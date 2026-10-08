@@ -1,0 +1,11 @@
+[package]
+name = "os-render"
+description = "Render an FLP project to WAV with the OpenStudio engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+os-flp.workspace = true
+os-model.workspace = true
+os-engine.workspace = true

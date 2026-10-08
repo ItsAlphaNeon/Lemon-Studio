@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/os-model", "crates/os-flp", "tools/flp-dump"]
+members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "tools/flp-dump", "tools/os-render"]
 
 [workspace.package]
 version = "0.0.1"
@@ -10,4 +10,5 @@ license = "GPL-3.0-or-later"
 [workspace.dependencies]
 os-model = { path = "crates/os-model" }
 os-flp = { path = "crates/os-flp" }
+os-engine = { path = "crates/os-engine" }
 thiserror = "2"
