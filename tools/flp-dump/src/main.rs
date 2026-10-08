@@ -1,7 +1,8 @@
 //! flp-dump: print an FLP file's chunks and event stream, then verify the lossless
 //! round-trip and the alignment checks.
 //!
-//! Usage: flp-dump <file.flp>
+//! Usage: flp-dump [--summary] <file.flp>
+//!   --summary  print the typed project (channels, patterns, mixer, playlist) instead
 //! Exit status: 0 = ok, 1 = malformed file or a failed check, 2 = usage / I/O error.
 
 // spec: flp/container.md (event kinds labelled per flp/coverage.md)
@@ -16,9 +17,13 @@ const PREVIEW: usize = 16;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [path] = args.as_slice() else {
-        eprintln!("usage: flp-dump <file.flp>");
-        return ExitCode::from(2);
+    let (summary, path) = match args.as_slice() {
+        [path] => (false, path),
+        [flag, path] if flag == "--summary" => (true, path),
+        _ => {
+            eprintln!("usage: flp-dump [--summary] <file.flp>");
+            return ExitCode::from(2);
+        }
     };
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
@@ -36,6 +41,22 @@ fn main() -> ExitCode {
     };
 
     let mut out = BufWriter::new(io::stdout().lock());
+    if summary {
+        return match os_flp::project::load(&file) {
+            Ok(p) => match print_summary(&mut out, &p).and_then(|()| out.flush()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("flp-dump: {e}");
+                    ExitCode::from(2)
+                }
+            },
+            Err(e) => {
+                eprintln!("flp-dump: {path}: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
     match dump(&mut out, &file, &bytes).and_then(|ok| out.flush().map(|()| ok)) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
@@ -151,4 +172,67 @@ fn hex(bytes: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn print_summary(out: &mut impl Write, p: &os_model::Project) -> io::Result<()> {
+    use os_model::ClipSource;
+    let opt = |s: &Option<String>| s.clone().unwrap_or_else(|| "-".into());
+    writeln!(out, "saved by {}  ppq {}  tempo {}", p.saved_by, p.ppq, p.tempo.map_or("-".into(), |t| format!("{t:.3}")))?;
+    let i = &p.info;
+    writeln!(out, "title {:?}  author {:?}  genre {:?}", opt(&i.title), opt(&i.author), opt(&i.genre))?;
+    writeln!(out, "
+channels ({}):", p.channels.len())?;
+    for c in &p.channels {
+        writeln!(
+            out,
+            "  {:3} {:<10} {:<28} vol {:5.1}%  pan {:+.2}  pitch {:+5}c  -> mixer {:3}{}{}",
+            c.index,
+            format!("{:?}", c.kind),
+            c.name.clone().or_else(|| c.plugin.clone()).unwrap_or_else(|| "-".into()),
+            c.volume * 100.0,
+            c.pan,
+            c.pitch_cents,
+            c.mixer_track,
+            if c.enabled { "" } else { "  [muted]" },
+            c.plugin.as_ref().map_or(String::new(), |pl| format!("  ({pl})")),
+        )?;
+    }
+    writeln!(out, "
+patterns ({}):", p.patterns.len())?;
+    for pat in &p.patterns {
+        writeln!(out, "  {:3} {:<24} {} notes", pat.number, opt(&pat.name), pat.notes.len())?;
+    }
+    let named: Vec<_> = p.mixer.iter().filter(|m| m.name.is_some() || m.slots.iter().any(Option::is_some)).collect();
+    writeln!(out, "
+mixer ({} tracks, {} named or with effects):", p.mixer.len(), named.len())?;
+    for m in named {
+        let fx: Vec<_> = m.slots.iter().flatten().cloned().collect();
+        writeln!(
+            out,
+            "  {:3} {:<20} vol {}  routes {:?}  fx [{}]{}",
+            m.index,
+            opt(&m.name),
+            m.volume.map_or("-".into(), |v| format!("{v:.3}")),
+            m.routes,
+            fx.join(", "),
+            if m.enabled { "" } else { "  [muted]" },
+        )?;
+    }
+    for a in &p.arrangements {
+        let pats = a.clips.iter().filter(|c| matches!(c.source, ClipSource::Pattern(_))).count();
+        let named = a.tracks.iter().filter(|t| t.name.is_some()).count();
+        writeln!(
+            out,
+            "
+arrangement {} {:?}: {} clips ({} pattern, {} audio/automation), {} tracks ({} named)",
+            a.number,
+            opt(&a.name),
+            a.clips.len(),
+            pats,
+            a.clips.len() - pats,
+            a.tracks.len(),
+            named
+        )?;
+    }
+    Ok(())
 }

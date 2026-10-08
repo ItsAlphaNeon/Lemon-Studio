@@ -7,3 +7,4 @@ license.workspace = true
 
 [dependencies]
 os-flp.workspace = true
+os-model.workspace = true
