@@ -1,0 +1,24 @@
+//! FLP project file support.
+//!
+//! Implemented from `OpenStudio-specs/flp/` only (see CLAUDE.md clean-room rules).
+//! Requirement: read → write must reproduce the input byte-for-byte; unknown events are
+//! preserved verbatim.
+//!
+//! - [`FlpFile::parse`] / [`FlpFile::to_bytes`]: the lossless container layer.
+//! - [`check_alignment`]: the stream-alignment checks every test over real files should run,
+//!   because a wrong event size can still round-trip byte-identically.
+
+// spec: flp/container.md
+
+mod check;
+mod container;
+mod error;
+mod event;
+
+pub use check::{AlignmentIssue, TEXT_RUN_MIN, check_alignment};
+pub use container::{Chunk, ChunkBody, FlpFile, Header, Tag};
+pub use error::{ReadError, WriteError};
+pub use event::{Event, EventReader, Kind, SIZE_EXCEPTIONS, Value, kind_of, range_kind};
+
+#[cfg(test)]
+mod tests;

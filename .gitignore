@@ -1,0 +1,4 @@
+/target
+*.flp
+*.wav
+.env

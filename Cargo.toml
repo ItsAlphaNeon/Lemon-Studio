@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/os-model", "crates/os-flp", "tools/flp-dump"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+os-model = { path = "crates/os-model" }
+os-flp = { path = "crates/os-flp" }
+thiserror = "2"

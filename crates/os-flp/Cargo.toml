@@ -1,0 +1,10 @@
+[package]
+name = "os-flp"
+description = "Lossless FLP project file reader/writer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+os-model.workspace = true
+thiserror.workspace = true
