@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
@@ -29,6 +29,9 @@ struct Shell {
     canvas: Option<Canvas>,
     mods: ModifiersState,
     last_click: Instant,
+    /// While a scroll-bar right-drag runs: the physical cursor position it is held at, and the
+    /// virtual (logical) mouse position fed to the app.
+    lock: Option<((f64, f64), (f32, f32))>,
 }
 
 impl ApplicationHandler for Shell {
@@ -68,6 +71,17 @@ impl ApplicationHandler for Shell {
         }
     }
 
+    /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor.
+    fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        let (DeviceEvent::MouseMotion { delta }, Some((anchor, virt)), Some(window)) = (event, self.lock, self.window.clone()) else { return };
+        let scale = window.scale_factor();
+        let v = (virt.0 + (delta.0 / scale) as f32, virt.1 + (delta.1 / scale) as f32);
+        self.lock = Some((anchor, v));
+        self.app.mouse_move(v.0, v.1);
+        let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
+        window.request_redraw();
+    }
+
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(window) = self.window.clone() else { return };
         let scale = window.scale_factor() as f32;
@@ -75,6 +89,12 @@ impl ApplicationHandler for Shell {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
+                // Locked: turn the offset from the anchor into virtual movement, then warp back.
+                // Locked: movement comes from raw motion (`device_event`); positions are ignored,
+                // since hiding the cursor makes Windows report a jump to the window centre.
+                if self.lock.is_some() {
+                    return;
+                }
                 let was = self.app.resize_cursor;
                 self.app.mouse_move(position.x as f32 / scale, position.y as f32 / scale);
                 if self.app.resize_cursor != was {
@@ -108,6 +128,11 @@ impl ApplicationHandler for Shell {
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
                 self.app.mouse_down_right();
+                if self.app.cursor_locked() {
+                    let (mx, my) = self.app.mouse;
+                    self.lock = Some(((f64::from(mx * scale), f64::from(my * scale)), (mx, my)));
+                    window.set_cursor_visible(false);
+                }
                 window.request_redraw();
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Middle, .. } => {
@@ -115,6 +140,11 @@ impl ApplicationHandler for Shell {
                 window.request_redraw();
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Right | MouseButton::Middle, .. } => {
+                if let Some((anchor, _)) = self.lock.take() {
+                    // Release where the drag started, as if the cursor never moved.
+                    let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
+                    window.set_cursor_visible(true);
+                }
                 self.app.mouse_up();
                 window.request_redraw();
             }
@@ -285,6 +315,7 @@ fn main() {
         canvas: None,
         mods: ModifiersState::default(),
         last_click: Instant::now() - Duration::from_secs(10),
+        lock: None,
     };
     event_loop.run_app(&mut shell).expect("run");
 }

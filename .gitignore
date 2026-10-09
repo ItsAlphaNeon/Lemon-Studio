@@ -3,3 +3,4 @@
 *.wav
 .env
 target-dev/
+/target-dev*/

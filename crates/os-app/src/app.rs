@@ -542,6 +542,12 @@ impl App {
         }
     }
 
+    /// True while a right-drag on a scroll bar runs: the shell hides the cursor and keeps it
+    /// where the drag started, feeding relative movement.
+    pub fn cursor_locked(&self) -> bool {
+        matches!(self.drag, Some(Drag::BarZoom { .. }))
+    }
+
     fn bar(&self, t: Scroll) -> Option<Bar> {
         self.bars.iter().find(|b| b.target == t).copied()
     }
