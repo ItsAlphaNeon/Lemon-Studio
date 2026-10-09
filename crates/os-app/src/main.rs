@@ -2,6 +2,7 @@
 
 mod app;
 mod icons;
+mod knobs;
 mod logo;
 mod piano;
 mod tabler;

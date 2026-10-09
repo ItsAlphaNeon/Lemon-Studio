@@ -4,6 +4,7 @@
 use os_ui::{Font, Rect};
 
 use super::{knob, menus, sunken, tool_button, FrameInfo};
+use crate::knobs::KnobId;
 use crate::app::{Action, State, Ui, Win};
 use crate::icons::{self, Icon};
 
@@ -254,10 +255,10 @@ fn row2(ui: &mut Ui, s: &State) {
     }
 
     // Master knobs.
-    ui.hit(Rect::span(303.0, 337.0, 45.0, 77.0), Action::Placeholder("master volume"), "Master volume");
-    knob(ui, 319.0, 61.0, 14.0, 0.8, false, t.glyph, t.button_hi);
-    ui.hit(Rect::span(340.0, 376.0, 45.0, 77.0), Action::Placeholder("master pitch"), "Master pitch");
-    knob(ui, 358.0, 61.0, 14.0, 0.5, true, t.glyph, t.button_hi);
+    ui.hit(Rect::span(303.0, 337.0, 45.0, 77.0), Action::Knob(KnobId::MasterVol), s.knob_text(KnobId::MasterVol));
+    knob(ui, 319.0, 61.0, 14.0, s.knob(KnobId::MasterVol), false, t.glyph, t.button_hi);
+    ui.hit(Rect::span(340.0, 376.0, 45.0, 77.0), Action::Knob(KnobId::MasterPitch), s.knob_text(KnobId::MasterPitch));
+    knob(ui, 358.0, 61.0, 14.0, s.knob(KnobId::MasterPitch), true, t.glyph, t.button_hi);
     for k in 0..20 {
         let a = 0.75 * std::f32::consts::PI + 1.5 * std::f32::consts::PI * k as f32 / 19.0;
         ui.c.fill_circle(358.0 + 17.5 * a.cos(), 61.0 + 17.5 * a.sin(), 0.7, t.glyph_dim);

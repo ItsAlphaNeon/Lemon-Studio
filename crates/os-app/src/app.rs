@@ -110,6 +110,8 @@ pub enum Action {
     RackAdd,
     /// Plugin picker: background (click closes), tab, "All" tab, tile (effects?, index).
     PickerBg,
+    /// A rotary control (drag vertically, wheel steps).
+    Knob(crate::knobs::KnobId),
     /// Toolbar plugin picker button.
     PickerOpen,
     PickerTab(bool, usize),
@@ -289,6 +291,7 @@ pub enum Drag {
     Marker,
     TimeSel { t0: u32 },
     Velocity { last_x: f32 },
+    Knob { id: crate::knobs::KnobId, y0: f32, v0: f32 },
     /// Left button held on the piano keyboard: each key entered is auditioned (§8).
     PianoKeys { key: i32 },
     /// Scroll axes from a start mouse position: value = start + (mouse - m0) × ratio per axis
@@ -322,6 +325,8 @@ pub struct State {
     pub pattern: u16,
     pub song_mode: bool,
     pub menu_open: Option<usize>,
+    /// Values of knobs that are not backed by the project (`knobs.rs`).
+    pub knobs: std::collections::HashMap<crate::knobs::KnobId, f32>,
     /// Piano roll event panel Control menu.
     pub lane_menu: bool,
     pub picker_open: bool,
@@ -464,6 +469,7 @@ impl App {
                 pattern: 1,
                 song_mode: false,
                 menu_open: None,
+                knobs: Default::default(),
                 lane_menu: false,
                 picker_open: false,
                 picker_cat: None,
@@ -849,6 +855,15 @@ impl App {
                     let col = self.hits.iter().rev().find(|h| h.action == Action::Fader(track)).map(|h| h.rect);
                     match col {
                         Some(r) => self.damage_rect(r.outset(10.0)),
+                        None => self.invalidate(),
+                    }
+                    self.damage_rect(HINT_RECT);
+                }
+                Drag::Knob { id, y0, v0 } => {
+                    self.state.set_knob(id, v0 - (y - y0) * crate::knobs::PER_PX);
+                    self.hint = Cow::Owned(self.state.knob_text(id));
+                    match self.hits.iter().rev().find(|h| h.action == Action::Knob(id)).map(|h| h.rect) {
+                        Some(r) => self.damage_rect(r.outset(6.0)),
                         None => self.invalidate(),
                     }
                     self.damage_rect(HINT_RECT);
@@ -1427,6 +1442,12 @@ impl App {
             piano::clamp_scroll(&mut self.state, g.grid.h);
             return;
         }
+        if let Some(Action::Knob(id)) = area {
+            let v = self.state.knob(id) + dy.signum() * crate::knobs::PER_NOTCH * if dy == 0.0 { 0.0 } else { 1.0 };
+            self.state.set_knob(id, v);
+            self.hint = Cow::Owned(self.state.knob_text(id));
+            return;
+        }
         let rack_area = self.top_hit(x, y).is_some_and(|h| h.win == Some(Win::ChannelRack));
         if rack_area {
             let (rx, ry) = if shift { (dy + dx, 0.0) } else { (dx, dy) };
@@ -1833,6 +1854,10 @@ impl App {
                 s.picker_open = true;
                 s.picker_cat = None;
             }
+            Action::Knob(id) => {
+                self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
+                self.hint = Cow::Owned(s.knob_text(id));
+            }
             Action::PianoLaneMenu => s.lane_menu = true,
             Action::PianoLanePick(i) => {
                 s.piano.lane = piano::Lane::ALL[i.min(piano::Lane::ALL.len() - 1)];
@@ -2056,6 +2081,41 @@ mod tests {
 
     fn frame(app: &mut App, c: &mut Canvas, damage: Option<Rect>) {
         app.paint(c, damage);
+    }
+
+    /// Knobs drag vertically (1/1024 per px), step with the wheel, and model-backed ones write the project.
+    #[test]
+    fn knobs_drag_and_wheel() {
+        use crate::knobs::KnobId;
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        app.state.z = vec![Win::Mixer, Win::ChannelRack];
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        for id in [KnobId::MasterVol, KnobId::MixPan(1), KnobId::ChanPan(0)] {
+            let r = hit_rect(&app, &Action::Knob(id));
+            let v0 = app.state.knob(id);
+            app.mouse_move(r.cx(), r.cy());
+            frame(&mut app, &mut a, None);
+            app.mouse_down();
+            app.mouse_move(r.cx(), r.cy() - 100.0);
+            let want = (v0 + 100.0 / 1024.0).min(1.0);
+            assert!((app.state.knob(id) - want).abs() < 1e-4, "{id:?}: {} vs {want}", app.state.knob(id));
+            frame(&mut app, &mut a, None);
+            app.mouse_up();
+            // Damage repaint of the drag equals a full repaint.
+            let d = app.take_damage();
+            frame(&mut app, &mut a, d.flatten());
+            frame(&mut app, &mut b, None);
+            assert_same(&a, &b, "after knob drag");
+            let before = app.state.knob(id);
+            app.mouse_move(r.cx(), r.cy());
+            frame(&mut app, &mut a, None);
+            app.wheel(0.0, 1.0, false, false);
+            assert!((app.state.knob(id) - (before + crate::knobs::PER_NOTCH).min(1.0)).abs() < 1e-4, "wheel {id:?}");
+        }
+        assert!(app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().pan.unwrap() > 0.0, "mixer pan written to the model");
     }
 
     /// Holding the mouse on a toolbar window button lights it orange; releasing restores it.

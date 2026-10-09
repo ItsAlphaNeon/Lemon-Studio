@@ -4,6 +4,7 @@
 use os_ui::{Color, Font, Rect};
 
 use super::{ball_knob, rgb, FrameInfo};
+use crate::knobs::KnobId;
 use crate::app::{Action, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
 
@@ -125,10 +126,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.hit(lr, Action::ChannelEnable(i), "Channel enabled - click to mute / unmute");
         rack_led(ui, x + 17.5, ry + 12.5, ch.enabled);
         // Pan and volume knobs.
-        ui.hit(Rect::new(x + 27.0, ry + 5.0, 15.0, 16.0), Action::Placeholder("channel pan"), format!("Channel panning: {}", pan_text(ch.pan)));
-        row_knob(ui, x + 34.5, ry + 13.0, 0.5 + ch.pan as f32 / 2.0);
-        ui.hit(Rect::new(x + 44.0, ry + 5.0, 15.0, 16.0), Action::Placeholder("channel volume"), format!("Channel volume: {:.0}%", ch.volume * 100.0));
-        row_knob(ui, x + 51.5, ry + 13.0, (ch.volume as f32).clamp(0.0, 1.0));
+        ui.hit(Rect::new(x + 27.0, ry + 5.0, 15.0, 16.0), Action::Knob(KnobId::ChanPan(i)), s.knob_text(KnobId::ChanPan(i)));
+        row_knob(ui, x + 34.5, ry + 13.0, s.knob(KnobId::ChanPan(i)));
+        ui.hit(Rect::new(x + 44.0, ry + 5.0, 15.0, 16.0), Action::Knob(KnobId::ChanVol(i)), s.knob_text(KnobId::ChanVol(i)));
+        row_knob(ui, x + 51.5, ry + 13.0, s.knob(KnobId::ChanVol(i)));
         // Mixer track box (drag to change).
         let mb = Rect::span(x + 66.0, x + 99.0, ry + 1.0, ry + 25.0);
         let mhov = ui.hit(mb, Action::RackMixer(i), format!("Mixer track: {} - drag to change", insert_name(ch.mixer_track)));

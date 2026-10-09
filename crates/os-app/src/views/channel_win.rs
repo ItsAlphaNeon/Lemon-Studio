@@ -6,6 +6,7 @@ use os_model::ChannelKind;
 use os_ui::{Color, Font, Rect};
 
 use super::{ball_knob, rack, FrameInfo};
+use crate::knobs::KnobId;
 use crate::app::{Action, State, Ui, Win};
 use crate::icons::{self, Icon};
 
@@ -66,8 +67,11 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         ui.c.text(f, body.x + 12.0, ly, t.text_dim, k);
         ui.c.text_clip(f, body.x + 100.0, ly, body.w - 180.0, t.text, v);
     }
-    ball_knob(ui, body.right() - 54.0, body.y + 34.0, 12.0, (ch.volume as f32).clamp(0.0, 1.0));
-    ball_knob(ui, body.right() - 54.0, body.y + 84.0, 12.0, 0.5 + ch.pan as f32 / 2.0);
+    let (vol, pan) = (KnobId::ChanVol(s.plugin_channel), KnobId::ChanPan(s.plugin_channel));
+    ui.hit(Rect::new(body.right() - 68.0, body.y + 20.0, 28.0, 28.0), Action::Knob(vol), s.knob_text(vol));
+    ball_knob(ui, body.right() - 54.0, body.y + 34.0, 12.0, s.knob(vol));
+    ui.hit(Rect::new(body.right() - 68.0, body.y + 70.0, 28.0, 28.0), Action::Knob(pan), s.knob_text(pan));
+    ball_knob(ui, body.right() - 54.0, body.y + 84.0, 12.0, s.knob(pan));
     ui.c.text_center(Font::new(13), Rect::new(body.right() - 84.0, body.y + 48.0, 60.0, 14.0), t.text_dim, "VOL");
     ui.c.text_center(Font::new(13), Rect::new(body.right() - 84.0, body.y + 98.0, 60.0, 14.0), t.text_dim, "PAN");
 }
