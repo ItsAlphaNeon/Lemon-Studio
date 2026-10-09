@@ -232,6 +232,12 @@ impl ApplicationHandler for Shell {
                     let double = self.last_click.elapsed() < Duration::from_millis(350);
                     self.last_click = Instant::now();
                     self.app.mouse_down();
+                    if self.app.cursor_locked() {
+                        let (mx, my) = self.app.mouse;
+                        let anchor = (f64::from(mx * scale) + f64::from(self.inset.0), f64::from(my * scale) + f64::from(self.inset.1));
+                        self.lock = Some((anchor, (mx, my)));
+                        window.set_cursor_visible(false);
+                    }
                     if self.app.want_drag_window {
                         self.app.want_drag_window = false;
                         if double {
@@ -241,6 +247,10 @@ impl ApplicationHandler for Shell {
                         }
                     }
                 } else {
+                    if let Some((anchor, _)) = self.lock.take() {
+                        let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
+                        window.set_cursor_visible(true);
+                    }
                     self.app.mouse_up();
                     if self.app.resize_cursor && self.app.drag.is_none() {
                         self.app.resize_cursor = false;
@@ -389,6 +399,7 @@ fn screenshot(args: &[String]) {
     let mut picker_open = false;
     let mut lane: Option<usize> = None;
     let mut lane_menu = false;
+    let mut pans: Option<Vec<f32>> = None;
     let mut path = None;
     let mut mouse: Option<(f32, f32)> = None;
     let mut pattern = None;
@@ -418,6 +429,7 @@ fn screenshot(args: &[String]) {
                 }
             }
             "--lane" => lane = it.next().and_then(|v| v.parse().ok()),
+            "--pans" => pans = it.next().map(|v| v.split(',').filter_map(|p| p.parse().ok()).collect()),
             "--lane-menu" => lane_menu = true,
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
             "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
@@ -454,6 +466,10 @@ fn screenshot(args: &[String]) {
     app.state.menu_open = menu;
     app.state.picker_open = picker_open;
     app.state.lane_menu = lane_menu;
+    // "--pans 0.2,0.8": mixer pan knob values for inserts 1.. (normalised), to check the value arcs.
+    for (i, v) in pans.iter().flatten().enumerate() {
+        app.state.set_knob(knobs::KnobId::MixPan(i as u16 + 1), *v);
+    }
     if let Some(i) = lane {
         app.state.piano.lane = piano::Lane::ALL[i.min(piano::Lane::ALL.len() - 1)];
     }

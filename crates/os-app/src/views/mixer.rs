@@ -255,7 +255,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     led(ui, kx, ly.y(LED_Y), enabled);
     let pan = KnobId::MixPan(n);
     ui.hit(Rect::new(kx - 14.0, ly.y(PAN_Y) - 14.0, 28.0, 28.0), Action::Knob(pan), s.knob_text(pan));
-    mixer_knob(ui, kx, ly.y(PAN_Y), 10.5, 15.0, s.knob(pan));
+    mixer_knob(ui, kx, ly.y(PAN_Y), 10.5, 15.0, s.knob(pan), Some(true));
 
     // Stereo separation, swap, and the small separation knob.
     let mut g = Glyph::new();
@@ -267,7 +267,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     ui.c.fill_rect(Rect::new(sx - 0.5, ly.y(SWAP_Y) - 6.0, 1.0, 12.0), Color::rgb(0x5a6266));
     let sep = KnobId::MixSep(n);
     ui.hit(Rect::new(sx - 9.0, ly.y(RING_Y) - 9.0, 18.0, 18.0), Action::Knob(sep), s.knob_text(sep));
-    mixer_knob(ui, sx, ly.y(RING_Y), 6.0, 9.5, s.knob(sep));
+    mixer_knob(ui, sx, ly.y(RING_Y), 6.0, 9.5, s.knob(sep), Some(true));
 
     // Fader: track, handle (green on the selected strip, with the track lit below it).
     let track_y1 = bottom - 99.0;
@@ -304,7 +304,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
         // The master's output knob with its green cable.
         let out = KnobId::MixOut(n);
         ui.hit(Rect::new(kx - 13.0, by - 53.0, 26.0, 26.0), Action::Knob(out), s.knob_text(out));
-        mixer_knob(ui, kx, by - 40.0, 10.0, 13.0, s.knob(out));
+        mixer_knob(ui, kx, by - 40.0, 10.0, 13.0, s.knob(out), None);
         ui.c.arc(kx, by - 40.0, 12.5, 0.75 * PI, 1.5 * PI, 2.0, t.accent);
         ui.c.fill_polygon(&[(kx - 4.0, by - 55.0), (kx, by - 59.0), (kx + 4.0, by - 55.0)], t.accent);
         ui.c.polyline(&[(kx - 3.0, by - 28.0), (kx - 1.0, by - 18.0), (kx + 6.0, by - 9.0), (kx + 10.0, by)], 2.0, t.accent);
@@ -321,15 +321,22 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
 }
 
 /// The dark round mixer knob: a shaded ball inside a darker halo.
-fn mixer_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, halo: f32, value: f32) {
+/// `arc`: Some(true) draws the red value arc from the top (pan style), Some(false) from the start.
+fn mixer_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, halo: f32, value: f32, arc: Option<bool>) {
     ui.c.fill_circle(cx, cy, halo, Color::rgb(0x1b1d20));
     ui.c.stroke_circle(cx, cy, halo - 0.5, 1.0, Color::rgb(0x16181a));
     ui.c.fill_circle(cx, cy, r + 0.6, Color::rgb(0x16181b));
     ui.c.fill_rect_gradient(Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), Color::rgb(0x3c3e41), Color::rgb(0x17191c), r);
     ui.c.arc(cx, cy, r - 0.6, 1.15 * PI, 0.7 * PI, 1.2, Color::rgb(0x55575a));
-    // Pointer: sweeps 270 degrees like the other knobs (centre value = straight up).
-    let a = 0.75 * PI + 1.5 * PI * value.clamp(0.0, 1.0);
-    ui.c.line(cx + r * 0.3 * a.cos(), cy + r * 0.3 * a.sin(), cx + (r - 2.2) * a.cos(), cy + (r - 2.2) * a.sin(), 1.4, Color::rgb(0xd4dade));
+    // Value arc around the ball (spec: ui/knobs.md): sweeps 270 degrees, centre value = straight up.
+    if let Some(center) = arc {
+        let start = 0.75 * PI;
+        let a1 = start + 1.5 * PI * value.clamp(0.0, 1.0);
+        let a0 = if center { start + 0.75 * PI } else { start };
+        if (a1 - a0).abs() > 0.02 {
+            ui.c.arc(cx, cy, halo - 2.0, a0.min(a1), (a1 - a0).abs(), (halo * 0.22).max(2.0), Color::rgb(0xce2900));
+        }
+    }
 }
 
 /// Fader handle centred on (cx, cy): 14 × 23, with the long 0 dB line through its middle.
@@ -401,7 +408,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         }
         let mix = KnobId::SlotMix(s.selected_mixer, i as u8);
         ui.hit(Rect::new(row.right() - 46.0, row.y, 26.0, row.h), Action::Knob(mix), s.knob_text(mix));
-        mixer_knob(ui, row.right() - 33.0, row.cy(), 10.5 * q, 12.0 * q, s.knob(mix));
+        mixer_knob(ui, row.right() - 33.0, row.cy(), 10.5 * q, 12.0 * q, s.knob(mix), Some(false));
         ui.c.stroke_circle(row.right() - 33.0, row.cy(), 11.8 * q, 1.5, Color::rgb(0x55595c));
         ui.hit(Rect::new(row.right() - 18.0, row.y, 18.0, row.h), Action::Placeholder("slot enable"), "Enable / disable slot");
         led(ui, row.right() - 10.0, row.cy(), true);
@@ -440,7 +447,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
             let (kx, ky) = (r.x + 162.0 + 22.0 * k as f32, ly + 20.0 + 20.0 * row as f32);
             let eq = KnobId::Eq(s.selected_mixer, (k * 2 + row) as u8);
             ui.hit(Rect::new(kx - 9.0, ky - 9.0, 18.0, 18.0), Action::Knob(eq), s.knob_text(eq));
-            mixer_knob(ui, kx, ky, 7.0, 8.0, s.knob(eq));
+            mixer_knob(ui, kx, ky, 7.0, 8.0, s.knob(eq), Some(true));
         }
     }
     let mut g = Glyph::new();

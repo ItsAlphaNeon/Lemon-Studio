@@ -28,9 +28,16 @@ pub enum KnobId {
 }
 
 impl KnobId {
-    fn default_value(self) -> f32 {
+    /// Value change per wheel notch: master pitch steps a semitone.
+    pub fn notch(self) -> f32 {
+        if self == KnobId::MasterPitch { 1.0 / 24.0 } else { PER_NOTCH }
+    }
+
+    /// Value restored by a middle click.
+    pub fn default_value(self) -> f32 {
         match self {
             KnobId::MasterVol | KnobId::MixOut(_) => 0.8,
+            KnobId::ChanVol(_) => 0.78125,
             KnobId::SlotMix(..) => 1.0,
             _ => 0.5,
         }
@@ -63,7 +70,11 @@ impl State {
     }
 
     pub fn set_knob(&mut self, id: KnobId, v: f32) {
-        let v = v.clamp(0.0, 1.0);
+        let mut v = v.clamp(0.0, 1.0);
+        if id == KnobId::MasterPitch {
+            // Snaps to whole semitones over +-12 (100 cents each).
+            v = (v * 24.0).round() / 24.0;
+        }
         match id {
             KnobId::MixPan(t) => {
                 if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
@@ -121,6 +132,10 @@ mod tests {
         let s = &mut app.state;
         s.set_knob(KnobId::MasterVol, 0.8);
         assert_eq!(s.knob_text(KnobId::MasterVol), "Main volume: 100%  0.0dB  1.00");
+        s.set_knob(KnobId::MasterPitch, 0.5 + 0.4 / 24.0);
+        assert_eq!(s.knob_text(KnobId::MasterPitch), "Master pitch: 0 cents");
+        s.set_knob(KnobId::MasterPitch, 0.5 + 1.4 / 24.0);
+        assert_eq!(s.knob_text(KnobId::MasterPitch), "Master pitch: 100 cents", "snaps to the nearest semitone");
         s.set_knob(KnobId::MasterPitch, 2.0);
         assert_eq!(s.knob(KnobId::MasterPitch), 1.0);
         s.set_knob(KnobId::MixPan(1), 0.75);

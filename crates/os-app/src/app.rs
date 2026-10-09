@@ -986,7 +986,7 @@ impl App {
     /// True while a right-drag on a scroll bar runs: the shell hides the cursor and keeps it
     /// where the drag started, feeding relative movement.
     pub fn cursor_locked(&self) -> bool {
-        matches!(self.drag, Some(Drag::BarZoom { .. }))
+        matches!(self.drag, Some(Drag::BarZoom { .. } | Drag::Knob { .. }))
     }
 
     fn bar(&self, t: Scroll) -> Option<Bar> {
@@ -1068,6 +1068,12 @@ impl App {
         self.raise_under_mouse();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
+        if let Some(Action::Knob(id)) = action {
+            self.state.set_knob(id, id.default_value());
+            self.hint = Cow::Owned(self.state.knob_text(id));
+            self.invalidate();
+            return;
+        }
         let targets: &[Scroll] = match action {
             Some(Action::PianoGrid | Action::PianoNote(_)) => &[Scroll::PianoX, Scroll::PianoY],
             Some(Action::PianoKeys) => &[Scroll::PianoY],
@@ -1443,7 +1449,7 @@ impl App {
             return;
         }
         if let Some(Action::Knob(id)) = area {
-            let v = self.state.knob(id) + dy.signum() * crate::knobs::PER_NOTCH * if dy == 0.0 { 0.0 } else { 1.0 };
+            let v = self.state.knob(id) + dy.signum() * id.notch() * if dy == 0.0 { 0.0 } else { 1.0 };
             self.state.set_knob(id, v);
             self.hint = Cow::Owned(self.state.knob_text(id));
             return;
@@ -2099,6 +2105,7 @@ mod tests {
             app.mouse_move(r.cx(), r.cy());
             frame(&mut app, &mut a, None);
             app.mouse_down();
+            assert!(app.cursor_locked(), "knob drags lock the cursor");
             app.mouse_move(r.cx(), r.cy() - 100.0);
             let want = (v0 + 100.0 / 1024.0).min(1.0);
             assert!((app.state.knob(id) - want).abs() < 1e-4, "{id:?}: {} vs {want}", app.state.knob(id));
@@ -2111,6 +2118,10 @@ mod tests {
             assert_same(&a, &b, "after knob drag");
             let before = app.state.knob(id);
             app.mouse_move(r.cx(), r.cy());
+            frame(&mut app, &mut a, None);
+            app.mouse_down_middle();
+            assert_eq!(app.state.knob(id), id.default_value(), "middle click resets {id:?}");
+            app.state.set_knob(id, before);
             frame(&mut app, &mut a, None);
             app.wheel(0.0, 1.0, false, false);
             assert!((app.state.knob(id) - (before + crate::knobs::PER_NOTCH).min(1.0)).abs() < 1e-4, "wheel {id:?}");
