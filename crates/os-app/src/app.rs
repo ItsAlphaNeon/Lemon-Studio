@@ -2217,6 +2217,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
         mixer_track,
         sample_path: None,
         layer_children: Vec::new(),
+        envelopes: Default::default(),
     }
 }
 

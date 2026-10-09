@@ -77,6 +77,54 @@ pub struct Channel {
     pub sample_path: Option<String>,
     /// Child channel references of a [`ChannelKind::Layer`].
     pub layer_children: Vec<u16>,
+    /// The five envelope records (event 218), indexed by [`Envelope::VOLUME`] and friends.
+    pub envelopes: [Envelope; 5],
+}
+
+/// One channel envelope record, values as stored (spec: audio/channel-envelopes.md). Times are knob
+/// values (100 = none), `sustain` is 0..=128, tensions are -128..=128.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Envelope {
+    pub enabled: bool,
+    pub delay: i32,
+    pub attack: i32,
+    pub hold: i32,
+    pub decay: i32,
+    pub sustain: i32,
+    pub release: i32,
+    /// Pitch record: cents. Cutoff record: -128..=128.
+    pub amount: i32,
+    pub attack_tension: i32,
+    pub decay_tension: i32,
+    pub release_tension: i32,
+}
+
+impl Envelope {
+    /// Record indices.
+    pub const PAN: usize = 0;
+    pub const VOLUME: usize = 1;
+    pub const CUTOFF: usize = 2;
+    pub const RESONANCE: usize = 3;
+    pub const PITCH: usize = 4;
+}
+
+impl Default for Envelope {
+    /// A fresh channel's record: off, with the default knob positions.
+    fn default() -> Self {
+        Envelope {
+            enabled: false,
+            delay: 100,
+            attack: 20000,
+            hold: 20000,
+            decay: 30000,
+            sustain: 50,
+            release: 20000,
+            amount: 0,
+            attack_tension: 0,
+            decay_tension: 0,
+            release_tension: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

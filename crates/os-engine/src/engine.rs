@@ -2,13 +2,15 @@
 //! and audio-clip channels, and sums them through the mixer routing graph.
 //!
 // spec: audio/sampler-playback.md, audio/gain-laws.md, flp/events/playlist.md (clips),
-//       flp/events/patterns.md (notes), flp/events/mixer.md (routing), audio/pattern-controls.md (repeat, control points)
+//       flp/events/patterns.md (notes), flp/events/mixer.md (routing), audio/pattern-controls.md (repeat, control points),
+//       audio/channel-envelopes.md (volume and pitch envelopes)
 
 use std::sync::Arc;
 
 use os_model::{ChannelKind, ClipSource, ControlPoint, Project};
 
 use crate::effects::Effect;
+use crate::envelope;
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
@@ -60,6 +62,11 @@ struct ChannelState {
     serial: u32,
     /// A volume / pan control point in progress (the parameters glide, then the laws apply).
     ramp: Option<Ramp>,
+    /// The channel's volume and pitch envelopes, when switched on (sampler channels).
+    vol_env: Option<envelope::Params>,
+    pitch_env: Option<envelope::Params>,
+    /// Seconds per output frame.
+    frame_s: f64,
 }
 
 /// Glide of the channel's volume and pan parameters towards a control point's values.
@@ -204,6 +211,9 @@ struct Voice {
     live: Option<u16>,
     /// Release fade after a live note off: (frames left, fade length).
     release: Option<(u32, u32)>,
+    /// Frames played so far, and the age at which the note ended (the channel envelopes' clock).
+    age: u64,
+    off: Option<u64>,
 }
 
 /// Release fade of a live note (an OpenStudio choice, spec: ui/typing-keyboard.md open questions).
@@ -289,6 +299,7 @@ impl Engine {
                 } else {
                     None
                 };
+                let env_on = ch.kind == ChannelKind::Sampler;
                 let volume = if ch.enabled { laws::channel_gain(ch.volume) } else { 0.0 };
                 let base_rate = sample.as_ref().map_or(1.0, |s| f64::from(s.rate) / f64::from(rate))
                     * laws::playback_rate(60, ch.pitch_cents);
@@ -307,6 +318,9 @@ impl Engine {
                     init_v: ch.volume,
                     serial: 0,
                     ramp: None,
+                    vol_env: env_on.then(|| envelope::Params::new(&ch.envelopes[os_model::Envelope::VOLUME])).flatten(),
+                    pitch_env: env_on.then(|| envelope::Params::new(&ch.envelopes[os_model::Envelope::PITCH])).flatten(),
+                    frame_s: 1.0 / f64::from(rate),
                 }
             })
             .collect();
@@ -439,6 +453,8 @@ impl Engine {
             serial,
             live: Some(key),
             release: None,
+            age: 0,
+            off: None,
         });
         self.sounding.push((channel, key, u64::MAX));
     }
@@ -446,9 +462,15 @@ impl Engine {
     /// Release a live note with a short fade.
     pub fn note_off(&mut self, channel: usize, key: u16) {
         let fade = (f64::from(self.rate) * RELEASE_SECONDS) as u32;
+        let vol_env = self.channels.get(channel).is_some_and(|c| c.vol_env.is_some());
         for v in &mut self.voices {
-            if v.channel == channel && v.live == Some(key) && v.release.is_none() {
-                v.release = Some((fade.max(1), fade.max(1)));
+            if v.channel == channel && v.live == Some(key) && v.release.is_none() && v.off.is_none() {
+                if vol_env {
+                    // The volume envelope's release ends the note.
+                    v.off = Some(v.age);
+                } else {
+                    v.release = Some((fade.max(1), fade.max(1)));
+                }
             }
         }
         self.sounding.retain(|&(c, k, end)| !(c == channel && k == key && end == u64::MAX));
@@ -654,6 +676,9 @@ impl Engine {
                 serial,
                 live: None,
                 release: None,
+                age: 0,
+                // A note-off only matters with the volume envelope on: otherwise the sampler plays on (measured).
+                off: self.channels[t.channel].vol_env.map(|_| t.end.saturating_sub(t.frame)),
             };
             if render_voice(&mut v, &self.channels, &mut self.bus, a, offset, b) {
                 self.voices.push(v);
@@ -724,11 +749,13 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
     let (mut gl, mut gr) = v.gain;
     let (dl, dr) = v.delta;
     let mut left = v.ramp_left;
-    let step = ch.base_rate * v.step;
+    let base_step = ch.base_rate * v.step;
+    let mut step = base_step;
     let out = &mut bus[ch.insert];
     // Rate 1 copies samples only while the position is whole (a voice that was pitched keeps its fraction).
-    let exact = step == 1.0 && v.pos.fract() == 0.0;
-    let scale = step.max(1.0);
+    let exact = step == 1.0 && v.pos.fract() == 0.0 && ch.pitch_env.is_none();
+    let mut scale = step.max(1.0);
+    let off_s = v.off.map(|o| o as f64 * ch.frame_s);
     let mut pos = v.pos;
     for f in offset..end {
         if v.remaining == Some(0) {
@@ -741,6 +768,24 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
             v.pos = pos;
             v.gain = (gl, gr);
             return false;
+        }
+        let t_s = v.age as f64 * ch.frame_s;
+        v.age += 1;
+        let env_gain = match &ch.vol_env {
+            None => 1.0,
+            Some(p) => match p.level(t_s, off_s) {
+                Some(l) => l as f32,
+                None => {
+                    v.pos = pos;
+                    v.gain = (gl, gr);
+                    v.ramp_left = left;
+                    return false;
+                }
+            },
+        };
+        if let Some(p) = &ch.pitch_env {
+            step = base_step * 2f64.powf(p.level(t_s, off_s).unwrap_or(0.0) * p.amount / 1200.0);
+            scale = step.max(1.0);
         }
         let fade = match v.release.as_mut() {
             None => 1.0,
@@ -784,8 +829,8 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
                 (gl, gr) = v.dest;
             }
         }
-        out[f * 2] += l * gl * fade;
-        out[f * 2 + 1] += r * gr * fade;
+        out[f * 2] += l * gl * fade * env_gain;
+        out[f * 2 + 1] += r * gr * fade * env_gain;
         pos += step;
     }
     v.pos = pos;
@@ -992,6 +1037,7 @@ mod tests {
             mixer_track: 0,
             sample_path: None, // plays the built-in tone
             layer_children: vec![],
+            envelopes: Default::default(),
         }
     }
 
@@ -1039,6 +1085,45 @@ mod tests {
         // No repeat, and a plain step (one step long) with a step-sized repeat: one trigger.
         assert_eq!(ticks(&project(vec![long_note(0, 384, 0)], vec![])).len(), 1);
         assert_eq!(ticks(&project(vec![long_note(48, 0, 7)], vec![])).len(), 1);
+    }
+
+    fn last_sound(x: &[f32]) -> usize {
+        x.chunks_exact(2).rposition(|f| f[0].abs() > 1e-5).unwrap_or(0)
+    }
+
+    fn with_envelope(index: usize, e: os_model::Envelope) -> Project {
+        let mut p = project(vec![long_note(0, 24, 0)], vec![]);
+        p.channels[0].envelopes[index] = e;
+        p
+    }
+
+    #[test]
+    fn volume_envelope_shapes_and_ends_the_note() {
+        // spec: audio/channel-envelopes.md
+        let plain = render(&project(vec![long_note(0, 24, 0)], vec![]));
+        assert!(last_sound(&plain) > 44100, "the plain tone rings past a second");
+        let off = os_model::Envelope { enabled: true, delay: 100, attack: 100, hold: 100, decay: 100, sustain: 128, release: 100, ..Default::default() };
+        // Envelope on, nothing set: full level, and the note ends with its length (24 ticks = 0.115 s) plus a short fade.
+        let on = render(&with_envelope(os_model::Envelope::VOLUME, off));
+        let end = last_sound(&on);
+        assert!(end < ((0.115 + 0.02) * 44100.0) as usize, "ended at {end}");
+        assert!(end > (0.115 * 44100.0) as usize, "ended at {end}");
+        // A 0.83 s attack keeps the start quiet.
+        let slow = render(&with_envelope(os_model::Envelope::VOLUME, os_model::Envelope { attack: 25000, ..off }));
+        let head = |x: &[f32]| x[..4410].chunks_exact(2).map(|f| f[0].abs()).fold(0.0, f32::max);
+        assert!(head(&slow) < 0.12 * head(&on), "{} vs {}", head(&slow), head(&on));
+        // A release of 0.47 s lets the note ring on after its length.
+        let rel = render(&with_envelope(os_model::Envelope::VOLUME, os_model::Envelope { release: 20000, ..off }));
+        assert!(last_sound(&rel) > 44100 / 2 && last_sound(&rel) > end + 10_000);
+    }
+
+    #[test]
+    fn pitch_envelope_shifts_the_sample() {
+        let plain = render(&project(vec![long_note(0, 24, 0)], vec![]));
+        let up = os_model::Envelope { enabled: true, delay: 100, attack: 100, hold: 100, decay: 100, sustain: 128, release: 20000, amount: 1200, ..Default::default() };
+        let high = render(&with_envelope(os_model::Envelope::PITCH, up));
+        // An octave up while the note is held, falling back over the release: the 1.5 s tone ends sooner.
+        assert!(last_sound(&plain) > 60_000 && last_sound(&high) + 8_000 < last_sound(&plain), "{} vs {}", last_sound(&plain), last_sound(&high));
     }
 
     #[test]

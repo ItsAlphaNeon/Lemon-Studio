@@ -8,6 +8,7 @@
 
 pub mod effects;
 pub mod engine;
+pub mod envelope;
 pub mod laws;
 pub mod sample;
 pub mod wav;

@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use os_model::{
-    Arrangement, Channel, ChannelKind, Clip, ClipSource, ControlPoint, MixerTrack, Note, Pattern,
+    Arrangement, Channel, ChannelKind, Clip, ClipSource, ControlPoint, Envelope, MixerTrack, Note, Pattern,
     PlaylistTrack, Project, ProjectInfo, Rgb, SlotPlugin,
 };
 
@@ -34,6 +34,7 @@ mod id {
     pub const CH_LEVELS: u8 = 219;
     pub const CH_TARGET: u8 = 104;
     pub const CH_LAYER_CHILD: u8 = 94;
+    pub const CH_ENVELOPE: u8 = 218;
     pub const PLUGIN_NAME: u8 = 201;
     pub const PLUGIN_REC: u8 = 212;
     pub const PLUGIN_STATE: u8 = 213;
@@ -500,7 +501,32 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
             .filter(|e| e.id == id::CH_LAYER_CHILD)
             .map(|e| int(e) as u16)
             .collect(),
+        envelopes: decode_envelopes(block),
     }
+}
+
+/// The five 68-byte envelope records of a channel (spec: audio/channel-envelopes.md); missing or short
+/// records stay at the defaults.
+fn decode_envelopes(block: &[Event]) -> [Envelope; 5] {
+    let mut out = [Envelope::default(); 5];
+    for (slot, e) in out.iter_mut().zip(block.iter().filter(|e| e.id == id::CH_ENVELOPE)) {
+        let Some(d) = e.data().filter(|d| d.len() >= 68) else { continue };
+        let v = |i: usize| i32::from_le_bytes(d[4 * i..4 * i + 4].try_into().unwrap());
+        *slot = Envelope {
+            enabled: v(1) != 0,
+            delay: v(2),
+            attack: v(3),
+            hold: v(4),
+            decay: v(5),
+            sustain: v(6),
+            release: v(7),
+            amount: v(8),
+            attack_tension: v(14),
+            decay_tension: v(15),
+            release_tension: v(16),
+        };
+    }
+    out
 }
 
 fn decode_note(r: &[u8]) -> Note {

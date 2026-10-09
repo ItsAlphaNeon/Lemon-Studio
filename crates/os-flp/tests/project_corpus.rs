@@ -158,3 +158,27 @@ fn control_points_survive_edits() {
     }
     eprintln!("{checked} files: control points added, rewritten and removed");
 }
+
+/// Channel envelopes (event 218, spec: audio/channel-envelopes.md): every channel reads five records with
+/// values inside the measured ranges, and some files switch the volume envelope on.
+#[test]
+fn channel_envelopes_decode() {
+    let Some(paths) = corpus() else { return };
+    let (mut vol_on, mut pitch_on) = (0, 0);
+    for path in &paths {
+        let file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let Ok(project) = load(&file) else { continue };
+        for ch in &project.channels {
+            for e in &ch.envelopes {
+                assert!((0..=128).contains(&e.sustain), "{path}: sustain {}", e.sustain);
+                for t in [e.attack_tension, e.decay_tension, e.release_tension] {
+                    assert!((-128..=128).contains(&t), "{path}: tension {t}");
+                }
+                assert!((0..=65536).contains(&e.attack) && (0..=65536).contains(&e.release), "{path}: time");
+            }
+            vol_on += usize::from(ch.envelopes[os_model::Envelope::VOLUME].enabled);
+            pitch_on += usize::from(ch.envelopes[os_model::Envelope::PITCH].enabled);
+        }
+    }
+    assert!(vol_on > 50 && pitch_on > 5, "volume {vol_on}, pitch {pitch_on}");
+}
