@@ -57,6 +57,22 @@ pub enum Action {
     Swallow,
 }
 
+/// What needs repainting before the next present.
+#[derive(Clone, Copy, PartialEq)]
+enum Damage {
+    None,
+    Rect(Rect),
+    Full,
+}
+
+/// The hint panel (spec §2): its text changes whenever the hovered control does.
+const HINT_RECT: Rect = Rect::new(73.0, 5.0, 289.0, 31.0);
+
+/// Actions whose hover state has no visual feedback (large background regions).
+fn hover_is_visible(a: &Action) -> bool {
+    !matches!(a, Action::DragWindow | Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow)
+}
+
 pub struct Hit {
     pub rect: Rect,
     pub action: Action,
@@ -117,6 +133,9 @@ pub struct App {
     pub transport: Transport,
     pub hits: Vec<Hit>,
     pub hover: Option<Action>,
+    hover_rect: Option<Rect>,
+    damage: Damage,
+    last_playing: bool,
     pub hint: Cow<'static, str>,
     pub mouse: (f32, f32),
     pub drag: Option<Drag>,
@@ -157,6 +176,9 @@ impl App {
             transport,
             hits: Vec::new(),
             hover: None,
+            hover_rect: None,
+            damage: Damage::Full,
+            last_playing: false,
             hint: Cow::Borrowed(""),
             mouse: (-1.0, -1.0),
             drag: None,
@@ -235,11 +257,49 @@ impl App {
     }
 
     /// Paint the whole frame.
-    pub fn paint(&mut self, canvas: &mut Canvas) {
-        self.hits.clear();
+    /// Mark everything dirty (state changed in a way that can affect any view).
+    pub fn invalidate(&mut self) {
+        self.damage = Damage::Full;
+    }
+
+    fn damage_rect(&mut self, r: Rect) {
+        self.damage = match self.damage {
+            Damage::Full => Damage::Full,
+            Damage::None => Damage::Rect(r),
+            Damage::Rect(o) => Damage::Rect(o.union(&r)),
+        };
+    }
+
+    pub fn has_damage(&self) -> bool {
+        self.damage != Damage::None
+    }
+
+    /// Take the pending damage: `None` = nothing to paint, `Some(None)` = whole frame.
+    pub fn take_damage(&mut self) -> Option<Option<Rect>> {
+        match std::mem::replace(&mut self.damage, Damage::None) {
+            Damage::None => None,
+            Damage::Full => Some(None),
+            Damage::Rect(r) => Some(Some(r)),
+        }
+    }
+
+    /// Periodic housekeeping; returns whether a repaint is needed.
+    pub fn tick(&mut self) -> bool {
+        let playing = self.transport.playing();
         if let Some(e) = self.transport.take_error() {
             self.state.message = Some(format!("Audio: {e}"));
+            self.invalidate();
         }
+        if playing || playing != self.last_playing {
+            self.last_playing = playing;
+            self.invalidate();
+        }
+        self.has_damage()
+    }
+
+    pub fn paint(&mut self, canvas: &mut Canvas, damage: Option<Rect>) {
+        canvas.begin_frame(damage);
+        self.hits.clear();
         let title = self.title();
         let mut ui = Ui { c: canvas, t: &self.theme.colors, hits: &mut self.hits, hover: &self.hover, mouse: self.mouse };
         let info = views::FrameInfo {
@@ -261,33 +321,66 @@ impl App {
         self.mouse = (x, y);
         if let Some(d) = self.drag {
             match d {
-                Drag::Rack { dx, dy } => self.state.rack_pos = ((x - dx).max(0.0), (y - dy).max(83.0)),
+                Drag::Rack { dx, dy } => {
+                    let old = views::rack::bounds(&self.state);
+                    self.state.rack_pos = ((x - dx).max(0.0), (y - dy).max(83.0));
+                    let new = views::rack::bounds(&self.state);
+                    self.damage_rect(old.union(&new));
+                }
                 Drag::Fader { track, y0, v0 } => {
                     let v = (v0 - f64::from(y - y0) * views::mixer::FADER_PER_PX).clamp(0.0, 1.0);
                     if let Some(t) = self.state.project.mixer.iter_mut().find(|t| t.index == track) {
                         t.volume = Some(v);
                     }
                     self.hint = Cow::Owned(format!("Volume {}", views::mixer::fader_db_text(v)));
+                    let col = self.hits.iter().rev().find(|h| h.action == Action::Fader(track)).map(|h| h.rect);
+                    match col {
+                        Some(r) => self.damage_rect(r.outset(10.0)),
+                        None => self.invalidate(),
+                    }
+                    self.damage_rect(HINT_RECT);
                 }
                 Drag::Tempo { y0, t0 } => {
                     let t = (t0 + f64::from(y0 - y).round()).clamp(10.0, 522.0);
                     self.state.tempo = t;
                     self.hint = Cow::Owned(format!("Tempo {t:.3} BPM"));
+                    self.damage_rect(Rect::new(380.0, 0.0, 200.0, 83.0));
+                    self.damage_rect(HINT_RECT);
                 }
             }
             return true;
         }
-        let (hover, hint) = match self.top_hit(x, y) {
-            Some(h) => (Some(h.action.clone()), h.hint.clone()),
-            None => (None, Cow::Borrowed("")),
+        let (hover, hint, rect) = match self.top_hit(x, y) {
+            Some(h) => (Some(h.action.clone()), h.hint.clone(), Some(h.rect)),
+            None => (None, Cow::Borrowed(""), None),
         };
         let changed = hover != self.hover || hint != self.hint;
+        if changed {
+            // Repaint the controls that lost / gained hover and the hint panel; large background
+            // regions have no hover look.
+            let mut dirty = Vec::new();
+            for (a, r) in [(&self.hover, self.hover_rect), (&hover, rect)] {
+                if let (Some(a), Some(r)) = (a, r) {
+                    if hover_is_visible(a) {
+                        dirty.push(r.outset(3.0));
+                    }
+                }
+            }
+            for r in dirty {
+                self.damage_rect(r);
+            }
+            if hint != self.hint {
+                self.damage_rect(HINT_RECT);
+            }
+        }
         self.hover = hover;
+        self.hover_rect = rect;
         self.hint = hint;
         changed
     }
 
     pub fn mouse_down(&mut self) {
+        self.invalidate();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
         // Any click outside an open menu closes it.
@@ -301,10 +394,12 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        self.invalidate();
         self.drag = None;
     }
 
     pub fn wheel(&mut self, dx: f32, dy: f32, shift: bool) {
+        self.invalidate();
         let (x, y) = self.mouse;
         let area = self.top_hit(x, y).map(|h| h.action.clone());
         let s = &mut self.state;
@@ -325,6 +420,7 @@ impl App {
     }
 
     pub fn key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) {
+        self.invalidate();
         use winit::keyboard::{Key, NamedKey};
         match key {
             Key::Named(NamedKey::Space) => self.act(if self.transport.playing() { Action::Stop } else { Action::Play }),
@@ -480,7 +576,7 @@ pub fn default_project() -> Project {
         volume: 10000.0 / 12800.0,
         pan: 0.0,
         pitch_cents: 0,
-        mixer_track: 0,
+        mixer_track: i + 1,
         sample_path: None,
         layer_children: Vec::new(),
     };
@@ -519,4 +615,37 @@ fn load_theme() -> Theme {
         }
     }
     Theme::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(app: &mut App, c: &mut Canvas, damage: Option<Rect>) {
+        app.paint(c, damage);
+    }
+
+    /// A damage-region repaint must give exactly the pixels of a full repaint.
+    #[test]
+    fn partial_repaint_matches_full() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return }; // no system font: skip
+        let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        app.state.front = Some(Win::Mixer);
+        frame(&mut app, &mut a, None);
+
+        // Move the rack and fade a fader, repainting only the damaged regions.
+        let old = views::rack::bounds(&app.state);
+        app.state.rack_pos = (700.0, 400.0);
+        let new = views::rack::bounds(&app.state);
+        if let Some(t) = app.state.project.mixer.iter_mut().find(|t| t.index == 3) {
+            t.volume = Some(0.35);
+        }
+        let col = app.hits.iter().find(|h| h.action == Action::Fader(3)).map(|h| h.rect).unwrap();
+        frame(&mut app, &mut a, Some(old.union(&new).union(&col.outset(10.0))));
+
+        frame(&mut app, &mut b, None);
+        let diff = a.pixmap.data().iter().zip(b.pixmap.data()).filter(|(x, y)| x != y).count();
+        assert_eq!(diff, 0, "{diff} differing bytes");
+    }
 }

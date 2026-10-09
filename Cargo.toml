@@ -12,3 +12,10 @@ os-model = { path = "crates/os-model" }
 os-flp = { path = "crates/os-flp" }
 os-engine = { path = "crates/os-engine" }
 thiserror = "2"
+
+[profile.dev]
+opt-level = 3
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -132,9 +132,24 @@ pub const MENUS: &[(&str, &[Item])] = &[
     ),
 ];
 
-/// Measured title spans (x0, x1) in the menu bar.
-pub const SPANS: [(f32, f32); 8] =
-    [(8.0, 31.0), (35.0, 57.0), (61.0, 83.0), (89.0, 139.0), (144.0, 171.0), (177.0, 222.0), (227.0, 260.0), (266.0, 292.0)];
+/// Menu bar item layout: (x0, x1, font size). The titles are spread over the measured panel
+/// (x 8–292) by their text widths, so they never overlap whatever font is in use.
+pub fn bar_layout(c: &mut os_ui::Canvas) -> [(f32, f32, f32); 8] {
+    const GAP: f32 = 9.0;
+    const SPAN: f32 = 284.0;
+    let base = 16.0;
+    let widths: Vec<f32> = MENUS.iter().map(|(t, _)| c.text_width(Face::Ui, base, t)).collect();
+    let total: f32 = widths.iter().sum::<f32>() + GAP * 7.0;
+    let k = ((SPAN - GAP * 7.0) / (total - GAP * 7.0)).min(1.15);
+    let mut out = [(0.0, 0.0, base); 8];
+    let mut x = 8.0;
+    for (i, w) in widths.iter().enumerate() {
+        let w = w * k;
+        out[i] = (x, x + w, base * k);
+        x += w + GAP;
+    }
+    out
+}
 
 /// Map VIEW menu items to their window actions; other menus use `MenuItem`.
 fn item_action(menu: usize, i: usize) -> Action {
@@ -150,11 +165,12 @@ fn item_action(menu: usize, i: usize) -> Action {
 
 pub fn paint_dropdown(ui: &mut Ui, menu: usize) {
     let Some((_, items)) = MENUS.get(menu) else { return };
+    let x0 = bar_layout(ui.c)[menu].0;
     let t = ui.t;
     let row = 22.0;
     let seps = items.iter().filter(|i| i.sep).count() as f32;
     let width = 260.0;
-    let r = Rect::new(SPANS[menu].0 - 4.0, 78.0, width, items.len() as f32 * row + seps * 7.0 + 8.0);
+    let r = Rect::new(x0 - 4.0, 78.0, width, items.len() as f32 * row + seps * 7.0 + 8.0);
     ui.c.fill_rect(Rect::new(r.x + 3.0, r.y + 3.0, r.w, r.h), t.toolbar_line.with_alpha(160));
     ui.c.fill_rect(r, t.menu_drop);
     ui.c.stroke_rrect(r, 0.0, 1.0, t.toolbar_line);

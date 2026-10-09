@@ -36,12 +36,14 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     // Workspace (§9): watermark, then docked windows on top.
     let left = if s.show_browser { BROWSER_W } else { 0.0 };
     let work = Rect::new(left, WORK_Y, w - left, h - WORK_Y);
-    let wm = ui.t.watermark;
-    icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
-    let version = concat!("OpenStudio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
-    let vc = ui.t.version_text;
-    let vw = ui.c.text_width(Face::Ui, 16.0, version);
-    ui.c.text(Face::Ui, 16.0, work.cx() - vw / 2.0, h - 22.0, vc, version);
+    if s.front.is_none() {
+        let wm = ui.t.watermark;
+        icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
+        let version = concat!("OpenStudio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
+        let vc = ui.t.version_text;
+        let vw = ui.c.text_width(Face::Ui, 16.0, version);
+        ui.c.text(Face::Ui, 16.0, work.cx() - vw / 2.0, h - 22.0, vc, version);
+    }
 
     match s.front {
         Some(Win::Playlist) => playlist::paint(ui, s, work, f),
@@ -66,6 +68,8 @@ pub fn window_frame(ui: &mut Ui, r: Rect, title: &str, title_x: f32) -> Rect {
     let t = ui.t;
     ui.c.fill_rect(r, t.window_title);
     let bar = Rect::new(r.x, r.y, r.w, 23.0);
+    ui.c.fill_rect_gradient(bar, t.window_title.shade(0.04), t.window_title.shade(-0.03), 0.0);
+    ui.c.fill_rect(Rect::new(r.x, r.y + 22.0, r.w, 1.0), t.splitter_dark);
     ui.c.text(Face::Ui, 13.0, r.x + title_x, r.y + 5.0, t.text, title);
     // Minimize / maximize / close glyphs at the right (1862, 1881, 1901 at full width).
     let right = r.right();
@@ -87,33 +91,42 @@ fn placeholder_window(ui: &mut Ui, r: Rect, title: &str) {
     ui.c.fill_rect(client, ui.t.grid);
 }
 
+/// Raised surface: soft vertical gradient (lighter at the top) so panels don't look flat.
+pub fn raised(ui: &mut Ui, r: Rect, base: Color, radius: f32) {
+    ui.c.fill_rect_gradient(r, base.shade(0.045), base.shade(-0.035), radius);
+}
+
 /// A 30×31 toolbar button (§1). `on` draws the orange "on" state.
 pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, hint: &'static str) {
     let hov = ui.hit(r, action, hint);
     let t = ui.t;
+    ui.c.fill_rrect(r, 3.5, t.toolbar_line.shade(-0.15));
+    let face = r.inset(1.0);
     if on {
-        ui.c.fill_rect_gradient(r, t.on_top, t.on_bottom, 3.0);
-        icons::draw(ui.c, icon, r.inset(6.0), t.on_glyph);
+        ui.c.fill_rect_gradient(face, t.on_top, t.on_bottom, 3.0);
+        ui.c.fill_rect(Rect::new(face.x + 2.0, face.y, face.w - 4.0, 1.0), Color::rgb(0xffffff).with_alpha(90));
+        icons::draw(ui.c, icon, r.inset(4.5), t.on_glyph);
     } else {
-        let face = if hov { t.button_hi } else { t.button };
-        ui.c.fill_rrect(r, 3.0, t.toolbar_line);
-        ui.c.fill_rect_gradient(r.inset(1.0), face.shade(0.04), face, 2.5);
-        icons::draw(ui.c, icon, r.inset(7.0), if hov { Color::rgb(0xffffff) } else { t.glyph });
+        let base = if hov { t.button_hi } else { t.button };
+        ui.c.fill_rect_gradient(face, base.shade(0.05), base.shade(-0.04), 3.0);
+        ui.c.fill_rect(Rect::new(face.x + 2.0, face.y, face.w - 4.0, 1.0), Color::rgb(0xffffff).with_alpha(if hov { 26 } else { 14 }));
+        icons::draw(ui.c, icon, r.inset(4.5), if hov { Color::rgb(0xffffff) } else { t.glyph });
     }
 }
 
-/// A sunken panel (hint bar, monitors).
+/// A sunken panel (hint bar, monitors): darker fill, shadow along the top, faint light edge below.
 pub fn sunken(ui: &mut Ui, r: Rect, fill: Color) {
-    ui.c.fill_rrect(r, 2.0, fill);
-    ui.c.line(r.x + 2.0, r.y + 0.5, r.right() - 2.0, r.y + 0.5, 1.0, fill.shade(-0.3));
+    ui.c.fill_rrect(r, 2.5, fill);
+    ui.c.fill_rect_gradient(Rect::new(r.x + 1.0, r.y, r.w - 2.0, 4.0), fill.shade(-0.45), fill.with_alpha(0), 0.0);
+    ui.c.fill_rect(Rect::new(r.x + 2.0, r.bottom() - 1.0, r.w - 4.0, 1.0), Color::rgb(0xffffff).with_alpha(10));
 }
 
-/// A ring knob: `value` 0…1 (bipolar knobs pass `center = true` to draw from 12 o'clock).
+/// A ring knob (toolbar style): arc from the minimum; bipolar knobs pass `center = true`.
 pub fn knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, value: f32, center: bool, c: Color, track: Color) {
     use std::f32::consts::PI;
     let start = 0.75 * PI;
     let sweep = 1.5 * PI;
-    ui.c.fill_circle(cx, cy, r, track.shade(-0.35));
+    ui.c.fill_circle(cx, cy, r, track.shade(-0.5));
     ui.c.arc(cx, cy, r - 1.5, start, sweep, 2.0, track);
     let (a0, a1) = if center { (start + sweep / 2.0, start + sweep * value) } else { (start, start + sweep * value) };
     if (a1 - a0).abs() > 0.01 {
@@ -123,13 +136,30 @@ pub fn knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, value: f32, center: bool, c: 
     ui.c.line(cx + (r - 6.0).max(1.0) * a.cos(), cy + (r - 6.0).max(1.0) * a.sin(), cx + (r - 2.5) * a.cos(), cy + (r - 2.5) * a.sin(), 1.6, c);
 }
 
+/// A dark glossy ball knob (mixer, rack, slots) with a pointer.
+pub fn ball_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, value: f32) {
+    use std::f32::consts::PI;
+    let t = ui.t;
+    ui.c.fill_circle(cx, cy, r, t.toolbar_line.shade(-0.3));
+    ui.c.fill_circle(cx, cy, r - 1.0, t.button_hi.shade(0.02));
+    ui.c.fill_circle(cx, cy + 0.6, r - 2.2, t.sunken_dark.shade(-0.1));
+    ui.c.fill_circle(cx - r * 0.25, cy - r * 0.35, r * 0.35, Color::rgb(0xffffff).with_alpha(14));
+    let a = 0.75 * PI + 1.5 * PI * value.clamp(0.0, 1.0);
+    let (ix, iy) = (r * 0.3, r * 0.3);
+    let _ = (ix, iy);
+    ui.c.line(cx + (r * 0.35) * a.cos(), cy + (r * 0.35) * a.sin(), cx + (r - 2.8) * a.cos(), cy + (r - 2.8) * a.sin(), 1.4, t.glyph.shade(-0.15));
+}
+
 /// A round LED (green accent when lit).
 pub fn led(ui: &mut Ui, cx: f32, cy: f32, on: bool) {
     let t = ui.t;
-    ui.c.fill_circle(cx, cy, 5.0, t.toolbar_line);
-    ui.c.fill_circle(cx, cy, 3.6, if on { t.accent } else { t.accent_dim.shade(-0.4) });
+    ui.c.fill_circle(cx, cy, 5.2, t.toolbar_line.shade(-0.25));
     if on {
-        ui.c.fill_circle(cx - 1.0, cy - 1.0, 1.3, t.accent.shade(0.5));
+        ui.c.fill_circle(cx, cy, 4.8, t.accent.with_alpha(60));
+    }
+    ui.c.fill_circle(cx, cy, 3.7, if on { t.accent.shade(-0.1) } else { t.accent_dim.shade(-0.45) });
+    if on {
+        ui.c.fill_circle(cx - 0.8, cy - 0.9, 1.5, t.accent.shade(0.55));
     }
 }
 

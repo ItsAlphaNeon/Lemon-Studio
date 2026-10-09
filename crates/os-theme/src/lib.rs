@@ -240,6 +240,7 @@ tokens! {
     name_button = 0x3d4245, "Channel name button.";
     name_button_sel = 0x5d6a70, "Selected channel name button.";
     name_text = 0xc9d0d4, "Channel name text.";
+    rack_inset = 0x25292d, "Channel rack row panel.";
     step_a = 0x30363a, "Step buttons, even groups of 4.";
     step_b = 0x714a4c, "Step buttons, odd groups of 4.";
     step_on = 0xd8dde0, "Lit step.";

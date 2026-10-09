@@ -49,8 +49,10 @@ impl ApplicationHandler for Shell {
         // Animate while playing; otherwise repaint a few times a second (peaks, clock).
         let ms = if self.app.transport.playing() { 16 } else { 100 };
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(ms)));
-        if let Some(w) = &self.window {
-            w.request_redraw();
+        if self.app.tick() {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
     }
 
@@ -61,7 +63,8 @@ impl ApplicationHandler for Shell {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
-                if self.app.mouse_move(position.x as f32 / scale, position.y as f32 / scale) {
+                self.app.mouse_move(position.x as f32 / scale, position.y as f32 / scale);
+                if self.app.has_damage() {
                     window.request_redraw();
                 }
             }
@@ -95,7 +98,10 @@ impl ApplicationHandler for Shell {
                 self.app.key(&event.logical_key, self.mods.control_key(), self.mods.alt_key());
                 window.request_redraw();
             }
-            WindowEvent::Resized(_) => window.request_redraw(),
+            WindowEvent::Resized(_) => {
+                self.app.invalidate();
+                window.request_redraw();
+            }
             WindowEvent::RedrawRequested => {
                 let size = window.inner_size();
                 let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
@@ -112,13 +118,43 @@ impl ApplicationHandler for Shell {
                 let canvas = self.canvas.as_mut().expect("canvas");
                 if canvas.pixmap.width() != size.width || canvas.pixmap.height() != size.height || canvas.scale != scale {
                     canvas.resize(size.width, size.height, scale);
+                    self.app.invalidate();
                 }
-                self.app.paint(canvas);
+                // Paint only what changed, then present only that region.
+                let damage = self.app.take_damage();
+                if let Some(d) = damage {
+                    self.app.paint(canvas, d);
+                }
                 if let Some(surface) = self.surface.as_mut() {
                     if surface.resize(w, h).is_ok() {
                         if let Ok(mut buf) = surface.buffer_mut() {
-                            canvas.copy_to_xrgb(&mut buf);
-                            let _ = buf.present();
+                            let age = buf.age();
+                            match damage {
+                                Some(Some(r)) if age > 0 => {
+                                    let px = canvas.device_rect(r);
+                                    canvas.copy_region_to_xrgb(&mut buf, px);
+                                    match (NonZeroU32::new(px.2 as u32), NonZeroU32::new(px.3 as u32)) {
+                                        (Some(rw), Some(rh)) => {
+                                            let _ = buf.present_with_damage(&[softbuffer::Rect { x: px.0 as u32, y: px.1 as u32, width: rw, height: rh }]);
+                                        }
+                                        _ => {
+                                            let _ = buf.present();
+                                        }
+                                    }
+                                }
+                                // Nothing painted (the OS asked for a redraw): the buffer already
+                                // holds the last frame unless it was discarded.
+                                None => {
+                                    if age == 0 {
+                                        canvas.copy_to_xrgb(&mut buf);
+                                    }
+                                    let _ = buf.present();
+                                }
+                                _ => {
+                                    canvas.copy_to_xrgb(&mut buf);
+                                    let _ = buf.present();
+                                }
+                            }
                         }
                     }
                 }
@@ -145,6 +181,7 @@ fn screenshot(args: &[String]) {
     let mut out = None;
     let mut view = "playlist".to_string();
     let mut rack = true;
+    let mut browser = true;
     let mut path = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -152,18 +189,38 @@ fn screenshot(args: &[String]) {
             "--screenshot" => out = it.next().cloned(),
             "--view" => view = it.next().cloned().unwrap_or_default(),
             "--no-rack" => rack = false,
+            "--no-browser" => browser = false,
             other => path = Some(std::path::PathBuf::from(other)),
         }
     }
     let mut app = App::new(path);
     app.state.show_rack = rack;
+    app.state.show_browser = browser;
     app.state.front = match view.as_str() {
         "mixer" => Some(app::Win::Mixer),
         "none" => None,
         _ => Some(app::Win::Playlist),
     };
     let mut canvas = Canvas::new(1920, 1080, 1.0).expect("canvas");
-    app.paint(&mut canvas);
+    app.paint(&mut canvas, None);
+    if std::env::var_os("OS_BENCH").is_some() {
+        let t0 = Instant::now();
+        for _ in 0..20 {
+            app.paint(&mut canvas, None);
+        }
+        eprintln!("paint: {:.2} ms/frame", t0.elapsed().as_secs_f64() * 50.0);
+        for (name, r) in [
+            ("rack-sized damage", os_ui::Rect::new(317.0, 195.0, 510.0, 260.0)),
+            ("fader-column damage", os_ui::Rect::new(317.0, 500.0, 50.0, 500.0)),
+            ("hover-button damage", os_ui::Rect::new(975.0, 45.0, 36.0, 36.0)),
+        ] {
+            let t1 = Instant::now();
+            for _ in 0..20 {
+                app.paint(&mut canvas, Some(r));
+            }
+            eprintln!("  {name}: {:.2} ms/frame", t1.elapsed().as_secs_f64() * 50.0);
+        }
+    }
     canvas.pixmap.save_png(out.expect("--screenshot needs a path")).expect("write png");
 }
 

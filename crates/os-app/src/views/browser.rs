@@ -83,7 +83,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         }
         let c = if *cat == 255 { t.browser_folder } else { cats[usize::from(*cat).min(9)] };
         icons::draw(ui.c, *icon, Rect::new(19.0, row.y + 3.0, 17.0, 17.0), c);
-        ui.c.text(Face::Ui, 14.0, 38.0, row.y + 4.0, c, label);
+        ui.c.text(Face::Ui, 14.8, 38.0, row.y + 3.0, c, label);
     }
     ui.c.pop_clip();
     // Footer.

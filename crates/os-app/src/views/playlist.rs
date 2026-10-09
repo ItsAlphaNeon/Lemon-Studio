@@ -27,9 +27,22 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         icons::draw(ui.c, icon, b, if hov { t.glyph } else { t.text });
     }
 
-    // Picker panel.
+    // Picker panel with its tab icons (pattern / audio / automation).
     let picker = Rect::new(r.x, client.y, 160.0, client.h);
     ui.c.fill_rect(picker, t.picker);
+    for (i, (icon, on)) in [(Icon::PianoRoll, true), (Icon::Wave, false), (Icon::Slide, false)].into_iter().enumerate() {
+        let cx = r.x + 23.0 + 47.0 * i as f32;
+        icons::draw(ui.c, icon, Rect::new(cx - 10.0, client.y + 15.0, 20.0, 20.0), if on { t.glyph } else { t.text_faint });
+    }
+    // Track-header strip: add button and the NOTE / CHAN / PAT filters.
+    let strip = Rect::new(r.x + 162.0, client.y + 1.0, 108.0, 38.0);
+    ui.c.fill_rect_gradient(strip, t.track_header.shade(0.05), t.track_header.shade(-0.03), 0.0);
+    icons::draw(ui.c, Icon::Plus, Rect::new(strip.x + 6.0, client.y + 20.0, 16.0, 16.0), t.glyph);
+    for (i, (icon, label)) in [(Icon::Wave, "NOTE"), (Icon::Slide, "CHAN"), (Icon::PianoRoll, "PAT")].into_iter().enumerate() {
+        let cx = strip.x + 45.0 + 26.0 * i as f32;
+        icons::draw(ui.c, icon, Rect::new(cx - 8.0, client.y + 3.0, 16.0, 16.0), if i == 2 { t.glyph } else { t.text_faint });
+        ui.c.text_center(Face::Ui, 7.5, Rect::new(cx - 14.0, client.y + 25.0, 28.0, 10.0), if i == 2 { t.glyph } else { t.text_faint }, label);
+    }
     let mut y = client.y + 44.0;
     let max_pat = s.project.patterns.iter().map(|p| p.number).max().unwrap_or(1).max(1);
     for n in 1..=max_pat {
@@ -77,21 +90,32 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.hit(Rect::new(grid_x, grid_y, grid_w, area.h), Action::PlaylistArea, "Playlist");
     ui.c.push_clip(area);
     ui.c.fill_rect(Rect::new(grid_x, grid_y, grid_w, area.h), t.grid_gap);
+    let grid = Rect::new(grid_x, grid_y, grid_w, area.h);
+    // Row bodies, then bar tints and lines as full-height columns, then the gaps between rows again
+    // (far fewer rectangles than per-row lines).
     for row in first_row..first_row + rows {
         let y = grid_y + row as f32 * ROW_H - sy;
-        let rr = Rect::new(grid_x, y, grid_w, 45.0);
-        ui.c.fill_rect(rr, t.grid);
-        // Bar groups alternate (every 4 bars) and beat lines.
-        for b in first_bar..first_bar + bars_visible {
-            let x = grid_x + b as f32 * BAR_W - sx;
-            if (b / 4) % 2 == 1 {
-                ui.c.fill_rect(Rect::new(x, y, BAR_W, 45.0), t.grid_alt);
-            }
-            for q in 1..4 {
-                ui.c.fill_rect(Rect::new(x + q as f32 * 15.0, y, 1.0, 45.0), t.grid_gap.mix(t.grid, 0.4));
-            }
-            ui.c.fill_rect(Rect::new(x, y, 2.0, 45.0), t.grid_bar);
+        ui.c.fill_rect(Rect::new(grid_x, y, grid_w, 45.0), t.grid);
+    }
+    let beat = t.grid_gap.mix(t.grid, 0.4);
+    ui.c.push_clip(grid);
+    for b in first_bar..first_bar + bars_visible {
+        let x = grid_x + b as f32 * BAR_W - sx;
+        if (b / 4) % 2 == 1 {
+            ui.c.fill_rect(Rect::new(x, grid_y, BAR_W, grid.h), t.grid_alt);
         }
+        for q in 1..4 {
+            ui.c.fill_rect(Rect::new(x + q as f32 * 15.0, grid_y, 1.0, grid.h), beat);
+        }
+        ui.c.fill_rect(Rect::new(x, grid_y, 2.0, grid.h), t.grid_bar);
+    }
+    for row in first_row..first_row + rows {
+        let y = grid_y + row as f32 * ROW_H - sy;
+        ui.c.fill_rect(Rect::new(grid_x, y + 45.0, grid_w, 3.0), t.grid_gap);
+    }
+    ui.c.pop_clip();
+    for row in first_row..first_row + rows {
+        let y = grid_y + row as f32 * ROW_H - sy;
         // Header.
         let hr = Rect::new(head_x, y, head_w, 45.0);
         ui.c.fill_rrect(hr, 4.0, t.track_header);
@@ -99,7 +123,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             .and_then(|a| a.tracks.iter().find(|tr| tr.number as usize == row + 1))
             .and_then(|tr| tr.name.clone())
             .unwrap_or(format!("Track {}", row + 1));
-        ui.c.text(Face::Ui, 13.0, hr.x + 2.0, y + 2.0, t.text_faint, &name);
+        ui.c.fill_rect_gradient(hr.inset(0.0), t.track_header.shade(0.035), t.track_header.shade(-0.03), 4.0);
+        ui.c.text(Face::Ui, 13.5, hr.x + 2.0, y + 2.0, t.text_faint, &name);
+        ui.c.text(Face::Ui, 12.0, hr.x + 14.0, y + 28.0, t.text_faint.shade(-0.2), "...");
         super::led(ui, hr.right() - 12.0, y + 37.0, true);
     }
     // Clips.

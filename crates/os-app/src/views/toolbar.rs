@@ -22,18 +22,20 @@ fn btn(x: f32, y: f32) -> Rect {
 pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     let t = ui.t;
     // Bands.
-    ui.c.fill_rect(Rect::new(0.0, 0.0, width, 41.0), t.toolbar);
+    ui.c.fill_rect_gradient(Rect::new(0.0, 0.0, width, 41.0), t.toolbar.shade(0.025), t.toolbar.shade(-0.015), 0.0);
     ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), t.toolbar_line);
-    ui.c.fill_rect(Rect::new(0.0, 42.0, width, 39.0), t.toolbar);
+    ui.c.fill_rect_gradient(Rect::new(0.0, 42.0, width, 39.0), t.toolbar.shade(0.02), t.toolbar.shade(-0.02), 0.0);
     ui.c.fill_rect(Rect::new(0.0, 81.0, width, 2.0), t.toolbar_line);
     // Empty toolbar areas drag the window (registered first, so controls win).
     ui.hit(Rect::new(0.0, 0.0, width, 81.0), Action::DragWindow, "");
     // Group separators (2 px gaps measured in row 1 and row 2).
     for x in [379.0, 575.0, 876.0, 1048.0, 1204.0] {
-        ui.c.fill_rect(Rect::new(x, 2.0, 2.0, 37.0), t.toolbar_line);
+        ui.c.fill_rect(Rect::new(x, 2.0, 1.0, 37.0), t.toolbar_line);
+        ui.c.fill_rect(Rect::new(x + 1.0, 2.0, 1.0, 37.0), t.toolbar_edge.with_alpha(110));
     }
     for x in [298.0, 378.0, 576.0, 967.0, 1298.0] {
-        ui.c.fill_rect(Rect::new(x, 44.0, 2.0, 35.0), t.toolbar_line);
+        ui.c.fill_rect(Rect::new(x, 44.0, 1.0, 35.0), t.toolbar_line);
+        ui.c.fill_rect(Rect::new(x + 1.0, 44.0, 1.0, 35.0), t.toolbar_edge.with_alpha(110));
     }
 
     row1(ui, s, f, width);
@@ -55,24 +57,26 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     ] {
         let r = Rect::new(x, 11.0, 19.0, 20.0);
         let hov = ui.hit(r, action, hint);
-        ui.c.fill_rrect(r, 2.0, if hov { t.button_hi } else { t.button });
-        icons::draw(ui.c, icon, r.inset(3.0), t.glyph);
+        ui.c.fill_rrect(r, 3.0, t.toolbar_line.shade(-0.2));
+        ui.c.fill_rect_gradient(r.inset(1.0), if hov { t.button_hi.shade(0.06) } else { t.button.shade(0.05) }, t.button.shade(-0.05), 2.5);
+        icons::draw(ui.c, icon, r.inset(3.5), t.glyph);
     }
 
     // Hint panel: project title + hint / message.
     let hp = Rect::span(73.0, 361.0, 5.0, 35.0);
     sunken(ui, hp, t.sunken);
     ui.hit(hp, Action::DragWindow, "Hint bar");
-    ui.c.push_clip(hp.inset(2.0));
-    ui.c.text(Face::Ui, 11.0, 77.0, 8.0, t.text_dim.shade(-0.1), &f.title);
+    ui.c.text_fit(Face::Ui, 11.5, 78.0, 8.0, 270.0, t.text_dim.shade(-0.05), &f.title);
     let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
-    ui.c.text(Face::Ui, 12.0, 77.0, 21.0, t.text, hint);
-    ui.c.pop_clip();
+    ui.c.text_fit(Face::Ui, 12.5, 78.0, 21.0, 270.0, t.text, hint);
     icons::draw(ui.c, Icon::MidiControl, Rect::span(364.0, 375.0, 20.0, 34.0), t.glyph_dim);
 
     // Transport group.
-    let ps = Rect::span(385.0, 416.0, 5.0, 35.0);
-    ui.c.fill_rrect(ps, 3.0, t.button);
+    let capsule = Rect::span(383.0, 483.0, 4.0, 36.0);
+    ui.c.fill_rrect(capsule, 15.0, t.toolbar_line.shade(-0.2));
+    ui.c.fill_rect_gradient(capsule.inset(1.0), t.sunken.shade(0.03), t.sunken.shade(-0.05), 14.0);
+    ui.c.fill_rect(Rect::new(418.0, 6.0, 1.0, 29.0), t.toolbar_line);
+    ui.c.fill_rect(Rect::new(449.0, 6.0, 1.0, 29.0), t.toolbar_line);
     let pat = Rect::new(388.0, 7.0, 26.0, 12.0);
     let song = Rect::new(388.0, 21.0, 26.0, 12.0);
     ui.hit(pat, Action::PatSong(false), "Pattern mode: play the current pattern");
@@ -84,26 +88,39 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         ui.c.text_center(Face::Ui, 9.0, r, if active { t.pill_text } else { t.glyph_dim }, label);
     }
     let play_on = f.playing;
-    tool_button(ui, Rect::span(419.0, 449.0, 5.0, 35.0), Icon::Play, play_on, Action::Play, "Play / restart (Space)");
-    tool_button(ui, Rect::span(450.0, 481.0, 5.0, 35.0), Icon::Stop, false, Action::Stop, "Stop (Space)");
+    for (r, icon, on, action, hint) in [
+        (Rect::span(420.0, 448.0, 6.0, 34.0), Icon::Play, play_on, Action::Play, "Play / restart (Space)"),
+        (Rect::span(451.0, 480.0, 6.0, 34.0), Icon::Stop, false, Action::Stop, "Stop (Space)"),
+    ] {
+        let hov = ui.hit(r, action, hint);
+        if on {
+            ui.c.fill_rect_gradient(r, t.on_top, t.on_bottom, 2.0);
+        } else if hov {
+            ui.c.fill_rect(r, t.button_hi.with_alpha(110));
+        }
+        icons::draw(ui.c, icon, r.inset(7.0), if on { t.on_glyph } else { t.glyph });
+    }
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
     let hov = ui.hit(rec, Action::Record, "Record");
-    ui.c.fill_circle(rec.cx(), rec.cy(), 13.5, t.toolbar_line);
-    ui.c.fill_circle(rec.cx(), rec.cy(), 12.0, if hov { t.button_hi } else { t.button });
-    ui.c.fill_circle(rec.cx(), rec.cy(), 5.0, t.record);
+    ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.toolbar_line.shade(-0.25));
+    ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, if hov { t.button_hi } else { t.button.shade(-0.03) });
+    ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.shade(-0.1));
+    ui.c.fill_circle(rec.cx() - 1.2, rec.cy() - 1.5, 2.0, t.record.shade(0.4));
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);
     ui.hit(tb, Action::Tempo, "Tempo (drag up/down)");
     ui.c.fill_rrect(tb, 5.0, t.tempo_box);
     let whole = format!("{}", s.tempo.trunc() as i64);
     let frac = format!(".{:03}", ((s.tempo.fract()) * 1000.0).round() as i64 % 1000);
-    let ww = ui.c.text_width(Face::Ui, 19.0, &whole);
-    let fw = ui.c.text_width(Face::Ui, 12.0, &frac);
-    let x0 = tb.right() - 10.0 - ww - fw;
-    ui.c.text(Face::Ui, 19.0, x0, 11.0, t.glyph, &whole);
-    ui.c.text(Face::Ui, 12.0, x0 + ww, 17.0, t.glyph_dim.shade(0.3), &frac);
-    ui.c.fill_polygon(&[(tb.right() - 7.0, 17.0), (tb.right() - 4.0, 13.0), (tb.right() - 1.0, 17.0)], t.glyph_dim);
-    ui.c.fill_polygon(&[(tb.right() - 7.0, 22.0), (tb.right() - 4.0, 26.0), (tb.right() - 1.0, 22.0)], t.glyph_dim);
+    let ww = ui.c.text_width(Face::Ui, 18.0, &whole);
+    let fw = ui.c.text_width(Face::Ui, 11.5, &frac);
+    let x0 = tb.right() - 12.0 - ww - fw;
+    ui.c.push_clip(tb.inset(1.0));
+    ui.c.text(Face::Ui, 18.0, x0, 11.0, t.glyph, &whole);
+    ui.c.text(Face::Ui, 11.5, x0 + ww, 17.0, t.glyph_dim.shade(0.3), &frac);
+    ui.c.pop_clip();
+    ui.c.fill_polygon(&[(tb.right() - 9.0, 17.0), (tb.right() - 6.0, 13.0), (tb.right() - 3.0, 17.0)], t.glyph_dim);
+    ui.c.fill_polygon(&[(tb.right() - 9.0, 22.0), (tb.right() - 6.0, 26.0), (tb.right() - 3.0, 22.0)], t.glyph_dim);
 
     // Recording options.
     for (i, (icon, name, hint)) in [
@@ -126,12 +143,14 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     ui.hit(tp, Action::Placeholder("time display"), "Song position (bar:step:tick)");
     let (bar, step, tick) = bst(f.seconds, s.tempo, 96);
     let main = format!("{bar}:{step:02}");
-    let mw = ui.c.text_width(Face::Light, 34.0, &main);
-    let tw = ui.c.text_width(Face::Light, 22.0, &format!(":{tick:02}"));
-    let x0 = tp.cx() - (mw + tw) / 2.0;
-    ui.c.text(Face::Light, 34.0, x0, 6.0, t.glyph, &main);
-    ui.c.text(Face::Light, 22.0, x0 + mw, 15.0, t.glyph, &format!(":{tick:02}"));
-    ui.c.text(Face::Ui, 7.0, tp.right() - 22.0, 7.0, t.glyph, "B:S:T");
+    let mw = ui.c.text_width(Face::Light, 40.0, &main);
+    let tw = ui.c.text_width(Face::Light, 28.0, &format!(":{tick:02}"));
+    let x0 = tp.x + 6.0 + ((tp.w - 12.0 - mw - tw) / 2.0).max(0.0);
+    ui.c.push_clip(tp.inset(1.0));
+    ui.c.text(Face::Light, 40.0, x0, 3.0, t.glyph, &main);
+    ui.c.text(Face::Light, 28.0, x0 + mw, 12.0, t.glyph, &format!(":{tick:02}"));
+    ui.c.pop_clip();
+    ui.c.text(Face::Ui, 7.5, tp.right() - 28.0, 7.0, t.glyph.shade(-0.1), "B:S:T");
 
     // Monitors (oscilloscope / peak) and CPU / memory.
     for r in [Rect::span(882.0, 965.0, 5.0, 35.0), Rect::span(970.0, 1044.0, 5.0, 35.0)] {
@@ -150,7 +169,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     ui.c.fill_rect(Rect::new(1055.0, 6.0, 1.5, 12.0), t.glyph);
     ui.c.text_right(Face::Ui, 13.0, 1140.0, 7.0, t.glyph, "0");
     ui.c.line(1055.0, 32.0, 1130.0, 32.0, 1.0, t.glyph.with_alpha(160));
-    ui.c.text_right(Face::Ui, 12.0, 1198.0, 7.0, t.glyph, "– MB");
+    ui.c.text_right(Face::Ui, 12.0, 1198.0, 7.0, t.glyph, "0 MB");
     ui.c.text_right(Face::Ui, 13.0, 1176.0, 20.0, t.glyph, "0");
 
     // Utility buttons.
@@ -178,18 +197,16 @@ fn row2(ui: &mut Ui, s: &State, width: f32) {
     let t = ui.t;
     // Menu bar.
     let mb = Rect::span(4.0, 296.0, 45.0, 77.0);
-    ui.c.fill_rrect(mb, 2.0, t.menu_panel);
-    ui.c.stroke_rrect(mb, 2.0, 1.0, t.toolbar_edge);
-    for (i, ((title, _), (x0, x1))) in menus::MENUS.iter().zip(menus::SPANS).enumerate() {
-        let r = Rect::new(x0 - 2.0, 47.0, x1 - x0 + 5.0, 29.0);
+    ui.c.fill_rect_gradient(mb, t.menu_panel.shade(-0.04), t.menu_panel.shade(0.02), 2.5);
+    ui.c.stroke_rrect(mb, 2.5, 1.0, t.toolbar_line.shade(-0.1));
+    let layout = menus::bar_layout(ui.c);
+    for (i, ((title, _), (x0, x1, size))) in menus::MENUS.iter().zip(layout).enumerate() {
+        let r = Rect::new(x0 - 3.0, 47.0, x1 - x0 + 6.0, 29.0);
         let hov = ui.hit(r, Action::Menu(i), *title);
         if hov || s.menu_open == Some(i) {
             ui.c.fill_rrect(r, 2.0, t.menu_drop_hi);
         }
-        let tw = ui.c.text_width(Face::Ui, 15.0, title);
-        let sx = ((x1 - x0 + 1.0) / tw).min(1.0);
-        let size = 15.0 * sx.max(0.75);
-        ui.c.text(Face::Ui, size, x0, 54.0, t.menu_text, title);
+        ui.c.text(Face::Ui, size, x0, 53.0, t.menu_text, title);
     }
 
     // Master knobs.
@@ -284,8 +301,8 @@ fn row2(ui: &mut Ui, s: &State, width: f32) {
     if np.right() < width - 85.0 {
         ui.c.fill_rrect(np, 2.0, t.news_panel);
         ui.hit(np, Action::Placeholder("news"), "News");
-        ui.c.text(Face::Ui, 11.0, 1310.0, 56.0, t.text_faint, "Today");
-        ui.c.text(Face::Ui, 11.0, 1344.0, 56.0, t.text_dim.shade(0.2), "Welcome to OpenStudio");
+        ui.c.text(Face::Ui, 11.5, 1310.0, 55.0, t.text_faint, "Today");
+        ui.c.text_fit(Face::Ui, 11.5, 1346.0, 55.0, 98.0, t.text_dim.shade(0.2), "Welcome to OpenStudio");
         icons::draw(ui.c, Icon::Globe, Rect::new(1449.0, 52.0, 18.0, 18.0), t.glyph_dim.shade(0.3));
     }
 }
