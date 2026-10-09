@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use os_model::{
-    Arrangement, Channel, ChannelKind, Clip, ClipSource, MixerTrack, Note, Pattern,
+    Arrangement, Channel, ChannelKind, Clip, ClipSource, ControlPoint, MixerTrack, Note, Pattern,
     PlaylistTrack, Project, ProjectInfo, Rgb, SlotPlugin,
 };
 
@@ -43,6 +43,8 @@ mod id {
 
     pub const PAT_START: u8 = 65;
     pub const PAT_NOTES: u8 = 224;
+    /// Channel control points (12-byte records) between 65 and 224.
+    pub const PAT_CONTROLS: u8 = 223;
     pub const PAT_NAME: u8 = 193;
     pub const PAT_COLOR: u8 = 150;
 
@@ -168,6 +170,9 @@ struct ChannelLoc {
 
 #[derive(Debug, Default)]
 struct PatternLoc {
+    /// Index of the event 65 that starts the note block (where a new 223 goes).
+    start: Option<usize>,
+    controls: Option<usize>,
     notes: Option<usize>,
     name: Option<usize>,
     color: Option<usize>,
@@ -275,9 +280,19 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 let number = int(e) as u16;
                 let loc = l.patterns.entry(number).or_default();
                 let mut k = i + 1;
+                // spec: flp/events/patterns.md "Control points": `65, 223, 224` (either may be absent).
+                let has_controls = events.get(k).is_some_and(|n| n.id == id::PAT_CONTROLS);
+                if has_controls {
+                    loc.start = Some(i);
+                    loc.controls = Some(k);
+                    k += 1;
+                }
                 if events.get(k).is_some_and(|n| n.id == id::PAT_NOTES) {
+                    loc.start = Some(i);
                     loc.notes = Some(k);
                     k += 1;
+                } else if has_controls {
+                    // A block of control points only: nothing else belongs to it.
                 } else {
                     // Metadata block: runs until the next block start or region change.
                     while let Some(n) = events.get(k) {
@@ -423,6 +438,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             name: text(loc.name),
             color: loc.color.map(|i| int(&events[i])).filter(|v| v >> 24 == 0xFF).map(rgb_from_bgr),
             notes: loc.notes.and_then(|i| events[i].data()).map(decode_notes).unwrap_or_default(),
+            controls: loc.controls.and_then(|i| events[i].data()).map(decode_controls).unwrap_or_default(),
         });
     }
     let mut a_index = 0;
@@ -504,12 +520,37 @@ fn decode_note(r: &[u8]) -> Note {
         flags: u16_at(4),
         group: r[19],
         unk14: u16_at(14),
-        unk17: r[17],
+        repeat: r[17],
     }
 }
 
 fn decode_notes(data: &[u8]) -> Vec<Note> {
     data.chunks_exact(NOTE_LEN).map(decode_note).collect()
+}
+
+const CONTROL_LEN: usize = 12;
+
+fn decode_controls(data: &[u8]) -> Vec<ControlPoint> {
+    data.chunks_exact(CONTROL_LEN)
+        .map(|r| ControlPoint {
+            position: u32::from_le_bytes(r[0..4].try_into().unwrap()),
+            kind: u32::from_le_bytes(r[4..8].try_into().unwrap()),
+            value: i32::from_le_bytes(r[8..12].try_into().unwrap()),
+        })
+        .collect()
+}
+
+fn encode_controls(points: &[ControlPoint]) -> Vec<u8> {
+    // Ordered by position; equal positions keep their order (spec: patterns.md).
+    let mut sorted = points.to_vec();
+    sorted.sort_by_key(|p| p.position);
+    let mut data = Vec::with_capacity(sorted.len() * CONTROL_LEN);
+    for p in &sorted {
+        data.extend_from_slice(&p.position.to_le_bytes());
+        data.extend_from_slice(&p.kind.to_le_bytes());
+        data.extend_from_slice(&p.value.to_le_bytes());
+    }
+    data
 }
 
 fn encode_note(n: &Note) -> [u8; NOTE_LEN] {
@@ -521,7 +562,7 @@ fn encode_note(n: &Note) -> [u8; NOTE_LEN] {
     r[12..14].copy_from_slice(&n.key.to_le_bytes());
     r[14..16].copy_from_slice(&n.unk14.to_le_bytes());
     r[16] = n.fine_pitch;
-    r[17] = n.unk17;
+    r[17] = n.repeat;
     r[19] = n.group;
     r[18] = n.release;
     r[20] = n.pan;
@@ -714,6 +755,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     }
 
     let mut inserts: Vec<(usize, Event)> = Vec::new();
+    let mut removals: Vec<usize> = Vec::new();
 
     // Project info.
     if let (Some(i), Some(t)) = (l.tempo, project.tempo.filter(|&t| Some(t) != current.tempo)) {
@@ -820,6 +862,22 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 }
             }
             set_data(&mut events[i], data);
+        }
+        if old.map(|o| &o.controls) != Some(&pat.controls) {
+            match (loc.and_then(|l| l.controls), pat.controls.is_empty()) {
+                (Some(i), false) => set_data(&mut events[i], encode_controls(&pat.controls)),
+                (Some(i), true) => removals.push(i),
+                (None, true) => {}
+                (None, false) => {
+                    let Some(start) = loc.and_then(|l| l.start) else {
+                        return Err(ProjectError::Mismatch(format!(
+                            "adding control points to pattern {} (no note block)",
+                            pat.number
+                        )));
+                    };
+                    inserts.push((start + 1, Event::new(id::PAT_CONTROLS, Value::var(encode_controls(&pat.controls)))));
+                }
+            }
         }
         if old.map(|o| &o.name) != Some(&pat.name) {
             match (loc.and_then(|l| l.name), &pat.name) {
@@ -936,6 +994,14 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         set_data(&mut events[i], data);
     }
 
+    // Removals first; insert positions refer to the original stream, so shift them down.
+    removals.sort_unstable();
+    for (at, _) in inserts.iter_mut() {
+        *at -= removals.iter().filter(|&&r| r < *at).count();
+    }
+    for &r in removals.iter().rev() {
+        events.remove(r);
+    }
     inserts.sort_by_key(|&(at, _)| std::cmp::Reverse(at));
     for (at, e) in inserts {
         events.insert(at, e);
@@ -951,10 +1017,36 @@ mod tests {
     /// (spec: flp/events/patterns.md, note flags).
     #[test]
     fn note_record_keeps_mute_and_flags() {
-        let mut n = Note { flags: 0x4008, group: 0x04, unk14: 3, unk17: 4, ..Note::step(2, 96) };
+        let mut n = Note { flags: 0x4008, group: 0x04, unk14: 3, repeat: 4, ..Note::step(2, 96) };
         n.set_muted(true);
         let r = encode_note(&n);
         assert_eq!(r[19], 0x24);
         assert_eq!(decode_note(&r), n);
+    }
+
+    /// Byte 17 is the note repeat index (spec: flp/events/patterns.md).
+    #[test]
+    fn note_repeat_is_byte_17() {
+        let n = Note { repeat: 14, ..Note::step(0, 0) };
+        assert_eq!(encode_note(&n)[17], 14);
+    }
+
+    /// Event 223 records: `position, channel << 16 | param, value` (spec: flp/events/patterns.md).
+    #[test]
+    fn control_points_round_trip_and_sort_by_position() {
+        let pts = [
+            ControlPoint::new(48, 1, ControlPoint::VOLUME, 5007),
+            ControlPoint::new(24, 0, ControlPoint::PITCH, -134),
+            ControlPoint::new(24, 0, ControlPoint::PAN, 6400),
+        ];
+        let data = encode_controls(&pts);
+        assert_eq!(data.len(), 36);
+        // Sorted by position; equal positions keep their order.
+        assert_eq!(&data[0..12], &[24, 0, 0, 0, 4, 0, 0, 0, 0x7A, 0xFF, 0xFF, 0xFF]);
+        let back = decode_controls(&data);
+        assert_eq!(back[1], pts[2]);
+        assert_eq!(back[2].channel(), 1);
+        assert_eq!(back[2].param(), ControlPoint::VOLUME);
+        assert_eq!(back[0].value, -134);
     }
 }

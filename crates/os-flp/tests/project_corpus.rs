@@ -116,3 +116,45 @@ fn edits_survive_a_write_read_cycle() {
     }
     eprintln!("{checked} FL 26 files: edits survived write/read");
 }
+
+/// Control points (event 223, spec: flp/events/patterns.md): adding, rewriting and removing them
+/// leaves the notes alone, and removing them again restores the original bytes.
+#[test]
+fn control_points_survive_edits() {
+    use os_model::ControlPoint;
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let bytes = std::fs::read(path).unwrap();
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        let Ok(original) = load(&file) else { continue };
+        let Some(pi) = original.patterns.iter().position(|p| !p.notes.is_empty() && p.controls.is_empty()) else {
+            continue;
+        };
+        let mut project = original.clone();
+        project.patterns[pi].controls = vec![
+            ControlPoint::new(48, 0, ControlPoint::PAN, 3200),
+            ControlPoint::new(0, 0, ControlPoint::VOLUME, 12800),
+            ControlPoint::new(0, 1, ControlPoint::PITCH, -37),
+        ];
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let mut file2 = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let reread = load(&file2).unwrap();
+        let got = &reread.patterns[pi];
+        assert_eq!(got.notes, original.patterns[pi].notes, "{path}: notes unchanged");
+        assert_eq!(got.controls.len(), 3, "{path}");
+        assert!(got.controls.windows(2).all(|w| w[0].position <= w[1].position), "{path}: sorted");
+
+        // Rewrite one value in place, then remove them all.
+        let mut project = reread.clone();
+        project.patterns[pi].controls[0].value = 777;
+        apply(&project, &mut file2).unwrap();
+        let reread = load(&FlpFile::parse(&file2.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(reread.patterns[pi].controls[0].value, 777, "{path}");
+        project.patterns[pi].controls.clear();
+        apply(&project, &mut file2).unwrap();
+        assert_eq!(file2.to_bytes().unwrap(), bytes, "{path}: removing the points restores the file");
+        checked += 1;
+    }
+    eprintln!("{checked} files: control points added, rewritten and removed");
+}

@@ -291,7 +291,10 @@ pub enum Drag {
     /// Ruler: move the play-start marker; right-drag a time selection from `t0`.
     Marker,
     TimeSel { t0: u32 },
-    Velocity { last_x: f32 },
+    /// Painting the event panel (note property or channel control points).
+    Velocity { last_x: f32, last_y: f32 },
+    /// Right-drag in a channel lane deletes its points (an OpenStudio choice, spec §7b).
+    ControlErase { last_x: f32 },
     Knob { id: crate::knobs::KnobId, y0: f32, v0: f32 },
     /// Left button held on the piano keyboard: each key entered is auditioned (§8).
     PianoKeys { key: i32 },
@@ -772,10 +775,14 @@ impl App {
                     }
                     self.damage_piano();
                 }
-                Drag::Velocity { last_x } => {
+                Drag::Velocity { last_x, last_y } => {
                     self.state.piano.dirty = true;
-                    self.paint_velocity(last_x, x, y);
-                    self.drag = Some(Drag::Velocity { last_x: x });
+                    self.paint_velocity(last_x, last_y, x, y);
+                    self.drag = Some(Drag::Velocity { last_x: x, last_y: y });
+                }
+                Drag::ControlErase { last_x } => {
+                    self.erase_control_points(last_x, x);
+                    self.drag = Some(Drag::ControlErase { last_x: x });
                 }
                 Drag::PianoKeys { key } => {
                     if let Some(g) = self.piano_geom() {
@@ -1123,6 +1130,12 @@ impl App {
             }
             return;
         }
+        if action == Some(Action::PianoVelocity) && self.state.piano.lane.is_channel() {
+            piano::snapshot(&mut self.state);
+            self.drag = Some(Drag::ControlErase { last_x: x });
+            self.erase_control_points(x, x);
+            return;
+        }
         if let Some(a @ (Action::PianoNote(_) | Action::PianoGrid)) = action {
             // Select: same as the left button; Zoom: toggle zoomed out / last zoom; the other
             // tools delete while the right button is held (spec: ui/piano-roll.md §9).
@@ -1412,10 +1425,49 @@ impl App {
         g.snap_down(tick)
     }
 
-    /// Set the velocity of this channel's notes whose start lies between the last and current x.
-    fn paint_velocity(&mut self, last_x: f32, x: f32, y: f32) {
+    /// Delete the channel lane's control points between two x positions.
+    fn erase_control_points(&mut self, last_x: f32, x: f32) {
         let (Some(g), Some(panel)) = (self.piano_geom(), self.piano_panel) else { return };
         let lane = self.state.piano.lane;
+        let (Some(ch), Some(param)) = (piano::channel(&self.state), lane.param()) else { return };
+        let (a, b) = (last_x.min(x), last_x.max(x));
+        let from = g.snap_down(g.tick_at(a).max(0.0));
+        let to = g.snap_down(g.tick_at(b).max(0.0));
+        if piano::erase_controls(&mut self.state, ch, param, from, to) > 0 {
+            self.damage_rect(panel);
+        }
+    }
+
+    /// Set the event panel's property of this channel's notes whose start lies between the last and
+    /// current x; in a channel lane, set a control point at every snap step the cursor path crosses.
+    fn paint_velocity(&mut self, last_x: f32, last_y: f32, x: f32, y: f32) {
+        let (Some(g), Some(panel)) = (self.piano_geom(), self.piano_panel) else { return };
+        let lane = self.state.piano.lane;
+        if lane.is_channel() {
+            let (Some(ch), Some(param)) = (piano::channel(&self.state), lane.param()) else { return };
+            let t0 = g.snap_down(g.tick_at(last_x).max(0.0));
+            let t1 = g.snap_down(g.tick_at(x).max(0.0));
+            let (lo, hi) = (t0.min(t1), t0.max(t1));
+            let step = g.step.max(1);
+            // A point is set when the cursor enters a snap step (its value is the path height at the
+            // step's start, as in FL's captured ramps) and on the press; staying inside a step keeps it.
+            let press = last_x == x && last_y == y;
+            let mut t = lo;
+            loop {
+                if t != t0 || (t0 == t1 && press) {
+                    let px = g.x_of(t as f32);
+                    let at = if (x - last_x).abs() < 0.5 { 1.0 } else { ((px - last_x) / (x - last_x)).clamp(0.0, 1.0) };
+                    let y_at = last_y + (y - last_y) * at;
+                    piano::set_control(&mut self.state, ch, param, t, lane.control_at(panel, y_at));
+                }
+                if t >= hi {
+                    break;
+                }
+                t += step;
+            }
+            self.damage_rect(panel);
+            return;
+        }
         let v = lane.value_at(panel, y);
         let (a, b) = (last_x.min(x) - 3.0, last_x.max(x) + 3.0);
         let ch = piano::channel(&self.state);
@@ -1829,8 +1881,8 @@ impl App {
             }
             Action::PianoVelocity => {
                 piano::snapshot(s);
-                self.drag = Some(Drag::Velocity { last_x: x });
-                self.paint_velocity(x, x, y);
+                self.drag = Some(Drag::Velocity { last_x: x, last_y: y });
+                self.paint_velocity(x, y, x, y);
             }
             Action::PianoKeys => {
                 let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
@@ -2685,6 +2737,68 @@ mod tests {
             }
         }
         assert_eq!(loud, 0, "erased notes still sounding: {:?}", app.transport.sounding());
+    }
+
+    /// Event panel: the Repeat lane and the channel control lanes (spec: ui/piano-roll.md §7a, §7b).
+    #[test]
+    fn event_panel_repeat_and_channel_lanes() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        frame(&mut app, &mut c, None);
+        let ch = piano::channel(&app.state).unwrap();
+        let g = app.piano_geom().unwrap();
+        let panel = app.piano_panel.unwrap();
+
+        // A note at tick 0, then the Repeat lane: pressing at its start at 6/14 of the height sets repeat 6.
+        app.mouse_move(g.x_of(0.0) + 2.0, g.y_of(60) + 8.0);
+        app.mouse_down();
+        app.mouse_up();
+        app.state.piano.lane = piano::Lane::Repeat;
+        frame(&mut app, &mut c, None);
+        app.mouse_move(g.x_of(0.0) + 2.0, panel.bottom() - panel.h * 6.0 / 14.0);
+        app.mouse_down();
+        app.mouse_up();
+        let repeat = piano::notes(&app.state).iter().find(|n| n.channel == ch).map(|n| n.repeat);
+        assert_eq!(repeat, Some(6));
+
+        // Channel volume: a drag lays one point per snap step along the cursor path.
+        app.state.piano.lane = piano::Lane::ChanVolume;
+        frame(&mut app, &mut c, None);
+        let (y0, y1) = (panel.bottom() - panel.h * 0.25, panel.bottom() - panel.h * 0.75);
+        app.mouse_move(g.x_of(24.0) + 1.0, y0);
+        app.mouse_down();
+        for i in 1..=8 {
+            let k = i as f32 / 8.0;
+            app.mouse_move(g.x_of(24.0) + 1.0 + (g.x_of(96.0) - g.x_of(24.0)) * k, y0 + (y1 - y0) * k);
+        }
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        let pts: Vec<(u32, i32)> = piano::controls(&app.state).iter().filter(|p| p.channel() == ch).map(|p| (p.position, p.value)).collect();
+        let at: Vec<u32> = pts.iter().map(|p| p.0).collect();
+        assert_eq!(at, vec![24, 48, 72, 96], "{pts:?}");
+        assert!(pts.windows(2).all(|w| w[0].1 < w[1].1), "values rise with the cursor: {pts:?}");
+        assert!((pts[0].1 - 3200).abs() < 400 && (pts[3].1 - 9600).abs() < 400, "{pts:?}");
+
+        // The same drag in the pan lane adds separate points (other target), right-drag erases only this lane.
+        app.state.piano.lane = piano::Lane::ChanPan;
+        frame(&mut app, &mut c, None);
+        app.mouse_move(g.x_of(48.0) + 1.0, y0);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!(piano::controls(&app.state).len(), 5);
+        app.state.piano.lane = piano::Lane::ChanVolume;
+        frame(&mut app, &mut c, None);
+        app.mouse_move(g.x_of(48.0) + 1.0, y0);
+        app.mouse_down_right();
+        app.mouse_move(g.x_of(72.0) + 1.0, y0);
+        app.mouse_up();
+        let left: Vec<(u16, u32)> = piano::controls(&app.state).iter().map(|p| (p.param(), p.position)).collect();
+        assert_eq!(left.len(), 3, "{left:?}");
+        assert!(left.contains(&(os_model::ControlPoint::PAN, 48)), "pan point kept: {left:?}");
+        assert!(piano::undo(&mut app.state));
+        assert_eq!(piano::controls(&app.state).len(), 5, "undo restores the erased points");
     }
 
     /// Piano-roll tools driven with the mouse and keys (spec: ui/piano-roll.md §9).

@@ -1,7 +1,7 @@
 //! Piano roll state and note editing (view geometry, selection, undo).
-// spec: ui/piano-roll.md §3, §5, §8, §9; flp/events/patterns.md (note records)
+// spec: ui/piano-roll.md §3, §5, §7a, §7b, §8, §9; flp/events/patterns.md (note records, control points)
 
-use os_model::{Note, Pattern};
+use os_model::{ControlPoint, Note, Pattern};
 use os_ui::Rect;
 
 use crate::app::State;
@@ -90,7 +90,7 @@ pub struct PianoState {
     pub range: Option<(u32, u32)>,
     sel: Vec<usize>,
     sel_key: (u16, u16),
-    undo: Vec<(u16, Vec<Note>)>,
+    undo: Vec<(u16, Vec<Note>, Vec<ControlPoint>)>,
 }
 
 impl Default for PianoState {
@@ -228,7 +228,8 @@ pub fn pattern_length(s: &State, notes: &[Note]) -> u32 {
     (end / bar + 1) * bar
 }
 
-/// What the event panel edits (spec: ui/piano-roll.md §7a). Note repeat and the channel controls are not stored yet.
+/// What the event panel edits (spec: ui/piano-roll.md §7a, §7b). The first seven are note properties, the
+/// last three edit the pattern's channel control points.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lane {
     Velocity,
@@ -237,10 +238,32 @@ pub enum Lane {
     Cutoff,
     Resonance,
     FinePitch,
+    Repeat,
+    ChanPan,
+    ChanVolume,
+    ChanPitch,
 }
 
+/// Cents spanned by the full height of the channel pitch lane (1.64 cents per pixel over 294 px; §7b).
+const PITCH_SPAN: f32 = 482.0;
+/// Stored value of the top of the channel volume / pan lanes (§7b).
+const CTRL_MAX: i32 = 12800;
+
 impl Lane {
-    pub const ALL: [Lane; 6] = [Lane::Pan, Lane::Velocity, Lane::Release, Lane::Cutoff, Lane::Resonance, Lane::FinePitch];
+    /// Menu order: note properties (the first `NOTE_LANES`), then channel controls.
+    pub const ALL: [Lane; 10] = [
+        Lane::Pan,
+        Lane::Velocity,
+        Lane::Release,
+        Lane::Cutoff,
+        Lane::Resonance,
+        Lane::FinePitch,
+        Lane::Repeat,
+        Lane::ChanPan,
+        Lane::ChanVolume,
+        Lane::ChanPitch,
+    ];
+    pub const NOTE_LANES: usize = 7;
     /// Dimmed name over the panel.
     pub fn name(self) -> &'static str {
         match self {
@@ -250,6 +273,10 @@ impl Lane {
             Lane::Cutoff => "Filter cutoff",
             Lane::Resonance => "Filter resonance",
             Lane::FinePitch => "Fine pitch",
+            Lane::Repeat => "Repeat",
+            Lane::ChanPan => "Channel panning",
+            Lane::ChanVolume => "Channel volume",
+            Lane::ChanPitch => "Channel pitch",
         }
     }
     /// Entry in the Control menu.
@@ -261,6 +288,23 @@ impl Lane {
             Lane::Cutoff => "Note filter cutoff frequency",
             Lane::Resonance => "Note filter resonance (Q)",
             Lane::FinePitch => "Note fine pitch",
+            Lane::Repeat => "Note repeat",
+            Lane::ChanPan => "Channel panning",
+            Lane::ChanVolume => "Channel volume",
+            Lane::ChanPitch => "Channel pitch",
+        }
+    }
+    /// Edits control points of the channel instead of note properties.
+    pub fn is_channel(self) -> bool {
+        matches!(self, Lane::ChanPan | Lane::ChanVolume | Lane::ChanPitch)
+    }
+    /// Parameter id of a channel lane in event 223 (spec: flp/events/patterns.md).
+    pub fn param(self) -> Option<u16> {
+        match self {
+            Lane::ChanVolume => Some(ControlPoint::VOLUME),
+            Lane::ChanPan => Some(ControlPoint::PAN),
+            Lane::ChanPitch => Some(ControlPoint::PITCH),
+            _ => None,
         }
     }
     pub fn get(self, n: &Note) -> u8 {
@@ -271,6 +315,8 @@ impl Lane {
             Lane::Cutoff => n.mod_x,
             Lane::Resonance => n.mod_y,
             Lane::FinePitch => n.fine_pitch,
+            Lane::Repeat => n.repeat,
+            _ => 0,
         }
     }
     pub fn set(self, n: &mut Note, v: u8) {
@@ -281,6 +327,8 @@ impl Lane {
             Lane::Cutoff => n.mod_x = v,
             Lane::Resonance => n.mod_y = v,
             Lane::FinePitch => n.fine_pitch = v,
+            Lane::Repeat => n.repeat = v,
+            _ => {}
         }
     }
     /// Value at the top of the panel.
@@ -289,6 +337,8 @@ impl Lane {
             Lane::Velocity | Lane::Pan | Lane::Release => 128.0,
             Lane::Cutoff | Lane::Resonance => 256.0,
             Lane::FinePitch => 240.0,
+            Lane::Repeat => 14.0,
+            _ => 1.0,
         }
     }
     fn max(self) -> f32 {
@@ -308,6 +358,30 @@ impl Lane {
     }
     pub fn value_at(self, panel: Rect, y: f32) -> u8 {
         ((panel.bottom() - y) / panel.h * self.scale()).round().clamp(0.0, self.max()) as u8
+    }
+    /// Channel lanes: the stored value at height `y` (volume, pan 0..=12800; pitch in cents).
+    pub fn control_at(self, panel: Rect, y: f32) -> i32 {
+        match self {
+            Lane::ChanPitch => {
+                let half = PITCH_SPAN / 2.0;
+                ((panel.y + panel.h / 2.0 - y) / panel.h * PITCH_SPAN).round().clamp(-half, half) as i32
+            }
+            _ => ((panel.bottom() - y) / panel.h * CTRL_MAX as f32).round().clamp(0.0, CTRL_MAX as f32) as i32,
+        }
+    }
+    /// Height of a stored channel-lane value.
+    pub fn control_y(self, panel: Rect, v: i32) -> f32 {
+        match self {
+            Lane::ChanPitch => panel.y + panel.h / 2.0 - v as f32 / PITCH_SPAN * panel.h,
+            _ => panel.bottom() - v as f32 / CTRL_MAX as f32 * panel.h,
+        }
+    }
+    /// Where the bars of a channel lane start: the bottom for volume, the middle line for pan and pitch.
+    pub fn control_base(self, panel: Rect) -> f32 {
+        match self {
+            Lane::ChanVolume => panel.bottom(),
+            _ => panel.y + panel.h / 2.0,
+        }
     }
 }
 
@@ -341,23 +415,57 @@ pub fn channel(s: &State) -> Option<u16> {
     s.project.channels.get(s.selected_channel).map(|c| c.index)
 }
 
-/// Remember the current pattern's notes for undo.
+/// The current pattern's channel control points.
+pub fn controls(s: &State) -> &[ControlPoint] {
+    s.project.patterns.iter().find(|p| p.number == s.pattern).map_or(&[], |p| &p.controls)
+}
+
+/// Set (or replace) the control point of `channel`/`param` at `tick`, keeping the list ordered by
+/// position (spec: flp/events/patterns.md, "Control points").
+pub fn set_control(s: &mut State, channel: u16, param: u16, tick: u32, value: i32) {
+    let point = ControlPoint::new(tick, channel, param, value);
+    let p = pattern_mut(s);
+    match p.controls.iter_mut().find(|c| c.position == tick && c.kind == point.kind) {
+        Some(c) => c.value = value,
+        None => {
+            let at = p.controls.partition_point(|c| c.position <= tick);
+            p.controls.insert(at, point);
+        }
+    }
+    s.piano.dirty = true;
+}
+
+/// Delete the lane's points whose position lies in `from..=to`; returns how many went.
+pub fn erase_controls(s: &mut State, channel: u16, param: u16, from: u32, to: u32) -> usize {
+    let kind = ControlPoint::new(0, channel, param, 0).kind;
+    let p = pattern_mut(s);
+    let before = p.controls.len();
+    p.controls.retain(|c| !(c.kind == kind && (from..=to).contains(&c.position)));
+    let gone = before - p.controls.len();
+    s.piano.dirty = true;
+    gone
+}
+
+/// Remember the current pattern's notes and control points for undo.
 pub fn snapshot(s: &mut State) {
     let number = s.pattern;
     let notes = notes(s).to_vec();
+    let controls = controls(s).to_vec();
     s.piano.dirty = true;
     let u = &mut s.piano.undo;
     if u.len() >= UNDO_DEPTH {
         u.remove(0);
     }
-    u.push((number, notes));
+    u.push((number, notes, controls));
 }
 
 /// Restore the last snapshot; returns false when there is nothing to undo.
 pub fn undo(s: &mut State) -> bool {
-    let Some((number, notes)) = s.piano.undo.pop() else { return false };
+    let Some((number, notes, controls)) = s.piano.undo.pop() else { return false };
     s.pattern = number;
-    pattern_mut(s).notes = notes;
+    let p = pattern_mut(s);
+    p.notes = notes;
+    p.controls = controls;
     s.piano.dirty = true;
     s.piano.clear_selection();
     true
@@ -529,8 +637,8 @@ mod tests {
     #[test]
     fn lanes_map_values_and_centres() {
         let panel = Rect::new(0.0, 100.0, 10.0, 200.0);
-        for lane in Lane::ALL {
-            for v in [0u8, 1, 64, 100, 120] {
+        for lane in Lane::ALL.iter().copied().take(Lane::NOTE_LANES) {
+            for v in [0u8, 1, 14, 64, 100, 120] {
                 let v = v.min(lane.max() as u8);
                 assert_eq!(lane.value_at(panel, lane.y_of(panel, v)), v, "{lane:?} {v}");
             }
@@ -541,6 +649,56 @@ mod tests {
         let mut n = Note::step(0, 0);
         Lane::Cutoff.set(&mut n, 77);
         assert_eq!((n.mod_x, Lane::Cutoff.get(&n)), (77, 77));
+    }
+
+    /// Repeat lane (spec: ui/piano-roll.md §7a): 15 values in 21 px steps of a 294 px panel, clamped at 14.
+    #[test]
+    fn repeat_lane_steps() {
+        let panel = Rect::new(0.0, 621.0, 100.0, 294.0);
+        assert_eq!(Lane::Repeat.value_at(panel, panel.bottom()), 0);
+        assert_eq!(Lane::Repeat.value_at(panel, panel.bottom() - 21.0 * 6.0), 6);
+        assert_eq!(Lane::Repeat.value_at(panel, panel.y - 40.0), 14);
+        let mut n = Note::step(0, 0);
+        Lane::Repeat.set(&mut n, 9);
+        assert_eq!(n.repeat, 9);
+    }
+
+    /// Channel lanes (spec: ui/piano-roll.md §7b): linear value <-> height; volume bars start at the bottom.
+    #[test]
+    fn channel_lanes_map_values() {
+        let panel = Rect::new(0.0, 621.0, 100.0, 294.0);
+        for lane in [Lane::ChanVolume, Lane::ChanPan] {
+            assert_eq!(lane.control_at(panel, panel.bottom()), 0);
+            assert_eq!(lane.control_at(panel, panel.y), 12800);
+            assert_eq!(lane.control_at(panel, panel.bottom() - 147.0), 6400);
+            assert!((lane.control_y(panel, 6400) - 768.0).abs() < 0.6);
+        }
+        assert_eq!(Lane::ChanVolume.control_base(panel), panel.bottom());
+        assert!((Lane::ChanPan.control_base(panel) - 768.0).abs() < 0.6);
+        // Pitch: 1.64 cents per pixel around the middle line.
+        assert_eq!(Lane::ChanPitch.control_at(panel, 768.0), 0);
+        let c = Lane::ChanPitch.control_at(panel, 768.0 - 100.0);
+        assert!((c - 164).abs() <= 1, "{c}");
+        assert!(Lane::ChanPitch.control_at(panel, -1000.0) <= 241);
+        assert_eq!(Lane::ChanPitch.param(), Some(ControlPoint::PITCH));
+    }
+
+    /// Control points keep position order, replace the same position and target, erase by range, undo.
+    #[test]
+    fn control_points_edit_and_undo() {
+        let mut a = app();
+        let s = &mut a.state;
+        snapshot(s);
+        set_control(s, 0, ControlPoint::VOLUME, 48, 100);
+        set_control(s, 0, ControlPoint::PAN, 24, 6400);
+        set_control(s, 0, ControlPoint::VOLUME, 48, 200);
+        assert_eq!(controls(s).len(), 2);
+        assert_eq!(controls(s)[0].position, 24);
+        assert_eq!(controls(s)[1].value, 200);
+        assert_eq!(erase_controls(s, 0, ControlPoint::VOLUME, 0, 100), 1);
+        assert_eq!(controls(s).len(), 1);
+        assert!(undo(s));
+        assert!(controls(s).is_empty());
     }
 
     use super::*;

@@ -88,6 +88,38 @@ pub struct Pattern {
     pub color: Option<Rgb>,
     /// Sorted by position.
     pub notes: Vec<Note>,
+    /// Channel control points drawn in the piano roll's event panel, ordered by position
+    /// (spec: flp/events/patterns.md, "Control points").
+    pub controls: Vec<ControlPoint>,
+}
+
+/// One point of a pattern's channel control lane (event 223 record). `kind` is
+/// `channel << 16 | parameter`; only [`ControlPoint::VOLUME`], [`ControlPoint::PAN`] and
+/// [`ControlPoint::PITCH`] are edited, other targets are kept as read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlPoint {
+    pub position: u32,
+    pub kind: u32,
+    /// Volume and pan 0..=12800 (pan centre 6400); pitch in signed cents.
+    pub value: i32,
+}
+
+impl ControlPoint {
+    pub const VOLUME: u16 = 0;
+    pub const PAN: u16 = 1;
+    pub const PITCH: u16 = 4;
+
+    pub fn new(position: u32, channel: u16, param: u16, value: i32) -> Self {
+        ControlPoint { position, kind: u32::from(channel) << 16 | u32::from(param), value }
+    }
+
+    pub fn channel(&self) -> u16 {
+        (self.kind >> 16) as u16
+    }
+
+    pub fn param(&self) -> u16 {
+        self.kind as u16
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,9 +142,10 @@ pub struct Note {
     pub flags: u16,
     /// Byte 19: colour group in the low nibble, `MUTED` bit; other bits kept as read.
     pub group: u8,
-    /// Unknown record bytes 14–15 and 17, kept as read.
+    /// Unknown record bytes 14–15, kept as read.
     pub unk14: u16,
-    pub unk17: u8,
+    /// Note repeat index 0..=14 (byte 17; 0 = off; spec: flp/events/patterns.md).
+    pub repeat: u8,
 }
 
 impl Note {
@@ -121,6 +154,17 @@ impl Note {
 
     pub fn muted(&self) -> bool {
         self.group & Self::MUTED != 0
+    }
+
+    /// Highest repeat index (spec: flp/events/patterns.md, note repeat table).
+    pub const MAX_REPEAT: u8 = 14;
+
+    /// Spacing of the repeat in ticks at `ppq`, `None` when the note doesn't repeat. The table is the
+    /// interval of each repeat name at PPQ 96 (derived from the names; the audible spacing is unverified).
+    pub fn repeat_ticks(&self, ppq: u16) -> Option<u32> {
+        const AT_96: [u32; 15] = [0, 96, 72, 64, 48, 36, 32, 24, 18, 16, 12, 9, 8, 6, 4];
+        let base = *AT_96.get(usize::from(self.repeat))?;
+        (base > 0).then(|| (base * u32::from(ppq) / 96).max(1))
     }
 
     pub fn set_muted(&mut self, on: bool) {
@@ -147,7 +191,7 @@ impl Note {
             flags: 0x4000,
             group: 0,
             unk14: 0,
-            unk17: 0,
+            repeat: 0,
         }
     }
 }

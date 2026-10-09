@@ -140,6 +140,19 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             ui.c.fill_rect(Rect::new(body.x, body.y + 1.0, 1.0, body.h - 2.0), hi);
             ui.c.fill_rect(Rect::new(body.right() - 1.0, body.y + 1.0, 1.0, body.h - 2.0), hi);
         }
+        // A repeating note shows a tick at every repeat interval inside its body (spec §7a).
+        if let Some(iv) = n.repeat_ticks(s.project.ppq) {
+            let end = n.position + piano::shown_len(s, n);
+            let mut at = n.position + iv;
+            let px = g.x_of((n.position + iv) as f32) - g.x_of(n.position as f32);
+            while at < end && px >= 2.0 {
+                let x = g.x_of(at as f32).floor();
+                if x >= l.grid.x && x < l.grid.right() {
+                    ui.c.fill_rect(Rect::new(x, body.y, 1.0, body.h), rim);
+                }
+                at += iv;
+            }
+        }
         if nr.w > 12.0 {
             let label = key_name(i32::from(n.key));
             let w = ui.c.text_width(label_font, &label);
@@ -478,8 +491,11 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
     columns(ui, g, p, &bands, t.pr_bar);
     ui.c.text(Font::new(16), p.x + 7.0, p.y + 2.0, t.text_faint.shade(-0.35), lane.name());
 
+    if lane.is_channel() {
+        control_bars(ui, s, g, p, lane, ch);
+    }
     // Lollipops.
-    for (idx, n) in notes.iter().enumerate().filter(|(_, n)| Some(n.channel) == ch) {
+    for (idx, n) in notes.iter().enumerate().filter(|(_, n)| !lane.is_channel() && Some(n.channel) == ch) {
         let x = g.x_of(n.position as f32).floor();
         if x > p.right() + 4.0 {
             continue;
@@ -506,6 +522,32 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
     ui.c.pop_clip();
 }
 
+/// Channel control lanes (spec: ui/piano-roll.md §7b): a step graph of the lane's points; each bar runs from its
+/// point to the next (the last to the panel's end) and is filled from the lane's baseline to the value.
+fn control_bars(ui: &mut Ui, s: &State, g: &Geom, p: Rect, lane: Lane, ch: Option<u16>) {
+    let (Some(ch), Some(param)) = (ch, lane.param()) else { return };
+    // Fills measured from FL; the edge of the volume bars was measured, the others are derived from their fill.
+    let (fill, edge) = match lane {
+        Lane::ChanVolume => (Color::rgb(0x6e4a4c), Color::rgb(0x895556)),
+        Lane::ChanPan => (Color::rgb(0x57643f), Color::rgb(0x6f7d51)),
+        _ => (Color::rgb(0x6b4669), Color::rgb(0x865c83)),
+    };
+    let kind = os_model::ControlPoint::new(0, ch, param, 0).kind;
+    let points: Vec<_> = piano::controls(s).iter().filter(|c| c.kind == kind).collect();
+    let base = lane.control_base(p).round();
+    for (i, c) in points.iter().enumerate() {
+        let x0 = g.x_of(c.position as f32).floor();
+        let x1 = points.get(i + 1).map_or(p.right(), |n| g.x_of(n.position as f32).floor());
+        if x1 < p.x || x0 > p.right() {
+            continue;
+        }
+        let y = lane.control_y(p, c.value).round();
+        let r = Rect::new(x0, y.min(base), (x1 - x0).max(1.0), (base - y).abs().max(1.0));
+        ui.c.fill_rect(r, fill);
+        ui.c.fill_rect(Rect::new(x0, r.y, 1.0, r.h), edge);
+    }
+}
+
 /// The event panel's Control menu (spec: ui/piano-roll.md §7a): same look as the menu bar dropdowns.
 fn lane_menu(ui: &mut Ui, s: &State, l: &Layout) {
     let t = ui.t;
@@ -528,18 +570,15 @@ fn lane_menu(ui: &mut Ui, s: &State, l: &Layout) {
     head(ui, body.x + w0 + 2.0, w1, "Channel controls");
     ui.c.fill_rect(Rect::new(body.x + w0, body.y, 2.0, body.h), t.menu_pop_border);
     for (i, lane) in Lane::ALL.iter().enumerate() {
-        let rr = Rect::new(body.x, body.y + HEAD + i as f32 * ROW, w0, ROW);
+        // Note properties fill the left column, channel controls the right one.
+        let rr = if i < Lane::NOTE_LANES {
+            Rect::new(body.x, body.y + HEAD + i as f32 * ROW, w0, ROW)
+        } else {
+            Rect::new(body.x + w0 + 2.0, body.y + HEAD + (i - Lane::NOTE_LANES) as f32 * ROW, w1, ROW)
+        };
         if ui.hit(rr, Action::PianoLanePick(i), lane.menu_name()) || *lane == s.piano.lane {
             ui.c.fill_rect(rr, t.menu_pop_hi);
         }
         ui.c.text(font, rr.x + 20.0, rr.y + 2.0, t.menu_pop_text, lane.menu_name());
-    }
-    // Not stored in the project model yet: drawn dim.
-    for (i, name) in ["Note repeat"].iter().enumerate() {
-        let rr = Rect::new(body.x, body.y + HEAD + (Lane::ALL.len() + i) as f32 * ROW, w0, ROW);
-        ui.c.text(font, rr.x + 20.0, rr.y + 2.0, t.menu_pop_dim, name);
-    }
-    for (i, name) in ["Channel panning", "Channel volume", "Channel pitch"].iter().enumerate() {
-        ui.c.text(font, body.x + w0 + 22.0, body.y + HEAD + i as f32 * ROW + 2.0, t.menu_pop_dim, name);
     }
 }

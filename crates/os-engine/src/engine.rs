@@ -2,11 +2,11 @@
 //! and audio-clip channels, and sums them through the mixer routing graph.
 //!
 // spec: audio/sampler-playback.md, audio/gain-laws.md, flp/events/playlist.md (clips),
-//       flp/events/patterns.md (notes), flp/events/mixer.md (routing)
+//       flp/events/patterns.md (notes), flp/events/mixer.md (routing), audio/pattern-controls.md (repeat, control points)
 
 use std::sync::Arc;
 
-use os_model::{ChannelKind, ClipSource, Project};
+use os_model::{ChannelKind, ClipSource, ControlPoint, Project};
 
 use crate::effects::Effect;
 use crate::laws;
@@ -25,6 +25,7 @@ pub enum PlayMode {
 struct Trigger {
     frame: u64,
     channel: usize,
+    /// Key rate; the voice plays at the channel's current base rate times this.
     rate: f64,
     /// Output frame at which the voice is cut (end of an audio clip), if any.
     cut: Option<u64>,
@@ -46,9 +47,131 @@ struct ChannelState {
     insert: usize,
     /// Sample-rate conversion × channel pitch.
     base_rate: f64,
+    /// Channel is on (a muted channel stays silent whatever a volume point says).
+    enabled: bool,
+    /// Sample-rate conversion alone (`base_rate` without the channel pitch).
+    src_ratio: f64,
+    /// Values at the start of playback, restored when control points are replayed from the top.
+    init: (f64, f64, f64),
+    /// Volume parameter 0..=1 (before the volume law) at the start of the current span.
+    vol_v: f64,
+    init_v: f64,
+    /// Count of glides started (`Ramp::id`, `Voice::serial`).
+    serial: u32,
+    /// A volume / pan control point in progress (the parameters glide, then the laws apply).
+    ramp: Option<Ramp>,
+}
+
+/// Glide of the channel's volume and pan parameters towards a control point's values.
+#[derive(Debug, Clone, Copy)]
+struct Ramp {
+    v0: f64,
+    v1: f64,
+    p0: f64,
+    p1: f64,
+    /// Frames each parameter takes (0 = already there).
+    len_v: u32,
+    len_p: u32,
+    /// Frames done at the start of the current span.
+    pos: u32,
+    /// Voices born before this glide started follow it; later notes start at the final values.
+    id: u32,
+}
+
+impl Ramp {
+    /// How far the volume / pan parameter is after `frames` (0..=1).
+    fn volume_at(&self, frames: f64) -> f64 {
+        if self.len_v == 0 { 1.0 } else { (frames / f64::from(self.len_v)).min(1.0) }
+    }
+    fn pan_at(&self, frames: f64) -> f64 {
+        if self.len_p == 0 { 1.0 } else { (frames / f64::from(self.len_p)).min(1.0) }
+    }
+}
+
+/// Glide of a volume / pan control point on voices already sounding: the parameter moves linearly and the
+/// law is applied to it. FL's volume glide lasts about 9.3 ms (shorter for tiny changes) and its pan glide
+/// about 4.7 ms (measured; spec: audio/pattern-controls.md).
+const VOLUME_GLIDE_SECONDS: f64 = 0.0093;
+const PAN_GLIDE_SECONDS: f64 = 0.0047;
+
+/// A channel control point placed in output frames.
+#[derive(Debug, Clone, Copy)]
+struct CtlEvent {
+    frame: u64,
+    channel: usize,
+    param: u16,
+    value: i32,
 }
 
 impl ChannelState {
+    fn reset(&mut self) {
+        (self.volume, self.pan, self.base_rate) = self.init;
+        self.vol_v = self.init_v;
+        self.ramp = None;
+    }
+
+    /// Gain of a note that starts now: a glide in progress is already at its final values for it.
+    fn start_gain(&self, vel: f64, note_pan: f64) -> (f32, f32) {
+        match self.ramp {
+            None => self.gain(vel, note_pan),
+            Some(r) => {
+                let g = self.vol_gain(r.v1) * vel;
+                let (pl, pr) = laws::channel_pan(r.p1 + note_pan);
+                ((g * pl) as f32, (g * pr) as f32)
+            }
+        }
+    }
+
+    fn vol_gain(&self, v: f64) -> f64 {
+        if self.enabled { laws::channel_gain(v) } else { 0.0 }
+    }
+
+    /// Moves the span-start values on by `frames` of a running glide.
+    fn advance(&mut self, frames: u32) {
+        let Some(r) = self.ramp.as_mut() else { return };
+        r.pos = r.pos.saturating_add(frames);
+        let pos = f64::from(r.pos);
+        self.vol_v = r.v0 + (r.v1 - r.v0) * r.volume_at(pos);
+        self.pan = r.p0 + (r.p1 - r.p0) * r.pan_at(pos);
+        if r.pos >= r.len_v && r.pos >= r.len_p {
+            (self.vol_v, self.pan) = (r.v1, r.p1);
+            self.ramp = None;
+        }
+        self.volume = self.vol_gain(self.vol_v);
+    }
+
+    /// Starts gliding the volume and / or pan parameter to a new value over `len` frames (0 = at once).
+    fn glide(&mut self, v1: Option<f64>, p1: Option<f64>, len: u32) {
+        // A parameter that is not being set carries on towards its old target in the time it had left.
+        let (tv, tp, rest_v, rest_p) = self.ramp.map_or((self.vol_v, self.pan, 0, 0), |r| {
+            (r.v1, r.p1, r.len_v.saturating_sub(r.pos), r.len_p.saturating_sub(r.pos))
+        });
+        let (nv, np) = (v1.unwrap_or(tv), p1.unwrap_or(tp));
+        let len_v = if v1.is_some() { len } else { rest_v };
+        let len_p = if p1.is_some() { len } else { rest_p };
+        if (nv, np) == (self.vol_v, self.pan) && self.ramp.is_none() {
+            return;
+        }
+        if len_v == 0 && len_p == 0 {
+            self.ramp = None;
+            (self.vol_v, self.pan) = (nv, np);
+            self.volume = self.vol_gain(nv);
+        } else {
+            self.serial += 1;
+            self.ramp = Some(Ramp { v0: self.vol_v, v1: nv, p0: self.pan, p1: np, len_v, len_p, pos: 0, id: self.serial });
+        }
+    }
+
+    /// A control point replaces the channel's own setting (spec: audio/pattern-controls.md).
+    fn apply(&mut self, param: u16, value: i32, rate: u32) {
+        match param {
+            ControlPoint::VOLUME => self.glide(Some((f64::from(value) / 12800.0).clamp(0.0, 1.0)), None, (f64::from(rate) * VOLUME_GLIDE_SECONDS).round() as u32),
+            ControlPoint::PAN => self.glide(None, Some((f64::from(value) / 6400.0 - 1.0).clamp(-1.0, 1.0)), (f64::from(rate) * PAN_GLIDE_SECONDS).round() as u32),
+            ControlPoint::PITCH => self.base_rate = self.src_ratio * laws::playback_rate(60, value),
+            _ => {}
+        }
+    }
+
     /// Gain of a note on this channel: channel volume × velocity × pan.
     // spec: audio/sampler-playback.md (velocity multiplies volume; pans add, clamped)
     fn gain(&self, vel: f64, note_pan: f64) -> (f32, f32) {
@@ -62,14 +185,21 @@ impl ChannelState {
 struct Voice {
     channel: usize,
     pos: f64,
+    /// Key rate; times the channel's base rate (so pitch edits reach ringing voices).
     step: f64,
     /// Output frames left before the voice is cut; `None` = play the whole sample.
     remaining: Option<u64>,
     vel: f64,
     pan: f64,
-    /// Gain applied at the end of the last block; ramps to the channel's current gain, so
+    /// Gain applied at the end of the last span; ramps to the channel's current gain, so
     /// volume / pan edits reach ringing voices without clicks.
     gain: (f32, f32),
+    /// Gain the ramp is heading for, its per-frame step and the frames left.
+    dest: (f32, f32),
+    delta: (f32, f32),
+    ramp_left: u32,
+    /// The channel's glide count when the voice started.
+    serial: u32,
     /// Key of a live note (`note_on`), which `note_off` releases.
     live: Option<u16>,
     /// Release fade after a live note off: (frames left, fade length).
@@ -108,6 +238,9 @@ pub struct Engine {
     order: Vec<usize>,
     triggers: Vec<Trigger>,
     next_trigger: usize,
+    /// Channel control points in frame order, and the next one to apply.
+    controls: Vec<CtlEvent>,
+    next_ctl: usize,
     /// Notes started and not yet past their length: (channel, key, end frame).
     sounding: Vec<(usize, u16, u64)>,
     voices: Vec<Voice>,
@@ -160,7 +293,21 @@ impl Engine {
                 let base_rate = sample.as_ref().map_or(1.0, |s| f64::from(s.rate) / f64::from(rate))
                     * laws::playback_rate(60, ch.pitch_cents);
                 let insert = usize::from(ch.mixer_track).min(n_tracks - 1);
-                ChannelState { sample, volume, pan: ch.pan, insert, base_rate }
+                let src_ratio = sample.as_ref().map_or(1.0, |s| f64::from(s.rate) / f64::from(rate));
+                ChannelState {
+                    sample,
+                    volume,
+                    pan: ch.pan,
+                    insert,
+                    base_rate,
+                    enabled: ch.enabled,
+                    src_ratio,
+                    init: (volume, ch.pan, base_rate),
+                    vol_v: ch.volume,
+                    init_v: ch.volume,
+                    serial: 0,
+                    ramp: None,
+                }
             })
             .collect();
 
@@ -204,6 +351,12 @@ impl Engine {
         };
         let order = processing_order(&tracks);
 
+        let mut controls: Vec<CtlEvent> = schedule_controls(project, mode)
+            .into_iter()
+            .filter(|&(_, channel, _, _)| channel < channels.len())
+            .map(|(tick, channel, param, value)| CtlEvent { frame: laws::tick_to_frame(tick, ppq, tempo, rate), channel, param, value })
+            .collect();
+        controls.sort_by_key(|c| c.frame); // stable: equal frames keep their order
         let (mut triggers, end_tick) = schedule(project, mode, &mut report);
         triggers.sort_by(|a, b| a.tick.total_cmp(&b.tick));
         let triggers = triggers
@@ -218,7 +371,7 @@ impl Engine {
                     end: laws::tick_to_frame(n.tick + len, ppq, tempo, rate),
                     frame: laws::tick_to_frame(n.tick, ppq, tempo, rate),
                     channel: n.channel,
-                    rate: state.base_rate * laws::playback_rate(n.key, 0),
+                    rate: laws::playback_rate(n.key, 0),
                     cut: n.cut.map(|c| laws::tick_to_frame(c, ppq, tempo, rate)),
                     vel: laws::velocity_gain(n.velocity),
                     pan: laws::note_pan(n.pan),
@@ -234,6 +387,8 @@ impl Engine {
             order,
             triggers,
             next_trigger: 0,
+            controls,
+            next_ctl: 0,
             sounding: Vec::with_capacity(256),
             voices: Vec::with_capacity(1024),
             frame: 0,
@@ -266,10 +421,25 @@ impl Engine {
             return;
         }
         let (vel, pan) = (laws::velocity_gain(velocity), 0.0);
-        let gain = ch.gain(vel, pan);
-        let step = ch.base_rate * laws::playback_rate(key, 0);
+        let gain = ch.start_gain(vel, pan);
+        let serial = ch.serial;
+        let step = laws::playback_rate(key, 0);
         self.note_off(channel, key); // retrigger
-        self.voices.push(Voice { channel, pos: 0.0, step, remaining: None, vel, pan, gain, live: Some(key), release: None });
+        self.voices.push(Voice {
+            channel,
+            pos: 0.0,
+            step,
+            remaining: None,
+            vel,
+            pan,
+            gain,
+            dest: gain,
+            delta: (0.0, 0.0),
+            ramp_left: 0,
+            serial,
+            live: Some(key),
+            release: None,
+        });
         self.sounding.push((channel, key, u64::MAX));
     }
 
@@ -314,6 +484,37 @@ impl Engine {
     pub fn seek(&mut self, frame: u64) {
         self.frame = frame;
         self.next_trigger = self.triggers.partition_point(|t| t.frame < frame);
+        self.sync_controls(frame);
+    }
+
+    /// Applies one control point at a time as playback reaches it, smoothing volume and pan.
+    fn run_controls(&mut self) {
+        while let Some(&e) = self.controls.get(self.next_ctl) {
+            if e.frame > self.frame {
+                break;
+            }
+            self.next_ctl += 1;
+            if let Some(ch) = self.channels.get_mut(e.channel) {
+                ch.apply(e.param, e.value, self.rate);
+            }
+        }
+    }
+
+    /// Channels as they are at `frame`: their own settings with every control point before it applied.
+    fn sync_controls(&mut self, frame: u64) {
+        for ch in &mut self.channels {
+            ch.reset();
+        }
+        self.next_ctl = 0;
+        while let Some(&e) = self.controls.get(self.next_ctl) {
+            if e.frame >= frame {
+                break;
+            }
+            self.next_ctl += 1;
+            if let Some(ch) = self.channels.get_mut(e.channel) {
+                ch.apply(e.param, e.value, 0);
+            }
+        }
     }
 
     /// Take over playback from `old` (built from an earlier version of the project) at its
@@ -334,6 +535,7 @@ impl Engine {
         self.frame = to_new(old.frame);
         let frame = self.frame;
         self.next_trigger = self.triggers.partition_point(|t| t.frame < frame);
+        self.sync_controls(frame);
         let n = self.channels.len();
         self.voices = std::mem::take(&mut old.voices);
         self.voices.retain(|v| v.channel < n);
@@ -372,9 +574,14 @@ impl Engine {
             if looping && self.frame >= self.end_frame {
                 self.wrap();
             }
+            self.run_controls();
             let mut n = frames - at;
             if looping {
                 n = n.min((self.end_frame - self.frame) as usize);
+            }
+            // Control points take effect on their exact frame.
+            if let Some(c) = self.controls.get(self.next_ctl) {
+                n = n.min(c.frame.saturating_sub(self.frame).max(1) as usize);
             }
             self.render_span(at, at + n);
             at += n;
@@ -422,7 +629,7 @@ impl Engine {
         // Continue voices started earlier.
         let channels = &self.channels;
         let bus = &mut self.bus;
-        self.voices.retain_mut(|v| render_voice(v, channels, bus, a, b));
+        self.voices.retain_mut(|v| render_voice(v, channels, bus, a, a, b));
         while let Some(t) = self.triggers.get(self.next_trigger).copied() {
             if t.frame >= span_end {
                 break;
@@ -431,11 +638,29 @@ impl Engine {
             self.sounding.push((t.channel, t.key, t.end));
             let offset = a + t.frame.saturating_sub(self.frame) as usize;
             let remaining = t.cut.map(|c| c.saturating_sub(t.frame));
-            let gain = self.channels[t.channel].gain(t.vel, t.pan);
-            let mut v = Voice { channel: t.channel, pos: 0.0, step: t.rate, remaining, vel: t.vel, pan: t.pan, gain, live: None, release: None };
-            if render_voice(&mut v, &self.channels, &mut self.bus, offset, b) {
+            let gain = self.channels[t.channel].start_gain(t.vel, t.pan);
+            let serial = self.channels[t.channel].serial;
+            let mut v = Voice {
+                channel: t.channel,
+                pos: 0.0,
+                step: t.rate,
+                remaining,
+                vel: t.vel,
+                pan: t.pan,
+                gain,
+                dest: gain,
+                delta: (0.0, 0.0),
+                ramp_left: 0,
+                serial,
+                live: None,
+                release: None,
+            };
+            if render_voice(&mut v, &self.channels, &mut self.bus, a, offset, b) {
                 self.voices.push(v);
             }
+        }
+        for ch in &mut self.channels {
+            ch.advance((b - a) as u32);
         }
         self.frame = span_end;
         self.sounding.retain(|&(_, _, end)| end > span_end);
@@ -446,6 +671,9 @@ impl Engine {
         let at = self.frame;
         self.frame = 0;
         self.next_trigger = 0;
+        // Control points replay from the top: until the first one the channel has its own settings
+        // (an OpenStudio choice; FL's behaviour at the loop point is not measured).
+        self.sync_controls(0);
         for s in &mut self.sounding {
             if s.2 != u64::MAX {
                 s.2 = s.2.saturating_sub(at);
@@ -480,22 +708,27 @@ const SINC_W: f64 = 13.5;
 /// change = constant). Rate 1 copies samples exactly. Other rates use a Blackman-windowed sinc with a fixed
 /// 13.5-sample window; above rate 1 the cutoff drops to the output Nyquist (`1/rate`).
 // spec: audio/sampler-playback.md (resampling)
-fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], offset: usize, end: usize) -> bool {
+fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], span: usize, offset: usize, end: usize) -> bool {
     let ch = &channels[v.channel];
     let Some(s) = ch.sample.as_ref() else { return false };
     let n = s.frames();
-    let target = ch.gain(v.vel, v.pan);
+    let glide = ch.ramp.filter(|r| v.serial < r.id);
+    let target = ch.start_gain(v.vel, v.pan);
+    if glide.is_none() && target != v.dest {
+        // Any edit smooths over this span (a control point's glide is handled per frame below).
+        let len = end.saturating_sub(offset).max(1) as u32;
+        v.dest = target;
+        v.delta = ((target.0 - v.gain.0) / len as f32, (target.1 - v.gain.1) / len as f32);
+        v.ramp_left = len;
+    }
     let (mut gl, mut gr) = v.gain;
-    let (dl, dr) = if target == v.gain {
-        (0.0, 0.0)
-    } else {
-        let len = end.saturating_sub(offset).max(1) as f32;
-        ((target.0 - gl) / len, (target.1 - gr) / len)
-    };
-    v.gain = target;
+    let (dl, dr) = v.delta;
+    let mut left = v.ramp_left;
+    let step = ch.base_rate * v.step;
     let out = &mut bus[ch.insert];
-    let exact = v.step == 1.0;
-    let scale = v.step.max(1.0);
+    // Rate 1 copies samples only while the position is whole (a voice that was pitched keeps its fraction).
+    let exact = step == 1.0 && v.pos.fract() == 0.0;
+    let scale = step.max(1.0);
     let mut pos = v.pos;
     for f in offset..end {
         if v.remaining == Some(0) {
@@ -506,6 +739,7 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
         }
         if pos >= n as f64 {
             v.pos = pos;
+            v.gain = (gl, gr);
             return false;
         }
         let fade = match v.release.as_mut() {
@@ -531,15 +765,32 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
             }
             (l as f32, r as f32)
         };
-        if dl != 0.0 || dr != 0.0 {
+        if let Some(r) = glide {
+            // The volume parameter glides linearly and the volume law applies to it; the pan glides linearly
+            // in the left / right gains (spec: audio/pattern-controls.md).
+            let frames = f64::from(r.pos) + (f - span) as f64 + 1.0;
+            let g = ch.vol_gain(r.v0 + (r.v1 - r.v0) * r.volume_at(frames)) * v.vel;
+            let (a, b) = (laws::channel_pan(r.p0 + v.pan), laws::channel_pan(r.p1 + v.pan));
+            let x = r.pan_at(frames);
+            let (pl, pr) = (a.0 + (b.0 - a.0) * x, a.1 + (b.1 - a.1) * x);
+            (gl, gr) = ((g * pl) as f32, (g * pr) as f32);
+            v.dest = (gl, gr);
+            left = 0;
+        } else if left > 0 {
             gl += dl;
             gr += dr;
+            left -= 1;
+            if left == 0 {
+                (gl, gr) = v.dest;
+            }
         }
         out[f * 2] += l * gl * fade;
         out[f * 2 + 1] += r * gr * fade;
-        pos += v.step;
+        pos += step;
     }
     v.pos = pos;
+    v.gain = (gl, gr);
+    v.ramp_left = left;
     pos < n as f64
 }
 
@@ -603,6 +854,51 @@ impl Sched {
     }
 }
 
+/// Schedules a note; a repeating note is retriggered at every multiple of its interval inside its
+/// length (spec: audio/pattern-controls.md, note repeat). A plain step counts as one step long.
+fn push_note(out: &mut Vec<Sched>, start: f64, n: &os_model::Note, ppq: u16) {
+    let first = Sched::note(start, n);
+    let span = if n.length > 0 { f64::from(n.length) } else { f64::from(ppq) / 4.0 };
+    match n.repeat_ticks(ppq) {
+        Some(interval) => {
+            let mut off = 0.0;
+            while off < span {
+                let len = if n.length > 0 { first.len - off } else { 0.0 };
+                out.push(Sched { tick: first.tick + off, len, ..first });
+                off += f64::from(interval);
+            }
+        }
+        None => out.push(first),
+    }
+}
+
+/// Channel control points as (tick, channel, parameter, value): a pattern's own, or those of every
+/// pattern clip of the playlist (spec: audio/pattern-controls.md).
+fn schedule_controls(project: &Project, mode: PlayMode) -> Vec<(f64, usize, u16, i32)> {
+    let points = |n: u16| project.patterns.iter().find(|p| p.number == n).map(|p| p.controls.as_slice()).unwrap_or(&[]);
+    let place = |out: &mut Vec<_>, start: f64, limit: f64, n: u16| {
+        for c in points(n).iter().filter(|c| f64::from(c.position) < limit) {
+            out.push((start + f64::from(c.position), usize::from(c.channel()), c.param(), c.value));
+        }
+    };
+    let mut out = Vec::new();
+    match mode {
+        PlayMode::Pattern(n) => place(&mut out, 0.0, f64::INFINITY, n),
+        PlayMode::Song => {
+            let clips = project.arrangements.first().map(|a| a.clips.as_slice()).unwrap_or(&[]);
+            if clips.is_empty() {
+                place(&mut out, 0.0, f64::INFINITY, project.current_pattern.unwrap_or(1));
+            }
+            for c in clips {
+                if let ClipSource::Pattern(n) = c.source {
+                    place(&mut out, f64::from(c.position), f64::from(c.length), n);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A plucked tone at key 60 (261.6 Hz), about 1.5 s: decaying harmonics of a saw.
 fn fallback_tone(rate: u32) -> Arc<Sample> {
     use std::f64::consts::TAU;
@@ -635,7 +931,10 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
     };
     let one_pattern = |n: u16| {
         // Muted notes are silent (spec: ui/piano-roll.md §9).
-        let t: Vec<Sched> = pattern_notes(n).iter().filter(|x| !x.muted()).map(|x| Sched::note(0.0, x)).collect();
+        let mut t = Vec::new();
+        for x in pattern_notes(n).iter().filter(|x| !x.muted()) {
+            push_note(&mut t, 0.0, x, project.ppq);
+        }
         (t, pattern_end(n))
     };
     match mode {
@@ -655,7 +954,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                     ClipSource::Pattern(n) => {
                         for note in pattern_notes(n).iter().filter(|x| !x.muted()) {
                             if f64::from(note.position) < len {
-                                out.push(Sched::note(start, note));
+                                push_note(&mut out, start, note, project.ppq);
                             }
                         }
                     }
@@ -670,5 +969,126 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
             }
             (out, end)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // spec: audio/pattern-controls.md (note repeat and channel control points, measured in FL)
+    use super::*;
+    use os_model::{Channel, Note, Pattern};
+
+    fn channel() -> Channel {
+        Channel {
+            index: 0,
+            kind: ChannelKind::Sampler,
+            name: None,
+            plugin: None,
+            color: None,
+            enabled: true,
+            volume: 0.78125,
+            pan: 0.0,
+            pitch_cents: 0,
+            mixer_track: 0,
+            sample_path: None, // plays the built-in tone
+            layer_children: vec![],
+        }
+    }
+
+    fn project(notes: Vec<Note>, controls: Vec<ControlPoint>) -> Project {
+        Project {
+            ppq: 96,
+            tempo: Some(130.0),
+            channels: vec![channel()],
+            patterns: vec![Pattern { number: 1, notes, controls, ..Pattern::default() }],
+            ..Project::default()
+        }
+    }
+
+    fn long_note(position: u32, length: u32, repeat: u8) -> Note {
+        Note { length, repeat, ..Note::step(0, position) }
+    }
+
+    fn render(p: &Project) -> Vec<f32> {
+        let mut lib = SampleLibrary::new(None);
+        Engine::new(p, &mut lib, 44100, PlayMode::Pattern(1)).render_all(512)
+    }
+
+    fn peak(x: &[f32], ch: usize) -> f32 {
+        x.chunks_exact(2).map(|f| f[ch].abs()).fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn repeat_retriggers_inside_the_note() {
+        let mut report = EngineReport::default();
+        let mut ticks = |p: &Project| -> Vec<(f64, f64)> {
+            let (t, _) = schedule(p, PlayMode::Pattern(1), &mut report);
+            t.iter().map(|s| (s.tick, s.len)).collect()
+        };
+        // 1/8 (48 ticks) over 384 ticks: eight triggers, the last one 48 ticks long.
+        let t = ticks(&project(vec![long_note(0, 384, 4)], vec![]));
+        assert_eq!(t.len(), 8);
+        assert_eq!(t[1], (48.0, 336.0));
+        assert_eq!(t[7], (336.0, 48.0));
+        // Counts measured in FL for a 384-tick note (index 1..=14).
+        let counts = [4, 6, 6, 8, 11, 12, 16, 22, 24, 32, 43, 48, 64, 96];
+        for (i, want) in counts.iter().enumerate() {
+            let got = ticks(&project(vec![long_note(0, 384, i as u8 + 1)], vec![])).len();
+            assert_eq!(got, *want, "repeat index {}", i + 1);
+        }
+        // No repeat, and a plain step (one step long) with a step-sized repeat: one trigger.
+        assert_eq!(ticks(&project(vec![long_note(0, 384, 0)], vec![])).len(), 1);
+        assert_eq!(ticks(&project(vec![long_note(48, 0, 7)], vec![])).len(), 1);
+    }
+
+    #[test]
+    fn controls_are_scheduled_per_pattern_and_clip() {
+        let pts = vec![ControlPoint::new(24, 0, ControlPoint::VOLUME, 6400), ControlPoint::new(96, 3, ControlPoint::PAN, 0)];
+        let p = project(vec![long_note(0, 96, 0)], pts);
+        let c = schedule_controls(&p, PlayMode::Pattern(1));
+        assert_eq!(c, vec![(24.0, 0, ControlPoint::VOLUME, 6400), (96.0, 3, ControlPoint::PAN, 0)]);
+    }
+
+    #[test]
+    fn volume_point_replaces_channel_volume() {
+        let note = vec![long_note(0, 96, 0)];
+        let plain = render(&project(note.clone(), vec![]));
+        // v = 0.5 from the first tick: the note plays at law(0.5) / law(0.78125) = 0.4204 of the default.
+        let quiet = render(&project(note.clone(), vec![ControlPoint::new(0, 0, ControlPoint::VOLUME, 6400)]));
+        let ratio = peak(&quiet, 0) / peak(&plain, 0);
+        assert!((ratio - 0.4204).abs() < 0.002, "ratio {ratio}");
+        // A point equal to the channel's own volume changes nothing.
+        let same = render(&project(note, vec![ControlPoint::new(0, 0, ControlPoint::VOLUME, 10000)]));
+        assert_eq!(same, plain);
+    }
+
+    #[test]
+    fn pan_point_moves_the_note() {
+        let note = vec![long_note(0, 96, 0)];
+        let left = render(&project(note, vec![ControlPoint::new(0, 0, ControlPoint::PAN, 0)]));
+        assert!(peak(&left, 0) > 0.05);
+        assert!(peak(&left, 1) < 1e-6, "right is silent at full left");
+    }
+
+    #[test]
+    fn pitch_point_shifts_by_cents() {
+        let note = vec![long_note(0, 96, 0)];
+        let end = |x: &[f32]| x.chunks_exact(2).rposition(|f| f[0].abs() > 1e-4).unwrap_or(0) as f64;
+        let plain = render(&project(note.clone(), vec![]));
+        let up = render(&project(note, vec![ControlPoint::new(0, 0, ControlPoint::PITCH, 1200)]));
+        // An octave up plays the sample twice as fast, so it ends in half the time.
+        let ratio = end(&up) / end(&plain);
+        assert!((ratio - 0.5).abs() < 0.03, "ratio {ratio}");
+    }
+
+    #[test]
+    fn seeking_past_a_point_applies_it() {
+        let p = project(vec![long_note(0, 384, 0)], vec![ControlPoint::new(24, 0, ControlPoint::VOLUME, 6400)]);
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+        e.seek(laws::tick_to_frame(48.0, 96, 130.0, 44100));
+        assert!((e.channels[0].volume - laws::channel_gain(0.5)).abs() < 1e-12);
+        e.seek(0);
+        assert!((e.channels[0].volume - laws::channel_gain(0.78125)).abs() < 1e-12, "back before the point");
     }
 }
