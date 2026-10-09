@@ -494,6 +494,11 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
     if lane.is_channel() {
         control_bars(ui, s, g, p, lane, ch);
     }
+    ui.c.pop_clip();
+    if lane == Lane::ChanPitch {
+        pitch_scroll(ui, s, l);
+    }
+    ui.c.push_clip(p);
     // Lollipops.
     for (idx, n) in notes.iter().enumerate().filter(|(_, n)| !lane.is_channel() && Some(n.channel) == ch) {
         let x = g.x_of(n.position as f32).floor();
@@ -522,6 +527,28 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
     ui.c.pop_clip();
 }
 
+/// The pitch lane's own vertical scroll bar with arrow buttons, right of the panel (spec §7b): the window
+/// is 482 cents tall over ±4800 cents and each arrow click moves it 455 cents.
+fn pitch_scroll(ui: &mut Ui, s: &State, l: &Layout) {
+    let t = ui.t;
+    let col = Rect::new(l.panel.right() + 3.0, l.panel.y, 19.0, l.panel.h);
+    let btn = 20.0_f32.min(col.h / 3.0);
+    let (up, down) = (Rect::new(col.x, col.y, col.w, btn), Rect::new(col.x, col.bottom() - btn, col.w, btn));
+    let track = Rect::new(col.x, up.bottom(), col.w, (down.y - up.bottom()).max(1.0));
+    // Content in cents: the top edge of the window is `4800 - pos`.
+    let total = (2 * piano::PITCH_RANGE) as f32;
+    let view = 482.0;
+    let top_edge = (s.piano.pitch_center as f32 + view / 2.0).min(piano::PITCH_RANGE as f32);
+    super::scrollbar(ui, track, true, piano::PITCH_RANGE as f32 - top_edge, view, total, Scroll::PitchY);
+    for (r, dir, name) in [(up, 1, "Scroll the lane up"), (down, -1, "Scroll the lane down")] {
+        let hov = ui.hit(r, Action::PitchStep(dir), name);
+        ui.c.fill_rect(r, if hov { t.scrollbar.shade(0.2) } else { t.scrollbar.shade(0.1) });
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let d = if dir > 0 { -2.0 } else { 2.0 };
+        ui.c.fill_polygon(&[(cx - 4.0, cy - d), (cx, cy + d), (cx + 4.0, cy - d)], t.text_dim);
+    }
+}
+
 /// Channel control lanes (spec: ui/piano-roll.md §7b): a step graph of the lane's points; each bar runs from its
 /// point to the next (the last to the panel's end) and is filled from the lane's baseline to the value.
 fn control_bars(ui: &mut Ui, s: &State, g: &Geom, p: Rect, lane: Lane, ch: Option<u16>) {
@@ -534,14 +561,15 @@ fn control_bars(ui: &mut Ui, s: &State, g: &Geom, p: Rect, lane: Lane, ch: Optio
     };
     let kind = os_model::ControlPoint::new(0, ch, param, 0).kind;
     let points: Vec<_> = piano::controls(s).iter().filter(|c| c.kind == kind).collect();
-    let base = lane.control_base(p).round();
+    let center = s.piano.pitch_center;
+    let base = lane.control_base(p, center).round();
     for (i, c) in points.iter().enumerate() {
         let x0 = g.x_of(c.position as f32).floor();
         let x1 = points.get(i + 1).map_or(p.right(), |n| g.x_of(n.position as f32).floor());
         if x1 < p.x || x0 > p.right() {
             continue;
         }
-        let y = lane.control_y(p, c.value).round();
+        let y = lane.control_y(p, c.value, center).round();
         let r = Rect::new(x0, y.min(base), (x1 - x0).max(1.0), (base - y).abs().max(1.0));
         ui.c.fill_rect(r, fill);
         ui.c.fill_rect(Rect::new(x0, r.y, 1.0, r.h), edge);

@@ -78,6 +78,8 @@ pub struct PianoState {
     pub tool: Tool,
     /// Event panel target.
     pub lane: Lane,
+    /// Cents at the middle of the channel pitch lane's window (its scroll position, §7b).
+    pub pitch_center: i32,
     pub overlay: Option<Overlay>,
     /// Ctrl+C copies (positions as copied).
     pub clipboard: Vec<Note>,
@@ -105,6 +107,7 @@ impl Default for PianoState {
             typed: Vec::new(),
             tool: Tool::Draw,
             lane: Lane::Velocity,
+            pitch_center: 0,
             overlay: None,
             clipboard: Vec::new(),
             zoom_back: None,
@@ -246,6 +249,15 @@ pub enum Lane {
 
 /// Cents spanned by the full height of the channel pitch lane (1.64 cents per pixel over 294 px; §7b).
 const PITCH_SPAN: f32 = 482.0;
+/// The pitch lane scrolls over ±4800 cents; an arrow click moves its window by 455 cents (§7b).
+pub const PITCH_RANGE: i32 = 4800;
+pub const PITCH_STEP: i32 = 455;
+
+/// Window centre limits: the window may not leave the range.
+pub fn clamp_pitch_center(c: i32) -> i32 {
+    let half = (PITCH_SPAN / 2.0) as i32;
+    c.clamp(-(PITCH_RANGE - half), PITCH_RANGE - half)
+}
 /// Stored value of the top of the channel volume / pan lanes (§7b).
 const CTRL_MAX: i32 = 12800;
 
@@ -360,26 +372,28 @@ impl Lane {
         ((panel.bottom() - y) / panel.h * self.scale()).round().clamp(0.0, self.max()) as u8
     }
     /// Channel lanes: the stored value at height `y` (volume, pan 0..=12800; pitch in cents).
-    pub fn control_at(self, panel: Rect, y: f32) -> i32 {
+    pub fn control_at(self, panel: Rect, y: f32, center: i32) -> i32 {
         match self {
             Lane::ChanPitch => {
-                let half = PITCH_SPAN / 2.0;
-                ((panel.y + panel.h / 2.0 - y) / panel.h * PITCH_SPAN).round().clamp(-half, half) as i32
+                let v = center as f32 + (panel.y + panel.h / 2.0 - y) / panel.h * PITCH_SPAN;
+                v.round().clamp(-(PITCH_RANGE as f32), PITCH_RANGE as f32) as i32
             }
             _ => ((panel.bottom() - y) / panel.h * CTRL_MAX as f32).round().clamp(0.0, CTRL_MAX as f32) as i32,
         }
     }
     /// Height of a stored channel-lane value.
-    pub fn control_y(self, panel: Rect, v: i32) -> f32 {
+    pub fn control_y(self, panel: Rect, v: i32, center: i32) -> f32 {
         match self {
-            Lane::ChanPitch => panel.y + panel.h / 2.0 - v as f32 / PITCH_SPAN * panel.h,
+            Lane::ChanPitch => panel.y + panel.h / 2.0 - (v - center) as f32 / PITCH_SPAN * panel.h,
             _ => panel.bottom() - v as f32 / CTRL_MAX as f32 * panel.h,
         }
     }
-    /// Where the bars of a channel lane start: the bottom for volume, the middle line for pan and pitch.
-    pub fn control_base(self, panel: Rect) -> f32 {
+    /// Where the bars of a channel lane start: the bottom for volume, the middle line for pan, the zero
+    /// line (possibly scrolled out of view) for pitch.
+    pub fn control_base(self, panel: Rect, center: i32) -> f32 {
         match self {
             Lane::ChanVolume => panel.bottom(),
+            Lane::ChanPitch => self.control_y(panel, 0, center),
             _ => panel.y + panel.h / 2.0,
         }
     }
@@ -668,18 +682,26 @@ mod tests {
     fn channel_lanes_map_values() {
         let panel = Rect::new(0.0, 621.0, 100.0, 294.0);
         for lane in [Lane::ChanVolume, Lane::ChanPan] {
-            assert_eq!(lane.control_at(panel, panel.bottom()), 0);
-            assert_eq!(lane.control_at(panel, panel.y), 12800);
-            assert_eq!(lane.control_at(panel, panel.bottom() - 147.0), 6400);
-            assert!((lane.control_y(panel, 6400) - 768.0).abs() < 0.6);
+            assert_eq!(lane.control_at(panel, panel.bottom(), 0), 0);
+            assert_eq!(lane.control_at(panel, panel.y, 0), 12800);
+            assert_eq!(lane.control_at(panel, panel.bottom() - 147.0, 0), 6400);
+            assert!((lane.control_y(panel, 6400, 0) - 768.0).abs() < 0.6);
         }
-        assert_eq!(Lane::ChanVolume.control_base(panel), panel.bottom());
-        assert!((Lane::ChanPan.control_base(panel) - 768.0).abs() < 0.6);
-        // Pitch: 1.64 cents per pixel around the middle line.
-        assert_eq!(Lane::ChanPitch.control_at(panel, 768.0), 0);
-        let c = Lane::ChanPitch.control_at(panel, 768.0 - 100.0);
+        assert_eq!(Lane::ChanVolume.control_base(panel, 0), panel.bottom());
+        assert!((Lane::ChanPan.control_base(panel, 0) - 768.0).abs() < 0.6);
+        // Pitch: 1.64 cents per pixel around the window centre.
+        assert_eq!(Lane::ChanPitch.control_at(panel, 768.0, 0), 0);
+        let c = Lane::ChanPitch.control_at(panel, 768.0 - 100.0, 0);
         assert!((c - 164).abs() <= 1, "{c}");
-        assert!(Lane::ChanPitch.control_at(panel, -1000.0) <= 241);
+        // Scrolled: the same height reads a different value; the zero line moves.
+        assert_eq!(Lane::ChanPitch.control_at(panel, 768.0, 1365), 1365);
+        let y0 = Lane::ChanPitch.control_base(panel, 1365);
+        assert!(y0 > panel.bottom(), "zero line scrolled out of view: {y0}");
+        assert!((Lane::ChanPitch.control_y(panel, 1365, 1365) - 768.0).abs() < 0.6);
+        // Values are limited to the lane's ±4800 cents.
+        assert_eq!(Lane::ChanPitch.control_at(panel, -100000.0, 0), PITCH_RANGE);
+        assert_eq!(clamp_pitch_center(99999), PITCH_RANGE - 241);
+        assert_eq!(clamp_pitch_center(-99999), -(PITCH_RANGE - 241));
         assert_eq!(Lane::ChanPitch.param(), Some(ControlPoint::PITCH));
     }
 

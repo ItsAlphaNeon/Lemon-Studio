@@ -142,6 +142,8 @@ pub enum Action {
     /// Event panel "Control" button and its menu entries (index into `Lane::ALL`).
     PianoLaneMenu,
     PianoLanePick(usize),
+    /// Arrow button of the pitch lane's scroll bar: +1 up, -1 down.
+    PitchStep(i32),
     PianoUndo,
     /// Piano-roll toolbar: make a tool active (spec: ui/piano-roll.md §9).
     PianoTool(Tool),
@@ -157,6 +159,8 @@ pub enum Action {
 pub enum Scroll {
     PianoX,
     PianoY,
+    /// The channel pitch lane's window (content = ±4800 cents).
+    PitchY,
     PlaylistX,
     PlaylistY,
     MixerX,
@@ -1021,6 +1025,7 @@ impl App {
         match t {
             Scroll::PianoX => s.piano.scroll_x * s.piano.px_per_beat / f32::from(s.project.ppq.max(4)),
             Scroll::PianoY => s.piano.scroll_y,
+            Scroll::PitchY => piano::PITCH_RANGE as f32 - (s.piano.pitch_center as f32 + 241.0),
             Scroll::PlaylistX => s.playlist_scroll.0,
             Scroll::PlaylistY => s.playlist_scroll.1,
             Scroll::MixerX => s.mixer_scroll,
@@ -1038,6 +1043,7 @@ impl App {
         match t {
             Scroll::PianoX => s.piano.scroll_x = v / (s.piano.px_per_beat / f32::from(s.project.ppq.max(4))),
             Scroll::PianoY => s.piano.scroll_y = v.round(),
+            Scroll::PitchY => s.piano.pitch_center = piano::clamp_pitch_center((piano::PITCH_RANGE as f32 - 241.0 - v).round() as i32),
             Scroll::PlaylistX => s.playlist_scroll.0 = v,
             Scroll::PlaylistY => s.playlist_scroll.1 = v,
             Scroll::MixerX => s.mixer_scroll = v,
@@ -1445,6 +1451,7 @@ impl App {
         let lane = self.state.piano.lane;
         if lane.is_channel() {
             let (Some(ch), Some(param)) = (piano::channel(&self.state), lane.param()) else { return };
+            let center = self.state.piano.pitch_center;
             let t0 = g.snap_down(g.tick_at(last_x).max(0.0));
             let t1 = g.snap_down(g.tick_at(x).max(0.0));
             let (lo, hi) = (t0.min(t1), t0.max(t1));
@@ -1458,7 +1465,7 @@ impl App {
                     let px = g.x_of(t as f32);
                     let at = if (x - last_x).abs() < 0.5 { 1.0 } else { ((px - last_x) / (x - last_x)).clamp(0.0, 1.0) };
                     let y_at = last_y + (y - last_y) * at;
-                    piano::set_control(&mut self.state, ch, param, t, lane.control_at(panel, y_at));
+                    piano::set_control(&mut self.state, ch, param, t, lane.control_at(panel, y_at, center));
                 }
                 if t >= hi {
                     break;
@@ -2019,6 +2026,9 @@ impl App {
                 self.hint = Cow::Owned(s.knob_text(id));
             }
             Action::PianoLaneMenu => s.lane_menu = true,
+            Action::PitchStep(dir) => {
+                s.piano.pitch_center = piano::clamp_pitch_center(s.piano.pitch_center + dir * piano::PITCH_STEP);
+            }
             Action::PianoLanePick(i) => {
                 s.piano.lane = piano::Lane::ALL[i.min(piano::Lane::ALL.len() - 1)];
                 s.lane_menu = false;
@@ -2799,6 +2809,50 @@ mod tests {
         assert!(left.contains(&(os_model::ControlPoint::PAN, 48)), "pan point kept: {left:?}");
         assert!(piano::undo(&mut app.state));
         assert_eq!(piano::controls(&app.state).len(), 5, "undo restores the erased points");
+    }
+
+    /// The pitch lane's own scroll bar (spec: ui/piano-roll.md §7b): arrows move the window 455 cents, it stops at
+    /// ±4800 cents, the bar and the arrows agree, and points drawn after scrolling take the scrolled value.
+    #[test]
+    fn pitch_lane_scrolls() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        app.state.piano.lane = piano::Lane::ChanPitch;
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.state.piano.pitch_center, 0);
+        for _ in 0..3 {
+            app.act(Action::PitchStep(1));
+        }
+        assert_eq!(app.state.piano.pitch_center, 1365);
+        for _ in 0..40 {
+            app.act(Action::PitchStep(1));
+        }
+        assert_eq!(app.state.piano.pitch_center, piano::PITCH_RANGE - 241, "stops at the top of the range");
+        for _ in 0..40 {
+            app.act(Action::PitchStep(-1));
+        }
+        assert_eq!(app.state.piano.pitch_center, -(piano::PITCH_RANGE - 241));
+
+        // The bar maps to the same window: the thumb at the top is the top of the range.
+        app.state.piano.pitch_center = 0;
+        frame(&mut app, &mut c, None);
+        assert!(app.bar(Scroll::PitchY).is_some(), "the lane has a scroll bar");
+        app.scroll_set(Scroll::PitchY, 0.0);
+        assert_eq!(app.state.piano.pitch_center, piano::PITCH_RANGE - 241);
+        assert_eq!(app.scroll_get(Scroll::PitchY), 0.0);
+        app.state.piano.pitch_center = 1365;
+
+        // A press at the middle of the panel sets a point at about the window's centre value.
+        frame(&mut app, &mut c, None);
+        let g = app.piano_geom().unwrap();
+        let panel = app.piano_panel.unwrap();
+        app.mouse_move(g.x_of(48.0) + 1.0, panel.y + panel.h / 2.0);
+        app.mouse_down();
+        app.mouse_up();
+        let v = piano::controls(&app.state).iter().find(|p| p.param() == os_model::ControlPoint::PITCH).map(|p| p.value);
+        assert!(v.is_some_and(|v| (v - 1365).abs() <= 2), "{v:?}");
     }
 
     /// Piano-roll tools driven with the mouse and keys (spec: ui/piano-roll.md §9).
