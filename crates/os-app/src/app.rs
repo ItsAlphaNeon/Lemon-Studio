@@ -1231,8 +1231,14 @@ impl App {
             .filter(|n| n.channel == ch && !n.muted())
             .filter(|n| {
                 let p = n.position as f32;
-                // Entered: the note's start lies between the old and new line positions.
-                p > a && p <= b || (from <= p && to > p && from == to)
+                let end = p + piano::shown_len(&self.state, n) as f32;
+                if from == to {
+                    // Press: every note the line touches sounds.
+                    p <= to && to < end
+                } else {
+                    // Drag: notes whose start the line just passed.
+                    p > a && p <= b
+                }
             })
             .map(|n| i32::from(n.key))
             .collect();
