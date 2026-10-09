@@ -315,7 +315,7 @@ fn row2(ui: &mut Ui, s: &State) {
         (Icon::Mixer, Action::ToggleWin(Win::Mixer), s.shown(Win::Mixer), "Mixer (F9)"),
         (Icon::Browser, Action::ToggleWin(Win::Browser), s.show_browser, "Browser (Alt+F8)"),
         (Icon::Project, Action::Placeholder("project"), false, "Project picker"),
-        (Icon::Plug, Action::Placeholder("plugin picker"), false, "Plugin picker"),
+        (Icon::Plug, Action::PickerOpen, false, "Plugin picker"),
         (Icon::AudioEditor, Action::Placeholder("audio editor"), false, "Audio editor"),
         (Icon::Touch, Action::Placeholder("touch controller"), false, "Touch controller"),
         (Icon::Store, Action::Placeholder("store"), false, "Plugin store"),

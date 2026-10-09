@@ -110,6 +110,8 @@ pub enum Action {
     RackAdd,
     /// Plugin picker: background (click closes), tab, "All" tab, tile (effects?, index).
     PickerBg,
+    /// Toolbar plugin picker button.
+    PickerOpen,
     PickerTab(bool, usize),
     PickerAll,
     PickerTile(bool, usize),
@@ -1800,6 +1802,10 @@ impl App {
                 self.drag = Some(Drag::RackMixer { ch: i, y0: self.mouse.1, v0 });
             }
             Action::RackAdd => {
+                s.picker_open = true;
+                s.picker_cat = None;
+            }
+            Action::PickerOpen => {
                 s.picker_open = true;
                 s.picker_cat = None;
             }
