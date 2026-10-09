@@ -1,0 +1,303 @@
+//! The host object handed to FL native plugins.
+//!
+//! Implements the documented host methods that matter for loading and rendering; every other
+//! slot (including extra slots past the documented 42) is a stub that records its index the first
+//! time it is called, so undocumented calls can be discovered by observation.
+//!
+// spec: plugins/fruity-abi.md
+
+use std::collections::BTreeMap;
+use std::ffi::{c_char, c_void, CString};
+use std::sync::Mutex;
+
+use crate::abi::{IntPtr, VoiceParams, HOST_EXTRA_SLOTS, HOST_METHODS};
+
+const SLOTS: usize = HOST_METHODS + HOST_EXTRA_SLOTS;
+const WAVETABLE_LEN: usize = 16384;
+
+/// The C++-compatible host object. Plugins only touch the documented leading fields;
+/// `ctx` is ours.
+#[repr(C)]
+pub struct HostObject {
+    vtable: *const VTable,
+    pub host_version: i32,
+    pub flags: i32,
+    pub app_handle: *mut c_void,
+    pub wave_tables: [*mut f32; 10],
+    pub temp_buffers: [*mut f32; 4],
+    pub reserved: [i32; 30],
+    pub ctx: *mut HostContext,
+}
+
+/// Host-side state shared with the callbacks.
+pub struct HostContext {
+    pub prog_path: CString,
+    pub sample_rate: u32,
+    /// Voice tags the plugin asked to kill.
+    pub killed_voices: Vec<IntPtr>,
+    /// Calls the host couldn't serve meaningfully: (slot or dispatcher id) → count.
+    pub unhandled: BTreeMap<String, u32>,
+    _wavetables: Vec<Vec<f32>>,
+    _temp: Vec<f32>,
+}
+
+/// Global log of unknown/unhandled calls (callbacks can't always reach a context).
+pub static CALL_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Set `OS_FRUITY_TRACE=1` to print every logged host call immediately.
+pub fn trace_enabled() -> bool {
+    std::env::var_os("OS_FRUITY_TRACE").is_some()
+}
+
+fn log_once(entry: String) {
+    if trace_enabled() {
+        eprintln!("[host] {entry}");
+    }
+    if let Ok(mut l) = CALL_LOG.lock() {
+        if !l.contains(&entry) {
+            l.push(entry);
+        }
+    }
+}
+
+fn ctx<'a>(this: *mut HostObject) -> Option<&'a mut HostContext> {
+    unsafe { this.as_ref().and_then(|h| h.ctx.as_mut()) }
+}
+
+impl HostObject {
+    /// Builds a host. `prog_path` is the FL install folder (returned for "GetProgPath").
+    pub fn new(prog_path: &str, sample_rate: u32, max_block: usize) -> Box<HostObject> {
+        let mut tables: Vec<Vec<f32>> = (0..6).map(|_| vec![0.0; WAVETABLE_LEN]).collect();
+        let mut seed = 0x1234_5678u32;
+        for i in 0..WAVETABLE_LEN {
+            let ph = i as f32 / WAVETABLE_LEN as f32;
+            tables[0][i] = (ph * std::f32::consts::TAU).sin();
+            tables[1][i] = 1.0 - 4.0 * (ph - 0.5).abs(); // triangle
+            tables[2][i] = if ph < 0.5 { 1.0 } else { -1.0 };
+            tables[3][i] = 2.0 * ph - 1.0;
+            tables[4][i] = 2.0 * ph - 1.0;
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            tables[5][i] = seed as f32 / u32::MAX as f32 * 2.0 - 1.0;
+        }
+        let mut temp = vec![0.0f32; max_block * 2 * 4];
+        let mut wave_tables = [std::ptr::null_mut(); 10];
+        for (slot, t) in wave_tables.iter_mut().zip(tables.iter_mut()) {
+            *slot = t.as_mut_ptr();
+        }
+        let base = temp.as_mut_ptr();
+        let temp_buffers = [0, 1, 2, 3].map(|k| unsafe { base.add(k * max_block * 2) });
+        let ctx = Box::into_raw(Box::new(HostContext {
+            prog_path: CString::new(prog_path).unwrap_or_default(),
+            sample_rate,
+            killed_voices: Vec::new(),
+            unhandled: BTreeMap::new(),
+            _wavetables: tables,
+            _temp: temp,
+        }));
+        Box::new(HostObject {
+            vtable: &VTABLE,
+            host_version: 26_01_07_00,
+            flags: 0,
+            app_handle: std::ptr::null_mut(),
+            wave_tables,
+            temp_buffers,
+            reserved: [0; 30],
+            ctx,
+        })
+    }
+
+    pub fn context(&mut self) -> &mut HostContext {
+        unsafe { &mut *self.ctx }
+    }
+}
+
+impl Drop for HostObject {
+    fn drop(&mut self) {
+        if !self.ctx.is_null() {
+            unsafe { drop(Box::from_raw(self.ctx)) };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Implemented methods
+
+unsafe extern "system" fn dispatcher(this: *mut HostObject, _sender: IntPtr, id: IntPtr, index: IntPtr, value: IntPtr) -> IntPtr {
+    match id {
+        // GetProgPath / GetProjDataPath: data path
+        29 | 47 => ctx(this).map_or(0, |c| c.prog_path.as_ptr() as IntPtr),
+        // LocateDataFile: give the name back unchanged
+        14 => value,
+        // GetMixingTime / GetPlaybackTime: zero time
+        36 | 37 => {
+            if let Some(t) = (value as *mut [f64; 2]).as_mut() {
+                *t = [0.0, 0.0];
+            }
+            0
+        }
+        // Harmless notifications
+        3 | 5 | 10 | 13 | 23 | 27 | 30 | 33 | 35 | 48 => 0,
+        _ => {
+            log_once(format!("host dispatcher id {id} (index {index}, value {value})"));
+            if let Some(c) = ctx(this) {
+                *c.unhandled.entry(format!("dispatcher {id}")).or_default() += 1;
+            }
+            0
+        }
+    }
+}
+
+unsafe extern "system" fn voice_kill(this: *mut HostObject, sender: IntPtr, _kill_handle: i32) {
+    if let Some(c) = ctx(this) {
+        c.killed_voices.push(sender);
+    }
+}
+
+unsafe extern "system" fn voice_process_event(_this: *mut HostObject, _sender: IntPtr, id: IntPtr, _v: IntPtr, _f: IntPtr) -> i32 {
+    match id {
+        1 => -1,   // GetLength: undefined
+        3 => 0,    // GetVelocity (float bits); 0 → plugins fall back to InitLevels.Vol
+        _ => 0,
+    }
+}
+
+/// Adds a mono or stereo source into a stereo destination, ramping from the last levels.
+unsafe fn add_wave(stereo_src: bool, src: *const f32, dst: *mut f32, len: i32, lvol: f32, rvol: f32, last_l: *mut f32, last_r: *mut f32) {
+    if src.is_null() || dst.is_null() || len <= 0 {
+        return;
+    }
+    let n = len as usize;
+    let (l0, r0) = (*last_l, *last_r);
+    for i in 0..n {
+        let t = (i + 1) as f32 / n as f32;
+        let gl = l0 + (lvol - l0) * t;
+        let gr = r0 + (rvol - r0) * t;
+        let (sl, sr) = if stereo_src { (*src.add(2 * i), *src.add(2 * i + 1)) } else { (*src.add(i), *src.add(i)) };
+        *dst.add(2 * i) += sl * gl;
+        *dst.add(2 * i + 1) += sr * gr;
+    }
+    *last_l = lvol;
+    *last_r = rvol;
+}
+
+unsafe extern "system" fn add_wave_mono(_this: *mut HostObject, src: *const f32, dst: *mut f32, len: i32, l: f32, r: f32, ll: *mut f32, lr: *mut f32) {
+    add_wave(false, src, dst, len, l, r, ll, lr);
+}
+unsafe extern "system" fn add_wave_stereo(_this: *mut HostObject, src: *const f32, dst: *mut f32, len: i32, l: f32, r: f32, ll: *mut f32, lr: *mut f32) {
+    add_wave(true, src, dst, len, l, r, ll, lr);
+}
+
+unsafe extern "system" fn time_f64(_this: *mut HostObject) -> f64 {
+    0.0
+}
+
+/// ComputeLRVol: pan −1..1, volume → left/right levels.
+/// Assumption (not yet measured): a balance law, unity at center.
+unsafe extern "system" fn compute_lr_vol(_this: *mut HostObject, l: *mut f32, r: *mut f32, pan: f32, vol: f32) {
+    if let (Some(l), Some(r)) = (l.as_mut(), r.as_mut()) {
+        *l = vol * (1.0 - pan).min(1.0);
+        *r = vol * (1.0 + pan).min(1.0);
+    }
+}
+
+unsafe extern "system" fn compute_lr_vol_old(this: *mut HostObject, l: *mut f32, r: *mut f32, pan: i32, vol: f32) {
+    compute_lr_vol(this, l, r, pan as f32 / 64.0, vol);
+}
+
+unsafe extern "system" fn trigger_output_voice(_this: *mut HostObject, _p: *mut VoiceParams, _i: IntPtr, _t: IntPtr) -> IntPtr {
+    log_once("host TriggerOutputVoice (output voices not supported)".into());
+    -1
+}
+
+#[repr(C)]
+struct IoBuffer {
+    buffer: *mut c_void,
+    flags: u32,
+}
+
+unsafe extern "system" fn get_io_buffer(_this: *mut HostObject, _sender: IntPtr, _index: IntPtr, b: *mut IoBuffer) {
+    if let Some(b) = b.as_mut() {
+        b.buffer = std::ptr::null_mut();
+        b.flags = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Stubs: one distinct function per slot so the slot index can be logged.
+
+macro_rules! stubs {
+    ($($n:literal),*) => {
+        const STUBS: [*const c_void; SLOTS] = [$({
+            unsafe extern "system" fn s(_this: *mut HostObject) -> IntPtr {
+                log_once(format!("host slot {}", $n));
+                0
+            }
+            s as *const c_void
+        }),*];
+    };
+}
+stubs!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+       30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
+       60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89,
+       90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105);
+
+/// No-op for documented methods that need no action (locks, MIDI out, hints, …).
+unsafe extern "system" fn noop(_this: *mut HostObject) -> IntPtr {
+    0
+}
+
+const fn build_vtable() -> [*const c_void; SLOTS] {
+    let mut v = STUBS;
+    v[0] = dispatcher as *const c_void;
+    v[1] = noop as *const c_void; // OnParamChanged
+    v[2] = noop as *const c_void; // OnHint
+    v[3] = compute_lr_vol_old as *const c_void;
+    v[4] = noop as *const c_void; // Voice_Release (plugin asks host to release: ignore)
+    v[5] = voice_kill as *const c_void;
+    v[6] = voice_process_event as *const c_void;
+    v[7] = noop as *const c_void; // LockMix
+    v[8] = noop as *const c_void; // UnlockMix
+    v[9] = noop as *const c_void; // MIDIOut_Delayed
+    v[10] = noop as *const c_void; // MIDIOut
+    v[11] = add_wave_mono as *const c_void;
+    v[12] = add_wave_stereo as *const c_void;
+    v[16] = noop as *const c_void; // GetSongMixingTime (int 0)
+    v[17] = time_f64 as *const c_void;
+    v[18] = time_f64 as *const c_void;
+    v[19] = noop as *const c_void; // OnControllerChanged
+    v[21] = noop as *const c_void; // PlugMsg_Delayed
+    v[22] = noop as *const c_void; // PlugMsg_Kill
+    v[28] = noop as *const c_void; // SuspendOutput
+    v[29] = noop as *const c_void; // ResumeOutput
+    v[31] = compute_lr_vol as *const c_void;
+    v[32] = noop as *const c_void; // LockPlugin
+    v[33] = noop as *const c_void; // UnlockPlugin
+    v[34] = noop as *const c_void; // LockMix_Shared_Old
+    v[35] = noop as *const c_void; // UnlockMix_Shared_Old
+    v[36] = get_io_buffer as *const c_void;
+    v[37] = get_io_buffer as *const c_void;
+    v[38] = trigger_output_voice as *const c_void;
+    v
+}
+
+#[repr(transparent)]
+pub struct VTable([*const c_void; SLOTS]);
+// Function pointers only; safe to share between threads.
+unsafe impl Sync for VTable {}
+static VTABLE: VTable = VTable(build_vtable());
+
+/// Returns the logged calls and clears the log.
+pub fn take_call_log() -> Vec<String> {
+    CALL_LOG.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default()
+}
+
+/// Exposed for diagnostics: the C string for a char pointer.
+pub fn cstr(p: *const c_char) -> String {
+    if p.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
+}

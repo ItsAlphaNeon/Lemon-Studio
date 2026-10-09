@@ -1,0 +1,10 @@
+[package]
+name = "os-fruity"
+description = "Host for FL Studio native plugins (Fruity plugin SDK interface)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libloading = "0.8"
+thiserror.workspace = true

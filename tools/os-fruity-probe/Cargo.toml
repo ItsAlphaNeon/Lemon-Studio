@@ -1,0 +1,10 @@
+[package]
+name = "os-fruity-probe"
+description = "Load one FL native plugin, print its info, render a test note"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+os-fruity = { path = "../../crates/os-fruity" }
+os-engine.workspace = true
