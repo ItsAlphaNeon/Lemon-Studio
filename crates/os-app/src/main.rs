@@ -384,6 +384,8 @@ fn screenshot(args: &[String]) {
     let mut rack_w: Option<f32> = None;
     let mut rack_roll = false;
     let mut menu: Option<usize> = None;
+    let mut picker: Option<(bool, usize)> = None;
+    let mut picker_open = false;
     let mut path = None;
     let mut pattern = None;
     let mut channel = None;
@@ -396,6 +398,14 @@ fn screenshot(args: &[String]) {
             "--no-rack" => rack = false,
             "--no-browser" => browser = false,
             "--rack-roll" => rack_roll = true,
+            "--picker" => {
+                picker_open = true;
+                if let Some(v) = it.next() {
+                    // "g2" / "e4": filter by that category
+                    let (k, n) = v.split_at(1);
+                    picker = n.parse().ok().map(|n| (k == "e", n));
+                }
+            }
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
             "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
             "--pattern" => pattern = it.next().and_then(|v| v.parse().ok()),
@@ -429,6 +439,8 @@ fn screenshot(args: &[String]) {
     }
     app.state.rack_roll_view = rack_roll;
     app.state.menu_open = menu;
+    app.state.picker_open = picker_open;
+    app.state.picker_cat = picker;
     if let Some(w) = rack_w {
         app.state.rack_size.0 = w;
     }

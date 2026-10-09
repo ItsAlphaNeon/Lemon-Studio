@@ -4,6 +4,7 @@
 pub mod browser;
 pub mod channel_win;
 pub mod menus;
+pub mod picker;
 pub mod mixer;
 pub mod piano;
 pub mod playlist;
@@ -88,6 +89,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     toolbar::paint(ui, s, f, w);
     if let Some(m) = s.menu_open {
         menus::paint_dropdown(ui, s, m);
+    }
+    if s.picker_open {
+        picker::paint(ui, s);
     }
 }
 

@@ -74,7 +74,7 @@ pub const FILE_EXIT: usize = 16;
 /// `MenuItem(PATTERNS, PATTERN_PICK + n)` selects pattern `n` (the pattern list column).
 pub const PATTERNS: usize = 3;
 pub const PATTERN_PICK: usize = 1000;
-const VIEW: usize = 4;
+pub const VIEW: usize = 4;
 
 const FILE: &[Item] = &[
     it("New", "").on(),
@@ -164,7 +164,7 @@ const VIEW_ITEMS: &[Item] = &[
     it("Mixer", "F9").on().tick(),
     it("Browser", "Alt+F8").on().tick(),
     it("Project picker", "Ctrl+F8"),
-    it("Plugin picker", "F8"),
+    it("Plugin picker", "F8").on(),
     it("Tempo tapper", "Ctrl+F5"),
     it("Touch controller", "Alt+F7"),
     it("Script output", ""),

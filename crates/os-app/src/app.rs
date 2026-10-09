@@ -108,6 +108,11 @@ pub enum Action {
     RackSelect(usize),
     RackMixer(usize),
     RackAdd,
+    /// Plugin picker: background (click closes), tab, "All" tab, tile (effects?, index).
+    PickerBg,
+    PickerTab(bool, usize),
+    PickerAll,
+    PickerTile(bool, usize),
     RackResize(u8),
     /// Step / piano-roll view toggle, and a row's mini piano roll (spec: ui/channel-rack.md §6).
     RackRollView,
@@ -306,6 +311,9 @@ pub struct State {
     pub pattern: u16,
     pub song_mode: bool,
     pub menu_open: Option<usize>,
+    pub picker_open: bool,
+    /// Plugin picker category filter: (effects half?, category index).
+    pub picker_cat: Option<(bool, usize)>,
     pub playlist_scroll: (f32, f32),
     /// Playlist horizontal zoom, pixels per bar.
     pub playlist_bar_w: f32,
@@ -441,6 +449,8 @@ impl App {
                 pattern: 1,
                 song_mode: false,
                 menu_open: None,
+                picker_open: false,
+                picker_cat: None,
                 playlist_scroll: (0.0, 0.0),
                 playlist_bar_w: views::playlist::BAR_W,
                 mixer_scroll: 0.0,
@@ -845,6 +855,9 @@ impl App {
             && rect.is_some_and(|r| x >= r.right() - resize_zone(r.w));
         let changed = hover != self.hover || hint != self.hint || resize != self.resize_cursor;
         self.resize_cursor = resize;
+        if changed && self.state.picker_open {
+            self.invalidate();
+        }
         if changed {
             // Repaint the controls that lost / gained hover and the hint panel; large background
             // regions have no hover look.
@@ -1422,10 +1435,15 @@ impl App {
             Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
             Key::Named(NamedKey::F6) => self.act(Action::ToggleWin(Win::ChannelRack)),
             Key::Named(NamedKey::F7) => self.act(Action::ToggleWin(Win::PianoRoll)),
+            Key::Named(NamedKey::F8) if !alt && !ctrl => {
+                self.state.picker_open = !self.state.picker_open;
+                self.state.picker_cat = None;
+            }
             Key::Named(NamedKey::F8) if alt => self.act(Action::ToggleWin(Win::Browser)),
             Key::Named(NamedKey::F9) => self.act(Action::ToggleWin(Win::Mixer)),
             Key::Named(NamedKey::Escape) => {
                 self.state.menu_open = None;
+                self.state.picker_open = false;
                 self.state.piano.clear_selection();
             }
             // Piano roll editing keys (spec: ui/piano-roll.md §8).
@@ -1782,10 +1800,22 @@ impl App {
                 self.drag = Some(Drag::RackMixer { ch: i, y0: self.mouse.1, v0 });
             }
             Action::RackAdd => {
+                s.picker_open = true;
+                s.picker_cat = None;
+            }
+            Action::PickerBg => s.picker_open = false,
+            Action::PickerAll => s.picker_cat = None,
+            Action::PickerTab(e, i) => s.picker_cat = if s.picker_cat == Some((e, i)) { None } else { Some((e, i)) },
+            Action::PickerTile(true, _) => {
+                s.picker_open = false;
+                s.message = Some("Effect placeholder: adding effects to mixer slots is not available yet".into());
+            }
+            Action::PickerTile(false, _) => {
+                s.picker_open = false;
                 let ch = add_channel(&mut s.project);
                 s.selected_channel = ch;
                 s.rack_selected = Some(ch);
-                s.message = Some("Added a sampler channel (plugin picker not available yet)".into());
+                s.message = Some("Added a sampler channel (all generators are placeholders for now)".into());
                 // Keep the new row in view.
                 let r = views::rack::rect(s);
                 let view_h = views::rack::panel(r).h;
@@ -1883,6 +1913,10 @@ impl App {
             (0, FILE_SAVE) => self.save(false),
             (0, FILE_SAVE_AS) => self.save(true),
             (0, FILE_EXIT) => self.want_close = true,
+            (VIEW, i) if item_at(VIEW, i).is_some_and(|it| it.label == "Plugin picker") => {
+                self.state.picker_open = true;
+                self.state.picker_cat = None;
+            }
             (PATTERNS, i) if i >= PATTERN_PICK => self.state.pattern = (i - PATTERN_PICK) as u16,
             (m, i) => {
                 let label = item_at(m, i).map_or("item", |it| it.label);
@@ -2175,6 +2209,10 @@ mod tests {
         for _ in 0..6 {
             let hr = hit_rect(&app, &Action::RackAdd);
             click(&mut app, &mut a, hr);
+            assert!(app.state.picker_open);
+            let tile = hit_rect(&app, &Action::PickerTile(false, 0));
+            click(&mut app, &mut a, tile);
+            assert!(!app.state.picker_open);
         }
         assert_eq!(app.state.project.channels.len(), n + 6);
         assert_eq!(app.state.project.channels.last().unwrap().mixer_track, 12, "after the highest insert in use (6 after the drag)");
