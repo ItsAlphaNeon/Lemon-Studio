@@ -15,7 +15,8 @@ use crate::piano::{self, Geom, PianoState};
 use crate::transport::Transport;
 use crate::views;
 
-/// Docked windows shown in the main area (one in front at a time in this draft).
+/// Child windows. Playlist, Mixer and Piano roll are shown maximized (filling the workspace); the
+/// Channel rack and the channel plugin window float. All share one stacking order (`State::z`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Win {
     Playlist,
@@ -23,6 +24,23 @@ pub enum Win {
     ChannelRack,
     PianoRoll,
     Browser,
+    Plugin,
+}
+
+impl Win {
+    /// Shown maximized in the workspace (this draft has no floating Playlist / Mixer / Piano roll).
+    pub fn maximized(self) -> bool {
+        matches!(self, Win::Playlist | Win::Mixer | Win::PianoRoll)
+    }
+}
+
+/// Mouse cursor shapes the shell should show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cursor {
+    Default,
+    EwResize,
+    NsResize,
+    NwseResize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,8 +67,15 @@ pub enum Action {
     ChannelSelect(usize),
     ChannelEnable(usize),
     Step(usize, u32),
-    RackDrag,
-    CloseRack,
+    /// Channel rack: activity / select slot, mixer track box (drag), add channel, resize edges
+    /// (`views::rack::EDGE_*` bits).
+    RackSelect(usize),
+    RackMixer(usize),
+    RackAdd,
+    RackResize(u8),
+    /// Floating window title bar (drag to move) and close button.
+    WinDrag(Win),
+    CloseWin(Win),
     BrowserRow(usize),
     PlaylistArea,
     MixerArea,
@@ -74,6 +99,8 @@ pub enum Scroll {
     PlaylistX,
     PlaylistY,
     MixerX,
+    RackX,
+    RackY,
 }
 
 /// A scroll bar painted this frame.
@@ -127,6 +154,8 @@ fn hover_is_visible(a: &Action) -> bool {
             | Action::PianoKeys
             | Action::PianoVelocity
             | Action::Scrollbar(_)
+            | Action::RackResize(_)
+            | Action::WinDrag(_)
     )
 }
 
@@ -139,6 +168,8 @@ pub struct Hit {
     pub rect: Rect,
     pub action: Action,
     pub hint: Cow<'static, str>,
+    /// The child window the control belongs to (clicking raises it).
+    pub win: Option<Win>,
 }
 
 /// What views paint with.
@@ -149,20 +180,27 @@ pub struct Ui<'a> {
     pub bars: &'a mut Vec<Bar>,
     hover: &'a Option<Action>,
     pub mouse: (f32, f32),
+    /// The window being painted (tags hits).
+    pub win: Option<Win>,
 }
 
 impl Ui<'_> {
     /// Register a hit region; returns whether it is hovered (topmost last frame).
     pub fn hit(&mut self, rect: Rect, action: Action, hint: impl Into<Cow<'static, str>>) -> bool {
         let hovered = self.hover.as_ref() == Some(&action) && rect.contains(self.mouse.0, self.mouse.1);
-        self.hits.push(Hit { rect, action, hint: hint.into() });
+        self.hits.push(Hit { rect, action, hint: hint.into(), win: self.win });
         hovered
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Drag {
-    Rack { dx: f32, dy: f32 },
+    /// Move a floating window (offset of the mouse from its top-left).
+    Window { win: Win, dx: f32, dy: f32 },
+    /// Resize the channel rack from its right / bottom edges.
+    RackResize { edges: u8, m0: (f32, f32), s0: (f32, f32) },
+    /// Change a channel's mixer track (spec: ui/channel-rack.md §5).
+    RackMixer { ch: usize, y0: f32, v0: u16 },
     Fader { track: u16, y0: f32, v0: f64 },
     Tempo { y0: f32, t0: f64 },
     /// Piano roll: move notes (originals by index), resize their ends, erase, draw velocities.
@@ -182,10 +220,18 @@ pub struct State {
     pub project: Project,
     pub file: Option<os_flp::FlpFile>,
     pub path: Option<PathBuf>,
-    pub front: Option<Win>,
-    pub show_rack: bool,
+    /// Open child windows, bottom to top.
+    pub z: Vec<Win>,
     pub show_browser: bool,
     pub rack_pos: (f32, f32),
+    pub rack_size: (f32, f32),
+    /// Horizontal step scroll of the rack, pixels.
+    pub rack_scroll_x: f32,
+    /// Channel whose select slot is lit (spec: ui/channel-rack.md §5).
+    pub rack_selected: Option<usize>,
+    /// Channel shown in the plugin window, and where that window is.
+    pub plugin_channel: usize,
+    pub plugin_pos: (f32, f32),
     pub selected_channel: usize,
     pub selected_mixer: u16,
     pub pattern: u16,
@@ -202,6 +248,33 @@ pub struct State {
     pub toggles: Vec<&'static str>,
     pub maximized: bool,
     pub piano: PianoState,
+}
+
+impl State {
+    pub fn shown(&self, w: Win) -> bool {
+        self.z.contains(&w)
+    }
+
+    /// The maximized window in front (the one filling the workspace), if any.
+    pub fn docked(&self) -> Option<Win> {
+        self.z.iter().rev().copied().find(|w| w.maximized())
+    }
+
+    /// Show `w` and bring it to the front.
+    pub fn raise(&mut self, w: Win) {
+        self.z.retain(|&o| o != w);
+        self.z.push(w);
+    }
+
+    pub fn hide(&mut self, w: Win) {
+        self.z.retain(|&o| o != w);
+    }
+
+    /// Whether `w` is in front of everything that could cover it: the top window for floating
+    /// windows, the top maximized window for maximized ones (floating windows never cover them fully).
+    pub fn in_front(&self, w: Win) -> bool {
+        if w.maximized() { self.docked() == Some(w) } else { self.z.last() == Some(&w) }
+    }
 }
 
 pub struct App {
@@ -238,10 +311,14 @@ impl App {
                 project: default_project(),
                 file: None,
                 path: None,
-                front: Some(Win::Playlist),
-                show_rack: true,
+                z: vec![Win::Playlist, Win::ChannelRack],
                 show_browser: true,
                 rack_pos: (317.0, 195.0),
+                rack_size: views::rack::DEFAULT_SIZE,
+                rack_scroll_x: 0.0,
+                rack_selected: Some(0),
+                plugin_channel: 0,
+                plugin_pos: (560.0, 260.0),
                 selected_channel: 0,
                 selected_mixer: 1,
                 pattern: 1,
@@ -310,6 +387,9 @@ impl App {
                 s.selected_mixer = 1;
                 s.playlist_scroll = (0.0, 0.0);
                 s.rack_scroll = 0.0;
+                s.rack_scroll_x = 0.0;
+                s.rack_selected = Some(0);
+                s.hide(Win::Plugin);
                 s.mixer_scroll = 0.0;
                 s.song_mode = project.arrangements.first().is_some_and(|a| !a.clips.is_empty());
                 s.project = project;
@@ -404,7 +484,7 @@ impl App {
         self.hits.clear();
         self.bars.clear();
         let title = self.title();
-        let mut ui = Ui { c: canvas, t: &self.theme.colors, hits: &mut self.hits, bars: &mut self.bars, hover: &self.hover, mouse: self.mouse };
+        let mut ui = Ui { c: canvas, t: &self.theme.colors, hits: &mut self.hits, bars: &mut self.bars, hover: &self.hover, mouse: self.mouse, win: None };
         let info = views::FrameInfo {
             title,
             hint: self.hint.clone(),
@@ -468,11 +548,47 @@ impl App {
                     self.paint_velocity(last_x, x, y);
                     self.drag = Some(Drag::Velocity { last_x: x });
                 }
-                Drag::Rack { dx, dy } => {
+                Drag::Window { win, dx, dy } => {
+                    let old = self.win_bounds(win);
+                    let pos = ((x - dx).max(0.0), (y - dy).max(views::WORK_Y));
+                    match win {
+                        Win::ChannelRack => self.state.rack_pos = pos,
+                        Win::Plugin => self.state.plugin_pos = pos,
+                        _ => {}
+                    }
+                    let new = self.win_bounds(win);
+                    self.damage_rect(old.union(&new));
+                }
+                Drag::RackResize { edges, m0, s0 } => {
                     let old = views::rack::bounds(&self.state);
-                    self.state.rack_pos = ((x - dx).max(0.0), (y - dy).max(83.0));
+                    let (min_w, min_h) = views::rack::MIN_SIZE;
+                    let s = &mut self.state;
+                    if edges & views::rack::EDGE_RIGHT != 0 {
+                        s.rack_size.0 = (s0.0 + x - m0.0).round().max(min_w);
+                    }
+                    if edges & views::rack::EDGE_BOTTOM != 0 {
+                        s.rack_size.1 = (s0.1 + y - m0.1).round().max(min_h);
+                    }
                     let new = views::rack::bounds(&self.state);
                     self.damage_rect(old.union(&new));
+                }
+                Drag::RackMixer { ch, y0, v0 } => {
+                    // One insert per 4 px, up = higher (spec: ui/channel-rack.md §5).
+                    let v = (i32::from(v0) + ((y0 - y) / 4.0).round() as i32).clamp(0, 125) as u16;
+                    let s = &mut self.state;
+                    if let Some(c) = s.project.channels.get_mut(ch) {
+                        if c.mixer_track != v {
+                            c.mixer_track = v;
+                            s.piano.dirty = true;
+                        }
+                    }
+                    self.hint = Cow::Owned(format!("Mixer track: {}", views::rack::insert_name(v)));
+                    let r = self.hits.iter().rev().find(|h| h.action == Action::RackMixer(ch)).map(|h| h.rect);
+                    match r {
+                        Some(r) => self.damage_rect(r.outset(2.0)),
+                        None => self.invalidate(),
+                    }
+                    self.damage_rect(HINT_RECT);
                 }
                 Drag::Fader { track, y0, v0 } => {
                     let v = (v0 - f64::from(y - y0) * views::mixer::FADER_PER_PX).clamp(0.0, 1.0);
@@ -537,8 +653,44 @@ impl App {
             self.state.menu_open = None;
             return;
         }
+        self.raise_under_mouse();
         if let Some(a) = action {
             self.act(a);
+        }
+    }
+
+    /// Clicking any part of a child window brings it to the front (spec: ui/channel-rack.md §5).
+    fn raise_under_mouse(&mut self) {
+        let (x, y) = self.mouse;
+        if let Some(w) = self.top_hit(x, y).and_then(|h| h.win) {
+            if self.state.z.last() != Some(&w) {
+                self.state.raise(w);
+                self.invalidate();
+            }
+        }
+    }
+
+    /// Area a floating window paints (for damage).
+    fn win_bounds(&self, w: Win) -> Rect {
+        match w {
+            Win::Plugin => views::channel_win::bounds(&self.state),
+            _ => views::rack::bounds(&self.state),
+        }
+    }
+
+    /// Cursor for the current hover / drag.
+    pub fn cursor(&self) -> Cursor {
+        let edges = match (&self.drag, &self.hover) {
+            (Some(Drag::RackResize { edges, .. }), _) => *edges,
+            (None, Some(Action::RackResize(e))) => *e,
+            _ => 0,
+        };
+        match edges {
+            0 if self.resize_cursor => Cursor::EwResize,
+            0 => Cursor::Default,
+            views::rack::EDGE_RIGHT => Cursor::EwResize,
+            views::rack::EDGE_BOTTOM => Cursor::NsResize,
+            _ => Cursor::NwseResize,
         }
     }
 
@@ -561,12 +713,15 @@ impl App {
             Scroll::PlaylistX => s.playlist_scroll.0,
             Scroll::PlaylistY => s.playlist_scroll.1,
             Scroll::MixerX => s.mixer_scroll,
+            Scroll::RackX => s.rack_scroll_x,
+            Scroll::RackY => s.rack_scroll,
         }
     }
 
     /// Set an axis, clamped to what its scroll bar allows (last frame).
     pub fn scroll_set(&mut self, t: Scroll, v: f32) {
-        let max = self.bar(t).map_or(f32::MAX, |b| b.max);
+        let unbounded = if matches!(t, Scroll::RackX | Scroll::RackY) { 0.0 } else { f32::MAX };
+        let max = self.bar(t).map_or(unbounded, |b| b.max);
         let v = v.clamp(0.0, max.max(0.0));
         let s = &mut self.state;
         match t {
@@ -575,6 +730,8 @@ impl App {
             Scroll::PlaylistX => s.playlist_scroll.0 = v,
             Scroll::PlaylistY => s.playlist_scroll.1 = v,
             Scroll::MixerX => s.mixer_scroll = v,
+            Scroll::RackX => s.rack_scroll_x = v,
+            Scroll::RackY => s.rack_scroll = v,
         }
     }
 
@@ -619,6 +776,7 @@ impl App {
     /// Middle button: grab-scroll the Piano roll and Playlist (FL manual: middle-drag scrolls
     /// both directions).
     pub fn mouse_down_middle(&mut self) {
+        self.raise_under_mouse();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
         let targets: &[Scroll] = match action {
@@ -642,6 +800,7 @@ impl App {
             self.invalidate();
             return;
         }
+        self.raise_under_mouse();
         if let Some(Action::Scrollbar(t)) = action {
             return self.scrollbar_press(t, true);
         }
@@ -790,14 +949,18 @@ impl App {
             piano::clamp_scroll(&mut self.state, g.grid.h);
             return;
         }
+        let rack_area = self.top_hit(x, y).is_some_and(|h| h.win == Some(Win::ChannelRack));
+        if rack_area {
+            let (rx, ry) = if shift { (dy + dx, 0.0) } else { (dx, dy) };
+            self.scroll_set(Scroll::RackY, self.scroll_get(Scroll::RackY) - ry * views::rack::ROW_H);
+            self.scroll_set(Scroll::RackX, self.scroll_get(Scroll::RackX) - rx * 4.0 * views::rack::STEP_W);
+            return;
+        }
         let s = &mut self.state;
         let (dx, dy) = if shift { (dy, dx) } else { (dx, dy) };
         match area {
             Some(Action::Fader(_) | Action::MixerSelect(_) | Action::MixerArea) => {
                 s.mixer_scroll = (s.mixer_scroll - (dy + dx) * 44.0).max(0.0);
-            }
-            Some(Action::Step(..) | Action::ChannelSelect(_) | Action::ChannelEnable(_) | Action::RackArea) => {
-                s.rack_scroll = (s.rack_scroll - dy * 30.0).max(0.0);
             }
             Some(Action::PlaylistArea) if ctrl => {
                 let bar = (s.playlist_scroll.0 + x - 481.0) / s.playlist_bar_w;
@@ -827,7 +990,7 @@ impl App {
                 self.state.piano.clear_selection();
             }
             // Piano roll editing keys (spec: ui/piano-roll.md §8).
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") && self.state.front == Some(Win::PianoRoll) => {
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") && self.state.docked() == Some(Win::PianoRoll) => {
                 let s = &mut self.state;
                 if let Some(ch) = piano::channel(s) {
                     let all = piano::notes(s).iter().enumerate().filter(|(_, n)| n.channel == ch).map(|(i, _)| i).collect();
@@ -835,7 +998,7 @@ impl App {
                 }
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => self.act(Action::PianoUndo),
-            Key::Named(NamedKey::Delete) if self.state.front == Some(Win::PianoRoll) => {
+            Key::Named(NamedKey::Delete) if self.state.docked() == Some(Win::PianoRoll) => {
                 let s = &mut self.state;
                 let sel = s.piano.selection(s.pattern, piano::channel(s));
                 if !sel.is_empty() {
@@ -964,16 +1127,19 @@ impl App {
                 s.menu_open = None;
                 self.menu_item(m, i);
             }
-            Action::ToggleWin(w) => match w {
-                Win::ChannelRack => s.show_rack = !s.show_rack,
-                Win::Browser => s.show_browser = !s.show_browser,
-                Win::Playlist | Win::Mixer | Win::PianoRoll => {
-                    s.front = if s.front == Some(w) { None } else { Some(w) };
-                    if s.front == Some(Win::PianoRoll) {
-                        piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
-                    }
+            // Show a hidden window, bring a covered one to the front, hide one already in front
+            // (spec: ui/channel-rack.md §5).
+            Action::ToggleWin(Win::Browser) => s.show_browser = !s.show_browser,
+            Action::ToggleWin(w) => {
+                if s.shown(w) && s.in_front(w) {
+                    s.hide(w);
+                } else {
+                    s.raise(w);
                 }
-            },
+                if w == Win::PianoRoll && s.docked() == Some(Win::PianoRoll) {
+                    piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
+                }
+            }
             Action::PatternPrev => s.pattern = s.pattern.saturating_sub(1).max(1),
             Action::PatternNext => s.pattern = (s.pattern + 1).min(999),
             Action::PatternAdd => {
@@ -987,12 +1153,37 @@ impl App {
                 self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0 });
             }
             Action::ChannelSelect(i) => {
-                if s.selected_channel != i && s.front == Some(Win::PianoRoll) {
+                if s.selected_channel != i && s.docked() == Some(Win::PianoRoll) {
                     s.selected_channel = i;
                     s.piano.clear_selection();
                     piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 }
                 s.selected_channel = i;
+                // The name button opens the channel's plugin window (spec: ui/channel-rack.md §5).
+                if !s.shown(Win::Plugin) {
+                    let r = views::rack::rect(s);
+                    s.plugin_pos = ((r.right() + 8.0).min(1920.0 - 440.0), r.y.min(1080.0 - 210.0));
+                }
+                s.plugin_channel = i;
+                s.raise(Win::Plugin);
+            }
+            Action::RackSelect(i) => s.rack_selected = Some(i),
+            Action::RackMixer(i) => {
+                let v0 = s.project.channels.get(i).map_or(0, |c| c.mixer_track);
+                self.drag = Some(Drag::RackMixer { ch: i, y0: self.mouse.1, v0 });
+            }
+            Action::RackAdd => {
+                let ch = add_channel(&mut s.project);
+                s.selected_channel = ch;
+                s.rack_selected = Some(ch);
+                s.message = Some("Added a sampler channel (plugin picker not available yet)".into());
+                // Keep the new row in view.
+                let r = views::rack::rect(s);
+                let view_h = views::rack::panel(r).h;
+                s.rack_scroll = (views::rack::content_h(s) - view_h).max(0.0);
+            }
+            Action::RackResize(edges) => {
+                self.drag = Some(Drag::RackResize { edges, m0: self.mouse, s0: s.rack_size });
             }
             Action::ChannelEnable(i) => {
                 if let Some(c) = s.project.channels.get_mut(i) {
@@ -1003,10 +1194,11 @@ impl App {
                 s.piano.clear_selection();
                 toggle_step(s, ch, step);
             }
-            Action::RackDrag => {
-                self.drag = Some(Drag::Rack { dx: self.mouse.0 - s.rack_pos.0, dy: self.mouse.1 - s.rack_pos.1 });
+            Action::WinDrag(win) => {
+                let pos = if win == Win::Plugin { s.plugin_pos } else { s.rack_pos };
+                self.drag = Some(Drag::Window { win, dx: self.mouse.0 - pos.0, dy: self.mouse.1 - pos.1 });
             }
-            Action::CloseRack => s.show_rack = false,
+            Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(i) => s.browser_selected = i,
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
         }
@@ -1069,9 +1261,9 @@ fn toggle_step(s: &mut State, ch: usize, step: u32) {
     }
 }
 
-/// A project with the default template's shape: five sampler channels and pattern 1.
-pub fn default_project() -> Project {
-    let channel = |i: u16, name: &str| Channel {
+/// An empty sampler channel at rack position `i`.
+fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
+    Channel {
         index: i,
         kind: ChannelKind::Sampler,
         name: Some(name.into()),
@@ -1081,10 +1273,24 @@ pub fn default_project() -> Project {
         volume: 10000.0 / 12800.0,
         pan: 0.0,
         pitch_cents: 0,
-        mixer_track: i + 1,
+        mixer_track,
         sample_path: None,
         layer_children: Vec::new(),
-    };
+    }
+}
+
+/// Add-channel button (spec: ui/channel-rack.md §5): an empty sampler routed to the next insert
+/// after the highest one in use. Returns its rack row.
+fn add_channel(p: &mut Project) -> usize {
+    let index = p.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let track = (p.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(125);
+    p.channels.push(sampler_channel(index, "Sampler", track));
+    p.channels.len() - 1
+}
+
+/// A project with the default template's shape: five sampler channels and pattern 1.
+pub fn default_project() -> Project {
+    let channel = |i: u16, name: &str| sampler_channel(i, name, i + 1);
     let mixer = (0..=126u16)
         .map(|i| MixerTrack {
             index: i,
@@ -1137,7 +1343,7 @@ mod tests {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return }; // no system font: skip
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
-        app.state.front = Some(Win::Mixer);
+        app.state.z = vec![Win::Mixer, Win::ChannelRack];
         frame(&mut app, &mut a, None);
 
         // Move the rack and fade a fader, repainting only the damaged regions.
@@ -1176,8 +1382,7 @@ mod tests {
     fn scrollbar_drags() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.front = Some(Win::PianoRoll);
-        app.state.show_rack = false;
+        app.state.z = vec![Win::PianoRoll];
         frame(&mut app, &mut c, None);
         let v = app.bar(Scroll::PianoY).unwrap();
         let h = app.bar(Scroll::PianoX).unwrap();
@@ -1218,13 +1423,99 @@ mod tests {
         assert!((app.scroll_get(Scroll::PianoY) - (y2 - 36.0)).abs() < 0.5);
     }
 
+    fn hit_rect(app: &App, a: &Action) -> Rect {
+        app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.rect).unwrap_or_else(|| panic!("no hit for {a:?}"))
+    }
+
+    fn click(app: &mut App, c: &mut Canvas, r: Rect) {
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_up();
+        frame(app, c, None);
+    }
+
+    /// Channel rack (spec: ui/channel-rack.md §5): stacking with other windows, name button opens
+    /// the plugin window, select slot, mixer-track drag, add, resize; drags repaint like full frames.
+    #[test]
+    fn channel_rack_window() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        frame(&mut app, &mut a, None);
+        // Clicking the playlist next to the rack puts the rack behind it; F6 brings it back.
+        let rack = views::rack::rect(&app.state);
+        click(&mut app, &mut a, Rect::new(rack.right() + 50.0, rack.y + 100.0, 2.0, 2.0));
+        assert_eq!(app.state.z.last(), Some(&Win::Playlist));
+        assert!(!app.hits.iter().any(|h| h.win == Some(Win::ChannelRack)), "covered rack gets no clicks");
+        app.act(Action::ToggleWin(Win::ChannelRack));
+        frame(&mut app, &mut a, None);
+        assert_eq!(app.state.z.last(), Some(&Win::ChannelRack));
+        app.act(Action::ToggleWin(Win::ChannelRack));
+        assert!(!app.state.shown(Win::ChannelRack), "F6 on the front rack hides it");
+        app.act(Action::ToggleWin(Win::ChannelRack));
+        frame(&mut app, &mut a, None);
+
+        // Name button opens the plugin window for that channel; the slot selects.
+        let hr = hit_rect(&app, &Action::ChannelSelect(2));
+        click(&mut app, &mut a, hr);
+        assert_eq!((app.state.z.last(), app.state.plugin_channel, app.state.selected_channel), (Some(&Win::Plugin), 2, 2));
+        let hr = hit_rect(&app, &Action::RackSelect(3));
+        click(&mut app, &mut a, hr);
+        assert_eq!(app.state.rack_selected, Some(3));
+        assert_eq!(app.state.z.last(), Some(&Win::ChannelRack), "clicking the rack raised it");
+
+        // Drag the mixer box up 20 px: +5 inserts, with damage repaint matching a full frame.
+        let _ = app.take_damage();
+        let mb = hit_rect(&app, &Action::RackMixer(0));
+        let t0 = app.state.project.channels[0].mixer_track;
+        let step = |app: &mut App, c: &mut Canvas, f: &dyn Fn(&mut App)| {
+            f(app);
+            if let Some(d) = app.take_damage() {
+                frame(app, c, d);
+            }
+        };
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(mb.cx(), mb.cy()); });
+        step(&mut app, &mut a, &|ap| ap.mouse_down());
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(mb.cx(), mb.cy() - 20.0); });
+        assert_eq!(app.state.project.channels[0].mixer_track, t0 + 5);
+        step(&mut app, &mut a, &|ap| ap.mouse_up());
+
+        // Resize from the corner: wider shows more steps, taller more room.
+        let r = views::rack::rect(&app.state);
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(r.right() - 2.0, r.bottom() - 2.0); });
+        assert_eq!(app.cursor(), Cursor::NwseResize);
+        step(&mut app, &mut a, &|ap| ap.mouse_down());
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(r.right() + 318.0, r.bottom() + 58.0); });
+        step(&mut app, &mut a, &|ap| ap.mouse_up());
+        assert_eq!(app.state.rack_size, (819.0, 306.0));
+        assert_eq!(views::rack::visible_steps(views::rack::rect(&app.state)), 36);
+        frame(&mut app, &mut b, None);
+        assert_same(&a, &b, "after mixer drag and resize");
+
+        // A dimmed step (past the one-bar pattern) extends the pattern to two bars.
+        assert_eq!(views::rack::pattern_steps(&app.state), 16);
+        let hr = hit_rect(&app, &Action::Step(0, 20));
+        click(&mut app, &mut a, hr);
+        assert_eq!(views::rack::pattern_steps(&app.state), 32);
+
+        // Add channels until the rows overflow: a vertical scroll bar appears.
+        let n = app.state.project.channels.len();
+        for _ in 0..6 {
+            let hr = hit_rect(&app, &Action::RackAdd);
+            click(&mut app, &mut a, hr);
+        }
+        assert_eq!(app.state.project.channels.len(), n + 6);
+        assert_eq!(app.state.project.channels.last().unwrap().mixer_track, 12, "after the highest insert in use (6 after the drag)");
+        assert!(app.bar(Scroll::RackY).is_some_and(|b| b.max > 0.0));
+    }
+
     /// Piano roll edits repaint only damaged regions; the result must match a full repaint.
     #[test]
     fn piano_damage_matches_full() {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
-        app.state.front = Some(Win::PianoRoll);
+        app.state.z = vec![Win::PianoRoll, Win::ChannelRack];
         app.state.selected_channel = 4;
         app.state.rack_pos = (900.0, 300.0);
         frame(&mut app, &mut a, None);

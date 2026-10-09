@@ -295,10 +295,10 @@ fn row2(ui: &mut Ui, s: &State, width: f32) {
 
     // Window buttons.
     let wins = [
-        (Icon::Playlist, Action::ToggleWin(Win::Playlist), s.front == Some(Win::Playlist), "Playlist (F5)"),
-        (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), s.front == Some(Win::PianoRoll), "Piano roll (F7)"),
-        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), s.show_rack, "Channel rack (F6)"),
-        (Icon::Mixer, Action::ToggleWin(Win::Mixer), s.front == Some(Win::Mixer), "Mixer (F9)"),
+        (Icon::Playlist, Action::ToggleWin(Win::Playlist), s.shown(Win::Playlist), "Playlist (F5)"),
+        (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), s.shown(Win::PianoRoll), "Piano roll (F7)"),
+        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), s.shown(Win::ChannelRack), "Channel rack (F6)"),
+        (Icon::Mixer, Action::ToggleWin(Win::Mixer), s.shown(Win::Mixer), "Mixer (F9)"),
         (Icon::Browser, Action::ToggleWin(Win::Browser), s.show_browser, "Browser (Alt+F8)"),
         (Icon::Project, Action::Placeholder("project"), false, "Project picker"),
         (Icon::Plug, Action::Placeholder("plugin picker"), false, "Plugin picker"),

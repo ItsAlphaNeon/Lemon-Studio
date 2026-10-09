@@ -32,6 +32,23 @@ struct Shell {
     /// While a scroll-bar right-drag runs: the physical cursor position it is held at, and the
     /// virtual (logical) mouse position fed to the app.
     lock: Option<((f64, f64), (f32, f32))>,
+    cursor: app::Cursor,
+}
+
+impl Shell {
+    /// Show the cursor the app wants (resize arrows over edges and note ends).
+    fn sync_cursor(&mut self, window: &Window) {
+        let c = self.app.cursor();
+        if c != self.cursor {
+            self.cursor = c;
+            window.set_cursor(match c {
+                app::Cursor::Default => CursorIcon::Default,
+                app::Cursor::EwResize => CursorIcon::EwResize,
+                app::Cursor::NsResize => CursorIcon::NsResize,
+                app::Cursor::NwseResize => CursorIcon::NwseResize,
+            });
+        }
+    }
 }
 
 impl ApplicationHandler for Shell {
@@ -95,11 +112,8 @@ impl ApplicationHandler for Shell {
                 if self.lock.is_some() {
                     return;
                 }
-                let was = self.app.resize_cursor;
                 self.app.mouse_move(position.x as f32 / scale, position.y as f32 / scale);
-                if self.app.resize_cursor != was {
-                    window.set_cursor(if self.app.resize_cursor { CursorIcon::EwResize } else { CursorIcon::Default });
-                }
+                self.sync_cursor(&window);
                 if self.app.has_damage() {
                     window.request_redraw();
                 }
@@ -121,8 +135,8 @@ impl ApplicationHandler for Shell {
                     self.app.mouse_up();
                     if self.app.resize_cursor && self.app.drag.is_none() {
                         self.app.resize_cursor = false;
-                        window.set_cursor(CursorIcon::Default);
                     }
+                    self.sync_cursor(&window);
                 }
                 window.request_redraw();
             }
@@ -244,6 +258,7 @@ fn screenshot(args: &[String]) {
     let mut view = "playlist".to_string();
     let mut rack = true;
     let mut browser = true;
+    let mut rack_w: Option<f32> = None;
     let mut path = None;
     let mut pattern = None;
     let mut channel = None;
@@ -254,6 +269,7 @@ fn screenshot(args: &[String]) {
             "--view" => view = it.next().cloned().unwrap_or_default(),
             "--no-rack" => rack = false,
             "--no-browser" => browser = false,
+            "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
             "--pattern" => pattern = it.next().and_then(|v| v.parse().ok()),
             "--channel" => channel = it.next().and_then(|v| v.parse().ok()),
             other => path = Some(std::path::PathBuf::from(other)),
@@ -266,15 +282,20 @@ fn screenshot(args: &[String]) {
     if let Some(c) = channel {
         app.state.selected_channel = c;
     }
-    app.state.show_rack = rack;
     app.state.show_browser = browser;
-    app.state.front = match view.as_str() {
-        "mixer" => Some(app::Win::Mixer),
-        "piano" => Some(app::Win::PianoRoll),
-        "none" => None,
-        _ => Some(app::Win::Playlist),
+    app.state.z = match view.as_str() {
+        "mixer" => vec![app::Win::Mixer],
+        "piano" => vec![app::Win::PianoRoll],
+        "none" => vec![],
+        _ => vec![app::Win::Playlist],
     };
-    if app.state.front == Some(app::Win::PianoRoll) {
+    if rack {
+        app.state.z.push(app::Win::ChannelRack);
+    }
+    if let Some(w) = rack_w {
+        app.state.rack_size.0 = w;
+    }
+    if app.state.docked() == Some(app::Win::PianoRoll) {
         piano::center_keys(&mut app.state, 744.0);
     }
     let mut canvas = Canvas::new(1920, 1080, 1.0).expect("canvas");
@@ -316,6 +337,7 @@ fn main() {
         mods: ModifiersState::default(),
         last_click: Instant::now() - Duration::from_secs(10),
         lock: None,
+        cursor: app::Cursor::Default,
     };
     event_loop.run_app(&mut shell).expect("run");
 }

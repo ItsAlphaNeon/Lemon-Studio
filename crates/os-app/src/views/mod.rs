@@ -2,6 +2,7 @@
 // spec: ui/main-window.md
 
 pub mod browser;
+pub mod channel_win;
 pub mod menus;
 pub mod mixer;
 pub mod piano;
@@ -47,7 +48,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     // Workspace (§9): watermark, then docked windows on top.
     let left = if s.show_browser { BROWSER_W } else { 0.0 };
     let work = Rect::new(left, WORK_Y, w - left, h - WORK_Y);
-    if s.front.is_none() {
+    let docked = s.docked();
+    if docked.is_none() {
         let wm = ui.t.watermark;
         icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
         let version = concat!("OpenStudio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
@@ -56,17 +58,35 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, h - 22.0, vc, version);
     }
 
-    match s.front {
-        Some(Win::Playlist) => playlist::paint(ui, s, work, f),
-        Some(Win::Mixer) => mixer::paint(ui, s, work, f),
-        Some(Win::PianoRoll) => piano::paint(ui, s, work, f),
-        _ => {}
+    // One stacking order for all child windows (spec: ui/channel-rack.md §5). Maximized windows fill
+    // the workspace, so only the topmost of them is painted, and floating windows below it are
+    // covered; the docked browser sits above maximized windows.
+    let docked_at = s.z.iter().rposition(|w| w.maximized());
+    if let Some(d) = docked {
+        ui.win = Some(d);
+        ui.hit(work, Action::Swallow, "");
+        match d {
+            Win::Playlist => playlist::paint(ui, s, work, f),
+            Win::Mixer => mixer::paint(ui, s, work, f),
+            Win::PianoRoll => piano::paint(ui, s, work, f),
+            _ => {}
+        }
+        ui.win = None;
     }
     if s.show_browser {
         browser::paint(ui, s, Rect::new(0.0, WORK_Y, BROWSER_W, h - WORK_Y));
     }
-    if s.show_rack {
-        rack::paint(ui, s);
+    for (i, &win) in s.z.iter().enumerate() {
+        if win.maximized() || docked_at.is_some_and(|d| i < d) {
+            continue;
+        }
+        ui.win = Some(win);
+        match win {
+            Win::ChannelRack => rack::paint(ui, s, f),
+            Win::Plugin => channel_win::paint(ui, s, f),
+            _ => {}
+        }
+        ui.win = None;
     }
     toolbar::paint(ui, s, f, w);
     if let Some(m) = s.menu_open {
