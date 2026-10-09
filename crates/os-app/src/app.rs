@@ -73,6 +73,9 @@ pub enum Action {
     RackMixer(usize),
     RackAdd,
     RackResize(u8),
+    /// Step / piano-roll view toggle, and a row's mini piano roll (spec: ui/channel-rack.md §6).
+    RackRollView,
+    RackRoll(usize),
     /// Floating window title bar (drag to move) and close button.
     WinDrag(Win),
     CloseWin(Win),
@@ -229,6 +232,8 @@ pub struct State {
     pub rack_scroll_x: f32,
     /// Channel whose select slot is lit (spec: ui/channel-rack.md §5).
     pub rack_selected: Option<usize>,
+    /// Rows show mini piano rolls instead of steps.
+    pub rack_roll_view: bool,
     /// Channel shown in the plugin window, and where that window is.
     pub plugin_channel: usize,
     pub plugin_pos: (f32, f32),
@@ -317,6 +322,7 @@ impl App {
                 rack_size: views::rack::DEFAULT_SIZE,
                 rack_scroll_x: 0.0,
                 rack_selected: Some(0),
+                rack_roll_view: false,
                 plugin_channel: 0,
                 plugin_pos: (560.0, 260.0),
                 selected_channel: 0,
@@ -561,14 +567,10 @@ impl App {
                 }
                 Drag::RackResize { edges, m0, s0 } => {
                     let old = views::rack::bounds(&self.state);
-                    let (min_w, min_h) = views::rack::MIN_SIZE;
                     let s = &mut self.state;
-                    if edges & views::rack::EDGE_RIGHT != 0 {
-                        s.rack_size.0 = (s0.0 + x - m0.0).round().max(min_w);
-                    }
-                    if edges & views::rack::EDGE_BOTTOM != 0 {
-                        s.rack_size.1 = (s0.1 + y - m0.1).round().max(min_h);
-                    }
+                    let w = if edges & views::rack::EDGE_RIGHT != 0 { s0.0 + x - m0.0 } else { s0.0 };
+                    let h = if edges & views::rack::EDGE_BOTTOM != 0 { s0.1 + y - m0.1 } else { s0.1 };
+                    s.rack_size = views::rack::snap_size(w, h);
                     let new = views::rack::bounds(&self.state);
                     self.damage_rect(old.union(&new));
                 }
@@ -1168,6 +1170,13 @@ impl App {
                 s.raise(Win::Plugin);
             }
             Action::RackSelect(i) => s.rack_selected = Some(i),
+            Action::RackRollView => s.rack_roll_view = !s.rack_roll_view,
+            Action::RackRoll(i) => {
+                s.selected_channel = i;
+                s.piano.clear_selection();
+                s.raise(Win::PianoRoll);
+                piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
+            }
             Action::RackMixer(i) => {
                 let v0 = s.project.channels.get(i).map_or(0, |c| c.mixer_track);
                 self.drag = Some(Drag::RackMixer { ch: i, y0: self.mouse.1, v0 });
@@ -1497,6 +1506,24 @@ mod tests {
         let hr = hit_rect(&app, &Action::Step(0, 20));
         click(&mut app, &mut a, hr);
         assert_eq!(views::rack::pattern_steps(&app.state), 32);
+
+        // Sizes snap to whole steps / rows, down to 4 steps and one row.
+        assert_eq!(views::rack::snap_size(822.0, 300.0), (819.0, 306.0));
+        assert_eq!(views::rack::snap_size(10.0, 10.0), (307.0, 126.0));
+        assert_eq!(views::rack::visible_steps(Rect::new(0.0, 0.0, 307.0, 126.0)), 4);
+
+        // Piano-roll view toggle: rows become mini rolls; clicking one opens the Piano roll.
+        assert!(!app.hits.iter().any(|h| matches!(h.action, Action::RackRoll(_))));
+        let hr = hit_rect(&app, &Action::RackRollView);
+        click(&mut app, &mut a, hr);
+        assert!(app.state.rack_roll_view);
+        assert!(!app.hits.iter().any(|h| matches!(h.action, Action::Step(..))), "no steps in roll view");
+        let hr = hit_rect(&app, &Action::RackRoll(1));
+        click(&mut app, &mut a, hr);
+        assert_eq!((app.state.docked(), app.state.selected_channel), (Some(Win::PianoRoll), 1));
+        app.state.rack_roll_view = false;
+        app.act(Action::ToggleWin(Win::ChannelRack));
+        frame(&mut app, &mut a, None);
 
         // Add channels until the rows overflow: a vertical scroll bar appears.
         let n = app.state.project.channels.len();

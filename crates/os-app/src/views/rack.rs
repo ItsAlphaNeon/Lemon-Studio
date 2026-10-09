@@ -12,7 +12,20 @@ pub const STEP_W: f32 = 16.0;
 /// Default outer size (§1).
 pub const DEFAULT_SIZE: (f32, f32) = (499.0, 246.0);
 /// Smallest size: the default width, one row.
-pub const MIN_SIZE: (f32, f32) = (499.0, 28.0 + 30.0 + ROW_H + 36.0);
+pub const MIN_SIZE: (f32, f32) = (307.0, 96.0 + ROW_H);
+
+/// Snap a dragged size so whole steps and rows appear (§5: W = 259 + 16·(n−1), H = 96 + 30·rows).
+pub fn snap_size(w: f32, h: f32) -> (f32, f32) {
+    let w = 259.0 + STEP_W * ((w - 259.0) / STEP_W).round();
+    let h = 96.0 + ROW_H * ((h - 96.0) / ROW_H).round();
+    (w.max(MIN_SIZE.0), h.max(MIN_SIZE.1))
+}
+
+/// Whether every note of channel `ch` in the pattern is a plain step (§6: otherwise the row shows
+/// the mini piano roll even in step mode).
+fn plain_steps(notes: &[os_model::Note], ch: u16) -> bool {
+    notes.iter().filter(|n| n.channel == ch).all(|n| n.length == 0 && n.key == 60)
+}
 /// x of the first step (§3).
 const STEP_X: f32 = 217.0;
 /// Space above the first row and below the last one inside the rows panel.
@@ -60,6 +73,7 @@ pub fn content_h(s: &State) -> f32 {
 }
 
 pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
+    let roll_view = s.rack_roll_view;
     let t = ui.t;
     let win = rect(s);
     let (x, y, w, h) = (win.x, win.y, win.w, win.h);
@@ -71,7 +85,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_rect(Rect::new(body.x, body.y, body.w, 1.0), t.window_title_hi);
     let bar = Rect::span(x + 1.0, x + w - 1.0, y + 1.0, y + 29.0);
     ui.hit(bar, Action::WinDrag(Win::ChannelRack), "Channel rack - drag to move");
-    title_bar(ui, win);
+    title_bar(ui, win, roll_view);
 
     // Rows panel (§1, §3).
     let inner = panel(win);
@@ -122,7 +136,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.c.fill_rect_gradient(mb.inset(1.0), t.rack_row_box.shade(-0.04), t.rack_row_box, 2.5);
         let num_c = if mhov { t.glyph } else { t.text_dim.shade(0.08) };
         let label = if ch.mixer_track == 0 { "M".to_string() } else { ch.mixer_track.to_string() };
-        ui.c.text_right(super::light(19.0), x + 91.0, ry + 1.5, num_c, &label);
+        let nf = super::light(19.0);
+        let lh = ui.c.line_height(nf);
+        ui.c.text_right(nf, x + 91.0, (mb.cy() - lh / 2.0).round(), num_c, &label);
         spin_mark(ui, x + 94.0, ry + 13.0, t.text_dim.shade(-0.1));
         // Name button: opens the channel's plugin window.
         let nb = Rect::span(x + 108.0, x + 190.0, ry, ry + 26.0);
@@ -164,6 +180,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         // Steps (§3), clipped to the step area.
         let steps_right = (x + STEP_X + steps_shown as f32 * STEP_W - 2.0).min(rows_clip.right());
         let step_area = Rect::span(x + STEP_X - 1.0, steps_right, rows_clip.y, rows_clip.bottom());
+        let notes: &[os_model::Note] = pat.map_or(&[], |p| &p.notes);
+        if s.rack_roll_view || !plain_steps(notes, ch.index) {
+            let block = Rect::span(x + STEP_X - 2.0, steps_right + 2.0, ry - 2.0, ry + 26.0);
+            mini_roll(ui, block, notes, ch.index, per_step, sx, focused);
+            ui.hit(block.intersect(&rows_clip), Action::RackRoll(i), "Piano roll preview - click to open the Piano roll");
+            continue;
+        }
         ui.c.push_clip(step_area);
         for k in first_step..(first_step + steps_shown + 1) {
             let sr = Rect::new(x + STEP_X + STEP_W * k as f32 - sx, ry + 4.0, 13.0, 19.0);
@@ -180,8 +203,6 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
 
     // Footer (§4).
-    let strip = Rect::span(x + 214.0, x + w - 28.0, y + h - 30.0, y + h - 22.0);
-    ui.c.fill_rect(strip, t.rack_inset_border);
     add_button(ui, x, y + h);
     let track = Rect::span(x + 208.0, x + w - 2.0, y + h - 13.0, y + h - 6.0);
     let view = steps_shown as f32 * STEP_W;
@@ -208,7 +229,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
 }
 
 /// Title bar contents (§2). Left items keep their x; the right group follows the right edge.
-fn title_bar(ui: &mut Ui, win: Rect) {
+fn title_bar(ui: &mut Ui, win: Rect, roll_view: bool) {
     let t = ui.t;
     let (x, y, r) = (win.x, win.y, win.right());
     ui.hit(Rect::new(x + 8.0, y + 6.0, 16.0, 17.0), Action::Placeholder("channel rack options"), "Channel rack options");
@@ -260,7 +281,13 @@ fn title_bar(ui: &mut Ui, win: Rect) {
     }
     ui.c.fill_rect(Rect::new(gx - 8.0, y + 20.0, 16.0, 1.0), gc.shade(-0.3));
     let sxc = r - 35.0;
-    let hov = ui.hit(Rect::new(sxc - 9.0, y + 6.0, 18.0, 17.0), Action::Placeholder("step sequencer"), "Step sequencer");
+    let br = Rect::new(sxc - 10.0, y + 5.0, 20.0, 20.0);
+    let hov = ui.hit(br, Action::RackRollView, if roll_view { "Show steps" } else { "Show piano roll previews" });
+    // On (§6): orange outline with a dark orange fill.
+    if roll_view {
+        ui.c.fill_rrect(br, 3.0, Color::rgb(0xc1923a));
+        ui.c.fill_rrect(br.inset(1.0), 2.5, Color::rgb(0x574b30));
+    }
     let oc = if hov { Color::rgb(0xffd77a) } else { Color::rgb(0xffc642) };
     for i in 0..3 {
         let b = Rect::new(sxc - 8.0 + 5.5 * i as f32, y + 9.0, 4.5, 11.0);
@@ -296,6 +323,44 @@ fn step_button(ui: &mut Ui, r: Rect, k: u32, on: bool, past_len: bool, hov: bool
     ui.c.fill_rect(Rect::new(f.x, f.y, f.w, 1.0), face.shade(0.2));
     ui.c.fill_rect(Rect::new(f.x + 2.0, f.y + 2.0, f.w - 4.0, 2.0), face.shade(-0.55));
     ui.c.fill_rect(Rect::new(f.x, f.bottom() - 2.0, f.w, 2.0), face.shade(-0.35));
+}
+
+/// Mini piano roll of one channel (§6) in `block`; `sx` is the step scroll in pixels.
+fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_step: u32, sx: f32, focused: bool) {
+    if focused {
+        ui.c.fill_rect(block, Color::rgb(0x040709));
+        ui.c.fill_rect(block.inset(1.0), Color::rgb(0x111416));
+    } else {
+        ui.c.fill_rect(block, Color::rgb(0x171a1c));
+        // Alternate 8-step spans darker.
+        let span = 8.0 * STEP_W;
+        let mut k = (sx / span).floor();
+        loop {
+            let x0 = block.x + 2.0 + k * span - sx;
+            if x0 >= block.right() {
+                break;
+            }
+            if k as i64 % 2 == 1 {
+                ui.c.fill_rect(Rect::span(x0.max(block.x), (x0 + span).min(block.right()), block.y, block.bottom()), Color::rgb(0x101315));
+            }
+            k += 1.0;
+        }
+    }
+    let mine: Vec<&os_model::Note> = notes.iter().filter(|n| n.channel == ch).collect();
+    let lo = mine.iter().map(|n| n.key).min().unwrap_or(60);
+    let hi = mine.iter().map(|n| n.key).max().unwrap_or(60);
+    let range = f32::from((hi - lo).max(1));
+    ui.c.push_clip(block);
+    for n in mine {
+        let nx = block.x + 2.0 + n.position as f32 / per_step as f32 * STEP_W - sx;
+        let len = if n.length == 0 { per_step } else { n.length };
+        let nw = (len as f32 / per_step as f32 * STEP_W - 1.0).max(2.0);
+        let t = if hi == lo { 0.5 } else { f32::from(n.key - lo) / range };
+        let ny = (block.bottom() - 6.0 - t * (block.h - 8.0)).round();
+        ui.c.fill_rect(Rect::new(nx, ny, nw, 1.0), Color::rgb(0x698a6f));
+        ui.c.fill_rect(Rect::new(nx, ny + 1.0, nw, 3.0), Color::rgb(0x9ed1a5));
+    }
+    ui.c.pop_clip();
 }
 
 /// Row knob (§3): dark ball, r 7, light pointer from the centre to the rim.
