@@ -1,8 +1,8 @@
 //! Playback: an audio thread that owns the output stream and the engine.
 //!
 //! The UI sends a project snapshot on Play; `update` swaps in an edited snapshot at the current
-//! position (heard immediately). Pattern mode loops by rebuilding the engine at the pattern end (decoded
-//! samples stay cached in the library). `preview` plays one note once while stopped.
+//! position (heard immediately; decoded samples stay cached in the library). Pattern mode loops
+//! inside the engine (`Engine::set_looping`). `preview` plays one note once on its own stream.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -147,10 +147,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     s.project = project;
                     // Build outside the lock, then swap at the playing position.
                     let mut e = Engine::new(&s.project, &mut library, s.rate, s.mode);
-                    if let Ok(mut slot) = s.engine.lock() {
+                    let old = s.engine.lock().map(|mut slot| {
                         e.continue_from(&mut slot);
-                        *slot = e;
-                    }
+                        std::mem::replace(&mut *slot, e)
+                    });
+                    drop(old); // freed after the audio callback has the new engine
                 }
             }
             Ok(Cmd::Preview(project)) => {
@@ -188,23 +189,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         if preview.as_ref().is_some_and(|p| p.done.load(Ordering::Relaxed)) {
             preview = None;
         }
-        let mut finished = false;
-        if let Some(s) = &mut session {
-            if s.done.load(Ordering::Relaxed) {
-                match s.mode {
-                    // Patterns loop: swap in a fresh engine at the start.
-                    PlayMode::Pattern(_) => {
-                        let e = Engine::new(&s.project, &mut library, s.rate, s.mode);
-                        if let Ok(mut slot) = s.engine.lock() {
-                            *slot = e;
-                        }
-                        s.done.store(false, Ordering::Relaxed);
-                    }
-                    PlayMode::Song => finished = true,
-                }
-            }
-        }
-        if finished {
+        // Patterns loop inside the engine (sample-accurate); a song ends when it has played out.
+        if session.as_ref().is_some_and(|s| s.done.load(Ordering::Relaxed)) {
             session = None;
             shared.paused.store(false, Ordering::Relaxed);
         }
@@ -223,6 +209,7 @@ struct Session {
     _stream: cpal::Stream,
     engine: Arc<Mutex<Engine>>,
     done: Arc<AtomicBool>,
+    /// The project playing (live edits replace it).
     project: Project,
     mode: PlayMode,
     rate: u32,
@@ -237,14 +224,16 @@ impl Session {
         let format = supported.sample_format();
         let config: StreamConfig = supported.into();
         let rate = config.sample_rate;
-        let engine = Arc::new(Mutex::new(Engine::new(project, library, rate, mode)));
+        let mut e = Engine::new(project, library, rate, mode);
+        // Pattern playback loops on the bar line.
+        e.set_looping(looping && matches!(mode, PlayMode::Pattern(_)));
+        let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));
         if looping {
             shared.sample_rate.store(rate, Ordering::Relaxed);
             shared.position.store(0, Ordering::Relaxed);
         }
-        let loop_at_end = matches!(mode, PlayMode::Pattern(_));
-        let args = (&device, &config, engine.clone(), done.clone(), shared.clone(), loop_at_end, looping);
+        let args = (&device, &config, engine.clone(), done.clone(), shared.clone(), looping);
         let stream = match format {
             SampleFormat::F32 => build::<f32>(args),
             SampleFormat::I16 => build::<i16>(args),
@@ -260,9 +249,9 @@ impl Session {
     }
 }
 
-type BuildArgs<'a> = (&'a cpal::Device, &'a StreamConfig, Arc<Mutex<Engine>>, Arc<AtomicBool>, Arc<Shared>, bool, bool);
+type BuildArgs<'a> = (&'a cpal::Device, &'a StreamConfig, Arc<Mutex<Engine>>, Arc<AtomicBool>, Arc<Shared>, bool);
 
-fn build<T>((device, config, engine, done, shared, loop_at_end, report): BuildArgs<'_>) -> Result<cpal::Stream, String>
+fn build<T>((device, config, engine, done, shared, report): BuildArgs<'_>) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
 {
@@ -287,10 +276,6 @@ where
                                 v.clear();
                                 v.extend(e.sounding().map(|(c, k)| (c as u16, k)));
                             }
-                        }
-                        // Patterns loop on the bar line; ringing voices are cut by the restart.
-                        if loop_at_end && e.past_end() {
-                            done.store(true, Ordering::Relaxed);
                         }
                     }
                     Ok(_) => {
@@ -351,6 +336,24 @@ mod tests {
             }
         }
         assert_eq!(loud, 0, "deleted notes still sounding");
+    }
+
+    /// A mixer fader edit silences a ringing note within a few blocks (needs an audio device).
+    #[test]
+    #[ignore]
+    fn fader_edit_is_heard_at_once() {
+        let mut project = crate::app::default_project();
+        let ch = project.channels[4].index;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 384, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
+        let t = Transport::new(None);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(t.peaks().0 > 0.01, "pluck rings: {:?}", t.peaks());
+        let track = project.channels[4].mixer_track;
+        project.mixer.iter_mut().find(|m| m.index == track).unwrap().volume = Some(0.0);
+        t.update(&project);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(t.peaks(), (0.0, 0.0), "fader at zero is silent within 100 ms");
     }
 
     /// Pause holds the position silently; resume continues from it (needs an audio device).

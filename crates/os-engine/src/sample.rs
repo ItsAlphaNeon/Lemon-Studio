@@ -164,6 +164,8 @@ pub struct SampleLibrary {
     /// The user's FL Studio install folder; `None` = placeholder paths can't be resolved.
     pub factory_dir: Option<PathBuf>,
     cache: HashMap<String, Option<Arc<Sample>>>,
+    /// Built-in tones by output rate (the engine's empty-sampler fallback), built once.
+    pub(crate) tones: HashMap<u32, Arc<Sample>>,
     /// Paths that couldn't be resolved or decoded, with the reason.
     pub failures: Vec<(String, String)>,
 }

@@ -84,16 +84,19 @@ impl State {
             KnobId::MixPan(t) => {
                 if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
                     m.pan = Some(f64::from((v - 0.5) * 2.0));
+                    self.piano.dirty = true;
                 }
             }
             KnobId::ChanVol(i) => {
                 if let Some(c) = self.project.channels.get_mut(i) {
                     c.volume = f64::from(v);
+                    self.piano.dirty = true;
                 }
             }
             KnobId::ChanPan(i) => {
                 if let Some(c) = self.project.channels.get_mut(i) {
                     c.pan = f64::from((v - 0.5) * 2.0);
+                    self.piano.dirty = true;
                 }
             }
             _ => {

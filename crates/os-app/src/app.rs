@@ -622,7 +622,8 @@ impl App {
             self.state.message = Some(format!("Audio: {e}"));
             self.invalidate();
         }
-        // Note edits reach playback right away, also during a drag (at most once per tick).
+        // Edits (notes, steps, mixer, channel volume / pan / mute, tempo) reach playback right away,
+        // also during a drag (at most once per tick).
         if self.state.piano.dirty {
             self.state.piano.dirty = false;
             // Also while Play is still starting (not `playing` yet); ignored when stopped.
@@ -850,6 +851,7 @@ impl App {
                     let v = (v0 - f64::from(y - y0) * per_px).clamp(0.0, 1.0);
                     if let Some(t) = self.state.project.mixer.iter_mut().find(|t| t.index == track) {
                         t.volume = Some(v);
+                        self.state.piano.dirty = true;
                     }
                     self.hint = Cow::Owned(format!("Volume {}", views::mixer::fader_db_text(v)));
                     let col = self.hits.iter().rev().find(|h| h.action == Action::Fader(track)).map(|h| h.rect);
@@ -870,7 +872,10 @@ impl App {
                 }
                 Drag::Tempo { y0, t0 } => {
                     let t = (t0 + f64::from(y0 - y).round()).clamp(10.0, 522.0);
-                    self.state.tempo = t;
+                    if self.state.tempo != t {
+                        self.state.tempo = t;
+                        self.state.piano.dirty = true;
+                    }
                     self.hint = Cow::Owned(format!("Tempo {t:.3} BPM"));
                     self.damage_rect(Rect::new(380.0, 0.0, 200.0, 83.0));
                     self.damage_rect(HINT_RECT);
@@ -1883,6 +1888,7 @@ impl App {
             Action::PickerTile(false, _) => {
                 s.picker_open = false;
                 let ch = add_channel(&mut s.project);
+                s.piano.dirty = true;
                 s.selected_channel = ch;
                 s.rack_selected = Some(ch);
                 s.message = Some("Added a sampler channel (all generators are placeholders for now)".into());
@@ -1897,6 +1903,7 @@ impl App {
             Action::ChannelEnable(i) => {
                 if let Some(c) = s.project.channels.get_mut(i) {
                     c.enabled = !c.enabled;
+                    s.piano.dirty = true;
                 }
             }
             Action::Step(ch, step) => {

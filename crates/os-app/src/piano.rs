@@ -68,7 +68,8 @@ pub struct PianoState {
     pub px_per_beat: f32,
     /// Length of the last note added, moved or resized; 0 = not yet (§8: first note is PPQ/2).
     pub last_len: u32,
-    /// Notes changed since the playing engine last got the project.
+    /// The project changed since the playing engine last got it (notes, steps, mixer, channel
+    /// settings, tempo); `App::tick` sends it to the transport.
     pub dirty: bool,
     /// Key held with the mouse (keyboard press or a dragged note), lit on the keyboard (§4).
     pub held: Option<i32>,
@@ -650,6 +651,97 @@ mod tests {
         }
         assert!(keys.contains(&72), "new note ahead plays");
         assert!(!keys.contains(&60), "old note is not retriggered");
+    }
+
+    fn peak(buf: &[f32]) -> f32 {
+        buf.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+    }
+
+    /// Pattern playback loops inside the engine, exactly on the bar line (no gap, no rebuild).
+    #[test]
+    fn pattern_loop_is_sample_accurate() {
+        let mut a = app();
+        add_note(&mut a.state, 4, 0, 60);
+        let mut lib = os_engine::SampleLibrary::new(None);
+        let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
+        e.set_looping(true);
+        let mut buf = vec![0.0f32; 2 * 512];
+        let mut retriggered = false;
+        for i in 0..200 {
+            e.process(&mut buf);
+            // One bar at 130 BPM is 88615 frames: block 173 holds the loop point.
+            if i == 173 {
+                retriggered = e.sounding().any(|(_, k)| k == 60);
+            }
+        }
+        assert!(!e.finished());
+        assert_eq!(e.position(), 200 * 512 - 88_615, "wrapped on the exact frame");
+        assert!(retriggered, "the first note plays again at the loop point");
+    }
+
+    /// Channel volume / mute and mixer fader edits reach a voice that is already ringing.
+    #[test]
+    fn mixer_and_channel_edits_reach_ringing_voices() {
+        let mode = os_engine::PlayMode::Pattern(1);
+        let mut lib = os_engine::SampleLibrary::new(None);
+        let mut buf = vec![0.0f32; 2 * 512];
+        for edit in 0..3 {
+            let mut a = app();
+            add_note(&mut a.state, 4, 0, 60);
+            let mut old = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+            for _ in 0..4 {
+                old.process(&mut buf);
+            }
+            assert!(peak(&buf) > 0.05, "pluck rings");
+            let p = &mut a.state.project;
+            match edit {
+                0 => p.channels[4].volume = 0.0,
+                1 => p.channels[4].enabled = false,
+                _ => {
+                    let t = p.channels[4].mixer_track;
+                    p.mixer.iter_mut().find(|m| m.index == t).unwrap().volume = Some(0.0);
+                }
+            }
+            let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+            e.continue_from(&mut old);
+            e.process(&mut buf); // ramps down over one block
+            e.process(&mut buf);
+            assert_eq!(peak(&buf), 0.0, "edit {edit} silences the ringing voice");
+        }
+    }
+
+    /// A tempo change keeps the musical position.
+    #[test]
+    fn tempo_change_keeps_tick() {
+        let mut a = app();
+        add_note(&mut a.state, 4, 0, 60);
+        let mut lib = os_engine::SampleLibrary::new(None);
+        let mode = os_engine::PlayMode::Pattern(1);
+        a.state.project.tempo = Some(130.0);
+        let mut old = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+        let mut buf = vec![0.0f32; 2 * 500];
+        for _ in 0..10 {
+            old.process(&mut buf);
+        }
+        a.state.project.tempo = Some(65.0);
+        let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+        e.continue_from(&mut old);
+        assert_eq!(e.position(), 10_000, "half the tempo, twice the frames");
+    }
+
+    /// Mixer and channel knobs, the fader and mute mark the project for the playing engine.
+    #[test]
+    fn playback_edits_are_flagged() {
+        use crate::knobs::KnobId;
+        let mut a = app();
+        for id in [KnobId::MixPan(1), KnobId::ChanVol(0), KnobId::ChanPan(0)] {
+            a.state.piano.dirty = false;
+            a.state.set_knob(id, 0.2);
+            assert!(a.state.piano.dirty, "{id:?}");
+        }
+        a.state.piano.dirty = false;
+        a.act(crate::app::Action::ChannelEnable(0));
+        assert!(a.state.piano.dirty, "channel mute");
     }
 
     fn key_name_check(k: i32) -> String {

@@ -28,8 +28,9 @@ struct Trigger {
     rate: f64,
     /// Output frame at which the voice is cut (end of an audio clip), if any.
     cut: Option<u64>,
-    /// Per-note gain (channel volume × velocity × pan).
-    gain: (f32, f32),
+    /// Velocity gain and note pan (−1..=1); the channel's volume and pan apply while it plays.
+    vel: f64,
+    pan: f64,
     /// Note key and the frame where the note ends (for showing sounding keys).
     key: u16,
     end: u64,
@@ -47,6 +48,16 @@ struct ChannelState {
     base_rate: f64,
 }
 
+impl ChannelState {
+    /// Gain of a note on this channel: channel volume × velocity × pan.
+    // spec: audio/sampler-playback.md (velocity multiplies volume; pans add, clamped)
+    fn gain(&self, vel: f64, note_pan: f64) -> (f32, f32) {
+        let g = self.volume * vel;
+        let (pl, pr) = laws::channel_pan(self.pan + note_pan);
+        ((g * pl) as f32, (g * pr) as f32)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Voice {
     channel: usize,
@@ -54,15 +65,20 @@ struct Voice {
     step: f64,
     /// Output frames left before the voice is cut; `None` = play the whole sample.
     remaining: Option<u64>,
+    vel: f64,
+    pan: f64,
+    /// Gain applied at the end of the last block; ramps to the channel's current gain, so
+    /// volume / pan edits reach ringing voices without clicks.
     gain: (f32, f32),
 }
-
 
 struct MixTrack {
     /// Insert effects in slot order (applied before the fader).
     effects: Vec<Box<dyn Effect>>,
     /// Fader × pan as `[[L←L, L←R], [R←L, R←R]]`.
     matrix: [[f32; 2]; 2],
+    /// Matrix applied at the end of the last block; ramps to `matrix` over one block.
+    cur: [[f32; 2]; 2],
     /// (destination, send gain). Sidechain-only routes (level 0) are dropped.
     routes: Vec<(usize, f32)>,
 }
@@ -91,6 +107,10 @@ pub struct Engine {
     frame: u64,
     /// Frame where the scheduled material ends (voices may ring past it).
     end_frame: u64,
+    /// Restart at frame 0 on reaching `end_frame` (pattern playback), sample-accurately.
+    looping: bool,
+    tempo: f64,
+    ppq: u16,
     bus: Vec<Vec<f32>>,
     pub report: EngineReport,
 }
@@ -121,7 +141,9 @@ impl Engine {
                         }
                         // OpenStudio choice: an empty sampler channel plays a built-in tone so new
                         // projects make sound (FL's empty sampler is silent).
-                        None if ch.kind == ChannelKind::Sampler => Some(fallback_tone(rate)),
+                        None if ch.kind == ChannelKind::Sampler => {
+                            Some(library.tones.entry(rate).or_insert_with(|| fallback_tone(rate)).clone())
+                        }
                         None => None,
                     }
                 } else {
@@ -136,7 +158,8 @@ impl Engine {
             .collect();
 
         let tracks: Vec<MixTrack> = if project.mixer.is_empty() {
-            vec![MixTrack { effects: Vec::new(), matrix: [[1.0, 0.0], [0.0, 1.0]], routes: vec![] }]
+            let unity = [[1.0, 0.0], [0.0, 1.0]];
+            vec![MixTrack { effects: Vec::new(), matrix: unity, cur: unity, routes: vec![] }]
         } else {
             project
                 .mixer
@@ -168,7 +191,7 @@ impl Engine {
                             .filter(|&(_, g)| g > 0.0)
                             .collect()
                     };
-                    MixTrack { effects, matrix, routes }
+                    MixTrack { effects, matrix, cur: matrix, routes }
                 })
                 .collect()
         };
@@ -181,9 +204,6 @@ impl Engine {
             .filter_map(|n: Sched| {
                 let state = channels.get(n.channel)?;
                 state.sample.as_ref()?;
-                // spec: audio/sampler-playback.md (velocity multiplies volume; pans add, clamped)
-                let g = state.volume * laws::velocity_gain(n.velocity);
-                let (pl, pr) = laws::channel_pan(state.pan + laws::note_pan(n.pan));
                 // A plain step (length 0) counts as one step long.
                 let len = if n.len > 0.0 { n.len } else { f64::from(ppq) / 4.0 };
                 Some(Trigger {
@@ -193,7 +213,8 @@ impl Engine {
                     channel: n.channel,
                     rate: state.base_rate * laws::playback_rate(n.key, 0),
                     cut: n.cut.map(|c| laws::tick_to_frame(c, ppq, tempo, rate)),
-                    gain: ((g * pl) as f32, (g * pr) as f32),
+                    vel: laws::velocity_gain(n.velocity),
+                    pan: laws::note_pan(n.pan),
                 })
             })
             .collect();
@@ -210,8 +231,17 @@ impl Engine {
             voices: Vec::with_capacity(1024),
             frame: 0,
             end_frame: laws::tick_to_frame(end_tick, ppq, tempo, rate),
+            looping: false,
+            tempo,
+            ppq,
             report,
         }
+    }
+
+    /// Loop the scheduled material: on reaching its end, playback continues from frame 0 within
+    /// the same block (ringing voices carry on). Used for pattern playback.
+    pub fn set_looping(&mut self, on: bool) {
+        self.looping = on;
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -234,9 +264,10 @@ impl Engine {
         self.frame >= self.end_frame && self.next_trigger >= self.triggers.len()
     }
 
-    /// True once all scheduled material has played and every voice has finished.
+    /// True once all scheduled material has played and every voice has finished (never while
+    /// looping).
     pub fn finished(&self) -> bool {
-        self.frame >= self.end_frame && self.next_trigger >= self.triggers.len() && self.voices.is_empty()
+        !self.looping && self.frame >= self.end_frame && self.next_trigger >= self.triggers.len() && self.voices.is_empty()
     }
 
     /// Start playback at `frame` (notes before it are not triggered).
@@ -247,16 +278,32 @@ impl Engine {
 
     /// Take over playback from `old` (built from an earlier version of the project) at its
     /// position: ringing voices keep playing, notes before the position are not retriggered, and
-    /// effect states carry over when the mixer layout is unchanged. Edits are heard immediately.
+    /// effect states carry over when the mixer layout is unchanged. Edits are heard immediately:
+    /// ringing voices take the new channel volume / pan and mixer levels (ramped over a block).
+    /// A tempo change keeps the musical position (same tick, new frame).
     pub fn continue_from(&mut self, old: &mut Engine) {
-        self.frame = old.frame;
-        self.next_trigger = self.triggers.partition_point(|t| t.frame < old.frame);
+        let (from, to) = ((old.tempo, old.ppq, old.rate), (self.tempo, self.ppq, self.rate));
+        let to_new = move |f: u64| -> u64 {
+            if from == to {
+                return f;
+            }
+            let tick = f as f64 / f64::from(from.2.max(1)) * from.0 / 60.0 * f64::from(from.1);
+            laws::tick_to_frame(tick, to.1, to.0, to.2)
+        };
+        self.looping = old.looping;
+        self.frame = to_new(old.frame);
+        let frame = self.frame;
+        self.next_trigger = self.triggers.partition_point(|t| t.frame < frame);
         let n = self.channels.len();
         self.voices = std::mem::take(&mut old.voices);
         self.voices.retain(|v| v.channel < n);
         self.sounding = std::mem::take(&mut old.sounding);
+        for s in &mut self.sounding {
+            s.2 = to_new(s.2);
+        }
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
+                new.cur = o.cur;
                 if new.effects.len() == o.effects.len() {
                     new.effects = std::mem::take(&mut o.effects);
                 }
@@ -276,38 +323,45 @@ impl Engine {
             b.clear();
             b.resize(frames * 2, 0.0);
         }
-        let block_end = self.frame + frames as u64;
-
-        // Continue voices started in earlier blocks.
-        let channels = &self.channels;
-        let bus = &mut self.bus;
-        self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, frames));
-        // Start voices whose trigger falls in this block, each from its exact offset.
-        while let Some(t) = self.triggers.get(self.next_trigger).copied() {
-            if t.frame >= block_end {
-                break;
+        // A looping engine splits the block at the loop point and carries on from frame 0.
+        let mut at = 0;
+        while at < frames {
+            let looping = self.looping && self.end_frame > 0;
+            if looping && self.frame >= self.end_frame {
+                self.wrap();
             }
-            self.next_trigger += 1;
-            self.sounding.push((t.channel, t.key, t.end));
-            let offset = t.frame.saturating_sub(self.frame) as usize;
-            let remaining = t.cut.map(|c| c.saturating_sub(t.frame));
-            let mut v = Voice { channel: t.channel, pos: 0.0, step: t.rate, remaining, gain: t.gain };
-            if render_voice(&mut v, &self.channels, &mut self.bus, offset, frames) {
-                self.voices.push(v);
+            let mut n = frames - at;
+            if looping {
+                n = n.min((self.end_frame - self.frame) as usize);
             }
+            self.render_span(at, at + n);
+            at += n;
         }
 
-        // Mixer: apply each track's gain/pan, then add into its destinations.
+        // Mixer: apply each track's gain/pan (ramped after an edit), then add into its destinations.
         for &t in &self.order {
-            let [[ll, lr], [rl, rr]] = self.tracks[t].matrix;
+            let (to, from) = (self.tracks[t].matrix, self.tracks[t].cur);
+            self.tracks[t].cur = to;
             let mut buf = std::mem::take(&mut self.bus[t]);
             for fx in &mut self.tracks[t].effects {
                 fx.process(&mut buf);
             }
-            for f in buf.chunks_exact_mut(2) {
-                let (l, r) = (f[0], f[1]);
-                f[0] = ll * l + lr * r;
-                f[1] = rl * l + rr * r;
+            if from == to {
+                let [[ll, lr], [rl, rr]] = to;
+                for f in buf.chunks_exact_mut(2) {
+                    let (l, r) = (f[0], f[1]);
+                    f[0] = ll * l + lr * r;
+                    f[1] = rl * l + rr * r;
+                }
+            } else {
+                let n = frames.max(1) as f32;
+                for (i, f) in buf.chunks_exact_mut(2).enumerate() {
+                    let k = (i + 1) as f32 / n;
+                    let m = |r: usize, c: usize| from[r][c] + (to[r][c] - from[r][c]) * k;
+                    let (l, r) = (f[0], f[1]);
+                    f[0] = m(0, 0) * l + m(0, 1) * r;
+                    f[1] = m(1, 0) * l + m(1, 1) * r;
+                }
             }
             for &(dest, g) in &self.tracks[t].routes {
                 for (d, s) in self.bus[dest].iter_mut().zip(&buf) {
@@ -317,8 +371,43 @@ impl Engine {
             self.bus[t] = buf;
         }
         out.copy_from_slice(&self.bus[0][..frames * 2]);
-        self.frame = block_end;
-        self.sounding.retain(|&(_, _, end)| end > block_end);
+    }
+
+    /// Renders voices into the insert buses for block frames `a..b`, starting triggers that fall
+    /// in it from their exact offset.
+    fn render_span(&mut self, a: usize, b: usize) {
+        let span_end = self.frame + (b - a) as u64;
+        // Continue voices started earlier.
+        let channels = &self.channels;
+        let bus = &mut self.bus;
+        self.voices.retain_mut(|v| render_voice(v, channels, bus, a, b));
+        while let Some(t) = self.triggers.get(self.next_trigger).copied() {
+            if t.frame >= span_end {
+                break;
+            }
+            self.next_trigger += 1;
+            self.sounding.push((t.channel, t.key, t.end));
+            let offset = a + t.frame.saturating_sub(self.frame) as usize;
+            let remaining = t.cut.map(|c| c.saturating_sub(t.frame));
+            let gain = self.channels[t.channel].gain(t.vel, t.pan);
+            let mut v = Voice { channel: t.channel, pos: 0.0, step: t.rate, remaining, vel: t.vel, pan: t.pan, gain };
+            if render_voice(&mut v, &self.channels, &mut self.bus, offset, b) {
+                self.voices.push(v);
+            }
+        }
+        self.frame = span_end;
+        self.sounding.retain(|&(_, _, end)| end > span_end);
+    }
+
+    /// Loop point: back to frame 0 (sounding notes keep their remaining length).
+    fn wrap(&mut self) {
+        let at = self.frame;
+        self.frame = 0;
+        self.next_trigger = 0;
+        for s in &mut self.sounding {
+            s.2 = s.2.saturating_sub(at);
+        }
+        self.sounding.retain(|&(_, _, end)| end > 0);
     }
 
     /// Renders everything to an interleaved stereo buffer.
@@ -340,22 +429,31 @@ impl Engine {
 /// Resampling window half-width in source samples.
 const SINC_W: f64 = 13.5;
 
-/// Adds one voice into its channel's insert bus from `offset` to the block end.
+/// Adds one voice into its channel's insert bus for block frames `offset..end`.
 /// Returns false when the voice has finished.
 ///
-/// Rate 1 copies samples exactly. Other rates use a Blackman-windowed sinc with a fixed
+/// The gain ramps from the voice's last gain to the channel's current one over the span (no
+/// change = constant). Rate 1 copies samples exactly. Other rates use a Blackman-windowed sinc with a fixed
 /// 13.5-sample window; above rate 1 the cutoff drops to the output Nyquist (`1/rate`).
 // spec: audio/sampler-playback.md (resampling)
-fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], offset: usize, frames: usize) -> bool {
+fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], offset: usize, end: usize) -> bool {
     let ch = &channels[v.channel];
     let Some(s) = ch.sample.as_ref() else { return false };
     let n = s.frames();
-    let (gl, gr) = v.gain;
+    let target = ch.gain(v.vel, v.pan);
+    let (mut gl, mut gr) = v.gain;
+    let (dl, dr) = if target == v.gain {
+        (0.0, 0.0)
+    } else {
+        let len = end.saturating_sub(offset).max(1) as f32;
+        ((target.0 - gl) / len, (target.1 - gr) / len)
+    };
+    v.gain = target;
     let out = &mut bus[ch.insert];
     let exact = v.step == 1.0;
     let scale = v.step.max(1.0);
     let mut pos = v.pos;
-    for f in offset..frames {
+    for f in offset..end {
         if v.remaining == Some(0) {
             return false;
         }
@@ -381,6 +479,10 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
             }
             (l as f32, r as f32)
         };
+        if dl != 0.0 || dr != 0.0 {
+            gl += dl;
+            gr += dr;
+        }
         out[f * 2] += l * gl;
         out[f * 2 + 1] += r * gr;
         pos += v.step;
