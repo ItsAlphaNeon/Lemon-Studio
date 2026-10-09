@@ -92,7 +92,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 
     overview(ui, s, &l, &g, notes, ch);
     ruler(ui, &l, &g);
-    keyboard(ui, &l, &g);
+    // Lit keys: the one held with the mouse and this channel's notes playing now (§4).
+    let mut lit: Vec<i32> = s.piano.held.into_iter().collect();
+    lit.extend(f.sounding.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| i32::from(k)));
+    keyboard(ui, &l, &g, &lit);
     grid(ui, &l, &g, selecting);
 
     // Notes: ghosts of the other channels first, then this channel's (§5).
@@ -224,7 +227,7 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom) {
     ui.c.pop_clip();
 }
 
-fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom) {
+fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
     let t = ui.t;
     let k = l.keys;
     ui.hit(k, Action::PianoKeys, "Keyboard");
@@ -239,15 +242,30 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom) {
     }
     ui.c.fill_rect(Rect::new(k.right() - 1.0, k.y, 1.0, k.h), Color::rgb(0x7e8289));
     let (lo, hi) = g.visible_keys();
+    // Lit white keys: the row plus half of each neighbouring black row (the white-key shape).
+    for &key in lit.iter().filter(|&&key| !is_black(key) && (lo..=hi).contains(&key)) {
+        let y = g.y_of(key);
+        let top = if is_black(key + 1) { y - 9.0 } else { y };
+        let bottom = if is_black(key - 1) { y + 26.0 } else { y + 17.0 };
+        for i in 0..bands {
+            let x = k.x + (k.w - 1.0) * i as f32 / bands as f32;
+            let w = (k.w - 1.0) / bands as f32 + 1.0;
+            let c = t.key_lit_left.mix(t.key_lit, i as f32 / (bands - 1) as f32);
+            ui.c.fill_rect(Rect::new(x, top, w, bottom - top), c);
+        }
+        ui.c.fill_rect(Rect::new(k.right() - 1.0, top, 1.0, bottom - top), t.key_lit_edge);
+    }
     let sep = t.key_white_left.shade(-0.12);
     for key in lo..=hi {
         let y = g.y_of(key);
         match key.rem_euclid(12) {
             0 => {
                 // C: darker key, extended half a row up on the right; octave label.
-                let left = t.key_white_left.shade(-0.16);
-                ui.c.fill_rect_gradient(Rect::new(k.x, y, 45.0, 17.0), left, left, 0.0);
-                ui.c.fill_rect(Rect::new(k.x + 45.0, y - 9.0, k.w - 46.0, 26.0), t.key_c);
+                if !lit.contains(&key) {
+                    let left = t.key_white_left.shade(-0.16);
+                    ui.c.fill_rect_gradient(Rect::new(k.x, y, 45.0, 17.0), left, left, 0.0);
+                    ui.c.fill_rect(Rect::new(k.x + 45.0, y - 9.0, k.w - 46.0, 26.0), t.key_c);
+                }
                 ui.c.text_right(Font::new(12), k.right() - 4.0, y + 1.0, t.key_label, &key_name(key));
                 ui.c.fill_rect(Rect::new(k.x, y + 17.0, k.w - 1.0, 1.0), sep);
             }
@@ -258,8 +276,9 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom) {
     for key in lo..=hi {
         if is_black(key) {
             let y = g.y_of(key);
+            let (left, right) = if lit.contains(&key) { (t.key_black_lit_left, t.key_black_lit) } else { (t.key_black_left, t.key_black) };
             for i in 0..6 {
-                let c = t.key_black_left.mix(t.key_black, i as f32 / 5.0);
+                let c = left.mix(right, i as f32 / 5.0);
                 let x = k.x + if i == 0 { 0.0 } else { 10.0 + 8.0 * (i - 1) as f32 };
                 let w = if i == 0 { 10.0 } else if i == 5 { 3.0 } else { 8.0 };
                 ui.c.fill_rect(Rect::new(x, y, w, 18.0), c);

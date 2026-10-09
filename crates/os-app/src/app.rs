@@ -211,6 +211,8 @@ pub enum Drag {
     NoteResize { x0: f32, orig: Vec<(usize, Note)> },
     NoteErase,
     Velocity { last_x: f32 },
+    /// Left button held on the piano keyboard: each key entered is auditioned (§8).
+    PianoKeys { key: i32 },
     /// Scroll axes from a start mouse position: value = start + (mouse - m0) × ratio per axis
     /// (ratio < 0 grabs the content, as with the middle button).
     Scroll { m0: (f32, f32), axes: Vec<(Scroll, bool, f32, f32)> },
@@ -497,6 +499,7 @@ impl App {
             playing: self.transport.playing(),
             seconds: self.transport.seconds(),
             peaks: self.transport.peaks(),
+            sounding: if self.transport.playing() { self.transport.sounding() } else { Vec::new() },
         };
         views::paint(&mut ui, &self.state, &info);
         // Remember where the piano roll's regions are, for mouse mapping and damage.
@@ -553,6 +556,15 @@ impl App {
                 Drag::Velocity { last_x } => {
                     self.paint_velocity(last_x, x, y);
                     self.drag = Some(Drag::Velocity { last_x: x });
+                }
+                Drag::PianoKeys { key } => {
+                    if let Some(g) = self.piano_geom() {
+                        let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
+                        if k != key {
+                            self.drag = Some(Drag::PianoKeys { key: k });
+                            self.hold_key(Some(k), true);
+                        }
+                    }
                 }
                 Drag::Window { win, dx, dy } => {
                     let old = self.win_bounds(win);
@@ -814,6 +826,7 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        self.hold_key(None, false);
         if matches!(self.drag, Some(Drag::Velocity { .. })) {
             self.state.piano.dirty = true;
         }
@@ -832,6 +845,8 @@ impl App {
         let Some(g) = self.piano_geom() else { return };
         let (x, y) = self.mouse;
         let mut dt = g.snap_delta((x - x0) / g.ppt);
+        let mut held = None;
+        let was_held = self.state.piano.held;
         let rects = |s: &State| -> Vec<Rect> {
             let notes = piano::notes(s);
             orig.iter().filter_map(|&(i, _)| notes.get(i).and_then(|n| g.note_rect(n))).collect()
@@ -858,6 +873,13 @@ impl App {
             let lo = orig.iter().map(|(_, o)| i32::from(o.key)).min().unwrap_or(0);
             let hi = orig.iter().map(|(_, o)| i32::from(o.key)).max().unwrap_or(0);
             let dk = dk.clamp(-lo, views::piano::TOP_KEY - hi);
+            // The grabbed note (first) is auditioned again whenever its key changes (§8).
+            if let Some(&(_, o)) = orig.first() {
+                let k = i32::from(o.key) + dk;
+                if was_held != Some(k) {
+                    held = Some(k);
+                }
+            }
             for &(i, o) in orig {
                 if let Some(n) = p.notes.get_mut(i) {
                     n.position = (i64::from(o.position) + dt) as u32;
@@ -867,6 +889,25 @@ impl App {
         }
         dirty.extend(rects(&self.state));
         self.damage_notes(&dirty);
+        if held.is_some() {
+            self.hold_key(held, true);
+        }
+    }
+
+    /// Set the key held with the mouse (lit on the keyboard), auditioning it if `play`.
+    fn hold_key(&mut self, key: Option<i32>, play: bool) {
+        if self.state.piano.held == key {
+            return;
+        }
+        self.state.piano.held = key;
+        if let (Some(k), true, Some(ch)) = (key, play, piano::channel(&self.state)) {
+            self.preview(ch, k);
+        }
+        // The keyboard column.
+        match self.piano_grid {
+            Some(g) => self.damage_rect(Rect::new(g.x - 73.0, g.y, 73.0, g.h)),
+            None => self.invalidate(),
+        }
     }
 
     /// Damage note rects (old and new) and the velocity-panel columns under them. The overview
@@ -1049,7 +1090,7 @@ impl App {
                 let n = piano::notes(s)[i];
                 s.piano.last_len = n.length;
                 self.drag = Some(Drag::NoteMove { x0: x, y0: y, orig: vec![(i, n)] });
-                self.preview(ch, i32::from(n.key));
+                self.hold_key(Some(i32::from(n.key)), true);
             }
             Action::PianoNote(i) => {
                 let Some(&n) = piano::notes(s).get(i) else { return };
@@ -1062,13 +1103,16 @@ impl App {
                     vec![i]
                 };
                 let notes = piano::notes(s);
-                let orig: Vec<(usize, Note)> = idx.iter().filter_map(|&j| notes.get(j).map(|&m| (j, m))).collect();
+                // The clicked note first: it is the one auditioned while dragging.
+                let orig: Vec<(usize, Note)> =
+                    std::iter::once(i).chain(idx.into_iter().filter(|&j| j != i)).filter_map(|j| notes.get(j).map(|&m| (j, m))).collect();
                 s.piano.last_len = n.length.max(g.step);
                 let nr = g.note_rect(&n).unwrap_or_default();
                 self.drag = Some(if x >= nr.right() - resize_zone(nr.w) {
                     self.resize_cursor = true;
                     Drag::NoteResize { x0: x, orig }
                 } else {
+                    self.hold_key(Some(i32::from(n.key)), true);
                     Drag::NoteMove { x0: x, y0: y, orig }
                 });
             }
@@ -1077,7 +1121,11 @@ impl App {
                 self.drag = Some(Drag::Velocity { last_x: x });
                 self.paint_velocity(x, x, y);
             }
-            Action::PianoKeys => self.preview(ch, g.key_at(y)),
+            Action::PianoKeys => {
+                let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
+                self.drag = Some(Drag::PianoKeys { key: k });
+                self.hold_key(Some(k), true);
+            }
             _ => {}
         }
     }
@@ -1560,7 +1608,20 @@ mod tests {
         for (x, y) in [(530.0, 490.0), (600.0, 450.0), (650.0, 430.0)] {
             step(&mut app, &mut a, move |ap| { ap.mouse_move(x, y); });
         }
+        // The dragged note's key is lit on the keyboard while held.
+        assert_eq!(app.state.piano.held, Some(i32::from(key0) + 4));
+        // (The overview mini-map refreshes on release, so compare the keyboard column only.)
+        frame(&mut app, &mut b, None);
+        let g = app.piano_geom().unwrap();
+        let keys = Rect::new(g.grid.x - 73.0, g.grid.y, 73.0, g.grid.h);
+        let differs = |x: usize, y: usize| {
+            let i = (y * 1920 + x) * 4;
+            (0..4).any(|c| a.pixmap.data()[i + c].abs_diff(b.pixmap.data()[i + c]) > 3)
+        };
+        let bad = (keys.y as usize..keys.bottom() as usize).flat_map(|y| (keys.x as usize..keys.right() as usize).map(move |x| (x, y))).filter(|&(x, y)| differs(x, y)).count();
+        assert_eq!(bad, 0, "keyboard while dragging a note (lit key)");
         step(&mut app, &mut a, |ap| ap.mouse_up());
+        assert_eq!(app.state.piano.held, None);
         let n = piano::notes(&app.state)[0];
         assert!(n.position > 0 && n.key == key0 + 4, "note moved right and 4 keys up: {n:?}");
         let r = app.piano_geom().unwrap().note_rect(&n).unwrap();
@@ -1582,5 +1643,21 @@ mod tests {
         assert!(piano::notes(&app.state).is_empty(), "right-click erased the note");
         frame(&mut app, &mut b, None);
         assert_same(&a, &b, "after erase");
+        // Hold the left button on the keyboard and slide down: each key entered is held (lit).
+        let g = app.piano_geom().unwrap();
+        let kx = g.grid.x - 30.0;
+        step(&mut app, &mut a, |ap| { ap.mouse_move(kx, g.y_of(72) + 8.0); });
+        step(&mut app, &mut a, |ap| ap.mouse_down());
+        assert_eq!(app.state.piano.held, Some(72));
+        for key in [71, 70, 69] {
+            step(&mut app, &mut a, |ap| { ap.mouse_move(kx, g.y_of(key) + 8.0); });
+            assert_eq!(app.state.piano.held, Some(key));
+        }
+        frame(&mut app, &mut b, None);
+        assert_same(&a, &b, "keyboard drag");
+        step(&mut app, &mut a, |ap| ap.mouse_up());
+        assert_eq!(app.state.piano.held, None);
+        frame(&mut app, &mut b, None);
+        assert_same(&a, &b, "keyboard released");
     }
 }

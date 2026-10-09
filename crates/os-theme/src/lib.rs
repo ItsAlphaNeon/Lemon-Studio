@@ -276,6 +276,11 @@ tokens! {
     key_black_left = 0x2a2b2d, "Piano keyboard: black keys (left end).";
     key_c = 0xc6cad1, "Piano keyboard: C keys.";
     key_label = 0x5082b5, "Piano keyboard: octave labels.";
+    key_lit = 0xffd094, "Piano keyboard: sounding white key (right end of the gradient).";
+    key_lit_left = 0xdea367, "Piano keyboard: sounding white key (left end).";
+    key_lit_edge = 0xa76c30, "Piano keyboard: sounding white key, right edge.";
+    key_black_lit = 0xc98a4a, "Piano keyboard: sounding black key (right end).";
+    key_black_lit_left = 0x7a4f24, "Piano keyboard: sounding black key (left end).";
     velocity = 0xacdfb3, "Velocity lollipops.";
     velocity_dot = 0x477a4e, "Velocity lollipop disc.";
 }

@@ -30,6 +30,9 @@ struct Trigger {
     cut: Option<u64>,
     /// Per-note gain (channel volume × velocity × pan).
     gain: (f32, f32),
+    /// Note key and the frame where the note ends (for showing sounding keys).
+    key: u16,
+    end: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +85,8 @@ pub struct Engine {
     order: Vec<usize>,
     triggers: Vec<Trigger>,
     next_trigger: usize,
+    /// Notes started and not yet past their length: (channel, key, end frame).
+    sounding: Vec<(usize, u16, u64)>,
     voices: Vec<Voice>,
     frame: u64,
     /// Frame where the scheduled material ends (voices may ring past it).
@@ -179,7 +184,11 @@ impl Engine {
                 // spec: audio/sampler-playback.md (velocity multiplies volume; pans add, clamped)
                 let g = state.volume * laws::velocity_gain(n.velocity);
                 let (pl, pr) = laws::channel_pan(state.pan + laws::note_pan(n.pan));
+                // A plain step (length 0) counts as one step long.
+                let len = if n.len > 0.0 { n.len } else { f64::from(ppq) / 4.0 };
                 Some(Trigger {
+                    key: n.key,
+                    end: laws::tick_to_frame(n.tick + len, ppq, tempo, rate),
                     frame: laws::tick_to_frame(n.tick, ppq, tempo, rate),
                     channel: n.channel,
                     rate: state.base_rate * laws::playback_rate(n.key, 0),
@@ -197,6 +206,7 @@ impl Engine {
             order,
             triggers,
             next_trigger: 0,
+            sounding: Vec::with_capacity(256),
             voices: Vec::with_capacity(1024),
             frame: 0,
             end_frame: laws::tick_to_frame(end_tick, ppq, tempo, rate),
@@ -229,6 +239,11 @@ impl Engine {
         self.frame >= self.end_frame && self.next_trigger >= self.triggers.len() && self.voices.is_empty()
     }
 
+    /// Notes playing at the current position, as (channel index, key).
+    pub fn sounding(&self) -> impl Iterator<Item = (usize, u16)> + '_ {
+        self.sounding.iter().map(|&(c, k, _)| (c, k))
+    }
+
     /// Renders the next `out.len() / 2` stereo frames (interleaved L/R) into `out`.
     pub fn process(&mut self, out: &mut [f32]) {
         let frames = out.len() / 2;
@@ -248,6 +263,7 @@ impl Engine {
                 break;
             }
             self.next_trigger += 1;
+            self.sounding.push((t.channel, t.key, t.end));
             let offset = t.frame.saturating_sub(self.frame) as usize;
             let remaining = t.cut.map(|c| c.saturating_sub(t.frame));
             let mut v = Voice { channel: t.channel, pos: 0.0, step: t.rate, remaining, gain: t.gain };
@@ -277,6 +293,7 @@ impl Engine {
         }
         out.copy_from_slice(&self.bus[0][..frames * 2]);
         self.frame = block_end;
+        self.sounding.retain(|&(_, _, end)| end > block_end);
     }
 
     /// Renders everything to an interleaved stereo buffer.
@@ -397,11 +414,13 @@ struct Sched {
     pan: u8,
     /// Tick at which the voice is cut (audio clip end).
     cut: Option<f64>,
+    /// Note length in ticks (0 = a plain step).
+    len: f64,
 }
 
 impl Sched {
     fn note(start: f64, n: &os_model::Note) -> Self {
-        Sched { tick: start + f64::from(n.position), channel: usize::from(n.channel), key: n.key, velocity: n.velocity, pan: n.pan, cut: None }
+        Sched { tick: start + f64::from(n.position), channel: usize::from(n.channel), key: n.key, velocity: n.velocity, pan: n.pan, cut: None, len: f64::from(n.length) }
     }
 }
 
@@ -463,7 +482,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                     ClipSource::Channel(ch) => match project.channels.get(usize::from(ch)).map(|c| c.kind) {
                         // An audio clip plays its channel's sample from the start, cut at the clip end.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, velocity: 100, pan: 64, cut: Some(start + len) });
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, velocity: 100, pan: 64, cut: Some(start + len), len });
                         }
                         _ => report.automation_clips_ignored += 1,
                     },

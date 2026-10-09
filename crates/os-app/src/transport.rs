@@ -26,6 +26,8 @@ pub struct Shared {
     pub peak_l: AtomicU32,
     pub peak_r: AtomicU32,
     pub error: Mutex<Option<String>>,
+    /// Notes playing now, as (channel index, key); written by the audio callback.
+    pub sounding: Mutex<Vec<(u16, u16)>>,
 }
 
 enum Cmd {
@@ -43,7 +45,7 @@ pub struct Transport {
 impl Transport {
     pub fn new(factory: Option<PathBuf>) -> Transport {
         let (tx, rx) = mpsc::channel();
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared { sounding: Mutex::new(Vec::with_capacity(256)), ..Shared::default() });
         let s = shared.clone();
         std::thread::Builder::new()
             .name("openstudio-audio".into())
@@ -84,6 +86,11 @@ impl Transport {
             f32::from_bits(self.shared.peak_l.load(Ordering::Relaxed)),
             f32::from_bits(self.shared.peak_r.load(Ordering::Relaxed)),
         )
+    }
+
+    /// Notes playing now (pattern or song playback, not previews), as (channel index, key).
+    pub fn sounding(&self) -> Vec<(u16, u16)> {
+        self.shared.sounding.lock().map(|v| v.clone()).unwrap_or_default()
     }
 
     pub fn take_error(&self) -> Option<String> {
@@ -150,6 +157,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, mut library: SampleLibra
         }
         if session.as_ref().is_none_or(|s| !s.looping) {
             shared.playing.store(false, Ordering::Relaxed);
+        }
+        if session.as_ref().is_none_or(|s| !s.looping) {
+            if let Ok(mut v) = shared.sounding.lock() {
+                v.clear();
+            }
         }
         if session.is_none() {
             shared.peak_l.store(0, Ordering::Relaxed);
@@ -220,6 +232,11 @@ where
                         e.process(&mut stereo);
                         if report {
                             shared.position.store(e.position(), Ordering::Relaxed);
+                            // Never block the audio thread; a missed update shows next block.
+                            if let Ok(mut v) = shared.sounding.try_lock() {
+                                v.clear();
+                                v.extend(e.sounding().map(|(c, k)| (c as u16, k)));
+                            }
                         }
                         // Patterns loop on the bar line; ringing voices are cut by the restart.
                         if loop_at_end && e.past_end() {

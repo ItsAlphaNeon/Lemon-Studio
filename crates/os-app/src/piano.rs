@@ -22,6 +22,8 @@ pub struct PianoState {
     pub last_len: u32,
     /// Notes changed since the playing engine last got the project.
     pub dirty: bool,
+    /// Key held with the mouse (keyboard press or a dragged note), lit on the keyboard (§4).
+    pub held: Option<i32>,
     sel: Vec<usize>,
     sel_key: (u16, u16),
     undo: Vec<(u16, Vec<Note>)>,
@@ -35,6 +37,7 @@ impl Default for PianoState {
             px_per_beat: 96.0,
             last_len: 0,
             dirty: false,
+            held: None,
             sel: Vec::new(),
             sel_key: (0, 0),
             undo: Vec::new(),
@@ -317,7 +320,9 @@ mod tests {
         let mut lib = os_engine::SampleLibrary::new(None);
         let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
         let mut buf = vec![0.0f32; 2 * 512];
-        let mut peak = 0.0f32;
+        e.process(&mut buf);
+        assert_eq!(e.sounding().collect::<Vec<_>>(), vec![(4, 72)], "the note is reported while it plays");
+        let mut peak = buf.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         while !e.past_end() {
             e.process(&mut buf);
             peak = buf.iter().fold(peak, |m, v| m.max(v.abs()));

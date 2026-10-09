@@ -24,6 +24,8 @@ pub struct FrameInfo {
     pub playing: bool,
     pub seconds: f64,
     pub peaks: (f32, f32),
+    /// Notes playing now, as (channel index, key).
+    pub sounding: Vec<(u16, u16)>,
 }
 
 /// UI text at a nominal size (Cuprum; spec §10).
