@@ -239,12 +239,18 @@ pub struct Ui<'a> {
     hits: &'a mut Vec<Hit>,
     pub bars: &'a mut Vec<Bar>,
     hover: &'a Option<Action>,
+    pressed: &'a Option<Action>,
     pub mouse: (f32, f32),
     /// The window being painted (tags hits).
     pub win: Option<Win>,
 }
 
 impl Ui<'_> {
+    /// Whether `action` is held down by the left button with the cursor still over `rect`.
+    pub fn down(&self, rect: Rect, action: &Action) -> bool {
+        self.pressed.as_ref() == Some(action) && rect.contains(self.mouse.0, self.mouse.1)
+    }
+
     /// Register a hit region; returns whether it is hovered (topmost last frame).
     pub fn hit(&mut self, rect: Rect, action: Action, hint: impl Into<Cow<'static, str>>) -> bool {
         let hovered = self.hover.as_ref() == Some(&action) && rect.contains(self.mouse.0, self.mouse.1);
@@ -410,6 +416,8 @@ pub struct App {
     pub hits: Vec<Hit>,
     pub bars: Vec<Bar>,
     pub hover: Option<Action>,
+    /// Action under the cursor while the left button is held (pressed look of buttons).
+    pub pressed: Option<Action>,
     hover_rect: Option<Rect>,
     damage: Damage,
     last_playing: bool,
@@ -481,6 +489,7 @@ impl App {
             hits: Vec::new(),
             bars: Vec::new(),
             hover: None,
+            pressed: None,
             hover_rect: None,
             damage: Damage::Full,
             last_playing: false,
@@ -630,7 +639,7 @@ impl App {
         self.hits.clear();
         self.bars.clear();
         let title = self.title();
-        let mut ui = Ui { c: canvas, t: &self.theme.colors, hits: &mut self.hits, bars: &mut self.bars, hover: &self.hover, mouse: self.mouse, win: None };
+        let mut ui = Ui { c: canvas, t: &self.theme.colors, hits: &mut self.hits, bars: &mut self.bars, hover: &self.hover, pressed: &self.pressed, mouse: self.mouse, win: None };
         let info = views::FrameInfo {
             title,
             hint: self.hint.clone(),
@@ -894,6 +903,7 @@ impl App {
         self.invalidate();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
+        self.pressed = action.clone();
         if self.state.lane_menu && !matches!(action, Some(Action::PianoLanePick(_))) {
             self.state.lane_menu = false;
             return;
@@ -1093,6 +1103,9 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        if self.pressed.take().is_some() {
+            self.invalidate();
+        }
         self.hold_key(None, false);
         if matches!(self.drag, Some(Drag::Velocity { .. })) {
             self.state.piano.dirty = true;
@@ -2043,6 +2056,33 @@ mod tests {
 
     fn frame(app: &mut App, c: &mut Canvas, damage: Option<Rect>) {
         app.paint(c, damage);
+    }
+
+    /// Holding the mouse on a toolbar window button lights it orange; releasing restores it.
+    #[test]
+    fn pressed_button_look() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut a, None);
+        let act = Action::Placeholder("audio editor");
+        let r = hit_rect(&app, &act);
+        let px = |c: &Canvas| {
+            let mut out = vec![0u32; 1920 * 1080];
+            c.copy_to_xrgb(&mut out);
+            out[(r.cy() as usize + 9) * 1920 + r.cx() as usize]
+        };
+        let idle = px(&a);
+        app.mouse_move(r.cx(), r.cy());
+        frame(&mut app, &mut a, None);
+        app.mouse_down();
+        frame(&mut app, &mut a, None);
+        let held = px(&a);
+        let (red, blue) = ((held >> 16) & 0xff, held & 0xff);
+        assert!(red > 0xe0 && blue < 0xa8, "orange while held: {held:06x} (idle {idle:06x})");
+        app.mouse_up();
+        app.mouse_move(900.0, 900.0);
+        frame(&mut app, &mut a, None);
+        assert_eq!(px(&a), idle, "back to idle after release and moving away");
     }
 
     /// A damage-region repaint must give the pixels of a full repaint (anti-aliased edges cut by

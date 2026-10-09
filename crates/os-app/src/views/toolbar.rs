@@ -100,7 +100,8 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         (Rect::span(419.0, 449.0, 5.0, 35.0), Icon::Play, play_on, Action::Play, "Play / pause (Space plays / stops)"),
         (Rect::span(450.0, 482.0, 5.0, 35.0), Icon::Stop, false, Action::Stop, "Stop (Space)"),
     ] {
-        let hov = ui.hit(r, action, hint);
+        let hov = ui.hit(r, action.clone(), hint);
+        let on = on || ui.down(r, &action);
         // Lit / hovered sections fill their whole slot of the capsule (clipped to its round end).
         if on || hov {
             ui.c.push_clip(r);
@@ -125,9 +126,16 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
     let hov = ui.hit(rec, Action::Record, "Record");
+    let down = ui.down(rec, &Action::Record);
     ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.toolbar_line.shade(-0.25));
     ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, if hov { t.button_hi } else { t.button.shade(-0.03) });
-    ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.shade(-0.1));
+    if down {
+        // Held: a red glowing ring around a dark core.
+        ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.record.mix(os_ui::Color::rgb(0xffffff), 0.35));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, t.record.shade(0.15));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.shade(-0.55));
+    }
+    ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, if down { t.record.shade(-0.55) } else { t.record.shade(-0.1) });
     ui.c.fill_circle(rec.cx() - 1.2, rec.cy() - 1.5, 2.0, t.record.shade(0.4));
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);
@@ -322,10 +330,10 @@ fn row2(ui: &mut Ui, s: &State) {
     ];
     for (i, (icon, action, open, hint)) in wins.into_iter().enumerate() {
         let r = btn(973.0 + 33.0 * i as f32, 45.0);
-        let hov = ui.hit(r, action, hint);
-        super::button_face(ui, r, if hov { super::Look::Hover } else { super::Look::Off });
+        let hov = ui.hit(r, action.clone(), hint) || ui.down(r, &action);
+        super::button_face(ui, r, if hov { super::Look::Hot } else { super::Look::Off });
         let _ = open;
-        icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), if hov { os_ui::Color::rgb(0xffffff) } else { t.glyph });
+        icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), if hov { t.on_glyph } else { t.glyph });
     }
 
     // News panel.

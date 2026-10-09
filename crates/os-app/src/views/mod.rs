@@ -227,6 +227,8 @@ pub enum Look {
     Off,
     Hover,
     On,
+    /// Hovered or held window-toggle buttons light up orange (spec: ui/main-window.md §1a).
+    Hot,
 }
 
 /// FL-style raised button face (spec §1): 1 px border with softened corners, an elliptical radial
@@ -237,6 +239,7 @@ pub fn button_face(ui: &mut Ui, r: Rect, look: Look) {
         Look::Off => (Color::rgb(0x191d1f), Color::rgb(0x313537), Color::rgb(0x272b2d)),
         Look::Hover => (Color::rgb(0x191d1f), Color::rgb(0x3d4244), Color::rgb(0x2c3133)),
         Look::On => (Color::rgb(0xbe5507), Color::rgb(0xfffaab), Color::rgb(0xffaf65)),
+        Look::Hot => (Color::rgb(0xbe5507), Color::rgb(0xffe598), Color::rgb(0xf99448)),
     };
     ui.c.fill_rect(r, border);
     for (x, y) in [(r.x, r.y), (r.right() - 1.0, r.y), (r.x, r.bottom() - 1.0), (r.right() - 1.0, r.bottom() - 1.0)] {
@@ -245,7 +248,7 @@ pub fn button_face(ui: &mut Ui, r: Rect, look: Look) {
     let face = r.inset(1.0);
     ui.c.fill_radial(face, center, edge);
     // Inner rim.
-    let rim = Color::rgb(0x000000).with_alpha(if look == Look::On { 26 } else { 40 });
+    let rim = Color::rgb(0x000000).with_alpha(if matches!(look, Look::On | Look::Hot) { 26 } else { 40 });
     ui.c.fill_rect(Rect::new(face.x, face.y, face.w, 1.0), rim);
     ui.c.fill_rect(Rect::new(face.x, face.bottom() - 1.0, face.w, 1.0), rim);
     ui.c.fill_rect(Rect::new(face.x, face.y + 1.0, 1.0, face.h - 2.0), rim);
@@ -254,11 +257,12 @@ pub fn button_face(ui: &mut Ui, r: Rect, look: Look) {
 
 /// A 30×33 toolbar button (§1). `on` draws the orange "on" state.
 pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, hint: &'static str) {
-    let hov = ui.hit(r, action, hint);
-    let look = if on { Look::On } else if hov { Look::Hover } else { Look::Off };
+    let hov = ui.hit(r, action.clone(), hint);
+    let down = ui.down(r, &action);
+    let look = if on { Look::On } else if down { Look::Hot } else if hov { Look::Hover } else { Look::Off };
     button_face(ui, r, look);
     let c = match look {
-        Look::On => ui.t.on_glyph,
+        Look::On | Look::Hot => ui.t.on_glyph,
         Look::Hover => Color::rgb(0xffffff),
         Look::Off => ui.t.glyph,
     };
