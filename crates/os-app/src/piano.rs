@@ -78,6 +78,11 @@ pub struct PianoState {
     pub clipboard: Vec<Note>,
     /// Zoom tool: the view before "zoom out" (px per beat, scroll x, scroll y), for right-click.
     pub zoom_back: Option<(f32, f32, f32)>,
+    /// Play-start marker in the ruler (ticks; pattern playback starts here, §10).
+    pub marker: u32,
+    /// Time selection made by right-dragging the ruler (ticks, start..end); the only selection
+    /// that shades the grid (§10).
+    pub range: Option<(u32, u32)>,
     sel: Vec<usize>,
     sel_key: (u16, u16),
     undo: Vec<(u16, Vec<Note>)>,
@@ -96,6 +101,8 @@ impl Default for PianoState {
             overlay: None,
             clipboard: Vec::new(),
             zoom_back: None,
+            marker: 0,
+            range: None,
             sel: Vec::new(),
             sel_key: (0, 0),
             undo: Vec::new(),
@@ -115,10 +122,12 @@ impl PianoState {
     pub fn select(&mut self, pattern: u16, channel: u16, sel: Vec<usize>) {
         self.sel_key = (pattern, channel);
         self.sel = sel;
+        self.range = None;
     }
 
     pub fn clear_selection(&mut self) {
         self.sel.clear();
+        self.range = None;
     }
 
     /// Forget everything tied to the previous project.
@@ -327,6 +336,14 @@ pub fn notes_in(s: &State, g: &Geom, r: Rect) -> Vec<usize> {
         .filter(|(_, n)| Some(n.channel) == ch && g.note_rect(n).is_some_and(|nr| nr.intersect(&r).w > 0.0 && nr.intersect(&r).h > 0.0))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Select this channel's notes starting inside the time range `a..b` and remember the range (§10).
+pub fn select_range(s: &mut State, a: u32, b: u32) {
+    let Some(ch) = channel(s) else { return };
+    let sel = notes(s).iter().enumerate().filter(|(_, n)| n.channel == ch && n.position >= a && n.position < b).map(|(i, _)| i).collect();
+    s.piano.select(s.pattern, ch, sel);
+    s.piano.range = if b > a { Some((a, b)) } else { None };
 }
 
 /// The selection, or every note of the channel when nothing is selected (§9 selection editing).

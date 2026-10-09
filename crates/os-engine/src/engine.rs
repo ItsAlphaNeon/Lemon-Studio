@@ -239,6 +239,12 @@ impl Engine {
         self.frame >= self.end_frame && self.next_trigger >= self.triggers.len() && self.voices.is_empty()
     }
 
+    /// Start playback at `frame` (notes before it are not triggered).
+    pub fn seek(&mut self, frame: u64) {
+        self.frame = frame;
+        self.next_trigger = self.triggers.partition_point(|t| t.frame < frame);
+    }
+
     /// Take over playback from `old` (built from an earlier version of the project) at its
     /// position: ringing voices keep playing, notes before the position are not retriggered, and
     /// effect states carry over when the mixer layout is unchanged. Edits are heard immediately.

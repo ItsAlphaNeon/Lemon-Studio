@@ -83,7 +83,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let pat = s.project.patterns.iter().find(|p| p.number == s.pattern);
     let notes: &[Note] = pat.map_or(&[], |p| &p.notes);
     let sel = s.piano.selection(s.pattern, ch);
-    let selecting = !sel.is_empty();
+    // Only a ruler time selection shades the grid, and only its columns (§10).
+    let range = s.piano.range.map(|(a, b)| (g.x_of(a as f32), g.x_of(b as f32)));
 
     // Note-colour tab (§6).
     let tab = l.tab;
@@ -96,12 +97,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.c.fill_polygon(&[(tab.right() - 4.0, tab.bottom() - 18.0), (tab.right() - 4.0, tab.bottom() - 5.0), (tab.right() - 17.0, tab.bottom() - 5.0)], ink);
 
     overview(ui, s, &l, &g, notes, ch);
-    ruler(ui, &l, &g);
+    ruler(ui, &l, &g, range, s.piano.marker);
     // Lit keys: the one held with the mouse and this channel's notes playing now (§4).
     let mut lit: Vec<i32> = s.piano.held.into_iter().collect();
     lit.extend(f.sounding.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| i32::from(k)));
     keyboard(ui, &l, &g, &lit);
-    grid(ui, &l, &g, selecting);
+    grid(ui, &l, &g, range);
 
     // Notes: ghosts of the other channels first, then this channel's (§5).
     ui.hit(l.grid, Action::PianoGrid, "Piano roll: click to add a note, drag a note to move it or its end to resize, right-click to delete");
@@ -169,6 +170,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         let tick = (f.seconds * s.tempo / 60.0 * ppq) % f64::from(len.max(1));
         let x = g.x_of(tick as f32);
         ui.c.fill_rect(Rect::new(x, l.grid.y, 1.5, l.grid.h), t.playhead);
+    } else if !f.playing {
+        // Stopped: a grey line at the play-start marker (§10).
+        let x = g.x_of(s.piano.marker as f32).round();
+        ui.c.fill_rect(Rect::new(x - 1.0, l.grid.y, 3.0, l.grid.h), Color::rgb(0x38373b));
+        ui.c.fill_rect(Rect::new(x, l.grid.y, 1.0, l.grid.h), Color::rgb(0x53585c));
     }
     ui.c.pop_clip();
 
@@ -267,13 +273,22 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     }
 }
 
-fn ruler(ui: &mut Ui, l: &Layout, g: &Geom) {
+fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u32) {
     let t = ui.t;
     let rr = l.ruler;
+    ui.hit(Rect::new(l.grid.x, rr.y, l.grid.w, rr.h), Action::PianoRuler, "Drag: move the play start - right-drag: select a time range");
     ui.c.fill_rect(Rect::new(rr.x, rr.y, rr.w, 17.0), t.ruler);
     ui.c.fill_rect(Rect::new(rr.x, rr.y + 17.0, rr.w, 1.0), Color::rgb(0x16191c));
     ui.c.fill_rect(Rect::new(rr.x, rr.y + 18.0, rr.w, 1.0), Color::rgb(0x090c0f));
     ui.c.push_clip(Rect::new(l.grid.x, rr.y, l.grid.w, rr.h));
+    // Time selection: red band (§10, colours sampled from FL).
+    if let Some((x0, x1)) = range {
+        let b = Rect::span(x0, x1, rr.y + 1.0, rr.y + 19.0);
+        ui.c.fill_rect_gradient(b, Color::rgb(0x9c5353), Color::rgb(0x944a4b), 0.0);
+        ui.c.fill_rect(Rect::new(b.x, b.y, b.w, 1.0), Color::rgb(0xbf7576));
+        ui.c.fill_rect(Rect::new(b.x, b.bottom() - 2.0, b.w, 1.0), Color::rgb(0x9f5556));
+        ui.c.fill_rect(Rect::new(b.x, b.bottom() - 1.0, b.w, 1.0), Color::rgb(0xb06667));
+    }
     let bar_px = g.ppt * g.bar as f32;
     let step = if bar_px < 30.0 { 4 } else if bar_px < 60.0 { 2 } else { 1 };
     let first = (g.scroll_x / g.bar as f32).floor() as i64;
@@ -285,6 +300,13 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom) {
         let x = g.x_of((b * i64::from(g.bar)) as f32);
         ui.c.text(Font::new(13), x + 2.0, rr.y + 1.0, t.text_dim, &format!("{}", b + 1));
     }
+    // Play-start marker: an orange downward triangle (§10, colours sampled from FL).
+    let mx = g.x_of(marker as f32).round() + 0.5;
+    let tri = [(mx - 7.5, rr.y + 2.0), (mx + 7.5, rr.y + 2.0), (mx, rr.y + 11.0)];
+    ui.c.fill_polygon(&tri, Color::rgb(0x2f1818));
+    let inner = [(mx - 5.5, rr.y + 3.0), (mx + 5.5, rr.y + 3.0), (mx, rr.y + 9.5)];
+    ui.c.fill_polygon(&inner, Color::rgb(0xdd9561));
+    ui.c.fill_rect(Rect::new(mx - 5.0, rr.y + 3.0, 10.0, 1.0), Color::rgb(0xffc08b));
     ui.c.pop_clip();
 }
 
@@ -380,11 +402,22 @@ fn columns(ui: &mut Ui, g: &Geom, area: Rect, bands: &[(f32, f32, Color)], bar: 
     }
 }
 
-fn grid(ui: &mut Ui, l: &Layout, g: &Geom, selecting: bool) {
+fn grid(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>) {
+    grid_rows(ui, l, g, l.grid, false);
+    if let Some((x0, x1)) = range {
+        let r = Rect::span(x0, x1, l.grid.y, l.grid.bottom()).intersect(&l.grid);
+        if r.w > 0.0 {
+            grid_rows(ui, l, g, r, true);
+        }
+    }
+}
+
+/// The note-grid rows and columns, clipped to `clip` (`selecting` = the red time-selection tint).
+fn grid_rows(ui: &mut Ui, l: &Layout, g: &Geom, clip: Rect, selecting: bool) {
     let t = ui.t;
     let gr = l.grid;
     let (white, black) = if selecting { (t.pr_row_sel, t.pr_row_black_sel) } else { (t.pr_row, t.pr_row_black) };
-    ui.c.push_clip(gr);
+    ui.c.push_clip(clip);
     let (lo, hi) = g.visible_keys();
     let mut bands = Vec::with_capacity((hi - lo + 1).max(0) as usize);
     for key in lo..=hi {
@@ -420,6 +453,10 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
     ui.hit(p, Action::PianoVelocity, "Velocity: drag to set the velocity of notes");
     ui.c.push_clip(p);
     ui.c.fill_rect(p, t.pr_row);
+    if let Some((a, b)) = s.piano.range {
+        let r = Rect::span(g.x_of(a as f32), g.x_of(b as f32), p.y, p.bottom());
+        ui.c.fill_rect(r, t.pr_row_sel);
+    }
     let mut bands = Vec::new();
     let mut y = p.y;
     let mut i = 0;

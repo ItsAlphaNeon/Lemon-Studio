@@ -132,6 +132,9 @@ pub enum Action {
     PianoUndo,
     /// Piano-roll toolbar: make a tool active (spec: ui/piano-roll.md §9).
     PianoTool(Tool),
+    /// Piano-roll time ruler: left-drag moves the play-start marker, right-drag selects a time
+    /// range (spec: ui/piano-roll.md §10).
+    PianoRuler,
     /// A scroll bar (left-drag scrolls; right-drag scrolls horizontally and zooms vertically).
     Scrollbar(Scroll),
 }
@@ -198,6 +201,7 @@ fn hover_is_visible(a: &Action) -> bool {
             | Action::PianoNote(_)
             | Action::PianoKeys
             | Action::PianoVelocity
+            | Action::PianoRuler
             | Action::Scrollbar(_)
             | Action::RackResize(_)
             | Action::WinDrag(_)
@@ -265,6 +269,9 @@ pub enum Drag {
     Slice,
     ZoomBox { x0: f32, y0: f32 },
     Scrub { tick: f32 },
+    /// Ruler: move the play-start marker; right-drag a time selection from `t0`.
+    Marker,
+    TimeSel { t0: u32 },
     Velocity { last_x: f32 },
     /// Left button held on the piano keyboard: each key entered is auditioned (§8).
     PianoKeys { key: i32 },
@@ -699,6 +706,19 @@ impl App {
                     self.state.piano.overlay = Some(Overlay::ZoomBox(Rect::span(x0.min(x), x0.max(x), y0.min(y), y0.max(y))));
                     self.damage_piano();
                 }
+                Drag::Marker => {
+                    if let Some(g) = self.piano_geom() {
+                        self.state.piano.marker = g.snap_down(g.tick_at(x) + g.step as f32 / 2.0);
+                    }
+                    self.damage_piano();
+                }
+                Drag::TimeSel { t0 } => {
+                    if let Some(g) = self.piano_geom() {
+                        let t = g.snap_down(g.tick_at(x) + g.step as f32 / 2.0);
+                        piano::select_range(&mut self.state, t0.min(t), t0.max(t));
+                    }
+                    self.damage_piano();
+                }
                 Drag::Scrub { tick } => {
                     if let Some(g) = self.piano_geom() {
                         let t = g.tick_at(x).max(0.0);
@@ -1023,6 +1043,15 @@ impl App {
         if let Some(Action::Scrollbar(t)) = action {
             return self.scrollbar_press(t, true);
         }
+        if action == Some(Action::PianoRuler) {
+            if let Some(g) = self.piano_geom() {
+                let t = g.snap_down(g.tick_at(x) + g.step as f32 / 2.0);
+                self.state.piano.clear_selection();
+                self.drag = Some(Drag::TimeSel { t0: t });
+                self.damage_piano();
+            }
+            return;
+        }
         if let Some(a @ (Action::PianoNote(_) | Action::PianoGrid)) = action {
             // Select: same as the left button; Zoom: toggle zoomed out / last zoom; the other
             // tools delete while the right button is held (spec: ui/piano-roll.md §9).
@@ -1054,6 +1083,9 @@ impl App {
                 }
             }
             Some(Drag::ZoomBox { x0, y0 }) => self.zoom_to(x0, y0),
+            Some(Drag::Marker) if self.transport.playing() && !self.state.song_mode => {
+                self.start_playback();
+            }
             _ => {}
         }
         if had_overlay {
@@ -1299,7 +1331,7 @@ impl App {
             let len = f64::from(piano::pattern_length(s, piano::notes(s)).max(1));
             ((self.transport.seconds() * s.tempo / 60.0 * ppq) % len) as f32
         } else {
-            0.0
+            s.piano.marker as f32
         };
         let x = g.x_of(head);
         let tick = if x >= g.grid.x && x < g.grid.right() { head } else { g.scroll_x };
@@ -1454,6 +1486,15 @@ impl App {
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_NEW)),
             _ => {}
         }
+    }
+
+    /// Start playback; pattern mode starts at the piano roll's play-start marker (§10).
+    fn start_playback(&mut self) {
+        let mut p = self.state.project.clone();
+        p.tempo = Some(self.state.tempo);
+        let mode = self.play_mode();
+        let start = if self.state.song_mode { 0.0 } else { f64::from(self.state.piano.marker) };
+        self.transport.play(&p, mode, start);
     }
 
     fn play_mode(&self) -> PlayMode {
@@ -1636,9 +1677,16 @@ impl App {
             self.piano_click(&a);
             return;
         }
+        if a == Action::PianoRuler {
+            if let Some(g) = self.piano_geom() {
+                self.state.piano.marker = g.snap_down(g.tick_at(self.mouse.0) + g.step as f32 / 2.0);
+                self.drag = Some(Drag::Marker);
+            }
+            return;
+        }
         let s = &mut self.state;
         match a {
-            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::Scrollbar(_) => {}
+            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::PianoRuler | Action::Scrollbar(_) => {}
             Action::PianoTool(t) => {
                 s.piano.tool = t;
                 s.piano.overlay = None;
@@ -1670,10 +1718,7 @@ impl App {
                     self.transport.pause();
                     return;
                 }
-                let mut p = s.project.clone();
-                p.tempo = Some(s.tempo);
-                let mode = self.play_mode();
-                self.transport.play(&p, mode);
+                self.start_playback();
             }
             Action::Stop => self.transport.stop(),
             Action::Record => s.message = Some("Recording: not available yet".into()),
@@ -2451,6 +2496,21 @@ mod tests {
         app.key(&Key::Character("b".into()), true, false);
         assert_eq!(mine(&app).len(), count * 3);
         assert_eq!(app.state.piano.tool, Tool::Draw, "Ctrl+letters don't switch tools");
+
+        // Ruler (§10): left-drag moves the play-start marker (snapped to steps); right-drag
+        // selects the notes starting in a time range, which is the only shaded selection.
+        let ruler = app.hits.iter().find(|h| h.action == Action::PianoRuler).map(|h| h.rect).unwrap();
+        let ry = ruler.cy();
+        swipe(&mut app, &mut c, (g.x_of(0.0) + 1.0, ry), (g.x_of(190.0), ry), false);
+        assert_eq!(app.state.piano.marker, 192);
+        assert_eq!(app.paste_tick(), 192, "stopped: paste at the marker");
+        swipe(&mut app, &mut c, (g.x_of(0.0) + 1.0, ry), (g.x_of(100.0), ry), true);
+        assert_eq!(app.state.piano.range, Some((0, 96)));
+        let sel = app.state.piano.selection(app.state.pattern, ch);
+        let notes = piano::notes(&app.state);
+        assert!(!sel.is_empty() && sel.iter().all(|&i| notes[i].position < 96));
+        app.key(&Key::Character("a".into()), true, false);
+        assert_eq!(app.state.piano.range, None, "other selections don't shade");
     }
 
     /// Piano roll edits repaint only damaged regions; the result must match a full repaint.

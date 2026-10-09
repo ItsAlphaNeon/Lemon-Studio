@@ -33,7 +33,8 @@ pub struct Shared {
 }
 
 enum Cmd {
-    Play(Box<Project>, PlayMode),
+    /// Project, mode, start tick (the piano roll's play-start marker in pattern mode).
+    Play(Box<Project>, PlayMode, f64),
     /// The newest edited project is in `Transport::latest` (older ones are skipped).
     Update,
     Preview(Box<Project>),
@@ -62,11 +63,11 @@ impl Transport {
         Transport { tx, latest, shared }
     }
 
-    pub fn play(&self, project: &Project, mode: PlayMode) {
+    pub fn play(&self, project: &Project, mode: PlayMode, start_tick: f64) {
         if let Ok(mut slot) = self.latest.lock() {
             *slot = None;
         }
-        let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode));
+        let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode, start_tick));
     }
 
     /// Replace the playing project, continuing from the current position.
@@ -159,11 +160,21 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     Err(e) => report(&shared, e),
                 }
             }
-            Ok(Cmd::Play(project, mode)) => {
+            Ok(Cmd::Play(project, mode, start)) => {
                 session = None;
                 shared.paused.store(false, Ordering::Relaxed);
                 match Session::start(&project, mode, true, &mut library, shared.clone()) {
-                    Ok(s) => session = Some(s),
+                    Ok(s) => {
+                        if start > 0.0 {
+                            let tempo = project.tempo.unwrap_or(140.0);
+                            let frame = os_engine::laws::tick_to_frame(start, project.ppq.max(1), tempo, s.rate);
+                            if let Ok(mut e) = s.engine.lock() {
+                                e.seek(frame);
+                            }
+                            shared.position.store(frame, Ordering::Relaxed);
+                        }
+                        session = Some(s);
+                    }
                     Err(e) => report(&shared, e),
                 }
             }
@@ -326,7 +337,7 @@ mod tests {
         project.patterns = vec![pat];
         project.tempo = Some(130.0);
         let t = Transport::new(None);
-        t.play(&project, PlayMode::Pattern(1));
+        t.play(&project, PlayMode::Pattern(1), 0.0);
         std::thread::sleep(Duration::from_millis(500));
         assert!(!t.sounding().is_empty() || t.peaks().0 > 0.0, "playing");
         project.patterns[0].notes.clear();
@@ -350,7 +361,7 @@ mod tests {
         let ch = project.channels[0].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
-        t.play(&project, PlayMode::Pattern(1));
+        t.play(&project, PlayMode::Pattern(1), 0.0);
         std::thread::sleep(Duration::from_millis(400));
         t.pause();
         std::thread::sleep(Duration::from_millis(100));
