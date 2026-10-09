@@ -202,7 +202,11 @@ impl ApplicationHandler for Shell {
         let scale = window.scale_factor() as f32;
         match event {
             WindowEvent::CloseRequested => el.exit(),
-            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::ModifiersChanged(m) => {
+                self.mods = m.state();
+                self.app.ctrl = self.mods.control_key();
+                self.app.shift = self.mods.shift_key();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 // Locked: turn the offset from the anchor into virtual movement, then warp back.
                 // Locked: movement comes from raw motion (`device_event`); positions are ignored,

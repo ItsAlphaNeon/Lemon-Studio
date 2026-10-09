@@ -7,7 +7,7 @@ use os_ui::{Color, Font, Rect};
 use super::{resize_zones, window_body, FrameInfo};
 use crate::app::{Action, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
-use crate::piano::{self, Geom};
+use crate::piano::{self, Geom, Overlay, Tool};
 
 /// Grid row pitch: 17 px of fill plus a 1 px separator (§3).
 pub const ROW: f32 = 18.0;
@@ -73,7 +73,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let floating = !s.wins[Win::PianoRoll.slot().unwrap_or(0)].maxed && r.h >= 2.0 * crate::app::TITLE_H;
     let (r, _) = super::framed(ui, s, Win::PianoRoll, r, &title, 365.0, true);
     let shift = if floating { -4.0 } else { 0.0 };
-    toolbar(ui, r, shift);
+    toolbar(ui, r, shift, s.piano.tool);
     if r.h < 2.0 * crate::app::TITLE_H {
         return; // collapsed to the title bar
     }
@@ -124,6 +124,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.hit(vis, Action::PianoNote(i), hint);
         let (top, bottom, rim, text) = if selected {
             (t.note_sel_top, t.note_sel_bottom, t.note_sel_rim, t.note_sel_text)
+        } else if n.muted() {
+            // Muted (§9): grey body, measured from FL.
+            (Color::rgb(0x6d7276), Color::rgb(0x63686c), Color::rgb(0x474a4d), Color::rgb(0xc4c8cc))
         } else {
             (t.note_top, t.note_bottom, t.note_rim, t.note_text)
         };
@@ -141,6 +144,23 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             let shown = if w <= nr.w - 5.0 { label } else { format!("{}..", &label[..1]) };
             ui.c.text_clip(label_font, nr.x + 3.0, nr.y + 2.0, nr.w - 4.0, text, &shown);
         }
+    }
+    // Tool overlays (§9): marquee and zoom box (orange, rounded), slice and scrub lines.
+    match s.piano.overlay {
+        Some(Overlay::Marquee(m) | Overlay::ZoomBox(m)) => {
+            let orange = t.pill;
+            ui.c.fill_rrect(m, 4.0, orange.with_alpha(48));
+            ui.c.stroke_rrect(m.inset(0.5), 4.0, 1.5, orange);
+        }
+        Some(Overlay::Slice(tick)) => {
+            let x = g.x_of(tick as f32).round();
+            ui.c.fill_rect(Rect::new(x - 1.0, l.grid.y, 2.0, l.grid.h), t.pill);
+        }
+        Some(Overlay::Scrub(tick)) => {
+            let x = g.x_of(tick).round();
+            ui.c.fill_rect(Rect::new(x, l.grid.y, 1.0, l.grid.h), Color::rgb(0xffffff).with_alpha(200));
+        }
+        None => {}
     }
     // Playhead (pattern mode).
     if f.playing && !s.song_mode {
@@ -188,32 +208,36 @@ fn arrow_button(ui: &mut Ui, b: Rect, dir: u8) {
 
 /// Toolbar icons in the title bar (§2). Only the draw tool exists so far; it is always active.
 /// `shift` moves the icons (the floating window draws them 4 px further left, §1a).
-fn toolbar(ui: &mut Ui, r: Rect, shift: f32) {
+fn toolbar(ui: &mut Ui, r: Rect, shift: f32, active: Tool) {
     let t = ui.t;
     let ox = r.x - 209.0 + shift;
-    let items: [(f32, Icon, &'static str); 15] = [
-        (222.0, Icon::ArrowRight, "Piano roll options"),
-        (242.0, Icon::MidiControl, "Tools"),
-        (263.0, Icon::Magnet, "Snap to grid: step"),
-        (283.0, Icon::Note, "Note properties"),
-        (305.0, Icon::Blend, "Scale and chord helpers"),
-        (327.0, Icon::Undo, "Undo (Ctrl+Z)"),
-        (360.0, Icon::Pencil, "Draw (P)"),
-        (380.0, Icon::Brush, "Paint (B)"),
-        (402.0, Icon::Plus, "Paint and add"),
-        (422.0, Icon::Delete, "Delete (D)"),
-        (442.0, Icon::Mute, "Mute (T)"),
-        (463.0, Icon::Slice, "Slice (C)"),
-        (485.0, Icon::Select, "Select (E)"),
-        (507.0, Icon::Zoom, "Zoom (Z)"),
-        (527.0, Icon::Speaker, "Playback (Y)"),
+    let items: [(f32, Icon, &'static str, Option<Tool>); 15] = [
+        (222.0, Icon::ArrowRight, "Piano roll options", None),
+        (242.0, Icon::MidiControl, "Tools", None),
+        (263.0, Icon::Magnet, "Snap to grid: step", None),
+        (283.0, Icon::Note, "Note properties", None),
+        (305.0, Icon::Blend, "Scale and chord helpers", None),
+        (327.0, Icon::Undo, "Undo (Ctrl+Z)", None),
+        (360.0, Icon::Pencil, "Draw (P)", Some(Tool::Draw)),
+        (380.0, Icon::Brush, "Paint (B): drag to paint notes along the row", Some(Tool::Paint)),
+        (402.0, Icon::Plus, "Paint and add", None),
+        (422.0, Icon::Delete, "Delete (D): click or swipe to delete notes", Some(Tool::Delete)),
+        (442.0, Icon::Mute, "Mute (T): click or swipe to mute / unmute notes", Some(Tool::Mute)),
+        (463.0, Icon::Slice, "Slice (C): drag a line to cut notes", Some(Tool::Slice)),
+        (485.0, Icon::Select, "Select (E): drag a box to select notes, Ctrl adds", Some(Tool::Select)),
+        (507.0, Icon::Zoom, "Zoom (Z): drag a box to zoom, right-click zooms out / back", Some(Tool::Zoom)),
+        (527.0, Icon::Speaker, "Playback (Y): drag to hear the notes under the line", Some(Tool::Playback)),
     ];
-    for (x, icon, hint) in items {
+    for (x, icon, hint, tool) in items {
         let b = Rect::new(ox + x - 9.0, r.y + 2.0, 18.0, 18.0);
-        let draw = icon == Icon::Pencil;
-        let action = if icon == Icon::Undo { Action::PianoUndo } else { Action::Placeholder("piano roll tool") };
+        let on = tool.is_some() && tool == Some(active);
+        let action = match tool {
+            Some(t) => Action::PianoTool(t),
+            None if icon == Icon::Undo => Action::PianoUndo,
+            None => Action::Placeholder("piano roll tool"),
+        };
         let hov = ui.hit(b, action, hint);
-        let c = if draw { t.pill } else if hov { Color::rgb(0xffffff) } else { t.glyph };
+        let c = if on { t.pill } else if hov { Color::rgb(0xffffff) } else { t.glyph };
         icons::draw(ui.c, icon, b, c);
     }
     icons::draw(ui.c, Icon::Speaker, Rect::new(ox + 547.0, r.y + 4.0, 15.0, 15.0), t.text);
@@ -422,7 +446,13 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
             continue;
         }
         let top = piano::velocity_y(p, n.velocity).round();
-        let (stem, dot) = if sel.contains(&idx) { (t.note_sel_top.mix(t.note_sel_bottom, 0.4), t.note_sel_rim) } else { (t.velocity, t.velocity_dot) };
+        let (stem, dot) = if sel.contains(&idx) {
+            (t.note_sel_top.mix(t.note_sel_bottom, 0.4), t.note_sel_rim)
+        } else if n.muted() {
+            (Color::rgb(0x80858a), Color::rgb(0x474a4d))
+        } else {
+            (t.velocity, t.velocity_dot)
+        };
         ui.c.fill_rect(Rect::new(x, top, 2.0, p.bottom() - top), stem);
         ui.c.fill_rect(Rect::new(x + 4.0, top, (end - x - 4.0).max(0.0), 1.0), stem);
         ui.c.fill_circle(x + 1.0, top + 0.5, 3.5, stem);

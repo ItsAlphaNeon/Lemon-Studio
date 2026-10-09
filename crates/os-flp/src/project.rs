@@ -501,6 +501,10 @@ fn decode_note(r: &[u8]) -> Note {
         velocity: r[21],
         mod_x: r[22],
         mod_y: r[23],
+        flags: u16_at(4),
+        group: r[19],
+        unk14: u16_at(14),
+        unk17: r[17],
     }
 }
 
@@ -511,11 +515,14 @@ fn decode_notes(data: &[u8]) -> Vec<Note> {
 fn encode_note(n: &Note) -> [u8; NOTE_LEN] {
     let mut r = [0u8; NOTE_LEN];
     r[0..4].copy_from_slice(&n.position.to_le_bytes());
-    r[4..6].copy_from_slice(&NOTE_FLAGS_DEFAULT.to_le_bytes());
+    r[4..6].copy_from_slice(&(n.flags | NOTE_FLAGS_DEFAULT).to_le_bytes());
     r[6..8].copy_from_slice(&n.channel.to_le_bytes());
     r[8..12].copy_from_slice(&n.length.to_le_bytes());
     r[12..14].copy_from_slice(&n.key.to_le_bytes());
+    r[14..16].copy_from_slice(&n.unk14.to_le_bytes());
     r[16] = n.fine_pitch;
+    r[17] = n.unk17;
+    r[19] = n.group;
     r[18] = n.release;
     r[20] = n.pan;
     r[21] = n.velocity;
@@ -934,4 +941,20 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         events.insert(at, e);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mute (byte 19 bit 0x20), colour group, slide flag and unknown bytes survive a note edit
+    /// (spec: flp/events/patterns.md, note flags).
+    #[test]
+    fn note_record_keeps_mute_and_flags() {
+        let mut n = Note { flags: 0x4008, group: 0x04, unk14: 3, unk17: 4, ..Note::step(2, 96) };
+        n.set_muted(true);
+        let r = encode_note(&n);
+        assert_eq!(r[19], 0x24);
+        assert_eq!(decode_note(&r), n);
+    }
 }

@@ -106,9 +106,31 @@ pub struct Note {
     pub velocity: u8,
     pub mod_x: u8,
     pub mod_y: u8,
+    /// Record flags (patterns.md: 0x4000 always, 0x0008 = slide); kept as read.
+    pub flags: u16,
+    /// Byte 19: colour group in the low nibble, `MUTED` bit; other bits kept as read.
+    pub group: u8,
+    /// Unknown record bytes 14–15 and 17, kept as read.
+    pub unk14: u16,
+    pub unk17: u8,
 }
 
 impl Note {
+    /// Byte-19 bit of a muted note (spec: flp/events/patterns.md, note flags).
+    pub const MUTED: u8 = 0x20;
+
+    pub fn muted(&self) -> bool {
+        self.group & Self::MUTED != 0
+    }
+
+    pub fn set_muted(&mut self, on: bool) {
+        if on {
+            self.group |= Self::MUTED;
+        } else {
+            self.group &= !Self::MUTED;
+        }
+    }
+
     /// A step-sequencer step with default parameters.
     pub fn step(channel: u16, position: u32) -> Self {
         Note {
@@ -122,6 +144,10 @@ impl Note {
             velocity: 100,
             mod_x: 128,
             mod_y: 128,
+            flags: 0x4000,
+            group: 0,
+            unk14: 0,
+            unk17: 0,
         }
     }
 }

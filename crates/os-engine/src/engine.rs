@@ -474,7 +474,8 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
         ((last / bar).floor() + 1.0).max(1.0) * bar
     };
     let one_pattern = |n: u16| {
-        let t: Vec<Sched> = pattern_notes(n).iter().map(|x| Sched::note(0.0, x)).collect();
+        // Muted notes are silent (spec: ui/piano-roll.md §9).
+        let t: Vec<Sched> = pattern_notes(n).iter().filter(|x| !x.muted()).map(|x| Sched::note(0.0, x)).collect();
         (t, pattern_end(n))
     };
     match mode {
@@ -492,7 +493,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                 end = end.max(start + len);
                 match c.source {
                     ClipSource::Pattern(n) => {
-                        for note in pattern_notes(n) {
+                        for note in pattern_notes(n).iter().filter(|x| !x.muted()) {
                             if f64::from(note.position) < len {
                                 out.push(Sched::note(start, note));
                             }

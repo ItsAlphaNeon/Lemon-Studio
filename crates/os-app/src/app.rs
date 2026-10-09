@@ -11,7 +11,7 @@ use os_model::{Channel, ChannelKind, MixerTrack, Note, Pattern, Project};
 use os_theme::{Palette, Theme};
 use os_ui::{Canvas, Rect};
 
-use crate::piano::{self, Geom, PianoState};
+use crate::piano::{self, Geom, Overlay, PianoState, Tool};
 use crate::transport::Transport;
 use crate::views;
 
@@ -130,6 +130,8 @@ pub enum Action {
     PianoKeys,
     PianoVelocity,
     PianoUndo,
+    /// Piano-roll toolbar: make a tool active (spec: ui/piano-roll.md §9).
+    PianoTool(Tool),
     /// A scroll bar (left-drag scrolls; right-drag scrolls horizontally and zooms vertically).
     Scrollbar(Scroll),
 }
@@ -253,6 +255,16 @@ pub enum Drag {
     NoteMove { x0: f32, y0: f32, orig: Vec<(usize, Note)> },
     NoteResize { x0: f32, orig: Vec<(usize, Note)> },
     NoteErase,
+    /// Mute tool swipe: every note touched gets `on` (the first note's new state, §9).
+    NoteMute { on: bool },
+    /// Paint tool: notes back to back on `key` from `start`, `len` apart (§9).
+    NotePaint { key: i32, start: u32, len: u32 },
+    /// Select tool marquee from (x0, y0); `base` = selection kept (Ctrl adds).
+    Marquee { x0: f32, y0: f32, base: Vec<usize> },
+    /// Slice tool line, Zoom tool box, Playback scrub.
+    Slice,
+    ZoomBox { x0: f32, y0: f32 },
+    Scrub { tick: f32 },
     Velocity { last_x: f32 },
     /// Left button held on the piano keyboard: each key entered is auditioned (§8).
     PianoKeys { key: i32 },
@@ -390,6 +402,9 @@ pub struct App {
     pub want_drag_window: bool,
     /// Show the horizontal-resize cursor (hovering or dragging a note end).
     pub resize_cursor: bool,
+    /// Modifier keys held (set by the shell).
+    pub ctrl: bool,
+    pub shift: bool,
     /// Piano roll regions from the last paint (window, grid, velocity panel).
     piano_win: Option<Rect>,
     piano_grid: Option<Rect>,
@@ -453,6 +468,8 @@ impl App {
             want_close: false,
             want_drag_window: false,
             resize_cursor: false,
+            ctrl: false,
+            shift: false,
             piano_win: None,
             piano_grid: None,
             piano_panel: None,
@@ -656,6 +673,41 @@ impl App {
                     self.state.piano.dirty = true;
                 }
                 Drag::NoteErase => self.erase_at(x, y),
+                Drag::NoteMute { on } => self.mute_at(x, y, on),
+                Drag::NotePaint { key, start, len } => self.paint_notes(key, start, len),
+                Drag::Marquee { x0, y0, base } => {
+                    let r = Rect::span(x0.min(x), x0.max(x), y0.min(y), y0.max(y));
+                    self.state.piano.overlay = Some(Overlay::Marquee(r));
+                    if let Some(g) = self.piano_geom() {
+                        let s = &mut self.state;
+                        let mut sel = base.clone();
+                        sel.extend(piano::notes_in(s, &g, r).into_iter().filter(|i| !base.contains(i)));
+                        if let Some(ch) = piano::channel(s) {
+                            s.piano.select(s.pattern, ch, sel);
+                        }
+                    }
+                    self.damage_piano();
+                }
+                Drag::Slice => {
+                    if let Some(g) = self.piano_geom() {
+                        let t = g.snap_down(g.tick_at(x) + g.step as f32 / 2.0);
+                        self.state.piano.overlay = Some(Overlay::Slice(t));
+                    }
+                    self.damage_piano();
+                }
+                Drag::ZoomBox { x0, y0 } => {
+                    self.state.piano.overlay = Some(Overlay::ZoomBox(Rect::span(x0.min(x), x0.max(x), y0.min(y), y0.max(y))));
+                    self.damage_piano();
+                }
+                Drag::Scrub { tick } => {
+                    if let Some(g) = self.piano_geom() {
+                        let t = g.tick_at(x).max(0.0);
+                        self.scrub(tick, t);
+                        self.drag = Some(Drag::Scrub { tick: t });
+                        self.state.piano.overlay = Some(Overlay::Scrub(t));
+                    }
+                    self.damage_piano();
+                }
                 Drag::Velocity { last_x } => {
                     self.state.piano.dirty = true;
                     self.paint_velocity(last_x, x, y);
@@ -768,7 +820,9 @@ impl App {
             Some(h) => (Some(h.action.clone()), h.hint.clone(), Some(h.rect)),
             None => (None, Cow::Borrowed(""), None),
         };
-        let resize = matches!(hover, Some(Action::PianoNote(_))) && rect.is_some_and(|r| x >= r.right() - resize_zone(r.w));
+        let resize = matches!(hover, Some(Action::PianoNote(_)))
+            && matches!(self.state.piano.tool, Tool::Draw | Tool::Paint | Tool::Select)
+            && rect.is_some_and(|r| x >= r.right() - resize_zone(r.w));
         let changed = hover != self.hover || hint != self.hint || resize != self.resize_cursor;
         self.resize_cursor = resize;
         if changed {
@@ -969,10 +1023,18 @@ impl App {
         if let Some(Action::Scrollbar(t)) = action {
             return self.scrollbar_press(t, true);
         }
-        if matches!(action, Some(Action::PianoNote(_) | Action::PianoGrid)) {
-            piano::snapshot(&mut self.state);
-            self.drag = Some(Drag::NoteErase);
-            self.erase_at(x, y);
+        if let Some(a @ (Action::PianoNote(_) | Action::PianoGrid)) = action {
+            // Select: same as the left button; Zoom: toggle zoomed out / last zoom; the other
+            // tools delete while the right button is held (spec: ui/piano-roll.md §9).
+            match self.state.piano.tool {
+                Tool::Select => self.piano_click(&a),
+                Tool::Zoom => self.zoom_toggle(),
+                _ => {
+                    piano::snapshot(&mut self.state);
+                    self.drag = Some(Drag::NoteErase);
+                    self.erase_at(x, y);
+                }
+            }
         }
     }
 
@@ -981,7 +1043,23 @@ impl App {
         if matches!(self.drag, Some(Drag::Velocity { .. })) {
             self.state.piano.dirty = true;
         }
-        if matches!(self.drag, Some(Drag::NoteMove { .. } | Drag::NoteResize { .. } | Drag::NoteErase)) {
+        let had_overlay = self.state.piano.overlay.take().is_some();
+        match self.drag.clone() {
+            Some(Drag::Slice) => {
+                if let Some(g) = self.piano_geom() {
+                    let t = g.snap_down(g.tick_at(self.mouse.0) + g.step as f32 / 2.0);
+                    if piano::slice(&mut self.state, t) > 0 {
+                        self.state.piano.dirty = true;
+                    }
+                }
+            }
+            Some(Drag::ZoomBox { x0, y0 }) => self.zoom_to(x0, y0),
+            _ => {}
+        }
+        if had_overlay {
+            self.damage_piano();
+        }
+        if matches!(self.drag, Some(Drag::NoteMove { .. } | Drag::NoteResize { .. } | Drag::NoteErase | Drag::NoteMute { .. } | Drag::NotePaint { .. })) {
             piano::finish_edit(&mut self.state);
             self.state.piano.dirty = true;
             self.damage_piano();
@@ -1095,6 +1173,133 @@ impl App {
         }
     }
 
+    /// Mute tool: give the note under (x, y) the mute state `on`.
+    fn mute_at(&mut self, x: f32, y: f32, on: bool) {
+        let Some(g) = self.piano_geom() else { return };
+        if !g.grid.contains(x, y) {
+            return;
+        }
+        let Some(i) = piano::note_at(&self.state, &g, x, y) else { return };
+        let p = piano::pattern_mut(&mut self.state);
+        if p.notes[i].muted() != on {
+            p.notes[i].set_muted(on);
+            let r = g.note_rect(&p.notes[i]);
+            self.state.piano.dirty = true;
+            match r {
+                Some(r) => self.damage_notes(&[r]),
+                None => self.damage_piano(),
+            }
+        }
+    }
+
+    /// Paint tool: fill `key`'s row with notes `len` apart from `start` up to the mouse (either
+    /// direction), skipping slots that already hold a note of this channel on that key.
+    fn paint_notes(&mut self, key: i32, start: u32, len: u32) {
+        let (Some(g), Some(ch)) = (self.piano_geom(), piano::channel(&self.state)) else { return };
+        let len = len.max(1);
+        let t = g.tick_at(self.mouse.0).max(0.0) as i64;
+        let k = (t - i64::from(start)).div_euclid(i64::from(len));
+        let (a, b) = (k.min(0), k.max(0));
+        let mut added = Vec::new();
+        for j in a..=b {
+            let pos = i64::from(start) + j * i64::from(len);
+            if pos < 0 {
+                continue;
+            }
+            let pos = pos as u32;
+            let taken = piano::notes(&self.state).iter().any(|n| n.channel == ch && i32::from(n.key) == key && n.position == pos);
+            if !taken {
+                let i = piano::add_note(&mut self.state, ch, pos, key);
+                piano::pattern_mut(&mut self.state).notes[i].length = len;
+                added.push(i);
+            }
+        }
+        if !added.is_empty() {
+            self.state.piano.dirty = true;
+            let notes = piano::notes(&self.state);
+            let rects: Vec<Rect> = added.iter().filter_map(|&i| g.note_rect(&notes[i])).collect();
+            self.damage_notes(&rects);
+        }
+    }
+
+    /// Playback tool: sound the notes the scrub line enters between ticks `from` and `to`.
+    fn scrub(&mut self, from: f32, to: f32) {
+        let Some(ch) = piano::channel(&self.state) else { return };
+        let (a, b) = (from.min(to), from.max(to));
+        let mut keys: Vec<i32> = piano::notes(&self.state)
+            .iter()
+            .filter(|n| n.channel == ch && !n.muted())
+            .filter(|n| {
+                let p = n.position as f32;
+                // Entered: the note's start lies between the old and new line positions.
+                p > a && p <= b || (from <= p && to > p && from == to)
+            })
+            .map(|n| i32::from(n.key))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        for k in keys {
+            self.preview(ch, k);
+        }
+    }
+
+    /// Zoom tool: zoom the time axis to the dragged box (a click zooms in 2x around the mouse).
+    fn zoom_to(&mut self, x0: f32, y0: f32) {
+        let Some(g) = self.piano_geom() else { return };
+        let (x1, y1) = self.mouse;
+        let p = &mut self.state.piano;
+        let back = (p.px_per_beat, p.scroll_x, p.scroll_y);
+        let ppq = f32::from(self.state.project.ppq.max(4));
+        if (x1 - x0).abs() < 4.0 {
+            let tick = g.tick_at(x1);
+            p.px_per_beat = (p.px_per_beat * 2.0).min(1600.0);
+            p.scroll_x = (tick - (x1 - g.grid.x) * ppq / p.px_per_beat).max(0.0);
+        } else {
+            let (t0, t1) = (g.tick_at(x0.min(x1)).max(0.0), g.tick_at(x0.max(x1)).max(0.0));
+            p.px_per_beat = (g.grid.w / ((t1 - t0).max(1.0) / ppq)).clamp(6.0, 1600.0);
+            p.scroll_x = t0;
+            p.scroll_y = (p.scroll_y + y0.min(y1) - g.grid.y).max(0.0);
+        }
+        p.zoom_back = Some(back);
+        piano::clamp_scroll(&mut self.state, g.grid.h);
+        self.invalidate();
+    }
+
+    /// Zoom tool right-click: fully zoomed out (the normal 96 px/beat view) <-> the last zoom.
+    fn zoom_toggle(&mut self) {
+        let Some(g) = self.piano_geom() else { return };
+        let p = &mut self.state.piano;
+        let normal = PianoState::default().px_per_beat;
+        if (p.px_per_beat - normal).abs() > 0.01 {
+            p.zoom_back = Some((p.px_per_beat, p.scroll_x, p.scroll_y));
+            p.px_per_beat = normal;
+            p.scroll_x = 0.0;
+        } else if let Some((z, sx, sy)) = p.zoom_back {
+            p.zoom_back = Some((p.px_per_beat, p.scroll_x, p.scroll_y));
+            p.px_per_beat = z;
+            p.scroll_x = sx;
+            p.scroll_y = sy;
+        }
+        piano::clamp_scroll(&mut self.state, g.grid.h);
+        self.invalidate();
+    }
+
+    /// Where Ctrl+V pastes (§9): the playhead when it is in view, else the left edge of the view.
+    fn paste_tick(&self) -> u32 {
+        let s = &self.state;
+        let Some(g) = self.piano_geom() else { return 0 };
+        let ppq = f64::from(s.project.ppq.max(1));
+        let head = if self.transport.playing() && !s.song_mode {
+            let len = f64::from(piano::pattern_length(s, piano::notes(s)).max(1));
+            ((self.transport.seconds() * s.tempo / 60.0 * ppq) % len) as f32
+        } else {
+            0.0
+        };
+        let x = g.x_of(head);
+        let tick = if x >= g.grid.x && x < g.grid.right() { head } else { g.scroll_x };
+        g.snap_down(tick)
+    }
+
     /// Set the velocity of this channel's notes whose start lies between the last and current x.
     fn paint_velocity(&mut self, last_x: f32, x: f32, y: f32) {
         let (Some(g), Some(panel)) = (self.piano_geom(), self.piano_panel) else { return };
@@ -1194,6 +1399,42 @@ impl App {
                 }
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => self.act(Action::PianoUndo),
+            // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
+            // tools (until a typing keyboard exists, which will take them).
+            Key::Character(c) if !ctrl && !alt && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
+                if let Some(t) = Tool::from_letter(c) {
+                    self.act(Action::PianoTool(t));
+                }
+            }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c") && self.state.shown(Win::PianoRoll) => {
+                let s = &mut self.state;
+                let sel = s.piano.selection(s.pattern, piano::channel(s));
+                let notes = piano::notes(s);
+                s.piano.clipboard = sel.iter().filter_map(|&i| notes.get(i).copied()).collect();
+            }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") && self.state.shown(Win::PianoRoll) => {
+                let at = self.paste_tick();
+                let clip = self.state.piano.clipboard.clone();
+                piano::paste(&mut self.state, &clip, at);
+                self.state.piano.dirty = true;
+            }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("b") && self.state.shown(Win::PianoRoll) => {
+                let s = &mut self.state;
+                let idx = piano::targets(s);
+                let notes = piano::notes(s);
+                let clip: Vec<Note> = idx.iter().filter_map(|&i| notes.get(i).copied()).collect();
+                let start = clip.iter().map(|n| n.position).min();
+                let end = clip.iter().map(|n| n.position + piano::shown_len(s, n)).max();
+                if let (Some(a), Some(b)) = (start, end) {
+                    piano::paste(s, &clip, b.max(a + 1));
+                    s.piano.dirty = true;
+                }
+            }
+            Key::Named(k @ (NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::ArrowUp | NamedKey::ArrowDown))
+                if self.state.shown(Win::PianoRoll) =>
+            {
+                self.piano_arrow(*k, ctrl);
+            }
             Key::Named(NamedKey::Delete) if self.state.shown(Win::PianoRoll) => {
                 let s = &mut self.state;
                 let sel = s.piano.selection(s.pattern, piano::channel(s));
@@ -1223,7 +1464,35 @@ impl App {
         self.transport.preview(p);
     }
 
-    /// Left click in the piano roll (spec: ui/piano-roll.md §8, Draw tool).
+    /// Arrow keys in the piano roll (§9): Left/Right scroll; Shift+arrows move the selection (or
+    /// every note) one snap unit / semitone; Ctrl+Up/Down move it an octave.
+    fn piano_arrow(&mut self, k: winit::keyboard::NamedKey, ctrl: bool) {
+        use winit::keyboard::NamedKey::*;
+        let Some(g) = self.piano_geom() else { return };
+        let step = g.step as i64;
+        let (dt, dk) = match (k, ctrl, self.shift) {
+            (ArrowUp, true, _) => (0, 12),
+            (ArrowDown, true, _) => (0, -12),
+            (ArrowLeft | ArrowRight, true, _) => return,
+            (ArrowLeft, false, true) => (-step, 0),
+            (ArrowRight, false, true) => (step, 0),
+            (ArrowUp, false, true) => (0, 1),
+            (ArrowDown, false, true) => (0, -1),
+            (ArrowLeft | ArrowRight, false, false) => {
+                let d = if k == ArrowLeft { -1.0 } else { 1.0 };
+                let s = &mut self.state;
+                s.piano.scroll_x = (s.piano.scroll_x + d * g.bar as f32).max(0.0);
+                return;
+            }
+            _ => return,
+        };
+        let idx = piano::targets(&self.state);
+        if piano::shift(&mut self.state, &idx, dt, dk) {
+            self.state.piano.dirty = true;
+        }
+    }
+
+    /// Left click in the piano roll (spec: ui/piano-roll.md §8 Draw tool, §9 other tools).
     fn piano_click(&mut self, a: &Action) {
         let (x, y) = self.mouse;
         let Some(g) = self.piano_geom() else { return };
@@ -1231,6 +1500,79 @@ impl App {
             self.state.message = Some("Piano roll: no channel selected".into());
             return;
         };
+        let tool = self.state.piano.tool;
+        if matches!(a, Action::PianoGrid | Action::PianoNote(_)) && tool != Tool::Draw {
+            let s = &mut self.state;
+            let note = if let Action::PianoNote(i) = *a { Some(i) } else { None };
+            match tool {
+                Tool::Delete => {
+                    piano::snapshot(s);
+                    self.drag = Some(Drag::NoteErase);
+                    self.erase_at(x, y);
+                    return;
+                }
+                Tool::Mute => {
+                    let Some(i) = note else { return };
+                    piano::snapshot(s);
+                    let on = !piano::notes(s)[i].muted();
+                    self.drag = Some(Drag::NoteMute { on });
+                    self.mute_at(x, y, on);
+                    return;
+                }
+                Tool::Paint if note.is_none() => {
+                    piano::snapshot(s);
+                    s.piano.clear_selection();
+                    let key = g.key_at(y).clamp(0, views::piano::TOP_KEY);
+                    let start = g.snap_down(g.tick_at(x));
+                    let i = piano::add_note(s, ch, start, key);
+                    let len = piano::notes(s)[i].length;
+                    s.piano.dirty = true;
+                    self.drag = Some(Drag::NotePaint { key, start, len });
+                    self.hold_key(Some(key), true);
+                    self.damage_piano();
+                    return;
+                }
+                Tool::Slice => {
+                    self.drag = Some(Drag::Slice);
+                    self.state.piano.overlay = Some(Overlay::Slice(g.snap_down(g.tick_at(x) + g.step as f32 / 2.0)));
+                    self.damage_piano();
+                    return;
+                }
+                Tool::Zoom => {
+                    self.drag = Some(Drag::ZoomBox { x0: x, y0: y });
+                    return;
+                }
+                Tool::Playback => {
+                    let t = g.tick_at(x).max(0.0);
+                    self.drag = Some(Drag::Scrub { tick: t });
+                    self.scrub(t, t);
+                    self.state.piano.overlay = Some(Overlay::Scrub(t));
+                    self.damage_piano();
+                    return;
+                }
+                Tool::Select if note.is_none() => {
+                    let base = if self.ctrl { s.piano.selection(s.pattern, Some(ch)) } else { Vec::new() };
+                    s.piano.select(s.pattern, ch, base.clone());
+                    self.drag = Some(Drag::Marquee { x0: x, y0: y, base });
+                    self.damage_piano();
+                    return;
+                }
+                Tool::Select => {
+                    // Clicking an unselected note selects it (Ctrl adds), then drags as Draw does.
+                    let i = note.unwrap_or(0);
+                    let mut sel = s.piano.selection(s.pattern, Some(ch));
+                    if !sel.contains(&i) {
+                        if !self.ctrl {
+                            sel.clear();
+                        }
+                        sel.push(i);
+                        s.piano.select(s.pattern, ch, sel);
+                    }
+                }
+                // Paint on a note: drags that one note like Draw (no group move).
+                _ => s.piano.clear_selection(),
+            }
+        }
         let s = &mut self.state;
         match *a {
             Action::PianoGrid => {
@@ -1246,7 +1588,7 @@ impl App {
                 let Some(&n) = piano::notes(s).get(i) else { return };
                 piano::snapshot(s);
                 let sel = s.piano.selection(s.pattern, Some(ch));
-                let idx = if sel.contains(&i) {
+                let idx = if sel.contains(&i) && tool.moves_groups() {
                     sel
                 } else {
                     s.piano.clear_selection();
@@ -1291,6 +1633,10 @@ impl App {
         let s = &mut self.state;
         match a {
             Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::Scrollbar(_) => {}
+            Action::PianoTool(t) => {
+                s.piano.tool = t;
+                s.piano.overlay = None;
+            }
             Action::PianoUndo => {
                 if !piano::undo(s) {
                     s.message = Some("Nothing to undo".into());
@@ -1990,6 +2336,115 @@ mod tests {
             }
         }
         assert_eq!(loud, 0, "erased notes still sounding: {:?}", app.transport.sounding());
+    }
+
+    /// Piano-roll tools driven with the mouse and keys (spec: ui/piano-roll.md §9).
+    #[test]
+    fn piano_tools() {
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        frame(&mut app, &mut c, None);
+        let ch = piano::channel(&app.state);
+        let mine = |app: &App| -> Vec<Note> { piano::notes(&app.state).iter().filter(|n| Some(n.channel) == ch).copied().collect() };
+        let g = app.piano_geom().unwrap();
+        let row = |k: i32| g.y_of(k) + 8.0;
+        let click = |app: &mut App, c: &mut Canvas, x: f32, y: f32| {
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        let swipe = |app: &mut App, c: &mut Canvas, (x0, y0): (f32, f32), (x1, y1): (f32, f32), right: bool| {
+            app.mouse_move(x0, y0);
+            if right { app.mouse_down_right() } else { app.mouse_down() }
+            for i in 1..=20 {
+                let k = i as f32 / 20.0;
+                app.mouse_move(x0 + (x1 - x0) * k, y0 + (y1 - y0) * k);
+            }
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        let n0 = mine(&app).len();
+
+        // Draw three notes on C5 (48 ticks each, a beat apart).
+        for t in [0.0, 96.0, 192.0] {
+            click(&mut app, &mut c, g.x_of(t) + 2.0, row(60));
+        }
+        assert_eq!(mine(&app).len(), n0 + 3);
+
+        // Letters switch tools; Select marquee over the first two notes.
+        app.key(&Key::Character("e".into()), false, false);
+        assert_eq!(app.state.piano.tool, Tool::Select);
+        swipe(&mut app, &mut c, (g.x_of(0.0) + 1.0, row(61)), (g.x_of(120.0), row(59)), false);
+        assert_eq!(app.state.piano.selection(app.state.pattern, ch).len(), 2);
+        assert!(app.state.piano.overlay.is_none(), "marquee gone after release");
+
+        // Shift+Right moves the selection one step; Ctrl+Up an octave; plain Right scrolls.
+        app.shift = true;
+        app.key(&Key::Named(NamedKey::ArrowRight), false, false);
+        app.shift = false;
+        app.key(&Key::Named(NamedKey::ArrowUp), true, false);
+        let moved: Vec<(u32, u16)> = mine(&app).iter().map(|n| (n.position, n.key)).collect();
+        assert!(moved.contains(&(24, 72)) && moved.contains(&(120, 72)) && moved.contains(&(192, 60)), "{moved:?}");
+        app.key(&Key::Named(NamedKey::ArrowRight), false, false);
+        assert!(app.state.piano.scroll_x > 0.0);
+        app.state.piano.scroll_x = 0.0;
+        frame(&mut app, &mut c, None);
+
+        // Right button in Select acts like the left button (no delete).
+        let before = mine(&app).len();
+        app.mouse_move(g.x_of(200.0), row(60));
+        app.mouse_down_right();
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert_eq!(mine(&app).len(), before);
+
+        // Mute: click toggles; a swipe follows the first note's new state.
+        app.key(&Key::Character("t".into()), false, false);
+        click(&mut app, &mut c, g.x_of(200.0), row(60));
+        assert!(mine(&app).iter().any(|n| n.position == 192 && n.muted()));
+        swipe(&mut app, &mut c, (g.x_of(30.0), row(72)), (g.x_of(130.0), row(72)), false);
+        assert_eq!(mine(&app).iter().filter(|n| n.key == 72 && n.muted()).count(), 2);
+
+        // Paint: drag along D5 from tick 0 to past 288 -> notes 48 apart, key locked.
+        app.key(&Key::Character("b".into()), false, false);
+        swipe(&mut app, &mut c, (g.x_of(0.0) + 2.0, row(62)), (g.x_of(300.0), row(66)), false);
+        let painted: Vec<u32> = mine(&app).iter().filter(|n| n.key == 62).map(|n| n.position).collect();
+        assert_eq!(painted, vec![0, 48, 96, 144, 192, 240, 288]);
+
+        // Slice: a line at tick 24 cuts the D5 note at 0 (48 long) in two.
+        app.key(&Key::Character("c".into()), false, false);
+        swipe(&mut app, &mut c, (g.x_of(24.0), row(70)), (g.x_of(24.0), row(55)), false);
+        let d5: Vec<(u32, u32)> = mine(&app).iter().filter(|n| n.key == 62).map(|n| (n.position, n.length)).take(2).collect();
+        assert_eq!(d5, vec![(0, 24), (24, 24)]);
+
+        // Delete: swipe across the D5 row removes every note touched.
+        app.key(&Key::Character("d".into()), false, false);
+        swipe(&mut app, &mut c, (g.x_of(1.0), row(62)), (g.x_of(330.0), row(62)), false);
+        assert_eq!(mine(&app).iter().filter(|n| n.key == 62).count(), 0);
+
+        // Right button in another tool deletes while held.
+        app.key(&Key::Character("p".into()), false, false);
+        app.mouse_move(g.x_of(200.0), row(60));
+        app.mouse_down_right();
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert!(!mine(&app).iter().any(|n| n.position == 192 && n.key == 60));
+
+        // Ctrl+A, Ctrl+C, Ctrl+V: pasted at the playhead (stopped: tick 0), selected.
+        let count = mine(&app).len();
+        app.key(&Key::Character("a".into()), true, false);
+        app.key(&Key::Character("c".into()), true, false);
+        app.key(&Key::Character("v".into()), true, false);
+        assert_eq!(mine(&app).len(), count * 2);
+        assert_eq!(app.state.piano.selection(app.state.pattern, ch).len(), count);
+        // Ctrl+B duplicates right after the selection's end.
+        app.key(&Key::Character("b".into()), true, false);
+        assert_eq!(mine(&app).len(), count * 3);
+        assert_eq!(app.state.piano.tool, Tool::Draw, "Ctrl+letters don't switch tools");
     }
 
     /// Piano roll edits repaint only damaged regions; the result must match a full repaint.

@@ -1,5 +1,5 @@
 //! Piano roll state and note editing (view geometry, selection, undo).
-// spec: ui/piano-roll.md §3, §5, §8; flp/events/patterns.md (note records)
+// spec: ui/piano-roll.md §3, §5, §8, §9; flp/events/patterns.md (note records)
 
 use os_model::{Note, Pattern};
 use os_ui::Rect;
@@ -9,6 +9,54 @@ use crate::views::piano::{ROW, TOP_KEY};
 
 /// Undo depth (snapshots of one pattern's notes).
 const UNDO_DEPTH: usize = 200;
+
+/// Piano-roll tools (§9), with their shortcut letters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tool {
+    #[default]
+    Draw,
+    Paint,
+    Delete,
+    Mute,
+    Slice,
+    Select,
+    Zoom,
+    Playback,
+}
+
+impl Tool {
+    pub fn from_letter(c: &str) -> Option<Tool> {
+        Some(match c.to_ascii_lowercase().as_str() {
+            "p" => Tool::Draw,
+            "b" => Tool::Paint,
+            "d" => Tool::Delete,
+            "t" => Tool::Mute,
+            "c" => Tool::Slice,
+            "e" => Tool::Select,
+            "z" => Tool::Zoom,
+            "y" => Tool::Playback,
+            _ => return None,
+        })
+    }
+
+    /// Tools whose left-drag on a selected note moves the whole selection (§9).
+    pub fn moves_groups(self) -> bool {
+        matches!(self, Tool::Draw | Tool::Select)
+    }
+}
+
+/// What a tool drag draws over the grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Overlay {
+    /// Select tool: marquee (grid pixels).
+    Marquee(Rect),
+    /// Zoom tool: the box to zoom to.
+    ZoomBox(Rect),
+    /// Slice tool: the cut time (ticks).
+    Slice(u32),
+    /// Playback tool: the scrub line (ticks).
+    Scrub(f32),
+}
 
 #[derive(Debug, Clone)]
 pub struct PianoState {
@@ -24,6 +72,12 @@ pub struct PianoState {
     pub dirty: bool,
     /// Key held with the mouse (keyboard press or a dragged note), lit on the keyboard (§4).
     pub held: Option<i32>,
+    pub tool: Tool,
+    pub overlay: Option<Overlay>,
+    /// Ctrl+C copies (positions as copied).
+    pub clipboard: Vec<Note>,
+    /// Zoom tool: the view before "zoom out" (px per beat, scroll x, scroll y), for right-click.
+    pub zoom_back: Option<(f32, f32, f32)>,
     sel: Vec<usize>,
     sel_key: (u16, u16),
     undo: Vec<(u16, Vec<Note>)>,
@@ -38,6 +92,10 @@ impl Default for PianoState {
             last_len: 0,
             dirty: false,
             held: None,
+            tool: Tool::Draw,
+            overlay: None,
+            clipboard: Vec::new(),
+            zoom_back: None,
             sel: Vec::new(),
             sel_key: (0, 0),
             undo: Vec::new(),
@@ -65,7 +123,7 @@ impl PianoState {
 
     /// Forget everything tied to the previous project.
     pub fn reset(&mut self) {
-        *self = PianoState { px_per_beat: self.px_per_beat, ..PianoState::default() };
+        *self = PianoState { px_per_beat: self.px_per_beat, tool: self.tool, ..PianoState::default() };
     }
 }
 
@@ -249,6 +307,97 @@ pub fn finish_edit(s: &mut State) {
     }
 }
 
+/// This channel's note under (x, y), topmost (last drawn) first.
+pub fn note_at(s: &State, g: &Geom, x: f32, y: f32) -> Option<usize> {
+    let ch = channel(s);
+    notes(s)
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, n)| Some(n.channel) == ch && g.note_rect(n).is_some_and(|r| r.contains(x, y)))
+        .map(|(i, _)| i)
+}
+
+/// This channel's notes whose rect touches `r` (grid pixels).
+pub fn notes_in(s: &State, g: &Geom, r: Rect) -> Vec<usize> {
+    let ch = channel(s);
+    notes(s)
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| Some(n.channel) == ch && g.note_rect(n).is_some_and(|nr| nr.intersect(&r).w > 0.0 && nr.intersect(&r).h > 0.0))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The selection, or every note of the channel when nothing is selected (§9 selection editing).
+pub fn targets(s: &State) -> Vec<usize> {
+    let ch = channel(s);
+    let sel = s.piano.selection(s.pattern, ch);
+    if !sel.is_empty() {
+        return sel;
+    }
+    notes(s).iter().enumerate().filter(|(_, n)| Some(n.channel) == ch).map(|(i, _)| i).collect()
+}
+
+/// Move notes by `dt` ticks and `dk` keys; refused (false) when any would leave tick 0 / the key range.
+pub fn shift(s: &mut State, idx: &[usize], dt: i64, dk: i32) -> bool {
+    let ok = idx.iter().filter_map(|&i| notes(s).get(i)).all(|n| {
+        i64::from(n.position) + dt >= 0 && (0..=TOP_KEY).contains(&(i32::from(n.key) + dk))
+    });
+    if !ok || idx.is_empty() {
+        return false;
+    }
+    snapshot(s);
+    let p = pattern_mut(s);
+    for &i in idx {
+        if let Some(n) = p.notes.get_mut(i) {
+            n.position = (i64::from(n.position) + dt) as u32;
+            n.key = (i32::from(n.key) + dk) as u16;
+        }
+    }
+    finish_edit(s);
+    true
+}
+
+/// Cut this channel's notes that span `tick` in two (Slice tool, §9). Returns how many were cut.
+pub fn slice(s: &mut State, tick: u32) -> usize {
+    let ch = channel(s);
+    let cut: Vec<usize> = notes(s)
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| Some(n.channel) == ch && n.length > 0 && n.position < tick && tick < n.position + n.length)
+        .map(|(i, _)| i)
+        .collect();
+    if cut.is_empty() {
+        return 0;
+    }
+    snapshot(s);
+    let p = pattern_mut(s);
+    for &i in &cut {
+        let n = p.notes[i];
+        p.notes[i].length = tick - n.position;
+        p.notes.push(Note { position: tick, length: n.position + n.length - tick, ..n });
+    }
+    s.piano.clear_selection();
+    finish_edit(s);
+    cut.len()
+}
+
+/// Paste `notes` so the earliest starts at `at`, on this channel; the pasted notes become the selection.
+pub fn paste(s: &mut State, clip: &[Note], at: u32) {
+    let Some(ch) = channel(s) else { return };
+    let Some(first) = clip.iter().map(|n| n.position).min() else { return };
+    snapshot(s);
+    let p = pattern_mut(s);
+    let start = p.notes.len();
+    for n in clip {
+        p.notes.push(Note { position: n.position - first + at, channel: ch, ..*n });
+    }
+    let end = p.notes.len();
+    s.piano.select(s.pattern, ch, (start..end).collect());
+    finish_edit(s);
+}
+
 /// Scroll vertically so the channel's notes (or C5) are centred in a grid `view_h` pixels tall.
 pub fn center_keys(s: &mut State, view_h: f32) {
     let ch = channel(s);
@@ -277,6 +426,30 @@ mod tests {
         let mut a = App::new(None);
         a.state.selected_channel = 4;
         a
+    }
+
+    #[test]
+    fn slice_shift_paste_mute() {
+        let mut a = app();
+        let s = &mut a.state;
+        let i = add_note(s, 4, 0, 60);
+        pattern_mut(s).notes[i].length = 96;
+        assert_eq!(slice(s, 48), 1);
+        let ns: Vec<(u32, u32)> = notes(s).iter().map(|n| (n.position, n.length)).collect();
+        assert_eq!(ns, vec![(0, 48), (48, 48)]);
+        assert!(shift(s, &[0, 1], 24, 12));
+        assert_eq!((notes(s)[0].position, notes(s)[0].key), (24, 72));
+        assert!(!shift(s, &[0], -48, 0), "would go before tick 0");
+        let clip = notes(s).to_vec();
+        paste(s, &clip, 384);
+        assert_eq!(notes(s).len(), 4);
+        assert_eq!(s.piano.selection(s.pattern, Some(4)).len(), 2);
+        assert_eq!(notes(s)[2].position, 384);
+        let mut n = notes(s)[0];
+        n.set_muted(true);
+        assert!(n.muted() && n.group == Note::MUTED);
+        n.set_muted(false);
+        assert_eq!(n.group, 0);
     }
 
     #[test]
