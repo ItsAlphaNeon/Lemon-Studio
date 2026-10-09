@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use os_model::{
     Arrangement, Channel, ChannelKind, Clip, ClipSource, MixerTrack, Note, Pattern,
-    PlaylistTrack, Project, ProjectInfo, Rgb,
+    PlaylistTrack, Project, ProjectInfo, Rgb, SlotPlugin,
 };
 
 use crate::{ChunkBody, Event, FlpFile, Value};
@@ -36,6 +36,7 @@ mod id {
     pub const CH_LAYER_CHILD: u8 = 94;
     pub const PLUGIN_NAME: u8 = 201;
     pub const PLUGIN_REC: u8 = 212;
+    pub const PLUGIN_STATE: u8 = 213;
     pub const DISPLAY_NAME: u8 = 203;
     pub const COLOR: u8 = 128;
     pub const SAMPLE_PATH: u8 = 196;
@@ -592,12 +593,20 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         let index = n as u16;
         let from = starts[n];
         let to = starts.get(n + 1).copied().or(l.mixer_params).unwrap_or(events.len());
-        let mut slots: [Option<String>; 10] = Default::default();
-        let mut pending_plugin: Option<String> = None;
+        let mut slots: [Option<SlotPlugin>; 10] = Default::default();
+        let mut pending_plugin: Option<SlotPlugin> = None;
         let mut routes = Vec::new();
         for e in &events[from..to] {
             match e.id {
-                id::PLUGIN_NAME => pending_plugin = e.data().map(|d| decode_text(d, enc)),
+                id::PLUGIN_NAME => {
+                    pending_plugin = e.data().map(|d| SlotPlugin { name: decode_text(d, enc), state: Vec::new() });
+                }
+                // spec: flp/events/mixer.md (slot sub-block: 213 = plugin state)
+                id::PLUGIN_STATE => {
+                    if let (Some(p), Some(d)) = (pending_plugin.as_mut(), e.data()) {
+                        p.state = d.to_vec();
+                    }
+                }
                 id::MX_SLOT => {
                     if let Some(s) = slots.get_mut(int(e) as usize) {
                         *s = pending_plugin.take();

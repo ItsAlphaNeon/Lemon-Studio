@@ -2,9 +2,11 @@
 //!
 //! - [`sample`]: decoding and resolving sample files.
 //! - [`laws`]: gain, pan and pitch laws measured from FL Studio.
+//! - [`effects`]: OpenStudio's mixer-slot effects (EQ, limiter).
 //! - [`engine`]: block-based playback of patterns and the playlist through the mixer.
 //! - [`wav`]: writing renders to disk.
 
+pub mod effects;
 pub mod engine;
 pub mod laws;
 pub mod sample;

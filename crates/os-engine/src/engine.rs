@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use os_model::{ChannelKind, ClipSource, Project};
 
+use crate::effects::Effect;
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
@@ -53,8 +54,10 @@ struct Voice {
     gain: (f32, f32),
 }
 
-#[derive(Debug, Clone)]
+
 struct MixTrack {
+    /// Insert effects in slot order (applied before the fader).
+    effects: Vec<Box<dyn Effect>>,
     /// Fader × pan as `[[L←L, L←R], [R←L, R←R]]`.
     matrix: [[f32; 2]; 2],
     /// (destination, send gain). Sidechain-only routes (level 0) are dropped.
@@ -67,6 +70,7 @@ pub struct EngineReport {
     pub plugin_channels_silent: usize,
     pub automation_clips_ignored: usize,
     pub effects_bypassed: usize,
+    pub effects_active: usize,
     pub missing_samples: Vec<String>,
 }
 
@@ -121,13 +125,22 @@ impl Engine {
             .collect();
 
         let tracks: Vec<MixTrack> = if project.mixer.is_empty() {
-            vec![MixTrack { matrix: [[1.0, 0.0], [0.0, 1.0]], routes: vec![] }]
+            vec![MixTrack { effects: Vec::new(), matrix: [[1.0, 0.0], [0.0, 1.0]], routes: vec![] }]
         } else {
             project
                 .mixer
                 .iter()
                 .map(|m| {
-                    report.effects_bypassed += m.slots.iter().flatten().count();
+                    let mut effects = Vec::new();
+                    for slot in m.slots.iter().flatten() {
+                        match crate::effects::from_slot(&slot.name, &slot.state, rate) {
+                            Some(fx) => {
+                                effects.push(fx);
+                                report.effects_active += 1;
+                            }
+                            None => report.effects_bypassed += 1,
+                        }
+                    }
                     let g = if m.enabled { m.volume.map_or(1.0, laws::fader_gain) } else { 0.0 };
                     let pan = laws::mixer_pan(m.pan.unwrap_or(0.0));
                     let matrix = pan.map(|row| row.map(|x| (x * g) as f32));
@@ -144,7 +157,7 @@ impl Engine {
                             .filter(|&(_, g)| g > 0.0)
                             .collect()
                     };
-                    MixTrack { matrix, routes }
+                    MixTrack { effects, matrix, routes }
                 })
                 .collect()
         };
@@ -235,6 +248,9 @@ impl Engine {
         for &t in &self.order {
             let [[ll, lr], [rl, rr]] = self.tracks[t].matrix;
             let mut buf = std::mem::take(&mut self.bus[t]);
+            for fx in &mut self.tracks[t].effects {
+                fx.process(&mut buf);
+            }
             for f in buf.chunks_exact_mut(2) {
                 let (l, r) = (f[0], f[1]);
                 f[0] = ll * l + lr * r;

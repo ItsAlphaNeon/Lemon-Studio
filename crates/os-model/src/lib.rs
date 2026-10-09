@@ -134,7 +134,7 @@ pub struct MixerTrack {
     pub color: Option<Rgb>,
     pub enabled: bool,
     /// Effects by slot (0..10); `None` = empty slot.
-    pub slots: [Option<String>; 10],
+    pub slots: [Option<SlotPlugin>; 10],
     /// Destination tracks this track sends to.
     pub routes: Vec<u16>,
     /// Explicit send levels `(destination, level 0..=1)`; routes without an entry send at unity
@@ -146,6 +146,13 @@ pub struct MixerTrack {
     pub pan: Option<f64>,
     /// -1.0 ..= 1.0.
     pub stereo_separation: Option<f64>,
+}
+
+/// A plugin in a mixer slot: its name and its opaque saved state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotPlugin {
+    pub name: String,
+    pub state: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

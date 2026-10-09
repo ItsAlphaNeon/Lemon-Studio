@@ -206,7 +206,7 @@ patterns ({}):", p.patterns.len())?;
     writeln!(out, "
 mixer ({} tracks, {} named or with effects):", p.mixer.len(), named.len())?;
     for m in named {
-        let fx: Vec<_> = m.slots.iter().flatten().cloned().collect();
+        let fx: Vec<_> = m.slots.iter().flatten().map(|s| s.name.clone()).collect();
         writeln!(
             out,
             "  {:3} {:<20} vol {}  routes {:?}  fx [{}]{}",

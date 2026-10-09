@@ -64,8 +64,8 @@ fn run() -> Result<(), String> {
     let r = &engine.report;
     if r.plugin_channels_silent + r.effects_bypassed + r.automation_clips_ignored > 0 {
         eprintln!(
-            "not yet supported: {} plugin channels silent, {} effects bypassed, {} automation clips ignored",
-            r.plugin_channels_silent, r.effects_bypassed, r.automation_clips_ignored
+            "{} effects active; not yet supported: {} plugin channels silent, {} effects bypassed, {} automation clips ignored",
+            r.effects_active, r.plugin_channels_silent, r.effects_bypassed, r.automation_clips_ignored
         );
     }
     let length = engine.length();
