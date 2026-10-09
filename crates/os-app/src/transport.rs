@@ -19,6 +19,8 @@ use os_model::Project;
 #[derive(Default)]
 pub struct Shared {
     pub playing: AtomicBool,
+    /// Playback holds its position silently (Play pressed while playing).
+    pub paused: AtomicBool,
     /// Playback position in frames.
     pub position: AtomicU64,
     pub sample_rate: AtomicU32,
@@ -32,40 +34,69 @@ pub struct Shared {
 
 enum Cmd {
     Play(Box<Project>, PlayMode),
-    Update(Box<Project>),
+    /// The newest edited project is in `Transport::latest` (older ones are skipped).
+    Update,
     Preview(Box<Project>),
     Stop,
 }
 
 pub struct Transport {
     tx: Sender<Cmd>,
+    latest: Arc<Mutex<Option<Project>>>,
     pub shared: Arc<Shared>,
 }
 
 impl Transport {
     pub fn new(factory: Option<PathBuf>) -> Transport {
         let (tx, rx) = mpsc::channel();
+        let latest = Arc::new(Mutex::new(None));
         let shared = Arc::new(Shared { sounding: Mutex::new(Vec::with_capacity(256)), ..Shared::default() });
         let s = shared.clone();
         std::thread::Builder::new()
             .name("openstudio-audio".into())
-            .spawn(move || audio_thread(rx, s, SampleLibrary::new(factory)))
+            .spawn({
+                let latest = latest.clone();
+                move || audio_thread(rx, s, latest, SampleLibrary::new(factory))
+            })
             .expect("spawn audio thread");
-        Transport { tx, shared }
+        Transport { tx, latest, shared }
     }
 
     pub fn play(&self, project: &Project, mode: PlayMode) {
+        if let Ok(mut slot) = self.latest.lock() {
+            *slot = None;
+        }
         let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode));
     }
 
     /// Replace the playing project, continuing from the current position.
     pub fn update(&self, project: &Project) {
-        let _ = self.tx.send(Cmd::Update(Box::new(project.clone())));
+        // Edits can come faster than engines are built: keep only the newest.
+        if let Ok(mut slot) = self.latest.lock() {
+            *slot = Some(project.clone());
+        }
+        let _ = self.tx.send(Cmd::Update);
     }
 
-    /// Play pattern 1 of `project` once (a one-note preview project); ignored while playing.
+    /// Play pattern 1 of `project` once (a one-note preview project), on its own stream.
     pub fn preview(&self, project: Project) {
         let _ = self.tx.send(Cmd::Preview(Box::new(project)));
+    }
+
+    /// Hold playback at its position (silent); `resume` continues from there.
+    pub fn pause(&self) {
+        self.shared.paused.store(true, Ordering::Relaxed);
+        if let Ok(mut v) = self.shared.sounding.lock() {
+            v.clear();
+        }
+    }
+
+    pub fn resume(&self) {
+        self.shared.paused.store(false, Ordering::Relaxed);
+    }
+
+    pub fn paused(&self) -> bool {
+        self.playing() && self.shared.paused.load(Ordering::Relaxed)
     }
 
     pub fn stop(&self) {
@@ -98,13 +129,21 @@ impl Transport {
     }
 }
 
-fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, mut library: SampleLibrary) {
+fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option<Project>>>, mut library: SampleLibrary) {
     let mut session: Option<Session> = None;
+    // One-shot note previews play on their own stream, so they also sound while playing or paused.
+    let mut preview: Option<Session> = None;
+    let report = |shared: &Shared, e: String| {
+        if let Ok(mut slot) = shared.error.lock() {
+            *slot = Some(e);
+        }
+    };
     loop {
         match rx.recv_timeout(Duration::from_millis(15)) {
-            Ok(Cmd::Update(project)) => {
-                if let Some(s) = session.as_mut().filter(|s| s.looping) {
-                    s.project = *project;
+            Ok(Cmd::Update) => {
+                let project = latest.lock().ok().and_then(|mut l| l.take());
+                if let (Some(s), Some(project)) = (session.as_mut(), project) {
+                    s.project = project;
                     // Build outside the lock, then swap at the playing position.
                     let mut e = Engine::new(&s.project, &mut library, s.rate, s.mode);
                     if let Ok(mut slot) = s.engine.lock() {
@@ -114,38 +153,34 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, mut library: SampleLibra
                 }
             }
             Ok(Cmd::Preview(project)) => {
-                if session.as_ref().is_none_or(|s| !s.looping) {
-                    session = None;
-                    match Session::start(&project, PlayMode::Pattern(1), false, &mut library, shared.clone()) {
-                        Ok(s) => session = Some(s),
-                        Err(e) => {
-                            if let Ok(mut slot) = shared.error.lock() {
-                                *slot = Some(e);
-                            }
-                        }
-                    }
+                preview = None;
+                match Session::start(&project, PlayMode::Pattern(1), false, &mut library, shared.clone()) {
+                    Ok(s) => preview = Some(s),
+                    Err(e) => report(&shared, e),
                 }
             }
             Ok(Cmd::Play(project, mode)) => {
                 session = None;
+                shared.paused.store(false, Ordering::Relaxed);
                 match Session::start(&project, mode, true, &mut library, shared.clone()) {
                     Ok(s) => session = Some(s),
-                    Err(e) => {
-                        if let Ok(mut slot) = shared.error.lock() {
-                            *slot = Some(e);
-                        }
-                    }
+                    Err(e) => report(&shared, e),
                 }
             }
-            Ok(Cmd::Stop) => session = None,
+            Ok(Cmd::Stop) => {
+                session = None;
+                shared.paused.store(false, Ordering::Relaxed);
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
+        }
+        if preview.as_ref().is_some_and(|p| p.done.load(Ordering::Relaxed)) {
+            preview = None;
         }
         let mut finished = false;
         if let Some(s) = &mut session {
             if s.done.load(Ordering::Relaxed) {
                 match s.mode {
-                    PlayMode::Pattern(_) if !s.looping => finished = true,
                     // Patterns loop: swap in a fresh engine at the start.
                     PlayMode::Pattern(_) => {
                         let e = Engine::new(&s.project, &mut library, s.rate, s.mode);
@@ -160,16 +195,13 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, mut library: SampleLibra
         }
         if finished {
             session = None;
+            shared.paused.store(false, Ordering::Relaxed);
         }
-        if session.as_ref().is_none_or(|s| !s.looping) {
+        if session.is_none() {
             shared.playing.store(false, Ordering::Relaxed);
-        }
-        if session.as_ref().is_none_or(|s| !s.looping) {
             if let Ok(mut v) = shared.sounding.lock() {
                 v.clear();
             }
-        }
-        if session.is_none() {
             shared.peak_l.store(0, Ordering::Relaxed);
             shared.peak_r.store(0, Ordering::Relaxed);
         }
@@ -183,8 +215,6 @@ struct Session {
     project: Project,
     mode: PlayMode,
     rate: u32,
-    /// False for a one-shot note preview.
-    looping: bool,
 }
 
 impl Session {
@@ -215,7 +245,7 @@ impl Session {
         if looping {
             shared.playing.store(true, Ordering::Relaxed);
         }
-        Ok(Session { _stream: stream, engine, done, project: project.clone(), mode, rate, looping })
+        Ok(Session { _stream: stream, engine, done, project: project.clone(), mode, rate })
     }
 }
 
@@ -233,7 +263,10 @@ where
             move |out: &mut [T], _| {
                 let frames = out.len() / channels;
                 stereo.resize(frames * 2, 0.0);
+                // Paused: silence, position held.
+                let paused = report && shared.paused.load(Ordering::Relaxed);
                 match engine.try_lock() {
+                    _ if paused => stereo.fill(0.0),
                     Ok(mut e) if !e.finished() => {
                         e.process(&mut stereo);
                         if report {
@@ -273,4 +306,59 @@ where
             None,
         )
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Needs an audio device: `cargo test -p os-app -- --ignored deleted_notes`.
+    #[test]
+    #[ignore]
+    fn deleted_notes_stop_playing() {
+        let mut project = crate::app::default_project();
+        let ch = project.channels[0].index;
+        let pat = os_model::Pattern {
+            number: 1,
+            notes: (0..8).map(|i| os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, i * 48) }).collect(),
+            ..Default::default()
+        };
+        project.patterns = vec![pat];
+        project.tempo = Some(130.0);
+        let t = Transport::new(None);
+        t.play(&project, PlayMode::Pattern(1));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!t.sounding().is_empty() || t.peaks().0 > 0.0, "playing");
+        project.patterns[0].notes.clear();
+        t.update(&project);
+        std::thread::sleep(Duration::from_millis(300));
+        let mut loud = 0;
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(50));
+            if !t.sounding().is_empty() {
+                loud += 1;
+            }
+        }
+        assert_eq!(loud, 0, "deleted notes still sounding");
+    }
+
+    /// Pause holds the position silently; resume continues from it (needs an audio device).
+    #[test]
+    #[ignore]
+    fn pause_holds_position() {
+        let mut project = crate::app::default_project();
+        let ch = project.channels[0].index;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
+        let t = Transport::new(None);
+        t.play(&project, PlayMode::Pattern(1));
+        std::thread::sleep(Duration::from_millis(400));
+        t.pause();
+        std::thread::sleep(Duration::from_millis(100));
+        let at = t.seconds();
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(t.paused() && (t.seconds() - at).abs() < 1e-9, "position held");
+        t.resume();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!t.paused() && t.seconds() > at + 0.1, "resumed from {at}: {}", t.seconds());
+    }
 }

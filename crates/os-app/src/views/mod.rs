@@ -22,6 +22,8 @@ pub struct FrameInfo {
     pub title: String,
     pub hint: Cow<'static, str>,
     pub playing: bool,
+    /// Playing but held by Play (pause).
+    pub paused: bool,
     pub seconds: f64,
     pub peaks: (f32, f32),
     /// Notes playing now, as (channel index, key).

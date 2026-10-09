@@ -474,7 +474,8 @@ impl App {
         // Note edits reach playback right away, also during a drag (at most once per tick).
         if self.state.piano.dirty {
             self.state.piano.dirty = false;
-            if playing {
+            // Also while Play is still starting (not `playing` yet); ignored when stopped.
+            {
                 let mut p = self.state.project.clone();
                 p.tempo = Some(self.state.tempo);
                 self.transport.update(&p);
@@ -497,6 +498,7 @@ impl App {
             title,
             hint: self.hint.clone(),
             playing: self.transport.playing(),
+            paused: self.transport.paused(),
             seconds: self.transport.seconds(),
             peaks: self.transport.peaks(),
             sounding: if self.transport.playing() { self.transport.sounding() } else { Vec::new() },
@@ -558,10 +560,7 @@ impl App {
                     self.drag_notes(x0, 0.0, &orig, true);
                     self.state.piano.dirty = true;
                 }
-                Drag::NoteErase => {
-                    self.erase_at(x, y);
-                    self.state.piano.dirty = true;
-                }
+                Drag::NoteErase => self.erase_at(x, y),
                 Drag::Velocity { last_x } => {
                     self.state.piano.dirty = true;
                     self.paint_velocity(last_x, x, y);
@@ -949,6 +948,7 @@ impl App {
             .map(|(i, _)| i);
         if let Some(i) = hit {
             piano::delete(&mut self.state, vec![i]);
+            self.state.piano.dirty = true;
             self.damage_piano();
         }
     }
@@ -1071,11 +1071,8 @@ impl App {
         if self.state.song_mode { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern) }
     }
 
-    /// Play one note of channel `channel` (Note::channel) once, unless the song is playing.
+    /// Play one note of channel `channel` (Note::channel) once (also while playing or paused).
     fn preview(&self, channel: u16, key: i32) {
-        if self.transport.playing() {
-            return;
-        }
         let mut p = self.state.project.clone();
         p.tempo = Some(self.state.tempo);
         let note = Note { key: key.clamp(0, views::piano::TOP_KEY) as u16, length: u32::from(p.ppq.max(4)), ..Note::step(channel, 0) };
@@ -1170,9 +1167,14 @@ impl App {
             Action::Close => self.want_close = true,
             Action::DragWindow => self.want_drag_window = true,
             Action::Play => {
+                // Play toggles pause while playing (position held); Stop rewinds.
+                if self.transport.paused() {
+                    self.transport.resume();
+                    return;
+                }
                 if self.transport.playing() {
-                    // Play while playing restarts, as Pause is not modeled yet.
-                    self.transport.stop();
+                    self.transport.pause();
+                    return;
                 }
                 let mut p = s.project.clone();
                 p.tempo = Some(s.tempo);
@@ -1594,6 +1596,97 @@ mod tests {
         assert_eq!(app.state.project.channels.len(), n + 6);
         assert_eq!(app.state.project.channels.last().unwrap().mixer_track, 12, "after the highest insert in use (6 after the drag)");
         assert!(app.bar(Scroll::RackY).is_some_and(|b| b.max > 0.0));
+    }
+
+    /// Needs an audio device: `cargo test -p os-app -- --ignored app_deleted_notes`.
+    #[test]
+    #[ignore]
+    fn app_deleted_notes_stop_playing() {
+        use winit::keyboard::{Key, NamedKey};
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        let ch = piano::channel(&app.state).unwrap();
+        for i in 0..8 {
+            piano::add_note(&mut app.state, ch, i * 48, 60);
+        }
+        app.act(Action::Play);
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            app.tick();
+        }
+        assert!(app.transport.playing());
+        app.key(&Key::Character("a".into()), true, false);
+        app.key(&Key::Named(NamedKey::Delete), false, false);
+        assert!(piano::notes(&app.state).is_empty());
+        let mut loud = 0;
+        for i in 0..120 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            app.tick();
+            if i > 20 && !app.transport.sounding().is_empty() {
+                loud += 1;
+            }
+        }
+        assert_eq!(loud, 0, "deleted notes still sounding");
+    }
+
+    /// Same with right-drag erasing and note moves while playing (needs an audio device).
+    #[test]
+    #[ignore]
+    fn app_erased_notes_stop_playing() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        frame(&mut app, &mut c, None);
+        let g = app.piano_geom().unwrap();
+        let y = g.y_of(64) + 8.0;
+        // Draw notes by clicking, while playing.
+        app.act(Action::Play);
+        for i in 0..8 {
+            app.mouse_move(g.x_of((i * 48) as f32) + 2.0, y);
+            app.mouse_down();
+            app.mouse_move(g.x_of((i * 48) as f32) + 2.0, y + 18.0 * (i % 3) as f32);
+            app.mouse_up();
+            frame(&mut app, &mut c, None);
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        for _ in 0..60 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            app.tick();
+        }
+        assert!(!app.transport.sounding().is_empty() || app.transport.peaks().0 > 0.0, "playing notes");
+        // Right-drag across all rows to erase.
+        frame(&mut app, &mut c, None);
+        let g = app.piano_geom().unwrap();
+        for key in (55..=70).rev() {
+            let yy = g.y_of(key) + 8.0;
+            if !g.grid.contains(g.grid.x + 2.0, yy) {
+                continue;
+            }
+            app.mouse_move(g.grid.x + 2.0, yy);
+            app.mouse_down_right();
+            for i in 0..120 {
+                app.mouse_move(g.grid.x + 2.0 + i as f32 * 4.0, yy);
+                if i % 8 == 0 {
+                    app.tick();
+                }
+            }
+            app.mouse_up();
+            frame(&mut app, &mut c, None);
+        }
+        let ch = piano::channel(&app.state);
+        assert!(piano::notes(&app.state).iter().all(|n| Some(n.channel) != ch), "{:?}", piano::notes(&app.state));
+        let mut loud = 0;
+        for i in 0..150 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            app.tick();
+            if i > 20 && !app.transport.sounding().is_empty() {
+                loud += 1;
+            }
+        }
+        assert_eq!(loud, 0, "erased notes still sounding: {:?}", app.transport.sounding());
     }
 
     /// Piano roll edits repaint only damaged regions; the result must match a full repaint.

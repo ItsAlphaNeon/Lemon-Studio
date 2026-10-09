@@ -89,9 +89,10 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         }
         ui.c.text_center(Font::condensed(10, 5), Rect::new(r.x + 1.0, r.y, r.w, r.h), if active { t.pill_text } else { t.glyph_dim }, label);
     }
-    let play_on = f.playing;
+    // Lit while playing, with a pause glyph (Play pauses); unlit with the play glyph when paused.
+    let play_on = f.playing && !f.paused;
     for (r, icon, on, action, hint) in [
-        (Rect::span(419.0, 449.0, 5.0, 35.0), Icon::Play, play_on, Action::Play, "Play / restart (Space)"),
+        (Rect::span(419.0, 449.0, 5.0, 35.0), Icon::Play, play_on, Action::Play, "Play / pause (Space plays / stops)"),
         (Rect::span(450.0, 482.0, 5.0, 35.0), Icon::Stop, false, Action::Stop, "Stop (Space)"),
     ] {
         let hov = ui.hit(r, action, hint);
@@ -105,7 +106,17 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
             }
             ui.c.pop_clip();
         }
-        icons::draw(ui.c, icon, Rect::new(r.x + 8.0, r.y + 8.0, r.w - 16.0, r.h - 16.0), if on { t.on_glyph } else { t.glyph });
+        let g = Rect::new(r.x + 8.0, r.y + 8.0, r.w - 16.0, r.h - 16.0);
+        let c = if on { t.on_glyph } else { t.glyph };
+        if icon == Icon::Play && on {
+            // Pause: two bars.
+            let (w, h) = (g.w * 0.22, g.h * 0.7);
+            let y = g.cy() - h / 2.0;
+            ui.c.fill_rrect(Rect::new(g.cx() - w * 1.6, y, w, h), 1.0, c);
+            ui.c.fill_rrect(Rect::new(g.cx() + w * 0.6, y, w, h), 1.0, c);
+        } else {
+            icons::draw(ui.c, icon, g, c);
+        }
     }
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
     let hov = ui.hit(rec, Action::Record, "Record");
