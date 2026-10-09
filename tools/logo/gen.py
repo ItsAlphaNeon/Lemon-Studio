@@ -4,14 +4,15 @@
 
 Writes:
   crates/os-app/src/logo.rs        greyscale mark as absolute M/L/Q/C/Z path data (drawn in one tint)
-  crates/os-app/assets/openstudio.ico  coloured mark, 16..256 px (exe and window icon)
+  crates/os-app/assets/openstudio.ico  app icon, 16..256 px (exe, window, taskbar), from the owner's
+                                       bitmap assets/logo/icon.png (edited in icon.pdn, Paint.NET)
 """
 import importlib.util
 import os
 import re
 import xml.etree.ElementTree as ET
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ASSETS = os.path.join(ROOT, "crates", "os-app", "assets")
@@ -36,53 +37,6 @@ def d_string(cmds):
     return " ".join(c[0] + "".join(" " + tg.fmt(v) for v in c[1:]) for c in cmds)
 
 
-def flatten(cmds, k, steps=24):
-    """Subpaths as point lists, scaled by k."""
-    subs, cur, p = [], [], (0.0, 0.0)
-    for c in cmds:
-        if c[0] == "M":
-            if len(cur) > 2:
-                subs.append(cur)
-            p = (c[1], c[2])
-            cur = [p]
-        elif c[0] == "L":
-            p = (c[1], c[2])
-            cur.append(p)
-        elif c[0] in "QC":
-            pts = [p] + [(c[i], c[i + 1]) for i in range(1, len(c), 2)]
-            for s in range(1, steps + 1):
-                t = s / steps
-                q = pts
-                while len(q) > 1:
-                    q = [(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t) for a, b in zip(q, q[1:])]
-                cur.append(q[0])
-            p = pts[-1]
-        elif c[0] == "Z":
-            if len(cur) > 2:
-                subs.append(cur)
-            cur = [p]
-    if len(cur) > 2:
-        subs.append(cur)
-    return [[(x * k, y * k) for x, y in s] for s in subs]
-
-
-def render(vb, lys, size):
-    """Coloured render, supersampled 4x, fitted (aspect kept) into a size x size square."""
-    ss = size * 4
-    k = ss / max(vb[2], vb[3])
-    ox, oy = (ss - vb[2] * k) / 2, (ss - vb[3] * k) / 2
-    img = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
-    for color, cmds in lys:
-        mask = Image.new("L", (ss, ss), 0)
-        for sub in flatten(cmds, k):
-            m = Image.new("L", (ss, ss), 0)
-            ImageDraw.Draw(m).polygon([(x + ox, y + oy) for x, y in sub], fill=255)
-            mask = ImageChops.logical_xor(mask.convert("1"), m.convert("1")).convert("L")
-        rgb = tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
-        img.paste(Image.new("RGBA", (ss, ss), rgb + (255,)), (0, 0), mask)
-    return img.resize((size, size), Image.LANCZOS)
-
-
 def main():
     vb, grey = layers(os.path.join(ASSETS, "logo", "logo-greyscale.svg"))
     lines = [
@@ -99,10 +53,13 @@ def main():
     with open(os.path.join(ROOT, "crates", "os-app", "src", "logo.rs"), "w", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
 
-    vb, colored = layers(os.path.join(ASSETS, "logo", "logo-colored.svg"))
-    big = render(vb, colored, 256)
-    big.save(os.path.join(ASSETS, "openstudio.ico"), sizes=[(s, s) for s in (16, 20, 24, 32, 40, 48, 64, 128, 256)])
-    big.save(os.path.join(ASSETS, "logo", "logo-colored-256.png"))
+    src = Image.open(os.path.join(ASSETS, "logo", "icon.png")).convert("RGBA")
+    side = max(src.size)
+    sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    sq.paste(src, ((side - src.width) // 2, (side - src.height) // 2))
+    sizes = (256, 128, 64, 48, 40, 32, 24, 20, 16)
+    imgs = [sq.resize((s, s), Image.LANCZOS) for s in sizes]
+    imgs[0].save(os.path.join(ASSETS, "openstudio.ico"), sizes=[(s, s) for s in sizes], append_images=imgs[1:])
 
 
 if __name__ == "__main__":
