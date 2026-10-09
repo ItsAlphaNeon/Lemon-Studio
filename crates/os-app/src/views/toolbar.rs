@@ -76,28 +76,36 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     ui.c.fill_rect_gradient(capsule.inset(1.0), t.sunken.shade(0.03), t.sunken.shade(-0.05), 14.0);
     ui.c.fill_rect(Rect::new(418.0, 6.0, 1.0, 29.0), t.toolbar_line);
     ui.c.fill_rect(Rect::new(449.0, 6.0, 1.0, 29.0), t.toolbar_line);
-    let pat = Rect::new(388.0, 7.0, 26.0, 12.0);
-    let song = Rect::new(388.0, 21.0, 26.0, 12.0);
+    // PAT / SONG fill the whole top / bottom half of the capsule's left section.
+    let pat = Rect::span(384.0, 418.0, 5.0, 20.0);
+    let song = Rect::span(384.0, 418.0, 20.0, 35.0);
     ui.hit(pat, Action::PatSong(false), "Pattern mode: play the current pattern");
     ui.hit(song, Action::PatSong(true), "Song mode: play the playlist");
     for (r, label, active) in [(pat, "PAT", !s.song_mode), (song, "SONG", s.song_mode)] {
         if active {
-            ui.c.fill_rrect(r, 3.0, t.pill);
+            ui.c.push_clip(r);
+            ui.c.fill_rrect(capsule.inset(1.0), 14.0, t.pill);
+            ui.c.pop_clip();
         }
-        ui.c.text_center(Font::condensed(10, 5), r, if active { t.pill_text } else { t.glyph_dim }, label);
+        ui.c.text_center(Font::condensed(10, 5), Rect::new(r.x + 1.0, r.y, r.w, r.h), if active { t.pill_text } else { t.glyph_dim }, label);
     }
     let play_on = f.playing;
     for (r, icon, on, action, hint) in [
-        (Rect::span(420.0, 448.0, 6.0, 34.0), Icon::Play, play_on, Action::Play, "Play / restart (Space)"),
-        (Rect::span(451.0, 480.0, 6.0, 34.0), Icon::Stop, false, Action::Stop, "Stop (Space)"),
+        (Rect::span(419.0, 449.0, 5.0, 35.0), Icon::Play, play_on, Action::Play, "Play / restart (Space)"),
+        (Rect::span(450.0, 482.0, 5.0, 35.0), Icon::Stop, false, Action::Stop, "Stop (Space)"),
     ] {
         let hov = ui.hit(r, action, hint);
-        if on {
-            ui.c.fill_rect_gradient(r, t.on_top, t.on_bottom, 2.0);
-        } else if hov {
-            ui.c.fill_rect(r, t.button_hi.with_alpha(110));
+        // Lit / hovered sections fill their whole slot of the capsule (clipped to its round end).
+        if on || hov {
+            ui.c.push_clip(r);
+            if on {
+                ui.c.fill_rect_gradient(capsule.inset(1.0), t.on_top, t.on_bottom, 14.0);
+            } else {
+                ui.c.fill_rrect(capsule.inset(1.0), 14.0, t.button_hi.with_alpha(110));
+            }
+            ui.c.pop_clip();
         }
-        icons::draw(ui.c, icon, r.inset(7.0), if on { t.on_glyph } else { t.glyph });
+        icons::draw(ui.c, icon, Rect::new(r.x + 8.0, r.y + 8.0, r.w - 16.0, r.h - 16.0), if on { t.on_glyph } else { t.glyph });
     }
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
     let hov = ui.hit(rec, Action::Record, "Record");
