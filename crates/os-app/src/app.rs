@@ -379,6 +379,8 @@ pub struct App {
     hover_rect: Option<Rect>,
     damage: Damage,
     last_playing: bool,
+    /// Last title-bar press (window, time, position), for double-click maximize / restore.
+    title_click: Option<(Win, std::time::Instant, (f32, f32))>,
     pub hint: Cow<'static, str>,
     pub mouse: (f32, f32),
     pub drag: Option<Drag>,
@@ -442,6 +444,7 @@ impl App {
             hover_rect: None,
             damage: Damage::Full,
             last_playing: false,
+            title_click: None,
             hint: Cow::Borrowed(""),
             mouse: (-1.0, -1.0),
             drag: None,
@@ -1405,6 +1408,19 @@ impl App {
                 s.piano.dirty = true;
             }
             Action::WinDrag(win) => {
+                // Double-click on the title bar toggles maximized / floating (like the max button).
+                let now = std::time::Instant::now();
+                let m = self.mouse;
+                let double = matches!(self.title_click, Some((w, t, p)) if w == win
+                    && now.duration_since(t).as_millis() < 500
+                    && (p.0 - m.0).abs() < 4.0 && (p.1 - m.1).abs() < 4.0);
+                if double && win.slot().is_some() {
+                    self.title_click = None;
+                    self.act(Action::MaxWin(win));
+                    return;
+                }
+                self.title_click = Some((win, now, m));
+                let s = &mut self.state;
                 if s.is_max(win) {
                     return;
                 }
@@ -1795,6 +1811,19 @@ mod tests {
         step(&mut app, &mut a, &|ap| ap.mouse_up());
         let r1 = app.state.win_rect(Win::Mixer);
         assert_eq!((r1.x, r1.y, r1.w, r1.h), (r0.x - 100.0, r0.y - 50.0, r0.w, r0.h));
+
+        // Double-click the title bar: maximize, then double-click again: back to r1.
+        for want_max in [true, false] {
+            let bar = hit_rect(&app, &Action::WinDrag(Win::Mixer));
+            let (bx, by) = (bar.x + 150.0, bar.cy());
+            step(&mut app, &mut a, &|ap| { ap.mouse_move(bx, by); });
+            for _ in 0..2 {
+                step(&mut app, &mut a, &|ap| ap.mouse_down());
+                step(&mut app, &mut a, &|ap| ap.mouse_up());
+            }
+            assert_eq!(app.state.is_max(Win::Mixer), want_max);
+        }
+        assert_eq!(app.state.win_rect(Win::Mixer), r1);
 
         // Resize from the bottom-right corner: bigger, then clamped to the minimum size.
         let corner = hit_rect(&app, &Action::WinResize(Win::Mixer, EDGE_R | EDGE_B));
