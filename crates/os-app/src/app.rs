@@ -1449,7 +1449,11 @@ impl App {
             return;
         }
         if let Some(Action::Knob(id)) = area {
-            let v = self.state.knob(id) + dy.signum() * id.notch() * if dy == 0.0 { 0.0 } else { 1.0 };
+            let mut v = self.state.knob(id);
+            if id == crate::knobs::KnobId::MasterPitch {
+                v = (v * 24.0).round() / 24.0; // wheel steps from the nearest semitone
+            }
+            let v = v + dy.signum() * id.notch() * if dy == 0.0 { 0.0 } else { 1.0 };
             self.state.set_knob(id, v);
             self.hint = Cow::Owned(self.state.knob_text(id));
             return;

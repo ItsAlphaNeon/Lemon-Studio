@@ -7,6 +7,8 @@ use crate::app::State;
 
 /// Normalised value change per logical pixel of vertical drag (1/1024: 512 px sweeps a bipolar knob's range).
 pub const PER_PX: f32 = 1.0 / 1024.0;
+/// How close (in semitones) master pitch must get to a semitone to snap onto it.
+pub const PITCH_SNAP: f32 = 0.2;
 /// Normalised value change per mouse-wheel notch (1/64).
 pub const PER_NOTCH: f32 = 1.0 / 64.0;
 
@@ -72,8 +74,11 @@ impl State {
     pub fn set_knob(&mut self, id: KnobId, v: f32) {
         let mut v = v.clamp(0.0, 1.0);
         if id == KnobId::MasterPitch {
-            // Snaps to whole semitones over +-12 (100 cents each).
-            v = (v * 24.0).round() / 24.0;
+            // Smooth, but pulled onto a whole semitone (+-12 range, 100 cents each) when within SNAP of it.
+            let nearest = (v * 24.0).round() / 24.0;
+            if (v - nearest).abs() * 24.0 < PITCH_SNAP {
+                v = nearest;
+            }
         }
         match id {
             KnobId::MixPan(t) => {
@@ -132,10 +137,10 @@ mod tests {
         let s = &mut app.state;
         s.set_knob(KnobId::MasterVol, 0.8);
         assert_eq!(s.knob_text(KnobId::MasterVol), "Main volume: 100%  0.0dB  1.00");
-        s.set_knob(KnobId::MasterPitch, 0.5 + 0.4 / 24.0);
-        assert_eq!(s.knob_text(KnobId::MasterPitch), "Master pitch: 0 cents");
-        s.set_knob(KnobId::MasterPitch, 0.5 + 1.4 / 24.0);
-        assert_eq!(s.knob_text(KnobId::MasterPitch), "Master pitch: 100 cents", "snaps to the nearest semitone");
+        s.set_knob(KnobId::MasterPitch, 0.5 + 0.1 / 24.0);
+        assert_eq!(s.knob_text(KnobId::MasterPitch), "Master pitch: 0 cents", "close enough: snaps");
+        s.set_knob(KnobId::MasterPitch, 0.5 + 1.5 / 24.0);
+        assert_eq!(s.knob_text(KnobId::MasterPitch), "Master pitch: 150 cents", "between semitones it is smooth");
         s.set_knob(KnobId::MasterPitch, 2.0);
         assert_eq!(s.knob(KnobId::MasterPitch), 1.0);
         s.set_knob(KnobId::MixPan(1), 0.75);
