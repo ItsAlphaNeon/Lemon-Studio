@@ -69,9 +69,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let name = channel.and_then(|c| c.name.clone()).unwrap_or_else(|| "(none)".into());
     let title = format!("Piano roll - {name}  \u{203a}");
     window_body(ui, r);
-    let client = window_frame(ui, Win::PianoRoll, r, &title, 365.0, true);
-    let _ = client;
-    toolbar(ui, r);
+    let floating = !s.wins[Win::PianoRoll.slot().unwrap_or(0)].maxed && r.h >= 2.0 * crate::app::TITLE_H;
+    let (r, shift) = if floating { (float_frame(ui, r, &title), -4.0) } else {
+        window_frame(ui, Win::PianoRoll, r, &title, 365.0, true);
+        (r, 0.0)
+    };
+    toolbar(ui, r, shift);
     if r.h < 2.0 * crate::app::TITLE_H {
         return; // collapsed to the title bar
     }
@@ -151,18 +154,61 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.c.pop_clip();
 
     // Vertical scroll bar.
-    ui.c.fill_rect(l.vscroll, t.scrollbar);
-    let track = Rect::new(l.vscroll.x + 1.0, l.grid.y, l.vscroll.w - 2.0, l.grid.h);
+    ui.c.fill_rect(Rect::new(l.vscroll.x, l.ruler.y, l.vscroll.w, l.grid.bottom() - l.ruler.y), t.scrollbar);
+    let up = Rect::new(l.vscroll.x, l.ruler.y, l.vscroll.w, 19.0);
+    let down = Rect::new(l.vscroll.x, l.grid.bottom() - 19.0, l.vscroll.w, 19.0);
+    arrow_button(ui, up, 2);
+    arrow_button(ui, down, 3);
+    let track = Rect::new(l.vscroll.x + 1.0, up.bottom(), l.vscroll.w - 2.0, (down.y - up.bottom()).max(0.0));
     super::scrollbar(ui, track, true, s.piano.scroll_y, l.grid.h, (TOP_KEY + 1) as f32 * ROW, Scroll::PianoY);
 
     velocity_panel(ui, s, &l, &g, notes, ch, &sel);
     resize_zones(ui, s, Win::PianoRoll, r);
 }
 
-/// Toolbar icons in the title bar (§2). Only the draw tool exists so far; it is always active.
-fn toolbar(ui: &mut Ui, r: Rect) {
+/// Floating window frame (§1a): 1 px dark border, 5 px frame, a 1 px inner line around the client
+/// area and a flat 28 px title bar. Returns the rect laid out like the docked window.
+fn float_frame(ui: &mut Ui, r: Rect, title: &str) -> Rect {
     let t = ui.t;
-    let ox = r.x - 209.0;
+    ui.c.fill_rect(r, Color::rgb(0x191d1f));
+    ui.c.fill_rect(r.inset(1.0), t.window_title);
+    ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, 1.0), Color::rgb(0x303436));
+    let inner = Rect::new(r.x + 7.0, r.y + 5.0, r.w - 14.0, r.h - 12.0);
+    let client = Rect::new(inner.x - 1.0, inner.y + 22.0, inner.w + 2.0, inner.h - 22.0);
+    ui.c.fill_rect(client, Color::rgb(0x131718));
+    let bar = Rect::new(r.x, r.y, r.w, 28.0);
+    ui.hit(bar, Action::WinDrag(Win::PianoRoll), "Drag to move");
+    ui.c.text(Font::new(16), inner.x + 361.0, r.y + 6.0, t.text, title);
+    super::window_buttons(ui, Win::PianoRoll, r.right() - 70.0, r.y + 4.0, t.glyph, Color::rgb(0xffffff));
+    inner
+}
+
+/// Scroll arrow button (§1a): raised face with a 1 px dark rim and a chevron pointing `dir`
+/// (0 left, 1 right, 2 up, 3 down; 4 = a dot).
+fn arrow_button(ui: &mut Ui, b: Rect, dir: u8) {
+    let t = ui.t;
+    ui.c.fill_rect(b, Color::rgb(0x131618));
+    ui.c.fill_rect_gradient(b.inset(1.0), Color::rgb(0x36383a), Color::rgb(0x2c2e30), 0.0);
+    let (cx, cy) = ((b.x + b.w / 2.0).round(), (b.y + b.h / 2.0).round());
+    let c = t.glyph.with_alpha(150);
+    let pts = match dir {
+        0 => [(cx + 2.0, cy - 5.0), (cx - 3.0, cy), (cx + 2.0, cy + 5.0)],
+        1 => [(cx - 2.0, cy - 5.0), (cx + 3.0, cy), (cx - 2.0, cy + 5.0)],
+        2 => [(cx - 5.0, cy + 2.0), (cx, cy - 3.0), (cx + 5.0, cy + 2.0)],
+        3 => [(cx - 5.0, cy - 2.0), (cx, cy + 3.0), (cx + 5.0, cy - 2.0)],
+        _ => {
+            ui.c.fill_rect(Rect::new(cx - 2.0, cy - 2.0, 3.0, 3.0), Color::rgb(0x000000));
+            return;
+        }
+    };
+    ui.c.polyline(&pts, 1.2, c);
+}
+
+/// Toolbar icons in the title bar (§2). Only the draw tool exists so far; it is always active.
+/// `shift` moves the icons (the floating window draws them 4 px further left, §1a).
+fn toolbar(ui: &mut Ui, r: Rect, shift: f32) {
+    let t = ui.t;
+    let ox = r.x - 209.0 + shift;
     let items: [(f32, Icon, &'static str); 15] = [
         (222.0, Icon::ArrowRight, "Piano roll options"),
         (242.0, Icon::MidiControl, "Tools"),
@@ -199,7 +245,12 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     let view = l.grid.w / g.ppt;
     let len = piano::pattern_length(s, notes) as f32;
     let span = len.max(g.scroll_x + view) + view / 2.0;
-    super::scrollbar(ui, o, false, g.scroll_x * g.ppt, l.grid.w, span * g.ppt, Scroll::PianoX);
+    // Scroll arrows at both ends (§1a); the bar runs between them.
+    arrow_button(ui, Rect::new(o.x, o.y, 19.0, o.h), 0);
+    arrow_button(ui, Rect::new(l.grid.right() - 19.0, o.y, 19.0, o.h), 1);
+    arrow_button(ui, Rect::new(l.vscroll.x, o.y, l.vscroll.w, o.h), 4);
+    let track = Rect::new(o.x + 19.0, o.y, (l.grid.right() - o.x - 38.0).max(0.0), o.h);
+    super::scrollbar(ui, track, false, g.scroll_x * g.ppt, l.grid.w, span * g.ppt, Scroll::PianoX);
     // Mini-map: one dash per note of the channel.
     let dash = t.note_top.mix(t.note_bottom, 0.5);
     for n in notes.iter().filter(|n| Some(n.channel) == ch) {
