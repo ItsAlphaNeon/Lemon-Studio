@@ -54,6 +54,7 @@ def main():
         f.write("\n".join(lines) + "\n")
 
     src = Image.open(os.path.join(ASSETS, "logo", "icon.png")).convert("RGBA")
+    src = src.crop(src.getchannel("A").getbbox())  # no transparent margin: fill the whole icon cell
     side = max(src.size)
     sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
     sq.paste(src, ((side - src.width) // 2, (side - src.height) // 2))
