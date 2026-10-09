@@ -110,7 +110,11 @@ impl ApplicationHandler for Shell {
                 self.app.mouse_down_right();
                 window.request_redraw();
             }
-            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Right, .. } => {
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Middle, .. } => {
+                self.app.mouse_down_middle();
+                window.request_redraw();
+            }
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Right | MouseButton::Middle, .. } => {
                 self.app.mouse_up();
                 window.request_redraw();
             }

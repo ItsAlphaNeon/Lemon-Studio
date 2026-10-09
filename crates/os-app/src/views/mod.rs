@@ -13,7 +13,7 @@ use std::borrow::Cow;
 
 use os_ui::{Color, Rect};
 
-use crate::app::{Action, State, Ui, Win};
+use crate::app::{Action, Bar, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
 
 /// Per-frame values that don't live in `State`.
@@ -95,6 +95,32 @@ pub fn window_frame(ui: &mut Ui, r: Rect, title: &str, title_x: f32) -> Rect {
     }
     let _ = bar;
     Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0)
+}
+
+/// A scroll bar over `track`: thumb sized `view / total`, positioned by `pos` (content pixels).
+/// Registers the bar for dragging (see `App::scrollbar_press`).
+pub fn scrollbar(ui: &mut Ui, track: Rect, vertical: bool, pos: f32, view: f32, total: f32, target: Scroll) {
+    let t = ui.t;
+    let len = if vertical { track.h } else { track.w };
+    let total = total.max(view).max(1.0);
+    let max = (total - view).max(0.0);
+    let thumb = (view / total * len).clamp(16.0_f32.min(len), len);
+    let off = if max > 0.0 { pos.clamp(0.0, max) / max * (len - thumb) } else { 0.0 };
+    let hint = if target.two_dimensional() {
+        "Drag to scroll - right-drag to scroll both directions"
+    } else {
+        "Drag to scroll"
+    };
+    let hov = ui.hit(track, Action::Scrollbar(target), hint);
+    ui.c.fill_rect(track, t.scrollbar);
+    let r = if vertical {
+        Rect::new(track.x + 2.0, track.y + off, track.w - 4.0, thumb)
+    } else {
+        Rect::new(track.x + off, track.y + 2.0, thumb, track.h - 4.0)
+    };
+    let c = if hov { t.overview.shade(0.12) } else { t.overview };
+    ui.c.fill_rrect(r, 2.0_f32.min(r.w / 2.0).min(r.h / 2.0), c);
+    ui.bars.push(Bar { target, track, vertical, max, thumb });
 }
 
 /// Raised surface: soft vertical gradient (lighter at the top) so panels don't look flat.

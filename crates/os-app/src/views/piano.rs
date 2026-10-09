@@ -5,7 +5,7 @@ use os_model::Note;
 use os_ui::{Color, Font, Rect};
 
 use super::{window_frame, FrameInfo};
-use crate::app::{Action, State, Ui};
+use crate::app::{Action, Scroll, State, Ui};
 use crate::icons::{self, Icon};
 use crate::piano::{self, Geom};
 
@@ -146,10 +146,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 
     // Vertical scroll bar.
     ui.c.fill_rect(l.vscroll, t.scrollbar);
-    let total = (TOP_KEY + 1) as f32 * ROW;
-    let th = (l.grid.h / total * l.vscroll.h).clamp(20.0, l.vscroll.h);
-    let ty = l.vscroll.y + (s.piano.scroll_y / (total - l.grid.h).max(1.0)).clamp(0.0, 1.0) * (l.vscroll.h - th);
-    ui.c.fill_rrect(Rect::new(l.vscroll.x + 3.0, ty, l.vscroll.w - 6.0, th), 2.0, t.overview);
+    let track = Rect::new(l.vscroll.x + 1.0, l.grid.y, l.vscroll.w - 2.0, l.grid.h);
+    super::scrollbar(ui, track, true, s.piano.scroll_y, l.grid.h, (TOP_KEY + 1) as f32 * ROW, Scroll::PianoY);
 
     velocity_panel(ui, s, &l, &g, notes, ch, &sel);
 }
@@ -189,14 +187,12 @@ fn toolbar(ui: &mut Ui, r: Rect) {
 fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Option<u16>) {
     let t = ui.t;
     let o = l.overview;
-    ui.c.fill_rect(o, t.scrollbar);
-    ui.hit(o, Action::Swallow, "Overview");
-    // Thumb: the visible part of the pattern (at least the pattern, at least what is on screen).
+    // Horizontal scroll bar over the pattern plus room to scroll on (half a screen past the
+    // pattern or the current view).
+    let view = l.grid.w / g.ppt;
     let len = piano::pattern_length(s, notes) as f32;
-    let span = len.max(g.scroll_x + l.grid.w / g.ppt);
-    let tx = o.x + g.scroll_x / span * o.w;
-    let tw = (l.grid.w / g.ppt / span * o.w).max(12.0);
-    ui.c.fill_rrect(Rect::new(tx, o.y + 2.0, tw.min(o.right() - tx), o.h - 4.0), 2.0, t.overview);
+    let span = len.max(g.scroll_x + view) + view / 2.0;
+    super::scrollbar(ui, o, false, g.scroll_x * g.ppt, l.grid.w, span * g.ppt, Scroll::PianoX);
     // Mini-map: one dash per note of the channel.
     let dash = t.note_top.mix(t.note_bottom, 0.5);
     for n in notes.iter().filter(|n| Some(n.channel) == ch) {

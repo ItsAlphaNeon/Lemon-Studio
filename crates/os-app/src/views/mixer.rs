@@ -94,8 +94,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     strip(ui, s, 0, r.x + 44.0, bottom, f);
 
     // Horizontal scroll bar under the strips.
-    let sb = Rect::new(area.x + 13.0, bottom - 12.0, area.w - 20.0, 5.0);
-    ui.c.fill_rrect(sb, 2.0, Color::rgb(0x141618));
+    let sb = Rect::new(area.x + 13.0, bottom - 14.0, area.w - 20.0, 9.0);
+    super::scrollbar(ui, sb, false, s.mixer_scroll, area.w, 126.0 * STRIP_W, crate::app::Scroll::MixerX);
     chevron(ui, area.x + 5.0, bottom - 9.5, false, Color::rgb(0x5d6366));
 
     slot_panel(ui, s, Rect::new(r.right() - panel_w, r.y, panel_w, r.h));

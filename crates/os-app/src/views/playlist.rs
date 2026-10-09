@@ -70,8 +70,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let (sx, sy) = s.playlist_scroll;
     let first_row = (sy / ROW_H) as usize;
 
-    // Overview + ruler.
-    ui.c.fill_rect(Rect::new(grid_x, client.y + 1.0, grid_w, 18.0), t.overview);
+    // Overview (horizontal scroll bar) + ruler. The song extends 16 bars past its last clip,
+    // at least 100 bars; 500 tracks.
+    let ppq = f32::from(s.project.ppq.max(1));
+    let last = arr.and_then(|a| a.clips.iter().map(|c| (c.position + c.length) as f32 / (ppq * 4.0)).reduce(f32::max)).unwrap_or(0.0);
+    let bars = (last.ceil() + 16.0).max(100.0);
+    super::scrollbar(ui, Rect::new(grid_x, client.y + 1.0, grid_w, 18.0), false, sx, grid_w, bars * BAR_W, crate::app::Scroll::PlaylistX);
     let ruler = Rect::new(grid_x, client.y + 22.0, grid_w, 17.0);
     ui.c.fill_rect(ruler, t.ruler);
     ui.c.push_clip(ruler);
@@ -84,6 +88,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     ui.c.pop_clip();
     ui.c.fill_rect(Rect::new(grid_x + grid_w + 4.0, client.y + 1.0, 18.0, client.h), t.scrollbar);
+    let vtrack = Rect::new(grid_x + grid_w + 4.0, grid_y, 18.0, r.bottom() - grid_y);
+    super::scrollbar(ui, vtrack, true, sy, vtrack.h, 500.0 * ROW_H, crate::app::Scroll::PlaylistY);
 
     // Track headers and rows.
     let area = Rect::new(head_x, grid_y, head_w + 12.0 + grid_w, r.bottom() - grid_y);

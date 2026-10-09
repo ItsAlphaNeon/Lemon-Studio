@@ -62,6 +62,60 @@ pub enum Action {
     PianoKeys,
     PianoVelocity,
     PianoUndo,
+    /// A scroll bar (left-drag scrolls its axis; right-drag scrolls both axes where that exists).
+    Scrollbar(Scroll),
+}
+
+/// Scrollable view axes. Scroll values are in content pixels (see `App::scroll_get`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scroll {
+    PianoX,
+    PianoY,
+    PlaylistX,
+    PlaylistY,
+    MixerX,
+}
+
+impl Scroll {
+    pub fn two_dimensional(self) -> bool {
+        self.partner().is_some()
+    }
+
+    /// The other axis of a two-dimensional view (FL manual: Playlist and Piano roll scroll bars
+    /// can be right-dragged to scroll both directions).
+    fn partner(self) -> Option<Scroll> {
+        match self {
+            Scroll::PianoX => Some(Scroll::PianoY),
+            Scroll::PianoY => Some(Scroll::PianoX),
+            Scroll::PlaylistX => Some(Scroll::PlaylistY),
+            Scroll::PlaylistY => Some(Scroll::PlaylistX),
+            Scroll::MixerX => None,
+        }
+    }
+}
+
+/// A scroll bar painted this frame.
+#[derive(Debug, Clone, Copy)]
+pub struct Bar {
+    pub target: Scroll,
+    pub track: Rect,
+    pub vertical: bool,
+    /// Largest scroll value (content pixels).
+    pub max: f32,
+    /// Thumb length in pixels.
+    pub thumb: f32,
+}
+
+impl Bar {
+    fn len(&self) -> f32 {
+        if self.vertical { self.track.h } else { self.track.w }
+    }
+
+    /// Content pixels per pixel of thumb travel.
+    fn ratio(&self) -> f32 {
+        let travel = self.len() - self.thumb;
+        if travel > 0.0 { self.max / travel } else { 0.0 }
+    }
 }
 
 /// What needs repainting before the next present.
@@ -88,6 +142,7 @@ fn hover_is_visible(a: &Action) -> bool {
             | Action::PianoNote(_)
             | Action::PianoKeys
             | Action::PianoVelocity
+            | Action::Scrollbar(_)
     )
 }
 
@@ -107,6 +162,7 @@ pub struct Ui<'a> {
     pub c: &'a mut Canvas,
     pub t: &'a Palette,
     hits: &'a mut Vec<Hit>,
+    pub bars: &'a mut Vec<Bar>,
     hover: &'a Option<Action>,
     pub mouse: (f32, f32),
 }
@@ -130,6 +186,9 @@ pub enum Drag {
     NoteResize { x0: f32, orig: Vec<(usize, Note)> },
     NoteErase,
     Velocity { last_x: f32 },
+    /// Scroll axes from a start mouse position: value = start + (mouse - m0) × ratio per axis
+    /// (ratio < 0 grabs the content, as with the middle button).
+    Scroll { m0: (f32, f32), axes: Vec<(Scroll, bool, f32, f32)> },
 }
 
 pub struct State {
@@ -161,6 +220,7 @@ pub struct App {
     pub theme: Theme,
     pub transport: Transport,
     pub hits: Vec<Hit>,
+    pub bars: Vec<Bar>,
     pub hover: Option<Action>,
     hover_rect: Option<Rect>,
     damage: Damage,
@@ -211,6 +271,7 @@ impl App {
             theme: load_theme(),
             transport,
             hits: Vec::new(),
+            bars: Vec::new(),
             hover: None,
             hover_rect: None,
             damage: Damage::Full,
@@ -351,8 +412,9 @@ impl App {
     pub fn paint(&mut self, canvas: &mut Canvas, damage: Option<Rect>) {
         canvas.begin_frame(damage);
         self.hits.clear();
+        self.bars.clear();
         let title = self.title();
-        let mut ui = Ui { c: canvas, t: &self.theme.colors, hits: &mut self.hits, hover: &self.hover, mouse: self.mouse };
+        let mut ui = Ui { c: canvas, t: &self.theme.colors, hits: &mut self.hits, bars: &mut self.bars, hover: &self.hover, mouse: self.mouse };
         let info = views::FrameInfo {
             title,
             hint: self.hint.clone(),
@@ -393,6 +455,13 @@ impl App {
         self.mouse = (x, y);
         if let Some(d) = self.drag.clone() {
             match d {
+                Drag::Scroll { m0, axes } => {
+                    for (t, vertical, p0, ratio) in axes {
+                        let d = if vertical { y - m0.1 } else { x - m0.0 };
+                        self.scroll_set(t, p0 + d * ratio);
+                    }
+                    self.invalidate();
+                }
                 Drag::NoteMove { x0, y0, orig } => self.drag_notes(x0, y0, &orig, false),
                 Drag::NoteResize { x0, orig } => self.drag_notes(x0, 0.0, &orig, true),
                 Drag::NoteErase => self.erase_at(x, y),
@@ -474,7 +543,75 @@ impl App {
         }
     }
 
-    /// Right button: delete notes in the piano roll (spec: ui/piano-roll.md §8).
+    fn bar(&self, t: Scroll) -> Option<Bar> {
+        self.bars.iter().find(|b| b.target == t).copied()
+    }
+
+    /// Scroll value of an axis in content pixels.
+    pub fn scroll_get(&self, t: Scroll) -> f32 {
+        let s = &self.state;
+        match t {
+            Scroll::PianoX => s.piano.scroll_x * s.piano.px_per_beat / f32::from(s.project.ppq.max(4)),
+            Scroll::PianoY => s.piano.scroll_y,
+            Scroll::PlaylistX => s.playlist_scroll.0,
+            Scroll::PlaylistY => s.playlist_scroll.1,
+            Scroll::MixerX => s.mixer_scroll,
+        }
+    }
+
+    /// Set an axis, clamped to what its scroll bar allows (last frame).
+    pub fn scroll_set(&mut self, t: Scroll, v: f32) {
+        let max = self.bar(t).map_or(f32::MAX, |b| b.max);
+        let v = v.clamp(0.0, max.max(0.0));
+        let s = &mut self.state;
+        match t {
+            Scroll::PianoX => s.piano.scroll_x = v / (s.piano.px_per_beat / f32::from(s.project.ppq.max(4))),
+            Scroll::PianoY => s.piano.scroll_y = v.round(),
+            Scroll::PlaylistX => s.playlist_scroll.0 = v,
+            Scroll::PlaylistY => s.playlist_scroll.1 = v,
+            Scroll::MixerX => s.mixer_scroll = v,
+        }
+    }
+
+    /// Press on a scroll bar. Left: a press off the thumb first centres the thumb on the mouse,
+    /// then dragging scrolls. Right (two-dimensional views): drag scrolls both axes.
+    fn scrollbar_press(&mut self, t: Scroll, right: bool) {
+        let Some(b) = self.bar(t) else { return };
+        let (x, y) = self.mouse;
+        let along = if b.vertical { y - b.track.y } else { x - b.track.x };
+        let pos = self.scroll_get(t);
+        let thumb0 = if b.max > 0.0 { pos / b.max * (b.len() - b.thumb) } else { 0.0 };
+        if !right && (along < thumb0 || along > thumb0 + b.thumb) {
+            self.scroll_set(t, (along - b.thumb / 2.0) * b.ratio());
+        }
+        let mut axes = vec![(t, b.vertical, self.scroll_get(t), b.ratio())];
+        if right {
+            if let Some(o) = t.partner().and_then(|p| self.bar(p)) {
+                axes.push((o.target, o.vertical, self.scroll_get(o.target), o.ratio()));
+            }
+        }
+        self.drag = Some(Drag::Scroll { m0: (x, y), axes });
+        self.invalidate();
+    }
+
+    /// Middle button: grab-scroll the Piano roll and Playlist (FL manual: middle-drag scrolls
+    /// both directions).
+    pub fn mouse_down_middle(&mut self) {
+        let (x, y) = self.mouse;
+        let action = self.top_hit(x, y).map(|h| h.action.clone());
+        let targets: &[Scroll] = match action {
+            Some(Action::PianoGrid | Action::PianoNote(_)) => &[Scroll::PianoX, Scroll::PianoY],
+            Some(Action::PianoKeys) => &[Scroll::PianoY],
+            Some(Action::PianoVelocity) => &[Scroll::PianoX],
+            Some(Action::PlaylistArea) => &[Scroll::PlaylistX, Scroll::PlaylistY],
+            _ => return,
+        };
+        let axes = targets.iter().map(|&t| (t, matches!(t, Scroll::PianoY | Scroll::PlaylistY), self.scroll_get(t), -1.0)).collect();
+        self.drag = Some(Drag::Scroll { m0: (x, y), axes });
+    }
+
+    /// Right button: delete notes in the piano roll (spec: ui/piano-roll.md §8); right-drag on
+    /// a scroll bar scrolls.
     pub fn mouse_down_right(&mut self) {
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
@@ -482,6 +619,9 @@ impl App {
             self.state.menu_open = None;
             self.invalidate();
             return;
+        }
+        if let Some(Action::Scrollbar(t)) = action {
+            return self.scrollbar_press(t, true);
         }
         if matches!(action, Some(Action::PianoNote(_) | Action::PianoGrid)) {
             piano::snapshot(&mut self.state);
@@ -605,6 +745,11 @@ impl App {
         self.invalidate();
         let (x, y) = self.mouse;
         let area = self.top_hit(x, y).map(|h| h.action.clone());
+        if let Some(Action::Scrollbar(t)) = area {
+            let step = if t == Scroll::PianoY { views::piano::ROW * 3.0 } else { 60.0 };
+            self.scroll_set(t, self.scroll_get(t) - (dy + dx) * step);
+            return;
+        }
         if matches!(area, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoKeys | Action::PianoVelocity)) {
             let Some(g) = self.piano_geom() else { return };
             let p = &mut self.state.piano;
@@ -746,13 +891,16 @@ impl App {
     }
 
     pub fn act(&mut self, a: Action) {
+        if let Action::Scrollbar(t) = a {
+            return self.scrollbar_press(t, false);
+        }
         if matches!(a, Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys) {
             self.piano_click(&a);
             return;
         }
         let s = &mut self.state;
         match a {
-            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys => {}
+            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::Scrollbar(_) => {}
             Action::PianoUndo => {
                 if !piano::undo(s) {
                     s.message = Some("Nothing to undo".into());
@@ -994,6 +1142,45 @@ mod tests {
             let _ = b.pixmap.save_png(std::env::temp_dir().join("os_full.png"));
         }
         assert_eq!(n, 0, "{what}: differing pixels in x {}..{} y {}..{}", bbox.0, bbox.2, bbox.1, bbox.3);
+    }
+
+    /// Scroll bars: left-drag scrolls one axis, right-drag both (piano roll), middle-drag grabs.
+    #[test]
+    fn scrollbar_drags() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.front = Some(Win::PianoRoll);
+        app.state.show_rack = false;
+        frame(&mut app, &mut c, None);
+        let v = app.bar(Scroll::PianoY).unwrap();
+        let h = app.bar(Scroll::PianoX).unwrap();
+        // Left-drag the vertical thumb down.
+        let y0 = app.scroll_get(Scroll::PianoY);
+        let thumb_y = v.track.y + y0 / v.max * (v.track.h - v.thumb) + v.thumb / 2.0;
+        app.mouse_move(v.track.cx(), thumb_y);
+        app.mouse_down();
+        app.mouse_move(v.track.cx(), thumb_y + 50.0);
+        app.mouse_up();
+        assert!(app.scroll_get(Scroll::PianoY) > y0 + 100.0, "scrolled down");
+        assert_eq!(app.scroll_get(Scroll::PianoX), 0.0);
+        frame(&mut app, &mut c, None);
+        // Right-drag the horizontal bar: both axes move.
+        let (x1, y1) = (app.scroll_get(Scroll::PianoX), app.scroll_get(Scroll::PianoY));
+        app.mouse_move(h.track.x + 5.0, h.track.cy());
+        app.mouse_down_right();
+        app.mouse_move(h.track.x + 105.0, h.track.cy() - 40.0);
+        app.mouse_up();
+        assert!(app.scroll_get(Scroll::PianoX) > x1 && app.scroll_get(Scroll::PianoY) < y1, "2-D scroll");
+        frame(&mut app, &mut c, None);
+        // Middle-drag the grid: the content follows the mouse.
+        let (x2, y2) = (app.scroll_get(Scroll::PianoX), app.scroll_get(Scroll::PianoY));
+        let g = app.piano_grid.unwrap();
+        app.mouse_move(g.cx(), g.cy());
+        app.mouse_down_middle();
+        app.mouse_move(g.cx() + 30.0, g.cy() + 36.0);
+        app.mouse_up();
+        assert!((app.scroll_get(Scroll::PianoX) - (x2 - 30.0)).abs() < 0.5);
+        assert!((app.scroll_get(Scroll::PianoY) - (y2 - 36.0)).abs() < 0.5);
     }
 
     /// Piano roll edits repaint only damaged regions; the result must match a full repaint.
