@@ -9,11 +9,13 @@ use crate::app::{Action, State, Ui};
 use crate::icons::{self, Icon};
 
 /// Pixels per bar and per track row at the default zoom.
+/// Default pixels per bar (the zoom is `State::playlist_bar_w`).
 pub const BAR_W: f32 = 60.0;
 pub const ROW_H: f32 = 48.0;
 
 pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
+    let bar_w = s.playlist_bar_w;
     let client = window_frame(ui, r, "Playlist - Arrangement  \u{203a}  (none)  \u{203a}", 281.0);
     // Toolbar icons inside the title bar.
     let tools = [
@@ -75,15 +77,18 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let ppq = f32::from(s.project.ppq.max(1));
     let last = arr.and_then(|a| a.clips.iter().map(|c| (c.position + c.length) as f32 / (ppq * 4.0)).reduce(f32::max)).unwrap_or(0.0);
     let bars = (last.ceil() + 16.0).max(100.0);
-    super::scrollbar(ui, Rect::new(grid_x, client.y + 1.0, grid_w, 18.0), false, sx, grid_w, bars * BAR_W, crate::app::Scroll::PlaylistX);
+    super::scrollbar(ui, Rect::new(grid_x, client.y + 1.0, grid_w, 18.0), false, sx, grid_w, bars * bar_w, crate::app::Scroll::PlaylistX);
     let ruler = Rect::new(grid_x, client.y + 22.0, grid_w, 17.0);
     ui.c.fill_rect(ruler, t.ruler);
     ui.c.push_clip(ruler);
-    let bars_visible = (grid_w / BAR_W).ceil() as i32 + 1;
-    let first_bar = (sx / BAR_W) as i32;
+    let bars_visible = (grid_w / bar_w).ceil() as i32 + 1;
+    let first_bar = (sx / bar_w) as i32;
     for b in first_bar..first_bar + bars_visible {
-        let x = grid_x + b as f32 * BAR_W - sx;
+        let x = grid_x + b as f32 * bar_w - sx;
         let size = if b % 4 == 0 { 15.0 } else { 13.0 };
+        if bar_w < 24.0 && b % 4 != 0 {
+            continue;
+        }
         ui.c.text(crate::views::fnt(size), x + 2.0, ruler.y + (16.0 - size), t.ruler_text, &format!("{}", b + 1));
     }
     ui.c.pop_clip();
@@ -106,12 +111,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let beat = t.grid_gap.mix(t.grid, 0.4);
     ui.c.push_clip(grid);
     for b in first_bar..first_bar + bars_visible {
-        let x = grid_x + b as f32 * BAR_W - sx;
+        let x = grid_x + b as f32 * bar_w - sx;
         if (b / 4) % 2 == 1 {
-            ui.c.fill_rect(Rect::new(x, grid_y, BAR_W, grid.h), t.grid_alt);
+            ui.c.fill_rect(Rect::new(x, grid_y, bar_w, grid.h), t.grid_alt);
         }
         for q in 1..4 {
-            ui.c.fill_rect(Rect::new(x + q as f32 * 15.0, grid_y, 1.0, grid.h), beat);
+            ui.c.fill_rect(Rect::new(x + q as f32 * bar_w / 4.0, grid_y, 1.0, grid.h), beat);
         }
         ui.c.fill_rect(Rect::new(x, grid_y, 2.0, grid.h), t.grid_bar);
     }
@@ -138,8 +143,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     if let Some(a) = arr {
         for clip in &a.clips {
             let ppq = f32::from(s.project.ppq.max(1));
-            let x = grid_x + clip.position as f32 / (ppq * 4.0) * BAR_W - sx;
-            let w = (clip.length as f32 / (ppq * 4.0) * BAR_W).max(4.0);
+            let x = grid_x + clip.position as f32 / (ppq * 4.0) * bar_w - sx;
+            let w = (clip.length as f32 / (ppq * 4.0) * bar_w).max(4.0);
             let y = grid_y + f32::from(clip.track) * ROW_H - sy;
             if x > r.right() || x + w < grid_x || y > r.bottom() || y + 45.0 < grid_y {
                 continue;
@@ -170,7 +175,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         let ppq = f64::from(s.project.ppq.max(1));
         let bars = f.seconds * s.tempo / 60.0 / 4.0;
         let _ = ppq;
-        let x = grid_x + bars as f32 * BAR_W - sx;
+        let x = grid_x + bars as f32 * bar_w - sx;
         ui.c.fill_rect(Rect::new(x, grid_y - 20.0, 1.5, area.h + 20.0), t.playhead);
     }
     ui.c.pop_clip();

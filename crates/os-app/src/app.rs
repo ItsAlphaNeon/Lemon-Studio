@@ -62,7 +62,7 @@ pub enum Action {
     PianoKeys,
     PianoVelocity,
     PianoUndo,
-    /// A scroll bar (left-drag scrolls its axis; right-drag scrolls both axes where that exists).
+    /// A scroll bar (left-drag scrolls; right-drag scrolls horizontally and zooms vertically).
     Scrollbar(Scroll),
 }
 
@@ -76,24 +76,6 @@ pub enum Scroll {
     MixerX,
 }
 
-impl Scroll {
-    pub fn two_dimensional(self) -> bool {
-        self.partner().is_some()
-    }
-
-    /// The other axis of a two-dimensional view (FL manual: Playlist and Piano roll scroll bars
-    /// can be right-dragged to scroll both directions).
-    fn partner(self) -> Option<Scroll> {
-        match self {
-            Scroll::PianoX => Some(Scroll::PianoY),
-            Scroll::PianoY => Some(Scroll::PianoX),
-            Scroll::PlaylistX => Some(Scroll::PlaylistY),
-            Scroll::PlaylistY => Some(Scroll::PlaylistX),
-            Scroll::MixerX => None,
-        }
-    }
-}
-
 /// A scroll bar painted this frame.
 #[derive(Debug, Clone, Copy)]
 pub struct Bar {
@@ -102,6 +84,8 @@ pub struct Bar {
     pub vertical: bool,
     /// Largest scroll value (content pixels).
     pub max: f32,
+    /// Visible extent along the axis (content pixels).
+    pub view: f32,
     /// Thumb length in pixels.
     pub thumb: f32,
 }
@@ -189,6 +173,9 @@ pub enum Drag {
     /// Scroll axes from a start mouse position: value = start + (mouse - m0) × ratio per axis
     /// (ratio < 0 grabs the content, as with the middle button).
     Scroll { m0: (f32, f32), axes: Vec<(Scroll, bool, f32, f32)> },
+    /// Right-drag on a scroll bar: horizontal mouse movement scrolls the bar, vertical movement
+    /// zooms its axis around the view centre (up = zoom in).
+    BarZoom { t: Scroll, m0: (f32, f32), p0: f32, ratio: f32, z0: f32, center: f32, view: f32 },
 }
 
 pub struct State {
@@ -205,6 +192,8 @@ pub struct State {
     pub song_mode: bool,
     pub menu_open: Option<usize>,
     pub playlist_scroll: (f32, f32),
+    /// Playlist horizontal zoom, pixels per bar.
+    pub playlist_bar_w: f32,
     pub mixer_scroll: f32,
     pub rack_scroll: f32,
     pub browser_selected: usize,
@@ -259,6 +248,7 @@ impl App {
                 song_mode: false,
                 menu_open: None,
                 playlist_scroll: (0.0, 0.0),
+                playlist_bar_w: views::playlist::BAR_W,
                 mixer_scroll: 0.0,
                 rack_scroll: 0.0,
                 browser_selected: 6,
@@ -455,6 +445,15 @@ impl App {
         self.mouse = (x, y);
         if let Some(d) = self.drag.clone() {
             match d {
+                Drag::BarZoom { t, m0, p0, ratio, z0, center, view } => {
+                    let z = z0 * 1.012f32.powf(m0.1 - y);
+                    self.zoom_set(t, z);
+                    let k = self.zoom_get(t).map_or(1.0, |z| z / z0);
+                    // Keep the content that was centred in view, then add the horizontal drag.
+                    self.scroll_set(t, (center * k - view / 2.0) + (x - m0.0) * ratio * k);
+                    let _ = p0;
+                    self.invalidate();
+                }
                 Drag::Scroll { m0, axes } => {
                     for (t, vertical, p0, ratio) in axes {
                         let d = if vertical { y - m0.1 } else { x - m0.0 };
@@ -573,6 +572,23 @@ impl App {
         }
     }
 
+    /// Zoom of an axis in pixels per content unit, where it can zoom.
+    fn zoom_get(&self, t: Scroll) -> Option<f32> {
+        match t {
+            Scroll::PianoX => Some(self.state.piano.px_per_beat),
+            Scroll::PlaylistX => Some(self.state.playlist_bar_w),
+            _ => None,
+        }
+    }
+
+    fn zoom_set(&mut self, t: Scroll, z: f32) {
+        match t {
+            Scroll::PianoX => self.state.piano.px_per_beat = z.clamp(6.0, 1600.0),
+            Scroll::PlaylistX => self.state.playlist_bar_w = z.clamp(4.0, 600.0),
+            _ => {}
+        }
+    }
+
     /// Press on a scroll bar. Left: a press off the thumb first centres the thumb on the mouse,
     /// then dragging scrolls. Right (two-dimensional views): drag scrolls both axes.
     fn scrollbar_press(&mut self, t: Scroll, right: bool) {
@@ -584,13 +600,13 @@ impl App {
         if !right && (along < thumb0 || along > thumb0 + b.thumb) {
             self.scroll_set(t, (along - b.thumb / 2.0) * b.ratio());
         }
-        let mut axes = vec![(t, b.vertical, self.scroll_get(t), b.ratio())];
-        if right {
-            if let Some(o) = t.partner().and_then(|p| self.bar(p)) {
-                axes.push((o.target, o.vertical, self.scroll_get(o.target), o.ratio()));
-            }
-        }
-        self.drag = Some(Drag::Scroll { m0: (x, y), axes });
+        let p0 = self.scroll_get(t);
+        self.drag = Some(if right {
+            let z0 = self.zoom_get(t).unwrap_or(1.0);
+            Drag::BarZoom { t, m0: (x, y), p0, ratio: b.ratio(), z0, center: p0 + b.view / 2.0, view: b.view }
+        } else {
+            Drag::Scroll { m0: (x, y), axes: vec![(t, b.vertical, p0, b.ratio())] }
+        });
         self.invalidate();
     }
 
@@ -776,6 +792,11 @@ impl App {
             }
             Some(Action::Step(..) | Action::ChannelSelect(_) | Action::ChannelEnable(_) | Action::RackArea) => {
                 s.rack_scroll = (s.rack_scroll - dy * 30.0).max(0.0);
+            }
+            Some(Action::PlaylistArea) if ctrl => {
+                let bar = (s.playlist_scroll.0 + x - 481.0) / s.playlist_bar_w;
+                s.playlist_bar_w = (s.playlist_bar_w * 1.25f32.powf(dy + dx)).clamp(4.0, 600.0);
+                s.playlist_scroll.0 = (bar * s.playlist_bar_w - (x - 481.0)).max(0.0);
             }
             Some(Action::PlaylistArea) => {
                 s.playlist_scroll.0 = (s.playlist_scroll.0 - dx * 60.0).max(0.0);
@@ -1164,13 +1185,21 @@ mod tests {
         assert!(app.scroll_get(Scroll::PianoY) > y0 + 100.0, "scrolled down");
         assert_eq!(app.scroll_get(Scroll::PianoX), 0.0);
         frame(&mut app, &mut c, None);
-        // Right-drag the horizontal bar: both axes move.
-        let (x1, y1) = (app.scroll_get(Scroll::PianoX), app.scroll_get(Scroll::PianoY));
+        // Right-drag the horizontal bar: sideways scrolls, upward zooms in; vertical scroll stays.
+        let (x1, y1, z1) = (app.scroll_get(Scroll::PianoX), app.scroll_get(Scroll::PianoY), app.state.piano.px_per_beat);
         app.mouse_move(h.track.x + 5.0, h.track.cy());
         app.mouse_down_right();
-        app.mouse_move(h.track.x + 105.0, h.track.cy() - 40.0);
+        app.mouse_move(h.track.x + 105.0, h.track.cy());
         app.mouse_up();
-        assert!(app.scroll_get(Scroll::PianoX) > x1 && app.scroll_get(Scroll::PianoY) < y1, "2-D scroll");
+        assert!(app.scroll_get(Scroll::PianoX) > x1, "sideways scroll");
+        assert_eq!(app.state.piano.px_per_beat, z1);
+        frame(&mut app, &mut c, None);
+        app.mouse_move(h.track.x + 5.0, h.track.cy());
+        app.mouse_down_right();
+        app.mouse_move(h.track.x + 5.0, h.track.cy() - 60.0);
+        app.mouse_up();
+        assert!(app.state.piano.px_per_beat > z1 * 1.5, "zoomed in: {}", app.state.piano.px_per_beat);
+        assert_eq!(app.scroll_get(Scroll::PianoY), y1);
         frame(&mut app, &mut c, None);
         // Middle-drag the grid: the content follows the mouse.
         let (x2, y2) = (app.scroll_get(Scroll::PianoX), app.scroll_get(Scroll::PianoY));

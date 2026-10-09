@@ -106,11 +106,8 @@ pub fn scrollbar(ui: &mut Ui, track: Rect, vertical: bool, pos: f32, view: f32, 
     let max = (total - view).max(0.0);
     let thumb = (view / total * len).clamp(16.0_f32.min(len), len);
     let off = if max > 0.0 { pos.clamp(0.0, max) / max * (len - thumb) } else { 0.0 };
-    let hint = if target.two_dimensional() {
-        "Drag to scroll - right-drag to scroll both directions"
-    } else {
-        "Drag to scroll"
-    };
+    let zooms = matches!(target, Scroll::PianoX | Scroll::PlaylistX);
+    let hint = if zooms { "Drag to scroll - right-drag: left/right scrolls, up/down zooms" } else { "Drag to scroll" };
     let hov = ui.hit(track, Action::Scrollbar(target), hint);
     ui.c.fill_rect(track, t.scrollbar);
     let r = if vertical {
@@ -120,7 +117,7 @@ pub fn scrollbar(ui: &mut Ui, track: Rect, vertical: bool, pos: f32, view: f32, 
     };
     let c = if hov { t.overview.shade(0.12) } else { t.overview };
     ui.c.fill_rrect(r, 2.0_f32.min(r.w / 2.0).min(r.h / 2.0), c);
-    ui.bars.push(Bar { target, track, vertical, max, thumb });
+    ui.bars.push(Bar { target, track, vertical, max, view, thumb });
 }
 
 /// Raised surface: soft vertical gradient (lighter at the top) so panels don't look flat.
