@@ -17,7 +17,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::ModifiersState;
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 use app::App;
 use os_ui::Canvas;
@@ -33,12 +33,66 @@ struct Shell {
     /// virtual (logical) mouse position fed to the app.
     lock: Option<((f64, f64), (f32, f32))>,
     cursor: app::Cursor,
+    /// Main-window border in device pixels (left, top, right, bottom); zero when maximized.
+    inset: (u32, u32, u32, u32),
+    /// The border edge under the mouse (drags resize the OS window).
+    edge: Option<ResizeDirection>,
+}
+
+/// Border of the restored main window (spec ui/main-window.md §11), logical px: left, top, right, bottom.
+const BORDER: (f32, f32, f32, f32) = (6.0, 2.0, 6.0, 6.0);
+/// Depth of the resize zone along the top edge and the size of the corner squares (logical px).
+const TOP_GRIP: f32 = 4.0;
+const CORNER: f32 = 14.0;
+
+fn insets(window: &Window) -> (u32, u32, u32, u32) {
+    if window.is_maximized() || window.fullscreen().is_some() {
+        return (0, 0, 0, 0);
+    }
+    let k = window.scale_factor() as f32;
+    let d = |v: f32| (v * k).round() as u32;
+    (d(BORDER.0), d(BORDER.1), d(BORDER.2), d(BORDER.3))
+}
+
+/// Draw the border into the frame buffer around the canvas (§11): 1 px outline, a 1 px highlight
+/// along the top, the frame, and a 1 px inner line at the left, right and bottom of the canvas.
+fn draw_border(buf: &mut [u32], w: usize, h: usize, (l, t, r, b): (u32, u32, u32, u32)) {
+    if l == 0 || t == 0 || w < 2 * (l + r) as usize || h < 2 * (t + b) as usize {
+        return;
+    }
+    let (l, t, r, b) = (l as usize, t as usize, r as usize, b as usize);
+    let mut rect = |x0: usize, y0: usize, x1: usize, y1: usize, c: u32| {
+        for y in y0.min(h)..y1.min(h) {
+            buf[y * w + x0.min(w)..y * w + x1.min(w)].fill(c);
+        }
+    };
+    let (frame, outline, light, inner) = (0x2e3234, 0x202426, 0x393d3f, 0x2a2d2f);
+    rect(0, 0, w, t, frame);
+    rect(0, h - b, w, h, frame);
+    rect(0, 0, l, h, frame);
+    rect(w - r, 0, w, h, frame);
+    if t > 1 {
+        rect(1, 1, w - 1, 2, light);
+    }
+    rect(l - 1, t, l, h - b + 1, inner);
+    rect(w - r, t, w - r + 1, h - b + 1, inner);
+    rect(l - 1, h - b, w - r + 1, h - b + 1, inner);
+    rect(0, 0, w, 1, outline);
+    rect(0, h - 1, w, h, outline);
+    rect(0, 0, 1, h, outline);
+    rect(w - 1, 0, w, h, outline);
 }
 
 impl Shell {
     /// Show the cursor the app wants (resize arrows over edges and note ends).
     fn sync_cursor(&mut self, window: &Window) {
-        let c = self.app.cursor();
+        let c = match self.edge {
+            Some(ResizeDirection::East | ResizeDirection::West) => app::Cursor::EwResize,
+            Some(ResizeDirection::North | ResizeDirection::South) => app::Cursor::NsResize,
+            Some(ResizeDirection::NorthWest | ResizeDirection::SouthEast) => app::Cursor::NwseResize,
+            Some(_) => app::Cursor::NeswResize,
+            None => self.app.cursor(),
+        };
         if c != self.cursor {
             self.cursor = c;
             window.set_cursor(match c {
@@ -49,6 +103,47 @@ impl Shell {
                 app::Cursor::NeswResize => CursorIcon::NeswResize,
             });
         }
+    }
+
+    /// The resize edge at physical position (x, y) of the restored window, if any.
+    fn edge_at(&self, window: &Window, x: f64, y: f64) -> Option<ResizeDirection> {
+        if self.inset == (0, 0, 0, 0) {
+            return None;
+        }
+        let size = window.inner_size();
+        let (w, h) = (f64::from(size.width), f64::from(size.height));
+        let k = window.scale_factor();
+        let (l, r, b) = (f64::from(self.inset.0), f64::from(self.inset.2), f64::from(self.inset.3));
+        let t = f64::from(TOP_GRIP) * k;
+        let c = f64::from(CORNER) * k;
+        let (left, right, top, bottom) = (x < l, x >= w - r, y < t, y >= h - b);
+        let (near_l, near_r, near_t, near_b) = (x < c, x >= w - c, y < c, y >= h - c);
+        use ResizeDirection::*;
+        Some(if (top && near_l) || (left && near_t) {
+            NorthWest
+        } else if (top && near_r) || (right && near_t) {
+            NorthEast
+        } else if (bottom && near_l) || (left && near_b) {
+            SouthWest
+        } else if (bottom && near_r) || (right && near_b) {
+            SouthEast
+        } else if left {
+            West
+        } else if right {
+            East
+        } else if top {
+            North
+        } else if bottom {
+            South
+        } else {
+            return None;
+        })
+    }
+
+    /// Logical app coordinates of a physical window position (the canvas sits inside the border).
+    fn to_app(&self, window: &Window, x: f64, y: f64) -> (f32, f32) {
+        let k = window.scale_factor();
+        (((x - f64::from(self.inset.0)) / k) as f32, ((y - f64::from(self.inset.1)) / k) as f32)
     }
 }
 
@@ -115,7 +210,9 @@ impl ApplicationHandler for Shell {
                 if self.lock.is_some() {
                     return;
                 }
-                self.app.mouse_move(position.x as f32 / scale, position.y as f32 / scale);
+                self.edge = if self.app.drag.is_none() { self.edge_at(&window, position.x, position.y) } else { None };
+                let (mx, my) = self.to_app(&window, position.x, position.y);
+                self.app.mouse_move(mx, my);
                 self.sync_cursor(&window);
                 if self.app.has_damage() {
                     window.request_redraw();
@@ -123,6 +220,10 @@ impl ApplicationHandler for Shell {
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 if state == ElementState::Pressed {
+                    if let Some(dir) = self.edge {
+                        let _ = window.drag_resize_window(dir);
+                        return;
+                    }
                     let double = self.last_click.elapsed() < Duration::from_millis(350);
                     self.last_click = Instant::now();
                     self.app.mouse_down();
@@ -147,7 +248,8 @@ impl ApplicationHandler for Shell {
                 self.app.mouse_down_right();
                 if self.app.cursor_locked() {
                     let (mx, my) = self.app.mouse;
-                    self.lock = Some(((f64::from(mx * scale), f64::from(my * scale)), (mx, my)));
+                    let anchor = (f64::from(mx * scale) + f64::from(self.inset.0), f64::from(my * scale) + f64::from(self.inset.1));
+                    self.lock = Some((anchor, (mx, my)));
                     window.set_cursor_visible(false);
                 }
                 window.request_redraw();
@@ -178,14 +280,25 @@ impl ApplicationHandler for Shell {
                 window.request_redraw();
             }
             WindowEvent::Resized(_) => {
+                self.inset = insets(&window);
                 self.app.invalidate();
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
                 let size = window.inner_size();
                 let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
+                let inset = insets(&window);
+                if inset != self.inset {
+                    self.inset = inset;
+                    self.app.invalidate();
+                }
+                // The canvas fills the window inside the border.
+                let cw = size.width.saturating_sub(inset.0 + inset.2).max(1);
+                let ch = size.height.saturating_sub(inset.1 + inset.3).max(1);
+                let off = (inset.0 as usize, inset.1 as usize);
+                let stride = size.width as usize;
                 if self.canvas.is_none() {
-                    match Canvas::new(size.width, size.height, scale) {
+                    match Canvas::new(cw, ch, scale) {
                         Ok(c) => self.canvas = Some(c),
                         Err(e) => {
                             eprintln!("openstudio: {e}");
@@ -195,8 +308,8 @@ impl ApplicationHandler for Shell {
                     }
                 }
                 let canvas = self.canvas.as_mut().expect("canvas");
-                if canvas.pixmap.width() != size.width || canvas.pixmap.height() != size.height || canvas.scale != scale {
-                    canvas.resize(size.width, size.height, scale);
+                if canvas.pixmap.width() != cw || canvas.pixmap.height() != ch || canvas.scale != scale {
+                    canvas.resize(cw, ch, scale);
                     self.app.invalidate();
                 }
                 // Paint only what changed, then present only that region.
@@ -211,10 +324,11 @@ impl ApplicationHandler for Shell {
                             match damage {
                                 Some(Some(r)) if age > 0 => {
                                     let px = canvas.device_rect(r);
-                                    canvas.copy_region_to_xrgb(&mut buf, px);
+                                    canvas.copy_region_to_xrgb_at(&mut buf, stride, px, off);
                                     match (NonZeroU32::new(px.2 as u32), NonZeroU32::new(px.3 as u32)) {
                                         (Some(rw), Some(rh)) => {
-                                            let _ = buf.present_with_damage(&[softbuffer::Rect { x: px.0 as u32, y: px.1 as u32, width: rw, height: rh }]);
+                                            let (x, y) = ((px.0 + off.0) as u32, (px.1 + off.1) as u32);
+                                            let _ = buf.present_with_damage(&[softbuffer::Rect { x, y, width: rw, height: rh }]);
                                         }
                                         _ => {
                                             let _ = buf.present();
@@ -225,12 +339,14 @@ impl ApplicationHandler for Shell {
                                 // holds the last frame unless it was discarded.
                                 None => {
                                     if age == 0 {
-                                        canvas.copy_to_xrgb(&mut buf);
+                                        canvas.copy_region_to_xrgb_at(&mut buf, stride, (0, 0, cw as usize, ch as usize), off);
+                                        draw_border(&mut buf, stride, size.height as usize, inset);
                                     }
                                     let _ = buf.present();
                                 }
                                 _ => {
-                                    canvas.copy_to_xrgb(&mut buf);
+                                    canvas.copy_region_to_xrgb_at(&mut buf, stride, (0, 0, cw as usize, ch as usize), off);
+                                    draw_border(&mut buf, stride, size.height as usize, inset);
                                     let _ = buf.present();
                                 }
                             }
@@ -360,6 +476,8 @@ fn main() {
         last_click: Instant::now() - Duration::from_secs(10),
         lock: None,
         cursor: app::Cursor::Default,
+        inset: (0, 0, 0, 0),
+        edge: None,
     };
     event_loop.run_app(&mut shell).expect("run");
 }

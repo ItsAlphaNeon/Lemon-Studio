@@ -541,12 +541,19 @@ impl Canvas {
     }
 
     /// Copy a device-pixel region into a `0x00RRGGBB` buffer of the same width.
-    pub fn copy_region_to_xrgb(&self, out: &mut [u32], (x, y, w, h): (usize, usize, usize, usize)) {
+    pub fn copy_region_to_xrgb(&self, out: &mut [u32], r: (usize, usize, usize, usize)) {
+        self.copy_region_to_xrgb_at(out, self.pixmap.width() as usize, r, (0, 0));
+    }
+
+    /// Copy a device-pixel region into a larger `0x00RRGGBB` buffer (row length `out_stride`),
+    /// with the canvas placed at `(ox, oy)` in it (the main window's border surrounds the canvas).
+    pub fn copy_region_to_xrgb_at(&self, out: &mut [u32], out_stride: usize, (x, y, w, h): (usize, usize, usize, usize), (ox, oy): (usize, usize)) {
         let stride = self.pixmap.width() as usize;
         let px = self.pixmap.pixels();
         for row in y..y + h {
             let src = &px[row * stride + x..row * stride + x + w];
-            let dst = &mut out[row * stride + x..row * stride + x + w];
+            let d = (row + oy) * out_stride + x + ox;
+            let Some(dst) = out.get_mut(d..d + w) else { return };
             for (o, p) in dst.iter_mut().zip(src) {
                 *o = (u32::from(p.red()) << 16) | (u32::from(p.green()) << 8) | u32::from(p.blue());
             }

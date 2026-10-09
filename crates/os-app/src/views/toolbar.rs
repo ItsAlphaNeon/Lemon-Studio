@@ -15,6 +15,9 @@ pub fn is_toggle(name: &str) -> bool {
     )
 }
 
+/// Leftmost logo centre: just right of the last toolbar control (the news panel / downloads, x 1473).
+const LOGO_MIN_X: f32 = 1520.0;
+
 fn btn(x: f32, y: f32) -> Rect {
     Rect::new(x, y, 30.0, 33.0)
 }
@@ -38,16 +41,18 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         ui.c.fill_rect(Rect::new(x + 1.0, 44.0, 1.0, 35.0), t.toolbar_edge.with_alpha(110));
     }
 
-    row1(ui, s, f, width);
-    row2(ui, s, width);
+    row1(ui, s, f);
+    row2(ui, s);
 
     // Logo spot (spans both rows): the OpenStudio mark.
-    let lx = width - 45.0;
-    ui.hit(Rect::new(width - 80.0, 0.0, 78.0, 80.0), Action::Placeholder("About"), "OpenStudio");
+    // It keeps to the right edge until the window is too narrow, then the edge crops it
+    // (spec ui/main-window.md §11); the toolbar never moves.
+    let lx = (width - 45.0).max(LOGO_MIN_X);
+    ui.hit(Rect::new(lx - 35.0, 0.0, 78.0, 80.0), Action::Placeholder("About"), "OpenStudio");
     icons::logo(ui.c, lx, 40.0, 26.0, t.toolbar_line);
 }
 
-fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
+fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let t = ui.t;
     // Caption buttons.
     for (x, icon, action, hint) in [
@@ -218,15 +223,12 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     ];
     for (i, (icon, hint)) in utils.into_iter().enumerate() {
         let r = btn(1209.0 + 33.0 * i as f32, 4.0);
-        if r.right() > width - 85.0 {
-            break;
-        }
         let action = if icon == Icon::Save { Action::MenuItem(0, menus::FILE_SAVE) } else { Action::Placeholder(hint) };
         tool_button(ui, r, icon, false, action, hint);
     }
 }
 
-fn row2(ui: &mut Ui, s: &State, width: f32) {
+fn row2(ui: &mut Ui, s: &State) {
     let t = ui.t;
     // Menu bar.
     let mb = Rect::span(4.0, 296.0, 45.0, 77.0);
@@ -327,7 +329,7 @@ fn row2(ui: &mut Ui, s: &State, width: f32) {
 
     // News panel.
     let np = Rect::span(1304.0, 1470.0, 45.0, 77.0);
-    if np.right() < width - 85.0 {
+    {
         ui.c.fill_rrect(np, 2.0, t.news_panel);
         ui.hit(np, Action::Placeholder("news"), "News");
         let tw = ui.c.text(Font::new(13), 1309.0, 53.0, t.text_faint, "Today");
