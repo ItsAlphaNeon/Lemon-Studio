@@ -20,6 +20,8 @@ pub struct PianoState {
     pub px_per_beat: f32,
     /// Length of the last note added, moved or resized; 0 = not yet (§8: first note is PPQ/2).
     pub last_len: u32,
+    /// Notes changed since the playing engine last got the project.
+    pub dirty: bool,
     sel: Vec<usize>,
     sel_key: (u16, u16),
     undo: Vec<(u16, Vec<Note>)>,
@@ -32,6 +34,7 @@ impl Default for PianoState {
             scroll_y: ((TOP_KEY - 72) as f32) * ROW,
             px_per_beat: 96.0,
             last_len: 0,
+            dirty: false,
             sel: Vec::new(),
             sel_key: (0, 0),
             undo: Vec::new(),
@@ -141,11 +144,11 @@ pub fn shown_len(s: &State, n: &Note) -> u32 {
     if n.length == 0 { u32::from(s.project.ppq.max(4)) / 4 } else { n.length }
 }
 
-/// Pattern length in ticks: the last note end rounded up to whole bars, at least one bar.
+/// Pattern length in ticks as the engine loops it: whole bars past the last note end.
 pub fn pattern_length(s: &State, notes: &[Note]) -> u32 {
     let bar = u32::from(s.project.ppq.max(1)) * 4;
     let end = notes.iter().map(|n| n.position + shown_len(s, n)).max().unwrap_or(0);
-    end.div_ceil(bar).max(1) * bar
+    (end / bar + 1) * bar
 }
 
 /// Top of a velocity lollipop: `velocity / 128` of the panel height (§7).
@@ -182,6 +185,7 @@ pub fn channel(s: &State) -> Option<u16> {
 pub fn snapshot(s: &mut State) {
     let number = s.pattern;
     let notes = notes(s).to_vec();
+    s.piano.dirty = true;
     let u = &mut s.piano.undo;
     if u.len() >= UNDO_DEPTH {
         u.remove(0);
@@ -194,6 +198,7 @@ pub fn undo(s: &mut State) -> bool {
     let Some((number, notes)) = s.piano.undo.pop() else { return false };
     s.pattern = number;
     pattern_mut(s).notes = notes;
+    s.piano.dirty = true;
     s.piano.clear_selection();
     true
 }
@@ -302,6 +307,24 @@ mod tests {
         }
         assert_eq!(g.snap_down(g.tick_at(g.x_of(100.0))), 96);
         assert_eq!(key_name_check(60), "C5");
+    }
+
+    /// A new project's empty channels play the built-in tone, and the pattern ends on the bar.
+    #[test]
+    fn new_project_notes_are_audible() {
+        let mut a = app();
+        add_note(&mut a.state, 4, 0, 72);
+        let mut lib = os_engine::SampleLibrary::new(None);
+        let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
+        let mut buf = vec![0.0f32; 2 * 512];
+        let mut peak = 0.0f32;
+        while !e.past_end() {
+            e.process(&mut buf);
+            peak = buf.iter().fold(peak, |m, v| m.max(v.abs()));
+        }
+        assert!(peak > 0.05, "peak {peak}");
+        // One bar at 130 BPM (PPQ 96): 4 beats = 88615 frames at 48 kHz; blocks of 512.
+        assert!(e.position().abs_diff(88_615) < 512, "loop point {}", e.position());
     }
 
     fn key_name_check(k: i32) -> String {

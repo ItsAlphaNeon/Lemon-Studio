@@ -332,6 +332,15 @@ impl App {
             self.state.message = Some(format!("Audio: {e}"));
             self.invalidate();
         }
+        // Note edits reach playback from the next pattern loop (after a drag has finished).
+        if self.state.piano.dirty && self.drag.is_none() {
+            self.state.piano.dirty = false;
+            if playing {
+                let mut p = self.state.project.clone();
+                p.tempo = Some(self.state.tempo);
+                self.transport.update(&p);
+            }
+        }
         if playing || playing != self.last_playing {
             self.last_playing = playing;
             self.invalidate();
@@ -482,6 +491,9 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        if matches!(self.drag, Some(Drag::Velocity { .. })) {
+            self.state.piano.dirty = true;
+        }
         if matches!(self.drag, Some(Drag::NoteMove { .. } | Drag::NoteResize { .. } | Drag::NoteErase)) {
             piano::finish_edit(&mut self.state);
             self.damage_piano();
@@ -670,6 +682,19 @@ impl App {
         if self.state.song_mode { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern) }
     }
 
+    /// Play one note of channel `channel` (Note::channel) once, unless the song is playing.
+    fn preview(&self, channel: u16, key: i32) {
+        if self.transport.playing() {
+            return;
+        }
+        let mut p = self.state.project.clone();
+        p.tempo = Some(self.state.tempo);
+        let note = Note { key: key.clamp(0, views::piano::TOP_KEY) as u16, length: u32::from(p.ppq.max(4)), ..Note::step(channel, 0) };
+        p.patterns = vec![Pattern { number: 1, notes: vec![note], ..Pattern::default() }];
+        p.arrangements.clear();
+        self.transport.preview(p);
+    }
+
     /// Left click in the piano roll (spec: ui/piano-roll.md §8, Draw tool).
     fn piano_click(&mut self, a: &Action) {
         let (x, y) = self.mouse;
@@ -687,6 +712,7 @@ impl App {
                 let n = piano::notes(s)[i];
                 s.piano.last_len = n.length;
                 self.drag = Some(Drag::NoteMove { x0: x, y0: y, orig: vec![(i, n)] });
+                self.preview(ch, i32::from(n.key));
             }
             Action::PianoNote(i) => {
                 let Some(&n) = piano::notes(s).get(i) else { return };
@@ -714,7 +740,7 @@ impl App {
                 self.drag = Some(Drag::Velocity { last_x: x });
                 self.paint_velocity(x, x, y);
             }
-            Action::PianoKeys => s.message = Some(format!("{}: key preview is not available yet", views::piano::key_name(g.key_at(y)))),
+            Action::PianoKeys => self.preview(ch, g.key_at(y)),
             _ => {}
         }
     }
@@ -891,7 +917,7 @@ pub fn default_project() -> Project {
             color: None,
             enabled: true,
             slots: Default::default(),
-            routes: Vec::new(),
+            routes: if i == 0 { Vec::new() } else { vec![0] },
             send_levels: Vec::new(),
             volume: Some(0.8),
             pan: Some(0.0),

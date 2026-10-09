@@ -1,7 +1,8 @@
 //! Playback: an audio thread that owns the output stream and the engine.
 //!
-//! The UI sends a project snapshot on Play; edits made while playing apply on the next Play.
-//! Pattern mode loops by rebuilding the engine (decoded samples stay cached in the library).
+//! The UI sends a project snapshot on Play; `update` swaps in an edited snapshot, heard from the
+//! next pattern loop. Pattern mode loops by rebuilding the engine at the pattern end (decoded
+//! samples stay cached in the library). `preview` plays one note once while stopped.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -29,6 +30,8 @@ pub struct Shared {
 
 enum Cmd {
     Play(Box<Project>, PlayMode),
+    Update(Box<Project>),
+    Preview(Box<Project>),
     Stop,
 }
 
@@ -51,6 +54,16 @@ impl Transport {
 
     pub fn play(&self, project: &Project, mode: PlayMode) {
         let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode));
+    }
+
+    /// Replace the playing project (takes effect at the next pattern loop).
+    pub fn update(&self, project: &Project) {
+        let _ = self.tx.send(Cmd::Update(Box::new(project.clone())));
+    }
+
+    /// Play pattern 1 of `project` once (a one-note preview project); ignored while playing.
+    pub fn preview(&self, project: Project) {
+        let _ = self.tx.send(Cmd::Preview(Box::new(project)));
     }
 
     pub fn stop(&self) {
@@ -82,9 +95,27 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, mut library: SampleLibra
     let mut session: Option<Session> = None;
     loop {
         match rx.recv_timeout(Duration::from_millis(15)) {
+            Ok(Cmd::Update(project)) => {
+                if let Some(s) = session.as_mut().filter(|s| s.looping) {
+                    s.project = *project;
+                }
+            }
+            Ok(Cmd::Preview(project)) => {
+                if session.as_ref().is_none_or(|s| !s.looping) {
+                    session = None;
+                    match Session::start(&project, PlayMode::Pattern(1), false, &mut library, shared.clone()) {
+                        Ok(s) => session = Some(s),
+                        Err(e) => {
+                            if let Ok(mut slot) = shared.error.lock() {
+                                *slot = Some(e);
+                            }
+                        }
+                    }
+                }
+            }
             Ok(Cmd::Play(project, mode)) => {
                 session = None;
-                match Session::start(&project, mode, &mut library, shared.clone()) {
+                match Session::start(&project, mode, true, &mut library, shared.clone()) {
                     Ok(s) => session = Some(s),
                     Err(e) => {
                         if let Ok(mut slot) = shared.error.lock() {
@@ -101,6 +132,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, mut library: SampleLibra
         if let Some(s) = &mut session {
             if s.done.load(Ordering::Relaxed) {
                 match s.mode {
+                    PlayMode::Pattern(_) if !s.looping => finished = true,
                     // Patterns loop: swap in a fresh engine at the start.
                     PlayMode::Pattern(_) => {
                         let e = Engine::new(&s.project, &mut library, s.rate, s.mode);
@@ -116,8 +148,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, mut library: SampleLibra
         if finished {
             session = None;
         }
-        if session.is_none() {
+        if session.as_ref().is_none_or(|s| !s.looping) {
             shared.playing.store(false, Ordering::Relaxed);
+        }
+        if session.is_none() {
             shared.peak_l.store(0, Ordering::Relaxed);
             shared.peak_r.store(0, Ordering::Relaxed);
         }
@@ -131,10 +165,13 @@ struct Session {
     project: Project,
     mode: PlayMode,
     rate: u32,
+    /// False for a one-shot note preview.
+    looping: bool,
 }
 
 impl Session {
-    fn start(project: &Project, mode: PlayMode, library: &mut SampleLibrary, shared: Arc<Shared>) -> Result<Session, String> {
+    /// `looping == false`: a one-shot preview that leaves the song position and play state alone.
+    fn start(project: &Project, mode: PlayMode, looping: bool, library: &mut SampleLibrary, shared: Arc<Shared>) -> Result<Session, String> {
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or("no audio output device")?;
         let supported = device.default_output_config().map_err(|e| e.to_string())?;
@@ -143,9 +180,12 @@ impl Session {
         let rate = config.sample_rate;
         let engine = Arc::new(Mutex::new(Engine::new(project, library, rate, mode)));
         let done = Arc::new(AtomicBool::new(false));
-        shared.sample_rate.store(rate, Ordering::Relaxed);
-        shared.position.store(0, Ordering::Relaxed);
-        let args = (&device, &config, engine.clone(), done.clone(), shared.clone());
+        if looping {
+            shared.sample_rate.store(rate, Ordering::Relaxed);
+            shared.position.store(0, Ordering::Relaxed);
+        }
+        let loop_at_end = matches!(mode, PlayMode::Pattern(_));
+        let args = (&device, &config, engine.clone(), done.clone(), shared.clone(), loop_at_end, looping);
         let stream = match format {
             SampleFormat::F32 => build::<f32>(args),
             SampleFormat::I16 => build::<i16>(args),
@@ -154,14 +194,16 @@ impl Session {
             other => Err(format!("unsupported output sample format {other:?}")),
         }?;
         stream.play().map_err(|e| e.to_string())?;
-        shared.playing.store(true, Ordering::Relaxed);
-        Ok(Session { _stream: stream, engine, done, project: project.clone(), mode, rate })
+        if looping {
+            shared.playing.store(true, Ordering::Relaxed);
+        }
+        Ok(Session { _stream: stream, engine, done, project: project.clone(), mode, rate, looping })
     }
 }
 
-type BuildArgs<'a> = (&'a cpal::Device, &'a StreamConfig, Arc<Mutex<Engine>>, Arc<AtomicBool>, Arc<Shared>);
+type BuildArgs<'a> = (&'a cpal::Device, &'a StreamConfig, Arc<Mutex<Engine>>, Arc<AtomicBool>, Arc<Shared>, bool, bool);
 
-fn build<T>((device, config, engine, done, shared): BuildArgs<'_>) -> Result<cpal::Stream, String>
+fn build<T>((device, config, engine, done, shared, loop_at_end, report): BuildArgs<'_>) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
 {
@@ -176,7 +218,13 @@ where
                 match engine.try_lock() {
                     Ok(mut e) if !e.finished() => {
                         e.process(&mut stereo);
-                        shared.position.store(e.position(), Ordering::Relaxed);
+                        if report {
+                            shared.position.store(e.position(), Ordering::Relaxed);
+                        }
+                        // Patterns loop on the bar line; ringing voices are cut by the restart.
+                        if loop_at_end && e.past_end() {
+                            done.store(true, Ordering::Relaxed);
+                        }
                     }
                     Ok(_) => {
                         stereo.fill(0.0);
@@ -193,8 +241,10 @@ where
                         *slot = T::from_sample(v.clamp(-1.0, 1.0));
                     }
                 }
-                shared.peak_l.store(pl.to_bits(), Ordering::Relaxed);
-                shared.peak_r.store(pr.to_bits(), Ordering::Relaxed);
+                if report {
+                    shared.peak_l.store(pl.to_bits(), Ordering::Relaxed);
+                    shared.peak_r.store(pr.to_bits(), Ordering::Relaxed);
+                }
             },
             |e| eprintln!("audio stream error: {e}"),
             None,

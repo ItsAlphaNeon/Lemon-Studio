@@ -106,13 +106,19 @@ impl Engine {
                     report.plugin_channels_silent += 1;
                 }
                 let sample = if plays_sample {
-                    ch.sample_path.as_deref().and_then(|p| {
-                        let s = library.get(p);
-                        if s.is_none() {
-                            report.missing_samples.push(p.to_string());
+                    match ch.sample_path.as_deref() {
+                        Some(p) => {
+                            let s = library.get(p);
+                            if s.is_none() {
+                                report.missing_samples.push(p.to_string());
+                            }
+                            s
                         }
-                        s
-                    })
+                        // OpenStudio choice: an empty sampler channel plays a built-in tone so new
+                        // projects make sound (FL's empty sampler is silent).
+                        None if ch.kind == ChannelKind::Sampler => Some(fallback_tone(rate)),
+                        None => None,
+                    }
                 } else {
                     None
                 };
@@ -210,6 +216,12 @@ impl Engine {
     /// Length of the scheduled material in frames (voices may ring past it).
     pub fn length(&self) -> u64 {
         self.end_frame
+    }
+
+    /// True once the scheduled material has played (voices may still ring): the loop point of a
+    /// pattern.
+    pub fn past_end(&self) -> bool {
+        self.frame >= self.end_frame && self.next_trigger >= self.triggers.len()
     }
 
     /// True once all scheduled material has played and every voice has finished.
@@ -391,6 +403,28 @@ impl Sched {
     fn note(start: f64, n: &os_model::Note) -> Self {
         Sched { tick: start + f64::from(n.position), channel: usize::from(n.channel), key: n.key, velocity: n.velocity, pan: n.pan, cut: None }
     }
+}
+
+/// A plucked tone at key 60 (261.6 Hz), about 1.5 s: decaying harmonics of a saw.
+fn fallback_tone(rate: u32) -> Arc<Sample> {
+    use std::f64::consts::TAU;
+    let n = (f64::from(rate) * 1.5) as usize;
+    let f0 = 261.625_565;
+    let mut left = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f64 / f64::from(rate);
+        let attack = (t / 0.004).min(1.0);
+        let mut v = 0.0;
+        for h in 1..=10 {
+            let hf = f64::from(h);
+            if f0 * hf > f64::from(rate) / 2.0 {
+                break;
+            }
+            v += (TAU * f0 * hf * t).sin() / hf * (-t * (2.5 + 2.0 * hf)).exp();
+        }
+        left.push((0.45 * attack * v) as f32);
+    }
+    Arc::new(Sample { rate, right: left.clone(), left })
 }
 
 /// Note triggers plus the end tick of the scheduled material.
