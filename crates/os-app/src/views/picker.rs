@@ -88,12 +88,17 @@ pub fn paint(ui: &mut Ui, s: &State) {
                 preview = Some((effects, i));
             }
             if hov || on {
-                let pill = Rect::new(cx - 24.0, tab_y - 32.0, 48.0, 68.0);
-                ui.c.fill_rrect(pill, 6.0, rgb(0x2f3d47));
-                ui.c.stroke_rrect(pill, 6.0, 1.0, rgb(0x5487a0));
-                ui.c.fill_rect(Rect::new(pill.x + 6.0, pill.bottom() - 3.0, pill.w - 12.0, 2.0), rgb(0x75b1d6));
-                ui.c.line(cx - 3.0, tab_y - 22.0, cx, tab_y - 25.0, 1.2, rgb(0xd8dde0));
-                ui.c.line(cx, tab_y - 25.0, cx + 3.0, tab_y - 22.0, 1.2, rgb(0xd8dde0));
+                let pill = Rect::new(cx - 24.0, tab_y - 32.0, 48.0, 70.0);
+                ui.c.fill_rect_gradient(pill, rgb(0x4a5e6a), rgb(0x2b3239), 10.0);
+                // Soft glow rising from the bottom edge.
+                ui.c.push_clip(pill);
+                for i in 0..16 {
+                    let r = 16.0 - i as f32 * 0.9;
+                    ui.c.fill_circle(cx, pill.bottom() - 1.5, r, rgb(0x8fdcf4).with_alpha(9 + i * 2));
+                }
+                ui.c.pop_clip();
+                ui.c.stroke_rrect(pill.inset(0.5), 10.0, 1.2, rgb(0x7f97a3).with_alpha(200));
+                ui.c.fill_polygon(&[(cx - 4.5, tab_y - 21.0), (cx, tab_y - 26.0), (cx + 4.5, tab_y - 21.0)], rgb(0xe6f2f4));
             }
             let c = if hov || on { rgb(0xffffff) } else { rgb(0x6f777c) };
             ui.c.text(font, cx - tw / 2.0, tab_y - 10.0, c, name);
