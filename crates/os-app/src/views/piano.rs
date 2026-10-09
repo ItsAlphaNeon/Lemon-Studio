@@ -4,8 +4,8 @@
 use os_model::Note;
 use os_ui::{Color, Font, Rect};
 
-use super::{window_frame, FrameInfo};
-use crate::app::{Action, Scroll, State, Ui};
+use super::{resize_zones, window_body, window_frame, FrameInfo};
+use crate::app::{Action, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
 use crate::piano::{self, Geom};
 
@@ -68,8 +68,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let channel = s.project.channels.get(s.selected_channel);
     let name = channel.and_then(|c| c.name.clone()).unwrap_or_else(|| "(none)".into());
     let title = format!("Piano roll - {name}  \u{203a}");
-    let client = window_frame(ui, r, &title, 365.0);
+    window_body(ui, r);
+    let client = window_frame(ui, Win::PianoRoll, r, &title, 365.0, true);
     let _ = client;
+    toolbar(ui, r);
+    if r.h < 2.0 * crate::app::TITLE_H {
+        return; // collapsed to the title bar
+    }
     let l = layout(r);
     let g = Geom::new(s, l.grid);
     let ch = channel.map(|c| c.index);
@@ -77,8 +82,6 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let notes: &[Note] = pat.map_or(&[], |p| &p.notes);
     let sel = s.piano.selection(s.pattern, ch);
     let selecting = !sel.is_empty();
-
-    toolbar(ui, r);
 
     // Note-colour tab (§6).
     let tab = l.tab;
@@ -153,6 +156,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     super::scrollbar(ui, track, true, s.piano.scroll_y, l.grid.h, (TOP_KEY + 1) as f32 * ROW, Scroll::PianoY);
 
     velocity_panel(ui, s, &l, &g, notes, ch, &sel);
+    resize_zones(ui, s, Win::PianoRoll, r);
 }
 
 /// Toolbar icons in the title bar (§2). Only the draw tool exists so far; it is always active.

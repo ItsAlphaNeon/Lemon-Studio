@@ -4,8 +4,8 @@
 use os_model::ClipSource;
 use os_ui::{Rect};
 
-use super::{rgb, window_frame, FrameInfo};
-use crate::app::{Action, State, Ui};
+use super::{resize_zones, rgb, window_body, window_frame, FrameInfo};
+use crate::app::{Action, State, Ui, Win};
 use crate::icons::{self, Icon};
 
 /// Pixels per bar and per track row at the default zoom.
@@ -16,7 +16,8 @@ pub const ROW_H: f32 = 48.0;
 pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
     let bar_w = s.playlist_bar_w;
-    let client = window_frame(ui, r, "Playlist - Arrangement  \u{203a}  (none)  \u{203a}", 281.0);
+    window_body(ui, r);
+    let client = window_frame(ui, Win::Playlist, r, "Playlist - Arrangement  \u{203a}  (none)  \u{203a}", 281.0, true);
     // Toolbar icons inside the title bar.
     let tools = [
         Icon::ArrowRight, Icon::Magnet, Icon::Pencil, Icon::Brush, Icon::Delete, Icon::Mute, Icon::Slip, Icon::Slice, Icon::Select,
@@ -24,9 +25,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ];
     let xs = [215.0, 235.0, 268.0, 288.0, 310.0, 331.0, 352.0, 374.0, 394.0, 415.0, 436.0];
     for (icon, x) in tools.into_iter().zip(xs) {
-        let b = Rect::new(x, 85.0, 18.0, 18.0);
+        let b = Rect::new(r.x + x - 209.0, r.y + 2.0, 18.0, 18.0);
         let hov = ui.hit(b, Action::Placeholder("playlist tool"), "Playlist tool");
         icons::draw(ui.c, icon, b, if hov { t.glyph } else { t.text });
+    }
+    if r.h < 2.0 * crate::app::TITLE_H {
+        return; // collapsed to the title bar
     }
 
     // Picker panel with its tab icons (pattern / audio / automation).
@@ -179,4 +183,5 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.fill_rect(Rect::new(x, grid_y - 20.0, 1.5, area.h + 20.0), t.playhead);
     }
     ui.c.pop_clip();
+    resize_zones(ui, s, Win::Playlist, r);
 }

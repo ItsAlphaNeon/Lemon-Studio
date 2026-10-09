@@ -15,8 +15,9 @@ use crate::piano::{self, Geom, PianoState};
 use crate::transport::Transport;
 use crate::views;
 
-/// Child windows. Playlist, Mixer and Piano roll are shown maximized (filling the workspace); the
-/// Channel rack and the channel plugin window float. All share one stacking order (`State::z`).
+/// Child windows. Playlist, Mixer and Piano roll float by default and can be moved, resized,
+/// minimized (title bar only) and maximized (filling the workspace); the Channel rack and the
+/// channel plugin window float. All share one stacking order (`State::z`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Win {
     Playlist,
@@ -28,11 +29,45 @@ pub enum Win {
 }
 
 impl Win {
-    /// Shown maximized in the workspace (this draft has no floating Playlist / Mixer / Piano roll).
-    pub fn maximized(self) -> bool {
-        matches!(self, Win::Playlist | Win::Mixer | Win::PianoRoll)
+    /// Index into `State::wins` for the windows with a stored rect, move and resize.
+    pub fn slot(self) -> Option<usize> {
+        match self {
+            Win::Playlist => Some(0),
+            Win::Mixer => Some(1),
+            Win::PianoRoll => Some(2),
+            _ => None,
+        }
+    }
+
+    /// Smallest outer size (the layouts stay intact down to this).
+    pub fn min_size(self) -> (f32, f32) {
+        match self {
+            Win::Playlist => (520.0, 220.0),
+            Win::Mixer => (560.0, 400.0),
+            Win::PianoRoll => (540.0, 320.0),
+            _ => (0.0, 0.0),
+        }
     }
 }
+
+/// Resize edge bits for `Action::WinResize`.
+pub const EDGE_L: u8 = 1;
+pub const EDGE_R: u8 = 2;
+pub const EDGE_T: u8 = 4;
+pub const EDGE_B: u8 = 8;
+
+/// Where a Playlist / Mixer / Piano roll window sits when floating, and its title-bar states.
+#[derive(Clone, Copy)]
+pub struct WinState {
+    pub rect: Rect,
+    /// Fills the workspace.
+    pub maxed: bool,
+    /// Collapsed to its title bar.
+    pub mini: bool,
+}
+
+/// Title bar height of the three docked-style windows.
+pub const TITLE_H: f32 = 23.0;
 
 /// Mouse cursor shapes the shell should show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +76,7 @@ pub enum Cursor {
     EwResize,
     NsResize,
     NwseResize,
+    NeswResize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +115,10 @@ pub enum Action {
     /// Floating window title bar (drag to move) and close button.
     WinDrag(Win),
     CloseWin(Win),
+    /// Title-bar buttons of Playlist / Mixer / Piano roll, and their resize edges (`EDGE_*` bits).
+    MinWin(Win),
+    MaxWin(Win),
+    WinResize(Win, u8),
     BrowserRow(usize),
     PlaylistArea,
     MixerArea,
@@ -159,6 +199,7 @@ fn hover_is_visible(a: &Action) -> bool {
             | Action::Scrollbar(_)
             | Action::RackResize(_)
             | Action::WinDrag(_)
+            | Action::WinResize(..)
     )
 }
 
@@ -200,6 +241,8 @@ impl Ui<'_> {
 pub enum Drag {
     /// Move a floating window (offset of the mouse from its top-left).
     Window { win: Win, dx: f32, dy: f32 },
+    /// Resize a Playlist / Mixer / Piano roll window (`r0` = its rect when the drag began).
+    WinResize { win: Win, edges: u8, m0: (f32, f32), r0: Rect },
     /// Resize the channel rack from its right / bottom edges.
     RackResize { edges: u8, m0: (f32, f32), s0: (f32, f32) },
     /// Change a channel's mixer track (spec: ui/channel-rack.md §5).
@@ -255,6 +298,10 @@ pub struct State {
     pub toggles: Vec<&'static str>,
     pub maximized: bool,
     pub piano: PianoState,
+    /// Playlist, Mixer, Piano roll (see `Win::slot`).
+    pub wins: [WinState; 3],
+    /// Size of the shell window in logical pixels (set each paint).
+    pub screen: (f32, f32),
 }
 
 impl State {
@@ -262,9 +309,47 @@ impl State {
         self.z.contains(&w)
     }
 
+    /// Whether `w` is maximized and not collapsed (it fills the workspace).
+    pub fn is_max(&self, w: Win) -> bool {
+        w.slot().is_some_and(|i| self.wins[i].maxed && !self.wins[i].mini)
+    }
+
     /// The maximized window in front (the one filling the workspace), if any.
     pub fn docked(&self) -> Option<Win> {
-        self.z.iter().rev().copied().find(|w| w.maximized())
+        self.z.iter().rev().copied().find(|&w| self.is_max(w))
+    }
+
+    /// The workspace: right of the browser, below the toolbar.
+    pub fn work_rect(&self) -> Rect {
+        let left = if self.show_browser { views::BROWSER_W } else { 0.0 };
+        Rect::new(left, views::WORK_Y, (self.screen.0 - left).max(0.0), (self.screen.1 - views::WORK_Y).max(0.0))
+    }
+
+    /// The window's floating rect, kept at least its minimum size and inside the screen.
+    pub fn float_rect(&self, w: Win) -> Rect {
+        let Some(i) = w.slot() else { return Rect::new(0.0, 0.0, 0.0, 0.0) };
+        let r = self.wins[i].rect;
+        let (mw, mh) = w.min_size();
+        let (sw, sh) = self.screen;
+        let rw = r.w.min(sw).max(mw);
+        let rh = r.h.min(sh - views::WORK_Y).max(mh);
+        let x = r.x.min(sw - rw).max(0.0);
+        let y = r.y.min(sh - rh).max(views::WORK_Y);
+        Rect::new(x, y, rw, rh)
+    }
+
+    /// Where the window is painted: the workspace when maximized, a title bar when minimized.
+    pub fn win_rect(&self, w: Win) -> Rect {
+        let Some(i) = w.slot() else { return Rect::new(0.0, 0.0, 0.0, 0.0) };
+        let f = self.float_rect(w);
+        let ws = self.wins[i];
+        if ws.mini {
+            Rect::new(f.x, f.y, f.w, TITLE_H)
+        } else if ws.maxed {
+            self.work_rect()
+        } else {
+            f
+        }
     }
 
     /// Show `w` and bring it to the front.
@@ -280,7 +365,7 @@ impl State {
     /// Whether `w` is in front of everything that could cover it: the top window for floating
     /// windows, the top maximized window for maximized ones (floating windows never cover them fully).
     pub fn in_front(&self, w: Win) -> bool {
-        if w.maximized() { self.docked() == Some(w) } else { self.z.last() == Some(&w) }
+        if self.is_max(w) { self.docked() == Some(w) } else { self.z.last() == Some(&w) }
     }
 }
 
@@ -342,6 +427,12 @@ impl App {
                 toggles: vec!["typing", "multilink"],
                 maximized: true,
                 piano: PianoState::default(),
+                wins: [
+                    WinState { rect: Rect::new(693.0, 101.0, 1126.0, 378.0), maxed: false, mini: false },
+                    WinState { rect: Rect::new(231.0, 565.0, 1552.0, 435.0), maxed: false, mini: false },
+                    WinState { rect: Rect::new(480.0, 140.0, 1000.0, 640.0), maxed: false, mini: false },
+                ],
+                screen: (1920.0, 1080.0),
             },
             theme: load_theme(),
             transport,
@@ -490,6 +581,7 @@ impl App {
 
     pub fn paint(&mut self, canvas: &mut Canvas, damage: Option<Rect>) {
         canvas.begin_frame(damage);
+        self.state.screen = canvas.size();
         self.hits.clear();
         self.bars.clear();
         let title = self.title();
@@ -578,10 +670,42 @@ impl App {
                 Drag::Window { win, dx, dy } => {
                     let old = self.win_bounds(win);
                     let pos = ((x - dx).max(0.0), (y - dy).max(views::WORK_Y));
+                    let (sw, sh) = self.state.screen;
                     match win {
                         Win::ChannelRack => self.state.rack_pos = pos,
                         Win::Plugin => self.state.plugin_pos = pos,
-                        _ => {}
+                        w => {
+                            if let Some(i) = w.slot() {
+                                let r = &mut self.state.wins[i].rect;
+                                r.x = pos.0.min(sw - 100.0).max(0.0);
+                                r.y = pos.1.min(sh - 30.0).max(views::WORK_Y);
+                            }
+                        }
+                    }
+                    let new = self.win_bounds(win);
+                    self.damage_rect(old.union(&new));
+                }
+                Drag::WinResize { win, edges, m0, r0 } => {
+                    let old = self.win_bounds(win);
+                    let (dx, dy) = (x - m0.0, y - m0.1);
+                    let (mw, mh) = win.min_size();
+                    let mut r = r0;
+                    if edges & EDGE_L != 0 {
+                        r.w = (r0.w - dx).max(mw);
+                        r.x = r0.right() - r.w;
+                    }
+                    if edges & EDGE_R != 0 {
+                        r.w = (r0.w + dx).max(mw);
+                    }
+                    if edges & EDGE_T != 0 {
+                        r.h = (r0.h - dy).max(mh).min((r0.bottom() - views::WORK_Y).max(mh));
+                        r.y = r0.bottom() - r.h;
+                    }
+                    if edges & EDGE_B != 0 {
+                        r.h = (r0.h + dy).max(mh);
+                    }
+                    if let Some(i) = win.slot() {
+                        self.state.wins[i].rect = r;
                     }
                     let new = self.win_bounds(win);
                     self.damage_rect(old.union(&new));
@@ -614,7 +738,8 @@ impl App {
                     self.damage_rect(HINT_RECT);
                 }
                 Drag::Fader { track, y0, v0 } => {
-                    let v = (v0 - f64::from(y - y0) * views::mixer::FADER_PER_PX).clamp(0.0, 1.0);
+                    let per_px = views::mixer::FADER_PER_PX / f64::from(views::mixer::scale(self.state.win_rect(Win::Mixer)));
+                    let v = (v0 - f64::from(y - y0) * per_px).clamp(0.0, 1.0);
                     if let Some(t) = self.state.project.mixer.iter_mut().find(|t| t.index == track) {
                         t.volume = Some(v);
                     }
@@ -697,12 +822,26 @@ impl App {
     fn win_bounds(&self, w: Win) -> Rect {
         match w {
             Win::Plugin => views::channel_win::bounds(&self.state),
-            _ => views::rack::bounds(&self.state),
+            Win::ChannelRack => views::rack::bounds(&self.state),
+            w => self.state.win_rect(w).outset(5.0),
         }
     }
 
     /// Cursor for the current hover / drag.
     pub fn cursor(&self) -> Cursor {
+        let win_edges = match (&self.drag, &self.hover) {
+            (Some(Drag::WinResize { edges, .. }), _) => *edges,
+            (None, Some(Action::WinResize(_, e))) => *e,
+            _ => 0,
+        };
+        if win_edges != 0 {
+            return match win_edges {
+                EDGE_L | EDGE_R => Cursor::EwResize,
+                EDGE_T | EDGE_B => Cursor::NsResize,
+                e if e == EDGE_L | EDGE_T || e == EDGE_R | EDGE_B => Cursor::NwseResize,
+                _ => Cursor::NeswResize,
+            };
+        }
         let edges = match (&self.drag, &self.hover) {
             (Some(Drag::RackResize { edges, .. }), _) => *edges,
             (None, Some(Action::RackResize(e))) => *e,
@@ -1044,7 +1183,7 @@ impl App {
                 self.state.piano.clear_selection();
             }
             // Piano roll editing keys (spec: ui/piano-roll.md §8).
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") && self.state.docked() == Some(Win::PianoRoll) => {
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") && self.state.shown(Win::PianoRoll) => {
                 let s = &mut self.state;
                 if let Some(ch) = piano::channel(s) {
                     let all = piano::notes(s).iter().enumerate().filter(|(_, n)| n.channel == ch).map(|(i, _)| i).collect();
@@ -1052,7 +1191,7 @@ impl App {
                 }
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => self.act(Action::PianoUndo),
-            Key::Named(NamedKey::Delete) if self.state.docked() == Some(Win::PianoRoll) => {
+            Key::Named(NamedKey::Delete) if self.state.shown(Win::PianoRoll) => {
                 let s = &mut self.state;
                 let sel = s.piano.selection(s.pattern, piano::channel(s));
                 if !sel.is_empty() {
@@ -1199,7 +1338,7 @@ impl App {
                 } else {
                     s.raise(w);
                 }
-                if w == Win::PianoRoll && s.docked() == Some(Win::PianoRoll) {
+                if w == Win::PianoRoll && s.shown(Win::PianoRoll) {
                     piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 }
             }
@@ -1216,7 +1355,7 @@ impl App {
                 self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0 });
             }
             Action::ChannelSelect(i) => {
-                if s.selected_channel != i && s.docked() == Some(Win::PianoRoll) {
+                if s.selected_channel != i && s.shown(Win::PianoRoll) {
                     s.selected_channel = i;
                     s.piano.clear_selection();
                     piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
@@ -1266,8 +1405,37 @@ impl App {
                 s.piano.dirty = true;
             }
             Action::WinDrag(win) => {
-                let pos = if win == Win::Plugin { s.plugin_pos } else { s.rack_pos };
+                if s.is_max(win) {
+                    return;
+                }
+                let pos = match win {
+                    Win::Plugin => s.plugin_pos,
+                    Win::ChannelRack => s.rack_pos,
+                    w => {
+                        // Start from the rect as shown (kept on screen), then move it.
+                        let r = s.float_rect(w);
+                        if let Some(i) = w.slot() {
+                            s.wins[i].rect = r;
+                        }
+                        (r.x, r.y)
+                    }
+                };
                 self.drag = Some(Drag::Window { win, dx: self.mouse.0 - pos.0, dy: self.mouse.1 - pos.1 });
+            }
+            Action::WinResize(win, edges) => {
+                let r0 = s.float_rect(win);
+                self.drag = Some(Drag::WinResize { win, edges, m0: self.mouse, r0 });
+            }
+            Action::MinWin(w) => {
+                if let Some(i) = w.slot() {
+                    s.wins[i].mini = !s.wins[i].mini;
+                }
+            }
+            Action::MaxWin(w) => {
+                if let Some(i) = w.slot() {
+                    s.wins[i].mini = false;
+                    s.wins[i].maxed = !s.wins[i].maxed;
+                }
             }
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(i) => s.browser_selected = i,
@@ -1517,7 +1685,8 @@ mod tests {
         let rack = views::rack::rect(&app.state);
         click(&mut app, &mut a, Rect::new(rack.right() + 50.0, rack.y + 100.0, 2.0, 2.0));
         assert_eq!(app.state.z.last(), Some(&Win::Playlist));
-        assert!(!app.hits.iter().any(|h| h.win == Some(Win::ChannelRack)), "covered rack gets no clicks");
+        let over = (rack.right() - 60.0, rack.y + 100.0); // inside both windows
+        assert_eq!(app.top_hit(over.0, over.1).and_then(|h| h.win), Some(Win::Playlist), "the playlist covers the rack there");
         app.act(Action::ToggleWin(Win::ChannelRack));
         frame(&mut app, &mut a, None);
         assert_eq!(app.state.z.last(), Some(&Win::ChannelRack));
@@ -1582,7 +1751,7 @@ mod tests {
         assert!(!app.hits.iter().any(|h| matches!(h.action, Action::Step(..))), "no steps in roll view");
         let hr = hit_rect(&app, &Action::RackRoll(1));
         click(&mut app, &mut a, hr);
-        assert_eq!((app.state.docked(), app.state.selected_channel), (Some(Win::PianoRoll), 1));
+        assert_eq!((app.state.z.last(), app.state.selected_channel), (Some(&Win::PianoRoll), 1));
         app.state.rack_roll_view = false;
         app.act(Action::ToggleWin(Win::ChannelRack));
         frame(&mut app, &mut a, None);
@@ -1596,6 +1765,95 @@ mod tests {
         assert_eq!(app.state.project.channels.len(), n + 6);
         assert_eq!(app.state.project.channels.last().unwrap().mixer_track, 12, "after the highest insert in use (6 after the drag)");
         assert!(app.bar(Scroll::RackY).is_some_and(|b| b.max > 0.0));
+    }
+
+    /// Playlist / Mixer / Piano roll windows: drag the title bar, resize from the edges (down to the
+    /// minimum size), minimize and maximize; damage repaints match full frames.
+    #[test]
+    fn window_move_resize_min_max() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        app.state.z = vec![Win::Playlist, Win::Mixer];
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        let step = |app: &mut App, c: &mut Canvas, f: &dyn Fn(&mut App)| {
+            f(app);
+            if let Some(d) = app.take_damage() {
+                frame(app, c, d);
+            }
+        };
+        let r0 = app.state.win_rect(Win::Mixer);
+        assert_eq!(r0, Rect::new(231.0, 565.0, 1552.0, 435.0));
+
+        // Move by the title bar.
+        let bar = hit_rect(&app, &Action::WinDrag(Win::Mixer));
+        let (bx, by) = (bar.cx(), bar.cy());
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(bx, by); });
+        step(&mut app, &mut a, &|ap| ap.mouse_down());
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(bx - 100.0, by - 50.0); });
+        step(&mut app, &mut a, &|ap| ap.mouse_up());
+        let r1 = app.state.win_rect(Win::Mixer);
+        assert_eq!((r1.x, r1.y, r1.w, r1.h), (r0.x - 100.0, r0.y - 50.0, r0.w, r0.h));
+
+        // Resize from the bottom-right corner: bigger, then clamped to the minimum size.
+        let corner = hit_rect(&app, &Action::WinResize(Win::Mixer, EDGE_R | EDGE_B));
+        let (cx, cy) = (corner.cx(), corner.cy());
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(cx, cy); });
+        assert_eq!(app.cursor(), Cursor::NwseResize);
+        step(&mut app, &mut a, &|ap| ap.mouse_down());
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(cx - 40.0, cy + 30.0); });
+        let r2 = app.state.win_rect(Win::Mixer);
+        assert_eq!((r2.w, r2.h), (r1.w - 40.0, r1.h + 30.0));
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(cx - 3000.0, cy - 3000.0); });
+        let r3 = app.state.win_rect(Win::Mixer);
+        assert_eq!((r3.x, r3.y, r3.w, r3.h), (r1.x, r1.y, Win::Mixer.min_size().0, Win::Mixer.min_size().1));
+        step(&mut app, &mut a, &|ap| ap.mouse_up());
+        frame(&mut app, &mut b, None);
+        assert_same(&a, &b, "after window move and resize");
+
+        // Top-left resize keeps the opposite corner fixed.
+        frame(&mut app, &mut a, None);
+        let tl = hit_rect(&app, &Action::WinResize(Win::Mixer, EDGE_L | EDGE_T));
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(tl.cx(), tl.cy()); });
+        step(&mut app, &mut a, &|ap| ap.mouse_down());
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(tl.cx() - 60.0, tl.cy() - 40.0); });
+        step(&mut app, &mut a, &|ap| ap.mouse_up());
+        let r4 = app.state.win_rect(Win::Mixer);
+        assert_eq!((r4.right(), r4.bottom()), (r3.right(), r3.bottom()));
+        assert_eq!((r4.w, r4.h), (r3.w + 60.0, r3.h + 40.0));
+
+        // Minimize collapses to the title bar and restores; maximize fills the workspace.
+        app.act(Action::MinWin(Win::Mixer));
+        frame(&mut app, &mut a, None);
+        assert_eq!(app.state.win_rect(Win::Mixer).h, TITLE_H);
+        assert!(app.hits.iter().all(|h| !matches!(h.action, Action::WinResize(Win::Mixer, _))), "no resize edges when collapsed");
+        app.act(Action::MinWin(Win::Mixer));
+        assert_eq!(app.state.win_rect(Win::Mixer), r4);
+        app.act(Action::MaxWin(Win::Mixer));
+        frame(&mut app, &mut a, None);
+        assert_eq!(app.state.win_rect(Win::Mixer), app.state.work_rect());
+        assert_eq!(app.state.docked(), Some(Win::Mixer));
+        app.act(Action::MaxWin(Win::Mixer));
+        assert_eq!(app.state.win_rect(Win::Mixer), r4);
+        app.act(Action::CloseWin(Win::Mixer));
+        assert!(!app.state.shown(Win::Mixer));
+
+        // The mixer layout scales with its height only (1 at the measured size).
+        assert_eq!(views::mixer::scale(Rect::new(209.0, 83.0, 1711.0, 997.0)), 1.0);
+        assert!(views::mixer::scale(Rect::new(0.0, 0.0, 600.0, 435.0)) < 0.3);
+
+        // Dragging a fader works at a squished size: 0 dB stays under the handle's start.
+        let mut app = App::new(None);
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut a, None);
+        let f = hit_rect(&app, &Action::Fader(1));
+        app.mouse_move(f.cx(), f.cy());
+        app.mouse_down();
+        app.mouse_move(f.cx(), f.cy() - 10.0);
+        app.mouse_up();
+        let v = app.state.project.mixer.iter().find(|m| m.index == 1).and_then(|m| m.volume).unwrap();
+        assert!(v > 0.8, "fader moved up: {v}");
     }
 
     /// Tiny windows (e.g. while restoring after Alt+Tab) must not panic in any view.
@@ -1712,6 +1970,7 @@ mod tests {
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
         app.state.z = vec![Win::PianoRoll, Win::ChannelRack];
+        app.state.wins[2].maxed = true;
         app.state.selected_channel = 4;
         app.state.rack_pos = (900.0, 300.0);
         frame(&mut app, &mut a, None);

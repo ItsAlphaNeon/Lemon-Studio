@@ -62,30 +62,23 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, h - 22.0, vc, version);
     }
 
-    // One stacking order for all child windows (spec: ui/channel-rack.md §5). Maximized windows fill
-    // the workspace, so only the topmost of them is painted, and floating windows below it are
-    // covered; the docked browser sits above maximized windows.
-    let docked_at = s.z.iter().rposition(|w| w.maximized());
-    if let Some(d) = docked {
-        ui.win = Some(d);
-        ui.hit(work, Action::Swallow, "");
-        match d {
-            Win::Playlist => playlist::paint(ui, s, work, f),
-            Win::Mixer => mixer::paint(ui, s, work, f),
-            Win::PianoRoll => piano::paint(ui, s, work, f),
-            _ => {}
-        }
-        ui.win = None;
-    }
+    // One stacking order for all child windows (spec: ui/channel-rack.md §5). A maximized window
+    // fills the workspace, so windows below it are covered and not painted.
+    let docked_at = s.z.iter().rposition(|&w| s.is_max(w));
     if s.show_browser {
         browser::paint(ui, s, Rect::new(0.0, WORK_Y, BROWSER_W, h - WORK_Y));
     }
+    let _ = work;
     for (i, &win) in s.z.iter().enumerate() {
-        if win.maximized() || docked_at.is_some_and(|d| i < d) {
+        if docked_at.is_some_and(|d| i < d) {
             continue;
         }
         ui.win = Some(win);
+        let r = s.win_rect(win);
         match win {
+            Win::Playlist => playlist::paint(ui, s, r, f),
+            Win::Mixer => mixer::paint(ui, s, r, f),
+            Win::PianoRoll => piano::paint(ui, s, r, f),
             Win::ChannelRack => rack::paint(ui, s, f),
             Win::Plugin => channel_win::paint(ui, s, f),
             _ => {}
@@ -98,26 +91,67 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
 }
 
-/// Docked window frame with a title bar (§5). Returns the client rect.
-pub fn window_frame(ui: &mut Ui, r: Rect, title: &str, title_x: f32) -> Rect {
+/// Start of a Playlist / Mixer / Piano roll window: blocks clicks through it, and (once the
+/// content is painted, so the zones sit on top) `resize_zones` adds its resize edges.
+pub fn window_body(ui: &mut Ui, r: Rect) {
+    ui.hit(r, Action::Swallow, "");
+}
+
+/// Resize edges of a floating window: thin strips along the sides and small corner squares,
+/// reaching 3 px outside the window. Not for maximized or collapsed windows.
+pub fn resize_zones(ui: &mut Ui, s: &State, win: Win, r: Rect) {
+    let Some(i) = win.slot() else { return };
+    if s.wins[i].maxed || s.wins[i].mini {
+        return;
+    }
+    use crate::app::{EDGE_B, EDGE_L, EDGE_R, EDGE_T};
+    let (o, n, c) = (3.0, 2.0, 8.0);
+    let hint = "Drag to resize";
+    let (x0, x1, y0, y1) = (r.x, r.right(), r.y, r.bottom());
+    for (z, e) in [
+        (Rect::span(x0 - o, x0 + n, y0 + c, y1 - c), EDGE_L),
+        (Rect::span(x1 - n, x1 + o, y0 + c, y1 - c), EDGE_R),
+        (Rect::span(x0 + c, x1 - c, y0 - o, y0 + n), EDGE_T),
+        (Rect::span(x0 + c, x1 - c, y1 - n, y1 + o), EDGE_B),
+        (Rect::span(x0 - o, x0 + c, y0 - o, y0 + c), EDGE_L | EDGE_T),
+        (Rect::span(x1 - c, x1 + o, y0 - o, y0 + c), EDGE_R | EDGE_T),
+        (Rect::span(x0 - o, x0 + c, y1 - c, y1 + o), EDGE_L | EDGE_B),
+        (Rect::span(x1 - c, x1 + o, y1 - c, y1 + o), EDGE_R | EDGE_B),
+    ] {
+        ui.hit(z, Action::WinResize(win, e), hint);
+    }
+}
+
+/// Minimize / maximize / close buttons from `x0` at the title bar of a window at top `y`.
+pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, normal: Color, hover: Color) {
+    for (i, (icon, hint, action)) in [
+        (Icon::Minimize, "Minimize window", Action::MinWin(win)),
+        (Icon::Restore, "Maximize / restore window", Action::MaxWin(win)),
+        (Icon::Close, "Close window", Action::CloseWin(win)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let b = Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0);
+        let hov = ui.hit(b, action, hint);
+        icons::draw(ui.c, icon, b.inset(2.0), if hov { hover } else { normal });
+    }
+}
+
+/// Window frame with a title bar (§5); the bar drags the window. `buttons` = draw the window
+/// buttons at the right (the Mixer draws its own over the slot panel). Returns the client rect.
+pub fn window_frame(ui: &mut Ui, win: Win, r: Rect, title: &str, title_x: f32, buttons: bool) -> Rect {
     let t = ui.t;
     ui.c.fill_rect(r, t.window_title);
     let bar = Rect::new(r.x, r.y, r.w, 23.0);
     ui.c.fill_rect_gradient(bar, t.window_title.shade(0.04), t.window_title.shade(-0.03), 0.0);
     ui.c.fill_rect(Rect::new(r.x, r.y + 22.0, r.w, 1.0), t.splitter_dark);
     ui.c.text(os_ui::Font::new(17), r.x + title_x, r.y + 1.0, t.text, title);
+    ui.hit(bar, Action::WinDrag(win), "Drag to move");
     // Minimize / maximize / close glyphs at the right (1862, 1881, 1901 at full width).
-    let right = r.right();
-    for (i, (icon, hint)) in [(Icon::Minimize, "Minimize window"), (Icon::Restore, "Restore window"), (Icon::Close, "Close window")]
-        .into_iter()
-        .enumerate()
-    {
-        let b = Rect::new(right - 64.0 + i as f32 * 19.5, r.y + 3.0, 17.0, 17.0);
-        let hov = ui.hit(b, Action::Placeholder("Window button"), hint);
-        let c = if hov { t.glyph } else { t.text_dim.mix(t.glyph, 0.6) };
-        icons::draw(ui.c, icon, b.inset(2.0), c);
+    if buttons {
+        window_buttons(ui, win, r.right() - 64.0, r.y, t.text_dim.mix(t.glyph, 0.6), t.glyph);
     }
-    let _ = bar;
     Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0)
 }
 

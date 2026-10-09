@@ -46,6 +46,7 @@ impl Shell {
                 app::Cursor::EwResize => CursorIcon::EwResize,
                 app::Cursor::NsResize => CursorIcon::NsResize,
                 app::Cursor::NwseResize => CursorIcon::NwseResize,
+                app::Cursor::NeswResize => CursorIcon::NeswResize,
             });
         }
     }
@@ -265,6 +266,7 @@ fn screenshot(args: &[String]) {
     let mut path = None;
     let mut pattern = None;
     let mut channel = None;
+    let mut win_rect: Option<os_ui::Rect> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -276,6 +278,13 @@ fn screenshot(args: &[String]) {
             "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
             "--pattern" => pattern = it.next().and_then(|v| v.parse().ok()),
             "--channel" => channel = it.next().and_then(|v| v.parse().ok()),
+            // Float the shown window at x,y,w,h instead of maximizing it.
+            "--win" => {
+                let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
+                if let [x, y, w, h] = v[..] {
+                    win_rect = Some(os_ui::Rect::new(x, y, w, h));
+                }
+            }
             other => path = Some(std::path::PathBuf::from(other)),
         }
     }
@@ -300,7 +309,15 @@ fn screenshot(args: &[String]) {
     if let Some(w) = rack_w {
         app.state.rack_size.0 = w;
     }
-    if app.state.docked() == Some(app::Win::PianoRoll) {
+    // The reference views fill the workspace unless `--win` floats the window.
+    if let Some(w) = app.state.z.first().copied().filter(|w| w.slot().is_some()) {
+        let ws = &mut app.state.wins[w.slot().unwrap_or(0)];
+        match win_rect {
+            Some(r) => ws.rect = r,
+            None => ws.maxed = true,
+        }
+    }
+    if app.state.shown(app::Win::PianoRoll) {
         piano::center_keys(&mut app.state, 744.0);
     }
     let mut canvas = Canvas::new(1920, 1080, 1.0).expect("canvas");
