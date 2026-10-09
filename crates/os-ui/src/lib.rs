@@ -102,6 +102,8 @@ impl Canvas {
         }
         self.scale = scale;
         self.clips.clear();
+        // Masks are canvas-sized; a stale one makes clipped fills fail silently.
+        self.masks.clear();
     }
 
     /// Logical size.
