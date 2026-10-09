@@ -100,6 +100,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ruler(ui, &l, &g, range, s.piano.marker);
     // Lit keys: the one held with the mouse and this channel's notes playing now (§4).
     let mut lit: Vec<i32> = s.piano.held.into_iter().collect();
+    lit.extend(s.piano.typed.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| k));
     lit.extend(f.sounding.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| i32::from(k)));
     keyboard(ui, &l, &g, &lit);
     grid(ui, &l, &g, range);

@@ -204,7 +204,7 @@ const OPTIONS: &[Item] = &[
     it("Enable MIDI output", "").tick(),
     it("Enable MIDI master sync", "").tick(),
     head("Switches"),
-    it("Typing keyboard to piano", "Ctrl+T").tick(),
+    it("Typing keyboard to piano", "Ctrl+T").on().tick(),
     it("Metronome", "Ctrl+M").tick(),
     it("Recording precount", "Ctrl+P").tick(),
     it("Start on input", "Ctrl+I").tick(),
@@ -399,6 +399,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                     // Tick state: window entries follow the window, others are drawn unticked.
                     let mark = match (item.mark, menu == VIEW) {
                         (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
+                        (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
                         (mk, _) => mk,
                     };
                     let (mx, my) = (rr.x + 10.0, rr.y + ROW / 2.0);

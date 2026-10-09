@@ -290,8 +290,24 @@ impl ApplicationHandler for Shell {
                 self.app.wheel(dx, dy, self.mods.shift_key(), self.mods.control_key());
                 window.request_redraw();
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
-                self.app.key(&event.logical_key, self.mods.control_key(), self.mods.alt_key());
+            WindowEvent::KeyboardInput { event, .. } => {
+                let pressed = event.state == ElementState::Pressed;
+                // The typing keyboard plays notes by physical key (spec: ui/typing-keyboard.md).
+                if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
+                    if self.app.typing_key(code, pressed, self.mods.control_key(), self.mods.alt_key()) {
+                        if self.app.has_damage() {
+                            window.request_redraw();
+                        }
+                        return;
+                    }
+                }
+                if pressed && !event.repeat {
+                    self.app.key(&event.logical_key, self.mods.control_key(), self.mods.alt_key());
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Focused(false) => {
+                self.app.typing_release_all();
                 window.request_redraw();
             }
             WindowEvent::Resized(_) => {

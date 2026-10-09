@@ -38,6 +38,9 @@ enum Cmd {
     /// The newest edited project is in `Transport::latest` (older ones are skipped).
     Update,
     Preview(Box<Project>),
+    /// Live note (typing keyboard): channel (rack position), key, velocity; `NoteOff` releases.
+    NoteOn(usize, u16, u8),
+    NoteOff(usize, u16),
     Stop,
 }
 
@@ -82,6 +85,17 @@ impl Transport {
     /// Play pattern 1 of `project` once (a one-note preview project), on its own stream.
     pub fn preview(&self, project: Project) {
         let _ = self.tx.send(Cmd::Preview(Box::new(project)));
+    }
+
+    /// Start a live note: mixed into playback while playing, else on the live stream (kept open, so
+    /// only the first note pays for opening the device). The live stream uses the project from the
+    /// last `play` / `update`.
+    pub fn note_on(&self, channel: usize, key: u16, velocity: u8) {
+        let _ = self.tx.send(Cmd::NoteOn(channel, key, velocity));
+    }
+
+    pub fn note_off(&self, channel: usize, key: u16) {
+        let _ = self.tx.send(Cmd::NoteOff(channel, key));
     }
 
     /// Hold playback at its position (silent); `resume` continues from there.
@@ -134,6 +148,21 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     let mut session: Option<Session> = None;
     // One-shot note previews play on their own stream, so they also sound while playing or paused.
     let mut preview: Option<Session> = None;
+    // Live notes while stopped or paused: an engine with no schedule on a stream that stays open.
+    let mut live: Option<Session> = None;
+    let mut live_project: Option<Project> = None;
+    let swap = |s: &mut Session, library: &mut SampleLibrary| {
+        // Build outside the lock, then swap at the playing position.
+        let mut e = Engine::new(&s.project, library, s.rate, s.mode);
+        if s.kind == Kind::Live {
+            e.clear_schedule();
+        }
+        let old = s.engine.lock().map(|mut slot| {
+            e.continue_from(&mut slot);
+            std::mem::replace(&mut *slot, e)
+        });
+        drop(old); // freed after the audio callback has the new engine
+    };
     let report = |shared: &Shared, e: String| {
         if let Ok(mut slot) = shared.error.lock() {
             *slot = Some(e);
@@ -142,21 +171,44 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     loop {
         match rx.recv_timeout(Duration::from_millis(15)) {
             Ok(Cmd::Update) => {
-                let project = latest.lock().ok().and_then(|mut l| l.take());
-                if let (Some(s), Some(project)) = (session.as_mut(), project) {
-                    s.project = project;
-                    // Build outside the lock, then swap at the playing position.
-                    let mut e = Engine::new(&s.project, &mut library, s.rate, s.mode);
-                    let old = s.engine.lock().map(|mut slot| {
-                        e.continue_from(&mut slot);
-                        std::mem::replace(&mut *slot, e)
-                    });
-                    drop(old); // freed after the audio callback has the new engine
+                if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
+                    for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
+                        s.project = project.clone();
+                        swap(s, &mut library);
+                    }
+                    live_project = Some(project);
+                }
+            }
+            Ok(Cmd::NoteOn(ch, key, vel)) => {
+                let paused = shared.paused.load(Ordering::Relaxed);
+                let target = match session.as_ref() {
+                    Some(s) if !paused => Some(s),
+                    _ => {
+                        if live.is_none() {
+                            if let Some(p) = &live_project {
+                                match Session::start(p, PlayMode::Pattern(1), Kind::Live, &mut library, shared.clone()) {
+                                    Ok(s) => live = Some(s),
+                                    Err(e) => report(&shared, e),
+                                }
+                            }
+                        }
+                        live.as_ref()
+                    }
+                };
+                if let Some(mut e) = target.and_then(|s| s.engine.lock().ok()) {
+                    e.note_on(ch, key, vel);
+                }
+            }
+            Ok(Cmd::NoteOff(ch, key)) => {
+                for s in [session.as_ref(), live.as_ref()].into_iter().flatten() {
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.note_off(ch, key);
+                    }
                 }
             }
             Ok(Cmd::Preview(project)) => {
                 preview = None;
-                match Session::start(&project, PlayMode::Pattern(1), false, &mut library, shared.clone()) {
+                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, &mut library, shared.clone()) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
@@ -164,7 +216,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             Ok(Cmd::Play(project, mode, start)) => {
                 session = None;
                 shared.paused.store(false, Ordering::Relaxed);
-                match Session::start(&project, mode, true, &mut library, shared.clone()) {
+                live_project = Some((*project).clone());
+                match Session::start(&project, mode, Kind::Song, &mut library, shared.clone()) {
                     Ok(s) => {
                         if start > 0.0 {
                             let tempo = project.tempo.unwrap_or(140.0);
@@ -205,8 +258,19 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Playback (pattern or song): reports position, peaks and sounding notes; patterns loop.
+    Song,
+    /// A one-shot note preview that leaves the song position and play state alone.
+    Preview,
+    /// Live notes only (no schedule); never finishes.
+    Live,
+}
+
 struct Session {
     _stream: cpal::Stream,
+    kind: Kind,
     engine: Arc<Mutex<Engine>>,
     done: Arc<AtomicBool>,
     /// The project playing (live edits replace it).
@@ -216,8 +280,8 @@ struct Session {
 }
 
 impl Session {
-    /// `looping == false`: a one-shot preview that leaves the song position and play state alone.
-    fn start(project: &Project, mode: PlayMode, looping: bool, library: &mut SampleLibrary, shared: Arc<Shared>) -> Result<Session, String> {
+    fn start(project: &Project, mode: PlayMode, kind: Kind, library: &mut SampleLibrary, shared: Arc<Shared>) -> Result<Session, String> {
+        let looping = kind == Kind::Song;
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or("no audio output device")?;
         let supported = device.default_output_config().map_err(|e| e.to_string())?;
@@ -227,6 +291,9 @@ impl Session {
         let mut e = Engine::new(project, library, rate, mode);
         // Pattern playback loops on the bar line.
         e.set_looping(looping && matches!(mode, PlayMode::Pattern(_)));
+        if kind == Kind::Live {
+            e.clear_schedule();
+        }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));
         if looping {
@@ -245,7 +312,7 @@ impl Session {
         if looping {
             shared.playing.store(true, Ordering::Relaxed);
         }
-        Ok(Session { _stream: stream, engine, done, project: project.clone(), mode, rate })
+        Ok(Session { _stream: stream, kind, engine, done, project: project.clone(), mode, rate })
     }
 }
 
@@ -354,6 +421,30 @@ mod tests {
         t.update(&project);
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(t.peaks(), (0.0, 0.0), "fader at zero is silent within 100 ms");
+    }
+
+    /// Live notes: on the live stream while stopped, mixed into playback while playing; note off
+    /// releases them (needs an audio device).
+    #[test]
+    #[ignore]
+    fn live_notes_play_and_release() {
+        let mut project = crate::app::default_project();
+        project.patterns = vec![os_model::Pattern { number: 1, ..Default::default() }];
+        let t = Transport::new(None);
+        t.update(&project);
+        t.note_on(4, 60, 100);
+        std::thread::sleep(Duration::from_millis(300));
+        t.note_off(4, 60);
+        assert_eq!(t.take_error(), None, "live stream opened");
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        std::thread::sleep(Duration::from_millis(300));
+        t.note_on(4, 67, 100);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(t.sounding().contains(&(4, 67)), "held while playing: {:?}", t.sounding());
+        assert!(t.peaks().0 > 0.01, "heard while playing");
+        t.note_off(4, 67);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(t.sounding().is_empty() && t.peaks() == (0.0, 0.0), "released: {:?}", t.peaks());
     }
 
     /// Pause holds the position silently; resume continues from it (needs an audio device).

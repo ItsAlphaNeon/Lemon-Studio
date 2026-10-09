@@ -70,7 +70,14 @@ struct Voice {
     /// Gain applied at the end of the last block; ramps to the channel's current gain, so
     /// volume / pan edits reach ringing voices without clicks.
     gain: (f32, f32),
+    /// Key of a live note (`note_on`), which `note_off` releases.
+    live: Option<u16>,
+    /// Release fade after a live note off: (frames left, fade length).
+    release: Option<(u32, u32)>,
 }
+
+/// Release fade of a live note (an OpenStudio choice, spec: ui/typing-keyboard.md open questions).
+const RELEASE_SECONDS: f64 = 0.015;
 
 struct MixTrack {
     /// Insert effects in slot order (applied before the fader).
@@ -244,6 +251,39 @@ impl Engine {
         self.looping = on;
     }
 
+    /// Drop the scheduled notes: the engine only plays live notes (`note_on`).
+    pub fn clear_schedule(&mut self) {
+        self.triggers.clear();
+        self.next_trigger = 0;
+        self.end_frame = 0;
+    }
+
+    /// Start a live note on channel `channel` (rack position) at the next block; it rings until
+    /// `note_off` (or the sample ends). Velocity 0..=128, 100 = unity.
+    pub fn note_on(&mut self, channel: usize, key: u16, velocity: u8) {
+        let Some(ch) = self.channels.get(channel) else { return };
+        if ch.sample.is_none() {
+            return;
+        }
+        let (vel, pan) = (laws::velocity_gain(velocity), 0.0);
+        let gain = ch.gain(vel, pan);
+        let step = ch.base_rate * laws::playback_rate(key, 0);
+        self.note_off(channel, key); // retrigger
+        self.voices.push(Voice { channel, pos: 0.0, step, remaining: None, vel, pan, gain, live: Some(key), release: None });
+        self.sounding.push((channel, key, u64::MAX));
+    }
+
+    /// Release a live note with a short fade.
+    pub fn note_off(&mut self, channel: usize, key: u16) {
+        let fade = (f64::from(self.rate) * RELEASE_SECONDS) as u32;
+        for v in &mut self.voices {
+            if v.channel == channel && v.live == Some(key) && v.release.is_none() {
+                v.release = Some((fade.max(1), fade.max(1)));
+            }
+        }
+        self.sounding.retain(|&(c, k, end)| !(c == channel && k == key && end == u64::MAX));
+    }
+
     pub fn sample_rate(&self) -> u32 {
         self.rate
     }
@@ -299,7 +339,9 @@ impl Engine {
         self.voices.retain(|v| v.channel < n);
         self.sounding = std::mem::take(&mut old.sounding);
         for s in &mut self.sounding {
-            s.2 = to_new(s.2);
+            if s.2 != u64::MAX {
+                s.2 = to_new(s.2); // MAX = a live note, held until note off
+            }
         }
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
@@ -390,7 +432,7 @@ impl Engine {
             let offset = a + t.frame.saturating_sub(self.frame) as usize;
             let remaining = t.cut.map(|c| c.saturating_sub(t.frame));
             let gain = self.channels[t.channel].gain(t.vel, t.pan);
-            let mut v = Voice { channel: t.channel, pos: 0.0, step: t.rate, remaining, vel: t.vel, pan: t.pan, gain };
+            let mut v = Voice { channel: t.channel, pos: 0.0, step: t.rate, remaining, vel: t.vel, pan: t.pan, gain, live: None, release: None };
             if render_voice(&mut v, &self.channels, &mut self.bus, offset, b) {
                 self.voices.push(v);
             }
@@ -405,7 +447,9 @@ impl Engine {
         self.frame = 0;
         self.next_trigger = 0;
         for s in &mut self.sounding {
-            s.2 = s.2.saturating_sub(at);
+            if s.2 != u64::MAX {
+                s.2 = s.2.saturating_sub(at);
+            }
         }
         self.sounding.retain(|&(_, _, end)| end > 0);
     }
@@ -464,6 +508,14 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
             v.pos = pos;
             return false;
         }
+        let fade = match v.release.as_mut() {
+            None => 1.0,
+            Some((0, _)) => return false,
+            Some((left, len)) => {
+                *left -= 1;
+                *left as f32 / *len as f32
+            }
+        };
         let (l, r) = if exact {
             let i = pos as usize;
             (s.left[i], s.right[i])
@@ -483,8 +535,8 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
             gl += dl;
             gr += dr;
         }
-        out[f * 2] += l * gl;
-        out[f * 2 + 1] += r * gr;
+        out[f * 2] += l * gl * fade;
+        out[f * 2 + 1] += r * gr * fade;
         pos += v.step;
     }
     v.pos = pos;

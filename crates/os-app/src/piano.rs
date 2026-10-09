@@ -73,6 +73,8 @@ pub struct PianoState {
     pub dirty: bool,
     /// Key held with the mouse (keyboard press or a dragged note), lit on the keyboard (§4).
     pub held: Option<i32>,
+    /// Keys held on the typing keyboard as (channel index, key), lit too (ui/typing-keyboard.md).
+    pub typed: Vec<(u16, i32)>,
     pub tool: Tool,
     /// Event panel target.
     pub lane: Lane,
@@ -100,6 +102,7 @@ impl Default for PianoState {
             last_len: 0,
             dirty: false,
             held: None,
+            typed: Vec::new(),
             tool: Tool::Draw,
             lane: Lane::Velocity,
             overlay: None,
@@ -727,6 +730,58 @@ mod tests {
         let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
         e.continue_from(&mut old);
         assert_eq!(e.position(), 10_000, "half the tempo, twice the frames");
+    }
+
+    /// Live notes ring until note off, then fade out within the release; the engine with no
+    /// schedule stays idle (finished) until a note arrives.
+    #[test]
+    fn live_note_on_off() {
+        let a = app();
+        let mut lib = os_engine::SampleLibrary::new(None);
+        let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
+        e.clear_schedule();
+        assert!(e.finished());
+        let mut buf = vec![0.0f32; 2 * 256];
+        e.note_on(4, 60, 100);
+        assert!(!e.finished());
+        e.process(&mut buf);
+        assert!(peak(&buf) > 0.01, "sounds in the first block");
+        assert_eq!(e.sounding().collect::<Vec<_>>(), vec![(4, 60)]);
+        for _ in 0..20 {
+            e.process(&mut buf); // held: rings on
+        }
+        assert!(peak(&buf) > 0.001 && e.sounding().count() == 1, "held note rings");
+        e.note_off(4, 60);
+        assert_eq!(e.sounding().count(), 0);
+        for _ in 0..4 {
+            e.process(&mut buf); // 15 ms fade = 720 frames, then a silent block
+        }
+        assert_eq!(peak(&buf), 0.0, "released");
+        assert!(e.finished());
+    }
+
+    /// Typing keyboard: physical keys map to notes on the selected channel, light the keys, take the
+    /// tool letters, shift octaves, and every note is released.
+    #[test]
+    fn typing_keyboard_keys() {
+        use winit::keyboard::KeyCode;
+        let mut a = app();
+        assert!(a.typing_on(), "on by default");
+        assert!(a.typing_key(KeyCode::KeyZ, true, false, false));
+        assert!(a.typing_key(KeyCode::KeyQ, true, false, false));
+        assert!(a.typing_key(KeyCode::KeyQ, true, false, false), "repeat is taken, not replayed");
+        assert_eq!(a.state.piano.typed, vec![(4, 48), (4, 60)]);
+        assert!(a.typing_key(KeyCode::KeyZ, false, false, false));
+        assert_eq!(a.state.piano.typed, vec![(4, 60)]);
+        assert!(!a.typing_key(KeyCode::KeyP, true, true, false), "Ctrl+letter stays a shortcut");
+        assert!(!a.typing_key(KeyCode::Space, true, false, false));
+        assert!(a.typing_key(KeyCode::NumpadAdd, true, false, false));
+        assert!(a.typing_key(KeyCode::KeyC, true, false, false));
+        assert_eq!(a.state.piano.typed, vec![(4, 60), (4, 64)], "octave up: C is E5");
+        a.toggle_typing();
+        assert!(!a.typing_on());
+        assert!(a.state.piano.typed.is_empty(), "switching off releases held notes");
+        assert!(!a.typing_key(KeyCode::KeyZ, true, false, false), "letters are shortcuts again");
     }
 
     /// Mixer and channel knobs, the fader and mute mark the project for the playing engine.

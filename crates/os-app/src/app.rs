@@ -10,6 +10,7 @@ use os_engine::PlayMode;
 use os_model::{Channel, ChannelKind, MixerTrack, Note, Pattern, Project};
 use os_theme::{Palette, Theme};
 use os_ui::{Canvas, Rect};
+use winit::keyboard::KeyCode;
 
 use crate::piano::{self, Geom, Overlay, PianoState, Tool};
 use crate::transport::Transport;
@@ -426,6 +427,11 @@ pub struct App {
     hover_rect: Option<Rect>,
     damage: Damage,
     last_playing: bool,
+    /// Typing keyboard (spec: ui/typing-keyboard.md): keys held now as (physical key, rack row,
+    /// note key), the octave shift, and whether the transport has the project for live notes.
+    typing_held: Vec<(KeyCode, usize, u16)>,
+    pub typing_octave: i32,
+    typing_synced: bool,
     /// Last title-bar press (window, time, position), for double-click maximize / restore.
     title_click: Option<(Win, std::time::Instant, (f32, f32))>,
     pub hint: Cow<'static, str>,
@@ -499,6 +505,9 @@ impl App {
             hover_rect: None,
             damage: Damage::Full,
             last_playing: false,
+            typing_held: Vec::new(),
+            typing_octave: 0,
+            typing_synced: false,
             title_click: None,
             hint: Cow::Borrowed(""),
             mouse: (-1.0, -1.0),
@@ -556,6 +565,7 @@ impl App {
                 s.message = Some(format!("Opened {}", path.display()));
                 s.path = Some(path);
                 s.piano.reset();
+                s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
             }
             Err(e) => self.state.message = Some(format!("Could not open {}: {e}", path.display())),
@@ -1517,6 +1527,7 @@ impl App {
                 }
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => self.act(Action::PianoUndo),
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("t") => self.toggle_typing(),
             // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
             // tools (until a typing keyboard exists, which will take them).
             Key::Character(c) if !ctrl && !alt && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
@@ -1582,6 +1593,87 @@ impl App {
     }
 
     /// Play one note of channel `channel` (Note::channel) once (also while playing or paused).
+    /// Typing keyboard switch (toolbar, Options menu, Ctrl+T); turning it off releases held notes.
+    pub fn toggle_typing(&mut self) {
+        let s = &mut self.state;
+        if let Some(i) = s.toggles.iter().position(|t| *t == "typing") {
+            s.toggles.remove(i);
+            self.typing_release_all();
+        } else {
+            s.toggles.push("typing");
+        }
+        self.invalidate();
+    }
+
+    pub fn typing_on(&self) -> bool {
+        self.state.toggles.contains(&"typing")
+    }
+
+    /// A physical key went down or up. Returns true when the typing keyboard took it (a note key or
+    /// the octave keys while the switch is on, or the release of a held note); the caller then
+    /// skips the normal shortcut handling. Spec: ui/typing-keyboard.md.
+    pub fn typing_key(&mut self, code: KeyCode, pressed: bool, ctrl: bool, alt: bool) -> bool {
+        if !pressed {
+            let Some(i) = self.typing_held.iter().position(|h| h.0 == code) else { return false };
+            let (_, row, key) = self.typing_held.remove(i);
+            self.transport.note_off(row, key);
+            self.typing_lit_changed();
+            return true;
+        }
+        if !self.typing_on() || ctrl || alt {
+            return false;
+        }
+        if matches!(code, KeyCode::NumpadAdd | KeyCode::NumpadSubtract) {
+            let d = if code == KeyCode::NumpadAdd { 1 } else { -1 };
+            self.typing_octave = (self.typing_octave + d).clamp(-4, 5);
+            self.state.message = Some(format!("Typing keyboard octave {:+}", self.typing_octave));
+            self.invalidate();
+            return true;
+        }
+        let Some(semi) = typing_semitone(code) else { return false };
+        if self.typing_held.iter().any(|h| h.0 == code) {
+            return true; // auto-repeat
+        }
+        let key = 48 + semi + 12 * self.typing_octave;
+        let row = self.state.selected_channel;
+        if !(0..=127).contains(&key) || row >= self.state.project.channels.len() {
+            return true;
+        }
+        if !self.typing_synced {
+            // The live stream needs the project before the first note.
+            self.typing_synced = true;
+            let mut p = self.state.project.clone();
+            p.tempo = Some(self.state.tempo);
+            self.transport.update(&p);
+        }
+        let key = key as u16;
+        self.transport.note_on(row, key, TYPING_VELOCITY);
+        self.typing_held.push((code, row, key));
+        self.typing_lit_changed();
+        true
+    }
+
+    /// Release every held typing-keyboard note (focus lost, switch off): no hanging notes.
+    pub fn typing_release_all(&mut self) {
+        if self.typing_held.is_empty() {
+            return;
+        }
+        for (_, row, key) in std::mem::take(&mut self.typing_held) {
+            self.transport.note_off(row, key);
+        }
+        self.typing_lit_changed();
+    }
+
+    /// Held typing-keyboard keys light on the piano roll's keyboard (§4).
+    fn typing_lit_changed(&mut self) {
+        let channels = &self.state.project.channels;
+        self.state.piano.typed = self.typing_held.iter().filter_map(|&(_, row, key)| Some((channels.get(row)?.index, i32::from(key)))).collect();
+        match self.piano_grid {
+            Some(g) => self.damage_rect(Rect::new(g.x - 73.0, g.y, 73.0, g.h)),
+            None => self.invalidate(),
+        }
+    }
+
     fn preview(&self, channel: u16, key: i32) {
         let mut p = self.state.project.clone();
         p.tempo = Some(self.state.tempo);
@@ -1776,6 +1868,7 @@ impl App {
                     s.message = Some("Nothing to undo".into());
                 }
             }
+            Action::Placeholder("typing") => self.toggle_typing(),
             Action::Placeholder(name) => {
                 if let Some(i) = s.toggles.iter().position(|t| *t == name) {
                     s.toggles.remove(i);
@@ -1975,6 +2068,7 @@ impl App {
                 s.tempo = 130.0;
                 s.pattern = 1;
                 s.piano.reset();
+                s.piano.dirty = true;
                 s.message = Some("New project".into());
             }
             (0, FILE_OPEN) => {
@@ -1995,12 +2089,33 @@ impl App {
                 self.state.picker_cat = None;
             }
             (PATTERNS, i) if i >= PATTERN_PICK => self.state.pattern = (i - PATTERN_PICK) as u16,
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
             (m, i) => {
                 let label = item_at(m, i).map_or("item", |it| it.label);
                 self.state.message = Some(format!("{label}: not available yet"));
             }
         }
     }
+}
+
+/// Typing keyboard velocity (fixed, spec: ui/typing-keyboard.md).
+const TYPING_VELOCITY: u8 = 100;
+const TYPING_LABEL: &str = "Typing keyboard to piano";
+
+/// Semitone above the lower tier's first C (C4) for a physical key (spec: ui/typing-keyboard.md).
+fn typing_semitone(code: KeyCode) -> Option<i32> {
+    use KeyCode::*;
+    Some(match code {
+        // Lower tier: white keys on the bottom row, black keys on the row above.
+        KeyZ => 0, KeyS => 1, KeyX => 2, KeyD => 3, KeyC => 4, KeyV => 5, KeyG => 6, KeyB => 7,
+        KeyH => 8, KeyN => 9, KeyJ => 10, KeyM => 11, Comma => 12, KeyL => 13, Period => 14,
+        Semicolon => 15, Slash => 16,
+        // Upper tier, one octave up.
+        KeyQ => 12, Digit2 => 13, KeyW => 14, Digit3 => 15, KeyE => 16, KeyR => 17, Digit5 => 18,
+        KeyT => 19, Digit6 => 20, KeyY => 21, Digit7 => 22, KeyU => 23, KeyI => 24, Digit9 => 25,
+        KeyO => 26, Digit0 => 27, KeyP => 28, BracketLeft => 29, Equal => 30, BracketRight => 31,
+        _ => return None,
+    })
 }
 
 /// Toggle a one-step note in the current pattern (spec: flp/events/patterns.md — a step note is
