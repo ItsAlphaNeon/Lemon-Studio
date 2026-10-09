@@ -137,6 +137,9 @@ pub struct MixerTrack {
     pub slots: [Option<String>; 10],
     /// Destination tracks this track sends to.
     pub routes: Vec<u16>,
+    /// Explicit send levels `(destination, level 0..=1)`; routes without an entry send at unity
+    /// (0.8). A level of 0 is a sidechain-only route: no audio reaches the destination's mix.
+    pub send_levels: Vec<(u16, f64)>,
     /// 0.0..=1.0 fader position; 0.8 = unity (the default).
     pub volume: Option<f64>,
     /// -1.0 ..= 1.0.

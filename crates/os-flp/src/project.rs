@@ -570,6 +570,7 @@ fn mixer_param_records(data: &[u8]) -> impl Iterator<Item = (usize, u8, u8, u16,
 }
 
 const MX_KIND_PARAM: u8 = 0x1F;
+const MX_KIND_ROUTE: u8 = 0x20;
 const MX_VOLUME: u8 = 0xC0;
 const MX_PAN: u8 = 0xC1;
 const MX_STEREO: u8 = 0xC2;
@@ -632,6 +633,10 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
                 .is_none_or(|&b| b & 0x08 != 0),
             slots,
             routes,
+            send_levels: mixer_param_records(params)
+                .filter(|&(_, _, k, loc, _)| k == MX_KIND_ROUTE && loc == mixer_location(index, 0))
+                .map(|(_, dest, _, _, v)| (u16::from(dest), f64::from(v) / 16000.0))
+                .collect(),
             volume: param(MX_VOLUME).map(|v| f64::from(v) / 16000.0),
             pan: param(MX_PAN).map(|v| f64::from(v) / 6400.0),
             stereo_separation: param(MX_STEREO).map(|v| f64::from(v) / 64.0),
