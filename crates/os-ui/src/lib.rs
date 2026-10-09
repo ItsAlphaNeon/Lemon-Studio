@@ -530,7 +530,7 @@ impl Canvas {
                 if cv == [0, 0, 0] {
                     continue;
                 }
-                let i = ((y0 as usize + y) * pw + x0 as usize + x) * 4;
+                let i = (dy as usize * pw + dx as usize) * 4; // dx, dy are inside the clip (>= 0)
                 for (ch, fg) in [c.r, c.g, c.b].into_iter().enumerate() {
                     let al = u32::from(cv[ch]) * a / 255;
                     let d = u32::from(data[i + ch]);

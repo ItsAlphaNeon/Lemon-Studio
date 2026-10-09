@@ -208,7 +208,8 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo) 
     let track_y1 = bottom - 99.0;
     ui.c.fill_rect(Rect::new(mx - 1.5, TRACK_Y0, 3.0, track_y1 - TRACK_Y0), Color::rgb(0x141618));
     let v = track.and_then(|m| m.volume).unwrap_or(0.8) as f32;
-    let hy = (HANDLE_0DB + (0.8 - v) * 440.0).clamp(TRACK_Y0 + 5.0, track_y1 - 5.0);
+    // max/min, not clamp: a very short window gives track_y1 < TRACK_Y0 (clamp would panic).
+    let hy = (HANDLE_0DB + (0.8 - v) * 440.0).min(track_y1 - 5.0).max(TRACK_Y0 + 5.0);
     if selected {
         ui.c.fill_rect(Rect::new(mx - 1.0, hy, 2.0, track_y1 - hy), Color::rgb(0x8ec63a));
     }

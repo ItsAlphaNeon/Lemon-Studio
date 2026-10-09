@@ -60,6 +60,8 @@ impl ApplicationHandler for Shell {
             .with_title("OpenStudio")
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1920.0, 1080.0))
+            // Layouts are measured at 1920x1080 and are not responsive yet; below this they break.
+            .with_min_inner_size(LogicalSize::new(1024.0, 600.0))
             .with_maximized(true);
         // App icon: resource 1, embedded by build.rs from assets/openstudio.ico.
         #[cfg(windows)]

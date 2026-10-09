@@ -325,7 +325,7 @@ fn grid(ui: &mut Ui, l: &Layout, g: &Geom, selecting: bool) {
     let (white, black) = if selecting { (t.pr_row_sel, t.pr_row_black_sel) } else { (t.pr_row, t.pr_row_black) };
     ui.c.push_clip(gr);
     let (lo, hi) = g.visible_keys();
-    let mut bands = Vec::with_capacity((hi - lo + 1) as usize);
+    let mut bands = Vec::with_capacity((hi - lo + 1).max(0) as usize);
     for key in lo..=hi {
         let y = g.y_of(key);
         let fill = if is_black(key) { black } else { white };

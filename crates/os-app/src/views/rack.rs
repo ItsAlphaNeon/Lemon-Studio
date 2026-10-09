@@ -101,7 +101,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let total_steps = len.max(steps_shown);
     // Steps continue past the pattern (§3, §4: the thumb is small even for a one-bar pattern).
     let scroll_steps = total_steps + 256;
-    let sx = s.rack_scroll_x.clamp(0.0, (scroll_steps - steps_shown) as f32 * STEP_W);
+    let sx = s.rack_scroll_x.clamp(0.0, ((scroll_steps - steps_shown) as f32 * STEP_W).max(0.0));
     let first_step = (sx / STEP_W).floor() as u32;
     let ppq = u32::from(s.project.ppq.max(4));
     let per_step = ppq / 4;
@@ -212,7 +212,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_rect(Rect::new(track.x, track.y, 1.0, track.h), Color::rgb(0x181c1e));
     ui.c.fill_rect(Rect::new(track.right() - 1.0, track.y, 1.0, track.h), Color::rgb(0x181c1e));
     let total_px = scroll_steps as f32 * STEP_W;
-    let tlen = (view / total_px * track.w).clamp(16.0, track.w);
+    let tlen = (view / total_px * track.w).clamp(16.0f32.min(track.w), track.w.max(0.0));
     let max = (total_px - view).max(0.0);
     let off = if max > 0.0 { sx / max * (track.w - tlen) } else { 0.0 };
     ui.c.fill_rect(Rect::new(track.x + off + 6.0, track.y + 2.0, (tlen - 12.0).max(8.0), 3.0), Color::rgb(0x14181a));

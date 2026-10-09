@@ -1598,6 +1598,22 @@ mod tests {
         assert!(app.bar(Scroll::RackY).is_some_and(|b| b.max > 0.0));
     }
 
+    /// Tiny windows (e.g. while restoring after Alt+Tab) must not panic in any view.
+    #[test]
+    fn tiny_windows_do_not_panic() {
+        for (w, h) in [(1, 1), (120, 28), (400, 120), (800, 300), (1920, 140)] {
+            let Ok(mut c) = Canvas::new(w, h, 1.0) else { return };
+            for z in [vec![Win::Mixer, Win::ChannelRack], vec![Win::Playlist], vec![Win::PianoRoll, Win::Plugin]] {
+                let mut app = App::new(None);
+                app.state.z = z;
+                frame(&mut app, &mut c, None);
+                app.mouse_move(w as f32 / 2.0, h as f32 / 2.0);
+                app.wheel(0.0, -1.0, false, false);
+                frame(&mut app, &mut c, None);
+            }
+        }
+    }
+
     /// Needs an audio device: `cargo test -p os-app -- --ignored app_deleted_notes`.
     #[test]
     #[ignore]
