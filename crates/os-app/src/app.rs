@@ -471,8 +471,8 @@ impl App {
             self.state.message = Some(format!("Audio: {e}"));
             self.invalidate();
         }
-        // Note edits reach playback from the next pattern loop (after a drag has finished).
-        if self.state.piano.dirty && self.drag.is_none() {
+        // Note edits reach playback right away, also during a drag (at most once per tick).
+        if self.state.piano.dirty {
             self.state.piano.dirty = false;
             if playing {
                 let mut p = self.state.project.clone();
@@ -550,10 +550,20 @@ impl App {
                     }
                     self.invalidate();
                 }
-                Drag::NoteMove { x0, y0, orig } => self.drag_notes(x0, y0, &orig, false),
-                Drag::NoteResize { x0, orig } => self.drag_notes(x0, 0.0, &orig, true),
-                Drag::NoteErase => self.erase_at(x, y),
+                Drag::NoteMove { x0, y0, orig } => {
+                    self.drag_notes(x0, y0, &orig, false);
+                    self.state.piano.dirty = true;
+                }
+                Drag::NoteResize { x0, orig } => {
+                    self.drag_notes(x0, 0.0, &orig, true);
+                    self.state.piano.dirty = true;
+                }
+                Drag::NoteErase => {
+                    self.erase_at(x, y);
+                    self.state.piano.dirty = true;
+                }
                 Drag::Velocity { last_x } => {
+                    self.state.piano.dirty = true;
                     self.paint_velocity(last_x, x, y);
                     self.drag = Some(Drag::Velocity { last_x: x });
                 }
@@ -832,6 +842,7 @@ impl App {
         }
         if matches!(self.drag, Some(Drag::NoteMove { .. } | Drag::NoteResize { .. } | Drag::NoteErase)) {
             piano::finish_edit(&mut self.state);
+            self.state.piano.dirty = true;
             self.damage_piano();
             self.drag = None;
             return;
@@ -1250,6 +1261,7 @@ impl App {
             Action::Step(ch, step) => {
                 s.piano.clear_selection();
                 toggle_step(s, ch, step);
+                s.piano.dirty = true;
             }
             Action::WinDrag(win) => {
                 let pos = if win == Win::Plugin { s.plugin_pos } else { s.rack_pos };

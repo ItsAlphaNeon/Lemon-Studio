@@ -1,7 +1,7 @@
 //! Playback: an audio thread that owns the output stream and the engine.
 //!
-//! The UI sends a project snapshot on Play; `update` swaps in an edited snapshot, heard from the
-//! next pattern loop. Pattern mode loops by rebuilding the engine at the pattern end (decoded
+//! The UI sends a project snapshot on Play; `update` swaps in an edited snapshot at the current
+//! position (heard immediately). Pattern mode loops by rebuilding the engine at the pattern end (decoded
 //! samples stay cached in the library). `preview` plays one note once while stopped.
 
 use std::path::PathBuf;
@@ -58,7 +58,7 @@ impl Transport {
         let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode));
     }
 
-    /// Replace the playing project (takes effect at the next pattern loop).
+    /// Replace the playing project, continuing from the current position.
     pub fn update(&self, project: &Project) {
         let _ = self.tx.send(Cmd::Update(Box::new(project.clone())));
     }
@@ -105,6 +105,12 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, mut library: SampleLibra
             Ok(Cmd::Update(project)) => {
                 if let Some(s) = session.as_mut().filter(|s| s.looping) {
                     s.project = *project;
+                    // Build outside the lock, then swap at the playing position.
+                    let mut e = Engine::new(&s.project, &mut library, s.rate, s.mode);
+                    if let Ok(mut slot) = s.engine.lock() {
+                        e.continue_from(&mut slot);
+                        *slot = e;
+                    }
                 }
             }
             Ok(Cmd::Preview(project)) => {

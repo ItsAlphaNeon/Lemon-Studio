@@ -332,6 +332,33 @@ mod tests {
         assert!(e.position().abs_diff(88_615) < 512, "loop point {}", e.position());
     }
 
+    /// An edit swapped in mid-pattern is heard right away: notes ahead of the playhead play, notes
+    /// behind it are not retriggered.
+    #[test]
+    fn live_edits_continue_at_position() {
+        let mut a = app();
+        let mut lib = os_engine::SampleLibrary::new(None);
+        let mode = os_engine::PlayMode::Pattern(1);
+        add_note(&mut a.state, 4, 0, 60);
+        let mut old = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+        let mut buf = vec![0.0f32; 2 * 512];
+        for _ in 0..40 {
+            old.process(&mut buf); // ~0.43 s: past beat 1 (0.46 s at 130 BPM is beat 2)
+        }
+        let pos = old.position();
+        add_note(&mut a.state, 4, 96, 72); // beat 2, ahead of the playhead
+        let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+        e.continue_from(&mut old);
+        assert_eq!(e.position(), pos);
+        let mut keys = Vec::new();
+        for _ in 0..20 {
+            e.process(&mut buf);
+            keys.extend(e.sounding().map(|(_, k)| k));
+        }
+        assert!(keys.contains(&72), "new note ahead plays");
+        assert!(!keys.contains(&60), "old note is not retriggered");
+    }
+
     fn key_name_check(k: i32) -> String {
         crate::views::piano::key_name(k)
     }

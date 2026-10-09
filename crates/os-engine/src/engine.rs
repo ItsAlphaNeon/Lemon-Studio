@@ -239,6 +239,25 @@ impl Engine {
         self.frame >= self.end_frame && self.next_trigger >= self.triggers.len() && self.voices.is_empty()
     }
 
+    /// Take over playback from `old` (built from an earlier version of the project) at its
+    /// position: ringing voices keep playing, notes before the position are not retriggered, and
+    /// effect states carry over when the mixer layout is unchanged. Edits are heard immediately.
+    pub fn continue_from(&mut self, old: &mut Engine) {
+        self.frame = old.frame;
+        self.next_trigger = self.triggers.partition_point(|t| t.frame < old.frame);
+        let n = self.channels.len();
+        self.voices = std::mem::take(&mut old.voices);
+        self.voices.retain(|v| v.channel < n);
+        self.sounding = std::mem::take(&mut old.sounding);
+        if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
+            for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
+                if new.effects.len() == o.effects.len() {
+                    new.effects = std::mem::take(&mut o.effects);
+                }
+            }
+        }
+    }
+
     /// Notes playing at the current position, as (channel index, key).
     pub fn sounding(&self) -> impl Iterator<Item = (usize, u16)> + '_ {
         self.sounding.iter().map(|&(c, k, _)| (c, k))
