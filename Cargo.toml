@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "tools/flp-dump", "tools/os-render", "tools/os-play", "crates/os-fruity", "tools/os-fruity-probe"]
+members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "tools/flp-dump", "tools/os-render", "tools/os-play", "crates/os-fruity", "tools/os-fruity-probe", "crates/os-theme", "crates/os-ui", "crates/os-app"]
 
 [workspace.package]
 version = "0.0.1"

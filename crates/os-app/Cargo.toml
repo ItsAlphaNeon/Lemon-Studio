@@ -1,0 +1,21 @@
+[package]
+name = "os-app"
+description = "OpenStudio: the application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "openstudio"
+path = "src/main.rs"
+
+[dependencies]
+os-model.workspace = true
+os-flp.workspace = true
+os-engine.workspace = true
+os-theme = { path = "../os-theme" }
+os-ui = { path = "../os-ui" }
+winit = "0.30"
+softbuffer = "0.4"
+cpal = "0.18"
+rfd = "0.15"

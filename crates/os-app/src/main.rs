@@ -1,0 +1,187 @@
+//! OpenStudio: the application window.
+
+mod app;
+mod icons;
+mod transport;
+mod views;
+
+use std::num::NonZeroU32;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+use winit::application::ApplicationHandler;
+use winit::dpi::LogicalSize;
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::ModifiersState;
+use winit::window::{Window, WindowId};
+
+use app::App;
+use os_ui::Canvas;
+
+struct Shell {
+    app: App,
+    window: Option<Rc<Window>>,
+    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
+    canvas: Option<Canvas>,
+    mods: ModifiersState,
+    last_click: Instant,
+}
+
+impl ApplicationHandler for Shell {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let attrs = Window::default_attributes()
+            .with_title("OpenStudio")
+            .with_decorations(false)
+            .with_inner_size(LogicalSize::new(1920.0, 1080.0))
+            .with_maximized(true);
+        let window = Rc::new(el.create_window(attrs).expect("create window"));
+        let context = softbuffer::Context::new(window.clone()).expect("graphics context");
+        self.surface = Some(softbuffer::Surface::new(&context, window.clone()).expect("surface"));
+        self.window = Some(window);
+        el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16)));
+    }
+
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        // Animate while playing; otherwise repaint a few times a second (peaks, clock).
+        let ms = if self.app.transport.playing() { 16 } else { 100 };
+        el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(ms)));
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let Some(window) = self.window.clone() else { return };
+        let scale = window.scale_factor() as f32;
+        match event {
+            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::CursorMoved { position, .. } => {
+                if self.app.mouse_move(position.x as f32 / scale, position.y as f32 / scale) {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                if state == ElementState::Pressed {
+                    let double = self.last_click.elapsed() < Duration::from_millis(350);
+                    self.last_click = Instant::now();
+                    self.app.mouse_down();
+                    if self.app.want_drag_window {
+                        self.app.want_drag_window = false;
+                        if double {
+                            window.set_maximized(!window.is_maximized());
+                        } else {
+                            let _ = window.drag_window();
+                        }
+                    }
+                } else {
+                    self.app.mouse_up();
+                }
+                window.request_redraw();
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x, y),
+                    MouseScrollDelta::PixelDelta(p) => (p.x as f32 / 40.0, p.y as f32 / 40.0),
+                };
+                self.app.wheel(dx, dy, self.mods.shift_key());
+                window.request_redraw();
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
+                self.app.key(&event.logical_key, self.mods.control_key(), self.mods.alt_key());
+                window.request_redraw();
+            }
+            WindowEvent::Resized(_) => window.request_redraw(),
+            WindowEvent::RedrawRequested => {
+                let size = window.inner_size();
+                let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
+                if self.canvas.is_none() {
+                    match Canvas::new(size.width, size.height, scale) {
+                        Ok(c) => self.canvas = Some(c),
+                        Err(e) => {
+                            eprintln!("openstudio: {e}");
+                            el.exit();
+                            return;
+                        }
+                    }
+                }
+                let canvas = self.canvas.as_mut().expect("canvas");
+                if canvas.pixmap.width() != size.width || canvas.pixmap.height() != size.height || canvas.scale != scale {
+                    canvas.resize(size.width, size.height, scale);
+                }
+                self.app.paint(canvas);
+                if let Some(surface) = self.surface.as_mut() {
+                    if surface.resize(w, h).is_ok() {
+                        if let Ok(mut buf) = surface.buffer_mut() {
+                            canvas.copy_to_xrgb(&mut buf);
+                            let _ = buf.present();
+                        }
+                    }
+                }
+                if self.app.want_minimize {
+                    self.app.want_minimize = false;
+                    window.set_minimized(true);
+                }
+                if self.app.want_maximize {
+                    self.app.want_maximize = false;
+                    window.set_maximized(!window.is_maximized());
+                }
+                if self.app.want_close {
+                    el.exit();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `openstudio --screenshot out.png [--view playlist|mixer] [--no-rack] [project.flp]`:
+/// paint one 1920×1080 frame offscreen (used to compare with reference measurements).
+fn screenshot(args: &[String]) {
+    let mut out = None;
+    let mut view = "playlist".to_string();
+    let mut rack = true;
+    let mut path = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--screenshot" => out = it.next().cloned(),
+            "--view" => view = it.next().cloned().unwrap_or_default(),
+            "--no-rack" => rack = false,
+            other => path = Some(std::path::PathBuf::from(other)),
+        }
+    }
+    let mut app = App::new(path);
+    app.state.show_rack = rack;
+    app.state.front = match view.as_str() {
+        "mixer" => Some(app::Win::Mixer),
+        "none" => None,
+        _ => Some(app::Win::Playlist),
+    };
+    let mut canvas = Canvas::new(1920, 1080, 1.0).expect("canvas");
+    app.paint(&mut canvas);
+    canvas.pixmap.save_png(out.expect("--screenshot needs a path")).expect("write png");
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--screenshot") {
+        screenshot(&args);
+        return;
+    }
+    let path = args.first().map(std::path::PathBuf::from);
+    let event_loop = EventLoop::new().expect("event loop");
+    let mut shell = Shell {
+        app: App::new(path),
+        window: None,
+        surface: None,
+        canvas: None,
+        mods: ModifiersState::default(),
+        last_click: Instant::now() - Duration::from_secs(10),
+    };
+    event_loop.run_app(&mut shell).expect("run");
+}

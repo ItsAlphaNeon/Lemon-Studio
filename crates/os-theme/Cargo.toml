@@ -1,0 +1,8 @@
+[package]
+name = "os-theme"
+description = "OpenStudio theme tokens and the HSL adjustment model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

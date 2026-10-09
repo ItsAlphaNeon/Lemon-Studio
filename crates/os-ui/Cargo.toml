@@ -1,0 +1,11 @@
+[package]
+name = "os-ui"
+description = "OpenStudio painting primitives: shapes and text on a CPU canvas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+os-theme = { path = "../os-theme" }
+tiny-skia = "0.11"
+fontdue = "0.9"
