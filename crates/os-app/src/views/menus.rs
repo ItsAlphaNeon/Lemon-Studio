@@ -4,7 +4,7 @@
 //! user manual's menu chapters and are provisional until captured (spec open question).
 // spec: ui/main-window.md §3
 
-use os_ui::{Face, Rect};
+use os_ui::{Rect};
 
 use crate::app::{Action, Ui};
 
@@ -132,21 +132,16 @@ pub const MENUS: &[(&str, &[Item])] = &[
     ),
 ];
 
-/// Menu bar item layout: (x0, x1, font size). The titles are spread over the measured panel
-/// (x 8–292) by their text widths, so they never overlap whatever font is in use.
+/// Menu bar font: Cuprum 18 px condensed (spec §3).
+pub const BAR_FONT: os_ui::Font = os_ui::Font::condensed(18, 6);
+
+/// Menu bar item layout: (x0, x1, font size). Left edges are the measured word starts; widths
+/// come from the font, so the words always fit.
 pub fn bar_layout(c: &mut os_ui::Canvas) -> [(f32, f32, f32); 8] {
-    const GAP: f32 = 9.0;
-    const SPAN: f32 = 284.0;
-    let base = 16.0;
-    let widths: Vec<f32> = MENUS.iter().map(|(t, _)| c.text_width(Face::Ui, base, t)).collect();
-    let total: f32 = widths.iter().sum::<f32>() + GAP * 7.0;
-    let k = ((SPAN - GAP * 7.0) / (total - GAP * 7.0)).min(1.15);
-    let mut out = [(0.0, 0.0, base); 8];
-    let mut x = 8.0;
-    for (i, w) in widths.iter().enumerate() {
-        let w = w * k;
-        out[i] = (x, x + w, base * k);
-        x += w + GAP;
+    const X: [f32; 8] = [8.0, 35.0, 61.0, 88.0, 143.0, 176.0, 226.0, 266.0];
+    let mut out = [(0.0, 0.0, 18.0); 8];
+    for (i, (t, _)) in MENUS.iter().enumerate() {
+        out[i] = (X[i], X[i] + c.text_width(BAR_FONT, t), 18.0);
     }
     out
 }
@@ -188,9 +183,9 @@ pub fn paint_dropdown(ui: &mut Ui, menu: usize) {
             ui.c.fill_rect(rr, t.menu_drop_hi);
         }
         let c = if item.works { t.menu_drop_text } else { t.menu_drop_disabled };
-        ui.c.text(Face::Ui, 13.0, rr.x + 22.0, rr.y + 5.0, c, item.label);
+        ui.c.text(os_ui::Font::new(15), rr.x + 22.0, rr.y + 2.0, c, item.label);
         if !item.shortcut.is_empty() {
-            ui.c.text_right(Face::Ui, 12.0, rr.right() - 10.0, rr.y + 5.5, t.menu_drop_disabled, item.shortcut);
+            ui.c.text_right(os_ui::Font::new(14), rr.right() - 10.0, rr.y + 3.0, t.menu_drop_disabled, item.shortcut);
         }
         y += row;
     }

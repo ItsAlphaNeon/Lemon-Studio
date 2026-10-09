@@ -1,7 +1,7 @@
 //! The two toolbar rows.
 // spec: ui/main-window.md §1–3
 
-use os_ui::{Face, Rect};
+use os_ui::{Font, Rect};
 
 use super::{knob, menus, sunken, tool_button, FrameInfo};
 use crate::app::{Action, State, Ui, Win};
@@ -16,7 +16,7 @@ pub fn is_toggle(name: &str) -> bool {
 }
 
 fn btn(x: f32, y: f32) -> Rect {
-    Rect::new(x, y, 30.0, 31.0)
+    Rect::new(x, y, 30.0, 33.0)
 }
 
 pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
@@ -52,24 +52,23 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     // Caption buttons.
     for (x, icon, action, hint) in [
         (4.0, Icon::Minimize, Action::Minimize, "Minimize"),
-        (25.0, Icon::Restore, Action::Maximize, "Restore / maximize"),
+        (24.0, Icon::Restore, Action::Maximize, "Restore / maximize"),
         (44.0, Icon::Close, Action::Close, "Exit OpenStudio"),
     ] {
-        let r = Rect::new(x, 11.0, 19.0, 20.0);
+        let r = Rect::new(x, 11.0, 19.0, 19.0);
         let hov = ui.hit(r, action, hint);
-        ui.c.fill_rrect(r, 3.0, t.toolbar_line.shade(-0.2));
-        ui.c.fill_rect_gradient(r.inset(1.0), if hov { t.button_hi.shade(0.06) } else { t.button.shade(0.05) }, t.button.shade(-0.05), 2.5);
-        icons::draw(ui.c, icon, r.inset(3.5), t.glyph);
+        super::button_face(ui, r, if hov { super::Look::Hover } else { super::Look::Off });
+        icons::draw(ui.c, icon, r.inset(3.5), if hov { os_ui::Color::rgb(0xffffff) } else { t.glyph });
     }
 
     // Hint panel: project title + hint / message.
-    let hp = Rect::span(73.0, 361.0, 5.0, 35.0);
+    let hp = Rect::span(72.0, 376.0, 4.0, 36.0);
     sunken(ui, hp, t.sunken);
     ui.hit(hp, Action::DragWindow, "Hint bar");
-    ui.c.text_fit(Face::Ui, 11.5, 78.0, 8.0, 270.0, t.text_dim.shade(-0.05), &f.title);
+    ui.c.text_clip(Font::new(13), 76.0, 6.0, 280.0, t.text_dim.shade(-0.05), &f.title);
     let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
-    ui.c.text_fit(Face::Ui, 12.5, 78.0, 21.0, 270.0, t.text, hint);
-    icons::draw(ui.c, Icon::MidiControl, Rect::span(364.0, 375.0, 20.0, 34.0), t.glyph_dim);
+    ui.c.text_clip(Font::new(14), 77.0, 19.0, 280.0, t.text, hint);
+    icons::draw(ui.c, Icon::MidiControl, Rect::span(360.0, 374.0, 17.0, 32.0), os_ui::Color::rgb(0x515457));
 
     // Transport group.
     let capsule = Rect::span(383.0, 483.0, 4.0, 36.0);
@@ -85,7 +84,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         if active {
             ui.c.fill_rrect(r, 3.0, t.pill);
         }
-        ui.c.text_center(Face::Ui, 9.0, r, if active { t.pill_text } else { t.glyph_dim }, label);
+        ui.c.text_center(Font::condensed(10, 5), r, if active { t.pill_text } else { t.glyph_dim }, label);
     }
     let play_on = f.playing;
     for (r, icon, on, action, hint) in [
@@ -109,15 +108,16 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);
     ui.hit(tb, Action::Tempo, "Tempo (drag up/down)");
-    ui.c.fill_rrect(tb, 5.0, t.tempo_box);
+    ui.c.fill_rrect(tb, 5.0, os_ui::Color::rgb(0x5b5f61));
+    ui.c.fill_rrect(tb.inset(1.0), 4.0, os_ui::Color::rgb(0x5f6466));
     let whole = format!("{}", s.tempo.trunc() as i64);
     let frac = format!(".{:03}", ((s.tempo.fract()) * 1000.0).round() as i64 % 1000);
-    let ww = ui.c.text_width(Face::Ui, 18.0, &whole);
-    let fw = ui.c.text_width(Face::Ui, 11.5, &frac);
-    let x0 = tb.right() - 12.0 - ww - fw;
+    let ww = ui.c.text_width(Font::condensed(19, 6), &whole);
+    let fw = ui.c.text_width(Font::condensed(13, 5), &frac);
+    let x0 = (tb.right() - 11.0 - ww - fw).max(tb.x + 2.0);
     ui.c.push_clip(tb.inset(1.0));
-    ui.c.text(Face::Ui, 18.0, x0, 11.0, t.glyph, &whole);
-    ui.c.text(Face::Ui, 11.5, x0 + ww, 17.0, t.glyph_dim.shade(0.3), &frac);
+    ui.c.text(Font::condensed(19, 6), x0, 9.0, t.glyph, &whole);
+    ui.c.text(Font::condensed(13, 5), x0 + ww, 16.0, t.glyph_dim.shade(0.3), &frac);
     ui.c.pop_clip();
     ui.c.fill_polygon(&[(tb.right() - 9.0, 17.0), (tb.right() - 6.0, 13.0), (tb.right() - 3.0, 17.0)], t.glyph_dim);
     ui.c.fill_polygon(&[(tb.right() - 9.0, 22.0), (tb.right() - 6.0, 26.0), (tb.right() - 3.0, 22.0)], t.glyph_dim);
@@ -134,23 +134,37 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     .enumerate()
     {
         let on = s.toggles.contains(&name);
-        tool_button(ui, btn(580.0 + 33.0 * i as f32, 5.0), icon, on, Action::Placeholder(name), hint);
+        tool_button(ui, btn(580.0 + 33.0 * i as f32, 4.0), icon, on, Action::Placeholder(name), hint);
     }
 
     // Song position (B:S:T).
-    let tp = Rect::span(746.0, 872.0, 5.0, 35.0);
-    sunken(ui, tp, t.time_panel);
+    let tp = Rect::span(745.0, 873.0, 4.0, 36.0);
+    ui.c.fill_rect(tp, os_ui::Color::rgb(0x212829));
+    ui.c.fill_rect(tp.inset(1.0), t.time_panel);
     ui.hit(tp, Action::Placeholder("time display"), "Song position (bar:step:tick)");
     let (bar, step, tick) = bst(f.seconds, s.tempo, 96);
-    let main = format!("{bar}:{step:02}");
-    let mw = ui.c.text_width(Face::Light, 40.0, &main);
-    let tw = ui.c.text_width(Face::Light, 28.0, &format!(":{tick:02}"));
-    let x0 = tp.x + 6.0 + ((tp.w - 12.0 - mw - tw) / 2.0).max(0.0);
+    // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
+    // right-aligned so long bar numbers grow to the left and never leave the panel.
+    let (big, small) = (Font::light(32, 13), Font::light(22, 8));
+    let bar_s = bar.to_string();
+    let step_s = format!("{step:02}");
+    let tick_s = format!("{tick:02}");
+    let (bw, sw, kw) = (ui.c.text_width(big, &bar_s), ui.c.text_width(big, &step_s), ui.c.text_width(small, &tick_s));
+    let right = 863.0;
+    let tick_x = right - kw;
+    let step_x = tick_x - 8.0 - sw;
+    let bar_x = (step_x - 8.0 - bw).max(tp.x + 2.0);
     ui.c.push_clip(tp.inset(1.0));
-    ui.c.text(Face::Light, 40.0, x0, 3.0, t.glyph, &main);
-    ui.c.text(Face::Light, 28.0, x0 + mw, 12.0, t.glyph, &format!(":{tick:02}"));
+    let g = t.glyph;
+    ui.c.text(big, bar_x, -3.0, g, &bar_s);
+    ui.c.fill_rect(Rect::new(step_x - 5.5, 20.0, 2.0, 2.5), g);
+    ui.c.fill_rect(Rect::new(step_x - 5.5, 30.0, 2.0, 2.5), g);
+    ui.c.text(big, step_x, -3.0, g, &step_s);
+    ui.c.fill_rect(Rect::new(tick_x - 5.0, 21.0, 2.0, 2.0), g);
+    ui.c.fill_rect(Rect::new(tick_x - 5.0, 29.5, 2.0, 2.0), g);
+    ui.c.text(small, tick_x, 9.0, g, &tick_s);
     ui.c.pop_clip();
-    ui.c.text(Face::Ui, 7.5, tp.right() - 28.0, 7.0, t.glyph.shade(-0.1), "B:S:T");
+    ui.c.text(Font::condensed(7, 3).bold(), 852.0, 5.0, t.glyph.shade(-0.1), "B:S:T");
 
     // Monitors (oscilloscope / peak) and CPU / memory.
     for r in [Rect::span(882.0, 965.0, 5.0, 35.0), Rect::span(970.0, 1044.0, 5.0, 35.0)] {
@@ -167,10 +181,10 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     sunken(ui, cpu, t.sunken_dark);
     ui.hit(cpu, Action::Placeholder("cpu"), "CPU, polyphony and memory");
     ui.c.fill_rect(Rect::new(1055.0, 6.0, 1.5, 12.0), t.glyph);
-    ui.c.text_right(Face::Ui, 13.0, 1140.0, 7.0, t.glyph, "0");
+    ui.c.text_right(Font::new(17), 1136.0, 3.0, t.glyph, "0");
     ui.c.line(1055.0, 32.0, 1130.0, 32.0, 1.0, t.glyph.with_alpha(160));
-    ui.c.text_right(Face::Ui, 12.0, 1198.0, 7.0, t.glyph, "0 MB");
-    ui.c.text_right(Face::Ui, 13.0, 1176.0, 20.0, t.glyph, "0");
+    ui.c.text_right(Font::condensed(18, 6), 1199.0, 3.0, t.glyph, "0 MB");
+    ui.c.text_right(Font::condensed(18, 6), 1166.0, 17.0, t.glyph, "0");
 
     // Utility buttons.
     let utils = [
@@ -184,7 +198,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         (Icon::Download, "Downloads"),
     ];
     for (i, (icon, hint)) in utils.into_iter().enumerate() {
-        let r = btn(1211.0 + 33.0 * i as f32, 5.0);
+        let r = btn(1209.0 + 33.0 * i as f32, 4.0);
         if r.right() > width - 85.0 {
             break;
         }
@@ -200,13 +214,13 @@ fn row2(ui: &mut Ui, s: &State, width: f32) {
     ui.c.fill_rect_gradient(mb, t.menu_panel.shade(-0.04), t.menu_panel.shade(0.02), 2.5);
     ui.c.stroke_rrect(mb, 2.5, 1.0, t.toolbar_line.shade(-0.1));
     let layout = menus::bar_layout(ui.c);
-    for (i, ((title, _), (x0, x1, size))) in menus::MENUS.iter().zip(layout).enumerate() {
+    for (i, ((title, _), (x0, x1, _))) in menus::MENUS.iter().zip(layout).enumerate() {
         let r = Rect::new(x0 - 3.0, 47.0, x1 - x0 + 6.0, 29.0);
         let hov = ui.hit(r, Action::Menu(i), *title);
         if hov || s.menu_open == Some(i) {
             ui.c.fill_rrect(r, 2.0, t.menu_drop_hi);
         }
-        ui.c.text(Face::Ui, size, x0, 53.0, t.menu_text, title);
+        ui.c.text(menus::BAR_FONT, x0, 51.0, t.menu_text, title);
     }
 
     // Master knobs.
@@ -246,7 +260,7 @@ fn row2(ui: &mut Ui, s: &State, width: f32) {
     let snap = Rect::span(768.0, 830.0, 50.0, 72.0);
     let hov = ui.hit(snap, Action::Placeholder("snap"), "Global snap");
     ui.c.fill_rrect(snap, 2.0, if hov { t.button_hi } else { t.sunken_dark });
-    ui.c.text(Face::Ui, 12.0, snap.x + 6.0, 56.0, t.glyph, "Line");
+    ui.c.text(Font::new(16), snap.x + 5.0, 51.0, t.glyph, "Line");
     icons::draw(ui.c, Icon::ArrowRight, Rect::new(snap.right() - 14.0, 55.0, 12.0, 12.0), t.glyph_dim);
 
     // Pattern selector.
@@ -265,7 +279,7 @@ fn row2(ui: &mut Ui, s: &State, width: f32) {
         .and_then(|p| p.name.clone())
         .unwrap_or_else(|| format!("Pattern {}", s.pattern));
     ui.c.push_clip(pb.inset(2.0));
-    ui.c.text_right(Face::Ui, 16.0, pb.right() - 10.0, 53.0, t.glyph, &name);
+    ui.c.text_right(Font::condensed(21, 7), pb.right() - 11.0, 49.0, t.glyph, &name);
     ui.c.pop_clip();
     let add = Rect::span(951.0, 962.0, 50.0, 72.0);
     ui.hit(add, Action::PatternAdd, "Add a pattern");
@@ -285,15 +299,11 @@ fn row2(ui: &mut Ui, s: &State, width: f32) {
         (Icon::Store, Action::Placeholder("store"), false, "Plugin store"),
     ];
     for (i, (icon, action, open, hint)) in wins.into_iter().enumerate() {
-        let r = btn(975.0 + 33.0 * i as f32, 45.0);
+        let r = btn(973.0 + 33.0 * i as f32, 45.0);
         let hov = ui.hit(r, action, hint);
-        let face = if hov { t.button_hi } else { t.button };
-        ui.c.fill_rrect(r, 3.0, t.toolbar_line);
-        ui.c.fill_rect_gradient(r.inset(1.0), face.shade(0.04), face, 2.5);
-        icons::draw(ui.c, icon, r.inset(6.0), if open { t.glyph } else { t.glyph.mix(t.button, 0.35) });
-        if open {
-            ui.c.fill_rect(Rect::new(r.x + 9.0, r.bottom() - 3.0, 12.0, 1.5), t.accent);
-        }
+        super::button_face(ui, r, if hov { super::Look::Hover } else { super::Look::Off });
+        let _ = open;
+        icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), if hov { os_ui::Color::rgb(0xffffff) } else { t.glyph });
     }
 
     // News panel.
@@ -301,8 +311,11 @@ fn row2(ui: &mut Ui, s: &State, width: f32) {
     if np.right() < width - 85.0 {
         ui.c.fill_rrect(np, 2.0, t.news_panel);
         ui.hit(np, Action::Placeholder("news"), "News");
-        ui.c.text(Face::Ui, 11.5, 1310.0, 55.0, t.text_faint, "Today");
-        ui.c.text_fit(Face::Ui, 11.5, 1346.0, 55.0, 98.0, t.text_dim.shade(0.2), "Welcome to OpenStudio");
+        let tw = ui.c.text(Font::new(13), 1309.0, 53.0, t.text_faint, "Today");
+        let news = "Welcome to OpenStudio";
+        let avail = 1442.0 - 1315.0 - tw;
+        let nf = ui.c.fit_font(Font::new(14), news, avail);
+        ui.c.text_clip(nf, 1315.0 + tw, 52.0, avail, os_ui::Color::rgb(0x9aa8b0), news);
         icons::draw(ui.c, Icon::Globe, Rect::new(1449.0, 52.0, 18.0, 18.0), t.glyph_dim.shade(0.3));
     }
 }

@@ -1,7 +1,7 @@
 //! Simple vector glyphs for toolbar and window buttons. Original drawings: each only suggests its
 //! function (no artwork is copied from any other program).
 
-use os_ui::{Canvas, Color, Face, Rect};
+use os_ui::{Canvas, Color, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
@@ -93,7 +93,12 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect, c: Color) {
             cv.line(p(4.0, 1.0).0, p(4.0, 1.0).1, p(4.0, -1.0).0, p(4.0, -1.0).1, w, c);
         }
         Icon::Countdown => {
-            cv.text(Face::Ui, 11.0 * u / 0.6, x - 7.0 * u, y - 5.0 * u, c, "3.2");
+            // "3.2.1" in shrinking digits, all inside the box.
+            let x0 = cv.text(os_ui::Font::condensed(16, 6), x - 9.0, y - 10.0, c, "3");
+            let x1 = cv.text(os_ui::Font::condensed(13, 5), x - 9.0 + x0 + 1.0, y - 7.0, c, "2");
+            cv.text(os_ui::Font::condensed(10, 4), x - 9.0 + x0 + x1 + 2.0, y - 4.0, c, "1");
+            cv.fill_rect(Rect::new(x - 9.0 + x0, y + 4.0, 1.0, 1.0), c);
+            cv.fill_rect(Rect::new(x - 8.0 + x0 + x1, y + 4.0, 1.0, 1.0), c);
         }
         Icon::Blend => {
             keys(cv, p(-7.0, -3.0), u, 3, c);
@@ -120,7 +125,7 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect, c: Color) {
             cv.line(x, y + 4.5 * u, x, y + 7.0 * u, w, c);
             cv.line(x - 3.0 * u, y + 7.0 * u, x + 3.0 * u, y + 7.0 * u, w, c);
         }
-        Icon::Help => cv.text_center(Face::Ui, 16.0 * u / 0.8, r, c, "?"),
+        Icon::Help => cv.text_center(crate::views::fnt(16.0 * u / 0.8), r, c, "?"),
         Icon::Save | Icon::SaveRender => {
             let b = Rect::new(x - 6.0 * u, y - 6.0 * u, 12.0 * u, 12.0 * u);
             cv.fill_rrect(b, 1.5 * u, c);

@@ -10,7 +10,7 @@ pub mod toolbar;
 
 use std::borrow::Cow;
 
-use os_ui::{Color, Face, Rect};
+use os_ui::{Color, Rect};
 
 use crate::app::{Action, State, Ui, Win};
 use crate::icons::{self, Icon};
@@ -22,6 +22,16 @@ pub struct FrameInfo {
     pub playing: bool,
     pub seconds: f64,
     pub peaks: (f32, f32),
+}
+
+/// UI text at a nominal size (Cuprum; spec §10).
+pub fn fnt(size: f32) -> os_ui::Font {
+    os_ui::Font::new(size.round() as u16)
+}
+
+/// The light display face (song position).
+pub fn light(size: f32) -> os_ui::Font {
+    os_ui::Font::light(size.round() as u16, 0)
 }
 
 /// Top of the workspace (§1).
@@ -41,8 +51,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
         let version = concat!("OpenStudio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
         let vc = ui.t.version_text;
-        let vw = ui.c.text_width(Face::Ui, 16.0, version);
-        ui.c.text(Face::Ui, 16.0, work.cx() - vw / 2.0, h - 22.0, vc, version);
+        let vw = ui.c.text_width(crate::views::fnt(16.0), version);
+        ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, h - 22.0, vc, version);
     }
 
     match s.front {
@@ -70,7 +80,7 @@ pub fn window_frame(ui: &mut Ui, r: Rect, title: &str, title_x: f32) -> Rect {
     let bar = Rect::new(r.x, r.y, r.w, 23.0);
     ui.c.fill_rect_gradient(bar, t.window_title.shade(0.04), t.window_title.shade(-0.03), 0.0);
     ui.c.fill_rect(Rect::new(r.x, r.y + 22.0, r.w, 1.0), t.splitter_dark);
-    ui.c.text(Face::Ui, 13.0, r.x + title_x, r.y + 5.0, t.text, title);
+    ui.c.text(os_ui::Font::new(17), r.x + title_x, r.y + 1.0, t.text, title);
     // Minimize / maximize / close glyphs at the right (1862, 1881, 1901 at full width).
     let right = r.right();
     for (i, (icon, hint)) in [(Icon::Minimize, "Minimize window"), (Icon::Restore, "Restore window"), (Icon::Close, "Close window")]
@@ -96,29 +106,54 @@ pub fn raised(ui: &mut Ui, r: Rect, base: Color, radius: f32) {
     ui.c.fill_rect_gradient(r, base.shade(0.045), base.shade(-0.035), radius);
 }
 
-/// A 30×31 toolbar button (§1). `on` draws the orange "on" state.
-pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, hint: &'static str) {
-    let hov = ui.hit(r, action, hint);
-    let t = ui.t;
-    ui.c.fill_rrect(r, 3.5, t.toolbar_line.shade(-0.15));
-    let face = r.inset(1.0);
-    if on {
-        ui.c.fill_rect_gradient(face, t.on_top, t.on_bottom, 3.0);
-        ui.c.fill_rect(Rect::new(face.x + 2.0, face.y, face.w - 4.0, 1.0), Color::rgb(0xffffff).with_alpha(90));
-        icons::draw(ui.c, icon, r.inset(4.5), t.on_glyph);
-    } else {
-        let base = if hov { t.button_hi } else { t.button };
-        ui.c.fill_rect_gradient(face, base.shade(0.05), base.shade(-0.04), 3.0);
-        ui.c.fill_rect(Rect::new(face.x + 2.0, face.y, face.w - 4.0, 1.0), Color::rgb(0xffffff).with_alpha(if hov { 26 } else { 14 }));
-        icons::draw(ui.c, icon, r.inset(4.5), if hov { Color::rgb(0xffffff) } else { t.glyph });
-    }
+/// Button face states.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Look {
+    Off,
+    Hover,
+    On,
 }
 
-/// A sunken panel (hint bar, monitors): darker fill, shadow along the top, faint light edge below.
+/// FL-style raised button face (spec §1): 1 px border with softened corners, an elliptical radial
+/// face (light centre, darker edges) and a darker 1 px inner rim.
+pub fn button_face(ui: &mut Ui, r: Rect, look: Look) {
+    let bg = ui.t.toolbar;
+    let (border, center, edge) = match look {
+        Look::Off => (Color::rgb(0x191d1f), Color::rgb(0x313537), Color::rgb(0x272b2d)),
+        Look::Hover => (Color::rgb(0x191d1f), Color::rgb(0x3d4244), Color::rgb(0x2c3133)),
+        Look::On => (Color::rgb(0xbe5507), Color::rgb(0xfffaab), Color::rgb(0xffaf65)),
+    };
+    ui.c.fill_rect(r, border);
+    for (x, y) in [(r.x, r.y), (r.right() - 1.0, r.y), (r.x, r.bottom() - 1.0), (r.right() - 1.0, r.bottom() - 1.0)] {
+        ui.c.pixel(x, y, bg.mix(border, 0.25));
+    }
+    let face = r.inset(1.0);
+    ui.c.fill_radial(face, center, edge);
+    // Inner rim.
+    let rim = Color::rgb(0x000000).with_alpha(if look == Look::On { 26 } else { 40 });
+    ui.c.fill_rect(Rect::new(face.x, face.y, face.w, 1.0), rim);
+    ui.c.fill_rect(Rect::new(face.x, face.bottom() - 1.0, face.w, 1.0), rim);
+    ui.c.fill_rect(Rect::new(face.x, face.y + 1.0, 1.0, face.h - 2.0), rim);
+    ui.c.fill_rect(Rect::new(face.right() - 1.0, face.y + 1.0, 1.0, face.h - 2.0), rim);
+}
+
+/// A 30×33 toolbar button (§1). `on` draws the orange "on" state.
+pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, hint: &'static str) {
+    let hov = ui.hit(r, action, hint);
+    let look = if on { Look::On } else if hov { Look::Hover } else { Look::Off };
+    button_face(ui, r, look);
+    let c = match look {
+        Look::On => ui.t.on_glyph,
+        Look::Hover => Color::rgb(0xffffff),
+        Look::Off => ui.t.glyph,
+    };
+    icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), c);
+}
+
+/// A sunken panel (hint bar, monitors): flat fill inside a 1 px dark border.
 pub fn sunken(ui: &mut Ui, r: Rect, fill: Color) {
-    ui.c.fill_rrect(r, 2.5, fill);
-    ui.c.fill_rect_gradient(Rect::new(r.x + 1.0, r.y, r.w - 2.0, 4.0), fill.shade(-0.45), fill.with_alpha(0), 0.0);
-    ui.c.fill_rect(Rect::new(r.x + 2.0, r.bottom() - 1.0, r.w - 4.0, 1.0), Color::rgb(0xffffff).with_alpha(10));
+    ui.c.fill_rect(r, Color::rgb(0x1d2022));
+    ui.c.fill_rect(r.inset(1.0), fill);
 }
 
 /// A ring knob (toolbar style): arc from the minimum; bipolar knobs pass `center = true`.
@@ -150,16 +185,16 @@ pub fn ball_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, value: f32) {
     ui.c.line(cx + (r * 0.35) * a.cos(), cy + (r * 0.35) * a.sin(), cx + (r - 2.8) * a.cos(), cy + (r - 2.8) * a.sin(), 1.4, t.glyph.shade(-0.15));
 }
 
-/// A round LED (green accent when lit).
+/// A round LED (spec §7: grey ring, green ball with a bright core when lit).
 pub fn led(ui: &mut Ui, cx: f32, cy: f32, on: bool) {
-    let t = ui.t;
-    ui.c.fill_circle(cx, cy, 5.2, t.toolbar_line.shade(-0.25));
+    ui.c.fill_circle(cx, cy, 6.0, Color::rgb(0x595b5c));
+    ui.c.fill_circle(cx, cy, 5.0, Color::rgb(0x283028));
     if on {
-        ui.c.fill_circle(cx, cy, 4.8, t.accent.with_alpha(60));
-    }
-    ui.c.fill_circle(cx, cy, 3.7, if on { t.accent.shade(-0.1) } else { t.accent_dim.shade(-0.45) });
-    if on {
-        ui.c.fill_circle(cx - 0.8, cy - 0.9, 1.5, t.accent.shade(0.55));
+        ui.c.fill_circle(cx, cy, 4.2, Color::rgb(0x3d7803));
+        ui.c.fill_circle(cx, cy, 3.4, Color::rgb(0xa0dd48));
+        ui.c.fill_circle(cx - 0.6, cy - 0.8, 1.8, Color::rgb(0xe2f5b8));
+    } else {
+        ui.c.fill_circle(cx, cy, 4.0, Color::rgb(0x1f2a14));
     }
 }
 

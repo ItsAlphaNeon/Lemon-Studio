@@ -1,12 +1,17 @@
-//! OpenStudio painting: a CPU canvas with shapes (tiny-skia) and text (fontdue).
+//! OpenStudio painting: a CPU canvas with shapes (tiny-skia) and text (GDI ClearType on Windows).
 //!
 //! All coordinates are logical pixels; the canvas multiplies by `scale` (the window's DPI factor).
-//! Text uses a system font loaded at runtime (nothing is bundled).
+//! Text uses the bundled Cuprum face (see `text`).
 // spec: ui/main-window.md §10 (typography)
+
+mod glyph;
+mod text;
 
 use std::collections::HashMap;
 
 pub use os_theme::Color;
+pub use glyph::Glyph;
+pub use text::{Face, Font};
 use tiny_skia::{FillRule, LineCap, Mask, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
 
 /// An axis-aligned rectangle in logical pixels.
@@ -62,112 +67,11 @@ impl Rect {
     }
 }
 
-/// Which system font face to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Face {
-    /// Condensed UI text.
-    Ui,
-    /// Thin display digits (song position).
-    Light,
-}
-
-/// Horizontal scale applied to UI glyphs: the UI face is a condensed look.
-const CONDENSE: f32 = 0.84;
-
-/// Squeeze a rasterized glyph horizontally (box filter), keeping its height.
-fn condense(mut m: fontdue::Metrics, cov: Vec<u8>, k: f32) -> (fontdue::Metrics, Vec<u8>) {
-    m.advance_width *= k;
-    if m.width == 0 || m.height == 0 {
-        return (m, cov);
-    }
-    let nw = ((m.width as f32 * k).round() as usize).max(1);
-    let mut out = vec![0u8; nw * m.height];
-    let ratio = m.width as f32 / nw as f32;
-    for y in 0..m.height {
-        for x in 0..nw {
-            let (a, b) = (x as f32 * ratio, (x + 1) as f32 * ratio);
-            let (mut sum, mut wsum) = (0.0f32, 0.0f32);
-            let mut i = a.floor() as usize;
-            while (i as f32) < b && i < m.width {
-                let w = (b.min(i as f32 + 1.0) - a.max(i as f32)).max(0.0);
-                sum += f32::from(cov[y * m.width + i]) * w;
-                wsum += w;
-                i += 1;
-            }
-            out[y * nw + x] = if wsum > 0.0 { (sum / wsum).round() as u8 } else { 0 };
-        }
-    }
-    m.xmin = (m.xmin as f32 * k).round() as i32;
-    m.width = nw;
-    (m, out)
-}
-
-struct Glyph {
-    metrics: fontdue::Metrics,
-    coverage: Vec<u8>,
-}
-
-struct Fonts {
-    ui: fontdue::Font,
-    light: fontdue::Font,
-    cache: HashMap<(Face, char, u32), Glyph>,
-}
-
-fn load_font(candidates: &[&str]) -> Option<fontdue::Font> {
-    let dirs: Vec<std::path::PathBuf> = std::env::var_os("WINDIR")
-        .map(|w| std::path::PathBuf::from(w).join("Fonts"))
-        .into_iter()
-        .chain(["/usr/share/fonts/truetype/dejavu", "/System/Library/Fonts"].map(Into::into))
-        .collect();
-    for name in candidates {
-        for d in &dirs {
-            if let Ok(bytes) = std::fs::read(d.join(name)) {
-                if let Ok(f) = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
-                    return Some(f);
-                }
-            }
-        }
-    }
-    None
-}
-
-impl Fonts {
-    fn load() -> Result<Fonts, String> {
-        let ui = load_font(&["bahnschrift.ttf", "segoeui.ttf", "DejaVuSansCondensed.ttf", "Helvetica.ttc"])
-            .ok_or("no usable system UI font found")?;
-        let light = load_font(&["segoeuil.ttf", "segoeui.ttf", "DejaVuSans.ttf"]).unwrap_or_else(|| ui.clone());
-        Ok(Fonts { ui, light, cache: HashMap::new() })
-    }
-
-    fn font(&self, face: Face) -> &fontdue::Font {
-        match face {
-            Face::Ui => &self.ui,
-            Face::Light => &self.light,
-        }
-    }
-
-    fn glyph(&mut self, face: Face, c: char, px: f32) -> &Glyph {
-        let key = (face, c, (px * 4.0).round() as u32);
-        if !self.cache.contains_key(&key) {
-            let (mut metrics, mut coverage) = self.font(face).rasterize(c, px);
-            if face == Face::Ui {
-                (metrics, coverage) = condense(metrics, coverage, CONDENSE);
-            }
-            self.cache.insert(key, Glyph { metrics, coverage });
-        }
-        &self.cache[&key]
-    }
-
-    fn ascent(&self, face: Face, px: f32) -> f32 {
-        self.font(face).horizontal_line_metrics(px).map_or(px * 0.8, |m| m.ascent)
-    }
-}
-
 /// The frame being painted.
 pub struct Canvas {
     pub pixmap: Pixmap,
     pub scale: f32,
-    fonts: Fonts,
+    text: text::TextEngine,
     clips: Vec<Rect>,
     /// Clip masks for path drawing, built lazily and reused across frames.
     masks: HashMap<[i32; 4], Mask>,
@@ -185,7 +89,7 @@ impl Canvas {
         Ok(Canvas {
             pixmap: Pixmap::new(width.max(1), height.max(1)).ok_or("bad canvas size")?,
             scale,
-            fonts: Fonts::load()?,
+            text: text::TextEngine::new()?,
             clips: Vec::new(),
             masks: HashMap::new(),
         })
@@ -336,6 +240,42 @@ impl Canvas {
         }
     }
 
+    /// Elliptical radial gradient over `r`: `center` at the middle, `edge` where the normalized
+    /// distance reaches 1 (the half-width / half-height), falling off with the square of the distance.
+    pub fn fill_radial(&mut self, r: Rect, center: Color, edge: Color) {
+        let k = self.scale;
+        let (cx0, cy0, cx1, cy1) = self.clip_px();
+        let x0 = ((r.x * k).round() as i32).max(cx0);
+        let x1 = ((r.right() * k).round() as i32).min(cx1);
+        let y0 = ((r.y * k).round() as i32).max(cy0);
+        let y1 = ((r.bottom() * k).round() as i32).min(cy1);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let (mx, my) = (r.cx() * k, r.cy() * k);
+        let (hw, hh) = ((r.w * k / 2.0).max(0.5), (r.h * k / 2.0).max(0.5));
+        let pw = self.pixmap.width() as usize;
+        let data = self.pixmap.data_mut();
+        for y in y0..y1 {
+            let ny = (y as f32 + 0.5 - my) / hh;
+            for x in x0..x1 {
+                let nx = (x as f32 + 0.5 - mx) / hw;
+                let t = nx * nx + ny * ny;
+                let i = (y as usize * pw + x as usize) * 4;
+                let l = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round().clamp(0.0, 255.0) as u8;
+                data[i] = l(center.r, edge.r);
+                data[i + 1] = l(center.g, edge.g);
+                data[i + 2] = l(center.b, edge.b);
+                data[i + 3] = 255;
+            }
+        }
+    }
+
+    /// Set single device pixels (corner details); `a` = 255 replaces, less blends.
+    pub fn pixel(&mut self, x: f32, y: f32, c: Color) {
+        self.fill_rect(Rect::new(x, y, 1.0, 1.0), c);
+    }
+
     /// Vertical gradient fill (rounded when `radius > 0`).
     pub fn fill_rect_gradient(&mut self, r: Rect, top: Color, bottom: Color, radius: f32) {
         if radius <= 0.0 {
@@ -477,103 +417,122 @@ impl Canvas {
     }
 
     /// Width of `s` in logical pixels.
-    pub fn text_width(&mut self, face: Face, size: f32, s: &str) -> f32 {
-        let px = size * self.scale;
-        let w: f32 = s.chars().map(|c| self.fonts.glyph(face, c, px).metrics.advance_width).sum();
-        w / self.scale
+    pub fn text_width(&mut self, f: Font, s: &str) -> f32 {
+        self.text.extent(f, self.scale, s).0 as f32 / self.scale
     }
 
-    /// Draw `s` with its top-left at (x, y) (top = ascent line). Returns the advance width.
-    pub fn text(&mut self, face: Face, size: f32, x: f32, y: f32, c: Color, s: &str) -> f32 {
-        self.text_dir(face, size, x, y, c, s, false)
+    /// Cell height (ascent + descent) of `f` in logical pixels.
+    pub fn line_height(&mut self, f: Font) -> f32 {
+        self.text.metrics(f, self.scale).0 as f32 / self.scale
     }
 
-    /// Text centered in `r` (both axes).
-    pub fn text_center(&mut self, face: Face, size: f32, r: Rect, c: Color, s: &str) {
-        let w = self.text_width(face, size, s);
-        self.text(face, size, r.cx() - w / 2.0, r.cy() - size * 0.5, c, s);
+    /// Ascent (cell top to baseline) of `f` in logical pixels.
+    pub fn ascent(&mut self, f: Font) -> f32 {
+        self.text.metrics(f, self.scale).1 as f32 / self.scale
     }
 
-    /// Text that shrinks (down to 70 %) to fit `max_w`, then is clipped to it. Returns the size used.
-    pub fn text_fit(&mut self, face: Face, size: f32, x: f32, y: f32, max_w: f32, c: Color, s: &str) -> f32 {
-        let mut size = size;
-        let w = self.text_width(face, size, s);
-        if w > max_w {
-            size = (size * max_w / w).max(size * 0.7);
+    /// Draw `s` with its text cell's top-left at (x, y). Returns the advance width.
+    pub fn text(&mut self, f: Font, x: f32, y: f32, c: Color, s: &str) -> f32 {
+        let k = self.scale;
+        let clip = self.clip_px();
+        let (xi, yi) = ((x * k).round() as i32, (y * k).round() as i32);
+        let (w, h) = self.text.extent(f, k, s);
+        if xi > clip.2 || yi > clip.3 || xi + w + 8 < clip.0 || yi + h + 4 < clip.1 {
+            return w as f32 / k;
         }
-        self.push_clip(Rect::new(x, y - 2.0, max_w, size * 1.5));
-        self.text(face, size, x, y, c, s);
+        self.text.draw(&mut self.pixmap, clip, f, k, xi, yi, c, s, false);
+        w as f32 / k
+    }
+
+    /// Text centered in `r` (both axes, by the cell box).
+    pub fn text_center(&mut self, f: Font, r: Rect, c: Color, s: &str) {
+        let w = self.text_width(f, s);
+        let h = self.line_height(f);
+        self.text(f, (r.cx() - w / 2.0).round(), (r.cy() - h / 2.0).round(), c, s);
+    }
+
+    /// `f`, horizontally condensed step by step (then shrunk) until `s` fits in `max_w`.
+    pub fn fit_font(&mut self, f: Font, s: &str, max_w: f32) -> Font {
+        if self.text_width(f, s) <= max_w {
+            return f;
+        }
+        let mut g = f;
+        let natural = (self.text_width(f, s) / s.chars().count().max(1) as f32).round() as u16;
+        let mut w = natural.max(2);
+        while w > 2 {
+            w -= 1;
+            g = Font { width: w, natural: false, ..f };
+            if self.text_width(g, s) <= max_w {
+                return g;
+            }
+        }
+        g
+    }
+
+    /// Text clipped to `max_w` (FL cuts long labels at the box edge).
+    pub fn text_clip(&mut self, f: Font, x: f32, y: f32, max_w: f32, c: Color, s: &str) {
+        let h = self.line_height(f);
+        self.push_clip(Rect::new(x - 2.0, y - 4.0, max_w + 2.0, h + 8.0));
+        self.text(f, x, y, c, s);
         self.pop_clip();
-        size
     }
 
     /// Text right-aligned to `right`.
-    pub fn text_right(&mut self, face: Face, size: f32, right: f32, y: f32, c: Color, s: &str) {
-        let w = self.text_width(face, size, s);
-        self.text(face, size, right - w, y, c, s);
+    pub fn text_right(&mut self, f: Font, right: f32, y: f32, c: Color, s: &str) {
+        let w = self.text_width(f, s);
+        self.text(f, right - w, y, c, s);
     }
 
     /// Text rotated 90° counter-clockwise (reads bottom to top), starting at (x, y_bottom),
-    /// with the glyph tops facing left at `x`.
-    pub fn text_vertical(&mut self, face: Face, size: f32, x: f32, y_bottom: f32, c: Color, s: &str) -> f32 {
-        self.text_dir(face, size, x, y_bottom, c, s, true)
+    /// with the glyph tops facing left at `x`. Returns the advance (upward extent).
+    pub fn text_vertical(&mut self, f: Font, x: f32, y_bottom: f32, c: Color, s: &str) -> f32 {
+        let k = self.scale;
+        let clip = self.clip_px();
+        let (xi, yi) = ((x * k).round() as i32, (y_bottom * k).round() as i32);
+        let (w, h) = self.text.extent(f, k, s);
+        if xi > clip.2 || xi + h + 4 < clip.0 || yi + 4 < clip.1 || yi - w - 4 > clip.3 {
+            return w as f32 / k;
+        }
+        self.text.draw(&mut self.pixmap, clip, f, k, xi, yi, c, s, true);
+        w as f32 / k
     }
 
-    fn text_dir(&mut self, face: Face, size: f32, x: f32, y: f32, c: Color, s: &str, vertical: bool) -> f32 {
-        let scale = self.scale;
-        let px = size * scale;
-        let cr = self.clip_rect();
-        let outside = if vertical {
-            // Rotated text runs upward from `y` (at most a few hundred pixels).
-            x > cr.right() || x + size * 1.6 < cr.x || y < cr.y || y - 600.0 > cr.bottom()
-        } else {
-            y > cr.bottom() || y + size * 1.6 < cr.y || x > cr.right()
-        };
-        if outside {
-            return 0.0;
+    /// Draw an icon glyph with subpixel (ClearType-style) coverage in color `c`.
+    pub fn glyph(&mut self, c: Color, g: &Glyph) {
+        let Some(b) = g.bounds() else { return };
+        let k = self.scale;
+        let clip = self.clip_px();
+        // Rasterize the whole glyph (the subpixel filter needs neighbours), blend inside the clip.
+        let x0 = (b.x * k).floor() as i32 - 1;
+        let y0 = (b.y * k).floor() as i32;
+        let x1 = (b.right() * k).ceil() as i32 + 1;
+        let y1 = (b.bottom() * k).ceil() as i32;
+        if x0.max(clip.0) >= x1.min(clip.2) || y0.max(clip.1) >= y1.min(clip.3) {
+            return;
         }
-        let ascent = self.fonts.ascent(face, px);
-        // Fold the font's internal leading so `y` is close to the cap top.
-        let top_pad = (ascent - px * 0.78).max(0.0);
-        let (pw, ph) = (self.pixmap.width() as i32, self.pixmap.height() as i32);
-        let clip = self.clip_rect();
-        let (cx0, cy0) = ((clip.x * scale).floor() as i32, (clip.y * scale).floor() as i32);
-        let (cx1, cy1) = ((clip.right() * scale).ceil() as i32, (clip.bottom() * scale).ceil() as i32);
-        let (cx0, cy0, cx1, cy1) = (cx0.max(0), cy0.max(0), cx1.min(pw), cy1.min(ph));
-        let mut pen = 0.0f32;
-        let ox = x * scale;
-        let oy = y * scale;
-        for ch in s.chars() {
-            let g = self.fonts.glyph(face, ch, px);
-            let m = g.metrics;
-            // Glyph-local origin: baseline at `ascent - top_pad` below the line top.
-            let gx0 = pen + m.xmin as f32;
-            let gy0 = ascent - top_pad - m.ymin as f32 - m.height as f32;
-            let data = self.pixmap.data_mut();
-            for j in 0..m.height {
-                for i in 0..m.width {
-                    let a = g.coverage[j * m.width + i];
-                    if a == 0 {
-                        continue;
-                    }
-                    let (lx, ly) = (gx0 + i as f32, gy0 + j as f32);
-                    let (dx, dy) = if vertical { (ox + ly, oy - lx) } else { (ox + lx, oy + ly) };
-                    let (dx, dy) = (dx.round() as i32, dy.round() as i32);
-                    if dx < cx0 || dy < cy0 || dx >= cx1 || dy >= cy1 {
-                        continue;
-                    }
-                    let k = ((dy * pw + dx) * 4) as usize;
-                    let alpha = u32::from(a) * u32::from(c.a) / 255;
-                    for (ch_i, v) in [c.r, c.g, c.b].into_iter().enumerate() {
-                        let d = u32::from(data[k + ch_i]);
-                        data[k + ch_i] = ((u32::from(v) * alpha + d * (255 - alpha)) / 255) as u8;
-                    }
-                    data[k + 3] = 255;
+        let (w, h) = (x1 - x0, y1 - y0);
+        let Some(cov) = glyph::coverage(g, k, x0, y0, w, h) else { return };
+        let pw = self.pixmap.width() as usize;
+        let data = self.pixmap.data_mut();
+        let a = u32::from(c.a);
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let (dx, dy) = (x0 + x as i32, y0 + y as i32);
+                if dx < clip.0 || dx >= clip.2 || dy < clip.1 || dy >= clip.3 {
+                    continue;
+                }
+                let cv = cov[y * w as usize + x];
+                if cv == [0, 0, 0] {
+                    continue;
+                }
+                let i = ((y0 as usize + y) * pw + x0 as usize + x) * 4;
+                for (ch, fg) in [c.r, c.g, c.b].into_iter().enumerate() {
+                    let al = u32::from(cv[ch]) * a / 255;
+                    let d = u32::from(data[i + ch]);
+                    data[i + ch] = ((u32::from(fg) * al + d * (255 - al)) / 255) as u8;
                 }
             }
-            pen += m.advance_width;
         }
-        pen / scale
     }
 
     /// Copy a device-pixel region into a `0x00RRGGBB` buffer of the same width.
@@ -650,7 +609,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(200, 50, 1.0) else { return }; // no system font: skip
         c.clear(Color::rgb(0x000000));
         c.fill_rrect(Rect::new(5.0, 5.0, 20.0, 20.0), 3.0, Color::rgb(0xff0000));
-        let w = c.text(Face::Ui, 14.0, 40.0, 10.0, Color::rgb(0xffffff), "OpenStudio");
+        let w = c.text(Font::new(14), 40.0, 10.0, Color::rgb(0xffffff), "OpenStudio");
         assert!(w > 40.0);
         assert!(c.pixmap.data().chunks_exact(4).any(|p| p[0] > 200 && p[1] > 200));
     }

@@ -1,7 +1,7 @@
 //! Floating channel rack.
 // spec: ui/main-window.md §8
 
-use os_ui::{Color, Face, Rect};
+use os_ui::{Color, Rect};
 
 use super::{ball_knob, led, rgb};
 use crate::app::{Action, State, Ui};
@@ -32,10 +32,10 @@ pub fn paint(ui: &mut Ui, s: &State) {
     icons::draw(ui.c, Icon::ArrowRight, Rect::new(x + 10.0, y + 6.0, 14.0, 14.0), t.text_dim);
     let grp = Rect::span(x + 108.0, x + 183.0, y + 8.0, y + 20.0);
     ui.c.fill_rrect(grp, 2.0, t.sunken.shade(-0.1));
-    ui.c.text(Face::Ui, 12.5, grp.x + 5.0, grp.y, t.text, "All");
+    ui.c.text(os_ui::Font::new(14), grp.x + 5.0, grp.y - 2.0, t.text, "All");
     ui.c.fill_polygon(&[(grp.right() - 8.0, grp.y + 3.0), (grp.right() - 4.0, grp.cy()), (grp.right() - 8.0, grp.bottom() - 3.0)], t.glyph_dim);
     icons::draw(ui.c, Icon::Speaker, Rect::new(x + 214.0, y + 6.0, 16.0, 16.0), t.text);
-    ui.c.text(Face::Ui, 14.5, x + 236.0, y + 5.0, t.text, "Channel rack");
+    ui.c.text(os_ui::Font::new(16), x + 236.0, y + 3.0, t.text, "Channel rack");
     ball_knob(ui, x + 350.0, y + 14.0, 8.5, 0.5);
     for (i, icon) in [Icon::Back, Icon::Mixer, Icon::PianoRoll].into_iter().enumerate() {
         icons::draw(ui.c, icon, Rect::new(x + 407.0 + 22.0 * i as f32, y + 6.0, 16.0, 16.0), t.text);
@@ -61,7 +61,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
         let mb = Rect::span(x + 67.0, x + 98.0, ry + 6.0, ry + 24.0);
         ui.c.fill_rrect(mb, 3.0, t.splitter_dark.shade(-0.1));
         ui.c.fill_rect_gradient(mb.inset(1.0), t.rack_row_box.shade(-0.1), t.rack_row_box, 2.5);
-        ui.c.text_center(Face::Ui, 17.0, mb, t.text_dim.shade(0.1), &format!("{}", ch.mixer_track));
+        ui.c.text_center(crate::views::fnt(17.0), mb, t.text_dim.shade(0.1), &format!("{}", ch.mixer_track));
         let nb = Rect::span(x + 109.0, x + 189.0, ry + 4.0, ry + 26.0);
         let nhov = ui.hit(nb, Action::ChannelSelect(i), "Select channel");
         let face = if selected { t.name_button_sel } else { t.name_button };
@@ -70,7 +70,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
         let col = ch.color.map(rgb).map_or(t.name_text, |c| c.mix(t.name_text, 0.55));
         let label = ch.name.clone().unwrap_or_else(|| format!("Channel {}", ch.index + 1));
         ui.c.push_clip(nb.inset(1.0));
-        ui.c.text_center(Face::Ui, 12.5, nb, if nhov { col.shade(0.3) } else { col }, &label);
+        ui.c.text_center(os_ui::Font::new(13), nb, if nhov { col.shade(0.3) } else { col }, &label);
         ui.c.pop_clip();
         let sel = Rect::span(x + 200.0, x + 204.0, ry + 5.0, ry + 24.0);
         ui.c.fill_rrect(sel, 1.5, t.splitter_dark.shade(-0.1));

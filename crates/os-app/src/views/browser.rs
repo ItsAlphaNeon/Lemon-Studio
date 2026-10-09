@@ -1,7 +1,7 @@
 //! Docked browser (left).
 // spec: ui/main-window.md §4
 
-use os_ui::{Color, Face, Rect};
+use os_ui::{Color, Rect};
 
 use crate::app::{Action, State, Ui};
 use crate::icons::{self, Icon};
@@ -44,7 +44,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     icons::draw(ui.c, Icon::ArrowRight, Rect::new(5.0, 87.0, 12.0, 14.0), t.text_dim);
     icons::draw(ui.c, Icon::ArrowUp, Rect::new(19.0, 87.0, 12.0, 14.0), t.text_dim);
     icons::draw(ui.c, Icon::Back, Rect::new(34.0, 87.0, 12.0, 14.0), t.text_dim);
-    ui.c.text(Face::Ui, 12.0, 52.0, 89.0, t.text_dim, "Browser");
+    ui.c.text(os_ui::Font::new(14), 52.0, 85.0, t.text_dim, "Browser");
     // Tabs.
     ui.c.fill_rect(Rect::span(0.0, 200.0, 106.0, 141.0), t.browser_tabs);
     for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Globe, Icon::Star].into_iter().enumerate() {
@@ -83,14 +83,14 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         }
         let c = if *cat == 255 { t.browser_folder } else { cats[usize::from(*cat).min(9)] };
         icons::draw(ui.c, *icon, Rect::new(19.0, row.y + 3.0, 17.0, 17.0), c);
-        ui.c.text(Face::Ui, 14.8, 38.0, row.y + 3.0, c, label);
+        ui.c.text_clip(os_ui::Font::new(17), 38.0, row.y, 160.0, c, label);
     }
     ui.c.pop_clip();
     // Footer.
     let fy = r.bottom() - 27.0;
     ui.c.fill_rect(Rect::new(0.0, fy, 201.0, 27.0), t.browser_footer);
     ui.c.fill_rrect(Rect::new(13.0, fy + 4.0, 41.0, 20.0), 3.0, t.sunken);
-    ui.c.text_center(Face::Ui, 11.0, Rect::new(13.0, fy + 4.0, 41.0, 20.0), t.text_dim, "TAGS");
+    ui.c.text_center(os_ui::Font::condensed(11, 6).bold(), Rect::new(13.0, fy + 4.0, 41.0, 20.0), os_ui::Color::rgb(0xc0c8cc), "TAGS");
     ui.c.fill_rrect(Rect::new(57.0, fy + 4.0, 119.0, 20.0), 3.0, t.sunken);
     icons::draw(ui.c, Icon::Folder, Rect::new(158.0, fy + 7.0, 14.0, 14.0), t.text_faint);
     icons::draw(ui.c, Icon::Search, Rect::new(180.0, fy + 5.0, 17.0, 17.0), t.browser_search);

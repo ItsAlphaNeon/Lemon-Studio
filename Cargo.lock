@@ -1790,6 +1790,7 @@ dependencies = [
  "fontdue",
  "os-theme",
  "tiny-skia",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
