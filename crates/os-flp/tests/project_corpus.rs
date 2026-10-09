@@ -182,3 +182,93 @@ fn channel_envelopes_decode() {
     }
     assert!(vol_on > 50 && pitch_on > 5, "volume {vol_on}, pitch {pitch_on}");
 }
+
+/// Patterns that have no blocks yet gain note, control and metadata blocks (spec: flp/events/patterns.md,
+/// "Where blocks go"): the new patterns read back as written, the others stay as they were, and the blocks keep the
+/// order FL writes them in (note blocks ascending before the first channel, metadata after the first channel).
+#[test]
+fn new_pattern_blocks_are_added() {
+    use os_model::{ControlPoint, Note, Pattern};
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let bytes = std::fs::read(path).unwrap();
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        let Ok(original) = load(&file) else { continue };
+        if original.channels.is_empty() {
+            continue;
+        }
+        let max = original.patterns.iter().map(|p| p.number).max().unwrap_or(0);
+        // A gap (a pattern number that has no blocks) in the middle when there is one, then two past the end.
+        let mut numbers: Vec<u16> = (1..max).filter(|n| original.patterns.iter().all(|p| p.number != *n)).take(1).collect();
+        numbers.extend([max + 1, max + 2]);
+        let mut project = original.clone();
+        for (k, &n) in numbers.iter().enumerate() {
+            project.patterns.push(Pattern {
+                number: n,
+                name: (k != 1).then(|| format!("New {n}")),
+                color: (k != 2).then(|| Rgb::new(10 + k as u8, 20, 30)),
+                notes: vec![Note::step(0, 24), Note::step(0, 0)],
+                controls: if k == 0 { vec![ControlPoint::new(0, 0, ControlPoint::VOLUME, 6400)] } else { vec![] },
+            });
+        }
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let file2 = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let reread = load(&file2).unwrap_or_else(|e| panic!("{path}: reload: {e}"));
+        for p in &original.patterns {
+            assert_eq!(reread.patterns.iter().find(|q| q.number == p.number), Some(p), "{path}: pattern {} unchanged", p.number);
+        }
+        for want in project.patterns.iter().filter(|p| numbers.contains(&p.number)) {
+            let got = reread.patterns.iter().find(|q| q.number == want.number).unwrap_or_else(|| panic!("{path}: pattern {} lost", want.number));
+            let mut sorted = want.notes.clone();
+            sorted.sort_by_key(|n| n.position);
+            assert_eq!(got.notes, sorted, "{path}: notes of {}", want.number);
+            assert_eq!(got.controls, want.controls, "{path}: controls of {}", want.number);
+            assert_eq!(got.name, want.name, "{path}: name of {}", want.number);
+            if want.color.is_some() {
+                assert_eq!(got.color, want.color, "{path}: colour of {}", want.number);
+            }
+        }
+        // Order: pattern note blocks ascend and stay before the first channel.
+        let events = file2.chunks.iter().find_map(|c| match &c.body {
+            os_flp::ChunkBody::Events(e) => Some(e),
+            _ => None,
+        });
+        if let Some(ev) = events {
+            let first_channel = ev.iter().position(|e| e.id == 64).unwrap();
+            let blocks: Vec<(usize, u32)> = ev
+                .iter()
+                .enumerate()
+                .filter(|(i, e)| e.id == 65 && matches!(ev.get(i + 1).map(|n| n.id), Some(223 | 224)))
+                .map(|(i, e)| (i, e.int_value().unwrap()))
+                .collect();
+            assert!(blocks.iter().all(|&(i, _)| i < first_channel), "{path}: note blocks before the first channel");
+            assert!(blocks.windows(2).all(|w| w[0].1 < w[1].1), "{path}: note blocks ascend");
+        }
+        checked += 1;
+    }
+    eprintln!("{checked} files: new pattern blocks added");
+}
+
+/// Manual helper: `OS_IN=a.flp OS_OUT=b.flp cargo test -p os-flp --test project_corpus -- --ignored new_pattern_file`
+/// writes `a.flp` with two new patterns (notes, points, name, colour) so FL can be asked to open it.
+#[test]
+#[ignore]
+fn new_pattern_file() {
+    use os_model::{ControlPoint, Note, Pattern, Rgb};
+    let (Some(i), Some(o)) = (std::env::var_os("OS_IN"), std::env::var_os("OS_OUT")) else { return };
+    let mut file = FlpFile::parse(&std::fs::read(i).unwrap()).unwrap();
+    let mut project = load(&file).unwrap();
+    let max = project.patterns.iter().map(|p| p.number).max().unwrap_or(0);
+    for k in 1..=2u16 {
+        project.patterns.push(Pattern {
+            number: max + k,
+            name: Some(format!("OpenStudio {k}")),
+            color: Some(Rgb::new(200, 60 * k as u8, 40)),
+            notes: (0..4).map(|s| Note { key: 60 + 4 * s as u16 * k, length: 48, ..Note::step(0, s * 96) }).collect(),
+            controls: vec![ControlPoint::new(0, 0, ControlPoint::VOLUME, 6400)],
+        });
+    }
+    apply(&project, &mut file).unwrap();
+    std::fs::write(o, file.to_bytes().unwrap()).unwrap();
+}

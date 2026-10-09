@@ -13,7 +13,7 @@ use os_model::{
     PlaylistTrack, Project, ProjectInfo, Rgb, SlotPlugin,
 };
 
-use crate::{ChunkBody, Event, FlpFile, Value};
+use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
 
 // Event IDs (see the specs for meanings).
 mod id {
@@ -175,6 +175,8 @@ struct PatternLoc {
     start: Option<usize>,
     controls: Option<usize>,
     notes: Option<usize>,
+    /// Index of the event 65 that starts the metadata block.
+    meta_start: Option<usize>,
     name: Option<usize>,
     color: Option<usize>,
 }
@@ -212,6 +214,8 @@ struct Layout {
     current_pattern: Option<usize>,
     channels: Vec<ChannelLoc>,
     patterns: BTreeMap<u16, PatternLoc>,
+    /// Index just past the last pattern metadata block.
+    meta_end: Option<usize>,
     arrangements: Vec<ArrangementLoc>,
     mixer: Vec<MixerLoc>,
     mixer_params: Option<usize>,
@@ -281,6 +285,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 let number = int(e) as u16;
                 let loc = l.patterns.entry(number).or_default();
                 let mut k = i + 1;
+                let mut is_meta = false;
                 // spec: flp/events/patterns.md "Control points": `65, 223, 224` (either may be absent).
                 let has_controls = events.get(k).is_some_and(|n| n.id == id::PAT_CONTROLS);
                 if has_controls {
@@ -296,6 +301,8 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                     // A block of control points only: nothing else belongs to it.
                 } else {
                     // Metadata block: runs until the next block start or region change.
+                    loc.meta_start = Some(i);
+                    is_meta = true;
                     while let Some(n) = events.get(k) {
                         match n.id {
                             id::PAT_NAME => loc.name = Some(k),
@@ -305,6 +312,9 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                         }
                         k += 1;
                     }
+                }
+                if is_meta {
+                    l.meta_end = Some(k);
                 }
                 i = k;
                 continue;
@@ -773,10 +783,14 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     if project.channels.len() != current.channels.len() {
         return Err(mismatch("channels", project.channels.len(), current.channels.len()));
     }
-    if project.mixer.len() != current.mixer.len() {
+    // A project made by `create` has no mixer or playlist in its file yet: their settings are not written then
+    // (see `unsaved_parts`).
+    let skip_mixer = current.mixer.is_empty();
+    let skip_arrangements = current.arrangements.is_empty();
+    if !skip_mixer && project.mixer.len() != current.mixer.len() {
         return Err(mismatch("mixer tracks", project.mixer.len(), current.mixer.len()));
     }
-    if project.arrangements.len() != current.arrangements.len() {
+    if !skip_arrangements && project.arrangements.len() != current.arrangements.len() {
         return Err(mismatch("arrangements", project.arrangements.len(), current.arrangements.len()));
     }
 
@@ -865,13 +879,28 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         }
     }
 
-    // Patterns: notes, name, color.
+    // Patterns: notes, name, color. Patterns without blocks get new ones (spec: flp/events/patterns.md,
+    // "Where blocks go"): note blocks in number order before the first channel, metadata blocks in number order
+    // after the first channel's block.
+    let mut new_note_blocks: Vec<(u16, Vec<Event>)> = Vec::new();
+    let mut new_meta_blocks: Vec<(u16, Vec<Event>)> = Vec::new();
     for pat in &project.patterns {
         let old = current.patterns.iter().find(|p| p.number == pat.number);
         let loc = l.patterns.get(&pat.number);
-        if old.map(|o| &o.notes) != Some(&pat.notes) {
+        let has_block = loc.is_some_and(|l| l.start.is_some());
+        let new_block = !has_block && (!pat.notes.is_empty() || !pat.controls.is_empty());
+        if new_block {
+            new_note_blocks.push((pat.number, note_block_events(pat)));
+        }
+        if has_block && loc.is_some_and(|l| l.notes.is_none()) && !pat.notes.is_empty() {
+            // A control-points-only block gains notes right after its points.
+            if let Some(c) = loc.and_then(|l| l.controls) {
+                inserts.push((c + 1, Event::new(id::PAT_NOTES, Value::var(encode_notes(&pat.notes)))));
+            }
+        }
+        if !new_block && old.map(|o| &o.notes) != Some(&pat.notes) {
             let Some(i) = loc.and_then(|l| l.notes) else {
-                if pat.notes.is_empty() {
+                if pat.notes.is_empty() || has_block {
                     continue;
                 }
                 return Err(ProjectError::Mismatch(format!("adding notes to pattern {} (no note block)", pat.number)));
@@ -889,7 +918,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
             set_data(&mut events[i], data);
         }
-        if old.map(|o| &o.controls) != Some(&pat.controls) {
+        if !new_block && old.map(|o| &o.controls) != Some(&pat.controls) {
             match (loc.and_then(|l| l.controls), pat.controls.is_empty()) {
                 (Some(i), false) => set_data(&mut events[i], encode_controls(&pat.controls)),
                 (Some(i), true) => removals.push(i),
@@ -905,12 +934,20 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 }
             }
         }
+        let meta_start = loc.and_then(|l| l.meta_start);
+        if meta_start.is_none() && (pat.name.is_some() || pat.color.is_some()) {
+            // First name or colour of a pattern: its whole metadata block (defaults per the spec).
+            new_meta_blocks.push((pat.number, meta_block_events(pat, enc)));
+            continue;
+        }
         if old.map(|o| &o.name) != Some(&pat.name) {
             match (loc.and_then(|l| l.name), &pat.name) {
                 (Some(i), Some(n)) => set_data(&mut events[i], encode_text(n, enc)),
                 (_, None) => {}
-                (None, Some(_)) => {
-                    return Err(ProjectError::Mismatch(format!("naming pattern {} (no metadata block)", pat.number)));
+                (None, Some(n)) => {
+                    // The name follows the pattern number.
+                    let at = meta_start.map_or(0, |s| s + 1);
+                    inserts.push((at, Event::new(id::PAT_NAME, Value::var(encode_text(n, enc)))));
                 }
             }
         }
@@ -922,10 +959,28 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 ),
                 None if pat.color.is_none() => {}
                 None => {
-                    return Err(ProjectError::Mismatch(format!("coloring pattern {} (no metadata block)", pat.number)));
+                    let at = loc.and_then(|l| l.name).or(meta_start).map_or(0, |s| s + 1);
+                    inserts.push((at, Event::new(id::PAT_COLOR, Value::U32(bgr_from_rgb(pat.color.unwrap(), 0xFF)))));
                 }
             }
         }
+    }
+    // Insert new blocks. Inserts at one index apply highest number first, each block's events in reverse,
+    // so the stream ends up ascending.
+    let first_channel = l.channels.first().ok_or_else(|| ProjectError::Structure("no channels".into()))?;
+    let after_first_channel = l.meta_end.unwrap_or(first_channel.end + 1);
+    let above = |number: u16, pick: fn(&PatternLoc) -> Option<usize>| {
+        l.patterns.iter().filter(|(n, _)| **n > number).filter_map(|(n, p)| pick(p).map(|i| (*n, i))).min().map(|(_, i)| i)
+    };
+    new_note_blocks.sort_by_key(|&(n, _)| std::cmp::Reverse(n));
+    new_meta_blocks.sort_by_key(|&(n, _)| std::cmp::Reverse(n));
+    for (n, block) in new_note_blocks {
+        let at = above(n, |p| p.start).unwrap_or(first_channel.start);
+        inserts.extend(block.into_iter().rev().map(|e| (at, e)));
+    }
+    for (n, block) in new_meta_blocks {
+        let at = above(n, |p| p.meta_start).unwrap_or(after_first_channel);
+        inserts.extend(block.into_iter().rev().map(|e| (at, e)));
     }
 
     // Playlist tracks.
@@ -1035,9 +1090,284 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     Ok(())
 }
 
+/// Notes as 24-byte records, sorted by position.
+fn encode_notes(notes: &[Note]) -> Vec<u8> {
+    let mut sorted = notes.to_vec();
+    sorted.sort_by_key(|n| n.position);
+    sorted.iter().flat_map(encode_note).collect()
+}
+
+/// A pattern's note block: `65 [223] [224]` (spec: flp/events/patterns.md).
+fn note_block_events(pat: &Pattern) -> Vec<Event> {
+    let mut block = vec![Event::new(id::PAT_START, Value::U16(pat.number))];
+    if !pat.controls.is_empty() {
+        block.push(Event::new(id::PAT_CONTROLS, Value::var(encode_controls(&pat.controls))));
+    }
+    if !pat.notes.is_empty() {
+        block.push(Event::new(id::PAT_NOTES, Value::var(encode_notes(&pat.notes))));
+    }
+    block
+}
+
+/// A pattern's metadata block with the spec's defaults for the fields OpenStudio doesn't edit.
+fn meta_block_events(pat: &Pattern, enc: TextEnc) -> Vec<Event> {
+    let mut block = vec![Event::new(id::PAT_START, Value::U16(pat.number))];
+    if let Some(n) = &pat.name {
+        block.push(Event::new(id::PAT_NAME, Value::var(encode_text(n, enc))));
+    }
+    let color = pat.color.map_or(PATTERN_COLOR_DEFAULT, |c| bgr_from_rgb(c, 0xFF));
+    block.push(Event::new(id::PAT_COLOR, Value::U32(color)));
+    block.extend([
+        Event::new(157, Value::U32(u32::MAX)),
+        Event::new(158, Value::U32(u32::MAX)),
+        Event::new(164, Value::U32(0)),
+        Event::new(52, Value::U8(0)),
+        Event::new(171, Value::U32(0)),
+        Event::new(252, Value::var(vec![0, 0])),
+        Event::new(253, Value::var(encode_text("0,0,0,0,0,0,0,0,0,0,0,0", enc))),
+    ]);
+    block
+}
+
+/// Version OpenStudio writes as "saved by" (spec: flp/events/project-info.md; FL 26 opens it without a warning).
+const COMPAT_VERSION: &str = "26.1.7.5653";
+const COMPAT_BUILD: u32 = 5653;
+/// A channel's color when none is set.
+const CHANNEL_COLOR_DEFAULT: u32 = 0x0034_3330;
+
+fn channel_type_code(kind: ChannelKind) -> u8 {
+    match kind {
+        ChannelKind::Sampler => 0,
+        ChannelKind::Plugin => 2,
+        ChannelKind::Layer => 3,
+        ChannelKind::AudioClip => 4,
+        ChannelKind::Automation => 5,
+        ChannelKind::Other(v) => v,
+    }
+}
+
+/// One channel block in the minimal form FL 26 loads (spec: flp/events/channels.md; every record not written here
+/// takes FL's default).
+fn channel_block_events(ch: &Channel, enc: TextEnc) -> Result<Vec<Event>, ProjectError> {
+    if matches!(ch.kind, ChannelKind::Plugin | ChannelKind::Automation | ChannelKind::Other(_)) {
+        return Err(ProjectError::Mismatch(format!(
+            "channel {}: creating plugin, automation or unknown channels is not supported yet",
+            ch.index
+        )));
+    }
+    let mut b = vec![
+        Event::new(id::CH_START, Value::U16(ch.index)),
+        Event::new(id::CH_TYPE, Value::U8(channel_type_code(ch.kind))),
+        Event::new(id::PLUGIN_NAME, Value::var(encode_text("", enc))),
+    ];
+    if let Some(n) = &ch.name {
+        b.push(Event::new(id::DISPLAY_NAME, Value::var(encode_text(n, enc))));
+    }
+    let color = ch.color.map_or(CHANNEL_COLOR_DEFAULT, |c| bgr_from_rgb(clamp_channel_color(c), 0));
+    b.push(Event::new(id::COLOR, Value::U32(color)));
+    b.push(Event::new(id::CH_COLOR_FLAG, Value::U8(u8::from(ch.color.is_some()))));
+    b.push(Event::new(id::CH_ENABLED, Value::U8(u8::from(ch.enabled))));
+    b.push(Event::new(id::CH_TARGET, Value::U16(ch.mixer_track)));
+    for child in &ch.layer_children {
+        b.push(Event::new(id::CH_LAYER_CHILD, Value::U16(*child)));
+    }
+    let mut levels = [0u8; 24];
+    levels[0..4].copy_from_slice(&(((ch.pan + 1.0) * 6400.0).round() as i32).to_le_bytes());
+    levels[4..8].copy_from_slice(&((ch.volume * 12800.0).round() as i32).to_le_bytes());
+    levels[8..12].copy_from_slice(&ch.pitch_cents.to_le_bytes());
+    levels[13] = 1; // the template's `00 01 00 00 …` tail
+    b.push(Event::new(id::CH_LEVELS, Value::var(levels.to_vec())));
+    if let Some(p) = &ch.sample_path {
+        b.push(Event::new(id::SAMPLE_PATH, Value::var(encode_text(p, enc))));
+    }
+    b.push(Event::new(id::CH_END, Value::U8(0)));
+    Ok(b)
+}
+
+/// Builds a new FLP file from the model: project info, tempo, patterns (notes, control points, names, colors)
+/// and channels, in FL's order. FL fills in everything not written (mixer, playlist, per-channel settings), which
+/// this version does not write yet: see [`unsaved_parts`]. Opens in FL 26 (checked 2026-10-09).
+// spec: flp/container.md, flp/events/{project-info,channels,patterns}.md
+pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
+    let enc = TextEnc::Utf16;
+    let mut ev = vec![
+        Event::new(id::VERSION, Value::var(format!("{COMPAT_VERSION}\0").into_bytes())),
+        Event::new(159, Value::U32(COMPAT_BUILD)),
+        Event::new(id::TEMPO, Value::U32((project.tempo.unwrap_or(130.0) * 1000.0).round() as u32)),
+    ];
+    if let Some(p) = project.current_pattern {
+        ev.push(Event::new(id::CURRENT_PATTERN, Value::U16(p)));
+    }
+    let info = &project.info;
+    for (id, value) in [
+        (id::TITLE, info.title.clone()),
+        (id::GENRE, info.genre.clone()),
+        (id::AUTHOR, info.author.clone()),
+        (id::COMMENTS, info.comments.as_deref().map(comments_to_file)),
+        (id::URL, info.url.clone()),
+    ] {
+        if let Some(v) = value.filter(|v| !v.is_empty()) {
+            ev.push(Event::new(id, Value::var(encode_text(&v, enc))));
+        }
+    }
+    let mut patterns: Vec<&Pattern> = project.patterns.iter().collect();
+    patterns.sort_by_key(|p| p.number);
+    for pat in &patterns {
+        if !pat.notes.is_empty() || !pat.controls.is_empty() {
+            ev.extend(note_block_events(pat));
+        }
+    }
+    for (i, ch) in project.channels.iter().enumerate() {
+        ev.extend(channel_block_events(ch, enc)?);
+        if i == 0 {
+            for pat in &patterns {
+                if pat.name.is_some() || pat.color.is_some() {
+                    ev.extend(meta_block_events(pat, enc));
+                }
+            }
+        }
+    }
+    let mut header = Vec::with_capacity(6);
+    header.extend(0u16.to_le_bytes()); // format
+    header.extend((project.channels.len() as u16).to_le_bytes());
+    header.extend(project.ppq.max(1).to_le_bytes());
+    Ok(FlpFile {
+        chunks: vec![
+            Chunk { tag: Tag::HEADER, body: ChunkBody::Header(Header { raw: header }) },
+            Chunk { tag: Tag::DATA, body: ChunkBody::Events(ev) },
+        ],
+        trailing: Vec::new(),
+    })
+}
+
+/// What `apply` cannot store in `file` yet: the mixer and playlist of a project made by [`create`] (their file
+/// has none). Empty when nothing would be lost.
+pub fn unsaved_parts(project: &Project, file: &FlpFile) -> Vec<&'static str> {
+    let Ok(current) = load(file) else { return Vec::new() };
+    let mut parts = Vec::new();
+    if current.mixer.is_empty() && !mixer_is_default(&project.mixer) {
+        parts.push("mixer settings");
+    }
+    if current.arrangements.is_empty() && project.arrangements.iter().any(|a| !a.clips.is_empty()) {
+        parts.push("playlist clips");
+    }
+    parts
+}
+
+/// Tracks as a fresh project has them: unnamed, uncolored, unity volume (0.8), centered, routed to the master.
+fn mixer_is_default(mixer: &[MixerTrack]) -> bool {
+    mixer.iter().all(|t| {
+        t.name.is_none()
+            && t.color.is_none()
+            && t.enabled
+            && t.slots.iter().all(Option::is_none)
+            && t.send_levels.is_empty()
+            && t.volume.is_none_or(|v| (v - 0.8).abs() < 1e-9)
+            && t.pan.is_none_or(|v| v == 0.0)
+            && t.stereo_separation.is_none_or(|v| v == 0.0)
+            && t.routes == if t.index == 0 { Vec::<u16>::new() } else { vec![0] }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn sampler(index: u16, name: &str, track: u16) -> Channel {
+        Channel {
+            index,
+            kind: ChannelKind::Sampler,
+            name: Some(name.into()),
+            plugin: None,
+            color: None,
+            enabled: true,
+            volume: 10000.0 / 12800.0,
+            pan: 0.0,
+            pitch_cents: 0,
+            mixer_track: track,
+            sample_path: None,
+            layer_children: vec![],
+            envelopes: Default::default(),
+        }
+    }
+
+    fn new_project() -> Project {
+        let mut b = sampler(1, "Bass", 2);
+        b.color = Some(Rgb::new(200, 40, 90));
+        b.pan = -0.5;
+        b.volume = 0.5;
+        b.pitch_cents = -50;
+        b.sample_path = Some("C:/samples/bass.wav".into());
+        Project {
+            ppq: 96,
+            tempo: Some(128.5),
+            current_pattern: Some(2),
+            info: ProjectInfo { title: Some("My song".into()), ..Default::default() },
+            channels: vec![sampler(0, "Kick", 1), b],
+            patterns: vec![
+                Pattern { number: 2, name: Some("Verse".into()), color: Some(Rgb::new(10, 20, 30)), notes: vec![Note::step(0, 48), Note::step(1, 0)], controls: vec![ControlPoint::new(0, 1, ControlPoint::PAN, 3200)] },
+                Pattern { number: 1, notes: vec![Note::step(0, 0)], ..Pattern::default() },
+            ],
+            ..Project::default()
+        }
+    }
+
+    /// A project made from the model alone reads back the same, and `apply` can edit it afterwards
+    /// (spec: flp/container.md, flp/events/channels.md, patterns.md).
+    #[test]
+    fn created_project_reads_back_and_takes_edits() {
+        let p = new_project();
+        let file = create(&p).unwrap();
+        let bytes = file.to_bytes().unwrap();
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        assert_eq!(file.to_bytes().unwrap(), bytes);
+        let back = load(&file).unwrap();
+        assert_eq!(back.ppq, 96);
+        assert_eq!(back.tempo, Some(128.5));
+        assert_eq!(back.current_pattern, Some(2));
+        assert_eq!(back.info.title.as_deref(), Some("My song"));
+        assert_eq!(back.channels.len(), 2);
+        assert_eq!(back.channels[0].name.as_deref(), Some("Kick"));
+        let b = &back.channels[1];
+        assert_eq!((b.color, b.pan, b.volume, b.pitch_cents, b.mixer_track), (Some(Rgb::new(200, 40, 90)), -0.5, 0.5, -50, 2));
+        assert_eq!(b.sample_path.as_deref(), Some("C:/samples/bass.wav"));
+        let numbers: Vec<u16> = back.patterns.iter().map(|p| p.number).collect();
+        assert_eq!(numbers, vec![1, 2], "note blocks ascend");
+        let verse = back.patterns.iter().find(|p| p.number == 2).unwrap();
+        assert_eq!((verse.name.as_deref(), verse.color), (Some("Verse"), Some(Rgb::new(10, 20, 30))));
+        assert_eq!(verse.notes.len(), 2);
+        assert_eq!(verse.controls, p.patterns[0].controls);
+        // The file has no mixer or playlist, and says so; edits to what it does store still apply.
+        assert!(back.mixer.is_empty() && back.arrangements.is_empty());
+        let mut edited = back.clone();
+        edited.tempo = Some(100.0);
+        edited.channels[0].volume = 0.25;
+        edited.patterns[0].notes.push(Note::step(0, 96));
+        edited.patterns.push(Pattern { number: 3, name: Some("Chorus".into()), notes: vec![Note::step(1, 24)], ..Pattern::default() });
+        apply(&edited, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(again.tempo, Some(100.0));
+        assert_eq!(again.channels[0].volume, 0.25);
+        assert_eq!(again.patterns.iter().map(|p| p.number).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(again.patterns[2].name.as_deref(), Some("Chorus"));
+        assert_eq!(again.patterns[0].notes.len(), 2);
+    }
+
+    #[test]
+    fn unsaved_parts_name_what_a_created_file_lacks() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        let file = create(&p).unwrap();
+        assert!(unsaved_parts(&p, &file).is_empty());
+        let track = |i: u16| MixerTrack {
+            index: i, name: None, color: None, enabled: true, slots: Default::default(),
+            routes: if i == 0 { vec![] } else { vec![0] }, send_levels: vec![], volume: Some(0.8), pan: Some(0.0), stereo_separation: Some(0.0),
+        };
+        p.mixer = (0..3).map(track).collect();
+        assert!(unsaved_parts(&p, &file).is_empty(), "default mixer: nothing is lost");
+        p.mixer[1].volume = Some(0.5);
+        assert_eq!(unsaved_parts(&p, &file), vec!["mixer settings"]);
+    }
+
 
     /// Mute (byte 19 bit 0x20), colour group, slide flag and unknown bytes survive a note edit
     /// (spec: flp/events/patterns.md, note flags).

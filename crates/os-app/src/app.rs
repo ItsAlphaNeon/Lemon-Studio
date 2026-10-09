@@ -580,24 +580,39 @@ impl App {
     }
 
     fn save(&mut self, choose: bool) {
-        let s = &mut self.state;
-        let Some(file) = s.file.as_mut() else {
-            s.message = Some("Saving new projects is not supported yet (open an FLP first)".into());
-            return;
-        };
+        let s = &self.state;
         let target = if choose || s.path.is_none() {
             rfd::FileDialog::new().add_filter("FLP project", &["flp"]).save_file()
         } else {
             s.path.clone()
         };
-        let Some(target) = target else { return };
+        if let Some(target) = target {
+            self.save_to(target);
+        }
+    }
+
+    fn save_to(&mut self, target: PathBuf) {
+        let s = &mut self.state;
         s.project.tempo = Some(s.tempo);
+        // A project that was not opened from a file gets a new FLP built from the model.
+        if s.file.is_none() {
+            match os_flp::project::create(&s.project) {
+                Ok(f) => s.file = Some(f),
+                Err(e) => {
+                    s.message = Some(format!("Save failed: {e}"));
+                    return;
+                }
+            }
+        }
+        let file = s.file.as_mut().expect("file made above");
+        let lost = os_flp::project::unsaved_parts(&s.project, file);
         let result = os_flp::project::apply(&s.project, file)
             .map_err(|e| e.to_string())
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
             .and_then(|b| std::fs::write(&target, b).map_err(|e| e.to_string()));
         s.message = Some(match result {
-            Ok(()) => format!("Saved {}", target.display()),
+            Ok(()) if lost.is_empty() => format!("Saved {}", target.display()),
+            Ok(()) => format!("Saved {} (not stored yet: {})", target.display(), lost.join(", ")),
             Err(e) => format!("Save failed: {e}"),
         });
         if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
@@ -2279,6 +2294,37 @@ mod tests {
     }
 
     /// Knobs drag vertically (1/1024 per px), step with the wheel, and model-backed ones write the project.
+    /// A project that was never opened from a file saves as a new FLP that loads back (spec: flp/container.md).
+    #[test]
+    fn new_project_saves_and_reloads() {
+        let mut app = App::new(None);
+        app.state.project = default_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.state.tempo = 111.0;
+        app.state.project.patterns[0].notes.push(Note::step(2, 48));
+        app.state.project.patterns.push(Pattern { number: 2, name: Some("Two".into()), notes: vec![Note::step(0, 0)], ..Pattern::default() });
+        let path = std::env::temp_dir().join(format!("openstudio-new-{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", app.state.message);
+        let file = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+        if let Some(keep) = std::env::var_os("OS_KEEP_FLP") {
+            let _ = std::fs::copy(&path, keep); // for checking the file in FL by hand
+        }
+        let back = os_flp::project::load(&file).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(back.tempo, Some(111.0));
+        assert_eq!(back.channels.len(), 5);
+        assert_eq!(back.patterns[0].notes.len(), 1);
+        assert_eq!(back.patterns[1].name.as_deref(), Some("Two"));
+        // Saving again goes through apply on the same file.
+        app.state.project.patterns[0].notes.push(Note::step(1, 96));
+        app.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(back.patterns[0].notes.len(), 2);
+    }
+
     #[test]
     fn knobs_drag_and_wheel() {
         use crate::knobs::KnobId;
