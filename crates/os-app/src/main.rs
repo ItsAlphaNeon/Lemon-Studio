@@ -2,6 +2,7 @@
 
 mod app;
 mod icons;
+mod logo;
 mod tabler;
 mod transport;
 mod views;
@@ -39,6 +40,15 @@ impl ApplicationHandler for Shell {
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1920.0, 1080.0))
             .with_maximized(true);
+        // App icon: resource 1, embedded by build.rs from assets/openstudio.ico.
+        #[cfg(windows)]
+        let attrs = {
+            use winit::dpi::PhysicalSize;
+            use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
+            use winit::window::Icon;
+            let icon = |s: u32| Icon::from_resource(1, Some(PhysicalSize::new(s, s))).ok();
+            attrs.with_window_icon(icon(16)).with_taskbar_icon(icon(32))
+        };
         let window = Rc::new(el.create_window(attrs).expect("create window"));
         let context = softbuffer::Context::new(window.clone()).expect("graphics context");
         self.surface = Some(softbuffer::Surface::new(&context, window.clone()).expect("surface"));

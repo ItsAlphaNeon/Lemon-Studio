@@ -41,9 +41,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     row1(ui, s, f, width);
     row2(ui, s, width);
 
-    // Logo spot (spans both rows): OpenStudio placeholder mark.
+    // Logo spot (spans both rows): the OpenStudio mark.
     let lx = width - 45.0;
-    ui.hit(Rect::new(width - 80.0, 0.0, 78.0, 80.0), Action::Placeholder("About"), "OpenStudio (placeholder logo)");
+    ui.hit(Rect::new(width - 80.0, 0.0, 78.0, 80.0), Action::Placeholder("About"), "OpenStudio");
     icons::logo(ui.c, lx, 40.0, 26.0, t.toolbar_line);
 }
 

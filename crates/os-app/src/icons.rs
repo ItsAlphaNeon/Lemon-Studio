@@ -1,4 +1,4 @@
-//! Toolbar and window-button icons. Placeholders taken from Tabler Icons (MIT, see `tabler.rs`);
+//! Toolbar and window-button icons, and the OpenStudio logo. Placeholders taken from Tabler Icons (MIT, see `tabler.rs`);
 //! each only suggests its function (no artwork is copied from any other program).
 
 use os_ui::{Canvas, Color, Glyph, Rect};
@@ -140,15 +140,14 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect, c: Color) {
     cv.glyph(c, &g);
 }
 
-/// OpenStudio placeholder mark (until the project has a logo): a ring with an "O" and an "S" wave.
+/// OpenStudio logo (greyscale mark, `logo.rs`) in one tint, fitted into a circle of radius `r`.
 pub fn logo(cv: &mut Canvas, cx: f32, cy: f32, r: f32, c: Color) {
-    cv.stroke_circle(cx, cy, r, r * 0.16, c);
-    let pts: Vec<(f32, f32)> = (0..=24)
-        .map(|i| {
-            let t = i as f32 / 24.0;
-            let a = t * std::f32::consts::TAU;
-            (cx - r * 0.55 + t * r * 1.1, cy - a.sin() * r * 0.32)
-        })
-        .collect();
-    cv.polyline(&pts, r * 0.14, c);
+    use crate::logo::{PATHS, VIEW_H, VIEW_W};
+    let k = 2.0 * r / VIEW_W.max(VIEW_H);
+    let (ox, oy) = (cx - VIEW_W * k / 2.0, cy - VIEW_H * k / 2.0);
+    let mut g = Glyph::new();
+    for d in PATHS {
+        g.commands(d, ox, oy, k, None);
+    }
+    cv.glyph(c, &g);
 }
