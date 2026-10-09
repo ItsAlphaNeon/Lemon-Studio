@@ -256,6 +256,14 @@ tokens! {
     menu_drop_hi = 0x47555c, "Dropdown menu hovered row.";
     menu_drop_text = 0xd4dade, "Dropdown menu text.";
     menu_drop_disabled = 0x6d7275, "Dropdown menu, not yet available.";
+    menu_pop = 0x505355, "Menu bar dropdown: body (spec: ui/menus.md).";
+    menu_pop_border = 0x000000, "Menu bar dropdown: 2 px border.";
+    menu_pop_hi = 0x03080c, "Menu bar dropdown: hovered row.";
+    menu_pop_text = 0xc1cdd0, "Menu bar dropdown: item text.";
+    menu_pop_shortcut = 0x9ea4a3, "Menu bar dropdown: shortcut text.";
+    menu_pop_dim = 0x838584, "Menu bar dropdown: disabled / not available item text.";
+    menu_pop_head = 0x2f3336, "Menu bar dropdown: section header and separator.";
+    menu_pop_head_text = 0x6c7678, "Menu bar dropdown: section header text.";
     clip = 0x4c6a7c, "Default clip color.";
     pr_row = 0x22272b, "Piano roll: white-key rows.";
     pr_row_black = 0x1c2125, "Piano roll: black-key rows.";

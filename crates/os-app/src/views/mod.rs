@@ -87,7 +87,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
     toolbar::paint(ui, s, f, w);
     if let Some(m) = s.menu_open {
-        menus::paint_dropdown(ui, m);
+        menus::paint_dropdown(ui, s, m);
     }
 }
 

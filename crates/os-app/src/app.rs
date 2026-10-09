@@ -1883,8 +1883,9 @@ impl App {
             (0, FILE_SAVE) => self.save(false),
             (0, FILE_SAVE_AS) => self.save(true),
             (0, FILE_EXIT) => self.want_close = true,
+            (PATTERNS, i) if i >= PATTERN_PICK => self.state.pattern = (i - PATTERN_PICK) as u16,
             (m, i) => {
-                let label = MENUS.get(m).and_then(|(_, items)| items.get(i)).map_or("item", |it| it.label);
+                let label = item_at(m, i).map_or("item", |it| it.label);
                 self.state.message = Some(format!("{label}: not available yet"));
             }
         }

@@ -235,9 +235,10 @@ fn row2(ui: &mut Ui, s: &State) {
     ui.c.fill_rect_gradient(mb, t.menu_panel.shade(-0.04), t.menu_panel.shade(0.02), 2.5);
     ui.c.stroke_rrect(mb, 2.5, 1.0, t.toolbar_line.shade(-0.1));
     let layout = menus::bar_layout(ui.c);
-    for (i, ((title, _), (x0, x1, _))) in menus::MENUS.iter().zip(layout).enumerate() {
+    for (i, (m, (x0, x1, _))) in menus::MENUS.iter().zip(layout).enumerate() {
+        let title = m.title;
         let r = Rect::new(x0 - 3.0, 47.0, x1 - x0 + 6.0, 29.0);
-        let hov = ui.hit(r, Action::Menu(i), *title);
+        let hov = ui.hit(r, Action::Menu(i), title);
         if hov || s.menu_open == Some(i) {
             ui.c.fill_rrect(r, 2.0, t.menu_drop_hi);
         }

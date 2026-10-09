@@ -383,6 +383,7 @@ fn screenshot(args: &[String]) {
     let mut browser = true;
     let mut rack_w: Option<f32> = None;
     let mut rack_roll = false;
+    let mut menu: Option<usize> = None;
     let mut path = None;
     let mut pattern = None;
     let mut channel = None;
@@ -395,6 +396,7 @@ fn screenshot(args: &[String]) {
             "--no-rack" => rack = false,
             "--no-browser" => browser = false,
             "--rack-roll" => rack_roll = true,
+            "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
             "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
             "--pattern" => pattern = it.next().and_then(|v| v.parse().ok()),
             "--channel" => channel = it.next().and_then(|v| v.parse().ok()),
@@ -426,6 +428,7 @@ fn screenshot(args: &[String]) {
         app.state.z.push(app::Win::ChannelRack);
     }
     app.state.rack_roll_view = rack_roll;
+    app.state.menu_open = menu;
     if let Some(w) = rack_w {
         app.state.rack_size.0 = w;
     }
