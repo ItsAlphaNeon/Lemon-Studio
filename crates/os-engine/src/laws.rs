@@ -14,6 +14,16 @@ pub fn channel_gain(v: f64) -> f64 {
     volume_curve(v)
 }
 
+/// Note velocity (0..=128, 100 = unity) → amplitude.
+pub fn velocity_gain(v: u8) -> f64 {
+    volume_curve(f64::from(v) / 100.0)
+}
+
+/// Note pan byte (0..=128, 64 = center) → −1..=1, added to the channel pan.
+pub fn note_pan(byte: u8) -> f64 {
+    (f64::from(byte) - 64.0) / 64.0
+}
+
 /// Mixer fader `f` (0..=1) → amplitude; 0.8 = unity, 1.0 = +5.6 dB.
 pub fn fader_gain(f: f64) -> f64 {
     volume_curve(f / 0.8)
@@ -85,6 +95,9 @@ mod tests {
         assert!(close(playback_rate(72, 0), 2.0, 1e-12));
         assert!(close(playback_rate(60, 100), 1.0595, 1e-4));
         assert_eq!(tick_to_frame(96.0, 96, 130.0, 44100), 20354);
+        assert!(close(velocity_gain(50), 0.23166, 1e-4));
+        assert!(close(velocity_gain(128), 2.0527, 1e-3));
+        assert!(close(note_pan(96), 0.5, 1e-12) && close(note_pan(0), -1.0, 1e-12));
         // Default template chain: channel default × center pan = 0.38961
         assert!(close(channel_gain(0.78125) * channel_pan(0.0).0, 0.38961, 1e-4));
     }

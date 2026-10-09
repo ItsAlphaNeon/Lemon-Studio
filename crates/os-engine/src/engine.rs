@@ -27,12 +27,17 @@ struct Trigger {
     rate: f64,
     /// Output frame at which the voice is cut (end of an audio clip), if any.
     cut: Option<u64>,
+    /// Per-note gain (channel volume × velocity × pan).
+    gain: (f32, f32),
 }
 
 #[derive(Debug, Clone)]
 struct ChannelState {
     sample: Option<Arc<Sample>>,
-    gain: (f32, f32),
+    /// Channel volume gain (0 when the channel is muted).
+    volume: f64,
+    /// Channel pan, −1..=1.
+    pan: f64,
     insert: usize,
     /// Sample-rate conversion × channel pitch.
     base_rate: f64,
@@ -45,6 +50,7 @@ struct Voice {
     step: f64,
     /// Output frames left before the voice is cut; `None` = play the whole sample.
     remaining: Option<u64>,
+    gain: (f32, f32),
 }
 
 #[derive(Debug, Clone)]
@@ -106,12 +112,11 @@ impl Engine {
                 } else {
                     None
                 };
-                let g = if ch.enabled { laws::channel_gain(ch.volume) } else { 0.0 };
-                let (pl, pr) = laws::channel_pan(ch.pan);
+                let volume = if ch.enabled { laws::channel_gain(ch.volume) } else { 0.0 };
                 let base_rate = sample.as_ref().map_or(1.0, |s| f64::from(s.rate) / f64::from(rate))
                     * laws::playback_rate(60, ch.pitch_cents);
                 let insert = usize::from(ch.mixer_track).min(n_tracks - 1);
-                ChannelState { sample, gain: ((g * pl) as f32, (g * pr) as f32), insert, base_rate }
+                ChannelState { sample, volume, pan: ch.pan, insert, base_rate }
             })
             .collect();
 
@@ -146,17 +151,21 @@ impl Engine {
         let order = processing_order(&tracks);
 
         let (mut triggers, end_tick) = schedule(project, mode, &mut report);
-        triggers.sort_by(|a, b| a.0.total_cmp(&b.0));
+        triggers.sort_by(|a, b| a.tick.total_cmp(&b.tick));
         let triggers = triggers
             .into_iter()
-            .filter_map(|(tick, ch, key, cut)| {
-                let state = channels.get(ch)?;
+            .filter_map(|n: Sched| {
+                let state = channels.get(n.channel)?;
                 state.sample.as_ref()?;
+                // spec: audio/sampler-playback.md (velocity multiplies volume; pans add, clamped)
+                let g = state.volume * laws::velocity_gain(n.velocity);
+                let (pl, pr) = laws::channel_pan(state.pan + laws::note_pan(n.pan));
                 Some(Trigger {
-                    frame: laws::tick_to_frame(tick, ppq, tempo, rate),
-                    channel: ch,
-                    rate: state.base_rate * laws::playback_rate(key, 0),
-                    cut: cut.map(|c: f64| laws::tick_to_frame(c, ppq, tempo, rate)),
+                    frame: laws::tick_to_frame(n.tick, ppq, tempo, rate),
+                    channel: n.channel,
+                    rate: state.base_rate * laws::playback_rate(n.key, 0),
+                    cut: n.cut.map(|c| laws::tick_to_frame(c, ppq, tempo, rate)),
+                    gain: ((g * pl) as f32, (g * pr) as f32),
                 })
             })
             .collect();
@@ -216,7 +225,7 @@ impl Engine {
             self.next_trigger += 1;
             let offset = t.frame.saturating_sub(self.frame) as usize;
             let remaining = t.cut.map(|c| c.saturating_sub(t.frame));
-            let mut v = Voice { channel: t.channel, pos: 0.0, step: t.rate, remaining };
+            let mut v = Voice { channel: t.channel, pos: 0.0, step: t.rate, remaining, gain: t.gain };
             if render_voice(&mut v, &self.channels, &mut self.bus, offset, frames) {
                 self.voices.push(v);
             }
@@ -258,42 +267,73 @@ impl Engine {
     }
 }
 
+/// Resampling window half-width in source samples.
+const SINC_W: f64 = 13.5;
+
 /// Adds one voice into its channel's insert bus from `offset` to the block end.
 /// Returns false when the voice has finished.
+///
+/// Rate 1 copies samples exactly. Other rates use a Blackman-windowed sinc with a fixed
+/// 13.5-sample window; above rate 1 the cutoff drops to the output Nyquist (`1/rate`).
+// spec: audio/sampler-playback.md (resampling)
 fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], offset: usize, frames: usize) -> bool {
     let ch = &channels[v.channel];
     let Some(s) = ch.sample.as_ref() else { return false };
     let n = s.frames();
-    let (gl, gr) = ch.gain;
+    let (gl, gr) = v.gain;
     let out = &mut bus[ch.insert];
+    let exact = v.step == 1.0;
+    let scale = v.step.max(1.0);
     let mut pos = v.pos;
     for f in offset..frames {
-        let i = pos as usize;
         if v.remaining == Some(0) {
             return false;
         }
         if let Some(r) = v.remaining.as_mut() {
             *r -= 1;
         }
-        if i >= n {
+        if pos >= n as f64 {
             v.pos = pos;
             return false;
         }
-        let frac = (pos - i as f64) as f32;
-        let (l, r) = if i + 1 < n {
-            (
-                s.left[i] + (s.left[i + 1] - s.left[i]) * frac,
-                s.right[i] + (s.right[i + 1] - s.right[i]) * frac,
-            )
-        } else {
+        let (l, r) = if exact {
+            let i = pos as usize;
             (s.left[i], s.right[i])
+        } else {
+            let i0 = (pos - SINC_W).ceil().max(0.0) as usize;
+            let i1 = ((pos + SINC_W).floor() as usize).min(n - 1);
+            let (mut l, mut r) = (0.0f64, 0.0f64);
+            for i in i0..=i1 {
+                let t = i as f64 - pos;
+                let w = sinc(t / scale) / scale * blackman(t);
+                l += f64::from(s.left[i]) * w;
+                r += f64::from(s.right[i]) * w;
+            }
+            (l as f32, r as f32)
         };
         out[f * 2] += l * gl;
         out[f * 2 + 1] += r * gr;
         pos += v.step;
     }
     v.pos = pos;
-    (pos as usize) < n
+    pos < n as f64
+}
+
+fn sinc(x: f64) -> f64 {
+    if x == 0.0 {
+        1.0
+    } else {
+        let px = std::f64::consts::PI * x;
+        px.sin() / px
+    }
+}
+
+fn blackman(t: f64) -> f64 {
+    if t.abs() >= SINC_W {
+        return 0.0;
+    }
+    let x = std::f64::consts::PI * t / SINC_W;
+    0.42 + 0.5 * x.cos() + 0.08 * (2.0 * x).cos()
 }
 
 /// Orders tracks so that every track is processed before any track it routes to.
@@ -318,8 +358,24 @@ fn processing_order(tracks: &[MixTrack]) -> Vec<usize> {
     order
 }
 
-/// A scheduled note: (start tick, channel, key, optional cut tick).
-type Sched = (f64, usize, u16, Option<f64>);
+/// A scheduled note.
+#[derive(Debug, Clone, Copy)]
+struct Sched {
+    tick: f64,
+    channel: usize,
+    key: u16,
+    velocity: u8,
+    /// Note pan byte, 64 = center.
+    pan: u8,
+    /// Tick at which the voice is cut (audio clip end).
+    cut: Option<f64>,
+}
+
+impl Sched {
+    fn note(start: f64, n: &os_model::Note) -> Self {
+        Sched { tick: start + f64::from(n.position), channel: usize::from(n.channel), key: n.key, velocity: n.velocity, pan: n.pan, cut: None }
+    }
+}
 
 /// Note triggers plus the end tick of the scheduled material.
 fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Vec<Sched>, f64) {
@@ -330,7 +386,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
         ((last / bar).floor() + 1.0).max(1.0) * bar
     };
     let one_pattern = |n: u16| {
-        let t: Vec<Sched> = pattern_notes(n).iter().map(|x| (f64::from(x.position), usize::from(x.channel), x.key, None)).collect();
+        let t: Vec<Sched> = pattern_notes(n).iter().map(|x| Sched::note(0.0, x)).collect();
         (t, pattern_end(n))
     };
     match mode {
@@ -350,14 +406,14 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                     ClipSource::Pattern(n) => {
                         for note in pattern_notes(n) {
                             if f64::from(note.position) < len {
-                                out.push((start + f64::from(note.position), usize::from(note.channel), note.key, None));
+                                out.push(Sched::note(start, note));
                             }
                         }
                     }
                     ClipSource::Channel(ch) => match project.channels.get(usize::from(ch)).map(|c| c.kind) {
                         // An audio clip plays its channel's sample from the start, cut at the clip end.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
-                            out.push((start, usize::from(ch), 60, Some(start + len)));
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, velocity: 100, pan: 64, cut: Some(start + len) });
                         }
                         _ => report.automation_clips_ignored += 1,
                     },
