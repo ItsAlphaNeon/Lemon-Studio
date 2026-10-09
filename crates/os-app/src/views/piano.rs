@@ -7,7 +7,7 @@ use os_ui::{Color, Font, Rect};
 use super::{resize_zones, window_body, FrameInfo};
 use crate::app::{Action, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
-use crate::piano::{self, Geom, Overlay, Tool};
+use crate::piano::{self, Geom, Lane, Overlay, Tool};
 
 /// Grid row pitch: 17 px of fill plus a 1 px separator (§3).
 pub const ROW: f32 = 18.0;
@@ -188,6 +188,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     super::scrollbar(ui, track, true, s.piano.scroll_y, l.grid.h, (TOP_KEY + 1) as f32 * ROW, Scroll::PianoY);
 
     velocity_panel(ui, s, &l, &g, notes, ch, &sel);
+    if s.lane_menu {
+        lane_menu(ui, s, &l);
+    }
     resize_zones(ui, s, Win::PianoRoll, outer);
 }
 
@@ -442,15 +445,17 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
     }
     // Label column.
     ui.c.fill_rect(l.label, t.window_title);
-    let lw = ui.c.text(Font::new(16), l.label.x + 12.0, l.label.y + 2.0, t.text, "Control");
-    let _ = lw;
+    let btn = Rect::new(l.label.x, l.label.y, l.label.w, 22.0);
+    let hov = ui.hit(btn, Action::PianoLaneMenu, "Event panel: choose which note property to edit");
+    ui.c.text(Font::new(16), l.label.x + 12.0, l.label.y + 2.0, if hov || s.lane_menu { Color::rgb(0xffffff) } else { t.text }, "Control");
     ui.c.fill_polygon(&[(l.label.x + 61.0, l.label.y + 9.0), (l.label.x + 65.0, l.label.y + 12.5), (l.label.x + 61.0, l.label.y + 16.0)], t.text_dim);
     ui.c.fill_rect(Rect::new(l.panel.x - 2.0, l.panel.y, 1.0, l.panel.h), Color::rgb(0x131718));
     ui.c.fill_rect(Rect::new(l.panel.x - 1.0, l.panel.y, 1.0, l.panel.h), Color::rgb(0x000205));
 
     // Panel grid: horizontal lines every 22 px, then the time columns (§7).
     let p = l.panel;
-    ui.hit(p, Action::PianoVelocity, "Velocity: drag to set the velocity of notes");
+    ui.hit(p, Action::PianoVelocity, "Event panel: drag to set this property of notes");
+    let lane = s.piano.lane;
     ui.c.push_clip(p);
     ui.c.fill_rect(p, t.pr_row);
     if let Some((a, b)) = s.piano.range {
@@ -470,7 +475,7 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
         i += 1;
     }
     columns(ui, g, p, &bands, t.pr_bar);
-    ui.c.text(Font::new(16), p.x + 7.0, p.y + 2.0, t.text_faint.shade(-0.35), "Velocity");
+    ui.c.text(Font::new(16), p.x + 7.0, p.y + 2.0, t.text_faint.shade(-0.35), lane.name());
 
     // Lollipops.
     for (idx, n) in notes.iter().enumerate().filter(|(_, n)| Some(n.channel) == ch) {
@@ -482,7 +487,9 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
         if end < p.x - 4.0 {
             continue;
         }
-        let top = piano::velocity_y(p, n.velocity).round();
+        let top = lane.y_of(p, lane.get(n)).round();
+        // Bipolar lanes hang the stem from the centre line.
+        let base = lane.center().map_or(p.bottom(), |c| lane.y_of(p, c).round());
         let (stem, dot) = if sel.contains(&idx) {
             (t.note_sel_top.mix(t.note_sel_bottom, 0.4), t.note_sel_rim)
         } else if n.muted() {
@@ -490,10 +497,48 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
         } else {
             (t.velocity, t.velocity_dot)
         };
-        ui.c.fill_rect(Rect::new(x, top, 2.0, p.bottom() - top), stem);
+        ui.c.fill_rect(Rect::new(x, top.min(base), 2.0, (base - top).abs()), stem);
         ui.c.fill_rect(Rect::new(x + 4.0, top, (end - x - 4.0).max(0.0), 1.0), stem);
         ui.c.fill_circle(x + 1.0, top + 0.5, 3.5, stem);
         ui.c.fill_circle(x + 1.0, top + 0.5, 2.5, dot);
     }
     ui.c.pop_clip();
+}
+
+/// The event panel's Control menu (spec: ui/piano-roll.md §7a): same look as the menu bar dropdowns.
+fn lane_menu(ui: &mut Ui, s: &State, l: &Layout) {
+    let t = ui.t;
+    const ROW: f32 = 19.0;
+    const HEAD: f32 = 16.0;
+    let (w0, w1) = (170.0, 124.0);
+    let h = HEAD + 7.0 * ROW;
+    let win_h = ui.c.size().1;
+    let r = Rect::new(l.label.x + 9.0, (l.label.y + 24.0).min(win_h - h - 8.0), w0 + w1 + 6.0, h + 4.0);
+    ui.c.fill_rect(r, t.menu_pop);
+    ui.c.stroke_rrect(r.inset(1.0), 0.0, 2.0, t.menu_pop_border);
+    ui.hit(r, Action::Swallow, "");
+    let body = r.inset(2.0);
+    let font = Font::new(14);
+    let head = |ui: &mut Ui, x: f32, w: f32, text: &str| {
+        ui.c.fill_rect(Rect::new(x, body.y, w, HEAD), t.menu_pop_head);
+        ui.c.text(Font::new(12), x + 4.0, body.y + 1.0, t.menu_pop_head_text, text);
+    };
+    head(ui, body.x, w0, "Note properties");
+    head(ui, body.x + w0 + 2.0, w1, "Channel controls");
+    ui.c.fill_rect(Rect::new(body.x + w0, body.y, 2.0, body.h), t.menu_pop_border);
+    for (i, lane) in Lane::ALL.iter().enumerate() {
+        let rr = Rect::new(body.x, body.y + HEAD + i as f32 * ROW, w0, ROW);
+        if ui.hit(rr, Action::PianoLanePick(i), lane.menu_name()) || *lane == s.piano.lane {
+            ui.c.fill_rect(rr, t.menu_pop_hi);
+        }
+        ui.c.text(font, rr.x + 20.0, rr.y + 2.0, t.menu_pop_text, lane.menu_name());
+    }
+    // Not stored in the project model yet: drawn dim.
+    for (i, name) in ["Note repeat"].iter().enumerate() {
+        let rr = Rect::new(body.x, body.y + HEAD + (Lane::ALL.len() + i) as f32 * ROW, w0, ROW);
+        ui.c.text(font, rr.x + 20.0, rr.y + 2.0, t.menu_pop_dim, name);
+    }
+    for (i, name) in ["Channel panning", "Channel volume", "Channel pitch"].iter().enumerate() {
+        ui.c.text(font, body.x + w0 + 22.0, body.y + HEAD + i as f32 * ROW + 2.0, t.menu_pop_dim, name);
+    }
 }

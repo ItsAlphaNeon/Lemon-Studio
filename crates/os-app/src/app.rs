@@ -136,6 +136,9 @@ pub enum Action {
     PianoNote(usize),
     PianoKeys,
     PianoVelocity,
+    /// Event panel "Control" button and its menu entries (index into `Lane::ALL`).
+    PianoLaneMenu,
+    PianoLanePick(usize),
     PianoUndo,
     /// Piano-roll toolbar: make a tool active (spec: ui/piano-roll.md §9).
     PianoTool(Tool),
@@ -313,6 +316,8 @@ pub struct State {
     pub pattern: u16,
     pub song_mode: bool,
     pub menu_open: Option<usize>,
+    /// Piano roll event panel Control menu.
+    pub lane_menu: bool,
     pub picker_open: bool,
     /// Plugin picker category filter: (effects half?, category index).
     pub picker_cat: Option<(bool, usize)>,
@@ -451,6 +456,7 @@ impl App {
                 pattern: 1,
                 song_mode: false,
                 menu_open: None,
+                lane_menu: false,
                 picker_open: false,
                 picker_cat: None,
                 playlist_scroll: (0.0, 0.0),
@@ -888,6 +894,10 @@ impl App {
         self.invalidate();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
+        if self.state.lane_menu && !matches!(action, Some(Action::PianoLanePick(_))) {
+            self.state.lane_menu = false;
+            return;
+        }
         // Any click outside an open menu closes it.
         if self.state.menu_open.is_some() && !matches!(action, Some(Action::MenuItem(..)) | Some(Action::Menu(_))) {
             self.state.menu_open = None;
@@ -1356,7 +1366,8 @@ impl App {
     /// Set the velocity of this channel's notes whose start lies between the last and current x.
     fn paint_velocity(&mut self, last_x: f32, x: f32, y: f32) {
         let (Some(g), Some(panel)) = (self.piano_geom(), self.piano_panel) else { return };
-        let v = piano::velocity_at(panel, y);
+        let lane = self.state.piano.lane;
+        let v = lane.value_at(panel, y);
         let (a, b) = (last_x.min(x) - 3.0, last_x.max(x) + 3.0);
         let ch = piano::channel(&self.state);
         let p = piano::pattern_mut(&mut self.state);
@@ -1364,7 +1375,7 @@ impl App {
         for n in p.notes.iter_mut().filter(|n| Some(n.channel) == ch) {
             let nx = g.x_of(n.position as f32);
             if nx >= a && nx <= b {
-                n.velocity = v;
+                lane.set(n, v);
                 let end = g.x_of((n.position + n.length.max(g.step)) as f32);
                 span = Some(span.map_or((nx, end), |(l, r)| (l.min(nx), r.max(end))));
             }
@@ -1808,6 +1819,11 @@ impl App {
             Action::PickerOpen => {
                 s.picker_open = true;
                 s.picker_cat = None;
+            }
+            Action::PianoLaneMenu => s.lane_menu = true,
+            Action::PianoLanePick(i) => {
+                s.piano.lane = piano::Lane::ALL[i.min(piano::Lane::ALL.len() - 1)];
+                s.lane_menu = false;
             }
             Action::PickerBg => s.picker_open = false,
             Action::PickerAll => s.picker_cat = None,

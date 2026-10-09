@@ -386,6 +386,8 @@ fn screenshot(args: &[String]) {
     let mut menu: Option<usize> = None;
     let mut picker: Option<(bool, usize)> = None;
     let mut picker_open = false;
+    let mut lane: Option<usize> = None;
+    let mut lane_menu = false;
     let mut path = None;
     let mut mouse: Option<(f32, f32)> = None;
     let mut pattern = None;
@@ -414,6 +416,8 @@ fn screenshot(args: &[String]) {
                     mouse = Some((x, y));
                 }
             }
+            "--lane" => lane = it.next().and_then(|v| v.parse().ok()),
+            "--lane-menu" => lane_menu = true,
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
             "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
             "--pattern" => pattern = it.next().and_then(|v| v.parse().ok()),
@@ -448,6 +452,10 @@ fn screenshot(args: &[String]) {
     app.state.rack_roll_view = rack_roll;
     app.state.menu_open = menu;
     app.state.picker_open = picker_open;
+    app.state.lane_menu = lane_menu;
+    if let Some(i) = lane {
+        app.state.piano.lane = piano::Lane::ALL[i.min(piano::Lane::ALL.len() - 1)];
+    }
     app.state.picker_cat = picker;
     if let Some(w) = rack_w {
         app.state.rack_size.0 = w;

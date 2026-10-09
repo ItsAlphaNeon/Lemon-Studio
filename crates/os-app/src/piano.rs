@@ -73,6 +73,8 @@ pub struct PianoState {
     /// Key held with the mouse (keyboard press or a dragged note), lit on the keyboard (§4).
     pub held: Option<i32>,
     pub tool: Tool,
+    /// Event panel target.
+    pub lane: Lane,
     pub overlay: Option<Overlay>,
     /// Ctrl+C copies (positions as copied).
     pub clipboard: Vec<Note>,
@@ -98,6 +100,7 @@ impl Default for PianoState {
             dirty: false,
             held: None,
             tool: Tool::Draw,
+            lane: Lane::Velocity,
             overlay: None,
             clipboard: Vec::new(),
             zoom_back: None,
@@ -219,6 +222,89 @@ pub fn pattern_length(s: &State, notes: &[Note]) -> u32 {
     let bar = u32::from(s.project.ppq.max(1)) * 4;
     let end = notes.iter().map(|n| n.position + shown_len(s, n)).max().unwrap_or(0);
     (end / bar + 1) * bar
+}
+
+/// What the event panel edits (spec: ui/piano-roll.md §7a). Note repeat and the channel controls are not stored yet.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lane {
+    Velocity,
+    Pan,
+    Release,
+    Cutoff,
+    Resonance,
+    FinePitch,
+}
+
+impl Lane {
+    pub const ALL: [Lane; 6] = [Lane::Pan, Lane::Velocity, Lane::Release, Lane::Cutoff, Lane::Resonance, Lane::FinePitch];
+    /// Dimmed name over the panel.
+    pub fn name(self) -> &'static str {
+        match self {
+            Lane::Velocity => "Velocity",
+            Lane::Pan => "Pan",
+            Lane::Release => "Release",
+            Lane::Cutoff => "Filter cutoff",
+            Lane::Resonance => "Filter resonance",
+            Lane::FinePitch => "Fine pitch",
+        }
+    }
+    /// Entry in the Control menu.
+    pub fn menu_name(self) -> &'static str {
+        match self {
+            Lane::Velocity => "Note velocity",
+            Lane::Pan => "Note pan",
+            Lane::Release => "Note release",
+            Lane::Cutoff => "Note filter cutoff frequency",
+            Lane::Resonance => "Note filter resonance (Q)",
+            Lane::FinePitch => "Note fine pitch",
+        }
+    }
+    pub fn get(self, n: &Note) -> u8 {
+        match self {
+            Lane::Velocity => n.velocity,
+            Lane::Pan => n.pan,
+            Lane::Release => n.release,
+            Lane::Cutoff => n.mod_x,
+            Lane::Resonance => n.mod_y,
+            Lane::FinePitch => n.fine_pitch,
+        }
+    }
+    pub fn set(self, n: &mut Note, v: u8) {
+        match self {
+            Lane::Velocity => n.velocity = v,
+            Lane::Pan => n.pan = v,
+            Lane::Release => n.release = v,
+            Lane::Cutoff => n.mod_x = v,
+            Lane::Resonance => n.mod_y = v,
+            Lane::FinePitch => n.fine_pitch = v,
+        }
+    }
+    /// Value at the top of the panel.
+    fn scale(self) -> f32 {
+        match self {
+            Lane::Velocity | Lane::Pan | Lane::Release => 128.0,
+            Lane::Cutoff | Lane::Resonance => 256.0,
+            Lane::FinePitch => 240.0,
+        }
+    }
+    fn max(self) -> f32 {
+        self.scale().min(255.0)
+    }
+    /// Bipolar lanes draw their stem from the centre line.
+    pub fn center(self) -> Option<u8> {
+        match self {
+            Lane::Pan => Some(64),
+            Lane::Cutoff | Lane::Resonance => Some(128),
+            Lane::FinePitch => Some(120),
+            _ => None,
+        }
+    }
+    pub fn y_of(self, panel: Rect, v: u8) -> f32 {
+        panel.bottom() - f32::from(v) / self.scale() * panel.h
+    }
+    pub fn value_at(self, panel: Rect, y: f32) -> u8 {
+        ((panel.bottom() - y) / panel.h * self.scale()).round().clamp(0.0, self.max()) as u8
+    }
 }
 
 /// Top of a velocity lollipop: `velocity / 128` of the panel height (§7).
@@ -436,6 +522,23 @@ pub fn clamp_scroll(s: &mut State, view_h: f32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lanes_map_values_and_centres() {
+        let panel = Rect::new(0.0, 100.0, 10.0, 200.0);
+        for lane in Lane::ALL {
+            for v in [0u8, 1, 64, 100, 120] {
+                let v = v.min(lane.max() as u8);
+                assert_eq!(lane.value_at(panel, lane.y_of(panel, v)), v, "{lane:?} {v}");
+            }
+            if let Some(c) = lane.center() {
+                assert!((lane.y_of(panel, c) - 200.0).abs() < 1.0, "{lane:?} centre sits mid-panel");
+            }
+        }
+        let mut n = Note::step(0, 0);
+        Lane::Cutoff.set(&mut n, 77);
+        assert_eq!((n.mod_x, Lane::Cutoff.get(&n)), (77, 77));
+    }
+
     use super::*;
     use crate::app::App;
 
