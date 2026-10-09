@@ -14,7 +14,7 @@ use crate::Rect;
 pub struct Glyph {
     pub(crate) shapes: Vec<(tiny_skia::Path, bool)>,
     erase: bool,
-    /// Line caps for strokes added from now on (default butt).
+    /// Round caps and joins for strokes added from now on (default butt caps, miter joins).
     pub round_caps: bool,
 }
 
@@ -34,11 +34,16 @@ impl Glyph {
         self
     }
 
+    /// Stroke an arbitrary path (round caps also give round joins).
+    pub fn stroke(&mut self, p: tiny_skia::Path, width: f32) -> &mut Self {
+        self.stroke_path(p, width)
+    }
+
     fn stroke_path(&mut self, p: tiny_skia::Path, width: f32) -> &mut Self {
         let s = Stroke {
             width,
             line_cap: if self.round_caps { LineCap::Round } else { LineCap::Butt },
-            line_join: LineJoin::Miter,
+            line_join: if self.round_caps { LineJoin::Round } else { LineJoin::Miter },
             ..Stroke::default()
         };
         if let Some(o) = p.stroke(&s, 4.0) {
@@ -114,6 +119,48 @@ impl Glyph {
             })
             .collect();
         self.polyline(&pts, width)
+    }
+
+    /// Add path data made of absolute `M x y`, `L x y`, `Q x1 y1 x y`, `C x1 y1 x2 y2 x y` and `Z`
+    /// commands (space separated), mapped by `(x, y) -> (ox + x * k, oy + y * k)`. Filled when
+    /// `stroke` is `None`, otherwise stroked with that width.
+    pub fn commands(&mut self, d: &str, ox: f32, oy: f32, k: f32, stroke: Option<f32>) -> &mut Self {
+        let mut pb = PathBuilder::new();
+        let mut it = d.split_ascii_whitespace();
+        let pt = |it: &mut std::str::SplitAsciiWhitespace| -> Option<(f32, f32)> {
+            let x: f32 = it.next()?.parse().ok()?;
+            let y: f32 = it.next()?.parse().ok()?;
+            Some((ox + x * k, oy + y * k))
+        };
+        while let Some(c) = it.next() {
+            match c {
+                "M" => {
+                    let Some((x, y)) = pt(&mut it) else { break };
+                    pb.move_to(x, y);
+                }
+                "L" => {
+                    let Some((x, y)) = pt(&mut it) else { break };
+                    pb.line_to(x, y);
+                }
+                "Q" => {
+                    let (Some(a), Some(b)) = (pt(&mut it), pt(&mut it)) else { break };
+                    pb.quad_to(a.0, a.1, b.0, b.1);
+                }
+                "C" => {
+                    let (Some(a), Some(b), Some(e)) = (pt(&mut it), pt(&mut it), pt(&mut it)) else { break };
+                    pb.cubic_to(a.0, a.1, b.0, b.1, e.0, e.1);
+                }
+                "Z" => pb.close(),
+                _ => break,
+            }
+        }
+        if let Some(p) = pb.finish() {
+            match stroke {
+                Some(w) => self.stroke_path(p, w),
+                None => self.path(p),
+            };
+        }
+        self
     }
 
     /// Bounds of all shapes (logical).

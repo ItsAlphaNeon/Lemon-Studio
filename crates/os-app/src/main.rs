@@ -2,6 +2,7 @@
 
 mod app;
 mod icons;
+mod tabler;
 mod transport;
 mod views;
 
