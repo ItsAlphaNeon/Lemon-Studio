@@ -387,6 +387,7 @@ fn screenshot(args: &[String]) {
     let mut picker: Option<(bool, usize)> = None;
     let mut picker_open = false;
     let mut path = None;
+    let mut mouse: Option<(f32, f32)> = None;
     let mut pattern = None;
     let mut channel = None;
     let mut win_rect: Option<os_ui::Rect> = None;
@@ -404,6 +405,13 @@ fn screenshot(args: &[String]) {
                     // "g2" / "e4": filter by that category
                     let (k, n) = v.split_at(1);
                     picker = n.parse().ok().map(|n| (k == "e", n));
+                }
+            }
+            // Hover at x,y before the frame is captured.
+            "--mouse" => {
+                let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
+                if let [x, y] = v[..] {
+                    mouse = Some((x, y));
                 }
             }
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
@@ -457,6 +465,10 @@ fn screenshot(args: &[String]) {
     }
     let mut canvas = Canvas::new(1920, 1080, 1.0).expect("canvas");
     app.paint(&mut canvas, None);
+    if let Some((x, y)) = mouse {
+        app.mouse_move(x, y);
+        app.paint(&mut canvas, None);
+    }
     if std::env::var_os("OS_BENCH").is_some() {
         let t0 = Instant::now();
         for _ in 0..20 {
