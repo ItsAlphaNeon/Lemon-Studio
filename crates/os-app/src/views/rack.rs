@@ -182,7 +182,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let step_area = Rect::span(x + STEP_X - 1.0, steps_right, rows_clip.y, rows_clip.bottom());
         let notes: &[os_model::Note] = pat.map_or(&[], |p| &p.notes);
         if s.rack_roll_view || !plain_steps(notes, ch.index) {
-            let block = Rect::span(x + STEP_X - 2.0, steps_right + 2.0, ry - 2.0, ry + 26.0);
+            let block = Rect::span(x + STEP_X - 2.0, steps_right + 2.0, ry - 2.0, ry + 28.0);
             mini_roll(ui, block, notes, ch.index, per_step, sx, focused);
             ui.hit(block.intersect(&rows_clip), Action::RackRoll(i), "Piano roll preview - click to open the Piano roll");
             continue;
@@ -325,26 +325,26 @@ fn step_button(ui: &mut Ui, r: Rect, k: u32, on: bool, past_len: bool, hov: bool
     ui.c.fill_rect(Rect::new(f.x, f.bottom() - 2.0, f.w, 2.0), face.shade(-0.35));
 }
 
-/// Mini piano roll of one channel (§6) in `block`; `sx` is the step scroll in pixels.
+/// Mini piano roll of one channel (§6) in `block` (one 30 px row); `sx` is the step scroll in pixels.
 fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_step: u32, sx: f32, focused: bool) {
-    if focused {
-        ui.c.fill_rect(block, Color::rgb(0x040709));
-        ui.c.fill_rect(block.inset(1.0), Color::rgb(0x111416));
+    // (separator, fill) for odd and even bars.
+    let shades = if focused {
+        [(Color::rgb(0x040709), Color::rgb(0x111416)), (Color::rgb(0x000002), Color::rgb(0x0a0d0f))]
     } else {
-        ui.c.fill_rect(block, Color::rgb(0x171a1c));
-        // Alternate 8-step spans darker.
-        let span = 8.0 * STEP_W;
-        let mut k = (sx / span).floor();
-        loop {
-            let x0 = block.x + 2.0 + k * span - sx;
-            if x0 >= block.right() {
-                break;
-            }
-            if k as i64 % 2 == 1 {
-                ui.c.fill_rect(Rect::span(x0.max(block.x), (x0 + span).min(block.right()), block.y, block.bottom()), Color::rgb(0x101315));
-            }
-            k += 1.0;
+        [(Color::rgb(0x0a0d0f), Color::rgb(0x171a1c)), (Color::rgb(0x030608), Color::rgb(0x101315))]
+    };
+    let bar = 16.0 * STEP_W;
+    let mut k = (sx / bar).floor();
+    loop {
+        let x0 = block.x + 2.0 + k * bar - sx;
+        if x0 >= block.right() {
+            break;
         }
+        let span = Rect::span(x0.max(block.x), (x0 + bar).min(block.right()), block.y, block.bottom());
+        let (sep, fill) = shades[(k as i64 % 2) as usize];
+        ui.c.fill_rect(span, sep);
+        ui.c.fill_rect(Rect::span(span.x, span.right(), span.y + 1.0, span.bottom() - 1.0), fill);
+        k += 1.0;
     }
     let mine: Vec<&os_model::Note> = notes.iter().filter(|n| n.channel == ch).collect();
     let lo = mine.iter().map(|n| n.key).min().unwrap_or(60);
@@ -356,7 +356,7 @@ fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_st
         let len = if n.length == 0 { per_step } else { n.length };
         let nw = (len as f32 / per_step as f32 * STEP_W - 1.0).max(2.0);
         let t = if hi == lo { 0.5 } else { f32::from(n.key - lo) / range };
-        let ny = (block.bottom() - 6.0 - t * (block.h - 8.0)).round();
+        let ny = (block.bottom() - 7.0 - t * (block.h - 10.0)).round();
         ui.c.fill_rect(Rect::new(nx, ny, nw, 1.0), Color::rgb(0x698a6f));
         ui.c.fill_rect(Rect::new(nx, ny + 1.0, nw, 3.0), Color::rgb(0x9ed1a5));
     }
