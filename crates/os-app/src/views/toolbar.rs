@@ -46,7 +46,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
 
     // Logo spot (spans both rows): the OpenStudio mark.
     // It keeps to the right edge until the window is too narrow, then the edge crops it
-    // (spec ui/main-window.md §11); the toolbar never moves.
+    // (spec ui/main-window.md §12); the toolbar never moves.
     let lx = (width - 45.0).max(LOGO_MIN_X);
     ui.hit(Rect::new(lx - 35.0, 0.0, 78.0, 80.0), Action::Placeholder("About"), "OpenStudio");
     icons::logo(ui.c, lx, 40.0, 26.0, t.toolbar_line);

@@ -39,7 +39,7 @@ struct Shell {
     edge: Option<ResizeDirection>,
 }
 
-/// Border of the restored main window (spec ui/main-window.md §11), logical px: left, top, right, bottom.
+/// Border of the restored main window (spec ui/main-window.md §12), logical px: left, top, right, bottom.
 const BORDER: (f32, f32, f32, f32) = (6.0, 2.0, 6.0, 6.0);
 /// Depth of the resize zone along the top edge and the size of the corner squares (logical px).
 const TOP_GRIP: f32 = 4.0;
@@ -54,7 +54,7 @@ fn insets(window: &Window) -> (u32, u32, u32, u32) {
     (d(BORDER.0), d(BORDER.1), d(BORDER.2), d(BORDER.3))
 }
 
-/// Draw the border into the frame buffer around the canvas (§11): 1 px outline, a 1 px highlight
+/// Draw the border into the frame buffer around the canvas (§12): 1 px outline, a 1 px highlight
 /// along the top, the frame, and a 1 px inner line at the left, right and bottom of the canvas.
 fn draw_border(buf: &mut [u32], w: usize, h: usize, (l, t, r, b): (u32, u32, u32, u32)) {
     if l == 0 || t == 0 || w < 2 * (l + r) as usize || h < 2 * (t + b) as usize {
