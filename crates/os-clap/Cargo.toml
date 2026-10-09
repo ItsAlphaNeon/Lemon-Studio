@@ -1,0 +1,15 @@
+[package]
+name = "os-clap"
+description = "OpenStudio's CLAP plugin host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap-sys = "0.5"
+libloading = "0.8"
+os-engine.workspace = true
+
+
+[dev-dependencies]
+os-model.workspace = true

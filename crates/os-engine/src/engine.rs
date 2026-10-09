@@ -11,6 +11,7 @@ use os_model::{ChannelKind, ClipSource, ControlPoint, Project};
 
 use crate::effects::Effect;
 use crate::envelope;
+use crate::instrument::{SharedInstrument, Slot};
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
@@ -37,6 +38,8 @@ struct Trigger {
     /// Note key and the frame where the note ends (for showing sounding keys).
     key: u16,
     end: u64,
+    /// Note velocity byte (instrument channels get it as 0..=1).
+    velocity: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +70,9 @@ struct ChannelState {
     pitch_env: Option<envelope::Params>,
     /// Seconds per output frame.
     frame_s: f64,
+    /// A generator plugin channel; it sounds only once an instrument is attached (`Engine::set_instrument`).
+    plugin: bool,
+    instrument: Slot,
 }
 
 /// Glide of the channel's volume and pan parameters towards a control point's values.
@@ -262,8 +268,19 @@ pub struct Engine {
     tempo: f64,
     ppq: u16,
     bus: Vec<Vec<f32>>,
+    /// Instrument channels: scheduled note ends (frame, channel, key), live notes waiting for the next span
+    /// (channel, key, velocity; negative = note off), this span's events (channel, offset, key, velocity) and scratch.
+    inst_offs: Vec<(u64, usize, u8)>,
+    inst_live: Vec<(usize, u8, f32)>,
+    inst_events: Vec<(usize, u32, u8, f32)>,
+    scratch: (Vec<f32>, Vec<f32>),
+    /// Frames instruments keep being processed after their last held note (their release / tail is not known).
+    inst_tail: u64,
     pub report: EngineReport,
 }
+
+/// Seconds an instrument keeps running after its last note (an OpenStudio choice).
+const INSTRUMENT_TAIL_SECONDS: u64 = 5;
 
 impl Engine {
     pub fn new(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayMode) -> Self {
@@ -321,6 +338,8 @@ impl Engine {
                     vol_env: env_on.then(|| envelope::Params::new(&ch.envelopes[os_model::Envelope::VOLUME])).flatten(),
                     pitch_env: env_on.then(|| envelope::Params::new(&ch.envelopes[os_model::Envelope::PITCH])).flatten(),
                     frame_s: 1.0 / f64::from(rate),
+                    plugin: ch.kind == ChannelKind::Plugin,
+                    instrument: Slot::default(),
                 }
             })
             .collect();
@@ -377,7 +396,9 @@ impl Engine {
             .into_iter()
             .filter_map(|n: Sched| {
                 let state = channels.get(n.channel)?;
-                state.sample.as_ref()?;
+                if state.sample.is_none() && !state.plugin {
+                    return None;
+                }
                 // A plain step (length 0) counts as one step long.
                 let len = if n.len > 0.0 { n.len } else { f64::from(ppq) / 4.0 };
                 Some(Trigger {
@@ -389,6 +410,7 @@ impl Engine {
                     cut: n.cut.map(|c| laws::tick_to_frame(c, ppq, tempo, rate)),
                     vel: laws::velocity_gain(n.velocity),
                     pan: laws::note_pan(n.pan),
+                    velocity: n.velocity,
                 })
             })
             .collect();
@@ -410,8 +432,38 @@ impl Engine {
             looping: false,
             tempo,
             ppq,
+            inst_offs: Vec::with_capacity(64),
+            inst_live: Vec::with_capacity(64),
+            inst_events: Vec::with_capacity(64),
+            scratch: (Vec::new(), Vec::new()),
+            inst_tail: 0,
             report,
         }
+    }
+
+    /// Plays generator-plugin channel `channel` through `inst` (a shared instance that outlives this engine).
+    pub fn set_instrument(&mut self, channel: usize, inst: SharedInstrument) {
+        if let Some(ch) = self.channels.get_mut(channel) {
+            if ch.plugin {
+                ch.instrument = Slot(Some(inst));
+                self.report.plugin_channels_silent = self.report.plugin_channels_silent.saturating_sub(1);
+            }
+        }
+    }
+
+    /// True when the channel is played by an attached instrument.
+    pub fn has_instrument(&self, channel: usize) -> bool {
+        self.channels.get(channel).is_some_and(|c| c.instrument.0.is_some())
+    }
+
+    /// A live note on an instrument channel that ends by itself after `frames` (note previews).
+    pub fn note_for(&mut self, channel: usize, key: u16, velocity: u8, frames: u64) {
+        if !self.has_instrument(channel) {
+            return;
+        }
+        let k = key.min(127) as u8;
+        self.inst_live.push((channel, k, f32::from(velocity) / 128.0));
+        self.inst_offs.push((self.frame + frames.max(1), channel, k));
     }
 
     /// Loop the scheduled material: on reaching its end, playback continues from frame 0 within
@@ -431,6 +483,11 @@ impl Engine {
     /// `note_off` (or the sample ends). Velocity 0..=128, 100 = unity.
     pub fn note_on(&mut self, channel: usize, key: u16, velocity: u8) {
         let Some(ch) = self.channels.get(channel) else { return };
+        if ch.instrument.0.is_some() {
+            self.inst_live.push((channel, key.min(127) as u8, f32::from(velocity) / 128.0));
+            self.sounding.push((channel, key, u64::MAX));
+            return;
+        }
         if ch.sample.is_none() {
             return;
         }
@@ -461,6 +518,9 @@ impl Engine {
 
     /// Release a live note with a short fade.
     pub fn note_off(&mut self, channel: usize, key: u16) {
+        if self.has_instrument(channel) && self.sounding.iter().any(|&(c, k, end)| c == channel && k == key && end == u64::MAX) {
+            self.inst_live.push((channel, key.min(127) as u8, -1.0));
+        }
         let fade = (f64::from(self.rate) * RELEASE_SECONDS) as u32;
         let vol_env = self.channels.get(channel).is_some_and(|c| c.vol_env.is_some());
         for v in &mut self.voices {
@@ -499,7 +559,7 @@ impl Engine {
     /// True once all scheduled material has played and every voice has finished (never while
     /// looping).
     pub fn finished(&self) -> bool {
-        !self.looping && self.frame >= self.end_frame && self.next_trigger >= self.triggers.len() && self.voices.is_empty()
+        !self.looping && self.frame >= self.end_frame && self.next_trigger >= self.triggers.len() && self.voices.is_empty() && self.inst_tail == 0 && self.inst_live.is_empty()
     }
 
     /// Start playback at `frame` (notes before it are not triggered).
@@ -562,6 +622,13 @@ impl Engine {
         self.voices = std::mem::take(&mut old.voices);
         self.voices.retain(|v| v.channel < n);
         self.sounding = std::mem::take(&mut old.sounding);
+        self.inst_live = std::mem::take(&mut old.inst_live);
+        self.inst_tail = old.inst_tail;
+        self.inst_offs = std::mem::take(&mut old.inst_offs);
+        for o in &mut self.inst_offs {
+            o.0 = to_new(o.0);
+        }
+        self.inst_offs.retain(|o| o.1 < n);
         for s in &mut self.sounding {
             if s.2 != u64::MAX {
                 s.2 = to_new(s.2); // MAX = a live note, held until note off
@@ -659,6 +726,14 @@ impl Engine {
             self.next_trigger += 1;
             self.sounding.push((t.channel, t.key, t.end));
             let offset = a + t.frame.saturating_sub(self.frame) as usize;
+            if self.channels[t.channel].plugin {
+                if self.channels[t.channel].instrument.0.is_some() {
+                    let k = t.key.min(127) as u8;
+                    self.inst_events.push((t.channel, (offset - a) as u32, k, f32::from(t.velocity) / 128.0));
+                    self.inst_offs.push((t.end, t.channel, k));
+                }
+                continue;
+            }
             let remaining = t.cut.map(|c| c.saturating_sub(t.frame));
             let gain = self.channels[t.channel].start_gain(t.vel, t.pan);
             let serial = self.channels[t.channel].serial;
@@ -684,6 +759,7 @@ impl Engine {
                 self.voices.push(v);
             }
         }
+        self.render_instruments(a, b, span_end);
         for ch in &mut self.channels {
             ch.advance((b - a) as u32);
         }
@@ -691,9 +767,60 @@ impl Engine {
         self.sounding.retain(|&(_, _, end)| end > span_end);
     }
 
+    /// Sends this span's note events to each instrument and mixes its output into the channel's insert with the
+    /// channel's volume and pan. An instrument that is busy (locked elsewhere) is skipped for the span.
+    fn render_instruments(&mut self, a: usize, b: usize, span_end: u64) {
+        let mut i = 0;
+        while i < self.inst_offs.len() {
+            let (end, ch, key) = self.inst_offs[i];
+            if end < span_end {
+                self.inst_events.push((ch, end.saturating_sub(self.frame) as u32, key, -1.0));
+                self.inst_offs.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        for (ch, key, vel) in self.inst_live.drain(..) {
+            self.inst_events.push((ch, 0, key, vel));
+        }
+        self.inst_events.sort_by_key(|e| e.1);
+        let held = !self.inst_offs.is_empty()
+            || self.sounding.iter().any(|&(c, _, end)| end == u64::MAX && self.channels.get(c).is_some_and(|ch| ch.instrument.0.is_some()));
+        if held || !self.inst_events.is_empty() {
+            self.inst_tail = u64::from(self.rate) * INSTRUMENT_TAIL_SECONDS;
+        } else {
+            self.inst_tail = self.inst_tail.saturating_sub((b - a) as u64);
+        }
+        let n = b - a;
+        if self.scratch.0.len() < n {
+            self.scratch.0.resize(n, 0.0);
+            self.scratch.1.resize(n, 0.0);
+        }
+        for (c, ch) in self.channels.iter().enumerate() {
+            let Some(inst) = &ch.instrument.0 else { continue };
+            let Ok(mut inst) = inst.try_lock() else { continue };
+            for &(_, off, key, vel) in self.inst_events.iter().filter(|e| e.0 == c) {
+                let off = off.min(n.saturating_sub(1) as u32);
+                if vel < 0.0 { inst.note_off(off, key) } else { inst.note_on(off, key, vel) }
+            }
+            let (l, r) = (&mut self.scratch.0[..n], &mut self.scratch.1[..n]);
+            inst.process(self.rate, l, r);
+            let (gl, gr) = ch.gain(1.0, 0.0);
+            let out = &mut self.bus[ch.insert];
+            for f in 0..n {
+                out[(a + f) * 2] += l[f] * gl;
+                out[(a + f) * 2 + 1] += r[f] * gr;
+            }
+        }
+        self.inst_events.clear();
+    }
+
     /// Loop point: back to frame 0 (sounding notes keep their remaining length).
     fn wrap(&mut self) {
         let at = self.frame;
+        for o in &mut self.inst_offs {
+            o.0 = o.0.saturating_sub(at);
+        }
         self.frame = 0;
         self.next_trigger = 0;
         // Control points replay from the top: until the first one the channel has its own settings
@@ -724,6 +851,22 @@ impl Engine {
 }
 
 /// Resampling window half-width in source samples.
+/// Notes still held on instruments end when the engine goes away (stop, or a new song).
+impl Drop for Engine {
+    fn drop(&mut self) {
+        for &(_, c, key) in &self.inst_offs {
+            if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
+                inst.note_off(0, key);
+            }
+        }
+        for &(c, key, _) in self.sounding.iter().filter(|s| s.2 == u64::MAX) {
+            if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
+                inst.note_off(0, key.min(127) as u8);
+            }
+        }
+    }
+}
+
 const SINC_W: f64 = 13.5;
 
 /// Adds one voice into its channel's insert bus for block frames `offset..end`.
@@ -1049,6 +1192,78 @@ mod tests {
             patterns: vec![Pattern { number: 1, notes, controls, ..Pattern::default() }],
             ..Project::default()
         }
+    }
+
+    /// Records note events and outputs a constant 1.0 while any note is held.
+    struct Probe {
+        log: Vec<(u64, bool, u8, f32)>,
+        held: Vec<u8>,
+        at: u64,
+    }
+
+    impl crate::Instrument for Probe {
+        fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
+            self.log.push((self.at + u64::from(offset), true, key, velocity));
+            self.held.push(key);
+        }
+        fn note_off(&mut self, offset: u32, key: u8) {
+            self.log.push((self.at + u64::from(offset), false, key, 0.0));
+            self.held.retain(|&k| k != key);
+        }
+        fn process(&mut self, _rate: u32, l: &mut [f32], r: &mut [f32]) {
+            let v = if self.held.is_empty() { 0.0 } else { 1.0 };
+            l.fill(v);
+            r.fill(v);
+            self.at += l.len() as u64;
+        }
+    }
+
+    // spec: plugins/plugin-formats.md (hosting: notes at frame offsets; the channel's volume and pan apply)
+    #[test]
+    fn instrument_channels_get_timed_notes() {
+        let mut p = project(vec![long_note(96, 48, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        assert_eq!(e.report.plugin_channels_silent, 0);
+        let mut out = vec![0.0f32; 512 * 2];
+        let mut frames = Vec::new();
+        for _ in 0..200 {
+            e.process(&mut out);
+            frames.extend_from_slice(&out);
+        }
+        let on = laws::tick_to_frame(96.0, 96, 130.0, 48000);
+        let off = laws::tick_to_frame(144.0, 96, 130.0, 48000);
+        let log = probe.lock().unwrap().log.clone();
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert_eq!((log[0].0, log[0].1, log[0].2), (on, true, 60));
+        assert!((log[0].3 - 100.0 / 128.0).abs() < 1e-6);
+        assert_eq!((log[1].0, log[1].1), (off, false));
+        // Output = 1.0 x channel gain x pan law while the note is held.
+        let (gl, _) = laws::channel_pan(0.0);
+        let g = (laws::channel_gain(0.78125) * gl) as f32;
+        assert_eq!(frames[(on as usize - 1024) * 2], 0.0);
+        let held = (on as usize + 256) * 2;
+        assert!((frames[held] - g).abs() < 1e-6, "{} vs {g}", frames[held]);
+        // (The probe holds its level for a whole process call; the next span after the note-off is silent.)
+        assert_eq!(frames[(off as usize + 1024) * 2], 0.0);
+    }
+
+    #[test]
+    fn dropping_an_engine_releases_held_instrument_notes() {
+        let mut p = project(vec![], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        e.note_on(0, 64, 100);
+        let mut out = vec![0.0f32; 256];
+        e.process(&mut out);
+        drop(e);
+        assert!(probe.lock().unwrap().held.is_empty(), "note released on drop");
     }
 
     fn long_note(position: u32, length: u32, repeat: u8) -> Note {

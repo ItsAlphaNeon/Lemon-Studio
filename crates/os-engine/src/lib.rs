@@ -9,9 +9,11 @@
 pub mod effects;
 pub mod engine;
 pub mod envelope;
+pub mod instrument;
 pub mod laws;
 pub mod sample;
 pub mod wav;
 
 pub use engine::{Engine, EngineReport, PlayMode};
+pub use instrument::{Instrument, SharedInstrument};
 pub use sample::{Sample, SampleLibrary};

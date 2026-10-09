@@ -26,6 +26,7 @@ pub enum Face {
     Meter,
 }
 
+#[derive(Clone, Copy)]
 pub struct Plugin {
     pub name: &'static str,
     pub cat: usize,
@@ -69,6 +70,16 @@ pub const EFFECTS: &[Plugin] = &[
     p("Placeholder gain", 6, Knobs, 44, 40, 0x9ab0b8),
     p("Placeholder patcher", 9, Curve, 86, 58, 0x6fb0d0),
 ];
+
+/// Built-in generators followed by the hosted instruments (`State::hosted_generators`).
+pub fn generators(s: &State) -> Vec<Plugin> {
+    let mut v = GENERATORS.to_vec();
+    for &name in &s.hosted_generators {
+        let cat = if name.contains("Sampler") { 5 } else { 7 };
+        v.push(p(name, cat, Knobs, 92, 62, 0x49f1b1));
+    }
+    v
+}
 
 /// Tab centres at 1920 px width (measured), left half then right half.
 const GEN_X: [f32; 9] = [70.0, 169.0, 250.0, 326.0, 415.0, 517.0, 639.0, 780.0, 896.0];
@@ -205,7 +216,9 @@ pub fn paint(ui: &mut Ui, s: &State) {
     // Tiles.
     let mut tooltip = None;
     let content = Rect::new(0.0, 62.0, w, h - bar_h - 62.0 - 10.0);
-    for (effects, list, cats, title) in [(false, GENERATORS, GEN_CATS, "Generators"), (true, EFFECTS, FX_CATS, "Effects")] {
+    // Generators: the built-in list, then the hosted (CLAP) instruments found at startup (spec: plugins/plugin-formats.md).
+    let gens = generators(s);
+    for (effects, list, cats, title) in [(false, &gens[..], GEN_CATS, "Generators"), (true, EFFECTS, FX_CATS, "Effects")] {
         let shown: Vec<usize> = match filter {
             Some((e, c)) if e == effects => (0..list.len()).filter(|&i| list[i].cat == c).collect(),
             Some(_) => vec![],

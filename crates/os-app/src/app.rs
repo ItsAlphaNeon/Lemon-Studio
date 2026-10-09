@@ -312,6 +312,13 @@ pub enum Drag {
 
 pub struct State {
     pub project: Project,
+    /// Names of the hosted instruments offered after the built-in generators in the picker.
+    pub hosted_generators: Vec<&'static str>,
+    /// Rack rows played by a hosted plugin.
+    pub hosted_rows: Vec<usize>,
+    /// Requests for the plugin host, handled on the next tick: (row, available index) to create, row to open.
+    pub pending_plugin: Option<(usize, usize)>,
+    pub pending_open: Option<usize>,
     pub file: Option<os_flp::FlpFile>,
     pub path: Option<PathBuf>,
     /// Open child windows, bottom to top.
@@ -424,6 +431,7 @@ impl State {
 
 pub struct App {
     pub state: State,
+    pub plugins: crate::plugins::Plugins,
     pub theme: Theme,
     pub transport: Transport,
     pub hits: Vec<Hit>,
@@ -464,8 +472,13 @@ impl App {
     pub fn new(path: Option<PathBuf>) -> App {
         let transport = Transport::new(os_engine::SampleLibrary::default_factory_dir());
         let mut app = App {
+            plugins: crate::plugins::Plugins::default(),
             state: State {
                 project: default_project(),
+                hosted_generators: Vec::new(),
+                hosted_rows: Vec::new(),
+                pending_plugin: None,
+                pending_open: None,
                 file: None,
                 path: None,
                 z: vec![Win::Playlist, Win::ChannelRack],
@@ -594,6 +607,11 @@ impl App {
     fn save_to(&mut self, target: PathBuf) {
         let s = &mut self.state;
         s.project.tempo = Some(s.tempo);
+        if !s.hosted_rows.is_empty() {
+            // spec: plugins/plugin-formats.md (open question: FLP storage of hosted plugins)
+            s.message = Some("Save failed: projects with hosted plugin channels (Open Sampler, CLAP) cannot be saved to FLP yet".into());
+            return;
+        }
         // A project that was not opened from a file gets a new FLP built from the model.
         if s.file.is_none() {
             match os_flp::project::create(&s.project) {
@@ -617,6 +635,59 @@ impl App {
         });
         if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
             s.path = Some(target);
+        }
+    }
+
+    /// Scans the plugin folders and offers the instruments found in the picker.
+    pub fn scan_plugins(&mut self) {
+        let mut p = crate::plugins::Plugins::scan();
+        (p.owner, p.scale) = (self.plugins.owner, self.plugins.scale);
+        self.plugins = p;
+        // Picker names live for the whole run (`Plugin::name` is static).
+        self.state.hosted_generators = self.plugins.names().into_iter().map(|n| &*Box::leak(n.into_boxed_str())).collect();
+    }
+
+    /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
+    fn plugin_tick(&mut self) {
+        if let Some((row, index)) = self.state.pending_plugin.take() {
+            match self.plugins.create(row, index) {
+                Ok(name) => {
+                    self.state.hosted_rows.push(row);
+                    self.transport.set_instruments(self.plugins.instruments());
+                    self.state.piano.dirty = true;
+                    self.state.message = Some(format!("Added {name} (hosted CLAP plugin)"));
+                    self.state.pending_open = Some(row);
+                }
+                Err(e) => self.state.message = Some(format!("Plugin: {e}")),
+            }
+            self.invalidate();
+        }
+        #[cfg(windows)]
+        if let Some(row) = self.state.pending_open.take() {
+            if let Some(info) = channel_info(&self.state.project, row) {
+                if let Err(e) = self.plugins.open_window(row, info) {
+                    self.state.message = Some(format!("Plugin: {e}"));
+                    self.invalidate();
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            let project = &self.state.project;
+            let requests = self.plugins.idle(|row| channel_info(project, row));
+            for r in requests {
+                use crate::plugins::Request;
+                let chans = &mut self.state.project.channels;
+                match r {
+                    Request::Close(_) => continue,
+                    Request::ToggleOn(row) => chans.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled),
+                    Request::Volume(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.volume = v),
+                    Request::Pan(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.pan = v),
+                    Request::PitchCents(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.pitch_cents = v),
+                }
+                self.state.piano.dirty = true;
+                self.invalidate();
+            }
         }
     }
 
@@ -649,6 +720,7 @@ impl App {
 
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
+        self.plugin_tick();
         let playing = self.transport.playing();
         if let Some(e) = self.transport.take_error() {
             self.state.message = Some(format!("Audio: {e}"));
@@ -2008,13 +2080,18 @@ impl App {
                     piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 }
                 s.selected_channel = i;
-                // The name button opens the channel's plugin window (spec: ui/channel-rack.md §5).
-                if !s.shown(Win::Plugin) {
-                    let r = views::rack::rect(s);
-                    s.plugin_pos = ((r.right() + 8.0).min(1920.0 - 440.0), r.y.min(1080.0 - 210.0));
+                // A hosted plugin opens in its own window with OpenStudio's frame (spec: ui/plugin-window.md).
+                if s.hosted_rows.contains(&i) {
+                    s.pending_open = Some(i);
+                } else {
+                    // The name button opens the channel's plugin window (spec: ui/channel-rack.md §5).
+                    if !s.shown(Win::Plugin) {
+                        let r = views::rack::rect(s);
+                        s.plugin_pos = ((r.right() + 8.0).min(1920.0 - 440.0), r.y.min(1080.0 - 210.0));
+                    }
+                    s.plugin_channel = i;
+                    s.raise(Win::Plugin);
                 }
-                s.plugin_channel = i;
-                s.raise(Win::Plugin);
             }
             Action::RackSelect(i) => s.rack_selected = Some(i),
             Action::RackRollView => s.rack_roll_view = !s.rack_roll_view,
@@ -2054,6 +2131,17 @@ impl App {
             Action::PickerTile(true, _) => {
                 s.picker_open = false;
                 s.message = Some("Effect placeholder: adding effects to mixer slots is not available yet".into());
+            }
+            Action::PickerTile(false, i) if i >= views::picker::GENERATORS.len() => {
+                s.picker_open = false;
+                let name = s.hosted_generators.get(i - views::picker::GENERATORS.len()).copied().unwrap_or("Plugin");
+                let ch = add_plugin_channel(&mut s.project, name);
+                s.pending_plugin = Some((ch, i - views::picker::GENERATORS.len()));
+                s.selected_channel = ch;
+                s.rack_selected = Some(ch);
+                let r = views::rack::rect(s);
+                let view_h = views::rack::panel(r).h;
+                s.rack_scroll = (views::rack::content_h(s) - view_h).max(0.0);
             }
             Action::PickerTile(false, _) => {
                 s.picker_open = false;
@@ -2234,6 +2322,32 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
         layer_children: Vec::new(),
         envelopes: Default::default(),
     }
+}
+
+/// What a plugin window's strip shows for rack row `row` (spec: ui/plugin-window.md).
+#[cfg(windows)]
+fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::ChannelInfo> {
+    let ch = p.channels.get(row)?;
+    Some(crate::plugin_window::ChannelInfo {
+        name: ch.name.clone().unwrap_or_else(|| format!("Channel {}", ch.index + 1)),
+        target: views::rack::insert_name(ch.mixer_track),
+        enabled: ch.enabled,
+        volume: ch.volume,
+        pan: ch.pan,
+        pitch_cents: ch.pitch_cents,
+        range: 2,
+        track: ch.mixer_track,
+    })
+}
+
+/// A generator-plugin channel played by a hosted instrument, routed like `add_channel`. Returns its rack row.
+fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
+    let row = add_channel(p);
+    let ch = &mut p.channels[row];
+    ch.kind = ChannelKind::Plugin;
+    ch.plugin = Some(name.to_string());
+    ch.name = Some(name.to_string());
+    row
 }
 
 /// Add-channel button (spec: ui/channel-rack.md §5): an empty sampler routed to the next insert

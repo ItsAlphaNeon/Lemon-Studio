@@ -1,0 +1,21 @@
+[package]
+name = "open-sampler"
+description = "Open Sampler: OpenStudio's sampler instrument as a VST3 / CLAP plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
+os-engine.workspace = true
+os-model.workspace = true
+os-ui = { path = "../../crates/os-ui" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls_Dialogs", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader"] }
+
+[dev-dependencies]
+tiny-skia = "0.11"

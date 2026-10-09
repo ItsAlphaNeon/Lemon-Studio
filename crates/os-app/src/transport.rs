@@ -3,6 +3,8 @@
 //! The UI sends a project snapshot on Play; `update` swaps in an edited snapshot at the current
 //! position (heard immediately; decoded samples stay cached in the library). Pattern mode loops
 //! inside the engine (`Engine::set_looping`). `preview` plays one note once on its own stream.
+//! Hosted generator plugins (`set_instruments`) are attached to the playback and live engines only: an instance must
+//! not be processed by two streams, so previews of plugin channels play as timed live notes.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -12,7 +14,7 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
-use os_engine::{Engine, PlayMode, SampleLibrary};
+use os_engine::{Engine, PlayMode, SampleLibrary, SharedInstrument};
 use os_model::Project;
 
 /// State the UI reads every frame.
@@ -38,15 +40,21 @@ enum Cmd {
     /// The newest edited project is in `Transport::latest` (older ones are skipped).
     Update,
     Preview(Box<Project>),
+    /// The hosted instruments changed (in `Transport::instruments`): rebuild the engines.
+    Instruments,
     /// Live note (typing keyboard): channel (rack position), key, velocity; `NoteOff` releases.
     NoteOn(usize, u16, u8),
     NoteOff(usize, u16),
     Stop,
 }
 
+/// Hosted instruments by rack row.
+type Instruments = Arc<Mutex<Vec<(usize, SharedInstrument)>>>;
+
 pub struct Transport {
     tx: Sender<Cmd>,
     latest: Arc<Mutex<Option<Project>>>,
+    instruments: Instruments,
     pub shared: Arc<Shared>,
 }
 
@@ -54,16 +62,32 @@ impl Transport {
     pub fn new(factory: Option<PathBuf>) -> Transport {
         let (tx, rx) = mpsc::channel();
         let latest = Arc::new(Mutex::new(None));
+        let instruments: Instruments = Arc::new(Mutex::new(Vec::new()));
         let shared = Arc::new(Shared { sounding: Mutex::new(Vec::with_capacity(256)), ..Shared::default() });
         let s = shared.clone();
         std::thread::Builder::new()
             .name("openstudio-audio".into())
             .spawn({
                 let latest = latest.clone();
-                move || audio_thread(rx, s, latest, SampleLibrary::new(factory))
+                let inst = instruments.clone();
+                move || audio_thread(rx, s, latest, inst, SampleLibrary::new(factory))
             })
             .expect("spawn audio thread");
-        Transport { tx, latest, shared }
+        Transport { tx, latest, instruments, shared }
+    }
+
+    /// Hosted generator plugins by rack row; playing engines pick them up at once.
+    pub fn set_instruments(&self, list: Vec<(usize, SharedInstrument)>) {
+        if let Ok(mut slot) = self.instruments.lock() {
+            *slot = list;
+        }
+        let _ = self.tx.send(Cmd::Instruments);
+    }
+
+    /// The output device's sample rate (what hosted plugins are activated at).
+    pub fn device_rate() -> Option<u32> {
+        let device = cpal::default_host().default_output_device()?;
+        device.default_output_config().ok().map(|c| c.sample_rate())
     }
 
     pub fn play(&self, project: &Project, mode: PlayMode, start_tick: f64) {
@@ -144,7 +168,18 @@ impl Transport {
     }
 }
 
-fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option<Project>>>, mut library: SampleLibrary) {
+fn attach(e: &mut Engine, inst: &Instruments) {
+    if let Ok(list) = inst.lock() {
+        if std::env::var_os("OS_DEBUG").is_some() {
+            eprintln!("[transport] attach {} instrument(s)", list.len());
+        }
+        for (row, i) in list.iter() {
+            e.set_instrument(*row, i.clone());
+        }
+    }
+}
+
+fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option<Project>>>, inst: Instruments, mut library: SampleLibrary) {
     let mut session: Option<Session> = None;
     // One-shot note previews play on their own stream, so they also sound while playing or paused.
     let mut preview: Option<Session> = None;
@@ -157,6 +192,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         if s.kind == Kind::Live {
             e.clear_schedule();
         }
+        attach(&mut e, &inst);
         let old = s.engine.lock().map(|mut slot| {
             e.continue_from(&mut slot);
             std::mem::replace(&mut *slot, e)
@@ -179,6 +215,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     live_project = Some(project);
                 }
             }
+            Ok(Cmd::Instruments) => {
+                for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
+                    swap(s, &mut library);
+                }
+            }
             Ok(Cmd::NoteOn(ch, key, vel)) => {
                 let paused = shared.paused.load(Ordering::Relaxed);
                 let target = match session.as_ref() {
@@ -186,7 +227,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     _ => {
                         if live.is_none() {
                             if let Some(p) = &live_project {
-                                match Session::start(p, PlayMode::Pattern(1), Kind::Live, &mut library, shared.clone()) {
+                                match Session::start(p, PlayMode::Pattern(1), Kind::Live, &mut library, shared.clone(), &inst) {
                                     Ok(s) => live = Some(s),
                                     Err(e) => report(&shared, e),
                                 }
@@ -207,8 +248,35 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
             }
             Ok(Cmd::Preview(project)) => {
+                // A plugin channel's preview plays as a timed live note on the stream that hosts the instrument.
+                let note = project.patterns.first().and_then(|p| p.notes.first()).copied();
+                let row = note.and_then(|n| project.channels.iter().position(|c| c.index == n.channel));
+                let hosted = row.is_some_and(|r| inst.lock().is_ok_and(|l| l.iter().any(|(i, _)| *i == r)));
+                if let (true, Some(n), Some(r)) = (hosted, note, row) {
+                    let paused = shared.paused.load(Ordering::Relaxed);
+                    if (session.is_none() || paused) && live.is_none() {
+                        if let Some(p) = live_project.as_ref().or(Some(&*project)) {
+                            match Session::start(p, PlayMode::Pattern(1), Kind::Live, &mut library, shared.clone(), &inst) {
+                                Ok(s) => live = Some(s),
+                                Err(e) => report(&shared, e),
+                            }
+                        }
+                    }
+                    let target = match session.as_ref() {
+                        Some(s) if !paused => Some(s),
+                        _ => live.as_ref(),
+                    };
+                    if let Some(s) = target {
+                        let tempo = project.tempo.unwrap_or(140.0);
+                        let frames = os_engine::laws::tick_to_frame(f64::from(n.length.max(1)), project.ppq.max(1), tempo, s.rate);
+                        if let Ok(mut e) = s.engine.lock() {
+                            e.note_for(r, n.key, n.velocity, frames);
+                        }
+                    }
+                    continue;
+                }
                 preview = None;
-                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, &mut library, shared.clone()) {
+                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, &mut library, shared.clone(), &inst) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
@@ -217,7 +285,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 session = None;
                 shared.paused.store(false, Ordering::Relaxed);
                 live_project = Some((*project).clone());
-                match Session::start(&project, mode, Kind::Song, &mut library, shared.clone()) {
+                match Session::start(&project, mode, Kind::Song, &mut library, shared.clone(), &inst) {
                     Ok(s) => {
                         if start > 0.0 {
                             let tempo = project.tempo.unwrap_or(140.0);
@@ -280,7 +348,7 @@ struct Session {
 }
 
 impl Session {
-    fn start(project: &Project, mode: PlayMode, kind: Kind, library: &mut SampleLibrary, shared: Arc<Shared>) -> Result<Session, String> {
+    fn start(project: &Project, mode: PlayMode, kind: Kind, library: &mut SampleLibrary, shared: Arc<Shared>, inst: &Instruments) -> Result<Session, String> {
         let looping = kind == Kind::Song;
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or("no audio output device")?;
@@ -293,6 +361,9 @@ impl Session {
         e.set_looping(looping && matches!(mode, PlayMode::Pattern(_)));
         if kind == Kind::Live {
             e.clear_schedule();
+        }
+        if kind != Kind::Preview {
+            attach(&mut e, inst);
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));

@@ -5,6 +5,9 @@ mod icons;
 mod knobs;
 mod logo;
 mod piano;
+#[cfg(windows)]
+mod plugin_window;
+mod plugins;
 mod tabler;
 mod transport;
 mod views;
@@ -172,6 +175,18 @@ impl ApplicationHandler for Shell {
         let window = Rc::new(el.create_window(attrs).expect("create window"));
         let context = softbuffer::Context::new(window.clone()).expect("graphics context");
         self.surface = Some(softbuffer::Surface::new(&context, window.clone()).expect("surface"));
+        // Hosted plugins: windows are owned by the main window; scanning loads the .clap files found.
+        #[cfg(windows)]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(h) = window.window_handle() {
+                if let RawWindowHandle::Win32(w) = h.as_raw() {
+                    self.app.plugins.owner = w.hwnd.get();
+                }
+            }
+        }
+        self.app.plugins.scale = window.scale_factor() as f32;
+        self.app.scan_plugins();
         self.window = Some(window);
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16)));
     }

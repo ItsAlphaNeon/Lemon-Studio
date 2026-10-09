@@ -15,7 +15,11 @@ os-flp.workspace = true
 os-engine.workspace = true
 os-theme = { path = "../os-theme" }
 os-ui = { path = "../os-ui" }
+os-clap = { path = "../os-clap" }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"
 rfd = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader"] }

@@ -1,0 +1,8 @@
+[package]
+name = "bundle-plugins"
+description = "Builds OpenStudio's plugins and writes their VST3 / CLAP bundles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
