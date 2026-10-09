@@ -1,0 +1,11 @@
+[package]
+name = "os-play"
+description = "Play an FLP project through the default audio output with the OpenStudio engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+os-flp.workspace = true
+os-engine.workspace = true
+cpal = "0.18"

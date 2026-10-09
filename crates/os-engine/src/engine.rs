@@ -169,7 +169,7 @@ impl Engine {
             order,
             triggers,
             next_trigger: 0,
-            voices: Vec::new(),
+            voices: Vec::with_capacity(1024),
             frame: 0,
             end_frame: laws::tick_to_frame(end_tick, ppq, tempo, rate),
             report,
@@ -178,6 +178,16 @@ impl Engine {
 
     pub fn sample_rate(&self) -> u32 {
         self.rate
+    }
+
+    /// Frames rendered so far.
+    pub fn position(&self) -> u64 {
+        self.frame
+    }
+
+    /// Length of the scheduled material in frames (voices may ring past it).
+    pub fn length(&self) -> u64 {
+        self.end_frame
     }
 
     /// True once all scheduled material has played and every voice has finished.
