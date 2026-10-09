@@ -4,6 +4,7 @@
 pub mod browser;
 pub mod menus;
 pub mod mixer;
+pub mod piano;
 pub mod playlist;
 pub mod rack;
 pub mod toolbar;
@@ -58,7 +59,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     match s.front {
         Some(Win::Playlist) => playlist::paint(ui, s, work, f),
         Some(Win::Mixer) => mixer::paint(ui, s, work, f),
-        Some(Win::PianoRoll) => placeholder_window(ui, work, "Piano roll - (not available yet)"),
+        Some(Win::PianoRoll) => piano::paint(ui, s, work, f),
         _ => {}
     }
     if s.show_browser {
@@ -94,11 +95,6 @@ pub fn window_frame(ui: &mut Ui, r: Rect, title: &str, title_x: f32) -> Rect {
     }
     let _ = bar;
     Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0)
-}
-
-fn placeholder_window(ui: &mut Ui, r: Rect, title: &str) {
-    let client = window_frame(ui, r, title, 30.0);
-    ui.c.fill_rect(client, ui.t.grid);
 }
 
 /// Raised surface: soft vertical gradient (lighter at the top) so panels don't look flat.

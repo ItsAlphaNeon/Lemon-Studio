@@ -190,6 +190,11 @@ impl Canvas {
     /// True when `b` (logical, padded by `pad`) lies entirely outside the current clip.
     fn outside(&self, b: tiny_skia::Rect, pad: f32) -> bool {
         let c = self.clip_rect();
+        // An empty clip (e.g. a pushed clip entirely outside the damage rect) shows nothing.
+        let (x0, y0, x1, y1) = self.clip_px();
+        if x1 <= x0 || y1 <= y0 {
+            return true;
+        }
         b.right() + pad < c.x || b.left() - pad > c.right() || b.bottom() + pad < c.y || b.top() - pad > c.bottom()
     }
 

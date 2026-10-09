@@ -249,6 +249,27 @@ tokens! {
     menu_drop_text = 0xd4dade, "Dropdown menu text.";
     menu_drop_disabled = 0x6d7275, "Dropdown menu, not yet available.";
     clip = 0x4c6a7c, "Default clip color.";
+    pr_row = 0x22272b, "Piano roll: white-key rows.";
+    pr_row_black = 0x1c2125, "Piano roll: black-key rows.";
+    pr_row_sel = 0x302c30, "Piano roll: white-key rows while notes are selected.";
+    pr_row_black_sel = 0x2a262a, "Piano roll: black-key rows while notes are selected.";
+    pr_bar = 0x000307, "Piano roll: bar lines.";
+    note_top = 0xb0e3b7, "Note body, top of the gradient.";
+    note_bottom = 0x8ec195, "Note body, bottom of the gradient.";
+    note_rim = 0x4b6652, "Note rim.";
+    note_text = 0x3c5a41, "Note label.";
+    note_sel_top = 0xef8f8f, "Selected note body, top.";
+    note_sel_bottom = 0xd37373, "Selected note body, bottom.";
+    note_sel_rim = 0x714243, "Selected note rim.";
+    note_sel_text = 0xfbe9e9, "Selected note label.";
+    key_white = 0xe5e9f0, "Piano keyboard: white keys (right end of the gradient).";
+    key_white_left = 0xbfc3ca, "Piano keyboard: white keys (left end).";
+    key_black = 0x4d4e50, "Piano keyboard: black keys (right end).";
+    key_black_left = 0x2a2b2d, "Piano keyboard: black keys (left end).";
+    key_c = 0xc6cad1, "Piano keyboard: C keys.";
+    key_label = 0x5082b5, "Piano keyboard: octave labels.";
+    velocity = 0xacdfb3, "Velocity lollipops.";
+    velocity_dot = 0x477a4e, "Velocity lollipop disc.";
 }
 
 /// A loaded theme: the base palette with the global adjustment applied.

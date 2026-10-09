@@ -3,6 +3,7 @@
 mod app;
 mod icons;
 mod logo;
+mod piano;
 mod tabler;
 mod transport;
 mod views;
@@ -16,7 +17,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::ModifiersState;
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
 use app::App;
 use os_ui::Canvas;
@@ -74,7 +75,11 @@ impl ApplicationHandler for Shell {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
+                let was = self.app.resize_cursor;
                 self.app.mouse_move(position.x as f32 / scale, position.y as f32 / scale);
+                if self.app.resize_cursor != was {
+                    window.set_cursor(if self.app.resize_cursor { CursorIcon::EwResize } else { CursorIcon::Default });
+                }
                 if self.app.has_damage() {
                     window.request_redraw();
                 }
@@ -94,7 +99,19 @@ impl ApplicationHandler for Shell {
                     }
                 } else {
                     self.app.mouse_up();
+                    if self.app.resize_cursor && self.app.drag.is_none() {
+                        self.app.resize_cursor = false;
+                        window.set_cursor(CursorIcon::Default);
+                    }
                 }
+                window.request_redraw();
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
+                self.app.mouse_down_right();
+                window.request_redraw();
+            }
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Right, .. } => {
+                self.app.mouse_up();
                 window.request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -102,7 +119,7 @@ impl ApplicationHandler for Shell {
                     MouseScrollDelta::LineDelta(x, y) => (x, y),
                     MouseScrollDelta::PixelDelta(p) => (p.x as f32 / 40.0, p.y as f32 / 40.0),
                 };
-                self.app.wheel(dx, dy, self.mods.shift_key());
+                self.app.wheel(dx, dy, self.mods.shift_key(), self.mods.control_key());
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
@@ -186,7 +203,7 @@ impl ApplicationHandler for Shell {
     }
 }
 
-/// `openstudio --screenshot out.png [--view playlist|mixer] [--no-rack] [project.flp]`:
+/// `openstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [project.flp]`:
 /// paint one 1920×1080 frame offscreen (used to compare with reference measurements).
 fn screenshot(args: &[String]) {
     let mut out = None;
@@ -194,6 +211,8 @@ fn screenshot(args: &[String]) {
     let mut rack = true;
     let mut browser = true;
     let mut path = None;
+    let mut pattern = None;
+    let mut channel = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -201,17 +220,29 @@ fn screenshot(args: &[String]) {
             "--view" => view = it.next().cloned().unwrap_or_default(),
             "--no-rack" => rack = false,
             "--no-browser" => browser = false,
+            "--pattern" => pattern = it.next().and_then(|v| v.parse().ok()),
+            "--channel" => channel = it.next().and_then(|v| v.parse().ok()),
             other => path = Some(std::path::PathBuf::from(other)),
         }
     }
     let mut app = App::new(path);
+    if let Some(p) = pattern {
+        app.state.pattern = p;
+    }
+    if let Some(c) = channel {
+        app.state.selected_channel = c;
+    }
     app.state.show_rack = rack;
     app.state.show_browser = browser;
     app.state.front = match view.as_str() {
         "mixer" => Some(app::Win::Mixer),
+        "piano" => Some(app::Win::PianoRoll),
         "none" => None,
         _ => Some(app::Win::Playlist),
     };
+    if app.state.front == Some(app::Win::PianoRoll) {
+        piano::center_keys(&mut app.state, 744.0);
+    }
     let mut canvas = Canvas::new(1920, 1080, 1.0).expect("canvas");
     app.paint(&mut canvas, None);
     if std::env::var_os("OS_BENCH").is_some() {
