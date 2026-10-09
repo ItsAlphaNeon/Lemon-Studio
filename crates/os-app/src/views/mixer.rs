@@ -5,7 +5,7 @@ use std::f32::consts::PI;
 
 use os_ui::{Color, Font, Glyph, Rect};
 
-use super::{led, resize_zones, window_body, window_buttons, window_frame, FrameInfo};
+use super::{led, resize_zones, window_body, window_buttons, FrameInfo};
 use crate::app::{Action, State, Ui, Win, TITLE_H};
 use crate::icons::{self, Icon};
 
@@ -97,7 +97,10 @@ const ICON: Color = Color::rgb(0xc4ccd0);
 pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let panel_w = 221.0;
     window_body(ui, r);
-    let client = window_frame(ui, Win::Mixer, Rect::new(r.x, r.y, r.w - panel_w, r.h), "", 0.0, false);
+    let outer = r;
+    let inner = super::float_frame(ui, s, Win::Mixer, r);
+    let r = inner.unwrap_or(r);
+    let client = super::window_frame_ex(ui, Win::Mixer, Rect::new(r.x, r.y, r.w - panel_w, r.h), "", 0.0, false, inner.is_some());
     title_tools(ui, r);
     if r.h < 2.0 * TITLE_H {
         // Collapsed to the title bar: only the slot panel's title with the window buttons.
@@ -157,7 +160,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     chevron(ui, area.x + 5.0, bottom - 9.5, false, Color::rgb(0x5d6366));
 
     slot_panel(ui, s, Rect::new(r.right() - panel_w, r.y, panel_w, r.h));
-    resize_zones(ui, s, Win::Mixer, r);
+    resize_zones(ui, s, Win::Mixer, outer);
 }
 
 fn title_tools(ui: &mut Ui, r: Rect) {

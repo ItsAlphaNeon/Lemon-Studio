@@ -141,11 +141,18 @@ pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, normal: Color, hov
 /// Window frame with a title bar (§5); the bar drags the window. `buttons` = draw the window
 /// buttons at the right (the Mixer draws its own over the slot panel). Returns the client rect.
 pub fn window_frame(ui: &mut Ui, win: Win, r: Rect, title: &str, title_x: f32, buttons: bool) -> Rect {
+    window_frame_ex(ui, win, r, title, title_x, buttons, false)
+}
+
+/// `window_frame` with `flat`: a flat title bar without the separator (inside a floating frame).
+pub fn window_frame_ex(ui: &mut Ui, win: Win, r: Rect, title: &str, title_x: f32, buttons: bool, flat: bool) -> Rect {
     let t = ui.t;
     ui.c.fill_rect(r, t.window_title);
     let bar = Rect::new(r.x, r.y, r.w, 23.0);
-    ui.c.fill_rect_gradient(bar, t.window_title.shade(0.04), t.window_title.shade(-0.03), 0.0);
-    ui.c.fill_rect(Rect::new(r.x, r.y + 22.0, r.w, 1.0), t.splitter_dark);
+    if !flat {
+        ui.c.fill_rect_gradient(bar, t.window_title.shade(0.04), t.window_title.shade(-0.03), 0.0);
+        ui.c.fill_rect(Rect::new(r.x, r.y + 22.0, r.w, 1.0), t.splitter_dark);
+    }
     ui.c.text(os_ui::Font::new(17), r.x + title_x, r.y + 1.0, t.text, title);
     ui.hit(bar, Action::WinDrag(win), "Drag to move");
     // Minimize / maximize / close glyphs at the right (1862, 1881, 1901 at full width).
@@ -153,6 +160,33 @@ pub fn window_frame(ui: &mut Ui, win: Win, r: Rect, title: &str, title_x: f32, b
         window_buttons(ui, win, r.right() - 64.0, r.y, t.text_dim.mix(t.glyph, 0.6), t.glyph);
     }
     Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0)
+}
+
+/// Floating window frame (spec ui/piano-roll.md §1a, same for Playlist / Mixer / Piano roll):
+/// 1 px dark border, 5 px frame, 1 px inner line around the client, flat 28 px title bar.
+/// Returns the inner rect (laid out like the docked window) when `win` floats, else `None`.
+pub fn float_frame(ui: &mut Ui, s: &State, win: Win, r: Rect) -> Option<Rect> {
+    let ws = &s.wins[win.slot()?];
+    if ws.maxed || ws.mini || r.h < 2.0 * crate::app::TITLE_H {
+        return None;
+    }
+    let t = ui.t;
+    ui.c.fill_rect(r, Color::rgb(0x191d1f));
+    ui.c.fill_rect(r.inset(1.0), t.window_title);
+    ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, 1.0), Color::rgb(0x303436));
+    let inner = Rect::new(r.x + 7.0, r.y + 5.0, r.w - 14.0, r.h - 12.0);
+    ui.c.fill_rect(Rect::new(inner.x - 1.0, inner.y + 22.0, inner.w + 2.0, inner.h - 21.0), Color::rgb(0x131718));
+    ui.hit(Rect::new(r.x, r.y, r.w, 28.0), Action::WinDrag(win), "Drag to move");
+    Some(inner)
+}
+
+/// Window frame for `win`: the floating frame when it floats, else the docked title bar.
+/// Returns (layout rect, client rect).
+pub fn framed(ui: &mut Ui, s: &State, win: Win, r: Rect, title: &str, title_x: f32, buttons: bool) -> (Rect, Rect) {
+    match float_frame(ui, s, win, r) {
+        Some(inner) => (inner, window_frame_ex(ui, win, inner, title, title_x, buttons, true)),
+        None => (r, window_frame(ui, win, r, title, title_x, buttons)),
+    }
 }
 
 /// A scroll bar over `track`: thumb sized `view / total`, positioned by `pos` (content pixels).

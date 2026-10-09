@@ -4,7 +4,7 @@
 use os_model::Note;
 use os_ui::{Color, Font, Rect};
 
-use super::{resize_zones, window_body, window_frame, FrameInfo};
+use super::{resize_zones, window_body, FrameInfo};
 use crate::app::{Action, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
 use crate::piano::{self, Geom};
@@ -69,11 +69,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let name = channel.and_then(|c| c.name.clone()).unwrap_or_else(|| "(none)".into());
     let title = format!("Piano roll - {name}  \u{203a}");
     window_body(ui, r);
+    let outer = r;
     let floating = !s.wins[Win::PianoRoll.slot().unwrap_or(0)].maxed && r.h >= 2.0 * crate::app::TITLE_H;
-    let (r, shift) = if floating { (float_frame(ui, r, &title), -4.0) } else {
-        window_frame(ui, Win::PianoRoll, r, &title, 365.0, true);
-        (r, 0.0)
-    };
+    let (r, _) = super::framed(ui, s, Win::PianoRoll, r, &title, 365.0, true);
+    let shift = if floating { -4.0 } else { 0.0 };
     toolbar(ui, r, shift);
     if r.h < 2.0 * crate::app::TITLE_H {
         return; // collapsed to the title bar
@@ -163,24 +162,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     super::scrollbar(ui, track, true, s.piano.scroll_y, l.grid.h, (TOP_KEY + 1) as f32 * ROW, Scroll::PianoY);
 
     velocity_panel(ui, s, &l, &g, notes, ch, &sel);
-    resize_zones(ui, s, Win::PianoRoll, r);
-}
-
-/// Floating window frame (§1a): 1 px dark border, 5 px frame, a 1 px inner line around the client
-/// area and a flat 28 px title bar. Returns the rect laid out like the docked window.
-fn float_frame(ui: &mut Ui, r: Rect, title: &str) -> Rect {
-    let t = ui.t;
-    ui.c.fill_rect(r, Color::rgb(0x191d1f));
-    ui.c.fill_rect(r.inset(1.0), t.window_title);
-    ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, 1.0), Color::rgb(0x303436));
-    let inner = Rect::new(r.x + 7.0, r.y + 5.0, r.w - 14.0, r.h - 12.0);
-    let client = Rect::new(inner.x - 1.0, inner.y + 22.0, inner.w + 2.0, inner.h - 22.0);
-    ui.c.fill_rect(client, Color::rgb(0x131718));
-    let bar = Rect::new(r.x, r.y, r.w, 28.0);
-    ui.hit(bar, Action::WinDrag(Win::PianoRoll), "Drag to move");
-    ui.c.text(Font::new(16), inner.x + 361.0, r.y + 6.0, t.text, title);
-    super::window_buttons(ui, Win::PianoRoll, r.right() - 70.0, r.y + 4.0, t.glyph, Color::rgb(0xffffff));
-    inner
+    resize_zones(ui, s, Win::PianoRoll, outer);
 }
 
 /// Scroll arrow button (§1a): raised face with a 1 px dark rim and a chevron pointing `dir`

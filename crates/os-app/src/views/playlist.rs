@@ -4,7 +4,7 @@
 use os_model::ClipSource;
 use os_ui::{Rect};
 
-use super::{resize_zones, rgb, window_body, window_frame, FrameInfo};
+use super::{resize_zones, rgb, window_body, FrameInfo};
 use crate::app::{Action, State, Ui, Win};
 use crate::icons::{self, Icon};
 
@@ -17,7 +17,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
     let bar_w = s.playlist_bar_w;
     window_body(ui, r);
-    let client = window_frame(ui, Win::Playlist, r, "Playlist - Arrangement  \u{203a}  (none)  \u{203a}", 281.0, true);
+    let outer = r;
+    let (r, client) = super::framed(ui, s, Win::Playlist, r, "Playlist - Arrangement  \u{203a}  (none)  \u{203a}", 281.0, true);
     // Toolbar icons inside the title bar.
     let tools = [
         Icon::ArrowRight, Icon::Magnet, Icon::Pencil, Icon::Brush, Icon::Delete, Icon::Mute, Icon::Slip, Icon::Slice, Icon::Select,
@@ -183,5 +184,5 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.fill_rect(Rect::new(x, grid_y - 20.0, 1.5, area.h + 20.0), t.playhead);
     }
     ui.c.pop_clip();
-    resize_zones(ui, s, Win::Playlist, r);
+    resize_zones(ui, s, Win::Playlist, outer);
 }
