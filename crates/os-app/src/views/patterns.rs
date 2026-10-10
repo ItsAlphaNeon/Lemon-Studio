@@ -1,0 +1,135 @@
+//! Pattern name box (with suggestions and colour swatches) and the delete confirmation.
+// spec: ui/pattern-menu.md §3, §4
+
+use os_ui::{Color, Font, Rect};
+
+use super::rgb;
+use crate::app::{Action, State, Ui};
+use crate::patterns::{self as pt, BoxTarget, Hit, BOX_H, BOX_W, SWATCHES, WORDS};
+
+const BG: u32 = 0x1c2023;
+const SUG_W: f32 = 96.0;
+const SUG_ROW: f32 = 18.0;
+const SW: f32 = 22.0;
+
+fn cross(ui: &mut Ui, r: Rect, c: Color) {
+    ui.c.line(r.x + 4.0, r.y + 4.0, r.right() - 4.0, r.bottom() - 4.0, 1.5, c);
+    ui.c.line(r.right() - 4.0, r.y + 4.0, r.x + 4.0, r.bottom() - 4.0, 1.5, c);
+}
+
+fn tick(ui: &mut Ui, r: Rect, c: Color) {
+    let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+    ui.c.line(x - 5.0, y, x - 1.0, y + 4.0, 1.5, c);
+    ui.c.line(x - 1.0, y + 4.0, x + 5.0, y - 4.0, 1.5, c);
+}
+
+pub fn paint(ui: &mut Ui, s: &State) {
+    let t = ui.t;
+    let font = Font::new(14);
+    if let Some(b) = s.pat_ui.name_box.as_ref() {
+        let r = Rect::new(b.at.0, b.at.1, BOX_W, BOX_H);
+        ui.c.fill_rect(r, Color::rgb(BG));
+        ui.c.stroke_rrect(r, 0.0, 1.0, t.menu_pop_border);
+        ui.hit(r, Action::Pat(Hit::Inside), "");
+        let named = matches!(b.target, BoxTarget::Name(_));
+        let field = Rect::new(r.x + 4.0, r.y + 4.0, r.w - if named { 30.0 } else { 8.0 }, 22.0);
+        ui.c.fill_rect(field, t.tempo_box);
+        let tw = ui.c.text_width(font, &b.text);
+        if b.fresh && !b.text.is_empty() {
+            ui.c.fill_rect(Rect::new(field.x + 3.0, field.y + 3.0, tw + 2.0, 16.0), Color::rgb(0x3d6a8a));
+        }
+        ui.c.text_clip(font, field.x + 4.0, field.y + 3.0, field.w - 6.0, t.glyph, &b.text);
+        if !b.fresh {
+            let cx = (field.x + 5.0 + tw).min(field.right() - 2.0);
+            ui.c.fill_rect(Rect::new(cx, field.y + 3.0, 1.0, 16.0), t.glyph);
+        }
+        let row = r.y + 29.0;
+        let mut x = r.x + 4.0;
+        if named {
+            let a = Rect::new(x, row, 18.0, 18.0);
+            let hov = ui.hit(a, Action::Pat(Hit::Suggestions), "Name suggestions");
+            ui.c.fill_rrect(a, 2.0, if hov { t.menu_pop_hi } else { t.menu_pop });
+            crate::icons::draw(ui.c, crate::icons::Icon::ArrowRight, a.inset(3.0), t.glyph);
+            x += 20.0;
+        }
+        let ok = Rect::new(x, row, 18.0, 18.0);
+        let hov = ui.hit(ok, Action::Pat(Hit::Accept), "Accept");
+        ui.c.fill_rrect(ok, 2.0, if hov { t.menu_pop_hi } else { t.menu_pop });
+        tick(ui, ok, t.glyph);
+        let no = Rect::new(x + 20.0, row, 18.0, 18.0);
+        let hov = ui.hit(no, Action::Pat(Hit::Cancel), "Cancel");
+        ui.c.fill_rrect(no, 2.0, if hov { t.menu_pop_hi } else { t.menu_pop });
+        cross(ui, no, t.glyph);
+        let caption = match b.target {
+            BoxTarget::Name(n) => format!("Pattern {n} name"),
+            BoxTarget::Transpose(_) => "Semitones".to_string(),
+        };
+        ui.c.text_clip(Font::new(12), x + 44.0, row + 2.0, r.right() - x - 74.0, t.glyph_dim, &caption);
+        if let BoxTarget::Name(n) = b.target {
+            // Colour tab: a left-pointing tab in the pattern colour.
+            let col = s.project.pattern(n).and_then(|p| p.color).map_or(Color::rgb(0x925755), rgb);
+            let tab = Rect::new(r.right() - 22.0, r.y + 4.0, 18.0, r.h - 8.0);
+            let hov = ui.hit(tab, Action::Pat(Hit::Color), "Pattern colour");
+            ui.c.fill_rect(Rect::new(tab.x + 5.0, tab.y, tab.w - 5.0, tab.h), col);
+            ui.c.fill_rect(Rect::new(tab.x, tab.y + tab.h / 2.0 - 5.0, 5.0, 10.0), col);
+            if hov {
+                ui.c.stroke_rrect(tab, 0.0, 1.0, t.glyph);
+            }
+        }
+        if b.suggestions {
+            let cols: Vec<Vec<String>> = std::iter::once(s.pat_ui.recent.clone())
+                .chain(WORDS.iter().map(|c| c.iter().map(|w| w.to_string()).collect()))
+                .collect();
+            let rows = cols.iter().map(Vec::len).max().unwrap_or(0) as f32;
+            let p = Rect::new(r.x, r.bottom(), SUG_W * cols.len() as f32 + 2.0, rows * SUG_ROW + 2.0);
+            ui.c.fill_rect(p, t.menu_pop);
+            ui.c.stroke_rrect(p, 0.0, 1.0, t.menu_pop_border);
+            ui.hit(p, Action::Pat(Hit::Inside), "");
+            for (ci, col) in cols.iter().enumerate() {
+                let cx = p.x + 1.0 + ci as f32 * SUG_W;
+                if ci > 0 {
+                    ui.c.fill_rect(Rect::new(cx - 1.0, p.y + 1.0, 1.0, p.h - 2.0), t.menu_pop_head);
+                }
+                for (ri, w) in col.iter().enumerate() {
+                    let rr = Rect::new(cx, p.y + 1.0 + ri as f32 * SUG_ROW, SUG_W - 1.0, SUG_ROW);
+                    if ui.hit(rr, Action::Pat(Hit::Suggest(ci, ri)), "Use this name") {
+                        ui.c.fill_rect(rr, t.menu_pop_hi);
+                    }
+                    ui.c.text_clip(Font::new(13), rr.x + 6.0, rr.y + 1.0, rr.w - 8.0, t.menu_pop_text, w);
+                }
+            }
+        }
+        if b.palette {
+            let p = Rect::new(r.right() - SW * 10.0 - 2.0, r.bottom(), SW * 10.0 + 2.0, SW * 2.0 + 2.0);
+            ui.c.fill_rect(p, t.menu_pop);
+            ui.hit(p, Action::Pat(Hit::Inside), "");
+            for (i, &c) in SWATCHES.iter().enumerate() {
+                let sr = Rect::new(p.x + 1.0 + (i % 10) as f32 * SW, p.y + 1.0 + (i / 10) as f32 * SW, SW, SW);
+                let hov = ui.hit(sr, Action::Pat(Hit::Swatch(i)), "Set the pattern colour");
+                ui.c.fill_rect(sr.inset(2.0), Color::rgb(c));
+                if hov {
+                    ui.c.stroke_rrect(sr.inset(1.0), 0.0, 1.0, t.glyph);
+                }
+            }
+        }
+    }
+    if s.pat_ui.confirm {
+        let (w, h) = (380.0, 120.0);
+        let r = Rect::new(((s.screen.0 - w) / 2.0).round(), ((s.screen.1 - h) / 2.0).round(), w, h);
+        ui.c.fill_rect(Rect::new(0.0, 0.0, s.screen.0, s.screen.1), Color::rgb(0).with_alpha(80));
+        ui.hit(Rect::new(0.0, 0.0, s.screen.0, s.screen.1), Action::Swallow, "");
+        ui.c.fill_rect(r, Color::rgb(BG));
+        ui.c.stroke_rrect(r, 0.0, 1.0, t.menu_pop_border);
+        ui.hit(r, Action::Pat(Hit::Inside), "");
+        ui.c.text(Font::new(13), r.x + 12.0, r.y + 8.0, t.glyph_dim, "Confirm");
+        let msg = format!("{} is about to be deleted.", pt::name_of(s, s.pattern.max(1)));
+        ui.c.text_clip(font, r.x + 12.0, r.y + 40.0, r.w - 24.0, t.glyph, &msg);
+        for (i, (label, hit)) in [("Ok", Hit::ConfirmOk), ("Cancel", Hit::ConfirmCancel)].into_iter().enumerate() {
+            let br = Rect::new(r.right() - 180.0 + i as f32 * 86.0, r.bottom() - 34.0, 80.0, 24.0);
+            let hov = ui.hit(br, Action::Pat(hit), label);
+            ui.c.fill_rrect(br, 2.0, if hov { t.menu_pop_hi } else { t.menu_pop });
+            let lw = ui.c.text_width(font, label);
+            ui.c.text(font, br.x + (br.w - lw) / 2.0, br.y + 4.0, t.glyph, label);
+        }
+    }
+}

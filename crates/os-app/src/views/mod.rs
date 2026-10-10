@@ -8,6 +8,7 @@ pub mod mondebug;
 pub mod picker;
 pub mod mixer;
 pub mod piano;
+pub mod patterns;
 pub mod playlist;
 pub mod rack;
 pub mod toolbar;
@@ -95,6 +96,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     if let Some(m) = s.menu_open {
         menus::paint_dropdown(ui, s, m);
     }
+    patterns::paint(ui, s);
     if s.picker_open {
         picker::paint(ui, s);
     }

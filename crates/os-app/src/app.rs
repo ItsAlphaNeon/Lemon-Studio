@@ -183,6 +183,8 @@ pub enum Action {
     PlPick(os_model::ClipSource),
     PlPopup(usize),
     PlPopupSub(usize),
+    /// Pattern name box, suggestions, swatches, delete confirmation (spec: ui/pattern-menu.md).
+    Pat(crate::patterns::Hit),
 }
 
 /// Scrollable view axes. Scroll values are in content pixels (see `App::scroll_get`).
@@ -304,6 +306,8 @@ impl Ui<'_> {
 
 #[derive(Debug, Clone)]
 pub enum Drag {
+    /// Vertical drag on the pattern name box steps the number (spec: ui/pattern-menu.md §1).
+    PatternBox { y0: f32, p0: u16 },
     /// Move a floating window (offset of the mouse from its top-left).
     Window { win: Win, dx: f32, dy: f32 },
     /// Resize a Playlist / Mixer / Piano roll window (`r0` = its rect when the drag began).
@@ -417,6 +421,7 @@ pub struct State {
     pub maximized: bool,
     pub piano: PianoState,
     pub playlist: crate::playlist::PlaylistState,
+    pub pat_ui: crate::patterns::PatternUi,
     /// Playlist, Mixer, Piano roll (see `Win::slot`).
     pub wins: [WinState; 3],
     /// Size of the shell window in logical pixels (set each paint).
@@ -582,6 +587,7 @@ impl App {
                 maximized: true,
                 piano: PianoState::default(),
                 playlist: crate::playlist::PlaylistState::default(),
+                pat_ui: Default::default(),
                 wins: [
                     WinState { rect: Rect::new(693.0, 101.0, 1126.0, 378.0), maxed: false, mini: false },
                     WinState { rect: Rect::new(231.0, 565.0, 1552.0, 435.0), maxed: false, mini: false },
@@ -1172,6 +1178,12 @@ impl App {
                     }
                     self.damage_rect(HINT_RECT);
                 }
+                Drag::PatternBox { y0, p0 } => {
+                    let (y0, p0): (f32, u16) = (y0.to_owned(), p0.to_owned());
+                    let steps = ((y0 - y) / crate::patterns::DRAG_STEP).trunc() as i32;
+                    self.state.pattern = (i32::from(p0) + steps).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+                    self.invalidate();
+                }
                 Drag::Fader { track, y0, v0 } => {
                     let per_px = views::mixer::FADER_PER_PX / f64::from(views::mixer::scale(self.state.win_rect(Win::Mixer)));
                     let v = (v0 - f64::from(y - y0) * per_px).clamp(0.0, 1.0);
@@ -1287,6 +1299,13 @@ impl App {
         // Playlist popup menus close on any click outside them; a click elsewhere accepts an open text box.
         if self.state.playlist.popup.is_some() && !matches!(action, Some(Action::PlPopup(_) | Action::PlPopupSub(_))) {
             self.state.playlist.popup = None;
+            return;
+        }
+        // The pattern name box / delete confirmation are modal: a click outside accepts the box.
+        if (self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm) && !matches!(action, Some(Action::Pat(_))) {
+            if self.state.pat_ui.name_box.is_some() {
+                crate::patterns::accept(&mut self.state);
+            }
             return;
         }
         if self.state.playlist.edit.is_some() {
@@ -1473,6 +1492,22 @@ impl App {
             self.state.menu_open = None;
             self.invalidate();
             return;
+        }
+        if self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm {
+            return;
+        }
+        // Pattern selector (spec: ui/pattern-menu.md §1): box = menu at the mouse, "+" = find next empty.
+        match &action {
+            Some(Action::PatternNext) => {
+                self.state.pat_ui.menu_at = Some((x, y));
+                self.state.menu_open = Some(views::menus::PATTERNS);
+                return self.invalidate();
+            }
+            Some(Action::PatternAdd) => {
+                crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindNext, crate::patterns::PLUS_BOX_AT);
+                return self.invalidate();
+            }
+            _ => {}
         }
         if self.state.playlist.popup.is_some() && !matches!(action, Some(Action::PlPopup(_) | Action::PlPopupSub(_))) {
             self.state.playlist.popup = None;
@@ -1894,6 +1929,11 @@ impl App {
         if matches!(area, Some(Action::BrowserList | Action::BrowserRow(_) | Action::BrowserTab(_))) {
             return self.browser_wheel(dy + dx);
         }
+        if matches!(area, Some(Action::PatternNext)) {
+            let d = if dy + dx > 0.0 { 1 } else { -1 };
+            self.state.pattern = (i32::from(self.state.pattern.max(1)) + d).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+            return;
+        }
         if let Some(Action::Scrollbar(t)) = area {
             let step = if t == Scroll::PianoY { views::piano::ROW * 3.0 } else { 60.0 };
             self.scroll_set(t, self.scroll_get(t) - (dy + dx) * step);
@@ -1966,11 +2006,21 @@ impl App {
     pub fn key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) {
         self.invalidate();
         use winit::keyboard::{Key, NamedKey};
+        if crate::patterns::key(&mut self.state, key, ctrl) {
+            return;
+        }
         if self.browser_key(key, ctrl, alt) {
             return;
         }
         // The playlist's editing keys when it is in front (spec: ui/playlist.md §5).
         if self.pl_focus() && crate::playlist::key(self, key, ctrl, alt) {
+            return;
+        }
+        if let Some(cmd) = pattern_shortcut(key, ctrl, self.shift) {
+            let at = crate::patterns::box_at_mouse(self.mouse);
+            if let Some(m) = crate::patterns::run(&mut self.state, cmd, at) {
+                self.state.message = Some(m);
+            }
             return;
         }
         match key {
@@ -2093,7 +2143,7 @@ impl App {
     /// skips the normal shortcut handling. Spec: ui/typing-keyboard.md.
     pub fn typing_key(&mut self, code: KeyCode, pressed: bool, ctrl: bool, alt: bool) -> bool {
         // A playlist text box (track / marker name, point value) takes the letters.
-        if pressed && (self.state.playlist.edit.is_some() || self.browser_takes_typing()) {
+        if pressed && (self.state.playlist.edit.is_some() || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing()) {
             return false;
         }
         if !pressed {
@@ -2501,7 +2551,10 @@ impl App {
                 self.invalidate();
             }
             Action::Tempo => self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo }),
-            Action::Menu(i) => s.menu_open = if s.menu_open == Some(i) { None } else { Some(i) },
+            Action::Menu(i) => {
+                s.pat_ui.menu_at = None;
+                s.menu_open = if s.menu_open == Some(i) { None } else { Some(i) };
+            }
             Action::MenuItem(m, i) => {
                 s.menu_open = None;
                 self.menu_item(m, i);
@@ -2519,12 +2572,16 @@ impl App {
                     piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 }
             }
-            Action::PatternPrev => s.pattern = s.pattern.saturating_sub(1).max(1),
-            Action::PatternNext => s.pattern = (s.pattern + 1).min(999),
-            Action::PatternAdd => {
-                let next = s.project.patterns.iter().map(|p| p.number).max().unwrap_or(0) + 1;
-                s.pattern = next;
+            // spec: ui/pattern-menu.md §1
+            Action::PatternPrev => {
+                s.pat_ui.menu_at = Some((837.0, 75.0));
+                s.menu_open = Some(views::menus::PATTERNS);
             }
+            Action::PatternNext => self.drag = Some(Drag::PatternBox { y0: self.mouse.1, p0: s.pattern.max(1) }),
+            Action::PatternAdd => {
+                crate::patterns::run(s, crate::patterns::Cmd::FindFirst, crate::patterns::PLUS_BOX_AT);
+            }
+            Action::Pat(h) => crate::patterns::hit(s, h),
             Action::MixerSelect(t) => s.selected_mixer = t,
             Action::Fader(t) => {
                 s.selected_mixer = t;
@@ -2724,6 +2781,13 @@ impl App {
                 self.state.picker_cat = None;
             }
             (PATTERNS, i) if i >= PATTERN_PICK => self.state.pattern = (i - PATTERN_PICK) as u16,
+            (PATTERNS, i) if item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).is_some() => {
+                let cmd = item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).expect("checked");
+                let at = crate::patterns::box_at_mouse(self.mouse);
+                if let Some(m) = crate::patterns::run(&mut self.state, cmd, at) {
+                    self.state.message = Some(m);
+                }
+            }
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
             (m, i) => {
                 let label = item_at(m, i).map_or("item", |it| it.label);
@@ -2731,6 +2795,24 @@ impl App {
             }
         }
     }
+}
+
+/// PATTERNS menu shortcuts (spec: ui/pattern-menu.md §3).
+fn pattern_shortcut(key: &winit::keyboard::Key, ctrl: bool, shift: bool) -> Option<crate::patterns::Cmd> {
+    use crate::patterns::Cmd;
+    use winit::keyboard::{Key, NamedKey};
+    let Key::Named(k) = key else { return None };
+    Some(match (k, ctrl, shift) {
+        (NamedKey::F4, false, true) => Cmd::FindFirst,
+        (NamedKey::F4, false, false) => Cmd::FindNext,
+        (NamedKey::F4, true, false) => Cmd::FindNextNoName,
+        (NamedKey::F2, false, false) => Cmd::Rename,
+        (NamedKey::Insert, true, true) => Cmd::InsertOne,
+        (NamedKey::Delete, true, true) => Cmd::Delete,
+        (NamedKey::ArrowUp, true, true) => Cmd::MoveUp,
+        (NamedKey::ArrowDown, true, true) => Cmd::MoveDown,
+        _ => return None,
+    })
 }
 
 /// Typing keyboard velocity (fixed, spec: ui/typing-keyboard.md).

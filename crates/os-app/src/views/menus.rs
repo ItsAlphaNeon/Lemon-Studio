@@ -131,24 +131,24 @@ const ADD_OTHER: &[Item] = &[
 /// The pattern list column is built from the project; this is its placeholder (never drawn).
 const PAT_LIST: &[Item] = &[];
 const PAT_CMDS: &[Item] = &[
-    it("Find first empty...", "Shift+F4"),
-    it("Find next empty...", "F4"),
-    it("Find next empty (no naming)", "Ctrl+F4"),
+    it("Find first empty...", "Shift+F4").on(),
+    it("Find next empty...", "F4").on(),
+    it("Find next empty (no naming)", "Ctrl+F4").on(),
     SEP,
-    it("Select in playlist", ""),
-    it("Rename and color...", "F2"),
-    it("Change color...", ""),
-    it("Random color", ""),
+    it("Select in playlist", "").on(),
+    it("Rename and color...", "F2").on(),
+    it("Change color...", "").on(),
+    it("Random color", "").on(),
     it("Open in project browser", "Shift+Ctrl+P"),
     it("Set time signature...", ""),
-    it("Transpose...", ""),
+    it("Transpose...", "").on(),
     SEP,
-    it("Insert one", "Shift+Ctrl+Ins"),
-    it("Clone", "Shift+Ctrl+C"),
-    it("Delete", "Shift+Ctrl+Del"),
+    it("Insert one", "Shift+Ctrl+Ins").on(),
+    it("Clone", "Shift+Ctrl+C").on(),
+    it("Delete", "Shift+Ctrl+Del").on(),
     SEP,
-    it("Move up", "Shift+Ctrl+Up"),
-    it("Move down", "Shift+Ctrl+Down"),
+    it("Move up", "Shift+Ctrl+Up").on(),
+    it("Move down", "Shift+Ctrl+Down").on(),
     SEP,
     it("Split by channel", ""),
     it("Quick render as audio clip", ""),
@@ -336,18 +336,16 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
     let t = ui.t;
 
     // Pattern list column: one row per project pattern (spec: ui/menus.md, PATTERNS).
+    // spec: ui/pattern-menu.md §2: only used patterns, the column as wide as the longest name.
     let pats: Vec<(u16, String)> = if menu == PATTERNS {
-        let mut v: Vec<(u16, String)> = s.project.patterns.iter().map(|p| (p.number, p.name.clone().unwrap_or_else(|| format!("Pattern {}", p.number)))).collect();
-        if !v.iter().any(|(n, _)| *n == s.pattern) {
-            v.push((s.pattern, format!("Pattern {}", s.pattern)));
-        }
-        v.sort_by_key(|(n, _)| *n);
-        v
+        crate::patterns::listed(s).into_iter().map(|n| (n, crate::patterns::name_of(s, n))).collect()
     } else {
         Vec::new()
     };
+    let list_w = pats.iter().map(|(_, n)| ui.c.text_width(Font::new(14), n) + 28.0).fold(80.0f32, f32::max).ceil();
+    let col_w = |ci: usize, w: f32| if menu == PATTERNS && ci == 0 { list_w } else { w };
 
-    let width: f32 = m.cols.iter().map(|(w, _)| w).sum::<f32>() + BORDER * 2.0;
+    let width: f32 = m.cols.iter().enumerate().map(|(ci, (w, _))| col_w(ci, *w)).sum::<f32>() + BORDER * 2.0;
     let col_h = |items: &[Item]| items.iter().map(row_h).sum::<f32>();
     let body_h = m
         .cols
@@ -355,7 +353,12 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
         .enumerate()
         .map(|(ci, (_, items))| if menu == PATTERNS && ci == 0 { pats.len() as f32 * ROW } else { col_h(items) })
         .fold(0.0, f32::max);
-    let r = Rect::new(x0 - 4.0, 78.0, width, body_h + BORDER * 2.0);
+    let (ax, ay) = match (menu == PATTERNS, s.pat_ui.menu_at) {
+        (true, Some(at)) => at,
+        _ => (x0 - 4.0, 78.0),
+    };
+    let r = Rect::new(ax.min(s.screen.0 - width).max(0.0), ay, width, body_h + BORDER * 2.0);
+    let away = !r.contains(ui.mouse.0, ui.mouse.1);
     ui.c.fill_rect(r, t.menu_pop);
     ui.c.stroke_rrect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0), 0.0, 2.0, t.menu_pop_border);
     ui.hit(r, Action::Swallow, "");
@@ -364,6 +367,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
     let mut cx = r.x + BORDER;
     let mut flat = 0usize;
     for (ci, (cw, items)) in m.cols.iter().enumerate() {
+        let cw = &col_w(ci, *cw);
         let col = Rect::new(cx, r.y + BORDER, *cw, body_h);
         if ci > 0 {
             ui.c.fill_rect(Rect::new(cx - 1.0, col.y, 1.0, body_h), t.menu_pop_head);
@@ -373,10 +377,13 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
             for (n, name) in &pats {
                 let rr = Rect::new(col.x, y, col.w, ROW);
                 let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
-                if hov || *n == s.pattern {
-                    ui.c.fill_rect(rr, t.menu_pop_hi);
+                let lit = hov || (*n == s.pattern && away);
+                if lit {
+                    ui.c.fill_rect(rr, os_ui::Color::rgb(0x03080c));
                 }
-                ui.c.text_clip(font, rr.x + 6.0, rr.y + 2.0, rr.w - 8.0, t.menu_pop_text, name);
+                let col = if *n == s.pattern { t.glyph } else { t.menu_pop_text };
+                let dx = if lit { 22.0 } else { 20.0 };
+                ui.c.text_clip(font, rr.x + dx, rr.y + 2.0, rr.w - dx - 4.0, col, name);
                 y += ROW;
             }
         }

@@ -7,6 +7,7 @@ mod knobs;
 mod logo;
 mod monitor;
 mod piano;
+mod patterns;
 mod playlist;
 #[cfg(windows)]
 mod plugin_window;

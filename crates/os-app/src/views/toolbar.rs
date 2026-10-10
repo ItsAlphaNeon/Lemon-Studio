@@ -353,12 +353,12 @@ fn row2(ui: &mut Ui, s: &State) {
 
     // Pattern selector.
     let prev = Rect::span(838.0, 851.0, 47.0, 76.0);
-    ui.hit(prev, Action::PatternPrev, "Previous pattern");
+    ui.hit(prev, Action::PatternPrev, "Pattern options"); // spec: ui/pattern-menu.md §1
     ui.c.fill_rrect(prev, 2.0, t.button);
     icons::draw(ui.c, Icon::ArrowRight, prev.inset(2.0), t.glyph);
     let pb = Rect::span(855.0, 948.0, 47.0, 76.0);
-    ui.hit(pb, Action::PatternNext, "Pattern selector (click: next pattern)");
-    ui.c.fill_rrect(pb, 2.0, t.tempo_box.shade(0.08));
+    let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(s, s.pattern.max(1)));
+    ui.c.fill_rrect(pb, 2.0, t.tempo_box.shade(if hov { 0.16 } else { 0.08 }));
     let name = s
         .project
         .patterns
@@ -370,7 +370,7 @@ fn row2(ui: &mut Ui, s: &State) {
     ui.c.text_right(Font::condensed(21, 7), pb.right() - 11.0, 49.0, t.glyph, &name);
     ui.c.pop_clip();
     let add = Rect::span(951.0, 962.0, 50.0, 72.0);
-    ui.hit(add, Action::PatternAdd, "Add a pattern");
+    ui.hit(add, Action::PatternAdd, "New pattern (find first / next empty)");
     icons::draw(ui.c, Icon::Plus, add, t.glyph);
 
     // Window buttons.
