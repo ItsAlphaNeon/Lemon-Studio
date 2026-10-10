@@ -419,6 +419,10 @@ pub struct State {
     /// and the drag label with the mouse position while an item is dragged.
     pub browser_tab: usize,
     pub browser_open: std::collections::HashSet<String>,
+    /// Folders dropped on the window: All-tab roots (spec: ui/browser.md §6).
+    pub browser_folders: Vec<PathBuf>,
+    /// Directory listings of dropped folders, until reread.
+    pub browser_dirs: std::cell::RefCell<std::collections::HashMap<PathBuf, std::rc::Rc<Vec<views::browser::Entry>>>>,
     pub browser_scroll: f32,
     pub browser_sel: Option<String>,
     pub browser_drag: Option<(String, f32, f32)>,
@@ -588,6 +592,8 @@ impl App {
                 rack_scroll: 0.0,
                 browser_tab: 0,
                 browser_open: views::browser::default_open(),
+                browser_folders: crate::browser::load_folders(),
+                browser_dirs: Default::default(),
                 browser_scroll: 0.0,
                 browser_sel: None,
                 browser_drag: None,
@@ -986,6 +992,9 @@ impl App {
         let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         if ext == "flp" {
             return self.open(path);
+        }
+        if path.is_dir() {
+            return self.add_browser_folder(path);
         }
         if ext == "flstheme" || ext == "txt" && path.file_name().is_some_and(|n| n == "theme.txt") {
             self.load_theme_file(&path);
@@ -1669,6 +1678,11 @@ impl App {
             Some(Action::PatternAdd) => {
                 crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindNext, crate::patterns::PLUS_BOX_AT);
                 return self.invalidate();
+            }
+            Some(Action::BrowserRow(i)) => {
+                if self.browser_remove_root(*i) {
+                    return;
+                }
             }
             _ => {}
         }
@@ -3535,6 +3549,44 @@ mod tests {
     }
 
     /// Browser options menu and search (spec: ui/browser.md §4, §5).
+    #[test]
+    fn browser_dropped_folder() {
+        use crate::views::browser::{rows, Item};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("os_browser_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Kicks")).unwrap();
+        std::fs::write(dir.join("Kicks").join("Kick 01.wav"), b"x").unwrap();
+        std::fs::write(dir.join("readme.txt"), b"hello").unwrap();
+        std::fs::write(dir.join(".hidden"), b"").unwrap();
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        app.drop_file(dir.clone());
+        let r = rows(&app.state);
+        let i = r.iter().position(|r| r.path.as_deref() == Some(dir.as_path())).expect("root row");
+        assert_eq!(r[i].open, Some(true));
+        // Folders first, then files; hidden files left out.
+        assert_eq!(r[i + 1].label, "Kicks");
+        assert_eq!(r[i + 2].label, "readme.txt");
+        assert!(matches!(r[i + 2].item, Item::File(_)));
+        assert_eq!(r[i + 3].depth, 0, "next root follows");
+        // Open the subfolder: the sample shows without extension and drags as a sample.
+        frame(&mut app, &mut c, None);
+        let sub = hit_rect(&app, &Action::BrowserRow(i + 1));
+        click(&mut app, &mut c, sub);
+        let r = rows(&app.state);
+        assert_eq!(r[i + 2].label, "Kick 01");
+        assert!(matches!(r[i + 2].item, Item::Sample(_)));
+        assert_eq!(r[i + 2].depth, 2);
+        // Right-click the root removes it.
+        frame(&mut app, &mut c, None);
+        let root = hit_rect(&app, &Action::BrowserRow(i));
+        app.mouse_move(root.cx(), root.cy());
+        app.mouse_down_right();
+        assert!(app.state.browser_folders.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn browser_menu_and_search() {
         use crate::views::browser::{rows, Item};

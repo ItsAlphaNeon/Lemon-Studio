@@ -536,7 +536,7 @@ impl ApplicationHandler for Shell {
     }
 }
 
-/// `openstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-menu] [--browser-search TEXT] [project.flp]`:
+/// `openstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-menu] [--browser-search TEXT] [--browser-folder DIR[|SUB]] [project.flp]`:
 /// paint one 1920×1080 frame offscreen (used to compare with reference measurements).
 fn screenshot(args: &[String]) {
     let mut out = None;
@@ -548,6 +548,7 @@ fn screenshot(args: &[String]) {
     let mut browser_tab: Option<usize> = None;
     let mut browser_menu = false;
     let mut browser_search: Option<String> = None;
+    let mut browser_folder: Option<String> = None;
     let mut menu: Option<usize> = None;
     let mut picker: Option<(bool, usize)> = None;
     let mut picker_open = false;
@@ -572,6 +573,7 @@ fn screenshot(args: &[String]) {
             "--rack-roll" => rack_roll = true,
             "--browser-menu" => browser_menu = true,
             "--browser-search" => browser_search = it.next().cloned(),
+            "--browser-folder" => browser_folder = it.next().cloned(),
             "--browser-tab" => browser_tab = it.next().and_then(|v| v.parse().ok()),
             "--picker" => {
                 picker_open = true;
@@ -624,6 +626,19 @@ fn screenshot(args: &[String]) {
     app.state.show_browser = browser;
     if let Some(t) = browser_tab {
         app.state.browser_tab = t.min(4);
+    }
+    // A dropped folder (spec: ui/browser.md §6), opened; not remembered. `--browser-folder DIR[|sub/path]` opens a subfolder and selects it.
+    if let Some(f) = browser_folder {
+        let (dir, sub) = f.split_once('|').unwrap_or((&f, ""));
+        let dir = std::path::PathBuf::from(dir);
+        let mut key = views::browser::disk_key(&dir);
+        app.state.browser_open.insert(key.clone());
+        for part in sub.split('/').filter(|p| !p.is_empty()) {
+            key = format!("{key}/{part}");
+            app.state.browser_open.insert(key.clone());
+        }
+        app.state.browser_sel = Some(key);
+        app.state.browser_folders.push(dir);
     }
     if let Some(q) = browser_search {
         app.state.browser_search = q;

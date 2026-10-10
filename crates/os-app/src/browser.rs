@@ -49,7 +49,7 @@ impl App {
                     _ => {}
                 }
                 s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
-                if row.item != Item::None {
+                if !matches!(row.item, Item::None | Item::File(_)) {
                     self.drag = Some(Drag::Browser { item: row.item, label: row.label, m0: self.mouse, started: false });
                 }
             }
@@ -86,7 +86,10 @@ impl App {
                 s.browser_open.retain(|k| !k.starts_with(&tab));
                 s.browser_scroll = 0.0;
             }
-            BCmd::Reread => s.browser_scroll = s.browser_scroll.min(view::max_scroll(s)),
+            BCmd::Reread => {
+                s.browser_dirs.borrow_mut().clear();
+                s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
+            }
             BCmd::Rescan => {
                 if !s.hosted_rows.is_empty() {
                     return Some("Remove plugin channels before rescanning the plugin list".into());
@@ -264,9 +267,62 @@ impl App {
                     s.message = Some("Effect placeholder: adding effects to mixer slots is not available yet".into());
                 }
             }
-            Item::None => {}
+            Item::None | Item::File(_) => {}
         }
     }
+
+    /// A folder dropped on the window becomes an All-tab root, opened and selected (spec §6).
+    pub(crate) fn add_browser_folder(&mut self, path: std::path::PathBuf) {
+        let s = &mut self.state;
+        if !s.browser_folders.contains(&path) {
+            s.browser_folders.push(path.clone());
+            save_folders(&s.browser_folders);
+        }
+        s.browser_tab = 0;
+        s.browser_search.clear();
+        let key = view::disk_key(&path);
+        s.browser_open.insert(key.clone());
+        select(s, &key);
+        reveal(s);
+        s.message = Some(format!("Browser: added {}", path.display()));
+        self.invalidate();
+    }
+
+    /// Right-click on a dropped folder root removes it from the browser (spec §6); returns whether it was one.
+    pub(crate) fn browser_remove_root(&mut self, i: usize) -> bool {
+        let s = &mut self.state;
+        let Some(row) = view::rows(s).into_iter().nth(i) else { return false };
+        let Some(path) = row.path.filter(|_| row.depth == 0) else { return false };
+        s.browser_folders.retain(|f| *f != path);
+        save_folders(&s.browser_folders);
+        s.browser_open.retain(|k| !k.starts_with(&row.key));
+        s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
+        s.message = Some(format!("Removed {} from the browser", path.display()));
+        self.invalidate();
+        true
+    }
+}
+
+/// `%APPDATA%/OpenStudio/browser_folders.txt`: one dropped folder per line (spec §6).
+fn folders_file() -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    std::env::var_os("APPDATA").map(|d| std::path::PathBuf::from(d).join("OpenStudio").join("browser_folders.txt"))
+}
+
+pub(crate) fn load_folders() -> Vec<std::path::PathBuf> {
+    let Some(text) = folders_file().and_then(|p| std::fs::read_to_string(p).ok()) else { return Vec::new() };
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(std::path::PathBuf::from).collect()
+}
+
+fn save_folders(folders: &[std::path::PathBuf]) {
+    let Some(p) = folders_file() else { return };
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let text: String = folders.iter().map(|f| format!("{}\r\n", f.display())).collect();
+    let _ = std::fs::write(p, text);
 }
 
 /// Options-menu commands (spec §4).

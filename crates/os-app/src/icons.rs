@@ -64,6 +64,14 @@ pub enum Icon {
     Person,
     Cloud,
     Box,
+    FolderOpen,
+    FolderPlus,
+    FileAudio,
+    FileProject,
+    FileText,
+    FilePreset,
+    FileZip,
+    FileBlank,
 }
 
 fn shape(icon: Icon) -> &'static TablerIcon {
@@ -125,6 +133,14 @@ fn shape(icon: Icon) -> &'static TablerIcon {
         Icon::Person => &tb::USER,
         Icon::Cloud => &tb::CLOUD,
         Icon::Box => &tb::BOX,
+        Icon::FolderOpen => &tb::FOLDER_OPEN,
+        Icon::FolderPlus => &tb::FOLDER_PLUS,
+        Icon::FileAudio => &tb::FILE_MUSIC,
+        Icon::FileProject => &tb::FILE_STAR,
+        Icon::FileText => &tb::FILE_TYPOGRAPHY,
+        Icon::FilePreset => &tb::FILE_SETTINGS,
+        Icon::FileZip => &tb::FILE_ZIP,
+        Icon::FileBlank => &tb::FILE,
     }
 }
 

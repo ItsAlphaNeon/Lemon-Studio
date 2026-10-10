@@ -1,5 +1,8 @@
 //! Docked browser (left): five tabs, a tree of the project / plugin database / folders, drag sources.
-// spec: ui/main-window.md §4, ui/browser.md (§4 options menu, §5 search)
+// spec: ui/main-window.md §4, ui/browser.md (§4 options menu, §5 search, §6 dropped folders)
+
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use os_ui::{Color, Rect};
 
@@ -16,6 +19,12 @@ pub const FOOTER_H: f32 = 28.0;
 
 /// Category colour indices (`cat_color`); 255 = folder.
 const FOLDER: u8 = 255;
+/// Category index of files in dropped folders (text colour, spec §6).
+const FILE: u8 = 254;
+/// First `ROOTS` entry of the alphabetical disk-folder part; dropped folders are sorted in from here (spec §6).
+const FIRST_SORTED: usize = 9;
+/// Height of the info panel above the footer (spec §6).
+pub const INFO_H: f32 = 84.0;
 
 /// (label, icon, category colour index)
 const ROOTS: &[(&str, Icon, u8)] = &[
@@ -72,6 +81,8 @@ pub enum Item {
     Generator(usize),
     /// Plugin picker effect index.
     Effect(usize),
+    /// A non-audio file in a dropped folder (not draggable, spec §6).
+    File(String),
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +98,8 @@ pub struct Row {
     /// Drawn brighter (current pattern, opened roots).
     pub bright: bool,
     pub item: Item,
+    /// Disk entry (dropped folders, spec §6): shown in the info panel.
+    pub path: Option<PathBuf>,
 }
 
 /// Keys of the rows that start opened (the project tab shows Patterns, like the screenshot).
@@ -157,17 +170,43 @@ pub fn rows(s: &State) -> Vec<Row> {
 fn tree(s: &State) -> Vec<Row> {
     let mut out = Vec::new();
     let tab = s.browser_tab;
-    let roots: Vec<usize> = match tab {
-        0 => (0..ROOTS.len()).collect(),
-        1 => vec![0],
-        2 => vec![2],
+    let mut roots: Vec<Result<usize, usize>> = match tab {
+        0 => (0..ROOTS.len()).map(Ok).collect(),
+        1 => vec![Ok(0)],
+        2 => vec![Ok(2)],
         _ => Vec::new(),
     };
+    if tab == 0 {
+        // Dropped folders sit among the disk-folder roots in alphabetical order (spec §6).
+        let name = |r: &Result<usize, usize>| match *r {
+            Ok(i) => ROOTS[i].0.to_lowercase(),
+            Err(f) => folder_name(&s.browser_folders[f]).to_lowercase(),
+        };
+        for f in 0..s.browser_folders.len() {
+            let me = folder_name(&s.browser_folders[f]).to_lowercase();
+            let at = (FIRST_SORTED..roots.len()).find(|&j| name(&roots[j]) > me).unwrap_or(roots.len());
+            roots.insert(at, Err(f));
+        }
+    }
     for r in roots {
+        let r = match r {
+            Ok(r) => r,
+            Err(f) => {
+                let path = &s.browser_folders[f];
+                let key = disk_key(path);
+                let open = s.browser_open.contains(&key);
+                let icon = if open { Icon::FolderOpen } else { Icon::Folder };
+                out.push(Row { key: key.clone(), depth: 0, label: folder_name(path), icon, cat: FOLDER, open: Some(open), bright: true, item: Item::None, path: Some(path.clone()) });
+                if open {
+                    disk_rows(s, path, &key, 1, &mut out);
+                }
+                continue;
+            }
+        };
         let (label, icon, cat) = ROOTS[r];
         let key = format!("{tab}:{label}");
         let open = is_open(s, &key);
-        out.push(Row { key: key.clone(), depth: 0, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None });
+        out.push(Row { key: key.clone(), depth: 0, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: None });
         if !open {
             continue;
         }
@@ -184,12 +223,105 @@ fn tree(s: &State) -> Vec<Row> {
 fn section(s: &State, parent: &str, label: &str, icon: Icon, cat: u8, out: &mut Vec<Row>) -> bool {
     let key = format!("{parent}/{label}");
     let open = is_open(s, &key);
-    out.push(Row { key, depth: 1, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None });
+    out.push(Row { key, depth: 1, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: None });
     open
 }
 
 fn leaf(out: &mut Vec<Row>, parent: &str, label: String, icon: Icon, cat: u8, bright: bool, item: Item) {
-    out.push(Row { key: format!("{parent}/{label}"), depth: 2, label, icon, cat, open: None, bright, item });
+    out.push(Row { key: format!("{parent}/{label}"), depth: 2, label, icon, cat, open: None, bright, item, path: None });
+}
+
+/// Tree key of a dropped folder root (All tab).
+pub fn disk_key(path: &Path) -> String {
+    format!("0:@{}", path.display())
+}
+
+/// A dropped folder's label: its name (the whole path for a drive root).
+pub fn folder_name(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
+}
+
+/// One directory entry of a dropped folder (spec §6).
+#[derive(Debug, Clone)]
+pub struct Entry {
+    pub name: String,
+    pub path: PathBuf,
+    pub dir: bool,
+    pub size: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// The listing of `dir`: subfolders, then files, each sorted by name, hidden/system entries left out
+/// (spec §6). Cached until the structure is reread (Ctrl+R).
+pub fn list_dir(s: &State, dir: &Path) -> Rc<Vec<Entry>> {
+    if let Some(v) = s.browser_dirs.borrow().get(dir) {
+        return v.clone();
+    }
+    let mut v: Vec<Entry> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let low = name.to_ascii_lowercase();
+                    let md = e.metadata().ok()?;
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::fs::MetadataExt;
+                        // FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
+                        if md.file_attributes() & 0x6 != 0 {
+                            return None;
+                        }
+                    }
+                    if name.starts_with('.') || low == "desktop.ini" || low == "thumbs.db" {
+                        return None;
+                    }
+                    Some(Entry { name, path: e.path(), dir: md.is_dir(), size: md.len(), modified: md.modified().ok() })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort_by_cached_key(|e| (!e.dir, e.name.to_lowercase()));
+    let v = Rc::new(v);
+    s.browser_dirs.borrow_mut().insert(dir.to_path_buf(), v.clone());
+    v
+}
+
+/// Icon for a file by extension (spec §6 table).
+pub fn file_icon(name: &str) -> Icon {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "wav" | "mp3" | "ogg" | "flac" | "aif" | "aiff" => Icon::FileAudio,
+        "mid" | "midi" => Icon::PianoRoll,
+        "flp" => Icon::FileProject,
+        "txt" | "url" | "pdf" | "nfo" | "rtf" | "htm" | "html" | "md" => Icon::FileText,
+        "fxp" | "fxb" | "fst" | "vstpreset" | "nmsv" | "spf" | "h2p" | "clap-preset" => Icon::FilePreset,
+        "zip" | "rar" | "7z" => Icon::FileZip,
+        _ => Icon::FileBlank,
+    }
+}
+
+/// Rows of an opened disk folder: its subfolders (recursing into opened ones), then its files.
+fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
+    for e in list_dir(s, dir).iter() {
+        let k = format!("{key}/{}", e.name);
+        if e.dir {
+            let open = s.browser_open.contains(&k);
+            let icon = if open { Icon::FolderOpen } else { Icon::Folder };
+            out.push(Row { key: k.clone(), depth, label: e.name.clone(), icon, cat: FOLDER, open: Some(open), bright: open, item: Item::None, path: Some(e.path.clone()) });
+            if open {
+                disk_rows(s, &e.path, &k, depth.saturating_add(1), out);
+            }
+        } else {
+            let icon = file_icon(&e.name);
+            let p = e.path.to_string_lossy().into_owned();
+            let (label, item) = if icon == Icon::FileAudio {
+                (e.name.rsplit_once('.').map_or(e.name.as_str(), |(a, _)| a).to_string(), Item::Sample(p))
+            } else {
+                (e.name.clone(), Item::File(p))
+            };
+            out.push(Row { key: k, depth, label, icon, cat: FILE, open: None, bright: false, item, path: Some(e.path.clone()) });
+        }
+    }
 }
 
 fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
@@ -255,7 +387,103 @@ fn plugin_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
 
 /// Height of the list viewport for a browser of height `h` (from `WORK_Y`).
 pub fn list_h(s: &State) -> f32 {
-    (s.screen.1 - list_top(s) - FOOTER_H).max(0.0)
+    (s.screen.1 - list_top(s) - FOOTER_H - info_h(&rows(s), s)).max(0.0)
+}
+
+/// The selected disk entry, shown in the info panel (spec §6).
+fn info_path(rows: &[Row], s: &State) -> Option<PathBuf> {
+    let k = s.browser_sel.as_deref()?;
+    rows.iter().find(|r| r.key == k)?.path.clone()
+}
+
+fn info_h(rows: &[Row], s: &State) -> f32 {
+    if info_path(rows, s).is_some() { INFO_H } else { 0.0 }
+}
+
+/// `35 B`, `12.4 KB`, `2.29 MB` (spec §6).
+pub fn size_text(n: u64) -> String {
+    let f = n as f64;
+    if n < 1024 {
+        format!("{n} B")
+    } else if f < 1024.0 * 1024.0 {
+        format!("{:.2} KB", f / 1024.0)
+    } else if f < 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.2} MB", f / 1024.0 / 1024.0)
+    } else {
+        format!("{:.2} GB", f / 1024.0 / 1024.0 / 1024.0)
+    }
+}
+
+/// Local `M/D/YYYY h:mm:ss AM` (spec §6).
+pub fn date_text(t: std::time::SystemTime) -> String {
+    let Some((y, mo, d, h, mi, se)) = local_time(t) else { return String::new() };
+    let (h12, ap) = match h {
+        0 => (12, "AM"),
+        1..=11 => (h, "AM"),
+        12 => (12, "PM"),
+        _ => (h - 12, "PM"),
+    };
+    format!("{mo}/{d}/{y} {h12}:{mi:02}:{se:02} {ap}")
+}
+
+#[cfg(windows)]
+fn local_time(t: std::time::SystemTime) -> Option<(u16, u16, u16, u16, u16, u16)> {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+    let ft = d.as_nanos() / 100 + 116_444_736_000_000_000;
+    let ft = FILETIME { dwLowDateTime: ft as u32, dwHighDateTime: (ft >> 32) as u32 };
+    // SAFETY: plain out-parameter calls on stack values.
+    unsafe {
+        let mut utc: SYSTEMTIME = std::mem::zeroed();
+        let mut loc: SYSTEMTIME = std::mem::zeroed();
+        if FileTimeToSystemTime(&ft, &mut utc) == 0 || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut loc) == 0 {
+            return None;
+        }
+        Some((loc.wYear, loc.wMonth, loc.wDay, loc.wHour, loc.wMinute, loc.wSecond))
+    }
+}
+
+#[cfg(not(windows))]
+fn local_time(_: std::time::SystemTime) -> Option<(u16, u16, u16, u16, u16, u16)> {
+    None
+}
+
+/// The info panel above the footer: title, date, size, path of the selected disk entry (spec §6).
+fn paint_info(ui: &mut Ui, s: &State, path: &Path, r: Rect) {
+    let t = ui.t;
+    ui.c.fill_rect(r, t.browser_tabs);
+    icons::draw(ui.c, Icon::FolderPlus, Rect::new(r.right() - 52.0, r.bottom() - 50.0, 44.0, 44.0), t.browser_tabs.shade(0.1));
+    let md = std::fs::metadata(path).ok();
+    let dir = md.as_ref().is_some_and(|m| m.is_dir());
+    let size = if dir { list_dir(s, path).iter().filter(|e| !e.dir).map(|e| e.size).sum() } else { md.as_ref().map_or(0, |m| m.len()) };
+    let date = md.and_then(|m| m.modified().ok()).map(date_text).unwrap_or_default();
+    let f = os_ui::Font::new(13);
+    let (lx, vx, lh) = (r.x + 5.0, r.x + 40.0, 15.0);
+    let vw = r.right() - vx - 4.0;
+    let mut y = r.y + 3.0;
+    let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+    for (k, v) in [("Title", title), ("Date", date), ("Size", size_text(size))] {
+        ui.c.text(f, lx, y, t.text_dim, k);
+        ui.c.text_clip(f, vx, y, vw, t.text, &v);
+        y += lh;
+    }
+    ui.c.text(f, lx, y, t.text_dim, "Path");
+    // Wrap the path at any character (FL breaks mid-word too).
+    let mut line = String::new();
+    for ch in path.display().to_string().chars() {
+        line.push(ch);
+        if ui.c.text_width(f, &line) > vw {
+            let last = line.pop().unwrap_or(' ');
+            ui.c.text(f, vx, y, t.text, &line);
+            y += lh;
+            line = last.to_string();
+            if y + lh > r.bottom() {
+                return;
+            }
+        }
+    }
+    ui.c.text(f, vx, y, t.text, &line);
 }
 
 /// Top of the rows: below the search box when "Search box on top" is on (spec §4).
@@ -305,7 +533,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         ui.c.fill_rect(Rect::new(0.0, LIST_Y, 201.0, SEARCH_ROW), t.browser_footer);
         search_box(ui, s, Rect::new(13.0, LIST_Y + 4.0, 163.0, 20.0));
     }
-    let list = Rect::span(13.0, 200.0, top, r.bottom() - FOOTER_H);
+    let rows = rows(s);
+    let info = info_path(&rows, s);
+    let ih = if info.is_some() { INFO_H } else { 0.0 };
+    let list = Rect::span(13.0, 200.0, top, r.bottom() - FOOTER_H - ih);
     ui.c.fill_rect(Rect::new(0.0, top, 13.0, list.h), t.browser_tabs.shade(0.02));
     ui.c.fill_rect(list, t.browser_list);
     ui.hit(Rect::new(0.0, top, 201.0, list.h), Action::BrowserList, "");
@@ -322,7 +553,6 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         t.cat_recent,
         t.cat_plugin_db,
     ];
-    let rows = rows(s);
     let scroll = s.browser_scroll.min((rows.len() as f32 * ROW_H - list.h).max(0.0)).max(0.0);
     let sel = s.browser_sel.as_deref();
     for (i, row) in rows.iter().enumerate() {
@@ -336,7 +566,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         if sel == Some(row.key.as_str()) || hov {
             ui.c.fill_rect(rect, t.browser_row_hi);
         }
-        let base = if row.cat == FOLDER { t.browser_folder } else { cats[usize::from(row.cat).min(9)] };
+        let base = match row.cat {
+            FOLDER => t.browser_folder,
+            FILE => t.text.shade(-0.08),
+            c => cats[usize::from(c).min(9)],
+        };
         let c = if row.bright { base.shade(0.12) } else if row.depth > 0 { base.shade(-0.06) } else { base };
         // Expander: only an opened node shows its ▾ in the gutter (FL screenshots, spec §2).
         if row.open == Some(true) && s.browser_search.is_empty() {
@@ -346,14 +580,25 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
                 ui.c.fill_rect(Rect::new(ax + k, cy - 2.0 + k, 7.0 - 2.0 * k, 1.0), t.text_dim);
             }
         }
-        icons::draw(ui.c, row.icon, Rect::new(x + 6.0, y + 3.0, 17.0, 17.0), c);
-        ui.c.text_clip(os_ui::Font::new(17), x + 25.0, y, 200.0 - x - 27.0, c, &row.label);
+        // File-type tints (spec §6): audio / project orange, MIDI blue.
+        let ic = match row.icon {
+            Icon::FileAudio | Icon::FileProject => t.browser_search,
+            Icon::PianoRoll if row.cat == FILE => t.cat_plugin_db,
+            _ => c,
+        };
+        icons::draw(ui.c, row.icon, Rect::new(x + 6.0, y + 3.0, 17.0, 17.0), ic);
+        let (f, w) = (os_ui::Font::new(17), 200.0 - x - 27.0);
+        let label = if row.path.is_some() { middle_cut(ui, f, &row.label, w) } else { row.label.clone() };
+        ui.c.text_clip(f, x + 25.0, y, w, c, &label);
     }
     let empty = if !s.browser_search.is_empty() { "No matches" } else if s.browser_tab == 3 { "No online content" } else { "No favorites yet" };
     if rows.is_empty() && (s.browser_tab >= 3 || !s.browser_search.is_empty()) {
         ui.c.text(os_ui::Font::new(14).italic(), 22.0, top + 6.0, t.text_faint, empty);
     }
     ui.c.pop_clip();
+    if let Some(p) = &info {
+        paint_info(ui, s, p, Rect::new(0.0, list.bottom(), 201.0, ih));
+    }
     // Footer.
     let fy = r.bottom() - 27.0;
     ui.c.fill_rect(Rect::new(0.0, fy, 201.0, 27.0), t.browser_footer);
@@ -369,6 +614,22 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     // Splitter.
     ui.c.fill_rect(Rect::new(201.0, 83.0, 6.0, r.h), t.splitter);
     ui.c.fill_rect(Rect::new(207.0, 83.0, 2.0, r.h), t.splitter_dark);
+}
+
+/// A long disk name shortened in the middle with ".." to fit `w` (FL screenshots, spec §6).
+fn middle_cut(ui: &mut Ui, f: os_ui::Font, text: &str, w: f32) -> String {
+    if ui.c.text_width(f, text) <= w {
+        return text.to_string();
+    }
+    let ch: Vec<char> = text.chars().collect();
+    for keep in (1..ch.len()).rev() {
+        let head = keep.div_ceil(2);
+        let s: String = ch[..head].iter().chain([&'.', &'.']).chain(&ch[ch.len() - (keep - head)..]).collect();
+        if ui.c.text_width(f, &s) <= w {
+            return s;
+        }
+    }
+    String::new()
 }
 
 /// Where the options menu opens (just below the title bar's ▸, spec §4).
