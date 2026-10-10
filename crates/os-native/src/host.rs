@@ -44,9 +44,9 @@ pub struct HostContext {
 /// Global log of unknown/unhandled calls (callbacks can't always reach a context).
 pub static CALL_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Set `OS_FRUITY_TRACE=1` to print every logged host call immediately.
+/// Set `OS_NATIVE_TRACE=1` to print every logged host call immediately.
 pub fn trace_enabled() -> bool {
-    std::env::var_os("OS_FRUITY_TRACE").is_some()
+    std::env::var_os("OS_NATIVE_TRACE").is_some()
 }
 
 fn log_once(entry: String) {

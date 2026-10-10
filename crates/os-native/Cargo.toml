@@ -1,6 +1,6 @@
 [package]
-name = "os-fruity"
-description = "Host for FL Studio native plugins (Fruity plugin SDK interface)"
+name = "os-native"
+description = "Host for third-party native-format DAW plugins (interoperability, public SDK interface)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,11 +1,11 @@
-//! os-fruity-probe: load one FL native plugin from the user's FL install, print its info and
+//! os-native-probe: load one FL native plugin from the user's FL install, print its info and
 //! parameters, save its default state, and render a test note (generators) to a WAV file.
 //!
-//! Usage: os-fruity-probe <plugin name> [out.wav] [--fl DIR]
+//! Usage: os-native-probe <plugin name> [out.wav] [--fl DIR]
 
 use std::path::PathBuf;
 
-use os_fruity::{find_plugin, host, Plugin};
+use os_native::{find_plugin, host, Plugin};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -21,7 +21,7 @@ fn main() {
             out = Some(PathBuf::from(a));
         }
     }
-    let name = name.expect("usage: os-fruity-probe <plugin name> [out.wav] [--fl DIR]");
+    let name = name.expect("usage: os-native-probe <plugin name> [out.wav] [--fl DIR]");
     let dll = find_plugin(&fl, &name).unwrap_or_else(|| PathBuf::from(&name));
     eprintln!("loading {}", dll.display());
 

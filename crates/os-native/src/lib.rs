@@ -1,4 +1,4 @@
-//! Hosting FL Studio native plugins ("Fruity plugins") from the user's own FL installation.
+//! Hosting plugins written against the FL Studio native plugin SDK, loaded from the user's own installation.
 //!
 //! Implemented from `OpenStudio-specs/plugins/fruity-abi.md` (public SDK interface).
 //! Windows x64 only for now.
@@ -18,7 +18,7 @@ use host::HostObject;
 use stream::MemStream;
 
 #[derive(Debug, thiserror::Error)]
-pub enum FruityError {
+pub enum NativeError {
     #[error("{0}: {1}")]
     Load(PathBuf, String),
     #[error("{0}: CreatePlugInstance returned null")]
@@ -56,8 +56,8 @@ pub struct Plugin {
 
 impl Plugin {
     /// Loads `dll` and creates one instance. `fl_dir` is the FL install folder (data path).
-    pub fn load(dll: &Path, fl_dir: &Path, sample_rate: u32, max_block: usize) -> Result<Plugin, FruityError> {
-        let err = |e: String| FruityError::Load(dll.to_owned(), e);
+    pub fn load(dll: &Path, fl_dir: &Path, sample_rate: u32, max_block: usize) -> Result<Plugin, NativeError> {
+        let err = |e: String| NativeError::Load(dll.to_owned(), e);
         let trace = |m: &str| {
             if host::trace_enabled() {
                 eprintln!("[load] {m}");
@@ -74,7 +74,7 @@ impl Plugin {
         let obj = unsafe { create(host_ptr, 0) };
         trace(&format!("instance at {obj:p}"));
         if obj.is_null() {
-            return Err(FruityError::Create(dll.to_owned()));
+            return Err(NativeError::Create(dll.to_owned()));
         }
         let info = unsafe {
             let i = &*(*obj).info;
