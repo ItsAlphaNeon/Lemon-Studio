@@ -19,7 +19,7 @@ use os_ui::tabler as tb;
 use os_ui::{Canvas, Color, Font, Rect};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, InvalidateRect, ScreenToClient, SetWindowRgn, RGN_AND, RGN_DIFF, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
+    BeginPaint, ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, InvalidateRect, ScreenToClient, SetWindowRgn, RGN_AND, RGN_DIFF, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -162,8 +162,8 @@ pub enum FrameEvent {
     PitchCents(i32),
     /// The window was clicked: it comes to the front of the app's window stack.
     Raise,
-    /// The menu arrow's "Detached" was picked (the new state).
-    Detach(bool),
+    /// The menu arrow was clicked: the app opens the window menu at this screen point.
+    Menu(i32, i32),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -234,7 +234,7 @@ enum Part {
     Close,
     Minimize,
     Gear,
-    /// The menu arrow (the window menu; only "Detached" works yet).
+    /// The menu arrow (the window menu, an app popup).
     Menu,
     /// Page tab `i`; `i == pages.len()` is the Misc tab.
     Tab(usize),
@@ -685,51 +685,6 @@ fn frame_style(detached: bool) -> u32 {
     if detached { WS_POPUP | WS_CLIPCHILDREN } else { WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN }
 }
 
-/// The window menu under the menu arrow (spec: ui/plugin-window.md "Window menu"): FL's entries, only "Detached" works
-/// yet. Returns whether "Detached" was picked.
-unsafe fn window_menu(hwnd: HWND, detached: bool) -> bool {
-    const DETACH: usize = 1;
-    unsafe {
-        let m = CreatePopupMenu();
-        let gray = |m: HMENU, s: &str| {
-            let t = wide(s);
-            AppendMenuW(m, MF_STRING | MF_GRAYED, 0, t.as_ptr());
-        };
-        let sep = |m: HMENU| {
-            AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
-        };
-        for s in ["Piano roll", "Replace", "Delete..."] {
-            gray(m, s);
-        }
-        sep(m);
-        for s in ["Presets", "Browse presets", "Save preset as...", "Add to plugin database (flag as favorite)"] {
-            gray(m, s);
-        }
-        sep(m);
-        for s in ["Store in spare state", "Flip with spare state"] {
-            gray(m, s);
-        }
-        sep(m);
-        for s in ["Link all parameters...", "Browse parameters"] {
-            gray(m, s);
-        }
-        sep(m);
-        for s in ["Allow threaded processing", "Smart disable"] {
-            gray(m, s);
-        }
-        sep(m);
-        for s in ["Rename, color and icon...\tF2", "Change color...", "Random color", "Change icon..."] {
-            gray(m, s);
-        }
-        let t = wide("Detached");
-        AppendMenuW(m, MF_STRING | if detached { MF_CHECKED } else { MF_UNCHECKED }, DETACH, t.as_ptr());
-        let mut c: POINT = std::mem::zeroed();
-        GetCursorPos(&mut c);
-        let picked = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, c.x, c.y, 0, hwnd, std::ptr::null());
-        DestroyMenu(m);
-        picked as usize == DETACH
-    }
-}
 
 unsafe fn win_of(hwnd: HWND) -> Option<&'static mut Win> {
     let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut Win;
@@ -851,11 +806,12 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 let (x, y) = client_point(hwnd, lp, w.scale, false);
                 let part = part_at(&w.state.borrow(), x, y);
                 if part == Some(Part::Menu) {
-                    let detached = w.state.borrow().detached;
-                    if window_menu(hwnd, detached) {
-                        w.state.borrow_mut().events.push(FrameEvent::Detach(!detached));
-                        os_clap::wake();
-                    }
+                    // The app draws the menu (its own popup, like every other OpenStudio menu), below the arrow.
+                    let (m, _) = top_buttons(&w.state.borrow());
+                    let mut p = POINT { x: (m.x * w.scale) as i32, y: (m.bottom() * w.scale) as i32 };
+                    ClientToScreen(hwnd, &mut p);
+                    w.state.borrow_mut().events.push(FrameEvent::Menu(p.x, p.y));
+                    os_clap::wake();
                     return 0;
                 }
                 let mut relayout = false;
@@ -989,4 +945,140 @@ pub fn default_position(owner: isize) -> (i32, i32) {
     let mut r: RECT = unsafe { std::mem::zeroed() };
     unsafe { GetWindowRect(owner as HWND, &mut r) };
     (r.left + 420, r.top + 160)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Lifted overlay: an app popup opened from a detached plugin window would be painted in the main window, under the
+// detached window (owned windows stay above their owner). While one is open, its pixels are shown in this small
+// window above the plugin window, and its mouse input is passed to the main window as if it happened there.
+
+struct Lift {
+    hwnd: HWND,
+    main: HWND,
+    /// Main-window client position of the lifted rect's top-left.
+    origin: (i32, i32),
+    size: (i32, i32),
+    buf: Vec<u32>,
+}
+
+static LIFT: Mutex<Option<LiftPtr>> = Mutex::new(None);
+struct LiftPtr(Box<Lift>);
+// SAFETY: only touched on the UI thread; the Mutex is just a global slot.
+unsafe impl Send for LiftPtr {}
+
+const LIFT_CLASS: &str = "OpenStudioLiftedPopup";
+
+unsafe extern "system" fn lift_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        let Ok(g) = LIFT.lock() else { return DefWindowProcW(hwnd, msg, wp, lp) };
+        let Some(l) = g.as_ref().map(|p| &p.0).filter(|l| l.hwnd == hwnd) else {
+            drop(g);
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        };
+        match msg {
+            WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
+            WM_ERASEBKGND => 1,
+            WM_PAINT => {
+                let mut ps: PAINTSTRUCT = std::mem::zeroed();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                let (w, h) = l.size;
+                if l.buf.len() == (w * h) as usize {
+                    let mut bmi: BITMAPINFO = std::mem::zeroed();
+                    bmi.bmiHeader = BITMAPINFOHEADER {
+                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: w,
+                        biHeight: -h,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB,
+                        ..std::mem::zeroed()
+                    };
+                    SetDIBitsToDevice(hdc, 0, 0, w as u32, h as u32, 0, 0, 0, h as u32, l.buf.as_ptr() as *const c_void, &bmi, DIB_RGB_COLORS);
+                }
+                EndPaint(hwnd, &ps);
+                0
+            }
+            WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP => {
+                let x = (lp & 0xffff) as u16 as i16 as i32 + l.origin.0;
+                let y = ((lp >> 16) & 0xffff) as u16 as i16 as i32 + l.origin.1;
+                let main = l.main;
+                drop(g);
+                PostMessageW(main, msg, wp, ((y as u32 & 0xffff) << 16 | (x as u32 & 0xffff)) as LPARAM);
+                0
+            }
+            _ => {
+                drop(g);
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
+        }
+    }
+}
+
+/// Shows `pixels` (`size`, XRGB) above plugin window `frame`, at main-window client position `origin`.
+pub fn lift_show(main: isize, frame: isize, origin: (i32, i32), size: (i32, i32), pixels: Vec<u32>) {
+    unsafe {
+        let mut p = POINT { x: origin.0, y: origin.1 };
+        ClientToScreen(main as HWND, &mut p);
+        let mut g = match LIFT.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if g.is_none() {
+            let inst = GetModuleHandleW(std::ptr::null());
+            let class = wide(LIFT_CLASS);
+            let wc = WNDCLASSW {
+                style: 0,
+                lpfnWndProc: Some(lift_proc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: inst,
+                hIcon: std::ptr::null_mut(),
+                hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
+                hbrBackground: std::ptr::null_mut(),
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: class.as_ptr(),
+            };
+            RegisterClassW(&wc);
+            *g = Some(LiftPtr(Box::new(Lift { hwnd: std::ptr::null_mut(), main: main as HWND, origin, size, buf: Vec::new() })));
+            drop(g);
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class.as_ptr(),
+                std::ptr::null(),
+                WS_POPUP,
+                p.x,
+                p.y,
+                size.0,
+                size.1,
+                frame as HWND,
+                std::ptr::null_mut(),
+                inst,
+                std::ptr::null(),
+            );
+            g = match LIFT.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            if let Some(l) = g.as_mut() {
+                l.0.hwnd = hwnd;
+            }
+        }
+        let Some(l) = g.as_mut().map(|p| &mut p.0) else { return };
+        l.main = main as HWND;
+        l.origin = origin;
+        l.size = size;
+        l.buf = pixels;
+        let hwnd = l.hwnd;
+        drop(g);
+        SetWindowPos(hwnd, HWND_TOP, p.x, p.y, size.0, size.1, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        InvalidateRect(hwnd, std::ptr::null(), 0);
+    }
+}
+
+/// Hides the lifted popup (none open).
+pub fn lift_hide() {
+    let l = LIFT.lock().ok().and_then(|mut g| g.take());
+    if let Some(l) = l {
+        unsafe { DestroyWindow(l.0.hwnd) };
+    }
 }

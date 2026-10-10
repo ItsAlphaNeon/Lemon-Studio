@@ -195,6 +195,8 @@ pub enum Mark {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
     Nothing,
+    /// Plugin window menu > Detached: rack row, new state (spec: ui/plugin-window.md "Docking and the window menu").
+    PluginDetach(usize, bool),
     NotYet(&'static str),
     Tool(PlTool),
     Snap(Snap),
@@ -2001,6 +2003,13 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     match cmd {
         Cmd::Browser(b) => return app.browser_cmd(b),
         Cmd::Rack(c) => return crate::rack::run(app, c),
+        #[cfg(windows)]
+        Cmd::PluginDetach(row, on) => {
+            app.plugins.set_detached(row, on);
+            app.state.raise(crate::app::Win::Hosted(row));
+            app.invalidate();
+            return None;
+        }
         Cmd::Consolidate => {
             let m = consolidate(app);
             app.invalidate();
@@ -2023,7 +2032,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let s = &mut app.state;
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::PluginDetach(..) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -2528,4 +2537,41 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
 #[cfg(test)]
 pub fn undo_len(s: &State) -> usize {
     s.playlist.undo.len()
+}
+
+/// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): FL's entries, only Detached
+/// works yet.
+pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
+    let items = vec![
+        PItem::not_yet("Piano roll"),
+        PItem::not_yet("Replace"),
+        PItem::not_yet("Delete..."),
+        PItem::head("Presets"),
+        PItem::not_yet("Presets"),
+        PItem::not_yet("Browse presets"),
+        PItem::not_yet("Save preset as..."),
+        PItem::not_yet("Add to plugin database (flag as favorite)"),
+        PItem::head("Spare state"),
+        PItem::not_yet("Store in spare state"),
+        PItem::not_yet("Flip with spare state"),
+        PItem::head("Parameters"),
+        PItem::not_yet("Link all parameters..."),
+        PItem::not_yet("Browse parameters"),
+        PItem::head("CPU"),
+        PItem::not_yet("Allow threaded processing"),
+        PItem::not_yet("Smart disable"),
+        PItem::sep(),
+        PItem::not_yet("Rename, color and icon...").key("F2"),
+        PItem::not_yet("Change color..."),
+        PItem::not_yet("Random color"),
+        PItem::not_yet("Change icon..."),
+        PItem::new("Detached", Cmd::PluginDetach(row, !detached)).mark(Mark::Check(detached)),
+        PItem::col(),
+        PItem::head("Channel"),
+        PItem::not_yet("Save channel state as..."),
+        PItem::not_yet("Browse channel states"),
+        PItem::sep(),
+        PItem::not_yet("Route to free mixer track").key("Ctrl+L"),
+    ];
+    Popup { x, y, items, sub: None }
 }

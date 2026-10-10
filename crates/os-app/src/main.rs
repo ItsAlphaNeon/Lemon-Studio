@@ -487,7 +487,10 @@ impl ApplicationHandler for Shell {
                 // Paint only what changed, then present only that region.
                 let damage = self.app.take_damage();
                 if let Some(d) = damage {
+                    self.app.canvas_off = (self.inset.0 as i32, self.inset.1 as i32);
                     self.app.paint(canvas, d);
+                    #[cfg(windows)]
+                    self.app.sync_lift(canvas);
                 }
                 if let Some(surface) = self.surface.as_mut() {
                     if surface.resize(w, h).is_ok() {

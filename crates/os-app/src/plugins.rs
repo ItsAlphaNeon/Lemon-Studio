@@ -42,6 +42,8 @@ pub enum Request {
     Note(usize, u8, u8, bool),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
     Raise(usize),
+    /// The menu arrow was clicked: open the window menu at this screen point.
+    Menu(usize, i32, i32),
 }
 
 #[derive(Default)]
@@ -251,6 +253,20 @@ impl Plugins {
         }
     }
 
+    /// Row `row`'s open window (native frame handle) and whether it is detached.
+    #[cfg(windows)]
+    pub fn window_of(&self, row: usize) -> Option<(isize, bool)> {
+        self.hosted.get(&row).and_then(|h| h.window.as_ref()).map(|w| (w.hwnd(), w.detached()))
+    }
+
+    /// Docks or detaches row `row`'s window (window menu > Detached).
+    #[cfg(windows)]
+    pub fn set_detached(&self, row: usize, on: bool) {
+        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
+            w.set_detached(self.owner, on);
+        }
+    }
+
     /// Rows whose plugin window is open and docked in the main window.
     #[cfg(windows)]
     pub fn docked(&self) -> Vec<usize> {
@@ -335,10 +351,7 @@ impl Plugins {
                         FrameEvent::Pan(v) => Request::Pan(row, v),
                         FrameEvent::PitchCents(c) => Request::PitchCents(row, c),
                         FrameEvent::Raise => Request::Raise(row),
-                        FrameEvent::Detach(on) => {
-                            w.set_detached(self.owner, on);
-                            Request::Raise(row)
-                        }
+                        FrameEvent::Menu(x, y) => Request::Menu(row, x, y),
                     });
                 }
             }

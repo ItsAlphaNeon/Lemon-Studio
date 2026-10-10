@@ -552,6 +552,10 @@ pub struct App {
     pub hits: Vec<Hit>,
     /// Rects of last frame's overlays (menus, popups...): docked plugin windows are clipped under them.
     overlays: Vec<Rect>,
+    /// Where the canvas sits in the main window's client area (physical px; the restored window's border).
+    pub canvas_off: (i32, i32),
+    /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
+    popup_lift: Option<usize>,
     pub bars: Vec<Bar>,
     pub hover: Option<Action>,
     /// Action under the cursor while the left button is held (pressed look of buttons).
@@ -665,6 +669,8 @@ impl App {
             transport,
             hits: Vec::new(),
             overlays: Vec::new(),
+            canvas_off: (0, 0),
+            popup_lift: None,
             bars: Vec::new(),
             hover: None,
             pressed: None,
@@ -934,7 +940,19 @@ impl App {
                 match r {
                     Request::Close(_) => continue,
                     Request::Raise(row) => {
+                        // A click in a plugin window closes an open app popup, as a click elsewhere does.
+                        if self.state.playlist.popup.take().is_some() {
+                            self.invalidate();
+                        }
                         self.state.raise(Win::Hosted(row));
+                        continue;
+                    }
+                    Request::Menu(row, x, y) => {
+                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let (lx, ly) = self.screen_to_canvas(x, y);
+                        self.state.playlist.popup = Some(crate::playlist::plugin_window_menu(row, detached, lx, ly));
+                        self.popup_lift = detached.then_some(row);
+                        self.invalidate();
                         continue;
                     }
                     Request::ToggleOn(row) => chans.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled),
@@ -962,6 +980,43 @@ impl App {
         }
     }
 
+    /// Screen point -> canvas logical px.
+    #[cfg(windows)]
+    fn screen_to_canvas(&self, x: i32, y: i32) -> (f32, f32) {
+        let mut p = windows_sys::Win32::Foundation::POINT { x, y };
+        // SAFETY: plain coordinate conversion against our own window.
+        unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(self.plugins.owner as _, &mut p) };
+        let k = self.plugins.scale;
+        ((p.x - self.canvas_off.0) as f32 / k, (p.y - self.canvas_off.1) as f32 / k)
+    }
+
+    /// After a paint: a popup opened from a detached plugin window is shown above that window (it is painted in the
+    /// main window, which the detached window covers).
+    #[cfg(windows)]
+    pub fn sync_lift(&mut self, canvas: &Canvas) {
+        let lifted = self.popup_lift.filter(|_| self.state.playlist.popup.is_some()).and_then(|r| self.plugins.window_of(r));
+        let bounds = self.overlays.iter().copied().reduce(|a, b| a.union(&b));
+        match (lifted, bounds) {
+            (Some((frame, true)), Some(b)) => {
+                let (x, y, w, h) = canvas.device_rect(b);
+                let stride = canvas.pixmap.width() as usize;
+                let px = canvas.pixmap.pixels();
+                let mut buf = Vec::with_capacity(w * h);
+                for row in y..y + h {
+                    for p in &px[row * stride + x..row * stride + x + w] {
+                        buf.push(u32::from(p.red()) << 16 | u32::from(p.green()) << 8 | u32::from(p.blue()));
+                    }
+                }
+                let origin = (x as i32 + self.canvas_off.0, y as i32 + self.canvas_off.1);
+                crate::plugin_window::lift_show(self.plugins.owner, frame, origin, (w as i32, h as i32), buf);
+            }
+            _ => {
+                self.popup_lift = None;
+                crate::plugin_window::lift_hide();
+            }
+        }
+    }
+
     /// Docked plugin windows (native children) join `State::z` and are clipped to the workspace minus the drawn
     /// windows above them and the overlays (spec: ui/plugin-window.md "Docking").
     #[cfg(windows)]
@@ -974,7 +1029,8 @@ impl App {
             }
         }
         let k = self.plugins.scale;
-        let px = |r: Rect| [(r.x * k).floor() as i32, (r.y * k).floor() as i32, (r.right() * k).ceil() as i32, (r.bottom() * k).ceil() as i32];
+        let (ox, oy) = self.canvas_off;
+        let px = |r: Rect| [(r.x * k).floor() as i32 + ox, (r.y * k).floor() as i32 + oy, (r.right() * k).ceil() as i32 + ox, (r.bottom() * k).ceil() as i32 + oy];
         let work = px(self.state.work_rect());
         let over: Vec<[i32; 4]> = self.overlays.iter().map(|&r| px(r.outset(2.0))).collect();
         let z = self.state.z.clone();
