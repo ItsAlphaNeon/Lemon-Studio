@@ -416,8 +416,6 @@ pub struct State {
     pub rack_scroll_x: f32,
     /// Channel rack selection, filters, view options, graph editor, loops (spec: ui/channel-rack.md §7-22).
     pub rack: crate::rack::RackUi,
-    /// Channels were deleted, cloned or moved since the file was read (see `App::save_to`).
-    pub rack_restructured: bool,
     /// Rows show mini piano rolls instead of steps.
     pub rack_roll_view: bool,
     /// Channel shown in the plugin window, and where that window is.
@@ -610,7 +608,6 @@ impl App {
                 rack_size: views::rack::DEFAULT_SIZE,
                 rack_scroll_x: 0.0,
                 rack: Default::default(),
-                rack_restructured: false,
                 rack_roll_view: false,
                 plugin_channel: 0,
                 plugin_pos: (560.0, 260.0),
@@ -721,11 +718,11 @@ impl App {
                 s.rack_scroll = 0.0;
                 s.rack_scroll_x = 0.0;
                 s.rack.reset();
-                s.rack_restructured = false;
                 s.hide(Win::Plugin);
                 s.mixer_scroll = 0.0;
                 s.song_mode = project.arrangement().is_some_and(|a| !a.clips.is_empty());
                 s.project = project;
+                crate::rack::from_model(s);
                 s.file = Some(file);
                 s.message = Some(format!("Opened {}", path.display()));
                 s.path = Some(path);
@@ -750,7 +747,7 @@ impl App {
         }
     }
 
-    fn save_to(&mut self, target: PathBuf) {
+    pub(crate) fn save_to(&mut self, target: PathBuf) {
         // Sampler channels keep their sample in Open Sampler: copy it to the channel so the FLP stores it.
         for row in self.state.hosted_rows.clone() {
             if self.state.project.channels.get(row).is_some_and(|c| c.kind == ChannelKind::Sampler) {
@@ -766,30 +763,32 @@ impl App {
             s.message = Some("Save failed: projects with hosted plugin channels (Open Sampler, CLAP) cannot be saved to FLP yet".into());
             return;
         }
-        // Deleted / cloned / moved channels: `apply` maps channels by position and cannot remove them, so only a file
-        // OpenStudio built from the model (no mixer data of its own) is rebuilt (spec: ui/channel-rack.md, Saving).
-        let own_file = s.file.as_ref().and_then(|f| os_flp::project::load(f).ok()).is_none_or(|p| p.mixer.is_empty());
-        if s.rack_restructured && !own_file {
-            s.message = Some("Save failed: deleted, cloned or moved channels cannot be written into this FLP yet".into());
-            return;
-        }
+        // Lock, zip, filter groups and loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
+        crate::rack::to_model(s);
         // A file OpenStudio made before the project had a playlist has no arrangement block (FL's files always have
         // one): build it again from the model, which holds everything that file stored.
         let lacks_playlist = s.file.as_ref().and_then(|f| os_flp::project::load(f).ok()).is_some_and(|p| p.arrangements.is_empty())
             && !s.project.arrangements.is_empty();
         // A project that was not opened from a file gets a new FLP built from the model.
-        if s.file.is_none() || lacks_playlist || s.rack_restructured {
+        let mut file = if s.file.is_none() || lacks_playlist {
+            // The new file's blocks are the model's channels in order.
+            for (i, c) in s.project.channels.iter_mut().enumerate() {
+                c.rack.origin = Some(i as u16);
+            }
             match os_flp::project::create(&s.project) {
-                Ok(f) => s.file = Some(f),
+                Ok(f) => f,
                 Err(e) => {
                     s.message = Some(format!("Save failed: {e}"));
                     return;
                 }
             }
-        }
-        let file = s.file.as_mut().expect("file made above");
-        let lost = os_flp::project::unsaved_parts(&s.project, file);
-        let result = os_flp::project::apply(&s.project, file)
+        } else {
+            s.file.clone().expect("checked")
+        };
+        // Deleted, cloned and moved channels are written by `apply` (os-flp `restructure`); it edits a copy so a
+        // failed save leaves the loaded file as it was.
+        let lost = os_flp::project::unsaved_parts(&s.project, &file);
+        let result = os_flp::project::apply(&s.project, &mut file)
             .map_err(|e| e.to_string())
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
             .and_then(|b| std::fs::write(&target, b).map_err(|e| e.to_string()));
@@ -799,7 +798,11 @@ impl App {
             Err(e) => format!("Save failed: {e}"),
         });
         if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
-            s.rack_restructured = false;
+            // The saved file now holds the channels in model order.
+            for (i, c) in s.project.channels.iter_mut().enumerate() {
+                c.rack.origin = Some(i as u16);
+            }
+            s.file = Some(file);
             s.path = Some(target);
         }
     }
@@ -3437,7 +3440,7 @@ impl App {
                 s.piano.reset();
                 s.playlist.reset();
                 s.rack.reset();
-                s.rack_restructured = false;
+                crate::rack::from_model(s);
                 s.piano.dirty = true;
                 s.message = Some("New project".into());
             }
@@ -3536,6 +3539,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
         sample_path: None,
         layer_children: Vec::new(),
         envelopes: Default::default(),
+        rack: Default::default(),
     }
 }
 

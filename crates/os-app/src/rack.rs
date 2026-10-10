@@ -190,7 +190,7 @@ pub enum RBox {
     Transpose,
 }
 
-/// Rack state that is not project data (session only, see the spec's Saving section).
+/// Rack UI state. Lock, zip, groups, the filter and loop lengths are saved through [`to_model`] / [`from_model`].
 #[derive(Debug, Clone)]
 pub struct RackUi {
     /// Selected channels (§8); the focused channel is `State::selected_channel`.
@@ -214,6 +214,8 @@ pub struct RackUi {
     /// Per-channel loop length in steps (§15).
     pub loop_len: BTreeMap<usize, u32>,
     pub loop_type: u8,
+    /// Position of "Unsorted" in the file's group list (`None` = last; see [`to_model`]).
+    pub unsorted_at: Option<usize>,
     /// Steps copied by Cut / Copy (the channel's notes of the pattern).
     pub clipboard: Option<Vec<Note>>,
     /// Copied knob value (knob menu, §19).
@@ -247,6 +249,7 @@ impl Default for RackUi {
             loop_mode: false,
             loop_len: BTreeMap::new(),
             loop_type: 0,
+            unsorted_at: None,
             clipboard: None,
             value_clip: None,
             opts: ["Show complete piano roll preview", "Show a mute button on the piano roll preview"].into_iter().collect(),
@@ -703,7 +706,6 @@ pub fn reorder(app: &mut App, order: &[usize]) {
     s.piano.dirty = true;
     s.playlist.sel.clear();
     s.playlist.hover_clip = None;
-    s.rack_restructured = true;
     if s.rack.sel.is_empty() && !s.project.channels.is_empty() {
         s.rack.select_only(s.selected_channel);
     }
@@ -1760,6 +1762,107 @@ pub fn graph_set(s: &mut State, k: u32, v: f32) -> Option<String> {
     Some(text)
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Saving (spec: ui/channel-rack.md "Saving"; flp/events/channels.md, project-info.md, patterns.md)
+
+/// Loop type values of event 162 for the rack's loop types (Loop step channels, Loop all channels, Advanced
+/// looping). Advanced looping was not measured; it is written like step channels.
+const LOOP_TYPE_CODES: [u32; 3] = [3, 2, 3];
+
+/// The rack state of an opened (or new) project: lock, zip, filter groups and the current filter from the channels,
+/// loop lengths and loop mode from the current pattern.
+pub fn from_model(s: &mut State) {
+    let p = &s.project;
+    let rack = &mut s.rack;
+    rack.locked = p.channels.iter().enumerate().filter(|(_, c)| c.rack.locked).map(|(r, _)| r).collect();
+    rack.zipped = p.channels.iter().enumerate().filter(|(_, c)| c.rack.zipped).map(|(r, _)| r).collect();
+    rack.groups.clear();
+    rack.unsorted_at = None;
+    let mut file_to_ui = Vec::new();
+    for (i, name) in p.groups.iter().enumerate() {
+        if name == os_model::UNSORTED_GROUP && rack.unsorted_at.is_none() {
+            rack.unsorted_at = Some(i);
+            file_to_ui.push(None);
+            continue;
+        }
+        let members = p.channels.iter().enumerate().filter(|(_, c)| c.rack.group as usize == i).map(|(r, _)| r).collect();
+        file_to_ui.push(Some(rack.groups.len()));
+        rack.groups.push(Group { name: name.clone(), members });
+    }
+    rack.filter = match p.current_group.map(|g| g as usize) {
+        None => Filter::All,
+        Some(g) => match file_to_ui.get(g) {
+            Some(Some(u)) => Filter::Group(*u),
+            Some(None) => Filter::Unsorted,
+            None => Filter::All,
+        },
+    };
+    let pat = p.pattern(s.pattern);
+    let loops = pat.map(|p| p.loops.clone()).unwrap_or_default();
+    rack.loop_len = loops
+        .iter()
+        // 0 = no length (FL writes it for the other channels while loop mode is off).
+        .filter(|&&(_, steps)| steps != 0 && steps != os_model::Pattern::LOOP_FOLLOW)
+        .filter_map(|&(ch, steps)| p.channels.iter().position(|c| c.index == ch).map(|r| (r, steps)))
+        .collect();
+    let all = loops.iter().any(|&(_, steps)| steps == os_model::Pattern::LOOP_FOLLOW);
+    let off = pat.and_then(|p| p.loop_off);
+    rack.loop_type = match off {
+        Some(2) => 1,
+        Some(_) => 0,
+        None if all => 1,
+        None => 0,
+    };
+    rack.loop_mode = !loops.is_empty() && off.is_none();
+}
+
+/// Writes the rack state into the project before a save (the inverse of [`from_model`]).
+pub fn to_model(s: &mut State) {
+    let rack = &s.rack;
+    let p = &mut s.project;
+    // Groups in file order: the user groups, with "Unsorted" where the file had it (else last, like FL's Alt+G).
+    let mut names: Vec<String> = rack.groups.iter().map(|g| g.name.clone()).collect();
+    let unsorted = rack.unsorted_at.unwrap_or(names.len()).min(names.len());
+    names.insert(unsorted, os_model::UNSORTED_GROUP.to_string());
+    let file_index = |g: usize| if g < unsorted { g } else { g + 1 } as u32;
+    for (r, c) in p.channels.iter_mut().enumerate() {
+        c.rack.locked = rack.locked.contains(&r);
+        c.rack.zipped = rack.zipped.contains(&r);
+        // A channel is in one group in the file: its first one.
+        c.rack.group = rack.groups.iter().position(|g| g.members.contains(&r)).map_or(unsorted as u32, file_index);
+    }
+    // A file without groups keeps none when nothing was grouped.
+    if !(p.groups.is_empty() && rack.groups.is_empty()) {
+        p.groups = names;
+    }
+    p.current_group = match rack.filter {
+        Filter::All => None,
+        Filter::Group(g) => Some(file_index(g)),
+        Filter::Unsorted => Some(unsorted as u32),
+    };
+    if p.groups.is_empty() {
+        p.current_group = None;
+    }
+    // Loop lengths belong to the current pattern.
+    let mut loops: Vec<(u16, u32)> =
+        rack.loop_len.iter().filter_map(|(&r, &l)| p.channels.get(r).map(|c| (c.index, l))).collect();
+    if rack.loop_type == 1 && !loops.is_empty() {
+        let set: BTreeSet<u16> = loops.iter().map(|l| l.0).collect();
+        loops.extend(p.channels.iter().filter(|c| !set.contains(&c.index)).map(|c| (c.index, os_model::Pattern::LOOP_FOLLOW)));
+    }
+    loops.sort_by_key(|l| l.0);
+    let loop_off = (!rack.loop_mode && !loops.is_empty()).then(|| LOOP_TYPE_CODES[usize::from(rack.loop_type.min(2))]);
+    let n = s.pattern;
+    // Pairs with no length (0) carry nothing: a file that has them is unchanged.
+    let set = |l: &[(u16, u32)]| l.iter().filter(|x| x.1 != 0).copied().collect::<BTreeSet<_>>();
+    let changed = p.pattern(n).map_or(!loops.is_empty(), |pat| set(&pat.loops) != set(&loops) || pat.loop_off != loop_off);
+    if changed {
+        let pat = crate::patterns::pat_mut(s, n);
+        pat.loops = loops;
+        pat.loop_off = loop_off;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1775,7 +1878,7 @@ mod tests {
         app.state.project.patterns[0].notes = vec![os_model::Note::step(2, 0)];
         clone_rows(&mut app, &[2]);
         assert_eq!(app.state.project.channels.len(), n + 1);
-        assert!(app.state.rack_restructured);
+        assert_eq!(app.state.project.channels[3].rack.origin, app.state.project.channels[2].rack.origin, "a clone keeps its source block");
         app.state.rack.select_only(2);
         move_selected(&mut app, -1);
         assert_eq!(name(&app, 1), n2);
@@ -1784,6 +1887,50 @@ mod tests {
         assert_eq!(app.state.project.channels.len(), n);
         assert_eq!(name(&app, 1), n1);
         assert!(app.state.project.patterns[0].notes.iter().all(|x| usize::from(x.channel) < n));
+    }
+
+    /// Lock, zip, groups, swing, loop lengths and a restructured rack survive saving into an opened file ("Saving").
+    #[test]
+    fn rack_settings_save_and_reopen() {
+        let path = std::env::temp_dir().join(format!("os_rack_save_{}.flp", std::process::id()));
+        let mut app = App::new(None);
+        crate::patterns::pat_mut(&mut app.state, 1).notes = vec![os_model::Note::step(2, 0), os_model::Note::step(0, 1)];
+        app.save_to(path.clone());
+        app.open(path.clone());
+        let n = app.state.project.channels.len();
+        let names: Vec<Option<String>> = app.state.project.channels.iter().map(|c| c.name.clone()).collect();
+        // Clone channel 0, delete channel 1, then set the rack state on the new rows.
+        clone_rows(&mut app, &[0]);
+        delete_rows(&mut app, &[2]);
+        let s = &mut app.state;
+        s.project.swing = Some(64);
+        s.rack.locked = [1].into();
+        s.rack.zipped = [2].into();
+        s.rack.groups = vec![Group { name: "Drums".into(), members: [0, 2].into() }];
+        s.rack.filter = Filter::Group(0);
+        s.rack.loop_len = [(0, 5)].into();
+        s.rack.loop_mode = true;
+        app.save_to(path.clone());
+        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", app.state.message);
+        app.open(path.clone());
+        let _ = std::fs::remove_file(&path);
+        let s = &app.state;
+        let p = &s.project;
+        assert_eq!(p.channels.len(), n);
+        assert_eq!(p.channels[0].name, names[0]);
+        assert_eq!(p.channels[2].name, names[2]);
+        assert!(p.channels.iter().enumerate().all(|(i, c)| usize::from(c.index) == i));
+        assert_eq!(p.swing, Some(64));
+        let mut notes: Vec<u16> = p.patterns[0].notes.iter().map(|x| x.channel).collect();
+        notes.sort_unstable();
+        assert_eq!(notes, vec![0, 2], "the clone has no notes; channel 2 moved back to row 2");
+        assert_eq!(s.rack.locked, [1].into());
+        assert_eq!(s.rack.zipped, [2].into());
+        assert_eq!(s.rack.groups.len(), 1);
+        assert_eq!(s.rack.groups[0].members, [0, 2].into());
+        assert_eq!(s.rack.filter, Filter::Group(0));
+        assert_eq!(s.rack.loop_len, [(0, 5)].into());
+        assert!(s.rack.loop_mode);
     }
 
     #[test]

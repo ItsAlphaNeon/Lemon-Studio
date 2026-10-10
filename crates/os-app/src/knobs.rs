@@ -87,6 +87,8 @@ impl State {
             }
             KnobId::ChanVol(i) => self.project.channels.get(i).map_or(0.8, |c| c.volume as f32).clamp(0.0, 1.0),
             KnobId::ChanPan(i) => self.project.channels.get(i).map_or(0.5, |c| 0.5 + c.pan as f32 / 2.0).clamp(0.0, 1.0),
+            // Main swing is project data, 0..=128 (spec: flp/events/project-info.md, event 11).
+            KnobId::Swing => f32::from(self.project.swing.unwrap_or(0).min(128)) / 128.0,
             _ => self.knobs.get(&id).copied().unwrap_or_else(|| id.default_value()),
         }
     }
@@ -118,6 +120,10 @@ impl State {
                     c.pan = f64::from((v - 0.5) * 2.0);
                     self.piano.dirty = true;
                 }
+            }
+            KnobId::Swing => {
+                self.project.swing = Some((v * 128.0).round() as u8);
+                self.piano.dirty = true;
             }
             _ => {
                 self.knobs.insert(id, v);

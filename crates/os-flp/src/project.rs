@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use os_model::{
-    Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, Clip, ClipSource, ControlPoint, Envelope, MixerTrack,
+    Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelRack, Clip, ClipSource, ControlPoint, Envelope, MixerTrack,
     Note, Pattern, PlaylistTrack, Project, ProjectInfo, Rgb, SlotPlugin, TimeMarker, CLIP_RECORD_LEN,
 };
 
@@ -43,6 +43,14 @@ mod id {
     pub const DISPLAY_NAME: u8 = 203;
     pub const COLOR: u8 = 128;
     pub const SAMPLE_PATH: u8 = 196;
+    /// Channel rack state (spec: flp/events/channels.md): zipped row, lock, filter group.
+    pub const CH_ZIPPED: u8 = 15;
+    pub const CH_LOCKED: u8 = 32;
+    pub const CH_GROUP: u8 = 145;
+    /// Project-level rack settings (spec: flp/events/project-info.md).
+    pub const SWING: u8 = 11;
+    pub const GROUP_NAME: u8 = 231;
+    pub const CURRENT_GROUP: u8 = 146;
 
     pub const PAT_START: u8 = 65;
     pub const PAT_NOTES: u8 = 224;
@@ -50,6 +58,13 @@ mod id {
     pub const PAT_CONTROLS: u8 = 223;
     pub const PAT_NAME: u8 = 193;
     pub const PAT_COLOR: u8 = 150;
+    /// Pattern length in ticks (metadata) and per-channel loop lengths (after the notes), loop-mode-off flag and
+    /// loop type (metadata) (spec: flp/events/patterns.md).
+    pub const PAT_LENGTH: u8 = 164;
+    pub const LOOP_CHANNEL: u8 = 160;
+    pub const LOOP_STEPS: u8 = 161;
+    pub const LOOP_OFF: u8 = 26;
+    pub const LOOP_TYPE: u8 = 162;
 
     pub const ARR_START: u8 = 99;
     pub const ARR_NAME: u8 = 241;
@@ -184,6 +199,11 @@ struct ChannelLoc {
     /// Event 196 (sample path) and event 20, which it follows (spec: flp/events/channels.md, row 40).
     sample: Option<usize>,
     ev20: Option<usize>,
+    zipped: Option<usize>,
+    locked: Option<usize>,
+    group: Option<usize>,
+    /// Last event 94 (layer child); the zip flag follows it or the target (104).
+    last_child: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -196,6 +216,13 @@ struct PatternLoc {
     meta_start: Option<usize>,
     name: Option<usize>,
     color: Option<usize>,
+    /// Loop length pairs (160, 161) after the notes.
+    loops: Vec<usize>,
+    /// Metadata: 157/158 (new loop/length events go after the last), 26 / 162, 164 and the "Length" marker events.
+    meta_158: Option<usize>,
+    loop_off: Vec<usize>,
+    length: Option<usize>,
+    length_marker: Vec<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -242,7 +269,16 @@ struct Layout {
     mixer_params: Option<usize>,
     /// Automation links (event 227 with a zero first field), in the prelude.
     links: Vec<usize>,
+    swing: Option<usize>,
+    groups: Vec<usize>,
+    current_group: Option<usize>,
 }
+
+/// Marker kind of a pattern's "Length" marker and its name (spec: flp/events/patterns.md, metadata block).
+const LENGTH_MARKER_KIND: u32 = 6;
+const LENGTH_MARKER_NAME: &str = "Length";
+/// Loop type "Loop step channels" (event 162).
+const LOOP_TYPE_STEP: u32 = 3;
 
 fn int(e: &Event) -> u32 {
     e.int_value().unwrap_or(0)
@@ -320,16 +356,31 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                     loc.start = Some(i);
                     loc.notes = Some(k);
                     k += 1;
+                    while events.get(k).is_some_and(|n| n.id == id::LOOP_CHANNEL || n.id == id::LOOP_STEPS) {
+                        loc.loops.push(k);
+                        k += 1;
+                    }
                 } else if has_controls {
                     // A block of control points only: nothing else belongs to it.
                 } else {
                     // Metadata block: runs until the next block start or region change.
                     loc.meta_start = Some(i);
                     is_meta = true;
+                    let mut in_length_marker = false;
                     while let Some(n) = events.get(k) {
+                        if n.id == id::MARKER_POS {
+                            in_length_marker = int(n) >> 24 == LENGTH_MARKER_KIND;
+                        }
+                        if in_length_marker && id::MARKER_IDS.contains(&n.id) {
+                            loc.length_marker.push(k);
+                        }
                         match n.id {
                             id::PAT_NAME => loc.name = Some(k),
                             id::PAT_COLOR => loc.color = Some(k),
+                            157 | 158 => loc.meta_158 = Some(k),
+                            id::LOOP_OFF | id::LOOP_TYPE => loc.loop_off.push(k),
+                            id::PAT_LENGTH => loc.length = Some(k),
+                            id::MARKER_NAME => in_length_marker = false,
                             id::PAT_START | id::CH_START | id::ARR_START => break,
                             _ => {}
                         }
@@ -352,6 +403,9 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 id::COMMENTS => l.comments = Some(i),
                 id::URL => l.url = Some(i),
                 id::CURRENT_PATTERN => l.current_pattern = Some(i),
+                id::SWING if l.swing.is_none() => l.swing = Some(i),
+                id::GROUP_NAME => l.groups.push(i),
+                id::CURRENT_GROUP => l.current_group = Some(i),
                 _ => {}
             },
             (Region::Channels | Region::Arrangements, id::ARR_START) => {
@@ -432,6 +486,10 @@ fn scan_channel(events: &[Event], start: usize, end: usize) -> ChannelLoc {
             id::AUTO_DATA => c.auto = Some(k),
             id::SAMPLE_PATH => c.sample = Some(k),
             20 => c.ev20 = Some(k),
+            id::CH_ZIPPED => c.zipped = Some(k),
+            id::CH_LOCKED => c.locked = Some(k),
+            id::CH_GROUP => c.group = Some(k),
+            id::CH_LAYER_CHILD => c.last_child = Some(k),
             _ => {}
         }
     }
@@ -476,11 +534,15 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         },
         current_pattern: l.current_pattern.map(|i| int(&events[i]) as u16),
         current_arrangement: l.current_arrangement.map(|i| int(&events[i]) as u16),
+        swing: l.swing.map(|i| int(&events[i]) as u8),
+        groups: l.groups.iter().map(|&i| events[i].data().map(|d| decode_text(d, enc)).unwrap_or_default()).collect(),
+        current_group: l.current_group.map(|i| int(&events[i])).filter(|&v| v != u32::MAX),
         ..Default::default()
     };
 
-    for loc in &l.channels {
-        let ch = load_channel(events, loc, enc);
+    for (pos, loc) in l.channels.iter().enumerate() {
+        let mut ch = load_channel(events, loc, enc);
+        ch.rack.origin = Some(pos as u16);
         if let Some(d) = loc.auto.and_then(|i| events[i].data()) {
             if let Some(a) = decode_automation(ch.index, d) {
                 p.automations.push(a);
@@ -504,7 +566,18 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             color: loc.color.map(|i| int(&events[i])).filter(|v| v >> 24 == 0xFF).map(rgb_from_bgr),
             notes: loc.notes.and_then(|i| events[i].data()).map(decode_notes).unwrap_or_default(),
             controls: loc.controls.and_then(|i| events[i].data()).map(decode_controls).unwrap_or_default(),
-            length: None,
+            length: loc.length.map(|i| int(&events[i])).filter(|&v| v != 0),
+            loops: loc
+                .loops
+                .chunks_exact(2)
+                .filter(|p| events[p[0]].id == id::LOOP_CHANNEL && events[p[1]].id == id::LOOP_STEPS)
+                .map(|p| (int(&events[p[0]]) as u16, int(&events[p[1]])))
+                .collect(),
+            loop_off: loc
+                .loop_off
+                .iter()
+                .any(|&i| events[i].id == id::LOOP_OFF && int(&events[i]) != 0)
+                .then(|| loc.loop_off.iter().find(|&&i| events[i].id == id::LOOP_TYPE).map_or(LOOP_TYPE_STEP, |&i| int(&events[i]))),
         });
     }
     let mut a_index = 0;
@@ -568,6 +641,12 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
             .map(|e| int(e) as u16)
             .collect(),
         envelopes: decode_envelopes(block),
+        rack: ChannelRack {
+            origin: None,
+            locked: loc.locked.is_some_and(|i| int(&events[i]) != 0),
+            zipped: loc.zipped.is_some_and(|i| int(&events[i]) != 0),
+            group: loc.group.map_or(0, |i| int(&events[i])),
+        },
     }
 }
 
@@ -1015,6 +1094,7 @@ fn patch_bytes(e: &mut Event, offset: usize, bytes: &[u8]) {
 /// channels, patterns with notes, mixer tracks, …) doesn't match the file: adding or
 /// removing objects isn't supported yet.
 pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
+    restructure(project, file)?;
     let current = load(file)?;
     let events = events_of_mut(file)?;
     let l = scan(events)?;
@@ -1073,6 +1153,39 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         set_int(&mut events[i], v.into());
     }
 
+    // Channel rack settings: main swing, filter groups, current filter (spec: flp/events/project-info.md).
+    if let Some(v) = project.swing.filter(|&v| Some(v) != current.swing) {
+        match l.swing {
+            Some(i) => set_int(&mut events[i], v.into()),
+            None if v != 0 => inserts.push((l.tempo.map_or(0, |i| i + 1), Event::new(id::SWING, Value::U8(v)))),
+            None => {}
+        }
+    }
+    let groups_at = l
+        .groups
+        .first()
+        .copied()
+        .or(l.current_group)
+        .or(l.links.first().copied())
+        .or(l.channels.first().map(|c| c.start))
+        .unwrap_or(0);
+    if project.groups != current.groups {
+        removals.extend(l.groups.iter().copied());
+        for name in project.groups.iter().rev() {
+            inserts.push((groups_at, Event::new(id::GROUP_NAME, Value::var(encode_text(name, enc)))));
+        }
+    }
+    if project.current_group != current.current_group {
+        let v = project.current_group.unwrap_or(u32::MAX);
+        match l.current_group {
+            Some(i) => set_int(&mut events[i], v),
+            None => {
+                let at = l.groups.last().map_or(groups_at, |i| i + 1);
+                inserts.push((at, Event::new(id::CURRENT_GROUP, Value::U32(v))));
+            }
+        }
+    }
+
     // Channels.
     for (loc, (ch, old)) in l.channels.iter().zip(project.channels.iter().zip(&current.channels)) {
         if ch.name != old.name {
@@ -1121,6 +1234,30 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         if ch.mixer_track != old.mixer_track {
             if let Some(i) = loc.target {
                 set_int(&mut events[i], ch.mixer_track.into());
+            }
+        }
+        // Rack state (spec: flp/events/channels.md, events 15 / 32 / 145).
+        if ch.rack.locked != old.rack.locked {
+            match loc.locked {
+                Some(i) => set_int(&mut events[i], u32::from(ch.rack.locked)),
+                None => inserts.push((loc.end, Event::new(id::CH_LOCKED, Value::U8(u8::from(ch.rack.locked))))),
+            }
+        }
+        if ch.rack.zipped != old.rack.zipped {
+            match (loc.zipped, ch.rack.zipped) {
+                (Some(i), true) => set_int(&mut events[i], 1),
+                (Some(i), false) => removals.push(i),
+                (None, true) => {
+                    let at = loc.last_child.or(loc.target).map_or(loc.end, |i| i + 1);
+                    inserts.push((at, Event::new(id::CH_ZIPPED, Value::U8(1))));
+                }
+                (None, false) => {}
+            }
+        }
+        if ch.rack.group != old.rack.group {
+            match loc.group {
+                Some(i) => set_int(&mut events[i], ch.rack.group),
+                None => inserts.push((loc.end, Event::new(id::CH_GROUP, Value::U32(ch.rack.group)))),
             }
         }
         // A sampler's sample (Open Sampler loads one): event 196 replaced, or added right after event 20 where FL
@@ -1176,7 +1313,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         let old = current.patterns.iter().find(|p| p.number == pat.number);
         let loc = l.patterns.get(&pat.number);
         let has_block = loc.is_some_and(|l| l.start.is_some());
-        let new_block = !has_block && (!pat.notes.is_empty() || !pat.controls.is_empty());
+        let new_block = !has_block && (!pat.notes.is_empty() || !pat.controls.is_empty() || !pat.loops.is_empty());
         if new_block {
             new_note_blocks.push((pat.number, note_block_events(pat)));
         }
@@ -1222,8 +1359,29 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 }
             }
         }
+        // Loop lengths follow the notes (spec: flp/events/patterns.md "Loop lengths").
+        if !new_block && old.map(|o| &o.loops) != Some(&pat.loops) {
+            removals.extend(loc.map(|l| l.loops.clone()).unwrap_or_default());
+            if !pat.loops.is_empty() {
+                let Some(at) = loc.and_then(|l| l.notes.or(l.controls).or(l.start)).map(|i| i + 1) else {
+                    return Err(ProjectError::Mismatch(format!("adding loop lengths to pattern {} (no note block)", pat.number)));
+                };
+                inserts.extend(loop_events(&pat.loops).into_iter().rev().map(|e| (at, e)));
+            }
+        }
         let meta_start = loc.and_then(|l| l.meta_start);
-        if meta_start.is_none() && (pat.name.is_some() || pat.color.is_some()) {
+        let wants_meta = pat.name.is_some() || pat.color.is_some() || pat.length.is_some() || pat.loop_off.is_some();
+        if meta_start.is_some()
+            && (old.map(|o| o.length) != Some(pat.length) || old.map(|o| o.loop_off) != Some(pat.loop_off))
+        {
+            // Loop-off flag, "Length" marker and length are rewritten together where they were.
+            let m = loc.expect("has metadata");
+            let old_ones: Vec<usize> = m.loop_off.iter().chain(&m.length_marker).chain(m.length.iter()).copied().collect();
+            let at = old_ones.iter().min().copied().or(m.meta_158.map(|i| i + 1)).unwrap_or(m.meta_start.unwrap_or(0) + 1);
+            removals.extend(old_ones);
+            inserts.extend(meta_length_events(pat, enc).into_iter().rev().map(|e| (at, e)));
+        }
+        if meta_start.is_none() && wants_meta {
             // First name or colour of a pattern: its whole metadata block (defaults per the spec).
             new_meta_blocks.push((pat.number, meta_block_events(pat, enc)));
             continue;
@@ -1399,6 +1557,160 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     Ok(())
 }
 
+/// Rebuilds the channel region when the model's channels are not the file's blocks in order (deleted, cloned, moved
+/// or inserted channels): kept blocks are copied (a clone copies its source block), new ones are built, indices are
+/// renumbered, and every reference to a channel follows it or is dropped with it (spec: flp/events/channels.md
+/// "Deleting, cloning and moving channels"). [`apply`] then patches the values as usual.
+fn restructure(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
+    let events = events_of_mut(file)?;
+    let l = scan(events)?;
+    let enc = text_enc(events, l.version);
+    let n_old = l.channels.len();
+    let origin: Vec<Option<usize>> =
+        project.channels.iter().map(|c| c.rack.origin.map(usize::from).filter(|&o| o < n_old)).collect();
+    let identity = origin.len() >= n_old
+        && origin.iter().enumerate().all(|(i, o)| if i < n_old { *o == Some(i) } else { o.is_none() });
+    if identity {
+        return Ok(());
+    }
+    // Old index -> new index; the first channel with an origin is that block's own (later ones are clones).
+    let mut new_of: Vec<Option<u16>> = vec![None; n_old];
+    for (i, o) in origin.iter().enumerate() {
+        if let Some(o) = *o {
+            new_of[o].get_or_insert(i as u16);
+        }
+    }
+    let map = |ch: u16| new_of.get(usize::from(ch)).copied().flatten();
+    let (first, last) = match (l.channels.first(), l.channels.last()) {
+        (Some(f), Some(t)) => (f.start, t.end + 1),
+        _ => return Err(ProjectError::Structure("no channels".into())),
+    };
+    // What sits between blocks (pattern metadata after channel 0) stays after the block at the same position.
+    let gaps: Vec<Vec<Event>> = (0..n_old)
+        .map(|k| events[l.channels[k].end + 1..l.channels.get(k + 1).map_or(last, |c| c.start)].to_vec())
+        .collect();
+    let mut region = Vec::new();
+    for (i, ch) in project.channels.iter().enumerate() {
+        match origin[i] {
+            Some(o) => {
+                let mut b = events[l.channels[o].start..=l.channels[o].end].to_vec();
+                set_int(&mut b[0], i as u32);
+                b.retain_mut(|e| {
+                    if e.id != id::CH_LAYER_CHILD {
+                        return true;
+                    }
+                    let Some(n) = map(int(e) as u16) else { return false };
+                    set_int(e, n.into());
+                    true
+                });
+                region.extend(b);
+            }
+            None => region.extend(channel_block_events(ch, project.automation(ch.index), enc)?),
+        }
+        if let Some(g) = gaps.get(i) {
+            region.extend(g.iter().cloned());
+        }
+    }
+    for g in gaps.iter().skip(project.channels.len()) {
+        region.extend(g.iter().cloned());
+    }
+    events.splice(first..last, region);
+
+    // References outside the channel blocks (none of these events occur inside a block).
+    let mut i = 0;
+    while i < events.len() {
+        match events[i].id {
+            id::PAT_NOTES => {
+                let d = events[i].data().unwrap_or(&[]).to_vec();
+                let mut out = Vec::with_capacity(d.len());
+                for r in d.chunks_exact(NOTE_LEN) {
+                    if let Some(n) = map(u16::from_le_bytes([r[6], r[7]])) {
+                        out.extend_from_slice(&r[..6]);
+                        out.extend_from_slice(&n.to_le_bytes());
+                        out.extend_from_slice(&r[8..]);
+                    }
+                }
+                set_data(&mut events[i], out);
+                // The loop pairs after the notes (kept in file order).
+                let (s, mut e) = (i + 1, i + 1);
+                while events.get(e).is_some_and(|x| x.id == id::LOOP_CHANNEL || x.id == id::LOOP_STEPS) {
+                    e += 1;
+                }
+                let pairs: Vec<(u16, u32)> = events[s..e]
+                    .chunks_exact(2)
+                    .filter_map(|p| map(int(&p[0]) as u16).map(|c| (c, int(&p[1]))))
+                    .collect();
+                let n = pairs.len() * 2;
+                events.splice(s..e, loop_events(&pairs));
+                i = s + n;
+                continue;
+            }
+            id::PAT_CONTROLS => {
+                let d = events[i].data().unwrap_or(&[]).to_vec();
+                let mut out = Vec::with_capacity(d.len());
+                for r in d.chunks_exact(CONTROL_LEN) {
+                    // Only channel parameters (0 volume, 1 pan, 4 pitch) hold a channel; other targets stay as read.
+                    let ch = u16::from_le_bytes([r[6], r[7]]);
+                    let n = if matches!(u16::from_le_bytes([r[4], r[5]]), 0 | 1 | 4) { map(ch) } else { Some(ch) };
+                    if let Some(n) = n {
+                        out.extend_from_slice(&r[..6]);
+                        out.extend_from_slice(&n.to_le_bytes());
+                        out.extend_from_slice(&r[8..]);
+                    }
+                }
+                set_data(&mut events[i], out);
+            }
+            id::AUTO_LINK if events[i].data().is_some_and(|d| d.len() >= 20 && d[0] == 0 && d[1] == 0) => {
+                let d = events[i].data().unwrap_or(&[]);
+                let clip = map(u16::from_le_bytes([d[2], d[3]]));
+                let target = u32::from_le_bytes(d[8..12].try_into().unwrap());
+                // Channel targets are `channel << 16 | param` below 0x4000_0000 (spec: flp/events/automation.md).
+                let new_target = if target >> 16 < 0x4000 {
+                    map((target >> 16) as u16).map(|c| u32::from(c) << 16 | target & 0xFFFF)
+                } else {
+                    Some(target)
+                };
+                match (clip, new_target) {
+                    (Some(c), Some(t)) => {
+                        patch_bytes(&mut events[i], 2, &c.to_le_bytes());
+                        patch_bytes(&mut events[i], 8, &t.to_le_bytes());
+                    }
+                    _ => {
+                        events.remove(i);
+                        continue;
+                    }
+                }
+            }
+            id::ARR_CLIPS => {
+                let d = events[i].data().unwrap_or(&[]).to_vec();
+                let mut out = Vec::with_capacity(d.len());
+                for r in d.chunks_exact(CLIP_LEN) {
+                    let item = u16::from_le_bytes([r[6], r[7]]);
+                    if item >= 0x5000 {
+                        out.extend_from_slice(r);
+                    } else if let Some(n) = map(item) {
+                        out.extend_from_slice(&r[..6]);
+                        out.extend_from_slice(&n.to_le_bytes());
+                        out.extend_from_slice(&r[8..]);
+                    }
+                }
+                set_data(&mut events[i], out);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    // The header counts the channels (container.md).
+    for c in &mut file.chunks {
+        if let ChunkBody::Header(h) = &mut c.body {
+            if h.raw.len() >= 4 {
+                h.raw[2..4].copy_from_slice(&(project.channels.len() as u16).to_le_bytes());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Notes as 24-byte records, sorted by position.
 fn encode_notes(notes: &[Note]) -> Vec<u8> {
     let mut sorted = notes.to_vec();
@@ -1412,10 +1724,42 @@ fn note_block_events(pat: &Pattern) -> Vec<Event> {
     if !pat.controls.is_empty() {
         block.push(Event::new(id::PAT_CONTROLS, Value::var(encode_controls(&pat.controls))));
     }
+    // Loop lengths follow the notes; FL keeps none for a pattern without notes (spec: patterns.md "Loop lengths").
     if !pat.notes.is_empty() {
         block.push(Event::new(id::PAT_NOTES, Value::var(encode_notes(&pat.notes))));
     }
+    block.extend(loop_events(&pat.loops));
     block
+}
+
+/// Loop length pairs `160 channel, 161 steps` (spec: flp/events/patterns.md "Loop lengths").
+fn loop_events(loops: &[(u16, u32)]) -> Vec<Event> {
+    loops
+        .iter()
+        .flat_map(|&(ch, steps)| [Event::new(id::LOOP_CHANNEL, Value::U32(ch.into())), Event::new(id::LOOP_STEPS, Value::U32(steps))])
+        .collect()
+}
+
+/// The metadata events between 158 and 52: loop-off flag + loop type, the "Length" marker, the length (spec:
+/// flp/events/patterns.md, metadata block).
+fn meta_length_events(pat: &Pattern, enc: TextEnc) -> Vec<Event> {
+    let mut out = Vec::new();
+    if let Some(t) = pat.loop_off {
+        out.push(Event::new(id::LOOP_OFF, Value::U8(1)));
+        out.push(Event::new(id::LOOP_TYPE, Value::U32(t)));
+    }
+    if let Some(len) = pat.length {
+        let marker = TimeMarker {
+            position: len,
+            kind: LENGTH_MARKER_KIND as u8,
+            name: LENGTH_MARKER_NAME.into(),
+            numerator: 4,
+            denominator: 4,
+        };
+        out.extend(marker_events(&marker, enc));
+    }
+    out.push(Event::new(id::PAT_LENGTH, Value::U32(pat.length.unwrap_or(0))));
+    out
 }
 
 /// A pattern's metadata block with the spec's defaults for the fields OpenStudio doesn't edit.
@@ -1429,7 +1773,9 @@ fn meta_block_events(pat: &Pattern, enc: TextEnc) -> Vec<Event> {
     block.extend([
         Event::new(157, Value::U32(u32::MAX)),
         Event::new(158, Value::U32(u32::MAX)),
-        Event::new(164, Value::U32(0)),
+    ]);
+    block.extend(meta_length_events(pat, enc));
+    block.extend([
         Event::new(52, Value::U8(0)),
         Event::new(171, Value::U32(0)),
         Event::new(252, Value::var(vec![0, 0])),
@@ -1483,17 +1829,22 @@ fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -
     for child in &ch.layer_children {
         b.push(Event::new(id::CH_LAYER_CHILD, Value::U16(*child)));
     }
+    if ch.rack.zipped {
+        b.push(Event::new(id::CH_ZIPPED, Value::U8(1)));
+    }
     let mut levels = [0u8; 24];
     levels[0..4].copy_from_slice(&(((ch.pan + 1.0) * 6400.0).round() as i32).to_le_bytes());
     levels[4..8].copy_from_slice(&((ch.volume * 12800.0).round() as i32).to_le_bytes());
     levels[8..12].copy_from_slice(&ch.pitch_cents.to_le_bytes());
     levels[13] = 1; // the template's `00 01 00 00 …` tail
     b.push(Event::new(id::CH_LEVELS, Value::var(levels.to_vec())));
-    if let Some(p) = &ch.sample_path {
-        b.push(Event::new(id::SAMPLE_PATH, Value::var(encode_text(p, enc))));
-    }
+    b.push(Event::new(id::CH_GROUP, Value::U32(ch.rack.group)));
     if let Some(a) = auto.filter(|_| ch.kind == ChannelKind::Automation) {
         b.push(Event::new(id::AUTO_DATA, Value::var(encode_automation(a))));
+    }
+    b.push(Event::new(id::CH_LOCKED, Value::U8(u8::from(ch.rack.locked))));
+    if let Some(p) = &ch.sample_path {
+        b.push(Event::new(id::SAMPLE_PATH, Value::var(encode_text(p, enc))));
     }
     b.push(Event::new(id::CH_END, Value::U8(0)));
     Ok(b)
@@ -1512,6 +1863,9 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         Event::new(169, Value::U32(15)),
         Event::new(id::TEMPO, Value::U32((project.tempo.unwrap_or(130.0) * 1000.0).round() as u32)),
     ];
+    if let Some(v) = project.swing.filter(|&v| v != 0) {
+        ev.push(Event::new(id::SWING, Value::U8(v)));
+    }
     if let Some(p) = project.current_pattern {
         ev.push(Event::new(id::CURRENT_PATTERN, Value::U16(p)));
     }
@@ -1527,10 +1881,17 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
             ev.push(Event::new(id, Value::var(encode_text(&v, enc))));
         }
     }
+    // Filter groups and the current filter (spec: flp/events/project-info.md), before the note blocks.
+    for name in &project.groups {
+        ev.push(Event::new(id::GROUP_NAME, Value::var(encode_text(name, enc))));
+    }
+    if !project.groups.is_empty() {
+        ev.push(Event::new(id::CURRENT_GROUP, Value::U32(project.current_group.unwrap_or(u32::MAX))));
+    }
     let mut patterns: Vec<&Pattern> = project.patterns.iter().collect();
     patterns.sort_by_key(|p| p.number);
     for pat in &patterns {
-        if !pat.notes.is_empty() || !pat.controls.is_empty() {
+        if !pat.notes.is_empty() || !pat.controls.is_empty() || !pat.loops.is_empty() {
             ev.extend(note_block_events(pat));
         }
     }
@@ -1543,7 +1904,7 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         ev.extend(channel_block_events(ch, project.automation(ch.index), enc)?);
         if i == 0 {
             for pat in &patterns {
-                if pat.name.is_some() || pat.color.is_some() {
+                if pat.name.is_some() || pat.color.is_some() || pat.length.is_some() || pat.loop_off.is_some() {
                     ev.extend(meta_block_events(pat, enc));
                 }
             }
@@ -1662,7 +2023,7 @@ mod tests {
             mixer_track: track,
             sample_path: None,
             layer_children: vec![],
-            envelopes: Default::default(),
+            envelopes: Default::default(), rack: Default::default(),
         }
     }
 
@@ -1680,7 +2041,7 @@ mod tests {
             info: ProjectInfo { title: Some("My song".into()), ..Default::default() },
             channels: vec![sampler(0, "Kick", 1), b],
             patterns: vec![
-                Pattern { number: 2, name: Some("Verse".into()), color: Some(Rgb::new(10, 20, 30)), notes: vec![Note::step(0, 48), Note::step(1, 0)], controls: vec![ControlPoint::new(0, 1, ControlPoint::PAN, 3200)], length: None },
+                Pattern { number: 2, name: Some("Verse".into()), color: Some(Rgb::new(10, 20, 30)), notes: vec![Note::step(0, 48), Note::step(1, 0)], controls: vec![ControlPoint::new(0, 1, ControlPoint::PAN, 3200)], ..Pattern::default() },
                 Pattern { number: 1, notes: vec![Note::step(0, 0)], ..Pattern::default() },
             ],
             ..Project::default()
@@ -1882,5 +2243,104 @@ mod tests {
         assert_eq!(back[2].channel(), 1);
         assert_eq!(back[2].param(), ControlPoint::VOLUME);
         assert_eq!(back[0].value, -134);
+    }
+
+    /// The project with every channel's origin set to its position (what `load` gives for a saved file).
+    fn settled(mut p: Project) -> Project {
+        for (i, c) in p.channels.iter_mut().enumerate() {
+            c.rack.origin = Some(i as u16);
+        }
+        p
+    }
+
+    /// Swing, filter groups, the current filter, lock, zip, pattern length and loop lengths are written and read
+    /// back; writing the same model again changes nothing; clearing them works (spec: flp/events/project-info.md,
+    /// channels.md, patterns.md).
+    #[test]
+    fn rack_settings_round_trip() {
+        let mut file = FlpFile::parse(&create(&new_project()).unwrap().to_bytes().unwrap()).unwrap();
+        let mut m = load(&file).unwrap();
+        m.swing = Some(64);
+        m.groups = vec!["Drums".into(), os_model::UNSORTED_GROUP.into()];
+        m.current_group = Some(0);
+        m.channels[0].rack.zipped = true;
+        m.channels[1].rack = ChannelRack { group: 1, locked: true, ..m.channels[1].rack };
+        for pat in &mut m.patterns {
+            if pat.number == 2 {
+                pat.length = Some(72);
+                pat.loops = vec![(0, 5), (1, Pattern::LOOP_FOLLOW)];
+                pat.loop_off = Some(2);
+            } else {
+                pat.length = Some(192);
+            }
+        }
+        apply(&m, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back, m);
+        let mut again = file.clone();
+        apply(&back, &mut again).unwrap();
+        assert_eq!(again.to_bytes().unwrap(), file.to_bytes().unwrap(), "an unchanged model writes nothing");
+        // The pattern length is a "Length" marker plus event 164 in the metadata block.
+        let ev = events_of(&file).unwrap();
+        assert!(ev.iter().any(|e| e.id == id::MARKER_POS && int(e) == 6 << 24 | 72));
+        assert!(ev.iter().any(|e| e.id == id::PAT_LENGTH && int(e) == 72));
+
+        let mut cleared = back.clone();
+        cleared.swing = Some(0);
+        cleared.current_group = None;
+        cleared.channels[0].rack.zipped = false;
+        cleared.channels[1].rack.locked = false;
+        for pat in &mut cleared.patterns {
+            (pat.length, pat.loops, pat.loop_off) = (None, Vec::new(), None);
+        }
+        let mut file2 = file.clone();
+        apply(&cleared, &mut file2).unwrap();
+        let back2 = load(&FlpFile::parse(&file2.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back2, cleared);
+        assert!(!events_of(&file2).unwrap().iter().any(|e| e.id == id::CH_ZIPPED || e.id == id::LOOP_CHANNEL));
+    }
+
+    /// Deleting, cloning and moving channels rewrites the blocks in model order and renumbers notes, control
+    /// points, automation links and playlist clips (spec: flp/events/channels.md "Deleting, cloning and moving").
+    #[test]
+    fn deleted_cloned_and_moved_channels_are_written() {
+        let mut p = new_project();
+        p.channels.push(sampler(2, "Hat", 3));
+        p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(3, "Hat - Channel volume", 0) });
+        p.automations.push(new_automation(3, os_model::target::channel(2, 0), 0.5, 4.0));
+        for pat in &mut p.patterns {
+            pat.notes.push(Note::step(2, 24));
+        }
+        p.patterns[0].controls.push(ControlPoint::new(24, 2, ControlPoint::VOLUME, 100));
+        let mut arr = default_arrangement();
+        arr.clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(1)), Clip::new(0, 384, 1, ClipSource::Channel(3))];
+        p.arrangements = vec![arr];
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let original = load(&file).unwrap();
+
+        // Hat first, Kick, a clone of Kick, the automation clip; Bass deleted.
+        let mut m = original.clone();
+        m.reorder_channels(&[2, 0, 0, 3]);
+        m.channels[2].name = Some("Kick #2".into());
+        assert_eq!(m.channels[2].rack.origin, Some(0));
+        apply(&m, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(file.header().unwrap().channel_count(), Some(4));
+        let back = load(&file).unwrap();
+        assert_eq!(back, settled(m.clone()));
+        let names: Vec<_> = back.channels.iter().map(|c| c.name.clone().unwrap_or_default()).collect();
+        assert_eq!(names, ["Hat", "Kick", "Kick #2", "Hat - Channel volume"]);
+        assert_eq!(back.automations[0].channel, 3);
+        assert_eq!(back.automations[0].target, Some(os_model::target::channel(0, 0)));
+        assert!(back.arrangements[0].clips.iter().any(|c| c.source == ClipSource::Channel(3)));
+        let count = |p: &Project, ch: u16| p.patterns.iter().flat_map(|p| &p.notes).filter(|n| n.channel == ch).count();
+        assert_eq!(count(&back, 2), 0, "a clone has no notes");
+        assert_eq!(count(&back, 1), count(&original, 0), "the kick notes followed the kick");
+        assert_eq!(back.patterns.iter().map(|p| p.notes.len()).sum::<usize>(), 4, "the bass note went");
+        // Writing the restructured model again is a no-op.
+        let mut again = file.clone();
+        apply(&back, &mut again).unwrap();
+        assert_eq!(again.to_bytes().unwrap(), file.to_bytes().unwrap());
     }
 }

@@ -37,7 +37,17 @@ pub struct Project {
     pub current_arrangement: Option<u16>,
     /// Automation clip data, one per automation channel (spec: flp/events/automation.md).
     pub automations: Vec<Automation>,
+    /// Main swing, 0..=128 (spec: flp/events/project-info.md, event 11); `None` = not in the file.
+    pub swing: Option<u8>,
+    /// Channel rack filter group names in file order (event 231); a channel's [`ChannelRack::group`] indexes it.
+    /// FL files always end with "Unsorted", the group of channels in no user group.
+    pub groups: Vec<String>,
+    /// Current display filter (event 146): a group index, `None` = All.
+    pub current_group: Option<u32>,
 }
+
+/// Name of the group of channels that are in no user filter group (spec: flp/events/project-info.md).
+pub const UNSORTED_GROUP: &str = "Unsorted";
 
 impl Project {
     /// Index into `arrangements` of the current arrangement (the first when unset or not found).
@@ -70,6 +80,73 @@ impl Project {
     /// Channel by its index (rack position).
     pub fn channel(&self, index: u16) -> Option<&Channel> {
         self.channels.iter().find(|c| c.index == index)
+    }
+
+    /// A new channel order: `order[new] = old` rack position. An old position left out deletes that channel (its
+    /// notes, control points, loop lengths and clips go too); a repeated one is a clone (a copy without notes that
+    /// keeps the source's [`ChannelRack::origin`]). Every channel reference is renumbered: notes, control points,
+    /// loop lengths, automation clips and their channel targets (a deleted target leaves the clip unlinked),
+    /// playlist clips, layer children (spec: flp/events/channels.md "Deleting, cloning and moving channels").
+    pub fn reorder_channels(&mut self, order: &[usize]) {
+        let n = self.channels.len();
+        let mut map: Vec<Option<u16>> = vec![None; n];
+        for (new, &old) in order.iter().enumerate() {
+            if old < n && map[old].is_none() {
+                map[old] = Some(new as u16);
+            }
+        }
+        let m = |c: u16| map.get(usize::from(c)).copied().flatten();
+        let old = std::mem::take(&mut self.channels);
+        self.channels = order
+            .iter()
+            .filter_map(|&o| old.get(o).cloned())
+            .enumerate()
+            .map(|(new, mut c)| {
+                c.index = new as u16;
+                c.layer_children = c.layer_children.iter().filter_map(|&k| m(k)).collect();
+                c
+            })
+            .collect();
+        for p in &mut self.patterns {
+            p.notes.retain_mut(|x| m(x.channel).map(|c| x.channel = c).is_some());
+            // Only channel parameters (0 volume, 1 pan, 4 pitch) hold a channel; other targets stay as read.
+            p.controls.retain_mut(|x| {
+                !matches!(x.param(), 0 | 1 | 4) || m(x.channel()).map(|c| *x = ControlPoint::new(x.position, c, x.param(), x.value)).is_some()
+            });
+            p.loops.retain_mut(|l| m(l.0).map(|c| l.0 = c).is_some());
+        }
+        // A clone of an automation channel copies its points (they live in the channel block), not its link.
+        let clones: Vec<Automation> = order
+            .iter()
+            .enumerate()
+            .filter(|&(new, &o)| map.get(o).copied().flatten() != Some(new as u16))
+            .filter_map(|(new, &o)| {
+                let a = self.automations.iter().find(|a| usize::from(a.channel) == o)?;
+                Some(Automation { channel: new as u16, target: None, ..a.clone() })
+            })
+            .collect();
+        self.automations.retain_mut(|a| {
+            let Some(c) = m(a.channel) else { return false };
+            a.channel = c;
+            if let Some(t) = a.target.filter(|&t| t >> 16 < 0x4000) {
+                a.target = m((t >> 16) as u16).map(|c| target::channel(c, t as u16));
+            }
+            true
+        });
+        self.automations.extend(clones);
+        self.automations.sort_by_key(|a| a.channel);
+        for arr in &mut self.arrangements {
+            arr.clips.retain_mut(|c| match c.source {
+                ClipSource::Channel(ch) => m(ch)
+                    .map(|n| {
+                        c.source = ClipSource::Channel(n);
+                        // The stored record holds the item index too (bytes 6..8, spec: flp/events/playlist.md).
+                        c.raw[6..8].copy_from_slice(&n.to_le_bytes());
+                    })
+                    .is_some(),
+                ClipSource::Pattern(_) => true,
+            });
+        }
     }
 }
 
@@ -117,6 +194,22 @@ pub struct Channel {
     pub layer_children: Vec<u16>,
     /// The five envelope records (event 218), indexed by [`Envelope::VOLUME`] and friends.
     pub envelopes: [Envelope; 5],
+    /// Channel rack state saved with the channel.
+    pub rack: ChannelRack,
+}
+
+/// Channel rack settings of one channel (spec: flp/events/channels.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChannelRack {
+    /// Index of the file block this channel was loaded from (`None` = created in OpenStudio). A clone keeps its
+    /// source's origin, so the writer copies the source block (spec: channels.md "Deleting, cloning and moving").
+    pub origin: Option<u16>,
+    /// Lock active/mute state (event 32).
+    pub locked: bool,
+    /// Zipped row (event 15).
+    pub zipped: bool,
+    /// Filter group index into [`Project::groups`] (event 145).
+    pub group: u32,
 }
 
 /// One channel envelope record, values as stored (spec: audio/channel-envelopes.md). Times are knob
@@ -178,8 +271,19 @@ pub struct Pattern {
     /// (spec: flp/events/patterns.md, "Control points").
     pub controls: Vec<ControlPoint>,
     /// Length set in the channel rack's pattern length box, in ticks; `None` = Auto (whole bars past the last
-    /// note). Not stored in the FLP yet (spec: ui/channel-rack.md, Saving).
+    /// note). Stored as metadata event 164 plus a "Length" marker (spec: flp/events/patterns.md).
     pub length: Option<u32>,
+    /// Per-channel loop lengths `(channel, steps)` in channel order (events 160/161 after the notes);
+    /// steps [`Pattern::LOOP_FOLLOW`] = a channel that only follows "Loop all channels".
+    pub loops: Vec<(u16, u32)>,
+    /// Loop mode off with loop lengths kept: the loop type value (metadata events 26 = 1 and 162; 3 = loop step
+    /// channels, 2 = loop all channels). `None` = loop mode on (or no loops).
+    pub loop_off: Option<u32>,
+}
+
+impl Pattern {
+    /// Stored loop length of channels that follow "Loop all channels" (0xFFFFFFFD).
+    pub const LOOP_FOLLOW: u32 = 0xFFFF_FFFD;
 }
 
 /// One point of a pattern's channel control lane (event 223 record). `kind` is

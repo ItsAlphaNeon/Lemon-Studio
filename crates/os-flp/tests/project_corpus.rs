@@ -157,6 +157,7 @@ fn playlist_edits_survive() {
         }
         let next = project.channels.len() as u16;
         let mut ch = project.channels[0].clone();
+        ch.rack.origin = None;
         ch.index = next;
         ch.kind = ChannelKind::Automation;
         ch.name = Some("Added automation".into());
@@ -270,7 +271,7 @@ fn new_pattern_blocks_are_added() {
                 color: (k != 2).then(|| Rgb::new(10 + k as u8, 20, 30)),
                 notes: vec![Note::step(0, 24), Note::step(0, 0)],
                 controls: if k == 0 { vec![ControlPoint::new(0, 0, ControlPoint::VOLUME, 6400)] } else { vec![] },
-                length: None,
+                ..Pattern::default()
             });
         }
         apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -328,9 +329,92 @@ fn new_pattern_file() {
             color: Some(Rgb::new(200, 60 * k as u8, 40)),
             notes: (0..4).map(|s| Note { key: 60 + 4 * s as u16 * k, length: 48, ..Note::step(0, s * 96) }).collect(),
             controls: vec![ControlPoint::new(0, 0, ControlPoint::VOLUME, 6400)],
-            length: None,
+            ..Pattern::default()
         });
     }
     apply(&project, &mut file).unwrap();
     std::fs::write(o, file.to_bytes().unwrap()).unwrap();
+}
+
+fn settled(mut p: os_model::Project) -> os_model::Project {
+    for (i, c) in p.channels.iter_mut().enumerate() {
+        c.rack.origin = Some(i as u16);
+    }
+    p
+}
+
+/// Channel rack settings written into every FL 26 file read back (spec: flp/events/project-info.md, channels.md,
+/// patterns.md): swing, a new filter group, lock, zip, an explicit length and loop lengths.
+#[test]
+fn rack_settings_survive() {
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let Ok(mut project) = load(&file) else { continue };
+        if project.channels.len() < 2 {
+            continue;
+        }
+        project.swing = Some(77);
+        project.groups.insert(0, "Added".into());
+        for c in &mut project.channels {
+            c.rack.group += 1;
+        }
+        project.channels[0].rack.group = 0;
+        project.current_group = Some(0);
+        project.channels[0].rack.locked = !project.channels[0].rack.locked;
+        project.channels[1].rack.zipped = !project.channels[1].rack.zipped;
+        if let Some(pat) = project.patterns.iter_mut().find(|p| !p.notes.is_empty()) {
+            pat.length = Some(96 * 3);
+            pat.loops = vec![(0, 3)];
+            pat.loop_off = Some(3);
+        }
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back, project, "{path}");
+        checked += 1;
+    }
+    assert!(checked > 40, "only {checked} files checked");
+}
+
+/// Restructured channels in every FL 26 file (spec: flp/events/channels.md "Deleting, cloning and moving"):
+/// swapping the first two channels writes the swapped model, swapping back gives the original bytes; deleting
+/// the second channel and cloning the first reads back as the model.
+#[test]
+fn restructured_channels_survive() {
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let bytes = std::fs::read(path).unwrap();
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        let Ok(project) = load(&file) else { continue };
+        let n = project.channels.len();
+        if n < 3 {
+            continue;
+        }
+        let mut order: Vec<usize> = (0..n).collect();
+        order.swap(0, 1);
+        let mut swapped = project.clone();
+        swapped.reorder_channels(&order);
+        apply(&swapped, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&file).unwrap();
+        let want = settled(swapped);
+        assert_eq!(back, want, "{path}");
+        let mut again = back.clone();
+        again.reorder_channels(&order);
+        apply(&again, &mut file).unwrap();
+        assert!(file.to_bytes().unwrap() == bytes, "{path}: swapping back changed the file");
+
+        let mut edited = project.clone();
+        let mut order: Vec<usize> = (0..n).filter(|&i| i != 1).collect();
+        order.insert(1, 0);
+        edited.reorder_channels(&order);
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        apply(&edited, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        let want = settled(edited);
+        assert_eq!(back, want, "{path}");
+        checked += 1;
+    }
+    assert!(checked > 50, "only {checked} files checked");
 }

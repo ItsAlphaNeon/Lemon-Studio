@@ -1044,7 +1044,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         mixer_track: 0,
         sample_path: None,
         layer_children: Vec::new(),
-        envelopes: Default::default(),
+        envelopes: Default::default(), rack: Default::default(),
     });
     s.project.automations.push(os_flp::project::new_automation(index, tgt, value.clamp(0.0, 1.0), beats));
     let track = free_track(s, track_after_used(s), a, b);
@@ -1078,7 +1078,7 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
         mixer_track,
         sample_path: Some(path.to_string()),
         layer_children: Vec::new(),
-        envelopes: Default::default(),
+        envelopes: Default::default(), rack: Default::default(),
     });
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Audio;

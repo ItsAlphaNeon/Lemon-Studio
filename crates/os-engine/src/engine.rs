@@ -1174,10 +1174,21 @@ impl Sched {
     }
 }
 
+/// Main swing delay of a note in ticks: a note starting exactly on an off-beat 16th (steps 2, 4, ...) plays
+/// `swing / 256` of a step late (spec: flp/events/project-info.md, "Swing timing").
+pub fn swing_delay(position: u32, ppq: u16, swing: u8) -> f64 {
+    let step = u32::from(ppq) / 4;
+    if swing == 0 || step == 0 || position % step != 0 || (position / step) % 2 == 0 {
+        return 0.0;
+    }
+    f64::from(step) * f64::from(swing.min(128)) / 256.0
+}
+
 /// Schedules a note; a repeating note is retriggered at every multiple of its interval inside its
 /// length (spec: audio/pattern-controls.md, note repeat). A plain step counts as one step long.
-fn push_note(out: &mut Vec<Sched>, start: f64, n: &os_model::Note, ppq: u16) {
-    let first = Sched::note(start, n);
+fn push_note(out: &mut Vec<Sched>, start: f64, n: &os_model::Note, ppq: u16, swing: u8) {
+    let mut first = Sched::note(start, n);
+    first.tick += swing_delay(n.position, ppq, swing);
     let span = if n.length > 0 { f64::from(n.length) } else { f64::from(ppq) / 4.0 };
     match n.repeat_ticks(ppq) {
         Some(interval) => {
@@ -1268,7 +1279,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
         let end = pattern_end(n);
         let mut t = Vec::new();
         for x in pattern_notes(n).iter().filter(|x| !x.muted() && f64::from(x.position) < end) {
-            push_note(&mut t, 0.0, x, project.ppq);
+            push_note(&mut t, 0.0, x, project.ppq, project.swing.unwrap_or(0));
         }
         (t, end)
     };
@@ -1296,7 +1307,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         for note in pattern_notes(n).iter().filter(|x| !x.muted()) {
                             let p = f64::from(note.position);
                             if p >= from && p < from + len {
-                                push_note(&mut out, start - from, note, project.ppq);
+                                push_note(&mut out, start - from, note, project.ppq, project.swing.unwrap_or(0));
                             }
                         }
                     }
@@ -1336,7 +1347,7 @@ mod tests {
             mixer_track: 0,
             sample_path: None, // plays the built-in tone
             layer_children: vec![],
-            envelopes: Default::default(),
+            envelopes: Default::default(), rack: Default::default(),
         }
     }
 
@@ -1372,6 +1383,18 @@ mod tests {
             r.fill(v);
             self.at += l.len() as u64;
         }
+    }
+
+    // spec: flp/events/project-info.md "Swing timing" (100 % delays an off-beat 16th by half a step)
+    #[test]
+    fn swing_delays_off_beat_sixteenths() {
+        assert_eq!(swing_delay(0, 96, 128), 0.0);
+        assert_eq!(swing_delay(24, 96, 128), 12.0);
+        assert_eq!(swing_delay(24, 96, 64), 6.0);
+        assert_eq!(swing_delay(48, 96, 128), 0.0);
+        assert_eq!(swing_delay(72, 96, 32), 3.0);
+        assert_eq!(swing_delay(30, 96, 128), 0.0, "off the 16th grid");
+        assert_eq!(swing_delay(24, 96, 0), 0.0);
     }
 
     // spec: plugins/plugin-formats.md (hosting: notes at frame offsets; the channel's volume and pan apply)
