@@ -98,6 +98,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     if s.picker_open {
         picker::paint(ui, s);
     }
+    browser::paint_ghost(ui, s);
     if s.monitor.debug {
         mondebug::paint(ui, s);
     }

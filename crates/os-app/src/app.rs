@@ -136,7 +136,14 @@ pub enum Action {
     MinWin(Win),
     MaxWin(Win),
     WinResize(Win, u8),
+    /// Browser tree row (index into `views::browser::rows`); press selects / toggles / starts a drag.
     BrowserRow(usize),
+    /// Browser tab 0..5 (spec: ui/browser.md §1).
+    BrowserTab(usize),
+    /// Browser list background (wheel scrolls).
+    BrowserList,
+    /// Title-bar up arrow: close every node of the tab.
+    BrowserCollapse,
     PlaylistArea,
     MixerArea,
     RackArea,
@@ -337,6 +344,8 @@ pub enum Drag {
     BarZoom { t: Scroll, m0: (f32, f32), p0: f32, ratio: f32, z0: f32, center: f32, view: f32 },
     /// A playlist drag (spec: ui/playlist.md).
     Pl(crate::playlist::PlDrag),
+    /// A browser item pressed (`started` once it moved far enough), spec: ui/browser.md §3.
+    Browser { item: views::browser::Item, label: String, m0: (f32, f32), started: bool },
 }
 
 pub struct State {
@@ -383,7 +392,13 @@ pub struct State {
     pub playlist_bar_w: f32,
     pub mixer_scroll: f32,
     pub rack_scroll: f32,
-    pub browser_selected: usize,
+    /// Browser (spec: ui/browser.md): active tab, opened node keys, list scroll (px), selected row key,
+    /// and the drag label with the mouse position while an item is dragged.
+    pub browser_tab: usize,
+    pub browser_open: std::collections::HashSet<String>,
+    pub browser_scroll: f32,
+    pub browser_sel: Option<String>,
+    pub browser_drag: Option<(String, f32, f32)>,
     pub tempo: f64,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
@@ -538,7 +553,11 @@ impl App {
                 playlist_bar_w: views::playlist::BAR_W,
                 mixer_scroll: 0.0,
                 rack_scroll: 0.0,
-                browser_selected: 6,
+                browser_tab: 0,
+                browser_open: views::browser::default_open(),
+                browser_scroll: 0.0,
+                browser_sel: None,
+                browser_drag: None,
                 tempo: 130.0,
                 message: None,
                 monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
@@ -748,7 +767,7 @@ impl App {
         self.damage = Damage::Full;
     }
 
-    fn damage_rect(&mut self, r: Rect) {
+    pub(crate) fn damage_rect(&mut self, r: Rect) {
         self.damage = match self.damage {
             Damage::Full => Damage::Full,
             Damage::None => Damage::Rect(r),
@@ -960,7 +979,7 @@ impl App {
         })
     }
 
-    fn top_hit(&self, x: f32, y: f32) -> Option<&Hit> {
+    pub(crate) fn top_hit(&self, x: f32, y: f32) -> Option<&Hit> {
         self.hits.iter().rev().find(|h| h.rect.contains(x, y))
     }
 
@@ -969,6 +988,7 @@ impl App {
         self.mouse = (x, y);
         if let Some(d) = self.drag.clone() {
             match d {
+                Drag::Browser { item, label, m0, started } => self.browser_drag_move(label, m0, started, item),
                 Drag::Pl(d) => {
                     if let Some(g) = self.pl_grid {
                         crate::playlist::drag_move(self, d, g);
@@ -1506,6 +1526,10 @@ impl App {
         if matches!(self.drag, Some(Drag::Velocity { .. })) {
             self.state.piano.dirty = true;
         }
+        if let Some(Drag::Browser { item, started, .. }) = self.drag.clone() {
+            self.drag = None;
+            return self.browser_drop(item, started);
+        }
         if let Some(Drag::Pl(d)) = self.drag.clone() {
             self.drag = None;
             if let Some(g) = self.pl_grid {
@@ -1846,6 +1870,9 @@ impl App {
         self.invalidate();
         let (x, y) = self.mouse;
         let area = self.top_hit(x, y).map(|h| h.action.clone());
+        if matches!(area, Some(Action::BrowserList | Action::BrowserRow(_) | Action::BrowserTab(_))) {
+            return self.browser_wheel(dy + dx);
+        }
         if let Some(Action::Scrollbar(t)) = area {
             let step = if t == Scroll::PianoY { views::piano::ROW * 3.0 } else { 60.0 };
             self.scroll_set(t, self.scroll_get(t) - (dy + dx) * step);
@@ -2361,6 +2388,9 @@ impl App {
         if self.playlist_act(&a, false) {
             return;
         }
+        if self.browser_act(&a) {
+            return;
+        }
         if matches!(a, Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys) {
             self.piano_click(&a);
             return;
@@ -2620,7 +2650,7 @@ impl App {
                 }
             }
             Action::CloseWin(w) => s.hide(w),
-            Action::BrowserRow(i) => s.browser_selected = i,
+            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse => {}
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
             Action::PlTool(_)
             | Action::PlSnap
@@ -2768,7 +2798,7 @@ fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
 
 /// Add-channel button (spec: ui/channel-rack.md §5): an empty sampler routed to the next insert
 /// after the highest one in use. Returns its rack row.
-fn add_channel(p: &mut Project) -> usize {
+pub(crate) fn add_channel(p: &mut Project) -> usize {
     let index = p.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let track = (p.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(125);
     p.channels.push(sampler_channel(index, "Sampler", track));
@@ -3067,6 +3097,74 @@ mod tests {
         app.mouse_down();
         app.mouse_up();
         frame(app, c, None);
+    }
+
+    /// Browser (spec: ui/browser.md): tabs, opening nodes, dragging a pattern and a generator onto the playlist.
+    #[test]
+    fn browser_tree_and_drag() {
+        use crate::views::browser::{rows, Item};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = default_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        // The all tab lists the 26 roots, all closed.
+        assert_eq!(rows(&app.state).len(), 26);
+        // Project tab: Current project opened with its patterns (default like the screenshot).
+        let r0 = hit_rect(&app, &Action::BrowserTab(1));
+        click(&mut app, &mut c, r0);
+        let r = rows(&app.state);
+        assert_eq!(r[0].label, "Current project");
+        assert_eq!(r[1].label, "History");
+        let pi = r.iter().position(|r| r.item == Item::Pattern(1)).expect("pattern row");
+        // Drag pattern 1 onto the playlist grid: a pattern clip appears.
+        let n0 = crate::playlist::clips(&app.state).len();
+        let src = hit_rect(&app, &Action::BrowserRow(pi));
+        let grid = app.pl_grid().expect("grid");
+        app.mouse_move(src.cx(), src.cy());
+        app.mouse_down();
+        app.mouse_move(src.cx() + 30.0, src.cy());
+        assert!(app.state.browser_drag.is_some(), "drag label shown");
+        app.mouse_move(grid.x + 100.0, grid.y + 10.0);
+        app.mouse_up();
+        assert!(app.state.browser_drag.is_none());
+        let clips = crate::playlist::clips(&app.state);
+        assert_eq!(clips.len(), n0 + 1);
+        assert_eq!(clips.last().unwrap().source, os_model::ClipSource::Pattern(1));
+        frame(&mut app, &mut c, None);
+        // Collapsing Patterns hides its rows; a plain click is not a drop.
+        let pat_hdr = rows(&app.state).iter().position(|r| r.label == "Patterns").unwrap();
+        let r0 = hit_rect(&app, &Action::BrowserRow(pat_hdr));
+        click(&mut app, &mut c, r0);
+        assert!(rows(&app.state).iter().all(|r| r.item != Item::Pattern(1)));
+        assert_eq!(crate::playlist::clips(&app.state).len(), n0 + 1);
+        // Plugin database tab: open Generators, drag the Sampler onto the playlist -> a new channel.
+        let r0 = hit_rect(&app, &Action::BrowserTab(2));
+        click(&mut app, &mut c, r0);
+        let gi = rows(&app.state).iter().position(|r| r.label == "Generators").unwrap();
+        let r0 = hit_rect(&app, &Action::BrowserRow(gi));
+        click(&mut app, &mut c, r0);
+        let si = rows(&app.state).iter().position(|r| r.item == Item::Generator(0)).expect("sampler row");
+        let ch0 = app.state.project.channels.len();
+        let src = hit_rect(&app, &Action::BrowserRow(si));
+        app.mouse_move(src.cx(), src.cy());
+        app.mouse_down();
+        app.mouse_move(grid.x + 200.0, grid.y + 60.0);
+        app.mouse_move(grid.x + 210.0, grid.y + 60.0);
+        app.mouse_up();
+        assert_eq!(app.state.project.channels.len(), ch0 + 1);
+        // Online / favorites tabs are empty; wheel never scrolls past the content.
+        let r0 = hit_rect(&app, &Action::BrowserTab(4));
+        click(&mut app, &mut c, r0);
+        assert!(rows(&app.state).is_empty());
+        let r0 = hit_rect(&app, &Action::BrowserTab(0));
+        click(&mut app, &mut c, r0);
+        app.mouse_move(100.0, 300.0);
+        app.wheel(0.0, -5.0, false, false);
+        assert_eq!(app.state.browser_scroll, 0.0);
     }
 
     /// Channel rack (spec: ui/channel-rack.md §5): stacking with other windows, name button opens
