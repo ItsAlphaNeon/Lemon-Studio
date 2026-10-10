@@ -38,6 +38,14 @@ fn main() {
         .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
         .unwrap_or_default();
     view::paint(&mut c, &theme, &vals, &st, &sv, "", hosted);
+    if std::env::var_os("OS_BENCH").is_some() {
+        // Full-frame paint time (what a knob drag repaints).
+        let t = std::time::Instant::now();
+        for _ in 0..50 {
+            view::paint(&mut c, &theme, &vals, &st, &sv, "", hosted);
+        }
+        eprintln!("paint {:.2} ms", t.elapsed().as_secs_f64() * 1000.0 / 50.0);
+    }
     let mut buf = vec![0u32; (view::W * view::H) as usize];
     c.copy_to_xrgb(&mut buf);
     // The editor the host shows (cropped); `full` paints the whole painted area.
