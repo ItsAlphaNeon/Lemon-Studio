@@ -14,6 +14,7 @@
 use std::fmt;
 
 pub mod fl;
+pub mod presets;
 pub use fl::FlTheme;
 
 /// An sRGB color with alpha.

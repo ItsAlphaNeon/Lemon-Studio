@@ -1035,20 +1035,15 @@ impl App {
         let name = |d: &cpal::Device| d.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "(unknown device)".into());
         st.device = host.default_output_device().map(|d| name(&d)).unwrap_or_else(|| "(no output device)".into());
         st.devices = host.output_devices().map(|ds| ds.map(|d| name(&d)).collect()).unwrap_or_default();
-        st.themes.clear();
-        let fl = std::path::Path::new(r"C:\Program Files\Image-Line\FL Studio 2026\Artwork\Themes");
-        let mut dirs = vec![fl.to_path_buf()];
-        if let Some(d) = std::env::var_os("APPDATA") {
-            dirs.push(PathBuf::from(d).join("OpenStudio").join("themes"));
-        }
-        for d in dirs {
+        // Built-in presets (spec: ui/theme-presets.md), then .flstheme files in %APPDATA%/OpenStudio/themes.
+        st.themes = os_theme::presets::PRESETS.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect();
+        if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio").join("themes")) {
             if let Ok(rd) = std::fs::read_dir(&d) {
                 let mut v: Vec<_> = rd
                     .flatten()
                     .map(|e| e.path())
                     .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")))
-                    // Trademarked product names are not shown (owner rule): "Sytrus" theme -> "Citrus".
-                    .map(|p| (p.file_stem().map(|s| s.to_string_lossy().replace("Sytrus", "Citrus")).unwrap_or_default(), p))
+                    .filter_map(|p| Some((p.file_stem()?.to_string_lossy().into_owned(), String::from_utf8_lossy(&std::fs::read(&p).ok()?).into_owned())))
                     .collect();
                 v.sort();
                 st.themes.extend(v);
@@ -1099,9 +1094,17 @@ impl App {
                 self.state.message = Some("Theme: default".into());
             }
             SAct::Preset(i) => {
-                if let Some((_, p)) = st.themes.get(i - 1).cloned() {
+                if let Some((name, text)) = st.themes.get(i - 1).cloned() {
                     st.preset = i;
-                    self.load_theme_file(&p);
+                    let fl = os_theme::FlTheme::parse(&text);
+                    self.theme = os_theme::Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default());
+                    os_theme::set_current(&self.theme.colors);
+                    // Remembered like an imported theme (loaded at the next start).
+                    if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) {
+                        let _ = std::fs::create_dir_all(&d);
+                        let _ = std::fs::write(d.join("current.flstheme"), &text);
+                    }
+                    self.state.message = Some(format!("Theme: {name}"));
                 }
             }
             SAct::Button("Reset") => self.settings_act(SAct::Preset(0)),

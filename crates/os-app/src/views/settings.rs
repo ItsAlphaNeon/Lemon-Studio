@@ -42,7 +42,8 @@ pub struct SettingsUi {
     /// Filled when the window opens: output devices, theme files (name, path), selected preset.
     pub devices: Vec<String>,
     pub device: String,
-    pub themes: Vec<(String, std::path::PathBuf)>,
+    /// Theme presets (name, `.flstheme` text): built-ins (spec ui/theme-presets.md), then the user's theme folder.
+    pub themes: Vec<(String, String)>,
     pub preset: usize,
 }
 
@@ -309,9 +310,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         }
         THEME => {
             let mut tiles = vec![("(Default)".to_string(), swatch(&os_theme::Palette::default()))];
-            for (name, path) in &st.themes {
-                let p = std::fs::read(path).map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b)))).unwrap_or_default();
-                tiles.push((name.clone(), swatch(&p)));
+            for (name, text) in &st.themes {
+                tiles.push((name.clone(), swatch(&os_theme::fl::palette(&os_theme::FlTheme::parse(text)))));
             }
             vec![
                 g("Presets", vec![Presets(tiles, st.preset)]),
