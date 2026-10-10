@@ -495,9 +495,12 @@ impl ApplicationHandler for Shell {
                 if let Some(surface) = self.surface.as_mut() {
                     if surface.resize(w, h).is_ok() {
                         if let Ok(mut buf) = surface.buffer_mut() {
+                            // The buffer holds the last frame only when its age is 1. Wayland hands out two or
+                            // more buffers in turn (age 2 and up): such a buffer lacks what was painted since
+                            // it was last shown, so it gets the whole canvas.
                             let age = buf.age();
                             match damage {
-                                Some(Some(r)) if age > 0 => {
+                                Some(Some(r)) if age == 1 => {
                                     let px = canvas.device_rect(r);
                                     canvas.copy_region_to_xrgb_at(&mut buf, stride, px, off);
                                     match (NonZeroU32::new(px.2 as u32), NonZeroU32::new(px.3 as u32)) {
@@ -513,7 +516,7 @@ impl ApplicationHandler for Shell {
                                 // Nothing painted (the OS asked for a redraw): the buffer already
                                 // holds the last frame unless it was discarded.
                                 None => {
-                                    if age == 0 {
+                                    if age != 1 {
                                         canvas.copy_region_to_xrgb_at(&mut buf, stride, (0, 0, cw as usize, ch as usize), off);
                                         draw_border(&mut buf, stride, size.height as usize, inset);
                                     }
