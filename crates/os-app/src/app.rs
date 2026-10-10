@@ -27,6 +27,8 @@ pub enum Win {
     PianoRoll,
     Browser,
     Plugin,
+    /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
+    Hosted(usize),
 }
 
 impl Win {
@@ -324,6 +326,11 @@ impl Ui<'_> {
         self.hover.is_some() && rect.contains(self.mouse.0, self.mouse.1)
     }
 
+    /// Hits registered so far this frame.
+    pub fn hit_count(&self) -> usize {
+        self.hits.len()
+    }
+
     /// Register a hit region; returns whether it is hovered (topmost last frame).
     pub fn hit(&mut self, rect: Rect, action: Action, hint: impl Into<Cow<'static, str>>) -> bool {
         let hovered = self.hover.as_ref() == Some(&action) && rect.contains(self.mouse.0, self.mouse.1);
@@ -543,6 +550,8 @@ pub struct App {
     pub theme: Theme,
     pub transport: Transport,
     pub hits: Vec<Hit>,
+    /// Rects of last frame's overlays (menus, popups...): docked plugin windows are clipped under them.
+    overlays: Vec<Rect>,
     pub bars: Vec<Bar>,
     pub hover: Option<Action>,
     /// Action under the cursor while the left button is held (pressed look of buttons).
@@ -655,6 +664,7 @@ impl App {
             theme: load_theme(),
             transport,
             hits: Vec::new(),
+            overlays: Vec::new(),
             bars: Vec::new(),
             hover: None,
             pressed: None,
@@ -895,9 +905,12 @@ impl App {
         #[cfg(windows)]
         if let Some(row) = self.state.pending_open.take().filter(|r| self.state.hosted_rows.contains(r)) {
             if let Some(info) = channel_info(&self.state.project, row) {
-                if let Err(e) = self.plugins.open_window(row, info) {
-                    self.state.message = Some(format!("Plugin: {e}"));
-                    self.invalidate();
+                match self.plugins.open_window(row, info) {
+                    Ok(()) => self.state.raise(Win::Hosted(row)),
+                    Err(e) => {
+                        self.state.message = Some(format!("Plugin: {e}"));
+                        self.invalidate();
+                    }
                 }
             }
         }
@@ -917,6 +930,10 @@ impl App {
                 let chans = &mut self.state.project.channels;
                 match r {
                     Request::Close(_) => continue,
+                    Request::Raise(row) => {
+                        self.state.raise(Win::Hosted(row));
+                        continue;
+                    }
                     Request::ToggleOn(row) => chans.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled),
                     Request::Volume(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.volume = v),
                     Request::Pan(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.pan = v),
@@ -938,6 +955,40 @@ impl App {
                 self.state.piano.dirty = true;
                 self.invalidate();
             }
+            self.clip_docked();
+        }
+    }
+
+    /// Docked plugin windows (native children) join `State::z` and are clipped to the workspace minus the drawn
+    /// windows above them and the overlays (spec: ui/plugin-window.md "Docking").
+    #[cfg(windows)]
+    fn clip_docked(&mut self) {
+        let docked = self.plugins.docked();
+        self.state.z.retain(|w| !matches!(w, Win::Hosted(r) if !docked.contains(r)));
+        for &r in &docked {
+            if !self.state.z.contains(&Win::Hosted(r)) {
+                self.state.z.push(Win::Hosted(r));
+            }
+        }
+        let k = self.plugins.scale;
+        let px = |r: Rect| [(r.x * k).floor() as i32, (r.y * k).floor() as i32, (r.right() * k).ceil() as i32, (r.bottom() * k).ceil() as i32];
+        let work = px(self.state.work_rect());
+        let over: Vec<[i32; 4]> = self.overlays.iter().map(|&r| px(r.outset(2.0))).collect();
+        let z = self.state.z.clone();
+        let docked_at = z.iter().rposition(|&w| self.state.is_max(w));
+        for (i, &w) in z.iter().enumerate() {
+            let Win::Hosted(row) = w else { continue };
+            let mut covers = over.clone();
+            for &a in &z[i + 1..] {
+                if !matches!(a, Win::Hosted(_)) {
+                    covers.push(px(self.win_bounds(a)));
+                }
+            }
+            // Below a maximized window: covered entirely.
+            if docked_at.is_some_and(|d| i < d) {
+                covers.push(work);
+            }
+            self.plugins.clip(row, work, &covers);
         }
     }
 
@@ -1034,7 +1085,8 @@ impl App {
             peaks: self.transport.peaks(),
             sounding: if self.transport.playing() { self.transport.sounding() } else { Vec::new() },
         };
-        views::paint(&mut ui, &self.state, &info);
+        let overlays = views::paint(&mut ui, &self.state, &info);
+        self.overlays = self.hits[overlays.min(self.hits.len())..].iter().map(|h| h.rect).collect();
         // Remember where the piano roll's regions are, for mouse mapping and damage.
         let find = |a: Action| self.hits.iter().find(|h| h.action == a).map(|h| h.rect);
         self.piano_grid = find(Action::PianoGrid);

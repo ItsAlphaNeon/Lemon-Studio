@@ -2,8 +2,9 @@
 //! gear-toggled strip, one row: the plugin's page tabs (a plain plugin has the plug tab, an Open plugin joined through the
 //! host link brings its own pages), the Misc wrench, the window's top-bar buttons (menu arrow, gear), then
 //! ON / PAN / VOL / PITCH / RANGE / TRACK. While the strip is hidden the two buttons sit in the title bar.
-//! Drawn with os-ui in a native top-level window owned by the main window; the plugin parents its editor into a child
-//! area below the strip.
+//! Drawn with os-ui in a native window: docked (a child of the main window, clipped to the workspace and stacked with
+//! the app's own windows) until the menu arrow's "Detached" makes it a top-level window owned by the main window. The
+//! plugin parents its editor into a child area below the strip.
 //!
 // spec: ui/plugin-window.md, plugins/host-link.md, plugins/open-sampler.md (strip geometry), ui/knobs.md (drag 1/1024 per px)
 
@@ -18,7 +19,7 @@ use os_ui::tabler as tb;
 use os_ui::{Canvas, Color, Font, Rect};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, InvalidateRect, ScreenToClient, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
+    BeginPaint, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, InvalidateRect, ScreenToClient, SetWindowRgn, RGN_AND, RGN_DIFF, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -153,6 +154,10 @@ pub enum FrameEvent {
     Volume(f64),
     Pan(f64),
     PitchCents(i32),
+    /// The window was clicked: it comes to the front of the app's window stack.
+    Raise,
+    /// The menu arrow's "Detached" was picked (the new state).
+    Detach(bool),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -180,6 +185,8 @@ struct State {
     /// Title-bar move in progress: cursor and window position (screen px) at the press. Done by hand: the system's
     /// move loop (HTCAPTION) blocks the UI thread, which would freeze all drawing while a window moves.
     moving: Option<(i32, i32, i32, i32)>,
+    /// A top-level window (menu arrow > Detached) instead of a child of the main window.
+    detached: bool,
 }
 
 impl State {
@@ -221,7 +228,7 @@ enum Part {
     Close,
     Minimize,
     Gear,
-    /// The menu arrow (inert for now).
+    /// The menu arrow (the window menu; only "Detached" works yet).
     Menu,
     /// Page tab `i`; `i == pages.len()` is the Misc tab.
     Tab(usize),
@@ -295,8 +302,6 @@ fn paint(c: &mut Canvas, st: &State) {
     let (menu, gear) = top_buttons(st);
     // In the strip row the buttons are bigger and the title text starts at the left edge.
     let (isz, gsz) = if st.strip { (16.0, 18.0) } else { (14.0, 16.0) };
-    icon_at(c, &tb::CARET_RIGHT, menu.cx(), menu.cy(), isz, c_icon());
-    icon_at(c, &tb::SETTINGS, gear.cx(), gear.cy(), gsz, if st.strip { c_green() } else { c_icon() });
     let f = Font::new(15);
     let lh = c.line_height(f);
     let ty = (12.0 - lh / 2.0).round();
@@ -316,6 +321,9 @@ fn paint(c: &mut Canvas, st: &State) {
     if st.strip {
         strip(c, st, w);
     }
+    // After the strip: while it is shown the buttons sit in its row.
+    icon_at(c, &tb::CARET_RIGHT, menu.cx(), menu.cy(), isz, c_icon());
+    icon_at(c, &tb::SETTINGS, gear.cx(), gear.cy(), gsz, if st.strip { c_green() } else { c_icon() });
     if st.misc {
         let a = Rect::new(BORDER, st.area_y(), w - 2.0 * BORDER, h - st.area_y() - BORDER);
         c.fill_rect(a, c_body());
@@ -400,6 +408,8 @@ pub struct FrameWindow {
     hwnd: HWND,
     area: HWND,
     state: Rc<RefCell<State>>,
+    /// The last clip applied while docked (window position, workspace, covering rects), so unchanged clips are not reset.
+    clip: RefCell<Option<Vec<i32>>>,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -410,8 +420,9 @@ const FRAME_CLASS: &str = "OpenStudioPluginFrame";
 const AREA_CLASS: &str = "OpenStudioPluginArea";
 
 impl FrameWindow {
-    /// A hidden frame owned by `owner` for an editor of `editor` logical px, at screen position `pos` (physical px).
-    pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (i32, i32)) -> Result<FrameWindow, String> {
+    /// A hidden frame for an editor of `editor` logical px at screen position `pos` (physical px): a child of `owner`
+    /// (docked) or a top-level window owned by it (`detached`).
+    pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
         install_key_hook();
         let state = Rc::new(RefCell::new(State {
             info,
@@ -424,6 +435,7 @@ impl FrameWindow {
             events: Vec::new(),
             drag: None,
             moving: None,
+            detached,
         }));
         let (w, h) = state.borrow().size();
         let px = |v: f32| (v * scale).round() as i32;
@@ -449,13 +461,17 @@ impl FrameWindow {
             let canvas = Canvas::new(px(w) as u32, px(h) as u32, scale)?;
             let win = Box::new(Win { hwnd: std::ptr::null_mut(), area: std::ptr::null_mut(), canvas, buf: Vec::new(), scale, state: state.clone() });
             let title = wide(&state.borrow().info.name);
+            let mut p = POINT { x: pos.0, y: pos.1 };
+            if !detached {
+                ScreenToClient(owner as HWND, &mut p);
+            }
             let hwnd = CreateWindowExW(
-                WS_EX_TOOLWINDOW,
+                0,
                 fc.as_ptr(),
                 title.as_ptr(),
-                WS_POPUP | WS_CLIPCHILDREN,
-                pos.0,
-                pos.1,
+                frame_style(detached),
+                p.x,
+                p.y,
                 px(w),
                 px(h),
                 owner as HWND,
@@ -484,7 +500,89 @@ impl FrameWindow {
             if let Some(w) = win_of(hwnd) {
                 w.area = area;
             }
-            Ok(FrameWindow { hwnd, area, state })
+            Ok(FrameWindow { hwnd, area, state, clip: RefCell::new(None) })
+        }
+    }
+
+    pub fn detached(&self) -> bool {
+        self.state.borrow().detached
+    }
+
+    /// Docks the window into `owner` (a child, same place on screen) or detaches it (a top-level window owned by
+    /// `owner`). The plugin's editor stays embedded.
+    pub fn set_detached(&self, owner: isize, on: bool) {
+        if self.state.borrow().detached == on {
+            return;
+        }
+        self.state.borrow_mut().detached = on;
+        *self.clip.borrow_mut() = None;
+        unsafe {
+            let mut r: RECT = std::mem::zeroed();
+            GetWindowRect(self.hwnd, &mut r);
+            SetWindowRgn(self.hwnd, std::ptr::null_mut(), 0);
+            ShowWindow(self.hwnd, SW_HIDE);
+            let mut p = POINT { x: r.left, y: r.top };
+            if on {
+                SetParent(self.hwnd, std::ptr::null_mut());
+                SetWindowLongPtrW(self.hwnd, GWL_STYLE, frame_style(true) as isize);
+                SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, owner);
+            } else {
+                SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, 0);
+                SetWindowLongPtrW(self.hwnd, GWL_STYLE, frame_style(false) as isize);
+                SetParent(self.hwnd, owner as HWND);
+                ScreenToClient(owner as HWND, &mut p);
+            }
+            SetWindowPos(self.hwnd, HWND_TOP, p.x, p.y, 0, 0, SWP_NOSIZE | SWP_FRAMECHANGED);
+        }
+        self.raise();
+    }
+
+    /// The docked window's rect in its parent's client area (physical px).
+    pub fn docked_rect(&self) -> Option<[i32; 4]> {
+        if self.detached() {
+            return None;
+        }
+        unsafe {
+            let mut r: RECT = std::mem::zeroed();
+            GetWindowRect(self.hwnd, &mut r);
+            let parent = GetParent(self.hwnd);
+            let (mut a, mut b) = (POINT { x: r.left, y: r.top }, POINT { x: r.right, y: r.bottom });
+            ScreenToClient(parent, &mut a);
+            ScreenToClient(parent, &mut b);
+            Some([a.x, a.y, b.x, b.y])
+        }
+    }
+
+    /// Clips a docked window to `work` minus the `covers` (the app's windows and popups above it), all in the parent's
+    /// client area (physical px).
+    pub fn clip_to(&self, work: [i32; 4], covers: &[[i32; 4]]) {
+        let Some(me) = self.docked_rect() else { return };
+        let mut key: Vec<i32> = me.into_iter().chain(work).collect();
+        // Only what overlaps the window matters.
+        let hit = |c: &[i32; 4]| c[0] < me[2] && c[2] > me[0] && c[1] < me[3] && c[3] > me[1];
+        let covers: Vec<[i32; 4]> = covers.iter().copied().filter(hit).collect();
+        key.extend(covers.iter().flatten());
+        if self.clip.borrow().as_ref() == Some(&key) {
+            return;
+        }
+        *self.clip.borrow_mut() = Some(key);
+        let inside = work[0] <= me[0] && work[1] <= me[1] && work[2] >= me[2] && work[3] >= me[3];
+        unsafe {
+            if inside && covers.is_empty() {
+                SetWindowRgn(self.hwnd, std::ptr::null_mut(), 1);
+                return;
+            }
+            let (ox, oy) = (me[0], me[1]);
+            let rgn = CreateRectRgn(0, 0, me[2] - ox, me[3] - oy);
+            let w = CreateRectRgn(work[0] - ox, work[1] - oy, work[2] - ox, work[3] - oy);
+            CombineRgn(rgn, rgn, w, RGN_AND);
+            DeleteObject(w);
+            for c in &covers {
+                let r = CreateRectRgn(c[0] - ox, c[1] - oy, c[2] - ox, c[3] - oy);
+                CombineRgn(rgn, rgn, r, RGN_DIFF);
+                DeleteObject(r);
+            }
+            SetWindowRgn(self.hwnd, rgn, 1); // the system owns `rgn` now
         }
     }
 
@@ -507,7 +605,10 @@ impl FrameWindow {
     pub fn raise(&self) {
         unsafe {
             ShowWindow(self.hwnd, SW_SHOWNORMAL);
-            SetForegroundWindow(self.hwnd);
+            SetWindowPos(self.hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            if self.detached() {
+                SetForegroundWindow(self.hwnd);
+            }
         }
     }
 
@@ -571,6 +672,56 @@ impl Drop for FrameWindow {
 }
 
 type WndProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
+
+fn frame_style(detached: bool) -> u32 {
+    if detached { WS_POPUP | WS_CLIPCHILDREN } else { WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN }
+}
+
+/// The window menu under the menu arrow (spec: ui/plugin-window.md "Window menu"): FL's entries, only "Detached" works
+/// yet. Returns whether "Detached" was picked.
+unsafe fn window_menu(hwnd: HWND, detached: bool) -> bool {
+    const DETACH: usize = 1;
+    unsafe {
+        let m = CreatePopupMenu();
+        let gray = |m: HMENU, s: &str| {
+            let t = wide(s);
+            AppendMenuW(m, MF_STRING | MF_GRAYED, 0, t.as_ptr());
+        };
+        let sep = |m: HMENU| {
+            AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
+        };
+        for s in ["Piano roll", "Replace", "Delete..."] {
+            gray(m, s);
+        }
+        sep(m);
+        for s in ["Presets", "Browse presets", "Save preset as...", "Add to plugin database (flag as favorite)"] {
+            gray(m, s);
+        }
+        sep(m);
+        for s in ["Store in spare state", "Flip with spare state"] {
+            gray(m, s);
+        }
+        sep(m);
+        for s in ["Link all parameters...", "Browse parameters"] {
+            gray(m, s);
+        }
+        sep(m);
+        for s in ["Allow threaded processing", "Smart disable"] {
+            gray(m, s);
+        }
+        sep(m);
+        for s in ["Rename, color and icon...\tF2", "Change color...", "Random color", "Change icon..."] {
+            gray(m, s);
+        }
+        let t = wide("Detached");
+        AppendMenuW(m, MF_STRING | if detached { MF_CHECKED } else { MF_UNCHECKED }, DETACH, t.as_ptr());
+        let mut c: POINT = std::mem::zeroed();
+        GetCursorPos(&mut c);
+        let picked = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, c.x, c.y, 0, hwnd, std::ptr::null());
+        DestroyMenu(m);
+        picked as usize == DETACH
+    }
+}
 
 unsafe fn win_of(hwnd: HWND) -> Option<&'static mut Win> {
     let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut Win;
@@ -674,17 +825,41 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 EndPaint(hwnd, &ps);
                 0
             }
+            WM_MOUSEACTIVATE => {
+                // Any click brings the window to the front of the app's stack (spec: ui/plugin-window.md "Docking").
+                SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                w.state.borrow_mut().events.push(FrameEvent::Raise);
+                os_clap::wake();
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
+            WM_PARENTNOTIFY if matches!((wp & 0xffff) as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) => {
+                // A click inside the plugin's editor.
+                SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                w.state.borrow_mut().events.push(FrameEvent::Raise);
+                os_clap::wake();
+                0
+            }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                 let (x, y) = client_point(hwnd, lp, w.scale, false);
                 let part = part_at(&w.state.borrow(), x, y);
+                if part == Some(Part::Menu) {
+                    let detached = w.state.borrow().detached;
+                    if window_menu(hwnd, detached) {
+                        w.state.borrow_mut().events.push(FrameEvent::Detach(!detached));
+                        os_clap::wake();
+                    }
+                    return 0;
+                }
                 let mut relayout = false;
                 {
                     let mut st = w.state.borrow_mut();
                     match part {
                         Some(Part::Close) => st.events.push(FrameEvent::Close),
                         Some(Part::Minimize) => {
+                            // A docked window hides (its channel's name button shows it again).
+                            let cmd = if st.detached { SW_MINIMIZE } else { SW_HIDE };
                             drop(st);
-                            ShowWindow(hwnd, SW_MINIMIZE);
+                            ShowWindow(hwnd, cmd);
                             return 0;
                         }
                         Some(Part::Gear) => {
@@ -750,7 +925,12 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                     drop(st);
                     let mut c: POINT = std::mem::zeroed();
                     GetCursorPos(&mut c);
-                    SetWindowPos(hwnd, std::ptr::null_mut(), wx + c.x - cx, wy + c.y - cy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    // Screen position; a docked window is placed in its parent's client area.
+                    let mut p = POINT { x: wx + c.x - cx, y: wy + c.y - cy };
+                    if GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0 {
+                        ScreenToClient(GetParent(hwnd), &mut p);
+                    }
+                    SetWindowPos(hwnd, std::ptr::null_mut(), p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
                     return 0;
                 }
                 if let Some((k, y0, v0)) = st.drag {

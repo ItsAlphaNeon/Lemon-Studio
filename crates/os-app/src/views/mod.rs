@@ -52,7 +52,9 @@ pub const WORK_Y: f32 = 83.0;
 /// Width of the docked browser incl. the splitter (§4).
 pub const BROWSER_W: f32 = 209.0;
 
-pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
+/// Paints the frame; returns the number of hits registered before the overlays (menus, popups, picker...), which cover
+/// docked plugin windows.
+pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     let (w, h) = ui.c.size();
     ui.c.clear(ui.t.workspace);
 
@@ -93,6 +95,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.win = None;
     }
     toolbar::paint(ui, s, f, w);
+    let overlays = ui.hit_count();
     playlist::paint_overlays(ui, s);
     if let Some(m) = s.menu_open {
         menus::paint_dropdown(ui, s, m);
@@ -109,6 +112,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     if s.monitor.debug {
         mondebug::paint(ui, s);
     }
+    overlays
 }
 
 /// Start of a Playlist / Mixer / Piano roll window: blocks clicks through it, and (once the

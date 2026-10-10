@@ -40,6 +40,8 @@ pub enum Request {
     PitchCents(usize, i32),
     /// A preview note from an Open plugin's own keyboard (host link): row, key, velocity, on.
     Note(usize, u8, u8, bool),
+    /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
+    Raise(usize),
 }
 
 #[derive(Default)]
@@ -50,6 +52,8 @@ pub struct Plugins {
     /// Main window handle (owner of plugin windows).
     pub owner: isize,
     pub scale: f32,
+    /// New plugin windows open detached (settings "Detach all new plugins"; off = docked like FL's default).
+    pub detach_new: bool,
     rate: u32,
 }
 
@@ -214,7 +218,7 @@ impl Plugins {
         let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
         let pos = crate::plugin_window::default_position(owner);
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size.
-        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos)?;
+        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, self.detach_new)?;
         let (ew, eh) = p.open_editor(w.area())?;
         // An Open plugin answers the hello: its page tabs go into the strip row and its editor shrinks to what is below.
         h.link = os_hostlink::Link::connect(w.area() as isize);
@@ -240,6 +244,20 @@ impl Plugins {
             }
             h.window = None;
             h.link = None;
+        }
+    }
+
+    /// Rows whose plugin window is open and docked in the main window.
+    #[cfg(windows)]
+    pub fn docked(&self) -> Vec<usize> {
+        self.hosted.iter().filter(|(_, h)| h.window.as_ref().is_some_and(|w| !w.detached())).map(|(&r, _)| r).collect()
+    }
+
+    /// Clips row `row`'s docked window to `work` minus `covers` (main-window client px).
+    #[cfg(windows)]
+    pub fn clip(&self, row: usize, work: [i32; 4], covers: &[[i32; 4]]) {
+        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
+            w.clip_to(work, covers);
         }
     }
 
@@ -312,6 +330,11 @@ impl Plugins {
                         FrameEvent::Volume(v) => Request::Volume(row, v),
                         FrameEvent::Pan(v) => Request::Pan(row, v),
                         FrameEvent::PitchCents(c) => Request::PitchCents(row, c),
+                        FrameEvent::Raise => Request::Raise(row),
+                        FrameEvent::Detach(on) => {
+                            w.set_detached(self.owner, on);
+                            Request::Raise(row)
+                        }
                     });
                 }
             }

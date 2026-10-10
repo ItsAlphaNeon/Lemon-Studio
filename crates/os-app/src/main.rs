@@ -254,6 +254,11 @@ impl ApplicationHandler for Shell {
             if let Ok(h) = window.window_handle() {
                 if let RawWindowHandle::Win32(w) = h.as_raw() {
                     self.app.plugins.owner = w.hwnd.get();
+                    // Docked plugin windows are children: our own painting must not draw over them.
+                    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_STYLE, WS_CLIPCHILDREN};
+                    let hwnd = w.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+                    // SAFETY: our own live window.
+                    unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, GetWindowLongPtrW(hwnd, GWL_STYLE) | WS_CLIPCHILDREN as isize) };
                 }
             }
         }
