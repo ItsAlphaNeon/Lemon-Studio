@@ -1,6 +1,6 @@
 //! Sample loading: decode an audio file to stereo `f32` frames.
 //!
-// spec: flp/sample-paths.md (placeholders, formats), audio/sample-formats.md (Vorbis in WAV)
+// spec: flp/sample-paths.md (placeholders, formats), audio/sample-formats.md (Vorbis in WAV, MP3, AIFF)
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -57,7 +57,7 @@ fn probe() -> &'static Probe {
     })
 }
 
-/// Decodes a WAV (PCM or Vorbis-in-WAV) / FLAC / Ogg Vorbis / WavPack file.
+/// Decodes a WAV (PCM or Vorbis-in-WAV) / FLAC / Ogg Vorbis / WavPack / MP3 / AIFF file.
 pub fn load(path: &Path) -> Result<Sample, SampleError> {
     let bytes = std::fs::read(path).map_err(|source| SampleError::Io { path: path.to_owned(), source })?;
     let decode_err = |message: String| SampleError::Decode { path: path.to_owned(), message };
@@ -213,5 +213,28 @@ impl SampleLibrary {
         };
         self.cache.insert(project_path.into(), loaded.clone());
         loaded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `tests/data/click_sine.mp3` (made with ffmpeg + LAME, 64 kbit/s mono, ID3v2 tag): 0.3 s at 44.1 kHz, a
+    /// 10-frame click of 0.9 at frame 4410, then a 440 Hz sine of 0.25 from frame 8820.
+    #[test]
+    fn mp3_decodes_in_time_and_level() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/click_sine.mp3");
+        let s = load(&path).expect("mp3 decodes");
+        assert_eq!(s.rate, 44100);
+        assert_eq!(s.left, s.right, "mono is duplicated");
+        let peak = (0..s.frames()).max_by(|&a, &b| s.left[a].abs().total_cmp(&s.left[b].abs())).unwrap();
+        eprintln!("frames {} click at {peak}", s.frames());
+        // The encoder delay is trimmed: the click stays where it was written.
+        assert!((4405..4425).contains(&peak), "click at {peak}");
+        assert!(s.frames().abs_diff(13230) < 64, "length {}", s.frames());
+        let tail = &s.left[9000..12000];
+        let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
+        assert!((rms - 0.25 / 2f32.sqrt()).abs() < 0.02, "sine rms {rms}");
     }
 }

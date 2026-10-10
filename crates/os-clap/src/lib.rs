@@ -688,6 +688,44 @@ mod tests {
         assert!(peak > 0.05, "engine output through Open Sampler (peak {peak})");
     }
 
+    /// An MP3 sample (os-engine's fixture: click of 0.9 at 0.1 s) loads and plays through Open Sampler at 48 kHz.
+    #[test]
+    fn open_sampler_plays_an_mp3() {
+        let Some(lib) = open_sampler() else { return };
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        let mp3 = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../os-engine/tests/data/click_sine.mp3");
+        let mp3 = mp3.canonicalize().unwrap().to_string_lossy().trim_start_matches(r"\\?\").to_string();
+        let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&mp3));
+        let mut blob = (state.len() as u64).to_le_bytes().to_vec();
+        blob.extend_from_slice(state.as_bytes());
+        assert!(p.load_state(&blob));
+        assert!(p.activate(48000));
+        let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
+        let ch = os_model::Channel {
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
+            enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
+            layer_children: vec![], envelopes: Default::default(),
+        };
+        let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
+        let project = os_model::Project {
+            ppq: 96, tempo: Some(130.0), channels: vec![ch],
+            patterns: vec![os_model::Pattern { number: 1, notes: vec![note], ..Default::default() }],
+            ..Default::default()
+        };
+        let mut lib = os_engine::SampleLibrary::default();
+        let mut e = os_engine::Engine::new(&project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
+        e.set_instrument(0, shared);
+        let mut out = vec![0.0f32; 2 * 12000];
+        for c in out.chunks_mut(1024) {
+            e.process(c);
+        }
+        let left: Vec<f32> = out.iter().step_by(2).copied().collect();
+        let peak = (0..left.len()).max_by(|&a, &b| left[a].abs().total_cmp(&left[b].abs())).unwrap();
+        assert!(left[peak].abs() > 0.2, "mp3 click heard (peak {})", left[peak]);
+        assert!((4780..4840).contains(&peak), "click at 0.1 s (frame {peak})");
+        assert!(left[10000..12000].iter().any(|v| v.abs() > 0.05), "sine after 0.2 s");
+    }
+
     /// A held-then-released live note of a long sample, as the typing keyboard plays it: in tune, and it keeps
     /// sounding past the engine's 5 s idle tail until the sample ends.
     #[test]
