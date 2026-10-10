@@ -49,7 +49,8 @@ pub struct Library {
     factory: *const clap_plugin_factory,
     pub path: PathBuf,
     pub plugins: Vec<Descriptor>,
-    _lib: libloading::Library,
+    /// `None` for a plugin linked into this program ([`Library::from_entry`]).
+    _lib: Option<libloading::Library>,
 }
 
 // SAFETY: the entry and factory are immutable tables; CLAP allows calling the factory from any thread.
@@ -65,6 +66,21 @@ impl Library {
         unsafe {
             let lib = libloading::Library::new(path).map_err(|e| format!("{}: {e}", path.display()))?;
             let entry: *const clap_plugin_entry = *lib.get::<*const clap_plugin_entry>(b"clap_entry\0").map_err(|e| format!("{}: no clap_entry ({e})", path.display()))?;
+            Self::open(entry, path, Some(lib))
+        }
+    }
+
+    /// A plugin compiled into this program: `entry` points at its `clap_entry` table (same layout in every CLAP
+    /// binding), `path` is what its `init` receives.
+    ///
+    /// # Safety
+    /// `entry` must point at a valid, `'static` `clap_plugin_entry`.
+    pub unsafe fn from_entry(entry: *const std::ffi::c_void, path: &Path) -> Result<Arc<Library>, String> {
+        unsafe { Self::open(entry as *const clap_plugin_entry, path, None) }
+    }
+
+    unsafe fn open(entry: *const clap_plugin_entry, path: &Path, lib: Option<libloading::Library>) -> Result<Arc<Library>, String> {
+        unsafe {
             if entry.is_null() || !clap_version_is_compatible((*entry).clap_version) {
                 return Err(format!("{}: incompatible CLAP version", path.display()));
             }
@@ -671,7 +687,7 @@ mod tests {
         let ch = os_model::Channel {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
         };
         let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
         let project = os_model::Project {
@@ -704,7 +720,7 @@ mod tests {
         let ch = os_model::Channel {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
         };
         let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
         let project = os_model::Project {
@@ -745,7 +761,7 @@ mod tests {
         let ch = os_model::Channel {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut lib = os_engine::SampleLibrary::default();
@@ -797,7 +813,7 @@ mod tests {
         let ch = os_model::Channel {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut lib = os_engine::SampleLibrary::default();

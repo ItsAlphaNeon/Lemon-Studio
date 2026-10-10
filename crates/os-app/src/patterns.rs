@@ -82,6 +82,8 @@ pub enum Hit {
 pub enum BoxTarget {
     Name(u16),
     Transpose(u16),
+    /// The channel rack's boxes (spec: ui/channel-rack.md §13, §17, §21).
+    Rack(crate::rack::RBox),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -221,7 +223,7 @@ pub fn transpose(s: &mut State, n: u16, semis: i32) {
     }
 }
 
-fn random_color(seed: u64) -> Rgb {
+pub(crate) fn random_color(seed: u64) -> Rgb {
     // A random hue at a muted saturation / lightness like the default pattern colours.
     let mut x = seed ^ 0x9e37_79b9_7f4a_7c15;
     x ^= x >> 33;
@@ -250,6 +252,7 @@ pub fn open_name_box(s: &mut State, target: BoxTarget, at: (f32, f32)) {
     let text = match target {
         BoxTarget::Name(n) => name_of(s, n),
         BoxTarget::Transpose(_) => String::new(),
+        BoxTarget::Rack(b) => crate::rack::box_text(s, b),
     };
     s.pat_ui.name_box = Some(NameBox { target, text, fresh: true, at, suggestions: false, palette: false });
 }
@@ -331,8 +334,13 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
     None
 }
 
-/// Ok in the delete confirmation.
+/// Ok in the delete confirmation (channels waiting in the rack go to the app, which removes them).
 pub fn delete_current(s: &mut State) {
+    if let Some(rows) = s.rack.pending_delete.take() {
+        s.rack.delete_now = Some(rows);
+        s.pat_ui.confirm = false;
+        return;
+    }
     let cur = s.pattern.max(1);
     renumber(s, |n| if n == cur { None } else if n > cur { Some(n - 1) } else { Some(n) });
     s.pat_ui.confirm = false;
@@ -360,6 +368,10 @@ pub fn accept(s: &mut State) {
                 transpose(s, n, v);
             }
         }
+        BoxTarget::Rack(rb) => {
+            crate::rack::box_accept(s, rb, &b.text);
+            s.piano.dirty = true;
+        }
     }
 }
 
@@ -373,9 +385,18 @@ pub fn suggest(s: &mut State, col: usize, row: usize) {
 }
 
 pub fn set_color(s: &mut State, i: usize) {
-    let Some(BoxTarget::Name(n)) = s.pat_ui.name_box.as_ref().map(|b| b.target) else { return };
+    let target = s.pat_ui.name_box.as_ref().map(|b| b.target);
     if let Some(&c) = SWATCHES.get(i) {
-        pat_mut(s, n).color = Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8));
+        let col = Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8));
+        match target {
+            Some(BoxTarget::Name(n)) => pat_mut(s, n).color = col,
+            Some(BoxTarget::Rack(crate::rack::RBox::Channel(r))) => {
+                if let Some(ch) = s.project.channels.get_mut(r) {
+                    ch.color = col;
+                }
+            }
+            _ => return,
+        }
         s.piano.dirty = true;
     }
     if let Some(b) = s.pat_ui.name_box.as_mut() {
@@ -403,7 +424,10 @@ pub fn hit(s: &mut State, h: Hit) {
         }
         Hit::Swatch(i) => set_color(s, i),
         Hit::ConfirmOk => delete_current(s),
-        Hit::ConfirmCancel => s.pat_ui.confirm = false,
+        Hit::ConfirmCancel => {
+            s.pat_ui.confirm = false;
+            s.rack.pending_delete = None;
+        }
         Hit::Inside => {}
     }
 }
@@ -414,7 +438,10 @@ pub fn key(s: &mut State, key: &winit::keyboard::Key, ctrl: bool) -> bool {
     if s.pat_ui.confirm {
         match key {
             Key::Named(NamedKey::Enter) => delete_current(s),
-            Key::Named(NamedKey::Escape) => s.pat_ui.confirm = false,
+            Key::Named(NamedKey::Escape) => {
+                s.pat_ui.confirm = false;
+                s.rack.pending_delete = None;
+            }
             _ => {}
         }
         return true;

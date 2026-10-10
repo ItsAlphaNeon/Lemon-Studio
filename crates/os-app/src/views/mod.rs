@@ -97,6 +97,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     if let Some(m) = s.menu_open {
         menus::paint_dropdown(ui, s, m);
     }
+    rack::paint_fill(ui, s);
     patterns::paint(ui, s);
     if s.picker_open {
         picker::paint(ui, s);

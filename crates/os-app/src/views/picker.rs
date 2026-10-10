@@ -9,6 +9,7 @@ use crate::app::{Action, State, Ui};
 
 /// How a tile is drawn (spec: OpenStudio choices).
 #[derive(Clone, Copy)]
+#[allow(dead_code)] // faces for plugins not built yet
 pub enum Face {
     /// Name as text instead of a picture (Audio clip, Automation clip).
     Label,
@@ -47,29 +48,10 @@ pub const FX_CATS: &[&str] =
 
 use Face::*;
 
-/// Index 0 is the plain sampler (what "+" in the channel rack adds).
-pub const GENERATORS: &[Plugin] = &[
-    p("Sampler", 5, Knobs, 92, 62, 0x7fa0b0),
-    p("Audio clip", 3, Label, 0, 0, 0),
-    p("Automation clip", 3, Label, 0, 0, 0),
-    p("Layer", 3, Rack, 80, 34, 0x9aa4aa),
-    p("Patcher", 4, Curve, 86, 58, 0x6fb0d0),
-    p("Placeholder drum", 1, Pads, 110, 62, 0x5fc8a0),
-    p("Placeholder synth", 6, Synth, 120, 62, 0xe08a3c),
-    p("Placeholder synth 2", 7, Synth, 96, 58, 0xc05878),
-    p("MIDI out", 2, Rack, 96, 30, 0x58a0e0),
-    p("Placeholder controller", 0, Knobs, 64, 50, 0xd0b048),
-    p("Placeholder visual", 8, Meter, 70, 54, 0x8070e0),
-];
-pub const EFFECTS: &[Plugin] = &[
-    p("Parametric EQ", 4, Curve, 128, 64, 0x60c0e0),
-    p("Limiter", 3, Meter, 96, 60, 0xe07050),
-    p("Placeholder reverb", 1, Curve, 100, 56, 0x9080d0),
-    p("Placeholder distortion", 2, Knobs, 84, 48, 0xd04838),
-    p("Placeholder flanger", 5, Rack, 120, 34, 0x50b8a0),
-    p("Placeholder gain", 6, Knobs, 44, 40, 0x9ab0b8),
-    p("Placeholder patcher", 9, Curve, 86, 58, 0x6fb0d0),
-];
+/// Only real plugins are listed. Index 0 is Open Sampler (what "+" in the channel rack adds); EQ and Limiter
+/// are built-in mixer features, not plugins, so the effects side is empty until real effect plugins exist.
+pub const GENERATORS: &[Plugin] = &[p("Open Sampler", 5, Knobs, 92, 62, 0x49f1b1)];
+pub const EFFECTS: &[Plugin] = &[];
 
 /// Built-in generators followed by the hosted instruments (`State::hosted_generators`).
 pub fn generators(s: &State) -> Vec<Plugin> {

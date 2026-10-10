@@ -188,6 +188,20 @@ pub enum Action {
     PlPickAdd,
     PlPopup(usize),
     PlPopupSub(usize),
+    /// Channel rack title bar (spec: ui/channel-rack.md §7): options ▸, display filter combo, name-width dots,
+    /// speaker (play / pause pattern), pattern length box, loop mode, graph editor; per-row loop boxes (§15),
+    /// graph editor area and tabs (§14), Advanced fill dialog (§22).
+    RackOptions,
+    RackFilter,
+    RackDots,
+    RackSpeaker,
+    RackLen,
+    RackLoop,
+    RackGraph,
+    RackLoopBox(usize),
+    RackGraphArea,
+    RackGraphTab(usize),
+    RackFill(crate::rack::FillHit),
     /// Pattern name box, suggestions, swatches, delete confirmation (spec: ui/pattern-menu.md).
     Pat(crate::patterns::Hit),
 }
@@ -266,6 +280,7 @@ fn hover_is_visible(a: &Action) -> bool {
             | Action::PlHeader(_)
             | Action::Scrollbar(_)
             | Action::RackResize(_)
+            | Action::RackGraphArea
             | Action::WinDrag(_)
             | Action::WinResize(..)
     )
@@ -367,6 +382,14 @@ pub enum Drag {
     Pl(crate::playlist::PlDrag),
     /// A browser item pressed (`started` once it moved far enough), spec: ui/browser.md §3.
     Browser { item: views::browser::Item, label: String, m0: (f32, f32), started: bool },
+    /// Channel rack (spec: ui/channel-rack.md): step painting along the start row (§9), slot range select (§8),
+    /// name width (§7), pattern length (§7), a row's loop length (§15), graph editor values (§14).
+    RackPaint { row: usize, on: bool, last: u32 },
+    RackSel { from: usize },
+    RackDots { x0: f32, p0: u32 },
+    RackLen { y0: f32, v0: u32 },
+    RackLoopLen { row: usize, y0: f32, v0: u32 },
+    RackGraph,
 }
 
 pub struct State {
@@ -380,6 +403,8 @@ pub struct State {
     /// Requests for the plugin host, handled on the next tick: (row, available index) to create, row to open.
     pub pending_plugin: Option<(usize, usize)>,
     pub pending_open: Option<usize>,
+    /// Samples to load into rows' Open Sampler instances on the next tick (browser send, drops on a rack row).
+    pub sample_loads: Vec<(usize, String)>,
     pub file: Option<os_flp::FlpFile>,
     pub path: Option<PathBuf>,
     /// Open child windows, bottom to top.
@@ -389,8 +414,8 @@ pub struct State {
     pub rack_size: (f32, f32),
     /// Horizontal step scroll of the rack, pixels.
     pub rack_scroll_x: f32,
-    /// Channel whose select slot is lit (spec: ui/channel-rack.md §5).
-    pub rack_selected: Option<usize>,
+    /// Channel rack selection, filters, view options, graph editor, loops (spec: ui/channel-rack.md §7-22).
+    pub rack: crate::rack::RackUi,
     /// Rows show mini piano rolls instead of steps.
     pub rack_roll_view: bool,
     /// Channel shown in the plugin window, and where that window is.
@@ -532,6 +557,8 @@ pub struct App {
     typing_synced: bool,
     /// Last title-bar press (window, time, position), for double-click maximize / restore.
     title_click: Option<(Win, std::time::Instant, (f32, f32))>,
+    /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
+    rack_click: Option<(Action, std::time::Instant)>,
     pub hint: Cow<'static, str>,
     pub mouse: (f32, f32),
     pub drag: Option<Drag>,
@@ -572,6 +599,7 @@ impl App {
                 hosted_rows: Vec::new(),
                 pending_plugin: None,
                 pending_open: None,
+                sample_loads: Vec::new(),
                 file: None,
                 path: None,
                 z: vec![Win::Playlist, Win::ChannelRack],
@@ -579,7 +607,7 @@ impl App {
                 rack_pos: (317.0, 195.0),
                 rack_size: views::rack::DEFAULT_SIZE,
                 rack_scroll_x: 0.0,
-                rack_selected: Some(0),
+                rack: Default::default(),
                 rack_roll_view: false,
                 plugin_channel: 0,
                 plugin_pos: (560.0, 260.0),
@@ -637,6 +665,7 @@ impl App {
             typing_octave: 0,
             typing_synced: false,
             title_click: None,
+            rack_click: None,
             hint: Cow::Borrowed(""),
             mouse: (-1.0, -1.0),
             drag: None,
@@ -688,11 +717,12 @@ impl App {
                 s.playlist_scroll = (0.0, 0.0);
                 s.rack_scroll = 0.0;
                 s.rack_scroll_x = 0.0;
-                s.rack_selected = Some(0);
+                s.rack.reset();
                 s.hide(Win::Plugin);
                 s.mixer_scroll = 0.0;
                 s.song_mode = project.arrangement().is_some_and(|a| !a.clips.is_empty());
                 s.project = project;
+                crate::rack::from_model(s);
                 s.file = Some(file);
                 s.message = Some(format!("Opened {}", path.display()));
                 s.path = Some(path);
@@ -717,12 +747,17 @@ impl App {
         }
     }
 
-    fn save_to(&mut self, target: PathBuf) {
+    pub(crate) fn save_to(&mut self, target: PathBuf) {
         // Sampler channels keep their sample in Open Sampler: copy it to the channel so the FLP stores it.
         for row in self.state.hosted_rows.clone() {
             if self.state.project.channels.get(row).is_some_and(|c| c.kind == ChannelKind::Sampler) {
                 if let Some(p) = self.plugins.sampler_path(row) {
-                    self.state.project.channels[row].sample_path = (!p.is_empty()).then_some(p);
+                    // A placeholder path that still names the same file is kept as the project wrote it.
+                    let ch = &mut self.state.project.channels[row];
+                    if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
+                        continue;
+                    }
+                    ch.sample_path = (!p.is_empty()).then_some(p);
                 }
             }
         }
@@ -733,23 +768,32 @@ impl App {
             s.message = Some("Save failed: projects with hosted plugin channels (Open Sampler, CLAP) cannot be saved to FLP yet".into());
             return;
         }
+        // Lock, zip, filter groups and loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
+        crate::rack::to_model(s);
         // A file OpenStudio made before the project had a playlist has no arrangement block (FL's files always have
         // one): build it again from the model, which holds everything that file stored.
         let lacks_playlist = s.file.as_ref().and_then(|f| os_flp::project::load(f).ok()).is_some_and(|p| p.arrangements.is_empty())
             && !s.project.arrangements.is_empty();
         // A project that was not opened from a file gets a new FLP built from the model.
-        if s.file.is_none() || lacks_playlist {
+        let mut file = if s.file.is_none() || lacks_playlist {
+            // The new file's blocks are the model's channels in order.
+            for (i, c) in s.project.channels.iter_mut().enumerate() {
+                c.rack.origin = Some(i as u16);
+            }
             match os_flp::project::create(&s.project) {
-                Ok(f) => s.file = Some(f),
+                Ok(f) => f,
                 Err(e) => {
                     s.message = Some(format!("Save failed: {e}"));
                     return;
                 }
             }
-        }
-        let file = s.file.as_mut().expect("file made above");
-        let lost = os_flp::project::unsaved_parts(&s.project, file);
-        let result = os_flp::project::apply(&s.project, file)
+        } else {
+            s.file.clone().expect("checked")
+        };
+        // Deleted, cloned and moved channels are written by `apply` (os-flp `restructure`); it edits a copy so a
+        // failed save leaves the loaded file as it was.
+        let lost = os_flp::project::unsaved_parts(&s.project, &file);
+        let result = os_flp::project::apply(&s.project, &mut file)
             .map_err(|e| e.to_string())
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
             .and_then(|b| std::fs::write(&target, b).map_err(|e| e.to_string()));
@@ -759,6 +803,11 @@ impl App {
             Err(e) => format!("Save failed: {e}"),
         });
         if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
+            // The saved file now holds the channels in model order.
+            for (i, c) in s.project.channels.iter_mut().enumerate() {
+                c.rack.origin = Some(i as u16);
+            }
+            s.file = Some(file);
             s.path = Some(target);
         }
     }
@@ -819,6 +868,15 @@ impl App {
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     fn plugin_tick(&mut self) {
         self.sync_samplers();
+        for (row, path) in std::mem::take(&mut self.state.sample_loads) {
+            // A row hosted this tick already started from its channel's sample.
+            if self.state.hosted_rows.contains(&row) && self.plugins.sampler_path(row).as_deref() != Some(path.as_str()) {
+                if !self.plugins.load_sample(row, &path) {
+                    self.state.message = Some(format!("Open Sampler did not take {path}"));
+                    self.invalidate();
+                }
+            }
+        }
         if let Some((row, pick)) = self.state.pending_plugin.take() {
             // `pick` indexes the picker's hosted generators (Open Sampler is left out there).
             let index = self.state.hosted_generators.get(pick).and_then(|n| self.plugins.index_of(n)).unwrap_or(usize::MAX);
@@ -868,9 +926,7 @@ impl App {
                         if on {
                             if !self.typing_synced {
                                 self.typing_synced = true;
-                                let mut p = self.state.project.clone();
-                                p.tempo = Some(self.state.tempo);
-                                self.transport.update(&p);
+                                self.transport.update(&crate::rack::play_project(&self.state));
                             }
                             self.transport.note_on(row, u16::from(key), vel);
                         } else {
@@ -951,9 +1007,7 @@ impl App {
             self.state.piano.dirty = false;
             // Also while Play is still starting (not `playing` yet); ignored when stopped.
             {
-                let mut p = self.state.project.clone();
-                p.tempo = Some(self.state.tempo);
-                self.transport.update(&p);
+                self.transport.update(&crate::rack::play_project(&self.state));
             }
         }
         if playing || playing != self.last_playing {
@@ -1065,6 +1119,10 @@ impl App {
             return;
         }
         let (x, y) = self.mouse;
+        if self.top_hit(x, y).and_then(|h| h.win) == Some(Win::ChannelRack) {
+            self.sample_to_rack(path.to_string_lossy().into_owned(), y);
+            return;
+        }
         let Some(grid) = self.pl_grid.filter(|g| g.contains(x, y)) else {
             self.state.message = Some("Drop audio files on the playlist to add audio clips".into());
             return self.invalidate();
@@ -1079,6 +1137,54 @@ impl App {
             None => format!("Could not read {} as audio", path.display()),
         });
         self.invalidate();
+    }
+
+    /// A sample dropped on the channel rack at window y `y` (spec: ui/channel-rack.md, New project / drops): onto a
+    /// sampler row it replaces that channel's sample (Open Sampler loads it); elsewhere it adds an Open Sampler channel
+    /// named after the file.
+    pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
+        let s = &mut self.state;
+        let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
+        let row = match views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind == ChannelKind::Sampler) {
+            Some(r) => {
+                s.sample_loads.push((r, path.clone()));
+                r
+            }
+            None => add_channel(&mut s.project),
+        };
+        let ch = &mut s.project.channels[row];
+        ch.name = stem.clone();
+        ch.sample_path = Some(path);
+        s.selected_channel = row;
+        s.rack.select_only(row);
+        s.piano.dirty = true;
+        s.message = Some(format!("{} loaded in Open Sampler", stem.unwrap_or_default()));
+        self.invalidate();
+    }
+
+    /// A browser sample released over a hosted plugin window (it sits above the main window, which keeps the mouse
+    /// capture during the drag): the plugin gets the file as if it came from Explorer. Returns whether it was one.
+    #[cfg(windows)]
+    pub(crate) fn sample_to_plugin_window(&mut self, path: &str) -> bool {
+        use windows_sys::Win32::Foundation::POINT;
+        let mut pt = POINT { x: 0, y: 0 };
+        if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt) } == 0 {
+            return false;
+        }
+        let Some(row) = self.plugins.row_at_screen(pt.x, pt.y) else { return false };
+        let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind == ChannelKind::Sampler);
+        let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned());
+        if self.plugins.drop_file(row, pt.x, pt.y, path, sampler) {
+            if let Some(ch) = self.state.project.channels.get_mut(row).filter(|_| sampler) {
+                ch.name = name.clone();
+                ch.sample_path = Some(path.to_string());
+            }
+            self.state.message = Some(format!("{} loaded in the plugin", name.unwrap_or_default()));
+        } else {
+            self.state.message = Some("This plugin does not take dropped files".into());
+        }
+        self.invalidate();
+        true
     }
 
     /// Load a theme: a `.flstheme` (spec ui/flstheme.md) or an OpenStudio `theme.txt`. A `.flstheme` is also
@@ -1390,13 +1496,13 @@ impl App {
                     let s = &mut self.state;
                     let w = if edges & views::rack::EDGE_RIGHT != 0 { s0.0 + x - m0.0 } else { s0.0 };
                     let h = if edges & views::rack::EDGE_BOTTOM != 0 { s0.1 + y - m0.1 } else { s0.1 };
-                    s.rack_size = views::rack::snap_size(w, h);
+                    s.rack_size = views::rack::snap_size(s, w, h);
                     let new = views::rack::bounds(&self.state);
                     self.damage_rect(old.union(&new));
                 }
                 Drag::RackMixer { ch, y0, v0 } => {
-                    // One insert per 4 px, up = higher (spec: ui/channel-rack.md §5).
-                    let v = (i32::from(v0) + ((y0 - y) / 4.0).round() as i32).clamp(0, 125) as u16;
+                    // One insert per 10 px, up = higher (spec: ui/channel-rack.md §12).
+                    let v = (i32::from(v0) + ((y0 - y) / crate::rack::MIXER_DRAG).round() as i32).clamp(0, 125) as u16;
                     let s = &mut self.state;
                     if let Some(c) = s.project.channels.get_mut(ch) {
                         if c.mixer_track != v {
@@ -1404,7 +1510,7 @@ impl App {
                             s.piano.dirty = true;
                         }
                     }
-                    self.hint = Cow::Owned(format!("Mixer track: {}", views::rack::insert_name(v)));
+                    self.hint = Cow::Owned(format!("Target mixer track: {}", views::rack::insert_name(v)));
                     let r = self.hits.iter().rev().find(|h| h.action == Action::RackMixer(ch)).map(|h| h.rect);
                     match r {
                         Some(r) => self.damage_rect(r.outset(2.0)),
@@ -1412,6 +1518,47 @@ impl App {
                     }
                     self.damage_rect(HINT_RECT);
                 }
+                Drag::RackPaint { row, on, last } => {
+                    if let Some(k) = views::rack::step_at(&self.state, x) {
+                        if k != last {
+                            for j in last.min(k)..=last.max(k) {
+                                crate::rack::set_step(&mut self.state, row, j, on);
+                            }
+                            self.drag = Some(Drag::RackPaint { row, on, last: k });
+                            self.invalidate();
+                        }
+                    }
+                }
+                Drag::RackSel { from } => {
+                    if let Some(r) = views::rack::row_at(&self.state, y) {
+                        let shown = crate::rack::shown(&self.state);
+                        if let (Some(a), Some(b)) = (shown.iter().position(|&x| x == from), shown.iter().position(|&x| x == r)) {
+                            self.state.rack.sel = shown[a.min(b)..=a.max(b)].iter().copied().collect();
+                        }
+                    }
+                    self.invalidate();
+                }
+                Drag::RackDots { x0, p0 } => {
+                    let w = p0 as f32 / 100.0 * crate::rack::NAME_W + (x - x0);
+                    let pct = (w / crate::rack::NAME_W * 100.0).round().clamp(30.0, 400.0) as u32;
+                    crate::rack::relayout(&mut self.state, |s| s.rack.name_pct = pct);
+                    self.hint = Cow::Owned(format!("Channel button width: {pct}%"));
+                    self.invalidate();
+                }
+                Drag::RackLen { y0, v0 } => {
+                    let v = (v0 as i32 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32).clamp(0, crate::rack::MAX_STEPS as i32) as u32;
+                    crate::rack::set_len(&mut self.state, (v > 0).then_some(v));
+                    self.hint = Cow::Owned(if v == 0 { "Pattern length: Auto".into() } else { format!("Pattern length: {v} steps") });
+                    self.invalidate();
+                }
+                Drag::RackLoopLen { row, y0, v0 } => {
+                    let v = (v0 as i32 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32).clamp(1, crate::rack::MAX_STEPS as i32) as u32;
+                    self.state.rack.loop_len.insert(row, v);
+                    self.state.piano.dirty = true;
+                    self.hint = Cow::Owned(format!("Loop point: {v} steps"));
+                    self.invalidate();
+                }
+                Drag::RackGraph => self.rack_graph_at((x, y)),
                 Drag::PatternBox { y0, p0 } => {
                     let (y0, p0): (f32, u16) = (y0.to_owned(), p0.to_owned());
                     let steps = ((y0 - y) / crate::patterns::DRAG_STEP).trunc() as i32;
@@ -1434,7 +1581,7 @@ impl App {
                     self.damage_rect(HINT_RECT);
                 }
                 Drag::Knob { id, y0, v0 } => {
-                    self.state.set_knob(id, v0 - (y - y0) * crate::knobs::PER_PX);
+                    self.state.set_knob(id, v0 - (y - y0) * id.drag_rate());
                     self.hint = Cow::Owned(self.state.knob_text(id));
                     match self.hits.iter().rev().find(|h| h.action == Action::Knob(id)).map(|h| h.rect) {
                         Some(r) => self.damage_rect(r.outset(6.0)),
@@ -1542,6 +1689,10 @@ impl App {
             }
             return;
         }
+        // The Advanced fill dialog is modal (spec: ui/channel-rack.md §22).
+        if self.state.rack.fill.is_some() && !matches!(action, Some(Action::RackFill(_))) {
+            return;
+        }
         if self.state.playlist.edit.is_some() {
             crate::playlist::commit_edit(&mut self.state);
         }
@@ -1562,6 +1713,7 @@ impl App {
         if let Some(a) = action {
             self.act(a);
         }
+        self.rack_pending();
     }
 
     /// Clicking any part of a child window brings it to the front (spec: ui/channel-rack.md §5).
@@ -1763,6 +1915,11 @@ impl App {
         self.raise_under_mouse();
         if let Some(Action::Scrollbar(t)) = action {
             return self.scrollbar_press(t, true);
+        }
+        if let Some(a) = action.as_ref() {
+            if self.rack_right(a) {
+                return self.invalidate();
+            }
         }
         // Knobs, faders and the tempo: "Create automation clip" (spec: ui/playlist.md §8).
         if let Some(a) = action.as_ref() {
@@ -2218,6 +2375,31 @@ impl App {
             self.hint = Cow::Owned(self.state.knob_text(id));
             return;
         }
+        // Channel rack value boxes (spec: ui/channel-rack.md §7, §12, §15): one per notch.
+        let d = if dy + dx > 0.0 { 1 } else { -1 };
+        match area {
+            Some(Action::RackMixer(i)) => {
+                let s = &mut self.state;
+                if let Some(c) = s.project.channels.get_mut(i) {
+                    c.mixer_track = (i32::from(c.mixer_track) + d).clamp(0, 125) as u16;
+                    self.hint = Cow::Owned(format!("Target mixer track: {}", views::rack::insert_name(c.mixer_track)));
+                    s.piano.dirty = true;
+                }
+                return;
+            }
+            Some(Action::RackLen) => {
+                let v = (crate::rack::len_value(&self.state) as i32 + d).clamp(0, crate::rack::MAX_STEPS as i32) as u32;
+                crate::rack::set_len(&mut self.state, (v > 0).then_some(v));
+                return;
+            }
+            Some(Action::RackLoopBox(i)) => {
+                let v = (crate::rack::row_len(&self.state, i) as i32 + d).clamp(1, crate::rack::MAX_STEPS as i32) as u32;
+                self.state.rack.loop_len.insert(i, v);
+                self.state.piano.dirty = true;
+                return;
+            }
+            _ => {}
+        }
         let rack_area = self.top_hit(x, y).is_some_and(|h| h.win == Some(Win::ChannelRack));
         if rack_area {
             let (rx, ry) = if shift { (dy + dx, 0.0) } else { (dx, dy) };
@@ -2258,9 +2440,22 @@ impl App {
         self.invalidate();
         use winit::keyboard::{Key, NamedKey};
         if crate::patterns::key(&mut self.state, key, ctrl) {
+            self.rack_pending();
             return;
         }
         if self.browser_key(key, ctrl, alt) {
+            return;
+        }
+        // The channel rack's keys while it is in front (spec: ui/channel-rack.md §20).
+        let s = &self.state;
+        if (s.z.last() == Some(&Win::ChannelRack) || s.rack.fill.is_some())
+            && !s.picker_open
+            && s.menu_open.is_none()
+            && !s.settings.open
+            && s.playlist.edit.is_none()
+            && crate::rack::key(self, key, ctrl, alt)
+        {
+            self.rack_pending();
             return;
         }
         // The playlist's editing keys when it is in front (spec: ui/playlist.md §5).
@@ -2359,8 +2554,7 @@ impl App {
     /// Start playback in the mode the PAT / SONG switch shows. Pattern mode loops the current pattern from the piano
     /// roll's play-start marker (§10); song mode plays the playlist from its start and stops at its end.
     fn start_playback(&mut self) {
-        let mut p = self.state.project.clone();
-        p.tempo = Some(self.state.tempo);
+        let p = crate::rack::play_project(&self.state);
         let song = self.state.song_mode;
         if song && p.arrangement().is_none_or(|a| a.clips.is_empty()) {
             self.state.message = Some("The playlist is empty: nothing to play in SONG mode".into());
@@ -2429,9 +2623,7 @@ impl App {
         if !self.typing_synced {
             // The live stream needs the project before the first note.
             self.typing_synced = true;
-            let mut p = self.state.project.clone();
-            p.tempo = Some(self.state.tempo);
-            self.transport.update(&p);
+            self.transport.update(&crate::rack::play_project(&self.state));
         }
         let key = key as u16;
         self.transport.note_on(row, key, TYPING_VELOCITY);
@@ -2722,6 +2914,9 @@ impl App {
         if self.browser_act(&a) {
             return;
         }
+        if self.rack_act(&a) {
+            return;
+        }
         if matches!(a, Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys) {
             self.piano_click(&a);
             return;
@@ -2851,27 +3046,7 @@ impl App {
                 let v0 = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
                 self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0 });
             }
-            Action::ChannelSelect(i) => {
-                if s.selected_channel != i && s.shown(Win::PianoRoll) {
-                    s.selected_channel = i;
-                    s.piano.clear_selection();
-                    piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
-                }
-                s.selected_channel = i;
-                // A hosted plugin opens in its own window with OpenStudio's frame (spec: ui/plugin-window.md).
-                if s.hosted_rows.contains(&i) {
-                    s.pending_open = Some(i);
-                } else {
-                    // The name button opens the channel's plugin window (spec: ui/channel-rack.md §5).
-                    if !s.shown(Win::Plugin) {
-                        let r = views::rack::rect(s);
-                        s.plugin_pos = ((r.right() + 8.0).min(1920.0 - 440.0), r.y.min(1080.0 - 210.0));
-                    }
-                    s.plugin_channel = i;
-                    s.raise(Win::Plugin);
-                }
-            }
-            Action::RackSelect(i) => s.rack_selected = Some(i),
+            Action::ChannelSelect(_) | Action::RackSelect(_) => {}
             Action::RackRollView => s.rack_roll_view = !s.rack_roll_view,
             Action::RackRoll(i) => {
                 s.selected_channel = i;
@@ -2879,10 +3054,7 @@ impl App {
                 s.raise(Win::PianoRoll);
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
             }
-            Action::RackMixer(i) => {
-                let v0 = s.project.channels.get(i).map_or(0, |c| c.mixer_track);
-                self.drag = Some(Drag::RackMixer { ch: i, y0: self.mouse.1, v0 });
-            }
+            Action::RackMixer(_) => {}
             Action::RackAdd => {
                 s.picker_open = true;
                 s.picker_cat = None;
@@ -2917,7 +3089,8 @@ impl App {
                 let ch = add_plugin_channel(&mut s.project, name);
                 s.pending_plugin = Some((ch, i - views::picker::GENERATORS.len()));
                 s.selected_channel = ch;
-                s.rack_selected = Some(ch);
+                s.rack.select_only(ch);
+                crate::rack::autosize(s);
                 let r = views::rack::rect(s);
                 let view_h = views::rack::panel(r).h;
                 s.rack_scroll = (views::rack::content_h(s) - view_h).max(0.0);
@@ -2927,7 +3100,8 @@ impl App {
                 let ch = add_channel(&mut s.project);
                 s.piano.dirty = true;
                 s.selected_channel = ch;
-                s.rack_selected = Some(ch);
+                s.rack.select_only(ch);
+                crate::rack::autosize(s);
                 // Hosted by Open Sampler on the next tick (`sync_samplers`), then its window opens.
                 s.pending_open = Some(ch);
                 s.message = Some("Added a sampler channel (Open Sampler)".into());
@@ -2939,17 +3113,19 @@ impl App {
             Action::RackResize(edges) => {
                 self.drag = Some(Drag::RackResize { edges, m0: self.mouse, s0: s.rack_size });
             }
-            Action::ChannelEnable(i) => {
-                if let Some(c) = s.project.channels.get_mut(i) {
-                    c.enabled = !c.enabled;
-                    s.piano.dirty = true;
-                }
-            }
-            Action::Step(ch, step) => {
-                s.piano.clear_selection();
-                toggle_step(s, ch, step);
-                s.piano.dirty = true;
-            }
+            Action::ChannelEnable(_)
+            | Action::Step(..)
+            | Action::RackOptions
+            | Action::RackFilter
+            | Action::RackDots
+            | Action::RackSpeaker
+            | Action::RackLen
+            | Action::RackLoop
+            | Action::RackGraph
+            | Action::RackLoopBox(_)
+            | Action::RackGraphArea
+            | Action::RackGraphTab(_)
+            | Action::RackFill(_) => {}
             Action::WinDrag(win) => {
                 // Double-click on the title bar toggles maximized / floating (like the max button).
                 let now = std::time::Instant::now();
@@ -3013,6 +3189,247 @@ impl App {
         }
     }
 
+    /// Make `i` the focused channel (piano roll, typing keyboard, plugin window follow it, spec: ui/channel-rack.md §8).
+    pub(crate) fn focus_channel(&mut self, i: usize) {
+        let s = &mut self.state;
+        if s.selected_channel != i && s.shown(Win::PianoRoll) {
+            s.selected_channel = i;
+            s.piano.clear_selection();
+            piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
+        }
+        s.selected_channel = i;
+    }
+
+    /// Name button click (spec: ui/channel-rack.md §13): opens the channel's plugin window, or closes it when open.
+    fn toggle_channel_window(&mut self, i: usize) {
+        if self.state.hosted_rows.contains(&i) {
+            if !self.plugins.close_if_open(i) {
+                self.state.pending_open = Some(i);
+            }
+            return;
+        }
+        let s = &mut self.state;
+        if s.project.channels.get(i).is_some_and(|c| c.kind == ChannelKind::Sampler) {
+            // Not hosted yet (just added): Open Sampler starts on the next tick and its window opens then.
+            s.pending_open = Some(i);
+            self.sampler_failed.retain(|&r| r != i);
+        } else if s.shown(Win::Plugin) && s.plugin_channel == i {
+            s.hide(Win::Plugin);
+        } else {
+            if !s.shown(Win::Plugin) {
+                let r = views::rack::rect(s);
+                s.plugin_pos = ((r.right() + 8.0).min(1920.0 - 440.0), r.y.min(1080.0 - 210.0));
+            }
+            s.plugin_channel = i;
+            s.raise(Win::Plugin);
+        }
+    }
+
+    /// Press on a step (spec: ui/channel-rack.md §9): selects the row, toggles the step, starts painting.
+    fn rack_step(&mut self, i: usize, k: u32) {
+        self.state.rack.select_only(i);
+        self.focus_channel(i);
+        let s = &mut self.state;
+        s.piano.clear_selection();
+        // A step past an explicit length grows the pattern to the bar holding it (§5).
+        if let Some(l) = crate::rack::explicit_len(s) {
+            if k >= l {
+                crate::rack::set_len(s, Some((k / 16 + 1) * 16));
+            }
+        }
+        let on = crate::rack::toggle_step(s, i, k);
+        self.drag = Some(Drag::RackPaint { row: i, on, last: k });
+    }
+
+    /// Speaker (spec: ui/channel-rack.md §7): plays the current pattern; while it plays, pauses / resumes.
+    fn rack_speaker(&mut self) {
+        match self.transport.state() {
+            TransportState::Playing if !self.state.song_mode => self.transport.pause(),
+            TransportState::Paused if !self.state.song_mode => self.transport.resume(),
+            _ => {
+                if self.transport.playing() {
+                    self.transport.stop();
+                }
+                self.state.song_mode = false;
+                self.start_playback();
+            }
+        }
+    }
+
+    /// Graph editor click / drag at a screen point (spec: ui/channel-rack.md §14).
+    fn rack_graph_at(&mut self, (x, y): (f32, f32)) {
+        let Some(b) = views::rack::graph_bars(&self.state) else { return };
+        let Some(k) = views::rack::step_at(&self.state, x) else { return };
+        let v = ((b.bottom() - y) / b.h).clamp(0.0, 1.0);
+        if let Some(t) = crate::rack::graph_set(&mut self.state, k, v) {
+            self.hint = Cow::Owned(t);
+        }
+        self.invalidate();
+    }
+
+    /// Channel rack left clicks (spec: ui/channel-rack.md §7-15, §22). Returns whether `a` was one.
+    fn rack_act(&mut self, a: &Action) -> bool {
+        use crate::rack as rk;
+        let (shift, ctrl, alt) = (self.shift, self.ctrl, self.alt);
+        let now = std::time::Instant::now();
+        let double = matches!(&self.rack_click, Some((p, t)) if p == a && now.duration_since(*t).as_millis() < 400);
+        if matches!(a, Action::RackSelect(_) | Action::RackMixer(_)) {
+            self.rack_click = if double { None } else { Some((a.clone(), now)) };
+        }
+        let mouse = self.mouse;
+        match *a {
+            Action::RackSelect(i) => {
+                if double {
+                    self.state.rack.sel = rk::shown(&self.state).into_iter().collect();
+                } else if shift {
+                    let sel = &mut self.state.rack.sel;
+                    if !sel.remove(&i) {
+                        sel.insert(i);
+                    }
+                } else {
+                    self.state.rack.select_only(i);
+                    self.focus_channel(i);
+                    self.drag = Some(Drag::RackSel { from: i });
+                }
+            }
+            Action::ChannelSelect(i) => {
+                if shift {
+                    let at = views::rack::name_rect(&self.state, i).map_or(mouse, |r| (r.x, r.y));
+                    rk::open_box(&mut self.state, rk::RBox::Channel(i), at);
+                } else if !ctrl {
+                    self.state.rack.select_only(i);
+                    self.focus_channel(i);
+                    self.toggle_channel_window(i);
+                }
+            }
+            Action::ChannelEnable(i) => {
+                let s = &mut self.state;
+                if ctrl || alt {
+                    rk::solo(s, i);
+                } else if shift {
+                    rk::toggle_lock(s, i);
+                } else {
+                    rk::toggle_mute(s, i);
+                }
+            }
+            Action::Step(i, k) => self.rack_step(i, k),
+            Action::RackMixer(i) => {
+                let s = &mut self.state;
+                if double {
+                    if let Some(t) = s.project.channels.get(i).map(|c| c.mixer_track) {
+                        s.selected_mixer = t;
+                        s.raise(Win::Mixer);
+                    }
+                } else {
+                    let v0 = s.project.channels.get(i).map_or(0, |c| c.mixer_track);
+                    self.drag = Some(Drag::RackMixer { ch: i, y0: mouse.1, v0 });
+                }
+            }
+            Action::RackOptions => {
+                let p = rk::options_menu(&self.state, self.state.rack_pos.0, self.state.rack_pos.1 + 28.0);
+                self.state.playlist.popup = Some(p);
+            }
+            Action::RackFilter => {
+                let p = rk::filter_menu(&self.state, mouse.0, mouse.1 + 8.0);
+                self.state.playlist.popup = Some(p);
+            }
+            Action::RackDots => self.drag = Some(Drag::RackDots { x0: mouse.0, p0: self.state.rack.name_pct }),
+            Action::RackSpeaker => self.rack_speaker(),
+            Action::RackLen => self.drag = Some(Drag::RackLen { y0: mouse.1, v0: rk::len_value(&self.state) }),
+            Action::RackLoop => {
+                let s = &mut self.state;
+                rk::relayout(s, |s| s.rack.loop_mode = !s.rack.loop_mode);
+                s.piano.dirty = true;
+            }
+            Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
+            Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::row_len(&self.state, i) }),
+            Action::RackGraphArea => {
+                self.rack_graph_at(mouse);
+                self.drag = Some(Drag::RackGraph);
+            }
+            Action::RackGraphTab(i) => self.state.rack.graph_tab = rk::Tab::ALL[i.min(rk::Tab::ALL.len() - 1)],
+            Action::RackFill(h) => rk::fill_hit(&mut self.state, h),
+            _ => return false,
+        }
+        self.invalidate();
+        true
+    }
+
+    /// Channel rack right clicks (spec: ui/channel-rack.md §8-19). Returns whether `a` was one.
+    fn rack_right(&mut self, a: &Action) -> bool {
+        use crate::knobs::KnobId;
+        use crate::rack as rk;
+        let (x, y) = self.mouse;
+        let s = &self.state;
+        let popup = match *a {
+            Action::ChannelSelect(i) => rk::channel_menu(s, i, x, y),
+            Action::ChannelEnable(i) => rk::led_menu(s, i, x, y),
+            Action::RackMixer(i) => rk::mixer_menu(s, i, x, y),
+            Action::Knob(k @ (KnobId::ChanVol(_) | KnobId::ChanPan(_) | KnobId::Swing)) => rk::knob_menu(s, k, self.automation_target(a), x, y),
+            Action::RackFilter => rk::filter_edit_menu(s, x, y),
+            Action::RackLen => rk::length_menu(s, x, y),
+            Action::RackLoop => rk::loop_menu(s, x, y),
+            Action::RackSelect(i) => {
+                let sel = &mut self.state.rack.sel;
+                if !sel.remove(&i) {
+                    sel.insert(i);
+                }
+                return true;
+            }
+            Action::Step(i, k) => {
+                self.rack_step(i, k);
+                return true;
+            }
+            Action::RackGraphArea => {
+                self.rack_graph_at((x, y));
+                self.drag = Some(Drag::RackGraph);
+                return true;
+            }
+            _ => return false,
+        };
+        self.state.playlist.popup = Some(popup);
+        true
+    }
+
+    /// Channels whose deletion was confirmed go now (spec: ui/channel-rack.md §18).
+    fn rack_pending(&mut self) {
+        if let Some(rows) = self.state.rack.delete_now.take() {
+            crate::rack::delete_rows(self, &rows);
+        }
+    }
+
+    /// Rack rows were renumbered (`m(old) = new`, `None` = deleted): hosted plugins, their windows and playback follow.
+    pub(crate) fn remap_rows(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
+        self.typing_release_all();
+        self.plugins.remap(m);
+        self.sampler_failed = self.sampler_failed.iter().filter_map(|&r| m(r)).collect();
+        self.transport.set_instruments(self.plugins.instruments());
+        self.state.piano.dirty = true;
+    }
+
+    /// A row's hosted instrument for cloning: (available plugin index, saved state).
+    pub(crate) fn plugin_copy(&self, r: usize) -> Option<(usize, Vec<u8>)> {
+        let ch = self.state.project.channels.get(r)?;
+        let name = match ch.kind {
+            ChannelKind::Sampler => crate::plugins::OPEN_SAMPLER.to_string(),
+            ChannelKind::Plugin => ch.plugin.clone()?,
+            _ => return None,
+        };
+        let index = self.plugins.index_of(&name)?;
+        let blob = self.plugins.hosted.get(&r)?.plugin.lock().ok()?.save_state()?;
+        Some((index, blob))
+    }
+
+    /// Host a copy of an instrument (`plugin_copy`) on row `row`.
+    pub(crate) fn plugin_paste(&mut self, row: usize, index: usize, blob: &[u8]) {
+        if self.plugins.create_with(row, index, Some(blob)).is_ok() {
+            if !self.state.hosted_rows.contains(&row) {
+                self.state.hosted_rows.push(row);
+            }
+            self.transport.set_instruments(self.plugins.instruments());
+        }
+    }
+
     fn menu_item(&mut self, menu: usize, item: usize) {
         use views::menus::*;
         match (menu, item) {
@@ -3027,6 +3444,8 @@ impl App {
                 s.pattern = 1;
                 s.piano.reset();
                 s.playlist.reset();
+                s.rack.reset();
+                crate::rack::from_model(s);
                 s.piano.dirty = true;
                 s.message = Some("New project".into());
             }
@@ -3109,28 +3528,6 @@ fn typing_semitone(code: KeyCode) -> Option<i32> {
     })
 }
 
-/// Toggle a one-step note in the current pattern (spec: flp/events/patterns.md — a step note is
-/// one step (PPQ/4 ticks) long at the default key).
-fn toggle_step(s: &mut State, ch: usize, step: u32) {
-    let ppq = u32::from(s.project.ppq.max(1));
-    let pos = step * ppq / 4;
-    let Some(channel) = s.project.channels.get(ch).map(|c| c.index) else { return };
-    let number = s.pattern;
-    let pat = match s.project.patterns.iter_mut().position(|p| p.number == number) {
-        Some(i) => &mut s.project.patterns[i],
-        None => {
-            s.project.patterns.push(Pattern { number, ..Pattern::default() });
-            s.project.patterns.last_mut().expect("pushed")
-        }
-    };
-    let before = pat.notes.len();
-    pat.notes.retain(|n| !(n.channel == channel && n.position == pos));
-    if pat.notes.len() == before {
-        pat.notes.push(Note::step(channel, pos));
-        pat.notes.sort_by_key(|n| (n.position, n.channel));
-    }
-}
-
 /// An empty sampler channel at rack position `i`.
 fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
     Channel {
@@ -3147,6 +3544,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
         sample_path: None,
         layer_children: Vec::new(),
         envelopes: Default::default(),
+        rack: Default::default(),
     }
 }
 
@@ -3181,7 +3579,7 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
 pub(crate) fn add_channel(p: &mut Project) -> usize {
     let index = p.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let track = (p.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(125);
-    p.channels.push(sampler_channel(index, "Sampler", track));
+    p.channels.push(sampler_channel(index, crate::plugins::OPEN_SAMPLER, track));
     p.channels.len() - 1
 }
 
@@ -3391,7 +3789,7 @@ mod tests {
             app.mouse_down();
             assert!(app.cursor_locked(), "knob drags lock the cursor");
             app.mouse_move(r.cx(), r.cy() - 100.0);
-            let want = (v0 + 100.0 / 1024.0).min(1.0);
+            let want = (v0 + 100.0 * id.drag_rate()).min(1.0);
             assert!((app.state.knob(id) - want).abs() < 1e-4, "{id:?}: {} vs {want}", app.state.knob(id));
             frame(&mut app, &mut a, None);
             app.mouse_up();
@@ -3408,7 +3806,7 @@ mod tests {
             app.state.set_knob(id, before);
             frame(&mut app, &mut a, None);
             app.wheel(0.0, 1.0, false, false);
-            assert!((app.state.knob(id) - (before + crate::knobs::PER_NOTCH).min(1.0)).abs() < 1e-4, "wheel {id:?}");
+            assert!((app.state.knob(id) - (before + id.notch()).min(1.0)).abs() < 1e-4, "wheel {id:?}");
         }
         assert!(app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().pan.unwrap() > 0.0, "mixer pan written to the model");
     }
@@ -3802,13 +4200,14 @@ mod tests {
         app.act(Action::ToggleWin(Win::ChannelRack));
         frame(&mut app, &mut a, None);
 
-        // Name button opens the plugin window for that channel; the slot selects.
+        // Name button opens the channel's Open Sampler (a sampler row never shows the info window); the slot selects.
         let hr = hit_rect(&app, &Action::ChannelSelect(2));
         click(&mut app, &mut a, hr);
-        assert_eq!((app.state.z.last(), app.state.plugin_channel, app.state.selected_channel), (Some(&Win::Plugin), 2, 2));
+        assert_eq!((app.state.pending_open, app.state.selected_channel), (Some(2), 2));
+        assert!(!app.state.shown(Win::Plugin));
         let hr = hit_rect(&app, &Action::RackSelect(3));
         click(&mut app, &mut a, hr);
-        assert_eq!(app.state.rack_selected, Some(3));
+        assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([3]));
         assert_eq!(app.state.z.last(), Some(&Win::ChannelRack), "clicking the rack raised it");
 
         // Drag the mixer box up 20 px: +5 inserts, with damage repaint matching a full frame.
@@ -3824,7 +4223,7 @@ mod tests {
         step(&mut app, &mut a, &|ap| { ap.mouse_move(mb.cx(), mb.cy()); });
         step(&mut app, &mut a, &|ap| ap.mouse_down());
         step(&mut app, &mut a, &|ap| { ap.mouse_move(mb.cx(), mb.cy() - 20.0); });
-        assert_eq!(app.state.project.channels[0].mixer_track, t0 + 5);
+        assert_eq!(app.state.project.channels[0].mixer_track, t0 + 2, "10 px per insert (§12)");
         step(&mut app, &mut a, &|ap| ap.mouse_up());
 
         // Resize from the corner: wider shows more steps, taller more room.
@@ -3835,20 +4234,23 @@ mod tests {
         step(&mut app, &mut a, &|ap| { ap.mouse_move(r.right() + 318.0, r.bottom() + 58.0); });
         step(&mut app, &mut a, &|ap| ap.mouse_up());
         assert_eq!(app.state.rack_size, (819.0, 306.0));
-        assert_eq!(views::rack::visible_steps(views::rack::rect(&app.state)), 36);
+        assert_eq!(views::rack::visible_steps(&app.state), 36);
         frame(&mut app, &mut b, None);
         assert_same(&a, &b, "after mixer drag and resize");
 
         // A dimmed step (past the one-bar pattern) extends the pattern to two bars.
-        assert_eq!(views::rack::pattern_steps(&app.state), 16);
+        assert_eq!(crate::rack::pattern_steps(&app.state), 16);
         let hr = hit_rect(&app, &Action::Step(0, 20));
         click(&mut app, &mut a, hr);
-        assert_eq!(views::rack::pattern_steps(&app.state), 32);
+        assert_eq!(crate::rack::pattern_steps(&app.state), 32);
 
         // Sizes snap to whole steps / rows, down to 4 steps and one row.
-        assert_eq!(views::rack::snap_size(822.0, 300.0), (819.0, 306.0));
-        assert_eq!(views::rack::snap_size(10.0, 10.0), (307.0, 126.0));
-        assert_eq!(views::rack::visible_steps(Rect::new(0.0, 0.0, 307.0, 126.0)), 4);
+        assert_eq!(views::rack::snap_size(&app.state, 822.0, 300.0), (819.0, 306.0));
+        assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (307.0, 126.0));
+        let keep = app.state.rack_size;
+        app.state.rack_size = (307.0, 126.0);
+        assert_eq!(views::rack::visible_steps(&app.state), 4);
+        app.state.rack_size = keep;
 
         // Piano-roll view toggle: rows become mini rolls; clicking one opens the Piano roll.
         assert!(!app.hits.iter().any(|h| matches!(h.action, Action::RackRoll(_))));
@@ -3874,7 +4276,12 @@ mod tests {
             assert!(!app.state.picker_open);
         }
         assert_eq!(app.state.project.channels.len(), n + 6);
-        assert_eq!(app.state.project.channels.last().unwrap().mixer_track, 12, "after the highest insert in use (6 after the drag)");
+        assert_eq!(app.state.project.channels.last().unwrap().mixer_track, 11, "after the highest insert in use (5)");
+        // Auto resize (minimum height, §7) grows the rack with its rows; with it off the rows overflow into a scroll bar.
+        assert!(app.bar(Scroll::RackY).is_none_or(|b| b.max == 0.0), "auto resize fits the rows");
+        app.state.rack.auto_resize = crate::rack::AutoResize::Off;
+        app.state.rack_size.1 = 200.0;
+        frame(&mut app, &mut a, None);
         assert!(app.bar(Scroll::RackY).is_some_and(|b| b.max > 0.0));
     }
 

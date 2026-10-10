@@ -1174,10 +1174,21 @@ impl Sched {
     }
 }
 
+/// Main swing delay of a note in ticks: a note starting exactly on an off-beat 16th (steps 2, 4, ...) plays
+/// `swing / 256` of a step late (spec: flp/events/project-info.md, "Swing timing").
+pub fn swing_delay(position: u32, ppq: u16, swing: u8) -> f64 {
+    let step = u32::from(ppq) / 4;
+    if swing == 0 || step == 0 || position % step != 0 || (position / step) % 2 == 0 {
+        return 0.0;
+    }
+    f64::from(step) * f64::from(swing.min(128)) / 256.0
+}
+
 /// Schedules a note; a repeating note is retriggered at every multiple of its interval inside its
 /// length (spec: audio/pattern-controls.md, note repeat). A plain step counts as one step long.
-fn push_note(out: &mut Vec<Sched>, start: f64, n: &os_model::Note, ppq: u16) {
-    let first = Sched::note(start, n);
+fn push_note(out: &mut Vec<Sched>, start: f64, n: &os_model::Note, ppq: u16, swing: u8) {
+    let mut first = Sched::note(start, n);
+    first.tick += swing_delay(n.position, ppq, swing);
     let span = if n.length > 0 { f64::from(n.length) } else { f64::from(ppq) / 4.0 };
     match n.repeat_ticks(ppq) {
         Some(interval) => {
@@ -1255,17 +1266,22 @@ fn fallback_tone(rate: u32) -> Arc<Sample> {
 fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Vec<Sched>, f64) {
     let bar = f64::from(project.ppq.max(1)) * 4.0;
     let pattern_notes = |n: u16| project.patterns.iter().find(|p| p.number == n).map(|p| p.notes.as_slice()).unwrap_or(&[]);
+    // An explicit length (channel rack length box, spec: ui/channel-rack.md §7) wins over whole bars.
+    let explicit = |n: u16| project.patterns.iter().find(|p| p.number == n).and_then(|p| p.length).filter(|&l| l > 0).map(f64::from);
     let pattern_end = |n: u16| {
-        let last = pattern_notes(n).iter().map(|x| f64::from(x.position) + f64::from(x.length)).fold(0.0, f64::max);
-        ((last / bar).floor() + 1.0).max(1.0) * bar
+        explicit(n).unwrap_or_else(|| {
+            let last = pattern_notes(n).iter().map(|x| f64::from(x.position) + f64::from(x.length)).fold(0.0, f64::max);
+            ((last / bar).floor() + 1.0).max(1.0) * bar
+        })
     };
     let one_pattern = |n: u16| {
-        // Muted notes are silent (spec: ui/piano-roll.md §9).
+        // Muted notes are silent (spec: ui/piano-roll.md §9); notes past an explicit length are not played.
+        let end = pattern_end(n);
         let mut t = Vec::new();
-        for x in pattern_notes(n).iter().filter(|x| !x.muted()) {
-            push_note(&mut t, 0.0, x, project.ppq);
+        for x in pattern_notes(n).iter().filter(|x| !x.muted() && f64::from(x.position) < end) {
+            push_note(&mut t, 0.0, x, project.ppq, project.swing.unwrap_or(0));
         }
-        (t, pattern_end(n))
+        (t, end)
     };
     match mode {
         PlayMode::Pattern(n) => one_pattern(n),
@@ -1291,7 +1307,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         for note in pattern_notes(n).iter().filter(|x| !x.muted()) {
                             let p = f64::from(note.position);
                             if p >= from && p < from + len {
-                                push_note(&mut out, start - from, note, project.ppq);
+                                push_note(&mut out, start - from, note, project.ppq, project.swing.unwrap_or(0));
                             }
                         }
                     }
@@ -1331,7 +1347,7 @@ mod tests {
             mixer_track: 0,
             sample_path: None, // plays the built-in tone
             layer_children: vec![],
-            envelopes: Default::default(),
+            envelopes: Default::default(), rack: Default::default(),
         }
     }
 
@@ -1367,6 +1383,37 @@ mod tests {
             r.fill(v);
             self.at += l.len() as u64;
         }
+    }
+
+    // spec: flp/events/project-info.md "Swing timing" (100 % delays an off-beat 16th by half a step)
+    #[test]
+    fn swing_delays_off_beat_sixteenths() {
+        assert_eq!(swing_delay(0, 96, 128), 0.0);
+        assert_eq!(swing_delay(24, 96, 128), 12.0);
+        assert_eq!(swing_delay(24, 96, 64), 6.0);
+        assert_eq!(swing_delay(48, 96, 128), 0.0);
+        assert_eq!(swing_delay(72, 96, 32), 3.0);
+        assert_eq!(swing_delay(30, 96, 128), 0.0, "off the 16th grid");
+        assert_eq!(swing_delay(24, 96, 0), 0.0);
+    }
+
+    /// Main swing reaches played notes: an off-beat step starts late on an instrument channel.
+    #[test]
+    fn swing_delays_played_notes() {
+        let mut p = project(vec![Note::step(0, 24), Note::step(0, 48)], vec![]);
+        p.swing = Some(128);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        let mut out = vec![0.0f32; 512 * 2];
+        for _ in 0..100 {
+            e.process(&mut out);
+        }
+        let ons: Vec<u64> = probe.lock().unwrap().log.iter().filter(|l| l.1).map(|l| l.0).collect();
+        assert_eq!(ons[0], laws::tick_to_frame(36.0, 96, 130.0, 48000), "{ons:?}");
+        assert_eq!(ons[1], laws::tick_to_frame(48.0, 96, 130.0, 48000), "{ons:?}");
     }
 
     // spec: plugins/plugin-formats.md (hosting: notes at frame offsets; the channel's volume and pan apply)

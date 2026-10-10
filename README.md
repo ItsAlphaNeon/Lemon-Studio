@@ -63,7 +63,7 @@ losslessly, so existing projects open, play and save without losing data it does
 
 ### 🖥️ Interface
 - Playlist with clips, markers, automation and nine editing tools
-- Channel rack with step sequencer and mini piano rolls
+- Channel rack: step sequencer, mini piano rolls, graph editor, per-channel loops, filter groups, fill tools, swing, clone / move / delete channels
 - Piano roll with full tool set, velocity and event lanes
 - Mixer, browser with drag and drop, plugin picker
 - Floating, resizable, stackable windows
@@ -80,6 +80,7 @@ losslessly, so existing projects open, play and save without losing data it does
 - Lossless `.flp` reader and writer: unknown data is preserved byte for byte
 - Typed project model for patterns, channels, mixer, playlist and automation
 - New projects saved in a form other compatible software opens
+- Channel rack settings saved: swing, filter groups, locked and zipped rows, pattern length, loop lengths, and added, cloned, moved or deleted channels
 - Round-trip test suite over a corpus of real-world projects
 
 </td>

@@ -645,12 +645,10 @@ fn header(ui: &mut Ui, s: &State, row: u16, hr: Rect) {
 pub fn paint_overlays(ui: &mut Ui, s: &State) {
     if let Some(p) = &s.playlist.popup {
         let (w, h) = ui.c.size();
-        let r = popup_list(ui, &p.items, p.x, p.y, (w, h), p.sub, false);
+        let (_, rows) = popup_list(ui, &p.items, p.x, p.y, (w, h), p.sub, false);
         if let Some(i) = p.sub {
-            if let Some(item) = p.items.get(i) {
-                let y = r.y + 2.0 + p.items[..i].iter().map(item_h).sum::<f32>();
-                let x = r.right() - 2.0;
-                popup_list(ui, &item.children, x, y - 2.0, (w, h), None, true);
+            if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
+                popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true);
             }
         }
     }
@@ -669,11 +667,29 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
 const POP_ROW: f32 = 19.0;
 
 fn item_h(it: &pl::PItem) -> f32 {
-    if it.sep { 7.0 } else if it.head { 16.0 } else { POP_ROW }
+    if it.col { 0.0 } else if it.sep { 7.0 } else if it.head { 16.0 } else { POP_ROW }
 }
 
-/// Draw a popup list at (x, y) kept on screen; returns its rect.
-fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, sub: bool) -> Rect {
+/// Column and y offset of each item: a new column starts at a column break or when the next item would pass
+/// `max_h` (long menus such as the channel rack's options wrap, spec: ui/channel-rack.md §17-18).
+fn popup_layout(items: &[pl::PItem], max_h: f32) -> (Vec<(usize, f32)>, usize, f32) {
+    let (mut col, mut y, mut h) = (0usize, 0.0f32, 0.0f32);
+    let mut out = Vec::with_capacity(items.len());
+    for it in items {
+        let ih = item_h(it);
+        if it.col || (y > 0.0 && y + ih > max_h) {
+            col += 1;
+            y = 0.0;
+        }
+        out.push((col, y));
+        y += ih;
+        h = h.max(y);
+    }
+    (out, col + 1, h)
+}
+
+/// Draw a popup list at (x, y) kept on screen; returns its rect and each item's row rect.
+fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, sub: bool) -> (Rect, Vec<Rect>) {
     let t = ui.t;
     let font = Font::new(14);
     let mut lw: f32 = 80.0;
@@ -684,19 +700,26 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             kw = kw.max(ui.c.text_width(font.italic(), it.key));
         }
     }
-    let w = 20.0 + lw + if kw > 0.0 { kw + 24.0 } else { 12.0 } + 14.0;
-    let h: f32 = items.iter().map(item_h).sum::<f32>() + 4.0;
+    let cw = 20.0 + lw + if kw > 0.0 { kw + 24.0 } else { 12.0 } + 14.0;
+    let (layout, cols, body_h) = popup_layout(items, (screen.1 - 8.0).max(POP_ROW));
+    let (w, h) = (cw * cols as f32, body_h + 4.0);
     let x = x.min(screen.0 - w - 2.0).max(0.0);
     let y = y.min(screen.1 - h - 2.0).max(0.0);
     let r = Rect::new(x, y, w, h);
+    let mut rows = Vec::with_capacity(items.len());
     ui.c.fill_rect(r, t.menu_pop);
     ui.c.stroke_rrect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0), 0.0, 2.0, t.menu_pop_border);
     ui.hit(r, Action::Swallow, "");
-    let mut yy = r.y + 2.0;
     for (i, it) in items.iter().enumerate() {
-        let ih = item_h(it);
-        let rr = Rect::new(r.x + 2.0, yy, r.w - 4.0, ih);
-        yy += ih;
+        let (col, off) = layout[i];
+        let rr = Rect::new(r.x + 2.0 + col as f32 * cw, r.y + 2.0 + off, cw - 4.0, item_h(it));
+        rows.push(rr);
+        if col > 0 && (i == 0 || layout[i - 1].0 != col) {
+            ui.c.fill_rect(Rect::new(rr.x - 2.0, r.y + 2.0, 1.0, r.h - 4.0), t.menu_pop_head);
+        }
+        if it.col {
+            continue;
+        }
         if it.sep {
             ui.c.fill_rect(Rect::new(rr.x, rr.y + 3.0, rr.w, 1.0), t.menu_pop_head);
             continue;
@@ -738,5 +761,5 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             ui.c.line(ax + 3.5, my, ax, my + 3.5, 1.2, t.menu_pop_dim);
         }
     }
-    r
+    (r, rows)
 }

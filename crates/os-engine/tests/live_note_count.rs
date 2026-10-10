@@ -36,7 +36,7 @@ fn channel() -> os_model::Channel {
         mixer_track: 0,
         sample_path: None,
         layer_children: vec![],
-        envelopes: Default::default(),
+        envelopes: Default::default(), rack: Default::default(),
     }
 }
 

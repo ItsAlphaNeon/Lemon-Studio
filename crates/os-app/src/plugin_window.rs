@@ -488,8 +488,7 @@ impl FrameWindow {
         }
     }
 
-    /// The native frame window (tests drive and capture it).
-    #[cfg(test)]
+    /// The native frame window (drops find their plugin by it; tests drive and capture it).
     pub fn hwnd(&self) -> isize {
         self.hwnd as isize
     }
