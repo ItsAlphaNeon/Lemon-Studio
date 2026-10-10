@@ -80,6 +80,7 @@ pub const OPTIONS_MENU: usize = 5;
 pub const PATTERNS: usize = 3;
 pub const PATTERN_PICK: usize = 1000;
 pub const VIEW: usize = 4;
+pub const EDIT_MENU: usize = 1;
 
 const FILE: &[Item] = &[
     it("New", "").on(),
@@ -313,6 +314,16 @@ fn win_of(label: &str) -> Option<Win> {
     })
 }
 
+/// Whether an entry does something in this build: its static flag, or one of the label-dispatched commands
+/// `App::menu_item` handles (settings tabs, pattern commands, window toggles, plugin picker, undo).
+pub fn works(menu: usize, item: &Item) -> bool {
+    item.works
+        || (menu == OPTIONS_MENU && crate::views::settings::tab_for_menu(item.label).is_some())
+        || (menu == PATTERNS && crate::patterns::Cmd::from_label(item.label).is_some())
+        || (menu == VIEW && (win_of(item.label).is_some() || item.label == "Plugin picker"))
+        || (menu == EDIT_MENU && item.label == "Undo")
+}
+
 fn item_action(menu: usize, i: usize, item: &Item) -> Action {
     if menu == VIEW {
         if let Some(w) = win_of(item.label) {
@@ -403,11 +414,12 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                 }
                 Kind::Item => {
                     let action = item_action(menu, flat, item);
-                    let hint = if item.works { item.label } else { "Not available yet" };
+                    let ok = works(menu, item);
+                    let hint = if ok { item.label } else { "Not available yet" };
                     if ui.hit(rr, action, hint) {
                         ui.c.fill_rect(rr, t.menu_pop_hi);
                     }
-                    let color = if item.works { t.menu_pop_text } else { t.menu_pop_dim };
+                    let color = if ok { t.menu_pop_text } else { t.menu_pop_dim };
                     // Tick state: window entries follow the window, others are drawn unticked.
                     let mark = match (item.mark, menu == VIEW) {
                         (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
