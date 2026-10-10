@@ -605,9 +605,9 @@ impl App {
                 playlist: crate::playlist::PlaylistState::default(),
                 pat_ui: Default::default(),
                 wins: [
-                    WinState { rect: Rect::new(693.0, 101.0, 1126.0, 378.0), maxed: false, mini: false },
-                    WinState { rect: Rect::new(231.0, 565.0, 1552.0, 435.0), maxed: false, mini: false },
-                    WinState { rect: Rect::new(480.0, 140.0, 1000.0, 640.0), maxed: false, mini: false },
+                    WinState { rect: Rect::new(693.0, 101.0, 1126.0, 378.0), maxed: true, mini: false },
+                    WinState { rect: Rect::new(231.0, 565.0, 1552.0, 435.0), maxed: true, mini: false },
+                    WinState { rect: Rect::new(480.0, 140.0, 1000.0, 640.0), maxed: true, mini: false },
                 ],
                 screen: (1920.0, 1080.0),
             },
@@ -3250,6 +3250,7 @@ mod tests {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
         app.state.z = vec![Win::Mixer, Win::ChannelRack];
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
@@ -3685,6 +3686,7 @@ mod tests {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
         app.state.z = vec![Win::Playlist, Win::Mixer];
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
