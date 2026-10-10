@@ -4,6 +4,7 @@
 use os_model::{ChannelKind, ClipSource};
 
 use crate::app::{Action, App, Drag, Win};
+use crate::playlist::{Cmd, Mark, PItem, Popup};
 use crate::playlist::{self as pl, PickKind};
 use crate::views::browser::{self as view, Item};
 
@@ -25,9 +26,15 @@ impl App {
                 s.browser_scroll = 0.0;
             }
             Action::BrowserList => {}
+            Action::BrowserMenu => {
+                let (x, y) = view::MENU_AT;
+                let open = s.playlist.popup.as_ref().is_some_and(|p| p.x == x && p.y == y);
+                s.playlist.popup = if open { None } else { Some(Popup { x, y, items: options_menu(s), sub: None }) };
+            }
+            Action::BrowserSearch => s.browser_search_focus = true,
             Action::BrowserRow(i) => {
                 let Some(row) = view::rows(s).into_iter().nth(i) else { return true };
-                s.browser_sel = Some(row.key.clone());
+                select(s, &row.key);
                 if row.open.is_some() && !s.browser_open.remove(&row.key) {
                     s.browser_open.insert(row.key.clone());
                 }
@@ -50,6 +57,114 @@ impl App {
         }
         self.invalidate();
         true
+    }
+
+    /// A browser options-menu command (spec §4); returns a message.
+    pub(crate) fn browser_cmd(&mut self, c: BCmd) -> Option<String> {
+        self.invalidate();
+        let s = &mut self.state;
+        match c {
+            BCmd::Find(dir) => return find(s, dir),
+            BCmd::Toggle(k) => {
+                if !s.browser_opts.remove(k) {
+                    s.browser_opts.insert(k);
+                }
+                s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
+            }
+            BCmd::History(dir) => {
+                let pos = s.browser_hist_pos as isize + dir;
+                let Some(key) = usize::try_from(pos).ok().and_then(|p| s.browser_hist.get(p)).cloned() else {
+                    return Some("No more browser history".into());
+                };
+                s.browser_hist_pos = pos as usize;
+                s.browser_sel = Some(key);
+                reveal(s);
+            }
+            BCmd::Send(dir) => return send(s, dir),
+            BCmd::Collapse => {
+                let tab = format!("{}:", s.browser_tab);
+                s.browser_open.retain(|k| !k.starts_with(&tab));
+                s.browser_scroll = 0.0;
+            }
+            BCmd::Reread => s.browser_scroll = s.browser_scroll.min(view::max_scroll(s)),
+            BCmd::Rescan => {
+                if !s.hosted_rows.is_empty() {
+                    return Some("Remove plugin channels before rescanning the plugin list".into());
+                }
+                self.scan_plugins();
+                return Some(format!("Plugin list refreshed: {} instruments found", self.state.hosted_generators.len()));
+            }
+        }
+        None
+    }
+
+    /// Whether the mouse is over the docked browser.
+    pub(crate) fn over_browser(&self) -> bool {
+        let (x, y) = self.mouse;
+        self.state.show_browser && x < crate::views::BROWSER_W && y >= crate::views::WORK_Y
+    }
+
+    /// Whether typed letters belong to the browser search (the typing keyboard leaves them alone).
+    pub(crate) fn browser_takes_typing(&self) -> bool {
+        self.state.browser_search_focus || (view::opt(&self.state, view::OPT_TYPE) && self.over_browser())
+    }
+
+    /// Browser keys (spec §4, §5); returns whether the key was used.
+    pub(crate) fn browser_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let shift = self.shift;
+        let focus = self.state.browser_search_focus;
+        let over = self.over_browser() || focus;
+        let cmd = match key {
+            Key::Named(NamedKey::F2) if !self.state.browser_search.is_empty() => Some(BCmd::Find(-1)),
+            Key::Named(NamedKey::F3) if !self.state.browser_search.is_empty() => Some(BCmd::Find(1)),
+            Key::Named(NamedKey::ArrowUp) if over && ctrl => Some(BCmd::Collapse),
+            Key::Named(NamedKey::ArrowUp) if over && shift => Some(BCmd::Send(-1)),
+            Key::Named(NamedKey::ArrowDown) if over && shift => Some(BCmd::Send(1)),
+            Key::Character(c) if over && ctrl && c.eq_ignore_ascii_case("r") => Some(BCmd::Reread),
+            _ => None,
+        };
+        if let Some(c) = cmd {
+            if let Some(m) = self.browser_cmd(c) {
+                self.state.message = Some(m);
+            }
+            return true;
+        }
+        let s = &mut self.state;
+        if focus {
+            match key {
+                Key::Named(NamedKey::Escape) => {
+                    s.browser_search.clear();
+                    s.browser_search_focus = false;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(m) = find(s, 1) {
+                        s.message = Some(m);
+                    }
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    s.browser_search.pop();
+                }
+                Key::Named(NamedKey::Space) => s.browser_search.push(' '),
+                Key::Character(c) if !ctrl && !alt => s.browser_search.push_str(c),
+                _ => return false,
+            }
+            s.browser_scroll = 0.0;
+            self.invalidate();
+            return true;
+        }
+        // "Type to filter": letters typed over the browser start a search.
+        if let Key::Character(c) = key {
+            if !ctrl && !alt && view::opt(s, view::OPT_TYPE) && self.over_browser() {
+                let s = &mut self.state;
+                s.browser_search_focus = true;
+                s.browser_search.push_str(c);
+                s.browser_scroll = 0.0;
+                self.invalidate();
+                return true;
+            }
+        }
+        false
     }
 
     /// Wheel over the browser list.
@@ -152,4 +267,129 @@ impl App {
             Item::None => {}
         }
     }
+}
+
+/// Options-menu commands (spec §4).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BCmd {
+    /// Find previous (-1) / next (1).
+    Find(isize),
+    Toggle(&'static str),
+    /// Navigation history back (-1) / forward (1).
+    History(isize),
+    /// Send previous (-1) / next (1) sample to the selected channel.
+    Send(isize),
+    Collapse,
+    Reread,
+    Rescan,
+}
+
+/// The browser options menu, from the FL screenshot (spec §4).
+pub fn options_menu(s: &crate::app::State) -> Vec<PItem> {
+    let b = |label: &'static str, c: BCmd| PItem::new(label, Cmd::Browser(c));
+    let t = |label: &'static str, k: &'static str| b(label, BCmd::Toggle(k)).mark(Mark::Check(view::opt(s, k)));
+    let searching = !s.browser_search.is_empty();
+    let find = |label, key, dir| {
+        let it = b(label, BCmd::Find(dir)).key(key);
+        if searching { it } else { it.off() }
+    };
+    vec![
+        PItem::head("Search"),
+        find("Find previous", "F2", -1),
+        find("Find next", "F3", 1),
+        PItem::sep(),
+        t("Show parent folders in search results", view::OPT_PARENTS),
+        t("Expand folders", view::OPT_EXPAND),
+        t("Search for folders", view::OPT_FOLDERS),
+        t("Search box on top", view::OPT_TOP),
+        t("Type to filter", view::OPT_TYPE),
+        t("Load plugin tags", view::OPT_TAGS),
+        t("Enable indexing", view::OPT_INDEX),
+        t("Re-index changed folders on startup", view::OPT_REINDEX),
+        PItem::head("Navigation history"),
+        b("Previous", BCmd::History(-1)),
+        b("Next", BCmd::History(1)),
+        PItem::head("Actions"),
+        b("Send previous to selected channel", BCmd::Send(-1)).key("Shift+Up"),
+        b("Send next to selected channel", BCmd::Send(1)).key("Shift+Down"),
+        PItem::head("View"),
+        t("Auto-hide", view::OPT_AUTOHIDE),
+        t("Hide while dragging (when detached)", view::OPT_HIDEDRAG),
+        t("Auto contrast text", view::OPT_CONTRAST),
+        PItem::sub("Show icons and text on tabs", vec![PItem::not_yet("Contents not captured yet")]),
+        t("Full sample preview", view::OPT_PREVIEW),
+        PItem::head("Structure"),
+        b("Collapse structure", BCmd::Collapse).key("Ctrl+Up"),
+        b("Reread structure", BCmd::Reread).key("Ctrl+R"),
+        PItem::head("Content"),
+        PItem::not_yet("Configure extra folders"),
+        b("Refresh plugin list (fast scan)", BCmd::Rescan),
+    ]
+}
+
+/// Select a row and record it in the navigation history (spec §4).
+fn select(s: &mut crate::app::State, key: &str) {
+    s.browser_sel = Some(key.to_string());
+    if s.browser_hist.get(s.browser_hist_pos).map(String::as_str) != Some(key) {
+        let keep = if s.browser_hist.is_empty() { 0 } else { s.browser_hist_pos + 1 };
+        s.browser_hist.truncate(keep);
+        s.browser_hist.push(key.to_string());
+        s.browser_hist_pos = s.browser_hist.len() - 1;
+    }
+}
+
+/// Scroll the selected row into view.
+fn reveal(s: &mut crate::app::State) {
+    let rows = view::rows(s);
+    let Some(i) = rows.iter().position(|r| Some(&r.key) == s.browser_sel.as_ref()) else { return };
+    let y = i as f32 * view::ROW_H;
+    let h = view::list_h(s);
+    if y < s.browser_scroll {
+        s.browser_scroll = y;
+    } else if y + view::ROW_H > s.browser_scroll + h {
+        s.browser_scroll = y + view::ROW_H - h;
+    }
+    s.browser_scroll = s.browser_scroll.clamp(0.0, view::max_scroll(s));
+}
+
+/// Index of the next row after the selection (wrapping) for which `ok` holds.
+fn step(s: &crate::app::State, rows: &[view::Row], dir: isize, ok: impl Fn(&view::Row) -> bool) -> Option<usize> {
+    let n = rows.len() as isize;
+    let cur = rows.iter().position(|r| Some(&r.key) == s.browser_sel.as_ref()).map_or(if dir > 0 { -1 } else { n }, |i| i as isize);
+    (1..=n).map(|k| (cur + dir * k).rem_euclid(n.max(1)) as usize).find(|&i| ok(&rows[i]))
+}
+
+/// Find previous / next match of the search text.
+fn find(s: &mut crate::app::State, dir: isize) -> Option<String> {
+    let q = s.browser_search.to_lowercase();
+    if q.is_empty() {
+        return None;
+    }
+    let rows = view::rows(s);
+    let Some(i) = step(s, &rows, dir, |r| view::matches(s, r, &q)) else {
+        return Some(format!("\"{}\" not found", s.browser_search));
+    };
+    let key = rows[i].key.clone();
+    select(s, &key);
+    reveal(s);
+    None
+}
+
+/// Send the previous / next sample row to the selected channel.
+fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
+    let rows = view::rows(s);
+    let Some(i) = step(s, &rows, dir, |r| matches!(r.item, Item::Sample(_))) else {
+        return Some("No samples in the browser to send".into());
+    };
+    let Item::Sample(path) = rows[i].item.clone() else { return None };
+    let key = rows[i].key.clone();
+    select(s, &key);
+    reveal(s);
+    let Some(ch) = s.project.channels.get_mut(s.selected_channel) else { return None };
+    if ch.kind != ChannelKind::Sampler {
+        return Some("The selected channel is not a sampler".into());
+    }
+    ch.sample_path = Some(path);
+    s.piano.dirty = true;
+    Some(format!("Sent {} to the selected channel", rows[i].label))
 }

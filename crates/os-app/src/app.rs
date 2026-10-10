@@ -144,6 +144,10 @@ pub enum Action {
     BrowserList,
     /// Title-bar up arrow: close every node of the tab.
     BrowserCollapse,
+    /// Title-bar ▸: the browser options menu (spec: ui/browser.md §4).
+    BrowserMenu,
+    /// The search field (focus it, §5).
+    BrowserSearch,
     PlaylistArea,
     MixerArea,
     RackArea,
@@ -399,6 +403,14 @@ pub struct State {
     pub browser_scroll: f32,
     pub browser_sel: Option<String>,
     pub browser_drag: Option<(String, f32, f32)>,
+    /// Search text and whether the search box has keyboard focus (spec: ui/browser.md §5).
+    pub browser_search: String,
+    pub browser_search_focus: bool,
+    /// Options-menu toggles that are on (`views::browser::OPT_*`).
+    pub browser_opts: std::collections::HashSet<&'static str>,
+    /// Navigation history of selected row keys and the position in it.
+    pub browser_hist: Vec<String>,
+    pub browser_hist_pos: usize,
     pub tempo: f64,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
@@ -558,6 +570,11 @@ impl App {
                 browser_scroll: 0.0,
                 browser_sel: None,
                 browser_drag: None,
+                browser_search: String::new(),
+                browser_search_focus: false,
+                browser_opts: views::browser::DEFAULT_OPTS.iter().copied().collect(),
+                browser_hist: Vec::new(),
+                browser_hist_pos: 0,
                 tempo: 130.0,
                 message: None,
                 monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
@@ -1275,6 +1292,10 @@ impl App {
         if self.state.playlist.edit.is_some() {
             crate::playlist::commit_edit(&mut self.state);
         }
+        // Clicking anywhere but the search field leaves it (spec: ui/browser.md §5).
+        if action != Some(Action::BrowserSearch) {
+            self.state.browser_search_focus = false;
+        }
         if self.state.lane_menu && !matches!(action, Some(Action::PianoLanePick(_))) {
             self.state.lane_menu = false;
             return;
@@ -1945,6 +1966,9 @@ impl App {
     pub fn key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) {
         self.invalidate();
         use winit::keyboard::{Key, NamedKey};
+        if self.browser_key(key, ctrl, alt) {
+            return;
+        }
         // The playlist's editing keys when it is in front (spec: ui/playlist.md §5).
         if self.pl_focus() && crate::playlist::key(self, key, ctrl, alt) {
             return;
@@ -2069,7 +2093,7 @@ impl App {
     /// skips the normal shortcut handling. Spec: ui/typing-keyboard.md.
     pub fn typing_key(&mut self, code: KeyCode, pressed: bool, ctrl: bool, alt: bool) -> bool {
         // A playlist text box (track / marker name, point value) takes the letters.
-        if pressed && self.state.playlist.edit.is_some() {
+        if pressed && (self.state.playlist.edit.is_some() || self.browser_takes_typing()) {
             return false;
         }
         if !pressed {
@@ -2650,7 +2674,7 @@ impl App {
                 }
             }
             Action::CloseWin(w) => s.hide(w),
-            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse => {}
+            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserMenu | Action::BrowserSearch => {}
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
             Action::PlTool(_)
             | Action::PlSnap
@@ -3165,6 +3189,68 @@ mod tests {
         app.mouse_move(100.0, 300.0);
         app.wheel(0.0, -5.0, false, false);
         assert_eq!(app.state.browser_scroll, 0.0);
+    }
+
+    /// Browser options menu and search (spec: ui/browser.md §4, §5).
+    #[test]
+    fn browser_menu_and_search() {
+        use crate::views::browser::{rows, Item};
+        use winit::keyboard::{Key, NamedKey, SmolStr};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = default_project();
+        app.state.project.patterns.push(os_model::Pattern { number: 2, name: Some("Kick + Clap".into()), ..Default::default() });
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        // The ▸ opens the menu; its items follow the screenshot.
+        let r0 = hit_rect(&app, &Action::BrowserMenu);
+        click(&mut app, &mut c, r0);
+        let labels: Vec<String> = app.state.playlist.popup.as_ref().expect("menu").items.iter().map(|i| i.label.to_string()).collect();
+        assert_eq!(labels[0], "Search");
+        assert!(labels.iter().any(|l| l == "Refresh plugin list (fast scan)"));
+        // Toggle "Show parent folders in search results".
+        let i = labels.iter().position(|l| l == "Show parent folders in search results").unwrap();
+        let r0 = hit_rect(&app, &Action::PlPopup(i));
+        click(&mut app, &mut c, r0);
+        assert!(app.state.playlist.popup.is_none());
+        assert!(crate::views::browser::opt(&app.state, "parents"));
+        // Click the search box and type: the whole tree is searched, closed nodes included.
+        let r0 = hit_rect(&app, &Action::BrowserSearch);
+        click(&mut app, &mut c, r0);
+        assert!(app.state.browser_search_focus);
+        for ch in ["k", "i", "c", "k"] {
+            app.key(&Key::Character(SmolStr::new(ch)), false, false);
+        }
+        assert_eq!(app.state.browser_search, "kick");
+        let r = rows(&app.state);
+        // Parents kept: Current project > Patterns > Kick + Clap, and Generators > Kick.
+        assert_eq!(r[0].label, "Current project");
+        assert!(r.iter().any(|r| r.item == Item::Pattern(2)));
+        assert!(r.iter().any(|r| r.label == "Kick" && r.depth == 2));
+        // Find next selects the first match, then the second.
+        app.key(&Key::Named(NamedKey::F3), false, false);
+        let first = app.state.browser_sel.clone().unwrap();
+        app.key(&Key::Named(NamedKey::F3), false, false);
+        let second = app.state.browser_sel.clone().unwrap();
+        assert_ne!(second, first);
+        app.key(&Key::Named(NamedKey::F2), false, false);
+        assert_eq!(app.state.browser_sel.clone().unwrap(), first);
+        // Parents off: matches listed flat.
+        app.state.browser_opts.remove("parents");
+        assert!(rows(&app.state).iter().all(|r| r.depth == 0 && r.label.to_lowercase().contains("kick")));
+        // Navigation history: back = the second match (first, second, first), forward = first again.
+        app.browser_cmd(crate::browser::BCmd::History(-1));
+        assert_eq!(app.state.browser_sel.clone().unwrap(), second);
+        app.browser_cmd(crate::browser::BCmd::History(1));
+        assert_eq!(app.state.browser_sel.clone().unwrap(), first);
+        // Esc clears the search and leaves the box.
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        assert!(app.state.browser_search.is_empty() && !app.state.browser_search_focus);
+        assert_eq!(rows(&app.state).len(), 26);
+        // Search box on top moves the list down.
+        app.browser_cmd(crate::browser::BCmd::Toggle("top"));
+        frame(&mut app, &mut c, None);
+        assert!(hit_rect(&app, &Action::BrowserSearch).y < 200.0);
     }
 
     /// Channel rack (spec: ui/channel-rack.md §5): stacking with other windows, name button opens

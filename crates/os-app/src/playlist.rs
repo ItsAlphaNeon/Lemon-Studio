@@ -248,6 +248,8 @@ pub enum Cmd {
     /// "Create automation clip" on a control: target, name, current value 0..1.
     CreateAutomation(u32, String, f64),
     ResetEmptyTracks,
+    /// Browser options menu (spec: ui/browser.md §4).
+    Browser(crate::browser::BCmd),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1983,6 +1985,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     app.state.playlist.popup = None;
     // Commands that need the whole app.
     match cmd {
+        Cmd::Browser(b) => return app.browser_cmd(b),
         Cmd::Consolidate => {
             let m = consolidate(app);
             app.invalidate();
@@ -2005,7 +2008,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let s = &mut app.state;
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let msg = match cmd {
-        Cmd::Nothing => None,
+        Cmd::Nothing | Cmd::Browser(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

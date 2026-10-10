@@ -636,6 +636,11 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
                 ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, t.menu_pop_text);
                 ui.c.line(mx - 1.0, my + 3.0, mx + 4.0, my - 3.0, 1.5, t.menu_pop_text);
             }
+            // Unticked checks show a faint tick (FL browser options menu, spec ui/browser.md §4).
+            Mark::Check(false) => {
+                ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, t.menu_pop_dim.shade(-0.15));
+                ui.c.line(mx - 1.0, my + 3.0, mx + 4.0, my - 3.0, 1.5, t.menu_pop_dim.shade(-0.15));
+            }
             Mark::Radio(true) => ui.c.fill_circle(mx, my, 3.0, t.menu_pop_text),
             Mark::Radio(false) => ui.c.stroke_circle(mx, my, 3.5, 1.0, t.menu_pop_dim),
             _ => {}

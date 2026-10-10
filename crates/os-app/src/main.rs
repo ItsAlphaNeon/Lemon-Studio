@@ -530,7 +530,7 @@ impl ApplicationHandler for Shell {
     }
 }
 
-/// `openstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [project.flp]`:
+/// `openstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-menu] [--browser-search TEXT] [project.flp]`:
 /// paint one 1920×1080 frame offscreen (used to compare with reference measurements).
 fn screenshot(args: &[String]) {
     let mut out = None;
@@ -540,6 +540,8 @@ fn screenshot(args: &[String]) {
     let mut rack_w: Option<f32> = None;
     let mut rack_roll = false;
     let mut browser_tab: Option<usize> = None;
+    let mut browser_menu = false;
+    let mut browser_search: Option<String> = None;
     let mut menu: Option<usize> = None;
     let mut picker: Option<(bool, usize)> = None;
     let mut picker_open = false;
@@ -559,6 +561,8 @@ fn screenshot(args: &[String]) {
             "--no-rack" => rack = false,
             "--no-browser" => browser = false,
             "--rack-roll" => rack_roll = true,
+            "--browser-menu" => browser_menu = true,
+            "--browser-search" => browser_search = it.next().cloned(),
             "--browser-tab" => browser_tab = it.next().and_then(|v| v.parse().ok()),
             "--picker" => {
                 picker_open = true;
@@ -602,6 +606,13 @@ fn screenshot(args: &[String]) {
     app.state.show_browser = browser;
     if let Some(t) = browser_tab {
         app.state.browser_tab = t.min(4);
+    }
+    if let Some(q) = browser_search {
+        app.state.browser_search = q;
+        app.state.browser_search_focus = true;
+    }
+    if browser_menu {
+        app.act(app::Action::BrowserMenu);
     }
     app.state.z = match view.as_str() {
         "mixer" => vec![app::Win::Mixer],
