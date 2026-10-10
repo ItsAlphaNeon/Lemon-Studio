@@ -31,7 +31,7 @@ const TOOL_X: [f32; 9] = [66.0, 86.0, 108.0, 129.0, 150.0, 171.0, 192.0, 213.0, 
 const TOOL_ICONS: [Icon; 9] =
     [Icon::Pencil, Icon::Brush, Icon::Delete, Icon::Mute, Icon::Slip, Icon::Slice, Icon::Select, Icon::Zoom, Icon::Speaker];
 /// Picker list row pitch (§1).
-const PICK_ROW: f32 = 31.0;
+const PICK_ROW: f32 = 31.0; // pitch of the measured 30 px rows
 
 pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
@@ -185,10 +185,98 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         let on = s.playlist.picker == kind;
         icons::draw(ui.c, icon, Rect::new(cx - 10.0, p.y + 15.0, 20.0, 20.0), if on { t.glyph } else if hov { t.text } else { t.text_faint });
     }
-    let items: Vec<ClipSource> = match s.playlist.picker {
+    let items: Vec<ClipSource> = pick_items(s);
+    let cur = pl::source(s);
+    // spec: ui/playlist.md §1a (picker panel, measured from FL): framed list + 15 px scroll bar, 19 px footer with "+".
+    let bottom = p.bottom() - FOOT_H;
+    let bx = Rect::span(p.x, p.right() - 6.0, p.y + 44.0, bottom);
+    if bx.h < 8.0 {
+        return;
+    }
+    ui.c.fill_rect(bx, Color::rgb(0x131718));
+    let list = Rect::span(bx.x + 1.0, bx.right() - 16.0, bx.y + 1.0, bx.bottom() - 1.0);
+    ui.c.fill_rect(list, Color::rgb(0x202527));
+    ui.hit(list, Action::PlPickList, "");
+    let total = items.len() as f32 * PICK_ROW + 4.0;
+    let scroll = s.playlist.pick_scroll.min((total - list.h).max(0.0)).max(0.0);
+    ui.c.push_clip(list);
+    let mut y = list.y + 3.0 - scroll;
+    for src in items {
+        if y > list.bottom() {
+            break;
+        }
+        if y + PICK_ROW < list.y {
+            y += PICK_ROW;
+            continue;
+        }
+        let row = Rect::new(list.x + 2.0, y, list.w - 4.0, PICK_ROW - 1.0);
+        let hov = ui.hit(row, Action::PlPick(src), "Select clip source (right-click a pattern to rename)");
+        let filled = pick_used(s, src);
+        let k = if hov { 0.05 } else { 0.0 };
+        if filled {
+            // Used source: grey button with a faint preview of its contents (pl_asher.png).
+            ui.c.fill_rect(row, Color::rgb(0x2f3539));
+            ui.c.fill_rect(row.inset(1.0), Color::rgb(0x464e53).shade(k));
+            preview(ui, s, src, row.inset(3.0));
+        } else {
+            // Empty pattern: dark face (owner's FL screenshot).
+            ui.c.fill_rect_gradient(row, Color::rgb(0x2a2d2e).shade(k), Color::rgb(0x232627).shade(k), 0.0);
+        }
+        if src == cur && !filled {
+            ui.c.stroke_rrect(row.inset(0.5), 0.0, 1.0, Color::rgb(0xa8e44a));
+        }
+        let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
+        if matches!(src, ClipSource::Pattern(_)) && !filled {
+            ui.c.fill_circle(row.x + 7.5, row.cy(), 1.6, Color::rgb(0xb9bcbd));
+        } else {
+            for k in 0..3 {
+                ui.c.fill_rect(Rect::new(row.x + 4.0, row.cy() - 4.0 + 3.0 * k as f32, 6.0, 1.0), ic);
+            }
+        }
+        ui.c.text_clip(Font::new(14), row.x + 15.0, row.cy() - 8.0, row.w - 18.0, ic, &pl::source_name(s, src));
+        if src == cur {
+            let ax = list.x - 1.0;
+            ui.c.fill_polygon(&[(ax, row.cy() - 5.0), (ax + 6.0, row.cy()), (ax, row.cy() + 5.0)], Color::rgb(0xe64363));
+        }
+        y += PICK_ROW;
+    }
+    ui.c.pop_clip();
+    // Scroll bar: bordered dithered track, raised thumb with a dark grip.
+    let track = Rect::span(list.right(), bx.right() - 1.0, list.y, list.bottom());
+    ui.c.fill_rect(Rect::new(track.x, track.y, 1.0, track.h), Color::rgb(0x131718));
+    let tr = Rect::span(track.x + 1.0, track.right(), track.y, track.bottom());
+    ui.c.fill_rect(tr, Color::rgb(0x212426));
+    let mut yy = tr.y;
+    while yy < tr.bottom() {
+        ui.c.fill_rect(Rect::new(tr.x, yy, tr.w, 1.0), Color::rgb(0x23272a));
+        yy += 2.0;
+    }
+    let max = (total - list.h).max(0.0);
+    let thumb = if max > 0.0 { (list.h / total * tr.h).max(14.0) } else { 14.0 };
+    let off = if max > 0.0 { scroll / max * (tr.h - thumb) } else { 0.0 };
+    let hov = ui.hit(tr, Action::Scrollbar(crate::app::Scroll::PlPick), "Drag to scroll");
+    let th = Rect::new(tr.x, tr.y + off, tr.w, thumb);
+    ui.c.fill_rect(th, Color::rgb(0x36383a));
+    ui.c.fill_rect(th.inset(1.0), Color::rgb(0x2c2e30).shade(if hov { 0.06 } else { 0.0 }));
+    ui.c.fill_rect(Rect::new(th.cx() - 1.0, th.cy() - 2.5, 2.0, 5.0), Color::rgb(0x000000));
+    ui.bars.push(crate::app::Bar { target: crate::app::Scroll::PlPick, track: tr, vertical: true, max, view: list.h, thumb });
+    // Footer "+": new pattern (find first empty).
+    let foot = Rect::new(p.x, bottom, bx.w, FOOT_H);
+    let hov = ui.hit(foot, Action::PlPickAdd, "New pattern (find first empty)");
+    let pc = if hov { Color::rgb(0xa0a4a6) } else { Color::rgb(0x545657) };
+    let (cx, cy) = ((list.x + list.right()) / 2.0, foot.y + FOOT_H / 2.0);
+    ui.c.fill_rect(Rect::new(cx - 3.5, cy - 0.5, 8.0, 2.0), pc);
+    ui.c.fill_rect(Rect::new(cx - 0.5, cy - 3.5, 2.0, 8.0), pc);
+}
+
+const FOOT_H: f32 = 19.0;
+
+/// Sources listed in the picker: used patterns only (scrolling the selector must not add rows).
+pub fn pick_items(s: &State) -> Vec<ClipSource> {
+    match s.playlist.picker {
         PickKind::Pattern => {
-            let max = s.project.patterns.iter().map(|p| p.number).max().unwrap_or(1).max(s.pattern).max(1);
-            (1..=max).map(ClipSource::Pattern).collect()
+            let v = crate::patterns::listed(s);
+            if v.is_empty() { vec![ClipSource::Pattern(1)] } else { v.into_iter().map(ClipSource::Pattern).collect() }
         }
         PickKind::Audio => s
             .project
@@ -198,37 +286,31 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             .map(|c| ClipSource::Channel(c.index))
             .collect(),
         PickKind::Automation => s.project.automations.iter().map(|a| ClipSource::Channel(a.channel)).collect(),
-    };
-    let cur = pl::source(s);
-    let list = Rect::new(p.x, p.y + 44.0, p.w, (p.h - 64.0).max(0.0));
-    ui.c.push_clip(list);
-    let mut y = list.y;
-    for src in items {
-        if y > list.bottom() {
-            break;
-        }
-        // Item buttons as measured (pl_asher.png): 134 x 26, border #353c41, face #4b5358 -> #424b50.
-        let row = Rect::new(p.x + 3.0, y + 1.0, 134.0, PICK_ROW - 5.0);
-        let hov = ui.hit(row, Action::PlPick(src), "Select clip source (right-click a pattern to rename)");
-        ui.c.fill_rect(row, Color::rgb(CLIP_BORDER));
-        let (top, bottom) = (Color::rgb(0x4b5358), Color::rgb(0x424b50));
-        let k = if hov { 0.06 } else { 0.0 };
-        ui.c.fill_rect_gradient(row.inset(1.0), top.shade(k), bottom.shade(k), 0.0);
-        if let Some(c) = pl::source_color(s, src) {
-            ui.c.fill_rect(Rect::new(row.right() - 5.0, row.y + 1.0, 4.0, row.h - 2.0), rgb(c));
-        }
-        if src == cur {
-            ui.c.fill_polygon(&[(p.x, row.y + 7.0), (p.x + 6.0, row.cy()), (p.x, row.bottom() - 7.0)], t.record);
-        }
-        let ic = Color::rgb(TITLE_TEXT);
-        for k in 0..3 {
-            ui.c.fill_rect(Rect::new(row.x + 4.0, row.y + 9.0 + 3.0 * k as f32, 6.0, 1.0), ic);
-        }
-        ui.c.text_clip(Font::new(14), row.x + 13.0, row.y + 4.0, row.w - 20.0, ic, &pl::source_name(s, src));
-        y += PICK_ROW;
     }
-    ui.c.pop_clip();
-    icons::draw(ui.c, Icon::Plus, Rect::new(p.cx() - 8.0, p.bottom() - 18.0, 16.0, 16.0), t.text_dim);
+}
+
+fn pick_used(s: &State, src: ClipSource) -> bool {
+    match src {
+        ClipSource::Pattern(n) => s.project.pattern(n).is_some_and(|p| !p.notes.is_empty()),
+        _ => true,
+    }
+}
+
+/// Faint note preview inside a picker button.
+fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect) {
+    let ClipSource::Pattern(n) = src else { return };
+    let Some(p) = s.project.pattern(n) else { return };
+    let len = crate::piano::pattern_length(s, &p.notes).max(1) as f32;
+    let lo = p.notes.iter().map(|n| n.key).min().unwrap_or(0);
+    let hi = p.notes.iter().map(|n| n.key).max().unwrap_or(0);
+    let span = f32::from(hi - lo + 1).max(6.0);
+    let c = Color::rgb(0x5a6268);
+    for note in &p.notes {
+        let x = r.x + note.position as f32 / len * r.w;
+        let w = (note.length.max(s.project.ppq as u32 / 4) as f32 / len * r.w).max(2.0);
+        let y = r.bottom() - 2.0 - f32::from(note.key - lo + 1) / span * (r.h - 2.0);
+        ui.c.fill_rect(Rect::new(x, y, w.min(r.right() - x).max(0.0), 2.0), c);
+    }
 }
 
 /// Miniature of the arrangement inside the overview bar (§1).

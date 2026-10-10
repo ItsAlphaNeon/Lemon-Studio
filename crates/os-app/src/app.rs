@@ -181,6 +181,9 @@ pub enum Action {
     PlLed(u16),
     PlPickTab(crate::playlist::PickKind),
     PlPick(os_model::ClipSource),
+    /// Picker list background / footer "+".
+    PlPickList,
+    PlPickAdd,
     PlPopup(usize),
     PlPopupSub(usize),
     /// Pattern name box, suggestions, swatches, delete confirmation (spec: ui/pattern-menu.md).
@@ -199,6 +202,8 @@ pub enum Scroll {
     MixerX,
     RackX,
     RackY,
+    /// Playlist picker list.
+    PlPick,
 }
 
 /// A scroll bar painted this frame.
@@ -1401,6 +1406,7 @@ impl App {
             Scroll::MixerX => s.mixer_scroll,
             Scroll::RackX => s.rack_scroll_x,
             Scroll::RackY => s.rack_scroll,
+            Scroll::PlPick => s.playlist.pick_scroll,
         }
     }
 
@@ -1419,6 +1425,7 @@ impl App {
             Scroll::MixerX => s.mixer_scroll = v,
             Scroll::RackX => s.rack_scroll_x = v,
             Scroll::RackY => s.rack_scroll = v,
+            Scroll::PlPick => s.playlist.pick_scroll = v,
         }
     }
 
@@ -1928,6 +1935,10 @@ impl App {
         let area = self.top_hit(x, y).map(|h| h.action.clone());
         if matches!(area, Some(Action::BrowserList | Action::BrowserRow(_) | Action::BrowserTab(_))) {
             return self.browser_wheel(dy + dx);
+        }
+        if matches!(area, Some(Action::PlPick(_) | Action::PlPickList)) {
+            self.scroll_set(Scroll::PlPick, self.scroll_get(Scroll::PlPick) - (dy + dx) * 31.0);
+            return;
         }
         if matches!(area, Some(Action::PatternNext)) {
             let d = if dy + dx > 0.0 { 1 } else { -1 };
@@ -2582,6 +2593,12 @@ impl App {
                 crate::patterns::run(s, crate::patterns::Cmd::FindFirst, crate::patterns::PLUS_BOX_AT);
             }
             Action::Pat(h) => crate::patterns::hit(s, h),
+            Action::PlPickList => {}
+            Action::PlPickAdd => {
+                let at = crate::patterns::box_at_mouse(self.mouse);
+                crate::patterns::run(s, crate::patterns::Cmd::FindFirst, at);
+                s.playlist.source = None;
+            }
             Action::MixerSelect(t) => s.selected_mixer = t,
             Action::Fader(t) => {
                 s.selected_mixer = t;

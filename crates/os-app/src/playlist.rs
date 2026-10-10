@@ -346,6 +346,8 @@ pub struct PlaylistState {
     /// The current clip source (what Draw / Paint place); `None` = the current pattern.
     pub source: Option<ClipSource>,
     pub picker: PickKind,
+    /// Picker list scroll, pixels.
+    pub pick_scroll: f32,
     /// Selected clips (indices into the first arrangement's clips).
     pub sel: Vec<usize>,
     /// Selected track (Ctrl+Up / Down, header click).
@@ -379,6 +381,7 @@ impl Default for PlaylistState {
             snap: Snap::Line,
             source: None,
             picker: PickKind::Pattern,
+            pick_scroll: 0.0,
             sel: Vec::new(),
             track: 0,
             pos: 0,

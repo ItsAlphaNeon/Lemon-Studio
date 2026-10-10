@@ -521,6 +521,21 @@ mod tests {
     }
 
     #[test]
+    fn stepping_the_selector_adds_no_picker_rows() {
+        let mut app = app();
+        let s = &mut app.state;
+        let before = crate::views::playlist::pick_items(s);
+        s.pattern = 40;
+        assert_eq!(crate::views::playlist::pick_items(s), before);
+        assert_eq!(s.project.patterns.len(), 4);
+        // The footer "+" = find first empty, which lists the pattern once it is named.
+        run(s, Cmd::FindFirst, (0.0, 0.0));
+        key(s, &winit::keyboard::Key::Character("Bass".into()), false);
+        accept(s);
+        assert_eq!(crate::views::playlist::pick_items(s).len(), before.len() + 1);
+    }
+
+    #[test]
     fn transpose_and_suggestions() {
         let mut app = app();
         let s = &mut app.state;
