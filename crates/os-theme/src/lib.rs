@@ -329,6 +329,23 @@ impl Palette {
     }
 }
 
+static CURRENT: std::sync::RwLock<Option<std::sync::Arc<Palette>>> = std::sync::RwLock::new(None);
+
+/// The palette in use by this process (set by the host when a theme loads; default palette until then).
+/// Lets separately painted windows (plugin frames, plugin editors in-process) follow the app theme.
+pub fn current() -> std::sync::Arc<Palette> {
+    if let Some(p) = CURRENT.read().ok().and_then(|g| g.clone()) {
+        return p;
+    }
+    std::sync::Arc::new(Palette::default())
+}
+
+pub fn set_current(p: &Palette) {
+    if let Ok(mut g) = CURRENT.write() {
+        *g = Some(std::sync::Arc::new(p.clone()));
+    }
+}
+
 /// A loaded theme: the base palette with the global adjustment applied.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {

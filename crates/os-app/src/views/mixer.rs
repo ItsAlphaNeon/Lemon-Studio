@@ -315,38 +315,14 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
 /// The dark round mixer knob: a shaded ball inside a darker halo.
 /// `arc`: Some(true) draws the red value arc from the top (pan style), Some(false) from the start.
 fn mixer_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, halo: f32, value: f32, arc: Option<bool>) {
-    ui.c.fill_circle(cx, cy, halo, ui.t.s(0x1b1d20));
-    ui.c.stroke_circle(cx, cy, halo - 0.5, 1.0, ui.t.s(0x16181a));
-    ui.c.fill_circle(cx, cy, r + 0.6, ui.t.s(0x16181b));
-    ui.c.fill_rect_gradient(Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), ui.t.s(0x3c3e41), ui.t.s(0x17191c), r);
-    ui.c.arc(cx, cy, r - 0.6, 1.15 * PI, 0.7 * PI, 1.2, ui.t.s(0x55575a));
-    // Value arc around the ball (spec: ui/knobs.md): sweeps 270 degrees, centre value = straight up.
-    if let Some(center) = arc {
-        let start = 0.75 * PI;
-        let a1 = start + 1.5 * PI * value.clamp(0.0, 1.0);
-        let a0 = if center { start + 0.75 * PI } else { start };
-        if (a1 - a0).abs() > 0.02 {
-            ui.c.arc(cx, cy, halo - 2.0, a0.min(a1), (a1 - a0).abs(), (halo * 0.22).max(2.0), Color::rgb(0xce2900));
-        }
-    }
+    let hov = ui.hovering(Rect::new(cx - halo, cy - halo, 2.0 * halo, 2.0 * halo));
+    let look = os_ui::kit::KnobLook::Mixer { halo, arc: arc.is_some() };
+    os_ui::kit::knob(ui.c, ui.t, cx, cy, r, value, arc.unwrap_or(false), look, os_ui::kit::State::hover(hov));
 }
 
 /// Fader handle centred on (cx, cy): 14 × 23, with the long 0 dB line through its middle.
 fn fader_handle(ui: &mut Ui, cx: f32, cy: f32, selected: bool, hov: bool) {
-    let h = Rect::new(cx - 7.0, cy - 11.0, 14.0, 23.0);
-    ui.c.fill_rrect(h.outset(1.0), 3.0, ui.t.s(0x121416));
-    let (top, mid, low) = if selected {
-        (ui.t.a(0xc8f56e), ui.t.a(0x8fd236), ui.t.a(0x3f7a10))
-    } else if hov {
-        (ui.t.s(0x7a7e81), ui.t.s(0x55595c), ui.t.s(0x2a2d30))
-    } else {
-        (ui.t.s(0x6a6e71), ui.t.s(0x46494c), ui.t.s(0x222528))
-    };
-    ui.c.fill_rect_gradient(Rect::new(h.x, h.y, h.w, 10.0), top, mid, 2.5);
-    ui.c.fill_rect_gradient(Rect::new(h.x, h.y + 10.0, h.w, 13.0), mid.shade(-0.25), low, 2.5);
-    ui.c.fill_rect(Rect::new(h.x, h.y + 8.0, h.w, 4.0), mid.shade(-0.1));
-    ui.c.fill_rect(Rect::new(cx - 15.0, cy - 0.5, 30.0, 1.0), ui.t.s(0x111315));
-    ui.c.fill_rect(Rect::new(h.x + 2.0, h.y + 16.0, h.w - 4.0, 1.0), low.shade(-0.4));
+    os_ui::kit::fader_handle(ui.c, ui.t, cx, cy, selected, os_ui::kit::State::hover(hov));
 }
 
 fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
@@ -474,10 +450,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
 
 fn combo(ui: &mut Ui, r: Rect, text: &str, action: Action, hint: &'static str) {
     let hov = ui.hit(r, action, hint);
-    ui.c.fill_rrect(r, 3.0, ui.t.s(0x161819));
-    ui.c.fill_rrect(r.inset(1.0), 2.5, if hov { ui.t.s(0x25282a) } else { ui.t.s(0x1e2022) });
-    ui.c.text_clip(Font::new(17), r.x + 5.0, r.y + (r.h - 21.0) / 2.0, r.w - 24.0, ui.t.tx(0xd4dade), text);
-    chevron(ui, r.right() - 10.0, r.cy(), true, ui.t.s(0x5d6366));
+    os_ui::kit::combo(ui.c, ui.t, r, text, Font::new(17), os_ui::kit::State::hover(hov));
 }
 
 /// Small solid chevron centred on (x, y), pointing right or left.

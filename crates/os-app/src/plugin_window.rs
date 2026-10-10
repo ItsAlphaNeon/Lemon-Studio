@@ -81,15 +81,33 @@ pub const TITLE_H: f32 = 24.0;
 pub const STRIP_H: f32 = 47.0;
 pub const BORDER: f32 = 4.0;
 
-const FRAME: Color = Color::rgb(0x25292b);
-const STRIP: Color = Color::rgb(0x1b1d1e);
-const STRIP_LINE: Color = Color::rgb(0x151718);
-const BODY: Color = Color::rgb(0x202324);
-const TEXT: Color = Color::rgb(0xd4dade);
-const GREY: Color = Color::rgb(0x8c9296);
-const ICON: Color = Color::rgb(0xd5dbdf);
-const GREEN: Color = Color::rgb(0x47f49a);
-const CAPTION: Color = Color::rgb(0x9fb4c8);
+fn c_frame() -> Color {
+    os_theme::current().s(0x25292b)
+}
+fn c_strip() -> Color {
+    os_theme::current().s(0x1b1d1e)
+}
+fn c_strip_line() -> Color {
+    os_theme::current().s(0x151718)
+}
+fn c_body() -> Color {
+    os_theme::current().s(0x202324)
+}
+fn c_text() -> Color {
+    os_theme::current().tx(0xd4dade)
+}
+fn c_grey() -> Color {
+    os_theme::current().tx(0x8c9296)
+}
+fn c_icon() -> Color {
+    os_theme::current().tx(0xd5dbdf)
+}
+fn c_green() -> Color {
+    os_theme::current().a(0x47f49a)
+}
+fn c_caption() -> Color {
+    os_theme::current().tx(0x9fb4c8)
+}
 
 /// Channel values the strip shows (pushed by the app).
 #[derive(Clone, Debug, PartialEq)]
@@ -255,66 +273,58 @@ fn icon_at(c: &mut Canvas, t: &tb::TablerIcon, cx: f32, cy: f32, size: f32, col:
 fn paint(c: &mut Canvas, st: &State) {
     let (w, h) = st.size();
     c.begin_frame(None);
-    c.clear(FRAME);
+    c.clear(c_frame());
     // Title bar.
     let (menu, gear) = top_buttons(st);
     // In the strip row the buttons are bigger and the title text starts at the left edge.
     let (isz, gsz) = if st.strip { (16.0, 18.0) } else { (14.0, 16.0) };
-    icon_at(c, &tb::CARET_RIGHT, menu.cx(), menu.cy(), isz, ICON);
-    icon_at(c, &tb::SETTINGS, gear.cx(), gear.cy(), gsz, if st.strip { GREEN } else { ICON });
+    icon_at(c, &tb::CARET_RIGHT, menu.cx(), menu.cy(), isz, c_icon());
+    icon_at(c, &tb::SETTINGS, gear.cx(), gear.cy(), gsz, if st.strip { c_green() } else { c_icon() });
     let f = Font::new(15);
     let lh = c.line_height(f);
     let ty = (12.0 - lh / 2.0).round();
     let nx = if st.strip { 9.0 } else { 36.0 };
-    let nw = c.text(f, nx, ty, TEXT, &st.info.name);
+    let nw = c.text(f, nx, ty, c_text(), &st.info.name);
     let target = format!("({})", st.info.target);
-    c.text_clip(f, nx + nw + 4.0, ty, (w - 70.0 - nx - nw).max(0.0), GREY, &target);
+    c.text_clip(f, nx + nw + 4.0, ty, (w - 70.0 - nx - nw).max(0.0), c_grey(), &target);
     let tw = c.text_width(f, &target).min((w - 70.0 - nx - nw).max(0.0));
     if !st.hint.is_empty() {
         let hx = nx + nw + 4.0 + tw + 14.0;
         let hf = Font::new(13);
         let hy = (12.0 - c.line_height(hf) / 2.0).round();
-        c.text_clip(hf, hx, hy, (w - 50.0 - hx).max(0.0), CAPTION, &st.hint);
+        c.text_clip(hf, hx, hy, (w - 50.0 - hx).max(0.0), c_caption(), &st.hint);
     }
-    icon_at(c, &tb::MINUS, w - 31.0, 12.0, 14.0, ICON);
-    icon_at(c, &tb::X, w - 14.0, 12.0, 14.0, ICON);
+    icon_at(c, &tb::MINUS, w - 31.0, 12.0, 14.0, c_icon());
+    icon_at(c, &tb::X, w - 14.0, 12.0, 14.0, c_icon());
     if st.strip {
         strip(c, st, w);
     }
     if st.misc {
         let a = Rect::new(BORDER, st.area_y(), w - 2.0 * BORDER, h - st.area_y() - BORDER);
-        c.fill_rect(a, BODY);
-        c.text_center(Font::new(16), a, GREY, "Miscellaneous functions: not available yet");
+        c.fill_rect(a, c_body());
+        c.text_center(Font::new(16), a, c_grey(), "Miscellaneous functions: not available yet");
     }
 }
 
 fn strip(c: &mut Canvas, st: &State, w: f32) {
     let dx = w - 568.0;
-    c.fill_rect(Rect::new(BORDER, 24.0, w - 2.0 * BORDER, 47.0), STRIP_LINE);
-    c.fill_rect(Rect::new(BORDER, 25.0, w - 2.0 * BORDER, 45.0), STRIP);
+    c.fill_rect(Rect::new(BORDER, 24.0, w - 2.0 * BORDER, 47.0), c_strip_line());
+    c.fill_rect(Rect::new(BORDER, 25.0, w - 2.0 * BORDER, 45.0), c_strip());
     // Page tabs, then the Misc wrench (always the last tab), then the menu arrow and gear (drawn with the title bar).
     let n = st.pages.len();
     for i in 0..=n {
         let cell = tab_rect(i);
         let active = if i == n { st.misc } else { !st.misc && st.page == i };
         if active {
-            c.fill_rect(Rect::new(cell.x, cell.y, cell.w + 1.0, cell.h), BODY);
+            c.fill_rect(Rect::new(cell.x, cell.y, cell.w + 1.0, cell.h), c_body());
         }
-        let col = if active { Color::rgb(0x49f1b1) } else { ICON };
+        let col = if active { os_theme::current().a(0x49f1b1) } else { c_icon() };
         let t = if i == n { &tb::TOOL } else { page_tabler(st.pages[i]) };
         icon_at(c, t, cell.cx() + 0.5, 47.0, 26.0, col);
     }
     // ON LED.
     let (lx, ly) = (349.0 + dx, 43.0);
-    c.fill_circle(lx, ly, 7.5, Color::rgb(0x5b5c5d));
-    c.fill_circle(lx, ly, 6.5, Color::rgb(0x2c422d));
-    if st.info.enabled {
-        c.fill_circle(lx, ly, 5.5, Color::rgb(0x417e02));
-        c.fill_circle(lx, ly, 4.6, Color::rgb(0xa5e436));
-        c.fill_circle(lx - 0.6, ly - 1.0, 2.0, Color::rgb(0xd8f5a0));
-    } else {
-        c.fill_circle(lx, ly, 5.0, Color::rgb(0x1f2a14));
-    }
+    os_ui::kit::led(c, &os_theme::current(), lx, ly, 7.5, os_ui::kit::State::NORMAL.with_on(st.info.enabled));
     caption(c, lx, "ON");
     value_box(c, Rect::new(455.0 + dx, 32.0, 43.0, 23.0), &st.info.range.to_string());
     for (k, x, cap) in [(Knob::Pan, 383.0, "PAN"), (Knob::Vol, 417.0, "VOL"), (Knob::Pitch, 455.0, "PITCH")] {
@@ -330,24 +340,24 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
 fn caption(c: &mut Canvas, cx: f32, s: &str) {
     let f = Font::condensed(9, 4).bold();
     let w = c.text_width(f, s);
-    c.text(f, (cx - w / 2.0).round(), 57.0, CAPTION, s);
+    c.text(f, (cx - w / 2.0).round(), 57.0, c_caption(), s);
 }
 
 fn knob(c: &mut Canvas, cx: f32, cy: f32, v: f32, bipolar: bool) {
     let r = 11.0;
-    c.fill_circle(cx, cy, r + 4.0, Color::rgb(0x191c1f));
-    c.fill_circle(cx, cy, r + 3.0, Color::rgb(0x23262a));
-    c.fill_circle(cx, cy, r + 1.5, Color::rgb(0x191c1f));
-    c.fill_rect_gradient(Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), Color::rgb(0x4e5154), Color::rgb(0x14171a), r);
-    c.fill_rect_gradient(Rect::new(cx - r + 1.6, cy - r + 1.2, 2.0 * r - 3.2, 2.0 * r - 3.2), Color::rgb(0x2a2d30), Color::rgb(0x1a1d20), r - 1.6);
+    c.fill_circle(cx, cy, r + 4.0, os_theme::current().s(0x191c1f));
+    c.fill_circle(cx, cy, r + 3.0, os_theme::current().s(0x23262a));
+    c.fill_circle(cx, cy, r + 1.5, os_theme::current().s(0x191c1f));
+    c.fill_rect_gradient(Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), os_theme::current().s(0x4e5154), os_theme::current().s(0x14171a), r);
+    c.fill_rect_gradient(Rect::new(cx - r + 1.6, cy - r + 1.2, 2.0 * r - 3.2, 2.0 * r - 3.2), os_theme::current().s(0x2a2d30), os_theme::current().s(0x1a1d20), r - 1.6);
     let half = 175.0 * PI / 180.0;
     let ang = |v: f32| -half + 2.0 * half * v.clamp(0.0, 1.0);
     let (a, from) = (ang(v), if bipolar { 0.0 } else { ang(0.0) });
     if (a - from).abs() > 0.01 {
         let (s, e) = if a > from { (from, a) } else { (a, from) };
-        c.arc(cx, cy, r + 2.5, s - PI / 2.0, e - s, 2.0, GREEN);
+        c.arc(cx, cy, r + 2.5, s - PI / 2.0, e - s, 2.0, c_green());
     }
-    c.fill_circle(cx + (r - 5.0) * a.sin(), cy - (r - 5.0) * a.cos(), 1.4, GREEN);
+    c.fill_circle(cx + (r - 5.0) * a.sin(), cy - (r - 5.0) * a.cos(), 1.4, c_green());
 }
 
 fn value_box(c: &mut Canvas, r: Rect, s: &str) {

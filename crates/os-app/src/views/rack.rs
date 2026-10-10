@@ -363,32 +363,19 @@ fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_st
 
 /// Row knob (§3): dark ball, r 7, light pointer from the centre to the rim.
 fn row_knob(ui: &mut Ui, cx: f32, cy: f32, value: f32) {
-    use std::f32::consts::PI;
-    ui.c.fill_circle(cx, cy, 7.5, ui.t.s(0x1e2022));
-    ui.c.fill_circle(cx, cy - 0.5, 6.5, ui.t.s(0x303234));
-    ui.c.fill_circle(cx, cy + 0.3, 5.8, ui.t.s(0x232527));
-    let a = 0.75 * PI + 1.5 * PI * value.clamp(0.0, 1.0);
-    ui.c.line(cx + 1.2 * a.cos(), cy + 1.2 * a.sin(), cx + 5.6 * a.cos(), cy + 5.6 * a.sin(), 2.0, ui.t.tx(0xadb2b6));
+    let hov = ui.hovering(Rect::new(cx - 7.5, cy - 7.5, 15.0, 15.0));
+    os_ui::kit::knob(ui.c, ui.t, cx, cy, 7.5, value, false, os_ui::kit::KnobLook::Row, os_ui::kit::State::hover(hov));
 }
 
 /// Enable LED (§3: ring r 5, green ball).
 fn rack_led(ui: &mut Ui, cx: f32, cy: f32, on: bool) {
-    ui.c.fill_circle(cx, cy, 5.0, ui.t.s(0x67696b));
-    ui.c.fill_circle(cx, cy, 4.0, ui.t.s(0x384b39));
-    if on {
-        ui.c.fill_circle(cx, cy, 3.3, ui.t.a(0x3c7605));
-        ui.c.fill_circle(cx, cy, 2.6, ui.t.a(0x97da3a));
-        ui.c.fill_circle(cx, cy + 0.5, 1.6, ui.t.a(0xb7e66e));
-        ui.c.fill_circle(cx - 0.8, cy - 1.0, 0.9, ui.t.a(0xedf7c4));
-    } else {
-        ui.c.fill_circle(cx, cy, 3.3, ui.t.s(0x1f2a14));
-    }
+    let hov = ui.hovering(Rect::new(cx - 6.0, cy - 6.0, 12.0, 12.0));
+    os_ui::kit::led(ui.c, ui.t, cx, cy, 5.0, os_ui::kit::State::hover(hov).with_on(on));
 }
 
 /// The small up/down spin mark beside a number (§3).
 fn spin_mark(ui: &mut Ui, x: f32, cy: f32, c: Color) {
-    ui.c.polyline(&[(x - 1.5, cy - 6.0), (x + 1.0, cy - 4.0), (x - 1.5, cy - 2.0)], 1.0, c);
-    ui.c.polyline(&[(x + 1.0, cy + 2.0), (x - 1.5, cy + 4.0), (x + 1.0, cy + 6.0)], 1.0, c);
+    os_ui::kit::spin_mark(ui.c, x, cy, c);
 }
 
 /// The add-channel "+" (§4); `bottom` is the window's bottom edge.

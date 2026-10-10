@@ -5,6 +5,7 @@
 // spec: ui/main-window.md §10 (typography)
 
 mod glyph;
+pub mod kit;
 pub mod tabler;
 mod text;
 

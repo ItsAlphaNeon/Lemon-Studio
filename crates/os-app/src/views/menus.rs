@@ -71,6 +71,10 @@ pub const FILE_OPEN: usize = 2;
 pub const FILE_SAVE: usize = 4;
 pub const FILE_SAVE_AS: usize = 5;
 pub const FILE_EXIT: usize = 16;
+/// OPTIONS > Theme settings (flat index: header counts).
+pub const OPT_THEME: usize = 5;
+/// Index of the OPTIONS menu.
+pub const OPTIONS_MENU: usize = 5;
 /// `MenuItem(PATTERNS, PATTERN_PICK + n)` selects pattern `n` (the pattern list column).
 pub const PATTERNS: usize = 3;
 pub const PATTERN_PICK: usize = 1000;
@@ -457,5 +461,7 @@ mod tests {
         assert_eq!(l(FILE_EXIT), Some("Exit"));
         assert_eq!(MENUS[PATTERNS].title, "PATTERNS");
         assert_eq!(MENUS[VIEW].title, "VIEW");
+        assert_eq!(MENUS[OPTIONS_MENU].title, "OPTIONS");
+        assert_eq!(item_at(OPTIONS_MENU, OPT_THEME).map(|it| it.label), Some("Theme settings"));
     }
 }

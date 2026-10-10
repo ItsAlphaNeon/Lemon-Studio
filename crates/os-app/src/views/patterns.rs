@@ -13,8 +13,7 @@ const SUG_ROW: f32 = 18.0;
 const SW: f32 = 22.0;
 
 fn cross(ui: &mut Ui, r: Rect, c: Color) {
-    ui.c.line(r.x + 4.0, r.y + 4.0, r.right() - 4.0, r.bottom() - 4.0, 1.5, c);
-    ui.c.line(r.right() - 4.0, r.y + 4.0, r.x + 4.0, r.bottom() - 4.0, 1.5, c);
+    os_ui::kit::cross(ui.c, r, c);
 }
 
 fn tick(ui: &mut Ui, r: Rect, c: Color) {

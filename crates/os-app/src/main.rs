@@ -600,8 +600,13 @@ fn screenshot(args: &[String]) {
         }
     }
     let mut app = App::new(path);
-    if let Some(t) = theme {
-        app.load_theme_file_ex(&t, false);
+    match theme {
+        Some(t) if t.as_os_str() == "default" => {
+            app.theme = os_theme::Theme::default();
+            os_theme::set_current(&app.theme.colors);
+        }
+        Some(t) => app.load_theme_file_ex(&t, false),
+        None => {}
     }
     if let Some(p) = pattern {
         app.state.pattern = p;

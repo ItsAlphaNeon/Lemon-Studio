@@ -208,22 +208,21 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 /// Scroll arrow button (§1a): raised face with a 1 px dark rim and a chevron pointing `dir`
 /// (0 left, 1 right, 2 up, 3 down; 4 = a dot).
 fn arrow_button(ui: &mut Ui, b: Rect, dir: u8) {
-    let t = ui.t;
-    ui.c.fill_rect(b, ui.t.s(0x131618));
-    ui.c.fill_rect_gradient(b.inset(1.0), ui.t.s(0x36383a), ui.t.s(0x2c2e30), 0.0);
-    let (cx, cy) = ((b.x + b.w / 2.0).round(), (b.y + b.h / 2.0).round());
-    let c = t.glyph.with_alpha(150);
-    let pts = match dir {
-        0 => [(cx + 2.0, cy - 5.0), (cx - 3.0, cy), (cx + 2.0, cy + 5.0)],
-        1 => [(cx - 2.0, cy - 5.0), (cx + 3.0, cy), (cx - 2.0, cy + 5.0)],
-        2 => [(cx - 5.0, cy + 2.0), (cx, cy - 3.0), (cx + 5.0, cy + 2.0)],
-        3 => [(cx - 5.0, cy - 2.0), (cx, cy + 3.0), (cx + 5.0, cy - 2.0)],
+    use os_ui::kit::{self, Dir};
+    let st = kit::State::hover(ui.hovering(b));
+    let d = match dir {
+        0 => Dir::Left,
+        1 => Dir::Right,
+        2 => Dir::Up,
+        3 => Dir::Down,
         _ => {
+            kit::flat_button(ui.c, ui.t, b, st);
+            let (cx, cy) = ((b.x + b.w / 2.0).round(), (b.y + b.h / 2.0).round());
             ui.c.fill_rect(Rect::new(cx - 2.0, cy - 2.0, 3.0, 3.0), ui.t.s(0x000000));
             return;
         }
     };
-    ui.c.polyline(&pts, 1.2, c);
+    kit::arrow_button(ui.c, ui.t, b, d, st);
 }
 
 /// Toolbar icons in the title bar (§2). Only the draw tool exists so far; it is always active.

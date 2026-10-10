@@ -301,6 +301,12 @@ impl Ui<'_> {
         self.pressed.as_ref() == Some(action) && rect.contains(self.mouse.0, self.mouse.1)
     }
 
+    /// Whether the mouse is over `rect` and last frame's topmost hit there was registered by this window
+    /// (for decorations without their own action, e.g. a knob drawn under its hit region).
+    pub fn hovering(&self, rect: Rect) -> bool {
+        self.hover.is_some() && rect.contains(self.mouse.0, self.mouse.1)
+    }
+
     /// Register a hit region; returns whether it is hovered (topmost last frame).
     pub fn hit(&mut self, rect: Rect, action: Action, hint: impl Into<Cow<'static, str>>) -> bool {
         let hovered = self.hover.as_ref() == Some(&action) && rect.contains(self.mouse.0, self.mouse.1);
@@ -994,6 +1000,7 @@ impl App {
         match theme_from_file(path) {
             Ok(t) => {
                 self.theme = t;
+                os_theme::set_current(&self.theme.colors);
                 if remember && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")) {
                     if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) {
                         let _ = std::fs::create_dir_all(&d);
@@ -2812,6 +2819,17 @@ impl App {
                 s.piano.dirty = true;
                 s.message = Some("New project".into());
             }
+            // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
+            (OPTIONS_MENU, OPT_THEME) => {
+                let mut dlg = rfd::FileDialog::new().add_filter("Theme", &["flstheme", "txt"]).set_title("Load theme");
+                let fl = std::path::Path::new(r"C:\Program Files\Image-Line\FL Studio 2026\Artwork\Themes");
+                if fl.is_dir() {
+                    dlg = dlg.set_directory(fl);
+                }
+                if let Some(p) = dlg.pick_file() {
+                    self.load_theme_file(&p);
+                }
+            }
             (0, FILE_OPEN) => {
                 let start = self.state.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf()));
                 let mut dlg = rfd::FileDialog::new().add_filter("FLP project", &["flp"]);
@@ -3025,6 +3043,15 @@ pub fn theme_from_file(path: &std::path::Path) -> Result<Theme, String> {
 
 /// The theme: `%APPDATA%/OpenStudio/theme.txt`, else the last imported `current.flstheme`, else the default.
 fn load_theme() -> Theme {
+    let t = load_theme_inner();
+    os_theme::set_current(&t.colors);
+    t
+}
+
+fn load_theme_inner() -> Theme {
+    if cfg!(test) {
+        return Theme::default();
+    }
     let Some(dir) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) else { return Theme::default() };
     for f in ["theme.txt", "current.flstheme"] {
         let p = dir.join(f);

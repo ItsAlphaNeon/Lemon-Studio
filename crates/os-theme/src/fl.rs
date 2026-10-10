@@ -252,6 +252,20 @@ impl Xform {
     }
 }
 
+/// `c` moved in lightness (hue and saturation kept) until it differs from `bg` by at least `gap`.
+pub fn readable(c: Color, bg: Color, gap: f32) -> Color {
+    let (h, s, l) = c.hsl();
+    let (_, _, lb) = bg.hsl();
+    if (l - lb).abs() >= gap {
+        return c;
+    }
+    let up = (lb + gap).min(1.0);
+    let down = (lb - gap).max(0.0);
+    // Go the way that has room (light background -> darker text).
+    let l2 = if lb > 0.5 { down } else { up };
+    Color::from_hsl_pub(h, s, l2, c.a)
+}
+
 /// The default palette re-coloured by `th`. `Palette::default()` is returned for the stock Dark theme.
 pub fn palette(th: &FlTheme) -> Palette {
     let dark = FlTheme::dark();
@@ -296,11 +310,24 @@ pub fn palette(th: &FlTheme) -> Palette {
         *out.get_mut(name).expect("token") = v;
     }
     // Browser text brightness (§3 Text).
-    // Text < 0 fades browser text toward the list background (−255 ≈ invisible), > 0 brightens it.
-    if th.text < 0.0 {
-        out.browser_folder = out.browser_folder.mix(out.browser_list, (-th.text / 255.0).min(1.0) * 0.9);
-    } else if th.text > 0.0 {
-        out.browser_folder = out.browser_folder.mix(Color::rgb(0xffffff), th.text / 255.0 * 0.5);
+    // Text: browser text brightness, -255 darker .. +255 brighter (spec §3). On light themes darker = more contrast.
+    if th.text != 0.0 {
+        let k = (th.text / 255.0).clamp(-1.0, 1.0);
+        let target = if k < 0.0 { Color::rgb(0x000000) } else { Color::rgb(0xffffff) };
+        out.browser_folder = out.browser_folder.mix(target, k.abs() * 0.6);
+    }
+    // Readability guard: text-like tokens keep a minimum lightness gap from the surface they sit on
+    // (signal colours like category names were measured on a dark list and vanish on light themes).
+    let pairs: [(&str, Color); 14] = [
+        ("cat_project", out.browser_list), ("cat_recent", out.browser_list), ("cat_plugin_db", out.browser_list),
+        ("cat_plugin_presets", out.browser_list), ("cat_channel_presets", out.browser_list),
+        ("cat_mixer_presets", out.browser_list), ("browser_folder", out.browser_list), ("text", out.window_title),
+        ("text_dim", out.window_title), ("glyph", out.toolbar), ("menu_text", out.menu_panel),
+        ("name_text", out.name_button), ("ruler_text", out.ruler), ("slot_text_used", out.slot),
+    ];
+    for (name, bg) in pairs.into_iter().filter(|_| !identity) {
+        let slot = out.get_mut(name).expect("token");
+        *slot = readable(*slot, bg, 0.38);
     }
     // Custom grid backs are used as given (§3).
     if th.pl_grid.1 {

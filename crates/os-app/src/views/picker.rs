@@ -90,7 +90,11 @@ const MIN_GAP: f32 = 24.0;
 const LABEL_FONT: u16 = 17;
 
 fn rgb(v: u32) -> Color {
-    Color::rgb(v)
+    // Theme roles (spec: ui/flstheme.md): greys follow the surface / text mapping, coloured accents stay.
+    let c = Color::rgb(v);
+    let (_, s, l) = c.hsl();
+    let p = os_theme::current();
+    if s > 0.35 && l > 0.2 && l < 0.9 { c } else if l > 0.55 { p.tx(v) } else { p.s(v) }
 }
 
 /// Tile size; text tiles take their label's width.
