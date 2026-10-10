@@ -72,6 +72,7 @@ pub const FILE_SAVE: usize = 4;
 pub const FILE_SAVE_AS: usize = 5;
 pub const FILE_EXIT: usize = 16;
 /// OPTIONS > Theme settings (flat index: header counts).
+#[cfg(test)]
 pub const OPT_THEME: usize = 5;
 /// Index of the OPTIONS menu.
 pub const OPTIONS_MENU: usize = 5;

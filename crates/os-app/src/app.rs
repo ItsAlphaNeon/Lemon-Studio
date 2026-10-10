@@ -82,6 +82,8 @@ pub enum Cursor {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    /// Settings window (spec: ui/settings.md).
+    Settings(views::settings::SAct),
     /// A control that is designed but not functional yet.
     Placeholder(&'static str),
     /// The toolbar's scope / spectrum panel: click switches the display.
@@ -404,6 +406,8 @@ pub struct State {
     /// Piano roll event panel Control menu.
     pub lane_menu: bool,
     pub picker_open: bool,
+    /// Settings window (OPTIONS > ... settings, F10 / F11).
+    pub settings: views::settings::SettingsUi,
     /// Plugin picker category filter: (effects half?, category index).
     pub picker_cat: Option<(bool, usize)>,
     pub playlist_scroll: (f32, f32),
@@ -576,6 +580,7 @@ impl App {
                 knobs: Default::default(),
                 lane_menu: false,
                 picker_open: false,
+                settings: Default::default(),
                 picker_cat: None,
                 playlist_scroll: (0.0, 0.0),
                 playlist_bar_w: views::playlist::BAR_W,
@@ -1013,6 +1018,99 @@ impl App {
                 self.state.message = Some(format!("Theme: {name}"));
             }
             Err(e) => self.state.message = Some(format!("Could not load theme {name}: {e}")),
+        }
+        self.invalidate();
+    }
+
+    /// Open the settings window on `tab` (spec: ui/settings.md §1); reads the output devices and theme files.
+    pub fn open_settings(&mut self, tab: usize) {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let st = &mut self.state.settings;
+        if st.tab != tab {
+            st.scroll = 0.0;
+        }
+        st.open = true;
+        st.tab = tab;
+        let host = cpal::default_host();
+        let name = |d: &cpal::Device| d.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "(unknown device)".into());
+        st.device = host.default_output_device().map(|d| name(&d)).unwrap_or_else(|| "(no output device)".into());
+        st.devices = host.output_devices().map(|ds| ds.map(|d| name(&d)).collect()).unwrap_or_default();
+        st.themes.clear();
+        let fl = std::path::Path::new(r"C:\Program Files\Image-Line\FL Studio 2026\Artwork\Themes");
+        let mut dirs = vec![fl.to_path_buf()];
+        if let Some(d) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(d).join("OpenStudio").join("themes"));
+        }
+        for d in dirs {
+            if let Ok(rd) = std::fs::read_dir(&d) {
+                let mut v: Vec<_> = rd
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")))
+                    .map(|p| (p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), p))
+                    .collect();
+                v.sort();
+                st.themes.extend(v);
+            }
+        }
+        self.invalidate();
+    }
+
+    /// Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
+    fn theme_dialog(&mut self) {
+        let mut dlg = rfd::FileDialog::new().add_filter("Theme", &["flstheme", "txt"]).set_title("Load theme");
+        let fl = std::path::Path::new(r"C:\Program Files\Image-Line\FL Studio 2026\Artwork\Themes");
+        if fl.is_dir() {
+            dlg = dlg.set_directory(fl);
+        }
+        if let Some(p) = dlg.pick_file() {
+            self.load_theme_file(&p);
+        }
+    }
+
+    fn settings_act(&mut self, a: views::settings::SAct) {
+        use views::settings::SAct;
+        let st = &mut self.state.settings;
+        match a {
+            SAct::Body => {}
+            SAct::Close => st.open = false,
+            SAct::Tab(i) => {
+                st.tab = i;
+                st.scroll = 0.0;
+            }
+            SAct::Check(k) => {
+                if !st.flipped.remove(k) {
+                    st.flipped.insert(k);
+                }
+            }
+            SAct::Group(k) => {
+                if !st.folded.remove(k) {
+                    st.folded.insert(k);
+                }
+            }
+            SAct::Preset(0) => {
+                st.preset = 0;
+                self.theme = os_theme::Theme::default();
+                os_theme::set_current(&self.theme.colors);
+                if let Some(d) = std::env::var_os("APPDATA") {
+                    let _ = std::fs::remove_file(PathBuf::from(d).join("OpenStudio").join("current.flstheme"));
+                }
+                self.state.message = Some("Theme: default".into());
+            }
+            SAct::Preset(i) => {
+                if let Some((_, p)) = st.themes.get(i - 1).cloned() {
+                    st.preset = i;
+                    self.load_theme_file(&p);
+                }
+            }
+            SAct::Button("Reset") => self.settings_act(SAct::Preset(0)),
+            SAct::Button("Load theme...") => self.theme_dialog(),
+            SAct::Button("Manage plugins") => {
+                self.scan_plugins();
+                self.state.message = Some(format!("Plugin scan: {} instruments found", self.state.hosted_generators.len()));
+            }
+            SAct::Button(b) => self.state.message = Some(format!("{b}: not available yet")),
+            SAct::Combo(k) => self.state.message = Some(format!("{k}: not available yet")),
         }
         self.invalidate();
     }
@@ -1975,6 +2073,12 @@ impl App {
         if matches!(area, Some(Action::BrowserList | Action::BrowserRow(_) | Action::BrowserTab(_))) {
             return self.browser_wheel(dy + dx);
         }
+        if matches!(area, Some(Action::Settings(_))) {
+            let s = &self.state;
+            let max = (views::settings::content_h(s) - views::settings::page_h(s)).max(0.0);
+            self.state.settings.scroll = (self.state.settings.scroll - (dy + dx) * 63.0).min(max).max(0.0);
+            return;
+        }
         if matches!(area, Some(Action::PlPick(_) | Action::PlPickList)) {
             self.scroll_set(Scroll::PlPick, self.scroll_get(Scroll::PlPick) - (dy + dx) * 31.0);
             return;
@@ -2084,8 +2188,11 @@ impl App {
             }
             Key::Named(NamedKey::F8) if alt => self.act(Action::ToggleWin(Win::Browser)),
             Key::Named(NamedKey::F9) => self.act(Action::ToggleWin(Win::Mixer)),
+            Key::Named(NamedKey::F10) => self.open_settings(views::settings::MIDI),
+            Key::Named(NamedKey::F11) => self.open_settings(views::settings::INFO),
             // Monitor debug panel (views/mondebug.rs) parked 2026-10-09: its values are now the defaults. Uncomment to tune again.
             // Key::Named(NamedKey::F12) => self.state.monitor.debug = !self.state.monitor.debug,
+            Key::Named(NamedKey::Escape) if self.state.settings.open => self.state.settings.open = false,
             Key::Named(NamedKey::Escape) => {
                 self.state.menu_open = None;
                 self.state.picker_open = false;
@@ -2506,6 +2613,9 @@ impl App {
     }
 
     pub fn act(&mut self, a: Action) {
+        if let Action::Settings(sa) = a {
+            return self.settings_act(sa);
+        }
         if let Action::Scrollbar(t) = a {
             return self.scrollbar_press(t, false);
         }
@@ -2696,6 +2806,7 @@ impl App {
                 s.piano.lane = piano::Lane::ALL[i.min(piano::Lane::ALL.len() - 1)];
                 s.lane_menu = false;
             }
+            Action::Settings(_) => {}
             Action::PickerBg => s.picker_open = false,
             Action::PickerAll => s.picker_cat = None,
             Action::PickerTab(e, i) => s.picker_cat = if s.picker_cat == Some((e, i)) { None } else { Some((e, i)) },
@@ -2820,15 +2931,9 @@ impl App {
                 s.message = Some("New project".into());
             }
             // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
-            (OPTIONS_MENU, OPT_THEME) => {
-                let mut dlg = rfd::FileDialog::new().add_filter("Theme", &["flstheme", "txt"]).set_title("Load theme");
-                let fl = std::path::Path::new(r"C:\Program Files\Image-Line\FL Studio 2026\Artwork\Themes");
-                if fl.is_dir() {
-                    dlg = dlg.set_directory(fl);
-                }
-                if let Some(p) = dlg.pick_file() {
-                    self.load_theme_file(&p);
-                }
+            (OPTIONS_MENU, i) if item_at(OPTIONS_MENU, i).and_then(|it| views::settings::tab_for_menu(it.label)).is_some() => {
+                let tab = item_at(OPTIONS_MENU, i).and_then(|it| views::settings::tab_for_menu(it.label)).expect("checked");
+                self.open_settings(tab);
             }
             (0, FILE_OPEN) => {
                 let start = self.state.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -3295,6 +3400,48 @@ mod tests {
         app.mouse_down();
         app.mouse_up();
         frame(app, c, None);
+    }
+
+    /// Settings window (spec: ui/settings.md): OPTIONS entries open their tab, tabs switch, checks and
+    /// group folds toggle, the General page scrolls, Esc closes; every tab paints.
+    #[test]
+    fn settings_window() {
+        use crate::views::menus::{item_at, OPTIONS_MENU};
+        use crate::views::settings::{SAct, GENERAL, MIDI, PROJECT, TABS};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let audio = (0..40).find(|&i| item_at(OPTIONS_MENU, i).is_some_and(|it| it.label == "Audio settings")).unwrap();
+        app.menu_item(OPTIONS_MENU, audio);
+        assert!(app.state.settings.open);
+        assert_eq!(app.state.settings.tab, 1);
+        for i in 0..TABS.len() {
+            frame(&mut app, &mut c, None);
+            let r = hit_rect(&app, &Action::Settings(SAct::Tab(i)));
+            click(&mut app, &mut c, r);
+            assert_eq!(app.state.settings.tab, i);
+        }
+        let r = hit_rect(&app, &Action::Settings(SAct::Tab(MIDI)));
+        click(&mut app, &mut c, r);
+        let k = Action::Settings(SAct::Check("Send master sync"));
+        let r = hit_rect(&app, &k);
+        click(&mut app, &mut c, r);
+        assert!(app.state.settings.flipped.contains("Send master sync"));
+        let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
+        click(&mut app, &mut c, r);
+        let adv = Action::Settings(SAct::Group("Advanced"));
+        let r = hit_rect(&app, &adv);
+        click(&mut app, &mut c, r);
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check("Fast declick for cut groups"))), "Advanced unfolded");
+        let r = hit_rect(&app, &Action::Settings(SAct::Tab(GENERAL)));
+        click(&mut app, &mut c, r);
+        app.wheel(0.0, -3.0, false, false);
+        assert!(app.state.settings.scroll > 0.0);
+        frame(&mut app, &mut c, None);
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        assert!(!app.state.settings.open);
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::F10), false, false);
+        assert!(app.state.settings.open && app.state.settings.tab == MIDI);
     }
 
     /// Browser (spec: ui/browser.md): tabs, opening nodes, dragging a pattern and a generator onto the playlist.

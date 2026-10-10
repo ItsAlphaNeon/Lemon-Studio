@@ -6,6 +6,7 @@ pub mod channel_win;
 pub mod menus;
 pub mod mondebug;
 pub mod picker;
+pub mod settings;
 pub mod mixer;
 pub mod piano;
 pub mod patterns;
@@ -99,6 +100,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     patterns::paint(ui, s);
     if s.picker_open {
         picker::paint(ui, s);
+    }
+    if s.settings.open {
+        settings::paint(ui, s);
     }
     browser::paint_ghost(ui, s);
     if s.monitor.debug {

@@ -546,6 +546,7 @@ fn screenshot(args: &[String]) {
     let mut menu: Option<usize> = None;
     let mut picker: Option<(bool, usize)> = None;
     let mut picker_open = false;
+    let mut settings: Option<usize> = None;
     let mut lane: Option<usize> = None;
     let mut lane_menu = false;
     let mut pans: Option<Vec<f32>> = None;
@@ -584,6 +585,7 @@ fn screenshot(args: &[String]) {
             }
             "--lane" => lane = it.next().and_then(|v| v.parse().ok()),
             "--pans" => pans = it.next().map(|v| v.split(',').filter_map(|p| p.parse().ok()).collect()),
+            "--settings" => settings = it.next().and_then(|v| v.parse().ok()),
             "--lane-menu" => lane_menu = true,
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
             "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
@@ -637,6 +639,9 @@ fn screenshot(args: &[String]) {
     app.state.rack_roll_view = rack_roll;
     app.state.menu_open = menu;
     app.state.picker_open = picker_open;
+    if let Some(t) = settings {
+        app.open_settings(t);
+    }
     app.state.lane_menu = lane_menu;
     // "--pans 0.2,0.8": mixer pan knob values for inserts 1.. (normalised), to check the value arcs.
     for (i, v) in pans.iter().flatten().enumerate() {
