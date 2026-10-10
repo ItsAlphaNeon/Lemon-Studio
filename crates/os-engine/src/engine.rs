@@ -1397,6 +1397,25 @@ mod tests {
         assert_eq!(swing_delay(24, 96, 0), 0.0);
     }
 
+    /// Main swing reaches played notes: an off-beat step starts late on an instrument channel.
+    #[test]
+    fn swing_delays_played_notes() {
+        let mut p = project(vec![Note::step(0, 24), Note::step(0, 48)], vec![]);
+        p.swing = Some(128);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        let mut out = vec![0.0f32; 512 * 2];
+        for _ in 0..100 {
+            e.process(&mut out);
+        }
+        let ons: Vec<u64> = probe.lock().unwrap().log.iter().filter(|l| l.1).map(|l| l.0).collect();
+        assert_eq!(ons[0], laws::tick_to_frame(36.0, 96, 130.0, 48000), "{ons:?}");
+        assert_eq!(ons[1], laws::tick_to_frame(48.0, 96, 130.0, 48000), "{ons:?}");
+    }
+
     // spec: plugins/plugin-formats.md (hosting: notes at frame offsets; the channel's volume and pan apply)
     #[test]
     fn instrument_channels_get_timed_notes() {

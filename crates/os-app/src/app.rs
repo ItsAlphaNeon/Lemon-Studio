@@ -752,7 +752,12 @@ impl App {
         for row in self.state.hosted_rows.clone() {
             if self.state.project.channels.get(row).is_some_and(|c| c.kind == ChannelKind::Sampler) {
                 if let Some(p) = self.plugins.sampler_path(row) {
-                    self.state.project.channels[row].sample_path = (!p.is_empty()).then_some(p);
+                    // A placeholder path that still names the same file is kept as the project wrote it.
+                    let ch = &mut self.state.project.channels[row];
+                    if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
+                        continue;
+                    }
+                    ch.sample_path = (!p.is_empty()).then_some(p);
                 }
             }
         }

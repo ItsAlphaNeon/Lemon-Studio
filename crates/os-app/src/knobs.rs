@@ -27,7 +27,7 @@ pub enum KnobId {
     /// Channel rack row / plugin window (model).
     ChanVol(usize),
     ChanPan(usize),
-    /// Channel rack main swing, 0..100 % (spec: ui/channel-rack.md §7; not applied to playback yet).
+    /// Channel rack main swing, 0..100 % (spec: ui/channel-rack.md §7; playback: flp/events/project-info.md).
     Swing,
 }
 

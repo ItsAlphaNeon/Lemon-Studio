@@ -364,13 +364,25 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
             params.push(format!("\"{pre}_{id}\":{v}"));
         }
     }
-    let path = ch.sample_path.as_deref().unwrap_or("");
+    // Factory placeholders (`%FLStudioFactoryData%`...) become real paths: the plugin opens files directly.
+    let path = resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
+    let path = path.as_str();
     // The persisted field is a JSON string holding JSON.
     let inner = json_string(path);
     let state = format!("{{\"version\":\"0.0.1\",\"params\":{{{}}},\"fields\":{{\"sample-path\":{}}}}}", params.join(","), json_string(&inner));
     let mut blob = (state.len() as u64).to_le_bytes().to_vec();
     blob.extend_from_slice(state.as_bytes());
     blob
+}
+
+/// A project sample path as a file path (placeholders resolved against the install folder, else unchanged).
+pub fn resolve_sample(path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    os_engine::SampleLibrary::new(os_engine::SampleLibrary::default_factory_dir())
+        .resolve(path)
+        .map_or_else(|| path.to_string(), |p| p.to_string_lossy().into_owned())
 }
 
 fn json_string(s: &str) -> String {
@@ -922,6 +934,56 @@ mod tests {
     fn fixture_mp3() -> String {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../os-engine/tests/data/click_sine.mp3");
         p.canonicalize().unwrap().to_string_lossy().trim_start_matches(r"\\?\").to_string()
+    }
+
+    /// Main swing delays an off-beat step played by a hosted Open Sampler (spec: flp/events/project-info.md "Swing timing").
+    #[test]
+    fn swing_reaches_hosted_sampler() {
+        let wav = std::env::temp_dir().join(format!("os-swing-click-{}.wav", std::process::id()));
+        let click: Vec<f32> = (0..48000).flat_map(|i| { let v = if i < 200 { 0.8 } else { 0.0 }; [v, v] }).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &click).unwrap();
+        let onsets = |swing: u8| -> Vec<usize> {
+            let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+            let index = pl.index_of(OPEN_SAMPLER).unwrap();
+            let mut p = crate::app::test_project();
+            p.channels.truncate(1);
+            p.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note::step(0, 0), os_model::Note::step(0, 24)], ..Default::default() }];
+            p.swing = Some(swing);
+            pl.create_with(0, index, Some(&sampler_state(&p.channels[0]))).unwrap();
+            assert!(pl.load_sample(0, &wav.to_string_lossy()));
+            let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
+            let mut lib = os_engine::SampleLibrary::default();
+            let mut e = os_engine::Engine::new(&p, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
+            e.set_instrument(0, inst);
+            let mut out = Vec::new();
+            let mut buf = vec![0.0f32; 480 * 2];
+            for _ in 0..40 {
+                e.process(&mut buf);
+                out.extend(buf.iter().step_by(2).copied());
+            }
+            let mut on = Vec::new();
+            let mut quiet = 1000;
+            for (i, v) in out.iter().enumerate() {
+                if v.abs() > 0.05 {
+                    if quiet > 500 {
+                        on.push(i);
+                    }
+                    quiet = 0;
+                } else {
+                    quiet += 1;
+                }
+            }
+            on
+        };
+        let straight = onsets(0);
+        let swung = onsets(128);
+        let _ = std::fs::remove_file(&wav);
+        eprintln!("straight {straight:?} swung {swung:?}");
+        assert_eq!(straight.len(), 2);
+        assert_eq!(swung.len(), 2);
+        // Half a step at 130 BPM, 48 kHz: 24 ticks = 5538 frames, so about 2769 frames later.
+        let shift = swung[1] as i64 - straight[1] as i64;
+        assert!((shift - 2769).abs() < 20, "{shift}");
     }
 
     /// Open Sampler is compiled in: no `.clap` file is needed, and a sample loads into a running instance without
