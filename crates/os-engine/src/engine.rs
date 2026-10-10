@@ -545,6 +545,11 @@ impl Engine {
         self.frame
     }
 
+    /// The playback position in ticks at the engine's tempo (a looping engine wraps to 0 at its end).
+    pub fn tick_position(&self) -> f64 {
+        self.frame as f64 / f64::from(self.rate.max(1)) * self.tempo / 60.0 * f64::from(self.ppq)
+    }
+
     /// Length of the scheduled material in frames (voices may ring past it).
     pub fn length(&self) -> u64 {
         self.end_frame
@@ -796,6 +801,7 @@ impl Engine {
             self.scratch.0.resize(n, 0.0);
             self.scratch.1.resize(n, 0.0);
         }
+        let mut active = false;
         for (c, ch) in self.channels.iter().enumerate() {
             let Some(inst) = &ch.instrument.0 else { continue };
             let Ok(mut inst) = inst.try_lock() else { continue };
@@ -805,6 +811,8 @@ impl Engine {
             }
             let (l, r) = (&mut self.scratch.0[..n], &mut self.scratch.1[..n]);
             inst.process(self.rate, l, r);
+            // A sample that is still playing must not be cut off by the idle tail.
+            active |= inst.active();
             let (gl, gr) = ch.gain(1.0, 0.0);
             let out = &mut self.bus[ch.insert];
             for f in 0..n {
@@ -813,6 +821,9 @@ impl Engine {
             }
         }
         self.inst_events.clear();
+        if active {
+            self.inst_tail = u64::from(self.rate) * INSTRUMENT_TAIL_SECONDS;
+        }
     }
 
     /// Loop point: back to frame 0 (sounding notes keep their remaining length).

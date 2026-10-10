@@ -1,22 +1,81 @@
-//! The window around a hosted plugin's editor: OpenStudio's title bar (▸, gear, name, Presets, minimize, close) and the
-//! gear-toggled strip (plugin / wrench tabs, ON / PAN / VOL / PITCH / RANGE / TRACK), drawn with os-ui in a native
-//! top-level window owned by the main window. The plugin parents its editor into a child area below the strip.
+//! The window around a hosted plugin's editor: OpenStudio's title bar (menu arrow, gear, name, minimize, close) and the
+//! gear-toggled strip, one row: the plugin's page tabs (a plain plugin has the plug tab, an Open plugin joined through the
+//! host link brings its own pages), the Misc wrench, the window's top-bar buttons (menu arrow, gear), then
+//! ON / PAN / VOL / PITCH / RANGE / TRACK. While the strip is hidden the two buttons sit in the title bar.
+//! Drawn with os-ui in a native top-level window owned by the main window; the plugin parents its editor into a child
+//! area below the strip.
 //!
-// spec: ui/plugin-window.md, plugins/open-sampler.md (strip geometry), ui/knobs.md (drag 1/1024 per px)
+// spec: ui/plugin-window.md, plugins/host-link.md, plugins/open-sampler.md (strip geometry), ui/knobs.md (drag 1/1024 per px)
 
 use std::cell::RefCell;
 use std::f32::consts::PI;
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::sync::{Mutex, Once};
 
-use os_ui::{Canvas, Color, Font, Glyph, Rect};
+use os_hostlink::PageIcon;
+use os_ui::tabler as tb;
+use os_ui::{Canvas, Color, Font, Rect};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, InvalidateRect, ScreenToClient, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+/// A key pressed or released while a plugin window has the keyboard focus (the typing keyboard keeps playing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyMsg {
+    /// Hardware scancode as winit's `PhysicalKeyExtScancode` expects it (extended keys carry 0xE000).
+    pub scancode: u32,
+    pub pressed: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+}
+
+static KEYS: Mutex<Vec<KeyMsg>> = Mutex::new(Vec::new());
+static KEY_HOOK: Once = Once::new();
+
+/// Keys seen since the last call (UI thread).
+pub fn take_keys() -> Vec<KeyMsg> {
+    KEYS.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
+}
+
+/// Thread-wide keyboard hook: a plugin's editor (any plugin, any child window) swallows key messages, so the key
+/// events are copied here whenever the focus is inside one of our plugin frames, and the app plays them.
+unsafe extern "system" fn key_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if code == 0 {
+            let focus = GetFocus();
+            if !focus.is_null() {
+                let root = GetAncestor(focus, GA_ROOT);
+                let mut name = [0u16; 64];
+                let n = GetClassNameW(root, name.as_mut_ptr(), 64) as usize;
+                let up = lp & (1 << 31) != 0;
+                let repeat = !up && lp & (1 << 30) != 0;
+                if String::from_utf16_lossy(&name[..n]) == FRAME_CLASS && !repeat {
+                    let mut sc = ((lp >> 16) & 0xff) as u32;
+                    if lp & (1 << 24) != 0 {
+                        sc |= 0xE000;
+                    }
+                    let down = |vk: u16| GetKeyState(i32::from(vk)) < 0;
+                    if let Ok(mut k) = KEYS.lock() {
+                        k.push(KeyMsg { scancode: sc, pressed: !up, ctrl: down(VK_CONTROL), alt: down(VK_MENU) });
+                    }
+                }
+            }
+        }
+        CallNextHookEx(std::ptr::null_mut(), code, wp, lp)
+    }
+}
+
+fn install_key_hook() {
+    KEY_HOOK.call_once(|| unsafe {
+        SetWindowsHookExW(WH_KEYBOARD, Some(key_hook), std::ptr::null_mut(), GetCurrentThreadId());
+    });
+}
 
 pub const TITLE_H: f32 = 24.0;
 pub const STRIP_H: f32 = 47.0;
@@ -53,6 +112,8 @@ pub struct ChannelInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub enum FrameEvent {
     Close,
+    /// The user picked page `n` of the plugin (a tab left of the Misc tab).
+    Page(usize),
     ToggleOn,
     Volume(f64),
     Pan(f64),
@@ -69,12 +130,21 @@ enum Knob {
 struct State {
     info: ChannelInfo,
     strip: bool,
-    /// 0 = plugin, 1 = miscellaneous functions.
-    tab: u8,
+    /// The plugin's page tabs, left to right (a plain plugin: the plug).
+    pages: Vec<PageIcon>,
+    /// The plugin's active page.
+    page: usize,
+    /// The Misc tab (right of the page tabs) is showing instead of the plugin.
+    misc: bool,
+    /// The plugin's hint line (parameter under the mouse), shown in the title bar.
+    hint: String,
     /// Plugin editor size (logical px).
     editor: (f32, f32),
     events: Vec<FrameEvent>,
     drag: Option<(Knob, f32, f32)>,
+    /// Title-bar move in progress: cursor and window position (screen px) at the press. Done by hand: the system's
+    /// move loop (HTCAPTION) blocks the UI thread, which would freeze all drawing while a window moves.
+    moving: Option<(i32, i32, i32, i32)>,
 }
 
 impl State {
@@ -116,7 +186,10 @@ enum Part {
     Close,
     Minimize,
     Gear,
-    Tab(u8),
+    /// The menu arrow (inert for now).
+    Menu,
+    /// Page tab `i`; `i == pages.len()` is the Misc tab.
+    Tab(usize),
     On,
     Knob(u8),
     Caption,
@@ -127,12 +200,15 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
     let mut v = vec![
         (Rect::new(w - 22.0, 4.0, 16.0, 16.0), Part::Close),
         (Rect::new(w - 39.0, 4.0, 16.0, 16.0), Part::Minimize),
-        (Rect::new(16.0, 4.0, 16.0, 16.0), Part::Gear),
     ];
+    let (menu, gear) = top_buttons(st);
+    v.push((menu, Part::Menu));
+    v.push((gear, Part::Gear));
     if st.strip {
         let dx = w - 568.0;
-        v.push((Rect::new(5.0, 25.0, 43.0, 46.0), Part::Tab(0)));
-        v.push((Rect::new(48.0, 25.0, 43.0, 46.0), Part::Tab(1)));
+        for i in 0..=st.pages.len() {
+            v.push((tab_rect(i), Part::Tab(i)));
+        }
         v.push((Rect::new(340.0 + dx, 35.0, 18.0, 18.0), Part::On));
         for (i, x) in [383.0, 417.0, 455.0].into_iter().enumerate() {
             v.push((Rect::new(x + dx - 14.0, 30.0, 28.0, 28.0), Part::Knob(i as u8)));
@@ -148,32 +224,64 @@ fn part_at(st: &State, x: f32, y: f32) -> Option<Part> {
 
 const KNOBS: [Knob; 3] = [Knob::Pan, Knob::Vol, Knob::Pitch];
 
+/// Cell of strip tab `i` (43 px wide from x 5; the Misc tab is the one after the pages).
+fn tab_rect(i: usize) -> Rect {
+    Rect::new(5.0 + 43.0 * i as f32, 25.0, 43.0, 46.0)
+}
+
+/// The window's top-bar buttons (menu arrow, gear): in the strip row right after the Misc tab while the strip is shown
+/// (owner, 2026-10-09), in the title bar while it is hidden (the gear brings the strip back).
+fn top_buttons(st: &State) -> (Rect, Rect) {
+    if st.strip {
+        let x = tab_rect(st.pages.len() + 1).x + 8.0;
+        (Rect::new(x, 36.0, 24.0, 22.0), Rect::new(x + 26.0, 36.0, 24.0, 22.0))
+    } else {
+        (Rect::new(2.0, 4.0, 14.0, 16.0), Rect::new(16.0, 4.0, 16.0, 16.0))
+    }
+}
+
+fn page_tabler(p: PageIcon) -> &'static tb::TablerIcon {
+    match p {
+        PageIcon::Plugin => &tb::PLUG,
+        PageIcon::Sample => &tb::WAVE_SINE,
+        PageIcon::Envelope => &tb::TIMELINE,
+    }
+}
+
+fn icon_at(c: &mut Canvas, t: &tb::TablerIcon, cx: f32, cy: f32, size: f32, col: Color) {
+    c.icon(t, Rect::new(cx - size / 2.0, cy - size / 2.0, size, size), col);
+}
+
 fn paint(c: &mut Canvas, st: &State) {
     let (w, h) = st.size();
     c.begin_frame(None);
     c.clear(FRAME);
     // Title bar.
-    c.fill_polygon(&[(7.0, 8.0), (11.5, 12.0), (7.0, 16.0)], ICON);
-    gear(c, 24.0, 12.0, if st.strip { GREEN } else { ICON });
+    let (menu, gear) = top_buttons(st);
+    // In the strip row the buttons are bigger and the title text starts at the left edge.
+    let (isz, gsz) = if st.strip { (16.0, 18.0) } else { (14.0, 16.0) };
+    icon_at(c, &tb::CARET_RIGHT, menu.cx(), menu.cy(), isz, ICON);
+    icon_at(c, &tb::SETTINGS, gear.cx(), gear.cy(), gsz, if st.strip { GREEN } else { ICON });
     let f = Font::new(15);
     let lh = c.line_height(f);
     let ty = (12.0 - lh / 2.0).round();
-    let nw = c.text(f, 36.0, ty, TEXT, &st.info.name);
-    c.text_clip(f, 36.0 + nw + 4.0, ty, (w - 170.0 - nw).max(0.0), GREY, &format!("({})", st.info.target));
-    let pr = Rect::new(w - 126.0, 3.0, 80.0, 18.0);
-    c.fill_rrect(pr, 2.0, Color::rgb(0x1d2022));
-    let plh = c.line_height(Font::new(14));
-    c.text(Font::new(14), pr.x + 7.0, (pr.cy() - plh / 2.0).round(), TEXT, "Presets");
-    c.fill_polygon(&[(pr.right() - 18.0, 12.0), (pr.right() - 14.0, 8.5), (pr.right() - 14.0, 15.5)], ICON);
-    c.fill_polygon(&[(pr.right() - 8.0, 8.5), (pr.right() - 4.0, 12.0), (pr.right() - 8.0, 15.5)], ICON);
-    c.fill_rect(Rect::new(w - 35.0, 12.0, 8.0, 1.5), ICON);
-    let mut x = Glyph::new();
-    x.line(w - 18.0, 8.0, w - 10.0, 16.0, 1.5).line(w - 18.0, 16.0, w - 10.0, 8.0, 1.5);
-    c.glyph(ICON, &x);
+    let nx = if st.strip { 9.0 } else { 36.0 };
+    let nw = c.text(f, nx, ty, TEXT, &st.info.name);
+    let target = format!("({})", st.info.target);
+    c.text_clip(f, nx + nw + 4.0, ty, (w - 70.0 - nx - nw).max(0.0), GREY, &target);
+    let tw = c.text_width(f, &target).min((w - 70.0 - nx - nw).max(0.0));
+    if !st.hint.is_empty() {
+        let hx = nx + nw + 4.0 + tw + 14.0;
+        let hf = Font::new(13);
+        let hy = (12.0 - c.line_height(hf) / 2.0).round();
+        c.text_clip(hf, hx, hy, (w - 50.0 - hx).max(0.0), CAPTION, &st.hint);
+    }
+    icon_at(c, &tb::MINUS, w - 31.0, 12.0, 14.0, ICON);
+    icon_at(c, &tb::X, w - 14.0, 12.0, 14.0, ICON);
     if st.strip {
         strip(c, st, w);
     }
-    if st.tab == 1 {
+    if st.misc {
         let a = Rect::new(BORDER, st.area_y(), w - 2.0 * BORDER, h - st.area_y() - BORDER);
         c.fill_rect(a, BODY);
         c.text_center(Font::new(16), a, GREY, "Miscellaneous functions: not available yet");
@@ -184,14 +292,17 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
     let dx = w - 568.0;
     c.fill_rect(Rect::new(BORDER, 24.0, w - 2.0 * BORDER, 47.0), STRIP_LINE);
     c.fill_rect(Rect::new(BORDER, 25.0, w - 2.0 * BORDER, 45.0), STRIP);
-    for i in 0..2u8 {
-        let cell = Rect::new(5.0 + 43.0 * f32::from(i), 25.0, 44.0, 46.0);
-        if st.tab == i {
-            c.fill_rect(cell, BODY);
+    // Page tabs, then the Misc wrench (always the last tab), then the menu arrow and gear (drawn with the title bar).
+    let n = st.pages.len();
+    for i in 0..=n {
+        let cell = tab_rect(i);
+        let active = if i == n { st.misc } else { !st.misc && st.page == i };
+        if active {
+            c.fill_rect(Rect::new(cell.x, cell.y, cell.w + 1.0, cell.h), BODY);
         }
-        let col = if st.tab == i { Color::rgb(0x49f1b1) } else { ICON };
-        let cx = 27.0 + 43.0 * f32::from(i);
-        if i == 0 { plug(c, cx, 47.0, col) } else { wrench(c, cx, 47.0, col) }
+        let col = if active { Color::rgb(0x49f1b1) } else { ICON };
+        let t = if i == n { &tb::TOOL } else { page_tabler(st.pages[i]) };
+        icon_at(c, t, cell.cx() + 0.5, 47.0, 26.0, col);
     }
     // ON LED.
     let (lx, ly) = (349.0 + dx, 43.0);
@@ -248,31 +359,6 @@ fn value_box(c: &mut Canvas, r: Rect, s: &str) {
     c.text(f, r.right() - 11.0 - w, (r.cy() - lh / 2.0).round(), Color::rgb(0xe8dfe2), s);
 }
 
-fn gear(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
-    let mut g = Glyph::new();
-    for i in 0..8 {
-        let a = i as f32 * PI / 4.0;
-        g.line(cx + 3.5 * a.cos(), cy + 3.5 * a.sin(), cx + 6.5 * a.cos(), cy + 6.5 * a.sin(), 2.4);
-    }
-    g.ring(cx, cy, 4.2, 2.2);
-    c.glyph(col, &g);
-}
-
-fn plug(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
-    let mut g = Glyph::new();
-    g.polygon(&[(cx - 9.0, cy - 4.0), (cx - 4.0, cy - 4.0), (cx + 3.0, cy - 9.0), (cx + 3.0, cy + 9.0), (cx - 4.0, cy + 4.0), (cx - 9.0, cy + 4.0)]);
-    g.arc(cx + 4.0, cy, 6.0, -0.3 * PI, 0.6 * PI, 1.6);
-    g.arc(cx + 4.0, cy, 10.0, -0.3 * PI, 0.6 * PI, 1.6);
-    c.glyph(col, &g);
-}
-
-fn wrench(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
-    let mut g = Glyph::new();
-    g.line(cx - 7.0, cy + 7.0, cx + 1.0, cy - 1.0, 3.2);
-    g.arc(cx + 4.0, cy - 4.0, 4.2, 0.9 * PI, 1.55 * PI, 2.6);
-    c.glyph(col, &g);
-}
-
 struct Win {
     hwnd: HWND,
     area: HWND,
@@ -299,7 +385,19 @@ const AREA_CLASS: &str = "OpenStudioPluginArea";
 impl FrameWindow {
     /// A hidden frame owned by `owner` for an editor of `editor` logical px, at screen position `pos` (physical px).
     pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (i32, i32)) -> Result<FrameWindow, String> {
-        let state = Rc::new(RefCell::new(State { info, strip: true, tab: 0, editor, events: Vec::new(), drag: None }));
+        install_key_hook();
+        let state = Rc::new(RefCell::new(State {
+            info,
+            strip: true,
+            pages: vec![PageIcon::Plugin],
+            page: 0,
+            misc: false,
+            hint: String::new(),
+            editor,
+            events: Vec::new(),
+            drag: None,
+            moving: None,
+        }));
         let (w, h) = state.borrow().size();
         let px = |v: f32| (v * scale).round() as i32;
         unsafe {
@@ -363,6 +461,12 @@ impl FrameWindow {
         }
     }
 
+    /// The native frame window (tests drive and capture it).
+    #[cfg(test)]
+    pub fn hwnd(&self) -> isize {
+        self.hwnd as isize
+    }
+
     /// The child window the plugin's editor goes into.
     pub fn area(&self) -> *mut c_void {
         self.area
@@ -385,6 +489,37 @@ impl FrameWindow {
         let mut st = self.state.borrow_mut();
         if st.info != info && st.drag.is_none() {
             st.info = info;
+            drop(st);
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
+    /// The plugin's own page tabs (an Open plugin joined through the host link), replacing the plug tab.
+    pub fn set_pages(&self, pages: Vec<PageIcon>, active: usize) {
+        let mut st = self.state.borrow_mut();
+        if !pages.is_empty() && (st.pages != pages || st.page != active) {
+            st.page = active.min(pages.len() - 1);
+            st.pages = pages;
+            drop(st);
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
+    /// The plugin changed its page itself.
+    pub fn set_page(&self, page: usize) {
+        let mut st = self.state.borrow_mut();
+        if st.page != page && page < st.pages.len() {
+            st.page = page;
+            drop(st);
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
+    /// The plugin's hint line (parameter under the mouse).
+    pub fn set_hint(&self, hint: String) {
+        let mut st = self.state.borrow_mut();
+        if st.hint != hint {
+            st.hint = hint;
             drop(st);
             unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
         }
@@ -422,7 +557,7 @@ unsafe fn layout(hwnd: HWND) {
     let st = w.state.borrow();
     let (fw, fh) = st.size();
     let px = |v: f32| (v * w.scale).round() as i32;
-    let tab_plugin = st.tab == 0;
+    let tab_plugin = !st.misc;
     let (ay, ed) = (st.area_y(), st.editor);
     drop(st);
     unsafe {
@@ -471,13 +606,8 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
         let Some(w) = win_of(hwnd) else { return DefWindowProcW(hwnd, msg, wp, lp) };
         match msg {
             WM_NCHITTEST => {
-                // The title bar drags the window, except over its buttons.
-                let (x, y) = client_point(hwnd, lp, w.scale, true);
-                let st = w.state.borrow();
-                match part_at(&st, x, y) {
-                    Some(Part::Caption) => HTCAPTION as LRESULT,
-                    _ => HTCLIENT as LRESULT,
-                }
+                // The whole frame is client area; the title bar is moved by hand (WM_LBUTTONDOWN).
+                HTCLIENT as LRESULT
             }
             WM_ERASEBKGND => 1,
             WM_PAINT => {
@@ -518,12 +648,18 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                         Some(Part::Gear) => {
                             st.strip = !st.strip;
                             if !st.strip {
-                                st.tab = 0;
+                                st.misc = false;
                             }
                             relayout = true;
                         }
+                        Some(Part::Tab(t)) if t == st.pages.len() => {
+                            st.misc = true;
+                            relayout = true;
+                        }
                         Some(Part::Tab(t)) => {
-                            st.tab = t;
+                            st.misc = false;
+                            st.page = t;
+                            st.events.push(FrameEvent::Page(t));
                             relayout = true;
                         }
                         Some(Part::On) => {
@@ -533,6 +669,15 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                         Some(Part::Knob(i)) => {
                             let k = KNOBS[usize::from(i)];
                             st.drag = Some((k, y, st.knob_value(k)));
+                            SetCapture(hwnd);
+                        }
+                        Some(Part::Caption) if msg == WM_LBUTTONDOWN => {
+                            // Drag the window by the title bar.
+                            let mut c: POINT = std::mem::zeroed();
+                            let mut r: RECT = std::mem::zeroed();
+                            GetCursorPos(&mut c);
+                            GetWindowRect(hwnd, &mut r);
+                            st.moving = Some((c.x, c.y, r.left, r.top));
                             SetCapture(hwnd);
                         }
                         _ => {}
@@ -559,6 +704,13 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             WM_MOUSEMOVE => {
                 let (_, y) = client_point(hwnd, lp, w.scale, false);
                 let mut st = w.state.borrow_mut();
+                if let Some((cx, cy, wx, wy)) = st.moving {
+                    drop(st);
+                    let mut c: POINT = std::mem::zeroed();
+                    GetCursorPos(&mut c);
+                    SetWindowPos(hwnd, std::ptr::null_mut(), wx + c.x - cx, wy + c.y - cy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    return 0;
+                }
                 if let Some((k, y0, v0)) = st.drag {
                     st.set_knob(k, v0 + (y0 - y) / 1024.0);
                     drop(st);
@@ -568,11 +720,15 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             }
             WM_LBUTTONUP => {
                 ReleaseCapture();
-                w.state.borrow_mut().drag = None;
+                let mut st = w.state.borrow_mut();
+                st.drag = None;
+                st.moving = None;
                 0
             }
             WM_CAPTURECHANGED => {
-                w.state.borrow_mut().drag = None;
+                let mut st = w.state.borrow_mut();
+                st.drag = None;
+                st.moving = None;
                 0
             }
             WM_MOUSEWHEEL => {

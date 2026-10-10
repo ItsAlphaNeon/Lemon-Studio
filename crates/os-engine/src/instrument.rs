@@ -15,6 +15,14 @@ pub trait Instrument: Send {
     fn note_off(&mut self, offset: u32, key: u8);
     /// Renders `left.len()` frames at `rate`, overwriting both buffers.
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
+    /// True while the instrument still has sound to deliver (ringing voices, a long sample): the engine keeps
+    /// processing it instead of stopping after its idle tail. Valid after `process`.
+    fn active(&self) -> bool {
+        false
+    }
+    /// Silences the instrument at once: every voice, tail and queued note is dropped (Stop). Called with no
+    /// stream processing the instrument.
+    fn reset(&mut self) {}
 }
 
 pub type SharedInstrument = Arc<Mutex<dyn Instrument>>;

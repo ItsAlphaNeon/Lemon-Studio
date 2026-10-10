@@ -108,10 +108,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let per_step = ppq / 4;
     let pat = s.project.patterns.iter().find(|p| p.number == s.pattern);
     // Playback position (pattern mode) for the activity slots.
-    let tick = (f.playing && !s.song_mode).then(|| {
-        let loop_len = f64::from(len * per_step);
-        (f.seconds * s.tempo / 60.0 * f64::from(ppq)) % loop_len
-    });
+    let tick = (f.playing && !f.song).then_some(f.tick);
 
     ui.c.push_clip(rows_clip);
     let first = (scroll / ROW_H) as usize;

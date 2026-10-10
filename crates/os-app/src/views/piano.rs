@@ -178,11 +178,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         None => {}
     }
     // Playhead (pattern mode).
-    if f.playing && !s.song_mode {
-        let len = piano::pattern_length(s, notes);
-        let ppq = f64::from(s.project.ppq.max(1));
-        let tick = (f.seconds * s.tempo / 60.0 * ppq) % f64::from(len.max(1));
-        let x = g.x_of(tick as f32);
+    if f.playing && !f.song {
+        let x = g.x_of(f.tick as f32);
         ui.c.fill_rect(Rect::new(x, l.grid.y, 1.5, l.grid.h), t.playhead);
     } else if !f.playing {
         // Stopped: a grey line at the play-start marker (§10).

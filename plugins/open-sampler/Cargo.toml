@@ -12,6 +12,7 @@ crate-type = ["cdylib", "lib"]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
 os-engine.workspace = true
 os-model.workspace = true
+os-hostlink.workspace = true
 os-ui = { path = "../../crates/os-ui" }
 
 [target.'cfg(windows)'.dependencies]

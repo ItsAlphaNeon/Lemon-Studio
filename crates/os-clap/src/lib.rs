@@ -19,11 +19,12 @@ use clap_sys::events::{
     CLAP_EVENT_NOTE_ON,
 };
 use clap_sys::ext::gui::{clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32};
+use clap_sys::ext::params::{clap_host_params, clap_plugin_params, CLAP_EXT_PARAMS};
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
 use clap_sys::host::clap_host;
 use clap_sys::plugin::clap_plugin;
-use clap_sys::process::clap_process;
+use clap_sys::process::{clap_process, CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, CLAP_PROCESS_TAIL};
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{clap_version_is_compatible, CLAP_VERSION};
 
@@ -135,15 +136,28 @@ pub fn find_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
 struct HostData {
     callback: AtomicBool,
     restart: AtomicBool,
+    /// The plugin asked for a parameter flush (`clap_host_params.request_flush`): an edit from its editor waits in its
+    /// output queue and only takes effect when the host flushes (or processes).
+    flush: AtomicBool,
 }
 
 static HOST_NAME: &CStr = c"OpenStudio";
 static HOST_URL: &CStr = c"";
 static HOST_VERSION: &CStr = c"0.0.1";
 
-unsafe extern "C" fn host_get_extension(_host: *const clap_host, _id: *const c_char) -> *const c_void {
+unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_char) -> *const c_void {
+    if !id.is_null() && unsafe { CStr::from_ptr(id) } == CLAP_EXT_PARAMS {
+        return &HOST_PARAMS as *const clap_host_params as *const c_void;
+    }
     ptr::null()
 }
+unsafe extern "C" fn host_params_rescan(_host: *const clap_host, _flags: u32) {}
+unsafe extern "C" fn host_params_clear(_host: *const clap_host, _id: u32, _flags: u32) {}
+unsafe extern "C" fn host_params_request_flush(host: *const clap_host) {
+    unsafe { (*((*host).host_data as *const HostData)).flush.store(true, Ordering::Release) };
+}
+static HOST_PARAMS: clap_host_params =
+    clap_host_params { rescan: Some(host_params_rescan), clear: Some(host_params_clear), request_flush: Some(host_params_request_flush) };
 unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).restart.store(true, Ordering::Release) };
 }
@@ -167,6 +181,7 @@ pub struct Plugin {
     plugin: *const clap_plugin,
     gui: *const clap_plugin_gui,
     state: *const clap_plugin_state,
+    params: *const clap_plugin_params,
     /// Kept alive for the plugin, which holds a pointer to it.
     _host: Box<clap_host>,
     host_data: Box<HostData>,
@@ -179,6 +194,8 @@ pub struct Plugin {
     queue: Vec<Ev>,
     notes: Vec<clap_event_note>,
     steady: i64,
+    /// The plugin's last process status says it still has sound to deliver (`Instrument::active`).
+    sounding: bool,
     dbg_peak: f32,
     dbg_frames: u64,
     /// The editor is open (parented into a host window).
@@ -203,7 +220,7 @@ impl Plugin {
     /// Creates and initialises plugin `id` from `lib` (UI thread).
     pub fn new(lib: &Arc<Library>, id: &str) -> Result<Plugin, String> {
         let desc = lib.plugins.iter().find(|d| d.id == id).cloned().ok_or_else(|| format!("{}: no plugin {id}", lib.path.display()))?;
-        let host_data = Box::new(HostData { callback: AtomicBool::new(false), restart: AtomicBool::new(false) });
+        let host_data = Box::new(HostData { callback: AtomicBool::new(false), restart: AtomicBool::new(false), flush: AtomicBool::new(false) });
         let host = Box::new(clap_host {
             clap_version: CLAP_VERSION,
             host_data: &*host_data as *const HostData as *mut c_void,
@@ -232,11 +249,13 @@ impl Plugin {
             let ext = |name: &CStr| (*plugin).get_extension.map_or(ptr::null(), |g| g(plugin, name.as_ptr()));
             let gui = ext(CLAP_EXT_GUI) as *const clap_plugin_gui;
             let state = ext(CLAP_EXT_STATE) as *const clap_plugin_state;
+            let params = ext(CLAP_EXT_PARAMS) as *const clap_plugin_params;
             Ok(Plugin {
                 desc,
                 plugin,
                 gui,
                 state,
+                params,
                 _host: host,
                 host_data,
                 rate: 0,
@@ -246,6 +265,7 @@ impl Plugin {
                 queue: Vec::with_capacity(256),
                 notes: Vec::with_capacity(256),
                 steady: 0,
+                sounding: false,
                 dbg_peak: 0.0,
                 dbg_frames: 0,
                 editor: false,
@@ -285,6 +305,32 @@ impl Plugin {
         self.rate = 0;
     }
 
+    /// Lets the plugin apply the parameter edits its editor queued (and drops the events it reports back: the
+    /// plugin already holds the values). Without this an edit made while no audio stream is processing the plugin
+    /// never takes effect, and the queue fills up. The caller holds the instance's mutex, so this never overlaps
+    /// `process`.
+    fn flush_params(&mut self) {
+        if self.params.is_null() {
+            return;
+        }
+        unsafe extern "C" fn size(_l: *const clap_input_events) -> u32 {
+            0
+        }
+        unsafe extern "C" fn get(_l: *const clap_input_events, _i: u32) -> *const clap_event_header {
+            ptr::null()
+        }
+        unsafe extern "C" fn push(_l: *const clap_output_events, _e: *const clap_event_header) -> bool {
+            true
+        }
+        let ins = clap_input_events { ctx: ptr::null_mut(), size: Some(size), get: Some(get) };
+        let outs = clap_output_events { ctx: ptr::null_mut(), try_push: Some(push) };
+        unsafe {
+            if let Some(f) = (*self.params).flush {
+                f(self.plugin, &ins, &outs);
+            }
+        }
+    }
+
     /// UI-thread housekeeping: callbacks the plugin asked for, restarts, rate changes, a closed editor window.
     pub fn idle(&mut self) {
         unsafe {
@@ -293,6 +339,9 @@ impl Plugin {
                     f(self.plugin);
                 }
             }
+        }
+        if self.host_data.flush.swap(false, Ordering::AcqRel) {
+            self.flush_params();
         }
         let wanted = self.wanted_rate.swap(0, Ordering::AcqRel);
         let restart = self.host_data.restart.swap(false, Ordering::AcqRel);
@@ -444,16 +493,39 @@ impl Plugin {
             in_events: &ins,
             out_events: &outs,
         };
-        unsafe {
-            if let Some(f) = (*self.plugin).process {
-                f(self.plugin, &p);
-            }
-        }
+        let status = unsafe { (*self.plugin).process.map_or(CLAP_PROCESS_CONTINUE, |f| f(self.plugin, &p)) };
+        // CONTINUE / TAIL: the plugin says it is still going; CONTINUE_IF_NOT_QUIET: while its output is not silent.
+        let loud = left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
+        self.sounding = status == CLAP_PROCESS_CONTINUE || status == CLAP_PROCESS_TAIL || (status == CLAP_PROCESS_CONTINUE_IF_NOT_QUIET && loud);
         self.steady += i64::from(n);
     }
 }
 
 impl os_engine::Instrument for Plugin {
+    fn active(&self) -> bool {
+        self.sounding
+    }
+
+    fn reset(&mut self) {
+        self.queue.clear();
+        self.sounding = false;
+        if self.rate == 0 {
+            return;
+        }
+        // CLAP: stop processing, then `reset` clears the plugin's voices and tails; processing restarts on the next block.
+        unsafe {
+            if self.processing {
+                if let Some(s) = (*self.plugin).stop_processing {
+                    s(self.plugin);
+                }
+                self.processing = false;
+            }
+            if let Some(r) = (*self.plugin).reset {
+                r(self.plugin);
+            }
+        }
+    }
+
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
         self.queue.push(Ev { time: offset, on: true, key, velocity });
     }
@@ -596,6 +668,111 @@ mod tests {
         e.process(&mut out);
         let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(peak > 0.05, "engine output through Open Sampler (peak {peak})");
+    }
+
+    /// A held-then-released live note of a long sample, as the typing keyboard plays it: in tune, and it keeps
+    /// sounding past the engine's 5 s idle tail until the sample ends.
+    #[test]
+    fn long_live_note_is_in_tune_and_not_cut_off() {
+        let Some(lib) = open_sampler() else { return };
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        // 30 s of a 441 Hz sine at 44.1 kHz.
+        let wav = std::env::temp_dir().join("os-clap-long.wav");
+        let tone: Vec<f32> = (0..44100 * 30).flat_map(|i| { let v = (i as f32 / 44100.0 * 441.0 * std::f32::consts::TAU).sin() * 0.5; [v, v] }).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &tone).unwrap();
+        let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&wav.to_string_lossy()));
+        let mut blob = (state.len() as u64).to_le_bytes().to_vec();
+        blob.extend_from_slice(state.as_bytes());
+        assert!(p.load_state(&blob));
+        assert!(p.activate(48000));
+        let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
+        let ch = os_model::Channel {
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
+            enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
+            layer_children: vec![], envelopes: Default::default(),
+        };
+        let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
+        let mut lib = os_engine::SampleLibrary::default();
+        let mut e = os_engine::Engine::new(&project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
+        e.clear_schedule();
+        e.set_instrument(0, shared);
+        let mut out = Vec::new();
+        let block = 1440; // 30 ms, what a WASAPI callback typically asks for
+        for b in 0..(48000 * 12 / block) {
+            if b == 3 {
+                e.note_on(0, 60, 100);
+            }
+            if b == 40 {
+                e.note_off(0, 60); // key released after ~1.2 s
+            }
+            let mut buf = vec![0.0f32; block * 2];
+            if !e.finished() {
+                e.process(&mut buf);
+            }
+            out.extend(buf.chunks_exact(2).map(|f| f[0]));
+        }
+        let window = |from_s: f32, to_s: f32| &out[(from_s * 48000.0) as usize..(to_s * 48000.0) as usize];
+        let peak = |w: &[f32]| w.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let crossings = |w: &[f32]| w.windows(2).filter(|p| p[0] <= 0.0 && p[1] > 0.0).count() as f32 / (w.len() as f32 / 48000.0);
+        let f = crossings(window(0.5, 1.0));
+        eprintln!("frequency {f:.1} Hz; peaks 0.5-1 s {:.3}, 6-7 s {:.3}, 9-10 s {:.3}", peak(window(0.5, 1.0)), peak(window(6.0, 7.0)), peak(window(9.0, 10.0)));
+        assert!((f - 441.0).abs() < 4.0, "in tune: {f} Hz");
+        assert!(peak(window(6.0, 7.0)) > 0.1, "still playing after the 5 s idle tail");
+        assert!(peak(window(9.0, 10.0)) > 0.1, "still playing at 9 s");
+    }
+
+    /// One note_on through the engine (as the typing keyboard plays it) must fire the sample exactly once.
+    #[test]
+    fn one_note_on_fires_the_sample_once() {
+        let Some(lib) = open_sampler() else { return };
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        // A single-unit impulse then silence: every voice start is one spike.
+        let wav = std::env::temp_dir().join("os-clap-impulse.wav");
+        let mut frame = vec![0.0f32; 48000 * 2];
+        frame[0] = 1.0;
+        frame[1] = 1.0;
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frame).unwrap();
+        let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&wav.to_string_lossy()));
+        let mut blob = (state.len() as u64).to_le_bytes().to_vec();
+        blob.extend_from_slice(state.as_bytes());
+        assert!(p.load_state(&blob));
+        assert!(p.activate(48000));
+        let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
+        let ch = os_model::Channel {
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
+            enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
+            layer_children: vec![], envelopes: Default::default(),
+        };
+        let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
+        let mut lib = os_engine::SampleLibrary::default();
+        let mut e = os_engine::Engine::new(&project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
+        e.clear_schedule();
+        e.set_instrument(0, shared);
+        let mut out = Vec::new();
+        let block = 1440;
+        for b in 0..30 {
+            if b == 1 {
+                e.note_on(0, 60, 100);
+            }
+            let mut buf = vec![0.0f32; block * 2];
+            if !e.finished() {
+                e.process(&mut buf);
+            }
+            out.extend(buf.chunks_exact(2).map(|f| f[0]));
+        }
+        // One spike per voice start (> 0.05 after at least 100 quiet frames).
+        let (mut starts, mut quiet) = (0, 1000);
+        for v in &out {
+            if v.abs() > 0.05 {
+                if quiet > 100 {
+                    starts += 1;
+                }
+                quiet = 0;
+            } else {
+                quiet += 1;
+            }
+        }
+        assert_eq!(starts, 1, "one note_on fired the sample {starts} times");
     }
 
     /// JSON string literal holding `s` as a JSON string (nih-plug stores persisted fields as serialised JSON).

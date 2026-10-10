@@ -5,6 +5,7 @@
 // spec: ui/main-window.md §10 (typography)
 
 mod glyph;
+pub mod tabler;
 mod text;
 
 use std::collections::HashMap;
@@ -502,6 +503,17 @@ impl Canvas {
         }
         self.text.draw(&mut self.pixmap, clip, f, k, xi, yi, c, s, true);
         w as f32 / k
+    }
+
+    /// Draw a Tabler icon (24-unit grid) centred in `r`, scaled to the shorter side, in color `c`.
+    pub fn icon(&mut self, icon: &tabler::TablerIcon, r: Rect, c: Color) {
+        let k = r.w.min(r.h) / 24.0;
+        let (ox, oy) = (r.cx() - 12.0 * k, r.cy() - 12.0 * k);
+        let mut g = Glyph::new();
+        g.round_caps = true;
+        let stroke = if icon.filled { None } else { Some((2.0 * k).max(1.1)) };
+        g.commands(icon.d, ox, oy, k, stroke);
+        self.glyph(c, &g);
     }
 
     /// Draw an icon glyph with subpixel (ClearType-style) coverage in color `c`.

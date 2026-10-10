@@ -1,42 +1,113 @@
-//! Playback: an audio thread that owns the output stream and the engine.
+//! Playback: an audio thread that owns the output streams and the engines.
 //!
-//! The UI sends a project snapshot on Play; `update` swaps in an edited snapshot at the current
-//! position (heard immediately; decoded samples stay cached in the library). Pattern mode loops
-//! inside the engine (`Engine::set_looping`). `preview` plays one note once on its own stream.
-//! Hosted generator plugins (`set_instruments`) are attached to the playback and live engines only: an instance must
-//! not be processed by two streams, so previews of plugin channels play as timed live notes.
+//! One state machine, `State` (stopped / playing / paused), published in `Shared`:
+//! - **Play** starts the pattern or the playlist from a start tick (a pattern loops inside the engine, the
+//!   playlist plays out and stops by itself).
+//! - **Pause** fades the stream out over a few milliseconds and holds the engine where it is (position, ringing
+//!   voices, hosted plugins untouched); **Resume** fades back in from that exact place.
+//! - **Stop** fades out, drops the streams, silences every hosted instrument (`Instrument::reset`: voices and tails
+//!   die, nothing resumes later) and rewinds to the start. It also ends live notes and previews.
+//!
+//! The UI sets the state at once (so a double click behaves), then sends the matching command; commands are
+//! applied in order on the audio thread. `generation` counts play / stop requests: a song that finishes after a
+//! newer request must not stop it.
+//!
+//! `update` swaps in an edited snapshot at the current position (decoded samples stay cached in the library).
+//! `preview` plays one note once on its own stream. Hosted generator plugins (`set_instruments`) are attached to
+//! the playback and live engines only: an instance must not be processed by two streams, so previews of plugin
+//! channels play as timed live notes.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
 use os_engine::{Engine, PlayMode, SampleLibrary, SharedInstrument};
 use os_model::Project;
 
+/// Transport state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    Stopped,
+    Playing,
+    Paused,
+}
+
+const STOPPED: u8 = 0;
+const PLAYING: u8 = 1;
+const PAUSED: u8 = 2;
+
+/// Seconds a stream takes to fade out (pause, stop) or in (resume): no clicks.
+const FADE_SECONDS: f64 = 0.006;
+/// How long a stopped stream stays alive to finish its fade before it is dropped.
+const CLOSE_AFTER: Duration = Duration::from_millis(40);
+
 /// State the UI reads every frame.
 #[derive(Default)]
 pub struct Shared {
-    pub playing: AtomicBool,
-    /// Playback holds its position silently (Play pressed while playing).
-    pub paused: AtomicBool,
-    /// Playback position in frames.
-    pub position: AtomicU64,
-    pub sample_rate: AtomicU32,
+    state: AtomicU8,
+    /// Counts play and stop requests (see the module docs).
+    generation: AtomicU64,
+    /// The running playback is the playlist (else one pattern).
+    song: AtomicBool,
+    /// Playback position in frames of the output stream.
+    position: AtomicU64,
+    /// Playback position in ticks (f64 bits): what every playhead and the time display show. A pattern wraps.
+    tick: AtomicU64,
+    sample_rate: AtomicU32,
     /// Peak of the last block, f32 bits, per side.
-    pub peak_l: AtomicU32,
-    pub peak_r: AtomicU32,
-    pub error: Mutex<Option<String>>,
+    peak_l: AtomicU32,
+    peak_r: AtomicU32,
+    error: Mutex<Option<String>>,
     /// Notes playing now, as (channel index, key); written by the audio callback.
-    pub sounding: Mutex<Vec<(u16, u16)>>,
+    sounding: Mutex<Vec<(u16, u16)>>,
+    /// The last samples that left the playback / live stream (mono), for the toolbar monitor.
+    tap: Mutex<Tap>,
+}
+
+/// Ring of the newest output samples.
+struct Tap {
+    buf: Vec<f32>,
+    pos: usize,
+    /// Samples written since the start; unchanged = no audio arrived.
+    total: u64,
+}
+
+impl Default for Tap {
+    fn default() -> Self {
+        Tap { buf: vec![0.0; 8192], pos: 0, total: 0 }
+    }
+}
+
+impl Tap {
+    fn push(&mut self, v: f32) {
+        self.buf[self.pos] = v;
+        self.pos = (self.pos + 1) % self.buf.len();
+        self.total += 1;
+    }
+}
+
+impl Shared {
+    /// Back to the start: position, meters and lit keys.
+    fn rewind(&self, tick: f64) {
+        self.position.store(0, Ordering::Relaxed);
+        self.tick.store(tick.to_bits(), Ordering::Relaxed);
+        self.peak_l.store(0, Ordering::Relaxed);
+        self.peak_r.store(0, Ordering::Relaxed);
+        if let Ok(mut v) = self.sounding.lock() {
+            v.clear();
+        }
+    }
 }
 
 enum Cmd {
-    /// Project, mode, start tick (the piano roll's play-start marker in pattern mode).
-    Play(Box<Project>, PlayMode, f64),
+    /// Project, mode, start tick (the piano roll's play-start marker in pattern mode), request generation.
+    Play(Box<Project>, PlayMode, f64, u64),
+    Pause,
+    Resume,
     /// The newest edited project is in `Transport::latest` (older ones are skipped).
     Update,
     Preview(Box<Project>),
@@ -55,7 +126,7 @@ pub struct Transport {
     tx: Sender<Cmd>,
     latest: Arc<Mutex<Option<Project>>>,
     instruments: Instruments,
-    pub shared: Arc<Shared>,
+    shared: Arc<Shared>,
 }
 
 impl Transport {
@@ -90,11 +161,16 @@ impl Transport {
         device.default_output_config().ok().map(|c| c.sample_rate())
     }
 
+    /// Start (or restart) playback from `start_tick`; replaces whatever is playing or paused.
     pub fn play(&self, project: &Project, mode: PlayMode, start_tick: f64) {
         if let Ok(mut slot) = self.latest.lock() {
             *slot = None;
         }
-        let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode, start_tick));
+        let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.shared.song.store(matches!(mode, PlayMode::Song), Ordering::Relaxed);
+        self.shared.rewind(start_tick);
+        self.shared.state.store(PLAYING, Ordering::Release);
+        let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode, start_tick, generation));
     }
 
     /// Replace the playing project, continuing from the current position.
@@ -122,33 +198,80 @@ impl Transport {
         let _ = self.tx.send(Cmd::NoteOff(channel, key));
     }
 
-    /// Hold playback at its position (silent); `resume` continues from there.
+    /// Hold playback where it is (Playing -> Paused); `resume` continues from the same place.
     pub fn pause(&self) {
-        self.shared.paused.store(true, Ordering::Relaxed);
-        if let Ok(mut v) = self.shared.sounding.lock() {
-            v.clear();
+        if self.shared.state.compare_exchange(PLAYING, PAUSED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            if let Ok(mut v) = self.shared.sounding.lock() {
+                v.clear();
+            }
+            let _ = self.tx.send(Cmd::Pause);
         }
     }
 
     pub fn resume(&self) {
-        self.shared.paused.store(false, Ordering::Relaxed);
+        if self.shared.state.compare_exchange(PAUSED, PLAYING, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            let _ = self.tx.send(Cmd::Resume);
+        }
     }
 
-    pub fn paused(&self) -> bool {
-        self.playing() && self.shared.paused.load(Ordering::Relaxed)
-    }
-
+    /// Stop everything: playback rewinds, hosted instruments fall silent, live notes and previews end. Also works
+    /// when already stopped (it silences notes still ringing from the typing keyboard or a preview).
     pub fn stop(&self) {
+        self.shared.generation.fetch_add(1, Ordering::AcqRel);
+        self.shared.state.store(STOPPED, Ordering::Release);
+        self.shared.rewind(0.0);
         let _ = self.tx.send(Cmd::Stop);
     }
 
+    pub fn state(&self) -> State {
+        match self.shared.state.load(Ordering::Acquire) {
+            PLAYING => State::Playing,
+            PAUSED => State::Paused,
+            _ => State::Stopped,
+        }
+    }
+
+    /// Playing or paused: there is a running song position (stopped = rewound).
     pub fn playing(&self) -> bool {
-        self.shared.playing.load(Ordering::Relaxed)
+        self.state() != State::Stopped
+    }
+
+    pub fn paused(&self) -> bool {
+        self.state() == State::Paused
+    }
+
+    /// The running playback is the playlist (false: one pattern). Meaningful while `playing`.
+    pub fn song(&self) -> bool {
+        self.shared.song.load(Ordering::Relaxed)
+    }
+
+    /// Playback position in ticks of the running mode (a looping pattern wraps at its end).
+    pub fn tick(&self) -> f64 {
+        f64::from_bits(self.shared.tick.load(Ordering::Relaxed))
     }
 
     pub fn seconds(&self) -> f64 {
         let rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
         self.shared.position.load(Ordering::Relaxed) as f64 / f64::from(rate)
+    }
+
+    /// Fills `out` with the newest output samples (oldest first, at most 8192) and returns the running sample
+    /// count; an unchanged count means nothing was played since the last call.
+    pub fn tap(&self, out: &mut [f32]) -> u64 {
+        let Ok(t) = self.shared.tap.lock() else { return 0 };
+        let n = out.len().min(t.buf.len());
+        let skip = out.len() - n;
+        out[..skip].fill(0.0);
+        let len = t.buf.len();
+        for (i, o) in out[skip..].iter_mut().enumerate() {
+            *o = t.buf[(t.pos + len - n + i) % len];
+        }
+        t.total
+    }
+
+    /// The output stream's sample rate (0 until the first stream opened).
+    pub fn sample_rate(&self) -> u32 {
+        self.shared.sample_rate.load(Ordering::Relaxed)
     }
 
     pub fn peaks(&self) -> (f32, f32) {
@@ -179,13 +302,27 @@ fn attach(e: &mut Engine, inst: &Instruments) {
     }
 }
 
+/// Silences every hosted instrument (voices, tails, queued notes). Only called while no stream processes them.
+fn reset_instruments(inst: &Instruments) {
+    let list: Vec<SharedInstrument> = inst.lock().map(|l| l.iter().map(|(_, i)| i.clone()).collect()).unwrap_or_default();
+    for i in list {
+        if let Ok(mut i) = i.lock() {
+            i.reset();
+        }
+    }
+}
+
 fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option<Project>>>, inst: Instruments, mut library: SampleLibrary) {
+    // The playback: the pattern or the playlist, running or paused.
     let mut session: Option<Session> = None;
     // One-shot note previews play on their own stream, so they also sound while playing or paused.
     let mut preview: Option<Session> = None;
     // Live notes while stopped or paused: an engine with no schedule on a stream that stays open.
     let mut live: Option<Session> = None;
     let mut live_project: Option<Project> = None;
+    // Streams that were stopped and finish their fade before they are dropped.
+    let mut closing: Vec<(Session, Instant)> = Vec::new();
+    let mut reset_pending = false;
     let swap = |s: &mut Session, library: &mut SampleLibrary| {
         // Build outside the lock, then swap at the playing position.
         let mut e = Engine::new(&s.project, library, s.rate, s.mode);
@@ -204,8 +341,13 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             *slot = Some(e);
         }
     };
+    let retire = |s: Session, closing: &mut Vec<(Session, Instant)>| {
+        s.ctl.report.store(false, Ordering::Relaxed);
+        s.ctl.paused.store(true, Ordering::Relaxed);
+        closing.push((s, Instant::now()));
+    };
     loop {
-        match rx.recv_timeout(Duration::from_millis(15)) {
+        match rx.recv_timeout(Duration::from_millis(10)) {
             Ok(Cmd::Update) => {
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
                     for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
@@ -221,13 +363,12 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
             }
             Ok(Cmd::NoteOn(ch, key, vel)) => {
-                let paused = shared.paused.load(Ordering::Relaxed);
                 let target = match session.as_ref() {
-                    Some(s) if !paused => Some(s),
+                    Some(s) if !s.paused() => Some(s),
                     _ => {
                         if live.is_none() {
                             if let Some(p) = &live_project {
-                                match Session::start(p, PlayMode::Pattern(1), Kind::Live, &mut library, shared.clone(), &inst) {
+                                match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst) {
                                     Ok(s) => live = Some(s),
                                     Err(e) => report(&shared, e),
                                 }
@@ -253,17 +394,17 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 let row = note.and_then(|n| project.channels.iter().position(|c| c.index == n.channel));
                 let hosted = row.is_some_and(|r| inst.lock().is_ok_and(|l| l.iter().any(|(i, _)| *i == r)));
                 if let (true, Some(n), Some(r)) = (hosted, note, row) {
-                    let paused = shared.paused.load(Ordering::Relaxed);
-                    if (session.is_none() || paused) && live.is_none() {
+                    let running = session.as_ref().is_some_and(|s| !s.paused());
+                    if !running && live.is_none() {
                         if let Some(p) = live_project.as_ref().or(Some(&*project)) {
-                            match Session::start(p, PlayMode::Pattern(1), Kind::Live, &mut library, shared.clone(), &inst) {
+                            match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst) {
                                 Ok(s) => live = Some(s),
                                 Err(e) => report(&shared, e),
                             }
                         }
                     }
                     let target = match session.as_ref() {
-                        Some(s) if !paused => Some(s),
+                        Some(s) if !s.paused() => Some(s),
                         _ => live.as_ref(),
                     };
                     if let Some(s) = target {
@@ -276,16 +417,26 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     continue;
                 }
                 preview = None;
-                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, &mut library, shared.clone(), &inst) {
+                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
             }
-            Ok(Cmd::Play(project, mode, start)) => {
+            Ok(Cmd::Play(project, mode, start, generation)) => {
+                // A newer request (stop, another play) already superseded this one.
+                if generation != shared.generation.load(Ordering::Acquire) {
+                    continue;
+                }
+                // The old playback is replaced, not faded; nothing may keep ringing into the new one. A live stream
+                // left open would process the same plugin instances a second time (each stream would only hear
+                // every other chunk of a ringing sample): typed notes go into the playing engine instead.
                 session = None;
-                shared.paused.store(false, Ordering::Relaxed);
+                live = None;
+                closing.clear();
+                reset_instruments(&inst);
+                reset_pending = false;
                 live_project = Some((*project).clone());
-                match Session::start(&project, mode, Kind::Song, &mut library, shared.clone(), &inst) {
+                match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst) {
                     Ok(s) => {
                         if start > 0.0 {
                             let tempo = project.tempo.unwrap_or(140.0);
@@ -297,12 +448,28 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                         }
                         session = Some(s);
                     }
-                    Err(e) => report(&shared, e),
+                    Err(e) => {
+                        report(&shared, e);
+                        let _ = shared.state.compare_exchange(PLAYING, STOPPED, Ordering::AcqRel, Ordering::Acquire);
+                        shared.rewind(0.0);
+                    }
+                }
+            }
+            Ok(Cmd::Pause) => {
+                if let Some(s) = &session {
+                    s.ctl.paused.store(true, Ordering::Relaxed);
+                }
+            }
+            Ok(Cmd::Resume) => {
+                if let Some(s) = &session {
+                    s.ctl.paused.store(false, Ordering::Relaxed);
                 }
             }
             Ok(Cmd::Stop) => {
-                session = None;
-                shared.paused.store(false, Ordering::Relaxed);
+                for s in [session.take(), live.take(), preview.take()].into_iter().flatten() {
+                    retire(s, &mut closing);
+                }
+                reset_pending = true;
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
@@ -310,18 +477,23 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         if preview.as_ref().is_some_and(|p| p.done.load(Ordering::Relaxed)) {
             preview = None;
         }
-        // Patterns loop inside the engine (sample-accurate); a song ends when it has played out.
-        if session.as_ref().is_some_and(|s| s.done.load(Ordering::Relaxed)) {
-            session = None;
-            shared.paused.store(false, Ordering::Relaxed);
-        }
-        if session.is_none() {
-            shared.playing.store(false, Ordering::Relaxed);
-            if let Ok(mut v) = shared.sounding.lock() {
-                v.clear();
+        // Stopped streams are dropped once their fade is over; then the instruments are silenced for good.
+        closing.retain(|(_, since)| since.elapsed() < CLOSE_AFTER);
+        if reset_pending && closing.is_empty() {
+            reset_pending = false;
+            reset_instruments(&inst);
+            if session.is_none() && shared.state.load(Ordering::Acquire) == STOPPED {
+                shared.rewind(0.0);
             }
-            shared.peak_l.store(0, Ordering::Relaxed);
-            shared.peak_r.store(0, Ordering::Relaxed);
+        }
+        // A pattern loops inside the engine; a song ends when it has played out and everything has rung out.
+        if session.as_ref().is_some_and(|s| s.done.load(Ordering::Relaxed)) {
+            if let Some(s) = session.take() {
+                if s.generation == shared.generation.load(Ordering::Acquire) {
+                    shared.state.store(STOPPED, Ordering::Release);
+                    shared.rewind(0.0);
+                }
+            }
         }
     }
 }
@@ -336,11 +508,22 @@ enum Kind {
     Live,
 }
 
+/// Controls shared with a stream's callback.
+struct Ctl {
+    /// Fade out and hold the engine (pause, stop).
+    paused: AtomicBool,
+    /// Publish position, meters and sounding notes (the playback stream until it is stopped).
+    report: AtomicBool,
+}
+
 struct Session {
     _stream: cpal::Stream,
     kind: Kind,
     engine: Arc<Mutex<Engine>>,
     done: Arc<AtomicBool>,
+    ctl: Arc<Ctl>,
+    /// The play request this session answers.
+    generation: u64,
     /// The project playing (live edits replace it).
     project: Project,
     mode: PlayMode,
@@ -348,8 +531,12 @@ struct Session {
 }
 
 impl Session {
-    fn start(project: &Project, mode: PlayMode, kind: Kind, library: &mut SampleLibrary, shared: Arc<Shared>, inst: &Instruments) -> Result<Session, String> {
-        let looping = kind == Kind::Song;
+    fn paused(&self) -> bool {
+        self.ctl.paused.load(Ordering::Relaxed)
+    }
+
+    fn start(project: &Project, mode: PlayMode, kind: Kind, generation: u64, library: &mut SampleLibrary, shared: Arc<Shared>, inst: &Instruments) -> Result<Session, String> {
+        let song = kind == Kind::Song;
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or("no audio output device")?;
         let supported = device.default_output_config().map_err(|e| e.to_string())?;
@@ -358,7 +545,7 @@ impl Session {
         let rate = config.sample_rate;
         let mut e = Engine::new(project, library, rate, mode);
         // Pattern playback loops on the bar line.
-        e.set_looping(looping && matches!(mode, PlayMode::Pattern(_)));
+        e.set_looping(song && matches!(mode, PlayMode::Pattern(_)));
         if kind == Kind::Live {
             e.clear_schedule();
         }
@@ -367,29 +554,101 @@ impl Session {
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));
-        if looping {
+        let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), report: AtomicBool::new(song) });
+        if kind != Kind::Preview {
             shared.sample_rate.store(rate, Ordering::Relaxed);
-            shared.position.store(0, Ordering::Relaxed);
         }
-        let args = (&device, &config, engine.clone(), done.clone(), shared.clone(), looping);
+        let mut renderer = Renderer::new(engine.clone(), ctl.clone(), done.clone(), shared, rate);
+        renderer.tap = kind != Kind::Preview;
         let stream = match format {
-            SampleFormat::F32 => build::<f32>(args),
-            SampleFormat::I16 => build::<i16>(args),
-            SampleFormat::I32 => build::<i32>(args),
-            SampleFormat::U16 => build::<u16>(args),
+            SampleFormat::F32 => build::<f32>(&device, &config, renderer),
+            SampleFormat::I16 => build::<i16>(&device, &config, renderer),
+            SampleFormat::I32 => build::<i32>(&device, &config, renderer),
+            SampleFormat::U16 => build::<u16>(&device, &config, renderer),
             other => Err(format!("unsupported output sample format {other:?}")),
         }?;
         stream.play().map_err(|e| e.to_string())?;
-        if looping {
-            shared.playing.store(true, Ordering::Relaxed);
-        }
-        Ok(Session { _stream: stream, kind, engine, done, project: project.clone(), mode, rate })
+        Ok(Session { _stream: stream, kind, engine, done, ctl, generation, project: project.clone(), mode, rate })
     }
 }
 
-type BuildArgs<'a> = (&'a cpal::Device, &'a StreamConfig, Arc<Mutex<Engine>>, Arc<AtomicBool>, Arc<Shared>, bool);
+/// What one output stream does per block: render the engine, fade it for pause / stop, publish the position.
+/// (Separate from the device so it can be tested without one.)
+struct Renderer {
+    engine: Arc<Mutex<Engine>>,
+    ctl: Arc<Ctl>,
+    done: Arc<AtomicBool>,
+    shared: Arc<Shared>,
+    /// Output gain, ramped toward 1 (playing) or 0 (paused) by `step` per frame.
+    gain: f32,
+    step: f32,
+    /// Feed the monitor tap with what this stream outputs.
+    tap: bool,
+}
 
-fn build<T>((device, config, engine, done, shared, report): BuildArgs<'_>) -> Result<cpal::Stream, String>
+impl Renderer {
+    fn new(engine: Arc<Mutex<Engine>>, ctl: Arc<Ctl>, done: Arc<AtomicBool>, shared: Arc<Shared>, rate: u32) -> Renderer {
+        let step = (1.0 / (f64::from(rate.max(1)) * FADE_SECONDS)) as f32;
+        Renderer { engine, ctl, done, shared, gain: 1.0, step, tap: false }
+    }
+
+    /// Renders one block (see `render_block`) and copies it to the monitor tap, unless the stream is held.
+    fn render(&mut self, stereo: &mut [f32]) {
+        let held = self.gain == 0.0 && self.ctl.paused.load(Ordering::Relaxed);
+        self.render_block(stereo);
+        if self.tap && !held {
+            if let Ok(mut t) = self.shared.tap.try_lock() {
+                for f in stereo.chunks_exact(2) {
+                    t.push((f[0] + f[1]) * 0.5);
+                }
+            }
+        }
+    }
+
+    /// Renders `stereo.len() / 2` frames (interleaved L/R). A paused stream, once faded out, does not touch the
+    /// engine at all, so its position and voices stay exactly where they were.
+    fn render_block(&mut self, stereo: &mut [f32]) {
+        let target = if self.ctl.paused.load(Ordering::Relaxed) { 0.0 } else { 1.0 };
+        if self.gain == 0.0 && target == 0.0 {
+            stereo.fill(0.0);
+            return;
+        }
+        match self.engine.try_lock() {
+            Ok(mut e) if !e.finished() => {
+                e.process(stereo);
+                if self.ctl.report.load(Ordering::Relaxed) {
+                    self.shared.position.store(e.position(), Ordering::Relaxed);
+                    self.shared.tick.store(e.tick_position().to_bits(), Ordering::Relaxed);
+                    // Never block the audio thread; a missed update shows next block.
+                    if let Ok(mut v) = self.shared.sounding.try_lock() {
+                        v.clear();
+                        if target > 0.0 {
+                            v.extend(e.sounding().map(|(c, k)| (c as u16, k)));
+                        }
+                    }
+                }
+            }
+            Ok(_) => {
+                stereo.fill(0.0);
+                self.done.store(true, Ordering::Relaxed);
+                return;
+            }
+            Err(_) => {
+                stereo.fill(0.0);
+                return;
+            }
+        }
+        if self.gain != 1.0 || target != 1.0 {
+            for f in stereo.chunks_exact_mut(2) {
+                self.gain = if self.gain < target { (self.gain + self.step).min(target) } else { (self.gain - self.step).max(target) };
+                f[0] *= self.gain;
+                f[1] *= self.gain;
+            }
+        }
+    }
+}
+
+fn build<T>(device: &cpal::Device, config: &StreamConfig, mut renderer: Renderer) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
 {
@@ -401,27 +660,7 @@ where
             move |out: &mut [T], _| {
                 let frames = out.len() / channels;
                 stereo.resize(frames * 2, 0.0);
-                // Paused: silence, position held.
-                let paused = report && shared.paused.load(Ordering::Relaxed);
-                match engine.try_lock() {
-                    _ if paused => stereo.fill(0.0),
-                    Ok(mut e) if !e.finished() => {
-                        e.process(&mut stereo);
-                        if report {
-                            shared.position.store(e.position(), Ordering::Relaxed);
-                            // Never block the audio thread; a missed update shows next block.
-                            if let Ok(mut v) = shared.sounding.try_lock() {
-                                v.clear();
-                                v.extend(e.sounding().map(|(c, k)| (c as u16, k)));
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        stereo.fill(0.0);
-                        done.store(true, Ordering::Relaxed);
-                    }
-                    Err(_) => stereo.fill(0.0),
-                }
+                renderer.render(&mut stereo);
                 let (mut pl, mut pr) = (0.0f32, 0.0f32);
                 for (frame, s) in out.chunks_mut(channels).zip(stereo.chunks_exact(2)) {
                     pl = pl.max(s[0].abs());
@@ -431,9 +670,9 @@ where
                         *slot = T::from_sample(v.clamp(-1.0, 1.0));
                     }
                 }
-                if report {
-                    shared.peak_l.store(pl.to_bits(), Ordering::Relaxed);
-                    shared.peak_r.store(pr.to_bits(), Ordering::Relaxed);
+                if renderer.ctl.report.load(Ordering::Relaxed) {
+                    renderer.shared.peak_l.store(pl.to_bits(), Ordering::Relaxed);
+                    renderer.shared.peak_r.store(pr.to_bits(), Ordering::Relaxed);
                 }
             },
             |e| eprintln!("audio stream error: {e}"),
@@ -445,6 +684,76 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn looping_engine() -> (Engine, Project) {
+        let mut project = crate::app::default_project();
+        let ch = project.channels[0].index;
+        project.patterns = vec![os_model::Pattern {
+            number: 1,
+            notes: (0..8).map(|i| os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, i * 48) }).collect(),
+            ..Default::default()
+        }];
+        project.tempo = Some(130.0);
+        let mut library = SampleLibrary::default();
+        let mut e = Engine::new(&project, &mut library, 48000, PlayMode::Pattern(1));
+        e.set_looping(true);
+        (e, project)
+    }
+
+    fn renderer(e: Engine) -> (Renderer, Arc<Ctl>, Arc<Shared>) {
+        let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), report: AtomicBool::new(true) });
+        let shared = Arc::new(Shared::default());
+        let r = Renderer::new(Arc::new(Mutex::new(e)), ctl.clone(), Arc::new(AtomicBool::new(false)), shared.clone(), 48000);
+        (r, ctl, shared)
+    }
+
+    /// Pause fades out and then holds the engine exactly; resume continues from that frame (no restart, no jump).
+    #[test]
+    fn pause_holds_and_resume_continues() {
+        let (e, _) = looping_engine();
+        let (mut r, ctl, shared) = renderer(e);
+        let mut block = vec![0.0f32; 512 * 2];
+        for _ in 0..20 {
+            r.render(&mut block);
+        }
+        let before = shared.position.load(Ordering::Relaxed);
+        assert!(before > 0 && block.iter().any(|v| v.abs() > 0.0), "playing and audible");
+        ctl.paused.store(true, Ordering::Relaxed);
+        // The fade takes under 300 frames: the second block is silent and the position no longer moves.
+        r.render(&mut block);
+        r.render(&mut block);
+        let held = shared.position.load(Ordering::Relaxed);
+        assert!(held >= before && held <= before + 1024, "fade block only: {before} -> {held}");
+        for _ in 0..10 {
+            r.render(&mut block);
+            assert!(block.iter().all(|v| *v == 0.0), "silent while paused");
+        }
+        assert_eq!(shared.position.load(Ordering::Relaxed), held, "position held");
+        ctl.paused.store(false, Ordering::Relaxed);
+        r.render(&mut block);
+        let after = shared.position.load(Ordering::Relaxed);
+        assert!(after > held && after <= held + 512, "continues from {held}, got {after}");
+        assert!(shared.sounding.lock().unwrap().len() <= 8);
+    }
+
+    /// The tick published to the UI follows the engine (a looping pattern wraps with it).
+    #[test]
+    fn tick_wraps_with_the_loop() {
+        let (e, _) = looping_engine();
+        let (mut r, _, shared) = renderer(e);
+        let mut block = vec![0.0f32; 4096 * 2];
+        let mut last = -1.0f64;
+        let mut wrapped = false;
+        // One bar at 130 bpm is about 1.85 s = 88_800 frames at 48 kHz.
+        for _ in 0..40 {
+            r.render(&mut block);
+            let t = f64::from_bits(shared.tick.load(Ordering::Relaxed));
+            assert!((0.0..384.0 + 1.0).contains(&t), "tick {t} stays inside the one-bar pattern");
+            wrapped |= t < last;
+            last = t;
+        }
+        assert!(wrapped, "the tick wrapped at the loop point");
+    }
 
     /// Needs an audio device: `cargo test -p os-app -- --ignored deleted_notes`.
     #[test]
@@ -518,7 +827,7 @@ mod tests {
         assert!(t.sounding().is_empty() && t.peaks() == (0.0, 0.0), "released: {:?}", t.peaks());
     }
 
-    /// Pause holds the position silently; resume continues from it (needs an audio device).
+    /// Pause holds the position silently; resume continues from it; Stop rewinds (needs an audio device).
     #[test]
     #[ignore]
     fn pause_holds_position() {
@@ -531,10 +840,81 @@ mod tests {
         t.pause();
         std::thread::sleep(Duration::from_millis(100));
         let at = t.seconds();
+        let tick = t.tick();
         std::thread::sleep(Duration::from_millis(400));
-        assert!(t.paused() && (t.seconds() - at).abs() < 1e-9, "position held");
+        assert!(t.paused() && (t.seconds() - at).abs() < 1e-9 && (t.tick() - tick).abs() < 1e-9, "position held");
+        assert_eq!(t.peaks(), (0.0, 0.0), "silent");
         t.resume();
         std::thread::sleep(Duration::from_millis(300));
-        assert!(!t.paused() && t.seconds() > at + 0.1, "resumed from {at}: {}", t.seconds());
+        assert!(!t.paused() && t.playing() && t.seconds() > at + 0.1, "resumed from {at}: {}", t.seconds());
+        t.pause();
+        t.stop();
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!t.playing() && t.seconds() == 0.0 && t.tick() == 0.0 && t.peaks() == (0.0, 0.0), "stopped = rewound");
+    }
+
+    /// The monitor tap carries what is played and goes quiet (count stops) when stopped (needs an audio device).
+    #[test]
+    #[ignore]
+    fn tap_follows_playback() {
+        let mut project = crate::app::default_project();
+        let ch = project.channels[4].index;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
+        let t = Transport::new(None);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        std::thread::sleep(Duration::from_millis(300));
+        let mut b = vec![0.0f32; 2048];
+        let n1 = t.tap(&mut b);
+        assert!(n1 > 0 && b.iter().any(|v| v.abs() > 0.01), "tap has audio");
+        assert!(t.sample_rate() > 0);
+        t.stop();
+        std::thread::sleep(Duration::from_millis(150));
+        let n2 = t.tap(&mut b);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(t.tap(&mut b), n2, "no more samples after stop");
+    }
+
+    /// A hosted instrument that rings until reset: Stop must silence it, and nothing may resume on the next Play.
+    #[test]
+    #[ignore]
+    fn stop_silences_hosted_instruments() {
+        use os_engine::Instrument;
+        struct Ringer {
+            level: f32,
+            resets: Arc<AtomicU32>,
+        }
+        impl Instrument for Ringer {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {
+                self.level = 0.3;
+            }
+            fn note_off(&mut self, _o: u32, _k: u8) {} // a long release: keeps ringing after the note
+            fn process(&mut self, _r: u32, l: &mut [f32], r: &mut [f32]) {
+                l.fill(self.level);
+                r.fill(self.level);
+            }
+            fn active(&self) -> bool {
+                self.level > 0.0
+            }
+            fn reset(&mut self) {
+                self.level = 0.0;
+                self.resets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let mut project = crate::app::default_project();
+        let ch = project.channels[0].index;
+        project.channels[0].kind = os_model::ChannelKind::Plugin;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
+        let resets = Arc::new(AtomicU32::new(0));
+        let inst: SharedInstrument = Arc::new(Mutex::new(Ringer { level: 0.0, resets: resets.clone() }));
+        let t = Transport::new(None);
+        t.set_instruments(vec![(0, inst.clone())]);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(t.peaks().0 > 0.05, "the instrument is heard: {:?}", t.peaks());
+        t.stop();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(t.peaks(), (0.0, 0.0), "silent after stop");
+        assert!(resets.load(Ordering::Relaxed) >= 1, "instrument was reset");
+        assert!(!inst.lock().unwrap().active(), "no tail left to resume");
     }
 }

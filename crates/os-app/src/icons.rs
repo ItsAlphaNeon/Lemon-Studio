@@ -3,7 +3,7 @@
 
 use os_ui::{Canvas, Color, Glyph, Rect};
 
-use crate::tabler::{self as tb, TablerIcon};
+use os_ui::tabler::{self as tb, TablerIcon};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
@@ -130,14 +130,7 @@ fn shape(icon: Icon) -> &'static TablerIcon {
 
 /// Draw `icon` centered in `r` with color `c`. The 24-unit Tabler grid is fitted to the shorter side.
 pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect, c: Color) {
-    let ti = shape(icon);
-    let k = r.w.min(r.h) / 24.0;
-    let (ox, oy) = (r.cx() - 12.0 * k, r.cy() - 12.0 * k);
-    let mut g = Glyph::new();
-    g.round_caps = true;
-    let stroke = if ti.filled { None } else { Some((2.0 * k).max(1.1)) };
-    g.commands(ti.d, ox, oy, k, stroke);
-    cv.glyph(c, &g);
+    cv.icon(shape(icon), r, c);
 }
 
 /// OpenStudio logo (greyscale mark, `logo.rs`) in one tint, fitted into a circle of radius `r`.

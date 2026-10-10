@@ -227,7 +227,8 @@ impl Plugin for OpenSampler {
             }
         }
         self.render_span(out, at, len, &blk);
-        ProcessStatus::Normal
+        // A long sample may be quiet for a while: tell the host to keep processing until the voices end.
+        if self.engine.has_voices() { ProcessStatus::KeepAlive } else { ProcessStatus::Normal }
     }
 }
 

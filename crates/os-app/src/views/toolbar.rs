@@ -175,7 +175,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_rect(tp, os_ui::Color::rgb(0x212829));
     ui.c.fill_rect(tp.inset(1.0), t.time_panel);
     ui.hit(tp, Action::Placeholder("time display"), "Song position (bar:step:tick)");
-    let (bar, step, tick) = bst(f.seconds, s.tempo, 96);
+    let (bar, step, tick) = bst_ticks(f.tick * 96.0 / f64::from(s.project.ppq.max(1)));
     // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
     // right-aligned so long bar numbers grow to the left and never leave the panel.
     let (big, small) = (Font::light(32, 13), Font::light(22, 8));
@@ -199,17 +199,8 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.pop_clip();
     ui.c.text(Font::condensed(7, 3).bold(), 852.0, 5.0, t.glyph.shade(-0.1), "B:S:T");
 
-    // Monitors (oscilloscope / peak) and CPU / memory.
-    for r in [Rect::span(882.0, 965.0, 5.0, 35.0), Rect::span(970.0, 1044.0, 5.0, 35.0)] {
-        sunken(ui, r, t.sunken);
-    }
-    ui.hit(Rect::span(882.0, 1044.0, 5.0, 35.0), Action::Placeholder("monitor"), "Output monitor");
-    let (pl, pr) = f.peaks;
-    let lvl = |p: f32| ((1.0 + 20.0 * p.max(1e-6).log10() / 60.0).clamp(0.0, 1.0)) * 80.0;
-    let line_y = 20.0;
-    ui.c.line(884.0, line_y, 963.0, line_y, 1.0, t.glyph.with_alpha(200));
-    ui.c.fill_rect(Rect::new(884.0, 30.0, lvl(pl), 2.0), t.meter_low);
-    ui.c.fill_rect(Rect::new(884.0, 33.0, lvl(pr), 2.0), t.meter_low);
+    // Monitors (oscilloscope / spectrum analyzer, stereo peak bars) and CPU / memory.
+    monitor(ui, s);
     let cpu = Rect::span(1053.0, 1201.0, 4.0, 35.0);
     sunken(ui, cpu, t.sunken_dark);
     ui.hit(cpu, Action::Placeholder("cpu"), "CPU, polyphony and memory");
@@ -235,6 +226,69 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let action = if icon == Icon::Save { Action::MenuItem(0, menus::FILE_SAVE) } else { Action::Placeholder(hint) };
         tool_button(ui, r, icon, false, action, hint);
     }
+}
+
+/// The output monitor (spec ui/monitor.md): a scope / analyzer panel at x 882..968 and two peak bars at x 970..1047.
+fn monitor(ui: &mut Ui, s: &State) {
+    use crate::monitor::{Mode, COLS};
+    let (edge, fill, ink) = (os_ui::Color::rgb(0x1d2022), os_ui::Color::rgb(0x25282a), os_ui::Color::rgb(0xb9bfc3));
+    let m = &s.monitor;
+    // Left panel: border, then 84 x 31 px of picture, bottom edge at y 36.
+    ui.c.fill_rect(Rect::new(880.0, 4.0, 86.0, 33.0), edge);
+    ui.c.fill_rect(Rect::new(881.0, 5.0, 84.0, 31.0), fill);
+    match m.mode {
+        Mode::Spectrum => {
+            for c in 0..COLS {
+                let h = m.bars[c] * 31.0;
+                let whole = h.floor();
+                let x = 881.0 + c as f32;
+                if whole > 0.0 {
+                    ui.c.fill_rect(Rect::new(x, 36.0 - whole, 1.0, whole), ink);
+                }
+                let part = h - whole;
+                if part > 0.05 && whole < 31.0 {
+                    ui.c.fill_rect(Rect::new(x, 36.0 - whole - 1.0, 1.0, 1.0), ink.with_alpha((part * 255.0) as u8));
+                }
+            }
+        }
+        Mode::Scope => {
+            for c in 0..COLS {
+                let (lo, hi) = m.wave[c];
+                let (y0, y1) = (20.0 - hi * 15.0, 20.0 - lo * 15.0);
+                let (top, bottom) = (y0.min(y1).round(), y0.max(y1).round());
+                ui.c.fill_rect(Rect::new(881.0 + c as f32, top, 1.0, (bottom - top).max(1.0)), ink);
+            }
+        }
+    }
+    ui.hit(Rect::new(880.0, 4.0, 86.0, 33.0), Action::Monitor, "Oscilloscope / spectrum analyzer (click to switch)");
+
+    // Right panel: two peak bars (-60 dB to 0 dB), light grey fading to cream at the tip.
+    ui.c.fill_rect(Rect::new(968.0, 4.0, 77.0, 23.0), edge);
+    ui.c.fill_rect(Rect::new(969.0, 5.0, 75.0, 21.0), fill);
+    let level = |p: f32| (1.0 + 20.0 * p.max(1e-6).log10() / 60.0).clamp(0.0, 1.0) * 75.0;
+    for (i, p) in [m.peaks.0, m.peaks.1].into_iter().enumerate() {
+        let len = level(p).round();
+        if len < 1.0 {
+            continue;
+        }
+        let y = 5.0 + 11.0 * i as f32;
+        let (a, b) = ((0xc8, 0xce, 0xd1), (0xcd, 0xc7, 0xa8));
+        let mix = |k: f32, shade: f32| {
+            let l = |u: i32, v: i32| (((u as f32 + (v - u) as f32 * k) * shade).round() as u32).min(255);
+            os_ui::Color::rgb((l(a.0, b.0) << 16) | (l(a.1, b.1) << 8) | l(a.2, b.2))
+        };
+        for x in 0..len as i32 {
+            let k = x as f32 / len.max(1.0);
+            // Tip column darker, left column slightly dark; top and bottom rows shaded like a raised bar.
+            let side = if x == len as i32 - 1 { 0.58 } else if x == 0 { 0.82 } else { 1.0 };
+            let px = 969.0 + x as f32;
+            ui.c.fill_rect(Rect::new(px, y, 1.0, 1.0), mix(k, 0.82 * side));
+            ui.c.fill_rect(Rect::new(px, y + 1.0, 1.0, 8.0), mix(k, side));
+            ui.c.fill_rect(Rect::new(px, y + 9.0, 1.0, 1.0), mix(k, 0.75 * side));
+        }
+    }
+    ui.hit(Rect::new(968.0, 4.0, 77.0, 23.0), Action::Swallow, "Output level (peak, -60 to 0 dB)");
+    ui.c.stroke_circle(1037.0, 33.5, 4.0, 2.0, os_ui::Color::rgb(0x66737d));
 }
 
 fn row2(ui: &mut Ui, s: &State) {
@@ -352,9 +406,15 @@ fn row2(ui: &mut Ui, s: &State) {
 }
 
 /// Bar:step:tick (1-based bar and step, 16 steps per bar, `ppq / 4` ticks per step).
+#[cfg(test)]
 pub fn bst(seconds: f64, tempo: f64, ppq: u32) -> (u32, u32, u32) {
-    let ticks = (seconds * tempo / 60.0 * f64::from(ppq)).max(0.0) as u32;
-    let per_step = (ppq / 4).max(1);
+    bst_ticks(seconds * tempo / 60.0 * f64::from(ppq))
+}
+
+/// Bar:step:tick of a position given in ticks of a 96-per-quarter clock (the display's own resolution).
+pub fn bst_ticks(ticks: f64) -> (u32, u32, u32) {
+    let ticks = ticks.max(0.0) as u32;
+    let per_step = 96 / 4;
     let steps = ticks / per_step;
     (steps / 16 + 1, steps % 16 + 1, ticks % per_step)
 }

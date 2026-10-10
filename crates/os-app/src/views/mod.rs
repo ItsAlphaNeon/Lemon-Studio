@@ -25,7 +25,10 @@ pub struct FrameInfo {
     pub playing: bool,
     /// Playing but held by Play (pause).
     pub paused: bool,
-    pub seconds: f64,
+    /// Playback position in ticks of the running mode (a pattern wraps at its end), and whether that mode is
+    /// the playlist. Every playhead and the time display read these, never the UI's own tempo or mode.
+    pub tick: f64,
+    pub song: bool,
     pub peaks: (f32, f32),
     /// Notes playing now, as (channel index, key).
     pub sounding: Vec<(u16, u16)>,

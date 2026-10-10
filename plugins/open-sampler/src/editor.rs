@@ -151,6 +151,11 @@ impl Logic {
 
     pub fn down(&mut self, x: f32, y: f32, right: bool, double: bool) -> Effect {
         let Some(t) = self.at(x, y) else { return Effect::None };
+        // The right button only steps choices backwards: it never starts a drag (there is no right-button-up
+        // handling, so a drag started here would never end).
+        if right && !matches!(t, Target::Cycle(_)) {
+            return Effect::None;
+        }
         match t {
             Target::Knob(id) if double => {
                 self.edit(&id, self.default(&id));
@@ -343,6 +348,8 @@ mod win32 {
         crop: Vec<u32>,
         scale: f32,
         size: (u32, u32),
+        /// The host's strip row carries our page tabs (host link, spec `plugins/host-link.md`).
+        hosted: bool,
         params: Arc<SamplerParams>,
         shared: Arc<Shared>,
         logic: Logic,
@@ -401,6 +408,7 @@ mod win32 {
                 crop: Vec::new(),
                 scale,
                 size: full,
+                hosted: false,
                 params,
                 shared,
                 logic: Logic::new(ptrs, ctx),
@@ -433,10 +441,11 @@ mod win32 {
         if p.is_null() { None } else { Some(unsafe { &mut *p }) }
     }
 
-    fn mouse(l: LPARAM, scale: f32) -> (f32, f32) {
+    /// Window-client pixels to painted-frame coordinates (the editor is a crop of the painted frame).
+    fn mouse(l: LPARAM, w: &Win) -> (f32, f32) {
         let x = (l & 0xffff) as u16 as i16 as f32;
         let y = ((l >> 16) & 0xffff) as u16 as i16 as f32;
-        (x / scale + view::CROP_X as f32, y / scale + view::CROP_Y as f32)
+        (x / w.scale + view::CROP_X as f32, y / w.scale + w.crop_y() as f32)
     }
 
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -457,6 +466,9 @@ mod win32 {
                 return DefWindowProcW(hwnd, msg, wp, lp);
             }
             let Some(w) = state(hwnd) else { return DefWindowProcW(hwnd, msg, wp, lp) };
+            if msg == os_hostlink::message() {
+                return w.host_link(wp, lp);
+            }
             match msg {
                 WM_PAINT => {
                     w.paint();
@@ -473,7 +485,7 @@ mod win32 {
                 }
                 WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN => {
                     SetFocus(hwnd);
-                    let (x, y) = mouse(lp, w.scale);
+                    let (x, y) = mouse(lp, w);
                     let e = w.logic.down(x, y, msg == WM_RBUTTONDOWN, msg == WM_LBUTTONDBLCLK);
                     if w.logic.dragging() {
                         SetCapture(hwnd);
@@ -482,18 +494,24 @@ mod win32 {
                     0
                 }
                 WM_MBUTTONDOWN => {
-                    let (x, y) = mouse(lp, w.scale);
+                    let (x, y) = mouse(lp, w);
                     let e = w.logic.middle(x, y);
                     w.effect(e);
                     0
                 }
                 WM_MOUSEMOVE => {
-                    let (x, y) = mouse(lp, w.scale);
+                    let (x, y) = mouse(lp, w);
                     let e = w.logic.moved(x, y);
                     w.effect(e);
                     0
                 }
                 WM_LBUTTONUP => {
+                    ReleaseCapture();
+                    let e = w.logic.up();
+                    w.effect(e);
+                    0
+                }
+                WM_RBUTTONUP | WM_KILLFOCUS => {
                     ReleaseCapture();
                     let e = w.logic.up();
                     w.effect(e);
@@ -511,7 +529,7 @@ mod win32 {
                     let sx = (lp & 0xffff) as u16 as i16 as i32 - r.left;
                     let sy = ((lp >> 16) & 0xffff) as u16 as i16 as i32 - r.top;
                     let notches = ((wp >> 16) & 0xffff) as u16 as i16 as f32 / 120.0;
-                    let e = w.logic.wheel(sx as f32 / w.scale + view::CROP_X as f32, sy as f32 / w.scale + view::CROP_Y as f32, notches);
+                    let e = w.logic.wheel(sx as f32 / w.scale + view::CROP_X as f32, sy as f32 / w.scale + w.crop_y() as f32, notches);
                     w.effect(e);
                     0
                 }
@@ -525,6 +543,59 @@ mod win32 {
     }
 
     impl Win {
+        /// Top of the shown crop in the painted frame: the strip row is left out when the host draws it.
+        fn crop_y(&self) -> u32 {
+            if self.hosted { view::HOSTED_CROP_Y } else { view::CROP_Y }
+        }
+
+        /// Editor content size in logical px.
+        fn content(&self) -> (u32, u32) {
+            (view::EDITOR_W, if self.hosted { view::HOSTED_EDITOR_H } else { view::EDITOR_H })
+        }
+
+        /// Answers the host (spec `plugins/host-link.md`). Unknown commands return 0.
+        unsafe fn host_link(&mut self, wp: WPARAM, lp: LPARAM) -> LRESULT {
+            use os_hostlink::{Cmd, PageIcon};
+            let Some(cmd) = Cmd::from_usize(wp) else { return 0 };
+            match cmd {
+                Cmd::Hello => {
+                    if !self.hosted {
+                        self.hosted = true;
+                        // Shrink to the content below the strip row; the host asks for the size next.
+                        let (cw, ch) = self.content();
+                        let px = |v: u32| (v as f32 * self.scale).round() as i32;
+                        unsafe {
+                            SetWindowPos(self.hwnd, std::ptr::null_mut(), 0, 0, px(cw), px(ch), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                            InvalidateRect(self.hwnd, std::ptr::null(), 0);
+                        }
+                    }
+                    os_hostlink::VERSION as LRESULT
+                }
+                Cmd::PageCount => 2,
+                Cmd::PageIcon => match lp {
+                    0 => PageIcon::Sample as LRESULT,
+                    _ => PageIcon::Envelope as LRESULT,
+                },
+                Cmd::GetPage => LRESULT::from(self.logic.view.tab),
+                Cmd::SetPage => {
+                    self.logic.view.tab = if lp <= 0 { 0 } else { 1 };
+                    unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+                    LRESULT::from(self.logic.view.tab)
+                }
+                Cmd::Metrics => {
+                    let (cw, ch) = self.content();
+                    os_hostlink::pack_size(cw, ch)
+                }
+                Cmd::Hint => {
+                    if lp != 0 {
+                        // SAFETY: the host passes a `HintBuf` of its own process (spec: host-link.md).
+                        unsafe { &mut *(lp as *mut os_hostlink::HintBuf) }.set(&self.logic.hint);
+                    }
+                    1
+                }
+            }
+        }
+
         fn effect(&mut self, e: Effect) {
             match e {
                 Effect::None => return,
@@ -546,15 +617,16 @@ mod win32 {
                 let mut ps: PAINTSTRUCT = std::mem::zeroed();
                 let hdc = BeginPaint(self.hwnd, &mut ps);
                 let hits = super::with_sample(&self.shared, &self.params, |sv| {
-                    view::paint(&mut self.canvas, &self.logic.ptrs, &self.logic.view, &sv, &self.logic.hint)
+                    view::paint(&mut self.canvas, &self.logic.ptrs, &self.logic.view, &sv, &self.logic.hint, self.hosted)
                 });
                 self.logic.hits = hits;
                 self.last_sig = self.logic.signature();
                 self.last_view = self.logic.view.clone();
                 self.last_ver = self.shared.version();
                 // Show the editor area: the painted frame minus FL's border.
-                let (ox, oy) = ((view::CROP_X as f32 * self.scale).round() as usize, (view::CROP_Y as f32 * self.scale).round() as usize);
-                let (w, h) = ((view::EDITOR_W as f32 * self.scale).round() as u32, (view::EDITOR_H as f32 * self.scale).round() as u32);
+                let (ox, oy) = ((view::CROP_X as f32 * self.scale).round() as usize, (self.crop_y() as f32 * self.scale).round() as usize);
+                let (cw, ch) = self.content();
+                let (w, h) = ((cw as f32 * self.scale).round() as u32, (ch as f32 * self.scale).round() as u32);
                 let (w, h) = (w.min(self.size.0 - ox as u32), h.min(self.size.1 - oy as u32));
                 let full = self.size.0 as usize;
                 self.buf.resize(full * self.size.1 as usize, 0);

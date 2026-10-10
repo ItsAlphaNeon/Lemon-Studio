@@ -4,11 +4,11 @@ mod app;
 mod icons;
 mod knobs;
 mod logo;
+mod monitor;
 mod piano;
 #[cfg(windows)]
 mod plugin_window;
 mod plugins;
-mod tabler;
 mod transport;
 mod views;
 
@@ -41,6 +41,74 @@ struct Shell {
     inset: (u32, u32, u32, u32),
     /// The border edge under the mouse (drags resize the OS window).
     edge: Option<ResizeDirection>,
+    /// A title-bar move or edge resize done by hand: cursor and window rect (screen px) at the press, and the edge
+    /// (None = move). The system's own move / size loops block the event loop, which froze all drawing.
+    grab: Option<Grab>,
+}
+
+#[derive(Clone, Copy)]
+struct Grab {
+    cursor: (i32, i32),
+    rect: (i32, i32, i32, i32),
+    edge: Option<ResizeDirection>,
+}
+
+/// Cursor position and outer window rect (left, top, right, bottom) in screen pixels.
+#[cfg(windows)]
+fn screen_state(window: &Window) -> Option<((i32, i32), (i32, i32, i32, i32))> {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let RawWindowHandle::Win32(h) = window.window_handle().ok()?.as_raw() else { return None };
+    let (mut p, mut r): (POINT, RECT) = unsafe { std::mem::zeroed() };
+    unsafe {
+        GetCursorPos(&mut p);
+        GetWindowRect(h.hwnd.get() as _, &mut r);
+    }
+    Some(((p.x, p.y), (r.left, r.top, r.right, r.bottom)))
+}
+
+#[cfg(not(windows))]
+fn screen_state(_: &Window) -> Option<((i32, i32), (i32, i32, i32, i32))> {
+    None
+}
+
+/// Move / resize the window to `rect` (left, top, right, bottom) in one call.
+#[cfg(windows)]
+fn set_rect(window: &Window, r: (i32, i32, i32, i32)) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(h) = window.window_handle() {
+        if let RawWindowHandle::Win32(h) = h.as_raw() {
+            unsafe { SetWindowPos(h.hwnd.get() as _, std::ptr::null_mut(), r.0, r.1, r.2 - r.0, r.3 - r.1, SWP_NOZORDER | SWP_NOACTIVATE) };
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn set_rect(_: &Window, _: (i32, i32, i32, i32)) {}
+
+impl Grab {
+    /// The window rect for the cursor at `cursor`, never below `min` (physical px).
+    fn rect_at(&self, cursor: (i32, i32), min: (i32, i32)) -> (i32, i32, i32, i32) {
+        use ResizeDirection::*;
+        let (dx, dy) = (cursor.0 - self.cursor.0, cursor.1 - self.cursor.1);
+        let (mut l, mut t, mut r, mut b) = self.rect;
+        let Some(e) = self.edge else { return (l + dx, t + dy, r + dx, b + dy) };
+        if matches!(e, West | NorthWest | SouthWest) {
+            l = (l + dx).min(r - min.0);
+        }
+        if matches!(e, East | NorthEast | SouthEast) {
+            r = (r + dx).max(l + min.0);
+        }
+        if matches!(e, North | NorthWest | NorthEast) {
+            t = (t + dy).min(b - min.1);
+        }
+        if matches!(e, South | SouthWest | SouthEast) {
+            b = (b + dy).max(t + min.1);
+        }
+        (l, t, r, b)
+    }
 }
 
 /// Border of the restored main window (spec ui/main-window.md §12), logical px: left, top, right, bottom.
@@ -193,7 +261,7 @@ impl ApplicationHandler for Shell {
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         // Animate while playing; otherwise repaint a few times a second (peaks, clock).
-        let ms = if self.app.transport.playing() { 16 } else { 100 };
+        let ms = if self.app.animating() { 16 } else { 100 };
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(ms)));
         if self.app.tick() {
             if let Some(w) = &self.window {
@@ -230,6 +298,12 @@ impl ApplicationHandler for Shell {
                 if self.lock.is_some() {
                     return;
                 }
+                if let (Some(g), Some((cursor, _))) = (self.grab, screen_state(&window)) {
+                    let k = window.scale_factor();
+                    let min = ((1024.0 * k) as i32, (600.0 * k) as i32);
+                    set_rect(&window, g.rect_at(cursor, min));
+                    return;
+                }
                 self.edge = if self.app.drag.is_none() { self.edge_at(&window, position.x, position.y) } else { None };
                 let (mx, my) = self.to_app(&window, position.x, position.y);
                 self.app.mouse_move(mx, my);
@@ -241,7 +315,12 @@ impl ApplicationHandler for Shell {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 if state == ElementState::Pressed {
                     if let Some(dir) = self.edge {
-                        let _ = window.drag_resize_window(dir);
+                        match screen_state(&window) {
+                            Some((cursor, rect)) => self.grab = Some(Grab { cursor, rect, edge: Some(dir) }),
+                            None => {
+                                let _ = window.drag_resize_window(dir);
+                            }
+                        }
                         return;
                     }
                     let double = self.last_click.elapsed() < Duration::from_millis(350);
@@ -257,11 +336,31 @@ impl ApplicationHandler for Shell {
                         self.app.want_drag_window = false;
                         if double {
                             window.set_maximized(!window.is_maximized());
+                        } else if window.is_maximized() {
+                            // Dragging a maximized window restores it under the cursor, then moves it.
+                            if let Some(((cx, cy), (l, _, r, _))) = screen_state(&window) {
+                                let frac = f64::from(cx - l) / f64::from((r - l).max(1));
+                                let grab_y = (self.app.mouse.1 * scale) as i32 + self.inset.1 as i32;
+                                window.set_maximized(false);
+                                if let Some((_, (nl, nt, nr, nb))) = screen_state(&window) {
+                                    let w = nr - nl;
+                                    let left = cx - (frac * f64::from(w)) as i32;
+                                    let rect = (left, cy - grab_y, left + w, cy - grab_y + (nb - nt));
+                                    set_rect(&window, rect);
+                                    self.grab = Some(Grab { cursor: (cx, cy), rect, edge: None });
+                                }
+                            }
                         } else {
-                            let _ = window.drag_window();
+                            match screen_state(&window) {
+                                Some((cursor, rect)) => self.grab = Some(Grab { cursor, rect, edge: None }),
+                                None => {
+                                    let _ = window.drag_window();
+                                }
+                            }
                         }
                     }
                 } else {
+                    self.grab = None;
                     if let Some((anchor, _)) = self.lock.take() {
                         let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
                         window.set_cursor_visible(true);
@@ -322,6 +421,7 @@ impl ApplicationHandler for Shell {
                 }
             }
             WindowEvent::Focused(false) => {
+                self.grab = None;
                 self.app.typing_release_all();
                 window.request_redraw();
             }
@@ -565,6 +665,7 @@ fn main() {
         cursor: app::Cursor::Default,
         inset: (0, 0, 0, 0),
         edge: None,
+        grab: None,
     };
     event_loop.run_app(&mut shell).expect("run");
 }

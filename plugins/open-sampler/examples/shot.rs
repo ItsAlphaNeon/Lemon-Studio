@@ -1,4 +1,4 @@
-//! Renders the Open Sampler editor offscreen: `cargo run -p open-sampler --example shot -- out.png [tab] [sample.wav]`.
+//! Renders the Open Sampler editor offscreen: `cargo run -p open-sampler --example shot -- out.png [tab] [sample.wav] [full|hosted]`.
 use open_sampler::editor::Ptrs;
 use open_sampler::params::SamplerParams;
 use open_sampler::view::{self, SampleView, ViewState};
@@ -11,14 +11,22 @@ fn main() {
     let file = args.get(3).map(|p| p.rsplit(['/', '\\']).next().unwrap().to_string()).unwrap_or_default();
     let params = SamplerParams::default();
     let ptrs = Ptrs::new(&params);
+    // `hosted` as the 4th argument paints the editor as it is with the host's strip row (host link).
+    let hosted = args.get(4).is_some_and(|a| a == "hosted");
     let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
     let st = ViewState { tab, ..ViewState::default() };
-    view::paint(&mut c, &ptrs, &st, &SampleView { sample: sample.as_ref(), file: &file }, "");
+    view::paint(&mut c, &ptrs, &st, &SampleView { sample: sample.as_ref(), file: &file }, "", hosted);
     let mut buf = vec![0u32; (view::W * view::H) as usize];
     c.copy_to_xrgb(&mut buf);
     // The editor the host shows (cropped); pass `full` as a 4th argument for the whole painted area.
     let full = args.get(4).is_some_and(|a| a == "full");
-    let (ox, oy, w, h) = if full { (0, 0, view::W, view::H) } else { (view::CROP_X, view::CROP_Y, view::EDITOR_W, view::EDITOR_H) };
+    let (ox, oy, w, h) = if full {
+        (0, 0, view::W, view::H)
+    } else if hosted {
+        (view::CROP_X, view::HOSTED_CROP_Y, view::EDITOR_W, view::HOSTED_EDITOR_H)
+    } else {
+        (view::CROP_X, view::CROP_Y, view::EDITOR_W, view::EDITOR_H)
+    };
     let mut pm = tiny_skia::Pixmap::new(w, h).unwrap();
     for (i, px) in pm.pixels_mut().iter_mut().enumerate() {
         let (x, y) = (i as u32 % w + ox, i as u32 / w + oy);

@@ -176,10 +176,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         }
     }
     // Playhead.
-    if f.playing && s.song_mode {
+    if f.playing && f.song {
         let ppq = f64::from(s.project.ppq.max(1));
-        let bars = f.seconds * s.tempo / 60.0 / 4.0;
-        let _ = ppq;
+        let bars = f.tick / (ppq * 4.0);
         let x = grid_x + bars as f32 * bar_w - sx;
         ui.c.fill_rect(Rect::new(x, grid_y - 20.0, 1.5, area.h + 20.0), t.playhead);
     }

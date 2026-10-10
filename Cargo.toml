@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "tools/flp-dump", "tools/os-render", "tools/os-play", "crates/os-fruity", "tools/os-fruity-probe", "crates/os-theme", "crates/os-ui", "crates/os-app", "plugins/open-sampler", "tools/bundle-plugins", "crates/os-clap"]
+members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "tools/flp-dump", "tools/os-render", "tools/os-play", "crates/os-fruity", "tools/os-fruity-probe", "crates/os-theme", "crates/os-ui", "crates/os-app", "plugins/open-sampler", "tools/bundle-plugins", "crates/os-clap", "crates/os-hostlink"]
 
 [workspace.package]
 version = "0.0.1"
@@ -11,6 +11,7 @@ license = "GPL-3.0-or-later"
 os-model = { path = "crates/os-model" }
 os-flp = { path = "crates/os-flp" }
 os-engine = { path = "crates/os-engine" }
+os-hostlink = { path = "crates/os-hostlink" }
 thiserror = "2"
 
 [profile.dev]

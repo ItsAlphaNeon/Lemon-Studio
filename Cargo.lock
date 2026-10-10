@@ -1956,6 +1956,7 @@ version = "0.0.1"
 dependencies = [
  "nih_plug",
  "os-engine",
+ "os-hostlink",
  "os-model",
  "os-ui",
  "tiny-skia",
@@ -1990,6 +1991,7 @@ dependencies = [
  "os-clap",
  "os-engine",
  "os-flp",
+ "os-hostlink",
  "os-model",
  "os-theme",
  "os-ui",
@@ -2041,6 +2043,13 @@ version = "0.0.1"
 dependencies = [
  "os-engine",
  "os-fruity",
+]
+
+[[package]]
+name = "os-hostlink"
+version = "0.0.1"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

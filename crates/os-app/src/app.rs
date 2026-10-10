@@ -13,7 +13,7 @@ use os_ui::{Canvas, Rect};
 use winit::keyboard::KeyCode;
 
 use crate::piano::{self, Geom, Overlay, PianoState, Tool};
-use crate::transport::Transport;
+use crate::transport::{State as TransportState, Transport};
 use crate::views;
 
 /// Child windows. Playlist, Mixer and Piano roll float by default and can be moved, resized,
@@ -84,6 +84,8 @@ pub enum Cursor {
 pub enum Action {
     /// A control that is designed but not functional yet.
     Placeholder(&'static str),
+    /// The toolbar's scope / spectrum panel: click switches the display.
+    Monitor,
     Minimize,
     Maximize,
     Close,
@@ -204,6 +206,8 @@ enum Damage {
 
 /// The hint panel (spec §2): its text changes whenever the hovered control does.
 const HINT_RECT: Rect = Rect::new(73.0, 5.0, 289.0, 31.0);
+/// The toolbar's output monitor (scope / analyzer and peak bars).
+const MONITOR_RECT: Rect = Rect::new(880.0, 4.0, 168.0, 33.0);
 
 /// Actions whose hover state has no visual feedback (large background regions).
 fn hover_is_visible(a: &Action) -> bool {
@@ -312,6 +316,8 @@ pub enum Drag {
 
 pub struct State {
     pub project: Project,
+    /// The toolbar's scope / analyzer and peak bars (fed from the audio tap in `App::tick`).
+    pub monitor: crate::monitor::Monitor,
     /// Names of the hosted instruments offered after the built-in generators in the picker.
     pub hosted_generators: Vec<&'static str>,
     /// Rack rows played by a hosted plugin.
@@ -506,6 +512,7 @@ impl App {
                 browser_selected: 6,
                 tempo: 130.0,
                 message: None,
+                monitor: crate::monitor::Monitor::default(),
                 toggles: vec!["typing", "multilink"],
                 maximized: true,
                 piano: PianoState::default(),
@@ -673,6 +680,13 @@ impl App {
         }
         #[cfg(windows)]
         {
+            // Keys pressed while a plugin window has the focus still play the typing keyboard.
+            for k in crate::plugin_window::take_keys() {
+                use winit::platform::scancode::PhysicalKeyExtScancode;
+                if let winit::keyboard::PhysicalKey::Code(code) = winit::keyboard::PhysicalKey::from_scancode(k.scancode) {
+                    self.typing_key(code, k.pressed, k.ctrl, k.alt);
+                }
+            }
             let project = &self.state.project;
             let requests = self.plugins.idle(|row| channel_info(project, row));
             for r in requests {
@@ -718,10 +732,23 @@ impl App {
         }
     }
 
+    /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
+    pub fn animating(&self) -> bool {
+        self.transport.playing() || self.state.monitor.active()
+    }
+
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         self.plugin_tick();
         let playing = self.transport.playing();
+        {
+            // Scope / analyzer / peak bars: from the audio tap; repaint just the monitor when it changed.
+            let (tp, rate) = (&self.transport, self.transport.sample_rate());
+            let peaks = if tp.playing() || tp.sample_rate() > 0 { tp.peaks() } else { (0.0, 0.0) };
+            if self.state.monitor.update(rate, peaks, |b| tp.tap(b)) {
+                self.damage_rect(MONITOR_RECT);
+            }
+        }
         if let Some(e) = self.transport.take_error() {
             self.state.message = Some(format!("Audio: {e}"));
             self.invalidate();
@@ -756,7 +783,8 @@ impl App {
             hint: self.hint.clone(),
             playing: self.transport.playing(),
             paused: self.transport.paused(),
-            seconds: self.transport.seconds(),
+            tick: self.transport.tick(),
+            song: self.transport.song(),
             peaks: self.transport.peaks(),
             sounding: if self.transport.playing() { self.transport.sounding() } else { Vec::new() },
         };
@@ -991,10 +1019,14 @@ impl App {
             }
             return true;
         }
-        let (hover, hint, rect) = match self.top_hit(x, y) {
+        let (hover, mut hint, rect) = match self.top_hit(x, y) {
             Some(h) => (Some(h.action.clone()), h.hint.clone(), Some(h.rect)),
             None => (None, Cow::Borrowed(""), None),
         };
+        if hover == Some(Action::Monitor) {
+            // Reading under the cursor: frequency and level of the analyzer column.
+            hint = Cow::Owned(self.state.monitor.hint((x - MONITOR_RECT.x - 1.0).max(0.0) as usize));
+        }
         let resize = matches!(hover, Some(Action::PianoNote(_)))
             && matches!(self.state.piano.tool, Tool::Draw | Tool::Paint | Tool::Select)
             && rect.is_some_and(|r| x >= r.right() - resize_zone(r.w));
@@ -1263,7 +1295,7 @@ impl App {
                 }
             }
             Some(Drag::ZoomBox { x0, y0 }) => self.zoom_to(x0, y0),
-            Some(Drag::Marker) if self.transport.playing() && !self.state.song_mode => {
+            Some(Drag::Marker) if self.transport.playing() && !self.transport.song() => {
                 self.start_playback();
             }
             _ => {}
@@ -1507,9 +1539,8 @@ impl App {
         let s = &self.state;
         let Some(g) = self.piano_geom() else { return 0 };
         let ppq = f64::from(s.project.ppq.max(1));
-        let head = if self.transport.playing() && !s.song_mode {
-            let len = f64::from(piano::pattern_length(s, piano::notes(s)).max(1));
-            ((self.transport.seconds() * s.tempo / 60.0 * ppq) % len) as f32
+        let head = if self.transport.playing() && !self.transport.song() {
+            (self.transport.tick() * 96.0 / ppq) as f32
         } else {
             s.piano.marker as f32
         };
@@ -1725,13 +1756,19 @@ impl App {
         }
     }
 
-    /// Start playback; pattern mode starts at the piano roll's play-start marker (§10).
+    /// Start playback in the mode the PAT / SONG switch shows. Pattern mode loops the current pattern from the piano
+    /// roll's play-start marker (§10); song mode plays the playlist from its start and stops at its end.
     fn start_playback(&mut self) {
         let mut p = self.state.project.clone();
         p.tempo = Some(self.state.tempo);
-        let mode = self.play_mode();
-        let start = if self.state.song_mode { 0.0 } else { f64::from(self.state.piano.marker) };
-        self.transport.play(&p, mode, start);
+        let song = self.state.song_mode;
+        if song && p.arrangements.first().is_none_or(|a| a.clips.is_empty()) {
+            self.state.message = Some("The playlist is empty: nothing to play in SONG mode".into());
+            self.invalidate();
+            return;
+        }
+        let start = if song { 0.0 } else { f64::from(self.state.piano.marker) };
+        self.transport.play(&p, self.play_mode(), start);
     }
 
     fn play_mode(&self) -> PlayMode {
@@ -2023,25 +2060,39 @@ impl App {
                 }
                 s.message = Some(format!("{name}: not available yet"));
             }
+            Action::Monitor => {
+                s.monitor.toggle();
+                self.damage_rect(MONITOR_RECT);
+                // The hint (frequency read-out) follows the new mode.
+                let (x, _) = self.mouse;
+                self.hint = Cow::Owned(self.state.monitor.hint((x - MONITOR_RECT.x - 1.0).max(0.0) as usize));
+                self.damage_rect(HINT_RECT);
+            }
             Action::Minimize => self.want_minimize = true,
             Action::Maximize => self.want_maximize = true,
             Action::Close => self.want_close = true,
             Action::DragWindow => self.want_drag_window = true,
-            Action::Play => {
-                // Play toggles pause while playing (position held); Stop rewinds.
-                if self.transport.paused() {
-                    self.transport.resume();
-                    return;
-                }
-                if self.transport.playing() {
-                    self.transport.pause();
-                    return;
-                }
-                self.start_playback();
-            }
+            Action::Play => match self.transport.state() {
+                // Play toggles pause (the position is held in place); Stop rewinds.
+                TransportState::Playing => self.transport.pause(),
+                TransportState::Paused => self.transport.resume(),
+                TransportState::Stopped => self.start_playback(),
+            },
             Action::Stop => self.transport.stop(),
             Action::Record => s.message = Some("Recording: not available yet".into()),
-            Action::PatSong(song) => s.song_mode = song,
+            Action::PatSong(song) => {
+                let changed = s.song_mode != song;
+                s.song_mode = song;
+                // The running playback follows the switch: it restarts in the new mode (a paused one is stopped),
+                // so the playheads always show what is heard.
+                if changed && self.transport.playing() {
+                    let was_playing = !self.transport.paused();
+                    self.transport.stop();
+                    if was_playing {
+                        self.start_playback();
+                    }
+                }
+            }
             Action::Tempo => self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo }),
             Action::Menu(i) => s.menu_open = if s.menu_open == Some(i) { None } else { Some(i) },
             Action::MenuItem(m, i) => {
@@ -2405,6 +2456,32 @@ mod tests {
 
     fn frame(app: &mut App, c: &mut Canvas, damage: Option<Rect>) {
         app.paint(c, damage);
+    }
+
+    /// Writes the toolbar with a live-looking signal to OS_MONITOR_SHOT (a look-and-feel check, not an assertion).
+    #[test]
+    fn monitor_shot() {
+        let Some(out) = std::env::var_os("OS_MONITOR_SHOT") else { return };
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        for mode in [crate::monitor::Mode::Spectrum, crate::monitor::Mode::Scope] {
+            app.state.monitor.mode = mode;
+            let mut seed = 12345u32;
+            let mut phase = 0.0f32;
+            app.state.monitor.update(48000, (0.5, 0.42), |b| {
+                for v in b.iter_mut() {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let noise = (seed >> 8) as f32 / 8388608.0 - 1.0;
+                    phase += 0.05;
+                    *v = 0.25 * phase.sin() + 0.1 * (phase * 7.3).sin() + 0.05 * noise;
+                }
+                9 + mode as u64
+            });
+            app.invalidate();
+            frame(&mut app, &mut c, None);
+            let path = std::path::Path::new(&out).join(format!("{mode:?}.png"));
+            c.pixmap.save_png(path).unwrap();
+        }
     }
 
     /// Knobs drag vertically (1/1024 per px), step with the wheel, and model-backed ones write the project.
@@ -2849,6 +2926,59 @@ mod tests {
             }
         }
         assert_eq!(loud, 0, "deleted notes still sounding");
+    }
+
+    /// Play / pause / stop and the PAT / SONG switch drive one consistent state: the playheads follow the playing
+    /// mode and tick, pause holds the tick, stop rewinds (needs an audio device).
+    #[test]
+    #[ignore]
+    fn transport_states_and_modes() {
+        use crate::transport::State as T;
+        let step = || std::thread::sleep(std::time::Duration::from_millis(250));
+        let mut app = App::new(None);
+        let ch = app.state.project.channels[0].index;
+        app.state.project.patterns = vec![Pattern {
+            number: 1,
+            notes: (0..8).map(|i| Note { length: 24, key: 60, ..Note::step(ch, i * 48) }).collect(),
+            ..Pattern::default()
+        }];
+        app.state.project.arrangements = vec![os_model::Arrangement {
+            number: 1,
+            name: None,
+            clips: vec![os_model::Clip { position: 0, length: 384 * 4, track: 0, source: os_model::ClipSource::Pattern(1) }],
+            tracks: vec![],
+        }];
+        // Song mode.
+        app.act(Action::PatSong(true));
+        app.act(Action::Play);
+        step();
+        assert_eq!(app.transport.state(), T::Playing);
+        assert!(app.transport.song() && app.transport.tick() > 10.0, "song tick {}", app.transport.tick());
+        // Pause holds the tick in place; Play resumes from it (no restart).
+        app.act(Action::Play);
+        step();
+        let held = app.transport.tick();
+        assert_eq!(app.transport.state(), T::Paused);
+        step();
+        assert_eq!(app.transport.tick(), held, "paused tick holds");
+        app.act(Action::Play);
+        step();
+        assert!(app.transport.tick() > held, "resumed from {held}: {}", app.transport.tick());
+        // Switching to PAT restarts in pattern mode, which loops inside one bar.
+        app.act(Action::PatSong(false));
+        step();
+        assert!(app.transport.playing() && !app.transport.song());
+        assert!(app.transport.tick() < 384.0 + 1.0);
+        // Stop rewinds and stays stopped.
+        app.act(Action::Stop);
+        step();
+        assert_eq!((app.transport.state(), app.transport.tick()), (T::Stopped, 0.0));
+        // An empty playlist does not start SONG mode.
+        app.state.project.arrangements.clear();
+        app.act(Action::PatSong(true));
+        app.act(Action::Play);
+        step();
+        assert_eq!(app.transport.state(), T::Stopped);
     }
 
     /// Same with right-drag erasing and note moves while playing (needs an audio device).

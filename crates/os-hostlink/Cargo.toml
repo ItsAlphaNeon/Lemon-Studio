@@ -1,0 +1,9 @@
+[package]
+name = "os-hostlink"
+description = "OpenStudio host link: how an Open plugin and OpenStudio's plugin window share the window strip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

@@ -7,7 +7,8 @@
 use std::f32::consts::PI;
 
 use os_engine::Sample;
-use os_ui::{Canvas, Color, Font, Glyph, Rect};
+use os_ui::tabler as tb;
+use os_ui::{Canvas, Color, Font, Rect};
 
 use crate::params::{note_name, LFO_SHAPES};
 
@@ -20,6 +21,11 @@ pub const CROP_X: u32 = 4;
 pub const CROP_Y: u32 = 1;
 pub const EDITOR_W: u32 = 560;
 pub const EDITOR_H: u32 = 437;
+/// Hosted mode (the host's strip row replaces the plugin's own, 47 px): the editor starts below that row.
+pub const HOSTED_CROP_Y: u32 = CROP_Y + STRIP_ROWS;
+pub const HOSTED_EDITOR_H: u32 = EDITOR_H - STRIP_ROWS;
+/// Height of the tab strip row the host draws instead (FL y 25..71).
+pub const STRIP_ROWS: u32 = 47;
 /// Height of FL's title bar, which the host draws instead.
 const OY: f32 = 24.0;
 
@@ -148,16 +154,20 @@ impl Ui<'_> {
     }
 }
 
-/// Paints the editor; `hint` (parameter name and value under the mouse) shows in the tab strip's free space.
-pub fn paint(c: &mut Canvas, m: &dyn Model, st: &ViewState, sv: &SampleView, hint: &str) -> Vec<Hit> {
+/// Paints the editor. `hosted` = the host's strip row carries the page tabs and the hint line (host link, spec
+/// `plugins/host-link.md`): the plugin leaves that row out. Otherwise it draws its own tabs and `hint` (parameter name and
+/// value under the mouse) in the strip's free space.
+pub fn paint(c: &mut Canvas, m: &dyn Model, st: &ViewState, sv: &SampleView, hint: &str, hosted: bool) -> Vec<Hit> {
     let mut ui = Ui { c, m, hits: Vec::new() };
     ui.c.begin_frame(None);
     ui.c.clear(FRAME);
     ui.c.fill_rect(Rect::span(4.0, 563.0, 1.0, y(461.0)), BODY);
-    tab_strip(&mut ui, st);
-    if !hint.is_empty() {
-        let lh = ui.c.line_height(LABEL);
-        ui.c.text_clip(LABEL, 100.0, (y(48.0) - lh / 2.0).round(), 230.0, CAPTION, hint);
+    if !hosted {
+        tab_strip(&mut ui, st);
+        if !hint.is_empty() {
+            let lh = ui.c.line_height(LABEL);
+            ui.c.text_clip(LABEL, 100.0, (y(48.0) - lh / 2.0).round(), 230.0, CAPTION, hint);
+        }
     }
     match st.tab {
         0 => sample_tab(&mut ui, sv),
@@ -291,7 +301,7 @@ fn dropdown(ui: &mut Ui, id: &str, x0: f32, x1: f32, y0: f32, y1: f32) {
 }
 
 fn arrow_right(ui: &mut Ui, x: f32, cy: f32, c: Color) {
-    ui.c.fill_polygon(&[(x - 2.0, cy - 4.0), (x + 2.5, cy), (x - 2.0, cy + 4.0)], c);
+    icon(ui.c, &tb::CARET_RIGHT, x, cy, 12.0, c);
 }
 
 fn label(ui: &mut Ui, x: f32, cy: f32, c: Color, s: &str) -> f32 {
@@ -307,99 +317,29 @@ fn button(ui: &mut Ui, r: Rect, s: &str, t: Target) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Icons (OpenStudio drawings)
+// Icons (Tabler Icons, MIT, shared with the rest of the UI through `os_ui::tabler`)
 
-fn icon_wave(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
-    let mut g = Glyph::new();
-    let hs = [2.0, 5.0, 9.0, 13.0, 9.0, 5.0, 2.0];
-    for (i, h) in hs.iter().enumerate() {
-        let x = cx - 9.0 + i as f32 * 3.0;
-        g.rrect(Rect::new(x - 1.0, cy - h / 2.0, 2.2, *h), 1.0);
+/// A Tabler icon centred on (`cx`, `cy`), `size` px square.
+fn icon(c: &mut Canvas, t: &tb::TablerIcon, cx: f32, cy: f32, size: f32, col: Color) {
+    c.icon(t, Rect::new(cx - size / 2.0, cy - size / 2.0, size, size), col);
+}
+
+/// The page icons the host draws in its strip (same ids as `os_hostlink::PageIcon`).
+pub fn page_icon(c: &mut Canvas, page: u8, cx: f32, cy: f32, col: Color) {
+    match page {
+        0 => icon(c, &tb::WAVE_SINE, cx, cy, 26.0, col),
+        _ => icon(c, &tb::TIMELINE, cx, cy, 26.0, col),
     }
-    g.line(cx - 13.0, cy, cx + 13.0, cy, 1.6);
-    c.glyph(col, &g);
-}
-
-fn icon_envelope(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
-    let mut g = Glyph::new();
-    g.polyline(&[(cx - 9.0, cy + 7.0), (cx - 4.0, cy - 10.0), (cx + 1.0, cy - 8.0), (cx + 6.0, cy + 7.0)], 1.6);
-    for (x, yy) in [(cx - 9.0, cy + 9.0), (cx - 3.5, cy - 11.0), (cx + 8.0, cy + 9.0)] {
-        g.ring(x, yy, 2.6, 1.4);
-    }
-    c.glyph(col, &g);
-}
-
-fn icon_wrench(c: &mut Canvas, cx: f32, cy: f32, k: f32, col: Color) {
-    let mut g = Glyph::new();
-    g.line(cx - 7.0 * k, cy + 7.0 * k, cx + 1.0 * k, cy - 1.0 * k, 3.2 * k);
-    g.arc(cx + 4.0 * k, cy - 4.0 * k, 4.2 * k, 0.9 * PI, 1.55 * PI, 2.6 * k);
-    c.glyph(col, &g);
-}
-
-fn icon_folder(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
-    let mut g = Glyph::new();
-    g.polyline(&[(cx - 7.0, cy + 5.0), (cx - 7.0, cy - 5.0), (cx - 2.0, cy - 5.0), (cx, cy - 3.0), (cx + 7.0, cy - 3.0), (cx + 7.0, cy + 5.0), (cx - 7.0, cy + 5.0)], 1.3);
-    g.line(cx - 7.0, cy - 1.0, cx + 7.0, cy - 1.0, 1.0);
-    c.glyph(col, &g);
-}
-
-fn icon_browse(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
-    let mut g = Glyph::new();
-    g.polyline(&[(cx - 6.0, cy + 1.0), (cx - 6.0, cy - 7.0), (cx - 2.0, cy - 7.0), (cx, cy - 5.0), (cx + 5.0, cy - 5.0), (cx + 5.0, cy + 1.0), (cx - 6.0, cy + 1.0)], 1.2);
-    g.polyline(&[(cx - 1.0, cy + 1.0), (cx - 1.0, cy + 8.0), (cx + 4.0, cy + 8.0)], 1.2);
-    g.line(cx - 1.0, cy + 4.5, cx + 3.0, cy + 4.5, 1.2);
-    c.glyph(col, &g);
-}
-
-fn icon_x(c: &mut Canvas, cx: f32, cy: f32, s: f32, col: Color) {
-    let mut g = Glyph::new();
-    g.line(cx - s, cy - s, cx + s, cy + s, 1.6).line(cx - s, cy + s, cx + s, cy - s, 1.6);
-    c.glyph(col, &g);
-}
-
-fn icon_loop(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
-    let mut g = Glyph::new();
-    g.arc(cx, cy, 4.0, -0.3 * PI, 1.6 * PI, 1.8);
-    g.polygon(&[(cx + 1.0, cy - 7.0), (cx + 5.0, cy - 4.0), (cx + 1.0, cy - 1.5)]);
-    c.glyph(col, &g);
-}
-
-fn icon_tube(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
-    let mut g = Glyph::new();
-    g.rrect(Rect::new(cx - 3.5, cy - 7.0, 7.0, 10.0), 3.0);
-    g.erase(true).rrect(Rect::new(cx - 2.0, cy - 5.5, 4.0, 7.0), 2.0).erase(false);
-    g.line(cx, cy - 4.0, cx, cy + 1.0, 1.0);
-    g.line(cx - 2.0, cy + 3.0, cx - 2.0, cy + 7.0, 1.0).line(cx + 2.0, cy + 3.0, cx + 2.0, cy + 7.0, 1.0);
-    c.glyph(col, &g);
-}
-
-fn icon_hand(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
-    let mut g = Glyph::new();
-    g.polygon(&[(cx - 8.0, cy - 5.0), (cx - 3.0, cy - 5.0), (cx + 1.0, cy - 2.0), (cx + 7.0, cy - 2.0), (cx + 8.0, cy + 2.0), (cx + 6.0, cy + 6.0), (cx - 2.0, cy + 6.0), (cx - 6.0, cy + 1.0)]);
-    c.glyph(col, &g);
-    let mut s = Glyph::new();
-    s.line(cx - 1.0, cy + 1.0, cx + 6.0, cy + 1.0, 1.0);
-    c.glyph(Color::rgb(0x222525), &s);
 }
 
 fn lfo_icon(c: &mut Canvas, shape: usize, cx: f32, cy: f32, col: Color) {
-    let mut g = Glyph::new();
-    match shape {
-        0 => {
-            let pts: Vec<(f32, f32)> = (0..=16).map(|i| {
-                let t = i as f32 / 16.0;
-                (cx - 7.0 + 14.0 * t, cy - 4.5 * (2.0 * PI * t).sin())
-            }).collect();
-            g.polyline(&pts, 1.6);
-        }
-        1 => {
-            g.polyline(&[(cx - 7.0, cy + 1.0), (cx - 3.5, cy - 5.0), (cx + 3.5, cy + 5.0), (cx + 7.0, cy - 1.0)], 1.6);
-        }
-        _ => {
-            g.polyline(&[(cx - 7.0, cy + 6.0), (cx - 4.0, cy + 6.0), (cx - 4.0, cy - 6.0), (cx + 2.0, cy - 6.0), (cx + 2.0, cy + 6.0), (cx + 6.0, cy + 6.0), (cx + 6.0, cy - 2.0)], 1.5);
-        }
-    }
-    c.glyph(col, &g);
+    // Tabler has no triangle wave: the saw-tool zigzag is the closest.
+    let t = match shape {
+        0 => &tb::WAVE_SINE,
+        1 => &tb::WAVE_SAW_TOOL,
+        _ => &tb::WAVE_SQUARE,
+    };
+    icon(c, t, cx, cy, 18.0, col);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -417,10 +357,7 @@ fn tab_strip(ui: &mut Ui, st: &ViewState) {
         }
         let col = if st.tab == i { Color::rgb(0x49f1b1) } else { ICON };
         let cx = 27.0 + 43.0 * f32::from(i);
-        match i {
-            0 => icon_wave(ui.c, cx, y(48.0), col),
-            _ => icon_envelope(ui.c, cx, y(48.0), col),
-        }
+        page_icon(ui.c, i, cx, y(48.0), col);
         ui.hit(cell, Target::Tab(i));
     }
     // The strip's right side (ON / PAN / VOL / PITCH / RANGE / TRACK) is the host's (spec: ui/plugin-window.md).
@@ -445,9 +382,9 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
         let r = rr(x0, x1, 85.0, 107.0);
         ui.c.fill_rect(r, Color::rgb(0x242728));
     }
-    icon_folder(ui.c, 220.0, y(96.0), ICON);
-    icon_browse(ui.c, 245.0, y(96.0), ICON);
-    icon_x(ui.c, 264.5, y(96.0), 4.0, ICON);
+    icon(ui.c, &tb::FOLDER_OPEN, 220.0, y(96.0), 17.0, ICON);
+    icon(ui.c, &tb::FOLDER_SEARCH, 245.5, y(96.0), 16.0, ICON);
+    icon(ui.c, &tb::X, 264.5, y(96.0), 12.0, ICON);
     ui.hit(rr(205.0, 255.0, 85.0, 107.0), Target::FileOpen);
     ui.hit(rr(256.0, 273.0, 85.0, 107.0), Target::FileClear);
 
@@ -463,7 +400,7 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     knob(ui, "start_offset", 45.0, 286.0, Size::Medium, ORANGE, false, "START OFFSET", 308.0, true);
     knob(ui, "loop_start", 98.0, 286.0, Size::Medium, ORANGE, false, "START", 308.0, true);
     knob(ui, "loop_end", 140.0, 286.0, Size::Medium, ORANGE, false, "END", 308.0, true);
-    icon_loop(ui.c, 120.0, y(308.0), Color::rgb(0x9fb4c8));
+    icon(ui.c, &tb::ROTATE_CLOCKWISE_2, 120.0, y(308.0), 13.0, Color::rgb(0x9fb4c8));
     radio(ui, "loop_use", 184.0, 274.0, "Use loop points", true);
     radio(ui, "loop_pingpong", 184.0, 294.0, "Ping pong loop", true);
 
@@ -477,8 +414,8 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     panel(ui, 287.0, 556.0, 162.0, 319.0, 0.0, "");
     header(ui, 287.0, 162.0, 172.0, "");
     ui.c.fill_rect(rr(288.0, 309.0, 163.0, 181.0), Color::rgb(0x191b1c));
-    icon_wrench(ui.c, 298.0, y(172.0), 0.85, ORANGE);
-    icon_tube(ui.c, 322.0, y(172.0), ICON);
+    icon(ui.c, &tb::TOOL, 298.0, y(172.0), 16.0, ORANGE);
+    icon(ui.c, &tb::FLASK_2, 322.0, y(172.0), 16.0, ICON);
     label(ui, 337.0, 172.0, TEXT, "Precomputed effects");
     radio(ui, "fx_dc", 302.0, 199.0, "Remove DC offset", true);
     radio(ui, "fx_normalize", 302.0, 221.0, "Normalize", true);
@@ -528,9 +465,7 @@ fn waveform(ui: &mut Ui, sv: &SampleView) {
     let zf = LABEL;
     let zw = ui.c.text_width(zf, zoom);
     ui.c.text(zf, 538.0 - zw, y(419.0), TEXT, zoom);
-    let mut g = Glyph::new();
-    g.frame(Rect::new(541.0, y(422.0), 9.0, 8.0), 1.2);
-    ui.c.glyph(TEXT, &g);
+    icon(ui.c, &tb::MAXIMIZE, 545.5, y(426.0), 11.0, TEXT);
 }
 
 /// The sample's mid signal as a smooth line, one point per pixel column (FL draws the decimated wave, not min / max).
@@ -731,7 +666,7 @@ fn root_panel(ui: &mut Ui, st: &ViewState) {
     radio(ui, "add_key", 200.0, 350.0, "Add to key", true);
     label(ui, 279.0, 350.0, TEXT, "Fine tune");
     slider(ui, "fine", 333.0, 435.0, 350.0);
-    icon_hand(ui.c, 541.0, y(350.0), ICON);
+    icon(ui.c, &tb::HAND_FINGER, 541.0, y(350.0), 18.0, ICON);
     keyboard(ui, st, root);
 }
 

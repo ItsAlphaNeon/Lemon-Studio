@@ -110,6 +110,11 @@ impl Engine {
         self.svf = [(0.0, 0.0); 2];
     }
 
+    /// True while any voice is playing.
+    pub fn has_voices(&self) -> bool {
+        !self.voices.is_empty()
+    }
+
     /// Keys currently sounding.
     pub fn sounding(&self) -> impl Iterator<Item = u8> + '_ {
         self.voices.iter().map(|v| v.key)
