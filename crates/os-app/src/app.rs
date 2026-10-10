@@ -1270,10 +1270,11 @@ impl App {
             return self.scrollbar_press(t, true);
         }
         // Right-click the monitor: open the debug panel; on a debug slider: back to its default.
-        if action == Some(Action::Monitor) {
-            self.state.monitor.debug = !self.state.monitor.debug;
-            return self.invalidate();
-        }
+        // Monitor debug panel (views/mondebug.rs) parked 2026-10-09: its values are now the defaults. Uncomment to tune again.
+        // if action == Some(Action::Monitor) {
+        //     self.state.monitor.debug = !self.state.monitor.debug;
+        //     return self.invalidate();
+        // }
         if let Some(Action::MonParam(i)) = action {
             let d = crate::monitor::PARAMS[i].default;
             self.state.monitor.cfg.set(i, d);
@@ -1723,7 +1724,8 @@ impl App {
             }
             Key::Named(NamedKey::F8) if alt => self.act(Action::ToggleWin(Win::Browser)),
             Key::Named(NamedKey::F9) => self.act(Action::ToggleWin(Win::Mixer)),
-            Key::Named(NamedKey::F12) => self.state.monitor.debug = !self.state.monitor.debug,
+            // Monitor debug panel (views/mondebug.rs) parked 2026-10-09: its values are now the defaults. Uncomment to tune again.
+            // Key::Named(NamedKey::F12) => self.state.monitor.debug = !self.state.monitor.debug,
             Key::Named(NamedKey::Escape) => {
                 self.state.menu_open = None;
                 self.state.picker_open = false;

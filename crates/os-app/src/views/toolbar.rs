@@ -260,7 +260,7 @@ fn monitor(ui: &mut Ui, s: &State) {
             }
         }
     }
-    ui.hit(Rect::new(880.0, 4.0, 86.0, 33.0), Action::Monitor, "Oscilloscope / spectrum analyzer (click to switch, right-click: settings)");
+    ui.hit(Rect::new(880.0, 4.0, 86.0, 33.0), Action::Monitor, "Oscilloscope / spectrum analyzer (click to switch)");
 
     // Right panel: two peak bars (meter range .. 0 dB), light grey fading to cream at the tip, plus the held peak.
     ui.c.fill_rect(Rect::new(968.0, 4.0, 77.0, 23.0), edge);
@@ -290,7 +290,7 @@ fn monitor(ui: &mut Ui, s: &State) {
             ui.c.fill_rect(Rect::new(px, y + 9.0, 1.0, 1.0), mix(k, 0.75 * side));
         }
     }
-    ui.hit(Rect::new(968.0, 4.0, 77.0, 23.0), Action::Swallow, "Output level (peak L / R; right-click the monitor for its settings)");
+    ui.hit(Rect::new(968.0, 4.0, 77.0, 23.0), Action::Swallow, "Output level (peak L / R)");
     ui.c.stroke_circle(1037.0, 33.5, 4.0, 2.0, os_ui::Color::rgb(0x66737d));
 }
 
