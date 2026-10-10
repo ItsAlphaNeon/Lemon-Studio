@@ -1047,7 +1047,8 @@ impl App {
                     .flatten()
                     .map(|e| e.path())
                     .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")))
-                    .map(|p| (p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), p))
+                    // Trademarked product names are not shown (owner rule): "Sytrus" theme -> "Citrus".
+                    .map(|p| (p.file_stem().map(|s| s.to_string_lossy().replace("Sytrus", "Citrus")).unwrap_or_default(), p))
                     .collect();
                 v.sort();
                 st.themes.extend(v);
