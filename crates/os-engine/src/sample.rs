@@ -190,8 +190,23 @@ impl SampleLibrary {
         } else if let Some(rest) = project_path.strip_prefix(DATA) {
             Some(self.factory_dir.as_ref()?.join("Data").join(rel(rest)))
         } else {
-            Some(PathBuf::from(project_path))
+            Some(Self::local_path(project_path))
         }
+    }
+
+    /// An absolute path as stored in a project. Projects store Windows paths; off Windows a path on drive Z:
+    /// (where Wine shows the whole file system) is the same path from the root, with forward slashes.
+    #[cfg(windows)]
+    fn local_path(project_path: &str) -> PathBuf {
+        PathBuf::from(project_path)
+    }
+    #[cfg(not(windows))]
+    fn local_path(project_path: &str) -> PathBuf {
+        let b = project_path.as_bytes();
+        if b.len() >= 3 && b[0].eq_ignore_ascii_case(&b'z') && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/') {
+            return PathBuf::from(project_path[2..].replace('\\', "/"));
+        }
+        PathBuf::from(project_path)
     }
 
     pub fn get(&mut self, project_path: &str) -> Option<Arc<Sample>> {
