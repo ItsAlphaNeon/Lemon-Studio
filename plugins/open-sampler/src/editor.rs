@@ -1,17 +1,25 @@
-//! The plugin editor window: a Win32 child of the host's window that paints `view` with the os-ui canvas and turns
-//! mouse input into parameter edits through nih-plug's `GuiContext`.
+//! The plugin editor: a Win32 child of the host's window that paints `view` with the os-ui canvas, and the editor
+//! logic (platform independent): knob drags with the cursor held in place, wheel and reset gestures, menus, the
+//! keyboard and waveform. Values the editor sets show at once (an overlay over the host's parameter values until
+//! the host confirms them), so nothing waits for the host's next flush.
 //!
-// spec: plugins/plugin-formats.md (editors), plugins/open-sampler.md (Interaction), ui/knobs.md (drag / wheel)
+// spec: plugins/open-sampler.md (§2 menus, §2.3 waveform, §3.1 keyboard, §4 interaction), plugins/host-link.md,
+// spec: plugins/plugin-formats.md (editors)
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use nih_plug::prelude::*;
+use os_theme::Palette;
+use os_ui::kit::menu::{Mark, MenuItem, MenuStyle};
+use os_ui::Rect;
 
-use crate::params::SamplerParams;
-use crate::view::{self, Model, SampleView, Target, ViewState};
+use crate::params::{self, SamplerParams};
+use crate::view::{self, Hit, Model, SampleView, Target, ViewState};
 use crate::Shared;
 
 pub struct SamplerEditor {
@@ -19,11 +27,18 @@ pub struct SamplerEditor {
     pub shared: Arc<Shared>,
     /// DPI scale as f32 bits.
     pub scale: AtomicU32,
+    /// The open editor window (0 = closed): parameter changes post a repaint to it.
+    hwnd: Arc<AtomicIsize>,
 }
 
 impl SamplerEditor {
     pub fn new(params: Arc<SamplerParams>, shared: Arc<Shared>) -> Self {
-        SamplerEditor { params, shared, scale: AtomicU32::new(1f32.to_bits()) }
+        SamplerEditor { params, shared, scale: AtomicU32::new(1f32.to_bits()), hwnd: Arc::new(AtomicIsize::new(0)) }
+    }
+
+    fn notify(&self) {
+        #[cfg(windows)]
+        win32::post_changed(self.hwnd.load(Ordering::Acquire));
     }
 }
 
@@ -32,7 +47,9 @@ impl Editor for SamplerEditor {
         let scale = f32::from_bits(self.scale.load(Ordering::Relaxed));
         match parent {
             #[cfg(windows)]
-            ParentWindowHandle::Win32Hwnd(hwnd) => Box::new(win32::open(hwnd, scale, self.params.clone(), self.shared.clone(), context)),
+            ParentWindowHandle::Win32Hwnd(hwnd) => {
+                Box::new(win32::open(hwnd, scale, self.params.clone(), self.shared.clone(), context, self.hwnd.clone()))
+            }
             _ => Box::new(()),
         }
     }
@@ -46,300 +63,1218 @@ impl Editor for SamplerEditor {
         true
     }
 
-    fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
-    fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
-    fn param_values_changed(&self) {}
-}
-
-/// Parameter lookup by id for the view.
-pub struct Ptrs(pub HashMap<String, ParamPtr>);
-
-impl Ptrs {
-    pub fn new(params: &SamplerParams) -> Self {
-        Ptrs(params.param_map().into_iter().map(|(id, p, _)| (id, p)).collect())
+    fn param_value_changed(&self, _id: &str, _normalized_value: f32) {
+        self.notify();
+    }
+    fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {
+        self.notify();
+    }
+    fn param_values_changed(&self) {
+        self.notify();
     }
 }
 
-impl Model for Ptrs {
-    fn norm(&self, id: &str) -> f32 {
+/// The palette OpenStudio uses: the remembered `.flstheme` (`%APPDATA%/OpenStudio/current.flstheme`, spec
+/// ui/flstheme.md), else the default one. The plugin runs in its own module, so it reads the theme itself.
+pub fn palette() -> Palette {
+    if cfg!(test) {
+        return Palette::default();
+    }
+    std::env::var_os("APPDATA")
+        .map(|d| PathBuf::from(d).join("OpenStudio").join("current.flstheme"))
+        .and_then(|p| std::fs::read(p).ok())
+        .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Parameter access
+
+/// Parameter values by id for the view, with the editor's own not-yet-confirmed edits on top.
+pub struct Vals {
+    pub ptrs: HashMap<String, ParamPtr>,
+    overlay: HashMap<String, (f32, Instant)>,
+}
+
+impl Vals {
+    pub fn new(params: &SamplerParams) -> Self {
+        Vals { ptrs: params.param_map().into_iter().map(|(id, p, _)| (id, p)).collect(), overlay: HashMap::new() }
+    }
+
+    /// The host's value.
+    pub fn actual(&self, id: &str) -> f32 {
         // SAFETY: the pointers come from the params object, which outlives the editor.
-        self.0.get(id).map_or(0.0, |p| unsafe { p.modulated_normalized_value() })
+        self.ptrs.get(id).map_or(0.0, |p| unsafe { p.unmodulated_normalized_value() })
+    }
+
+    fn put(&mut self, id: &str, v: f32) {
+        self.overlay.insert(id.to_string(), (v, Instant::now()));
+    }
+
+    /// Drops overlay entries the host has confirmed (or ignored for a second). True when one went.
+    pub fn expire(&mut self) -> bool {
+        let before = self.overlay.len();
+        let now = Instant::now();
+        let ptrs = &self.ptrs;
+        self.overlay.retain(|id, (v, t)| {
+            let a = ptrs.get(id).map_or(*v, |p| unsafe { p.unmodulated_normalized_value() });
+            (a - *v).abs() > 1e-6 && now.duration_since(*t) < Duration::from_secs(1)
+        });
+        before != self.overlay.len()
+    }
+
+    pub fn default_norm(&self, id: &str) -> f32 {
+        self.ptrs.get(id).map_or(0.0, |p| unsafe { p.default_normalized_value() })
+    }
+
+    pub fn plain_to_norm(&self, id: &str, plain: f32) -> f32 {
+        self.ptrs.get(id).map_or(0.0, |p| unsafe { p.preview_normalized(plain) })
+    }
+
+    pub fn text_of(&self, id: &str, norm: f32) -> String {
+        self.ptrs.get(id).map_or_else(String::new, |p| unsafe { p.normalized_value_to_string(norm, true) })
+    }
+
+    /// A fingerprint of every value (repaint when it changes).
+    pub fn signature(&self) -> u64 {
+        let mut h: u64 = 1469598103934665603;
+        for p in self.ptrs.values() {
+            let v = unsafe { p.unmodulated_normalized_value() }.to_bits();
+            h = (h ^ u64::from(v)).wrapping_mul(1099511628211);
+        }
+        for (v, _) in self.overlay.values() {
+            h = (h ^ u64::from(v.to_bits())).wrapping_mul(1099511628211);
+        }
+        h
+    }
+}
+
+impl Model for Vals {
+    fn norm(&self, id: &str) -> f32 {
+        match self.overlay.get(id) {
+            Some((v, _)) => *v,
+            None => self.actual(id),
+        }
     }
     fn plain(&self, id: &str) -> f32 {
-        self.0.get(id).map_or(0.0, |p| unsafe { p.modulated_plain_value() })
+        let n = self.norm(id);
+        self.ptrs.get(id).map_or(0.0, |p| unsafe { p.preview_plain(n) })
     }
     fn text(&self, id: &str) -> String {
-        self.0.get(id).map_or_else(String::new, |p| unsafe { p.normalized_value_to_string(p.modulated_normalized_value(), true) })
-    }
-    fn name(&self, id: &str) -> String {
-        self.0.get(id).map_or_else(String::new, |p| unsafe { p.name().to_string() })
+        self.text_of(id, self.norm(id))
     }
 }
 
-/// What the mouse is doing (editor logic, independent of the window system).
+/// Default values of a fresh Open Sampler (offscreen renders, tests).
+pub struct Defaults(pub Vals);
+
+impl Defaults {
+    pub fn new(params: &SamplerParams) -> Self {
+        Defaults(Vals::new(params))
+    }
+}
+
+impl Model for Defaults {
+    fn norm(&self, id: &str) -> f32 {
+        self.0.norm(id)
+    }
+    fn plain(&self, id: &str) -> f32 {
+        self.0.plain(id)
+    }
+    fn text(&self, id: &str) -> String {
+        self.0.text(id)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Knob laws (spec §4)
+
+/// Pixels of drag for a knob's whole range.
+pub fn knob_px(id: &str) -> f32 {
+    match id {
+        "start_offset" => 2000.0,
+        "loop_start" | "loop_end" => 1600.0,
+        "fx_start" | "fx_length" => 1000.0,
+        "fx_eq" | "fx_rm_freq" => 128.0,
+        "ts_mul" => 400.0,
+        "ts_pitch" => 640.0,
+        "ts_time" => params::TIME_PX,
+        "f_cut" | "f_res" => 500.0,
+        _ => 256.0,
+    }
+}
+
+/// Fine (Ctrl) slow-down of a knob.
+pub fn fine_factor(id: &str) -> f32 {
+    if id == "ts_mul" {
+        0.01
+    } else {
+        0.25
+    }
+}
+
+/// Envelope time knobs (the ones with the Set ▸ steps submenu).
+fn is_time_knob(id: &str) -> bool {
+    id.starts_with("env") && ["_delay", "_att", "_hold", "_dec", "_rel", "_lfo_delay", "_lfo_att"].iter().any(|s| id.ends_with(s))
+}
+
+/// Knob position of an envelope time knob for `secs` seconds (inverse of the envelope time law).
+pub fn time_knob_norm(secs: f64, falling: bool) -> f32 {
+    let s = if falling { (secs - 0.009).max(0.0) } else { secs.max(0.0) };
+    let g100 = 2f64.powf(100.0 / 6553.6);
+    let g = s / 0.063922 + g100;
+    let field = 6553.6 * g.log2();
+    (field / 65536.0).clamp(0.0, 1.0) as f32
+}
+
+/// Parses a typed value into a knob position (spec §2.2 "Type in value").
+pub fn parse_value(vals: &Vals, id: &str, text: &str) -> Option<f32> {
+    let t = text.trim();
+    let num: String = t.chars().skip_while(|c| !(c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.')).take_while(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.')).collect();
+    let n: f32 = num.parse().ok()?;
+    let lower = t.to_ascii_lowercase();
+    let suffix = id.split_once('_').map_or(id, |(a, b)| if a.starts_with("env") { b } else { id });
+    let v = match suffix {
+        "ts_pitch" => (n + 1200.0) / 2400.0,
+        "ts_mul" => (((n / 100.0).max(1e-3)).log2() / 4.0) + 0.5,
+        "ts_time" => {
+            // "beats:16ths" or a number of beats.
+            let parts: Vec<&str> = t.split(':').collect();
+            let steps = if parts.len() >= 2 {
+                parts[0].trim().parse::<i32>().ok()? * 16 + parts[1].trim().parse::<i32>().unwrap_or(0)
+            } else {
+                (n * 16.0) as i32
+            };
+            params::time_norm(steps)
+        }
+        // Loop points are typed in samples (handled by `Logic::typed`, which knows the length).
+        "loop_start" | "loop_end" => return None,
+        "root" | "zone_lo" | "zone_hi" => return note_from_text(t).map(|k| vals.plain_to_norm(id, k as f32)),
+        "fine" => return Some(vals.plain_to_norm(id, n)),
+        "fx_sdelay" => {
+            let s = if lower.contains("left") { -n } else { n };
+            (s / 100.0 + 1.0) / 2.0
+        }
+        "amt" | "lfo_amt" | "att_t" | "dec_t" | "rel_t" | "fx_eq" | "fx_pogo" => (n / 100.0 + 1.0) / 2.0,
+        _ => n / 100.0,
+    };
+    Some(v.clamp(0.0, 1.0))
+}
+
+/// "C5" / "c#4" -> key (C5 = 60).
+pub fn note_from_text(t: &str) -> Option<i32> {
+    let t = t.trim().to_ascii_uppercase();
+    let (name, oct) = t.split_at(t.find(|c: char| c.is_ascii_digit() || c == '-')?);
+    let idx = params::NOTE_NAMES.iter().position(|n| *n == name)?;
+    Some(oct.parse::<i32>().ok()? * 12 + idx as i32)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Menus
+
+/// What a menu entry does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cmd {
+    None,
+    Reset,
+    /// Envelope time knob: the stage lasts `n` steps (16ths of a bar) at the host tempo.
+    Steps(i32),
+    CopyValue,
+    PasteValue,
+    TypeIn,
+    /// TIME knob value in 16ths of a beat (0 = none); -1 = autodetect / project tempo.
+    Time(i32),
+    /// Choice list entry.
+    Choice(i32),
+    Reload,
+    SaveAs,
+    Locate,
+    CopyAudio,
+    PasteAudio,
+    DetectTempo,
+    Properties,
+    Spectrum,
+    Multichannel,
+    Recent(String),
+    Browse,
+}
+
+/// A menu to show: rows, what each does, submenus by row.
+pub struct MenuDef {
+    pub items: Vec<MenuItem>,
+    pub cmds: Vec<Cmd>,
+    pub subs: Vec<(usize, MenuDef)>,
+    pub style: MenuStyle,
+    pub current: Option<usize>,
+}
+
+impl MenuDef {
+    fn new(style: MenuStyle) -> Self {
+        MenuDef { items: Vec::new(), cmds: Vec::new(), subs: Vec::new(), style, current: None }
+    }
+    fn add(&mut self, it: MenuItem, c: Cmd) -> usize {
+        self.items.push(it);
+        self.cmds.push(c);
+        self.items.len() - 1
+    }
+    fn head(&mut self, s: &str) {
+        self.add(MenuItem::head(s), Cmd::None);
+    }
+    fn sep(&mut self) {
+        self.add(MenuItem::Sep, Cmd::None);
+    }
+    pub fn sub(&self, i: usize) -> Option<&MenuDef> {
+        self.subs.iter().find(|(j, _)| *j == i).map(|(_, m)| m)
+    }
+}
+
+/// Which menu is open.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MenuReq {
+    Knob(String),
+    List(String),
+    Wave,
+    EnvPresets,
+    History,
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Editor logic
+
+/// Something the window has to do after an event.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Act {
+    Repaint,
+    /// Hide the cursor and hold it in place (knob drag).
+    Lock,
+    Menu(MenuReq, f32, f32),
+    TypeIn(String, f32, f32),
+    /// Preview note (key, velocity 1..127, on).
+    Note(u8, u8, bool),
+    OpenDialog,
+    Load(String),
+    Clear,
+    Reload,
+    SaveAs,
+    Locate,
+    CopyAudio,
+    PasteAudio,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Mods {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Btn {
+    Left,
+    Right,
+    Middle,
+}
+
 #[derive(Clone, Debug)]
 enum Drag {
-    Knob { id: String, y0: f32, v0: f32 },
-    Spin { id: String, y0: f32, v0: f32 },
-    Slider { id: String, track: os_ui::Rect },
-    KeyScroll { x0: f32, s0: f32 },
+    Knob { id: String },
+    Slider { id: String, track: Rect },
+    KeyScroll { x0: f32, s0: f32, ratio: f32 },
+    Keys,
+    Ruler { from: i32 },
+    Overview { track: Rect, grab: f64 },
+    Loop { which: u8, both: bool, x0: f32, s0: f32, e0: f32 },
+    EnvPoint { i: u8, x0: f32, y0: f32, v: [f32; 3] },
 }
 
-/// Editor behaviour: hit testing and parameter edits.
 pub struct Logic {
-    pub ptrs: Ptrs,
-    pub ctx: Arc<dyn GuiContext>,
+    pub vals: Vals,
+    ctx: Option<Arc<dyn GuiContext>>,
+    pub params: Arc<SamplerParams>,
+    pub shared: Arc<Shared>,
     pub view: ViewState,
-    pub hits: Vec<view::Hit>,
+    pub hits: Vec<Hit>,
     drag: Option<Drag>,
-    /// Hint text shown while hovering / dragging a control.
+    /// Hint text (`Label: value`, a tab before a right-aligned part).
     pub hint: String,
-}
-
-pub enum Effect {
-    None,
-    Repaint,
-    OpenFile,
-    ClearFile,
+    copied: Option<f32>,
+    /// Key held in the editor (preview) and its velocity.
+    held: Option<(u8, u8)>,
+    pub hosted: bool,
 }
 
 impl Logic {
-    pub fn new(ptrs: Ptrs, ctx: Arc<dyn GuiContext>) -> Self {
-        Logic { ptrs, ctx, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new() }
+    pub fn new(params: Arc<SamplerParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
+        Logic {
+            vals: Vals::new(&params),
+            ctx,
+            params,
+            shared,
+            view: ViewState::default(),
+            hits: Vec::new(),
+            drag: None,
+            hint: String::new(),
+            copied: None,
+            held: None,
+            hosted: false,
+        }
     }
 
     fn at(&self, x: f32, y: f32) -> Option<Target> {
         self.hits.iter().rev().find(|h| h.r.contains(x, y)).map(|h| h.t.clone())
     }
 
+    // Parameter edits: the overlay shows them at once; the host gets them through the GUI context.
+
     fn begin(&self, id: &str) {
-        if let Some(p) = self.ptrs.0.get(id) {
-            unsafe { self.ctx.raw_begin_set_parameter(*p) };
+        if let (Some(p), Some(c)) = (self.vals.ptrs.get(id), &self.ctx) {
+            unsafe { c.raw_begin_set_parameter(*p) };
         }
     }
-    fn set(&self, id: &str, norm: f32) {
-        if let Some(p) = self.ptrs.0.get(id) {
-            unsafe { self.ctx.raw_set_parameter_normalized(*p, norm.clamp(0.0, 1.0)) };
+    fn set(&mut self, id: &str, norm: f32) {
+        let norm = norm.clamp(0.0, 1.0);
+        self.vals.put(id, norm);
+        if let (Some(p), Some(c)) = (self.vals.ptrs.get(id), &self.ctx) {
+            unsafe { c.raw_set_parameter_normalized(*p, norm) };
         }
     }
     fn end(&self, id: &str) {
-        if let Some(p) = self.ptrs.0.get(id) {
-            unsafe { self.ctx.raw_end_set_parameter(*p) };
+        if let (Some(p), Some(c)) = (self.vals.ptrs.get(id), &self.ctx) {
+            unsafe { c.raw_end_set_parameter(*p) };
         }
     }
     /// One complete edit (begin, set, end).
-    fn edit(&self, id: &str, norm: f32) {
+    pub fn edit(&mut self, id: &str, norm: f32) {
         self.begin(id);
         self.set(id, norm);
         self.end(id);
     }
-    fn plain_to_norm(&self, id: &str, plain: f32) -> f32 {
-        self.ptrs.0.get(id).map_or(0.0, |p| unsafe { p.preview_normalized(plain) })
+    fn edit_plain(&mut self, id: &str, plain: f32) {
+        let n = self.vals.plain_to_norm(id, plain);
+        self.edit(id, n);
     }
-    fn step(&self, id: &str, from: f32, up: bool) -> f32 {
-        self.ptrs.0.get(id).map_or(from, |p| unsafe {
-            if up { p.next_normalized_step(from, false) } else { p.previous_normalized_step(from, false) }
-        })
-    }
-    fn default(&self, id: &str) -> f32 {
-        self.ptrs.0.get(id).map_or(0.0, |p| unsafe { p.default_normalized_value() })
+    fn reset(&mut self, id: &str) {
+        let d = self.vals.default_norm(id);
+        self.edit(id, d);
+        self.hint_for(id);
     }
 
-    fn set_hint(&mut self, id: &str) {
-        self.hint = format!("{}: {}", self.ptrs.name(id), self.ptrs.text(id));
+    /// Turning a time-stretch knob in Resample mode switches the mode to Auto (spec §5.6).
+    fn stretch_touch(&mut self, id: &str) {
+        if matches!(id, "ts_pitch" | "ts_mul" | "ts_time") && self.vals.plain("ts_mode") as i32 == 0 {
+            self.edit_plain("ts_mode", params::STRETCH_AUTO as f32);
+        }
     }
 
-    pub fn down(&mut self, x: f32, y: f32, right: bool, double: bool) -> Effect {
-        let Some(t) = self.at(x, y) else { return Effect::None };
-        // The right button only steps choices backwards: it never starts a drag (there is no right-button-up
-        // handling, so a drag started here would never end).
-        if right && !matches!(t, Target::Cycle(_)) {
-            return Effect::None;
+    fn hint_for(&mut self, id: &str) {
+        self.hint = self.param_hint(id);
+    }
+
+    /// `Label: value` with the TIME knob's clip tempo.
+    fn param_hint(&self, id: &str) -> String {
+        let mut h = view::param_hint(&self.vals, id);
+        if id == "ts_time" {
+            let steps = params::time_steps(self.vals.norm(id));
+            let raw = self.shared.raw.lock().ok().and_then(|r| r.as_ref().map(|s| s.frames() as f64 / f64::from(s.rate.max(1))));
+            if let (true, Some(secs)) = (steps > 0, raw) {
+                if secs > 0.0 {
+                    let bpm = f64::from(steps) / 16.0 * 60.0 / secs;
+                    h.push_str(&format!("  Clip tempo is {bpm:.0} BPM"));
+                }
+            }
+        }
+        h
+    }
+
+    fn with_sample<R>(&self, f: impl FnOnce(&SampleView) -> R) -> R {
+        let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
+        let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
+        let s = s.or_else(|| self.shared.raw.lock().ok().and_then(|r| r.clone()));
+        let bits = (self.shared.bits.load(Ordering::Relaxed) & 0x1ff) as u16;
+        f(&SampleView { sample: s.as_deref(), path: &path, bits, spectrum: None })
+    }
+
+    fn hover_hint(&self, x: f32, y: f32) -> String {
+        match self.at(x, y) {
+            Some(Target::Knob(id)) | Some(Target::Slider(id, _)) => self.param_hint(&id),
+            Some(Target::Key(k)) if self.held.is_none() => format!("Select range & offset   {}", params::note_name(k)),
+            Some(t) => self.with_sample(|sv| view::hint(&t, &self.vals, &self.view, sv, x, y)),
+            None => String::new(),
+        }
+    }
+
+    // Mouse
+
+    pub fn down(&mut self, x: f32, y: f32, btn: Btn, m: Mods, double: bool) -> Vec<Act> {
+        if debug() {
+            eprintln!("[open-sampler] down {x},{y} {btn:?} -> {:?} ({} hits)", self.at(x, y), self.hits.len());
+        }
+        let Some(t) = self.at(x, y) else { return vec![] };
+        if btn == Btn::Middle || (btn == Btn::Left && m.alt && t.param().is_some() && !matches!(t, Target::Key(_))) {
+            // Middle click / Alt+click resets (spec §4).
+            return match t.param().map(str::to_string) {
+                Some(id) => {
+                    self.reset(&id);
+                    vec![Act::Repaint]
+                }
+                None => vec![],
+            };
+        }
+        if btn == Btn::Right {
+            return self.right(t, x, y);
         }
         match t {
-            Target::Knob(id) if double => {
-                self.edit(&id, self.default(&id));
-                self.set_hint(&id);
-            }
             Target::Knob(id) => {
+                self.stretch_touch(&id);
                 self.begin(&id);
-                self.drag = Some(Drag::Knob { v0: self.ptrs.norm(&id), id, y0: y });
-            }
-            Target::Spin(id) => {
-                self.begin(&id);
-                self.drag = Some(Drag::Spin { v0: self.ptrs.norm(&id), id, y0: y });
+                self.hint_for(&id);
+                self.view.pressed = Some(Target::Knob(id.clone()));
+                self.drag = Some(Drag::Knob { id });
+                return vec![Act::Lock, Act::Repaint];
             }
             Target::Slider(id, track) => {
-                self.begin(&id);
-                self.set(&id, (x - track.x) / track.w);
-                self.set_hint(&id);
-                self.drag = Some(Drag::Slider { id, track });
+                if double {
+                    self.reset(&id);
+                } else {
+                    self.begin(&id);
+                    self.set(&id, (x - track.x) / track.w);
+                    self.hint_for(&id);
+                    self.view.pressed = Some(Target::Slider(id.clone(), track));
+                    self.drag = Some(Drag::Slider { id, track });
+                }
             }
             Target::Toggle(id) => {
-                let v = self.ptrs.norm(&id);
+                let v = self.vals.norm(&id);
                 self.edit(&id, if v > 0.5 { 0.0 } else { 1.0 });
+                self.hint = self.hover_hint(x, y);
             }
-            Target::Set(id, plain) => self.edit(&id, self.plain_to_norm(&id, plain)),
-            Target::Cycle(id) => {
-                let v = self.ptrs.norm(&id);
-                let mut n = self.step(&id, v, !right);
-                if n == v {
-                    // Wrap around at either end.
-                    n = if right { 1.0 } else { 0.0 };
-                }
-                self.edit(&id, n);
-                self.set_hint(&id);
+            Target::Set(id, plain) => self.edit_plain(&id, plain),
+            Target::List(id) => {
+                let r = self.hits.iter().rev().find(|h| h.t == Target::List(id.clone())).map(|h| h.r).unwrap_or_default();
+                return vec![Act::Menu(MenuReq::List(id), r.x, r.bottom())];
+            }
+            Target::ReverbAb => {
+                let v = self.vals.plain("fx_reverb_type");
+                self.edit_plain("fx_reverb_type", if v > 0.5 { 0.0 } else { 1.0 });
             }
             Target::Tab(i) => self.view.tab = i,
             Target::SubTab(i) => self.view.sub = i,
-            Target::FileOpen => return Effect::OpenFile,
-            Target::FileClear => return Effect::ClearFile,
+            Target::FxPage(i) => self.view.fx_page = i,
+            Target::FileOpen | Target::FileName => return vec![Act::OpenDialog],
+            Target::FileBrowse => return vec![Act::Locate],
+            Target::FileClear => return vec![Act::Clear, Act::Repaint],
             Target::Key(k) => {
-                self.edit("root", self.plain_to_norm("root", k as f32));
-                self.set_hint("root");
+                let vel = self.key_velocity(y);
+                self.held = Some((k as u8, vel));
+                self.drag = Some(Drag::Keys);
+                self.hint = format!("{} / velocity: {vel}", params::note_name(k));
+                return vec![Act::Note(k as u8, vel, true), Act::Repaint];
             }
+            Target::Ruler => {
+                let k = view::ruler_key(&self.view, x);
+                self.view.zone_drag = Some((k, k));
+                self.drag = Some(Drag::Ruler { from: k });
+            }
+            Target::KeyScroll(track) => {
+                let total = view::keyboard_width(false);
+                let thumb = (view::KEYS_W / total * track.w).max(24.0);
+                let ratio = view::keyboard_max_scroll(false) / (track.w - thumb).max(1.0);
+                self.view.pressed = Some(Target::KeyScroll(track));
+                self.drag = Some(Drag::KeyScroll { x0: x, s0: self.view.key_scroll, ratio });
+            }
+            Target::KeyArrow(d) => self.scroll_keys(f32::from(d) * view::OCTAVE_W),
             Target::RootReset => {
-                self.edit("root", self.default("root"));
-                self.edit("fine", self.default("fine"));
-            }
-            Target::KeyScroll => self.drag = Some(Drag::KeyScroll { x0: x, s0: self.view.key_scroll }),
-        }
-        Effect::Repaint
-    }
-
-    pub fn middle(&mut self, x: f32, y: f32) -> Effect {
-        match self.at(x, y).and_then(|t| t.param().map(str::to_string)) {
-            Some(id) => {
-                self.edit(&id, self.default(&id));
-                self.set_hint(&id);
-                Effect::Repaint
-            }
-            None => Effect::None,
-        }
-    }
-
-    pub fn moved(&mut self, x: f32, y: f32) -> Effect {
-        match self.drag.clone() {
-            Some(Drag::Knob { id, y0, v0 }) => {
-                // 1/1024 of the travel per pixel (spec: ui/knobs.md).
-                self.set(&id, v0 + (y0 - y) / 1024.0);
-                self.set_hint(&id);
-                Effect::Repaint
-            }
-            Some(Drag::Spin { id, y0, v0 }) => {
-                let steps = ((y0 - y) / 8.0).trunc() as i32;
-                let mut v = v0;
-                for _ in 0..steps.unsigned_abs() {
-                    v = self.step(&id, v, steps > 0);
+                for id in ["root", "fine", "zone_lo", "zone_hi"] {
+                    let d = self.vals.default_norm(id);
+                    self.edit(id, d);
                 }
-                self.set(&id, v);
-                self.set_hint(&id);
-                Effect::Repaint
             }
+            Target::Hand => self.view.hand = !self.view.hand,
+            Target::Wave(_) => {
+                if double {
+                    self.view.wave_start = 0.0;
+                    self.view.wave_len = 1.0;
+                }
+            }
+            Target::Overview(track) => {
+                let inner = (track.x, track.w);
+                let f = f64::from((x - inner.0) / inner.1);
+                let in_view = f >= self.view.wave_start && f <= self.view.wave_start + self.view.wave_len;
+                let grab = if in_view { f - self.view.wave_start } else { self.view.wave_len / 2.0 };
+                self.drag = Some(Drag::Overview { track, grab });
+                self.move_overview(track, grab, x);
+            }
+            Target::WaveArrow(d) => self.scroll_wave(f64::from(d) * self.view.wave_len / 4.0),
+            Target::WaveInfo => {
+                self.view.multichannel = !self.view.multichannel;
+            }
+            Target::LoopHandle(i) => {
+                let (s0, e0) = (self.vals.norm("loop_start"), self.vals.norm("loop_end"));
+                let both = m.shift;
+                self.begin("loop_start");
+                self.begin("loop_end");
+                self.view.pressed = Some(Target::LoopHandle(i));
+                self.drag = Some(Drag::Loop { which: i, both, x0: x, s0, e0 });
+            }
+            Target::EnvMenu => return vec![Act::Menu(MenuReq::EnvPresets, x, y)],
+            Target::EnvPoint(i) => {
+                let p = view::ENV_PREFIX[self.view.sub.min(4) as usize];
+                let ids = env_point_ids(p, i);
+                let v = [self.vals.norm(&ids[0]), ids.get(1).map_or(0.0, |s| self.vals.norm(s)), 0.0];
+                for id in &ids {
+                    self.begin(id);
+                }
+                self.view.pressed = Some(Target::EnvPoint(i));
+                self.drag = Some(Drag::EnvPoint { i, x0: x, y0: y, v });
+            }
+        }
+        vec![Act::Repaint]
+    }
+
+    fn right(&mut self, t: Target, x: f32, y: f32) -> Vec<Act> {
+        match t {
+            Target::Knob(id) => vec![Act::Menu(MenuReq::Knob(id), x, y)],
+            Target::Slider(id, _) => vec![Act::Menu(MenuReq::Knob(id), x, y)],
+            Target::List(id) => {
+                // Steps back through the list (OpenStudio choice).
+                let n = self.vals.plain(&id) as i32;
+                let max = list_labels(&id).len() as i32;
+                self.edit_plain(&id, ((n - 1).rem_euclid(max)) as f32);
+                self.hint_for(&id);
+                vec![Act::Repaint]
+            }
+            Target::Key(k) => {
+                self.edit_plain("root", k as f32);
+                self.hint = format!("Root note: {}", params::note_name(k));
+                vec![Act::Repaint]
+            }
+            Target::Wave(_) | Target::Overview(_) | Target::WaveInfo => vec![Act::Menu(MenuReq::Wave, x, y)],
+            Target::FileOpen | Target::FileName => vec![Act::Menu(MenuReq::History, x, y)],
+            Target::EnvMenu => vec![Act::Menu(MenuReq::EnvPresets, x, y)],
+            _ => vec![],
+        }
+    }
+
+    /// Velocity from the click height on a key: 64 at the middle (OpenStudio choice), louder towards the bottom.
+    fn key_velocity(&self, y: f32) -> u8 {
+        let (_, kt, _, kb, _, _) = view::key_rows();
+        let (kt, kb) = if self.view.hand { (view::y(365.0), view::y(454.0)) } else { (kt, kb) };
+        let u = ((y - kt) / (kb - kt)).clamp(0.0, 1.0);
+        (1.0 + u * 126.0).round() as u8
+    }
+
+    fn scroll_keys(&mut self, d: f32) {
+        self.view.key_scroll = (self.view.key_scroll + d).clamp(0.0, view::keyboard_max_scroll(false));
+    }
+
+    fn scroll_wave(&mut self, d: f64) {
+        self.view.wave_start = (self.view.wave_start + d).clamp(0.0, (1.0 - self.view.wave_len).max(0.0));
+    }
+
+    fn move_overview(&mut self, track: Rect, grab: f64, x: f32) {
+        let f = f64::from((x - track.x) / track.w);
+        self.view.wave_start = (f - grab).clamp(0.0, (1.0 - self.view.wave_len).max(0.0));
+    }
+
+    /// Mouse move (not locked). Returns the acts (repaint when something changed).
+    pub fn moved(&mut self, x: f32, y: f32, _m: Mods) -> Vec<Act> {
+        self.view.mouse = Some((x, y));
+        match self.drag.clone() {
             Some(Drag::Slider { id, track }) => {
                 self.set(&id, (x - track.x) / track.w);
-                self.set_hint(&id);
-                Effect::Repaint
+                self.hint_for(&id);
+                vec![Act::Repaint]
             }
-            Some(Drag::KeyScroll { x0, s0 }) => {
-                self.view.key_scroll = (s0 + (x - x0) * 2.0).clamp(0.0, view::keyboard_max_scroll());
-                Effect::Repaint
+            Some(Drag::KeyScroll { x0, s0, ratio }) => {
+                self.view.key_scroll = (s0 + (x - x0) * ratio).clamp(0.0, view::keyboard_max_scroll(false));
+                vec![Act::Repaint]
             }
-            None => {
-                let hint = match self.at(x, y).as_ref().and_then(Target::param) {
-                    Some(id) => format!("{}: {}", self.ptrs.name(id), self.ptrs.text(id)),
-                    None => String::new(),
-                };
-                if hint != self.hint {
-                    self.hint = hint;
-                    Effect::Repaint
-                } else {
-                    Effect::None
+            Some(Drag::Keys) => {
+                let k = view::key_at(&self.view, x, y);
+                match (k, self.held) {
+                    (Some(k), Some((h, _))) if k as u8 != h => {
+                        let vel = self.key_velocity(y);
+                        self.held = Some((k as u8, vel));
+                        self.hint = format!("{} / velocity: {vel}", params::note_name(k));
+                        vec![Act::Note(h, 0, false), Act::Note(k as u8, vel, true), Act::Repaint]
+                    }
+                    (Some(k), None) => {
+                        let vel = self.key_velocity(y);
+                        self.held = Some((k as u8, vel));
+                        vec![Act::Note(k as u8, vel, true), Act::Repaint]
+                    }
+                    _ => vec![],
                 }
+            }
+            Some(Drag::Ruler { from }) => {
+                let k = view::ruler_key(&self.view, x);
+                self.view.zone_drag = Some((from, k));
+                let (a, b) = (from.min(k), from.max(k));
+                self.hint = format!("Zone: {} to {}", params::note_name(a), params::note_name(b));
+                vec![Act::Repaint]
+            }
+            Some(Drag::Overview { track, grab }) => {
+                self.move_overview(track, grab, x);
+                vec![Act::Repaint]
+            }
+            Some(Drag::Loop { which, both, x0, s0, e0 }) => {
+                let area = view::wave_area();
+                let d = (x - x0) / area.w * self.view.wave_len as f32;
+                if both {
+                    let d = d.clamp(-s0, 1.0 - e0);
+                    self.set("loop_start", s0 + d);
+                    self.set("loop_end", e0 + d);
+                } else if which == 0 {
+                    self.set("loop_start", (s0 + d).min(e0));
+                } else {
+                    self.set("loop_end", (e0 + d).max(s0));
+                }
+                self.hint_for(if which == 0 { "loop_start" } else { "loop_end" });
+                vec![Act::Repaint]
+            }
+            Some(Drag::EnvPoint { i, x0, y0, v }) => {
+                let p = view::ENV_PREFIX[self.view.sub.min(4) as usize];
+                let ids = env_point_ids(p, i);
+                let eg = view::env_geom(&self.vals, p, view::env_rect());
+                // The decay node moves (1 - sustain) of the decay knob's run.
+                let run = if i == 3 { eg.px * (1.0 - eg.sus).max(0.05) } else { eg.px };
+                let dx = (x - x0) / run;
+                self.set(&ids[0], v[0] + dx);
+                if i == 3 {
+                    // Sustain node: vertical = sustain level over the drawn level range.
+                    let (top, bot) = view::env_levels(view::env_rect());
+                    let h = (bot - top) * if eg.amp > 0.05 { eg.amp } else { 1.0 };
+                    self.set(&ids[1], v[1] + (y0 - y) / h);
+                }
+                self.hint_for(&ids[0]);
+                vec![Act::Repaint]
+            }
+            Some(Drag::Knob { .. }) => vec![],
+            None => {
+                let h = self.hover_hint(x, y);
+                let changed = h != self.hint;
+                self.hint = h;
+                // Hover looks: repaint when the control under the mouse changes.
+                let _ = changed;
+                vec![Act::Repaint]
             }
         }
     }
 
-    pub fn up(&mut self) -> Effect {
-        match self.drag.take() {
-            Some(Drag::Knob { id, .. } | Drag::Spin { id, .. } | Drag::Slider { id, .. }) => {
-                self.end(&id);
-                Effect::Repaint
-            }
-            Some(Drag::KeyScroll { .. }) => Effect::Repaint,
-            None => Effect::None,
+    /// Locked knob drag: `dy` logical px (down positive).
+    pub fn delta(&mut self, _dx: f32, dy: f32, m: Mods) -> Vec<Act> {
+        let Some(Drag::Knob { id }) = self.drag.clone() else { return vec![] };
+        let mut rate = 1.0 / knob_px(&id);
+        if m.ctrl {
+            rate *= fine_factor(&id);
         }
+        let v = self.vals.norm(&id) - dy * rate;
+        self.set(&id, v);
+        self.hint_for(&id);
+        vec![Act::Repaint]
+    }
+
+    pub fn up(&mut self, _btn: Btn) -> Vec<Act> {
+        self.view.pressed = None;
+        let mut acts = vec![Act::Repaint];
+        match self.drag.take() {
+            Some(Drag::Knob { id } | Drag::Slider { id, .. }) => self.end(&id),
+            Some(Drag::Keys) => {
+                if let Some((k, _)) = self.held.take() {
+                    acts.push(Act::Note(k, 0, false));
+                }
+            }
+            Some(Drag::Ruler { from }) => {
+                let to = self.view.zone_drag.map_or(from, |z| z.1);
+                self.view.zone_drag = None;
+                let (a, b) = (from.min(to), from.max(to));
+                if a == b {
+                    // A click without a drag clears the zone.
+                    self.edit_plain("zone_lo", 0.0);
+                    self.edit_plain("zone_hi", params::KEY_MAX as f32);
+                } else {
+                    self.edit_plain("zone_lo", a as f32);
+                    self.edit_plain("zone_hi", b as f32);
+                }
+            }
+            Some(Drag::Loop { .. }) => {
+                self.end("loop_start");
+                self.end("loop_end");
+            }
+            Some(Drag::EnvPoint { i, .. }) => {
+                let p = view::ENV_PREFIX[self.view.sub.min(4) as usize];
+                for id in env_point_ids(p, i) {
+                    self.end(&id);
+                }
+            }
+            _ => {}
+        }
+        acts
     }
 
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
     }
 
-    /// Wheel: 1/64 of a knob's travel per notch, one step on spin boxes and choices.
-    pub fn wheel(&mut self, x: f32, y: f32, notches: f32) -> Effect {
+    pub fn leave(&mut self) -> Vec<Act> {
+        self.view.mouse = None;
+        if self.drag.is_none() {
+            self.hint.clear();
+        }
+        vec![Act::Repaint]
+    }
+
+    /// Wheel (spec §4): one notch = 8 px of drag; Ctrl 4, Shift 16; Alt jumps.
+    pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         match self.at(x, y) {
-            Some(Target::Knob(id) | Target::Slider(id, _)) => {
-                self.edit(&id, self.ptrs.norm(&id) + notches / 64.0);
-                self.set_hint(&id);
-                Effect::Repaint
-            }
-            Some(Target::Spin(id) | Target::Cycle(id)) => {
-                let v = self.step(&id, self.ptrs.norm(&id), notches > 0.0);
+            Some(Target::Knob(id)) | Some(Target::Slider(id, _)) => {
+                let cur = self.vals.norm(&id);
+                let v = if m.alt {
+                    if id == "ts_mul" {
+                        cur + notches.signum() * 0.25
+                    } else if notches > 0.0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    let px = if m.ctrl {
+                        4.0
+                    } else if m.shift {
+                        16.0
+                    } else {
+                        8.0
+                    };
+                    let px_range = if id == "fine" { 200.0 } else { knob_px(&id) };
+                    cur + notches * px / px_range
+                };
+                self.stretch_touch(&id);
                 self.edit(&id, v);
-                self.set_hint(&id);
-                Effect::Repaint
+                self.hint_for(&id);
+                vec![Act::Repaint]
             }
-            Some(Target::Key(_) | Target::KeyScroll) => {
-                self.view.key_scroll = (self.view.key_scroll - notches * 40.0).clamp(0.0, view::keyboard_max_scroll());
-                Effect::Repaint
+            Some(Target::List(id)) => {
+                let n = self.vals.plain(&id) as i32;
+                let max = list_labels(&id).len() as i32 - 1;
+                self.edit_plain(&id, (n - notches.signum() as i32).clamp(0, max) as f32);
+                self.hint_for(&id);
+                vec![Act::Repaint]
             }
-            _ => Effect::None,
+            Some(Target::Key(_) | Target::Ruler | Target::KeyScroll(_) | Target::KeyArrow(_)) => {
+                if self.view.hand {
+                    let step = view::OCTAVE_W / (7.0 * view::HAND_WHITE) * 34.0;
+                    self.scroll_keys(-notches * step);
+                } else {
+                    self.scroll_keys(-notches * 34.0);
+                }
+                vec![Act::Repaint]
+            }
+            Some(Target::Wave(area)) | Some(Target::Overview(area)) => {
+                if m.ctrl || m.shift {
+                    self.scroll_wave(-f64::from(notches) * self.view.wave_len / 8.0);
+                } else {
+                    // Zoom around the mouse, ×1.167 per notch (measured).
+                    let f = self.view.wave_start + f64::from((x - area.x) / area.w) * self.view.wave_len;
+                    let len = (self.view.wave_len / 1.167f64.powf(f64::from(notches))).clamp(1e-4, 1.0);
+                    let u = f64::from((x - area.x) / area.w).clamp(0.0, 1.0);
+                    self.view.wave_len = len;
+                    self.view.wave_start = (f - u * len).clamp(0.0, (1.0 - len).max(0.0));
+                }
+                vec![Act::Repaint]
+            }
+            _ => vec![],
         }
     }
 
-    /// A cheap fingerprint of all parameter values (repaint when it changes).
-    pub fn signature(&self) -> u64 {
-        let mut h: u64 = 1469598103934665603;
-        for p in self.ptrs.0.values() {
-            let v = unsafe { p.modulated_normalized_value() }.to_bits();
-            h = (h ^ u64::from(v)).wrapping_mul(1099511628211);
+    /// Keys while the editor has the focus.
+    pub fn key(&mut self, vk: u32, m: Mods) -> Vec<Act> {
+        match (vk, m.ctrl) {
+            (0x43, true) if self.view.tab == 0 => vec![Act::CopyAudio],
+            (0x56, true) if self.view.tab == 0 => vec![Act::PasteAudio],
+            _ => vec![],
         }
-        h
+    }
+
+    // Menus
+
+    pub fn menu(&self, req: &MenuReq) -> MenuDef {
+        match req {
+            MenuReq::Knob(id) => self.knob_menu(id),
+            MenuReq::List(id) => {
+                let mut m = MenuDef::new(MenuStyle::List);
+                let cur = self.vals.plain(id) as i32;
+                if id == "ts_mode" {
+                    // Two columns with headers (spec §2.2).
+                    let layout: [(&str, &[i32]); 3] = [("Realtime", &[0, 1, 2]), ("Elastique", &[3, 4]), ("Special", &[5, 6])];
+                    for (h, idx) in layout {
+                        m.head(h);
+                        for &i in idx {
+                            let r = m.add(MenuItem::item(params::STRETCH[i as usize]), Cmd::Choice(i));
+                            if i == cur {
+                                m.current = Some(r);
+                            }
+                        }
+                    }
+                    m.add(MenuItem::Column, Cmd::None);
+                    let r = m.add(MenuItem::item(params::STRETCH[7]), Cmd::Choice(7));
+                    if cur == 7 {
+                        m.current = Some(r);
+                    }
+                    m.head("Legacy elastique");
+                    for i in 8..12 {
+                        let r = m.add(MenuItem::item(params::STRETCH[i as usize]), Cmd::Choice(i));
+                        if i == cur {
+                            m.current = Some(r);
+                        }
+                    }
+                } else {
+                    for (i, l) in list_labels(id).iter().enumerate() {
+                        let r = m.add(MenuItem::item(l), Cmd::Choice(i as i32));
+                        if i as i32 == cur {
+                            m.current = Some(r);
+                        }
+                    }
+                }
+                m
+            }
+            MenuReq::Wave => {
+                let mut m = MenuDef::new(MenuStyle::Context);
+                let has = self.shared.raw.lock().map(|r| r.is_some()).unwrap_or(false);
+                let has_path = !self.params.sample_path.read().map(|p| p.is_empty()).unwrap_or(true);
+                m.add(MenuItem::item("Reload").enabled(has_path), Cmd::Reload);
+                m.add(MenuItem::item("Save as...").enabled(has), Cmd::SaveAs);
+                m.add(MenuItem::item("Locate file").enabled(has_path), Cmd::Locate);
+                m.add(MenuItem::item("Copy audio to clipboard").shortcut("Ctrl+C").enabled(has), Cmd::CopyAudio);
+                m.add(MenuItem::item("Paste audio from clipboard").shortcut("Ctrl+V"), Cmd::PasteAudio);
+                m.sep();
+                m.add(MenuItem::item("Edit in audio editor").shortcut("Ctrl+E").enabled(false), Cmd::None);
+                m.add(MenuItem::item("Edit in pitch corrector").enabled(false), Cmd::None);
+                m.add(MenuItem::item("Edit in time warper").enabled(false), Cmd::None);
+                m.sep();
+                m.add(MenuItem::item("Detect tempo").enabled(has), Cmd::DetectTempo);
+                m.add(MenuItem::item("Get properties").enabled(has), Cmd::Properties);
+                m.sep();
+                m.add(MenuItem::item("Spectrum view").mark(Mark::Check(self.view.spectrum)), Cmd::Spectrum);
+                m.add(MenuItem::item("Multichannel waveform view").mark(Mark::Check(self.view.multichannel)), Cmd::Multichannel);
+                m
+            }
+            MenuReq::EnvPresets => {
+                let mut m = MenuDef::new(MenuStyle::Context);
+                m.head("Presets");
+                m.add(MenuItem::item("Save as...").enabled(false), Cmd::None);
+                m
+            }
+            MenuReq::History => {
+                let mut m = MenuDef::new(MenuStyle::Context);
+                m.add(MenuItem::item("Load sample file..."), Cmd::Browse);
+                let hist = history();
+                if !hist.is_empty() {
+                    m.head("Sample history");
+                    for p in hist {
+                        let name = p.rsplit(['/', '\\']).next().unwrap_or(&p).to_string();
+                        m.add(MenuItem::item(&name), Cmd::Recent(p));
+                    }
+                }
+                m
+            }
+        }
+    }
+
+    fn knob_menu(&self, id: &str) -> MenuDef {
+        let mut m = MenuDef::new(MenuStyle::Context);
+        if id == "ts_time" {
+            let cur = params::time_steps(self.vals.norm(id));
+            m.add(MenuItem::item("(none)").mark(Mark::Radio(cur == 0)), Cmd::Time(0));
+            let has = self.shared.raw.lock().map(|r| r.is_some()).unwrap_or(false);
+            m.add(MenuItem::item("Autodetect...").enabled(has), Cmd::Time(-1));
+            m.add(MenuItem::item("Project tempo").enabled(has), Cmd::Time(-1));
+            m.sep();
+            for (l, s) in [("1 beat", 16), ("2 beats", 32), ("1 bar", 64), ("2 bars", 128), ("3 bars", 192), ("4 bars", 256)] {
+                m.add(MenuItem::item(l).mark(Mark::Radio(cur == s)), Cmd::Time(s));
+            }
+            m.add(MenuItem::Column, Cmd::None);
+        }
+        m.add(MenuItem::item("Reset"), Cmd::Reset);
+        if is_time_knob(id) {
+            let i = m.add(MenuItem::item("Set").sub(), Cmd::None);
+            let mut s = MenuDef::new(MenuStyle::Context);
+            for n in [1, 2, 3, 4, 8, 16, 32, 64, 128] {
+                s.add(MenuItem::item(&format!("{n} {}", if n == 1 { "step" } else { "steps" })), Cmd::Steps(n));
+            }
+            m.subs.push((i, s));
+        }
+        // Automation and remote control belong to the host: shown, not available in the plugin.
+        m.head("Automation");
+        for l in ["Edit events", "Edit events in new window", "Edit events in piano roll", "Init song with this position", "Delete initial value"] {
+            m.add(MenuItem::item(l).enabled(false), Cmd::None);
+        }
+        m.sep();
+        m.add(MenuItem::item("Create automation clip").enabled(false), Cmd::None);
+        m.add(MenuItem::item("Edit automation clip...").enabled(false), Cmd::None);
+        m.head("Remote control");
+        m.add(MenuItem::item("Link to controller...").enabled(false), Cmd::None);
+        m.add(MenuItem::item("Override global link...").enabled(false), Cmd::None);
+        m.head("Value");
+        m.add(MenuItem::item("Copy value"), Cmd::CopyValue);
+        m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue);
+        m.add(MenuItem::item("Type in value..."), Cmd::TypeIn);
+        m.add(MenuItem::item("Set..."), Cmd::TypeIn);
+        m
+    }
+
+    /// Runs a picked menu entry.
+    pub fn pick(&mut self, req: &MenuReq, cmd: Cmd, x: f32, y: f32) -> Vec<Act> {
+        let id = match req {
+            MenuReq::Knob(id) | MenuReq::List(id) => id.clone(),
+            _ => String::new(),
+        };
+        match cmd {
+            Cmd::None => return vec![],
+            Cmd::Reset => self.reset(&id),
+            Cmd::Steps(n) => {
+                // A step is a 16th of a bar (4 per beat).
+                let secs = f64::from(n) * 60.0 / self.shared.tempo() / 4.0;
+                let falling = id.ends_with("_dec") || id.ends_with("_rel");
+                self.edit(&id, time_knob_norm(secs, falling));
+                self.hint_for(&id);
+            }
+            Cmd::CopyValue => self.copied = Some(self.vals.norm(&id)),
+            Cmd::PasteValue => {
+                if let Some(v) = self.copied {
+                    self.edit(&id, v);
+                    self.hint_for(&id);
+                }
+            }
+            Cmd::TypeIn => return vec![Act::TypeIn(id, x, y)],
+            Cmd::Time(s) => {
+                let steps = if s < 0 { self.detect_beats() * 16 } else { s };
+                self.stretch_touch("ts_time");
+                self.edit("ts_time", params::time_norm(steps));
+                self.hint_for("ts_time");
+            }
+            Cmd::Choice(i) => {
+                self.edit_plain(&id, i as f32);
+                self.hint_for(&id);
+            }
+            Cmd::Reload => return vec![Act::Reload],
+            Cmd::SaveAs => return vec![Act::SaveAs],
+            Cmd::Locate => return vec![Act::Locate],
+            Cmd::CopyAudio => return vec![Act::CopyAudio],
+            Cmd::PasteAudio => return vec![Act::PasteAudio],
+            Cmd::DetectTempo => {
+                let beats = self.detect_beats();
+                let secs = self.shared.raw.lock().ok().and_then(|r| r.as_ref().map(|s| s.frames() as f64 / f64::from(s.rate.max(1)))).unwrap_or(0.0);
+                if secs > 0.0 {
+                    self.hint = format!("Tempo: {:.2} BPM ({beats} beats)", f64::from(beats) * 60.0 / secs);
+                }
+            }
+            Cmd::Properties => {
+                self.hint = self.with_sample(|sv| view::hint(&Target::WaveInfo, &self.vals, &self.view, sv, 0.0, 0.0));
+            }
+            Cmd::Spectrum => self.view.spectrum = !self.view.spectrum,
+            Cmd::Multichannel => self.view.multichannel = !self.view.multichannel,
+            Cmd::Recent(p) => return vec![Act::Load(p)],
+            Cmd::Browse => return vec![Act::OpenDialog],
+        }
+        vec![Act::Repaint]
+    }
+
+    /// Whole beats the loaded sample lasts at the host tempo (at least 1).
+    fn detect_beats(&self) -> i32 {
+        let secs = self.shared.raw.lock().ok().and_then(|r| r.as_ref().map(|s| s.frames() as f64 / f64::from(s.rate.max(1)))).unwrap_or(0.0);
+        ((secs * self.shared.tempo() / 60.0).round() as i32).clamp(1, 16)
+    }
+
+    /// A typed value for `id`.
+    pub fn typed(&mut self, id: &str, text: &str) {
+        let frames = self.params.frames.load(Ordering::Relaxed) as f32;
+        let typed = if matches!(id, "loop_start" | "loop_end") {
+            text.trim().split_whitespace().next().and_then(|n| n.parse::<f32>().ok()).map(|n| (n / frames.max(1.0)).clamp(0.0, 1.0))
+        } else {
+            parse_value(&self.vals, id, text)
+        };
+        if let Some(v) = typed {
+            self.stretch_touch(id);
+            self.edit(id, v);
+            self.hint_for(id);
+        }
+    }
+
+    /// The current value as text for the type-in box.
+    pub fn value_text(&self, id: &str) -> String {
+        self.vals.text(id)
+    }
+
+    /// Updates the lit keys from the engine and the held key. True when they changed.
+    pub fn refresh_lit(&mut self) -> bool {
+        let mut lit = self.shared.sounding_keys();
+        if let Some((k, _)) = self.held {
+            if !lit.contains(&i32::from(k)) {
+                lit.push(i32::from(k));
+            }
+        }
+        lit.sort_unstable();
+        if lit != self.view.lit {
+            self.view.lit = lit;
+            true
+        } else {
+            false
+        }
     }
 }
 
-/// The current sample for the waveform: the processed one when it matches the loaded one, else the raw sample.
-pub fn with_sample<R>(shared: &Shared, params: &SamplerParams, f: impl FnOnce(SampleView) -> R) -> R {
-    let path = params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
-    let file = path.rsplit(['/', '\\']).next().unwrap_or("").to_string();
-    let processed = shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
-    let raw = shared.raw.lock().ok().and_then(|r| r.clone());
-    let s = processed.or(raw);
-    f(SampleView { sample: s.as_deref(), file: &file })
+/// `OS_DEBUG` set: log editor events to stderr.
+pub fn debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("OS_DEBUG").is_some())
+}
+
+/// Labels of a choice list.
+pub fn list_labels(id: &str) -> &'static [&'static str] {
+    match id {
+        "declick" => params::DECLICK,
+        "ts_mode" => params::STRETCH,
+        "f_type" => params::FILTERS,
+        _ => &[],
+    }
+}
+
+/// The knobs an envelope node edits: horizontal first.
+fn env_point_ids(p: &str, i: u8) -> Vec<String> {
+    let id = |s: &str| format!("{p}_{s}");
+    match i {
+        0 => vec![id("delay")],
+        1 => vec![id("att")],
+        2 => vec![id("hold")],
+        3 => vec![id("dec"), id("sus")],
+        _ => vec![id("rel")],
+    }
+}
+
+/// Recently loaded samples (newest first), `%APPDATA%/OpenStudio/sampler-history.txt`.
+pub fn history() -> Vec<String> {
+    history_file().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()).unwrap_or_default()
+}
+
+fn history_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio").join("sampler-history.txt"))
+}
+
+pub fn remember(path: &str) {
+    let Some(f) = history_file() else { return };
+    let mut h = history();
+    h.retain(|p| p != path);
+    h.insert(0, path.to_string());
+    h.truncate(12);
+    if let Some(d) = f.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(f, h.join("\n"));
+}
+
+/// A 16-bit PCM (clipboard) or 32-bit float WAV file of a sample.
+pub fn wav_bytes(s: &os_engine::Sample, float: bool) -> Vec<u8> {
+    let n = s.frames();
+    let (bits, fmt) = if float { (32u16, 3u16) } else { (16, 1) };
+    let bpf = 2 * u32::from(bits / 8);
+    let data = n as u32 * bpf;
+    let mut v = Vec::with_capacity(44 + data as usize);
+    v.extend_from_slice(b"RIFF");
+    v.extend_from_slice(&(36 + data).to_le_bytes());
+    v.extend_from_slice(b"WAVEfmt ");
+    v.extend_from_slice(&16u32.to_le_bytes());
+    v.extend_from_slice(&fmt.to_le_bytes());
+    v.extend_from_slice(&2u16.to_le_bytes());
+    v.extend_from_slice(&s.rate.to_le_bytes());
+    v.extend_from_slice(&(s.rate * bpf).to_le_bytes());
+    v.extend_from_slice(&(bpf as u16).to_le_bytes());
+    v.extend_from_slice(&bits.to_le_bytes());
+    v.extend_from_slice(b"data");
+    v.extend_from_slice(&data.to_le_bytes());
+    for i in 0..n {
+        for x in [s.left[i], s.right[i]] {
+            if float {
+                v.extend_from_slice(&x.to_le_bytes());
+            } else {
+                v.extend_from_slice(&((x.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes());
+            }
+        }
+    }
+    v
+}
+
+/// Where pasted audio is kept so the plugin state can name it.
+pub fn paste_path() -> Option<PathBuf> {
+    let d = PathBuf::from(std::env::var_os("APPDATA")?).join("OpenStudio").join("samples");
+    std::fs::create_dir_all(&d).ok()?;
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    Some(d.join(format!("Pasted audio {t}.wav")))
+}
+
+/// Cached spectrum picture of the waveform panel.
+#[derive(Default)]
+pub struct SpectrumCache {
+    key: Option<(u64, u64, u64)>,
+    pub px: Vec<u32>,
+    pub w: usize,
+    pub h: usize,
+}
+
+impl SpectrumCache {
+    pub fn get(&mut self, version: u64, st: &ViewState, s: &os_engine::Sample) -> (usize, usize, &[u32]) {
+        let key = (version, st.wave_start.to_bits(), st.wave_len.to_bits());
+        if self.key != Some(key) {
+            let area = view::wave_area();
+            let (w, h) = ((area.w as usize / 2).max(1), (area.h as usize / 2).max(1));
+            let n = s.frames();
+            let (v0, vl) = view::wave_range(st, n);
+            self.px = view::spectrogram(s, v0, vl, w, h);
+            self.w = w;
+            self.h = h;
+            self.key = Some(key);
+        }
+        (self.w, self.h, &self.px)
+    }
 }
 
 #[cfg(windows)]
 mod win32 {
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicIsize, Ordering};
     use std::sync::Arc;
+    use std::time::Instant;
 
     use nih_plug::prelude::GuiContext;
+    use os_theme::Palette;
+    use os_ui::kit::menu::{self as kmenu, MenuStyle};
     use os_ui::Canvas;
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{
-        BeginPaint, EndPaint, InvalidateRect, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
+        BeginPaint, ClientToScreen, CreateFontW, DeleteObject, EndPaint, GetMonitorInfoW, InvalidateRect, MonitorFromPoint, SetDIBitsToDevice, UpdateWindow, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
     };
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OPENFILENAMEW};
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus};
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
+    use windows_sys::Win32::System::Ole::CF_WAVE;
+    use windows_sys::Win32::UI::Controls::{EM_SETSEL, WM_MOUSELEAVE};
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OPENFILENAMEW,
+    };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_RETURN, VK_SHIFT, VK_UP};
+    use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, ShellExecuteW, HDROP};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-    use super::{Effect, Logic, Ptrs};
+    use super::{Act, Btn, Cmd, Logic, MenuDef, Mods, SpectrumCache};
     use crate::params::SamplerParams;
-    use crate::view::{self, ViewState};
+    use crate::view::{self, SampleView, ViewState};
     use crate::Shared;
 
     const TIMER: usize = 1;
+    const WM_CHANGED: u32 = WM_APP + 1;
 
     struct Win {
         hwnd: HWND,
@@ -348,25 +1283,37 @@ mod win32 {
         crop: Vec<u32>,
         scale: f32,
         size: (u32, u32),
-        /// The host's strip row carries our page tabs (host link, spec `plugins/host-link.md`).
-        hosted: bool,
         params: Arc<SamplerParams>,
         shared: Arc<Shared>,
         logic: Logic,
+        palette: Palette,
+        spectrum: SpectrumCache,
         last_sig: u64,
         last_view: ViewState,
         last_ver: u64,
+        last_hint: String,
+        /// Cursor held here (screen px) during a knob drag.
+        lock: Option<POINT>,
+        tracking: bool,
+        slot: Arc<AtomicIsize>,
     }
 
     /// Owns the window; dropping it closes the editor.
-    pub struct Handle(isize);
+    pub struct Handle(isize, Arc<AtomicIsize>);
 
     // SAFETY: the handle is only an HWND value; the wrapper drops it on the GUI thread.
     unsafe impl Send for Handle {}
 
     impl Drop for Handle {
         fn drop(&mut self) {
+            self.1.store(0, Ordering::Release);
             unsafe { DestroyWindow(self.0 as HWND) };
+        }
+    }
+
+    pub fn post_changed(hwnd: isize) {
+        if hwnd != 0 {
+            unsafe { PostMessageW(hwnd as HWND, WM_CHANGED, 0, 0) };
         }
     }
 
@@ -375,23 +1322,19 @@ mod win32 {
     }
 
     /// One class per DLL instance: the name carries this module's address so two OpenStudio plugins never share it.
-    fn class_name() -> Vec<u16> {
-        wide(&format!("OpenSamplerView{:x}", wndproc as *const () as usize))
+    fn class_name(kind: &str) -> Vec<u16> {
+        wide(&format!("OpenSampler{kind}{:x}", wndproc as *const () as usize))
     }
 
-    pub fn open(parent: *mut c_void, scale: f32, params: Arc<SamplerParams>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>) -> Handle {
-        let scale = if scale > 0.0 { scale } else { 1.0 };
-        let size = ((view::EDITOR_W as f32 * scale).round() as u32, (view::EDITOR_H as f32 * scale).round() as u32);
-        let full = ((view::W as f32 * scale).round() as u32, (view::H as f32 * scale).round() as u32);
+    fn register(kind: &str, proc_: WNDPROC) -> Vec<u16> {
+        let class = class_name(kind);
         unsafe {
-            let inst = GetModuleHandleW(std::ptr::null());
-            let class = class_name();
             let wc = WNDCLASSW {
                 style: CS_DBLCLKS,
-                lpfnWndProc: Some(wndproc),
+                lpfnWndProc: proc_,
                 cbClsExtra: 0,
                 cbWndExtra: 0,
-                hInstance: inst,
+                hInstance: GetModuleHandleW(std::ptr::null()),
                 hIcon: std::ptr::null_mut(),
                 hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
                 hbrBackground: std::ptr::null_mut(),
@@ -399,7 +1342,16 @@ mod win32 {
                 lpszClassName: class.as_ptr(),
             };
             RegisterClassW(&wc);
-            let ptrs = Ptrs::new(&params);
+        }
+        class
+    }
+
+    pub fn open(parent: *mut c_void, scale: f32, params: Arc<SamplerParams>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: Arc<AtomicIsize>) -> Handle {
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let size = ((view::EDITOR_W as f32 * scale).round() as u32, (view::EDITOR_H as f32 * scale).round() as u32);
+        let full = ((view::W as f32 * scale).round() as u32, (view::H as f32 * scale).round() as u32);
+        unsafe {
+            let class = register("View", Some(wndproc));
             let canvas = Canvas::new(full.0, full.1, scale).expect("canvas");
             let win = Box::new(Win {
                 hwnd: std::ptr::null_mut(),
@@ -408,13 +1360,18 @@ mod win32 {
                 crop: Vec::new(),
                 scale,
                 size: full,
-                hosted: false,
+                logic: Logic::new(params.clone(), shared.clone(), Some(ctx)),
                 params,
                 shared,
-                logic: Logic::new(ptrs, ctx),
+                palette: super::palette(),
+                spectrum: SpectrumCache::default(),
                 last_sig: 0,
                 last_view: ViewState::default(),
                 last_ver: 0,
+                last_hint: String::new(),
+                lock: None,
+                tracking: false,
+                slot: slot.clone(),
             });
             let title = wide("Open Sampler");
             let hwnd = CreateWindowExW(
@@ -428,11 +1385,13 @@ mod win32 {
                 size.1 as i32,
                 parent as HWND,
                 std::ptr::null_mut(),
-                inst,
+                GetModuleHandleW(std::ptr::null()),
                 Box::into_raw(win) as *const c_void,
             );
+            slot.store(hwnd as isize, Ordering::Release);
+            DragAcceptFiles(hwnd, 1);
             SetTimer(hwnd, TIMER, 30, None);
-            Handle(hwnd as isize)
+            Handle(hwnd as isize, slot)
         }
     }
 
@@ -441,11 +1400,13 @@ mod win32 {
         if p.is_null() { None } else { Some(unsafe { &mut *p }) }
     }
 
-    /// Window-client pixels to painted-frame coordinates (the editor is a crop of the painted frame).
-    fn mouse(l: LPARAM, w: &Win) -> (f32, f32) {
-        let x = (l & 0xffff) as u16 as i16 as f32;
-        let y = ((l >> 16) & 0xffff) as u16 as i16 as f32;
-        (x / w.scale + view::CROP_X as f32, y / w.scale + w.crop_y() as f32)
+    fn mods() -> Mods {
+        let down = |vk: u16| unsafe { GetKeyState(i32::from(vk)) } < 0;
+        Mods { ctrl: down(VK_CONTROL), shift: down(VK_SHIFT), alt: down(VK_MENU) }
+    }
+
+    fn xy(l: LPARAM) -> (i32, i32) {
+        ((l & 0xffff) as u16 as i16 as i32, ((l >> 16) & 0xffff) as u16 as i16 as i32)
     }
 
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -461,6 +1422,7 @@ mod win32 {
                 let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Win;
                 if !p.is_null() {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                    (*p).slot.store(0, Ordering::Release);
                     drop(Box::from_raw(p));
                 }
                 return DefWindowProcW(hwnd, msg, wp, lp);
@@ -475,66 +1437,106 @@ mod win32 {
                     0
                 }
                 WM_ERASEBKGND => 1,
-                WM_TIMER => {
-                    let sig = w.logic.signature();
-                    let ver = w.shared.version();
-                    if sig != w.last_sig || ver != w.last_ver || w.logic.view != w.last_view {
-                        InvalidateRect(hwnd, std::ptr::null(), 0);
-                    }
+                WM_TIMER | WM_CHANGED => {
+                    w.poll();
                     0
                 }
-                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN => {
+                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN => {
                     SetFocus(hwnd);
-                    let (x, y) = mouse(lp, w);
-                    let e = w.logic.down(x, y, msg == WM_RBUTTONDOWN, msg == WM_LBUTTONDBLCLK);
-                    if w.logic.dragging() {
+                    let (x, y) = w.mouse(lp);
+                    let btn = match msg {
+                        WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => Btn::Right,
+                        WM_MBUTTONDOWN => Btn::Middle,
+                        _ => Btn::Left,
+                    };
+                    let acts = w.logic.down(x, y, btn, mods(), msg == WM_LBUTTONDBLCLK);
+                    if w.logic.dragging() && w.lock.is_none() {
                         SetCapture(hwnd);
                     }
-                    w.effect(e);
-                    0
-                }
-                WM_MBUTTONDOWN => {
-                    let (x, y) = mouse(lp, w);
-                    let e = w.logic.middle(x, y);
-                    w.effect(e);
+                    w.run(acts);
                     0
                 }
                 WM_MOUSEMOVE => {
-                    let (x, y) = mouse(lp, w);
-                    let e = w.logic.moved(x, y);
-                    w.effect(e);
+                    if !w.tracking {
+                        let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+                        TrackMouseEvent(&mut tme);
+                        w.tracking = true;
+                    }
+                    if let Some(anchor) = w.lock {
+                        // Held cursor: the movement since the last event, then back to the anchor.
+                        let mut p = POINT { x: 0, y: 0 };
+                        GetCursorPos(&mut p);
+                        let (dx, dy) = (p.x - anchor.x, p.y - anchor.y);
+                        if dx != 0 || dy != 0 {
+                            SetCursorPos(anchor.x, anchor.y);
+                            let acts = w.logic.delta(dx as f32 / w.scale, dy as f32 / w.scale, mods());
+                            w.run(acts);
+                        }
+                        return 0;
+                    }
+                    let (x, y) = w.mouse(lp);
+                    let acts = w.logic.moved(x, y, mods());
+                    w.run_hover(acts);
                     0
                 }
-                WM_LBUTTONUP => {
-                    ReleaseCapture();
-                    let e = w.logic.up();
-                    w.effect(e);
+                WM_MOUSELEAVE => {
+                    w.tracking = false;
+                    if w.lock.is_none() && !w.logic.dragging() {
+                        let acts = w.logic.leave();
+                        w.run(acts);
+                    }
                     0
                 }
-                WM_RBUTTONUP | WM_KILLFOCUS => {
+                WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
+                    w.unlock();
                     ReleaseCapture();
-                    let e = w.logic.up();
-                    w.effect(e);
+                    let acts = w.logic.up(Btn::Left);
+                    w.run(acts);
                     0
                 }
                 WM_CAPTURECHANGED => {
-                    let e = w.logic.up();
-                    w.effect(e);
+                    // Another window took the mouse (not this one capturing again): end the drag.
+                    if w.logic.dragging() && lp as HWND != hwnd {
+                        w.unlock();
+                        let acts = w.logic.up(Btn::Left);
+                        w.run(acts);
+                    }
                     0
                 }
+                WM_KILLFOCUS => 0,
                 WM_MOUSEWHEEL => {
                     // Wheel positions are screen coordinates.
                     let mut r: RECT = std::mem::zeroed();
                     GetWindowRect(hwnd, &mut r);
-                    let sx = (lp & 0xffff) as u16 as i16 as i32 - r.left;
-                    let sy = ((lp >> 16) & 0xffff) as u16 as i16 as i32 - r.top;
+                    let (sx, sy) = xy(lp);
+                    let (x, y) = w.to_view((sx - r.left) as f32, (sy - r.top) as f32);
                     let notches = ((wp >> 16) & 0xffff) as u16 as i16 as f32 / 120.0;
-                    let e = w.logic.wheel(sx as f32 / w.scale + view::CROP_X as f32, sy as f32 / w.scale + w.crop_y() as f32, notches);
-                    w.effect(e);
+                    let acts = w.logic.wheel(x, y, notches, mods());
+                    w.run(acts);
+                    0
+                }
+                WM_KEYDOWN => {
+                    let acts = w.logic.key(wp as u32, mods());
+                    if acts.is_empty() {
+                        return DefWindowProcW(hwnd, msg, wp, lp);
+                    }
+                    w.run(acts);
+                    0
+                }
+                WM_DROPFILES => {
+                    let drop = wp as HDROP;
+                    let mut buf = vec![0u16; 1024];
+                    let n = DragQueryFileW(drop, 0, buf.as_mut_ptr(), buf.len() as u32) as usize;
+                    DragFinish(drop);
+                    if n > 0 {
+                        let path = String::from_utf16_lossy(&buf[..n]);
+                        w.run(vec![Act::Load(path)]);
+                    }
                     0
                 }
                 WM_DESTROY => {
                     KillTimer(hwnd, TIMER);
+                    w.unlock();
                     0
                 }
                 _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -545,12 +1547,207 @@ mod win32 {
     impl Win {
         /// Top of the shown crop in the painted frame: the strip row is left out when the host draws it.
         fn crop_y(&self) -> u32 {
-            if self.hosted { view::HOSTED_CROP_Y } else { view::CROP_Y }
+            if self.logic.hosted { view::HOSTED_CROP_Y } else { view::CROP_Y }
         }
 
         /// Editor content size in logical px.
         fn content(&self) -> (u32, u32) {
-            (view::EDITOR_W, if self.hosted { view::HOSTED_EDITOR_H } else { view::EDITOR_H })
+            (view::EDITOR_W, if self.logic.hosted { view::HOSTED_EDITOR_H } else { view::EDITOR_H })
+        }
+
+        fn to_view(&self, x: f32, y: f32) -> (f32, f32) {
+            (x / self.scale + view::CROP_X as f32, y / self.scale + self.crop_y() as f32)
+        }
+
+        /// Window-client pixels to painted-frame coordinates (the editor is a crop of the painted frame).
+        fn mouse(&self, l: LPARAM) -> (f32, f32) {
+            let (x, y) = xy(l);
+            self.to_view(x as f32, y as f32)
+        }
+
+        /// Screen position of a painted-frame point.
+        fn screen(&self, x: f32, y: f32) -> (i32, i32) {
+            let mut p = POINT { x: ((x - view::CROP_X as f32) * self.scale) as i32, y: ((y - self.crop_y() as f32) * self.scale) as i32 };
+            unsafe { ClientToScreen(self.hwnd, &mut p) };
+            (p.x, p.y)
+        }
+
+        fn invalidate(&self) {
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+
+        fn unlock(&mut self) {
+            if let Some(p) = self.lock.take() {
+                unsafe {
+                    SetCursorPos(p.x, p.y);
+                    while ShowCursor(1) < 0 {}
+                }
+            }
+        }
+
+        /// Timer / parameter change: expire confirmed overlay values, refresh the lit keys, keep the processed sample
+        /// current, repaint when anything shown changed.
+        fn poll(&mut self) {
+            let mut dirty = self.logic.vals.expire();
+            dirty |= self.logic.refresh_lit();
+            if self.shared.stale(&self.params) {
+                self.shared.precompute_async(&self.params);
+            }
+            let sig = self.logic.vals.signature();
+            let ver = self.shared.version();
+            if dirty || sig != self.last_sig || ver != self.last_ver || self.logic.view != self.last_view || self.logic.hint != self.last_hint {
+                self.invalidate();
+            }
+            if self.logic.hint != self.last_hint {
+                self.last_hint = self.logic.hint.clone();
+                // Tell the host its hint line changed (hosted mode).
+                if self.logic.hosted {
+                    os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
+                }
+            }
+        }
+
+        /// Hover moves repaint only when the look under the mouse could change.
+        fn run_hover(&mut self, acts: Vec<super::Act>) {
+            let only_repaint = acts.iter().all(|a| *a == Act::Repaint);
+            if only_repaint && !self.logic.dragging() {
+                let hover_changed = self.hover_target() != self.last_hover();
+                if !hover_changed && self.logic.hint == self.last_hint {
+                    return;
+                }
+            }
+            self.run(acts);
+        }
+
+        fn hover_target(&self) -> Option<view::Target> {
+            let (x, y) = self.logic.view.mouse?;
+            self.logic.hits.iter().rev().find(|h| h.r.contains(x, y)).map(|h| h.t.clone())
+        }
+
+        fn last_hover(&self) -> Option<view::Target> {
+            let (x, y) = self.last_view.mouse?;
+            self.logic.hits.iter().rev().find(|h| h.r.contains(x, y)).map(|h| h.t.clone())
+        }
+
+        fn run(&mut self, acts: Vec<Act>) {
+            let mut repaint = false;
+            for a in acts {
+                match a {
+                    Act::Repaint => repaint = true,
+                    Act::Lock => unsafe {
+                        let mut p = POINT { x: 0, y: 0 };
+                        GetCursorPos(&mut p);
+                        self.lock = Some(p);
+                        let n = ShowCursor(0);
+                        if super::debug() {
+                            eprintln!("[open-sampler] lock at {},{} (cursor count {n})", p.x, p.y);
+                        }
+                        if n >= 0 {
+                            while ShowCursor(0) >= 0 {}
+                        }
+                        if GetCapture() != self.hwnd {
+                            SetCapture(self.hwnd);
+                        }
+                    },
+                    Act::Menu(req, x, y) => {
+                        let def = self.logic.menu(&req);
+                        let (sx, sy) = self.screen(x, y);
+                        if let Some(cmd) = popup(self.hwnd, sx, sy, &def, &self.palette, self.scale) {
+                            let acts = self.logic.pick(&req, cmd, x, y);
+                            self.run(acts);
+                        }
+                        repaint = true;
+                    }
+                    Act::TypeIn(id, x, y) => {
+                        let (sx, sy) = self.screen(x, y);
+                        let cur = self.logic.value_text(&id);
+                        if let Some(t) = type_in(self.hwnd, sx, sy, &cur, self.scale) {
+                            self.logic.typed(&id, &t);
+                        }
+                        repaint = true;
+                    }
+                    Act::Note(k, v, on) => {
+                        let ans = os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Note, os_hostlink::pack_note(k, v, on));
+                        if ans != 1 {
+                            if let Ok(mut q) = self.shared.previews.lock() {
+                                q.push((k, f32::from(v) / 127.0, on));
+                            }
+                        }
+                    }
+                    Act::OpenDialog => {
+                        if let Some(path) = file_dialog(self.hwnd, false) {
+                            self.load(&path);
+                        }
+                        repaint = true;
+                    }
+                    Act::Load(p) => {
+                        self.load(&p);
+                        repaint = true;
+                    }
+                    Act::Clear => {
+                        self.shared.clear(&self.params);
+                        repaint = true;
+                    }
+                    Act::Reload => {
+                        let p = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
+                        if !p.is_empty() {
+                            self.load(&p);
+                        }
+                        repaint = true;
+                    }
+                    Act::SaveAs => {
+                        let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
+                        if let (Some(s), Some(path)) = (s, file_dialog(self.hwnd, true)) {
+                            let path = if path.to_ascii_lowercase().ends_with(".wav") { path } else { format!("{path}.wav") };
+                            self.logic.hint = match std::fs::write(&path, super::wav_bytes(&s, true)) {
+                                Ok(()) => format!("Saved {path}"),
+                                Err(e) => format!("Could not save: {e}"),
+                            };
+                        }
+                        repaint = true;
+                    }
+                    Act::Locate => {
+                        let p = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
+                        if !p.is_empty() {
+                            let args = wide(&format!("/select,\"{p}\""));
+                            let exe = wide("explorer.exe");
+                            let op = wide("open");
+                            unsafe { ShellExecuteW(self.hwnd, op.as_ptr(), exe.as_ptr(), args.as_ptr(), std::ptr::null(), SW_SHOWNORMAL) };
+                        }
+                    }
+                    Act::CopyAudio => {
+                        let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
+                        if let Some(s) = s {
+                            set_clipboard_wave(self.hwnd, &super::wav_bytes(&s, false));
+                            self.logic.hint = "Audio copied to the clipboard".into();
+                            repaint = true;
+                        }
+                    }
+                    Act::PasteAudio => {
+                        if let (Some(bytes), Some(path)) = (clipboard_wave(self.hwnd), super::paste_path()) {
+                            if std::fs::write(&path, bytes).is_ok() {
+                                self.load(&path.to_string_lossy());
+                            }
+                        }
+                        repaint = true;
+                    }
+                }
+            }
+            if repaint {
+                self.invalidate();
+            }
+        }
+
+        fn load(&mut self, path: &str) {
+            match self.shared.load(path, &self.params) {
+                Ok(()) => {
+                    super::remember(path);
+                    self.logic.view.wave_start = 0.0;
+                    self.logic.view.wave_len = 1.0;
+                    self.logic.hint = format!("Loaded {}", path.rsplit(['/', '\\']).next().unwrap_or(path));
+                }
+                Err(e) => self.logic.hint = e,
+            }
         }
 
         /// Answers the host (spec `plugins/host-link.md`). Unknown commands return 0.
@@ -559,15 +1756,15 @@ mod win32 {
             let Some(cmd) = Cmd::from_usize(wp) else { return 0 };
             match cmd {
                 Cmd::Hello => {
-                    if !self.hosted {
-                        self.hosted = true;
+                    if !self.logic.hosted {
+                        self.logic.hosted = true;
                         // Shrink to the content below the strip row; the host asks for the size next.
                         let (cw, ch) = self.content();
                         let px = |v: u32| (v as f32 * self.scale).round() as i32;
                         unsafe {
                             SetWindowPos(self.hwnd, std::ptr::null_mut(), 0, 0, px(cw), px(ch), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-                            InvalidateRect(self.hwnd, std::ptr::null(), 0);
                         }
+                        self.invalidate();
                     }
                     os_hostlink::VERSION as LRESULT
                 }
@@ -579,7 +1776,7 @@ mod win32 {
                 Cmd::GetPage => LRESULT::from(self.logic.view.tab),
                 Cmd::SetPage => {
                     self.logic.view.tab = if lp <= 0 { 0 } else { 1 };
-                    unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+                    self.invalidate();
                     LRESULT::from(self.logic.view.tab)
                 }
                 Cmd::Metrics => {
@@ -593,36 +1790,30 @@ mod win32 {
                     }
                     1
                 }
+                Cmd::Changed | Cmd::Note => 0,
             }
-        }
-
-        fn effect(&mut self, e: Effect) {
-            match e {
-                Effect::None => return,
-                Effect::Repaint => {}
-                Effect::OpenFile => {
-                    if let Some(path) = open_dialog(self.hwnd) {
-                        if let Err(msg) = self.shared.load(&path, &self.params) {
-                            self.logic.hint = msg;
-                        }
-                    }
-                }
-                Effect::ClearFile => self.shared.clear(&self.params),
-            }
-            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
         }
 
         fn paint(&mut self) {
             unsafe {
                 let mut ps: PAINTSTRUCT = std::mem::zeroed();
                 let hdc = BeginPaint(self.hwnd, &mut ps);
-                let hits = super::with_sample(&self.shared, &self.params, |sv| {
-                    view::paint(&mut self.canvas, &self.logic.ptrs, &self.logic.view, &sv, &self.logic.hint, self.hosted)
-                });
+                let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
+                let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
+                let s = s.or_else(|| self.shared.raw.lock().ok().and_then(|r| r.clone()));
+                let bits = (self.shared.bits.load(Ordering::Relaxed) & 0x1ff) as u16;
+                let ver = self.shared.version();
+                let spectrum = match (&s, self.logic.view.spectrum) {
+                    (Some(s), true) => Some(self.spectrum.get(ver, &self.logic.view, s)),
+                    _ => None,
+                };
+                let sv = SampleView { sample: s.as_deref(), path: &path, bits, spectrum };
+                let hint = if self.logic.hosted { String::new() } else { self.logic.hint.clone() };
+                let hits = view::paint(&mut self.canvas, &self.palette, &self.logic.vals, &self.logic.view, &sv, &hint, self.logic.hosted);
                 self.logic.hits = hits;
-                self.last_sig = self.logic.signature();
+                self.last_sig = self.logic.vals.signature();
                 self.last_view = self.logic.view.clone();
-                self.last_ver = self.shared.version();
+                self.last_ver = ver;
                 // Show the editor area: the painted frame minus FL's border.
                 let (ox, oy) = ((view::CROP_X as f32 * self.scale).round() as usize, (self.crop_y() as f32 * self.scale).round() as usize);
                 let (cw, ch) = self.content();
@@ -651,10 +1842,336 @@ mod win32 {
         }
     }
 
-    fn open_dialog(owner: HWND) -> Option<String> {
+    // -----------------------------------------------------------------------------------------------------------
+    // Popup menus: an owned popup window painted with `kit::menu`, run modally until a pick or a cancel.
+
+    struct Pop {
+        canvas: Canvas,
+        items: Vec<os_ui::kit::menu::MenuItem>,
+        layout: kmenu::MenuLayout,
+        style: MenuStyle,
+        hover: Option<usize>,
+        current: Option<usize>,
+        palette: Palette,
+        scale: f32,
+        buf: Vec<u32>,
+    }
+
+    enum PopRes {
+        Pick(Cmd),
+        Cancel,
+        /// The mouse went back to the parent menu.
+        Back,
+    }
+
+    unsafe extern "system" fn pop_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        unsafe {
+            if msg == WM_PAINT {
+                let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Pop;
+                let mut ps: PAINTSTRUCT = std::mem::zeroed();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                if !p.is_null() {
+                    let pop = &mut *p;
+                    pop.canvas.begin_frame(None);
+                    kmenu::paint(&mut pop.canvas, &pop.palette, &pop.items, &pop.layout, pop.style, 0.0, 0.0, pop.hover, pop.current);
+                    let (w, h) = ((pop.layout.w * pop.scale).ceil() as u32, (pop.layout.h * pop.scale).ceil() as u32);
+                    pop.buf.resize((w * h) as usize, 0);
+                    pop.canvas.copy_to_xrgb(&mut pop.buf);
+                    let mut bmi: BITMAPINFO = std::mem::zeroed();
+                    bmi.bmiHeader = BITMAPINFOHEADER {
+                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: w as i32,
+                        biHeight: -(h as i32),
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB,
+                        ..std::mem::zeroed()
+                    };
+                    SetDIBitsToDevice(hdc, 0, 0, w, h, 0, 0, 0, h, pop.buf.as_ptr() as *const c_void, &bmi, DIB_RGB_COLORS);
+                }
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+            if msg == WM_ERASEBKGND {
+                return 1;
+            }
+            if msg == WM_MOUSEACTIVATE {
+                return MA_NOACTIVATE as LRESULT;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+    }
+
+    /// Work area of the monitor at a screen point.
+    fn work_area(x: i32, y: i32) -> RECT {
+        unsafe {
+            let mon = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            GetMonitorInfoW(mon, &mut mi);
+            mi.rcWork
+        }
+    }
+
+    /// Shows a menu at screen (`x`, `y`); the picked entry's command.
+    fn popup(owner: HWND, x: i32, y: i32, def: &MenuDef, pal: &Palette, scale: f32) -> Option<Cmd> {
+        match popup_at(owner, x, y, def, pal, scale, None) {
+            PopRes::Pick(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Tests that click at random set `OPENSAMPLER_NO_MODAL`: menus, type-in boxes and file dialogs then return nothing
+    /// instead of running a modal loop.
+    fn no_modal() -> bool {
+        std::env::var_os("OPENSAMPLER_NO_MODAL").is_some()
+    }
+
+    fn popup_at(owner: HWND, x: i32, y: i32, def: &MenuDef, pal: &Palette, scale: f32, parent: Option<RECT>) -> PopRes {
+        if no_modal() {
+            return PopRes::Cancel;
+        }
+        unsafe {
+            let class = register("Popup", Some(pop_proc));
+            let mut measure = Canvas::new(8, 8, scale).expect("canvas");
+            let layout = kmenu::layout(&mut measure, &def.items, def.style);
+            let (w, h) = ((layout.w * scale).ceil() as i32, (layout.h * scale).ceil() as i32);
+            let wa = work_area(x, y);
+            let mut px = x;
+            let mut py = y;
+            if px + w > wa.right {
+                px = match parent {
+                    Some(p) => p.left - w,
+                    None => wa.right - w,
+                };
+            }
+            if py + h > wa.bottom {
+                py = (wa.bottom - h).max(wa.top);
+            }
+            let pop = Box::new(Pop {
+                canvas: Canvas::new(w.max(1) as u32, h.max(1) as u32, scale).expect("canvas"),
+                items: def.items.clone(),
+                layout,
+                style: def.style,
+                hover: None,
+                current: def.current,
+                palette: pal.clone(),
+                scale,
+                buf: Vec::new(),
+            });
+            let root = GetAncestor(owner, GA_ROOT);
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                class.as_ptr(),
+                std::ptr::null(),
+                WS_POPUP,
+                px,
+                py,
+                w,
+                h,
+                root,
+                std::ptr::null_mut(),
+                GetModuleHandleW(std::ptr::null()),
+                std::ptr::null(),
+            );
+            let pop = Box::into_raw(pop);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, pop as isize);
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            SetCapture(hwnd);
+            let rect = RECT { left: px, top: py, right: px + w, bottom: py + h };
+            let opened = Instant::now();
+            let mut start = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut start);
+            let mut moved = false;
+            let mut sub_open: Option<usize> = None;
+            let item_at = |pop: &Pop, sx: i32, sy: i32| -> Option<usize> {
+                let (lx, ly) = ((sx - px) as f32 / scale, (sy - py) as f32 / scale);
+                pop.layout.item_at(&pop.items, lx, ly)
+            };
+            let inside = |r: &RECT, sx: i32, sy: i32| sx >= r.left && sx < r.right && sy >= r.top && sy < r.bottom;
+            let result = 'run: loop {
+                let mut msg: MSG = std::mem::zeroed();
+                if GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) <= 0 {
+                    PostQuitMessage(msg.wParam as i32);
+                    break PopRes::Cancel;
+                }
+                if GetCapture() != hwnd && msg.message != WM_PAINT && msg.message != WM_TIMER {
+                    SetCapture(hwnd);
+                }
+                let mut cur = POINT { x: 0, y: 0 };
+                GetCursorPos(&mut cur);
+                match msg.message {
+                    WM_MOUSEMOVE => {
+                        if (cur.x - start.x).abs() + (cur.y - start.y).abs() > 2 {
+                            moved = true;
+                        }
+                        if !inside(&rect, cur.x, cur.y) {
+                            if let Some(pr) = parent {
+                                if inside(&pr, cur.x, cur.y) {
+                                    break 'run PopRes::Back;
+                                }
+                            }
+                        }
+                        let hov = if inside(&rect, cur.x, cur.y) { item_at(&*pop, cur.x, cur.y) } else { None };
+                        let hov = hov.filter(|&i| def.items[i].clickable());
+                        if hov != (*pop).hover {
+                            (*pop).hover = hov;
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                            UpdateWindow(hwnd);
+                        }
+                        // Submenu: opens while its row is hovered.
+                        if let Some(i) = hov {
+                            if sub_open != Some(i) {
+                                if let Some(sub) = def.sub(i) {
+                                    sub_open = Some(i);
+                                    let row = (&(*pop).layout.rows)[i];
+                                    let sx = px + ((row.x + row.w) * scale) as i32 - 2;
+                                    let sy = py + (row.y * scale) as i32 - 2;
+                                    match popup_at(owner, sx, sy, sub, pal, scale, Some(rect)) {
+                                        PopRes::Pick(c) => break 'run PopRes::Pick(c),
+                                        PopRes::Cancel => break 'run PopRes::Cancel,
+                                        PopRes::Back => {
+                                            SetCapture(hwnd);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            sub_open = None;
+                        }
+                    }
+                    WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN => {
+                        if !inside(&rect, cur.x, cur.y) {
+                            break 'run PopRes::Cancel;
+                        }
+                        moved = true;
+                    }
+                    WM_LBUTTONUP | WM_RBUTTONUP => {
+                        // The release of the click that opened the menu does not pick.
+                        if !moved && opened.elapsed().as_millis() < 400 {
+                            continue;
+                        }
+                        if inside(&rect, cur.x, cur.y) {
+                            if let Some(i) = item_at(&*pop, cur.x, cur.y) {
+                                if def.items[i].clickable() && def.sub(i).is_none() {
+                                    break 'run PopRes::Pick(def.cmds[i].clone());
+                                }
+                            }
+                        }
+                    }
+                    WM_KEYDOWN | WM_SYSKEYDOWN => {
+                        let vk = msg.wParam as u16;
+                        if vk == VK_ESCAPE {
+                            break 'run PopRes::Cancel;
+                        }
+                        let n = def.items.len();
+                        if vk == VK_DOWN || vk == VK_UP {
+                            let mut i = (*pop).hover.or((*pop).current).map_or(if vk == VK_DOWN { n - 1 } else { 0 }, |i| i);
+                            for _ in 0..n {
+                                i = if vk == VK_DOWN { (i + 1) % n } else { (i + n - 1) % n };
+                                if def.items[i].clickable() {
+                                    break;
+                                }
+                            }
+                            (*pop).hover = Some(i);
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                        } else if vk == VK_RETURN {
+                            if let Some(i) = (*pop).hover {
+                                if def.items[i].clickable() && def.sub(i).is_none() {
+                                    break 'run PopRes::Pick(def.cmds[i].clone());
+                                }
+                            }
+                        }
+                    }
+                    WM_CANCELMODE | WM_ACTIVATEAPP => break 'run PopRes::Cancel,
+                    _ => {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+            };
+            ReleaseCapture();
+            DestroyWindow(hwnd);
+            drop(Box::from_raw(pop));
+            result
+        }
+    }
+
+    /// A small edit box at screen (`x`, `y`) for "Type in value"; Enter accepts, Esc or a click elsewhere cancels.
+    fn type_in(owner: HWND, x: i32, y: i32, text: &str, scale: f32) -> Option<String> {
+        if no_modal() {
+            return None;
+        }
+        unsafe {
+            let class = wide("EDIT");
+            let init = wide(text);
+            let (w, h) = ((140.0 * scale) as i32, (22.0 * scale) as i32);
+            let root = GetAncestor(owner, GA_ROOT);
+            let edit = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                class.as_ptr(),
+                init.as_ptr(),
+                WS_POPUP | WS_BORDER | ES_AUTOHSCROLL as u32,
+                x,
+                y,
+                w,
+                h,
+                root,
+                std::ptr::null_mut(),
+                GetModuleHandleW(std::ptr::null()),
+                std::ptr::null(),
+            );
+            if edit.is_null() {
+                return None;
+            }
+            let face = wide("Segoe UI");
+            let font = CreateFontW(-(14.0 * scale) as i32, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 5, 0, face.as_ptr());
+            SendMessageW(edit, WM_SETFONT, font as WPARAM, 1);
+            ShowWindow(edit, SW_SHOW);
+            SetForegroundWindow(edit);
+            SetFocus(edit);
+            SendMessageW(edit, EM_SETSEL, 0, -1);
+            let result = loop {
+                let mut msg: MSG = std::mem::zeroed();
+                if GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) <= 0 {
+                    PostQuitMessage(msg.wParam as i32);
+                    break None;
+                }
+                if msg.message == WM_KEYDOWN && msg.wParam as u16 == VK_RETURN {
+                    let mut buf = vec![0u16; 256];
+                    let n = GetWindowTextW(edit, buf.as_mut_ptr(), buf.len() as i32) as usize;
+                    break Some(String::from_utf16_lossy(&buf[..n]));
+                }
+                if msg.message == WM_KEYDOWN && msg.wParam as u16 == VK_ESCAPE {
+                    break None;
+                }
+                if matches!(msg.message, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_NCLBUTTONDOWN) && msg.hwnd != edit {
+                    break None;
+                }
+                if GetFocus() != edit && msg.message == WM_KEYDOWN {
+                    break None;
+                }
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            };
+            DestroyWindow(edit);
+            DeleteObject(font);
+            SetFocus(owner);
+            result
+        }
+    }
+
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
+
+    fn file_dialog(owner: HWND, save: bool) -> Option<String> {
+        if no_modal() {
+            return None;
+        }
         let mut file = vec![0u16; 1024];
-        let filter: Vec<u16> = "Audio files\0*.wav;*.flac;*.ogg;*.wv\0All files\0*.*\0\0".encode_utf16().collect();
-        let title = wide("Open sample");
+        let filter: Vec<u16> = if save { "WAV files\0*.wav\0\0" } else { "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3\0All files\0*.*\0\0" }
+            .encode_utf16()
+            .collect();
+        let title = wide(if save { "Save sample as" } else { "Open sample" });
         unsafe {
             let mut ofn: OPENFILENAMEW = std::mem::zeroed();
             ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
@@ -663,12 +2180,160 @@ mod win32 {
             ofn.lpstrFile = file.as_mut_ptr();
             ofn.nMaxFile = file.len() as u32;
             ofn.lpstrTitle = title.as_ptr();
-            ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-            if GetOpenFileNameW(&mut ofn) == 0 {
+            ofn.Flags = OFN_NOCHANGEDIR | if save { OFN_OVERWRITEPROMPT } else { OFN_FILEMUSTEXIST };
+            let ok = if save { GetSaveFileNameW(&mut ofn) } else { GetOpenFileNameW(&mut ofn) };
+            if ok == 0 {
                 return None;
             }
         }
         let end = file.iter().position(|&c| c == 0).unwrap_or(file.len());
         Some(String::from_utf16_lossy(&file[..end]))
+    }
+
+    fn set_clipboard_wave(owner: HWND, bytes: &[u8]) {
+        unsafe {
+            if OpenClipboard(owner) == 0 {
+                return;
+            }
+            EmptyClipboard();
+            let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len());
+            if !h.is_null() {
+                let p = GlobalLock(h) as *mut u8;
+                if !p.is_null() {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+                    GlobalUnlock(h);
+                    SetClipboardData(u32::from(CF_WAVE), h);
+                }
+            }
+            CloseClipboard();
+        }
+    }
+
+    fn clipboard_wave(owner: HWND) -> Option<Vec<u8>> {
+        unsafe {
+            if OpenClipboard(owner) == 0 {
+                return None;
+            }
+            let h = GetClipboardData(u32::from(CF_WAVE));
+            let out = if h.is_null() {
+                None
+            } else {
+                let size = GlobalSize(h);
+                let p = GlobalLock(h) as *const u8;
+                let v = (!p.is_null()).then(|| std::slice::from_raw_parts(p, size).to_vec());
+                GlobalUnlock(h);
+                v
+            };
+            CloseClipboard();
+            out
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn logic(tab: u8) -> Logic {
+        let params = Arc::new(SamplerParams::default());
+        let mut l = Logic::new(params, Arc::new(Shared::default()), None);
+        l.view.tab = tab;
+        l.view.sub = 4;
+        paint(&mut l);
+        l
+    }
+
+    fn paint(l: &mut Logic) {
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+        let sv = SampleView { sample: None, path: "", bits: 16, spectrum: None };
+        l.hits = view::paint(&mut c, &Palette::default(), &l.vals, &l.view, &sv, "", false);
+    }
+
+    fn centre(l: &Logic, t: &Target) -> (f32, f32) {
+        let h = l.hits.iter().rev().find(|h| &h.t == t).unwrap_or_else(|| panic!("no hit {t:?}"));
+        (h.r.cx(), h.r.cy())
+    }
+
+    #[test]
+    fn knob_drags_lock_the_cursor_and_follow_the_measured_speeds() {
+        let mut l = logic(0);
+        let k = Target::Knob("start_offset".into());
+        let (x, y) = centre(&l, &k);
+        let acts = l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(acts.contains(&Act::Lock));
+        l.delta(0.0, -20.0, Mods::default());
+        assert!((l.vals.norm("start_offset") - 0.01).abs() < 1e-5);
+        // Ctrl: a quarter of the speed.
+        l.delta(0.0, -20.0, Mods { ctrl: true, ..Mods::default() });
+        assert!((l.vals.norm("start_offset") - 0.0125).abs() < 1e-5);
+        l.up(Btn::Left);
+        assert!(!l.dragging());
+        // Middle click resets.
+        l.down(x, y, Btn::Middle, Mods::default(), false);
+        assert_eq!(l.vals.norm("start_offset"), 0.0);
+        // Wheel: 8 px per notch over the knob's 2000 px.
+        l.wheel(x, y, 1.0, Mods::default());
+        assert!((l.vals.norm("start_offset") - 0.004).abs() < 1e-5);
+        // Alt+wheel jumps to the end.
+        l.wheel(x, y, 1.0, Mods { alt: true, ..Mods::default() });
+        assert_eq!(l.vals.norm("start_offset"), 1.0);
+    }
+
+    #[test]
+    fn stretch_knobs_switch_resample_to_auto() {
+        let mut l = logic(0);
+        assert_eq!(l.vals.plain("ts_mode") as i32, 0);
+        let (x, y) = centre(&l, &Target::Knob("ts_pitch".into()));
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(l.vals.plain("ts_mode") as i32, params::STRETCH_AUTO);
+    }
+
+    #[test]
+    fn menus_and_typed_values() {
+        let mut l = logic(1);
+        let m = l.menu(&MenuReq::Knob("envpitch_att".into()));
+        let set = m.items.iter().position(|i| matches!(i, MenuItem::Item { label, .. } if label == "Set")).expect("Set row");
+        assert_eq!(m.sub(set).map(|s| s.items.len()), Some(9));
+        let before = l.vals.norm("envpitch_att");
+        l.pick(&MenuReq::Knob("envpitch_att".into()), Cmd::Steps(4), 0.0, 0.0);
+        assert_ne!(l.vals.norm("envpitch_att"), before);
+        // Copy / paste value.
+        l.pick(&MenuReq::Knob("envpitch_att".into()), Cmd::CopyValue, 0.0, 0.0);
+        l.pick(&MenuReq::Knob("envpitch_dec".into()), Cmd::PasteValue, 0.0, 0.0);
+        assert_eq!(l.vals.norm("envpitch_dec"), l.vals.norm("envpitch_att"));
+        // A time-stretch mode list has every mode.
+        let modes = l.menu(&MenuReq::List("ts_mode".into()));
+        assert_eq!(modes.cmds.iter().filter(|c| matches!(c, Cmd::Choice(_))).count(), params::STRETCH.len());
+        l.typed("root", "C4");
+        assert_eq!(l.vals.plain("root") as i32, 48);
+        l.typed("ts_pitch", "-1200");
+        assert!(l.vals.norm("ts_pitch").abs() < 1e-5);
+    }
+
+    #[test]
+    fn keyboard_previews_and_sets_the_root() {
+        let mut l = logic(1);
+        let key = l.hits.iter().find_map(|h| match h.t {
+            Target::Key(k) => Some((k, h.r)),
+            _ => None,
+        });
+        let Some((k, r)) = key else { panic!("no keys") };
+        let acts = l.down(r.cx(), r.bottom() - 2.0, Btn::Left, Mods::default(), false);
+        assert!(acts.iter().any(|a| matches!(a, Act::Note(n, _, true) if i32::from(*n) == k)));
+        let acts = l.up(Btn::Left);
+        assert!(acts.iter().any(|a| matches!(a, Act::Note(_, _, false))));
+        l.down(r.cx(), r.bottom() - 2.0, Btn::Right, Mods::default(), false);
+        assert_eq!(l.vals.plain("root") as i32, k);
+    }
+
+    #[test]
+    fn envelope_graph_follows_the_measured_law() {
+        let l = logic(1);
+        // Defaults: nodes at x 19, 47, 75, 100, 127 (measured, spec §3).
+        let eg = view::env_geom(&l.vals, "envvol", view::env_rect());
+        let want = [46.5, 74.0, 99.0, 126.5];
+        for (got, w) in eg.x[2..].iter().zip(want) {
+            assert!((got - w).abs() < 1.2, "{:?}", eg.x);
+        }
     }
 }

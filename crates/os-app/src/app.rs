@@ -793,6 +793,21 @@ impl App {
                     Request::Volume(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.volume = v),
                     Request::Pan(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.pan = v),
                     Request::PitchCents(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.pitch_cents = v),
+                    Request::Note(row, key, vel, on) => {
+                        // The plugin's own keyboard plays on the live stream, like the typing keyboard.
+                        if on {
+                            if !self.typing_synced {
+                                self.typing_synced = true;
+                                let mut p = self.state.project.clone();
+                                p.tempo = Some(self.state.tempo);
+                                self.transport.update(&p);
+                            }
+                            self.transport.note_on(row, u16::from(key), vel);
+                        } else {
+                            self.transport.note_off(row, u16::from(key));
+                        }
+                        continue;
+                    }
                 }
                 self.state.piano.dirty = true;
                 self.invalidate();

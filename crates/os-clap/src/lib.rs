@@ -141,6 +141,21 @@ struct HostData {
     flush: AtomicBool,
 }
 
+/// Called when a plugin wants the UI thread soon (flush, callback, restart): the app wakes its event loop so `idle`
+/// runs at once instead of on the next timer tick (an editor edit would otherwise wait up to a tick to apply).
+static WAKER: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Sets the function that wakes the host's UI loop (once per process).
+pub fn set_waker(f: fn()) {
+    let _ = WAKER.set(f);
+}
+
+pub fn wake() {
+    if let Some(f) = WAKER.get() {
+        f();
+    }
+}
+
 static HOST_NAME: &CStr = c"OpenStudio";
 static HOST_URL: &CStr = c"";
 static HOST_VERSION: &CStr = c"0.0.1";
@@ -155,15 +170,18 @@ unsafe extern "C" fn host_params_rescan(_host: *const clap_host, _flags: u32) {}
 unsafe extern "C" fn host_params_clear(_host: *const clap_host, _id: u32, _flags: u32) {}
 unsafe extern "C" fn host_params_request_flush(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).flush.store(true, Ordering::Release) };
+    wake();
 }
 static HOST_PARAMS: clap_host_params =
     clap_host_params { rescan: Some(host_params_rescan), clear: Some(host_params_clear), request_flush: Some(host_params_request_flush) };
 unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).restart.store(true, Ordering::Release) };
+    wake();
 }
 unsafe extern "C" fn host_request_process(_host: *const clap_host) {}
 unsafe extern "C" fn host_request_callback(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).callback.store(true, Ordering::Release) };
+    wake();
 }
 
 /// One queued note event.

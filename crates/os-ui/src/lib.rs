@@ -555,6 +555,31 @@ impl Canvas {
         }
     }
 
+    /// Draws a `w` x `h` image of `0x00RRGGBB` pixels stretched over `r` (nearest neighbour, clipped).
+    pub fn image(&mut self, r: Rect, w: usize, h: usize, px: &[u32]) {
+        if w == 0 || h == 0 || px.len() < w * h {
+            return;
+        }
+        let k = self.scale;
+        let (cx0, cy0, cx1, cy1) = self.clip_px();
+        let (x0, x1) = (((r.x * k).round() as i32).max(cx0), ((r.right() * k).round() as i32).min(cx1));
+        let (y0, y1) = (((r.y * k).round() as i32).max(cy0), ((r.bottom() * k).round() as i32).min(cy1));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let (rw, rh) = ((r.w * k).max(1.0), (r.h * k).max(1.0));
+        let pw = self.pixmap.width() as usize;
+        let pixels = self.pixmap.pixels_mut();
+        for y in y0..y1 {
+            let sy = (((y as f32 + 0.5 - r.y * k) / rh * h as f32) as usize).min(h - 1);
+            for x in x0..x1 {
+                let sx = (((x as f32 + 0.5 - r.x * k) / rw * w as f32) as usize).min(w - 1);
+                let v = px[sy * w + sx];
+                pixels[y as usize * pw + x as usize] = PremultipliedColorU8::from_rgba((v >> 16) as u8, (v >> 8) as u8, v as u8, 255).expect("opaque");
+            }
+        }
+    }
+
     /// Copy a device-pixel region into a `0x00RRGGBB` buffer of the same width.
     pub fn copy_region_to_xrgb(&self, out: &mut [u32], r: (usize, usize, usize, usize)) {
         self.copy_region_to_xrgb_at(out, self.pixmap.width() as usize, r, (0, 0));

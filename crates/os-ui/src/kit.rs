@@ -11,6 +11,9 @@ use os_theme::{Color, Palette};
 
 use crate::{Canvas, Font, Glyph, Rect};
 
+pub mod inst;
+pub mod menu;
+
 /// Interaction state of a control. `on` (latched / active) is separate from the pointer state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct State {

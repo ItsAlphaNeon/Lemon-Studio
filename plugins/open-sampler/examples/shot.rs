@@ -1,26 +1,47 @@
-//! Renders the Open Sampler editor offscreen: `cargo run -p open-sampler --example shot -- out.png [tab] [sample.wav] [full|hosted]`.
-use open_sampler::editor::Ptrs;
+//! Renders the Open Sampler editor offscreen:
+//! `cargo run -p open-sampler --example shot -- out.png [tab] [sample.wav|""] [full|hosted|-] [sub] [fx-page] [x,y] [spectrum]`.
+//! `tab` 0 = sample page, 1 = envelope page; `sub` = envelope target (0 Panning .. 4 Pitch); `fx-page` 0 tools / 1 effects;
+//! `x,y` = mouse position (hover looks, painted-frame coordinates).
+use open_sampler::editor::Vals;
 use open_sampler::params::SamplerParams;
 use open_sampler::view::{self, SampleView, ViewState};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let out = args.get(1).map(String::as_str).unwrap_or("open-sampler.png");
-    let tab: u8 = args.get(2).and_then(|t| t.parse().ok()).unwrap_or(0);
-    let sample = args.get(3).map(|p| os_engine::sample::load(std::path::Path::new(p)).expect("sample"));
-    let file = args.get(3).map(|p| p.rsplit(['/', '\\']).next().unwrap().to_string()).unwrap_or_default();
+    let arg = |i: usize| args.get(i).map(String::as_str).filter(|a| !a.is_empty() && *a != "-");
+    let out = arg(1).unwrap_or("open-sampler.png");
+    let tab: u8 = arg(2).and_then(|t| t.parse().ok()).unwrap_or(0);
+    let path = arg(3).unwrap_or("");
+    let sample = arg(3).map(|p| os_engine::sample::load(std::path::Path::new(p)).expect("sample"));
+    let bits = arg(3).map_or(16, |p| open_sampler::source_bits(std::path::Path::new(p))) as u16;
+    let mode = arg(4).unwrap_or("");
+    let sub: u8 = arg(5).and_then(|t| t.parse().ok()).unwrap_or(1);
+    let fx_page: u8 = arg(6).and_then(|t| t.parse().ok()).unwrap_or(0);
+    let mouse = arg(7).and_then(|m| m.split_once(',')).and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?)));
+    let spectrum = arg(8) == Some("spectrum");
     let params = SamplerParams::default();
-    let ptrs = Ptrs::new(&params);
-    // `hosted` as the 4th argument paints the editor as it is with the host's strip row (host link).
-    let hosted = args.get(4).is_some_and(|a| a == "hosted");
+    let vals = Vals::new(&params);
+    let hosted = mode == "hosted";
     let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
-    let st = ViewState { tab, ..ViewState::default() };
-    view::paint(&mut c, &ptrs, &st, &SampleView { sample: sample.as_ref(), file: &file }, "", hosted);
+    let st = ViewState { tab, sub, fx_page, mouse, spectrum, ..ViewState::default() };
+    let spec = match (&sample, spectrum) {
+        (Some(s), true) => {
+            let a = view::wave_area();
+            let (w, h) = ((a.w as usize / 2).max(1), (a.h as usize / 2).max(1));
+            Some((w, h, view::spectrogram(s, 0.0, s.frames() as f64, w, h)))
+        }
+        _ => None,
+    };
+    let sv = SampleView { sample: sample.as_ref(), path, bits, spectrum: spec.as_ref().map(|(w, h, p)| (*w, *h, p.as_slice())) };
+    let theme = std::env::var_os("OS_THEME")
+        .and_then(|p| std::fs::read(p).ok())
+        .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
+        .unwrap_or_default();
+    view::paint(&mut c, &theme, &vals, &st, &sv, "", hosted);
     let mut buf = vec![0u32; (view::W * view::H) as usize];
     c.copy_to_xrgb(&mut buf);
-    // The editor the host shows (cropped); pass `full` as a 4th argument for the whole painted area.
-    let full = args.get(4).is_some_and(|a| a == "full");
-    let (ox, oy, w, h) = if full {
+    // The editor the host shows (cropped); `full` paints the whole painted area.
+    let (ox, oy, w, h) = if mode == "full" {
         (0, 0, view::W, view::H)
     } else if hosted {
         (view::CROP_X, view::HOSTED_CROP_Y, view::EDITOR_W, view::HOSTED_EDITOR_H)

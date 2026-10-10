@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
@@ -260,6 +260,11 @@ impl ApplicationHandler for Shell {
         self.app.scan_plugins();
         self.window = Some(window);
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16)));
+    }
+
+    fn user_event(&mut self, _el: &ActiveEventLoop, _e: ()) {
+        // A wake (see `wake_ui`): `about_to_wait` follows and ticks.
+        WAKE_PENDING.store(false, std::sync::atomic::Ordering::Release);
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
@@ -692,6 +697,21 @@ fn screenshot(args: &[String]) {
     canvas.pixmap.save_png(out.expect("--screenshot needs a path")).expect("write png");
 }
 
+/// Wakes the event loop from any thread (hosted plugins asking for the UI thread: a parameter flush after an editor
+/// edit, a callback). One pending wake at a time; `about_to_wait` runs after the user event and ticks the app.
+static PROXY: std::sync::Mutex<Option<EventLoopProxy<()>>> = std::sync::Mutex::new(None);
+static WAKE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn wake_ui() {
+    if !WAKE_PENDING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        if let Ok(p) = PROXY.lock() {
+            if let Some(p) = p.as_ref() {
+                let _ = p.send_event(());
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--screenshot") {
@@ -699,7 +719,11 @@ fn main() {
         return;
     }
     let path = args.first().map(std::path::PathBuf::from);
-    let event_loop = EventLoop::new().expect("event loop");
+    let event_loop = EventLoop::<()>::with_user_event().build().expect("event loop");
+    if let Ok(mut p) = PROXY.lock() {
+        *p = Some(event_loop.create_proxy());
+    }
+    os_clap::set_waker(wake_ui);
     let mut shell = Shell {
         app: App::new(path),
         window: None,

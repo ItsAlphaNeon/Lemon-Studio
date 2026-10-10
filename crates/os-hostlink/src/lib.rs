@@ -35,6 +35,12 @@ pub enum Cmd {
     Metrics = 6,
     /// `lparam` = pointer to a [`HintBuf`] the plugin fills with the text for the hint line (parameter name and value).
     Hint = 7,
+    /// Plugin -> host (sent to the editor's parent window), `lparam` 0: the hint line or the page changed, poll now
+    /// instead of waiting for the next tick. Answer 1 when understood.
+    Changed = 8,
+    /// Plugin -> host: a preview note from the plugin's own keyboard, `lparam` = [`pack_note`]. The host plays it on the
+    /// plugin's channel (its live stream) and answers 1; 0 = not handled, the plugin plays it by itself.
+    Note = 9,
 }
 
 impl Cmd {
@@ -47,6 +53,8 @@ impl Cmd {
             5 => Cmd::SetPage,
             6 => Cmd::Metrics,
             7 => Cmd::Hint,
+            8 => Cmd::Changed,
+            9 => Cmd::Note,
             _ => return None,
         })
     }
@@ -103,6 +111,15 @@ impl HintBuf {
     }
 }
 
+/// A [`Cmd::Note`] argument: key 0..=127, velocity 0..=127, note on / off.
+pub fn pack_note(key: u8, velocity: u8, on: bool) -> isize {
+    (key as isize & 0x7f) | ((velocity as isize & 0x7f) << 8) | (isize::from(on) << 16)
+}
+
+pub fn unpack_note(v: isize) -> (u8, u8, bool) {
+    ((v & 0x7f) as u8, ((v >> 8) & 0x7f) as u8, (v >> 16) & 1 == 1)
+}
+
 pub fn pack_size(w: u32, h: u32) -> isize {
     (w.min(0xffff) | (h.min(0xffff) << 16)) as isize
 }
@@ -117,7 +134,7 @@ mod win {
     use std::sync::OnceLock;
 
     use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindow, RegisterWindowMessageW, SendMessageTimeoutW, GW_CHILD, SMTO_ABORTIFHUNG};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetParent, GetWindow, RegisterWindowMessageW, SendMessageTimeoutW, GW_CHILD, SMTO_ABORTIFHUNG};
 
     use super::*;
 
@@ -142,6 +159,18 @@ mod win {
         let mut out = 0usize;
         let ok = unsafe { SendMessageTimeoutW(hwnd as HWND, message(), cmd as WPARAM, arg as LPARAM, SMTO_ABORTIFHUNG, 250, &mut out) };
         (ok != 0).then_some(out as isize)
+    }
+
+    /// Plugin side: sends a plugin -> host command to the window that holds the editor `editor`. The answer, 0 when the
+    /// host does not speak the link (another DAW).
+    pub fn to_host(editor: isize, cmd: Cmd, arg: isize) -> isize {
+        let parent = unsafe { GetParent(editor as HWND) } as isize;
+        if parent == 0 {
+            return 0;
+        }
+        let mut out = 0usize;
+        let ok = unsafe { SendMessageTimeoutW(parent as HWND, message(), cmd as WPARAM, arg as LPARAM, SMTO_ABORTIFHUNG, 100, &mut out) };
+        if ok != 0 { out as isize } else { 0 }
     }
 
     impl Link {
@@ -192,7 +221,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{message, Link};
+pub use win::{message, to_host, Link};
 
 #[cfg(test)]
 mod tests {
@@ -206,5 +235,7 @@ mod tests {
         assert_eq!(b.get(), "Volume: 50 %");
         assert_eq!(Cmd::from_usize(Cmd::SetPage as usize), Some(Cmd::SetPage));
         assert_eq!(PageIcon::from_id(99), PageIcon::Plugin);
+        assert_eq!(unpack_note(pack_note(67, 100, true)), (67, 100, true));
+        assert_eq!(unpack_note(pack_note(0, 0, false)), (0, 0, false));
     }
 }

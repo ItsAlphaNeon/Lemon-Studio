@@ -79,6 +79,16 @@ impl Params {
         })
     }
 
+    /// The same envelope with every stage time multiplied by `f` (tempo-synced envelopes).
+    pub fn scaled(mut self, f: f64) -> Self {
+        self.delay *= f;
+        self.attack *= f;
+        self.hold *= f;
+        self.decay *= f;
+        self.release *= f;
+        self
+    }
+
     /// Level while the note is held, `t` seconds after it started.
     fn held(&self, t: f64) -> f64 {
         if t < self.delay {

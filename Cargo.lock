@@ -1958,6 +1958,7 @@ dependencies = [
  "os-engine",
  "os-hostlink",
  "os-model",
+ "os-theme",
  "os-ui",
  "tiny-skia",
  "windows-sys 0.61.2",

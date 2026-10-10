@@ -1,7 +1,10 @@
-//! Open Sampler parameters. Every control of the editor is a host-visible parameter, addressed by its id.
+//! Open Sampler parameters. Every control of the editor is a host-visible parameter, addressed by its id. Most are
+//! stored as the knob position 0..1 (FL's knobs are positions too) and converted where they are used; the value
+//! texts follow FL's hint bar.
 //!
-// spec: plugins/open-sampler.md (controls per tab, defaults, working vs inert)
+// spec: plugins/open-sampler.md (§Controls: ids, ranges, defaults, value texts)
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use nih_plug::prelude::*;
@@ -13,12 +16,17 @@ fn percent() -> Fmt {
     Arc::new(|v| format!("{:.0}%", v * 100.0))
 }
 
-fn bipolar() -> Fmt {
-    Arc::new(|v| if v.abs() < 0.005 { "Centered".into() } else { format!("{:.0}%", v * 100.0) })
+/// "N %" (with a space: SMP START / LENGTH, as FL writes them).
+fn percent_sp() -> Fmt {
+    Arc::new(|v| format!("{:.0} %", v * 100.0))
 }
 
-#[allow(dead_code)]
-fn pan_text() -> Fmt {
+/// A -1..1 value in percent ("-79%").
+fn signed_percent() -> Fmt {
+    Arc::new(|v| format!("{:.0}%", v * 100.0))
+}
+
+fn side_text() -> Fmt {
     Arc::new(|v| {
         let p = (v * 100.0).round();
         if p == 0.0 { "Centered".into() } else if p < 0.0 { format!("{:.0}% left", -p) } else { format!("{p:.0}% right") }
@@ -30,16 +38,9 @@ pub fn knob(name: &str, default: f32) -> FloatParam {
     FloatParam::new(name, default, FloatRange::Linear { min: 0.0, max: 1.0 }).with_value_to_string(percent())
 }
 
-/// A -1..1 knob (centre = 0).
+/// A -1..1 knob (centre = 0) shown in percent.
 pub fn bi_knob(name: &str, default: f32) -> FloatParam {
-    FloatParam::new(name, default, FloatRange::Linear { min: -1.0, max: 1.0 }).with_value_to_string(bipolar())
-}
-
-#[allow(dead_code)]
-fn pan_knob(name: &str) -> FloatParam {
-    FloatParam::new(name, 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })
-        .with_smoother(SmoothingStyle::Linear(10.0))
-        .with_value_to_string(pan_text())
+    FloatParam::new(name, default, FloatRange::Linear { min: -1.0, max: 1.0 }).with_value_to_string(signed_percent())
 }
 
 /// A choice list stored as an integer (the label is the value text).
@@ -48,35 +49,14 @@ fn choice(name: &str, default: i32, labels: &'static [&'static str]) -> IntParam
         .with_value_to_string(Arc::new(move |v| labels.get(v as usize).copied().unwrap_or("?").to_string()))
 }
 
-/// A spin box where 0 shows `---` (off / unlimited).
-#[allow(dead_code)]
-fn spin(name: &str, default: i32, max: i32) -> IntParam {
-    IntParam::new(name, default, IntRange::Linear { min: 0, max })
-        .with_value_to_string(Arc::new(|v| if v == 0 { "---".into() } else { v.to_string() }))
-}
-
-/// Envelope time knobs: field range 100..=65536 of the channel envelope records (spec: audio/channel-envelopes.md).
-pub const TIME_MIN: f32 = 100.0;
-pub const TIME_MAX: f32 = 65536.0;
-
+/// Envelope / LFO time knobs: the knob position v is the channel-envelope field v·65536 (minimum 100 = none, spec
+/// audio/channel-envelopes.md); FL shows the position in percent.
 pub fn time_field(norm: f32) -> i32 {
-    (TIME_MIN + norm.clamp(0.0, 1.0) * (TIME_MAX - TIME_MIN)).round() as i32
+    ((norm.clamp(0.0, 1.0) * 65536.0).round() as i32).max(100)
 }
 
-fn time_norm(field: i32) -> f32 {
-    (field as f32 - TIME_MIN) / (TIME_MAX - TIME_MIN)
-}
-
-fn seconds_text(falling: bool) -> Fmt {
-    Arc::new(move |v| {
-        let f = time_field(v);
-        let s = if falling { envelope::fall_seconds(f) } else { envelope::knob_seconds(f) };
-        if s < 1.0 { format!("{:.0} ms", s * 1000.0) } else { format!("{s:.2} s") }
-    })
-}
-
-fn time_knob(name: &str, field: i32, falling: bool) -> FloatParam {
-    FloatParam::new(name, time_norm(field), FloatRange::Linear { min: 0.0, max: 1.0 }).with_value_to_string(seconds_text(falling))
+fn field_norm(field: i32) -> f32 {
+    field as f32 / 65536.0
 }
 
 pub const NOTE_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -86,10 +66,62 @@ pub fn note_name(key: i32) -> String {
     format!("{}{}", NOTE_NAMES[key.rem_euclid(12) as usize], key.div_euclid(12))
 }
 
-pub const DECLICK: &[&str] = &["None", "Out only (no bleeding)", "Transient (no bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (no bleeding)"];
-pub const STRETCH: &[&str] = &["Resample", "E3 generic", "E3 mono", "Slice stretch", "Slice map", "Auto"];
-pub const FILTERS: &[&str] = &["Fast LP", "LP", "BP", "HP", "BS", "LPx2", "SVF LP", "SVF LP x2"];
-pub const LFO_SHAPES: &[&str] = &["Sine", "Triangle", "Square"];
+pub const DECLICK: &[&str] = &[
+    "Out only (no bleeding)",
+    "Transient (no bleeding)",
+    "Transient (bleeding)",
+    "Generic (bleeding)",
+    "Smooth (bleeding)",
+    "Crossfade (bleeding)",
+];
+/// Stretch modes in the order of the mode menu (spec §Menus: two columns with headers).
+pub const STRETCH: &[&str] =
+    &["Resample", "Stretch", "Stretch Pro", "e3 generic", "e3 mono", "Slice stretch", "Slice map", "Auto", "e2 generic", "e2 transient", "e2 mono", "e2 speech"];
+pub const STRETCH_AUTO: i32 = 7;
+pub const FILTERS: &[&str] = &["Fast LP", "LP", "BP", "HP", "BS", "LPx2", "SVF LP", "SVF LPx2"];
+pub const LFO_SHAPES: &[&str] = &["Sine", "Triangle", "Pulse"];
+pub const REVERB_TYPES: &[&str] = &["A", "B"];
+
+/// Highest key (C0 = 0 .. B10 = 131).
+pub const KEY_MAX: i32 = 131;
+
+/// Time stretch multiplier of a knob position: 25 %..400 %, doubling every quarter (FL: 100 px per octave).
+pub fn mul_of(v: f32) -> f64 {
+    2f64.powf(4.0 * (f64::from(v) - 0.5))
+}
+
+/// Time stretch pitch in cents of a knob position (±1200).
+pub fn ts_cents(v: f32) -> f64 {
+    (f64::from(v) * 2400.0 - 1200.0).round()
+}
+
+/// TIME knob: pixels of drag over its whole range. The first 16 px are 16ths of a beat, then one beat per 36 px up to
+/// 16 beats (spec §4).
+pub const TIME_PX: f32 = 556.0;
+
+/// TIME knob: 16ths of a beat of a knob position (0 = off).
+pub fn time_steps(v: f32) -> i32 {
+    let p = v.clamp(0.0, 1.0) * TIME_PX;
+    if p < 15.5 {
+        p.round() as i32
+    } else {
+        ((1.0 + ((p - 16.0).max(0.0) / 36.0).floor()) as i32 * 16).min(256)
+    }
+}
+
+/// Knob position of a TIME value in 16ths of a beat (inverse of `time_steps`).
+pub fn time_norm(steps: i32) -> f32 {
+    if steps < 16 {
+        steps.max(0) as f32 / TIME_PX
+    } else {
+        (16.0 + (steps / 16 - 1) as f32 * 36.0 + 0.5) / TIME_PX
+    }
+}
+
+/// "beats:16ths:00" as FL writes the TIME value.
+pub fn time_text(steps: i32) -> String {
+    format!("{}:{:02}:00", steps / 16, steps % 16)
+}
 
 /// One envelope / LFO target of the envelope tab (Panning, Volume, Mod X, Mod Y, Pitch).
 #[derive(Params)]
@@ -114,7 +146,7 @@ pub struct EnvParams {
     pub dec_t: FloatParam,
     #[id = "rel_t"]
     pub rel_t: FloatParam,
-    /// Envelope amount (pitch: ±2400 cents at full scale). Not on the Volume target.
+    /// Envelope amount (Mod X / Mod Y / Pitch; pitch: ±2400 cents at full scale).
     #[id = "amt"]
     pub amt: FloatParam,
     #[id = "tempo"]
@@ -139,35 +171,32 @@ impl EnvParams {
     fn new(target: &str, rel_tension: i32) -> Self {
         let n = |s: &str| format!("{target} {s}");
         let d = os_model::Envelope::default();
-        let tension = |s: &str, t: i32| {
-            FloatParam::new(&n(s), t as f32 / 128.0, FloatRange::Linear { min: -1.0, max: 1.0 })
-                .with_value_to_string(Arc::new(|v| format!("{:.0}", v * 128.0)))
-        };
+        let time = |s: &str, field: i32| knob(&n(s), field_norm(field));
         EnvParams {
             on: BoolParam::new(n("envelope"), false),
-            delay: time_knob(&n("delay"), d.delay, false),
-            att: time_knob(&n("attack"), d.attack, false),
-            hold: time_knob(&n("hold"), d.hold, false),
-            dec: time_knob(&n("decay"), d.decay, true),
-            sus: FloatParam::new(n("sustain"), d.sustain as f32 / 128.0, FloatRange::Linear { min: 0.0, max: 1.0 }).with_value_to_string(percent()),
-            rel: time_knob(&n("release"), d.release, true),
-            att_t: tension("attack tension", 0),
-            dec_t: tension("decay tension", 0),
-            rel_t: tension("release tension", rel_tension),
+            delay: time("delay", d.delay),
+            att: time("attack", d.attack),
+            hold: time("hold", d.hold),
+            dec: time("decay", d.decay),
+            sus: knob(&n("sustain"), d.sustain as f32 / 128.0),
+            rel: time("release", d.release),
+            att_t: bi_knob(&n("attack tension"), 0.0),
+            dec_t: bi_knob(&n("decay tension"), 0.0),
+            rel_t: bi_knob(&n("release tension"), rel_tension as f32 / 128.0),
             amt: bi_knob(&n("amount"), 0.0),
             tempo: BoolParam::new(n("tempo"), false),
             lfo_shape: choice(&n("LFO shape"), 0, LFO_SHAPES),
             lfo_delay: knob(&n("LFO delay"), 0.0),
-            lfo_att: knob(&n("LFO attack"), 0.3),
+            lfo_att: knob(&n("LFO attack"), field_norm(20000)),
             lfo_amt: bi_knob(&n("LFO amount"), 0.0),
-            lfo_speed: knob(&n("LFO speed"), 0.6),
+            lfo_speed: knob(&n("LFO speed"), field_norm(32950)),
             lfo_tempo: BoolParam::new(n("LFO tempo"), false),
             lfo_global: BoolParam::new(n("LFO global"), false),
         }
     }
 
-    /// The record in channel-envelope units, `None` when off.
-    pub fn envelope(&self) -> Option<envelope::Params> {
+    /// The record in channel-envelope units, `None` when off. `amount_scale` = units of the amount at full scale.
+    pub fn envelope(&self, amount_scale: f32) -> Option<envelope::Params> {
         let rec = os_model::Envelope {
             enabled: self.on.value(),
             delay: time_field(self.delay.value()),
@@ -176,7 +205,7 @@ impl EnvParams {
             decay: time_field(self.dec.value()),
             sustain: (self.sus.value() * 128.0).round() as i32,
             release: time_field(self.rel.value()),
-            amount: (self.amt.value() * 2400.0).round() as i32,
+            amount: (self.amt.value() * amount_scale).round() as i32,
             attack_tension: (self.att_t.value() * 128.0).round() as i32,
             decay_tension: (self.dec_t.value() * 128.0).round() as i32,
             release_tension: (self.rel_t.value() * 128.0).round() as i32,
@@ -190,6 +219,8 @@ pub struct SamplerParams {
     /// The loaded sample's path (empty = none).
     #[persist = "sample-path"]
     pub sample_path: Arc<RwLock<String>>,
+    /// Frames of the loaded sample (loop knob texts are in samples).
+    pub frames: Arc<AtomicU32>,
 
     // Tab 1: sample.
     #[id = "keep_disk"]
@@ -244,6 +275,29 @@ pub struct SamplerParams {
     pub fx_crossfade: FloatParam,
     #[id = "fx_trim"]
     pub fx_trim: FloatParam,
+    // Precomputed effects, effects page.
+    #[id = "fx_boost"]
+    pub fx_boost: FloatParam,
+    #[id = "fx_eq"]
+    pub fx_eq: FloatParam,
+    #[id = "fx_rm_mix"]
+    pub fx_rm_mix: FloatParam,
+    #[id = "fx_rm_freq"]
+    pub fx_rm_freq: FloatParam,
+    #[id = "fx_cut"]
+    pub fx_cut: FloatParam,
+    #[id = "fx_res"]
+    pub fx_res: FloatParam,
+    #[id = "fx_clip"]
+    pub fx_clip: BoolParam,
+    #[id = "fx_reverb_type"]
+    pub fx_reverb_type: IntParam,
+    #[id = "fx_reverb"]
+    pub fx_reverb: FloatParam,
+    #[id = "fx_sdelay"]
+    pub fx_sdelay: FloatParam,
+    #[id = "fx_pogo"]
+    pub fx_pogo: FloatParam,
 
     // Tab 2: envelope / instrument.
     #[nested(id_prefix = "envpan", group = "Panning")]
@@ -270,51 +324,86 @@ pub struct SamplerParams {
     pub main_pitch: BoolParam,
     #[id = "add_key"]
     pub add_key: BoolParam,
-
+    /// Key zone (ruler selection): lowest and highest key that play; the full range = no zone.
+    #[id = "zone_lo"]
+    pub zone_lo: IntParam,
+    #[id = "zone_hi"]
+    pub zone_hi: IntParam,
 }
 
 impl Default for SamplerParams {
     fn default() -> Self {
+        let frames = Arc::new(AtomicU32::new(0));
+        let samples = |f: Arc<AtomicU32>| -> Fmt {
+            Arc::new(move |v| {
+                let n = f.load(Ordering::Relaxed);
+                format!("{}", (v * n as f32).round() as i64)
+            })
+        };
         SamplerParams {
             sample_path: Arc::new(RwLock::new(String::new())),
             keep_disk: BoolParam::new("Keep on disk", false),
             resample: BoolParam::new("Resample", true),
             load_regions: BoolParam::new("Load regions", true),
             load_slices: BoolParam::new("Load slice markers", false),
-            declick: choice("Declicking mode", 1, DECLICK),
-            start_offset: knob("Start offset", 0.0),
-            loop_start: knob("Loop start", 0.0),
-            loop_end: knob("Loop end", 0.0),
+            declick: choice("Declicking mode", 0, DECLICK),
+            start_offset: knob("Sample start offset", 0.0),
+            loop_start: FloatParam::new("Loop start position", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_value_to_string(samples(frames.clone())),
+            loop_end: FloatParam::new("Loop end position", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_value_to_string(samples(frames.clone())),
             loop_use: BoolParam::new("Use loop points", true),
             loop_pingpong: BoolParam::new("Ping pong loop", false),
-            ts_pitch: bi_knob("Stretch pitch", 0.0),
-            ts_mul: bi_knob("Stretch multiplier", 0.0),
-            ts_time: knob("Stretch time", 0.0),
-            ts_mode: choice("Stretch mode", 0, STRETCH),
+            ts_pitch: FloatParam::new("Pitch shift", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_value_to_string(Arc::new(|v| {
+                    let c = ts_cents(v);
+                    if c == 0.0 { "0 cents".into() } else { format!("{c:+.0} cents") }
+                })),
+            ts_mul: FloatParam::new("Time stretch (multiplicator)", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_value_to_string(Arc::new(|v| format!("{:.2}%", mul_of(v) * 100.0))),
+            ts_time: FloatParam::new("Time stretch (time)", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_value_to_string(Arc::new(|v| time_text(time_steps(v)))),
+            ts_mode: choice("Stretching method", 0, STRETCH),
             fx_dc: BoolParam::new("Remove DC offset", false),
             fx_normalize: BoolParam::new("Normalize", false),
             fx_reverse: BoolParam::new("Reverse", false),
             fx_polarity: BoolParam::new("Reverse polarity", false),
             fx_fade_stereo: BoolParam::new("Fade stereo", false),
             fx_swap: BoolParam::new("Swap stereo", false),
-            fx_start: knob("Sample start", 0.0),
-            fx_length: knob("Length", 1.0),
-            fx_in: knob("Fade in", 0.0),
-            fx_out: knob("Fade out", 0.0),
-            fx_crossfade: knob("Crossfade", 0.0),
-            fx_trim: knob("Trim", 0.0),
+            fx_start: knob("Sample start", 0.0).with_value_to_string(percent_sp()),
+            fx_length: knob("Sample end", 1.0).with_value_to_string(percent_sp()),
+            fx_in: knob("Quick fade in", 0.0),
+            fx_out: knob("Quick fade out", 0.0),
+            fx_crossfade: knob("Crossfade loop", 0.0),
+            fx_trim: knob("Silence trimming threshold", 0.0),
+            fx_boost: knob("Boost", 0.0),
+            fx_eq: bi_knob("EQ", 0.0),
+            fx_rm_mix: knob("Ring modulation mix", 0.0),
+            fx_rm_freq: knob("Ring modulation frequency", 0.5),
+            fx_cut: knob("Filter cutoff", 1.0),
+            fx_res: knob("Filter resonance", 0.0),
+            fx_clip: BoolParam::new("Clipping", false),
+            fx_reverb_type: choice("Reverb type", 1, REVERB_TYPES),
+            fx_reverb: knob("Reverb amount", 0.0),
+            fx_sdelay: FloatParam::new("Stereo delay", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }).with_value_to_string(side_text()),
+            fx_pogo: bi_knob("Pogo effect", 0.0),
             env_pan: EnvParams::new("Panning", 0),
             env_vol: EnvParams::new("Volume", -101),
             env_modx: EnvParams::new("Mod X", 0),
             env_mody: EnvParams::new("Mod Y", 0),
             env_pitch: EnvParams::new("Pitch", 0),
-            f_cut: knob("Mod X (cutoff)", 1.0),
-            f_res: knob("Mod Y (resonance)", 0.0),
+            f_cut: knob("Filter frequency (modulation X)", 1.0),
+            f_res: knob("Filter bandwidth (modulation Y)", 0.0),
             f_type: choice("Filter type", 0, FILTERS),
-            root: IntParam::new("Root note", 60, IntRange::Linear { min: 0, max: 131 }).with_value_to_string(Arc::new(note_name)),
-            fine: IntParam::new("Fine tune", 0, IntRange::Linear { min: -100, max: 100 }).with_value_to_string(Arc::new(|v| format!("{v} cents"))),
-            main_pitch: BoolParam::new("Enable main pitch", true),
-            add_key: BoolParam::new("Add to key", false),
+            root: IntParam::new("Root note", 60, IntRange::Linear { min: 0, max: KEY_MAX }).with_value_to_string(Arc::new(note_name)),
+            fine: IntParam::new("Fine tuning", 0, IntRange::Linear { min: -100, max: 100 }).with_value_to_string(Arc::new(|v| format!("{v} cents"))),
+            main_pitch: BoolParam::new("Affected by the main pitch", true),
+            add_key: BoolParam::new("Add root note to key", false),
+            zone_lo: IntParam::new("Zone low key", 0, IntRange::Linear { min: 0, max: KEY_MAX }).with_value_to_string(Arc::new(note_name)).hide(),
+            zone_hi: IntParam::new("Zone high key", KEY_MAX, IntRange::Linear { min: 0, max: KEY_MAX })
+                .with_value_to_string(Arc::new(note_name))
+                .hide(),
+            frames,
         }
     }
 }
@@ -323,6 +412,11 @@ impl SamplerParams {
     /// The envelope tab's five targets in sub-tab order.
     pub fn env(&self, target: usize) -> &EnvParams {
         [&self.env_pan, &self.env_vol, &self.env_modx, &self.env_mody, &self.env_pitch][target.min(4)]
+    }
+
+    /// True when the ruler selected a key zone (not the full range).
+    pub fn has_zone(&self) -> bool {
+        self.zone_lo.value() > 0 || self.zone_hi.value() < KEY_MAX
     }
 }
 
@@ -339,10 +433,92 @@ pub struct FxKey {
     pub length: f32,
     pub fade_in: f32,
     pub fade_out: f32,
+    pub crossfade: f32,
+    pub trim: f32,
+    pub boost: f32,
+    pub eq: f32,
+    pub rm_mix: f32,
+    pub rm_freq: f32,
+    pub cut: f32,
+    pub res: f32,
+    pub clip: bool,
+    pub reverb_b: bool,
+    pub reverb: f32,
+    pub sdelay: f32,
+    pub pogo: f32,
+    /// Declicking mode (the precomputed edges of the sample).
+    pub declick: i32,
+    /// Loop points (0..1 of the length) and whether a loop plays: the crossfade needs them.
+    pub loop_on: bool,
+    pub loop_start: f32,
+    pub loop_end: f32,
+    /// Time stretching in a stretch mode (not Resample): MUL ratio, TIME target length in seconds (0 = off) and the
+    /// pitch shift in cents.
+    pub stretch: bool,
+    pub ratio: f32,
+    pub time: f32,
+    pub shift: f32,
+}
+
+impl FxKey {
+    /// No effect at all (a plain copy).
+    pub fn neutral() -> FxKey {
+        FxKey {
+            dc: false,
+            normalize: false,
+            reverse: false,
+            polarity: false,
+            fade_stereo: false,
+            swap: false,
+            start: 0.0,
+            length: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            crossfade: 0.0,
+            trim: 0.0,
+            boost: 0.0,
+            eq: 0.0,
+            rm_mix: 0.0,
+            rm_freq: 0.5,
+            cut: 1.0,
+            res: 0.0,
+            clip: false,
+            reverb_b: true,
+            reverb: 0.0,
+            sdelay: 0.0,
+            pogo: 0.0,
+            declick: 0,
+            loop_on: false,
+            loop_start: 0.0,
+            loop_end: 1.0,
+            stretch: false,
+            ratio: 1.0,
+            time: 0.0,
+            shift: 0.0,
+        }
+    }
+
+    /// Stretch ratio for a sample of `secs` seconds: TIME's target length when set, else MUL.
+    pub fn ratio_for(&self, secs: f64) -> f64 {
+        if self.time > 0.0 && secs > 0.0 {
+            f64::from(self.time) / secs
+        } else {
+            f64::from(self.ratio)
+        }
+    }
 }
 
 impl SamplerParams {
-    pub fn fx_key(&self) -> FxKey {
+    /// TIME's target length in seconds at `tempo` BPM (`None` when TIME is off).
+    pub fn ts_seconds(&self, tempo: f64) -> Option<f64> {
+        let steps = time_steps(self.ts_time.value());
+        (steps > 0).then(|| f64::from(steps) / 16.0 * 60.0 / tempo.max(1.0))
+    }
+
+    /// Precomputed settings at the host's `tempo` (TIME depends on it).
+    pub fn fx_key(&self, tempo: f64) -> FxKey {
+        let stretch = self.ts_mode.value() != 0;
+        let time = if stretch { self.ts_seconds(tempo).unwrap_or(0.0) as f32 } else { 0.0 };
         FxKey {
             dc: self.fx_dc.value(),
             normalize: self.fx_normalize.value(),
@@ -354,6 +530,32 @@ impl SamplerParams {
             length: self.fx_length.value(),
             fade_in: self.fx_in.value(),
             fade_out: self.fx_out.value(),
+            crossfade: self.fx_crossfade.value(),
+            trim: self.fx_trim.value(),
+            boost: self.fx_boost.value(),
+            eq: self.fx_eq.value(),
+            rm_mix: self.fx_rm_mix.value(),
+            rm_freq: self.fx_rm_freq.value(),
+            cut: self.fx_cut.value(),
+            res: self.fx_res.value(),
+            clip: self.fx_clip.value(),
+            reverb_b: self.fx_reverb_type.value() == 1,
+            reverb: self.fx_reverb.value(),
+            sdelay: self.fx_sdelay.value(),
+            pogo: self.fx_pogo.value(),
+            declick: self.declick.value(),
+            loop_on: self.loop_active(),
+            loop_start: self.loop_start.value(),
+            loop_end: self.loop_end.value(),
+            stretch,
+            ratio: if stretch { mul_of(self.ts_mul.value()) as f32 } else { 1.0 },
+            time,
+            shift: if stretch { ts_cents(self.ts_pitch.value()) as f32 } else { 0.0 },
         }
+    }
+
+    /// A loop plays when "Use loop points" is on and the loop knobs mark a loop (OpenStudio rule, spec §Loop).
+    pub fn loop_active(&self) -> bool {
+        self.loop_use.value() && (self.loop_start.value() > 0.0 || self.loop_end.value() < 1.0)
     }
 }

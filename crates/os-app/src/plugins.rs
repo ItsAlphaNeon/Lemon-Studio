@@ -38,6 +38,8 @@ pub enum Request {
     Volume(usize, f64),
     Pan(usize, f64),
     PitchCents(usize, i32),
+    /// A preview note from an Open plugin's own keyboard (host link): row, key, velocity, on.
+    Note(usize, u8, u8, bool),
 }
 
 #[derive(Default)]
@@ -160,6 +162,16 @@ impl Plugins {
     pub fn idle(&mut self, info: impl Fn(usize) -> Option<ChannelInfoT>) -> Vec<Request> {
         let mut out = Vec::new();
         let mut close = Vec::new();
+        // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
+        #[cfg(windows)]
+        for (area, m) in crate::plugin_window::take_link() {
+            if let crate::plugin_window::LinkMsg::Note(k, v, on) = m {
+                let row = self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
+                if let Some(row) = row {
+                    out.push(Request::Note(row, k, v, on));
+                }
+            }
+        }
         for (&row, h) in &mut self.hosted {
             if let Ok(mut p) = h.plugin.try_lock() {
                 p.idle();
@@ -311,6 +323,8 @@ mod tests {
     #[ignore]
     fn plugin_editor_stress() {
         let Some(clap) = std::env::var_os("OS_CLAP") else { return };
+        // Right clicks and list buttons open modal menus; the plugin skips them under this switch.
+        unsafe { std::env::set_var("OPENSAMPLER_NO_MODAL", "1") };
         let lib = Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
@@ -393,6 +407,80 @@ mod tests {
         assert!(failed.is_none(), "the editor stopped responding after {:?} events", failed);
     }
 
+    /// Real mouse input (moves the desktop cursor): dragging the START OFFSET knob hides the cursor and holds it at the
+    /// press point, the value follows the movement, and releasing shows the cursor at the same place.
+    /// `OS_CLAP=.. cargo test -p os-app plugin_knob_drag_holds_the_cursor -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn plugin_knob_drag_holds_the_cursor() {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT};
+        let Some(clap) = std::env::var_os("OS_CLAP") else { return };
+        let lib = Library::load(std::path::Path::new(&clap)).expect("load clap");
+        let desc = lib.plugins[0].clone();
+        let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+        pl.create(0, 0).unwrap();
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 300);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
+        unsafe { SetForegroundWindow(frame as HWND) };
+        pump(&mut pl, 200);
+        let state = |pl: &Plugins| String::from_utf8_lossy(&pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap()).to_string();
+        let offset = |s: &str| -> f32 {
+            let i = s.find("\"start_offset\"").expect("start_offset in state");
+            let rest = &s[i + 14..];
+            let rest = &rest[rest.find(':').map_or(0, |j| j + 1)..];
+            let rest = &rest[rest.find(':').map_or(0, |j| j + 1)..];
+            let num: String = rest.chars().skip_while(|c| !(c.is_ascii_digit() || *c == '-')).take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | 'e')).collect();
+            num.parse().unwrap_or(-1.0)
+        };
+        let before = offset(&state(&pl));
+        // START OFFSET knob: FL (45, 286) -> editor client (41, 214) with the host's strip row.
+        let mut p = POINT { x: 41, y: 214 };
+        unsafe { ClientToScreen(editor, &mut p) };
+        let input = |flags: u32, dx: i32, dy: i32| unsafe {
+            let i = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } };
+            SendInput(1, &i, std::mem::size_of::<INPUT>() as i32);
+        };
+        let cursor = || unsafe {
+            let mut c = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut c);
+            (c.x, c.y)
+        };
+        let shown = || unsafe {
+            let mut ci: CURSORINFO = std::mem::zeroed();
+            ci.cbSize = std::mem::size_of::<CURSORINFO>() as u32;
+            GetCursorInfo(&mut ci);
+            ci.flags & CURSOR_SHOWING != 0
+        };
+        unsafe { SetCursorPos(p.x, p.y) };
+        pump(&mut pl, 50);
+        input(MOUSEEVENTF_LEFTDOWN, 0, 0);
+        pump(&mut pl, 50);
+        let mut worst = 0;
+        let t0 = Instant::now();
+        for _ in 0..40 {
+            input(MOUSEEVENTF_MOVE, 0, -3);
+            pump(&mut pl, 12);
+            let (x, y) = cursor();
+            worst = worst.max((x - p.x).abs() + (y - p.y).abs());
+        }
+        let took = t0.elapsed();
+        let hidden = !shown();
+        let during = offset(&state(&pl));
+        input(MOUSEEVENTF_LEFTUP, 0, 0);
+        pump(&mut pl, 80);
+        let after = cursor();
+        println!("offset {before} -> {during}, worst cursor drift {worst} px, cursor hidden while dragging: {hidden}, 40 moves in {took:?}");
+        assert!(during > before + 0.01, "the knob did not follow the drag ({before} -> {during})");
+        assert!(worst <= 3, "the cursor was not held in place (drift {worst} px)");
+        assert!(hidden, "the cursor should be hidden while dragging a knob");
+        assert!(shown(), "the cursor should show again after the drag");
+        assert_eq!(after, (p.x, p.y), "the cursor should be back at the press point");
+    }
+
     /// Keys typed while the plugin window has the focus must reach the app (the typing keyboard keeps playing).
     #[test]
     #[ignore]
@@ -416,9 +504,13 @@ mod tests {
         eprintln!("focus {:?} editor {:?} frame {:?} foreground {:?}", unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() }, editor, frame, unsafe { GetForegroundWindow() });
         crate::plugin_window::take_keys();
         let q = 0x10isize; // scancode of Q
+        // Real key input (the hook sees what the system queue delivers; posted messages bypass it), only while our
+        // frame is in front so the key cannot land in another program.
+        assert_eq!(unsafe { GetForegroundWindow() }, frame as HWND, "the plugin window must be in front");
         unsafe {
-            PostMessageW(editor, WM_KEYDOWN, 0x51, 1 | (q << 16));
-            PostMessageW(editor, WM_KEYUP, 0x51, 1 | (q << 16) | (1 << 30) | (1 << 31));
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP};
+            keybd_event(0x51, q as u8, 0, 0);
+            keybd_event(0x51, q as u8, KEYEVENTF_KEYUP, 0);
         }
         pump(&mut pl, 100);
         let keys = crate::plugin_window::take_keys();

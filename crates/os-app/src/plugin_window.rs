@@ -36,6 +36,23 @@ pub struct KeyMsg {
 }
 
 static KEYS: Mutex<Vec<KeyMsg>> = Mutex::new(Vec::new());
+
+/// A message an Open plugin's editor sent to its frame (host link, plugin -> host).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkMsg {
+    /// Hint or page changed: poll the link now.
+    Changed,
+    /// Preview note from the plugin's keyboard: key, velocity, on.
+    Note(u8, u8, bool),
+}
+
+/// (editor area window, message) since the last `take_link`.
+static LINK: Mutex<Vec<(isize, LinkMsg)>> = Mutex::new(Vec::new());
+
+/// Link messages seen since the last call (UI thread).
+pub fn take_link() -> Vec<(isize, LinkMsg)> {
+    LINK.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
+}
 static KEY_HOOK: Once = Once::new();
 
 /// Keys seen since the last call (UI thread).
@@ -582,6 +599,22 @@ unsafe fn layout(hwnd: HWND) {
 unsafe extern "system" fn area_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         if msg == WM_ERASEBKGND {
+            return 1;
+        }
+        if msg == os_hostlink::message() {
+            // Plugin -> host (spec: plugins/host-link.md): queue it and wake the app so it is handled at once.
+            let m = match os_hostlink::Cmd::from_usize(wp) {
+                Some(os_hostlink::Cmd::Changed) => LinkMsg::Changed,
+                Some(os_hostlink::Cmd::Note) => {
+                    let (k, v, on) = os_hostlink::unpack_note(lp);
+                    LinkMsg::Note(k, v, on)
+                }
+                _ => return 0,
+            };
+            if let Ok(mut q) = LINK.lock() {
+                q.push((hwnd as isize, m));
+            }
+            os_clap::wake();
             return 1;
         }
         DefWindowProcW(hwnd, msg, wp, lp)

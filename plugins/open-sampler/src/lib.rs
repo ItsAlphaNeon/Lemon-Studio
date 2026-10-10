@@ -10,15 +10,15 @@ pub mod view;
 
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nih_plug::prelude::*;
-use os_engine::Sample;
+use os_engine::{envelope, Sample};
 
 use params::{FxKey, SamplerParams};
 
-/// The processed sample for one (loaded sample version, effect settings) pair.
+/// The processed sample for one (loaded sample version, precomputed settings) pair.
 pub struct Processed {
     pub version: u64,
     pub key: FxKey,
@@ -26,7 +26,6 @@ pub struct Processed {
 }
 
 /// State shared by the audio thread, the background task and the editor.
-#[derive(Default)]
 pub struct Shared {
     pub raw: Mutex<Option<Arc<Sample>>>,
     /// Bumped on every load / clear.
@@ -34,45 +33,166 @@ pub struct Shared {
     pub processed: Mutex<Option<Processed>>,
     processed_version: AtomicU64,
     loaded_path: Mutex<String>,
+    /// Source bit depth (low byte) and 0x100 when the source is floating point.
+    pub bits: AtomicU32,
+    /// Host tempo (f64 bits), 130 BPM until the host tells.
+    tempo: AtomicU64,
+    /// Notes the editor plays itself (key, velocity, on) when the host does not play them.
+    pub previews: Mutex<Vec<(u8, f32, bool)>>,
+    /// Keys sounding (bit per key, 132 keys).
+    pub sounding: [AtomicU64; 3],
+    busy: AtomicBool,
+    again: AtomicBool,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Shared {
+            raw: Mutex::new(None),
+            raw_version: AtomicU64::new(0),
+            processed: Mutex::new(None),
+            processed_version: AtomicU64::new(0),
+            loaded_path: Mutex::new(String::new()),
+            bits: AtomicU32::new(16),
+            tempo: AtomicU64::new(130f64.to_bits()),
+            previews: Mutex::new(Vec::new()),
+            sounding: Default::default(),
+            busy: AtomicBool::new(false),
+            again: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Bit depth of a sample file's data (WAV `fmt `, FLAC STREAMINFO), | 0x100 for floating point; 16 when unknown.
+pub fn source_bits(path: &Path) -> u32 {
+    let Ok(data) = std::fs::read(path).map(|mut d| {
+        d.truncate(1 << 16);
+        d
+    }) else {
+        return 16;
+    };
+    if data.len() > 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" {
+        let mut i = 12;
+        while i + 8 <= data.len() {
+            let id = &data[i..i + 4];
+            let len = u32::from_le_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]) as usize;
+            if id == b"fmt " && i + 24 <= data.len() {
+                let fmt = u16::from_le_bytes([data[i + 8], data[i + 9]]);
+                let bits = u32::from(u16::from_le_bytes([data[i + 22], data[i + 23]]));
+                return bits | if fmt == 3 { 0x100 } else { 0 };
+            }
+            i += 8 + len + (len & 1);
+        }
+    } else if data.len() > 22 && &data[0..4] == b"fLaC" {
+        // STREAMINFO: bits per sample − 1 sits in 5 bits across bytes 20 and 21 of the file.
+        return u32::from(((data[20] & 1) << 4) | (data[21] >> 4)) + 1;
+    } else if data.len() > 4 && &data[0..4] == b"OggS" {
+        return 32 | 0x100;
+    }
+    16
 }
 
 impl Shared {
     /// Loads a sample file and makes it the current one (UI / initialize thread).
     pub fn load(&self, path: &str, params: &SamplerParams) -> Result<(), String> {
         let s = os_engine::sample::load(Path::new(path)).map_err(|e| e.to_string())?;
-        *self.raw.lock().unwrap() = Some(Arc::new(s));
+        self.bits.store(source_bits(Path::new(path)), Ordering::Release);
+        self.set_raw(Some(s), path, params);
+        Ok(())
+    }
+
+    /// Replaces the loaded sample (`path` is what the state remembers).
+    pub fn set_raw(&self, s: Option<Sample>, path: &str, params: &SamplerParams) {
+        *self.raw.lock().unwrap() = s.map(Arc::new);
         *self.loaded_path.lock().unwrap() = path.to_string();
         if let Ok(mut p) = params.sample_path.write() {
             *p = path.to_string();
         }
         self.raw_version.fetch_add(1, Ordering::AcqRel);
         self.precompute(params);
-        Ok(())
     }
 
     pub fn clear(&self, params: &SamplerParams) {
-        *self.raw.lock().unwrap() = None;
-        self.loaded_path.lock().unwrap().clear();
-        if let Ok(mut p) = params.sample_path.write() {
-            p.clear();
-        }
-        self.raw_version.fetch_add(1, Ordering::AcqRel);
-        self.precompute(params);
+        self.set_raw(None, "", params);
     }
 
-    /// Rebuilds the processed sample from the loaded one and the current effect settings.
+    pub fn tempo(&self) -> f64 {
+        f64::from_bits(self.tempo.load(Ordering::Relaxed))
+    }
+
+    pub fn set_tempo(&self, t: f64) {
+        if t > 0.0 && (t - self.tempo()).abs() > 1e-9 {
+            self.tempo.store(t.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// Rebuilds the processed sample from the loaded one and the current settings. Calls that arrive while one runs
+    /// only mark it to run again, so a knob drag never queues a backlog.
     pub fn precompute(&self, params: &SamplerParams) {
+        if self.busy.swap(true, Ordering::AcqRel) {
+            self.again.store(true, Ordering::Release);
+            return;
+        }
+        loop {
+            self.again.store(false, Ordering::Release);
+            let version = self.raw_version.load(Ordering::Acquire);
+            let key = params.fx_key(self.tempo());
+            let fresh = self.processed.lock().unwrap().as_ref().is_some_and(|p| p.version == version && p.key == key);
+            if !fresh {
+                let raw = self.raw.lock().unwrap().clone();
+                let sample = raw.map(|r| Arc::new(dsp::precompute(&r, &key)));
+                params.frames.store(sample.as_ref().map_or(0, |s| s.frames() as u32), Ordering::Relaxed);
+                *self.processed.lock().unwrap() = Some(Processed { version, key, sample });
+                self.processed_version.fetch_add(1, Ordering::AcqRel);
+            }
+            if !self.again.load(Ordering::Acquire) {
+                break;
+            }
+        }
+        self.busy.store(false, Ordering::Release);
+        if self.again.swap(false, Ordering::AcqRel) {
+            self.precompute(params);
+        }
+    }
+
+    /// Runs `precompute` on a thread of its own (editor edits while the host isn't processing).
+    pub fn precompute_async(self: &Arc<Self>, params: &Arc<SamplerParams>) {
+        if self.busy.load(Ordering::Acquire) {
+            self.again.store(true, Ordering::Release);
+            return;
+        }
+        let (s, p) = (self.clone(), params.clone());
+        std::thread::spawn(move || s.precompute(&p));
+    }
+
+    /// True when the processed sample is out of date for the current settings.
+    pub fn stale(&self, params: &SamplerParams) -> bool {
         let version = self.raw_version.load(Ordering::Acquire);
-        let key = params.fx_key();
-        let raw = self.raw.lock().unwrap().clone();
-        let sample = raw.map(|r| Arc::new(dsp::precompute(&r, key)));
-        *self.processed.lock().unwrap() = Some(Processed { version, key, sample });
-        self.processed_version.fetch_add(1, Ordering::AcqRel);
+        let key = params.fx_key(self.tempo());
+        !self.processed.lock().unwrap().as_ref().is_some_and(|p| p.version == version && p.key == key)
     }
 
     /// Changes whenever the shown sample changes (editor repaint check).
     pub fn version(&self) -> u64 {
         self.processed_version.load(Ordering::Acquire) ^ (self.raw_version.load(Ordering::Acquire) << 32)
+    }
+
+    pub fn loaded_path(&self) -> String {
+        self.loaded_path.lock().unwrap().clone()
+    }
+
+    /// Sounding keys.
+    pub fn sounding_keys(&self) -> Vec<i32> {
+        let mut out = Vec::new();
+        for (w, a) in self.sounding.iter().enumerate() {
+            let bits = a.load(Ordering::Relaxed);
+            for b in 0..64 {
+                if bits & (1 << b) != 0 {
+                    out.push((w * 64 + b) as i32);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -84,10 +204,11 @@ pub struct OpenSampler {
     params: Arc<SamplerParams>,
     shared: Arc<Shared>,
     engine: dsp::Engine,
-    /// (sample version, effect settings) last asked for / currently playing.
+    /// (sample version, settings) last asked for / currently playing.
     requested: Option<(u64, FxKey)>,
     current: Option<(u64, FxKey)>,
-    gains: Vec<(f32, f32)>,
+    /// Pitch bend in cents (main pitch).
+    bend: f64,
 }
 
 impl Default for OpenSampler {
@@ -98,29 +219,69 @@ impl Default for OpenSampler {
             engine: dsp::Engine::new(44100.0),
             requested: None,
             current: None,
-            gains: Vec::new(),
+            bend: 0.0,
         }
     }
 }
 
-impl OpenSampler {
-    fn block(&self) -> dsp::Block {
-        let p = &self.params;
-        dsp::Block {
-            on: true,
-            root: p.root.value(),
-            cents: f64::from(p.fine.value()),
-            vol_env: p.env_vol.envelope(),
-            pitch_env: p.env_pitch.envelope(),
-            start_offset: p.start_offset.value(),
-            cutoff: p.f_cut.value(),
-            resonance: p.f_res.value(),
-        }
+/// An envelope target's LFO (spec §5.2): times from the envelope time law, speed `0.1·2^(8v)` Hz or tempo-synced.
+fn lfo(e: &params::EnvParams, tempo: f64) -> dsp::Lfo {
+    let n = |v: f32| envelope::knob_seconds(params::time_field(v));
+    let sp = f64::from(e.lfo_speed.value());
+    let hz = if e.lfo_tempo.value() {
+        16.0 * tempo / (60.0 * 2f64.powf(8.0 * (1.0 - sp)))
+    } else {
+        0.1 * 2f64.powf(8.0 * sp)
+    };
+    dsp::Lfo {
+        shape: e.lfo_shape.value().clamp(0, 2) as u8,
+        delay: n(e.lfo_delay.value()),
+        attack: n(e.lfo_att.value()),
+        amount: f64::from(e.lfo_amt.value()),
+        hz,
+        global: e.lfo_global.value(),
     }
+}
 
+/// The per-block settings of the voices from the parameters.
+pub fn block(p: &SamplerParams, tempo: f64, bend: f64) -> dsp::Block {
+    let mut targets = [dsp::Target::default(); 5];
+    for (i, t) in targets.iter_mut().enumerate() {
+        let e = p.env(i);
+        // The Panning target has no envelope (spec §3).
+        let mut env = if i == dsp::PAN { None } else { e.envelope(128.0) };
+        if e.tempo.value() {
+            // Tempo-based times: the time law at 120 BPM, scaled by the host tempo (OpenStudio choice).
+            env = env.map(|x| x.scaled(120.0 / tempo.max(1.0)));
+        }
+        *t = dsp::Target { env, amount: f64::from(e.amt.value()), lfo: lfo(e, tempo) };
+    }
+    let resample = p.ts_mode.value() == 0;
+    dsp::Block {
+        root: p.root.value(),
+        cents: f64::from(p.fine.value()) + if p.main_pitch.value() { bend } else { 0.0 },
+        ts_cents: if resample { params::ts_cents(p.ts_pitch.value()) } else { 0.0 },
+        ts_ratio: if resample { params::mul_of(p.ts_mul.value()) } else { 1.0 },
+        ts_time: if resample { p.ts_seconds(tempo) } else { None },
+        targets,
+        f_type: p.f_type.value().clamp(0, 7) as u8,
+        f_cut: f64::from(p.f_cut.value()),
+        f_res: f64::from(p.f_res.value()),
+        start_offset: f64::from(p.start_offset.value()),
+        loop_on: p.loop_active(),
+        loop_start: f64::from(p.loop_start.value()),
+        loop_end: f64::from(p.loop_end.value()),
+        pingpong: p.loop_pingpong.value(),
+        declick: p.declick.value(),
+        zone: (p.zone_lo.value(), p.zone_hi.value()),
+        add_key: p.add_key.value(),
+    }
+}
+
+impl OpenSampler {
     /// Takes a newer processed sample when the background task has one ready (never blocks).
     fn pick_up_sample(&mut self, ctx: &mut impl ProcessContext<Self>) {
-        let want = (self.shared.raw_version.load(Ordering::Acquire), self.params.fx_key());
+        let want = (self.shared.raw_version.load(Ordering::Acquire), self.params.fx_key(self.shared.tempo()));
         if self.requested != Some(want) {
             self.requested = Some(want);
             ctx.execute_background(Task::Precompute);
@@ -135,14 +296,15 @@ impl OpenSampler {
         }
     }
 
-    fn render_span(&mut self, out: &mut [&mut [f32]], a: usize, b: usize, blk: &dsp::Block) {
-        if a >= b {
-            return;
+    fn publish_sounding(&self) {
+        let mut bits = [0u64; 3];
+        for k in self.engine.sounding() {
+            let k = usize::from(k).min(191);
+            bits[k / 64] |= 1 << (k % 64);
         }
-        // Channel volume / pan are the host's: the plugin plays at unity.
-        self.gains[..b - a].fill((1.0, 1.0));
-        let (left, right) = out.split_at_mut(1);
-        self.engine.render(&mut left[0][a..b], &mut right[0][a..b], blk, &self.gains[..b - a]);
+        for (a, b) in self.shared.sounding.iter().zip(bits) {
+            a.store(b, Ordering::Relaxed);
+        }
     }
 }
 
@@ -158,7 +320,7 @@ impl Plugin for OpenSampler {
         main_output_channels: NonZeroU32::new(2),
         ..AudioIOLayout::const_default()
     }];
-    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
+    const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
     type SysExMessage = ();
@@ -181,11 +343,9 @@ impl Plugin for OpenSampler {
 
     fn initialize(&mut self, _layout: &AudioIOLayout, config: &BufferConfig, _ctx: &mut impl InitContext<Self>) -> bool {
         self.engine.set_rate(config.sample_rate);
-        self.gains = vec![(0.0, 0.0); config.max_buffer_size as usize];
         // A restored state names a sample: load it now (initialize may block).
         let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
-        let loaded = self.shared.loaded_path.lock().unwrap().clone();
-        if !path.is_empty() && path != loaded {
+        if !path.is_empty() && path != self.shared.loaded_path() {
             if let Err(e) = self.shared.load(&path, &self.params) {
                 nih_log!("Open Sampler: {e}");
             }
@@ -202,15 +362,27 @@ impl Plugin for OpenSampler {
 
     fn reset(&mut self) {
         self.engine.reset();
+        self.publish_sounding();
     }
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
-        self.pick_up_sample(ctx);
-        let blk = self.block();
-        let len = buffer.samples();
-        if self.gains.len() < len {
-            self.gains.resize(len, (0.0, 0.0));
+        if let Some(t) = ctx.transport().tempo {
+            self.shared.set_tempo(t);
         }
+        self.pick_up_sample(ctx);
+        let tempo = self.shared.tempo();
+        let mut blk = block(&self.params, tempo, self.bend);
+        // Notes the editor plays itself.
+        if let Ok(mut q) = self.shared.previews.try_lock() {
+            for (key, vel, on) in q.drain(..) {
+                if on {
+                    self.engine.note_on(key, vel, &blk);
+                } else {
+                    self.engine.note_off(key, &blk);
+                }
+            }
+        }
+        let len = buffer.samples();
         let out = buffer.as_slice();
         for ch in out.iter_mut() {
             ch.fill(0.0);
@@ -218,15 +390,29 @@ impl Plugin for OpenSampler {
         let mut at = 0;
         while let Some(ev) = ctx.next_event() {
             let t = (ev.timing() as usize).min(len);
-            self.render_span(out, at, t, &blk);
-            at = t;
+            if t > at {
+                let (left, right) = out.split_at_mut(1);
+                self.engine.render(&mut left[0][at..t], &mut right[0][at..t], &blk);
+                at = t;
+            }
             match ev {
                 NoteEvent::NoteOn { note, velocity, .. } => self.engine.note_on(note, velocity, &blk),
-                NoteEvent::NoteOff { note, .. } => self.engine.note_off(note),
+                NoteEvent::NoteOff { note, .. } => self.engine.note_off(note, &blk),
+                NoteEvent::Choke { .. } => self.engine.all_off(),
+                NoteEvent::MidiPitchBend { value, .. } => {
+                    // ±2 semitones (spec §5.1).
+                    self.bend = f64::from(value * 2.0 - 1.0) * 200.0;
+                    blk = block(&self.params, tempo, self.bend);
+                }
+                NoteEvent::MidiCC { cc: 120 | 123, .. } => self.engine.all_off(),
                 _ => {}
             }
         }
-        self.render_span(out, at, len, &blk);
+        if at < len {
+            let (left, right) = out.split_at_mut(1);
+            self.engine.render(&mut left[0][at..len], &mut right[0][at..len], &blk);
+        }
+        self.publish_sounding();
         // A long sample may be quiet for a while: tell the host to keep processing until the voices end.
         if self.engine.has_voices() { ProcessStatus::KeepAlive } else { ProcessStatus::Normal }
     }
