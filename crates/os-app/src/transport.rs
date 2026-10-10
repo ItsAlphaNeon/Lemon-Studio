@@ -718,7 +718,7 @@ mod tests {
     use super::*;
 
     fn looping_engine() -> (Engine, Project) {
-        let mut project = crate::app::default_project();
+        let mut project = crate::app::test_project();
         let ch = project.channels[0].index;
         project.patterns = vec![os_model::Pattern {
             number: 1,
@@ -791,7 +791,7 @@ mod tests {
     #[test]
     #[ignore]
     fn deleted_notes_stop_playing() {
-        let mut project = crate::app::default_project();
+        let mut project = crate::app::test_project();
         let ch = project.channels[0].index;
         let pat = os_model::Pattern {
             number: 1,
@@ -821,7 +821,7 @@ mod tests {
     #[test]
     #[ignore]
     fn fader_edit_is_heard_at_once() {
-        let mut project = crate::app::default_project();
+        let mut project = crate::app::test_project();
         let ch = project.channels[4].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 384, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
@@ -840,7 +840,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_notes_play_and_release() {
-        let mut project = crate::app::default_project();
+        let mut project = crate::app::test_project();
         project.patterns = vec![os_model::Pattern { number: 1, ..Default::default() }];
         let t = Transport::new(None);
         t.update(&project);
@@ -863,7 +863,7 @@ mod tests {
     #[test]
     #[ignore]
     fn pause_holds_position() {
-        let mut project = crate::app::default_project();
+        let mut project = crate::app::test_project();
         let ch = project.channels[0].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
@@ -889,7 +889,7 @@ mod tests {
     #[test]
     #[ignore]
     fn tap_follows_playback() {
-        let mut project = crate::app::default_project();
+        let mut project = crate::app::test_project();
         let ch = project.channels[4].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
@@ -932,7 +932,7 @@ mod tests {
                 self.resets.fetch_add(1, Ordering::Relaxed);
             }
         }
-        let mut project = crate::app::default_project();
+        let mut project = crate::app::test_project();
         let ch = project.channels[0].index;
         project.channels[0].kind = os_model::ChannelKind::Plugin;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];

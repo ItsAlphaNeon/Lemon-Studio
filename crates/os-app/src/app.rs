@@ -551,16 +551,23 @@ pub struct App {
     piano_win: Option<Rect>,
     piano_grid: Option<Rect>,
     piano_panel: Option<Rect>,
+    /// Sampler channel rows whose Open Sampler instance could not be created (not retried).
+    sampler_failed: Vec<usize>,
 }
 
 /// Window-level requests the shell must carry out after an event.
 impl App {
     pub fn new(path: Option<PathBuf>) -> App {
         let transport = Transport::new(os_engine::SampleLibrary::default_factory_dir());
+        // Tests keep the old five-channel template; a new session starts with one Open Sampler channel.
+        #[cfg(test)]
+        let project = test_project();
+        #[cfg(not(test))]
+        let project = default_project();
         let mut app = App {
             plugins: crate::plugins::Plugins::default(),
             state: State {
-                project: default_project(),
+                project,
                 hosted_generators: Vec::new(),
                 hosted_rows: Vec::new(),
                 pending_plugin: None,
@@ -645,6 +652,7 @@ impl App {
             piano_win: None,
             piano_grid: None,
             piano_panel: None,
+            sampler_failed: Vec::new(),
         };
         if let Some(p) = path {
             app.open(p);
@@ -671,6 +679,7 @@ impl App {
         match result {
             Ok((file, project)) => {
                 self.transport.stop();
+                self.reset_hosted();
                 let s = &mut self.state;
                 s.tempo = project.tempo.unwrap_or(130.0);
                 s.pattern = project.current_pattern.unwrap_or(1).max(1);
@@ -709,9 +718,17 @@ impl App {
     }
 
     fn save_to(&mut self, target: PathBuf) {
+        // Sampler channels keep their sample in Open Sampler: copy it to the channel so the FLP stores it.
+        for row in self.state.hosted_rows.clone() {
+            if self.state.project.channels.get(row).is_some_and(|c| c.kind == ChannelKind::Sampler) {
+                if let Some(p) = self.plugins.sampler_path(row) {
+                    self.state.project.channels[row].sample_path = (!p.is_empty()).then_some(p);
+                }
+            }
+        }
         let s = &mut self.state;
         s.project.tempo = Some(s.tempo);
-        if !s.hosted_rows.is_empty() {
+        if s.hosted_rows.iter().any(|&r| s.project.channels.get(r).is_some_and(|c| c.kind == ChannelKind::Plugin)) {
             // spec: plugins/plugin-formats.md (open question: FLP storage of hosted plugins)
             s.message = Some("Save failed: projects with hosted plugin channels (Open Sampler, CLAP) cannot be saved to FLP yet".into());
             return;
@@ -752,12 +769,59 @@ impl App {
         (p.owner, p.scale) = (self.plugins.owner, self.plugins.scale);
         self.plugins = p;
         // Picker names live for the whole run (`Plugin::name` is static).
-        self.state.hosted_generators = self.plugins.names().into_iter().map(|n| &*Box::leak(n.into_boxed_str())).collect();
+        // Open Sampler is the picker's own "Sampler" tile (it plays every sampler channel), not a separate entry.
+        self.state.hosted_generators = self
+            .plugins
+            .names()
+            .into_iter()
+            .filter(|n| n != crate::plugins::OPEN_SAMPLER)
+            .map(|n| &*Box::leak(n.into_boxed_str()))
+            .collect();
+    }
+
+    /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
+    fn reset_hosted(&mut self) {
+        self.plugins.clear();
+        self.state.hosted_rows.clear();
+        self.sampler_failed.clear();
+        self.transport.set_instruments(Vec::new());
+    }
+
+    /// Every sampler channel is played and edited by Open Sampler (owner, 2026-10-10; spec: plugins/open-sampler.md §7):
+    /// a channel without an instance gets one, started from the channel's sample and envelopes. Without Open Sampler
+    /// (plugin not found) sampler channels keep the engine's own sample playback.
+    fn sync_samplers(&mut self) {
+        let Some(index) = self.plugins.index_of(crate::plugins::OPEN_SAMPLER) else { return };
+        let mut added = false;
+        for row in 0..self.state.project.channels.len() {
+            let ch = &self.state.project.channels[row];
+            if ch.kind != ChannelKind::Sampler || self.state.hosted_rows.contains(&row) || self.sampler_failed.contains(&row) {
+                continue;
+            }
+            let st = crate::plugins::sampler_state(ch);
+            match self.plugins.create_with(row, index, Some(&st)) {
+                Ok(_) => {
+                    self.state.hosted_rows.push(row);
+                    added = true;
+                }
+                Err(e) => {
+                    self.sampler_failed.push(row);
+                    self.state.message = Some(format!("Open Sampler: {e}"));
+                }
+            }
+        }
+        if added {
+            self.transport.set_instruments(self.plugins.instruments());
+            self.state.piano.dirty = true;
+        }
     }
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     fn plugin_tick(&mut self) {
-        if let Some((row, index)) = self.state.pending_plugin.take() {
+        self.sync_samplers();
+        if let Some((row, pick)) = self.state.pending_plugin.take() {
+            // `pick` indexes the picker's hosted generators (Open Sampler is left out there).
+            let index = self.state.hosted_generators.get(pick).and_then(|n| self.plugins.index_of(n)).unwrap_or(usize::MAX);
             match self.plugins.create(row, index) {
                 Ok(name) => {
                     self.state.hosted_rows.push(row);
@@ -771,7 +835,7 @@ impl App {
             self.invalidate();
         }
         #[cfg(windows)]
-        if let Some(row) = self.state.pending_open.take() {
+        if let Some(row) = self.state.pending_open.take().filter(|r| self.state.hosted_rows.contains(r)) {
             if let Some(info) = channel_info(&self.state.project, row) {
                 if let Err(e) = self.plugins.open_window(row, info) {
                     self.state.message = Some(format!("Plugin: {e}"));
@@ -2864,7 +2928,9 @@ impl App {
                 s.piano.dirty = true;
                 s.selected_channel = ch;
                 s.rack_selected = Some(ch);
-                s.message = Some("Added a sampler channel (all generators are placeholders for now)".into());
+                // Hosted by Open Sampler on the next tick (`sync_samplers`), then its window opens.
+                s.pending_open = Some(ch);
+                s.message = Some("Added a sampler channel (Open Sampler)".into());
                 // Keep the new row in view.
                 let r = views::rack::rect(s);
                 let view_h = views::rack::panel(r).h;
@@ -2952,6 +3018,7 @@ impl App {
         match (menu, item) {
             (0, FILE_NEW) => {
                 self.transport.stop();
+                self.reset_hosted();
                 let s = &mut self.state;
                 s.project = default_project();
                 s.file = None;
@@ -3100,7 +3167,7 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
 }
 
 /// A generator-plugin channel played by a hosted instrument, routed like `add_channel`. Returns its rack row.
-fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
+pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
     let row = add_channel(p);
     let ch = &mut p.channels[row];
     ch.kind = ChannelKind::Plugin;
@@ -3118,8 +3185,20 @@ pub(crate) fn add_channel(p: &mut Project) -> usize {
     p.channels.len() - 1
 }
 
-/// A project with the default template's shape: five sampler channels and pattern 1.
+/// A new project (owner's choice, 2026-10-10): one empty sampler channel, played and edited by Open Sampler, on
+/// insert 1, and pattern 1.
 pub fn default_project() -> Project {
+    template_project(&[crate::plugins::OPEN_SAMPLER])
+}
+
+/// The old five-channel template (tests that need several channels).
+#[cfg(test)]
+pub fn test_project() -> Project {
+    template_project(&["Kick", "Clap", "Hat", "Snare", "Pluck"])
+}
+
+/// Sampler channels named `names` (channel i on insert i + 1), the mixer's 127 tracks to the master, pattern 1.
+fn template_project(names: &[&str]) -> Project {
     let channel = |i: u16, name: &str| sampler_channel(i, name, i + 1);
     let mixer = (0..=126u16)
         .map(|i| MixerTrack {
@@ -3139,7 +3218,7 @@ pub fn default_project() -> Project {
         ppq: 96,
         tempo: Some(130.0),
         current_pattern: Some(1),
-        channels: ["Kick", "Clap", "Hat", "Snare", "Pluck"].iter().enumerate().map(|(i, n)| channel(i as u16, n)).collect(),
+        channels: names.iter().enumerate().map(|(i, n)| channel(i as u16, n)).collect(),
         patterns: vec![Pattern { number: 1, ..Pattern::default() }],
         mixer,
         ..Project::default()
@@ -3215,6 +3294,18 @@ mod tests {
 
     /// Writes the toolbar with a live-looking signal to OS_MONITOR_SHOT (a look-and-feel check, not an assertion).
     #[test]
+    fn new_project_is_one_empty_open_sampler() {
+        let p = default_project();
+        assert_eq!(p.channels.len(), 1);
+        let c = &p.channels[0];
+        assert_eq!((c.kind, c.name.as_deref(), c.sample_path.as_deref(), c.mixer_track), (ChannelKind::Sampler, Some("Open Sampler"), None, 1));
+        // Its starting Open Sampler state names no sample and carries the channel's envelope records.
+        let st = crate::plugins::sampler_state(c);
+        let json = String::from_utf8_lossy(&st[8..]).to_string();
+        assert!(json.contains("\"envvol_on\":{\"bool\":false}") && json.contains("\"sample-path\":\"\\\"\\\"\""), "{json}");
+    }
+
+    #[test]
     fn monitor_shot() {
         let Some(out) = std::env::var_os("OS_MONITOR_SHOT") else { return };
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
@@ -3246,7 +3337,7 @@ mod tests {
     #[test]
     fn new_project_saves_and_reloads() {
         let mut app = App::new(None);
-        app.state.project = default_project();
+        app.state.project = test_project();
         app.state.file = None;
         app.state.path = None;
         app.state.tempo = 111.0;
@@ -3486,7 +3577,7 @@ mod tests {
         use crate::views::browser::{rows, Item};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = default_project();
+        app.state.project = test_project();
         app.state.file = None;
         app.state.path = None;
         app.state.playlist.reset();
@@ -3593,7 +3684,7 @@ mod tests {
         use winit::keyboard::{Key, NamedKey, SmolStr};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = default_project();
+        app.state.project = test_project();
         app.state.project.patterns.push(os_model::Pattern { number: 2, name: Some("Kick + Clap".into()), ..Default::default() });
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
@@ -4325,7 +4416,7 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = default_project();
+        app.state.project = test_project();
         app.state.file = None;
         app.state.path = None;
         app.state.playlist.reset();
@@ -4433,7 +4524,7 @@ mod tests {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = default_project();
+        app.state.project = test_project();
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         app.state.project.patterns[0].notes = (0..16).map(|i| Note { length: 24, key: 60 + (i % 5) as u16 * 2, ..Note::step(0, i * 48) }).collect();

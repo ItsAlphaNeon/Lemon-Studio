@@ -794,6 +794,74 @@ mod tests {
     }
 
     /// JSON string literal holding `s` as a JSON string (nih-plug stores persisted fields as serialised JSON).
+    /// Every sound control of Open Sampler must change what a note sounds like (state-set parameters, rendered here).
+    #[test]
+    fn open_sampler_parameters_change_the_sound() {
+        let Some(lib) = open_sampler() else { return };
+        // A 2 s decaying saw-ish tone at 44.1 kHz, stereo with different channels.
+        let wav = std::env::temp_dir().join("os-clap-params.wav");
+        let n = 44100 * 2;
+        let tone: Vec<f32> = (0..n)
+            .flat_map(|i| {
+                let t = i as f32 / 44100.0;
+                let ph = (t * 220.0).fract();
+                let e = (-t * 1.5).exp() * 0.5;
+                [(ph * 2.0 - 1.0) * e + 0.05, (t * 330.0 * std::f32::consts::TAU).sin() * e]
+            })
+            .collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &tone).unwrap();
+        let path = serde_string(&wav.to_string_lossy());
+        let render = |params: &str| -> Vec<f32> {
+            let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+            let state = format!("{{\"version\":\"0.0.1\",\"params\":{{{params}}},\"fields\":{{\"sample-path\":{path}}}}}");
+            let mut blob = (state.len() as u64).to_le_bytes().to_vec();
+            blob.extend_from_slice(state.as_bytes());
+            assert!(p.load_state(&blob));
+            assert!(p.activate(48000));
+            let mut out = Vec::new();
+            for b in 0..150 {
+                // Precomputed effects run on a background task: give it time before the note.
+                if b < 20 {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                if b == 20 {
+                    p.note_on(0, 60, 100.0 / 128.0);
+                }
+                if b == 60 {
+                    p.note_off(0, 60);
+                }
+                let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+                p.process(48000, &mut l, &mut r);
+                out.extend(l.iter().zip(&r).flat_map(|(a, b)| [*a, *b]));
+            }
+            out
+        };
+        let base = render("");
+        assert!(base.iter().any(|v| v.abs() > 0.05), "the default plays");
+        let cases = [
+            ("start_offset", "{\"f32\":0.5}"), ("ts_pitch", "{\"f32\":700.0}"), ("ts_mul", "{\"f32\":2.0}"),
+            ("fx_dc", "{\"bool\":true}"), ("fx_normalize", "{\"bool\":true}"), ("fx_reverse", "{\"bool\":true}"),
+            ("fx_polarity", "{\"bool\":true}"), ("fx_fade_stereo", "{\"bool\":true}"), ("fx_swap", "{\"bool\":true}"),
+            ("fx_start", "{\"f32\":0.3}"), ("fx_length", "{\"f32\":0.3}"), ("fx_in", "{\"f32\":0.5}"), ("fx_out", "{\"f32\":0.5}"),
+            ("fx_boost", "{\"f32\":0.5}"), ("fx_eq", "{\"f32\":0.8}"), ("fx_rm_mix", "{\"f32\":0.8}"), ("fx_cut", "{\"f32\":0.3}"),
+            ("fx_reverb", "{\"f32\":0.8}"), ("fx_sdelay", "{\"f32\":0.5}"), ("fx_pogo", "{\"f32\":0.8}"),
+            ("f_cut", "{\"f32\":0.3}"), ("fine", "{\"i32\":50}"), ("root", "{\"i32\":55}"),
+            ("envvol_on", "{\"bool\":true}"), ("envpitch_on", "{\"bool\":true},\"envpitch_amt\":{\"f32\":0.5}"),
+            ("envpan_lfo_amt", "{\"f32\":0.8}"), ("envvol_lfo_amt", "{\"f32\":0.8}"), ("envpitch_lfo_amt", "{\"f32\":0.5}"),
+            ("envmodx_lfo_amt", "{\"f32\":-0.8}"), ("f_type", "{\"i32\":3}"),
+        ];
+        let mut dead = Vec::new();
+        for (id, v) in cases {
+            let out = render(&format!("\"{id}\":{v}"));
+            let diff = base.iter().zip(&out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            eprintln!("{id:>16} = {v:<16} max diff {diff:.4}");
+            if diff < 1e-3 {
+                dead.push(id);
+            }
+        }
+        assert!(dead.is_empty(), "no change in the sound: {dead:?}");
+    }
+
     fn serde_string(s: &str) -> String {
         let inner = format!("\"{}\"", s.replace('\\', "\\\\"));
         format!("\"{}\"", inner.replace('\\', "\\\\").replace('"', "\\\""))

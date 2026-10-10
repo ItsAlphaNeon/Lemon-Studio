@@ -453,7 +453,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::app::default_project();
+        app.state.project = crate::app::test_project();
         let s = &mut app.state;
         s.project.patterns = vec![
             Pattern { number: 1, name: Some("Kick".into()), notes: vec![Note::step(0, 0)], ..Pattern::default() },

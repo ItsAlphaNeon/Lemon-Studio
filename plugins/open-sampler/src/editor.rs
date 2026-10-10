@@ -104,7 +104,7 @@ impl Vals {
     /// The host's value.
     pub fn actual(&self, id: &str) -> f32 {
         // SAFETY: the pointers come from the params object, which outlives the editor.
-        self.ptrs.get(id).map_or(0.0, |p| unsafe { p.unmodulated_normalized_value() })
+        self.ptrs.get(id).map_or(0.0, |p| params::live_of(*p))
     }
 
     fn put(&mut self, id: &str, v: f32) {
@@ -117,7 +117,7 @@ impl Vals {
         let now = Instant::now();
         let ptrs = &self.ptrs;
         self.overlay.retain(|id, (v, t)| {
-            let a = ptrs.get(id).map_or(*v, |p| unsafe { p.unmodulated_normalized_value() });
+            let a = ptrs.get(id).map_or(*v, |p| params::live_of(*p));
             (a - *v).abs() > 1e-6 && now.duration_since(*t) < Duration::from_secs(1)
         });
         before != self.overlay.len()
@@ -434,6 +434,10 @@ impl Logic {
     fn set(&mut self, id: &str, norm: f32) {
         let norm = norm.clamp(0.0, 1.0);
         self.vals.put(id, norm);
+        if let Some(p) = self.vals.ptrs.get(id) {
+            // The sound uses the edit at once, whether or not the host hands it back (params::Live).
+            params::live_set(params::param_addr(*p), norm, unsafe { p.unmodulated_normalized_value() });
+        }
         if let (Some(p), Some(c)) = (self.vals.ptrs.get(id), &self.ctx) {
             unsafe { c.raw_set_parameter_normalized(*p, norm) };
         }

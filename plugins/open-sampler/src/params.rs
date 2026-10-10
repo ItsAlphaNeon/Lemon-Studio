@@ -12,6 +12,110 @@ use os_engine::envelope;
 
 pub type Fmt = Arc<dyn Fn(f32) -> String + Send + Sync>;
 
+/// Editor edits the host has not handed back yet (spec: plugins/open-sampler.md §4 "Edits apply at once").
+///
+/// The editor tells the host about every edit; nih-plug then changes the parameter only when the host passes the edit
+/// back (VST3 while processing) or flushes (CLAP), and some hosts do neither. So the sound reads parameters through
+/// [`Live::live`]: the editor's newest value wins until the host's own value moves to it (confirmed) or away from the
+/// value it had at the edit (automation / undo in the host). Entries are keyed by the parameter's address, unique per
+/// plugin instance.
+static LIVE: std::sync::Mutex<Vec<LiveEdit>> = std::sync::Mutex::new(Vec::new());
+
+#[derive(Clone, Copy)]
+struct LiveEdit {
+    addr: usize,
+    /// The editor's value (normalised).
+    norm: f32,
+    /// The host's value when the edit was made.
+    base: f32,
+}
+
+/// Records an editor edit of the parameter at `addr` whose host value is `host` now.
+pub fn live_set(addr: usize, norm: f32, host: f32) {
+    if let Ok(mut l) = LIVE.lock() {
+        l.retain(|e| e.addr != addr);
+        if (norm - host).abs() > 1e-7 {
+            l.push(LiveEdit { addr, norm, base: host });
+        }
+    }
+}
+
+/// The normalised value the sound should use for the parameter at `addr` (`host` = its host value), or `None` to use
+/// the host's. Never blocks: when the editor holds the list, the host value is used for this block.
+pub fn live_norm(addr: usize, host: f32) -> Option<f32> {
+    let mut l = LIVE.try_lock().ok()?;
+    let i = l.iter().position(|e| e.addr == addr)?;
+    let e = l[i];
+    if (host - e.base).abs() <= 1e-7 && (host - e.norm).abs() > 1e-7 {
+        Some(e.norm)
+    } else {
+        // Confirmed, or the host changed it since: the host's value from now on.
+        l.swap_remove(i);
+        None
+    }
+}
+
+/// Forgets the edits of parameters inside `from..to` (a dropped instance).
+fn live_forget(from: usize, to: usize) {
+    if let Ok(mut l) = LIVE.lock() {
+        l.retain(|e| e.addr < from || e.addr >= to);
+    }
+}
+
+/// The normalised value the sound uses for `p` (its pending editor edit, else the host's value).
+pub fn live_of(p: ParamPtr) -> f32 {
+    // SAFETY: callers hold pointers from a live params object.
+    let host = unsafe { p.unmodulated_normalized_value() };
+    live_norm(param_addr(p), host).unwrap_or(host)
+}
+
+/// The address `live_set` keys a parameter by.
+pub fn param_addr(p: ParamPtr) -> usize {
+    match p {
+        ParamPtr::FloatParam(p) => p as usize,
+        ParamPtr::IntParam(p) => p as usize,
+        ParamPtr::BoolParam(p) => p as usize,
+        ParamPtr::EnumParam(p) => p as usize,
+    }
+}
+
+/// Parameter values for the sound (see [`LIVE`]).
+pub trait Live {
+    type Plain;
+    fn live(&self) -> Self::Plain;
+}
+
+impl Live for FloatParam {
+    type Plain = f32;
+    fn live(&self) -> f32 {
+        match live_norm(self as *const Self as usize, self.unmodulated_normalized_value()) {
+            Some(n) => self.preview_plain(n),
+            None => self.value(),
+        }
+    }
+}
+
+impl Live for IntParam {
+    type Plain = i32;
+    fn live(&self) -> i32 {
+        match live_norm(self as *const Self as usize, self.unmodulated_normalized_value()) {
+            Some(n) => self.preview_plain(n),
+            None => self.value(),
+        }
+    }
+}
+
+impl Live for BoolParam {
+    type Plain = bool;
+    fn live(&self) -> bool {
+        match live_norm(self as *const Self as usize, self.unmodulated_normalized_value()) {
+            Some(n) => self.preview_plain(n),
+            None => self.value(),
+        }
+    }
+}
+
+
 fn percent() -> Fmt {
     Arc::new(|v| format!("{:.0}%", v * 100.0))
 }
@@ -198,17 +302,17 @@ impl EnvParams {
     /// The record in channel-envelope units, `None` when off. `amount_scale` = units of the amount at full scale.
     pub fn envelope(&self, amount_scale: f32) -> Option<envelope::Params> {
         let rec = os_model::Envelope {
-            enabled: self.on.value(),
-            delay: time_field(self.delay.value()),
-            attack: time_field(self.att.value()),
-            hold: time_field(self.hold.value()),
-            decay: time_field(self.dec.value()),
-            sustain: (self.sus.value() * 128.0).round() as i32,
-            release: time_field(self.rel.value()),
-            amount: (self.amt.value() * amount_scale).round() as i32,
-            attack_tension: (self.att_t.value() * 128.0).round() as i32,
-            decay_tension: (self.dec_t.value() * 128.0).round() as i32,
-            release_tension: (self.rel_t.value() * 128.0).round() as i32,
+            enabled: self.on.live(),
+            delay: time_field(self.delay.live()),
+            attack: time_field(self.att.live()),
+            hold: time_field(self.hold.live()),
+            decay: time_field(self.dec.live()),
+            sustain: (self.sus.live() * 128.0).round() as i32,
+            release: time_field(self.rel.live()),
+            amount: (self.amt.live() * amount_scale).round() as i32,
+            attack_tension: (self.att_t.live() * 128.0).round() as i32,
+            decay_tension: (self.dec_t.live() * 128.0).round() as i32,
+            release_tension: (self.rel_t.live() * 128.0).round() as i32,
         };
         envelope::Params::new(&rec)
     }
@@ -331,6 +435,13 @@ pub struct SamplerParams {
     pub zone_hi: IntParam,
 }
 
+impl Drop for SamplerParams {
+    fn drop(&mut self) {
+        let from = self as *const Self as usize;
+        live_forget(from, from + std::mem::size_of::<Self>());
+    }
+}
+
 impl Default for SamplerParams {
     fn default() -> Self {
         let frames = Arc::new(AtomicU32::new(0));
@@ -416,7 +527,7 @@ impl SamplerParams {
 
     /// True when the ruler selected a key zone (not the full range).
     pub fn has_zone(&self) -> bool {
-        self.zone_lo.value() > 0 || self.zone_hi.value() < KEY_MAX
+        self.zone_lo.live() > 0 || self.zone_hi.live() < KEY_MAX
     }
 }
 
@@ -511,51 +622,77 @@ impl FxKey {
 impl SamplerParams {
     /// TIME's target length in seconds at `tempo` BPM (`None` when TIME is off).
     pub fn ts_seconds(&self, tempo: f64) -> Option<f64> {
-        let steps = time_steps(self.ts_time.value());
+        let steps = time_steps(self.ts_time.live());
         (steps > 0).then(|| f64::from(steps) / 16.0 * 60.0 / tempo.max(1.0))
     }
 
     /// Precomputed settings at the host's `tempo` (TIME depends on it).
     pub fn fx_key(&self, tempo: f64) -> FxKey {
-        let stretch = self.ts_mode.value() != 0;
+        let stretch = self.ts_mode.live() != 0;
         let time = if stretch { self.ts_seconds(tempo).unwrap_or(0.0) as f32 } else { 0.0 };
         FxKey {
-            dc: self.fx_dc.value(),
-            normalize: self.fx_normalize.value(),
-            reverse: self.fx_reverse.value(),
-            polarity: self.fx_polarity.value(),
-            fade_stereo: self.fx_fade_stereo.value(),
-            swap: self.fx_swap.value(),
-            start: self.fx_start.value(),
-            length: self.fx_length.value(),
-            fade_in: self.fx_in.value(),
-            fade_out: self.fx_out.value(),
-            crossfade: self.fx_crossfade.value(),
-            trim: self.fx_trim.value(),
-            boost: self.fx_boost.value(),
-            eq: self.fx_eq.value(),
-            rm_mix: self.fx_rm_mix.value(),
-            rm_freq: self.fx_rm_freq.value(),
-            cut: self.fx_cut.value(),
-            res: self.fx_res.value(),
-            clip: self.fx_clip.value(),
-            reverb_b: self.fx_reverb_type.value() == 1,
-            reverb: self.fx_reverb.value(),
-            sdelay: self.fx_sdelay.value(),
-            pogo: self.fx_pogo.value(),
-            declick: self.declick.value(),
+            dc: self.fx_dc.live(),
+            normalize: self.fx_normalize.live(),
+            reverse: self.fx_reverse.live(),
+            polarity: self.fx_polarity.live(),
+            fade_stereo: self.fx_fade_stereo.live(),
+            swap: self.fx_swap.live(),
+            start: self.fx_start.live(),
+            length: self.fx_length.live(),
+            fade_in: self.fx_in.live(),
+            fade_out: self.fx_out.live(),
+            crossfade: self.fx_crossfade.live(),
+            trim: self.fx_trim.live(),
+            boost: self.fx_boost.live(),
+            eq: self.fx_eq.live(),
+            rm_mix: self.fx_rm_mix.live(),
+            rm_freq: self.fx_rm_freq.live(),
+            cut: self.fx_cut.live(),
+            res: self.fx_res.live(),
+            clip: self.fx_clip.live(),
+            reverb_b: self.fx_reverb_type.live() == 1,
+            reverb: self.fx_reverb.live(),
+            sdelay: self.fx_sdelay.live(),
+            pogo: self.fx_pogo.live(),
+            declick: self.declick.live(),
             loop_on: self.loop_active(),
-            loop_start: self.loop_start.value(),
-            loop_end: self.loop_end.value(),
+            loop_start: self.loop_start.live(),
+            loop_end: self.loop_end.live(),
             stretch,
-            ratio: if stretch { mul_of(self.ts_mul.value()) as f32 } else { 1.0 },
+            ratio: if stretch { mul_of(self.ts_mul.live()) as f32 } else { 1.0 },
             time,
-            shift: if stretch { ts_cents(self.ts_pitch.value()) as f32 } else { 0.0 },
+            shift: if stretch { ts_cents(self.ts_pitch.live()) as f32 } else { 0.0 },
         }
     }
 
     /// A loop plays when "Use loop points" is on and the loop knobs mark a loop (OpenStudio rule, spec §Loop).
     pub fn loop_active(&self) -> bool {
-        self.loop_use.value() && (self.loop_start.value() > 0.0 || self.loop_end.value() < 1.0)
+        self.loop_use.live() && (self.loop_start.live() > 0.0 || self.loop_end.live() < 1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_edits_reach_the_sound_without_the_host() {
+        let p = Arc::new(SamplerParams::default());
+        let ptr = p.f_cut.as_ptr();
+        let host = p.f_cut.unmodulated_normalized_value();
+        assert_eq!(p.f_cut.live(), p.f_cut.value());
+        // An edit the host has not handed back: the sound uses it.
+        live_set(param_addr(ptr), 0.25, host);
+        assert!((p.f_cut.live() - 0.25).abs() < 1e-6);
+        assert!((live_of(ptr) - 0.25).abs() < 1e-6);
+        // Setting it back to the host's value leaves nothing pending.
+        live_set(param_addr(ptr), host, host);
+        assert_eq!(p.f_cut.live(), p.f_cut.value());
+        // Booleans and integers too; a dropped instance forgets its edits.
+        live_set(param_addr(p.fx_reverse.as_ptr()), 1.0, 0.0);
+        assert!(p.fx_reverse.live());
+        let addr = param_addr(p.fx_reverse.as_ptr());
+        drop(p);
+        assert!(LIVE.lock().unwrap().iter().all(|e| e.addr != addr));
     }
 }

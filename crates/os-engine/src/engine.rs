@@ -505,12 +505,15 @@ impl Engine {
     }
 
     /// Plays generator-plugin channel `channel` through `inst` (a shared instance that outlives this engine).
+    /// Plugin channels, and sampler channels played by a hosted sampler plugin (OpenStudio hosts Open Sampler for every
+    /// sampler channel): the channel's notes go to `inst` instead of the engine's own sample voices.
     pub fn set_instrument(&mut self, channel: usize, inst: SharedInstrument) {
         if let Some(ch) = self.channels.get_mut(channel) {
-            if ch.plugin {
-                ch.instrument = Slot(Some(inst));
+            if ch.plugin && ch.instrument.0.is_none() {
                 self.report.plugin_channels_silent = self.report.plugin_channels_silent.saturating_sub(1);
             }
+            ch.plugin = true;
+            ch.instrument = Slot(Some(inst));
         }
     }
 
@@ -1397,6 +1400,31 @@ mod tests {
         assert!((frames[held] - g).abs() < 1e-6, "{} vs {g}", frames[held]);
         // (The probe holds its level for a whole process call; the next span after the note-off is silent.)
         assert_eq!(frames[(off as usize + 1024) * 2], 0.0);
+    }
+
+    /// A sampler channel played by a hosted sampler (OpenStudio's Open Sampler): its notes go to the instrument, the
+    /// engine's own voice for the channel (the empty sampler's tone) stays silent.
+    #[test]
+    fn sampler_channels_can_be_played_by_an_instrument() {
+        let p = project(vec![long_note(0, 48, 0)], vec![]);
+        assert_eq!(p.channels[0].kind, ChannelKind::Sampler);
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        assert!(e.has_instrument(0));
+        let mut out = vec![0.0f32; 512 * 2];
+        let mut frames = Vec::new();
+        for _ in 0..40 {
+            e.process(&mut out);
+            frames.extend_from_slice(&out);
+        }
+        let log = probe.lock().unwrap().log.clone();
+        assert_eq!((log[0].1, log[0].2), (true, 60), "{log:?}");
+        // Only the probe's flat level: no tone voice on top of it.
+        let (gl, _) = laws::channel_pan(0.0);
+        let g = (laws::channel_gain(p.channels[0].volume) * gl) as f32;
+        assert!(frames.chunks_exact(2).all(|f| f[0] == 0.0 || (f[0] - g).abs() < 1e-6));
     }
 
     #[test]

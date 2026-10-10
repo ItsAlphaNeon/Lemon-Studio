@@ -181,6 +181,9 @@ struct ChannelLoc {
     levels: Option<usize>,
     target: Option<usize>,
     auto: Option<usize>,
+    /// Event 196 (sample path) and event 20, which it follows (spec: flp/events/channels.md, row 40).
+    sample: Option<usize>,
+    ev20: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -427,6 +430,8 @@ fn scan_channel(events: &[Event], start: usize, end: usize) -> ChannelLoc {
             id::CH_LEVELS => c.levels = Some(k),
             id::CH_TARGET => c.target = Some(k),
             id::AUTO_DATA => c.auto = Some(k),
+            id::SAMPLE_PATH => c.sample = Some(k),
+            20 => c.ev20 = Some(k),
             _ => {}
         }
     }
@@ -1117,6 +1122,17 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 set_int(&mut events[i], ch.mixer_track.into());
             }
         }
+        // A sampler's sample (Open Sampler loads one): event 196 replaced, or added right after event 20 where FL
+        // writes it (spec: flp/events/channels.md). Clearing a sample is not written yet (the old path stays).
+        if ch.sample_path != old.sample_path {
+            if let Some(p) = &ch.sample_path {
+                match (loc.sample, loc.ev20) {
+                    (Some(i), _) => set_data(&mut events[i], encode_text(p, enc)),
+                    (None, Some(i)) => inserts.push((i + 1, Event::new(id::SAMPLE_PATH, Value::var(encode_text(p, enc))))),
+                    (None, None) => inserts.push((loc.end, Event::new(id::SAMPLE_PATH, Value::var(encode_text(p, enc))))),
+                }
+            }
+        }
     }
 
     // New channels go after the last channel block (spec: flp/events/channels.md; automation.md for type 5).
@@ -1700,12 +1716,17 @@ mod tests {
         let mut edited = back.clone();
         edited.tempo = Some(100.0);
         edited.channels[0].volume = 0.25;
+        // Samples loaded into a sampler: added where there was none, replaced where there was one.
+        edited.channels[0].sample_path = Some("C:/samples/kick.wav".into());
+        edited.channels[1].sample_path = Some("C:/samples/bass2.wav".into());
         edited.patterns[0].notes.push(Note::step(0, 96));
         edited.patterns.push(Pattern { number: 3, name: Some("Chorus".into()), notes: vec![Note::step(1, 24)], ..Pattern::default() });
         apply(&edited, &mut file).unwrap();
         let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
         assert_eq!(again.tempo, Some(100.0));
         assert_eq!(again.channels[0].volume, 0.25);
+        assert_eq!(again.channels[0].sample_path.as_deref(), Some("C:/samples/kick.wav"));
+        assert_eq!(again.channels[1].sample_path.as_deref(), Some("C:/samples/bass2.wav"));
         assert_eq!(again.patterns.iter().map(|p| p.number).collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(again.patterns[2].name.as_deref(), Some("Chorus"));
         assert_eq!(again.patterns[0].notes.len(), 2);

@@ -1997,6 +1997,7 @@ dependencies = [
  "os-theme",
  "os-ui",
  "rfd",
+ "serde_json",
  "softbuffer",
  "windows-sys 0.61.2",
  "winit",

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use nih_plug::prelude::*;
 use os_engine::{envelope, Sample};
 
-use params::{FxKey, SamplerParams};
+use params::{FxKey, Live, SamplerParams};
 
 /// The processed sample for one (loaded sample version, precomputed settings) pair.
 pub struct Processed {
@@ -227,19 +227,19 @@ impl Default for OpenSampler {
 /// An envelope target's LFO (spec §5.2): times from the envelope time law, speed `0.1·2^(8v)` Hz or tempo-synced.
 fn lfo(e: &params::EnvParams, tempo: f64) -> dsp::Lfo {
     let n = |v: f32| envelope::knob_seconds(params::time_field(v));
-    let sp = f64::from(e.lfo_speed.value());
-    let hz = if e.lfo_tempo.value() {
+    let sp = f64::from(e.lfo_speed.live());
+    let hz = if e.lfo_tempo.live() {
         16.0 * tempo / (60.0 * 2f64.powf(8.0 * (1.0 - sp)))
     } else {
         0.1 * 2f64.powf(8.0 * sp)
     };
     dsp::Lfo {
-        shape: e.lfo_shape.value().clamp(0, 2) as u8,
-        delay: n(e.lfo_delay.value()),
-        attack: n(e.lfo_att.value()),
-        amount: f64::from(e.lfo_amt.value()),
+        shape: e.lfo_shape.live().clamp(0, 2) as u8,
+        delay: n(e.lfo_delay.live()),
+        attack: n(e.lfo_att.live()),
+        amount: f64::from(e.lfo_amt.live()),
         hz,
-        global: e.lfo_global.value(),
+        global: e.lfo_global.live(),
     }
 }
 
@@ -250,31 +250,31 @@ pub fn block(p: &SamplerParams, tempo: f64, bend: f64) -> dsp::Block {
         let e = p.env(i);
         // The Panning target has no envelope (spec §3).
         let mut env = if i == dsp::PAN { None } else { e.envelope(128.0) };
-        if e.tempo.value() {
+        if e.tempo.live() {
             // Tempo-based times: the time law at 120 BPM, scaled by the host tempo (OpenStudio choice).
             env = env.map(|x| x.scaled(120.0 / tempo.max(1.0)));
         }
-        *t = dsp::Target { env, amount: f64::from(e.amt.value()), lfo: lfo(e, tempo) };
+        *t = dsp::Target { env, amount: f64::from(e.amt.live()), lfo: lfo(e, tempo) };
     }
-    let resample = p.ts_mode.value() == 0;
+    let resample = p.ts_mode.live() == 0;
     dsp::Block {
-        root: p.root.value(),
-        cents: f64::from(p.fine.value()) + if p.main_pitch.value() { bend } else { 0.0 },
-        ts_cents: if resample { params::ts_cents(p.ts_pitch.value()) } else { 0.0 },
-        ts_ratio: if resample { params::mul_of(p.ts_mul.value()) } else { 1.0 },
+        root: p.root.live(),
+        cents: f64::from(p.fine.live()) + if p.main_pitch.live() { bend } else { 0.0 },
+        ts_cents: if resample { params::ts_cents(p.ts_pitch.live()) } else { 0.0 },
+        ts_ratio: if resample { params::mul_of(p.ts_mul.live()) } else { 1.0 },
         ts_time: if resample { p.ts_seconds(tempo) } else { None },
         targets,
-        f_type: p.f_type.value().clamp(0, 7) as u8,
-        f_cut: f64::from(p.f_cut.value()),
-        f_res: f64::from(p.f_res.value()),
-        start_offset: f64::from(p.start_offset.value()),
+        f_type: p.f_type.live().clamp(0, 7) as u8,
+        f_cut: f64::from(p.f_cut.live()),
+        f_res: f64::from(p.f_res.live()),
+        start_offset: f64::from(p.start_offset.live()),
         loop_on: p.loop_active(),
-        loop_start: f64::from(p.loop_start.value()),
-        loop_end: f64::from(p.loop_end.value()),
-        pingpong: p.loop_pingpong.value(),
-        declick: p.declick.value(),
-        zone: (p.zone_lo.value(), p.zone_hi.value()),
-        add_key: p.add_key.value(),
+        loop_start: f64::from(p.loop_start.live()),
+        loop_end: f64::from(p.loop_end.live()),
+        pingpong: p.loop_pingpong.live(),
+        declick: p.declick.live(),
+        zone: (p.zone_lo.live(), p.zone_hi.live()),
+        add_key: p.add_key.live(),
     }
 }
 

@@ -97,8 +97,18 @@ impl Plugins {
 
     /// Creates an instance of available plugin `index` for rack row `row` and activates it at the device rate.
     pub fn create(&mut self, row: usize, index: usize) -> Result<String, String> {
+        self.create_with(row, index, None)
+    }
+
+    /// `create` with a starting state (the plugin's own saved state format).
+    pub fn create_with(&mut self, row: usize, index: usize, state: Option<&[u8]>) -> Result<String, String> {
         let a = self.available.get(index).ok_or("no such plugin")?.clone();
         let mut p = Plugin::new(&a.lib, &a.desc.id)?;
+        if let Some(st) = state {
+            if !p.load_state(st) {
+                eprintln!("[plugins] {} did not take its starting state", a.desc.name);
+            }
+        }
         if self.rate == 0 {
             self.rate = crate::transport::Transport::device_rate().unwrap_or(48000);
         }
@@ -110,6 +120,27 @@ impl Plugins {
         }
         self.hosted.insert(row, Hosted { plugin: Arc::new(Mutex::new(p)), #[cfg(windows)] window: None, #[cfg(windows)] link: None });
         Ok(a.desc.name)
+    }
+
+    /// Index of the available plugin called `name`.
+    pub fn index_of(&self, name: &str) -> Option<usize> {
+        self.available.iter().position(|a| a.desc.name == name)
+    }
+
+    /// Closes every window and drops every instance (a new or opened project).
+    pub fn clear(&mut self) {
+        #[cfg(windows)]
+        for row in self.hosted.keys().copied().collect::<Vec<_>>() {
+            self.close_window(row);
+        }
+        self.hosted.clear();
+    }
+
+    /// The sample file an Open Sampler instance holds (its persisted `sample-path`), `Some("")` when it has none.
+    pub fn sampler_path(&self, row: usize) -> Option<String> {
+        let h = self.hosted.get(&row)?;
+        let blob = h.plugin.lock().ok()?.save_state()?;
+        sample_path_of(&blob)
     }
 
     /// The instances for the transport.
@@ -217,6 +248,77 @@ impl Plugins {
         }
         out
     }
+}
+
+impl Drop for Hosted {
+    /// The editor closes before its frame window goes (a frame destroyed under an open editor took the editor's
+    /// window with it, and the plugin's own close then crashed at exit).
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if self.window.is_some() {
+            if let Ok(mut p) = self.plugin.lock() {
+                p.close_editor();
+            }
+        }
+    }
+}
+
+/// Name of OpenStudio's sampler plugin: it plays and edits every sampler channel (spec: plugins/open-sampler.md §7).
+pub const OPEN_SAMPLER: &str = "Open Sampler";
+
+/// Open Sampler's starting state for a sampler channel of the project: its sample and its five envelope records
+/// (nih-plug JSON state with the u64 length prefix of its CLAP state; spec: plugins/open-sampler.md §6, §7).
+pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
+    let mut params = Vec::new();
+    // Model records: panning, volume, cutoff (Mod X), resonance (Mod Y), pitch.
+    for (e, pre) in ch.envelopes.iter().zip(["envpan", "envvol", "envmodx", "envmody", "envpitch"]) {
+        let f = |v: f32| format!("{{\"f32\":{v}}}");
+        let time = |field: i32| f(field.max(0) as f32 / 65536.0);
+        params.push(format!("\"{pre}_on\":{{\"bool\":{}}}", e.enabled));
+        for (id, v) in [
+            ("delay", time(e.delay)),
+            ("att", time(e.attack)),
+            ("hold", time(e.hold)),
+            ("dec", time(e.decay)),
+            ("sus", f(e.sustain.clamp(0, 128) as f32 / 128.0)),
+            ("rel", time(e.release)),
+            ("att_t", f(e.attack_tension.clamp(-128, 128) as f32 / 128.0)),
+            ("dec_t", f(e.decay_tension.clamp(-128, 128) as f32 / 128.0)),
+            ("rel_t", f(e.release_tension.clamp(-128, 128) as f32 / 128.0)),
+            ("amt", f(e.amount.clamp(-128, 128) as f32 / 128.0)),
+        ] {
+            params.push(format!("\"{pre}_{id}\":{v}"));
+        }
+    }
+    let path = ch.sample_path.as_deref().unwrap_or("");
+    // The persisted field is a JSON string holding JSON.
+    let inner = json_string(path);
+    let state = format!("{{\"version\":\"0.0.1\",\"params\":{{{}}},\"fields\":{{\"sample-path\":{}}}}}", params.join(","), json_string(&inner));
+    let mut blob = (state.len() as u64).to_le_bytes().to_vec();
+    blob.extend_from_slice(state.as_bytes());
+    blob
+}
+
+fn json_string(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// The `sample-path` field of an Open Sampler state blob.
+fn sample_path_of(blob: &[u8]) -> Option<String> {
+    let json = blob.get(8..).filter(|_| blob.len() > 8 && blob[0] != b'{').unwrap_or(blob);
+    let v: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let field = v.get("fields")?.get("sample-path")?.as_str()?;
+    serde_json::from_str::<String>(field).ok()
 }
 
 #[cfg(windows)]
@@ -479,6 +581,174 @@ mod tests {
         assert!(hidden, "the cursor should be hidden while dragging a knob");
         assert!(shown(), "the cursor should show again after the drag");
         assert_eq!(after, (p.x, p.y), "the cursor should be back at the press point");
+    }
+
+    /// Real mouse input on the hosted editor must change what the plugin plays: drag the filter's MOD X knob down with
+    /// the real cursor, then render a note through the same instance the engine uses.
+    /// `OS_CLAP=.. cargo test -p os-app plugin_knob_edit_changes_the_sound -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn plugin_knob_edit_changes_the_sound() {
+        use os_engine::Instrument;
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT};
+        let Some(clap) = std::env::var_os("OS_CLAP") else { return };
+        let lib = Library::load(std::path::Path::new(&clap)).expect("load clap");
+        let desc = lib.plugins[0].clone();
+        let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+        pl.create(0, 0).unwrap();
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 300);
+        // A bright 2 s saw so a low-pass is audible.
+        let wav = std::env::temp_dir().join("os-app-knob-sound.wav");
+        let tone: Vec<f32> = (0..88200).flat_map(|i| { let v = ((i as f32 / 44100.0 * 220.0).fract() * 2.0 - 1.0) * 0.4; [v, v] }).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &tone).unwrap();
+        // The persisted field is a JSON string holding JSON: forward slashes keep it free of escapes.
+        let path = format!("\"\\\"{}\\\"\"", wav.to_string_lossy().replace('\\', "/"));
+        let st = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{path}}}}}");
+        let mut blob = (st.len() as u64).to_le_bytes().to_vec();
+        blob.extend_from_slice(st.as_bytes());
+        assert!(pl.hosted[&0].plugin.lock().unwrap().load_state(&blob));
+        pump(&mut pl, 300);
+        let rate = pl.rate;
+        let render = |pl: &mut Plugins| -> Vec<f32> {
+            let plugin = pl.hosted[&0].plugin.clone();
+            let mut p = plugin.lock().unwrap();
+            let mut out = Vec::new();
+            for b in 0..60 {
+                if b == 2 {
+                    p.note_on(0, 60, 0.78);
+                }
+                if b == 40 {
+                    p.note_off(0, 60);
+                }
+                let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+                p.process(rate, &mut l, &mut r);
+                out.extend(l);
+            }
+            p.reset();
+            out
+        };
+        // Let the plugin pick up its processed sample first.
+        render(&mut pl);
+        let before = render(&mut pl);
+        assert!(before.iter().any(|v| v.abs() > 0.05), "the sample plays");
+        pl.hosted.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(1);
+        pump(&mut pl, 100);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
+        unsafe { SetForegroundWindow(frame as HWND) };
+        pump(&mut pl, 200);
+        // Filter MOD X: FL (492.5, 168.5) -> editor client (488, 96) with the host's strip row.
+        let mut p = POINT { x: 488, y: 96 };
+        unsafe { ClientToScreen(editor, &mut p) };
+        let input = |flags: u32, dx: i32, dy: i32| unsafe {
+            let i = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } };
+            SendInput(1, &i, std::mem::size_of::<INPUT>() as i32);
+        };
+        unsafe { SetCursorPos(p.x, p.y) };
+        pump(&mut pl, 50);
+        input(MOUSEEVENTF_LEFTDOWN, 0, 0);
+        pump(&mut pl, 50);
+        for _ in 0..60 {
+            input(MOUSEEVENTF_MOVE, 0, 4);
+            pump(&mut pl, 10);
+        }
+        input(MOUSEEVENTF_LEFTUP, 0, 0);
+        pump(&mut pl, 200);
+        let state = String::from_utf8_lossy(&pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap()).to_string();
+        let i = state.find("\"f_cut\"").unwrap_or(0);
+        println!("state: {}", &state[i..(i + 40).min(state.len())]);
+        let after = render(&mut pl);
+        let diff = before.iter().zip(&after).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let rms = |v: &[f32]| (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
+        println!("max diff {diff}, rms {} -> {}", rms(&before), rms(&after));
+        assert!(diff > 0.05, "the MOD X drag did not change the sound");
+    }
+
+    /// The app's own path (needs an audio device): a plugin channel on the transport's live stream, a held note, a real
+    /// mouse drag of MOD X in the editor; the output level must follow.
+    /// `OS_CLAP=.. cargo test -p os-app app_hears_plugin_knob_edits -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn app_hears_plugin_knob_edits() {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT};
+        let Some(clap) = std::env::var_os("OS_CLAP") else { return };
+        let lib = Library::load(std::path::Path::new(&clap)).expect("load clap");
+        let desc = lib.plugins[0].clone();
+        let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+        pl.create(0, 0).unwrap();
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 300);
+        // A bright 2 s saw so a low-pass is audible.
+        let wav = std::env::temp_dir().join("os-app-knob-sound.wav");
+        let tone: Vec<f32> = (0..88200).flat_map(|i| { let v = ((i as f32 / 44100.0 * 220.0).fract() * 2.0 - 1.0) * 0.4; [v, v] }).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &tone).unwrap();
+        // The persisted field is a JSON string holding JSON: forward slashes keep it free of escapes.
+        let path = format!("\"\\\"{}\\\"\"", wav.to_string_lossy().replace('\\', "/"));
+        let st = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{path}}}}}");
+        let mut blob = (st.len() as u64).to_le_bytes().to_vec();
+        blob.extend_from_slice(st.as_bytes());
+        assert!(pl.hosted[&0].plugin.lock().unwrap().load_state(&blob));
+        pump(&mut pl, 300);
+        let mut project = crate::app::test_project();
+        project.channels.clear();
+        let row = crate::app::add_plugin_channel(&mut project, "Open Sampler");
+        assert_eq!(row, 0);
+        let transport = crate::transport::Transport::new(None);
+        transport.update(&project);
+        transport.set_instruments(pl.instruments());
+        // Hold a note 400 ms, keep the UI side ticking, return the loudest output peak.
+        let level = |pl: &mut Plugins| -> f32 {
+            transport.take_peaks();
+            transport.note_on(0, 60, 100);
+            let mut peak = 0.0f32;
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_millis(400) {
+                pump(pl, 20);
+                let (l, r) = transport.take_peaks();
+                peak = peak.max(l.max(r));
+            }
+            transport.note_off(0, 60);
+            pump(pl, 300);
+            peak
+        };
+        level(&mut pl);
+        let before = level(&mut pl);
+        println!("level before {before}");
+        assert!(before > 0.05, "the note is heard");
+        pl.hosted.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(1);
+        pump(&mut pl, 100);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
+        unsafe { SetForegroundWindow(frame as HWND) };
+        pump(&mut pl, 200);
+        // Filter MOD X: FL (492.5, 168.5) -> editor client (488, 96) with the host's strip row.
+        let mut p = POINT { x: 488, y: 96 };
+        unsafe { ClientToScreen(editor, &mut p) };
+        let input = |flags: u32, dx: i32, dy: i32| unsafe {
+            let i = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } };
+            SendInput(1, &i, std::mem::size_of::<INPUT>() as i32);
+        };
+        unsafe { SetCursorPos(p.x, p.y) };
+        pump(&mut pl, 50);
+        input(MOUSEEVENTF_LEFTDOWN, 0, 0);
+        pump(&mut pl, 50);
+        for _ in 0..120 {
+            input(MOUSEEVENTF_MOVE, 0, 4);
+            pump(&mut pl, 10);
+        }
+        input(MOUSEEVENTF_LEFTUP, 0, 0);
+        pump(&mut pl, 200);
+        let state = String::from_utf8_lossy(&pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap()).to_string();
+        let i = state.find("\"f_cut\"").unwrap_or(0);
+        println!("state: {}", &state[i..(i + 40).min(state.len())]);
+        let after = level(&mut pl);
+        println!("level after {after}");
+        assert!(after < before * 0.5, "MOD X down did not change what the app plays ({before} -> {after})");
     }
 
     /// Keys typed while the plugin window has the focus must reach the app (the typing keyboard keeps playing).
