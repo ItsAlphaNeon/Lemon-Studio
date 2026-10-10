@@ -113,6 +113,8 @@ enum Cmd {
     /// The newest edited project is in `Transport::latest` (older ones are skipped).
     Update,
     Preview(Box<Project>),
+    /// Play a project's playlist once on the preview stream (clip preview).
+    PreviewSong(Box<Project>),
     /// The hosted instruments changed (in `Transport::instruments`): rebuild the engines.
     Instruments,
     /// Live note (typing keyboard): channel (rack position), key, velocity; `NoteOff` releases.
@@ -187,6 +189,11 @@ impl Transport {
     /// Play pattern 1 of `project` once (a one-note preview project), on its own stream.
     pub fn preview(&self, project: Project) {
         let _ = self.tx.send(Cmd::Preview(Box::new(project)));
+    }
+
+    /// Play the playlist of `project` once on the preview stream (spec: ui/playlist.md §10, clip Preview).
+    pub fn preview_song(&self, project: Project) {
+        let _ = self.tx.send(Cmd::PreviewSong(Box::new(project)));
     }
 
     /// Start a live note: mixed into playback while playing, else on the live stream (kept open, so
@@ -397,6 +404,13 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     if let Ok(mut e) = s.engine.lock() {
                         e.note_off(ch, key);
                     }
+                }
+            }
+            Ok(Cmd::PreviewSong(project)) => {
+                preview = None;
+                match Session::start(&project, PlayMode::Song, Kind::Preview, 0, &mut library, shared.clone(), &inst) {
+                    Ok(s) => preview = Some(s),
+                    Err(e) => report(&shared, e),
                 }
             }
             Ok(Cmd::Preview(project)) => {

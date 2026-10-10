@@ -91,6 +91,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.win = None;
     }
     toolbar::paint(ui, s, f, w);
+    playlist::paint_overlays(ui, s);
     if let Some(m) = s.menu_open {
         menus::paint_dropdown(ui, s, m);
     }

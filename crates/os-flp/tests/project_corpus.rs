@@ -117,6 +117,66 @@ fn edits_survive_a_write_read_cycle() {
     eprintln!("{checked} FL 26 files: edits survived write/read");
 }
 
+/// Playlist edits (spec: flp/events/playlist.md, automation.md): clips moved, muted, trimmed, copied, deleted;
+/// markers added; automation points changed; a new automation channel. Everything reads back.
+#[test]
+fn playlist_edits_survive() {
+    use os_model::{AutoPoint, ChannelKind, Clip, ClipSource, TimeMarker};
+    let Some(paths) = corpus() else { return };
+    let strip = |v: &[Clip]| {
+        let mut v: Vec<_> = v.iter().map(|c| (c.position, c.length, c.track, c.source, c.muted, c.window.map(|(a, b)| ((a * 1000.0) as i64, (b * 1000.0) as i64)))).collect();
+        v.sort_by_key(|c| (c.0, c.2, c.1));
+        v
+    };
+    let mut checked = 0;
+    for path in &paths {
+        let bytes = std::fs::read(path).unwrap();
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        let Ok(mut project) = load(&file) else { continue };
+        if project.saved_by.split('.').next() != Some("26") || project.arrangements.first().is_none_or(|a| a.clips.len() < 3) {
+            continue;
+        }
+        let arr = &mut project.arrangements[0];
+        arr.clips[0].position += 96;
+        arr.clips[0].muted = !arr.clips[0].muted;
+        let mut copy = arr.clips[1];
+        copy.track = (copy.track + 1).min(499);
+        copy.position += 384;
+        arr.clips.push(copy);
+        arr.clips.remove(2);
+        if let ClipSource::Pattern(_) = arr.clips[1].source {
+            arr.clips[1].window = Some((48.0, 48.0 + f64::from(arr.clips[1].length)));
+        }
+        arr.markers.push(TimeMarker::new(1536, "Added"));
+        if let Some(a) = project.automations.first_mut() {
+            if a.points.len() >= 2 {
+                a.points[1].value = 0.123;
+            } else {
+                a.points.push(AutoPoint::new(4.0, 0.5));
+            }
+        }
+        let next = project.channels.len() as u16;
+        let mut ch = project.channels[0].clone();
+        ch.index = next;
+        ch.kind = ChannelKind::Automation;
+        ch.name = Some("Added automation".into());
+        ch.sample_path = None;
+        ch.layer_children.clear();
+        project.channels.push(ch);
+        project.automations.push(os_flp::project::new_automation(next, os_model::target::channel(0, 1), 0.5, 16.0));
+
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let reread = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(strip(&reread.arrangements[0].clips), strip(&project.arrangements[0].clips), "{path}");
+        assert_eq!(reread.arrangements[0].markers, project.arrangements[0].markers, "{path}");
+        assert_eq!(reread.automations, project.automations, "{path}");
+        assert_eq!(reread.channels.len(), project.channels.len(), "{path}");
+        checked += 1;
+    }
+    assert!(checked > 0);
+    eprintln!("{checked} files: playlist edits survived");
+}
+
 /// Control points (event 223, spec: flp/events/patterns.md): adding, rewriting and removing them
 /// leaves the notes alone, and removing them again restores the original bytes.
 #[test]

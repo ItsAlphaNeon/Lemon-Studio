@@ -40,6 +40,8 @@ struct Trigger {
     end: u64,
     /// Note velocity byte (instrument channels get it as 0..=1).
     velocity: u8,
+    /// Sample position (source frames) the voice starts at.
+    from: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -222,10 +224,29 @@ struct Voice {
     off: Option<u64>,
 }
 
+/// Channel pitch automation range: ±2 semitones, the channel's default pitch range (spec: flp/events/automation.md).
+const AUTO_PITCH_CENTS: f64 = 200.0;
+
 /// Release fade of a live note (an OpenStudio choice, spec: ui/typing-keyboard.md open questions).
 const RELEASE_SECONDS: f64 = 0.015;
 
+/// An automation clip placed in output frames (spec: ui/playlist.md §8, flp/events/automation.md).
+#[derive(Debug, Clone, Copy)]
+struct AutoClip {
+    start: u64,
+    end: u64,
+    /// Beats into the automation at the clip start (its window).
+    from_beat: f64,
+    /// Index into `Engine::curves`.
+    curve: usize,
+    target: os_model::target::Target,
+}
+
 struct MixTrack {
+    /// Fader position and pan as set (automation rewrites them, then the matrix).
+    vol: f64,
+    pan: f64,
+    on: bool,
     /// Insert effects in slot order (applied before the fader).
     effects: Vec<Box<dyn Effect>>,
     /// Fader × pan as `[[L←L, L←R], [R←L, R←R]]`.
@@ -276,6 +297,10 @@ pub struct Engine {
     scratch: (Vec<f32>, Vec<f32>),
     /// Frames instruments keep being processed after their last held note (their release / tail is not known).
     inst_tail: u64,
+    /// Automation clips of the playlist and their curves (song mode).
+    autos: Vec<AutoClip>,
+    curves: Vec<os_model::Automation>,
+    frames_per_beat: f64,
     pub report: EngineReport,
 }
 
@@ -346,7 +371,7 @@ impl Engine {
 
         let tracks: Vec<MixTrack> = if project.mixer.is_empty() {
             let unity = [[1.0, 0.0], [0.0, 1.0]];
-            vec![MixTrack { effects: Vec::new(), matrix: unity, cur: unity, routes: vec![] }]
+            vec![MixTrack { vol: 0.8, pan: 0.0, on: true, effects: Vec::new(), matrix: unity, cur: unity, routes: vec![] }]
         } else {
             project
                 .mixer
@@ -378,7 +403,7 @@ impl Engine {
                             .filter(|&(_, g)| g > 0.0)
                             .collect()
                     };
-                    MixTrack { effects, matrix, cur: matrix, routes }
+                    MixTrack { vol: m.volume.unwrap_or(0.8), pan: m.pan.unwrap_or(0.0), on: m.enabled, effects, matrix, cur: matrix, routes }
                 })
                 .collect()
         };
@@ -411,11 +436,49 @@ impl Engine {
                     vel: laws::velocity_gain(n.velocity),
                     pan: laws::note_pan(n.pan),
                     velocity: n.velocity,
+                    from: state.sample.as_ref().map_or(0.0, |s| n.from_s * f64::from(s.rate)),
                 })
             })
             .collect();
 
+        // Automation clips (song mode only): each plays its curve onto its target from its start to its end.
+        let mut curves = Vec::new();
+        let mut autos = Vec::new();
+        if mode == PlayMode::Song {
+            for c in project.arrangement().map(|a| a.clips.as_slice()).unwrap_or(&[]) {
+                let ClipSource::Channel(ch) = c.source else { continue };
+                let Some(a) = project.automation(ch) else { continue };
+                let Some(target) = a.target.map(os_model::target::decode) else { continue };
+                if !clip_audible(project, c) {
+                    continue;
+                }
+                if matches!(target, os_model::target::Target::Other(_) | os_model::target::Target::Tempo) {
+                    report.automation_clips_ignored += 1;
+                    continue;
+                }
+                let curve = match curves.iter().position(|x: &os_model::Automation| x.channel == ch) {
+                    Some(i) => i,
+                    None => {
+                        curves.push(a.clone());
+                        curves.len() - 1
+                    }
+                };
+                autos.push(AutoClip {
+                    start: laws::tick_to_frame(f64::from(c.position), ppq, tempo, rate),
+                    end: laws::tick_to_frame(f64::from(c.end()), ppq, tempo, rate),
+                    from_beat: c.window.map_or(0.0, |w| w.0),
+                    curve,
+                    target,
+                });
+            }
+        }
+        // Later clips win where clips on the same target overlap.
+        autos.sort_by_key(|a| a.start);
+
         Engine {
+            autos,
+            curves,
+            frames_per_beat: f64::from(rate) * 60.0 / tempo.max(1.0),
             rate,
             channels,
             bus: vec![Vec::new(); tracks.len()],
@@ -654,9 +717,62 @@ impl Engine {
         self.sounding.iter().map(|&(c, k, _)| (c, k))
     }
 
+    /// Applies every automation clip that covers the current frame to its target (once per block; volumes and
+    /// pans glide over the block, the mixer ramps its matrix). Outside its clips a target keeps its last value.
+    fn run_automation(&mut self, frames: usize) {
+        use os_model::target::Target;
+        if self.autos.is_empty() {
+            return;
+        }
+        let now = self.frame;
+        let len = frames.max(1) as u32;
+        let mut done: Vec<Target> = Vec::new();
+        for a in self.autos.iter().rev() {
+            if now < a.start || now >= a.end || done.contains(&a.target) {
+                continue;
+            }
+            done.push(a.target);
+            let beat = a.from_beat + (now - a.start) as f64 / self.frames_per_beat;
+            let Some(v) = self.curves[a.curve].value_at(beat) else { continue };
+            let v = v.clamp(0.0, 1.0);
+            // spec: flp/events/automation.md "Targets" (value scaling)
+            match a.target {
+                Target::ChannelVolume(c) => {
+                    if let Some(ch) = self.channels.get_mut(usize::from(c)) {
+                        ch.glide(Some(v), None, len);
+                    }
+                }
+                Target::ChannelPan(c) => {
+                    if let Some(ch) = self.channels.get_mut(usize::from(c)) {
+                        ch.glide(None, Some((v - 0.5) * 2.0), len);
+                    }
+                }
+                Target::ChannelPitch(c) => {
+                    if let Some(ch) = self.channels.get_mut(usize::from(c)) {
+                        let cents = ((v - 0.5) * 2.0 * AUTO_PITCH_CENTS).round() as i32;
+                        ch.base_rate = ch.src_ratio * laws::playback_rate(60, cents);
+                    }
+                }
+                Target::MixerVolume(t) | Target::MixerPan(t) => {
+                    if let Some(m) = self.tracks.get_mut(usize::from(t)) {
+                        if matches!(a.target, Target::MixerVolume(_)) {
+                            m.vol = v;
+                        } else {
+                            m.pan = (v - 0.5) * 2.0;
+                        }
+                        let g = if m.on { laws::fader_gain(m.vol) } else { 0.0 };
+                        m.matrix = laws::mixer_pan(m.pan).map(|row| row.map(|x| (x * g) as f32));
+                    }
+                }
+                Target::Tempo | Target::Other(_) => {}
+            }
+        }
+    }
+
     /// Renders the next `out.len() / 2` stereo frames (interleaved L/R) into `out`.
     pub fn process(&mut self, out: &mut [f32]) {
         let frames = out.len() / 2;
+        self.run_automation(frames);
         for b in &mut self.bus {
             b.clear();
             b.resize(frames * 2, 0.0);
@@ -744,7 +860,7 @@ impl Engine {
             let serial = self.channels[t.channel].serial;
             let mut v = Voice {
                 channel: t.channel,
-                pos: 0.0,
+                pos: t.from,
                 step: t.rate,
                 remaining,
                 vel: t.vel,
@@ -1045,11 +1161,13 @@ struct Sched {
     cut: Option<f64>,
     /// Note length in ticks (0 = a plain step).
     len: f64,
+    /// Seconds into the sample where the voice starts (audio clip window start).
+    from_s: f64,
 }
 
 impl Sched {
     fn note(start: f64, n: &os_model::Note) -> Self {
-        Sched { tick: start + f64::from(n.position), channel: usize::from(n.channel), key: n.key, velocity: n.velocity, pan: n.pan, cut: None, len: f64::from(n.length) }
+        Sched { tick: start + f64::from(n.position), channel: usize::from(n.channel), key: n.key, velocity: n.velocity, pan: n.pan, cut: None, len: f64::from(n.length), from_s: 0.0 }
     }
 }
 
@@ -1084,18 +1202,28 @@ fn schedule_controls(project: &Project, mode: PlayMode) -> Vec<(f64, usize, u16,
     match mode {
         PlayMode::Pattern(n) => place(&mut out, 0.0, f64::INFINITY, n),
         PlayMode::Song => {
-            let clips = project.arrangements.first().map(|a| a.clips.as_slice()).unwrap_or(&[]);
+            let clips = project.arrangement().map(|a| a.clips.as_slice()).unwrap_or(&[]);
             if clips.is_empty() {
                 place(&mut out, 0.0, f64::INFINITY, project.current_pattern.unwrap_or(1));
             }
-            for c in clips {
+            for c in clips.iter().filter(|c| clip_audible(project, c)) {
                 if let ClipSource::Pattern(n) = c.source {
-                    place(&mut out, f64::from(c.position), f64::from(c.length), n);
+                    // Points inside the clip's window, placed relative to it.
+                    let from = c.window.map_or(0.0, |w| w.0);
+                    for p in points(n).iter().filter(|p| f64::from(p.position) >= from && f64::from(p.position) < from + f64::from(c.length)) {
+                        out.push((f64::from(c.position) - from + f64::from(p.position), usize::from(p.channel()), p.param(), p.value));
+                    }
                 }
             }
         }
     }
     out
+}
+
+/// A clip plays unless it is muted or its playlist track is (spec: ui/playlist.md §2, §6).
+fn clip_audible(project: &Project, c: &os_model::Clip) -> bool {
+    let track_on = project.arrangement().and_then(|a| a.tracks.get(usize::from(c.track))).is_none_or(|t| t.enabled);
+    !c.muted && track_on
 }
 
 /// A plucked tone at key 60 (261.6 Hz), about 1.5 s: decaying harmonics of a saw.
@@ -1139,7 +1267,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
     match mode {
         PlayMode::Pattern(n) => one_pattern(n),
         PlayMode::Song => {
-            let clips = project.arrangements.first().map(|a| a.clips.as_slice()).unwrap_or(&[]);
+            let clips = project.arrangement().map(|a| a.clips.as_slice()).unwrap_or(&[]);
             if clips.is_empty() {
                 return one_pattern(project.current_pattern.unwrap_or(1));
             }
@@ -1149,19 +1277,28 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                 let start = f64::from(c.position);
                 let len = f64::from(c.length);
                 end = end.max(start + len);
+                // Muted clips and clips on muted tracks are silent (spec: ui/playlist.md §2, §6).
+                if !clip_audible(project, c) {
+                    continue;
+                }
                 match c.source {
+                    // A pattern clip plays the notes inside its window [from, from + length) (spec: playlist.md "Clip offsets").
                     ClipSource::Pattern(n) => {
+                        let from = c.window.map_or(0.0, |w| w.0);
                         for note in pattern_notes(n).iter().filter(|x| !x.muted()) {
-                            if f64::from(note.position) < len {
-                                push_note(&mut out, start, note, project.ppq);
+                            let p = f64::from(note.position);
+                            if p >= from && p < from + len {
+                                push_note(&mut out, start - from, note, project.ppq);
                             }
                         }
                     }
                     ClipSource::Channel(ch) => match project.channels.get(usize::from(ch)).map(|c| c.kind) {
-                        // An audio clip plays its channel's sample from the start, cut at the clip end.
+                        // An audio clip plays its channel's sample from the window start (milliseconds), cut at the clip end.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, velocity: 100, pan: 64, cut: Some(start + len), len });
+                            let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, velocity: 100, pan: 64, cut: Some(start + len), len, from_s });
                         }
+                        Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
                     },
                 }
@@ -1401,5 +1538,89 @@ mod tests {
         assert!((e.channels[0].volume - laws::channel_gain(0.5)).abs() < 1e-12);
         e.seek(0);
         assert!((e.channels[0].volume - laws::channel_gain(0.78125)).abs() < 1e-12, "back before the point");
+    }
+
+    fn song(notes: Vec<Note>, clips: Vec<os_model::Clip>) -> Project {
+        let mut p = project(notes, vec![]);
+        p.arrangements = vec![os_model::Arrangement {
+            clips,
+            tracks: (1..=4).map(|n| os_model::PlaylistTrack { number: n, name: None, color: None, enabled: true }).collect(),
+            ..Default::default()
+        }];
+        p
+    }
+
+    fn song_triggers(p: &Project) -> Vec<u64> {
+        let mut lib = SampleLibrary::new(None);
+        Engine::new(p, &mut lib, 48000, PlayMode::Song).triggers.iter().map(|t| t.frame).collect()
+    }
+
+    // spec: ui/playlist.md §2, §6 (muted clips / tracks are silent), flp/events/playlist.md "Clip offsets"
+    #[test]
+    fn song_respects_mutes_and_clip_windows() {
+        use os_model::{Clip, ClipSource};
+        let notes = vec![Note::step(0, 0), Note::step(0, 96), Note::step(0, 192)];
+        let f = |t: f64| laws::tick_to_frame(t, 96, 130.0, 48000);
+        // A clip at bar 2 with the window [96, 288): the notes at 96 and 192 play at 384 and 480.
+        let mut c = Clip::new(384, 192, 0, ClipSource::Pattern(1));
+        c.window = Some((96.0, 288.0));
+        assert_eq!(song_triggers(&song(notes.clone(), vec![c])), vec![f(384.0), f(480.0)]);
+        let mut m = c;
+        m.muted = true;
+        assert!(song_triggers(&song(notes.clone(), vec![m])).is_empty(), "muted clip");
+        let mut p = song(notes.clone(), vec![c]);
+        p.arrangements[0].tracks[0].enabled = false;
+        assert!(song_triggers(&p).is_empty(), "muted track");
+        // An unwindowed clip plays the pattern from its start, cut at the clip length.
+        let plain = Clip::new(0, 100, 1, ClipSource::Pattern(1));
+        assert_eq!(song_triggers(&song(notes, vec![plain])), vec![f(0.0), f(96.0)]);
+    }
+
+    // spec: ui/playlist.md §8 (automation clips drive their target), flp/events/automation.md (value scaling)
+    #[test]
+    fn automation_clips_drive_channel_and_mixer() {
+        use os_model::{AutoPoint, Automation, ChannelKind, Clip, ClipSource, target};
+        let mut p = song(vec![long_note(0, 384 * 4, 0)], vec![Clip::new(0, 384 * 4, 0, ClipSource::Pattern(1))]);
+        let mut auto_ch = channel();
+        auto_ch.index = 1;
+        auto_ch.kind = ChannelKind::Automation;
+        p.channels.push(auto_ch);
+        p.mixer = (0..2)
+            .map(|i| os_model::MixerTrack {
+                index: i, name: None, color: None, enabled: true, slots: Default::default(), routes: if i == 0 { vec![] } else { vec![0] },
+                send_levels: vec![], volume: Some(0.8), pan: Some(0.0), stereo_separation: Some(0.0),
+            })
+            .collect();
+        // Channel volume falls from 1.0 to 0.0 over 8 beats, starting at bar 2.
+        let a = Automation { channel: 1, target: Some(target::channel(0, 0)), points: vec![AutoPoint::new(0.0, 1.0), AutoPoint::new(8.0, 0.0)], header: vec![0; 21], tail: vec![] };
+        p.automations.push(a);
+        p.arrangements[0].clips.push(Clip::new(384, 768, 1, ClipSource::Channel(1)));
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        assert_eq!(e.autos.len(), 1);
+        let mut out = vec![0.0f32; 480 * 2];
+        let at = |e: &mut Engine, tick: f64| {
+            let frame = laws::tick_to_frame(tick, 96, 130.0, 48000);
+            while e.frame < frame {
+                e.process(&mut out.clone());
+            }
+            e.channels[0].vol_v
+        };
+        assert!((at(&mut e, 100.0) - 0.78125).abs() < 1e-9, "before the clip: the channel's own volume");
+        let mid = at(&mut e, 384.0 + 384.0);
+        assert!((mid - 0.5).abs() < 0.02, "half way: {mid}");
+        let end = at(&mut e, 384.0 + 760.0);
+        assert!(end < 0.03, "near the end: {end}");
+        let after = at(&mut e, 384.0 * 3.5);
+        assert!(after < 0.03, "after the clip it keeps the last value: {after}");
+        // A mixer pan clip moves the track's matrix.
+        p.automations[0].target = Some(target::mixer(1, target::MIXER_PAN));
+        p.automations[0].points = vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(8.0, 0.0)];
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e.seek(laws::tick_to_frame(400.0, 96, 130.0, 48000));
+        e.process(&mut out);
+        let m = e.tracks[1].matrix;
+        assert!(m[1][0].abs() < 1e-6 && m[1][1].abs() < 1e-6, "full left: no right output {m:?}");
+        let _ = &mut out;
     }
 }

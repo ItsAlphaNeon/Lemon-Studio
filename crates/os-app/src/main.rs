@@ -6,6 +6,7 @@ mod knobs;
 mod logo;
 mod monitor;
 mod piano;
+mod playlist;
 #[cfg(windows)]
 mod plugin_window;
 mod plugins;
@@ -290,6 +291,7 @@ impl ApplicationHandler for Shell {
                 self.mods = m.state();
                 self.app.ctrl = self.mods.control_key();
                 self.app.shift = self.mods.shift_key();
+                self.app.alt = self.mods.alt_key();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 // Locked: turn the offset from the anchor into virtual movement, then warp back.
@@ -420,6 +422,17 @@ impl ApplicationHandler for Shell {
                     window.request_redraw();
                 }
             }
+            // Audio files dropped on the playlist become audio clips (spec: ui/playlist.md §9); a dropped project opens.
+            WindowEvent::DroppedFile(path) => {
+                // No mouse moves arrive during a drag and drop: take the cursor position now.
+                if let (Some(((cx, cy), _)), Ok(p)) = (screen_state(&window), window.inner_position()) {
+                    let (mx, my) = self.to_app(&window, f64::from(cx - p.x), f64::from(cy - p.y));
+                    self.app.mouse_move(mx, my);
+                }
+                self.app.drop_file(path);
+                window.request_redraw();
+            }
+            WindowEvent::HoveredFile(_) => {}
             WindowEvent::Focused(false) => {
                 self.grab = None;
                 self.app.typing_release_all();
