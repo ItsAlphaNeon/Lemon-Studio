@@ -920,7 +920,10 @@ impl App {
             for k in crate::plugin_window::take_keys() {
                 use winit::platform::scancode::PhysicalKeyExtScancode;
                 if let winit::keyboard::PhysicalKey::Code(code) = winit::keyboard::PhysicalKey::from_scancode(k.scancode) {
-                    self.typing_key(code, k.pressed, k.ctrl, k.alt);
+                    // Space keeps playing / stopping the song (the typing keyboard does not use it).
+                    if !self.typing_key(code, k.pressed, k.ctrl, k.alt) && k.pressed && code == winit::keyboard::KeyCode::Space {
+                        self.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), k.ctrl, k.alt);
+                    }
                 }
             }
             let project = &self.state.project;

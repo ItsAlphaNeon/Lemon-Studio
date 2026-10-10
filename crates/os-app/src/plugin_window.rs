@@ -68,12 +68,18 @@ unsafe extern "system" fn key_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
         if code == 0 {
             let focus = GetFocus();
             if !focus.is_null() {
-                let root = GetAncestor(focus, GA_ROOT);
-                let mut name = [0u16; 64];
-                let n = GetClassNameW(root, name.as_mut_ptr(), 64) as usize;
+                // Inside a plugin frame: docked frames are children of the main window, so walk up to the frame.
+                let mut w = focus;
+                let mut in_frame = false;
+                while !w.is_null() && !in_frame {
+                    let mut name = [0u16; 64];
+                    let n = GetClassNameW(w, name.as_mut_ptr(), 64) as usize;
+                    in_frame = String::from_utf16_lossy(&name[..n]) == FRAME_CLASS;
+                    w = GetAncestor(w, GA_PARENT);
+                }
                 let up = lp & (1 << 31) != 0;
                 let repeat = !up && lp & (1 << 30) != 0;
-                if String::from_utf16_lossy(&name[..n]) == FRAME_CLASS && !repeat {
+                if in_frame && !repeat {
                     let mut sc = ((lp >> 16) & 0xff) as u32;
                     if lp & (1 << 24) != 0 {
                         sc |= 0xE000;
