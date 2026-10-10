@@ -175,10 +175,36 @@ impl SampleLibrary {
         SampleLibrary { factory_dir, ..Default::default() }
     }
 
-    /// The default install location, if it exists on this machine.
+    /// The FL Studio install folder on this machine, if one is found: the folder named by the environment
+    /// variable `OPENSTUDIO_FACTORY`, else the default install location, else (off Windows) the newest
+    /// "FL Studio ..." folder in the Wine prefix (`WINEPREFIX`, or `~/.wine`).
     pub fn default_factory_dir() -> Option<PathBuf> {
+        if let Some(p) = std::env::var_os("OPENSTUDIO_FACTORY").map(PathBuf::from) {
+            return p.is_dir().then_some(p);
+        }
         let p = PathBuf::from(r"C:\Program Files\Image-Line\FL Studio 2026");
-        p.is_dir().then_some(p)
+        if p.is_dir() {
+            return Some(p);
+        }
+        Self::wine_factory_dir()
+    }
+
+    #[cfg(windows)]
+    fn wine_factory_dir() -> Option<PathBuf> {
+        None
+    }
+    #[cfg(not(windows))]
+    fn wine_factory_dir() -> Option<PathBuf> {
+        let prefix = std::env::var_os("WINEPREFIX").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".wine")))?;
+        let mut found: Vec<PathBuf> = std::fs::read_dir(prefix.join("drive_c/Program Files/Image-Line"))
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            // (Image-Line's ASIO driver installs to "FL Studio ASIO": an install has the factory data.)
+            .filter(|p| p.join("Data/Patches").is_dir() && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("FL Studio")))
+            .collect();
+        found.sort();
+        found.pop()
     }
 
     pub fn resolve(&self, project_path: &str) -> Option<PathBuf> {
