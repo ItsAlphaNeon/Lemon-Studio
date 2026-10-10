@@ -250,6 +250,8 @@ pub enum Cmd {
     ResetEmptyTracks,
     /// Browser options menu (spec: ui/browser.md §4).
     Browser(crate::browser::BCmd),
+    /// Channel rack menus (spec: ui/channel-rack.md §17-21).
+    Rack(crate::rack::RCmd),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -262,12 +264,14 @@ pub struct PItem {
     /// Section header (not clickable).
     pub head: bool,
     pub sep: bool,
+    /// Column break: the following items start a new column (not drawn).
+    pub col: bool,
     pub children: Vec<PItem>,
 }
 
 impl PItem {
     pub fn new(label: impl Into<Cow<'static, str>>, cmd: Cmd) -> Self {
-        PItem { label: label.into(), key: "", cmd, mark: Mark::None, enabled: true, head: false, sep: false, children: Vec::new() }
+        PItem { label: label.into(), key: "", cmd, mark: Mark::None, enabled: true, head: false, sep: false, col: false, children: Vec::new() }
     }
     pub fn key(mut self, k: &'static str) -> Self {
         self.key = k;
@@ -286,6 +290,9 @@ impl PItem {
     }
     pub fn sep() -> Self {
         PItem { sep: true, ..PItem::new("", Cmd::Nothing) }
+    }
+    pub fn col() -> Self {
+        PItem { col: true, ..PItem::new("", Cmd::Nothing) }
     }
     pub fn sub(label: &'static str, children: Vec<PItem>) -> Self {
         PItem { children, ..PItem::new(label, Cmd::Nothing) }
@@ -574,8 +581,12 @@ pub fn source_len(s: &State, src: ClipSource) -> u32 {
     let bar = bar(s);
     match src {
         ClipSource::Pattern(n) => {
+            if let Some(l) = s.project.pattern(n).and_then(|p| p.length).filter(|&l| l > 0) {
+                return l;
+            }
             let notes = s.project.pattern(n).map(|p| p.notes.as_slice()).unwrap_or(&[]);
-            if notes.is_empty() { bar } else { crate::piano::pattern_length(s, notes) }
+            let end = notes.iter().map(|x| x.position + crate::piano::shown_len(s, x)).max().unwrap_or(0);
+            if notes.is_empty() { bar } else { (end / bar + 1) * bar }
         }
         ClipSource::Channel(c) => {
             if let Some(a) = s.project.automation(c) {
@@ -1989,6 +2000,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     // Commands that need the whole app.
     match cmd {
         Cmd::Browser(b) => return app.browser_cmd(b),
+        Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Consolidate => {
             let m = consolidate(app);
             app.invalidate();
@@ -2011,7 +2023,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let s = &mut app.state;
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -2325,7 +2337,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
 }
 
 /// An RGB colour from hue (degrees), saturation and lightness (0..1).
-fn hsl_rgb(h: f32, s: f32, l: f32) -> Rgb {
+pub(crate) fn hsl_rgb(h: f32, s: f32, l: f32) -> Rgb {
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
     let hp = (h.rem_euclid(360.0)) / 60.0;
     let x = c * (1.0 - (hp % 2.0 - 1.0).abs());

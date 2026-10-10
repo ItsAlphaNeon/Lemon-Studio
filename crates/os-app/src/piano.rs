@@ -224,8 +224,11 @@ pub fn shown_len(s: &State, n: &Note) -> u32 {
     if n.length == 0 { u32::from(s.project.ppq.max(4)) / 4 } else { n.length }
 }
 
-/// Pattern length in ticks as the engine loops it: whole bars past the last note end.
+/// Pattern length in ticks as the engine loops it: the rack's explicit length, else whole bars past the last note end.
 pub fn pattern_length(s: &State, notes: &[Note]) -> u32 {
+    if let Some(l) = s.project.pattern(s.pattern).and_then(|p| p.length).filter(|&l| l > 0) {
+        return l;
+    }
     let bar = u32::from(s.project.ppq.max(1)) * 4;
     let end = notes.iter().map(|n| n.position + shown_len(s, n)).max().unwrap_or(0);
     (end / bar + 1) * bar

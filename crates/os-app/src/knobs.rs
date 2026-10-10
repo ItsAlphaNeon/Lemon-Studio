@@ -27,12 +27,31 @@ pub enum KnobId {
     /// Channel rack row / plugin window (model).
     ChanVol(usize),
     ChanPan(usize),
+    /// Channel rack main swing, 0..100 % (spec: ui/channel-rack.md §7; not applied to playback yet).
+    Swing,
 }
 
 impl KnobId {
     /// Value change per wheel notch: master pitch steps a semitone.
     pub fn notch(self) -> f32 {
-        if self == KnobId::MasterPitch { 1.0 / 24.0 } else { PER_NOTCH }
+        match self {
+            KnobId::MasterPitch => 1.0 / 24.0,
+            // spec: ui/channel-rack.md §11 (3 % per notch; pan percent spans half the range), §7 (swing 4-5 %).
+            KnobId::ChanVol(_) => 0.03,
+            KnobId::ChanPan(_) => 0.015,
+            KnobId::Swing => 0.045,
+            _ => PER_NOTCH,
+        }
+    }
+
+    /// Value change per pixel of vertical drag.
+    pub fn drag_rate(self) -> f32 {
+        match self {
+            // spec: ui/channel-rack.md §11 (0.4 % / px volume, 0.8 % / px pan) and §7 (30 px = 17 % swing).
+            KnobId::ChanVol(_) | KnobId::ChanPan(_) => 0.004,
+            KnobId::Swing => 0.17 / 30.0,
+            _ => PER_PX,
+        }
     }
 
     /// Value restored by a middle click.
@@ -41,6 +60,7 @@ impl KnobId {
             KnobId::MasterVol | KnobId::MixOut(_) => 0.8,
             KnobId::ChanVol(_) => 0.78125,
             KnobId::SlotMix(..) => 1.0,
+            KnobId::Swing => 0.0,
             _ => 0.5,
         }
     }
@@ -122,7 +142,13 @@ impl State {
             KnobId::MixOut(_) => format!("Output level: {:.0}%", n / 0.8 * 100.0),
             KnobId::SlotMix(..) => format!("Mix level: {:.0}%", n * 100.0),
             KnobId::Eq(_, k) => format!("{}: {:.0}%", if k % 2 == 0 { "Band frequency" } else { "Band width" }, n * 100.0),
-            KnobId::ChanVol(_) => format!("Channel volume: {:.0}%", n * 100.0),
+            // spec: ui/channel-rack.md §11: "Channel volume: 78%  -5.2dB  0.55".
+            KnobId::ChanVol(_) => {
+                let g = os_engine::laws::channel_gain(f64::from(n));
+                let db = if g > 0.0 { format!("{:.1}dB", 20.0 * g.log10()) } else { "-INF".into() };
+                format!("Channel volume: {:.0}%  {db}  {g:.2}", n * 100.0)
+            }
+            KnobId::Swing => format!("Main swing: {:.0}%", n * 100.0),
         }
     }
 }
@@ -148,5 +174,8 @@ mod tests {
         assert_eq!(s.knob(KnobId::MasterPitch), 1.0);
         s.set_knob(KnobId::MixPan(1), 0.75);
         assert_eq!(s.knob_text(KnobId::MixPan(1)), "Panning: 50% right");
+        assert_eq!(s.knob_text(KnobId::Swing), "Main swing: 0%");
+        s.project.channels = vec![os_model::Channel { volume: 0.78, ..crate::app::test_project().channels[0].clone() }];
+        assert_eq!(s.knob_text(KnobId::ChanVol(0)), "Channel volume: 78%  -5.2dB  0.55");
     }
 }

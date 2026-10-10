@@ -504,6 +504,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             color: loc.color.map(|i| int(&events[i])).filter(|v| v >> 24 == 0xFF).map(rgb_from_bgr),
             notes: loc.notes.and_then(|i| events[i].data()).map(decode_notes).unwrap_or_default(),
             controls: loc.controls.and_then(|i| events[i].data()).map(decode_controls).unwrap_or_default(),
+            length: None,
         });
     }
     let mut a_index = 0;
@@ -1679,7 +1680,7 @@ mod tests {
             info: ProjectInfo { title: Some("My song".into()), ..Default::default() },
             channels: vec![sampler(0, "Kick", 1), b],
             patterns: vec![
-                Pattern { number: 2, name: Some("Verse".into()), color: Some(Rgb::new(10, 20, 30)), notes: vec![Note::step(0, 48), Note::step(1, 0)], controls: vec![ControlPoint::new(0, 1, ControlPoint::PAN, 3200)] },
+                Pattern { number: 2, name: Some("Verse".into()), color: Some(Rgb::new(10, 20, 30)), notes: vec![Note::step(0, 48), Note::step(1, 0)], controls: vec![ControlPoint::new(0, 1, ControlPoint::PAN, 3200)], length: None },
                 Pattern { number: 1, notes: vec![Note::step(0, 0)], ..Pattern::default() },
             ],
             ..Project::default()

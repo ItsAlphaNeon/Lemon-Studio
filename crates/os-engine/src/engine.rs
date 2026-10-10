@@ -1255,17 +1255,22 @@ fn fallback_tone(rate: u32) -> Arc<Sample> {
 fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Vec<Sched>, f64) {
     let bar = f64::from(project.ppq.max(1)) * 4.0;
     let pattern_notes = |n: u16| project.patterns.iter().find(|p| p.number == n).map(|p| p.notes.as_slice()).unwrap_or(&[]);
+    // An explicit length (channel rack length box, spec: ui/channel-rack.md §7) wins over whole bars.
+    let explicit = |n: u16| project.patterns.iter().find(|p| p.number == n).and_then(|p| p.length).filter(|&l| l > 0).map(f64::from);
     let pattern_end = |n: u16| {
-        let last = pattern_notes(n).iter().map(|x| f64::from(x.position) + f64::from(x.length)).fold(0.0, f64::max);
-        ((last / bar).floor() + 1.0).max(1.0) * bar
+        explicit(n).unwrap_or_else(|| {
+            let last = pattern_notes(n).iter().map(|x| f64::from(x.position) + f64::from(x.length)).fold(0.0, f64::max);
+            ((last / bar).floor() + 1.0).max(1.0) * bar
+        })
     };
     let one_pattern = |n: u16| {
-        // Muted notes are silent (spec: ui/piano-roll.md §9).
+        // Muted notes are silent (spec: ui/piano-roll.md §9); notes past an explicit length are not played.
+        let end = pattern_end(n);
         let mut t = Vec::new();
-        for x in pattern_notes(n).iter().filter(|x| !x.muted()) {
+        for x in pattern_notes(n).iter().filter(|x| !x.muted() && f64::from(x.position) < end) {
             push_note(&mut t, 0.0, x, project.ppq);
         }
-        (t, pattern_end(n))
+        (t, end)
     };
     match mode {
         PlayMode::Pattern(n) => one_pattern(n),

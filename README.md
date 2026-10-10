@@ -63,7 +63,7 @@ losslessly, so existing projects open, play and save without losing data it does
 
 ### 🖥️ Interface
 - Playlist with clips, markers, automation and nine editing tools
-- Channel rack with step sequencer and mini piano rolls
+- Channel rack: step sequencer, mini piano rolls, graph editor, per-channel loops, filter groups, fill tools, clone / move / delete channels
 - Piano roll with full tool set, velocity and event lanes
 - Mixer, browser with drag and drop, plugin picker
 - Floating, resizable, stackable windows

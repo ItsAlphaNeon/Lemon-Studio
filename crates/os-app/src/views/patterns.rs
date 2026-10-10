@@ -31,7 +31,9 @@ pub fn paint(ui: &mut Ui, s: &State) {
         ui.c.stroke_rrect(r, 0.0, 1.0, t.menu_pop_border);
         ui.hit(r, Action::Pat(Hit::Inside), "");
         let named = matches!(b.target, BoxTarget::Name(_));
-        let field = Rect::new(r.x + 4.0, r.y + 4.0, r.w - if named { 30.0 } else { 8.0 }, 22.0);
+        // The colour tab: patterns and channels (spec: ui/channel-rack.md §13).
+        let tabbed = named || matches!(b.target, BoxTarget::Rack(crate::rack::RBox::Channel(_)));
+        let field = Rect::new(r.x + 4.0, r.y + 4.0, r.w - if tabbed { 30.0 } else { 8.0 }, 22.0);
         ui.c.fill_rect(field, t.tempo_box);
         let tw = ui.c.text_width(font, &b.text);
         if b.fresh && !b.text.is_empty() {
@@ -62,13 +64,19 @@ pub fn paint(ui: &mut Ui, s: &State) {
         let caption = match b.target {
             BoxTarget::Name(n) => format!("Pattern {n} name"),
             BoxTarget::Transpose(_) => "Semitones".to_string(),
+            BoxTarget::Rack(rb) => crate::rack::box_caption(s, rb),
         };
         ui.c.text_clip(Font::new(12), x + 44.0, row + 2.0, r.right() - x - 74.0, t.glyph_dim, &caption);
-        if let BoxTarget::Name(n) = b.target {
-            // Colour tab: a left-pointing tab in the pattern colour.
-            let col = s.project.pattern(n).and_then(|p| p.color).map_or(Color::rgb(0x925755), rgb);
+        let tab_col = match b.target {
+            BoxTarget::Name(n) => Some(s.project.pattern(n).and_then(|p| p.color)),
+            BoxTarget::Rack(crate::rack::RBox::Channel(r)) => Some(s.project.channels.get(r).and_then(|c| c.color)),
+            _ => None,
+        };
+        if let Some(col) = tab_col {
+            // Colour tab: a left-pointing tab in the pattern / channel colour.
+            let col = col.map_or(Color::rgb(0x925755), rgb);
             let tab = Rect::new(r.right() - 22.0, r.y + 4.0, 18.0, r.h - 8.0);
-            let hov = ui.hit(tab, Action::Pat(Hit::Color), "Pattern colour");
+            let hov = ui.hit(tab, Action::Pat(Hit::Color), if named { "Pattern colour" } else { "Channel colour" });
             ui.c.fill_rect(Rect::new(tab.x + 5.0, tab.y, tab.w - 5.0, tab.h), col);
             ui.c.fill_rect(Rect::new(tab.x, tab.y + tab.h / 2.0 - 5.0, 5.0, 10.0), col);
             if hov {
@@ -104,7 +112,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
             ui.hit(p, Action::Pat(Hit::Inside), "");
             for (i, &c) in SWATCHES.iter().enumerate() {
                 let sr = Rect::new(p.x + 1.0 + (i % 10) as f32 * SW, p.y + 1.0 + (i / 10) as f32 * SW, SW, SW);
-                let hov = ui.hit(sr, Action::Pat(Hit::Swatch(i)), "Set the pattern colour");
+                let hov = ui.hit(sr, Action::Pat(Hit::Swatch(i)), "Set the colour");
                 ui.c.fill_rect(sr.inset(2.0), Color::rgb(c));
                 if hov {
                     ui.c.stroke_rrect(sr.inset(1.0), 0.0, 1.0, t.glyph);
@@ -121,7 +129,12 @@ pub fn paint(ui: &mut Ui, s: &State) {
         ui.c.stroke_rrect(r, 0.0, 1.0, t.menu_pop_border);
         ui.hit(r, Action::Pat(Hit::Inside), "");
         ui.c.text(Font::new(13), r.x + 12.0, r.y + 8.0, t.glyph_dim, "Confirm");
-        let msg = format!("{} is about to be deleted.", pt::name_of(s, s.pattern.max(1)));
+        // spec: ui/channel-rack.md §18 (channels), ui/pattern-menu.md (patterns)
+        let msg = match &s.rack.pending_delete {
+            Some(rows) if rows.len() == 1 => "The selected channel is about to be deleted.".to_string(),
+            Some(rows) => format!("The {} selected channels are about to be deleted.", rows.len()),
+            None => format!("{} is about to be deleted.", pt::name_of(s, s.pattern.max(1))),
+        };
         ui.c.text_clip(font, r.x + 12.0, r.y + 40.0, r.w - 24.0, t.glyph, &msg);
         for (i, (label, hit)) in [("Ok", Hit::ConfirmOk), ("Cancel", Hit::ConfirmCancel)].into_iter().enumerate() {
             let br = Rect::new(r.right() - 180.0 + i as f32 * 86.0, r.bottom() - 34.0, 80.0, 24.0);

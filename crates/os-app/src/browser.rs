@@ -46,7 +46,7 @@ impl App {
                     }
                     Item::Channel(c) => {
                         s.selected_channel = c;
-                        s.rack_selected = Some(c);
+                        s.rack.select_only(c);
                     }
                     _ => {}
                 }
@@ -258,7 +258,7 @@ impl App {
                     }
                 } else if matches!(win, Some(Win::PianoRoll | Win::ChannelRack)) {
                     s.selected_channel = c;
-                    s.rack_selected = Some(c);
+                    s.rack.select_only(c);
                 }
             }
             Item::Sample(path) => {

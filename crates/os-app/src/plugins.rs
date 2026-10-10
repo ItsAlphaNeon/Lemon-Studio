@@ -243,6 +243,26 @@ impl Plugins {
         }
     }
 
+    /// Rack rows were renumbered (`m(old) = new`; `None` drops the instance and its window).
+    pub fn remap(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
+        for (row, h) in std::mem::take(&mut self.hosted) {
+            if let Some(n) = m(row) {
+                self.hosted.insert(n, h);
+            }
+        }
+    }
+
+    /// Closes row `row`'s plugin window when it is open; returns whether it was.
+    pub fn close_if_open(&mut self, row: usize) -> bool {
+        #[cfg(windows)]
+        if self.hosted.get(&row).is_some_and(|h| h.window.is_some()) {
+            self.close_window(row);
+            return true;
+        }
+        let _ = row;
+        false
+    }
+
     /// UI tick: plugin housekeeping, then the windows' requests (a closed window is closed here).
     pub fn idle(&mut self, info: impl Fn(usize) -> Option<ChannelInfoT>) -> Vec<Request> {
         let mut out = Vec::new();

@@ -270,6 +270,7 @@ fn new_pattern_blocks_are_added() {
                 color: (k != 2).then(|| Rgb::new(10 + k as u8, 20, 30)),
                 notes: vec![Note::step(0, 24), Note::step(0, 0)],
                 controls: if k == 0 { vec![ControlPoint::new(0, 0, ControlPoint::VOLUME, 6400)] } else { vec![] },
+                length: None,
             });
         }
         apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -327,6 +328,7 @@ fn new_pattern_file() {
             color: Some(Rgb::new(200, 60 * k as u8, 40)),
             notes: (0..4).map(|s| Note { key: 60 + 4 * s as u16 * k, length: 48, ..Note::step(0, s * 96) }).collect(),
             controls: vec![ControlPoint::new(0, 0, ControlPoint::VOLUME, 6400)],
+            length: None,
         });
     }
     apply(&project, &mut file).unwrap();

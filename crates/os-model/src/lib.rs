@@ -177,6 +177,9 @@ pub struct Pattern {
     /// Channel control points drawn in the piano roll's event panel, ordered by position
     /// (spec: flp/events/patterns.md, "Control points").
     pub controls: Vec<ControlPoint>,
+    /// Length set in the channel rack's pattern length box, in ticks; `None` = Auto (whole bars past the last
+    /// note). Not stored in the FLP yet (spec: ui/channel-rack.md, Saving).
+    pub length: Option<u32>,
 }
 
 /// One point of a pattern's channel control lane (event 223 record). `kind` is

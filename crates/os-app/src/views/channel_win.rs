@@ -3,7 +3,7 @@
 // plugins have editors OpenStudio shows a plain settings window for the channel (OpenStudio layout).
 
 use os_model::ChannelKind;
-use os_ui::{Color, Font, Rect};
+use os_ui::{Font, Rect};
 
 use super::{ball_knob, rack, FrameInfo};
 use crate::knobs::KnobId;
