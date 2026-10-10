@@ -64,7 +64,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let r = Rect::new(x, 11.0, 19.0, 19.0);
         let hov = ui.hit(r, action, hint);
         super::button_face(ui, r, if hov { super::Look::Hover } else { super::Look::Off });
-        icons::draw(ui.c, icon, r.inset(3.5), if hov { os_ui::Color::rgb(0xffffff) } else { t.glyph });
+        icons::draw(ui.c, icon, r.inset(3.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
     }
 
     // Hint panel: project title + hint / message.
@@ -74,7 +74,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.text_clip(Font::new(13), 76.0, 6.0, 280.0, t.text_dim.shade(-0.05), &f.title);
     let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
     ui.c.text_clip(Font::new(14), 77.0, 19.0, 280.0, t.text, hint);
-    icons::draw(ui.c, Icon::MidiControl, Rect::span(360.0, 374.0, 17.0, 32.0), os_ui::Color::rgb(0x515457));
+    icons::draw(ui.c, Icon::MidiControl, Rect::span(360.0, 374.0, 17.0, 32.0), ui.t.s(0x515457));
 
     // Transport group.
     let capsule = Rect::span(383.0, 483.0, 4.0, 36.0);
@@ -132,7 +132,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, if hov { t.button_hi } else { t.button.shade(-0.03) });
     if down {
         // Held: a red glowing ring around a dark core.
-        ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.record.mix(os_ui::Color::rgb(0xffffff), 0.35));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.record.mix(ui.t.tx(0xffffff), 0.35));
         ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, t.record.shade(0.15));
         ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.shade(-0.55));
     }
@@ -141,8 +141,8 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);
     ui.hit(tb, Action::Tempo, "Tempo (drag up/down)");
-    ui.c.fill_rrect(tb, 5.0, os_ui::Color::rgb(0x5b5f61));
-    ui.c.fill_rrect(tb.inset(1.0), 4.0, os_ui::Color::rgb(0x5f6466));
+    ui.c.fill_rrect(tb, 5.0, ui.t.s(0x5b5f61));
+    ui.c.fill_rrect(tb.inset(1.0), 4.0, ui.t.s(0x5f6466));
     let whole = format!("{}", s.tempo.trunc() as i64);
     let frac = format!(".{:03}", ((s.tempo.fract()) * 1000.0).round() as i64 % 1000);
     let ww = ui.c.text_width(Font::condensed(19, 6), &whole);
@@ -172,7 +172,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
 
     // Song position (B:S:T).
     let tp = Rect::span(745.0, 873.0, 4.0, 36.0);
-    ui.c.fill_rect(tp, os_ui::Color::rgb(0x212829));
+    ui.c.fill_rect(tp, ui.t.s(0x212829));
     ui.c.fill_rect(tp.inset(1.0), t.time_panel);
     ui.hit(tp, Action::Placeholder("time display"), "Song position (bar:step:tick)");
     let (bar, step, tick) = bst_ticks(f.tick * 96.0 / f64::from(s.project.ppq.max(1)));
@@ -231,7 +231,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
 /// The output monitor (spec ui/monitor.md): a scope / analyzer panel at x 882..968 and two peak bars at x 970..1047.
 fn monitor(ui: &mut Ui, s: &State) {
     use crate::monitor::{Mode, COLS};
-    let (edge, fill, ink) = (os_ui::Color::rgb(0x1d2022), os_ui::Color::rgb(0x25282a), os_ui::Color::rgb(0xb9bfc3));
+    let (edge, fill, ink) = (ui.t.s(0x1d2022), ui.t.s(0x25282a), ui.t.tx(0xb9bfc3));
     let m = &s.monitor;
     // Left panel: border, then 84 x 31 px of picture, bottom edge at y 36.
     ui.c.fill_rect(Rect::new(880.0, 4.0, 86.0, 33.0), edge);
@@ -269,7 +269,7 @@ fn monitor(ui: &mut Ui, s: &State) {
         let y = 5.0 + 11.0 * i as f32;
         let hold = (m.meter_pos(m.hold[i].0) * 75.0).round();
         if m.hold[i].1.is_some() && hold >= 1.0 {
-            ui.c.fill_rect(Rect::new(969.0 + hold - 1.0, y, 1.0, 10.0), os_ui::Color::rgb(0xcdc7a8));
+            ui.c.fill_rect(Rect::new(969.0 + hold - 1.0, y, 1.0, 10.0), ui.t.h(0xcdc7a8));
         }
         let len = (m.meter_pos(m.meter_db[i]) * 75.0).round();
         if len < 1.0 {
@@ -291,7 +291,7 @@ fn monitor(ui: &mut Ui, s: &State) {
         }
     }
     ui.hit(Rect::new(968.0, 4.0, 77.0, 23.0), Action::Swallow, "Output level (peak L / R)");
-    ui.c.stroke_circle(1037.0, 33.5, 4.0, 2.0, os_ui::Color::rgb(0x66737d));
+    ui.c.stroke_circle(1037.0, 33.5, 4.0, 2.0, ui.t.s(0x66737d));
 }
 
 fn row2(ui: &mut Ui, s: &State) {
@@ -403,7 +403,7 @@ fn row2(ui: &mut Ui, s: &State) {
         let news = "Welcome to OpenStudio";
         let avail = 1442.0 - 1315.0 - tw;
         let nf = ui.c.fit_font(Font::new(14), news, avail);
-        ui.c.text_clip(nf, 1315.0 + tw, 52.0, avail, os_ui::Color::rgb(0x9aa8b0), news);
+        ui.c.text_clip(nf, 1315.0 + tw, 52.0, avail, ui.t.tx(0x9aa8b0), news);
         icons::draw(ui.c, Icon::Globe, Rect::new(1449.0, 52.0, 18.0, 18.0), t.glyph_dim.shade(0.3));
     }
 }

@@ -13,6 +13,9 @@
 
 use std::fmt;
 
+pub mod fl;
+pub use fl::FlTheme;
+
 /// An sRGB color with alpha.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
@@ -94,6 +97,15 @@ impl Color {
         Color { r: q(r), g: q(g), b: q(b), a }
     }
 
+    /// Hue (degrees), saturation and lightness (0..1).
+    pub fn hsl(self) -> (f32, f32, f32) {
+        self.to_hsl()
+    }
+
+    pub fn from_hsl_pub(h: f32, s: f32, l: f32, a: u8) -> Color {
+        Color::from_hsl(h, s, l, a)
+    }
+
     /// Apply the theme's global adjustment.
     pub fn adjust(self, adj: Adjust) -> Color {
         if adj == Adjust::default() {
@@ -133,11 +145,13 @@ macro_rules! tokens {
         #[derive(Debug, Clone, PartialEq)]
         pub struct Palette {
             $(#[doc = $doc] pub $name: Color,)*
+            /// How measured default colours map to this theme (see `Palette::s`, `a`, `h`, `tx`, `led`).
+            pub xf: fl::Xform,
         }
 
         impl Default for Palette {
             fn default() -> Self {
-                Palette { $($name: Color::rgb($hex),)* }
+                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default() }
             }
         }
 
@@ -160,7 +174,7 @@ macro_rules! tokens {
             }
 
             fn map(&self, f: impl Fn(Color) -> Color) -> Palette {
-                Palette { $($name: f(self.$name),)* }
+                Palette { $($name: f(self.$name),)* xf: self.xf.clone() }
             }
         }
     };
@@ -291,6 +305,28 @@ tokens! {
     key_black_lit_left = 0x7a4f24, "Piano keyboard: sounding black key (left end).";
     velocity = 0xacdfb3, "Velocity lollipops.";
     velocity_dot = 0x477a4e, "Velocity lollipop disc.";
+}
+
+/// Role-mapped literals: widgets that need a measured shade with no token of its own write it as
+/// `t.s(0x313436)` (surface), `t.a(..)` (accent green), `t.h(..)` (orange highlight), `t.tx(..)` (text),
+/// `t.led(..)` (enable LEDs). Under the default theme each returns the literal unchanged; under an imported theme
+/// it follows the same mapping as the named tokens of that role (spec: ui/flstheme.md §4).
+impl Palette {
+    pub fn s(&self, hex: u32) -> Color {
+        self.xf.surface(Color::rgb(hex))
+    }
+    pub fn a(&self, hex: u32) -> Color {
+        self.xf.accent(Color::rgb(hex))
+    }
+    pub fn h(&self, hex: u32) -> Color {
+        self.xf.highlight(Color::rgb(hex))
+    }
+    pub fn tx(&self, hex: u32) -> Color {
+        self.xf.text(Color::rgb(hex))
+    }
+    pub fn led(&self, hex: u32) -> Color {
+        self.xf.mute(Color::rgb(hex))
+    }
 }
 
 /// A loaded theme: the base palette with the global adjustment applied.

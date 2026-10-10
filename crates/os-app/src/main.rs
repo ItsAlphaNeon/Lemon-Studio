@@ -554,10 +554,12 @@ fn screenshot(args: &[String]) {
     let mut pattern = None;
     let mut channel = None;
     let mut win_rect: Option<os_ui::Rect> = None;
+    let mut theme: Option<std::path::PathBuf> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--screenshot" => out = it.next().cloned(),
+            "--theme" => theme = it.next().map(std::path::PathBuf::from),
             "--view" => view = it.next().cloned().unwrap_or_default(),
             "--no-rack" => rack = false,
             "--no-browser" => browser = false,
@@ -598,6 +600,9 @@ fn screenshot(args: &[String]) {
         }
     }
     let mut app = App::new(path);
+    if let Some(t) = theme {
+        app.load_theme_file_ex(&t, false);
+    }
     if let Some(p) = pattern {
         app.state.pattern = p;
     }

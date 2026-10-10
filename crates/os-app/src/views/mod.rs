@@ -186,11 +186,11 @@ pub fn float_frame(ui: &mut Ui, s: &State, win: Win, r: Rect) -> Option<Rect> {
         return None;
     }
     let t = ui.t;
-    ui.c.fill_rect(r, Color::rgb(0x191d1f));
+    ui.c.fill_rect(r, ui.t.s(0x191d1f));
     ui.c.fill_rect(r.inset(1.0), t.window_title);
-    ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, 1.0), Color::rgb(0x303436));
+    ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, 1.0), ui.t.s(0x303436));
     let inner = Rect::new(r.x + 7.0, r.y + 5.0, r.w - 14.0, r.h - 12.0);
-    ui.c.fill_rect(Rect::new(inner.x - 1.0, inner.y + 22.0, inner.w + 2.0, inner.h - 21.0), Color::rgb(0x131718));
+    ui.c.fill_rect(Rect::new(inner.x - 1.0, inner.y + 22.0, inner.w + 2.0, inner.h - 21.0), ui.t.s(0x131718));
     ui.hit(Rect::new(r.x, r.y, r.w, 28.0), Action::WinDrag(win), "Drag to move");
     Some(inner)
 }
@@ -247,10 +247,10 @@ pub enum Look {
 pub fn button_face(ui: &mut Ui, r: Rect, look: Look) {
     let bg = ui.t.toolbar;
     let (border, center, edge) = match look {
-        Look::Off => (Color::rgb(0x191d1f), Color::rgb(0x313537), Color::rgb(0x272b2d)),
-        Look::Hover => (Color::rgb(0x191d1f), Color::rgb(0x3d4244), Color::rgb(0x2c3133)),
-        Look::On => (Color::rgb(0xbe5507), Color::rgb(0xfffaab), Color::rgb(0xffaf65)),
-        Look::Hot => (Color::rgb(0xbe5507), Color::rgb(0xffe598), Color::rgb(0xf99448)),
+        Look::Off => (ui.t.s(0x191d1f), ui.t.s(0x313537), ui.t.s(0x272b2d)),
+        Look::Hover => (ui.t.s(0x191d1f), ui.t.s(0x3d4244), ui.t.s(0x2c3133)),
+        Look::On => (ui.t.h(0xbe5507), ui.t.h(0xfffaab), ui.t.h(0xffaf65)),
+        Look::Hot => (ui.t.h(0xbe5507), ui.t.h(0xffe598), ui.t.h(0xf99448)),
     };
     ui.c.fill_rect(r, border);
     for (x, y) in [(r.x, r.y), (r.right() - 1.0, r.y), (r.x, r.bottom() - 1.0), (r.right() - 1.0, r.bottom() - 1.0)] {
@@ -259,7 +259,7 @@ pub fn button_face(ui: &mut Ui, r: Rect, look: Look) {
     let face = r.inset(1.0);
     ui.c.fill_radial(face, center, edge);
     // Inner rim.
-    let rim = Color::rgb(0x000000).with_alpha(if matches!(look, Look::On | Look::Hot) { 26 } else { 40 });
+    let rim = ui.t.s(0x000000).with_alpha(if matches!(look, Look::On | Look::Hot) { 26 } else { 40 });
     ui.c.fill_rect(Rect::new(face.x, face.y, face.w, 1.0), rim);
     ui.c.fill_rect(Rect::new(face.x, face.bottom() - 1.0, face.w, 1.0), rim);
     ui.c.fill_rect(Rect::new(face.x, face.y + 1.0, 1.0, face.h - 2.0), rim);
@@ -274,7 +274,7 @@ pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, h
     button_face(ui, r, look);
     let c = match look {
         Look::On | Look::Hot => ui.t.on_glyph,
-        Look::Hover => Color::rgb(0xffffff),
+        Look::Hover => ui.t.tx(0xffffff),
         Look::Off => ui.t.glyph,
     };
     icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), c);
@@ -282,7 +282,7 @@ pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, h
 
 /// A sunken panel (hint bar, monitors): flat fill inside a 1 px dark border.
 pub fn sunken(ui: &mut Ui, r: Rect, fill: Color) {
-    ui.c.fill_rect(r, Color::rgb(0x1d2022));
+    ui.c.fill_rect(r, ui.t.s(0x1d2022));
     ui.c.fill_rect(r.inset(1.0), fill);
 }
 
@@ -308,7 +308,7 @@ pub fn ball_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, value: f32) {
     ui.c.fill_circle(cx, cy, r, t.toolbar_line.shade(-0.3));
     ui.c.fill_circle(cx, cy, r - 1.0, t.button_hi.shade(0.02));
     ui.c.fill_circle(cx, cy + 0.6, r - 2.2, t.sunken_dark.shade(-0.1));
-    ui.c.fill_circle(cx - r * 0.25, cy - r * 0.35, r * 0.35, Color::rgb(0xffffff).with_alpha(14));
+    ui.c.fill_circle(cx - r * 0.25, cy - r * 0.35, r * 0.35, ui.t.tx(0xffffff).with_alpha(14));
     let a = 0.75 * PI + 1.5 * PI * value.clamp(0.0, 1.0);
     let (ix, iy) = (r * 0.3, r * 0.3);
     let _ = (ix, iy);
@@ -317,14 +317,14 @@ pub fn ball_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, value: f32) {
 
 /// A round LED (spec §7: grey ring, green ball with a bright core when lit).
 pub fn led(ui: &mut Ui, cx: f32, cy: f32, on: bool) {
-    ui.c.fill_circle(cx, cy, 6.0, Color::rgb(0x595b5c));
-    ui.c.fill_circle(cx, cy, 5.0, Color::rgb(0x283028));
+    ui.c.fill_circle(cx, cy, 6.0, ui.t.s(0x595b5c));
+    ui.c.fill_circle(cx, cy, 5.0, ui.t.s(0x283028));
     if on {
-        ui.c.fill_circle(cx, cy, 4.2, Color::rgb(0x3d7803));
-        ui.c.fill_circle(cx, cy, 3.4, Color::rgb(0xa0dd48));
-        ui.c.fill_circle(cx - 0.6, cy - 0.8, 1.8, Color::rgb(0xe2f5b8));
+        ui.c.fill_circle(cx, cy, 4.2, ui.t.a(0x3d7803));
+        ui.c.fill_circle(cx, cy, 3.4, ui.t.a(0xa0dd48));
+        ui.c.fill_circle(cx - 0.6, cy - 0.8, 1.8, ui.t.a(0xe2f5b8));
     } else {
-        ui.c.fill_circle(cx, cy, 4.0, Color::rgb(0x1f2a14));
+        ui.c.fill_circle(cx, cy, 4.0, ui.t.s(0x1f2a14));
     }
 }
 

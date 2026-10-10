@@ -165,8 +165,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
                 })
             })
         });
-        ui.c.fill_rect(slot, Color::rgb(0x1f2224));
-        let slot_fill = if playing_now && ch.enabled { t.accent.shade(-0.1) } else { Color::rgb(0x2b2d2f) };
+        ui.c.fill_rect(slot, ui.t.s(0x1f2224));
+        let slot_fill = if playing_now && ch.enabled { t.accent.shade(-0.1) } else { ui.t.s(0x2b2d2f) };
         ui.c.fill_rect(slot.inset(1.0), slot_fill);
         if s.rack_selected == Some(i) {
             let fr = Rect::span(x + 199.0, x + 207.0, ry, ry + 26.0);
@@ -207,14 +207,14 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     super::scrollbar(ui, track, false, sx, view, scroll_steps as f32 * STEP_W, Scroll::RackX);
     // Redraw the bar in the rack's own look: flat track, thin dark thumb, end chevrons.
     ui.c.fill_rect(track, t.scrollbar);
-    ui.c.fill_rect(Rect::new(track.x, track.y, 1.0, track.h), Color::rgb(0x181c1e));
-    ui.c.fill_rect(Rect::new(track.right() - 1.0, track.y, 1.0, track.h), Color::rgb(0x181c1e));
+    ui.c.fill_rect(Rect::new(track.x, track.y, 1.0, track.h), ui.t.s(0x181c1e));
+    ui.c.fill_rect(Rect::new(track.right() - 1.0, track.y, 1.0, track.h), ui.t.s(0x181c1e));
     let total_px = scroll_steps as f32 * STEP_W;
     let tlen = (view / total_px * track.w).clamp(16.0f32.min(track.w), track.w.max(0.0));
     let max = (total_px - view).max(0.0);
     let off = if max > 0.0 { sx / max * (track.w - tlen) } else { 0.0 };
-    ui.c.fill_rect(Rect::new(track.x + off + 6.0, track.y + 2.0, (tlen - 12.0).max(8.0), 3.0), Color::rgb(0x14181a));
-    let chev = Color::rgb(0x3c4042);
+    ui.c.fill_rect(Rect::new(track.x + off + 6.0, track.y + 2.0, (tlen - 12.0).max(8.0), 3.0), ui.t.s(0x14181a));
+    let chev = ui.t.s(0x3c4042);
     let cy = track.cy();
     ui.c.polyline(&[(x + 208.0, cy - 3.0), (x + 205.0, cy), (x + 208.0, cy + 3.0)], 1.3, chev);
     ui.c.polyline(&[(x + w - 23.0, cy - 3.0), (x + w - 20.0, cy), (x + w - 23.0, cy + 3.0)], 1.3, chev);
@@ -231,49 +231,49 @@ fn title_bar(ui: &mut Ui, win: Rect, roll_view: bool) {
     let t = ui.t;
     let (x, y, r) = (win.x, win.y, win.right());
     ui.hit(Rect::new(x + 8.0, y + 6.0, 16.0, 17.0), Action::Placeholder("channel rack options"), "Channel rack options");
-    ui.c.fill_polygon(&[(x + 14.0, y + 10.5), (x + 18.5, y + 14.0), (x + 14.0, y + 17.5)], Color::rgb(0xc2c8cc));
+    ui.c.fill_polygon(&[(x + 14.0, y + 10.5), (x + 18.5, y + 14.0), (x + 14.0, y + 17.5)], ui.t.tx(0xc2c8cc));
     let sw = Rect::new(x + 34.0, y + 6.0, 16.0, 16.0);
     ui.hit(sw, Action::Placeholder("graph editor"), "Graph editor");
     icons::draw(ui.c, Icon::Countdown, sw, t.glyph);
     // Group combo "All".
     let combo = Rect::span(x + 107.0, x + 190.0, y + 4.0, y + 27.0);
     let chov = ui.hit(combo, Action::Placeholder("channel group"), "Channel group filter");
-    ui.c.fill_rect(combo, Color::rgb(0x192227));
+    ui.c.fill_rect(combo, ui.t.s(0x192227));
     let cf = combo.inset(1.0);
-    ui.c.fill_rect(Rect::new(cf.x, cf.y, cf.w, 1.0), Color::rgb(0x303132));
-    ui.c.fill_rect(Rect::new(cf.x, cf.y + 1.0, cf.w, cf.h / 2.0), Color::rgb(0x202122));
-    ui.c.fill_rect(Rect::span(cf.x, cf.right(), cf.y + 1.0 + cf.h / 2.0, cf.bottom()), Color::rgb(0x1b1c1d));
+    ui.c.fill_rect(Rect::new(cf.x, cf.y, cf.w, 1.0), ui.t.s(0x303132));
+    ui.c.fill_rect(Rect::new(cf.x, cf.y + 1.0, cf.w, cf.h / 2.0), ui.t.s(0x202122));
+    ui.c.fill_rect(Rect::span(cf.x, cf.right(), cf.y + 1.0 + cf.h / 2.0, cf.bottom()), ui.t.s(0x1b1c1d));
     ui.c.text(Font::new(17), x + 113.0, y + 5.0, if chov { t.glyph.shade(0.1) } else { t.glyph }, "All");
-    ui.c.fill_polygon(&[(x + 181.0, y + 11.5), (x + 185.0, y + 15.0), (x + 181.0, y + 18.5)], Color::rgb(0x686c6e));
+    ui.c.fill_polygon(&[(x + 181.0, y + 11.5), (x + 185.0, y + 15.0), (x + 181.0, y + 18.5)], ui.t.s(0x686c6e));
     // Dotted separator.
     for k in 0..4 {
-        ui.c.fill_rect(Rect::new(x + 204.0, y + 8.0 + 4.0 * k as f32, 2.0, 2.0), Color::rgb(0x4c4b47));
+        ui.c.fill_rect(Rect::new(x + 204.0, y + 8.0 + 4.0 * k as f32, 2.0, 2.0), ui.t.s(0x4c4b47));
     }
     icons::draw(ui.c, Icon::Speaker, Rect::new(x + 215.0, y + 7.0, 15.0, 15.0), t.glyph);
     ui.c.text(Font::new(17), x + 236.0, y + 5.0, t.text, "Channel rack");
     // Swing knob with its halo.
     let kx = r - 149.5;
     ui.hit(Rect::new(kx - 12.0, y + 3.0, 24.0, 24.0), Action::Placeholder("swing"), "Swing");
-    ui.c.fill_circle(kx, y + 14.5, 12.0, Color::rgb(0x212225));
-    ui.c.fill_circle(kx, y + 14.5, 10.5, Color::rgb(0x2b2d2f));
+    ui.c.fill_circle(kx, y + 14.5, 12.0, ui.t.s(0x212225));
+    ui.c.fill_circle(kx, y + 14.5, 10.5, ui.t.s(0x2b2d2f));
     ball_knob(ui, kx, y + 14.5, 9.0, 0.0);
     // Step-count box.
     let bx = Rect::span(r - 132.0, r - 100.0, y + 4.0, y + 26.0);
     ui.hit(bx, Action::Placeholder("steps per bar"), "Pattern length");
-    ui.c.fill_rrect(bx, 3.5, Color::rgb(0x191d1f));
-    ui.c.fill_rect_gradient(bx.inset(1.0), Color::rgb(0x35393b), Color::rgb(0x2f3335), 3.0);
+    ui.c.fill_rrect(bx, 3.5, ui.t.s(0x191d1f));
+    ui.c.fill_rect_gradient(bx.inset(1.0), ui.t.s(0x35393b), ui.t.s(0x2f3335), 3.0);
     for k in 0..3 {
-        ui.c.fill_rect(Rect::new(r - 116.0 + 3.0 * k as f32, y + 14.0, 2.0, 1.0), Color::rgb(0xa7adb0));
+        ui.c.fill_rect(Rect::new(r - 116.0 + 3.0 * k as f32, y + 14.0, 2.0, 1.0), ui.t.tx(0xa7adb0));
     }
-    spin_mark(ui, r - 104.0, y + 15.0, Color::rgb(0x6f7476));
+    spin_mark(ui, r - 104.0, y + 15.0, ui.t.s(0x6f7476));
     // Tool icons and close.
     let ur = Rect::new(r - 89.5, y + 6.0, 17.0, 17.0);
     let hov = ui.hit(ur, Action::Placeholder("channel rack undo"), "Undo step edits");
-    icons::draw(ui.c, Icon::Undo, ur, if hov { Color::rgb(0xffffff) } else { t.glyph });
+    icons::draw(ui.c, Icon::Undo, ur, if hov { ui.t.tx(0xffffff) } else { t.glyph });
     // Graph bars and the step-sequencer blocks (§2), drawn as plain shapes.
     let gx = r - 58.0;
     let hov = ui.hit(Rect::new(gx - 9.0, y + 6.0, 18.0, 17.0), Action::Placeholder("graph editor"), "Graph editor");
-    let gc = if hov { Color::rgb(0xffffff) } else { t.glyph };
+    let gc = if hov { ui.t.tx(0xffffff) } else { t.glyph };
     for (i, hgt) in [5.0, 9.0, 6.0, 11.0, 4.0].into_iter().enumerate() {
         ui.c.fill_rect(Rect::new(gx - 7.0 + 3.0 * i as f32, y + 20.0 - hgt, 2.0, hgt), gc);
     }
@@ -283,10 +283,10 @@ fn title_bar(ui: &mut Ui, win: Rect, roll_view: bool) {
     let hov = ui.hit(br, Action::RackRollView, if roll_view { "Show steps" } else { "Show piano roll previews" });
     // On (§6): orange outline with a dark orange fill.
     if roll_view {
-        ui.c.fill_rrect(br, 3.0, Color::rgb(0xc1923a));
-        ui.c.fill_rrect(br.inset(1.0), 2.5, Color::rgb(0x574b30));
+        ui.c.fill_rrect(br, 3.0, ui.t.h(0xc1923a));
+        ui.c.fill_rrect(br.inset(1.0), 2.5, ui.t.h(0x574b30));
     }
-    let oc = if hov { Color::rgb(0xffd77a) } else { Color::rgb(0xffc642) };
+    let oc = if hov { ui.t.h(0xffd77a) } else { ui.t.h(0xffc642) };
     for i in 0..3 {
         let b = Rect::new(sxc - 8.0 + 5.5 * i as f32, y + 9.0, 4.5, 11.0);
         ui.c.fill_rect(b, oc);
@@ -294,7 +294,7 @@ fn title_bar(ui: &mut Ui, win: Rect, roll_view: bool) {
     }
     let close = Rect::new(r - 22.0, y + 6.0, 16.0, 16.0);
     let hov = ui.hit(close, Action::CloseWin(Win::ChannelRack), "Close");
-    icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { Color::rgb(0xffffff) } else { t.glyph });
+    icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
 }
 
 /// One step button (§3): bordered, lighter at the top, a dark dash below the top edge.
@@ -327,9 +327,9 @@ fn step_button(ui: &mut Ui, r: Rect, k: u32, on: bool, past_len: bool, hov: bool
 fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_step: u32, sx: f32, focused: bool) {
     // (separator, fill) for odd and even bars.
     let shades = if focused {
-        [(Color::rgb(0x040709), Color::rgb(0x111416)), (Color::rgb(0x000002), Color::rgb(0x0a0d0f))]
+        [(ui.t.s(0x040709), ui.t.s(0x111416)), (ui.t.s(0x000002), ui.t.s(0x0a0d0f))]
     } else {
-        [(Color::rgb(0x0a0d0f), Color::rgb(0x171a1c)), (Color::rgb(0x030608), Color::rgb(0x101315))]
+        [(ui.t.s(0x0a0d0f), ui.t.s(0x171a1c)), (ui.t.s(0x030608), ui.t.s(0x101315))]
     };
     let bar = 16.0 * STEP_W;
     let mut k = (sx / bar).floor();
@@ -355,8 +355,8 @@ fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_st
         let nw = (len as f32 / per_step as f32 * STEP_W - 1.0).max(2.0);
         let t = if hi == lo { 0.5 } else { f32::from(n.key - lo) / range };
         let ny = (block.bottom() - 7.0 - t * (block.h - 10.0)).round();
-        ui.c.fill_rect(Rect::new(nx, ny, nw, 1.0), Color::rgb(0x698a6f));
-        ui.c.fill_rect(Rect::new(nx, ny + 1.0, nw, 3.0), Color::rgb(0x9ed1a5));
+        ui.c.fill_rect(Rect::new(nx, ny, nw, 1.0), ui.t.a(0x698a6f));
+        ui.c.fill_rect(Rect::new(nx, ny + 1.0, nw, 3.0), ui.t.a(0x9ed1a5));
     }
     ui.c.pop_clip();
 }
@@ -364,24 +364,24 @@ fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_st
 /// Row knob (§3): dark ball, r 7, light pointer from the centre to the rim.
 fn row_knob(ui: &mut Ui, cx: f32, cy: f32, value: f32) {
     use std::f32::consts::PI;
-    ui.c.fill_circle(cx, cy, 7.5, Color::rgb(0x1e2022));
-    ui.c.fill_circle(cx, cy - 0.5, 6.5, Color::rgb(0x303234));
-    ui.c.fill_circle(cx, cy + 0.3, 5.8, Color::rgb(0x232527));
+    ui.c.fill_circle(cx, cy, 7.5, ui.t.s(0x1e2022));
+    ui.c.fill_circle(cx, cy - 0.5, 6.5, ui.t.s(0x303234));
+    ui.c.fill_circle(cx, cy + 0.3, 5.8, ui.t.s(0x232527));
     let a = 0.75 * PI + 1.5 * PI * value.clamp(0.0, 1.0);
-    ui.c.line(cx + 1.2 * a.cos(), cy + 1.2 * a.sin(), cx + 5.6 * a.cos(), cy + 5.6 * a.sin(), 2.0, Color::rgb(0xadb2b6));
+    ui.c.line(cx + 1.2 * a.cos(), cy + 1.2 * a.sin(), cx + 5.6 * a.cos(), cy + 5.6 * a.sin(), 2.0, ui.t.tx(0xadb2b6));
 }
 
 /// Enable LED (§3: ring r 5, green ball).
 fn rack_led(ui: &mut Ui, cx: f32, cy: f32, on: bool) {
-    ui.c.fill_circle(cx, cy, 5.0, Color::rgb(0x67696b));
-    ui.c.fill_circle(cx, cy, 4.0, Color::rgb(0x384b39));
+    ui.c.fill_circle(cx, cy, 5.0, ui.t.s(0x67696b));
+    ui.c.fill_circle(cx, cy, 4.0, ui.t.s(0x384b39));
     if on {
-        ui.c.fill_circle(cx, cy, 3.3, Color::rgb(0x3c7605));
-        ui.c.fill_circle(cx, cy, 2.6, Color::rgb(0x97da3a));
-        ui.c.fill_circle(cx, cy + 0.5, 1.6, Color::rgb(0xb7e66e));
-        ui.c.fill_circle(cx - 0.8, cy - 1.0, 0.9, Color::rgb(0xedf7c4));
+        ui.c.fill_circle(cx, cy, 3.3, ui.t.a(0x3c7605));
+        ui.c.fill_circle(cx, cy, 2.6, ui.t.a(0x97da3a));
+        ui.c.fill_circle(cx, cy + 0.5, 1.6, ui.t.a(0xb7e66e));
+        ui.c.fill_circle(cx - 0.8, cy - 1.0, 0.9, ui.t.a(0xedf7c4));
     } else {
-        ui.c.fill_circle(cx, cy, 3.3, Color::rgb(0x1f2a14));
+        ui.c.fill_circle(cx, cy, 3.3, ui.t.s(0x1f2a14));
     }
 }
 
@@ -397,7 +397,7 @@ fn add_button(ui: &mut Ui, x: f32, bottom: f32) {
     let area = Rect::span(x + 110.0, x + 190.0, bottom - 26.0, bottom - 5.0);
     let hov = ui.hit(area, Action::RackAdd, "Add a channel");
     let (cx, cy) = (x + 150.5, bottom - 15.5);
-    let c = if hov { Color::rgb(0xffc63b) } else { Color::rgb(0xd4dade) };
+    let c = if hov { ui.t.h(0xffc63b) } else { ui.t.tx(0xd4dade) };
     ui.c.fill_rect(Rect::new(cx - 4.5, cy - 1.0, 9.0, 2.0), c);
     ui.c.fill_rect(Rect::new(cx - 1.0, cy - 4.5, 2.0, 9.0), c);
     if hov {

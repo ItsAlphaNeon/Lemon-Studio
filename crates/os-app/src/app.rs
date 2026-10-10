@@ -961,6 +961,10 @@ impl App {
         if ext == "flp" {
             return self.open(path);
         }
+        if ext == "flstheme" || ext == "txt" && path.file_name().is_some_and(|n| n == "theme.txt") {
+            self.load_theme_file(&path);
+            return;
+        }
         let (x, y) = self.mouse;
         let Some(grid) = self.pl_grid.filter(|g| g.contains(x, y)) else {
             self.state.message = Some("Drop audio files on the playlist to add audio clips".into());
@@ -975,6 +979,34 @@ impl App {
             Some(_) => format!("Added audio clip {}", path.display()),
             None => format!("Could not read {} as audio", path.display()),
         });
+        self.invalidate();
+    }
+
+    /// Load a theme: a `.flstheme` (spec ui/flstheme.md) or an OpenStudio `theme.txt`. A `.flstheme` is also
+    /// remembered as `%APPDATA%/OpenStudio/current.flstheme` so the next start uses it.
+    pub fn load_theme_file(&mut self, path: &std::path::Path) {
+        self.load_theme_file_ex(path, true)
+    }
+
+    /// `load_theme_file`; `remember` = keep it for the next start.
+    pub fn load_theme_file_ex(&mut self, path: &std::path::Path, remember: bool) {
+        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        match theme_from_file(path) {
+            Ok(t) => {
+                self.theme = t;
+                if remember && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")) {
+                    if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) {
+                        let _ = std::fs::create_dir_all(&d);
+                        let keep = d.join("current.flstheme");
+                        if keep.as_path() != path {
+                            let _ = std::fs::copy(path, keep);
+                        }
+                    }
+                }
+                self.state.message = Some(format!("Theme: {name}"));
+            }
+            Err(e) => self.state.message = Some(format!("Could not load theme {name}: {e}")),
+        }
         self.invalidate();
     }
 
@@ -2978,13 +3010,29 @@ fn save_monitor_cfg(cfg: &crate::monitor::Settings) -> Result<PathBuf, String> {
     Ok(p)
 }
 
-/// The theme: `%APPDATA%/OpenStudio/theme.txt` if present, else the default.
+/// Read a `.flstheme` (spec ui/flstheme.md) or an OpenStudio theme text file.
+pub fn theme_from_file(path: &std::path::Path) -> Result<Theme, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&bytes);
+    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")) {
+        let fl = os_theme::FlTheme::parse(&text);
+        Ok(Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default()))
+    } else {
+        Theme::parse(&name, &text)
+    }
+}
+
+/// The theme: `%APPDATA%/OpenStudio/theme.txt`, else the last imported `current.flstheme`, else the default.
 fn load_theme() -> Theme {
-    let path = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio").join("theme.txt"));
-    if let Some(text) = path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()) {
-        match Theme::parse("User", &text) {
-            Ok(t) => return t,
-            Err(e) => eprintln!("theme: {e}; using the default"),
+    let Some(dir) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) else { return Theme::default() };
+    for f in ["theme.txt", "current.flstheme"] {
+        let p = dir.join(f);
+        if p.exists() {
+            match theme_from_file(&p) {
+                Ok(t) => return t,
+                Err(e) => eprintln!("theme {f}: {e}; using the default"),
+            }
         }
     }
     Theme::default()

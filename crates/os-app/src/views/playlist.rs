@@ -121,7 +121,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // Time selection (§7).
     if let Some((a, b)) = s.playlist.range {
         let (x0, x1) = (g.x_of(a as f32), g.x_of(b as f32));
-        ui.c.fill_rect(Rect::span(x0, x1, grid.y, grid.bottom()), Color::rgb(0xffffff).with_alpha(18));
+        ui.c.fill_rect(Rect::span(x0, x1, grid.y, grid.bottom()), ui.t.tx(0xffffff).with_alpha(18));
         ui.c.fill_rect(Rect::new(x0, grid.y, 1.0, grid.h), t.playhead.with_alpha(90));
         ui.c.fill_rect(Rect::new(x1, grid.y, 1.0, grid.h), t.playhead.with_alpha(90));
     }
@@ -140,8 +140,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             ui.c.stroke_rrect(m, 0.0, 1.0, Color::rgb(0xff6060));
         }
         Some(Overlay::ZoomBox(m)) => {
-            ui.c.fill_rect(m, Color::rgb(0xffffff).with_alpha(20));
-            ui.c.stroke_rrect(m, 0.0, 1.0, Color::rgb(0xd0d8dc));
+            ui.c.fill_rect(m, ui.t.tx(0xffffff).with_alpha(20));
+            ui.c.stroke_rrect(m, 0.0, 1.0, ui.t.tx(0xd0d8dc));
         }
         Some(Overlay::Slice { tick, t0, t1 }) => {
             let x = g.x_of(tick as f32);
@@ -193,9 +193,9 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
     if bx.h < 8.0 {
         return;
     }
-    ui.c.fill_rect(bx, Color::rgb(0x131718));
+    ui.c.fill_rect(bx, ui.t.s(0x131718));
     let list = Rect::span(bx.x + 1.0, bx.right() - 16.0, bx.y + 1.0, bx.bottom() - 1.0);
-    ui.c.fill_rect(list, Color::rgb(0x202527));
+    ui.c.fill_rect(list, ui.t.s(0x202527));
     ui.hit(list, Action::PlPickList, "");
     let total = items.len() as f32 * PICK_ROW + 4.0;
     let scroll = s.playlist.pick_scroll.min((total - list.h).max(0.0)).max(0.0);
@@ -215,19 +215,19 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         let k = if hov { 0.05 } else { 0.0 };
         if filled {
             // Used source: grey button with a faint preview of its contents (pl_asher.png).
-            ui.c.fill_rect(row, Color::rgb(0x2f3539));
-            ui.c.fill_rect(row.inset(1.0), Color::rgb(0x464e53).shade(k));
+            ui.c.fill_rect(row, ui.t.s(0x2f3539));
+            ui.c.fill_rect(row.inset(1.0), ui.t.s(0x464e53).shade(k));
             preview(ui, s, src, row.inset(3.0));
         } else {
             // Empty pattern: dark face (owner's FL screenshot).
-            ui.c.fill_rect_gradient(row, Color::rgb(0x2a2d2e).shade(k), Color::rgb(0x232627).shade(k), 0.0);
+            ui.c.fill_rect_gradient(row, ui.t.s(0x2a2d2e).shade(k), ui.t.s(0x232627).shade(k), 0.0);
         }
         if src == cur && !filled {
-            ui.c.stroke_rrect(row.inset(0.5), 0.0, 1.0, Color::rgb(0xa8e44a));
+            ui.c.stroke_rrect(row.inset(0.5), 0.0, 1.0, ui.t.a(0xa8e44a));
         }
         let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
         if matches!(src, ClipSource::Pattern(_)) && !filled {
-            ui.c.fill_circle(row.x + 7.5, row.cy(), 1.6, Color::rgb(0xb9bcbd));
+            ui.c.fill_circle(row.x + 7.5, row.cy(), 1.6, ui.t.tx(0xb9bcbd));
         } else {
             for k in 0..3 {
                 ui.c.fill_rect(Rect::new(row.x + 4.0, row.cy() - 4.0 + 3.0 * k as f32, 6.0, 1.0), ic);
@@ -243,12 +243,12 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
     ui.c.pop_clip();
     // Scroll bar: bordered dithered track, raised thumb with a dark grip.
     let track = Rect::span(list.right(), bx.right() - 1.0, list.y, list.bottom());
-    ui.c.fill_rect(Rect::new(track.x, track.y, 1.0, track.h), Color::rgb(0x131718));
+    ui.c.fill_rect(Rect::new(track.x, track.y, 1.0, track.h), ui.t.s(0x131718));
     let tr = Rect::span(track.x + 1.0, track.right(), track.y, track.bottom());
-    ui.c.fill_rect(tr, Color::rgb(0x212426));
+    ui.c.fill_rect(tr, ui.t.s(0x212426));
     let mut yy = tr.y;
     while yy < tr.bottom() {
-        ui.c.fill_rect(Rect::new(tr.x, yy, tr.w, 1.0), Color::rgb(0x23272a));
+        ui.c.fill_rect(Rect::new(tr.x, yy, tr.w, 1.0), ui.t.s(0x23272a));
         yy += 2.0;
     }
     let max = (total - list.h).max(0.0);
@@ -256,14 +256,14 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
     let off = if max > 0.0 { scroll / max * (tr.h - thumb) } else { 0.0 };
     let hov = ui.hit(tr, Action::Scrollbar(crate::app::Scroll::PlPick), "Drag to scroll");
     let th = Rect::new(tr.x, tr.y + off, tr.w, thumb);
-    ui.c.fill_rect(th, Color::rgb(0x36383a));
-    ui.c.fill_rect(th.inset(1.0), Color::rgb(0x2c2e30).shade(if hov { 0.06 } else { 0.0 }));
-    ui.c.fill_rect(Rect::new(th.cx() - 1.0, th.cy() - 2.5, 2.0, 5.0), Color::rgb(0x000000));
+    ui.c.fill_rect(th, ui.t.s(0x36383a));
+    ui.c.fill_rect(th.inset(1.0), ui.t.s(0x2c2e30).shade(if hov { 0.06 } else { 0.0 }));
+    ui.c.fill_rect(Rect::new(th.cx() - 1.0, th.cy() - 2.5, 2.0, 5.0), ui.t.s(0x000000));
     ui.bars.push(crate::app::Bar { target: crate::app::Scroll::PlPick, track: tr, vertical: true, max, view: list.h, thumb });
     // Footer "+": new pattern (find first empty).
     let foot = Rect::new(p.x, bottom, bx.w, FOOT_H);
     let hov = ui.hit(foot, Action::PlPickAdd, "New pattern (find first empty)");
-    let pc = if hov { Color::rgb(0xa0a4a6) } else { Color::rgb(0x545657) };
+    let pc = if hov { ui.t.tx(0xa0a4a6) } else { ui.t.s(0x545657) };
     let (cx, cy) = ((list.x + list.right()) / 2.0, foot.y + FOOT_H / 2.0);
     ui.c.fill_rect(Rect::new(cx - 3.5, cy - 0.5, 8.0, 2.0), pc);
     ui.c.fill_rect(Rect::new(cx - 0.5, cy - 3.5, 2.0, 8.0), pc);
@@ -304,7 +304,7 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect) {
     let lo = p.notes.iter().map(|n| n.key).min().unwrap_or(0);
     let hi = p.notes.iter().map(|n| n.key).max().unwrap_or(0);
     let span = f32::from(hi - lo + 1).max(6.0);
-    let c = Color::rgb(0x5a6268);
+    let c = ui.t.s(0x5a6268);
     for note in &p.notes {
         let x = r.x + note.position as f32 / len * r.w;
         let w = (note.length.max(s.project.ppq as u32 / 4) as f32 / len * r.w).max(2.0);
@@ -433,7 +433,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let dim = |col: Color| if track_on { col } else { col.mix(t.grid, 0.5) };
     // Body colour: the track's colour, else the source's (§2 "Body colour source").
     let color = pl::track_info(s, c.track).and_then(|t| t.color).or_else(|| pl::source_color(s, c.source)).map(rgb);
-    let darken = |c: Color| c.mix(Color::rgb(0x000000), 0.55);
+    let darken = |c: Color| c.mix(ui.t.s(0x000000), 0.55);
 
     let (title_top, title_bottom, text, body) = if selected {
         (Color::rgb(SEL_TITLE), Color::rgb(SEL_TITLE).shade(-0.1), Color::rgb(SEL_TEXT), Color::rgb(SEL_BODY))
@@ -631,7 +631,7 @@ fn header(ui: &mut Ui, s: &State, row: u16, hr: Rect) {
     let name_r = Rect::new(hr.x, hr.y, hr.w, hr.h);
     ui.hit(name_r, Action::PlHeader(row), "Track (double-click: rename, right-click: menu, Shift+wheel: move)");
     ui.hit(led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo)");
-    let text = if colored.is_some() { Color::rgb(0xdce8f0) } else { t.text_faint };
+    let text = if colored.is_some() { ui.t.tx(0xdce8f0) } else { t.text_faint };
     let text = if on { text } else { text.shade(-0.35) };
     let editing = matches!(s.playlist.edit.as_ref().map(|e| e.target), Some(pl::EditTarget::TrackName(r)) if r == row);
     if !editing {
@@ -658,7 +658,7 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
         let t = ui.t;
         let r = Rect::new(e.at.0, e.at.1, 150.0, 20.0);
         ui.hit(r, Action::Swallow, "Type, Enter accepts, Esc cancels");
-        ui.c.fill_rect(r, Color::rgb(0x0e1214));
+        ui.c.fill_rect(r, ui.t.s(0x0e1214));
         ui.c.stroke_rrect(r, 0.0, 1.0, t.glyph);
         ui.c.text_clip(Font::new(14), r.x + 4.0, r.y + 2.0, r.w - 8.0, t.text, &e.text);
         let cw = ui.c.text_width(Font::new(14), &e.text).min(r.w - 10.0);

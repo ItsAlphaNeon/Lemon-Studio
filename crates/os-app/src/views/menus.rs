@@ -379,7 +379,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                 let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
                 let lit = hov || (*n == s.pattern && away);
                 if lit {
-                    ui.c.fill_rect(rr, os_ui::Color::rgb(0x03080c));
+                    ui.c.fill_rect(rr, ui.t.s(0x03080c));
                 }
                 let col = if *n == s.pattern { t.glyph } else { t.menu_pop_text };
                 let dx = if lit { 22.0 } else { 20.0 };

@@ -358,7 +358,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     let fy = r.bottom() - 27.0;
     ui.c.fill_rect(Rect::new(0.0, fy, 201.0, 27.0), t.browser_footer);
     ui.c.fill_rrect(Rect::new(13.0, fy + 4.0, 41.0, 20.0), 3.0, t.sunken);
-    ui.c.text_center(os_ui::Font::condensed(11, 6).bold(), Rect::new(13.0, fy + 4.0, 41.0, 20.0), os_ui::Color::rgb(0xc0c8cc), "TAGS");
+    ui.c.text_center(os_ui::Font::condensed(11, 6).bold(), Rect::new(13.0, fy + 4.0, 41.0, 20.0), ui.t.tx(0xc0c8cc), "TAGS");
     if top == LIST_Y {
         search_box(ui, s, Rect::new(57.0, fy + 4.0, 119.0, 20.0));
     } else {

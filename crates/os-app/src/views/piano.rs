@@ -128,7 +128,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             (t.note_sel_top, t.note_sel_bottom, t.note_sel_rim, t.note_sel_text)
         } else if n.muted() {
             // Muted (§9): grey body, measured from FL.
-            (Color::rgb(0x6d7276), Color::rgb(0x63686c), Color::rgb(0x474a4d), Color::rgb(0xc4c8cc))
+            (ui.t.s(0x6d7276), ui.t.s(0x63686c), ui.t.s(0x474a4d), ui.t.tx(0xc4c8cc))
         } else {
             (t.note_top, t.note_bottom, t.note_rim, t.note_text)
         };
@@ -173,7 +173,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         }
         Some(Overlay::Scrub(tick)) => {
             let x = g.x_of(tick).round();
-            ui.c.fill_rect(Rect::new(x, l.grid.y, 1.0, l.grid.h), Color::rgb(0xffffff).with_alpha(200));
+            ui.c.fill_rect(Rect::new(x, l.grid.y, 1.0, l.grid.h), ui.t.tx(0xffffff).with_alpha(200));
         }
         None => {}
     }
@@ -184,8 +184,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     } else if !f.playing {
         // Stopped: a grey line at the play-start marker (§10).
         let x = g.x_of(s.piano.marker as f32).round();
-        ui.c.fill_rect(Rect::new(x - 1.0, l.grid.y, 3.0, l.grid.h), Color::rgb(0x38373b));
-        ui.c.fill_rect(Rect::new(x, l.grid.y, 1.0, l.grid.h), Color::rgb(0x53585c));
+        ui.c.fill_rect(Rect::new(x - 1.0, l.grid.y, 3.0, l.grid.h), ui.t.s(0x38373b));
+        ui.c.fill_rect(Rect::new(x, l.grid.y, 1.0, l.grid.h), ui.t.s(0x53585c));
     }
     ui.c.pop_clip();
 
@@ -209,8 +209,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 /// (0 left, 1 right, 2 up, 3 down; 4 = a dot).
 fn arrow_button(ui: &mut Ui, b: Rect, dir: u8) {
     let t = ui.t;
-    ui.c.fill_rect(b, Color::rgb(0x131618));
-    ui.c.fill_rect_gradient(b.inset(1.0), Color::rgb(0x36383a), Color::rgb(0x2c2e30), 0.0);
+    ui.c.fill_rect(b, ui.t.s(0x131618));
+    ui.c.fill_rect_gradient(b.inset(1.0), ui.t.s(0x36383a), ui.t.s(0x2c2e30), 0.0);
     let (cx, cy) = ((b.x + b.w / 2.0).round(), (b.y + b.h / 2.0).round());
     let c = t.glyph.with_alpha(150);
     let pts = match dir {
@@ -219,7 +219,7 @@ fn arrow_button(ui: &mut Ui, b: Rect, dir: u8) {
         2 => [(cx - 5.0, cy + 2.0), (cx, cy - 3.0), (cx + 5.0, cy + 2.0)],
         3 => [(cx - 5.0, cy - 2.0), (cx, cy + 3.0), (cx + 5.0, cy - 2.0)],
         _ => {
-            ui.c.fill_rect(Rect::new(cx - 2.0, cy - 2.0, 3.0, 3.0), Color::rgb(0x000000));
+            ui.c.fill_rect(Rect::new(cx - 2.0, cy - 2.0, 3.0, 3.0), ui.t.s(0x000000));
             return;
         }
     };
@@ -257,7 +257,7 @@ fn toolbar(ui: &mut Ui, r: Rect, shift: f32, active: Tool) {
             None => Action::Placeholder("piano roll tool"),
         };
         let hov = ui.hit(b, action, hint);
-        let c = if on { t.pill } else if hov { Color::rgb(0xffffff) } else { t.glyph };
+        let c = if on { t.pill } else if hov { ui.t.tx(0xffffff) } else { t.glyph };
         icons::draw(ui.c, icon, b, c);
     }
     icons::draw(ui.c, Icon::Speaker, Rect::new(ox + 547.0, r.y + 4.0, 15.0, 15.0), t.text);
@@ -292,8 +292,8 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u
     let rr = l.ruler;
     ui.hit(Rect::new(l.grid.x, rr.y, l.grid.w, rr.h), Action::PianoRuler, "Drag: move the play start - right-drag: select a time range");
     ui.c.fill_rect(Rect::new(rr.x, rr.y, rr.w, 17.0), t.ruler);
-    ui.c.fill_rect(Rect::new(rr.x, rr.y + 17.0, rr.w, 1.0), Color::rgb(0x16191c));
-    ui.c.fill_rect(Rect::new(rr.x, rr.y + 18.0, rr.w, 1.0), Color::rgb(0x090c0f));
+    ui.c.fill_rect(Rect::new(rr.x, rr.y + 17.0, rr.w, 1.0), ui.t.s(0x16191c));
+    ui.c.fill_rect(Rect::new(rr.x, rr.y + 18.0, rr.w, 1.0), ui.t.s(0x090c0f));
     ui.c.push_clip(Rect::new(l.grid.x, rr.y, l.grid.w, rr.h));
     // Time selection: red band (§10, colours sampled from FL).
     if let Some((x0, x1)) = range {
@@ -317,10 +317,10 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u
     // Play-start marker: an orange downward triangle (§10, colours sampled from FL).
     let mx = g.x_of(marker as f32).round() + 0.5;
     let tri = [(mx - 7.5, rr.y + 2.0), (mx + 7.5, rr.y + 2.0), (mx, rr.y + 11.0)];
-    ui.c.fill_polygon(&tri, Color::rgb(0x2f1818));
+    ui.c.fill_polygon(&tri, ui.t.s(0x2f1818));
     let inner = [(mx - 5.5, rr.y + 3.0), (mx + 5.5, rr.y + 3.0), (mx, rr.y + 9.5)];
-    ui.c.fill_polygon(&inner, Color::rgb(0xdd9561));
-    ui.c.fill_rect(Rect::new(mx - 5.0, rr.y + 3.0, 10.0, 1.0), Color::rgb(0xffc08b));
+    ui.c.fill_polygon(&inner, ui.t.h(0xdd9561));
+    ui.c.fill_rect(Rect::new(mx - 5.0, rr.y + 3.0, 10.0, 1.0), ui.t.h(0xffc08b));
     ui.c.pop_clip();
 }
 
@@ -337,7 +337,7 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
         let c = t.key_white_left.mix(t.key_white, i as f32 / (bands - 1) as f32);
         ui.c.fill_rect(Rect::new(x, k.y, w, k.h), c);
     }
-    ui.c.fill_rect(Rect::new(k.right() - 1.0, k.y, 1.0, k.h), Color::rgb(0x7e8289));
+    ui.c.fill_rect(Rect::new(k.right() - 1.0, k.y, 1.0, k.h), ui.t.s(0x7e8289));
     let (lo, hi) = g.visible_keys();
     // Lit white keys: the row plus half of each neighbouring black row (the white-key shape).
     for &key in lit.iter().filter(|&&key| !is_black(key) && (lo..=hi).contains(&key)) {
@@ -384,8 +384,8 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
     }
     ui.c.pop_clip();
     // Divider between keyboard and grid.
-    ui.c.fill_rect(Rect::new(k.right(), l.grid.y, 1.0, k.h), Color::rgb(0x131718));
-    ui.c.fill_rect(Rect::new(k.right() + 1.0, l.grid.y, 1.0, k.h), Color::rgb(0x000000));
+    ui.c.fill_rect(Rect::new(k.right(), l.grid.y, 1.0, k.h), ui.t.s(0x131718));
+    ui.c.fill_rect(Rect::new(k.right() + 1.0, l.grid.y, 1.0, k.h), ui.t.s(0x000000));
 }
 
 /// Vertical step / beat / bar lines over `area`, in `line(fill)` colors per horizontal band.
@@ -441,7 +441,7 @@ fn grid_rows(ui: &mut Ui, l: &Layout, g: &Geom, clip: Rect, selecting: bool) {
         ui.c.fill_rect(Rect::new(gr.x, y + 17.0, gr.w, 1.0), sub(white, 0x0a));
         bands.push((y, 17.0, fill));
     }
-    let bar = if selecting { Color::rgb(0x0e080c) } else { t.pr_bar };
+    let bar = if selecting { ui.t.s(0x0e080c) } else { t.pr_bar };
     columns(ui, g, gr, &bands, bar);
     ui.c.pop_clip();
 }
@@ -458,10 +458,10 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
     ui.c.fill_rect(l.label, t.window_title);
     let btn = Rect::new(l.label.x, l.label.y, l.label.w, 22.0);
     let hov = ui.hit(btn, Action::PianoLaneMenu, "Event panel: choose which note property to edit");
-    ui.c.text(Font::new(16), l.label.x + 12.0, l.label.y + 2.0, if hov || s.lane_menu { Color::rgb(0xffffff) } else { t.text }, "Control");
+    ui.c.text(Font::new(16), l.label.x + 12.0, l.label.y + 2.0, if hov || s.lane_menu { ui.t.tx(0xffffff) } else { t.text }, "Control");
     ui.c.fill_polygon(&[(l.label.x + 61.0, l.label.y + 9.0), (l.label.x + 65.0, l.label.y + 12.5), (l.label.x + 61.0, l.label.y + 16.0)], t.text_dim);
-    ui.c.fill_rect(Rect::new(l.panel.x - 2.0, l.panel.y, 1.0, l.panel.h), Color::rgb(0x131718));
-    ui.c.fill_rect(Rect::new(l.panel.x - 1.0, l.panel.y, 1.0, l.panel.h), Color::rgb(0x000205));
+    ui.c.fill_rect(Rect::new(l.panel.x - 2.0, l.panel.y, 1.0, l.panel.h), ui.t.s(0x131718));
+    ui.c.fill_rect(Rect::new(l.panel.x - 1.0, l.panel.y, 1.0, l.panel.h), ui.t.s(0x000205));
 
     // Panel grid: horizontal lines every 22 px, then the time columns (§7).
     let p = l.panel;
@@ -512,7 +512,7 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
         let (stem, dot) = if sel.contains(&idx) {
             (t.note_sel_top.mix(t.note_sel_bottom, 0.4), t.note_sel_rim)
         } else if n.muted() {
-            (Color::rgb(0x80858a), Color::rgb(0x474a4d))
+            (ui.t.s(0x80858a), ui.t.s(0x474a4d))
         } else {
             (t.velocity, t.velocity_dot)
         };
@@ -553,7 +553,7 @@ fn control_bars(ui: &mut Ui, s: &State, g: &Geom, p: Rect, lane: Lane, ch: Optio
     // Fills measured from FL; the edge of the volume bars was measured, the others are derived from their fill.
     let (fill, edge) = match lane {
         Lane::ChanVolume => (Color::rgb(0x6e4a4c), Color::rgb(0x895556)),
-        Lane::ChanPan => (Color::rgb(0x57643f), Color::rgb(0x6f7d51)),
+        Lane::ChanPan => (ui.t.a(0x57643f), ui.t.a(0x6f7d51)),
         _ => (Color::rgb(0x6b4669), Color::rgb(0x865c83)),
     };
     let kind = os_model::ControlPoint::new(0, ch, param, 0).kind;
