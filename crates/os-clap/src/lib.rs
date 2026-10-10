@@ -49,7 +49,8 @@ pub struct Library {
     factory: *const clap_plugin_factory,
     pub path: PathBuf,
     pub plugins: Vec<Descriptor>,
-    _lib: libloading::Library,
+    /// `None` for a plugin linked into this program ([`Library::from_entry`]).
+    _lib: Option<libloading::Library>,
 }
 
 // SAFETY: the entry and factory are immutable tables; CLAP allows calling the factory from any thread.
@@ -65,6 +66,21 @@ impl Library {
         unsafe {
             let lib = libloading::Library::new(path).map_err(|e| format!("{}: {e}", path.display()))?;
             let entry: *const clap_plugin_entry = *lib.get::<*const clap_plugin_entry>(b"clap_entry\0").map_err(|e| format!("{}: no clap_entry ({e})", path.display()))?;
+            Self::open(entry, path, Some(lib))
+        }
+    }
+
+    /// A plugin compiled into this program: `entry` points at its `clap_entry` table (same layout in every CLAP
+    /// binding), `path` is what its `init` receives.
+    ///
+    /// # Safety
+    /// `entry` must point at a valid, `'static` `clap_plugin_entry`.
+    pub unsafe fn from_entry(entry: *const std::ffi::c_void, path: &Path) -> Result<Arc<Library>, String> {
+        unsafe { Self::open(entry as *const clap_plugin_entry, path, None) }
+    }
+
+    unsafe fn open(entry: *const clap_plugin_entry, path: &Path, lib: Option<libloading::Library>) -> Result<Arc<Library>, String> {
+        unsafe {
             if entry.is_null() || !clap_version_is_compatible((*entry).clap_version) {
                 return Err(format!("{}: incompatible CLAP version", path.display()));
             }

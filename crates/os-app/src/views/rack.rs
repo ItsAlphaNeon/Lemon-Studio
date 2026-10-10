@@ -69,6 +69,19 @@ pub fn pattern_steps(s: &State) -> u32 {
 }
 
 /// Height of all rows plus the padding (content pixels for the vertical scroll bar).
+/// The channel row at window y `y` (inside the rows panel), if any.
+pub fn row_at(s: &State, y: f32) -> Option<usize> {
+    let win = rect(s);
+    let inner = panel(win);
+    if y < inner.y || y >= inner.bottom() {
+        return None;
+    }
+    let scroll = s.rack_scroll.clamp(0.0, (content_h(s) - inner.h).max(0.0));
+    // Row i's name button top is at y 50 + i * ROW_H; its band starts half the row gap above it.
+    let f = (y - (win.y + 50.0) + scroll + (ROW_H - 22.0) / 2.0) / ROW_H;
+    (f >= 0.0).then_some(f as usize).filter(|&i| i < s.project.channels.len())
+}
+
 pub fn content_h(s: &State) -> f32 {
     s.project.channels.len() as f32 * ROW_H + 2.0 * PAD
 }

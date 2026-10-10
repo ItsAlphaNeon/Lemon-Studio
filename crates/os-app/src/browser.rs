@@ -214,6 +214,13 @@ impl App {
         if !started {
             return;
         }
+        // Plugin windows float above the main window: a sample released over one goes into that plugin.
+        #[cfg(windows)]
+        if let Item::Sample(path) = &item {
+            if self.sample_to_plugin_window(path) {
+                return;
+            }
+        }
         let (x, y) = self.mouse;
         let win = self.top_hit(x, y).and_then(|h| h.win);
         let grid = self.pl_grid().filter(|g| g.contains(x, y) && win == Some(Win::Playlist));
@@ -262,13 +269,7 @@ impl App {
                         None => format!("Could not read {name} as audio"),
                     });
                 } else if win == Some(Win::ChannelRack) {
-                    let row = crate::app::add_channel(&mut s.project);
-                    let ch = &mut s.project.channels[row];
-                    ch.name = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
-                    ch.sample_path = Some(path);
-                    s.selected_channel = row;
-                    s.rack_selected = Some(row);
-                    s.piano.dirty = true;
+                    self.sample_to_rack(path, y);
                 }
             }
             Item::Generator(i) => {
@@ -459,7 +460,9 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     if ch.kind != ChannelKind::Sampler {
         return Some("The selected channel is not a sampler".into());
     }
-    ch.sample_path = Some(path);
+    ch.sample_path = Some(path.clone());
+    let row = s.selected_channel;
+    s.sample_loads.push((row, path));
     s.piano.dirty = true;
     Some(format!("Sent {} to the selected channel", rows[i].label))
 }

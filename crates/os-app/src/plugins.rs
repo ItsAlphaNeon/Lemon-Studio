@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use os_clap::{Descriptor, Library, Plugin, SharedPlugin};
 use os_engine::SharedInstrument;
@@ -72,11 +72,32 @@ fn search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Open Sampler compiled into OpenStudio and hosted through its own CLAP entry, so sampler channels never depend on
+/// finding a `.clap` file (spec: plugins/open-sampler.md §7).
+pub fn builtin() -> Vec<Available> {
+    static LIB: OnceLock<Option<Arc<Library>>> = OnceLock::new();
+    let lib = LIB.get_or_init(|| {
+        let path = std::env::current_exe().unwrap_or_default();
+        let entry = &open_sampler::clap_entry as *const _ as *const std::ffi::c_void;
+        // SAFETY: `clap_entry` is the linked plugin's static CLAP entry table.
+        match unsafe { Library::from_entry(entry, &path) } {
+            Ok(l) => Some(l),
+            Err(e) => {
+                eprintln!("built-in Open Sampler: {e}");
+                None
+            }
+        }
+    });
+    lib.iter().flat_map(|l| l.plugins.iter().map(|d| Available { lib: l.clone(), desc: d.clone() })).collect()
+}
+
 impl Plugins {
-    /// Scans the plugin folders for instruments (first file wins for a plugin id).
+    /// The built-in Open Sampler, then the plugin folders' instruments (first file wins for a plugin id). Open Sampler
+    /// `.clap` files are skipped: a second copy in the process would share the built-in one's editor window class.
     pub fn scan() -> Plugins {
-        let mut available: Vec<Available> = Vec::new();
-        for f in os_clap::find_files(&search_dirs()) {
+        let mut available: Vec<Available> = builtin();
+        let files = os_clap::find_files(&search_dirs());
+        for f in files.into_iter().filter(|f| f.file_stem().is_none_or(|s| s != OPEN_SAMPLER)) {
             match Library::load(&f) {
                 Ok(lib) => {
                     for d in lib.plugins.iter().filter(|d| d.is_instrument()) {
@@ -125,6 +146,39 @@ impl Plugins {
     /// Index of the available plugin called `name`.
     pub fn index_of(&self, name: &str) -> Option<usize> {
         self.available.iter().position(|a| a.desc.name == name)
+    }
+
+    /// Loads sample `path` into row `row`'s Open Sampler: its current state with a new `sample-path`, so every other
+    /// setting stays. False when the row hosts nothing or the plugin refused the state.
+    pub fn load_sample(&mut self, row: usize, path: &str) -> bool {
+        let Some(h) = self.hosted.get(&row) else { return false };
+        let Ok(mut p) = h.plugin.lock() else { return false };
+        let Some(new) = p.save_state().and_then(|b| with_sample_path(&b, path)) else { return false };
+        p.load_state(&new)
+    }
+
+    /// The hosted row whose plugin window is at screen point (x, y).
+    #[cfg(windows)]
+    pub fn row_at_screen(&self, x: i32, y: i32) -> Option<usize> {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+        let hit = unsafe { WindowFromPoint(POINT { x, y }) };
+        if hit.is_null() {
+            return None;
+        }
+        let root = unsafe { GetAncestor(hit, GA_ROOT) } as isize;
+        self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|w| w.hwnd() == root)).map(|(&r, _)| r)
+    }
+
+    /// Drops file `path` on row `row`'s plugin window at screen point (x, y), as Explorer would: the window under the
+    /// point that accepts files gets `WM_DROPFILES`. Open Sampler rows without one (the strip, the frame) load the sample
+    /// through their state. Returns whether the plugin got the file.
+    #[cfg(windows)]
+    pub fn drop_file(&mut self, row: usize, x: i32, y: i32, path: &str, sampler: bool) -> bool {
+        if post_drop(x, y, path) {
+            return true;
+        }
+        sampler && self.load_sample(row, path)
     }
 
     /// Closes every window and drops every instance (a new or opened project).
@@ -311,6 +365,63 @@ fn json_string(s: &str) -> String {
     }
     o.push('"');
     o
+}
+
+/// `blob` (an Open Sampler state) with its `sample-path` field replaced by `path`.
+fn with_sample_path(blob: &[u8], path: &str) -> Option<Vec<u8>> {
+    let prefixed = blob.len() > 8 && blob[0] != b'{';
+    let json = if prefixed { &blob[8..] } else { blob };
+    let mut v: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let inner = serde_json::to_string(path).ok()?;
+    v.get_mut("fields")?.as_object_mut()?.insert("sample-path".into(), serde_json::Value::String(inner));
+    let out = serde_json::to_vec(&v).ok()?;
+    let mut b = if prefixed { (out.len() as u64).to_le_bytes().to_vec() } else { Vec::new() };
+    b.extend_from_slice(&out);
+    Some(b)
+}
+
+/// Posts `WM_DROPFILES` for `path` to the window at screen point (x, y), or its nearest ancestor that accepts files
+/// (`DragAcceptFiles`). The drop handle is ours: the receiver's `DragFinish` frees it. Same process only.
+#[cfg(windows)]
+fn post_drop(x: i32, y: i32, path: &str) -> bool {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
+    use windows_sys::Win32::UI::Shell::DROPFILES;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    unsafe {
+        let mut w = WindowFromPoint(POINT { x, y });
+        while !w.is_null() && GetWindowLongW(w, GWL_EXSTYLE) as u32 & WS_EX_ACCEPTFILES == 0 {
+            w = GetAncestor(w, GA_PARENT);
+            if w == GetDesktopWindow() {
+                return false;
+            }
+        }
+        if w.is_null() {
+            return false;
+        }
+        let mut pt = POINT { x, y };
+        windows_sys::Win32::Graphics::Gdi::ScreenToClient(w, &mut pt);
+        let wide: Vec<u16> = path.encode_utf16().chain([0, 0]).collect();
+        let head = std::mem::size_of::<DROPFILES>();
+        let mem = GlobalAlloc(GHND, head + wide.len() * 2);
+        if mem.is_null() {
+            return false;
+        }
+        let p = GlobalLock(mem) as *mut u8;
+        if p.is_null() {
+            GlobalFree(mem);
+            return false;
+        }
+        *(p as *mut DROPFILES) = DROPFILES { pFiles: head as u32, pt, fNC: 0, fWide: 1 };
+        std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, p.add(head), wide.len() * 2);
+        GlobalUnlock(mem);
+        if PostMessageW(w, WM_DROPFILES, mem as usize, 0) == 0 {
+            GlobalFree(mem);
+            return false;
+        }
+        true
+    }
 }
 
 /// The `sample-path` field of an Open Sampler state blob.
@@ -786,5 +897,74 @@ mod tests {
         let keys = crate::plugin_window::take_keys();
         assert_eq!(keys.len(), 2, "{keys:?}");
         assert!(keys[0].pressed && !keys[1].pressed && keys[0].scancode == 0x10);
+    }
+
+    fn fixture_mp3() -> String {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../os-engine/tests/data/click_sine.mp3");
+        p.canonicalize().unwrap().to_string_lossy().trim_start_matches(r"\\?\").to_string()
+    }
+
+    /// Open Sampler is compiled in: no `.clap` file is needed, and a sample loads into a running instance without
+    /// touching its other settings.
+    #[test]
+    fn builtin_open_sampler_takes_a_sample() {
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(OPEN_SAMPLER).expect("built-in Open Sampler");
+        let mut ch = crate::app::test_project().channels.remove(0);
+        ch.envelopes[1].enabled = true;
+        ch.envelopes[1].attack = 65536 / 2;
+        pl.create_with(0, index, Some(&sampler_state(&ch))).unwrap();
+        assert_eq!(pl.sampler_path(0).as_deref(), Some(""));
+        let mp3 = fixture_mp3();
+        assert!(pl.load_sample(0, &mp3));
+        assert_eq!(pl.sampler_path(0).as_deref(), Some(mp3.as_str()));
+        let st = pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&st[8..]).unwrap();
+        assert_eq!(v["params"]["envvol_on"], serde_json::json!({"bool": true}), "other settings kept");
+        // And it sounds.
+        let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
+        let mut i = inst.lock().unwrap();
+        i.note_on(0, 60, 0.8);
+        let mut peak = 0.0f32;
+        for _ in 0..50 {
+            let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+            i.process(48000, &mut l, &mut r);
+            peak = l.iter().fold(peak, |m, v| m.max(v.abs()));
+        }
+        // The 0.5 s volume attack kept from the channel still fades the click (0.9 at 0.1 s) in.
+        assert!(peak > 0.01 && peak < 0.3, "the mp3 plays through the kept envelope (peak {peak})");
+    }
+
+    /// A file dropped on an open Open Sampler window (what a browser drag released over it does) reaches its editor
+    /// the way an Explorer drop does: `OS_CLAP` not needed (`cargo test -p os-app drop_on -- --ignored`).
+    #[test]
+    #[ignore]
+    fn drop_on_plugin_window_loads_the_sample() {
+        use windows_sys::Win32::Foundation::RECT;
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        pl.create(0, pl.index_of(OPEN_SAMPLER).unwrap()).unwrap();
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 300);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        unsafe {
+            SetForegroundWindow(frame as HWND);
+            GetWindowRect(frame as HWND, &mut r);
+        }
+        pump(&mut pl, 100);
+        let (x, y) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        assert_eq!(pl.row_at_screen(x, y), Some(0), "the window is found under the point");
+        let mp3 = fixture_mp3();
+        assert!(post_drop(x, y, &mp3), "the editor accepts files");
+        pump(&mut pl, 300);
+        assert_eq!(pl.sampler_path(0).as_deref(), Some(mp3.as_str()));
+        // The strip (no editor under the point): loaded through the state instead.
+        let wav = std::env::temp_dir().join("os-app-drop.wav");
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &[0.5; 2000]).unwrap();
+        let wav = wav.to_string_lossy().into_owned();
+        assert!(pl.drop_file(0, r.left + 12, r.top + 40, &wav, true));
+        pump(&mut pl, 200);
+        assert_eq!(pl.sampler_path(0).as_deref(), Some(wav.as_str()));
     }
 }

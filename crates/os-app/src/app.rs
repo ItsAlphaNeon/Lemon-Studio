@@ -380,6 +380,8 @@ pub struct State {
     /// Requests for the plugin host, handled on the next tick: (row, available index) to create, row to open.
     pub pending_plugin: Option<(usize, usize)>,
     pub pending_open: Option<usize>,
+    /// Samples to load into rows' Open Sampler instances on the next tick (browser send, drops on a rack row).
+    pub sample_loads: Vec<(usize, String)>,
     pub file: Option<os_flp::FlpFile>,
     pub path: Option<PathBuf>,
     /// Open child windows, bottom to top.
@@ -572,6 +574,7 @@ impl App {
                 hosted_rows: Vec::new(),
                 pending_plugin: None,
                 pending_open: None,
+                sample_loads: Vec::new(),
                 file: None,
                 path: None,
                 z: vec![Win::Playlist, Win::ChannelRack],
@@ -819,6 +822,15 @@ impl App {
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     fn plugin_tick(&mut self) {
         self.sync_samplers();
+        for (row, path) in std::mem::take(&mut self.state.sample_loads) {
+            // A row hosted this tick already started from its channel's sample.
+            if self.state.hosted_rows.contains(&row) && self.plugins.sampler_path(row).as_deref() != Some(path.as_str()) {
+                if !self.plugins.load_sample(row, &path) {
+                    self.state.message = Some(format!("Open Sampler did not take {path}"));
+                    self.invalidate();
+                }
+            }
+        }
         if let Some((row, pick)) = self.state.pending_plugin.take() {
             // `pick` indexes the picker's hosted generators (Open Sampler is left out there).
             let index = self.state.hosted_generators.get(pick).and_then(|n| self.plugins.index_of(n)).unwrap_or(usize::MAX);
@@ -1065,6 +1077,10 @@ impl App {
             return;
         }
         let (x, y) = self.mouse;
+        if self.top_hit(x, y).and_then(|h| h.win) == Some(Win::ChannelRack) {
+            self.sample_to_rack(path.to_string_lossy().into_owned(), y);
+            return;
+        }
         let Some(grid) = self.pl_grid.filter(|g| g.contains(x, y)) else {
             self.state.message = Some("Drop audio files on the playlist to add audio clips".into());
             return self.invalidate();
@@ -1079,6 +1095,54 @@ impl App {
             None => format!("Could not read {} as audio", path.display()),
         });
         self.invalidate();
+    }
+
+    /// A sample dropped on the channel rack at window y `y` (spec: ui/channel-rack.md, New project / drops): onto a
+    /// sampler row it replaces that channel's sample (Open Sampler loads it); elsewhere it adds an Open Sampler channel
+    /// named after the file.
+    pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
+        let s = &mut self.state;
+        let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
+        let row = match views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind == ChannelKind::Sampler) {
+            Some(r) => {
+                s.sample_loads.push((r, path.clone()));
+                r
+            }
+            None => add_channel(&mut s.project),
+        };
+        let ch = &mut s.project.channels[row];
+        ch.name = stem.clone();
+        ch.sample_path = Some(path);
+        s.selected_channel = row;
+        s.rack_selected = Some(row);
+        s.piano.dirty = true;
+        s.message = Some(format!("{} loaded in Open Sampler", stem.unwrap_or_default()));
+        self.invalidate();
+    }
+
+    /// A browser sample released over a hosted plugin window (it sits above the main window, which keeps the mouse
+    /// capture during the drag): the plugin gets the file as if it came from Explorer. Returns whether it was one.
+    #[cfg(windows)]
+    pub(crate) fn sample_to_plugin_window(&mut self, path: &str) -> bool {
+        use windows_sys::Win32::Foundation::POINT;
+        let mut pt = POINT { x: 0, y: 0 };
+        if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt) } == 0 {
+            return false;
+        }
+        let Some(row) = self.plugins.row_at_screen(pt.x, pt.y) else { return false };
+        let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind == ChannelKind::Sampler);
+        let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned());
+        if self.plugins.drop_file(row, pt.x, pt.y, path, sampler) {
+            if let Some(ch) = self.state.project.channels.get_mut(row).filter(|_| sampler) {
+                ch.name = name.clone();
+                ch.sample_path = Some(path.to_string());
+            }
+            self.state.message = Some(format!("{} loaded in the plugin", name.unwrap_or_default()));
+        } else {
+            self.state.message = Some("This plugin does not take dropped files".into());
+        }
+        self.invalidate();
+        true
     }
 
     /// Load a theme: a `.flstheme` (spec ui/flstheme.md) or an OpenStudio `theme.txt`. A `.flstheme` is also
@@ -2861,6 +2925,10 @@ impl App {
                 // A hosted plugin opens in its own window with OpenStudio's frame (spec: ui/plugin-window.md).
                 if s.hosted_rows.contains(&i) {
                     s.pending_open = Some(i);
+                } else if s.project.channels.get(i).is_some_and(|c| c.kind == ChannelKind::Sampler) {
+                    // Not hosted yet (just added): Open Sampler starts on the next tick and its window opens then.
+                    s.pending_open = Some(i);
+                    self.sampler_failed.retain(|&r| r != i);
                 } else {
                     // The name button opens the channel's plugin window (spec: ui/channel-rack.md §5).
                     if !s.shown(Win::Plugin) {
@@ -3181,7 +3249,7 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
 pub(crate) fn add_channel(p: &mut Project) -> usize {
     let index = p.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let track = (p.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(125);
-    p.channels.push(sampler_channel(index, "Sampler", track));
+    p.channels.push(sampler_channel(index, crate::plugins::OPEN_SAMPLER, track));
     p.channels.len() - 1
 }
 
@@ -3802,10 +3870,11 @@ mod tests {
         app.act(Action::ToggleWin(Win::ChannelRack));
         frame(&mut app, &mut a, None);
 
-        // Name button opens the plugin window for that channel; the slot selects.
+        // Name button opens the channel's Open Sampler (a sampler row never shows the info window); the slot selects.
         let hr = hit_rect(&app, &Action::ChannelSelect(2));
         click(&mut app, &mut a, hr);
-        assert_eq!((app.state.z.last(), app.state.plugin_channel, app.state.selected_channel), (Some(&Win::Plugin), 2, 2));
+        assert_eq!((app.state.pending_open, app.state.selected_channel), (Some(2), 2));
+        assert!(!app.state.shown(Win::Plugin));
         let hr = hit_rect(&app, &Action::RackSelect(3));
         click(&mut app, &mut a, hr);
         assert_eq!(app.state.rack_selected, Some(3));
