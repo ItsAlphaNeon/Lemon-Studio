@@ -3191,6 +3191,15 @@ pub fn default_project() -> Project {
     template_project(&[crate::plugins::OPEN_SAMPLER])
 }
 
+/// A one-channel project that plays `path` once from the start (browser sample preview, spec: ui/browser.md §7).
+pub(crate) fn preview_project(path: &str) -> Project {
+    let mut p = template_project(&["Preview"]);
+    p.channels[0].sample_path = Some(path.to_string());
+    p.patterns = vec![Pattern { number: 1, notes: vec![Note { length: u32::from(p.ppq.max(4)), ..Note::step(0, 0) }], ..Pattern::default() }];
+    p.arrangements.clear();
+    p
+}
+
 /// The old five-channel template (tests that need several channels).
 #[cfg(test)]
 pub fn test_project() -> Project {
@@ -3640,6 +3649,38 @@ mod tests {
     }
 
     /// Browser options menu and search (spec: ui/browser.md §4, §5).
+    /// A clicked browser sample plays from its file (the 5 s cut-off is the transport's job).
+    #[test]
+    fn browser_sample_preview_project() {
+        let path = std::env::temp_dir().join(format!("os_preview_test_{}.wav", std::process::id()));
+        let (rate, n) = (44100u32, 44100usize);
+        let mut wav = Vec::new();
+        wav.extend(b"RIFF");
+        wav.extend(&(36 + n as u32 * 2).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(&16u32.to_le_bytes());
+        wav.extend(&1u16.to_le_bytes());
+        wav.extend(&1u16.to_le_bytes());
+        wav.extend(&rate.to_le_bytes());
+        wav.extend(&(rate * 2).to_le_bytes());
+        wav.extend(&2u16.to_le_bytes());
+        wav.extend(&16u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend(&(n as u32 * 2).to_le_bytes());
+        for i in 0..n {
+            let v = ((i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 16000.0) as i16;
+            wav.extend(&v.to_le_bytes());
+        }
+        std::fs::write(&path, wav).unwrap();
+        let p = preview_project(&path.to_string_lossy());
+        let mut library = os_engine::SampleLibrary::default();
+        let mut e = os_engine::Engine::new(&p, &mut library, 48000, os_engine::PlayMode::Pattern(1));
+        let mut buf = vec![0.0f32; 48000];
+        e.process(&mut buf);
+        let _ = std::fs::remove_file(&path);
+        assert!(buf.iter().any(|v| v.abs() > 0.05), "preview is silent");
+    }
+
     #[test]
     fn browser_dropped_folder() {
         use crate::views::browser::{rows, Item};

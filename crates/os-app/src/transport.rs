@@ -115,6 +115,8 @@ enum Cmd {
     Preview(Box<Project>),
     /// Play a project's playlist once on the preview stream (clip preview).
     PreviewSong(Box<Project>),
+    /// Like `Preview`, faded out after the given time if still sounding (browser sample preview).
+    PreviewFor(Box<Project>, Option<Duration>),
     /// The hosted instruments changed (in `Transport::instruments`): rebuild the engines.
     Instruments,
     /// Live note (typing keyboard): channel (rack position), key, velocity; `NoteOff` releases.
@@ -189,6 +191,12 @@ impl Transport {
     /// Play pattern 1 of `project` once (a one-note preview project), on its own stream.
     pub fn preview(&self, project: Project) {
         let _ = self.tx.send(Cmd::Preview(Box::new(project)));
+    }
+
+    /// Play pattern 1 of `project` once on the preview stream and cut it off after `limit` (spec: ui/browser.md §7,
+    /// sample preview). A new preview replaces the one sounding.
+    pub fn preview_for(&self, project: Project, limit: Option<Duration>) {
+        let _ = self.tx.send(Cmd::PreviewFor(Box::new(project), limit));
     }
 
     /// Play the playlist of `project` once on the preview stream (spec: ui/playlist.md §10, clip Preview).
@@ -335,6 +343,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     let mut session: Option<Session> = None;
     // One-shot note previews play on their own stream, so they also sound while playing or paused.
     let mut preview: Option<Session> = None;
+    // When a time-limited preview (browser samples) is faded out.
+    let mut preview_until: Option<Instant> = None;
     // Live notes while stopped or paused: an engine with no schedule on a stream that stays open.
     let mut live: Option<Session> = None;
     let mut live_project: Option<Project> = None;
@@ -406,8 +416,17 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     }
                 }
             }
+            Ok(Cmd::PreviewFor(project, limit)) => {
+                preview = None;
+                preview_until = limit.map(|d| Instant::now() + d);
+                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst) {
+                    Ok(s) => preview = Some(s),
+                    Err(e) => report(&shared, e),
+                }
+            }
             Ok(Cmd::PreviewSong(project)) => {
                 preview = None;
+                preview_until = None;
                 match Session::start(&project, PlayMode::Song, Kind::Preview, 0, &mut library, shared.clone(), &inst) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
@@ -442,6 +461,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     continue;
                 }
                 preview = None;
+                preview_until = None;
                 match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
@@ -501,6 +521,12 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         }
         if preview.as_ref().is_some_and(|p| p.done.load(Ordering::Relaxed)) {
             preview = None;
+        }
+        if preview_until.is_some_and(|t| Instant::now() >= t) {
+            preview_until = None;
+            if let Some(s) = preview.take() {
+                retire(s, &mut closing);
+            }
         }
         // Stopped streams are dropped once their fade is over; then the instruments are silenced for good.
         closing.retain(|(_, since)| since.elapsed() < CLOSE_AFTER);

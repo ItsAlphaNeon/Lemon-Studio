@@ -10,6 +10,8 @@ use crate::views::browser::{self as view, Item};
 
 /// Mouse travel before a press on an item becomes a drag (spec §3).
 const DRAG_START: f32 = 4.0;
+/// How long a clicked sample plays (spec §7).
+const PREVIEW_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl App {
     /// Browser actions; returns whether `a` was one.
@@ -48,6 +50,10 @@ impl App {
                     }
                     _ => {}
                 }
+                if let Item::Sample(path) = &row.item {
+                    self.preview_sample(path);
+                }
+                let s = &mut self.state;
                 s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
                 if !matches!(row.item, Item::None | Item::File(_)) {
                     self.drag = Some(Drag::Browser { item: row.item, label: row.label, m0: self.mouse, started: false });
@@ -57,6 +63,14 @@ impl App {
         }
         self.invalidate();
         true
+    }
+
+    /// Clicking a sample plays it once (spec §7): cut off after `PREVIEW_LIMIT` unless "Full sample preview" is ticked.
+    pub(crate) fn preview_sample(&self, path: &str) {
+        let mut p = crate::app::preview_project(path);
+        p.tempo = Some(self.state.tempo);
+        let limit = (!view::opt(&self.state, view::OPT_PREVIEW)).then_some(PREVIEW_LIMIT);
+        self.transport.preview_for(p, limit);
     }
 
     /// A browser options-menu command (spec §4); returns a message.
