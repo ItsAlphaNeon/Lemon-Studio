@@ -4,6 +4,7 @@
 pub mod browser;
 pub mod channel_win;
 pub mod menus;
+pub mod mondebug;
 pub mod picker;
 pub mod mixer;
 pub mod piano;
@@ -95,6 +96,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
     if s.picker_open {
         picker::paint(ui, s);
+    }
+    if s.monitor.debug {
+        mondebug::paint(ui, s);
     }
 }
 

@@ -86,6 +86,11 @@ pub enum Action {
     Placeholder(&'static str),
     /// The toolbar's scope / spectrum panel: click switches the display.
     Monitor,
+    /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
+    MonParam(usize),
+    MonReset,
+    MonSave,
+    MonClose,
     Minimize,
     Maximize,
     Close,
@@ -282,6 +287,8 @@ pub enum Drag {
     RackMixer { ch: usize, y0: f32, v0: u16 },
     Fader { track: u16, y0: f32, v0: f64 },
     Tempo { y0: f32, t0: f64 },
+    /// Monitor debug panel slider.
+    MonParam(usize),
     /// Piano roll: move notes (originals by index), resize their ends, erase, draw velocities.
     NoteMove { x0: f32, y0: f32, orig: Vec<(usize, Note)> },
     NoteResize { x0: f32, orig: Vec<(usize, Note)> },
@@ -512,7 +519,7 @@ impl App {
                 browser_selected: 6,
                 tempo: 130.0,
                 message: None,
-                monitor: crate::monitor::Monitor::default(),
+                monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
                 toggles: vec!["typing", "multilink"],
                 maximized: true,
                 piano: PianoState::default(),
@@ -732,6 +739,18 @@ impl App {
         }
     }
 
+    /// Debug panel slider `i` follows mouse x.
+    fn set_mon_param(&mut self, i: usize, x: f32) {
+        let t = views::mondebug::slider(i);
+        let p = &crate::monitor::PARAMS[i];
+        let k = ((x - t.x) / t.w).clamp(0.0, 1.0);
+        self.state.monitor.cfg.set(i, p.min + (p.max - p.min) * k);
+        self.hint = Cow::Owned(format!("{}: {}", p.name, self.state.monitor.cfg.text(i)));
+        self.damage_rect(views::mondebug::PANEL);
+        self.damage_rect(MONITOR_RECT);
+        self.damage_rect(HINT_RECT);
+    }
+
     /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
         self.transport.playing() || self.state.monitor.active()
@@ -743,9 +762,9 @@ impl App {
         let playing = self.transport.playing();
         {
             // Scope / analyzer / peak bars: from the audio tap; repaint just the monitor when it changed.
+            // The monitor advances at its own refresh rate, however often we tick.
             let (tp, rate) = (&self.transport, self.transport.sample_rate());
-            let peaks = if tp.playing() || tp.sample_rate() > 0 { tp.peaks() } else { (0.0, 0.0) };
-            if self.state.monitor.update(rate, peaks, |b| tp.tap(b)) {
+            if self.state.monitor.update(std::time::Instant::now(), rate, || tp.take_peaks(), |b| tp.tap(b)) {
                 self.damage_rect(MONITOR_RECT);
             }
         }
@@ -1006,6 +1025,10 @@ impl App {
                     }
                     self.damage_rect(HINT_RECT);
                 }
+                Drag::MonParam(i) => {
+                    self.set_mon_param(i, x);
+                    return true;
+                }
                 Drag::Tempo { y0, t0 } => {
                     let t = (t0 + f64::from(y0 - y).round()).clamp(10.0, 522.0);
                     if self.state.tempo != t {
@@ -1245,6 +1268,16 @@ impl App {
         self.raise_under_mouse();
         if let Some(Action::Scrollbar(t)) = action {
             return self.scrollbar_press(t, true);
+        }
+        // Right-click the monitor: open the debug panel; on a debug slider: back to its default.
+        if action == Some(Action::Monitor) {
+            self.state.monitor.debug = !self.state.monitor.debug;
+            return self.invalidate();
+        }
+        if let Some(Action::MonParam(i)) = action {
+            let d = crate::monitor::PARAMS[i].default;
+            self.state.monitor.cfg.set(i, d);
+            return self.damage_rect(views::mondebug::PANEL);
         }
         if action == Some(Action::PianoRuler) {
             if let Some(g) = self.piano_geom() {
@@ -1690,6 +1723,7 @@ impl App {
             }
             Key::Named(NamedKey::F8) if alt => self.act(Action::ToggleWin(Win::Browser)),
             Key::Named(NamedKey::F9) => self.act(Action::ToggleWin(Win::Mixer)),
+            Key::Named(NamedKey::F12) => self.state.monitor.debug = !self.state.monitor.debug,
             Key::Named(NamedKey::Escape) => {
                 self.state.menu_open = None;
                 self.state.picker_open = false;
@@ -2093,6 +2127,26 @@ impl App {
                     }
                 }
             }
+            Action::MonParam(i) => {
+                self.drag = Some(Drag::MonParam(i));
+                let x = self.mouse.0;
+                self.set_mon_param(i, x);
+            }
+            Action::MonReset => {
+                s.monitor.cfg = Default::default();
+                self.invalidate();
+            }
+            Action::MonSave => {
+                s.message = Some(match save_monitor_cfg(&s.monitor.cfg) {
+                    Ok(p) => format!("Monitor settings saved to {}", p.display()),
+                    Err(e) => format!("Monitor settings not saved: {e}"),
+                });
+                self.invalidate();
+            }
+            Action::MonClose => {
+                s.monitor.debug = false;
+                self.invalidate();
+            }
             Action::Tempo => self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo }),
             Action::Menu(i) => s.menu_open = if s.menu_open == Some(i) { None } else { Some(i) },
             Action::MenuItem(m, i) => {
@@ -2438,6 +2492,28 @@ pub fn default_project() -> Project {
     }
 }
 
+fn monitor_cfg_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio").join("monitor.txt"))
+}
+
+/// Monitor settings from `%APPDATA%/OpenStudio/monitor.txt` (written by the debug panel's Save), else defaults.
+fn load_monitor_cfg() -> crate::monitor::Settings {
+    let mut cfg = crate::monitor::Settings::default();
+    if let Some(text) = monitor_cfg_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        cfg.load(&text);
+    }
+    cfg
+}
+
+fn save_monitor_cfg(cfg: &crate::monitor::Settings) -> Result<PathBuf, String> {
+    let p = monitor_cfg_path().ok_or("no APPDATA folder")?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, cfg.dump()).map_err(|e| e.to_string())?;
+    Ok(p)
+}
+
 /// The theme: `%APPDATA%/OpenStudio/theme.txt` if present, else the default.
 fn load_theme() -> Theme {
     let path = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio").join("theme.txt"));
@@ -2465,10 +2541,12 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         for mode in [crate::monitor::Mode::Spectrum, crate::monitor::Mode::Scope] {
+            app.state.monitor = crate::monitor::Monitor::default();
             app.state.monitor.mode = mode;
+            app.state.monitor.debug = true;
             let mut seed = 12345u32;
             let mut phase = 0.0f32;
-            app.state.monitor.update(48000, (0.5, 0.42), |b| {
+            app.state.monitor.update(std::time::Instant::now(), 48000, || (0.5, 0.42), |b| {
                 for v in b.iter_mut() {
                     seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
                     let noise = (seed >> 8) as f32 / 8388608.0 - 1.0;

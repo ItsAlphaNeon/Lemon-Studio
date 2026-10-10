@@ -239,7 +239,7 @@ fn monitor(ui: &mut Ui, s: &State) {
     match m.mode {
         Mode::Spectrum => {
             for c in 0..COLS {
-                let h = m.bars[c] * 31.0;
+                let h = m.bar(c) * 31.0;
                 let whole = h.floor();
                 let x = 881.0 + c as f32;
                 if whole > 0.0 {
@@ -260,18 +260,21 @@ fn monitor(ui: &mut Ui, s: &State) {
             }
         }
     }
-    ui.hit(Rect::new(880.0, 4.0, 86.0, 33.0), Action::Monitor, "Oscilloscope / spectrum analyzer (click to switch)");
+    ui.hit(Rect::new(880.0, 4.0, 86.0, 33.0), Action::Monitor, "Oscilloscope / spectrum analyzer (click to switch, right-click: settings)");
 
-    // Right panel: two peak bars (-60 dB to 0 dB), light grey fading to cream at the tip.
+    // Right panel: two peak bars (meter range .. 0 dB), light grey fading to cream at the tip, plus the held peak.
     ui.c.fill_rect(Rect::new(968.0, 4.0, 77.0, 23.0), edge);
     ui.c.fill_rect(Rect::new(969.0, 5.0, 75.0, 21.0), fill);
-    let level = |p: f32| (1.0 + 20.0 * p.max(1e-6).log10() / 60.0).clamp(0.0, 1.0) * 75.0;
-    for (i, p) in [m.peaks.0, m.peaks.1].into_iter().enumerate() {
-        let len = level(p).round();
+    for i in 0..2 {
+        let y = 5.0 + 11.0 * i as f32;
+        let hold = (m.meter_pos(m.hold[i].0) * 75.0).round();
+        if m.hold[i].1.is_some() && hold >= 1.0 {
+            ui.c.fill_rect(Rect::new(969.0 + hold - 1.0, y, 1.0, 10.0), os_ui::Color::rgb(0xcdc7a8));
+        }
+        let len = (m.meter_pos(m.meter_db[i]) * 75.0).round();
         if len < 1.0 {
             continue;
         }
-        let y = 5.0 + 11.0 * i as f32;
         let (a, b) = ((0xc8, 0xce, 0xd1), (0xcd, 0xc7, 0xa8));
         let mix = |k: f32, shade: f32| {
             let l = |u: i32, v: i32| (((u as f32 + (v - u) as f32 * k) * shade).round() as u32).min(255);
@@ -287,7 +290,7 @@ fn monitor(ui: &mut Ui, s: &State) {
             ui.c.fill_rect(Rect::new(px, y + 9.0, 1.0, 1.0), mix(k, 0.75 * side));
         }
     }
-    ui.hit(Rect::new(968.0, 4.0, 77.0, 23.0), Action::Swallow, "Output level (peak, -60 to 0 dB)");
+    ui.hit(Rect::new(968.0, 4.0, 77.0, 23.0), Action::Swallow, "Output level (peak L / R; right-click the monitor for its settings)");
     ui.c.stroke_circle(1037.0, 33.5, 4.0, 2.0, os_ui::Color::rgb(0x66737d));
 }
 

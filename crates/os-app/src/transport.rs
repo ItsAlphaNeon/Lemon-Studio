@@ -61,6 +61,8 @@ pub struct Shared {
     /// Peak of the last block, f32 bits, per side.
     peak_l: AtomicU32,
     peak_r: AtomicU32,
+    meter_l: AtomicU32,
+    meter_r: AtomicU32,
     error: Mutex<Option<String>>,
     /// Notes playing now, as (channel index, key); written by the audio callback.
     sounding: Mutex<Vec<(u16, u16)>>,
@@ -78,7 +80,7 @@ struct Tap {
 
 impl Default for Tap {
     fn default() -> Self {
-        Tap { buf: vec![0.0; 8192], pos: 0, total: 0 }
+        Tap { buf: vec![0.0; crate::monitor::MAX_FFT], pos: 0, total: 0 }
     }
 }
 
@@ -274,6 +276,15 @@ impl Transport {
         self.shared.sample_rate.load(Ordering::Relaxed)
     }
 
+    /// Output peaks (L, R) since the last call, then resets them (the toolbar meter's feed).
+    pub fn take_peaks(&self) -> (f32, f32) {
+        (
+            f32::from_bits(self.shared.meter_l.swap(0, Ordering::Relaxed)),
+            f32::from_bits(self.shared.meter_r.swap(0, Ordering::Relaxed)),
+        )
+    }
+
+    /// Peaks of the last playback block (L, R).
     pub fn peaks(&self) -> (f32, f32) {
         (
             f32::from_bits(self.shared.peak_l.load(Ordering::Relaxed)),
@@ -670,9 +681,16 @@ where
                         *slot = T::from_sample(v.clamp(-1.0, 1.0));
                     }
                 }
+                // Meter peaks: the largest since the monitor last read them (non-negative f32 bits order like u32s).
                 if renderer.ctl.report.load(Ordering::Relaxed) {
                     renderer.shared.peak_l.store(pl.to_bits(), Ordering::Relaxed);
                     renderer.shared.peak_r.store(pr.to_bits(), Ordering::Relaxed);
+                }
+                // Toolbar meter: the largest peak since the monitor last read it (non-negative f32 bits order like
+                // u32s), from every stream the monitor taps (playback and live notes).
+                if renderer.tap {
+                    renderer.shared.meter_l.fetch_max(pl.to_bits(), Ordering::Relaxed);
+                    renderer.shared.meter_r.fetch_max(pr.to_bits(), Ordering::Relaxed);
                 }
             },
             |e| eprintln!("audio stream error: {e}"),
