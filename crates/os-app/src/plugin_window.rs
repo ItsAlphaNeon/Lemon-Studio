@@ -424,6 +424,8 @@ impl FrameWindow {
     /// (docked) or a top-level window owned by it (`detached`).
     pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
         install_key_hook();
+        // Without a main window (tests) there is nothing to dock into.
+        let detached = detached || owner == 0;
         let state = Rc::new(RefCell::new(State {
             info,
             strip: true,

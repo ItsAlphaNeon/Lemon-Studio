@@ -165,13 +165,17 @@ impl Plugins {
     #[cfg(windows)]
     pub fn row_at_screen(&self, x: i32, y: i32) -> Option<usize> {
         use windows_sys::Win32::Foundation::POINT;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
-        let hit = unsafe { WindowFromPoint(POINT { x, y }) };
-        if hit.is_null() {
-            return None;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_PARENT};
+        // Walk up from the window under the point: a docked frame is a child of the main window, a detached one is a
+        // top-level window.
+        let mut w = unsafe { WindowFromPoint(POINT { x, y }) };
+        while !w.is_null() {
+            if let Some((&r, _)) = self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|f| f.hwnd() == w as isize)) {
+                return Some(r);
+            }
+            w = unsafe { GetAncestor(w, GA_PARENT) };
         }
-        let root = unsafe { GetAncestor(hit, GA_ROOT) } as isize;
-        self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|w| w.hwnd() == root)).map(|(&r, _)| r)
+        None
     }
 
     /// Drops file `path` on row `row`'s plugin window at screen point (x, y), as Explorer would: the window under the
@@ -179,7 +183,7 @@ impl Plugins {
     /// through their state. Returns whether the plugin got the file.
     #[cfg(windows)]
     pub fn drop_file(&mut self, row: usize, x: i32, y: i32, path: &str, sampler: bool) -> bool {
-        if post_drop(x, y, path) {
+        if self.hosted.get(&row).and_then(|h| h.window.as_ref()).is_some_and(|f| post_drop(x, y, path, f.hwnd())) {
             return true;
         }
         sampler && self.load_sample(row, path)
@@ -438,7 +442,8 @@ fn with_sample_path(blob: &[u8], path: &str) -> Option<Vec<u8>> {
 /// Posts `WM_DROPFILES` for `path` to the window at screen point (x, y), or its nearest ancestor that accepts files
 /// (`DragAcceptFiles`). The drop handle is ours: the receiver's `DragFinish` frees it. Same process only.
 #[cfg(windows)]
-fn post_drop(x: i32, y: i32, path: &str) -> bool {
+/// `frame` bounds the search: a docked frame's parent is the main window, which takes files itself.
+fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::Foundation::GlobalFree;
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
@@ -447,6 +452,9 @@ fn post_drop(x: i32, y: i32, path: &str) -> bool {
     unsafe {
         let mut w = WindowFromPoint(POINT { x, y });
         while !w.is_null() && GetWindowLongW(w, GWL_EXSTYLE) as u32 & WS_EX_ACCEPTFILES == 0 {
+            if w as isize == frame {
+                return false;
+            }
             w = GetAncestor(w, GA_PARENT);
             if w == GetDesktopWindow() {
                 return false;
@@ -1061,7 +1069,7 @@ mod tests {
         let (x, y) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
         assert_eq!(pl.row_at_screen(x, y), Some(0), "the window is found under the point");
         let mp3 = fixture_mp3();
-        assert!(post_drop(x, y, &mp3), "the editor accepts files");
+        assert!(post_drop(x, y, &mp3, frame), "the editor accepts files");
         pump(&mut pl, 300);
         assert_eq!(pl.sampler_path(0).as_deref(), Some(mp3.as_str()));
         // The strip (no editor under the point): loaded through the state instead.
