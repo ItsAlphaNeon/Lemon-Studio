@@ -52,24 +52,24 @@ pub mod k {
 }
 
 pub const PARAMS: [Param; 18] = [
-    p("Refresh rate", 30.0, 5.0, 120.0, 0, "Hz"),
-    p("FFT size (2^n)", 12.0, 9.0, 14.0, 0, ""),
-    p("Low frequency", 25.0, 10.0, 200.0, 0, "Hz"),
-    p("High frequency", 20000.0, 4000.0, 24000.0, 0, "Hz"),
-    p("Analyzer floor", -90.0, -140.0, -30.0, 0, "dB"),
-    p("Analyzer top", 0.0, -30.0, 12.0, 0, "dB"),
-    p("Tilt", 3.0, 0.0, 9.0, 1, "dB/oct"),
+    p("Refresh rate", 120.0, 5.0, 240.0, 0, "Hz"),
+    p("FFT size (2^n)", 14.0, 9.0, 14.0, 0, ""),
+    p("Low frequency", 10.0, 5.0, 200.0, 0, "Hz"),
+    p("High frequency", 24000.0, 4000.0, 24000.0, 0, "Hz"),
+    p("Analyzer floor", -78.0, -140.0, -30.0, 0, "dB"),
+    p("Analyzer top", -30.0, -60.0, 12.0, 0, "dB"),
+    p("Tilt", 1.4, 0.0, 9.0, 1, "dB/oct"),
     p("Rise (1 = instant)", 1.0, 0.05, 1.0, 2, ""),
-    p("Bar fall", 60.0, 5.0, 600.0, 0, "dB/s"),
-    p("Column blur", 0.0, 0.0, 4.0, 0, "cols"),
+    p("Bar fall", 600.0, 5.0, 2000.0, 0, "dB/s"),
+    p("Column blur", 1.0, 0.0, 4.0, 0, "cols"),
     p("Bin: max(0) / avg(1)", 0.0, 0.0, 1.0, 0, ""),
-    p("Scope window", 32.0, 2.0, 170.0, 0, "ms"),
-    p("Scope gain", 1.0, 0.25, 4.0, 2, "x"),
+    p("Scope window", 25.0, 2.0, 170.0, 0, "ms"),
+    p("Scope gain", 2.64, 0.25, 4.0, 2, "x"),
     p("Scope trigger", 1.0, 0.0, 1.0, 0, "on/off"),
-    p("Meter range", 60.0, 20.0, 96.0, 0, "dB"),
-    p("Meter fall", 30.0, 3.0, 300.0, 0, "dB/s"),
-    p("Meter peak hold", 0.0, 0.0, 3000.0, 0, "ms"),
-    p("Silence after", 250.0, 50.0, 1000.0, 0, "ms"),
+    p("Meter range", 96.0, 20.0, 120.0, 0, "dB"),
+    p("Meter fall", 241.0, 3.0, 300.0, 0, "dB/s"),
+    p("Meter peak hold", 2018.0, 0.0, 3000.0, 0, "ms"),
+    p("Silence after", 499.0, 50.0, 1000.0, 0, "ms"),
 ];
 
 #[derive(Clone, PartialEq)]
@@ -79,7 +79,10 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { v: std::array::from_fn(|i| PARAMS[i].default) }
+        // Through `set`, so defaults sit on the same step grid as loaded values.
+        let mut s = Settings { v: [0.0; PARAMS.len()] };
+        (0..PARAMS.len()).for_each(|i| s.set(i, PARAMS[i].default));
+        s
     }
 }
 
@@ -458,6 +461,8 @@ mod tests {
     #[test]
     fn analyzer_peaks_at_the_tone() {
         let mut m = Monitor::default();
+        m.cfg.set(k::TILT, 0.0);
+        m.cfg.set(k::SMOOTH, 0.0);
         let changed = m.update(Instant::now(), 48000, || (0.5, 0.5), |b| {
             sine(1000.0, 48000, 0.5, b);
             1
@@ -517,6 +522,8 @@ mod tests {
     #[test]
     fn meter_falls_at_its_rate() {
         let mut m = Monitor::default();
+        m.cfg.set(k::METER_FALL, 30.0);
+        m.cfg.set(k::REFRESH, 30.0);
         let t0 = Instant::now();
         m.update(t0, 48000, || (1.0, 0.5), |_| 1);
         assert!(m.meter_db[0].abs() < 0.01 && (m.meter_db[1] + 6.02).abs() < 0.05);
