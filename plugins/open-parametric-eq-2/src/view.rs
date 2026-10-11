@@ -198,11 +198,12 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
                 1 => (PLOT.bottom() - 12.0, 12.0, 220.0),
                 _ => (PLOT.y, PLOT.h, 40.0),
             };
+            let cell_x = |i: usize| PLOT.x + PLOT.w * i as f32 / n as f32;
             for (i, &db) in sp.iter().enumerate() {
-                let x = PLOT.x + PLOT.w * i as f32 / n as f32;
+                let x = cell_x(i);
                 let v = (1.0 + db / range_db).clamp(0.0, 1.0);
                 let col = heat(v).with_alpha((a * v) as u8);
-                c.fill_rect(Rect::new(x, y0, PLOT.w / n as f32 + 0.5, h), col);
+                c.fill_cell(Rect::new(x, y0, cell_x(i + 1) - x, h), col);
             }
         }
     }

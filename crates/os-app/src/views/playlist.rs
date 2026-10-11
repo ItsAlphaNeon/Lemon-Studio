@@ -565,7 +565,7 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Rect, co
         }
         let m = hi.max(-lo).min(1.0);
         let hpx = (m * amp).max(0.5);
-        ui.c.fill_rect(Rect::new(x, mid - hpx, 1.0, hpx * 2.0), col);
+        ui.c.fill_cell(Rect::new(x, mid - hpx, 1.0, hpx * 2.0), col);
         x += 1.0;
     }
 }

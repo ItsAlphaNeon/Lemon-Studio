@@ -217,11 +217,24 @@ impl Canvas {
         self.fill_rect_vgrad(r, c, c);
     }
 
+    /// One cell of a picture made of adjacent cells (meter and analyzer columns, waveform columns, heatmap cells):
+    /// both edges rounded, so neighbours tile without gaps or overlaps at any scale. `fill_rect` keeps a thin
+    /// rect's width instead, right for a lone line but at 150 % it leaves a gap after every other 1 px column
+    /// (spec: ui/ui-scaling.md §4).
+    pub fn fill_cell(&mut self, r: Rect, c: Color) {
+        let k = self.scale;
+        let span = |a: f32, len: f32| ((a * k).round() as i32, ((a + len) * k).round() as i32);
+        self.fill_px(span(r.x, r.w), span(r.y, r.h), c, c);
+    }
+
     fn fill_rect_vgrad(&mut self, r: Rect, top: Color, bottom: Color) {
         let sc = self.scale;
+        self.fill_px(snap_span(r.x, r.w, sc), snap_span(r.y, r.h, sc), top, bottom);
+    }
+
+    /// Fill the device-pixel span `[rx0, rx1) x [ry0, ry1)` inside the clip, `top` to `bottom` down the span.
+    fn fill_px(&mut self, (rx0, rx1): (i32, i32), (ry0, ry1): (i32, i32), top: Color, bottom: Color) {
         let (cx0, cy0, cx1, cy1) = self.clip_px();
-        let (rx0, rx1) = snap_span(r.x, r.w, sc);
-        let (ry0, ry1) = snap_span(r.y, r.h, sc);
         let (x0, x1) = (rx0.max(cx0), rx1.min(cx1));
         let (y0, y1) = (ry0.max(cy0), ry1.min(cy1));
         if x0 >= x1 || y0 >= y1 {
@@ -749,6 +762,20 @@ mod tests {
         // Integer scales are unchanged: both edges rounded.
         assert_eq!(snap_span(3.0, 1.0, 2.0), (6, 8));
         assert_eq!(snap_span(0.5, 1.0, 1.0), (1, 2));
+    }
+
+    #[test]
+    fn cells_tile_at_fractional_scales() {
+        // 1 px columns side by side (a meter) cover every device pixel once at 150 %; thin rects would leave gaps.
+        for (scale, w) in [(1.5, 30), (1.25, 25), (1.75, 35), (2.0, 40)] {
+            let Ok(mut c) = Canvas::new(w, 2, scale) else { return };
+            c.fill_rect(Rect::new(0.0, 0.0, 20.0, 2.0), Color::rgb(0x000000));
+            for x in 0..20 {
+                c.fill_cell(Rect::new(x as f32, 0.0, 1.0, 1.0), Color::rgb(0x808080).with_alpha(128));
+            }
+            let row: Vec<u8> = c.pixmap.pixels()[..w as usize].iter().map(|p| p.red()).collect();
+            assert!(row.iter().all(|&r| r == 64), "cells at {scale}: {row:?}");
+        }
     }
 
     #[test]
