@@ -83,6 +83,9 @@ losslessly, so existing projects open, play and save without losing data it does
 - Typed project model for patterns, channels, mixer, playlist and automation
 - New projects saved in a form other compatible software opens
 - Channel rack settings saved: swing, filter groups, locked and zipped rows, pattern length, loop lengths, and added, cloned, moved or deleted channels
+- Plugin channels and mixer effects saved with their state: CLAP and VST3 plugins as wrapped plugins that are hosted
+  again on opening, native plugins in their own format
+- Mixer saved: effects added, removed or moved between slots, slot on/off and mix levels, added mixer tracks
 - Round-trip test suite over a corpus of real-world projects
 
 </td>
