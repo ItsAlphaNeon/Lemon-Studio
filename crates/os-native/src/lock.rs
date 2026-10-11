@@ -98,8 +98,9 @@ impl Drop for Guard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
 
     #[test]
     fn reentrant_and_blocks_other_threads() {
@@ -107,16 +108,22 @@ mod tests {
         l.enter();
         l.enter();
         l.leave();
-        let l2 = l.clone();
+        // Still held once: another thread must not get it until the last unlock (checked by what it did, not by how
+        // long it waited, which depends on when the system lets it run).
+        let (l2, got) = (l.clone(), Arc::new(AtomicBool::new(false)));
+        let got2 = got.clone();
+        let (started, wait_start) = mpsc::channel();
         let t = std::thread::spawn(move || {
-            let start = Instant::now();
+            started.send(()).unwrap();
             let _g = l2.guard();
-            start.elapsed()
+            got2.store(true, Ordering::SeqCst);
         });
+        wait_start.recv().unwrap();
         std::thread::sleep(Duration::from_millis(50));
+        assert!(cfg!(not(windows)) || !got.load(Ordering::SeqCst), "the other thread waited for the unlock");
         l.leave();
-        let waited = t.join().unwrap();
-        assert!(cfg!(not(windows)) || waited >= Duration::from_millis(30), "the other thread waited for the unlock");
+        t.join().unwrap();
+        assert!(got.load(Ordering::SeqCst));
         // An unlock without holding the lock is ignored.
         l.leave();
         let _g = l.guard();
