@@ -13,6 +13,7 @@
   <img alt="Rust 2024 edition" src="https://img.shields.io/badge/rust-2024_edition-e57324?style=flat-square&logo=rust&logoColor=white">
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square">
   <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-orange?style=flat-square">
+  <a href="https://discord.gg/yC2uCuGs3M"><img alt="Discord" src="https://img.shields.io/badge/discord-join_the_server-5865f2?style=flat-square&logo=discord&logoColor=white"></a>
 </p>
 
 <p>
@@ -21,6 +22,8 @@
   <a href="#getting-started">Getting started</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#roadmap">Roadmap</a> ·
+  <a href="#contributing">Contributing</a> ·
+  <a href="#community">Community</a> ·
   <a href="#license">License</a>
 </p>
 
@@ -38,9 +41,16 @@ modern open plugin standards.
 A central goal is **interoperability**. OpenStudio reads and writes the `.flp` project format
 losslessly, so existing projects open, play and save without losing data it does not yet understand.
 
-> [!NOTE]
-> OpenStudio is in early, active development. Many features are complete, but expect missing pieces,
-> rough edges and breaking changes. It is not yet ready for production work.
+> [!WARNING]
+> **OpenStudio is pre-alpha software.** It is under active development and is not yet a usable DAW:
+> expect missing features, rough edges and breaking changes.
+>
+> - **No prebuilt binaries** will be published until OpenStudio reaches a usable state. Until then it
+>   can only be built from source.
+> - **Project-file support is at a very early stage.** Do not overwrite your original `.flp` projects
+>   with files saved by OpenStudio until this support is declared stable. Work on copies and keep backups.
+> - **Support is not available yet**, and issue reports will not be tracked until a later stage of
+>   development.
 
 ## Features
 
@@ -120,6 +130,8 @@ losslessly, so existing projects open, play and save without losing data it does
 - *Optional:* the Windows SDK, used to embed the application icon. Without it the build still succeeds.
 
 ### Build and run
+
+No prebuilt binaries are provided at this stage; OpenStudio is built from source.
 
 ```bash
 git clone <repository-url> OpenStudio
@@ -205,6 +217,19 @@ OpenStudio is developed independently. File-format and behaviour details needed 
 interoperability are first written down as specifications, and the product code is implemented
 from those specifications and public documentation. All artwork, icons and interface graphics
 in this repository are original or come from the openly licensed projects listed below.
+
+## Contributing
+
+OpenStudio is not accepting outside contributions yet. Once it does, pull requests will be welcome
+from developers who are comfortable with Rust and the pull-request workflow.
+
+All contributions must be **clean-room** work. Decompiled code, and code or pseudocode derived from
+decompiled output, will not be accepted in any form: the codebase must contain none of it.
+
+## Community
+
+Join the [OpenStudio Discord server](https://discord.gg/yC2uCuGs3M) to follow development and talk
+about the project. Please keep in mind that support is not offered at this stage.
 
 ## Third-party components
 
