@@ -8,6 +8,7 @@ mod loading;
 mod logo;
 mod meters;
 mod mixer;
+mod osc3;
 mod monitor;
 mod params;
 mod piano;

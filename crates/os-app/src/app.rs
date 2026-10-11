@@ -810,6 +810,8 @@ impl App {
                 }
             }
         }
+        // Open 3x Osc instances hold their channel's settings: written back as the file's 3x Osc state.
+        crate::osc3::store(&mut self.state.project, &self.plugins);
         let s = &mut self.state;
         s.project.tempo = Some(s.tempo);
         // Lock, zip, filter groups and loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
@@ -999,6 +1001,7 @@ impl App {
         self.params_tick();
         if self.loading.is_none() {
             self.sync_wrapped();
+            self.sync_osc3();
         }
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
             // A row hosted this tick already started from its channel's sample.
@@ -3907,7 +3910,8 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
     let row = add_channel(p);
     let ch = &mut p.channels[row];
     ch.kind = ChannelKind::Plugin;
-    ch.plugin = Some(name.to_string());
+    // The built-in Open 3x Osc is stored as the file's own 3x Osc.
+    ch.plugin = Some(crate::osc3::file_name(name).to_string());
     ch.name = Some(name.to_string());
     row
 }

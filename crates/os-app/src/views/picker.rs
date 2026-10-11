@@ -61,11 +61,19 @@ pub const EFFECTS: &[Plugin] = &[];
 pub fn generators(s: &State) -> Vec<Plugin> {
     let mut v = GENERATORS.to_vec();
     for &name in &s.hosted_generators {
+        if name == crate::osc3::OPEN_3X_OSC {
+            v.push(p(name, 6, Shot(OPEN_3X_OSC_SHOT), 104, 81, 0xf2a13a));
+            continue;
+        }
         let cat = if name.contains("Sampler") { 5 } else { 7 };
         v.push(p(name, cat, Knobs, 92, 62, 0x49f1b1));
     }
     v
 }
+
+/// Open 3x Osc's tile (Synth classic): its oscillator page (`cargo run -p open-3x-osc --example osc3_shot -- out.png osc - crop`,
+/// scaled to 104 px wide).
+const OPEN_3X_OSC_SHOT: &[u8] = include_bytes!("../../assets/picker/open-3x-osc.png");
 
 /// Open Parametric EQ 2's tile: its editor (`cargo run -p open-parametric-eq-2 --example eq_shot -- out.png demo`, scaled
 /// to 104 px wide).

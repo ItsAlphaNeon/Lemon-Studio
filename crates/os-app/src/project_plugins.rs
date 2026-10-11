@@ -143,7 +143,7 @@ pub fn find(list: &[Available], r: &PluginRef) -> Option<usize> {
 
 /// What a channel's plugin is called on screen: a wrapped plugin's own name, else the plugin name.
 pub fn plugin_title(ch: &Channel) -> Option<String> {
-    wrapped_channel(ch).map(|r| r.name).filter(|n| !n.is_empty()).or_else(|| ch.plugin.clone())
+    wrapped_channel(ch).map(|r| r.name).filter(|n| !n.is_empty()).or_else(|| ch.plugin.as_deref().map(|n| crate::osc3::label(n).to_string()))
 }
 
 /// What a mixer slot shows: a wrapped plugin's own name, else the slot's label (spec: ui/mixer.md §7).

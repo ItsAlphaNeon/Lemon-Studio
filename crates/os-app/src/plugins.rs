@@ -106,10 +106,13 @@ fn search_dirs(standard: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// Open Sampler compiled into OpenStudio and hosted through its own CLAP entry, so sampler channels never depend on
-/// finding a `.clap` file (spec: plugins/open-sampler.md §7).
+/// finding a `.clap` file (spec: plugins/open-sampler.md §7); Open 3x Osc likewise (spec: plugins/open-3x-osc.md §6).
 pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
-    linked(&LIB, &open_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, OPEN_SAMPLER)
+    static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    let mut v = linked(&LIB, &open_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, OPEN_SAMPLER);
+    v.extend(linked(&OSC3, &open_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::OPEN_3X_OSC));
+    v
 }
 
 /// Open Parametric EQ 2, compiled in the same way: offered for every mixer slot, and it plays the slots a project
@@ -182,7 +185,7 @@ impl Plugins {
         let mut available: Vec<Available> = builtin();
         let mut effects: Vec<Available> = builtin_effects();
         let files = plugin_files().into_iter().flat_map(|(files, load)| files.into_iter().map(move |f| (f, load)));
-        for (f, load) in files.filter(|(f, _)| f.file_stem().is_none_or(|s| s != OPEN_SAMPLER && s != OPEN_EQ)) {
+        for (f, load) in files.filter(|(f, _)| f.file_stem().is_none_or(|s| s != OPEN_SAMPLER && s != OPEN_EQ && s != crate::osc3::OPEN_3X_OSC)) {
             match load(&f) {
                 Ok(lib) => {
                     for d in lib.plugins().iter() {
