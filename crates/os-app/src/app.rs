@@ -1323,6 +1323,11 @@ impl App {
                         self.invalidate();
                         continue;
                     }
+                    Request::NotAvailable(name) => {
+                        self.state.message = Some(off_text(name));
+                        self.invalidate();
+                        continue;
+                    }
                 }
                 self.state.piano.dirty = true;
                 self.invalidate();

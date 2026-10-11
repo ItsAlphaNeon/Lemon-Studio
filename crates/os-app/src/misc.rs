@@ -38,9 +38,9 @@ pub fn vals(misc: &ChannelMisc) -> MiscVals {
     v
 }
 
-/// The page values of channel `ch`.
+/// The page values of channel `ch`: root note and fine tuning play only on sampler channels (`set`).
 pub fn vals_of(ch: &Channel) -> MiscVals {
-    vals(&ch.misc)
+    MiscVals { tuned: ch.kind.is_sampler(), ..vals(&ch.misc) }
 }
 
 /// One page value of `misc`.
