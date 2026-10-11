@@ -235,6 +235,37 @@ pub struct ChannelSound {
     pub stretch: [u32; 4],
 }
 
+impl ChannelSound {
+    /// The resample stretch multiplier `2^(stored / 10000)` (event 215 int 26; spec: audio/audio-clips.md "Stretching by
+    /// resampling"), 1.0 when none.
+    pub fn stretch_multiplier(&self) -> f64 {
+        2f64.powf(f64::from(self.stretch[2] as i32) / 10000.0)
+    }
+
+    /// Stretches by resampling with multiplier `m` and no fitted time (the clip plays `m` times as long).
+    pub fn set_stretch_multiplier(&mut self, m: f64) {
+        self.stretch[0] = 0;
+        self.stretch[2] = (m.log2() * 10000.0).round() as i32 as u32;
+        self.stretch[3] = 0;
+    }
+
+    /// Playback speed of a stretched sample of `duration` seconds at `bpm`, and whether the channel's pitch still
+    /// applies (spec: audio/audio-clips.md "Stretching by resampling (mode 0)"; other modes play unstretched here).
+    pub fn stretch_speed(&self, duration: f64, bpm: f64) -> (f64, bool) {
+        let [time, _, _, mode] = self.stretch;
+        if mode != 0 {
+            return (1.0, true);
+        }
+        let m = f64::from(self.stretch_multiplier() as f32);
+        if time > 0 && duration > 0.0 {
+            let target = (f64::from(time) / 192.0) * (60.0 / bpm) * m;
+            (duration / target, false)
+        } else {
+            (1.0 / m, true)
+        }
+    }
+}
+
 impl Default for ChannelSound {
     /// A new channel: filter open, no flags read, declick mode 0, not stretched.
     fn default() -> Self {
@@ -381,6 +412,9 @@ pub struct ChannelRack {
     pub zipped: bool,
     /// Filter group index into [`Project::groups`] (event 145).
     pub group: u32,
+    /// The colour event 128 holds, whether or not it is a custom colour: the playlist draws audio and automation
+    /// clips with it (spec: ui/playlist.md §2, "Channel-colour rule"). Display only; saving writes `Channel::color`.
+    pub stored_color: Option<Rgb>,
 }
 
 /// One channel envelope record, values as stored (spec: audio/channel-envelopes.md). Times are knob
@@ -737,6 +771,63 @@ impl Clip {
     pub fn set_id(&mut self, id: u32) {
         self.raw[32..36].copy_from_slice(&id.to_le_bytes());
     }
+
+    fn f32_at(&self, o: usize) -> f32 {
+        f32::from_le_bytes([self.raw[o], self.raw[o + 1], self.raw[o + 2], self.raw[o + 3]])
+    }
+
+    fn set_f32(&mut self, o: usize, v: f32) {
+        self.raw[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// An audio clip's fade-in: (milliseconds, tension) when it is on (bytes 36..44, flag bit 0 of byte 56; spec:
+    /// flp/events/playlist.md).
+    pub fn fade_in(&self) -> Option<(f32, f32)> {
+        let ms = self.f32_at(36);
+        (self.raw[56] & 1 != 0 && ms.is_finite() && ms > 0.0).then(|| (ms, self.f32_at(40)))
+    }
+
+    /// An audio clip's fade-out: (milliseconds, tension) when it is on (bytes 44..52, flag bit 1 of byte 56).
+    pub fn fade_out(&self) -> Option<(f32, f32)> {
+        let ms = self.f32_at(44);
+        (self.raw[56] & 2 != 0 && ms.is_finite() && ms > 0.0).then(|| (ms, self.f32_at(48)))
+    }
+
+    /// Sets (or with `None` / a length of 0 removes) the fade-in.
+    pub fn set_fade_in(&mut self, f: Option<(f32, f32)>) {
+        let (ms, tension) = f.filter(|f| f.0 > 0.0).unwrap_or((0.0, self.f32_at(40)));
+        self.set_f32(36, ms);
+        self.set_f32(40, tension);
+        self.raw[56] = if ms > 0.0 { self.raw[56] | 1 } else { self.raw[56] & !1 };
+    }
+
+    /// Sets (or removes) the fade-out.
+    pub fn set_fade_out(&mut self, f: Option<(f32, f32)>) {
+        let (ms, tension) = f.filter(|f| f.0 > 0.0).unwrap_or((0.0, self.f32_at(48)));
+        self.set_f32(44, ms);
+        self.set_f32(48, tension);
+        self.raw[56] = if ms > 0.0 { self.raw[56] | 2 } else { self.raw[56] & !2 };
+    }
+
+    /// The clip's gain (bytes 52..56): 1.0 when the record holds no usable value.
+    pub fn gain(&self) -> f32 {
+        let g = self.f32_at(52);
+        if g.is_finite() && g > 0.0 { g } else { 1.0 }
+    }
+
+    pub fn set_gain(&mut self, g: f32) {
+        self.set_f32(52, g);
+    }
+}
+
+/// The gain at `x` (0..1) through an audio clip's fade-in with tension `tension`; a fade-out is `fade_curve(1 - x)`
+/// (spec: audio/audio-clips.md "Fades and clip gain": a raised cosine at tension 0, measured; the tension warp
+/// `x + k x (1 - x)`, `k = t / (|t| + 4.17)`, is a fit).
+pub fn fade_curve(x: f64, tension: f64) -> f64 {
+    let x = x.clamp(0.0, 1.0);
+    let k = tension / (tension.abs() + 4.17);
+    let w = x + k * x * (1.0 - x);
+    0.5 - 0.5 * (std::f64::consts::PI * w).cos()
 }
 
 /// A time marker (spec: flp/events/playlist.md "Time markers").
@@ -765,6 +856,20 @@ pub struct PlaylistTrack {
     pub name: Option<String>,
     pub color: Option<Rgb>,
     pub enabled: bool,
+    /// Grouped with the track above: a member of the group led by the nearest ungrouped track above it (event 238
+    /// byte 46; spec: flp/events/playlist.md, ui/playlist.md §6a).
+    pub grouped: bool,
+    /// On a group track: its group is collapsed (byte 61 = 0).
+    pub collapsed: bool,
+    /// Byte 47: FL draws a lock on such a group (meaning not measured; kept and drawn).
+    pub locked: bool,
+}
+
+impl PlaylistTrack {
+    /// Track `number` as a new project has it: unnamed, default colour, on, not grouped.
+    pub fn new(number: u32) -> Self {
+        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false }
+    }
 }
 
 /// The data of an automation clip channel (spec: flp/events/automation.md): its points (event 234) and the

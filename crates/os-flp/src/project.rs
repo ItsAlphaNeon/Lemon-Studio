@@ -251,6 +251,9 @@ struct PlTrackLoc {
 
 #[derive(Debug, Default)]
 struct ArrangementLoc {
+    /// The arrangement's first event (99) and its name (241).
+    start: usize,
+    name: Option<usize>,
     clips: Option<usize>,
     /// Every event of the time-marker groups.
     markers: Vec<usize>,
@@ -435,7 +438,12 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
             },
             (Region::Channels | Region::Arrangements, id::ARR_START) => {
                 region = Region::Arrangements;
-                l.arrangements.push(ArrangementLoc::default());
+                l.arrangements.push(ArrangementLoc { start: i, ..ArrangementLoc::default() });
+            }
+            (Region::Arrangements, id::ARR_NAME) => {
+                if let Some(a) = l.arrangements.last_mut().filter(|a| a.name.is_none() && a.clips.is_none()) {
+                    a.name = Some(i);
+                }
             }
             (Region::Arrangements, id::ARR_CLIPS) => {
                 if let Some(a) = l.arrangements.last_mut().filter(|a| a.tracks.is_empty()) {
@@ -681,6 +689,7 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
             locked: loc.locked.is_some_and(|i| int(&events[i]) != 0),
             zipped: loc.zipped.is_some_and(|i| int(&events[i]) != 0),
             group: loc.group.map_or(0, |i| int(&events[i])),
+            stored_color: loc.color.map(|i| rgb_from_bgr(int(&events[i]))),
         },
         misc: load_misc(block),
         sound: load_sound(block, &i32_at),
@@ -704,6 +713,18 @@ fn load_misc(block: &[Event]) -> ChannelMisc {
         m.root = int(e).min(127) as u8;
     }
     m
+}
+
+/// Event 215 of a new audio clip channel as FL 26 writes it (declick mode 1, not stretched), its stretch ints
+/// (bytes 96..112) replaced by the channel's (spec: flp/engine-events.md "A channel", audio/audio-clips.md).
+const AUDIO_CLIP_215: &str = "8c0000000000000001000000ffffffff3c0000000000803f0000803f0000803f0000803f0000803f000000000300000000000000000400003000000000000100a7050000000000000001000000000000000000010000000000000000010000000000000000000000000000000000000002000000feffffffffffffff000000000000000000000000000000000000f03f0000000000000000ffffffff01010000000000000000e03f";
+
+fn audio_clip_215(stretch: [u32; 4]) -> Vec<u8> {
+    let mut d: Vec<u8> = (0..AUDIO_CLIP_215.len()).step_by(2).map(|i| u8::from_str_radix(&AUDIO_CLIP_215[i..i + 2], 16).unwrap_or(0)).collect();
+    for (k, v) in stretch.iter().enumerate() {
+        d[96 + 4 * k..100 + 4 * k].copy_from_slice(&v.to_le_bytes());
+    }
+    d
 }
 
 /// Filter (event 219 ints 3..5), sampler flags (143), declick mode and stretch settings (215).
@@ -1041,6 +1062,9 @@ fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrac
             .filter(|_| custom)
             .map(|b| rgb_from_bgr(u32::from_le_bytes(b.try_into().unwrap()))),
         enabled: r.get(12).is_none_or(|&b| b != 0),
+        grouped: r.get(46).is_some_and(|&b| b != 0),
+        collapsed: r.get(61).is_some_and(|&b| b == 0),
+        locked: r.get(47).is_some_and(|&b| b != 0),
     }
 }
 
@@ -1403,9 +1427,6 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     if !skip_mixer && project.mixer.len() != current.mixer.len() {
         return Err(mismatch("mixer tracks", project.mixer.len(), current.mixer.len()));
     }
-    if !skip_arrangements && project.arrangements.len() != current.arrangements.len() {
-        return Err(mismatch("arrangements", project.arrangements.len(), current.arrangements.len()));
-    }
 
     let mut inserts: Vec<(usize, Event)> = Vec::new();
     let mut removals: Vec<usize> = Vec::new();
@@ -1478,6 +1499,18 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
 
     // Channels.
     for (loc, (ch, old)) in l.channels.iter().zip(project.channels.iter().zip(&current.channels)) {
+        // Stretch settings: event 215 ints 24..27 of the channel's block (spec: audio/audio-clips.md "Settings").
+        if ch.sound.stretch != old.sound.stretch {
+            let mut k = loc.start + 1;
+            while k < events.len() && events[k].id != id::CH_START && events[k].id != id::ARR_START {
+                if events[k].id == id::CH_SAMPLE_SETTINGS {
+                    let bytes: Vec<u8> = ch.sound.stretch.iter().flat_map(|v| v.to_le_bytes()).collect();
+                    patch_bytes(&mut events[k], 96, &bytes);
+                    break;
+                }
+                k += 1;
+            }
+        }
         if ch.name != old.name {
             match (loc.name, &ch.name) {
                 (Some(i), Some(n)) => set_data(&mut events[i], encode_text(n, enc)),
@@ -1738,8 +1771,48 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         inserts.extend(block.into_iter().rev().map(|e| (at, e)));
     }
 
+    // Arrangements, matched by number: removed ones lose their whole block, added ones are written after the last
+    // (spec: flp/events/playlist.md "Arrangement block"); kept ones are patched below.
+    let mut arr_end: Option<usize> = None;
+    for (old_arr, loc) in current.arrangements.iter().zip(&l.arrangements) {
+        let end = loc
+            .tracks
+            .iter()
+            .flat_map(|t| [Some(t.record), t.color_flag, t.name])
+            .flatten()
+            .chain(loc.clips)
+            .chain(loc.markers.iter().copied())
+            .chain(loc.name)
+            .max()
+            .unwrap_or(loc.start)
+            + 1;
+        arr_end = Some(arr_end.map_or(end, |e| e.max(end)));
+        if !project.arrangements.iter().any(|a| a.number == old_arr.number) {
+            removals.extend(loc.start..end);
+        }
+    }
+    if let (None, Some(n), Some(at)) = (l.current_arrangement, project.current_arrangement, arr_end) {
+        // A file without event 100 (an older OpenStudio save) gets it after its last arrangement.
+        inserts.push((at, Event::new(id::CURRENT_ARRANGEMENT, Value::U16(n))));
+    }
+    if let Some(at) = arr_end.filter(|_| !skip_arrangements) {
+        let added: Vec<Event> = project
+            .arrangements
+            .iter()
+            .filter(|a| current.arrangements.iter().all(|o| o.number != a.number))
+            .flat_map(|a| arrangement_events(a, enc))
+            .collect();
+        inserts.extend(added.into_iter().rev().map(|e| (at, e)));
+    }
+
     // Playlist clips, time markers and tracks.
-    for ((arr, old_arr), loc) in project.arrangements.iter().zip(&current.arrangements).zip(&l.arrangements) {
+    for (old_arr, loc) in current.arrangements.iter().zip(&l.arrangements) {
+        let Some(arr) = project.arrangements.iter().find(|a| a.number == old_arr.number) else { continue };
+        if arr.name != old_arr.name {
+            if let Some(i) = loc.name {
+                set_data(&mut events[i], encode_text(arr.name.as_deref().unwrap_or("Arrangement"), enc));
+            }
+        }
         if arr.clips != old_arr.clips {
             if let Some(i) = loc.clips {
                 set_data(&mut events[i], encode_clips(&arr.clips));
@@ -1756,6 +1829,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         for ((t, old), tl) in arr.tracks.iter().zip(&old_arr.tracks).zip(&loc.tracks) {
             if t.enabled != old.enabled {
                 patch_bytes(&mut events[tl.record], 12, &[u8::from(t.enabled)]);
+            }
+            // Groups (spec: flp/events/playlist.md, bytes 46 / 47 / 61).
+            if t.grouped != old.grouped {
+                patch_bytes(&mut events[tl.record], 46, &[u8::from(t.grouped)]);
+            }
+            if t.locked != old.locked {
+                patch_bytes(&mut events[tl.record], 47, &[u8::from(t.locked)]);
+            }
+            if t.collapsed != old.collapsed {
+                patch_bytes(&mut events[tl.record], 61, &[u8::from(!t.collapsed)]);
             }
             if t.color != old.color {
                 if let Some(c) = t.color {
@@ -2289,6 +2372,10 @@ fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -
     levels[8..12].copy_from_slice(&ch.pitch_cents.to_le_bytes());
     levels[13] = 1; // the template's `00 01 00 00 …` tail
     b.push(Event::new(id::CH_LEVELS, Value::var(levels.to_vec())));
+    if ch.kind == ChannelKind::AudioClip {
+        // FL writes the sample settings right after the levels.
+        b.push(Event::new(id::CH_SAMPLE_SETTINGS, Value::var(audio_clip_215(ch.sound.stretch))));
+    }
     b.push(Event::new(id::CH_GROUP, Value::U32(ch.rack.group)));
     if let Some(a) = auto.filter(|_| ch.kind == ChannelKind::Automation) {
         b.push(Event::new(id::AUTO_DATA, Value::var(encode_automation(a))));
@@ -2364,6 +2451,10 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     for arr in &project.arrangements {
         ev.extend(arrangement_events(arr, enc));
     }
+    // The arrangement shown, right after the last one's tracks as FL writes it (spec: flp/events/playlist.md, event 100).
+    if let Some(n) = project.current_arrangement.filter(|_| !project.arrangements.is_empty()) {
+        ev.push(Event::new(id::CURRENT_ARRANGEMENT, Value::U16(n)));
+    }
     // The mixer follows the arrangements (spec: flp/events/mixer.md "Where the mixer sits").
     if !project.arrangements.is_empty() && !project.mixer.is_empty() {
         ev.extend(mixer_events(&project.mixer, enc));
@@ -2393,10 +2484,12 @@ fn track_record(t: &PlaylistTrack) -> Vec<u8> {
     r[13..17].copy_from_slice(&1.0f32.to_le_bytes());
     r[17] = if t.number <= 33 { 0xf0 } else { 0xff };
     r[18..21].fill(0xff);
-    r[29] = 5;
-    r[37] = 1;
-    r[51..59].fill(0xff);
-    r[59] = 1;
+    r[30] = 5;
+    r[38] = 1;
+    r[46] = u8::from(t.grouped);
+    r[47] = u8::from(t.locked);
+    r[53..61].fill(0xff);
+    r[61] = u8::from(!t.collapsed);
     r
 }
 
@@ -2412,7 +2505,7 @@ fn arrangement_events(arr: &Arrangement, enc: TextEnc) -> Vec<Event> {
         ev.extend(marker_events(m, enc));
     }
     for n in 1..=PLAYLIST_TRACKS {
-        let t = arr.tracks.iter().find(|t| t.number == n).cloned().unwrap_or(PlaylistTrack { number: n, name: None, color: None, enabled: true });
+        let t = arr.tracks.iter().find(|t| t.number == n).cloned().unwrap_or_else(|| PlaylistTrack::new(n));
         ev.push(Event::new(id::PL_TRACK, Value::var(track_record(&t))));
         ev.push(Event::new(id::PL_COLOR_FLAG, Value::U8(u8::from(t.color.is_some()))));
         if let Some(name) = &t.name {
@@ -2550,7 +2643,7 @@ pub fn default_arrangement() -> Arrangement {
     Arrangement {
         number: 0,
         name: Some("Arrangement".into()),
-        tracks: (1..=PLAYLIST_TRACKS).map(|n| PlaylistTrack { number: n, name: None, color: None, enabled: true }).collect(),
+        tracks: (1..=PLAYLIST_TRACKS).map(PlaylistTrack::new).collect(),
         ..Default::default()
     }
 }
@@ -2941,6 +3034,7 @@ mod tests {
         let arr = &back.arrangements[0];
         assert_eq!(arr.tracks.len(), 500);
         assert_eq!(arr.markers, p.arrangements[0].markers);
+        assert!(arr.tracks.iter().all(|t| !t.grouped && !t.collapsed && !t.locked), "new tracks: no groups, expanded");
         let c = arr.clips.iter().find(|c| c.source == ClipSource::Pattern(1)).unwrap();
         assert_eq!((c.position, c.length, c.track, c.muted, c.window), (384, 288, 0, true, Some((96.0, 384.0))));
         let ac = arr.clips.iter().find(|c| c.source == ClipSource::Channel(2)).unwrap();
@@ -2952,9 +3046,18 @@ mod tests {
         let a0 = &mut edited.arrangements[0];
         a0.clips[0].position = 0;
         a0.clips[0].muted = false;
+        // Audio clip fades and gain live in the record (spec: flp/events/playlist.md bytes 36-59).
+        a0.clips[1].set_fade_in(Some((250.0, 1.5)));
+        a0.clips[1].set_fade_out(Some((80.0, -2.0)));
+        a0.clips[1].set_gain(0.5);
         a0.markers.push(TimeMarker::new(0, "Intro"));
         a0.tracks[3].enabled = false;
         a0.tracks[3].name = Some("Drums".into());
+        // A collapsed group: track 3 leads, tracks 4 and 5 are its members (spec: flp/events/playlist.md).
+        a0.tracks[3].collapsed = true;
+        a0.tracks[4].grouped = true;
+        a0.tracks[5].grouped = true;
+        a0.tracks[5].locked = true;
         edited.automations[0].points[1].value = 0.9;
         let mut ch = sampler(3, "Tempo", 0);
         ch.kind = ChannelKind::Automation;
@@ -2965,11 +3068,14 @@ mod tests {
         assert_eq!(file.header().unwrap().channel_count(), Some(4));
         assert_eq!(again.automations, edited.automations);
         assert_eq!(again.arrangements[0].markers, edited.arrangements[0].markers);
-        assert_eq!(again.arrangements[0].tracks[3], edited.arrangements[0].tracks[3]);
+        assert_eq!(again.arrangements[0].tracks[3..6], edited.arrangements[0].tracks[3..6]);
         let mut want = edited.arrangements[0].clips.clone();
         want.sort_by_key(|c| c.position);
         let strip = |v: &[Clip]| v.iter().map(|c| (c.position, c.length, c.track, c.source, c.muted, c.window)).collect::<Vec<_>>();
         assert_eq!(strip(&again.arrangements[0].clips), strip(&want));
+        let fx = |v: &[Clip]| v.iter().map(|c| (c.position, c.fade_in(), c.fade_out(), c.gain().to_bits())).collect::<Vec<_>>();
+        assert_eq!(fx(&again.arrangements[0].clips), fx(&want), "fades and gain survive");
+        assert!(want.iter().any(|c| c.fade_in() == Some((250.0, 1.5))));
         // Removing a track name works too.
         let mut e2 = again.clone();
         e2.arrangements[0].tracks[3].name = None;

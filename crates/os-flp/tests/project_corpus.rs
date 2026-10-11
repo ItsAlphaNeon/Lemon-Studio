@@ -109,6 +109,8 @@ fn edits_survive_a_write_read_cycle() {
         // The channel color is clamped on write, as FL does.
         let mut expected = project.clone();
         expected.channels[0].color = Some(Rgb::new(0x14, 0x80, 0xFF));
+        // The colour the file holds now (shown on the channel's playlist clips).
+        expected.channels[0].rack.stored_color = expected.channels[0].color;
         for p in &mut expected.patterns {
             p.notes.sort_by_key(|n| n.position);
         }
@@ -485,6 +487,8 @@ fn plugin_channel_states_survive() {
         ch.layer_children.clear();
         ch.envelopes = Default::default();
         ch.rack = Default::default();
+        // Reads back with the colour written for it: its own, else the default channel colour.
+        ch.rack.stored_color = Some(ch.color.unwrap_or(os_model::Rgb::new(0x30, 0x33, 0x34)));
         // A new channel's block stores none of the Misc / sound settings yet (they read back as defaults).
         ch.misc = Default::default();
         ch.sound = Default::default();

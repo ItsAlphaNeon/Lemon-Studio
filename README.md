@@ -72,7 +72,9 @@ losslessly, so existing projects open, play and save without losing data it does
 <td width="50%" valign="top">
 
 ### 🖥️ Interface
-- Playlist with clips, markers, automation and nine editing tools
+- Playlist with clips, markers, automation and nine editing tools; track groups (collapsible), several arrangements,
+  audio clip fades and gain with on-clip handles, stretch mode (Shift+M), tempo automation, quick quantize and
+  per-track export
 - Channel rack: step sequencer, mini piano rolls, graph editor, per-channel loops, filter groups, fill tools, swing, clone / move / delete channels
 - Piano roll with full tool set, velocity and event lanes
 - Mixer: track select / rename / colour, mute and solo, polarity and channel swap, click-to-route sends with send knobs

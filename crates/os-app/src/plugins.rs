@@ -390,6 +390,15 @@ impl Plugins {
 
     /// Loads sample `path` into row `row`'s Open Sampler: its current state with a new `sample-path`, so every other
     /// setting stays. False when the row hosts nothing or the plugin refused the state.
+    /// Row `row`'s Open Sampler stretches by resampling with multiplier `m` (§9b), keeping its other settings.
+    pub fn set_sampler_stretch(&mut self, row: usize, m: f64) -> bool {
+        let Some(h) = self.hosted.get(&row) else { return false };
+        let Ok(mut p) = h.plugin.lock() else { return false };
+        let set = [("ts_mode", serde_json::json!({ "i32": 0 })), ("ts_mul", serde_json::json!({ "f32": stretch_mul_norm(m) }))];
+        let Some(new) = p.save_state().and_then(|b| with_params(&b, &set)) else { return false };
+        p.load_state(&new)
+    }
+
     pub fn load_sample(&mut self, row: usize, path: &str) -> bool {
         let Some(h) = self.hosted.get(&row) else { return false };
         let Ok(mut p) = h.plugin.lock() else { return false };
@@ -742,6 +751,11 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
             params.push(format!("\"{pre}_{id}\":{v}"));
         }
     }
+    // Stretching by resampling (spec: audio/audio-clips.md): Resample mode with the multiplier.
+    if ch.sound.stretch[3] == 0 && ch.sound.stretch != [0; 4] {
+        params.push("\"ts_mode\":{\"i32\":0}".to_string());
+        params.push(format!("\"ts_mul\":{{\"f32\":{}}}", stretch_mul_norm(ch.sound.stretch_multiplier())));
+    }
     // Factory placeholders (`%FLStudioFactoryData%`...) become real paths: the plugin opens files directly.
     let path = resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
     let path = path.as_str();
@@ -778,6 +792,26 @@ fn json_string(s: &str) -> String {
 }
 
 /// `blob` (an Open Sampler state) with its `sample-path` field replaced by `path`.
+/// Open Sampler's MUL knob position of a stretch multiplier (25 %..400 %, doubling every quarter).
+fn stretch_mul_norm(m: f64) -> f32 {
+    ((m.log2() + 2.0) / 4.0).clamp(0.0, 1.0) as f32
+}
+
+/// `blob` (an Open Sampler state) with parameters set to the given JSON values.
+fn with_params(blob: &[u8], set: &[(&str, serde_json::Value)]) -> Option<Vec<u8>> {
+    let prefixed = blob.len() > 8 && blob[0] != b'{';
+    let json = if prefixed { &blob[8..] } else { blob };
+    let mut v: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let params = v.get_mut("params")?.as_object_mut()?;
+    for (k, val) in set {
+        params.insert((*k).to_string(), val.clone());
+    }
+    let out = serde_json::to_vec(&v).ok()?;
+    let mut b = if prefixed { (out.len() as u64).to_le_bytes().to_vec() } else { Vec::new() };
+    b.extend_from_slice(&out);
+    Some(b)
+}
+
 pub(crate) fn with_sample_path(blob: &[u8], path: &str) -> Option<Vec<u8>> {
     let prefixed = blob.len() > 8 && blob[0] != b'{';
     let json = if prefixed { &blob[8..] } else { blob };
