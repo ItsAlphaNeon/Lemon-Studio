@@ -96,6 +96,8 @@ losslessly, so existing projects open, play and save without losing data it does
 - **Open Parametric EQ 2**: 7-band EQ (VST3 + CLAP) with a graph editor, band tokens,
   spectrum monitor and A/B compare; it plays and saves the EQ slots of `.flp` projects
 - Host link protocol that lets OpenStudio's own plugins integrate with the host's window frame
+- Experimental host for FL native effect plugins (opt-in): the user's installed native effects
+  appear in the picker and process in mixer slots
 
 </td>
 </tr>
@@ -181,6 +183,7 @@ OpenStudio is a Cargo workspace of focused crates:
 - [x] Open Parametric EQ 2 plugin, built in for mixer slots
 - [x] Theme engine and theme import
 - [x] VST3 hosting (instruments, effects, editors, state, automation)
+- [x] Experimental native effect hosting (opt-in)
 - [ ] ASIO audio output
 - [ ] Saving plugin channels and full mixer state to project files
 - [ ] More built-in instruments and effects
