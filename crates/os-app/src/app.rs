@@ -1917,12 +1917,19 @@ impl App {
                 let s = &self.state;
                 let pg = crate::playlist::PGeom::new(s, g);
                 let hit = crate::playlist::clip_at(s, &pg, x, y);
-                let auto = hit.filter(|&i| matches!(crate::playlist::clips(s)[i].source, os_model::ClipSource::Channel(c) if s.project.automation(c).is_some()));
-                if auto != self.state.playlist.hover_clip {
+                let auto = hit.filter(|&i| {
+                    let c = &crate::playlist::clips(s)[i];
+                    matches!(c.source, os_model::ClipSource::Channel(ch) if s.project.automation(ch).is_some()) || crate::playlist::is_audio_clip(s, &pg, c)
+                });
+                let handle = hit.and_then(|i| crate::playlist::handle_at(s, &pg, i, x, y));
+                if auto != self.state.playlist.hover_clip || handle != self.state.playlist.hover_handle {
                     self.state.playlist.hover_clip = auto;
+                    self.state.playlist.hover_handle = handle;
                     self.invalidate();
                 }
-                if let Some(i) = hit {
+                if let (Some(i), Some(h)) = (hit, handle) {
+                    hint = Cow::Owned(crate::playlist::handle_hint(&crate::playlist::clips(&self.state)[i], h));
+                } else if let Some(i) = hit {
                     let r = pg.clip_rect(&crate::playlist::clips(&self.state)[i]);
                     let z = crate::playlist::EDGE.min(r.w / 4.0);
                     let tool_resizes = matches!(self.state.playlist.tool, crate::playlist::PlTool::Draw | crate::playlist::PlTool::Paint | crate::playlist::PlTool::Select);
@@ -1934,6 +1941,7 @@ impl App {
             }
         } else if self.state.playlist.hover_clip.is_some() {
             self.state.playlist.hover_clip = None;
+            self.state.playlist.hover_handle = None;
             self.invalidate();
         }
         let changed = hover != self.hover || hint != self.hint || resize != self.resize_cursor;
@@ -5352,6 +5360,64 @@ mod tests {
         assert!(app.state.song_mode, "a click on the ruler switches to SONG");
         assert_eq!(app.state.playlist.pos, 4 * bar);
         assert!(!app.transport.playing(), "and does not start playback");
+    }
+
+    /// Audio clip handles (spec: ui/playlist.md §9a): dragging the fade triangles sets the fades, the tension ring
+    /// bends the curve, the gain half-circle changes the gain; one undo step each.
+    #[test]
+    fn audio_clip_fade_handles() {
+        use crate::playlist as pl;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, _, _, _) = ruler_app(&mut c);
+        app.state.playlist_bar_w = 400.0;
+        let wav = std::env::temp_dir().join(format!("os-app-clip-fades-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
+        pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let ci = pl::clips(&app.state).len() - 1;
+        assert_eq!(pl::clips(&app.state)[ci].gain(), 1.0, "a new audio clip stores gain 1.0");
+        frame(&mut app, &mut c, None);
+        let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
+        let body = g.body(&pl::clips(&app.state)[ci]);
+        let drag = |app: &mut App, c: &mut Canvas, (x0, y0): (f32, f32), (x1, y1): (f32, f32)| {
+            app.mouse_move(x0, y0);
+            app.mouse_down();
+            for k in 1..=8 {
+                let f = k as f32 / 8.0;
+                app.mouse_move(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f);
+            }
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        // Fade-in: the top-left triangle dragged 100 px right.
+        drag(&mut app, &mut c, (body.x + 2.0, body.y + 2.0), (body.x + 102.0, body.y + 2.0));
+        let clip = pl::clips(&app.state)[ci];
+        let ms_per_tick = pl::to_src(&app.state, clip.source, 1.0);
+        let ms = |px: f32| f64::from(px / g.ppt) * ms_per_tick;
+        let (fin, t) = clip.fade_in().expect("a fade-in");
+        // The fade ends under the mouse.
+        assert!((f64::from(fin) - ms(102.0)).abs() < 2.0, "fade-in {fin} ms vs {}", ms(102.0));
+        assert_eq!(t, 0.0);
+        // Fade-out: the top-right triangle dragged 60 px left.
+        drag(&mut app, &mut c, (body.right() - 2.0, body.y + 2.0), (body.right() - 62.0, body.y + 2.0));
+        let (fout, _) = pl::clips(&app.state)[ci].fade_out().expect("a fade-out");
+        assert!((f64::from(fout) - ms(62.0)).abs() < 2.0, "fade-out {fout} ms");
+        // Tension: the fade-in's ring dragged up 10 px.
+        let (mx, my) = pl::fade_mid(body, body.x, pl::fade_xs(&app.state, &g, &pl::clips(&app.state)[ci]).0, 0.0, false);
+        app.mouse_move(mx, my);
+        assert_eq!(app.state.playlist.hover_handle, Some(pl::Handle::TensionIn));
+        drag(&mut app, &mut c, (mx, my), (mx, my - 10.0));
+        let t = pl::clips(&app.state)[ci].fade_in().unwrap().1;
+        assert!((t - 2.8).abs() < 0.01, "tension {t}");
+        // Gain: the half-circle dragged up 20 px = +3 dB.
+        drag(&mut app, &mut c, (body.cx(), body.bottom() - 2.0), (body.cx(), body.bottom() - 22.0));
+        let gain = pl::clips(&app.state)[ci].gain();
+        assert!((20.0 * gain.log10() - 3.0).abs() < 0.01, "gain {gain}");
+        // Each drag is one undo step.
+        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        assert_eq!(pl::clips(&app.state)[ci].gain(), 1.0);
+        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        assert_eq!(pl::clips(&app.state)[ci].fade_in().unwrap().1, 0.0);
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// Track groups (spec: ui/playlist.md §6a): grouped tracks follow their group track; a collapsed group's members

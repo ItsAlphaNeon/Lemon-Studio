@@ -2969,6 +2969,10 @@ mod tests {
         let a0 = &mut edited.arrangements[0];
         a0.clips[0].position = 0;
         a0.clips[0].muted = false;
+        // Audio clip fades and gain live in the record (spec: flp/events/playlist.md bytes 36-59).
+        a0.clips[1].set_fade_in(Some((250.0, 1.5)));
+        a0.clips[1].set_fade_out(Some((80.0, -2.0)));
+        a0.clips[1].set_gain(0.5);
         a0.markers.push(TimeMarker::new(0, "Intro"));
         a0.tracks[3].enabled = false;
         a0.tracks[3].name = Some("Drums".into());
@@ -2992,6 +2996,9 @@ mod tests {
         want.sort_by_key(|c| c.position);
         let strip = |v: &[Clip]| v.iter().map(|c| (c.position, c.length, c.track, c.source, c.muted, c.window)).collect::<Vec<_>>();
         assert_eq!(strip(&again.arrangements[0].clips), strip(&want));
+        let fx = |v: &[Clip]| v.iter().map(|c| (c.position, c.fade_in(), c.fade_out(), c.gain().to_bits())).collect::<Vec<_>>();
+        assert_eq!(fx(&again.arrangements[0].clips), fx(&want), "fades and gain survive");
+        assert!(want.iter().any(|c| c.fade_in() == Some((250.0, 1.5))));
         // Removing a track name works too.
         let mut e2 = again.clone();
         e2.arrangements[0].tracks[3].name = None;

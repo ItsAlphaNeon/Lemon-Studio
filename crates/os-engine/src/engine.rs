@@ -57,6 +57,65 @@ struct Trigger {
     from: f64,
     /// The same as a fraction of the sample (instrument channels: the sampler plugin starts there).
     start: f32,
+    /// An audio clip's fades, gain and late-start declick (`None` = plays as it is).
+    shape: Option<ClipShape>,
+}
+
+/// An audio clip's fades, gain and start declick on its voice's clock (spec: audio/audio-clips.md "Fades and clip
+/// gain", "Starting inside a clip").
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ClipShape {
+    /// Frames of the clip already past when the voice starts (playback started inside the clip).
+    since: u64,
+    /// The clip's length in frames.
+    total: u64,
+    fade_in: u64,
+    fade_out: u64,
+    tension_in: f64,
+    tension_out: f64,
+    gain: f32,
+    /// Frames of the short fade a late start begins with (0 = none).
+    declick: u64,
+}
+
+impl ClipShape {
+    /// The gain `age` frames after the voice started.
+    fn at(&self, age: u64) -> f32 {
+        let t = self.since + age;
+        let mut g = f64::from(self.gain);
+        if self.fade_in > 0 && t < self.fade_in {
+            g *= os_model::fade_curve(t as f64 / self.fade_in as f64, self.tension_in);
+        }
+        if self.fade_out > 0 {
+            let left = self.total.saturating_sub(t);
+            if left < self.fade_out {
+                g *= os_model::fade_curve(left as f64 / self.fade_out as f64, self.tension_out);
+            }
+        }
+        if self.declick > 0 && age < self.declick {
+            g *= os_model::fade_curve(age as f64 / self.declick as f64, 0.0);
+        }
+        g as f32
+    }
+}
+
+/// Frames of the fade-in a late start inside an audio clip begins with (an OpenStudio choice, spec:
+/// audio/audio-clips.md "Starting inside a clip").
+const LATE_START_SECONDS: f64 = 0.005;
+
+/// An audio clip's fades (milliseconds, tension) and gain as the clip record stores them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ClipFx {
+    fade_in: (f32, f32),
+    fade_out: (f32, f32),
+    gain: f32,
+}
+
+impl ClipFx {
+    fn of(c: &os_model::Clip) -> Option<ClipFx> {
+        let fx = ClipFx { fade_in: c.fade_in().unwrap_or((0.0, 0.0)), fade_out: c.fade_out().unwrap_or((0.0, 0.0)), gain: c.gain() };
+        (fx.fade_in.0 > 0.0 || fx.fade_out.0 > 0.0 || fx.gain != 1.0).then_some(fx)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +300,8 @@ struct Voice {
     /// Frames played so far, and the age at which the note ended (the channel envelopes' clock).
     age: u64,
     off: Option<u64>,
+    /// An audio clip's fades and gain.
+    shape: Option<ClipShape>,
 }
 
 /// Channel pitch automation range: ±2 semitones, the channel's default pitch range (spec: flp/events/automation.md).
@@ -388,6 +449,8 @@ pub struct Engine {
     /// notes waiting for the next tick (channel, key, velocity; negative = note off), this tick's events (channel,
     /// offset, key, velocity (`OFF` / `CHOKE` below zero), sample start fraction) and scratch.
     inst_offs: Vec<(u64, usize, u8, bool)>,
+    /// Audio clips playing on instrument channels: (channel, shape, frames since its start).
+    inst_shapes: Vec<(usize, ClipShape, u64)>,
     inst_live: Vec<(usize, u8, f32)>,
     inst_events: Vec<(usize, u32, u8, f32, f32)>,
     /// This tick's events after the channels' note rules, sorted by channel, and each channel's notes at its
@@ -566,6 +629,20 @@ impl Engine {
                     velocity: n.velocity,
                     from: state.sample.as_ref().map_or(0.0, |s| n.from_s * f64::from(s.rate)),
                     start: state.sample.as_ref().filter(|s| s.frames() > 0).map_or(0.0, |s| (n.from_s * f64::from(s.rate) / s.frames() as f64) as f32),
+                    shape: n.clip.map(|fx| {
+                        let ms = |v: f32| (f64::from(v.max(0.0)) * f64::from(rate) / 1000.0).round() as u64;
+                        let total = Clock::frame_of_tick(rate, ppq, tempo, n.tick + n.len) - Clock::frame_of_tick(rate, ppq, tempo, n.tick);
+                        ClipShape {
+                            since: 0,
+                            total,
+                            fade_in: ms(fx.fade_in.0),
+                            fade_out: ms(fx.fade_out.0),
+                            tension_in: f64::from(fx.fade_in.1),
+                            tension_out: f64::from(fx.fade_out.1),
+                            gain: fx.gain,
+                            declick: 0,
+                        }
+                    }),
                 })
             })
             .collect();
@@ -635,6 +712,7 @@ impl Engine {
             out_tick: 0,
             out_frame: 0,
             inst_offs: Vec::with_capacity(64),
+            inst_shapes: Vec::new(),
             inst_live: Vec::with_capacity(64),
             inst_events: Vec::with_capacity(64),
             inst_notes: Vec::with_capacity(64),
@@ -750,6 +828,7 @@ impl Engine {
             release: None,
             age: 0,
             off: None,
+            shape: None,
         });
         self.sounding.push((channel, key, u64::MAX));
     }
@@ -854,8 +933,13 @@ impl Engine {
             .filter_map(|t| {
                 let ch = self.channels.get(t.channel)?;
                 let frames = ch.sample.as_ref()?.frames() as f64;
-                let from = t.from + (at - frame(t.tick)) as f64 * t.rate * ch.base_rate;
-                (from < frames).then(|| Trigger { tick, from, start: (from / frames) as f32, ..*t })
+                let since = at - frame(t.tick);
+                let from = t.from + since as f64 * t.rate * ch.base_rate;
+                let total = t.cut.map_or(u64::MAX, |c| frame(c) - frame(t.tick));
+                let plain = ClipShape { since: 0, total, fade_in: 0, fade_out: 0, tension_in: 0.0, tension_out: 0.0, gain: 1.0, declick: 0 };
+                let declick = (LATE_START_SECONDS * f64::from(self.rate)).round() as u64;
+                let shape = Some(ClipShape { since, declick, ..t.shape.unwrap_or(plain) });
+                (from < frames).then(|| Trigger { tick, from, start: (from / frames) as f32, shape, ..*t })
             })
             .collect()
     }
@@ -931,6 +1015,8 @@ impl Engine {
         self.inst_tail = old.inst_tail;
         self.inst_offs = std::mem::take(&mut old.inst_offs);
         self.inst_offs.retain(|o| o.1 < n);
+        self.inst_shapes = std::mem::take(&mut old.inst_shapes);
+        self.inst_shapes.retain(|s| s.0 < n);
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
                 new.gains = o.gains;
@@ -1131,6 +1217,9 @@ impl Engine {
             if self.channels[t.channel].instrument.0.is_some() {
                 let k = t.key.min(127) as u8;
                 self.inst_events.push((t.channel, 0, k, f32::from(t.velocity) / 128.0, t.start));
+                if let Some(sh) = t.shape {
+                    self.inst_shapes.push((t.channel, sh, 0));
+                }
                 // An audio clip ends at its cut (spec: plugins/open-sampler.md Â§7); notes end with a note off.
                 match t.cut {
                     Some(c) => self.inst_offs.push((c, t.channel, k, true)),
@@ -1158,6 +1247,7 @@ impl Engine {
             release: None,
             age: 0,
             off: None,
+            shape: t.shape,
         });
     }
 
@@ -1207,6 +1297,14 @@ impl Engine {
             }
             let (l, r) = (&mut self.scratch.0[..n], &mut self.scratch.1[..n]);
             inst.process(self.rate, l, r);
+            // Audio clip fades and gain on this channel (spec: audio/audio-clips.md "Fades and clip gain").
+            if self.inst_shapes.iter().any(|s| s.0 == c) {
+                for f in 0..n {
+                    let g: f32 = self.inst_shapes.iter().filter(|s| s.0 == c).map(|s| s.1.at(s.2 + f as u64)).product();
+                    l[f] *= g;
+                    r[f] *= g;
+                }
+            }
             // A sample that is still playing must not be cut off by the idle tail.
             active |= inst.active();
             let (gl, gr) = ch.gain(1.0, 0.0);
@@ -1217,6 +1315,12 @@ impl Engine {
             }
         }
         self.inst_events.clear();
+        // A clip's shape is kept half a second past its end (the choke's own fade).
+        let tail = u64::from(self.rate / 2);
+        for s in &mut self.inst_shapes {
+            s.2 += n as u64;
+        }
+        self.inst_shapes.retain(|s| s.1.since + s.2 < s.1.total.saturating_add(tail));
         self.inst_active = active;
         if active {
             self.inst_tail = u64::from(self.rate) * INSTRUMENT_TAIL_SECONDS;
@@ -1399,6 +1503,7 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
             return false;
         }
         let t_s = v.age as f64 * ch.frame_s;
+        let shape = v.shape.map_or(1.0, |s| s.at(v.age));
         v.age += 1;
         let env_gain = match &ch.vol_env {
             None => 1.0,
@@ -1458,8 +1563,8 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
                 (gl, gr) = v.dest;
             }
         }
-        out[f * 2] += l * gl * fade * env_gain;
-        out[f * 2 + 1] += r * gr * fade * env_gain;
+        out[f * 2] += l * gl * fade * env_gain * shape;
+        out[f * 2 + 1] += r * gr * fade * env_gain * shape;
         pos += step;
     }
     v.pos = pos;
@@ -1559,11 +1664,13 @@ struct Sched {
     len: u64,
     /// Seconds into the sample where the voice starts (audio clip window start).
     from_s: f64,
+    /// An audio clip's fades and gain.
+    clip: Option<ClipFx>,
 }
 
 impl Sched {
     fn note(tick: u64, n: &os_model::Note) -> Self {
-        Sched { tick, channel: usize::from(n.channel), key: n.key, velocity: n.velocity, pan: n.pan, cut: None, len: u64::from(n.length), from_s: 0.0 }
+        Sched { tick, channel: usize::from(n.channel), key: n.key, velocity: n.velocity, pan: n.pan, cut: None, len: u64::from(n.length), from_s: 0.0, clip: None }
     }
 }
 
@@ -1812,7 +1919,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         // An audio clip plays its channel's sample from the window start (milliseconds), cut at the clip end.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
                             let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, velocity: 100, pan: 64, cut: Some(start + len), len, from_s });
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, velocity: 100, pan: 64, cut: Some(start + len), len, from_s, clip: ClipFx::of(c) });
                         }
                         Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
@@ -2334,8 +2441,10 @@ mod tests {
         e.seek_tick(96);
         let inside = e.render_all(480);
         assert!(whole[f(96) * 2] > 0.1, "the clip sounds at tick 96");
-        let worst = inside[..2000].iter().zip(&whole[f(96) * 2..]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        // After the 5 ms fade a late start begins with (240 frames at 48 kHz), the two agree.
+        let worst = inside[480..2480].iter().zip(&whole[f(96) * 2 + 480..]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         assert!(worst < 1e-6, "started inside, the clip plays from where it had got to (off by {worst})");
+        assert!(inside[0].abs() < 1e-6 && inside[240] < whole[f(96) * 2 + 240], "the late start fades in");
         // A hosted sampler is told where in the sample to start.
         #[derive(Default)]
         struct Log(Vec<(u64, &'static str, f32)>, u64);
@@ -2371,6 +2480,72 @@ mod tests {
         let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
         e.seek_tick(300);
         assert!(e.late.is_empty(), "the sample has run out by tick 300");
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    // spec: audio/audio-clips.md "Fades and clip gain"
+    #[test]
+    fn audio_clip_fades_and_gain() {
+        use os_model::{Clip, ClipSource};
+        let wav = std::env::temp_dir().join(format!("os-engine-clip-fades-{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 96000]).unwrap();
+        // A one-bar clip (1.846 s at 130 BPM) of a one-second DC sample: plain, then with fades and gain.
+        let mut p = song(vec![], vec![Clip::new(0, 384, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        let mut lib = SampleLibrary::new(None);
+        let plain = Engine::new(&p, &mut lib, 48000, PlayMode::Song).render_all(480);
+        let c = &mut p.arrangements[0].clips[0];
+        c.set_fade_in(Some((100.0, 0.0)));
+        c.set_fade_out(Some((50.0, 3.0)));
+        c.set_gain(2.0);
+        let faded = Engine::new(&p, &mut lib, 48000, PlayMode::Song).render_all(480);
+        let g = |f: usize| faded[f * 2] / plain[f * 2];
+        assert!(g(0).abs() < 1e-4, "starts silent: {}", g(0));
+        let want = |x: f64| 2.0 * os_model::fade_curve(x, 0.0) as f32;
+        for f in [1200, 2400, 3600] {
+            assert!((g(f) - want(f as f64 / 4800.0)).abs() < 1e-4, "fade-in at {f}: {} vs {}", g(f), want(f as f64 / 4800.0));
+        }
+        assert!((g(24000) - 2.0).abs() < 1e-4, "the gain in the middle: {}", g(24000));
+        // The sample ends after one second, before the clip and its fade-out: the fade-out is measured from the clip end.
+        let clip_frames = crate::clock::Clock::frame_of_tick(48000, 96, 130.0, 384) as usize;
+        assert!(clip_frames > 48000);
+        // The same on a hosted instrument (constant 1.0 while a note is held).
+        struct Held(bool);
+        impl crate::Instrument for Held {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {
+                self.0 = true;
+            }
+            fn note_off(&mut self, _o: u32, _k: u8) {
+                self.0 = false;
+            }
+            fn choke(&mut self, _o: u32, _k: u8) {
+                self.0 = false;
+            }
+            fn process(&mut self, _rate: u32, l: &mut [f32], r: &mut [f32]) {
+                let v = if self.0 { 1.0 } else { 0.0 };
+                l.fill(v);
+                r.fill(v);
+            }
+        }
+        let run = |p: &Project, lib: &mut SampleLibrary| {
+            let mut e = Engine::new(p, lib, 48000, PlayMode::Song);
+            e.set_instrument(0, Arc::new(std::sync::Mutex::new(Held(false))));
+            e.render_all(480)
+        };
+        let faded = run(&p, &mut lib);
+        let mut q = p.clone();
+        let c = &mut q.arrangements[0].clips[0];
+        c.set_fade_in(None);
+        c.set_fade_out(None);
+        c.set_gain(1.0);
+        let plain = run(&q, &mut lib);
+        let g = |f: usize| faded[f * 2] / plain[f * 2];
+        assert!((g(2400) - want(0.5)).abs() < 1e-4, "instrument fade-in midway: {}", g(2400));
+        assert!((g(24000) - 2.0).abs() < 1e-4, "instrument gain: {}", g(24000));
+        let end = clip_frames - 1200; // half way through the 50 ms fade-out
+        let w = 2.0 * os_model::fade_curve(1200.0 / 2400.0, 3.0) as f32;
+        assert!((g(end) - w).abs() < 2e-3, "instrument fade-out half way: {} vs {w}", g(end));
         let _ = std::fs::remove_file(&wav);
     }
 

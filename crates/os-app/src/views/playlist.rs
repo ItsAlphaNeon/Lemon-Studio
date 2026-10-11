@@ -557,6 +557,9 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
                 let wave = tint.map_or(Color::rgb(WAVE), |c| offset(c, 80));
                 let col = if c.muted { content } else { dim(wave) };
                 waveform(ui, s, g, c, ch, body_r, col);
+                if !c.muted {
+                    fades(ui, s, g, i, c, body_r, dim(wave));
+                }
             }
             (PickKind::Automation, ClipSource::Channel(ch)) => {
                 let col = if c.muted { content } else { dim(Color::rgb(CURVE)) };
@@ -599,8 +602,8 @@ fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Rect
     }
 }
 
-/// The clip's part of the sample, mirrored around the body's middle: the peak magnitude of every device-pixel column,
-/// filled as one anti-aliased shape (§2).
+/// The clip's part of the sample: every device-pixel column spans the minimum to the maximum of its samples, times
+/// the clip's fades and gain, filled as one anti-aliased shape (§2, §9a).
 fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Rect, col: Color) {
     let Some(path) = s.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
     let Some(w) = s.playlist.wave(&path) else { return };
@@ -612,7 +615,22 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Rect, co
     let px = 1.0 / ui.c.scale.max(1.0);
     let x0 = body.x.max(g.grid.x - px);
     let x1 = body.right().min(g.grid.right() + px);
-    let peak = |xa: f32, xb: f32| -> Option<f32> {
+    let clip_x = g.x_of(c.position as f32);
+    let total_ms = f64::from(c.length) * ms_per_tick;
+    let (fin, fout, gain) = (c.fade_in(), c.fade_out(), f64::from(c.gain()));
+    // Gain of the fades at screen x (the engine's law, os_model::fade_curve).
+    let shape = |x: f32| -> f32 {
+        let ms = f64::from((x - clip_x) / g.ppt) * ms_per_tick;
+        let mut k = gain;
+        if let Some((l, t)) = fin {
+            k *= os_model::fade_curve(ms / f64::from(l), f64::from(t));
+        }
+        if let Some((l, t)) = fout {
+            k *= os_model::fade_curve((total_ms - ms) / f64::from(l), f64::from(t));
+        }
+        k as f32
+    };
+    let range = |xa: f32, xb: f32| -> Option<(f32, f32)> {
         let ms_a = w0 + f64::from((xa - body.x) / g.ppt) * ms_per_tick;
         let ms_b = w0 + f64::from((xb - body.x) / g.ppt) * ms_per_tick;
         let fa = (ms_a * frames_per_ms).max(0.0) as usize / w.per;
@@ -623,25 +641,95 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Rect, co
         let fb = fb.min(w.peaks.len());
         // Cap the work per column when zoomed far out.
         let stride = ((fb - fa) / 32).max(1);
-        let m = w.peaks[fa..fb].iter().step_by(stride).fold(0.0f32, |m, &(a, b)| m.max(-a).max(b));
-        Some(m.min(1.0))
+        Some(w.peaks[fa..fb].iter().step_by(stride).fold((f32::MAX, f32::MIN), |(lo, hi), &(a, b)| (lo.min(a), hi.max(b))))
     };
     let mut top: Vec<(f32, f32)> = Vec::with_capacity(((x1 - x0) / px) as usize + 2);
+    let mut bottom: Vec<(f32, f32)> = Vec::with_capacity(top.capacity());
     let mut x = x0;
     while x < x1 {
-        let Some(m) = peak(x, x + px) else { break };
-        let h = (m * amp).max(0.35);
-        if top.is_empty() {
-            top.push((x, mid - h));
+        let Some((lo, hi)) = range(x, x + px) else { break };
+        let k = shape(x + px * 0.5) * amp;
+        let (mut yt, mut yb) = (mid - hi.clamp(-1.0, 1.0) * k, mid - lo.clamp(-1.0, 1.0) * k);
+        // Keep a hairline where the column is flat (a DC sample, silence).
+        if yb - yt < 0.7 {
+            let m = (yt + yb) / 2.0;
+            (yt, yb) = (m - 0.35, m + 0.35);
         }
-        top.push(((x + px * 0.5).min(x1), mid - h));
+        let xm = (x + px * 0.5).min(x1);
+        if top.is_empty() {
+            top.push((x, yt));
+            bottom.push((x, yb));
+        }
+        top.push((xm, yt));
+        bottom.push((xm, yb));
         x += px;
     }
-    let Some(&(_, y_end)) = top.last() else { return };
-    top.push((x.min(x1), y_end));
-    let mut shape = top.clone();
-    shape.extend(top.iter().rev().map(|&(x, y)| (x, 2.0 * mid - y)));
-    ui.c.fill_polygon(&shape, col);
+    let (Some(&(_, yt)), Some(&(_, yb))) = (top.last(), bottom.last()) else { return };
+    top.push((x.min(x1), yt));
+    bottom.push((x.min(x1), yb));
+    let mut outline = top;
+    outline.extend(bottom.into_iter().rev());
+    ui.c.fill_polygon(&outline, col);
+}
+
+/// An audio clip's fade curves, and its handles while the mouse is over it (§9a): fade triangles at the top
+/// corners (at the fades' ends), tension rings in the middle of each curve, the gain half-circle at the bottom.
+fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, body: Rect, wave: Color) {
+    if body.w < 12.0 || body.h < 10.0 {
+        return;
+    }
+    let white = ui.t.tx(0xffffff);
+    let hovered = s.playlist.hover_clip == Some(i);
+    let lit = |h: pl::Handle| hovered && s.playlist.hover_handle == Some(h);
+    let (fx_in, fx_out) = pl::fade_xs(s, g, c);
+    let curve = |ui: &mut Ui, xa: f32, xb: f32, t: f32, out: bool| {
+        let n = ((xb - xa) / 2.0).ceil().max(2.0) as usize;
+        let pts: Vec<(f32, f32)> = (0..=n)
+            .map(|k| {
+                let u = k as f32 / n as f32;
+                let x = if out { 1.0 - u } else { u };
+                (xa + (xb - xa) * u, body.bottom() - os_model::fade_curve(f64::from(x), f64::from(t)) as f32 * body.h)
+            })
+            .collect();
+        ui.c.polyline(&pts, 1.4, white.with_alpha(230));
+    };
+    if let Some((_, t)) = c.fade_in() {
+        curve(ui, body.x, fx_in, t, false);
+        ui.c.fill_rect(Rect::new(fx_in, body.y, 1.0, body.h), white.with_alpha(50));
+    }
+    if let Some((_, t)) = c.fade_out() {
+        curve(ui, fx_out, body.right(), t, true);
+        ui.c.fill_rect(Rect::new(fx_out - 1.0, body.y, 1.0, body.h), white.with_alpha(50));
+    }
+    // Handles: faint in the waveform's colour, white while the clip is hovered, brighter on the one under the mouse.
+    let col = |h: pl::Handle| if lit(h) { white } else if hovered { white.with_alpha(215) } else { wave.with_alpha(170) };
+    let k = 6.0;
+    ui.c.fill_polygon(&[(fx_in, body.y), (fx_in + k, body.y), (fx_in, body.y + k)], col(pl::Handle::FadeIn));
+    ui.c.fill_polygon(&[(fx_out, body.y), (fx_out - k, body.y), (fx_out, body.y + k)], col(pl::Handle::FadeOut));
+    let (gx, gy) = (body.cx(), body.bottom());
+    let r = if lit(pl::Handle::Gain) { 5.0 } else { 4.0 };
+    ui.c.push_clip(Rect::new(gx - 6.0, gy - 6.0, 12.0, 6.0));
+    ui.c.fill_circle(gx, gy, r, col(pl::Handle::Gain));
+    ui.c.pop_clip();
+    if hovered {
+        for (h, on, xa, xb, out) in [
+            (pl::Handle::TensionIn, c.fade_in(), body.x, fx_in, false),
+            (pl::Handle::TensionOut, c.fade_out(), fx_out, body.right(), true),
+        ] {
+            let Some((_, t)) = on else { continue };
+            if xb - xa <= 10.0 {
+                continue;
+            }
+            let (mx, my) = pl::fade_mid(body, xa, xb, t, out);
+            if lit(h) {
+                ui.c.fill_circle(mx, my, 5.5, white);
+            } else {
+                ui.c.fill_circle(mx, my, 4.0, ui.t.s(0x1c2328).with_alpha(200));
+                ui.c.stroke_circle(mx, my, 4.0, 1.3, white);
+                ui.c.line(mx - 2.2, my + 2.2, mx + 2.2, my - 2.2, 1.1, white);
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -388,8 +388,10 @@ pub struct PlaylistState {
     pub solo: Option<(u16, Vec<bool>)>,
     /// Zoom tool: the view before "zoom out" (bar width, scroll x, scroll y).
     pub zoom_back: Option<(f32, f32, f32)>,
-    /// Automation clip under the mouse (its points are drawn).
+    /// Automation or audio clip under the mouse (its points / handles are drawn).
     pub hover_clip: Option<usize>,
+    /// The audio clip handle under the mouse (drawn highlighted).
+    pub hover_handle: Option<Handle>,
     /// Last header click (track, time) for double-click rename.
     pub last_header: Option<(u16, std::time::Instant)>,
     /// Last left click on an audio clip (clip, time): a second one soon after opens its sampler.
@@ -420,6 +422,7 @@ impl Default for PlaylistState {
             solo: None,
             zoom_back: None,
             hover_clip: None,
+            hover_handle: None,
             last_header: None,
             last_clip: None,
             waves: RefCell::new(HashMap::new()),
@@ -453,7 +456,8 @@ impl PlaylistState {
                 .chunks(per)
                 .zip(s.right.chunks(per))
                 .map(|(l, r)| {
-                    let (mut lo, mut hi) = (0.0f32, 0.0f32);
+                    // The chunk's own range (a DC sample is one value, not a band from zero; §9a signed waveforms).
+                    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
                     for (a, b) in l.iter().zip(r) {
                         let v = (a + b) * 0.5;
                         lo = lo.min(v);
@@ -794,8 +798,14 @@ pub fn snap_delta(s: &State, g: &PGeom, dt: f32, alt: bool) -> i64 {
 pub fn place(s: &mut State, track: u16, tick: u32) -> usize {
     let src = source(s);
     let len = source_len(s, src);
+    let audio = source_kind(s, src) == PickKind::Audio && matches!(src, ClipSource::Channel(_));
     let a = arr_mut(s);
-    a.clips.push(Clip::new(tick, len, track, src));
+    let mut c = Clip::new(tick, len, track, src);
+    if audio {
+        // FL writes gain 1.0 into a new audio clip (spec: flp/events/playlist.md, byte 52).
+        c.set_gain(1.0);
+    }
+    a.clips.push(c);
     s.piano.dirty = true;
     clips(s).len() - 1
 }
@@ -1550,6 +1560,94 @@ pub enum PlDrag {
     Marker { i: usize, dt: i64, t0: u32 },
     Point { ch: u16, clip: usize, i: usize, x0: f32, y0: f32, beat0: f64, v0: f64, lock: Option<bool> },
     Tension { ch: u16, i: usize, y0: f32, t0: f32 },
+    /// An audio clip's fade-in (`out` false) or fade-out handle (§9a).
+    Fade { clip: usize, out: bool },
+    FadeTension { clip: usize, out: bool, y0: f32, t0: f32 },
+    /// An audio clip's gain handle: dB from where the drag started.
+    Gain { clip: usize, y0: f32, db0: f32 },
+}
+
+/// The handles an audio clip shows while the mouse is over it (§9a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handle {
+    FadeIn,
+    FadeOut,
+    TensionIn,
+    TensionOut,
+    Gain,
+}
+
+/// Tension per logical pixel of a tension-handle drag, and dB per pixel of a gain drag (§9a, OS: FL's per-pixel
+/// steps at 150 %).
+const TENSION_PER_PX: f32 = 0.28;
+const DB_PER_PX: f32 = 0.15;
+
+/// An audio clip (not a collapsed group's strip): the clips with fades and gain.
+pub fn is_audio_clip(s: &State, g: &PGeom, c: &Clip) -> bool {
+    source_kind(s, c.source) == PickKind::Audio && matches!(c.source, ClipSource::Channel(_)) && !g.rows.strip(c.track)
+}
+
+/// Pixels of `ms` milliseconds of an audio clip.
+pub fn ms_px(s: &State, g: &PGeom, c: &Clip, ms: f32) -> f32 {
+    (f64::from(ms) / to_src(s, c.source, 1.0).max(1e-9)) as f32 * g.ppt
+}
+
+/// Where an audio clip's fades end on screen: (fade-in end x, fade-out start x).
+pub fn fade_xs(s: &State, g: &PGeom, c: &Clip) -> (f32, f32) {
+    let body = g.body(c);
+    let fin = c.fade_in().map_or(0.0, |f| ms_px(s, g, c, f.0)).min(body.w);
+    let fout = c.fade_out().map_or(0.0, |f| ms_px(s, g, c, f.0)).min(body.w);
+    (body.x + fin, body.right() - fout)
+}
+
+/// The middle of a fade curve drawn across `body` from `x0` to `x1` (the same height for a fade-in and a fade-out).
+pub fn fade_mid(body: Rect, x0: f32, x1: f32, tension: f32, _out: bool) -> (f32, f32) {
+    let v = os_model::fade_curve(0.5, f64::from(tension)) as f32;
+    ((x0 + x1) / 2.0, body.bottom() - v * body.h)
+}
+
+/// The handle of audio clip `i` under (x, y), if any (§9a).
+pub fn handle_at(s: &State, g: &PGeom, i: usize, x: f32, y: f32) -> Option<Handle> {
+    let c = clips(s).get(i)?;
+    if !is_audio_clip(s, g, c) || c.muted || !matches!(s.playlist.tool, PlTool::Draw | PlTool::Paint | PlTool::Select) {
+        return None;
+    }
+    let body = g.body(c);
+    let (fx_in, fx_out) = fade_xs(s, g, c);
+    let near = |hx: f32, hy: f32, r: f32| (x - hx).abs() <= r && (y - hy).abs() <= r;
+    if let Some((_, t)) = c.fade_in() {
+        let (mx, my) = fade_mid(body, body.x, fx_in, t, false);
+        if fx_in - body.x > 10.0 && near(mx, my, 5.0) {
+            return Some(Handle::TensionIn);
+        }
+    }
+    if let Some((_, t)) = c.fade_out() {
+        let (mx, my) = fade_mid(body, fx_out, body.right(), t, true);
+        if body.right() - fx_out > 10.0 && near(mx, my, 5.0) {
+            return Some(Handle::TensionOut);
+        }
+    }
+    if near(fx_in + 3.0, body.y + 3.0, 5.0) {
+        return Some(Handle::FadeIn);
+    }
+    if near(fx_out - 3.0, body.y + 3.0, 5.0) {
+        return Some(Handle::FadeOut);
+    }
+    if near(body.cx(), body.bottom() - 2.0, 6.0) {
+        return Some(Handle::Gain);
+    }
+    None
+}
+
+/// Hint text of a clip handle.
+pub fn handle_hint(c: &Clip, h: Handle) -> String {
+    match h {
+        Handle::FadeIn => format!("Fade in: {:.0} ms", c.fade_in().map_or(0.0, |f| f.0)),
+        Handle::FadeOut => format!("Fade out: {:.0} ms", c.fade_out().map_or(0.0, |f| f.0)),
+        Handle::TensionIn => format!("Fade in tension: {:+.2}", c.fade_in().map_or(0.0, |f| f.1)),
+        Handle::TensionOut => format!("Fade out tension: {:+.2}", c.fade_out().map_or(0.0, |f| f.1)),
+        Handle::Gain => format!("Clip gain: {:+.1} dB", 20.0 * c.gain().log10()),
+    }
 }
 
 /// Edge of a clip under x: -1 left, 1 right, 0 body.
@@ -1575,6 +1673,24 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
     let hit = clip_at(s, &g, x, y);
     let tool = s.playlist.tool;
     let alt = app.alt;
+
+    // Audio clip handles: fades, fade tensions, gain (§9a).
+    if let (Some(ci), false) = (hit, right) {
+        if let Some(h) = handle_at(s, &g, ci, x, y) {
+            snapshot(s);
+            let c = clips(s)[ci];
+            app.drag = Some(Drag::Pl(match h {
+                Handle::FadeIn => PlDrag::Fade { clip: ci, out: false },
+                Handle::FadeOut => PlDrag::Fade { clip: ci, out: true },
+                Handle::TensionIn => PlDrag::FadeTension { clip: ci, out: false, y0: y, t0: c.fade_in().map_or(0.0, |f| f.1) },
+                Handle::TensionOut => PlDrag::FadeTension { clip: ci, out: true, y0: y, t0: c.fade_out().map_or(0.0, |f| f.1) },
+                Handle::Gain => PlDrag::Gain { clip: ci, y0: y, db0: 20.0 * c.gain().log10() },
+            }));
+            app.hint = Cow::Owned(handle_hint(&c, h));
+            app.invalidate();
+            return;
+        }
+    }
 
     // Automation points: drag, add, menu (Draw / Paint / Select tools) (§8).
     if let Some(ci) = hit {
@@ -1933,6 +2049,48 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
                 p.tension = (t0 + (y0 - y) / 80.0).clamp(-1.0, 1.0);
                 s.piano.dirty = true;
             }
+        }
+        PlDrag::Fade { clip, out } => {
+            let Some(c) = clips(s).get(clip).copied() else { return };
+            let body = g.body(&c);
+            let (fx_in, fx_out) = fade_xs(s, &g, &c);
+            // A fade reaches at most to where the other one starts.
+            let px = if out { (body.right() - x).clamp(0.0, body.right() - fx_in) } else { (x - body.x).clamp(0.0, fx_out - body.x) };
+            let ms = (f64::from(px / g.ppt) * to_src(s, c.source, 1.0)) as f32;
+            let c = &mut arr_mut(s).clips[clip];
+            let on = (px >= 2.0).then_some(ms);
+            if out {
+                let t = c.fade_out().map_or(0.0, |f| f.1);
+                c.set_fade_out(on.map(|ms| (ms, t)));
+            } else {
+                let t = c.fade_in().map_or(0.0, |f| f.1);
+                c.set_fade_in(on.map(|ms| (ms, t)));
+            }
+            let c = *c;
+            app.hint = Cow::Owned(handle_hint(&c, if out { Handle::FadeOut } else { Handle::FadeIn }));
+            app.state.piano.dirty = true;
+        }
+        PlDrag::FadeTension { clip, out, y0, t0 } => {
+            let t = (t0 + (y0 - y) * TENSION_PER_PX).clamp(-40.0, 40.0);
+            let c = &mut arr_mut(s).clips[clip];
+            if out {
+                if let Some((ms, _)) = c.fade_out() {
+                    c.set_fade_out(Some((ms, t)));
+                }
+            } else if let Some((ms, _)) = c.fade_in() {
+                c.set_fade_in(Some((ms, t)));
+            }
+            let c = *c;
+            app.hint = Cow::Owned(handle_hint(&c, if out { Handle::TensionOut } else { Handle::TensionIn }));
+            app.state.piano.dirty = true;
+        }
+        PlDrag::Gain { clip, y0, db0 } => {
+            let db = (db0 + (y0 - y) * DB_PER_PX).clamp(-60.0, 24.0);
+            let c = &mut arr_mut(s).clips[clip];
+            c.set_gain(10f32.powf(db / 20.0));
+            let c = *c;
+            app.hint = Cow::Owned(handle_hint(&c, Handle::Gain));
+            app.state.piano.dirty = true;
         }
     }
     app.invalidate();
