@@ -1536,7 +1536,8 @@ pub fn point_menu(s: &State, ch: u16, i: usize, x: f32, y: f32) -> Popup {
     let a = s.project.automation(ch);
     let n = a.map_or(0, |a| a.points.len());
     let mode = a.and_then(|a| a.points.get(i)).map(|p| p.mode);
-    let mut items = vec![PItem::head("Point"), PItem::new(format!("Point {}/{}", i + 1, n), Cmd::Nothing).off(), PItem::new("Delete", Cmd::PointDelete(ch, i))];
+    let title = PItem { head: true, ..PItem::new(format!("Point {}/{}", i + 1, n), Cmd::Nothing) };
+    let mut items = vec![title, PItem::new("Delete", Cmd::PointDelete(ch, i))];
     items.push(PItem::head("Mode"));
     for m in AutoMode::MENU {
         items.push(PItem::new(m.name(), Cmd::PointMode(ch, i, m)).mark(Mark::Radio(mode == Some(m))));

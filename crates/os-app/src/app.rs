@@ -805,6 +805,8 @@ pub struct App {
     pub(crate) wrap_failed: Vec<usize>,
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
     loading: Option<crate::loading::Loading>,
+    /// A WAV export is rendering (FILE > Export): its file name and progress (0..1); the same panel shows, input waits.
+    export: Option<(String, f32)>,
 }
 
 /// Window-level requests the shell must carry out after an event.
@@ -918,6 +920,7 @@ impl App {
             fx_failed: Vec::new(),
             wrap_failed: Vec::new(),
             loading: None,
+            export: None,
         };
         if let Some(p) = path {
             app.open(p);
@@ -984,6 +987,59 @@ impl App {
         };
         if let Some(target) = target {
             self.save_to(target);
+        }
+    }
+
+    /// FILE > Export as WAV (Ctrl+R, the toolbar's render button): renders what Play would play (the playlist in SONG
+    /// mode, one pass of the current pattern in PAT mode) with every hosted instrument and effect to a 32-bit float WAV
+    /// file, at the output device's rate. Playback stops; a progress panel shows until the file is written.
+    fn export_wav(&mut self) {
+        if self.export.is_some() {
+            return;
+        }
+        let p = crate::rack::play_project(&self.state);
+        let song = self.state.song_mode;
+        if song && p.arrangement().is_none_or(|a| a.clips.is_empty()) {
+            self.state.message = Some("Export: the playlist is empty (switch to PAT to export the current pattern)".into());
+            return self.invalidate();
+        }
+        if !song && p.patterns.iter().find(|q| q.number == self.state.pattern).is_none_or(|q| q.notes.is_empty()) {
+            self.state.message = Some(format!("Export: {} has no notes", crate::patterns::name_of(&self.state, self.state.pattern)));
+            return self.invalidate();
+        }
+        let stem = self.state.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
+        let mut dlg = rfd::FileDialog::new().add_filter("WAV audio", &["wav"]).set_file_name(format!("{stem}.wav"));
+        if let Some(d) = self.state.path.as_ref().and_then(|p| p.parent()) {
+            dlg = dlg.set_directory(d);
+        }
+        let Some(mut target) = dlg.save_file() else { return };
+        if target.extension().is_none() {
+            target.set_extension("wav");
+        }
+        let rate = Transport::device_rate().unwrap_or(44100);
+        let name = target.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        self.transport.export(&p, self.play_mode(), rate, target);
+        self.export = Some((name, 0.0));
+        self.invalidate();
+    }
+
+    /// Follows a running export: moves the progress bar, then reports the result.
+    fn export_tick(&mut self) {
+        let Some((name, _)) = self.export.clone() else { return };
+        match self.transport.export_status() {
+            crate::transport::Export::Running(p) => {
+                self.export = Some((name, p));
+                self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
+            }
+            crate::transport::Export::Done(r) => {
+                self.export = None;
+                self.state.message = Some(match r {
+                    Ok(secs) => format!("Exported {}:{:02} to {name}", (secs / 60.0) as u32, (secs % 60.0) as u32),
+                    Err(e) => format!("Export failed: {e}"),
+                });
+                self.invalidate();
+            }
+            crate::transport::Export::Idle => {}
         }
     }
 
@@ -1159,9 +1215,10 @@ impl App {
         self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
     }
 
-    /// A project is loading: the window shows the progress and takes no input (spec: ui/project-loading.md §2).
+    /// A project is loading or an export is rendering: the window shows the progress and takes no input (spec:
+    /// ui/project-loading.md §2).
     pub fn loading(&self) -> bool {
-        self.loading.is_some()
+        self.loading.is_some() || self.export.is_some()
     }
 
     /// Mixer slots that hold the project file's parametric EQ are played and edited by Open Parametric EQ 2, started
@@ -1196,6 +1253,7 @@ impl App {
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     fn plugin_tick(&mut self) {
         self.loading_tick();
+        self.export_tick();
         self.mixer_tick();
         self.sync_effects();
         self.params_tick();
@@ -1528,7 +1586,7 @@ impl App {
 
     /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
-        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading.is_some()
+        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading()
     }
 
     /// Periodic housekeeping; returns whether a repaint is needed.
@@ -1625,6 +1683,10 @@ impl App {
         };
         if let Some(l) = &self.loading {
             crate::loading::paint(canvas, &self.theme.colors, l);
+        }
+        if let Some((name, p)) = &self.export {
+            let status = format!("Rendering {name}   {:.0} %", p * 100.0);
+            crate::loading::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
         }
     }
 
@@ -3211,6 +3273,7 @@ impl App {
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("o") => self.act(Action::MenuItem(0, views::menus::FILE_OPEN)),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE)),
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_NEW)),
             _ => {}
         }
@@ -3562,9 +3625,9 @@ impl App {
                     if let Some(m) = pl::run(self, item.cmd) {
                         self.state.message = Some(m);
                     }
-                } else if !item.head && !item.sep {
+                } else if let pl::Cmd::NotYet(name) = item.cmd {
                     // A greyed-out entry only says so; the menu stays open.
-                    self.state.message = Some(off_text(&item.label));
+                    self.state.message = Some(off_text(name));
                 }
             }
             Action::PlPopupSub(i) => {
@@ -3575,8 +3638,8 @@ impl App {
                             self.state.message = Some(m);
                         }
                     }
-                    Some(item) => self.state.message = Some(off_text(&item.label)),
-                    None => {}
+                    Some(pl::PItem { cmd: pl::Cmd::NotYet(name), .. }) => self.state.message = Some(off_text(name)),
+                    _ => {}
                 }
             }
             _ => return false,
@@ -4154,8 +4217,8 @@ impl App {
                 s.message = Some("New project".into());
             }
             // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
-            (OPTIONS_MENU, i) if item_at(OPTIONS_MENU, i).and_then(|it| views::settings::tab_for_menu(it.label)).is_some() => {
-                let tab = item_at(OPTIONS_MENU, i).and_then(|it| views::settings::tab_for_menu(it.label)).expect("checked");
+            (OPTIONS_MENU | ADD_MENU, i) if item_at(menu, i).and_then(|it| views::settings::tab_for_menu(it.label)).is_some() => {
+                let tab = item_at(menu, i).and_then(|it| views::settings::tab_for_menu(it.label)).expect("checked");
                 self.open_settings(tab);
             }
             (0, FILE_OPEN) => {
@@ -4169,9 +4232,28 @@ impl App {
                 }
             }
             (0, FILE_SAVE) => self.save(false),
+            (0, FILE_EXPORT) => self.export_wav(),
+            (HELP_MENU, HELP_ABOUT) => {
+                self.state.message = Some(concat!("OpenStudio ", env!("CARGO_PKG_VERSION"), " (pre-alpha), free software under the GNU GPL v3 or later").into());
+            }
+            (ADD_MENU | TOOLS_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Pattern") => {
+                let at = crate::patterns::box_at_mouse(self.mouse);
+                if let Some(m) = crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindFirst, at) {
+                    self.state.message = Some(m);
+                }
+            }
+            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Stop sound") => {
+                self.transport.stop();
+                self.state.message = Some("Sound stopped".into());
+            }
+            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Reset empty playlist tracks") => {
+                if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::ResetEmptyTracks) {
+                    self.state.message = Some(m);
+                }
+            }
             (0, FILE_SAVE_AS) => self.save(true),
             (0, FILE_EXIT) => self.want_close = true,
-            (VIEW, i) if item_at(VIEW, i).is_some_and(|it| it.label == "Plugin picker") => {
+            (VIEW | ADD_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Plugin picker") => {
                 self.state.picker_open = true;
                 self.state.picker_cat = None;
             }
@@ -4561,7 +4643,7 @@ mod tests {
         app.state.z = vec![Win::Mixer, Win::ChannelRack];
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
-        for id in [KnobId::MasterVol, KnobId::MixPan(1), KnobId::ChanPan(0)] {
+        for id in [KnobId::ChanVol(0), KnobId::MixPan(1), KnobId::ChanPan(0)] {
             let r = hit_rect(&app, &Action::Knob(id));
             let v0 = app.state.knob(id);
             app.mouse_move(r.cx(), r.cy());
@@ -4597,7 +4679,7 @@ mod tests {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         frame(&mut app, &mut a, None);
-        let act = Action::PickerOpen;
+        let act = Action::ToggleWin(Win::Browser);
         let r = hit_rect(&app, &act);
         let px = |c: &Canvas| {
             let mut out = vec![0u32; 1920 * 1080];

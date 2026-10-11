@@ -1441,14 +1441,24 @@ impl Engine {
     /// block-based engine.
     pub fn render_all(&mut self, _block: usize) -> Vec<f32> {
         let mut out = Vec::new();
+        self.render_ticks(usize::MAX, &mut out);
+        out
+    }
+
+    /// `render_all` in steps (an export with a progress bar): appends up to `ticks` more ticks to `out`; true once the
+    /// song is over.
+    pub fn render_ticks(&mut self, ticks: usize, out: &mut Vec<f32>) -> bool {
         out.extend_from_slice(&self.out[self.out_pos..]);
         self.out_pos = self.out.len();
-        while !self.finished() {
+        for _ in 0..ticks {
+            if self.finished() {
+                return true;
+            }
             self.render_tick();
             out.extend_from_slice(&self.out);
             self.out_pos = self.out.len();
         }
-        out
+        self.finished()
     }
 }
 

@@ -58,6 +58,10 @@ pub struct Shared {
     /// Playback position in ticks (f64 bits): what every playhead and the time display show. A pattern wraps.
     tick: AtomicU64,
     sample_rate: AtomicU32,
+    /// An export is running, its progress in 1/1000 of the song, and its outcome once done.
+    exporting: AtomicBool,
+    export_permille: AtomicU32,
+    export_result: Mutex<Option<Result<f64, String>>>,
     /// Peak of the last block, f32 bits, per side.
     peak_l: AtomicU32,
     peak_r: AtomicU32,
@@ -125,7 +129,22 @@ enum Cmd {
     NoteOn(usize, u16, u8),
     NoteOff(usize, u16),
     Stop,
+    /// Render to a WAV file with the hosted plugins (FILE > Export): project, mode, sample rate, file.
+    Export(Box<Project>, PlayMode, u32, PathBuf),
 }
+
+/// Where an export is (`Transport::export_status`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Export {
+    Idle,
+    /// Rendering: 0..1 of the song.
+    Running(f32),
+    /// Finished: the length written in seconds, or what went wrong.
+    Done(Result<f64, String>),
+}
+
+/// An export renders at most this long past the song's end (instruments that never report silence).
+const EXPORT_TAIL_MAX_SECS: u64 = 30;
 
 /// Hosted instruments by rack row, and hosted mixer effects by (track, slot).
 #[derive(Default)]
@@ -190,6 +209,28 @@ impl Transport {
     pub fn device_rate() -> Option<u32> {
         let device = cpal::default_host().default_output_device()?;
         device.default_output_config().ok().map(|c| c.sample_rate())
+    }
+
+    /// Renders `project` offline to a 32-bit float WAV file at `rate`, with the hosted instruments and effects, on the
+    /// audio thread: playback, previews and live notes stop at once and nothing else processes the plugins meanwhile.
+    /// Follow it with `export_status`.
+    pub fn export(&self, project: &Project, mode: PlayMode, rate: u32, path: PathBuf) {
+        self.shared.generation.fetch_add(1, Ordering::AcqRel);
+        self.shared.state.store(STOPPED, Ordering::Release);
+        self.shared.export_permille.store(0, Ordering::Relaxed);
+        self.shared.exporting.store(true, Ordering::Release);
+        let _ = self.tx.send(Cmd::Export(Box::new(project.clone()), mode, rate, path));
+    }
+
+    /// The running export's progress, or its outcome once (then `Idle` again).
+    pub fn export_status(&self) -> Export {
+        if let Some(r) = self.shared.export_result.lock().ok().and_then(|mut r| r.take()) {
+            return Export::Done(r);
+        }
+        if self.shared.exporting.load(Ordering::Acquire) {
+            return Export::Running(self.shared.export_permille.load(Ordering::Relaxed) as f32 / 1000.0);
+        }
+        Export::Idle
     }
 
     /// Start (or restart) playback from `start_tick`; replaces whatever is playing or paused.
@@ -354,6 +395,29 @@ fn attach(e: &mut Engine, inst: &Instruments) {
             e.set_effect(*track, *slot, fx.clone());
         }
     }
+}
+
+/// Renders a whole song (or one pass of a pattern) with the hosted plugins and writes it to `path`; returns its length
+/// in seconds. Runs on the audio thread with no stream open.
+fn export(project: &Project, mode: PlayMode, rate: u32, path: &std::path::Path, library: &mut SampleLibrary, inst: &Instruments, shared: &Shared) -> Result<f64, String> {
+    let mut e = Engine::new(project, library, rate, mode);
+    attach(&mut e, inst);
+    let len = e.length().max(1);
+    let cap = len + u64::from(rate) * EXPORT_TAIL_MAX_SECS;
+    let mut audio: Vec<f32> = Vec::with_capacity(2 * (len as usize + rate as usize));
+    loop {
+        let done = e.render_ticks(32, &mut audio);
+        let frames = audio.len() as u64 / 2;
+        shared.export_permille.store((frames * 1000 / len).min(999) as u32, Ordering::Relaxed);
+        if done || frames >= cap {
+            break;
+        }
+    }
+    drop(e);
+    let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut w = std::io::BufWriter::new(file);
+    os_engine::wav::write_f32_stereo(&mut w, rate, &audio).and_then(|_| std::io::Write::flush(&mut w)).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(audio.len() as f64 / 2.0 / f64::from(rate))
 }
 
 /// Silences every hosted instrument (voices, tails, queued notes). Only called while no stream processes them.
@@ -551,6 +615,23 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     retire(s, &mut closing);
                 }
                 reset_pending = true;
+            }
+            Ok(Cmd::Export(project, mode, rate, path)) => {
+                // Every stream that could process the plugins goes at once (no fade), and they start from silence.
+                session = None;
+                live = None;
+                preview = None;
+                preview_until = None;
+                closing.clear();
+                reset_instruments(&inst);
+                reset_pending = false;
+                shared.rewind(0.0);
+                let result = export(&project, mode, rate, &path, &mut library, &inst, &shared);
+                reset_instruments(&inst);
+                if let Ok(mut slot) = shared.export_result.lock() {
+                    *slot = Some(result);
+                }
+                shared.exporting.store(false, Ordering::Release);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
@@ -804,6 +885,35 @@ mod tests {
         let shared = Arc::new(Shared::default());
         let r = Renderer::new(Arc::new(Mutex::new(e)), ctl.clone(), Arc::new(AtomicBool::new(false)), shared.clone(), 48000);
         (r, ctl, shared)
+    }
+
+    /// An export renders one pass of the pattern (not a loop) on the audio thread, with progress, into a WAV file.
+    #[test]
+    fn export_writes_a_wav_file() {
+        let (_, project) = looping_engine();
+        let t = Transport::new(None);
+        let path = std::env::temp_dir().join(format!("openstudio-export-test-{}.wav", std::process::id()));
+        t.export(&project, PlayMode::Pattern(1), 48000, path.clone());
+        assert!(matches!(t.export_status(), Export::Running(_) | Export::Done(_)), "running at once");
+        let t0 = Instant::now();
+        let secs = loop {
+            match t.export_status() {
+                Export::Done(r) => break r.expect("export"),
+                _ if t0.elapsed() > Duration::from_secs(30) => panic!("export did not finish"),
+                _ => std::thread::sleep(Duration::from_millis(5)),
+            }
+        };
+        assert_eq!(t.export_status(), Export::Idle, "the result is handed out once");
+        assert_eq!(t.state(), State::Stopped);
+        // One bar at 130 BPM is about 1.85 s; the sampler's ring-out adds a little, a loop would never end.
+        assert!(secs > 1.8 && secs < 8.0, "length {secs}");
+        let bytes = std::fs::read(&path).expect("file written");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(&bytes[..4], b"RIFF");
+        let frames = (bytes.len() - 44) / 8;
+        assert!((frames as f64 / 48000.0 - secs).abs() < 0.01, "file holds {frames} frames");
+        let samples = bytes[44..].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]).abs());
+        assert!(samples.fold(0.0f32, f32::max) > 0.01, "the notes are heard");
     }
 
     /// Pause fades out and then holds the engine exactly; resume continues from that frame (no restart, no jump).

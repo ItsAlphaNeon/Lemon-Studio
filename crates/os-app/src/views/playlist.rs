@@ -1030,8 +1030,11 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             if ui.hit(rr, action, it.label.to_string()) || open == Some(i) {
                 ui.c.fill_rect(rr, t.menu_pop_hi);
             }
-        } else {
+        } else if matches!(it.cmd, pl::Cmd::NotYet(_)) {
             ui.hit(rr, action, crate::app::off_text(&it.label));
+        } else {
+            // Disabled here and now (nothing to merge, the last arrangement), not missing.
+            ui.hit(rr, action, it.label.to_string());
         }
         let color = if live { t.menu_pop_text } else { t.menu_pop_dim };
         let (mx, my) = (rr.x + 10.0, rr.y + m.row / 2.0);
