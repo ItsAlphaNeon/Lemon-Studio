@@ -173,6 +173,8 @@ pub struct ChannelInfo {
     pub range: i32,
     /// Insert number, 0 = master.
     pub track: u16,
+    /// The channel's Misc tab values (`None`: no Misc tab, e.g. mixer effects).
+    pub misc: Option<crate::misc_page::MiscVals>,
 }
 
 /// What the user did in the frame, for the app to apply to the channel.
@@ -193,6 +195,12 @@ pub enum FrameEvent {
     Presets(i32, i32),
     /// The Presets box arrows (or the wheel over the box): next (+1) / previous (-1) preset.
     PresetStep(i32),
+    /// A Misc tab value changed (spec: ui/plugin-window.md "Misc tab").
+    Misc(crate::misc_page::M, f32),
+    /// A Misc tab list (chord list, number box values): the app opens it at this screen point.
+    MiscMenu(crate::misc_page::M, i32, i32),
+    /// A Misc tab keyboard key: key, velocity, pressed.
+    Note(u8, u8, bool),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -215,6 +223,8 @@ struct State {
     hint: String,
     /// The loaded preset's name, shown in the Presets box ("Presets" without one).
     preset: Option<String>,
+    /// Misc tab page state (tracking page, keyboard scroll, drag, hover).
+    misc_ui: crate::misc_page::MiscUi,
     /// Plugin editor size (logical px).
     editor: (f32, f32),
     events: Vec<FrameEvent>,
@@ -363,7 +373,10 @@ fn paint(c: &mut Canvas, st: &State) {
     let a = Rect::new(BORDER, ay, w - 2.0 * BORDER, h - ay - BORDER);
     c.fill_rect(a, c_body());
     if st.misc {
-        c.text_center(Font::new(16), a, c_grey(), "Miscellaneous functions: not available yet");
+        match &st.info.misc {
+            Some(v) => crate::misc_page::paint(c, &os_theme::current(), a.x, a.y, v, &st.misc_ui),
+            None => c.text_center(Font::new(16), a, c_grey(), "No channel settings here"),
+        }
     }
 }
 
@@ -388,12 +401,13 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     let troom = (p.x - 8.0 - tx).max(0.0);
     c.text_clip(f, tx, ty, troom, c_grey(), &target);
     let tw = c.text_width(f, &target).min(troom);
-    if !st.hint.is_empty() {
+    let hint = if st.misc { &st.misc_ui.hint } else { &st.hint };
+    if !hint.is_empty() {
         let hx = tx + tw + 14.0;
         let hf = Font::new(12);
         let hy = (19.0 - c.ascent(hf)).round();
         // A tab splits the hint: the part after it sits right-aligned before the Presets box (spec: plugins/host-link.md).
-        let (left, right) = st.hint.split_once('\t').unwrap_or((&st.hint, ""));
+        let (left, right) = hint.split_once('\t').unwrap_or((hint, ""));
         let end = p.x - 8.0;
         let rw = if right.is_empty() { 0.0 } else { c.text_width(hf, right).min((end - hx).max(0.0)) };
         if rw > 0.0 {
@@ -516,6 +530,7 @@ impl FrameWindow {
             misc: false,
             hint: String::new(),
             preset: None,
+            misc_ui: Default::default(),
             editor,
             events: Vec::new(),
             drag: None,
@@ -699,7 +714,7 @@ impl FrameWindow {
 
     pub fn set_info(&self, info: ChannelInfo) {
         let mut st = self.state.borrow_mut();
-        if st.info != info && st.drag.is_none() {
+        if st.info != info && st.drag.is_none() && st.misc_ui.drag.is_none() {
             st.info = info;
             drop(st);
             unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
@@ -924,6 +939,9 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                     os_clap::wake();
                     return 0;
                 }
+                if part.is_none() && misc_button(hwnd, w, x, y, Btn::Left) {
+                    return 0;
+                }
                 let mut relayout = false;
                 {
                     let mut st = w.state.borrow_mut();
@@ -980,9 +998,17 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 InvalidateRect(hwnd, std::ptr::null(), 0);
                 0
             }
+            WM_RBUTTONDOWN => {
+                let (x, y) = client_point(hwnd, lp, w.scale, false);
+                misc_button(hwnd, w, x, y, Btn::Right);
+                0
+            }
             WM_MBUTTONDOWN => {
                 // Middle click resets a knob (spec: ui/knobs.md, owner decision).
                 let (x, y) = client_point(hwnd, lp, w.scale, false);
+                if misc_button(hwnd, w, x, y, Btn::Middle) {
+                    return 0;
+                }
                 let part = part_at(&w.state.borrow(), x, y);
                 if let Some(Part::Knob(i)) = part {
                     let k = KNOBS[usize::from(i)];
@@ -993,7 +1019,10 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 0
             }
             WM_MOUSEMOVE => {
-                let (_, y) = client_point(hwnd, lp, w.scale, false);
+                let (x, y) = client_point(hwnd, lp, w.scale, false);
+                if misc_move(hwnd, w, x, y) {
+                    return 0;
+                }
                 let mut st = w.state.borrow_mut();
                 if let Some((cx, cy, wx, wy)) = st.moving {
                     drop(st);
@@ -1019,18 +1048,23 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 let mut st = w.state.borrow_mut();
                 st.drag = None;
                 st.moving = None;
+                misc_release(&mut st);
                 0
             }
             WM_CAPTURECHANGED => {
                 let mut st = w.state.borrow_mut();
                 st.drag = None;
                 st.moving = None;
+                misc_release(&mut st);
                 0
             }
             WM_MOUSEWHEEL => {
                 let (x, y) = client_point(hwnd, lp, w.scale, true);
                 let notches = ((wp >> 16) & 0xffff) as u16 as i16 as f32 / 120.0;
                 let part = part_at(&w.state.borrow(), x, y);
+                if part.is_none() && misc_wheel(hwnd, w, x, y, notches) {
+                    return 0;
+                }
                 if matches!(part, Some(Part::Presets | Part::PresetPrev | Part::PresetNext)) && notches != 0.0 {
                     // Wheel down = next preset.
                     w.state.borrow_mut().events.push(FrameEvent::PresetStep(if notches < 0.0 { 1 } else { -1 }));
@@ -1054,6 +1088,169 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Misc tab input (spec: ui/plugin-window.md "Misc tab"; the page itself is `misc_page`).
+
+#[derive(Clone, Copy, PartialEq)]
+enum Btn {
+    Left,
+    Right,
+    Middle,
+}
+
+/// The Misc page hit under frame point (x, y), when the Misc tab shows.
+fn misc_hit(st: &State, x: f32, y: f32) -> Option<crate::misc_page::Hit> {
+    if !st.misc || st.info.misc.is_none() {
+        return None;
+    }
+    let (ax, ay) = (BORDER, st.area_y());
+    crate::misc_page::hit(&st.misc_ui, x - ax, y - ay)
+}
+
+/// Sets a Misc value on the page at once and tells the app.
+fn misc_set(st: &mut State, m: crate::misc_page::M, v: f32) {
+    if let Some(vals) = st.info.misc.as_mut() {
+        vals.set(m, v);
+    }
+    st.events.push(FrameEvent::Misc(m, v));
+    misc_hint(st, Some(crate::misc_page::Hit::Value(m)));
+}
+
+fn misc_hint(st: &mut State, h: Option<crate::misc_page::Hit>) {
+    use crate::misc_page::{note_name, value_text, Hit, M};
+    st.misc_ui.hint = match (h, &st.info.misc) {
+        (Some(Hit::Value(m) | Hit::Step(m, _)), Some(v)) => format!("{}: {}", m.label(), value_text(m, v.get(m))),
+        (Some(Hit::ArpDir(i)), _) => format!("Arpeggio direction: {}", value_text(M::ArpDir, f32::from(i))),
+        (Some(Hit::Key(k)), _) => format!("{} (right click sets the root note)", note_name(i32::from(k))),
+        (Some(Hit::CutSelf), _) => "Cut itself: a new note cuts the channel's playing notes".into(),
+        (Some(Hit::Reset), _) => "Reset the root note and fine tuning".into(),
+        (Some(Hit::TrackTab(k)), _) => (if k { "Key tracking" } else { "Velocity tracking" }).into(),
+        _ => String::new(),
+    };
+}
+
+/// A button press over the Misc page; returns whether the page took it.
+unsafe fn misc_button(hwnd: HWND, w: &mut Win, x: f32, y: f32, b: Btn) -> bool {
+    use crate::misc_page::{self as mp, Hit, M};
+    let Some(h) = misc_hit(&w.state.borrow(), x, y) else { return false };
+    let scale = w.scale;
+    let mut st = w.state.borrow_mut();
+    let Some(vals) = st.info.misc else { return false };
+    let screen = || {
+        let mut p = POINT { x: (x * scale) as i32, y: (y * scale) as i32 };
+        unsafe { ClientToScreen(hwnd, &mut p) };
+        (p.x, p.y)
+    };
+    match (b, h) {
+        (Btn::Middle, Hit::Value(m)) => misc_set(&mut st, m, mp::default_of(m)),
+        (Btn::Right, Hit::Value(m) | Hit::Step(m, _)) if mp::list_on_right(m) => {
+            let (sx, sy) = screen();
+            st.events.push(FrameEvent::MiscMenu(m, sx, sy));
+        }
+        (Btn::Right, Hit::Key(k)) => misc_set(&mut st, M::Root, f32::from(k)),
+        (Btn::Left, Hit::Value(m)) if mp::list_on_click(m) => {
+            let (sx, sy) = screen();
+            st.events.push(FrameEvent::MiscMenu(m, sx, sy));
+        }
+        (Btn::Left, Hit::Value(m)) if mp::draggable(m) => {
+            st.misc_ui.drag = Some((m, mp::drag_start(m, x - BORDER, y - st.area_y()), vals.get(m)));
+            unsafe { SetCapture(hwnd) };
+        }
+        (Btn::Left, Hit::Value(m)) => {
+            if let Some(v) = mp::click_value(m, vals.get(m)) {
+                misc_set(&mut st, m, v);
+            }
+        }
+        (Btn::Left, Hit::Step(m, d)) => {
+            let (lo, hi) = mp::range_of(m);
+            misc_set(&mut st, m, (vals.get(m) + d as f32).clamp(lo, hi));
+        }
+        (Btn::Left, Hit::ArpDir(i)) => misc_set(&mut st, M::ArpDir, f32::from(i)),
+        (Btn::Left, Hit::TrackTab(k)) => st.misc_ui.track_key = k,
+        (Btn::Left, Hit::CutSelf) => {
+            // The channel cuts itself: cut and cut-by the same group (spec: ui/plugin-window.md "Misc tab").
+            let g = if vals.get(M::Cut) >= 1.0 { vals.get(M::Cut) } else { 1.0 };
+            misc_set(&mut st, M::Cut, g);
+            misc_set(&mut st, M::CutBy, g);
+        }
+        (Btn::Left, Hit::Reset) => {
+            misc_set(&mut st, M::Root, 60.0);
+            misc_set(&mut st, M::Fine, 0.0);
+        }
+        (Btn::Left, Hit::Key(k)) => {
+            st.misc_ui.held = Some(k);
+            st.events.push(FrameEvent::Note(k, 100, true));
+            unsafe { SetCapture(hwnd) };
+        }
+        _ => {}
+    }
+    drop(st);
+    os_clap::wake();
+    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+    true
+}
+
+/// Mouse move over / dragging on the Misc page; returns whether the page took it (a drag).
+unsafe fn misc_move(hwnd: HWND, w: &mut Win, x: f32, y: f32) -> bool {
+    let mut st = w.state.borrow_mut();
+    if !st.misc {
+        return false;
+    }
+    if st.misc_ui.drag.is_some() {
+        let fine = unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
+        let ay = st.area_y();
+        if let Some((m, v)) = crate::misc_page::drag_value(&st.misc_ui, x - BORDER, y - ay, fine) {
+            if st.info.misc.is_some_and(|vals| vals.get(m) != v) {
+                misc_set(&mut st, m, v);
+                drop(st);
+                os_clap::wake();
+                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+            }
+        }
+        return true;
+    }
+    if st.drag.is_some() || st.moving.is_some() {
+        return false;
+    }
+    let h = misc_hit(&st, x, y);
+    if h != st.misc_ui.hover {
+        st.misc_ui.hover = h;
+        misc_hint(&mut st, h);
+        drop(st);
+        unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+    }
+    false
+}
+
+fn misc_release(st: &mut State) {
+    st.misc_ui.drag = None;
+    if let Some(k) = st.misc_ui.held.take() {
+        st.events.push(FrameEvent::Note(k, 0, false));
+        os_clap::wake();
+    }
+}
+
+/// The wheel over the Misc page; returns whether the page took it.
+unsafe fn misc_wheel(hwnd: HWND, w: &mut Win, x: f32, y: f32, notches: f32) -> bool {
+    use crate::misc_page::{self as mp, Hit};
+    let Some(h) = misc_hit(&w.state.borrow(), x, y) else { return false };
+    let mut st = w.state.borrow_mut();
+    match h {
+        Hit::Value(m) | Hit::Step(m, _) => {
+            let Some(v) = st.info.misc.map(|vals| vals.get(m)) else { return false };
+            if let Some(nv) = mp::wheel_value(m, v, notches) {
+                misc_set(&mut st, m, nv);
+                os_clap::wake();
+            }
+        }
+        Hit::Key(_) | Hit::Keyboard => mp::scroll_keyboard(&mut st.misc_ui, notches),
+        _ => {}
+    }
+    drop(st);
+    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+    true
 }
 
 /// Screen position for a new plugin window: right of the owner's left edge, below its toolbar (physical px).
@@ -1204,8 +1401,8 @@ mod tests {
     use super::*;
 
     fn state(strip: bool, target: &str) -> State {
-        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0 };
-        State { info, strip, pages: vec![PageIcon::Plugin], page: 0, misc: false, hint: String::new(), preset: None, editor: (480.0, 270.0), events: Vec::new(), drag: None, moving: None, detached: false }
+        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, misc: Some(Default::default()) };
+        State { info, strip, pages: vec![PageIcon::Plugin], page: 0, misc: false, hint: String::new(), preset: None, misc_ui: Default::default(), editor: (480.0, 270.0), events: Vec::new(), drag: None, moving: None, detached: false }
     }
 
     #[test]

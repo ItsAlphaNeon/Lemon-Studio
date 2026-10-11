@@ -260,6 +260,8 @@ pub enum Cmd {
     Param(crate::params::PCmd),
     /// Plugin presets (spec: plugins/presets.md).
     Preset(crate::presets::PCmd),
+    /// A Misc tab list entry: rack row, value, new value (spec: ui/plugin-window.md "Misc tab").
+    Misc(usize, crate::misc_page::M, f32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1063,7 +1065,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         mixer_track: 0,
         sample_path: None,
         layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(),
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
     });
     s.project.automations.push(os_flp::project::new_automation(index, tgt, value.clamp(0.0, 1.0), beats));
     let track = free_track(s, track_after_used(s), a, b);
@@ -1107,7 +1109,7 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
         mixer_track,
         sample_path: Some(path.to_string()),
         layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(),
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
     });
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Audio;
@@ -2051,6 +2053,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
         Cmd::Param(c) => return app.params_cmd(c),
         Cmd::Preset(c) => return crate::presets::run(app, c),
+        Cmd::Misc(row, m, v) => {
+            crate::misc::set(app, row, m, v);
+            return None;
+        }
         #[cfg(windows)]
         Cmd::PluginDetach(row, on) => {
             app.plugins.set_detached(row, on);
@@ -2080,7 +2086,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let s = &mut app.state;
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::PluginDetach(..) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

@@ -207,6 +207,135 @@ pub struct Channel {
     pub envelopes: [Envelope; 5],
     /// Channel rack state saved with the channel.
     pub rack: ChannelRack,
+    /// The plugin window's Misc tab settings (polyphony, cut groups, arpeggiator, echo, root note...).
+    pub misc: ChannelMisc,
+}
+
+/// A channel's Misc tab settings (spec: ui/plugin-window.md "Misc tab"; storage: flp/events/channels.md "Misc
+/// settings"). Knobs are 0.0..=1.0; bipolar knobs (levels, tracking, echo pan / mod / pitch) are -1.0..=1.0 with 0
+/// = centre.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChannelMisc {
+    /// Levels adjustment: panning, volume, Mod X, Mod Y (bipolar).
+    pub levels: [f32; 4],
+    /// Maximum polyphony; 0 = unlimited.
+    pub max_poly: u32,
+    /// Slide (portamento) time knob.
+    pub slide: f32,
+    /// Portamento: every new note slides from the previous one.
+    pub porta: bool,
+    /// Mono: one voice at a time.
+    pub mono: bool,
+    /// Note gate, time shift and swing knobs (gate 1.0 = off).
+    pub gate: f32,
+    pub shift: f32,
+    pub swing: f32,
+    /// Full portamento.
+    pub full_porta: bool,
+    /// Velocity tracking (0) and key tracking (1).
+    pub tracking: [Tracking; 2],
+    /// Cut group this channel cuts, and the group that cuts it; 0 = none.
+    pub cut: u32,
+    pub cut_by: u32,
+    pub arp: Arpeggio,
+    pub echo: Echo,
+    /// Root note (MIDI key, 60 = C5).
+    pub root: u8,
+    /// Follows the main (project) pitch.
+    pub main_pitch: bool,
+    /// Adds the root note to played keys.
+    pub add_key: bool,
+    /// Fine tuning, cents (-100..=100).
+    pub fine: i32,
+}
+
+impl Default for ChannelMisc {
+    /// A new channel's settings.
+    fn default() -> Self {
+        ChannelMisc {
+            levels: [0.0; 4],
+            max_poly: 0,
+            slide: 0.35,
+            porta: false,
+            mono: false,
+            gate: 1.0,
+            shift: 0.0,
+            swing: 1.0,
+            full_porta: true,
+            tracking: [Tracking::default(); 2],
+            cut: 0,
+            cut_by: 0,
+            arp: Arpeggio::default(),
+            echo: Echo::default(),
+            root: 60,
+            main_pitch: true,
+            add_key: false,
+            fine: 0,
+        }
+    }
+}
+
+/// One tracking page of the Misc tab (velocity or key).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tracking {
+    /// Middle point (velocity or MIDI key).
+    pub mid: u8,
+    /// To panning, Mod X, Mod Y (bipolar).
+    pub pan: f32,
+    pub mod_x: f32,
+    pub mod_y: f32,
+}
+
+impl Default for Tracking {
+    fn default() -> Self {
+        Tracking { mid: 60, pan: 0.0, mod_x: 0.0, mod_y: 0.0 }
+    }
+}
+
+/// The Misc tab's arpeggiator.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Arpeggio {
+    /// 0 off, 1 up, 2 down, 3 up-down sticky, 4 up-down bounce, 5 random.
+    pub direction: u8,
+    /// Time and gate knobs.
+    pub time: f32,
+    pub gate: f32,
+    /// Range in octaves (1..).
+    pub range: u32,
+    /// Note repeat; 0 = none.
+    pub repeat: u32,
+    pub slide: bool,
+    /// Chord list index (0 = auto with sustain).
+    pub chord: u32,
+}
+
+impl Default for Arpeggio {
+    fn default() -> Self {
+        Arpeggio { direction: 0, time: 0.58, gate: 1.0, range: 1, repeat: 0, slide: false, chord: 0 }
+    }
+}
+
+/// The Misc tab's echo delay.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Echo {
+    /// Feedback and time knobs.
+    pub feed: f32,
+    pub time: f32,
+    /// Panning, Mod X, Mod Y and pitch of each echo (bipolar).
+    pub pan: f32,
+    pub mod_x: f32,
+    pub mod_y: f32,
+    pub pitch: f32,
+    /// Number of echoes (1..).
+    pub echoes: u32,
+    pub ping_pong: bool,
+    pub fat: bool,
+}
+
+impl Default for Echo {
+    fn default() -> Self {
+        Echo { feed: 0.0, time: 0.45, pan: 0.0, mod_x: 0.0, mod_y: 0.0, pitch: 0.0, echoes: 4, ping_pong: false, fat: false }
+    }
 }
 
 /// Channel rack settings of one channel (spec: flp/events/channels.md).

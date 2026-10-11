@@ -662,6 +662,7 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
             zipped: loc.zipped.is_some_and(|i| int(&events[i]) != 0),
             group: loc.group.map_or(0, |i| int(&events[i])),
         },
+        misc: Default::default(),
     }
 }
 
@@ -2475,7 +2476,7 @@ mod tests {
             mixer_track: track,
             sample_path: None,
             layer_children: vec![],
-            envelopes: Default::default(), rack: Default::default(),
+            envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         }
     }
 

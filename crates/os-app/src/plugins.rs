@@ -50,6 +50,10 @@ pub enum Request {
     Presets(usize, i32, i32),
     /// The Presets box arrows: next (+1) / previous (-1) preset.
     PresetStep(usize, i32),
+    /// A Misc tab value changed (spec: ui/plugin-window.md "Misc tab").
+    Misc(usize, crate::misc_page::M, f32),
+    /// A Misc tab list asks for its menu at this screen point.
+    MiscMenu(usize, crate::misc_page::M, i32, i32),
 }
 
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
@@ -361,6 +365,15 @@ impl Plugins {
         self.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.load_state(data))
     }
 
+    /// Sets the parameter named `name` of the instance under `key` to plain value `plain` (the plugin's own range).
+    /// False when the instance or the parameter is missing.
+    pub fn set_param_named(&self, key: usize, name: &str, plain: f64) -> bool {
+        let Some(mut p) = self.hosted.get(&key).and_then(|h| h.plugin.lock().ok()) else { return false };
+        let Some(info) = (0..p.param_count()).filter_map(|i| p.param_info(i)).find(|i| i.name == name) else { return false };
+        let n = if info.max > info.min { (plain - info.min) / (info.max - info.min) } else { 0.0 };
+        p.set_param(info.id, n.clamp(0.0, 1.0))
+    }
+
     /// The project-file state of the Open Parametric EQ 2 in mixer slot `key` (its plugin state converted back),
     /// `None` when the slot hosts something else.
     pub fn eq_file_state(&self, key: usize) -> Option<Vec<u8>> {
@@ -583,6 +596,9 @@ impl Plugins {
                         FrameEvent::Menu(x, y) => Request::Menu(row, x, y),
                         FrameEvent::Presets(x, y) => Request::Presets(row, x, y),
                         FrameEvent::PresetStep(d) => Request::PresetStep(row, d),
+                        FrameEvent::Misc(m, v) => Request::Misc(row, m, v),
+                        FrameEvent::MiscMenu(m, x, y) => Request::MiscMenu(row, m, x, y),
+                        FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
                     });
                 }
             }
@@ -842,7 +858,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let hwnd = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -871,7 +887,7 @@ mod tests {
         let index = pl.effect_index(OPEN_EQ).expect("built-in EQ");
         pl.create_effect(1, 0, index, None).unwrap();
         let key = fx_key(1, 0);
-        let info = ChannelInfo { name: OPEN_EQ.into(), target: "Insert 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: OPEN_EQ.into(), target: "Insert 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(key, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
@@ -899,7 +915,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -990,7 +1006,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -1064,7 +1080,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -1147,7 +1163,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -1227,7 +1243,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -1418,7 +1434,7 @@ mod tests {
         use windows_sys::Win32::Foundation::RECT;
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         pl.create(0, pl.index_of(OPEN_SAMPLER).unwrap()).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();

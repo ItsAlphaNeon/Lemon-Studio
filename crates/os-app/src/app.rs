@@ -1093,6 +1093,18 @@ impl App {
                         self.state.message = crate::presets::run(self, crate::presets::PCmd::Step(row, d));
                         continue;
                     }
+                    Request::Misc(row, m, v) => {
+                        crate::misc::set(self, row, m, v);
+                        continue;
+                    }
+                    Request::MiscMenu(row, m, x, y) => {
+                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let (lx, ly) = self.screen_to_canvas(x, y);
+                        self.state.playlist.popup = Some(crate::misc::menu(self, row, m, lx, ly));
+                        self.popup_lift = detached.then_some(row);
+                        self.invalidate();
+                        continue;
+                    }
                     Request::ToggleOn(row) => chans.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled),
                     Request::Volume(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.volume = v),
                     Request::Pan(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.pan = v),
@@ -3869,6 +3881,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
         layer_children: Vec::new(),
         envelopes: Default::default(),
         rack: Default::default(),
+        misc: Default::default(),
     }
 }
 
@@ -3892,6 +3905,7 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
         pitch_cents: ch.pitch_cents,
         range: 2,
         track: ch.mixer_track,
+        misc: Some(crate::misc::vals_of(ch)),
     })
 }
 

@@ -197,6 +197,7 @@ mod tests {
             envelopes: Default::default(),
             rack: Default::default(),
             plugin_state: None,
+            misc: Default::default(),
         }
     }
 

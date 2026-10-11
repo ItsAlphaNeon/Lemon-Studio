@@ -1041,6 +1041,7 @@ pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate:
     let m = p.mixer.iter().find(|m| m.index == t)?;
     let name = ui.slot_names.get(&(t, k)).cloned().or_else(|| m.slots.get(usize::from(k))?.as_ref().map(crate::project_plugins::slot_title))?;
     Some(crate::plugin_window::ChannelInfo {
+        misc: None,
         name,
         target: m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Insert {t}") }),
         enabled: m.slot_on[usize::from(k)],

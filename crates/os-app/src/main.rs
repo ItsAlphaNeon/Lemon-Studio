@@ -19,6 +19,8 @@ mod plugin_window;
 mod plugins;
 mod project_plugins;
 mod presets;
+mod misc;
+mod misc_page;
 mod transport;
 mod views;
 
