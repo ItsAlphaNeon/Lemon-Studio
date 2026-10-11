@@ -15,11 +15,16 @@ use std::sync::{Arc, Mutex};
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    clap_event_header, clap_event_note, clap_event_param_mod, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID,
-    CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_MOD,
+    clap_event_header, clap_event_note, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value, clap_input_events,
+    clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON,
+    CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END, CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE,
 };
 use clap_sys::ext::gui::{clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32};
-use clap_sys::ext::params::{clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID};
+use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
+use clap_sys::ext::params::{
+    clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS,
+    CLAP_PARAM_IS_HIDDEN, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
+};
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
 use clap_sys::host::clap_host;
@@ -28,23 +33,17 @@ use clap_sys::process::{clap_process, CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTIN
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{clap_version_is_compatible, CLAP_VERSION};
 
-/// A plugin a library offers.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Descriptor {
-    pub id: String,
-    pub name: String,
-    pub vendor: String,
-    pub features: Vec<String>,
-}
+/// A plugin a library offers (the hosting layer's descriptor, format `Clap`).
+pub use os_host::{set_waker, wake, Descriptor};
 
-impl Descriptor {
-    pub fn is_instrument(&self) -> bool {
-        self.features.iter().any(|f| f == "instrument")
-    }
-
-    /// An insert effect (CLAP feature "audio-effect"): offered for mixer slots.
-    pub fn is_effect(&self) -> bool {
-        !self.is_instrument() && self.features.iter().any(|f| f == "audio-effect")
+/// What CLAP features say a plugin is: "instrument" makes an instrument, else "audio-effect" an insert effect.
+fn kind_of(features: &[String]) -> os_host::Kind {
+    if features.iter().any(|f| f == "instrument") {
+        os_host::Kind::Instrument
+    } else if features.iter().any(|f| f == "audio-effect") {
+        os_host::Kind::Effect
+    } else {
+        os_host::Kind::Other
     }
 }
 
@@ -107,7 +106,16 @@ impl Library {
                     features.push(cstr(*fp));
                     fp = fp.add(1);
                 }
-                plugins.push(Descriptor { id: cstr((*d).id), name: cstr((*d).name), vendor: cstr((*d).vendor), features });
+                plugins.push(Descriptor {
+                    format: os_host::Format::Clap,
+                    id: cstr((*d).id),
+                    name: cstr((*d).name),
+                    vendor: cstr((*d).vendor),
+                    version: cstr((*d).version),
+                    kind: kind_of(&features),
+                    features,
+                    path: path.to_owned(),
+                });
             }
             Ok(Arc::new(Library { entry, factory, path: path.to_owned(), plugins, _lib: lib }))
         }
@@ -153,28 +161,28 @@ pub fn find_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+impl os_host::Library for Library {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn plugins(&self) -> &[Descriptor] {
+        &self.plugins
+    }
+
+    fn create(self: Arc<Self>, id: &str) -> Result<os_host::SharedPlugin, String> {
+        Ok(Arc::new(Mutex::new(Plugin::new(&self, id)?)))
+    }
+}
+
 /// Host-side state the plugin's callbacks reach through `clap_host::host_data`.
 struct HostData {
     callback: AtomicBool,
     restart: AtomicBool,
     /// The plugin asked for a parameter flush (`clap_host_params.request_flush`): an edit from its editor waits in its
-    /// output queue and only takes effect when the host flushes (or processes).
+    /// output queue and only takes effect when the host flushes (or processes). The host's waker
+    /// (`os_host::set_waker`) makes `idle` run at once instead of on the next timer tick.
     flush: AtomicBool,
-}
-
-/// Called when a plugin wants the UI thread soon (flush, callback, restart): the app wakes its event loop so `idle`
-/// runs at once instead of on the next timer tick (an editor edit would otherwise wait up to a tick to apply).
-static WAKER: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
-
-/// Sets the function that wakes the host's UI loop (once per process).
-pub fn set_waker(f: fn()) {
-    let _ = WAKER.set(f);
-}
-
-pub fn wake() {
-    if let Some(f) = WAKER.get() {
-        f();
-    }
 }
 
 static HOST_NAME: &CStr = c"OpenStudio";
@@ -230,6 +238,7 @@ pub struct Plugin {
     gui: *const clap_plugin_gui,
     state: *const clap_plugin_state,
     params: *const clap_plugin_params,
+    latency: *const clap_plugin_latency,
     /// Kept alive for the plugin, which holds a pointer to it.
     _host: Box<clap_host>,
     host_data: Box<HostData>,
@@ -256,7 +265,56 @@ pub struct Plugin {
     editor: bool,
     /// Input copies for effect processing (mixer slots).
     fx_in: (Vec<f32>, Vec<f32>),
+    /// Parameter ranges (id, min, max), read once after init (values cross the hosting layer normalized).
+    ranges: Vec<(u32, f64, f64)>,
+    /// Host parameter changes (id, plain value) for the next process call or flush.
+    param_queue: Vec<(u32, f64)>,
+    /// This chunk's parameter events (sent before the notes, at time 0).
+    pvals: Vec<clap_event_param_value>,
+    /// Changes the plugin reported (its editor): gesture begin / end and values, plain.
+    param_out: Vec<OutEv>,
     _lib: Arc<Library>,
+}
+
+/// A parameter event the plugin sent the host.
+#[derive(Clone, Copy)]
+enum OutEv {
+    Begin(u32),
+    Value(u32, f64),
+    End(u32),
+}
+
+/// Most plugin -> host parameter events kept until the app takes them.
+const MAX_OUT: usize = 4096;
+
+/// `clap_input_events` over the `Vec<*const clap_event_header>` behind `ctx`.
+unsafe extern "C" fn events_size(l: *const clap_input_events) -> u32 {
+    unsafe { (*((*l).ctx as *const Vec<*const clap_event_header>)).len() as u32 }
+}
+
+unsafe extern "C" fn events_get(l: *const clap_input_events, i: u32) -> *const clap_event_header {
+    let v = unsafe { &*((*l).ctx as *const Vec<*const clap_event_header>) };
+    v.get(i as usize).copied().unwrap_or(ptr::null())
+}
+
+/// `clap_output_events.try_push` collecting parameter events into the `Vec<OutEv>` behind `ctx`.
+unsafe extern "C" fn push_out(l: *const clap_output_events, e: *const clap_event_header) -> bool {
+    unsafe {
+        let v = &mut *((*l).ctx as *mut Vec<OutEv>);
+        if e.is_null() || (*e).space_id != CLAP_CORE_EVENT_SPACE_ID || v.len() >= MAX_OUT {
+            return true;
+        }
+        match (*e).type_ {
+            CLAP_EVENT_PARAM_VALUE => {
+                let p = &*(e as *const clap_event_param_value);
+                v.push(OutEv::Value(p.param_id, p.value));
+            }
+            CLAP_EVENT_PARAM_GESTURE_BEGIN => v.push(OutEv::Begin((*(e as *const clap_event_param_gesture)).param_id)),
+            CLAP_EVENT_PARAM_GESTURE_END => v.push(OutEv::End((*(e as *const clap_event_param_gesture)).param_id)),
+            _ => {}
+        }
+        true
+    }
 }
 
 // SAFETY: CLAP instances may be used from the main thread and the audio thread; access is serialised by the
@@ -306,6 +364,16 @@ impl Plugin {
             let gui = ext(CLAP_EXT_GUI) as *const clap_plugin_gui;
             let state = ext(CLAP_EXT_STATE) as *const clap_plugin_state;
             let params = ext(CLAP_EXT_PARAMS) as *const clap_plugin_params;
+            let latency = ext(CLAP_EXT_LATENCY) as *const clap_plugin_latency;
+            let mut ranges = Vec::new();
+            if !params.is_null() {
+                for i in 0..(*params).count.map_or(0, |c| c(plugin)) {
+                    let mut info: clap_param_info = std::mem::zeroed();
+                    if (*params).get_info.is_some_and(|g| g(plugin, i, &mut info)) {
+                        ranges.push((info.id, info.min_value, info.max_value));
+                    }
+                }
+            }
             Ok(Plugin {
                 desc,
                 plugin,
@@ -330,6 +398,11 @@ impl Plugin {
                 dbg_frames: 0,
                 editor: false,
                 fx_in: (Vec::new(), Vec::new()),
+                latency,
+                ranges,
+                param_queue: Vec::new(),
+                pvals: Vec::with_capacity(64),
+                param_out: Vec::new(),
                 _lib: lib.clone(),
             })
         }
@@ -374,21 +447,60 @@ impl Plugin {
         if self.params.is_null() {
             return;
         }
-        unsafe extern "C" fn size(_l: *const clap_input_events) -> u32 {
-            0
-        }
-        unsafe extern "C" fn get(_l: *const clap_input_events, _i: u32) -> *const clap_event_header {
-            ptr::null()
-        }
-        unsafe extern "C" fn push(_l: *const clap_output_events, _e: *const clap_event_header) -> bool {
-            true
-        }
-        let ins = clap_input_events { ctx: ptr::null_mut(), size: Some(size), get: Some(get) };
-        let outs = clap_output_events { ctx: ptr::null_mut(), try_push: Some(push) };
+        // Host parameter changes waiting for a process call go in now; parameter events the plugin sends back are
+        // collected for `take_param_events`.
+        self.fill_param_events();
+        self.order.clear();
+        self.order.extend(self.pvals.iter().map(|e| &e.header as *const clap_event_header));
+        let ins = clap_input_events { ctx: &self.order as *const Vec<*const clap_event_header> as *mut c_void, size: Some(events_size), get: Some(events_get) };
+        let outs = clap_output_events { ctx: &mut self.param_out as *mut Vec<OutEv> as *mut c_void, try_push: Some(push_out) };
         unsafe {
             if let Some(f) = (*self.params).flush {
                 f(self.plugin, &ins, &outs);
             }
+        }
+        self.order.clear();
+    }
+
+    /// Moves the queued host parameter changes into `pvals` (events at time 0).
+    fn fill_param_events(&mut self) {
+        self.pvals.clear();
+        for (id, value) in self.param_queue.drain(..) {
+            self.pvals.push(clap_event_param_value {
+                header: clap_event_header {
+                    size: std::mem::size_of::<clap_event_param_value>() as u32,
+                    time: 0,
+                    space_id: CLAP_CORE_EVENT_SPACE_ID,
+                    type_: CLAP_EVENT_PARAM_VALUE,
+                    flags: 0,
+                },
+                param_id: id,
+                cookie: ptr::null_mut(),
+                note_id: -1,
+                port_index: -1,
+                channel: -1,
+                key: -1,
+                value,
+            });
+        }
+    }
+
+    /// (min, max) of parameter `id`.
+    fn range(&self, id: u32) -> Option<(f64, f64)> {
+        self.ranges.iter().find(|r| r.0 == id).map(|&(_, lo, hi)| (lo, hi))
+    }
+
+    fn normalize(&self, id: u32, plain: f64) -> f64 {
+        match self.range(id) {
+            Some((lo, hi)) if hi > lo => ((plain - lo) / (hi - lo)).clamp(0.0, 1.0),
+            _ => plain,
+        }
+    }
+
+    fn plain(&self, id: u32, norm: f64) -> f64 {
+        match self.range(id) {
+            Some((lo, hi)) => lo + norm.clamp(0.0, 1.0) * (hi - lo),
+            None => norm,
         }
     }
 
@@ -426,7 +538,7 @@ impl Plugin {
                 }
             }
         }
-        if self.host_data.flush.swap(false, Ordering::AcqRel) {
+        if self.host_data.flush.swap(false, Ordering::AcqRel) || !self.param_queue.is_empty() {
             self.flush_params();
         }
         let wanted = self.wanted_rate.swap(0, Ordering::AcqRel);
@@ -595,26 +707,18 @@ impl Plugin {
             }
         }
         self.queue = rest;
-        // `queue` is sorted by time, so `seq` already is.
+        // `queue` is sorted by time, so `seq` already is. Host parameter changes go first, at time 0.
+        self.fill_param_events();
         self.order.clear();
+        self.order.extend(self.pvals.iter().map(|e| &e.header as *const clap_event_header));
         for &(ni, mi) in &seq {
             self.order.push(match mi {
                 Some(m) => &self.mods[m].header as *const clap_event_header,
                 None => &self.notes[ni].header as *const clap_event_header,
             });
         }
-        unsafe extern "C" fn size(l: *const clap_input_events) -> u32 {
-            unsafe { (*((*l).ctx as *const Vec<*const clap_event_header>)).len() as u32 }
-        }
-        unsafe extern "C" fn get(l: *const clap_input_events, i: u32) -> *const clap_event_header {
-            let v = unsafe { &*((*l).ctx as *const Vec<*const clap_event_header>) };
-            v.get(i as usize).copied().unwrap_or(ptr::null())
-        }
-        unsafe extern "C" fn push(_l: *const clap_output_events, _e: *const clap_event_header) -> bool {
-            true
-        }
-        let ins = clap_input_events { ctx: &self.order as *const Vec<*const clap_event_header> as *mut c_void, size: Some(size), get: Some(get) };
-        let outs = clap_output_events { ctx: ptr::null_mut(), try_push: Some(push) };
+        let ins = clap_input_events { ctx: &self.order as *const Vec<*const clap_event_header> as *mut c_void, size: Some(events_size), get: Some(events_get) };
+        let outs = clap_output_events { ctx: &mut self.param_out as *mut Vec<OutEv> as *mut c_void, try_push: Some(push_out) };
         let mut chans = [left.as_mut_ptr(), right.as_mut_ptr()];
         let mut buf = clap_audio_buffer { data32: chans.as_mut_ptr(), data64: ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
         let has_in = input.is_some();
@@ -639,6 +743,134 @@ impl Plugin {
         let loud = left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
         self.sounding = status == CLAP_PROCESS_CONTINUE || status == CLAP_PROCESS_TAIL || (status == CLAP_PROCESS_CONTINUE_IF_NOT_QUIET && loud);
         self.steady += i64::from(n);
+    }
+}
+
+// The hosting layer's view of a CLAP instance (the inherent methods above do the work).
+impl os_host::Plugin for Plugin {
+    fn desc(&self) -> &Descriptor {
+        &self.desc
+    }
+
+    fn activate(&mut self, rate: u32) -> bool {
+        Plugin::activate(self, rate)
+    }
+
+    fn idle(&mut self) {
+        Plugin::idle(self)
+    }
+
+    fn has_editor(&self) -> bool {
+        Plugin::has_editor(self)
+    }
+
+    fn editor_open(&self) -> bool {
+        self.editor
+    }
+
+    fn open_editor(&mut self, parent: *mut c_void) -> Result<(u32, u32), String> {
+        Plugin::open_editor(self, parent)
+    }
+
+    fn editor_size(&self) -> Option<(u32, u32)> {
+        Plugin::editor_size(self)
+    }
+
+    fn close_editor(&mut self) {
+        Plugin::close_editor(self)
+    }
+
+    fn save_state(&self) -> Option<Vec<u8>> {
+        Plugin::save_state(self)
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> bool {
+        Plugin::load_state(self, data)
+    }
+
+    fn latency(&self) -> u32 {
+        if self.latency.is_null() || self.rate == 0 {
+            return 0;
+        }
+        unsafe { (*self.latency).get.map_or(0, |g| g(self.plugin)) }
+    }
+
+    fn use_start_param(&mut self, name: &str) -> bool {
+        Plugin::use_start_param(self, name)
+    }
+
+    fn param_count(&self) -> usize {
+        if self.params.is_null() { 0 } else { unsafe { (*self.params).count.map_or(0, |c| c(self.plugin)) as usize } }
+    }
+
+    fn param_info(&self, index: usize) -> Option<os_host::ParamInfo> {
+        if self.params.is_null() {
+            return None;
+        }
+        unsafe {
+            let mut info: clap_param_info = std::mem::zeroed();
+            if !(*self.params).get_info.is_some_and(|g| g(self.plugin, index as u32, &mut info)) {
+                return None;
+            }
+            let (lo, hi) = (info.min_value, info.max_value);
+            let f = info.flags;
+            Some(os_host::ParamInfo {
+                id: info.id,
+                name: CStr::from_ptr(info.name.as_ptr()).to_string_lossy().into_owned(),
+                unit: String::new(),
+                group: CStr::from_ptr(info.module.as_ptr()).to_string_lossy().into_owned(),
+                default: if hi > lo { ((info.default_value - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 },
+                steps: if f & CLAP_PARAM_IS_STEPPED != 0 { (hi - lo).round().max(0.0) as u32 } else { 0 },
+                automatable: f & CLAP_PARAM_IS_AUTOMATABLE != 0,
+                read_only: f & CLAP_PARAM_IS_READONLY != 0,
+                hidden: f & CLAP_PARAM_IS_HIDDEN != 0,
+                bypass: f & CLAP_PARAM_IS_BYPASS != 0,
+            })
+        }
+    }
+
+    fn param_value(&self, id: u32) -> Option<f64> {
+        if self.params.is_null() {
+            return None;
+        }
+        // A change still in the queue is the value the plugin will have.
+        if let Some(&(_, v)) = self.param_queue.iter().rev().find(|q| q.0 == id) {
+            return Some(self.normalize(id, v));
+        }
+        let mut v = 0.0;
+        unsafe { (*self.params).get_value.is_some_and(|g| g(self.plugin, id, &mut v)) }.then(|| self.normalize(id, v))
+    }
+
+    fn param_text(&self, id: u32, value: f64) -> Option<String> {
+        if self.params.is_null() {
+            return None;
+        }
+        let mut buf = [0 as c_char; 128];
+        let plain = self.plain(id, value);
+        let ok = unsafe { (*self.params).value_to_text.is_some_and(|f| f(self.plugin, id, plain, buf.as_mut_ptr(), buf.len() as u32)) };
+        ok.then(|| unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned())
+    }
+
+    fn set_param(&mut self, id: u32, value: f64) -> bool {
+        if self.range(id).is_none() {
+            return false;
+        }
+        let plain = self.plain(id, value);
+        self.param_queue.retain(|q| q.0 != id);
+        self.param_queue.push((id, plain));
+        os_host::wake();
+        true
+    }
+
+    fn take_param_events(&mut self) -> Vec<os_host::ParamEvent> {
+        let raw = std::mem::take(&mut self.param_out);
+        raw.into_iter()
+            .map(|e| match e {
+                OutEv::Begin(id) => os_host::ParamEvent::Begin(id),
+                OutEv::Value(id, v) => os_host::ParamEvent::Value(id, self.normalize(id, v)),
+                OutEv::End(id) => os_host::ParamEvent::End(id),
+            })
+            .collect()
     }
 }
 
@@ -778,13 +1010,37 @@ mod tests {
     /// Loads the bundled Open Sampler (built by `cargo run -p bundle-plugins`) when it is there.
     fn open_sampler() -> Option<Arc<Library>> {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for t in ["target-dev", "target"] {
-            let p = root.join(t).join("bundled").join("Open Sampler.clap");
+        // This test's own build folder (target*/debug/deps/x.exe -> target*), then the usual ones.
+        let own = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.parent()?.parent()?.to_path_buf()));
+        for t in own.into_iter().chain(["target-dev", "target"].map(|t| root.join(t))) {
+            let p = t.join("bundled").join("Open Sampler.clap");
             if p.exists() {
                 return Some(Library::load(&p).expect("load"));
             }
         }
         None
+    }
+
+    /// The hosting layer's parameter surface on a CLAP instance: info, normalized get / set, text, and the edit
+    /// reaching the plugin's state.
+    #[test]
+    fn parameters_through_the_hosting_layer() {
+        let Some(lib) = open_sampler() else { return };
+        let shared = os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap();
+        let mut p = shared.lock().unwrap();
+        assert!(p.param_count() > 20);
+        let infos: Vec<os_host::ParamInfo> = (0..p.param_count()).filter_map(|i| p.param_info(i)).collect();
+        let start = infos.iter().find(|i| i.name == "Sample start offset").expect("start offset parameter");
+        assert!(start.automatable && start.steps == 0);
+        assert!((p.param_value(start.id).unwrap() - start.default).abs() < 1e-6);
+        assert!(p.set_param(start.id, 0.25));
+        assert!(!p.set_param(0xdead_beef, 0.5), "unknown ids are refused");
+        p.idle();
+        assert!((p.param_value(start.id).unwrap() - 0.25).abs() < 1e-3, "{:?}", p.param_value(start.id));
+        assert!(p.param_text(start.id, 0.25).is_some_and(|t| !t.is_empty()));
+        let saved = String::from_utf8_lossy(&p.save_state().unwrap()[8..]).into_owned();
+        assert!(saved.contains("\"start_offset\":{\"f32\":0.25"), "{saved}");
+        assert_eq!(p.desc().uid(), "clap:org.openstudio.open-sampler");
     }
 
     #[test]

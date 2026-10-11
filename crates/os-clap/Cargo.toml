@@ -9,6 +9,7 @@ license.workspace = true
 clap-sys = "0.5"
 libloading = "0.8"
 os-engine.workspace = true
+os-host.workspace = true
 
 
 [dev-dependencies]

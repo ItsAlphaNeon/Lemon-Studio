@@ -2010,6 +2010,7 @@ dependencies = [
  "os-clap",
  "os-engine",
  "os-flp",
+ "os-host",
  "os-hostlink",
  "os-model",
  "os-theme",
@@ -2028,6 +2029,7 @@ dependencies = [
  "clap-sys 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "libloading",
  "os-engine",
+ "os-host",
  "os-model",
 ]
 
@@ -2047,6 +2049,13 @@ version = "0.0.1"
 dependencies = [
  "os-model",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "os-host"
+version = "0.0.1"
+dependencies = [
+ "os-engine",
 ]
 
 [[package]]

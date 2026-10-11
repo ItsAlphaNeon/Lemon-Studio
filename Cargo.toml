@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "tools/flp-dump", "tools/os-render", "tools/os-play", "crates/os-native", "tools/os-native-probe", "crates/os-theme", "crates/os-ui", "crates/os-app", "plugins/open-sampler", "tools/bundle-plugins", "crates/os-clap", "crates/os-hostlink", "crates/os-plugkit", "plugins/open-parametric-eq-2"]
+members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "tools/flp-dump", "tools/os-render", "tools/os-play", "crates/os-native", "tools/os-native-probe", "crates/os-theme", "crates/os-ui", "crates/os-app", "plugins/open-sampler", "tools/bundle-plugins", "crates/os-clap", "crates/os-hostlink", "crates/os-plugkit", "plugins/open-parametric-eq-2", "crates/os-host"]
 
 [workspace.package]
 version = "0.0.1"
@@ -12,6 +12,7 @@ os-model = { path = "crates/os-model" }
 os-flp = { path = "crates/os-flp" }
 os-engine = { path = "crates/os-engine" }
 os-hostlink = { path = "crates/os-hostlink" }
+os-host = { path = "crates/os-host" }
 thiserror = "2"
 
 [profile.dev]

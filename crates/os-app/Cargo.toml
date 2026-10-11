@@ -17,6 +17,7 @@ os-hostlink.workspace = true
 os-theme = { path = "../os-theme" }
 os-ui = { path = "../os-ui" }
 os-clap = { path = "../os-clap" }
+os-host.workspace = true
 open-sampler = { path = "../../plugins/open-sampler", features = ["linked"] }
 open-parametric-eq-2 = { path = "../../plugins/open-parametric-eq-2", features = ["linked"] }
 winit = "0.30"

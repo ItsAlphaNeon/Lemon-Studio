@@ -1,0 +1,305 @@
+//! OpenStudio's format-neutral plugin hosting layer.
+//!
+//! Every plugin format OpenStudio hosts (CLAP in `os-clap`, VST3 in `os-vst3`, native plugins in `os-native`) offers
+//! the same two things: a [`Library`] (a loaded plugin file that lists [`Descriptor`]s and creates instances) and a
+//! [`Plugin`] instance (activation, editor, state, parameters, and the engine-side [`Instrument`] / [`HostedEffect`]
+//! processing). The app only talks to these traits.
+//!
+//! Threading (all formats): an instance is shared as [`SharedPlugin`] (`Arc<Mutex<dyn Plugin>>`). The UI thread creates
+//! and activates it, opens its editor, loads / saves state, reads / sets parameters and calls [`Plugin::idle`] every
+//! tick; the audio thread only calls the `Instrument` / `HostedEffect` methods through the engine (with `try_lock`).
+//! A `SharedPlugin` coerces to `os_engine::SharedInstrument` / `SharedEffect` (`plugin.clone() as SharedInstrument`).
+// spec: plugins/plugin-formats.md (hosting inside OpenStudio), plugins/vst3-hosting.md
+
+use std::ffi::c_void;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+
+pub use os_engine::{HostedEffect, Instrument};
+
+/// The plugin format of a library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Format {
+    Clap,
+    Vst3,
+    /// Plugins written against the native SDK of the DAW whose projects OpenStudio opens (`os-native`).
+    Native,
+}
+
+impl Format {
+    /// Short lowercase name, used in plugin identities (`Descriptor::uid`): "clap", "vst3", "native".
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Format::Clap => "clap",
+            Format::Vst3 => "vst3",
+            Format::Native => "native",
+        }
+    }
+
+    /// The format named by `as_str`.
+    pub fn parse(s: &str) -> Option<Format> {
+        [Format::Clap, Format::Vst3, Format::Native].into_iter().find(|f| f.as_str() == s)
+    }
+}
+
+/// What a plugin is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Kind {
+    /// A note-driven generator (channel rack).
+    Instrument,
+    /// An insert effect (mixer slots).
+    Effect,
+    /// Anything else (analyzers without audio out, note effects...): not offered yet.
+    #[default]
+    Other,
+}
+
+/// A plugin a library offers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Descriptor {
+    pub format: Format,
+    /// Format-specific id, stable across versions and machines: the CLAP plugin id, the VST3 class id as 32
+    /// uppercase hex digits, a native plugin's file stem.
+    pub id: String,
+    pub name: String,
+    pub vendor: String,
+    pub version: String,
+    /// CLAP features, or the VST3 class's subcategories (split at `|`).
+    pub features: Vec<String>,
+    pub kind: Kind,
+    /// The file it was loaded from (a `.clap` file, a `.vst3` bundle folder or module file, a DLL; for a plugin
+    /// compiled into OpenStudio, the program itself).
+    pub path: PathBuf,
+}
+
+impl Descriptor {
+    pub fn is_instrument(&self) -> bool {
+        self.kind == Kind::Instrument
+    }
+
+    /// An insert effect: offered for mixer slots.
+    pub fn is_effect(&self) -> bool {
+        self.kind == Kind::Effect
+    }
+
+    /// The plugin's identity for project files and plugin lists: `format:id` (e.g. `clap:org.openstudio.open-sampler`,
+    /// `vst3:` + 32 hex digits). The path is not part of it (plugins move between folders and machines).
+    pub fn uid(&self) -> String {
+        format!("{}:{}", self.format.as_str(), self.id)
+    }
+}
+
+/// One parameter of a plugin. Values crossing this API are normalized to 0..=1 (whatever the format's own range).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamInfo {
+    /// Stable id (CLAP `clap_id`, VST3 `ParamID`).
+    pub id: u32,
+    pub name: String,
+    /// Unit label ("dB", "%"), may be empty.
+    pub unit: String,
+    /// Group / module path ("Filter/Envelope"), may be empty.
+    pub group: String,
+    /// Default value, normalized.
+    pub default: f64,
+    /// Number of steps for stepped parameters (a switch has 1, a 4-way list 3), 0 = continuous.
+    pub steps: u32,
+    pub automatable: bool,
+    pub read_only: bool,
+    pub hidden: bool,
+    /// The plugin's bypass switch.
+    pub bypass: bool,
+}
+
+/// A parameter change the plugin reports by itself (its editor moved a control): the source of "last tweaked" and of
+/// automation recording. `Begin` / `End` bracket a gesture (mouse down / up on a knob).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ParamEvent {
+    Begin(u32),
+    /// Parameter id, new normalized value.
+    Value(u32, f64),
+    End(u32),
+}
+
+/// A loaded plugin file of any format.
+pub trait Library: Send + Sync {
+    /// The file it was loaded from.
+    fn path(&self) -> &Path;
+    /// The plugins it offers.
+    fn plugins(&self) -> &[Descriptor];
+    /// Creates and initialises plugin `id` (UI thread). Not active yet: call [`Plugin::activate`].
+    fn create(self: Arc<Self>, id: &str) -> Result<SharedPlugin, String>;
+}
+
+/// A plugin instance, whatever its format.
+///
+/// Main-thread calls (everything except the `Instrument` / `HostedEffect` methods) come from the UI thread only.
+pub trait Plugin: Instrument + HostedEffect + Send {
+    fn desc(&self) -> &Descriptor;
+
+    /// Activates at `rate` (UI thread); reactivates when the rate changes. The audio thread renders silence (an
+    /// instrument) or passes the sound through (an effect) until the instance is active at the stream's rate, and asks
+    /// for that rate; the next `idle` reactivates.
+    fn activate(&mut self, rate: u32) -> bool;
+
+    /// UI-thread housekeeping, every tick: callbacks the plugin asked for, restarts, rate changes.
+    fn idle(&mut self);
+
+    /// The plugin has an editor that can be embedded in a host window.
+    fn has_editor(&self) -> bool;
+    fn editor_open(&self) -> bool;
+    /// Embeds the plugin's editor in `parent` (a host window handle: HWND on Windows); returns its size in pixels.
+    /// The host draws the window frame around it (spec: ui/plugin-window.md).
+    fn open_editor(&mut self, parent: *mut c_void) -> Result<(u32, u32), String>;
+    /// The editor's current size in pixels (when open). The host polls it: a plugin that resizes itself is followed.
+    fn editor_size(&self) -> Option<(u32, u32)>;
+    fn close_editor(&mut self);
+
+    /// The plugin's whole state as bytes, in the format's own layout (UI thread). Round-trips through `load_state`
+    /// of the same plugin; what a project file stores for the instance.
+    fn save_state(&self) -> Option<Vec<u8>>;
+    /// Restores a `save_state` blob (UI thread).
+    fn load_state(&mut self, data: &[u8]) -> bool;
+
+    /// Processing latency the plugin reports, in frames (0 when it reports none).
+    fn latency(&self) -> u32 {
+        0
+    }
+
+    /// Sends each note's sample start (`Instrument::note_on_from`) as per-note modulation of the parameter named
+    /// `name` (spec: plugins/open-sampler.md §7). False when the plugin or format cannot (notes play from the top).
+    fn use_start_param(&mut self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+
+    /// Number of parameters.
+    fn param_count(&self) -> usize {
+        0
+    }
+    /// Parameter `index` (0..param_count).
+    fn param_info(&self, index: usize) -> Option<ParamInfo> {
+        let _ = index;
+        None
+    }
+    /// Current value of parameter `id`, normalized.
+    fn param_value(&self, id: u32) -> Option<f64> {
+        let _ = id;
+        None
+    }
+    /// The plugin's text for normalized `value` of parameter `id` ("-6.0 dB").
+    fn param_text(&self, id: u32, value: f64) -> Option<String> {
+        let _ = (id, value);
+        None
+    }
+    /// Sets parameter `id` to a normalized value (UI thread). The change reaches the sound on the next processed
+    /// block (or at once when nothing is processing the instance). False for an unknown id.
+    fn set_param(&mut self, id: u32, value: f64) -> bool {
+        let _ = (id, value);
+        false
+    }
+    /// Parameter changes the plugin made by itself since the last call (its editor), oldest first.
+    fn take_param_events(&mut self) -> Vec<ParamEvent> {
+        Vec::new()
+    }
+}
+
+pub type SharedPlugin = Arc<Mutex<dyn Plugin>>;
+
+/// Called when a plugin wants the UI thread soon (parameter flush, callback, restart, resize): the app wakes its event
+/// loop so `idle` runs at once instead of on the next timer tick.
+static WAKER: OnceLock<fn()> = OnceLock::new();
+
+/// Sets the function that wakes the host's UI loop (once per process).
+pub fn set_waker(f: fn()) {
+    let _ = WAKER.set(f);
+}
+
+/// Wakes the host's UI loop (any thread).
+pub fn wake() {
+    if let Some(f) = WAKER.get() {
+        f();
+    }
+}
+
+/// `OS_DEBUG` is set: backends log activation and levels to stderr.
+pub fn debug() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("OS_DEBUG").is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Dummy(Descriptor, f32);
+    impl Instrument for Dummy {
+        fn note_on(&mut self, _: u32, _: u8, v: f32) {
+            self.1 = v;
+        }
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, l: &mut [f32], r: &mut [f32]) {
+            l.fill(self.1);
+            r.fill(self.1);
+        }
+    }
+    impl HostedEffect for Dummy {
+        fn process_fx(&mut self, _: u32, l: &mut [f32], _: &mut [f32]) {
+            l.iter_mut().for_each(|v| *v *= 2.0);
+        }
+    }
+    impl Plugin for Dummy {
+        fn desc(&self) -> &Descriptor {
+            &self.0
+        }
+        fn activate(&mut self, _: u32) -> bool {
+            true
+        }
+        fn idle(&mut self) {}
+        fn has_editor(&self) -> bool {
+            false
+        }
+        fn editor_open(&self) -> bool {
+            false
+        }
+        fn open_editor(&mut self, _: *mut c_void) -> Result<(u32, u32), String> {
+            Err("none".into())
+        }
+        fn editor_size(&self) -> Option<(u32, u32)> {
+            None
+        }
+        fn close_editor(&mut self) {}
+        fn save_state(&self) -> Option<Vec<u8>> {
+            Some(self.1.to_le_bytes().to_vec())
+        }
+        fn load_state(&mut self, d: &[u8]) -> bool {
+            d.try_into().map(|b| self.1 = f32::from_le_bytes(b)).is_ok()
+        }
+    }
+
+    /// A shared instance is the engine's instrument and effect at once (trait upcasting through the mutex).
+    #[test]
+    fn shared_plugins_are_engine_instruments_and_effects() {
+        let desc = Descriptor {
+            format: Format::Vst3,
+            id: "0123".into(),
+            name: "Dummy".into(),
+            vendor: String::new(),
+            version: String::new(),
+            features: vec![],
+            kind: Kind::Instrument,
+            path: PathBuf::new(),
+        };
+        assert_eq!(desc.uid(), "vst3:0123");
+        assert_eq!(Format::parse("vst3"), Some(Format::Vst3));
+        let p: SharedPlugin = Arc::new(Mutex::new(Dummy(desc, 0.0)));
+        let inst = p.clone() as os_engine::SharedInstrument;
+        let fx = p.clone() as os_engine::SharedEffect;
+        inst.lock().unwrap().note_on(0, 60, 0.5);
+        let (mut l, mut r) = ([0.0f32; 4], [0.0f32; 4]);
+        inst.lock().unwrap().process(48000, &mut l, &mut r);
+        fx.lock().unwrap().process_fx(48000, &mut l, &mut r);
+        assert_eq!(l, [1.0; 4]);
+        assert_eq!(p.lock().unwrap().save_state(), Some(0.5f32.to_le_bytes().to_vec()));
+        assert!(p.lock().unwrap().desc().is_instrument());
+    }
+}
