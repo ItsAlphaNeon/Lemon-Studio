@@ -3562,14 +3562,21 @@ impl App {
                     if let Some(m) = pl::run(self, item.cmd) {
                         self.state.message = Some(m);
                     }
+                } else if !item.head && !item.sep {
+                    // A greyed-out entry only says so; the menu stays open.
+                    self.state.message = Some(off_text(&item.label));
                 }
             }
             Action::PlPopupSub(i) => {
                 let item = self.state.playlist.popup.as_ref().and_then(|p| p.sub.and_then(|s| p.items.get(s))).and_then(|it| it.children.get(i)).cloned();
-                if let Some(item) = item.filter(|it| it.enabled && !it.head) {
-                    if let Some(m) = pl::run(self, item.cmd) {
-                        self.state.message = Some(m);
+                match item.filter(|it| !it.head && !it.sep) {
+                    Some(item) if item.enabled => {
+                        if let Some(m) = pl::run(self, item.cmd) {
+                            self.state.message = Some(m);
+                        }
                     }
+                    Some(item) => self.state.message = Some(off_text(&item.label)),
+                    None => {}
                 }
             }
             _ => return false,
