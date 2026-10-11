@@ -233,7 +233,8 @@ fn monitor(ui: &mut Ui, s: &State) {
     use crate::monitor::{Mode, COLS};
     let (edge, fill, ink) = (ui.t.s(0x1d2022), ui.t.s(0x25282a), ui.t.tx(0xb9bfc3));
     let m = &s.monitor;
-    // Left panel: border, then 84 x 31 px of picture, bottom edge at y 36.
+    // Left panel: border, then 84 x 31 px of picture, bottom edge at y 36. Pictures are drawn as cells, which tile at
+    // any scale (spec ui/ui-scaling.md §4).
     ui.c.fill_rect(Rect::new(880.0, 4.0, 86.0, 33.0), edge);
     ui.c.fill_rect(Rect::new(881.0, 5.0, 84.0, 31.0), fill);
     match m.mode {
@@ -243,11 +244,11 @@ fn monitor(ui: &mut Ui, s: &State) {
                 let whole = h.floor();
                 let x = 881.0 + c as f32;
                 if whole > 0.0 {
-                    ui.c.fill_rect(Rect::new(x, 36.0 - whole, 1.0, whole), ink);
+                    ui.c.fill_cell(Rect::new(x, 36.0 - whole, 1.0, whole), ink);
                 }
                 let part = h - whole;
                 if part > 0.05 && whole < 31.0 {
-                    ui.c.fill_rect(Rect::new(x, 36.0 - whole - 1.0, 1.0, 1.0), ink.with_alpha((part * 255.0) as u8));
+                    ui.c.fill_cell(Rect::new(x, 36.0 - whole - 1.0, 1.0, 1.0), ink.with_alpha((part * 255.0) as u8));
                 }
             }
         }
@@ -256,7 +257,7 @@ fn monitor(ui: &mut Ui, s: &State) {
                 let (lo, hi) = m.wave[c];
                 let (y0, y1) = (20.0 - hi * 15.0, 20.0 - lo * 15.0);
                 let (top, bottom) = (y0.min(y1).round(), y0.max(y1).round());
-                ui.c.fill_rect(Rect::new(881.0 + c as f32, top, 1.0, (bottom - top).max(1.0)), ink);
+                ui.c.fill_cell(Rect::new(881.0 + c as f32, top, 1.0, (bottom - top).max(1.0)), ink);
             }
         }
     }
@@ -285,9 +286,9 @@ fn monitor(ui: &mut Ui, s: &State) {
             // Tip column darker, left column slightly dark; top and bottom rows shaded like a raised bar.
             let side = if x == len as i32 - 1 { 0.58 } else if x == 0 { 0.82 } else { 1.0 };
             let px = 969.0 + x as f32;
-            ui.c.fill_rect(Rect::new(px, y, 1.0, 1.0), mix(k, 0.82 * side));
-            ui.c.fill_rect(Rect::new(px, y + 1.0, 1.0, 8.0), mix(k, side));
-            ui.c.fill_rect(Rect::new(px, y + 9.0, 1.0, 1.0), mix(k, 0.75 * side));
+            ui.c.fill_cell(Rect::new(px, y, 1.0, 1.0), mix(k, 0.82 * side));
+            ui.c.fill_cell(Rect::new(px, y + 1.0, 1.0, 8.0), mix(k, side));
+            ui.c.fill_cell(Rect::new(px, y + 9.0, 1.0, 1.0), mix(k, 0.75 * side));
         }
     }
     ui.hit(Rect::new(968.0, 4.0, 77.0, 23.0), Action::Swallow, "Output level (peak L / R)");

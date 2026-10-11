@@ -4096,6 +4096,43 @@ mod tests {
         }
     }
 
+    /// The toolbar's analyzer columns and peak bars are solid at 150 %: no device column of the panel shows
+    /// through between two 1 px columns (spec: ui/ui-scaling.md §4).
+    #[test]
+    fn monitor_columns_tile_at_fractional_scales() {
+        use crate::monitor::{k, Mode, COLS};
+        for scale in [1.0, 1.25, 1.5, 1.75] {
+            let Ok(mut c) = Canvas::new((1920.0 * scale) as u32, (1080.0 * scale) as u32, scale) else { return };
+            let mut app = App::new(None);
+            app.state.monitor.mode = Mode::Spectrum;
+            app.state.monitor.bars_db = [app.state.monitor.cfg.v[k::DB_TOP]; COLS];
+            app.state.monitor.meter_db = [0.0; 2];
+            app.invalidate();
+            frame(&mut app, &mut c, None);
+            if let Some(out) = std::env::var_os("OS_MONITOR_SHOT") {
+                c.pixmap.save_png(std::path::Path::new(&out).join(format!("tiles-{scale}.png"))).unwrap();
+            }
+            let w = c.pixmap.width() as usize;
+            let px = c.pixmap.pixels();
+            let row = |y: f32, x0: f32, x1: f32| -> Vec<u8> {
+                let (dy, d0, d1) = ((y * scale) as usize, (x0 * scale).round() as usize, (x1 * scale).round() as usize);
+                px[dy * w + d0..dy * w + d1].iter().map(|p| p.green()).collect()
+            };
+            // Analyzer: 84 full-height columns from x 881; peak bars: 75 px from x 969 at y 5 and 16 (body rows).
+            for (what, y, x0, x1) in [("analyzer", 30.0, 881.0, 965.0), ("peak L", 9.0, 969.0, 1043.0), ("peak R", 20.0, 969.0, 1043.0)] {
+                let got = row(y, x0, x1);
+                assert!(got.iter().all(|&g| g > 0x80), "{what} at {scale}: gaps in {got:?}");
+            }
+            // The tip column is shaded on purpose (0.58): stay clear of it above. Rows tile too.
+            let (d0, d1) = ((5.0 * scale).round() as usize, (15.0 * scale).round() as usize);
+            let col: Vec<u8> = (d0..d1).map(|y| px[y * w + (1000.0 * scale) as usize].green()).collect();
+            assert!(col.iter().all(|&g| g > 0x80), "peak L rows at {scale}: {col:?}");
+            let (d0, d1) = ((16.0 * scale).round() as usize, (26.0 * scale).round() as usize);
+            let col: Vec<u8> = (d0..d1).map(|y| px[y * w + (1000.0 * scale) as usize].green()).collect();
+            assert!(col.iter().all(|&g| g > 0x80), "peak R rows at {scale}: {col:?}");
+        }
+    }
+
     /// Knobs drag vertically (1/1024 per px), step with the wheel, and model-backed ones write the project.
     /// A project that was never opened from a file saves as a new FLP that loads back (spec: flp/container.md).
     #[test]
