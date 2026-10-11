@@ -17,6 +17,7 @@ os-hostlink.workspace = true
 os-theme = { path = "../os-theme" }
 os-ui = { path = "../os-ui" }
 os-clap = { path = "../os-clap" }
+os-native = { path = "../os-native" }
 os-host.workspace = true
 os-vst3.workspace = true
 open-sampler = { path = "../../plugins/open-sampler", features = ["linked"] }

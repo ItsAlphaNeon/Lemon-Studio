@@ -9,8 +9,11 @@
 pub mod abi;
 pub mod adapter;
 pub mod host;
+pub mod library;
 pub mod stream;
 pub mod stub;
+
+pub use library::{dll_files, dll_files_in, effect_dll_files, NativeLibrary};
 
 use std::ffi::{c_char, CString};
 use std::path::{Path, PathBuf};
@@ -185,8 +188,9 @@ impl Plugin {
         unsafe { (self.vt().process_param)(self.obj, index, 0, 2) }
     }
 
-    /// Saves the plugin state into a byte vector.
-    pub fn save_state(&mut self) -> Vec<u8> {
+    /// Saves the plugin state into a byte vector. Takes `&self`: the FFI call drives the plugin
+    /// through its raw object pointer and does not need Rust `&mut`.
+    pub fn save_state(&self) -> Vec<u8> {
         let mut s = MemStream::new(Vec::new());
         unsafe { (self.vt().save_restore_state)(self.obj, s.as_ptr(), 1) };
         std::mem::take(&mut s.data)
@@ -283,16 +287,35 @@ pub fn find_plugin(fl_dir: &Path, name: &str) -> Option<PathBuf> {
 /// Default block size handed to a plugin at load.
 pub const DEFAULT_BLOCK: usize = adapter::MAX_BLOCK;
 
-/// Loads an effect plugin and wraps it as a shared engine insert effect.
-pub fn load_effect(dll: &Path, fl_dir: &Path, rate: u32) -> Result<os_engine::instrument::SharedEffect, NativeError> {
+/// Loads one plugin DLL and wraps it as a shared, activated `os_host::Plugin`. `is_generator`
+/// selects the descriptor kind (instrument vs insert effect).
+pub fn load_plugin(dll: &Path, fl_dir: &Path, rate: u32, is_generator: bool) -> Result<os_host::SharedPlugin, NativeError> {
+    use os_host::{Descriptor, Format, Kind, Plugin as _};
     let plugin = Plugin::load(dll, fl_dir, rate, DEFAULT_BLOCK)?;
-    Ok(std::sync::Arc::new(std::sync::Mutex::new(adapter::NativeEffect::new(plugin, rate))))
+    let name = dll.parent().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let desc = Descriptor {
+        format: Format::Native,
+        id: name.clone(),
+        name,
+        vendor: String::new(),
+        version: String::new(),
+        features: Vec::new(),
+        kind: if is_generator { Kind::Instrument } else { Kind::Effect },
+        path: dll.to_path_buf(),
+    };
+    let mut p = adapter::NativePlugin::new(plugin, desc);
+    p.activate(rate);
+    Ok(std::sync::Arc::new(std::sync::Mutex::new(p)))
 }
 
-/// Loads a generator plugin and wraps it as a shared engine instrument (experimental; see adapter).
+/// Loads an effect plugin as a shared engine insert effect.
+pub fn load_effect(dll: &Path, fl_dir: &Path, rate: u32) -> Result<os_engine::instrument::SharedEffect, NativeError> {
+    Ok(load_plugin(dll, fl_dir, rate, false)? as os_engine::instrument::SharedEffect)
+}
+
+/// Loads a generator plugin as a shared engine instrument (experimental; level not yet correct).
 pub fn load_instrument(dll: &Path, fl_dir: &Path, rate: u32) -> Result<os_engine::instrument::SharedInstrument, NativeError> {
-    let plugin = Plugin::load(dll, fl_dir, rate, DEFAULT_BLOCK)?;
-    Ok(std::sync::Arc::new(std::sync::Mutex::new(adapter::NativeInstrument::new(plugin, rate))))
+    Ok(load_plugin(dll, fl_dir, rate, true)? as os_engine::instrument::SharedInstrument)
 }
 
 #[cfg(test)]
@@ -314,7 +337,10 @@ mod tests {
         assert!(list.iter().any(|p| !p.is_generator), "expected at least one effect");
     }
 
+    // Loads a real FL plugin DLL in-process: environment-dependent and flaky under heavy parallel
+    // load, so ignored like the audio-device tests. Run with `cargo test -p os-native -- --ignored`.
     #[test]
+    #[ignore]
     #[cfg(windows)]
     fn effect_loads_and_passes_audio() {
         let Some(fl) = fl() else { return };
@@ -332,5 +358,39 @@ mod tests {
         // Not a null-test, but it should not be wildly different from the input.
         let diff: f32 = l.iter().zip(&before).map(|(a, b)| (a - b).abs()).sum::<f32>() / l.len() as f32;
         assert!(diff < 0.2, "default Balance should roughly pass through, mean abs diff {diff}");
+    }
+
+    // Also loads a real FL plugin DLL in-process: ignored, run with `--ignored`.
+    #[test]
+    #[ignore]
+    #[cfg(windows)]
+    fn effect_hosts_through_os_host_library() {
+        use os_host::{Library as _, Plugin as _};
+        let Some(fl) = fl() else { return };
+        let Some(dll) = find_plugin(&fl, "Fruity Balance") else { return };
+        let lib = NativeLibrary::load(&dll).expect("build library");
+        assert_eq!(lib.plugins().len(), 1);
+        let d = lib.plugins()[0].clone();
+        assert!(d.is_effect());
+        assert_eq!(d.uid(), "native:Fruity Balance");
+        let p = lib.create(&d.id).expect("create instance");
+        {
+            let mut pl = p.lock().unwrap();
+            assert!(pl.activate(44_100));
+            assert!(pl.save_state().is_some(), "effect should report its state");
+        }
+        let rate = 44_100u32;
+        let mut l: Vec<f32> = (0..1024).map(|s| (std::f32::consts::TAU * 1000.0 * s as f32 / rate as f32).sin() * 0.5).collect();
+        let mut r = l.clone();
+        (p as os_engine::SharedEffect).lock().unwrap().process_fx(rate, &mut l, &mut r);
+        assert!(l.iter().all(|s| s.is_finite()));
+        let peak = l.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.1 && peak < 2.0, "near unity, got {peak}");
+    }
+
+    #[test]
+    fn dll_files_lists_plugins_when_fl_present() {
+        let Some(_) = fl() else { return };
+        assert!(!dll_files().is_empty(), "expected native plugin DLLs");
     }
 }

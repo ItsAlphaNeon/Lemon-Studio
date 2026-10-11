@@ -2013,6 +2013,7 @@ dependencies = [
  "os-host",
  "os-hostlink",
  "os-model",
+ "os-native",
  "os-theme",
  "os-ui",
  "os-vst3",
@@ -2077,6 +2078,7 @@ version = "0.0.1"
 dependencies = [
  "libloading",
  "os-engine",
+ "os-host",
  "thiserror 2.0.21",
 ]
 

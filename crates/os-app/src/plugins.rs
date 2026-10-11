@@ -126,12 +126,21 @@ fn linked(cell: &OnceLock<Option<Arc<os_clap::Library>>>, entry: *const std::ffi
 /// One plugin format's files in its search folders, and how to load one.
 type Scan = (Vec<PathBuf>, fn(&std::path::Path) -> Result<Arc<dyn Library>, String>);
 
-/// The plugin files of every hosted format (spec: plugins/vst3-hosting.md §2).
+/// The plugin files of every hosted format (spec: plugins/vst3-hosting.md §2). The user's installed
+/// FL native plugins are included only when the experimental native host is opted into
+/// (`os_native::enabled()`, Settings > File or `OPENSTUDIO_NATIVE=1`): they are loaded through an
+/// unverified interop path (spec plugins/fruity-abi.md), so they stay off by default.
 fn plugin_files() -> Vec<Scan> {
-    vec![
+    let mut scans: Vec<Scan> = vec![
         (os_clap::find_files(&search_dirs(os_clap::standard_dirs())), |p| os_clap::Library::load(p).map(|l| l as Arc<dyn Library>)),
         (os_vst3::find_bundles(&search_dirs(os_vst3::standard_dirs())), |p| os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>)),
-    ]
+    ];
+    if os_native::enabled() {
+        // Effects only: native generators are not offered in the UI yet (some abort on load; their
+        // output level is not yet right). An in-process native crash would take the app down.
+        scans.push((os_native::effect_dll_files(), |p| os_native::NativeLibrary::load(p).map(|l| l as Arc<dyn Library>)));
+    }
+    scans
 }
 
 /// A format's name as the UI shows it.
@@ -181,6 +190,10 @@ impl Plugins {
             }
         }
         effects.sort_by_key(|a| a.desc.name.to_lowercase());
+        if std::env::var_os("OS_DEBUG").is_some() {
+            let native = effects.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
+            eprintln!("[plugins] {} instruments, {} effects ({native} native)", available.len(), effects.len());
+        }
         Plugins { available, effects, scale: 1.0, ..Plugins::default() }
     }
 
@@ -1474,5 +1487,32 @@ mod tests {
             pump(&mut pl, 200);
             capture(frame, &out);
         }
+    }
+
+    /// With the experimental native host opted in, the scan offers the user's installed FL native
+    /// effects in the effect picker (spec plugins/fruity-abi.md). Skips when FL is not installed.
+    /// Ignored in the default run: it mutates the process `OPENSTUDIO_NATIVE` env var, which is
+    /// unsound to do while other parallel tests read the environment. Run with
+    /// `cargo test -p os-app native_effects_listed_when_opted_in -- --ignored`.
+    #[test]
+    #[ignore]
+    fn native_effects_listed_when_opted_in() {
+        let fl = os_native::default_fl_dir();
+        if !fl.join("Plugins").join("Fruity").join("Effects").is_dir() {
+            return;
+        }
+        // SAFETY: test-only; `OPENSTUDIO_NATIVE` is read only by this scan path.
+        unsafe { std::env::set_var("OPENSTUDIO_NATIVE", "1") };
+        let opted = Plugins::scan();
+        unsafe { std::env::remove_var("OPENSTUDIO_NATIVE") };
+        let baseline = Plugins::scan();
+
+        let native: Vec<_> = opted.effects.iter().filter(|a| a.desc.format == os_host::Format::Native).collect();
+        assert!(!native.is_empty(), "native effects should be listed when opted in");
+        assert!(native.iter().any(|a| a.desc.name == "Fruity Balance"));
+        assert!(
+            baseline.effects.iter().all(|a| a.desc.format != os_host::Format::Native),
+            "native effects must not appear without the opt-in"
+        );
     }
 }

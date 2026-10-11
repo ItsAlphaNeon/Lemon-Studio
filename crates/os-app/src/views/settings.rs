@@ -64,6 +64,10 @@ pub const MIDI: usize = 0;
 pub const AUDIO: usize = 1;
 pub const GENERAL: usize = 2;
 pub const FILE: usize = 3;
+
+/// The one working File-tab check: opt in to the experimental FL native plugin host (spec
+/// plugins/fruity-abi.md). Its label is the key for `SAct::Check`; `App::settings_act` acts on it.
+pub const NATIVE_HOST_CHECK: &str = "Experimental: host installed native plugins";
 pub const THEME: usize = 4;
 pub const PROJECT: usize = 5;
 pub const INFO: usize = 6;
@@ -301,7 +305,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     pair(combo("Occasionally (every 10 minutes)", 336.0, "Autosave"), ValueR("Maximum", "100".into())),
                     combo("Save to the project data folder if there is one", 336.0, "Location"),
                 ]),
-                g("Plugins", vec![Buttons(vec![("Manage plugins", 124.0)]), Text(format!("{} instrument plugins found", s.hosted_generators.len()), true)]),
+                g("Plugins", vec![
+                    Buttons(vec![("Manage plugins", 124.0)]),
+                    Text(format!("{} instrument plugins found", s.hosted_generators.len()), true),
+                    Check(NATIVE_HOST_CHECK, os_native::enabled()),
+                ]),
                 g("User data folder", vec![txt(user)]),
                 g("Browser extra search folders", vec![List(vec![("Folder", 30.0), ("Browser name", 440.0)], vec![], 12)]),
                 g("External tools", vec![List(vec![("File", 30.0), ("Name", 320.0)], vec![], 4), txt("Script editor   C:\\Windows\\System32\\Notepad.exe")]),

@@ -1511,6 +1511,21 @@ impl App {
                 st.tab = i;
                 st.scroll = 0.0;
             }
+            // The one check that does real work: opt in / out of the experimental native host and
+            // re-scan so the picker's effect list updates (spec plugins/fruity-abi.md). Its displayed
+            // state comes straight from `os_native::enabled()` (the row's default), so it is left out
+            // of the `flipped` set.
+            SAct::Check(k) if k == views::settings::NATIVE_HOST_CHECK => {
+                let on = !os_native::enabled();
+                os_native::set_enabled(on);
+                self.scan_plugins();
+                let n = self.plugins.effects.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
+                self.state.message = Some(if on {
+                    format!("Experimental native plugin host on: {n} native effects available")
+                } else {
+                    "Experimental native plugin host off".into()
+                });
+            }
             SAct::Check(k) => {
                 if !st.flipped.remove(k) {
                     st.flipped.insert(k);
