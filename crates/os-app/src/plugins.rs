@@ -1506,6 +1506,73 @@ mod tests {
         assert!(l.iter().any(|v| v.abs() > 0.1), "plays");
     }
 
+    /// A VST3 instrument channel and a VST3 effect in a mixer slot are saved as wrapped plugins naming the class id, and
+    /// the reopened project hosts the same classes with the saved state (spec: plugins/vst3-hosting.md §8,
+    /// flp/events/plugins.md §4).
+    #[test]
+    fn vst3_plugins_save_and_reopen() {
+        let (Some(smp), Some(eq)) = (bundled("Open Sampler.vst3"), bundled("Open Parametric EQ 2.vst3")) else { return };
+        let load = |p: &std::path::Path| {
+            let lib = os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>).unwrap();
+            Available { desc: lib.plugins()[0].clone(), lib }
+        };
+        let path = std::env::temp_dir().join(format!("openstudio-vst3-{}.flp", std::process::id()));
+        let wav = std::env::temp_dir().join("os-app-vst3-save.wav");
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.25; 4800]).unwrap();
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.plugins.available = vec![load(&smp)];
+        a.plugins.effects = vec![load(&eq)];
+        let row = crate::app::add_plugin_channel(&mut a.state.project, "Open Sampler");
+        a.plugins.create(row, 0).unwrap();
+        a.state.hosted_rows.push(row);
+        let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
+        assert!(a.plugins.set_state(row, json.as_bytes()));
+        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { name: "Open Parametric EQ 2".into(), state: Vec::new() });
+        a.plugins.create_effect(3, 2, 0, None).unwrap();
+        // An edit of the effect, through the hosting layer, flushed into its processor.
+        {
+            let mut fx = a.plugins.hosted[&fx_key(3, 2)].plugin.lock().unwrap();
+            let id = (0..fx.param_count()).filter_map(|i| fx.param_info(i)).find(|p| !p.read_only && !p.hidden && p.automatable).unwrap().id;
+            assert!(fx.set_param(id, 0.3));
+            assert!(fx.activate(48000));
+            fx.idle();
+            std::thread::sleep(Duration::from_millis(60));
+            fx.idle();
+        }
+        let (ch_state, fx_state) = (a.plugins.state(row).unwrap(), a.plugins.state(fx_key(3, 2)).unwrap());
+        assert!(ch_state.starts_with(b"VST3") && fx_state.starts_with(b"VST3"));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+
+        // The file names each class by its id.
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let r = crate::project_plugins::wrapped_channel(&saved.channels[row]).unwrap();
+        assert_eq!((r.format.as_str(), r.id.as_str(), r.name.as_str()), ("vst3", a.plugins.available[0].desc.id.as_str(), "Open Sampler"));
+        assert_eq!(r.state, ch_state);
+        let s = crate::project_plugins::wrapped_slot(saved.mixer[3].slots[2].as_ref().unwrap()).unwrap();
+        assert_eq!((s.format.as_str(), s.id.as_str()), ("vst3", a.plugins.effects[0].desc.id.as_str()));
+        assert_eq!(s.state, fx_state);
+
+        // Reopened: found by class id even when the plugin file is named differently now.
+        let mut b = crate::app::App::new(None);
+        let (mut i, mut e) = (load(&smp), load(&eq));
+        i.desc.path = "D:/moved/Renamed.vst3".into();
+        e.desc.path = "D:/moved/Other.vst3".into();
+        b.plugins.available = vec![i];
+        b.plugins.effects = vec![e];
+        b.open(path.clone());
+        b.sync_wrapped();
+        let _ = std::fs::remove_file(&path);
+        assert!(b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
+        assert_eq!(b.plugins.descriptor(row).unwrap().format, os_host::Format::Vst3);
+        assert_eq!(b.plugins.state(row).as_deref(), Some(&ch_state[..]));
+        assert_eq!(b.plugins.state(fx_key(3, 2)).as_deref(), Some(&fx_state[..]));
+        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Open Parametric EQ 2"));
+    }
+
     /// VST3 editors inside OpenStudio's plugin frame, moved off every screen and captured with PrintWindow:
     /// `OS_SHOT_DIR=<dir> cargo test -p os-app --bin openstudio vst3_window_shots -- --ignored`.
     #[test]
