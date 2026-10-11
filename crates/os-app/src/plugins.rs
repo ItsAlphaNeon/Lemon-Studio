@@ -40,6 +40,8 @@ pub enum Request {
     PitchCents(usize, i32),
     /// A preview note from an Open plugin's own keyboard (host link): row, key, velocity, on.
     Note(usize, u8, u8, bool),
+    /// "Create automation clip" from an Open plugin's own parameter menu (host link): row, parameter index.
+    Automate(usize, usize),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
     Raise(usize),
     /// The menu arrow was clicked: open the window menu at this screen point.
@@ -501,11 +503,11 @@ impl Plugins {
         // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
         #[cfg(windows)]
         for (area, m) in crate::plugin_window::take_link() {
-            if let crate::plugin_window::LinkMsg::Note(k, v, on) = m {
-                let row = self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
-                if let Some(row) = row {
-                    out.push(Request::Note(row, k, v, on));
-                }
+            let row = self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
+            match (row, m) {
+                (Some(row), crate::plugin_window::LinkMsg::Note(k, v, on)) => out.push(Request::Note(row, k, v, on)),
+                (Some(row), crate::plugin_window::LinkMsg::Automate(i)) => out.push(Request::Automate(row, i)),
+                _ => {}
             }
         }
         for (&row, h) in &mut self.hosted {

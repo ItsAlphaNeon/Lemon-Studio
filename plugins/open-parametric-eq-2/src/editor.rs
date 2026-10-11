@@ -107,6 +107,8 @@ pub enum Cmd {
     CopyValue(String),
     PasteValue(String),
     TypeIn(String),
+    /// "Create automation clip" (host link).
+    Automate(String),
     /// Toggle a flag of the flags byte.
     Flag(u8),
     /// Set an index option.
@@ -180,6 +182,8 @@ pub enum Act {
     Lock,
     Menu(MenuReq, f32, f32),
     TypeIn(String, f32, f32),
+    /// Ask the host for an automation clip on the parameter at this list position (host link).
+    Automate(usize),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -550,6 +554,11 @@ impl Logic {
         vec![Act::Repaint]
     }
 
+    /// The parameter's position in the plugin's parameter list (its CLAP / VST3 index).
+    pub fn param_index(&self, id: &str) -> Option<usize> {
+        nih_plug::params::Params::param_map(&*self.params).iter().position(|(p, _, _)| p == id)
+    }
+
     pub fn menu(&self, req: &MenuReq) -> MenuDef<Cmd> {
         let extra = self.params.extra_copy();
         let s = self.shown();
@@ -580,6 +589,9 @@ impl Logic {
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
                 m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
+                // Automation belongs to the host: offered when OpenStudio hosts the editor (host link).
+                m.sep(Cmd::None);
+                m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
             }
             MenuReq::Options => {
                 m.head("Options", Cmd::None);
@@ -653,6 +665,7 @@ impl Logic {
                 }
             }
             Cmd::TypeIn(id) => return vec![Act::TypeIn(id, x, y)],
+            Cmd::Automate(id) => return self.param_index(&id).map(Act::Automate).into_iter().collect(),
             Cmd::Flag(f) => self.params.edit_extra(|b| toggle(b, f)),
             Cmd::Opt(o, v) => self.params.edit_extra(|b| params::set_opt(b, o, v)),
             Cmd::Byte(i, v) => self.params.edit_extra(|b| set_byte(b, i, v)),
@@ -1000,6 +1013,9 @@ mod win32 {
                         }
                         repaint = true;
                     }
+                    Act::Automate(i) => {
+                        os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Automate, i as isize);
+                    }
                 }
             }
             if repaint {
@@ -1027,7 +1043,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate => 0,
             }
         }
 
@@ -1069,6 +1085,24 @@ mod tests {
     fn centre(l: &Logic, t: Target) -> (f32, f32) {
         let h = l.hits.iter().rev().find(|h| h.t == t).unwrap_or_else(|| panic!("no hit {t:?}"));
         (h.r.cx(), h.r.cy())
+    }
+
+    /// A knob's "Create automation clip" works only inside OpenStudio (host link) and asks for the parameter's list
+    /// position: band 1 frequency is parameter 7 (spec: plugins/plugin-parameters.md §3, plugins/host-link.md).
+    #[test]
+    fn create_automation_clip_asks_the_host_for_the_parameter_index() {
+        let mut l = logic();
+        let req = MenuReq::Param(freq_id(0));
+        let entry = |l: &Logic| {
+            let m = l.menu(&req);
+            let i = m.items.iter().position(|it| matches!(it, MenuItem::Item { label, .. } if label == "Create automation clip")).unwrap();
+            (matches!(&m.items[i], MenuItem::Item { enabled: true, .. }), m.cmds[i].clone())
+        };
+        assert!(!entry(&l).0, "another host: disabled");
+        l.hosted = true;
+        let (enabled, cmd) = entry(&l);
+        assert!(enabled);
+        assert_eq!(l.pick(&req, cmd, 0.0, 0.0), vec![Act::Automate(7)]);
     }
 
     #[test]

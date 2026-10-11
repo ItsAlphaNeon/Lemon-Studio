@@ -45,6 +45,8 @@ pub enum LinkMsg {
     Changed,
     /// Preview note from the plugin's keyboard: key, velocity, on.
     Note(u8, u8, bool),
+    /// "Create automation clip" on the plugin parameter at this list position.
+    Automate(usize),
 }
 
 /// (editor area window, message) since the last `take_link`.
@@ -798,6 +800,7 @@ unsafe extern "system" fn area_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                     let (k, v, on) = os_hostlink::unpack_note(lp);
                     LinkMsg::Note(k, v, on)
                 }
+                Some(os_hostlink::Cmd::Automate) => LinkMsg::Automate(lp.max(0) as usize),
                 _ => return 0,
             };
             if let Ok(mut q) = LINK.lock() {

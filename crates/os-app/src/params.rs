@@ -280,6 +280,16 @@ impl App {
         None
     }
 
+    /// "Create automation clip" from a plugin's own parameter menu (host link, spec §6): parameter `index` of instance
+    /// `key`. Returns a message.
+    pub(crate) fn params_automate(&mut self, key: usize, index: usize) -> Option<String> {
+        self.params_tick();
+        let Some((tgt, name, v)) = automation(&self.state, key, index) else {
+            return Some("This parameter cannot be automated".into());
+        };
+        crate::playlist::run(self, Cmd::CreateAutomation(tgt, name, v))
+    }
+
     /// Parameter commands (popup menus).
     pub(crate) fn params_cmd(&mut self, c: PCmd) -> Option<String> {
         match c {
@@ -401,6 +411,11 @@ mod tests {
         a.params_menu(ADD_LAST);
         let last = a.state.project.channels.last().unwrap();
         assert_eq!(last.name.as_deref(), Some("Open Parametric EQ 2 - Insert 2 - Main level #2"));
+        // A plugin's own knob menu (host link): a clip on band 1 frequency.
+        a.params_automate(key, 7);
+        let last = a.state.project.channels.last().unwrap();
+        assert_eq!(last.name.as_deref(), Some("Open Parametric EQ 2 - Insert 2 - Band 1 freq"));
+        assert_eq!(a.state.project.automations.last().and_then(|x| x.target), Some(target::slot_param(2, 1, 7)));
         a.note_host_tweak(&Action::Tempo);
         assert_eq!(a.params_menu(TOOLS_NEXT), None);
         let menu = a.state.playlist.popup.take().unwrap();

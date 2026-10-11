@@ -297,6 +297,8 @@ pub enum Cmd {
     Multichannel,
     Recent(String),
     Browse,
+    /// "Create automation clip" (host link).
+    Automate,
 }
 
 /// A menu to show: rows, what each does, submenus by row.
@@ -359,6 +361,8 @@ pub enum Act {
     Locate,
     CopyAudio,
     PasteAudio,
+    /// Ask the host for an automation clip on this parameter (host link).
+    Automate(String),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1007,13 +1011,13 @@ impl Logic {
             }
             m.subs.push((i, s));
         }
-        // Automation and remote control belong to the host: shown, not available in the plugin.
+        // Automation and remote control belong to the host: shown; "Create automation clip" goes to OpenStudio (host link).
         m.head("Automation");
         for l in ["Edit events", "Edit events in new window", "Edit events in piano roll", "Init song with this position", "Delete initial value"] {
             m.add(MenuItem::item(l).enabled(false), Cmd::None);
         }
         m.sep();
-        m.add(MenuItem::item("Create automation clip").enabled(false), Cmd::None);
+        m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate);
         m.add(MenuItem::item("Edit automation clip...").enabled(false), Cmd::None);
         m.head("Remote control");
         m.add(MenuItem::item("Link to controller...").enabled(false), Cmd::None);
@@ -1034,6 +1038,7 @@ impl Logic {
         };
         match cmd {
             Cmd::None => return vec![],
+            Cmd::Automate => return vec![Act::Automate(id)],
             Cmd::Reset => self.reset(&id),
             Cmd::Steps(n) => {
                 // A step is a 16th of a bar (4 per beat).
@@ -1670,6 +1675,13 @@ mod win32 {
                         }
                         repaint = true;
                     }
+                    Act::Automate(id) => {
+                        // The host makes the clip (spec: plugins/host-link.md); the index is the parameter's list position.
+                        let i = nih_plug::params::Params::param_map(&*self.params).iter().position(|(p, _, _)| *p == id);
+                        if let Some(i) = i {
+                            os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Automate, i as isize);
+                        }
+                    }
                     Act::Note(k, v, on) => {
                         let ans = os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Note, os_hostlink::pack_note(k, v, on));
                         if ans != 1 {
@@ -1794,7 +1806,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate => 0,
             }
         }
 

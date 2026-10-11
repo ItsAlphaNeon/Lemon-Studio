@@ -1096,6 +1096,11 @@ impl App {
                         }
                         continue;
                     }
+                    Request::Automate(row, index) => {
+                        self.state.message = self.params_automate(row, index);
+                        self.invalidate();
+                        continue;
+                    }
                 }
                 self.state.piano.dirty = true;
                 self.invalidate();
