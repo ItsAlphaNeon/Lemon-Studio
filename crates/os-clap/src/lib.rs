@@ -16,10 +16,12 @@ use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
     clap_event_header, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
-    clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_EXPRESSION, CLAP_EVENT_NOTE_OFF,
-    CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_TUNING,
-    CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END, CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE,
+    clap_event_transport, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_EXPRESSION,
+    CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_TUNING, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
+    CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE,
+    CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
 };
+use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::ext::gui::{clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32};
 use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
 use clap_sys::ext::params::{
@@ -286,6 +288,11 @@ pub struct Plugin {
     start_param: Option<u32>,
     next_note_id: i32,
     steady: i64,
+    /// The song position for the next process call (the engine gives it while playing), and the current chunk's.
+    song: Option<os_engine::TransportInfo>,
+    chunk_song: Option<os_engine::TransportInfo>,
+    /// The transport event of the process call being made.
+    transport_ev: clap_event_transport,
     /// The plugin's last process status says it still has sound to deliver (`Instrument::active`).
     sounding: bool,
     dbg_peak: f32,
@@ -426,6 +433,19 @@ impl Plugin {
                 start_param: None,
                 next_note_id: 0,
                 steady: 0,
+                song: None,
+                chunk_song: None,
+                transport_ev: transport_event(&os_engine::TransportInfo {
+                    playing: false,
+                    tempo: 120.0,
+                    frame: 0,
+                    beats: 0.0,
+                    bar_start: 0.0,
+                    bar: 0,
+                    numerator: 4,
+                    denominator: 4,
+                    looping: None,
+                }),
                 sounding: false,
                 dbg_peak: 0.0,
                 dbg_frames: 0,
@@ -793,10 +813,18 @@ impl Plugin {
             None => [ptr::null_mut(), ptr::null_mut()],
         };
         let in_buf = clap_audio_buffer { data32: in_chans.as_mut_ptr(), data64: ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
+        // The engine's transport while playing; without one the host is free running (spec: plugins/vst3-hosting.md §1).
+        let transport = match self.chunk_song {
+            Some(t) => {
+                self.transport_ev = transport_event(&t);
+                &self.transport_ev as *const clap_event_transport
+            }
+            None => ptr::null(),
+        };
         let p = clap_process {
             steady_time: self.steady,
             frames_count: n,
-            transport: ptr::null(),
+            transport,
             audio_inputs: if has_in { &in_buf } else { ptr::null() },
             audio_outputs: &mut buf,
             audio_inputs_count: u32::from(has_in),
@@ -996,6 +1024,10 @@ impl os_engine::Instrument for Plugin {
         self.automate(offset, index, value);
     }
 
+    fn transport(&mut self, info: &os_engine::TransportInfo) {
+        self.song = Some(*info);
+    }
+
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         left.fill(0.0);
         right.fill(0.0);
@@ -1017,10 +1049,12 @@ impl os_engine::Instrument for Plugin {
             }
         }
         self.queue.sort_by_key(|e| e.time);
+        let song = self.song.take();
         let max = self.max_frames as usize;
         let mut at = 0;
         while at < left.len() {
             let n = (left.len() - at).min(max);
+            self.chunk_song = song.map(|s| s.advanced(at as u64, rate));
             let (l, r) = (&mut left[at..at + n], &mut right[at..at + n]);
             self.process_chunk(l, r);
             at += n;
@@ -1052,10 +1086,12 @@ impl os_engine::HostedEffect for Plugin {
             }
         }
         let (mut il, mut ir) = std::mem::take(&mut self.fx_in);
+        let song = self.song.take();
         let max = self.max_frames as usize;
         let mut at = 0;
         while at < left.len() {
             let n = (left.len() - at).min(max);
+            self.chunk_song = song.map(|s| s.advanced(at as u64, rate));
             il.clear();
             ir.clear();
             il.extend_from_slice(&left[at..at + n]);
@@ -1072,6 +1108,47 @@ impl os_engine::HostedEffect for Plugin {
 
     fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
         self.automate(offset, index, value);
+    }
+
+    fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
+        self.song = Some(*info);
+    }
+}
+
+/// The CLAP transport event of an engine transport (spec: plugins/vst3-hosting.md §1): tempo, beat and seconds
+/// timelines, time signature, bar start and number, playing, the loop.
+fn transport_event(t: &os_engine::TransportInfo) -> clap_event_transport {
+    let beats = |b: f64| (b * CLAP_BEATTIME_FACTOR as f64).round() as i64;
+    let secs = |b: f64| (b * 60.0 / t.tempo.max(1.0) * CLAP_SECTIME_FACTOR as f64).round() as i64;
+    let mut flags = CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
+    if t.playing {
+        flags |= CLAP_TRANSPORT_IS_PLAYING;
+    }
+    if t.looping.is_some() {
+        flags |= CLAP_TRANSPORT_IS_LOOP_ACTIVE;
+    }
+    let (ls, le) = t.looping.unwrap_or((0.0, 0.0));
+    clap_event_transport {
+        header: clap_event_header {
+            size: std::mem::size_of::<clap_event_transport>() as u32,
+            time: 0,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_: CLAP_EVENT_TRANSPORT,
+            flags: 0,
+        },
+        flags,
+        song_pos_beats: beats(t.beats),
+        song_pos_seconds: secs(t.beats),
+        tempo: t.tempo,
+        tempo_inc: 0.0,
+        loop_start_beats: beats(ls),
+        loop_end_beats: beats(le),
+        loop_start_seconds: secs(ls),
+        loop_end_seconds: secs(le),
+        bar_start: beats(t.bar_start),
+        bar_number: t.bar,
+        tsig_num: t.numerator,
+        tsig_denom: t.denominator,
     }
 }
 
@@ -1111,6 +1188,46 @@ mod tests {
         let entry = &open_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
         let lib = unsafe { Library::from_entry(entry, Path::new("Open Parametric EQ 2.clap")) }.expect("linked EQ");
         os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap()
+    }
+
+    // spec: plugins/vst3-hosting.md §1 (transport)
+    #[test]
+    fn transport_events_follow_the_engine() {
+        let song = os_engine::TransportInfo {
+            playing: true,
+            tempo: 120.0,
+            frame: 120000,
+            beats: 5.0,
+            bar_start: 4.0,
+            bar: 1,
+            numerator: 3,
+            denominator: 4,
+            looping: Some((0.0, 8.0)),
+        };
+        let e = transport_event(&song);
+        assert_eq!((e.header.type_, e.header.space_id, e.header.time), (CLAP_EVENT_TRANSPORT, CLAP_CORE_EVENT_SPACE_ID, 0));
+        assert_eq!(e.header.size as usize, std::mem::size_of::<clap_event_transport>());
+        let all = CLAP_TRANSPORT_HAS_TEMPO
+            | CLAP_TRANSPORT_HAS_BEATS_TIMELINE
+            | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE
+            | CLAP_TRANSPORT_HAS_TIME_SIGNATURE
+            | CLAP_TRANSPORT_IS_PLAYING
+            | CLAP_TRANSPORT_IS_LOOP_ACTIVE;
+        assert_eq!(e.flags, all);
+        // Beats and seconds are fixed point (2^31 per unit); 5 beats at 120 BPM = 2.5 s.
+        assert_eq!((e.song_pos_beats, e.song_pos_seconds), (5 * CLAP_BEATTIME_FACTOR, 5 * CLAP_SECTIME_FACTOR / 2));
+        assert_eq!((e.loop_start_beats, e.loop_end_beats, e.loop_end_seconds), (0, 8 * CLAP_BEATTIME_FACTOR, 4 * CLAP_SECTIME_FACTOR));
+        assert_eq!((e.bar_start, e.bar_number, e.tsig_num, e.tsig_denom), (4 * CLAP_BEATTIME_FACTOR, 1, 3, 4));
+        let stopped = transport_event(&os_engine::TransportInfo { playing: false, looping: None, ..song });
+        assert_eq!(stopped.flags & (CLAP_TRANSPORT_IS_PLAYING | CLAP_TRANSPORT_IS_LOOP_ACTIVE), 0);
+        // A plugin processes with it (and without it on the next block).
+        let p = open_eq();
+        let mut p = p.lock().unwrap();
+        assert!(p.activate(48000));
+        let (mut l, mut r) = (vec![0.1f32; 5000], vec![0.1f32; 5000]);
+        p.transport_fx(&song);
+        p.process_fx(48000, &mut l, &mut r);
+        p.process_fx(48000, &mut l, &mut r);
     }
 
     // spec: plugins/plugin-parameters.md §1 (list order = automation index), parametric-eq-2.md (parameter order)

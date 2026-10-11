@@ -549,6 +549,47 @@ mod separate {
         assert_eq!(processing[processing.len() - 2..], ["comp.set_processing 0", "comp.set_processing 1"]);
     }
 
+    /// The engine's transport becomes the process context: playing, tempo, musical position (per chunk of a long
+    /// block), bar start and loop; without one the transport reads as stopped (spec §5).
+    #[test]
+    fn the_transport_reaches_the_process_context() {
+        let probe = Arc::new(Probe::default());
+        let (_m, mut p) = instance(&probe);
+        assert!(p.activate(48000));
+        let (mut l, mut r) = ones(64);
+        p.process_fx(48000, &mut l, &mut r);
+        let song = os_engine::TransportInfo {
+            playing: true,
+            tempo: 150.0,
+            frame: 96000,
+            beats: 5.0,
+            bar_start: 4.0,
+            bar: 1,
+            numerator: 4,
+            denominator: 4,
+            looping: Some((0.0, 8.0)),
+        };
+        p.transport_fx(&song);
+        let (mut l, mut r) = ones(5000);
+        p.process_fx(48000, &mut l, &mut r);
+        let (mut l, mut r) = ones(64);
+        p.process_fx(48000, &mut l, &mut r);
+        let c = probe.contexts.lock().unwrap().clone();
+        assert_eq!(c.len(), 4, "{c:?}");
+        let valid = CONT_TIME_VALID | TEMPO_VALID | TIME_SIG_VALID | PROJECT_TIME_MUSIC_VALID | BAR_POSITION_VALID;
+        assert_eq!(c[0].0 & (PLAYING | TEMPO_VALID), 0, "no transport yet: {:#x}", c[0].0);
+        assert_eq!(c[1].0, valid | PLAYING | CYCLE_ACTIVE | CYCLE_VALID);
+        assert_eq!((c[1].1, c[1].2, c[1].3, c[1].4, c[1].5), (150.0, 5.0, 96000, 4.0, 8.0));
+        // The second chunk of the 5000-frame block starts 4096 frames (2.133 beats at 150 BPM) later, in the next bar.
+        let beats = 5.0 + 4096.0 / (48000.0 * 60.0 / 150.0);
+        assert_eq!(c[2].3, 96000 + 4096);
+        assert!((c[2].2 - beats).abs() < 1e-9 && c[2].4 == 4.0 * (beats / 4.0).floor(), "{:?}", c[2]);
+        // The next block has no transport: stopped where it was, tempo still known.
+        assert_eq!(c[3].0 & (PLAYING | CYCLE_ACTIVE), 0);
+        assert_eq!(c[3].0 & TEMPO_VALID, TEMPO_VALID);
+        assert_eq!(c[3].3, 96000 + 4096);
+    }
+
     #[test]
     fn teardown_follows_the_documented_order() {
         let probe = Arc::new(Probe::default());

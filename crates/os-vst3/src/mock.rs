@@ -47,6 +47,8 @@ pub struct Probe {
     pub gain_points: Mutex<Vec<(i32, f64)>>,
     /// The controller object, for simulating edits in its editor.
     pub controller: AtomicUsize,
+    /// Each process call's context: (state, tempo, project time in quarter notes, in samples, bar start, cycle end).
+    pub contexts: Mutex<Vec<(u32, f64, f64, i64, f64, f64)>>,
 }
 
 impl Probe {
@@ -339,6 +341,11 @@ impl IAudioProcessor for Component {
 
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let d = unsafe { &mut *data };
+        if !d.context.is_null() {
+            let c = unsafe { &*d.context };
+            let e = (c.state, c.tempo, c.project_time_music, c.project_time_samples, c.bar_position_music, c.cycle_end_music);
+            self.probe.contexts.lock().unwrap().push(e);
+        }
         let mut points: Vec<(i32, f64)> = Vec::new();
         unsafe {
             if let Some(pc) = d.input_param_changes.upgrade() {

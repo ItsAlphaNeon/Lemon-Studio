@@ -46,7 +46,14 @@ const IO_CHANGED: i32 = 2;
 const LATENCY_CHANGED: i32 = 8;
 const PARAM_TITLES_CHANGED: i32 = 16;
 
-// `ProcessContext::state` flag: continuous time is valid.
+// `ProcessContext::state` flags (spec §5).
+const PLAYING: u32 = 1 << 1;
+const CYCLE_ACTIVE: u32 = 1 << 2;
+const PROJECT_TIME_MUSIC_VALID: u32 = 1 << 9;
+const TEMPO_VALID: u32 = 1 << 10;
+const BAR_POSITION_VALID: u32 = 1 << 11;
+const CYCLE_VALID: u32 = 1 << 12;
+const TIME_SIG_VALID: u32 = 1 << 13;
 const CONT_TIME_VALID: u32 = 1 << 17;
 
 /// `getTailSamples`: the plug-in sounds forever.
@@ -364,6 +371,8 @@ pub struct Plugin {
     sounding: bool,
     steady: i64,
     context: ProcessContext,
+    /// The song position for the next process call (the engine gives it while playing).
+    song: Option<os_engine::TransportInfo>,
     dbg_peak: f32,
     dbg_frames: u64,
     _module: Arc<Module>,
@@ -440,6 +449,7 @@ impl Plugin {
                 sounding: false,
                 steady: 0,
                 context: ProcessContext::default(),
+                song: None,
                 dbg_peak: 0.0,
                 dbg_frames: 0,
                 _module: module.clone(),
@@ -599,7 +609,7 @@ impl Plugin {
         self.context = ProcessContext {
             state: CONT_TIME_VALID,
             sample_rate: f64::from(rate),
-            // Not flagged valid: the engine does not pass its transport yet (spec open questions).
+            // Flagged valid once the engine has given a transport.
             tempo: 120.0,
             time_sig_num: 4,
             time_sig_den: 4,
@@ -865,6 +875,39 @@ impl Plugin {
         true
     }
 
+    /// The process context of a chunk (spec §5): continuous time always; with the engine's transport (`song`, at the
+    /// chunk's first frame) also playing, tempo, time signature, musical position, bar start and the loop. Without
+    /// one the transport is stopped where it was.
+    fn set_context(&mut self, song: Option<os_engine::TransportInfo>) {
+        let c = &mut self.context;
+        c.continuous_time_samples = self.steady;
+        c.state &= !(PLAYING | CYCLE_ACTIVE);
+        let Some(t) = song else {
+            if c.state & TEMPO_VALID == 0 {
+                c.project_time_samples = self.steady;
+            }
+            return;
+        };
+        c.state |= CONT_TIME_VALID | TEMPO_VALID | TIME_SIG_VALID | PROJECT_TIME_MUSIC_VALID | BAR_POSITION_VALID;
+        if t.playing {
+            c.state |= PLAYING;
+        }
+        c.tempo = t.tempo;
+        c.time_sig_num = i32::from(t.numerator);
+        c.time_sig_den = i32::from(t.denominator);
+        c.project_time_samples = t.frame as i64;
+        c.project_time_music = t.beats;
+        c.bar_position_music = t.bar_start;
+        match t.looping {
+            Some((a, b)) => {
+                c.state |= CYCLE_ACTIVE | CYCLE_VALID;
+                c.cycle_start_music = a;
+                c.cycle_end_music = b;
+            }
+            None => c.state &= !CYCLE_VALID,
+        }
+    }
+
     /// Processes up to `max_frames` frames: queued notes inside them, waiting parameter changes, the given audio.
     fn process_chunk(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>) {
         let n = left.len();
@@ -925,8 +968,6 @@ impl Plugin {
             }
             self.bus_out.push(AudioBusBuffers { num_channels: ch as i32, silence_flags: 0, buffers: unsafe { self.ptrs.as_mut_ptr().add(start) } });
         }
-        self.context.continuous_time_samples = self.steady;
-        self.context.project_time_samples = self.steady;
         let mut data = ProcessData {
             process_mode: 0,
             symbolic_sample_size: 0,
@@ -1104,6 +1145,10 @@ impl os_engine::Instrument for Plugin {
         self.automate(offset, index, value);
     }
 
+    fn transport(&mut self, info: &os_engine::TransportInfo) {
+        self.song = Some(*info);
+    }
+
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         left.fill(0.0);
         right.fill(0.0);
@@ -1116,10 +1161,12 @@ impl os_engine::Instrument for Plugin {
         self.start_processing();
         // Stable sort: notes at the same time keep their order (a note off before the next note on).
         self.queue.sort_by_key(|e| e.time);
+        let song = self.song.take();
         let max = self.max_frames as usize;
         let mut at = 0;
         while at < left.len() {
             let n = (left.len() - at).min(max);
+            self.set_context(song.map(|s| s.advanced(at as u64, rate)));
             self.process_chunk(&mut left[at..at + n], &mut right[at..at + n], None);
             at += n;
         }
@@ -1138,10 +1185,12 @@ impl os_engine::HostedEffect for Plugin {
         }
         self.start_processing();
         let (mut il, mut ir) = std::mem::take(&mut self.fx_in);
+        let song = self.song.take();
         let max = self.max_frames as usize;
         let mut at = 0;
         while at < left.len() {
             let n = (left.len() - at).min(max);
+            self.set_context(song.map(|s| s.advanced(at as u64, rate)));
             il.clear();
             ir.clear();
             il.extend_from_slice(&left[at..at + n]);
@@ -1158,6 +1207,10 @@ impl os_engine::HostedEffect for Plugin {
 
     fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
         self.automate(offset, index, value);
+    }
+
+    fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
+        self.song = Some(*info);
     }
 }
 

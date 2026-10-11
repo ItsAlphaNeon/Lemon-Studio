@@ -11,7 +11,7 @@ use os_model::{ChannelKind, ClipSource, ControlPoint, Project};
 
 use crate::effects::Effect;
 use crate::envelope;
-use crate::instrument::{SharedInstrument, Slot};
+use crate::instrument::{SharedInstrument, Slot, TransportInfo};
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
@@ -911,6 +911,9 @@ impl Engine {
     /// Renders the next `out.len() / 2` stereo frames (interleaved L/R) into `out`.
     pub fn process(&mut self, out: &mut [f32]) {
         let frames = out.len() / 2;
+        // Effects see the transport at the block's first frame (after a pending wrap to the loop start).
+        let first = if self.looping && self.end_frame > 0 && self.frame >= self.end_frame { 0 } else { self.frame };
+        let song = self.transport_at(first);
         self.run_automation(frames);
         self.run_param_automation(frames);
         for b in &mut self.bus {
@@ -946,7 +949,7 @@ impl Engine {
             let rate = self.rate;
             let (dry, l, r) = (&mut self.fx_dry, &mut self.scratch.0, &mut self.scratch.1);
             for fx in &mut self.tracks[t].effects {
-                run_slot(fx, &mut buf, rate, dry, l, r);
+                run_slot(fx, &mut buf, rate, &song, dry, l, r);
             }
             if from == to {
                 let [[ll, lr], [rl, rr]] = to;
@@ -1073,12 +1076,14 @@ impl Engine {
             self.scratch.1.resize(n, 0.0);
         }
         let mut active = false;
+        let song = self.transport_at(self.frame);
         for (c, ch) in self.channels.iter().enumerate() {
             let Some(inst) = &ch.instrument.0 else { continue };
             let Ok(mut inst) = inst.try_lock() else {
                 self.params.resend_channel(c);
                 continue;
             };
+            inst.transport(&song);
             // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md §2).
             for (off, index, value) in self.params.channel_span(c, a, b) {
                 inst.param(off, index, value);
@@ -1109,6 +1114,26 @@ impl Engine {
         if active {
             self.inst_tail = u64::from(self.rate) * INSTRUMENT_TAIL_SECONDS;
         }
+    }
+
+    /// The transport hosted plugins see at `frame` (spec: plugins/vst3-hosting.md §1): playing at the project tempo,
+    /// in 4/4 (the project's time signature is not read yet), with the pattern loop while looping.
+    fn transport_at(&self, frame: u64) -> TransportInfo {
+        let mut start = TransportInfo {
+            playing: true,
+            tempo: self.tempo,
+            frame: 0,
+            beats: 0.0,
+            bar_start: 0.0,
+            bar: 0,
+            numerator: 4,
+            denominator: 4,
+            looping: None,
+        };
+        if self.looping && self.end_frame > 0 {
+            start.looping = Some((0.0, self.end_frame as f64 / start.frames_per_beat(self.rate)));
+        }
+        start.advanced(frame, self.rate)
     }
 
     /// Loop point: back to frame 0 (sounding notes keep their remaining length).
@@ -1304,7 +1329,7 @@ fn blackman(t: f64) -> f64 {
 }
 
 /// One mixer slot over interleaved `buf`: skipped when its LED is off, blended with the dry signal by its mix level.
-fn run_slot(fx: &mut FxSlot, buf: &mut [f32], rate: u32, dry: &mut Vec<f32>, l: &mut Vec<f32>, r: &mut Vec<f32>) {
+fn run_slot(fx: &mut FxSlot, buf: &mut [f32], rate: u32, song: &TransportInfo, dry: &mut Vec<f32>, l: &mut Vec<f32>, r: &mut Vec<f32>) {
     if !fx.on || fx.mix <= 0.0 {
         return;
     }
@@ -1323,6 +1348,7 @@ fn run_slot(fx: &mut FxSlot, buf: &mut [f32], rate: u32, dry: &mut Vec<f32>, l: 
             r.clear();
             l.extend(buf.chunks_exact(2).map(|f| f[0]));
             r.extend(buf.chunks_exact(2).map(|f| f[1]));
+            h.transport_fx(song);
             h.process_fx(rate, &mut l[..n], &mut r[..n]);
             for (i, f) in buf.chunks_exact_mut(2).enumerate() {
                 f[0] = l[i];
@@ -1593,6 +1619,85 @@ mod tests {
             r.fill(v);
             self.at += l.len() as u64;
         }
+    }
+
+    /// Records the transport it is given before each block (instrument and effect).
+    #[derive(Default)]
+    struct Clock {
+        seen: Vec<(TransportInfo, usize)>,
+        next: Option<TransportInfo>,
+    }
+
+    impl crate::Instrument for Clock {
+        fn note_on(&mut self, _offset: u32, _key: u8, _velocity: f32) {}
+        fn note_off(&mut self, _offset: u32, _key: u8) {}
+        fn transport(&mut self, info: &TransportInfo) {
+            self.next = Some(*info);
+        }
+        fn process(&mut self, _rate: u32, l: &mut [f32], _r: &mut [f32]) {
+            let t = self.next.take().expect("a transport before each block");
+            self.seen.push((t, l.len()));
+        }
+    }
+
+    impl crate::instrument::HostedEffect for Clock {
+        fn transport_fx(&mut self, info: &TransportInfo) {
+            self.next = Some(*info);
+        }
+        fn process_fx(&mut self, _rate: u32, l: &mut [f32], _r: &mut [f32]) {
+            let t = self.next.take().expect("a transport before each block");
+            self.seen.push((t, l.len()));
+        }
+    }
+
+    /// spec: plugins/vst3-hosting.md §1 (transport): hosted plugins see the playing position, tempo and loop.
+    #[test]
+    fn plugins_see_the_transport() {
+        let mut p = project(vec![long_note(0, 96, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        p.channels[0].mixer_track = 1;
+        p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let inst = Arc::new(std::sync::Mutex::new(Clock::default()));
+        let fx = Arc::new(std::sync::Mutex::new(Clock::default()));
+        e.set_instrument(0, inst.clone());
+        e.set_effect(1, 0, fx.clone());
+        // Pattern playback loops (the app turns it on for pattern mode).
+        e.set_looping(true);
+        let mut out = vec![0.0f32; 512 * 2];
+        let blocks = 200;
+        for _ in 0..blocks {
+            e.process(&mut out);
+        }
+        // 130 BPM at 48 kHz; the pattern is one bar (4 beats) and loops.
+        let fpb = 48000.0 * 60.0 / 130.0;
+        let bar = 4.0 * fpb;
+        let end = e.end_frame;
+        assert!((end as f64 - bar).abs() < 2.0, "one bar: {end} frames");
+        for (who, seen) in [("instrument", &inst.lock().unwrap().seen), ("effect", &fx.lock().unwrap().seen)] {
+            let mut frame = 0u64;
+            for (t, n) in seen.iter() {
+                if frame >= end {
+                    frame -= end;
+                }
+                assert!(t.playing && t.tempo == 130.0 && (t.numerator, t.denominator) == (4, 4), "{who} {t:?}");
+                assert_eq!(t.frame, frame, "{who}");
+                assert!((t.beats - frame as f64 / fpb).abs() < 1e-9, "{who} {t:?}");
+                assert_eq!((t.bar, t.bar_start), (0, 0.0), "{who}: a one-bar loop stays in bar 0");
+                let (a, b) = t.looping.expect("pattern playback loops");
+                assert!(a == 0.0 && (b - end as f64 / fpb).abs() < 1e-9, "{who} {t:?}");
+                frame += *n as u64;
+            }
+            let total: usize = seen.iter().map(|s| s.1).sum();
+            assert_eq!(total, 512 * blocks, "{who}: every frame is covered");
+        }
+        // Effects get one call per block, at its first frame (wrapped to the loop start when the block begins there).
+        assert_eq!(fx.lock().unwrap().seen.len(), blocks);
+        let t = TransportInfo { looping: None, ..fx.lock().unwrap().seen[0].0 };
+        let later = t.advanced(48000 * 3, 48000);
+        assert_eq!((later.frame, later.bar), (144000, 1));
+        assert!((later.beats - 6.5).abs() < 1e-9 && (later.bar_start - 4.0).abs() < 1e-9, "{later:?}");
     }
 
     // spec: flp/events/project-info.md "Swing timing" (100 % delays an off-beat 16th by half a step)
