@@ -4,7 +4,8 @@
 //! A third-party plugin is stored the way the project format stores every such plugin: as the wrapper plugin, whose
 //! state names the plugin (format, class id, name, vendor, file) and holds the plugin's own saved state. Plugins
 //! compiled into OpenStudio keep their own mapping (Open Sampler = sampler channels, Open Parametric EQ 2 = the
-//! file's parametric EQ), and native plugins keep the state the file had.
+//! file's parametric EQ). Native plugins keep their own state format: a hosted native instance writes its state into
+//! its channel or slot as it is, and native plugins that are not hosted keep the bytes the file had.
 //!
 // spec: flp/events/plugins.md (§4 the wrapper state, §6 what OpenStudio writes)
 
@@ -52,7 +53,17 @@ pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
 /// plugin keeps the wrapper records OpenStudio does not edit.
 pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
     for key in plugins.hosted.keys().copied().collect::<Vec<_>>() {
-        let Some(d) = plugins.descriptor(key).filter(is_wrapped) else { continue };
+        let Some(d) = plugins.descriptor(key) else { continue };
+        if d.format == Format::Native {
+            // The plugin's own state stream is what the file stores for it (spec §1, event 213).
+            if let Some(state) = plugins.state(key) {
+                store_native(proj, key, state);
+            }
+            continue;
+        }
+        if !is_wrapped(&d) {
+            continue;
+        }
         let state = plugins.state(key).unwrap_or_default();
         let r = plugin_ref(&d, state);
         match fx_of(key) {
@@ -67,6 +78,22 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
                 let base = (slot.name == WRAPPER).then_some(slot.state.as_slice());
                 slot.state = wrapper::encode(base, &r);
                 slot.name = WRAPPER.into();
+            }
+        }
+    }
+}
+
+/// A hosted native plugin's state into its channel (a plugin channel) or mixer slot.
+fn store_native(proj: &mut Project, key: usize, state: Vec<u8>) {
+    match fx_of(key) {
+        None => {
+            if let Some(ch) = proj.channels.get_mut(key).filter(|c| c.kind == ChannelKind::Plugin) {
+                ch.plugin_state = Some(state);
+            }
+        }
+        Some((t, k)) => {
+            if let Some(slot) = proj.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) {
+                slot.state = state;
             }
         }
     }
@@ -293,6 +320,79 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(b.state.project.mixer, a.state.project.mixer);
         assert_eq!(crate::mixer::inserts(&b.state), crate::mixer::inserts(&a.state));
+    }
+
+    /// A stand-in native plugin: its state is four bytes.
+    struct NativeStandIn(Descriptor, Vec<u8>);
+    impl os_engine::Instrument for NativeStandIn {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_engine::HostedEffect for NativeStandIn {
+        fn process_fx(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_host::Plugin for NativeStandIn {
+        fn desc(&self) -> &Descriptor {
+            &self.0
+        }
+        fn activate(&mut self, _: u32) -> bool {
+            true
+        }
+        fn idle(&mut self) {}
+        fn has_editor(&self) -> bool {
+            false
+        }
+        fn editor_open(&self) -> bool {
+            false
+        }
+        fn open_editor(&mut self, _: *mut std::ffi::c_void) -> Result<(u32, u32), String> {
+            Err("none".into())
+        }
+        fn editor_size(&self) -> Option<(u32, u32)> {
+            None
+        }
+        fn close_editor(&mut self) {}
+        fn save_state(&self) -> Option<Vec<u8>> {
+            Some(self.1.clone())
+        }
+        fn load_state(&mut self, d: &[u8]) -> bool {
+            self.1 = d.to_vec();
+            true
+        }
+    }
+
+    /// A hosted native effect writes its own state into its slot (not wrapped); the file reads it back
+    /// (spec: flp/events/plugins.md §1).
+    #[test]
+    fn hosted_native_effects_save_their_state() {
+        let path = std::env::temp_dir().join(format!("openstudio-native-{}.flp", std::process::id()));
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.file = None;
+        a.state.path = None;
+        let desc = Descriptor {
+            format: Format::Native,
+            id: "native:Fruity Balance".into(),
+            name: "Fruity Balance".into(),
+            vendor: String::new(),
+            version: String::new(),
+            features: vec![],
+            kind: os_host::Kind::Effect,
+            path: "C:/FL/Plugins/Fruity/Effects/Balance/Fruity Balance.dll".into(),
+        };
+        let plugin: os_host::SharedPlugin = std::sync::Arc::new(std::sync::Mutex::new(NativeStandIn(desc, vec![9, 8, 7, 6])));
+        a.state.project.mixer[2].slots[1] = Some(crate::plugins::new_slot("Fruity Balance"));
+        a.plugins.hosted.insert(
+            fx_key(2, 1),
+            crate::plugins::Hosted { plugin, #[cfg(windows)] window: None, #[cfg(windows)] link: None },
+        );
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(saved.mixer[2].slots[1], Some(SlotPlugin { name: "Fruity Balance".into(), state: vec![9, 8, 7, 6] }));
+        assert_eq!(a.state.project.mixer[2].slots[1], saved.mixer[2].slots[1]);
     }
 
     /// A wrapped plugin is found by class id, else by file and name, else by name.
