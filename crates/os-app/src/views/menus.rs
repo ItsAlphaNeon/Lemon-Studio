@@ -334,16 +334,12 @@ fn item_action(menu: usize, i: usize, item: &Item) -> Action {
     Action::MenuItem(menu, i)
 }
 
-const ROW: f32 = 19.0;
-const HEAD_H: f32 = 16.0;
-const SEP_H: f32 = 7.0;
-const BORDER: f32 = 2.0;
-
-fn row_h(it: &Item) -> f32 {
+// Row heights follow the display scale like FL's popup menus (spec: ui/ui-scaling.md §2).
+fn row_h(m: &os_ui::kit::menu::Metrics, it: &Item) -> f32 {
     match it.kind {
-        Kind::Item => ROW,
-        Kind::Head => HEAD_H,
-        Kind::Sep => SEP_H,
+        Kind::Item => m.row,
+        Kind::Head => m.head,
+        Kind::Sep => m.sep,
     }
 }
 
@@ -351,6 +347,8 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
     let Some(m) = MENUS.get(menu) else { return };
     let x0 = bar_layout(ui.c)[menu].0;
     let t = ui.t;
+    let mt = os_ui::kit::menu::metrics(ui.c.scale);
+    let (row, border) = (mt.row, mt.border);
 
     // Pattern list column: one row per project pattern (spec: ui/menus.md, PATTERNS).
     // spec: ui/pattern-menu.md §2: only used patterns, the column as wide as the longest name.
@@ -362,37 +360,39 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
     let list_w = pats.iter().map(|(_, n)| ui.c.text_width(Font::new(14), n) + 28.0).fold(80.0f32, f32::max).ceil();
     let col_w = |ci: usize, w: f32| if menu == PATTERNS && ci == 0 { list_w } else { w };
 
-    let width: f32 = m.cols.iter().enumerate().map(|(ci, (w, _))| col_w(ci, *w)).sum::<f32>() + BORDER * 2.0;
-    let col_h = |items: &[Item]| items.iter().map(row_h).sum::<f32>();
+    let width: f32 = m.cols.iter().enumerate().map(|(ci, (w, _))| col_w(ci, *w)).sum::<f32>() + border * 2.0;
+    let col_h = |items: &[Item]| items.iter().map(|it| row_h(&mt, it)).sum::<f32>();
     let body_h = m
         .cols
         .iter()
         .enumerate()
-        .map(|(ci, (_, items))| if menu == PATTERNS && ci == 0 { pats.len() as f32 * ROW } else { col_h(items) })
+        .map(|(ci, (_, items))| if menu == PATTERNS && ci == 0 { pats.len() as f32 * row } else { col_h(items) })
         .fold(0.0, f32::max);
     let (ax, ay) = match (menu == PATTERNS, s.pat_ui.menu_at) {
         (true, Some(at)) => at,
         _ => (x0 - 4.0, 78.0),
     };
-    let r = Rect::new(ax.min(s.screen.0 - width).max(0.0), ay, width, body_h + BORDER * 2.0);
+    let r = Rect::new(ax.min(s.screen.0 - width).max(0.0), ay, width, body_h + border * 2.0);
     let away = !r.contains(ui.mouse.0, ui.mouse.1);
     ui.c.fill_rect(r, t.menu_pop);
-    ui.c.stroke_rrect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0), 0.0, 2.0, t.menu_pop_border);
+    ui.c.stroke_rrect(Rect::new(r.x + mt.line, r.y + mt.line, r.w - 2.0 * mt.line, r.h - 2.0 * mt.line), 0.0, border, t.menu_pop_border);
     ui.hit(r, Action::Swallow, "");
 
     let font = Font::new(14);
-    let mut cx = r.x + BORDER;
+    // Text sits where it does at 100 %, moved by half of what the row lost.
+    let dy = (row - os_ui::kit::menu::ROW) / 2.0;
+    let mut cx = r.x + border;
     let mut flat = 0usize;
     for (ci, (cw, items)) in m.cols.iter().enumerate() {
         let cw = &col_w(ci, *cw);
-        let col = Rect::new(cx, r.y + BORDER, *cw, body_h);
+        let col = Rect::new(cx, r.y + border, *cw, body_h);
         if ci > 0 {
             ui.c.fill_rect(Rect::new(cx - 1.0, col.y, 1.0, body_h), t.menu_pop_head);
         }
         let mut y = col.y;
         if menu == PATTERNS && ci == 0 {
             for (n, name) in &pats {
-                let rr = Rect::new(col.x, y, col.w, ROW);
+                let rr = Rect::new(col.x, y, col.w, row);
                 let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
                 let lit = hov || (*n == s.pattern && away);
                 if lit {
@@ -400,18 +400,18 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                 }
                 let col = if *n == s.pattern { t.glyph } else { t.menu_pop_text };
                 let dx = if lit { 22.0 } else { 20.0 };
-                ui.c.text_clip(font, rr.x + dx, rr.y + 2.0, rr.w - dx - 4.0, col, name);
-                y += ROW;
+                ui.c.text_clip(font, rr.x + dx, rr.y + 2.0 + dy, rr.w - dx - 4.0, col, name);
+                y += row;
             }
         }
         for item in items.iter() {
-            let h = row_h(item);
+            let h = row_h(&mt, item);
             let rr = Rect::new(col.x, y, col.w, h);
             match item.kind {
-                Kind::Sep => ui.c.fill_rect(Rect::new(col.x, y + 3.0, col.w, 1.0), t.menu_pop_head),
+                Kind::Sep => ui.c.fill_rect(Rect::new(col.x, y + mt.sep_line, col.w, mt.line), t.menu_pop_head),
                 Kind::Head => {
                     ui.c.fill_rect(rr, t.menu_pop_head);
-                    ui.c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0, t.menu_pop_head_text, item.label);
+                    ui.c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0 + (h - os_ui::kit::menu::HEAD) / 2.0, t.menu_pop_head_text, item.label);
                 }
                 Kind::Item => {
                     let action = item_action(menu, flat, item);
@@ -427,7 +427,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                         (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
                         (mk, _) => mk,
                     };
-                    let (mx, my) = (rr.x + 10.0, rr.y + ROW / 2.0);
+                    let (mx, my) = (rr.x + 10.0, rr.y + row / 2.0);
                     match mark {
                         Mark::Check(true) => {
                             ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, t.menu_pop_text);
@@ -442,10 +442,10 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                         }
                         _ => {}
                     }
-                    ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0, rr.w - 24.0, color, item.label);
+                    ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, rr.w - 24.0, color, item.label);
                     let right = rr.right() - if item.sub { 16.0 } else { 8.0 };
                     if !item.shortcut.is_empty() {
-                        ui.c.text_right(font.italic(), right, rr.y + 3.0, t.menu_pop_shortcut, item.shortcut);
+                        ui.c.text_right(font.italic(), right, rr.y + 3.0 + dy, t.menu_pop_shortcut, item.shortcut);
                     }
                     if item.sub {
                         let ax = rr.right() - 11.0;

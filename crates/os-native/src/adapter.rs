@@ -184,7 +184,7 @@ impl os_host::Plugin for NativePlugin {
     fn editor_open(&self) -> bool {
         self.editor
     }
-    fn open_editor(&mut self, parent: *mut c_void) -> Result<(u32, u32), String> {
+    fn open_editor(&mut self, parent: *mut c_void, _scale: f32) -> Result<(u32, u32), String> {
         if parent.is_null() {
             return Err("no parent window".into());
         }

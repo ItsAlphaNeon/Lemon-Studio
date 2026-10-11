@@ -19,7 +19,7 @@ pub use os_host::{set_waker, wake, Descriptor};
 
 use host::{from_utf16, null_shared, null_static, Com, EventList, Frame, Handler, HostApp, ParamChanges, Shared, Stream};
 use vst3_sys::base::{kResultOk, kResultTrue, IPluginBase, IPluginFactory, IPluginFactory2, IPluginFactory3, PClassInfo, PClassInfo2, PClassInfoW, PFactoryInfo};
-use vst3_sys::gui::{IPlugView, ViewRect};
+use vst3_sys::gui::{IPlugView, IPlugViewContentScaleSupport, ViewRect};
 use vst3_sys::utils::SharedVstPtr;
 use vst3_sys::vst::{
     AudioBusBuffers, BusInfo, Event, EventData, IAudioProcessor, IComponent, IConnectionPoint, IEditController, IUnitInfo,
@@ -798,8 +798,9 @@ impl Plugin {
         self.can_edit
     }
 
-    /// Embeds the editor in `parent` (an HWND; spec §6); returns its size in pixels.
-    pub fn open_editor(&mut self, parent: *mut c_void) -> Result<(u32, u32), String> {
+    /// Embeds the editor in `parent` (an HWND; spec §6); returns its size in pixels. `scale` is the parent's DPI
+    /// factor, given to editors that support content scaling (spec: ui/ui-scaling.md §3).
+    pub fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
         if !self.can_edit {
             return Err(format!("{} has no editor", self.desc.name));
         }
@@ -811,6 +812,12 @@ impl Plugin {
                 return Err("the editor cannot be shown in a window".into());
             }
             view.set_frame(self.frame.raw());
+            // Content scale before attaching, so the editor opens at its final size (optional interface).
+            if scale > 0.0 {
+                if let Some(s) = view.cast::<dyn IPlugViewContentScaleSupport>() {
+                    s.set_scale_factor(scale);
+                }
+            }
             if view.attached(parent, c"HWND".as_ptr()) != kResultOk {
                 view.set_frame(std::ptr::null_mut());
                 return Err("the plug-in refused the editor window".into());
@@ -1081,8 +1088,8 @@ impl os_host::Plugin for Plugin {
         self.editor
     }
 
-    fn open_editor(&mut self, parent: *mut c_void) -> Result<(u32, u32), String> {
-        Plugin::open_editor(self, parent)
+    fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
+        Plugin::open_editor(self, parent, scale)
     }
 
     fn editor_size(&self) -> Option<(u32, u32)> {

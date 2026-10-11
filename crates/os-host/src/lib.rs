@@ -155,8 +155,9 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     fn has_editor(&self) -> bool;
     fn editor_open(&self) -> bool;
     /// Embeds the plugin's editor in `parent` (a host window handle: HWND on Windows); returns its size in pixels.
-    /// The host draws the window frame around it (spec: ui/plugin-window.md).
-    fn open_editor(&mut self, parent: *mut c_void) -> Result<(u32, u32), String>;
+    /// The host draws the window frame around it (spec: ui/plugin-window.md). `scale` is the parent window's DPI
+    /// factor (1.0 = 96 dpi): the editor is told to draw at it (spec: ui/ui-scaling.md §3).
+    fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String>;
     /// The editor's current size in pixels (when open). The host polls it: a plugin that resizes itself is followed.
     fn editor_size(&self) -> Option<(u32, u32)>;
     fn close_editor(&mut self);
@@ -273,7 +274,7 @@ mod tests {
         fn editor_open(&self) -> bool {
             false
         }
-        fn open_editor(&mut self, _: *mut c_void) -> Result<(u32, u32), String> {
+        fn open_editor(&mut self, _: *mut c_void, _: f32) -> Result<(u32, u32), String> {
             Err("none".into())
         }
         fn editor_size(&self) -> Option<(u32, u32)> {

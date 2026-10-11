@@ -585,7 +585,7 @@ mod tests {
         fn editor_open(&self) -> bool {
             false
         }
-        fn open_editor(&mut self, _: *mut std::ffi::c_void) -> Result<(u32, u32), String> {
+        fn open_editor(&mut self, _: *mut std::ffi::c_void, _: f32) -> Result<(u32, u32), String> {
             Err(String::new())
         }
         fn editor_size(&self) -> Option<(u32, u32)> {

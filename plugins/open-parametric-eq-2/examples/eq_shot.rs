@@ -51,7 +51,10 @@ fn main() {
         .and_then(|p| std::fs::read(p).ok())
         .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
         .unwrap_or_default();
-    let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+    // `OS_SHOT_SCALE=3` renders at that display scale (the picker's high-resolution tiles).
+    let k: f32 = std::env::var("OS_SHOT_SCALE").ok().and_then(|v| v.parse().ok()).filter(|k: &f32| *k > 0.0).unwrap_or(1.0);
+    let s = |v: u32| (v as f32 * k).round() as u32;
+    let mut c = os_ui::Canvas::new(s(view::W), s(view::H), k).unwrap();
     let paint = |l: &mut Logic, c: &mut os_ui::Canvas| {
         let extra = l.params.extra_copy();
         let look = Look { s: l.shown(), extra: &extra, spectrum: spectrum.as_deref(), rate: 44100.0 };
@@ -73,9 +76,9 @@ fn main() {
         }
         eprintln!("paint {:.2} ms", t.elapsed().as_secs_f64() * 1000.0 / 50.0);
     }
-    let mut buf = vec![0u32; (view::W * view::H) as usize];
+    let mut buf = vec![0u32; (s(view::W) * s(view::H)) as usize];
     c.copy_to_xrgb(&mut buf);
-    let mut pm = tiny_skia::Pixmap::new(view::W, view::H).unwrap();
+    let mut pm = tiny_skia::Pixmap::new(s(view::W), s(view::H)).unwrap();
     for (px, v) in pm.pixels_mut().iter_mut().zip(&buf) {
         *px = tiny_skia::PremultipliedColorU8::from_rgba((v >> 16) as u8, (v >> 8) as u8, *v as u8, 255).unwrap();
     }

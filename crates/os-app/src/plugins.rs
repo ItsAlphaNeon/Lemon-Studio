@@ -457,24 +457,15 @@ impl Plugins {
             return Ok(());
         }
         let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
-        let pos = crate::plugin_window::default_position(owner);
+        let pos = crate::plugin_window::default_position(owner, scale);
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size.
         let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, self.detach_new)?;
         // Mixer effects have no channel strip (spec: ui/mixer.md §7).
         if row >= FX_KEY {
             w.set_strip(false);
         }
-        let (ew, eh) = p.open_editor(w.area())?;
-        // An Open plugin answers the hello: its page tabs go into the strip row and its editor shrinks to what is below.
-        h.link = os_hostlink::Link::connect(w.area() as isize);
-        match &h.link {
-            Some(l) => {
-                w.set_pages(l.pages.clone(), l.page_now());
-                let (lw, lh) = l.size().unwrap_or((ew, eh));
-                w.set_editor_size((lw as f32, lh as f32));
-            }
-            None => w.set_editor_size((ew as f32 / scale, eh as f32 / scale)),
-        }
+        let size = p.open_editor(w.area(), scale)?;
+        h.link = fit_editor(&w, size, scale);
         // On top: the app stacks it above its other windows (`State::raise`), and a new child window starts below
         // the open ones.
         w.raise();
@@ -485,6 +476,44 @@ impl Plugins {
             w.set_preset(name);
         }
         Ok(())
+    }
+
+    /// The main window's DPI scale changed: docked windows follow it (detached ones follow their own monitor,
+    /// `FrameEvent::Dpi`). Spec: ui/ui-scaling.md §3.
+    pub fn set_scale(&mut self, scale: f32) {
+        if scale <= 0.0 || scale == self.scale {
+            return;
+        }
+        self.scale = scale;
+        #[cfg(windows)]
+        for row in self.docked() {
+            self.rescale_window(row, scale);
+        }
+    }
+
+    /// Redraws row `row`'s window at `scale`: the frame resizes and the editor is reopened, since plugins take their
+    /// scale when the editor opens. The plugin's page is kept.
+    #[cfg(windows)]
+    fn rescale_window(&mut self, row: usize, scale: f32) {
+        let Some(Hosted { plugin, window: Some(w), link, .. }) = self.hosted.get_mut(&row) else { return };
+        if w.scale() == scale {
+            return;
+        }
+        let Ok(mut p) = plugin.lock() else { return };
+        let page = link.as_ref().map(|l| l.page_now());
+        p.close_editor();
+        w.set_scale(scale);
+        *link = match p.open_editor(w.area(), scale) {
+            Ok(size) => fit_editor(w, size, scale),
+            Err(e) => {
+                eprintln!("openstudio: plugin editor at the new scale: {e}");
+                None
+            }
+        };
+        if let (Some(l), Some(page)) = (link.as_mut(), page) {
+            l.set_page(page);
+            w.set_page(l.page_now());
+        }
     }
 
     #[cfg(windows)]
@@ -560,6 +589,8 @@ impl Plugins {
     pub fn idle(&mut self, info: impl Fn(usize) -> Option<ChannelInfoT>) -> Vec<Request> {
         let mut out = Vec::new();
         let mut close: Vec<usize> = Vec::new();
+        #[cfg(windows)]
+        let mut rescale: Vec<(usize, f32)> = Vec::new();
         // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
         #[cfg(windows)]
         for (area, m) in crate::plugin_window::take_link() {
@@ -575,7 +606,8 @@ impl Plugins {
                 p.idle();
                 #[cfg(windows)]
                 if let (Some(w), None, Some((ew, eh))) = (&h.window, &h.link, p.editor_size()) {
-                    w.set_editor_size((ew as f32 / self.scale, eh as f32 / self.scale));
+                    let k = w.scale();
+                    w.set_editor_size((ew as f32 / k, eh as f32 / k));
                 }
             }
             #[cfg(windows)]
@@ -612,6 +644,10 @@ impl Plugins {
                         FrameEvent::Misc(m, v) => Request::Misc(row, m, v),
                         FrameEvent::MiscMenu(m, x, y) => Request::MiscMenu(row, m, x, y),
                         FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
+                        FrameEvent::Dpi(k) => {
+                            rescale.push((row, k));
+                            continue;
+                        }
                     });
                 }
             }
@@ -620,8 +656,28 @@ impl Plugins {
         for row in close {
             self.close_window(row);
         }
+        #[cfg(windows)]
+        for (row, k) in rescale {
+            self.rescale_window(row, k);
+        }
         out
     }
+}
+
+/// Sizes window `w` to its freshly opened editor (`size` in device px at `scale`). An Open plugin answers the host
+/// link's hello: its page tabs go into the strip row and its editor shrinks to what is below them.
+#[cfg(windows)]
+fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_hostlink::Link> {
+    let link = os_hostlink::Link::connect(w.area() as isize);
+    match &link {
+        Some(l) => {
+            w.set_pages(l.pages.clone(), l.page_now());
+            let (lw, lh) = l.size().unwrap_or(((ew as f32 / scale) as u32, (eh as f32 / scale) as u32));
+            w.set_editor_size((lw as f32, lh as f32));
+        }
+        None => w.set_editor_size((ew as f32 / scale, eh as f32 / scale)),
+    }
+    link
 }
 
 impl Drop for Hosted {
@@ -859,6 +915,42 @@ mod tests {
             DeleteObject(bmp);
             DeleteDC(mem);
             ReleaseDC(std::ptr::null_mut(), dc);
+        }
+    }
+
+    /// Plugin editors draw at the window's DPI scale and follow a scale change (spec: ui/ui-scaling.md §3). Opens real
+    /// windows: `cargo test -p os-app --bin openstudio plugin_editors_follow_the_scale -- --ignored`.
+    #[test]
+    #[ignore]
+    fn plugin_editors_follow_the_scale() {
+        let size = |h: isize| unsafe {
+            let mut r: RECT = std::mem::zeroed();
+            GetWindowRect(h as HWND, &mut r);
+            (r.right - r.left, r.bottom - r.top)
+        };
+        let mut pl = Plugins { available: builtin(), scale: 1.5, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(OPEN_SAMPLER).expect("built-in Open Sampler");
+        pl.create_with(0, index, None).unwrap();
+        let info = ChannelInfo { name: OPEN_SAMPLER.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 200);
+        let w = pl.hosted[&0].window.as_ref().unwrap();
+        let (frame, area) = (w.hwnd(), w.area() as isize);
+        let editor = || unsafe { GetWindow(area as HWND, GW_CHILD) } as isize;
+        // Joined the strip: 560 x 390 logical (spec: plugins/host-link.md), drawn at 150 %.
+        assert_eq!(size(editor()), (840, 585), "the editor draws at the window's scale");
+        assert_eq!(size(area), (840, 585), "the frame's editor area matches it");
+        let page = 1;
+        pl.hosted.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(page);
+        for (k, want) in [(1.0, (560, 390)), (2.0, (1120, 780))] {
+            pl.rescale_window(0, k);
+            pump(&mut pl, 100);
+            assert_eq!(size(editor()), want, "editor at scale {k}");
+            assert_eq!(size(area), want, "editor area at scale {k}");
+            let (fw, _) = size(frame);
+            assert_eq!(fw, want.0 + (2.0 * 7.0 * k) as i32, "frame width at scale {k}");
+            assert!(pl.hosted[&0].link.is_some(), "the reopened editor joins the strip again");
+            assert_eq!(pl.hosted[&0].link.as_ref().unwrap().page_now(), page, "the plugin's page is kept");
         }
     }
 

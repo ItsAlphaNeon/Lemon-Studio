@@ -220,10 +220,9 @@ impl Canvas {
     fn fill_rect_vgrad(&mut self, r: Rect, top: Color, bottom: Color) {
         let sc = self.scale;
         let (cx0, cy0, cx1, cy1) = self.clip_px();
-        let x0 = ((r.x * sc).round() as i32).max(cx0);
-        let x1 = ((r.right() * sc).round() as i32).min(cx1);
-        let ry0 = (r.y * sc).round() as i32;
-        let ry1 = (r.bottom() * sc).round() as i32;
+        let (rx0, rx1) = snap_span(r.x, r.w, sc);
+        let (ry0, ry1) = snap_span(r.y, r.h, sc);
+        let (x0, x1) = (rx0.max(cx0), rx1.min(cx1));
         let (y0, y1) = (ry0.max(cy0), ry1.min(cy1));
         if x0 >= x1 || y0 >= y1 {
             return;
@@ -575,7 +574,9 @@ impl Canvas {
         Some((pm.width() as usize, pm.height() as usize, px.collect()))
     }
 
-    /// Draws a `w` x `h` image of `0x00RRGGBB` pixels stretched over `r` (nearest neighbour, clipped).
+    /// Draws a `w` x `h` image of `0x00RRGGBB` pixels stretched over `r` (clipped). Filtered, so a picture stays smooth
+    /// at any display scale: each device pixel averages the source pixels it covers when shrinking, and blends the
+    /// nearest four when enlarging. Pixel for pixel, the image is copied as it is. Spec: ui/ui-scaling.md §5.
     pub fn image(&mut self, r: Rect, w: usize, h: usize, px: &[u32]) {
         if w == 0 || h == 0 || px.len() < w * h {
             return;
@@ -588,14 +589,26 @@ impl Canvas {
             return;
         }
         let (rw, rh) = ((r.w * k).max(1.0), (r.h * k).max(1.0));
+        // Source pixels per device pixel, and the source span (start, weights) each device column / row reads.
+        let (fx, fy) = (w as f32 / rw, h as f32 / rh);
+        let xs: Vec<Vec<(usize, f32)>> = (x0..x1).map(|x| taps(x as f32 + 0.5 - r.x * k, fx, w)).collect();
+        let ys: Vec<Vec<(usize, f32)>> = (y0..y1).map(|y| taps(y as f32 + 0.5 - r.y * k, fy, h)).collect();
         let pw = self.pixmap.width() as usize;
         let pixels = self.pixmap.pixels_mut();
-        for y in y0..y1 {
-            let sy = (((y as f32 + 0.5 - r.y * k) / rh * h as f32) as usize).min(h - 1);
-            for x in x0..x1 {
-                let sx = (((x as f32 + 0.5 - r.x * k) / rw * w as f32) as usize).min(w - 1);
-                let v = px[sy * w + sx];
-                pixels[y as usize * pw + x as usize] = PremultipliedColorU8::from_rgba((v >> 16) as u8, (v >> 8) as u8, v as u8, 255).expect("opaque");
+        for (y, ty) in (y0..y1).zip(&ys) {
+            for (x, tx) in (x0..x1).zip(&xs) {
+                let mut acc = [0.0f32; 3];
+                for &(sy, wy) in ty {
+                    for &(sx, wx) in tx {
+                        let v = px[sy * w + sx];
+                        let wgt = wx * wy;
+                        acc[0] += ((v >> 16) & 0xff) as f32 * wgt;
+                        acc[1] += ((v >> 8) & 0xff) as f32 * wgt;
+                        acc[2] += (v & 0xff) as f32 * wgt;
+                    }
+                }
+                let ch = |a: f32| a.round().clamp(0.0, 255.0) as u8;
+                pixels[y as usize * pw + x as usize] = PremultipliedColorU8::from_rgba(ch(acc[0]), ch(acc[1]), ch(acc[2]), 255).expect("opaque");
             }
         }
     }
@@ -624,6 +637,51 @@ impl Canvas {
     pub fn copy_to_xrgb(&self, out: &mut [u32]) {
         for (o, p) in out.iter_mut().zip(self.pixmap.data().chunks_exact(4)) {
             *o = (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2]);
+        }
+    }
+}
+
+/// Device span `[p0, p1)` of the logical span `[a, a + len)` at `scale`: both edges rounded, except that at a
+/// fractional scale a thin span (a line or border, up to 2 logical px) keeps one width wherever it sits. Rounding
+/// both edges of a 1 px line at 150 % gives 1 or 2 px depending on its position, so a grid's lines would alternate
+/// thin and thick; this gives 1 px everywhere (spec: ui/ui-scaling.md §4).
+pub fn snap_span(a: f32, len: f32, scale: f32) -> (i32, i32) {
+    let p0 = (a * scale).round() as i32;
+    if len > 0.0 && len <= 2.0 && scale.fract() != 0.0 {
+        return (p0, p0 + ((len * scale + 0.25).floor() as i32).max(1));
+    }
+    (p0, ((a + len) * scale).round() as i32)
+}
+
+/// Source pixels (index, weight; weights sum to 1) that the device pixel centred at `d` (device px from the image's
+/// left / top edge) reads from an `n`-pixel source when one device pixel spans `f` source pixels.
+fn taps(d: f32, f: f32, n: usize) -> Vec<(usize, f32)> {
+    let last = n as f32;
+    if f > 1.0 {
+        // Shrinking: average the covered span [s0, s1), partial pixels by their coverage.
+        let (s0, s1) = (((d - 0.5) * f).clamp(0.0, last), ((d + 0.5) * f).clamp(0.0, last));
+        let mut out = Vec::with_capacity(f.ceil() as usize + 1);
+        let mut i = s0.floor() as usize;
+        while (i as f32) < s1 && i < n {
+            let cover = (s1.min(i as f32 + 1.0) - s0.max(i as f32)).max(0.0);
+            if cover > 0.0 {
+                out.push((i, cover / (s1 - s0)));
+            }
+            i += 1;
+        }
+        if out.is_empty() {
+            out.push(((s0 as usize).min(n - 1), 1.0));
+        }
+        out
+    } else {
+        // Enlarging (or 1:1): linear between the two nearest source centres.
+        let s = (d * f - 0.5).clamp(0.0, last - 1.0);
+        let i = s.floor() as usize;
+        let t = s - i as f32;
+        if t <= 1e-4 || i + 1 >= n {
+            vec![(i.min(n - 1), 1.0)]
+        } else {
+            vec![(i, 1.0 - t), (i + 1, t)]
         }
     }
 }
@@ -674,6 +732,40 @@ mod tests {
         let r = Rect::span(73.0, 361.0, 5.0, 35.0);
         assert_eq!((r.w, r.h), (289.0, 31.0));
         assert!(r.contains(361.5, 35.5) && !r.contains(362.0, 20.0));
+    }
+
+    #[test]
+    fn thin_rects_keep_their_width_at_fractional_scales() {
+        // 150 %: a 1 px line is 1 device px wherever it sits, 2 px is 3; wide spans still meet edge to edge.
+        for i in 0..8 {
+            let x = i as f32 * 7.0 + 0.5 * (i % 2) as f32;
+            let (a, b) = snap_span(x, 1.0, 1.5);
+            assert_eq!(b - a, 1, "1 px at {x}");
+            let (a, b) = snap_span(x, 2.0, 1.5);
+            assert_eq!(b - a, 3, "2 px at {x}");
+        }
+        assert_eq!(snap_span(10.0, 1.0, 1.75), (18, 20));
+        assert_eq!(snap_span(0.0, 10.0, 1.5).1, snap_span(10.0, 10.0, 1.5).0);
+        // Integer scales are unchanged: both edges rounded.
+        assert_eq!(snap_span(3.0, 1.0, 2.0), (6, 8));
+        assert_eq!(snap_span(0.5, 1.0, 1.0), (1, 2));
+    }
+
+    #[test]
+    fn images_are_filtered_and_one_to_one_is_exact() {
+        let px: Vec<u32> = (0..16).map(|i| if i % 2 == 0 { 0x000000 } else { 0xffffff }).collect();
+        let Ok(mut c) = Canvas::new(16, 1, 1.0) else { return };
+        c.image(Rect::new(0.0, 0.0, 16.0, 1.0), 16, 1, &px);
+        let got: Vec<u8> = c.pixmap.pixels().iter().map(|p| p.red()).collect();
+        assert_eq!(got, (0..16).map(|i| if i % 2 == 0 { 0 } else { 255 }).collect::<Vec<_>>(), "1:1 copies");
+        // Half size: each device pixel averages a black and a white source pixel.
+        let Ok(mut c) = Canvas::new(8, 1, 0.5) else { return };
+        c.image(Rect::new(0.0, 0.0, 16.0, 2.0), 16, 1, &px);
+        assert!(c.pixmap.pixels().iter().all(|p| (127..=128).contains(&p.red())), "box average when shrinking");
+        // 150 %: enlarged pixels blend, no uneven doubling.
+        let Ok(mut c) = Canvas::new(24, 1, 1.5) else { return };
+        c.image(Rect::new(0.0, 0.0, 16.0, 1.0), 16, 1, &px);
+        assert!(c.pixmap.pixels().iter().any(|p| p.red() > 20 && p.red() < 235), "linear when enlarging");
     }
 
     #[test]
