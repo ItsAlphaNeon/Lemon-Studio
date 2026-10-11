@@ -72,7 +72,7 @@ clicking it does nothing.
 | Exporting audio | 🚧 | Song or pattern to a WAV file (32-bit float); no MP3 or FLAC yet |
 | Project files | 🚧 | Opens and saves `.flp` projects; early, always keep backups |
 | Undo | 🚧 | Per editor (piano roll, playlist); no redo or global history |
-| Note input | 🚧 | Mouse and computer keyboard; no MIDI controllers yet |
+| Note input | 🚧 | Mouse, computer keyboard and MIDI controllers (notes play the selected channel); no note recording yet |
 | Audio recording | ❌ | Not available yet |
 | MIDI file import / export | ❌ | Not available yet |
 | Audio editing and time-stretching | ❌ | Not available yet |
@@ -165,7 +165,7 @@ OpenStudio is a Cargo workspace of focused crates:
 
 The roadmap is kept on the [OpenStudio Discord server](https://discord.gg/yC2uCuGs3M), where every item is
 marked as complete, in progress or not started. The broad next steps are the engine rework (sampler voice,
-automation, delay compensation), audio recording, MIDI controller input, ASIO output, more built-in instruments
+automation, delay compensation), audio and note recording, MIDI settings, ASIO output, more built-in instruments
 and effects, and Linux and macOS support.
 
 ## Development approach

@@ -103,7 +103,6 @@ pub enum Action {
     DragWindow,
     Play,
     Stop,
-    Record,
     PatSong(bool),
     Tempo,
     Menu(usize),
@@ -662,6 +661,8 @@ pub struct State {
     pub tempo: f64,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
+    /// MIDI input devices that are open (their notes play the selected channel; spec: ui/midi-input.md).
+    pub midi_inputs: Vec<String>,
     pub maximized: bool,
     pub piano: PianoState,
     pub playlist: crate::playlist::PlaylistState,
@@ -774,6 +775,9 @@ pub struct App {
     typing_held: Vec<(KeyCode, usize, u16)>,
     pub typing_octave: i32,
     typing_synced: bool,
+    /// MIDI controller input, and its held notes: (key, rack row they started on).
+    pub midi: crate::midi_in::MidiIn,
+    midi_held: Vec<(u8, usize)>,
     /// Last title-bar press (window, time, position), for double-click maximize / restore.
     title_click: Option<(Win, std::time::Instant, (f32, f32))>,
     /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
@@ -873,6 +877,7 @@ impl App {
                 message: None,
                 monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
                 toggles: vec!["typing"],
+                midi_inputs: Vec::new(),
                 maximized: true,
                 piano: PianoState::default(),
                 playlist: crate::playlist::PlaylistState::default(),
@@ -901,6 +906,8 @@ impl App {
             typing_held: Vec::new(),
             typing_octave: 0,
             typing_synced: false,
+            midi: crate::midi_in::MidiIn::none(),
+            midi_held: Vec::new(),
             title_click: None,
             rack_click: None,
             hint: Cow::Borrowed(""),
@@ -998,6 +1005,7 @@ impl App {
     /// FILE > Export as WAV (Ctrl+R, the toolbar's render button): renders what Play would play (the playlist in SONG
     /// mode, one pass of the current pattern in PAT mode) with every hosted instrument and effect to a 32-bit float WAV
     /// file, at the output device's rate. Playback stops; a progress panel shows until the file is written.
+    // spec: audio/export.md
     fn export_wav(&mut self) {
         if self.export.is_some() {
             return;
@@ -1309,6 +1317,7 @@ impl App {
     fn plugin_tick(&mut self) {
         self.loading_tick();
         self.export_tick();
+        self.midi_tick();
         self.mixer_tick();
         self.sync_effects();
         self.params_tick();
@@ -3429,10 +3438,44 @@ impl App {
         self.typing_lit_changed();
     }
 
-    /// Held typing-keyboard keys light on the piano roll's keyboard (§4).
+    /// MIDI controller notes (spec: ui/midi-input.md): note on plays the selected channel, like a typing-keyboard key;
+    /// note off releases the key on the channel it started on.
+    fn midi_tick(&mut self) {
+        let msgs = self.midi.poll();
+        if msgs.is_empty() {
+            return;
+        }
+        for m in msgs {
+            match m {
+                crate::midi_in::Msg::On(key, velocity) => {
+                    let row = self.state.selected_channel;
+                    if row >= self.state.project.channels.len() {
+                        continue;
+                    }
+                    if !self.typing_synced {
+                        // The live stream needs the project before the first note.
+                        self.typing_synced = true;
+                        self.transport.update(&crate::rack::play_project(&self.state));
+                    }
+                    self.transport.note_on(row, u16::from(key), velocity);
+                    self.midi_held.push((key, row));
+                }
+                crate::midi_in::Msg::Off(key) => {
+                    while let Some(i) = self.midi_held.iter().position(|h| h.0 == key) {
+                        let (_, row) = self.midi_held.remove(i);
+                        self.transport.note_off(row, u16::from(key));
+                    }
+                }
+            }
+        }
+        self.typing_lit_changed();
+    }
+
+    /// Held typing-keyboard keys and MIDI notes light on the piano roll's keyboard (§4).
     fn typing_lit_changed(&mut self) {
         let channels = &self.state.project.channels;
-        self.state.piano.typed = self.typing_held.iter().filter_map(|&(_, row, key)| Some((channels.get(row)?.index, i32::from(key)))).collect();
+        let midi = self.midi_held.iter().map(|&(key, row)| (row, u16::from(key)));
+        self.state.piano.typed = self.typing_held.iter().map(|&(_, row, key)| (row, key)).chain(midi).filter_map(|(row, key)| Some((channels.get(row)?.index, i32::from(key)))).collect();
         match self.piano_grid {
             Some(g) => self.damage_rect(Rect::new(g.x - 73.0, g.y, 73.0, g.h)),
             None => self.invalidate(),
@@ -3767,7 +3810,6 @@ impl App {
                 TransportState::Stopped => self.start_playback(),
             },
             Action::Stop => self.transport.stop(),
-            Action::Record => s.message = Some(off_text("Recording")),
             Action::PatSong(song) => {
                 let changed = s.song_mode != song;
                 s.song_mode = song;

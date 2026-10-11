@@ -14,7 +14,10 @@ pub const PER_NOTCH: f32 = 1.0 / 64.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum KnobId {
+    /// The toolbar's main volume and pitch: not connected to the sound yet, so the toolbar greys them out.
+    #[allow(dead_code)]
     MasterVol,
+    #[allow(dead_code)]
     MasterPitch,
     /// Mixer track pan (model).
     MixPan(u16),

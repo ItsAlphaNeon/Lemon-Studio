@@ -399,6 +399,7 @@ fn attach(e: &mut Engine, inst: &Instruments) {
 
 /// Renders a whole song (or one pass of a pattern) with the hosted plugins and writes it to `path`; returns its length
 /// in seconds. Runs on the audio thread with no stream open.
+// spec: audio/export.md
 fn export(project: &Project, mode: PlayMode, rate: u32, path: &std::path::Path, library: &mut SampleLibrary, inst: &Instruments, shared: &Shared) -> Result<f64, String> {
     let mut e = Engine::new(project, library, rate, mode);
     attach(&mut e, inst);
