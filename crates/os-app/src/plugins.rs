@@ -1528,7 +1528,7 @@ mod tests {
                 pl.create(0, 0).unwrap();
                 0
             };
-            let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+            let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
             pl.open_window(key, info).unwrap();
             let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
             unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
