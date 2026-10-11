@@ -252,11 +252,88 @@ impl Bar {
 }
 
 /// What needs repainting before the next present.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Damage {
     None,
-    Rect(Rect),
+    /// Separate regions (a playhead, the clock and a meter are far apart: one bounding box would cover most of the
+    /// frame).
+    Rects(Vec<Rect>),
     Full,
+}
+
+/// The window a scroll target scrolls.
+fn scroll_win(t: Scroll) -> Win {
+    match t {
+        Scroll::PianoX | Scroll::PianoY | Scroll::PitchY => Win::PianoRoll,
+        Scroll::PlaylistX | Scroll::PlaylistY | Scroll::PlPick => Win::Playlist,
+        Scroll::MixerX => Win::Mixer,
+        Scroll::RackX | Scroll::RackY => Win::ChannelRack,
+    }
+}
+
+/// Past this many separate damage rects, the two whose merge adds the least area are merged.
+const MAX_DAMAGE_RECTS: usize = 32;
+
+/// Add `r` to a damage list, merging it with rects it overlaps or nearly touches when the merge adds little area.
+fn add_damage(v: &mut Vec<Rect>, r: Rect) {
+    if r.is_empty() {
+        return;
+    }
+    let area = |r: &Rect| r.w * r.h;
+    let mut r = r;
+    loop {
+        let mut merged = false;
+        v.retain(|o| {
+            let u = o.union(&r);
+            if area(&u) <= area(o) + area(&r) + 2048.0 {
+                r = u;
+                merged = true;
+                false
+            } else {
+                true
+            }
+        });
+        if !merged {
+            break;
+        }
+    }
+    v.push(r);
+    while v.len() > MAX_DAMAGE_RECTS {
+        let mut best = (f32::MAX, 0, 1);
+        for i in 0..v.len() {
+            for j in i + 1..v.len() {
+                let cost = area(&v[i].union(&v[j])) - area(&v[i]) - area(&v[j]);
+                if cost < best.0 {
+                    best = (cost, i, j);
+                }
+            }
+        }
+        let b = v.swap_remove(best.2);
+        v[best.1] = v[best.1].union(&b);
+    }
+}
+
+/// Regions whose look follows playback; views register them while painting (`Ui::live`) and `App::tick` repaints
+/// just them while playing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Live {
+    /// The song position display.
+    Clock,
+    /// Lights for the notes sounding now (rack select slots, piano-roll keys).
+    Sounding,
+    /// Mixer peak meters.
+    Meter,
+}
+
+/// The playback state the frame shows. Taken in `App::tick`, where the damage for playheads is worked out, so a paint
+/// draws them exactly where the damage expects them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Shown {
+    pub playing: bool,
+    pub paused: bool,
+    pub tick: f64,
+    pub song: bool,
+    pub sounding: Vec<(u16, u16)>,
 }
 
 /// The hint panel (spec §2): its text changes whenever the hovered control does.
@@ -303,6 +380,84 @@ pub struct Hit {
     pub win: Option<Win>,
 }
 
+/// A part of the frame that paints independently: skipped by a repaint whose damage misses where it drew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seg {
+    Browser,
+    Win(Win),
+    Toolbar,
+}
+
+/// What each part registered and where it drew in the last paint, so a partial repaint can keep the hits of the parts
+/// it skips (hits are rebuilt every paint; topmost last).
+#[derive(Default)]
+pub struct Keep {
+    /// Last paint's hits / bars, from which skipped parts take theirs back.
+    prev: Vec<Hit>,
+    prev_bars: Vec<Bar>,
+    prev_live: Vec<(Live, Rect)>,
+    parts: Vec<Part>,
+    next: Vec<Part>,
+    /// This paint covers the whole frame (drawn bounds are complete, nothing is skipped).
+    full: bool,
+}
+
+struct Part {
+    seg: Seg,
+    hits: std::ops::Range<usize>,
+    bars: std::ops::Range<usize>,
+    live: std::ops::Range<usize>,
+    /// Everything the part drew (logical px), or might draw.
+    area: Rect,
+}
+
+impl Ui<'_> {
+    /// Paint one part of the frame, or, when it has painted before and `area` (where it paints now) and where it
+    /// drew last time both miss the clip, keep last paint's hits for it instead.
+    pub fn part(&mut self, seg: Seg, area: Rect, paint: impl FnOnce(&mut Self)) {
+        let (h0, b0, l0) = (self.hits.len(), self.bars.len(), self.live.len());
+        let old = self.keep.parts.iter().position(|p| p.seg == seg);
+        let keep = !self.keep.full
+            && old.is_some_and(|i| {
+                let p = &self.keep.parts[i];
+                p.hits.end <= self.keep.prev.len()
+                    && p.bars.end <= self.keep.prev_bars.len()
+                    && p.live.end <= self.keep.prev_live.len()
+                    && !self.c.visible(p.area.union(&area))
+            });
+        let area = match old {
+            Some(i) if keep => {
+                let (hits, bars, live, area) = {
+                    let p = &self.keep.parts[i];
+                    (p.hits.clone(), p.bars.clone(), p.live.clone(), p.area)
+                };
+                let dummy = || Hit { rect: Rect::default(), action: Action::Swallow, hint: Cow::Borrowed(""), win: None };
+                let prev = &mut self.keep.prev;
+                self.hits.extend(hits.map(|k| std::mem::replace(&mut prev[k], dummy())));
+                self.bars.extend_from_slice(&self.keep.prev_bars[bars]);
+                self.live.extend_from_slice(&self.keep.prev_live[live]);
+                area
+            }
+            _ => {
+                self.c.take_drawn();
+                paint(self);
+                let drawn = self.c.take_drawn().map_or(area, |d| d.union(&area));
+                // A partial paint only saw part of what the view draws: keep last paint's extent as well.
+                match old {
+                    Some(i) if !self.keep.full => drawn.union(&self.keep.parts[i].area),
+                    _ => drawn,
+                }
+            }
+        };
+        self.keep.next.push(Part { seg, hits: h0..self.hits.len(), bars: b0..self.bars.len(), live: l0..self.live.len(), area });
+    }
+
+    /// Register a region whose look follows playback (repainted while playing, see `Live`).
+    pub fn live(&mut self, kind: Live, r: Rect) {
+        self.live.push((kind, r));
+    }
+}
+
 /// What views paint with.
 pub struct Ui<'a> {
     pub c: &'a mut Canvas,
@@ -314,6 +469,8 @@ pub struct Ui<'a> {
     pub mouse: (f32, f32),
     /// The window being painted (tags hits).
     pub win: Option<Win>,
+    keep: &'a mut Keep,
+    live: &'a mut Vec<(Live, Rect)>,
 }
 
 impl Ui<'_> {
@@ -521,6 +678,15 @@ impl State {
         Rect::new(x, y, rw, rh)
     }
 
+    /// Where window `w` paints and takes clicks: its rect plus, while it floats, the resize zones past its edges.
+    pub fn win_area(&self, w: Win) -> Rect {
+        let r = self.win_rect(w);
+        match w.slot() {
+            Some(i) if !self.wins[i].maxed && !self.wins[i].mini => r.outset(4.0),
+            _ => r,
+        }
+    }
+
     /// Where the window is painted: the workspace when maximized, a title bar when minimized.
     pub fn win_rect(&self, w: Win) -> Rect {
         let Some(i) = w.slot() else { return Rect::new(0.0, 0.0, 0.0, 0.0) };
@@ -558,6 +724,11 @@ pub struct App {
     pub theme: Theme,
     pub transport: Transport,
     pub hits: Vec<Hit>,
+    keep: Keep,
+    /// Live regions from the last paint.
+    live: Vec<(Live, Rect)>,
+    /// Playback state the frame shows (see `Shown`).
+    shown: Shown,
     /// Rects of last frame's overlays (menus, popups...): docked plugin windows are clipped under them.
     overlays: Vec<Rect>,
     /// Where the canvas sits in the main window's client area (physical px; the restored window's border).
@@ -570,7 +741,6 @@ pub struct App {
     pub pressed: Option<Action>,
     hover_rect: Option<Rect>,
     damage: Damage,
-    last_playing: bool,
     /// Typing keyboard (spec: ui/typing-keyboard.md): keys held now as (physical key, rack row,
     /// note key), the octave shift, and whether the transport has the project for live notes.
     typing_held: Vec<(KeyCode, usize, u16)>,
@@ -685,6 +855,9 @@ impl App {
             theme: load_theme(),
             transport,
             hits: Vec::new(),
+            keep: Keep::default(),
+            live: Vec::new(),
+            shown: Shown::default(),
             overlays: Vec::new(),
             canvas_off: (0, 0),
             popup_lift: None,
@@ -693,7 +866,6 @@ impl App {
             pressed: None,
             hover_rect: None,
             damage: Damage::Full,
-            last_playing: false,
             typing_held: Vec::new(),
             typing_octave: 0,
             typing_synced: false,
@@ -1211,23 +1383,106 @@ impl App {
     }
 
     pub(crate) fn damage_rect(&mut self, r: Rect) {
-        self.damage = match self.damage {
-            Damage::Full => Damage::Full,
-            Damage::None => Damage::Rect(r),
-            Damage::Rect(o) => Damage::Rect(o.union(&r)),
-        };
+        match &mut self.damage {
+            Damage::Full => {}
+            Damage::None => self.damage = Damage::Rects(vec![r]),
+            Damage::Rects(v) => add_damage(v, r),
+        }
     }
 
     pub fn has_damage(&self) -> bool {
         self.damage != Damage::None
     }
 
-    /// Take the pending damage: `None` = nothing to paint, `Some(None)` = whole frame.
-    pub fn take_damage(&mut self) -> Option<Option<Rect>> {
+    /// Take the pending damage: `None` = nothing to paint, `Some(None)` = whole frame, else the regions to repaint
+    /// (all in one `paint_region`).
+    pub fn take_damage(&mut self) -> Option<Option<Vec<Rect>>> {
         match std::mem::replace(&mut self.damage, Damage::None) {
             Damage::None => None,
             Damage::Full => Some(None),
-            Damage::Rect(r) => Some(Some(r)),
+            Damage::Rects(v) => Some(Some(v)),
+        }
+    }
+
+    /// Repaint window `w` only (with its resize zones), or everything when it is not shown.
+    pub(crate) fn damage_win(&mut self, w: Win) {
+        if !self.state.shown(w) {
+            return self.invalidate();
+        }
+        match w {
+            Win::ChannelRack => self.damage_rect(views::rack::bounds(&self.state)),
+            Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
+            _ => self.invalidate(),
+        }
+    }
+
+    /// Repaint the live regions of `kind` from the last paint.
+    fn damage_live(&mut self, kind: Live) {
+        let rs: Vec<Rect> = self.live.iter().filter(|(k, _)| *k == kind).map(|(_, r)| *r).collect();
+        for r in rs {
+            self.damage_rect(r);
+        }
+    }
+
+    /// The playback state now, as the frame should show it.
+    fn play_state(&self) -> Shown {
+        let playing = self.transport.playing();
+        Shown {
+            playing,
+            paused: self.transport.paused(),
+            tick: self.transport.tick(),
+            song: self.transport.song(),
+            sounding: if playing { self.transport.sounding() } else { Vec::new() },
+        }
+    }
+
+    /// Damage what playback moved since the shown state, then show the new one: the clock, both playheads (old and
+    /// new place), the rack's playing step and the lights of sounding notes. Starting, stopping, pausing and switching
+    /// between pattern and song repaint everything.
+    fn playback_damage(&mut self) {
+        let now = self.play_state();
+        self.show_playback(now);
+    }
+
+    /// `playback_damage` for a given state (tests and the paint benchmark play without a device).
+    pub(crate) fn show_playback(&mut self, now: Shown) {
+        let old = std::mem::replace(&mut self.shown, now.clone());
+        if now.playing != old.playing || now.paused != old.paused || now.song != old.song {
+            return self.invalidate();
+        }
+        if !now.playing {
+            return;
+        }
+        if now.tick != old.tick {
+            self.damage_live(Live::Clock);
+            let (pl, piano, rack) = (self.state.shown(Win::Playlist), self.state.shown(Win::PianoRoll), self.state.shown(Win::ChannelRack));
+            if now.song && pl {
+                if let Some(g) = self.pl_grid {
+                    let pg = crate::playlist::PGeom::new(&self.state, g);
+                    // The playhead line and the ruler's song-position triangle (and the marker lane between them).
+                    let top = g.y - 22.0 - crate::playlist::MARKER_H;
+                    for t in [old.tick, now.tick] {
+                        let x = pg.x_of(t as f32);
+                        self.damage_rect(Rect::new(x - 8.0, top, 17.0, g.bottom() - top));
+                    }
+                }
+            }
+            if !now.song && piano {
+                if let Some(g) = self.piano_geom() {
+                    let grid = g.grid;
+                    for t in [old.tick, now.tick] {
+                        self.damage_rect(Rect::new(g.x_of(t as f32) - 2.0, grid.y, 5.0, grid.h));
+                    }
+                }
+            }
+            if !now.song && rack {
+                for r in views::rack::step_columns(&self.state, old.tick, now.tick) {
+                    self.damage_rect(r);
+                }
+            }
+        }
+        if now.sounding != old.sounding {
+            self.damage_live(Live::Sounding);
         }
     }
 
@@ -1251,7 +1506,6 @@ impl App {
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         self.plugin_tick();
-        let playing = self.transport.playing();
         {
             // Scope / analyzer / peak bars: from the audio tap; repaint just the monitor when it changed.
             // The monitor advances at its own refresh rate, however often we tick.
@@ -1267,7 +1521,7 @@ impl App {
         // Mixer meters (spec: ui/mixer.md §9): fall back after playback stops.
         let peaks = self.transport.take_track_peaks();
         if crate::mixer::feed_meters(&mut self.state, &peaks) && self.state.shown(Win::Mixer) {
-            self.invalidate();
+            self.damage_live(Live::Meter);
         }
         // Edits (notes, steps, mixer, channel volume / pan / mute, tempo) reach playback right away,
         // also during a drag (at most once per tick).
@@ -1278,31 +1532,58 @@ impl App {
                 self.transport.update(&crate::rack::play_project(&self.state));
             }
         }
-        if playing || playing != self.last_playing {
-            self.last_playing = playing;
-            self.invalidate();
-        }
+        self.playback_damage();
         self.has_damage()
     }
 
+    /// Paint the whole frame (`damage` None) or just the damaged rect.
     pub fn paint(&mut self, canvas: &mut Canvas, damage: Option<Rect>) {
-        canvas.begin_frame(damage);
+        self.paint_region(canvas, damage.as_ref().map(std::slice::from_ref));
+    }
+
+    /// Paint the whole frame (None) or only the given rects, in one pass (see `Canvas::begin_region`).
+    pub fn paint_region(&mut self, canvas: &mut Canvas, damage: Option<&[Rect]>) {
+        match damage {
+            Some(rects) => canvas.begin_region(rects),
+            None => canvas.begin_frame(None),
+        }
         self.state.screen = canvas.size();
+        // Last paint's hits stay available to the parts this one skips (see `Ui::part`).
+        std::mem::swap(&mut self.hits, &mut self.keep.prev);
+        std::mem::swap(&mut self.bars, &mut self.keep.prev_bars);
+        std::mem::swap(&mut self.live, &mut self.keep.prev_live);
         self.hits.clear();
         self.bars.clear();
+        self.live.clear();
+        self.keep.full = damage.is_none();
         let title = self.title();
-        let mut ui = Ui { c: canvas, t: &self.theme.colors, hits: &mut self.hits, bars: &mut self.bars, hover: &self.hover, pressed: &self.pressed, mouse: self.mouse, win: None };
+        let mut ui = Ui {
+            c: canvas,
+            t: &self.theme.colors,
+            hits: &mut self.hits,
+            bars: &mut self.bars,
+            hover: &self.hover,
+            pressed: &self.pressed,
+            mouse: self.mouse,
+            win: None,
+            keep: &mut self.keep,
+            live: &mut self.live,
+        };
         let info = views::FrameInfo {
             title,
             hint: self.hint.clone(),
-            playing: self.transport.playing(),
-            paused: self.transport.paused(),
-            tick: self.transport.tick(),
-            song: self.transport.song(),
+            playing: self.shown.playing,
+            paused: self.shown.paused,
+            tick: self.shown.tick,
+            song: self.shown.song,
             peaks: self.transport.peaks(),
-            sounding: if self.transport.playing() { self.transport.sounding() } else { Vec::new() },
+            sounding: self.shown.sounding.clone(),
         };
         let overlays = views::paint(&mut ui, &self.state, &info);
+        self.keep.parts = std::mem::take(&mut self.keep.next);
+        self.keep.prev.clear();
+        self.keep.prev_bars.clear();
+        self.keep.prev_live.clear();
         self.overlays = self.hits[overlays.min(self.hits.len())..].iter().map(|h| h.rect).collect();
         // Remember where the piano roll's regions are, for mouse mapping and damage.
         let find = |a: Action| self.hits.iter().find(|h| h.action == a).map(|h| h.rect);
@@ -1651,14 +1932,14 @@ impl App {
                     // Keep the content that was centred in view, then add the horizontal drag.
                     self.scroll_set(t, (center * k - view / 2.0) + (x - m0.0) * ratio * k);
                     let _ = p0;
-                    self.invalidate();
+                    self.damage_win(scroll_win(t));
                 }
                 Drag::Scroll { m0, axes } => {
                     for (t, vertical, p0, ratio) in axes {
                         let d = if vertical { y - m0.1 } else { x - m0.0 };
                         self.scroll_set(t, p0 + d * ratio);
+                        self.damage_win(scroll_win(t));
                     }
-                    self.invalidate();
                 }
                 Drag::NoteMove { x0, y0, orig } => {
                     self.drag_notes(x0, y0, &orig, false);
@@ -1913,8 +2194,14 @@ impl App {
                 let hit = crate::playlist::clip_at(s, &pg, x, y);
                 let auto = hit.filter(|&i| matches!(crate::playlist::clips(s)[i].source, os_model::ClipSource::Channel(c) if s.project.automation(c).is_some()));
                 if auto != self.state.playlist.hover_clip {
+                    // An automation clip shows its points while hovered: repaint the clip that lost and gained them.
+                    for i in [self.state.playlist.hover_clip, auto].into_iter().flatten() {
+                        match crate::playlist::clips(&self.state).get(i) {
+                            Some(c) => self.damage_rect(pg.clip_rect(c).outset(6.0)),
+                            None => self.invalidate(),
+                        }
+                    }
                     self.state.playlist.hover_clip = auto;
-                    self.invalidate();
                 }
                 if let Some(i) = hit {
                     let r = pg.clip_rect(&crate::playlist::clips(&self.state)[i]);
@@ -1926,9 +2213,12 @@ impl App {
                     }
                 }
             }
-        } else if self.state.playlist.hover_clip.is_some() {
-            self.state.playlist.hover_clip = None;
-            self.invalidate();
+        } else if let Some(i) = self.state.playlist.hover_clip.take() {
+            let r = self.pl_grid.zip(crate::playlist::clips(&self.state).get(i)).map(|(g, c)| crate::playlist::PGeom::new(&self.state, g).clip_rect(c));
+            match r {
+                Some(r) => self.damage_rect(r.outset(6.0)),
+                None => self.invalidate(),
+            }
         }
         let changed = hover != self.hover || hint != self.hint || resize != self.resize_cursor;
         self.resize_cursor = resize;
@@ -2270,7 +2560,22 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
-        if self.pressed.take().is_some() {
+        let pressed = self.pressed.take();
+        // A click without a drag did its work on the press (painted then): its release only lifts the pressed look.
+        if self.drag.is_none() {
+            let rect = pressed.as_ref().and_then(|a| self.hits.iter().rev().find(|h| &h.action == a)).map(|h| h.rect);
+            match (pressed, rect) {
+                (None, _) => {}
+                (Some(_), Some(r)) => self.damage_rect(r.outset(3.0)),
+                (Some(_), None) => self.invalidate(),
+            }
+            self.hold_key(None, false);
+            if self.state.piano.overlay.take().is_some() {
+                self.damage_piano();
+            }
+            return;
+        }
+        if pressed.is_some() {
             self.invalidate();
         }
         self.hold_key(None, false);
@@ -2618,34 +2923,45 @@ impl App {
     }
 
     pub fn wheel(&mut self, dx: f32, dy: f32, shift: bool, ctrl: bool) {
+        // Scrolling or zooming one window repaints just that window.
+        let before = self.damage.clone();
         self.invalidate();
+        if let Some(w) = self.wheel_act(dx, dy, shift, ctrl) {
+            self.damage = before;
+            self.damage_win(w);
+        }
+    }
+
+    /// The wheel's work; returns the window when only that window's view moved (else everything is repainted).
+    fn wheel_act(&mut self, dx: f32, dy: f32, shift: bool, ctrl: bool) -> Option<Win> {
         let (x, y) = self.mouse;
         let area = self.top_hit(x, y).map(|h| h.action.clone());
         if matches!(area, Some(Action::BrowserList | Action::BrowserRow(_) | Action::BrowserTab(_))) {
-            return self.browser_wheel(dy + dx);
+            self.browser_wheel(dy + dx);
+            return None;
         }
         if matches!(area, Some(Action::Settings(_))) {
             let s = &self.state;
             let max = (views::settings::content_h(s) - views::settings::page_h(s)).max(0.0);
             self.state.settings.scroll = (self.state.settings.scroll - (dy + dx) * 63.0).min(max).max(0.0);
-            return;
+            return None;
         }
         if matches!(area, Some(Action::PlPick(_) | Action::PlPickList)) {
             self.scroll_set(Scroll::PlPick, self.scroll_get(Scroll::PlPick) - (dy + dx) * 31.0);
-            return;
+            return Some(Win::Playlist);
         }
         if matches!(area, Some(Action::PatternNext)) {
             let d = if dy + dx > 0.0 { 1 } else { -1 };
             self.state.pattern = (i32::from(self.state.pattern.max(1)) + d).clamp(1, i32::from(crate::patterns::MAX)) as u16;
-            return;
+            return None;
         }
         if let Some(Action::Scrollbar(t)) = area {
             let step = if t == Scroll::PianoY { views::piano::ROW * 3.0 } else { 60.0 };
             self.scroll_set(t, self.scroll_get(t) - (dy + dx) * step);
-            return;
+            return Some(scroll_win(t));
         }
         if matches!(area, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoKeys | Action::PianoVelocity)) {
-            let Some(g) = self.piano_geom() else { return };
+            let Some(g) = self.piano_geom() else { return None };
             let p = &mut self.state.piano;
             if ctrl {
                 // Zoom time around the mouse.
@@ -2660,7 +2976,7 @@ impl App {
                 p.scroll_x = (p.scroll_x - dx * 120.0 / g.ppt).max(0.0);
             }
             piano::clamp_scroll(&mut self.state, g.grid.h);
-            return;
+            return Some(Win::PianoRoll);
         }
         if let Some(Action::Knob(id)) = area {
             let mut v = self.state.knob(id);
@@ -2670,7 +2986,7 @@ impl App {
             let v = v + dy.signum() * id.notch() * if dy == 0.0 { 0.0 } else { 1.0 };
             self.state.set_knob(id, v);
             self.hint = Cow::Owned(self.state.knob_text(id));
-            return;
+            return None;
         }
         // Channel rack value boxes (spec: ui/channel-rack.md §7, §12, §15): one per notch.
         let d = if dy + dx > 0.0 { 1 } else { -1 };
@@ -2683,18 +2999,18 @@ impl App {
                     self.hint = Cow::Owned(format!("Target mixer track: {}", views::rack::insert_name(c.mixer_track)));
                     s.piano.dirty = true;
                 }
-                return;
+                return None;
             }
             Some(Action::RackLen) => {
                 let v = (crate::rack::len_value(&self.state) as i32 + d).clamp(0, crate::rack::MAX_STEPS as i32) as u32;
                 crate::rack::set_len(&mut self.state, (v > 0).then_some(v));
-                return;
+                return None;
             }
             Some(Action::RackLoopBox(i)) => {
                 let v = (crate::rack::row_len(&self.state, i) as i32 + d).clamp(1, crate::rack::MAX_STEPS as i32) as u32;
                 self.state.rack.loop_len.insert(i, v);
                 self.state.piano.dirty = true;
-                return;
+                return None;
             }
             _ => {}
         }
@@ -2703,34 +3019,39 @@ impl App {
             let (rx, ry) = if shift { (dy + dx, 0.0) } else { (dx, dy) };
             self.scroll_set(Scroll::RackY, self.scroll_get(Scroll::RackY) - ry * views::rack::ROW_H);
             self.scroll_set(Scroll::RackX, self.scroll_get(Scroll::RackX) - rx * 4.0 * views::rack::STEP_W);
-            return;
+            return Some(Win::ChannelRack);
         }
         let s = &mut self.state;
         let (dx, dy) = if shift { (dy, dx) } else { (dx, dy) };
         match area {
             Some(Action::Fader(_) | Action::Mix(_) | Action::MixerArea) => {
                 s.mixer_scroll = (s.mixer_scroll - (dy + dx) * 44.0).max(0.0);
+                Some(Win::Mixer)
             }
             Some(Action::PlaylistArea | Action::PlRuler | Action::PlMarkers) if ctrl => {
                 let gx = self.pl_grid.map_or(481.0, |g| g.x);
                 let bar = (s.playlist_scroll.0 + x - gx) / s.playlist_bar_w;
                 s.playlist_bar_w = (s.playlist_bar_w * 1.25f32.powf(dy + dx)).clamp(4.0, 600.0);
                 s.playlist_scroll.0 = (bar * s.playlist_bar_w - (x - gx)).max(0.0);
+                Some(Win::Playlist)
             }
             // Shift+wheel over the track headers moves the selected track (spec: ui/playlist.md §6).
             Some(Action::PlHeader(_) | Action::PlLed(_)) if shift => {
                 let d = if dx + dy > 0.0 { -1 } else { 1 };
                 crate::playlist::snapshot(s);
                 crate::playlist::shift_tracks(s, d);
+                None
             }
             Some(Action::PlHeader(_) | Action::PlLed(_)) => {
                 s.playlist_scroll.1 = (s.playlist_scroll.1 - dy * 48.0).max(0.0);
+                Some(Win::Playlist)
             }
             Some(Action::PlaylistArea) => {
                 s.playlist_scroll.0 = (s.playlist_scroll.0 - dx * 60.0).max(0.0);
                 s.playlist_scroll.1 = (s.playlist_scroll.1 - dy * 48.0).max(0.0);
+                Some(Win::Playlist)
             }
-            _ => {}
+            _ => None,
         }
     }
 
@@ -4033,6 +4354,15 @@ mod tests {
         app.paint(c, damage);
     }
 
+    /// Paint what `App::take_damage` returned, as the shell does: each rect, or the whole frame.
+    fn frame_damage(app: &mut App, c: &mut Canvas, damage: Option<Option<Vec<Rect>>>) {
+        match damage {
+            Some(Some(rects)) => app.paint_region(c, Some(&rects)),
+            Some(None) => app.paint(c, None),
+            None => {}
+        }
+    }
+
     /// Slots holding the file's parametric EQ get an Open Parametric EQ 2 instance and show its name; adding the EQ
     /// stores the file's EQ (spec: plugins/open-parametric-eq-2.md §8).
     #[test]
@@ -4189,7 +4519,7 @@ mod tests {
             app.mouse_up();
             // Damage repaint of the drag equals a full repaint.
             let d = app.take_damage();
-            frame(&mut app, &mut a, d.flatten());
+            frame_damage(&mut app, &mut a, d);
             frame(&mut app, &mut b, None);
             assert_same(&a, &b, "after knob drag");
             let before = app.state.knob(id);
@@ -4261,6 +4591,159 @@ mod tests {
             let _ = b.pixmap.save_png(std::env::temp_dir().join("os_full.png"));
         }
         assert!(diffs.is_empty(), "{} differing pixels in x {}..{} y {}..{}", diffs.len(), bbox.0, bbox.2, bbox.1, bbox.3);
+    }
+
+    /// While playing, only what playback moves is repainted (clock, playheads, the rack's playing step, sounding
+    /// lights, meters); each such frame must equal a full repaint of the same state.
+    #[test]
+    fn playback_repaint_matches_full() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.patterns[0].notes = (0..16).step_by(2).map(|k| Note::step(0, k * 24)).collect();
+        app.state.project.patterns[0].notes.extend((0..16).step_by(4).map(|k| Note::step(1, k * 24)));
+        crate::playlist::place(&mut app.state, 0, 0);
+        crate::playlist::place(&mut app.state, 1, 384);
+        let play = |tick: f64, song: bool, sounding: Vec<(u16, u16)>| Shown { playing: true, paused: false, tick, song, sounding };
+        // Floating windows side by side, so every playback region is on screen.
+        for (w, r) in [(Win::Playlist, Rect::new(220.0, 90.0, 1000.0, 480.0)), (Win::PianoRoll, Rect::new(220.0, 90.0, 1000.0, 480.0)), (Win::Mixer, Rect::new(230.0, 590.0, 1500.0, 480.0))] {
+            let ws = &mut app.state.wins[w.slot().unwrap()];
+            ws.maxed = false;
+            ws.rect = r;
+        }
+        for (z, song) in [(vec![Win::Playlist, Win::Mixer, Win::ChannelRack], true), (vec![Win::Mixer, Win::PianoRoll, Win::ChannelRack], false)] {
+            app.state.z = z;
+            app.state.rack_pos = (1240.0, 100.0);
+            frame(&mut app, &mut a, None);
+            let grid = if song { app.pl_grid } else { app.piano_grid }.expect("grid shown");
+            // Starting playback repaints everything; then each tick only damages.
+            app.show_playback(play(0.0, song, Vec::new()));
+            let d = app.take_damage();
+            assert_eq!(d, Some(None), "starting repaints the whole frame");
+            frame_damage(&mut app, &mut a, d);
+            for (i, tick) in [5.0, 23.0, 25.0, 50.0, 120.0, 383.0, 390.0, 700.0, 10.0].into_iter().enumerate() {
+                let sounding = if i % 3 == 0 { vec![(0, 60)] } else if i % 3 == 1 { vec![(0, 60), (1, 60)] } else { Vec::new() };
+                app.show_playback(play(tick, song, sounding));
+                // Meters move too.
+                app.state.mixer.meters.resize(18, Default::default());
+                app.state.mixer.meters[1].db = [-6.0 - i as f32, -12.0];
+                app.state.mixer.meters[2].db = [-3.0 * i as f32, -1.0];
+                app.damage_live(Live::Meter);
+                let d = app.take_damage();
+                let Some(Some(rects)) = &d else { panic!("a tick repaints regions, not the frame") };
+                assert!(rects.iter().any(|r| !r.intersect(&grid).is_empty()), "the playhead is repainted");
+                frame_damage(&mut app, &mut a, d);
+                frame(&mut app, &mut b, None);
+                assert_same(&a, &b, &format!("song {song}, tick {tick}"));
+            }
+            app.show_playback(Shown::default());
+            let d = app.take_damage();
+            frame_damage(&mut app, &mut a, d);
+        }
+    }
+
+    /// Wheel scrolls and zooms, scroll-bar drags and clip drags repaint only their window, and match a full repaint.
+    #[test]
+    fn scroll_repaint_matches_full() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.patterns[0].notes = (0..16).step_by(2).map(|k| Note::step(0, k * 24)).collect();
+        for (track, tick) in [(0, 0), (1, 384), (2, 768), (0, 1536)] {
+            crate::playlist::place(&mut app.state, track, tick);
+        }
+        for (w, r) in [(Win::Playlist, Rect::new(220.0, 90.0, 1000.0, 480.0)), (Win::PianoRoll, Rect::new(300.0, 300.0, 900.0, 450.0))] {
+            let ws = &mut app.state.wins[w.slot().unwrap()];
+            ws.maxed = false;
+            ws.rect = r;
+        }
+        app.state.z = vec![Win::PianoRoll, Win::Playlist, Win::ChannelRack];
+        app.state.rack_pos = (1240.0, 100.0);
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        let pl = app.state.win_area(Win::Playlist);
+        let check = |app: &mut App, a: &mut Canvas, b: &mut Canvas, what: &str| {
+            let d = app.take_damage();
+            let Some(Some(rects)) = &d else { panic!("{what}: repaints regions, not the frame") };
+            // The hint panel follows the hovered thing; everything else stays inside the playlist.
+            let inside = rects.iter().filter(|r| r.intersect(&HINT_RECT) != **r);
+            let bound = inside.fold(Rect::default(), |u, r| if u.is_empty() { *r } else { u.union(r) });
+            assert!(bound.intersect(&pl) == bound, "{what}: only the playlist is repainted ({bound:?})");
+            frame_damage(app, a, d);
+            frame(app, b, None);
+            assert_same(a, b, what);
+        };
+        let g = app.pl_grid.unwrap();
+        // Hovering an automation clip shows its points: onto it and off it again repaints just that clip.
+        crate::playlist::create_automation(&mut app.state, 0, "Auto", 0.5);
+        app.state.playlist.sel.clear();
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        let pg = crate::playlist::PGeom::new(&app.state, g);
+        let auto = *crate::playlist::clips(&app.state).last().unwrap();
+        let ar = pg.clip_rect(&auto);
+        app.mouse_move(ar.x + 20.0, ar.bottom() - 10.0);
+        assert!(app.state.playlist.hover_clip.is_some(), "the automation clip is hovered");
+        check(&mut app, &mut a, &mut b, "automation clip hovered");
+        app.mouse_move(ar.x + 20.0, ar.bottom() + 60.0);
+        check(&mut app, &mut a, &mut b, "automation clip left");
+        // A plain click on a tool button: the press repaints everything, the release just the button.
+        let tool = hit_rect(&app, &Action::PlTool(crate::playlist::PlTool::Paint));
+        app.mouse_move(tool.cx(), tool.cy());
+        app.mouse_down();
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut a, d);
+        app.mouse_up();
+        check(&mut app, &mut a, &mut b, "tool button released");
+        assert_eq!(app.state.playlist.tool, crate::playlist::PlTool::Paint);
+        app.state.playlist.tool = crate::playlist::PlTool::Draw;
+        app.invalidate();
+        frame_damage(&mut app, &mut a, Some(None));
+        let _ = app.take_damage();
+        // Wheel over the grid: scroll down, then right; Ctrl zooms.
+        app.mouse_move(g.x + 300.0, g.y + 100.0);
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        app.wheel(0.0, -2.0, false, false);
+        check(&mut app, &mut a, &mut b, "wheel scroll");
+        app.wheel(-3.0, 0.0, false, false);
+        check(&mut app, &mut a, &mut b, "wheel sideways");
+        app.wheel(0.0, 1.0, false, true);
+        check(&mut app, &mut a, &mut b, "ctrl+wheel zoom");
+        // Drag the horizontal scroll bar.
+        let bar = app.bar(Scroll::PlaylistX).unwrap();
+        app.mouse_move(bar.track.x + 3.0, bar.track.cy());
+        app.mouse_down();
+        let _ = app.take_damage();
+        frame(&mut app, &mut a, None);
+        app.mouse_move(bar.track.x + 60.0, bar.track.cy());
+        check(&mut app, &mut a, &mut b, "scroll bar drag");
+        app.mouse_up();
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        // Drag the first clip on screen right and down.
+        app.state.playlist_scroll = (0.0, 0.0);
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        let pg = crate::playlist::PGeom::new(&app.state, app.pl_grid.unwrap());
+        let c0 = pg.clip_rect(&crate::playlist::clips(&app.state)[0]);
+        app.mouse_move(c0.x + 10.0, c0.y + 25.0);
+        app.mouse_down();
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        for (dx, dy) in [(40.0, 0.0), (90.0, 48.0), (150.0, 96.0)] {
+            app.mouse_move(c0.x + 10.0 + dx, c0.y + 25.0 + dy);
+            if let Damage::Rects(rs) = &app.damage {
+                let area: f32 = rs.iter().map(|r| r.w * r.h).sum();
+                assert!(area < pl.w * pl.h / 4.0, "a clip drag repaints the clip, not the window ({area})");
+            }
+            check(&mut app, &mut a, &mut b, "clip drag");
+        }
+        let moved = crate::playlist::clips(&app.state)[0];
+        assert!(moved.position > 0 && moved.track == 2, "the clip was dragged: {} on track {}", moved.position, moved.track);
+        app.mouse_up();
     }
 
     fn assert_same(a: &Canvas, b: &Canvas, what: &str) {
@@ -4667,9 +5150,8 @@ mod tests {
         let t0 = app.state.project.channels[0].mixer_track;
         let step = |app: &mut App, c: &mut Canvas, f: &dyn Fn(&mut App)| {
             f(app);
-            if let Some(d) = app.take_damage() {
-                frame(app, c, d);
-            }
+            let d = app.take_damage();
+            frame_damage(app, c, d);
         };
         step(&mut app, &mut a, &|ap| { ap.mouse_move(mb.cx(), mb.cy()); });
         step(&mut app, &mut a, &|ap| ap.mouse_down());
@@ -4749,9 +5231,8 @@ mod tests {
         let _ = app.take_damage();
         let step = |app: &mut App, c: &mut Canvas, f: &dyn Fn(&mut App)| {
             f(app);
-            if let Some(d) = app.take_damage() {
-                frame(app, c, d);
-            }
+            let d = app.take_damage();
+            frame_damage(app, c, d);
         };
         let r0 = app.state.win_rect(Win::Mixer);
         assert_eq!(r0, Rect::new(231.0, 565.0, 1552.0, 435.0));
@@ -5243,9 +5724,8 @@ mod tests {
         let _ = app.take_damage();
         fn step(app: &mut App, c: &mut Canvas, f: impl FnOnce(&mut App)) {
             f(app);
-            if let Some(d) = app.take_damage() {
-                frame(app, c, d);
-            }
+            let d = app.take_damage();
+            frame_damage(app, c, d);
         }
         // Add a note (click), drag it up and right, release; resize it; draw a velocity; erase it.
         step(&mut app, &mut a, |ap| { ap.mouse_move(500.0, 500.0); });

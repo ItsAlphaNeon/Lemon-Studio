@@ -83,7 +83,8 @@ losslessly, so existing projects open, play and save without losing data it does
 - Theme engine with `.flstheme` import
 - Sharp on high-density displays: follows the Windows display scale (125 %, 150 %, 200 % ...), plugin editors included,
   and follows a monitor or scale change at once
-- Damage-tracked CPU rendering for fast repaints
+- Damage-tracked CPU rendering: playback, meters and scrolling repaint only what moves, and cached text, icons and
+  shapes keep whole-window repaints fast, even with a full playlist
 - Computer-keyboard note input
 
 </td>

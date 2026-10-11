@@ -1671,6 +1671,31 @@ fn mute_at(app: &mut App, grid: Rect, on: bool) {
 
 /// Mouse moved during a playlist drag.
 pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
+    // Drags that only move, resize or select things inside the playlist repaint just the playlist.
+    let inside = matches!(
+        d,
+        PlDrag::Move { .. }
+            | PlDrag::ResizeL { .. }
+            | PlDrag::ResizeR { .. }
+            | PlDrag::Slip { .. }
+            | PlDrag::Marquee { .. }
+            | PlDrag::ZoomBox { .. }
+            | PlDrag::TimeSel { .. }
+            | PlDrag::Marker { .. }
+            | PlDrag::Point { .. }
+            | PlDrag::Tension { .. }
+    );
+    // Moving, resizing or slipping clips changes only those clips and the overview's miniature.
+    let moved: Option<Vec<usize>> = match &d {
+        PlDrag::Move { orig, .. } | PlDrag::ResizeL { orig, .. } | PlDrag::ResizeR { orig, .. } => Some(orig.iter().map(|&(i, _)| i).collect()),
+        PlDrag::Slip { i, .. } => Some(vec![*i]),
+        _ => None,
+    };
+    let rects = |s: &State, idx: &[usize]| -> Vec<Rect> {
+        let g = PGeom::new(s, grid);
+        idx.iter().filter_map(|&i| clips(s).get(i)).map(|c| g.clip_rect(c).outset(6.0).intersect(&grid)).collect()
+    };
+    let before = moved.as_deref().map(|idx| rects(&app.state, idx));
     let (x, y) = app.mouse;
     let alt = app.alt;
     let shift = app.shift;
@@ -1805,7 +1830,17 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             }
         }
     }
-    app.invalidate();
+    match (moved, before) {
+        (Some(idx), Some(mut dirty)) => {
+            dirty.extend(rects(&app.state, &idx));
+            dirty.push(crate::views::playlist::overview_rect(&app.state, grid).outset(1.0));
+            for r in dirty {
+                app.damage_rect(r);
+            }
+        }
+        _ if inside => app.damage_win(crate::app::Win::Playlist),
+        _ => app.invalidate(),
+    }
 }
 
 /// Button released.

@@ -38,7 +38,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     window_body(ui, r);
     let outer = r;
     let title = format!("Playlist - Arrangement  \u{203a}  {}  \u{203a}", pl::source_name(s, pl::source(s)));
+    // The grid covers most of the window and is painted all over (rows and gaps): the frame skips it.
+    let (fr, fc) = super::frame_rects(s, Win::Playlist, r);
+    let cover = grid_rect(s, fr, fc);
+    ui.c.set_cover((fr.h >= 2.0 * crate::app::TITLE_H).then_some(cover));
     let (r, client) = super::framed(ui, s, Win::Playlist, r, &title, 281.0, true);
+    ui.c.set_cover(None);
 
     // Title-bar tools: ▸ options, snap magnet, then the nine tools (§1, §3).
     let ty = r.y + 2.0;
@@ -76,12 +81,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // Arrangement geometry.
     let head_x = r.x + 162.0;
     let head_w = 98.0;
-    let grid_x = head_x + head_w + 12.0;
-    let grid_w = (r.right() - grid_x - 22.0).max(1.0);
+    let grid = grid_rect(s, r, client);
+    debug_assert_eq!(grid, cover);
+    let (grid_x, grid_y, grid_w) = (grid.x, grid.y, grid.w);
     let has_markers = !pl::markers(s).is_empty();
     let lane_y = client.y + 42.0;
-    let grid_y = lane_y + if has_markers { MARKER_H } else { 0.0 };
-    let grid = Rect::new(grid_x, grid_y, grid_w, (r.bottom() - grid_y).max(0.0));
     let g = PGeom::new(s, grid);
     let (sx, sy) = s.playlist_scroll;
     let bar_w = s.playlist_bar_w;
@@ -92,6 +96,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let last = pl::clips(s).iter().map(|c| c.end() as f32 / bar_t).fold(0.0, f32::max);
     let bars = (last.ceil() + 16.0).max(100.0);
     let over = Rect::new(grid_x, client.y + 1.0, grid_w, 18.0);
+    debug_assert_eq!(over, overview_rect(s, grid));
     super::scrollbar(ui, over, false, sx, grid_w, bars * bar_w, crate::app::Scroll::PlaylistX);
     overview(ui, s, over, bars * bar_t);
     let ruler = Rect::new(grid_x, client.y + 22.0, grid_w, 17.0);
@@ -108,7 +113,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let first_row = (sy / ROW_H) as u16;
     let rows = ((grid.h / ROW_H).ceil() as u16 + 1).min(TRACKS.saturating_sub(first_row));
     ui.c.push_clip(grid);
-    ui.c.fill_rect(grid, t.grid_gap);
+    // Rows and the gaps under them (painted after the grid lines) tile the grid; past the last track it is a gap.
+    let end = g.y_of(first_row + rows);
+    if end < grid.bottom() {
+        ui.c.fill_rect(Rect::new(grid_x, end, grid_w, grid.bottom() - end), t.grid_gap);
+    }
     for row in first_row..first_row + rows {
         let y = g.y_of(row);
         let c = if pl::track_on(s, row) { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
@@ -165,6 +174,20 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     ui.c.pop_clip();
     resize_zones(ui, s, Win::Playlist, outer);
+}
+
+/// The overview bar above `grid` (a miniature of the clips that is also the horizontal scroll bar, §1).
+pub fn overview_rect(s: &State, grid: Rect) -> Rect {
+    let lane_y = grid.y - if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
+    Rect::new(grid.x, lane_y - 41.0, grid.w, 18.0)
+}
+
+/// The arrangement grid in a window laid out at `r` with client rect `client` (see `super::frame_rects`).
+fn grid_rect(s: &State, r: Rect, client: Rect) -> Rect {
+    let grid_x = r.x + 162.0 + 98.0 + 12.0;
+    let grid_w = (r.right() - grid_x - 22.0).max(1.0);
+    let grid_y = client.y + 42.0 + if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
+    Rect::new(grid_x, grid_y, grid_w, (r.bottom() - grid_y).max(0.0))
 }
 
 /// Picker panel: kind tabs, then the list of clip sources of that kind (§1).

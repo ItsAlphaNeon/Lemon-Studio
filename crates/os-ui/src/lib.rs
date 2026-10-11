@@ -4,17 +4,20 @@
 //! Text uses the bundled Cuprum face (see `text`).
 // spec: ui/main-window.md §10 (typography)
 
+mod cache;
 mod glyph;
 pub mod kit;
 pub mod tabler;
 mod text;
 
-use std::collections::HashMap;
+use std::hash::Hasher;
+use std::rc::Rc;
 
+use cache::{Fx, Lru};
 pub use os_theme::Color;
 pub use glyph::Glyph;
 pub use text::{Face, Font};
-use tiny_skia::{FillRule, LineCap, Mask, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
+use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
 
 /// An axis-aligned rectangle in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -75,8 +78,54 @@ pub struct Canvas {
     pub scale: f32,
     text: text::TextEngine,
     clips: Vec<Rect>,
-    /// Clip masks for path drawing, built lazily and reused across frames.
-    masks: HashMap<[i32; 4], Mask>,
+    /// The frame's damage region as disjoint device rects (x0, y0, x1, y1); empty = the whole canvas.
+    region: Vec<(i32, i32, i32, i32)>,
+    /// Device rect that will be painted over opaquely later: rect fills skip it (see `set_cover`).
+    cover: Option<(i32, i32, i32, i32)>,
+    /// Anti-aliased coverage of filled / stroked paths, by path (relative to its pixel origin) and scale: most frames
+    /// repaint the same shapes, and a scrolled view the same shapes moved by whole pixels.
+    shapes: Lru<Rc<Coverage>>,
+    /// Subpixel coverage of icon glyphs, by glyph (or icon and box) and scale.
+    glyphs: Lru<Rc<GlyphCoverage>>,
+    /// Device bounds of everything drawn since the last `take_drawn` (x0, y0, x1, y1).
+    drawn: Option<(i32, i32, i32, i32)>,
+}
+
+/// Coverage (0..=255) of a shape, `w` x `h` device pixels.
+struct Coverage {
+    w: i32,
+    h: i32,
+    a: Vec<u8>,
+}
+
+/// A shape's coverage placed with its top-left at device pixel (x0, y0).
+struct Placed {
+    x0: i32,
+    y0: i32,
+    cov: Rc<Coverage>,
+}
+
+/// Per-channel subpixel coverage of a glyph over the device rect at (x0, y0), `w` x `h`.
+struct GlyphCoverage {
+    x0: i32,
+    y0: i32,
+    w: i32,
+    h: i32,
+    cov: Vec<[u8; 3]>,
+}
+
+/// Shapes larger than this (device pixels) are rasterized for the visible part only and not cached.
+const BIG_SHAPE: i64 = 1 << 20;
+
+fn hash_path(h: &mut Fx, p: &tiny_skia::Path) {
+    h.write_usize(p.verbs().len());
+    for v in p.verbs() {
+        h.write_u8(*v as u8);
+    }
+    for pt in p.points() {
+        h.f32(pt.x);
+        h.f32(pt.y);
+    }
 }
 
 fn paint(c: Color) -> Paint<'static> {
@@ -93,7 +142,11 @@ impl Canvas {
             scale,
             text: text::TextEngine::new()?,
             clips: Vec::new(),
-            masks: HashMap::new(),
+            region: Vec::new(),
+            cover: None,
+            shapes: Lru::new(32 << 20),
+            glyphs: Lru::new(16 << 20),
+            drawn: None,
         })
     }
 
@@ -102,19 +155,19 @@ impl Canvas {
         if let Some(p) = Pixmap::new(width.max(1), height.max(1)) {
             self.pixmap = p;
         }
+        if scale != self.scale {
+            // Cached coverage is per scale: entries for the old one would only wait to be evicted.
+            self.shapes.clear();
+            self.glyphs.clear();
+        }
         self.scale = scale;
         self.clips.clear();
-        // Masks are canvas-sized; a stale one makes clipped fills fail silently.
-        self.masks.clear();
+        self.region.clear();
     }
 
     /// Logical size.
     pub fn size(&self) -> (f32, f32) {
         (self.pixmap.width() as f32 / self.scale, self.pixmap.height() as f32 / self.scale)
-    }
-
-    fn transform(&self) -> Transform {
-        Transform::from_scale(self.scale, self.scale)
     }
 
     /// Current clip in logical pixels.
@@ -135,8 +188,8 @@ impl Canvas {
         self.clips.pop();
     }
 
-    /// Device-pixel bounds of the current clip: (x0, y0, x1, y1), end-exclusive.
-    fn clip_px(&self) -> (i32, i32, i32, i32) {
+    /// Device-pixel bounds of the innermost clip: (x0, y0, x1, y1), end-exclusive.
+    fn top_px(&self) -> (i32, i32, i32, i32) {
         let c = self.clip_rect();
         let s = self.scale;
         (
@@ -147,43 +200,217 @@ impl Canvas {
         )
     }
 
-    /// Make sure a mask exists for the current clip; returns its key (None when unclipped).
-    fn ensure_mask(&mut self, bounds: tiny_skia::Rect, pad: f32) -> Option<[i32; 4]> {
-        let (x0, y0, x1, y1) = self.clip_px();
-        if self.clips.is_empty() {
-            return None;
+    /// Number of device rects drawing goes to (`clip_at`): one per rect of the frame's damage region.
+    fn clip_count(&self) -> usize {
+        self.region.len().max(1)
+    }
+
+    /// Device rect `i` drawing goes to: the innermost clip cut by damage rect `i` (may be empty).
+    fn clip_at(&self, i: usize) -> (i32, i32, i32, i32) {
+        let t = self.top_px();
+        match self.region.get(i) {
+            Some(&(x0, y0, x1, y1)) => (t.0.max(x0), t.1.max(y0), t.2.min(x1), t.3.min(y1)),
+            None => t,
         }
-        // A path entirely inside the (rectangular) clip needs no mask.
+    }
+
+    /// Bounding box of every rect drawing goes to (x0 >= x1 when there is none).
+    fn clip_bounds(&self) -> (i32, i32, i32, i32) {
+        (0..self.clip_count()).map(|i| self.clip_at(i)).filter(|c| c.0 < c.2 && c.1 < c.3).fold(
+            (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+            |b, c| (b.0.min(c.0), b.1.min(c.1), b.2.max(c.2), b.3.max(c.3)),
+        )
+    }
+
+    /// Whether the device rect `[x0, x1) x [y0, y1)` reaches any rect drawing goes to.
+    fn reaches(&self, x0: i32, y0: i32, x1: i32, y1: i32) -> bool {
+        (0..self.clip_count()).any(|i| {
+            let c = self.clip_at(i);
+            c.0 < c.2 && c.1 < c.3 && x0 < c.2 && x1 > c.0 && y0 < c.3 && y1 > c.1
+        })
+    }
+
+    /// Anti-aliased coverage of `path` at the canvas scale, filled (`stroke` None) or stroked, rasterized by
+    /// tiny-skia into a shape-sized buffer and cached by the path, so a repaint of the same shape only blends.
+    fn coverage(&mut self, path: &tiny_skia::Path, stroke: Option<&Stroke>) -> Option<Placed> {
         let k = self.scale;
-        let inside = (bounds.left() - pad) * k >= x0 as f32
-            && (bounds.top() - pad) * k >= y0 as f32
-            && (bounds.right() + pad) * k <= x1 as f32
-            && (bounds.bottom() + pad) * k <= y1 as f32;
-        if inside {
+        // Device bounds, padded for anti-aliasing and the stroke (miter joins reach `miter_limit` half-widths out).
+        let b = path.bounds();
+        let pad = stroke.map_or(0.0, |s| s.width / 2.0 * s.miter_limit.max(1.5));
+        let x0 = ((b.left() - pad) * k).floor() as i32 - 1;
+        let y0 = ((b.top() - pad) * k).floor() as i32 - 1;
+        let x1 = ((b.right() + pad) * k).ceil() as i32 + 1;
+        let y1 = ((b.bottom() + pad) * k).ceil() as i32 + 1;
+        let big = i64::from(x1 - x0) * i64::from(y1 - y0) > BIG_SHAPE;
+        let (x0, y0, x1, y1) = if big {
+            let (cx0, cy0, cx1, cy1) = self.clip_bounds();
+            (x0.max(cx0), y0.max(cy0), x1.min(cx1), y1.min(cy1))
+        } else {
+            (x0, y0, x1, y1)
+        };
+        if x0 >= x1 || y0 >= y1 {
             return None;
         }
-        let key = [x0, y0, x1, y1];
-        if !self.masks.contains_key(&key) {
-            if self.masks.len() > 512 {
-                self.masks.clear();
+        let (w, h) = (x1 - x0, y1 - y0);
+        // The shape is drawn from its points relative to its pixel origin, snapped to 1/64 px, and cached by those: the
+        // same shape moved by whole pixels (a scrolled view) reuses its coverage, and the pixels depend only on the
+        // key, so every repaint draws a shape the same way. Shapes too big to cache are drawn for the visible part.
+        let q = |v: f32, o: i32| ((v * k - o as f32) * 64.0).round() as i32;
+        let pts: Vec<(i32, i32)> = path.points().iter().map(|pt| (q(pt.x, x0), q(pt.y, y0))).collect();
+        let key = (!big).then(|| {
+            let mut hs = Fx::default();
+            hs.f32(k);
+            match stroke {
+                None => hs.write_u8(1),
+                Some(s) => {
+                    hs.write_u8(2);
+                    hs.f32(s.width);
+                    hs.f32(s.miter_limit);
+                    hs.write_u8(s.line_cap as u8);
+                    hs.write_u8(s.line_join as u8);
+                }
             }
-            let mut mask = Mask::new(self.pixmap.width(), self.pixmap.height())?;
-            if let Some(rect) = tiny_skia::Rect::from_ltrb(x0 as f32, y0 as f32, (x1.max(x0 + 1)) as f32, (y1.max(y0 + 1)) as f32) {
-                mask.fill_path(&PathBuilder::from_rect(rect), FillRule::Winding, false, Transform::identity());
+            hs.write_i32(w);
+            hs.write_i32(h);
+            hs.write_usize(path.verbs().len());
+            for v in path.verbs() {
+                hs.write_u8(*v as u8);
             }
-            self.masks.insert(key, mask);
+            for &(x, y) in &pts {
+                hs.write_i32(x);
+                hs.write_i32(y);
+            }
+            hs.finish()
+        });
+        if let Some(c) = key.and_then(|key| self.shapes.get(key)) {
+            return Some(Placed { x0, y0, cov: c.clone() });
         }
-        Some(key)
+        let snapped = rebuild_path(path, &pts)?;
+        let mut pm = Pixmap::new(w as u32, h as u32)?;
+        let p = paint(Color::rgb(0xffffff));
+        match stroke {
+            None => pm.fill_path(&snapped, &p, FillRule::Winding, Transform::identity(), None),
+            Some(s) => {
+                // In device pixels: the width scales with the canvas (hairlines below one device pixel as before).
+                let s = Stroke { width: s.width * k, ..s.clone() };
+                pm.stroke_path(&snapped, &p, &s, Transform::identity(), None)
+            }
+        }
+        let a: Vec<u8> = pm.pixels().iter().map(|px| px.alpha()).collect();
+        let c = Rc::new(Coverage { w, h, a });
+        if let Some(key) = key {
+            self.shapes.insert(key, c.clone(), c.a.len() + 64);
+        }
+        Some(Placed { x0, y0, cov: c })
+    }
+
+    /// Blend `top` through `cov` inside the clip; with `grad` = (bottom, y_top, y_bottom) in device pixels the
+    /// colour runs from `top` to `bottom` down that span (a vertical linear gradient sampled at pixel centres).
+    fn blend(&mut self, cov: &Placed, top: Color, grad: Option<(Color, f32, f32)>) {
+        for i in 0..self.clip_count() {
+            let clip = self.clip_at(i);
+            self.blend_in(clip, cov, top, grad);
+        }
+    }
+
+    fn blend_in(&mut self, (cx0, cy0, cx1, cy1): (i32, i32, i32, i32), p: &Placed, top: Color, grad: Option<(Color, f32, f32)>) {
+        let cov = &*p.cov;
+        let (x0, x1) = (p.x0.max(cx0), (p.x0 + cov.w).min(cx1));
+        let (y0, y1) = (p.y0.max(cy0), (p.y0 + cov.h).min(cy1));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        self.mark(x0, y0, x1, y1);
+        let pw = self.pixmap.width() as usize;
+        let n = (x1 - x0) as usize;
+        let data = self.pixmap.data_mut();
+        for y in y0..y1 {
+            let c = match grad {
+                Some((bottom, g0, g1)) => top.mix(bottom, ((y as f32 + 0.5 - g0) / (g1 - g0).max(1e-3)).clamp(0.0, 1.0)),
+                None => top,
+            };
+            if c.a == 0 {
+                continue;
+            }
+            let src = &cov.a[((y - p.y0) * cov.w + (x0 - p.x0)) as usize..][..n];
+            let dst = &mut data[(y as usize * pw + x0 as usize) * 4..][..n * 4];
+            blend_cov_row(dst.as_chunks_mut::<4>().0, src, c);
+        }
+    }
+
+    /// Record that device pixels `[x0, x1) x [y0, y1)` were drawn.
+    fn mark(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        self.drawn = Some(match self.drawn {
+            Some((a, b, c, d)) => (a.min(x0), b.min(y0), c.max(x1), d.max(y1)),
+            None => (x0, y0, x1, y1),
+        });
+    }
+
+    /// Logical bounds of everything drawn since the last call (None = nothing), then start over. The app uses it to
+    /// learn where each view paints, so a repaint that misses a view can skip it.
+    pub fn take_drawn(&mut self) -> Option<Rect> {
+        let (x0, y0, x1, y1) = self.drawn.take()?;
+        let k = self.scale;
+        Some(Rect::new(x0 as f32 / k, y0 as f32 / k, (x1 - x0) as f32 / k, (y1 - y0) as f32 / k))
+    }
+
+    /// Whether anything drawn inside `r` (logical) would reach the current clip: views skip invisible work with it.
+    pub fn visible(&self, r: Rect) -> bool {
+        let k = self.scale;
+        let (x0, y0) = ((r.x * k).floor() as i32, (r.y * k).floor() as i32);
+        let (x1, y1) = ((r.right() * k).ceil() as i32, (r.bottom() * k).ceil() as i32);
+        self.reaches(x0, y0, x1, y1)
     }
 
     /// Start a frame. With `damage`, everything is clipped to that rectangle (the rest of the
     /// canvas keeps last frame's pixels) and primitives outside it are skipped outright.
     pub fn begin_frame(&mut self, damage: Option<Rect>) {
-        self.clips.clear();
-        if let Some(d) = damage {
-            let (w, h) = self.size();
-            self.clips.push(d.intersect(&Rect::new(0.0, 0.0, w, h)));
+        match damage {
+            Some(d) => self.begin_region(&[d]),
+            None => {
+                self.clips.clear();
+                self.region.clear();
+                self.cover = None;
+            }
         }
+    }
+
+    /// Start a frame clipped to several rectangles at once (one paint for damage in separate places: a playhead,
+    /// the clock and some meters). Overlapping rects are merged, so no pixel is drawn twice.
+    pub fn begin_region(&mut self, damage: &[Rect]) {
+        self.clips.clear();
+        self.region.clear();
+        self.cover = None;
+        let mut rs: Vec<(i32, i32, i32, i32)> = Vec::with_capacity(damage.len());
+        for d in damage {
+            let (x, y, w, h) = self.device_rect(*d);
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let mut r = (x as i32, y as i32, (x + w) as i32, (y + h) as i32);
+            // Merge with every rect it overlaps, until it overlaps none.
+            while let Some(i) = rs.iter().position(|o| o.0 < r.2 && o.2 > r.0 && o.1 < r.3 && o.3 > r.1) {
+                let o = rs.swap_remove(i);
+                r = (r.0.min(o.0), r.1.min(o.1), r.2.max(o.2), r.3.max(o.3));
+            }
+            rs.push(r);
+        }
+        // Nothing to paint: one empty rect (an empty region means the whole canvas).
+        self.region = if rs.is_empty() { vec![(0, 0, 0, 0)] } else { rs };
+    }
+
+    /// Promise that `r` will be painted over opaquely before the frame ends; until `set_cover(None)`, rect fills
+    /// leave it alone (a window background under the grid that covers it, the workspace under a maximized window).
+    /// Saves filling those pixels twice; the caller must really cover all of `r`.
+    pub fn set_cover(&mut self, r: Option<Rect>) {
+        self.cover = r.map(|r| {
+            // The same rounding as a clip to `r`, which the covering paint is drawn through.
+            let k = self.scale;
+            ((r.x * k).round() as i32, (r.y * k).round() as i32, (r.right() * k).round() as i32, (r.bottom() * k).round() as i32)
+        });
     }
 
     pub fn clear(&mut self, c: Color) {
@@ -193,13 +420,7 @@ impl Canvas {
 
     /// True when `b` (logical, padded by `pad`) lies entirely outside the current clip.
     fn outside(&self, b: tiny_skia::Rect, pad: f32) -> bool {
-        let c = self.clip_rect();
-        // An empty clip (e.g. a pushed clip entirely outside the damage rect) shows nothing.
-        let (x0, y0, x1, y1) = self.clip_px();
-        if x1 <= x0 || y1 <= y0 {
-            return true;
-        }
-        b.right() + pad < c.x || b.left() - pad > c.right() || b.bottom() + pad < c.y || b.top() - pad > c.bottom()
+        !self.visible(Rect::new(b.left() - pad, b.top() - pad, b.width() + 2.0 * pad, b.height() + 2.0 * pad))
     }
 
     /// Device-pixel rectangle of a logical one, clamped to the canvas: (x, y, w, h).
@@ -233,29 +454,77 @@ impl Canvas {
     }
 
     /// Fill the device-pixel span `[rx0, rx1) x [ry0, ry1)` inside the clip, `top` to `bottom` down the span.
-    fn fill_px(&mut self, (rx0, rx1): (i32, i32), (ry0, ry1): (i32, i32), top: Color, bottom: Color) {
-        let (cx0, cy0, cx1, cy1) = self.clip_px();
+    fn fill_px(&mut self, rx: (i32, i32), ry: (i32, i32), top: Color, bottom: Color) {
+        for i in 0..self.clip_count() {
+            let clip = self.clip_at(i);
+            self.fill_px_in(clip, rx, ry, top, bottom);
+        }
+    }
+
+    fn fill_px_in(&mut self, (cx0, cy0, cx1, cy1): (i32, i32, i32, i32), (rx0, rx1): (i32, i32), (ry0, ry1): (i32, i32), top: Color, bottom: Color) {
         let (x0, x1) = (rx0.max(cx0), rx1.min(cx1));
         let (y0, y1) = (ry0.max(cy0), ry1.min(cy1));
         if x0 >= x1 || y0 >= y1 {
             return;
         }
+        if let Some((vx0, vy0, vx1, vy1)) = self.cover
+            && vx0 < x1
+            && vx1 > x0
+            && vy0 < y1
+            && vy1 > y0
+        {
+            // Fill only around the covered rect: the bands above and below, then left and right of it.
+            let cover = self.cover.take();
+            let (mx0, mx1) = (vx0.max(x0), vx1.min(x1));
+            let (my0, my1) = (vy0.max(y0), vy1.min(y1));
+            for (bx0, by0, bx1, by1) in [(x0, y0, x1, my0), (x0, my1, x1, y1), (x0, my0, mx0, my1), (mx1, my0, x1, my1)] {
+                if bx0 < bx1 && by0 < by1 {
+                    self.fill_px_in((bx0, by0, bx1, by1), (rx0, rx1), (ry0, ry1), top, bottom);
+                }
+            }
+            self.cover = cover;
+            return;
+        }
+        self.mark(x0, y0, x1, y1);
         let pw = self.pixmap.width() as usize;
         let span = (ry1 - ry0).max(1) as f32;
         let flat = top == bottom;
-        let pixels = self.pixmap.pixels_mut();
+        let (x0, x1) = (x0 as usize, x1 as usize);
+        let data = self.pixmap.data_mut();
+        // SAFETY: a u32 view of whole RGBA pixels; `align_to_mut` hands back any unaligned head, and the pixmap's
+        // allocation is aligned in practice (the byte path below covers it otherwise).
+        let (head, px, _) = unsafe { data.align_to_mut::<u32>() };
+        if !head.is_empty() {
+            return Self::fill_bytes(data, pw, (x0, x1), (y0, y1), ry0, span, top, bottom);
+        }
         for y in y0..y1 {
             let c = if flat { top } else { top.mix(bottom, (y - ry0) as f32 / span) };
-            let row = &mut pixels[y as usize * pw + x0 as usize..y as usize * pw + x1 as usize];
+            let row = &mut px[y as usize * pw + x0..y as usize * pw + x1];
             if c.a == 255 {
-                row.fill(PremultipliedColorU8::from_rgba(c.r, c.g, c.b, 255).expect("opaque"));
-            } else {
-                let (sr, sg, sb, sa) = (u32::from(c.r), u32::from(c.g), u32::from(c.b), u32::from(c.a));
-                for px in row.iter_mut() {
-                    // Opaque canvas: destination is already premultiplied with alpha 255.
-                    let mix = |s: u32, d: u8| ((s * sa + u32::from(d) * (255 - sa)) / 255) as u8;
-                    *px = PremultipliedColorU8::from_rgba(mix(sr, px.red()), mix(sg, px.green()), mix(sb, px.blue()), 255)
-                        .expect("opaque");
+                let v = u32::from_ne_bytes([c.r, c.g, c.b, 255]);
+                if row.len() <= 4 {
+                    // Thin vertical lines (grid lines): one or two pixels a row, so no per-row fill call.
+                    for p in row {
+                        *p = v;
+                    }
+                } else {
+                    row.fill(v);
+                }
+            } else if c.a > 0 {
+                blend_row(row, c);
+            }
+        }
+    }
+
+    /// `fill_px_in` on bytes (an unaligned pixmap, not expected in practice).
+    #[allow(clippy::too_many_arguments)]
+    fn fill_bytes(data: &mut [u8], pw: usize, (x0, x1): (usize, usize), (y0, y1): (i32, i32), ry0: i32, span: f32, top: Color, bottom: Color) {
+        for y in y0..y1 {
+            let c = if top == bottom { top } else { top.mix(bottom, (y - ry0) as f32 / span) };
+            let (sa, inv) = (u32::from(c.a), 255 - u32::from(c.a));
+            for d in data[(y as usize * pw + x0) * 4..(y as usize * pw + x1) * 4].as_chunks_mut::<4>().0 {
+                for (k, s) in [c.r, c.g, c.b].into_iter().enumerate() {
+                    d[k] = ((u32::from(s) * sa + u32::from(d[k]) * inv) / 255) as u8;
                 }
             }
         }
@@ -264,8 +533,14 @@ impl Canvas {
     /// Elliptical radial gradient over `r`: `center` at the middle, `edge` where the normalized
     /// distance reaches 1 (the half-width / half-height), falling off with the square of the distance.
     pub fn fill_radial(&mut self, r: Rect, center: Color, edge: Color) {
+        for i in 0..self.clip_count() {
+            let clip = self.clip_at(i);
+            self.fill_radial_in(clip, r, center, edge);
+        }
+    }
+
+    fn fill_radial_in(&mut self, (cx0, cy0, cx1, cy1): (i32, i32, i32, i32), r: Rect, center: Color, edge: Color) {
         let k = self.scale;
-        let (cx0, cy0, cx1, cy1) = self.clip_px();
         let x0 = ((r.x * k).round() as i32).max(cx0);
         let x1 = ((r.right() * k).round() as i32).min(cx1);
         let y0 = ((r.y * k).round() as i32).max(cy0);
@@ -273,6 +548,7 @@ impl Canvas {
         if x0 >= x1 || y0 >= y1 {
             return;
         }
+        self.mark(x0, y0, x1, y1);
         let (mx, my) = (r.cx() * k, r.cy() * k);
         let (hw, hh) = ((r.w * k / 2.0).max(0.5), (r.h * k / 2.0).max(0.5));
         let pw = self.pixmap.width() as usize;
@@ -307,21 +583,10 @@ impl Canvas {
         if self.outside(path.bounds(), 1.0) {
             return;
         }
-        let tc = |c: Color| tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a);
-        let Some(shader) = tiny_skia::LinearGradient::new(
-            tiny_skia::Point::from_xy(0.0, r.y * self.scale),
-            tiny_skia::Point::from_xy(0.0, r.bottom() * self.scale),
-            vec![tiny_skia::GradientStop::new(0.0, tc(top)), tiny_skia::GradientStop::new(1.0, tc(bottom))],
-            tiny_skia::SpreadMode::Pad,
-            Transform::identity(),
-        ) else {
-            return;
-        };
-        let p = Paint { shader, anti_alias: true, ..Paint::default() };
-        let t = self.transform();
-        let key = self.ensure_mask(path.bounds(), 1.0);
-        let mask = key.and_then(|k| self.masks.get(&k));
-        self.pixmap.fill_path(&path, &p, FillRule::Winding, t, mask);
+        if let Some(cov) = self.coverage(&path, None) {
+            let k = self.scale;
+            self.blend(&cov, top, Some((bottom, r.y * k, r.bottom() * k)));
+        }
     }
 
     pub fn fill_rrect(&mut self, r: Rect, radius: f32, c: Color) {
@@ -404,13 +669,10 @@ impl Canvas {
             if self.outside(path.bounds(), width + 1.0) {
                 return;
             }
-            let mut s = Stroke { width, ..Stroke::default() };
-            s.line_cap = LineCap::Round;
-            let t = self.transform();
-            let p = paint(c);
-            let key = self.ensure_mask(path.bounds(), width + 1.0);
-            let mask = key.and_then(|k| self.masks.get(&k));
-            self.pixmap.stroke_path(&path, &p, &s, t, mask);
+            let s = Stroke { width, line_cap: LineCap::Round, ..Stroke::default() };
+            if let Some(cov) = self.coverage(&path, Some(&s)) {
+                self.blend(&cov, c, None);
+            }
         }
     }
 
@@ -418,23 +680,19 @@ impl Canvas {
         if self.outside(path.bounds(), 1.0) {
             return;
         }
-        let t = self.transform();
-        let p = paint(c);
-        let key = self.ensure_mask(path.bounds(), 1.0);
-        let mask = key.and_then(|k| self.masks.get(&k));
-        self.pixmap.fill_path(path, &p, FillRule::Winding, t, mask);
+        if let Some(cov) = self.coverage(path, None) {
+            self.blend(&cov, c, None);
+        }
     }
 
     pub fn stroke(&mut self, path: &tiny_skia::Path, width: f32, c: Color) {
         if self.outside(path.bounds(), width + 1.0) {
             return;
         }
-        let t = self.transform();
-        let p = paint(c);
         let s = Stroke { width, ..Stroke::default() };
-        let key = self.ensure_mask(path.bounds(), width + 1.0);
-        let mask = key.and_then(|k| self.masks.get(&k));
-        self.pixmap.stroke_path(path, &p, &s, t, mask);
+        if let Some(cov) = self.coverage(path, Some(&s)) {
+            self.blend(&cov, c, None);
+        }
     }
 
     /// Width of `s` in logical pixels.
@@ -455,13 +713,17 @@ impl Canvas {
     /// Draw `s` with its text cell's top-left at (x, y). Returns the advance width.
     pub fn text(&mut self, f: Font, x: f32, y: f32, c: Color, s: &str) -> f32 {
         let k = self.scale;
-        let clip = self.clip_px();
         let (xi, yi) = ((x * k).round() as i32, (y * k).round() as i32);
         let (w, h) = self.text.extent(f, k, s);
-        if xi > clip.2 || yi > clip.3 || xi + w + 8 < clip.0 || yi + h + 4 < clip.1 {
-            return w as f32 / k;
+        for i in 0..self.clip_count() {
+            let clip = self.clip_at(i);
+            if clip.0 >= clip.2 || clip.1 >= clip.3 || xi > clip.2 || yi > clip.3 || xi + w + 8 < clip.0 || yi + h + 4 < clip.1 {
+                continue;
+            }
+            // Glyphs overhang their cell (italics, descenders, ClearType fringes): mark generously.
+            self.mark((xi - h).max(clip.0), (yi - h).max(clip.1), (xi + w + h).min(clip.2), (yi + 2 * h).min(clip.3));
+            self.text.draw(&mut self.pixmap, clip, f, k, xi, yi, c, s, false);
         }
-        self.text.draw(&mut self.pixmap, clip, f, k, xi, yi, c, s, false);
         w as f32 / k
     }
 
@@ -508,70 +770,130 @@ impl Canvas {
     /// with the glyph tops facing left at `x`. Returns the advance (upward extent).
     pub fn text_vertical(&mut self, f: Font, x: f32, y_bottom: f32, c: Color, s: &str) -> f32 {
         let k = self.scale;
-        let clip = self.clip_px();
         let (xi, yi) = ((x * k).round() as i32, (y_bottom * k).round() as i32);
         let (w, h) = self.text.extent(f, k, s);
-        if xi > clip.2 || xi + h + 4 < clip.0 || yi + 4 < clip.1 || yi - w - 4 > clip.3 {
-            return w as f32 / k;
+        for i in 0..self.clip_count() {
+            let clip = self.clip_at(i);
+            if clip.0 >= clip.2 || clip.1 >= clip.3 || xi > clip.2 || xi + h + 4 < clip.0 || yi + 4 < clip.1 || yi - w - 4 > clip.3 {
+                continue;
+            }
+            self.mark((xi - h).max(clip.0), (yi - w - h).max(clip.1), (xi + 2 * h).min(clip.2), (yi + h).min(clip.3));
+            self.text.draw(&mut self.pixmap, clip, f, k, xi, yi, c, s, true);
         }
-        self.text.draw(&mut self.pixmap, clip, f, k, xi, yi, c, s, true);
         w as f32 / k
     }
 
     /// Draw a Tabler icon (24-unit grid) centred in `r`, scaled to the shorter side, in color `c`.
     pub fn icon(&mut self, icon: &tabler::TablerIcon, r: Rect, c: Color) {
         let k = r.w.min(r.h) / 24.0;
-        let (ox, oy) = (r.cx() - 12.0 * k, r.cy() - 12.0 * k);
-        let mut g = Glyph::new();
-        g.round_caps = true;
         let stroke = if icon.filled { None } else { Some((2.0 * k).max(1.1)) };
-        g.commands(icon.d, ox, oy, k, stroke);
-        self.glyph(c, &g);
+        self.tabler(icon, r, c, stroke);
     }
 
     /// An outline Tabler icon like `icon`, stroked `width` logical px wide whatever its size (small, bold glyphs).
     pub fn icon_stroke(&mut self, icon: &tabler::TablerIcon, r: Rect, c: Color, width: f32) {
+        self.tabler(icon, r, c, (!icon.filled).then_some(width));
+    }
+
+    /// A Tabler icon fitted into `r`; its coverage is cached by icon, box, stroke and scale (parsing and
+    /// rasterizing it again every frame was most of the cost of drawing an icon).
+    fn tabler(&mut self, icon: &tabler::TablerIcon, r: Rect, c: Color, stroke: Option<f32>) {
+        let mut h = Fx::default();
+        h.write_u8(4);
+        h.write_usize(icon.d.as_ptr() as usize);
+        h.write_usize(icon.d.len());
+        for v in [r.x, r.y, r.w, r.h, self.scale, stroke.unwrap_or(-1.0)] {
+            h.f32(v);
+        }
+        let key = h.finish();
+        if let Some(cov) = self.glyphs.get(key).cloned() {
+            self.blend_glyph(&cov, c);
+            return;
+        }
+        // The icon lies in the square of the shorter side centred in `r`, plus half the stroke.
+        if !self.visible(r.outset(stroke.unwrap_or(0.0) + 2.0)) {
+            return;
+        }
         let k = r.w.min(r.h) / 24.0;
         let (ox, oy) = (r.cx() - 12.0 * k, r.cy() - 12.0 * k);
         let mut g = Glyph::new();
         g.round_caps = true;
-        g.commands(icon.d, ox, oy, k, (!icon.filled).then_some(width));
-        self.glyph(c, &g);
+        g.commands(icon.d, ox, oy, k, stroke);
+        if let Some(cov) = self.glyph_coverage(&g) {
+            self.glyphs.insert(key, cov.clone(), cov.cov.len() * 3 + 64);
+            self.blend_glyph(&cov, c);
+        }
     }
 
     /// Draw an icon glyph with subpixel (ClearType-style) coverage in color `c`.
     pub fn glyph(&mut self, c: Color, g: &Glyph) {
+        let mut h = Fx::default();
+        h.write_u8(3);
+        h.f32(self.scale);
+        for (p, erase) in &g.shapes {
+            h.write_u8(u8::from(*erase));
+            hash_path(&mut h, p);
+        }
+        let key = h.finish();
+        if let Some(cov) = self.glyphs.get(key).cloned() {
+            self.blend_glyph(&cov, c);
+            return;
+        }
         let Some(b) = g.bounds() else { return };
+        if !self.visible(b.outset(2.0)) {
+            return;
+        }
+        if let Some(cov) = self.glyph_coverage(g) {
+            self.glyphs.insert(key, cov.clone(), cov.cov.len() * 3 + 64);
+            self.blend_glyph(&cov, c);
+        }
+    }
+
+    /// Rasterize the whole glyph (the subpixel filter needs neighbours); blending clips it.
+    fn glyph_coverage(&self, g: &Glyph) -> Option<Rc<GlyphCoverage>> {
+        let b = g.bounds()?;
         let k = self.scale;
-        let clip = self.clip_px();
-        // Rasterize the whole glyph (the subpixel filter needs neighbours), blend inside the clip.
         let x0 = (b.x * k).floor() as i32 - 1;
         let y0 = (b.y * k).floor() as i32;
         let x1 = (b.right() * k).ceil() as i32 + 1;
         let y1 = (b.bottom() * k).ceil() as i32;
-        if x0.max(clip.0) >= x1.min(clip.2) || y0.max(clip.1) >= y1.min(clip.3) {
+        let (w, h) = (x1 - x0, y1 - y0);
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        let cov = glyph::coverage(g, k, x0, y0, w, h)?;
+        Some(Rc::new(GlyphCoverage { x0, y0, w, h, cov }))
+    }
+
+    fn blend_glyph(&mut self, g: &GlyphCoverage, c: Color) {
+        for i in 0..self.clip_count() {
+            let clip = self.clip_at(i);
+            self.blend_glyph_in(clip, g, c);
+        }
+    }
+
+    fn blend_glyph_in(&mut self, clip: (i32, i32, i32, i32), g: &GlyphCoverage, c: Color) {
+        let (x0, x1) = (g.x0.max(clip.0), (g.x0 + g.w).min(clip.2));
+        let (y0, y1) = (g.y0.max(clip.1), (g.y0 + g.h).min(clip.3));
+        if x0 >= x1 || y0 >= y1 {
             return;
         }
-        let (w, h) = (x1 - x0, y1 - y0);
-        let Some(cov) = glyph::coverage(g, k, x0, y0, w, h) else { return };
+        self.mark(x0, y0, x1, y1);
         let pw = self.pixmap.width() as usize;
+        let n = (x1 - x0) as usize;
         let data = self.pixmap.data_mut();
         let a = u32::from(c.a);
-        for y in 0..h as usize {
-            for x in 0..w as usize {
-                let (dx, dy) = (x0 + x as i32, y0 + y as i32);
-                if dx < clip.0 || dx >= clip.2 || dy < clip.1 || dy >= clip.3 {
+        let fg = [u32::from(c.r), u32::from(c.g), u32::from(c.b)];
+        for y in y0..y1 {
+            let src = &g.cov[((y - g.y0) * g.w + (x0 - g.x0)) as usize..][..n];
+            let dst = &mut data[(y as usize * pw + x0 as usize) * 4..][..n * 4];
+            for (d, cv) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src) {
+                if *cv == [0, 0, 0] {
                     continue;
                 }
-                let cv = cov[y * w as usize + x];
-                if cv == [0, 0, 0] {
-                    continue;
-                }
-                let i = (dy as usize * pw + dx as usize) * 4; // dx, dy are inside the clip (>= 0)
-                for (ch, fg) in [c.r, c.g, c.b].into_iter().enumerate() {
+                for ch in 0..3 {
                     let al = u32::from(cv[ch]) * a / 255;
-                    let d = u32::from(data[i + ch]);
-                    data[i + ch] = ((u32::from(fg) * al + d * (255 - al)) / 255) as u8;
+                    d[ch] = ((fg[ch] * al + u32::from(d[ch]) * (255 - al)) / 255) as u8;
                 }
             }
         }
@@ -594,13 +916,20 @@ impl Canvas {
         if w == 0 || h == 0 || px.len() < w * h {
             return;
         }
+        for i in 0..self.clip_count() {
+            let clip = self.clip_at(i);
+            self.image_in(clip, r, w, h, px);
+        }
+    }
+
+    fn image_in(&mut self, (cx0, cy0, cx1, cy1): (i32, i32, i32, i32), r: Rect, w: usize, h: usize, px: &[u32]) {
         let k = self.scale;
-        let (cx0, cy0, cx1, cy1) = self.clip_px();
         let (x0, x1) = (((r.x * k).round() as i32).max(cx0), ((r.right() * k).round() as i32).min(cx1));
         let (y0, y1) = (((r.y * k).round() as i32).max(cy0), ((r.bottom() * k).round() as i32).min(cy1));
         if x0 >= x1 || y0 >= y1 {
             return;
         }
+        self.mark(x0, y0, x1, y1);
         let (rw, rh) = ((r.w * k).max(1.0), (r.h * k).max(1.0));
         // Source pixels per device pixel, and the source span (start, weights) each device column / row reads.
         let (fx, fy) = (w as f32 / rw, h as f32 / rh);
@@ -635,13 +964,21 @@ impl Canvas {
     /// with the canvas placed at `(ox, oy)` in it (the main window's border surrounds the canvas).
     pub fn copy_region_to_xrgb_at(&self, out: &mut [u32], out_stride: usize, (x, y, w, h): (usize, usize, usize, usize), (ox, oy): (usize, usize)) {
         let stride = self.pixmap.width() as usize;
-        let px = self.pixmap.pixels();
+        let data = self.pixmap.data();
+        // SAFETY: a u32 view of whole RGBA pixels; an unaligned head (not expected) takes the per-byte path.
+        let (head, px, _) = unsafe { data.align_to::<u32>() };
         for row in y..y + h {
-            let src = &px[row * stride + x..row * stride + x + w];
             let d = (row + oy) * out_stride + x + ox;
             let Some(dst) = out.get_mut(d..d + w) else { return };
-            for (o, p) in dst.iter_mut().zip(src) {
-                *o = (u32::from(p.red()) << 16) | (u32::from(p.green()) << 8) | u32::from(p.blue());
+            if head.is_empty() && cfg!(target_endian = "little") {
+                // Bytes R G B A read as a little-endian word: swap R and B, drop A (the compiler vectorizes this).
+                for (o, &v) in dst.iter_mut().zip(&px[row * stride + x..row * stride + x + w]) {
+                    *o = ((v & 0xff) << 16) | (v & 0xff00) | ((v >> 16) & 0xff);
+                }
+            } else {
+                for (o, p) in dst.iter_mut().zip(data[(row * stride + x) * 4..(row * stride + x + w) * 4].as_chunks::<4>().0) {
+                    *o = (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2]);
+                }
             }
         }
     }
@@ -650,6 +987,128 @@ impl Canvas {
     pub fn copy_to_xrgb(&self, out: &mut [u32]) {
         for (o, p) in out.iter_mut().zip(self.pixmap.data().chunks_exact(4)) {
             *o = (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2]);
+        }
+    }
+}
+
+/// Blend `c` (straight alpha) over a row of opaque pixels: `(c * a + d * (255 - a)) / 255` per channel, truncated.
+/// `x / 255 == (x * 0x8081) >> 23` for every x up to 255 * 255; four pixels at a time with SSE2 (x86-64 baseline).
+fn blend_row(row: &mut [u32], c: Color) {
+    let sa = u32::from(c.a);
+    let inv = 255 - sa;
+    let (pr, pg, pb) = (u32::from(c.r) * sa, u32::from(c.g) * sa, u32::from(c.b) * sa);
+    #[cfg(target_arch = "x86_64")]
+    let row = {
+        use std::arch::x86_64::*;
+        let (chunks, rest) = row.as_chunks_mut::<4>();
+        // SAFETY: SSE2 is always available on x86-64; the loads and stores are unaligned and stay inside the chunk.
+        unsafe {
+            let (r, g, b, a) = (pr as i16, pg as i16, pb as i16, (255 * sa) as u16 as i16);
+            let src = _mm_setr_epi16(r, g, b, a, r, g, b, a);
+            let invv = _mm_set1_epi16(inv as i16);
+            let magic = _mm_set1_epi16(0x8081u16 as i16);
+            let zero = _mm_setzero_si128();
+            for ch in chunks {
+                let p = ch.as_mut_ptr().cast::<__m128i>();
+                let d = _mm_loadu_si128(p);
+                // Bytes to 16-bit lanes (two pixels per register); d * inv + src stays within 255 * 255.
+                let lo = _mm_add_epi16(_mm_mullo_epi16(_mm_unpacklo_epi8(d, zero), invv), src);
+                let hi = _mm_add_epi16(_mm_mullo_epi16(_mm_unpackhi_epi8(d, zero), invv), src);
+                let lo = _mm_srli_epi16(_mm_mulhi_epu16(lo, magic), 7);
+                let hi = _mm_srli_epi16(_mm_mulhi_epu16(hi, magic), 7);
+                _mm_storeu_si128(p, _mm_packus_epi16(lo, hi));
+            }
+        }
+        rest
+    };
+    let div = |x: u32| (x * 0x8081) >> 23;
+    for p in row {
+        let [r, g, b, _] = p.to_ne_bytes();
+        *p = u32::from_ne_bytes([div(pr + u32::from(r) * inv) as u8, div(pg + u32::from(g) * inv) as u8, div(pb + u32::from(b) * inv) as u8, 255]);
+    }
+}
+
+/// `path`'s verbs with new points given in 1/64 device pixels.
+fn rebuild_path(path: &tiny_skia::Path, pts: &[(i32, i32)]) -> Option<tiny_skia::Path> {
+    use tiny_skia::PathSegment;
+    let mut it = pts.iter().map(|&(x, y)| (x as f32 / 64.0, y as f32 / 64.0));
+    let mut pb = PathBuilder::new();
+    // Segments come in point order: one point per move / line, two per quad, three per cubic.
+    for seg in path.segments() {
+        match seg {
+            PathSegment::MoveTo(_) => {
+                let (x, y) = it.next()?;
+                pb.move_to(x, y);
+            }
+            PathSegment::LineTo(_) => {
+                let (x, y) = it.next()?;
+                pb.line_to(x, y);
+            }
+            PathSegment::QuadTo(..) => {
+                let ((x1, y1), (x, y)) = (it.next()?, it.next()?);
+                pb.quad_to(x1, y1, x, y);
+            }
+            PathSegment::CubicTo(..) => {
+                let ((x1, y1), (x2, y2), (x, y)) = (it.next()?, it.next()?, it.next()?);
+                pb.cubic_to(x1, y1, x2, y2, x, y);
+            }
+            PathSegment::Close => pb.close(),
+        }
+    }
+    pb.finish()
+}
+
+/// Blend `c` over a row of opaque pixels through per-pixel coverage `cov`: with `al = (cov * a + 127) / 255`, each
+/// channel becomes `(c * al + d * (255 - al) + 127) / 255`. Four pixels at a time with SSE2 (x86-64 baseline); the
+/// division is `(x * 0x8081) >> 23`, exact for every 16-bit x.
+fn blend_cov_row(row: &mut [[u8; 4]], cov: &[u8], c: Color) {
+    let ca = u32::from(c.a);
+    let div = |x: u32| (x * 0x8081) >> 23;
+    #[cfg(target_arch = "x86_64")]
+    let (row, cov) = {
+        use std::arch::x86_64::*;
+        let (chunks, rest) = row.as_chunks_mut::<4>();
+        let n = chunks.len() * 4;
+        // SAFETY: SSE2 is always available on x86-64; loads and stores are unaligned and stay inside each chunk.
+        unsafe {
+            let (r, g, b) = (i16::from(c.r), i16::from(c.g), i16::from(c.b));
+            let src = _mm_setr_epi16(r, g, b, 255, r, g, b, 255);
+            let ca_v = _mm_set1_epi16(c.a.into());
+            let full = _mm_set1_epi16(255);
+            let half = _mm_set1_epi16(127);
+            let magic = _mm_set1_epi16(0x8081u16 as i16);
+            let zero = _mm_setzero_si128();
+            for (ch, cv) in chunks.iter_mut().zip(cov.as_chunks::<4>().0) {
+                let cw = u32::from_le_bytes(*cv);
+                if cw == 0 {
+                    continue;
+                }
+                // Coverage to alpha (16-bit lanes), then each pixel's alpha spread over its four channels.
+                let cv16 = _mm_unpacklo_epi8(_mm_cvtsi32_si128(cw as i32), zero);
+                let al = _mm_srli_epi16(_mm_mulhi_epu16(_mm_add_epi16(_mm_mullo_epi16(cv16, ca_v), half), magic), 7);
+                let al2 = _mm_unpacklo_epi16(al, al);
+                let (alo, ahi) = (_mm_unpacklo_epi32(al2, al2), _mm_unpackhi_epi32(al2, al2));
+                let p = ch.as_mut_ptr().cast::<__m128i>();
+                let d = _mm_loadu_si128(p);
+                let mix = |d16: __m128i, a: __m128i| {
+                    let x = _mm_add_epi16(_mm_add_epi16(_mm_mullo_epi16(src, a), _mm_mullo_epi16(d16, _mm_sub_epi16(full, a))), half);
+                    _mm_srli_epi16(_mm_mulhi_epu16(x, magic), 7)
+                };
+                let lo = mix(_mm_unpacklo_epi8(d, zero), alo);
+                let hi = mix(_mm_unpackhi_epi8(d, zero), ahi);
+                _mm_storeu_si128(p, _mm_packus_epi16(lo, hi));
+            }
+        }
+        (rest, &cov[n..])
+    };
+    for (d, &a) in row.iter_mut().zip(cov) {
+        if a == 0 {
+            continue;
+        }
+        let al = div(u32::from(a) * ca + 127);
+        let inv = 255 - al;
+        for (k, s) in [c.r, c.g, c.b].into_iter().enumerate() {
+            d[k] = div(u32::from(s) * al + u32::from(d[k]) * inv + 127) as u8;
         }
     }
 }
@@ -739,6 +1198,125 @@ fn poly_path(pts: &[(f32, f32)], close: bool) -> Option<tiny_skia::Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn present_copy_is_xrgb() {
+        let Ok(mut c) = Canvas::new(7, 3, 1.0) else { return };
+        c.fill_rect(Rect::new(0.0, 0.0, 7.0, 3.0), Color::rgb(0x123456));
+        c.fill_rect(Rect::new(2.0, 1.0, 3.0, 1.0), Color::rgb(0xfedcba));
+        let mut out = vec![0u32; 9 * 4];
+        c.copy_region_to_xrgb_at(&mut out, 9, (1, 0, 5, 3), (2, 1));
+        assert_eq!(out[9 + 3], 0x123456, "row 0 -> out row 1, x 1 -> 3");
+        assert_eq!(out[2 * 9 + 4], 0xfedcba);
+        assert_eq!(out[2 * 9 + 2], 0, "left of the copied region");
+        assert_eq!(out[0], 0);
+    }
+
+    #[test]
+    fn coverage_blend_matches_the_formula() {
+        let mut seed = 777u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 16) as u8
+        };
+        for a in [0u8, 1, 64, 127, 128, 200, 254, 255] {
+            for n in 0..14 {
+                let c = Color { r: next(), g: next(), b: next(), a };
+                // Coverage with zeros, full and partial values.
+                let cov: Vec<u8> = (0..n).map(|i| match i % 5 { 0 => 0, 1 => 255, _ => next() }).collect();
+                let row: Vec<[u8; 4]> = (0..n).map(|_| [next(), next(), next(), 255]).collect();
+                let mut got = row.clone();
+                blend_cov_row(&mut got, &cov, c);
+                for ((g, d), &cv) in got.iter().zip(&row).zip(&cov) {
+                    let al = (u32::from(cv) * u32::from(a) + 127) / 255;
+                    let mix = |s: u8, d: u8| ((u32::from(s) * al + u32::from(d) * (255 - al) + 127) / 255) as u8;
+                    let want = if cv == 0 { *d } else { [mix(c.r, d[0]), mix(c.g, d[1]), mix(c.b, d[2]), 255] };
+                    assert_eq!(*g, want, "alpha {a}, coverage {cv}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn moved_shapes_reuse_their_coverage() {
+        // The same circle 7 px further right draws the same pixels 7 px further right, from the cache.
+        let Ok(mut c) = Canvas::new(60, 30, 1.0) else { return };
+        c.fill_rect(Rect::new(0.0, 0.0, 60.0, 30.0), Color::rgb(0x000000));
+        c.fill_circle(10.3, 12.6, 6.0, Color::rgb(0xffffff));
+        let n = c.shapes.len();
+        c.fill_circle(17.3, 12.6, 6.0, Color::rgb(0xffffff));
+        assert_eq!(c.shapes.len(), n, "found in the cache");
+        let red = |c: &Canvas, x: usize, y: usize| c.pixmap.pixels()[y * 60 + x].red();
+        let Ok(mut d) = Canvas::new(60, 30, 1.0) else { return };
+        d.fill_rect(Rect::new(0.0, 0.0, 60.0, 30.0), Color::rgb(0x000000));
+        d.fill_circle(17.3, 12.6, 6.0, Color::rgb(0xffffff));
+        for y in 0..30 {
+            for x in 18..60 {
+                assert!(red(&c, x, y).abs_diff(red(&d, x, y)) <= 1, "pixel {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn row_blend_matches_the_formula() {
+        // Every alpha, rows of 0..11 pixels (whole SIMD chunks and leftovers), varied destinations.
+        let mut seed = 12345u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 16) as u8
+        };
+        for a in 0..=255u8 {
+            let c = Color { r: next(), g: next(), b: next(), a };
+            for n in 0..12 {
+                let row: Vec<u32> = (0..n).map(|_| u32::from_ne_bytes([next(), next(), next(), 255])).collect();
+                let mut got = row.clone();
+                blend_row(&mut got, c);
+                for (g, d) in got.iter().zip(&row) {
+                    let d = d.to_ne_bytes();
+                    let mix = |s: u8, d: u8| ((u32::from(s) * u32::from(a) + u32::from(d) * (255 - u32::from(a))) / 255) as u8;
+                    assert_eq!(g.to_ne_bytes(), [mix(c.r, d[0]), mix(c.g, d[1]), mix(c.b, d[2]), 255], "alpha {a}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn covered_rects_are_left_for_later() {
+        // A fill under a cover leaves the covered pixels; the rest is filled as without it.
+        let Ok(mut c) = Canvas::new(40, 30, 1.5) else { return };
+        c.fill_rect(Rect::new(0.0, 0.0, 40.0, 30.0), Color::rgb(0x000000));
+        c.set_cover(Some(Rect::new(5.0, 4.0, 10.0, 8.0)));
+        c.fill_rect_gradient(Rect::new(2.0, 2.0, 20.0, 15.0), Color::rgb(0x204060), Color::rgb(0x6080a0), 0.0);
+        c.set_cover(None);
+        let Ok(mut d) = Canvas::new(40, 30, 1.5) else { return };
+        d.fill_rect(Rect::new(0.0, 0.0, 40.0, 30.0), Color::rgb(0x000000));
+        d.fill_rect_gradient(Rect::new(2.0, 2.0, 20.0, 15.0), Color::rgb(0x204060), Color::rgb(0x6080a0), 0.0);
+        let w = 40;
+        for (i, (p, q)) in c.pixmap.pixels().iter().zip(d.pixmap.pixels()).enumerate() {
+            let (x, y) = (i % w, i / w);
+            let covered = (8..23).contains(&x) && (6..18).contains(&y);
+            if covered {
+                assert_eq!(p.red(), 0, "covered pixel {x},{y} left alone");
+            } else {
+                assert_eq!(p, q, "pixel {x},{y} as without a cover");
+            }
+        }
+    }
+
+    #[test]
+    fn regions_clip_to_each_rect_once() {
+        // Two overlapping damage rects: an alpha fill blends once where they overlap, nothing outside them.
+        let Ok(mut c) = Canvas::new(30, 10, 1.0) else { return };
+        c.fill_rect(Rect::new(0.0, 0.0, 30.0, 10.0), Color::rgb(0x000000));
+        c.begin_region(&[Rect::new(2.0, 0.0, 10.0, 10.0), Rect::new(8.0, 0.0, 10.0, 10.0), Rect::new(25.0, 0.0, 2.0, 10.0)]);
+        c.fill_rect(Rect::new(0.0, 0.0, 30.0, 10.0), Color::rgb(0xffffff).with_alpha(128));
+        let row: Vec<u8> = c.pixmap.pixels()[..30].iter().map(|p| p.red()).collect();
+        for (x, &v) in row.iter().enumerate() {
+            let inside = (2..18).contains(&x) || (25..27).contains(&x);
+            assert_eq!(v, if inside { 128 } else { 0 }, "x {x}: {row:?}");
+        }
+        assert!(c.visible(Rect::new(20.0, 0.0, 6.0, 1.0)) && !c.visible(Rect::new(19.0, 0.0, 5.0, 1.0)));
+    }
 
     #[test]
     fn rect_span_is_inclusive() {
