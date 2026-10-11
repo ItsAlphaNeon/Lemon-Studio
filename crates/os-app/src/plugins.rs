@@ -304,7 +304,7 @@ impl Plugins {
     /// UI tick: plugin housekeeping, then the windows' requests (a closed window is closed here).
     pub fn idle(&mut self, info: impl Fn(usize) -> Option<ChannelInfoT>) -> Vec<Request> {
         let mut out = Vec::new();
-        let mut close = Vec::new();
+        let mut close: Vec<usize> = Vec::new();
         // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
         #[cfg(windows)]
         for (area, m) in crate::plugin_window::take_link() {
