@@ -320,8 +320,8 @@ impl State {
     }
 }
 
-/// Strip controls that do nothing yet, with their rects: the pitch knob (the channel pitch does not reach hosted
-/// instruments) and the pitch range and mixer track boxes (no editing); ON, PAN and VOL too in an effect's window.
+/// Strip controls that do nothing yet, with their rects: the pitch range and mixer track boxes (no editing); ON, PAN, VOL
+/// and PITCH too in an effect's window (there is no channel).
 fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
     let dx = w - STRIP_RIGHT;
     let mut v = Vec::new();
@@ -329,8 +329,8 @@ fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
         v.push((Rect::new(340.0 + dx, 38.0, 18.0, 18.0), "Effect on / off"));
         v.push((Rect::new(383.0 + dx - 14.0, 33.0, 28.0, 28.0), "Panning"));
         v.push((Rect::new(417.0 + dx - 14.0, 33.0, 28.0, 28.0), "Volume"));
+        v.push((Rect::new(455.0 + dx - 14.0, 33.0, 28.0, 28.0), "Channel pitch"));
     }
-    v.push((Rect::new(455.0 + dx - 14.0, 33.0, 28.0, 28.0), "Channel pitch"));
     v.push((Rect::new(470.0 + dx, 35.0, 28.0, 23.0), "Pitch range"));
     v.push((Rect::new(517.0 + dx, 35.0, 41.0, 23.0), "Mixer track number"));
     v
@@ -356,8 +356,7 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
         v.extend(strip_off(st, w).into_iter().map(|(r, name)| (r, Part::Off(name))));
         if st.channel() {
             v.push((Rect::new(340.0 + dx, 38.0, 18.0, 18.0), Part::On));
-            // PAN and VOL (the pitch knob, index 2, is not available yet).
-            for (i, x) in [383.0, 417.0].into_iter().enumerate() {
+            for (i, x) in [383.0, 417.0, 455.0].into_iter().enumerate() {
                 v.push((Rect::new(x + dx - 14.0, 33.0, 28.0, 28.0), Part::Knob(i as u8)));
             }
         }
@@ -509,8 +508,8 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
     let track = if st.info.track == 0 { "---".to_string() } else { st.info.track.to_string() };
     value_box(c, Rect::new(517.0 + dx, 32.0 + dy, 41.0, 23.0), &track);
     caption(c, 537.0 + dx, "TRACK");
-    // Greyed out (`strip_off`): PITCH, RANGE and TRACK; from ON on in an effect's window.
-    let x0 = if st.channel() { 436.0 } else { 334.0 };
+    // Greyed out (`strip_off`): RANGE and TRACK; from ON on in an effect's window.
+    let x0 = if st.channel() { 470.0 } else { 334.0 };
     c.fill_rect(Rect::span(x0 + dx, 561.0 + dx, TITLE_H + 2.0, TITLE_H + STRIP_H - 1.0), c_strip().with_alpha(crate::app::OFF_VEIL));
 }
 
@@ -1633,7 +1632,7 @@ mod tests {
         }
     }
 
-    /// Strip controls that do nothing yet are greyed out: PITCH / RANGE / TRACK, and ON / PAN / VOL of an effect.
+    /// Strip controls that do nothing yet are greyed out: RANGE / TRACK, and ON / PAN / VOL / PITCH of an effect.
     #[test]
     fn dead_strip_controls_are_off() {
         let st = state(true, "Master");
@@ -1642,7 +1641,7 @@ mod tests {
         assert_eq!(part_at(&st, 383.0 + dx, 47.0), Some(Part::Knob(0)), "PAN works");
         assert_eq!(part_at(&st, 417.0 + dx, 47.0), Some(Part::Knob(1)), "VOL works");
         assert_eq!(part_at(&st, 349.0 + dx, 47.0), Some(Part::On));
-        assert_eq!(part_at(&st, 455.0 + dx, 47.0), Some(Part::Off("Channel pitch")));
+        assert_eq!(part_at(&st, 455.0 + dx, 47.0), Some(Part::Knob(2)), "PITCH works");
         assert_eq!(part_at(&st, 485.0 + dx, 47.0), Some(Part::Off("Pitch range")));
         assert_eq!(part_at(&st, 537.0 + dx, 47.0), Some(Part::Off("Mixer track number")));
         let mut fx = state(true, "Master");

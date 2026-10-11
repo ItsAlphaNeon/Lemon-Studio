@@ -1298,15 +1298,27 @@ impl Engine {
             for (off, index, value) in self.params.channel_span(c, 0, n) {
                 inst.param(off, index, value);
             }
+            // The channel's pitch (knob, control points, automation) reaches the instrument as each note's tuning, on top
+            // of any glide; notes keep the pitch they started with.
+            let shift = (12.0 * (ch.base_rate / ch.src_ratio).log2()) as f32;
+            let shift = if shift.is_finite() && shift.abs() > 1e-3 { shift } else { 0.0 };
             let first = self.inst_notes.partition_point(|e| e.0 < c);
             for &(_, off, note) in self.inst_notes[first..].iter().take_while(|e| e.0 == c) {
                 let off = off.min(n.saturating_sub(1) as u32);
                 match note {
                     notes::Note::Choke(key) => inst.choke(off, key),
                     notes::Note::Off(key) => inst.note_off(off, key),
-                    notes::Note::On { key, vel, start } if start > 0.0 => inst.note_on_from(off, key, vel, start),
-                    notes::Note::On { key, vel, .. } => inst.note_on(off, key, vel),
-                    notes::Note::Tune(key, semitones) => inst.tune(off, key, semitones),
+                    notes::Note::On { key, vel, start } => {
+                        if start > 0.0 {
+                            inst.note_on_from(off, key, vel, start);
+                        } else {
+                            inst.note_on(off, key, vel);
+                        }
+                        if shift != 0.0 {
+                            inst.tune(off, key, shift);
+                        }
+                    }
+                    notes::Note::Tune(key, semitones) => inst.tune(off, key, semitones + shift),
                 }
             }
             let (l, r) = (&mut self.scratch.0[..n], &mut self.scratch.1[..n]);
@@ -2444,6 +2456,36 @@ mod tests {
         let f = |t: f64| laws::tick_to_frame(t, 96, 130.0, 48000);
         let got = log.lock().unwrap().0.clone();
         assert_eq!(got, vec![(0, "from", 0.25), (f(96.0), "choke", 0.0), (f(384.0), "on", 0.0), (f(480.0), "choke", 0.0)]);
+    }
+
+    /// A hosted instrument hears the channel pitch as each note's tuning (the engine's own voices apply it themselves).
+    #[test]
+    fn channel_pitch_tunes_hosted_notes() {
+        use os_model::{Clip, ClipSource};
+        #[derive(Default)]
+        struct Log(Vec<(u8, f32)>);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {}
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn tune(&mut self, _o: u32, key: u8, semitones: f32) {
+                self.0.push((key, semitones));
+            }
+            fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        }
+        let mut p = song(vec![long_note(0, 96, 0)], vec![Clip::new(0, 96, 0, ClipSource::Pattern(1))]);
+        let tunes = |p: &Project| {
+            let mut e = Engine::new(p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+            let log = Arc::new(std::sync::Mutex::new(Log::default()));
+            e.set_instrument(0, log.clone());
+            e.render_all(480);
+            let got = log.lock().unwrap().0.clone();
+            got
+        };
+        assert!(tunes(&p).is_empty(), "no pitch, no tuning");
+        p.channels[0].pitch_cents = -250;
+        let got = tunes(&p);
+        assert_eq!(got.len(), 1);
+        assert!((got[0].1 + 2.5).abs() < 1e-3, "{got:?}");
     }
 
     // spec: audio/audio-clips.md "Starting inside a clip"
