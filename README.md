@@ -66,7 +66,7 @@ losslessly, so existing projects open, play and save without losing data it does
 - Channel rack: step sequencer, mini piano rolls, graph editor, per-channel loops, filter groups, fill tools, swing, clone / move / delete channels
 - Piano roll with full tool set, velocity and event lanes
 - Mixer: track select / rename / colour, mute and solo, polarity and channel swap, click-to-route sends with send knobs
-  and sidechain, per-track meters, add / insert / move / delete tracks, effect slots hosting CLAP effects (bypass, dry/wet)
+  and sidechain, per-track meters, add / insert / move / delete tracks, effect slots hosting CLAP and VST3 effects (bypass, dry/wet)
 - Browser with drag and drop, plugin picker
 - Floating, resizable, stackable windows
 - Theme engine with `.flstheme` import
@@ -89,7 +89,8 @@ losslessly, so existing projects open, play and save without losing data it does
 <td width="50%" valign="top">
 
 ### 🔌 Plugins
-- [CLAP](https://cleveraudio.org/) instrument hosting with native editor windows
+- [CLAP](https://cleveraudio.org/) and VST3 hosting: instruments and mixer effects, plugin editors inside
+  OpenStudio's plugin window, plugin state (VST3 in the `.vstpreset` layout), parameters and automation
 - **Open Sampler**: OpenStudio's sampler, also built as a standalone
   VST3 and CLAP plugin for use in other hosts
 - **Open Parametric EQ 2**: 7-band EQ (VST3 + CLAP) with a graph editor, band tokens,
@@ -162,7 +163,9 @@ OpenStudio is a Cargo workspace of focused crates:
 | [`os-theme`](crates/os-theme) | Colour palette, theme files and the HSL adjustment model |
 | [`os-ui`](crates/os-ui) | CPU canvas, text rendering and the shared widget kit |
 | [`os-app`](crates/os-app) | The `openstudio` application: windows, editors, transport |
+| [`os-host`](crates/os-host) | Format-neutral plugin hosting layer (CLAP, VST3, native) |
 | [`os-clap`](crates/os-clap) | CLAP plugin host |
+| [`os-vst3`](crates/os-vst3) | VST3 plugin host |
 | [`os-hostlink`](crates/os-hostlink) | Host link protocol between OpenStudio and its own plugins |
 | [`os-native`](crates/os-native) | Experimental host for plugins built on a third-party native plugin SDK |
 | [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of OpenStudio's own plugins |
@@ -177,7 +180,7 @@ OpenStudio is a Cargo workspace of focused crates:
 - [x] CLAP hosting (instruments and mixer effects) and the Open Sampler plugin
 - [x] Open Parametric EQ 2 plugin, built in for mixer slots
 - [x] Theme engine and theme import
-- [ ] VST3 hosting
+- [x] VST3 hosting (instruments, effects, editors, state, automation)
 - [ ] ASIO audio output
 - [ ] Saving plugin channels and full mixer state to project files
 - [ ] More built-in instruments and effects
@@ -198,6 +201,7 @@ in this repository are original or come from the openly licensed projects listed
 | [Cuprum](https://fonts.google.com/specimen/Cuprum) by Jovanny Lemonad | Interface typeface | [SIL Open Font License 1.1](crates/os-ui/fonts/Cuprum/OFL.txt) |
 | [Tabler Icons](https://tabler.io/icons) | Interface icons | [MIT](crates/os-ui/icons/TABLER-LICENSE.txt) |
 | [NIH-plug](https://github.com/robbert-vdh/nih-plug) | Plugin framework for OpenStudio's plugins | ISC |
+| [vst3-sys](https://github.com/RustAudio/vst3-sys) | VST3 interface bindings (plugin hosting and OpenStudio's plugins) | GPLv3 |
 | Rust crates listed in `Cargo.lock` | Various | Their respective licenses |
 
 ## License

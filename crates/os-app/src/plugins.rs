@@ -1391,4 +1391,88 @@ mod tests {
         pump(&mut pl, 200);
         assert_eq!(pl.sampler_path(0).as_deref(), Some(wav.as_str()));
     }
+
+    /// `<target>/bundled/<file>` of this test's build folder (`cargo run -p bundle-plugins`), if built.
+    fn bundled(file: &str) -> Option<PathBuf> {
+        let target = std::env::current_exe().ok()?.parent()?.parent()?.parent()?.to_path_buf();
+        Some(target.join("bundled").join(file)).filter(|p| p.exists())
+    }
+
+    /// A VST3 instrument hosts like a CLAP one (spec: plugins/vst3-hosting.md): created, given state bytes, played;
+    /// the same plugin in both formats gets format labels in the picker and each label finds its own entry.
+    #[test]
+    fn vst3_plugins_host_like_clap_ones() {
+        let (Some(clap), Some(vst3)) = (bundled("Open Sampler.clap"), bundled("Open Sampler.vst3")) else { return };
+        let available = |p: &std::path::Path, load: fn(&std::path::Path) -> Result<Arc<dyn Library>, String>| {
+            let lib = load(p).unwrap();
+            Available { desc: lib.plugins()[0].clone(), lib }
+        };
+        let mut pl = Plugins {
+            available: vec![
+                available(&clap, |p| os_clap::Library::load(p).map(|l| l as Arc<dyn Library>)),
+                available(&vst3, |p| os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>)),
+            ],
+            scale: 1.0,
+            rate: 48000,
+            ..Plugins::default()
+        };
+        assert_eq!(pl.names(), ["Open Sampler (CLAP)", "Open Sampler (VST3)"]);
+        assert_eq!(pl.index_of("Open Sampler (VST3)"), Some(1));
+        assert_eq!(pl.index_of("Open Sampler"), Some(0), "a plain name still finds the first");
+        pl.create(0, 1).unwrap();
+        let d = pl.descriptor(0).unwrap();
+        assert_eq!(d.format, os_host::Format::Vst3);
+        assert!(d.uid().starts_with("vst3:") && d.uid().len() == 5 + 32);
+        let wav = std::env::temp_dir().join("os-app-vst3.wav");
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
+        // A VST3 instance takes a bare component state too (here Open Sampler's JSON with the sample).
+        let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
+        assert!(pl.set_state(0, json.as_bytes()), "the sample reaches the VST3 instance");
+        let state = pl.state(0).unwrap();
+        assert!(state.starts_with(b"VST3"), "state bytes are a .vstpreset");
+        assert!(pl.set_state(0, &state));
+        let (_, inst) = pl.instruments().pop().unwrap();
+        let mut i = inst.lock().unwrap();
+        let (mut l, mut r) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+        i.note_on(0, 60, 0.8);
+        i.process(48000, &mut l, &mut r);
+        assert!(l.iter().any(|v| v.abs() > 0.1), "plays");
+    }
+
+    /// VST3 editors inside OpenStudio's plugin frame, moved off every screen and captured with PrintWindow:
+    /// `OS_SHOT_DIR=<dir> cargo test -p os-app --bin openstudio vst3_window_shots -- --ignored`.
+    #[test]
+    #[ignore]
+    fn vst3_window_shots() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        for (file, effect) in [("Open Sampler.vst3", false), ("Open Parametric EQ 2.vst3", true)] {
+            let Some(path) = bundled(file) else { continue };
+            let lib = os_vst3::Module::load(&path).unwrap();
+            let a = Available { desc: lib.plugins()[0].clone(), lib };
+            let name = a.desc.name.clone();
+            let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+            let key = if effect {
+                pl.effects = vec![a];
+                pl.create_effect(1, 0, 0, None).unwrap();
+                fx_key(1, 0)
+            } else {
+                pl.available = vec![a];
+                pl.create(0, 0).unwrap();
+                0
+            };
+            let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+            pl.open_window(key, info).unwrap();
+            let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+            unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+            pump(&mut pl, 400);
+            let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
+            assert!(!editor.is_null(), "{name}: the editor is a child of the frame");
+            let out = dir.join(format!("vst3_{}.bmp", name.replace(' ', "_")));
+            // The first capture of a window that never reached the screen makes it paint.
+            capture(frame, &out);
+            pump(&mut pl, 200);
+            capture(frame, &out);
+        }
+    }
 }

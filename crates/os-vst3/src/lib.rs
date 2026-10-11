@@ -30,6 +30,9 @@ use vst3_sys::{c_void, ComInterface, VstPtr, IID};
 /// Largest block handed to a plug-in; longer host blocks are split.
 const MAX_FRAMES: u32 = 4096;
 
+/// Most automation values waiting for a process call (the audio thread never grows the queue).
+const MAX_AUTO: usize = 2048;
+
 // Media types, bus directions (spec §4).
 const AUDIO: i32 = 0;
 const EVENT: i32 = 1;
@@ -339,7 +342,11 @@ pub struct Plugin {
     from_processor: Vec<(u32, f64)>,
     /// Host / editor edits have waited for a `process` call since then (a flush is due without a stream).
     pending_since: Option<Instant>,
-    param_ids: Vec<u32>,
+    /// (id, step count) of each parameter in list order: the position is the automation index. A parameter whose
+    /// info could not be read keeps its place with id `u32::MAX` (VST 3's "no parameter").
+    param_ids: Vec<(u32, i32)>,
+    /// Automation values (frame offset, id, normalized) for the next process call.
+    auto: Vec<(u32, u32, f64)>,
     /// Unit id -> group path (IUnitInfo).
     units: Vec<(i32, String)>,
     latency: u32,
@@ -416,6 +423,7 @@ impl Plugin {
                 from_processor: Vec::with_capacity(256),
                 pending_since: None,
                 param_ids: Vec::new(),
+                auto: Vec::with_capacity(MAX_AUTO),
                 units: Vec::new(),
                 latency: 0,
                 tail: 0,
@@ -538,15 +546,18 @@ impl Plugin {
             .collect();
     }
 
+    fn known(&self, id: u32) -> bool {
+        id != u32::MAX && self.param_ids.iter().any(|p| p.0 == id)
+    }
+
     fn refresh_param_ids(&mut self) {
         self.param_ids.clear();
         let Some(c) = &self.controller else { return };
         unsafe {
             for i in 0..c.get_parameter_count() {
                 let mut info: ParameterInfo = std::mem::zeroed();
-                if c.get_parameter_info(i, &mut info) == kResultOk {
-                    self.param_ids.push(info.id);
-                }
+                let ok = c.get_parameter_info(i, &mut info) == kResultOk;
+                self.param_ids.push(if ok { (info.id, info.step_count.max(0)) } else { (u32::MAX, 0) });
             }
         }
     }
@@ -640,7 +651,7 @@ impl Plugin {
         }
         // Edits only reach a processor in `process`: without a stream, flush them with an empty block so the sound
         // and the saved state follow (spec §5).
-        let waiting = self.shared.to_processor.lock().is_ok_and(|q| !q.is_empty());
+        let waiting = !self.auto.is_empty() || self.shared.to_processor.lock().is_ok_and(|q| !q.is_empty());
         if !waiting {
             self.pending_since = None;
         } else if self.rate != 0 {
@@ -659,6 +670,11 @@ impl Plugin {
     fn flush(&mut self) {
         self.start_processing();
         self.fill_params();
+        // Automation that waited: the newest value of each parameter, now.
+        for &(_, id, v) in &self.auto {
+            self.params_in.get().add(id, 0, v);
+        }
+        self.auto.clear();
         self.params_out.get().clear();
         let mut data = ProcessData {
             process_mode: 0,
@@ -687,6 +703,43 @@ impl Plugin {
                 pin.add(id, 0, v);
             }
         }
+    }
+
+    /// Automation (audio thread): parameter `index` of the list to normalized `value`, `offset` frames into the next
+    /// process call (spec §5). A stepped parameter gets its nearest step; unknown indexes are ignored.
+    fn automate(&mut self, offset: u32, index: u32, value: f64) {
+        let Some(&(id, steps)) = self.param_ids.get(index as usize) else { return };
+        if id == u32::MAX || self.auto.len() >= MAX_AUTO {
+            return;
+        }
+        let mut v = value.clamp(0.0, 1.0);
+        if steps > 0 {
+            v = (v * f64::from(steps)).round() / f64::from(steps);
+        }
+        self.auto.push((offset, id, v));
+    }
+
+    /// This chunk's automation (offset < `n`) into the input parameter changes, after the host edits at offset 0; the
+    /// controller hears the last values too. Later values move on by `n` frames. No allocation.
+    fn fill_auto(&mut self, n: u32) {
+        let pin = self.params_in.get();
+        let out = &mut self.from_processor;
+        let mut kept = 0;
+        for i in 0..self.auto.len() {
+            let (t, id, v) = self.auto[i];
+            if t < n {
+                pin.add(id, t as i32, v);
+                if let Some(e) = out.iter_mut().find(|e| e.0 == id) {
+                    e.1 = v;
+                } else if out.len() < out.capacity() {
+                    out.push((id, v));
+                }
+            } else {
+                self.auto[kept] = (t - n, id, v);
+                kept += 1;
+            }
+        }
+        self.auto.truncate(kept);
     }
 
     /// Parameter values the processor reported, for the controller.
@@ -820,6 +873,7 @@ impl Plugin {
         }
         self.queue.truncate(kept);
         self.fill_params();
+        self.fill_auto(n as u32);
         self.params_out.get().clear();
         // Buffers: the main buses carry the host's audio, every other channel a scratch buffer.
         self.ptrs.clear();
@@ -982,7 +1036,7 @@ impl os_host::Plugin for Plugin {
 
     fn param_value(&self, id: u32) -> Option<f64> {
         let c = self.controller.as_ref()?;
-        self.param_ids.contains(&id).then(|| unsafe { c.get_param_normalized(id) })
+        self.known(id).then(|| unsafe { c.get_param_normalized(id) })
     }
 
     fn param_text(&self, id: u32, value: f64) -> Option<String> {
@@ -993,7 +1047,7 @@ impl os_host::Plugin for Plugin {
 
     fn set_param(&mut self, id: u32, value: f64) -> bool {
         let Some(c) = &self.controller else { return false };
-        if !self.param_ids.contains(&id) {
+        if !self.known(id) {
             return false;
         }
         let v = value.clamp(0.0, 1.0);
@@ -1018,6 +1072,7 @@ impl os_engine::Instrument for Plugin {
     fn reset(&mut self) {
         self.queue.clear();
         self.sounding = false;
+        // Automation still waiting is a value the parameter should have: it is kept for the next block / flush.
         if self.processing {
             unsafe { self.processor.set_processing(0) };
             self.processing = false;
@@ -1030,6 +1085,10 @@ impl os_engine::Instrument for Plugin {
 
     fn note_off(&mut self, offset: u32, key: u8) {
         self.queue.push(Note { time: offset, on: false, key, velocity: 0.0 });
+    }
+
+    fn param(&mut self, offset: u32, index: u32, value: f64) {
+        self.automate(offset, index, value);
     }
 
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
@@ -1082,6 +1141,10 @@ impl os_engine::HostedEffect for Plugin {
 
     fn reset_fx(&mut self) {
         os_engine::Instrument::reset(self);
+    }
+
+    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
+        self.automate(offset, index, value);
     }
 }
 

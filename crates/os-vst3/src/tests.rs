@@ -245,6 +245,53 @@ fn hosts_an_effect() {
     assert_eq!(p.latency(), 0);
 }
 
+/// Automation (`HostedEffect::param_fx`, by list index) reaches the processor at its frame offset, the controller
+/// follows, and without a stream it is flushed on idle.
+#[test]
+fn automation_is_sample_accurate() {
+    use os_engine::HostedEffect;
+    use os_host::Plugin as _;
+    use vst3_sys::vst::{IParamValueQueue, IParameterChanges};
+    let Some(m) = module("Open Parametric EQ 2") else { return };
+    let mut p = Plugin::new(&m, &m.plugins()[0].id).unwrap();
+    assert!(p.activate(48000));
+    let index = (0..p.param_count()).find(|&i| p.param_info(i).is_some_and(|i| i.name == "Main level")).expect("main level") as u32;
+    let id = p.param_info(index as usize).unwrap().id;
+    let src = vec![0.25f32; 2048];
+    let (mut l, mut r) = (src.clone(), src.clone());
+    p.process_fx(48000, &mut l, &mut r);
+    l.copy_from_slice(&src);
+    r.copy_from_slice(&src);
+    p.param_fx(1024, index, 1.0);
+    p.process_fx(48000, &mut l, &mut r);
+    // The block carried the point at its frame (nih-plug applies it at the block start unless the plug-in asks for
+    // sample-accurate automation, so the sound only shows that it arrived).
+    let mut points = Vec::new();
+    unsafe {
+        for i in 0..p.params_in.get().get_parameter_count() {
+            let q = p.params_in.get().get_parameter_data(i).upgrade().unwrap();
+            let (mut o, mut v) = (0, 0.0);
+            q.get_point(0, &mut o, &mut v);
+            points.push((q.get_parameter_id(), o, v));
+        }
+    }
+    assert_eq!(points, vec![(id, 1024, 1.0)]);
+    assert!(peak(&l[1100..]) > 1.0, "+18 dB ({})", peak(&l[1100..]));
+    p.idle();
+    assert!((p.param_value(id).unwrap() - 1.0).abs() < 1e-6, "the controller follows the automation");
+    // No stream: the value is flushed by idle after a short wait.
+    p.param_fx(0, index, 0.5);
+    p.idle();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    p.idle();
+    assert!(p.auto.is_empty(), "flushed");
+    l.copy_from_slice(&src);
+    r.copy_from_slice(&src);
+    p.process_fx(48000, &mut l, &mut r);
+    // (The plug-in glides to a new level within the block.)
+    assert!((peak(&l[1800..]) - 0.25).abs() < 0.03, "0 dB after the flushed automation ({})", peak(&l[1800..]));
+}
+
 /// The whole path OpenStudio uses: a pattern on a plug-in channel, played by the engine through the hosted .vst3.
 #[test]
 fn engine_plays_a_pattern() {
