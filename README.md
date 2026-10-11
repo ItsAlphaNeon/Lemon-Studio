@@ -54,7 +54,7 @@ losslessly, so existing projects open, play and save without losing data it does
 - Mixer graph with sends, sidechain routing and measured gain, pan and pitch laws
 - Built-in effects: parametric EQ and limiter
 - Channel envelopes, note repeat and per-pattern control lanes
-- Automation clips for channel and mixer parameters
+- Automation clips for channel, mixer and plugin parameters (sample-accurate plugin parameter events)
 - Live edits reach playback instantly, without clicks
 - Offline rendering and low-latency WASAPI output
 
@@ -67,7 +67,8 @@ losslessly, so existing projects open, play and save without losing data it does
 - Piano roll with full tool set, velocity and event lanes
 - Mixer: track select / rename / colour, mute and solo, polarity and channel swap, click-to-route sends with send knobs
   and sidechain, per-track meters, add / insert / move / delete tracks, effect slots hosting CLAP and VST3 effects (bypass, dry/wet)
-- Browser with drag and drop, plugin picker
+- Browser with drag and drop, plugin picker; "Browse parameters" lists a plugin's parameters to drag onto the playlist
+- "Create automation clip" from knobs, plugin knob menus and the last tweaked parameter
 - Floating, resizable, stackable windows
 - Theme engine with `.flstheme` import
 - Damage-tracked CPU rendering for fast repaints
