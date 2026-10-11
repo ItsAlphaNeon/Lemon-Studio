@@ -171,6 +171,14 @@ pub enum ChannelKind {
     Other(u8),
 }
 
+impl ChannelKind {
+    /// Sampler and audio-clip channels: both are sampler channels with a sample (an audio clip channel is a sampler
+    /// with audio-clip defaults; spec: plugins/open-sampler.md §7).
+    pub fn is_sampler(self) -> bool {
+        matches!(self, ChannelKind::Sampler | ChannelKind::AudioClip)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Channel {
     /// Position in the Channel rack, 0-based.

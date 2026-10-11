@@ -13,6 +13,16 @@ pub trait Instrument: Send {
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32);
     /// Ends a note `offset` frames into the next `process` call.
     fn note_off(&mut self, offset: u32, key: u8);
+    /// Starts a note `start` (0..1) of the way into the instrument's sample (a trimmed audio clip; spec:
+    /// plugins/open-sampler.md §7). Instruments without a sample start position play it from the top.
+    fn note_on_from(&mut self, offset: u32, key: u8, velocity: f32, start: f32) {
+        let _ = start;
+        self.note_on(offset, key, velocity);
+    }
+    /// Cuts a note at once, whatever its envelope (the end of an audio clip). Default: a note off.
+    fn choke(&mut self, offset: u32, key: u8) {
+        self.note_off(offset, key);
+    }
     /// Renders `left.len()` frames at `rate`, overwriting both buffers.
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
     /// True while the instrument still has sound to deliver (ringing voices, a long sample): the engine keeps

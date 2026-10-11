@@ -1051,7 +1051,7 @@ fn add_one_items(s: &State) -> Vec<PItem> {
 
 /// Right click on a name button (§18): two columns.
 pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
-    let sampler = s.project.channels.get(r).is_some_and(|c| c.kind == ChannelKind::Sampler);
+    let sampler = s.project.channels.get(r).is_some_and(|c| c.kind.is_sampler());
     let piano_on = s.shown(Win::PianoRoll) && s.selected_channel == r;
     let mut items = vec![
         it("Piano roll", RCmd::PianoRoll(r)).key("F7").mark(Mark::Check(piano_on)),

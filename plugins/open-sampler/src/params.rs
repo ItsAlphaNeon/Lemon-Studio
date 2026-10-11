@@ -138,6 +138,9 @@ fn side_text() -> Fmt {
 }
 
 /// A 0..1 knob shown in percent.
+/// Poly modulation id of "Sample start offset": per-note sample start.
+pub const START_OFFSET_POLY: u32 = 0;
+
 pub fn knob(name: &str, default: f32) -> FloatParam {
     FloatParam::new(name, default, FloatRange::Linear { min: 0.0, max: 1.0 }).with_value_to_string(percent())
 }
@@ -458,7 +461,8 @@ impl Default for SamplerParams {
             load_regions: BoolParam::new("Load regions", true),
             load_slices: BoolParam::new("Load slice markers", false),
             declick: choice("Declicking mode", 0, DECLICK),
-            start_offset: knob("Sample start offset", 0.0),
+            // A host can start one note further into the sample (a trimmed audio clip, spec §7).
+            start_offset: knob("Sample start offset", 0.0).with_poly_modulation_id(START_OFFSET_POLY),
             loop_start: FloatParam::new("Loop start position", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_value_to_string(samples(frames.clone())),
             loop_end: FloatParam::new("Loop end position", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })

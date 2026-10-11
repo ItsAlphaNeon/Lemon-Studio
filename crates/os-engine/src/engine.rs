@@ -42,6 +42,8 @@ struct Trigger {
     velocity: u8,
     /// Sample position (source frames) the voice starts at.
     from: f64,
+    /// The same as a fraction of the sample (instrument channels: the sampler plugin starts there).
+    start: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -353,11 +355,12 @@ pub struct Engine {
     tempo: f64,
     ppq: u16,
     bus: Vec<Vec<f32>>,
-    /// Instrument channels: scheduled note ends (frame, channel, key), live notes waiting for the next span
-    /// (channel, key, velocity; negative = note off), this span's events (channel, offset, key, velocity) and scratch.
-    inst_offs: Vec<(u64, usize, u8)>,
+    /// Instrument channels: scheduled note ends (frame, channel, key, cut = choke at the end of an audio clip), live
+    /// notes waiting for the next span (channel, key, velocity; negative = note off), this span's events (channel,
+    /// offset, key, velocity (`OFF` / `CHOKE` below zero), sample start fraction) and scratch.
+    inst_offs: Vec<(u64, usize, u8, bool)>,
     inst_live: Vec<(usize, u8, f32)>,
-    inst_events: Vec<(usize, u32, u8, f32)>,
+    inst_events: Vec<(usize, u32, u8, f32, f32)>,
     scratch: (Vec<f32>, Vec<f32>),
     /// Dry copy of a track buffer for slots mixed below 100 %.
     fx_dry: Vec<f32>,
@@ -372,6 +375,9 @@ pub struct Engine {
 
 /// Seconds an instrument keeps running after its last note (an OpenStudio choice).
 const INSTRUMENT_TAIL_SECONDS: u64 = 5;
+/// `inst_events` velocity values below zero: a note off, a choke.
+const OFF: f32 = -1.0;
+const CHOKE: f32 = -2.0;
 
 impl Engine {
     pub fn new(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayMode) -> Self {
@@ -515,6 +521,7 @@ impl Engine {
                     pan: laws::note_pan(n.pan),
                     velocity: n.velocity,
                     from: state.sample.as_ref().map_or(0.0, |s| n.from_s * f64::from(s.rate)),
+                    start: state.sample.as_ref().filter(|s| s.frames() > 0).map_or(0.0, |s| (n.from_s * f64::from(s.rate) / s.frames() as f64) as f32),
                 })
             })
             .collect();
@@ -630,7 +637,7 @@ impl Engine {
         }
         let k = key.min(127) as u8;
         self.inst_live.push((channel, k, f32::from(velocity) / 128.0));
-        self.inst_offs.push((self.frame + frames.max(1), channel, k));
+        self.inst_offs.push((self.frame + frames.max(1), channel, k, false));
     }
 
     /// Loop the scheduled material: on reaching its end, playback continues from frame 0 within
@@ -967,8 +974,12 @@ impl Engine {
             if self.channels[t.channel].plugin {
                 if self.channels[t.channel].instrument.0.is_some() {
                     let k = t.key.min(127) as u8;
-                    self.inst_events.push((t.channel, (offset - a) as u32, k, f32::from(t.velocity) / 128.0));
-                    self.inst_offs.push((t.end, t.channel, k));
+                    self.inst_events.push((t.channel, (offset - a) as u32, k, f32::from(t.velocity) / 128.0, t.start));
+                    // An audio clip ends at its cut (spec: plugins/open-sampler.md §7); notes end with a note off.
+                    match t.cut {
+                        Some(c) => self.inst_offs.push((c, t.channel, k, true)),
+                        None => self.inst_offs.push((t.end, t.channel, k, false)),
+                    }
                 }
                 continue;
             }
@@ -1010,16 +1021,16 @@ impl Engine {
     fn render_instruments(&mut self, a: usize, b: usize, span_end: u64) {
         let mut i = 0;
         while i < self.inst_offs.len() {
-            let (end, ch, key) = self.inst_offs[i];
+            let (end, ch, key, cut) = self.inst_offs[i];
             if end < span_end {
-                self.inst_events.push((ch, end.saturating_sub(self.frame) as u32, key, -1.0));
+                self.inst_events.push((ch, end.saturating_sub(self.frame) as u32, key, if cut { CHOKE } else { OFF }, 0.0));
                 self.inst_offs.swap_remove(i);
             } else {
                 i += 1;
             }
         }
         for (ch, key, vel) in self.inst_live.drain(..) {
-            self.inst_events.push((ch, 0, key, vel));
+            self.inst_events.push((ch, 0, key, if vel < 0.0 { OFF } else { vel }, 0.0));
         }
         self.inst_events.sort_by_key(|e| e.1);
         let held = !self.inst_offs.is_empty()
@@ -1038,9 +1049,17 @@ impl Engine {
         for (c, ch) in self.channels.iter().enumerate() {
             let Some(inst) = &ch.instrument.0 else { continue };
             let Ok(mut inst) = inst.try_lock() else { continue };
-            for &(_, off, key, vel) in self.inst_events.iter().filter(|e| e.0 == c) {
+            for &(_, off, key, vel, start) in self.inst_events.iter().filter(|e| e.0 == c) {
                 let off = off.min(n.saturating_sub(1) as u32);
-                if vel < 0.0 { inst.note_off(off, key) } else { inst.note_on(off, key, vel) }
+                if vel == CHOKE {
+                    inst.choke(off, key);
+                } else if vel < 0.0 {
+                    inst.note_off(off, key);
+                } else if start > 0.0 {
+                    inst.note_on_from(off, key, vel, start);
+                } else {
+                    inst.note_on(off, key, vel);
+                }
             }
             let (l, r) = (&mut self.scratch.0[..n], &mut self.scratch.1[..n]);
             inst.process(self.rate, l, r);
@@ -1098,7 +1117,7 @@ impl Engine {
 /// Notes still held on instruments end when the engine goes away (stop, or a new song).
 impl Drop for Engine {
     fn drop(&mut self) {
-        for &(_, c, key) in &self.inst_offs {
+        for &(_, c, key, _) in &self.inst_offs {
             if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
                 inst.note_off(0, key);
             }
@@ -1798,6 +1817,47 @@ mod tests {
         // An unwindowed clip plays the pattern from its start, cut at the clip length.
         let plain = Clip::new(0, 100, 1, ClipSource::Pattern(1));
         assert_eq!(song_triggers(&song(notes, vec![plain])), vec![f(0.0), f(96.0)]);
+    }
+
+    // spec: plugins/open-sampler.md §7 (playlist clips through a hosted sampler: sample start and choke)
+    #[test]
+    fn audio_clips_on_instruments_start_late_and_are_choked() {
+        use os_model::{Clip, ClipSource};
+        #[derive(Default)]
+        struct Log(Vec<(u64, &'static str, f32)>, u64);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, o: u32, _k: u8, _v: f32) {
+                self.0.push((self.1 + u64::from(o), "on", 0.0));
+            }
+            fn note_off(&mut self, o: u32, _k: u8) {
+                self.0.push((self.1 + u64::from(o), "off", 0.0));
+            }
+            fn note_on_from(&mut self, o: u32, _k: u8, _v: f32, start: f32) {
+                self.0.push((self.1 + u64::from(o), "from", start));
+            }
+            fn choke(&mut self, o: u32, _k: u8) {
+                self.0.push((self.1 + u64::from(o), "choke", 0.0));
+            }
+            fn process(&mut self, _rate: u32, l: &mut [f32], _r: &mut [f32]) {
+                self.1 += l.len() as u64;
+            }
+        }
+        // A one-second sample; the first clip starts 250 ms into it, the second plays it from the top.
+        let wav = std::env::temp_dir().join("os-engine-clip-start.wav");
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 96000]).unwrap();
+        let mut trimmed = Clip::new(0, 96, 0, ClipSource::Channel(0));
+        trimmed.window = Some((250.0, 711.0));
+        let mut p = song(vec![], vec![trimmed, Clip::new(384, 96, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        let log = Arc::new(std::sync::Mutex::new(Log::default()));
+        e.set_instrument(0, log.clone());
+        e.render_all(480);
+        let f = |t: f64| laws::tick_to_frame(t, 96, 130.0, 48000);
+        let got = log.lock().unwrap().0.clone();
+        assert_eq!(got, vec![(0, "from", 0.25), (f(96.0), "choke", 0.0), (f(384.0), "on", 0.0), (f(480.0), "choke", 0.0)]);
     }
 
     // spec: ui/playlist.md §8 (automation clips drive their target), flp/events/automation.md (value scaling)

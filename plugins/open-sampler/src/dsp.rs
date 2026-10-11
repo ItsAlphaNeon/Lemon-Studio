@@ -609,6 +609,8 @@ const CTL: usize = 32;
 #[derive(Clone, Copy)]
 struct Voice {
     key: u8,
+    /// Host note id (per-note modulation), if the host gave one.
+    id: Option<i32>,
     vel: f32,
     pos: f64,
     /// +1 forward, −1 backward (ping-pong loop).
@@ -671,6 +673,11 @@ impl Engine {
     }
 
     pub fn note_on(&mut self, key: u8, velocity: f32, b: &Block) {
+        self.note_on_id(key, velocity, None, b);
+    }
+
+    /// `note_on` for a host note `id` (per-note modulation reaches it by that id).
+    pub fn note_on_id(&mut self, key: u8, velocity: f32, id: Option<i32>, b: &Block) {
         let Some(s) = &self.sample else { return };
         let zkey = if b.add_key { i32::from(key) - (b.root - 60) } else { i32::from(key) };
         if zkey < b.zone.0 || zkey > b.zone.1 || s.frames() == 0 {
@@ -700,6 +707,7 @@ impl Engine {
         }
         self.voices.push(Voice {
             key,
+            id,
             vel,
             pos,
             dir: 1.0,
@@ -724,6 +732,27 @@ impl Engine {
             if b.loop_on && !vol_env && v.kill.is_none() {
                 v.kill = Some((fo, fo));
             }
+        }
+    }
+
+    /// A note that has not played yet starts `extra` (0..1 of the sample) further in, on top of START OFFSET
+    /// (spec §7: a trimmed audio clip).
+    pub fn start_later(&mut self, id: i32, extra: f32, b: &Block) {
+        let Some(s) = &self.sample else { return };
+        let fin = declick(b.declick).0;
+        let rate = f64::from(self.rate);
+        for v in self.voices.iter_mut().filter(|v| v.id == Some(id) && v.age == 0) {
+            let at = (b.start_offset + f64::from(extra)).clamp(0.0, 1.0);
+            v.pos = (at * s.frames() as f64).floor();
+            v.fade_in = if v.pos > 0.0 { ((fin / 1000.0) * rate) as u32 } else { 0 };
+        }
+    }
+
+    /// Cuts the voices of `key` with the declick out fade (the host's choke: an audio clip ends).
+    pub fn choke(&mut self, key: u8, b: &Block) {
+        let fo = ((declick(b.declick).1 / 1000.0) * f64::from(self.rate)).max(1.0) as u32;
+        for v in self.voices.iter_mut().filter(|v| v.key == key && v.kill.is_none()) {
+            v.kill = Some((fo, fo));
         }
     }
 

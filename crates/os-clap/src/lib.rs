@@ -15,11 +15,11 @@ use std::sync::{Arc, Mutex};
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    clap_event_header, clap_event_note, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_OFF,
-    CLAP_EVENT_NOTE_ON,
+    clap_event_header, clap_event_note, clap_event_param_mod, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID,
+    CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_MOD,
 };
 use clap_sys::ext::gui::{clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32};
-use clap_sys::ext::params::{clap_host_params, clap_plugin_params, CLAP_EXT_PARAMS};
+use clap_sys::ext::params::{clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID};
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
 use clap_sys::host::clap_host;
@@ -205,13 +205,22 @@ unsafe extern "C" fn host_request_callback(host: *const clap_host) {
     wake();
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    On,
+    Off,
+    Choke,
+}
+
 /// One queued note event.
 #[derive(Clone, Copy)]
 struct Ev {
     time: u32,
-    on: bool,
+    kind: Kind,
     key: u8,
     velocity: f32,
+    /// Sample start (0..1) sent as per-note modulation of `Plugin::start_param` (0 = none).
+    start: f32,
 }
 
 /// A plugin instance.
@@ -232,6 +241,12 @@ pub struct Plugin {
     wanted_rate: AtomicU32,
     queue: Vec<Ev>,
     notes: Vec<clap_event_note>,
+    mods: Vec<clap_event_param_mod>,
+    /// This chunk's events in time order (pointers into `notes` / `mods`).
+    order: Vec<*const clap_event_header>,
+    /// Parameter that takes a note's sample start as per-note modulation (`use_start_param`).
+    start_param: Option<u32>,
+    next_note_id: i32,
     steady: i64,
     /// The plugin's last process status says it still has sound to deliver (`Instrument::active`).
     sounding: bool,
@@ -305,6 +320,10 @@ impl Plugin {
                 wanted_rate: AtomicU32::new(0),
                 queue: Vec::with_capacity(256),
                 notes: Vec::with_capacity(256),
+                mods: Vec::with_capacity(64),
+                order: Vec::with_capacity(320),
+                start_param: None,
+                next_note_id: 0,
                 steady: 0,
                 sounding: false,
                 dbg_peak: 0.0,
@@ -371,6 +390,31 @@ impl Plugin {
                 f(self.plugin, &ins, &outs);
             }
         }
+    }
+
+    /// Sends each note's sample start (`Instrument::note_on_from`) as per-note modulation of the parameter named
+    /// `name`, which must be modulatable per note id (UI thread; spec: plugins/open-sampler.md §7). False if the
+    /// plugin has no such parameter (notes then play from the top).
+    pub fn use_start_param(&mut self, name: &str) -> bool {
+        self.start_param = None;
+        if self.params.is_null() {
+            return false;
+        }
+        unsafe {
+            let count = (*self.params).count.map_or(0, |c| c(self.plugin));
+            for i in 0..count {
+                let mut info: clap_param_info = std::mem::zeroed();
+                if !(*self.params).get_info.is_some_and(|g| g(self.plugin, i, &mut info)) {
+                    continue;
+                }
+                let n = CStr::from_ptr(info.name.as_ptr()).to_string_lossy();
+                if n == name && info.flags & CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID != 0 {
+                    self.start_param = Some(info.id);
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// UI-thread housekeeping: callbacks the plugin asked for, restarts, rate changes, a closed editor window.
@@ -494,39 +538,82 @@ impl Plugin {
     fn process_chunk_in(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>) {
         let n = left.len() as u32;
         self.notes.clear();
+        self.mods.clear();
         let mut rest = Vec::new();
+        // Event order: (index into notes, index into mods); a note's modulation follows its note on at the same time.
+        let mut seq: Vec<(usize, Option<usize>)> = Vec::new();
         for e in self.queue.drain(..) {
             if e.time < n {
+                // A note with a sample start gets an id, so its modulation reaches only that voice.
+                let id = match (e.kind, self.start_param) {
+                    (Kind::On, Some(_)) if e.start > 0.0 => {
+                        self.next_note_id = self.next_note_id.wrapping_add(1) & 0x7fff_ffff;
+                        self.next_note_id
+                    }
+                    _ => -1,
+                };
                 self.notes.push(clap_event_note {
                     header: clap_event_header {
                         size: std::mem::size_of::<clap_event_note>() as u32,
                         time: e.time,
                         space_id: CLAP_CORE_EVENT_SPACE_ID,
-                        type_: if e.on { CLAP_EVENT_NOTE_ON } else { CLAP_EVENT_NOTE_OFF },
+                        type_: match e.kind {
+                            Kind::On => CLAP_EVENT_NOTE_ON,
+                            Kind::Off => CLAP_EVENT_NOTE_OFF,
+                            Kind::Choke => CLAP_EVENT_NOTE_CHOKE,
+                        },
                         flags: 0,
                     },
-                    note_id: -1,
+                    note_id: id,
                     port_index: 0,
                     channel: 0,
                     key: i16::from(e.key),
                     velocity: f64::from(e.velocity),
                 });
+                seq.push((self.notes.len() - 1, None));
+                if let (Some(param), true) = (self.start_param, id >= 0) {
+                    self.mods.push(clap_event_param_mod {
+                        header: clap_event_header {
+                            size: std::mem::size_of::<clap_event_param_mod>() as u32,
+                            time: e.time,
+                            space_id: CLAP_CORE_EVENT_SPACE_ID,
+                            type_: CLAP_EVENT_PARAM_MOD,
+                            flags: 0,
+                        },
+                        param_id: param,
+                        cookie: ptr::null_mut(),
+                        note_id: id,
+                        port_index: 0,
+                        channel: 0,
+                        key: i16::from(e.key),
+                        amount: f64::from(e.start),
+                    });
+                    seq.push((0, Some(self.mods.len() - 1)));
+                }
             } else {
                 rest.push(Ev { time: e.time - n, ..e });
             }
         }
         self.queue = rest;
+        // `queue` is sorted by time, so `seq` already is.
+        self.order.clear();
+        for &(ni, mi) in &seq {
+            self.order.push(match mi {
+                Some(m) => &self.mods[m].header as *const clap_event_header,
+                None => &self.notes[ni].header as *const clap_event_header,
+            });
+        }
         unsafe extern "C" fn size(l: *const clap_input_events) -> u32 {
-            unsafe { (*((*l).ctx as *const Vec<clap_event_note>)).len() as u32 }
+            unsafe { (*((*l).ctx as *const Vec<*const clap_event_header>)).len() as u32 }
         }
         unsafe extern "C" fn get(l: *const clap_input_events, i: u32) -> *const clap_event_header {
-            let v = unsafe { &*((*l).ctx as *const Vec<clap_event_note>) };
-            v.get(i as usize).map_or(ptr::null(), |e| &e.header as *const clap_event_header)
+            let v = unsafe { &*((*l).ctx as *const Vec<*const clap_event_header>) };
+            v.get(i as usize).copied().unwrap_or(ptr::null())
         }
         unsafe extern "C" fn push(_l: *const clap_output_events, _e: *const clap_event_header) -> bool {
             true
         }
-        let ins = clap_input_events { ctx: &self.notes as *const Vec<clap_event_note> as *mut c_void, size: Some(size), get: Some(get) };
+        let ins = clap_input_events { ctx: &self.order as *const Vec<*const clap_event_header> as *mut c_void, size: Some(size), get: Some(get) };
         let outs = clap_output_events { ctx: ptr::null_mut(), try_push: Some(push) };
         let mut chans = [left.as_mut_ptr(), right.as_mut_ptr()];
         let mut buf = clap_audio_buffer { data32: chans.as_mut_ptr(), data64: ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
@@ -581,11 +668,19 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
-        self.queue.push(Ev { time: offset, on: true, key, velocity });
+        self.queue.push(Ev { time: offset, kind: Kind::On, key, velocity, start: 0.0 });
     }
 
     fn note_off(&mut self, offset: u32, key: u8) {
-        self.queue.push(Ev { time: offset, on: false, key, velocity: 0.0 });
+        self.queue.push(Ev { time: offset, kind: Kind::Off, key, velocity: 0.0, start: 0.0 });
+    }
+
+    fn note_on_from(&mut self, offset: u32, key: u8, velocity: f32, start: f32) {
+        self.queue.push(Ev { time: offset, kind: Kind::On, key, velocity, start: start.clamp(0.0, 1.0) });
+    }
+
+    fn choke(&mut self, offset: u32, key: u8) {
+        self.queue.push(Ev { time: offset, kind: Kind::Choke, key, velocity: 0.0, start: 0.0 });
     }
 
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {

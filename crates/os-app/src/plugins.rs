@@ -169,6 +169,8 @@ impl Plugins {
         if !p.activate(self.rate) {
             return Err(format!("{} could not start", a.desc.name));
         }
+        // Trimmed audio clips start their note further into the sample (spec: plugins/open-sampler.md §7).
+        p.use_start_param(SAMPLE_START);
         self.hosted.insert(row, Hosted { plugin: Arc::new(Mutex::new(p)), #[cfg(windows)] window: None, #[cfg(windows)] link: None });
         Ok(a.desc.name)
     }
@@ -463,6 +465,8 @@ impl Drop for Hosted {
 
 /// Name of OpenStudio's sampler plugin: it plays and edits every sampler channel (spec: plugins/open-sampler.md §7).
 pub const OPEN_SAMPLER: &str = "Open Sampler";
+/// The sampler parameter a note's sample start modulates per note (Open Sampler's START OFFSET).
+const SAMPLE_START: &str = "Sample start offset";
 
 /// Open Sampler's starting state for a sampler channel of the project: its sample and its five envelope records
 /// (nih-plug JSON state with the u64 length prefix of its CLAP state; spec: plugins/open-sampler.md §6, §7).
@@ -1143,6 +1147,42 @@ mod tests {
         }
         // The 0.5 s volume attack kept from the channel still fades the click (0.9 at 0.1 s) in.
         assert!(peak > 0.01 && peak < 0.3, "the mp3 plays through the kept envelope (peak {peak})");
+    }
+
+    /// Playlist clips through Open Sampler (spec: plugins/open-sampler.md §7): a note can start partway into the sample
+    /// (per-note modulation of the start offset) and a choke ends it at once.
+    #[test]
+    fn open_sampler_starts_late_and_chokes() {
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(OPEN_SAMPLER).unwrap();
+        pl.create_with(0, index, None).unwrap();
+        // One second: silent first half, 0.5 in the second.
+        let wav = std::env::temp_dir().join("os-app-start-late.wav");
+        let frames: Vec<f32> = (0..48000).flat_map(|i| if i < 24000 { [0.0; 2] } else { [0.5; 2] }).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frames).unwrap();
+        assert!(pl.load_sample(0, &wav.to_string_lossy()));
+        let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
+        let mut i = inst.lock().unwrap();
+        let mut block = |i: &mut dyn os_engine::Instrument| {
+            let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+            i.process(48000, &mut l, &mut r);
+            l.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+        };
+        // From the top: the first 100 ms are silent.
+        i.note_on(0, 60, 0.78);
+        assert!((0..10).all(|_| block(&mut *i) < 1e-4), "plays from the top");
+        i.choke(0, 60);
+        for _ in 0..10 {
+            block(&mut *i);
+        }
+        // Started halfway: sound at once (after the declick fade-in).
+        i.note_on_from(0, 60, 0.78, 0.5);
+        let first: Vec<f32> = (0..5).map(|_| block(&mut *i)).collect();
+        assert!(first.iter().any(|&p| p > 0.1), "starts in the loud half: {first:?}");
+        // A choke silences it within the declick out time.
+        i.choke(0, 60);
+        let after: Vec<f32> = (0..10).map(|_| block(&mut *i)).collect();
+        assert!(after[3..].iter().all(|&p| p < 1e-4), "choked: {after:?}");
     }
 
     /// A file dropped on an open Open Sampler window (what a browser drag released over it does) reaches its editor

@@ -775,7 +775,7 @@ impl App {
     pub(crate) fn save_to(&mut self, target: PathBuf) {
         // Sampler channels keep their sample in Open Sampler: copy it to the channel so the FLP stores it.
         for row in self.state.hosted_rows.clone() {
-            if self.state.project.channels.get(row).is_some_and(|c| c.kind == ChannelKind::Sampler) {
+            if self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler()) {
                 if let Some(p) = self.plugins.sampler_path(row) {
                     // A placeholder path that still names the same file is kept as the project wrote it.
                     let ch = &mut self.state.project.channels[row];
@@ -887,7 +887,7 @@ impl App {
         let mut added = false;
         for row in 0..self.state.project.channels.len() {
             let ch = &self.state.project.channels[row];
-            if ch.kind != ChannelKind::Sampler || self.state.hosted_rows.contains(&row) || self.sampler_failed.contains(&row) {
+            if !ch.kind.is_sampler() || self.state.hosted_rows.contains(&row) || self.sampler_failed.contains(&row) {
                 continue;
             }
             let st = crate::plugins::sampler_state(ch);
@@ -1289,7 +1289,7 @@ impl App {
     pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
         let s = &mut self.state;
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
-        let row = match views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind == ChannelKind::Sampler) {
+        let row = match views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind.is_sampler()) {
             Some(r) => {
                 s.sample_loads.push((r, path.clone()));
                 r
@@ -1316,7 +1316,7 @@ impl App {
             return false;
         }
         let Some(row) = self.plugins.row_at_screen(pt.x, pt.y) else { return false };
-        let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind == ChannelKind::Sampler);
+        let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
         let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned());
         if self.plugins.drop_file(row, pt.x, pt.y, path, sampler) {
             if let Some(ch) = self.state.project.channels.get_mut(row).filter(|_| sampler) {
@@ -3386,7 +3386,7 @@ impl App {
             return;
         }
         let s = &mut self.state;
-        if s.project.channels.get(i).is_some_and(|c| c.kind == ChannelKind::Sampler) {
+        if s.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
             // Not hosted yet (just added): Open Sampler starts on the next tick and its window opens then.
             s.pending_open = Some(i);
             self.sampler_failed.retain(|&r| r != i);
@@ -3588,7 +3588,7 @@ impl App {
     pub(crate) fn plugin_copy(&self, r: usize) -> Option<(usize, Vec<u8>)> {
         let ch = self.state.project.channels.get(r)?;
         let name = match ch.kind {
-            ChannelKind::Sampler => crate::plugins::OPEN_SAMPLER.to_string(),
+            ChannelKind::Sampler | ChannelKind::AudioClip => crate::plugins::OPEN_SAMPLER.to_string(),
             ChannelKind::Plugin => ch.plugin.clone()?,
             _ => return None,
         };
@@ -4251,6 +4251,27 @@ mod tests {
         e.process(&mut buf);
         let _ = std::fs::remove_file(&path);
         assert!(buf.iter().any(|v| v.abs() > 0.05), "preview is silent");
+    }
+
+    /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Open Sampler, never the info
+    /// window (spec: plugins/open-sampler.md §7).
+    #[test]
+    fn audio_clip_channels_use_open_sampler() {
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let wav = std::env::temp_dir().join("os-app-audio-clip-channel.wav");
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
+        let path = wav.to_string_lossy().into_owned();
+        crate::playlist::add_audio_clip(&mut app.state, &path, 0, 0).expect("audio clip added");
+        let row = app.state.project.channels.len() - 1;
+        assert_eq!(app.state.project.channels[row].kind, ChannelKind::AudioClip);
+        app.plugin_tick();
+        assert!(app.state.hosted_rows.contains(&row), "Open Sampler hosts the audio clip channel");
+        assert_eq!(app.plugins.sampler_path(row).as_deref(), Some(path.as_str()));
+        app.toggle_channel_window(row);
+        assert!(!app.state.shown(Win::Plugin), "no information window");
+        assert_eq!(app.state.pending_open, Some(row), "Open Sampler's window opens");
     }
 
     #[test]
