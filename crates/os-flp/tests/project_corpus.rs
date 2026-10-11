@@ -557,3 +557,34 @@ fn slot_edits_survive() {
     }
     assert!(checked > 20, "only {checked} files checked");
 }
+
+/// Mixer tracks added before the last ("current") track: the old tracks and the current track read back unchanged,
+/// the new tracks are default inserts that take edits (spec: flp/events/mixer.md "Adding tracks").
+#[test]
+fn added_mixer_tracks_survive() {
+    use os_model::MixerTrack;
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let Ok(project) = load(&file) else { continue };
+        let n = project.mixer.len();
+        if n < 2 || n > 200 {
+            continue;
+        }
+        let mut grown = project.clone();
+        let mut current = grown.mixer.pop().unwrap();
+        current.index = n as u16 + 1;
+        grown.mixer.extend((n as u16 - 1..n as u16 + 1).map(MixerTrack::new));
+        grown.mixer.push(current);
+        grown.mixer[n].name = Some("Added".into());
+        grown.mixer[n].volume = Some(0.5);
+        grown.mixer[n].slot_on[2] = false;
+        apply(&grown, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back.mixer, grown.mixer, "{path}");
+        assert_eq!(back.channels, project.channels, "{path}");
+        checked += 1;
+    }
+    assert!(checked > 100, "only {checked} files checked");
+}

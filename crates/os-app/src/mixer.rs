@@ -453,9 +453,8 @@ pub fn add_track(s: &mut State, at: Option<u16>) -> u16 {
     // The new track takes number n; n.. move one up (the hidden last track stays last).
     let len = s.project.mixer.len() as u16;
     s.project.mixer.push(MixerTrack::new(len));
-    if n < last {
-        shift_tracks(s, n, len, 1);
-    }
+    // The hidden last track moves too, keeping what it had (spec: flp/events/mixer.md "Adding tracks").
+    shift_tracks(s, n, len, 1);
     let fresh = MixerTrack::new(n);
     if let Some(m) = track_mut(s, n) {
         *m = fresh;
@@ -542,17 +541,19 @@ fn delete_track(s: &mut State, n: u16) -> Option<String> {
         s.mixer.pending.push(FxReq::Delete { track: n, slot: k });
     }
     s.mixer.slot_names.retain(|(t, _), _| *t != n);
-    let m = move |t: u16| if t > n && t < len { t - 1 } else { t };
+    // The hidden last track stays last; the default track comes before it (spec: flp/events/mixer.md "The last track").
+    let hidden = len - 1;
+    let m = move |t: u16| if t > n && t < hidden { t - 1 } else { t };
     let old = s.project.mixer.clone();
     for t in &old {
-        if t.index > n {
+        if t.index > n && t.index < hidden {
             if let Some(dst) = s.project.mixer.iter_mut().find(|x| x.index == t.index - 1) {
                 *dst = MixerTrack { index: t.index - 1, ..t.clone() };
             }
         }
     }
-    if let Some(last) = s.project.mixer.iter_mut().find(|x| x.index == len - 1) {
-        *last = MixerTrack::new(len - 1);
+    if let Some(last) = s.project.mixer.iter_mut().find(|x| x.index == hidden - 1) {
+        *last = MixerTrack::new(hidden - 1);
     }
     for t in s.project.mixer.iter_mut() {
         for r in t.routes.iter_mut() {
@@ -566,7 +567,7 @@ fn delete_track(s: &mut State, n: u16) -> Option<String> {
         c.mixer_track = m(c.mixer_track);
     }
     let mut map = Vec::new();
-    for t in n + 1..len {
+    for t in n + 1..hidden {
         for k in 0..10u8 {
             map.push(((t, k), (t - 1, k)));
         }

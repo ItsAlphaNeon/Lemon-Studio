@@ -263,6 +263,38 @@ mod tests {
         assert_eq!(again.mixer[3].slots[2], saved.mixer[3].slots[2]);
     }
 
+    /// Mixer tracks added in the app are saved (before the hidden last track) and come back on reopening; deleting a
+    /// track keeps the hidden track last (spec: flp/events/mixer.md "Adding tracks").
+    #[test]
+    fn added_mixer_tracks_save_and_reopen() {
+        let path = std::env::temp_dir().join(format!("openstudio-tracks-{}.flp", std::process::id()));
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.save_to(path.clone());
+        let n = a.state.project.mixer.len();
+        let hidden = a.state.project.mixer[n - 1].clone();
+        assert!(hidden.routes.is_empty());
+        let t = crate::mixer::add_track(&mut a.state, None);
+        assert_eq!(usize::from(t), n - 1);
+        crate::mixer::add_track(&mut a.state, Some(2));
+        a.state.project.mixer[usize::from(t) + 1].name = Some("Added".into());
+        a.state.project.mixer[usize::from(t) + 1].slot_mix[4] = 0.5;
+        assert_eq!(a.state.project.mixer.len(), n + 2);
+        assert_eq!(a.state.project.mixer[n + 1], os_model::MixerTrack { index: (n + 1) as u16, ..hidden.clone() });
+        // Deleting an insert keeps the hidden track last.
+        crate::mixer::run(&mut a, crate::mixer::MCmd::Delete(1));
+        assert_eq!(a.state.project.mixer[n + 1], os_model::MixerTrack { index: (n + 1) as u16, ..hidden.clone() });
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", a.state.message);
+        let mut b = App::new(None);
+        b.open(path.clone());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(b.state.project.mixer, a.state.project.mixer);
+        assert_eq!(crate::mixer::inserts(&b.state), crate::mixer::inserts(&a.state));
+    }
+
     /// A wrapped plugin is found by class id, else by file and name, else by name.
     #[test]
     fn wrapped_plugins_are_found_by_identity() {

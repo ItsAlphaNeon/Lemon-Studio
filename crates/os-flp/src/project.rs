@@ -1031,6 +1031,16 @@ fn mixer_location(track: u16, slot: u16) -> u16 {
     0x7000 + track * 64 + slot
 }
 
+/// The track number a stored track's slot plugins (event 212) and parameter records (event 225) use: the last stored
+/// track is the mixer's "current" track, numbered 501 there (spec: flp/events/mixer.md "The last track").
+fn record_track(index: u16, len: usize) -> u16 {
+    if index > 0 && usize::from(index) + 1 == len {
+        MX_SPECIAL_TRACK
+    } else {
+        index
+    }
+}
+
 /// Slot parameter IDs (kind 0x1F at the slot's location) and the mix level of a full mix (spec:
 /// flp/events/plugins.md §5).
 const MX_SLOT_ON: u8 = 0;
@@ -1217,7 +1227,8 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         // Slot LED and mix (spec: flp/events/plugins.md §5).
         let mut slot_on = [true; 10];
         let mut slot_mix = [1.0; 10];
-        let base = mixer_location(index, 0);
+        let rt = record_track(index, l.mixer.len());
+        let base = mixer_location(rt, 0);
         for (_, pid, kind, loc, v) in mixer_param_records(params) {
             if kind == MX_KIND_PARAM && (base..base + 10).contains(&loc) {
                 let s = usize::from(loc - base);
@@ -1230,7 +1241,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         }
         let param = |pid: u8| {
             mixer_param_records(params)
-                .find(|&(_, p, k, loc, _)| k == MX_KIND_PARAM && p == pid && loc == mixer_location(index, 0))
+                .find(|&(_, p, k, loc, _)| k == MX_KIND_PARAM && p == pid && loc == base)
                 .map(|r| r.4)
         };
         out.push(MixerTrack {
@@ -1245,7 +1256,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             slots,
             routes,
             send_levels: mixer_param_records(params)
-                .filter(|&(_, _, k, loc, _)| k == MX_KIND_ROUTE && loc == mixer_location(index, 0))
+                .filter(|&(_, _, k, loc, _)| k == MX_KIND_ROUTE && loc == base)
                 .map(|(_, dest, _, _, v)| (u16::from(dest), f64::from(v) / 16000.0))
                 .collect(),
             volume: param(MX_VOLUME).map(|v| f64::from(v) / 16000.0),
@@ -1295,6 +1306,7 @@ fn patch_bytes(e: &mut Event, offset: usize, bytes: &[u8]) {
 /// removing objects isn't supported yet.
 pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
     restructure(project, file)?;
+    grow_mixer(project, file)?;
     let current = load(file)?;
     let events = events_of_mut(file)?;
     let l = scan(events)?;
@@ -1714,7 +1726,8 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             let mut block = Vec::new();
             for (k, slot) in m.slots.iter().enumerate() {
                 if let Some(p) = slot {
-                    block.extend(slot_plugin_events(p, t as u16, k as u8, take_run(&mut pool, t, k, p), enc));
+                    let rt = record_track(t as u16, project.mixer.len());
+                    block.extend(slot_plugin_events(p, rt, k as u8, take_run(&mut pool, t, k, p), enc));
                 }
                 block.push(Event::new(id::MX_SLOT, Value::U16(k as u16)));
             }
@@ -1741,7 +1754,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         // Slot LED and mix level (spec: flp/events/plugins.md §5): kind 0x1F records ID 0 / 1 at the slot's location.
         if let Some(data) = params.as_mut() {
             for k in 0..10u16 {
-                let loc = mixer_location(m.index, k);
+                let loc = mixer_location(record_track(m.index, project.mixer.len()), k);
                 let s = usize::from(k);
                 if m.slot_on[s] != old.slot_on[s] {
                     set_param_record(data, loc, MX_SLOT_ON, i32::from(m.slot_on[s]));
@@ -1798,7 +1811,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         // spec: flp/events/mixer.md "Kind 0x20, route level": records right after the source track's own records.
         if m.send_levels != old.send_levels {
             if let Some(data) = params.as_mut() {
-                let loc = mixer_location(m.index, 0);
+                let loc = mixer_location(record_track(m.index, project.mixer.len()), 0);
                 let mut recs: Vec<[u8; MIXER_REC_LEN]> = data.chunks_exact(MIXER_REC_LEN).map(|r| r.try_into().unwrap()).collect();
                 recs.retain(|r| !(r[5] == MX_KIND_ROUTE && u16::from_le_bytes([r[6], r[7]]) == loc));
                 let at = recs.iter().rposition(|r| u16::from_le_bytes([r[6], r[7]]) == loc).map_or_else(
@@ -1828,7 +1841,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                     continue;
                 }
                 let Some(v) = new else { continue };
-                let loc = mixer_location(m.index, 0);
+                let loc = mixer_location(record_track(m.index, project.mixer.len()), 0);
                 let Some((off, ..)) = mixer_param_records(data)
                     .find(|&(_, p, k, at, _)| k == MX_KIND_PARAM && p == pid && at == loc)
                 else {
@@ -1865,6 +1878,44 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
         }
     }
+    Ok(())
+}
+
+/// Adds default insert tracks before the last ("current") track when the model has more tracks than the file (spec:
+/// flp/events/mixer.md "Adding tracks"): their blocks go before the last track's block, their parameter records before
+/// the current track's (track 501), and the count (event 103) follows. [`apply`] then patches the values as usual.
+fn grow_mixer(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
+    let events = events_of_mut(file)?;
+    let l = scan(events)?;
+    let enc = text_enc(events, l.version);
+    let (old, new) = (l.mixer.len(), project.mixer.len());
+    if old < 2 || new <= old {
+        return Ok(());
+    }
+    let missing = |what: &str| ProjectError::Structure(format!("mixer without {what}"));
+    let count = events.iter().position(|e| e.id == id::MX_COUNT).ok_or_else(|| missing("a track count"))?;
+    let last = &l.mixer[old - 1];
+    let at = last.color.or(last.color_flag).or(last.name).or(last.flags).ok_or_else(|| missing("a last track"))?;
+    let params_at = l.mixer_params.ok_or_else(|| missing("parameter records"))?;
+    if at <= count || params_at <= at {
+        return Err(ProjectError::Structure("mixer events out of order".into()));
+    }
+    let first = (old - 1) as u16;
+    let mut data = events[params_at].data().unwrap_or(&[]).to_vec();
+    // Records are in location order and none sit between the last insert and track 501.
+    let pos = mixer_param_records(&data)
+        .find(|&(_, _, _, loc, _)| loc >= mixer_location(first, 0))
+        .map_or(data.len() - data.len() % MIXER_REC_LEN, |r| r.0);
+    let mut recs = Vec::new();
+    let mut blocks = Vec::new();
+    for t in first..(new - 1) as u16 {
+        recs.extend(track_records(t, None));
+        blocks.extend(track_block_events(&MixerTrack::new(t), false, enc));
+    }
+    data.splice(pos..pos, recs);
+    set_data(&mut events[params_at], data);
+    set_int(&mut events[count], new as u32);
+    events.splice(at..at, blocks);
     Ok(())
 }
 
@@ -2375,13 +2426,14 @@ fn track_block_events(m: &MixerTrack, last: bool, enc: TextEnc) -> Vec<Event> {
     }
     let mut flags = [0u8; 12];
     flags[4] = if m.index == 0 || last { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
+    let rt = if last && m.index > 0 { MX_SPECIAL_TRACK } else { m.index };
     if !m.enabled {
         flags[4] &= !0x08;
     }
     ev.push(Event::new(id::MX_FLAGS, Value::var(flags.to_vec())));
     for (k, slot) in m.slots.iter().enumerate() {
         if let Some(p) = slot {
-            ev.extend(slot_plugin_events(p, m.index, k as u8, None, enc));
+            ev.extend(slot_plugin_events(p, rt, k as u8, None, enc));
         }
         ev.push(Event::new(id::MX_SLOT, Value::U16(k as u16)));
     }
@@ -2402,12 +2454,15 @@ fn mixer_events(mixer: &[MixerTrack], enc: TextEnc) -> Vec<Event> {
         ev.extend(track_block_events(m, n + 1 == mixer.len(), enc));
     }
     let mut recs = param_rec(0, 0, MX_SPECIAL_LOC, 12800).to_vec();
-    for m in mixer {
+    let (current, rest) = match mixer.split_last() {
+        Some((c, rest)) if !rest.is_empty() => (Some(c), rest),
+        _ => (None, mixer),
+    };
+    for m in rest {
         recs.extend(track_records(m.index, Some(m)));
     }
-    // "Track 501" has slot records and track parameters, no routes.
-    let special = track_records(MX_SPECIAL_TRACK, None);
-    recs.extend(special);
+    // The last ("current") track's records sit at track 501 (spec: mixer.md "The last track").
+    recs.extend(track_records(MX_SPECIAL_TRACK, current));
     ev.push(Event::new(id::MX_PARAMS, Value::var(recs)));
     ev
 }
@@ -2614,6 +2669,51 @@ mod tests {
         edited.mixer[2].slot_mix[9] = 0.75;
         apply(&edited, &mut file).unwrap();
         assert_eq!(load(&file).unwrap().mixer, edited.mixer);
+    }
+
+    /// The last stored track is the "current" track: its slot plugins and records use track 501. Added tracks go
+    /// before it (spec: flp/events/mixer.md "The last track", "Adding tracks").
+    #[test]
+    fn added_mixer_tracks_go_before_the_current_track() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        p.mixer[17].slots[9] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: vec![7; 4] });
+        p.mixer[17].slot_mix[9] = 0.25;
+        p.mixer[17].volume = Some(0.5);
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let ev = events_of(&file).unwrap();
+        let rec = ev.iter().find(|e| e.id == id::PLUGIN_REC).unwrap().data().unwrap();
+        assert_eq!(u32::from_le_bytes(rec[0..4].try_into().unwrap()), 501);
+        let params = ev.iter().rfind(|e| e.id == id::MX_PARAMS).unwrap().data().unwrap();
+        let tracks: std::collections::BTreeSet<u16> =
+            mixer_param_records(params).filter(|r| r.3 >= 0x7000).map(|r| (r.3 - 0x7000) / 64).collect();
+        assert_eq!(tracks, (0..17).chain([501]).collect());
+        assert_eq!(load(&file).unwrap().mixer, p.mixer);
+        // Three tracks added at the end: the current track moves to 20 with everything it had.
+        let mut grown = p.clone();
+        let mut current = grown.mixer.pop().unwrap();
+        current.index = 20;
+        grown.mixer.extend((17..20).map(MixerTrack::new));
+        grown.mixer.push(current);
+        grown.mixer[18].name = Some("New".into());
+        grown.mixer[18].slots[0] = Some(SlotPlugin { name: "Fruity Parametric EQ 2".into(), state: vec![1, 2] });
+        grown.mixer[19].routes = vec![0, 18];
+        apply(&grown, &mut file).unwrap();
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back.mixer, grown.mixer);
+        let ev = events_of(&file).unwrap();
+        assert_eq!(ev.iter().find(|e| e.id == id::MX_COUNT).map(int), Some(21));
+        let params = ev.iter().rfind(|e| e.id == id::MX_PARAMS).unwrap().data().unwrap();
+        let tracks: Vec<u16> = mixer_param_records(params).filter(|r| r.3 >= 0x7000).map(|r| (r.3 - 0x7000) / 64).collect();
+        assert!(tracks.windows(2).all(|w| w[0] <= w[1]), "records stay in track order");
+        assert_eq!(tracks.iter().filter(|&&t| t == 19).count(), 32);
+        // Fewer tracks than the file is still refused.
+        let mut fewer = back.clone();
+        fewer.mixer.truncate(19);
+        assert!(apply(&fewer, &mut file).is_err());
     }
 
     #[test]

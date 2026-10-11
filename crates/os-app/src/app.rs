@@ -847,14 +847,7 @@ impl App {
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
-        if let Some(n) = os_flp::project::load(&file).ok().map(|p| p.mixer.len()).filter(|&n| n > 0 && n < proj.mixer.len()) {
-            proj.mixer.truncate(n);
-            for m in proj.mixer.iter_mut() {
-                m.routes.retain(|&r| usize::from(r) < n);
-                m.send_levels.retain(|&(d, _)| usize::from(d) < n);
-            }
-            lost.push("added mixer tracks");
-        }
+        // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         if s.project.mixer.iter().any(|m| m.polarity || m.swap) {
             lost.push("polarity / swap buttons");
         }
