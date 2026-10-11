@@ -25,6 +25,8 @@ pub enum Face {
     Knobs,
     /// Level meter bars.
     Meter,
+    /// A screenshot of the plugin's own editor (PNG bytes, decoded once; drawn at the tile size).
+    Shot(&'static [u8]),
 }
 
 #[derive(Clone, Copy)]
@@ -50,7 +52,9 @@ use Face::*;
 
 /// Only real plugins are listed. Index 0 is Open Sampler (what "+" in the channel rack adds); EQ and Limiter
 /// are built-in mixer features, not plugins, so the effects side is empty until real effect plugins exist.
-pub const GENERATORS: &[Plugin] = &[p("Open Sampler", 5, Knobs, 92, 62, 0x49f1b1)];
+/// Open Sampler's tile is a screenshot of its sample page (`cargo run -p open-sampler --example shot`, scaled to 104 px wide).
+pub const GENERATORS: &[Plugin] = &[p("Open Sampler", 5, Shot(OPEN_SAMPLER_SHOT), 104, 81, 0x49f1b1)];
+const OPEN_SAMPLER_SHOT: &[u8] = include_bytes!("../../assets/picker/open-sampler.png");
 pub const EFFECTS: &[Plugin] = &[];
 
 /// Built-in generators followed by the hosted instruments (`State::hosted_generators`).
@@ -318,6 +322,10 @@ fn face(c: &mut Canvas, pl: &Plugin, r: Rect) {
             c.text(Font::new(LABEL_FONT), r.x + 2.0, r.y + 2.0, rgb(0xe8e8b0), &label(pl));
             return;
         }
+        Shot(png) => {
+            shot(c, png, r);
+            return;
+        }
         _ => {}
     }
     // Device body: dark panel with a lighter top lip and a shadow.
@@ -326,7 +334,7 @@ fn face(c: &mut Canvas, pl: &Plugin, r: Rect) {
     c.fill_rect(Rect::new(r.x, r.y, r.w, 1.0), rgb(0x59636a));
     let inner = r.inset(4.0);
     match pl.face {
-        Label => {}
+        Label | Shot(_) => {}
         Synth => {
             c.fill_rect(Rect::new(r.x, r.y + 1.0, r.w, 3.0), acc);
             let kb_h = (r.h * 0.3).round();
@@ -391,6 +399,26 @@ fn face(c: &mut Canvas, pl: &Plugin, r: Rect) {
             }
         }
     }
+}
+
+/// A screenshot tile: drop shadow, the picture, a dark 1 px outline and a faint top highlight.
+fn shot(c: &mut Canvas, png: &'static [u8], r: Rect) {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Decoded = Option<(usize, usize, Vec<u32>)>;
+    static CACHE: OnceLock<Mutex<HashMap<usize, &'static Decoded>>> = OnceLock::new();
+    let img = *CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(png.as_ptr() as usize)
+        .or_insert_with(|| Box::leak(Box::new(Canvas::decode_png(png))));
+    c.fill_rrect(r.outset(2.0), 4.0, rgb(0x000000).with_alpha(110));
+    if let Some((w, h, px)) = img {
+        c.image(r, *w, *h, px);
+    }
+    c.stroke_rrect(r.outset(0.5), 1.5, 1.0, rgb(0x0c0f12));
+    c.fill_rect(Rect::new(r.x, r.y, r.w, 1.0), rgb(0xffffff).with_alpha(40));
 }
 
 fn knob(c: &mut Canvas, x: f32, y: f32, r: f32, mark: Color) {
