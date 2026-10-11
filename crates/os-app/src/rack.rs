@@ -520,7 +520,8 @@ pub fn clone_name(s: &State, r: usize) -> String {
 
 /// Lowest insert (1..=125) no channel is routed to.
 pub fn free_insert(s: &State) -> u16 {
-    (1..=125u16).find(|t| !s.project.channels.iter().any(|c| c.mixer_track == *t)).unwrap_or(125)
+    let max = crate::mixer::max_insert(&s.project);
+    (1..=max).find(|t| !s.project.channels.iter().any(|c| c.mixer_track == *t)).unwrap_or(max)
 }
 
 fn seed() -> u64 {
@@ -1050,7 +1051,7 @@ fn add_one_items(s: &State) -> Vec<PItem> {
 
 /// Right click on a name button (§18): two columns.
 pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
-    let sampler = s.project.channels.get(r).is_some_and(|c| c.kind == ChannelKind::Sampler);
+    let sampler = s.project.channels.get(r).is_some_and(|c| c.kind.is_sampler());
     let piano_on = s.shown(Win::PianoRoll) && s.selected_channel == r;
     let mut items = vec![
         it("Piano roll", RCmd::PianoRoll(r)).key("F7").mark(Mark::Check(piano_on)),
@@ -1329,7 +1330,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::MixerReset(r) => {
             // The default target: the insert the channel was made with (its own number).
             if let Some(c) = s.project.channels.get_mut(r) {
-                c.mixer_track = (c.index + 1).min(125);
+                c.mixer_track = (c.index + 1).min(crate::mixer::max_insert_of(&s.project.mixer));
                 s.piano.dirty = true;
             }
             None

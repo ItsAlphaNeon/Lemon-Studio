@@ -457,7 +457,7 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     select(s, &key);
     reveal(s);
     let Some(ch) = s.project.channels.get_mut(s.selected_channel) else { return None };
-    if ch.kind != ChannelKind::Sampler {
+    if !ch.kind.is_sampler() {
         return Some("The selected channel is not a sampler".into());
     }
     ch.sample_path = Some(path.clone());

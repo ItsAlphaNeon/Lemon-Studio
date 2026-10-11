@@ -63,6 +63,15 @@ pub fn generators(s: &State) -> Vec<Plugin> {
     v
 }
 
+/// Built-in effects followed by the hosted effect plugins (`State::hosted_effects`), all in "Misc" for now.
+pub fn effects(s: &State) -> Vec<Plugin> {
+    let mut v = EFFECTS.to_vec();
+    for &name in &s.hosted_effects {
+        v.push(p(name, 7, Curve, 92, 62, 0x5fb6f0));
+    }
+    v
+}
+
 /// Tab centres at 1920 px width (measured), left half then right half.
 const GEN_X: [f32; 9] = [70.0, 169.0, 250.0, 326.0, 415.0, 517.0, 639.0, 780.0, 896.0];
 const FX_X: [f32; 11] = [1034.0, 1143.0, 1252.0, 1351.0, 1436.0, 1511.0, 1586.0, 1650.0, 1713.0, 1786.0, 1866.0];
@@ -204,7 +213,8 @@ pub fn paint(ui: &mut Ui, s: &State) {
     let content = Rect::new(0.0, 62.0, w, h - bar_h - 62.0 - 10.0);
     // Generators: the built-in list, then the hosted (CLAP) instruments found at startup (spec: plugins/plugin-formats.md).
     let gens = generators(s);
-    for (effects, list, cats, title) in [(false, &gens[..], GEN_CATS, "Generators"), (true, EFFECTS, FX_CATS, "Effects")] {
+    let fx = effects(s);
+    for (effects, list, cats, title) in [(false, &gens[..], GEN_CATS, "Generators"), (true, &fx[..], FX_CATS, "Effects")] {
         let shown: Vec<usize> = match filter {
             Some((e, c)) if e == effects => (0..list.len()).filter(|&i| list[i].cat == c).collect(),
             Some(_) => vec![],

@@ -396,9 +396,12 @@ impl Plugin for OpenSampler {
                 at = t;
             }
             match ev {
-                NoteEvent::NoteOn { note, velocity, .. } => self.engine.note_on(note, velocity, &blk),
+                NoteEvent::NoteOn { note, velocity, voice_id, .. } => self.engine.note_on_id(note, velocity, voice_id, &blk),
                 NoteEvent::NoteOff { note, .. } => self.engine.note_off(note, &blk),
-                NoteEvent::Choke { .. } => self.engine.all_off(),
+                NoteEvent::Choke { note, .. } => self.engine.choke(note, &blk),
+                NoteEvent::PolyModulation { voice_id, poly_modulation_id: params::START_OFFSET_POLY, normalized_offset, .. } => {
+                    self.engine.start_later(voice_id, normalized_offset, &blk)
+                }
                 NoteEvent::MidiPitchBend { value, .. } => {
                     // ±2 semitones (spec §5.1).
                     self.bend = f64::from(value * 2.0 - 1.0) * 200.0;

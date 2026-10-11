@@ -729,6 +729,14 @@ impl FrameWindow {
         }
     }
 
+    /// Shows or hides the gear strip (mixer effects open without it).
+    pub fn set_strip(&self, on: bool) {
+        if self.state.borrow().strip != on {
+            self.state.borrow_mut().strip = on;
+            unsafe { layout(self.hwnd) };
+        }
+    }
+
     pub fn take_events(&self) -> Vec<FrameEvent> {
         std::mem::take(&mut self.state.borrow_mut().events)
     }

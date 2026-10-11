@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
-use os_engine::{Engine, PlayMode, SampleLibrary, SharedInstrument};
+use os_engine::{Engine, PlayMode, SampleLibrary, SharedEffect, SharedInstrument};
 use os_model::Project;
 
 /// Transport state.
@@ -68,6 +68,8 @@ pub struct Shared {
     sounding: Mutex<Vec<(u16, u16)>>,
     /// The last samples that left the playback / live stream (mono), for the toolbar monitor.
     tap: Mutex<Tap>,
+    /// Peak per mixer track (L, R) since the mixer meters last read them.
+    tracks: Mutex<Vec<[f32; 2]>>,
 }
 
 /// Ring of the newest output samples.
@@ -125,8 +127,14 @@ enum Cmd {
     Stop,
 }
 
-/// Hosted instruments by rack row.
-type Instruments = Arc<Mutex<Vec<(usize, SharedInstrument)>>>;
+/// Hosted instruments by rack row, and hosted mixer effects by (track, slot).
+#[derive(Default)]
+struct Hosts {
+    inst: Vec<(usize, SharedInstrument)>,
+    fx: Vec<(usize, usize, SharedEffect)>,
+}
+
+type Instruments = Arc<Mutex<Hosts>>;
 
 pub struct Transport {
     tx: Sender<Cmd>,
@@ -139,7 +147,7 @@ impl Transport {
     pub fn new(factory: Option<PathBuf>) -> Transport {
         let (tx, rx) = mpsc::channel();
         let latest = Arc::new(Mutex::new(None));
-        let instruments: Instruments = Arc::new(Mutex::new(Vec::new()));
+        let instruments: Instruments = Arc::new(Mutex::new(Hosts::default()));
         let shared = Arc::new(Shared { sounding: Mutex::new(Vec::with_capacity(256)), ..Shared::default() });
         let s = shared.clone();
         std::thread::Builder::new()
@@ -156,9 +164,26 @@ impl Transport {
     /// Hosted generator plugins by rack row; playing engines pick them up at once.
     pub fn set_instruments(&self, list: Vec<(usize, SharedInstrument)>) {
         if let Ok(mut slot) = self.instruments.lock() {
-            *slot = list;
+            slot.inst = list;
         }
         let _ = self.tx.send(Cmd::Instruments);
+    }
+
+    /// Hosted effect plugins in mixer slots (track, slot); playing engines pick them up at once.
+    pub fn set_effects(&self, list: Vec<(usize, usize, SharedEffect)>) {
+        if let Ok(mut slot) = self.instruments.lock() {
+            slot.fx = list;
+        }
+        let _ = self.tx.send(Cmd::Instruments);
+    }
+
+    /// Peak per mixer track (L, R) since the last call (the mixer meters' feed); resets them.
+    pub fn take_track_peaks(&self) -> Vec<[f32; 2]> {
+        self.shared.tracks.lock().map(|mut v| {
+            let out = v.clone();
+            v.iter_mut().for_each(|p| *p = [0.0; 2]);
+            out
+        }).unwrap_or_default()
     }
 
     /// The output device's sample rate (what hosted plugins are activated at).
@@ -320,20 +345,31 @@ impl Transport {
 fn attach(e: &mut Engine, inst: &Instruments) {
     if let Ok(list) = inst.lock() {
         if std::env::var_os("OS_DEBUG").is_some() {
-            eprintln!("[transport] attach {} instrument(s)", list.len());
+            eprintln!("[transport] attach {} instrument(s), {} effect(s)", list.inst.len(), list.fx.len());
         }
-        for (row, i) in list.iter() {
+        for (row, i) in list.inst.iter() {
             e.set_instrument(*row, i.clone());
+        }
+        for (track, slot, fx) in list.fx.iter() {
+            e.set_effect(*track, *slot, fx.clone());
         }
     }
 }
 
 /// Silences every hosted instrument (voices, tails, queued notes). Only called while no stream processes them.
 fn reset_instruments(inst: &Instruments) {
-    let list: Vec<SharedInstrument> = inst.lock().map(|l| l.iter().map(|(_, i)| i.clone()).collect()).unwrap_or_default();
+    let (list, fx): (Vec<SharedInstrument>, Vec<SharedEffect>) = inst
+        .lock()
+        .map(|l| (l.inst.iter().map(|(_, i)| i.clone()).collect(), l.fx.iter().map(|(_, _, f)| f.clone()).collect()))
+        .unwrap_or_default();
     for i in list {
         if let Ok(mut i) = i.lock() {
             i.reset();
+        }
+    }
+    for f in fx {
+        if let Ok(mut f) = f.lock() {
+            f.reset_fx();
         }
     }
 }
@@ -436,7 +472,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 // A plugin channel's preview plays as a timed live note on the stream that hosts the instrument.
                 let note = project.patterns.first().and_then(|p| p.notes.first()).copied();
                 let row = note.and_then(|n| project.channels.iter().position(|c| c.index == n.channel));
-                let hosted = row.is_some_and(|r| inst.lock().is_ok_and(|l| l.iter().any(|(i, _)| *i == r)));
+                let hosted = row.is_some_and(|r| inst.lock().is_ok_and(|l| l.inst.iter().any(|(i, _)| *i == r)));
                 if let (true, Some(n), Some(r)) = (hosted, note, row) {
                     let running = session.as_ref().is_some_and(|s| !s.paused());
                     if !running && live.is_none() {
@@ -667,6 +703,11 @@ impl Renderer {
         match self.engine.try_lock() {
             Ok(mut e) if !e.finished() => {
                 e.process(stereo);
+                if self.tap {
+                    if let Ok(mut v) = self.shared.tracks.try_lock() {
+                        e.take_track_peaks(&mut v);
+                    }
+                }
                 if self.ctl.report.load(Ordering::Relaxed) {
                     self.shared.position.store(e.position(), Ordering::Relaxed);
                     self.shared.tick.store(e.tick_position().to_bits(), Ordering::Relaxed);

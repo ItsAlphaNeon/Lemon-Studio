@@ -87,6 +87,11 @@ fn edits_survive_a_write_read_cycle() {
             if t.volume.is_some() {
                 t.volume = Some(0.25);
             }
+            // Routing: a second destination with a send level (event 235 + route-level records).
+            if t.routes == [0] {
+                t.routes = vec![0, 3];
+                t.send_levels = vec![(3, 0.5)];
+            }
         }
         if let Some(t) = project.arrangements.get_mut(0).and_then(|a| a.tracks.get_mut(2)) {
             t.name = Some("Edited track".into());

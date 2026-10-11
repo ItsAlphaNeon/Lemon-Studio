@@ -171,6 +171,14 @@ pub enum ChannelKind {
     Other(u8),
 }
 
+impl ChannelKind {
+    /// Sampler and audio-clip channels: both are sampler channels with a sample (an audio clip channel is a sampler
+    /// with audio-clip defaults; spec: plugins/open-sampler.md §7).
+    pub fn is_sampler(self) -> bool {
+        matches!(self, ChannelKind::Sampler | ChannelKind::AudioClip)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Channel {
     /// Position in the Channel rack, 0-based.
@@ -407,8 +415,36 @@ pub struct MixerTrack {
     pub volume: Option<f64>,
     /// -1.0 ..= 1.0.
     pub pan: Option<f64>,
-    /// -1.0 ..= 1.0.
+    /// -1.0 ..= 1.0: below 0 merges toward mono, above 0 widens (spec: ui/mixer.md §4).
     pub stereo_separation: Option<f64>,
+    /// Reverse polarity and swap left / right buttons (spec: ui/mixer.md §4; file location unknown).
+    pub polarity: bool,
+    pub swap: bool,
+    /// Per slot: enabled (the slot LED) and mix level 0..=1 (spec: ui/mixer.md §7).
+    pub slot_on: [bool; 10],
+    pub slot_mix: [f64; 10],
+}
+
+impl MixerTrack {
+    /// A default track: unnamed, enabled, unity volume, centred, empty slots, routed to the master (except the master).
+    pub fn new(index: u16) -> Self {
+        MixerTrack {
+            index,
+            name: None,
+            color: None,
+            enabled: true,
+            slots: Default::default(),
+            routes: if index == 0 { Vec::new() } else { vec![0] },
+            send_levels: Vec::new(),
+            volume: Some(0.8),
+            pan: Some(0.0),
+            stereo_separation: Some(0.0),
+            polarity: false,
+            swap: false,
+            slot_on: [true; 10],
+            slot_mix: [1.0; 10],
+        }
+    }
 }
 
 /// A plugin in a mixer slot: its name and its opaque saved state.

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use os_clap::{Descriptor, Library, Plugin, SharedPlugin};
-use os_engine::SharedInstrument;
+use os_engine::{SharedEffect, SharedInstrument};
 
 #[cfg(windows)]
 use crate::plugin_window::{ChannelInfo, FrameEvent, FrameWindow};
@@ -46,10 +46,25 @@ pub enum Request {
     Menu(usize, i32, i32),
 }
 
+/// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
+pub const FX_KEY: usize = 1 << 24;
+
+/// The `hosted` key of mixer track `track`'s slot `slot`.
+pub fn fx_key(track: u16, slot: u8) -> usize {
+    FX_KEY + usize::from(track) * 16 + usize::from(slot)
+}
+
+/// The mixer (track, slot) of a `hosted` key, `None` for rack rows.
+pub fn fx_of(key: usize) -> Option<(u16, u8)> {
+    (key >= FX_KEY).then(|| (((key - FX_KEY) / 16) as u16, ((key - FX_KEY) % 16) as u8))
+}
+
 #[derive(Default)]
 pub struct Plugins {
     pub available: Vec<Available>,
-    /// By rack row.
+    /// Effect plugins found (offered for mixer slots).
+    pub effects: Vec<Available>,
+    /// By rack row, or by `fx_key` for mixer slots.
     pub hosted: BTreeMap<usize, Hosted>,
     /// Main window handle (owner of plugin windows).
     pub owner: isize,
@@ -102,20 +117,29 @@ impl Plugins {
     /// `.clap` files are skipped: a second copy in the process would share the built-in one's editor window class.
     pub fn scan() -> Plugins {
         let mut available: Vec<Available> = builtin();
+        let mut effects: Vec<Available> = Vec::new();
         let files = os_clap::find_files(&search_dirs());
         for f in files.into_iter().filter(|f| f.file_stem().is_none_or(|s| s != OPEN_SAMPLER)) {
             match Library::load(&f) {
                 Ok(lib) => {
-                    for d in lib.plugins.iter().filter(|d| d.is_instrument()) {
-                        if !available.iter().any(|a| a.desc.id == d.id) {
-                            available.push(Available { lib: lib.clone(), desc: d.clone() });
+                    for d in lib.plugins.iter() {
+                        let list = if d.is_instrument() {
+                            &mut available
+                        } else if d.is_effect() {
+                            &mut effects
+                        } else {
+                            continue;
+                        };
+                        if !list.iter().any(|a| a.desc.id == d.id) {
+                            list.push(Available { lib: lib.clone(), desc: d.clone() });
                         }
                     }
                 }
                 Err(e) => eprintln!("plugin scan: {e}"),
             }
         }
-        Plugins { available, scale: 1.0, ..Plugins::default() }
+        effects.sort_by_key(|a| a.desc.name.to_lowercase());
+        Plugins { available, effects, scale: 1.0, ..Plugins::default() }
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -145,8 +169,64 @@ impl Plugins {
         if !p.activate(self.rate) {
             return Err(format!("{} could not start", a.desc.name));
         }
+        // Trimmed audio clips start their note further into the sample (spec: plugins/open-sampler.md §7).
+        p.use_start_param(SAMPLE_START);
         self.hosted.insert(row, Hosted { plugin: Arc::new(Mutex::new(p)), #[cfg(windows)] window: None, #[cfg(windows)] link: None });
         Ok(a.desc.name)
+    }
+
+    /// Creates effect `index` (of `effects`) in mixer track `track`'s slot `slot`, replacing what was there.
+    pub fn create_effect(&mut self, track: u16, slot: u8, index: usize, state: Option<&[u8]>) -> Result<String, String> {
+        let a = self.effects.get(index).ok_or("no such effect")?.clone();
+        let key = fx_key(track, slot);
+        self.drop_key(key);
+        let mut p = Plugin::new(&a.lib, &a.desc.id)?;
+        if let Some(st) = state {
+            p.load_state(st);
+        }
+        if self.rate == 0 {
+            self.rate = crate::transport::Transport::device_rate().unwrap_or(48000);
+        }
+        if !p.activate(self.rate) {
+            return Err(format!("{} could not start", a.desc.name));
+        }
+        self.hosted.insert(key, Hosted { plugin: Arc::new(Mutex::new(p)), #[cfg(windows)] window: None, #[cfg(windows)] link: None });
+        Ok(a.desc.name)
+    }
+
+    /// Removes the instance under `key` (closing its window first).
+    pub fn drop_key(&mut self, key: usize) {
+        #[cfg(windows)]
+        self.close_window(key);
+        self.hosted.remove(&key);
+    }
+
+    /// Moves mixer slot instances: `m(track, slot)` gives the new place, `None` drops the instance.
+    pub fn remap_fx(&mut self, m: &dyn Fn(u16, u8) -> Option<(u16, u8)>) {
+        let keys: Vec<usize> = self.hosted.keys().copied().filter(|&k| k >= FX_KEY).collect();
+        let mut moved = Vec::new();
+        for k in keys {
+            let (t, s) = fx_of(k).unwrap();
+            match m(t, s) {
+                Some((nt, ns)) if (nt, ns) == (t, s) => {}
+                Some((nt, ns)) => moved.push((fx_key(nt, ns), self.hosted.remove(&k).unwrap())),
+                None => self.drop_key(k),
+            }
+        }
+        for (k, h) in moved {
+            self.hosted.insert(k, h);
+        }
+    }
+
+    /// The mixer slot instances for the transport: (track, slot, effect).
+    pub fn effects(&self) -> Vec<(usize, usize, SharedEffect)> {
+        self.hosted
+            .range(FX_KEY..)
+            .map(|(&k, h)| {
+                let (t, s) = fx_of(k).unwrap();
+                (usize::from(t), usize::from(s), h.plugin.clone() as SharedEffect)
+            })
+            .collect()
     }
 
     /// Index of the available plugin called `name`.
@@ -209,7 +289,7 @@ impl Plugins {
 
     /// The instances for the transport.
     pub fn instruments(&self) -> Vec<(usize, SharedInstrument)> {
-        self.hosted.iter().map(|(&r, h)| (r, h.plugin.clone() as SharedInstrument)).collect()
+        self.hosted.range(..FX_KEY).map(|(&r, h)| (r, h.plugin.clone() as SharedInstrument)).collect()
     }
 
     /// Opens (or raises) row `row`'s plugin window.
@@ -225,6 +305,10 @@ impl Plugins {
         let pos = crate::plugin_window::default_position(owner);
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size.
         let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, self.detach_new)?;
+        // Mixer effects have no channel strip (spec: ui/mixer.md §7).
+        if row >= FX_KEY {
+            w.set_strip(false);
+        }
         let (ew, eh) = p.open_editor(w.area())?;
         // An Open plugin answers the hello: its page tabs go into the strip row and its editor shrinks to what is below.
         h.link = os_hostlink::Link::connect(w.area() as isize);
@@ -284,7 +368,9 @@ impl Plugins {
     /// Rack rows were renumbered (`m(old) = new`; `None` drops the instance and its window).
     pub fn remap(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
         for (row, h) in std::mem::take(&mut self.hosted) {
-            if let Some(n) = m(row) {
+            if row >= FX_KEY {
+                self.hosted.insert(row, h);
+            } else if let Some(n) = m(row) {
                 self.hosted.insert(n, h);
             }
         }
@@ -379,6 +465,8 @@ impl Drop for Hosted {
 
 /// Name of OpenStudio's sampler plugin: it plays and edits every sampler channel (spec: plugins/open-sampler.md §7).
 pub const OPEN_SAMPLER: &str = "Open Sampler";
+/// The sampler parameter a note's sample start modulates per note (Open Sampler's START OFFSET).
+const SAMPLE_START: &str = "Sample start offset";
 
 /// Open Sampler's starting state for a sampler channel of the project: its sample and its five envelope records
 /// (nih-plug JSON state with the u64 length prefix of its CLAP state; spec: plugins/open-sampler.md §6, §7).
@@ -1059,6 +1147,42 @@ mod tests {
         }
         // The 0.5 s volume attack kept from the channel still fades the click (0.9 at 0.1 s) in.
         assert!(peak > 0.01 && peak < 0.3, "the mp3 plays through the kept envelope (peak {peak})");
+    }
+
+    /// Playlist clips through Open Sampler (spec: plugins/open-sampler.md §7): a note can start partway into the sample
+    /// (per-note modulation of the start offset) and a choke ends it at once.
+    #[test]
+    fn open_sampler_starts_late_and_chokes() {
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(OPEN_SAMPLER).unwrap();
+        pl.create_with(0, index, None).unwrap();
+        // One second: silent first half, 0.5 in the second.
+        let wav = std::env::temp_dir().join("os-app-start-late.wav");
+        let frames: Vec<f32> = (0..48000).flat_map(|i| if i < 24000 { [0.0; 2] } else { [0.5; 2] }).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frames).unwrap();
+        assert!(pl.load_sample(0, &wav.to_string_lossy()));
+        let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
+        let mut i = inst.lock().unwrap();
+        let mut block = |i: &mut dyn os_engine::Instrument| {
+            let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+            i.process(48000, &mut l, &mut r);
+            l.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+        };
+        // From the top: the first 100 ms are silent.
+        i.note_on(0, 60, 0.78);
+        assert!((0..10).all(|_| block(&mut *i) < 1e-4), "plays from the top");
+        i.choke(0, 60);
+        for _ in 0..10 {
+            block(&mut *i);
+        }
+        // Started halfway: sound at once (after the declick fade-in).
+        i.note_on_from(0, 60, 0.78, 0.5);
+        let first: Vec<f32> = (0..5).map(|_| block(&mut *i)).collect();
+        assert!(first.iter().any(|&p| p > 0.1), "starts in the loud half: {first:?}");
+        // A choke silences it within the declick out time.
+        i.choke(0, 60);
+        let after: Vec<f32> = (0..10).map(|_| block(&mut *i)).collect();
+        assert!(after[3..].iter().all(|&p| p < 1e-4), "choked: {after:?}");
     }
 
     /// A file dropped on an open Open Sampler window (what a browser drag released over it does) reaches its editor
