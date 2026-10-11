@@ -1037,18 +1037,15 @@ pub fn track_after_used(s: &State) -> u16 {
 }
 
 /// Create an automation clip for `target` (§8): a new type-5 channel named `name`, two flat points at `value`,
-/// a clip over the time selection (else one bar from the song position) on a free track.
+/// a clip over the time selection, else from the song position for the current pattern's length (FL observed,
+/// spec: plugins/plugin-parameters.md §5), on a free track.
 pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16 {
     snapshot(s);
     let name = &unique_channel_name(s, name);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let (a, b) = match s.playlist.range {
         Some((r0, r1)) if r1 > r0 => (r0, r1),
-        _ => {
-            let bar = bar(s);
-            let start = s.playlist.pos - s.playlist.pos % bar;
-            (start, start + bar * 4)
-        }
+        _ => (s.playlist.pos, s.playlist.pos + source_len(s, ClipSource::Pattern(s.pattern)).max(1)),
     };
     let beats = f64::from(b - a) / f64::from(ppq(s));
     s.project.channels.push(Channel {
