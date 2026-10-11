@@ -95,6 +95,9 @@ pub enum Action {
     MonReset,
     MonSave,
     MonClose,
+    /// Mixer meter debug panel: a slider (index into `meters::PARAMS`); buttons Reset (0), Save (1), Close (2).
+    MeterParam(usize),
+    MeterBtn(u8),
     Minimize,
     Maximize,
     Close,
@@ -357,6 +360,8 @@ pub enum Drag {
     Tempo { y0: f32, t0: f64 },
     /// Monitor debug panel slider.
     MonParam(usize),
+    /// Mixer meter debug panel slider.
+    MeterParam(usize),
     /// Piano roll: move notes (originals by index), resize their ends, erase, draw velocities.
     NoteMove { x0: f32, y0: f32, orig: Vec<(usize, Note)> },
     NoteResize { x0: f32, orig: Vec<(usize, Note)> },
@@ -738,7 +743,10 @@ impl App {
                 s.pattern = project.current_pattern.unwrap_or(1).max(1);
                 s.selected_channel = 0;
                 s.selected_mixer = 1;
+                // Meter tuning outlives the project.
+                let (cfg, dbg) = (s.mixer.meter_cfg.clone(), s.mixer.meter_debug);
                 s.mixer = Default::default();
+                (s.mixer.meter_cfg, s.mixer.meter_debug) = (cfg, dbg);
                 s.playlist_scroll = (0.0, 0.0);
                 s.rack_scroll = 0.0;
                 s.rack_scroll_x = 0.0;
@@ -1106,6 +1114,16 @@ impl App {
         }
     }
 
+    /// Meter debug panel slider `i` follows mouse x.
+    fn set_meter_param(&mut self, i: usize, x: f32) {
+        let t = views::meterdebug::slider(i);
+        let p = &crate::meters::PARAMS[i];
+        let k = ((x - t.x) / t.w).clamp(0.0, 1.0);
+        self.state.mixer.meter_cfg.set(i, p.min + (p.max - p.min) * k);
+        self.hint = Cow::Owned(format!("{}: {}", p.name, self.state.mixer.meter_cfg.text(i)));
+        self.invalidate();
+    }
+
     /// Debug panel slider `i` follows mouse x.
     fn set_mon_param(&mut self, i: usize, x: f32) {
         let t = views::mondebug::slider(i);
@@ -1120,7 +1138,7 @@ impl App {
 
     /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
-        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m[0] > 0.0 || m[1] > 0.0)
+        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active())
     }
 
     /// Periodic housekeeping; returns whether a repaint is needed.
@@ -1737,6 +1755,10 @@ impl App {
                     self.set_mon_param(i, x);
                     return true;
                 }
+                Drag::MeterParam(i) => {
+                    self.set_meter_param(i, x);
+                    return true;
+                }
                 Drag::Tempo { y0, t0 } => {
                     let t = (t0 + f64::from(y0 - y).round()).clamp(10.0, 522.0);
                     if self.state.tempo != t {
@@ -2095,6 +2117,11 @@ impl App {
             let d = crate::monitor::PARAMS[i].default;
             self.state.monitor.cfg.set(i, d);
             return self.damage_rect(views::mondebug::PANEL);
+        }
+        if let Some(Action::MeterParam(i)) = action {
+            let d = crate::meters::PARAMS[i].default;
+            self.state.mixer.meter_cfg.set(i, d);
+            return self.invalidate();
         }
         if action == Some(Action::PianoRuler) {
             if let Some(g) = self.piano_geom() {
@@ -3147,6 +3174,26 @@ impl App {
                 let x = self.mouse.0;
                 self.set_mon_param(i, x);
             }
+            Action::MeterParam(i) => {
+                self.drag = Some(Drag::MeterParam(i));
+                let x = self.mouse.0;
+                self.set_meter_param(i, x);
+            }
+            Action::MeterBtn(0) => {
+                s.mixer.meter_cfg = Default::default();
+                self.invalidate();
+            }
+            Action::MeterBtn(1) => {
+                s.message = Some(match save_meter_cfg(&s.mixer.meter_cfg) {
+                    Ok(p) => format!("Meter settings saved to {}", p.display()),
+                    Err(e) => format!("Meter settings not saved: {e}"),
+                });
+                self.invalidate();
+            }
+            Action::MeterBtn(_) => {
+                s.mixer.meter_debug = false;
+                self.invalidate();
+            }
             Action::MonReset => {
                 s.monitor.cfg = Default::default();
                 self.invalidate();
@@ -3804,6 +3851,31 @@ fn template_project(names: &[&str]) -> Project {
         mixer,
         ..Project::default()
     }
+}
+
+fn meter_cfg_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio").join("meters.txt"))
+}
+
+/// Mixer meter settings from `%APPDATA%/OpenStudio/meters.txt` (the meter debug panel's Save), else defaults.
+pub(crate) fn load_meter_cfg() -> crate::meters::Settings {
+    let mut cfg = crate::meters::Settings::default();
+    if cfg!(test) {
+        return cfg;
+    }
+    if let Some(text) = meter_cfg_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        cfg.load(&text);
+    }
+    cfg
+}
+
+fn save_meter_cfg(cfg: &crate::meters::Settings) -> Result<PathBuf, String> {
+    let p = meter_cfg_path().ok_or("no APPDATA folder")?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, cfg.dump()).map_err(|e| e.to_string())?;
+    Ok(p)
 }
 
 fn monitor_cfg_path() -> Option<PathBuf> {
@@ -5224,7 +5296,12 @@ mod tests {
         app.state.project.mixer[3].slot_on[1] = false;
         mx::select(&mut app.state, 6, true);
         mx::select(&mut app.state, 3, true);
-        app.state.mixer.meters = (0..18).map(|i| [0.05 * i as f32, 0.04 * i as f32]).collect();
+        app.state.mixer.meters = (0..18)
+            .map(|i| {
+                let db = [crate::meters::to_db(0.12 * i as f32), crate::meters::to_db(0.1 * i as f32)];
+                crate::meters::Meter { db, hold: db.map(|d| if d > crate::meters::SILENT { d + 3.0 } else { d }), held: [0.0; 2] }
+            })
+            .collect();
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(dir.join("mx_states.png")).unwrap();
         app.state.playlist.popup = Some(mx::track_menu(&app.state, 3, 500.0, 200.0));
@@ -5233,5 +5310,9 @@ mod tests {
         app.state.playlist.popup = Some(mx::slot_menu(&app.state, 0, 1500.0, 150.0));
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(dir.join("mx_slot_menu.png")).unwrap();
+        app.state.playlist.popup = None;
+        app.state.mixer.meter_debug = true;
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(dir.join("mx_meter_debug.png")).unwrap();
     }
 }

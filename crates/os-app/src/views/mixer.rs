@@ -8,6 +8,7 @@ use os_ui::{Color, Font, Glyph, Rect};
 use super::{led, resize_zones, window_body, window_buttons, FrameInfo};
 use crate::knobs::KnobId;
 use crate::app::{Action, State, Ui, Win, TITLE_H};
+use crate::meters;
 use crate::mixer::{self as mx, MHit};
 use crate::icons::{self, Icon};
 
@@ -114,9 +115,21 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.c.text_center(Font::new(17), Rect::new(r.x + 12.0, ly.y(HEAD_Y0), 20.0, 21.0), ui.t.s(0x6d7275), "C");
     ui.c.text_center(Font::new(17), Rect::new(r.x + 50.0, ly.y(HEAD_Y0), 22.0, 21.0), ui.t.s(0x6d7275), "M");
 
-    // Level scale column.
+    // "C" column: the level scale with the current track's meter (spec: ui/mixer.md §9).
     let col = Rect::new(r.x + 9.0, ly.y(METER_Y0), 28.0, bottom - 156.0 - ly.y(METER_Y0));
-    ui.hit(col, Action::Mix(MHit::Scale), "Level scale (dB)");
+    let cfg = &s.mixer.meter_cfg;
+    let floor = cfg.v[meters::k::FLOOR_DB];
+    let hint = if col.contains(ui.mouse.0, ui.mouse.1) {
+        // The level at the mouse (the scale is not linear in y: invert it through the law).
+        let ref_y = (0..=400).map(|i| meters::LAW_TOP + (meters::LAW_BOTTOM - meters::LAW_TOP) * i as f32 / 400.0)
+            .min_by(|a, b| (ly.y(*a) - ui.mouse.1).abs().total_cmp(&(ly.y(*b) - ui.mouse.1).abs()))
+            .unwrap_or(meters::LAW_BOTTOM);
+        let db = meters::db_at((meters::LAW_BOTTOM - ref_y) / (meters::LAW_BOTTOM - meters::LAW_TOP), floor);
+        format!("Current  {db:.2}dB  {:.2}   (right-click: meter debug panel)", 10f32.powf(db / 20.0))
+    } else {
+        "Level scale".to_string()
+    };
+    ui.hit(col, Action::Mix(MHit::Scale), hint);
     ui.c.fill_rrect(col, 3.0, ui.t.s(0x191d1e));
     ui.c.fill_rrect(col.inset(1.0), 2.5, ui.t.s(0x222527));
     // Marks closer than a label height are skipped when the window is squished.
@@ -132,6 +145,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     for k in 0..4 {
         ui.c.fill_rect(Rect::new(col.x + 4.0, ly.y(893.0 + 7.5 * k as f32), col.w - 8.0, 1.0), ui.t.s(0x111315));
+    }
+    // The bars cover the labels (measured: two 13 px bars filling the column inside its 1 px border).
+    if let Some(m) = s.mixer.meters.get(usize::from(s.selected_mixer)) {
+        let ys = |db: f32| ly.y(meters::law_y(db, floor)).min(col.bottom() - 1.0);
+        for i in 0..2 {
+            meter_bar(ui, col.x + 1.0 + 13.0 * i as f32, 13.0, col.bottom() - 1.0, m.db[i], m.hold[i], cfg, &ys);
+        }
     }
 
     // Inserts scroll; the master strip and the scale stay put.
@@ -200,6 +220,68 @@ fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
     ui.c.text(Font::new(17), r.x + 134.0, r.y + 2.0, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xb8c4cb) }, "Wide");
 }
 
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let ch = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round().clamp(0.0, 255.0) as u32;
+    Color::rgb(ch(a.r, b.r) << 16 | ch(a.g, b.g) << 8 | ch(a.b, b.b))
+}
+
+fn shade(c: Color, k: f32) -> Color {
+    mix(Color::rgb(0), c, k)
+}
+
+/// One meter bar (spec: ui/mixer.md §9, measured from FL): the colour depends on the height, not on the level: green up
+/// to "Yellow from", yellow-orange up to "Red from", red above; each zone is a slight vertical gradient. The outer
+/// columns are darker, the next ones a touch lighter; a 1 px dark cap sits on the top and the peak-hold line is a
+/// 1 px orange line. `ys` maps a level to y; `bottom` is the bar's foot.
+#[allow(clippy::too_many_arguments)]
+fn meter_bar(ui: &mut Ui, x: f32, w: f32, bottom: f32, db: f32, hold: f32, cfg: &meters::Settings, ys: &dyn Fn(f32) -> f32) {
+    use meters::k;
+    let t = ui.t;
+    let full_top = ys(12.0);
+    let grad = cfg.v[k::GRADIENT];
+    let edge = cfg.v[k::EDGE];
+    // Zone colours at the zone's top and bottom (measured 0xa0db40 / 0xb6db4d, 0xeec757 / 0xfac050).
+    let green = (ui.t.a(0xa0db40), ui.t.a(0xb6db4d));
+    let yellow = (ui.t.h(0xeec757), ui.t.h(0xfac050));
+    let red = (t.meter_clip, t.meter_clip);
+    let y_yel = ys(cfg.v[k::YELLOW_DB]);
+    let y_red = ys(cfg.v[k::RED_DB].max(cfg.v[k::YELLOW_DB]));
+    if db > meters::SILENT {
+        let top = ys(db).min(bottom);
+        for (z0, z1, (ct, cb)) in [(y_yel, bottom, green), (y_red, y_yel, yellow), (full_top, y_red, red)] {
+            let (a, b) = (top.max(z0), z1.min(bottom));
+            if b - a < 0.5 {
+                continue;
+            }
+            // Colours at a and b along the zone's gradient (scaled by the gradient setting).
+            let at = |y: f32| mix(ct, mix(ct, cb, grad), (y - z0) / (z1 - z0).max(1.0));
+            let (ca, cb2) = (at(a), at(b));
+            let r = Rect::new(x, a, w, b - a);
+            ui.c.fill_rect_gradient(r, ca, cb2, 0.0);
+            if w >= 4.0 {
+                let hl = |c: Color| mix(c, Color::rgb(0xffffff), 0.04);
+                ui.c.fill_rect_gradient(Rect::new(x + 1.0, a, 1.0, b - a), hl(ca), hl(cb2), 0.0);
+                ui.c.fill_rect_gradient(Rect::new(x + w - 2.0, a, 1.0, b - a), hl(ca), hl(cb2), 0.0);
+                ui.c.fill_rect_gradient(Rect::new(x, a, 1.0, b - a), shade(ca, edge), shade(cb2, edge), 0.0);
+                ui.c.fill_rect_gradient(Rect::new(x + w - 1.0, a, 1.0, b - a), shade(ca, edge), shade(cb2, edge), 0.0);
+            }
+        }
+        if cfg.v[k::CAP] >= 0.5 && top - 1.0 > full_top {
+            ui.c.fill_rect(Rect::new(x, top - 1.0, w, 1.0), ui.t.s(0x181c1e));
+        }
+    }
+    if cfg.v[k::HOLD_ON] >= 0.5 && hold > meters::SILENT {
+        let y = ys(hold).min(bottom - 1.0);
+        let c = ui.t.h(0xe16e2f);
+        ui.c.fill_rect(Rect::new(x, y, w, 1.0), c);
+        if w >= 4.0 {
+            ui.c.fill_rect(Rect::new(x, y, 1.0, 1.0), shade(c, edge));
+            ui.c.fill_rect(Rect::new(x + w - 1.0, y, 1.0, 1.0), shade(c, edge));
+        }
+    }
+}
+
 /// One strip; `left` is its left edge (44 px pitch). Columns: knobs at +22, meter / fader at +32,
 /// name and small controls at +12 (spec §7).
 fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, ly: &Ly) {
@@ -247,12 +329,14 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     for y in [181.0, 230.0, 278.0, 327.0, 375.0, 423.0] {
         ui.c.fill_rect(Rect::new(meter.x + 3.0, ly.y(y), 9.0, 1.0), ui.t.s(0x111315));
     }
-    // Per-track peak meter (spec: ui/mixer.md §9).
-    if let Some(&[pl, pr]) = s.mixer.meters.get(usize::from(n)) {
-        for (i, p) in [pl, pr].into_iter().enumerate().filter(|(_, p)| *p > 0.0) {
-            let h = ((1.0 + 20.0 * p.max(1e-6).log10() / 48.0).clamp(0.0, 1.0)) * (meter.h - 4.0);
-            let c = if p >= 1.0 { t.meter_clip } else if p > 0.5 { t.meter_high } else { t.meter_low };
-            ui.c.fill_rect(Rect::new(meter.x + 2.0 + i as f32 * 6.0, meter.bottom() - 2.0 - h, 5.0, h), c);
+    // Per-track peak meter (spec: ui/mixer.md §9): two 6 px bars on the same scale as the "C" column.
+    if let Some(m) = s.mixer.meters.get(usize::from(n)) {
+        let cfg = &s.mixer.meter_cfg;
+        let (top, bot) = (meter.y + 2.0, meter.bottom() - 2.0);
+        let floor = cfg.v[meters::k::FLOOR_DB];
+        let ys = |db: f32| bot - meters::frac(db, floor) * (bot - top);
+        for i in 0..2 {
+            meter_bar(ui, meter.x + 2.0 + 6.0 * i as f32, 6.0, bot, m.db[i], m.hold[i], cfg, &ys);
         }
     }
     if selected {

@@ -4,6 +4,7 @@
 pub mod browser;
 pub mod channel_win;
 pub mod menus;
+pub mod meterdebug;
 pub mod mondebug;
 pub mod picker;
 pub mod settings;
@@ -111,6 +112,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     browser::paint_ghost(ui, s);
     if s.monitor.debug {
         mondebug::paint(ui, s);
+    }
+    if s.mixer.meter_debug {
+        meterdebug::paint(ui, s);
     }
     overlays
 }

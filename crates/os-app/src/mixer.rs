@@ -98,13 +98,20 @@ pub struct MixerUi {
     /// The picker was opened for this slot of the current track.
     pub picker_slot: Option<u8>,
     pub pending: Vec<FxReq>,
-    /// Meter levels per track (L, R), decaying between audio blocks.
-    pub meters: Vec<[f32; 2]>,
+    /// Meter state per track (`meters::Meter`), fed by `feed_meters`.
+    pub meters: Vec<crate::meters::Meter>,
+    /// Meter ballistics and look (tuned in the meter debug panel).
+    pub meter_cfg: crate::meters::Settings,
+    /// The meter debug panel is open (right-click the level scale).
+    pub meter_debug: bool,
+    /// When the meters last advanced.
+    pub meter_at: Option<std::time::Instant>,
 }
 
 impl Default for MixerUi {
     fn default() -> Self {
-        MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), armed: Vec::new(), picker_slot: None, pending: Vec::new(), meters: Vec::new() }
+        MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), armed: Vec::new(), picker_slot: None, pending: Vec::new(), meters: Vec::new(),
+            meter_cfg: crate::app::load_meter_cfg(), meter_debug: false, meter_at: None }
     }
 }
 
@@ -380,6 +387,8 @@ pub fn right(app: &mut App, h: MHit) -> bool {
             }
         }
         MHit::Pin(n) | MHit::Clock(n) | MHit::Polarity(n) | MHit::Swap(n) | MHit::Disk(n) => select(s, n, false),
+        // The meter debug panel (an OpenStudio tuning aid, views/meterdebug.rs).
+        MHit::Scale => s.mixer.meter_debug = !s.mixer.meter_debug,
         _ => return false,
     }
     true
@@ -940,25 +949,24 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, alt: bool) -> bool {
     true
 }
 
-/// Meter decay per UI tick (about 16 ms): peaks fall ~26 dB per second.
-const METER_FALL: f32 = 0.95;
-
-/// New peaks from the audio thread: meters jump up and fall back slowly. True while any meter is still moving.
+/// New peaks from the audio thread: meters rise, fall and hold by elapsed time (`meters::step`). True while any meter
+/// is still moving.
 pub fn feed_meters(s: &mut State, peaks: &[[f32; 2]]) -> bool {
+    let now = std::time::Instant::now();
+    // Long gaps (the app was idle) count as one frame, so a meter does not vanish in a single step.
+    let dt = s.mixer.meter_at.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
+    s.mixer.meter_at = Some(now);
     let m = &mut s.mixer.meters;
     if m.len() < peaks.len() {
-        m.resize(peaks.len(), [0.0; 2]);
+        m.resize(peaks.len(), Default::default());
     }
     let mut moving = false;
     for (i, v) in m.iter_mut().enumerate() {
         let p = peaks.get(i).copied().unwrap_or([0.0; 2]);
-        for k in 0..2 {
-            v[k] = if p[k] >= v[k] { p[k] } else { v[k] * METER_FALL };
-            if v[k] < 1e-4 {
-                v[k] = 0.0;
-            }
-            moving |= v[k] > 0.0;
-        }
+        moving |= crate::meters::step(v, p, dt, &s.mixer.meter_cfg);
+    }
+    if !moving {
+        s.mixer.meter_at = None;
     }
     moving
 }
