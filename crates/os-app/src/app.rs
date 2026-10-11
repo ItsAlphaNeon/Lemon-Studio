@@ -4561,7 +4561,7 @@ mod tests {
         app.state.z = vec![Win::Mixer, Win::ChannelRack];
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
-        for id in [KnobId::MasterVol, KnobId::MixPan(1), KnobId::ChanPan(0)] {
+        for id in [KnobId::MixSep(1), KnobId::MixPan(1), KnobId::ChanPan(0)] {
             let r = hit_rect(&app, &Action::Knob(id));
             let v0 = app.state.knob(id);
             app.mouse_move(r.cx(), r.cy());
@@ -4597,7 +4597,8 @@ mod tests {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         frame(&mut app, &mut a, None);
-        let act = Action::PickerOpen;
+        // A window button whose press changes nothing in the toolbar (the plugin picker would cover the screen).
+        let act = Action::ToggleWin(Win::Mixer);
         let r = hit_rect(&app, &act);
         let px = |c: &Canvas| {
             let mut out = vec![0u32; 1920 * 1080];
