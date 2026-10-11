@@ -1543,35 +1543,89 @@ fn swing_share(project: &Project, channel: u16) -> u16 {
     project.channels.get(usize::from(channel)).map_or(128, |c| (c.misc.swing.clamp(0.0, 1.0) * 128.0).round() as u16)
 }
 
-/// Schedules a note whose pattern starts at tick `start` (may be negative: a clip that begins inside its pattern);
-/// swing moves its start by the note's position inside the pattern. A repeating note is retriggered at every
-/// multiple of its interval inside its length (spec: audio/pattern-controls.md, note repeat); a plain step counts as
-/// one step long for that.
-fn push_note(out: &mut Vec<Sched>, start: i64, n: &os_model::Note, project: &Project) {
+/// Schedules a note whose pattern starts at tick `start` (may be negative: a clip that begins inside its pattern).
+/// With `swing` the note's start moves by its position inside the pattern; `cap` is the tick at which a note with a
+/// length is released at the latest (a clip's end with "play truncated notes"; steps keep their own release). A
+/// repeating note is retriggered at every multiple of its interval inside its length (spec:
+/// audio/pattern-controls.md, note repeat); a plain step counts as one step long for that.
+fn push_note(out: &mut Vec<Sched>, start: i64, n: &os_model::Note, project: &Project, swing: bool, cap: Option<u64>) {
     let ppq = project.ppq.max(1);
-    let swing = swing_delay(n.position, ppq, project.swing.unwrap_or(0), swing_share(project, n.channel));
-    let first = start + i64::from(n.position) + i64::from(swing);
+    let delay = if swing { swing_delay(n.position, ppq, project.swing.unwrap_or(0), swing_share(project, n.channel)) } else { 0 };
+    let first = start + i64::from(n.position) + i64::from(delay);
     if first < 0 {
         return;
     }
     let first = Sched::note(first as u64, n);
     let span = if n.length > 0 { u64::from(n.length) } else { u64::from(ppq / 4).max(1) };
+    let capped = |s: Sched| match cap {
+        Some(c) if s.len > 0 => Sched { len: s.len.min(c.saturating_sub(s.tick)), ..s },
+        _ => s,
+    };
     match n.repeat_ticks(ppq) {
         Some(interval) => {
             let mut off = 0;
             while off < span {
                 let len = if n.length > 0 { first.len - off } else { 0 };
-                out.push(Sched { tick: first.tick + off, len, ..first });
+                let s = capped(Sched { tick: first.tick + off, len, ..first });
+                if n.length == 0 || s.len > 0 {
+                    out.push(s);
+                }
                 off += u64::from(interval.max(1));
             }
         }
-        None => out.push(first),
+        None => {
+            let s = capped(first);
+            if n.length == 0 || s.len > 0 {
+                out.push(s);
+            }
+        }
     }
 }
 
-/// The tick a clip's pattern time starts at: the clip's position minus its window start (rounded to a tick).
-fn pattern_origin(c: &os_model::Clip) -> i64 {
-    i64::from(c.position) - c.window.map_or(0.0, |w| w.0).round() as i64
+/// Where a pattern clip plays (spec: audio/song-structure.md, "Song mode"): its pattern time `[from, from + len)`, the
+/// tick its pattern time starts at, its own end on the song, and the tick from which it starts no more notes (the
+/// next clip of the same pattern taking the pattern over, or its end).
+#[derive(Debug, Clone, Copy)]
+struct PatternPlay {
+    pattern: u16,
+    from: u64,
+    len: u64,
+    origin: i64,
+    end: u64,
+    starts_until: u64,
+}
+
+/// The pattern clips that play, with their windows. A clip whose start offset is negative (uncut) plays the whole
+/// pattern, whatever length its record stores. A pattern has one play position: a later clip of the same pattern
+/// takes it over from its start, and of two clips that start on the same tick only the later one in the file plays.
+/// Muted clips and clips on a switched-off track play nothing and take nothing over.
+fn pattern_plays(project: &Project, clips: &[os_model::Clip]) -> Vec<PatternPlay> {
+    let mut list: Vec<(usize, &os_model::Clip, u16)> = clips
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| clip_audible(project, c))
+        .filter_map(|(i, c)| match c.source {
+            ClipSource::Pattern(n) => Some((i, c, n)),
+            _ => None,
+        })
+        .collect();
+    list.sort_by_key(|&(i, c, n)| (n, c.position, i));
+    let mut out = Vec::new();
+    for (k, &(_, c, n)) in list.iter().enumerate() {
+        let later = &list[k + 1..];
+        if later.first().is_some_and(|&(_, d, m)| m == n && d.position == c.position) {
+            continue;
+        }
+        let (from, len) = match c.window {
+            Some(w) => (w.0.max(0.0).round() as u64, u64::from(c.length)),
+            None => (0, pattern_length(project, n)),
+        };
+        let start = u64::from(c.position);
+        let end = start + len;
+        let takeover = later.iter().take_while(|&&(_, _, m)| m == n).map(|&(_, d, _)| u64::from(d.position)).find(|&p| p > start);
+        out.push(PatternPlay { pattern: n, from, len, origin: i64::from(c.position) - from as i64, end, starts_until: end.min(takeover.unwrap_or(u64::MAX)) });
+    }
+    out
 }
 
 /// Channel control points as (tick, channel, parameter, value): a pattern's own, or those of every
@@ -1591,16 +1645,12 @@ fn schedule_controls(project: &Project, mode: PlayMode) -> Vec<(u64, usize, u16,
             if clips.is_empty() {
                 place(&mut out, project.current_pattern.unwrap_or(1));
             }
-            for c in clips.iter().filter(|c| clip_audible(project, c)) {
-                if let ClipSource::Pattern(n) = c.source {
-                    // Points inside the clip's window, placed relative to it.
-                    let from = c.window.map_or(0.0, |w| w.0);
-                    let origin = pattern_origin(c);
-                    for p in points(n).iter().filter(|p| f64::from(p.position) >= from && f64::from(p.position) < from + f64::from(c.length)) {
-                        let tick = origin + i64::from(p.position);
-                        if tick >= 0 {
-                            out.push((tick as u64, usize::from(p.channel()), p.param(), p.value));
-                        }
+            // Points inside a clip's window act, placed with the clip like notes.
+            for play in pattern_plays(project, clips) {
+                for p in points(play.pattern).iter().filter(|p| u64::from(p.position) >= play.from && u64::from(p.position) < play.from + play.len) {
+                    let tick = play.origin + i64::from(p.position);
+                    if tick >= 0 && (tick as u64) < play.starts_until {
+                        out.push((tick as u64, usize::from(p.channel()), p.param(), p.value));
                     }
                 }
             }
@@ -1665,7 +1715,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
         let end = pattern_length(project, n);
         let mut t = Vec::new();
         for x in pattern_notes(n).iter().filter(|x| !x.muted() && u64::from(x.position) < end) {
-            push_note(&mut t, 0, x, project);
+            push_note(&mut t, 0, x, project, true, None);
         }
         (t, end)
     };
@@ -1678,6 +1728,27 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
             }
             let mut out = Vec::new();
             let mut end: u64 = 0;
+            let truncated = project.play_truncated.unwrap_or(false);
+            for play in pattern_plays(project, clips) {
+                for note in pattern_notes(play.pattern).iter().filter(|x| !x.muted()) {
+                    let p = u64::from(note.position);
+                    let cap = truncated.then_some(play.end);
+                    if p >= play.from && p < play.from + play.len {
+                        // Starts inside the window: from its place in the clip, unless the pattern was taken over.
+                        if play.origin + (p as i64) < play.starts_until as i64 {
+                            push_note(&mut out, play.origin, note, project, true, cap);
+                        }
+                    } else if truncated && p < play.from && note.length > 0 && p + u64::from(note.length) > play.from {
+                        // Began before the window and reaches into it: starts at the clip's position, for the part
+                        // inside the window.
+                        let inside = (p + u64::from(note.length)).min(play.from + play.len) - play.from;
+                        let cut = os_model::Note { position: play.from as u32, length: inside as u32, ..*note };
+                        if play.origin + (play.from as i64) < play.starts_until as i64 {
+                            push_note(&mut out, play.origin, &cut, project, false, cap);
+                        }
+                    }
+                }
+            }
             for c in clips {
                 let start = u64::from(c.position);
                 let len = u64::from(c.length);
@@ -1689,16 +1760,8 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                     continue;
                 }
                 match c.source {
-                    // A pattern clip plays the notes inside its window [from, from + length) (spec: playlist.md "Clip offsets").
-                    ClipSource::Pattern(n) => {
-                        let from = c.window.map_or(0.0, |w| w.0);
-                        for note in pattern_notes(n).iter().filter(|x| !x.muted()) {
-                            let p = f64::from(note.position);
-                            if p >= from && p < from + len as f64 {
-                                push_note(&mut out, pattern_origin(c), note, project);
-                            }
-                        }
-                    }
+                    // Pattern clips were placed above.
+                    ClipSource::Pattern(_) => {}
                     ClipSource::Channel(ch) => match project.channels.get(usize::from(ch)).map(|c| c.kind) {
                         // An audio clip plays its channel's sample from the window start (milliseconds), cut at the clip end.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
@@ -2122,9 +2185,47 @@ mod tests {
         let mut p = song(notes.clone(), vec![c]);
         p.arrangements[0].tracks[0].enabled = false;
         assert!(song_triggers(&p).is_empty(), "muted track");
-        // An unwindowed clip plays the pattern from its start, cut at the clip length.
+        // An uncut clip plays the whole pattern, whatever length its record stores (spec: audio/song-structure.md).
         let plain = Clip::new(0, 100, 1, ClipSource::Pattern(1));
-        assert_eq!(song_triggers(&song(notes, vec![plain])), vec![0, 96]);
+        assert_eq!(song_triggers(&song(notes, vec![plain])), vec![0, 96, 192]);
+    }
+
+    fn song_notes(p: &Project) -> Vec<(u64, Option<u64>)> {
+        let mut lib = SampleLibrary::new(None);
+        Engine::new(p, &mut lib, 48000, PlayMode::Song).triggers.iter().map(|t| (t.tick, t.end)).collect()
+    }
+
+    /// spec: audio/song-structure.md "One play position per pattern": a later clip of the same pattern takes it over
+    /// (the earlier one starts no more notes, started notes keep their length); of two clips on one tick only the
+    /// later one in the file plays; a clip of another pattern takes nothing over.
+    #[test]
+    fn a_pattern_has_one_play_position() {
+        use os_model::{Clip, ClipSource};
+        let notes = vec![long_note(0, 300, 0), long_note(96, 48, 0), long_note(192, 48, 0), long_note(288, 48, 0)];
+        // The second clip starts at 150, inside the first: the first plays 0 (keeping its 300 ticks) and 96.
+        let first = Clip::new(0, 384, 0, ClipSource::Pattern(1));
+        let second = Clip::new(150, 384, 1, ClipSource::Pattern(1));
+        assert_eq!(song_notes(&song(notes.clone(), vec![first, second])), vec![(0, Some(300)), (96, Some(144)), (150, Some(450)), (246, Some(294)), (342, Some(390)), (438, Some(486))]);
+        // Two clips on one tick sound once.
+        assert_eq!(song_triggers(&song(notes.clone(), vec![first, first])).len(), 4);
+        // Another pattern's clip does not interrupt.
+        let mut p = song(notes, vec![first, Clip::new(150, 384, 1, ClipSource::Pattern(2))]);
+        p.patterns.push(Pattern { number: 2, notes: vec![Note::step(0, 0)], ..Pattern::default() });
+        assert_eq!(song_triggers(&p), vec![0, 96, 150, 192, 288]);
+    }
+
+    /// spec: audio/song-structure.md "Play truncated notes": on, a note that began before the window starts at the
+    /// clip for its part inside the window, and notes end at the clip's end at the latest; off, neither.
+    #[test]
+    fn truncated_notes_follow_the_option() {
+        use os_model::{Clip, ClipSource};
+        let notes = vec![long_note(0, 200, 0), long_note(150, 200, 0)];
+        let mut c = Clip::new(384, 100, 0, ClipSource::Pattern(1));
+        c.window = Some((100.0, 200.0));
+        let mut p = song(notes, vec![c]);
+        assert_eq!(song_notes(&p), vec![(434, Some(634))], "off: only the note starting inside, at full length");
+        p.play_truncated = Some(true);
+        assert_eq!(song_notes(&p), vec![(384, Some(484)), (434, Some(484))], "on: the earlier note from the clip start, both cut at its end");
     }
 
     // spec: plugins/open-sampler.md §7 (playlist clips through a hosted sampler: sample start and choke)
