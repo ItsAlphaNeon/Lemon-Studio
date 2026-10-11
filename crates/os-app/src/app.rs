@@ -5347,6 +5347,39 @@ mod tests {
         assert!(!app.transport.playing(), "and does not start playback");
     }
 
+    /// Double-clicking an audio clip opens its channel's Open Sampler and selects the channel in the rack; one
+    /// click does not, nor does a double click on a pattern clip (spec: ui/playlist.md §9).
+    #[test]
+    fn audio_clip_double_click_opens_its_sampler() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, ruler, g, bar) = ruler_app(&mut c);
+        let wav = std::env::temp_dir().join(format!("os-app-clip-dblclick-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
+        crate::playlist::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 1, 0).expect("audio clip added");
+        let row = app.state.project.channels.len() - 1;
+        app.state.project.arrangements[0].clips.push(os_model::Clip::new(0, bar, 2, os_model::ClipSource::Pattern(1)));
+        frame(&mut app, &mut c, None);
+        let _ = ruler;
+        let tap = |app: &mut App, c: &mut Canvas, track: u16| {
+            let (x, y) = (g.x_of(10.0) + 10.0, g.y_of(track) + 30.0);
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        tap(&mut app, &mut c, 1);
+        assert_eq!(app.state.pending_open, None, "one click only selects");
+        tap(&mut app, &mut c, 1);
+        assert_eq!(app.state.pending_open, Some(row), "a double click opens the clip's sampler");
+        assert_eq!(app.state.selected_channel, row);
+        assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([row]));
+        app.state.pending_open = None;
+        tap(&mut app, &mut c, 2);
+        tap(&mut app, &mut c, 2);
+        assert_eq!(app.state.pending_open, None, "not for a pattern clip");
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// A pattern playing when the ruler is clicked goes on as the song from the clicked position (needs an audio
     /// device).
     #[test]

@@ -388,6 +388,8 @@ pub struct PlaylistState {
     pub hover_clip: Option<usize>,
     /// Last header click (track, time) for double-click rename.
     pub last_header: Option<(u16, std::time::Instant)>,
+    /// Last left click on an audio clip (clip, time): a second one soon after opens its sampler.
+    pub last_clip: Option<(usize, std::time::Instant)>,
     /// Waveform cache by sample path (`None` = could not be loaded).
     pub waves: RefCell<HashMap<String, Option<Rc<Wave>>>>,
     /// A project is loading and its files decode off the UI thread: waveforms wait (spec: ui/project-loading.md).
@@ -415,6 +417,7 @@ impl Default for PlaylistState {
             zoom_back: None,
             hover_clip: None,
             last_header: None,
+            last_clip: None,
             waves: RefCell::new(HashMap::new()),
             wave_wait: false,
             undo: Vec::new(),
@@ -564,6 +567,12 @@ fn bar(s: &State) -> u32 {
 
 fn channel_of(s: &State, ch: u16) -> Option<&Channel> {
     s.project.channel(ch)
+}
+
+/// The rack row of the channel an audio clip plays (`None` for pattern and automation clips).
+fn audio_clip_row(s: &State, c: &Clip) -> Option<usize> {
+    let ClipSource::Channel(ch) = c.source else { return None };
+    s.project.channels.iter().position(|x| x.index == ch && x.kind.is_sampler())
 }
 
 pub fn source_name(s: &State, src: ClipSource) -> String {
@@ -1464,6 +1473,21 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
     // Automation points: drag, add, menu (Draw / Paint / Select tools) (§8).
     if let Some(ci) = hit {
         let c = clips(s)[ci];
+        // Double-clicking an audio clip opens its channel's sampler and selects that channel in the rack (§9).
+        if !right && matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select) {
+            if let Some(row) = audio_clip_row(s, &c) {
+                let now = std::time::Instant::now();
+                let double = s.playlist.last_clip.is_some_and(|(i, t)| i == ci && now.duration_since(t).as_millis() < 450);
+                s.playlist.last_clip = (!double).then_some((ci, now));
+                if double {
+                    s.rack.select_only(row);
+                    s.pending_open = Some(row);
+                    app.focus_channel(row);
+                    app.invalidate();
+                    return;
+                }
+            }
+        }
         let auto_clip = matches!(c.source, ClipSource::Channel(ch) if s.project.automation(ch).is_some());
         if auto_clip && matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select) && !app.ctrl && g.body(&c).contains(x, y) {
             let ClipSource::Channel(ch) = c.source else { return };
