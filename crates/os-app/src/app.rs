@@ -5019,9 +5019,10 @@ mod tests {
         app.mouse_move(grid.x + 210.0, grid.y + 60.0);
         app.mouse_up();
         assert_eq!(app.state.project.channels.len(), ch0 + 1);
-        // Online / favorites tabs are empty; wheel never scrolls past the content.
-        let r0 = hit_rect(&app, &Action::BrowserTab(4));
-        click(&mut app, &mut c, r0);
+        // Online / favorites tabs are not available yet: greyed out (no tab hit), their pages empty; wheel never
+        // scrolls past the content.
+        assert!(!app.hits.iter().any(|h| h.action == Action::BrowserTab(4)));
+        app.act(Action::BrowserTab(4));
         assert!(rows(&app.state).is_empty());
         let r0 = hit_rect(&app, &Action::BrowserTab(0));
         click(&mut app, &mut c, r0);
@@ -5120,6 +5121,31 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// An effect dragged from the plugin database onto the mixer goes into the current track's first free slot
+    /// (spec: ui/browser.md §3).
+    #[test]
+    fn browser_effect_drops_into_a_mixer_slot() {
+        use crate::views::browser::{rows, Item};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.hosted_effects = vec!["Test FX"];
+        app.state.z = vec![Win::Mixer];
+        app.state.browser_tab = 2;
+        app.state.browser_open.insert("2:Plugin database/Effects".into());
+        frame(&mut app, &mut c, None);
+        let i = rows(&app.state).iter().position(|r| r.item == Item::Effect(0)).expect("effect row");
+        let src = hit_rect(&app, &Action::BrowserRow(i));
+        let dst = hit_rect(&app, &Action::MixerArea);
+        app.mouse_move(src.cx(), src.cy());
+        app.mouse_down();
+        app.mouse_move(src.cx() + 30.0, src.cy());
+        app.mouse_move(dst.cx(), dst.cy());
+        app.mouse_up();
+        let t = app.state.selected_mixer;
+        assert_eq!(crate::mixer::slot_name(&app.state, t, 0).as_deref(), Some("Test FX"));
+    }
+
     #[test]
     fn browser_dropped_folder() {
         use crate::views::browser::{rows, Item};
@@ -5216,7 +5242,7 @@ mod tests {
         // Search box on top moves the list down.
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);
-        assert!(hit_rect(&app, &Action::BrowserSearch).y < 200.0);
+        assert!(app.hits.iter().any(|h| h.action == Action::BrowserSearch && h.rect.y < 200.0));
     }
 
     /// Channel rack (spec: ui/channel-rack.md §5): stacking with other windows, name button opens

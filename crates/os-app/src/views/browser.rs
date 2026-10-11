@@ -102,6 +102,9 @@ pub struct Row {
     pub item: Item,
     /// Disk entry (dropped folders, spec §6): shown in the info panel.
     pub path: Option<PathBuf>,
+    /// A node with no content yet (empty disk-folder roots, untracked project sections): greyed out, named in its
+    /// "not available yet" hint.
+    pub off: Option<&'static str>,
 }
 
 /// Keys of the rows that start opened (the project tab shows Patterns, like the screenshot).
@@ -198,7 +201,7 @@ fn tree(s: &State) -> Vec<Row> {
                 let key = disk_key(path);
                 let open = s.browser_open.contains(&key);
                 let icon = if open { Icon::FolderOpen } else { Icon::Folder };
-                out.push(Row { key: key.clone(), depth: 0, label: folder_name(path), icon, cat: FOLDER, open: Some(open), bright: true, item: Item::None, path: Some(path.clone()) });
+                out.push(Row { key: key.clone(), depth: 0, label: folder_name(path), icon, cat: FOLDER, open: Some(open), bright: true, item: Item::None, path: Some(path.clone()), off: None });
                 if open {
                     disk_rows(s, path, &key, 1, &mut out);
                 }
@@ -207,15 +210,16 @@ fn tree(s: &State) -> Vec<Row> {
         };
         let (label, icon, cat) = ROOTS[r];
         let key = format!("{tab}:{label}");
-        let open = is_open(s, &key);
-        out.push(Row { key: key.clone(), depth: 0, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: None });
+        // Disk folders: no content ships yet (spec §2, owner decision), so they are greyed out.
+        let off = !matches!(r, 0 | 2);
+        let open = !off && is_open(s, &key);
+        out.push(Row { key: key.clone(), depth: 0, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: None, off: off.then_some(label) });
         if !open {
             continue;
         }
         match r {
             0 => project_rows(s, &key, cat, &mut out),
             2 => plugin_rows(s, &key, cat, &mut out),
-            // Disk folders: no content ships yet (spec §2, owner decision).
             _ => {}
         }
     }
@@ -225,12 +229,12 @@ fn tree(s: &State) -> Vec<Row> {
 fn section(s: &State, parent: &str, label: &str, icon: Icon, cat: u8, out: &mut Vec<Row>) -> bool {
     let key = format!("{parent}/{label}");
     let open = is_open(s, &key);
-    out.push(Row { key, depth: 1, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: None });
+    out.push(Row { key, depth: 1, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: None, off: None });
     open
 }
 
 fn leaf(out: &mut Vec<Row>, parent: &str, label: String, icon: Icon, cat: u8, bright: bool, item: Item) {
-    out.push(Row { key: format!("{parent}/{label}"), depth: 2, label, icon, cat, open: None, bright, item, path: None });
+    out.push(Row { key: format!("{parent}/{label}"), depth: 2, label, icon, cat, open: None, bright, item, path: None, off: None });
 }
 
 /// Tree key of a dropped folder root (All tab).
@@ -309,7 +313,7 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
         if e.dir {
             let open = s.browser_open.contains(&k);
             let icon = if open { Icon::FolderOpen } else { Icon::Folder };
-            out.push(Row { key: k.clone(), depth, label: e.name.clone(), icon, cat: FOLDER, open: Some(open), bright: open, item: Item::None, path: Some(e.path.clone()) });
+            out.push(Row { key: k.clone(), depth, label: e.name.clone(), icon, cat: FOLDER, open: Some(open), bright: open, item: Item::None, path: Some(e.path.clone()), off: None });
             if open {
                 disk_rows(s, &e.path, &k, depth.saturating_add(1), out);
             }
@@ -321,7 +325,7 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
             } else {
                 (e.name.clone(), Item::File(p))
             };
-            out.push(Row { key: k, depth, label, icon, cat: FILE, open: None, bright: false, item, path: Some(e.path.clone()) });
+            out.push(Row { key: k, depth, label, icon, cat: FILE, open: None, bright: false, item, path: Some(e.path.clone()), off: None });
         }
     }
 }
@@ -329,6 +333,14 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
 fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
     let p = &s.project;
     for &(name, icon) in PROJECT {
+        // History, Remote control, Initialized controls: nothing tracked yet (spec §2), greyed out.
+        if matches!(name, "History" | "Remote control" | "Initialized controls") {
+            section(s, root, name, icon, cat, out);
+            if let Some(r) = out.last_mut() {
+                (r.open, r.bright, r.off) = (Some(false), false, Some(name));
+            }
+            continue;
+        }
         if !section(s, root, name, icon, cat, out) {
             continue;
         }
@@ -365,7 +377,6 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                     }
                 }
             }
-            // History, Remote control, Initialized controls: nothing tracked yet (spec §2).
             _ => {}
         }
     }
@@ -385,16 +396,16 @@ fn plugin_node(s: &State, out: &mut Vec<Row>, parent: &str, label: String, icon:
     }
     let k = format!("{parent}/{label}");
     let open = is_open(s, &k);
-    out.push(Row { key: k.clone(), depth: 2, label, icon, cat, open: Some(open), bright: bright || open, item, path: None });
+    out.push(Row { key: k.clone(), depth: 2, label, icon, cat, open: Some(open), bright: bright || open, item, path: None, off: None });
     if open {
         for (index, e) in s.params.visible(key) {
-            out.push(Row { key: format!("{k}/{index}"), depth: 3, label: e.name.clone(), icon: Icon::Slide, cat, open: None, bright: false, item: Item::Param(key, index), path: None });
+            out.push(Row { key: format!("{k}/{index}"), depth: 3, label: e.name.clone(), icon: Icon::Slide, cat, open: None, bright: false, item: Item::Param(key, index), path: None, off: None });
         }
     }
 }
 
 fn plugin_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
-    use crate::views::picker::{EFFECTS, GENERATORS};
+    use crate::views::picker::GENERATORS;
     if section(s, root, "Generators", Icon::Plug, cat, out) {
         let parent = format!("{root}/Generators");
         let names = GENERATORS.iter().map(|g| g.name).chain(s.hosted_generators.iter().copied());
@@ -404,7 +415,7 @@ fn plugin_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
     }
     if section(s, root, "Effects", Icon::Speaker, cat, out) {
         let parent = format!("{root}/Effects");
-        for (i, e) in EFFECTS.iter().enumerate() {
+        for (i, e) in crate::views::picker::effects(s).iter().enumerate() {
             leaf(out, &parent, e.name.to_string(), Icon::Speaker, cat, false, Item::Effect(i));
         }
     }
@@ -536,8 +547,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     }
     icons::draw(ui.c, Icon::ArrowRight, Rect::new(5.0, 87.0, 12.0, 14.0), if mhov || menu_open { t.glyph } else { t.text_dim });
     icons::draw(ui.c, Icon::ArrowUp, Rect::new(19.0, 87.0, 12.0, 14.0), t.text_dim);
-    icons::draw(ui.c, Icon::Back, Rect::new(34.0, 87.0, 12.0, 14.0), t.text_dim);
     ui.hit(Rect::new(17.0, 85.0, 16.0, 18.0), Action::BrowserCollapse, "Collapse all");
+    // Back: not available yet, greyed out.
+    ui.off(Rect::new(33.0, 85.0, 15.0, 18.0), "Back");
+    icons::draw(ui.c, Icon::Back, Rect::new(34.0, 87.0, 12.0, 14.0), t.text_faint);
     ui.c.text(os_ui::Font::new(14), 52.0, 85.0, t.text_dim, "Browser");
     // Tabs (spec ui/browser.md §1).
     ui.c.fill_rect(Rect::span(0.0, 200.0, 106.0, 141.0), t.browser_tabs);
@@ -545,11 +558,17 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Globe, Icon::Star].into_iter().enumerate() {
         let cx = 20.0 + 40.0 * i as f32;
         let rr = Rect::new(cx - 18.0, 108.0, 36.0, 30.0);
-        let hov = ui.hit(rr, Action::BrowserTab(i), TIPS[i]);
+        // Online content and favorites: not available yet, greyed out.
+        let hov = if i >= OFF_TABS {
+            ui.off(rr, TIPS[i]);
+            false
+        } else {
+            ui.hit(rr, Action::BrowserTab(i), TIPS[i])
+        };
         if i == s.browser_tab {
             ui.c.stroke_rrect(rr, 4.0, 1.5, t.browser_tab_outline);
         }
-        let c = if hov || i == s.browser_tab { t.glyph } else { t.glyph.shade(-0.1) };
+        let c = if i >= OFF_TABS { t.text_faint } else if hov || i == s.browser_tab { t.glyph } else { t.glyph.shade(-0.1) };
         icons::draw(ui.c, icon, Rect::new(cx - 9.0, 114.0, 18.0, 18.0), c);
     }
     // List.
@@ -592,16 +611,23 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             Item::Param(key, index) if ui.hovering(rect) => crate::params::row_hint(s, key, index),
             _ => row.label.clone(),
         };
-        let hov = ui.hit(rect, Action::BrowserRow(i), hint);
+        let hov = match row.off {
+            Some(name) => {
+                ui.off(rect, name);
+                false
+            }
+            None => ui.hit(rect, Action::BrowserRow(i), hint),
+        };
         if sel == Some(row.key.as_str()) || hov {
             ui.c.fill_rect(rect, t.browser_row_hi);
         }
         let base = match row.cat {
+            _ if row.off.is_some() => t.text_faint,
             FOLDER => t.browser_folder,
             FILE => t.text.shade(-0.08),
             c => cats[usize::from(c).min(9)],
         };
-        let c = if row.bright { base.shade(0.12) } else if row.depth > 0 { base.shade(-0.06) } else { base };
+        let c = if row.off.is_some() { base } else if row.bright { base.shade(0.12) } else if row.depth > 0 { base.shade(-0.06) } else { base };
         // Expander: only an opened node shows its ▾ in the gutter (FL screenshots, spec §2).
         if row.open == Some(true) && s.browser_search.is_empty() {
             let (ax, cy) = (x - 9.0, y + ROW_H / 2.0);
@@ -612,6 +638,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         }
         // File-type tints (spec §6): audio / project orange, MIDI blue.
         let ic = match row.icon {
+            _ if row.off.is_some() => c,
             Icon::FileAudio | Icon::FileProject => t.browser_search,
             Icon::PianoRoll if row.cat == FILE => t.cat_plugin_db,
             _ => c,
@@ -632,15 +659,21 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     // Footer.
     let fy = r.bottom() - 27.0;
     ui.c.fill_rect(Rect::new(0.0, fy, 201.0, 27.0), t.browser_footer);
-    ui.c.fill_rrect(Rect::new(13.0, fy + 4.0, 41.0, 20.0), 3.0, t.sunken);
-    ui.c.text_center(os_ui::Font::condensed(11, 6).bold(), Rect::new(13.0, fy + 4.0, 41.0, 20.0), ui.t.tx(0xc0c8cc), "TAGS");
+    // Tags: not available yet, greyed out.
+    let tags = Rect::new(13.0, fy + 4.0, 41.0, 20.0);
+    ui.off(tags, "Tags");
+    ui.c.fill_rrect(tags, 3.0, t.sunken);
+    ui.c.text_center(os_ui::Font::condensed(11, 6).bold(), tags, ui.t.tx(0xc0c8cc), "TAGS");
+    ui.veil(tags, t.browser_footer);
     if top == LIST_Y {
         search_box(ui, s, Rect::new(57.0, fy + 4.0, 119.0, 20.0));
     } else {
         ui.c.fill_rrect(Rect::new(57.0, fy + 4.0, 119.0, 20.0), 3.0, t.sunken);
     }
     icons::draw(ui.c, Icon::Folder, Rect::new(158.0, fy + 7.0, 14.0, 14.0), t.text_faint);
-    icons::draw(ui.c, Icon::Search, Rect::new(180.0, fy + 5.0, 17.0, 17.0), t.browser_search);
+    let glass = Rect::new(178.0, fy + 3.0, 21.0, 21.0);
+    let hov = ui.hit(glass, Action::BrowserSearch, "Search the browser (Enter = find next, Esc = clear)");
+    icons::draw(ui.c, Icon::Search, Rect::new(180.0, fy + 5.0, 17.0, 17.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
     // Splitter.
     ui.c.fill_rect(Rect::new(201.0, 83.0, 6.0, r.h), t.splitter);
     ui.c.fill_rect(Rect::new(207.0, 83.0, 2.0, r.h), t.splitter_dark);
@@ -661,6 +694,9 @@ fn middle_cut(ui: &mut Ui, f: os_ui::Font, text: &str, w: f32) -> String {
     }
     String::new()
 }
+
+/// Tabs from this one on (online content, favorites) are not available yet (spec §1).
+const OFF_TABS: usize = 3;
 
 /// Where the options menu opens (just below the title bar's ▸, spec §4).
 pub const MENU_AT: (f32, f32) = (1.0, 105.0);

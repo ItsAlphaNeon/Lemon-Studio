@@ -277,9 +277,16 @@ impl App {
                     self.act(Action::PickerTile(false, i));
                 }
             }
-            Item::Effect(_) => {
+            // An effect dropped on the mixer goes into the slot under the mouse, else the current track's first free
+            // slot (as if picked in the plugin picker, spec §3).
+            Item::Effect(i) => {
                 if win == Some(Win::Mixer) {
-                    s.message = Some("Effect placeholder: adding effects to mixer slots is not available yet".into());
+                    let slot = match self.top_hit(x, y).map(|h| &h.action) {
+                        Some(Action::Mix(crate::mixer::MHit::SlotName(k) | crate::mixer::MHit::SlotArrow(k))) => Some(*k),
+                        _ => None,
+                    };
+                    self.state.mixer.picker_slot = slot;
+                    self.act(Action::PickerTile(true, i));
                 }
             }
             Item::Param(key, index) => {
@@ -365,6 +372,8 @@ pub enum BCmd {
 pub fn options_menu(s: &crate::app::State) -> Vec<PItem> {
     let b = |label: &'static str, c: BCmd| PItem::new(label, Cmd::Browser(c));
     let t = |label: &'static str, k: &'static str| b(label, BCmd::Toggle(k)).mark(Mark::Check(view::opt(s, k)));
+    // Options with no effect yet: greyed out, showing their default tick.
+    let dead = |label: &'static str, k: &'static str| PItem::not_yet(label).mark(Mark::Check(view::opt(s, k)));
     let searching = !s.browser_search.is_empty();
     let find = |label, key, dir| {
         let it = b(label, BCmd::Find(dir)).key(key);
@@ -376,13 +385,13 @@ pub fn options_menu(s: &crate::app::State) -> Vec<PItem> {
         find("Find next", "F3", 1),
         PItem::sep(),
         t("Show parent folders in search results", view::OPT_PARENTS),
-        t("Expand folders", view::OPT_EXPAND),
+        dead("Expand folders", view::OPT_EXPAND),
         t("Search for folders", view::OPT_FOLDERS),
         t("Search box on top", view::OPT_TOP),
         t("Type to filter", view::OPT_TYPE),
-        t("Load plugin tags", view::OPT_TAGS),
-        t("Enable indexing", view::OPT_INDEX),
-        t("Re-index changed folders on startup", view::OPT_REINDEX),
+        dead("Load plugin tags", view::OPT_TAGS),
+        dead("Enable indexing", view::OPT_INDEX),
+        dead("Re-index changed folders on startup", view::OPT_REINDEX),
         PItem::head("Navigation history"),
         b("Previous", BCmd::History(-1)),
         b("Next", BCmd::History(1)),
@@ -390,9 +399,9 @@ pub fn options_menu(s: &crate::app::State) -> Vec<PItem> {
         b("Send previous to selected channel", BCmd::Send(-1)).key("Shift+Up"),
         b("Send next to selected channel", BCmd::Send(1)).key("Shift+Down"),
         PItem::head("View"),
-        t("Auto-hide", view::OPT_AUTOHIDE),
-        t("Hide while dragging (when detached)", view::OPT_HIDEDRAG),
-        t("Auto contrast text", view::OPT_CONTRAST),
+        dead("Auto-hide", view::OPT_AUTOHIDE),
+        dead("Hide while dragging (when detached)", view::OPT_HIDEDRAG),
+        dead("Auto contrast text", view::OPT_CONTRAST),
         PItem::sub("Show icons and text on tabs", vec![PItem::not_yet("Contents not captured yet")]),
         t("Full sample preview", view::OPT_PREVIEW),
         PItem::head("Structure"),
