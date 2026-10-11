@@ -163,7 +163,7 @@ fn env_point_ids(p: &str, i: u8) -> Vec<String> {
 
 impl Logic {
     pub fn new(params: Arc<Osc3Params>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
-        let vals = Vals::new(&*params, ctx);
+        let vals = Vals::new(&*params, params.live.clone(), ctx);
         Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false }
     }
 

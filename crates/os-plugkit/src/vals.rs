@@ -7,22 +7,25 @@ use std::time::{Duration, Instant};
 
 use nih_plug::prelude::*;
 
-use crate::live;
+use crate::live::LiveEdits;
 
 pub struct Vals {
     pub ptrs: HashMap<String, ParamPtr>,
     overlay: HashMap<String, (f32, Instant)>,
+    /// The plugin instance's edits the sound hears (owned by its params object).
+    live: Arc<LiveEdits>,
     ctx: Option<Arc<dyn GuiContext>>,
 }
 
 impl Vals {
-    pub fn new(params: &dyn Params, ctx: Option<Arc<dyn GuiContext>>) -> Self {
-        Vals { ptrs: params.param_map().into_iter().map(|(id, p, _)| (id, p)).collect(), overlay: HashMap::new(), ctx }
+    /// `live` = the edits list of the instance `params` belongs to.
+    pub fn new(params: &dyn Params, live: Arc<LiveEdits>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
+        Vals { ptrs: params.param_map().into_iter().map(|(id, p, _)| (id, p)).collect(), overlay: HashMap::new(), live, ctx }
     }
 
     /// The host's value (normalised).
     pub fn actual(&self, id: &str) -> f32 {
-        self.ptrs.get(id).map_or(0.0, |p| live::live_of(*p))
+        self.ptrs.get(id).map_or(0.0, |p| self.live.norm(*p))
     }
 
     /// The shown value (normalised): the editor's pending edit, else the host's.
@@ -64,9 +67,9 @@ impl Vals {
     pub fn expire(&mut self) -> bool {
         let before = self.overlay.len();
         let now = Instant::now();
-        let ptrs = &self.ptrs;
+        let (ptrs, live) = (&self.ptrs, &self.live);
         self.overlay.retain(|id, (v, t)| {
-            let a = ptrs.get(id).map_or(*v, |p| live::live_of(*p));
+            let a = ptrs.get(id).map_or(*v, |p| live.norm(*p));
             (a - *v).abs() > 1e-6 && now.duration_since(*t) < Duration::from_secs(1)
         });
         before != self.overlay.len()
@@ -91,12 +94,12 @@ impl Vals {
         }
     }
 
-    /// Sets `id` inside a gesture: shown at once, heard at once (see [`live`]), and told to the host.
+    /// Sets `id` inside a gesture: shown at once, heard at once (see [`crate::live`]), and told to the host.
     pub fn set(&mut self, id: &str, norm: f32) {
         let norm = norm.clamp(0.0, 1.0);
         self.overlay.insert(id.to_string(), (norm, Instant::now()));
         if let Some(p) = self.ptrs.get(id) {
-            live::live_set(live::param_addr(*p), norm, unsafe { p.unmodulated_normalized_value() });
+            self.live.set(*p, norm);
         }
         if let (Some(p), Some(c)) = (self.ptrs.get(id), &self.ctx) {
             unsafe { c.raw_set_parameter_normalized(*p, norm) };

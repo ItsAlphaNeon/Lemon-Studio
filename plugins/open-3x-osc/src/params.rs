@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use nih_plug::prelude::*;
-use os_plugkit::live::{live_forget, Live};
+use os_plugkit::live::LiveEdits;
 
 /// Parameters (fields 1..=114 of the saved state).
 pub const COUNT: usize = 114;
@@ -250,6 +250,8 @@ pub struct Osc3Params {
     pub raw: RwLock<Vec<u8>>,
     /// Bumped on every `raw` change.
     pub raw_version: AtomicU64,
+    /// Editor edits the host has not confirmed yet (the sound hears them at once).
+    pub live: Arc<LiveEdits>,
 }
 
 impl Default for Osc3Params {
@@ -268,16 +270,7 @@ impl Default for Osc3Params {
                 ip
             })
             .collect();
-        Osc3Params { p, defs, raw: RwLock::new(default_state()), raw_version: AtomicU64::new(0) }
-    }
-}
-
-impl Drop for Osc3Params {
-    fn drop(&mut self) {
-        for p in &self.p {
-            let a = p as *const IntParam as usize;
-            live_forget(a, a + std::mem::size_of::<IntParam>());
-        }
+        Osc3Params { p, defs, raw: RwLock::new(default_state()), raw_version: AtomicU64::new(0), live: Arc::default() }
     }
 }
 
@@ -304,7 +297,7 @@ unsafe impl Params for Osc3Params {
 impl Osc3Params {
     /// Parameter `k`'s value for the sound (an editor edit the host has not confirmed yet wins).
     pub fn v(&self, k: usize) -> i32 {
-        self.p[k].live()
+        self.live.value(&self.p[k])
     }
 
     pub fn set_raw(&self, b: Vec<u8>) {

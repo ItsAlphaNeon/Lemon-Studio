@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use nih_plug::prelude::*;
 use os_engine::effects::eq::{self, Band, Settings, BANDS, MASK_BYTE, STATE_LEN, STATE_VERSION};
-use os_plugkit::live::Live;
+use os_plugkit::live::LiveEdits;
 
 pub const TYPE_NAMES: [&str; 8] = ["Disabled", "Low pass", "Band pass", "High pass", "Band stop", "Low shelf", "Peaking", "High shelf"];
 /// Order names for stored orders -3..=3.
@@ -72,6 +72,8 @@ pub struct EqParams {
     pub extra: RwLock<Vec<u8>>,
     /// Bumped on every `extra` change (repaint, audio refresh).
     pub extra_version: AtomicU64,
+    /// Editor edits the host has not confirmed yet (the sound hears them at once).
+    pub live: Arc<LiveEdits>,
 }
 
 fn level_param(name: String) -> FloatParam {
@@ -109,6 +111,7 @@ impl Default for EqParams {
             main: level_param("Main level".into()),
             extra: RwLock::new(default_state()),
             extra_version: AtomicU64::new(0),
+            live: Arc::default(),
         }
     }
 }
@@ -301,13 +304,13 @@ impl EqParams {
     pub fn settings(&self, mask: u8) -> Settings {
         Settings {
             bands: std::array::from_fn(|k| Band {
-                db: f64::from(self.level[k].live()),
-                freq: f64::from(self.freq[k].live()),
-                width: f64::from(self.width[k].live()),
-                kind: self.kind[k].live(),
-                order: self.order[k].live(),
+                db: f64::from(self.live.value(&self.level[k])),
+                freq: f64::from(self.live.value(&self.freq[k])),
+                width: f64::from(self.live.value(&self.width[k])),
+                kind: self.live.value(&self.kind[k]),
+                order: self.live.value(&self.order[k]),
             }),
-            main_db: f64::from(self.main.live()),
+            main_db: f64::from(self.live.value(&self.main)),
             mask,
         }
     }
