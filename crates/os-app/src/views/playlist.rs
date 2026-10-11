@@ -96,6 +96,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let last = pl::clips(s).iter().map(|c| c.end() as f32 / bar_t).fold(0.0, f32::max);
     let bars = (last.ceil() + 16.0).max(100.0);
     let over = Rect::new(grid_x, client.y + 1.0, grid_w, 18.0);
+    debug_assert_eq!(over, overview_rect(s, grid));
     super::scrollbar(ui, over, false, sx, grid_w, bars * bar_w, crate::app::Scroll::PlaylistX);
     overview(ui, s, over, bars * bar_t);
     let ruler = Rect::new(grid_x, client.y + 22.0, grid_w, 17.0);
@@ -173,6 +174,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     ui.c.pop_clip();
     resize_zones(ui, s, Win::Playlist, outer);
+}
+
+/// The overview bar above `grid` (a miniature of the clips that is also the horizontal scroll bar, §1).
+pub fn overview_rect(s: &State, grid: Rect) -> Rect {
+    let lane_y = grid.y - if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
+    Rect::new(grid.x, lane_y - 41.0, grid.w, 18.0)
 }
 
 /// The arrangement grid in a window laid out at `r` with client rect `client` (see `super::frame_rects`).

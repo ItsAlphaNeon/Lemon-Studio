@@ -2194,8 +2194,14 @@ impl App {
                 let hit = crate::playlist::clip_at(s, &pg, x, y);
                 let auto = hit.filter(|&i| matches!(crate::playlist::clips(s)[i].source, os_model::ClipSource::Channel(c) if s.project.automation(c).is_some()));
                 if auto != self.state.playlist.hover_clip {
+                    // An automation clip shows its points while hovered: repaint the clip that lost and gained them.
+                    for i in [self.state.playlist.hover_clip, auto].into_iter().flatten() {
+                        match crate::playlist::clips(&self.state).get(i) {
+                            Some(c) => self.damage_rect(pg.clip_rect(c).outset(6.0)),
+                            None => self.invalidate(),
+                        }
+                    }
                     self.state.playlist.hover_clip = auto;
-                    self.invalidate();
                 }
                 if let Some(i) = hit {
                     let r = pg.clip_rect(&crate::playlist::clips(&self.state)[i]);
@@ -2207,9 +2213,12 @@ impl App {
                     }
                 }
             }
-        } else if self.state.playlist.hover_clip.is_some() {
-            self.state.playlist.hover_clip = None;
-            self.invalidate();
+        } else if let Some(i) = self.state.playlist.hover_clip.take() {
+            let r = self.pl_grid.zip(crate::playlist::clips(&self.state).get(i)).map(|(g, c)| crate::playlist::PGeom::new(&self.state, g).clip_rect(c));
+            match r {
+                Some(r) => self.damage_rect(r.outset(6.0)),
+                None => self.invalidate(),
+            }
         }
         let changed = hover != self.hover || hint != self.hint || resize != self.resize_cursor;
         self.resize_cursor = resize;
@@ -2551,7 +2560,22 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
-        if self.pressed.take().is_some() {
+        let pressed = self.pressed.take();
+        // A click without a drag did its work on the press (painted then): its release only lifts the pressed look.
+        if self.drag.is_none() {
+            let rect = pressed.as_ref().and_then(|a| self.hits.iter().rev().find(|h| &h.action == a)).map(|h| h.rect);
+            match (pressed, rect) {
+                (None, _) => {}
+                (Some(_), Some(r)) => self.damage_rect(r.outset(3.0)),
+                (Some(_), None) => self.invalidate(),
+            }
+            self.hold_key(None, false);
+            if self.state.piano.overlay.take().is_some() {
+                self.damage_piano();
+            }
+            return;
+        }
+        if pressed.is_some() {
             self.invalidate();
         }
         self.hold_key(None, false);
@@ -4643,13 +4667,41 @@ mod tests {
         let check = |app: &mut App, a: &mut Canvas, b: &mut Canvas, what: &str| {
             let d = app.take_damage();
             let Some(Some(rects)) = &d else { panic!("{what}: repaints regions, not the frame") };
-            let bound = rects.iter().skip(1).fold(rects[0], |u, r| u.union(r));
+            // The hint panel follows the hovered thing; everything else stays inside the playlist.
+            let inside = rects.iter().filter(|r| r.intersect(&HINT_RECT) != **r);
+            let bound = inside.fold(Rect::default(), |u, r| if u.is_empty() { *r } else { u.union(r) });
             assert!(bound.intersect(&pl) == bound, "{what}: only the playlist is repainted ({bound:?})");
             frame_damage(app, a, d);
             frame(app, b, None);
             assert_same(a, b, what);
         };
         let g = app.pl_grid.unwrap();
+        // Hovering an automation clip shows its points: onto it and off it again repaints just that clip.
+        crate::playlist::create_automation(&mut app.state, 0, "Auto", 0.5);
+        app.state.playlist.sel.clear();
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        let pg = crate::playlist::PGeom::new(&app.state, g);
+        let auto = *crate::playlist::clips(&app.state).last().unwrap();
+        let ar = pg.clip_rect(&auto);
+        app.mouse_move(ar.x + 20.0, ar.bottom() - 10.0);
+        assert!(app.state.playlist.hover_clip.is_some(), "the automation clip is hovered");
+        check(&mut app, &mut a, &mut b, "automation clip hovered");
+        app.mouse_move(ar.x + 20.0, ar.bottom() + 60.0);
+        check(&mut app, &mut a, &mut b, "automation clip left");
+        // A plain click on a tool button: the press repaints everything, the release just the button.
+        let tool = hit_rect(&app, &Action::PlTool(crate::playlist::PlTool::Paint));
+        app.mouse_move(tool.cx(), tool.cy());
+        app.mouse_down();
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut a, d);
+        app.mouse_up();
+        check(&mut app, &mut a, &mut b, "tool button released");
+        assert_eq!(app.state.playlist.tool, crate::playlist::PlTool::Paint);
+        app.state.playlist.tool = crate::playlist::PlTool::Draw;
+        app.invalidate();
+        frame_damage(&mut app, &mut a, Some(None));
+        let _ = app.take_damage();
         // Wheel over the grid: scroll down, then right; Ctrl zooms.
         app.mouse_move(g.x + 300.0, g.y + 100.0);
         frame(&mut app, &mut a, None);
@@ -4683,6 +4735,10 @@ mod tests {
         let _ = app.take_damage();
         for (dx, dy) in [(40.0, 0.0), (90.0, 48.0), (150.0, 96.0)] {
             app.mouse_move(c0.x + 10.0 + dx, c0.y + 25.0 + dy);
+            if let Damage::Rects(rs) = &app.damage {
+                let area: f32 = rs.iter().map(|r| r.w * r.h).sum();
+                assert!(area < pl.w * pl.h / 4.0, "a clip drag repaints the clip, not the window ({area})");
+            }
             check(&mut app, &mut a, &mut b, "clip drag");
         }
         let moved = crate::playlist::clips(&app.state)[0];
