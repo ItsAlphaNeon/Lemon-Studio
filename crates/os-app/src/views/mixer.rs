@@ -125,7 +125,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             .min_by(|a, b| (ly.y(*a) - ui.mouse.1).abs().total_cmp(&(ly.y(*b) - ui.mouse.1).abs()))
             .unwrap_or(meters::LAW_BOTTOM);
         let db = meters::db_at((meters::LAW_BOTTOM - ref_y) / (meters::LAW_BOTTOM - meters::LAW_TOP), floor);
-        format!("Current  {db:.2}dB  {:.2}   (right-click: meter debug panel)", 10f32.powf(db / 20.0))
+        format!("Current  {db:.2}dB  {:.2}", 10f32.powf(db / 20.0))
     } else {
         "Level scale".to_string()
     };
@@ -381,9 +381,10 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     ui.hit(Rect::new(sx - 9.0, ly.y(RING_Y) - 9.0, 18.0, 18.0), Action::Knob(sep), s.knob_text(sep));
     mixer_knob(ui, sx, ly.y(RING_Y), 6.0, 9.5, s.knob(sep), Some(true));
 
-    // Fader: track, handle (green on the selected strip, with the track lit below it).
+    // Fader: track, gain marks, handle (green on the selected strip, with the track lit below it).
     let track_y1 = bottom - 99.0;
     ui.c.fill_rect(Rect::new(mx - 1.5, ly.y(TRACK_Y0), 3.0, track_y1 - ly.y(TRACK_Y0)), ui.t.s(0x141618));
+    fader_marks(ui, mx, track_y1, ly);
     let v = track.and_then(|m| m.volume).unwrap_or(0.8) as f32;
     // max/min, not clamp: a very short window gives track_y1 < ly.y(TRACK_Y0) (clamp would panic).
     let hy = (ly.y(HANDLE_0DB + (0.8 - v) * 440.0)).min(track_y1 - 5.0).max(ly.y(TRACK_Y0) + 5.0);
@@ -458,7 +459,35 @@ fn mixer_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, halo: f32, value: f32, arc:
     os_ui::kit::knob(ui.c, ui.t, cx, cy, r, value, arc.unwrap_or(false), look, os_ui::kit::State::hover(hov));
 }
 
-/// Fader handle centred on (cx, cy): 14 × 23, with the long 0 dB line through its middle.
+/// Gain marks beside a fader track (spec: ui/mixer.md §5, measured from FL): 6 px ticks on both sides at 0, −6, −12 and
+/// −18 dB (2 px clear of the track), and faint 4 px rails between consecutive ticks (1 px clear of each tick). They
+/// belong to the track: the handle covers them as it moves.
+fn fader_marks(ui: &mut Ui, mx: f32, track_y1: f32, ly: &Ly) {
+    let ys: Vec<f32> = [0.0, -6.0, -12.0, -18.0]
+        .iter()
+        .map(|&db| ly.y(HANDLE_0DB + (0.8 - fader_value(db)) * 440.0).floor())
+        .filter(|&y| y < track_y1 - 1.0)
+        .collect();
+    let (tick, rail) = (ui.t.s(0x181a1c), ui.t.s(0x202324));
+    for w in ys.windows(2) {
+        let (a, b) = (w[0] + 2.0, w[1] - 1.0);
+        if b > a {
+            ui.c.fill_rect(Rect::new(mx - 7.5, a, 4.0, b - a), rail);
+            ui.c.fill_rect(Rect::new(mx + 3.5, a, 4.0, b - a), rail);
+        }
+    }
+    for y in ys {
+        ui.c.fill_rect(Rect::new(mx - 9.5, y, 6.0, 1.0), tick);
+        ui.c.fill_rect(Rect::new(mx + 3.5, y, 6.0, 1.0), tick);
+    }
+}
+
+/// Fader value (0..1, 0.8 = 0 dB) of a gain in dB: the inverse of `laws::fader_gain`.
+fn fader_value(db: f32) -> f32 {
+    0.8 * (10.0 * 10f32.powf(db / 20.0) + 1.0).ln() / 11f32.ln()
+}
+
+/// Fader handle centred on (cx, cy): 14 × 23.
 fn fader_handle(ui: &mut Ui, cx: f32, cy: f32, selected: bool, hov: bool) {
     os_ui::kit::fader_handle(ui.c, ui.t, cx, cy, selected, os_ui::kit::State::hover(hov));
 }

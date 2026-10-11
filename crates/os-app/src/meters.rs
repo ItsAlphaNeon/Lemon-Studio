@@ -1,5 +1,5 @@
 //! Mixer peak meters: ballistics (rise, fall, peak hold), the level scale law and the colour zones. Every number lives
-//! in one table (`PARAMS`) so the meter debug panel (right-click the level scale) can tune them against FL.
+//! in one table (`PARAMS`; values tuned by eye against FL by the owner, 2026-10-10).
 //!
 // spec: ui/mixer.md §9 (meters)
 
@@ -27,7 +27,7 @@ pub mod k {
 }
 
 pub const PARAMS: [Param; 13] = [
-    p("Fall speed", 48.0, 1.0, 600.0, 0, "dB/s"),
+    p("Fall speed", 51.0, 1.0, 600.0, 0, "dB/s"),
     p("Fall: dB/s (0) / exp (1)", 0.0, 0.0, 1.0, 0, ""),
     p("Fall time (exp)", 300.0, 5.0, 5000.0, 0, "ms"),
     p("Rise (1 = instant)", 1.0, 0.02, 1.0, 2, ""),
@@ -60,26 +60,6 @@ impl Settings {
         let p = &PARAMS[i];
         let step = 10f32.powi(-(p.decimals as i32));
         self.v[i] = ((x.clamp(p.min, p.max) / step).round() * step).clamp(p.min, p.max);
-    }
-    /// Position of parameter `i` within its range, 0..=1.
-    pub fn norm(&self, i: usize) -> f32 {
-        (self.v[i] - PARAMS[i].min) / (PARAMS[i].max - PARAMS[i].min)
-    }
-    pub fn text(&self, i: usize) -> String {
-        let p = &PARAMS[i];
-        format!("{:.*} {}", p.decimals, self.v[i], p.unit)
-    }
-    /// One `name = value` line per parameter (what the debug panel's Save writes).
-    pub fn dump(&self) -> String {
-        PARAMS.iter().zip(self.v).map(|(p, v)| format!("{} = {v:.*}\n", p.name, p.decimals)).collect()
-    }
-    pub fn load(&mut self, text: &str) {
-        for line in text.lines() {
-            let Some((name, val)) = line.split_once('=') else { continue };
-            if let (Some(i), Ok(x)) = (PARAMS.iter().position(|p| p.name == name.trim()), val.trim().parse::<f32>()) {
-                self.set(i, x);
-            }
-        }
     }
 }
 
@@ -211,7 +191,7 @@ mod tests {
         step(&mut m, [1.0, 0.5], 0.016, &c);
         assert!((m.db[0]).abs() < 1e-4 && (m.db[1] + 6.02).abs() < 0.01);
         step(&mut m, [0.0, 0.0], 0.5, &c);
-        assert!((m.db[0] + 24.0).abs() < 0.01, "48 dB/s for 0.5 s: {}", m.db[0]);
+        assert!((m.db[0] + 25.5).abs() < 0.01, "51 dB/s for 0.5 s: {}", m.db[0]);
         assert_eq!(m.hold[0], 0.0, "hold line stays for its hold time");
         for _ in 0..200 {
             step(&mut m, [0.0, 0.0], 0.05, &c);

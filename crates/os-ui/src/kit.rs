@@ -336,7 +336,6 @@ pub fn fader_handle(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, selected: boo
     c.fill_rect_gradient(Rect::new(h.x, h.y, h.w, 10.0), top, mid, 2.5);
     c.fill_rect_gradient(Rect::new(h.x, h.y + 10.0, h.w, 13.0), mid.shade(-0.25), low, 2.5);
     c.fill_rect(Rect::new(h.x, h.y + 8.0, h.w, 4.0), mid.shade(-0.1));
-    c.fill_rect(Rect::new(cx - 15.0, cy - 0.5, 30.0, 1.0), t.s(0x111315));
     c.fill_rect(Rect::new(h.x + 2.0, h.y + 16.0, h.w - 4.0, 1.0), low.shade(-0.4));
 }
 

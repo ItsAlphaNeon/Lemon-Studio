@@ -100,10 +100,8 @@ pub struct MixerUi {
     pub pending: Vec<FxReq>,
     /// Meter state per track (`meters::Meter`), fed by `feed_meters`.
     pub meters: Vec<crate::meters::Meter>,
-    /// Meter ballistics and look (tuned in the meter debug panel).
+    /// Meter ballistics and look.
     pub meter_cfg: crate::meters::Settings,
-    /// The meter debug panel is open (right-click the level scale).
-    pub meter_debug: bool,
     /// When the meters last advanced.
     pub meter_at: Option<std::time::Instant>,
 }
@@ -111,7 +109,7 @@ pub struct MixerUi {
 impl Default for MixerUi {
     fn default() -> Self {
         MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), armed: Vec::new(), picker_slot: None, pending: Vec::new(), meters: Vec::new(),
-            meter_cfg: crate::app::load_meter_cfg(), meter_debug: false, meter_at: None }
+            meter_cfg: Default::default(), meter_at: None }
     }
 }
 
@@ -387,8 +385,6 @@ pub fn right(app: &mut App, h: MHit) -> bool {
             }
         }
         MHit::Pin(n) | MHit::Clock(n) | MHit::Polarity(n) | MHit::Swap(n) | MHit::Disk(n) => select(s, n, false),
-        // The meter debug panel (an OpenStudio tuning aid, views/meterdebug.rs).
-        MHit::Scale => s.mixer.meter_debug = !s.mixer.meter_debug,
         _ => return false,
     }
     true
