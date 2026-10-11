@@ -60,7 +60,6 @@ pub fn playback_rate(key: u16, cents: i32) -> f64 {
     2f64.powf((f64::from(key) - 60.0) / 12.0 + f64::from(cents) / 1200.0)
 }
 
-/// Output frame at which a tick position starts.
 /// Glide time of the Misc tab's SLIDE knob (0..1), seconds (spec: audio/channel-voices.md).
 pub fn slide_seconds(v: f32) -> f64 {
     let v = f64::from(v.clamp(0.0, 1.0));
@@ -68,8 +67,12 @@ pub fn slide_seconds(v: f32) -> f64 {
     4.0 * (2f64.powf(8.0 * v) - 1.0) / 255.0
 }
 
+/// Output frame at which a tick position starts at a constant tempo: whole ticks start where the tick clock's running
+/// sum puts them (spec: audio/timing.md), a fraction of a tick adds its share of the tick's nominal length.
 pub fn tick_to_frame(ticks: f64, ppq: u16, tempo: f64, rate: u32) -> u64 {
-    (ticks / f64::from(ppq) * 60.0 / tempo * f64::from(rate)).round() as u64
+    let whole = ticks.max(0.0).floor();
+    let base = crate::clock::Clock::frame_of_tick(rate, ppq, tempo, whole as u64);
+    base + ((ticks - whole) * crate::clock::samples_per_tick(rate, ppq, tempo)).round() as u64
 }
 
 #[cfg(test)]

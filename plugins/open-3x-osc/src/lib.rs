@@ -74,6 +74,7 @@ pub fn block(p: &Osc3Params, bend: f64) -> dsp::Block {
             attack_tension: v(r + R_ATT_T),
             decay_tension: v(r + R_DEC_T),
             release_tension: v(r + R_REL_T),
+            ..Default::default()
         };
         dsp::Target {
             env: envelope::Params::new(&e),

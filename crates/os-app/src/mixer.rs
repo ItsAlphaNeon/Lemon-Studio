@@ -175,15 +175,16 @@ pub fn level_text(label: &str, v: f64) -> String {
     format!("{label}: {:.0}%  {db}  {g:.2}", v / 0.8 * 100.0)
 }
 
-/// "Stereo separation: Original" / "40% separated" / "40% merged" (§4).
+/// "Stereo separation: Original" / "40% separated" / "40% merged" (§4). A positive stored value merges towards mono
+/// (spec: audio/mixer.md "Fader matrix"); which way FL's knob turns for it is not checked.
 pub fn sep_text(sep: f64) -> String {
     let pct = (sep.abs() * 100.0).round();
     if pct == 0.0 {
         "Stereo separation: Original".into()
     } else if sep > 0.0 {
-        format!("Stereo separation: {pct:.0}% separated")
-    } else {
         format!("Stereo separation: {pct:.0}% merged")
+    } else {
+        format!("Stereo separation: {pct:.0}% separated")
     }
 }
 

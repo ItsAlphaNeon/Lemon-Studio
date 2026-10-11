@@ -59,9 +59,9 @@ losslessly, so existing projects open, play and save without losing data it does
 <td width="50%" valign="top">
 
 ### 🎛️ Audio engine
-- Sample-accurate pattern and song playback
+- Tick-based pattern and song playback: a running tick clock, swing in whole ticks, song length and render tail
 - Sampler with high-quality windowed-sinc resampling
-- Mixer graph with sends, sidechain routing and measured gain, pan and pitch laws
+- Mixer graph with sends, sidechain routing, stereo separation, a three-band track equaliser and gliding gains
 - Built-in effects: parametric EQ and limiter
 - Channel envelopes, note repeat and per-pattern control lanes
 - Automation clips for channel, mixer and plugin parameters (sample-accurate plugin parameter events)
@@ -182,6 +182,7 @@ OpenStudio is a Cargo workspace of focused crates:
 | [`os-model`](crates/os-model) | Project data model, free of I/O |
 | [`os-flp`](crates/os-flp) | Lossless `.flp` event-stream reader/writer and model mapping |
 | [`os-engine`](crates/os-engine) | Audio engine: sampler, mixer, routing, effects, envelopes, automation |
+| [`os-dsp`](crates/os-dsp) | DSP building blocks: level curve, pan split, gain glides, mixer matrix and equaliser |
 | [`os-theme`](crates/os-theme) | Colour palette, theme files and the HSL adjustment model |
 | [`os-ui`](crates/os-ui) | CPU canvas, text rendering and the shared widget kit |
 | [`os-app`](crates/os-app) | The `openstudio` application: windows, editors, transport |
@@ -204,6 +205,7 @@ OpenStudio is a Cargo workspace of focused crates:
 - [x] Theme engine and theme import
 - [x] VST3 hosting (instruments, effects, editors, state, automation)
 - [x] Experimental native effect hosting (opt-in)
+- [ ] Engine rework from the engine specifications: sampler voice, mixer, automation, delay compensation (in progress)
 - [ ] ASIO audio output
 - [ ] Saving plugin channels and full mixer state to project files
 - [ ] More built-in instruments and effects

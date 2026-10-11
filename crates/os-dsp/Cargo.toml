@@ -1,0 +1,8 @@
+[package]
+name = "os-dsp"
+description = "OpenStudio DSP building blocks: level curve, pan split, gain glides, mixer matrix and equaliser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

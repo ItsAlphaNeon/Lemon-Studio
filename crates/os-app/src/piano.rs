@@ -890,13 +890,18 @@ mod tests {
             }
             let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
             e.continue_from(&mut old);
-            e.process(&mut buf); // ramps down over one block
+            // The rest of the tick already rendered, then the ramp down: a mixer gain moves at most 0.001 per sample at
+            // 44.1 kHz (about 1000 samples from unity to silence; spec: audio/mixer.md "Gains ramp").
+            for _ in 0..3 {
+                e.process(&mut buf);
+            }
             e.process(&mut buf);
             assert_eq!(peak(&buf), 0.0, "edit {edit} silences the ringing voice");
         }
     }
 
-    /// A tempo change keeps the musical position.
+    /// A tempo change keeps the musical position: the tick goes on where it was, the frames continue, and the ticks
+    /// after it follow the new tempo.
     #[test]
     fn tempo_change_keeps_tick() {
         let mut a = app();
@@ -909,10 +914,18 @@ mod tests {
         for _ in 0..10 {
             old.process(&mut buf);
         }
+        let (tick, frame) = (old.tick_position(), old.position());
         a.state.project.tempo = Some(65.0);
         let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
         e.continue_from(&mut old);
-        assert_eq!(e.position(), 10_000, "half the tempo, twice the frames");
+        assert_eq!((e.tick_position(), e.position()), (tick, frame), "same tick, same frame");
+        // Past the tick already rendered, ticks are 48000 * 60 / (65 * 96) = 461.5 frames long.
+        e.process(&mut buf);
+        let (t0, f0) = (e.tick_position(), e.position());
+        let mut ten = vec![0.0f32; 2 * 4615];
+        e.process(&mut ten);
+        let per_tick = (e.position() - f0) as f64 / (e.tick_position() - t0);
+        assert!((per_tick - 461.5).abs() < 1.0, "{per_tick} frames per tick");
     }
 
     /// Live notes ring until note off, then fade out within the release; the engine with no
@@ -936,8 +949,8 @@ mod tests {
         assert!(peak(&buf) > 0.001 && e.sounding().count() == 1, "held note rings");
         e.note_off(4, 60);
         assert_eq!(e.sounding().count(), 0);
-        for _ in 0..4 {
-            e.process(&mut buf); // 15 ms fade = 720 frames, then a silent block
+        for _ in 0..5 {
+            e.process(&mut buf); // the rest of the tick already rendered, the 15 ms fade (720 frames), a silent block
         }
         assert_eq!(peak(&buf), 0.0, "released");
         assert!(e.finished());
