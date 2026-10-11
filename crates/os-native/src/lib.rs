@@ -7,8 +7,10 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 pub mod abi;
+pub mod adapter;
 pub mod host;
 pub mod stream;
+pub mod stub;
 
 use std::ffi::{c_char, CString};
 use std::path::{Path, PathBuf};
@@ -16,6 +18,65 @@ use std::path::{Path, PathBuf};
 use abi::{flags, IntPtr, PluginObject, VoiceParams};
 use host::HostObject;
 use stream::MemStream;
+
+/// Default FL Studio install folder (data path): `OPENSTUDIO_FACTORY` if set, else the usual path.
+pub fn default_fl_dir() -> PathBuf {
+    std::env::var_os("OPENSTUDIO_FACTORY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\Image-Line\FL Studio 2026"))
+}
+
+/// Whether the experimental native-plugin host is opted into for this process, via the
+/// `OPENSTUDIO_NATIVE` environment variable (`1`/`true`/`on`). The app also exposes a settings
+/// toggle; it sets this at startup so the whole process agrees.
+pub fn enabled() -> bool {
+    matches!(
+        std::env::var("OPENSTUDIO_NATIVE").as_deref(),
+        Ok("1") | Ok("true") | Ok("on") | Ok("yes")
+    )
+}
+
+/// Turns the opt-in on or off for this process (so a settings toggle and `enabled()` agree).
+pub fn set_enabled(on: bool) {
+    // SAFETY: set once at startup / from the UI thread before plugins are scanned.
+    unsafe {
+        if on {
+            std::env::set_var("OPENSTUDIO_NATIVE", "1");
+        } else {
+            std::env::remove_var("OPENSTUDIO_NATIVE");
+        }
+    }
+}
+
+/// One installed FL native plugin found on disk.
+#[derive(Debug, Clone)]
+pub struct Installed {
+    pub name: String,
+    pub is_generator: bool,
+    pub path: PathBuf,
+}
+
+/// Lists the installed FL native plugins under `<fl>\Plugins\Fruity\{Generators,Effects}`.
+/// Each plugin is a `<Name>\<Name>_x64.dll`. Nothing is loaded; the kind comes from the folder.
+pub fn installed(fl_dir: &Path) -> Vec<Installed> {
+    let mut out = Vec::new();
+    for (kind, is_gen) in [("Generators", true), ("Effects", false)] {
+        let dir = fl_dir.join("Plugins").join("Fruity").join(kind);
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            if !e.path().is_dir() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let dll = e.path().join(format!("{name}_x64.dll"));
+            if dll.is_file() {
+                out.push(Installed { name, is_generator: is_gen, path: dll });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeError {
@@ -177,6 +238,22 @@ impl Plugin {
         unsafe { (self.vt().idle)(self.obj) }
     }
 
+    /// Advances the plugin's internal clock one tick. Generators that set the `WantNewTick` flag
+    /// expect this between buffers; without it their envelopes and timing do not progress.
+    pub fn new_tick(&mut self) {
+        unsafe { (self.vt().new_tick)(self.obj) }
+    }
+
+    /// Tells the plugin whether the song is playing (dispatcher `SetPlaying`).
+    pub fn set_playing(&mut self, playing: bool) {
+        self.dispatch(abi::dispatch::SET_PLAYING, 0, playing as IntPtr);
+    }
+
+    /// Enables or bypasses the plugin (dispatcher `SetEnabled`).
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.dispatch(abi::dispatch::SET_ENABLED, 0, enabled as IntPtr);
+    }
+
     pub fn killed_voices(&mut self) -> Vec<IntPtr> {
         std::mem::take(&mut self.host.context().killed_voices)
     }
@@ -201,4 +278,59 @@ pub fn find_plugin(fl_dir: &Path, name: &str) -> Option<PathBuf> {
         let p = fl_dir.join("Plugins").join("Fruity").join(kind).join(name).join(format!("{name}_x64.dll"));
         p.is_file().then_some(p)
     })
+}
+
+/// Default block size handed to a plugin at load.
+pub const DEFAULT_BLOCK: usize = adapter::MAX_BLOCK;
+
+/// Loads an effect plugin and wraps it as a shared engine insert effect.
+pub fn load_effect(dll: &Path, fl_dir: &Path, rate: u32) -> Result<os_engine::instrument::SharedEffect, NativeError> {
+    let plugin = Plugin::load(dll, fl_dir, rate, DEFAULT_BLOCK)?;
+    Ok(std::sync::Arc::new(std::sync::Mutex::new(adapter::NativeEffect::new(plugin, rate))))
+}
+
+/// Loads a generator plugin and wraps it as a shared engine instrument (experimental; see adapter).
+pub fn load_instrument(dll: &Path, fl_dir: &Path, rate: u32) -> Result<os_engine::instrument::SharedInstrument, NativeError> {
+    let plugin = Plugin::load(dll, fl_dir, rate, DEFAULT_BLOCK)?;
+    Ok(std::sync::Arc::new(std::sync::Mutex::new(adapter::NativeInstrument::new(plugin, rate))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // These tests need the user's FL install. They skip (pass) when it is absent, and are only
+    // meaningful on Windows x64. No plugin DLL is bundled or committed.
+    fn fl() -> Option<PathBuf> {
+        let d = default_fl_dir();
+        d.join("Plugins").join("Fruity").exists().then_some(d)
+    }
+
+    #[test]
+    fn enumerates_installed_plugins() {
+        let Some(fl) = fl() else { return };
+        let list = installed(&fl);
+        assert!(!list.is_empty(), "expected some Fruity plugins");
+        assert!(list.iter().any(|p| !p.is_generator), "expected at least one effect");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn effect_loads_and_passes_audio() {
+        let Some(fl) = fl() else { return };
+        let Some(dll) = find_plugin(&fl, "Fruity Balance") else { return };
+        let rate = 44_100;
+        let fx = load_effect(&dll, &fl, rate).expect("load Fruity Balance");
+        // A 1 kHz sine through default Balance should come back finite and roughly unchanged.
+        let mut l: Vec<f32> = (0..1024).map(|s| (std::f32::consts::TAU * 1000.0 * s as f32 / rate as f32).sin() * 0.5).collect();
+        let mut r = l.clone();
+        let before = l.clone();
+        fx.lock().unwrap().process_fx(rate, &mut l, &mut r);
+        assert!(l.iter().all(|s| s.is_finite()), "output must be finite");
+        let peak = l.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.1 && peak < 2.0, "default Balance near unity, got peak {peak}");
+        // Not a null-test, but it should not be wildly different from the input.
+        let diff: f32 = l.iter().zip(&before).map(|(a, b)| (a - b).abs()).sum::<f32>() / l.len() as f32;
+        assert!(diff < 0.2, "default Balance should roughly pass through, mean abs diff {diff}");
+    }
 }

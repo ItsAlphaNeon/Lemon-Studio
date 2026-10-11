@@ -2075,6 +2075,7 @@ name = "os-native"
 version = "0.0.1"
 dependencies = [
  "libloading",
+ "os-engine",
  "thiserror 2.0.21",
 ]
 
@@ -2084,6 +2085,7 @@ version = "0.0.1"
 dependencies = [
  "os-engine",
  "os-native",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

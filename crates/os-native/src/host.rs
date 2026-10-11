@@ -8,9 +8,30 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CString};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::abi::{IntPtr, VoiceParams, HOST_EXTRA_SLOTS, HOST_METHODS};
+
+/// A hook the host consults before its own handling of a `Dispatcher` call (plugin -> host),
+/// so experimental code can answer undocumented dispatcher IDs the published SDK does not cover
+/// (see "Unknown host slots" in the spec). Returns `Some(result)` to answer, `None` to fall
+/// through to the built-in handling. `(id, index, value)`.
+pub type DispatchHook = fn(IntPtr, IntPtr, IntPtr) -> Option<IntPtr>;
+
+/// Function pointer stored as a `usize` (0 = none). A plain pointer, so no allocation or lock
+/// on the hot dispatcher path.
+static DISPATCH_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+/// Installs (or clears, with `None`) the global dispatcher hook. Process-wide.
+pub fn set_dispatch_hook(hook: Option<DispatchHook>) {
+    DISPATCH_HOOK.store(hook.map_or(0, |f| f as usize), Ordering::SeqCst);
+}
+
+fn dispatch_hook() -> Option<DispatchHook> {
+    let p = DISPATCH_HOOK.load(Ordering::Relaxed);
+    (p != 0).then(|| unsafe { std::mem::transmute::<usize, DispatchHook>(p) })
+}
 
 const SLOTS: usize = HOST_METHODS + HOST_EXTRA_SLOTS;
 const WAVETABLE_LEN: usize = 16384;
@@ -125,6 +146,11 @@ impl Drop for HostObject {
 // Implemented methods
 
 unsafe extern "system" fn dispatcher(this: *mut HostObject, _sender: IntPtr, id: IntPtr, index: IntPtr, value: IntPtr) -> IntPtr {
+    if let Some(hook) = dispatch_hook() {
+        if let Some(r) = hook(id, index, value) {
+            return r;
+        }
+    }
     match id {
         // GetProgPath / GetProjDataPath: data path
         29 | 47 => ctx(this).map_or(0, |c| c.prog_path.as_ptr() as IntPtr),
@@ -137,8 +163,12 @@ unsafe extern "system" fn dispatcher(this: *mut HostObject, _sender: IntPtr, id:
             }
             0
         }
-        // Harmless notifications
-        3 | 5 | 10 | 13 | 23 | 27 | 30 | 33 | 35 | 48 => 0,
+        // The undocumented context object a plugin requests during construction: hand back the
+        // stand-in (spec plugins/fruity-abi.md, "Host dispatcher ID 71"). Without this the plugin
+        // crashes; with it, effects host and render.
+        71 => crate::stub::context_object(),
+        // Harmless notifications observed from FL 26 plugins (answered 0 with no ill effect).
+        3 | 5 | 10 | 13 | 23 | 27 | 30 | 33 | 35 | 46 | 48 | 50 | 72 | 86 => 0,
         _ => {
             log_once(format!("host dispatcher id {id} (index {index}, value {value})"));
             if let Some(c) = ctx(this) {

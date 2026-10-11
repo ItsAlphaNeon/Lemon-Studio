@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 libloading = "0.8"
 thiserror.workspace = true
+os-engine.workspace = true
