@@ -74,6 +74,22 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         }
         icons::draw(ui.c, icon, b, if on { t.glyph } else if hov { t.text.shade(0.3) } else { t.text });
     }
+    // Stretch mode (Shift+M, §9b): |<->| after the tools, lit while on.
+    {
+        let b = Rect::new(r.x + 254.0 - 9.0, ty, 18.0, 18.0);
+        let hov = ui.hit(b, Action::PlStretch, if s.playlist.stretch { "Stretch mode: on (Shift+M)" } else { "Stretch mode: off (Shift+M)" });
+        let on = s.playlist.stretch;
+        if on {
+            ui.c.fill_rrect(b.outset(1.0), 3.0, t.glyph.with_alpha(40));
+        }
+        let col = if on { t.glyph } else if hov { t.text.shade(0.3) } else { t.text };
+        let (cx, cy) = (b.cx(), b.cy());
+        ui.c.fill_rect(Rect::new(cx - 7.0, cy - 5.0, 1.2, 10.0), col);
+        ui.c.fill_rect(Rect::new(cx + 5.8, cy - 5.0, 1.2, 10.0), col);
+        ui.c.line(cx - 5.0, cy, cx + 4.0, cy, 1.2, col);
+        ui.c.fill_polygon(&[(cx - 5.5, cy), (cx - 2.5, cy - 2.5), (cx - 2.5, cy + 2.5)], col);
+        ui.c.fill_polygon(&[(cx + 4.5, cy), (cx + 1.5, cy - 2.5), (cx + 1.5, cy + 2.5)], col);
+    }
     if r.h < 2.0 * crate::app::TITLE_H {
         return; // collapsed to the title bar
     }

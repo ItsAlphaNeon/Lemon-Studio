@@ -188,6 +188,8 @@ pub enum Action {
     PlGroupArrow(u16),
     /// The arrangement name in the playlist title: the arrangement menu (spec: ui/playlist.md §12).
     PlArrangement,
+    /// Stretch mode switch in the playlist title (Shift+M, spec: ui/playlist.md §9b).
+    PlStretch,
     PlPickTab(crate::playlist::PickKind),
     PlPick(os_model::ClipSource),
     /// Picker list background / footer "+".
@@ -3185,6 +3187,9 @@ impl App {
                 let (x, y) = self.mouse;
                 self.state.playlist.popup = Some(pl::options_menu(&self.state, x - 6.0, y + 10.0));
             }
+            Action::PlStretch => {
+                self.state.message = pl::run(self, pl::Cmd::StretchMode);
+            }
             Action::PlArrangement => {
                 let r = self.top_hit(self.mouse.0, self.mouse.1).map(|h| h.rect).unwrap_or(Rect::new(self.mouse.0, self.mouse.1, 1.0, 20.0));
                 self.state.playlist.arr_anchor = (r.x - 4.0, r.y);
@@ -3530,6 +3535,7 @@ impl App {
             | Action::PlLed(_)
             | Action::PlGroupArrow(_)
             | Action::PlArrangement
+            | Action::PlStretch
             | Action::PlPickTab(_)
             | Action::PlPick(_)
             | Action::PlPopup(_)
@@ -5368,6 +5374,94 @@ mod tests {
         assert!(app.state.song_mode, "a click on the ruler switches to SONG");
         assert_eq!(app.state.playlist.pos, 4 * bar);
         assert!(!app.transport.playing(), "and does not start playback");
+    }
+
+    /// Stretch mode (spec: ui/playlist.md §9b): Shift+M on, then dragging an audio clip's end to twice its length
+    /// doubles its channel's resample multiplier and keeps the part of the sample it shows; undo restores both; the
+    /// multiplier is saved with a new audio clip channel.
+    #[test]
+    fn playlist_stretch_mode() {
+        use crate::playlist as pl;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, _, _, _) = ruler_app(&mut c);
+        app.state.playlist_bar_w = 200.0;
+        app.state.playlist.snap = pl::Snap::None;
+        let wav = std::env::temp_dir().join(format!("os-app-stretch-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
+        pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let ci = pl::clips(&app.state).len() - 1;
+        let row = app.state.project.channels.len() - 1;
+        let before = pl::clips(&app.state)[ci];
+        pl::run(&mut app, pl::Cmd::StretchMode);
+        assert!(app.state.playlist.stretch);
+        frame(&mut app, &mut c, None);
+        let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
+        let r = g.clip_rect(&before);
+        let y = r.y + r.h - 6.0;
+        app.mouse_move(r.right() - 1.0, y);
+        app.mouse_down();
+        app.mouse_move(r.right() - 1.0 + r.w, y);
+        app.mouse_up();
+        let after = pl::clips(&app.state)[ci];
+        let m = app.state.project.channels[row].sound.stretch_multiplier();
+        assert!((m - 2.0).abs() < 0.02, "multiplier {m}");
+        assert!((f64::from(after.length) / f64::from(before.length) - 2.0).abs() < 0.02, "twice as long");
+        assert_eq!(after.window, before.window, "the same part of the sample");
+        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        assert_eq!(app.state.project.channels[row].sound.stretch, [0; 4], "undo restores the channel");
+        // Saved with a new project's audio clip channel.
+        app.key(&winit::keyboard::Key::Character("y".into()), true, false);
+        app.state.project.channels[row].sound.set_stretch_multiplier(2.0);
+        let path = std::env::temp_dir().join(format!("os-app-stretch-{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let ch = back.channels.iter().find(|c| c.kind == ChannelKind::AudioClip).expect("the audio clip channel");
+        assert_eq!(ch.sound.stretch, [0, 0, 10000, 0]);
+        // And changed in that existing file (its event 215 patched).
+        let mut app2 = App::new(Some(path.clone()));
+        let row2 = app2.state.project.channels.iter().position(|c| c.kind == ChannelKind::AudioClip).unwrap();
+        app2.state.project.channels[row2].sound.set_stretch_multiplier(0.5);
+        app2.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        assert_eq!(back.channels[row2].sound.stretch, [0, 0, (-10000i32) as u32, 0]);
+        let _ = (std::fs::remove_file(&path), std::fs::remove_file(&wav));
+    }
+
+    /// Tools menu (spec: ui/playlist.md §10): quick quantize moves clip starts onto the snap grid (one undo step);
+    /// export renders every playing track to its own file, all as long as the song.
+    #[test]
+    fn playlist_quantize_and_export_tracks() {
+        use crate::playlist as pl;
+        use os_model::{Clip, ClipSource};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, _, _, bar) = ruler_app(&mut c);
+        let ppq = u32::from(app.state.project.ppq);
+        app.state.playlist.snap = pl::Snap::Step;
+        let step = ppq / 4;
+        let a = pl::arr_mut(&mut app.state);
+        a.clips = vec![Clip::new(step + 5, bar, 0, ClipSource::Pattern(1)), Clip::new(2 * bar - 3, bar, 2, ClipSource::Pattern(1))];
+        // Each channel plays a note so the tracks make sound.
+        let ch = app.state.project.channels[0].index;
+        app.state.project.patterns[0].notes = vec![os_model::Note { length: ppq, ..os_model::Note::step(ch, 0) }];
+        let m = pl::run(&mut app, pl::Cmd::QuantizeStarts).unwrap();
+        assert!(m.contains("moved 2"), "{m}");
+        let starts: Vec<u32> = pl::clips(&app.state).iter().map(|c| c.position).collect();
+        assert_eq!(starts, vec![step, 2 * bar], "nearest steps");
+        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        assert_eq!(pl::clips(&app.state)[0].position, step + 5, "one undo step");
+        // Export: two files (tracks 1 and 3), the same length, each with sound only where its clip is.
+        app.state.path = Some(std::env::temp_dir().join(format!("os-export-{}.flp", std::process::id())));
+        let m = pl::run(&mut app, pl::Cmd::ExportTracks).unwrap();
+        let dir = std::env::temp_dir().join("Rendered").join(format!("os-export-{} tracks", std::process::id()));
+        assert!(m.starts_with("Exported 2 tracks"), "{m}");
+        let read = |name: &str| os_engine::sample::load(&dir.join(name)).expect(name);
+        let (t1, t3) = (read("01 Track 1.wav"), read("03 Track 3.wav"));
+        assert!(t1.frames() >= os_engine::laws::tick_to_frame(f64::from(3 * bar - 3), 96, app.state.tempo, 44100) as usize);
+        let loud = |s: &os_engine::sample::Sample, a: usize, b: usize| s.left[a..b.min(s.frames())].iter().any(|v| v.abs() > 0.01);
+        let f = |t: u32| os_engine::laws::tick_to_frame(f64::from(t), 96, app.state.tempo, 44100) as usize;
+        assert!(loud(&t1, f(step), f(step + ppq)) && !loud(&t3, f(step), f(step + ppq)), "track 1's clip only in its file");
+        assert!(loud(&t3, f(2 * bar), f(2 * bar + ppq)), "track 3's clip in its file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Arrangements (spec: ui/playlist.md §12): add, rename, clone, merge, delete, switch; saved and read back with

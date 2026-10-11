@@ -715,6 +715,18 @@ fn load_misc(block: &[Event]) -> ChannelMisc {
     m
 }
 
+/// Event 215 of a new audio clip channel as FL 26 writes it (declick mode 1, not stretched), its stretch ints
+/// (bytes 96..112) replaced by the channel's (spec: flp/engine-events.md "A channel", audio/audio-clips.md).
+const AUDIO_CLIP_215: &str = "8c0000000000000001000000ffffffff3c0000000000803f0000803f0000803f0000803f0000803f000000000300000000000000000400003000000000000100a7050000000000000001000000000000000000010000000000000000010000000000000000000000000000000000000002000000feffffffffffffff000000000000000000000000000000000000f03f0000000000000000ffffffff01010000000000000000e03f";
+
+fn audio_clip_215(stretch: [u32; 4]) -> Vec<u8> {
+    let mut d: Vec<u8> = (0..AUDIO_CLIP_215.len()).step_by(2).map(|i| u8::from_str_radix(&AUDIO_CLIP_215[i..i + 2], 16).unwrap_or(0)).collect();
+    for (k, v) in stretch.iter().enumerate() {
+        d[96 + 4 * k..100 + 4 * k].copy_from_slice(&v.to_le_bytes());
+    }
+    d
+}
+
 /// Filter (event 219 ints 3..5), sampler flags (143), declick mode and stretch settings (215).
 fn load_sound(block: &[Event], levels: &dyn Fn(usize) -> Option<i32>) -> ChannelSound {
     let find = |id: u8| block.iter().find(|e| e.id == id);
@@ -1487,6 +1499,18 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
 
     // Channels.
     for (loc, (ch, old)) in l.channels.iter().zip(project.channels.iter().zip(&current.channels)) {
+        // Stretch settings: event 215 ints 24..27 of the channel's block (spec: audio/audio-clips.md "Settings").
+        if ch.sound.stretch != old.sound.stretch {
+            let mut k = loc.start + 1;
+            while k < events.len() && events[k].id != id::CH_START && events[k].id != id::ARR_START {
+                if events[k].id == id::CH_SAMPLE_SETTINGS {
+                    let bytes: Vec<u8> = ch.sound.stretch.iter().flat_map(|v| v.to_le_bytes()).collect();
+                    patch_bytes(&mut events[k], 96, &bytes);
+                    break;
+                }
+                k += 1;
+            }
+        }
         if ch.name != old.name {
             match (loc.name, &ch.name) {
                 (Some(i), Some(n)) => set_data(&mut events[i], encode_text(n, enc)),
@@ -2348,6 +2372,10 @@ fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -
     levels[8..12].copy_from_slice(&ch.pitch_cents.to_le_bytes());
     levels[13] = 1; // the template's `00 01 00 00 …` tail
     b.push(Event::new(id::CH_LEVELS, Value::var(levels.to_vec())));
+    if ch.kind == ChannelKind::AudioClip {
+        // FL writes the sample settings right after the levels.
+        b.push(Event::new(id::CH_SAMPLE_SETTINGS, Value::var(audio_clip_215(ch.sound.stretch))));
+    }
     b.push(Event::new(id::CH_GROUP, Value::U32(ch.rack.group)));
     if let Some(a) = auto.filter(|_| ch.kind == ChannelKind::Automation) {
         b.push(Event::new(id::AUTO_DATA, Value::var(encode_automation(a))));

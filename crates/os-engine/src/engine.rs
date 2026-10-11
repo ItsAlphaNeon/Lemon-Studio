@@ -520,10 +520,15 @@ impl Engine {
                 };
                 let env_on = ch.kind == ChannelKind::Sampler;
                 let volume = if ch.enabled { laws::channel_gain(ch.volume) } else { 0.0 };
-                let base_rate = sample.as_ref().map_or(1.0, |s| f64::from(s.rate) / f64::from(rate))
-                    * laws::playback_rate(60, ch.pitch_cents);
+                // Stretching by resampling plays the sample faster or slower (spec: audio/audio-clips.md "Stretching by
+                // resampling (mode 0)"); with a fitted time the channel's pitch no longer applies.
+                let (speed, pitched) = sample
+                    .as_ref()
+                    .filter(|_| plays_sample)
+                    .map_or((1.0, true), |s| ch.sound.stretch_speed(s.frames() as f64 / f64::from(s.rate.max(1)), tempo));
+                let src_ratio = sample.as_ref().map_or(1.0, |s| f64::from(s.rate) / f64::from(rate)) * speed;
+                let base_rate = src_ratio * if pitched { laws::playback_rate(60, ch.pitch_cents) } else { 1.0 };
                 let insert = usize::from(ch.mixer_track).min(n_tracks - 1);
-                let src_ratio = sample.as_ref().map_or(1.0, |s| f64::from(s.rate) / f64::from(rate));
                 ChannelState {
                     sample,
                     volume,
@@ -2555,6 +2560,28 @@ mod tests {
         let end = clip_frames - 1200; // half way through the 50 ms fade-out
         let w = 2.0 * os_model::fade_curve(1200.0 / 2400.0, 3.0) as f32;
         assert!((g(end) - w).abs() < 2e-3, "instrument fade-out half way: {} vs {w}", g(end));
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    // spec: audio/audio-clips.md "Stretching by resampling (mode 0)"
+    #[test]
+    fn resample_stretch_multiplier_slows_the_clip() {
+        use os_model::{Clip, ClipSource};
+        let wav = std::env::temp_dir().join(format!("os-engine-stretch-{}.wav", std::process::id()));
+        let ramp: Vec<f32> = (0..48000).flat_map(|i| [i as f32 / 48000.0; 2]).collect();
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &ramp).unwrap();
+        let mut p = song(vec![], vec![Clip::new(0, 384, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        let mut lib = SampleLibrary::new(None);
+        let plain = Engine::new(&p, &mut lib, 48000, PlayMode::Song).render_all(480);
+        p.channels[0].sound.set_stretch_multiplier(2.0);
+        assert_eq!(p.channels[0].sound.stretch, [0, 0, 10000, 0], "stored as log2(2) * 10000");
+        let slow = Engine::new(&p, &mut lib, 48000, PlayMode::Song).render_all(480);
+        // Twice as long: frame 2f of the stretched clip is frame f of the plain one.
+        for f in [1000usize, 4000, 12000] {
+            assert!((slow[4 * f] - plain[2 * f]).abs() < 1e-3, "frame {}: {} vs {}", 2 * f, slow[4 * f], plain[2 * f]);
+        }
         let _ = std::fs::remove_file(&wav);
     }
 

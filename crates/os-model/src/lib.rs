@@ -235,6 +235,37 @@ pub struct ChannelSound {
     pub stretch: [u32; 4],
 }
 
+impl ChannelSound {
+    /// The resample stretch multiplier `2^(stored / 10000)` (event 215 int 26; spec: audio/audio-clips.md "Stretching by
+    /// resampling"), 1.0 when none.
+    pub fn stretch_multiplier(&self) -> f64 {
+        2f64.powf(f64::from(self.stretch[2] as i32) / 10000.0)
+    }
+
+    /// Stretches by resampling with multiplier `m` and no fitted time (the clip plays `m` times as long).
+    pub fn set_stretch_multiplier(&mut self, m: f64) {
+        self.stretch[0] = 0;
+        self.stretch[2] = (m.log2() * 10000.0).round() as i32 as u32;
+        self.stretch[3] = 0;
+    }
+
+    /// Playback speed of a stretched sample of `duration` seconds at `bpm`, and whether the channel's pitch still
+    /// applies (spec: audio/audio-clips.md "Stretching by resampling (mode 0)"; other modes play unstretched here).
+    pub fn stretch_speed(&self, duration: f64, bpm: f64) -> (f64, bool) {
+        let [time, _, _, mode] = self.stretch;
+        if mode != 0 {
+            return (1.0, true);
+        }
+        let m = f64::from(self.stretch_multiplier() as f32);
+        if time > 0 && duration > 0.0 {
+            let target = (f64::from(time) / 192.0) * (60.0 / bpm) * m;
+            (duration / target, false)
+        } else {
+            (1.0 / m, true)
+        }
+    }
+}
+
 impl Default for ChannelSound {
     /// A new channel: filter open, no flags read, declick mode 0, not stretched.
     fn default() -> Self {
