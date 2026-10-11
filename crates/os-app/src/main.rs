@@ -519,8 +519,13 @@ impl ApplicationHandler for Shell {
                             // more buffers in turn (age 2 and up): such a buffer lacks what was painted since
                             // it was last shown, so it gets the whole canvas.
                             let age = buf.age();
+                            // A docked plugin window moved: what it uncovered needs the whole canvas.
+                            #[cfg(windows)]
+                            let exposed = crate::plugin_window::take_exposed();
+                            #[cfg(not(windows))]
+                            let exposed = false;
                             match damage {
-                                Some(Some(r)) if age == 1 => {
+                                Some(Some(r)) if age == 1 && !exposed => {
                                     let px = canvas.device_rect(r);
                                     canvas.copy_region_to_xrgb_at(&mut buf, stride, px, off);
                                     match (NonZeroU32::new(px.2 as u32), NonZeroU32::new(px.3 as u32)) {

@@ -1185,6 +1185,8 @@ impl App {
         let work = px(self.state.work_rect());
         let over: Vec<[i32; 4]> = self.overlays.iter().map(|&r| px(r.outset(2.0))).collect();
         let z = self.state.z.clone();
+        let stacked: Vec<usize> = z.iter().filter_map(|w| if let Win::Hosted(r) = w { Some(*r) } else { None }).collect();
+        self.plugins.stack(&stacked);
         let docked_at = z.iter().rposition(|&w| self.state.is_max(w));
         for (i, &w) in z.iter().enumerate() {
             let Win::Hosted(row) = w else { continue };

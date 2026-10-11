@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::f32::consts::PI;
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
 
 use os_hostlink::PageIcon;
@@ -19,7 +20,8 @@ use os_ui::tabler as tb;
 use os_ui::{Canvas, Color, Font, Rect};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, InvalidateRect, ScreenToClient, SetWindowRgn, RGN_AND, RGN_DIFF, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
+    BeginPaint, ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, GetWindowRgn, InvalidateRect, RedrawWindow, ScreenToClient, SetWindowRgn, RDW_ALLCHILDREN, RDW_INVALIDATE,
+    RDW_UPDATENOW, RGN_AND, RGN_COPY, RGN_DIFF, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -57,6 +59,15 @@ pub fn take_link() -> Vec<(isize, LinkMsg)> {
     LINK.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
 }
 static KEY_HOOK: Once = Once::new();
+
+/// A docked window moved and the main window repainted what it uncovered.
+static EXPOSED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a docked plugin window uncovered part of the main window since the last call: the next present must show
+/// the whole canvas, not only the app's own damage (UI thread).
+pub fn take_exposed() -> bool {
+    EXPOSED.swap(false, Ordering::Relaxed)
+}
 
 /// Keys seen since the last call (UI thread).
 pub fn take_keys() -> Vec<KeyMsg> {
@@ -234,6 +245,11 @@ struct State {
     moving: Option<(i32, i32, i32, i32)>,
     /// A top-level window (menu arrow > Detached) instead of a child of the main window.
     detached: bool,
+    /// Docked: the workspace and the rects covering it (the app's windows and popups above this one), in the main
+    /// window's client area (physical px). Kept so a move re-clips at once instead of at the app's next tick.
+    clip: Option<([i32; 4], Vec<[i32; 4]>)>,
+    /// The clip last applied (window rect, workspace, covering rects), so unchanged clips are not reset.
+    clip_key: Option<Vec<i32>>,
 }
 
 impl State {
@@ -504,8 +520,6 @@ pub struct FrameWindow {
     hwnd: HWND,
     area: HWND,
     state: Rc<RefCell<State>>,
-    /// The last clip applied while docked (window position, workspace, covering rects), so unchanged clips are not reset.
-    clip: RefCell<Option<Vec<i32>>>,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -536,6 +550,8 @@ impl FrameWindow {
             drag: None,
             moving: None,
             detached,
+            clip: None,
+            clip_key: None,
         }));
         let (w, h) = state.borrow().size();
         let px = |v: f32| (v * scale).round() as i32;
@@ -600,7 +616,7 @@ impl FrameWindow {
             if let Some(w) = win_of(hwnd) {
                 w.area = area;
             }
-            Ok(FrameWindow { hwnd, area, state, clip: RefCell::new(None) })
+            Ok(FrameWindow { hwnd, area, state })
         }
     }
 
@@ -614,8 +630,12 @@ impl FrameWindow {
         if self.state.borrow().detached == on {
             return;
         }
-        self.state.borrow_mut().detached = on;
-        *self.clip.borrow_mut() = None;
+        {
+            let mut st = self.state.borrow_mut();
+            st.detached = on;
+            st.clip = None;
+            st.clip_key = None;
+        }
         unsafe {
             let mut r: RECT = std::mem::zeroed();
             GetWindowRect(self.hwnd, &mut r);
@@ -637,53 +657,14 @@ impl FrameWindow {
         self.raise();
     }
 
-    /// The docked window's rect in its parent's client area (physical px).
-    pub fn docked_rect(&self) -> Option<[i32; 4]> {
-        if self.detached() {
-            return None;
-        }
-        unsafe {
-            let mut r: RECT = std::mem::zeroed();
-            GetWindowRect(self.hwnd, &mut r);
-            let parent = GetParent(self.hwnd);
-            let (mut a, mut b) = (POINT { x: r.left, y: r.top }, POINT { x: r.right, y: r.bottom });
-            ScreenToClient(parent, &mut a);
-            ScreenToClient(parent, &mut b);
-            Some([a.x, a.y, b.x, b.y])
-        }
-    }
-
     /// Clips a docked window to `work` minus the `covers` (the app's windows and popups above it), all in the parent's
-    /// client area (physical px).
+    /// client area (physical px). Moving the window by its title bar re-clips with the same rects.
     pub fn clip_to(&self, work: [i32; 4], covers: &[[i32; 4]]) {
-        let Some(me) = self.docked_rect() else { return };
-        let mut key: Vec<i32> = me.into_iter().chain(work).collect();
-        // Only what overlaps the window matters.
-        let hit = |c: &[i32; 4]| c[0] < me[2] && c[2] > me[0] && c[1] < me[3] && c[3] > me[1];
-        let covers: Vec<[i32; 4]> = covers.iter().copied().filter(hit).collect();
-        key.extend(covers.iter().flatten());
-        if self.clip.borrow().as_ref() == Some(&key) {
+        if self.detached() {
             return;
         }
-        *self.clip.borrow_mut() = Some(key);
-        let inside = work[0] <= me[0] && work[1] <= me[1] && work[2] >= me[2] && work[3] >= me[3];
-        unsafe {
-            if inside && covers.is_empty() {
-                SetWindowRgn(self.hwnd, std::ptr::null_mut(), 1);
-                return;
-            }
-            let (ox, oy) = (me[0], me[1]);
-            let rgn = CreateRectRgn(0, 0, me[2] - ox, me[3] - oy);
-            let w = CreateRectRgn(work[0] - ox, work[1] - oy, work[2] - ox, work[3] - oy);
-            CombineRgn(rgn, rgn, w, RGN_AND);
-            DeleteObject(w);
-            for c in &covers {
-                let r = CreateRectRgn(c[0] - ox, c[1] - oy, c[2] - ox, c[3] - oy);
-                CombineRgn(rgn, rgn, r, RGN_DIFF);
-                DeleteObject(r);
-            }
-            SetWindowRgn(self.hwnd, rgn, 1); // the system owns `rgn` now
-        }
+        self.state.borrow_mut().clip = Some((work, covers.to_vec()));
+        unsafe { apply_clip(self.hwnd, &self.state) };
     }
 
     /// The native frame window (drops find their plugin by it; tests drive and capture it).
@@ -694,12 +675,6 @@ impl FrameWindow {
     /// The child window the plugin's editor goes into.
     pub fn area(&self) -> *mut c_void {
         self.area
-    }
-
-    pub fn show(&self) {
-        unsafe {
-            ShowWindow(self.hwnd, SW_SHOWNORMAL);
-        }
     }
 
     pub fn raise(&self) {
@@ -795,6 +770,96 @@ fn frame_style(detached: bool) -> u32 {
     if detached { WS_POPUP | WS_CLIPCHILDREN } else { WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN }
 }
 
+
+/// Puts `parent`'s docked windows `hwnds` (bottom to top) in that native order when they are not already.
+pub fn stack(parent: isize, hwnds: &[isize]) {
+    if hwnds.len() < 2 {
+        return;
+    }
+    unsafe {
+        // The children's current order, bottom to top.
+        let mut now = Vec::new();
+        let mut c = GetWindow(parent as HWND, GW_CHILD);
+        while !c.is_null() {
+            if hwnds.contains(&(c as isize)) {
+                now.push(c as isize);
+            }
+            c = GetWindow(c, GW_HWNDNEXT);
+        }
+        now.reverse();
+        if now == hwnds {
+            return;
+        }
+        for &h in hwnds {
+            SetWindowPos(h as HWND, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+}
+
+/// A child window's rect in its parent's client area (physical px).
+unsafe fn parent_rect(hwnd: HWND) -> [i32; 4] {
+    unsafe {
+        let mut r: RECT = std::mem::zeroed();
+        GetWindowRect(hwnd, &mut r);
+        let parent = GetParent(hwnd);
+        let (mut a, mut b) = (POINT { x: r.left, y: r.top }, POINT { x: r.right, y: r.bottom });
+        ScreenToClient(parent, &mut a);
+        ScreenToClient(parent, &mut b);
+        [a.x, a.y, b.x, b.y]
+    }
+}
+
+/// Sets a docked window's region for its current position from `State::clip`. The parts that come into view are
+/// repainted, the plugin's editor included: the system redraws only the frame itself, and an editor left alone keeps
+/// showing whatever was seen through the old region.
+unsafe fn apply_clip(hwnd: HWND, state: &RefCell<State>) {
+    let (me, work, covers) = {
+        let mut st = state.borrow_mut();
+        let Some((work, covers)) = st.clip.as_ref() else { return };
+        let me = unsafe { parent_rect(hwnd) };
+        // Only what overlaps the window matters.
+        let hit = |c: &[i32; 4]| c[0] < me[2] && c[2] > me[0] && c[1] < me[3] && c[3] > me[1];
+        let covers: Vec<[i32; 4]> = covers.iter().copied().filter(hit).collect();
+        let work = *work;
+        let key: Vec<i32> = me.into_iter().chain(work).chain(covers.iter().flatten().copied()).collect();
+        if st.clip_key.as_ref() == Some(&key) {
+            return;
+        }
+        st.clip_key = Some(key);
+        (me, work, covers)
+    };
+    let inside = work[0] <= me[0] && work[1] <= me[1] && work[2] >= me[2] && work[3] >= me[3];
+    let (ox, oy, w, h) = (me[0], me[1], me[2] - me[0], me[3] - me[1]);
+    unsafe {
+        let whole = CreateRectRgn(0, 0, w, h);
+        let rgn = if inside && covers.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            let rgn = CreateRectRgn(0, 0, w, h);
+            let r = CreateRectRgn(work[0] - ox, work[1] - oy, work[2] - ox, work[3] - oy);
+            CombineRgn(rgn, rgn, r, RGN_AND);
+            DeleteObject(r);
+            for c in &covers {
+                let r = CreateRectRgn(c[0] - ox, c[1] - oy, c[2] - ox, c[3] - oy);
+                CombineRgn(rgn, rgn, r, RGN_DIFF);
+                DeleteObject(r);
+            }
+            rgn
+        };
+        // What the new region shows that the old one hid (no region = the whole window).
+        let old = CreateRectRgn(0, 0, 0, 0);
+        if GetWindowRgn(hwnd, old) == 0 {
+            CombineRgn(old, whole, std::ptr::null_mut(), RGN_COPY);
+        }
+        let gained = CreateRectRgn(0, 0, 0, 0);
+        CombineRgn(gained, if rgn.is_null() { whole } else { rgn }, old, RGN_DIFF);
+        SetWindowRgn(hwnd, rgn, 1); // the system owns `rgn` now
+        RedrawWindow(hwnd, std::ptr::null(), gained, RDW_INVALIDATE | RDW_ALLCHILDREN);
+        for r in [whole, old, gained] {
+            DeleteObject(r);
+        }
+    }
+}
 
 unsafe fn win_of(hwnd: HWND) -> Option<&'static mut Win> {
     let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut Win;
@@ -1030,10 +1095,19 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                     GetCursorPos(&mut c);
                     // Screen position; a docked window is placed in its parent's client area.
                     let mut p = POINT { x: wx + c.x - cx, y: wy + c.y - cy };
-                    if GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0 {
+                    let docked = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0;
+                    if docked {
                         ScreenToClient(GetParent(hwnd), &mut p);
                     }
                     SetWindowPos(hwnd, std::ptr::null_mut(), p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    if docked {
+                        // Paint what the move uncovered (the main window, other docked plugin windows and their
+                        // editors) before the next move. Left to ordinary WM_PAINTs, which wait behind the mouse
+                        // moves, the windows below lag behind and show trails of this one while it is dragged.
+                        apply_clip(hwnd, &w.state);
+                        EXPOSED.store(true, Ordering::Relaxed);
+                        RedrawWindow(GetParent(hwnd), std::ptr::null(), std::ptr::null_mut(), RDW_UPDATENOW | RDW_ALLCHILDREN);
+                    }
                     return 0;
                 }
                 if let Some((k, y0, v0)) = st.drag {
@@ -1402,7 +1476,7 @@ mod tests {
 
     fn state(strip: bool, target: &str) -> State {
         let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, misc: Some(Default::default()) };
-        State { info, strip, pages: vec![PageIcon::Plugin], page: 0, misc: false, hint: String::new(), preset: None, misc_ui: Default::default(), editor: (480.0, 270.0), events: Vec::new(), drag: None, moving: None, detached: false }
+        State { info, strip, pages: vec![PageIcon::Plugin], page: 0, misc: false, hint: String::new(), preset: None, misc_ui: Default::default(), editor: (480.0, 270.0), events: Vec::new(), drag: None, moving: None, detached: false, clip: None, clip_key: None }
     }
 
     #[test]

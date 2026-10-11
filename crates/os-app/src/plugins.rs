@@ -475,7 +475,9 @@ impl Plugins {
             }
             None => w.set_editor_size((ew as f32 / scale, eh as f32 / scale)),
         }
-        w.show();
+        // On top: the app stacks it above its other windows (`State::raise`), and a new child window starts below
+        // the open ones.
+        w.raise();
         drop(p);
         h.window = Some(w);
         let name = self.preset_name(row);
@@ -514,6 +516,14 @@ impl Plugins {
     #[cfg(windows)]
     pub fn docked(&self) -> Vec<usize> {
         self.hosted.iter().filter(|(_, h)| h.window.as_ref().is_some_and(|w| !w.detached())).map(|(&r, _)| r).collect()
+    }
+
+    /// Stacks the docked windows of `rows` (bottom to top, as in `State::z`) in that order: docked windows clip each
+    /// other by their native order, so it must match the app's.
+    #[cfg(windows)]
+    pub fn stack(&self, rows: &[usize]) {
+        let hwnds: Vec<isize> = rows.iter().filter_map(|r| self.window_of(*r)).filter(|w| !w.1).map(|w| w.0).collect();
+        crate::plugin_window::stack(self.owner, &hwnds);
     }
 
     /// Clips row `row`'s docked window to `work` minus `covers` (main-window client px).
