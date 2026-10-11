@@ -355,6 +355,9 @@ pub struct Engine {
     order: Vec<usize>,
     triggers: Vec<Trigger>,
     next_trigger: usize,
+    /// Audio clips already under way where playback starts, moved to that tick (spec: audio/audio-clips.md,
+    /// "Starting inside a clip").
+    late: Vec<Trigger>,
     /// Channel control points in tick order, and the next one to apply.
     controls: Vec<CtlEvent>,
     next_ctl: usize,
@@ -613,6 +616,7 @@ impl Engine {
             order,
             triggers,
             next_trigger: 0,
+            late: Vec::new(),
             controls,
             next_ctl: 0,
             sounding: Vec::with_capacity(256),
@@ -706,6 +710,7 @@ impl Engine {
     pub fn clear_schedule(&mut self) {
         self.triggers.clear();
         self.next_trigger = 0;
+        self.late.clear();
         self.end_tick = 0;
         self.live_only = true;
     }
@@ -820,19 +825,39 @@ impl Engine {
         self.seek_tick(tick);
     }
 
-    /// Start playback at tick `tick`: control points before it are applied, notes before it are not triggered.
+    /// Start playback at tick `tick`: control points before it are applied, notes before it are not triggered, audio
+    /// clips that are under way start on it from where their sample has got to.
     pub fn seek_tick(&mut self, tick: u64) {
         self.clock = Clock::at_tick(self.rate, self.ppq, self.tempo, tick);
         self.tick = tick;
         self.frame = self.clock.next_start();
         self.next_trigger = self.triggers.partition_point(|t| t.tick < tick);
         self.sync_controls(tick);
+        self.late = self.clips_under_way(tick);
         self.params.forget();
         self.out.clear();
         self.out_pos = 0;
         self.out_tick = tick;
         self.out_frame = self.frame;
         self.tail_done = false;
+    }
+
+    /// Audio clips that started before `tick` and are not over at it, moved to `tick` with their sample position
+    /// advanced by the time since their start; a clip whose sample has run out by then stays silent (spec:
+    /// audio/audio-clips.md, "Starting inside a clip"). Notes of pattern clips are not started late.
+    fn clips_under_way(&self, tick: u64) -> Vec<Trigger> {
+        let frame = |t: u64| Clock::frame_of_tick(self.rate, self.ppq, self.tempo, t);
+        let at = frame(tick);
+        self.triggers[..self.next_trigger]
+            .iter()
+            .filter(|t| t.cut.is_some_and(|c| c > tick))
+            .filter_map(|t| {
+                let ch = self.channels.get(t.channel)?;
+                let frames = ch.sample.as_ref()?.frames() as f64;
+                let from = t.from + (at - frame(t.tick)) as f64 * t.rate * ch.base_rate;
+                (from < frames).then(|| Trigger { tick, from, start: (from / frames) as f32, ..*t })
+            })
+            .collect()
     }
 
     /// Applies the control points due on the tick starting now, smoothing volume and pan.
@@ -893,6 +918,9 @@ impl Engine {
         self.next_trigger = self.triggers.partition_point(|t| t.tick < tick);
         self.sync_controls(tick);
         let n = self.channels.len();
+        // Clips moved to a seek tick that has not been rendered yet still start there.
+        self.late = std::mem::take(&mut old.late);
+        self.late.retain(|t| t.channel < n);
         self.voices = std::mem::take(&mut old.voices);
         self.voices.retain(|v| v.channel < n);
         self.sounding = std::mem::take(&mut old.sounding);
@@ -1079,6 +1107,11 @@ impl Engine {
         // A plain step lights its key for one step (instrument channels: it ends after one step, an OpenStudio choice
         // for hosted plugins, which have no song-length release).
         let step = u64::from(self.ppq / 4).max(1);
+        for t in std::mem::take(&mut self.late) {
+            if t.tick == tick {
+                self.start_trigger(t, step);
+            }
+        }
         while let Some(t) = self.triggers.get(self.next_trigger).copied() {
             if t.tick > tick {
                 break;
@@ -1087,40 +1120,45 @@ impl Engine {
             if t.tick < tick {
                 continue;
             }
-            self.sounding.push((t.channel, t.key, t.end.unwrap_or(t.tick + step)));
-            if self.channels[t.channel].plugin {
-                if self.channels[t.channel].instrument.0.is_some() {
-                    let k = t.key.min(127) as u8;
-                    self.inst_events.push((t.channel, 0, k, f32::from(t.velocity) / 128.0, t.start));
-                    // An audio clip ends at its cut (spec: plugins/open-sampler.md Â§7); notes end with a note off.
-                    match t.cut {
-                        Some(c) => self.inst_offs.push((c, t.channel, k, true)),
-                        None => self.inst_offs.push((t.end.unwrap_or(t.tick + step), t.channel, k, false)),
-                    }
-                }
-                continue;
-            }
-            let gain = self.channels[t.channel].start_gain(t.vel, t.pan);
-            let serial = self.channels[t.channel].serial;
-            self.voices.push(Voice {
-                channel: t.channel,
-                pos: t.from,
-                step: t.rate,
-                cut: t.cut,
-                release_at: t.end,
-                vel: t.vel,
-                pan: t.pan,
-                gain,
-                dest: gain,
-                delta: (0.0, 0.0),
-                ramp_left: 0,
-                serial,
-                live: None,
-                release: None,
-                age: 0,
-                off: None,
-            });
+            self.start_trigger(t, step);
         }
+    }
+
+    /// Starts one note or audio clip: a voice of the engine's sampler, or a note at the channel's instrument.
+    fn start_trigger(&mut self, t: Trigger, step: u64) {
+        self.sounding.push((t.channel, t.key, t.end.unwrap_or(t.tick + step)));
+        if self.channels[t.channel].plugin {
+            if self.channels[t.channel].instrument.0.is_some() {
+                let k = t.key.min(127) as u8;
+                self.inst_events.push((t.channel, 0, k, f32::from(t.velocity) / 128.0, t.start));
+                // An audio clip ends at its cut (spec: plugins/open-sampler.md Â§7); notes end with a note off.
+                match t.cut {
+                    Some(c) => self.inst_offs.push((c, t.channel, k, true)),
+                    None => self.inst_offs.push((t.end.unwrap_or(t.tick + step), t.channel, k, false)),
+                }
+            }
+            return;
+        }
+        let gain = self.channels[t.channel].start_gain(t.vel, t.pan);
+        let serial = self.channels[t.channel].serial;
+        self.voices.push(Voice {
+            channel: t.channel,
+            pos: t.from,
+            step: t.rate,
+            cut: t.cut,
+            release_at: t.end,
+            vel: t.vel,
+            pan: t.pan,
+            gain,
+            dest: gain,
+            delta: (0.0, 0.0),
+            ramp_left: 0,
+            serial,
+            live: None,
+            release: None,
+            age: 0,
+            off: None,
+        });
     }
 
     /// Sends this tick's note events to each instrument and mixes its output into the channel's insert with the
@@ -2275,6 +2313,65 @@ mod tests {
         let f = |t: f64| laws::tick_to_frame(t, 96, 130.0, 48000);
         let got = log.lock().unwrap().0.clone();
         assert_eq!(got, vec![(0, "from", 0.25), (f(96.0), "choke", 0.0), (f(384.0), "on", 0.0), (f(480.0), "choke", 0.0)]);
+    }
+
+    // spec: audio/audio-clips.md "Starting inside a clip"
+    #[test]
+    fn playback_started_inside_an_audio_clip_plays_it_from_there() {
+        use os_model::{Clip, ClipSource};
+        // A one-second ramp (each frame's value is its time) in a clip from tick 0 to 192 (0.92 s at 130 BPM).
+        let wav = std::env::temp_dir().join(format!("os-engine-clip-inside-{}.wav", std::process::id()));
+        let ramp: Vec<f32> = (0..48000).flat_map(|i| [i as f32 / 48000.0; 2]).collect();
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &ramp).unwrap();
+        let mut p = song(vec![], vec![Clip::new(0, 192, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        let mut lib = SampleLibrary::new(None);
+        let f = |t: u64| crate::clock::Clock::frame_of_tick(48000, 96, 130.0, t) as usize;
+        // From the top, then from tick 96: the second sounds as the first does from that tick on.
+        let whole = Engine::new(&p, &mut lib, 48000, PlayMode::Song).render_all(480);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e.seek_tick(96);
+        let inside = e.render_all(480);
+        assert!(whole[f(96) * 2] > 0.1, "the clip sounds at tick 96");
+        let worst = inside[..2000].iter().zip(&whole[f(96) * 2..]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-6, "started inside, the clip plays from where it had got to (off by {worst})");
+        // A hosted sampler is told where in the sample to start.
+        #[derive(Default)]
+        struct Log(Vec<(u64, &'static str, f32)>, u64);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, o: u32, _k: u8, _v: f32) {
+                self.0.push((self.1 + u64::from(o), "on", 0.0));
+            }
+            fn note_off(&mut self, o: u32, _k: u8) {
+                self.0.push((self.1 + u64::from(o), "off", 0.0));
+            }
+            fn note_on_from(&mut self, o: u32, _k: u8, _v: f32, start: f32) {
+                self.0.push((self.1 + u64::from(o), "from", start));
+            }
+            fn choke(&mut self, o: u32, _k: u8) {
+                self.0.push((self.1 + u64::from(o), "choke", 0.0));
+            }
+            fn process(&mut self, _rate: u32, l: &mut [f32], _r: &mut [f32]) {
+                self.1 += l.len() as u64;
+            }
+        }
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        let log = Arc::new(std::sync::Mutex::new(Log::default()));
+        e.set_instrument(0, log.clone());
+        e.seek_tick(96);
+        e.render_all(480);
+        let start = f(96) as f32 / 48000.0;
+        assert_eq!(log.lock().unwrap().0, vec![(0, "from", start), ((f(192) - f(96)) as u64, "choke", 0.0)]);
+        // A clip that is over, or whose sample has run out, does not start.
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e.seek_tick(192);
+        assert!(e.render_all(480).iter().all(|&v| v == 0.0), "a clip that is over stays silent");
+        p.arrangements[0].clips[0].length = 384;
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e.seek_tick(300);
+        assert!(e.late.is_empty(), "the sample has run out by tick 300");
+        let _ = std::fs::remove_file(&wav);
     }
 
     // spec: ui/playlist.md §8 (automation clips drive their target), flp/events/automation.md (value scaling)
