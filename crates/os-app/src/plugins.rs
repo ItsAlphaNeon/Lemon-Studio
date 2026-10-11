@@ -906,6 +906,57 @@ mod tests {
         assert_eq!(mask(&pl), Some(0x7f & !4));
     }
 
+    /// Open 3x Osc in its window: a wheel turn on a knob changes the plugin's value AND the picture (spec:
+    /// plugins/open-3x-osc.md §5). `OS_SHOT_DIR=.. cargo test -p os-app --bin openstudio osc3_window_redraws -- --ignored`
+    #[test]
+    #[ignore]
+    fn osc3_window_redraws() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(crate::osc3::OPEN_3X_OSC).expect("built-in Open 3x Osc");
+        pl.create_with(0, index, None).unwrap();
+        let info = ChannelInfo { name: crate::osc3::OPEN_3X_OSC.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 400);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
+        assert!(editor != 0, "the editor is a child of the frame");
+        // Where osc 2's coarse knob is drawn (painted-frame coordinates -> editor client, hosted crop).
+        let mut c = os_ui::Canvas::new(open_3x_osc::view::W, open_3x_osc::view::H, 1.0).unwrap();
+        struct Mid;
+        impl open_3x_osc::view::Model for Mid {
+            fn norm(&self, _: &str) -> f32 {
+                0.5
+            }
+            fn plain(&self, _: &str) -> f32 {
+                0.0
+            }
+            fn text(&self, _: &str) -> String {
+                String::new()
+            }
+        }
+        let hits = open_3x_osc::view::paint(&mut c, &os_theme::Palette::default(), &Mid, &Default::default(), "", true);
+        let t = open_3x_osc::view::Target::Knob("o2_coarse".into());
+        let r = hits.iter().rev().find(|h| h.t == t).expect("coarse knob").r;
+        let (cx, cy) = ((r.cx() - open_3x_osc::view::CROP_X as f32) as i32, (r.cy() - open_3x_osc::view::HOSTED_CROP_Y as f32) as i32);
+        let mut er: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetWindowRect(editor as HWND, &mut er) };
+        let state = |pl: &Plugins| pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap();
+        let (a, b) = (dir.join("osc3_before.bmp"), dir.join("osc3_after.bmp"));
+        capture(frame, &a);
+        let before = state(&pl);
+        for _ in 0..6 {
+            let (sx, sy) = (er.left + cx, er.top + cy);
+            unsafe { SendMessageW(editor as HWND, WM_MOUSEWHEEL, (120usize) << 16, ((sx & 0xffff) | (sy << 16)) as isize) };
+            pump(&mut pl, 60);
+        }
+        pump(&mut pl, 300);
+        capture(frame, &b);
+        assert_ne!(state(&pl), before, "the knob moved the plugin value");
+        assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "the editor redrew");
+    }
+
     /// Random clicks, drags and wheel turns on the editor; a probe toggle must keep changing the plugin state.
     /// `OS_SHOT_DIR=.. OS_CLAP=.. cargo test -p os-app plugin_editor_stress -- --ignored --nocapture`
     #[test]
