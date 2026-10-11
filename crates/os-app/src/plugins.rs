@@ -54,6 +54,8 @@ pub enum Request {
     Misc(usize, crate::misc_page::M, f32),
     /// A Misc tab list asks for its menu at this screen point.
     MiscMenu(usize, crate::misc_page::M, i32, i32),
+    /// A greyed-out control of the window was clicked: the app says it is not available yet.
+    NotAvailable(&'static str),
 }
 
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
@@ -653,6 +655,7 @@ impl Plugins {
                         FrameEvent::Misc(m, v) => Request::Misc(row, m, v),
                         FrameEvent::MiscMenu(m, x, y) => Request::MiscMenu(row, m, x, y),
                         FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
+                        FrameEvent::NotAvailable(name) => Request::NotAvailable(name),
                         FrameEvent::Dpi(k) => {
                             rescale.push((row, k));
                             continue;

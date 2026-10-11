@@ -228,6 +228,8 @@ pub fn paint(ui: &mut Ui, s: &State) {
         ui.c.text(Font::new(14), x - dw / 2.0, tab_cy - 6.0, rgb(0x6f777c), "...");
     }
 
+    // Search: not available yet, greyed out.
+    ui.off(Rect::new(half - 24.0, 12.0, 48.0, 48.0), "Plugin search");
     search_icon(&mut ui.c, half, 38.0);
 
     // Tiles.
@@ -323,9 +325,10 @@ fn tip(c: &mut Canvas, fr: Rect, name: &str, cat: &str, bounds: Rect) {
     c.text(cf, b.x + 10.0, b.y + 30.0, rgb(0x9aa2a8), cat);
 }
 
-/// Circle-and-handle magnifier with a "T" inside (search, not wired yet).
+/// Circle-and-handle magnifier with a "T" inside (search, not available yet: drawn greyed out, as `Ui::veil` would on
+/// the background behind it).
 fn search_icon(c: &mut Canvas, cx: f32, cy: f32) {
-    let col = rgb(0x4c555c);
+    let col = rgb(0x4c555c).mix(rgb(0x1a1f24), f32::from(crate::app::OFF_VEIL) / 255.0);
     c.stroke_circle(cx - 2.0, cy - 2.0, 18.0, 3.0, col);
     c.line(cx + 11.0, cy + 11.0, cx + 20.0, cy + 20.0, 4.0, col);
     c.line(cx - 8.0, cy - 9.0, cx + 4.0, cy - 9.0, 2.0, col);
