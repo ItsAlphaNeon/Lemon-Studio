@@ -1,7 +1,7 @@
-//! The window around a hosted plugin's editor: OpenStudio's title bar (menu arrow, gear, name, minimize, close) and the
-//! gear-toggled strip, one row: the plugin's page tabs (a plain plugin has the plug tab, an Open plugin joined through the
-//! host link brings its own pages), the Misc wrench, the window's top-bar buttons (menu arrow, gear), then
-//! ON / PAN / VOL / PITCH / RANGE / TRACK. While the strip is hidden the two buttons sit in the title bar.
+//! The window around a hosted plugin's editor: OpenStudio's title bar (menu arrow, gear, channel name, "(mixer target)",
+//! Presets box, minimize, close) and the gear-toggled strip, one row: the plugin's page tabs (a plain plugin has the plug
+//! tab, an Open plugin joined through the host link brings its own pages), the Misc wrench, then
+//! ON / PAN / VOL / PITCH / RANGE / TRACK.
 //! Drawn with os-ui in a native window: docked (a child of the main window, clipped to the workspace and stacked with
 //! the app's own windows) until the menu arrow's "Detached" makes it a top-level window owned by the main window. The
 //! plugin parents its editor into a child area below the strip.
@@ -101,12 +101,35 @@ fn install_key_hook() {
     });
 }
 
-pub const TITLE_H: f32 = 24.0;
-pub const STRIP_H: f32 = 47.0;
-pub const BORDER: f32 = 4.0;
+/// Title bar height (outline row included); the strip, or the editor's outline, starts here.
+pub const TITLE_H: f32 = 27.0;
+/// Strip height, its outline included (y 27..72).
+pub const STRIP_H: f32 = 46.0;
+/// Left / right / bottom inset of the editor: 1 px outline, 5 px frame, 1 px editor outline.
+pub const BORDER: f32 = 7.0;
+/// Width of the Presets box in the title bar (its right edge is 49 px from the window's).
+const PRESETS_W: f32 = 80.0;
 
 fn c_frame() -> Color {
     os_theme::current().s(0x25292b)
+}
+fn c_outline() -> Color {
+    os_theme::current().s(0x191d1f)
+}
+fn c_top_light() -> Color {
+    os_theme::current().s(0x2b2f31)
+}
+fn c_editor_line() -> Color {
+    os_theme::current().s(0x13191d)
+}
+fn c_presets() -> Color {
+    os_theme::current().s(0x1d2123)
+}
+fn c_arrow() -> Color {
+    os_theme::current().tx(0xc2c8cc)
+}
+fn c_gear_on() -> Color {
+    os_theme::current().a(0x8eff7e)
 }
 fn c_strip() -> Color {
     os_theme::current().s(0x1b1d1e)
@@ -124,7 +147,7 @@ fn c_grey() -> Color {
     os_theme::current().tx(0x8c9296)
 }
 fn c_icon() -> Color {
-    os_theme::current().tx(0xd5dbdf)
+    os_theme::current().tx(0xd4dade)
 }
 fn c_green() -> Color {
     os_theme::current().a(0x47f49a)
@@ -220,11 +243,11 @@ impl State {
         self.events.push(e);
     }
     fn size(&self) -> (f32, f32) {
-        let strip = if self.strip { STRIP_H } else { 0.0 };
-        (self.editor.0 + 2.0 * BORDER, TITLE_H + strip + self.editor.1 + BORDER)
+        (self.editor.0 + 2.0 * BORDER, self.area_y() + self.editor.1 + BORDER)
     }
+    /// Top of the editor (below the strip, or the title bar, and the editor's 1 px outline).
     fn area_y(&self) -> f32 {
-        TITLE_H + if self.strip { STRIP_H } else { 0.0 }
+        TITLE_H + if self.strip { STRIP_H } else { 0.0 } + 1.0
     }
 }
 
@@ -236,6 +259,10 @@ enum Part {
     Gear,
     /// The menu arrow (the window menu, an app popup).
     Menu,
+    /// The Presets box and its previous / next arrows (no presets yet: inert).
+    Presets,
+    PresetPrev,
+    PresetNext,
     /// Page tab `i`; `i == pages.len()` is the Misc tab.
     Tab(usize),
     On,
@@ -245,21 +272,24 @@ enum Part {
 
 fn parts(st: &State) -> Vec<(Rect, Part)> {
     let (w, _) = st.size();
+    let p = presets_rect(w);
     let mut v = vec![
-        (Rect::new(w - 22.0, 4.0, 16.0, 16.0), Part::Close),
-        (Rect::new(w - 39.0, 4.0, 16.0, 16.0), Part::Minimize),
+        (Rect::new(w - 23.0, 7.0, 17.0, 17.0), Part::Close),
+        (Rect::new(w - 42.0, 7.0, 17.0, 17.0), Part::Minimize),
+        (MENU_RECT, Part::Menu),
+        (GEAR_RECT, Part::Gear),
+        (Rect::new(p.right() - 33.0, p.y, 17.0, p.h), Part::PresetPrev),
+        (Rect::new(p.right() - 16.0, p.y, 16.0, p.h), Part::PresetNext),
+        (p, Part::Presets),
     ];
-    let (menu, gear) = top_buttons(st);
-    v.push((menu, Part::Menu));
-    v.push((gear, Part::Gear));
     if st.strip {
-        let dx = w - 568.0;
+        let dx = w - STRIP_RIGHT;
         for i in 0..=st.pages.len() {
             v.push((tab_rect(i), Part::Tab(i)));
         }
-        v.push((Rect::new(340.0 + dx, 35.0, 18.0, 18.0), Part::On));
+        v.push((Rect::new(340.0 + dx, 38.0, 18.0, 18.0), Part::On));
         for (i, x) in [383.0, 417.0, 455.0].into_iter().enumerate() {
-            v.push((Rect::new(x + dx - 14.0, 30.0, 28.0, 28.0), Part::Knob(i as u8)));
+            v.push((Rect::new(x + dx - 14.0, 33.0, 28.0, 28.0), Part::Knob(i as u8)));
         }
     }
     v.push((Rect::new(0.0, 0.0, w, TITLE_H), Part::Caption));
@@ -272,20 +302,21 @@ fn part_at(st: &State, x: f32, y: f32) -> Option<Part> {
 
 const KNOBS: [Knob; 3] = [Knob::Pan, Knob::Vol, Knob::Pitch];
 
-/// Cell of strip tab `i` (43 px wide from x 5; the Misc tab is the one after the pages).
+/// Cell of strip tab `i` (45 px wide from x 7, inside the strip's outline; the Misc tab is the one after the pages).
 fn tab_rect(i: usize) -> Rect {
-    Rect::new(5.0 + 43.0 * i as f32, 25.0, 43.0, 46.0)
+    Rect::new(7.0 + 45.0 * i as f32, TITLE_H + 1.0, 45.0, STRIP_H - 1.0)
 }
 
-/// The window's top-bar buttons (menu arrow, gear): in the strip row right after the Misc tab while the strip is shown
-/// (owner, 2026-10-09), in the title bar while it is hidden (the gear brings the strip back).
-fn top_buttons(st: &State) -> (Rect, Rect) {
-    if st.strip {
-        let x = tab_rect(st.pages.len() + 1).x + 8.0;
-        (Rect::new(x, 36.0, 24.0, 22.0), Rect::new(x + 26.0, 36.0, 24.0, 22.0))
-    } else {
-        (Rect::new(2.0, 4.0, 14.0, 16.0), Rect::new(16.0, 4.0, 16.0, 16.0))
-    }
+/// The strip's right-hand controls (ON ... TRACK) are placed for a window this wide and move with its right edge.
+const STRIP_RIGHT: f32 = 570.0;
+
+/// The title bar's menu arrow and gear (always in the title bar, whether the strip is shown or not).
+const MENU_RECT: Rect = Rect { x: 8.0, y: 5.0, w: 14.0, h: 21.0 };
+const GEAR_RECT: Rect = Rect { x: 24.0, y: 5.0, w: 21.0, h: 21.0 };
+
+/// The Presets box: right side of the title bar, left of minimize.
+fn presets_rect(w: f32) -> Rect {
+    Rect::new(w - 49.0 - PRESETS_W, 6.0, PRESETS_W, 19.0)
 }
 
 fn page_tabler(p: PageIcon) -> &'static tb::TablerIcon {
@@ -300,81 +331,111 @@ fn icon_at(c: &mut Canvas, t: &tb::TablerIcon, cx: f32, cy: f32, size: f32, col:
     c.icon(t, Rect::new(cx - size / 2.0, cy - size / 2.0, size, size), col);
 }
 
+/// The title bar's text font (FL: 8 px cap height, baseline under row 18).
+fn title_font() -> Font {
+    Font::new(13)
+}
+
 fn paint(c: &mut Canvas, st: &State) {
     let (w, h) = st.size();
     c.begin_frame(None);
     c.clear(c_frame());
-    // Title bar.
-    let (menu, gear) = top_buttons(st);
-    // In the strip row the buttons are bigger and the title text starts at the left edge.
-    let (isz, gsz) = if st.strip { (16.0, 18.0) } else { (14.0, 16.0) };
-    let f = Font::new(15);
-    let lh = c.line_height(f);
-    let ty = (12.0 - lh / 2.0).round();
-    let nx = if st.strip { 9.0 } else { 36.0 };
-    let nw = c.text(f, nx, ty, c_text(), &st.info.name);
-    let target = format!("({})", st.info.target);
-    c.text_clip(f, nx + nw + 4.0, ty, (w - 70.0 - nx - nw).max(0.0), c_grey(), &target);
-    let tw = c.text_width(f, &target).min((w - 70.0 - nx - nw).max(0.0));
-    if !st.hint.is_empty() {
-        let hx = nx + nw + 4.0 + tw + 14.0;
-        let hf = Font::new(13);
-        let hy = (12.0 - c.line_height(hf) / 2.0).round();
-        c.text_clip(hf, hx, hy, (w - 50.0 - hx).max(0.0), c_caption(), &st.hint);
+    // 1 px outline around the window, a lighter line under its top edge.
+    for r in [Rect::new(0.0, 0.0, w, 1.0), Rect::new(0.0, h - 1.0, w, 1.0), Rect::new(0.0, 0.0, 1.0, h), Rect::new(w - 1.0, 0.0, 1.0, h)] {
+        c.fill_rect(r, c_outline());
     }
-    icon_at(c, &tb::MINUS, w - 31.0, 12.0, 14.0, c_icon());
-    icon_at(c, &tb::X, w - 14.0, 12.0, 14.0, c_icon());
+    c.fill_rect(Rect::new(1.0, 1.0, w - 2.0, 1.0), c_top_light());
+    title_bar(c, st, w);
     if st.strip {
         strip(c, st, w);
     }
-    // After the strip: while it is shown the buttons sit in its row.
-    icon_at(c, &tb::CARET_RIGHT, menu.cx(), menu.cy(), isz, c_icon());
-    icon_at(c, &tb::SETTINGS, gear.cx(), gear.cy(), gsz, if st.strip { c_green() } else { c_icon() });
+    // The editor's 1 px outline; the plugin's own window covers the inside.
+    let ay = st.area_y();
+    c.fill_rect(Rect::new(BORDER - 1.0, ay - 1.0, w - 2.0 * BORDER + 2.0, h - ay - BORDER + 2.0), c_editor_line());
+    let a = Rect::new(BORDER, ay, w - 2.0 * BORDER, h - ay - BORDER);
+    c.fill_rect(a, c_body());
     if st.misc {
-        let a = Rect::new(BORDER, st.area_y(), w - 2.0 * BORDER, h - st.area_y() - BORDER);
-        c.fill_rect(a, c_body());
         c.text_center(Font::new(16), a, c_grey(), "Miscellaneous functions: not available yet");
     }
 }
 
+/// Title bar, left to right: menu arrow, gear (boxed while the strip is shown), channel name, "(mixer target)", the
+/// plugin's hint; right side: Presets box with previous / next arrows, minimize, close.
+fn title_bar(c: &mut Canvas, st: &State, w: f32) {
+    icon_at(c, &tb::CARET_RIGHT, 14.4, 15.5, 15.4, c_arrow());
+    let g = GEAR_RECT;
+    if st.strip {
+        c.stroke_rrect(Rect::new(g.x + 1.0, g.y + 1.0, g.w - 2.0, g.h - 2.0), 3.5, 2.0, c_gear_on());
+    }
+    icon_at(c, &tb::SETTINGS_FILLED, g.cx(), g.cy(), 18.4, if st.strip { c_gear_on() } else { c_icon() });
+    let p = presets_rect(w);
+    let f = title_font();
+    let ty = (19.0 - c.ascent(f)).round();
+    let nx = 48.0;
+    let room = (p.x - 8.0 - nx).max(0.0);
+    let nw = c.text_width(f, &st.info.name).min(room);
+    c.text_clip(f, nx, ty, room, c_text(), &st.info.name);
+    let target = format!("({})", st.info.target);
+    let tx = nx + nw + c.text_width(f, " ");
+    let troom = (p.x - 8.0 - tx).max(0.0);
+    c.text_clip(f, tx, ty, troom, c_grey(), &target);
+    let tw = c.text_width(f, &target).min(troom);
+    if !st.hint.is_empty() {
+        let hx = tx + tw + 14.0;
+        let hf = Font::new(12);
+        let hy = (19.0 - c.ascent(hf)).round();
+        c.text_clip(hf, hx, hy, (p.x - 8.0 - hx).max(0.0), c_caption(), &st.hint);
+    }
+    // Presets box (presets are not implemented yet: drawn, inert).
+    c.fill_rrect(p, 3.0, c_presets());
+    c.text(f, p.x + 9.0, ty, c_text(), "Presets");
+    icon_at(c, &tb::CARET_LEFT, p.right() - 22.2, 15.5, 18.9, c_icon());
+    icon_at(c, &tb::CARET_RIGHT, p.right() - 7.8, 15.5, 18.9, c_icon());
+    c.icon_stroke(&tb::MINUS, Rect::new(w - 39.5, 7.0, 12.0, 12.0), c_icon(), 2.0);
+    c.icon_stroke(&tb::X, Rect::new(w - 22.25, 7.75, 15.5, 15.5), c_icon(), 1.6);
+}
+
 fn strip(c: &mut Canvas, st: &State, w: f32) {
-    let dx = w - 568.0;
-    c.fill_rect(Rect::new(BORDER, 24.0, w - 2.0 * BORDER, 47.0), c_strip_line());
-    c.fill_rect(Rect::new(BORDER, 25.0, w - 2.0 * BORDER, 45.0), c_strip());
-    // Page tabs, then the Misc wrench (always the last tab), then the menu arrow and gear (drawn with the title bar).
+    // Strip box with a 1 px outline (its bottom edge is the editor's outline).
+    let (dx, dy) = (w - STRIP_RIGHT, TITLE_H - 24.0);
+    c.fill_rect(Rect::new(BORDER - 1.0, TITLE_H, w - 2.0 * BORDER + 2.0, STRIP_H), c_strip_line());
+    c.fill_rect(Rect::new(BORDER, TITLE_H + 1.0, w - 2.0 * BORDER, STRIP_H - 1.0), c_strip());
+    // Page tabs, then the Misc wrench (always the last tab).
     let n = st.pages.len();
     for i in 0..=n {
         let cell = tab_rect(i);
         let active = if i == n { st.misc } else { !st.misc && st.page == i };
         if active {
-            c.fill_rect(Rect::new(cell.x, cell.y, cell.w + 1.0, cell.h), c_body());
+            c.fill_rect(cell, c_body());
         }
         let col = if active { os_theme::current().a(0x49f1b1) } else { c_icon() };
         let t = if i == n { &tb::TOOL } else { page_tabler(st.pages[i]) };
-        icon_at(c, t, cell.cx() + 0.5, 47.0, 26.0, col);
+        icon_at(c, t, cell.cx(), cell.cy(), 26.0, col);
     }
     // ON LED.
-    let (lx, ly) = (349.0 + dx, 43.0);
+    let (lx, ly) = (349.0 + dx, 43.0 + dy);
     os_ui::kit::led(c, &os_theme::current(), lx, ly, 7.5, os_ui::kit::State::NORMAL.with_on(st.info.enabled));
     caption(c, lx, "ON");
-    value_box(c, Rect::new(455.0 + dx, 32.0, 43.0, 23.0), &st.info.range.to_string());
+    value_box(c, Rect::new(455.0 + dx, 32.0 + dy, 43.0, 23.0), &st.info.range.to_string());
     for (k, x, cap) in [(Knob::Pan, 383.0, "PAN"), (Knob::Vol, 417.0, "VOL"), (Knob::Pitch, 455.0, "PITCH")] {
-        knob(c, x + dx, 43.0, st.knob_value(k), k != Knob::Vol);
+        // Indicator dots: pan teal, volume green, pitch red.
+        let dot = os_theme::current().a(match k { Knob::Pan => 0x43aebd, Knob::Vol => 0x47f49a, Knob::Pitch => 0xbb465f });
+        knob(c, x + dx, 43.0 + dy, st.knob_value(k), k != Knob::Vol, dot);
         caption(c, if k == Knob::Pitch { x + dx - 3.0 } else { x + dx }, cap);
     }
     caption(c, 484.0 + dx, "RANGE");
     let track = if st.info.track == 0 { "---".to_string() } else { st.info.track.to_string() };
-    value_box(c, Rect::new(517.0 + dx, 32.0, 41.0, 23.0), &track);
+    value_box(c, Rect::new(517.0 + dx, 32.0 + dy, 41.0, 23.0), &track);
     caption(c, 537.0 + dx, "TRACK");
 }
 
 fn caption(c: &mut Canvas, cx: f32, s: &str) {
     let f = Font::condensed(9, 4).bold();
     let w = c.text_width(f, s);
-    c.text(f, (cx - w / 2.0).round(), 57.0, c_caption(), s);
+    c.text(f, (cx - w / 2.0).round(), TITLE_H + 33.0, c_caption(), s);
 }
 
-fn knob(c: &mut Canvas, cx: f32, cy: f32, v: f32, bipolar: bool) {
+fn knob(c: &mut Canvas, cx: f32, cy: f32, v: f32, bipolar: bool, dot: Color) {
     let r = 11.0;
     c.fill_circle(cx, cy, r + 4.0, os_theme::current().s(0x191c1f));
     c.fill_circle(cx, cy, r + 3.0, os_theme::current().s(0x23262a));
@@ -388,7 +449,7 @@ fn knob(c: &mut Canvas, cx: f32, cy: f32, v: f32, bipolar: bool) {
         let (s, e) = if a > from { (from, a) } else { (a, from) };
         c.arc(cx, cy, r + 2.5, s - PI / 2.0, e - s, 2.0, c_green());
     }
-    c.fill_circle(cx + (r - 5.0) * a.sin(), cy - (r - 5.0) * a.cos(), 1.4, c_green());
+    c.fill_circle(cx + (r - 5.0) * a.sin(), cy - (r - 5.0) * a.cos(), 1.4, dot);
 }
 
 fn value_box(c: &mut Canvas, r: Rect, s: &str) {
@@ -807,7 +868,7 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 let part = part_at(&w.state.borrow(), x, y);
                 if part == Some(Part::Menu) {
                     // The app draws the menu (its own popup, like every other OpenStudio menu), below the arrow.
-                    let (m, _) = top_buttons(&w.state.borrow());
+                    let m = MENU_RECT;
                     let mut p = POINT { x: (m.x * w.scale) as i32, y: (m.bottom() * w.scale) as i32 };
                     ClientToScreen(hwnd, &mut p);
                     w.state.borrow_mut().events.push(FrameEvent::Menu(p.x, p.y));
@@ -1080,5 +1141,49 @@ pub fn lift_hide() {
     let l = LIFT.lock().ok().and_then(|mut g| g.take());
     if let Some(l) = l {
         unsafe { DestroyWindow(l.0.hwnd) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(strip: bool, target: &str) -> State {
+        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0 };
+        State { info, strip, pages: vec![PageIcon::Plugin], page: 0, misc: false, hint: String::new(), editor: (480.0, 270.0), events: Vec::new(), drag: None, moving: None, detached: false }
+    }
+
+    #[test]
+    fn frame_geometry() {
+        // spec: ui/plugin-window.md "Frame": 7 px around the editor, 27 px title bar, 46 px strip.
+        let st = state(true, "Master");
+        assert_eq!(st.size(), (494.0, 74.0 + 270.0 + 7.0));
+        assert_eq!(state(false, "Master").size().1, 28.0 + 270.0 + 7.0);
+        let at = |x, y| part_at(&st, x, y);
+        assert_eq!(at(15.0, 15.0), Some(Part::Menu));
+        assert_eq!(at(34.0, 15.0), Some(Part::Gear));
+        assert_eq!(at(390.0, 15.0), Some(Part::Presets));
+        assert_eq!(at(422.0, 15.0), Some(Part::PresetPrev));
+        assert_eq!(at(438.0, 15.0), Some(Part::PresetNext));
+        assert_eq!(at(460.0, 15.0), Some(Part::Minimize));
+        assert_eq!(at(479.0, 15.0), Some(Part::Close));
+        assert_eq!(at(200.0, 15.0), Some(Part::Caption));
+        assert_eq!(at(29.0, 50.0), Some(Part::Tab(0)));
+        assert_eq!(at(74.0, 50.0), Some(Part::Tab(1)));
+    }
+
+    /// Renders the frame offscreen (`OS_SHOT_DIR=<dir> cargo test -p os-app frame_shots -- --ignored`).
+    #[test]
+    #[ignore]
+    fn frame_shots() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        for (name, strip) in [("frame_strip.png", true), ("frame_bare.png", false)] {
+            let st = state(strip, "Master");
+            let (w, h) = st.size();
+            let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
+            paint(&mut c, &st);
+            c.pixmap.save_png(dir.join(name)).unwrap();
+        }
     }
 }

@@ -3665,7 +3665,14 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
     let ch = p.channels.get(row)?;
     Some(crate::plugin_window::ChannelInfo {
         name: ch.name.clone().unwrap_or_else(|| format!("Channel {}", ch.index + 1)),
-        target: views::rack::insert_name(ch.mixer_track),
+        // The mixer track's own name when it has one, else "Master" / "Insert N".
+        target: p
+            .mixer
+            .iter()
+            .find(|t| t.index == ch.mixer_track)
+            .and_then(|t| t.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| views::rack::insert_name(ch.mixer_track)),
         enabled: ch.enabled,
         volume: ch.volume,
         pan: ch.pan,
