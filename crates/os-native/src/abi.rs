@@ -26,11 +26,14 @@ pub mod flags {
     pub const GET_NOTE_INPUT: i32 = 1 << 4;
     pub const WANT_NEW_TICK: i32 = 1 << 5;
     pub const NO_PROCESS: i32 = 1 << 6;
+    pub const NO_WINDOW: i32 = 1 << 10;
+    pub const INTERFACELESS: i32 = 1 << 11;
     pub const DEMO_VERSION: i32 = 1 << 15;
     pub const NEW_VOICE_PARAMS: i32 = 1 << 21;
 }
 
 pub mod dispatch {
+    pub const SHOW_EDITOR: IntPtr = 0;
     pub const PROCESS_MODE: IntPtr = 1;
     pub const FLUSH: IntPtr = 2;
     pub const SET_BLOCK_SIZE: IntPtr = 3;

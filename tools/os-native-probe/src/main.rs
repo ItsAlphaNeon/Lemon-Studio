@@ -1,7 +1,7 @@
 //! os-native-probe: load one FL native plugin from the user's FL install, print its info and
 //! parameters, save its default state, and render a test note (generators) to a WAV file.
 //!
-//! Usage: os-native-probe <plugin name> [out.wav] [--fl DIR] [--sandbox71]
+//! Usage: os-native-probe <plugin name> [out.wav] [--fl DIR] [--sandbox71] [--editor out.bmp]
 //!
 //! `--sandbox71` installs the experimental sandbox-object answer to the undocumented host
 //! dispatcher ID 71 (see `probe71`) and prints which of its vtable slots the plugin touched.
@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use os_native::{find_plugin, host, Plugin};
 
 #[cfg(windows)]
+mod editor;
+#[cfg(windows)]
 mod probe71;
 
 fn main() {
@@ -19,9 +21,12 @@ fn main() {
     let mut out = None;
     let mut fl = PathBuf::from(r"C:\Program Files\Image-Line\FL Studio 2026");
     let mut sandbox71 = false;
+    let mut editor_out: Option<PathBuf> = None;
     while let Some(a) = args.next() {
         if a == "--fl" {
             fl = PathBuf::from(args.next().expect("--fl needs a value"));
+        } else if a == "--editor" {
+            editor_out = Some(PathBuf::from(args.next().expect("--editor needs an output .bmp")));
         } else if a == "--sandbox71" {
             sandbox71 = true;
         } else if name.is_none() {
@@ -65,6 +70,19 @@ fn main() {
     let state = p.save_state();
     println!("default state: {} bytes, head {:02x?}", state.len(), &state[..state.len().min(24)]);
     report_log();
+
+    #[cfg(windows)]
+    if let Some(out) = &editor_out {
+        editor::run(&mut p, out);
+        report_log();
+        drop(p);
+        println!("unloaded cleanly");
+        editor::after_drop();
+        if sandbox71 {
+            report_sandbox();
+        }
+        return;
+    }
 
     if i.is_generator() {
         p.set_tempo(130.0, 96);

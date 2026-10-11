@@ -10,6 +10,7 @@ pub mod abi;
 pub mod adapter;
 pub mod host;
 pub mod library;
+pub mod lock;
 pub mod stream;
 pub mod stub;
 
@@ -109,6 +110,10 @@ impl PluginInfo {
     }
 }
 
+/// Creating and destroying instances is serialised process-wide: the plugins' runtime is not made for two threads
+/// constructing instances at once (two parallel loads crashed; one GUI thread, as in the app, never does).
+static LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A plugin instance. Not thread-safe: call from one thread.
 pub struct Plugin {
     obj: *mut PluginObject,
@@ -127,6 +132,7 @@ impl Plugin {
                 eprintln!("[load] {m}");
             }
         };
+        let _one = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
         trace("LoadLibrary");
         let lib = unsafe { libloading::Library::new(dll) }.map_err(|e| err(e.to_string()))?;
         let create: libloading::Symbol<abi::CreatePlugInstance> =
@@ -161,6 +167,14 @@ impl Plugin {
 
     fn vt(&self) -> &abi::PluginVtbl {
         unsafe { &*(*self.obj).vtable }
+    }
+
+    /// Runs `f` holding the plugin's render lock (audio-thread calls; see `lock`).
+    fn locked<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let lock: *const lock::PluginLock = self.host.lock();
+        // SAFETY: the lock lives in the host context, which outlives this call and never moves.
+        let _g = unsafe { &*lock }.guard();
+        f(self)
     }
 
     pub fn dispatch(&mut self, id: IntPtr, index: IntPtr, value: IntPtr) -> IntPtr {
@@ -206,36 +220,36 @@ impl Plugin {
     pub fn trigger(&mut self, key: f32, velocity: f32, pan: f32, tag: IntPtr) -> IntPtr {
         let lv = abi::LevelParams { pan, vol: velocity, pitch: key * 100.0, fcut: 0.0, fres: 0.0 };
         let vp = VoiceParams { init: lv, fin: lv };
-        unsafe { (self.vt().trigger_voice)(self.obj, &vp, tag) }
+        self.locked(|p| unsafe { (p.vt().trigger_voice)(p.obj, &vp, tag) })
     }
 
     pub fn release(&mut self, voice: IntPtr) {
-        unsafe { (self.vt().voice_release)(self.obj, voice) }
+        self.locked(|p| unsafe { (p.vt().voice_release)(p.obj, voice) })
     }
 
     pub fn kill(&mut self, voice: IntPtr) {
-        unsafe { (self.vt().voice_kill)(self.obj, voice) }
+        self.locked(|p| unsafe { (p.vt().voice_kill)(p.obj, voice) })
     }
 
     /// Full generators: renders up to `out.len()/2` frames, returns frames rendered.
     pub fn gen_render(&mut self, out: &mut [f32]) -> usize {
         let mut n = (out.len() / 2) as i32;
-        unsafe { (self.vt().gen_render)(self.obj, out.as_mut_ptr(), &mut n) };
+        self.locked(|p| unsafe { (p.vt().gen_render)(p.obj, out.as_mut_ptr(), &mut n) });
         n.max(0) as usize
     }
 
     /// Hybrid generators: renders one voice; returns false when it has no more data.
     pub fn voice_render(&mut self, voice: IntPtr, out: &mut [f32]) -> (usize, bool) {
         let mut n = (out.len() / 2) as i32;
-        let r = unsafe { (self.vt().voice_render)(self.obj, voice, out.as_mut_ptr(), &mut n) };
+        let r = self.locked(|p| unsafe { (p.vt().voice_render)(p.obj, voice, out.as_mut_ptr(), &mut n) });
         (n.max(0) as usize, r == 0)
     }
 
     /// Effects: processes `buf` (interleaved stereo) in place.
     pub fn eff_render(&mut self, buf: &mut [f32]) {
         let n = (buf.len() / 2) as i32;
-        let p = buf.as_mut_ptr();
-        unsafe { (self.vt().eff_render)(self.obj, p, p, n) };
+        let b = buf.as_mut_ptr();
+        self.locked(|p| unsafe { (p.vt().eff_render)(p.obj, b, b, n) });
     }
 
     pub fn idle(&mut self) {
@@ -245,7 +259,7 @@ impl Plugin {
     /// Advances the plugin's internal clock one tick. Generators that set the `WantNewTick` flag
     /// expect this between buffers; without it their envelopes and timing do not progress.
     pub fn new_tick(&mut self) {
-        unsafe { (self.vt().new_tick)(self.obj) }
+        self.locked(|p| unsafe { (p.vt().new_tick)(p.obj) })
     }
 
     /// Tells the plugin whether the song is playing (dispatcher `SetPlaying`).
@@ -256,6 +270,12 @@ impl Plugin {
     /// Enables or bypasses the plugin (dispatcher `SetEnabled`).
     pub fn set_enabled(&mut self, enabled: bool) {
         self.dispatch(abi::dispatch::SET_ENABLED, 0, enabled as IntPtr);
+    }
+
+    /// The editor window the plugin created after `ShowEditor` (the plugin object's `EditorHandle`
+    /// field), 0 when it has none.
+    pub fn editor_handle(&self) -> IntPtr {
+        unsafe { (*self.obj).editor_handle as IntPtr }
     }
 
     pub fn killed_voices(&mut self) -> Vec<IntPtr> {
@@ -270,6 +290,7 @@ impl Plugin {
 impl Drop for Plugin {
     fn drop(&mut self) {
         if !self.obj.is_null() {
+            let _one = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
             unsafe { (self.vt().destroy_object)(self.obj) };
             self.obj = std::ptr::null_mut();
         }
@@ -337,10 +358,9 @@ mod tests {
         assert!(list.iter().any(|p| !p.is_generator), "expected at least one effect");
     }
 
-    // Loads a real FL plugin DLL in-process: environment-dependent and flaky under heavy parallel
-    // load, so ignored like the audio-device tests. Run with `cargo test -p os-native -- --ignored`.
+    // Loads a real FL plugin DLL in-process (skips without FL). Instance creation is serialised
+    // (`LIFECYCLE`), so these run in parallel with the other tests.
     #[test]
-    #[ignore]
     #[cfg(windows)]
     fn effect_loads_and_passes_audio() {
         let Some(fl) = fl() else { return };
@@ -360,12 +380,10 @@ mod tests {
         assert!(diff < 0.2, "default Balance should roughly pass through, mean abs diff {diff}");
     }
 
-    // Also loads a real FL plugin DLL in-process: ignored, run with `--ignored`.
     #[test]
-    #[ignore]
     #[cfg(windows)]
     fn effect_hosts_through_os_host_library() {
-        use os_host::{Library as _, Plugin as _};
+        use os_host::Library as _;
         let Some(fl) = fl() else { return };
         let Some(dll) = find_plugin(&fl, "Fruity Balance") else { return };
         let lib = NativeLibrary::load(&dll).expect("build library");

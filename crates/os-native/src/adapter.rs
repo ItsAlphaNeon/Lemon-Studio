@@ -40,6 +40,8 @@ pub struct NativePlugin {
     spt: f64,
     tick_acc: f64,
     inter: Vec<f32>,
+    /// The editor is shown in a host window (ShowEditor with a parent, not yet hidden).
+    editor: bool,
 }
 
 // SAFETY: the engine serialises all access behind a mutex; never two threads at once.
@@ -60,6 +62,7 @@ impl NativePlugin {
             spt: 1.0,
             tick_acc: 0.0,
             inter: vec![0.0; MAX_BLOCK * 2],
+            editor: false,
         }
     }
 
@@ -172,21 +175,40 @@ impl os_host::Plugin for NativePlugin {
         self.plugin.idle();
     }
 
-    // Editor embedding is not implemented yet for native plugins (experimental); the host shows its
-    // own empty frame. The plugin still loads and processes audio.
+    // Editors (spec plugins/fruity-abi.md, "Editors"): ShowEditor with the host's window as parent; the
+    // plugin creates its editor as a child window of it, sized by itself. ShowEditor(0) hides it again
+    // (the plugin keeps the window), so the host's frame can be docked, detached or closed safely.
     fn has_editor(&self) -> bool {
-        false
+        self.plugin.info.flags & (flags::NO_WINDOW | flags::INTERFACELESS) == 0
     }
     fn editor_open(&self) -> bool {
-        false
+        self.editor
     }
-    fn open_editor(&mut self, _parent: *mut c_void) -> Result<(u32, u32), String> {
-        Err("native plugin editors are not supported yet".into())
+    fn open_editor(&mut self, parent: *mut c_void) -> Result<(u32, u32), String> {
+        if parent.is_null() {
+            return Err("no parent window".into());
+        }
+        if !self.has_editor() {
+            return Err("the plugin has no editor".into());
+        }
+        self.plugin.dispatch(dispatch::SHOW_EDITOR, 0, parent as IntPtr);
+        let h = self.plugin.editor_handle();
+        if h == 0 {
+            return Err("the plugin did not create an editor".into());
+        }
+        self.editor = true;
+        win::place_at_origin(h);
+        win::size(h).ok_or_else(|| "the plugin's editor window is gone".into())
     }
     fn editor_size(&self) -> Option<(u32, u32)> {
-        None
+        if self.editor { win::size(self.plugin.editor_handle()) } else { None }
     }
-    fn close_editor(&mut self) {}
+    fn close_editor(&mut self) {
+        if self.editor {
+            self.plugin.dispatch(dispatch::SHOW_EDITOR, 0, 0);
+            self.editor = false;
+        }
+    }
 
     fn save_state(&self) -> Option<Vec<u8>> {
         Some(self.plugin.save_state())
@@ -196,6 +218,38 @@ impl os_host::Plugin for NativePlugin {
         self.plugin.restore_state(data);
         true
     }
+}
+
+/// Window helpers for the plugin's editor window (Windows only; elsewhere there is no editor).
+mod win {
+    #[cfg(windows)]
+    pub fn size(h: isize) -> Option<(u32, u32)> {
+        use windows_sys::Win32::Foundation::{HWND, RECT};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsWindow};
+        let h = h as HWND;
+        if h.is_null() || unsafe { IsWindow(h) } == 0 {
+            return None;
+        }
+        let mut r: RECT = unsafe { std::mem::zeroed() };
+        if unsafe { GetWindowRect(h, &mut r) } == 0 {
+            return None;
+        }
+        Some(((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32))
+    }
+
+    /// The editor fills the host's area from its top-left corner.
+    #[cfg(windows)]
+    pub fn place_at_origin(h: isize) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER};
+        unsafe { SetWindowPos(h as _, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+    }
+
+    #[cfg(not(windows))]
+    pub fn size(_h: isize) -> Option<(u32, u32)> {
+        None
+    }
+    #[cfg(not(windows))]
+    pub fn place_at_origin(_h: isize) {}
 }
 
 // Native plugins do not surface individual parameters through os_host yet (params/automation use

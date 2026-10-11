@@ -1610,6 +1610,48 @@ mod tests {
         }
     }
 
+    /// The user's installed FL native effects show their own editors inside OpenStudio's plugin frame (spec
+    /// plugins/fruity-abi.md, "Editors"): frame moved off every screen, captured with PrintWindow, closed and opened
+    /// again. Loads FL DLLs in-process, so ignored: `OS_SHOT_DIR=<dir> cargo test -p os-app --bin openstudio
+    /// native_window_shots -- --ignored` (shots only when OS_SHOT_DIR is set). Skips without FL.
+    #[test]
+    #[ignore]
+    fn native_window_shots() {
+        let fl = os_native::default_fl_dir();
+        let dir = std::env::var_os("OS_SHOT_DIR").map(std::path::PathBuf::from);
+        for name in ["Fruity Balance", "Fruity Parametric EQ 2", "Fruity Delay 3", "Fruity Limiter"] {
+            let Some(dll) = os_native::find_plugin(&fl, name) else { continue };
+            let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
+            let a = Available { desc: lib.plugins()[0].clone(), lib };
+            let mut pl = Plugins { scale: 1.0, rate: 48000, effects: vec![a], ..Plugins::default() };
+            pl.create_effect(1, 0, 0, None).unwrap();
+            let key = fx_key(1, 0);
+            let info = ChannelInfo { name: name.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+            for round in 0..2 {
+                pl.open_window(key, info.clone()).unwrap();
+                let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+                unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+                pump(&mut pl, 300);
+                let area = pl.hosted[&key].window.as_ref().unwrap().area() as HWND;
+                let editor = unsafe { GetWindow(area, GW_CHILD) };
+                assert!(!editor.is_null(), "{name}: the editor is a child of the frame's editor area");
+                let (mut ra, mut re): (RECT, RECT) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+                unsafe { GetWindowRect(area, &mut ra) };
+                unsafe { GetWindowRect(editor, &mut re) };
+                assert_eq!((ra.right - ra.left, ra.bottom - ra.top), (re.right - re.left, re.bottom - re.top), "{name}: the frame fits the editor");
+                assert_eq!((ra.left, ra.top), (re.left, re.top), "{name}: the editor sits at the area's corner");
+                if let Some(dir) = &dir {
+                    let out = dir.join(format!("native_{}_{round}.bmp", name.replace(' ', "_")));
+                    capture(frame, &out);
+                    pump(&mut pl, 200);
+                    capture(frame, &out);
+                }
+                assert!(pl.close_if_open(key));
+                pump(&mut pl, 100);
+            }
+        }
+    }
+
     /// With the experimental native host opted in, the scan offers the user's installed FL native
     /// effects in the effect picker (spec plugins/fruity-abi.md). Skips when FL is not installed.
     /// Ignored in the default run: it mutates the process `OPENSTUDIO_NATIVE` env var, which is
