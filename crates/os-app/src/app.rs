@@ -1855,8 +1855,7 @@ impl App {
             }
             // The one check that does real work: opt in / out of the experimental native host and
             // re-scan so the picker's effect list updates (spec plugins/fruity-abi.md). Its displayed
-            // state comes straight from `os_native::enabled()` (the row's default), so it is left out
-            // of the `flipped` set.
+            // state comes straight from `os_native::enabled()` (the row's default).
             SAct::Check(k) if k == views::settings::NATIVE_HOST_CHECK => {
                 let on = !os_native::enabled();
                 os_native::set_enabled(on);
@@ -1868,11 +1867,8 @@ impl App {
                     "Experimental native plugin host off".into()
                 });
             }
-            SAct::Check(k) => {
-                if !st.flipped.remove(k) {
-                    st.flipped.insert(k);
-                }
-            }
+            // Checks and buttons outside `settings::LIVE` are drawn greyed out with an `Action::Placeholder` hit instead.
+            SAct::Check(k) => self.state.message = Some(off_text(k)),
             SAct::Group(k) => {
                 if !st.folded.remove(k) {
                     st.folded.insert(k);
@@ -1907,8 +1903,7 @@ impl App {
                 self.scan_plugins();
                 self.state.message = Some(format!("Plugin scan: {} instruments found", self.state.hosted_generators.len()));
             }
-            SAct::Button(b) => self.state.message = Some(format!("{b}: not available yet")),
-            SAct::Combo(k) => self.state.message = Some(format!("{k}: not available yet")),
+            SAct::Button(b) => self.state.message = Some(off_text(b)),
         }
         self.invalidate();
     }
@@ -4924,7 +4919,7 @@ mod tests {
     #[test]
     fn settings_window() {
         use crate::views::menus::{item_at, OPTIONS_MENU};
-        use crate::views::settings::{SAct, GENERAL, MIDI, PROJECT, TABS};
+        use crate::views::settings::{SAct, FILE, GENERAL, MIDI, NATIVE_HOST_CHECK, PROJECT, TABS, THEME};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         frame(&mut app, &mut c, None);
@@ -4940,16 +4935,25 @@ mod tests {
         }
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(MIDI)));
         click(&mut app, &mut c, r);
-        let k = Action::Settings(SAct::Check("Send master sync"));
-        let r = hit_rect(&app, &k);
+        // Controls that do not work yet are greyed out: no toggling, the click only says so.
+        assert!(!app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check("Send master sync"))));
+        let r = hit_rect(&app, &Action::Placeholder("Send master sync"));
         click(&mut app, &mut c, r);
-        assert!(app.state.settings.flipped.contains("Send master sync"));
+        assert_eq!(app.state.message.as_deref(), Some("Send master sync: not available yet"));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
         click(&mut app, &mut c, r);
+        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Timebase (PPQ)")), "the PPQ combo is greyed out");
         let adv = Action::Settings(SAct::Group("Advanced"));
         let r = hit_rect(&app, &adv);
         click(&mut app, &mut c, r);
-        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check("Fast declick for cut groups"))), "Advanced unfolded");
+        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Fast declick for cut groups")), "Advanced unfolded");
+        // The working controls keep their actions.
+        for (tab, live) in [(FILE, SAct::Button("Manage plugins")), (FILE, SAct::Check(NATIVE_HOST_CHECK)), (THEME, SAct::Button("Load theme...")), (THEME, SAct::Button("Reset")), (THEME, SAct::Preset(0))] {
+            let r = hit_rect(&app, &Action::Settings(SAct::Tab(tab)));
+            click(&mut app, &mut c, r);
+            assert!(app.hits.iter().any(|h| h.action == Action::Settings(live.clone())), "{live:?} works");
+        }
+        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Save preset...")));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(GENERAL)));
         click(&mut app, &mut c, r);
         app.wheel(0.0, -3.0, false, false);
