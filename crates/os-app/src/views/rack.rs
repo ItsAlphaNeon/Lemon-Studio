@@ -4,7 +4,7 @@
 use os_ui::{Color, Font, Rect};
 
 use super::{rgb, FrameInfo};
-use crate::app::{Action, Scroll, State, Ui, Win};
+use crate::app::{Action, Live, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
 use crate::knobs::KnobId;
 use crate::rack::{self as rk, FillHit, FillType, Tab};
@@ -193,6 +193,23 @@ pub fn graph_rect(s: &State) -> Option<Rect> {
     Some(Rect::new(x, row_y(s, &p) + 27.0, w, GRAPH_H))
 }
 
+/// The columns of the steps playing at ticks `a` and `b` in pattern mode, when they differ: lit steps down the
+/// column and the footer marker (§16) are all that a new step changes.
+pub fn step_columns(s: &State, a: f64, b: f64) -> Vec<Rect> {
+    let per_step = f64::from(rk::per_step(s).max(1));
+    let len = rk::pattern_steps(s).max(1);
+    let step = |t: f64| (t / per_step).floor().max(0.0) as u32 % len;
+    let (ka, kb) = (step(a), step(b));
+    if ka == kb {
+        return Vec::new();
+    }
+    let win = rect(s);
+    let inner = panel(win);
+    let x0 = win.x + cols(s).step_x - sx(s);
+    let bottom = win.bottom() - 22.0;
+    [ka, kb].into_iter().map(|k| Rect::new(x0 + STEP_W * k as f32 - 2.0, inner.y, STEP_W + 1.0, bottom - inner.y)).collect()
+}
+
 /// The bars area of the graph editor (above its tab row).
 pub fn graph_bars(s: &State) -> Option<Rect> {
     graph_rect(s).map(|g| Rect::new(g.x, g.y + 2.0, g.w, g.h - GRAPH_TABS_H - 4.0))
@@ -331,6 +348,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let slot = Rect::span(x + c.slot_x, x + c.slot_x + 6.0, ry + 2.0, ry + 24.0);
         let sel_hit = Rect::span(x + c.slot_x - 4.0, x + c.slot_x + 10.0, ry, ry + 26.0);
         ui.hit(sel_hit, Action::RackSelect(i), "Select (Up/Down)");
+        ui.live(Live::Sounding, slot);
         let sounding = f.playing && !f.paused && f.sounding.iter().any(|&(n, _)| n == ch.index) && ch.enabled;
         ui.c.fill_rect(slot, ui.t.s(0x1f2224));
         let slot_fill = if sounding { ui.t.tx(0xd8dcde) } else { ui.t.s(0x2b2d2f) };

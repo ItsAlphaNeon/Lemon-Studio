@@ -18,7 +18,7 @@ use std::borrow::Cow;
 
 use os_ui::{kit, Color, Rect};
 
-use crate::app::{Action, Bar, Scroll, State, Ui, Win};
+use crate::app::{Action, Bar, Scroll, Seg, State, Ui, Win};
 use crate::icons::{self, Icon};
 
 /// Per-frame values that don't live in `State`.
@@ -56,7 +56,11 @@ pub const BROWSER_W: f32 = 209.0;
 /// docked plugin windows.
 pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     let (w, h) = ui.c.size();
+    // A maximized Playlist or Piano roll paints all of its rect (`framed`): the workspace under it needs no clear.
+    let cover = s.docked().filter(|w| matches!(w, Win::Playlist | Win::PianoRoll)).map(|w| s.win_rect(w));
+    ui.c.set_cover(cover);
     ui.c.clear(ui.t.workspace);
+    ui.c.set_cover(None);
 
     // Workspace (§9): watermark, then docked windows on top.
     let left = if s.show_browser { BROWSER_W } else { 0.0 };
@@ -74,8 +78,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     // One stacking order for all child windows (spec: ui/channel-rack.md §5). A maximized window
     // fills the workspace, so windows below it are covered and not painted.
     let docked_at = s.z.iter().rposition(|&w| s.is_max(w));
+    // Each part is skipped by a repaint that misses it (`Ui::part`).
     if s.show_browser {
-        browser::paint(ui, s, Rect::new(0.0, WORK_Y, BROWSER_W, h - WORK_Y));
+        let r = Rect::new(0.0, WORK_Y, BROWSER_W, h - WORK_Y);
+        ui.part(Seg::Browser, r, |ui| browser::paint(ui, s, r));
     }
     let _ = work;
     for (i, &win) in s.z.iter().enumerate() {
@@ -84,17 +90,18 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
         ui.win = Some(win);
         let r = s.win_rect(win);
+        let a = s.win_area(win);
         match win {
-            Win::Playlist => playlist::paint(ui, s, r, f),
-            Win::Mixer => mixer::paint(ui, s, r, f),
-            Win::PianoRoll => piano::paint(ui, s, r, f),
-            Win::ChannelRack => rack::paint(ui, s, f),
-            Win::Plugin => channel_win::paint(ui, s, f),
+            Win::Playlist => ui.part(Seg::Win(win), a, |ui| playlist::paint(ui, s, r, f)),
+            Win::Mixer => ui.part(Seg::Win(win), a, |ui| mixer::paint(ui, s, r, f)),
+            Win::PianoRoll => ui.part(Seg::Win(win), a, |ui| piano::paint(ui, s, r, f)),
+            Win::ChannelRack => ui.part(Seg::Win(win), rack::bounds(s), |ui| rack::paint(ui, s, f)),
+            Win::Plugin => ui.part(Seg::Win(win), channel_win::bounds(s), |ui| channel_win::paint(ui, s, f)),
             _ => {}
         }
         ui.win = None;
     }
-    toolbar::paint(ui, s, f, w);
+    ui.part(Seg::Toolbar, Rect::new(0.0, 0.0, w, WORK_Y), |ui| toolbar::paint(ui, s, f, w));
     let overlays = ui.hit_count();
     playlist::paint_overlays(ui, s);
     if let Some(m) = s.menu_open {
@@ -204,6 +211,13 @@ pub fn float_frame(ui: &mut Ui, s: &State, win: Win, r: Rect) -> Option<Rect> {
     ui.c.fill_rect(Rect::new(inner.x - 1.0, inner.y + 22.0, inner.w + 2.0, inner.h - 21.0), ui.t.s(0x131718));
     ui.hit(Rect::new(r.x, r.y, r.w, 28.0), Action::WinDrag(win), "Drag to move");
     Some(inner)
+}
+
+/// The (layout rect, client rect) that `framed` returns for `win` at `r`, without painting.
+pub fn frame_rects(s: &State, win: Win, r: Rect) -> (Rect, Rect) {
+    let floats = win.slot().is_some_and(|i| !s.wins[i].maxed && !s.wins[i].mini) && r.h >= 2.0 * crate::app::TITLE_H;
+    let r = if floats { Rect::new(r.x + 7.0, r.y + 5.0, r.w - 14.0, r.h - 12.0) } else { r };
+    (r, Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0))
 }
 
 /// Window frame for `win`: the floating frame when it floats, else the docked title bar.

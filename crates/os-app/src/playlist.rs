@@ -1671,6 +1671,20 @@ fn mute_at(app: &mut App, grid: Rect, on: bool) {
 
 /// Mouse moved during a playlist drag.
 pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
+    // Drags that only move, resize or select things inside the playlist repaint just the playlist.
+    let inside = matches!(
+        d,
+        PlDrag::Move { .. }
+            | PlDrag::ResizeL { .. }
+            | PlDrag::ResizeR { .. }
+            | PlDrag::Slip { .. }
+            | PlDrag::Marquee { .. }
+            | PlDrag::ZoomBox { .. }
+            | PlDrag::TimeSel { .. }
+            | PlDrag::Marker { .. }
+            | PlDrag::Point { .. }
+            | PlDrag::Tension { .. }
+    );
     let (x, y) = app.mouse;
     let alt = app.alt;
     let shift = app.shift;
@@ -1805,7 +1819,11 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             }
         }
     }
-    app.invalidate();
+    if inside {
+        app.damage_win(crate::app::Win::Playlist);
+    } else {
+        app.invalidate();
+    }
 }
 
 /// Button released.

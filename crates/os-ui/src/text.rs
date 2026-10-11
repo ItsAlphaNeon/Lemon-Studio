@@ -123,14 +123,31 @@ impl TextEngine {
 #[cfg(windows)]
 mod gdi {
     use std::collections::HashMap;
+    use std::hash::{BuildHasherDefault, Hash, Hasher};
     use std::sync::OnceLock;
 
     use windows_sys::Win32::Foundation::SIZE;
     use windows_sys::Win32::Graphics::Gdi::*;
 
     use super::{ClipPx, Face, Font, CUPRUM};
+    use crate::cache::{Fx, Id, Lru};
     use os_theme::Color;
     use tiny_skia::Pixmap;
+
+    /// A drawn string: the pixels it produced over the pixels it was drawn on. ClearType blends each pixel with the
+    /// destination pixel under it, so the same string, font, colour and offset over the same background pixels gives
+    /// the same result; a hit is checked field by field and pixel by pixel, so it is exact.
+    struct Drawn {
+        s: Box<str>,
+        f: Font,
+        scale: u32,
+        vertical: bool,
+        c: Color,
+        /// Text origin relative to the region, and the region size (device px).
+        at: (i32, i32, i32, i32),
+        bg: Vec<u8>,
+        out: Vec<u8>,
+    }
 
     /// Register the embedded face once per process (private to the process).
     fn register_face() -> bool {
@@ -152,6 +169,11 @@ mod gdi {
         fonts: HashMap<(Font, u32, bool), HFONT>,
         names: [Vec<u16>; 2],
         metrics: HashMap<(Font, u32), (i32, i32)>,
+        /// Text extents by (font, scale, string) hash: views measure the same labels every frame.
+        extents: HashMap<u64, (i32, i32), BuildHasherDefault<Id>>,
+        drawn: Lru<Drawn>,
+        /// Background pixels of the region being drawn (reused buffer).
+        bg: Vec<u8>,
     }
 
     impl Gdi {
@@ -177,6 +199,9 @@ mod gdi {
                 fonts: HashMap::new(),
                 names: [Face::Ui, Face::Light].map(|f| f.gdi_name().encode_utf16().chain(Some(0)).collect()),
                 metrics: HashMap::new(),
+                extents: HashMap::default(),
+                drawn: Lru::new(32 << 20),
+                bg: Vec::new(),
             };
             g.ensure(256, 64)?;
             Ok(g)
@@ -272,6 +297,14 @@ mod gdi {
         }
 
         pub fn extent(&mut self, f: Font, scale: f32, s: &str) -> (i32, i32) {
+            let mut h = Fx::default();
+            f.hash(&mut h);
+            h.write_u32(scale.to_bits());
+            h.write(s.as_bytes());
+            let key = h.finish();
+            if let Some(e) = self.extents.get(&key) {
+                return *e;
+            }
             let font = self.font(f, scale, false);
             let w: Vec<u16> = s.encode_utf16().collect();
             let mut sz = SIZE { cx: 0, cy: 0 };
@@ -280,6 +313,10 @@ mod gdi {
                 SelectObject(self.dc, font);
                 GetTextExtentPoint32W(self.dc, w.as_ptr(), w.len() as i32, &mut sz);
             }
+            if self.extents.len() > 100_000 {
+                self.extents.clear();
+            }
+            self.extents.insert(key, (sz.cx, sz.cy));
             (sz.cx, sz.cy)
         }
 
@@ -297,12 +334,47 @@ mod gdi {
                 return;
             }
             let (w, h) = (x1 - x0, y1 - y0);
+            let data = pix.data_mut();
+            let pstride = pw as usize * 4;
+            let row_bytes = w as usize * 4;
+            // The pixels under the region, then a lookup of the same string drawn over the same pixels.
+            let mut bg = std::mem::take(&mut self.bg);
+            bg.clear();
+            for row in 0..h as usize {
+                bg.extend_from_slice(&data[(y0 as usize + row) * pstride + x0 as usize * 4..][..row_bytes]);
+            }
+            let at = (x - x0, y - y0, w, h);
+            let mut hs = Fx::default();
+            f.hash(&mut hs);
+            hs.write_u32(scale.to_bits());
+            hs.write_u8(u8::from(vertical));
+            hs.write_u32(u32::from_le_bytes([c.r, c.g, c.b, c.a]));
+            for v in [at.0, at.1, at.2, at.3] {
+                hs.write_i32(v);
+            }
+            hs.write(s.as_bytes());
+            hs.write(&bg);
+            let key = hs.finish();
+            if let Some(d) = self.drawn.get(key)
+                && d.at == at
+                && d.f == f
+                && d.scale == scale.to_bits()
+                && d.vertical == vertical
+                && d.c == c
+                && *d.s == *s
+                && d.bg == bg
+            {
+                for row in 0..h as usize {
+                    data[(y0 as usize + row) * pstride + x0 as usize * 4..][..row_bytes].copy_from_slice(&d.out[row * row_bytes..][..row_bytes]);
+                }
+                self.bg = bg;
+                return;
+            }
             if self.ensure(w, h).is_err() {
+                self.bg = bg;
                 return;
             }
             let stride = self.cap.0 as usize * 4;
-            let data = pix.data_mut();
-            let pstride = pw as usize * 4;
             // SAFETY: the DIB holds cap.0 × cap.1 BGRA pixels and w ≤ cap.0, h ≤ cap.1.
             let dib = unsafe { std::slice::from_raw_parts_mut(self.bits, stride * self.cap.1 as usize) };
             for row in 0..h as usize {
@@ -342,6 +414,14 @@ mod gdi {
                     d[3] = 255;
                 }
             }
+            let mut out = Vec::with_capacity(bg.len());
+            for row in 0..h as usize {
+                out.extend_from_slice(&data[(y0 as usize + row) * pstride + x0 as usize * 4..][..row_bytes]);
+            }
+            let bytes = bg.len() * 2 + s.len() + 96;
+            let d = Drawn { s: s.into(), f, scale: scale.to_bits(), vertical, c, at, bg: bg.clone(), out };
+            self.drawn.insert(key, d, bytes);
+            self.bg = bg;
         }
     }
 

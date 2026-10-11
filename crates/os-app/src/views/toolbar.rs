@@ -5,7 +5,7 @@ use os_ui::{Font, Rect};
 
 use super::{knob, menus, sunken, tool_button, FrameInfo};
 use crate::knobs::KnobId;
-use crate::app::{Action, State, Ui, Win};
+use crate::app::{Action, Live, State, Ui, Win};
 use crate::icons::{self, Icon};
 
 /// Placeholder buttons that latch on/off (designed, not functional yet).
@@ -175,6 +175,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_rect(tp, ui.t.s(0x212829));
     ui.c.fill_rect(tp.inset(1.0), t.time_panel);
     ui.hit(tp, Action::Placeholder("time display"), "Song position (bar:step:tick)");
+    ui.live(Live::Clock, tp);
     let (bar, step, tick) = bst_ticks(f.tick * 96.0 / f64::from(s.project.ppq.max(1)));
     // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
     // right-aligned so long bar numbers grow to the left and never leave the panel.
