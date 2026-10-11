@@ -23,6 +23,11 @@ pub trait Instrument: Send {
     fn choke(&mut self, offset: u32, key: u8) {
         self.note_off(offset, key);
     }
+    /// Tunes the sounding voices of `key` to `semitones` from the key's own pitch (portamento glides; spec:
+    /// audio/channel-voices.md). Default: ignored (no glide).
+    fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
+        let _ = (offset, key, semitones);
+    }
     /// Renders `left.len()` frames at `rate`, overwriting both buffers.
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
     /// True while the instrument still has sound to deliver (ringing voices, a long sample): the engine keeps

@@ -2031,6 +2031,7 @@ dependencies = [
  "clap-sys 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "libloading",
  "open-parametric-eq-2",
+ "open-sampler",
  "os-engine",
  "os-host",
  "os-model",

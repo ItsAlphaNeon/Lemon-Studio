@@ -617,6 +617,8 @@ struct Voice {
     dir: f64,
     /// Key rate times the sample / host rate ratio.
     key_step: f64,
+    /// Host tuning of this key's voices, semitones (portamento glides; spec: audio/channel-voices.md).
+    tune: f64,
     age: u64,
     off: Option<u64>,
     /// Fade-in frames (0 = none).
@@ -712,6 +714,7 @@ impl Engine {
             pos,
             dir: 1.0,
             key_step,
+            tune: 0.0,
             age: 0,
             off: None,
             fade_in,
@@ -745,6 +748,13 @@ impl Engine {
             let at = (b.start_offset + f64::from(extra)).clamp(0.0, 1.0);
             v.pos = (at * s.frames() as f64).floor();
             v.fade_in = if v.pos > 0.0 { ((fin / 1000.0) * rate) as u32 } else { 0 };
+        }
+    }
+
+    /// Tunes the voices of `key` to `semitones` from the key's pitch (the host's tuning expression: glides).
+    pub fn tune(&mut self, key: u8, semitones: f64) {
+        for v in self.voices.iter_mut().filter(|v| v.key == key) {
+            v.tune = semitones;
         }
     }
 
@@ -889,7 +899,7 @@ fn render_voice(v: &mut Voice, s: &Sample, b: &Block, rs: f64, (ls, le): (f64, O
                 }
             }
         }
-        let step = v.key_step * 2f64.powf((b.cents + m0.cents) / 1200.0) * rs;
+        let step = v.key_step * 2f64.powf((b.cents + m0.cents + v.tune * 100.0) / 1200.0) * rs;
         for j in 0..chunk {
             // Loop / end handling.
             if let Some(le) = le {

@@ -15,8 +15,9 @@ use std::sync::{Arc, Mutex};
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    clap_event_header, clap_event_note, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value, clap_input_events,
-    clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON,
+    clap_event_header, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
+    clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_EXPRESSION, CLAP_EVENT_NOTE_OFF,
+    CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_TUNING,
     CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END, CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE,
 };
 use clap_sys::ext::gui::{clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32};
@@ -235,6 +236,16 @@ enum Kind {
     On,
     Off,
     Choke,
+    /// Tuning of a key's voices (note expression); `velocity` holds the semitones.
+    Tune,
+}
+
+/// One entry of a chunk's event order: an index into `notes`, `mods` or `exprs`.
+#[derive(Clone, Copy)]
+enum Seq {
+    Note(usize),
+    Mod(usize),
+    Expr(usize),
 }
 
 /// One queued note event.
@@ -268,6 +279,7 @@ pub struct Plugin {
     queue: Vec<Ev>,
     notes: Vec<clap_event_note>,
     mods: Vec<clap_event_param_mod>,
+    exprs: Vec<clap_event_note_expression>,
     /// This chunk's events in time order (pointers into `notes` / `mods`).
     order: Vec<*const clap_event_header>,
     /// Parameter that takes a note's sample start as per-note modulation (`use_start_param`).
@@ -409,6 +421,7 @@ impl Plugin {
                 queue: Vec::with_capacity(256),
                 notes: Vec::with_capacity(256),
                 mods: Vec::with_capacity(64),
+                exprs: Vec::with_capacity(64),
                 order: Vec::with_capacity(320),
                 start_param: None,
                 next_note_id: 0,
@@ -674,11 +687,30 @@ impl Plugin {
         let n = left.len() as u32;
         self.notes.clear();
         self.mods.clear();
+        self.exprs.clear();
         let mut rest = Vec::new();
-        // Event order: (index into notes, index into mods); a note's modulation follows its note on at the same time.
-        let mut seq: Vec<(usize, Option<usize>)> = Vec::new();
+        // Event order; a note's modulation follows its note on at the same time.
+        let mut seq: Vec<Seq> = Vec::new();
         for e in self.queue.drain(..) {
-            if e.time < n {
+            if e.time < n && e.kind == Kind::Tune {
+                // Portamento glides (spec: audio/channel-voices.md): CLAP tuning expression, semitones.
+                self.exprs.push(clap_event_note_expression {
+                    header: clap_event_header {
+                        size: std::mem::size_of::<clap_event_note_expression>() as u32,
+                        time: e.time,
+                        space_id: CLAP_CORE_EVENT_SPACE_ID,
+                        type_: CLAP_EVENT_NOTE_EXPRESSION,
+                        flags: 0,
+                    },
+                    expression_id: CLAP_NOTE_EXPRESSION_TUNING,
+                    note_id: -1,
+                    port_index: 0,
+                    channel: 0,
+                    key: i16::from(e.key),
+                    value: f64::from(e.velocity),
+                });
+                seq.push(Seq::Expr(self.exprs.len() - 1));
+            } else if e.time < n {
                 // A note with a sample start gets an id, so its modulation reaches only that voice.
                 let id = match (e.kind, self.start_param) {
                     (Kind::On, Some(_)) if e.start > 0.0 => {
@@ -695,7 +727,7 @@ impl Plugin {
                         type_: match e.kind {
                             Kind::On => CLAP_EVENT_NOTE_ON,
                             Kind::Off => CLAP_EVENT_NOTE_OFF,
-                            Kind::Choke => CLAP_EVENT_NOTE_CHOKE,
+                            Kind::Choke | Kind::Tune => CLAP_EVENT_NOTE_CHOKE,
                         },
                         flags: 0,
                     },
@@ -705,7 +737,7 @@ impl Plugin {
                     key: i16::from(e.key),
                     velocity: f64::from(e.velocity),
                 });
-                seq.push((self.notes.len() - 1, None));
+                seq.push(Seq::Note(self.notes.len() - 1));
                 if let (Some(param), true) = (self.start_param, id >= 0) {
                     self.mods.push(clap_event_param_mod {
                         header: clap_event_header {
@@ -723,7 +755,7 @@ impl Plugin {
                         key: i16::from(e.key),
                         amount: f64::from(e.start),
                     });
-                    seq.push((0, Some(self.mods.len() - 1)));
+                    seq.push(Seq::Mod(self.mods.len() - 1));
                 }
             } else {
                 rest.push(Ev { time: e.time - n, ..e });
@@ -736,10 +768,11 @@ impl Plugin {
         self.take_automation(n);
         self.order.clear();
         let mut pi = 0;
-        for &(ni, mi) in &seq {
-            let h = match mi {
-                Some(m) => &self.mods[m].header as *const clap_event_header,
-                None => &self.notes[ni].header as *const clap_event_header,
+        for &s in &seq {
+            let h = match s {
+                Seq::Mod(m) => &self.mods[m].header as *const clap_event_header,
+                Seq::Note(i) => &self.notes[i].header as *const clap_event_header,
+                Seq::Expr(x) => &self.exprs[x].header as *const clap_event_header,
             };
             let t = unsafe { (*h).time };
             while pi < self.pvals.len() && self.pvals[pi].header.time <= t {
@@ -953,6 +986,10 @@ impl os_engine::Instrument for Plugin {
 
     fn choke(&mut self, offset: u32, key: u8) {
         self.queue.push(Ev { time: offset, kind: Kind::Choke, key, velocity: 0.0, start: 0.0 });
+    }
+
+    fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
+        self.queue.push(Ev { time: offset, kind: Kind::Tune, key, velocity: semitones, start: 0.0 });
     }
 
     fn param(&mut self, offset: u32, index: u32, value: f64) {
@@ -1489,5 +1526,63 @@ mod tests {
     fn serde_string(s: &str) -> String {
         let inner = format!("\"{}\"", s.replace('\\', "\\\\"));
         format!("\"{}\"", inner.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    /// Mono + portamento on the channel (the Misc tab): a second, overlapping note does not start a new attack; the
+    /// sounding note glides to the new key through CLAP tuning expressions, which Open Sampler follows.
+    // spec: audio/channel-voices.md
+    #[test]
+    fn mono_portamento_glides_through_open_sampler() {
+        let entry = &open_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Open Sampler.clap")) }.expect("linked Open Sampler");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        // 4 s of a 441 Hz sine at 48 kHz.
+        let wav = std::env::temp_dir().join("os-clap-porta.wav");
+        let tone: Vec<f32> = (0..48000 * 4).flat_map(|i| { let v = (i as f32 / 48000.0 * 441.0 * std::f32::consts::TAU).sin() * 0.5; [v, v] }).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
+        let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&wav.to_string_lossy()));
+        let mut blob = (state.len() as u64).to_le_bytes().to_vec();
+        blob.extend_from_slice(state.as_bytes());
+        assert!(p.load_state(&blob));
+        assert!(p.activate(48000));
+        let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
+        let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 0.35, ..Default::default() };
+        let ch = os_model::Channel {
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
+            enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc,
+        };
+        let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
+        let mut slib = os_engine::SampleLibrary::default();
+        let mut e = os_engine::Engine::new(&project, &mut slib, 48000, os_engine::PlayMode::Pattern(1));
+        e.clear_schedule();
+        e.set_instrument(0, shared);
+        let mut out = Vec::new();
+        let block = 480;
+        for b in 0..(48000 * 3 / block) {
+            match b {
+                10 => e.note_on(0, 60, 100),
+                // An octave up at 1 s, while 60 is still held.
+                100 => e.note_on(0, 72, 100),
+                _ => {}
+            }
+            let mut buf = vec![0.0f32; block * 2];
+            e.process(&mut buf);
+            out.extend(buf.chunks_exact(2).map(|f| f[0]));
+        }
+        let window = |from_s: f32, to_s: f32| &out[(from_s * 48000.0) as usize..(to_s * 48000.0) as usize];
+        let crossings = |w: &[f32]| w.windows(2).filter(|p| p[0] <= 0.0 && p[1] > 0.0).count() as f32 / (w.len() as f32 / 48000.0);
+        let before = crossings(window(0.5, 0.95));
+        let glide_s = os_engine::laws::slide_seconds(0.35) as f32;
+        let after = crossings(window(1.0 + glide_s + 0.05, 2.0));
+        let mid = crossings(window(1.0 + glide_s * 0.4, 1.0 + glide_s * 0.6));
+        eprintln!("before {before:.1} Hz, mid-glide {mid:.1} Hz, after {after:.1} Hz (glide {glide_s:.3} s)");
+        assert!((before - 441.0).abs() < 4.0, "first note in tune: {before}");
+        assert!((after - 882.0).abs() < 8.0, "glides to the octave: {after}");
+        assert!(mid > 500.0 && mid < 800.0, "between the two keys mid-glide: {mid}");
+        // Legato: the sample keeps playing from where it was (no restart at 1 s): the level stays up through the glide.
+        let peak = |w: &[f32]| w.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let (p0, p1) = (peak(window(0.9, 0.99)), peak(window(1.0, 1.05)));
+        assert!(p1 > p0 * 0.8, "no retrigger gap: {p0} -> {p1}");
     }
 }

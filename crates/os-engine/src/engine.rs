@@ -15,6 +15,7 @@ use crate::instrument::{SharedInstrument, Slot};
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
+mod notes;
 mod param_auto;
 pub use param_auto::PARAM_STEP;
 
@@ -80,6 +81,8 @@ struct ChannelState {
     /// A generator plugin channel; it sounds only once an instrument is attached (`Engine::set_instrument`).
     plugin: bool,
     instrument: Slot,
+    /// Polyphony, mono, portamento and cut group rules for the instrument's notes (spec: audio/channel-voices.md).
+    rules: notes::Rules,
 }
 
 /// Glide of the channel's volume and pan parameters towards a control point's values.
@@ -364,6 +367,10 @@ pub struct Engine {
     inst_offs: Vec<(u64, usize, u8, bool)>,
     inst_live: Vec<(usize, u8, f32)>,
     inst_events: Vec<(usize, u32, u8, f32, f32)>,
+    /// This span's events after the channels' note rules, sorted by channel, and each channel's notes at its
+    /// instrument (spec: audio/channel-voices.md).
+    inst_notes: Vec<(usize, u32, notes::Note)>,
+    note_voices: Vec<notes::Voices>,
     scratch: (Vec<f32>, Vec<f32>),
     /// Dry copy of a track buffer for slots mixed below 100 %.
     fx_dry: Vec<f32>,
@@ -381,8 +388,8 @@ pub struct Engine {
 /// Seconds an instrument keeps running after its last note (an OpenStudio choice).
 const INSTRUMENT_TAIL_SECONDS: u64 = 5;
 /// `inst_events` velocity values below zero: a note off, a choke.
-const OFF: f32 = -1.0;
-const CHOKE: f32 = -2.0;
+const OFF: f32 = notes::OFF;
+const CHOKE: f32 = notes::CHOKE;
 
 impl Engine {
     pub fn new(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayMode) -> Self {
@@ -442,6 +449,7 @@ impl Engine {
                     frame_s: 1.0 / f64::from(rate),
                     plugin: ch.kind == ChannelKind::Plugin,
                     instrument: Slot::default(),
+                    rules: notes::Rules::new(&ch.misc, rate),
                 }
             })
             .collect();
@@ -590,6 +598,8 @@ impl Engine {
             inst_offs: Vec::with_capacity(64),
             inst_live: Vec::with_capacity(64),
             inst_events: Vec::with_capacity(64),
+            inst_notes: Vec::with_capacity(64),
+            note_voices: vec![notes::Voices::default(); project.channels.len()],
             scratch: (Vec::new(), Vec::new()),
             fx_dry: Vec::new(),
             inst_tail: 0,
@@ -810,6 +820,9 @@ impl Engine {
         self.voices.retain(|v| v.channel < n);
         self.sounding = std::mem::take(&mut old.sounding);
         self.inst_live = std::mem::take(&mut old.inst_live);
+        // Notes held at the instruments (mono / polyphony / glide state) carry over.
+        self.note_voices = std::mem::take(&mut old.note_voices);
+        self.note_voices.resize(n, notes::Voices::default());
         self.inst_tail = old.inst_tail;
         self.inst_offs = std::mem::take(&mut old.inst_offs);
         for o in &mut self.inst_offs {
@@ -1044,6 +1057,9 @@ impl Engine {
             self.inst_events.push((ch, 0, key, if vel < 0.0 { OFF } else { vel }, 0.0));
         }
         self.inst_events.sort_by_key(|e| e.1);
+        let rules: Vec<notes::Rules> = self.channels.iter().map(|c| c.rules).collect();
+        self.note_voices.resize(self.channels.len(), notes::Voices::default());
+        notes::apply(&self.inst_events, &rules, &mut self.note_voices, (b - a) as u32, &mut self.inst_notes);
         let held = !self.inst_offs.is_empty()
             || self.sounding.iter().any(|&(c, _, end)| end == u64::MAX && self.channels.get(c).is_some_and(|ch| ch.instrument.0.is_some()));
         if held || !self.inst_events.is_empty() {
@@ -1067,16 +1083,15 @@ impl Engine {
             for (off, index, value) in self.params.channel_span(c, a, b) {
                 inst.param(off, index, value);
             }
-            for &(_, off, key, vel, start) in self.inst_events.iter().filter(|e| e.0 == c) {
+            let first = self.inst_notes.partition_point(|e| e.0 < c);
+            for &(_, off, note) in self.inst_notes[first..].iter().take_while(|e| e.0 == c) {
                 let off = off.min(n.saturating_sub(1) as u32);
-                if vel == CHOKE {
-                    inst.choke(off, key);
-                } else if vel < 0.0 {
-                    inst.note_off(off, key);
-                } else if start > 0.0 {
-                    inst.note_on_from(off, key, vel, start);
-                } else {
-                    inst.note_on(off, key, vel);
+                match note {
+                    notes::Note::Choke(key) => inst.choke(off, key),
+                    notes::Note::Off(key) => inst.note_off(off, key),
+                    notes::Note::On { key, vel, start } if start > 0.0 => inst.note_on_from(off, key, vel, start),
+                    notes::Note::On { key, vel, .. } => inst.note_on(off, key, vel),
+                    notes::Note::Tune(key, semitones) => inst.tune(off, key, semitones),
                 }
             }
             let (l, r) = (&mut self.scratch.0[..n], &mut self.scratch.1[..n]);
@@ -1143,6 +1158,14 @@ impl Drop for Engine {
         for &(c, key, _) in self.sounding.iter().filter(|s| s.2 == u64::MAX) {
             if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
                 inst.note_off(0, key.min(127) as u8);
+            }
+        }
+        // Mono legato notes sound under their first key.
+        for (c, v) in self.note_voices.iter().enumerate() {
+            for key in v.taken_over() {
+                if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
+                    inst.note_off(0, key);
+                }
             }
         }
     }

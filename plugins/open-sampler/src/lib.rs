@@ -399,6 +399,7 @@ impl Plugin for OpenSampler {
                 NoteEvent::NoteOn { note, velocity, voice_id, .. } => self.engine.note_on_id(note, velocity, voice_id, &blk),
                 NoteEvent::NoteOff { note, .. } => self.engine.note_off(note, &blk),
                 NoteEvent::Choke { note, .. } => self.engine.choke(note, &blk),
+                NoteEvent::PolyTuning { note, tuning, .. } => self.engine.tune(note, f64::from(tuning)),
                 NoteEvent::PolyModulation { voice_id, poly_modulation_id: params::START_OFFSET_POLY, normalized_offset, .. } => {
                     self.engine.start_later(voice_id, normalized_offset, &blk)
                 }
