@@ -251,6 +251,9 @@ struct PlTrackLoc {
 
 #[derive(Debug, Default)]
 struct ArrangementLoc {
+    /// The arrangement's first event (99) and its name (241).
+    start: usize,
+    name: Option<usize>,
     clips: Option<usize>,
     /// Every event of the time-marker groups.
     markers: Vec<usize>,
@@ -435,7 +438,12 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
             },
             (Region::Channels | Region::Arrangements, id::ARR_START) => {
                 region = Region::Arrangements;
-                l.arrangements.push(ArrangementLoc::default());
+                l.arrangements.push(ArrangementLoc { start: i, ..ArrangementLoc::default() });
+            }
+            (Region::Arrangements, id::ARR_NAME) => {
+                if let Some(a) = l.arrangements.last_mut().filter(|a| a.name.is_none() && a.clips.is_none()) {
+                    a.name = Some(i);
+                }
             }
             (Region::Arrangements, id::ARR_CLIPS) => {
                 if let Some(a) = l.arrangements.last_mut().filter(|a| a.tracks.is_empty()) {
@@ -1407,9 +1415,6 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     if !skip_mixer && project.mixer.len() != current.mixer.len() {
         return Err(mismatch("mixer tracks", project.mixer.len(), current.mixer.len()));
     }
-    if !skip_arrangements && project.arrangements.len() != current.arrangements.len() {
-        return Err(mismatch("arrangements", project.arrangements.len(), current.arrangements.len()));
-    }
 
     let mut inserts: Vec<(usize, Event)> = Vec::new();
     let mut removals: Vec<usize> = Vec::new();
@@ -1742,8 +1747,48 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         inserts.extend(block.into_iter().rev().map(|e| (at, e)));
     }
 
+    // Arrangements, matched by number: removed ones lose their whole block, added ones are written after the last
+    // (spec: flp/events/playlist.md "Arrangement block"); kept ones are patched below.
+    let mut arr_end: Option<usize> = None;
+    for (old_arr, loc) in current.arrangements.iter().zip(&l.arrangements) {
+        let end = loc
+            .tracks
+            .iter()
+            .flat_map(|t| [Some(t.record), t.color_flag, t.name])
+            .flatten()
+            .chain(loc.clips)
+            .chain(loc.markers.iter().copied())
+            .chain(loc.name)
+            .max()
+            .unwrap_or(loc.start)
+            + 1;
+        arr_end = Some(arr_end.map_or(end, |e| e.max(end)));
+        if !project.arrangements.iter().any(|a| a.number == old_arr.number) {
+            removals.extend(loc.start..end);
+        }
+    }
+    if let (None, Some(n), Some(at)) = (l.current_arrangement, project.current_arrangement, arr_end) {
+        // A file without event 100 (an older OpenStudio save) gets it after its last arrangement.
+        inserts.push((at, Event::new(id::CURRENT_ARRANGEMENT, Value::U16(n))));
+    }
+    if let Some(at) = arr_end.filter(|_| !skip_arrangements) {
+        let added: Vec<Event> = project
+            .arrangements
+            .iter()
+            .filter(|a| current.arrangements.iter().all(|o| o.number != a.number))
+            .flat_map(|a| arrangement_events(a, enc))
+            .collect();
+        inserts.extend(added.into_iter().rev().map(|e| (at, e)));
+    }
+
     // Playlist clips, time markers and tracks.
-    for ((arr, old_arr), loc) in project.arrangements.iter().zip(&current.arrangements).zip(&l.arrangements) {
+    for (old_arr, loc) in current.arrangements.iter().zip(&l.arrangements) {
+        let Some(arr) = project.arrangements.iter().find(|a| a.number == old_arr.number) else { continue };
+        if arr.name != old_arr.name {
+            if let Some(i) = loc.name {
+                set_data(&mut events[i], encode_text(arr.name.as_deref().unwrap_or("Arrangement"), enc));
+            }
+        }
         if arr.clips != old_arr.clips {
             if let Some(i) = loc.clips {
                 set_data(&mut events[i], encode_clips(&arr.clips));
@@ -2377,6 +2422,10 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     }
     for arr in &project.arrangements {
         ev.extend(arrangement_events(arr, enc));
+    }
+    // The arrangement shown, right after the last one's tracks as FL writes it (spec: flp/events/playlist.md, event 100).
+    if let Some(n) = project.current_arrangement.filter(|_| !project.arrangements.is_empty()) {
+        ev.push(Event::new(id::CURRENT_ARRANGEMENT, Value::U16(n)));
     }
     // The mixer follows the arrangements (spec: flp/events/mixer.md "Where the mixer sits").
     if !project.arrangements.is_empty() && !project.mixer.is_empty() {

@@ -186,6 +186,8 @@ pub enum Action {
     PlLed(u16),
     /// A group track's collapse arrow (spec: ui/playlist.md §6a).
     PlGroupArrow(u16),
+    /// The arrangement name in the playlist title: the arrangement menu (spec: ui/playlist.md §12).
+    PlArrangement,
     PlPickTab(crate::playlist::PickKind),
     PlPick(os_model::ClipSource),
     /// Picker list background / footer "+".
@@ -3183,6 +3185,11 @@ impl App {
                 let (x, y) = self.mouse;
                 self.state.playlist.popup = Some(pl::options_menu(&self.state, x - 6.0, y + 10.0));
             }
+            Action::PlArrangement => {
+                let r = self.top_hit(self.mouse.0, self.mouse.1).map(|h| h.rect).unwrap_or(Rect::new(self.mouse.0, self.mouse.1, 1.0, 20.0));
+                self.state.playlist.arr_anchor = (r.x - 4.0, r.y);
+                self.state.playlist.popup = Some(pl::arrangement_menu(&self.state, r.x, r.bottom() + 2.0));
+            }
             Action::PlPickTab(k) => self.state.playlist.picker = k,
             Action::PlPick(src) => {
                 self.state.playlist.source = Some(src);
@@ -3522,6 +3529,7 @@ impl App {
             | Action::PlHeader(_)
             | Action::PlLed(_)
             | Action::PlGroupArrow(_)
+            | Action::PlArrangement
             | Action::PlPickTab(_)
             | Action::PlPick(_)
             | Action::PlPopup(_)
@@ -5362,6 +5370,62 @@ mod tests {
         assert!(!app.transport.playing(), "and does not start playback");
     }
 
+    /// Arrangements (spec: ui/playlist.md §12): add, rename, clone, merge, delete, switch; saved and read back with
+    /// the shown one.
+    #[test]
+    fn playlist_arrangements() {
+        use crate::playlist as pl;
+        use os_model::{Clip, ClipSource};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, _, _, bar) = ruler_app(&mut c);
+        pl::place(&mut app.state, 0, 0);
+        let first = app.state.project.arrangement().unwrap().number;
+        // The title's arrangement name opens the menu.
+        frame(&mut app, &mut c, None);
+        let title = hit_rect(&app, &Action::PlArrangement);
+        click(&mut app, &mut c, title);
+        assert!(app.state.playlist.popup.is_some(), "arrangement menu");
+        app.state.playlist.popup = None;
+        // Add one, named through the box.
+        pl::run(&mut app, pl::Cmd::ArrAdd);
+        assert_eq!(app.state.project.arrangements.len(), 2);
+        let added = app.state.project.arrangement().unwrap().number;
+        assert_ne!(added, first);
+        assert!(pl::clips(&app.state).is_empty(), "a new arrangement is empty");
+        app.state.playlist.edit.as_mut().unwrap().text = "Verse".into();
+        pl::commit_edit(&mut app.state);
+        assert_eq!(pl::arrangement_name(&app.state), "Verse");
+        app.state.project.arrangement_mut().unwrap().clips.push(Clip::new(bar, bar, 1, ClipSource::Pattern(1)));
+        // Clone it, then merge the first arrangement's clips into the clone.
+        pl::run(&mut app, pl::Cmd::ArrClone);
+        pl::commit_edit(&mut app.state);
+        assert_eq!(pl::arrangement_name(&app.state), "Verse #2");
+        pl::run(&mut app, pl::Cmd::ArrMerge(first));
+        assert_eq!(pl::clips(&app.state).len(), 2, "its own clip and the merged one");
+        // Delete the clone: the one before it shows.
+        pl::run(&mut app, pl::Cmd::ArrDelete);
+        assert_eq!((app.state.project.arrangements.len(), app.state.project.arrangement().unwrap().number), (2, added));
+        // Saved and read back with "Verse" shown.
+        let path = std::env::temp_dir().join(format!("os-app-arrangements-{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let names: Vec<_> = back.arrangements.iter().map(|a| a.name.clone().unwrap_or_default()).collect();
+        assert_eq!(names, vec!["Arrangement".to_string(), "Verse".to_string()]);
+        assert_eq!(back.arrangement().unwrap().name.as_deref(), Some("Verse"));
+        // Edits to a file that already has arrangements: add one more, delete the first, save again.
+        let mut app2 = App::new(Some(path.clone()));
+        pl::run(&mut app2, pl::Cmd::ArrSelect(first));
+        pl::run(&mut app2, pl::Cmd::ArrDelete);
+        pl::run(&mut app2, pl::Cmd::ArrAdd);
+        pl::commit_edit(&mut app2.state);
+        app2.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let names: Vec<_> = back.arrangements.iter().map(|a| a.name.clone().unwrap_or_default()).collect();
+        assert_eq!(names, vec!["Verse".to_string(), "Arrangement 2".to_string()], "removed and added in an existing file");
+        assert!(back.arrangements[0].clips.iter().any(|c| c.position == bar), "the kept arrangement keeps its clips");
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Audio clip handles (spec: ui/playlist.md §9a): dragging the fade triangles sets the fades, the tension ring
     /// bends the curve, the gain half-circle changes the gain; one undo step each.
     #[test]
@@ -5449,7 +5513,7 @@ mod tests {
     }
 
     /// Double-clicking an audio clip opens its channel's Open Sampler and selects the channel in the rack; one
-    /// click does not, nor does a double click on a pattern clip (spec: ui/playlist.md §9).
+    /// click does not; a pattern clip opens its pattern in the piano roll (spec: ui/playlist.md §9, §2b).
     #[test]
     fn audio_clip_double_click_opens_its_sampler() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
@@ -5475,9 +5539,11 @@ mod tests {
         assert_eq!(app.state.selected_channel, row);
         assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([row]));
         app.state.pending_open = None;
+        app.state.pattern = 2;
         tap(&mut app, &mut c, 2);
         tap(&mut app, &mut c, 2);
-        assert_eq!(app.state.pending_open, None, "not for a pattern clip");
+        assert_eq!(app.state.pending_open, None, "a pattern clip opens no sampler");
+        assert!(app.state.shown(Win::PianoRoll) && app.state.pattern == 1, "it opens its pattern in the piano roll");
         let _ = std::fs::remove_file(&wav);
     }
 

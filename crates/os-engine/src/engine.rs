@@ -659,7 +659,7 @@ impl Engine {
                     continue;
                 }
                 // Plugin parameters play (spec: plugins/plugin-parameters.md Â§2); tempo and unknown targets do not.
-                if matches!(target, os_model::target::Target::Other(_) | os_model::target::Target::Tempo) {
+                if matches!(target, os_model::target::Target::Other(_)) {
                     report.automation_clips_ignored += 1;
                     continue;
                 }
@@ -1087,7 +1087,16 @@ impl Engine {
                     }
                 }
                 // Plugin parameters: sampled through the tick by `run_param_automation`.
-                Target::ChannelParam(..) | Target::SlotParam(..) | Target::Tempo | Target::Other(_) => {}
+                // The tempo for the ticks after this one: BPM = (10000 + Round(single(v) * 512000)) / 1000 (spec:
+                // audio/timing.md "Tempo that changes"; this tick's length was settled before).
+                Target::Tempo => {
+                    let bpm = (10000.0 + (f64::from(v as f32) * 512000.0).round()) / 1000.0;
+                    if bpm != self.tempo {
+                        self.tempo = bpm;
+                        self.clock.set_tempo(self.rate, self.ppq, bpm);
+                    }
+                }
+                Target::ChannelParam(..) | Target::SlotParam(..) | Target::Other(_) => {}
             }
         }
     }
@@ -2547,6 +2556,36 @@ mod tests {
         let w = 2.0 * os_model::fade_curve(1200.0 / 2400.0, 3.0) as f32;
         assert!((g(end) - w).abs() < 2e-3, "instrument fade-out half way: {} vs {w}", g(end));
         let _ = std::fs::remove_file(&wav);
+    }
+
+    // spec: audio/timing.md "Tempo that changes"
+    #[test]
+    fn tempo_automation_resizes_the_ticks() {
+        use os_model::{AutoPoint, Automation, ChannelKind, Clip, ClipSource, target};
+        let mut p = song(vec![long_note(0, 384 * 4, 0)], vec![Clip::new(0, 384 * 4, 0, ClipSource::Pattern(1))]);
+        let mut auto_ch = channel();
+        auto_ch.index = 1;
+        auto_ch.kind = ChannelKind::Automation;
+        p.channels.push(auto_ch);
+        // A flat tempo clip at 0.25: (10000 + Round(0.25 * 512000)) / 1000 = 138 BPM.
+        p.automations.push(Automation { channel: 1, target: Some(target::TEMPO), points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![] });
+        p.arrangements[0].clips.push(Clip::new(0, 384 * 4, 1, ClipSource::Channel(1)));
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        let mut out = vec![0.0f32; 480 * 2];
+        while e.tick < 384 * 4 {
+            e.process(&mut out);
+        }
+        // The first tick is sized at 130 BPM, every later one at 138.
+        let mut c = crate::clock::Clock::new(48000, 96, 130.0);
+        c.advance();
+        c.set_tempo(48000, 96, 138.0);
+        // (Processing runs in blocks, so the engine may be a tick or two past the four bars.)
+        for _ in 1..e.tick {
+            c.advance();
+        }
+        assert_eq!(e.clock.next_start(), c.next_start(), "{} ticks, all but the first at 138 BPM", e.tick);
+        assert_eq!(e.tempo, 138.0);
     }
 
     // spec: ui/playlist.md §8 (automation clips drive their target), flp/events/automation.md (value scaling)

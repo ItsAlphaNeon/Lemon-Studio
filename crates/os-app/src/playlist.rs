@@ -243,6 +243,14 @@ pub enum Cmd {
     TrackSolo(u16),
     /// Group the track with the one above it, or take it out of its group (§6a).
     TrackGroup(u16),
+    /// Arrangements (§12): show arrangement `n`, add an empty one, clone / rename / delete the current one, copy
+    /// arrangement `n`'s clips into the current one.
+    ArrSelect(u16),
+    ArrAdd,
+    ArrClone,
+    ArrRename,
+    ArrDelete,
+    ArrMerge(u16),
     /// Collapse / expand the group the track leads or belongs to (§6a).
     GroupCollapse(u16),
     TrackUp(u16),
@@ -337,6 +345,8 @@ pub enum EditTarget {
     /// Mixer track name (spec: ui/mixer.md §2) and a mixer slot's plugin name (§7).
     MixerName(u16),
     SlotName(u16, u8),
+    /// The current arrangement's name (§12).
+    ArrangementName,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -392,6 +402,8 @@ pub struct PlaylistState {
     pub hover_clip: Option<usize>,
     /// The audio clip handle under the mouse (drawn highlighted).
     pub hover_handle: Option<Handle>,
+    /// Where the arrangement name sits in the title bar (its rename box opens there).
+    pub arr_anchor: (f32, f32),
     /// Last header click (track, time) for double-click rename.
     pub last_header: Option<(u16, std::time::Instant)>,
     /// Last left click on an audio clip (clip, time): a second one soon after opens its sampler.
@@ -423,6 +435,7 @@ impl Default for PlaylistState {
             zoom_back: None,
             hover_clip: None,
             hover_handle: None,
+            arr_anchor: (300.0, 90.0),
             last_header: None,
             last_clip: None,
             waves: RefCell::new(HashMap::new()),
@@ -1695,16 +1708,22 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
     // Automation points: drag, add, menu (Draw / Paint / Select tools) (§8).
     if let Some(ci) = hit {
         let c = clips(s)[ci];
-        // Double-clicking an audio clip opens its channel's sampler and selects that channel in the rack (§9).
+        // Double-clicking an audio clip opens its channel's sampler and selects that channel in the rack (§9); a
+        // pattern clip makes its pattern the current one and opens the piano roll (§2b, as FL does).
         if !right && matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select) {
-            if let Some(row) = audio_clip_row(s, &c) {
+            let audio = audio_clip_row(s, &c);
+            if audio.is_some() || matches!(c.source, ClipSource::Pattern(_)) {
                 let now = std::time::Instant::now();
                 let double = s.playlist.last_clip.is_some_and(|(i, t)| i == ci && now.duration_since(t).as_millis() < 450);
                 s.playlist.last_clip = (!double).then_some((ci, now));
                 if double {
-                    s.rack.select_only(row);
-                    s.pending_open = Some(row);
-                    app.focus_channel(row);
+                    if let Some(row) = audio {
+                        s.rack.select_only(row);
+                        s.pending_open = Some(row);
+                        app.focus_channel(row);
+                    } else {
+                        run(app, Cmd::ClipEditSource(ci));
+                    }
                     app.invalidate();
                     return;
                 }
@@ -2184,6 +2203,53 @@ pub fn zoom_on(s: &mut State, grid_w: f32, idx: &[usize]) {
     s.playlist_scroll.1 = Rows::new(s).top(top);
 }
 
+/// The current arrangement's name.
+pub fn arrangement_name(s: &State) -> String {
+    s.project.arrangement().and_then(|a| a.name.clone()).unwrap_or_else(|| "Arrangement".into())
+}
+
+fn cmd_is_clone(c: &Cmd) -> bool {
+    matches!(c, Cmd::ArrClone)
+}
+
+/// Shows arrangement number `n` (event 100, spec: flp/events/playlist.md): selection and undo belong to the one
+/// left; a playing song continues with the new one.
+pub fn show_arrangement(s: &mut State, n: u16) {
+    s.project.current_arrangement = Some(n);
+    s.playlist.sel.clear();
+    s.playlist.hover_clip = None;
+    s.playlist.hover_handle = None;
+    s.playlist.undo.clear();
+    s.piano.dirty = true;
+}
+
+/// The arrangement menu of the playlist title (§12, as FL 26 shows it): the arrangements (the current one ticked),
+/// then Clone, Rename, Delete, Merge with, Add one.
+pub fn arrangement_menu(s: &State, x: f32, y: f32) -> Popup {
+    let cur = s.project.arrangement().map(|a| a.number);
+    let mut items = vec![PItem::head("Arrangements")];
+    for a in &s.project.arrangements {
+        let name = a.name.clone().unwrap_or_else(|| "Arrangement".into());
+        items.push(PItem::new(name, Cmd::ArrSelect(a.number)).mark(Mark::Radio(Some(a.number) == cur)));
+    }
+    let others: Vec<PItem> = s
+        .project
+        .arrangements
+        .iter()
+        .filter(|a| Some(a.number) != cur)
+        .map(|a| PItem::new(a.name.clone().unwrap_or_else(|| "Arrangement".into()), Cmd::ArrMerge(a.number)))
+        .collect();
+    items.push(PItem::head("Current Arrangement"));
+    items.push(PItem::new("Clone...", Cmd::ArrClone));
+    items.push(PItem::new("Rename...", Cmd::ArrRename));
+    let delete = PItem::new("Delete", Cmd::ArrDelete);
+    items.push(if s.project.arrangements.len() > 1 { delete } else { delete.off() });
+    items.push(if others.is_empty() { PItem::new("Merge with...", Cmd::Nothing).off() } else { PItem::sub("Merge with...", others) });
+    items.push(PItem::sep());
+    items.push(PItem::new("Add one...", Cmd::ArrAdd));
+    Popup { x, y, items, sub: None }
+}
+
 /// Collapses or expands the group led by track `t` or by `t`'s group track (§6a); no-op for an ungrouped track
 /// without members.
 pub fn toggle_collapse(s: &mut State, t: u16) {
@@ -2274,6 +2340,7 @@ pub fn press_led(app: &mut App, t: u16, right: bool) {
 pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
     let text = match target {
         EditTarget::TrackName(t) => track_name(s, t),
+        EditTarget::ArrangementName => arrangement_name(s),
         EditTarget::MarkerName(i) => markers(s).get(i).map(|m| m.name.clone()).unwrap_or_default(),
         EditTarget::NewMarker(_) => String::new(),
         EditTarget::PointValue(ch, i) => {
@@ -2296,6 +2363,11 @@ pub fn commit_edit(s: &mut State) {
     snapshot(s);
     let text = e.text.trim().to_string();
     match e.target {
+        EditTarget::ArrangementName => {
+            if !text.trim().is_empty() {
+                arr_mut(s).name = Some(text.trim().to_string());
+            }
+        }
         EditTarget::TrackName(t) => {
             let def = format!("Track {}", t + 1);
             if let Some(tr) = arr_mut(s).tracks.get_mut(usize::from(t)) {
@@ -2648,6 +2720,46 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::GroupCollapse(t) => {
             toggle_collapse(s, t);
             None
+        }
+        Cmd::ArrSelect(n) => {
+            show_arrangement(s, n);
+            None
+        }
+        Cmd::ArrAdd | Cmd::ArrClone => {
+            let n = s.project.arrangements.iter().map(|a| a.number + 1).max().unwrap_or(0);
+            let mut a = if cmd_is_clone(&cmd) { arr_mut(s).clone() } else { os_flp::project::default_arrangement() };
+            a.number = n;
+            a.name = Some(if cmd_is_clone(&cmd) {
+                format!("{} #2", arrangement_name(s))
+            } else {
+                format!("Arrangement {}", s.project.arrangements.len() + 1)
+            });
+            s.project.arrangements.push(a);
+            show_arrangement(s, n);
+            // FL's "Add one..." / "Clone..." ask for the name.
+            start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
+            None
+        }
+        Cmd::ArrRename => {
+            start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
+            None
+        }
+        Cmd::ArrDelete if s.project.arrangements.len() > 1 => {
+            let i = s.project.arrangement_index();
+            s.project.arrangements.remove(i);
+            let n = s.project.arrangements[i.saturating_sub(1)].number;
+            show_arrangement(s, n);
+            None
+        }
+        Cmd::ArrDelete => Some("The only arrangement cannot be deleted".into()),
+        Cmd::ArrMerge(n) => {
+            let Some(other) = s.project.arrangements.iter().find(|a| a.number == n).cloned() else { return None };
+            snapshot(s);
+            let a = arr_mut(s);
+            a.clips.extend(other.clips.iter().copied());
+            a.clips.sort_by_key(|c| c.position);
+            s.piano.dirty = true;
+            Some(format!("Merged the clips of {}", other.name.unwrap_or_else(|| "Arrangement".into())))
         }
         Cmd::TrackUp(t) if t > 0 => {
             snapshot(s);

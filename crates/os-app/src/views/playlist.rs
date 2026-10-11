@@ -37,8 +37,25 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
     window_body(ui, r);
     let outer = r;
-    let title = format!("Playlist - Arrangement  \u{203a}  {}  \u{203a}", pl::source_name(s, pl::source(s)));
+    let arr = pl::arrangement_name(s);
+    let title = format!("Playlist - {arr}  \u{203a}  {}  \u{203a}", pl::source_name(s, pl::source(s)));
     let (r, client) = super::framed(ui, s, Win::Playlist, r, &title, 281.0, true);
+    // The arrangement name opens the arrangement menu; hovered it turns orange with a down arrow (§12, as FL).
+    {
+        let f = Font::new(17);
+        let x0 = r.x + 281.0 + ui.c.text_width(f, "Playlist - ");
+        let w = ui.c.text_width(f, &arr);
+        let arrow_w = ui.c.text_width(f, "  \u{203a}  ");
+        let hit = Rect::new(x0 - 2.0, r.y, w + arrow_w * 0.7, 22.0);
+        if ui.hit(hit, Action::PlArrangement, "Arrangements (switch, add, clone, rename, delete)") {
+            let bg = ui.t.window_title;
+            ui.c.fill_rect(Rect::new(x0 - 1.0, r.y + 1.0, w + arrow_w * 0.7, 20.0), bg);
+            let hot = ui.t.h(0xf7a94c);
+            ui.c.text(f, x0, r.y + 1.0, hot, &arr);
+            let ax = x0 + w + arrow_w * 0.35;
+            ui.c.fill_polygon(&[(ax - 4.0, r.y + 9.0), (ax + 4.0, r.y + 9.0), (ax, r.y + 14.0)], hot);
+        }
+    }
 
     // Title-bar tools: ▸ options, snap magnet, then the nine tools (§1, §3).
     let ty = r.y + 2.0;
