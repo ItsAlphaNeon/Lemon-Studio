@@ -381,6 +381,9 @@ pub struct ChannelRack {
     pub zipped: bool,
     /// Filter group index into [`Project::groups`] (event 145).
     pub group: u32,
+    /// The colour event 128 holds, whether or not it is a custom colour: the playlist draws audio and automation
+    /// clips with it (spec: ui/playlist.md §2, "Channel-colour rule"). Display only; saving writes `Channel::color`.
+    pub stored_color: Option<Rgb>,
 }
 
 /// One channel envelope record, values as stored (spec: audio/channel-envelopes.md). Times are knob
@@ -765,6 +768,20 @@ pub struct PlaylistTrack {
     pub name: Option<String>,
     pub color: Option<Rgb>,
     pub enabled: bool,
+    /// Grouped with the track above: a member of the group led by the nearest ungrouped track above it (event 238
+    /// byte 46; spec: flp/events/playlist.md, ui/playlist.md §6a).
+    pub grouped: bool,
+    /// On a group track: its group is collapsed (byte 61 = 0).
+    pub collapsed: bool,
+    /// Byte 47: FL draws a lock on such a group (meaning not measured; kept and drawn).
+    pub locked: bool,
+}
+
+impl PlaylistTrack {
+    /// Track `number` as a new project has it: unnamed, default colour, on, not grouped.
+    pub fn new(number: u32) -> Self {
+        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false }
+    }
 }
 
 /// The data of an automation clip channel (spec: flp/events/automation.md): its points (event 234) and the

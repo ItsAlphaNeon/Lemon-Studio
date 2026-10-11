@@ -2205,7 +2205,7 @@ mod tests {
         let mut p = project(notes, vec![]);
         p.arrangements = vec![os_model::Arrangement {
             clips,
-            tracks: (1..=4).map(|n| os_model::PlaylistTrack { number: n, name: None, color: None, enabled: true }).collect(),
+            tracks: (1..=4).map(os_model::PlaylistTrack::new).collect(),
             ..Default::default()
         }];
         p

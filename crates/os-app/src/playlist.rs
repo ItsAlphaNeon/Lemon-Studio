@@ -241,6 +241,10 @@ pub enum Cmd {
     TrackRename(u16),
     TrackMute(u16),
     TrackSolo(u16),
+    /// Group the track with the one above it, or take it out of its group (§6a).
+    TrackGroup(u16),
+    /// Collapse / expand the group the track leads or belongs to (§6a).
+    GroupCollapse(u16),
     TrackUp(u16),
     TrackDown(u16),
     TrackInsert(u16),
@@ -468,8 +472,60 @@ impl PlaylistState {
 // ---------------------------------------------------------------------------------------------------------
 // Geometry
 
+/// Height of a member row of a collapsed group: a thin strip showing its clips as bars (§6a).
+pub const STRIP_H: f32 = 6.0;
+
+/// Vertical layout of the tracks (§6a): every track's top in content pixels. Rows are `ROW_H` tall; members of a
+/// collapsed group are `STRIP_H` strips.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rows {
+    top: Vec<f32>,
+}
+
+impl Rows {
+    pub fn new(s: &State) -> Rows {
+        let tracks = s.project.arrangement().map(|a| a.tracks.as_slice()).unwrap_or(&[]);
+        let mut top = Vec::with_capacity(usize::from(TRACKS) + 1);
+        let (mut y, mut collapsed) = (0.0, false);
+        for t in 0..usize::from(TRACKS) {
+            top.push(y);
+            let tr = tracks.get(t);
+            let grouped = t > 0 && tr.is_some_and(|x| x.grouped);
+            if !grouped {
+                collapsed = tr.is_some_and(|x| x.collapsed);
+            }
+            y += if grouped && collapsed { STRIP_H } else { ROW_H };
+        }
+        top.push(y);
+        Rows { top }
+    }
+
+    pub fn top(&self, t: u16) -> f32 {
+        self.top[usize::from(t.min(TRACKS))]
+    }
+
+    pub fn height(&self, t: u16) -> f32 {
+        let i = usize::from(t.min(TRACKS - 1));
+        self.top[i + 1] - self.top[i]
+    }
+
+    /// A collapsed group's member: drawn as a strip.
+    pub fn strip(&self, t: u16) -> bool {
+        self.height(t) < ROW_H - 0.5
+    }
+
+    /// The track at content height `y`.
+    pub fn at(&self, y: f32) -> u16 {
+        self.top.partition_point(|&v| v <= y).saturating_sub(1).min(usize::from(TRACKS) - 1) as u16
+    }
+
+    pub fn total(&self) -> f32 {
+        self.top[usize::from(TRACKS)]
+    }
+}
+
 /// Mapping between grid pixels and ticks / tracks for one frame.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PGeom {
     pub grid: Rect,
     /// Pixels per tick.
@@ -478,13 +534,15 @@ pub struct PGeom {
     pub scroll_y: f32,
     pub ppq: u32,
     pub bar_w: f32,
+    pub rows: std::rc::Rc<Rows>,
 }
 
 impl PGeom {
     pub fn new(s: &State, grid: Rect) -> PGeom {
         let ppq = u32::from(s.project.ppq.max(4));
         let bar_w = s.playlist_bar_w;
-        PGeom { grid, ppt: bar_w / (ppq * 4) as f32, scroll_x: s.playlist_scroll.0, scroll_y: s.playlist_scroll.1, ppq, bar_w }
+        let rows = std::rc::Rc::new(Rows::new(s));
+        PGeom { grid, ppt: bar_w / (ppq * 4) as f32, scroll_x: s.playlist_scroll.0, scroll_y: s.playlist_scroll.1, ppq, bar_w, rows }
     }
 
     pub fn x_of(&self, tick: f32) -> f32 {
@@ -496,16 +554,20 @@ impl PGeom {
     }
 
     pub fn y_of(&self, track: u16) -> f32 {
-        self.grid.y + f32::from(track) * ROW_H - self.scroll_y
+        self.grid.y + self.rows.top(track) - self.scroll_y
     }
 
     pub fn track_at(&self, y: f32) -> u16 {
-        (((y - self.grid.y + self.scroll_y) / ROW_H).floor().max(0.0) as u32).min(u32::from(TRACKS) - 1) as u16
+        self.rows.at(y - self.grid.y + self.scroll_y)
     }
 
+    /// A clip's rectangle: the row less its 3 px gap, or a thin bar on a collapsed group's strip (§6a).
     pub fn clip_rect(&self, c: &Clip) -> Rect {
         let x = self.x_of(c.position as f32);
         let w = (c.length as f32 * self.ppt).max(3.0);
+        if self.rows.strip(c.track) {
+            return Rect::new(x, self.y_of(c.track) + 1.0, w, STRIP_H - 2.0);
+        }
         Rect::new(x, self.y_of(c.track), w, CLIP_H)
     }
 
@@ -527,7 +589,7 @@ pub fn arr_mut(s: &mut State) -> &mut Arrangement {
     let a = s.project.arrangement_mut().expect("not empty");
     while a.tracks.len() < usize::from(TRACKS) {
         let n = a.tracks.len() as u32 + 1;
-        a.tracks.push(PlaylistTrack { number: n, name: None, color: None, enabled: true });
+        a.tracks.push(PlaylistTrack::new(n));
     }
     a
 }
@@ -538,6 +600,19 @@ pub fn clips(s: &State) -> &[Clip] {
 
 pub fn markers(s: &State) -> &[TimeMarker] {
     s.project.arrangement().map(|a| a.markers.as_slice()).unwrap_or(&[])
+}
+
+/// The group track leading track `t`'s group (§6a): the nearest ungrouped track above a grouped track.
+pub fn group_track(s: &State, t: u16) -> Option<u16> {
+    if t == 0 || !track_info(s, t).is_some_and(|x| x.grouped) {
+        return None;
+    }
+    (0..t).rev().find(|&k| !track_info(s, k).is_some_and(|x| x.grouped))
+}
+
+/// Track `t` leads a group: it is not grouped and the track below it is.
+pub fn is_group_track(s: &State, t: u16) -> bool {
+    !track_info(s, t).is_some_and(|x| x.grouped) && track_info(s, t + 1).is_some_and(|x| x.grouped)
 }
 
 pub fn track_info(s: &State, t: u16) -> Option<&PlaylistTrack> {
@@ -587,6 +662,33 @@ pub fn source_color(s: &State, src: ClipSource) -> Option<Rgb> {
         ClipSource::Pattern(n) => s.project.pattern(n).and_then(|p| p.color),
         ClipSource::Channel(c) => channel_of(s, c).and_then(|ch| ch.color),
     }
+}
+
+/// The colour an audio or automation clip's title strip and waveform take: its channel's colour as the file stores
+/// it (custom or not), else a pastel picked from the channel's name (spec: ui/playlist.md §2, "Channel-colour rule").
+/// `None` for pattern clips (neutral titles).
+pub fn clip_tint(s: &State, src: ClipSource) -> Option<Rgb> {
+    let ClipSource::Channel(c) = src else { return None };
+    let ch = channel_of(s, c)?;
+    ch.color.or(ch.rack.stored_color).or_else(|| Some(pastel(ch.name.as_deref().or(ch.sample_path.as_deref()).unwrap_or(""))))
+}
+
+/// A pastel of FL's audio-clip family (one component 0x68, one 0x7e, the third between), its hue from a hash of
+/// `seed` (an OpenStudio choice for clips whose file has no colour).
+pub fn pastel(seed: &str) -> Rgb {
+    let h = seed.bytes().fold(2_166_136_261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16_777_619));
+    let hue = (h % 360) as f32 / 60.0;
+    let (lo, hi) = (f32::from(0x68u8), f32::from(0x7eu8));
+    let mid = lo + (hi - lo) * (1.0 - (hue % 2.0 - 1.0).abs());
+    let (r, g, b) = match hue as u32 {
+        0 => (hi, mid, lo),
+        1 => (mid, hi, lo),
+        2 => (lo, hi, mid),
+        3 => (lo, mid, hi),
+        4 => (mid, lo, hi),
+        _ => (hi, lo, mid),
+    };
+    Rgb { r: r.round() as u8, g: g.round() as u8, b: b.round() as u8 }
 }
 
 pub fn source_kind(s: &State, src: ClipSource) -> PickKind {
@@ -956,7 +1058,7 @@ pub fn insert_track(s: &mut State, t: u16) {
         let prev = arr.tracks[k - 1].clone();
         arr.tracks[k] = PlaylistTrack { number: arr.tracks[k].number, ..prev };
     }
-    arr.tracks[usize::from(t)] = PlaylistTrack { number: u32::from(t) + 1, name: None, color: None, enabled: true };
+    arr.tracks[usize::from(t)] = PlaylistTrack::new(u32::from(t) + 1);
     s.piano.dirty = true;
 }
 
@@ -975,7 +1077,7 @@ pub fn delete_track(s: &mut State, t: u16) {
         let next = arr.tracks[k + 1].clone();
         arr.tracks[k] = PlaylistTrack { number: arr.tracks[k].number, ..next };
     }
-    arr.tracks[n - 1] = PlaylistTrack { number: n as u32, name: None, color: None, enabled: true };
+    arr.tracks[n - 1] = PlaylistTrack::new(n as u32);
     s.piano.dirty = true;
 }
 
@@ -1395,6 +1497,10 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::new("Solo", Cmd::TrackSolo(t)).mark(Mark::Check(s.playlist.solo.as_ref().is_some_and(|x| x.0 == t))),
         PItem::new("Mute all clips", Cmd::TrackMuteClips(t, true)),
         PItem::new("Unmute all clips", Cmd::TrackMuteClips(t, false)),
+        PItem::sep(),
+        PItem::new("Group with above track", Cmd::TrackGroup(t)).mark(Mark::Check(track_info(s, t).is_some_and(|x| x.grouped))),
+        PItem::new("Collapse group", Cmd::GroupCollapse(t))
+            .mark(Mark::Check(group_track(s, t).or(Some(t)).and_then(|g| track_info(s, g)).is_some_and(|x| x.collapsed))),
         PItem::sep(),
         PItem::new("Insert one", Cmd::TrackInsert(t)),
         PItem::new("Delete one", Cmd::TrackDelete(t)),
@@ -1917,7 +2023,16 @@ pub fn zoom_on(s: &mut State, grid_w: f32, idx: &[usize]) {
     s.playlist_bar_w = (grid_w / span).clamp(4.0, 600.0);
     s.playlist_scroll.0 = a as f32 / bar * s.playlist_bar_w;
     let top = cs.iter().map(|c| c.track).min().unwrap_or(0);
-    s.playlist_scroll.1 = f32::from(top) * ROW_H;
+    s.playlist_scroll.1 = Rows::new(s).top(top);
+}
+
+/// Collapses or expands the group led by track `t` or by `t`'s group track (§6a); no-op for an ungrouped track
+/// without members.
+pub fn toggle_collapse(s: &mut State, t: u16) {
+    let Some(g) = group_track(s, t).or_else(|| is_group_track(s, t).then_some(t)) else { return };
+    snapshot(s);
+    let tr = &mut arr_mut(s).tracks[usize::from(g)];
+    tr.collapsed = !tr.collapsed;
 }
 
 /// Ruler press: left moves the song position (playback follows), right starts a time selection (§7).
@@ -2330,6 +2445,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
                 ClipSource::Channel(ch) => {
                     if let Some(c) = s.project.channels.iter_mut().find(|c| c.index == ch) {
                         c.color = Some(rgb);
+                        c.rack.stored_color = Some(rgb);
                     }
                 }
             }
@@ -2362,6 +2478,17 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::TrackSolo(t) => {
             snapshot(s);
             toggle_solo(s, t);
+            None
+        }
+        Cmd::TrackGroup(t) if t > 0 => {
+            snapshot(s);
+            let tr = &mut arr_mut(s).tracks[usize::from(t)];
+            tr.grouped = !tr.grouped;
+            None
+        }
+        Cmd::TrackGroup(_) => None,
+        Cmd::GroupCollapse(t) => {
+            toggle_collapse(s, t);
             None
         }
         Cmd::TrackUp(t) if t > 0 => {
@@ -2417,7 +2544,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             let used: Vec<u16> = clips(s).iter().map(|c| c.track).collect();
             for (k, tr) in arr_mut(s).tracks.iter_mut().enumerate() {
                 if !used.contains(&(k as u16)) {
-                    *tr = PlaylistTrack { number: tr.number, name: None, color: None, enabled: true };
+                    *tr = PlaylistTrack::new(tr.number);
                 }
             }
             s.piano.dirty = true;

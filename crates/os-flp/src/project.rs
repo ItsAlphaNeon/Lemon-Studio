@@ -681,6 +681,7 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
             locked: loc.locked.is_some_and(|i| int(&events[i]) != 0),
             zipped: loc.zipped.is_some_and(|i| int(&events[i]) != 0),
             group: loc.group.map_or(0, |i| int(&events[i])),
+            stored_color: loc.color.map(|i| rgb_from_bgr(int(&events[i]))),
         },
         misc: load_misc(block),
         sound: load_sound(block, &i32_at),
@@ -1041,6 +1042,9 @@ fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrac
             .filter(|_| custom)
             .map(|b| rgb_from_bgr(u32::from_le_bytes(b.try_into().unwrap()))),
         enabled: r.get(12).is_none_or(|&b| b != 0),
+        grouped: r.get(46).is_some_and(|&b| b != 0),
+        collapsed: r.get(61).is_some_and(|&b| b == 0),
+        locked: r.get(47).is_some_and(|&b| b != 0),
     }
 }
 
@@ -1757,6 +1761,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             if t.enabled != old.enabled {
                 patch_bytes(&mut events[tl.record], 12, &[u8::from(t.enabled)]);
             }
+            // Groups (spec: flp/events/playlist.md, bytes 46 / 47 / 61).
+            if t.grouped != old.grouped {
+                patch_bytes(&mut events[tl.record], 46, &[u8::from(t.grouped)]);
+            }
+            if t.locked != old.locked {
+                patch_bytes(&mut events[tl.record], 47, &[u8::from(t.locked)]);
+            }
+            if t.collapsed != old.collapsed {
+                patch_bytes(&mut events[tl.record], 61, &[u8::from(!t.collapsed)]);
+            }
             if t.color != old.color {
                 if let Some(c) = t.color {
                     patch_bytes(&mut events[tl.record], 4, &bgr_from_rgb(c, 0).to_le_bytes());
@@ -2393,10 +2407,12 @@ fn track_record(t: &PlaylistTrack) -> Vec<u8> {
     r[13..17].copy_from_slice(&1.0f32.to_le_bytes());
     r[17] = if t.number <= 33 { 0xf0 } else { 0xff };
     r[18..21].fill(0xff);
-    r[29] = 5;
-    r[37] = 1;
-    r[51..59].fill(0xff);
-    r[59] = 1;
+    r[30] = 5;
+    r[38] = 1;
+    r[46] = u8::from(t.grouped);
+    r[47] = u8::from(t.locked);
+    r[53..61].fill(0xff);
+    r[61] = u8::from(!t.collapsed);
     r
 }
 
@@ -2412,7 +2428,7 @@ fn arrangement_events(arr: &Arrangement, enc: TextEnc) -> Vec<Event> {
         ev.extend(marker_events(m, enc));
     }
     for n in 1..=PLAYLIST_TRACKS {
-        let t = arr.tracks.iter().find(|t| t.number == n).cloned().unwrap_or(PlaylistTrack { number: n, name: None, color: None, enabled: true });
+        let t = arr.tracks.iter().find(|t| t.number == n).cloned().unwrap_or_else(|| PlaylistTrack::new(n));
         ev.push(Event::new(id::PL_TRACK, Value::var(track_record(&t))));
         ev.push(Event::new(id::PL_COLOR_FLAG, Value::U8(u8::from(t.color.is_some()))));
         if let Some(name) = &t.name {
@@ -2550,7 +2566,7 @@ pub fn default_arrangement() -> Arrangement {
     Arrangement {
         number: 0,
         name: Some("Arrangement".into()),
-        tracks: (1..=PLAYLIST_TRACKS).map(|n| PlaylistTrack { number: n, name: None, color: None, enabled: true }).collect(),
+        tracks: (1..=PLAYLIST_TRACKS).map(PlaylistTrack::new).collect(),
         ..Default::default()
     }
 }
@@ -2941,6 +2957,7 @@ mod tests {
         let arr = &back.arrangements[0];
         assert_eq!(arr.tracks.len(), 500);
         assert_eq!(arr.markers, p.arrangements[0].markers);
+        assert!(arr.tracks.iter().all(|t| !t.grouped && !t.collapsed && !t.locked), "new tracks: no groups, expanded");
         let c = arr.clips.iter().find(|c| c.source == ClipSource::Pattern(1)).unwrap();
         assert_eq!((c.position, c.length, c.track, c.muted, c.window), (384, 288, 0, true, Some((96.0, 384.0))));
         let ac = arr.clips.iter().find(|c| c.source == ClipSource::Channel(2)).unwrap();
@@ -2955,6 +2972,11 @@ mod tests {
         a0.markers.push(TimeMarker::new(0, "Intro"));
         a0.tracks[3].enabled = false;
         a0.tracks[3].name = Some("Drums".into());
+        // A collapsed group: track 3 leads, tracks 4 and 5 are its members (spec: flp/events/playlist.md).
+        a0.tracks[3].collapsed = true;
+        a0.tracks[4].grouped = true;
+        a0.tracks[5].grouped = true;
+        a0.tracks[5].locked = true;
         edited.automations[0].points[1].value = 0.9;
         let mut ch = sampler(3, "Tempo", 0);
         ch.kind = ChannelKind::Automation;
@@ -2965,7 +2987,7 @@ mod tests {
         assert_eq!(file.header().unwrap().channel_count(), Some(4));
         assert_eq!(again.automations, edited.automations);
         assert_eq!(again.arrangements[0].markers, edited.arrangements[0].markers);
-        assert_eq!(again.arrangements[0].tracks[3], edited.arrangements[0].tracks[3]);
+        assert_eq!(again.arrangements[0].tracks[3..6], edited.arrangements[0].tracks[3..6]);
         let mut want = edited.arrangements[0].clips.clone();
         want.sort_by_key(|c| c.position);
         let strip = |v: &[Clip]| v.iter().map(|c| (c.position, c.length, c.track, c.source, c.muted, c.window)).collect::<Vec<_>>();

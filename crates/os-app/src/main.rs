@@ -627,6 +627,10 @@ fn screenshot(args: &[String]) {
     let mut channel = None;
     let mut win_rect: Option<os_ui::Rect> = None;
     let mut theme: Option<std::path::PathBuf> = None;
+    let mut size = (1920u32, 1080u32);
+    let mut scale = 1.0f32;
+    let mut bar_w: Option<f32> = None;
+    let mut wait = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -663,6 +667,17 @@ fn screenshot(args: &[String]) {
             "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
             "--pattern" => pattern = it.next().and_then(|v| v.parse().ok()),
             "--channel" => channel = it.next().and_then(|v| v.parse().ok()),
+            // Physical canvas size "WxH" and UI scale (a 150 % display: `--size 2560x1540 --scale 1.5`).
+            "--size" => {
+                if let Some((w, h)) = it.next().and_then(|v| v.split_once('x')) {
+                    size = (w.parse().unwrap_or(size.0), h.parse().unwrap_or(size.1));
+                }
+            }
+            "--scale" => scale = it.next().and_then(|v| v.parse().ok()).unwrap_or(1.0),
+            // Playlist zoom: logical pixels per bar.
+            "--bar-w" => bar_w = it.next().and_then(|v| v.parse().ok()),
+            // Let the project finish loading (samples decoded, samplers started) before the frame is captured.
+            "--wait" => wait = true,
             // Float the shown window at x,y,w,h instead of maximizing it.
             "--win" => {
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
@@ -750,7 +765,15 @@ fn screenshot(args: &[String]) {
     if app.state.shown(app::Win::PianoRoll) {
         piano::center_keys(&mut app.state, 744.0);
     }
-    let mut canvas = Canvas::new(1920, 1080, 1.0).expect("canvas");
+    if let Some(w) = bar_w {
+        app.state.playlist_bar_w = w;
+    }
+    let started = Instant::now();
+    while wait && app.loading() && started.elapsed().as_secs() < 120 {
+        app.tick();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let mut canvas = Canvas::new(size.0, size.1, scale).expect("canvas");
     app.paint(&mut canvas, None);
     if let Some((x, y)) = mouse {
         app.mouse_move(x, y);

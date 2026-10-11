@@ -553,6 +553,7 @@ pub fn gradient(s: &mut State) {
             _ => crate::playlist::hsl_rgb(300.0 * t, 0.35, 0.45),
         };
         s.project.channels[r].color = Some(c);
+        s.project.channels[r].rack.stored_color = Some(c);
     }
 }
 

@@ -184,6 +184,8 @@ pub enum Action {
     PlMarkers,
     PlHeader(u16),
     PlLed(u16),
+    /// A group track's collapse arrow (spec: ui/playlist.md §6a).
+    PlGroupArrow(u16),
     PlPickTab(crate::playlist::PickKind),
     PlPick(os_model::ClipSource),
     /// Picker list background / footer "+".
@@ -2722,12 +2724,12 @@ impl App {
                 s.playlist_scroll.0 = (bar * s.playlist_bar_w - (x - gx)).max(0.0);
             }
             // Shift+wheel over the track headers moves the selected track (spec: ui/playlist.md §6).
-            Some(Action::PlHeader(_) | Action::PlLed(_)) if shift => {
+            Some(Action::PlHeader(_) | Action::PlLed(_) | Action::PlGroupArrow(_)) if shift => {
                 let d = if dx + dy > 0.0 { -1 } else { 1 };
                 crate::playlist::snapshot(s);
                 crate::playlist::shift_tracks(s, d);
             }
-            Some(Action::PlHeader(_) | Action::PlLed(_)) => {
+            Some(Action::PlHeader(_) | Action::PlLed(_) | Action::PlGroupArrow(_)) => {
                 s.playlist_scroll.1 = (s.playlist_scroll.1 - dy * 48.0).max(0.0);
             }
             Some(Action::PlaylistArea) => {
@@ -3157,6 +3159,10 @@ impl App {
                 pl::press_header(self, t, right, at);
             }
             Action::PlLed(t) => pl::press_led(self, t, right),
+            Action::PlGroupArrow(t) => {
+                pl::toggle_collapse(&mut self.state, t);
+                self.invalidate();
+            }
             Action::PlTool(t) if !right => {
                 self.state.playlist.tool = t;
                 self.state.playlist.overlay = None;
@@ -3507,6 +3513,7 @@ impl App {
             | Action::PlMarkers
             | Action::PlHeader(_)
             | Action::PlLed(_)
+            | Action::PlGroupArrow(_)
             | Action::PlPickTab(_)
             | Action::PlPick(_)
             | Action::PlPopup(_)
@@ -5345,6 +5352,34 @@ mod tests {
         assert!(app.state.song_mode, "a click on the ruler switches to SONG");
         assert_eq!(app.state.playlist.pos, 4 * bar);
         assert!(!app.transport.playing(), "and does not start playback");
+    }
+
+    /// Track groups (spec: ui/playlist.md §6a): grouped tracks follow their group track; a collapsed group's members
+    /// become strips; the group track's arrow expands it again.
+    #[test]
+    fn playlist_track_groups() {
+        use crate::playlist as pl;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, _, _, _) = ruler_app(&mut c);
+        pl::run(&mut app, pl::Cmd::TrackGroup(1));
+        pl::run(&mut app, pl::Cmd::TrackGroup(2));
+        assert!(pl::is_group_track(&app.state, 0));
+        assert_eq!((pl::group_track(&app.state, 2), pl::group_track(&app.state, 3)), (Some(0), None));
+        assert_eq!(pl::Rows::new(&app.state).top(3), 3.0 * pl::ROW_H);
+        // A member collapses its group.
+        pl::run(&mut app, pl::Cmd::GroupCollapse(2));
+        let rows = pl::Rows::new(&app.state);
+        assert!(rows.strip(1) && rows.strip(2) && !rows.strip(0) && !rows.strip(3));
+        assert_eq!(rows.top(3), pl::ROW_H + 2.0 * pl::STRIP_H);
+        frame(&mut app, &mut c, None);
+        let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
+        assert_eq!(g.track_at(g.y_of(3) + 1.0), 3, "rows below the strips map back to their tracks");
+        let arrow = hit_rect(&app, &Action::PlGroupArrow(0));
+        click(&mut app, &mut c, arrow);
+        assert!(!pl::Rows::new(&app.state).strip(1), "the arrow expands the group");
+        // Undo brings the collapse back.
+        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        assert!(pl::Rows::new(&app.state).strip(1));
     }
 
     /// Double-clicking an audio clip opens its channel's Open Sampler and selects the channel in the rack; one
