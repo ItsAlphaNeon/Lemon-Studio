@@ -3,18 +3,9 @@
 
 use os_ui::{Font, Rect};
 
-use super::{knob, menus, sunken, tool_button, FrameInfo};
-use crate::knobs::KnobId;
+use super::{menus, sunken, tool_button, FrameInfo};
 use crate::app::{Action, Live, State, Ui, Win};
 use crate::icons::{self, Icon};
-
-/// Placeholder buttons that latch on/off (designed, not functional yet).
-pub fn is_toggle(name: &str) -> bool {
-    matches!(
-        name,
-        "metronome" | "wait" | "countdown" | "blend" | "loop" | "typing" | "step" | "slide" | "multilink" | "midi"
-    )
-}
 
 /// Leftmost logo centre: just right of the last toolbar control (the news panel / downloads, x 1473).
 const LOGO_MIN_X: f32 = 1520.0;
@@ -49,7 +40,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     // It keeps to the right edge until the window is too narrow, then the edge crops it
     // (spec ui/main-window.md §12); the toolbar never moves.
     let lx = (width - 45.0).max(LOGO_MIN_X);
-    ui.hit(Rect::new(lx - 35.0, 0.0, 78.0, 80.0), Action::Placeholder("About"), "OpenStudio");
+    ui.hit(Rect::new(lx - 35.0, 0.0, 78.0, 80.0), Action::MenuItem(menus::HELP_MENU, menus::HELP_ABOUT), "About OpenStudio");
     icons::logo(ui.c, lx, 40.0, 26.0, t.toolbar_line);
 }
 
@@ -125,19 +116,12 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
             icons::draw(ui.c, icon, g, c);
         }
     }
+    // Record: not available yet, so drawn greyed out (no hover, no press).
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
-    let hov = ui.hit(rec, Action::Record, "Record");
-    let down = ui.down(rec, &Action::Record);
+    ui.off(rec, "Recording");
     ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.toolbar_line.shade(-0.25));
-    ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, if hov { t.button_hi } else { t.button.shade(-0.03) });
-    if down {
-        // Held: a red glowing ring around a dark core.
-        ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.record.mix(ui.t.tx(0xffffff), 0.35));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, t.record.shade(0.15));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.shade(-0.55));
-    }
-    ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, if down { t.record.shade(-0.55) } else { t.record.shade(-0.1) });
-    ui.c.fill_circle(rec.cx() - 1.2, rec.cy() - 1.5, 2.0, t.record.shade(0.4));
+    ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, t.button.shade(-0.12));
+    ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.mix(t.button, 0.7).shade(-0.15));
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);
     ui.hit(tb, Action::Tempo, "Tempo (drag up/down)");
@@ -156,25 +140,24 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_polygon(&[(tb.right() - 9.0, 22.0), (tb.right() - 6.0, 26.0), (tb.right() - 3.0, 22.0)], t.glyph_dim);
 
     // Recording options.
-    for (i, (icon, name, hint)) in [
-        (Icon::Metronome, "metronome", "Metronome"),
-        (Icon::WaitInput, "wait", "Wait for input to start recording"),
-        (Icon::Countdown, "countdown", "Countdown before recording"),
-        (Icon::Blend, "blend", "Blend recording"),
-        (Icon::LoopRecord, "loop", "Loop recording"),
+    for (i, (icon, hint)) in [
+        (Icon::Metronome, "Metronome"),
+        (Icon::WaitInput, "Wait for input to start recording"),
+        (Icon::Countdown, "Countdown before recording"),
+        (Icon::Blend, "Blend recording"),
+        (Icon::LoopRecord, "Loop recording"),
     ]
     .into_iter()
     .enumerate()
     {
-        let on = s.toggles.contains(&name);
-        tool_button(ui, btn(580.0 + 33.0 * i as f32, 4.0), icon, on, Action::Placeholder(name), hint);
+        tool_button(ui, btn(580.0 + 33.0 * i as f32, 4.0), icon, false, Action::Placeholder(hint), hint);
     }
 
     // Song position (B:S:T).
     let tp = Rect::span(745.0, 873.0, 4.0, 36.0);
     ui.c.fill_rect(tp, ui.t.s(0x212829));
     ui.c.fill_rect(tp.inset(1.0), t.time_panel);
-    ui.hit(tp, Action::Placeholder("time display"), "Song position (bar:step:tick)");
+    ui.hit(tp, Action::Swallow, "Song position (bar:step:tick)");
     ui.live(Live::Clock, tp);
     let (bar, step, tick) = bst_ticks(f.tick * 96.0 / f64::from(s.project.ppq.max(1)));
     // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
@@ -202,14 +185,16 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
 
     // Monitors (oscilloscope / spectrum analyzer, stereo peak bars) and CPU / memory.
     monitor(ui, s);
+    // CPU / polyphony / memory panel: not measured yet, greyed out.
     let cpu = Rect::span(1053.0, 1201.0, 4.0, 35.0);
     sunken(ui, cpu, t.sunken_dark);
-    ui.hit(cpu, Action::Placeholder("cpu"), "CPU, polyphony and memory");
+    ui.off(cpu, "CPU, polyphony and memory monitor");
     ui.c.fill_rect(Rect::new(1055.0, 6.0, 1.5, 12.0), t.glyph);
-    ui.c.text_right(Font::new(17), 1136.0, 3.0, t.glyph, "0");
+    ui.c.text_right(Font::new(17), 1136.0, 3.0, t.glyph, "-");
     ui.c.line(1055.0, 32.0, 1130.0, 32.0, 1.0, t.glyph.with_alpha(160));
-    ui.c.text_right(Font::condensed(18, 6), 1199.0, 3.0, t.glyph, "0 MB");
-    ui.c.text_right(Font::condensed(18, 6), 1166.0, 17.0, t.glyph, "0");
+    ui.c.text_right(Font::condensed(18, 6), 1199.0, 3.0, t.glyph, "- MB");
+    ui.c.text_right(Font::condensed(18, 6), 1166.0, 17.0, t.glyph, "-");
+    ui.veil(cpu.inset(1.0), t.sunken_dark);
 
     // Utility buttons.
     let utils = [
@@ -218,13 +203,18 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         (Icon::Mic, "Audio input / recording"),
         (Icon::Help, "Help"),
         (Icon::Save, "Save project (Ctrl+S)"),
-        (Icon::SaveRender, "Save and render"),
+        (Icon::SaveRender, "Export the song as a WAV file (Ctrl+R)"),
         (Icon::Info, "Project info"),
         (Icon::Download, "Downloads"),
     ];
     for (i, (icon, hint)) in utils.into_iter().enumerate() {
         let r = btn(1209.0 + 33.0 * i as f32, 4.0);
-        let action = if icon == Icon::Save { Action::MenuItem(0, menus::FILE_SAVE) } else { Action::Placeholder(hint) };
+        let action = match icon {
+            Icon::Save => Action::MenuItem(0, menus::FILE_SAVE),
+            Icon::SaveRender => Action::MenuItem(0, menus::FILE_EXPORT),
+            Icon::Info => Action::MenuItem(menus::OPTIONS_MENU, menus::OPT_INFO),
+            _ => Action::Placeholder(hint),
+        };
         tool_button(ui, r, icon, false, action, hint);
     }
 }
@@ -313,45 +303,49 @@ fn row2(ui: &mut Ui, s: &State) {
         ui.c.text(menus::BAR_FONT, x0, 51.0, t.menu_text, title);
     }
 
-    // Master knobs.
-    ui.hit(Rect::span(303.0, 337.0, 45.0, 77.0), Action::Knob(KnobId::MasterVol), s.knob_text(KnobId::MasterVol));
-    knob(ui, 319.0, 61.0, 14.0, s.knob(KnobId::MasterVol), false, t.glyph, t.button_hi);
-    ui.hit(Rect::span(340.0, 376.0, 45.0, 77.0), Action::Knob(KnobId::MasterPitch), s.knob_text(KnobId::MasterPitch));
-    knob(ui, 358.0, 61.0, 14.0, s.knob(KnobId::MasterPitch), true, t.glyph, t.button_hi);
+    // Master knobs: not connected to the sound yet (the mixer's master track is), so greyed out.
+    ui.off(Rect::span(303.0, 337.0, 45.0, 77.0), "Main volume (use the mixer's master track)");
+    let off = os_ui::kit::State::NORMAL.with_disabled(true);
+    os_ui::kit::knob(ui.c, t, 319.0, 61.0, 14.0, 0.8, false, os_ui::kit::KnobLook::Ring, off);
+    ui.off(Rect::span(340.0, 376.0, 45.0, 77.0), "Main pitch");
+    os_ui::kit::knob(ui.c, t, 358.0, 61.0, 14.0, 0.5, true, os_ui::kit::KnobLook::Ring, off);
     for k in 0..20 {
         let a = 0.75 * std::f32::consts::PI + 1.5 * std::f32::consts::PI * k as f32 / 19.0;
         ui.c.fill_circle(358.0 + 17.5 * a.cos(), 61.0 + 17.5 * a.sin(), 0.7, t.glyph_dim);
     }
+    ui.veil(Rect::span(301.0, 377.0, 43.0, 79.0), t.toolbar);
 
     // Main slider panel.
     let sp = Rect::span(381.0, 575.0, 45.0, 77.0);
-    ui.hit(sp, Action::Placeholder("song position slider"), "Song position");
+    ui.off(sp, "Song position slider");
     ui.c.fill_rect(Rect::new(390.0, 61.0, 180.0, 2.0), t.sunken_dark);
     ui.c.fill_circle(396.0, 62.0, 6.5, t.sunken_dark);
     ui.c.line(396.0, 57.0, 396.0, 67.0, 2.0, t.pill);
+    ui.veil(Rect::span(383.0, 574.0, 50.0, 74.0), t.toolbar);
 
     // Mode buttons.
-    for (i, (icon, name, hint)) in [
-        (Icon::TypingKeyboard, "typing", "Typing keyboard to piano keyboard"),
-        (Icon::StepEdit, "step", "Step editing"),
-        (Icon::Slide, "slide", "Slide / portamento"),
-        (Icon::Link, "multilink", "Multilink to controllers"),
-        (Icon::MidiControl, "midi", "MIDI note controls"),
+    for (i, (icon, hint)) in [
+        (Icon::TypingKeyboard, "Typing keyboard to piano keyboard (Ctrl+T)"),
+        (Icon::StepEdit, "Step editing"),
+        (Icon::Slide, "Slide / portamento"),
+        (Icon::Link, "Multilink to controllers"),
+        (Icon::MidiControl, "MIDI note controls"),
     ]
     .into_iter()
     .enumerate()
     {
-        let on = s.toggles.contains(&name);
-        tool_button(ui, btn(580.0 + 33.0 * i as f32, 45.0), icon, on, Action::Placeholder(name), hint);
+        let (on, action) = if i == 0 { (s.toggles.contains(&"typing"), Action::Typing) } else { (false, Action::Placeholder(hint)) };
+        tool_button(ui, btn(580.0 + 33.0 * i as f32, 45.0), icon, on, action, hint);
     }
 
     // Snap.
     icons::draw(ui.c, Icon::Magnet, Rect::span(748.0, 766.0, 52.0, 70.0), t.glyph_dim.shade(0.3));
     let snap = Rect::span(768.0, 830.0, 50.0, 72.0);
-    let hov = ui.hit(snap, Action::Placeholder("snap"), "Global snap");
-    ui.c.fill_rrect(snap, 2.0, if hov { t.button_hi } else { t.sunken_dark });
+    ui.off(snap, "Global snap (each editor has its own snap)");
+    ui.c.fill_rrect(snap, 2.0, t.sunken_dark);
     ui.c.text(Font::new(16), snap.x + 5.0, 51.0, t.glyph, "Line");
     icons::draw(ui.c, Icon::ArrowRight, Rect::new(snap.right() - 14.0, 55.0, 12.0, 12.0), t.glyph_dim);
+    ui.veil(Rect::span(746.0, 831.0, 50.0, 72.0), t.toolbar);
 
     // Pattern selector.
     let prev = Rect::span(838.0, 851.0, 47.0, 76.0);
@@ -382,14 +376,18 @@ fn row2(ui: &mut Ui, s: &State) {
         (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), s.shown(Win::ChannelRack), "Channel rack (F6)"),
         (Icon::Mixer, Action::ToggleWin(Win::Mixer), s.shown(Win::Mixer), "Mixer (F9)"),
         (Icon::Browser, Action::ToggleWin(Win::Browser), s.show_browser, "Browser (Alt+F8)"),
-        (Icon::Project, Action::Placeholder("project"), false, "Project picker"),
-        (Icon::Plug, Action::PickerOpen, false, "Plugin picker"),
-        (Icon::AudioEditor, Action::Placeholder("audio editor"), false, "Audio editor"),
-        (Icon::Touch, Action::Placeholder("touch controller"), false, "Touch controller"),
-        (Icon::Store, Action::Placeholder("store"), false, "Plugin store"),
+        (Icon::Project, Action::Placeholder("Project picker"), false, "Project picker"),
+        (Icon::Plug, Action::PickerOpen, false, "Plugin picker (F8)"),
+        (Icon::AudioEditor, Action::Placeholder("Audio editor"), false, "Audio editor"),
+        (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller"),
+        (Icon::Store, Action::Placeholder("Plugin store"), false, "Plugin store"),
     ];
     for (i, (icon, action, open, hint)) in wins.into_iter().enumerate() {
         let r = btn(973.0 + 33.0 * i as f32, 45.0);
+        if matches!(action, Action::Placeholder(_)) {
+            super::tool_button(ui, r, icon, false, action, hint);
+            continue;
+        }
         let hov = ui.hit(r, action.clone(), hint) || ui.down(r, &action);
         super::button_face(ui, r, if hov { super::Look::Hot } else { super::Look::Off });
         let _ = open;
@@ -400,13 +398,14 @@ fn row2(ui: &mut Ui, s: &State) {
     let np = Rect::span(1304.0, 1470.0, 45.0, 77.0);
     {
         ui.c.fill_rrect(np, 2.0, t.news_panel);
-        ui.hit(np, Action::Placeholder("news"), "News");
+        ui.off(np, "News");
         let tw = ui.c.text(Font::new(13), 1309.0, 53.0, t.text_faint, "Today");
         let news = "Welcome to OpenStudio";
         let avail = 1442.0 - 1315.0 - tw;
         let nf = ui.c.fit_font(Font::new(14), news, avail);
         ui.c.text_clip(nf, 1315.0 + tw, 52.0, avail, ui.t.tx(0x9aa8b0), news);
         icons::draw(ui.c, Icon::Globe, Rect::new(1449.0, 52.0, 18.0, 18.0), t.glyph_dim.shade(0.3));
+        ui.veil(np, t.toolbar);
     }
 }
 

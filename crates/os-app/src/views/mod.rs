@@ -279,7 +279,15 @@ pub fn button_face(ui: &mut Ui, r: Rect, look: Look) {
 }
 
 /// A 30×33 toolbar button (§1). `on` draws the orange "on" state.
+/// An `Action::Placeholder` button is not available yet: drawn greyed out, never lit (`Ui::off`).
 pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, hint: &'static str) {
+    if matches!(action, Action::Placeholder(_)) {
+        ui.off(r, hint);
+        let st = kit::State::NORMAL.with_disabled(true);
+        kit::button(ui.c, ui.t, r, st);
+        icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), kit::ink(ui.t, st));
+        return;
+    }
     let hov = ui.hit(r, action.clone(), hint);
     let down = ui.down(r, &action);
     let look = if on { Look::On } else if down { Look::Hot } else if hov { Look::Hover } else { Look::Off };

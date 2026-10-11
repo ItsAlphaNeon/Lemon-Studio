@@ -119,6 +119,9 @@ pub fn button(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
         (t.h(0xbe5507), t.h(0xfffaab), t.h(0xffaf65))
     } else if st.pressed {
         (t.h(0xbe5507), t.h(0xffe598), t.h(0xf99448))
+    } else if st.disabled {
+        // Not available: a flat face, no light in the middle.
+        (t.s(0x1f2325), t.s(0x292d2f), t.s(0x262a2c))
     } else if st.hover {
         (t.s(0x191d1f), t.s(0x3d4244), t.s(0x2c3133))
     } else {

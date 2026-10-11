@@ -86,8 +86,10 @@ pub enum Cursor {
 pub enum Action {
     /// Settings window (spec: ui/settings.md).
     Settings(views::settings::SAct),
-    /// A control that is designed but not functional yet.
+    /// A control that is drawn but not functional yet (`Ui::off`): hovering and clicking only say so.
     Placeholder(&'static str),
+    /// Typing keyboard to piano switch (toolbar, OPTIONS menu, Ctrl+T).
+    Typing,
     /// The toolbar's scope / spectrum panel: click switches the display.
     Monitor,
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
@@ -502,6 +504,26 @@ impl Ui<'_> {
         self.hits.push(Hit { rect, action, hint: hint.into(), win: self.win });
         hovered
     }
+
+    /// A control that is drawn but does nothing yet: its hit only explains that (hint and click message), so it never
+    /// lights up, toggles or acts. Draw the control greyed out: `kit::State::disabled`, `menu_pop_dim` text, or `veil`.
+    pub fn off(&mut self, rect: Rect, name: &'static str) {
+        self.hits.push(Hit { rect, action: Action::Placeholder(name), hint: Cow::Owned(off_text(name)), win: self.win });
+    }
+
+    /// Greys out what was just drawn in `rect` (a disabled control without a disabled look of its own): a veil of the
+    /// background colour `bg` under it.
+    pub fn veil(&mut self, rect: Rect, bg: os_ui::Color) {
+        self.c.fill_rect(rect, bg.with_alpha(OFF_VEIL));
+    }
+}
+
+/// Opacity of `Ui::veil`: a greyed-out control keeps about 40 % of its contrast.
+pub const OFF_VEIL: u8 = 155;
+
+/// Hint and message of a control or menu entry that is not implemented yet.
+pub fn off_text(name: &str) -> String {
+    format!("{name}: not available yet")
 }
 
 #[derive(Debug, Clone)]
@@ -846,7 +868,7 @@ impl App {
                 tempo: 130.0,
                 message: None,
                 monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
-                toggles: vec!["typing", "multilink"],
+                toggles: vec!["typing"],
                 maximized: true,
                 piano: PianoState::default(),
                 playlist: crate::playlist::PlaylistState::default(),
@@ -3596,15 +3618,8 @@ impl App {
                     s.message = Some("Nothing to undo".into());
                 }
             }
-            Action::Placeholder("typing") => self.toggle_typing(),
-            Action::Placeholder(name) => {
-                if let Some(i) = s.toggles.iter().position(|t| *t == name) {
-                    s.toggles.remove(i);
-                } else if views::toolbar::is_toggle(name) {
-                    s.toggles.push(name);
-                }
-                s.message = Some(format!("{name}: not available yet"));
-            }
+            Action::Typing => self.toggle_typing(),
+            Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
                 self.damage_rect(MONITOR_RECT);
@@ -3624,7 +3639,7 @@ impl App {
                 TransportState::Stopped => self.start_playback(),
             },
             Action::Stop => self.transport.stop(),
-            Action::Record => s.message = Some("Recording: not available yet".into()),
+            Action::Record => s.message = Some(off_text("Recording")),
             Action::PatSong(song) => {
                 let changed = s.song_mode != song;
                 s.song_mode = song;
@@ -4575,7 +4590,7 @@ mod tests {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         frame(&mut app, &mut a, None);
-        let act = Action::Placeholder("audio editor");
+        let act = Action::PickerOpen;
         let r = hit_rect(&app, &act);
         let px = |c: &Canvas| {
             let mut out = vec![0u32; 1920 * 1080];

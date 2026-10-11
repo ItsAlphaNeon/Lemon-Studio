@@ -1,8 +1,8 @@
 //! Menu bar contents and the dropdown.
 //!
 //! Structure, sizes and colours follow the captured menus (spec: ui/menus.md). Product names and
-//! cloud / shop entries are not reproduced; entries with no behaviour yet are dim and answer
-//! "not available yet".
+//! cloud / shop entries are not reproduced; entries with no behaviour yet are greyed out: dim, never
+//! highlighted, and they only answer "not available yet".
 // spec: ui/menus.md, ui/main-window.md §3
 
 use os_ui::{Font, Rect};
@@ -70,12 +70,22 @@ pub const FILE_NEW: usize = 0;
 pub const FILE_OPEN: usize = 2;
 pub const FILE_SAVE: usize = 4;
 pub const FILE_SAVE_AS: usize = 5;
+/// FILE > Export as WAV (Ctrl+R; the toolbar's render button).
+pub const FILE_EXPORT: usize = 12;
 pub const FILE_EXIT: usize = 16;
 /// OPTIONS > Theme settings (flat index: header counts).
 #[cfg(test)]
 pub const OPT_THEME: usize = 5;
 /// Index of the OPTIONS menu.
 pub const OPTIONS_MENU: usize = 5;
+/// OPTIONS > Project info (the toolbar's info button).
+pub const OPT_INFO: usize = 9;
+/// HELP > About (the toolbar logo).
+pub const HELP_MENU: usize = 7;
+pub const HELP_ABOUT: usize = 6;
+/// Index of the ADD and TOOLS menus.
+pub const ADD_MENU: usize = 2;
+pub const TOOLS_MENU: usize = 6;
 /// `MenuItem(PATTERNS, PATTERN_PICK + n)` selects pattern `n` (the pattern list column).
 pub const PATTERNS: usize = 3;
 pub const PATTERN_PICK: usize = 1000;
@@ -95,7 +105,7 @@ const FILE: &[Item] = &[
     it("Delete unused files and save project", ""),
     SEP,
     it("Import", "").sub(),
-    it("Export", "").sub(),
+    it("Export as WAV...", "Ctrl+R").on(),
     SEP,
     it("Revert to last backup", ""),
     SEP,
@@ -121,7 +131,7 @@ const ADD_PLUGINS: &[Item] = &[
 const ADD_OTHER: &[Item] = &[
     head("Other"),
     it("Effect", "").sub(),
-    it("Plugin picker", "F8"),
+    it("Plugin picker", "F8").on(),
     it("Browse plugin database", ""),
     it("Browse all installed plugins", ""),
     it("Browse presets", ""),
@@ -131,7 +141,7 @@ const ADD_OTHER: &[Item] = &[
     SEP,
     it("Automation for last tweaked parameter", ""),
     SEP,
-    it("Pattern", ""),
+    it("Pattern", "").on(),
 ];
 
 /// The pattern list column is built from the project; this is its placeholder (never drawn).
@@ -243,7 +253,7 @@ const TOOLS_A: &[Item] = &[
 ];
 const TOOLS_B: &[Item] = &[
     head("Macros"),
-    it("Stop sound", "Ctrl+H"),
+    it("Stop sound", "Ctrl+H").on(),
     it("Cancel recording", ""),
     SEP,
     it("Prepare for performance mode", ""),
@@ -255,7 +265,7 @@ const TOOLS_B: &[Item] = &[
     it("Switch selected audio clip channels to", "").sub(),
     it("Lock all playlist tracks to content", ""),
     it("Unlock all playlist tracks from content", ""),
-    it("Reset empty playlist tracks", ""),
+    it("Reset empty playlist tracks", "").on(),
     it("Delete unused files and save project", ""),
     it("Switch all plugin editors to", "").sub(),
     it("Set keyboard focus for all plugins to", "").sub(),
@@ -269,7 +279,7 @@ const HELP: &[Item] = &[
     it("Diagnostics", ""),
     it("What's new", ""),
     SEP,
-    it("About...", ""),
+    it("About...", "").on(),
 ];
 
 pub const MENUS: &[Menu] = &[
@@ -318,7 +328,7 @@ fn win_of(label: &str) -> Option<Win> {
 /// `App::menu_item` handles (settings tabs, pattern commands, window toggles, plugin picker, undo).
 pub fn works(menu: usize, item: &Item) -> bool {
     item.works
-        || (menu == OPTIONS_MENU && crate::views::settings::tab_for_menu(item.label).is_some())
+        || ((menu == OPTIONS_MENU || menu == ADD_MENU) && crate::views::settings::tab_for_menu(item.label).is_some())
         || (menu == PATTERNS && crate::patterns::Cmd::from_label(item.label).is_some())
         || (menu == VIEW && (win_of(item.label).is_some() || item.label == "Plugin picker"))
         || (menu == EDIT_MENU && item.label == "Undo")
@@ -414,11 +424,14 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                     ui.c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0 + (h - os_ui::kit::menu::HEAD) / 2.0, t.menu_pop_head_text, item.label);
                 }
                 Kind::Item => {
-                    let action = item_action(menu, flat, item);
                     let ok = works(menu, item);
-                    let hint = if ok { item.label } else { "Not available yet" };
-                    if ui.hit(rr, action, hint) {
-                        ui.c.fill_rect(rr, t.menu_pop_hi);
+                    // Greyed-out entries never light up; they only say they are not available yet.
+                    if ok {
+                        if ui.hit(rr, item_action(menu, flat, item), item.label) {
+                            ui.c.fill_rect(rr, t.menu_pop_hi);
+                        }
+                    } else {
+                        ui.off(rr, item.label);
                     }
                     let color = if ok { t.menu_pop_text } else { t.menu_pop_dim };
                     // Tick state: window entries follow the window, others are drawn unticked.
@@ -445,7 +458,8 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                     ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, rr.w - 24.0, color, item.label);
                     let right = rr.right() - if item.sub { 16.0 } else { 8.0 };
                     if !item.shortcut.is_empty() {
-                        ui.c.text_right(font.italic(), right, rr.y + 3.0 + dy, t.menu_pop_shortcut, item.shortcut);
+                        let sc = if ok { t.menu_pop_shortcut } else { t.menu_pop_dim.mix(t.menu_pop, 0.35) };
+                        ui.c.text_right(font.italic(), right, rr.y + 3.0 + dy, sc, item.shortcut);
                     }
                     if item.sub {
                         let ax = rr.right() - 11.0;
@@ -472,6 +486,11 @@ mod tests {
         assert_eq!(l(FILE_OPEN), Some("Open..."));
         assert_eq!(l(FILE_SAVE), Some("Save"));
         assert_eq!(l(FILE_SAVE_AS), Some("Save as..."));
+        assert_eq!(l(FILE_EXPORT), Some("Export as WAV..."));
+        assert_eq!(item_at(OPTIONS_MENU, OPT_INFO).map(|it| it.label), Some("Project info"));
+        assert_eq!(item_at(HELP_MENU, HELP_ABOUT).map(|it| it.label), Some("About..."));
+        assert_eq!(MENUS[ADD_MENU].title, "ADD");
+        assert_eq!(MENUS[TOOLS_MENU].title, "TOOLS");
         assert_eq!(l(FILE_EXIT), Some("Exit"));
         assert_eq!(MENUS[PATTERNS].title, "PATTERNS");
         assert_eq!(MENUS[VIEW].title, "VIEW");
