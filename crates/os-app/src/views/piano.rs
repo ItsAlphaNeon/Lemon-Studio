@@ -5,7 +5,7 @@ use os_model::Note;
 use os_ui::{Color, Font, Rect};
 
 use super::{resize_zones, window_body, FrameInfo};
-use crate::app::{Action, Scroll, State, Ui, Win};
+use crate::app::{Action, Live, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
 use crate::piano::{self, Geom, Lane, Overlay, Tool};
 
@@ -102,6 +102,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let mut lit: Vec<i32> = s.piano.held.into_iter().collect();
     lit.extend(s.piano.typed.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| k));
     lit.extend(f.sounding.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| i32::from(k)));
+    ui.live(Live::Sounding, l.keys);
     keyboard(ui, &l, &g, &lit);
     grid(ui, &l, &g, range);
 

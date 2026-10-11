@@ -59,15 +59,51 @@ struct Shell {
     grab: Option<Grab>,
     /// A tick or mouse input left damage that is not painted yet: `about_to_wait` asks for the frame (see `FRAME`).
     pending: bool,
-    /// When the last frame was painted.
+    /// When the last frame was painted (finished presenting), and when its paint started.
     painted: Instant,
+    frame_start: Instant,
+    /// `OS_FRAMES=<file>`: one line per frame (see `FrameLog`).
+    frames: Option<FrameLog>,
 }
 
-/// Shortest time between two frames asked for by ticks and mouse input (a drag moves the mouse hundreds of times a
-/// second). Windows hands out a window's WM_PAINT ahead of its child windows' and ahead of every WM_TIMER, so a main
-/// window that always has a frame pending starves the plugin windows (docked children and detached ones alike) and
-/// the timers their editors animate with. The gap after each frame lets the loop go idle and serve them.
+/// Frame timing for tuning (`OS_FRAMES=<file>`): per frame the time, what was repainted (`full` or the number of
+/// damage rects and their device pixels), paint and present milliseconds, and how long the oldest input it answers
+/// waited; slow ticks too.
+struct FrameLog {
+    out: std::io::BufWriter<std::fs::File>,
+    start: Instant,
+    /// The first input event since the last frame.
+    input: Option<Instant>,
+}
+
+impl FrameLog {
+    fn open() -> Option<FrameLog> {
+        let path = std::env::var_os("OS_FRAMES")?;
+        let file = std::fs::File::create(path).ok()?;
+        let mut log = FrameLog { out: std::io::BufWriter::new(file), start: Instant::now(), input: None };
+        // Wall-clock start (Unix seconds), to line the log up with a script driving the app.
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        log.line(format_args!("start {unix:.3}"));
+        Some(log)
+    }
+
+    fn line(&mut self, text: std::fmt::Arguments) {
+        use std::io::Write;
+        let _ = writeln!(self.out, "{:9.1} {text}", self.start.elapsed().as_secs_f64() * 1000.0);
+        // Flushed at once: the app may be killed rather than closed.
+        let _ = self.out.flush();
+    }
+}
+
+/// Shortest time from one frame's start to the next asked for by ticks and mouse input (a drag moves the mouse
+/// hundreds of times a second): about 60 frames a second.
 const FRAME: Duration = Duration::from_millis(16);
+
+/// Shortest idle time after a frame. Windows hands out a window's WM_PAINT ahead of its child windows' and ahead of
+/// every WM_TIMER, so a main window that always has a frame pending starves the plugin windows (docked children and
+/// detached ones alike) and the timers their editors animate with. The gap lets the loop go idle and serve them.
+/// (Counting `FRAME` from the end of a frame instead held everything to 16 ms plus the paint: 30-45 fps.)
+const IDLE: Duration = Duration::from_millis(4);
 
 #[derive(Clone, Copy)]
 struct Grab {
@@ -298,10 +334,16 @@ impl ApplicationHandler for Shell {
         let now = Instant::now();
         let mut wake = now + Duration::from_millis(ms);
         self.pending |= self.app.tick();
+        if let Some(log) = &mut self.frames {
+            let took = now.elapsed().as_secs_f64() * 1000.0;
+            if took > 2.0 {
+                log.line(format_args!("tick {took:.2}"));
+            }
+        }
         // winit stops dispatching after each frame and comes back here: asking for the next frame at once would keep
         // our WM_PAINT pending forever while playing, and the plugin windows would never paint (see `FRAME`).
         if self.pending {
-            let next = self.painted + FRAME;
+            let next = (self.frame_start + FRAME).max(self.painted + IDLE);
             if now >= next {
                 self.pending = false;
                 if let Some(w) = &self.window {
@@ -338,6 +380,15 @@ impl ApplicationHandler for Shell {
         };
         if press && self.app.loading() {
             return;
+        }
+        if let Some(log) = &mut self.frames {
+            let input = matches!(
+                event,
+                WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::KeyboardInput { .. }
+            );
+            if input && log.input.is_none() {
+                log.input = Some(Instant::now());
+            }
         }
         match event {
             WindowEvent::CloseRequested => el.exit(),
@@ -533,12 +584,17 @@ impl ApplicationHandler for Shell {
                 }
                 // Paint only what changed, then present only that region.
                 let damage = self.app.take_damage();
-                if let Some(d) = damage {
+                let t_paint = Instant::now();
+                if damage.is_some() {
+                    self.frame_start = t_paint;
+                }
+                if let Some(d) = &damage {
                     self.app.canvas_off = (self.inset.0 as i32, self.inset.1 as i32);
-                    self.app.paint(canvas, d);
+                    self.app.paint_region(canvas, d.as_deref());
                     #[cfg(windows)]
                     self.app.sync_lift(canvas);
                 }
+                let t_present = Instant::now();
                 if let Some(surface) = self.surface.as_mut() {
                     if surface.resize(w, h).is_ok() {
                         if let Ok(mut buf) = surface.buffer_mut() {
@@ -551,19 +607,18 @@ impl ApplicationHandler for Shell {
                             let exposed = crate::plugin_window::take_exposed();
                             #[cfg(not(windows))]
                             let exposed = false;
-                            match damage {
-                                Some(Some(r)) if age == 1 && !exposed => {
-                                    let px = canvas.device_rect(r);
-                                    canvas.copy_region_to_xrgb_at(&mut buf, stride, px, off);
-                                    match (NonZeroU32::new(px.2 as u32), NonZeroU32::new(px.3 as u32)) {
-                                        (Some(rw), Some(rh)) => {
+                            match &damage {
+                                Some(Some(rects)) if age == 1 && !exposed => {
+                                    let mut present = Vec::with_capacity(rects.len());
+                                    for r in rects {
+                                        let px = canvas.device_rect(*r);
+                                        canvas.copy_region_to_xrgb_at(&mut buf, stride, px, off);
+                                        if let (Some(width), Some(height)) = (NonZeroU32::new(px.2 as u32), NonZeroU32::new(px.3 as u32)) {
                                             let (x, y) = ((px.0 + off.0) as u32, (px.1 + off.1) as u32);
-                                            let _ = buf.present_with_damage(&[softbuffer::Rect { x, y, width: rw, height: rh }]);
-                                        }
-                                        _ => {
-                                            let _ = buf.present();
+                                            present.push(softbuffer::Rect { x, y, width, height });
                                         }
                                     }
+                                    let _ = if present.is_empty() { buf.present() } else { buf.present_with_damage(&present) };
                                 }
                                 // Nothing painted (the OS asked for a redraw): the buffer already
                                 // holds the last frame unless it was discarded.
@@ -584,6 +639,19 @@ impl ApplicationHandler for Shell {
                     }
                 }
                 self.painted = Instant::now();
+                if let Some(log) = &mut self.frames {
+                    let what = match &damage {
+                        None => "none".to_string(),
+                        Some(None) => format!("full {}", u64::from(cw) * u64::from(ch)),
+                        Some(Some(rs)) => {
+                            let px: usize = rs.iter().map(|r| canvas.device_rect(*r)).map(|(_, _, w, h)| w * h).sum();
+                            format!("rects{} {px}", rs.len())
+                        }
+                    };
+                    let ms = |a: Instant, b: Instant| b.duration_since(a).as_secs_f64() * 1000.0;
+                    let wait = log.input.take().map_or(-1.0, |i| ms(i, self.painted));
+                    log.line(format_args!("frame {what} paint {:.2} present {:.2} input {wait:.1}", ms(t_paint, t_present), ms(t_present, self.painted)));
+                }
                 if self.app.want_minimize {
                     self.app.want_minimize = false;
                     window.set_minimized(true);
@@ -627,8 +695,8 @@ fn screenshot(args: &[String]) {
     let mut channel = None;
     let mut win_rect: Option<os_ui::Rect> = None;
     let mut theme: Option<std::path::PathBuf> = None;
-    let mut size = (1920u32, 1080u32);
     let mut scale = 1.0f32;
+    let mut size: Option<(u32, u32)> = None;
     let mut bar_w: Option<f32> = None;
     let mut wait = false;
     let mut it = args.iter();
@@ -636,6 +704,8 @@ fn screenshot(args: &[String]) {
         match a.as_str() {
             "--screenshot" => out = it.next().cloned(),
             "--theme" => theme = it.next().map(std::path::PathBuf::from),
+            // Device pixels per logical one (the frame stays 1920x1080 logical): 1.5 = Windows at 150 %.
+            "--scale" => scale = it.next().and_then(|v| v.parse().ok()).filter(|s: &f32| *s >= 0.5 && *s <= 4.0).unwrap_or(1.0),
             "--view" => view = it.next().cloned().unwrap_or_default(),
             "--no-rack" => rack = false,
             "--no-browser" => browser = false,
@@ -667,13 +737,13 @@ fn screenshot(args: &[String]) {
             "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
             "--pattern" => pattern = it.next().and_then(|v| v.parse().ok()),
             "--channel" => channel = it.next().and_then(|v| v.parse().ok()),
-            // Physical canvas size "WxH" and UI scale (a 150 % display: `--size 2560x1540 --scale 1.5`).
+            // Physical canvas size "WxH" (default 1920x1080 times the scale), e.g. FL's window on a 150 % display:
+            // `--size 2560x1540 --scale 1.5`.
             "--size" => {
                 if let Some((w, h)) = it.next().and_then(|v| v.split_once('x')) {
-                    size = (w.parse().unwrap_or(size.0), h.parse().unwrap_or(size.1));
+                    size = w.parse().ok().zip(h.parse().ok());
                 }
             }
-            "--scale" => scale = it.next().and_then(|v| v.parse().ok()).unwrap_or(1.0),
             // Playlist zoom: logical pixels per bar.
             "--bar-w" => bar_w = it.next().and_then(|v| v.parse().ok()),
             // Let the project finish loading (samples decoded, samplers started) before the frame is captured.
@@ -773,7 +843,8 @@ fn screenshot(args: &[String]) {
         app.tick();
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let mut canvas = Canvas::new(size.0, size.1, scale).expect("canvas");
+    let (w, h) = size.unwrap_or(((1920.0 * scale).round() as u32, (1080.0 * scale).round() as u32));
+    let mut canvas = Canvas::new(w, h, scale).expect("canvas");
     app.paint(&mut canvas, None);
     if let Some((x, y)) = mouse {
         app.mouse_move(x, y);
@@ -785,6 +856,14 @@ fn screenshot(args: &[String]) {
             app.paint(&mut canvas, None);
         }
         eprintln!("paint: {:.2} ms/frame", t0.elapsed().as_secs_f64() * 50.0);
+        // Copying the whole frame into the window's buffer (a full present).
+        let (cw, ch) = (canvas.pixmap.width() as usize, canvas.pixmap.height() as usize);
+        let mut buf = vec![0u32; cw * ch];
+        let tc = Instant::now();
+        for _ in 0..20 {
+            canvas.copy_region_to_xrgb(&mut buf, (0, 0, cw, ch));
+        }
+        eprintln!("  full present copy: {:.2} ms/frame", tc.elapsed().as_secs_f64() * 50.0);
         for (name, r) in [
             ("rack-sized damage", os_ui::Rect::new(317.0, 195.0, 510.0, 260.0)),
             ("fader-column damage", os_ui::Rect::new(317.0, 500.0, 50.0, 500.0)),
@@ -795,6 +874,40 @@ fn screenshot(args: &[String]) {
                 app.paint(&mut canvas, Some(r));
             }
             eprintln!("  {name}: {:.2} ms/frame", t1.elapsed().as_secs_f64() * 50.0);
+        }
+        // Playback: what each tick repaints (spec: audio/transport.md; no device, the shown state is set directly).
+        // About 4 ticks per frame = 60 frames a second at 140 BPM, 96 PPQ.
+        for song in [false, true] {
+            let shown = |tick: f64, sounding: Vec<(u16, u16)>| app::Shown { playing: true, paused: false, tick, song, sounding };
+            app.show_playback(shown(0.0, Vec::new()));
+            let d = app.take_damage();
+            app.paint_region(&mut canvas, d.flatten().as_deref());
+            let n = 120;
+            let t2 = Instant::now();
+            for i in 1..=n {
+                let sounding = if (i / 6) % 2 == 0 { vec![(0, 60)] } else { Vec::new() };
+                app.show_playback(shown(f64::from(i) * 4.0, sounding));
+                if let Some(d) = app.take_damage() {
+                    app.paint_region(&mut canvas, d.as_deref());
+                }
+            }
+            eprintln!("  playing ({}): {:.2} ms/frame", if song { "song" } else { "pattern" }, t2.elapsed().as_secs_f64() * 1000.0 / f64::from(n));
+        }
+        app.show_playback(app::Shown::default());
+        app.paint(&mut canvas, None);
+        // Scrolling the playlist sideways (wheel or scroll bar): only its window repaints.
+        if app.state.shown(app::Win::Playlist) {
+            let t3 = Instant::now();
+            for _ in 0..20 {
+                app.state.playlist_scroll.0 += 7.0;
+                app.damage_win(app::Win::Playlist);
+                if let Some(d) = app.take_damage() {
+                    app.paint_region(&mut canvas, d.as_deref());
+                }
+            }
+            eprintln!("  playlist scroll: {:.2} ms/frame", t3.elapsed().as_secs_f64() * 50.0);
+            app.state.playlist_scroll.0 = 0.0;
+            app.paint(&mut canvas, None);
         }
     }
     canvas.pixmap.save_png(out.expect("--screenshot needs a path")).expect("write png");
@@ -841,6 +954,8 @@ fn main() {
         grab: None,
         pending: false,
         painted: Instant::now(),
+        frame_start: Instant::now(),
+        frames: FrameLog::open(),
     };
     event_loop.run_app(&mut shell).expect("run");
 }
