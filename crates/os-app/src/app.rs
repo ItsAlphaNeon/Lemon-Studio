@@ -1355,11 +1355,15 @@ impl App {
     pub fn play_song_from(&mut self, tick: u32) {
         let mut p = self.state.project.clone();
         p.tempo = Some(self.state.tempo);
+        self.state.song_mode = true;
         if p.arrangement().is_none_or(|a| a.clips.is_empty()) {
+            // Nothing plays in SONG mode, so a pattern that was playing stops too.
+            if self.transport.playing() {
+                self.transport.stop();
+            }
             self.state.message = Some("The playlist is empty: nothing to play in SONG mode".into());
             return self.invalidate();
         }
-        self.state.song_mode = true;
         self.transport.stop();
         self.transport.play(&p, PlayMode::Song, f64::from(tick));
         self.invalidate();
@@ -5305,6 +5309,67 @@ mod tests {
         assert_eq!(app.state.piano.held, None);
         frame(&mut app, &mut b, None);
         assert_same(&a, &b, "keyboard released");
+    }
+
+    fn ruler_app(c: &mut Canvas) -> (App, Rect, crate::playlist::PGeom, u32) {
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, c, None);
+        let g = crate::playlist::PGeom::new(&app.state, app.pl_grid().expect("playlist grid"));
+        let ruler = hit_rect(&app, &Action::PlRuler);
+        let bar = 4 * u32::from(app.state.project.ppq);
+        (app, ruler, g, bar)
+    }
+
+    fn ruler_press(app: &mut App, c: &mut Canvas, x0: f32, x1: f32, y: f32, right: bool) {
+        app.mouse_move(x0, y);
+        if right { app.mouse_down_right() } else { app.mouse_down() }
+        app.mouse_move(x1, y);
+        app.mouse_up();
+        frame(app, c, None);
+    }
+
+    /// Moving the song position in the playlist ruler switches to SONG mode without starting playback; a time
+    /// selection (right-drag) keeps PAT (spec: ui/playlist.md §7, as FL does).
+    #[test]
+    fn ruler_click_switches_to_song_mode() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, ruler, g, bar) = ruler_app(&mut c);
+        assert!(!app.state.song_mode);
+        ruler_press(&mut app, &mut c, g.x_of(bar as f32) + 1.0, g.x_of(3.0 * bar as f32), ruler.cy(), true);
+        assert!(app.state.playlist.range.is_some(), "a time selection");
+        assert!(!app.state.song_mode, "a time selection keeps PAT");
+        ruler_press(&mut app, &mut c, g.x_of(4.0 * bar as f32) + 1.0, g.x_of(4.0 * bar as f32) + 1.0, ruler.cy(), false);
+        assert!(app.state.song_mode, "a click on the ruler switches to SONG");
+        assert_eq!(app.state.playlist.pos, 4 * bar);
+        assert!(!app.transport.playing(), "and does not start playback");
+    }
+
+    /// A pattern playing when the ruler is clicked goes on as the song from the clicked position (needs an audio
+    /// device).
+    #[test]
+    #[ignore]
+    fn ruler_click_takes_a_playing_pattern_to_the_song() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, ruler, g, bar) = ruler_app(&mut c);
+        let ch = app.state.project.channels[0].index;
+        app.state.project.patterns = vec![Pattern { number: 1, notes: vec![Note { length: 24, key: 60, ..Note::step(ch, 0) }], ..Pattern::default() }];
+        app.state.project.arrangements = vec![os_model::Arrangement {
+            number: 1,
+            clips: vec![os_model::Clip::new(0, 8 * bar, 0, os_model::ClipSource::Pattern(1))],
+            ..Default::default()
+        }];
+        app.act(Action::Play);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(app.transport.playing() && !app.transport.song());
+        ruler_press(&mut app, &mut c, g.x_of(4.0 * bar as f32) + 1.0, g.x_of(4.0 * bar as f32) + 1.0, ruler.cy(), false);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(app.state.song_mode && app.transport.playing() && app.transport.song(), "the song plays");
+        let tick = app.transport.tick();
+        assert!(tick >= f64::from(4 * bar) && tick < f64::from(5 * bar), "from the clicked bar: {tick}");
+        app.act(Action::Stop);
     }
 
     /// Playlist (spec: ui/playlist.md): Draw places / moves / resizes clips, undo, Mute tool, right-click delete,

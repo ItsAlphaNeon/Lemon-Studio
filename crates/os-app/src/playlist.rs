@@ -1825,9 +1825,15 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
         PlDrag::ZoomBox { x0, y0 } => zoom_to(app, grid, x0, y0),
         PlDrag::Playback => app.transport.stop(),
         PlDrag::SongPos => {
-            if app.transport.playing() && app.transport.song() {
-                let p = app.state.playlist.pos;
-                app.play_song_from(p);
+            // The song jumps to the new position; a running pattern goes on as the song from there, a paused one
+            // stops, as with the PAT / SONG switch (§7, audio/transport.md).
+            if app.transport.playing() {
+                if app.transport.song() || !app.transport.paused() {
+                    let p = app.state.playlist.pos;
+                    app.play_song_from(p);
+                } else {
+                    app.transport.stop();
+                }
             }
         }
         PlDrag::Move { orig, fresh: false, .. } | PlDrag::ResizeL { orig, .. } | PlDrag::ResizeR { orig, .. } => {
@@ -1903,6 +1909,8 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
         app.drag = Some(Drag::Pl(PlDrag::TimeSel { t0: t }));
     } else {
         s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
+        // Moving the song position switches to SONG mode; a time selection does not (§7).
+        s.song_mode = true;
         app.drag = Some(Drag::Pl(PlDrag::SongPos));
     }
     app.invalidate();
