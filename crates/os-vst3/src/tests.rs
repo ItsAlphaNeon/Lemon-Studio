@@ -361,6 +361,217 @@ fn hosts_a_plugin_from_env() {
     }
 }
 
+/// A plug-in whose edit controller is a class of its own, the layout of most VST 3 plug-ins (`mock.rs`).
+mod separate {
+    use super::*;
+    use crate::mock::{self, Probe, EXTRA, GAIN, MODE, PEAK};
+    use os_engine::{HostedEffect, Instrument};
+    use os_host::ParamEvent::{Begin, End, Value};
+    use os_host::Plugin as _;
+
+    fn test_module(probe: &Arc<Probe>) -> Arc<Module> {
+        unsafe { Module::from_factory(Path::new("Test Gain.vst3"), mock::Factory::create(probe), None) }.expect("module")
+    }
+
+    fn instance(probe: &Arc<Probe>) -> (Arc<Module>, Plugin) {
+        let m = test_module(probe);
+        let id = m.plugins()[0].id.clone();
+        let p = Plugin::new(&m, &id).expect("create");
+        (m, p)
+    }
+
+    fn ones(n: usize) -> (Vec<f32>, Vec<f32>) {
+        (vec![1.0; n], vec![1.0; n])
+    }
+
+    #[test]
+    fn lists_only_audio_classes() {
+        let probe = Arc::new(Probe::default());
+        let m = test_module(&probe);
+        assert_eq!(m.plugins().len(), 1, "the controller class is not a plug-in");
+        let d = &m.plugins()[0];
+        assert_eq!((d.name.as_str(), d.vendor.as_str(), d.version.as_str()), ("Test Gain", "Test Vendor", "1.2.3"));
+        assert!(d.is_effect(), "{:?}", d.features);
+        assert_eq!(d.id, fuid_string(&mock::COMPONENT_CID));
+        assert_eq!(d.uid(), format!("vst3:{}", d.id));
+        assert!(Plugin::new(&m, &fuid_string(&mock::CONTROLLER_CID)).is_err());
+    }
+
+    #[test]
+    fn setup_connects_the_controller_to_the_component() {
+        let probe = Arc::new(Probe::default());
+        probe.latency.store(64, Ordering::Release);
+        let (_m, mut p) = instance(&probe);
+        let log = probe.log.lock().unwrap().clone();
+        let at = |s: &str| log.iter().position(|l| l == s).unwrap_or_else(|| panic!("{s} missing in {log:?}"));
+        // Spec §4: both initialised with the host context, connected both ways, the handler, then the component's state.
+        assert!(at("comp.initialize host=true") < at("ctrl.initialize host=true"));
+        assert!(at("ctrl.initialize host=true") < at("comp.connect").min(at("ctrl.connect")));
+        assert!(at("ctrl.set_component_handler true") < at("ctrl.set_component_state 0.5"));
+        at("comp.set_bus_arrangements true");
+        at("comp.activate_bus 0 0 0 1");
+        at("comp.activate_bus 0 1 0 1");
+        assert!(!p.has_editor(), "no view, no editor");
+        // Parameters are the controller's.
+        assert_eq!(p.param_count(), 3);
+        let g = p.param_info(0).unwrap();
+        assert_eq!((g.id, g.name.as_str(), g.unit.as_str(), g.min, g.max, g.default), (GAIN, "Gain", "dB", -24.0, 24.0, 0.5));
+        assert!(g.automatable && !g.enumerated && !g.read_only);
+        let mode = p.param_info(1).unwrap();
+        assert!(mode.enumerated && mode.steps == 2);
+        assert!(p.param_info(2).unwrap().read_only);
+        assert_eq!(p.param_text(MODE, 1.0).as_deref(), Some("Clip"));
+        assert_eq!(p.param_value(GAIN), Some(0.5));
+        // Activation: the component tells its controller through a message the host created.
+        assert!(p.activate(48000));
+        assert_eq!(p.latency(), 64);
+        assert_eq!(probe.logged("comp.setup_processing"), ["comp.setup_processing 48000 4096 0"]);
+        assert_eq!(probe.logged("ctrl.notify"), ["ctrl.notify activated 64"]);
+    }
+
+    #[test]
+    fn edits_reach_both_halves() {
+        let probe = Arc::new(Probe::default());
+        let (_m, mut p) = instance(&probe);
+        assert!(p.activate(48000));
+        // A host edit: the controller at once, the processor in its next block.
+        assert!(p.set_param(GAIN, 0.75));
+        assert_eq!(probe.controller().value(GAIN), 0.75);
+        let (mut l, mut r) = ones(256);
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!((l[0], r[255]), (1.5, 1.5));
+        // The processor's output parameter reaches the controller on idle.
+        p.idle();
+        assert_eq!(probe.controller().value(PEAK), 1.0);
+        // An edit in the plug-in's editor: the gesture for the app, the value for the processor.
+        probe.controller().user_edit(GAIN, 0.25);
+        assert_eq!(p.take_param_events(), [Begin(GAIN), Value(GAIN, 0.25), End(GAIN)]);
+        let (mut l, mut r) = ones(64);
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!(l[0], 0.5);
+        // Without a stream an edit is flushed with an empty block.
+        assert!(p.set_param(GAIN, 0.6));
+        p.idle();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        p.idle();
+        assert_eq!(probe.gain_points.lock().unwrap().last(), Some(&(0, 0.6)));
+        let (mut l, mut r) = ones(16);
+        p.process_fx(48000, &mut l, &mut r);
+        assert!((l[0] - 1.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn automation_is_sample_accurate_and_the_controller_follows() {
+        let probe = Arc::new(Probe::default());
+        let (_m, mut p) = instance(&probe);
+        assert!(p.activate(48000));
+        p.param_fx(100, 0, 0.25);
+        // Mode has two steps: 0.4 becomes 0.5.
+        p.param_fx(0, 1, 0.4);
+        // Past this block: moves on to the next one.
+        p.param_fx(300, 0, 0.125);
+        let (mut l, mut r) = ones(256);
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!((l[99], l[100], r[255]), (1.0, 0.5, 0.5));
+        assert_eq!(*probe.gain_points.lock().unwrap(), [(100, 0.25)]);
+        p.idle();
+        assert_eq!((probe.controller().value(GAIN), probe.controller().value(MODE)), (0.25, 0.5));
+        let (mut l, mut r) = ones(256);
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!((l[43], l[44]), (0.5, 0.25), "the later point lands 300 - 256 frames into the second block");
+        // Unknown indexes are ignored.
+        p.param_fx(0, 99, 1.0);
+        p.process_fx(48000, &mut l, &mut r);
+    }
+
+    #[test]
+    fn state_holds_both_halves() {
+        let probe = Arc::new(Probe::default());
+        let (_m, mut p) = instance(&probe);
+        assert!(p.activate(48000));
+        probe.controller().user_edit(GAIN, 0.25);
+        probe.controller().user_edit(MODE, 1.0);
+        let (mut l, mut r) = ones(32);
+        p.process_fx(48000, &mut l, &mut r);
+        let saved = p.save_state().unwrap();
+        let preset = preset::Preset::parse(&saved).unwrap();
+        assert_eq!(preset.class_id, p.desc().id);
+        assert_eq!(preset.component, 0.25f64.to_le_bytes());
+        assert_eq!(&preset.controller[..4], b"MODE");
+        // Change both, then restore.
+        p.set_param(GAIN, 0.9);
+        p.process_fx(48000, &mut l, &mut r);
+        probe.controller().user_edit(MODE, 0.0);
+        assert!(p.load_state(&saved));
+        assert_eq!(probe.logged("comp.set_state"), ["comp.set_state 0.25"]);
+        assert_eq!(probe.logged("ctrl.set_component_state").last().map(String::as_str), Some("ctrl.set_component_state 0.25"));
+        assert_eq!(probe.logged("ctrl.set_state"), ["ctrl.set_state 1"]);
+        assert_eq!((probe.controller().value(GAIN), probe.controller().value(MODE)), (0.25, 1.0));
+        let (mut l, mut r) = ones(32);
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!(l[0], 0.5);
+        // Another class's preset is refused; bare component bytes are accepted.
+        let other = preset::Preset { class_id: "0".repeat(32), ..preset };
+        assert!(!p.load_state(&other.to_bytes()));
+        assert!(p.load_state(&0.5f64.to_le_bytes()));
+        assert_eq!(probe.controller().value(GAIN), 0.5);
+    }
+
+    #[test]
+    fn restart_requests_are_handled_on_idle() {
+        let probe = Arc::new(Probe::default());
+        let (_m, mut p) = instance(&probe);
+        assert!(p.activate(48000));
+        // Latency change: deactivate, reactivate, read it again (spec §7).
+        probe.latency.store(128, Ordering::Release);
+        probe.controller().restart(LATENCY_CHANGED);
+        assert_eq!(p.latency(), 0, "not before idle");
+        p.idle();
+        assert_eq!(p.latency(), 128);
+        assert_eq!(probe.logged("comp.set_active"), ["comp.set_active 1", "comp.set_active 0", "comp.set_active 1"]);
+        assert_eq!(probe.logged("ctrl.notify").last().map(String::as_str), Some("ctrl.notify activated 128"));
+        // Parameter list change: the automation indexes follow.
+        probe.extra.store(true, Ordering::Release);
+        assert_eq!(p.param_value(EXTRA), None);
+        probe.controller().restart(PARAM_TITLES_CHANGED);
+        p.idle();
+        assert_eq!(p.param_count(), 4);
+        assert_eq!(p.param_value(EXTRA), Some(0.0));
+        p.param_fx(0, 3, 0.7);
+        let (mut l, mut r) = ones(32);
+        p.process_fx(48000, &mut l, &mut r);
+        p.idle();
+        assert_eq!(probe.controller().value(EXTRA), 0.7);
+        // Stop: processing restarts before the next block.
+        p.reset();
+        p.process_fx(48000, &mut l, &mut r);
+        let processing = probe.logged("comp.set_processing");
+        assert_eq!(processing[processing.len() - 2..], ["comp.set_processing 0", "comp.set_processing 1"]);
+    }
+
+    #[test]
+    fn teardown_follows_the_documented_order() {
+        let probe = Arc::new(Probe::default());
+        {
+            let (_m, mut p) = instance(&probe);
+            assert!(p.activate(48000));
+            let (mut l, mut r) = ones(32);
+            p.process_fx(48000, &mut l, &mut r);
+            probe.log.lock().unwrap().clear();
+        }
+        let log = probe.log.lock().unwrap().clone();
+        let at = |s: &str| log.iter().position(|l| l == s).unwrap_or_else(|| panic!("{s} missing in {log:?}"));
+        // Spec §4.7: stop processing, deactivate, disconnect, the controller lets go of the handler and terminates, then
+        // the component terminates.
+        assert!(at("comp.set_processing 0") < at("comp.set_active 0"));
+        assert!(at("comp.set_active 0") < at("comp.disconnect").min(at("ctrl.disconnect")));
+        assert!(at("ctrl.disconnect") < at("ctrl.set_component_handler false"));
+        assert!(at("ctrl.set_component_handler false") < at("ctrl.terminate"));
+        assert!(at("ctrl.terminate") < at("comp.terminate"));
+        assert_eq!(probe.live.load(Ordering::Acquire), 0, "every plug-in object was released");
+    }
+}
+
 #[cfg(windows)]
 mod window {
     use super::*;

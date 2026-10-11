@@ -183,8 +183,18 @@ impl Module {
             let get = lib
                 .get::<unsafe extern "system" fn() -> *mut c_void>(b"GetPluginFactory\0")
                 .map_err(|_| format!("{}: not a VST 3 module (no GetPluginFactory)", file.display()))?;
-            let factory = owned::<dyn IPluginFactory>(get());
-            let mut m = Module { path: path.to_path_buf(), plugins: Vec::new(), classes: Vec::new(), factory: None, host: HostApp::create(), lib: Some(lib) };
+            let factory = get();
+            Module::from_factory(path, factory, Some(lib))
+        }
+    }
+
+    /// The module of a factory (`GetPluginFactory`'s result, whose reference it takes over) and its audio classes.
+    /// `lib` is the loaded module file, unloaded after the factory is released.
+    pub(crate) unsafe fn from_factory(path: &Path, factory: *mut c_void, lib: Option<libloading::Library>) -> Result<Arc<Module>, String> {
+        let file = module_file(path);
+        unsafe {
+            let factory = owned::<dyn IPluginFactory>(factory);
+            let mut m = Module { path: path.to_path_buf(), plugins: Vec::new(), classes: Vec::new(), factory: None, host: HostApp::create(), lib };
             let Some(factory) = factory else { return Err(format!("{}: no plug-in factory", file.display())) };
             if let Some(f3) = factory.cast::<dyn IPluginFactory3>() {
                 f3.set_host_context(m.host.raw());
@@ -513,6 +523,9 @@ impl Plugin {
         self.ptrs = Vec::with_capacity(total);
         self.bus_in = Vec::with_capacity(self.ins.len());
         self.bus_out = Vec::with_capacity(self.outs.len());
+        // An effect's input copy, so the audio thread does not allocate.
+        let max = self.max_frames as usize;
+        self.fx_in = (Vec::with_capacity(max), Vec::with_capacity(max));
     }
 
     /// Group names of the controller's units (IUnitInfo): parent path, root unit left out.
@@ -1169,5 +1182,7 @@ impl Drop for Plugin {
     }
 }
 
+#[cfg(test)]
+mod mock;
 #[cfg(test)]
 mod tests;

@@ -624,7 +624,8 @@ impl IParameterChanges for ParamChanges {
             Some(i) => i,
             None => {
                 if qs.len() == used {
-                    qs.push(Com::new(ParamQueue::allocate(Cell::new(0), RefCell::new(Vec::with_capacity(8)))));
+                    // Room for an automation point every 64 frames of a full block.
+                    qs.push(Com::new(ParamQueue::allocate(Cell::new(0), RefCell::new(Vec::with_capacity(72)))));
                 }
                 qs[used].get().id.set(id);
                 qs[used].get().points.borrow_mut().clear();
