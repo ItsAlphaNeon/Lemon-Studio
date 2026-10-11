@@ -529,17 +529,22 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     // Outline (rounded at the top only); a clip a few pixels wide keeps its colours to its edges.
     let outline = dim(t.s(0x03090d));
     let narrow = r.w < 8.0;
-    if narrow {
-        ui.c.fill_rect(r, outline);
-    } else {
-        ui.c.fill_rrect(r, 2.5, outline);
-        ui.c.fill_rect(Rect::new(r.x, r.y + 3.0, r.w, r.h - 3.0), outline);
+    // Rect fills with the top corners knocked out (cheaper than rounded paths for hundreds of clips).
+    ui.c.fill_rect(r, outline);
+    let row = if track_on { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
+    if !narrow {
+        ui.c.fill_rect(Rect::new(r.x, r.y, 1.0, 1.0), row);
+        ui.c.fill_rect(Rect::new(r.right() - 1.0, r.y, 1.0, 1.0), row);
     }
     let side = if narrow { 0.0 } else { 1.0 };
     let inner = Rect::new(r.x + side, r.y + 1.0, (r.w - 2.0 * side).max(1.0), r.h - 2.0);
     let title_h = TITLE_H - 2.0;
-    // Edge colour behind the strip, then the highlight row and the gradient inside it.
-    ui.c.fill_rrect(Rect::new(inner.x, inner.y, inner.w, title_h + 3.0), 2.0, dim(edge));
+    // Edge colour behind the strip (its top corners in the outline's colour), then the highlight row and the gradient.
+    ui.c.fill_rect(Rect::new(inner.x, inner.y, inner.w, title_h + 1.0), dim(edge));
+    if !narrow && inner.w > 4.0 {
+        ui.c.fill_rect(Rect::new(inner.x, inner.y, 1.0, 1.0), outline);
+        ui.c.fill_rect(Rect::new(inner.right() - 1.0, inner.y, 1.0, 1.0), outline);
+    }
     if inner.w > 3.0 {
         ui.c.fill_rect(Rect::new(inner.x + 1.0, inner.y + 1.0, inner.w - 2.0, 1.0), dim(high));
         ui.c.fill_rect_gradient(Rect::new(inner.x + 1.0, inner.y + 2.0, inner.w - 2.0, title_h - 3.0), dim(top), dim(bottom), 0.0);
@@ -734,16 +739,23 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, body: Rect, wave
         curve(ui, fx_out, body.right(), t, true);
         ui.c.fill_rect(Rect::new(fx_out - 1.0, body.y, 1.0, body.h), white.with_alpha(50));
     }
-    // Handles: faint in the waveform's colour, white while the clip is hovered, brighter on the one under the mouse.
-    let col = |h: pl::Handle| if lit(h) { white } else if hovered { white.with_alpha(215) } else { wave.with_alpha(170) };
+    // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse.
+    if !hovered {
+        return;
+    }
+    let _ = wave;
+    let col = |h: pl::Handle| if lit(h) { white } else { white.with_alpha(215) };
     let k = 6.0;
     ui.c.fill_polygon(&[(fx_in, body.y), (fx_in + k, body.y), (fx_in, body.y + k)], col(pl::Handle::FadeIn));
     ui.c.fill_polygon(&[(fx_out, body.y), (fx_out - k, body.y), (fx_out, body.y + k)], col(pl::Handle::FadeOut));
+    // The gain handle: a half disc on the body's bottom edge (a shape, not a clipped circle: clips are costly).
     let (gx, gy) = (body.cx(), body.bottom());
     let r = if lit(pl::Handle::Gain) { 5.0 } else { 4.0 };
-    ui.c.push_clip(Rect::new(gx - 6.0, gy - 6.0, 12.0, 6.0));
-    ui.c.fill_circle(gx, gy, r, col(pl::Handle::Gain));
-    ui.c.pop_clip();
+    let half: Vec<(f32, f32)> = (0..=8).map(|k| {
+        let a = std::f32::consts::PI * k as f32 / 8.0;
+        (gx - r * a.cos(), gy - r * a.sin())
+    }).collect();
+    ui.c.fill_polygon(&half, col(pl::Handle::Gain));
     if hovered {
         for (h, on, xa, xb, out) in [
             (pl::Handle::TensionIn, c.fade_in(), body.x, fx_in, false),
