@@ -260,7 +260,7 @@ enum Damage {
 }
 
 /// The hint panel (spec §2): its text changes whenever the hovered control does.
-const HINT_RECT: Rect = Rect::new(73.0, 5.0, 289.0, 31.0);
+pub(crate) const HINT_RECT: Rect = Rect::new(73.0, 5.0, 289.0, 31.0);
 /// The toolbar's output monitor (scope / analyzer and peak bars).
 const MONITOR_RECT: Rect = Rect::new(880.0, 4.0, 168.0, 33.0);
 
@@ -472,6 +472,8 @@ pub struct State {
     /// Navigation history of selected row keys and the position in it.
     pub browser_hist: Vec<String>,
     pub browser_hist_pos: usize,
+    /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
+    pub params: crate::params::ParamUi,
     pub tempo: f64,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
@@ -599,6 +601,12 @@ pub struct App {
     piano_panel: Option<Rect>,
     /// Sampler channel rows whose Open Sampler instance could not be created (not retried).
     sampler_failed: Vec<usize>,
+    /// Mixer slots (`plugins::fx_key`) whose Open Parametric EQ 2 could not start (not retried).
+    fx_failed: Vec<usize>,
+    /// Wrapped plugin channels (rows) and slots (`fx_key`) whose plugin was not found or did not start (not retried).
+    pub(crate) wrap_failed: Vec<usize>,
+    /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
+    loading: Option<crate::loading::Loading>,
 }
 
 /// Window-level requests the shell must carry out after an event.
@@ -649,6 +657,7 @@ impl App {
                 browser_tab: 0,
                 browser_open: views::browser::default_open(),
                 browser_folders: crate::browser::load_folders(),
+                params: Default::default(),
                 browser_dirs: Default::default(),
                 browser_scroll: 0.0,
                 browser_sel: None,
@@ -706,6 +715,9 @@ impl App {
             piano_grid: None,
             piano_panel: None,
             sampler_failed: Vec::new(),
+            fx_failed: Vec::new(),
+            wrap_failed: Vec::new(),
+            loading: None,
         };
         if let Some(p) = path {
             app.open(p);
@@ -755,6 +767,9 @@ impl App {
                 s.playlist.reset();
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
+                self.loading = Some(crate::loading::Loading::start(&self.state.project));
+                self.state.playlist.wave_wait = true;
+                self.invalidate();
             }
             Err(e) => self.state.message = Some(format!("Could not open {}: {e}", path.display())),
         }
@@ -786,13 +801,19 @@ impl App {
                 }
             }
         }
+        // Open Parametric EQ 2 instances hold their slot's settings: convert them back to the file's EQ state.
+        for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
+            let (Some((t, k)), Some(st)) = (crate::plugins::fx_of(key), self.plugins.eq_file_state(key)) else { continue };
+            if let Some(slot) = self.state.project.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) {
+                if slot.name == crate::plugins::EQ_FILE_NAME {
+                    slot.state = st;
+                }
+            }
+        }
+        // Open 3x Osc instances hold their channel's settings: written back as the file's 3x Osc state.
+        crate::osc3::store(&mut self.state.project, &self.plugins);
         let s = &mut self.state;
         s.project.tempo = Some(s.tempo);
-        if s.hosted_rows.iter().any(|&r| s.project.channels.get(r).is_some_and(|c| c.kind == ChannelKind::Plugin)) {
-            // spec: plugins/plugin-formats.md (open question: FLP storage of hosted plugins)
-            s.message = Some("Save failed: projects with hosted plugin channels (Open Sampler, CLAP) cannot be saved to FLP yet".into());
-            return;
-        }
         // Lock, zip, filter groups and loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
         crate::rack::to_model(s);
         // A file OpenStudio made before the project had a playlist has no arrangement block (FL's files always have
@@ -805,7 +826,13 @@ impl App {
             for (i, c) in s.project.channels.iter_mut().enumerate() {
                 c.rack.origin = Some(i as u16);
             }
-            match os_flp::project::create(&s.project) {
+            // FL's files always have a playlist, and the mixer is stored after it (spec: flp/events/mixer.md).
+            if s.project.arrangements.is_empty() {
+                s.project.arrangements.push(os_flp::project::default_arrangement());
+            }
+            let mut first = s.project.clone();
+            crate::project_plugins::store_hosted(&mut first, &self.plugins);
+            match os_flp::project::create(&first) {
                 Ok(f) => f,
                 Err(e) => {
                     s.message = Some(format!("Save failed: {e}"));
@@ -819,18 +846,10 @@ impl App {
         // failed save leaves the loaded file as it was.
         let mut lost = os_flp::project::unsaved_parts(&s.project, &file);
         // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, OpenStudio status).
+        // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
-        if let Some(n) = os_flp::project::load(&file).ok().map(|p| p.mixer.len()).filter(|&n| n > 0 && n < proj.mixer.len()) {
-            proj.mixer.truncate(n);
-            for m in proj.mixer.iter_mut() {
-                m.routes.retain(|&r| usize::from(r) < n);
-                m.send_levels.retain(|&(d, _)| usize::from(d) < n);
-            }
-            lost.push("added mixer tracks");
-        }
-        if self.plugins.hosted.keys().any(|&k| k >= crate::plugins::FX_KEY) {
-            lost.push("mixer effect plugins");
-        }
+        crate::project_plugins::store_hosted(&mut proj, &self.plugins);
+        // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         if s.project.mixer.iter().any(|m| m.polarity || m.swap) {
             lost.push("polarity / swap buttons");
         }
@@ -844,10 +863,11 @@ impl App {
             Err(e) => format!("Save failed: {e}"),
         });
         if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
-            // The saved file now holds the channels in model order.
+            // The saved file now holds the channels in model order, and the plugins as written.
             for (i, c) in s.project.channels.iter_mut().enumerate() {
                 c.rack.origin = Some(i as u16);
             }
+            crate::project_plugins::adopt_saved(&mut s.project, &proj);
             s.file = Some(file);
             s.path = Some(target);
         }
@@ -867,14 +887,18 @@ impl App {
             .filter(|n| n != crate::plugins::OPEN_SAMPLER)
             .map(|n| &*Box::leak(n.into_boxed_str()))
             .collect();
-        self.state.hosted_effects = self.plugins.effects.iter().map(|a| &*Box::leak(a.desc.name.clone().into_boxed_str())).collect();
+        self.state.hosted_effects = self.plugins.effect_names().into_iter().map(|n| &*Box::leak(n.into_boxed_str())).collect();
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
-    fn reset_hosted(&mut self) {
+    pub(crate) fn reset_hosted(&mut self) {
         self.plugins.clear();
+        self.loading = None;
+        self.state.playlist.wave_wait = false;
         self.state.hosted_rows.clear();
         self.sampler_failed.clear();
+        self.fx_failed.clear();
+        self.wrap_failed.clear();
         self.transport.set_instruments(Vec::new());
         self.transport.set_effects(Vec::new());
     }
@@ -882,15 +906,25 @@ impl App {
     /// Every sampler channel is played and edited by Open Sampler (owner, 2026-10-10; spec: plugins/open-sampler.md §7):
     /// a channel without an instance gets one, started from the channel's sample and envelopes. Without Open Sampler
     /// (plugin not found) sampler channels keep the engine's own sample playback.
-    fn sync_samplers(&mut self) {
-        let Some(index) = self.plugins.index_of(crate::plugins::OPEN_SAMPLER) else { return };
+    /// With a `deadline` it stops after the instance that passes it; returns whether every sampler row is done.
+    fn sync_samplers(&mut self, deadline: Option<std::time::Instant>) -> bool {
+        let Some(index) = self.plugins.index_of(crate::plugins::OPEN_SAMPLER) else { return true };
         let mut added = false;
+        let mut done = true;
         for row in 0..self.state.project.channels.len() {
             let ch = &self.state.project.channels[row];
             if !ch.kind.is_sampler() || self.state.hosted_rows.contains(&row) || self.sampler_failed.contains(&row) {
                 continue;
             }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                done = false;
+                break;
+            }
             let st = crate::plugins::sampler_state(ch);
+            if let Some(l) = &mut self.loading {
+                l.hosted += 1;
+                l.label = ch.name.clone().unwrap_or_default();
+            }
             match self.plugins.create_with(row, index, Some(&st)) {
                 Ok(_) => {
                     self.state.hosted_rows.push(row);
@@ -906,12 +940,69 @@ impl App {
             self.transport.set_instruments(self.plugins.instruments());
             self.state.piano.dirty = true;
         }
+        done
+    }
+
+    /// Project loading (spec: ui/project-loading.md): samples decode on worker threads first, then the sampler
+    /// instances start a few per tick (`loading::HOST_BUDGET`) so the progress panel keeps moving. Without a loading
+    /// project, new sampler rows are hosted at once.
+    fn loading_tick(&mut self) {
+        let Some(decoded) = self.loading.as_mut().map(|l| l.decode_done()) else {
+            self.sync_samplers(None);
+            return;
+        };
+        if decoded && self.sync_samplers(Some(std::time::Instant::now() + crate::loading::HOST_BUDGET)) {
+            self.loading = None;
+            self.state.playlist.wave_wait = false;
+            return self.invalidate();
+        }
+        self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
+    }
+
+    /// A project is loading: the window shows the progress and takes no input (spec: ui/project-loading.md §2).
+    pub fn loading(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    /// Mixer slots that hold the project file's parametric EQ are played and edited by Open Parametric EQ 2, started
+    /// from the slot's saved state (spec: plugins/open-parametric-eq-2.md §8). Without the plugin the engine's own EQ
+    /// plays them.
+    pub(crate) fn sync_effects(&mut self) {
+        use crate::plugins::{fx_key, EQ_FILE_NAME, OPEN_EQ};
+        let Some(index) = self.plugins.effect_index(OPEN_EQ) else { return };
+        let todo: Vec<(u16, u8, Vec<u8>)> = self
+            .state
+            .project
+            .mixer
+            .iter()
+            .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
+            .filter_map(|(t, k, s)| s.as_ref().filter(|s| s.name == EQ_FILE_NAME).map(|s| (t, k, s.state.clone())))
+            .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
+            .collect();
+        if todo.is_empty() {
+            return;
+        }
+        for (t, k, fl) in todo {
+            let st = open_parametric_eq_2::params::plugin_state_from_fl(&fl);
+            if let Err(e) = self.plugins.create_effect(t, k, index, Some(&st)) {
+                self.fx_failed.push(fx_key(t, k));
+                self.state.message = Some(format!("{OPEN_EQ}: {e}"));
+            }
+        }
+        self.transport.set_effects(self.plugins.effects());
+        self.state.piano.dirty = true;
     }
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     fn plugin_tick(&mut self) {
-        self.sync_samplers();
+        self.loading_tick();
         self.mixer_tick();
+        self.sync_effects();
+        self.params_tick();
+        if self.loading.is_none() {
+            self.sync_wrapped();
+            self.sync_osc3();
+        }
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
             // A row hosted this tick already started from its channel's sample.
             if self.state.hosted_rows.contains(&row) && self.plugins.sampler_path(row).as_deref() != Some(path.as_str()) {
@@ -929,7 +1020,8 @@ impl App {
                     self.state.hosted_rows.push(row);
                     self.transport.set_instruments(self.plugins.instruments());
                     self.state.piano.dirty = true;
-                    self.state.message = Some(format!("Added {name} (hosted CLAP plugin)"));
+                    let format = self.plugins.descriptor(row).map_or("", |d| crate::plugins::format_name(d.format));
+                    self.state.message = Some(format!("Added {name} (hosted {format} plugin)"));
                     self.state.pending_open = Some(row);
                 }
                 Err(e) => self.state.message = Some(format!("Plugin: {e}")),
@@ -978,7 +1070,33 @@ impl App {
                     Request::Menu(row, x, y) => {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
-                        self.state.playlist.popup = Some(crate::playlist::plugin_window_menu(row, detached, lx, ly));
+                        let mut menu = crate::playlist::plugin_window_menu(row, detached, lx, ly);
+                        crate::presets::fill_window_menu(self, row, &mut menu);
+                        self.state.playlist.popup = Some(menu);
+                        self.popup_lift = detached.then_some(row);
+                        self.invalidate();
+                        continue;
+                    }
+                    Request::Presets(row, x, y) => {
+                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let (lx, ly) = self.screen_to_canvas(x, y);
+                        self.state.playlist.popup = Some(crate::presets::popup(self, row, lx, ly));
+                        self.popup_lift = detached.then_some(row);
+                        self.invalidate();
+                        continue;
+                    }
+                    Request::PresetStep(row, d) => {
+                        self.state.message = crate::presets::run(self, crate::presets::PCmd::Step(row, d));
+                        continue;
+                    }
+                    Request::Misc(row, m, v) => {
+                        crate::misc::set(self, row, m, v);
+                        continue;
+                    }
+                    Request::MiscMenu(row, m, x, y) => {
+                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let (lx, ly) = self.screen_to_canvas(x, y);
+                        self.state.playlist.popup = Some(crate::misc::menu(self, row, m, lx, ly));
                         self.popup_lift = detached.then_some(row);
                         self.invalidate();
                         continue;
@@ -998,6 +1116,11 @@ impl App {
                         } else {
                             self.transport.note_off(row, u16::from(key));
                         }
+                        continue;
+                    }
+                    Request::Automate(row, index) => {
+                        self.state.message = self.params_automate(row, index);
+                        self.invalidate();
                         continue;
                     }
                 }
@@ -1062,6 +1185,8 @@ impl App {
         let work = px(self.state.work_rect());
         let over: Vec<[i32; 4]> = self.overlays.iter().map(|&r| px(r.outset(2.0))).collect();
         let z = self.state.z.clone();
+        let stacked: Vec<usize> = z.iter().filter_map(|w| if let Win::Hosted(r) = w { Some(*r) } else { None }).collect();
+        self.plugins.stack(&stacked);
         let docked_at = z.iter().rposition(|&w| self.state.is_max(w));
         for (i, &w) in z.iter().enumerate() {
             let Win::Hosted(row) = w else { continue };
@@ -1120,7 +1245,7 @@ impl App {
 
     /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
-        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active())
+        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading.is_some()
     }
 
     /// Periodic housekeeping; returns whether a repaint is needed.
@@ -1189,6 +1314,9 @@ impl App {
             (Some(g), Some(p)) => Some(Rect::new(g.x - 73.0, g.y - 41.0, g.w + 96.0, p.bottom() - g.y + 41.0)),
             _ => None,
         };
+        if let Some(l) = &self.loading {
+            crate::loading::paint(canvas, &self.theme.colors, l);
+        }
     }
 
     /// Repaint the piano roll body (note edits change the grid, overview and velocity panel).
@@ -1412,6 +1540,21 @@ impl App {
                 st.tab = i;
                 st.scroll = 0.0;
             }
+            // The one check that does real work: opt in / out of the experimental native host and
+            // re-scan so the picker's effect list updates (spec plugins/fruity-abi.md). Its displayed
+            // state comes straight from `os_native::enabled()` (the row's default), so it is left out
+            // of the `flipped` set.
+            SAct::Check(k) if k == views::settings::NATIVE_HOST_CHECK => {
+                let on = !os_native::enabled();
+                os_native::set_enabled(on);
+                self.scan_plugins();
+                let n = self.plugins.effects.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
+                self.state.message = Some(if on {
+                    format!("Experimental native plugin host on: {n} native effects available")
+                } else {
+                    "Experimental native plugin host off".into()
+                });
+            }
             SAct::Check(k) => {
                 if !st.flipped.remove(k) {
                     st.flipped.insert(k);
@@ -1458,7 +1601,7 @@ impl App {
     }
 
     /// The automation target, name and current value of a control, for "Create automation clip" (§8).
-    fn automation_target(&self, a: &Action) -> Option<(u32, String, f64)> {
+    pub(crate) fn automation_target(&self, a: &Action) -> Option<(u32, String, f64)> {
         use os_model::target;
         let s = &self.state;
         let chan = |row: usize| s.project.channels.get(row);
@@ -2045,7 +2188,7 @@ impl App {
                 return self.invalidate();
             }
             Some(Action::BrowserRow(i)) => {
-                if self.browser_remove_root(*i) {
+                if self.browser_remove_root(*i) || self.params_browser_right(*i, x, y) {
                     return;
                 }
             }
@@ -3068,6 +3211,7 @@ impl App {
         if let Action::Scrollbar(t) = a {
             return self.scrollbar_press(t, false);
         }
+        self.note_host_tweak(&a);
         if self.playlist_act(&a, false) {
             return;
         }
@@ -3580,6 +3724,7 @@ impl App {
         self.typing_release_all();
         self.plugins.remap(m);
         self.sampler_failed = self.sampler_failed.iter().filter_map(|&r| m(r)).collect();
+        self.wrap_failed = self.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
         self.transport.set_instruments(self.plugins.instruments());
         self.state.piano.dirty = true;
     }
@@ -3589,7 +3734,12 @@ impl App {
         let ch = self.state.project.channels.get(r)?;
         let name = match ch.kind {
             ChannelKind::Sampler | ChannelKind::AudioClip => crate::plugins::OPEN_SAMPLER.to_string(),
-            ChannelKind::Plugin => ch.plugin.clone()?,
+            // A hosted plugin is found by its identity (a wrapped channel's plugin name is the wrapper's).
+            ChannelKind::Plugin => {
+                let d = self.plugins.descriptor(r)?;
+                let index = self.plugins.index_of_uid(&d.uid())?;
+                return Some((index, self.plugins.state(r)?));
+            }
             _ => return None,
         };
         let index = self.plugins.index_of(&name)?;
@@ -3657,6 +3807,12 @@ impl App {
                 }
             }
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
+            (m, i) if item_at(m, i).is_some_and(|it| crate::params::menu_handles(it.label)) => {
+                let label = item_at(m, i).map_or("", |it| it.label);
+                if let Some(msg) = self.params_menu(label) {
+                    self.state.message = Some(msg);
+                }
+            }
             // EDIT > Undo = Ctrl+Z (piano-roll undo).
             (EDIT_MENU, i) if item_at(EDIT_MENU, i).is_some_and(|it| it.label == "Undo") => self.act(Action::PianoUndo),
             (m, i) => {
@@ -3712,6 +3868,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
         kind: ChannelKind::Sampler,
         name: Some(name.into()),
         plugin: None,
+        plugin_state: None,
         color: None,
         enabled: true,
         volume: 10000.0 / 12800.0,
@@ -3722,6 +3879,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
         layer_children: Vec::new(),
         envelopes: Default::default(),
         rack: Default::default(),
+        misc: Default::default(),
     }
 }
 
@@ -3745,6 +3903,7 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
         pitch_cents: ch.pitch_cents,
         range: 2,
         track: ch.mixer_track,
+        misc: Some(crate::misc::vals_of(ch)),
     })
 }
 
@@ -3753,7 +3912,8 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
     let row = add_channel(p);
     let ch = &mut p.channels[row];
     ch.kind = ChannelKind::Plugin;
-    ch.plugin = Some(name.to_string());
+    // The built-in Open 3x Osc is stored as the file's own 3x Osc.
+    ch.plugin = Some(crate::osc3::file_name(name).to_string());
     ch.name = Some(name.to_string());
     row
 }
@@ -3792,9 +3952,9 @@ pub fn test_project() -> Project {
 /// last one, as FL's default template stores them; spec: ui/mixer.md §1) routed to the master, pattern 1.
 fn template_project(names: &[&str]) -> Project {
     let channel = |i: u16, name: &str| sampler_channel(i, name, i + 1);
-    let mixer = (0..18u16)
-        .map(MixerTrack::new)
-        .collect();
+    let mut mixer: Vec<MixerTrack> = (0..18u16).map(MixerTrack::new).collect();
+    // The hidden last track is routed nowhere, as FL stores it (spec: flp/events/mixer.md).
+    mixer[17].routes.clear();
     Project {
         ppq: 96,
         tempo: Some(130.0),
@@ -3871,6 +4031,29 @@ mod tests {
 
     fn frame(app: &mut App, c: &mut Canvas, damage: Option<Rect>) {
         app.paint(c, damage);
+    }
+
+    /// Slots holding the file's parametric EQ get an Open Parametric EQ 2 instance and show its name; adding the EQ
+    /// stores the file's EQ (spec: plugins/open-parametric-eq-2.md §8).
+    #[test]
+    fn parametric_eq_slots_are_hosted() {
+        use crate::plugins::{fx_key, EQ_FILE_NAME, OPEN_EQ};
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let mut fl = open_parametric_eq_2::params::default_state();
+        open_parametric_eq_2::params::set_field(&mut fl, 1, -600);
+        a.state.project.mixer[2].slots[1] = Some(os_model::SlotPlugin { name: EQ_FILE_NAME.into(), state: fl.clone() });
+        a.sync_effects();
+        assert!(a.plugins.hosted.contains_key(&fx_key(2, 1)));
+        assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some(OPEN_EQ));
+        assert_eq!(a.plugins.eq_file_state(fx_key(2, 1)), Some(fl));
+        // A second pass changes nothing.
+        let before = a.plugins.hosted.len();
+        a.sync_effects();
+        assert_eq!(a.plugins.hosted.len(), before);
+        assert_eq!(crate::plugins::new_slot(OPEN_EQ).state, open_parametric_eq_2::params::default_state());
     }
 
     /// Writes the toolbar with a live-looking signal to OS_MONITOR_SHOT (a look-and-feel check, not an assertion).
@@ -4272,6 +4455,42 @@ mod tests {
         app.toggle_channel_window(row);
         assert!(!app.state.shown(Win::Plugin), "no information window");
         assert_eq!(app.state.pending_open, Some(row), "Open Sampler's window opens");
+    }
+
+    /// An opened project decodes its samples on worker threads, then starts its samplers behind the progress panel;
+    /// loading ends with every sampler channel hosted on the shared decode (spec: ui/project-loading.md).
+    #[test]
+    fn opened_projects_load_their_samplers_first() {
+        let flp = std::env::temp_dir().join(format!("os_loading_{}.flp", std::process::id()));
+        let wav = std::env::temp_dir().join(format!("os_loading_{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.25; 96000]).unwrap();
+        let wav = wav.to_string_lossy().into_owned();
+        let mut app = App::new(None);
+        for c in app.state.project.channels.iter_mut().filter(|c| c.kind.is_sampler()) {
+            c.sample_path = Some(wav.clone());
+        }
+        let rows: Vec<usize> = (0..app.state.project.channels.len()).filter(|&r| app.state.project.channels[r].kind.is_sampler()).collect();
+        assert!(rows.len() > 1);
+        app.save_to(flp.clone());
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        app.open(flp.clone());
+        let _ = std::fs::remove_file(&flp);
+        assert!(app.loading(), "opening starts loading");
+        assert!(app.animating(), "the panel keeps ticking");
+        let mut canvas = Canvas::new(1920, 1080, 1.0).unwrap();
+        app.paint(&mut canvas, None);
+        let t0 = std::time::Instant::now();
+        while app.loading() && t0.elapsed() < std::time::Duration::from_secs(20) {
+            app.plugin_tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!app.loading(), "loading ends");
+        for &r in &rows {
+            assert!(app.state.hosted_rows.contains(&r), "row {r} has its Open Sampler");
+            assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(wav.as_str()));
+        }
+        let _ = std::fs::remove_file(&wav);
     }
 
     #[test]

@@ -65,10 +65,9 @@ impl Default for Shared {
 
 /// Bit depth of a sample file's data (WAV `fmt `, FLAC STREAMINFO), | 0x100 for floating point; 16 when unknown.
 pub fn source_bits(path: &Path) -> u32 {
-    let Ok(data) = std::fs::read(path).map(|mut d| {
-        d.truncate(1 << 16);
-        d
-    }) else {
+    // The header is enough: a long sample is not read twice.
+    let mut data = Vec::new();
+    let Ok(_) = std::fs::File::open(path).and_then(|f| std::io::Read::read_to_end(&mut std::io::Read::take(f, 1 << 16), &mut data)) else {
         return 16;
     };
     if data.len() > 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" {
@@ -93,17 +92,18 @@ pub fn source_bits(path: &Path) -> u32 {
 }
 
 impl Shared {
-    /// Loads a sample file and makes it the current one (UI / initialize thread).
+    /// Loads a sample file and makes it the current one (UI / initialize thread). A decode the host already holds
+    /// (it decodes a project's samples ahead, spec: ui/project-loading.md) is taken as it is.
     pub fn load(&self, path: &str, params: &SamplerParams) -> Result<(), String> {
-        let s = os_engine::sample::load(Path::new(path)).map_err(|e| e.to_string())?;
+        let s = os_engine::sample::load_shared(Path::new(path)).map_err(|e| e.to_string())?;
         self.bits.store(source_bits(Path::new(path)), Ordering::Release);
         self.set_raw(Some(s), path, params);
         Ok(())
     }
 
     /// Replaces the loaded sample (`path` is what the state remembers).
-    pub fn set_raw(&self, s: Option<Sample>, path: &str, params: &SamplerParams) {
-        *self.raw.lock().unwrap() = s.map(Arc::new);
+    pub fn set_raw(&self, s: Option<Arc<Sample>>, path: &str, params: &SamplerParams) {
+        *self.raw.lock().unwrap() = s;
         *self.loaded_path.lock().unwrap() = path.to_string();
         if let Ok(mut p) = params.sample_path.write() {
             *p = path.to_string();
@@ -399,6 +399,7 @@ impl Plugin for OpenSampler {
                 NoteEvent::NoteOn { note, velocity, voice_id, .. } => self.engine.note_on_id(note, velocity, voice_id, &blk),
                 NoteEvent::NoteOff { note, .. } => self.engine.note_off(note, &blk),
                 NoteEvent::Choke { note, .. } => self.engine.choke(note, &blk),
+                NoteEvent::PolyTuning { note, tuning, .. } => self.engine.tune(note, f64::from(tuning)),
                 NoteEvent::PolyModulation { voice_id, poly_modulation_id: params::START_OFFSET_POLY, normalized_offset, .. } => {
                     self.engine.start_later(voice_id, normalized_offset, &blk)
                 }
@@ -434,5 +435,10 @@ impl Vst3Plugin for OpenSampler {
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Instrument, Vst3SubCategory::Sampler];
 }
 
+// Built as a plugin module: the C entry points hosts look for. Linked into OpenStudio (`linked` feature): only the
+// symbol-free table, so several Open plugins fit in one program (spec: plugins/plugin-formats.md).
+#[cfg(not(feature = "linked"))]
 nih_export_clap!(OpenSampler);
+#[cfg(not(feature = "linked"))]
 nih_export_vst3!(OpenSampler);
+os_plugkit::linked_clap_entry!(OpenSampler);

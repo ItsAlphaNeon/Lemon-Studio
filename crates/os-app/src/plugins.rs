@@ -1,14 +1,14 @@
-//! Hosted generator plugins (CLAP): scanning, one instance per plugin channel, their windows, and the
-//! instrument list the transport plays.
+//! Hosted plugins (any format, through the `os-host` layer): scanning, one instance per plugin channel or mixer slot,
+//! their windows, and the instrument / effect lists the transport plays.
 //!
 // spec: plugins/plugin-formats.md (hosting, where to find plugins, Open Sampler state), ui/plugin-window.md,
 // plugins/host-link.md (Open plugins join the window strip)
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
-use os_clap::{Descriptor, Library, Plugin, SharedPlugin};
+use os_host::{Descriptor, Library, SharedPlugin};
 use os_engine::{SharedEffect, SharedInstrument};
 
 #[cfg(windows)]
@@ -17,7 +17,7 @@ use crate::plugin_window::{ChannelInfo, FrameEvent, FrameWindow};
 /// A plugin offered in the picker.
 #[derive(Clone)]
 pub struct Available {
-    pub lib: Arc<Library>,
+    pub lib: Arc<dyn Library>,
     pub desc: Descriptor,
 }
 
@@ -40,10 +40,20 @@ pub enum Request {
     PitchCents(usize, i32),
     /// A preview note from an Open plugin's own keyboard (host link): row, key, velocity, on.
     Note(usize, u8, u8, bool),
+    /// "Create automation clip" from an Open plugin's own parameter menu (host link): row, parameter index.
+    Automate(usize, usize),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
     Raise(usize),
     /// The menu arrow was clicked: open the window menu at this screen point.
     Menu(usize, i32, i32),
+    /// The title-bar Presets box was clicked: open the preset list at this screen point (spec: plugins/presets.md).
+    Presets(usize, i32, i32),
+    /// The Presets box arrows: next (+1) / previous (-1) preset.
+    PresetStep(usize, i32),
+    /// A Misc tab value changed (spec: ui/plugin-window.md "Misc tab").
+    Misc(usize, crate::misc_page::M, f32),
+    /// A Misc tab list asks for its menu at this screen point.
+    MiscMenu(usize, crate::misc_page::M, i32, i32),
 }
 
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
@@ -71,13 +81,15 @@ pub struct Plugins {
     pub scale: f32,
     /// New plugin windows open detached (settings "Detach all new plugins"; off = docked like FL's default).
     pub detach_new: bool,
+    /// The preset file each instance last loaded or saved (spec: plugins/presets.md), by `hosted` key.
+    pub presets: BTreeMap<usize, PathBuf>,
     rate: u32,
 }
 
-/// Folders searched for `.clap` files: the standard CLAP folders, then `bundled/` next to the build folders of this
-/// workspace (where `cargo run -p bundle-plugins` puts OpenStudio's own plugins).
-fn search_dirs() -> Vec<PathBuf> {
-    let mut dirs = os_clap::standard_dirs();
+/// Folders searched for plugin files: a format's standard folders (`standard`), then `bundled/` next to the build
+/// folders of this workspace (where `cargo run -p bundle-plugins` puts OpenStudio's own plugins).
+fn search_dirs(standard: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs = standard;
     if let Ok(exe) = std::env::current_exe() {
         // target*/release/openstudio.exe -> target*/bundled, and the sibling build folders.
         if let Some(target) = exe.parent().and_then(|p| p.parent()) {
@@ -94,17 +106,31 @@ fn search_dirs() -> Vec<PathBuf> {
 }
 
 /// Open Sampler compiled into OpenStudio and hosted through its own CLAP entry, so sampler channels never depend on
-/// finding a `.clap` file (spec: plugins/open-sampler.md §7).
+/// finding a `.clap` file (spec: plugins/open-sampler.md §7); Open 3x Osc likewise (spec: plugins/open-3x-osc.md §6).
 pub fn builtin() -> Vec<Available> {
-    static LIB: OnceLock<Option<Arc<Library>>> = OnceLock::new();
-    let lib = LIB.get_or_init(|| {
+    static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    let mut v = linked(&LIB, &open_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, OPEN_SAMPLER);
+    v.extend(linked(&OSC3, &open_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::OPEN_3X_OSC));
+    v
+}
+
+/// Open Parametric EQ 2, compiled in the same way: offered for every mixer slot, and it plays the slots a project
+/// saved with the original EQ (spec: plugins/open-parametric-eq-2.md §8).
+pub fn builtin_effects() -> Vec<Available> {
+    static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    linked(&LIB, &open_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, OPEN_EQ)
+}
+
+/// The plugins of a CLAP entry table linked into this program.
+fn linked(cell: &OnceLock<Option<Arc<os_clap::Library>>>, entry: *const std::ffi::c_void, name: &str) -> Vec<Available> {
+    let lib = cell.get_or_init(|| {
         let path = std::env::current_exe().unwrap_or_default();
-        let entry = &open_sampler::clap_entry as *const _ as *const std::ffi::c_void;
-        // SAFETY: `clap_entry` is the linked plugin's static CLAP entry table.
-        match unsafe { Library::from_entry(entry, &path) } {
+        // SAFETY: `entry` is a linked plugin's static CLAP entry table.
+        match unsafe { os_clap::Library::from_entry(entry, &path) } {
             Ok(l) => Some(l),
             Err(e) => {
-                eprintln!("built-in Open Sampler: {e}");
+                eprintln!("built-in {name}: {e}");
                 None
             }
         }
@@ -112,17 +138,57 @@ pub fn builtin() -> Vec<Available> {
     lib.iter().flat_map(|l| l.plugins.iter().map(|d| Available { lib: l.clone(), desc: d.clone() })).collect()
 }
 
+/// One plugin format's files in its search folders, and how to load one.
+type Scan = (Vec<PathBuf>, fn(&std::path::Path) -> Result<Arc<dyn Library>, String>);
+
+/// The plugin files of every hosted format (spec: plugins/vst3-hosting.md §2). The user's installed
+/// FL native plugins are included only when the experimental native host is opted into
+/// (`os_native::enabled()`, Settings > File or `OPENSTUDIO_NATIVE=1`): they are loaded through an
+/// unverified interop path (spec plugins/fruity-abi.md), so they stay off by default.
+fn plugin_files() -> Vec<Scan> {
+    let mut scans: Vec<Scan> = vec![
+        (os_clap::find_files(&search_dirs(os_clap::standard_dirs())), |p| os_clap::Library::load(p).map(|l| l as Arc<dyn Library>)),
+        (os_vst3::find_bundles(&search_dirs(os_vst3::standard_dirs())), |p| os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>)),
+    ];
+    if os_native::enabled() {
+        // Effects only: native generators are not offered in the UI yet (some abort on load; their
+        // output level is not yet right). An in-process native crash would take the app down.
+        scans.push((os_native::effect_dll_files(), |p| os_native::NativeLibrary::load(p).map(|l| l as Arc<dyn Library>)));
+    }
+    scans
+}
+
+/// A format's name as the UI shows it.
+pub fn format_name(f: os_host::Format) -> &'static str {
+    match f {
+        os_host::Format::Clap => "CLAP",
+        os_host::Format::Vst3 => "VST3",
+        os_host::Format::Native => "native",
+    }
+}
+
+/// Picker labels of found plugins: the name, plus the format when plugins of other formats have the same name.
+fn labels(list: &[Available]) -> Vec<String> {
+    list.iter()
+        .map(|a| {
+            let twin = list.iter().any(|b| b.desc.name == a.desc.name && b.desc.format != a.desc.format);
+            if twin { format!("{} ({})", a.desc.name, format_name(a.desc.format)) } else { a.desc.name.clone() }
+        })
+        .collect()
+}
+
 impl Plugins {
-    /// The built-in Open Sampler, then the plugin folders' instruments (first file wins for a plugin id). Open Sampler
-    /// `.clap` files are skipped: a second copy in the process would share the built-in one's editor window class.
+    /// The built-in Open Sampler, then the plugin folders' instruments (first file wins for a plugin id). Files of the
+    /// built-in plugins are skipped (any format): a second copy in the process would share the built-in one's editor
+    /// window class.
     pub fn scan() -> Plugins {
         let mut available: Vec<Available> = builtin();
-        let mut effects: Vec<Available> = Vec::new();
-        let files = os_clap::find_files(&search_dirs());
-        for f in files.into_iter().filter(|f| f.file_stem().is_none_or(|s| s != OPEN_SAMPLER)) {
-            match Library::load(&f) {
+        let mut effects: Vec<Available> = builtin_effects();
+        let files = plugin_files().into_iter().flat_map(|(files, load)| files.into_iter().map(move |f| (f, load)));
+        for (f, load) in files.filter(|(f, _)| f.file_stem().is_none_or(|s| s != OPEN_SAMPLER && s != OPEN_EQ && s != crate::osc3::OPEN_3X_OSC)) {
+            match load(&f) {
                 Ok(lib) => {
-                    for d in lib.plugins.iter() {
+                    for d in lib.plugins().iter() {
                         let list = if d.is_instrument() {
                             &mut available
                         } else if d.is_effect() {
@@ -130,7 +196,7 @@ impl Plugins {
                         } else {
                             continue;
                         };
-                        if !list.iter().any(|a| a.desc.id == d.id) {
+                        if !list.iter().any(|a| a.desc.uid() == d.uid()) {
                             list.push(Available { lib: lib.clone(), desc: d.clone() });
                         }
                     }
@@ -139,11 +205,21 @@ impl Plugins {
             }
         }
         effects.sort_by_key(|a| a.desc.name.to_lowercase());
+        if std::env::var_os("OS_DEBUG").is_some() {
+            let native = effects.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
+            eprintln!("[plugins] {} instruments, {} effects ({native} native)", available.len(), effects.len());
+        }
         Plugins { available, effects, scale: 1.0, ..Plugins::default() }
     }
 
+    /// Picker labels of the instruments (`labels`), in `available` order.
     pub fn names(&self) -> Vec<String> {
-        self.available.iter().map(|a| a.desc.name.clone()).collect()
+        labels(&self.available)
+    }
+
+    /// Picker labels of the effects, in `effects` order.
+    pub fn effect_names(&self) -> Vec<String> {
+        labels(&self.effects)
     }
 
     /// Creates an instance of available plugin `index` for rack row `row` and activates it at the device rate.
@@ -154,7 +230,8 @@ impl Plugins {
     /// `create` with a starting state (the plugin's own saved state format).
     pub fn create_with(&mut self, row: usize, index: usize, state: Option<&[u8]>) -> Result<String, String> {
         let a = self.available.get(index).ok_or("no such plugin")?.clone();
-        let mut p = Plugin::new(&a.lib, &a.desc.id)?;
+        let plugin = a.lib.clone().create(&a.desc.id)?;
+        let mut p = plugin.lock().map_err(|_| "plugin busy")?;
         if let Some(st) = state {
             if !p.load_state(st) {
                 eprintln!("[plugins] {} did not take its starting state", a.desc.name);
@@ -171,7 +248,8 @@ impl Plugins {
         }
         // Trimmed audio clips start their note further into the sample (spec: plugins/open-sampler.md §7).
         p.use_start_param(SAMPLE_START);
-        self.hosted.insert(row, Hosted { plugin: Arc::new(Mutex::new(p)), #[cfg(windows)] window: None, #[cfg(windows)] link: None });
+        drop(p);
+        self.hosted.insert(row, Hosted { plugin, #[cfg(windows)] window: None, #[cfg(windows)] link: None });
         Ok(a.desc.name)
     }
 
@@ -180,7 +258,8 @@ impl Plugins {
         let a = self.effects.get(index).ok_or("no such effect")?.clone();
         let key = fx_key(track, slot);
         self.drop_key(key);
-        let mut p = Plugin::new(&a.lib, &a.desc.id)?;
+        let plugin = a.lib.clone().create(&a.desc.id)?;
+        let mut p = plugin.lock().map_err(|_| "plugin busy")?;
         if let Some(st) = state {
             p.load_state(st);
         }
@@ -190,7 +269,8 @@ impl Plugins {
         if !p.activate(self.rate) {
             return Err(format!("{} could not start", a.desc.name));
         }
-        self.hosted.insert(key, Hosted { plugin: Arc::new(Mutex::new(p)), #[cfg(windows)] window: None, #[cfg(windows)] link: None });
+        drop(p);
+        self.hosted.insert(key, Hosted { plugin, #[cfg(windows)] window: None, #[cfg(windows)] link: None });
         Ok(a.desc.name)
     }
 
@@ -199,6 +279,24 @@ impl Plugins {
         #[cfg(windows)]
         self.close_window(key);
         self.hosted.remove(&key);
+        self.presets.remove(&key);
+    }
+
+    /// Remembers the preset the instance under `key` holds and shows its name in the window's Presets box.
+    pub fn set_preset(&mut self, key: usize, path: Option<PathBuf>) {
+        match path {
+            Some(p) => self.presets.insert(key, p),
+            None => self.presets.remove(&key),
+        };
+        #[cfg(windows)]
+        if let Some(w) = self.hosted.get(&key).and_then(|h| h.window.as_ref()) {
+            w.set_preset(self.preset_name(key));
+        }
+    }
+
+    /// The name of the preset the instance under `key` holds.
+    pub fn preset_name(&self, key: usize) -> Option<String> {
+        self.presets.get(&key).map(|p| crate::presets::shown_name(p))
     }
 
     /// Moves mixer slot instances: `m(track, slot)` gives the new place, `None` drops the instance.
@@ -209,7 +307,12 @@ impl Plugins {
             let (t, s) = fx_of(k).unwrap();
             match m(t, s) {
                 Some((nt, ns)) if (nt, ns) == (t, s) => {}
-                Some((nt, ns)) => moved.push((fx_key(nt, ns), self.hosted.remove(&k).unwrap())),
+                Some((nt, ns)) => {
+                    if let Some(p) = self.presets.remove(&k) {
+                        self.presets.insert(fx_key(nt, ns), p);
+                    }
+                    moved.push((fx_key(nt, ns), self.hosted.remove(&k).unwrap()))
+                }
                 None => self.drop_key(k),
             }
         }
@@ -231,7 +334,58 @@ impl Plugins {
 
     /// Index of the available plugin called `name`.
     pub fn index_of(&self, name: &str) -> Option<usize> {
-        self.available.iter().position(|a| a.desc.name == name)
+        // A picker label first (it names the format of a plugin found in several), then the plain name.
+        labels(&self.available).iter().position(|l| l == name).or_else(|| self.available.iter().position(|a| a.desc.name == name))
+    }
+
+    /// Index of the effect plugin called `name`.
+    pub fn effect_index(&self, name: &str) -> Option<usize> {
+        self.effects.iter().position(|a| a.desc.name == name)
+    }
+
+    /// Index of the available instrument with identity `uid` (`Descriptor::uid`, e.g. `vst3:<class id>`).
+    pub fn index_of_uid(&self, uid: &str) -> Option<usize> {
+        self.available.iter().position(|a| a.desc.uid() == uid)
+    }
+
+    /// Index of the effect plugin with identity `uid`.
+    pub fn effect_index_of_uid(&self, uid: &str) -> Option<usize> {
+        self.effects.iter().position(|a| a.desc.uid() == uid)
+    }
+
+    /// What the instance under `key` (rack row or `fx_key`) is: format, id, name, file (for project files).
+    pub fn descriptor(&self, key: usize) -> Option<Descriptor> {
+        Some(self.hosted.get(&key)?.plugin.lock().ok()?.desc().clone())
+    }
+
+    /// The saved state of the instance under `key`, in its format's own bytes.
+    pub fn state(&self, key: usize) -> Option<Vec<u8>> {
+        self.hosted.get(&key)?.plugin.lock().ok()?.save_state()
+    }
+
+    /// Restores a `state` blob into the instance under `key`.
+    pub fn set_state(&self, key: usize, data: &[u8]) -> bool {
+        self.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.load_state(data))
+    }
+
+    /// Sets the parameter named `name` of the instance under `key` to plain value `plain` (the plugin's own range).
+    /// False when the instance or the parameter is missing.
+    pub fn set_param_named(&self, key: usize, name: &str, plain: f64) -> bool {
+        let Some(mut p) = self.hosted.get(&key).and_then(|h| h.plugin.lock().ok()) else { return false };
+        let Some(info) = (0..p.param_count()).filter_map(|i| p.param_info(i)).find(|i| i.name == name) else { return false };
+        let n = if info.max > info.min { (plain - info.min) / (info.max - info.min) } else { 0.0 };
+        p.set_param(info.id, n.clamp(0.0, 1.0))
+    }
+
+    /// The project-file state of the Open Parametric EQ 2 in mixer slot `key` (its plugin state converted back),
+    /// `None` when the slot hosts something else.
+    pub fn eq_file_state(&self, key: usize) -> Option<Vec<u8>> {
+        let h = self.hosted.get(&key)?;
+        let p = h.plugin.lock().ok()?;
+        if p.desc().name != OPEN_EQ {
+            return None;
+        }
+        open_parametric_eq_2::params::fl_from_plugin_state(&p.save_state()?)
     }
 
     /// Loads sample `path` into row `row`'s Open Sampler: its current state with a new `sample-path`, so every other
@@ -278,6 +432,7 @@ impl Plugins {
             self.close_window(row);
         }
         self.hosted.clear();
+        self.presets.clear();
     }
 
     /// The sample file an Open Sampler instance holds (its persisted `sample-path`), `Some("")` when it has none.
@@ -320,9 +475,15 @@ impl Plugins {
             }
             None => w.set_editor_size((ew as f32 / scale, eh as f32 / scale)),
         }
-        w.show();
+        // On top: the app stacks it above its other windows (`State::raise`), and a new child window starts below
+        // the open ones.
+        w.raise();
         drop(p);
         h.window = Some(w);
+        let name = self.preset_name(row);
+        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
+            w.set_preset(name);
+        }
         Ok(())
     }
 
@@ -355,6 +516,14 @@ impl Plugins {
     #[cfg(windows)]
     pub fn docked(&self) -> Vec<usize> {
         self.hosted.iter().filter(|(_, h)| h.window.as_ref().is_some_and(|w| !w.detached())).map(|(&r, _)| r).collect()
+    }
+
+    /// Stacks the docked windows of `rows` (bottom to top, as in `State::z`) in that order: docked windows clip each
+    /// other by their native order, so it must match the app's.
+    #[cfg(windows)]
+    pub fn stack(&self, rows: &[usize]) {
+        let hwnds: Vec<isize> = rows.iter().filter_map(|r| self.window_of(*r)).filter(|w| !w.1).map(|w| w.0).collect();
+        crate::plugin_window::stack(self.owner, &hwnds);
     }
 
     /// Clips row `row`'s docked window to `work` minus `covers` (main-window client px).
@@ -394,11 +563,11 @@ impl Plugins {
         // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
         #[cfg(windows)]
         for (area, m) in crate::plugin_window::take_link() {
-            if let crate::plugin_window::LinkMsg::Note(k, v, on) = m {
-                let row = self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
-                if let Some(row) = row {
-                    out.push(Request::Note(row, k, v, on));
-                }
+            let row = self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
+            match (row, m) {
+                (Some(row), crate::plugin_window::LinkMsg::Note(k, v, on)) => out.push(Request::Note(row, k, v, on)),
+                (Some(row), crate::plugin_window::LinkMsg::Automate(i)) => out.push(Request::Automate(row, i)),
+                _ => {}
             }
         }
         for (&row, h) in &mut self.hosted {
@@ -438,6 +607,11 @@ impl Plugins {
                         FrameEvent::PitchCents(c) => Request::PitchCents(row, c),
                         FrameEvent::Raise => Request::Raise(row),
                         FrameEvent::Menu(x, y) => Request::Menu(row, x, y),
+                        FrameEvent::Presets(x, y) => Request::Presets(row, x, y),
+                        FrameEvent::PresetStep(d) => Request::PresetStep(row, d),
+                        FrameEvent::Misc(m, v) => Request::Misc(row, m, v),
+                        FrameEvent::MiscMenu(m, x, y) => Request::MiscMenu(row, m, x, y),
+                        FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
                     });
                 }
             }
@@ -465,6 +639,26 @@ impl Drop for Hosted {
 
 /// Name of OpenStudio's sampler plugin: it plays and edits every sampler channel (spec: plugins/open-sampler.md §7).
 pub const OPEN_SAMPLER: &str = "Open Sampler";
+/// Name of OpenStudio's parametric EQ plugin.
+pub const OPEN_EQ: &str = "Open Parametric EQ 2";
+/// The plugin name a project file stores for the parametric EQ (file-format identifier, kept for interop): slots
+/// with it are played by Open Parametric EQ 2 (spec: plugins/open-parametric-eq-2.md §8).
+pub const EQ_FILE_NAME: &str = "Fruity Parametric EQ 2";
+
+/// What the mixer shows for a slot's stored plugin name.
+pub fn slot_label(name: &str) -> &str {
+    if name == EQ_FILE_NAME { OPEN_EQ } else { name }
+}
+
+/// A new slot for effect `name`: what the project stores (Open Parametric EQ 2 as the file's EQ with its default
+/// state, so the file opens elsewhere; other effects by name).
+pub fn new_slot(name: &str) -> os_model::SlotPlugin {
+    if name == OPEN_EQ {
+        os_model::SlotPlugin { name: EQ_FILE_NAME.into(), state: open_parametric_eq_2::params::default_state() }
+    } else {
+        os_model::SlotPlugin { name: name.into(), state: Vec::new() }
+    }
+}
 /// The sampler parameter a note's sample start modulates per note (Open Sampler's START OFFSET).
 const SAMPLE_START: &str = "Sample start offset";
 
@@ -528,7 +722,7 @@ fn json_string(s: &str) -> String {
 }
 
 /// `blob` (an Open Sampler state) with its `sample-path` field replaced by `path`.
-fn with_sample_path(blob: &[u8], path: &str) -> Option<Vec<u8>> {
+pub(crate) fn with_sample_path(blob: &[u8], path: &str) -> Option<Vec<u8>> {
     let prefixed = blob.len() > 8 && blob[0] != b'{';
     let json = if prefixed { &blob[8..] } else { blob };
     let mut v: serde_json::Value = serde_json::from_slice(json).ok()?;
@@ -673,11 +867,11 @@ mod tests {
     fn plugin_window_shots() {
         let (Some(dir), Some(clap)) = (std::env::var_os("OS_SHOT_DIR"), std::env::var_os("OS_CLAP")) else { return };
         let dir = std::path::PathBuf::from(dir);
-        let lib = Library::load(std::path::Path::new(&clap)).expect("load clap");
+        let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let hwnd = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -694,6 +888,85 @@ mod tests {
         capture(hwnd, &dir.join("win_nostrip.bmp"));
     }
 
+    /// The built-in Open Parametric EQ 2 in a mixer slot window: the frame without a strip, the editor inside it, and a
+    /// click on a band's switch reaching the plugin state.
+    /// `OS_SHOT_DIR=.. cargo test -p os-app --bin openstudio eq_window_shots -- --ignored`
+    #[test]
+    #[ignore]
+    fn eq_window_shots() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.effect_index(OPEN_EQ).expect("built-in EQ");
+        pl.create_effect(1, 0, index, None).unwrap();
+        let key = fx_key(1, 0);
+        let info = ChannelInfo { name: OPEN_EQ.into(), target: "Insert 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        pl.open_window(key, info).unwrap();
+        pump(&mut pl, 400);
+        let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+        capture(frame, &dir.join("eq_window.bmp"));
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
+        assert!(editor != 0, "the editor is a child of the frame");
+        let mask = |pl: &Plugins| pl.eq_file_state(key).map(|b| b[318]);
+        assert_eq!(mask(&pl), Some(0x7f));
+        // Band 3's switch (editor coordinates, spec: plugins/open-parametric-eq-2.md §3): mutes band 3.
+        click(editor, 549 + 21 * 2 + 6, 296);
+        pump(&mut pl, 200);
+        capture(frame, &dir.join("eq_window_muted.bmp"));
+        assert_eq!(mask(&pl), Some(0x7f & !4));
+    }
+
+    /// Open 3x Osc in its window: a wheel turn on a knob changes the plugin's value AND the picture (spec:
+    /// plugins/open-3x-osc.md §5). `OS_SHOT_DIR=.. cargo test -p os-app --bin openstudio osc3_window_redraws -- --ignored`
+    #[test]
+    #[ignore]
+    fn osc3_window_redraws() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(crate::osc3::OPEN_3X_OSC).expect("built-in Open 3x Osc");
+        pl.create_with(0, index, None).unwrap();
+        let info = ChannelInfo { name: crate::osc3::OPEN_3X_OSC.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 400);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
+        assert!(editor != 0, "the editor is a child of the frame");
+        // Where osc 2's coarse knob is drawn (painted-frame coordinates -> editor client, hosted crop).
+        let mut c = os_ui::Canvas::new(open_3x_osc::view::W, open_3x_osc::view::H, 1.0).unwrap();
+        struct Mid;
+        impl open_3x_osc::view::Model for Mid {
+            fn norm(&self, _: &str) -> f32 {
+                0.5
+            }
+            fn plain(&self, _: &str) -> f32 {
+                0.0
+            }
+            fn text(&self, _: &str) -> String {
+                String::new()
+            }
+        }
+        let hits = open_3x_osc::view::paint(&mut c, &os_theme::Palette::default(), &Mid, &Default::default(), "", true);
+        let t = open_3x_osc::view::Target::Knob("o2_coarse".into());
+        let r = hits.iter().rev().find(|h| h.t == t).expect("coarse knob").r;
+        let (cx, cy) = ((r.cx() - open_3x_osc::view::CROP_X as f32) as i32, (r.cy() - open_3x_osc::view::HOSTED_CROP_Y as f32) as i32);
+        let mut er: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetWindowRect(editor as HWND, &mut er) };
+        let state = |pl: &Plugins| pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap();
+        let (a, b) = (dir.join("osc3_before.bmp"), dir.join("osc3_after.bmp"));
+        capture(frame, &a);
+        let before = state(&pl);
+        for _ in 0..6 {
+            let (sx, sy) = (er.left + cx, er.top + cy);
+            unsafe { SendMessageW(editor as HWND, WM_MOUSEWHEEL, (120usize) << 16, ((sx & 0xffff) | (sy << 16)) as isize) };
+            pump(&mut pl, 60);
+        }
+        pump(&mut pl, 300);
+        capture(frame, &b);
+        assert_ne!(state(&pl), before, "the knob moved the plugin value");
+        assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "the editor redrew");
+    }
+
     /// Random clicks, drags and wheel turns on the editor; a probe toggle must keep changing the plugin state.
     /// `OS_SHOT_DIR=.. OS_CLAP=.. cargo test -p os-app plugin_editor_stress -- --ignored --nocapture`
     #[test]
@@ -702,11 +975,11 @@ mod tests {
         let Some(clap) = std::env::var_os("OS_CLAP") else { return };
         // Right clicks and list buttons open modal menus; the plugin skips them under this switch.
         unsafe { std::env::set_var("OPENSAMPLER_NO_MODAL", "1") };
-        let lib = Library::load(std::path::Path::new(&clap)).expect("load clap");
+        let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -793,11 +1066,11 @@ mod tests {
         use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT};
         let Some(clap) = std::env::var_os("OS_CLAP") else { return };
-        let lib = Library::load(std::path::Path::new(&clap)).expect("load clap");
+        let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -864,15 +1137,14 @@ mod tests {
     #[test]
     #[ignore]
     fn plugin_knob_edit_changes_the_sound() {
-        use os_engine::Instrument;
         use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT};
         let Some(clap) = std::env::var_os("OS_CLAP") else { return };
-        let lib = Library::load(std::path::Path::new(&clap)).expect("load clap");
+        let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -951,11 +1223,11 @@ mod tests {
         use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT};
         let Some(clap) = std::env::var_os("OS_CLAP") else { return };
-        let lib = Library::load(std::path::Path::new(&clap)).expect("load clap");
+        let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -1031,11 +1303,11 @@ mod tests {
     #[ignore]
     fn keys_in_a_plugin_window_reach_the_app() {
         let Some(clap) = std::env::var_os("OS_CLAP") else { return };
-        let lib = Library::load(std::path::Path::new(&clap)).expect("load clap");
+        let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -1149,6 +1421,39 @@ mod tests {
         assert!(peak > 0.01 && peak < 0.3, "the mp3 plays through the kept envelope (peak {peak})");
     }
 
+    /// The built-in Open Parametric EQ 2 starts from a project file's EQ state, plays it, and gives the state back
+    /// (spec: plugins/open-parametric-eq-2.md §8).
+    #[test]
+    fn builtin_parametric_eq_takes_and_gives_the_file_state() {
+        use open_parametric_eq_2::params::{default_state, field, plugin_state_from_fl, set_field};
+        let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.effect_index(OPEN_EQ).expect("built-in EQ");
+        // Band 4 (default frequency: the middle of the scale) at +12 dB.
+        let mut fl = default_state();
+        set_field(&mut fl, 4, 1200);
+        pl.create_effect(3, 2, index, Some(&plugin_state_from_fl(&fl))).unwrap();
+        let key = fx_key(3, 2);
+        let back = pl.eq_file_state(key).expect("EQ state");
+        assert_eq!(field(&back, 4), 1200);
+        assert_eq!(back, fl, "the whole file state comes back");
+        // A sine at the band's frequency comes out about 4 times louder.
+        let hz = os_engine::effects::eq::freq_hz(os_engine::effects::eq::default_freq(3));
+        let fx = pl.hosted[&key].plugin.clone() as SharedEffect;
+        let mut f = fx.lock().unwrap();
+        let mut peak = 0.0f32;
+        for block in 0..40 {
+            let mut l: Vec<f32> = (0..480).map(|i| (0.1 * (std::f64::consts::TAU * hz * f64::from(block * 480 + i) / 48000.0).sin()) as f32).collect();
+            let mut r = l.clone();
+            f.process_fx(48000, &mut l, &mut r);
+            if block > 20 {
+                peak = l.iter().fold(peak, |m, v| m.max(v.abs()));
+            }
+        }
+        assert!((peak - 0.398).abs() < 0.03, "+12 dB at the band (peak {peak})");
+        assert_eq!(slot_label(EQ_FILE_NAME), OPEN_EQ);
+        assert_eq!(new_slot(OPEN_EQ).name, EQ_FILE_NAME);
+    }
+
     /// Playlist clips through Open Sampler (spec: plugins/open-sampler.md §7): a note can start partway into the sample
     /// (per-note modulation of the start offset) and a choke ends it at once.
     #[test]
@@ -1193,7 +1498,7 @@ mod tests {
         use windows_sys::Win32::Foundation::RECT;
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         pl.create(0, pl.index_of(OPEN_SAMPLER).unwrap()).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -1216,5 +1521,225 @@ mod tests {
         assert!(pl.drop_file(0, r.left + 12, r.top + 40, &wav, true));
         pump(&mut pl, 200);
         assert_eq!(pl.sampler_path(0).as_deref(), Some(wav.as_str()));
+    }
+
+    /// `<target>/bundled/<file>` of this test's build folder (`cargo run -p bundle-plugins`), if built.
+    fn bundled(file: &str) -> Option<PathBuf> {
+        let target = std::env::current_exe().ok()?.parent()?.parent()?.parent()?.to_path_buf();
+        Some(target.join("bundled").join(file)).filter(|p| p.exists())
+    }
+
+    /// A VST3 instrument hosts like a CLAP one (spec: plugins/vst3-hosting.md): created, given state bytes, played;
+    /// the same plugin in both formats gets format labels in the picker and each label finds its own entry.
+    #[test]
+    fn vst3_plugins_host_like_clap_ones() {
+        let (Some(clap), Some(vst3)) = (bundled("Open Sampler.clap"), bundled("Open Sampler.vst3")) else { return };
+        let available = |p: &std::path::Path, load: fn(&std::path::Path) -> Result<Arc<dyn Library>, String>| {
+            let lib = load(p).unwrap();
+            Available { desc: lib.plugins()[0].clone(), lib }
+        };
+        let mut pl = Plugins {
+            available: vec![
+                available(&clap, |p| os_clap::Library::load(p).map(|l| l as Arc<dyn Library>)),
+                available(&vst3, |p| os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>)),
+            ],
+            scale: 1.0,
+            rate: 48000,
+            ..Plugins::default()
+        };
+        assert_eq!(pl.names(), ["Open Sampler (CLAP)", "Open Sampler (VST3)"]);
+        assert_eq!(pl.index_of("Open Sampler (VST3)"), Some(1));
+        assert_eq!(pl.index_of("Open Sampler"), Some(0), "a plain name still finds the first");
+        pl.create(0, 1).unwrap();
+        let d = pl.descriptor(0).unwrap();
+        assert_eq!(d.format, os_host::Format::Vst3);
+        assert!(d.uid().starts_with("vst3:") && d.uid().len() == 5 + 32);
+        let wav = std::env::temp_dir().join("os-app-vst3.wav");
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
+        // A VST3 instance takes a bare component state too (here Open Sampler's JSON with the sample).
+        let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
+        assert!(pl.set_state(0, json.as_bytes()), "the sample reaches the VST3 instance");
+        let state = pl.state(0).unwrap();
+        assert!(state.starts_with(b"VST3"), "state bytes are a .vstpreset");
+        assert!(pl.set_state(0, &state));
+        let (_, inst) = pl.instruments().pop().unwrap();
+        let mut i = inst.lock().unwrap();
+        let (mut l, mut r) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+        i.note_on(0, 60, 0.8);
+        i.process(48000, &mut l, &mut r);
+        assert!(l.iter().any(|v| v.abs() > 0.1), "plays");
+    }
+
+    /// A VST3 instrument channel and a VST3 effect in a mixer slot are saved as wrapped plugins naming the class id, and
+    /// the reopened project hosts the same classes with the saved state (spec: plugins/vst3-hosting.md §8,
+    /// flp/events/plugins.md §4).
+    #[test]
+    fn vst3_plugins_save_and_reopen() {
+        let (Some(smp), Some(eq)) = (bundled("Open Sampler.vst3"), bundled("Open Parametric EQ 2.vst3")) else { return };
+        let load = |p: &std::path::Path| {
+            let lib = os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>).unwrap();
+            Available { desc: lib.plugins()[0].clone(), lib }
+        };
+        let path = std::env::temp_dir().join(format!("openstudio-vst3-{}.flp", std::process::id()));
+        let wav = std::env::temp_dir().join("os-app-vst3-save.wav");
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.25; 4800]).unwrap();
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.plugins.available = vec![load(&smp)];
+        a.plugins.effects = vec![load(&eq)];
+        let row = crate::app::add_plugin_channel(&mut a.state.project, "Open Sampler");
+        a.plugins.create(row, 0).unwrap();
+        a.state.hosted_rows.push(row);
+        let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
+        assert!(a.plugins.set_state(row, json.as_bytes()));
+        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { name: "Open Parametric EQ 2".into(), state: Vec::new() });
+        a.plugins.create_effect(3, 2, 0, None).unwrap();
+        // An edit of the effect, through the hosting layer, flushed into its processor.
+        {
+            let mut fx = a.plugins.hosted[&fx_key(3, 2)].plugin.lock().unwrap();
+            let id = (0..fx.param_count()).filter_map(|i| fx.param_info(i)).find(|p| !p.read_only && !p.hidden && p.automatable).unwrap().id;
+            assert!(fx.set_param(id, 0.3));
+            assert!(fx.activate(48000));
+            fx.idle();
+            std::thread::sleep(Duration::from_millis(60));
+            fx.idle();
+        }
+        let (ch_state, fx_state) = (a.plugins.state(row).unwrap(), a.plugins.state(fx_key(3, 2)).unwrap());
+        assert!(ch_state.starts_with(b"VST3") && fx_state.starts_with(b"VST3"));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+
+        // The file names each class by its id.
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let r = crate::project_plugins::wrapped_channel(&saved.channels[row]).unwrap();
+        assert_eq!((r.format.as_str(), r.id.as_str(), r.name.as_str()), ("vst3", a.plugins.available[0].desc.id.as_str(), "Open Sampler"));
+        assert_eq!(r.state, ch_state);
+        let s = crate::project_plugins::wrapped_slot(saved.mixer[3].slots[2].as_ref().unwrap()).unwrap();
+        assert_eq!((s.format.as_str(), s.id.as_str()), ("vst3", a.plugins.effects[0].desc.id.as_str()));
+        assert_eq!(s.state, fx_state);
+
+        // Reopened: found by class id even when the plugin file is named differently now.
+        let mut b = crate::app::App::new(None);
+        let (mut i, mut e) = (load(&smp), load(&eq));
+        i.desc.path = "D:/moved/Renamed.vst3".into();
+        e.desc.path = "D:/moved/Other.vst3".into();
+        b.plugins.available = vec![i];
+        b.plugins.effects = vec![e];
+        b.open(path.clone());
+        b.sync_wrapped();
+        let _ = std::fs::remove_file(&path);
+        assert!(b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
+        assert_eq!(b.plugins.descriptor(row).unwrap().format, os_host::Format::Vst3);
+        assert_eq!(b.plugins.state(row).as_deref(), Some(&ch_state[..]));
+        assert_eq!(b.plugins.state(fx_key(3, 2)).as_deref(), Some(&fx_state[..]));
+        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Open Parametric EQ 2"));
+    }
+
+    /// VST3 editors inside OpenStudio's plugin frame, moved off every screen and captured with PrintWindow:
+    /// `OS_SHOT_DIR=<dir> cargo test -p os-app --bin openstudio vst3_window_shots -- --ignored`.
+    #[test]
+    #[ignore]
+    fn vst3_window_shots() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        for (file, effect) in [("Open Sampler.vst3", false), ("Open Parametric EQ 2.vst3", true)] {
+            let Some(path) = bundled(file) else { continue };
+            let lib = os_vst3::Module::load(&path).unwrap();
+            let a = Available { desc: lib.plugins()[0].clone(), lib };
+            let name = a.desc.name.clone();
+            let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+            let key = if effect {
+                pl.effects = vec![a];
+                pl.create_effect(1, 0, 0, None).unwrap();
+                fx_key(1, 0)
+            } else {
+                pl.available = vec![a];
+                pl.create(0, 0).unwrap();
+                0
+            };
+            let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+            pl.open_window(key, info).unwrap();
+            let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+            unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+            pump(&mut pl, 400);
+            let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
+            assert!(!editor.is_null(), "{name}: the editor is a child of the frame");
+            let out = dir.join(format!("vst3_{}.bmp", name.replace(' ', "_")));
+            // The first capture of a window that never reached the screen makes it paint.
+            capture(frame, &out);
+            pump(&mut pl, 200);
+            capture(frame, &out);
+        }
+    }
+
+    /// The user's installed FL native effects show their own editors inside OpenStudio's plugin frame (spec
+    /// plugins/fruity-abi.md, "Editors"): frame moved off every screen, captured with PrintWindow, closed and opened
+    /// again. Loads FL DLLs in-process, so ignored: `OS_SHOT_DIR=<dir> cargo test -p os-app --bin openstudio
+    /// native_window_shots -- --ignored` (shots only when OS_SHOT_DIR is set). Skips without FL.
+    #[test]
+    #[ignore]
+    fn native_window_shots() {
+        let fl = os_native::default_fl_dir();
+        let dir = std::env::var_os("OS_SHOT_DIR").map(std::path::PathBuf::from);
+        for name in ["Fruity Balance", "Fruity Parametric EQ 2", "Fruity Delay 3", "Fruity Limiter"] {
+            let Some(dll) = os_native::find_plugin(&fl, name) else { continue };
+            let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
+            let a = Available { desc: lib.plugins()[0].clone(), lib };
+            let mut pl = Plugins { scale: 1.0, rate: 48000, effects: vec![a], ..Plugins::default() };
+            pl.create_effect(1, 0, 0, None).unwrap();
+            let key = fx_key(1, 0);
+            let info = ChannelInfo { name: name.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+            for round in 0..2 {
+                pl.open_window(key, info.clone()).unwrap();
+                let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+                unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+                pump(&mut pl, 300);
+                let area = pl.hosted[&key].window.as_ref().unwrap().area() as HWND;
+                let editor = unsafe { GetWindow(area, GW_CHILD) };
+                assert!(!editor.is_null(), "{name}: the editor is a child of the frame's editor area");
+                let (mut ra, mut re): (RECT, RECT) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+                unsafe { GetWindowRect(area, &mut ra) };
+                unsafe { GetWindowRect(editor, &mut re) };
+                assert_eq!((ra.right - ra.left, ra.bottom - ra.top), (re.right - re.left, re.bottom - re.top), "{name}: the frame fits the editor");
+                assert_eq!((ra.left, ra.top), (re.left, re.top), "{name}: the editor sits at the area's corner");
+                if let Some(dir) = &dir {
+                    let out = dir.join(format!("native_{}_{round}.bmp", name.replace(' ', "_")));
+                    capture(frame, &out);
+                    pump(&mut pl, 200);
+                    capture(frame, &out);
+                }
+                assert!(pl.close_if_open(key));
+                pump(&mut pl, 100);
+            }
+        }
+    }
+
+    /// With the experimental native host opted in, the scan offers the user's installed FL native
+    /// effects in the effect picker (spec plugins/fruity-abi.md). Skips when FL is not installed.
+    /// Ignored in the default run: it mutates the process `OPENSTUDIO_NATIVE` env var, which is
+    /// unsound to do while other parallel tests read the environment. Run with
+    /// `cargo test -p os-app native_effects_listed_when_opted_in -- --ignored`.
+    #[test]
+    #[ignore]
+    fn native_effects_listed_when_opted_in() {
+        let fl = os_native::default_fl_dir();
+        if !fl.join("Plugins").join("Fruity").join("Effects").is_dir() {
+            return;
+        }
+        // SAFETY: test-only; `OPENSTUDIO_NATIVE` is read only by this scan path.
+        unsafe { std::env::set_var("OPENSTUDIO_NATIVE", "1") };
+        let opted = Plugins::scan();
+        unsafe { std::env::remove_var("OPENSTUDIO_NATIVE") };
+        let baseline = Plugins::scan();
+
+        let native: Vec<_> = opted.effects.iter().filter(|a| a.desc.format == os_host::Format::Native).collect();
+        assert!(!native.is_empty(), "native effects should be listed when opted in");
+        assert!(native.iter().any(|a| a.desc.name == "Fruity Balance"));
+        assert!(
+            baseline.effects.iter().all(|a| a.desc.format != os_host::Format::Native),
+            "native effects must not appear without the opt-in"
+        );
     }
 }

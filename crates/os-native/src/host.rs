@@ -8,9 +8,31 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CString};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::abi::{IntPtr, VoiceParams, HOST_EXTRA_SLOTS, HOST_METHODS};
+use crate::lock::PluginLock;
+
+/// A hook the host consults before its own handling of a `Dispatcher` call (plugin -> host),
+/// so experimental code can answer undocumented dispatcher IDs the published SDK does not cover
+/// (see "Unknown host slots" in the spec). Returns `Some(result)` to answer, `None` to fall
+/// through to the built-in handling. `(id, index, value)`.
+pub type DispatchHook = fn(IntPtr, IntPtr, IntPtr) -> Option<IntPtr>;
+
+/// Function pointer stored as a `usize` (0 = none). A plain pointer, so no allocation or lock
+/// on the hot dispatcher path.
+static DISPATCH_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+/// Installs (or clears, with `None`) the global dispatcher hook. Process-wide.
+pub fn set_dispatch_hook(hook: Option<DispatchHook>) {
+    DISPATCH_HOOK.store(hook.map_or(0, |f| f as usize), Ordering::SeqCst);
+}
+
+fn dispatch_hook() -> Option<DispatchHook> {
+    let p = DISPATCH_HOOK.load(Ordering::Relaxed);
+    (p != 0).then(|| unsafe { std::mem::transmute::<usize, DispatchHook>(p) })
+}
 
 const SLOTS: usize = HOST_METHODS + HOST_EXTRA_SLOTS;
 const WAVETABLE_LEN: usize = 16384;
@@ -37,6 +59,8 @@ pub struct HostContext {
     pub killed_voices: Vec<IntPtr>,
     /// Calls the host couldn't serve meaningfully: (slot or dispatcher id) → count.
     pub unhandled: BTreeMap<String, u32>,
+    /// Render lock behind LockMix / LockPlugin / SuspendOutput (see `lock`).
+    pub lock: PluginLock,
     _wavetables: Vec<Vec<f32>>,
     _temp: Vec<f32>,
 }
@@ -93,6 +117,7 @@ impl HostObject {
             sample_rate,
             killed_voices: Vec::new(),
             unhandled: BTreeMap::new(),
+            lock: PluginLock::new(),
             _wavetables: tables,
             _temp: temp,
         }));
@@ -111,6 +136,11 @@ impl HostObject {
     pub fn context(&mut self) -> &mut HostContext {
         unsafe { &mut *self.ctx }
     }
+
+    /// The plugin's render lock (lives as long as the host object).
+    pub fn lock(&self) -> &PluginLock {
+        unsafe { &(*self.ctx).lock }
+    }
 }
 
 impl Drop for HostObject {
@@ -125,20 +155,31 @@ impl Drop for HostObject {
 // Implemented methods
 
 unsafe extern "system" fn dispatcher(this: *mut HostObject, _sender: IntPtr, id: IntPtr, index: IntPtr, value: IntPtr) -> IntPtr {
+    if let Some(hook) = dispatch_hook() {
+        if let Some(r) = hook(id, index, value) {
+            return r;
+        }
+    }
     match id {
         // GetProgPath / GetProjDataPath: data path
         29 | 47 => ctx(this).map_or(0, |c| c.prog_path.as_ptr() as IntPtr),
-        // LocateDataFile: give the name back unchanged
-        14 => value,
-        // GetMixingTime / GetPlaybackTime: zero time
-        36 | 37 => {
+        // LocateDataFile / PackDataFile: give the name back unchanged
+        14 | 28 => value,
+        // GetMixingTime / GetPlaybackTime / GetSelTime: zero time (no selection)
+        36 | 37 | 38 => {
             if let Some(t) = (value as *mut [f64; 2]).as_mut() {
                 *t = [0.0, 0.0];
             }
             0
         }
-        // Harmless notifications
-        3 | 5 | 10 | 13 | 23 | 27 | 30 | 33 | 35 | 48 => 0,
+        // The undocumented context object a plugin requests during construction: hand back the
+        // stand-in (spec plugins/fruity-abi.md, "Host dispatcher ID 71"). Without this the plugin
+        // crashes; with it, effects host and render.
+        71 => crate::stub::context_object(),
+        // Harmless notifications observed from FL 26 plugins (answered 0 with no ill effect).
+        // 2 EditorResized: the host polls the editor's size on its UI tick instead.
+        // 22 OnHint_Direct, 24 GetInstance (none).
+        2 | 3 | 5 | 10 | 13 | 22 | 23 | 24 | 27 | 30 | 33 | 35 | 46 | 48 | 50 | 72 | 86 => 0,
         _ => {
             log_once(format!("host dispatcher id {id} (index {index}, value {value})"));
             if let Some(c) = ctx(this) {
@@ -187,6 +228,20 @@ unsafe extern "system" fn add_wave_mono(_this: *mut HostObject, src: *const f32,
 }
 unsafe extern "system" fn add_wave_stereo(_this: *mut HostObject, src: *const f32, dst: *mut f32, len: i32, l: f32, r: f32, ll: *mut f32, lr: *mut f32) {
     add_wave(true, src, dst, len, l, r, ll, lr);
+}
+
+// LockMix / UnlockMix (no sender), SuspendOutput / ResumeOutput, LockPlugin / UnlockPlugin (sender): this host
+// keeps one lock per plugin instance and holds it around every render call, so a plugin locking from its editor
+// keeps its rendering out until it unlocks.
+unsafe extern "system" fn lock_enter(this: *mut HostObject) {
+    if let Some(c) = ctx(this) {
+        c.lock.enter();
+    }
+}
+unsafe extern "system" fn lock_leave(this: *mut HostObject) {
+    if let Some(c) = ctx(this) {
+        c.lock.leave();
+    }
 }
 
 unsafe extern "system" fn time_f64(_this: *mut HostObject) -> f64 {
@@ -257,8 +312,8 @@ const fn build_vtable() -> [*const c_void; SLOTS] {
     v[4] = noop as *const c_void; // Voice_Release (plugin asks host to release: ignore)
     v[5] = voice_kill as *const c_void;
     v[6] = voice_process_event as *const c_void;
-    v[7] = noop as *const c_void; // LockMix
-    v[8] = noop as *const c_void; // UnlockMix
+    v[7] = lock_enter as *const c_void; // LockMix
+    v[8] = lock_leave as *const c_void; // UnlockMix
     v[9] = noop as *const c_void; // MIDIOut_Delayed
     v[10] = noop as *const c_void; // MIDIOut
     v[11] = add_wave_mono as *const c_void;
@@ -269,11 +324,11 @@ const fn build_vtable() -> [*const c_void; SLOTS] {
     v[19] = noop as *const c_void; // OnControllerChanged
     v[21] = noop as *const c_void; // PlugMsg_Delayed
     v[22] = noop as *const c_void; // PlugMsg_Kill
-    v[28] = noop as *const c_void; // SuspendOutput
-    v[29] = noop as *const c_void; // ResumeOutput
+    v[28] = lock_enter as *const c_void; // SuspendOutput
+    v[29] = lock_leave as *const c_void; // ResumeOutput
     v[31] = compute_lr_vol as *const c_void;
-    v[32] = noop as *const c_void; // LockPlugin
-    v[33] = noop as *const c_void; // UnlockPlugin
+    v[32] = lock_enter as *const c_void; // LockPlugin (sender ignored: one host object per plugin)
+    v[33] = lock_leave as *const c_void; // UnlockPlugin
     v[34] = noop as *const c_void; // LockMix_Shared_Old
     v[35] = noop as *const c_void; // UnlockMix_Shared_Old
     v[36] = get_io_buffer as *const c_void;

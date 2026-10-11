@@ -1,0 +1,20 @@
+[package]
+name = "os-vst3"
+description = "OpenStudio's VST3 plugin host"
+version.workspace = true
+# vst3-sys' COM macros generate 2021-edition code.
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+# Same source as nih-plug's (already in Cargo.lock): GPLv3 bindings of the public VST3 interfaces.
+vst3-sys = { git = "https://github.com/robbert-vdh/vst3-sys.git", branch = "fix/drop-box-from-raw" }
+libloading = "0.8"
+os-engine.workspace = true
+os-host.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_Storage_Xps"] }
+
+[dev-dependencies]
+os-model.workspace = true

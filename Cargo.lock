@@ -1951,6 +1951,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "open-3x-osc"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-engine",
+ "os-hostlink",
+ "os-model",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "serde_json",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "open-parametric-eq-2"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-engine",
+ "os-hostlink",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "serde_json",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "open-sampler"
 version = "0.0.1"
 dependencies = [
@@ -1958,6 +1989,7 @@ dependencies = [
  "os-engine",
  "os-hostlink",
  "os-model",
+ "os-plugkit",
  "os-theme",
  "os-ui",
  "tiny-skia",
@@ -1989,14 +2021,19 @@ name = "os-app"
 version = "0.0.1"
 dependencies = [
  "cpal",
+ "open-3x-osc",
+ "open-parametric-eq-2",
  "open-sampler",
  "os-clap",
  "os-engine",
  "os-flp",
+ "os-host",
  "os-hostlink",
  "os-model",
+ "os-native",
  "os-theme",
  "os-ui",
+ "os-vst3",
  "rfd",
  "serde_json",
  "softbuffer",
@@ -2010,7 +2047,10 @@ version = "0.0.1"
 dependencies = [
  "clap-sys 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "libloading",
+ "open-parametric-eq-2",
+ "open-sampler",
  "os-engine",
+ "os-host",
  "os-model",
 ]
 
@@ -2033,6 +2073,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "os-host"
+version = "0.0.1"
+dependencies = [
+ "os-engine",
+]
+
+[[package]]
 name = "os-hostlink"
 version = "0.0.1"
 dependencies = [
@@ -2048,7 +2095,10 @@ name = "os-native"
 version = "0.0.1"
 dependencies = [
  "libloading",
+ "os-engine",
+ "os-host",
  "thiserror 2.0.21",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2057,6 +2107,7 @@ version = "0.0.1"
 dependencies = [
  "os-engine",
  "os-native",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2066,6 +2117,16 @@ dependencies = [
  "cpal",
  "os-engine",
  "os-flp",
+]
+
+[[package]]
+name = "os-plugkit"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-theme",
+ "os-ui",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2088,6 +2149,18 @@ dependencies = [
  "fontdue",
  "os-theme",
  "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "os-vst3"
+version = "0.0.1"
+dependencies = [
+ "libloading",
+ "os-engine",
+ "os-host",
+ "os-model",
+ "vst3-sys",
  "windows-sys 0.61.2",
 ]
 

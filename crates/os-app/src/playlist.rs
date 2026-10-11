@@ -256,6 +256,12 @@ pub enum Cmd {
     Rack(crate::rack::RCmd),
     /// Mixer menus (spec: ui/mixer.md §6-7).
     Mixer(crate::mixer::MCmd),
+    /// Plugin parameter menus (spec: plugins/plugin-parameters.md §5-6).
+    Param(crate::params::PCmd),
+    /// Plugin presets (spec: plugins/presets.md).
+    Preset(crate::presets::PCmd),
+    /// A Misc tab list entry: rack row, value, new value (spec: ui/plugin-window.md "Misc tab").
+    Misc(usize, crate::misc_page::M, f32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -384,7 +390,8 @@ pub struct PlaylistState {
     pub last_header: Option<(u16, std::time::Instant)>,
     /// Waveform cache by sample path (`None` = could not be loaded).
     pub waves: RefCell<HashMap<String, Option<Rc<Wave>>>>,
-    library: RefCell<os_engine::SampleLibrary>,
+    /// A project is loading and its files decode off the UI thread: waveforms wait (spec: ui/project-loading.md).
+    pub wave_wait: bool,
     undo: Vec<Snapshot>,
 }
 
@@ -409,7 +416,7 @@ impl Default for PlaylistState {
             hover_clip: None,
             last_header: None,
             waves: RefCell::new(HashMap::new()),
-            library: RefCell::new(os_engine::SampleLibrary::new(os_engine::SampleLibrary::default_factory_dir())),
+            wave_wait: false,
             undo: Vec::new(),
         }
     }
@@ -427,7 +434,12 @@ impl PlaylistState {
         if let Some(w) = self.waves.borrow().get(path) {
             return w.clone();
         }
-        let w = self.library.borrow_mut().get(path).map(|s| {
+        if self.wave_wait {
+            return None;
+        }
+        // The decode is shared with the sampler playing the file (decoded once, while the project loaded).
+        let file = crate::plugins::resolve_sample(path);
+        let w = os_engine::sample::load_shared(std::path::Path::new(&file)).ok().map(|s| {
             let per = 64usize;
             let peaks = s
                 .left
@@ -1025,17 +1037,15 @@ pub fn track_after_used(s: &State) -> u16 {
 }
 
 /// Create an automation clip for `target` (§8): a new type-5 channel named `name`, two flat points at `value`,
-/// a clip over the time selection (else one bar from the song position) on a free track.
+/// a clip over the time selection, else from the song position for the current pattern's length (FL observed,
+/// spec: plugins/plugin-parameters.md §5), on a free track.
 pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16 {
     snapshot(s);
+    let name = &unique_channel_name(s, name);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let (a, b) = match s.playlist.range {
         Some((r0, r1)) if r1 > r0 => (r0, r1),
-        _ => {
-            let bar = bar(s);
-            let start = s.playlist.pos - s.playlist.pos % bar;
-            (start, start + bar * 4)
-        }
+        _ => (s.playlist.pos, s.playlist.pos + source_len(s, ClipSource::Pattern(s.pattern)).max(1)),
     };
     let beats = f64::from(b - a) / f64::from(ppq(s));
     s.project.channels.push(Channel {
@@ -1043,6 +1053,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         kind: ChannelKind::Automation,
         name: Some(name.to_string()),
         plugin: None,
+        plugin_state: None,
         color: Some(Rgb::new(0x5a, 0x74, 0x4c)),
         enabled: true,
         volume: 1.0,
@@ -1051,7 +1062,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         mixer_track: 0,
         sample_path: None,
         layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(),
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
     });
     s.project.automations.push(os_flp::project::new_automation(index, tgt, value.clamp(0.0, 1.0), beats));
     let track = free_track(s, track_after_used(s), a, b);
@@ -1063,6 +1074,15 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     s.playlist.picker = PickKind::Automation;
     s.piano.dirty = true;
     index
+}
+
+/// `name`, or `name #2`, `name #3`... when a channel already has it (spec: plugins/plugin-parameters.md §4).
+pub fn unique_channel_name(s: &State, name: &str) -> String {
+    let taken = |n: &str| s.project.channels.iter().any(|c| c.name.as_deref() == Some(n));
+    if !taken(name) {
+        return name.to_string();
+    }
+    (2..).map(|k| format!("{name} #{k}")).find(|n| !taken(n)).unwrap_or_default()
 }
 
 /// Add an audio clip channel for a sample file and place it at `tick` on `track` (§9).
@@ -1077,6 +1097,7 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
         kind: ChannelKind::AudioClip,
         name: Some(name),
         plugin: None,
+        plugin_state: None,
         color: None,
         enabled: true,
         volume: 0.78125,
@@ -1085,7 +1106,7 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
         mixer_track,
         sample_path: Some(path.to_string()),
         layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(),
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
     });
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Audio;
@@ -1203,6 +1224,9 @@ pub fn value_text(s: &State, ch: u16, v: f64) -> String {
         Some(target::Target::ChannelPan(_) | target::Target::MixerPan(_)) => crate::knobs::pan_text(((v - 0.5) * 2.0) as f32),
         Some(target::Target::ChannelPitch(_)) => format!("{:+.0} cents", (v - 0.5) * 400.0),
         Some(target::Target::MixerVolume(_)) => crate::views::mixer::fader_db_text(v),
+        Some(t @ (target::Target::ChannelParam(..) | target::Target::SlotParam(..))) => {
+            crate::params::value_text(s, t, v).unwrap_or_else(|| format!("{:.0}%", v * 100.0))
+        }
         _ => format!("{:.0}%", v * 100.0),
     }
 }
@@ -2024,6 +2048,12 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Browser(b) => return app.browser_cmd(b),
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
+        Cmd::Param(c) => return app.params_cmd(c),
+        Cmd::Preset(c) => return crate::presets::run(app, c),
+        Cmd::Misc(row, m, v) => {
+            crate::misc::set(app, row, m, v);
+            return None;
+        }
         #[cfg(windows)]
         Cmd::PluginDetach(row, on) => {
             app.plugins.set_detached(row, on);
@@ -2053,7 +2083,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let s = &mut app.state;
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::PluginDetach(..) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -2577,7 +2607,7 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::not_yet("Flip with spare state"),
         PItem::head("Parameters"),
         PItem::not_yet("Link all parameters..."),
-        PItem::not_yet("Browse parameters"),
+        PItem::new("Browse parameters", Cmd::Param(crate::params::PCmd::Browse(row))),
         PItem::head("CPU"),
         PItem::not_yet("Allow threaded processing"),
         PItem::not_yet("Smart disable"),

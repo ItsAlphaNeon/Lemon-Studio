@@ -11,6 +11,7 @@ use os_theme::{Color, Palette};
 
 use crate::{Canvas, Font, Glyph, Rect};
 
+pub mod eq;
 pub mod inst;
 pub mod menu;
 

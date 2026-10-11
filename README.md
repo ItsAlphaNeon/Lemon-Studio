@@ -54,7 +54,7 @@ losslessly, so existing projects open, play and save without losing data it does
 - Mixer graph with sends, sidechain routing and measured gain, pan and pitch laws
 - Built-in effects: parametric EQ and limiter
 - Channel envelopes, note repeat and per-pattern control lanes
-- Automation clips for channel and mixer parameters
+- Automation clips for channel, mixer and plugin parameters (sample-accurate plugin parameter events)
 - Live edits reach playback instantly, without clicks
 - Offline rendering and low-latency WASAPI output
 
@@ -66,8 +66,9 @@ losslessly, so existing projects open, play and save without losing data it does
 - Channel rack: step sequencer, mini piano rolls, graph editor, per-channel loops, filter groups, fill tools, swing, clone / move / delete channels
 - Piano roll with full tool set, velocity and event lanes
 - Mixer: track select / rename / colour, mute and solo, polarity and channel swap, click-to-route sends with send knobs
-  and sidechain, per-track meters, add / insert / move / delete tracks, effect slots hosting CLAP effects (bypass, dry/wet)
-- Browser with drag and drop, plugin picker
+  and sidechain, per-track meters, add / insert / move / delete tracks, effect slots hosting CLAP and VST3 effects (bypass, dry/wet)
+- Browser with drag and drop, plugin picker; "Browse parameters" lists a plugin's parameters to drag onto the playlist
+- "Create automation clip" from knobs, plugin knob menus and the last tweaked parameter
 - Floating, resizable, stackable windows
 - Theme engine with `.flstheme` import
 - Damage-tracked CPU rendering for fast repaints
@@ -83,16 +84,26 @@ losslessly, so existing projects open, play and save without losing data it does
 - Typed project model for patterns, channels, mixer, playlist and automation
 - New projects saved in a form other compatible software opens
 - Channel rack settings saved: swing, filter groups, locked and zipped rows, pattern length, loop lengths, and added, cloned, moved or deleted channels
+- Plugin channels and mixer effects saved with their state: CLAP and VST3 plugins as wrapped plugins that are hosted
+  again on opening, native plugins in their own format
+- Mixer saved: effects added, removed or moved between slots, slot on/off and mix levels, added mixer tracks
 - Round-trip test suite over a corpus of real-world projects
 
 </td>
 <td width="50%" valign="top">
 
 ### 🔌 Plugins
-- [CLAP](https://cleveraudio.org/) instrument hosting with native editor windows
+- [CLAP](https://cleveraudio.org/) and VST3 hosting: instruments and mixer effects, plugin editors inside
+  OpenStudio's plugin window, plugin state (VST3 in the `.vstpreset` layout), parameters and automation, song
+  tempo and position for tempo-synced plugins, portamento glides (per-note tuning)
 - **Open Sampler**: OpenStudio's sampler, also built as a standalone
   VST3 and CLAP plugin for use in other hosts
+- **Open Parametric EQ 2**: 7-band EQ (VST3 + CLAP) with a graph editor, band tokens,
+  spectrum monitor and A/B compare; it plays and saves the EQ slots of `.flp` projects
 - Host link protocol that lets OpenStudio's own plugins integrate with the host's window frame
+- Experimental host for FL native effect plugins (opt-in): the user's installed native effects
+  appear in the picker and process in mixer slots
+- Presets for every hosted plugin: list, step with ◀ ▶ and save from the plugin window's title bar
 
 </td>
 </tr>
@@ -122,7 +133,7 @@ cargo run -p os-app --release -- path/to/project.flp
 
 ### Plugins
 
-Build Open Sampler as VST3 and CLAP bundles (written to `target/bundled/`):
+Build Open Sampler and Open Parametric EQ 2 as VST3 and CLAP bundles (written to `target/bundled/`):
 
 ```bash
 cargo run -p bundle-plugins
@@ -160,10 +171,14 @@ OpenStudio is a Cargo workspace of focused crates:
 | [`os-theme`](crates/os-theme) | Colour palette, theme files and the HSL adjustment model |
 | [`os-ui`](crates/os-ui) | CPU canvas, text rendering and the shared widget kit |
 | [`os-app`](crates/os-app) | The `openstudio` application: windows, editors, transport |
+| [`os-host`](crates/os-host) | Format-neutral plugin hosting layer (CLAP, VST3, native) |
 | [`os-clap`](crates/os-clap) | CLAP plugin host |
+| [`os-vst3`](crates/os-vst3) | VST3 plugin host |
 | [`os-hostlink`](crates/os-hostlink) | Host link protocol between OpenStudio and its own plugins |
 | [`os-native`](crates/os-native) | Experimental host for plugins built on a third-party native plugin SDK |
+| [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of OpenStudio's own plugins |
 | [`open-sampler`](plugins/open-sampler) | Open Sampler instrument (VST3 + CLAP) |
+| [`open-parametric-eq-2`](plugins/open-parametric-eq-2) | Open Parametric EQ 2 effect (VST3 + CLAP) |
 
 ## Roadmap
 
@@ -171,8 +186,10 @@ OpenStudio is a Cargo workspace of focused crates:
 - [x] Audio engine with mixer, routing and effects
 - [x] Playlist, channel rack, piano roll, mixer and browser
 - [x] CLAP hosting (instruments and mixer effects) and the Open Sampler plugin
+- [x] Open Parametric EQ 2 plugin, built in for mixer slots
 - [x] Theme engine and theme import
-- [ ] VST3 hosting
+- [x] VST3 hosting (instruments, effects, editors, state, automation)
+- [x] Experimental native effect hosting (opt-in)
 - [ ] ASIO audio output
 - [ ] Saving plugin channels and full mixer state to project files
 - [ ] More built-in instruments and effects
@@ -192,7 +209,8 @@ in this repository are original or come from the openly licensed projects listed
 |---|---|---|
 | [Cuprum](https://fonts.google.com/specimen/Cuprum) by Jovanny Lemonad | Interface typeface | [SIL Open Font License 1.1](crates/os-ui/fonts/Cuprum/OFL.txt) |
 | [Tabler Icons](https://tabler.io/icons) | Interface icons | [MIT](crates/os-ui/icons/TABLER-LICENSE.txt) |
-| [NIH-plug](https://github.com/robbert-vdh/nih-plug) | Plugin framework for Open Sampler | ISC |
+| [NIH-plug](https://github.com/robbert-vdh/nih-plug) | Plugin framework for OpenStudio's plugins | ISC |
+| [vst3-sys](https://github.com/RustAudio/vst3-sys) | VST3 interface bindings (plugin hosting and OpenStudio's plugins) | GPLv3 |
 | Rust crates listed in `Cargo.lock` | Various | Their respective licenses |
 
 ## License

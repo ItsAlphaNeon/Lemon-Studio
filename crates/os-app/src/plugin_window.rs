@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::f32::consts::PI;
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
 
 use os_hostlink::PageIcon;
@@ -19,7 +20,8 @@ use os_ui::tabler as tb;
 use os_ui::{Canvas, Color, Font, Rect};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, InvalidateRect, ScreenToClient, SetWindowRgn, RGN_AND, RGN_DIFF, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
+    BeginPaint, ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, GetWindowRgn, InvalidateRect, RedrawWindow, ScreenToClient, SetWindowRgn, RDW_ALLCHILDREN, RDW_INVALIDATE,
+    RDW_UPDATENOW, RGN_AND, RGN_COPY, RGN_DIFF, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -45,6 +47,8 @@ pub enum LinkMsg {
     Changed,
     /// Preview note from the plugin's keyboard: key, velocity, on.
     Note(u8, u8, bool),
+    /// "Create automation clip" on the plugin parameter at this list position.
+    Automate(usize),
 }
 
 /// (editor area window, message) since the last `take_link`.
@@ -55,6 +59,15 @@ pub fn take_link() -> Vec<(isize, LinkMsg)> {
     LINK.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
 }
 static KEY_HOOK: Once = Once::new();
+
+/// A docked window moved and the main window repainted what it uncovered.
+static EXPOSED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a docked plugin window uncovered part of the main window since the last call: the next present must show
+/// the whole canvas, not only the app's own damage (UI thread).
+pub fn take_exposed() -> bool {
+    EXPOSED.swap(false, Ordering::Relaxed)
+}
 
 /// Keys seen since the last call (UI thread).
 pub fn take_keys() -> Vec<KeyMsg> {
@@ -171,6 +184,8 @@ pub struct ChannelInfo {
     pub range: i32,
     /// Insert number, 0 = master.
     pub track: u16,
+    /// The channel's Misc tab values (`None`: no Misc tab, e.g. mixer effects).
+    pub misc: Option<crate::misc_page::MiscVals>,
 }
 
 /// What the user did in the frame, for the app to apply to the channel.
@@ -187,6 +202,16 @@ pub enum FrameEvent {
     Raise,
     /// The menu arrow was clicked: the app opens the window menu at this screen point.
     Menu(i32, i32),
+    /// The Presets box was clicked: the app opens the preset list at this screen point (spec: plugins/presets.md).
+    Presets(i32, i32),
+    /// The Presets box arrows (or the wheel over the box): next (+1) / previous (-1) preset.
+    PresetStep(i32),
+    /// A Misc tab value changed (spec: ui/plugin-window.md "Misc tab").
+    Misc(crate::misc_page::M, f32),
+    /// A Misc tab list (chord list, number box values): the app opens it at this screen point.
+    MiscMenu(crate::misc_page::M, i32, i32),
+    /// A Misc tab keyboard key: key, velocity, pressed.
+    Note(u8, u8, bool),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -207,6 +232,10 @@ struct State {
     misc: bool,
     /// The plugin's hint line (parameter under the mouse), shown in the title bar.
     hint: String,
+    /// The loaded preset's name, shown in the Presets box ("Presets" without one).
+    preset: Option<String>,
+    /// Misc tab page state (tracking page, keyboard scroll, drag, hover).
+    misc_ui: crate::misc_page::MiscUi,
     /// Plugin editor size (logical px).
     editor: (f32, f32),
     events: Vec<FrameEvent>,
@@ -216,6 +245,11 @@ struct State {
     moving: Option<(i32, i32, i32, i32)>,
     /// A top-level window (menu arrow > Detached) instead of a child of the main window.
     detached: bool,
+    /// Docked: the workspace and the rects covering it (the app's windows and popups above this one), in the main
+    /// window's client area (physical px). Kept so a move re-clips at once instead of at the app's next tick.
+    clip: Option<([i32; 4], Vec<[i32; 4]>)>,
+    /// The clip last applied (window rect, workspace, covering rects), so unchanged clips are not reset.
+    clip_key: Option<Vec<i32>>,
 }
 
 impl State {
@@ -259,7 +293,7 @@ enum Part {
     Gear,
     /// The menu arrow (the window menu, an app popup).
     Menu,
-    /// The Presets box and its previous / next arrows (no presets yet: inert).
+    /// The Presets box and its previous / next arrows (spec: plugins/presets.md).
     Presets,
     PresetPrev,
     PresetNext,
@@ -355,7 +389,10 @@ fn paint(c: &mut Canvas, st: &State) {
     let a = Rect::new(BORDER, ay, w - 2.0 * BORDER, h - ay - BORDER);
     c.fill_rect(a, c_body());
     if st.misc {
-        c.text_center(Font::new(16), a, c_grey(), "Miscellaneous functions: not available yet");
+        match &st.info.misc {
+            Some(v) => crate::misc_page::paint(c, &os_theme::current(), a.x, a.y, v, &st.misc_ui),
+            None => c.text_center(Font::new(16), a, c_grey(), "No channel settings here"),
+        }
     }
 }
 
@@ -380,15 +417,23 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     let troom = (p.x - 8.0 - tx).max(0.0);
     c.text_clip(f, tx, ty, troom, c_grey(), &target);
     let tw = c.text_width(f, &target).min(troom);
-    if !st.hint.is_empty() {
+    let hint = if st.misc { &st.misc_ui.hint } else { &st.hint };
+    if !hint.is_empty() {
         let hx = tx + tw + 14.0;
         let hf = Font::new(12);
         let hy = (19.0 - c.ascent(hf)).round();
-        c.text_clip(hf, hx, hy, (p.x - 8.0 - hx).max(0.0), c_caption(), &st.hint);
+        // A tab splits the hint: the part after it sits right-aligned before the Presets box (spec: plugins/host-link.md).
+        let (left, right) = hint.split_once('\t').unwrap_or((hint, ""));
+        let end = p.x - 8.0;
+        let rw = if right.is_empty() { 0.0 } else { c.text_width(hf, right).min((end - hx).max(0.0)) };
+        if rw > 0.0 {
+            c.text_clip(hf, end - rw, hy, rw, c_caption(), right);
+        }
+        c.text_clip(hf, hx, hy, (end - rw - 10.0 - hx).max(0.0), c_caption(), left);
     }
-    // Presets box (presets are not implemented yet: drawn, inert).
+    // Presets box: the loaded preset's name, or "Presets" (spec: plugins/presets.md).
     c.fill_rrect(p, 3.0, c_presets());
-    c.text(f, p.x + 9.0, ty, c_text(), "Presets");
+    c.text_clip(f, p.x + 9.0, ty, p.w - 9.0 - 31.0, c_text(), st.preset.as_deref().unwrap_or("Presets"));
     icon_at(c, &tb::CARET_LEFT, p.right() - 22.2, 15.5, 18.9, c_icon());
     icon_at(c, &tb::CARET_RIGHT, p.right() - 7.8, 15.5, 18.9, c_icon());
     c.icon_stroke(&tb::MINUS, Rect::new(w - 39.5, 7.0, 12.0, 12.0), c_icon(), 2.0);
@@ -475,8 +520,6 @@ pub struct FrameWindow {
     hwnd: HWND,
     area: HWND,
     state: Rc<RefCell<State>>,
-    /// The last clip applied while docked (window position, workspace, covering rects), so unchanged clips are not reset.
-    clip: RefCell<Option<Vec<i32>>>,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -500,11 +543,15 @@ impl FrameWindow {
             page: 0,
             misc: false,
             hint: String::new(),
+            preset: None,
+            misc_ui: Default::default(),
             editor,
             events: Vec::new(),
             drag: None,
             moving: None,
             detached,
+            clip: None,
+            clip_key: None,
         }));
         let (w, h) = state.borrow().size();
         let px = |v: f32| (v * scale).round() as i32;
@@ -569,7 +616,7 @@ impl FrameWindow {
             if let Some(w) = win_of(hwnd) {
                 w.area = area;
             }
-            Ok(FrameWindow { hwnd, area, state, clip: RefCell::new(None) })
+            Ok(FrameWindow { hwnd, area, state })
         }
     }
 
@@ -583,8 +630,12 @@ impl FrameWindow {
         if self.state.borrow().detached == on {
             return;
         }
-        self.state.borrow_mut().detached = on;
-        *self.clip.borrow_mut() = None;
+        {
+            let mut st = self.state.borrow_mut();
+            st.detached = on;
+            st.clip = None;
+            st.clip_key = None;
+        }
         unsafe {
             let mut r: RECT = std::mem::zeroed();
             GetWindowRect(self.hwnd, &mut r);
@@ -606,53 +657,14 @@ impl FrameWindow {
         self.raise();
     }
 
-    /// The docked window's rect in its parent's client area (physical px).
-    pub fn docked_rect(&self) -> Option<[i32; 4]> {
-        if self.detached() {
-            return None;
-        }
-        unsafe {
-            let mut r: RECT = std::mem::zeroed();
-            GetWindowRect(self.hwnd, &mut r);
-            let parent = GetParent(self.hwnd);
-            let (mut a, mut b) = (POINT { x: r.left, y: r.top }, POINT { x: r.right, y: r.bottom });
-            ScreenToClient(parent, &mut a);
-            ScreenToClient(parent, &mut b);
-            Some([a.x, a.y, b.x, b.y])
-        }
-    }
-
     /// Clips a docked window to `work` minus the `covers` (the app's windows and popups above it), all in the parent's
-    /// client area (physical px).
+    /// client area (physical px). Moving the window by its title bar re-clips with the same rects.
     pub fn clip_to(&self, work: [i32; 4], covers: &[[i32; 4]]) {
-        let Some(me) = self.docked_rect() else { return };
-        let mut key: Vec<i32> = me.into_iter().chain(work).collect();
-        // Only what overlaps the window matters.
-        let hit = |c: &[i32; 4]| c[0] < me[2] && c[2] > me[0] && c[1] < me[3] && c[3] > me[1];
-        let covers: Vec<[i32; 4]> = covers.iter().copied().filter(hit).collect();
-        key.extend(covers.iter().flatten());
-        if self.clip.borrow().as_ref() == Some(&key) {
+        if self.detached() {
             return;
         }
-        *self.clip.borrow_mut() = Some(key);
-        let inside = work[0] <= me[0] && work[1] <= me[1] && work[2] >= me[2] && work[3] >= me[3];
-        unsafe {
-            if inside && covers.is_empty() {
-                SetWindowRgn(self.hwnd, std::ptr::null_mut(), 1);
-                return;
-            }
-            let (ox, oy) = (me[0], me[1]);
-            let rgn = CreateRectRgn(0, 0, me[2] - ox, me[3] - oy);
-            let w = CreateRectRgn(work[0] - ox, work[1] - oy, work[2] - ox, work[3] - oy);
-            CombineRgn(rgn, rgn, w, RGN_AND);
-            DeleteObject(w);
-            for c in &covers {
-                let r = CreateRectRgn(c[0] - ox, c[1] - oy, c[2] - ox, c[3] - oy);
-                CombineRgn(rgn, rgn, r, RGN_DIFF);
-                DeleteObject(r);
-            }
-            SetWindowRgn(self.hwnd, rgn, 1); // the system owns `rgn` now
-        }
+        self.state.borrow_mut().clip = Some((work, covers.to_vec()));
+        unsafe { apply_clip(self.hwnd, &self.state) };
     }
 
     /// The native frame window (drops find their plugin by it; tests drive and capture it).
@@ -663,12 +675,6 @@ impl FrameWindow {
     /// The child window the plugin's editor goes into.
     pub fn area(&self) -> *mut c_void {
         self.area
-    }
-
-    pub fn show(&self) {
-        unsafe {
-            ShowWindow(self.hwnd, SW_SHOWNORMAL);
-        }
     }
 
     pub fn raise(&self) {
@@ -683,7 +689,7 @@ impl FrameWindow {
 
     pub fn set_info(&self, info: ChannelInfo) {
         let mut st = self.state.borrow_mut();
-        if st.info != info && st.drag.is_none() {
+        if st.info != info && st.drag.is_none() && st.misc_ui.drag.is_none() {
             st.info = info;
             drop(st);
             unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
@@ -716,6 +722,16 @@ impl FrameWindow {
         let mut st = self.state.borrow_mut();
         if st.hint != hint {
             st.hint = hint;
+            drop(st);
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
+    /// The loaded preset's name for the Presets box.
+    pub fn set_preset(&self, name: Option<String>) {
+        let mut st = self.state.borrow_mut();
+        if st.preset != name {
+            st.preset = name;
             drop(st);
             unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
         }
@@ -755,6 +771,96 @@ fn frame_style(detached: bool) -> u32 {
 }
 
 
+/// Puts `parent`'s docked windows `hwnds` (bottom to top) in that native order when they are not already.
+pub fn stack(parent: isize, hwnds: &[isize]) {
+    if hwnds.len() < 2 {
+        return;
+    }
+    unsafe {
+        // The children's current order, bottom to top.
+        let mut now = Vec::new();
+        let mut c = GetWindow(parent as HWND, GW_CHILD);
+        while !c.is_null() {
+            if hwnds.contains(&(c as isize)) {
+                now.push(c as isize);
+            }
+            c = GetWindow(c, GW_HWNDNEXT);
+        }
+        now.reverse();
+        if now == hwnds {
+            return;
+        }
+        for &h in hwnds {
+            SetWindowPos(h as HWND, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+}
+
+/// A child window's rect in its parent's client area (physical px).
+unsafe fn parent_rect(hwnd: HWND) -> [i32; 4] {
+    unsafe {
+        let mut r: RECT = std::mem::zeroed();
+        GetWindowRect(hwnd, &mut r);
+        let parent = GetParent(hwnd);
+        let (mut a, mut b) = (POINT { x: r.left, y: r.top }, POINT { x: r.right, y: r.bottom });
+        ScreenToClient(parent, &mut a);
+        ScreenToClient(parent, &mut b);
+        [a.x, a.y, b.x, b.y]
+    }
+}
+
+/// Sets a docked window's region for its current position from `State::clip`. The parts that come into view are
+/// repainted, the plugin's editor included: the system redraws only the frame itself, and an editor left alone keeps
+/// showing whatever was seen through the old region.
+unsafe fn apply_clip(hwnd: HWND, state: &RefCell<State>) {
+    let (me, work, covers) = {
+        let mut st = state.borrow_mut();
+        let Some((work, covers)) = st.clip.as_ref() else { return };
+        let me = unsafe { parent_rect(hwnd) };
+        // Only what overlaps the window matters.
+        let hit = |c: &[i32; 4]| c[0] < me[2] && c[2] > me[0] && c[1] < me[3] && c[3] > me[1];
+        let covers: Vec<[i32; 4]> = covers.iter().copied().filter(hit).collect();
+        let work = *work;
+        let key: Vec<i32> = me.into_iter().chain(work).chain(covers.iter().flatten().copied()).collect();
+        if st.clip_key.as_ref() == Some(&key) {
+            return;
+        }
+        st.clip_key = Some(key);
+        (me, work, covers)
+    };
+    let inside = work[0] <= me[0] && work[1] <= me[1] && work[2] >= me[2] && work[3] >= me[3];
+    let (ox, oy, w, h) = (me[0], me[1], me[2] - me[0], me[3] - me[1]);
+    unsafe {
+        let whole = CreateRectRgn(0, 0, w, h);
+        let rgn = if inside && covers.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            let rgn = CreateRectRgn(0, 0, w, h);
+            let r = CreateRectRgn(work[0] - ox, work[1] - oy, work[2] - ox, work[3] - oy);
+            CombineRgn(rgn, rgn, r, RGN_AND);
+            DeleteObject(r);
+            for c in &covers {
+                let r = CreateRectRgn(c[0] - ox, c[1] - oy, c[2] - ox, c[3] - oy);
+                CombineRgn(rgn, rgn, r, RGN_DIFF);
+                DeleteObject(r);
+            }
+            rgn
+        };
+        // What the new region shows that the old one hid (no region = the whole window).
+        let old = CreateRectRgn(0, 0, 0, 0);
+        if GetWindowRgn(hwnd, old) == 0 {
+            CombineRgn(old, whole, std::ptr::null_mut(), RGN_COPY);
+        }
+        let gained = CreateRectRgn(0, 0, 0, 0);
+        CombineRgn(gained, if rgn.is_null() { whole } else { rgn }, old, RGN_DIFF);
+        SetWindowRgn(hwnd, rgn, 1); // the system owns `rgn` now
+        RedrawWindow(hwnd, std::ptr::null(), gained, RDW_INVALIDATE | RDW_ALLCHILDREN);
+        for r in [whole, old, gained] {
+            DeleteObject(r);
+        }
+    }
+}
+
 unsafe fn win_of(hwnd: HWND) -> Option<&'static mut Win> {
     let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut Win;
     if p.is_null() { None } else { Some(unsafe { &mut *p }) }
@@ -791,6 +897,7 @@ unsafe extern "system" fn area_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                     let (k, v, on) = os_hostlink::unpack_note(lp);
                     LinkMsg::Note(k, v, on)
                 }
+                Some(os_hostlink::Cmd::Automate) => LinkMsg::Automate(lp.max(0) as usize),
                 _ => return 0,
             };
             if let Ok(mut q) = LINK.lock() {
@@ -883,6 +990,23 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                     os_clap::wake();
                     return 0;
                 }
+                if part == Some(Part::Presets) {
+                    // The preset list is an app popup too, under the box's left edge.
+                    let b = presets_rect(w.state.borrow().size().0);
+                    let mut p = POINT { x: (b.x * w.scale) as i32, y: (b.bottom() * w.scale) as i32 };
+                    ClientToScreen(hwnd, &mut p);
+                    w.state.borrow_mut().events.push(FrameEvent::Presets(p.x, p.y));
+                    os_clap::wake();
+                    return 0;
+                }
+                if let Some(d) = match part { Some(Part::PresetPrev) => Some(-1), Some(Part::PresetNext) => Some(1), _ => None } {
+                    w.state.borrow_mut().events.push(FrameEvent::PresetStep(d));
+                    os_clap::wake();
+                    return 0;
+                }
+                if part.is_none() && misc_button(hwnd, w, x, y, Btn::Left) {
+                    return 0;
+                }
                 let mut relayout = false;
                 {
                     let mut st = w.state.borrow_mut();
@@ -939,9 +1063,17 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 InvalidateRect(hwnd, std::ptr::null(), 0);
                 0
             }
+            WM_RBUTTONDOWN => {
+                let (x, y) = client_point(hwnd, lp, w.scale, false);
+                misc_button(hwnd, w, x, y, Btn::Right);
+                0
+            }
             WM_MBUTTONDOWN => {
                 // Middle click resets a knob (spec: ui/knobs.md, owner decision).
                 let (x, y) = client_point(hwnd, lp, w.scale, false);
+                if misc_button(hwnd, w, x, y, Btn::Middle) {
+                    return 0;
+                }
                 let part = part_at(&w.state.borrow(), x, y);
                 if let Some(Part::Knob(i)) = part {
                     let k = KNOBS[usize::from(i)];
@@ -952,7 +1084,10 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 0
             }
             WM_MOUSEMOVE => {
-                let (_, y) = client_point(hwnd, lp, w.scale, false);
+                let (x, y) = client_point(hwnd, lp, w.scale, false);
+                if misc_move(hwnd, w, x, y) {
+                    return 0;
+                }
                 let mut st = w.state.borrow_mut();
                 if let Some((cx, cy, wx, wy)) = st.moving {
                     drop(st);
@@ -960,10 +1095,19 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                     GetCursorPos(&mut c);
                     // Screen position; a docked window is placed in its parent's client area.
                     let mut p = POINT { x: wx + c.x - cx, y: wy + c.y - cy };
-                    if GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0 {
+                    let docked = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0;
+                    if docked {
                         ScreenToClient(GetParent(hwnd), &mut p);
                     }
                     SetWindowPos(hwnd, std::ptr::null_mut(), p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    if docked {
+                        // Paint what the move uncovered (the main window, other docked plugin windows and their
+                        // editors) before the next move. Left to ordinary WM_PAINTs, which wait behind the mouse
+                        // moves, the windows below lag behind and show trails of this one while it is dragged.
+                        apply_clip(hwnd, &w.state);
+                        EXPOSED.store(true, Ordering::Relaxed);
+                        RedrawWindow(GetParent(hwnd), std::ptr::null(), std::ptr::null_mut(), RDW_UPDATENOW | RDW_ALLCHILDREN);
+                    }
                     return 0;
                 }
                 if let Some((k, y0, v0)) = st.drag {
@@ -978,18 +1122,29 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 let mut st = w.state.borrow_mut();
                 st.drag = None;
                 st.moving = None;
+                misc_release(&mut st);
                 0
             }
             WM_CAPTURECHANGED => {
                 let mut st = w.state.borrow_mut();
                 st.drag = None;
                 st.moving = None;
+                misc_release(&mut st);
                 0
             }
             WM_MOUSEWHEEL => {
                 let (x, y) = client_point(hwnd, lp, w.scale, true);
                 let notches = ((wp >> 16) & 0xffff) as u16 as i16 as f32 / 120.0;
                 let part = part_at(&w.state.borrow(), x, y);
+                if part.is_none() && misc_wheel(hwnd, w, x, y, notches) {
+                    return 0;
+                }
+                if matches!(part, Some(Part::Presets | Part::PresetPrev | Part::PresetNext)) && notches != 0.0 {
+                    // Wheel down = next preset.
+                    w.state.borrow_mut().events.push(FrameEvent::PresetStep(if notches < 0.0 { 1 } else { -1 }));
+                    os_clap::wake();
+                    return 0;
+                }
                 if let Some(Part::Knob(i)) = part {
                     let k = KNOBS[usize::from(i)];
                     let mut st = w.state.borrow_mut();
@@ -1007,6 +1162,169 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Misc tab input (spec: ui/plugin-window.md "Misc tab"; the page itself is `misc_page`).
+
+#[derive(Clone, Copy, PartialEq)]
+enum Btn {
+    Left,
+    Right,
+    Middle,
+}
+
+/// The Misc page hit under frame point (x, y), when the Misc tab shows.
+fn misc_hit(st: &State, x: f32, y: f32) -> Option<crate::misc_page::Hit> {
+    if !st.misc || st.info.misc.is_none() {
+        return None;
+    }
+    let (ax, ay) = (BORDER, st.area_y());
+    crate::misc_page::hit(&st.misc_ui, x - ax, y - ay)
+}
+
+/// Sets a Misc value on the page at once and tells the app.
+fn misc_set(st: &mut State, m: crate::misc_page::M, v: f32) {
+    if let Some(vals) = st.info.misc.as_mut() {
+        vals.set(m, v);
+    }
+    st.events.push(FrameEvent::Misc(m, v));
+    misc_hint(st, Some(crate::misc_page::Hit::Value(m)));
+}
+
+fn misc_hint(st: &mut State, h: Option<crate::misc_page::Hit>) {
+    use crate::misc_page::{note_name, value_text, Hit, M};
+    st.misc_ui.hint = match (h, &st.info.misc) {
+        (Some(Hit::Value(m) | Hit::Step(m, _)), Some(v)) => format!("{}: {}", m.label(), value_text(m, v.get(m))),
+        (Some(Hit::ArpDir(i)), _) => format!("Arpeggio direction: {}", value_text(M::ArpDir, f32::from(i))),
+        (Some(Hit::Key(k)), _) => format!("{} (right click sets the root note)", note_name(i32::from(k))),
+        (Some(Hit::CutSelf), _) => "Cut itself: a new note cuts the channel's playing notes".into(),
+        (Some(Hit::Reset), _) => "Reset the root note and fine tuning".into(),
+        (Some(Hit::TrackTab(k)), _) => (if k { "Key tracking" } else { "Velocity tracking" }).into(),
+        _ => String::new(),
+    };
+}
+
+/// A button press over the Misc page; returns whether the page took it.
+unsafe fn misc_button(hwnd: HWND, w: &mut Win, x: f32, y: f32, b: Btn) -> bool {
+    use crate::misc_page::{self as mp, Hit, M};
+    let Some(h) = misc_hit(&w.state.borrow(), x, y) else { return false };
+    let scale = w.scale;
+    let mut st = w.state.borrow_mut();
+    let Some(vals) = st.info.misc else { return false };
+    let screen = || {
+        let mut p = POINT { x: (x * scale) as i32, y: (y * scale) as i32 };
+        unsafe { ClientToScreen(hwnd, &mut p) };
+        (p.x, p.y)
+    };
+    match (b, h) {
+        (Btn::Middle, Hit::Value(m)) => misc_set(&mut st, m, mp::default_of(m)),
+        (Btn::Right, Hit::Value(m) | Hit::Step(m, _)) if mp::list_on_right(m) => {
+            let (sx, sy) = screen();
+            st.events.push(FrameEvent::MiscMenu(m, sx, sy));
+        }
+        (Btn::Right, Hit::Key(k)) => misc_set(&mut st, M::Root, f32::from(k)),
+        (Btn::Left, Hit::Value(m)) if mp::list_on_click(m) => {
+            let (sx, sy) = screen();
+            st.events.push(FrameEvent::MiscMenu(m, sx, sy));
+        }
+        (Btn::Left, Hit::Value(m)) if mp::draggable(m) => {
+            st.misc_ui.drag = Some((m, mp::drag_start(m, x - BORDER, y - st.area_y()), vals.get(m)));
+            unsafe { SetCapture(hwnd) };
+        }
+        (Btn::Left, Hit::Value(m)) => {
+            if let Some(v) = mp::click_value(m, vals.get(m)) {
+                misc_set(&mut st, m, v);
+            }
+        }
+        (Btn::Left, Hit::Step(m, d)) => {
+            let (lo, hi) = mp::range_of(m);
+            misc_set(&mut st, m, (vals.get(m) + d as f32).clamp(lo, hi));
+        }
+        (Btn::Left, Hit::ArpDir(i)) => misc_set(&mut st, M::ArpDir, f32::from(i)),
+        (Btn::Left, Hit::TrackTab(k)) => st.misc_ui.track_key = k,
+        (Btn::Left, Hit::CutSelf) => {
+            // The channel cuts itself: cut and cut-by the same group (spec: ui/plugin-window.md "Misc tab").
+            let g = if vals.get(M::Cut) >= 1.0 { vals.get(M::Cut) } else { 1.0 };
+            misc_set(&mut st, M::Cut, g);
+            misc_set(&mut st, M::CutBy, g);
+        }
+        (Btn::Left, Hit::Reset) => {
+            misc_set(&mut st, M::Root, 60.0);
+            misc_set(&mut st, M::Fine, 0.0);
+        }
+        (Btn::Left, Hit::Key(k)) => {
+            st.misc_ui.held = Some(k);
+            st.events.push(FrameEvent::Note(k, 100, true));
+            unsafe { SetCapture(hwnd) };
+        }
+        _ => {}
+    }
+    drop(st);
+    os_clap::wake();
+    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+    true
+}
+
+/// Mouse move over / dragging on the Misc page; returns whether the page took it (a drag).
+unsafe fn misc_move(hwnd: HWND, w: &mut Win, x: f32, y: f32) -> bool {
+    let mut st = w.state.borrow_mut();
+    if !st.misc {
+        return false;
+    }
+    if st.misc_ui.drag.is_some() {
+        let fine = unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
+        let ay = st.area_y();
+        if let Some((m, v)) = crate::misc_page::drag_value(&st.misc_ui, x - BORDER, y - ay, fine) {
+            if st.info.misc.is_some_and(|vals| vals.get(m) != v) {
+                misc_set(&mut st, m, v);
+                drop(st);
+                os_clap::wake();
+                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+            }
+        }
+        return true;
+    }
+    if st.drag.is_some() || st.moving.is_some() {
+        return false;
+    }
+    let h = misc_hit(&st, x, y);
+    if h != st.misc_ui.hover {
+        st.misc_ui.hover = h;
+        misc_hint(&mut st, h);
+        drop(st);
+        unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+    }
+    false
+}
+
+fn misc_release(st: &mut State) {
+    st.misc_ui.drag = None;
+    if let Some(k) = st.misc_ui.held.take() {
+        st.events.push(FrameEvent::Note(k, 0, false));
+        os_clap::wake();
+    }
+}
+
+/// The wheel over the Misc page; returns whether the page took it.
+unsafe fn misc_wheel(hwnd: HWND, w: &mut Win, x: f32, y: f32, notches: f32) -> bool {
+    use crate::misc_page::{self as mp, Hit};
+    let Some(h) = misc_hit(&w.state.borrow(), x, y) else { return false };
+    let mut st = w.state.borrow_mut();
+    match h {
+        Hit::Value(m) | Hit::Step(m, _) => {
+            let Some(v) = st.info.misc.map(|vals| vals.get(m)) else { return false };
+            if let Some(nv) = mp::wheel_value(m, v, notches) {
+                misc_set(&mut st, m, nv);
+                os_clap::wake();
+            }
+        }
+        Hit::Key(_) | Hit::Keyboard => mp::scroll_keyboard(&mut st.misc_ui, notches),
+        _ => {}
+    }
+    drop(st);
+    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+    true
 }
 
 /// Screen position for a new plugin window: right of the owner's left edge, below its toolbar (physical px).
@@ -1157,8 +1475,8 @@ mod tests {
     use super::*;
 
     fn state(strip: bool, target: &str) -> State {
-        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0 };
-        State { info, strip, pages: vec![PageIcon::Plugin], page: 0, misc: false, hint: String::new(), editor: (480.0, 270.0), events: Vec::new(), drag: None, moving: None, detached: false }
+        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, misc: Some(Default::default()) };
+        State { info, strip, pages: vec![PageIcon::Plugin], page: 0, misc: false, hint: String::new(), preset: None, misc_ui: Default::default(), editor: (480.0, 270.0), events: Vec::new(), drag: None, moving: None, detached: false, clip: None, clip_key: None }
     }
 
     #[test]

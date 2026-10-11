@@ -11,9 +11,13 @@ use os_model::{ChannelKind, ClipSource, ControlPoint, Project};
 
 use crate::effects::Effect;
 use crate::envelope;
-use crate::instrument::{SharedInstrument, Slot};
+use crate::instrument::{SharedInstrument, Slot, TransportInfo};
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
+
+mod notes;
+mod param_auto;
+pub use param_auto::PARAM_STEP;
 
 /// What to play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +81,8 @@ struct ChannelState {
     /// A generator plugin channel; it sounds only once an instrument is attached (`Engine::set_instrument`).
     plugin: bool,
     instrument: Slot,
+    /// Polyphony, mono, portamento and cut group rules for the instrument's notes (spec: audio/channel-voices.md).
+    rules: notes::Rules,
 }
 
 /// Glide of the channel's volume and pan parameters towards a control point's values.
@@ -361,6 +367,10 @@ pub struct Engine {
     inst_offs: Vec<(u64, usize, u8, bool)>,
     inst_live: Vec<(usize, u8, f32)>,
     inst_events: Vec<(usize, u32, u8, f32, f32)>,
+    /// This span's events after the channels' note rules, sorted by channel, and each channel's notes at its
+    /// instrument (spec: audio/channel-voices.md).
+    inst_notes: Vec<(usize, u32, notes::Note)>,
+    note_voices: Vec<notes::Voices>,
     scratch: (Vec<f32>, Vec<f32>),
     /// Dry copy of a track buffer for slots mixed below 100 %.
     fx_dry: Vec<f32>,
@@ -370,14 +380,16 @@ pub struct Engine {
     autos: Vec<AutoClip>,
     curves: Vec<os_model::Automation>,
     frames_per_beat: f64,
+    /// Clips on plugin parameters: this block's events.
+    params: param_auto::ParamAuto,
     pub report: EngineReport,
 }
 
 /// Seconds an instrument keeps running after its last note (an OpenStudio choice).
 const INSTRUMENT_TAIL_SECONDS: u64 = 5;
 /// `inst_events` velocity values below zero: a note off, a choke.
-const OFF: f32 = -1.0;
-const CHOKE: f32 = -2.0;
+const OFF: f32 = notes::OFF;
+const CHOKE: f32 = notes::CHOKE;
 
 impl Engine {
     pub fn new(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayMode) -> Self {
@@ -437,6 +449,7 @@ impl Engine {
                     frame_s: 1.0 / f64::from(rate),
                     plugin: ch.kind == ChannelKind::Plugin,
                     instrument: Slot::default(),
+                    rules: notes::Rules::new(&ch.misc, rate),
                 }
             })
             .collect();
@@ -537,6 +550,7 @@ impl Engine {
                 if !clip_audible(project, c) {
                     continue;
                 }
+                // Plugin parameters play (spec: plugins/plugin-parameters.md §2); tempo and unknown targets do not.
                 if matches!(target, os_model::target::Target::Other(_) | os_model::target::Target::Tempo) {
                     report.automation_clips_ignored += 1;
                     continue;
@@ -561,6 +575,7 @@ impl Engine {
         autos.sort_by_key(|a| a.start);
 
         Engine {
+            params: param_auto::ParamAuto::new(autos.iter().any(|a| param_auto::is_param(a.target))),
             autos,
             curves,
             frames_per_beat: f64::from(rate) * 60.0 / tempo.max(1.0),
@@ -583,6 +598,8 @@ impl Engine {
             inst_offs: Vec::with_capacity(64),
             inst_live: Vec::with_capacity(64),
             inst_events: Vec::with_capacity(64),
+            inst_notes: Vec::with_capacity(64),
+            note_voices: vec![notes::Voices::default(); project.channels.len()],
             scratch: (Vec::new(), Vec::new()),
             fx_dry: Vec::new(),
             inst_tail: 0,
@@ -746,6 +763,7 @@ impl Engine {
         self.frame = frame;
         self.next_trigger = self.triggers.partition_point(|t| t.frame < frame);
         self.sync_controls(frame);
+        self.params.forget();
     }
 
     /// Applies one control point at a time as playback reaches it, smoothing volume and pan.
@@ -802,6 +820,9 @@ impl Engine {
         self.voices.retain(|v| v.channel < n);
         self.sounding = std::mem::take(&mut old.sounding);
         self.inst_live = std::mem::take(&mut old.inst_live);
+        // Notes held at the instruments (mono / polyphony / glide state) carry over.
+        self.note_voices = std::mem::take(&mut old.note_voices);
+        self.note_voices.resize(n, notes::Voices::default());
         self.inst_tail = old.inst_tail;
         self.inst_offs = std::mem::take(&mut old.inst_offs);
         for o in &mut self.inst_offs {
@@ -881,7 +902,8 @@ impl Engine {
                         m.matrix = m.compute_matrix();
                     }
                 }
-                Target::Tempo | Target::Other(_) => {}
+                // Plugin parameters: sampled through the block by `run_param_automation`.
+                Target::ChannelParam(..) | Target::SlotParam(..) | Target::Tempo | Target::Other(_) => {}
             }
         }
     }
@@ -889,7 +911,11 @@ impl Engine {
     /// Renders the next `out.len() / 2` stereo frames (interleaved L/R) into `out`.
     pub fn process(&mut self, out: &mut [f32]) {
         let frames = out.len() / 2;
+        // Effects see the transport at the block's first frame (after a pending wrap to the loop start).
+        let first = if self.looping && self.end_frame > 0 && self.frame >= self.end_frame { 0 } else { self.frame };
+        let song = self.transport_at(first);
         self.run_automation(frames);
+        self.run_param_automation(frames);
         for b in &mut self.bus {
             b.clear();
             b.resize(frames * 2, 0.0);
@@ -918,11 +944,12 @@ impl Engine {
         for &t in &self.order {
             let (to, from) = (self.tracks[t].matrix, self.tracks[t].cur);
             self.tracks[t].cur = to;
+            self.params.deliver_slots(t, &self.tracks[t].effects);
             let mut buf = std::mem::take(&mut self.bus[t]);
             let rate = self.rate;
             let (dry, l, r) = (&mut self.fx_dry, &mut self.scratch.0, &mut self.scratch.1);
             for fx in &mut self.tracks[t].effects {
-                run_slot(fx, &mut buf, rate, dry, l, r);
+                run_slot(fx, &mut buf, rate, &song, dry, l, r);
             }
             if from == to {
                 let [[ll, lr], [rl, rr]] = to;
@@ -1033,6 +1060,9 @@ impl Engine {
             self.inst_events.push((ch, 0, key, if vel < 0.0 { OFF } else { vel }, 0.0));
         }
         self.inst_events.sort_by_key(|e| e.1);
+        let rules: Vec<notes::Rules> = self.channels.iter().map(|c| c.rules).collect();
+        self.note_voices.resize(self.channels.len(), notes::Voices::default());
+        notes::apply(&self.inst_events, &rules, &mut self.note_voices, (b - a) as u32, &mut self.inst_notes);
         let held = !self.inst_offs.is_empty()
             || self.sounding.iter().any(|&(c, _, end)| end == u64::MAX && self.channels.get(c).is_some_and(|ch| ch.instrument.0.is_some()));
         if held || !self.inst_events.is_empty() {
@@ -1046,19 +1076,27 @@ impl Engine {
             self.scratch.1.resize(n, 0.0);
         }
         let mut active = false;
+        let song = self.transport_at(self.frame);
         for (c, ch) in self.channels.iter().enumerate() {
             let Some(inst) = &ch.instrument.0 else { continue };
-            let Ok(mut inst) = inst.try_lock() else { continue };
-            for &(_, off, key, vel, start) in self.inst_events.iter().filter(|e| e.0 == c) {
+            let Ok(mut inst) = inst.try_lock() else {
+                self.params.resend_channel(c);
+                continue;
+            };
+            inst.transport(&song);
+            // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md §2).
+            for (off, index, value) in self.params.channel_span(c, a, b) {
+                inst.param(off, index, value);
+            }
+            let first = self.inst_notes.partition_point(|e| e.0 < c);
+            for &(_, off, note) in self.inst_notes[first..].iter().take_while(|e| e.0 == c) {
                 let off = off.min(n.saturating_sub(1) as u32);
-                if vel == CHOKE {
-                    inst.choke(off, key);
-                } else if vel < 0.0 {
-                    inst.note_off(off, key);
-                } else if start > 0.0 {
-                    inst.note_on_from(off, key, vel, start);
-                } else {
-                    inst.note_on(off, key, vel);
+                match note {
+                    notes::Note::Choke(key) => inst.choke(off, key),
+                    notes::Note::Off(key) => inst.note_off(off, key),
+                    notes::Note::On { key, vel, start } if start > 0.0 => inst.note_on_from(off, key, vel, start),
+                    notes::Note::On { key, vel, .. } => inst.note_on(off, key, vel),
+                    notes::Note::Tune(key, semitones) => inst.tune(off, key, semitones),
                 }
             }
             let (l, r) = (&mut self.scratch.0[..n], &mut self.scratch.1[..n]);
@@ -1076,6 +1114,26 @@ impl Engine {
         if active {
             self.inst_tail = u64::from(self.rate) * INSTRUMENT_TAIL_SECONDS;
         }
+    }
+
+    /// The transport hosted plugins see at `frame` (spec: plugins/vst3-hosting.md §1): playing at the project tempo,
+    /// in 4/4 (the project's time signature is not read yet), with the pattern loop while looping.
+    fn transport_at(&self, frame: u64) -> TransportInfo {
+        let mut start = TransportInfo {
+            playing: true,
+            tempo: self.tempo,
+            frame: 0,
+            beats: 0.0,
+            bar_start: 0.0,
+            bar: 0,
+            numerator: 4,
+            denominator: 4,
+            looping: None,
+        };
+        if self.looping && self.end_frame > 0 {
+            start.looping = Some((0.0, self.end_frame as f64 / start.frames_per_beat(self.rate)));
+        }
+        start.advanced(frame, self.rate)
     }
 
     /// Loop point: back to frame 0 (sounding notes keep their remaining length).
@@ -1125,6 +1183,14 @@ impl Drop for Engine {
         for &(c, key, _) in self.sounding.iter().filter(|s| s.2 == u64::MAX) {
             if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
                 inst.note_off(0, key.min(127) as u8);
+            }
+        }
+        // Mono legato notes sound under their first key.
+        for (c, v) in self.note_voices.iter().enumerate() {
+            for key in v.taken_over() {
+                if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
+                    inst.note_off(0, key);
+                }
             }
         }
     }
@@ -1263,7 +1329,7 @@ fn blackman(t: f64) -> f64 {
 }
 
 /// One mixer slot over interleaved `buf`: skipped when its LED is off, blended with the dry signal by its mix level.
-fn run_slot(fx: &mut FxSlot, buf: &mut [f32], rate: u32, dry: &mut Vec<f32>, l: &mut Vec<f32>, r: &mut Vec<f32>) {
+fn run_slot(fx: &mut FxSlot, buf: &mut [f32], rate: u32, song: &TransportInfo, dry: &mut Vec<f32>, l: &mut Vec<f32>, r: &mut Vec<f32>) {
     if !fx.on || fx.mix <= 0.0 {
         return;
     }
@@ -1282,6 +1348,7 @@ fn run_slot(fx: &mut FxSlot, buf: &mut [f32], rate: u32, dry: &mut Vec<f32>, l: 
             r.clear();
             l.extend(buf.chunks_exact(2).map(|f| f[0]));
             r.extend(buf.chunks_exact(2).map(|f| f[1]));
+            h.transport_fx(song);
             h.process_fx(rate, &mut l[..n], &mut r[..n]);
             for (i, f) in buf.chunks_exact_mut(2).enumerate() {
                 f[0] = l[i];
@@ -1507,6 +1574,7 @@ mod tests {
             kind: ChannelKind::Sampler,
             name: None,
             plugin: None,
+            plugin_state: None,
             color: None,
             enabled: true,
             volume: 0.78125,
@@ -1515,7 +1583,7 @@ mod tests {
             mixer_track: 0,
             sample_path: None, // plays the built-in tone
             layer_children: vec![],
-            envelopes: Default::default(), rack: Default::default(),
+            envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         }
     }
 
@@ -1551,6 +1619,85 @@ mod tests {
             r.fill(v);
             self.at += l.len() as u64;
         }
+    }
+
+    /// Records the transport it is given before each block (instrument and effect).
+    #[derive(Default)]
+    struct Clock {
+        seen: Vec<(TransportInfo, usize)>,
+        next: Option<TransportInfo>,
+    }
+
+    impl crate::Instrument for Clock {
+        fn note_on(&mut self, _offset: u32, _key: u8, _velocity: f32) {}
+        fn note_off(&mut self, _offset: u32, _key: u8) {}
+        fn transport(&mut self, info: &TransportInfo) {
+            self.next = Some(*info);
+        }
+        fn process(&mut self, _rate: u32, l: &mut [f32], _r: &mut [f32]) {
+            let t = self.next.take().expect("a transport before each block");
+            self.seen.push((t, l.len()));
+        }
+    }
+
+    impl crate::instrument::HostedEffect for Clock {
+        fn transport_fx(&mut self, info: &TransportInfo) {
+            self.next = Some(*info);
+        }
+        fn process_fx(&mut self, _rate: u32, l: &mut [f32], _r: &mut [f32]) {
+            let t = self.next.take().expect("a transport before each block");
+            self.seen.push((t, l.len()));
+        }
+    }
+
+    /// spec: plugins/vst3-hosting.md §1 (transport): hosted plugins see the playing position, tempo and loop.
+    #[test]
+    fn plugins_see_the_transport() {
+        let mut p = project(vec![long_note(0, 96, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        p.channels[0].mixer_track = 1;
+        p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let inst = Arc::new(std::sync::Mutex::new(Clock::default()));
+        let fx = Arc::new(std::sync::Mutex::new(Clock::default()));
+        e.set_instrument(0, inst.clone());
+        e.set_effect(1, 0, fx.clone());
+        // Pattern playback loops (the app turns it on for pattern mode).
+        e.set_looping(true);
+        let mut out = vec![0.0f32; 512 * 2];
+        let blocks = 200;
+        for _ in 0..blocks {
+            e.process(&mut out);
+        }
+        // 130 BPM at 48 kHz; the pattern is one bar (4 beats) and loops.
+        let fpb = 48000.0 * 60.0 / 130.0;
+        let bar = 4.0 * fpb;
+        let end = e.end_frame;
+        assert!((end as f64 - bar).abs() < 2.0, "one bar: {end} frames");
+        for (who, seen) in [("instrument", &inst.lock().unwrap().seen), ("effect", &fx.lock().unwrap().seen)] {
+            let mut frame = 0u64;
+            for (t, n) in seen.iter() {
+                if frame >= end {
+                    frame -= end;
+                }
+                assert!(t.playing && t.tempo == 130.0 && (t.numerator, t.denominator) == (4, 4), "{who} {t:?}");
+                assert_eq!(t.frame, frame, "{who}");
+                assert!((t.beats - frame as f64 / fpb).abs() < 1e-9, "{who} {t:?}");
+                assert_eq!((t.bar, t.bar_start), (0, 0.0), "{who}: a one-bar loop stays in bar 0");
+                let (a, b) = t.looping.expect("pattern playback loops");
+                assert!(a == 0.0 && (b - end as f64 / fpb).abs() < 1e-9, "{who} {t:?}");
+                frame += *n as u64;
+            }
+            let total: usize = seen.iter().map(|s| s.1).sum();
+            assert_eq!(total, 512 * blocks, "{who}: every frame is covered");
+        }
+        // Effects get one call per block, at its first frame (wrapped to the loop start when the block begins there).
+        assert_eq!(fx.lock().unwrap().seen.len(), blocks);
+        let t = TransportInfo { looping: None, ..fx.lock().unwrap().seen[0].0 };
+        let later = t.advanced(48000 * 3, 48000);
+        assert_eq!((later.frame, later.bar), (144000, 1));
+        assert!((later.beats - 6.5).abs() < 1e-9 && (later.bar_start - 4.0).abs() < 1e-9, "{later:?}");
     }
 
     // spec: flp/events/project-info.md "Swing timing" (100 % delays an off-beat 16th by half a step)

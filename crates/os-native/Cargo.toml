@@ -8,3 +8,8 @@ license.workspace = true
 [dependencies]
 libloading = "0.8"
 thiserror.workspace = true
+os-engine.workspace = true
+os-host.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Kernel"] }

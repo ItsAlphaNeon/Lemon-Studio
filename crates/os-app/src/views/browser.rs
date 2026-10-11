@@ -83,6 +83,8 @@ pub enum Item {
     Effect(usize),
     /// A non-audio file in a dropped folder (not draggable, spec §6).
     File(String),
+    /// A parameter of a hosted plugin: hosted key, parameter index (spec: plugins/plugin-parameters.md §6).
+    Param(usize, usize),
 }
 
 #[derive(Debug, Clone)]
@@ -340,17 +342,18 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                     leaf(out, &parent, label, Icon::Note, cat, pat.number == s.pattern, Item::Pattern(pat.number));
                 }
             }
+            // Hosted plugins open into their parameters (spec: plugins/plugin-parameters.md §6).
             "Generators" => {
-                for (i, c) in p.channels.iter().enumerate() {
-                    let label = c.name.clone().or_else(|| c.plugin.clone()).unwrap_or_else(|| format!("Channel {}", i + 1));
-                    leaf(out, &parent, label, Icon::Plug, cat, i == s.selected_channel, Item::Channel(i));
+                for i in 0..p.channels.len() {
+                    let label = channel_label(s, i).unwrap_or_default();
+                    plugin_node(s, out, &parent, label, Icon::Plug, cat, i == s.selected_channel, Item::Channel(i), i);
                 }
             }
             "Effects" => {
                 for m in &p.mixer {
-                    for slot in m.slots.iter().flatten() {
-                        let track = if m.index == 0 { "Master".to_string() } else { format!("Insert {}", m.index) };
-                        leaf(out, &parent, format!("{track} - {}", slot.name), Icon::Speaker, cat, false, Item::None);
+                    for k in (0..m.slots.len()).filter(|&k| m.slots[k].is_some()) {
+                        let label = crate::params::effect_label(s, m.index, k as u8).unwrap_or_default();
+                        plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, crate::plugins::fx_key(m.index, k as u8));
                     }
                 }
             }
@@ -364,6 +367,28 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
             }
             // History, Remote control, Initialized controls: nothing tracked yet (spec §2).
             _ => {}
+        }
+    }
+}
+
+/// A channel's row label under Generators.
+pub fn channel_label(s: &State, i: usize) -> Option<String> {
+    let c = s.project.channels.get(i)?;
+    Some(c.name.clone().or_else(|| crate::project_plugins::plugin_title(c)).unwrap_or_else(|| format!("Channel {}", i + 1)))
+}
+
+/// A generator / effect row: a leaf, or a node listing its parameters when it is a hosted plugin that has some.
+#[allow(clippy::too_many_arguments)]
+fn plugin_node(s: &State, out: &mut Vec<Row>, parent: &str, label: String, icon: Icon, cat: u8, bright: bool, item: Item, key: usize) {
+    if !s.params.has_params(key) {
+        return leaf(out, parent, label, icon, cat, bright, item);
+    }
+    let k = format!("{parent}/{label}");
+    let open = is_open(s, &k);
+    out.push(Row { key: k.clone(), depth: 2, label, icon, cat, open: Some(open), bright: bright || open, item, path: None });
+    if open {
+        for (index, e) in s.params.visible(key) {
+            out.push(Row { key: format!("{k}/{index}"), depth: 3, label: e.name.clone(), icon: Icon::Slide, cat, open: None, bright: false, item: Item::Param(key, index), path: None });
         }
     }
 }
@@ -562,7 +587,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         }
         let x = 13.0 + INDENT * f32::from(row.depth);
         let rect = Rect::new(13.0, y, 188.0, ROW_H);
-        let hov = ui.hit(rect, Action::BrowserRow(i), row.label.clone());
+        // A parameter row's hint carries its value (spec: plugins/plugin-parameters.md §6); read for the hovered row only.
+        let hint = match row.item {
+            Item::Param(key, index) if ui.hovering(rect) => crate::params::row_hint(s, key, index),
+            _ => row.label.clone(),
+        };
+        let hov = ui.hit(rect, Action::BrowserRow(i), hint);
         if sel == Some(row.key.as_str()) || hov {
             ui.c.fill_rect(rect, t.browser_row_hi);
         }

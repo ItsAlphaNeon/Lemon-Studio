@@ -423,3 +423,168 @@ fn restructured_channels_survive() {
     }
     assert!(checked > 50, "only {checked} files checked");
 }
+
+/// Mixer slot plugin states written into every FL 26 file read back (spec: flp/events/mixer.md "Slot sub-block"):
+/// each effect state gets a changed last byte and one extra byte, and reads back so.
+#[test]
+fn slot_plugin_states_survive() {
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let Ok(mut project) = load(&file) else { continue };
+        let mut any = false;
+        for s in project.mixer.iter_mut().flat_map(|m| m.slots.iter_mut().flatten()) {
+            // A plugin without a state event (some analysers) keeps having none.
+            if let Some(b) = s.state.last_mut() {
+                *b ^= 0x5a;
+                s.state.push(7);
+                any = true;
+            }
+        }
+        if !any {
+            continue;
+        }
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back, project, "{path}");
+        assert!(os_flp::project::unsaved_parts(&project, &file).is_empty(), "{path}");
+        checked += 1;
+    }
+    assert!(checked > 20, "only {checked} files checked");
+}
+
+/// Plugin channel states (event 213, spec: flp/events/plugins.md) written into every FL 26 file read back, and a new
+/// wrapped plugin channel appended to each file reads back with its plugin and state.
+#[test]
+fn plugin_channel_states_survive() {
+    use os_model::{ChannelKind, PluginRef};
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let Ok(mut project) = load(&file) else { continue };
+        let mut any = false;
+        for c in project.channels.iter_mut().filter(|c| c.kind == ChannelKind::Plugin) {
+            assert!(c.plugin_state.is_some(), "{path}: plugin channel {} without a state", c.index);
+            if let Some(b) = c.plugin_state.as_mut().and_then(|s| s.last_mut()) {
+                *b ^= 0x5a;
+            }
+            c.plugin_state.as_mut().unwrap().push(3);
+            any = true;
+        }
+        if !any || project.mixer.len() < 3 {
+            continue;
+        }
+        let mut ch = project.channels[0].clone();
+        ch.index = project.channels.len() as u16;
+        ch.kind = ChannelKind::Plugin;
+        ch.name = Some("Hosted synth".into());
+        ch.plugin = Some(os_flp::wrapper::WRAPPER.into());
+        ch.sample_path = None;
+        ch.layer_children.clear();
+        ch.envelopes = Default::default();
+        ch.rack = Default::default();
+        ch.mixer_track = 2;
+        let p = PluginRef {
+            format: "clap".into(),
+            name: "Synth".into(),
+            vendor: "Maker".into(),
+            path: "C:/CLAP/Synth.clap".into(),
+            state: vec![1, 2, 3],
+            ..Default::default()
+        };
+        ch.plugin_state = Some(os_flp::wrapper::encode(None, &p));
+        project.channels.push(ch);
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        let want = settled(project);
+        assert_eq!(back.channels, want.channels, "{path}");
+        let last = back.channels.last().unwrap();
+        assert_eq!(os_flp::wrapper::decode(last.plugin_state.as_deref().unwrap()), Some(p), "{path}");
+        checked += 1;
+    }
+    assert!(checked > 20, "only {checked} files checked");
+}
+
+/// Mixer slot edits in every FL 26 file (spec: flp/events/plugins.md §2-5): slot plugins moved within a track and to
+/// another track, one removed, one added, LEDs and mix levels changed. Everything reads back; moving the plugins
+/// back and restoring the LEDs gives the original bytes.
+#[test]
+fn slot_edits_survive() {
+    use os_model::SlotPlugin;
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let bytes = std::fs::read(path).unwrap();
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        let Ok(project) = load(&file) else { continue };
+        // A track with a plugin and an empty slot, and a second track with an empty slot.
+        let Some(t) = project.mixer.iter().position(|m| m.slots.iter().any(Option::is_some) && m.slots.iter().any(Option::is_none)) else {
+            continue;
+        };
+        let Some(u) = project.mixer.iter().position(|m| m.index != project.mixer[t].index && m.slots[9].is_none()) else { continue };
+        let from = project.mixer[t].slots.iter().position(Option::is_some).unwrap();
+        let to = project.mixer[t].slots.iter().position(Option::is_none).unwrap();
+
+        // Move within the track (with its LED and mix), and back: the original bytes.
+        let mut moved = project.clone();
+        let m = &mut moved.mixer[t];
+        m.slots.swap(from, to);
+        m.slot_on.swap(from, to);
+        m.slot_mix.swap(from, to);
+        m.slot_on[from] = false;
+        m.slot_mix[to] = 0.25;
+        apply(&moved, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back.mixer, moved.mixer, "{path}");
+        apply(&project, &mut file).unwrap();
+        assert!(file.to_bytes().unwrap() == bytes, "{path}: moving back changed the file");
+
+        // Move to another track, remove one, add one.
+        let mut edited = project.clone();
+        let p = edited.mixer[t].slots[from].take().unwrap();
+        edited.mixer[u].slots[9] = Some(p);
+        edited.mixer[t].slots[to] = Some(SlotPlugin { name: "Fruity Parametric EQ 2".into(), state: vec![1, 2, 3, 4] });
+        if let Some(k) = (0..10).find(|&k| k != to && edited.mixer[u].slots[k].is_some() && k != 9) {
+            edited.mixer[u].slots[k] = None;
+        }
+        apply(&edited, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back.mixer, edited.mixer, "{path}");
+        assert!(os_flp::project::unsaved_parts(&edited, &file).is_empty(), "{path}");
+        checked += 1;
+    }
+    assert!(checked > 20, "only {checked} files checked");
+}
+
+/// Mixer tracks added before the last ("current") track: the old tracks and the current track read back unchanged,
+/// the new tracks are default inserts that take edits (spec: flp/events/mixer.md "Adding tracks").
+#[test]
+fn added_mixer_tracks_survive() {
+    use os_model::MixerTrack;
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let Ok(project) = load(&file) else { continue };
+        let n = project.mixer.len();
+        if n < 2 || n > 200 {
+            continue;
+        }
+        let mut grown = project.clone();
+        let mut current = grown.mixer.pop().unwrap();
+        current.index = n as u16 + 1;
+        grown.mixer.extend((n as u16 - 1..n as u16 + 1).map(MixerTrack::new));
+        grown.mixer.push(current);
+        grown.mixer[n].name = Some("Added".into());
+        grown.mixer[n].volume = Some(0.5);
+        grown.mixer[n].slot_on[2] = false;
+        apply(&grown, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back.mixer, grown.mixer, "{path}");
+        assert_eq!(back.channels, project.channels, "{path}");
+        checked += 1;
+    }
+    assert!(checked > 100, "only {checked} files checked");
+}

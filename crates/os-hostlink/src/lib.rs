@@ -41,6 +41,10 @@ pub enum Cmd {
     /// Plugin -> host: a preview note from the plugin's own keyboard, `lparam` = [`pack_note`]. The host plays it on the
     /// plugin's channel (its live stream) and answers 1; 0 = not handled, the plugin plays it by itself.
     Note = 9,
+    /// Plugin -> host: "Create automation clip" for one of the plugin's parameters, `lparam` = its position in the
+    /// plugin's parameter list (the CLAP / VST3 parameter index). The host makes the clip for that parameter of this
+    /// instance and answers 1; 0 = not handled (a plugin that never got the hello keeps the entry disabled).
+    Automate = 10,
 }
 
 impl Cmd {
@@ -55,6 +59,7 @@ impl Cmd {
             7 => Cmd::Hint,
             8 => Cmd::Changed,
             9 => Cmd::Note,
+            10 => Cmd::Automate,
             _ => return None,
         })
     }
@@ -234,6 +239,7 @@ mod tests {
         b.set("Volume: 50 %");
         assert_eq!(b.get(), "Volume: 50 %");
         assert_eq!(Cmd::from_usize(Cmd::SetPage as usize), Some(Cmd::SetPage));
+        assert_eq!(Cmd::from_usize(10), Some(Cmd::Automate));
         assert_eq!(PageIcon::from_id(99), PageIcon::Plugin);
         assert_eq!(unpack_note(pack_note(67, 100, true)), (67, 100, true));
         assert_eq!(unpack_note(pack_note(0, 0, false)), (0, 0, false));

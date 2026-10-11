@@ -15,11 +15,19 @@ use std::sync::{Arc, Mutex};
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    clap_event_header, clap_event_note, clap_event_param_mod, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID,
-    CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_MOD,
+    clap_event_header, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
+    clap_event_transport, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_EXPRESSION,
+    CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_TUNING, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
+    CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE,
+    CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
 };
+use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::ext::gui::{clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32};
-use clap_sys::ext::params::{clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID};
+use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
+use clap_sys::ext::params::{
+    clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS,
+    CLAP_PARAM_IS_ENUM, CLAP_PARAM_IS_HIDDEN, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
+};
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
 use clap_sys::host::clap_host;
@@ -28,23 +36,20 @@ use clap_sys::process::{clap_process, CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTIN
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{clap_version_is_compatible, CLAP_VERSION};
 
-/// A plugin a library offers.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Descriptor {
-    pub id: String,
-    pub name: String,
-    pub vendor: String,
-    pub features: Vec<String>,
-}
+mod context_menu;
+mod params;
 
-impl Descriptor {
-    pub fn is_instrument(&self) -> bool {
-        self.features.iter().any(|f| f == "instrument")
-    }
+/// A plugin a library offers (the hosting layer's descriptor, format `Clap`).
+pub use os_host::{set_waker, wake, Descriptor};
 
-    /// An insert effect (CLAP feature "audio-effect"): offered for mixer slots.
-    pub fn is_effect(&self) -> bool {
-        !self.is_instrument() && self.features.iter().any(|f| f == "audio-effect")
+/// What CLAP features say a plugin is: "instrument" makes an instrument, else "audio-effect" an insert effect.
+fn kind_of(features: &[String]) -> os_host::Kind {
+    if features.iter().any(|f| f == "instrument") {
+        os_host::Kind::Instrument
+    } else if features.iter().any(|f| f == "audio-effect") {
+        os_host::Kind::Effect
+    } else {
+        os_host::Kind::Other
     }
 }
 
@@ -107,7 +112,16 @@ impl Library {
                     features.push(cstr(*fp));
                     fp = fp.add(1);
                 }
-                plugins.push(Descriptor { id: cstr((*d).id), name: cstr((*d).name), vendor: cstr((*d).vendor), features });
+                plugins.push(Descriptor {
+                    format: os_host::Format::Clap,
+                    id: cstr((*d).id),
+                    name: cstr((*d).name),
+                    vendor: cstr((*d).vendor),
+                    version: cstr((*d).version),
+                    kind: kind_of(&features),
+                    features,
+                    path: path.to_owned(),
+                });
             }
             Ok(Arc::new(Library { entry, factory, path: path.to_owned(), plugins, _lib: lib }))
         }
@@ -153,28 +167,32 @@ pub fn find_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+impl os_host::Library for Library {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn plugins(&self) -> &[Descriptor] {
+        &self.plugins
+    }
+
+    fn create(self: Arc<Self>, id: &str) -> Result<os_host::SharedPlugin, String> {
+        Ok(Arc::new(Mutex::new(Plugin::new(&self, id)?)))
+    }
+}
+
 /// Host-side state the plugin's callbacks reach through `clap_host::host_data`.
 struct HostData {
     callback: AtomicBool,
     restart: AtomicBool,
     /// The plugin asked for a parameter flush (`clap_host_params.request_flush`): an edit from its editor waits in its
-    /// output queue and only takes effect when the host flushes (or processes).
+    /// output queue and only takes effect when the host flushes (or processes). The host's waker
+    /// (`os_host::set_waker`) makes `idle` run at once instead of on the next timer tick.
     flush: AtomicBool,
-}
-
-/// Called when a plugin wants the UI thread soon (flush, callback, restart): the app wakes its event loop so `idle`
-/// runs at once instead of on the next timer tick (an editor edit would otherwise wait up to a tick to apply).
-static WAKER: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
-
-/// Sets the function that wakes the host's UI loop (once per process).
-pub fn set_waker(f: fn()) {
-    let _ = WAKER.set(f);
-}
-
-pub fn wake() {
-    if let Some(f) = WAKER.get() {
-        f();
-    }
+    /// `clap_host_params.rescan` flags not handled yet (the parameter list changed).
+    rescan: AtomicU32,
+    /// Parameter ids picked for "Create automation clip" in the plugin's own menus (`context_menu.rs`).
+    automate: Mutex<Vec<u32>>,
 }
 
 static HOST_NAME: &CStr = c"OpenStudio";
@@ -182,12 +200,22 @@ static HOST_URL: &CStr = c"";
 static HOST_VERSION: &CStr = c"0.0.1";
 
 unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_char) -> *const c_void {
-    if !id.is_null() && unsafe { CStr::from_ptr(id) } == CLAP_EXT_PARAMS {
+    if id.is_null() {
+        return ptr::null();
+    }
+    let id = unsafe { CStr::from_ptr(id) };
+    if id == CLAP_EXT_PARAMS {
         return &HOST_PARAMS as *const clap_host_params as *const c_void;
+    }
+    if id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU || id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU_COMPAT {
+        return &context_menu::HOST_CONTEXT_MENU as *const clap_sys::ext::context_menu::clap_host_context_menu as *const c_void;
     }
     ptr::null()
 }
-unsafe extern "C" fn host_params_rescan(_host: *const clap_host, _flags: u32) {}
+unsafe extern "C" fn host_params_rescan(host: *const clap_host, flags: u32) {
+    unsafe { (*((*host).host_data as *const HostData)).rescan.fetch_or(flags, Ordering::AcqRel) };
+    wake();
+}
 unsafe extern "C" fn host_params_clear(_host: *const clap_host, _id: u32, _flags: u32) {}
 unsafe extern "C" fn host_params_request_flush(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).flush.store(true, Ordering::Release) };
@@ -210,6 +238,16 @@ enum Kind {
     On,
     Off,
     Choke,
+    /// Tuning of a key's voices (note expression); `velocity` holds the semitones.
+    Tune,
+}
+
+/// One entry of a chunk's event order: an index into `notes`, `mods` or `exprs`.
+#[derive(Clone, Copy)]
+enum Seq {
+    Note(usize),
+    Mod(usize),
+    Expr(usize),
 }
 
 /// One queued note event.
@@ -230,6 +268,7 @@ pub struct Plugin {
     gui: *const clap_plugin_gui,
     state: *const clap_plugin_state,
     params: *const clap_plugin_params,
+    latency: *const clap_plugin_latency,
     /// Kept alive for the plugin, which holds a pointer to it.
     _host: Box<clap_host>,
     host_data: Box<HostData>,
@@ -242,12 +281,18 @@ pub struct Plugin {
     queue: Vec<Ev>,
     notes: Vec<clap_event_note>,
     mods: Vec<clap_event_param_mod>,
+    exprs: Vec<clap_event_note_expression>,
     /// This chunk's events in time order (pointers into `notes` / `mods`).
     order: Vec<*const clap_event_header>,
     /// Parameter that takes a note's sample start as per-note modulation (`use_start_param`).
     start_param: Option<u32>,
     next_note_id: i32,
     steady: i64,
+    /// The song position for the next process call (the engine gives it while playing), and the current chunk's.
+    song: Option<os_engine::TransportInfo>,
+    chunk_song: Option<os_engine::TransportInfo>,
+    /// The transport event of the process call being made.
+    transport_ev: clap_event_transport,
     /// The plugin's last process status says it still has sound to deliver (`Instrument::active`).
     sounding: bool,
     dbg_peak: f32,
@@ -256,7 +301,61 @@ pub struct Plugin {
     editor: bool,
     /// Input copies for effect processing (mixer slots).
     fx_in: (Vec<f32>, Vec<f32>),
+    /// Parameter ranges in list order (id, min, max, stepped), read after init and on a rescan (values cross the
+    /// hosting layer normalized).
+    ranges: Vec<params::Range>,
+    /// Host parameter changes (id, plain value) for the next process call or flush.
+    param_queue: Vec<(u32, f64)>,
+    /// Automation values (frame offset, id, plain value) for the next process call (`params.rs`).
+    auto: Vec<(u32, u32, f64)>,
+    /// A process call ran since the last `idle`.
+    processed: bool,
+    /// This chunk's parameter events (sent before the notes, at time 0).
+    pvals: Vec<clap_event_param_value>,
+    /// Changes the plugin reported (its editor): gesture begin / end and values, plain.
+    param_out: Vec<OutEv>,
     _lib: Arc<Library>,
+}
+
+/// A parameter event the plugin sent the host.
+#[derive(Clone, Copy)]
+enum OutEv {
+    Begin(u32),
+    Value(u32, f64),
+    End(u32),
+}
+
+/// Most plugin -> host parameter events kept until the app takes them.
+const MAX_OUT: usize = 4096;
+
+/// `clap_input_events` over the `Vec<*const clap_event_header>` behind `ctx`.
+unsafe extern "C" fn events_size(l: *const clap_input_events) -> u32 {
+    unsafe { (*((*l).ctx as *const Vec<*const clap_event_header>)).len() as u32 }
+}
+
+unsafe extern "C" fn events_get(l: *const clap_input_events, i: u32) -> *const clap_event_header {
+    let v = unsafe { &*((*l).ctx as *const Vec<*const clap_event_header>) };
+    v.get(i as usize).copied().unwrap_or(ptr::null())
+}
+
+/// `clap_output_events.try_push` collecting parameter events into the `Vec<OutEv>` behind `ctx`.
+unsafe extern "C" fn push_out(l: *const clap_output_events, e: *const clap_event_header) -> bool {
+    unsafe {
+        let v = &mut *((*l).ctx as *mut Vec<OutEv>);
+        if e.is_null() || (*e).space_id != CLAP_CORE_EVENT_SPACE_ID || v.len() >= MAX_OUT {
+            return true;
+        }
+        match (*e).type_ {
+            CLAP_EVENT_PARAM_VALUE => {
+                let p = &*(e as *const clap_event_param_value);
+                v.push(OutEv::Value(p.param_id, p.value));
+            }
+            CLAP_EVENT_PARAM_GESTURE_BEGIN => v.push(OutEv::Begin((*(e as *const clap_event_param_gesture)).param_id)),
+            CLAP_EVENT_PARAM_GESTURE_END => v.push(OutEv::End((*(e as *const clap_event_param_gesture)).param_id)),
+            _ => {}
+        }
+        true
+    }
 }
 
 // SAFETY: CLAP instances may be used from the main thread and the audio thread; access is serialised by the
@@ -276,7 +375,13 @@ impl Plugin {
     /// Creates and initialises plugin `id` from `lib` (UI thread).
     pub fn new(lib: &Arc<Library>, id: &str) -> Result<Plugin, String> {
         let desc = lib.plugins.iter().find(|d| d.id == id).cloned().ok_or_else(|| format!("{}: no plugin {id}", lib.path.display()))?;
-        let host_data = Box::new(HostData { callback: AtomicBool::new(false), restart: AtomicBool::new(false), flush: AtomicBool::new(false) });
+        let host_data = Box::new(HostData {
+            callback: AtomicBool::new(false),
+            restart: AtomicBool::new(false),
+            flush: AtomicBool::new(false),
+            rescan: AtomicU32::new(0),
+            automate: Mutex::new(Vec::new()),
+        });
         let host = Box::new(clap_host {
             clap_version: CLAP_VERSION,
             host_data: &*host_data as *const HostData as *mut c_void,
@@ -306,6 +411,8 @@ impl Plugin {
             let gui = ext(CLAP_EXT_GUI) as *const clap_plugin_gui;
             let state = ext(CLAP_EXT_STATE) as *const clap_plugin_state;
             let params = ext(CLAP_EXT_PARAMS) as *const clap_plugin_params;
+            let latency = ext(CLAP_EXT_LATENCY) as *const clap_plugin_latency;
+            let ranges = params::read_ranges(params, plugin);
             Ok(Plugin {
                 desc,
                 plugin,
@@ -321,15 +428,36 @@ impl Plugin {
                 queue: Vec::with_capacity(256),
                 notes: Vec::with_capacity(256),
                 mods: Vec::with_capacity(64),
+                exprs: Vec::with_capacity(64),
                 order: Vec::with_capacity(320),
                 start_param: None,
                 next_note_id: 0,
                 steady: 0,
+                song: None,
+                chunk_song: None,
+                transport_ev: transport_event(&os_engine::TransportInfo {
+                    playing: false,
+                    tempo: 120.0,
+                    frame: 0,
+                    beats: 0.0,
+                    bar_start: 0.0,
+                    bar: 0,
+                    numerator: 4,
+                    denominator: 4,
+                    looping: None,
+                }),
                 sounding: false,
                 dbg_peak: 0.0,
                 dbg_frames: 0,
                 editor: false,
                 fx_in: (Vec::new(), Vec::new()),
+                latency,
+                ranges,
+                param_queue: Vec::new(),
+                auto: Vec::with_capacity(params::MAX_AUTO),
+                processed: false,
+                pvals: Vec::with_capacity(params::MAX_AUTO + 64),
+                param_out: Vec::new(),
                 _lib: lib.clone(),
             })
         }
@@ -374,21 +502,60 @@ impl Plugin {
         if self.params.is_null() {
             return;
         }
-        unsafe extern "C" fn size(_l: *const clap_input_events) -> u32 {
-            0
-        }
-        unsafe extern "C" fn get(_l: *const clap_input_events, _i: u32) -> *const clap_event_header {
-            ptr::null()
-        }
-        unsafe extern "C" fn push(_l: *const clap_output_events, _e: *const clap_event_header) -> bool {
-            true
-        }
-        let ins = clap_input_events { ctx: ptr::null_mut(), size: Some(size), get: Some(get) };
-        let outs = clap_output_events { ctx: ptr::null_mut(), try_push: Some(push) };
+        // Host parameter changes waiting for a process call go in now; parameter events the plugin sends back are
+        // collected for `take_param_events`.
+        self.fill_param_events();
+        self.order.clear();
+        self.order.extend(self.pvals.iter().map(|e| &e.header as *const clap_event_header));
+        let ins = clap_input_events { ctx: &self.order as *const Vec<*const clap_event_header> as *mut c_void, size: Some(events_size), get: Some(events_get) };
+        let outs = clap_output_events { ctx: &mut self.param_out as *mut Vec<OutEv> as *mut c_void, try_push: Some(push_out) };
         unsafe {
             if let Some(f) = (*self.params).flush {
                 f(self.plugin, &ins, &outs);
             }
+        }
+        self.order.clear();
+    }
+
+    /// Moves the queued host parameter changes into `pvals` (events at time 0).
+    fn fill_param_events(&mut self) {
+        self.pvals.clear();
+        for (id, value) in self.param_queue.drain(..) {
+            self.pvals.push(clap_event_param_value {
+                header: clap_event_header {
+                    size: std::mem::size_of::<clap_event_param_value>() as u32,
+                    time: 0,
+                    space_id: CLAP_CORE_EVENT_SPACE_ID,
+                    type_: CLAP_EVENT_PARAM_VALUE,
+                    flags: 0,
+                },
+                param_id: id,
+                cookie: ptr::null_mut(),
+                note_id: -1,
+                port_index: -1,
+                channel: -1,
+                key: -1,
+                value,
+            });
+        }
+    }
+
+    /// (min, max) of parameter `id`.
+    fn range(&self, id: u32) -> Option<(f64, f64)> {
+        self.ranges.iter().find(|r| r.0 == id).map(|&(_, lo, hi, _)| (lo, hi))
+    }
+
+    fn normalize(&self, id: u32, plain: f64) -> f64 {
+        match self.range(id) {
+            Some((lo, hi)) if hi > lo => ((plain - lo) / (hi - lo)).clamp(0.0, 1.0),
+            _ => plain,
+        }
+    }
+
+    fn plain(&self, id: u32, norm: f64) -> f64 {
+        match self.range(id) {
+            Some((lo, hi)) => lo + norm.clamp(0.0, 1.0) * (hi - lo),
+            None => norm,
         }
     }
 
@@ -426,7 +593,8 @@ impl Plugin {
                 }
             }
         }
-        if self.host_data.flush.swap(false, Ordering::AcqRel) {
+        self.idle_params();
+        if self.host_data.flush.swap(false, Ordering::AcqRel) || !self.param_queue.is_empty() {
             self.flush_params();
         }
         let wanted = self.wanted_rate.swap(0, Ordering::AcqRel);
@@ -539,11 +707,30 @@ impl Plugin {
         let n = left.len() as u32;
         self.notes.clear();
         self.mods.clear();
+        self.exprs.clear();
         let mut rest = Vec::new();
-        // Event order: (index into notes, index into mods); a note's modulation follows its note on at the same time.
-        let mut seq: Vec<(usize, Option<usize>)> = Vec::new();
+        // Event order; a note's modulation follows its note on at the same time.
+        let mut seq: Vec<Seq> = Vec::new();
         for e in self.queue.drain(..) {
-            if e.time < n {
+            if e.time < n && e.kind == Kind::Tune {
+                // Portamento glides (spec: audio/channel-voices.md): CLAP tuning expression, semitones.
+                self.exprs.push(clap_event_note_expression {
+                    header: clap_event_header {
+                        size: std::mem::size_of::<clap_event_note_expression>() as u32,
+                        time: e.time,
+                        space_id: CLAP_CORE_EVENT_SPACE_ID,
+                        type_: CLAP_EVENT_NOTE_EXPRESSION,
+                        flags: 0,
+                    },
+                    expression_id: CLAP_NOTE_EXPRESSION_TUNING,
+                    note_id: -1,
+                    port_index: 0,
+                    channel: 0,
+                    key: i16::from(e.key),
+                    value: f64::from(e.velocity),
+                });
+                seq.push(Seq::Expr(self.exprs.len() - 1));
+            } else if e.time < n {
                 // A note with a sample start gets an id, so its modulation reaches only that voice.
                 let id = match (e.kind, self.start_param) {
                     (Kind::On, Some(_)) if e.start > 0.0 => {
@@ -560,7 +747,7 @@ impl Plugin {
                         type_: match e.kind {
                             Kind::On => CLAP_EVENT_NOTE_ON,
                             Kind::Off => CLAP_EVENT_NOTE_OFF,
-                            Kind::Choke => CLAP_EVENT_NOTE_CHOKE,
+                            Kind::Choke | Kind::Tune => CLAP_EVENT_NOTE_CHOKE,
                         },
                         flags: 0,
                     },
@@ -570,7 +757,7 @@ impl Plugin {
                     key: i16::from(e.key),
                     velocity: f64::from(e.velocity),
                 });
-                seq.push((self.notes.len() - 1, None));
+                seq.push(Seq::Note(self.notes.len() - 1));
                 if let (Some(param), true) = (self.start_param, id >= 0) {
                     self.mods.push(clap_event_param_mod {
                         header: clap_event_header {
@@ -588,33 +775,36 @@ impl Plugin {
                         key: i16::from(e.key),
                         amount: f64::from(e.start),
                     });
-                    seq.push((0, Some(self.mods.len() - 1)));
+                    seq.push(Seq::Mod(self.mods.len() - 1));
                 }
             } else {
                 rest.push(Ev { time: e.time - n, ..e });
             }
         }
         self.queue = rest;
-        // `queue` is sorted by time, so `seq` already is.
+        // `queue` is sorted by time, so `seq` already is. Host parameter changes go first, at time 0, then automation
+        // in time order; parameter values go before the notes at the same frame.
+        self.fill_param_events();
+        self.take_automation(n);
         self.order.clear();
-        for &(ni, mi) in &seq {
-            self.order.push(match mi {
-                Some(m) => &self.mods[m].header as *const clap_event_header,
-                None => &self.notes[ni].header as *const clap_event_header,
-            });
+        let mut pi = 0;
+        for &s in &seq {
+            let h = match s {
+                Seq::Mod(m) => &self.mods[m].header as *const clap_event_header,
+                Seq::Note(i) => &self.notes[i].header as *const clap_event_header,
+                Seq::Expr(x) => &self.exprs[x].header as *const clap_event_header,
+            };
+            let t = unsafe { (*h).time };
+            while pi < self.pvals.len() && self.pvals[pi].header.time <= t {
+                self.order.push(&self.pvals[pi].header as *const clap_event_header);
+                pi += 1;
+            }
+            self.order.push(h);
         }
-        unsafe extern "C" fn size(l: *const clap_input_events) -> u32 {
-            unsafe { (*((*l).ctx as *const Vec<*const clap_event_header>)).len() as u32 }
-        }
-        unsafe extern "C" fn get(l: *const clap_input_events, i: u32) -> *const clap_event_header {
-            let v = unsafe { &*((*l).ctx as *const Vec<*const clap_event_header>) };
-            v.get(i as usize).copied().unwrap_or(ptr::null())
-        }
-        unsafe extern "C" fn push(_l: *const clap_output_events, _e: *const clap_event_header) -> bool {
-            true
-        }
-        let ins = clap_input_events { ctx: &self.order as *const Vec<*const clap_event_header> as *mut c_void, size: Some(size), get: Some(get) };
-        let outs = clap_output_events { ctx: ptr::null_mut(), try_push: Some(push) };
+        self.order.extend(self.pvals[pi..].iter().map(|e| &e.header as *const clap_event_header));
+        self.processed = true;
+        let ins = clap_input_events { ctx: &self.order as *const Vec<*const clap_event_header> as *mut c_void, size: Some(events_size), get: Some(events_get) };
+        let outs = clap_output_events { ctx: &mut self.param_out as *mut Vec<OutEv> as *mut c_void, try_push: Some(push_out) };
         let mut chans = [left.as_mut_ptr(), right.as_mut_ptr()];
         let mut buf = clap_audio_buffer { data32: chans.as_mut_ptr(), data64: ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
         let has_in = input.is_some();
@@ -623,10 +813,18 @@ impl Plugin {
             None => [ptr::null_mut(), ptr::null_mut()],
         };
         let in_buf = clap_audio_buffer { data32: in_chans.as_mut_ptr(), data64: ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
+        // The engine's transport while playing; without one the host is free running (spec: plugins/vst3-hosting.md §1).
+        let transport = match self.chunk_song {
+            Some(t) => {
+                self.transport_ev = transport_event(&t);
+                &self.transport_ev as *const clap_event_transport
+            }
+            None => ptr::null(),
+        };
         let p = clap_process {
             steady_time: self.steady,
             frames_count: n,
-            transport: ptr::null(),
+            transport,
             audio_inputs: if has_in { &in_buf } else { ptr::null() },
             audio_outputs: &mut buf,
             audio_inputs_count: u32::from(has_in),
@@ -639,6 +837,141 @@ impl Plugin {
         let loud = left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
         self.sounding = status == CLAP_PROCESS_CONTINUE || status == CLAP_PROCESS_TAIL || (status == CLAP_PROCESS_CONTINUE_IF_NOT_QUIET && loud);
         self.steady += i64::from(n);
+    }
+}
+
+// The hosting layer's view of a CLAP instance (the inherent methods above do the work).
+impl os_host::Plugin for Plugin {
+    fn desc(&self) -> &Descriptor {
+        &self.desc
+    }
+
+    fn activate(&mut self, rate: u32) -> bool {
+        Plugin::activate(self, rate)
+    }
+
+    fn idle(&mut self) {
+        Plugin::idle(self)
+    }
+
+    fn has_editor(&self) -> bool {
+        Plugin::has_editor(self)
+    }
+
+    fn editor_open(&self) -> bool {
+        self.editor
+    }
+
+    fn open_editor(&mut self, parent: *mut c_void) -> Result<(u32, u32), String> {
+        Plugin::open_editor(self, parent)
+    }
+
+    fn editor_size(&self) -> Option<(u32, u32)> {
+        Plugin::editor_size(self)
+    }
+
+    fn close_editor(&mut self) {
+        Plugin::close_editor(self)
+    }
+
+    fn save_state(&self) -> Option<Vec<u8>> {
+        Plugin::save_state(self)
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> bool {
+        Plugin::load_state(self, data)
+    }
+
+    fn latency(&self) -> u32 {
+        if self.latency.is_null() || self.rate == 0 {
+            return 0;
+        }
+        unsafe { (*self.latency).get.map_or(0, |g| g(self.plugin)) }
+    }
+
+    fn use_start_param(&mut self, name: &str) -> bool {
+        Plugin::use_start_param(self, name)
+    }
+
+    fn param_count(&self) -> usize {
+        if self.params.is_null() { 0 } else { unsafe { (*self.params).count.map_or(0, |c| c(self.plugin)) as usize } }
+    }
+
+    fn param_info(&self, index: usize) -> Option<os_host::ParamInfo> {
+        if self.params.is_null() {
+            return None;
+        }
+        unsafe {
+            let mut info: clap_param_info = std::mem::zeroed();
+            if !(*self.params).get_info.is_some_and(|g| g(self.plugin, index as u32, &mut info)) {
+                return None;
+            }
+            let (lo, hi) = (info.min_value, info.max_value);
+            let f = info.flags;
+            Some(os_host::ParamInfo {
+                id: info.id,
+                name: CStr::from_ptr(info.name.as_ptr()).to_string_lossy().into_owned(),
+                unit: String::new(),
+                group: CStr::from_ptr(info.module.as_ptr()).to_string_lossy().into_owned(),
+                min: lo,
+                max: hi,
+                default: if hi > lo { ((info.default_value - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 },
+                steps: if f & CLAP_PARAM_IS_STEPPED != 0 { (hi - lo).round().max(0.0) as u32 } else { 0 },
+                automatable: f & CLAP_PARAM_IS_AUTOMATABLE != 0,
+                read_only: f & CLAP_PARAM_IS_READONLY != 0,
+                hidden: f & CLAP_PARAM_IS_HIDDEN != 0,
+                bypass: f & CLAP_PARAM_IS_BYPASS != 0,
+                enumerated: f & CLAP_PARAM_IS_ENUM != 0,
+            })
+        }
+    }
+
+    fn param_value(&self, id: u32) -> Option<f64> {
+        if self.params.is_null() {
+            return None;
+        }
+        // A change still in the queue is the value the plugin will have.
+        if let Some(&(_, v)) = self.param_queue.iter().rev().find(|q| q.0 == id) {
+            return Some(self.normalize(id, v));
+        }
+        let mut v = 0.0;
+        unsafe { (*self.params).get_value.is_some_and(|g| g(self.plugin, id, &mut v)) }.then(|| self.normalize(id, v))
+    }
+
+    fn param_text(&self, id: u32, value: f64) -> Option<String> {
+        if self.params.is_null() {
+            return None;
+        }
+        let mut buf = [0 as c_char; 128];
+        let plain = self.plain(id, value);
+        let ok = unsafe { (*self.params).value_to_text.is_some_and(|f| f(self.plugin, id, plain, buf.as_mut_ptr(), buf.len() as u32)) };
+        ok.then(|| unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned())
+    }
+
+    fn set_param(&mut self, id: u32, value: f64) -> bool {
+        if self.range(id).is_none() {
+            return false;
+        }
+        let plain = self.plain(id, value);
+        self.param_queue.retain(|q| q.0 != id);
+        self.param_queue.push((id, plain));
+        os_host::wake();
+        true
+    }
+
+    fn take_automation_requests(&mut self) -> Vec<u32> {
+        self.automation_requests()
+    }
+
+    fn take_param_events(&mut self) -> Vec<os_host::ParamEvent> {
+        let raw = std::mem::take(&mut self.param_out);
+        raw.into_iter()
+            .map(|e| match e {
+                OutEv::Begin(id) => os_host::ParamEvent::Begin(id),
+                OutEv::Value(id, v) => os_host::ParamEvent::Value(id, self.normalize(id, v)),
+                OutEv::End(id) => os_host::ParamEvent::End(id),
+            })
+            .collect()
     }
 }
 
@@ -683,6 +1016,18 @@ impl os_engine::Instrument for Plugin {
         self.queue.push(Ev { time: offset, kind: Kind::Choke, key, velocity: 0.0, start: 0.0 });
     }
 
+    fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
+        self.queue.push(Ev { time: offset, kind: Kind::Tune, key, velocity: semitones, start: 0.0 });
+    }
+
+    fn param(&mut self, offset: u32, index: u32, value: f64) {
+        self.automate(offset, index, value);
+    }
+
+    fn transport(&mut self, info: &os_engine::TransportInfo) {
+        self.song = Some(*info);
+    }
+
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         left.fill(0.0);
         right.fill(0.0);
@@ -704,10 +1049,12 @@ impl os_engine::Instrument for Plugin {
             }
         }
         self.queue.sort_by_key(|e| e.time);
+        let song = self.song.take();
         let max = self.max_frames as usize;
         let mut at = 0;
         while at < left.len() {
             let n = (left.len() - at).min(max);
+            self.chunk_song = song.map(|s| s.advanced(at as u64, rate));
             let (l, r) = (&mut left[at..at + n], &mut right[at..at + n]);
             self.process_chunk(l, r);
             at += n;
@@ -739,10 +1086,12 @@ impl os_engine::HostedEffect for Plugin {
             }
         }
         let (mut il, mut ir) = std::mem::take(&mut self.fx_in);
+        let song = self.song.take();
         let max = self.max_frames as usize;
         let mut at = 0;
         while at < left.len() {
             let n = (left.len() - at).min(max);
+            self.chunk_song = song.map(|s| s.advanced(at as u64, rate));
             il.clear();
             ir.clear();
             il.extend_from_slice(&left[at..at + n]);
@@ -755,6 +1104,51 @@ impl os_engine::HostedEffect for Plugin {
 
     fn reset_fx(&mut self) {
         os_engine::Instrument::reset(self);
+    }
+
+    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
+        self.automate(offset, index, value);
+    }
+
+    fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
+        self.song = Some(*info);
+    }
+}
+
+/// The CLAP transport event of an engine transport (spec: plugins/vst3-hosting.md §1): tempo, beat and seconds
+/// timelines, time signature, bar start and number, playing, the loop.
+fn transport_event(t: &os_engine::TransportInfo) -> clap_event_transport {
+    let beats = |b: f64| (b * CLAP_BEATTIME_FACTOR as f64).round() as i64;
+    let secs = |b: f64| (b * 60.0 / t.tempo.max(1.0) * CLAP_SECTIME_FACTOR as f64).round() as i64;
+    let mut flags = CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
+    if t.playing {
+        flags |= CLAP_TRANSPORT_IS_PLAYING;
+    }
+    if t.looping.is_some() {
+        flags |= CLAP_TRANSPORT_IS_LOOP_ACTIVE;
+    }
+    let (ls, le) = t.looping.unwrap_or((0.0, 0.0));
+    clap_event_transport {
+        header: clap_event_header {
+            size: std::mem::size_of::<clap_event_transport>() as u32,
+            time: 0,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_: CLAP_EVENT_TRANSPORT,
+            flags: 0,
+        },
+        flags,
+        song_pos_beats: beats(t.beats),
+        song_pos_seconds: secs(t.beats),
+        tempo: t.tempo,
+        tempo_inc: 0.0,
+        loop_start_beats: beats(ls),
+        loop_end_beats: beats(le),
+        loop_start_seconds: secs(ls),
+        loop_end_seconds: secs(le),
+        bar_start: beats(t.bar_start),
+        bar_number: t.bar,
+        tsig_num: t.numerator,
+        tsig_denom: t.denominator,
     }
 }
 
@@ -778,13 +1172,173 @@ mod tests {
     /// Loads the bundled Open Sampler (built by `cargo run -p bundle-plugins`) when it is there.
     fn open_sampler() -> Option<Arc<Library>> {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for t in ["target-dev", "target"] {
-            let p = root.join(t).join("bundled").join("Open Sampler.clap");
+        // This test's own build folder (target*/debug/deps/x.exe -> target*), then the usual ones.
+        let own = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.parent()?.parent()?.to_path_buf()));
+        for t in own.into_iter().chain(["target-dev", "target"].map(|t| root.join(t))) {
+            let p = t.join("bundled").join("Open Sampler.clap");
             if p.exists() {
                 return Some(Library::load(&p).expect("load"));
             }
         }
         None
+    }
+
+    /// The built-in Open Parametric EQ 2, linked into the test binary.
+    fn open_eq() -> os_host::SharedPlugin {
+        let entry = &open_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Open Parametric EQ 2.clap")) }.expect("linked EQ");
+        os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap()
+    }
+
+    // spec: plugins/vst3-hosting.md §1 (transport)
+    #[test]
+    fn transport_events_follow_the_engine() {
+        let song = os_engine::TransportInfo {
+            playing: true,
+            tempo: 120.0,
+            frame: 120000,
+            beats: 5.0,
+            bar_start: 4.0,
+            bar: 1,
+            numerator: 3,
+            denominator: 4,
+            looping: Some((0.0, 8.0)),
+        };
+        let e = transport_event(&song);
+        assert_eq!((e.header.type_, e.header.space_id, e.header.time), (CLAP_EVENT_TRANSPORT, CLAP_CORE_EVENT_SPACE_ID, 0));
+        assert_eq!(e.header.size as usize, std::mem::size_of::<clap_event_transport>());
+        let all = CLAP_TRANSPORT_HAS_TEMPO
+            | CLAP_TRANSPORT_HAS_BEATS_TIMELINE
+            | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE
+            | CLAP_TRANSPORT_HAS_TIME_SIGNATURE
+            | CLAP_TRANSPORT_IS_PLAYING
+            | CLAP_TRANSPORT_IS_LOOP_ACTIVE;
+        assert_eq!(e.flags, all);
+        // Beats and seconds are fixed point (2^31 per unit); 5 beats at 120 BPM = 2.5 s.
+        assert_eq!((e.song_pos_beats, e.song_pos_seconds), (5 * CLAP_BEATTIME_FACTOR, 5 * CLAP_SECTIME_FACTOR / 2));
+        assert_eq!((e.loop_start_beats, e.loop_end_beats, e.loop_end_seconds), (0, 8 * CLAP_BEATTIME_FACTOR, 4 * CLAP_SECTIME_FACTOR));
+        assert_eq!((e.bar_start, e.bar_number, e.tsig_num, e.tsig_denom), (4 * CLAP_BEATTIME_FACTOR, 1, 3, 4));
+        let stopped = transport_event(&os_engine::TransportInfo { playing: false, looping: None, ..song });
+        assert_eq!(stopped.flags & (CLAP_TRANSPORT_IS_PLAYING | CLAP_TRANSPORT_IS_LOOP_ACTIVE), 0);
+        // A plugin processes with it (and without it on the next block).
+        let p = open_eq();
+        let mut p = p.lock().unwrap();
+        assert!(p.activate(48000));
+        let (mut l, mut r) = (vec![0.1f32; 5000], vec![0.1f32; 5000]);
+        p.transport_fx(&song);
+        p.process_fx(48000, &mut l, &mut r);
+        p.process_fx(48000, &mut l, &mut r);
+    }
+
+    // spec: plugins/plugin-parameters.md §1 (list order = automation index), parametric-eq-2.md (parameter order)
+    #[test]
+    fn parameter_list_follows_the_plugin_order() {
+        let p = open_eq();
+        let p = p.lock().unwrap();
+        let infos: Vec<os_host::ParamInfo> = (0..p.param_count()).filter_map(|i| p.param_info(i)).collect();
+        assert_eq!(infos.len(), 36);
+        let names: Vec<&str> = infos.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            (names[0], names[7], names[14], names[21], names[28], names[35]),
+            ("Band 1 level", "Band 1 freq", "Band 1 width", "Band 1 type", "Band 1 order", "Main level")
+        );
+        assert!(infos.iter().all(|i| i.automatable && !i.hidden));
+        assert_eq!(infos[21].steps, 7);
+        assert_eq!(p.param_value(infos[0].id), Some(0.5), "0 dB is the middle of -18..18");
+        assert_eq!(p.param_text(infos[0].id, 1.0).as_deref(), Some("18.0dB"));
+        assert_eq!(p.param_text(infos[21].id, 6.0 / 7.0).as_deref(), Some("Peaking"));
+    }
+
+    /// Automation reaches the plugin inside `process` by parameter index and normalized value, at its frame offset (a
+    /// stepped parameter gets its nearest step); values no process call took are flushed on `idle`.
+    // spec: plugins/plugin-parameters.md §2
+    #[test]
+    fn parameter_automation_reaches_the_plugin() {
+        let shared = open_eq();
+        let mut p = shared.lock().unwrap();
+        assert!(p.activate(48000));
+        let ids: Vec<u32> = (0..p.param_count()).filter_map(|i| p.param_info(i)).map(|i| i.id).collect();
+        let near = |p: &dyn os_host::Plugin, id: u32, want: f64| (p.param_value(id).unwrap() - want).abs() < 1e-6;
+        let (mut l, mut r) = (vec![0.1f32; 256], vec![0.1f32; 256]);
+        p.param_fx(0, 35, 1.0);
+        p.param_fx(100, 21, 0.4); // 0.4 x 7 = 2.8 -> type 3
+        p.param_fx(300, 0, 0.0); // past this block: the next one
+        p.param_fx(0, 999, 1.0); // unknown: ignored
+        p.process_fx(48000, &mut l, &mut r);
+        assert!(near(&*p, ids[35], 1.0));
+        assert!(near(&*p, ids[21], 3.0 / 7.0), "{:?}", p.param_value(ids[21]));
+        assert!(near(&*p, ids[0], 0.5), "not yet");
+        p.process_fx(48000, &mut l, &mut r);
+        assert!(near(&*p, ids[0], 0.0));
+        // Nothing processes it (a bypassed slot): the next idle hands the newest value over.
+        os_host::Plugin::idle(&mut *p);
+        p.param_fx(0, 7, 0.1);
+        p.param_fx(64, 7, 0.2);
+        os_host::Plugin::idle(&mut *p);
+        assert!(near(&*p, ids[7], 0.2), "{:?}", p.param_value(ids[7]));
+    }
+
+    /// The whole path: a playlist automation clip on "Insert 1, slot 1, Main level" moves the hosted EQ's parameter
+    /// in song playback (spec: plugins/plugin-parameters.md §2-3).
+    #[test]
+    fn automation_clip_moves_a_slot_plugin_parameter() {
+        use os_model::{AutoPoint, Automation, Channel, ChannelKind, Clip, ClipSource, Project};
+        let shared = open_eq();
+        assert!(shared.lock().unwrap().activate(48000));
+        let main = shared.lock().unwrap().param_info(35).unwrap().id;
+        let auto_ch = Channel {
+            index: 0, kind: ChannelKind::Automation, name: None, plugin: None, color: None, enabled: true, volume: 0.78125,
+            pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None, layer_children: vec![], envelopes: Default::default(),
+            rack: Default::default(), plugin_state: None, misc: Default::default(),
+        };
+        // Main level from 0 (-18 dB) to 1 (+18 dB) over 4 beats (120 BPM: 2 s).
+        let auto = Automation {
+            channel: 0,
+            target: Some(os_model::target::slot_param(1, 0, 35)),
+            points: vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(4.0, 1.0)],
+            header: vec![0; 21],
+            tail: vec![],
+        };
+        let project = Project {
+            ppq: 96,
+            tempo: Some(120.0),
+            channels: vec![auto_ch],
+            automations: vec![auto],
+            arrangements: vec![os_model::Arrangement { clips: vec![Clip::new(0, 4 * 96, 0, ClipSource::Channel(0))], ..Default::default() }],
+            mixer: (0..3).map(os_model::MixerTrack::new).collect(),
+            ..Default::default()
+        };
+        let mut lib = os_engine::SampleLibrary::default();
+        let mut e = os_engine::Engine::new(&project, &mut lib, 48000, os_engine::PlayMode::Song);
+        e.set_effect(1, 0, shared.clone());
+        let mut out = vec![0.0f32; 2 * 480];
+        for _ in 0..100 {
+            e.process(&mut out); // 1 s: half way
+        }
+        let v = shared.lock().unwrap().param_value(main).unwrap();
+        assert!((v - 0.5).abs() < 0.01, "half way through the ramp: {v}");
+    }
+
+    /// The hosting layer's parameter surface on a CLAP instance: info, normalized get / set, text, and the edit
+    /// reaching the plugin's state.
+    #[test]
+    fn parameters_through_the_hosting_layer() {
+        let Some(lib) = open_sampler() else { return };
+        let shared = os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap();
+        let mut p = shared.lock().unwrap();
+        assert!(p.param_count() > 20);
+        let infos: Vec<os_host::ParamInfo> = (0..p.param_count()).filter_map(|i| p.param_info(i)).collect();
+        let start = infos.iter().find(|i| i.name == "Sample start offset").expect("start offset parameter");
+        assert!(start.automatable && start.steps == 0);
+        assert!((p.param_value(start.id).unwrap() - start.default).abs() < 1e-6);
+        assert!(p.set_param(start.id, 0.25));
+        assert!(!p.set_param(0xdead_beef, 0.5), "unknown ids are refused");
+        p.idle();
+        assert!((p.param_value(start.id).unwrap() - 0.25).abs() < 1e-3, "{:?}", p.param_value(start.id));
+        assert!(p.param_text(start.id, 0.25).is_some_and(|t| !t.is_empty()));
+        let saved = String::from_utf8_lossy(&p.save_state().unwrap()[8..]).into_owned();
+        assert!(saved.contains("\"start_offset\":{\"f32\":0.25"), "{saved}");
+        assert_eq!(p.desc().uid(), "clap:org.openstudio.open-sampler");
     }
 
     #[test]
@@ -855,9 +1409,9 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         };
         let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
         let project = os_model::Project {
@@ -888,9 +1442,9 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         };
         let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
         let project = os_model::Project {
@@ -929,9 +1483,9 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut lib = os_engine::SampleLibrary::default();
@@ -981,9 +1535,9 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut lib = os_engine::SampleLibrary::default();
@@ -1089,5 +1643,63 @@ mod tests {
     fn serde_string(s: &str) -> String {
         let inner = format!("\"{}\"", s.replace('\\', "\\\\"));
         format!("\"{}\"", inner.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    /// Mono + portamento on the channel (the Misc tab): a second, overlapping note does not start a new attack; the
+    /// sounding note glides to the new key through CLAP tuning expressions, which Open Sampler follows.
+    // spec: audio/channel-voices.md
+    #[test]
+    fn mono_portamento_glides_through_open_sampler() {
+        let entry = &open_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Open Sampler.clap")) }.expect("linked Open Sampler");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        // 4 s of a 441 Hz sine at 48 kHz.
+        let wav = std::env::temp_dir().join("os-clap-porta.wav");
+        let tone: Vec<f32> = (0..48000 * 4).flat_map(|i| { let v = (i as f32 / 48000.0 * 441.0 * std::f32::consts::TAU).sin() * 0.5; [v, v] }).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
+        let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&wav.to_string_lossy()));
+        let mut blob = (state.len() as u64).to_le_bytes().to_vec();
+        blob.extend_from_slice(state.as_bytes());
+        assert!(p.load_state(&blob));
+        assert!(p.activate(48000));
+        let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
+        let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 0.35, ..Default::default() };
+        let ch = os_model::Channel {
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
+            enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc,
+        };
+        let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
+        let mut slib = os_engine::SampleLibrary::default();
+        let mut e = os_engine::Engine::new(&project, &mut slib, 48000, os_engine::PlayMode::Pattern(1));
+        e.clear_schedule();
+        e.set_instrument(0, shared);
+        let mut out = Vec::new();
+        let block = 480;
+        for b in 0..(48000 * 3 / block) {
+            match b {
+                10 => e.note_on(0, 60, 100),
+                // An octave up at 1 s, while 60 is still held.
+                100 => e.note_on(0, 72, 100),
+                _ => {}
+            }
+            let mut buf = vec![0.0f32; block * 2];
+            e.process(&mut buf);
+            out.extend(buf.chunks_exact(2).map(|f| f[0]));
+        }
+        let window = |from_s: f32, to_s: f32| &out[(from_s * 48000.0) as usize..(to_s * 48000.0) as usize];
+        let crossings = |w: &[f32]| w.windows(2).filter(|p| p[0] <= 0.0 && p[1] > 0.0).count() as f32 / (w.len() as f32 / 48000.0);
+        let before = crossings(window(0.5, 0.95));
+        let glide_s = os_engine::laws::slide_seconds(0.35) as f32;
+        let after = crossings(window(1.0 + glide_s + 0.05, 2.0));
+        let mid = crossings(window(1.0 + glide_s * 0.4, 1.0 + glide_s * 0.6));
+        eprintln!("before {before:.1} Hz, mid-glide {mid:.1} Hz, after {after:.1} Hz (glide {glide_s:.3} s)");
+        assert!((before - 441.0).abs() < 4.0, "first note in tune: {before}");
+        assert!((after - 882.0).abs() < 8.0, "glides to the octave: {after}");
+        assert!(mid > 500.0 && mid < 800.0, "between the two keys mid-glide: {mid}");
+        // Legato: the sample keeps playing from where it was (no restart at 1 s): the level stays up through the glide.
+        let peak = |w: &[f32]| w.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let (p0, p1) = (peak(window(0.9, 0.99)), peak(window(1.0, 1.05)));
+        assert!(p1 > p0 * 0.8, "no retrigger gap: {p0} -> {p1}");
     }
 }

@@ -565,6 +565,16 @@ impl Canvas {
         }
     }
 
+    /// Decodes a PNG into `(w, h, 0x00RRGGBB pixels)` for [`Canvas::image`] (alpha is dropped).
+    pub fn decode_png(bytes: &[u8]) -> Option<(usize, usize, Vec<u32>)> {
+        let pm = tiny_skia::Pixmap::decode_png(bytes).ok()?;
+        let px = pm.pixels().iter().map(|p| {
+            let c = p.demultiply();
+            u32::from(c.red()) << 16 | u32::from(c.green()) << 8 | u32::from(c.blue())
+        });
+        Some((pm.width() as usize, pm.height() as usize, px.collect()))
+    }
+
     /// Draws a `w` x `h` image of `0x00RRGGBB` pixels stretched over `r` (nearest neighbour, clipped).
     pub fn image(&mut self, r: Rect, w: usize, h: usize, px: &[u32]) {
         if w == 0 || h == 0 || px.len() < w * h {

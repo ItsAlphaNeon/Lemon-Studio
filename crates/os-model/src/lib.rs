@@ -187,6 +187,9 @@ pub struct Channel {
     pub name: Option<String>,
     /// Generator plugin name for [`ChannelKind::Plugin`].
     pub plugin: Option<String>,
+    /// The plugin's saved state as the project file stores it (event 213), for plugin channels. `None` = not known
+    /// (the file's state is kept as it is). spec: flp/events/plugins.md
+    pub plugin_state: Option<Vec<u8>>,
     /// `None` = default color.
     pub color: Option<Rgb>,
     pub enabled: bool,
@@ -204,6 +207,135 @@ pub struct Channel {
     pub envelopes: [Envelope; 5],
     /// Channel rack state saved with the channel.
     pub rack: ChannelRack,
+    /// The plugin window's Misc tab settings (polyphony, cut groups, arpeggiator, echo, root note...).
+    pub misc: ChannelMisc,
+}
+
+/// A channel's Misc tab settings (spec: ui/plugin-window.md "Misc tab"; storage: flp/events/channels.md "Misc
+/// settings"). Knobs are 0.0..=1.0; bipolar knobs (levels, tracking, echo pan / mod / pitch) are -1.0..=1.0 with 0
+/// = centre.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChannelMisc {
+    /// Levels adjustment: panning, volume, Mod X, Mod Y (bipolar).
+    pub levels: [f32; 4],
+    /// Maximum polyphony; 0 = unlimited.
+    pub max_poly: u32,
+    /// Slide (portamento) time knob.
+    pub slide: f32,
+    /// Portamento: every new note slides from the previous one.
+    pub porta: bool,
+    /// Mono: one voice at a time.
+    pub mono: bool,
+    /// Note gate, time shift and swing knobs (gate 1.0 = off).
+    pub gate: f32,
+    pub shift: f32,
+    pub swing: f32,
+    /// Full portamento.
+    pub full_porta: bool,
+    /// Velocity tracking (0) and key tracking (1).
+    pub tracking: [Tracking; 2],
+    /// Cut group this channel cuts, and the group that cuts it; 0 = none.
+    pub cut: u32,
+    pub cut_by: u32,
+    pub arp: Arpeggio,
+    pub echo: Echo,
+    /// Root note (MIDI key, 60 = C5).
+    pub root: u8,
+    /// Follows the main (project) pitch.
+    pub main_pitch: bool,
+    /// Adds the root note to played keys.
+    pub add_key: bool,
+    /// Fine tuning, cents (-100..=100).
+    pub fine: i32,
+}
+
+impl Default for ChannelMisc {
+    /// A new channel's settings.
+    fn default() -> Self {
+        ChannelMisc {
+            levels: [0.0; 4],
+            max_poly: 0,
+            slide: 0.35,
+            porta: false,
+            mono: false,
+            gate: 1.0,
+            shift: 0.0,
+            swing: 1.0,
+            full_porta: true,
+            tracking: [Tracking::default(); 2],
+            cut: 0,
+            cut_by: 0,
+            arp: Arpeggio::default(),
+            echo: Echo::default(),
+            root: 60,
+            main_pitch: true,
+            add_key: false,
+            fine: 0,
+        }
+    }
+}
+
+/// One tracking page of the Misc tab (velocity or key).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tracking {
+    /// Middle point (velocity or MIDI key).
+    pub mid: u8,
+    /// To panning, Mod X, Mod Y (bipolar).
+    pub pan: f32,
+    pub mod_x: f32,
+    pub mod_y: f32,
+}
+
+impl Default for Tracking {
+    fn default() -> Self {
+        Tracking { mid: 60, pan: 0.0, mod_x: 0.0, mod_y: 0.0 }
+    }
+}
+
+/// The Misc tab's arpeggiator.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Arpeggio {
+    /// 0 off, 1 up, 2 down, 3 up-down sticky, 4 up-down bounce, 5 random.
+    pub direction: u8,
+    /// Time and gate knobs.
+    pub time: f32,
+    pub gate: f32,
+    /// Range in octaves (1..).
+    pub range: u32,
+    /// Note repeat; 0 = none.
+    pub repeat: u32,
+    pub slide: bool,
+    /// Chord list index (0 = auto with sustain).
+    pub chord: u32,
+}
+
+impl Default for Arpeggio {
+    fn default() -> Self {
+        Arpeggio { direction: 0, time: 0.58, gate: 1.0, range: 1, repeat: 0, slide: false, chord: 0 }
+    }
+}
+
+/// The Misc tab's echo delay.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Echo {
+    /// Feedback and time knobs.
+    pub feed: f32,
+    pub time: f32,
+    /// Panning, Mod X, Mod Y and pitch of each echo (bipolar).
+    pub pan: f32,
+    pub mod_x: f32,
+    pub mod_y: f32,
+    pub pitch: f32,
+    /// Number of echoes (1..).
+    pub echoes: u32,
+    pub ping_pong: bool,
+    pub fat: bool,
+}
+
+impl Default for Echo {
+    fn default() -> Self {
+        Echo { feed: 0.0, time: 0.45, pan: 0.0, mod_x: 0.0, mod_y: 0.0, pitch: 0.0, echoes: 4, ping_pong: false, fat: false }
+    }
 }
 
 /// Channel rack settings of one channel (spec: flp/events/channels.md).
@@ -451,6 +583,23 @@ impl MixerTrack {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotPlugin {
     pub name: String,
+    pub state: Vec<u8>,
+}
+
+/// A third-party plugin (CLAP, VST3, VST2) as a project file names it: its format, identity and saved state.
+/// spec: flp/events/plugins.md §4
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginRef {
+    /// `clap`, `vst3` or `vst2`.
+    pub format: String,
+    /// VST3: the class id as 32 uppercase hex digits; VST2: the unique id as 8 hex digits; CLAP: empty when the file
+    /// does not store it (the plugin is then found by path and name).
+    pub id: String,
+    pub name: String,
+    pub vendor: String,
+    /// The plugin file.
+    pub path: String,
+    /// The plugin's own saved state.
     pub state: Vec<u8>,
 }
 
@@ -719,6 +868,20 @@ pub mod target {
         u32::from(0x7000 + track * 64) << 16 | 0x1F00 | u32::from(id)
     }
 
+    /// Plugin parameters are `0x8000 + k`, k = the parameter's index in the plugin's list
+    /// (spec: plugins/plugin-parameters.md §3).
+    pub const PLUGIN_PARAM: u16 = 0x8000;
+
+    /// Parameter `k` of channel `ch`'s plugin.
+    pub fn channel_param(ch: u16, k: u16) -> u32 {
+        channel(ch, PLUGIN_PARAM | (k & 0x7FFF))
+    }
+
+    /// Parameter `k` of the plugin in mixer track `track`'s slot `slot` (0..9).
+    pub fn slot_param(track: u16, slot: u8, k: u16) -> u32 {
+        u32::from(0x7000 + track * 64 + u16::from(slot)) << 16 | u32::from(PLUGIN_PARAM | (k & 0x7FFF))
+    }
+
     /// What a target id names.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Target {
@@ -728,6 +891,10 @@ pub mod target {
         MixerVolume(u16),
         MixerPan(u16),
         Tempo,
+        /// Channel, parameter index of its plugin.
+        ChannelParam(u16, u16),
+        /// Mixer track, slot, parameter index of the slot's plugin.
+        SlotParam(u16, u8, u16),
         Other(u32),
     }
 
@@ -737,6 +904,15 @@ pub mod target {
         }
         let hi = (t >> 16) as u16;
         let lo = t as u16;
+        if (0x7000..0x7000 + 128 * 64).contains(&hi) && lo >= PLUGIN_PARAM {
+            let loc = hi - 0x7000;
+            if loc % 64 < 10 {
+                return Target::SlotParam(loc / 64, (loc % 64) as u8, lo - PLUGIN_PARAM);
+            }
+        }
+        if hi < 0x4000 && lo >= PLUGIN_PARAM {
+            return Target::ChannelParam(hi, lo - PLUGIN_PARAM);
+        }
         if (0x7000..0x7000 + 127 * 64).contains(&hi) && (hi - 0x7000) % 64 == 0 && lo >> 8 == 0x1F {
             let track = (hi - 0x7000) / 64;
             return match lo as u8 {
@@ -759,6 +935,27 @@ pub mod target {
     /// Bipolar targets centre at 0.5.
     pub fn bipolar(t: u32) -> bool {
         matches!(decode(t), Target::ChannelPan(_) | Target::ChannelPitch(_) | Target::MixerPan(_))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // spec: plugins/plugin-parameters.md §3
+        #[test]
+        fn plugin_parameter_targets() {
+            assert_eq!(channel_param(2, 5), 0x0002_8005);
+            assert_eq!(decode(0x0002_8005), Target::ChannelParam(2, 5));
+            // Insert 1, slot 0: location 0x7040; slot 9 of the master: 0x7009.
+            assert_eq!(slot_param(1, 0, 13), 0x7040_800D);
+            assert_eq!(decode(0x7040_800D), Target::SlotParam(1, 0, 13));
+            assert_eq!(decode(slot_param(0, 9, 0)), Target::SlotParam(0, 9, 0));
+            assert_eq!(decode(slot_param(125, 3, 0x7FFF)), Target::SlotParam(125, 3, 0x7FFF));
+            // The mixer track's own controls are not slot parameters.
+            assert_eq!(decode(mixer(1, MIXER_VOLUME)), Target::MixerVolume(1));
+            assert_eq!(decode(channel(3, CHANNEL_PAN)), Target::ChannelPan(3));
+            assert!(!bipolar(slot_param(1, 0, 0)));
+        }
     }
 }
 

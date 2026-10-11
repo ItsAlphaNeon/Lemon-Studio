@@ -15,5 +15,5 @@ pub mod sample;
 pub mod wav;
 
 pub use engine::{Engine, EngineReport, PlayMode};
-pub use instrument::{HostedEffect, Instrument, SharedEffect, SharedInstrument};
+pub use instrument::{HostedEffect, Instrument, SharedEffect, SharedInstrument, TransportInfo};
 pub use sample::{Sample, SampleLibrary};

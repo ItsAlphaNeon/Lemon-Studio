@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use os_model::{MixerTrack, Rgb, SlotPlugin};
+use os_model::{MixerTrack, Rgb};
 
 use crate::app::{App, State, Win};
 use crate::playlist::{Cmd, EditTarget, Mark, PItem, Popup};
@@ -165,7 +165,7 @@ pub fn receives(s: &State, n: u16) -> bool {
 /// The slot's shown name (renamed, else the plugin's name).
 pub fn slot_name(s: &State, t: u16, slot: u8) -> Option<String> {
     let p = track(s, t)?.slots.get(usize::from(slot))?.as_ref()?;
-    Some(s.mixer.slot_names.get(&(t, slot)).cloned().unwrap_or_else(|| p.name.clone()))
+    Some(s.mixer.slot_names.get(&(t, slot)).cloned().unwrap_or_else(|| crate::project_plugins::slot_title(p)))
 }
 
 /// "Volume: 100%  0.0dB  1.00" (§4); `label` = "Volume" or "To Insert 3".
@@ -453,9 +453,8 @@ pub fn add_track(s: &mut State, at: Option<u16>) -> u16 {
     // The new track takes number n; n.. move one up (the hidden last track stays last).
     let len = s.project.mixer.len() as u16;
     s.project.mixer.push(MixerTrack::new(len));
-    if n < last {
-        shift_tracks(s, n, len, 1);
-    }
+    // The hidden last track moves too, keeping what it had (spec: flp/events/mixer.md "Adding tracks").
+    shift_tracks(s, n, len, 1);
     let fresh = MixerTrack::new(n);
     if let Some(m) = track_mut(s, n) {
         *m = fresh;
@@ -542,17 +541,19 @@ fn delete_track(s: &mut State, n: u16) -> Option<String> {
         s.mixer.pending.push(FxReq::Delete { track: n, slot: k });
     }
     s.mixer.slot_names.retain(|(t, _), _| *t != n);
-    let m = move |t: u16| if t > n && t < len { t - 1 } else { t };
+    // The hidden last track stays last; the default track comes before it (spec: flp/events/mixer.md "The last track").
+    let hidden = len - 1;
+    let m = move |t: u16| if t > n && t < hidden { t - 1 } else { t };
     let old = s.project.mixer.clone();
     for t in &old {
-        if t.index > n {
+        if t.index > n && t.index < hidden {
             if let Some(dst) = s.project.mixer.iter_mut().find(|x| x.index == t.index - 1) {
                 *dst = MixerTrack { index: t.index - 1, ..t.clone() };
             }
         }
     }
-    if let Some(last) = s.project.mixer.iter_mut().find(|x| x.index == len - 1) {
-        *last = MixerTrack::new(len - 1);
+    if let Some(last) = s.project.mixer.iter_mut().find(|x| x.index == hidden - 1) {
+        *last = MixerTrack::new(hidden - 1);
     }
     for t in s.project.mixer.iter_mut() {
         for r in t.routes.iter_mut() {
@@ -566,7 +567,7 @@ fn delete_track(s: &mut State, n: u16) -> Option<String> {
         c.mixer_track = m(c.mixer_track);
     }
     let mut map = Vec::new();
-    for t in n + 1..len {
+    for t in n + 1..hidden {
         for k in 0..10u8 {
             map.push(((t, k), (t - 1, k)));
         }
@@ -734,7 +735,7 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
         PItem::not_yet("Flip with spare state"),
         PItem::head("Parameters"),
         PItem::not_yet("Link all parameters..."),
-        PItem::not_yet("Browse parameters"),
+        PItem::new("Browse parameters", Cmd::Param(crate::params::PCmd::Browse(crate::plugins::fx_key(s.selected_mixer, slot)))),
         PItem::head("CPU"),
         PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
         PItem::not_yet("Smart disable"),
@@ -840,7 +841,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
             let t = s.selected_mixer;
             let Some(&nm) = s.hosted_effects.get(index) else { return None };
             if let Some(m) = track_mut(s, t) {
-                m.slots[usize::from(slot)] = Some(SlotPlugin { name: nm.to_string(), state: Vec::new() });
+                m.slots[usize::from(slot)] = Some(crate::plugins::new_slot(nm));
                 m.slot_on[usize::from(slot)] = true;
                 m.slot_mix[usize::from(slot)] = 1.0;
             }
@@ -1019,7 +1020,7 @@ impl App {
     fn open_fx(&mut self, track: u16, slot: u8) {
         let key = crate::plugins::fx_key(track, slot);
         if !self.plugins.hosted.contains_key(&key) {
-            self.state.message = Some("This slot's plugin is not hosted (OpenStudio's own effects have no window yet)".into());
+            self.state.message = Some("This slot's plugin is not hosted (no OpenStudio version of it yet)".into());
             return;
         }
         #[cfg(windows)]
@@ -1039,8 +1040,9 @@ impl App {
 pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate::plugin_window::ChannelInfo> {
     let (t, k) = crate::plugins::fx_of(key)?;
     let m = p.mixer.iter().find(|m| m.index == t)?;
-    let name = ui.slot_names.get(&(t, k)).cloned().or_else(|| m.slots.get(usize::from(k))?.as_ref().map(|s| s.name.clone()))?;
+    let name = ui.slot_names.get(&(t, k)).cloned().or_else(|| m.slots.get(usize::from(k))?.as_ref().map(crate::project_plugins::slot_title))?;
     Some(crate::plugin_window::ChannelInfo {
+        misc: None,
         name,
         target: m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Insert {t}") }),
         enabled: m.slot_on[usize::from(k)],

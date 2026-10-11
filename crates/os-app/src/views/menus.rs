@@ -322,6 +322,7 @@ pub fn works(menu: usize, item: &Item) -> bool {
         || (menu == PATTERNS && crate::patterns::Cmd::from_label(item.label).is_some())
         || (menu == VIEW && (win_of(item.label).is_some() || item.label == "Plugin picker"))
         || (menu == EDIT_MENU && item.label == "Undo")
+        || crate::params::menu_handles(item.label)
 }
 
 fn item_action(menu: usize, i: usize, item: &Item) -> Action {

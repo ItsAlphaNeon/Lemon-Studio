@@ -4,10 +4,13 @@ mod app;
 mod browser;
 mod icons;
 mod knobs;
+mod loading;
 mod logo;
 mod meters;
 mod mixer;
+mod osc3;
 mod monitor;
+mod params;
 mod piano;
 mod rack;
 mod patterns;
@@ -15,6 +18,10 @@ mod playlist;
 #[cfg(windows)]
 mod plugin_window;
 mod plugins;
+mod project_plugins;
+mod presets;
+mod misc;
+mod misc_page;
 mod transport;
 mod views;
 
@@ -300,6 +307,17 @@ impl ApplicationHandler for Shell {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(window) = self.window.clone() else { return };
         let scale = window.scale_factor() as f32;
+        // A project is loading (spec: ui/project-loading.md §2): presses, wheel turns and drops wait until it is done;
+        // releases still go through so nothing stays held.
+        let press = match &event {
+            WindowEvent::MouseInput { state, .. } => *state == ElementState::Pressed,
+            WindowEvent::KeyboardInput { event, .. } => event.state == ElementState::Pressed,
+            WindowEvent::MouseWheel { .. } | WindowEvent::DroppedFile(_) => true,
+            _ => false,
+        };
+        if press && self.app.loading() {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::ModifiersChanged(m) => {
@@ -501,8 +519,13 @@ impl ApplicationHandler for Shell {
                             // more buffers in turn (age 2 and up): such a buffer lacks what was painted since
                             // it was last shown, so it gets the whole canvas.
                             let age = buf.age();
+                            // A docked plugin window moved: what it uncovered needs the whole canvas.
+                            #[cfg(windows)]
+                            let exposed = crate::plugin_window::take_exposed();
+                            #[cfg(not(windows))]
+                            let exposed = false;
                             match damage {
-                                Some(Some(r)) if age == 1 => {
+                                Some(Some(r)) if age == 1 && !exposed => {
                                     let px = canvas.device_rect(r);
                                     canvas.copy_region_to_xrgb_at(&mut buf, stride, px, off);
                                     match (NonZeroU32::new(px.2 as u32), NonZeroU32::new(px.3 as u32)) {

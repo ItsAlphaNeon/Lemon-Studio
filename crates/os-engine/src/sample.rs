@@ -57,6 +57,33 @@ fn probe() -> &'static Probe {
     })
 }
 
+/// Size and modification time of a file: a cached decode is reused only while both match.
+type Stamp = (u64, Option<std::time::SystemTime>);
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()))
+}
+
+/// `load`, shared: while any holder keeps a decoded file alive, loading the same unchanged file again returns that
+/// copy instead of decoding it again. Project loading decodes samples on worker threads this way so that the plugin
+/// instances made afterwards on the UI thread find them ready (spec: ui/project-loading.md).
+pub fn load_shared(path: &Path) -> Result<Arc<Sample>, SampleError> {
+    static LIVE: OnceLock<std::sync::Mutex<HashMap<PathBuf, (std::sync::Weak<Sample>, Stamp)>>> = OnceLock::new();
+    let live = LIVE.get_or_init(Default::default);
+    let st = stamp(path);
+    if let (Some(st), Ok(map)) = (st, live.lock()) {
+        if let Some(s) = map.get(path).filter(|(_, s)| *s == st).and_then(|(w, _)| w.upgrade()) {
+            return Ok(s);
+        }
+    }
+    let s = Arc::new(load(path)?);
+    if let (Some(st), Ok(mut map)) = (st, live.lock()) {
+        map.retain(|_, (w, _)| w.strong_count() > 0);
+        map.insert(path.to_owned(), (Arc::downgrade(&s), st));
+    }
+    Ok(s)
+}
+
 /// Decodes a WAV (PCM or Vorbis-in-WAV) / FLAC / Ogg Vorbis / WavPack / MP3 / AIFF file.
 pub fn load(path: &Path) -> Result<Sample, SampleError> {
     let bytes = std::fs::read(path).map_err(|source| SampleError::Io { path: path.to_owned(), source })?;
@@ -244,8 +271,9 @@ impl SampleLibrary {
                 self.failures.push((project_path.into(), "factory folder not set".into()));
                 None
             }
-            Some(p) => match load(&p) {
-                Ok(s) => Some(Arc::new(s)),
+            // Shared with the other users of the file (plugin instances, playlist waveforms).
+            Some(p) => match load_shared(&p) {
+                Ok(s) => Some(s),
                 Err(e) => {
                     self.failures.push((project_path.into(), e.to_string()));
                     None
@@ -277,5 +305,22 @@ mod tests {
         let tail = &s.left[9000..12000];
         let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
         assert!((rms - 0.25 / 2f32.sqrt()).abs() < 0.02, "sine rms {rms}");
+    }
+
+    /// A kept decode is handed out again; once every holder dropped it, or the file changed, the file is decoded anew.
+    #[test]
+    fn shared_loads_reuse_a_live_decode() {
+        let path = std::env::temp_dir().join(format!("os_engine_shared_{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&path).unwrap(), 48000, &[0.25; 960]).unwrap();
+        let a = load_shared(&path).unwrap();
+        let b = load_shared(&path).unwrap();
+        assert!(Arc::ptr_eq(&a, &b), "the live decode is shared");
+        drop((a, b));
+        let c = load_shared(&path).unwrap();
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&path).unwrap(), 48000, &[0.5; 1920]).unwrap();
+        let d = load_shared(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(!Arc::ptr_eq(&c, &d), "a changed file is decoded again");
+        assert_eq!(d.frames(), 960);
     }
 }
