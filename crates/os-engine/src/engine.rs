@@ -15,6 +15,9 @@ use crate::instrument::{SharedInstrument, Slot};
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
+mod param_auto;
+pub use param_auto::PARAM_STEP;
+
 /// What to play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayMode {
@@ -370,6 +373,8 @@ pub struct Engine {
     autos: Vec<AutoClip>,
     curves: Vec<os_model::Automation>,
     frames_per_beat: f64,
+    /// Clips on plugin parameters: this block's events.
+    params: param_auto::ParamAuto,
     pub report: EngineReport,
 }
 
@@ -537,6 +542,7 @@ impl Engine {
                 if !clip_audible(project, c) {
                     continue;
                 }
+                // Plugin parameters play (spec: plugins/plugin-parameters.md §2); tempo and unknown targets do not.
                 if matches!(target, os_model::target::Target::Other(_) | os_model::target::Target::Tempo) {
                     report.automation_clips_ignored += 1;
                     continue;
@@ -561,6 +567,7 @@ impl Engine {
         autos.sort_by_key(|a| a.start);
 
         Engine {
+            params: param_auto::ParamAuto::new(autos.iter().any(|a| param_auto::is_param(a.target))),
             autos,
             curves,
             frames_per_beat: f64::from(rate) * 60.0 / tempo.max(1.0),
@@ -746,6 +753,7 @@ impl Engine {
         self.frame = frame;
         self.next_trigger = self.triggers.partition_point(|t| t.frame < frame);
         self.sync_controls(frame);
+        self.params.forget();
     }
 
     /// Applies one control point at a time as playback reaches it, smoothing volume and pan.
@@ -881,7 +889,8 @@ impl Engine {
                         m.matrix = m.compute_matrix();
                     }
                 }
-                Target::Tempo | Target::Other(_) => {}
+                // Plugin parameters: sampled through the block by `run_param_automation`.
+                Target::ChannelParam(..) | Target::SlotParam(..) | Target::Tempo | Target::Other(_) => {}
             }
         }
     }
@@ -890,6 +899,7 @@ impl Engine {
     pub fn process(&mut self, out: &mut [f32]) {
         let frames = out.len() / 2;
         self.run_automation(frames);
+        self.run_param_automation(frames);
         for b in &mut self.bus {
             b.clear();
             b.resize(frames * 2, 0.0);
@@ -918,6 +928,7 @@ impl Engine {
         for &t in &self.order {
             let (to, from) = (self.tracks[t].matrix, self.tracks[t].cur);
             self.tracks[t].cur = to;
+            self.params.deliver_slots(t, &self.tracks[t].effects);
             let mut buf = std::mem::take(&mut self.bus[t]);
             let rate = self.rate;
             let (dry, l, r) = (&mut self.fx_dry, &mut self.scratch.0, &mut self.scratch.1);
@@ -1048,7 +1059,14 @@ impl Engine {
         let mut active = false;
         for (c, ch) in self.channels.iter().enumerate() {
             let Some(inst) = &ch.instrument.0 else { continue };
-            let Ok(mut inst) = inst.try_lock() else { continue };
+            let Ok(mut inst) = inst.try_lock() else {
+                self.params.resend_channel(c);
+                continue;
+            };
+            // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md §2).
+            for (off, index, value) in self.params.channel_span(c, a, b) {
+                inst.param(off, index, value);
+            }
             for &(_, off, key, vel, start) in self.inst_events.iter().filter(|e| e.0 == c) {
                 let off = off.min(n.saturating_sub(1) as u32);
                 if vel == CHOKE {

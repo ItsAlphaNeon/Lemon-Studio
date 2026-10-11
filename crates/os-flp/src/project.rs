@@ -2382,6 +2382,35 @@ mod tests {
         assert!(!events_of(&file2).unwrap().iter().any(|e| e.id == id::CH_ZIPPED || e.id == id::LOOP_CHANNEL));
     }
 
+    /// Automation clips on plugin parameters (a channel plugin's, a mixer slot's) are written as 227 links with the
+    /// parameter target and read back; moving the channel renumbers the channel-plugin target and keeps its index
+    /// (spec: plugins/plugin-parameters.md §3, §7).
+    #[test]
+    fn plugin_parameter_automation_round_trips() {
+        use os_model::target::{channel_param, decode, slot_param, Target};
+        let mut p = new_project();
+        for (i, name) in [(2u16, "Kick - Band 1 level"), (3, "EQ - Insert 1 - Band 2 freq")] {
+            p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(i, name, 0) });
+        }
+        p.automations.push(new_automation(2, channel_param(1, 35), 0.5, 4.0));
+        p.automations.push(new_automation(3, slot_param(1, 0, 8), 0.25, 4.0));
+        let mut arr = default_arrangement();
+        arr.clips = vec![Clip::new(0, 384, 0, ClipSource::Channel(2)), Clip::new(0, 384, 1, ClipSource::Channel(3))];
+        p.arrangements = vec![arr];
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.automations, p.automations);
+        let link = events_of(&file).unwrap().iter().filter(|e| e.id == id::AUTO_LINK).filter_map(|e| e.data()).map(|d| d.to_vec()).collect::<Vec<_>>();
+        assert_eq!(&link[1][8..12], &0x7040_8008u32.to_le_bytes());
+        // Swap the two sampler channels: the plugin target follows its channel.
+        let mut m = back.clone();
+        m.reorder_channels(&[1, 0, 2, 3]);
+        apply(&m, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(again.automations[0].target.map(decode), Some(Target::ChannelParam(0, 35)));
+        assert_eq!(again.automations[1].target.map(decode), Some(Target::SlotParam(1, 0, 8)));
+    }
+
     /// Deleting, cloning and moving channels rewrites the blocks in model order and renumbers notes, control
     /// points, automation links and playlist clips (spec: flp/events/channels.md "Deleting, cloning and moving").
     #[test]

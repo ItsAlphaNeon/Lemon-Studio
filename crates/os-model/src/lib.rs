@@ -719,6 +719,20 @@ pub mod target {
         u32::from(0x7000 + track * 64) << 16 | 0x1F00 | u32::from(id)
     }
 
+    /// Plugin parameters are `0x8000 + k`, k = the parameter's index in the plugin's list
+    /// (spec: plugins/plugin-parameters.md §3).
+    pub const PLUGIN_PARAM: u16 = 0x8000;
+
+    /// Parameter `k` of channel `ch`'s plugin.
+    pub fn channel_param(ch: u16, k: u16) -> u32 {
+        channel(ch, PLUGIN_PARAM | (k & 0x7FFF))
+    }
+
+    /// Parameter `k` of the plugin in mixer track `track`'s slot `slot` (0..9).
+    pub fn slot_param(track: u16, slot: u8, k: u16) -> u32 {
+        u32::from(0x7000 + track * 64 + u16::from(slot)) << 16 | u32::from(PLUGIN_PARAM | (k & 0x7FFF))
+    }
+
     /// What a target id names.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Target {
@@ -728,6 +742,10 @@ pub mod target {
         MixerVolume(u16),
         MixerPan(u16),
         Tempo,
+        /// Channel, parameter index of its plugin.
+        ChannelParam(u16, u16),
+        /// Mixer track, slot, parameter index of the slot's plugin.
+        SlotParam(u16, u8, u16),
         Other(u32),
     }
 
@@ -737,6 +755,15 @@ pub mod target {
         }
         let hi = (t >> 16) as u16;
         let lo = t as u16;
+        if (0x7000..0x7000 + 128 * 64).contains(&hi) && lo >= PLUGIN_PARAM {
+            let loc = hi - 0x7000;
+            if loc % 64 < 10 {
+                return Target::SlotParam(loc / 64, (loc % 64) as u8, lo - PLUGIN_PARAM);
+            }
+        }
+        if hi < 0x4000 && lo >= PLUGIN_PARAM {
+            return Target::ChannelParam(hi, lo - PLUGIN_PARAM);
+        }
         if (0x7000..0x7000 + 127 * 64).contains(&hi) && (hi - 0x7000) % 64 == 0 && lo >> 8 == 0x1F {
             let track = (hi - 0x7000) / 64;
             return match lo as u8 {
@@ -759,6 +786,27 @@ pub mod target {
     /// Bipolar targets centre at 0.5.
     pub fn bipolar(t: u32) -> bool {
         matches!(decode(t), Target::ChannelPan(_) | Target::ChannelPitch(_) | Target::MixerPan(_))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // spec: plugins/plugin-parameters.md §3
+        #[test]
+        fn plugin_parameter_targets() {
+            assert_eq!(channel_param(2, 5), 0x0002_8005);
+            assert_eq!(decode(0x0002_8005), Target::ChannelParam(2, 5));
+            // Insert 1, slot 0: location 0x7040; slot 9 of the master: 0x7009.
+            assert_eq!(slot_param(1, 0, 13), 0x7040_800D);
+            assert_eq!(decode(0x7040_800D), Target::SlotParam(1, 0, 13));
+            assert_eq!(decode(slot_param(0, 9, 0)), Target::SlotParam(0, 9, 0));
+            assert_eq!(decode(slot_param(125, 3, 0x7FFF)), Target::SlotParam(125, 3, 0x7FFF));
+            // The mixer track's own controls are not slot parameters.
+            assert_eq!(decode(mixer(1, MIXER_VOLUME)), Target::MixerVolume(1));
+            assert_eq!(decode(channel(3, CHANNEL_PAN)), Target::ChannelPan(3));
+            assert!(!bipolar(slot_param(1, 0, 0)));
+        }
     }
 }
 

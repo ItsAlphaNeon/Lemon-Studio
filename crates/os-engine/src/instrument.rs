@@ -33,6 +33,11 @@ pub trait Instrument: Send {
     /// Silences the instrument at once: every voice, tail and queued note is dropped (Stop). Called with no
     /// stream processing the instrument.
     fn reset(&mut self) {}
+    /// Sets parameter `index` (its position in the plugin's parameter list) to normalized `value` (0..1) `offset`
+    /// frames into the next `process` call (automation; spec: plugins/plugin-parameters.md §2). Default: ignored.
+    fn param(&mut self, offset: u32, index: u32, value: f64) {
+        let _ = (offset, index, value);
+    }
 }
 
 pub type SharedInstrument = Arc<Mutex<dyn Instrument>>;
@@ -56,6 +61,11 @@ pub trait HostedEffect: Send {
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
     /// Drops tails and delay lines (Stop).
     fn reset_fx(&mut self) {}
+    /// [`Instrument::param`] for effects: parameter `index` to normalized `value`, `offset` frames into the next
+    /// `process_fx` call.
+    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
+        let _ = (offset, index, value);
+    }
 }
 
 pub type SharedEffect = Arc<Mutex<dyn HostedEffect>>;
