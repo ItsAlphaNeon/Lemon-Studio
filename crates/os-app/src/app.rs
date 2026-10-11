@@ -27,6 +27,8 @@ pub enum Win {
     PianoRoll,
     Browser,
     Plugin,
+    /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
+    Hosted(usize),
 }
 
 impl Win {
@@ -324,6 +326,11 @@ impl Ui<'_> {
         self.hover.is_some() && rect.contains(self.mouse.0, self.mouse.1)
     }
 
+    /// Hits registered so far this frame.
+    pub fn hit_count(&self) -> usize {
+        self.hits.len()
+    }
+
     /// Register a hit region; returns whether it is hovered (topmost last frame).
     pub fn hit(&mut self, rect: Rect, action: Action, hint: impl Into<Cow<'static, str>>) -> bool {
         let hovered = self.hover.as_ref() == Some(&action) && rect.contains(self.mouse.0, self.mouse.1);
@@ -543,6 +550,12 @@ pub struct App {
     pub theme: Theme,
     pub transport: Transport,
     pub hits: Vec<Hit>,
+    /// Rects of last frame's overlays (menus, popups...): docked plugin windows are clipped under them.
+    overlays: Vec<Rect>,
+    /// Where the canvas sits in the main window's client area (physical px; the restored window's border).
+    pub canvas_off: (i32, i32),
+    /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
+    popup_lift: Option<usize>,
     pub bars: Vec<Bar>,
     pub hover: Option<Action>,
     /// Action under the cursor while the left button is held (pressed look of buttons).
@@ -655,6 +668,9 @@ impl App {
             theme: load_theme(),
             transport,
             hits: Vec::new(),
+            overlays: Vec::new(),
+            canvas_off: (0, 0),
+            popup_lift: None,
             bars: Vec::new(),
             hover: None,
             pressed: None,
@@ -895,9 +911,12 @@ impl App {
         #[cfg(windows)]
         if let Some(row) = self.state.pending_open.take().filter(|r| self.state.hosted_rows.contains(r)) {
             if let Some(info) = channel_info(&self.state.project, row) {
-                if let Err(e) = self.plugins.open_window(row, info) {
-                    self.state.message = Some(format!("Plugin: {e}"));
-                    self.invalidate();
+                match self.plugins.open_window(row, info) {
+                    Ok(()) => self.state.raise(Win::Hosted(row)),
+                    Err(e) => {
+                        self.state.message = Some(format!("Plugin: {e}"));
+                        self.invalidate();
+                    }
                 }
             }
         }
@@ -907,7 +926,10 @@ impl App {
             for k in crate::plugin_window::take_keys() {
                 use winit::platform::scancode::PhysicalKeyExtScancode;
                 if let winit::keyboard::PhysicalKey::Code(code) = winit::keyboard::PhysicalKey::from_scancode(k.scancode) {
-                    self.typing_key(code, k.pressed, k.ctrl, k.alt);
+                    // Space keeps playing / stopping the song (the typing keyboard does not use it).
+                    if !self.typing_key(code, k.pressed, k.ctrl, k.alt) && k.pressed && code == winit::keyboard::KeyCode::Space {
+                        self.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), k.ctrl, k.alt);
+                    }
                 }
             }
             let project = &self.state.project;
@@ -917,6 +939,22 @@ impl App {
                 let chans = &mut self.state.project.channels;
                 match r {
                     Request::Close(_) => continue,
+                    Request::Raise(row) => {
+                        // A click in a plugin window closes an open app popup, as a click elsewhere does.
+                        if self.state.playlist.popup.take().is_some() {
+                            self.invalidate();
+                        }
+                        self.state.raise(Win::Hosted(row));
+                        continue;
+                    }
+                    Request::Menu(row, x, y) => {
+                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let (lx, ly) = self.screen_to_canvas(x, y);
+                        self.state.playlist.popup = Some(crate::playlist::plugin_window_menu(row, detached, lx, ly));
+                        self.popup_lift = detached.then_some(row);
+                        self.invalidate();
+                        continue;
+                    }
                     Request::ToggleOn(row) => chans.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled),
                     Request::Volume(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.volume = v),
                     Request::Pan(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.pan = v),
@@ -938,6 +976,78 @@ impl App {
                 self.state.piano.dirty = true;
                 self.invalidate();
             }
+            self.clip_docked();
+        }
+    }
+
+    /// Screen point -> canvas logical px.
+    #[cfg(windows)]
+    fn screen_to_canvas(&self, x: i32, y: i32) -> (f32, f32) {
+        let mut p = windows_sys::Win32::Foundation::POINT { x, y };
+        // SAFETY: plain coordinate conversion against our own window.
+        unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(self.plugins.owner as _, &mut p) };
+        let k = self.plugins.scale;
+        ((p.x - self.canvas_off.0) as f32 / k, (p.y - self.canvas_off.1) as f32 / k)
+    }
+
+    /// After a paint: a popup opened from a detached plugin window is shown above that window (it is painted in the
+    /// main window, which the detached window covers).
+    #[cfg(windows)]
+    pub fn sync_lift(&mut self, canvas: &Canvas) {
+        let lifted = self.popup_lift.filter(|_| self.state.playlist.popup.is_some()).and_then(|r| self.plugins.window_of(r));
+        let bounds = self.overlays.iter().copied().reduce(|a, b| a.union(&b));
+        match (lifted, bounds) {
+            (Some((frame, true)), Some(b)) => {
+                let (x, y, w, h) = canvas.device_rect(b);
+                let stride = canvas.pixmap.width() as usize;
+                let px = canvas.pixmap.pixels();
+                let mut buf = Vec::with_capacity(w * h);
+                for row in y..y + h {
+                    for p in &px[row * stride + x..row * stride + x + w] {
+                        buf.push(u32::from(p.red()) << 16 | u32::from(p.green()) << 8 | u32::from(p.blue()));
+                    }
+                }
+                let origin = (x as i32 + self.canvas_off.0, y as i32 + self.canvas_off.1);
+                crate::plugin_window::lift_show(self.plugins.owner, frame, origin, (w as i32, h as i32), buf);
+            }
+            _ => {
+                self.popup_lift = None;
+                crate::plugin_window::lift_hide();
+            }
+        }
+    }
+
+    /// Docked plugin windows (native children) join `State::z` and are clipped to the workspace minus the drawn
+    /// windows above them and the overlays (spec: ui/plugin-window.md "Docking").
+    #[cfg(windows)]
+    fn clip_docked(&mut self) {
+        let docked = self.plugins.docked();
+        self.state.z.retain(|w| !matches!(w, Win::Hosted(r) if !docked.contains(r)));
+        for &r in &docked {
+            if !self.state.z.contains(&Win::Hosted(r)) {
+                self.state.z.push(Win::Hosted(r));
+            }
+        }
+        let k = self.plugins.scale;
+        let (ox, oy) = self.canvas_off;
+        let px = |r: Rect| [(r.x * k).floor() as i32 + ox, (r.y * k).floor() as i32 + oy, (r.right() * k).ceil() as i32 + ox, (r.bottom() * k).ceil() as i32 + oy];
+        let work = px(self.state.work_rect());
+        let over: Vec<[i32; 4]> = self.overlays.iter().map(|&r| px(r.outset(2.0))).collect();
+        let z = self.state.z.clone();
+        let docked_at = z.iter().rposition(|&w| self.state.is_max(w));
+        for (i, &w) in z.iter().enumerate() {
+            let Win::Hosted(row) = w else { continue };
+            let mut covers = over.clone();
+            for &a in &z[i + 1..] {
+                if !matches!(a, Win::Hosted(_)) {
+                    covers.push(px(self.win_bounds(a)));
+                }
+            }
+            // Below a maximized window: covered entirely.
+            if docked_at.is_some_and(|d| i < d) {
+                covers.push(work);
+            }
+            self.plugins.clip(row, work, &covers);
         }
     }
 
@@ -1034,7 +1144,8 @@ impl App {
             peaks: self.transport.peaks(),
             sounding: if self.transport.playing() { self.transport.sounding() } else { Vec::new() },
         };
-        views::paint(&mut ui, &self.state, &info);
+        let overlays = views::paint(&mut ui, &self.state, &info);
+        self.overlays = self.hits[overlays.min(self.hits.len())..].iter().map(|h| h.rect).collect();
         // Remember where the piano roll's regions are, for mouse mapping and damage.
         let find = |a: Action| self.hits.iter().find(|h| h.action == a).map(|h| h.rect);
         self.piano_grid = find(Action::PianoGrid);
@@ -3554,7 +3665,14 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
     let ch = p.channels.get(row)?;
     Some(crate::plugin_window::ChannelInfo {
         name: ch.name.clone().unwrap_or_else(|| format!("Channel {}", ch.index + 1)),
-        target: views::rack::insert_name(ch.mixer_track),
+        // The mixer track's own name when it has one, else "Master" / "Insert N".
+        target: p
+            .mixer
+            .iter()
+            .find(|t| t.index == ch.mixer_track)
+            .and_then(|t| t.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| views::rack::insert_name(ch.mixer_track)),
         enabled: ch.enabled,
         volume: ch.volume,
         pan: ch.pan,

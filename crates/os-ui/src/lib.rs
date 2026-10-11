@@ -517,6 +517,16 @@ impl Canvas {
         self.glyph(c, &g);
     }
 
+    /// An outline Tabler icon like `icon`, stroked `width` logical px wide whatever its size (small, bold glyphs).
+    pub fn icon_stroke(&mut self, icon: &tabler::TablerIcon, r: Rect, c: Color, width: f32) {
+        let k = r.w.min(r.h) / 24.0;
+        let (ox, oy) = (r.cx() - 12.0 * k, r.cy() - 12.0 * k);
+        let mut g = Glyph::new();
+        g.round_caps = true;
+        g.commands(icon.d, ox, oy, k, (!icon.filled).then_some(width));
+        self.glyph(c, &g);
+    }
+
     /// Draw an icon glyph with subpixel (ClearType-style) coverage in color `c`.
     pub fn glyph(&mut self, c: Color, g: &Glyph) {
         let Some(b) = g.bounds() else { return };

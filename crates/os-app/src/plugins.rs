@@ -40,6 +40,10 @@ pub enum Request {
     PitchCents(usize, i32),
     /// A preview note from an Open plugin's own keyboard (host link): row, key, velocity, on.
     Note(usize, u8, u8, bool),
+    /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
+    Raise(usize),
+    /// The menu arrow was clicked: open the window menu at this screen point.
+    Menu(usize, i32, i32),
 }
 
 #[derive(Default)]
@@ -50,6 +54,8 @@ pub struct Plugins {
     /// Main window handle (owner of plugin windows).
     pub owner: isize,
     pub scale: f32,
+    /// New plugin windows open detached (settings "Detach all new plugins"; off = docked like FL's default).
+    pub detach_new: bool,
     rate: u32,
 }
 
@@ -161,13 +167,17 @@ impl Plugins {
     #[cfg(windows)]
     pub fn row_at_screen(&self, x: i32, y: i32) -> Option<usize> {
         use windows_sys::Win32::Foundation::POINT;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
-        let hit = unsafe { WindowFromPoint(POINT { x, y }) };
-        if hit.is_null() {
-            return None;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_PARENT};
+        // Walk up from the window under the point: a docked frame is a child of the main window, a detached one is a
+        // top-level window.
+        let mut w = unsafe { WindowFromPoint(POINT { x, y }) };
+        while !w.is_null() {
+            if let Some((&r, _)) = self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|f| f.hwnd() == w as isize)) {
+                return Some(r);
+            }
+            w = unsafe { GetAncestor(w, GA_PARENT) };
         }
-        let root = unsafe { GetAncestor(hit, GA_ROOT) } as isize;
-        self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|w| w.hwnd() == root)).map(|(&r, _)| r)
+        None
     }
 
     /// Drops file `path` on row `row`'s plugin window at screen point (x, y), as Explorer would: the window under the
@@ -175,7 +185,7 @@ impl Plugins {
     /// through their state. Returns whether the plugin got the file.
     #[cfg(windows)]
     pub fn drop_file(&mut self, row: usize, x: i32, y: i32, path: &str, sampler: bool) -> bool {
-        if post_drop(x, y, path) {
+        if self.hosted.get(&row).and_then(|h| h.window.as_ref()).is_some_and(|f| post_drop(x, y, path, f.hwnd())) {
             return true;
         }
         sampler && self.load_sample(row, path)
@@ -214,7 +224,7 @@ impl Plugins {
         let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
         let pos = crate::plugin_window::default_position(owner);
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size.
-        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos)?;
+        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, self.detach_new)?;
         let (ew, eh) = p.open_editor(w.area())?;
         // An Open plugin answers the hello: its page tabs go into the strip row and its editor shrinks to what is below.
         h.link = os_hostlink::Link::connect(w.area() as isize);
@@ -240,6 +250,34 @@ impl Plugins {
             }
             h.window = None;
             h.link = None;
+        }
+    }
+
+    /// Row `row`'s open window (native frame handle) and whether it is detached.
+    #[cfg(windows)]
+    pub fn window_of(&self, row: usize) -> Option<(isize, bool)> {
+        self.hosted.get(&row).and_then(|h| h.window.as_ref()).map(|w| (w.hwnd(), w.detached()))
+    }
+
+    /// Docks or detaches row `row`'s window (window menu > Detached).
+    #[cfg(windows)]
+    pub fn set_detached(&self, row: usize, on: bool) {
+        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
+            w.set_detached(self.owner, on);
+        }
+    }
+
+    /// Rows whose plugin window is open and docked in the main window.
+    #[cfg(windows)]
+    pub fn docked(&self) -> Vec<usize> {
+        self.hosted.iter().filter(|(_, h)| h.window.as_ref().is_some_and(|w| !w.detached())).map(|(&r, _)| r).collect()
+    }
+
+    /// Clips row `row`'s docked window to `work` minus `covers` (main-window client px).
+    #[cfg(windows)]
+    pub fn clip(&self, row: usize, work: [i32; 4], covers: &[[i32; 4]]) {
+        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
+            w.clip_to(work, covers);
         }
     }
 
@@ -312,6 +350,8 @@ impl Plugins {
                         FrameEvent::Volume(v) => Request::Volume(row, v),
                         FrameEvent::Pan(v) => Request::Pan(row, v),
                         FrameEvent::PitchCents(c) => Request::PitchCents(row, c),
+                        FrameEvent::Raise => Request::Raise(row),
+                        FrameEvent::Menu(x, y) => Request::Menu(row, x, y),
                     });
                 }
             }
@@ -415,7 +455,8 @@ fn with_sample_path(blob: &[u8], path: &str) -> Option<Vec<u8>> {
 /// Posts `WM_DROPFILES` for `path` to the window at screen point (x, y), or its nearest ancestor that accepts files
 /// (`DragAcceptFiles`). The drop handle is ours: the receiver's `DragFinish` frees it. Same process only.
 #[cfg(windows)]
-fn post_drop(x: i32, y: i32, path: &str) -> bool {
+/// `frame` bounds the search: a docked frame's parent is the main window, which takes files itself.
+fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::Foundation::GlobalFree;
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
@@ -424,6 +465,9 @@ fn post_drop(x: i32, y: i32, path: &str) -> bool {
     unsafe {
         let mut w = WindowFromPoint(POINT { x, y });
         while !w.is_null() && GetWindowLongW(w, GWL_EXSTYLE) as u32 & WS_EX_ACCEPTFILES == 0 {
+            if w as isize == frame {
+                return false;
+            }
             w = GetAncestor(w, GA_PARENT);
             if w == GetDesktopWindow() {
                 return false;
@@ -1038,7 +1082,7 @@ mod tests {
         let (x, y) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
         assert_eq!(pl.row_at_screen(x, y), Some(0), "the window is found under the point");
         let mp3 = fixture_mp3();
-        assert!(post_drop(x, y, &mp3), "the editor accepts files");
+        assert!(post_drop(x, y, &mp3, frame), "the editor accepts files");
         pump(&mut pl, 300);
         assert_eq!(pl.sampler_path(0).as_deref(), Some(mp3.as_str()));
         // The strip (no editor under the point): loaded through the state instead.

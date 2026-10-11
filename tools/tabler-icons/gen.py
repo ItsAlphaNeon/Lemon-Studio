@@ -86,6 +86,7 @@ ICONS = [
     ("ROTATE_CLOCKWISE_2", "rotate-clockwise-2", "outline"),
     ("FLASK_2", "flask-2", "outline"),
     ("MAXIMIZE", "maximize", "outline"),
+    ("SETTINGS_FILLED", "settings", "filled"),
 ]
 
 NUM = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")

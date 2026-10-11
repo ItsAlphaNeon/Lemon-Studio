@@ -254,6 +254,11 @@ impl ApplicationHandler for Shell {
             if let Ok(h) = window.window_handle() {
                 if let RawWindowHandle::Win32(w) = h.as_raw() {
                     self.app.plugins.owner = w.hwnd.get();
+                    // Docked plugin windows are children: our own painting must not draw over them.
+                    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_STYLE, WS_CLIPCHILDREN};
+                    let hwnd = w.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+                    // SAFETY: our own live window.
+                    unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, GetWindowLongPtrW(hwnd, GWL_STYLE) | WS_CLIPCHILDREN as isize) };
                 }
             }
         }
@@ -482,7 +487,10 @@ impl ApplicationHandler for Shell {
                 // Paint only what changed, then present only that region.
                 let damage = self.app.take_damage();
                 if let Some(d) = damage {
+                    self.app.canvas_off = (self.inset.0 as i32, self.inset.1 as i32);
                     self.app.paint(canvas, d);
+                    #[cfg(windows)]
+                    self.app.sync_lift(canvas);
                 }
                 if let Some(surface) = self.surface.as_mut() {
                     if surface.resize(w, h).is_ok() {
