@@ -82,7 +82,8 @@ pub struct Canvas {
     region: Vec<(i32, i32, i32, i32)>,
     /// Device rect that will be painted over opaquely later: rect fills skip it (see `set_cover`).
     cover: Option<(i32, i32, i32, i32)>,
-    /// Anti-aliased coverage of filled / stroked paths, by path and scale (most frames repaint the same shapes).
+    /// Anti-aliased coverage of filled / stroked paths, by path (relative to its pixel origin) and scale: most frames
+    /// repaint the same shapes, and a scrolled view the same shapes moved by whole pixels.
     shapes: Lru<Rc<Coverage>>,
     /// Subpixel coverage of icon glyphs, by glyph (or icon and box) and scale.
     glyphs: Lru<Rc<GlyphCoverage>>,
@@ -90,13 +91,18 @@ pub struct Canvas {
     drawn: Option<(i32, i32, i32, i32)>,
 }
 
-/// Coverage (0..=255) of a shape over the device rect at (x0, y0), `w` x `h`.
+/// Coverage (0..=255) of a shape, `w` x `h` device pixels.
 struct Coverage {
-    x0: i32,
-    y0: i32,
     w: i32,
     h: i32,
     a: Vec<u8>,
+}
+
+/// A shape's coverage placed with its top-left at device pixel (x0, y0).
+struct Placed {
+    x0: i32,
+    y0: i32,
+    cov: Rc<Coverage>,
 }
 
 /// Per-channel subpixel coverage of a glyph over the device rect at (x0, y0), `w` x `h`.
@@ -226,25 +232,8 @@ impl Canvas {
 
     /// Anti-aliased coverage of `path` at the canvas scale, filled (`stroke` None) or stroked, rasterized by
     /// tiny-skia into a shape-sized buffer and cached by the path, so a repaint of the same shape only blends.
-    fn coverage(&mut self, path: &tiny_skia::Path, stroke: Option<&Stroke>) -> Option<Rc<Coverage>> {
+    fn coverage(&mut self, path: &tiny_skia::Path, stroke: Option<&Stroke>) -> Option<Placed> {
         let k = self.scale;
-        let mut h = Fx::default();
-        h.f32(k);
-        match stroke {
-            None => h.write_u8(1),
-            Some(s) => {
-                h.write_u8(2);
-                h.f32(s.width);
-                h.f32(s.miter_limit);
-                h.write_u8(s.line_cap as u8);
-                h.write_u8(s.line_join as u8);
-            }
-        }
-        hash_path(&mut h, path);
-        let key = h.finish();
-        if let Some(c) = self.shapes.get(key) {
-            return Some(c.clone());
-        }
         // Device bounds, padded for anti-aliasing and the stroke (miter joins reach `miter_limit` half-widths out).
         let b = path.bounds();
         let pad = stroke.map_or(0.0, |s| s.width / 2.0 * s.miter_limit.max(1.5));
@@ -263,33 +252,71 @@ impl Canvas {
             return None;
         }
         let (w, h) = (x1 - x0, y1 - y0);
+        // The shape is drawn from its points relative to its pixel origin, snapped to 1/64 px, and cached by those: the
+        // same shape moved by whole pixels (a scrolled view) reuses its coverage, and the pixels depend only on the
+        // key, so every repaint draws a shape the same way. Shapes too big to cache are drawn for the visible part.
+        let q = |v: f32, o: i32| ((v * k - o as f32) * 64.0).round() as i32;
+        let pts: Vec<(i32, i32)> = path.points().iter().map(|pt| (q(pt.x, x0), q(pt.y, y0))).collect();
+        let key = (!big).then(|| {
+            let mut hs = Fx::default();
+            hs.f32(k);
+            match stroke {
+                None => hs.write_u8(1),
+                Some(s) => {
+                    hs.write_u8(2);
+                    hs.f32(s.width);
+                    hs.f32(s.miter_limit);
+                    hs.write_u8(s.line_cap as u8);
+                    hs.write_u8(s.line_join as u8);
+                }
+            }
+            hs.write_i32(w);
+            hs.write_i32(h);
+            hs.write_usize(path.verbs().len());
+            for v in path.verbs() {
+                hs.write_u8(*v as u8);
+            }
+            for &(x, y) in &pts {
+                hs.write_i32(x);
+                hs.write_i32(y);
+            }
+            hs.finish()
+        });
+        if let Some(c) = key.and_then(|key| self.shapes.get(key)) {
+            return Some(Placed { x0, y0, cov: c.clone() });
+        }
+        let snapped = rebuild_path(path, &pts)?;
         let mut pm = Pixmap::new(w as u32, h as u32)?;
-        let t = Transform::from_row(k, 0.0, 0.0, k, -x0 as f32, -y0 as f32);
         let p = paint(Color::rgb(0xffffff));
         match stroke {
-            None => pm.fill_path(path, &p, FillRule::Winding, t, None),
-            Some(s) => pm.stroke_path(path, &p, s, t, None),
+            None => pm.fill_path(&snapped, &p, FillRule::Winding, Transform::identity(), None),
+            Some(s) => {
+                // In device pixels: the width scales with the canvas (hairlines below one device pixel as before).
+                let s = Stroke { width: s.width * k, ..s.clone() };
+                pm.stroke_path(&snapped, &p, &s, Transform::identity(), None)
+            }
         }
         let a: Vec<u8> = pm.pixels().iter().map(|px| px.alpha()).collect();
-        let c = Rc::new(Coverage { x0, y0, w, h, a });
-        if !big {
+        let c = Rc::new(Coverage { w, h, a });
+        if let Some(key) = key {
             self.shapes.insert(key, c.clone(), c.a.len() + 64);
         }
-        Some(c)
+        Some(Placed { x0, y0, cov: c })
     }
 
     /// Blend `top` through `cov` inside the clip; with `grad` = (bottom, y_top, y_bottom) in device pixels the
     /// colour runs from `top` to `bottom` down that span (a vertical linear gradient sampled at pixel centres).
-    fn blend(&mut self, cov: &Coverage, top: Color, grad: Option<(Color, f32, f32)>) {
+    fn blend(&mut self, cov: &Placed, top: Color, grad: Option<(Color, f32, f32)>) {
         for i in 0..self.clip_count() {
             let clip = self.clip_at(i);
             self.blend_in(clip, cov, top, grad);
         }
     }
 
-    fn blend_in(&mut self, (cx0, cy0, cx1, cy1): (i32, i32, i32, i32), cov: &Coverage, top: Color, grad: Option<(Color, f32, f32)>) {
-        let (x0, x1) = (cov.x0.max(cx0), (cov.x0 + cov.w).min(cx1));
-        let (y0, y1) = (cov.y0.max(cy0), (cov.y0 + cov.h).min(cy1));
+    fn blend_in(&mut self, (cx0, cy0, cx1, cy1): (i32, i32, i32, i32), p: &Placed, top: Color, grad: Option<(Color, f32, f32)>) {
+        let cov = &*p.cov;
+        let (x0, x1) = (p.x0.max(cx0), (p.x0 + cov.w).min(cx1));
+        let (y0, y1) = (p.y0.max(cy0), (p.y0 + cov.h).min(cy1));
         if x0 >= x1 || y0 >= y1 {
             return;
         }
@@ -305,26 +332,9 @@ impl Canvas {
             if c.a == 0 {
                 continue;
             }
-            let ca = u32::from(c.a);
-            let (r, g, b) = (u32::from(c.r), u32::from(c.g), u32::from(c.b));
-            let src = &cov.a[((y - cov.y0) * cov.w + (x0 - cov.x0)) as usize..][..n];
+            let src = &cov.a[((y - p.y0) * cov.w + (x0 - p.x0)) as usize..][..n];
             let dst = &mut data[(y as usize * pw + x0 as usize) * 4..][..n * 4];
-            for (d, &a) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src) {
-                if a == 0 {
-                    continue;
-                }
-                let al = (u32::from(a) * ca + 127) / 255;
-                if al >= 255 {
-                    d[0] = c.r;
-                    d[1] = c.g;
-                    d[2] = c.b;
-                } else {
-                    let inv = 255 - al;
-                    d[0] = ((r * al + u32::from(d[0]) * inv + 127) / 255) as u8;
-                    d[1] = ((g * al + u32::from(d[1]) * inv + 127) / 255) as u8;
-                    d[2] = ((b * al + u32::from(d[2]) * inv + 127) / 255) as u8;
-                }
-            }
+            blend_cov_row(dst.as_chunks_mut::<4>().0, src, c);
         }
     }
 
@@ -1018,6 +1028,91 @@ fn blend_row(row: &mut [u32], c: Color) {
     }
 }
 
+/// `path`'s verbs with new points given in 1/64 device pixels.
+fn rebuild_path(path: &tiny_skia::Path, pts: &[(i32, i32)]) -> Option<tiny_skia::Path> {
+    use tiny_skia::PathSegment;
+    let mut it = pts.iter().map(|&(x, y)| (x as f32 / 64.0, y as f32 / 64.0));
+    let mut pb = PathBuilder::new();
+    // Segments come in point order: one point per move / line, two per quad, three per cubic.
+    for seg in path.segments() {
+        match seg {
+            PathSegment::MoveTo(_) => {
+                let (x, y) = it.next()?;
+                pb.move_to(x, y);
+            }
+            PathSegment::LineTo(_) => {
+                let (x, y) = it.next()?;
+                pb.line_to(x, y);
+            }
+            PathSegment::QuadTo(..) => {
+                let ((x1, y1), (x, y)) = (it.next()?, it.next()?);
+                pb.quad_to(x1, y1, x, y);
+            }
+            PathSegment::CubicTo(..) => {
+                let ((x1, y1), (x2, y2), (x, y)) = (it.next()?, it.next()?, it.next()?);
+                pb.cubic_to(x1, y1, x2, y2, x, y);
+            }
+            PathSegment::Close => pb.close(),
+        }
+    }
+    pb.finish()
+}
+
+/// Blend `c` over a row of opaque pixels through per-pixel coverage `cov`: with `al = (cov * a + 127) / 255`, each
+/// channel becomes `(c * al + d * (255 - al) + 127) / 255`. Four pixels at a time with SSE2 (x86-64 baseline); the
+/// division is `(x * 0x8081) >> 23`, exact for every 16-bit x.
+fn blend_cov_row(row: &mut [[u8; 4]], cov: &[u8], c: Color) {
+    let ca = u32::from(c.a);
+    let div = |x: u32| (x * 0x8081) >> 23;
+    #[cfg(target_arch = "x86_64")]
+    let (row, cov) = {
+        use std::arch::x86_64::*;
+        let (chunks, rest) = row.as_chunks_mut::<4>();
+        let n = chunks.len() * 4;
+        // SAFETY: SSE2 is always available on x86-64; loads and stores are unaligned and stay inside each chunk.
+        unsafe {
+            let (r, g, b) = (i16::from(c.r), i16::from(c.g), i16::from(c.b));
+            let src = _mm_setr_epi16(r, g, b, 255, r, g, b, 255);
+            let ca_v = _mm_set1_epi16(c.a.into());
+            let full = _mm_set1_epi16(255);
+            let half = _mm_set1_epi16(127);
+            let magic = _mm_set1_epi16(0x8081u16 as i16);
+            let zero = _mm_setzero_si128();
+            for (ch, cv) in chunks.iter_mut().zip(cov.as_chunks::<4>().0) {
+                let cw = u32::from_le_bytes(*cv);
+                if cw == 0 {
+                    continue;
+                }
+                // Coverage to alpha (16-bit lanes), then each pixel's alpha spread over its four channels.
+                let cv16 = _mm_unpacklo_epi8(_mm_cvtsi32_si128(cw as i32), zero);
+                let al = _mm_srli_epi16(_mm_mulhi_epu16(_mm_add_epi16(_mm_mullo_epi16(cv16, ca_v), half), magic), 7);
+                let al2 = _mm_unpacklo_epi16(al, al);
+                let (alo, ahi) = (_mm_unpacklo_epi32(al2, al2), _mm_unpackhi_epi32(al2, al2));
+                let p = ch.as_mut_ptr().cast::<__m128i>();
+                let d = _mm_loadu_si128(p);
+                let mix = |d16: __m128i, a: __m128i| {
+                    let x = _mm_add_epi16(_mm_add_epi16(_mm_mullo_epi16(src, a), _mm_mullo_epi16(d16, _mm_sub_epi16(full, a))), half);
+                    _mm_srli_epi16(_mm_mulhi_epu16(x, magic), 7)
+                };
+                let lo = mix(_mm_unpacklo_epi8(d, zero), alo);
+                let hi = mix(_mm_unpackhi_epi8(d, zero), ahi);
+                _mm_storeu_si128(p, _mm_packus_epi16(lo, hi));
+            }
+        }
+        (rest, &cov[n..])
+    };
+    for (d, &a) in row.iter_mut().zip(cov) {
+        if a == 0 {
+            continue;
+        }
+        let al = div(u32::from(a) * ca + 127);
+        let inv = 255 - al;
+        for (k, s) in [c.r, c.g, c.b].into_iter().enumerate() {
+            d[k] = div(u32::from(s) * al + u32::from(d[k]) * inv + 127) as u8;
+        }
+    }
+}
+
 /// Device span `[p0, p1)` of the logical span `[a, a + len)` at `scale`: both edges rounded, except that at a
 /// fractional scale a thin span (a line or border, up to 2 logical px) keeps one width wherever it sits. Rounding
 /// both edges of a 1 px line at 150 % gives 1 or 2 px depending on its position, so a grid's lines would alternate
@@ -1115,6 +1210,51 @@ mod tests {
         assert_eq!(out[2 * 9 + 4], 0xfedcba);
         assert_eq!(out[2 * 9 + 2], 0, "left of the copied region");
         assert_eq!(out[0], 0);
+    }
+
+    #[test]
+    fn coverage_blend_matches_the_formula() {
+        let mut seed = 777u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 16) as u8
+        };
+        for a in [0u8, 1, 64, 127, 128, 200, 254, 255] {
+            for n in 0..14 {
+                let c = Color { r: next(), g: next(), b: next(), a };
+                // Coverage with zeros, full and partial values.
+                let cov: Vec<u8> = (0..n).map(|i| match i % 5 { 0 => 0, 1 => 255, _ => next() }).collect();
+                let row: Vec<[u8; 4]> = (0..n).map(|_| [next(), next(), next(), 255]).collect();
+                let mut got = row.clone();
+                blend_cov_row(&mut got, &cov, c);
+                for ((g, d), &cv) in got.iter().zip(&row).zip(&cov) {
+                    let al = (u32::from(cv) * u32::from(a) + 127) / 255;
+                    let mix = |s: u8, d: u8| ((u32::from(s) * al + u32::from(d) * (255 - al) + 127) / 255) as u8;
+                    let want = if cv == 0 { *d } else { [mix(c.r, d[0]), mix(c.g, d[1]), mix(c.b, d[2]), 255] };
+                    assert_eq!(*g, want, "alpha {a}, coverage {cv}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn moved_shapes_reuse_their_coverage() {
+        // The same circle 7 px further right draws the same pixels 7 px further right, from the cache.
+        let Ok(mut c) = Canvas::new(60, 30, 1.0) else { return };
+        c.fill_rect(Rect::new(0.0, 0.0, 60.0, 30.0), Color::rgb(0x000000));
+        c.fill_circle(10.3, 12.6, 6.0, Color::rgb(0xffffff));
+        let n = c.shapes.len();
+        c.fill_circle(17.3, 12.6, 6.0, Color::rgb(0xffffff));
+        assert_eq!(c.shapes.len(), n, "found in the cache");
+        let red = |c: &Canvas, x: usize, y: usize| c.pixmap.pixels()[y * 60 + x].red();
+        let Ok(mut d) = Canvas::new(60, 30, 1.0) else { return };
+        d.fill_rect(Rect::new(0.0, 0.0, 60.0, 30.0), Color::rgb(0x000000));
+        d.fill_circle(17.3, 12.6, 6.0, Color::rgb(0xffffff));
+        for y in 0..30 {
+            for x in 18..60 {
+                assert!(red(&c, x, y).abs_diff(red(&d, x, y)) <= 1, "pixel {x},{y}");
+            }
+        }
     }
 
     #[test]
