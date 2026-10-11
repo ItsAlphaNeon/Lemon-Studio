@@ -9,6 +9,7 @@ mod logo;
 mod meters;
 mod mixer;
 mod monitor;
+mod params;
 mod piano;
 mod rack;
 mod patterns;

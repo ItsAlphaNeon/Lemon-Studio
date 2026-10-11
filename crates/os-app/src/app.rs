@@ -260,7 +260,7 @@ enum Damage {
 }
 
 /// The hint panel (spec §2): its text changes whenever the hovered control does.
-const HINT_RECT: Rect = Rect::new(73.0, 5.0, 289.0, 31.0);
+pub(crate) const HINT_RECT: Rect = Rect::new(73.0, 5.0, 289.0, 31.0);
 /// The toolbar's output monitor (scope / analyzer and peak bars).
 const MONITOR_RECT: Rect = Rect::new(880.0, 4.0, 168.0, 33.0);
 
@@ -472,6 +472,8 @@ pub struct State {
     /// Navigation history of selected row keys and the position in it.
     pub browser_hist: Vec<String>,
     pub browser_hist_pos: usize,
+    /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
+    pub params: crate::params::ParamUi,
     pub tempo: f64,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
@@ -653,6 +655,7 @@ impl App {
                 browser_tab: 0,
                 browser_open: views::browser::default_open(),
                 browser_folders: crate::browser::load_folders(),
+                params: Default::default(),
                 browser_dirs: Default::default(),
                 browser_scroll: 0.0,
                 browser_sel: None,
@@ -889,7 +892,7 @@ impl App {
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
-    fn reset_hosted(&mut self) {
+    pub(crate) fn reset_hosted(&mut self) {
         self.plugins.clear();
         self.loading = None;
         self.state.playlist.wave_wait = false;
@@ -964,7 +967,7 @@ impl App {
     /// Mixer slots that hold the project file's parametric EQ are played and edited by Open Parametric EQ 2, started
     /// from the slot's saved state (spec: plugins/open-parametric-eq-2.md §8). Without the plugin the engine's own EQ
     /// plays them.
-    fn sync_effects(&mut self) {
+    pub(crate) fn sync_effects(&mut self) {
         use crate::plugins::{fx_key, EQ_FILE_NAME, OPEN_EQ};
         let Some(index) = self.plugins.effect_index(OPEN_EQ) else { return };
         let todo: Vec<(u16, u8, Vec<u8>)> = self
@@ -995,6 +998,7 @@ impl App {
         self.loading_tick();
         self.mixer_tick();
         self.sync_effects();
+        self.params_tick();
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
             // A row hosted this tick already started from its channel's sample.
             if self.state.hosted_rows.contains(&row) && self.plugins.sampler_path(row).as_deref() != Some(path.as_str()) {
@@ -1544,7 +1548,7 @@ impl App {
     }
 
     /// The automation target, name and current value of a control, for "Create automation clip" (§8).
-    fn automation_target(&self, a: &Action) -> Option<(u32, String, f64)> {
+    pub(crate) fn automation_target(&self, a: &Action) -> Option<(u32, String, f64)> {
         use os_model::target;
         let s = &self.state;
         let chan = |row: usize| s.project.channels.get(row);
@@ -2131,7 +2135,7 @@ impl App {
                 return self.invalidate();
             }
             Some(Action::BrowserRow(i)) => {
-                if self.browser_remove_root(*i) {
+                if self.browser_remove_root(*i) || self.params_browser_right(*i, x, y) {
                     return;
                 }
             }
@@ -3154,6 +3158,7 @@ impl App {
         if let Action::Scrollbar(t) = a {
             return self.scrollbar_press(t, false);
         }
+        self.note_host_tweak(&a);
         if self.playlist_act(&a, false) {
             return;
         }
@@ -3743,6 +3748,12 @@ impl App {
                 }
             }
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
+            (m, i) if item_at(m, i).is_some_and(|it| crate::params::menu_handles(it.label)) => {
+                let label = item_at(m, i).map_or("", |it| it.label);
+                if let Some(msg) = self.params_menu(label) {
+                    self.state.message = Some(msg);
+                }
+            }
             // EDIT > Undo = Ctrl+Z (piano-roll undo).
             (EDIT_MENU, i) if item_at(EDIT_MENU, i).is_some_and(|it| it.label == "Undo") => self.act(Action::PianoUndo),
             (m, i) => {

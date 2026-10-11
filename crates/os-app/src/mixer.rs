@@ -734,7 +734,7 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
         PItem::not_yet("Flip with spare state"),
         PItem::head("Parameters"),
         PItem::not_yet("Link all parameters..."),
-        PItem::not_yet("Browse parameters"),
+        PItem::new("Browse parameters", Cmd::Param(crate::params::PCmd::Browse(crate::plugins::fx_key(s.selected_mixer, slot)))),
         PItem::head("CPU"),
         PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
         PItem::not_yet("Smart disable"),

@@ -282,6 +282,12 @@ impl App {
                     s.message = Some("Effect placeholder: adding effects to mixer slots is not available yet".into());
                 }
             }
+            Item::Param(key, index) => {
+                if let Some((track, tick)) = spot {
+                    let msg = self.params_drop(key, index, track, tick);
+                    self.state.message = msg;
+                }
+            }
             Item::None | Item::File(_) => {}
         }
     }
@@ -410,7 +416,7 @@ fn select(s: &mut crate::app::State, key: &str) {
 }
 
 /// Scroll the selected row into view.
-fn reveal(s: &mut crate::app::State) {
+pub(crate) fn reveal(s: &mut crate::app::State) {
     let rows = view::rows(s);
     let Some(i) = rows.iter().position(|r| Some(&r.key) == s.browser_sel.as_ref()) else { return };
     let y = i as f32 * view::ROW_H;
