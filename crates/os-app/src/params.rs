@@ -49,6 +49,8 @@ pub struct ParamUi {
     pub lists: BTreeMap<usize, List>,
     /// Newest first: "Last tweaked", "Next to last tweaked".
     pub last: Vec<Tweak>,
+    /// "Copy value": a normalized parameter value for "Paste value".
+    pub copied: Option<f64>,
 }
 
 impl ParamUi {
@@ -81,6 +83,9 @@ impl ParamUi {
 pub enum PCmd {
     /// Plugin window ▸ "Browse parameters": hosted key.
     Browse(usize),
+    /// "Copy value" / "Paste value" of parameter (hosted key, index).
+    Copy(usize, usize),
+    Paste(usize, usize),
 }
 
 /// The hosted key of the instance an automation target points at, and the parameter index.
@@ -157,15 +162,46 @@ pub fn row_hint(s: &State, key: usize, index: usize) -> String {
     }
 }
 
-/// The automation menu of a parameter (browser right-click, spec §6).
-pub fn param_menu(s: &State, key: usize, index: usize, x: f32, y: f32) -> Option<Popup> {
-    let (tgt, name, v) = automation(s, key, index)?;
-    let items = vec![
-        PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, v)),
+/// The parameter menu FL shows on a parameter row and in TOOLS ▸ Last tweaked (FL observed, spec §5, §6): automation,
+/// remote control and value entries. `param` = (hosted key, index) of a plugin parameter; `create` = what "Create
+/// automation clip" makes (`None` = disabled).
+fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32, String, f64)>) -> Vec<PItem> {
+    let create = match create {
+        Some((tgt, name, v)) => PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, v)),
+        None => PItem::new("Create automation clip", Cmd::Nothing).off(),
+    };
+    let copy = match param {
+        Some((key, index)) => PItem::new("Copy value", Cmd::Param(PCmd::Copy(key, index))),
+        None => PItem::new("Copy value", Cmd::Nothing).off(),
+    };
+    let paste = match param.filter(|_| s.params.copied.is_some()) {
+        Some((key, index)) => PItem::new("Paste value", Cmd::Param(PCmd::Paste(key, index))),
+        None => PItem::new("Paste value", Cmd::Nothing).off(),
+    };
+    vec![
         PItem::not_yet("Edit events"),
+        PItem::not_yet("Edit events in new window"),
+        PItem::not_yet("Edit events in piano roll"),
+        PItem::not_yet("Init song with this position"),
+        PItem::not_yet("Delete initial value"),
+        PItem::sep(),
+        create,
+        PItem::not_yet("Edit automation clip..."),
+        PItem::head("Remote control"),
         PItem::not_yet("Link to controller..."),
-    ];
-    Some(Popup { x, y, items, sub: None })
+        PItem::not_yet("Override global link..."),
+        PItem::head("Value"),
+        copy,
+        paste,
+        PItem::not_yet("Type in value..."),
+        PItem::not_yet("Set..."),
+    ]
+}
+
+/// The menu of a parameter row (browser right-click, spec §6).
+pub fn param_menu(s: &State, key: usize, index: usize, x: f32, y: f32) -> Option<Popup> {
+    let create = automation(s, key, index)?;
+    Some(Popup { x, y, items: parameter_items(s, Some((key, index)), Some(create)), sub: None })
 }
 
 /// The browser node key of instance `key` (spec §6): Generators ▸ channel, Effects ▸ "<track> - <slot>".
@@ -176,12 +212,9 @@ pub fn node_key(s: &State, key: usize) -> Option<String> {
     })
 }
 
-/// A slot's row label under Effects: "<track> - <slot plugin>".
+/// A slot's row label under Effects: "<slot plugin> (<track name>)" (FL observed, spec §6).
 pub fn effect_label(s: &State, track: u16, slot: u8) -> Option<String> {
-    let m = s.project.mixer.iter().find(|m| m.index == track)?;
-    let p = m.slots.get(usize::from(slot))?.as_ref()?;
-    let t = if track == 0 { "Master".to_string() } else { format!("Insert {track}") };
-    Some(format!("{t} - {}", crate::project_plugins::slot_title(p)))
+    Some(format!("{} ({})", crate::mixer::slot_name(s, track, slot)?, crate::mixer::name(s, track)))
 }
 
 /// Main-menu entries handled here (spec §5).
@@ -266,26 +299,25 @@ impl App {
     /// ADD / TOOLS menu entries for the last tweaked parameters (spec §5); returns a message.
     pub(crate) fn params_menu(&mut self, label: &str) -> Option<String> {
         let nth = usize::from(label == TOOLS_NEXT);
-        let Some(t) = self.state.params.last.get(nth).cloned() else {
-            return Some("No parameter tweaked yet: move a plugin control or a knob first".into());
-        };
-        let Some((tgt, name, v)) = self.tweak_automation(&t) else {
-            return Some("The tweaked control is gone".into());
-        };
+        let tweak = self.state.params.last.get(nth).cloned();
+        let create = tweak.as_ref().and_then(|t| self.tweak_automation(t));
         if label == ADD_LAST {
+            let Some((tgt, name, v)) = create else {
+                return Some("No parameter tweaked yet: move a plugin control or a knob first".into());
+            };
             return crate::playlist::run(self, Cmd::CreateAutomation(tgt, name, v));
         }
-        // The submenu, at the mouse (the main menu has no submenus of its own).
+        // The submenu, at the mouse (the main menu has no submenus of its own): the parameter's name, then the
+        // parameter menu; "No parameter" and everything disabled while nothing was tweaked (FL observed).
         let (x, y) = self.mouse;
-        let items = vec![
-            PItem::head("Last tweaked"),
-            PItem::new(name.clone(), Cmd::Nothing).off(),
-            PItem::sep(),
-            PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, v)),
-            PItem::not_yet("Edit events"),
-            PItem::not_yet("Init song with this position"),
-            PItem::not_yet("Link to controller..."),
-        ];
+        let param = match tweak {
+            Some(Tweak::Plugin { key, index }) => Some((key, index)),
+            _ => None,
+        };
+        let head = create.as_ref().map_or_else(|| "No parameter".to_string(), |c| c.1.clone());
+        let mut items = vec![PItem { head: true, ..PItem::new(head, Cmd::Nothing) }, PItem::head("Automation")];
+        items.extend(parameter_items(&self.state, param, create));
+        items.extend([PItem::sep(), PItem::not_yet("Override volatile link...")]);
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
         self.invalidate();
         None
@@ -305,6 +337,17 @@ impl App {
     pub(crate) fn params_cmd(&mut self, c: PCmd) -> Option<String> {
         match c {
             PCmd::Browse(key) => self.browse_params(key),
+            PCmd::Copy(key, index) => {
+                self.state.params.copied = value_of(&self.state, key, index);
+                None
+            }
+            PCmd::Paste(key, index) => {
+                let id = self.state.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id);
+                let (Some(v), Some(id)) = (self.state.params.copied, id) else { return None };
+                let p = self.state.params.plugin(key)?;
+                let ok = p.lock().ok()?.set_param(id, v);
+                (!ok).then(|| "The plugin did not take the value".to_string())
+            }
         }
     }
 
@@ -393,7 +436,7 @@ mod tests {
         let key = fx_key(2, 1);
         assert_eq!(a.browse_params(key), None);
         assert_eq!(a.state.params.visible(key).count(), 36);
-        let node = "1:Current project/Effects/Insert 2 - Open Parametric EQ 2";
+        let node = "1:Current project/Effects/Open Parametric EQ 2 (Insert 2)";
         assert_eq!((a.state.show_browser, a.state.browser_tab, a.state.browser_sel.as_deref()), (true, PROJECT_TAB, Some(node)));
         let list = rows(&a.state);
         let names: Vec<&str> = list.iter().filter(|r| matches!(r.item, Item::Param(k, _) if k == key)).map(|r| r.label.as_str()).collect();
@@ -405,7 +448,15 @@ mod tests {
         assert!(a.params_browser_right(row, 10.0, 10.0));
         let menu = a.state.playlist.popup.take().unwrap();
         let tgt = target::slot_param(2, 1, 35);
-        assert_eq!(menu.items[0].cmd, Cmd::CreateAutomation(tgt, "Open Parametric EQ 2 - Insert 2 - Main level".into(), 0.5));
+        let create = menu.items.iter().find(|i| i.label == "Create automation clip").unwrap();
+        assert_eq!(create.cmd, Cmd::CreateAutomation(tgt, "Open Parametric EQ 2 - Insert 2 - Main level".into(), 0.5));
+        // Copy value (main level), then paste another value onto band 1 level.
+        crate::playlist::run(&mut a, Cmd::Param(PCmd::Copy(key, 35)));
+        assert_eq!(a.state.params.copied, Some(0.5));
+        a.state.params.copied = Some(0.75);
+        assert_eq!(crate::playlist::run(&mut a, Cmd::Param(PCmd::Paste(key, 0))), None);
+        a.plugins.hosted[&key].plugin.lock().unwrap().idle();
+        assert!((value_of(&a.state, key, 0).unwrap() - 0.75).abs() < 1e-6);
 
         // Dropped on the playlist: a clip there, aimed at the parameter.
         let msg = a.params_drop(key, 35, 3, 384);
@@ -416,8 +467,13 @@ mod tests {
         assert_eq!((clip.position, clip.track, clip.source), (384, 3, os_model::ClipSource::Channel(ch)));
         assert_eq!(value_text(&a.state, Target::SlotParam(2, 1, 0), 1.0).as_deref(), Some("18.0dB"));
 
-        // Last tweaked: nothing yet, then a plugin parameter; a second clip on it gets a numbered name.
+        // Last tweaked: nothing yet ("No parameter", disabled entries), then a plugin parameter; a second clip on it
+        // gets a numbered name.
         assert!(a.params_menu(ADD_LAST).is_some_and(|m| m.starts_with("No parameter")));
+        assert_eq!(a.params_menu(TOOLS_LAST), None);
+        let menu = a.state.playlist.popup.take().unwrap();
+        assert_eq!((menu.items[0].label.as_ref(), menu.items[0].head), ("No parameter", true));
+        assert!(menu.items.iter().any(|i| i.label == "Create automation clip" && !i.enabled));
         a.state.params.note(Tweak::Plugin { key, index: 35 });
         a.params_menu(ADD_LAST);
         let last = a.state.project.channels.last().unwrap();
@@ -480,6 +536,29 @@ mod tests {
         }
         assert!(bad.is_empty(), "{bad:#?}");
         assert!(checked >= 10, "only {checked} named EQ clips");
+    }
+
+    /// Writes a project with an automation clip on a slot plugin parameter, for opening in other software:
+    /// OS_PARAM_FLP_IN (a project with a parametric EQ in a mixer slot) -> OS_PARAM_FLP_OUT, one clip on the EQ's band 1
+    /// frequency (parameter OS_PARAM_K, default 7) rising from 0 to 1 over its 4 bars (spec §7).
+    #[test]
+    #[ignore]
+    fn write_parameter_automation_project() {
+        let (Some(input), Some(out)) = (std::env::var_os("OS_PARAM_FLP_IN"), std::env::var_os("OS_PARAM_FLP_OUT")) else { return };
+        let k: usize = std::env::var("OS_PARAM_K").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
+        let mut a = App::new(None);
+        a.open(input.into());
+        a.plugins.effects = crate::plugins::builtin_effects();
+        a.sync_effects();
+        a.params_tick();
+        let key = a.state.params.lists.keys().copied().find(|&k| fx_of(k).is_some()).expect("a hosted EQ slot");
+        println!("{:?}", a.params_automate(key, k));
+        let auto = a.state.project.automations.last_mut().unwrap();
+        println!("target {:#010x}", auto.target.unwrap());
+        let end = auto.points.last().map_or(16.0, |p| p.beat.max(16.0));
+        auto.points = vec![os_model::AutoPoint::new(0.0, 0.0), os_model::AutoPoint::new(end, 1.0)];
+        a.save_to(out.into());
+        println!("{:?}", a.state.message);
     }
 
     /// A stand-in instance for typing `Weak` (never upgraded).
