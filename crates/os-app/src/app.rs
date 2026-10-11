@@ -177,6 +177,8 @@ pub enum Action {
     PianoRuler,
     /// A scroll bar (left-drag scrolls; right-drag scrolls horizontally and zooms vertically).
     Scrollbar(Scroll),
+    /// A scroll bar's arrow button: steps the axis by an eighth of its view (-1 back, 1 forward).
+    ScrollStep(Scroll, i32),
     /// Playlist (spec: ui/playlist.md): title-bar tools, snap magnet, ▸ options menu, time ruler, marker lane,
     /// track header name area and mute LED, picker tabs and items, popup menu items (top level, submenu).
     PlTool(crate::playlist::PlTool),
@@ -3592,6 +3594,10 @@ impl App {
         if let Action::Scrollbar(t) = a {
             return self.scrollbar_press(t, false);
         }
+        if let Action::ScrollStep(t, dir) = a {
+            let step = self.bar(t).map_or(48.0, |b| (b.view / 8.0).max(18.0).round());
+            return self.scroll_set(t, self.scroll_get(t) + dir as f32 * step);
+        }
         self.note_host_tweak(&a);
         if self.playlist_act(&a, false) {
             return;
@@ -3615,7 +3621,7 @@ impl App {
         }
         let s = &mut self.state;
         match a {
-            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::PianoRuler | Action::Scrollbar(_) => {}
+            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::PianoRuler | Action::Scrollbar(_) | Action::ScrollStep(..) => {}
             Action::PianoTool(t) => {
                 s.piano.tool = t;
                 s.piano.overlay = None;
@@ -5144,6 +5150,24 @@ mod tests {
         app.mouse_up();
         let t = app.state.selected_mixer;
         assert_eq!(crate::mixer::slot_name(&app.state, t, 0).as_deref(), Some("Test FX"));
+    }
+
+    /// The piano roll's scroll-bar arrows step their axis (spec: ui/piano-roll.md §1a).
+    #[test]
+    fn piano_scroll_arrows_step() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        frame(&mut app, &mut c, None);
+        for t in [Scroll::PianoY, Scroll::PianoX] {
+            let v0 = app.scroll_get(t);
+            let r = hit_rect(&app, &Action::ScrollStep(t, 1));
+            click(&mut app, &mut c, r);
+            assert!(app.scroll_get(t) > v0, "{t:?} steps forward");
+            let r = hit_rect(&app, &Action::ScrollStep(t, -1));
+            click(&mut app, &mut c, r);
+            assert!((app.scroll_get(t) - v0).abs() < 0.01, "{t:?} steps back: {v0} -> {}", app.scroll_get(t));
+        }
     }
 
     #[test]
