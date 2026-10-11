@@ -59,7 +59,7 @@ losslessly, so existing projects open, play and save without losing data it does
 <td width="50%" valign="top">
 
 ### 🎛️ Audio engine
-- Sample-accurate pattern and song playback
+- Tick-based pattern and song playback: a running tick clock, swing in whole ticks, song length and render tail
 - Sampler with high-quality windowed-sinc resampling
 - Mixer graph with sends, sidechain routing and measured gain, pan and pitch laws
 - Built-in effects: parametric EQ and limiter
@@ -204,6 +204,7 @@ OpenStudio is a Cargo workspace of focused crates:
 - [x] Theme engine and theme import
 - [x] VST3 hosting (instruments, effects, editors, state, automation)
 - [x] Experimental native effect hosting (opt-in)
+- [ ] Engine rework from the engine specifications: sampler voice, mixer, automation, delay compensation (in progress)
 - [ ] ASIO audio output
 - [ ] Saving plugin channels and full mixer state to project files
 - [ ] More built-in instruments and effects

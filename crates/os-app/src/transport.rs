@@ -523,7 +523,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                             let tempo = project.tempo.unwrap_or(140.0);
                             let frame = os_engine::laws::tick_to_frame(start, project.ppq.max(1), tempo, s.rate);
                             if let Ok(mut e) = s.engine.lock() {
-                                e.seek(frame);
+                                e.seek_tick(start as u64);
                             }
                             shared.position.store(frame, Ordering::Relaxed);
                         }

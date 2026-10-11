@@ -97,24 +97,25 @@ pub(super) fn is_param(t: Target) -> bool {
 }
 
 impl Engine {
-    /// Samples every plugin-parameter clip over the next `frames` frames into `self.params.events`.
+    /// Samples every plugin-parameter clip over the `frames` frames of the tick starting now into `self.params.events`.
     pub(super) fn run_param_automation(&mut self, frames: usize) {
         self.params.events.clear();
         if !self.params.any {
             return;
         }
-        let now = self.frame;
+        let (now, len, ppq) = (self.tick as f64, frames.max(1) as f64, f64::from(self.ppq));
         let pa = &mut self.params;
         for step in (0..frames).step_by(PARAM_STEP) {
-            let f = now + step as u64;
+            // The position in ticks: the tick plus the share of it the step has reached.
+            let f = now + step as f64 / len;
             pa.done.clear();
             // Later clips win where clips on the same target overlap (as for the other targets).
             for a in self.autos.iter().rev() {
-                if !is_param(a.target) || f < a.start || f >= a.end || pa.done.contains(&a.target) {
+                if !is_param(a.target) || f < a.start as f64 || f >= a.end as f64 || pa.done.contains(&a.target) {
                     continue;
                 }
                 pa.done.push(a.target);
-                let beat = a.from_beat + (f - a.start) as f64 / self.frames_per_beat;
+                let beat = a.from_beat + (f - a.start as f64) / ppq;
                 let Some(v) = self.curves[a.curve].value_at(beat) else { continue };
                 let v = v.clamp(0.0, 1.0);
                 match pa.last.iter_mut().find(|(t, _)| *t == a.target) {
