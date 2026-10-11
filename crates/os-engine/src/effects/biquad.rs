@@ -2,7 +2,7 @@
 
 use std::f64::consts::PI;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Biquad {
     b0: f64,
     b1: f64,
@@ -24,6 +24,26 @@ impl Biquad {
         z[0] = self.b1 * x - self.a1 * y + z[1];
         z[1] = self.b2 * x - self.a2 * y;
         y
+    }
+
+    /// Takes `o`'s coefficients and keeps this filter's state (a design change without a restart).
+    pub fn set_coefs(&mut self, o: &Biquad) {
+        let z = self.z;
+        *self = *o;
+        self.z = z;
+    }
+
+    pub fn reset(&mut self) {
+        self.z = [[0.0; 2]; 2];
+    }
+
+    /// Magnitude of the response at `hz`.
+    pub fn magnitude(&self, hz: f64, sr: f64) -> f64 {
+        let w = 2.0 * PI * hz / sr;
+        let (c1, s1, c2, s2) = (w.cos(), w.sin(), (2.0 * w).cos(), (2.0 * w).sin());
+        let (nr, ni) = (self.b0 + self.b1 * c1 + self.b2 * c2, -(self.b1 * s1 + self.b2 * s2));
+        let (dr, di) = (1.0 + self.a1 * c1 + self.a2 * c2, -(self.a1 * s1 + self.a2 * s2));
+        ((nr * nr + ni * ni) / (dr * dr + di * di).max(1e-300)).sqrt()
     }
 
     pub fn process(&mut self, buf: &mut [f32]) {

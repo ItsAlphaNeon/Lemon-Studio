@@ -599,6 +599,8 @@ pub struct App {
     piano_panel: Option<Rect>,
     /// Sampler channel rows whose Open Sampler instance could not be created (not retried).
     sampler_failed: Vec<usize>,
+    /// Mixer slots (`plugins::fx_key`) whose Open Parametric EQ 2 could not start (not retried).
+    fx_failed: Vec<usize>,
 }
 
 /// Window-level requests the shell must carry out after an event.
@@ -706,6 +708,7 @@ impl App {
             piano_grid: None,
             piano_panel: None,
             sampler_failed: Vec::new(),
+            fx_failed: Vec::new(),
         };
         if let Some(p) = path {
             app.open(p);
@@ -783,6 +786,15 @@ impl App {
                         continue;
                     }
                     ch.sample_path = (!p.is_empty()).then_some(p);
+                }
+            }
+        }
+        // Open Parametric EQ 2 instances hold their slot's settings: convert them back to the file's EQ state.
+        for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
+            let (Some((t, k)), Some(st)) = (crate::plugins::fx_of(key), self.plugins.eq_file_state(key)) else { continue };
+            if let Some(slot) = self.state.project.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) {
+                if slot.name == crate::plugins::EQ_FILE_NAME {
+                    slot.state = st;
                 }
             }
         }
@@ -875,6 +887,7 @@ impl App {
         self.plugins.clear();
         self.state.hosted_rows.clear();
         self.sampler_failed.clear();
+        self.fx_failed.clear();
         self.transport.set_instruments(Vec::new());
         self.transport.set_effects(Vec::new());
     }
@@ -908,10 +921,40 @@ impl App {
         }
     }
 
+    /// Mixer slots that hold the project file's parametric EQ are played and edited by Open Parametric EQ 2, started
+    /// from the slot's saved state (spec: plugins/open-parametric-eq-2.md §8). Without the plugin the engine's own EQ
+    /// plays them.
+    fn sync_effects(&mut self) {
+        use crate::plugins::{fx_key, EQ_FILE_NAME, OPEN_EQ};
+        let Some(index) = self.plugins.effect_index(OPEN_EQ) else { return };
+        let todo: Vec<(u16, u8, Vec<u8>)> = self
+            .state
+            .project
+            .mixer
+            .iter()
+            .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
+            .filter_map(|(t, k, s)| s.as_ref().filter(|s| s.name == EQ_FILE_NAME).map(|s| (t, k, s.state.clone())))
+            .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
+            .collect();
+        if todo.is_empty() {
+            return;
+        }
+        for (t, k, fl) in todo {
+            let st = open_parametric_eq_2::params::plugin_state_from_fl(&fl);
+            if let Err(e) = self.plugins.create_effect(t, k, index, Some(&st)) {
+                self.fx_failed.push(fx_key(t, k));
+                self.state.message = Some(format!("{OPEN_EQ}: {e}"));
+            }
+        }
+        self.transport.set_effects(self.plugins.effects());
+        self.state.piano.dirty = true;
+    }
+
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     fn plugin_tick(&mut self) {
         self.sync_samplers();
         self.mixer_tick();
+        self.sync_effects();
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
             // A row hosted this tick already started from its channel's sample.
             if self.state.hosted_rows.contains(&row) && self.plugins.sampler_path(row).as_deref() != Some(path.as_str()) {
@@ -3871,6 +3914,29 @@ mod tests {
 
     fn frame(app: &mut App, c: &mut Canvas, damage: Option<Rect>) {
         app.paint(c, damage);
+    }
+
+    /// Slots holding the file's parametric EQ get an Open Parametric EQ 2 instance and show its name; adding the EQ
+    /// stores the file's EQ (spec: plugins/open-parametric-eq-2.md §8).
+    #[test]
+    fn parametric_eq_slots_are_hosted() {
+        use crate::plugins::{fx_key, EQ_FILE_NAME, OPEN_EQ};
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let mut fl = open_parametric_eq_2::params::default_state();
+        open_parametric_eq_2::params::set_field(&mut fl, 1, -600);
+        a.state.project.mixer[2].slots[1] = Some(os_model::SlotPlugin { name: EQ_FILE_NAME.into(), state: fl.clone() });
+        a.sync_effects();
+        assert!(a.plugins.hosted.contains_key(&fx_key(2, 1)));
+        assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some(OPEN_EQ));
+        assert_eq!(a.plugins.eq_file_state(fx_key(2, 1)), Some(fl));
+        // A second pass changes nothing.
+        let before = a.plugins.hosted.len();
+        a.sync_effects();
+        assert_eq!(a.plugins.hosted.len(), before);
+        assert_eq!(crate::plugins::new_slot(OPEN_EQ).state, open_parametric_eq_2::params::default_state());
     }
 
     /// Writes the toolbar with a live-looking signal to OS_MONITOR_SHOT (a look-and-feel check, not an assertion).

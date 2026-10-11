@@ -987,6 +987,36 @@ const MX_VOLUME: u8 = 0xC0;
 const MX_PAN: u8 = 0xC1;
 const MX_STEREO: u8 = 0xC2;
 
+/// Per mixer track, the plugin-state event (213) of each slot 0-9 that holds a plugin (spec: flp/events/mixer.md
+/// "Slot sub-block": a slot's plugin events come before its 98 marker). Track ranges as in `load_mixer`.
+fn slot_state_events(events: &[Event], l: &Layout) -> Vec<[Option<usize>; 10]> {
+    let starts: Vec<usize> = l.mixer.iter().map(|m| m.color.or(m.color_flag).or(m.name).or(m.flags).unwrap_or(0)).collect();
+    (0..l.mixer.len())
+        .map(|n| {
+            let to = starts.get(n + 1).copied().or(l.mixer_params).unwrap_or(events.len());
+            let mut out = [None; 10];
+            let mut pending: Option<Option<usize>> = None;
+            for (i, e) in events.iter().enumerate().take(to).skip(starts[n]) {
+                match e.id {
+                    id::PLUGIN_NAME => pending = Some(None),
+                    id::PLUGIN_STATE => {
+                        if let Some(p) = pending.as_mut() {
+                            *p = Some(i);
+                        }
+                    }
+                    id::MX_SLOT => {
+                        if let (Some(o), Some(p)) = (out.get_mut(int(e) as usize), pending.take()) {
+                            *o = p;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out
+        })
+        .collect()
+}
+
 fn mixer_location(track: u16, slot: u16) -> u16 {
     0x7000 + track * 64 + slot
 }
@@ -1479,7 +1509,17 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
 
     // Mixer tracks.
     let mut params = l.mixer_params.and_then(|i| events[i].data()).map(<[u8]>::to_vec);
-    for ((m, old), ml) in project.mixer.iter().zip(&current.mixer).zip(&l.mixer) {
+    let slot_states = if skip_mixer { Vec::new() } else { slot_state_events(events, &l) };
+    for (((m, old), ml), states) in project.mixer.iter().zip(&current.mixer).zip(&l.mixer).zip(slot_states.iter().chain(std::iter::repeat(&[None; 10]))) {
+        // spec: flp/events/mixer.md "Slot sub-block": a plugin kept in its slot gets its new state (213); adding or
+        // removing slot plugins is not written (see `unsaved_parts`).
+        for ((new, prev), &at) in m.slots.iter().zip(&old.slots).zip(states) {
+            if let (Some(new), Some(prev), Some(i)) = (new, prev, at) {
+                if new.name == prev.name && new.state != prev.state {
+                    set_data(&mut events[i], new.state.clone());
+                }
+            }
+        }
         if m.enabled != old.enabled {
             if let Some(i) = ml.flags {
                 if let Some(&b) = events[i].data().and_then(|d| d.get(4)) {
@@ -2024,6 +2064,10 @@ pub fn unsaved_parts(project: &Project, file: &FlpFile) -> Vec<&'static str> {
     let mut parts = Vec::new();
     if current.mixer.is_empty() && !mixer_is_default(&project.mixer) {
         parts.push("mixer settings");
+    }
+    let slot_names = |t: &MixerTrack| t.slots.iter().map(|s| s.as_ref().map(|s| s.name.clone())).collect::<Vec<_>>();
+    if !current.mixer.is_empty() && project.mixer.iter().zip(&current.mixer).any(|(a, b)| slot_names(a) != slot_names(b)) {
+        parts.push("added or removed mixer effects");
     }
     if current.arrangements.is_empty() && project.arrangements.iter().any(|a| !a.clips.is_empty()) {
         parts.push("playlist clips");

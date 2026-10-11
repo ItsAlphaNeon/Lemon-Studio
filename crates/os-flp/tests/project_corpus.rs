@@ -423,3 +423,33 @@ fn restructured_channels_survive() {
     }
     assert!(checked > 50, "only {checked} files checked");
 }
+
+/// Mixer slot plugin states written into every FL 26 file read back (spec: flp/events/mixer.md "Slot sub-block"):
+/// each effect state gets a changed last byte and one extra byte, and reads back so.
+#[test]
+fn slot_plugin_states_survive() {
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let Ok(mut project) = load(&file) else { continue };
+        let mut any = false;
+        for s in project.mixer.iter_mut().flat_map(|m| m.slots.iter_mut().flatten()) {
+            // A plugin without a state event (some analysers) keeps having none.
+            if let Some(b) = s.state.last_mut() {
+                *b ^= 0x5a;
+                s.state.push(7);
+                any = true;
+            }
+        }
+        if !any {
+            continue;
+        }
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back, project, "{path}");
+        assert!(os_flp::project::unsaved_parts(&project, &file).is_empty(), "{path}");
+        checked += 1;
+    }
+    assert!(checked > 20, "only {checked} files checked");
+}

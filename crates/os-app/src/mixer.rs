@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use os_model::{MixerTrack, Rgb, SlotPlugin};
+use os_model::{MixerTrack, Rgb};
 
 use crate::app::{App, State, Win};
 use crate::playlist::{Cmd, EditTarget, Mark, PItem, Popup};
@@ -165,7 +165,7 @@ pub fn receives(s: &State, n: u16) -> bool {
 /// The slot's shown name (renamed, else the plugin's name).
 pub fn slot_name(s: &State, t: u16, slot: u8) -> Option<String> {
     let p = track(s, t)?.slots.get(usize::from(slot))?.as_ref()?;
-    Some(s.mixer.slot_names.get(&(t, slot)).cloned().unwrap_or_else(|| p.name.clone()))
+    Some(s.mixer.slot_names.get(&(t, slot)).cloned().unwrap_or_else(|| crate::plugins::slot_label(&p.name).to_string()))
 }
 
 /// "Volume: 100%  0.0dB  1.00" (§4); `label` = "Volume" or "To Insert 3".
@@ -840,7 +840,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
             let t = s.selected_mixer;
             let Some(&nm) = s.hosted_effects.get(index) else { return None };
             if let Some(m) = track_mut(s, t) {
-                m.slots[usize::from(slot)] = Some(SlotPlugin { name: nm.to_string(), state: Vec::new() });
+                m.slots[usize::from(slot)] = Some(crate::plugins::new_slot(nm));
                 m.slot_on[usize::from(slot)] = true;
                 m.slot_mix[usize::from(slot)] = 1.0;
             }
@@ -1019,7 +1019,7 @@ impl App {
     fn open_fx(&mut self, track: u16, slot: u8) {
         let key = crate::plugins::fx_key(track, slot);
         if !self.plugins.hosted.contains_key(&key) {
-            self.state.message = Some("This slot's plugin is not hosted (OpenStudio's own effects have no window yet)".into());
+            self.state.message = Some("This slot's plugin is not hosted (no OpenStudio version of it yet)".into());
             return;
         }
         #[cfg(windows)]
@@ -1039,7 +1039,7 @@ impl App {
 pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate::plugin_window::ChannelInfo> {
     let (t, k) = crate::plugins::fx_of(key)?;
     let m = p.mixer.iter().find(|m| m.index == t)?;
-    let name = ui.slot_names.get(&(t, k)).cloned().or_else(|| m.slots.get(usize::from(k))?.as_ref().map(|s| s.name.clone()))?;
+    let name = ui.slot_names.get(&(t, k)).cloned().or_else(|| m.slots.get(usize::from(k))?.as_ref().map(|s| crate::plugins::slot_label(&s.name).to_string()))?;
     Some(crate::plugin_window::ChannelInfo {
         name,
         target: m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Insert {t}") }),

@@ -97,14 +97,25 @@ fn search_dirs() -> Vec<PathBuf> {
 /// finding a `.clap` file (spec: plugins/open-sampler.md §7).
 pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<Library>>> = OnceLock::new();
-    let lib = LIB.get_or_init(|| {
+    linked(&LIB, &open_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, OPEN_SAMPLER)
+}
+
+/// Open Parametric EQ 2, compiled in the same way: offered for every mixer slot, and it plays the slots a project
+/// saved with the original EQ (spec: plugins/open-parametric-eq-2.md §8).
+pub fn builtin_effects() -> Vec<Available> {
+    static LIB: OnceLock<Option<Arc<Library>>> = OnceLock::new();
+    linked(&LIB, &open_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, OPEN_EQ)
+}
+
+/// The plugins of a CLAP entry table linked into this program.
+fn linked(cell: &OnceLock<Option<Arc<Library>>>, entry: *const std::ffi::c_void, name: &str) -> Vec<Available> {
+    let lib = cell.get_or_init(|| {
         let path = std::env::current_exe().unwrap_or_default();
-        let entry = &open_sampler::clap_entry as *const _ as *const std::ffi::c_void;
-        // SAFETY: `clap_entry` is the linked plugin's static CLAP entry table.
+        // SAFETY: `entry` is a linked plugin's static CLAP entry table.
         match unsafe { Library::from_entry(entry, &path) } {
             Ok(l) => Some(l),
             Err(e) => {
-                eprintln!("built-in Open Sampler: {e}");
+                eprintln!("built-in {name}: {e}");
                 None
             }
         }
@@ -117,9 +128,9 @@ impl Plugins {
     /// `.clap` files are skipped: a second copy in the process would share the built-in one's editor window class.
     pub fn scan() -> Plugins {
         let mut available: Vec<Available> = builtin();
-        let mut effects: Vec<Available> = Vec::new();
+        let mut effects: Vec<Available> = builtin_effects();
         let files = os_clap::find_files(&search_dirs());
-        for f in files.into_iter().filter(|f| f.file_stem().is_none_or(|s| s != OPEN_SAMPLER)) {
+        for f in files.into_iter().filter(|f| f.file_stem().is_none_or(|s| s != OPEN_SAMPLER && s != OPEN_EQ)) {
             match Library::load(&f) {
                 Ok(lib) => {
                     for d in lib.plugins.iter() {
@@ -232,6 +243,22 @@ impl Plugins {
     /// Index of the available plugin called `name`.
     pub fn index_of(&self, name: &str) -> Option<usize> {
         self.available.iter().position(|a| a.desc.name == name)
+    }
+
+    /// Index of the effect plugin called `name`.
+    pub fn effect_index(&self, name: &str) -> Option<usize> {
+        self.effects.iter().position(|a| a.desc.name == name)
+    }
+
+    /// The project-file state of the Open Parametric EQ 2 in mixer slot `key` (its plugin state converted back),
+    /// `None` when the slot hosts something else.
+    pub fn eq_file_state(&self, key: usize) -> Option<Vec<u8>> {
+        let h = self.hosted.get(&key)?;
+        let p = h.plugin.lock().ok()?;
+        if p.desc.name != OPEN_EQ {
+            return None;
+        }
+        open_parametric_eq_2::params::fl_from_plugin_state(&p.save_state()?)
     }
 
     /// Loads sample `path` into row `row`'s Open Sampler: its current state with a new `sample-path`, so every other
@@ -465,6 +492,26 @@ impl Drop for Hosted {
 
 /// Name of OpenStudio's sampler plugin: it plays and edits every sampler channel (spec: plugins/open-sampler.md §7).
 pub const OPEN_SAMPLER: &str = "Open Sampler";
+/// Name of OpenStudio's parametric EQ plugin.
+pub const OPEN_EQ: &str = "Open Parametric EQ 2";
+/// The plugin name a project file stores for the parametric EQ (file-format identifier, kept for interop): slots
+/// with it are played by Open Parametric EQ 2 (spec: plugins/open-parametric-eq-2.md §8).
+pub const EQ_FILE_NAME: &str = "Fruity Parametric EQ 2";
+
+/// What the mixer shows for a slot's stored plugin name.
+pub fn slot_label(name: &str) -> &str {
+    if name == EQ_FILE_NAME { OPEN_EQ } else { name }
+}
+
+/// A new slot for effect `name`: what the project stores (Open Parametric EQ 2 as the file's EQ with its default
+/// state, so the file opens elsewhere; other effects by name).
+pub fn new_slot(name: &str) -> os_model::SlotPlugin {
+    if name == OPEN_EQ {
+        os_model::SlotPlugin { name: EQ_FILE_NAME.into(), state: open_parametric_eq_2::params::default_state() }
+    } else {
+        os_model::SlotPlugin { name: name.into(), state: Vec::new() }
+    }
+}
 /// The sampler parameter a note's sample start modulates per note (Open Sampler's START OFFSET).
 const SAMPLE_START: &str = "Sample start offset";
 
@@ -692,6 +739,34 @@ mod tests {
         click(hwnd, 24, 12); // gear: hide the strip
         pump(&mut pl, 300);
         capture(hwnd, &dir.join("win_nostrip.bmp"));
+    }
+
+    /// The built-in Open Parametric EQ 2 in a mixer slot window: the frame without a strip, the editor inside it, and a
+    /// click on a band's switch reaching the plugin state.
+    /// `OS_SHOT_DIR=.. cargo test -p os-app --bin openstudio eq_window_shots -- --ignored`
+    #[test]
+    #[ignore]
+    fn eq_window_shots() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.effect_index(OPEN_EQ).expect("built-in EQ");
+        pl.create_effect(1, 0, index, None).unwrap();
+        let key = fx_key(1, 0);
+        let info = ChannelInfo { name: OPEN_EQ.into(), target: "Insert 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1 };
+        pl.open_window(key, info).unwrap();
+        pump(&mut pl, 400);
+        let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+        capture(frame, &dir.join("eq_window.bmp"));
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
+        assert!(editor != 0, "the editor is a child of the frame");
+        let mask = |pl: &Plugins| pl.eq_file_state(key).map(|b| b[318]);
+        assert_eq!(mask(&pl), Some(0x7f));
+        // Band 3's switch (editor coordinates, spec: plugins/open-parametric-eq-2.md §3): mutes band 3.
+        click(editor, 549 + 21 * 2 + 6, 296);
+        pump(&mut pl, 200);
+        capture(frame, &dir.join("eq_window_muted.bmp"));
+        assert_eq!(mask(&pl), Some(0x7f & !4));
     }
 
     /// Random clicks, drags and wheel turns on the editor; a probe toggle must keep changing the plugin state.
@@ -1147,6 +1222,39 @@ mod tests {
         }
         // The 0.5 s volume attack kept from the channel still fades the click (0.9 at 0.1 s) in.
         assert!(peak > 0.01 && peak < 0.3, "the mp3 plays through the kept envelope (peak {peak})");
+    }
+
+    /// The built-in Open Parametric EQ 2 starts from a project file's EQ state, plays it, and gives the state back
+    /// (spec: plugins/open-parametric-eq-2.md §8).
+    #[test]
+    fn builtin_parametric_eq_takes_and_gives_the_file_state() {
+        use open_parametric_eq_2::params::{default_state, field, plugin_state_from_fl, set_field};
+        let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.effect_index(OPEN_EQ).expect("built-in EQ");
+        // Band 4 (default frequency: the middle of the scale) at +12 dB.
+        let mut fl = default_state();
+        set_field(&mut fl, 4, 1200);
+        pl.create_effect(3, 2, index, Some(&plugin_state_from_fl(&fl))).unwrap();
+        let key = fx_key(3, 2);
+        let back = pl.eq_file_state(key).expect("EQ state");
+        assert_eq!(field(&back, 4), 1200);
+        assert_eq!(back, fl, "the whole file state comes back");
+        // A sine at the band's frequency comes out about 4 times louder.
+        let hz = os_engine::effects::eq::freq_hz(os_engine::effects::eq::default_freq(3));
+        let fx = pl.hosted[&key].plugin.clone() as SharedEffect;
+        let mut f = fx.lock().unwrap();
+        let mut peak = 0.0f32;
+        for block in 0..40 {
+            let mut l: Vec<f32> = (0..480).map(|i| (0.1 * (std::f64::consts::TAU * hz * f64::from(block * 480 + i) / 48000.0).sin()) as f32).collect();
+            let mut r = l.clone();
+            f.process_fx(48000, &mut l, &mut r);
+            if block > 20 {
+                peak = l.iter().fold(peak, |m, v| m.max(v.abs()));
+            }
+        }
+        assert!((peak - 0.398).abs() < 0.03, "+12 dB at the band (peak {peak})");
+        assert_eq!(slot_label(EQ_FILE_NAME), OPEN_EQ);
+        assert_eq!(new_slot(OPEN_EQ).name, EQ_FILE_NAME);
     }
 
     /// Playlist clips through Open Sampler (spec: plugins/open-sampler.md §7): a note can start partway into the sample

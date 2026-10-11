@@ -384,7 +384,14 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
         let hx = tx + tw + 14.0;
         let hf = Font::new(12);
         let hy = (19.0 - c.ascent(hf)).round();
-        c.text_clip(hf, hx, hy, (p.x - 8.0 - hx).max(0.0), c_caption(), &st.hint);
+        // A tab splits the hint: the part after it sits right-aligned before the Presets box (spec: plugins/host-link.md).
+        let (left, right) = st.hint.split_once('\t').unwrap_or((&st.hint, ""));
+        let end = p.x - 8.0;
+        let rw = if right.is_empty() { 0.0 } else { c.text_width(hf, right).min((end - hx).max(0.0)) };
+        if rw > 0.0 {
+            c.text_clip(hf, end - rw, hy, rw, c_caption(), right);
+        }
+        c.text_clip(hf, hx, hy, (end - rw - 10.0 - hx).max(0.0), c_caption(), left);
     }
     // Presets box (presets are not implemented yet: drawn, inert).
     c.fill_rrect(p, 3.0, c_presets());

@@ -92,6 +92,8 @@ losslessly, so existing projects open, play and save without losing data it does
 - [CLAP](https://cleveraudio.org/) instrument hosting with native editor windows
 - **Open Sampler**: OpenStudio's sampler, also built as a standalone
   VST3 and CLAP plugin for use in other hosts
+- **Open Parametric EQ 2**: 7-band EQ (VST3 + CLAP) with a graph editor, band tokens,
+  spectrum monitor and A/B compare; it plays and saves the EQ slots of `.flp` projects
 - Host link protocol that lets OpenStudio's own plugins integrate with the host's window frame
 
 </td>
@@ -122,7 +124,7 @@ cargo run -p os-app --release -- path/to/project.flp
 
 ### Plugins
 
-Build Open Sampler as VST3 and CLAP bundles (written to `target/bundled/`):
+Build Open Sampler and Open Parametric EQ 2 as VST3 and CLAP bundles (written to `target/bundled/`):
 
 ```bash
 cargo run -p bundle-plugins
@@ -163,7 +165,9 @@ OpenStudio is a Cargo workspace of focused crates:
 | [`os-clap`](crates/os-clap) | CLAP plugin host |
 | [`os-hostlink`](crates/os-hostlink) | Host link protocol between OpenStudio and its own plugins |
 | [`os-native`](crates/os-native) | Experimental host for plugins built on a third-party native plugin SDK |
+| [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of OpenStudio's own plugins |
 | [`open-sampler`](plugins/open-sampler) | Open Sampler instrument (VST3 + CLAP) |
+| [`open-parametric-eq-2`](plugins/open-parametric-eq-2) | Open Parametric EQ 2 effect (VST3 + CLAP) |
 
 ## Roadmap
 
@@ -171,6 +175,7 @@ OpenStudio is a Cargo workspace of focused crates:
 - [x] Audio engine with mixer, routing and effects
 - [x] Playlist, channel rack, piano roll, mixer and browser
 - [x] CLAP hosting (instruments and mixer effects) and the Open Sampler plugin
+- [x] Open Parametric EQ 2 plugin, built in for mixer slots
 - [x] Theme engine and theme import
 - [ ] VST3 hosting
 - [ ] ASIO audio output
@@ -192,7 +197,7 @@ in this repository are original or come from the openly licensed projects listed
 |---|---|---|
 | [Cuprum](https://fonts.google.com/specimen/Cuprum) by Jovanny Lemonad | Interface typeface | [SIL Open Font License 1.1](crates/os-ui/fonts/Cuprum/OFL.txt) |
 | [Tabler Icons](https://tabler.io/icons) | Interface icons | [MIT](crates/os-ui/icons/TABLER-LICENSE.txt) |
-| [NIH-plug](https://github.com/robbert-vdh/nih-plug) | Plugin framework for Open Sampler | ISC |
+| [NIH-plug](https://github.com/robbert-vdh/nih-plug) | Plugin framework for OpenStudio's plugins | ISC |
 | Rust crates listed in `Cargo.lock` | Various | Their respective licenses |
 
 ## License

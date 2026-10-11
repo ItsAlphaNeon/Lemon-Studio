@@ -434,5 +434,10 @@ impl Vst3Plugin for OpenSampler {
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Instrument, Vst3SubCategory::Sampler];
 }
 
+// Built as a plugin module: the C entry points hosts look for. Linked into OpenStudio (`linked` feature): only the
+// symbol-free table, so several Open plugins fit in one program (spec: plugins/plugin-formats.md).
+#[cfg(not(feature = "linked"))]
 nih_export_clap!(OpenSampler);
+#[cfg(not(feature = "linked"))]
 nih_export_vst3!(OpenSampler);
+os_plugkit::linked_clap_entry!(OpenSampler);

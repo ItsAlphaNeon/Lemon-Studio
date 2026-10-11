@@ -67,11 +67,20 @@ pub fn generators(s: &State) -> Vec<Plugin> {
     v
 }
 
-/// Built-in effects followed by the hosted effect plugins (`State::hosted_effects`), all in "Misc" for now.
+/// Open Parametric EQ 2's tile: its editor (`cargo run -p open-parametric-eq-2 --example eq_shot -- out.png demo`, scaled
+/// to 104 px wide).
+const OPEN_EQ_SHOT: &[u8] = include_bytes!("../../assets/picker/open-parametric-eq-2.png");
+
+/// Built-in effects followed by the hosted effect plugins (`State::hosted_effects`): the built-in EQ under "Filter",
+/// the others in "Misc" for now.
 pub fn effects(s: &State) -> Vec<Plugin> {
     let mut v = EFFECTS.to_vec();
     for &name in &s.hosted_effects {
-        v.push(p(name, 7, Curve, 92, 62, 0x5fb6f0));
+        if name == crate::plugins::OPEN_EQ {
+            v.push(p(name, 4, Shot(OPEN_EQ_SHOT), 104, 52, 0x5fb6f0));
+        } else {
+            v.push(p(name, 7, Curve, 92, 62, 0x5fb6f0));
+        }
     }
     v
 }

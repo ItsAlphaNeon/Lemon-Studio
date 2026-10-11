@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// (cargo package, library file stem, display name).
-const PLUGINS: &[(&str, &str, &str)] = &[("open-sampler", "open_sampler", "Open Sampler")];
+const PLUGINS: &[(&str, &str, &str)] =
+    &[("open-sampler", "open_sampler", "Open Sampler"), ("open-parametric-eq-2", "open_parametric_eq_2", "Open Parametric EQ 2")];
 
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
