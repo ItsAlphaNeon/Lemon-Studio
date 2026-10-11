@@ -1,0 +1,12 @@
+//! OpenStudio's DSP building blocks, shared by the engine and OpenStudio's own plugins: the arithmetic the engine
+//! pages specify, at the precision they give, so that a project plays the way it was made.
+//!
+//! - [`level`]: the level curve, knob positions as products with a reciprocal, the constant-power pan split.
+//! - [`glide`]: the per-block gain glide.
+//! - [`mixer`]: a mixer track's fader matrix and its three-band equaliser.
+//!
+// spec: audio/conventions.md, audio/mixer.md
+
+pub mod glide;
+pub mod level;
+pub mod mixer;

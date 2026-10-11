@@ -2055,9 +2055,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "os-dsp"
+version = "0.0.1"
+
+[[package]]
 name = "os-engine"
 version = "0.0.1"
 dependencies = [
+ "os-dsp",
  "os-model",
  "symphonia",
  "symphonia-codec-wavpack",

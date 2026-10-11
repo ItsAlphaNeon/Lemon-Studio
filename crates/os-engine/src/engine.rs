@@ -14,6 +14,7 @@ use std::sync::Arc;
 use os_model::{ChannelKind, ClipSource, ControlPoint, Project};
 
 use crate::clock::Clock;
+use os_dsp::glide::Glide;
 use crate::effects::Effect;
 use crate::envelope;
 use crate::instrument::{SharedInstrument, Slot, TransportInfo};
@@ -262,14 +263,17 @@ struct AutoClip {
 }
 
 struct MixTrack {
-    /// Fader position and pan as set (automation rewrites them, then the matrix).
-    vol: f64,
-    pan: f64,
+    /// Fader (0..16000, 12800 = unity), pan (-6400..6400) and stereo separation (-64..64, positive merges) as stored;
+    /// automation rewrites them, then the matrix (spec: audio/mixer.md).
+    vol: i32,
+    pan: i32,
+    sep: i32,
     on: bool,
-    /// Stereo separation (-1 mono .. 0 as is .. 1 wide), swap left / right, reverse polarity (spec: ui/mixer.md §4).
-    sep: f64,
+    /// Swap left / right and reverse polarity (spec: ui/mixer.md §4; OpenStudio applies them to the matrix).
     swap: bool,
     polarity: bool,
+    /// The three-band equaliser, after the slots and before the fader.
+    eq: os_dsp::mixer::TrackEq,
     /// Insert effects in slot order (applied before the fader).
     effects: Vec<FxSlot>,
     /// Slot LEDs and mix levels by slot, for hosted effects attached later.
@@ -277,10 +281,9 @@ struct MixTrack {
     slot_mix: [f32; 10],
     /// Largest |sample| per side after the fader since the meters last read them.
     peak: [f32; 2],
-    /// Fader × pan as `[[L←L, L←R], [R←L, R←R]]`.
+    /// The fader matrix's target gains `[[L←L, L←R], [R←L, R←R]]`, and the gains as they glide towards them.
     matrix: [[f32; 2]; 2],
-    /// Matrix applied at the end of the last block; ramps to `matrix` over one block.
-    cur: [[f32; 2]; 2],
+    gains: [[Glide; 2]; 2],
     /// (destination, send gain). Sidechain-only routes (level 0) are dropped.
     routes: Vec<(usize, f32)>,
 }
@@ -302,39 +305,33 @@ impl MixTrack {
     fn unity() -> MixTrack {
         let unity = [[1.0, 0.0], [0.0, 1.0]];
         MixTrack {
-            vol: 0.8,
-            pan: 0.0,
+            vol: 12800,
+            pan: 0,
+            sep: 0,
             on: true,
-            sep: 0.0,
             swap: false,
             polarity: false,
+            eq: os_dsp::mixer::TrackEq::default(),
             effects: Vec::new(),
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
             peak: [0.0; 2],
             matrix: unity,
-            cur: unity,
+            gains: unity.map(|r| r.map(Glide::new)),
             routes: vec![],
         }
     }
 
-    /// Fader x pan x (separation, swap, polarity) as one 2x2 matrix (spec: ui/mixer.md §4; gain-laws.md).
+    /// The fader matrix (volume, pan, stereo separation, switch; spec: audio/mixer.md "Fader matrix") with swap and
+    /// polarity on top, as `[[L←L, L←R], [R←L, R←R]]`.
     fn compute_matrix(&self) -> [[f32; 2]; 2] {
-        let g = if self.on { laws::fader_gain(self.vol) } else { 0.0 };
-        let p = laws::mixer_pan(self.pan);
-        // Mid / side: the side signal is scaled by w (0 = mono, 1 = as is, 2 = twice as wide).
-        let w = 1.0 + self.sep.clamp(-1.0, 1.0);
-        let (a, b) = ((1.0 + w) / 2.0, (1.0 - w) / 2.0);
-        let mut t = [[a, b], [b, a]];
+        let [ll, rl, rr, lr] = os_dsp::mixer::fader_matrix(self.vol, self.pan, self.sep, self.on);
+        let mut m = [[ll, rl], [lr, rr]];
         if self.swap {
-            t = [[t[0][1], t[0][0]], [t[1][1], t[1][0]]];
+            m = [[m[0][1], m[0][0]], [m[1][1], m[1][0]]];
         }
-        let sign = if self.polarity { -1.0 } else { 1.0 };
-        let mut m = [[0.0f32; 2]; 2];
-        for r in 0..2 {
-            for c in 0..2 {
-                m[r][c] = ((p[r][0] * t[0][c] + p[r][1] * t[1][c]) * g * sign) as f32;
-            }
+        if self.polarity {
+            m = m.map(|r| r.map(|g| -g));
         }
         m
     }
@@ -509,27 +506,30 @@ impl Engine {
                             .iter()
                             .filter(|&&r| usize::from(r) < n_tracks && r != m.index)
                             .map(|&r| {
+                                // A route without a level record is at unity (spec: flp/engine-events.md "The mixer").
                                 let level = m.send_levels.iter().find(|(d, _)| *d == r).map(|&(_, l)| l);
-                                (usize::from(r), level.map_or(1.0, laws::fader_gain) as f32)
+                                (usize::from(r), level.map_or(1.0, |l| os_dsp::mixer::send_gain((l * 16000.0).round() as i32)))
                             })
                             .filter(|&(_, g)| g > 0.0)
                             .collect()
                     };
                     let mut t = MixTrack {
-                        vol: m.volume.unwrap_or(0.8),
-                        pan: m.pan.unwrap_or(0.0),
+                        vol: (m.volume.unwrap_or(0.8) * 16000.0).round() as i32,
+                        pan: (m.pan.unwrap_or(0.0) * 6400.0).round() as i32,
+                        sep: (m.stereo_separation.unwrap_or(0.0) * 64.0).round() as i32,
                         on: m.enabled,
-                        sep: m.stereo_separation.unwrap_or(0.0),
                         swap: m.swap,
                         polarity: m.polarity,
+                        eq: os_dsp::mixer::TrackEq::new(m.eq, rate),
                         effects,
                         slot_on: m.slot_on,
                         slot_mix: m.slot_mix.map(|v| v as f32),
                         routes,
                         ..MixTrack::unity()
                     };
+                    // At the start of the song every gain is at its target.
                     t.matrix = t.compute_matrix();
-                    t.cur = t.matrix;
+                    t.gains = t.matrix.map(|r| r.map(Glide::new));
                     t
                 })
                 .collect()
@@ -905,7 +905,7 @@ impl Engine {
         self.inst_offs.retain(|o| o.1 < n);
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
-                new.cur = o.cur;
+                new.gains = o.gains;
                 // Own effects keep their state (delay lines, envelopes) when the slot layout is unchanged; the new
                 // slot LEDs and mix levels apply.
                 let same = new.effects.len() == o.effects.len() && new.effects.iter().zip(&o.effects).all(|(a, b)| a.slot == b.slot);
@@ -961,12 +961,13 @@ impl Engine {
                         ch.base_rate = ch.src_ratio * laws::playback_rate(60, cents);
                     }
                 }
+                // Volume Round(16000 v), pan Round((2 v - 1) * 6400) (spec: audio/mixer.md "Changes while the song plays").
                 Target::MixerVolume(t) | Target::MixerPan(t) => {
                     if let Some(m) = self.tracks.get_mut(usize::from(t)) {
                         if matches!(a.target, Target::MixerVolume(_)) {
-                            m.vol = v;
+                            m.vol = (16000.0 * v).round_ties_even() as i32;
                         } else {
-                            m.pan = (v - 0.5) * 2.0;
+                            m.pan = ((2.0 * v - 1.0) * 6400.0).round_ties_even() as i32;
                         }
                         m.matrix = m.compute_matrix();
                     }
@@ -1187,31 +1188,37 @@ impl Engine {
     /// The mixer over this tick: each track's effects, then its gain / pan (ramped over the tick after an edit), then
     /// its output added into its destinations; the master's output is the song.
     fn mix(&mut self, frames: usize, song: &TransportInfo) {
+        let limit = os_dsp::glide::engine_limit(self.rate);
         for &t in &self.order {
-            let (to, from) = (self.tracks[t].matrix, self.tracks[t].cur);
-            self.tracks[t].cur = to;
             self.params.deliver_slots(t, &self.tracks[t].effects);
             let mut buf = std::mem::take(&mut self.bus[t]);
             let rate = self.rate;
             let (dry, l, r) = (&mut self.fx_dry, &mut self.scratch.0, &mut self.scratch.1);
-            for fx in &mut self.tracks[t].effects {
+            let track = &mut self.tracks[t];
+            for fx in &mut track.effects {
                 run_slot(fx, &mut buf, rate, song, dry, l, r);
             }
-            if from == to {
-                let [[ll, lr], [rl, rr]] = to;
+            track.eq.process(&mut buf);
+            // The four gains glide to their targets: a per-sample step for this tick, at most `limit`, applied as a
+            // running sum (spec: audio/mixer.md "Gains ramp").
+            let to = track.matrix;
+            let mut ramps = [[track.gains[0][0].block(to[0][0], frames, limit), track.gains[0][1].block(to[0][1], frames, limit)], [
+                track.gains[1][0].block(to[1][0], frames, limit),
+                track.gains[1][1].block(to[1][1], frames, limit),
+            ]];
+            if ramps.iter().flatten().all(|r| r.is_flat()) {
+                let [[ll, lr], [rl, rr]] = ramps.map(|r| r.map(|g| g.first()));
                 for f in buf.chunks_exact_mut(2) {
                     let (l, r) = (f[0], f[1]);
                     f[0] = ll * l + lr * r;
-                    f[1] = rl * l + rr * r;
+                    f[1] = rr * r + rl * l;
                 }
             } else {
-                let n = frames.max(1) as f32;
-                for (i, f) in buf.chunks_exact_mut(2).enumerate() {
-                    let k = (i + 1) as f32 / n;
-                    let m = |r: usize, c: usize| from[r][c] + (to[r][c] - from[r][c]) * k;
+                for f in buf.chunks_exact_mut(2) {
+                    let [[ll, lr], [rl, rr]] = [[ramps[0][0].next(), ramps[0][1].next()], [ramps[1][0].next(), ramps[1][1].next()]];
                     let (l, r) = (f[0], f[1]);
-                    f[0] = m(0, 0) * l + m(0, 1) * r;
-                    f[1] = m(1, 0) * l + m(1, 1) * r;
+                    f[0] = ll * l + lr * r;
+                    f[1] = rr * r + rl * l;
                 }
             }
             let pk = &mut self.tracks[t].peak;
@@ -1469,9 +1476,10 @@ fn run_slot(fx: &mut FxSlot, buf: &mut [f32], rate: u32, song: &TransportInfo, d
         }
     }
     if blend {
-        let m = fx.mix;
-        for (o, d) in buf.iter_mut().zip(dry.iter()) {
-            *o = *d + (*o - *d) * m;
+        // out = wet * m + dry * (1 - m), single arithmetic (spec: audio/mixer.md "An effect slot").
+        let (m, d) = (fx.mix, 1.0 - fx.mix);
+        for (o, x) in buf.iter_mut().zip(dry.iter()) {
+            *o = *o * m + *x * d;
         }
     }
 }
@@ -2374,10 +2382,11 @@ mod tests {
         // Swap acts on the track's input, before its pan (an OpenStudio reading; FL's order is unmeasured).
         let m = MixTrack { swap: true, ..MixTrack::unity() }.compute_matrix();
         assert!(m[0][0].abs() < 1e-6 && m[1][1].abs() < 1e-6 && m[0][1] > 0.5 && m[1][0] > 0.5, "swapped: {m:?}");
-        let mut t = MixTrack { sep: -1.0, ..MixTrack::unity() };
+        // A positive separation merges: fully mono at 64 (spec: audio/mixer.md).
+        let mut t = MixTrack { sep: 64, ..MixTrack::unity() };
         let m = t.compute_matrix();
         assert!((m[0][0] - m[0][1]).abs() < 1e-6 && (m[1][0] - m[1][1]).abs() < 1e-6, "merged: {m:?}");
-        t.sep = 0.0;
+        t.sep = 0;
         let m = t.compute_matrix();
         assert!(m[0][1].abs() < 1e-6 && m[1][0].abs() < 1e-6, "original: {m:?}");
     }

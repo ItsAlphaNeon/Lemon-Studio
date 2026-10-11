@@ -890,7 +890,11 @@ mod tests {
             }
             let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
             e.continue_from(&mut old);
-            e.process(&mut buf); // ramps down over one block
+            // The rest of the tick already rendered, then the ramp down: a mixer gain moves at most 0.001 per sample at
+            // 44.1 kHz (about 1000 samples from unity to silence; spec: audio/mixer.md "Gains ramp").
+            for _ in 0..3 {
+                e.process(&mut buf);
+            }
             e.process(&mut buf);
             assert_eq!(peak(&buf), 0.0, "edit {edit} silences the ringing voice");
         }

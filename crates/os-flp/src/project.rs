@@ -1061,6 +1061,9 @@ const MX_KIND_ROUTE: u8 = 0x20;
 const MX_VOLUME: u8 = 0xC0;
 const MX_PAN: u8 = 0xC1;
 const MX_STEREO: u8 = 0xC2;
+const MX_EQ_GAIN: u8 = 0xD0;
+const MX_EQ_FREQ: u8 = 0xD8;
+const MX_EQ_WIDTH: u8 = 0xE0;
 
 /// Per mixer track, the plugin-state event (213) of each slot 0-9 that holds a plugin (spec: flp/events/mixer.md
 /// "Slot sub-block": a slot's plugin events come before its 98 marker). Track ranges as in `load_mixer`.
@@ -1309,6 +1312,15 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
                 .find(|&(_, p, k, loc, _)| k == MX_KIND_PARAM && p == pid && loc == base)
                 .map(|r| r.4)
         };
+        // The equaliser: gain 0xD0 + band, frequency 0xD8 + band, width 0xE0 + band (spec: flp/events/mixer.md).
+        let mut eq = os_model::EQ_DEFAULT;
+        for (b, band) in eq.iter_mut().enumerate() {
+            for (k, first) in [MX_EQ_GAIN, MX_EQ_FREQ, MX_EQ_WIDTH].into_iter().enumerate() {
+                if let Some(v) = param(first + b as u8) {
+                    band[k] = v;
+                }
+            }
+        }
         out.push(MixerTrack {
             index,
             name: m.name.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)),
@@ -1329,6 +1341,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             stereo_separation: param(MX_STEREO).map(|v| f64::from(v) / 64.0),
             slot_on,
             slot_mix,
+            eq,
             ..MixerTrack::new(index)
         });
     }

@@ -594,7 +594,7 @@ pub struct MixerTrack {
     pub volume: Option<f64>,
     /// -1.0 ..= 1.0.
     pub pan: Option<f64>,
-    /// -1.0 ..= 1.0: below 0 merges toward mono, above 0 widens (spec: ui/mixer.md §4).
+    /// -1.0 ..= 1.0 (stored / 64): above 0 merges toward mono (fully at 1), below 0 widens (spec: audio/mixer.md).
     pub stereo_separation: Option<f64>,
     /// Reverse polarity and swap left / right buttons (spec: ui/mixer.md §4; file location unknown).
     pub polarity: bool,
@@ -602,7 +602,13 @@ pub struct MixerTrack {
     /// Per slot: enabled (the slot LED) and mix level 0..=1 (spec: ui/mixer.md §7).
     pub slot_on: [bool; 10],
     pub slot_mix: [f64; 10],
+    /// The three-band equaliser as stored, per band `[gain, frequency, width]`: gain -1800..=1800 in 0.01 dB,
+    /// frequency and width 0..=65536 (spec: audio/mixer.md "Equaliser"). Band 1 low shelf, 2 peaking, 3 high shelf.
+    pub eq: [[i32; 3]; 3],
 }
+
+/// A new track's equaliser: flat, at the default frequencies and widths.
+pub const EQ_DEFAULT: [[i32; 3]; 3] = [[0, 5777, 17500], [0, 33145, 17500], [0, 55825, 17500]];
 
 impl MixerTrack {
     /// A default track: unnamed, enabled, unity volume, centred, empty slots, routed to the master (except the master).
@@ -622,6 +628,7 @@ impl MixerTrack {
             swap: false,
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
+            eq: EQ_DEFAULT,
         }
     }
 }
