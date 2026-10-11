@@ -183,7 +183,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 pair(Value("0".into(), "Master sync offset (milliseconds)"), combo("MIDI clock", 168.0, "Synchronization type")),
             ]),
             g("Input", vec![
-                dim("MIDI input devices", List(vec![("", 0.0)], vec![], 9)),
+                // The devices that are open: their notes play the selected channel (spec: ui/midi-input.md).
+                List(vec![("Open input devices (notes play the selected channel)", 0.0)], s.midi_inputs.iter().map(|d| vec![d.clone()]).collect(), 9),
                 pair(Check("Enable", true), ValueR("Port", "---".into())),
                 combo("(generic controller)", 250.0, "Controller type"),
                 pair(combo("Velocity", 100.0, "Link note on velocity to"), ValueR("Omni preview MIDI channel", "---".into())),
