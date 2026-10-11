@@ -157,7 +157,6 @@ pub fn sampler_param(misc: &ChannelMisc, m: M) -> Option<(&'static str, f64)> {
 }
 
 /// A Misc tab edit of rack row `row`: the channel model, its hosted Open Sampler (root / fine), then playback.
-#[cfg(windows)]
 pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
     let Some(ch) = app.state.project.channels.get_mut(row) else { return };
     put(&mut ch.misc, m, v);
