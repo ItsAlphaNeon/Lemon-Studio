@@ -18,7 +18,7 @@
 
 <p>
   <a href="#overview">Overview</a> ·
-  <a href="#features">Features</a> ·
+  <a href="#capabilities">Capabilities</a> ·
   <a href="#getting-started">Getting started</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#roadmap">Roadmap</a> ·
@@ -45,6 +45,8 @@ losslessly, so existing projects open, play and save without losing data it does
 > **OpenStudio is pre-alpha software.** It is under active development and is not yet a usable DAW:
 > expect missing features, rough edges and breaking changes.
 >
+> - **Greyed-out controls are not implemented yet.** Many menus and buttons are already laid out but do
+>   nothing so far; they are drawn dim and say "not available yet".
 > - **No prebuilt binaries** will be published until OpenStudio reaches a usable state. Until then it
 >   can only be built from source.
 > - **Project-file support is at a very early stage.** Do not overwrite your original `.flp` projects
@@ -52,77 +54,35 @@ losslessly, so existing projects open, play and save without losing data it does
 > - **Support is not available yet**, and issue reports will not be tracked until a later stage of
 >   development.
 
-## Features
+## Capabilities
 
-<table>
-<tr>
-<td width="50%" valign="top">
+A broad picture of where OpenStudio stands against what a complete DAW offers. Controls for anything that
+is not implemented yet are **greyed out** in the application: hovering one says "not available yet", and
+clicking it does nothing.
 
-### 🎛️ Audio engine
-- Tick-based pattern and song playback: a running tick clock, swing in whole ticks, song length and render tail
-- Sampler with high-quality windowed-sinc resampling
-- Mixer graph with sends, sidechain routing, stereo separation, a three-band track equaliser and gliding gains
-- Built-in effects: parametric EQ and limiter
-- Channel envelopes, note repeat and per-pattern control lanes
-- Automation clips for channel, mixer and plugin parameters (sample-accurate plugin parameter events)
-- Live edits reach playback instantly, without clicks
-- Offline rendering and low-latency WASAPI output
+| Area | Status | Notes |
+|---|:---:|---|
+| Step sequencing and patterns | ✅ | Channel rack with steps, mini piano rolls, swing, per-channel loops |
+| Piano roll note editing | ✅ | Full tool set, velocity and event lanes |
+| Song arrangement | ✅ | Playlist with pattern, audio and automation clips, markers, several arrangements |
+| Automation | 🚧 | Automation clips for channel, mixer and plugin parameters; no recording of movements |
+| Mixing and routing | ✅ | Mixer tracks, sends, sidechain, effect slots, meters |
+| Plugin hosting | ✅ | CLAP and VST3 instruments and effects, with their editors and saved state |
+| Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ so far |
+| Exporting audio | 🚧 | Song or pattern to a WAV file (32-bit float); no MP3 or FLAC yet |
+| Project files | 🚧 | Opens and saves `.flp` projects; early, always keep backups |
+| Undo | 🚧 | Per editor (piano roll, playlist); no redo or global history |
+| Note input | 🚧 | Mouse and computer keyboard; no MIDI controllers yet |
+| Audio recording | ❌ | Not available yet |
+| MIDI file import / export | ❌ | Not available yet |
+| Audio editing and time-stretching | ❌ | Not available yet |
+| Plugin delay compensation | ❌ | Not available yet |
+| Audio drivers | 🚧 | WASAPI (shared mode); no ASIO yet |
+| Platforms | 🚧 | Windows 10 / 11; Linux builds are experimental; no macOS yet |
 
-</td>
-<td width="50%" valign="top">
+✅ usable · 🚧 partial · ❌ not available yet
 
-### 🖥️ Interface
-- Playlist with clips, markers, automation and nine editing tools; track groups (collapsible), several arrangements,
-  audio clip fades and gain with on-clip handles, stretch mode (Shift+M), tempo automation, quick quantize and
-  per-track export
-- Channel rack: step sequencer, mini piano rolls, graph editor, per-channel loops, filter groups, fill tools, swing, clone / move / delete channels
-- Piano roll with full tool set, velocity and event lanes
-- Mixer: track select / rename / colour, mute and solo, polarity and channel swap, click-to-route sends with send knobs
-  and sidechain, per-track meters, add / insert / move / delete tracks, effect slots hosting CLAP and VST3 effects (bypass, dry/wet)
-- Browser with drag and drop, plugin picker; "Browse parameters" lists a plugin's parameters to drag onto the playlist
-- "Create automation clip" from knobs, plugin knob menus and the last tweaked parameter
-- Floating, resizable, stackable windows
-- Theme engine with `.flstheme` import
-- Sharp on high-density displays: follows the Windows display scale (125 %, 150 %, 200 % ...), plugin editors included,
-  and follows a monitor or scale change at once
-- Damage-tracked CPU rendering: playback, meters and scrolling repaint only what moves, and cached text, icons and
-  shapes keep whole-window repaints fast, even with a full playlist
-- Computer-keyboard note input
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### 📁 Project files
-- Lossless `.flp` reader and writer: unknown data is preserved byte for byte
-- Typed project model for patterns, channels, mixer, playlist and automation
-- New projects saved in a form other compatible software opens
-- Channel rack settings saved: swing, filter groups, locked and zipped rows, pattern length, loop lengths, and added, cloned, moved or deleted channels
-- Plugin channels and mixer effects saved with their state: CLAP and VST3 plugins as wrapped plugins that are hosted
-  again on opening, native plugins in their own format
-- Mixer saved: effects added, removed or moved between slots, slot on/off and mix levels, added mixer tracks
-- Round-trip test suite over a corpus of real-world projects
-
-</td>
-<td width="50%" valign="top">
-
-### 🔌 Plugins
-- [CLAP](https://cleveraudio.org/) and VST3 hosting: instruments and mixer effects, plugin editors inside
-  OpenStudio's plugin window, plugin state (VST3 in the `.vstpreset` layout), parameters and automation, song
-  tempo and position for tempo-synced plugins, portamento glides (per-note tuning)
-- **Open Sampler**: OpenStudio's sampler, also built as a standalone
-  VST3 and CLAP plugin for use in other hosts
-- **Open Parametric EQ 2**: 7-band EQ (VST3 + CLAP) with a graph editor, band tokens,
-  spectrum monitor and A/B compare; it plays and saves the EQ slots of `.flp` projects
-- Host link protocol that lets OpenStudio's own plugins integrate with the host's window frame
-- Experimental host for FL native effect plugins (opt-in): the user's installed native effects
-  appear in the picker and process in mixer slots
-- Presets for every hosted plugin: list, step with ◀ ▶ and save from the plugin window's title bar
-
-</td>
-</tr>
-</table>
+The full, item-by-item roadmap lives on the [Discord server](https://discord.gg/yC2uCuGs3M).
 
 ## Getting started
 
@@ -137,10 +97,12 @@ losslessly, so existing projects open, play and save without losing data it does
 No prebuilt binaries are provided at this stage; OpenStudio is built from source.
 
 ```bash
-git clone <repository-url> OpenStudio
+git clone https://github.com/ItsAlphaNeon/OpenStudio.git
 cd OpenStudio
 cargo run -p os-app --release
 ```
+
+Use `FILE > Export as WAV` (Ctrl+R) to render the song, or the current pattern in PAT mode, to a file.
 
 Open a project directly by passing its path:
 
@@ -150,7 +112,7 @@ cargo run -p os-app --release -- path/to/project.flp
 
 ### Plugins
 
-Build Open Sampler and Open Parametric EQ 2 as VST3 and CLAP bundles (written to `target/bundled/`):
+Build Open Sampler, Open 3x Osc and Open Parametric EQ 2 as VST3 and CLAP bundles (written to `target/bundled/`):
 
 ```bash
 cargo run -p bundle-plugins
@@ -196,25 +158,15 @@ OpenStudio is a Cargo workspace of focused crates:
 | [`os-native`](crates/os-native) | Experimental host for plugins built on a third-party native plugin SDK |
 | [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of OpenStudio's own plugins |
 | [`open-sampler`](plugins/open-sampler) | Open Sampler instrument (VST3 + CLAP) |
+| [`open-3x-osc`](plugins/open-3x-osc) | Open 3x Osc instrument (VST3 + CLAP) |
 | [`open-parametric-eq-2`](plugins/open-parametric-eq-2) | Open Parametric EQ 2 effect (VST3 + CLAP) |
 
 ## Roadmap
 
-- [x] Lossless project file reading and writing
-- [x] Audio engine with mixer, routing and effects
-- [x] Playlist, channel rack, piano roll, mixer and browser
-- [x] CLAP hosting (instruments and mixer effects) and the Open Sampler plugin
-- [x] Open Parametric EQ 2 plugin, built in for mixer slots
-- [x] Theme engine and theme import
-- [x] VST3 hosting (instruments, effects, editors, state, automation)
-- [x] Experimental native effect hosting (opt-in)
-- [ ] Engine rework from the engine specifications: sampler voice, mixer, automation, delay compensation (in progress)
-- [ ] ASIO audio output
-- [ ] Saving plugin channels and full mixer state to project files
-- [ ] More built-in instruments and effects
-- [x] High-DPI displays (Windows display scale, plugin editors included)
-- [ ] Own UI scale setting and wide-screen toolbar layout
-- [ ] Linux and macOS support
+The roadmap is kept on the [OpenStudio Discord server](https://discord.gg/yC2uCuGs3M), where every item is
+marked as complete, in progress or not started. The broad next steps are the engine rework (sampler voice,
+automation, delay compensation), audio recording, MIDI controller input, ASIO output, more built-in instruments
+and effects, and Linux and macOS support.
 
 ## Development approach
 
