@@ -89,7 +89,9 @@ impl Descriptor {
     }
 }
 
-/// One parameter of a plugin. Values crossing this API are normalized to 0..=1 (whatever the format's own range).
+/// One parameter of a plugin. Values crossing this API are normalized to 0..=1 (VST3's own unit; CLAP's plain value
+/// maps linearly: plain = min + normalized * (max - min)), which is also what automation stores. The list order
+/// (`Plugin::param_info(index)`) is the parameter's index.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamInfo {
     /// Stable id (CLAP `clap_id`, VST3 `ParamID`).
@@ -99,6 +101,9 @@ pub struct ParamInfo {
     pub unit: String,
     /// Group / module path ("Filter/Envelope"), may be empty.
     pub group: String,
+    /// The plugin's own (plain) range, for display: CLAP min / max, VST3 the plain values of 0 and 1.
+    pub min: f64,
+    pub max: f64,
     /// Default value, normalized.
     pub default: f64,
     /// Number of steps for stepped parameters (a switch has 1, a 4-way list 3), 0 = continuous.
@@ -108,6 +113,8 @@ pub struct ParamInfo {
     pub hidden: bool,
     /// The plugin's bypass switch.
     pub bypass: bool,
+    /// A list of named values (CLAP enum, VST3 list).
+    pub enumerated: bool,
 }
 
 /// A parameter change the plugin reports by itself (its editor moved a control): the source of "last tweaked" and of

@@ -23,7 +23,7 @@ use clap_sys::ext::gui::{clap_plugin_gui, clap_window, clap_window_handle, CLAP_
 use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
 use clap_sys::ext::params::{
     clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS,
-    CLAP_PARAM_IS_HIDDEN, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
+    CLAP_PARAM_IS_ENUM, CLAP_PARAM_IS_HIDDEN, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
 };
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
@@ -819,12 +819,15 @@ impl os_host::Plugin for Plugin {
                 name: CStr::from_ptr(info.name.as_ptr()).to_string_lossy().into_owned(),
                 unit: String::new(),
                 group: CStr::from_ptr(info.module.as_ptr()).to_string_lossy().into_owned(),
+                min: lo,
+                max: hi,
                 default: if hi > lo { ((info.default_value - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 },
                 steps: if f & CLAP_PARAM_IS_STEPPED != 0 { (hi - lo).round().max(0.0) as u32 } else { 0 },
                 automatable: f & CLAP_PARAM_IS_AUTOMATABLE != 0,
                 read_only: f & CLAP_PARAM_IS_READONLY != 0,
                 hidden: f & CLAP_PARAM_IS_HIDDEN != 0,
                 bypass: f & CLAP_PARAM_IS_BYPASS != 0,
+                enumerated: f & CLAP_PARAM_IS_ENUM != 0,
             })
         }
     }
