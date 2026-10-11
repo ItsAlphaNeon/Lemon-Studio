@@ -71,10 +71,35 @@ pub enum MenuStyle {
     List,
 }
 
+/// Row heights at 100 % (logical px = device px): item row, section header, separator, panel border.
 pub const ROW: f32 = 19.0;
 pub const HEAD: f32 = 16.0;
 pub const SEP: f32 = 7.0;
 pub const BORDER: f32 = 2.0;
+
+/// A menu's row heights at one display scale, in logical px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Metrics {
+    pub row: f32,
+    pub head: f32,
+    pub sep: f32,
+    /// The separator's 1 px line, from the separator's top.
+    pub sep_line: f32,
+    /// One device pixel (the separator line's thickness).
+    pub line: f32,
+    pub border: f32,
+}
+
+/// Menu row heights at display scale `scale` (spec: ui/ui-scaling.md §2). Popup menus size their rows from the menu
+/// font, which scales, plus padding that stays in device pixels: item rows are font + 7 px, headers font + 4 px,
+/// separators a 1 px line between two gaps of 3 px x scale (rounded down), the border 2 px. At 100 % that is 19 / 16 /
+/// 7 / 2 px, at 150 % 25 / 22 / 9 / 2 px, so menus grow less than the rest of the window. Text and widths scale as usual.
+pub fn metrics(scale: f32) -> Metrics {
+    let k = if scale > 0.0 { scale } else { 1.0 };
+    let em = (12.0 * k).round();
+    let gap = (3.0 * k).floor();
+    Metrics { row: (em + 7.0) / k, head: (em + 4.0) / k, sep: (2.0 * gap + 1.0) / k, sep_line: gap / k, line: 1.0 / k, border: 2.0 / k }
+}
 
 fn font(style: MenuStyle) -> Font {
     match style {
@@ -83,11 +108,11 @@ fn font(style: MenuStyle) -> Font {
     }
 }
 
-fn row_h(it: &MenuItem) -> f32 {
+fn row_h(m: &Metrics, it: &MenuItem) -> f32 {
     match it {
-        MenuItem::Item { .. } => ROW,
-        MenuItem::Head(_) => HEAD,
-        MenuItem::Sep => SEP,
+        MenuItem::Item { .. } => m.row,
+        MenuItem::Head(_) => m.head,
+        MenuItem::Sep => m.sep,
         MenuItem::Column => 0.0,
     }
 }
@@ -111,6 +136,7 @@ impl MenuLayout {
 /// Lays a menu out: columns as wide as their widest row, rows stacked.
 pub fn layout(c: &mut Canvas, items: &[MenuItem], style: MenuStyle) -> MenuLayout {
     let f = font(style);
+    let m = metrics(c.scale);
     let mut cols: Vec<Vec<usize>> = vec![Vec::new()];
     for (i, it) in items.iter().enumerate() {
         if matches!(it, MenuItem::Column) {
@@ -120,7 +146,7 @@ pub fn layout(c: &mut Canvas, items: &[MenuItem], style: MenuStyle) -> MenuLayou
         }
     }
     let mut rows = vec![Rect::default(); items.len()];
-    let mut x = BORDER;
+    let mut x = m.border;
     let mut h: f32 = 0.0;
     for col in &cols {
         let mut w: f32 = 60.0;
@@ -136,16 +162,16 @@ pub fn layout(c: &mut Canvas, items: &[MenuItem], style: MenuStyle) -> MenuLayou
             });
         }
         let w = w.ceil();
-        let mut y = BORDER;
+        let mut y = m.border;
         for &i in col {
-            let rh = row_h(&items[i]);
+            let rh = row_h(&m, &items[i]);
             rows[i] = Rect::new(x, y, w, rh);
             y += rh;
         }
-        h = h.max(y - BORDER);
+        h = h.max(y - m.border);
         x += w;
     }
-    MenuLayout { w: x + BORDER, h: h + 2.0 * BORDER, rows }
+    MenuLayout { w: x + m.border, h: h + 2.0 * m.border, rows }
 }
 
 /// Paints a menu at (`ox`, `oy`) (the layout's origin). `hover` = row under the mouse, `current` = lit row of a list
@@ -153,13 +179,14 @@ pub fn layout(c: &mut Canvas, items: &[MenuItem], style: MenuStyle) -> MenuLayou
 pub fn paint(c: &mut Canvas, t: &Palette, items: &[MenuItem], l: &MenuLayout, style: MenuStyle, ox: f32, oy: f32, hover: Option<usize>, current: Option<usize>) {
     let r = Rect::new(ox, oy, l.w, l.h);
     let f = font(style);
+    let m = metrics(c.scale);
     let lh = c.line_height(f);
     let (body, border, hi, text, dim, head, head_text, sc) = match style {
         MenuStyle::Context => (t.menu_pop, t.menu_pop_border, t.menu_pop_hi, t.menu_pop_text, t.menu_pop_dim, t.menu_pop_head, t.menu_pop_head_text, t.menu_pop_shortcut),
         MenuStyle::List => (t.s(0x1d1e1f), t.s(0x101112), t.s(0x89949b), t.tx(0xc5ccd0), t.s(0x6a6e70), t.s(0x303131), t.s(0x7e8486), t.s(0x9ea4a3)),
     };
     c.fill_rect(r, border);
-    c.fill_rect(r.inset(BORDER), body);
+    c.fill_rect(r.inset(m.border), body);
     // Column dividers.
     let mut last_x = None;
     for (i, row) in l.rows.iter().enumerate() {
@@ -168,7 +195,7 @@ pub fn paint(c: &mut Canvas, t: &Palette, items: &[MenuItem], l: &MenuLayout, st
         }
         if let Some(px) = last_x {
             if row.x > px {
-                c.fill_rect(Rect::new(ox + row.x - 1.0, oy + BORDER, 1.0, l.h - 2.0 * BORDER), head);
+                c.fill_rect(Rect::new(ox + row.x - 1.0, oy + m.border, 1.0, l.h - 2.0 * m.border), head);
             }
         }
         last_x = Some(row.x);
@@ -178,10 +205,10 @@ pub fn paint(c: &mut Canvas, t: &Palette, items: &[MenuItem], l: &MenuLayout, st
         let rr = Rect::new(ox + l.rows[i].x, oy + l.rows[i].y, l.rows[i].w, l.rows[i].h);
         match it {
             MenuItem::Column => {}
-            MenuItem::Sep => c.fill_rect(Rect::new(rr.x, rr.y + 3.0, rr.w, 1.0), head),
+            MenuItem::Sep => c.fill_rect(Rect::new(rr.x, rr.y + m.sep_line, rr.w, m.line), head),
             MenuItem::Head(s) => {
                 c.fill_rect(rr, head);
-                c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0, head_text, s);
+                c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0 + (rr.h - HEAD) / 2.0, head_text, s);
             }
             MenuItem::Item { label, shortcut, mark, sub, enabled } => {
                 let on = lit == Some(i) && (*enabled || style == MenuStyle::List);
@@ -243,10 +270,22 @@ mod tests {
         assert_eq!(l.rows[1].y, BORDER + HEAD);
         assert!(l.rows[4].x > l.rows[1].x);
         assert_eq!(l.h, HEAD + 2.0 * ROW + 2.0 * BORDER);
+        // 150 %: rows 25, headers 22, border 2 device px (spec: ui/ui-scaling.md §2).
+        let mut c = Canvas::new(600, 450, 1.5).unwrap();
+        let l = layout(&mut c, &items, MenuStyle::List);
+        assert_eq!(((l.h * 1.5).round(), (l.rows[1].h * 1.5).round(), (l.rows[0].h * 1.5).round()), (2.0 * 25.0 + 22.0 + 4.0, 25.0, 22.0));
         assert_eq!(l.item_at(&items, l.rows[2].cx(), l.rows[2].cy()), Some(2));
         assert_eq!(l.item_at(&items, l.rows[0].cx(), l.rows[0].cy()), None);
         let t = Palette::default();
         paint(&mut c, &t, &items, &l, MenuStyle::List, 0.0, 0.0, None, Some(1));
         paint(&mut c, &t, &items, &l, MenuStyle::Context, 0.0, 0.0, Some(2), None);
+    }
+
+    #[test]
+    fn metrics_follow_the_font_with_fixed_padding() {
+        let px = |m: Metrics, k: f32| [m.row, m.head, m.sep, m.sep_line, m.border].map(|v| (v * k).round());
+        assert_eq!(px(metrics(1.0), 1.0), [19.0, 16.0, 7.0, 3.0, 2.0]);
+        assert_eq!(px(metrics(1.5), 1.5), [25.0, 22.0, 9.0, 4.0, 2.0]);
+        assert_eq!(px(metrics(2.0), 2.0), [31.0, 28.0, 13.0, 6.0, 2.0]);
     }
 }

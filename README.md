@@ -71,6 +71,8 @@ losslessly, so existing projects open, play and save without losing data it does
 - "Create automation clip" from knobs, plugin knob menus and the last tweaked parameter
 - Floating, resizable, stackable windows
 - Theme engine with `.flstheme` import
+- Sharp on high-density displays: follows the Windows display scale (125 %, 150 %, 200 % ...), plugin editors included,
+  and follows a monitor or scale change at once
 - Damage-tracked CPU rendering for fast repaints
 - Computer-keyboard note input
 
@@ -193,7 +195,8 @@ OpenStudio is a Cargo workspace of focused crates:
 - [ ] ASIO audio output
 - [ ] Saving plugin channels and full mixer state to project files
 - [ ] More built-in instruments and effects
-- [ ] UI scaling and high-DPI layouts
+- [x] High-DPI displays (Windows display scale, plugin editors included)
+- [ ] Own UI scale setting and wide-screen toolbar layout
 - [ ] Linux and macOS support
 
 ## Development approach

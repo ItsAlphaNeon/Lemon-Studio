@@ -664,19 +664,18 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
     }
 }
 
-const POP_ROW: f32 = 19.0;
-
-fn item_h(it: &pl::PItem) -> f32 {
-    if it.col { 0.0 } else if it.sep { 7.0 } else if it.head { 16.0 } else { POP_ROW }
+// Row heights follow the display scale like FL's popup menus (spec: ui/ui-scaling.md §2).
+fn item_h(m: &os_ui::kit::menu::Metrics, it: &pl::PItem) -> f32 {
+    if it.col { 0.0 } else if it.sep { m.sep } else if it.head { m.head } else { m.row }
 }
 
 /// Column and y offset of each item: a new column starts at a column break or when the next item would pass
 /// `max_h` (long menus such as the channel rack's options wrap, spec: ui/channel-rack.md §17-18).
-fn popup_layout(items: &[pl::PItem], max_h: f32) -> (Vec<(usize, f32)>, usize, f32) {
+fn popup_layout(m: &os_ui::kit::menu::Metrics, items: &[pl::PItem], max_h: f32) -> (Vec<(usize, f32)>, usize, f32) {
     let (mut col, mut y, mut h) = (0usize, 0.0f32, 0.0f32);
     let mut out = Vec::with_capacity(items.len());
     for it in items {
-        let ih = item_h(it);
+        let ih = item_h(m, it);
         if it.col || (y > 0.0 && y + ih > max_h) {
             col += 1;
             y = 0.0;
@@ -701,32 +700,35 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         }
     }
     let cw = 20.0 + lw + if kw > 0.0 { kw + 24.0 } else { 12.0 } + 14.0;
-    let (layout, cols, body_h) = popup_layout(items, (screen.1 - 8.0).max(POP_ROW));
-    let (w, h) = (cw * cols as f32, body_h + 4.0);
+    let m = os_ui::kit::menu::metrics(ui.c.scale);
+    // Text sits where it does at 100 %, moved by half of what the row lost.
+    let dy = (m.row - os_ui::kit::menu::ROW) / 2.0;
+    let (layout, cols, body_h) = popup_layout(&m, items, (screen.1 - 8.0).max(m.row));
+    let (w, h) = (cw * cols as f32, body_h + 2.0 * m.border);
     let x = x.min(screen.0 - w - 2.0).max(0.0);
     let y = y.min(screen.1 - h - 2.0).max(0.0);
     let r = Rect::new(x, y, w, h);
     let mut rows = Vec::with_capacity(items.len());
     ui.c.fill_rect(r, t.menu_pop);
-    ui.c.stroke_rrect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0), 0.0, 2.0, t.menu_pop_border);
+    ui.c.stroke_rrect(Rect::new(r.x + m.line, r.y + m.line, r.w - 2.0 * m.line, r.h - 2.0 * m.line), 0.0, m.border, t.menu_pop_border);
     ui.hit(r, Action::Swallow, "");
     for (i, it) in items.iter().enumerate() {
         let (col, off) = layout[i];
-        let rr = Rect::new(r.x + 2.0 + col as f32 * cw, r.y + 2.0 + off, cw - 4.0, item_h(it));
+        let rr = Rect::new(r.x + m.border + col as f32 * cw, r.y + m.border + off, cw - 2.0 * m.border, item_h(&m, it));
         rows.push(rr);
         if col > 0 && (i == 0 || layout[i - 1].0 != col) {
-            ui.c.fill_rect(Rect::new(rr.x - 2.0, r.y + 2.0, 1.0, r.h - 4.0), t.menu_pop_head);
+            ui.c.fill_rect(Rect::new(rr.x - m.border, r.y + m.border, 1.0, r.h - 2.0 * m.border), t.menu_pop_head);
         }
         if it.col {
             continue;
         }
         if it.sep {
-            ui.c.fill_rect(Rect::new(rr.x, rr.y + 3.0, rr.w, 1.0), t.menu_pop_head);
+            ui.c.fill_rect(Rect::new(rr.x, rr.y + m.sep_line, rr.w, m.line), t.menu_pop_head);
             continue;
         }
         if it.head {
             ui.c.fill_rect(rr, t.menu_pop_head);
-            ui.c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0, t.menu_pop_head_text, &it.label);
+            ui.c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0 + (rr.h - os_ui::kit::menu::HEAD) / 2.0, t.menu_pop_head_text, &it.label);
             continue;
         }
         let action = if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
@@ -735,7 +737,7 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             ui.c.fill_rect(rr, t.menu_pop_hi);
         }
         let color = if it.enabled { t.menu_pop_text } else { t.menu_pop_dim };
-        let (mx, my) = (rr.x + 10.0, rr.y + POP_ROW / 2.0);
+        let (mx, my) = (rr.x + 10.0, rr.y + m.row / 2.0);
         match it.mark {
             Mark::Check(true) => {
                 ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, t.menu_pop_text);
@@ -750,10 +752,10 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             Mark::Radio(false) => ui.c.stroke_circle(mx, my, 3.5, 1.0, t.menu_pop_dim),
             _ => {}
         }
-        ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0, lw + 4.0, color, &it.label);
+        ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, lw + 4.0, color, &it.label);
         let right = rr.right() - if it.children.is_empty() { 8.0 } else { 16.0 };
         if !it.key.is_empty() {
-            ui.c.text_right(font.italic(), right, rr.y + 3.0, t.menu_pop_shortcut, it.key);
+            ui.c.text_right(font.italic(), right, rr.y + 3.0 + dy, t.menu_pop_shortcut, it.key);
         }
         if !it.children.is_empty() {
             let ax = rr.right() - 11.0;
