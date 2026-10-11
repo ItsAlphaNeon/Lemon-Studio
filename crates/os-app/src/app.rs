@@ -110,8 +110,9 @@ pub enum Action {
     PatternPrev,
     PatternNext,
     PatternAdd,
-    MixerSelect(u16),
     Fader(u16),
+    /// A mixer control (spec: ui/mixer.md).
+    Mix(crate::mixer::MHit),
     ChannelSelect(usize),
     ChannelEnable(usize),
     Step(usize, u32),
@@ -270,6 +271,7 @@ fn hover_is_visible(a: &Action) -> bool {
         Action::DragWindow
             | Action::PlaylistArea
             | Action::MixerArea
+            | Action::Mix(crate::mixer::MHit::Strip(_) | crate::mixer::MHit::Scale)
             | Action::RackArea
             | Action::Swallow
             | Action::PianoGrid
@@ -405,6 +407,10 @@ pub struct State {
     pub monitor: crate::monitor::Monitor,
     /// Names of the hosted instruments offered after the built-in generators in the picker.
     pub hosted_generators: Vec<&'static str>,
+    /// Names of the effect plugins found (mixer slots, picker effects side).
+    pub hosted_effects: Vec<&'static str>,
+    /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
+    pub mixer: crate::mixer::MixerUi,
     /// Rack rows played by a hosted plugin.
     pub hosted_rows: Vec<usize>,
     /// Requests for the plugin host, handled on the next tick: (row, available index) to create, row to open.
@@ -626,6 +632,8 @@ impl App {
                 plugin_pos: (560.0, 260.0),
                 selected_channel: 0,
                 selected_mixer: 1,
+                mixer: Default::default(),
+                hosted_effects: Vec::new(),
                 pattern: 1,
                 song_mode: false,
                 menu_open: None,
@@ -730,6 +738,7 @@ impl App {
                 s.pattern = project.current_pattern.unwrap_or(1).max(1);
                 s.selected_channel = 0;
                 s.selected_mixer = 1;
+                s.mixer = Default::default();
                 s.playlist_scroll = (0.0, 0.0);
                 s.rack_scroll = 0.0;
                 s.rack_scroll_x = 0.0;
@@ -808,8 +817,24 @@ impl App {
         };
         // Deleted, cloned and moved channels are written by `apply` (os-flp `restructure`); it edits a copy so a
         // failed save leaves the loaded file as it was.
-        let lost = os_flp::project::unsaved_parts(&s.project, &file);
-        let result = os_flp::project::apply(&s.project, &mut file)
+        let mut lost = os_flp::project::unsaved_parts(&s.project, &file);
+        // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, OpenStudio status).
+        let mut proj = s.project.clone();
+        if let Some(n) = os_flp::project::load(&file).ok().map(|p| p.mixer.len()).filter(|&n| n > 0 && n < proj.mixer.len()) {
+            proj.mixer.truncate(n);
+            for m in proj.mixer.iter_mut() {
+                m.routes.retain(|&r| usize::from(r) < n);
+                m.send_levels.retain(|&(d, _)| usize::from(d) < n);
+            }
+            lost.push("added mixer tracks");
+        }
+        if self.plugins.hosted.keys().any(|&k| k >= crate::plugins::FX_KEY) {
+            lost.push("mixer effect plugins");
+        }
+        if s.project.mixer.iter().any(|m| m.polarity || m.swap) {
+            lost.push("polarity / swap buttons");
+        }
+        let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
             .and_then(|b| std::fs::write(&target, b).map_err(|e| e.to_string()));
@@ -842,6 +867,7 @@ impl App {
             .filter(|n| n != crate::plugins::OPEN_SAMPLER)
             .map(|n| &*Box::leak(n.into_boxed_str()))
             .collect();
+        self.state.hosted_effects = self.plugins.effects.iter().map(|a| &*Box::leak(a.desc.name.clone().into_boxed_str())).collect();
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
@@ -850,6 +876,7 @@ impl App {
         self.state.hosted_rows.clear();
         self.sampler_failed.clear();
         self.transport.set_instruments(Vec::new());
+        self.transport.set_effects(Vec::new());
     }
 
     /// Every sampler channel is played and edited by Open Sampler (owner, 2026-10-10; spec: plugins/open-sampler.md §7):
@@ -884,6 +911,7 @@ impl App {
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     fn plugin_tick(&mut self) {
         self.sync_samplers();
+        self.mixer_tick();
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
             // A row hosted this tick already started from its channel's sample.
             if self.state.hosted_rows.contains(&row) && self.plugins.sampler_path(row).as_deref() != Some(path.as_str()) {
@@ -932,8 +960,8 @@ impl App {
                     }
                 }
             }
-            let project = &self.state.project;
-            let requests = self.plugins.idle(|row| channel_info(project, row));
+            let (project, mixer) = (&self.state.project, &self.state.mixer);
+            let requests = self.plugins.idle(|row| if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) });
             for r in requests {
                 use crate::plugins::Request;
                 let chans = &mut self.state.project.channels;
@@ -1092,7 +1120,7 @@ impl App {
 
     /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
-        self.transport.playing() || self.state.monitor.active()
+        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m[0] > 0.0 || m[1] > 0.0)
     }
 
     /// Periodic housekeeping; returns whether a repaint is needed.
@@ -1109,6 +1137,11 @@ impl App {
         }
         if let Some(e) = self.transport.take_error() {
             self.state.message = Some(format!("Audio: {e}"));
+            self.invalidate();
+        }
+        // Mixer meters (spec: ui/mixer.md §9): fall back after playback stops.
+        let peaks = self.transport.take_track_peaks();
+        if crate::mixer::feed_meters(&mut self.state, &peaks) && self.state.shown(Win::Mixer) {
             self.invalidate();
         }
         // Edits (notes, steps, mixer, channel volume / pan / mute, tempo) reach playback right away,
@@ -1613,7 +1646,7 @@ impl App {
                 }
                 Drag::RackMixer { ch, y0, v0 } => {
                     // One insert per 10 px, up = higher (spec: ui/channel-rack.md §12).
-                    let v = (i32::from(v0) + ((y0 - y) / crate::rack::MIXER_DRAG).round() as i32).clamp(0, 125) as u16;
+                    let v = (i32::from(v0) + ((y0 - y) / crate::rack::MIXER_DRAG).round() as i32).clamp(0, i32::from(crate::mixer::max_insert(&self.state.project))) as u16;
                     let s = &mut self.state;
                     if let Some(c) = s.project.channels.get_mut(ch) {
                         if c.mixer_track != v {
@@ -1683,7 +1716,7 @@ impl App {
                         t.volume = Some(v);
                         self.state.piano.dirty = true;
                     }
-                    self.hint = Cow::Owned(format!("Volume {}", views::mixer::fader_db_text(v)));
+                    self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
                     let col = self.hits.iter().rev().find(|h| h.action == Action::Fader(track)).map(|h| h.rect);
                     match col {
                         Some(r) => self.damage_rect(r.outset(10.0)),
@@ -1965,6 +1998,11 @@ impl App {
         self.raise_under_mouse();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
+        if let Some(Action::Mix(h)) = action {
+            if crate::mixer::middle(self, h) {
+                return self.invalidate();
+            }
+        }
         if let Some(Action::Knob(id)) = action {
             self.state.set_knob(id, id.default_value());
             self.hint = Cow::Owned(self.state.knob_text(id));
@@ -2029,6 +2067,11 @@ impl App {
         }
         if let Some(a) = action.as_ref() {
             if self.rack_right(a) {
+                return self.invalidate();
+            }
+        }
+        if let Some(Action::Mix(h)) = action {
+            if crate::mixer::right(self, h) {
                 return self.invalidate();
             }
         }
@@ -2491,8 +2534,9 @@ impl App {
         match area {
             Some(Action::RackMixer(i)) => {
                 let s = &mut self.state;
+                let max = crate::mixer::max_insert(&s.project);
                 if let Some(c) = s.project.channels.get_mut(i) {
-                    c.mixer_track = (i32::from(c.mixer_track) + d).clamp(0, 125) as u16;
+                    c.mixer_track = (i32::from(c.mixer_track) + d).clamp(0, i32::from(max)) as u16;
                     self.hint = Cow::Owned(format!("Target mixer track: {}", views::rack::insert_name(c.mixer_track)));
                     s.piano.dirty = true;
                 }
@@ -2521,7 +2565,7 @@ impl App {
         let s = &mut self.state;
         let (dx, dy) = if shift { (dy, dx) } else { (dx, dy) };
         match area {
-            Some(Action::Fader(_) | Action::MixerSelect(_) | Action::MixerArea) => {
+            Some(Action::Fader(_) | Action::Mix(_) | Action::MixerArea) => {
                 s.mixer_scroll = (s.mixer_scroll - (dy + dx) * 44.0).max(0.0);
             }
             Some(Action::PlaylistArea | Action::PlRuler | Action::PlMarkers) if ctrl => {
@@ -2567,6 +2611,11 @@ impl App {
             && crate::rack::key(self, key, ctrl, alt)
         {
             self.rack_pending();
+            return;
+        }
+        // The mixer's keys while it is in front (spec: ui/mixer.md §2).
+        let s = &self.state;
+        if s.z.last() == Some(&Win::Mixer) && !s.picker_open && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && s.playlist.popup.is_none() && !ctrl && crate::mixer::key(self, key, alt) {
             return;
         }
         // The playlist's editing keys when it is in front (spec: ui/playlist.md §5).
@@ -3151,9 +3200,13 @@ impl App {
                 crate::patterns::run(s, crate::patterns::Cmd::FindFirst, at);
                 s.playlist.source = None;
             }
-            Action::MixerSelect(t) => s.selected_mixer = t,
+            Action::Mix(h) => {
+                if let Some(m) = crate::mixer::hit(self, h) {
+                    self.state.message = Some(m);
+                }
+            }
             Action::Fader(t) => {
-                s.selected_mixer = t;
+                crate::mixer::select(s, t, self.ctrl);
                 let v0 = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
                 self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0 });
             }
@@ -3190,9 +3243,22 @@ impl App {
             Action::PickerBg => s.picker_open = false,
             Action::PickerAll => s.picker_cat = None,
             Action::PickerTab(e, i) => s.picker_cat = if s.picker_cat == Some((e, i)) { None } else { Some((e, i)) },
-            Action::PickerTile(true, _) => {
+            Action::PickerTile(true, i) => {
                 s.picker_open = false;
-                s.message = Some("Effect placeholder: adding effects to mixer slots is not available yet".into());
+                // Into the slot the picker was opened for, else the current track's first empty slot (spec: ui/mixer.md §7).
+                let t = s.selected_mixer;
+                let slot = s.mixer.picker_slot.take().or_else(|| {
+                    s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.iter().position(Option::is_none)).map(|k| k as u8)
+                });
+                match slot {
+                    Some(k) => {
+                        if let Some(m) = crate::mixer::run(self, crate::mixer::MCmd::AddEffect(k, i)) {
+                            self.state.message = Some(m);
+                        }
+                    }
+                    None => s.message = Some("Every slot of this track is in use".into()),
+                }
+                return;
             }
             Action::PickerTile(false, i) if i >= views::picker::GENERATORS.len() => {
                 s.picker_open = false;
@@ -3696,7 +3762,7 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
 /// after the highest one in use. Returns its rack row.
 pub(crate) fn add_channel(p: &mut Project) -> usize {
     let index = p.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    let track = (p.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(125);
+    let track = (p.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(p));
     p.channels.push(sampler_channel(index, crate::plugins::OPEN_SAMPLER, track));
     p.channels.len() - 1
 }
@@ -3722,22 +3788,12 @@ pub fn test_project() -> Project {
     template_project(&["Kick", "Clap", "Hat", "Snare", "Pluck"])
 }
 
-/// Sampler channels named `names` (channel i on insert i + 1), the mixer's 127 tracks to the master, pattern 1.
+/// Sampler channels named `names` (channel i on insert i + 1), 18 mixer tracks (master, Insert 1-16 and the hidden
+/// last one, as FL's default template stores them; spec: ui/mixer.md §1) routed to the master, pattern 1.
 fn template_project(names: &[&str]) -> Project {
     let channel = |i: u16, name: &str| sampler_channel(i, name, i + 1);
-    let mixer = (0..=126u16)
-        .map(|i| MixerTrack {
-            index: i,
-            name: None,
-            color: None,
-            enabled: true,
-            slots: Default::default(),
-            routes: if i == 0 { Vec::new() } else { vec![0] },
-            send_levels: Vec::new(),
-            volume: Some(0.8),
-            pan: Some(0.0),
-            stereo_separation: Some(0.0),
-        })
+    let mixer = (0..18u16)
+        .map(MixerTrack::new)
         .collect();
     Project {
         ppq: 96,
@@ -5120,5 +5176,41 @@ mod tests {
         frame(&mut app, &mut c, None);
         let dir = std::path::PathBuf::from(dir);
         c.pixmap.save_png(dir.join("pl_states.png")).unwrap();
+    }
+
+    /// Mixer look with routing, a sidechain, slots, meters and the menus: `OS_SHOT_DIR=dir cargo test -p os-app
+    /// mixer_shots -- --ignored` writes mx_states.png, mx_menu.png and mx_slot_menu.png.
+    #[test]
+    #[ignore]
+    fn mixer_shots() {
+        use crate::mixer as mx;
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.z = vec![Win::Mixer];
+        app.state.show_browser = false;
+        app.state.hosted_effects = vec!["Test Delay"];
+        mx::select(&mut app.state, 3, false);
+        mx::route(&mut app.state, 5, false, false);
+        mx::route(&mut app.state, 7, false, true);
+        app.state.project.mixer[4].polarity = true;
+        app.state.project.mixer[6].swap = true;
+        app.state.project.mixer[2].enabled = false;
+        app.state.project.mixer[3].name = Some("Drums".into());
+        app.state.project.mixer[3].slots[0] = Some(os_model::SlotPlugin { name: "Test Delay".into(), state: Vec::new() });
+        app.state.project.mixer[3].slot_on[1] = false;
+        mx::select(&mut app.state, 6, true);
+        mx::select(&mut app.state, 3, true);
+        app.state.mixer.meters = (0..18).map(|i| [0.05 * i as f32, 0.04 * i as f32]).collect();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(dir.join("mx_states.png")).unwrap();
+        app.state.playlist.popup = Some(mx::track_menu(&app.state, 3, 500.0, 200.0));
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(dir.join("mx_menu.png")).unwrap();
+        app.state.playlist.popup = Some(mx::slot_menu(&app.state, 0, 1500.0, 150.0));
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(dir.join("mx_slot_menu.png")).unwrap();
     }
 }

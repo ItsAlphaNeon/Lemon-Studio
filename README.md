@@ -65,7 +65,9 @@ losslessly, so existing projects open, play and save without losing data it does
 - Playlist with clips, markers, automation and nine editing tools
 - Channel rack: step sequencer, mini piano rolls, graph editor, per-channel loops, filter groups, fill tools, swing, clone / move / delete channels
 - Piano roll with full tool set, velocity and event lanes
-- Mixer, browser with drag and drop, plugin picker
+- Mixer: track select / rename / colour, mute and solo, polarity and channel swap, click-to-route sends with send knobs
+  and sidechain, per-track meters, add / insert / move / delete tracks, effect slots hosting CLAP effects (bypass, dry/wet)
+- Browser with drag and drop, plugin picker
 - Floating, resizable, stackable windows
 - Theme engine with `.flstheme` import
 - Damage-tracked CPU rendering for fast repaints
@@ -168,7 +170,7 @@ OpenStudio is a Cargo workspace of focused crates:
 - [x] Lossless project file reading and writing
 - [x] Audio engine with mixer, routing and effects
 - [x] Playlist, channel rack, piano roll, mixer and browser
-- [x] CLAP hosting and the Open Sampler plugin
+- [x] CLAP hosting (instruments and mixer effects) and the Open Sampler plugin
 - [x] Theme engine and theme import
 - [ ] VST3 hosting
 - [ ] ASIO audio output

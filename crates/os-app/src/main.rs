@@ -5,6 +5,7 @@ mod browser;
 mod icons;
 mod knobs;
 mod logo;
+mod mixer;
 mod monitor;
 mod piano;
 mod rack;

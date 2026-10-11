@@ -19,9 +19,9 @@ pub enum KnobId {
     /// Mixer track pan (model).
     MixPan(u16),
     MixSep(u16),
-    /// The master strip's output knob.
-    MixOut(u16),
     SlotMix(u16, u8),
+    /// Send level from mixer track `.0` to `.1` (model `send_levels`, fader law; spec: ui/mixer.md §5).
+    Send(u16, u16),
     /// Equalizer band knob: track, band * 2 + row.
     Eq(u16, u8),
     /// Channel rack row / plugin window (model).
@@ -57,7 +57,7 @@ impl KnobId {
     /// Value restored by a middle click.
     pub fn default_value(self) -> f32 {
         match self {
-            KnobId::MasterVol | KnobId::MixOut(_) => 0.8,
+            KnobId::MasterVol | KnobId::Send(..) => 0.8,
             KnobId::ChanVol(_) => 0.78125,
             KnobId::SlotMix(..) => 1.0,
             KnobId::Swing => 0.0,
@@ -85,6 +85,12 @@ impl State {
                 let pan = self.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.pan).unwrap_or(0.0);
                 (0.5 + pan as f32 / 2.0).clamp(0.0, 1.0)
             }
+            KnobId::MixSep(t) => {
+                let sep = self.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.stereo_separation).unwrap_or(0.0);
+                (0.5 + sep as f32 / 2.0).clamp(0.0, 1.0)
+            }
+            KnobId::SlotMix(t, k) => self.project.mixer.iter().find(|m| m.index == t).map_or(1.0, |m| m.slot_mix[usize::from(k).min(9)] as f32),
+            KnobId::Send(a, b) => crate::mixer::send(self, a, b).unwrap_or(0.8) as f32,
             KnobId::ChanVol(i) => self.project.channels.get(i).map_or(0.8, |c| c.volume as f32).clamp(0.0, 1.0),
             KnobId::ChanPan(i) => self.project.channels.get(i).map_or(0.5, |c| 0.5 + c.pan as f32 / 2.0).clamp(0.0, 1.0),
             // Main swing is project data, 0..=128 (spec: flp/events/project-info.md, event 11).
@@ -106,6 +112,26 @@ impl State {
             KnobId::MixPan(t) => {
                 if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
                     m.pan = Some(f64::from((v - 0.5) * 2.0));
+                    self.piano.dirty = true;
+                }
+            }
+            KnobId::MixSep(t) => {
+                if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
+                    m.stereo_separation = Some(f64::from((v - 0.5) * 2.0));
+                    self.piano.dirty = true;
+                }
+            }
+            KnobId::SlotMix(t, k) => {
+                if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
+                    m.slot_mix[usize::from(k).min(9)] = f64::from(v);
+                    self.piano.dirty = true;
+                }
+            }
+            KnobId::Send(a, b) => {
+                if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == a) {
+                    m.send_levels.retain(|&(d, _)| d != b);
+                    m.send_levels.push((b, f64::from(v)));
+                    m.send_levels.sort_by_key(|&(d, _)| d);
                     self.piano.dirty = true;
                 }
             }
@@ -144,8 +170,8 @@ impl State {
             KnobId::MasterPitch => format!("Master pitch: {:.0} cents", bipolar * 1200.0),
             KnobId::MixPan(_) => format!("Panning: {}", pan_text(bipolar)),
             KnobId::ChanPan(_) => format!("Channel panning: {}", pan_text(bipolar)),
-            KnobId::MixSep(_) => format!("Stereo separation: {:.0}%", bipolar * 100.0),
-            KnobId::MixOut(_) => format!("Output level: {:.0}%", n / 0.8 * 100.0),
+            KnobId::MixSep(_) => crate::mixer::sep_text(f64::from(bipolar)),
+            KnobId::Send(_, b) => crate::mixer::level_text(&format!("To {}", crate::mixer::name(self, b)), f64::from(n)),
             KnobId::SlotMix(..) => format!("Mix level: {:.0}%", n * 100.0),
             KnobId::Eq(_, k) => format!("{}: {:.0}%", if k % 2 == 0 { "Band frequency" } else { "Band width" }, n * 100.0),
             // spec: ui/channel-rack.md §11: "Channel volume: 78%  -5.2dB  0.55".

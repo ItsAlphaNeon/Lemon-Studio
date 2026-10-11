@@ -520,7 +520,8 @@ pub fn clone_name(s: &State, r: usize) -> String {
 
 /// Lowest insert (1..=125) no channel is routed to.
 pub fn free_insert(s: &State) -> u16 {
-    (1..=125u16).find(|t| !s.project.channels.iter().any(|c| c.mixer_track == *t)).unwrap_or(125)
+    let max = crate::mixer::max_insert(&s.project);
+    (1..=max).find(|t| !s.project.channels.iter().any(|c| c.mixer_track == *t)).unwrap_or(max)
 }
 
 fn seed() -> u64 {
@@ -1329,7 +1330,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::MixerReset(r) => {
             // The default target: the insert the channel was made with (its own number).
             if let Some(c) = s.project.channels.get_mut(r) {
-                c.mixer_track = (c.index + 1).min(125);
+                c.mixer_track = (c.index + 1).min(crate::mixer::max_insert_of(&s.project.mixer));
                 s.piano.dirty = true;
             }
             None

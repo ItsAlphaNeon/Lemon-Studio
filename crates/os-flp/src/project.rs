@@ -246,6 +246,7 @@ struct MixerLoc {
     color_flag: Option<usize>,
     name: Option<usize>,
     flags: Option<usize>,
+    routes: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -462,6 +463,11 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
             (Region::Mixer, id::MX_FLAGS) => {
                 if let Some(m) = l.mixer.last_mut() {
                     m.flags = Some(i);
+                }
+            }
+            (Region::Mixer, id::MX_ROUTES) => {
+                if let Some(m) = l.mixer.last_mut() {
+                    m.routes = Some(i);
                 }
             }
             (Region::Mixer, id::MX_PARAMS) => l.mixer_params = Some(i),
@@ -1054,6 +1060,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             volume: param(MX_VOLUME).map(|v| f64::from(v) / 16000.0),
             pan: param(MX_PAN).map(|v| f64::from(v) / 6400.0),
             stereo_separation: param(MX_STEREO).map(|v| f64::from(v) / 64.0),
+            ..MixerTrack::new(index)
         });
     }
     out
@@ -1488,9 +1495,8 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                     let at = ml.flags.ok_or_else(|| ProjectError::Structure("mixer track without flags".into()))?;
                     inserts.push((at, Event::new(id::MX_NAME, Value::var(encode_text(n, enc)))));
                 }
-                (Some(_), None) => {
-                    return Err(ProjectError::Mismatch("removing a mixer track name".into()));
-                }
+                // Back to the default name ("Insert N"): the name event goes.
+                (Some(i), None) => removals.push(i),
                 (None, None) => {}
             }
         }
@@ -1505,6 +1511,40 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
             if let Some(fi) = ml.color_flag {
                 set_int(&mut events[fi], u32::from(m.color.is_some()));
+            }
+        }
+        // spec: flp/events/mixer.md "Routing (event 235)": one byte per destination from track 0, trailing zeros omitted.
+        if m.routes != old.routes {
+            let mut bytes = vec![0u8; m.routes.iter().map(|&r| usize::from(r) + 1).max().unwrap_or(0)];
+            for &r in &m.routes {
+                bytes[usize::from(r)] = 1;
+            }
+            match ml.routes {
+                Some(i) => set_data(&mut events[i], bytes),
+                None => return Err(ProjectError::Structure(format!("mixer track {} has no routing event", m.index))),
+            }
+        }
+        // spec: flp/events/mixer.md "Kind 0x20, route level": records right after the source track's own records.
+        if m.send_levels != old.send_levels {
+            if let Some(data) = params.as_mut() {
+                let loc = mixer_location(m.index, 0);
+                let mut recs: Vec<[u8; MIXER_REC_LEN]> = data.chunks_exact(MIXER_REC_LEN).map(|r| r.try_into().unwrap()).collect();
+                recs.retain(|r| !(r[5] == MX_KIND_ROUTE && u16::from_le_bytes([r[6], r[7]]) == loc));
+                let at = recs.iter().rposition(|r| u16::from_le_bytes([r[6], r[7]]) == loc).map_or_else(
+                    || recs.iter().position(|r| u16::from_le_bytes([r[6], r[7]]) > loc).unwrap_or(recs.len()),
+                    |p| p + 1,
+                );
+                let mut levels = m.send_levels.clone();
+                levels.sort_by_key(|&(d, _)| d);
+                for (k, &(dest, level)) in levels.iter().enumerate() {
+                    let mut r = [0u8; MIXER_REC_LEN];
+                    r[4] = dest.min(255) as u8;
+                    r[5] = MX_KIND_ROUTE;
+                    r[6..8].copy_from_slice(&loc.to_le_bytes());
+                    r[8..12].copy_from_slice(&((level * 16000.0).round() as i32).to_le_bytes());
+                    recs.insert(at + k, r);
+                }
+                *data = recs.concat();
             }
         }
         if let Some(data) = params.as_mut() {
@@ -2100,10 +2140,7 @@ mod tests {
         let mut p = new_project();
         let file = create(&p).unwrap();
         assert!(unsaved_parts(&p, &file).is_empty());
-        let track = |i: u16| MixerTrack {
-            index: i, name: None, color: None, enabled: true, slots: Default::default(),
-            routes: if i == 0 { vec![] } else { vec![0] }, send_levels: vec![], volume: Some(0.8), pan: Some(0.0), stereo_separation: Some(0.0),
-        };
+        let track = MixerTrack::new;
         p.mixer = (0..3).map(track).collect();
         assert!(unsaved_parts(&p, &file).is_empty(), "default mixer: nothing is lost");
         p.mixer[1].volume = Some(0.5);

@@ -254,6 +254,8 @@ pub enum Cmd {
     Browser(crate::browser::BCmd),
     /// Channel rack menus (spec: ui/channel-rack.md §17-21).
     Rack(crate::rack::RCmd),
+    /// Mixer menus (spec: ui/mixer.md §6-7).
+    Mixer(crate::mixer::MCmd),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -322,6 +324,9 @@ pub enum EditTarget {
     NewMarker(u32),
     PointValue(u16, usize),
     PatternName(u16),
+    /// Mixer track name (spec: ui/mixer.md §2) and a mixer slot's plugin name (§7).
+    MixerName(u16),
+    SlotName(u16, u8),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1066,7 +1071,7 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
     snapshot(s);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
-    let mixer_track = (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(125);
+    let mixer_track = (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project));
     s.project.channels.push(Channel {
         index,
         kind: ChannelKind::AudioClip,
@@ -1950,6 +1955,8 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
             }
         }
         EditTarget::PatternName(n) => source_name(s, ClipSource::Pattern(n)),
+        EditTarget::MixerName(n) => crate::mixer::name(s, n),
+        EditTarget::SlotName(t, k) => crate::mixer::slot_name(s, t, k).unwrap_or_default(),
     };
     s.playlist.edit = Some(TextEdit { target, text, at });
 }
@@ -1981,6 +1988,19 @@ pub fn commit_edit(s: &mut State) {
                 move_point(s, ch, i, beat, v);
             }
         }
+        EditTarget::MixerName(n) => {
+            let def = if n == 0 { "Master".to_string() } else { format!("Insert {n}") };
+            if let Some(m) = s.project.mixer.iter_mut().find(|m| m.index == n) {
+                m.name = (!text.is_empty() && text != def).then_some(text);
+            }
+        }
+        EditTarget::SlotName(t, k) => {
+            if text.is_empty() {
+                s.mixer.slot_names.remove(&(t, k));
+            } else {
+                s.mixer.slot_names.insert((t, k), text);
+            }
+        }
         EditTarget::PatternName(n) => {
             if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
                 p.name = (!text.is_empty()).then_some(text);
@@ -2003,6 +2023,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     match cmd {
         Cmd::Browser(b) => return app.browser_cmd(b),
         Cmd::Rack(c) => return crate::rack::run(app, c),
+        Cmd::Mixer(c) => return crate::mixer::run(app, c),
         #[cfg(windows)]
         Cmd::PluginDetach(row, on) => {
             app.plugins.set_detached(row, on);
@@ -2032,7 +2053,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let s = &mut app.state;
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::PluginDetach(..) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::PluginDetach(..) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

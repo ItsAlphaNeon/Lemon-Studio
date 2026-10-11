@@ -41,6 +41,11 @@ impl Descriptor {
     pub fn is_instrument(&self) -> bool {
         self.features.iter().any(|f| f == "instrument")
     }
+
+    /// An insert effect (CLAP feature "audio-effect"): offered for mixer slots.
+    pub fn is_effect(&self) -> bool {
+        !self.is_instrument() && self.features.iter().any(|f| f == "audio-effect")
+    }
 }
 
 /// A loaded `.clap` file.
@@ -234,6 +239,8 @@ pub struct Plugin {
     dbg_frames: u64,
     /// The editor is open (parented into a host window).
     editor: bool,
+    /// Input copies for effect processing (mixer slots).
+    fx_in: (Vec<f32>, Vec<f32>),
     _lib: Arc<Library>,
 }
 
@@ -303,6 +310,7 @@ impl Plugin {
                 dbg_peak: 0.0,
                 dbg_frames: 0,
                 editor: false,
+                fx_in: (Vec::new(), Vec::new()),
                 _lib: lib.clone(),
             })
         }
@@ -478,6 +486,12 @@ impl Plugin {
 
     /// Processes `n` frames (≤ max) with the queued events whose time falls inside them.
     fn process_chunk(&mut self, left: &mut [f32], right: &mut [f32]) {
+        self.process_chunk_in(left, right, None);
+    }
+
+    /// `process_chunk` with an audio input (effects): `input` holds the frames to process, `left` / `right` receive
+    /// the output.
+    fn process_chunk_in(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>) {
         let n = left.len() as u32;
         self.notes.clear();
         let mut rest = Vec::new();
@@ -516,13 +530,19 @@ impl Plugin {
         let outs = clap_output_events { ctx: ptr::null_mut(), try_push: Some(push) };
         let mut chans = [left.as_mut_ptr(), right.as_mut_ptr()];
         let mut buf = clap_audio_buffer { data32: chans.as_mut_ptr(), data64: ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
+        let has_in = input.is_some();
+        let mut in_chans = match input {
+            Some((l, r)) => [l.as_mut_ptr(), r.as_mut_ptr()],
+            None => [ptr::null_mut(), ptr::null_mut()],
+        };
+        let in_buf = clap_audio_buffer { data32: in_chans.as_mut_ptr(), data64: ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
         let p = clap_process {
             steady_time: self.steady,
             frames_count: n,
             transport: ptr::null(),
-            audio_inputs: ptr::null(),
+            audio_inputs: if has_in { &in_buf } else { ptr::null() },
             audio_outputs: &mut buf,
-            audio_inputs_count: 0,
+            audio_inputs_count: u32::from(has_in),
             audio_outputs_count: 1,
             in_events: &ins,
             out_events: &outs,
@@ -609,6 +629,40 @@ impl os_engine::Instrument for Plugin {
     }
 }
 
+// spec: ui/mixer.md §7 (effect slots): a CLAP effect processes a mixer track in place. Until the UI thread has
+// activated it at the stream's rate the sound passes through unchanged.
+impl os_engine::HostedEffect for Plugin {
+    fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        if self.rate != rate {
+            self.wanted_rate.store(rate, Ordering::Release);
+            return;
+        }
+        if !self.processing {
+            self.processing = unsafe { (*self.plugin).start_processing.is_none_or(|s| s(self.plugin)) };
+            if !self.processing {
+                return;
+            }
+        }
+        let (mut il, mut ir) = std::mem::take(&mut self.fx_in);
+        let max = self.max_frames as usize;
+        let mut at = 0;
+        while at < left.len() {
+            let n = (left.len() - at).min(max);
+            il.clear();
+            ir.clear();
+            il.extend_from_slice(&left[at..at + n]);
+            ir.extend_from_slice(&right[at..at + n]);
+            self.process_chunk_in(&mut left[at..at + n], &mut right[at..at + n], Some((&mut il[..], &mut ir[..])));
+            at += n;
+        }
+        self.fx_in = (il, ir);
+    }
+
+    fn reset_fx(&mut self) {
+        os_engine::Instrument::reset(self);
+    }
+}
+
 impl Drop for Plugin {
     fn drop(&mut self) {
         self.close_editor();
@@ -668,6 +722,27 @@ mod tests {
         assert!(peak > 0.05, "plays the sample (peak {peak})");
         let saved = String::from_utf8_lossy(&p.save_state().unwrap()[8..]).into_owned();
         assert!(saved.contains("os-clap-test.wav"), "{saved}");
+    }
+
+    /// A CLAP effect in a mixer slot (spec: ui/mixer.md §7): `OS_CLAP_FX=<effect>.clap` names one (skipped when unset).
+    /// The effect gets the track's audio as its input; a unity-gain effect gives it back unchanged.
+    #[test]
+    fn hosts_an_effect() {
+        let Some(path) = std::env::var_os("OS_CLAP_FX") else { return };
+        let lib = Library::load(std::path::Path::new(&path)).expect("load");
+        let d = lib.plugins.iter().find(|d| d.is_effect()).expect("an audio effect");
+        let mut p = Plugin::new(&lib, &d.id).unwrap();
+        assert!(p.activate(48000));
+        let src: Vec<f32> = (0..2048).map(|i| (i as f32 * 0.02).sin() * 0.5).collect();
+        let (mut l, mut r) = (src.clone(), src.clone());
+        // The first call may only start processing; run a few blocks.
+        for _ in 0..3 {
+            l.copy_from_slice(&src);
+            r.copy_from_slice(&src);
+            os_engine::HostedEffect::process_fx(&mut p, 48000, &mut l, &mut r);
+        }
+        let peak = l.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.1, "{} passes the input through (peak {peak})", d.name);
     }
 
     /// The whole path OpenStudio uses: a pattern on a plugin channel, played by the engine through the hosted .clap.

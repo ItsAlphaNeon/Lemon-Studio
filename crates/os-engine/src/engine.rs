@@ -247,14 +247,78 @@ struct MixTrack {
     vol: f64,
     pan: f64,
     on: bool,
+    /// Stereo separation (-1 mono .. 0 as is .. 1 wide), swap left / right, reverse polarity (spec: ui/mixer.md §4).
+    sep: f64,
+    swap: bool,
+    polarity: bool,
     /// Insert effects in slot order (applied before the fader).
-    effects: Vec<Box<dyn Effect>>,
+    effects: Vec<FxSlot>,
+    /// Slot LEDs and mix levels by slot, for hosted effects attached later.
+    slot_on: [bool; 10],
+    slot_mix: [f32; 10],
+    /// Largest |sample| per side after the fader since the meters last read them.
+    peak: [f32; 2],
     /// Fader × pan as `[[L←L, L←R], [R←L, R←R]]`.
     matrix: [[f32; 2]; 2],
     /// Matrix applied at the end of the last block; ramps to `matrix` over one block.
     cur: [[f32; 2]; 2],
     /// (destination, send gain). Sidechain-only routes (level 0) are dropped.
     routes: Vec<(usize, f32)>,
+}
+
+/// One filled mixer slot: OpenStudio's own effect or a hosted plugin, with the slot's LED and mix level.
+struct FxSlot {
+    slot: usize,
+    on: bool,
+    mix: f32,
+    fx: Fx,
+}
+
+enum Fx {
+    Own(Box<dyn Effect>),
+    Hosted(crate::instrument::SharedEffect),
+}
+
+impl MixTrack {
+    fn unity() -> MixTrack {
+        let unity = [[1.0, 0.0], [0.0, 1.0]];
+        MixTrack {
+            vol: 0.8,
+            pan: 0.0,
+            on: true,
+            sep: 0.0,
+            swap: false,
+            polarity: false,
+            effects: Vec::new(),
+            slot_on: [true; 10],
+            slot_mix: [1.0; 10],
+            peak: [0.0; 2],
+            matrix: unity,
+            cur: unity,
+            routes: vec![],
+        }
+    }
+
+    /// Fader x pan x (separation, swap, polarity) as one 2x2 matrix (spec: ui/mixer.md §4; gain-laws.md).
+    fn compute_matrix(&self) -> [[f32; 2]; 2] {
+        let g = if self.on { laws::fader_gain(self.vol) } else { 0.0 };
+        let p = laws::mixer_pan(self.pan);
+        // Mid / side: the side signal is scaled by w (0 = mono, 1 = as is, 2 = twice as wide).
+        let w = 1.0 + self.sep.clamp(-1.0, 1.0);
+        let (a, b) = ((1.0 + w) / 2.0, (1.0 - w) / 2.0);
+        let mut t = [[a, b], [b, a]];
+        if self.swap {
+            t = [[t[0][1], t[0][0]], [t[1][1], t[1][0]]];
+        }
+        let sign = if self.polarity { -1.0 } else { 1.0 };
+        let mut m = [[0.0f32; 2]; 2];
+        for r in 0..2 {
+            for c in 0..2 {
+                m[r][c] = ((p[r][0] * t[0][c] + p[r][1] * t[1][c]) * g * sign) as f32;
+            }
+        }
+        m
+    }
 }
 
 /// Things the engine skipped, so callers can report them.
@@ -295,6 +359,8 @@ pub struct Engine {
     inst_live: Vec<(usize, u8, f32)>,
     inst_events: Vec<(usize, u32, u8, f32)>,
     scratch: (Vec<f32>, Vec<f32>),
+    /// Dry copy of a track buffer for slots mixed below 100 %.
+    fx_dry: Vec<f32>,
     /// Frames instruments keep being processed after their last held note (their release / tail is not known).
     inst_tail: u64,
     /// Automation clips of the playlist and their curves (song mode).
@@ -370,26 +436,23 @@ impl Engine {
             .collect();
 
         let tracks: Vec<MixTrack> = if project.mixer.is_empty() {
-            let unity = [[1.0, 0.0], [0.0, 1.0]];
-            vec![MixTrack { vol: 0.8, pan: 0.0, on: true, effects: Vec::new(), matrix: unity, cur: unity, routes: vec![] }]
+            vec![MixTrack::unity()]
         } else {
             project
                 .mixer
                 .iter()
                 .map(|m| {
                     let mut effects = Vec::new();
-                    for slot in m.slots.iter().flatten() {
+                    for (k, slot) in m.slots.iter().enumerate() {
+                        let Some(slot) = slot else { continue };
                         match crate::effects::from_slot(&slot.name, &slot.state, rate) {
                             Some(fx) => {
-                                effects.push(fx);
+                                effects.push(FxSlot { slot: k, on: m.slot_on[k], mix: m.slot_mix[k] as f32, fx: Fx::Own(fx) });
                                 report.effects_active += 1;
                             }
                             None => report.effects_bypassed += 1,
                         }
                     }
-                    let g = if m.enabled { m.volume.map_or(1.0, laws::fader_gain) } else { 0.0 };
-                    let pan = laws::mixer_pan(m.pan.unwrap_or(0.0));
-                    let matrix = pan.map(|row| row.map(|x| (x * g) as f32));
                     let routes = if m.index == 0 {
                         vec![]
                     } else {
@@ -403,7 +466,22 @@ impl Engine {
                             .filter(|&(_, g)| g > 0.0)
                             .collect()
                     };
-                    MixTrack { vol: m.volume.unwrap_or(0.8), pan: m.pan.unwrap_or(0.0), on: m.enabled, effects, matrix, cur: matrix, routes }
+                    let mut t = MixTrack {
+                        vol: m.volume.unwrap_or(0.8),
+                        pan: m.pan.unwrap_or(0.0),
+                        on: m.enabled,
+                        sep: m.stereo_separation.unwrap_or(0.0),
+                        swap: m.swap,
+                        polarity: m.polarity,
+                        effects,
+                        slot_on: m.slot_on,
+                        slot_mix: m.slot_mix.map(|v| v as f32),
+                        routes,
+                        ..MixTrack::unity()
+                    };
+                    t.matrix = t.compute_matrix();
+                    t.cur = t.matrix;
+                    t
                 })
                 .collect()
         };
@@ -499,6 +577,7 @@ impl Engine {
             inst_live: Vec::with_capacity(64),
             inst_events: Vec::with_capacity(64),
             scratch: (Vec::new(), Vec::new()),
+            fx_dry: Vec::new(),
             inst_tail: 0,
             report,
         }
@@ -514,6 +593,28 @@ impl Engine {
             }
             ch.plugin = true;
             ch.instrument = Slot(Some(inst));
+        }
+    }
+
+    /// Runs mixer slot `slot` of track `track` through a hosted effect plugin (replacing whatever the slot had).
+    pub fn set_effect(&mut self, track: usize, slot: usize, fx: crate::instrument::SharedEffect) {
+        let Some(t) = self.tracks.get_mut(track) else { return };
+        if slot >= 10 {
+            return;
+        }
+        t.effects.retain(|e| e.slot != slot);
+        let at = t.effects.partition_point(|e| e.slot < slot);
+        t.effects.insert(at, FxSlot { slot, on: t.slot_on[slot], mix: t.slot_mix[slot], fx: Fx::Hosted(fx) });
+    }
+
+    /// Peak level per mixer track (L, R) since the last call, after each track's fader; resets them. `out` keeps the
+    /// larger of its old and the new values.
+    pub fn take_track_peaks(&mut self, out: &mut Vec<[f32; 2]>) {
+        out.resize(self.tracks.len(), [0.0; 2]);
+        for (o, t) in out.iter_mut().zip(&mut self.tracks) {
+            o[0] = o[0].max(t.peak[0]);
+            o[1] = o[1].max(t.peak[1]);
+            t.peak = [0.0; 2];
         }
     }
 
@@ -708,8 +809,15 @@ impl Engine {
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
                 new.cur = o.cur;
-                if new.effects.len() == o.effects.len() {
-                    new.effects = std::mem::take(&mut o.effects);
+                // Own effects keep their state (delay lines, envelopes) when the slot layout is unchanged; the new
+                // slot LEDs and mix levels apply.
+                let same = new.effects.len() == o.effects.len() && new.effects.iter().zip(&o.effects).all(|(a, b)| a.slot == b.slot);
+                if same {
+                    for (a, b) in new.effects.iter_mut().zip(&mut o.effects) {
+                        if let (Fx::Own(_), Fx::Own(_)) = (&a.fx, &b.fx) {
+                            std::mem::swap(&mut a.fx, &mut b.fx);
+                        }
+                    }
                 }
             }
         }
@@ -763,8 +871,7 @@ impl Engine {
                         } else {
                             m.pan = (v - 0.5) * 2.0;
                         }
-                        let g = if m.on { laws::fader_gain(m.vol) } else { 0.0 };
-                        m.matrix = laws::mixer_pan(m.pan).map(|row| row.map(|x| (x * g) as f32));
+                        m.matrix = m.compute_matrix();
                     }
                 }
                 Target::Tempo | Target::Other(_) => {}
@@ -805,8 +912,10 @@ impl Engine {
             let (to, from) = (self.tracks[t].matrix, self.tracks[t].cur);
             self.tracks[t].cur = to;
             let mut buf = std::mem::take(&mut self.bus[t]);
+            let rate = self.rate;
+            let (dry, l, r) = (&mut self.fx_dry, &mut self.scratch.0, &mut self.scratch.1);
             for fx in &mut self.tracks[t].effects {
-                fx.process(&mut buf);
+                run_slot(fx, &mut buf, rate, dry, l, r);
             }
             if from == to {
                 let [[ll, lr], [rl, rr]] = to;
@@ -824,6 +933,11 @@ impl Engine {
                     f[0] = m(0, 0) * l + m(0, 1) * r;
                     f[1] = m(1, 0) * l + m(1, 1) * r;
                 }
+            }
+            let pk = &mut self.tracks[t].peak;
+            for f in buf.chunks_exact(2) {
+                pk[0] = pk[0].max(f[0].abs());
+                pk[1] = pk[1].max(f[1].abs());
             }
             for &(dest, g) in &self.tracks[t].routes {
                 for (d, s) in self.bus[dest].iter_mut().zip(&buf) {
@@ -1127,6 +1241,41 @@ fn blackman(t: f64) -> f64 {
     }
     let x = std::f64::consts::PI * t / SINC_W;
     0.42 + 0.5 * x.cos() + 0.08 * (2.0 * x).cos()
+}
+
+/// One mixer slot over interleaved `buf`: skipped when its LED is off, blended with the dry signal by its mix level.
+fn run_slot(fx: &mut FxSlot, buf: &mut [f32], rate: u32, dry: &mut Vec<f32>, l: &mut Vec<f32>, r: &mut Vec<f32>) {
+    if !fx.on || fx.mix <= 0.0 {
+        return;
+    }
+    let blend = fx.mix < 1.0;
+    if blend {
+        dry.clear();
+        dry.extend_from_slice(buf);
+    }
+    match &mut fx.fx {
+        Fx::Own(e) => e.process(buf),
+        Fx::Hosted(h) => {
+            // A busy instance (its window is being set up) passes the sound through for this block.
+            let Ok(mut h) = h.try_lock() else { return };
+            let n = buf.len() / 2;
+            l.clear();
+            r.clear();
+            l.extend(buf.chunks_exact(2).map(|f| f[0]));
+            r.extend(buf.chunks_exact(2).map(|f| f[1]));
+            h.process_fx(rate, &mut l[..n], &mut r[..n]);
+            for (i, f) in buf.chunks_exact_mut(2).enumerate() {
+                f[0] = l[i];
+                f[1] = r[i];
+            }
+        }
+    }
+    if blend {
+        let m = fx.mix;
+        for (o, d) in buf.iter_mut().zip(dry.iter()) {
+            *o = *d + (*o - *d) * m;
+        }
+    }
 }
 
 /// Orders tracks so that every track is processed before any track it routes to.
@@ -1661,10 +1810,7 @@ mod tests {
         auto_ch.kind = ChannelKind::Automation;
         p.channels.push(auto_ch);
         p.mixer = (0..2)
-            .map(|i| os_model::MixerTrack {
-                index: i, name: None, color: None, enabled: true, slots: Default::default(), routes: if i == 0 { vec![] } else { vec![0] },
-                send_levels: vec![], volume: Some(0.8), pan: Some(0.0), stereo_separation: Some(0.0),
-            })
+            .map(os_model::MixerTrack::new)
             .collect();
         // Channel volume falls from 1.0 to 0.0 over 8 beats, starting at bar 2.
         let a = Automation { channel: 1, target: Some(target::channel(0, 0)), points: vec![AutoPoint::new(0.0, 1.0), AutoPoint::new(8.0, 0.0)], header: vec![0; 21], tail: vec![] };
@@ -1697,5 +1843,73 @@ mod tests {
         let m = e.tracks[1].matrix;
         assert!(m[1][0].abs() < 1e-6 && m[1][1].abs() < 1e-6, "full left: no right output {m:?}");
         let _ = &mut out;
+    }
+
+    /// Halves what passes through (a stand-in for a hosted effect plugin).
+    struct Halve;
+
+    impl crate::instrument::HostedEffect for Halve {
+        fn process_fx(&mut self, _rate: u32, left: &mut [f32], right: &mut [f32]) {
+            left.iter_mut().chain(right.iter_mut()).for_each(|v| *v *= 0.5);
+        }
+    }
+
+    fn insert_project() -> Project {
+        let mut p = project(vec![long_note(0, 96, 0)], vec![]);
+        p.channels[0].mixer_track = 1;
+        p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        p
+    }
+
+    fn render_with(p: &Project, fx: bool) -> Vec<f32> {
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(p, &mut lib, 44100, PlayMode::Pattern(1));
+        if fx {
+            e.set_effect(1, 0, std::sync::Arc::new(std::sync::Mutex::new(Halve)));
+        }
+        e.render_all(512)
+    }
+
+    /// spec: ui/mixer.md §7: a slot's plugin processes its track; the LED bypasses it, the mix knob blends it.
+    #[test]
+    fn hosted_slot_effects_follow_led_and_mix() {
+        let p = insert_project();
+        let dry = peak(&render_with(&p, false), 0);
+        assert!(dry > 0.01);
+        let wet = peak(&render_with(&p, true), 0);
+        assert!((wet / dry - 0.5).abs() < 1e-3, "halved: {wet} / {dry}");
+        let mut off = p.clone();
+        off.mixer[1].slot_on[0] = false;
+        assert!((peak(&render_with(&off, true), 0) - dry).abs() < 1e-6, "LED off = bypass");
+        let mut half = p.clone();
+        half.mixer[1].slot_mix[0] = 0.5;
+        assert!((peak(&render_with(&half, true), 0) / dry - 0.75).abs() < 1e-3, "mix 50 %");
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+        let mut buf = vec![0.0f32; 1024];
+        e.process(&mut buf);
+        let mut peaks = Vec::new();
+        e.take_track_peaks(&mut peaks);
+        assert!(peaks[1][0] > 0.0 && peaks[0][0] > 0.0 && peaks[2][0] == 0.0, "track meters: {peaks:?}");
+    }
+
+    /// spec: ui/mixer.md §4: polarity flips the sign, swap exchanges sides, separation -100 % is mono.
+    #[test]
+    fn polarity_swap_and_separation() {
+        let p = insert_project();
+        let base = render_with(&p, false);
+        let mut q = p.clone();
+        q.mixer[1].polarity = true;
+        let flipped = render_with(&q, false);
+        assert!(base.iter().zip(&flipped).all(|(a, b)| (a + b).abs() < 1e-6), "polarity");
+        // Swap acts on the track's input, before its pan (an OpenStudio reading; FL's order is unmeasured).
+        let m = MixTrack { swap: true, ..MixTrack::unity() }.compute_matrix();
+        assert!(m[0][0].abs() < 1e-6 && m[1][1].abs() < 1e-6 && m[0][1] > 0.5 && m[1][0] > 0.5, "swapped: {m:?}");
+        let mut t = MixTrack { sep: -1.0, ..MixTrack::unity() };
+        let m = t.compute_matrix();
+        assert!((m[0][0] - m[0][1]).abs() < 1e-6 && (m[1][0] - m[1][1]).abs() < 1e-6, "merged: {m:?}");
+        t.sep = 0.0;
+        let m = t.compute_matrix();
+        assert!(m[0][1].abs() < 1e-6 && m[1][0].abs() < 1e-6, "original: {m:?}");
     }
 }

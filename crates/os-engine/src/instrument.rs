@@ -36,3 +36,16 @@ impl fmt::Debug for Slot {
         f.write_str(if self.0.is_some() { "Slot(instrument)" } else { "Slot(none)" })
     }
 }
+
+/// An insert effect plugin hosted in a mixer slot (a CLAP effect): stereo in, stereo out. Shared like instruments,
+/// because the instance outlives engine rebuilds; the audio thread only `try_lock`s it (a busy instance passes the
+/// sound through unchanged).
+// spec: ui/mixer.md §7 (effect slots)
+pub trait HostedEffect: Send {
+    /// Processes `left.len()` frames at `rate` in place.
+    fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
+    /// Drops tails and delay lines (Stop).
+    fn reset_fx(&mut self) {}
+}
+
+pub type SharedEffect = Arc<Mutex<dyn HostedEffect>>;
