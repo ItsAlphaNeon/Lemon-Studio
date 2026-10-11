@@ -189,6 +189,10 @@ pub enum FrameEvent {
     Raise,
     /// The menu arrow was clicked: the app opens the window menu at this screen point.
     Menu(i32, i32),
+    /// The Presets box was clicked: the app opens the preset list at this screen point (spec: plugins/presets.md).
+    Presets(i32, i32),
+    /// The Presets box arrows (or the wheel over the box): next (+1) / previous (-1) preset.
+    PresetStep(i32),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -209,6 +213,8 @@ struct State {
     misc: bool,
     /// The plugin's hint line (parameter under the mouse), shown in the title bar.
     hint: String,
+    /// The loaded preset's name, shown in the Presets box ("Presets" without one).
+    preset: Option<String>,
     /// Plugin editor size (logical px).
     editor: (f32, f32),
     events: Vec<FrameEvent>,
@@ -261,7 +267,7 @@ enum Part {
     Gear,
     /// The menu arrow (the window menu, an app popup).
     Menu,
-    /// The Presets box and its previous / next arrows (no presets yet: inert).
+    /// The Presets box and its previous / next arrows (spec: plugins/presets.md).
     Presets,
     PresetPrev,
     PresetNext,
@@ -395,9 +401,9 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
         }
         c.text_clip(hf, hx, hy, (end - rw - 10.0 - hx).max(0.0), c_caption(), left);
     }
-    // Presets box (presets are not implemented yet: drawn, inert).
+    // Presets box: the loaded preset's name, or "Presets" (spec: plugins/presets.md).
     c.fill_rrect(p, 3.0, c_presets());
-    c.text(f, p.x + 9.0, ty, c_text(), "Presets");
+    c.text_clip(f, p.x + 9.0, ty, p.w - 9.0 - 31.0, c_text(), st.preset.as_deref().unwrap_or("Presets"));
     icon_at(c, &tb::CARET_LEFT, p.right() - 22.2, 15.5, 18.9, c_icon());
     icon_at(c, &tb::CARET_RIGHT, p.right() - 7.8, 15.5, 18.9, c_icon());
     c.icon_stroke(&tb::MINUS, Rect::new(w - 39.5, 7.0, 12.0, 12.0), c_icon(), 2.0);
@@ -509,6 +515,7 @@ impl FrameWindow {
             page: 0,
             misc: false,
             hint: String::new(),
+            preset: None,
             editor,
             events: Vec::new(),
             drag: None,
@@ -730,6 +737,16 @@ impl FrameWindow {
         }
     }
 
+    /// The loaded preset's name for the Presets box.
+    pub fn set_preset(&self, name: Option<String>) {
+        let mut st = self.state.borrow_mut();
+        if st.preset != name {
+            st.preset = name;
+            drop(st);
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
     /// Follows a new editor size (plugins may resize).
     pub fn set_editor_size(&self, editor: (f32, f32)) {
         if self.state.borrow().editor != editor {
@@ -893,6 +910,20 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                     os_clap::wake();
                     return 0;
                 }
+                if part == Some(Part::Presets) {
+                    // The preset list is an app popup too, under the box's left edge.
+                    let b = presets_rect(w.state.borrow().size().0);
+                    let mut p = POINT { x: (b.x * w.scale) as i32, y: (b.bottom() * w.scale) as i32 };
+                    ClientToScreen(hwnd, &mut p);
+                    w.state.borrow_mut().events.push(FrameEvent::Presets(p.x, p.y));
+                    os_clap::wake();
+                    return 0;
+                }
+                if let Some(d) = match part { Some(Part::PresetPrev) => Some(-1), Some(Part::PresetNext) => Some(1), _ => None } {
+                    w.state.borrow_mut().events.push(FrameEvent::PresetStep(d));
+                    os_clap::wake();
+                    return 0;
+                }
                 let mut relayout = false;
                 {
                     let mut st = w.state.borrow_mut();
@@ -1000,6 +1031,12 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 let (x, y) = client_point(hwnd, lp, w.scale, true);
                 let notches = ((wp >> 16) & 0xffff) as u16 as i16 as f32 / 120.0;
                 let part = part_at(&w.state.borrow(), x, y);
+                if matches!(part, Some(Part::Presets | Part::PresetPrev | Part::PresetNext)) && notches != 0.0 {
+                    // Wheel down = next preset.
+                    w.state.borrow_mut().events.push(FrameEvent::PresetStep(if notches < 0.0 { 1 } else { -1 }));
+                    os_clap::wake();
+                    return 0;
+                }
                 if let Some(Part::Knob(i)) = part {
                     let k = KNOBS[usize::from(i)];
                     let mut st = w.state.borrow_mut();
@@ -1168,7 +1205,7 @@ mod tests {
 
     fn state(strip: bool, target: &str) -> State {
         let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0 };
-        State { info, strip, pages: vec![PageIcon::Plugin], page: 0, misc: false, hint: String::new(), editor: (480.0, 270.0), events: Vec::new(), drag: None, moving: None, detached: false }
+        State { info, strip, pages: vec![PageIcon::Plugin], page: 0, misc: false, hint: String::new(), preset: None, editor: (480.0, 270.0), events: Vec::new(), drag: None, moving: None, detached: false }
     }
 
     #[test]

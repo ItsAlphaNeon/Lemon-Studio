@@ -18,6 +18,7 @@ mod playlist;
 mod plugin_window;
 mod plugins;
 mod project_plugins;
+mod presets;
 mod transport;
 mod views;
 

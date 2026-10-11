@@ -1074,9 +1074,23 @@ impl App {
                     Request::Menu(row, x, y) => {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
-                        self.state.playlist.popup = Some(crate::playlist::plugin_window_menu(row, detached, lx, ly));
+                        let mut menu = crate::playlist::plugin_window_menu(row, detached, lx, ly);
+                        crate::presets::fill_window_menu(self, row, &mut menu);
+                        self.state.playlist.popup = Some(menu);
                         self.popup_lift = detached.then_some(row);
                         self.invalidate();
+                        continue;
+                    }
+                    Request::Presets(row, x, y) => {
+                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let (lx, ly) = self.screen_to_canvas(x, y);
+                        self.state.playlist.popup = Some(crate::presets::popup(self, row, lx, ly));
+                        self.popup_lift = detached.then_some(row);
+                        self.invalidate();
+                        continue;
+                    }
+                    Request::PresetStep(row, d) => {
+                        self.state.message = crate::presets::run(self, crate::presets::PCmd::Step(row, d));
                         continue;
                     }
                     Request::ToggleOn(row) => chans.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled),

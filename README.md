@@ -98,6 +98,7 @@ losslessly, so existing projects open, play and save without losing data it does
 - Host link protocol that lets OpenStudio's own plugins integrate with the host's window frame
 - Experimental host for FL native effect plugins (opt-in): the user's installed native effects
   appear in the picker and process in mixer slots
+- Presets for every hosted plugin: list, step with ◀ ▶ and save from the plugin window's title bar
 
 </td>
 </tr>

@@ -46,6 +46,10 @@ pub enum Request {
     Raise(usize),
     /// The menu arrow was clicked: open the window menu at this screen point.
     Menu(usize, i32, i32),
+    /// The title-bar Presets box was clicked: open the preset list at this screen point (spec: plugins/presets.md).
+    Presets(usize, i32, i32),
+    /// The Presets box arrows: next (+1) / previous (-1) preset.
+    PresetStep(usize, i32),
 }
 
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
@@ -73,6 +77,8 @@ pub struct Plugins {
     pub scale: f32,
     /// New plugin windows open detached (settings "Detach all new plugins"; off = docked like FL's default).
     pub detach_new: bool,
+    /// The preset file each instance last loaded or saved (spec: plugins/presets.md), by `hosted` key.
+    pub presets: BTreeMap<usize, PathBuf>,
     rate: u32,
 }
 
@@ -266,6 +272,24 @@ impl Plugins {
         #[cfg(windows)]
         self.close_window(key);
         self.hosted.remove(&key);
+        self.presets.remove(&key);
+    }
+
+    /// Remembers the preset the instance under `key` holds and shows its name in the window's Presets box.
+    pub fn set_preset(&mut self, key: usize, path: Option<PathBuf>) {
+        match path {
+            Some(p) => self.presets.insert(key, p),
+            None => self.presets.remove(&key),
+        };
+        #[cfg(windows)]
+        if let Some(w) = self.hosted.get(&key).and_then(|h| h.window.as_ref()) {
+            w.set_preset(self.preset_name(key));
+        }
+    }
+
+    /// The name of the preset the instance under `key` holds.
+    pub fn preset_name(&self, key: usize) -> Option<String> {
+        self.presets.get(&key).map(|p| crate::presets::shown_name(p))
     }
 
     /// Moves mixer slot instances: `m(track, slot)` gives the new place, `None` drops the instance.
@@ -276,7 +300,12 @@ impl Plugins {
             let (t, s) = fx_of(k).unwrap();
             match m(t, s) {
                 Some((nt, ns)) if (nt, ns) == (t, s) => {}
-                Some((nt, ns)) => moved.push((fx_key(nt, ns), self.hosted.remove(&k).unwrap())),
+                Some((nt, ns)) => {
+                    if let Some(p) = self.presets.remove(&k) {
+                        self.presets.insert(fx_key(nt, ns), p);
+                    }
+                    moved.push((fx_key(nt, ns), self.hosted.remove(&k).unwrap()))
+                }
                 None => self.drop_key(k),
             }
         }
@@ -387,6 +416,7 @@ impl Plugins {
             self.close_window(row);
         }
         self.hosted.clear();
+        self.presets.clear();
     }
 
     /// The sample file an Open Sampler instance holds (its persisted `sample-path`), `Some("")` when it has none.
@@ -432,6 +462,10 @@ impl Plugins {
         w.show();
         drop(p);
         h.window = Some(w);
+        let name = self.preset_name(row);
+        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
+            w.set_preset(name);
+        }
         Ok(())
     }
 
@@ -547,6 +581,8 @@ impl Plugins {
                         FrameEvent::PitchCents(c) => Request::PitchCents(row, c),
                         FrameEvent::Raise => Request::Raise(row),
                         FrameEvent::Menu(x, y) => Request::Menu(row, x, y),
+                        FrameEvent::Presets(x, y) => Request::Presets(row, x, y),
+                        FrameEvent::PresetStep(d) => Request::PresetStep(row, d),
                     });
                 }
             }
@@ -657,7 +693,7 @@ fn json_string(s: &str) -> String {
 }
 
 /// `blob` (an Open Sampler state) with its `sample-path` field replaced by `path`.
-fn with_sample_path(blob: &[u8], path: &str) -> Option<Vec<u8>> {
+pub(crate) fn with_sample_path(blob: &[u8], path: &str) -> Option<Vec<u8>> {
     let prefixed = blob.len() > 8 && blob[0] != b'{';
     let json = if prefixed { &blob[8..] } else { blob };
     let mut v: serde_json::Value = serde_json::from_slice(json).ok()?;
