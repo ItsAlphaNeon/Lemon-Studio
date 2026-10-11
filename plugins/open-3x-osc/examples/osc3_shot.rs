@@ -35,7 +35,10 @@ fn main() {
         .and_then(|p| std::fs::read(p).ok())
         .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
         .unwrap_or_default();
-    let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+    // `OS_SHOT_SCALE=3` renders at that display scale (the picker's high-resolution tiles).
+    let k: f32 = std::env::var("OS_SHOT_SCALE").ok().and_then(|v| v.parse().ok()).filter(|k: &f32| *k > 0.0).unwrap_or(1.0);
+    let s = |v: u32| (v as f32 * k).round() as u32;
+    let mut c = os_ui::Canvas::new(s(view::W), s(view::H), k).unwrap();
     let paint = |l: &mut Logic, c: &mut os_ui::Canvas| {
         let hint = l.hint.clone();
         l.hits = view::paint(c, &theme, &l.vals, &l.view, &hint, false);
@@ -56,13 +59,14 @@ fn main() {
         }
         eprintln!("paint {:.2} ms", t.elapsed().as_secs_f64() * 1000.0 / 50.0);
     }
-    let mut buf = vec![0u32; (view::W * view::H) as usize];
+    let mut buf = vec![0u32; (s(view::W) * s(view::H)) as usize];
     c.copy_to_xrgb(&mut buf);
     let (ox, oy, w, h) = if arg(4) == Some("crop") { (view::CROP_X, view::CROP_Y, view::EDITOR_W, view::EDITOR_H) } else { (0, 0, view::W, view::H) };
+    let (ox, oy, w, h) = (s(ox), s(oy), s(w), s(h));
     let mut pm = tiny_skia::Pixmap::new(w, h).unwrap();
     for (i, px) in pm.pixels_mut().iter_mut().enumerate() {
         let (x, y) = (i as u32 % w + ox, i as u32 / w + oy);
-        let v = buf[(y * view::W + x) as usize];
+        let v = buf[(y * s(view::W) + x) as usize];
         *px = tiny_skia::PremultipliedColorU8::from_rgba((v >> 16) as u8, (v >> 8) as u8, v as u8, 255).unwrap();
     }
     pm.save_png(out).unwrap();

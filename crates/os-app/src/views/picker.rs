@@ -52,7 +52,8 @@ use Face::*;
 
 /// Only real plugins are listed. Index 0 is Open Sampler (what "+" in the channel rack adds); EQ and Limiter
 /// are built-in mixer features, not plugins, so the effects side is empty until real effect plugins exist.
-/// Open Sampler's tile is a screenshot of its sample page (`cargo run -p open-sampler --example shot`, scaled to 104 px wide).
+/// Open Sampler's tile is a screenshot of its sample page (`OS_SHOT_SCALE=3 cargo run -p open-sampler --example shot`, scaled to
+/// 312 px wide: tiles are stored at three times their 104 px size so they stay sharp at every display scale).
 pub const GENERATORS: &[Plugin] = &[p("Open Sampler", 5, Shot(OPEN_SAMPLER_SHOT), 104, 81, 0x49f1b1)];
 const OPEN_SAMPLER_SHOT: &[u8] = include_bytes!("../../assets/picker/open-sampler.png");
 pub const EFFECTS: &[Plugin] = &[];
@@ -71,12 +72,12 @@ pub fn generators(s: &State) -> Vec<Plugin> {
     v
 }
 
-/// Open 3x Osc's tile (Synth classic): its oscillator page (`cargo run -p open-3x-osc --example osc3_shot -- out.png osc - crop`,
-/// scaled to 104 px wide).
+/// Open 3x Osc's tile (Synth classic): its oscillator page (`OS_SHOT_SCALE=3 cargo run -p open-3x-osc --example osc3_shot -- out.png
+/// osc - crop`, scaled to 312 px wide).
 const OPEN_3X_OSC_SHOT: &[u8] = include_bytes!("../../assets/picker/open-3x-osc.png");
 
-/// Open Parametric EQ 2's tile: its editor (`cargo run -p open-parametric-eq-2 --example eq_shot -- out.png demo`, scaled
-/// to 104 px wide).
+/// Open Parametric EQ 2's tile: its editor (`OS_SHOT_SCALE=3 cargo run -p open-parametric-eq-2 --example eq_shot -- out.png demo`,
+/// scaled to 312 px wide).
 const OPEN_EQ_SHOT: &[u8] = include_bytes!("../../assets/picker/open-parametric-eq-2.png");
 
 /// Built-in effects followed by the hosted effect plugins (`State::hosted_effects`): the built-in EQ under "Filter",
