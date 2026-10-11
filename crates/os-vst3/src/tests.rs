@@ -320,6 +320,58 @@ fn engine_plays_a_pattern() {
     assert!(peak(&out) > 0.05, "engine output through the VST 3 (peak {})", peak(&out));
 }
 
+/// Mono portamento on a VST 3 channel: the second key glides the sounding note through its tuning note expression
+/// (spec §5) instead of restarting it.
+#[test]
+fn mono_portamento_glides_through_the_tuning_expression() {
+    let Some((_m, shared)) = sampler() else { return };
+    // 4 s of a 441 Hz sine at 48 kHz.
+    let wav = std::env::temp_dir().join("os-vst3-porta.wav");
+    let sine: Vec<f32> = (0..48000 * 4).flat_map(|i| { let v = (i as f32 / 48000.0 * 441.0 * std::f32::consts::TAU).sin() * 0.5; [v, v] }).collect();
+    os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &sine).unwrap();
+    {
+        let mut p = shared.lock().unwrap();
+        assert!(p.load_state(&sampler_state(&wav, "")));
+        assert!(p.activate(48000));
+    }
+    let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 0.35, ..Default::default() };
+    let ch = os_model::Channel {
+        index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
+        enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
+        layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc,
+    };
+    let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
+    let mut lib = os_engine::SampleLibrary::default();
+    let mut e = os_engine::Engine::new(&project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
+    e.clear_schedule();
+    e.set_instrument(0, shared.clone() as os_engine::SharedInstrument);
+    let mut out = Vec::new();
+    let block = 480;
+    for b in 0..(48000 * 3 / block) {
+        match b {
+            10 => e.note_on(0, 60, 100),
+            // An octave up at 1 s, while 60 is still held.
+            100 => e.note_on(0, 72, 100),
+            _ => {}
+        }
+        let mut buf = vec![0.0f32; block * 2];
+        e.process(&mut buf);
+        out.extend(buf.chunks_exact(2).map(|f| f[0]));
+    }
+    let window = |from_s: f32, to_s: f32| &out[(from_s * 48000.0) as usize..(to_s * 48000.0) as usize];
+    let crossings = |w: &[f32]| w.windows(2).filter(|p| p[0] <= 0.0 && p[1] > 0.0).count() as f32 / (w.len() as f32 / 48000.0);
+    let glide_s = os_engine::laws::slide_seconds(0.35) as f32;
+    let (before, mid, after) =
+        (crossings(window(0.5, 0.95)), crossings(window(1.0 + glide_s * 0.4, 1.0 + glide_s * 0.6)), crossings(window(1.0 + glide_s + 0.05, 2.0)));
+    eprintln!("before {before:.1} Hz, mid-glide {mid:.1} Hz, after {after:.1} Hz (glide {glide_s:.3} s)");
+    assert!((before - 441.0).abs() < 4.0, "first note in tune: {before}");
+    assert!((after - 882.0).abs() < 8.0, "glides to the octave: {after}");
+    assert!(mid > 500.0 && mid < 800.0, "between the two keys mid-glide: {mid}");
+    // Legato: the note keeps sounding through the glide (no restart at 1 s).
+    let (p0, p1) = (peak(window(0.9, 0.99)), peak(window(1.0, 1.05)));
+    assert!(p1 > p0 * 0.8, "no retrigger gap: {p0} -> {p1}");
+}
+
 /// A plug-in that is not active at the stream's rate stays silent and asks the UI thread to activate it.
 #[test]
 fn rate_changes_reactivate_on_idle() {

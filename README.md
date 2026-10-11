@@ -94,7 +94,7 @@ losslessly, so existing projects open, play and save without losing data it does
 ### 🔌 Plugins
 - [CLAP](https://cleveraudio.org/) and VST3 hosting: instruments and mixer effects, plugin editors inside
   OpenStudio's plugin window, plugin state (VST3 in the `.vstpreset` layout), parameters and automation, song
-  tempo and position for tempo-synced plugins
+  tempo and position for tempo-synced plugins, portamento glides (per-note tuning)
 - **Open Sampler**: OpenStudio's sampler, also built as a standalone
   VST3 and CLAP plugin for use in other hosts
 - **Open Parametric EQ 2**: 7-band EQ (VST3 + CLAP) with a graph editor, band tokens,

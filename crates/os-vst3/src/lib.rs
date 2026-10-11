@@ -22,8 +22,8 @@ use vst3_sys::base::{kResultOk, kResultTrue, IPluginBase, IPluginFactory, IPlugi
 use vst3_sys::gui::{IPlugView, ViewRect};
 use vst3_sys::utils::SharedVstPtr;
 use vst3_sys::vst::{
-    AudioBusBuffers, BusInfo, Event, EventData, IAudioProcessor, IComponent, IConnectionPoint, IEditController, IUnitInfo, NoteOffEvent,
-    NoteOnEvent, ParameterInfo, ProcessContext, ProcessData, ProcessSetup, UnitInfo,
+    AudioBusBuffers, BusInfo, Event, EventData, IAudioProcessor, IComponent, IConnectionPoint, IEditController, IUnitInfo,
+    NoteExpressionValueEvent, NoteOffEvent, NoteOnEvent, ParameterInfo, ProcessContext, ProcessData, ProcessSetup, UnitInfo,
 };
 use vst3_sys::{c_void, ComInterface, VstPtr, IID};
 
@@ -309,14 +309,29 @@ impl os_host::Library for Module {
     }
 }
 
-/// A note waiting for the next `process` call.
+/// What a queued note event does.
+#[derive(Clone, Copy, PartialEq)]
+enum NoteKind {
+    On,
+    Off,
+    /// Tuning of the key's sounding note, `velocity` = semitones.
+    Tune,
+}
+
+/// A note event waiting for the next `process` call.
 #[derive(Clone, Copy)]
 struct Note {
     time: u32,
-    on: bool,
+    kind: NoteKind,
     key: u8,
     velocity: f32,
 }
+
+// Event types and the tuning note expression (spec §5).
+const NOTE_ON_EVENT: u16 = 0;
+const NOTE_OFF_EVENT: u16 = 1;
+const NOTE_EXPRESSION_VALUE_EVENT: u16 = 4;
+const TUNING_TYPE_ID: u32 = 2;
 
 /// A running VST 3 instance.
 pub struct Plugin {
@@ -354,6 +369,7 @@ pub struct Plugin {
     bus_in: Vec<AudioBusBuffers>,
     bus_out: Vec<AudioBusBuffers>,
     queue: Vec<Note>,
+    note_ids: NoteIds,
     fx_in: (Vec<f32>, Vec<f32>),
     /// Values the processor reported, for the controller on the next idle.
     from_processor: Vec<(u32, f64)>,
@@ -438,6 +454,7 @@ impl Plugin {
                 bus_in: Vec::new(),
                 bus_out: Vec::new(),
                 queue: Vec::with_capacity(256),
+                note_ids: NoteIds { ids: [-1; 128], next: 0 },
                 fx_in: (Vec::new(), Vec::new()),
                 from_processor: Vec::with_capacity(256),
                 pending_since: None,
@@ -920,7 +937,9 @@ impl Plugin {
             let e = self.queue[i];
             if (e.time as usize) < n {
                 if self.takes_notes {
-                    ev.push(note_event(e));
+                    if let Some(event) = self.note_ids.event(e) {
+                        ev.push(event);
+                    }
                 }
             } else {
                 self.queue[kept] = Note { time: e.time - n as u32, ..e };
@@ -1004,13 +1023,41 @@ impl Plugin {
     }
 }
 
-fn note_event(n: Note) -> Event {
-    let event = if n.on {
-        EventData { note_on: NoteOnEvent { channel: 0, pitch: i16::from(n.key), tuning: 0.0, velocity: n.velocity, length: 0, note_id: -1 } }
-    } else {
-        EventData { note_off: NoteOffEvent { channel: 0, pitch: i16::from(n.key), velocity: 0.0, note_id: -1, tuning: 0.0 } }
-    };
-    Event { bus_index: 0, sample_offset: n.time as i32, ppq_position: 0.0, flags: 0, type_: if n.on { 0 } else { 1 }, event }
+/// Note id of each key's latest note on (-1 = none), and the next id to give.
+struct NoteIds {
+    ids: [i32; 128],
+    next: i32,
+}
+
+impl NoteIds {
+    /// The VST 3 event of a queued note (spec §5). A note on gets a note id (so its tuning can address it); a note off
+    /// names only its key (id -1), so it ends that key's note as before; a tuning goes to the key's latest note and is
+    /// dropped when the key has none.
+    fn event(&mut self, n: Note) -> Option<Event> {
+        let key = usize::from(n.key.min(127));
+        let (type_, event) = match n.kind {
+            NoteKind::On => {
+                let id = self.next;
+                self.next = (id + 1) & 0x7fff_ffff;
+                self.ids[key] = id;
+                let on = NoteOnEvent { channel: 0, pitch: i16::from(n.key), tuning: 0.0, velocity: n.velocity, length: 0, note_id: id };
+                (NOTE_ON_EVENT, EventData { note_on: on })
+            }
+            NoteKind::Off => {
+                (NOTE_OFF_EVENT, EventData { note_off: NoteOffEvent { channel: 0, pitch: i16::from(n.key), velocity: 0.0, note_id: -1, tuning: 0.0 } })
+            }
+            NoteKind::Tune => {
+                let id = self.ids[key];
+                if id < 0 {
+                    return None;
+                }
+                // Normalized tuning: 0.5 = none, plain semitones = 240 * (v - 0.5).
+                let value = (f64::from(n.velocity) / 240.0 + 0.5).clamp(0.0, 1.0);
+                (NOTE_EXPRESSION_VALUE_EVENT, EventData { note_expression_value: NoteExpressionValueEvent { type_id: TUNING_TYPE_ID, note_id: id, value } })
+            }
+        };
+        Some(Event { bus_index: 0, sample_offset: n.time as i32, ppq_position: 0.0, flags: 0, type_, event })
+    }
 }
 
 impl os_host::Plugin for Plugin {
@@ -1134,11 +1181,16 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
-        self.queue.push(Note { time: offset, on: true, key, velocity: velocity.clamp(0.0, 1.0) });
+        self.queue.push(Note { time: offset, kind: NoteKind::On, key, velocity: velocity.clamp(0.0, 1.0) });
     }
 
     fn note_off(&mut self, offset: u32, key: u8) {
-        self.queue.push(Note { time: offset, on: false, key, velocity: 0.0 });
+        self.queue.push(Note { time: offset, kind: NoteKind::Off, key, velocity: 0.0 });
+    }
+
+    /// Portamento glides (spec: audio/channel-voices.md): the tuning note expression of the key's sounding note.
+    fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
+        self.queue.push(Note { time: offset, kind: NoteKind::Tune, key, velocity: semitones });
     }
 
     fn param(&mut self, offset: u32, index: u32, value: f64) {
