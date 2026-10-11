@@ -143,6 +143,20 @@ pub fn value_text(s: &State, t: Target, v: f64) -> Option<String> {
     text
 }
 
+/// The hint of a parameter row in the browser (spec §6): "<parameter>: <value text>".
+pub fn row_hint(s: &State, key: usize, index: usize) -> String {
+    let Some(e) = s.params.lists.get(&key).and_then(|l| l.params.get(index)) else { return String::new() };
+    let text = s.params.plugin(key).and_then(|p| {
+        let p = p.lock().ok()?;
+        let v = p.param_value(e.id)?;
+        p.param_text(e.id, v)
+    });
+    match text {
+        Some(t) => format!("{}: {t}", e.name),
+        None => e.name.clone(),
+    }
+}
+
 /// The automation menu of a parameter (browser right-click, spec §6).
 pub fn param_menu(s: &State, key: usize, index: usize, x: f32, y: f32) -> Option<Popup> {
     let (tgt, name, v) = automation(s, key, index)?;
@@ -363,6 +377,7 @@ mod tests {
         let list = rows(&a.state);
         let names: Vec<&str> = list.iter().filter(|r| matches!(r.item, Item::Param(k, _) if k == key)).map(|r| r.label.as_str()).collect();
         assert_eq!((names.len(), names[0], names[35]), (36, "Band 1 level", "Main level"));
+        assert_eq!(row_hint(&a.state, key, 0), "Band 1 level: 0.0dB");
 
         // Right-click a parameter row: its automation menu.
         let row = list.iter().position(|r| r.item == Item::Param(key, 35)).unwrap();
@@ -390,6 +405,55 @@ mod tests {
         assert_eq!(a.params_menu(TOOLS_NEXT), None);
         let menu = a.state.playlist.popup.take().unwrap();
         assert!(menu.items.iter().any(|i| matches!(&i.cmd, Cmd::CreateAutomation(t, _, _) if *t == tgt)));
+    }
+
+    /// Corpus check (OPENSTUDIO_FLP_CORPUS): automation clips made on Parametric EQ 2 slot parameters load as slot
+    /// parameter targets of the hosted Open Parametric EQ 2, and every clip whose name still ends in the parameter
+    /// name ("... - Band 7 freq") points at the parameter of that name: the index maps 1:1 (spec §3, §7).
+    #[test]
+    fn corpus_eq_automation_points_at_the_same_parameters() {
+        let Some(list) = std::env::var_os("OPENSTUDIO_FLP_CORPUS") else { return };
+        let text = std::fs::read_to_string(list).unwrap();
+        let (mut checked, mut bad) = (0, Vec::new());
+        for path in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let Some(project) = std::fs::read(path).ok().and_then(|b| os_flp::FlpFile::parse(&b).ok()).and_then(|f| os_flp::project::load(&f).ok()) else {
+                continue;
+            };
+            let eq_slot = |t: u16, k: u8| {
+                let m = project.mixer.iter().find(|m| m.index == t);
+                m.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).is_some_and(|p| p.name == crate::plugins::EQ_FILE_NAME)
+            };
+            let links: Vec<(u16, Target)> = project
+                .automations
+                .iter()
+                .filter_map(|x| Some((x.channel, target::decode(x.target?))))
+                .filter(|&(_, t)| matches!(t, Target::SlotParam(tr, sl, _) if eq_slot(tr, sl)))
+                .collect();
+            if links.is_empty() {
+                continue;
+            }
+            let mut a = App::new(None);
+            a.state.project = project;
+            a.reset_hosted();
+            a.plugins.effects = crate::plugins::builtin_effects();
+            a.sync_effects();
+            a.params_tick();
+            for (ch, t) in links {
+                let s = &a.state;
+                let (key, k) = key_of(s, t).unwrap();
+                let param = s.params.lists.get(&key).and_then(|l| l.params.get(k)).map(|e| e.name.clone());
+                assert!(param.is_some(), "{path}: {t:?} has no hosted parameter");
+                let name = s.project.channels.iter().find(|c| c.index == ch).and_then(|c| c.name.clone()).unwrap_or_default();
+                let base = name.rsplit_once(" #").filter(|(_, n)| n.parse::<u32>().is_ok()).map_or(name.as_str(), |(b, _)| b);
+                let Some((_, tail)) = base.rsplit_once(" - ").filter(|(_, t)| t.starts_with("Band ") || t.starts_with("Main ")) else { continue };
+                checked += 1;
+                if param.as_deref() != Some(tail) {
+                    bad.push(format!("{path}: {name:?} -> {param:?}"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+        assert!(checked >= 10, "only {checked} named EQ clips");
     }
 
     /// A stand-in instance for typing `Weak` (never upgraded).
