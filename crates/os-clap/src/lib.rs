@@ -33,6 +33,8 @@ use clap_sys::process::{clap_process, CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTIN
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{clap_version_is_compatible, CLAP_VERSION};
 
+mod params;
+
 /// A plugin a library offers (the hosting layer's descriptor, format `Clap`).
 pub use os_host::{set_waker, wake, Descriptor};
 
@@ -183,6 +185,8 @@ struct HostData {
     /// output queue and only takes effect when the host flushes (or processes). The host's waker
     /// (`os_host::set_waker`) makes `idle` run at once instead of on the next timer tick.
     flush: AtomicBool,
+    /// `clap_host_params.rescan` flags not handled yet (the parameter list changed).
+    rescan: AtomicU32,
 }
 
 static HOST_NAME: &CStr = c"OpenStudio";
@@ -195,7 +199,10 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
     }
     ptr::null()
 }
-unsafe extern "C" fn host_params_rescan(_host: *const clap_host, _flags: u32) {}
+unsafe extern "C" fn host_params_rescan(host: *const clap_host, flags: u32) {
+    unsafe { (*((*host).host_data as *const HostData)).rescan.fetch_or(flags, Ordering::AcqRel) };
+    wake();
+}
 unsafe extern "C" fn host_params_clear(_host: *const clap_host, _id: u32, _flags: u32) {}
 unsafe extern "C" fn host_params_request_flush(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).flush.store(true, Ordering::Release) };
@@ -265,10 +272,15 @@ pub struct Plugin {
     editor: bool,
     /// Input copies for effect processing (mixer slots).
     fx_in: (Vec<f32>, Vec<f32>),
-    /// Parameter ranges (id, min, max), read once after init (values cross the hosting layer normalized).
-    ranges: Vec<(u32, f64, f64)>,
+    /// Parameter ranges in list order (id, min, max, stepped), read after init and on a rescan (values cross the
+    /// hosting layer normalized).
+    ranges: Vec<params::Range>,
     /// Host parameter changes (id, plain value) for the next process call or flush.
     param_queue: Vec<(u32, f64)>,
+    /// Automation values (frame offset, id, plain value) for the next process call (`params.rs`).
+    auto: Vec<(u32, u32, f64)>,
+    /// A process call ran since the last `idle`.
+    processed: bool,
     /// This chunk's parameter events (sent before the notes, at time 0).
     pvals: Vec<clap_event_param_value>,
     /// Changes the plugin reported (its editor): gesture begin / end and values, plain.
@@ -334,7 +346,12 @@ impl Plugin {
     /// Creates and initialises plugin `id` from `lib` (UI thread).
     pub fn new(lib: &Arc<Library>, id: &str) -> Result<Plugin, String> {
         let desc = lib.plugins.iter().find(|d| d.id == id).cloned().ok_or_else(|| format!("{}: no plugin {id}", lib.path.display()))?;
-        let host_data = Box::new(HostData { callback: AtomicBool::new(false), restart: AtomicBool::new(false), flush: AtomicBool::new(false) });
+        let host_data = Box::new(HostData {
+            callback: AtomicBool::new(false),
+            restart: AtomicBool::new(false),
+            flush: AtomicBool::new(false),
+            rescan: AtomicU32::new(0),
+        });
         let host = Box::new(clap_host {
             clap_version: CLAP_VERSION,
             host_data: &*host_data as *const HostData as *mut c_void,
@@ -365,15 +382,7 @@ impl Plugin {
             let state = ext(CLAP_EXT_STATE) as *const clap_plugin_state;
             let params = ext(CLAP_EXT_PARAMS) as *const clap_plugin_params;
             let latency = ext(CLAP_EXT_LATENCY) as *const clap_plugin_latency;
-            let mut ranges = Vec::new();
-            if !params.is_null() {
-                for i in 0..(*params).count.map_or(0, |c| c(plugin)) {
-                    let mut info: clap_param_info = std::mem::zeroed();
-                    if (*params).get_info.is_some_and(|g| g(plugin, i, &mut info)) {
-                        ranges.push((info.id, info.min_value, info.max_value));
-                    }
-                }
-            }
+            let ranges = params::read_ranges(params, plugin);
             Ok(Plugin {
                 desc,
                 plugin,
@@ -401,7 +410,9 @@ impl Plugin {
                 latency,
                 ranges,
                 param_queue: Vec::new(),
-                pvals: Vec::with_capacity(64),
+                auto: Vec::with_capacity(params::MAX_AUTO),
+                processed: false,
+                pvals: Vec::with_capacity(params::MAX_AUTO + 64),
                 param_out: Vec::new(),
                 _lib: lib.clone(),
             })
@@ -487,7 +498,7 @@ impl Plugin {
 
     /// (min, max) of parameter `id`.
     fn range(&self, id: u32) -> Option<(f64, f64)> {
-        self.ranges.iter().find(|r| r.0 == id).map(|&(_, lo, hi)| (lo, hi))
+        self.ranges.iter().find(|r| r.0 == id).map(|&(_, lo, hi, _)| (lo, hi))
     }
 
     fn normalize(&self, id: u32, plain: f64) -> f64 {
@@ -538,6 +549,7 @@ impl Plugin {
                 }
             }
         }
+        self.idle_params();
         if self.host_data.flush.swap(false, Ordering::AcqRel) || !self.param_queue.is_empty() {
             self.flush_params();
         }
@@ -707,16 +719,26 @@ impl Plugin {
             }
         }
         self.queue = rest;
-        // `queue` is sorted by time, so `seq` already is. Host parameter changes go first, at time 0.
+        // `queue` is sorted by time, so `seq` already is. Host parameter changes go first, at time 0, then automation
+        // in time order; parameter values go before the notes at the same frame.
         self.fill_param_events();
+        self.take_automation(n);
         self.order.clear();
-        self.order.extend(self.pvals.iter().map(|e| &e.header as *const clap_event_header));
+        let mut pi = 0;
         for &(ni, mi) in &seq {
-            self.order.push(match mi {
+            let h = match mi {
                 Some(m) => &self.mods[m].header as *const clap_event_header,
                 None => &self.notes[ni].header as *const clap_event_header,
-            });
+            };
+            let t = unsafe { (*h).time };
+            while pi < self.pvals.len() && self.pvals[pi].header.time <= t {
+                self.order.push(&self.pvals[pi].header as *const clap_event_header);
+                pi += 1;
+            }
+            self.order.push(h);
         }
+        self.order.extend(self.pvals[pi..].iter().map(|e| &e.header as *const clap_event_header));
+        self.processed = true;
         let ins = clap_input_events { ctx: &self.order as *const Vec<*const clap_event_header> as *mut c_void, size: Some(events_size), get: Some(events_get) };
         let outs = clap_output_events { ctx: &mut self.param_out as *mut Vec<OutEv> as *mut c_void, try_push: Some(push_out) };
         let mut chans = [left.as_mut_ptr(), right.as_mut_ptr()];
@@ -918,6 +940,10 @@ impl os_engine::Instrument for Plugin {
         self.queue.push(Ev { time: offset, kind: Kind::Choke, key, velocity: 0.0, start: 0.0 });
     }
 
+    fn param(&mut self, offset: u32, index: u32, value: f64) {
+        self.automate(offset, index, value);
+    }
+
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         left.fill(0.0);
         right.fill(0.0);
@@ -991,6 +1017,10 @@ impl os_engine::HostedEffect for Plugin {
     fn reset_fx(&mut self) {
         os_engine::Instrument::reset(self);
     }
+
+    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
+        self.automate(offset, index, value);
+    }
 }
 
 impl Drop for Plugin {
@@ -1022,6 +1052,102 @@ mod tests {
             }
         }
         None
+    }
+
+    /// The built-in Open Parametric EQ 2, linked into the test binary.
+    fn open_eq() -> os_host::SharedPlugin {
+        let entry = &open_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Open Parametric EQ 2.clap")) }.expect("linked EQ");
+        os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap()
+    }
+
+    // spec: plugins/plugin-parameters.md §1 (list order = automation index), parametric-eq-2.md (parameter order)
+    #[test]
+    fn parameter_list_follows_the_plugin_order() {
+        let p = open_eq();
+        let p = p.lock().unwrap();
+        let infos: Vec<os_host::ParamInfo> = (0..p.param_count()).filter_map(|i| p.param_info(i)).collect();
+        assert_eq!(infos.len(), 36);
+        let names: Vec<&str> = infos.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            (names[0], names[7], names[14], names[21], names[28], names[35]),
+            ("Band 1 level", "Band 1 freq", "Band 1 width", "Band 1 type", "Band 1 order", "Main level")
+        );
+        assert!(infos.iter().all(|i| i.automatable && !i.hidden));
+        assert_eq!(infos[21].steps, 7);
+        assert_eq!(p.param_value(infos[0].id), Some(0.5), "0 dB is the middle of -18..18");
+        assert_eq!(p.param_text(infos[0].id, 1.0).as_deref(), Some("18.0dB"));
+        assert_eq!(p.param_text(infos[21].id, 6.0 / 7.0).as_deref(), Some("Peaking"));
+    }
+
+    /// Automation reaches the plugin inside `process` by parameter index and normalized value, at its frame offset (a
+    /// stepped parameter gets its nearest step); values no process call took are flushed on `idle`.
+    // spec: plugins/plugin-parameters.md §2
+    #[test]
+    fn parameter_automation_reaches_the_plugin() {
+        let shared = open_eq();
+        let mut p = shared.lock().unwrap();
+        assert!(p.activate(48000));
+        let ids: Vec<u32> = (0..p.param_count()).filter_map(|i| p.param_info(i)).map(|i| i.id).collect();
+        let near = |p: &dyn os_host::Plugin, id: u32, want: f64| (p.param_value(id).unwrap() - want).abs() < 1e-6;
+        let (mut l, mut r) = (vec![0.1f32; 256], vec![0.1f32; 256]);
+        p.param_fx(0, 35, 1.0);
+        p.param_fx(100, 21, 0.4); // 0.4 x 7 = 2.8 -> type 3
+        p.param_fx(300, 0, 0.0); // past this block: the next one
+        p.param_fx(0, 999, 1.0); // unknown: ignored
+        p.process_fx(48000, &mut l, &mut r);
+        assert!(near(&*p, ids[35], 1.0));
+        assert!(near(&*p, ids[21], 3.0 / 7.0), "{:?}", p.param_value(ids[21]));
+        assert!(near(&*p, ids[0], 0.5), "not yet");
+        p.process_fx(48000, &mut l, &mut r);
+        assert!(near(&*p, ids[0], 0.0));
+        // Nothing processes it (a bypassed slot): the next idle hands the newest value over.
+        os_host::Plugin::idle(&mut *p);
+        p.param_fx(0, 7, 0.1);
+        p.param_fx(64, 7, 0.2);
+        os_host::Plugin::idle(&mut *p);
+        assert!(near(&*p, ids[7], 0.2), "{:?}", p.param_value(ids[7]));
+    }
+
+    /// The whole path: a playlist automation clip on "Insert 1, slot 1, Main level" moves the hosted EQ's parameter
+    /// in song playback (spec: plugins/plugin-parameters.md §2-3).
+    #[test]
+    fn automation_clip_moves_a_slot_plugin_parameter() {
+        use os_model::{AutoPoint, Automation, Channel, ChannelKind, Clip, ClipSource, Project};
+        let shared = open_eq();
+        assert!(shared.lock().unwrap().activate(48000));
+        let main = shared.lock().unwrap().param_info(35).unwrap().id;
+        let auto_ch = Channel {
+            index: 0, kind: ChannelKind::Automation, name: None, plugin: None, color: None, enabled: true, volume: 0.78125,
+            pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None, layer_children: vec![], envelopes: Default::default(),
+            rack: Default::default(),
+        };
+        // Main level from 0 (-18 dB) to 1 (+18 dB) over 4 beats (120 BPM: 2 s).
+        let auto = Automation {
+            channel: 0,
+            target: Some(os_model::target::slot_param(1, 0, 35)),
+            points: vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(4.0, 1.0)],
+            header: vec![0; 21],
+            tail: vec![],
+        };
+        let project = Project {
+            ppq: 96,
+            tempo: Some(120.0),
+            channels: vec![auto_ch],
+            automations: vec![auto],
+            arrangements: vec![os_model::Arrangement { clips: vec![Clip::new(0, 4 * 96, 0, ClipSource::Channel(0))], ..Default::default() }],
+            mixer: (0..3).map(os_model::MixerTrack::new).collect(),
+            ..Default::default()
+        };
+        let mut lib = os_engine::SampleLibrary::default();
+        let mut e = os_engine::Engine::new(&project, &mut lib, 48000, os_engine::PlayMode::Song);
+        e.set_effect(1, 0, shared.clone());
+        let mut out = vec![0.0f32; 2 * 480];
+        for _ in 0..100 {
+            e.process(&mut out); // 1 s: half way
+        }
+        let v = shared.lock().unwrap().param_value(main).unwrap();
+        assert!((v - 0.5).abs() < 0.01, "half way through the ramp: {v}");
     }
 
     /// The hosting layer's parameter surface on a CLAP instance: info, normalized get / set, text, and the edit

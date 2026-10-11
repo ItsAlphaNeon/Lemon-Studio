@@ -14,3 +14,5 @@ os-host.workspace = true
 
 [dev-dependencies]
 os-model.workspace = true
+# The built-in EQ, linked (no exported entry points), for the parameter tests.
+open-parametric-eq-2 = { path = "../../plugins/open-parametric-eq-2", features = ["linked"] }
