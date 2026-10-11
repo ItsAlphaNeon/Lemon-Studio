@@ -892,7 +892,7 @@ impl App {
             .filter(|n| n != crate::plugins::OPEN_SAMPLER)
             .map(|n| &*Box::leak(n.into_boxed_str()))
             .collect();
-        self.state.hosted_effects = self.plugins.effects.iter().map(|a| &*Box::leak(a.desc.name.clone().into_boxed_str())).collect();
+        self.state.hosted_effects = self.plugins.effect_names().into_iter().map(|n| &*Box::leak(n.into_boxed_str())).collect();
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
@@ -1024,7 +1024,8 @@ impl App {
                     self.state.hosted_rows.push(row);
                     self.transport.set_instruments(self.plugins.instruments());
                     self.state.piano.dirty = true;
-                    self.state.message = Some(format!("Added {name} (hosted CLAP plugin)"));
+                    let format = self.plugins.descriptor(row).map_or("", |d| crate::plugins::format_name(d.format));
+                    self.state.message = Some(format!("Added {name} (hosted {format} plugin)"));
                     self.state.pending_open = Some(row);
                 }
                 Err(e) => self.state.message = Some(format!("Plugin: {e}")),

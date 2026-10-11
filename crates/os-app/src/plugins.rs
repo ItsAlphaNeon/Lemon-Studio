@@ -126,9 +126,31 @@ fn linked(cell: &OnceLock<Option<Arc<os_clap::Library>>>, entry: *const std::ffi
 /// One plugin format's files in its search folders, and how to load one.
 type Scan = (Vec<PathBuf>, fn(&std::path::Path) -> Result<Arc<dyn Library>, String>);
 
-/// The plugin files of every hosted format.
+/// The plugin files of every hosted format (spec: plugins/vst3-hosting.md §2).
 fn plugin_files() -> Vec<Scan> {
-    vec![(os_clap::find_files(&search_dirs(os_clap::standard_dirs())), |p| os_clap::Library::load(p).map(|l| l as Arc<dyn Library>))]
+    vec![
+        (os_clap::find_files(&search_dirs(os_clap::standard_dirs())), |p| os_clap::Library::load(p).map(|l| l as Arc<dyn Library>)),
+        (os_vst3::find_bundles(&search_dirs(os_vst3::standard_dirs())), |p| os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>)),
+    ]
+}
+
+/// A format's name as the UI shows it.
+pub fn format_name(f: os_host::Format) -> &'static str {
+    match f {
+        os_host::Format::Clap => "CLAP",
+        os_host::Format::Vst3 => "VST3",
+        os_host::Format::Native => "native",
+    }
+}
+
+/// Picker labels of found plugins: the name, plus the format when plugins of other formats have the same name.
+fn labels(list: &[Available]) -> Vec<String> {
+    list.iter()
+        .map(|a| {
+            let twin = list.iter().any(|b| b.desc.name == a.desc.name && b.desc.format != a.desc.format);
+            if twin { format!("{} ({})", a.desc.name, format_name(a.desc.format)) } else { a.desc.name.clone() }
+        })
+        .collect()
 }
 
 impl Plugins {
@@ -162,8 +184,14 @@ impl Plugins {
         Plugins { available, effects, scale: 1.0, ..Plugins::default() }
     }
 
+    /// Picker labels of the instruments (`labels`), in `available` order.
     pub fn names(&self) -> Vec<String> {
-        self.available.iter().map(|a| a.desc.name.clone()).collect()
+        labels(&self.available)
+    }
+
+    /// Picker labels of the effects, in `effects` order.
+    pub fn effect_names(&self) -> Vec<String> {
+        labels(&self.effects)
     }
 
     /// Creates an instance of available plugin `index` for rack row `row` and activates it at the device rate.
@@ -255,7 +283,8 @@ impl Plugins {
 
     /// Index of the available plugin called `name`.
     pub fn index_of(&self, name: &str) -> Option<usize> {
-        self.available.iter().position(|a| a.desc.name == name)
+        // A picker label first (it names the format of a plugin found in several), then the plain name.
+        labels(&self.available).iter().position(|l| l == name).or_else(|| self.available.iter().position(|a| a.desc.name == name))
     }
 
     /// Index of the effect plugin called `name`.

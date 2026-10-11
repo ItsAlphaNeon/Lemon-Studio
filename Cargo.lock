@@ -2015,6 +2015,7 @@ dependencies = [
  "os-model",
  "os-theme",
  "os-ui",
+ "os-vst3",
  "rfd",
  "serde_json",
  "softbuffer",
@@ -2127,6 +2128,18 @@ dependencies = [
  "fontdue",
  "os-theme",
  "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "os-vst3"
+version = "0.0.1"
+dependencies = [
+ "libloading",
+ "os-engine",
+ "os-host",
+ "os-model",
+ "vst3-sys",
  "windows-sys 0.61.2",
 ]
 
