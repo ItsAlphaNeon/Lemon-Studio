@@ -176,6 +176,8 @@ pub enum Action {
     PianoRuler,
     /// A scroll bar (left-drag scrolls; right-drag scrolls horizontally and zooms vertically).
     Scrollbar(Scroll),
+    /// A scroll bar's arrow button: steps the axis by an eighth of its view (-1 back, 1 forward).
+    ScrollStep(Scroll, i32),
     /// Playlist (spec: ui/playlist.md): title-bar tools, snap magnet, ▸ options menu, time ruler, marker lane,
     /// track header name area and mute LED, picker tabs and items, popup menu items (top level, submenu).
     PlTool(crate::playlist::PlTool),
@@ -3756,6 +3758,10 @@ impl App {
         if let Action::Scrollbar(t) = a {
             return self.scrollbar_press(t, false);
         }
+        if let Action::ScrollStep(t, dir) = a {
+            let step = self.bar(t).map_or(48.0, |b| (b.view / 8.0).max(18.0).round());
+            return self.scroll_set(t, self.scroll_get(t) + dir as f32 * step);
+        }
         self.note_host_tweak(&a);
         if self.playlist_act(&a, false) {
             return;
@@ -3779,7 +3785,7 @@ impl App {
         }
         let s = &mut self.state;
         match a {
-            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::PianoRuler | Action::Scrollbar(_) => {}
+            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::PianoRuler | Action::Scrollbar(_) | Action::ScrollStep(..) => {}
             Action::PianoTool(t) => {
                 s.piano.tool = t;
                 s.piano.overlay = None;
@@ -4789,6 +4795,7 @@ mod tests {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         frame(&mut app, &mut a, None);
+        // A window button whose press changes nothing in the toolbar (the plugin picker would cover the screen).
         let act = Action::ToggleWin(Win::Browser);
         let r = hit_rect(&app, &act);
         let px = |c: &Canvas| {
@@ -5219,9 +5226,10 @@ mod tests {
         app.mouse_move(grid.x + 210.0, grid.y + 60.0);
         app.mouse_up();
         assert_eq!(app.state.project.channels.len(), ch0 + 1);
-        // Online / favorites tabs are empty; wheel never scrolls past the content.
-        let r0 = hit_rect(&app, &Action::BrowserTab(4));
-        click(&mut app, &mut c, r0);
+        // Online / favorites tabs are not available yet: greyed out (no tab hit), their pages empty; wheel never
+        // scrolls past the content.
+        assert!(!app.hits.iter().any(|h| h.action == Action::BrowserTab(4)));
+        app.act(Action::BrowserTab(4));
         assert!(rows(&app.state).is_empty());
         let r0 = hit_rect(&app, &Action::BrowserTab(0));
         click(&mut app, &mut c, r0);
@@ -5355,6 +5363,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// An effect dragged from the plugin database onto the mixer goes into the current track's first free slot
+    /// (spec: ui/browser.md §3).
+    #[test]
+    fn browser_effect_drops_into_a_mixer_slot() {
+        use crate::views::browser::{rows, Item};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.hosted_effects = vec!["Test FX"];
+        app.state.z = vec![Win::Mixer];
+        app.state.browser_tab = 2;
+        app.state.browser_open.insert("2:Plugin database/Effects".into());
+        frame(&mut app, &mut c, None);
+        let i = rows(&app.state).iter().position(|r| r.item == Item::Effect(0)).expect("effect row");
+        let src = hit_rect(&app, &Action::BrowserRow(i));
+        let dst = hit_rect(&app, &Action::MixerArea);
+        app.mouse_move(src.cx(), src.cy());
+        app.mouse_down();
+        app.mouse_move(src.cx() + 30.0, src.cy());
+        app.mouse_move(dst.cx(), dst.cy());
+        app.mouse_up();
+        let t = app.state.selected_mixer;
+        assert_eq!(crate::mixer::slot_name(&app.state, t, 0).as_deref(), Some("Test FX"));
+    }
+
+    /// The piano roll's scroll-bar arrows step their axis (spec: ui/piano-roll.md §1a).
+    #[test]
+    fn piano_scroll_arrows_step() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        frame(&mut app, &mut c, None);
+        for t in [Scroll::PianoY, Scroll::PianoX] {
+            let v0 = app.scroll_get(t);
+            let r = hit_rect(&app, &Action::ScrollStep(t, 1));
+            click(&mut app, &mut c, r);
+            assert!(app.scroll_get(t) > v0, "{t:?} steps forward");
+            let r = hit_rect(&app, &Action::ScrollStep(t, -1));
+            click(&mut app, &mut c, r);
+            assert!((app.scroll_get(t) - v0).abs() < 0.01, "{t:?} steps back: {v0} -> {}", app.scroll_get(t));
+        }
+    }
+
     #[test]
     fn browser_dropped_folder() {
         use crate::views::browser::{rows, Item};
@@ -5451,7 +5502,7 @@ mod tests {
         // Search box on top moves the list down.
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);
-        assert!(hit_rect(&app, &Action::BrowserSearch).y < 200.0);
+        assert!(app.hits.iter().any(|h| h.action == Action::BrowserSearch && h.rect.y < 200.0));
     }
 
     /// Channel rack (spec: ui/channel-rack.md §5): stacking with other windows, name button opens

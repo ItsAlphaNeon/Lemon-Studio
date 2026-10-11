@@ -10,7 +10,9 @@ use os_model::{MixerTrack, Rgb};
 use crate::app::{App, State, Win};
 use crate::playlist::{Cmd, EditTarget, Mark, PItem, Popup};
 
-/// Mixer controls (the view registers them as `Action::Mix`).
+/// Mixer controls (the view registers them as `Action::Mix`). Controls that are not available yet (title-bar view
+/// buttons, input pin, latency clock, disk recording, input / output combos, track equalizer) are greyed out with
+/// `Ui::off` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MHit {
     /// Anywhere on a strip that is not a control.
@@ -22,23 +24,15 @@ pub enum MHit {
     Route(u16),
     /// The small green "^" above a send knob (removes that route).
     Unroute(u16),
-    Pin(u16),
-    Clock(u16),
-    Disk(u16),
     /// "+" after the last strip; title-bar "+" (after the selected track).
     Add,
     AddAfter,
     Options,
     Layout,
-    /// Title-bar view buttons (multi-touch, waveforms, extra properties, track inspector).
-    Tool(u8),
     /// Effect slot `n` of the current track: name, ▸ arrow, LED.
     SlotName(u8),
     SlotArrow(u8),
     SlotLed(u8),
-    Input,
-    Output,
-    Eq(u8),
     /// The level scale column.
     Scale,
 }
@@ -53,15 +47,14 @@ pub enum MCmd {
     ResetRouting(u16),
     UnrouteTo(u16),
     Solo(u16),
-    Arm(bool),
     MoveLeft(u16),
     MoveRight(u16),
     Delete(u16),
     InsertOne(u16),
     /// Route the selected tracks to `dst`: only = drop their other routes, side = sidechain (level 0).
     Route { dst: u16, only: bool, side: bool },
+    /// Layout menu: Wide (the only layout drawn; the others are greyed out).
     Layout(u8),
-    TrimUnused,
     /// Effect slots of the current track.
     AddEffect(u8, usize),
     Picker(u8),
@@ -93,8 +86,6 @@ pub struct MixerUi {
     pub layout: u8,
     /// Slot names typed in the rename box (session only).
     pub slot_names: HashMap<(u16, u8), String>,
-    /// Tracks armed for disk recording (drawn only).
-    pub armed: Vec<u16>,
     /// The picker was opened for this slot of the current track.
     pub picker_slot: Option<u8>,
     pub pending: Vec<FxReq>,
@@ -108,7 +99,7 @@ pub struct MixerUi {
 
 impl Default for MixerUi {
     fn default() -> Self {
-        MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), armed: Vec::new(), picker_slot: None, pending: Vec::new(), meters: Vec::new(),
+        MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), picker_slot: None, pending: Vec::new(), meters: Vec::new(),
             meter_cfg: Default::default(), meter_at: None }
     }
 }
@@ -272,20 +263,6 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             changed(s);
             Some(format!("{} no longer sends to {}", name(s, cur), name(s, dst)))
         }
-        MHit::Pin(n) | MHit::Clock(n) => {
-            select(s, n, ctrl);
-            None
-        }
-        MHit::Disk(n) => {
-            select(s, n, ctrl);
-            if let Some(i) = s.mixer.armed.iter().position(|&t| t == n) {
-                s.mixer.armed.remove(i);
-                None
-            } else {
-                s.mixer.armed.push(n);
-                Some("Disk recording: armed (recording is not available yet)".into())
-            }
-        }
         MHit::Add => {
             let n = add_track(s, None);
             Some(format!("Added {}", name(s, n)))
@@ -302,7 +279,6 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             s.playlist.popup = Some(layout_menu(s, at.0, at.1 + 10.0));
             None
         }
-        MHit::Tool(k) => Some(format!("{}: not available yet", ["Multi-touch control", "View waveforms", "Extra volume / stereo properties", "Track inspector"][usize::from(k).min(3)])),
         MHit::SlotName(i) => {
             let t = s.selected_mixer;
             if slot_name(s, t, i).is_some() {
@@ -325,15 +301,6 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             changed(s);
             None
         }
-        MHit::Input => {
-            s.playlist.popup = Some(io_menu("Audio input source", at.0, at.1 + 10.0));
-            None
-        }
-        MHit::Output => {
-            s.playlist.popup = Some(io_menu("Audio output target", at.0, at.1 + 10.0));
-            None
-        }
-        MHit::Eq(_) => Some("Track equalizer: not available yet".into()),
         MHit::Scale => None,
     }
 }
@@ -385,7 +352,7 @@ pub fn right(app: &mut App, h: MHit) -> bool {
                 changed(s);
             }
         }
-        MHit::Pin(n) | MHit::Clock(n) | MHit::Polarity(n) | MHit::Swap(n) | MHit::Disk(n) => select(s, n, false),
+        MHit::Polarity(n) | MHit::Swap(n) => select(s, n, false),
         _ => return false,
     }
     true
@@ -607,15 +574,14 @@ const COLORS: [(&str, u32); 8] = [
 /// Track menu (right click on a strip), §6.1.
 pub fn track_menu(s: &State, n: u16, x: f32, y: f32) -> Popup {
     let mut items = vec![PItem::head(Box::leak(format!("Mixer track ({})", name(s, n)).into_boxed_str()))];
-    items.extend(track_items(s, n));
+    items.extend(track_items(n));
     Popup { x, y, items, sub: None }
 }
 
-fn track_items(s: &State, n: u16) -> Vec<PItem> {
+fn track_items(n: u16) -> Vec<PItem> {
     let mx = |c: MCmd| Cmd::Mixer(c);
     let mut colors: Vec<PItem> = vec![PItem::new("Default", mx(MCmd::Color(n, None)))];
     colors.extend(COLORS.iter().map(|&(l, c)| PItem::new(l, mx(MCmd::Color(n, Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8)))))));
-    let armed = s.mixer.armed.contains(&n);
     vec![
         PItem::new("Rename, color and icon...", mx(MCmd::Rename(n))).key("F2"),
         PItem::sub("Change color...", colors),
@@ -639,8 +605,9 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
         PItem::sep(),
         PItem::new("Solo selected track(s)", mx(MCmd::Solo(n))).key("S"),
         PItem::not_yet("Alt solo selected track(s)").key("Alt+S"),
-        PItem::new("Arm selected track(s)", mx(MCmd::Arm(true))).mark(Mark::Check(armed)),
-        PItem::new("Disarm selected track(s)", mx(MCmd::Arm(false))),
+        // Disk recording is not available yet.
+        PItem::not_yet("Arm selected track(s)"),
+        PItem::not_yet("Disarm selected track(s)"),
         PItem::sep(),
         PItem::not_yet("Compensate for master latency").mark(Mark::Check(true)),
         PItem::head("Group"),
@@ -671,28 +638,26 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub("View", vec![PItem::not_yet("Waveforms"), PItem::not_yet("Extra properties")]),
         PItem::not_yet("Detached").mark(Mark::Check(false)),
         PItem::sep(),
-        PItem::new("Trim unused tracks", Cmd::Mixer(MCmd::TrimUnused)),
+        PItem::not_yet("Trim unused tracks"),
         PItem::not_yet("Switch smart disable for all plugins"),
         PItem::not_yet("Remove all (audio editor) instances"),
         PItem::head(Box::leak(format!("Mixer track ({})", name(s, s.selected_mixer)).into_boxed_str())),
     ];
-    items.extend(track_items(s, s.selected_mixer));
+    items.extend(track_items(s.selected_mixer));
     Popup { x, y, items, sub: None }
 }
 
+/// Layout combo menu (§6.4): only Wide is drawn, the other layouts are greyed out.
 pub fn layout_menu(s: &State, x: f32, y: f32) -> Popup {
     let mut items = Vec::new();
-    for (i, l) in LAYOUTS.iter().enumerate() {
+    for (i, &l) in LAYOUTS.iter().enumerate() {
         if i == 7 {
             items.push(PItem::sep());
         }
-        items.push(PItem::new(*l, Cmd::Mixer(MCmd::Layout(i as u8))).mark(Mark::Radio(s.mixer.layout == i as u8)));
+        let on = Mark::Radio(s.mixer.layout == i as u8);
+        items.push(if i as u8 == WIDE { PItem::new(l, Cmd::Mixer(MCmd::Layout(i as u8))) } else { PItem::not_yet(l) }.mark(on));
     }
     Popup { x, y, items, sub: None }
-}
-
-fn io_menu(title: &'static str, x: f32, y: f32) -> Popup {
-    Popup { x, y, items: vec![PItem::head(title), PItem::new("(none)", Cmd::Nothing).mark(Mark::Radio(true)), PItem::not_yet("Device inputs and outputs: not available yet")], sub: None }
 }
 
 /// Empty slot: the effect list (§7.1): picker entries, then the effects found.
@@ -813,15 +778,6 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
             solo(s, n);
             None
         }
-        MCmd::Arm(on) => {
-            for t in selected(s) {
-                s.mixer.armed.retain(|&a| a != t);
-                if on {
-                    s.mixer.armed.push(t);
-                }
-            }
-            None
-        }
         MCmd::MoveLeft(n) => move_track(s, n, -1),
         MCmd::MoveRight(n) => move_track(s, n, 1),
         MCmd::Delete(n) => delete_track(s, n),
@@ -830,14 +786,8 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
             Some(format!("Inserted {}", name(s, n)))
         }
         MCmd::Route { dst, only, side } => route(s, dst, only, side),
-        MCmd::Layout(l) => {
-            if l == WIDE {
-                None
-            } else {
-                Some(format!("Mixer layout \"{}\": not available yet (Wide is shown)", LAYOUTS[usize::from(l)]))
-            }
-        }
-        MCmd::TrimUnused => Some("Trim unused tracks: not available yet".into()),
+        // Wide is the layout shown; the others are greyed out in the menu.
+        MCmd::Layout(_) => None,
         MCmd::AddEffect(slot, index) => {
             let t = s.selected_mixer;
             let Some(&nm) = s.hosted_effects.get(index) else { return None };
