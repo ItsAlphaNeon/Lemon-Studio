@@ -57,7 +57,17 @@ struct Shell {
     /// A title-bar move or edge resize done by hand: cursor and window rect (screen px) at the press, and the edge
     /// (None = move). The system's own move / size loops block the event loop, which froze all drawing.
     grab: Option<Grab>,
+    /// A tick or mouse input left damage that is not painted yet: `about_to_wait` asks for the frame (see `FRAME`).
+    pending: bool,
+    /// When the last frame was painted.
+    painted: Instant,
 }
+
+/// Shortest time between two frames asked for by ticks and mouse input (a drag moves the mouse hundreds of times a
+/// second). Windows hands out a window's WM_PAINT ahead of its child windows' and ahead of every WM_TIMER, so a main
+/// window that always has a frame pending starves the plugin windows (docked children and detached ones alike) and
+/// the timers their editors animate with. The gap after each frame lets the loop go idle and serve them.
+const FRAME: Duration = Duration::from_millis(16);
 
 #[derive(Clone, Copy)]
 struct Grab {
@@ -285,12 +295,23 @@ impl ApplicationHandler for Shell {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         // Animate while playing; otherwise repaint a few times a second (peaks, clock).
         let ms = if self.app.animating() { 16 } else { 100 };
-        el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(ms)));
-        if self.app.tick() {
-            if let Some(w) = &self.window {
-                w.request_redraw();
+        let now = Instant::now();
+        let mut wake = now + Duration::from_millis(ms);
+        self.pending |= self.app.tick();
+        // winit stops dispatching after each frame and comes back here: asking for the next frame at once would keep
+        // our WM_PAINT pending forever while playing, and the plugin windows would never paint (see `FRAME`).
+        if self.pending {
+            let next = self.painted + FRAME;
+            if now >= next {
+                self.pending = false;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            } else {
+                wake = wake.min(next);
             }
         }
+        el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 
     /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor.
@@ -301,7 +322,7 @@ impl ApplicationHandler for Shell {
         self.lock = Some((anchor, v));
         self.app.mouse_move(v.0, v.1);
         let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
-        window.request_redraw();
+        self.pending = true;
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -343,9 +364,7 @@ impl ApplicationHandler for Shell {
                 let (mx, my) = self.to_app(&window, position.x, position.y);
                 self.app.mouse_move(mx, my);
                 self.sync_cursor(&window);
-                if self.app.has_damage() {
-                    window.request_redraw();
-                }
+                self.pending |= self.app.has_damage();
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 if state == ElementState::Pressed {
@@ -406,7 +425,7 @@ impl ApplicationHandler for Shell {
                     }
                     self.sync_cursor(&window);
                 }
-                window.request_redraw();
+                self.pending = true;
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
                 self.app.mouse_down_right();
@@ -416,11 +435,11 @@ impl ApplicationHandler for Shell {
                     self.lock = Some((anchor, (mx, my)));
                     window.set_cursor_visible(false);
                 }
-                window.request_redraw();
+                self.pending = true;
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Middle, .. } => {
                 self.app.mouse_down_middle();
-                window.request_redraw();
+                self.pending = true;
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Right | MouseButton::Middle, .. } => {
                 if let Some((anchor, _)) = self.lock.take() {
@@ -429,7 +448,7 @@ impl ApplicationHandler for Shell {
                     window.set_cursor_visible(true);
                 }
                 self.app.mouse_up();
-                window.request_redraw();
+                self.pending = true;
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (dx, dy) = match delta {
@@ -437,7 +456,7 @@ impl ApplicationHandler for Shell {
                     MouseScrollDelta::PixelDelta(p) => (p.x as f32 / 40.0, p.y as f32 / 40.0),
                 };
                 self.app.wheel(dx, dy, self.mods.shift_key(), self.mods.control_key());
-                window.request_redraw();
+                self.pending = true;
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
@@ -564,6 +583,7 @@ impl ApplicationHandler for Shell {
                         }
                     }
                 }
+                self.painted = Instant::now();
                 if self.app.want_minimize {
                     self.app.want_minimize = false;
                     window.set_minimized(true);
@@ -796,6 +816,8 @@ fn main() {
         inset: (0, 0, 0, 0),
         edge: None,
         grab: None,
+        pending: false,
+        painted: Instant::now(),
     };
     event_loop.run_app(&mut shell).expect("run");
 }
