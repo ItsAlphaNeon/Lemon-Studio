@@ -1,6 +1,6 @@
 //! Settings window (OPTIONS > MIDI / Audio / General / File / Theme settings, Project settings, Project info,
-//! Debugging log; F10 / F11): ten tabs of grouped controls. Most controls are drawn and remember their state for
-//! the session only; the ones that work today are listed in `SAct` handling (`App::settings_act`).
+//! Debugging log; F10 / F11): ten tabs of grouped controls. The controls that work today are listed in `LIVE` and
+//! handled in `App::settings_act`; every other control is drawn greyed out and only says it is not available yet.
 // spec: ui/settings.md
 
 use std::collections::HashSet;
@@ -17,13 +17,12 @@ pub enum SAct {
     Body,
     Close,
     Tab(usize),
-    /// A check (radio LED) by its label.
+    /// A working check (radio LED) by its label (`LIVE`).
     Check(&'static str),
     /// A collapsible group header by its title.
     Group(&'static str),
+    /// A working button by its label (`LIVE`).
     Button(&'static str),
-    /// A combo / value box (not functional: no popup contents captured, spec open questions).
-    Combo(&'static str),
     /// Theme preset tile: 0 = default, n = `SettingsUi::themes[n - 1]`.
     Preset(usize),
 }
@@ -35,8 +34,6 @@ pub struct SettingsUi {
     pub tab: usize,
     /// Page scroll in pixels.
     pub scroll: f32,
-    /// Checks whose state differs from their default.
-    pub flipped: HashSet<&'static str>,
     /// Groups whose open state differs from their default.
     pub folded: HashSet<&'static str>,
     /// Filled when the window opens: output devices, theme files (name, path), selected preset.
@@ -68,6 +65,15 @@ pub const FILE: usize = 3;
 /// The one working File-tab check: opt in to the experimental FL native plugin host (spec
 /// plugins/fruity-abi.md). Its label is the key for `SAct::Check`; `App::settings_act` acts on it.
 pub const NATIVE_HOST_CHECK: &str = "Experimental: host installed native plugins";
+
+/// The checks and buttons that work (by label, handled in `App::settings_act`). Every other check, combo, value box,
+/// slider and button is not available yet: drawn greyed out, its hint and click say so.
+pub const LIVE: [&str; 4] = [NATIVE_HOST_CHECK, "Manage plugins", "Load theme...", "Reset"];
+
+fn live(key: &str) -> bool {
+    LIVE.contains(&key)
+}
+
 pub const THEME: usize = 4;
 pub const PROJECT: usize = 5;
 pub const INFO: usize = 6;
@@ -133,6 +139,8 @@ pub enum Row {
     Gap(f32),
     /// Two controls on one line: left one, right one (right-hand column at x 304).
     Pair(Box<Row>, Box<Row>),
+    /// A display that belongs to a feature not available yet (name for the hint): drawn greyed out.
+    Dim(&'static str, Box<Row>),
 }
 
 pub struct Group {
@@ -159,6 +167,9 @@ fn combo(v: &str, w: f32, label: &'static str) -> Row {
 fn txt(v: impl Into<String>) -> Row {
     Row::Text(v.into(), false)
 }
+fn dim(name: &'static str, r: Row) -> Row {
+    Row::Dim(name, Box::new(r))
+}
 
 /// The groups of page `tab` (spec §4). FL-only groups (cloud, remote app, licence) are left out.
 pub fn page(tab: usize, s: &State) -> Vec<Group> {
@@ -167,12 +178,13 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
     match tab {
         MIDI => vec![
             g("Output", vec![
-                List(vec![("", 0.0)], vec![], 8),
+                dim("MIDI output devices", List(vec![("", 0.0)], vec![], 8)),
                 pair(Check2("Send master sync", false, "Send all notes off", true), ValueR("Port", "---".into())),
                 pair(Value("0".into(), "Master sync offset (milliseconds)"), combo("MIDI clock", 168.0, "Synchronization type")),
             ]),
             g("Input", vec![
-                List(vec![("", 0.0)], vec![], 9),
+                // The devices that are open: their notes play the selected channel (spec: ui/midi-input.md).
+                List(vec![("Open input devices (notes play the selected channel)", 0.0)], s.midi_inputs.iter().map(|d| vec![d.clone()]).collect(), 9),
                 pair(Check("Enable", true), ValueR("Port", "---".into())),
                 combo("(generic controller)", 250.0, "Controller type"),
                 pair(combo("Velocity", 100.0, "Link note on velocity to"), ValueR("Omni preview MIDI channel", "---".into())),
@@ -217,8 +229,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         GENERAL => vec![
             Group { note: " (requires a restart to take effect)", ..gf("Display", false, vec![
                 combo("System", 64.0, "Main GUI scaling"),
-                txt("Define 1 inch / 2.54 cm or set display's PPI"),
-                Text("(96 PPI/advised scaling: 100%)".into(), true),
+                dim("Display PPI", txt("Define 1 inch / 2.54 cm or set display's PPI")),
+                dim("Display PPI", Text("(96 PPI/advised scaling: 100%)".into(), true)),
                 Slider("", 0.25),
                 combo("Main", 64.0, "Pop-ups scaling"),
                 combo("Main", 64.0, "Toolbars scaling"),
@@ -311,8 +323,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     Check(NATIVE_HOST_CHECK, os_native::enabled()),
                 ]),
                 g("User data folder", vec![txt(user)]),
-                g("Browser extra search folders", vec![List(vec![("Folder", 30.0), ("Browser name", 440.0)], vec![], 12)]),
-                g("External tools", vec![List(vec![("File", 30.0), ("Name", 320.0)], vec![], 4), txt("Script editor   C:\\Windows\\System32\\Notepad.exe")]),
+                g("Browser extra search folders", vec![dim("Browser extra search folders", List(vec![("Folder", 30.0), ("Browser name", 440.0)], vec![], 12))]),
+                g("External tools", vec![
+                    dim("External tools", List(vec![("File", 30.0), ("Name", 320.0)], vec![], 4)),
+                    dim("External tools", txt("Script editor   C:\\Windows\\System32\\Notepad.exe")),
+                ]),
                 gf("Troubleshooting", true, vec![Buttons(vec![("Repair optional features", 124.0), ("Reset browser cache", 124.0)])]),
             ]
         }
@@ -410,10 +425,6 @@ fn swatch(p: &os_theme::Palette) -> [Color; 3] {
     [p.s(0x2b2d30), p.h(0xffaf65), p.a(0x9ad04a)]
 }
 
-fn check_on(st: &crate::views::settings::SettingsUi, key: &'static str, default: bool) -> bool {
-    default ^ st.flipped.contains(key)
-}
-
 fn row_h(r: &Row) -> f32 {
     match r {
         Row::Check(..) | Row::Check2(..) | Row::Off(..) => 21.0,
@@ -427,6 +438,7 @@ fn row_h(r: &Row) -> f32 {
         Row::ThemeKnobs => 140.0,
         Row::Gap(h) => *h,
         Row::Pair(a, b) => row_h(a).max(row_h(b)),
+        Row::Dim(_, r) => row_h(r),
     }
 }
 
@@ -552,18 +564,21 @@ fn paint_group(ui: &mut Ui, s: &State, gr: &Group, r: Rect, open: bool, clip: Re
     for row in &gr.rows {
         let h = row_h(row);
         if y + h > clip.y && y < clip.bottom() {
-            paint_row(ui, st, row, r, y, h);
+            paint_row(ui, st, gr.title, row, r, y, h);
         }
         y += h;
     }
 }
 
-fn check(ui: &mut Ui, st: &SettingsUi, key: &'static str, default: bool, x: f32, cy: f32, enabled: bool) {
+/// A check showing `on`; one that is not `enabled` (not in `LIVE`) is greyed out.
+fn check(ui: &mut Ui, key: &'static str, on: bool, x: f32, cy: f32, enabled: bool) {
     let t = ui.t;
-    let on = check_on(st, key, default);
     let tw = ui.c.text_width(Font::new(13), key);
     let hr = Rect::new(x - 8.0, cy - 9.0, tw + 26.0, 18.0);
     let hov = enabled && ui.hit(hr, Action::Settings(SAct::Check(key)), "");
+    if !enabled {
+        ui.off(hr, key);
+    }
     // Round LED (spec §3): orange when on.
     ui.c.fill_circle(x, cy, 6.5, t.s(0x141516));
     if on {
@@ -574,16 +589,37 @@ fn check(ui: &mut Ui, st: &SettingsUi, key: &'static str, default: bool, x: f32,
         ui.c.fill_circle(x, cy, 5.5, if hov { t.s(0x6a6c6e) } else { t.s(0x58595a) });
         ui.c.fill_circle(x, cy, 4.2, t.s(0x36393a));
     }
-    let col = if !enabled { t.text_dim } else if hov { t.glyph } else { t.text };
+    let col = if hov { t.glyph } else { t.text };
     let lh = ui.c.line_height(Font::new(13));
     ui.c.text(Font::new(13), x + 11.0, (cy - lh / 2.0).round(), col, key);
+    if !enabled {
+        grey(ui, hr);
+    }
 }
 
-fn paint_row(ui: &mut Ui, st: &SettingsUi, row: &Row, g: Rect, y: f32, h: f32) {
-    paint_row_at(ui, st, row, g, y, h, 0.0)
+/// Greys out what was just drawn in `r` on a group body.
+fn grey(ui: &mut Ui, r: Rect) {
+    let bg = ui.t.s(0x25272a);
+    ui.veil(r, bg);
 }
 
-fn paint_row_at(ui: &mut Ui, st: &SettingsUi, row: &Row, g: Rect, y: f32, h: f32, dx: f32) {
+/// The hint name of a control: its label, else its group's title.
+fn name_of(label: &'static str, group: &'static str) -> &'static str {
+    if !label.is_empty() {
+        label
+    } else if !group.is_empty() {
+        group
+    } else {
+        "This option"
+    }
+}
+
+fn paint_row(ui: &mut Ui, st: &SettingsUi, group: &'static str, row: &Row, g: Rect, y: f32, h: f32) {
+    paint_row_at(ui, st, group, row, g, y, h, 0.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_row_at(ui: &mut Ui, st: &SettingsUi, group: &'static str, row: &Row, g: Rect, y: f32, h: f32, dx: f32) {
     let t = ui.t;
     let f = LABEL;
     let x0 = g.x + 12.0 + dx;
@@ -591,37 +627,51 @@ fn paint_row_at(ui: &mut Ui, st: &SettingsUi, row: &Row, g: Rect, y: f32, h: f32
     let lh = ui.c.line_height(f);
     let ty = (cy - lh / 2.0).round();
     match row {
-        Row::Check(k, d) => check(ui, st, k, *d, x0 + 10.0, cy, true),
-        Row::Off(k, d) => check(ui, st, k, *d, x0 + 10.0, cy, false),
+        // A check that is not available yet shows its default, greyed out.
+        Row::Check(k, d) => check(ui, k, *d, x0 + 10.0, cy, live(k)),
+        Row::Off(k, d) => check(ui, k, *d, x0 + 10.0, cy, false),
         Row::Check2(a, da, b, db) => {
-            check(ui, st, a, *da, g.x + 22.0, cy, true);
-            check(ui, st, b, *db, g.x + 324.0, cy, true);
+            check(ui, a, *da, g.x + 22.0, cy, live(a));
+            check(ui, b, *db, g.x + 324.0, cy, live(b));
         }
+        // Combos and value boxes: none works yet. A combo keeps showing its value (the output device, the sample
+        // rate, the project's PPQ), greyed out.
         Row::Combo(v, w, label) => {
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
-            let hov = ui.hit(b, Action::Settings(SAct::Combo(label)), "Not available yet");
-            kit::combo(ui.c, t, b, v, f, kit::State::hover(hov));
-            ui.c.text(f, b.right() + 8.0, ty, t.text, label);
+            ui.off(b, name_of(label, group));
+            kit::combo(ui.c, t, b, v, f, kit::State::NORMAL);
+            let lw = ui.c.text(f, b.right() + 8.0, ty, t.text, label);
+            grey(ui, Rect::new(b.x, b.y, b.w + 8.0 + lw, b.h));
         }
         Row::Value(v, label) => {
             let b = Rect::new(x0, y + 3.0, 38.0, 21.0);
-            let hov = ui.hit(b, Action::Settings(SAct::Combo(label)), "Not available yet");
-            value_red(ui, b, v, hov);
-            ui.c.text(f, b.right() + 8.0, ty, t.text, label);
+            ui.off(b, name_of(label, group));
+            value_red(ui, b, v);
+            let lw = ui.c.text(f, b.right() + 8.0, ty, t.text, label);
+            grey(ui, Rect::new(b.x, b.y, b.w + 8.0 + lw, b.h));
         }
         Row::ValueR(label, v) => {
             let b = Rect::new(g.right() - 52.0, y + 3.0, 42.0, 21.0);
-            let hov = ui.hit(b, Action::Settings(SAct::Combo(label)), "Not available yet");
-            value_red(ui, b, v, hov);
+            ui.off(b, name_of(label, group));
+            value_red(ui, b, v);
             ui.c.text_right(f, b.x - 8.0, ty, t.text, label);
+            let lw = ui.c.text_width(f, label);
+            grey(ui, Rect::span(b.x - 8.0 - lw, b.right(), b.y, b.bottom()));
         }
         Row::Buttons(bs) => {
             let mut x = x0;
             for &(label, w) in bs {
                 let b = Rect::new(x, y + 4.0, w, 28.0);
-                let hov = ui.hit(b, Action::Settings(SAct::Button(label)), "");
+                let on = live(label);
+                let hov = on && ui.hit(b, Action::Settings(SAct::Button(label)), "");
+                if !on {
+                    ui.off(b, label);
+                }
                 kit::bordered(ui.c, b, 2.0, t.s(0x161819), kit::face(t.s(0x212425), kit::State::hover(hov)));
                 ui.c.text_center(Font::new(13), b, if hov { t.glyph } else { t.text }, label);
+                if !on {
+                    grey(ui, b);
+                }
                 x += w + 8.0;
             }
         }
@@ -633,7 +683,10 @@ fn paint_row_at(ui: &mut Ui, st: &SettingsUi, row: &Row, g: Rect, y: f32, h: f32
             ui.c.fill_circle(hx, cy, 8.0, t.s(0x111213));
             ui.c.fill_circle(hx, cy, 7.0, t.s(0x4a4d50));
             ui.c.fill_rect(Rect::new(hx - 0.5, cy - 6.0, 1.0, 5.0), t.s(0x1a1b1c));
-            ui.c.text(f, tr.right() + 12.0, ty, t.text, label);
+            let lw = ui.c.text(f, tr.right() + 12.0, ty, t.text, label);
+            let r = Rect::span(tr.x - 9.0, tr.right() + 14.0 + lw, cy - 9.0, cy + 9.0);
+            ui.off(r, name_of(label, group));
+            grey(ui, r);
         }
         Row::List(cols, rows, n) => {
             let b = Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 6.0);
@@ -693,18 +746,26 @@ fn paint_row_at(ui: &mut Ui, st: &SettingsUi, row: &Row, g: Rect, y: f32, h: f32
                 ui.c.fill_circle(cx, y + 92.0, 14.5, cols[i]);
                 ui.c.text_center(Font::new(13), Rect::new(cx - 30.0, y + 110.0, 60.0, 18.0), t.text, k);
             }
-            ui.hit(Rect::new(x0, y, g.w - 24.0, 130.0), Action::Settings(SAct::Combo("Adjustments")), "Not available yet");
+            let r = Rect::new(x0, y, g.w - 24.0, 130.0);
+            ui.off(r, "Theme adjustments");
+            grey(ui, r);
         }
         Row::Gap(_) => {}
         Row::Pair(a, b) => {
-            paint_row_at(ui, st, a, g, y, h, 0.0);
-            paint_row_at(ui, st, b, g, y, h, 304.0);
+            paint_row_at(ui, st, group, a, g, y, h, 0.0);
+            paint_row_at(ui, st, group, b, g, y, h, 304.0);
+        }
+        Row::Dim(name, r) => {
+            paint_row_at(ui, st, group, r, g, y, h, dx);
+            let b = Rect::span(x0 - 4.0, g.right() - 8.0, y, y + h);
+            ui.off(b, name);
+            grey(ui, b);
         }
     }
 }
 
-fn value_red(ui: &mut Ui, b: Rect, v: &str, hov: bool) {
+fn value_red(ui: &mut Ui, b: Rect, v: &str) {
     let t = ui.t;
-    kit::bordered(ui.c, b, 3.0, t.h(0x5a2229), if hov { t.h(0x9a4a52) } else { t.h(0x863c44) });
+    kit::bordered(ui.c, b, 3.0, t.h(0x5a2229), t.h(0x863c44));
     ui.c.text_center(Font::new(15), b, t.tx(0xf2e4e6), v);
 }

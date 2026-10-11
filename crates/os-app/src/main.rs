@@ -7,6 +7,7 @@ mod knobs;
 mod loading;
 mod logo;
 mod meters;
+mod midi_in;
 mod mixer;
 mod osc3;
 mod monitor;
@@ -391,7 +392,11 @@ impl ApplicationHandler for Shell {
             }
         }
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                if self.app.confirm_discard("closing") {
+                    el.exit();
+                }
+            }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
                 self.app.ctrl = self.mods.control_key();
@@ -661,7 +666,10 @@ impl ApplicationHandler for Shell {
                     window.set_maximized(!window.is_maximized());
                 }
                 if self.app.want_close {
-                    el.exit();
+                    self.app.want_close = false;
+                    if self.app.confirm_discard("closing") {
+                        el.exit();
+                    }
                 }
             }
             _ => {}
@@ -940,8 +948,15 @@ fn main() {
         *p = Some(event_loop.create_proxy());
     }
     os_clap::set_waker(wake_ui);
+    let mut app = App::new(path);
+    // MIDI controllers play the selected channel (spec: ui/midi-input.md).
+    app.midi = midi_in::MidiIn::open(wake_ui);
+    app.state.midi_inputs = app.midi.names.clone();
+    if !app.state.midi_inputs.is_empty() && app.state.message.is_none() {
+        app.state.message = Some(format!("MIDI input: {}", app.state.midi_inputs.join(", ")));
+    }
     let mut shell = Shell {
-        app: App::new(path),
+        app,
         window: None,
         surface: None,
         canvas: None,

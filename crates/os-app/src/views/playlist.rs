@@ -973,6 +973,11 @@ fn popup_layout(m: &os_ui::kit::menu::Metrics, items: &[pl::PItem], max_h: f32) 
     (out, col + 1, h)
 }
 
+/// Whether any entry of a submenu (or of its own submenus) does something.
+fn any_enabled(items: &[pl::PItem]) -> bool {
+    items.iter().any(|c| !c.head && !c.sep && !c.col && c.enabled && (c.children.is_empty() || any_enabled(&c.children)))
+}
+
 /// Draw a popup list at (x, y) kept on screen; returns its rect and each item's row rect.
 fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, sub: bool) -> (Rect, Vec<Rect>) {
     let t = ui.t;
@@ -1018,30 +1023,40 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             continue;
         }
         let action = if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
-        let hint: String = if it.enabled { it.label.to_string() } else { "Not available yet".into() };
-        if ui.hit(rr, action, hint) || open == Some(i) {
-            ui.c.fill_rect(rr, t.menu_pop_hi);
+        // Greyed out: a disabled entry, or a submenu with nothing available in it (it still opens, to show what is
+        // planned). Disabled entries never light up.
+        let live = it.enabled && (it.children.is_empty() || any_enabled(&it.children));
+        if it.enabled {
+            if ui.hit(rr, action, it.label.to_string()) || open == Some(i) {
+                ui.c.fill_rect(rr, t.menu_pop_hi);
+            }
+        } else if matches!(it.cmd, pl::Cmd::NotYet(_)) {
+            ui.hit(rr, action, crate::app::off_text(&it.label));
+        } else {
+            // Disabled here and now (nothing to merge, the last arrangement), not missing.
+            ui.hit(rr, action, it.label.to_string());
         }
-        let color = if it.enabled { t.menu_pop_text } else { t.menu_pop_dim };
+        let color = if live { t.menu_pop_text } else { t.menu_pop_dim };
         let (mx, my) = (rr.x + 10.0, rr.y + m.row / 2.0);
         match it.mark {
             Mark::Check(true) => {
-                ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, t.menu_pop_text);
-                ui.c.line(mx - 1.0, my + 3.0, mx + 4.0, my - 3.0, 1.5, t.menu_pop_text);
+                ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, color);
+                ui.c.line(mx - 1.0, my + 3.0, mx + 4.0, my - 3.0, 1.5, color);
             }
             // Unticked checks show a faint tick (FL browser options menu, spec ui/browser.md §4).
             Mark::Check(false) => {
                 ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, t.menu_pop_dim.shade(-0.15));
                 ui.c.line(mx - 1.0, my + 3.0, mx + 4.0, my - 3.0, 1.5, t.menu_pop_dim.shade(-0.15));
             }
-            Mark::Radio(true) => ui.c.fill_circle(mx, my, 3.0, t.menu_pop_text),
+            Mark::Radio(true) => ui.c.fill_circle(mx, my, 3.0, color),
             Mark::Radio(false) => ui.c.stroke_circle(mx, my, 3.5, 1.0, t.menu_pop_dim),
             _ => {}
         }
         ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, lw + 4.0, color, &it.label);
         let right = rr.right() - if it.children.is_empty() { 8.0 } else { 16.0 };
         if !it.key.is_empty() {
-            ui.c.text_right(font.italic(), right, rr.y + 3.0 + dy, t.menu_pop_shortcut, it.key);
+            let sc = if live { t.menu_pop_shortcut } else { t.menu_pop_dim.mix(t.menu_pop, 0.35) };
+            ui.c.text_right(font.italic(), right, rr.y + 3.0 + dy, sc, it.key);
         }
         if !it.children.is_empty() {
             let ax = rr.right() - 11.0;

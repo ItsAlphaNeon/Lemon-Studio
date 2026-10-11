@@ -436,9 +436,10 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let (x, y, r) = (win.x, win.y, win.right());
     let ohov = ui.hit(Rect::new(x + 8.0, y + 6.0, 16.0, 17.0), Action::RackOptions, "Channel options");
     ui.c.fill_polygon(&[(x + 14.0, y + 10.5), (x + 18.5, y + 14.0), (x + 14.0, y + 17.5)], if ohov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc2c8cc) });
+    // Loop starter: not available yet, greyed out.
     let sw = Rect::new(x + 34.0, y + 6.0, 16.0, 16.0);
-    ui.hit(sw, Action::Placeholder("loop starter"), "Turn loop starter mode on or off (shift)");
-    icons::draw(ui.c, Icon::Countdown, sw, t.glyph);
+    ui.off(sw, "Loop starter");
+    icons::draw(ui.c, Icon::Countdown, sw, os_ui::kit::ink(t, os_ui::kit::State::NORMAL.with_disabled(true)));
     // Display filter combo (§7, §21).
     let combo = Rect::span(x + c.name_x - 1.0, x + c.name_x + c.name_w, y + 4.0, y + 27.0);
     let chov = ui.hit(combo, Action::RackFilter, "Channel display filter (PgUp/PgDn)");

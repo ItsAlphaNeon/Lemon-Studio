@@ -184,7 +184,8 @@ pub struct ChannelInfo {
     pub range: i32,
     /// Insert number, 0 = master.
     pub track: u16,
-    /// The channel's Misc tab values (`None`: no Misc tab, e.g. mixer effects).
+    /// The channel's Misc tab values (`None`: no channel behind the window, e.g. mixer effects: no Misc tab, and the
+    /// strip's ON / PAN / VOL do nothing).
     pub misc: Option<crate::misc_page::MiscVals>,
 }
 
@@ -214,6 +215,8 @@ pub enum FrameEvent {
     Note(u8, u8, bool),
     /// A detached window moved to a monitor with another DPI: the app redraws it at this scale (spec: ui/ui-scaling.md §3).
     Dpi(f32),
+    /// A greyed-out control was clicked: the app says it is not available yet.
+    NotAvailable(&'static str),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -234,6 +237,8 @@ struct State {
     misc: bool,
     /// The plugin's hint line (parameter under the mouse), shown in the title bar.
     hint: String,
+    /// A greyed-out frame control under the mouse: its "not available yet" hint replaces the plugin's.
+    off_hint: Option<&'static str>,
     /// The loaded preset's name, shown in the Presets box ("Presets" without one).
     preset: Option<String>,
     /// Misc tab page state (tracking page, keyboard scroll, drag, hover).
@@ -303,7 +308,32 @@ enum Part {
     Tab(usize),
     On,
     Knob(u8),
+    /// A strip control that is not available yet (drawn greyed out): its name for the hint.
+    Off(&'static str),
     Caption,
+}
+
+impl State {
+    /// The window belongs to a channel (not a mixer effect): ON, PAN and VOL act on it.
+    fn channel(&self) -> bool {
+        self.info.misc.is_some()
+    }
+}
+
+/// Strip controls that do nothing yet, with their rects: the pitch range and mixer track boxes (no editing); ON, PAN, VOL
+/// and PITCH too in an effect's window (there is no channel).
+fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
+    let dx = w - STRIP_RIGHT;
+    let mut v = Vec::new();
+    if !st.channel() {
+        v.push((Rect::new(340.0 + dx, 38.0, 18.0, 18.0), "Effect on / off"));
+        v.push((Rect::new(383.0 + dx - 14.0, 33.0, 28.0, 28.0), "Panning"));
+        v.push((Rect::new(417.0 + dx - 14.0, 33.0, 28.0, 28.0), "Volume"));
+        v.push((Rect::new(455.0 + dx - 14.0, 33.0, 28.0, 28.0), "Channel pitch"));
+    }
+    v.push((Rect::new(470.0 + dx, 35.0, 28.0, 23.0), "Pitch range"));
+    v.push((Rect::new(517.0 + dx, 35.0, 41.0, 23.0), "Mixer track number"));
+    v
 }
 
 fn parts(st: &State) -> Vec<(Rect, Part)> {
@@ -323,9 +353,12 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
         for i in 0..=st.pages.len() {
             v.push((tab_rect(i), Part::Tab(i)));
         }
-        v.push((Rect::new(340.0 + dx, 38.0, 18.0, 18.0), Part::On));
-        for (i, x) in [383.0, 417.0, 455.0].into_iter().enumerate() {
-            v.push((Rect::new(x + dx - 14.0, 33.0, 28.0, 28.0), Part::Knob(i as u8)));
+        v.extend(strip_off(st, w).into_iter().map(|(r, name)| (r, Part::Off(name))));
+        if st.channel() {
+            v.push((Rect::new(340.0 + dx, 38.0, 18.0, 18.0), Part::On));
+            for (i, x) in [383.0, 417.0, 455.0].into_iter().enumerate() {
+                v.push((Rect::new(x + dx - 14.0, 33.0, 28.0, 28.0), Part::Knob(i as u8)));
+            }
         }
     }
     v.push((Rect::new(0.0, 0.0, w, TITLE_H), Part::Caption));
@@ -419,7 +452,8 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     let troom = (p.x - 8.0 - tx).max(0.0);
     c.text_clip(f, tx, ty, troom, c_grey(), &target);
     let tw = c.text_width(f, &target).min(troom);
-    let hint = if st.misc { &st.misc_ui.hint } else { &st.hint };
+    let off = st.off_hint.map(crate::app::off_text);
+    let hint = if let Some(o) = &off { o } else if st.misc { &st.misc_ui.hint } else { &st.hint };
     if !hint.is_empty() {
         let hx = tx + tw + 14.0;
         let hf = Font::new(12);
@@ -474,6 +508,9 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
     let track = if st.info.track == 0 { "---".to_string() } else { st.info.track.to_string() };
     value_box(c, Rect::new(517.0 + dx, 32.0 + dy, 41.0, 23.0), &track);
     caption(c, 537.0 + dx, "TRACK");
+    // Greyed out (`strip_off`): RANGE and TRACK; from ON on in an effect's window.
+    let x0 = if st.channel() { 470.0 } else { 334.0 };
+    c.fill_rect(Rect::span(x0 + dx, 561.0 + dx, TITLE_H + 2.0, TITLE_H + STRIP_H - 1.0), c_strip().with_alpha(crate::app::OFF_VEIL));
 }
 
 fn caption(c: &mut Canvas, cx: f32, s: &str) {
@@ -545,6 +582,7 @@ impl FrameWindow {
             page: 0,
             misc: false,
             hint: String::new(),
+            off_hint: None,
             preset: None,
             misc_ui: Default::default(),
             editor,
@@ -1072,6 +1110,10 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                             st.drag = Some((k, y, st.knob_value(k)));
                             SetCapture(hwnd);
                         }
+                        Some(Part::Off(name)) => {
+                            st.events.push(FrameEvent::NotAvailable(name));
+                            os_clap::wake();
+                        }
                         Some(Part::Caption) if msg == WM_LBUTTONDOWN => {
                             // Drag the window by the title bar.
                             let mut c: POINT = std::mem::zeroed();
@@ -1139,6 +1181,17 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 }
                 if let Some((k, y0, v0)) = st.drag {
                     st.set_knob(k, v0 + (y0 - y) / 1024.0);
+                    drop(st);
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                    return 0;
+                }
+                // Over a greyed-out control the title bar says it is not available yet.
+                let off = match part_at(&st, x, y) {
+                    Some(Part::Off(name)) => Some(name),
+                    _ => None,
+                };
+                if off != st.off_hint {
+                    st.off_hint = off;
                     drop(st);
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
@@ -1220,7 +1273,11 @@ fn misc_set(st: &mut State, m: crate::misc_page::M, v: f32) {
 }
 
 fn misc_hint(st: &mut State, h: Option<crate::misc_page::Hit>) {
-    use crate::misc_page::{note_name, value_text, Hit, M};
+    use crate::misc_page::{note_name, off_name, value_text, Hit, M};
+    if let Some(name) = h.zip(st.info.misc).and_then(|(h, v)| off_name(h, &v)) {
+        st.misc_ui.hint = crate::app::off_text(name);
+        return;
+    }
     st.misc_ui.hint = match (h, &st.info.misc) {
         (Some(Hit::Value(m) | Hit::Step(m, _)), Some(v)) => format!("{}: {}", m.label(), value_text(m, v.get(m))),
         (Some(Hit::ArpDir(i)), _) => format!("Arpeggio direction: {}", value_text(M::ArpDir, f32::from(i))),
@@ -1239,6 +1296,20 @@ unsafe fn misc_button(hwnd: HWND, w: &mut Win, x: f32, y: f32, b: Btn) -> bool {
     let scale = w.scale;
     let mut st = w.state.borrow_mut();
     let Some(vals) = st.info.misc else { return false };
+    // Greyed-out controls (and setting the root note from a key where it does nothing) only say so.
+    let off = match (b, h) {
+        (Btn::Right, Hit::Key(_)) if !vals.tuned => Some("Root note"),
+        (Btn::Right, Hit::Key(_)) => None,
+        _ => mp::off_name(h, &vals),
+    };
+    if let Some(name) = off {
+        if b != Btn::Middle {
+            st.events.push(FrameEvent::NotAvailable(name));
+            drop(st);
+            os_clap::wake();
+        }
+        return true;
+    }
     let screen = || {
         let mut p = POINT { x: (x * scale) as i32, y: (y * scale) as i32 };
         unsafe { ClientToScreen(hwnd, &mut p) };
@@ -1338,6 +1409,9 @@ unsafe fn misc_wheel(hwnd: HWND, w: &mut Win, x: f32, y: f32, notches: f32) -> b
     use crate::misc_page::{self as mp, Hit};
     let Some(h) = misc_hit(&w.state.borrow(), x, y) else { return false };
     let mut st = w.state.borrow_mut();
+    if st.info.misc.is_some_and(|v| mp::off_name(h, &v).is_some()) {
+        return true;
+    }
     match h {
         Hit::Value(m) | Hit::Step(m, _) => {
             let Some(v) = st.info.misc.map(|vals| vals.get(m)) else { return false };
@@ -1504,7 +1578,7 @@ mod tests {
 
     fn state(strip: bool, target: &str) -> State {
         let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, misc: Some(Default::default()) };
-        State { info, strip, pages: vec![PageIcon::Plugin], page: 0, misc: false, hint: String::new(), preset: None, misc_ui: Default::default(), editor: (480.0, 270.0), events: Vec::new(), drag: None, moving: None, detached: false, clip: None, clip_key: None }
+        State { info, strip, pages: vec![PageIcon::Plugin], page: 0, misc: false, hint: String::new(), off_hint: None, preset: None, misc_ui: Default::default(), editor: (480.0, 270.0), events: Vec::new(), drag: None, moving: None, detached: false, clip: None, clip_key: None }
     }
 
     #[test]
@@ -1532,12 +1606,47 @@ mod tests {
     fn frame_shots() {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
-        for (name, strip) in [("frame_strip.png", true), ("frame_bare.png", false)] {
-            let st = state(strip, "Master");
+        let misc = |tuned: bool| {
+            let mut st = state(true, "Insert 1");
+            st.misc = true;
+            st.editor = (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H);
+            st.info.misc = Some(crate::misc_page::MiscVals { tuned, ..Default::default() });
+            st
+        };
+        let effect = || {
+            let mut st = state(true, "Insert 1");
+            st.info.misc = None;
+            st
+        };
+        for (name, st) in [
+            ("frame_strip.png", state(true, "Master")),
+            ("frame_bare.png", state(false, "Master")),
+            ("frame_effect.png", effect()),
+            ("frame_misc.png", misc(true)),
+            ("frame_misc_plugin.png", misc(false)),
+        ] {
             let (w, h) = st.size();
             let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
             paint(&mut c, &st);
             c.pixmap.save_png(dir.join(name)).unwrap();
         }
+    }
+
+    /// Strip controls that do nothing yet are greyed out: RANGE / TRACK, and ON / PAN / VOL / PITCH of an effect.
+    #[test]
+    fn dead_strip_controls_are_off() {
+        let st = state(true, "Master");
+        let (w, _) = st.size();
+        let dx = w - STRIP_RIGHT;
+        assert_eq!(part_at(&st, 383.0 + dx, 47.0), Some(Part::Knob(0)), "PAN works");
+        assert_eq!(part_at(&st, 417.0 + dx, 47.0), Some(Part::Knob(1)), "VOL works");
+        assert_eq!(part_at(&st, 349.0 + dx, 47.0), Some(Part::On));
+        assert_eq!(part_at(&st, 455.0 + dx, 47.0), Some(Part::Knob(2)), "PITCH works");
+        assert_eq!(part_at(&st, 485.0 + dx, 47.0), Some(Part::Off("Pitch range")));
+        assert_eq!(part_at(&st, 537.0 + dx, 47.0), Some(Part::Off("Mixer track number")));
+        let mut fx = state(true, "Master");
+        fx.info.misc = None;
+        assert_eq!(part_at(&fx, 383.0 + dx, 47.0), Some(Part::Off("Panning")));
+        assert_eq!(part_at(&fx, 349.0 + dx, 47.0), Some(Part::Off("Effect on / off")));
     }
 }

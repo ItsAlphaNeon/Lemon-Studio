@@ -103,14 +103,19 @@ pub fn panel_rect(screen: (f32, f32)) -> Rect {
 }
 
 pub fn paint(c: &mut Canvas, t: &os_theme::Palette, l: &Loading) {
+    panel(c, t, "Loading project", &format!("{}   {}", l.status(), l.label), l.progress());
+}
+
+/// The progress panel with a title, a status line and a bar at `progress` (0..1); an export shows it too.
+pub fn panel(c: &mut Canvas, t: &os_theme::Palette, title: &str, status: &str, progress: f32) {
     let r = panel_rect(c.size());
     kit::popup(c, t, r);
     let x = r.x + 16.0;
-    c.text(Font::new(17), x, r.y + 10.0, t.text, "Loading project");
-    c.text_clip(Font::new(14), x, r.y + 35.0, r.w - 32.0, t.text_dim, &format!("{}   {}", l.status(), l.label));
+    c.text(Font::new(17), x, r.y + 10.0, t.text, title);
+    c.text_clip(Font::new(14), x, r.y + 35.0, r.w - 32.0, t.text_dim, status);
     let track = Rect::new(x, r.y + 64.0, r.w - 32.0, 12.0);
     kit::sunken(c, t, track, t.sunken_dark);
-    let w = ((track.w - 4.0) * l.progress().clamp(0.0, 1.0)).round();
+    let w = ((track.w - 4.0) * progress.clamp(0.0, 1.0)).round();
     if w > 0.0 {
         c.fill_rect(Rect::new(track.x + 2.0, track.y + 2.0, w, track.h - 4.0), t.accent);
     }

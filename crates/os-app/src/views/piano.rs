@@ -67,11 +67,15 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
     let channel = s.project.channels.get(s.selected_channel);
     let name = channel.and_then(|c| c.name.clone()).unwrap_or_else(|| "(none)".into());
-    let title = format!("Piano roll - {name}  \u{203a}");
+    let title = format!("Piano roll - {name}  ");
     window_body(ui, r);
     let outer = r;
     let floating = !s.wins[Win::PianoRoll.slot().unwrap_or(0)].maxed && r.h >= 2.0 * crate::app::TITLE_H;
     let (r, _) = super::framed(ui, s, Win::PianoRoll, r, &title, 365.0, true);
+    // The title's › (channel menu): not available yet, greyed out.
+    let ax = r.x + 365.0 + ui.c.text_width(Font::new(17), &title);
+    ui.c.text(Font::new(17), ax, r.y + 1.0, t.text_faint, "\u{203a}");
+    ui.off(Rect::new(ax - 3.0, r.y + 2.0, 13.0, 19.0), "Piano roll channel menu");
     let shift = if floating { -4.0 } else { 0.0 };
     toolbar(ui, r, shift, s.piano.tool);
     if r.h < 2.0 * crate::app::TITLE_H {
@@ -95,6 +99,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let ink = green.shade(-0.3);
     ui.c.polyline(&[(tab.right() - 15.0, tab.y + 16.0), (tab.right() - 10.0, tab.y + 16.0), (tab.right() - 7.0, tab.y + 7.0), (tab.right() - 3.0, tab.y + 7.0)], 1.6, ink);
     ui.c.fill_polygon(&[(tab.right() - 4.0, tab.bottom() - 18.0), (tab.right() - 4.0, tab.bottom() - 5.0), (tab.right() - 17.0, tab.bottom() - 5.0)], ink);
+    // Note colours: not available yet, greyed out.
+    ui.off(tab, "Note color");
+    ui.veil(tab, t.window_title);
 
     overview(ui, s, &l, &g, notes, ch);
     ruler(ui, &l, &g, range, s.piano.marker);
@@ -194,8 +201,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.c.fill_rect(Rect::new(l.vscroll.x, l.ruler.y, l.vscroll.w, l.grid.bottom() - l.ruler.y), t.scrollbar);
     let up = Rect::new(l.vscroll.x, l.ruler.y, l.vscroll.w, 19.0);
     let down = Rect::new(l.vscroll.x, l.grid.bottom() - 19.0, l.vscroll.w, 19.0);
-    arrow_button(ui, up, 2);
-    arrow_button(ui, down, 3);
+    arrow_button(ui, up, 2, Scroll::PianoY);
+    arrow_button(ui, down, 3, Scroll::PianoY);
     let track = Rect::new(l.vscroll.x + 1.0, up.bottom(), l.vscroll.w - 2.0, (down.y - up.bottom()).max(0.0));
     super::scrollbar(ui, track, true, s.piano.scroll_y, l.grid.h, (TOP_KEY + 1) as f32 * ROW, Scroll::PianoY);
 
@@ -207,55 +214,61 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 }
 
 /// Scroll arrow button (§1a): raised face with a 1 px dark rim and a chevron pointing `dir`
-/// (0 left, 1 right, 2 up, 3 down; 4 = a dot).
-fn arrow_button(ui: &mut Ui, b: Rect, dir: u8) {
+/// (0 left, 1 right, 2 up, 3 down); a click steps `target` that way.
+fn arrow_button(ui: &mut Ui, b: Rect, dir: u8, target: Scroll) {
     use os_ui::kit::{self, Dir};
-    let st = kit::State::hover(ui.hovering(b));
-    let d = match dir {
-        0 => Dir::Left,
-        1 => Dir::Right,
-        2 => Dir::Up,
-        3 => Dir::Down,
-        _ => {
-            kit::flat_button(ui.c, ui.t, b, st);
-            let (cx, cy) = ((b.x + b.w / 2.0).round(), (b.y + b.h / 2.0).round());
-            ui.c.fill_rect(Rect::new(cx - 2.0, cy - 2.0, 3.0, 3.0), ui.t.s(0x000000));
-            return;
-        }
+    let (d, step) = match dir {
+        0 => (Dir::Left, -1),
+        1 => (Dir::Right, 1),
+        2 => (Dir::Up, -1),
+        _ => (Dir::Down, 1),
     };
+    let act = Action::ScrollStep(target, step);
+    let hov = ui.hit(b, act.clone(), "Scroll");
+    let st = kit::State::new(hov, ui.down(b, &act), false);
     kit::arrow_button(ui.c, ui.t, b, d, st);
 }
 
-/// Toolbar icons in the title bar (§2). Only the draw tool exists so far; it is always active.
-/// `shift` moves the icons (the floating window draws them 4 px further left, §1a).
+/// The square button with a dot above the vertical scroll bar (§1a): not available yet, greyed out.
+fn corner_button(ui: &mut Ui, b: Rect) {
+    use os_ui::kit;
+    ui.off(b, "Piano roll view options");
+    kit::flat_button(ui.c, ui.t, b, kit::State::NORMAL.with_disabled(true));
+    let (cx, cy) = ((b.x + b.w / 2.0).round(), (b.y + b.h / 2.0).round());
+    ui.c.fill_rect(Rect::new(cx - 2.0, cy - 2.0, 3.0, 3.0), ui.t.s(0x000000));
+    ui.veil(b, ui.t.scrollbar);
+}
+
+/// Toolbar icons in the title bar (§2): the editing tools and undo; the menus and helpers that are not available yet
+/// are greyed out. `shift` moves the icons (the floating window draws them 4 px further left, §1a).
 fn toolbar(ui: &mut Ui, r: Rect, shift: f32, active: Tool) {
     let t = ui.t;
     let ox = r.x - 209.0 + shift;
-    let items: [(f32, Icon, &'static str, Option<Tool>); 15] = [
+    let items: [(f32, Icon, &'static str, Option<Action>); 15] = [
         (222.0, Icon::ArrowRight, "Piano roll options", None),
-        (242.0, Icon::MidiControl, "Tools", None),
-        (263.0, Icon::Magnet, "Snap to grid: step", None),
+        (242.0, Icon::MidiControl, "Piano roll tools", None),
+        (263.0, Icon::Magnet, "Piano roll snap", None),
         (283.0, Icon::Note, "Note properties", None),
         (305.0, Icon::Blend, "Scale and chord helpers", None),
-        (327.0, Icon::Undo, "Undo (Ctrl+Z)", None),
-        (360.0, Icon::Pencil, "Draw (P)", Some(Tool::Draw)),
-        (380.0, Icon::Brush, "Paint (B): drag to paint notes along the row", Some(Tool::Paint)),
+        (327.0, Icon::Undo, "Undo (Ctrl+Z)", Some(Action::PianoUndo)),
+        (360.0, Icon::Pencil, "Draw (P)", Some(Action::PianoTool(Tool::Draw))),
+        (380.0, Icon::Brush, "Paint (B): drag to paint notes along the row", Some(Action::PianoTool(Tool::Paint))),
         (402.0, Icon::Plus, "Paint and add", None),
-        (422.0, Icon::Delete, "Delete (D): click or swipe to delete notes", Some(Tool::Delete)),
-        (442.0, Icon::Mute, "Mute (T): click or swipe to mute / unmute notes", Some(Tool::Mute)),
-        (463.0, Icon::Slice, "Slice (C): drag a line to cut notes", Some(Tool::Slice)),
-        (485.0, Icon::Select, "Select (E): drag a box to select notes, Ctrl adds", Some(Tool::Select)),
-        (507.0, Icon::Zoom, "Zoom (Z): drag a box to zoom, right-click zooms out / back", Some(Tool::Zoom)),
-        (527.0, Icon::Speaker, "Playback (Y): drag to hear the notes under the line", Some(Tool::Playback)),
+        (422.0, Icon::Delete, "Delete (D): click or swipe to delete notes", Some(Action::PianoTool(Tool::Delete))),
+        (442.0, Icon::Mute, "Mute (T): click or swipe to mute / unmute notes", Some(Action::PianoTool(Tool::Mute))),
+        (463.0, Icon::Slice, "Slice (C): drag a line to cut notes", Some(Action::PianoTool(Tool::Slice))),
+        (485.0, Icon::Select, "Select (E): drag a box to select notes, Ctrl adds", Some(Action::PianoTool(Tool::Select))),
+        (507.0, Icon::Zoom, "Zoom (Z): drag a box to zoom, right-click zooms out / back", Some(Action::PianoTool(Tool::Zoom))),
+        (527.0, Icon::Speaker, "Playback (Y): drag to hear the notes under the line", Some(Action::PianoTool(Tool::Playback))),
     ];
-    for (x, icon, hint, tool) in items {
+    for (x, icon, hint, action) in items {
         let b = Rect::new(ox + x - 9.0, r.y + 2.0, 18.0, 18.0);
-        let on = tool.is_some() && tool == Some(active);
-        let action = match tool {
-            Some(t) => Action::PianoTool(t),
-            None if icon == Icon::Undo => Action::PianoUndo,
-            None => Action::Placeholder("piano roll tool"),
+        let Some(action) = action else {
+            ui.off(b, hint);
+            icons::draw(ui.c, icon, b, t.text_faint);
+            continue;
         };
+        let on = action == Action::PianoTool(active);
         let hov = ui.hit(b, action, hint);
         let c = if on { t.pill } else if hov { ui.t.tx(0xffffff) } else { t.glyph };
         icons::draw(ui.c, icon, b, c);
@@ -272,9 +285,9 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     let len = piano::pattern_length(s, notes) as f32;
     let span = len.max(g.scroll_x + view) + view / 2.0;
     // Scroll arrows at both ends (§1a); the bar runs between them.
-    arrow_button(ui, Rect::new(o.x, o.y, 19.0, o.h), 0);
-    arrow_button(ui, Rect::new(l.grid.right() - 19.0, o.y, 19.0, o.h), 1);
-    arrow_button(ui, Rect::new(l.vscroll.x, o.y, l.vscroll.w, o.h), 4);
+    arrow_button(ui, Rect::new(o.x, o.y, 19.0, o.h), 0, Scroll::PianoX);
+    arrow_button(ui, Rect::new(l.grid.right() - 19.0, o.y, 19.0, o.h), 1, Scroll::PianoX);
+    corner_button(ui, Rect::new(l.vscroll.x, o.y, l.vscroll.w, o.h));
     let track = Rect::new(o.x + 19.0, o.y, (l.grid.right() - o.x - 38.0).max(0.0), o.h);
     super::scrollbar(ui, track, false, g.scroll_x * g.ppt, l.grid.w, span * g.ppt, Scroll::PianoX);
     // Mini-map: one dash per note of the channel.
@@ -448,11 +461,12 @@ fn grid_rows(ui: &mut Ui, l: &Layout, g: &Geom, clip: Rect, selecting: bool) {
 
 fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Option<u16>, sel: &[usize]) {
     let t = ui.t;
-    // Splitter with a grip (§1).
+    // Splitter with a grip (§1). Resizing the event panel is not available yet: the grip is greyed out.
     ui.c.fill_rect(l.splitter, t.window_title);
+    ui.off(l.splitter, "Event panel resizing");
     let gx = l.grid.x + l.grid.w / 2.0 - 8.0;
     for i in 0..5 {
-        ui.c.fill_rect(Rect::new(gx + i as f32 * 3.0, l.splitter.y + 4.0, 1.0, 1.0), t.text_dim);
+        ui.c.fill_rect(Rect::new(gx + i as f32 * 3.0, l.splitter.y + 4.0, 1.0, 1.0), t.text_faint);
     }
     // Label column.
     ui.c.fill_rect(l.label, t.window_title);

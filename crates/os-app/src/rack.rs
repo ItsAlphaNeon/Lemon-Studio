@@ -220,7 +220,7 @@ pub struct RackUi {
     pub clipboard: Option<Vec<Note>>,
     /// Copied knob value (knob menu, §19).
     pub value_clip: Option<f32>,
-    /// Menu checkboxes that are stored but have no effect yet.
+    /// Menu checkboxes that have no effect yet (greyed out): their default ticks.
     pub opts: BTreeSet<&'static str>,
     /// Channels waiting for the delete confirmation's Ok.
     pub pending_delete: Option<Vec<usize>>,
@@ -938,7 +938,6 @@ pub enum RCmd {
     UnzipAll,
     AutoResize(AutoResize),
     ResizeNow,
-    Opt(&'static str),
     NameWidth(u32),
     SizeToFit,
     AlignLeft(bool),
@@ -950,8 +949,9 @@ fn it(label: impl Into<std::borrow::Cow<'static, str>>, c: RCmd) -> PItem {
     PItem::new(label, Cmd::Rack(c))
 }
 
+/// A menu option that is not available yet: greyed out, showing its default tick.
 fn opt(s: &State, label: &'static str) -> PItem {
-    it(label, RCmd::Opt(label)).mark(Mark::Check(s.rack.opts.contains(label)))
+    PItem::not_yet(label).mark(Mark::Check(s.rack.opts.contains(label)))
 }
 
 /// Options menu (title ▸, §17).
@@ -1199,7 +1199,7 @@ pub fn loop_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::head("Loop type"),
         it("Loop step channels", RCmd::LoopType(0)).mark(Mark::Radio(t == 0)),
         it("Loop all channels", RCmd::LoopType(1)).mark(Mark::Radio(t == 1)),
-        it("Advanced looping", RCmd::LoopType(2)).mark(Mark::Radio(t == 2)),
+        PItem::not_yet("Advanced looping").mark(Mark::Radio(t == 2)),
         PItem::head("Burn to pattern"),
         burn("Burn selected channels", false),
         burn("Burn all looping channels", true),
@@ -1456,12 +1456,6 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             }
             autosize(s);
             s.rack.auto_resize = keep;
-            None
-        }
-        RCmd::Opt(name) => {
-            if !s.rack.opts.remove(name) {
-                s.rack.opts.insert(name);
-            }
             None
         }
         RCmd::NameWidth(p) => {
