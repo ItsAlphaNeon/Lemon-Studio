@@ -65,10 +65,9 @@ impl Default for Shared {
 
 /// Bit depth of a sample file's data (WAV `fmt `, FLAC STREAMINFO), | 0x100 for floating point; 16 when unknown.
 pub fn source_bits(path: &Path) -> u32 {
-    let Ok(data) = std::fs::read(path).map(|mut d| {
-        d.truncate(1 << 16);
-        d
-    }) else {
+    // The header is enough: a long sample is not read twice.
+    let mut data = Vec::new();
+    let Ok(_) = std::fs::File::open(path).and_then(|f| std::io::Read::read_to_end(&mut std::io::Read::take(f, 1 << 16), &mut data)) else {
         return 16;
     };
     if data.len() > 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" {
@@ -93,17 +92,18 @@ pub fn source_bits(path: &Path) -> u32 {
 }
 
 impl Shared {
-    /// Loads a sample file and makes it the current one (UI / initialize thread).
+    /// Loads a sample file and makes it the current one (UI / initialize thread). A decode the host already holds
+    /// (it decodes a project's samples ahead, spec: ui/project-loading.md) is taken as it is.
     pub fn load(&self, path: &str, params: &SamplerParams) -> Result<(), String> {
-        let s = os_engine::sample::load(Path::new(path)).map_err(|e| e.to_string())?;
+        let s = os_engine::sample::load_shared(Path::new(path)).map_err(|e| e.to_string())?;
         self.bits.store(source_bits(Path::new(path)), Ordering::Release);
         self.set_raw(Some(s), path, params);
         Ok(())
     }
 
     /// Replaces the loaded sample (`path` is what the state remembers).
-    pub fn set_raw(&self, s: Option<Sample>, path: &str, params: &SamplerParams) {
-        *self.raw.lock().unwrap() = s.map(Arc::new);
+    pub fn set_raw(&self, s: Option<Arc<Sample>>, path: &str, params: &SamplerParams) {
+        *self.raw.lock().unwrap() = s;
         *self.loaded_path.lock().unwrap() = path.to_string();
         if let Ok(mut p) = params.sample_path.write() {
             *p = path.to_string();

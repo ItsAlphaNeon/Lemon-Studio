@@ -4,6 +4,7 @@ mod app;
 mod browser;
 mod icons;
 mod knobs;
+mod loading;
 mod logo;
 mod meters;
 mod mixer;
@@ -300,6 +301,17 @@ impl ApplicationHandler for Shell {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(window) = self.window.clone() else { return };
         let scale = window.scale_factor() as f32;
+        // A project is loading (spec: ui/project-loading.md §2): presses, wheel turns and drops wait until it is done;
+        // releases still go through so nothing stays held.
+        let press = match &event {
+            WindowEvent::MouseInput { state, .. } => *state == ElementState::Pressed,
+            WindowEvent::KeyboardInput { event, .. } => event.state == ElementState::Pressed,
+            WindowEvent::MouseWheel { .. } | WindowEvent::DroppedFile(_) => true,
+            _ => false,
+        };
+        if press && self.app.loading() {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::ModifiersChanged(m) => {

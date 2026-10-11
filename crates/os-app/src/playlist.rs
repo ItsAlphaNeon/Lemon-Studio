@@ -384,7 +384,8 @@ pub struct PlaylistState {
     pub last_header: Option<(u16, std::time::Instant)>,
     /// Waveform cache by sample path (`None` = could not be loaded).
     pub waves: RefCell<HashMap<String, Option<Rc<Wave>>>>,
-    library: RefCell<os_engine::SampleLibrary>,
+    /// A project is loading and its files decode off the UI thread: waveforms wait (spec: ui/project-loading.md).
+    pub wave_wait: bool,
     undo: Vec<Snapshot>,
 }
 
@@ -409,7 +410,7 @@ impl Default for PlaylistState {
             hover_clip: None,
             last_header: None,
             waves: RefCell::new(HashMap::new()),
-            library: RefCell::new(os_engine::SampleLibrary::new(os_engine::SampleLibrary::default_factory_dir())),
+            wave_wait: false,
             undo: Vec::new(),
         }
     }
@@ -427,7 +428,12 @@ impl PlaylistState {
         if let Some(w) = self.waves.borrow().get(path) {
             return w.clone();
         }
-        let w = self.library.borrow_mut().get(path).map(|s| {
+        if self.wave_wait {
+            return None;
+        }
+        // The decode is shared with the sampler playing the file (decoded once, while the project loaded).
+        let file = crate::plugins::resolve_sample(path);
+        let w = os_engine::sample::load_shared(std::path::Path::new(&file)).ok().map(|s| {
             let per = 64usize;
             let peaks = s
                 .left

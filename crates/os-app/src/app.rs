@@ -601,6 +601,8 @@ pub struct App {
     sampler_failed: Vec<usize>,
     /// Mixer slots (`plugins::fx_key`) whose Open Parametric EQ 2 could not start (not retried).
     fx_failed: Vec<usize>,
+    /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
+    loading: Option<crate::loading::Loading>,
 }
 
 /// Window-level requests the shell must carry out after an event.
@@ -709,6 +711,7 @@ impl App {
             piano_panel: None,
             sampler_failed: Vec::new(),
             fx_failed: Vec::new(),
+            loading: None,
         };
         if let Some(p) = path {
             app.open(p);
@@ -758,6 +761,9 @@ impl App {
                 s.playlist.reset();
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
+                self.loading = Some(crate::loading::Loading::start(&self.state.project));
+                self.state.playlist.wave_wait = true;
+                self.invalidate();
             }
             Err(e) => self.state.message = Some(format!("Could not open {}: {e}", path.display())),
         }
@@ -885,6 +891,8 @@ impl App {
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
     fn reset_hosted(&mut self) {
         self.plugins.clear();
+        self.loading = None;
+        self.state.playlist.wave_wait = false;
         self.state.hosted_rows.clear();
         self.sampler_failed.clear();
         self.fx_failed.clear();
@@ -895,15 +903,25 @@ impl App {
     /// Every sampler channel is played and edited by Open Sampler (owner, 2026-10-10; spec: plugins/open-sampler.md §7):
     /// a channel without an instance gets one, started from the channel's sample and envelopes. Without Open Sampler
     /// (plugin not found) sampler channels keep the engine's own sample playback.
-    fn sync_samplers(&mut self) {
-        let Some(index) = self.plugins.index_of(crate::plugins::OPEN_SAMPLER) else { return };
+    /// With a `deadline` it stops after the instance that passes it; returns whether every sampler row is done.
+    fn sync_samplers(&mut self, deadline: Option<std::time::Instant>) -> bool {
+        let Some(index) = self.plugins.index_of(crate::plugins::OPEN_SAMPLER) else { return true };
         let mut added = false;
+        let mut done = true;
         for row in 0..self.state.project.channels.len() {
             let ch = &self.state.project.channels[row];
             if !ch.kind.is_sampler() || self.state.hosted_rows.contains(&row) || self.sampler_failed.contains(&row) {
                 continue;
             }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                done = false;
+                break;
+            }
             let st = crate::plugins::sampler_state(ch);
+            if let Some(l) = &mut self.loading {
+                l.hosted += 1;
+                l.label = ch.name.clone().unwrap_or_default();
+            }
             match self.plugins.create_with(row, index, Some(&st)) {
                 Ok(_) => {
                     self.state.hosted_rows.push(row);
@@ -919,6 +937,28 @@ impl App {
             self.transport.set_instruments(self.plugins.instruments());
             self.state.piano.dirty = true;
         }
+        done
+    }
+
+    /// Project loading (spec: ui/project-loading.md): samples decode on worker threads first, then the sampler
+    /// instances start a few per tick (`loading::HOST_BUDGET`) so the progress panel keeps moving. Without a loading
+    /// project, new sampler rows are hosted at once.
+    fn loading_tick(&mut self) {
+        let Some(decoded) = self.loading.as_mut().map(|l| l.decode_done()) else {
+            self.sync_samplers(None);
+            return;
+        };
+        if decoded && self.sync_samplers(Some(std::time::Instant::now() + crate::loading::HOST_BUDGET)) {
+            self.loading = None;
+            self.state.playlist.wave_wait = false;
+            return self.invalidate();
+        }
+        self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
+    }
+
+    /// A project is loading: the window shows the progress and takes no input (spec: ui/project-loading.md §2).
+    pub fn loading(&self) -> bool {
+        self.loading.is_some()
     }
 
     /// Mixer slots that hold the project file's parametric EQ are played and edited by Open Parametric EQ 2, started
@@ -952,7 +992,7 @@ impl App {
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     fn plugin_tick(&mut self) {
-        self.sync_samplers();
+        self.loading_tick();
         self.mixer_tick();
         self.sync_effects();
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
@@ -1163,7 +1203,7 @@ impl App {
 
     /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
-        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active())
+        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading.is_some()
     }
 
     /// Periodic housekeeping; returns whether a repaint is needed.
@@ -1232,6 +1272,9 @@ impl App {
             (Some(g), Some(p)) => Some(Rect::new(g.x - 73.0, g.y - 41.0, g.w + 96.0, p.bottom() - g.y + 41.0)),
             _ => None,
         };
+        if let Some(l) = &self.loading {
+            crate::loading::paint(canvas, &self.theme.colors, l);
+        }
     }
 
     /// Repaint the piano roll body (note edits change the grid, overview and velocity panel).
@@ -4338,6 +4381,42 @@ mod tests {
         app.toggle_channel_window(row);
         assert!(!app.state.shown(Win::Plugin), "no information window");
         assert_eq!(app.state.pending_open, Some(row), "Open Sampler's window opens");
+    }
+
+    /// An opened project decodes its samples on worker threads, then starts its samplers behind the progress panel;
+    /// loading ends with every sampler channel hosted on the shared decode (spec: ui/project-loading.md).
+    #[test]
+    fn opened_projects_load_their_samplers_first() {
+        let flp = std::env::temp_dir().join(format!("os_loading_{}.flp", std::process::id()));
+        let wav = std::env::temp_dir().join(format!("os_loading_{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.25; 96000]).unwrap();
+        let wav = wav.to_string_lossy().into_owned();
+        let mut app = App::new(None);
+        for c in app.state.project.channels.iter_mut().filter(|c| c.kind.is_sampler()) {
+            c.sample_path = Some(wav.clone());
+        }
+        let rows: Vec<usize> = (0..app.state.project.channels.len()).filter(|&r| app.state.project.channels[r].kind.is_sampler()).collect();
+        assert!(rows.len() > 1);
+        app.save_to(flp.clone());
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        app.open(flp.clone());
+        let _ = std::fs::remove_file(&flp);
+        assert!(app.loading(), "opening starts loading");
+        assert!(app.animating(), "the panel keeps ticking");
+        let mut canvas = Canvas::new(1920, 1080, 1.0).unwrap();
+        app.paint(&mut canvas, None);
+        let t0 = std::time::Instant::now();
+        while app.loading() && t0.elapsed() < std::time::Duration::from_secs(20) {
+            app.plugin_tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!app.loading(), "loading ends");
+        for &r in &rows {
+            assert!(app.state.hosted_rows.contains(&r), "row {r} has its Open Sampler");
+            assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(wav.as_str()));
+        }
+        let _ = std::fs::remove_file(&wav);
     }
 
     #[test]
