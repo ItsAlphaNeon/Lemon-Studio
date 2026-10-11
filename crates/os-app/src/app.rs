@@ -3879,7 +3879,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
         layer_children: Vec::new(),
         envelopes: Default::default(),
         rack: Default::default(),
-        misc: Default::default(),
+        misc: Default::default(), sound: Default::default(),
     }
 }
 

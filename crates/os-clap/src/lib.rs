@@ -1294,7 +1294,7 @@ mod tests {
         let auto_ch = Channel {
             index: 0, kind: ChannelKind::Automation, name: None, plugin: None, color: None, enabled: true, volume: 0.78125,
             pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None, layer_children: vec![], envelopes: Default::default(),
-            rack: Default::default(), plugin_state: None, misc: Default::default(),
+            rack: Default::default(), plugin_state: None, misc: Default::default(), sound: Default::default(),
         };
         // Main level from 0 (-18 dB) to 1 (+18 dB) over 4 beats (120 BPM: 2 s).
         let auto = Automation {
@@ -1416,7 +1416,7 @@ mod tests {
         let ch = os_model::Channel {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
         let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
         let project = os_model::Project {
@@ -1449,7 +1449,7 @@ mod tests {
         let ch = os_model::Channel {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
         let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
         let project = os_model::Project {
@@ -1490,7 +1490,7 @@ mod tests {
         let ch = os_model::Channel {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut lib = os_engine::SampleLibrary::default();
@@ -1542,7 +1542,7 @@ mod tests {
         let ch = os_model::Channel {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut lib = os_engine::SampleLibrary::default();
@@ -1672,7 +1672,7 @@ mod tests {
         let ch = os_model::Channel {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc,
+            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc, sound: Default::default(),
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut slib = os_engine::SampleLibrary::default();

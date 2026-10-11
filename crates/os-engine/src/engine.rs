@@ -1583,7 +1583,7 @@ mod tests {
             mixer_track: 0,
             sample_path: None, // plays the built-in tone
             layer_children: vec![],
-            envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
+            envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         }
     }
 

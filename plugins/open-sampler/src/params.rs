@@ -316,6 +316,7 @@ impl EnvParams {
             attack_tension: (self.att_t.live() * 128.0).round() as i32,
             decay_tension: (self.dec_t.live() * 128.0).round() as i32,
             release_tension: (self.rel_t.live() * 128.0).round() as i32,
+            ..Default::default()
         };
         envelope::Params::new(&rec)
     }

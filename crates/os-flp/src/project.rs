@@ -9,7 +9,8 @@
 use std::collections::BTreeMap;
 
 use os_model::{
-    Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelRack, Clip, ClipSource, ControlPoint, Envelope, MixerTrack,
+    Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
+    Envelope, MixerTrack,
     Note, Pattern, PlaylistTrack, Project, ProjectInfo, Rgb, SlotPlugin, TimeMarker, CLIP_RECORD_LEN,
 };
 
@@ -50,6 +51,16 @@ mod id {
     pub const CH_GROUP: u8 = 145;
     /// Project-level rack settings (spec: flp/events/project-info.md).
     pub const SWING: u8 = 11;
+    /// Time signature and "play truncated notes" (spec: flp/engine-events.md "Project").
+    pub const TIME_NUM: u8 = 17;
+    pub const TIME_DEN: u8 = 18;
+    pub const PLAY_TRUNCATED: u8 = 30;
+    /// Channel settings the engine reads (spec: flp/engine-events.md "A channel").
+    pub const CH_SWING_SHARE: u8 = 97;
+    pub const CH_ROOT: u8 = 135;
+    pub const CH_SAMPLER_FLAGS: u8 = 143;
+    pub const CH_SAMPLE_SETTINGS: u8 = 215;
+    pub const CH_ADJUST: u8 = 229;
     pub const GROUP_NAME: u8 = 231;
     pub const CURRENT_GROUP: u8 = 146;
 
@@ -277,6 +288,10 @@ struct Layout {
     /// Automation links (event 227 with a zero first field), in the prelude.
     links: Vec<usize>,
     swing: Option<usize>,
+    /// Time signature and "play truncated notes" (spec: flp/engine-events.md "Project").
+    time_num: Option<usize>,
+    time_den: Option<usize>,
+    truncated: Option<usize>,
     groups: Vec<usize>,
     current_group: Option<usize>,
 }
@@ -411,6 +426,9 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 id::URL => l.url = Some(i),
                 id::CURRENT_PATTERN => l.current_pattern = Some(i),
                 id::SWING if l.swing.is_none() => l.swing = Some(i),
+                id::TIME_NUM if l.time_num.is_none() => l.time_num = Some(i),
+                id::TIME_DEN if l.time_den.is_none() => l.time_den = Some(i),
+                id::PLAY_TRUNCATED if l.truncated.is_none() => l.truncated = Some(i),
                 id::GROUP_NAME => l.groups.push(i),
                 id::CURRENT_GROUP => l.current_group = Some(i),
                 _ => {}
@@ -551,6 +569,8 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         swing: l.swing.map(|i| int(&events[i]) as u8),
         groups: l.groups.iter().map(|&i| events[i].data().map(|d| decode_text(d, enc)).unwrap_or_default()).collect(),
         current_group: l.current_group.map(|i| int(&events[i])).filter(|&v| v != u32::MAX),
+        time_signature: l.time_num.zip(l.time_den).map(|(n, d)| (int(&events[n]) as u16, int(&events[d]) as u16)).filter(|&(n, d)| n > 0 && d > 0),
+        play_truncated: l.truncated.map(|i| int(&events[i]) != 0),
         ..Default::default()
     };
 
@@ -662,8 +682,47 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
             zipped: loc.zipped.is_some_and(|i| int(&events[i]) != 0),
             group: loc.group.map_or(0, |i| int(&events[i])),
         },
-        misc: Default::default(),
+        misc: load_misc(block),
+        sound: load_sound(block, &i32_at),
     }
+}
+
+/// The Misc tab values the file stores outside the plugin state: level adjustments (event 229: pan offset,
+/// volume multiplier, -, mod X offset, mod Y offset), swing share (97, 0..=128) and root note (135)
+/// (spec: flp/engine-events.md "A channel", audio/voice-levels.md, audio/swing.md, audio/sampler.md).
+fn load_misc(block: &[Event]) -> ChannelMisc {
+    let find = |id: u8| block.iter().find(|e| e.id == id);
+    let mut m = ChannelMisc::default();
+    if let Some(d) = find(id::CH_ADJUST).and_then(Event::data).filter(|d| d.len() >= 20) {
+        let v = |i: usize| i32::from_le_bytes(d[4 * i..4 * i + 4].try_into().unwrap()) as f32;
+        m.levels = [v(0) / 6400.0, (v(1) - 12800.0) / 12800.0, v(3) / 256.0, v(4) / 256.0];
+    }
+    if let Some(e) = find(id::CH_SWING_SHARE) {
+        m.swing = int(e) as f32 / 128.0;
+    }
+    if let Some(e) = find(id::CH_ROOT) {
+        m.root = int(e).min(127) as u8;
+    }
+    m
+}
+
+/// Filter (event 219 ints 3..5), sampler flags (143), declick mode and stretch settings (215).
+fn load_sound(block: &[Event], levels: &dyn Fn(usize) -> Option<i32>) -> ChannelSound {
+    let find = |id: u8| block.iter().find(|e| e.id == id);
+    let mut s = ChannelSound::default();
+    s.cutoff = levels(12).unwrap_or(s.cutoff);
+    s.resonance = levels(16).unwrap_or(s.resonance);
+    s.filter_type = levels(20).unwrap_or(s.filter_type);
+    s.sampler_flags = find(id::CH_SAMPLER_FLAGS).map(int);
+    if let Some(d) = find(id::CH_SAMPLE_SETTINGS).and_then(Event::data) {
+        s.declick = d.get(83).copied().unwrap_or(0);
+        for (k, v) in s.stretch.iter_mut().enumerate() {
+            if let Some(b) = d.get(96 + 4 * k..100 + 4 * k) {
+                *v = u32::from_le_bytes(b.try_into().unwrap());
+            }
+        }
+    }
+    s
 }
 
 /// The five 68-byte envelope records of a channel (spec: audio/channel-envelopes.md); missing or short
@@ -685,6 +744,12 @@ fn decode_envelopes(block: &[Event]) -> [Envelope; 5] {
             attack_tension: v(14),
             decay_tension: v(15),
             release_tension: v(16),
+            flags: v(0),
+            lfo_delay: v(9),
+            lfo_attack: v(10),
+            lfo_amount: v(11),
+            lfo_speed: v(12),
+            lfo_shape: v(13),
         };
     }
     out
@@ -2531,7 +2596,7 @@ mod tests {
             mixer_track: track,
             sample_path: None,
             layer_children: vec![],
-            envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
+            envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         }
     }
 
@@ -2600,6 +2665,64 @@ mod tests {
         assert_eq!(again.patterns.iter().map(|p| p.number).collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(again.patterns[2].name.as_deref(), Some("Chorus"));
         assert_eq!(again.patterns[0].notes.len(), 2);
+    }
+
+    /// The events the engine reads beyond the editable settings (spec: flp/engine-events.md): time signature,
+    /// "play truncated notes", the channel's swing share, root note, sampler flags, declick and stretch settings,
+    /// level adjustments, filter, and the envelope records' flags and LFO.
+    #[test]
+    fn engine_settings_are_read() {
+        let mut file = create(&new_project()).unwrap();
+        {
+            let ev = events_of_mut(&mut file).unwrap();
+            let ch0 = ev.iter().position(|e| e.id == id::CH_START).unwrap();
+            let mut s215 = vec![0u8; 168];
+            s215[83] = 3;
+            for (k, v) in [1536u32, 25, 10000, 5].iter().enumerate() {
+                s215[96 + 4 * k..100 + 4 * k].copy_from_slice(&v.to_le_bytes());
+            }
+            let ints = |v: &[i32]| Value::var(v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>());
+            let env = [1, -1, 100, 20000, 20000, 30000, 50, 20000, 0, 2000, 3000, -64, 20000, 2, 0, 0, -101];
+            let mut add = vec![
+                Event::new(id::CH_SWING_SHARE, Value::U16(64)),
+                Event::new(id::CH_ROOT, Value::U32(48)),
+                Event::new(id::CH_SAMPLER_FLAGS, Value::U32(10)),
+                Event::new(id::CH_SAMPLE_SETTINGS, Value::var(s215)),
+                Event::new(id::CH_ADJUST, ints(&[-3200, 25600, 0, 128, -256])),
+            ];
+            add.extend((0..5).map(|_| Event::new(id::CH_ENVELOPE, ints(&env))));
+            // Replace whatever envelope records the file has with five of these in the first channel.
+            ev.retain(|e| e.id != id::CH_ENVELOPE);
+            let at = ch0 + 1;
+            for (k, e) in add.into_iter().enumerate() {
+                ev.insert(at + k, e);
+            }
+            let levels = ev.iter_mut().skip(ch0).find(|e| e.id == id::CH_LEVELS);
+            match levels {
+                Some(e) => {
+                    let mut d = e.data().unwrap().to_vec();
+                    d[12..24].copy_from_slice(&[128i32, 64, 5].iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>());
+                    *e = Event::new(id::CH_LEVELS, Value::var(d));
+                }
+                None => ev.insert(at, Event::new(id::CH_LEVELS, ints(&[6400, 10000, 0, 128, 64, 5]))),
+            }
+            ev.insert(0, Event::new(id::PLAY_TRUNCATED, Value::U8(1)));
+            ev.insert(0, Event::new(id::TIME_DEN, Value::U8(8)));
+            ev.insert(0, Event::new(id::TIME_NUM, Value::U8(6)));
+        }
+        let p = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!((p.time_signature, p.play_truncated), (Some((6, 8)), Some(true)));
+        let c = &p.channels[0];
+        assert_eq!((c.misc.swing, c.misc.root), (0.5, 48));
+        assert_eq!(c.misc.levels, [-0.5, 1.0, 0.5, -1.0]);
+        assert_eq!((c.sound.cutoff, c.sound.resonance, c.sound.filter_type), (128, 64, 5));
+        assert_eq!((c.sound.sampler_flags, c.sound.declick, c.sound.stretch), (Some(10), 3, [1536, 25, 10000, 5]));
+        let e = c.envelopes[Envelope::VOLUME];
+        assert_eq!((e.enabled, e.flags, e.lfo_delay, e.lfo_attack, e.lfo_amount, e.lfo_speed, e.lfo_shape), (true, 1, 2000, 3000, -64, 20000, 2));
+        // Files without these events keep the defaults.
+        let plain = load(&create(&new_project()).unwrap()).unwrap();
+        assert_eq!((plain.time_signature, plain.play_truncated), (None, None));
+        assert_eq!((plain.channels[0].misc.swing, plain.channels[0].misc.root, plain.channels[0].sound), (1.0, 60, ChannelSound::default()));
     }
 
     /// A plugin channel made in OpenStudio (spec: flp/events/plugins.md §2-3): its block holds the plugin name, a

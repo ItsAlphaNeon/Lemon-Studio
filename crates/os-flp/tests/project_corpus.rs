@@ -485,6 +485,9 @@ fn plugin_channel_states_survive() {
         ch.layer_children.clear();
         ch.envelopes = Default::default();
         ch.rack = Default::default();
+        // A new channel's block stores none of the Misc / sound settings yet (they read back as defaults).
+        ch.misc = Default::default();
+        ch.sound = Default::default();
         ch.mixer_track = 2;
         let p = PluginRef {
             format: "clap".into(),

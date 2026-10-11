@@ -44,6 +44,10 @@ pub struct Project {
     pub groups: Vec<String>,
     /// Current display filter (event 146): a group index, `None` = All.
     pub current_group: Option<u32>,
+    /// Time signature (events 17 and 18): numerator, denominator. `None` = not in the file (4/4).
+    pub time_signature: Option<(u16, u16)>,
+    /// "Play truncated notes" (event 30; spec: audio/song-structure.md). `None` = not in the file (off).
+    pub play_truncated: Option<bool>,
 }
 
 /// Name of the group of channels that are in no user filter group (spec: flp/events/project-info.md).
@@ -209,6 +213,33 @@ pub struct Channel {
     pub rack: ChannelRack,
     /// The plugin window's Misc tab settings (polyphony, cut groups, arpeggiator, echo, root note...).
     pub misc: ChannelMisc,
+    /// Sound settings the engine reads that have no other place in the model (filter, sampler flags, declick,
+    /// stretch).
+    pub sound: ChannelSound,
+}
+
+/// A channel's filter, sampler and declick settings as stored (spec: flp/engine-events.md "A channel",
+/// audio/channel-filter.md, audio/sampler.md, audio/declick.md, audio/audio-clips.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelSound {
+    /// Filter cutoff (mod X) and resonance (mod Y), 0..=256; filter type 0..=7 (event 219, ints 3..5).
+    pub cutoff: i32,
+    pub resonance: i32,
+    pub filter_type: i32,
+    /// Sampler flags (event 143); value 8 = use the sample's loop points. `None` = not in the file.
+    pub sampler_flags: Option<u32>,
+    /// Declick mode 0..=5 (event 215, byte 83).
+    pub declick: u8,
+    /// Stretch settings as stored (event 215, ints 24..27): time, pitch, multiplier, mode. The time is an int in
+    /// 1/192 beat, or a single from FL 24.2 on: kept as its bits.
+    pub stretch: [u32; 4],
+}
+
+impl Default for ChannelSound {
+    /// A new channel: filter open, no flags read, declick mode 0, not stretched.
+    fn default() -> Self {
+        ChannelSound { cutoff: 256, resonance: 0, filter_type: 0, sampler_flags: None, declick: 0, stretch: [0; 4] }
+    }
 }
 
 /// A channel's Misc tab settings (spec: ui/plugin-window.md "Misc tab"; storage: flp/events/channels.md "Misc
@@ -368,6 +399,16 @@ pub struct Envelope {
     pub attack_tension: i32,
     pub decay_tension: i32,
     pub release_tension: i32,
+    /// Flags (int 0): 1 = envelope times follow the tempo, 2 = LFO times follow the tempo, 4 = the envelope's
+    /// value is 1 while it is off (spec: audio/envelopes-and-lfos.md).
+    pub flags: i32,
+    /// The record's LFO (ints 9..13): delay, attack and speed are time knobs, amount -128..=128, shape 0 sine /
+    /// 1 triangle / 2 square.
+    pub lfo_delay: i32,
+    pub lfo_attack: i32,
+    pub lfo_amount: i32,
+    pub lfo_speed: i32,
+    pub lfo_shape: i32,
 }
 
 impl Envelope {
@@ -394,6 +435,12 @@ impl Default for Envelope {
             attack_tension: 0,
             decay_tension: 0,
             release_tension: 0,
+            flags: 0,
+            lfo_delay: 100,
+            lfo_attack: 20000,
+            lfo_amount: 0,
+            lfo_speed: 32950,
+            lfo_shape: 0,
         }
     }
 }
