@@ -70,6 +70,7 @@ pub const FILE_NEW: usize = 0;
 pub const FILE_OPEN: usize = 2;
 pub const FILE_SAVE: usize = 4;
 pub const FILE_SAVE_AS: usize = 5;
+pub const FILE_SAVE_VERSION: usize = 6;
 /// FILE > Export as WAV (Ctrl+R; the toolbar's render button).
 pub const FILE_EXPORT: usize = 12;
 pub const FILE_EXIT: usize = 16;
@@ -99,7 +100,7 @@ const FILE: &[Item] = &[
     SEP,
     it("Save", "Ctrl+S").on(),
     it("Save as...", "Shift+Ctrl+S").on(),
-    it("Save new version", "Ctrl+N"),
+    it("Save new version", "Ctrl+N").on(),
     it("Save to new project folder...", ""),
     it("Save as template...", ""),
     it("Delete unused files and save project", ""),
@@ -118,7 +119,7 @@ const ADD_PLUGINS: &[Item] = &[
     it("More plugins...", ""),
     SEP,
     head("Channel"),
-    it("Sampler", ""),
+    it("Sampler", "").on(),
     head("Misc"),
     it("Audio clip", ""),
     it("Automation clip", ""),
@@ -487,6 +488,7 @@ mod tests {
         assert_eq!(l(FILE_SAVE), Some("Save"));
         assert_eq!(l(FILE_SAVE_AS), Some("Save as..."));
         assert_eq!(l(FILE_EXPORT), Some("Export as WAV..."));
+        assert_eq!(l(FILE_SAVE_VERSION), Some("Save new version"));
         assert_eq!(item_at(OPTIONS_MENU, OPT_INFO).map(|it| it.label), Some("Project info"));
         assert_eq!(item_at(HELP_MENU, HELP_ABOUT).map(|it| it.label), Some("About..."));
         assert_eq!(MENUS[ADD_MENU].title, "ADD");

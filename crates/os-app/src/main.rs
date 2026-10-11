@@ -391,7 +391,11 @@ impl ApplicationHandler for Shell {
             }
         }
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                if self.app.confirm_discard("closing") {
+                    el.exit();
+                }
+            }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
                 self.app.ctrl = self.mods.control_key();
@@ -661,7 +665,10 @@ impl ApplicationHandler for Shell {
                     window.set_maximized(!window.is_maximized());
                 }
                 if self.app.want_close {
-                    el.exit();
+                    self.app.want_close = false;
+                    if self.app.confirm_discard("closing") {
+                        el.exit();
+                    }
                 }
             }
             _ => {}

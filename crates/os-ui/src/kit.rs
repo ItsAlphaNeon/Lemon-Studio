@@ -115,13 +115,16 @@ pub fn grip(c: &mut Canvas, t: &Palette, x: f32, y: f32) {
 pub fn button(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
     let bg = t.toolbar;
     let lit = st.on || st.pressed;
+    if st.disabled && !lit {
+        // Not available: no raised face, just a faint outline on the background.
+        c.fill_rect(r, bg.mix(t.s(0x191d1f), 0.45));
+        c.fill_rect(r.inset(1.0), bg.shade(-0.03));
+        return;
+    }
     let (border, center, edge) = if st.on {
         (t.h(0xbe5507), t.h(0xfffaab), t.h(0xffaf65))
     } else if st.pressed {
         (t.h(0xbe5507), t.h(0xffe598), t.h(0xf99448))
-    } else if st.disabled {
-        // Not available: a flat face, no light in the middle.
-        (t.s(0x1f2325), t.s(0x292d2f), t.s(0x262a2c))
     } else if st.hover {
         (t.s(0x191d1f), t.s(0x3d4244), t.s(0x2c3133))
     } else {

@@ -807,6 +807,8 @@ pub struct App {
     loading: Option<crate::loading::Loading>,
     /// A WAV export is rendering (FILE > Export): its file name and progress (0..1); the same panel shows, input waits.
     export: Option<(String, f32)>,
+    /// The project and tempo as last opened, saved or created: anything else has unsaved changes.
+    saved: (Project, f64),
 }
 
 /// Window-level requests the shell must carry out after an event.
@@ -921,7 +923,9 @@ impl App {
             wrap_failed: Vec::new(),
             loading: None,
             export: None,
+            saved: (Project::default(), 0.0),
         };
+        app.mark_saved();
         if let Some(p) = path {
             app.open(p);
         }
@@ -970,6 +974,7 @@ impl App {
                 s.playlist.reset();
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
+                self.mark_saved();
                 self.loading = Some(crate::loading::Loading::start(&self.state.project));
                 self.state.playlist.wave_wait = true;
                 self.invalidate();
@@ -1126,7 +1131,57 @@ impl App {
             crate::project_plugins::adopt_saved(&mut s.project, &proj);
             s.file = Some(file);
             s.path = Some(target);
+            self.mark_saved();
         }
+    }
+
+    /// The project as it is now counts as saved (opened, saved, new).
+    fn mark_saved(&mut self) {
+        self.saved = (self.state.project.clone(), self.state.tempo);
+    }
+
+    /// Whether the project changed since it was last opened, saved or created. Settings kept inside hosted plugins are
+    /// not compared.
+    pub fn unsaved(&self) -> bool {
+        self.saved.0 != self.state.project || self.saved.1 != self.state.tempo
+    }
+
+    /// Before the project is replaced or the app closes (`doing`: "closing", ...): with unsaved changes, asks to save
+    /// them. True = go ahead (saved, or the changes are not wanted); false = cancelled.
+    pub fn confirm_discard(&mut self, doing: &str) -> bool {
+        if !self.unsaved() || cfg!(test) {
+            return true;
+        }
+        let name = self.state.path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "the new project".to_string(), |n| n.to_string_lossy().into_owned());
+        let answer = rfd::MessageDialog::new()
+            .set_title("OpenStudio")
+            .set_level(rfd::MessageLevel::Warning)
+            .set_description(format!("Save the changes to {name} before {doing}?"))
+            .set_buttons(rfd::MessageButtons::YesNoCancel)
+            .show();
+        match answer {
+            rfd::MessageDialogResult::Yes => {
+                self.save(false);
+                self.invalidate();
+                !self.unsaved()
+            }
+            rfd::MessageDialogResult::No => true,
+            _ => false,
+        }
+    }
+
+    /// FILE > Save new version (Ctrl+N): saves next to the project as "name_2.flp", "name_3.flp", ... (the first free
+    /// number), which becomes the project's file. A project without a file asks for a name.
+    fn save_new_version(&mut self) {
+        let Some(path) = self.state.path.clone() else { return self.save(true) };
+        let stem = path.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let (base, n) = match stem.rsplit_once('_') {
+            Some((b, d)) if !b.is_empty() && !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()) => (b.to_string(), d.parse::<u32>().unwrap_or(1)),
+            _ => (stem.clone(), 1),
+        };
+        let dir = path.parent().map(PathBuf::from).unwrap_or_default();
+        let target = (n + 1..).map(|k| dir.join(format!("{base}_{k}.flp"))).find(|p| !p.exists()).expect("a free name");
+        self.save_to(target);
     }
 
     /// Scans the plugin folders and offers the instruments found in the picker.
@@ -1756,6 +1811,9 @@ impl App {
     pub fn drop_file(&mut self, path: PathBuf) {
         let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         if ext == "flp" {
+            if !self.confirm_discard("opening another project") {
+                return;
+            }
             return self.open(path);
         }
         if path.is_dir() {
@@ -3274,7 +3332,7 @@ impl App {
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("o") => self.act(Action::MenuItem(0, views::menus::FILE_OPEN)),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE)),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_NEW)),
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
             _ => {}
         }
     }
@@ -4201,6 +4259,9 @@ impl App {
         use views::menus::*;
         match (menu, item) {
             (0, FILE_NEW) => {
+                if !self.confirm_discard("starting a new project") {
+                    return;
+                }
                 self.transport.stop();
                 self.reset_hosted();
                 let s = &mut self.state;
@@ -4215,6 +4276,7 @@ impl App {
                 crate::rack::from_model(s);
                 s.piano.dirty = true;
                 s.message = Some("New project".into());
+                self.mark_saved();
             }
             // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
             (OPTIONS_MENU | ADD_MENU, i) if item_at(menu, i).and_then(|it| views::settings::tab_for_menu(it.label)).is_some() => {
@@ -4222,6 +4284,9 @@ impl App {
                 self.open_settings(tab);
             }
             (0, FILE_OPEN) => {
+                if !self.confirm_discard("opening another project") {
+                    return;
+                }
                 let start = self.state.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf()));
                 let mut dlg = rfd::FileDialog::new().add_filter("FLP project", &["flp"]);
                 if let Some(d) = start {
@@ -4233,6 +4298,8 @@ impl App {
             }
             (0, FILE_SAVE) => self.save(false),
             (0, FILE_EXPORT) => self.export_wav(),
+            // ADD > Sampler: a new Open Sampler channel, like the plugin picker's first tile.
+            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Sampler") => self.act(Action::PickerTile(false, 0)),
             (HELP_MENU, HELP_ABOUT) => {
                 self.state.message = Some(concat!("OpenStudio ", env!("CARGO_PKG_VERSION"), " (pre-alpha), free software under the GNU GPL v3 or later").into());
             }
@@ -4252,6 +4319,7 @@ impl App {
                 }
             }
             (0, FILE_SAVE_AS) => self.save(true),
+            (0, FILE_SAVE_VERSION) => self.save_new_version(),
             (0, FILE_EXIT) => self.want_close = true,
             (VIEW | ADD_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Plugin picker") => {
                 self.state.picker_open = true;
@@ -5199,6 +5267,41 @@ mod tests {
             assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(wav.as_str()));
         }
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// Opening, loading and saving leave no unsaved changes; an edit does; "Save new version" numbers the file.
+    #[test]
+    fn unsaved_changes_and_new_versions() {
+        let dir = std::env::temp_dir().join(format!("os_versions_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new(None);
+        assert!(!app.unsaved(), "a fresh project");
+        app.save_to(dir.join("Song.flp"));
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        app.open(dir.join("Song.flp"));
+        let mut canvas = Canvas::new(1920, 1080, 1.0).unwrap();
+        let t0 = std::time::Instant::now();
+        while app.loading() && t0.elapsed() < std::time::Duration::from_secs(20) {
+            app.plugin_tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for _ in 0..5 {
+            app.tick();
+            app.paint(&mut canvas, None);
+        }
+        assert!(!app.unsaved(), "opening and loading change nothing");
+        app.state.tempo = 99.0;
+        assert!(app.unsaved(), "an edit is unsaved");
+        app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
+        assert!(!app.unsaved(), "saved");
+        app.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION));
+        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_2.flp").as_path()));
+        app.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION));
+        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_3.flp").as_path()));
+        assert!(dir.join("Song_2.flp").exists() && dir.join("Song_3.flp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
