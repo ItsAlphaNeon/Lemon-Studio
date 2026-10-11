@@ -617,8 +617,9 @@ impl Plugin {
     }
 
     /// Embeds the plugin's editor in `parent` (a host window handle: HWND on Windows); returns its size in pixels.
-    /// The host draws the window frame around it (spec: ui/plugin-window.md).
-    pub fn open_editor(&mut self, parent: *mut c_void) -> Result<(u32, u32), String> {
+    /// The host draws the window frame around it (spec: ui/plugin-window.md). `scale` is the parent's DPI factor:
+    /// a plugin that takes it draws at that size and reports the scaled size (spec: ui/ui-scaling.md §3).
+    pub fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
         if !self.has_editor() {
             return Err(format!("{} has no editor", self.desc.name));
         }
@@ -628,6 +629,10 @@ impl Plugin {
             let api = CLAP_WINDOW_API_WIN32.as_ptr();
             if !g.create.is_some_and(|c| c(self.plugin, api, false)) {
                 return Err("the plugin could not create its editor".into());
+            }
+            // CLAP: the scale goes between create and set_parent; a plugin that refuses it handles DPI itself.
+            if scale > 0.0 {
+                g.set_scale.map(|f| f(self.plugin, f64::from(scale)));
             }
             let (mut w, mut h) = (0u32, 0u32);
             g.get_size.map(|f| f(self.plugin, &mut w, &mut h));
@@ -862,8 +867,8 @@ impl os_host::Plugin for Plugin {
         self.editor
     }
 
-    fn open_editor(&mut self, parent: *mut c_void) -> Result<(u32, u32), String> {
-        Plugin::open_editor(self, parent)
+    fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
+        Plugin::open_editor(self, parent, scale)
     }
 
     fn editor_size(&self) -> Option<(u32, u32)> {

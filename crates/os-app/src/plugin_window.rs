@@ -212,6 +212,8 @@ pub enum FrameEvent {
     MiscMenu(crate::misc_page::M, i32, i32),
     /// A Misc tab keyboard key: key, velocity, pressed.
     Note(u8, u8, bool),
+    /// A detached window moved to a monitor with another DPI: the app redraws it at this scale (spec: ui/ui-scaling.md §3).
+    Dpi(f32),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -737,6 +739,23 @@ impl FrameWindow {
         }
     }
 
+    /// The DPI scale the frame is drawn at.
+    pub fn scale(&self) -> f32 {
+        unsafe { win_of(self.hwnd) }.map_or(1.0, |w| w.scale)
+    }
+
+    /// Redraws the frame at another DPI scale (same logical size). The editor inside is the caller's: plugins take
+    /// their scale when the editor opens (spec: ui/ui-scaling.md §3).
+    pub fn set_scale(&self, scale: f32) {
+        let Some(w) = (unsafe { win_of(self.hwnd) }) else { return };
+        if scale <= 0.0 || w.scale == scale {
+            return;
+        }
+        w.scale = scale;
+        self.state.borrow_mut().clip_key = None;
+        unsafe { layout(self.hwnd) };
+    }
+
     /// Follows a new editor size (plugins may resize).
     pub fn set_editor_size(&self, editor: (f32, f32)) {
         if self.state.borrow().editor != editor {
@@ -942,6 +961,14 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 HTCLIENT as LRESULT
             }
             WM_ERASEBKGND => 1,
+            WM_DPICHANGED => {
+                // Only top-level (detached) windows get this: moved onto a monitor with another DPI. The app redraws
+                // the frame and reopens the editor at the new scale on its next tick (spec: ui/ui-scaling.md §3).
+                let k = (wp & 0xffff) as f32 / 96.0;
+                w.state.borrow_mut().events.push(FrameEvent::Dpi(k));
+                os_clap::wake();
+                0
+            }
             WM_PAINT => {
                 let mut ps: PAINTSTRUCT = std::mem::zeroed();
                 let hdc = BeginPaint(hwnd, &mut ps);
@@ -1327,11 +1354,12 @@ unsafe fn misc_wheel(hwnd: HWND, w: &mut Win, x: f32, y: f32, notches: f32) -> b
     true
 }
 
-/// Screen position for a new plugin window: right of the owner's left edge, below its toolbar (physical px).
-pub fn default_position(owner: isize) -> (i32, i32) {
+/// Screen position for a new plugin window: right of the owner's left edge, below its toolbar (physical px; the
+/// offset is logical, so the window lands on the same part of the layout at every scale).
+pub fn default_position(owner: isize, scale: f32) -> (i32, i32) {
     let mut r: RECT = unsafe { std::mem::zeroed() };
     unsafe { GetWindowRect(owner as HWND, &mut r) };
-    (r.left + 420, r.top + 160)
+    (r.left + (420.0 * scale).round() as i32, r.top + (160.0 * scale).round() as i32)
 }
 
 // ---------------------------------------------------------------------------------------------------------------

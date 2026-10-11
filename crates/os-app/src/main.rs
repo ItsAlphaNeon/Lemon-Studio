@@ -471,6 +471,14 @@ impl ApplicationHandler for Shell {
                 self.app.typing_release_all();
                 window.request_redraw();
             }
+            // Windows display scale changed, or the window moved to a monitor with another DPI: the canvas follows at
+            // the next paint; docked plugin windows are redrawn at the new scale (spec: ui/ui-scaling.md §3).
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.app.plugins.set_scale(scale_factor as f32);
+                self.inset = insets(&window);
+                self.app.invalidate();
+                window.request_redraw();
+            }
             WindowEvent::Resized(_) => {
                 self.inset = insets(&window);
                 self.app.invalidate();

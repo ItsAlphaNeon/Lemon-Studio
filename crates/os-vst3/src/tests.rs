@@ -760,7 +760,7 @@ mod window {
         let mut p = shared.lock().unwrap();
         assert!(p.has_editor());
         let hwnd = host_window(false);
-        let (w, h) = p.open_editor(hwnd as *mut c_void).expect("editor");
+        let (w, h) = p.open_editor(hwnd as *mut c_void, 1.0).expect("editor");
         assert!(w > 200 && h > 100, "{w} x {h}");
         assert!(p.editor_open());
         assert_eq!(p.editor_size(), Some((w, h)));
@@ -770,7 +770,7 @@ mod window {
         assert!(!p.editor_open() && p.editor_size().is_none());
         assert!(unsafe { GetWindow(hwnd, GW_CHILD) }.is_null(), "the editor window is gone");
         // A second open works (the view is created anew).
-        p.open_editor(hwnd as *mut c_void).expect("editor again");
+        p.open_editor(hwnd as *mut c_void, 1.0).expect("editor again");
         p.close_editor();
         unsafe { DestroyWindow(hwnd) };
     }
@@ -789,7 +789,7 @@ mod window {
             }
             assert!(p.activate(48000));
             let hwnd = host_window(true);
-            let (w, h) = p.open_editor(hwnd as *mut c_void).expect("editor");
+            let (w, h) = p.open_editor(hwnd as *mut c_void, 1.0).expect("editor");
             unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, w as i32, h as i32, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) };
             pump(&mut *p, 600);
             let mut rc: RECT = unsafe { std::mem::zeroed() };
