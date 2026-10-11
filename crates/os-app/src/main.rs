@@ -17,6 +17,7 @@ mod playlist;
 #[cfg(windows)]
 mod plugin_window;
 mod plugins;
+mod project_plugins;
 mod transport;
 mod views;
 

@@ -167,7 +167,7 @@ pub fn effect_label(s: &State, track: u16, slot: u8) -> Option<String> {
     let m = s.project.mixer.iter().find(|m| m.index == track)?;
     let p = m.slots.get(usize::from(slot))?.as_ref()?;
     let t = if track == 0 { "Master".to_string() } else { format!("Insert {track}") };
-    Some(format!("{t} - {}", crate::plugins::slot_label(&p.name)))
+    Some(format!("{t} - {}", crate::project_plugins::slot_title(p)))
 }
 
 /// Main-menu entries handled here (spec §5).

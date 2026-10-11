@@ -40,6 +40,7 @@ mod id {
     pub const PLUGIN_NAME: u8 = 201;
     pub const PLUGIN_REC: u8 = 212;
     pub const PLUGIN_STATE: u8 = 213;
+    pub const PLUGIN_ICON: u8 = 155;
     pub const DISPLAY_NAME: u8 = 203;
     pub const COLOR: u8 = 128;
     pub const SAMPLE_PATH: u8 = 196;
@@ -91,6 +92,8 @@ mod id {
     pub const MX_SLOT: u8 = 98;
     pub const MX_ROUTES: u8 = 235;
     pub const MX_PARAMS: u8 = 225;
+    /// Number of stored mixer tracks, just before the first track (spec: flp/events/mixer.md).
+    pub const MX_COUNT: u8 = 103;
 }
 
 const NOTE_LEN: usize = 24;
@@ -190,6 +193,9 @@ struct ChannelLoc {
     end: usize,
     name: Option<usize>,
     plugin_rec: Option<usize>,
+    /// Events 201 (plugin name) and 213 (plugin state) (spec: flp/events/plugins.md).
+    plugin_name: Option<usize>,
+    state: Option<usize>,
     color: Option<usize>,
     color_flag: Option<usize>,
     enabled: Option<usize>,
@@ -484,6 +490,8 @@ fn scan_channel(events: &[Event], start: usize, end: usize) -> ChannelLoc {
         match events[k].id {
             id::DISPLAY_NAME => c.name = Some(k),
             id::PLUGIN_REC => c.plugin_rec = Some(k),
+            id::PLUGIN_NAME => c.plugin_name = Some(k),
+            id::PLUGIN_STATE => c.state = Some(k),
             id::COLOR => c.color = Some(k),
             id::CH_COLOR_FLAG => c.color_flag = Some(k),
             id::CH_ENABLED if c.enabled.is_none() => c.enabled = Some(k),
@@ -634,6 +642,7 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
             .and_then(Event::data)
             .map(|d| decode_text(d, enc))
             .filter(|s| !s.is_empty()),
+        plugin_state: loc.state.and_then(|i| events[i].data()).map(<[u8]>::to_vec),
         color: loc.color.filter(|_| custom).map(|i| rgb_from_bgr(int(&events[i]))),
         enabled: loc.enabled.is_none_or(|i| int(&events[i]) != 0),
         pan: i32_at(0).map_or(0.0, |v| f64::from(v) / 6400.0 - 1.0),
@@ -1021,6 +1030,143 @@ fn mixer_location(track: u16, slot: u16) -> u16 {
     0x7000 + track * 64 + slot
 }
 
+/// Slot parameter IDs (kind 0x1F at the slot's location) and the mix level of a full mix (spec:
+/// flp/events/plugins.md §5).
+const MX_SLOT_ON: u8 = 0;
+const MX_SLOT_MIX: u8 = 1;
+const SLOT_MIX_FULL: f64 = 12800.0;
+
+/// Sets parameter record (`MX_KIND_PARAM`, `pid`) at `loc`, or adds it after the records of that location (before the
+/// first record of a later location) when the file has none.
+fn set_param_record(data: &mut Vec<u8>, loc: u16, pid: u8, v: i32) {
+    let found = mixer_param_records(data).find(|&(_, p, k, at, _)| k == MX_KIND_PARAM && p == pid && at == loc).map(|r| r.0);
+    if let Some(off) = found {
+        data[off + 8..off + 12].copy_from_slice(&v.to_le_bytes());
+        return;
+    }
+    let at = mixer_param_records(data)
+        .find(|&(_, _, k, l, _)| l > loc && k == MX_KIND_PARAM)
+        .map_or(data.len() - data.len() % MIXER_REC_LEN, |r| r.0);
+    let mut r = [0u8; MIXER_REC_LEN];
+    r[4] = pid;
+    r[5] = MX_KIND_PARAM;
+    r[6..8].copy_from_slice(&loc.to_le_bytes());
+    r[8..12].copy_from_slice(&v.to_le_bytes());
+    data.splice(at..at, r);
+}
+
+/// A mixer track's slot area (spec: flp/events/mixer.md "Slot sub-block"): the events between its flags (236) and its
+/// routing (235), and each filled slot's plugin events (its 201 up to, not including, its 98 marker).
+struct SlotArea {
+    from: usize,
+    to: usize,
+    runs: [Option<(usize, usize)>; 10],
+}
+
+fn slot_areas(events: &[Event], l: &Layout) -> Vec<Option<SlotArea>> {
+    l.mixer
+        .iter()
+        .map(|m| {
+            let (f, t) = (m.flags?, m.routes?);
+            if t <= f {
+                return None;
+            }
+            let mut runs = [None; 10];
+            let mut start = None;
+            for (i, e) in events.iter().enumerate().take(t).skip(f + 1) {
+                match e.id {
+                    id::PLUGIN_NAME => start = Some(i),
+                    id::MX_SLOT => {
+                        if let (Some(r), Some(s)) = (runs.get_mut(int(e) as usize), start.take()) {
+                            *r = Some((s, i));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some(SlotArea { from: f + 1, to: t, runs })
+        })
+        .collect()
+}
+
+/// A slot plugin's events as the file held them, while slot areas are rewritten.
+struct SlotRun {
+    track: usize,
+    slot: usize,
+    plugin: SlotPlugin,
+    events: Vec<Event>,
+    used: bool,
+}
+
+/// The file events of the plugin the model has at (`track`, `slot`): the same plugin in the same slot, else the same
+/// plugin (name and state) moved from another slot or track, else a plugin of that name moved within the track.
+fn take_run(pool: &mut [SlotRun], track: usize, slot: usize, p: &SlotPlugin) -> Option<Vec<Event>> {
+    let pick = [
+        pool.iter().position(|r| !r.used && r.track == track && r.slot == slot && r.plugin.name == p.name),
+        pool.iter().position(|r| !r.used && r.track == track && r.plugin == *p),
+        pool.iter().position(|r| !r.used && r.plugin == *p),
+        pool.iter().position(|r| !r.used && r.track == track && r.plugin.name == p.name),
+    ]
+    .into_iter()
+    .flatten()
+    .next()?;
+    pool[pick].used = true;
+    Some(pool[pick].events.clone())
+}
+
+/// A slot plugin's events (spec: flp/events/plugins.md §2): the file's own events when it had the plugin (window
+/// record moved to the new place, state replaced), else new ones.
+fn slot_plugin_events(p: &SlotPlugin, track: u16, slot: u8, run: Option<Vec<Event>>, enc: TextEnc) -> Vec<Event> {
+    let Some(mut ev) = run else {
+        let mut ev = vec![
+            Event::new(id::PLUGIN_NAME, Value::var(encode_text(&p.name, enc))),
+            Event::new(id::PLUGIN_REC, Value::var(plugin_record(Some((track, slot))))),
+            Event::new(id::PLUGIN_ICON, Value::U32(0)),
+            Event::new(id::COLOR, Value::U32(SLOT_COLOR_DEFAULT)),
+            Event::new(id::CH_COLOR_FLAG, Value::U8(0)),
+        ];
+        // A plugin without a known state starts at its defaults (spec: some plugins store no 213).
+        if !p.state.is_empty() {
+            ev.push(Event::new(id::PLUGIN_STATE, Value::var(p.state.clone())));
+        }
+        return ev;
+    };
+    for e in ev.iter_mut().filter(|e| e.id == id::PLUGIN_REC) {
+        let mut at = [0u8; 8];
+        at[0..4].copy_from_slice(&u32::from(track).to_le_bytes());
+        at[4..8].copy_from_slice(&u32::from(slot).to_le_bytes());
+        patch_bytes(e, 0, &at);
+    }
+    match ev.iter().position(|e| e.id == id::PLUGIN_STATE) {
+        Some(i) => set_data(&mut ev[i], p.state.clone()),
+        None if !p.state.is_empty() => ev.push(Event::new(id::PLUGIN_STATE, Value::var(p.state.clone()))),
+        None => {}
+    }
+    ev
+}
+
+/// Length of a plugin window record (event 212).
+const PLUGIN_REC_LEN: usize = 52;
+/// Colour FL stores for most slot plugins (spec: flp/events/plugins.md §1, corpus).
+const SLOT_COLOR_DEFAULT: u32 = 0x0056_5148;
+
+/// A new plugin window record (event 212, spec: flp/events/plugins.md §3): `+8 = 2`; channels flags 0x50
+/// (generator, threaded); mixer slots carry their track and slot, flags 0x140.
+fn plugin_record(slot: Option<(u16, u8)>) -> Vec<u8> {
+    let mut r = vec![0u8; PLUGIN_REC_LEN];
+    r[8] = 2;
+    let flags: u32 = match slot {
+        Some((t, s)) => {
+            r[0..4].copy_from_slice(&u32::from(t).to_le_bytes());
+            r[4..8].copy_from_slice(&u32::from(s).to_le_bytes());
+            0x140
+        }
+        None => 0x50,
+    };
+    r[16..20].copy_from_slice(&flags.to_le_bytes());
+    r
+}
+
 fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
     let params = l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[]);
     let mut out = Vec::new();
@@ -1067,6 +1213,20 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             }
         }
         let custom = m.color_flag.is_some_and(|i| int(&events[i]) != 0);
+        // Slot LED and mix (spec: flp/events/plugins.md §5).
+        let mut slot_on = [true; 10];
+        let mut slot_mix = [1.0; 10];
+        let base = mixer_location(index, 0);
+        for (_, pid, kind, loc, v) in mixer_param_records(params) {
+            if kind == MX_KIND_PARAM && (base..base + 10).contains(&loc) {
+                let s = usize::from(loc - base);
+                match pid {
+                    MX_SLOT_ON => slot_on[s] = v != 0,
+                    MX_SLOT_MIX => slot_mix[s] = f64::from(v) / SLOT_MIX_FULL,
+                    _ => {}
+                }
+            }
+        }
         let param = |pid: u8| {
             mixer_param_records(params)
                 .find(|&(_, p, k, loc, _)| k == MX_KIND_PARAM && p == pid && loc == mixer_location(index, 0))
@@ -1090,6 +1250,8 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             volume: param(MX_VOLUME).map(|v| f64::from(v) / 16000.0),
             pan: param(MX_PAN).map(|v| f64::from(v) / 6400.0),
             stereo_separation: param(MX_STEREO).map(|v| f64::from(v) / 64.0),
+            slot_on,
+            slot_mix,
             ..MixerTrack::new(index)
         });
     }
@@ -1308,6 +1470,25 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 }
             }
         }
+        // A plugin channel's plugin (201) and state (213) (spec: flp/events/plugins.md §1-2). A state for a channel
+        // that had none goes after the colour flag (41), where FL keeps it.
+        if ch.kind == ChannelKind::Plugin && ch.plugin != old.plugin {
+            if let (Some(i), Some(n)) = (loc.plugin_name, &ch.plugin) {
+                set_data(&mut events[i], encode_text(n, enc));
+            }
+        }
+        if ch.plugin_state != old.plugin_state {
+            if let Some(st) = &ch.plugin_state {
+                match loc.state {
+                    Some(i) => set_data(&mut events[i], st.clone()),
+                    None if ch.kind == ChannelKind::Plugin => {
+                        let at = loc.color_flag.or(loc.color).or(loc.name).or(loc.plugin_rec).map_or(loc.start + 2, |i| i + 1);
+                        inserts.push((at, Event::new(id::PLUGIN_STATE, Value::var(st.clone()))));
+                    }
+                    None => {}
+                }
+            }
+        }
     }
 
     // New channels go after the last channel block (spec: flp/events/channels.md; automation.md for type 5).
@@ -1510,13 +1691,62 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     // Mixer tracks.
     let mut params = l.mixer_params.and_then(|i| events[i].data()).map(<[u8]>::to_vec);
     let slot_states = if skip_mixer { Vec::new() } else { slot_state_events(events, &l) };
-    for (((m, old), ml), states) in project.mixer.iter().zip(&current.mixer).zip(&l.mixer).zip(slot_states.iter().chain(std::iter::repeat(&[None; 10]))) {
-        // spec: flp/events/mixer.md "Slot sub-block": a plugin kept in its slot gets its new state (213); adding or
-        // removing slot plugins is not written (see `unsaved_parts`).
-        for ((new, prev), &at) in m.slots.iter().zip(&old.slots).zip(states) {
+    // Tracks whose slots gained, lost or swapped plugins get their whole slot area rewritten (spec:
+    // flp/events/plugins.md §2-3); a plugin that stays (or moves) keeps its own events.
+    let slot_names = |t: &MixerTrack| t.slots.iter().map(|s| s.as_ref().map(|s| s.name.clone())).collect::<Vec<_>>();
+    let rewrite: Vec<bool> = project.mixer.iter().zip(&current.mixer).map(|(m, old)| slot_names(m) != slot_names(old)).collect();
+    if !skip_mixer && rewrite.iter().any(|&r| r) {
+        let areas = slot_areas(events, &l);
+        let mut pool: Vec<SlotRun> = Vec::new();
+        for (t, old) in current.mixer.iter().enumerate().filter(|&(t, _)| rewrite[t]) {
+            let Some(area) = areas.get(t).and_then(Option::as_ref) else {
+                return Err(ProjectError::Structure(format!("mixer track {t} has no slot area")));
+            };
+            for (k, (slot, run)) in old.slots.iter().zip(&area.runs).enumerate() {
+                if let (Some(p), Some((s, e))) = (slot, run) {
+                    pool.push(SlotRun { track: t, slot: k, plugin: p.clone(), events: events[*s..*e].to_vec(), used: false });
+                }
+            }
+        }
+        for (t, m) in project.mixer.iter().enumerate().filter(|&(t, _)| rewrite[t]) {
+            let area = areas[t].as_ref().expect("checked above");
+            let mut block = Vec::new();
+            for (k, slot) in m.slots.iter().enumerate() {
+                if let Some(p) = slot {
+                    block.extend(slot_plugin_events(p, t as u16, k as u8, take_run(&mut pool, t, k, p), enc));
+                }
+                block.push(Event::new(id::MX_SLOT, Value::U16(k as u16)));
+            }
+            removals.extend(area.from..area.to);
+            inserts.extend(block.into_iter().rev().map(|e| (area.to, e)));
+        }
+    }
+    for ((((m, old), ml), states), &rewritten) in project
+        .mixer
+        .iter()
+        .zip(&current.mixer)
+        .zip(&l.mixer)
+        .zip(slot_states.iter().chain(std::iter::repeat(&[None; 10])))
+        .zip(rewrite.iter())
+    {
+        // spec: flp/events/mixer.md "Slot sub-block": a plugin kept in its slot gets its new state (213).
+        for ((new, prev), &at) in m.slots.iter().zip(&old.slots).zip(states).filter(|_| !rewritten) {
             if let (Some(new), Some(prev), Some(i)) = (new, prev, at) {
                 if new.name == prev.name && new.state != prev.state {
                     set_data(&mut events[i], new.state.clone());
+                }
+            }
+        }
+        // Slot LED and mix level (spec: flp/events/plugins.md §5): kind 0x1F records ID 0 / 1 at the slot's location.
+        if let Some(data) = params.as_mut() {
+            for k in 0..10u16 {
+                let loc = mixer_location(m.index, k);
+                let s = usize::from(k);
+                if m.slot_on[s] != old.slot_on[s] {
+                    set_param_record(data, loc, MX_SLOT_ON, i32::from(m.slot_on[s]));
+                }
+                if m.slot_mix[s] != old.slot_mix[s] {
+                    set_param_record(data, loc, MX_SLOT_MIX, (m.slot_mix[s].clamp(0.0, 1.0) * SLOT_MIX_FULL).round() as i32);
                 }
             }
         }
@@ -1884,9 +2114,10 @@ fn channel_type_code(kind: ChannelKind) -> u8 {
 /// One channel block in the minimal form FL 26 loads (spec: flp/events/channels.md; every record not written here
 /// takes FL's default).
 fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -> Result<Vec<Event>, ProjectError> {
-    if matches!(ch.kind, ChannelKind::Plugin | ChannelKind::Other(_)) {
+    let plugin = (ch.kind == ChannelKind::Plugin).then_some(ch.plugin.as_deref()).flatten().filter(|p| !p.is_empty());
+    if matches!(ch.kind, ChannelKind::Other(_)) || (ch.kind == ChannelKind::Plugin && plugin.is_none()) {
         return Err(ProjectError::Mismatch(format!(
-            "channel {}: creating plugin or unknown channels is not supported yet",
+            "channel {}: creating unknown channels or plugin channels without a plugin is not supported",
             ch.index
         )));
     }
@@ -1896,14 +2127,24 @@ fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -
     let mut b = vec![
         Event::new(id::CH_START, Value::U16(ch.index)),
         Event::new(id::CH_TYPE, Value::U8(channel_type_code(ch.kind))),
-        Event::new(id::PLUGIN_NAME, Value::var(encode_text("", enc))),
+        Event::new(id::PLUGIN_NAME, Value::var(encode_text(plugin.unwrap_or(""), enc))),
     ];
+    // A plugin channel: its window record (spec: flp/events/plugins.md §3) and icon, then the state after the colour.
+    if plugin.is_some() {
+        b.push(Event::new(id::PLUGIN_REC, Value::var(plugin_record(None))));
+    }
     if let Some(n) = &ch.name {
         b.push(Event::new(id::DISPLAY_NAME, Value::var(encode_text(n, enc))));
+    }
+    if plugin.is_some() {
+        b.push(Event::new(id::PLUGIN_ICON, Value::U32(0)));
     }
     let color = ch.color.map_or(CHANNEL_COLOR_DEFAULT, |c| bgr_from_rgb(clamp_channel_color(c), 0));
     b.push(Event::new(id::COLOR, Value::U32(color)));
     b.push(Event::new(id::CH_COLOR_FLAG, Value::U8(u8::from(ch.color.is_some()))));
+    if let Some(st) = ch.plugin_state.as_ref().filter(|_| plugin.is_some()) {
+        b.push(Event::new(id::PLUGIN_STATE, Value::var(st.clone())));
+    }
     b.push(Event::new(id::CH_ENABLED, Value::U8(u8::from(ch.enabled))));
     b.push(Event::new(id::CH_TARGET, Value::U16(ch.mixer_track)));
     for child in &ch.layer_children {
@@ -1993,6 +2234,10 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     for arr in &project.arrangements {
         ev.extend(arrangement_events(arr, enc));
     }
+    // The mixer follows the arrangements (spec: flp/events/mixer.md "Where the mixer sits").
+    if !project.arrangements.is_empty() && !project.mixer.is_empty() {
+        ev.extend(mixer_events(&project.mixer, enc));
+    }
     let mut header = Vec::with_capacity(6);
     header.extend(0u16.to_le_bytes()); // format
     header.extend((project.channels.len() as u16).to_le_bytes());
@@ -2047,6 +2292,125 @@ fn arrangement_events(arr: &Arrangement, enc: TextEnc) -> Vec<Event> {
     ev
 }
 
+/// Track parameter records of a default track, in file order (spec: flp/events/mixer.md "Event 225"; the EQ-like IDs
+/// keep the values every untouched track has).
+const TRACK_PARAM_DEFAULTS: [(u8, i32); 12] = [
+    (MX_VOLUME, 12800),
+    (MX_PAN, 0),
+    (MX_STEREO, 0),
+    (0xD0, 0),
+    (0xD1, 0),
+    (0xD2, 0),
+    (0xD8, 5777),
+    (0xD9, 33145),
+    (0xDA, 55825),
+    (0xE0, 17500),
+    (0xE1, 17500),
+    (0xE2, 17500),
+];
+/// The record at location 0x4000 and the parameter block of "track 501" that every file has (spec: mixer.md).
+const MX_SPECIAL_LOC: u16 = 0x4000;
+const MX_SPECIAL_TRACK: u16 = 501;
+/// Track flags (event 236) byte 4 of the master and the last track, and of an insert (spec: flp/events/mixer.md).
+const MX_FLAGS_MASTER: u8 = 0x0C;
+const MX_FLAGS_INSERT: u8 = 0x4C;
+
+fn param_rec(pid: u8, kind: u8, loc: u16, v: i32) -> [u8; MIXER_REC_LEN] {
+    let mut r = [0u8; MIXER_REC_LEN];
+    r[4] = pid;
+    r[5] = kind;
+    r[6..8].copy_from_slice(&loc.to_le_bytes());
+    r[8..12].copy_from_slice(&v.to_le_bytes());
+    r
+}
+
+/// One track's parameter records in file order: each slot's LED and mix, the track parameters, the route levels
+/// (spec: flp/events/plugins.md §5, mixer.md "Event 225").
+fn track_records(t: u16, m: Option<&MixerTrack>) -> Vec<u8> {
+    let d = MixerTrack::new(t);
+    let m = m.unwrap_or(&d);
+    let mut out = Vec::new();
+    for k in 0..10u16 {
+        let s = usize::from(k);
+        out.extend(param_rec(MX_SLOT_ON, MX_KIND_PARAM, mixer_location(t, k), i32::from(m.slot_on[s])));
+        out.extend(param_rec(MX_SLOT_MIX, MX_KIND_PARAM, mixer_location(t, k), (m.slot_mix[s].clamp(0.0, 1.0) * SLOT_MIX_FULL).round() as i32));
+    }
+    for (pid, v) in TRACK_PARAM_DEFAULTS {
+        let v = match pid {
+            MX_VOLUME => m.volume.map_or(v, |x| (x * 16000.0).round() as i32),
+            MX_PAN => m.pan.map_or(v, |x| (x * 6400.0).round() as i32),
+            MX_STEREO => m.stereo_separation.map_or(v, |x| (x * 64.0).round() as i32),
+            _ => v,
+        };
+        out.extend(param_rec(pid, MX_KIND_PARAM, mixer_location(t, 0), v));
+    }
+    let mut levels = m.send_levels.clone();
+    levels.sort_by_key(|&(d, _)| d);
+    for (dest, level) in levels {
+        out.extend(param_rec(dest.min(255) as u8, MX_KIND_ROUTE, mixer_location(t, 0), (level * 16000.0).round() as i32));
+    }
+    out
+}
+
+/// The routing bytes of event 235: one per destination from track 0, trailing zeros omitted, at least one byte.
+fn route_bytes(routes: &[u16]) -> Vec<u8> {
+    let mut bytes = vec![0u8; routes.iter().map(|&r| usize::from(r) + 1).max().unwrap_or(1)];
+    for &r in routes {
+        bytes[usize::from(r)] = 1;
+    }
+    bytes
+}
+
+/// One mixer track block (spec: flp/events/mixer.md "Track blocks"): colour, name, flags, the ten slots, routing and
+/// the trailing events with the values untouched tracks have.
+fn track_block_events(m: &MixerTrack, last: bool, enc: TextEnc) -> Vec<Event> {
+    let mut ev = Vec::new();
+    if let Some(c) = m.color {
+        ev.push(Event::new(id::MX_COLOR, Value::U32(bgr_from_rgb(c, 0xFF))));
+    }
+    ev.push(Event::new(id::MX_COLOR_FLAG, Value::U8(u8::from(m.color.is_some()))));
+    if let Some(n) = m.name.as_ref().filter(|n| !n.is_empty()) {
+        ev.push(Event::new(id::MX_NAME, Value::var(encode_text(n, enc))));
+    }
+    let mut flags = [0u8; 12];
+    flags[4] = if m.index == 0 || last { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
+    if !m.enabled {
+        flags[4] &= !0x08;
+    }
+    ev.push(Event::new(id::MX_FLAGS, Value::var(flags.to_vec())));
+    for (k, slot) in m.slots.iter().enumerate() {
+        if let Some(p) = slot {
+            ev.extend(slot_plugin_events(p, m.index, k as u8, None, enc));
+        }
+        ev.push(Event::new(id::MX_SLOT, Value::U16(k as u16)));
+    }
+    ev.push(Event::new(id::MX_ROUTES, Value::var(route_bytes(&m.routes))));
+    ev.push(Event::new(165, Value::U32(3)));
+    ev.push(Event::new(166, Value::U32(1)));
+    ev.push(Event::new(49, Value::U8(0)));
+    ev.push(Event::new(154, Value::U32(u32::MAX)));
+    ev.push(Event::new(147, Value::U32(if m.index == 0 { 0 } else { u32::MAX })));
+    ev
+}
+
+/// A whole mixer: the track count (event 103), the track blocks, and the parameter records (event 225) with the
+/// special records every file has (spec: flp/events/mixer.md).
+fn mixer_events(mixer: &[MixerTrack], enc: TextEnc) -> Vec<Event> {
+    let mut ev = vec![Event::new(id::MX_COUNT, Value::U16(mixer.len() as u16))];
+    for (n, m) in mixer.iter().enumerate() {
+        ev.extend(track_block_events(m, n + 1 == mixer.len(), enc));
+    }
+    let mut recs = param_rec(0, 0, MX_SPECIAL_LOC, 12800).to_vec();
+    for m in mixer {
+        recs.extend(track_records(m.index, Some(m)));
+    }
+    // "Track 501" has slot records and track parameters, no routes.
+    let special = track_records(MX_SPECIAL_TRACK, None);
+    recs.extend(special);
+    ev.push(Event::new(id::MX_PARAMS, Value::var(recs)));
+    ev
+}
+
 /// A fresh arrangement as FL's template has it: number 0, "Arrangement", 500 default tracks.
 pub fn default_arrangement() -> Arrangement {
     Arrangement {
@@ -2065,10 +2429,6 @@ pub fn unsaved_parts(project: &Project, file: &FlpFile) -> Vec<&'static str> {
     if current.mixer.is_empty() && !mixer_is_default(&project.mixer) {
         parts.push("mixer settings");
     }
-    let slot_names = |t: &MixerTrack| t.slots.iter().map(|s| s.as_ref().map(|s| s.name.clone())).collect::<Vec<_>>();
-    if !current.mixer.is_empty() && project.mixer.iter().zip(&current.mixer).any(|(a, b)| slot_names(a) != slot_names(b)) {
-        parts.push("added or removed mixer effects");
-    }
     if current.arrangements.is_empty() && project.arrangements.iter().any(|a| !a.clips.is_empty()) {
         parts.push("playlist clips");
     }
@@ -2077,11 +2437,18 @@ pub fn unsaved_parts(project: &Project, file: &FlpFile) -> Vec<&'static str> {
 
 /// Tracks as a fresh project has them: unnamed, uncolored, unity volume (0.8), centered, routed to the master.
 fn mixer_is_default(mixer: &[MixerTrack]) -> bool {
-    mixer.iter().all(|t| {
+    mixer.iter().enumerate().all(|(n, t)| {
+        // The last stored track is routed nowhere in FL's files.
+        let hidden = n + 1 == mixer.len() && n > 0 && t.routes.is_empty();
+        hidden ||
         t.name.is_none()
             && t.color.is_none()
             && t.enabled
             && t.slots.iter().all(Option::is_none)
+            && t.slot_on.iter().all(|&on| on)
+            && t.slot_mix.iter().all(|&m| m == 1.0)
+            && !t.polarity
+            && !t.swap
             && t.send_levels.is_empty()
             && t.volume.is_none_or(|v| (v - 0.8).abs() < 1e-9)
             && t.pan.is_none_or(|v| v == 0.0)
@@ -2099,6 +2466,7 @@ mod tests {
             kind: ChannelKind::Sampler,
             name: Some(name.into()),
             plugin: None,
+            plugin_state: None,
             color: None,
             enabled: true,
             volume: 10000.0 / 12800.0,
@@ -2176,6 +2544,75 @@ mod tests {
         assert_eq!(again.patterns.iter().map(|p| p.number).collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(again.patterns[2].name.as_deref(), Some("Chorus"));
         assert_eq!(again.patterns[0].notes.len(), 2);
+    }
+
+    /// A plugin channel made in OpenStudio (spec: flp/events/plugins.md §2-3): its block holds the plugin name, a
+    /// generator window record and the state after the colour flag; it reads back, and a changed state is written.
+    #[test]
+    fn created_plugin_channel_reads_back() {
+        let mut p = new_project();
+        let mut ch = sampler(2, "Lead", 3);
+        ch.kind = ChannelKind::Plugin;
+        ch.plugin = Some(crate::wrapper::WRAPPER.into());
+        ch.plugin_state = Some(vec![10, 0, 0, 0, 9, 9]);
+        p.channels.push(ch.clone());
+        let mut file = create(&p).unwrap();
+        let ids: Vec<u8> = {
+            let ev = events_of(&file).unwrap();
+            let start = ev.iter().rposition(|e| e.id == id::CH_START).unwrap();
+            ev[start..start + 9].iter().map(|e| e.id).collect()
+        };
+        assert_eq!(ids, [64, 21, 201, 212, 203, 155, 128, 41, 213]);
+        let rec = events_of(&file).unwrap().iter().filter(|e| e.id == id::PLUGIN_REC).last().unwrap().data().unwrap().to_vec();
+        assert_eq!((rec.len(), rec[8], rec[16]), (52, 2, 0x50));
+        let back = load(&file).unwrap();
+        assert_eq!(back.channels[2].plugin, ch.plugin);
+        assert_eq!(back.channels[2].plugin_state, ch.plugin_state);
+        let mut edited = back.clone();
+        edited.channels[2].plugin_state = Some(vec![1; 40]);
+        apply(&edited, &mut file).unwrap();
+        assert_eq!(load(&file).unwrap().channels[2].plugin_state, Some(vec![1; 40]));
+        // Sampler channels keep their minimal block (no window record).
+        assert!(events_of(&file).unwrap().iter().filter(|e| e.id == id::PLUGIN_REC).count() == 1);
+    }
+
+    /// A created project with a playlist stores its mixer (spec: flp/events/mixer.md, plugins.md): track settings,
+    /// slot plugins, LEDs and mix levels read back, and later slot edits apply to the file.
+    #[test]
+    fn created_mixer_reads_back_and_takes_edits() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        let m = &mut p.mixer[2];
+        m.name = Some("Bass bus".into());
+        m.color = Some(Rgb::new(1, 2, 3));
+        m.volume = Some(0.5);
+        m.pan = Some(-0.25);
+        m.routes = vec![0, 5];
+        m.send_levels = vec![(5, 0.5)];
+        m.slots[0] = Some(SlotPlugin { name: "Fruity Parametric EQ 2".into(), state: vec![1, 2, 3] });
+        m.slots[3] = Some(SlotPlugin { name: crate::wrapper::WRAPPER.into(), state: vec![10, 0, 0, 0] });
+        m.slot_on[3] = false;
+        m.slot_mix[3] = 0.5;
+        p.mixer[0].enabled = false;
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.mixer, p.mixer);
+        assert!(unsaved_parts(&p, &file).is_empty());
+        let ev = events_of(&file).unwrap();
+        let count = ev.iter().find(|e| e.id == id::MX_COUNT).map(int);
+        assert_eq!(count, Some(18));
+        // Slot plugins carry their track and slot in the window record.
+        let rec = ev.iter().filter(|e| e.id == id::PLUGIN_REC).nth(1).unwrap().data().unwrap();
+        assert_eq!((rec[0], rec[4], rec[17]), (2, 3, 0x01));
+        let mut edited = back.clone();
+        edited.mixer[2].slots.swap(0, 9);
+        edited.mixer[4].slots[1] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
+        edited.mixer[2].slot_mix[9] = 0.75;
+        apply(&edited, &mut file).unwrap();
+        assert_eq!(load(&file).unwrap().mixer, edited.mixer);
     }
 
     #[test]

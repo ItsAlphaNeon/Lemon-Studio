@@ -196,6 +196,7 @@ mod tests {
             layer_children: vec![],
             envelopes: Default::default(),
             rack: Default::default(),
+            plugin_state: None,
         }
     }
 

@@ -42,7 +42,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     ui.c.fill_rect(body, t.rack_inset);
     let kind = match ch.kind {
         ChannelKind::Sampler => "Sampler".to_string(),
-        ChannelKind::Plugin => ch.plugin.clone().unwrap_or_else(|| "Plugin".into()),
+        ChannelKind::Plugin => crate::project_plugins::plugin_title(ch).unwrap_or_else(|| "Plugin".into()),
         ChannelKind::Layer => "Layer".into(),
         ChannelKind::AudioClip => "Audio clip".into(),
         ChannelKind::Automation => "Automation clip".into(),

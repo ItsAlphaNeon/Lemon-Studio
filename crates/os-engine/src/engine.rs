@@ -1525,6 +1525,7 @@ mod tests {
             kind: ChannelKind::Sampler,
             name: None,
             plugin: None,
+            plugin_state: None,
             color: None,
             enabled: true,
             volume: 0.78125,

@@ -1120,7 +1120,7 @@ mod tests {
         let auto_ch = Channel {
             index: 0, kind: ChannelKind::Automation, name: None, plugin: None, color: None, enabled: true, volume: 0.78125,
             pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None, layer_children: vec![], envelopes: Default::default(),
-            rack: Default::default(),
+            rack: Default::default(), plugin_state: None,
         };
         // Main level from 0 (-18 dB) to 1 (+18 dB) over 4 beats (120 BPM: 2 s).
         let auto = Automation {
@@ -1240,7 +1240,7 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
         };
@@ -1273,7 +1273,7 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
         };
@@ -1314,7 +1314,7 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
         };
@@ -1366,7 +1366,7 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(),
         };

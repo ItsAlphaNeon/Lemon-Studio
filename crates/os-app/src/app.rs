@@ -603,6 +603,8 @@ pub struct App {
     sampler_failed: Vec<usize>,
     /// Mixer slots (`plugins::fx_key`) whose Open Parametric EQ 2 could not start (not retried).
     fx_failed: Vec<usize>,
+    /// Wrapped plugin channels (rows) and slots (`fx_key`) whose plugin was not found or did not start (not retried).
+    pub(crate) wrap_failed: Vec<usize>,
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
     loading: Option<crate::loading::Loading>,
 }
@@ -714,6 +716,7 @@ impl App {
             piano_panel: None,
             sampler_failed: Vec::new(),
             fx_failed: Vec::new(),
+            wrap_failed: Vec::new(),
             loading: None,
         };
         if let Some(p) = path {
@@ -809,11 +812,6 @@ impl App {
         }
         let s = &mut self.state;
         s.project.tempo = Some(s.tempo);
-        if s.hosted_rows.iter().any(|&r| s.project.channels.get(r).is_some_and(|c| c.kind == ChannelKind::Plugin)) {
-            // spec: plugins/plugin-formats.md (open question: FLP storage of hosted plugins)
-            s.message = Some("Save failed: projects with hosted plugin channels (Open Sampler, CLAP) cannot be saved to FLP yet".into());
-            return;
-        }
         // Lock, zip, filter groups and loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
         crate::rack::to_model(s);
         // A file OpenStudio made before the project had a playlist has no arrangement block (FL's files always have
@@ -826,7 +824,13 @@ impl App {
             for (i, c) in s.project.channels.iter_mut().enumerate() {
                 c.rack.origin = Some(i as u16);
             }
-            match os_flp::project::create(&s.project) {
+            // FL's files always have a playlist, and the mixer is stored after it (spec: flp/events/mixer.md).
+            if s.project.arrangements.is_empty() {
+                s.project.arrangements.push(os_flp::project::default_arrangement());
+            }
+            let mut first = s.project.clone();
+            crate::project_plugins::store_hosted(&mut first, &self.plugins);
+            match os_flp::project::create(&first) {
                 Ok(f) => f,
                 Err(e) => {
                     s.message = Some(format!("Save failed: {e}"));
@@ -840,7 +844,9 @@ impl App {
         // failed save leaves the loaded file as it was.
         let mut lost = os_flp::project::unsaved_parts(&s.project, &file);
         // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, OpenStudio status).
+        // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
+        crate::project_plugins::store_hosted(&mut proj, &self.plugins);
         if let Some(n) = os_flp::project::load(&file).ok().map(|p| p.mixer.len()).filter(|&n| n > 0 && n < proj.mixer.len()) {
             proj.mixer.truncate(n);
             for m in proj.mixer.iter_mut() {
@@ -848,9 +854,6 @@ impl App {
                 m.send_levels.retain(|&(d, _)| usize::from(d) < n);
             }
             lost.push("added mixer tracks");
-        }
-        if self.plugins.hosted.keys().any(|&k| k >= crate::plugins::FX_KEY) {
-            lost.push("mixer effect plugins");
         }
         if s.project.mixer.iter().any(|m| m.polarity || m.swap) {
             lost.push("polarity / swap buttons");
@@ -865,10 +868,11 @@ impl App {
             Err(e) => format!("Save failed: {e}"),
         });
         if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
-            // The saved file now holds the channels in model order.
+            // The saved file now holds the channels in model order, and the plugins as written.
             for (i, c) in s.project.channels.iter_mut().enumerate() {
                 c.rack.origin = Some(i as u16);
             }
+            crate::project_plugins::adopt_saved(&mut s.project, &proj);
             s.file = Some(file);
             s.path = Some(target);
         }
@@ -899,6 +903,7 @@ impl App {
         self.state.hosted_rows.clear();
         self.sampler_failed.clear();
         self.fx_failed.clear();
+        self.wrap_failed.clear();
         self.transport.set_instruments(Vec::new());
         self.transport.set_effects(Vec::new());
     }
@@ -999,6 +1004,9 @@ impl App {
         self.mixer_tick();
         self.sync_effects();
         self.params_tick();
+        if self.loading.is_none() {
+            self.sync_wrapped();
+        }
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
             // A row hosted this tick already started from its channel's sample.
             if self.state.hosted_rows.contains(&row) && self.plugins.sampler_path(row).as_deref() != Some(path.as_str()) {
@@ -3671,6 +3679,7 @@ impl App {
         self.typing_release_all();
         self.plugins.remap(m);
         self.sampler_failed = self.sampler_failed.iter().filter_map(|&r| m(r)).collect();
+        self.wrap_failed = self.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
         self.transport.set_instruments(self.plugins.instruments());
         self.state.piano.dirty = true;
     }
@@ -3680,7 +3689,12 @@ impl App {
         let ch = self.state.project.channels.get(r)?;
         let name = match ch.kind {
             ChannelKind::Sampler | ChannelKind::AudioClip => crate::plugins::OPEN_SAMPLER.to_string(),
-            ChannelKind::Plugin => ch.plugin.clone()?,
+            // A hosted plugin is found by its identity (a wrapped channel's plugin name is the wrapper's).
+            ChannelKind::Plugin => {
+                let d = self.plugins.descriptor(r)?;
+                let index = self.plugins.index_of_uid(&d.uid())?;
+                return Some((index, self.plugins.state(r)?));
+            }
             _ => return None,
         };
         let index = self.plugins.index_of(&name)?;
@@ -3809,6 +3823,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
         kind: ChannelKind::Sampler,
         name: Some(name.into()),
         plugin: None,
+        plugin_state: None,
         color: None,
         enabled: true,
         volume: 10000.0 / 12800.0,
@@ -3889,9 +3904,9 @@ pub fn test_project() -> Project {
 /// last one, as FL's default template stores them; spec: ui/mixer.md §1) routed to the master, pattern 1.
 fn template_project(names: &[&str]) -> Project {
     let channel = |i: u16, name: &str| sampler_channel(i, name, i + 1);
-    let mixer = (0..18u16)
-        .map(MixerTrack::new)
-        .collect();
+    let mut mixer: Vec<MixerTrack> = (0..18u16).map(MixerTrack::new).collect();
+    // The hidden last track is routed nowhere, as FL stores it (spec: flp/events/mixer.md).
+    mixer[17].routes.clear();
     Project {
         ppq: 96,
         tempo: Some(130.0),

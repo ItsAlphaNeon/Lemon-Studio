@@ -165,7 +165,7 @@ pub fn receives(s: &State, n: u16) -> bool {
 /// The slot's shown name (renamed, else the plugin's name).
 pub fn slot_name(s: &State, t: u16, slot: u8) -> Option<String> {
     let p = track(s, t)?.slots.get(usize::from(slot))?.as_ref()?;
-    Some(s.mixer.slot_names.get(&(t, slot)).cloned().unwrap_or_else(|| crate::plugins::slot_label(&p.name).to_string()))
+    Some(s.mixer.slot_names.get(&(t, slot)).cloned().unwrap_or_else(|| crate::project_plugins::slot_title(p)))
 }
 
 /// "Volume: 100%  0.0dB  1.00" (§4); `label` = "Volume" or "To Insert 3".
@@ -1039,7 +1039,7 @@ impl App {
 pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate::plugin_window::ChannelInfo> {
     let (t, k) = crate::plugins::fx_of(key)?;
     let m = p.mixer.iter().find(|m| m.index == t)?;
-    let name = ui.slot_names.get(&(t, k)).cloned().or_else(|| m.slots.get(usize::from(k))?.as_ref().map(|s| crate::plugins::slot_label(&s.name).to_string()))?;
+    let name = ui.slot_names.get(&(t, k)).cloned().or_else(|| m.slots.get(usize::from(k))?.as_ref().map(crate::project_plugins::slot_title))?;
     Some(crate::plugin_window::ChannelInfo {
         name,
         target: m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Insert {t}") }),

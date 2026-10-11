@@ -28,6 +28,7 @@ fn channel() -> os_model::Channel {
         kind: os_model::ChannelKind::Plugin,
         name: None,
         plugin: Some("Open Sampler".into()),
+        plugin_state: None,
         color: None,
         enabled: true,
         volume: 0.78125,

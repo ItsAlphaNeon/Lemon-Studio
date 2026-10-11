@@ -15,6 +15,7 @@ mod container;
 mod error;
 mod event;
 pub mod project;
+pub mod wrapper;
 
 pub use check::{AlignmentIssue, TEXT_RUN_MIN, check_alignment};
 pub use container::{Chunk, ChunkBody, FlpFile, Header, Tag};

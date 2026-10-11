@@ -374,7 +374,7 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
 /// A channel's row label under Generators.
 pub fn channel_label(s: &State, i: usize) -> Option<String> {
     let c = s.project.channels.get(i)?;
-    Some(c.name.clone().or_else(|| c.plugin.clone()).unwrap_or_else(|| format!("Channel {}", i + 1)))
+    Some(c.name.clone().or_else(|| crate::project_plugins::plugin_title(c)).unwrap_or_else(|| format!("Channel {}", i + 1)))
 }
 
 /// A generator / effect row: a leaf, or a node listing its parameters when it is a hosted plugin that has some.

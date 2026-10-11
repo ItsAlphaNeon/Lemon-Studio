@@ -187,6 +187,9 @@ pub struct Channel {
     pub name: Option<String>,
     /// Generator plugin name for [`ChannelKind::Plugin`].
     pub plugin: Option<String>,
+    /// The plugin's saved state as the project file stores it (event 213), for plugin channels. `None` = not known
+    /// (the file's state is kept as it is). spec: flp/events/plugins.md
+    pub plugin_state: Option<Vec<u8>>,
     /// `None` = default color.
     pub color: Option<Rgb>,
     pub enabled: bool,
@@ -451,6 +454,23 @@ impl MixerTrack {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotPlugin {
     pub name: String,
+    pub state: Vec<u8>,
+}
+
+/// A third-party plugin (CLAP, VST3, VST2) as a project file names it: its format, identity and saved state.
+/// spec: flp/events/plugins.md §4
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginRef {
+    /// `clap`, `vst3` or `vst2`.
+    pub format: String,
+    /// VST3: the class id as 32 uppercase hex digits; VST2: the unique id as 8 hex digits; CLAP: empty when the file
+    /// does not store it (the plugin is then found by path and name).
+    pub id: String,
+    pub name: String,
+    pub vendor: String,
+    /// The plugin file.
+    pub path: String,
+    /// The plugin's own saved state.
     pub state: Vec<u8>,
 }
 
