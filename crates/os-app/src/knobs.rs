@@ -22,8 +22,6 @@ pub enum KnobId {
     SlotMix(u16, u8),
     /// Send level from mixer track `.0` to `.1` (model `send_levels`, fader law; spec: ui/mixer.md §5).
     Send(u16, u16),
-    /// Equalizer band knob: track, band * 2 + row.
-    Eq(u16, u8),
     /// Channel rack row / plugin window (model).
     ChanVol(usize),
     ChanPan(usize),
@@ -173,7 +171,6 @@ impl State {
             KnobId::MixSep(_) => crate::mixer::sep_text(f64::from(bipolar)),
             KnobId::Send(_, b) => crate::mixer::level_text(&format!("To {}", crate::mixer::name(self, b)), f64::from(n)),
             KnobId::SlotMix(..) => format!("Mix level: {:.0}%", n * 100.0),
-            KnobId::Eq(_, k) => format!("{}: {:.0}%", if k % 2 == 0 { "Band frequency" } else { "Band width" }, n * 100.0),
             // spec: ui/channel-rack.md §11: "Channel volume: 78%  -5.2dB  0.55".
             KnobId::ChanVol(_) => {
                 let g = os_engine::laws::channel_gain(f64::from(n));

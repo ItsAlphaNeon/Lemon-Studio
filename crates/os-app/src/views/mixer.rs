@@ -195,23 +195,27 @@ fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
     let ob = Rect::new(r.x + 3.0, y - 9.0, 16.0, 18.0);
     let hov = ui.hit(ob, Action::Mix(MHit::Options), "Mixer options");
     chevron(ui, r.x + 11.0, y, true, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
-    for (k, icon, dx, hint) in [(0u8, Icon::Touch, 37.0, "Multi-touch control"), (1, Icon::Plug, 61.0, "View waveforms (Alt+W)")] {
+    // View buttons (multi-touch, waveforms, extra properties, track inspector): not available yet, greyed out (drawn
+    // in their colours faded into the title bar, like `Ui::veil`; a veil would show over the bar's gradient).
+    let bg = ui.t.window_title;
+    let dim = |c: Color| c.mix(bg, f32::from(crate::app::OFF_VEIL) / 255.0);
+    for (icon, dx, name) in [(Icon::Touch, 37.0, "Multi-touch control"), (Icon::Plug, 61.0, "View waveforms")] {
         let b = Rect::new(r.x + dx - 9.0, y - 9.0, 18.0, 18.0);
-        let hov = ui.hit(b, Action::Mix(MHit::Tool(k)), hint);
-        icons::draw(ui.c, icon, b.inset(1.0), if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
+        ui.off(b, name);
+        icons::draw(ui.c, icon, b.inset(1.0), dim(ui.t.tx(0xc4ccd0)));
     }
-    ui.hit(Rect::new(r.x + 76.0, y - 9.0, 16.0, 18.0), Action::Mix(MHit::Tool(2)), "View extra volume / stereo properties");
-    ui.hit(Rect::new(r.x + 92.0, y - 9.0, 15.0, 18.0), Action::Mix(MHit::Tool(3)), "View / swap track inspector (Ctrl+Enter)");
+    ui.off(Rect::new(r.x + 76.0, y - 9.0, 16.0, 18.0), "Extra volume / stereo properties");
+    ui.off(Rect::new(r.x + 92.0, y - 9.0, 15.0, 18.0), "Track inspector");
     // Bow-tie (stereo) in blue, layout square in orange, then "+" and the view combo.
     let mut g = Glyph::new();
     let cx = r.x + 85.0;
     g.polygon(&[(cx - 8.0, y - 6.0), (cx - 1.0, y), (cx - 8.0, y + 6.0)]).polygon(&[(cx + 8.0, y - 6.0), (cx + 1.0, y), (cx + 8.0, y + 6.0)]);
     g.rect(cx - 8.5, y - 6.0, 1.5, 12.0);
-    ui.c.glyph(Color::rgb(0x5fb6f0), &g);
+    ui.c.glyph(dim(Color::rgb(0x5fb6f0)), &g);
     let mut g = Glyph::new();
     g.frame(Rect::new(r.x + 93.0, y - 6.0, 12.0, 12.0), 1.6);
-    ui.c.glyph(ui.t.h(0xf3b234), &g);
-    ui.c.fill_rect(Rect::new(r.x + 101.5, y - 4.5, 2.0, 9.0), Color::rgb(0xd03a2a));
+    ui.c.glyph(dim(ui.t.h(0xf3b234)), &g);
+    ui.c.fill_rect(Rect::new(r.x + 101.5, y - 4.5, 2.0, 9.0), dim(Color::rgb(0xd03a2a)));
     let pb = Rect::new(r.x + 109.0, y - 8.0, 16.0, 16.0);
     let hov = ui.hit(pb, Action::Mix(MHit::AddAfter), "Add a new track after the selected track");
     icons::draw(ui.c, Icon::Plus, Rect::new(r.x + 110.0, y - 7.0, 14.0, 14.0), if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
@@ -396,7 +400,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     let hov = ui.hit(Rect::new(mx - 9.0, ly.y(TRACK_Y0) - 5.0, 18.0, track_y1 - ly.y(TRACK_Y0) + 10.0), Action::Fader(n), mx::level_text("Volume", f64::from(v)));
     fader_handle(ui, mx, hy, selected, hov);
 
-    // Routing controls near the bottom: input pin, latency clock, polarity dot.
+    // Input pin, latency clock and disk-recording dot: not available yet, greyed out.
     let master = n == 0;
     let by = bottom;
     let pin_c = if master { ui.t.h(0xf09a28) } else { ui.t.s(0x4d5357) };
@@ -405,15 +409,15 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     g.polygon(&[(sx - 2.5, by - 138.0), (sx + 2.5, by - 138.0), (sx, by - 133.0)]);
     ui.c.glyph(pin_c, &g);
     ui.c.fill_rect(Rect::new(sx - 1.0, by - 145.0, 2.0, 9.0), if master { ui.t.h(0x7a3c08) } else { ui.t.s(0x23272a) });
-    ui.hit(Rect::new(sx - 8.0, by - 148.0, 16.0, 18.0), Action::Mix(MHit::Pin(n)), mx::name(s, n));
+    ui.off(Rect::new(sx - 8.0, by - 148.0, 16.0, 18.0), "Track audio input");
     let clk = if master { ui.t.h(0xf09a28) } else { ui.t.tx(0xc4d4e0) };
     let mut g = Glyph::new();
     g.ring(sx, by - 117.0, 6.0, 1.6).rect(sx - 0.7, by - 121.0, 1.4, 4.5).rect(sx - 0.7, by - 117.7, 3.5, 1.4);
     ui.c.glyph(clk, &g);
-    ui.hit(Rect::new(sx - 8.0, by - 125.0, 16.0, 16.0), Action::Mix(MHit::Clock(n)), "Track latency");
-    let armed = s.mixer.armed.contains(&n);
-    ui.hit(Rect::new(sx - 6.0, by - 106.0, 12.0, 12.0), Action::Mix(MHit::Disk(n)), "Arm disk recording");
-    ui.c.fill_circle(sx, by - 100.0, 2.6, if armed { Color::rgb(0xe0463a) } else { ui.t.tx(0xd8e0e6) });
+    ui.off(Rect::new(sx - 8.0, by - 125.0, 16.0, 16.0), "Track latency");
+    ui.off(Rect::new(sx - 6.0, by - 106.0, 12.0, 12.0), "Disk recording");
+    ui.c.fill_circle(sx, by - 100.0, 2.6, ui.t.tx(0xd8e0e6));
+    ui.veil(Rect::new(sx - 9.0, by - 149.0, 18.0, 55.0), body);
 
     // Routing (spec: ui/mixer.md §5): the current track's green ⬇ with its cables, a send knob where the current
     // track sends, else the ▲ "route to this track" button; an orange "^" marks tracks that receive a route.
@@ -519,16 +523,20 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     let kp = ((room - 15.0) / 503.0).clamp(0.3, 1.0);
     let knobs = room >= 579.0;
     let q = kp.max(0.55);
-    // Input row: EQ glyph, "(none)" combo, latency clock.
-    ui.c.fill_rect(Rect::new(r.x, r.y + 23.0, r.w, 36.0), ui.t.s(0x2b2e30));
+    // Input row: EQ glyph, "(none)" combo, latency clock. Audio inputs are not available yet: greyed out.
+    let input_bg = ui.t.s(0x2b2e30);
+    ui.c.fill_rect(Rect::new(r.x, r.y + 23.0, r.w, 36.0), input_bg);
     let mut g = Glyph::new();
     g.polygon(&[(r.x + 7.0, r.y + 32.0), (r.x + 13.0, r.y + 32.0), (r.x + 18.0, r.y + 37.5), (r.x + 13.0, r.y + 43.0), (r.x + 7.0, r.y + 43.0)]);
     ui.c.glyph(ui.t.s(0x40464a), &g);
     ui.c.text(Font::new(9).bold(), r.x + 6.0, r.y + 43.0, ui.t.s(0x40464a), "EQ");
-    combo(ui, Rect::new(r.x + 27.0, r.y + 28.0, 159.0, 23.0), "(none)", Action::Mix(MHit::Input), "Audio input source");
+    off_combo(ui, Rect::new(r.x + 27.0, r.y + 28.0, 159.0, 23.0), "Audio input source", input_bg);
     let mut g = Glyph::new();
     g.ring(r.x + 202.0, r.y + 39.5, 8.5, 1.8).rect(r.x + 201.2, r.y + 34.0, 1.6, 6.5).rect(r.x + 201.2, r.y + 38.9, 5.0, 1.6);
     ui.c.glyph(ui.t.tx(0xd4dade), &g);
+    let clock = Rect::new(r.x + 192.0, r.y + 29.0, 21.0, 21.0);
+    ui.off(clock, "Input latency");
+    ui.veil(clock, input_bg);
 
     // Ten effect slots.
     for i in 0..10 {
@@ -557,8 +565,10 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     let sep = r.y + 61.0 + 330.0 * kp;
     ui.c.fill_rect(Rect::new(r.x, sep, r.w, 1.0), ui.t.s(0x1f2224));
 
-    // Equalizer: response graph, three band gain faders, band knobs.
+    // Equalizer: response graph, three band gain faders, band knobs. Editing the track equalizer is not available
+    // yet (a project's stored EQ plays, but is not shown here): the whole section is greyed out.
     let eq = Rect::new(r.x + 4.0, sep + 11.0, 146.0, 173.0 * kp);
+    ui.off(eq, "Track equalizer");
     ui.c.fill_rect(eq, ui.t.s(0x1f2224));
     ui.c.fill_rect(eq.inset(1.0), ui.t.s(0x272a2c));
     for k in 1..5 {
@@ -574,7 +584,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         ui.c.fill_rrect(h.outset(1.0), 2.0, ui.t.s(0x121416));
         ui.c.fill_rect_gradient(h, ui.t.s(0x5e6265), ui.t.s(0x2a2d30), 2.0);
         ui.c.fill_rect(Rect::new(fx - 9.0, eq.cy(), 18.0, 1.0), ui.t.s(0x111315));
-        ui.hit(Rect::new(fx - 9.0, eq.y, 18.0, eq.h), Action::Mix(MHit::Eq(k as u8)), ["EQ band 1 (low shelf) level: 0.0dB", "EQ band 2 (peaking) level: 0.0dB", "EQ band 3 (high shelf) level: 0.0dB"][k]);
+        ui.off(Rect::new(fx - 9.0, eq.y, 18.0, eq.h), ["EQ band 1 (low shelf) level", "EQ band 2 (peaking) level", "EQ band 3 (high shelf) level"][k]);
     }
     let ly = eq.bottom() + 8.0;
     if knobs {
@@ -586,9 +596,9 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         }
         for k in 0..3 {
             let (kx, ky) = (r.x + 162.0 + 22.0 * k as f32, ly + 20.0 + 20.0 * row as f32);
-            let eq = KnobId::Eq(s.selected_mixer, (k * 2 + row) as u8);
-            ui.hit(Rect::new(kx - 9.0, ky - 9.0, 18.0, 18.0), Action::Knob(eq), s.knob_text(eq));
-            mixer_knob(ui, kx, ky, 7.0, 8.0, s.knob(eq), Some(true));
+            ui.off(Rect::new(kx - 9.0, ky - 9.0, 18.0, 18.0), if row == 0 { "EQ band frequency" } else { "EQ band width" });
+            let look = os_ui::kit::KnobLook::Mixer { halo: 8.0, arc: true };
+            os_ui::kit::knob(ui.c, ui.t, kx, ky, 7.0, 0.5, true, look, os_ui::kit::State::NORMAL.with_disabled(true));
         }
     }
     let mut g = Glyph::new();
@@ -602,28 +612,35 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     if knobs {
         ui.c.glyph(ui.t.tx(0x8c969c), &g);
     }
-
-    // Output rows at the bottom.
     let b = r.bottom();
+    let eq_bottom = if knobs { ly + 50.0 } else { eq.bottom() + 2.0 };
+    ui.veil(Rect::span(r.x, r.right(), sep + 1.0, eq_bottom.min(b - 67.0)), ui.t.s(0x2e3133));
+
+    // Output rows at the bottom: audio outputs are not available yet, greyed out.
     ui.c.fill_rect(Rect::new(r.x, b - 66.0, r.w, 1.0), ui.t.s(0x1f2224));
     ui.c.fill_rect(Rect::new(r.x, b - 33.0, r.w, 1.0), ui.t.s(0x1f2224));
     let mut g = Glyph::new();
     g.ring(r.x + 14.0, b - 48.5, 8.0, 1.5).rect(r.x + 13.3, b - 53.0, 1.4, 5.0).rect(r.x + 13.3, b - 49.2, 4.0, 1.4);
     ui.c.glyph(ui.t.s(0x40464a), &g);
-    ui.hit(Rect::new(r.x + 25.0, b - 60.0, r.w - 28.0, 22.0), Action::Mix(MHit::Output), "Audio output target");
+    ui.off(Rect::new(r.x + 25.0, b - 60.0, r.w - 28.0, 22.0), "Audio output target");
     ui.c.text(Font::new(17), r.x + 30.0, b - 59.0, ui.t.tx(0xd4dade), "(none)");
     chevron(ui, r.right() - 11.0, b - 48.5, true, ui.t.tx(0x8c969c));
+    ui.veil(Rect::span(r.x, r.right(), b - 65.0, b - 34.0), ui.t.s(0x2e3133));
     let mut g = Glyph::new();
     g.ring(r.x + 13.0, b - 16.0, 8.0, 1.6);
     g.erase(true).rect(r.x + 13.0, b - 26.0, 10.0, 20.0);
     g.erase(false).polygon(&[(r.x + 11.0, b - 20.5), (r.x + 16.0, b - 20.5), (r.x + 21.0, b - 16.0), (r.x + 16.0, b - 11.5), (r.x + 11.0, b - 11.5)]);
     ui.c.glyph(ui.t.tx(0xc4ccd0), &g);
-    combo(ui, Rect::new(r.x + 26.0, b - 28.0, 189.0, 24.0), "(none)", Action::Mix(MHit::Output), "Audio output target");
+    ui.veil(Rect::new(r.x + 3.0, b - 26.0, 20.0, 20.0), ui.t.s(0x2e3133));
+    off_combo(ui, Rect::new(r.x + 26.0, b - 28.0, 189.0, 24.0), "Audio output target", ui.t.s(0x2e3133));
 }
 
-fn combo(ui: &mut Ui, r: Rect, text: &str, action: Action, hint: &'static str) {
-    let hov = ui.hit(r, action, hint);
-    os_ui::kit::combo(ui.c, ui.t, r, text, Font::new(17), os_ui::kit::State::hover(hov));
+/// An input / output combo that is not available yet: drawn greyed out, its hit only says so.
+fn off_combo(ui: &mut Ui, r: Rect, name: &'static str, bg: Color) {
+    ui.off(r, name);
+    let st = os_ui::kit::State::NORMAL.with_disabled(true);
+    os_ui::kit::combo(ui.c, ui.t, r, "(none)", Font::new(17), st);
+    ui.veil(r, bg);
 }
 
 /// Small solid chevron centred on (x, y), pointing right or left.
