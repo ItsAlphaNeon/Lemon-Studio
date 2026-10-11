@@ -199,6 +199,7 @@ impl App {
         let ui = &mut self.state.params;
         ui.lists.retain(|k, _| self.plugins.hosted.contains_key(k));
         let mut moved = None;
+        let mut automate = Vec::new();
         for (&key, h) in &self.plugins.hosted {
             let Ok(mut p) = h.plugin.lock() else { continue };
             let weak = Arc::downgrade(&h.plugin);
@@ -219,10 +220,20 @@ impl App {
                     moved = Some(Tweak::Plugin { key, index });
                 }
             }
+            // "Create automation clip" picked in the plugin's own menu (CLAP context menu).
+            for id in p.take_automation_requests() {
+                if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
+                    automate.push((key, index));
+                }
+            }
         }
         if let Some(t) = moved {
             self.state.params.note(t);
             self.tweak_hint();
+        }
+        for (key, index) in automate {
+            self.state.message = self.params_automate(key, index);
+            self.invalidate();
         }
     }
 

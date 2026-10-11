@@ -33,6 +33,7 @@ use clap_sys::process::{clap_process, CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTIN
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{clap_version_is_compatible, CLAP_VERSION};
 
+mod context_menu;
 mod params;
 
 /// A plugin a library offers (the hosting layer's descriptor, format `Clap`).
@@ -187,6 +188,8 @@ struct HostData {
     flush: AtomicBool,
     /// `clap_host_params.rescan` flags not handled yet (the parameter list changed).
     rescan: AtomicU32,
+    /// Parameter ids picked for "Create automation clip" in the plugin's own menus (`context_menu.rs`).
+    automate: Mutex<Vec<u32>>,
 }
 
 static HOST_NAME: &CStr = c"OpenStudio";
@@ -194,8 +197,15 @@ static HOST_URL: &CStr = c"";
 static HOST_VERSION: &CStr = c"0.0.1";
 
 unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_char) -> *const c_void {
-    if !id.is_null() && unsafe { CStr::from_ptr(id) } == CLAP_EXT_PARAMS {
+    if id.is_null() {
+        return ptr::null();
+    }
+    let id = unsafe { CStr::from_ptr(id) };
+    if id == CLAP_EXT_PARAMS {
         return &HOST_PARAMS as *const clap_host_params as *const c_void;
+    }
+    if id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU || id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU_COMPAT {
+        return &context_menu::HOST_CONTEXT_MENU as *const clap_sys::ext::context_menu::clap_host_context_menu as *const c_void;
     }
     ptr::null()
 }
@@ -351,6 +361,7 @@ impl Plugin {
             restart: AtomicBool::new(false),
             flush: AtomicBool::new(false),
             rescan: AtomicU32::new(0),
+            automate: Mutex::new(Vec::new()),
         });
         let host = Box::new(clap_host {
             clap_version: CLAP_VERSION,
@@ -885,6 +896,10 @@ impl os_host::Plugin for Plugin {
         self.param_queue.push((id, plain));
         os_host::wake();
         true
+    }
+
+    fn take_automation_requests(&mut self) -> Vec<u32> {
+        self.automation_requests()
     }
 
     fn take_param_events(&mut self) -> Vec<os_host::ParamEvent> {

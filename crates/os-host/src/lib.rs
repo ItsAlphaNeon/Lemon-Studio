@@ -208,6 +208,11 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     fn take_param_events(&mut self) -> Vec<ParamEvent> {
         Vec::new()
     }
+    /// Parameters the plugin's own menus asked the host to automate since the last call ("Create automation clip",
+    /// CLAP context-menu host entries), by parameter id. Plugins without such menus return nothing.
+    fn take_automation_requests(&mut self) -> Vec<u32> {
+        Vec::new()
+    }
 }
 
 pub type SharedPlugin = Arc<Mutex<dyn Plugin>>;
