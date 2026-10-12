@@ -171,6 +171,12 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     /// Restores a `save_state` blob (UI thread).
     fn load_state(&mut self, data: &[u8]) -> bool;
 
+    /// Why the instance stopped working, when it did: it raised an error the host contained, and from then on renders
+    /// nothing (an effect passes the sound through) and ignores every call. `None` while it works.
+    fn stopped(&self) -> Option<String> {
+        None
+    }
+
     /// Processing latency the plugin reports, in frames (0 when it reports none).
     fn latency(&self) -> u32 {
         0

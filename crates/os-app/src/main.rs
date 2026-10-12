@@ -1102,8 +1102,12 @@ fn wake_ui() {
 }
 
 fn main() {
-    app::move_old_settings();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // A child the app starts to try a native plugin before its first load (spec: plugins/fruity-abi.md).
+    if args.first().map(String::as_str) == Some(os_native::check::CHECK_ARG) {
+        os_native::guard::exit(os_native::check::run(&args[1..]));
+    }
+    app::move_old_settings();
     if args.iter().any(|a| a == "--screenshot") {
         screenshot(&args);
         return;
@@ -1149,4 +1153,7 @@ fn main() {
         frames: FrameLog::open(),
     };
     event_loop.run_app(&mut shell).expect("run");
+    // A native plugin that stopped working stays loaded; unloading it on a normal exit can crash.
+    drop(shell);
+    os_native::guard::exit(0);
 }

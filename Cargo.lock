@@ -2287,6 +2287,7 @@ version = "0.0.1"
 name = "os-native"
 version = "0.0.1"
 dependencies = [
+ "cc",
  "libloading 0.8.9",
  "os-engine",
  "os-host",

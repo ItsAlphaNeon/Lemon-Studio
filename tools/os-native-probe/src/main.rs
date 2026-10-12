@@ -71,7 +71,7 @@ fn main() {
     if i.num_params > 12 {
         println!("  … {} more", i.num_params - 12);
     }
-    let state = p.save_state();
+    let state = p.save_state().unwrap_or_default();
     println!("default state: {} bytes, head {:02x?}", state.len(), &state[..state.len().min(24)]);
     report_log();
 

@@ -36,6 +36,9 @@ pub struct NativePlugin {
     voices: Vec<(u8, IntPtr)>,
     next_tag: IntPtr,
     wants_tick: bool,
+    /// The plugin renders audio in its role: an effect that is no generator, a generator, neither with the NoProcess
+    /// flag (spec: flags). Otherwise its render methods are never called: an effect passes the sound through.
+    renders: bool,
     /// Samples per FL tick at the nominal tempo (generators only).
     spt: f64,
     tick_acc: f64,
@@ -51,6 +54,7 @@ impl NativePlugin {
     /// Wraps a freshly loaded plugin with its descriptor. Not active yet; call `activate`.
     pub fn new(plugin: Plugin, desc: Descriptor) -> Self {
         let wants_tick = plugin.info.flags & flags::WANT_NEW_TICK != 0;
+        let renders = !plugin.info.no_process() && (desc.is_instrument() || !plugin.info.is_generator());
         NativePlugin {
             plugin,
             desc,
@@ -59,6 +63,7 @@ impl NativePlugin {
             voices: Vec::new(),
             next_tag: 1,
             wants_tick,
+            renders,
             spt: 1.0,
             tick_acc: 0.0,
             inter: vec![0.0; MAX_BLOCK * 2],
@@ -77,6 +82,9 @@ impl NativePlugin {
 
 impl Instrument for NativePlugin {
     fn note_on(&mut self, _offset: u32, key: u8, velocity: f32) {
+        if !self.renders || self.plugin.stopped().is_some() {
+            return;
+        }
         let tag = self.next_tag;
         self.next_tag += 1;
         let voice = self.plugin.trigger(f32::from(key), velocity, 0.0, tag);
@@ -91,6 +99,9 @@ impl Instrument for NativePlugin {
     }
 
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        if !self.renders || self.plugin.stopped().is_some() {
+            return;
+        }
         self.set_rate(rate);
         let n = left.len().min(right.len());
         let mut off = 0;
@@ -130,6 +141,10 @@ impl Instrument for NativePlugin {
 
 impl HostedEffect for NativePlugin {
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        // Plugins that process no buffers (controllers, visual plugins) and stopped plugins pass the sound through.
+        if !self.renders || self.plugin.stopped().is_some() {
+            return;
+        }
         self.set_rate(rate);
         let n = left.len().min(right.len());
         let mut off = 0;
@@ -139,7 +154,9 @@ impl HostedEffect for NativePlugin {
                 self.inter[2 * i] = left[off + i];
                 self.inter[2 * i + 1] = right[off + i];
             }
-            self.plugin.eff_render(&mut self.inter[..len * 2]);
+            if !self.plugin.eff_render(&mut self.inter[..len * 2]) {
+                return;
+            }
             for i in 0..len {
                 left[off + i] = self.inter[2 * i];
                 right[off + i] = self.inter[2 * i + 1];
@@ -168,7 +185,7 @@ impl os_host::Plugin for NativePlugin {
             self.plugin.set_playing(true);
             self.active = true;
         }
-        true
+        self.plugin.stopped().is_none()
     }
 
     fn idle(&mut self) {
@@ -192,6 +209,9 @@ impl os_host::Plugin for NativePlugin {
             return Err("the plugin has no editor".into());
         }
         self.plugin.dispatch(dispatch::SHOW_EDITOR, 0, parent as IntPtr);
+        if let Some(code) = self.plugin.stopped() {
+            return Err(format!("the plugin stopped ({})", crate::guard::describe(code)));
+        }
         let h = self.plugin.editor_handle();
         if h == 0 {
             return Err("the plugin did not create an editor".into());
@@ -211,12 +231,15 @@ impl os_host::Plugin for NativePlugin {
     }
 
     fn save_state(&self) -> Option<Vec<u8>> {
-        Some(self.plugin.save_state())
+        self.plugin.save_state()
     }
 
     fn load_state(&mut self, data: &[u8]) -> bool {
-        self.plugin.restore_state(data);
-        true
+        self.plugin.restore_state(data)
+    }
+
+    fn stopped(&self) -> Option<String> {
+        self.plugin.stopped().map(crate::guard::describe)
     }
 }
 

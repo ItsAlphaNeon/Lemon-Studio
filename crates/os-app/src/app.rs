@@ -1571,6 +1571,11 @@ impl App {
                         self.invalidate();
                         continue;
                     }
+                    Request::Stopped(_, why) => {
+                        self.state.message = Some(why);
+                        self.invalidate();
+                        continue;
+                    }
                 }
                 self.state.piano.dirty = true;
                 self.invalidate();

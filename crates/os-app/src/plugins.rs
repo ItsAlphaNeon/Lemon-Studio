@@ -65,6 +65,9 @@ pub enum Request {
     MiscMenu(usize, crate::misc_page::M, i32, i32),
     /// A greyed-out control of the window was clicked: the app says it is not available yet.
     NotAvailable(&'static str),
+    /// The instance stopped working (it raised an error the host contained, spec: plugins/fruity-abi.md "Crash
+    /// containment"): row, why. Its window closes; it stays in place, bypassed.
+    Stopped(usize, String),
 }
 
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
@@ -95,6 +98,11 @@ pub struct Plugins {
     /// The preset file each instance last loaded or saved (spec: plugins/presets.md), by `hosted` key.
     pub presets: BTreeMap<usize, PathBuf>,
     rate: u32,
+    /// Verdicts of the one-time child-process check a native plugin passes before its first load here (spec:
+    /// plugins/fruity-abi.md "Crash containment"). `None`: no check (tests, where this program is the test harness).
+    native_checks: Option<os_native::check::Checks>,
+    /// Instances whose stop was reported (`Request::Stopped` once each).
+    stopped_told: std::collections::BTreeSet<usize>,
 }
 
 /// Folders searched for plugin files: a format's standard folders (`standard`), then `bundled/` next to the build
@@ -220,7 +228,32 @@ impl Plugins {
             let native = effects.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
             eprintln!("[plugins] {} instruments, {} effects ({native} native)", available.len(), effects.len());
         }
-        Plugins { available, effects, scale: 1.0, ..Plugins::default() }
+        let native_checks = (!cfg!(test)).then(|| os_native::check::Checks::load(os_paths::user_file(NATIVE_CHECKS)));
+        Plugins { available, effects, scale: 1.0, native_checks, ..Plugins::default() }
+    }
+
+    /// Native plugins load into this process only once a child process tried them (`os_native::check`): one that
+    /// crashes, hangs or stops with an error there is refused with the reason.
+    fn native_check(&mut self, desc: &Descriptor) -> Result<(), String> {
+        if desc.format != os_host::Format::Native {
+            return Ok(());
+        }
+        let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return Ok(()) };
+        match checks.verdict(&program, &desc.path) {
+            os_native::check::Verdict::Works => Ok(()),
+            os_native::check::Verdict::Fails(why) => Err(format!("{} can't load ({why})", desc.name)),
+        }
+    }
+
+    /// Whether effect `index` can be created without waiting: anything but a native effect whose check has not run
+    /// yet. That check is started in the background; ask again on a later tick.
+    pub fn effect_ready(&mut self, index: usize) -> bool {
+        let Some(a) = self.effects.get(index) else { return true };
+        if a.desc.format != os_host::Format::Native {
+            return true;
+        }
+        let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return true };
+        checks.ready(&program, &a.desc.path)
     }
 
     /// Picker labels of the instruments (`labels`), in `available` order.
@@ -241,6 +274,7 @@ impl Plugins {
     /// `create` with a starting state (the plugin's own saved state format).
     pub fn create_with(&mut self, row: usize, index: usize, state: Option<&[u8]>) -> Result<String, String> {
         let a = self.available.get(index).ok_or("no such plugin")?.clone();
+        self.native_check(&a.desc)?;
         let plugin = a.lib.clone().create(&a.desc.id)?;
         let mut p = plugin.lock().map_err(|_| "plugin busy")?;
         if let Some(st) = state {
@@ -269,6 +303,7 @@ impl Plugins {
         let a = self.effects.get(index).ok_or("no such effect")?.clone();
         let key = fx_key(track, slot);
         self.drop_key(key);
+        self.native_check(&a.desc)?;
         let plugin = a.lib.clone().create(&a.desc.id)?;
         let mut p = plugin.lock().map_err(|_| "plugin busy")?;
         if let Some(st) = state {
@@ -291,6 +326,7 @@ impl Plugins {
         self.close_window(key);
         self.hosted.remove(&key);
         self.presets.remove(&key);
+        self.stopped_told.remove(&key);
     }
 
     /// Remembers the preset the instance under `key` holds and shows its name in the window's Presets box.
@@ -632,6 +668,13 @@ impl Plugins {
         }
         for (&row, h) in &mut self.hosted {
             if let Ok(mut p) = h.plugin.try_lock() {
+                if let Some(why) = p.stopped() {
+                    if self.stopped_told.insert(row) {
+                        out.push(Request::Stopped(row, format!("{} stopped ({why}) and is bypassed", p.desc().name)));
+                        close.push(row);
+                    }
+                    continue;
+                }
                 p.idle();
                 #[cfg(plugin_windows)]
                 if let (Some(w), false, Some((ew, eh))) = (&h.window, h.linked(), p.editor_size()) {
@@ -750,6 +793,8 @@ pub fn new_slot(name: &str) -> os_model::SlotPlugin {
         os_model::SlotPlugin { name: name.into(), state: Vec::new() }
     }
 }
+/// File (in the user folder) remembering which native plugins passed the child-process check.
+const NATIVE_CHECKS: &str = "native-checks.txt";
 /// The sampler parameter a note's sample start modulates per note (Open Sampler's START OFFSET).
 const SAMPLE_START: &str = "Sample start offset";
 
@@ -1866,6 +1911,134 @@ mod tests {
                 pump(&mut pl, 100);
             }
         }
+    }
+
+    /// An instance that stopped working (spec: plugins/fruity-abi.md, "Crash containment") is reported once, with its
+    /// window closed, and is not called on later ticks.
+    #[test]
+    fn a_stopped_plugin_is_reported_once() {
+        struct Stopped(Descriptor);
+        impl os_engine::Instrument for Stopped {
+            fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+            fn note_off(&mut self, _: u32, _: u8) {}
+            fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+        }
+        impl os_engine::HostedEffect for Stopped {
+            fn process_fx(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+        }
+        impl os_host::Plugin for Stopped {
+            fn desc(&self) -> &Descriptor {
+                &self.0
+            }
+            fn activate(&mut self, _: u32) -> bool {
+                false
+            }
+            fn idle(&mut self) {
+                panic!("a stopped plugin is not idled");
+            }
+            fn has_editor(&self) -> bool {
+                false
+            }
+            fn editor_open(&self) -> bool {
+                false
+            }
+            fn open_editor(&mut self, _: *mut c_void, _: f32) -> Result<(u32, u32), String> {
+                Err("stopped".into())
+            }
+            fn editor_size(&self) -> Option<(u32, u32)> {
+                None
+            }
+            fn close_editor(&mut self) {}
+            fn save_state(&self) -> Option<Vec<u8>> {
+                None
+            }
+            fn load_state(&mut self, _: &[u8]) -> bool {
+                false
+            }
+            fn stopped(&self) -> Option<String> {
+                Some("plugin error".into())
+            }
+        }
+        let desc = Descriptor {
+            format: os_host::Format::Native,
+            id: "native:Test Effect".into(),
+            name: "Test Effect".into(),
+            vendor: String::new(),
+            version: String::new(),
+            features: vec![],
+            kind: os_host::Kind::Effect,
+            path: "C:/Plugins/Test Effect.dll".into(),
+        };
+        let mut pl = Plugins::default();
+        let key = fx_key(1, 0);
+        let plugin: SharedPlugin = Arc::new(std::sync::Mutex::new(Stopped(desc)));
+        pl.hosted.insert(key, Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None });
+        assert_eq!(pl.idle(|_| None), vec![Request::Stopped(key, "Test Effect stopped (plugin error) and is bypassed".into())]);
+        assert_eq!(pl.idle(|_| None), vec![]);
+        pl.drop_key(key);
+        assert!(pl.stopped_told.is_empty());
+    }
+
+    /// One installed native effect (`OS_NATIVE_ONE=<folder name>`) through the app's whole path: created and
+    /// activated at the device rate, rendered on an audio thread while its editor is open, state saved and restored,
+    /// closed and dropped. Loads FL DLLs in-process, so ignored; run once per plugin in its own process:
+    /// `OS_NATIVE_ONE="Fruity Balance" cargo test -p os-app --bin lemonstudio native_effect_lifecycle -- --ignored`.
+    #[test]
+    #[ignore]
+    fn native_effect_lifecycle() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
+        let fl = os_native::default_fl_dir();
+        let dll = os_native::find_plugin(&fl, &name).expect("plugin installed");
+        let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
+        let a = Available { desc: lib.plugins()[0].clone(), lib };
+        let mut pl = Plugins { scale: 1.0, rate: 48000, effects: vec![a], ..Plugins::default() };
+        let key = fx_key(1, 0);
+        eprintln!("STEP create");
+        if let Err(e) = pl.create_effect(1, 0, 0, None) {
+            eprintln!("RESULT refused: {e}");
+            return;
+        }
+        let fx = pl.effects()[0].2.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let audio = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let (mut l, mut r) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+                let mut n = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
+                        *a = ((n + i as u64) as f32 * 0.05).sin() * 0.5;
+                        *b = *a;
+                    }
+                    fx.lock().unwrap().process_fx(48000, &mut l, &mut r);
+                    n += 512;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                l.iter().chain(&r).all(|s| s.is_finite())
+            })
+        };
+        eprintln!("STEP window");
+        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        match pl.open_window(key, info) {
+            Ok(()) => {
+                let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+                unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+                pump(&mut pl, 700);
+            }
+            Err(e) => eprintln!("STEP no window: {e}"),
+        }
+        eprintln!("STEP state");
+        let st = pl.state(key).unwrap_or_default();
+        pl.set_state(key, &st);
+        eprintln!("STEP close");
+        pl.close_if_open(key);
+        pump(&mut pl, 100);
+        stop.store(true, Ordering::Relaxed);
+        let finite = audio.join().unwrap();
+        eprintln!("STEP drop");
+        pl.drop_key(key);
+        eprintln!("RESULT ok (state {} bytes, finite output {finite})", st.len());
     }
 
     /// With the experimental native host opted in, the scan offers the user's installed FL native
