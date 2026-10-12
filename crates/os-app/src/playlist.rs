@@ -13,9 +13,11 @@ use os_ui::Rect;
 
 use crate::app::{App, Drag, State};
 
-/// Track row pitch and clip height at the default size (spec: ui/main-window.md §6).
+/// Track row pitch at the default size (spec: ui/main-window.md §6); a clip fills its row less the 3 px gap.
 pub const ROW_H: f32 = 48.0;
-pub const CLIP_H: f32 = 45.0;
+/// Track heights Ctrl+wheel over the headers can reach (§6, OS).
+pub const ROW_MIN: f32 = 24.0;
+pub const ROW_MAX: f32 = 160.0;
 /// Title strip of a clip incl. its top border (spec: ui/playlist.md §2).
 pub const TITLE_H: f32 = 15.0;
 /// Marker lane under the ruler, when the arrangement has time markers (§1).
@@ -212,6 +214,11 @@ pub enum Cmd {
     MakeUnique,
     InsertSpace,
     DeleteSpace,
+    /// Shift+G / Alt+G (§3a): group the selected clips / take their groups apart.
+    GroupClips,
+    UngroupClips,
+    /// Shift+Tab: the next common snap setting (§4).
+    CycleSnap,
     Consolidate,
     SelectAll,
     Deselect,
@@ -413,6 +420,8 @@ pub struct PlaylistState {
     /// each audio clip's channel had when it started.
     pub stretch: bool,
     pub stretch_base: Vec<(u16, f64)>,
+    /// Track row pitch (vertical zoom: Ctrl+wheel over the track headers).
+    pub row_h: f32,
     /// Last header click (track, time) for double-click rename.
     pub last_header: Option<(u16, std::time::Instant)>,
     /// Last left click on an audio clip (clip, time): a second one soon after opens its sampler.
@@ -447,6 +456,7 @@ impl Default for PlaylistState {
             arr_anchor: (300.0, 90.0),
             stretch: false,
             stretch_base: Vec::new(),
+            row_h: ROW_H,
             last_header: None,
             last_clip: None,
             waves: RefCell::new(HashMap::new()),
@@ -457,10 +467,10 @@ impl Default for PlaylistState {
 }
 
 impl PlaylistState {
-    /// Forget everything tied to the previous project (keeps tool and snap).
+    /// Forget everything tied to the previous project (keeps tool, snap and track height).
     pub fn reset(&mut self) {
-        let (tool, snap) = (self.tool, self.snap);
-        *self = PlaylistState { tool, snap, ..PlaylistState::default() };
+        let (tool, snap, row_h) = (self.tool, self.snap, self.row_h);
+        *self = PlaylistState { tool, snap, row_h, ..PlaylistState::default() };
     }
 
     /// The waveform of a sample path (loaded and summarised once).
@@ -503,16 +513,18 @@ impl PlaylistState {
 /// Height of a member row of a collapsed group: a thin strip showing its clips as bars (§6a).
 pub const STRIP_H: f32 = 6.0;
 
-/// Vertical layout of the tracks (§6a): every track's top in content pixels. Rows are `ROW_H` tall; members of a
-/// collapsed group are `STRIP_H` strips.
+/// Vertical layout of the tracks (§6a): every track's top in content pixels. Rows are `row_h` tall (`ROW_H` unless
+/// zoomed); members of a collapsed group are `STRIP_H` strips.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rows {
     top: Vec<f32>,
+    pub row_h: f32,
 }
 
 impl Rows {
     pub fn new(s: &State) -> Rows {
         let tracks = s.project.arrangement().map(|a| a.tracks.as_slice()).unwrap_or(&[]);
+        let row_h = s.playlist.row_h.clamp(ROW_MIN, ROW_MAX);
         let mut top = Vec::with_capacity(usize::from(TRACKS) + 1);
         let (mut y, mut collapsed) = (0.0, false);
         for t in 0..usize::from(TRACKS) {
@@ -522,10 +534,15 @@ impl Rows {
             if !grouped {
                 collapsed = tr.is_some_and(|x| x.collapsed);
             }
-            y += if grouped && collapsed { STRIP_H } else { ROW_H };
+            y += if grouped && collapsed { STRIP_H } else { row_h };
         }
         top.push(y);
-        Rows { top }
+        Rows { top, row_h }
+    }
+
+    /// A clip's height: its row less the 3 px gap.
+    pub fn clip_h(&self) -> f32 {
+        self.row_h - 3.0
     }
 
     pub fn top(&self, t: u16) -> f32 {
@@ -539,7 +556,7 @@ impl Rows {
 
     /// A collapsed group's member: drawn as a strip.
     pub fn strip(&self, t: u16) -> bool {
-        self.height(t) < ROW_H - 0.5
+        self.height(t) < self.row_h - 0.5
     }
 
     /// The track at content height `y`.
@@ -596,13 +613,13 @@ impl PGeom {
         if self.rows.strip(c.track) {
             return Rect::new(x, self.y_of(c.track) + 1.0, w, STRIP_H - 2.0);
         }
-        Rect::new(x, self.y_of(c.track), w, CLIP_H)
+        Rect::new(x, self.y_of(c.track), w, self.rows.clip_h())
     }
 
     /// The body of a clip below its title strip (automation curves, notes, waveforms).
     pub fn body(&self, c: &Clip) -> Rect {
         let r = self.clip_rect(c);
-        Rect::new(r.x, r.y + TITLE_H, r.w, (CLIP_H - TITLE_H - 1.0).max(1.0))
+        Rect::new(r.x, r.y + TITLE_H, r.w, (self.rows.clip_h() - TITLE_H - 1.0).max(1.0))
     }
 }
 
@@ -873,6 +890,90 @@ pub fn targets(s: &State) -> Vec<usize> {
     if s.playlist.sel.is_empty() { (0..clips(s).len()).collect() } else { s.playlist.sel.clone() }
 }
 
+/// `idx` plus every clip that shares a group with one of them (grouped clips select and move as one, §3a).
+pub fn with_groups(s: &State, mut idx: Vec<usize>) -> Vec<usize> {
+    let groups: Vec<u16> = idx.iter().filter_map(|&i| clips(s).get(i)).map(Clip::group).filter(|&g| g != 0).collect();
+    if groups.is_empty() {
+        return idx;
+    }
+    for (i, c) in clips(s).iter().enumerate() {
+        if groups.contains(&c.group()) && !idx.contains(&i) {
+            idx.push(i);
+        }
+    }
+    idx
+}
+
+/// Shift+G: put the selected clips (and the groups they belong to) into one new group. Returns how many.
+pub fn group_clips(s: &mut State) -> usize {
+    let idx = with_groups(s, s.playlist.sel.clone());
+    if idx.len() < 2 {
+        return 0;
+    }
+    let g = clips(s).iter().map(Clip::group).max().unwrap_or(0).saturating_add(1).max(1);
+    let arr = arr_mut(s);
+    for &i in &idx {
+        if let Some(c) = arr.clips.get_mut(i) {
+            c.set_group(g);
+        }
+    }
+    s.playlist.sel = idx.clone();
+    s.piano.dirty = true;
+    idx.len()
+}
+
+/// Alt+G / Alt+U: take the selected clips' groups apart. Returns how many clips left a group.
+pub fn ungroup_clips(s: &mut State) -> usize {
+    let idx = with_groups(s, s.playlist.sel.clone());
+    let arr = arr_mut(s);
+    let mut n = 0;
+    for &i in &idx {
+        if let Some(c) = arr.clips.get_mut(i).filter(|c| c.group() != 0) {
+            c.set_group(0);
+            n += 1;
+        }
+    }
+    if n > 0 {
+        s.piano.dirty = true;
+    }
+    n
+}
+
+/// Copies of grouped clips (`from..` in the clip list) form new groups of their own, as FL numbers a duplicated
+/// group anew.
+fn regroup_copies(s: &mut State, from: usize) {
+    let arr = arr_mut(s);
+    let mut next = arr.clips[..from.min(arr.clips.len())].iter().map(Clip::group).max().unwrap_or(0);
+    let mut map: HashMap<u16, u16> = HashMap::new();
+    for c in arr.clips.iter_mut().skip(from) {
+        let g = c.group();
+        if g != 0 {
+            let n = *map.entry(g).or_insert_with(|| {
+                next = next.saturating_add(1);
+                next
+            });
+            c.set_group(n);
+        }
+    }
+}
+
+/// Ctrl+wheel over the track headers: change the track height around the track under the mouse (§6).
+pub fn zoom_rows(s: &mut State, grid: Rect, y: f32, notches: f32) {
+    let rows = Rows::new(s);
+    let cy = s.playlist_scroll.1 + (y - grid.y);
+    let t = rows.at(cy.max(0.0));
+    let frac = ((cy - rows.top(t)) / rows.height(t).max(1.0)).clamp(0.0, 1.0);
+    s.playlist.row_h = (s.playlist.row_h * 1.15f32.powf(notches)).round().clamp(ROW_MIN, ROW_MAX);
+    let rows = Rows::new(s);
+    s.playlist_scroll.1 = (rows.top(t) + frac * rows.height(t) - (y - grid.y)).max(0.0);
+}
+
+/// Shift+Tab: the next of the common snap settings (Line, Cell, Beat, Bar, none).
+pub fn next_snap(sn: Snap) -> Snap {
+    const CYCLE: [Snap; 5] = [Snap::Line, Snap::Cell, Snap::Beat, Snap::Bar, Snap::None];
+    CYCLE.iter().position(|&x| x == sn).map_or(Snap::Line, |i| CYCLE[(i + 1) % CYCLE.len()])
+}
+
 /// Split clip `i` at `tick` (inside it); the right part keeps the content in place. Returns the new clip's index.
 pub fn split(s: &mut State, i: usize, tick: u32) -> Option<usize> {
     let c = *clips(s).get(i)?;
@@ -990,6 +1091,7 @@ pub fn duplicate(s: &mut State) {
         arr.clips.push(n);
     }
     let n = arr.clips.len();
+    regroup_copies(s, first);
     s.playlist.sel = (first..n).collect();
     if let Some((r0, r1)) = s.playlist.range {
         s.playlist.range = Some((r0 + span, r1 + span));
@@ -1016,13 +1118,15 @@ pub fn paste(s: &mut State) {
         arr.clips.push(n);
     }
     let n = arr.clips.len();
+    regroup_copies(s, start);
     s.playlist.sel = (start..n).collect();
     s.piano.dirty = true;
 }
 
-/// Ctrl+Insert: insert the time selection's length of empty space at its start (all tracks).
-pub fn insert_space(s: &mut State) -> bool {
-    let Some((r0, r1)) = s.playlist.range.filter(|r| r.1 > r.0) else { return false };
+/// Ctrl+Insert: insert the time selection's length of empty space at its start (all tracks); without a time
+/// selection, one bar at the song position (§5, OS).
+pub fn insert_space(s: &mut State) -> (u32, u32) {
+    let (r0, r1) = s.playlist.range.filter(|r| r.1 > r.0).unwrap_or_else(|| (s.playlist.pos, s.playlist.pos + bar(s)));
     let len = r1 - r0;
     let ids: Vec<usize> = clips(s).iter().enumerate().filter(|(_, c)| c.position < r0 && c.end() > r0).map(|(i, _)| i).collect();
     for i in ids {
@@ -1040,7 +1144,7 @@ pub fn insert_space(s: &mut State) -> bool {
         }
     }
     s.piano.dirty = true;
-    true
+    (r0, r1)
 }
 
 /// Ctrl+Delete: remove the time selection and pull later clips left.
@@ -1480,12 +1584,16 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
             ],
         ),
         PItem::sub(
+            "Group",
+            vec![PItem::new("Group", Cmd::GroupClips).key("Shift+G"), PItem::new("Ungroup", Cmd::UngroupClips).key("Alt+G")],
+        ),
+        PItem::sub(
             "Zoom",
             vec![
                 PItem::new("Zoom in", Cmd::ZoomIn).key("PgUp"),
                 PItem::new("Zoom out", Cmd::ZoomOut).key("PgDn"),
                 PItem::new("Zoom out far", Cmd::ZoomAll).key("Shift+4"),
-                PItem::new("Zoom on selection", Cmd::ZoomSelection).key("Shift+Z"),
+                PItem::new("Zoom on selection", Cmd::ZoomSelection).key("Shift+5"),
             ],
         ),
         PItem::sub(
@@ -1826,10 +1934,12 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
     if app.ctrl && !right {
         match hit {
             Some(i) => {
-                if let Some(k) = s.playlist.sel.iter().position(|&j| j == i) {
-                    s.playlist.sel.remove(k);
+                // A grouped clip toggles with its group.
+                let group = with_groups(s, vec![i]);
+                if s.playlist.sel.contains(&i) {
+                    s.playlist.sel.retain(|j| !group.contains(j));
                 } else {
-                    s.playlist.sel.push(i);
+                    s.playlist.sel.extend(group.into_iter().filter(|j| !s.playlist.sel.contains(j)).collect::<Vec<_>>());
                 }
             }
             None => {
@@ -1897,6 +2007,12 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             app.drag = Some(Drag::Pl(PlDrag::Marquee { x0: x, y0: y, base: Vec::new() }));
         }
         PlTool::Draw | PlTool::Paint | PlTool::Select => match hit {
+            // Shift+drag on empty grid with Draw / Paint: a quick slice line, as the Slice tool (§3).
+            None if app.shift => {
+                app.drag = Some(Drag::Pl(PlDrag::Slice { y0: y }));
+                let t = snap_round(s, &g, tick, alt);
+                s.playlist.overlay = Some(Overlay::Slice { tick: t, t0: track, t1: track });
+            }
             None => {
                 snapshot(s);
                 s.playlist.sel.clear();
@@ -1918,9 +2034,11 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     s.pattern = n;
                 }
                 s.playlist.picker = source_kind(s, c.source);
-                let mut group = if s.playlist.sel.contains(&i) { s.playlist.sel.clone() } else { vec![i] };
+                // Grouped clips go along (§3a); clicking one selects its whole group.
+                let grouped = clips(s)[i].group() != 0;
+                let mut group = with_groups(s, if s.playlist.sel.contains(&i) { s.playlist.sel.clone() } else { vec![i] });
                 if !s.playlist.sel.contains(&i) {
-                    s.playlist.sel = if tool == PlTool::Select { vec![i] } else { Vec::new() };
+                    s.playlist.sel = if tool == PlTool::Select || grouped { group.clone() } else { Vec::new() };
                 }
                 // The clicked clip first.
                 group.retain(|&j| j != i);
@@ -1937,6 +2055,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                         arr.clips.push(cp);
                     }
                     group = (first..arr.clips.len()).collect();
+                    regroup_copies(s, first);
                     s.piano.dirty = true;
                 }
                 let orig: Vec<(usize, Clip)> = group.iter().filter_map(|&j| clips(s).get(j).map(|c| (j, *c))).collect();
@@ -2669,7 +2788,32 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::InsertSpace => {
             snapshot(s);
-            (!insert_space(s)).then(|| "Insert space: make a time selection first (right-drag the ruler)".into())
+            insert_space(s);
+            None
+        }
+        Cmd::GroupClips => {
+            snapshot(s);
+            match group_clips(s) {
+                0 => {
+                    s.playlist.undo.pop();
+                    Some("Group: select two or more clips first".into())
+                }
+                n => Some(format!("Grouped {n} clips")),
+            }
+        }
+        Cmd::UngroupClips => {
+            snapshot(s);
+            match ungroup_clips(s) {
+                0 => {
+                    s.playlist.undo.pop();
+                    Some("Ungroup: no grouped clip is selected".into())
+                }
+                n => Some(format!("Ungrouped {n} clips")),
+            }
+        }
+        Cmd::CycleSnap => {
+            s.playlist.snap = next_snap(s.playlist.snap);
+            Some(format!("Snap: {}", s.playlist.snap.label()))
         }
         Cmd::DeleteSpace => {
             snapshot(s);
@@ -3162,6 +3306,8 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
     let cmd = match key {
         Key::Character(c) if ctrl && alt && c.eq_ignore_ascii_case("c") => Cmd::Consolidate,
         Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("c") => Cmd::MakeUnique,
+        // Performance mode (live clip launching) is not built yet.
+        Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("p") => Cmd::NotYet("Performance mode"),
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") => Cmd::SelectAll,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("d") => Cmd::Deselect,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c") => Cmd::Copy,
@@ -3176,6 +3322,11 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("m") => Cmd::StretchMode,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("i") => Cmd::InvertSelection,
         Key::Character(c) if shift && !ctrl && !alt && (c == "4" || c == "$") => Cmd::ZoomAll,
+        Key::Character(c) if shift && !ctrl && !alt && (c == "5" || c == "%") => Cmd::ZoomSelection,
+        Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("g") => Cmd::GroupClips,
+        Key::Character(c) if alt && !ctrl && (c.eq_ignore_ascii_case("g") || c.eq_ignore_ascii_case("u")) => Cmd::UngroupClips,
+        Key::Named(NamedKey::End) if !ctrl && !alt => Cmd::ZoomSelection,
+        Key::Named(NamedKey::Tab) if shift && !ctrl && !alt => Cmd::CycleSnap,
         Key::Character(c) if !ctrl && !alt && !app.typing_on() && PlTool::from_letter(c).is_some() => {
             Cmd::Tool(PlTool::from_letter(c).expect("checked"))
         }

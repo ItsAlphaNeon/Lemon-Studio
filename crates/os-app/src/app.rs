@@ -3193,14 +3193,24 @@ impl App {
             self.scroll_set(Scroll::RackX, self.scroll_get(Scroll::RackX) - rx * 4.0 * views::rack::STEP_W);
             return Some(Win::ChannelRack);
         }
+        let alt = self.alt;
+        let pl_grid = self.pl_grid;
         let s = &mut self.state;
         let (dx, dy) = if shift { (dy, dx) } else { (dx, dy) };
+        let row_h = s.playlist.row_h;
         match area {
             Some(Action::Fader(_) | Action::Mix(_) | Action::MixerArea) => {
                 s.mixer_scroll = (s.mixer_scroll - (dy + dx) * 44.0).max(0.0);
                 Some(Win::Mixer)
             }
-            Some(Action::PlaylistArea | Action::PlRuler | Action::PlMarkers) if ctrl => {
+            // Ctrl+wheel over the track headers: track height (spec: ui/playlist.md §6).
+            Some(Action::PlHeader(_) | Action::PlLed(_) | Action::PlGroupArrow(_)) if ctrl => {
+                let grid = pl_grid.unwrap_or(Rect::new(481.0, 150.0, 1400.0, 800.0));
+                crate::playlist::zoom_rows(s, grid, y, dy + dx);
+                Some(Win::Playlist)
+            }
+            // Ctrl+wheel anywhere over the time line, Alt+wheel over the ruler: time zoom around the mouse (§5).
+            Some(Action::PlaylistArea | Action::PlRuler | Action::PlMarkers) if ctrl || (alt && !matches!(area, Some(Action::PlaylistArea))) => {
                 let gx = self.pl_grid.map_or(481.0, |g| g.x);
                 let bar = (s.playlist_scroll.0 + x - gx) / s.playlist_bar_w;
                 s.playlist_bar_w = (s.playlist_bar_w * 1.25f32.powf(dy + dx)).clamp(4.0, 600.0);
@@ -3215,12 +3225,12 @@ impl App {
                 None
             }
             Some(Action::PlHeader(_) | Action::PlLed(_) | Action::PlGroupArrow(_)) => {
-                s.playlist_scroll.1 = (s.playlist_scroll.1 - dy * 48.0).max(0.0);
+                s.playlist_scroll.1 = (s.playlist_scroll.1 - dy * row_h).max(0.0);
                 Some(Win::Playlist)
             }
             Some(Action::PlaylistArea) => {
                 s.playlist_scroll.0 = (s.playlist_scroll.0 - dx * 60.0).max(0.0);
-                s.playlist_scroll.1 = (s.playlist_scroll.1 - dy * 48.0).max(0.0);
+                s.playlist_scroll.1 = (s.playlist_scroll.1 - dy * row_h).max(0.0);
                 Some(Win::Playlist)
             }
             _ => None,
@@ -6613,6 +6623,161 @@ mod tests {
         assert_eq!(back.automation(ch).map(|a| a.points.len()), Some(n + 1));
     }
 
+    /// Playlist navigation and editing shortcuts (spec: ui/playlist.md §3, §3a, §4, §5, §6): Ctrl+wheel over the
+    /// headers = track height, Alt+wheel over the ruler = time zoom, End = zoom on selection, Shift+G / Alt+G /
+    /// Alt+U clip groups (move together, duplicates get their own group, saved), Shift+drag slice in Draw,
+    /// Shift+Tab snap cycle, Ctrl+Insert without a time selection, Ctrl+Shift+P not available yet, F5 raises.
+    #[test]
+    fn playlist_keybinds() {
+        use crate::playlist::{self as pl, Snap};
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.state.playlist.reset();
+        app.state.playlist.row_h = pl::ROW_H;
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let grid = app.pl_grid().expect("playlist grid");
+        let g = pl::PGeom::new(&app.state, grid);
+        let bar = 4 * u32::from(app.state.project.ppq);
+        let at = |t: u32, track: u16| (g.x_of(t as f32) + 10.0, g.y_of(track) + 30.0);
+        let drag = |app: &mut App, c: &mut Canvas, (x0, y0): (f32, f32), (x1, y1): (f32, f32)| {
+            app.mouse_move(x0, y0);
+            app.mouse_down();
+            for i in 1..=10 {
+                let k = i as f32 / 10.0;
+                app.mouse_move(x0 + (x1 - x0) * k, y0 + (y1 - y0) * k);
+            }
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        let on_track = |app: &App, t: u16| -> Vec<os_model::Clip> {
+            let mut v: Vec<os_model::Clip> = pl::clips(&app.state).iter().filter(|c| c.track == t).copied().collect();
+            v.sort_by_key(|c| c.position);
+            v
+        };
+
+        // Shift+Tab cycles Line, Cell, Beat, Bar, none.
+        app.shift = true;
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            app.key(&Key::Named(NamedKey::Tab), false, false);
+            seen.push(app.state.playlist.snap);
+        }
+        app.shift = false;
+        assert_eq!(seen, vec![Snap::Cell, Snap::Beat, Snap::Bar, Snap::None, Snap::Line]);
+
+        // Two clips, grouped with Shift+G: they select and move as one.
+        drag(&mut app, &mut c, at(0, 0), at(0, 0));
+        drag(&mut app, &mut c, at(bar, 1), at(bar, 1));
+        assert_eq!(pl::clips(&app.state).len(), 2);
+        app.key(&Key::Character("a".into()), true, false);
+        app.shift = true;
+        app.key(&Key::Character("G".into()), false, false);
+        app.shift = false;
+        let groups: Vec<u16> = pl::clips(&app.state).iter().map(|c| c.group()).collect();
+        assert!(groups[0] != 0 && groups[0] == groups[1], "{groups:?}");
+        app.key(&Key::Character("d".into()), true, false);
+        drag(&mut app, &mut c, at(0, 0), (g.x_of(2.0 * bar as f32) + 10.0, g.y_of(0) + 30.0));
+        assert_eq!((on_track(&app, 0)[0].position, on_track(&app, 1)[0].position), (2 * bar, 3 * bar), "the group moved together");
+        assert_eq!(app.state.playlist.sel.len(), 2, "clicking a grouped clip selects its group");
+        // A duplicate is a group of its own; the copy keeps the shape.
+        app.key(&Key::Character("b".into()), true, false);
+        let (orig, copy) = (on_track(&app, 0)[0], on_track(&app, 0)[1]);
+        assert!(copy.group() != 0 && copy.group() != orig.group() && copy.group() == on_track(&app, 1)[1].group());
+        // The group survives saving.
+        let path = std::env::temp_dir().join(format!("openstudio-pl-groups-{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let saved: Vec<u16> = back.arrangement().unwrap().clips.iter().map(|c| c.group()).collect();
+        assert_eq!(saved.iter().filter(|&&g| g == orig.group()).count(), 2, "{saved:?}");
+        // Alt+G and Alt+U take groups apart.
+        app.key(&Key::Character("d".into()), true, false);
+        app.state.playlist.last_clip = None; // not a double click
+        drag(&mut app, &mut c, at(2 * bar, 0), at(2 * bar, 0));
+        app.key(&Key::Character("g".into()), false, true);
+        assert_eq!(on_track(&app, 0)[0].group(), 0);
+        assert_eq!(on_track(&app, 1)[0].group(), 0);
+        app.key(&Key::Character("a".into()), true, false);
+        app.key(&Key::Character("u".into()), false, true);
+        assert!(pl::clips(&app.state).iter().all(|c| c.group() == 0));
+        app.key(&Key::Character("d".into()), true, false);
+
+        // End zooms on the selection (all clips when none is selected).
+        app.state.playlist.sel = vec![pl::clips(&app.state).iter().position(|c| c.track == 0 && c.position == 2 * bar).unwrap()];
+        app.key(&Key::Named(NamedKey::End), false, false);
+        assert!((app.state.playlist_bar_w - 600.0f32.min(grid.w)).abs() < 0.01, "one bar fills the view: {}", app.state.playlist_bar_w);
+        assert!((app.state.playlist_scroll.0 - 2.0 * app.state.playlist_bar_w).abs() < 0.01);
+        app.state.playlist_bar_w = crate::views::playlist::BAR_W;
+        app.state.playlist_scroll = (0.0, 0.0);
+        app.state.playlist.sel.clear();
+        frame(&mut app, &mut c, None);
+
+        // Shift+drag across clips from empty grid (Draw tool) slices them; no clip is placed.
+        let g = pl::PGeom::new(&app.state, grid);
+        app.state.project.arrangements[0].clips.push(os_model::Clip::new(0, 2 * bar, 4, os_model::ClipSource::Pattern(1)));
+        let n = pl::clips(&app.state).len();
+        app.shift = true;
+        drag(&mut app, &mut c, (g.x_of(bar as f32), g.y_of(3) + 30.0), (g.x_of(bar as f32), g.y_of(5) + 30.0));
+        app.shift = false;
+        assert_eq!(pl::clips(&app.state).len(), n + 1);
+        assert_eq!(on_track(&app, 4).iter().map(|c| (c.position, c.length)).collect::<Vec<_>>(), vec![(0, bar), (bar, bar)]);
+
+        // Ctrl+wheel over the track headers changes the track height; Alt+wheel over the ruler zooms time.
+        let header = hit_rect(&app, &Action::PlHeader(2));
+        app.mouse_move(header.cx(), header.cy());
+        app.wheel(0.0, 2.0, false, true);
+        let h = app.state.playlist.row_h;
+        assert!(h > pl::ROW_H + 10.0, "taller tracks: {h}");
+        frame(&mut app, &mut c, None);
+        let g = pl::PGeom::new(&app.state, grid);
+        assert_eq!(g.rows.top(3), 3.0 * h);
+        assert_eq!(g.clip_rect(&on_track(&app, 4)[0]).h, h - 3.0);
+        assert!(hit_rect(&app, &Action::PlLed(0)).bottom() <= g.y_of(0) + h, "the LED stays inside its row");
+        for _ in 0..40 {
+            app.wheel(0.0, -1.0, false, true);
+        }
+        assert_eq!(app.state.playlist.row_h, pl::ROW_MIN);
+        app.state.playlist.row_h = pl::ROW_H;
+        app.state.playlist_scroll = (0.0, 0.0);
+        frame(&mut app, &mut c, None);
+        let ruler = hit_rect(&app, &Action::PlRuler);
+        app.mouse_move(ruler.cx(), ruler.cy());
+        let w0 = app.state.playlist_bar_w;
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(app.state.playlist_bar_w, w0, "a plain wheel over the ruler does not zoom");
+        app.alt = true;
+        app.wheel(0.0, 1.0, false, false);
+        app.alt = false;
+        assert!(app.state.playlist_bar_w > w0, "Alt+wheel over the ruler zooms in");
+        app.state.playlist_bar_w = w0;
+        app.state.playlist_scroll = (0.0, 0.0);
+
+        // Ctrl+Insert without a time selection inserts one bar at the song position.
+        app.state.playlist.range = None;
+        app.state.playlist.pos = bar;
+        let before: Vec<u32> = on_track(&app, 4).iter().map(|c| c.position).collect();
+        app.key(&Key::Named(NamedKey::Insert), true, false);
+        let after: Vec<u32> = on_track(&app, 4).iter().map(|c| c.position).collect();
+        assert_eq!((before, after), (vec![0, bar], vec![0, 2 * bar]));
+
+        // Performance mode is not built yet: Ctrl+Shift+P says so.
+        app.shift = true;
+        app.key(&Key::Character("P".into()), true, false);
+        app.shift = false;
+        assert!(app.state.message.as_deref().is_some_and(|m| m.contains("not available yet")), "{:?}", app.state.message);
+
+        // F5 brings a covered playlist to the front.
+        app.state.z = vec![Win::Playlist, Win::Mixer];
+        app.key(&Key::Named(NamedKey::F5), false, false);
+        assert_eq!(app.state.z.last(), Some(&Win::Playlist));
+        assert!(app.state.shown(Win::Playlist));
+    }
+
     /// Look check for playlist states (markers, time selection, selected / muted clips, automation points,
     /// options menu with a submenu): `OS_SHOT_DIR=dir cargo test -p os-app playlist_shots -- --ignored`.
     #[test]
@@ -6652,6 +6817,13 @@ mod tests {
         frame(&mut app, &mut c, None);
         let dir = std::path::PathBuf::from(dir);
         c.pixmap.save_png(dir.join("pl_states.png")).unwrap();
+        // Track heights (Ctrl+wheel over the headers): tall and the minimum.
+        app.state.playlist.popup = None;
+        for (h, name) in [(96.0, "pl_rows_tall.png"), (pl::ROW_MIN, "pl_rows_short.png")] {
+            app.state.playlist.row_h = h;
+            frame(&mut app, &mut c, None);
+            c.pixmap.save_png(dir.join(name)).unwrap();
+        }
     }
 
     /// Mixer look with routing, a sidechain, slots, meters and the menus: `OS_SHOT_DIR=dir cargo test -p os-app

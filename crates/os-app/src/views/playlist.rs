@@ -890,15 +890,21 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     if strip {
         return;
     }
-    let led = Rect::new(hr.right() - 19.0, hr.y + 30.0, 14.0, 14.0);
+    // The LED and "…" keep their distance from the row's bottom when the track height changes (Ctrl+wheel); short
+    // rows drop the "…" and keep the name clear of the LED.
+    let short = g.rows.row_h < pl::ROW_H - 8.0;
+    let led = Rect::new(hr.right() - 19.0, (h - gap - 15.0).max(1.0) + hr.y, 14.0, 14.0);
     ui.hit(led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo)");
     let text = if colored.is_some() { ui.t.tx(0xdce8f0) } else { t.text_faint };
     let text = if on { text } else { text.shade(-0.35) };
     let editing = matches!(s.playlist.edit.as_ref().map(|e| e.target), Some(pl::EditTarget::TrackName(r)) if r == row);
     if !editing {
-        ui.c.text_clip(Font::new(16), hr.x + 2.0, hr.y + 1.0, hr.w - 4.0, text, &pl::track_name(s, row));
+        let name_w = if short { hr.w - 26.0 } else { hr.w - 4.0 };
+        ui.c.text_clip(Font::new(16), hr.x + 2.0, hr.y + 1.0, name_w, text, &pl::track_name(s, row));
     }
-    ui.c.text(Font::new(14), hr.x + 14.0, hr.y + 24.0, text.shade(-0.2), "...");
+    if !short {
+        ui.c.text(Font::new(14), hr.x + 14.0, led.y - 6.0, text.shade(-0.2), "...");
+    }
     let info = pl::track_info(s, row);
     if lead {
         // Collapse arrow left of the LED: up while open, down while collapsed.

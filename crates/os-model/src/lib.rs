@@ -772,6 +772,15 @@ impl Clip {
         self.raw[32..36].copy_from_slice(&id.to_le_bytes());
     }
 
+    /// Clip group stored in the record (bytes 14..16, 0 = none; spec: flp/events/playlist.md).
+    pub fn group(&self) -> u16 {
+        u16::from_le_bytes([self.raw[14], self.raw[15]])
+    }
+
+    pub fn set_group(&mut self, group: u16) {
+        self.raw[14..16].copy_from_slice(&group.to_le_bytes());
+    }
+
     fn f32_at(&self, o: usize) -> f32 {
         f32::from_le_bytes([self.raw[o], self.raw[o + 1], self.raw[o + 2], self.raw[o + 3]])
     }
