@@ -837,6 +837,28 @@ fn stretch_params(sound: &os_model::ChannelSound) -> [(&'static str, serde_json:
     ]
 }
 
+/// Writes an edit of one of Open Sampler's time-stretch parameters (`name`, at normalized value `norm`) into a
+/// channel's stretch settings (event 215 ints 24..27, the inverse of `stretch_params`). False for other parameters.
+pub fn stretch_param(name: &str, norm: f64, stretch: &mut [u32; 4]) -> bool {
+    use open_sampler::params as sp;
+    let v = norm.clamp(0.0, 1.0) as f32;
+    match name {
+        "Time stretch (time)" => {
+            let units = sp::time_file(sp::time_steps(v));
+            stretch[0] = if units >= 1.0 { units.to_bits() } else { 0 };
+        }
+        "Pitch shift" => stretch[1] = sp::ts_cents(v) as i32 as u32,
+        "Time stretch (multiplicator)" => stretch[2] = (sp::mul_of(v).log2() * 10000.0).round() as i32 as u32,
+        "Stretching method" => {
+            let last = sp::STRETCH_FILE.len() - 1;
+            let i = ((f64::from(v) * last as f64).round() as usize).min(last);
+            stretch[3] = sp::STRETCH_FILE[i] as u32;
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// `blob` (an Open Sampler state) with parameters set to the given JSON values.
 fn with_params(blob: &[u8], set: &[(&str, serde_json::Value)]) -> Option<Vec<u8>> {
     let prefixed = blob.len() > 8 && blob[0] != b'{';
@@ -1641,6 +1663,34 @@ mod tests {
         assert!((f(&p["ts_mul"]) - 0.5).abs() < 1e-6);
         assert_eq!(p["ts_mode"], serde_json::json!({"i32": 1}), "the method kept");
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// Open Sampler's time-stretch parameters read back into the channel's stretch settings (`stretch_param`, the
+    /// inverse of `stretch_params`): what the app does with the editor's edits (spec: ui/playlist.md §9c).
+    #[test]
+    fn open_sampler_stretch_parameters_give_the_channel_settings() {
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(OPEN_SAMPLER).expect("built-in Open Sampler");
+        let mut ch = crate::app::test_project().channels.remove(0);
+        let read = |pl: &Plugins| {
+            let p = pl.hosted[&0].plugin.lock().unwrap();
+            let mut st = [0u32; 4];
+            let n = (0..p.param_count()).filter_map(|i| p.param_info(i)).filter(|i| stretch_param(&i.name, p.param_value(i.id).unwrap(), &mut st)).count();
+            assert_eq!(n, 4, "the four stretch parameters by name");
+            st
+        };
+        // Stretch, x2, +300 cents.
+        ch.sound.stretch = [0, 300, 10000, (-1i32) as u32];
+        pl.create_with(0, index, Some(&sampler_state(&ch))).unwrap();
+        assert_eq!(read(&pl), ch.sound.stretch);
+        // A time of 4 beats (768 / 192), the multiplier back at 1; e2 speech, -1200 cents.
+        ch.sound.stretch = [768f32.to_bits(), (-1200i32) as u32, 0, 9];
+        assert!(pl.set_sampler_stretch(0, &ch.sound));
+        assert_eq!(read(&pl), ch.sound.stretch);
+        // Resample, x0.25.
+        ch.sound.stretch = [0, 0, (-20000i32) as u32, 0];
+        assert!(pl.set_sampler_stretch(0, &ch.sound));
+        assert_eq!(read(&pl), ch.sound.stretch);
     }
 
     /// The built-in Open Parametric EQ 2 starts from a project file's EQ state, plays it, and gives the state back

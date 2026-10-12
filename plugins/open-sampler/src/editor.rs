@@ -501,10 +501,23 @@ impl Logic {
         self.hint_for(id);
     }
 
-    /// Turning a time-stretch knob in Resample mode switches the mode to Auto (spec §5.6; the TIME menu does not).
+    /// Turning PITCH in Resample mode switches the mode to Auto; MUL and TIME leave it alone (spec §5.6).
     fn stretch_touch(&mut self, id: &str) {
-        if matches!(id, "ts_pitch" | "ts_mul" | "ts_time") && self.vals.plain("ts_mode") as i32 == 0 {
+        if id == "ts_pitch" && self.vals.plain("ts_mode") as i32 == 0 {
             self.edit_plain("ts_mode", params::STRETCH_AUTO as f32);
+        }
+    }
+
+    /// Picking Stretch or Stretch Pro while TIME is off sets TIME to the sample's own length at the host tempo, in
+    /// whole 1/192 beats (spec §5.6).
+    fn realtime_picked(&mut self) {
+        if params::time_file(params::time_steps(self.vals.norm("ts_time"))) >= 1.0 {
+            return;
+        }
+        let secs = self.shared.raw.lock().ok().and_then(|r| r.as_ref().map(|s| s.frames() as f64 / f64::from(s.rate.max(1)))).unwrap_or(0.0);
+        let units = (secs * self.shared.tempo() / 60.0 * 192.0).round();
+        if units >= 1.0 {
+            self.edit("ts_time", params::time_norm(units / 48.0));
         }
     }
 
@@ -1107,6 +1120,9 @@ impl Logic {
             }
             Cmd::Choice(i) => {
                 self.edit_plain(&id, i as f32);
+                if id == "ts_mode" && params::stretch_realtime(i) {
+                    self.realtime_picked();
+                }
                 self.hint_for(&id);
             }
             Cmd::Reload => return vec![Act::Reload],
@@ -2718,12 +2734,38 @@ mod tests {
     }
 
     #[test]
-    fn stretch_knobs_switch_resample_to_auto() {
+    fn pitch_switches_resample_to_auto() {
         let mut l = logic(0);
         assert_eq!(l.vals.plain("ts_mode") as i32, 0);
+        for id in ["ts_mul", "ts_time"] {
+            let (x, y) = centre(&l, &Target::Knob(id.into()));
+            l.wheel(x, y, 1.0, Mods::default());
+            assert_eq!(l.vals.plain("ts_mode") as i32, 0, "{id} leaves Resample alone");
+        }
         let (x, y) = centre(&l, &Target::Knob("ts_pitch".into()));
         l.wheel(x, y, 1.0, Mods::default());
         assert_eq!(l.vals.plain("ts_mode") as i32, params::STRETCH_AUTO);
+    }
+
+    // spec §5.6: Stretch and Stretch Pro picked with TIME off fit the sample to its own length at the host tempo.
+    #[test]
+    fn picking_a_realtime_method_sets_time_to_the_sample() {
+        let shared = Arc::new(Shared::default());
+        // 6.4 s at 130 BPM: 2662.4 / 192 beats, stored as 2662.
+        *shared.raw.lock().unwrap() = Some(Arc::new(os_engine::Sample { rate: 1000, left: vec![0.0; 6400], right: vec![0.0; 6400] }));
+        shared.set_tempo(130.0);
+        let mut l = Logic::new(Arc::new(SamplerParams::default()), shared, None);
+        paint(&mut l);
+        let req = MenuReq::List("ts_mode".into());
+        let time = |l: &Logic| params::time_file(params::time_steps(l.vals.norm("ts_time")));
+        l.pick(&req, Cmd::Choice(3), 0.0, 0.0);
+        assert_eq!(time(&l), 0.0, "e3 generic leaves TIME off");
+        l.pick(&req, Cmd::Choice(1), 0.0, 0.0);
+        assert!((time(&l) - 2662.0).abs() < 0.05, "{}", time(&l));
+        // A TIME already set stays.
+        l.pick(&MenuReq::Knob("ts_time".into()), Cmd::Time(16), 0.0, 0.0);
+        l.pick(&req, Cmd::Choice(2), 0.0, 0.0);
+        assert!((time(&l) - 768.0).abs() < 0.05, "{}", time(&l));
     }
 
     // spec §2.1, §2.2, §4: TIME counts bars:steps:ticks, its menu leaves the method alone, drags land on whole steps.

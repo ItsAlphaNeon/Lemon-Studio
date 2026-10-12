@@ -77,7 +77,7 @@ clicking it does nothing.
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers (notes play the selected channel); no note recording yet |
 | Audio recording | ❌ | Not available yet |
 | MIDI file import / export | ❌ | Not available yet |
-| Time-stretching | ✅ | All twelve stretch methods of sampler channels and audio clips, with the length and pitch rules projects expect; playlist stretch mode (Shift+M). One open-source stretcher (Signalsmith Stretch) plays every method, so the sound differs from the original stretchers |
+| Time-stretching | ✅ | All twelve stretch methods of sampler channels and audio clips, with the length and pitch rules projects expect; audio clips in the playlist take their length (and redraw their waveform) whenever the sampler's stretch settings, the channel pitch or the tempo change; playlist stretch mode (Shift+M). One open-source stretcher (Signalsmith Stretch) plays every method, so the sound differs from the original stretchers |
 | Audio editing | ❌ | Not available yet |
 | Plugin delay compensation | ❌ | Not available yet |
 | Audio drivers | 🚧 | WASAPI (shared mode) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux; no ASIO or JACK yet |
