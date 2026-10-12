@@ -384,6 +384,33 @@ fn rack_settings_survive() {
     assert!(checked > 40, "only {checked} files checked");
 }
 
+/// Track switches, main volume and main pitch in every file, old 5- and 8-byte track records included (spec:
+/// flp/layouts.md "A mixer track's record (event 236)").
+#[test]
+fn mixer_switches_and_main_values_survive() {
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let Ok(mut project) = load(&file) else { continue };
+        if project.mixer.len() < 3 {
+            continue;
+        }
+        project.mixer[1].polarity = !project.mixer[1].polarity;
+        project.mixer[1].swap = !project.mixer[1].swap;
+        project.mixer[2].slots_enabled = !project.mixer[2].slots_enabled;
+        project.main_pitch = Some(-450);
+        if project.main_volume.is_some() {
+            project.main_volume = Some(9000);
+        }
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back, project, "{path}");
+        checked += 1;
+    }
+    assert!(checked > 40, "only {checked} files checked");
+}
+
 /// Restructured channels in every FL 26 file (spec: flp/events/channels.md "Deleting, cloning and moving"):
 /// swapping the first two channels writes the swapped model, swapping back gives the original bytes; deleting
 /// the second channel and cloning the first reads back as the model.

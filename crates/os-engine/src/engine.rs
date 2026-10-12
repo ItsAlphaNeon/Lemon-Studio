@@ -48,6 +48,8 @@ struct Trigger {
     pan: f64,
     /// Note key.
     key: u16,
+    /// The note's fine pitch in semitones (instrument channels get it as the note's tuning).
+    fine: f32,
     /// Tick at which the note is released; `None` = a step (length 0), which has no end of its own and is released
     /// with the song (spec: audio/song-structure.md, "A note").
     end: Option<u64>,
@@ -132,6 +134,15 @@ struct ChannelState {
     enabled: bool,
     /// Sample-rate conversion alone (`base_rate` without the channel pitch).
     src_ratio: f64,
+    /// The pitch knob in cents as control points and automation leave it, and what the channel adds to it: fine tune,
+    /// root note and (when the channel follows it) the main pitch (spec: audio/voice-levels.md "The channel's levels").
+    /// `pitched` is false for a sample stretched to a fitted time: no channel pitch then.
+    knob: f64,
+    init_knob: f64,
+    fine: i32,
+    root: u8,
+    main: Option<i32>,
+    pitched: bool,
     /// Values at the start of playback, restored when control points are replayed from the top.
     init: (f64, f64, f64),
     /// Volume parameter 0..=1 (before the volume law) at the start of the current span.
@@ -197,6 +208,7 @@ struct CtlEvent {
 impl ChannelState {
     fn reset(&mut self) {
         (self.volume, self.pan, self.base_rate) = self.init;
+        self.knob = self.init_knob;
         self.vol_v = self.init_v;
         self.ramp = None;
     }
@@ -253,12 +265,24 @@ impl ChannelState {
         }
     }
 
+    /// Sets the pitch knob (cents) and with it the channel's rate: the knob, fine tune, root note and main pitch
+    /// (spec: audio/voice-levels.md), counted here from key 60 as the voices' key rates are.
+    fn retune(&mut self, knob: f64) {
+        self.knob = knob;
+        self.base_rate = self.src_ratio * if self.pitched { laws::cents_rate(self.pitch_from_60()) } else { 1.0 };
+    }
+
+    /// The channel's pitch in cents from key 60.
+    fn pitch_from_60(&self) -> f64 {
+        f64::from(laws::channel_pitch(self.knob, self.fine, self.root, self.main)) + 6000.0
+    }
+
     /// A control point replaces the channel's own setting (spec: audio/pattern-controls.md).
     fn apply(&mut self, param: u16, value: i32, rate: u32) {
         match param {
             ControlPoint::VOLUME => self.glide(Some((f64::from(value) / 12800.0).clamp(0.0, 1.0)), None, (f64::from(rate) * VOLUME_GLIDE_SECONDS).round() as u32),
             ControlPoint::PAN => self.glide(None, Some((f64::from(value) / 6400.0 - 1.0).clamp(-1.0, 1.0)), (f64::from(rate) * PAN_GLIDE_SECONDS).round() as u32),
-            ControlPoint::PITCH => self.base_rate = self.src_ratio * laws::playback_rate(60, value),
+            ControlPoint::PITCH => self.retune(f64::from(value)),
             _ => {}
         }
     }
@@ -330,9 +354,11 @@ struct MixTrack {
     pan: i32,
     sep: i32,
     on: bool,
-    /// Swap left / right and reverse polarity (spec: ui/mixer.md §4; Lemon Studio applies them to the matrix).
+    /// Swap left / right and reverse polarity, on the fader matrix (spec: audio/mixer.md "Fader matrix").
     swap: bool,
     polarity: bool,
+    /// The track's "effect slots enabled" switch: when off no slot runs (spec: audio/mixer.md).
+    slots_enabled: bool,
     /// The three-band equaliser, after the slots and before the fader.
     eq: os_dsp::mixer::TrackEq,
     /// Insert effects in slot order (applied before the fader).
@@ -372,6 +398,7 @@ impl MixTrack {
             on: true,
             swap: false,
             polarity: false,
+            slots_enabled: true,
             eq: os_dsp::mixer::TrackEq::default(),
             effects: Vec::new(),
             slot_on: [true; 10],
@@ -388,8 +415,10 @@ impl MixTrack {
     fn compute_matrix(&self) -> [[f32; 2]; 2] {
         let [ll, rl, rr, lr] = os_dsp::mixer::fader_matrix(self.vol, self.pan, self.sep, self.on);
         let mut m = [[ll, rl], [lr, rr]];
+        // Swap exchanges the two outputs after pan and separation, not the inputs: (LL, RR, RL, LR) become
+        // (LR, RL, RR, LL).
         if self.swap {
-            m = [[m[0][1], m[0][0]], [m[1][1], m[1][0]]];
+            m = [m[1], m[0]];
         }
         if self.polarity {
             m = m.map(|r| r.map(|g| -g));
@@ -410,6 +439,12 @@ pub struct EngineReport {
 
 pub struct Engine {
     rate: u32,
+    /// The main volume's gain `curve(stored / 12800)` and its ramp (spec: audio/mixer.md "Main volume"). Playback
+    /// multiplies the master by it; an export does not (FL applies it after writing the tick), but the tail test sees it.
+    main_gain: f32,
+    main_glide: os_dsp::glide::Glide,
+    /// Set while rendering an export (`render_ticks`), cleared by live playback (`process`).
+    exporting: bool,
     channels: Vec<ChannelState>,
     tracks: Vec<MixTrack>,
     /// Mixer tracks in processing order: every track before the tracks it sends to.
@@ -452,7 +487,9 @@ pub struct Engine {
     /// Audio clips playing on instrument channels: (channel, shape, frames since its start).
     inst_shapes: Vec<(usize, ClipShape, u64)>,
     inst_live: Vec<(usize, u8, f32)>,
-    inst_events: Vec<(usize, u32, u8, f32, f32)>,
+    inst_events: Vec<(usize, u32, u8, f32, f32, f32)>,
+    /// Per instrument channel and key: the fine pitch (semitones) of the note last started there.
+    inst_fine: Vec<[f32; 128]>,
     /// This tick's events after the channels' note rules, sorted by channel, and each channel's notes at its
     /// instrument (spec: audio/channel-voices.md).
     inst_notes: Vec<(usize, u32, notes::Note)>,
@@ -527,17 +564,24 @@ impl Engine {
                     .filter(|_| plays_sample)
                     .map_or((1.0, true), |s| ch.sound.stretch_speed(s.frames() as f64 / f64::from(s.rate.max(1)), tempo));
                 let src_ratio = sample.as_ref().map_or(1.0, |s| f64::from(s.rate) / f64::from(rate)) * speed;
-                let base_rate = src_ratio * if pitched { laws::playback_rate(60, ch.pitch_cents) } else { 1.0 };
                 let insert = usize::from(ch.mixer_track).min(n_tracks - 1);
-                ChannelState {
+                let knob = f64::from(ch.pitch_cents);
+                let main = ch.misc.main_pitch.then(|| i32::from(project.main_pitch.unwrap_or(0)));
+                let mut state = ChannelState {
                     sample,
                     volume,
                     pan: ch.pan,
                     insert,
-                    base_rate,
+                    base_rate: src_ratio,
                     enabled: ch.enabled,
                     src_ratio,
-                    init: (volume, ch.pan, base_rate),
+                    knob,
+                    init_knob: knob,
+                    fine: ch.misc.fine,
+                    root: ch.misc.root,
+                    main,
+                    pitched,
+                    init: (volume, ch.pan, src_ratio),
                     vol_v: ch.volume,
                     init_v: ch.volume,
                     serial: 0,
@@ -548,7 +592,10 @@ impl Engine {
                     plugin: ch.kind == ChannelKind::Plugin,
                     instrument: Slot::default(),
                     rules: notes::Rules::new(&ch.misc, rate),
-                }
+                };
+                state.retune(knob);
+                state.init.2 = state.base_rate;
+                state
             })
             .collect();
 
@@ -591,6 +638,7 @@ impl Engine {
                         on: m.enabled,
                         swap: m.swap,
                         polarity: m.polarity,
+                        slots_enabled: m.slots_enabled,
                         eq: os_dsp::mixer::TrackEq::new(m.eq, rate),
                         effects,
                         slot_on: m.slot_on,
@@ -625,7 +673,9 @@ impl Engine {
                 Some(Trigger {
                     tick: n.tick,
                     channel: n.channel,
-                    rate: laws::playback_rate(n.key, 0),
+                    // The note's fine pitch is the voice's pitch offset, kept apart from its key (spec: audio/voice-levels.md).
+                    rate: laws::playback_rate(n.key, laws::fine_pitch_cents(n.fine)),
+                    fine: laws::fine_pitch_cents(n.fine) as f32 / 100.0,
                     cut: n.cut,
                     vel: laws::velocity_gain(n.velocity),
                     pan: laws::note_pan(n.pan),
@@ -687,7 +737,11 @@ impl Engine {
         // Later clips win where clips on the same target overlap.
         autos.sort_by_key(|a| a.start);
 
+        let main_gain = os_dsp::level::curve(f32::from(project.main_volume.unwrap_or(os_model::Project::MAIN_VOLUME_DEFAULT)) * os_dsp::level::R12800);
         Engine {
+            main_gain,
+            main_glide: os_dsp::glide::Glide::new(main_gain),
+            exporting: false,
             params: param_auto::ParamAuto::new(autos.iter().any(|a| param_auto::is_param(a.target))),
             autos,
             curves,
@@ -720,6 +774,7 @@ impl Engine {
             inst_shapes: Vec::new(),
             inst_live: Vec::with_capacity(64),
             inst_events: Vec::with_capacity(64),
+            inst_fine: Vec::new(),
             inst_notes: Vec::with_capacity(64),
             note_voices: vec![notes::Voices::default(); project.channels.len()],
             scratch: (Vec::new(), Vec::new()),
@@ -1022,6 +1077,9 @@ impl Engine {
         self.inst_offs.retain(|o| o.1 < n);
         self.inst_shapes = std::mem::take(&mut old.inst_shapes);
         self.inst_shapes.retain(|s| s.0 < n);
+        // The main volume glides from where it was.
+        self.main_glide = old.main_glide;
+        self.exporting = old.exporting;
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
                 new.gains = o.gains;
@@ -1076,8 +1134,8 @@ impl Engine {
                 }
                 Target::ChannelPitch(c) => {
                     if let Some(ch) = self.channels.get_mut(usize::from(c)) {
-                        let cents = ((v - 0.5) * 2.0 * AUTO_PITCH_CENTS).round() as i32;
-                        ch.base_rate = ch.src_ratio * laws::playback_rate(60, cents);
+                        let cents = ((v - 0.5) * 2.0 * AUTO_PITCH_CENTS).round();
+                        ch.retune(cents);
                     }
                 }
                 // Volume Round(16000 v), pan Round((2 v - 1) * 6400) (spec: audio/mixer.md "Changes while the song plays").
@@ -1109,6 +1167,7 @@ impl Engine {
     /// Fills `out` with the next `out.len() / 2` stereo frames (interleaved L/R), rendering whole ticks as needed. Once
     /// playback is over the rest is silence.
     pub fn process(&mut self, out: &mut [f32]) {
+        self.exporting = false;
         let mut at = 0;
         while at < out.len() {
             if self.out_pos >= self.out.len() {
@@ -1162,9 +1221,25 @@ impl Engine {
         self.out_pos = 0;
         self.out_tick = tick;
         self.out_frame = start;
+        // The main volume (spec: audio/mixer.md "Main volume"): playback hears it as a ramped gain on the master; an
+        // export writes the samples without it and only its tail test sees it. With delay compensation and the stored
+        // value exactly 12800 FL tests less of the tick (audio/timing.md); Lemon Studio has no delay compensation yet.
+        let gain = if self.exporting {
+            self.main_gain
+        } else {
+            let mut ramp = self.main_glide.block(self.main_gain, len, os_dsp::glide::engine_limit(self.rate));
+            if !(ramp.is_flat() && ramp.first() == 1.0) {
+                for f in self.out.chunks_exact_mut(2) {
+                    let g = ramp.next();
+                    f[0] *= g;
+                    f[1] *= g;
+                }
+            }
+            1.0
+        };
         // The tail rule: the first quiet tick at or after the song's end is the last one.
         if !self.looping && !self.live_only && tick >= self.end_tick {
-            let quiet = !self.inst_active && self.out.iter().all(|s| s.abs() < QUIET);
+            let quiet = !self.inst_active && self.out.iter().all(|s| (s * gain).abs() < QUIET);
             let limit = (TAIL_LIMIT_SECONDS * f64::from(self.rate) / self.clock.samples_per_tick()) as u64;
             if quiet || tick >= self.end_tick + limit {
                 self.tail_done = true;
@@ -1193,7 +1268,7 @@ impl Engine {
         while i < self.inst_offs.len() {
             let (end, ch, key, cut) = self.inst_offs[i];
             if end <= tick || (song_end && !cut) {
-                self.inst_events.push((ch, 0, key, if cut { CHOKE } else { OFF }, 0.0));
+                self.inst_events.push((ch, 0, key, if cut { CHOKE } else { OFF }, 0.0, 0.0));
                 self.inst_offs.swap_remove(i);
             } else {
                 i += 1;
@@ -1230,7 +1305,7 @@ impl Engine {
         if self.channels[t.channel].plugin {
             if self.channels[t.channel].instrument.0.is_some() {
                 let k = t.key.min(127) as u8;
-                self.inst_events.push((t.channel, 0, k, f32::from(t.velocity) / 128.0, t.start));
+                self.inst_events.push((t.channel, 0, k, f32::from(t.velocity) / 128.0, t.start, t.fine));
                 if let Some(sh) = t.shape {
                     self.inst_shapes.push((t.channel, sh, 0));
                 }
@@ -1269,7 +1344,7 @@ impl Engine {
     /// channel's volume and pan. An instrument that is busy (locked elsewhere) is skipped for the tick.
     fn render_instruments(&mut self, n: usize, song: &TransportInfo) {
         for (ch, key, vel) in self.inst_live.drain(..) {
-            self.inst_events.push((ch, 0, key, if vel < 0.0 { OFF } else { vel }, 0.0));
+            self.inst_events.push((ch, 0, key, if vel < 0.0 { OFF } else { vel }, 0.0, 0.0));
         }
         self.inst_events.sort_by_key(|e| e.1);
         let rules: Vec<notes::Rules> = self.channels.iter().map(|c| c.rules).collect();
@@ -1298,27 +1373,33 @@ impl Engine {
             for (off, index, value) in self.params.channel_span(c, 0, n) {
                 inst.param(off, index, value);
             }
-            // The channel's pitch (knob, control points, automation) reaches the instrument as each note's tuning, on top
-            // of any glide; notes keep the pitch they started with.
+            // The channel's pitch (knob, control points, automation, fine tune, root note, main pitch) reaches the
+            // instrument as each note's tuning, with the note's fine pitch, on top of any glide; notes keep the pitch they
+            // started with.
             let shift = (12.0 * (ch.base_rate / ch.src_ratio).log2()) as f32;
             let shift = if shift.is_finite() && shift.abs() > 1e-3 { shift } else { 0.0 };
+            if self.inst_fine.len() <= c {
+                self.inst_fine.resize(c + 1, [0.0; 128]);
+            }
+            let fines = &mut self.inst_fine[c];
             let first = self.inst_notes.partition_point(|e| e.0 < c);
             for &(_, off, note) in self.inst_notes[first..].iter().take_while(|e| e.0 == c) {
                 let off = off.min(n.saturating_sub(1) as u32);
                 match note {
                     notes::Note::Choke(key) => inst.choke(off, key),
                     notes::Note::Off(key) => inst.note_off(off, key),
-                    notes::Note::On { key, vel, start } => {
+                    notes::Note::On { key, vel, start, fine } => {
                         if start > 0.0 {
                             inst.note_on_from(off, key, vel, start);
                         } else {
                             inst.note_on(off, key, vel);
                         }
-                        if shift != 0.0 {
-                            inst.tune(off, key, shift);
+                        fines[usize::from(key & 127)] = fine;
+                        if shift + fine != 0.0 {
+                            inst.tune(off, key, shift + fine);
                         }
                     }
-                    notes::Note::Tune(key, semitones) => inst.tune(off, key, semitones + shift),
+                    notes::Note::Tune(key, semitones) => inst.tune(off, key, semitones + shift + fines[usize::from(key & 127)]),
                 }
             }
             let (l, r) = (&mut self.scratch.0[..n], &mut self.scratch.1[..n]);
@@ -1363,8 +1444,11 @@ impl Engine {
             let rate = self.rate;
             let (dry, l, r) = (&mut self.fx_dry, &mut self.scratch.0, &mut self.scratch.1);
             let track = &mut self.tracks[t];
-            for fx in &mut track.effects {
-                run_slot(fx, &mut buf, rate, song, dry, l, r);
+            // A slot runs when its own switch is on and the track's slots are enabled (spec: audio/mixer.md).
+            if track.slots_enabled {
+                for fx in &mut track.effects {
+                    run_slot(fx, &mut buf, rate, song, dry, l, r);
+                }
             }
             track.eq.process(&mut buf);
             // The four gains glide to their targets: a per-sample step for this tick, at most `limit`, applied as a
@@ -1460,6 +1544,7 @@ impl Engine {
     /// `render_all` in steps (an export with a progress bar): appends up to `ticks` more ticks to `out`; true once the
     /// song is over.
     pub fn render_ticks(&mut self, ticks: usize, out: &mut Vec<f32>) -> bool {
+        self.exporting = true;
         out.extend_from_slice(&self.out[self.out_pos..]);
         self.out_pos = self.out.len();
         for _ in 0..ticks {
@@ -1691,6 +1776,8 @@ struct Sched {
     tick: u64,
     channel: usize,
     key: u16,
+    /// Note fine pitch byte, 120 = none.
+    fine: u8,
     velocity: u8,
     /// Note pan byte, 64 = center.
     pan: u8,
@@ -1706,7 +1793,7 @@ struct Sched {
 
 impl Sched {
     fn note(tick: u64, n: &os_model::Note) -> Self {
-        Sched { tick, channel: usize::from(n.channel), key: n.key, velocity: n.velocity, pan: n.pan, cut: None, len: u64::from(n.length), from_s: 0.0, clip: None }
+        Sched { tick, channel: usize::from(n.channel), key: n.key, fine: n.fine_pitch, velocity: n.velocity, pan: n.pan, cut: None, len: u64::from(n.length), from_s: 0.0, clip: None }
     }
 }
 
@@ -1955,7 +2042,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         // An audio clip plays its channel's sample from the window start (milliseconds), cut at the clip end.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
                             let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, velocity: 100, pan: 64, cut: Some(start + len), len, from_s, clip: ClipFx::of(c) });
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, cut: Some(start + len), len, from_s, clip: ClipFx::of(c) });
                         }
                         Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
@@ -2748,6 +2835,10 @@ mod tests {
         let mut off = p.clone();
         off.mixer[1].slot_on[0] = false;
         assert!((peak(&render_with(&off, true), 0) - dry).abs() < 1e-6, "LED off = bypass");
+        // The track's "effect slots enabled" switch off: no slot runs (spec: audio/mixer.md).
+        let mut disabled = p.clone();
+        disabled.mixer[1].slots_enabled = false;
+        assert!((peak(&render_with(&disabled, true), 0) - dry).abs() < 1e-6, "slots disabled = bypass");
         let mut half = p.clone();
         half.mixer[1].slot_mix[0] = 0.5;
         assert!((peak(&render_with(&half, true), 0) / dry - 0.75).abs() < 1e-3, "mix 50 %");
@@ -2760,7 +2851,7 @@ mod tests {
         assert!(peaks[1][0] > 0.0 && peaks[0][0] > 0.0 && peaks[2][0] == 0.0, "track meters: {peaks:?}");
     }
 
-    /// spec: ui/mixer.md §4: polarity flips the sign, swap exchanges sides, separation -100 % is mono.
+    /// spec: audio/mixer.md "Fader matrix": polarity flips the sign, swap exchanges the outputs, separation merges.
     #[test]
     fn polarity_swap_and_separation() {
         let p = insert_project();
@@ -2769,9 +2860,13 @@ mod tests {
         q.mixer[1].polarity = true;
         let flipped = render_with(&q, false);
         assert!(base.iter().zip(&flipped).all(|(a, b)| (a + b).abs() < 1e-6), "polarity");
-        // Swap acts on the track's input, before its pan (a Lemon Studio reading; FL's order is unmeasured).
+        // Swap exchanges the outputs after pan: a track panned hard left with the swap sounds on the right only.
         let m = MixTrack { swap: true, ..MixTrack::unity() }.compute_matrix();
         assert!(m[0][0].abs() < 1e-6 && m[1][1].abs() < 1e-6 && m[0][1] > 0.5 && m[1][0] > 0.5, "swapped: {m:?}");
+        let left = MixTrack { pan: -6400, ..MixTrack::unity() }.compute_matrix();
+        let m = MixTrack { pan: -6400, swap: true, ..MixTrack::unity() }.compute_matrix();
+        assert!(m[0].iter().all(|g| g.abs() < 1e-9), "left output silent: {m:?}");
+        assert_eq!(m[1], left[0], "the right output is the old left output");
         // A positive separation merges: fully mono at 64 (spec: audio/mixer.md).
         let mut t = MixTrack { sep: 64, ..MixTrack::unity() };
         let m = t.compute_matrix();
@@ -2779,5 +2874,65 @@ mod tests {
         t.sep = 0;
         let m = t.compute_matrix();
         assert!(m[0][1].abs() < 1e-6 && m[1][0].abs() < 1e-6, "original: {m:?}");
+    }
+    /// spec: audio/mixer.md "Main volume", audio/timing.md "Where the file ends": an export's samples never carry the
+    /// main volume, only its tail test does; playback hears it.
+    #[test]
+    fn main_volume_moves_the_tail_test_not_the_export() {
+        // A note that still sounds at the song's end, so the tail test has something to hear.
+        let mut base = insert_project();
+        base.patterns[0].notes[0] = long_note(300, 80, 0);
+        let at = |v: u16| Project { main_volume: Some(v), ..base.clone() };
+        let unity = render(&base);
+        for v in [1u16, 800, 6400, 16000] {
+            let out = render(&at(v));
+            let n = out.len().min(unity.len());
+            assert_eq!(out[..n], unity[..n], "main volume {v}: the samples are those at 12800");
+        }
+        assert!(render(&at(1)).len() <= unity.len() && render(&at(16000)).len() >= unity.len());
+        assert!(render(&at(1)).len() < unity.len(), "a tiny gain ends the file sooner");
+        // Playback: the master times curve(6400 / 12800).
+        let live = |p: &Project| {
+            let mut lib = SampleLibrary::new(None);
+            let mut e = Engine::new(p, &mut lib, 44100, PlayMode::Pattern(1));
+            let mut buf = vec![0.0f32; 8192];
+            e.process(&mut buf);
+            buf
+        };
+        let early = insert_project();
+        let (a, b) = (live(&early), live(&Project { main_volume: Some(6400), ..early.clone() }));
+        let g = os_dsp::level::curve(6400.0 * os_dsp::level::R12800);
+        assert!(peak(&a, 0) > 0.01);
+        assert!(a.iter().zip(&b).all(|(x, y)| (x * g - y).abs() < 1e-6), "playback scaled by {g}");
+    }
+
+    /// spec: audio/voice-levels.md "The channel's levels": the root note, fine tune and main pitch (when the channel
+    /// follows it) move the channel's pitch; the note's fine pitch is the voice's own offset.
+    #[test]
+    fn root_fine_tune_and_main_pitch_set_the_channel_pitch() {
+        let rate_of = |p: &Project| {
+            let mut lib = SampleLibrary::new(None);
+            let e = Engine::new(p, &mut lib, 44100, PlayMode::Pattern(1));
+            e.channels[0].base_rate / e.channels[0].src_ratio
+        };
+        let base = project(vec![long_note(0, 96, 0)], vec![]);
+        assert!((rate_of(&base) - 1.0).abs() < 1e-9);
+        let mut p = base.clone();
+        p.channels[0].misc.root = 72;
+        assert!((rate_of(&p) - 0.5).abs() < 1e-9, "root an octave up plays an octave down");
+        let mut p = base.clone();
+        p.channels[0].misc.fine = 100;
+        assert!((rate_of(&p) - 2f64.powf(1.0 / 12.0)).abs() < 1e-6, "fine tune in cents");
+        let mut p = base.clone();
+        p.main_pitch = Some(1200);
+        assert!((rate_of(&p) - 2.0).abs() < 1e-9, "main pitch");
+        p.channels[0].misc.main_pitch = false;
+        assert!((rate_of(&p) - 1.0).abs() < 1e-9, "the switch cleared: no main pitch");
+        let mut p = base.clone();
+        p.patterns[0].notes[0].fine_pitch = 220;
+        let mut lib = SampleLibrary::new(None);
+        let e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+        assert!((e.triggers[0].rate - 2f64.powf(1000.0 / 1200.0)).abs() < 1e-9, "fine pitch 220 = +1000 cents");
+        assert!((e.channels[0].base_rate / e.channels[0].src_ratio - 1.0).abs() < 1e-9, "the channel is not moved");
     }
 }

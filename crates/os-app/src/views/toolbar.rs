@@ -367,17 +367,16 @@ fn row2(ui: &mut Ui, s: &State) {
         ui.c.text(Font::condensed(menus::BAR_FONT.size, width as u16), x0, 51.0, if lemon && open { t.pill_text } else { t.menu_text }, title);
     }
 
-    // Master knobs: not connected to the sound yet (the mixer's master track is), so greyed out.
-    ui.off(Rect::span(303.0, 337.0, 45.0, 77.0), "Main volume (use the mixer's master track)");
-    let off = os_ui::kit::State::NORMAL.with_disabled(true);
-    os_ui::kit::knob(ui.c, t, 319.0, 61.0, 14.0, 0.8, false, os_ui::kit::KnobLook::Ring, off);
-    ui.off(Rect::span(340.0, 376.0, 45.0, 77.0), "Main pitch");
-    os_ui::kit::knob(ui.c, t, 358.0, 61.0, 14.0, 0.5, true, os_ui::kit::KnobLook::Ring, off);
+    // Main volume and main pitch (project values; spec: audio/mixer.md "Main volume", audio/voice-levels.md).
+    use crate::knobs::KnobId;
+    ui.hit(Rect::span(303.0, 337.0, 45.0, 77.0), Action::Knob(KnobId::MasterVol), s.knob_text(KnobId::MasterVol));
+    super::knob(ui, 319.0, 61.0, 14.0, s.knob(KnobId::MasterVol), false, t.glyph, t.button_hi);
+    ui.hit(Rect::span(340.0, 376.0, 45.0, 77.0), Action::Knob(KnobId::MasterPitch), s.knob_text(KnobId::MasterPitch));
+    super::knob(ui, 358.0, 61.0, 14.0, s.knob(KnobId::MasterPitch), true, t.glyph, t.button_hi);
     for k in 0..20 {
         let a = 0.75 * std::f32::consts::PI + 1.5 * std::f32::consts::PI * k as f32 / 19.0;
         ui.c.fill_circle(358.0 + 17.5 * a.cos(), 61.0 + 17.5 * a.sin(), 0.7, t.glyph_dim);
     }
-    ui.veil(Rect::span(301.0, 377.0, 43.0, 79.0), t.toolbar);
 
     // Main slider panel.
     let sp = Rect::span(381.0, 575.0, 45.0, 77.0);

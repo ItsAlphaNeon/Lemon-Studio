@@ -57,6 +57,10 @@ mod id {
     pub const TIME_NUM: u8 = 17;
     pub const TIME_DEN: u8 = 18;
     pub const PLAY_TRUNCATED: u8 = 30;
+    /// The project's main pitch, cents as a signed 16-bit value (spec: flp/engine-events.md "Project").
+    pub const MAIN_PITCH: u8 = 80;
+    /// Channel fine tune, cents (spec: audio/voice-levels.md).
+    pub const CH_FINE: u8 = 142;
     /// Channel settings the engine reads (spec: flp/engine-events.md "A channel").
     pub const CH_SWING_SHARE: u8 = 97;
     pub const CH_ROOT: u8 = 135;
@@ -298,6 +302,7 @@ struct Layout {
     time_num: Option<usize>,
     time_den: Option<usize>,
     truncated: Option<usize>,
+    main_pitch: Option<usize>,
     groups: Vec<usize>,
     current_group: Option<usize>,
 }
@@ -433,6 +438,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 id::TIME_NUM if l.time_num.is_none() => l.time_num = Some(i),
                 id::TIME_DEN if l.time_den.is_none() => l.time_den = Some(i),
                 id::PLAY_TRUNCATED if l.truncated.is_none() => l.truncated = Some(i),
+                id::MAIN_PITCH if l.main_pitch.is_none() => l.main_pitch = Some(i),
                 id::GROUP_NAME => l.groups.push(i),
                 id::CURRENT_GROUP => l.current_group = Some(i),
                 _ => {}
@@ -581,6 +587,8 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         current_group: l.current_group.map(|i| int(&events[i])).filter(|&v| v != u32::MAX),
         time_signature: l.time_num.zip(l.time_den).map(|(n, d)| (int(&events[n]) as u16, int(&events[d]) as u16)).filter(|&(n, d)| n > 0 && d > 0),
         play_truncated: l.truncated.map(|i| int(&events[i]) != 0),
+        main_pitch: l.main_pitch.map(|i| int(&events[i]) as u16 as i16),
+        main_volume: main_volume(l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[])),
         playlist_view: l.playlist_view.and_then(|i| events[i].data()).and_then(PlaylistView::from_bytes),
         ..Default::default()
     };
@@ -704,8 +712,9 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
 }
 
 /// The Misc tab values the file stores outside the plugin state: level adjustments (event 229: pan offset,
-/// volume multiplier, -, mod X offset, mod Y offset), swing share (97, 0..=128) and root note (135)
-/// (spec: flp/engine-events.md "A channel", audio/voice-levels.md, audio/swing.md, audio/sampler.md).
+/// volume multiplier, -, mod X offset, mod Y offset), swing share (97, 0..=128), root note (135), fine tune (142) and
+/// the main pitch switch (215 byte 11) (spec: flp/engine-events.md "A channel", audio/voice-levels.md, audio/swing.md,
+/// audio/sampler.md).
 fn load_misc(block: &[Event]) -> ChannelMisc {
     let find = |id: u8| block.iter().find(|e| e.id == id);
     let mut m = ChannelMisc::default();
@@ -718,6 +727,12 @@ fn load_misc(block: &[Event]) -> ChannelMisc {
     }
     if let Some(e) = find(id::CH_ROOT) {
         m.root = int(e).min(127) as u8;
+    }
+    if let Some(e) = find(id::CH_FINE) {
+        m.fine = int(e) as i32;
+    }
+    if let Some(&b) = find(id::CH_SAMPLE_SETTINGS).and_then(Event::data).and_then(|d| d.get(11)) {
+        m.main_pitch = b != 0;
     }
     m
 }
@@ -1149,20 +1164,61 @@ const SLOT_MIX_FULL: f64 = 12800.0;
 /// Sets parameter record (`MX_KIND_PARAM`, `pid`) at `loc`, or adds it after the records of that location (before the
 /// first record of a later location) when the file has none.
 fn set_param_record(data: &mut Vec<u8>, loc: u16, pid: u8, v: i32) {
-    let found = mixer_param_records(data).find(|&(_, p, k, at, _)| k == MX_KIND_PARAM && p == pid && at == loc).map(|r| r.0);
+    set_record(data, MX_KIND_PARAM, loc, pid, v);
+}
+
+/// Sets the record (`kind`, `pid`) at `loc`, or adds it before the first record of a later location.
+fn set_record(data: &mut Vec<u8>, kind: u8, loc: u16, pid: u8, v: i32) {
+    let found = mixer_param_records(data).find(|&(_, p, k, at, _)| k == kind && p == pid && at == loc).map(|r| r.0);
     if let Some(off) = found {
         data[off + 8..off + 12].copy_from_slice(&v.to_le_bytes());
         return;
     }
     let at = mixer_param_records(data)
-        .find(|&(_, _, k, l, _)| l > loc && k == MX_KIND_PARAM)
+        .find(|&(_, _, _, l, _)| l > loc)
         .map_or(data.len() - data.len() % MIXER_REC_LEN, |r| r.0);
-    let mut r = [0u8; MIXER_REC_LEN];
-    r[4] = pid;
-    r[5] = MX_KIND_PARAM;
-    r[6..8].copy_from_slice(&loc.to_le_bytes());
-    r[8..12].copy_from_slice(&v.to_le_bytes());
-    data.splice(at..at, r);
+    data.splice(at..at, param_rec(pid, kind, loc, v));
+}
+
+/// The main volume: record id 0, kind 0 at place 0x4000 (spec: audio/mixer.md "Main volume").
+fn main_volume(params: &[u8]) -> Option<u16> {
+    mixer_param_records(params)
+        .find(|&(_, p, k, loc, _)| p == 0 && k == 0 && loc == MX_SPECIAL_LOC)
+        .map(|r| r.4.clamp(0, 16000) as u16)
+}
+
+/// Send records of files up to FL 24.1: kind 0x1F, id 64 + destination (destinations 0..=126) at the source's place
+/// (spec: flp/layouts.md "Parameter ids"); later files use kind 0x20 with the destination as the id.
+const MX_SEND_OLD: std::ops::RangeInclusive<u8> = 64..=190;
+
+fn is_send(kind: u8, pid: u8) -> bool {
+    kind == MX_KIND_ROUTE || (kind == MX_KIND_PARAM && MX_SEND_OLD.contains(&pid))
+}
+
+/// A send record's destination track.
+fn send_dest(kind: u8, pid: u8) -> u16 {
+    if kind == MX_KIND_ROUTE { u16::from(pid) } else { u16::from(pid - 64) }
+}
+
+/// Event 236 flags (spec: flp/layouts.md "A mixer track's record (event 236)"): reverse polarity, swap left / right,
+/// effect slots enabled, track on. A 5-byte record (FL 10 and 11) holds no flags: all at their defaults.
+const MX_FLAG_POLARITY: u8 = 0x01;
+const MX_FLAG_SWAP: u8 = 0x02;
+const MX_FLAG_SLOTS: u8 = 0x04;
+const MX_FLAG_ON: u8 = 0x08;
+
+fn track_flags(d: Option<&[u8]>) -> Option<u8> {
+    d.filter(|d| d.len() >= 8).map(|d| d[4])
+}
+
+fn with_flags(b: u8, m: &MixerTrack) -> u8 {
+    let mut b = b & !(MX_FLAG_POLARITY | MX_FLAG_SWAP | MX_FLAG_SLOTS | MX_FLAG_ON);
+    for (on, f) in [(m.polarity, MX_FLAG_POLARITY), (m.swap, MX_FLAG_SWAP), (m.slots_enabled, MX_FLAG_SLOTS), (m.enabled, MX_FLAG_ON)] {
+        if on {
+            b |= f;
+        }
+    }
+    b
 }
 
 /// A mixer track's slot area (spec: flp/events/mixer.md "Slot sub-block"): the events between its flags (236) and its
@@ -1352,20 +1408,21 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
                 }
             }
         }
+        let flags = track_flags(m.flags.and_then(|i| events[i].data()));
+        let flag = |f: u8, default: bool| flags.map_or(default, |b| b & f != 0);
         out.push(MixerTrack {
             index,
             name: m.name.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)),
             color: m.color.filter(|_| custom).map(|i| rgb_from_bgr(int(&events[i]))),
-            enabled: m
-                .flags
-                .and_then(|i| events[i].data())
-                .and_then(|d| d.get(4))
-                .is_none_or(|&b| b & 0x08 != 0),
+            enabled: flag(MX_FLAG_ON, true),
+            polarity: flag(MX_FLAG_POLARITY, false),
+            swap: flag(MX_FLAG_SWAP, false),
+            slots_enabled: flag(MX_FLAG_SLOTS, true),
             slots,
             routes,
             send_levels: mixer_param_records(params)
-                .filter(|&(_, _, k, loc, _)| k == MX_KIND_ROUTE && loc == base)
-                .map(|(_, dest, _, _, v)| (u16::from(dest), f64::from(v) / 16000.0))
+                .filter(|&(_, pid, k, loc, _)| is_send(k, pid) && loc == base)
+                .map(|(_, pid, k, _, v)| (send_dest(k, pid), f64::from(v) / 16000.0))
                 .collect(),
             volume: param(MX_VOLUME).map(|v| f64::from(v) / 16000.0),
             pan: param(MX_PAN).map(|v| f64::from(v) / 6400.0),
@@ -1476,6 +1533,17 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         match l.swing {
             Some(i) => set_int(&mut events[i], v.into()),
             None if v != 0 => inserts.push((l.tempo.map_or(0, |i| i + 1), Event::new(id::SWING, Value::U8(v)))),
+            None => {}
+        }
+    }
+    // Main pitch (event 80): FL writes it right after the swing.
+    if let Some(v) = project.main_pitch.filter(|&v| Some(v) != current.main_pitch) {
+        match l.main_pitch {
+            Some(i) => set_int(&mut events[i], u32::from(v as u16)),
+            None if v != 0 => {
+                let at = l.swing.or(l.tempo).map_or(0, |i| i + 1);
+                inserts.push((at, Event::new(id::MAIN_PITCH, Value::U16(v as u16))));
+            }
             None => {}
         }
     }
@@ -1946,11 +2014,21 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 }
             }
         }
-        if m.enabled != old.enabled {
+        if (m.enabled, m.polarity, m.swap, m.slots_enabled) != (old.enabled, old.polarity, old.swap, old.slots_enabled) {
             if let Some(i) = ml.flags {
-                if let Some(&b) = events[i].data().and_then(|d| d.get(4)) {
-                    let b = if m.enabled { b | 0x08 } else { b & !0x08 };
-                    patch_bytes(&mut events[i], 4, &[b]);
+                match track_flags(events[i].data()) {
+                    Some(b) => patch_bytes(&mut events[i], 4, &[with_flags(b, m)]),
+                    // A 5-byte record (FL 10 / 11) has no flags: it becomes the 8-byte record of FL 12, its latency kept
+                    // (spec: flp/layouts.md "A mixer track's record (event 236)").
+                    None => {
+                        let d = events[i].data().unwrap_or(&[]);
+                        let mut r = [0u8; 8];
+                        let late = d.get(4).is_some_and(|&b| b != 0);
+                        r[..d.len().min(4)].copy_from_slice(&d[..d.len().min(4)]);
+                        let base = if m.index == 0 { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
+                        r[4] = with_flags(base | if late { 0x20 } else { 0 }, m);
+                        set_data(&mut events[i], r.to_vec());
+                    }
                 }
             }
         }
@@ -1995,7 +2073,9 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             if let Some(data) = params.as_mut() {
                 let loc = mixer_location(record_track(m.index, project.mixer.len()), 0);
                 let mut recs: Vec<[u8; MIXER_REC_LEN]> = data.chunks_exact(MIXER_REC_LEN).map(|r| r.try_into().unwrap()).collect();
-                recs.retain(|r| !(r[5] == MX_KIND_ROUTE && u16::from_le_bytes([r[6], r[7]]) == loc));
+                // Files with sends in the old form (kind 0x1F, id 64 + destination) keep that form.
+                let old_form = recs.iter().any(|r| r[5] == MX_KIND_PARAM && MX_SEND_OLD.contains(&r[4]));
+                recs.retain(|r| !(is_send(r[5], r[4]) && u16::from_le_bytes([r[6], r[7]]) == loc));
                 let at = recs.iter().rposition(|r| u16::from_le_bytes([r[6], r[7]]) == loc).map_or_else(
                     || recs.iter().position(|r| u16::from_le_bytes([r[6], r[7]]) > loc).unwrap_or(recs.len()),
                     |p| p + 1,
@@ -2004,8 +2084,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 levels.sort_by_key(|&(d, _)| d);
                 for (k, &(dest, level)) in levels.iter().enumerate() {
                     let mut r = [0u8; MIXER_REC_LEN];
-                    r[4] = dest.min(255) as u8;
-                    r[5] = MX_KIND_ROUTE;
+                    (r[4], r[5]) = if old_form { (64 + dest.min(126) as u8, MX_KIND_PARAM) } else { (dest.min(255) as u8, MX_KIND_ROUTE) };
                     r[6..8].copy_from_slice(&loc.to_le_bytes());
                     r[8..12].copy_from_slice(&((level * 16000.0).round() as i32).to_le_bytes());
                     recs.insert(at + k, r);
@@ -2033,6 +2112,9 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 data[off + 8..off + 12].copy_from_slice(&v.to_le_bytes());
             }
         }
+    }
+    if let (Some(v), Some(data)) = (project.main_volume.filter(|&v| Some(v) != current.main_volume), params.as_mut()) {
+        set_record(data, 0, MX_SPECIAL_LOC, 0, i32::from(v));
     }
     if let (Some(i), Some(data)) = (l.mixer_params, params) {
         set_data(&mut events[i], data);
@@ -2429,6 +2511,9 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     if let Some(v) = project.swing.filter(|&v| v != 0) {
         ev.push(Event::new(id::SWING, Value::U8(v)));
     }
+    if let Some(v) = project.main_pitch.filter(|&v| v != 0) {
+        ev.push(Event::new(id::MAIN_PITCH, Value::U16(v as u16)));
+    }
     if let Some(p) = project.current_pattern {
         ev.push(Event::new(id::CURRENT_PATTERN, Value::U16(p)));
     }
@@ -2486,7 +2571,7 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     }
     // The mixer follows the arrangements (spec: flp/events/mixer.md "Where the mixer sits").
     if !project.arrangements.is_empty() && !project.mixer.is_empty() {
-        ev.extend(mixer_events(&project.mixer, enc));
+        ev.extend(mixer_events(&project.mixer, project.main_volume, enc));
     }
     let mut header = Vec::with_capacity(6);
     header.extend(0u16.to_le_bytes()); // format
@@ -2627,9 +2712,7 @@ fn track_block_events(m: &MixerTrack, last: bool, enc: TextEnc) -> Vec<Event> {
     let mut flags = [0u8; 12];
     flags[4] = if m.index == 0 || last { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
     let rt = if last && m.index > 0 { MX_SPECIAL_TRACK } else { m.index };
-    if !m.enabled {
-        flags[4] &= !0x08;
-    }
+    flags[4] = with_flags(flags[4], m);
     ev.push(Event::new(id::MX_FLAGS, Value::var(flags.to_vec())));
     for (k, slot) in m.slots.iter().enumerate() {
         if let Some(p) = slot {
@@ -2648,12 +2731,12 @@ fn track_block_events(m: &MixerTrack, last: bool, enc: TextEnc) -> Vec<Event> {
 
 /// A whole mixer: the track count (event 103), the track blocks, and the parameter records (event 225) with the
 /// special records every file has (spec: flp/events/mixer.md).
-fn mixer_events(mixer: &[MixerTrack], enc: TextEnc) -> Vec<Event> {
+fn mixer_events(mixer: &[MixerTrack], main_volume: Option<u16>, enc: TextEnc) -> Vec<Event> {
     let mut ev = vec![Event::new(id::MX_COUNT, Value::U16(mixer.len() as u16))];
     for (n, m) in mixer.iter().enumerate() {
         ev.extend(track_block_events(m, n + 1 == mixer.len(), enc));
     }
-    let mut recs = param_rec(0, 0, MX_SPECIAL_LOC, 12800).to_vec();
+    let mut recs = param_rec(0, 0, MX_SPECIAL_LOC, i32::from(main_volume.unwrap_or(Project::MAIN_VOLUME_DEFAULT))).to_vec();
     let (current, rest) = match mixer.split_last() {
         Some((c, rest)) if !rest.is_empty() => (Some(c), rest),
         _ => (None, mixer),
@@ -2685,6 +2768,10 @@ pub fn unsaved_parts(project: &Project, file: &FlpFile) -> Vec<&'static str> {
     if current.mixer.is_empty() && !mixer_is_default(&project.mixer) {
         parts.push("mixer settings");
     }
+    // The main volume lives in the mixer's parameter records: a file without them cannot hold it.
+    if current.main_volume.is_none() && project.main_volume.is_some_and(|v| v != Project::MAIN_VOLUME_DEFAULT) {
+        parts.push("main volume");
+    }
     if current.arrangements.is_empty() && project.arrangements.iter().any(|a| !a.clips.is_empty()) {
         parts.push("playlist clips");
     }
@@ -2705,6 +2792,7 @@ fn mixer_is_default(mixer: &[MixerTrack]) -> bool {
             && t.slot_mix.iter().all(|&m| m == 1.0)
             && !t.polarity
             && !t.swap
+            && t.slots_enabled
             && t.send_levels.is_empty()
             && t.volume.is_none_or(|v| (v - 0.8).abs() < 1e-9)
             && t.pan.is_none_or(|v| v == 0.0)
@@ -2821,6 +2909,7 @@ mod tests {
             let mut add = vec![
                 Event::new(id::CH_SWING_SHARE, Value::U16(64)),
                 Event::new(id::CH_ROOT, Value::U32(48)),
+                Event::new(id::CH_FINE, Value::U32(-35i32 as u32)),
                 Event::new(id::CH_SAMPLER_FLAGS, Value::U32(10)),
                 Event::new(id::CH_SAMPLE_SETTINGS, Value::var(s215)),
                 Event::new(id::CH_ADJUST, ints(&[-3200, 25600, 0, 128, -256])),
@@ -2849,6 +2938,8 @@ mod tests {
         assert_eq!((p.time_signature, p.play_truncated), (Some((6, 8)), Some(true)));
         let c = &p.channels[0];
         assert_eq!((c.misc.swing, c.misc.root), (0.5, 48));
+        // Fine tune (event 142) and the main pitch switch (215 byte 11, cleared here).
+        assert_eq!((c.misc.fine, c.misc.main_pitch), (-35, false));
         assert_eq!(c.misc.levels, [-0.5, 1.0, 0.5, -1.0]);
         assert_eq!((c.sound.cutoff, c.sound.resonance, c.sound.filter_type), (128, 64, 5));
         assert_eq!((c.sound.sampler_flags, c.sound.declick, c.sound.stretch), (Some(10), 3, [1536, 25, 10000, 5]));
@@ -2858,6 +2949,110 @@ mod tests {
         let plain = load(&create(&new_project()).unwrap()).unwrap();
         assert_eq!((plain.time_signature, plain.play_truncated), (None, None));
         assert_eq!((plain.channels[0].misc.swing, plain.channels[0].misc.root, plain.channels[0].sound), (1.0, 60, ChannelSound::default()));
+        assert_eq!((plain.channels[0].misc.fine, plain.channels[0].misc.main_pitch), (0, true));
+    }
+
+    /// Track switches (event 236 flags), the main volume (record 0 at 0x4000) and the main pitch (event 80) are
+    /// written by `create` and `apply` and read back (spec: flp/layouts.md, audio/mixer.md, audio/voice-levels.md).
+    #[test]
+    fn mixer_switches_main_volume_and_pitch_round_trip() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        p.mixer[1].polarity = true;
+        p.mixer[2].swap = true;
+        p.mixer[3].slots_enabled = false;
+        p.main_volume = Some(6400);
+        p.main_pitch = Some(-300);
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!((back.mixer.clone(), back.main_volume, back.main_pitch), (p.mixer.clone(), Some(6400), Some(-300)));
+        let flags = |f: &FlpFile, t: usize| events_of(f).unwrap().iter().filter(|e| e.id == id::MX_FLAGS).nth(t).unwrap().data().unwrap()[4];
+        assert_eq!([flags(&file, 1), flags(&file, 2), flags(&file, 3), flags(&file, 4)], [0x4D, 0x4E, 0x48, 0x4C]);
+        let mut edited = back.clone();
+        edited.mixer[1].polarity = false;
+        edited.mixer[3].slots_enabled = true;
+        edited.mixer[4].swap = true;
+        edited.mixer[4].enabled = false;
+        edited.main_volume = Some(16000);
+        edited.main_pitch = Some(1200);
+        apply(&edited, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!((again.mixer, again.main_volume, again.main_pitch), (edited.mixer, Some(16000), Some(1200)));
+        // A file without event 80 gets it after the swing (or the tempo) once the main pitch is set.
+        let mut plain = create(&new_project()).unwrap();
+        let mut q = load(&plain).unwrap();
+        assert_eq!((q.main_pitch, q.main_volume), (None, None));
+        q.main_pitch = Some(250);
+        apply(&q, &mut plain).unwrap();
+        let ev = events_of(&plain).unwrap();
+        let at = ev.iter().position(|e| e.id == id::MAIN_PITCH).unwrap();
+        assert_eq!(ev[at - 1].id, id::TEMPO);
+        assert_eq!(load(&plain).unwrap().main_pitch, Some(250));
+    }
+
+    /// A 5-byte track record (FL 10 / 11) holds no flags: the track reads as on, unswapped, slots enabled; an edit turns
+    /// it into the 8-byte record with the latency value and its 0x20 byte kept (spec: flp/layouts.md).
+    #[test]
+    fn five_byte_track_records() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        let mut file = create(&p).unwrap();
+        let old = [0x00, 0x00, 0xa0, 0x40, 0x01];
+        {
+            let ev = events_of_mut(&mut file).unwrap();
+            let e = ev.iter_mut().filter(|e| e.id == id::MX_FLAGS).nth(2).unwrap();
+            *e = Event::new(id::MX_FLAGS, Value::var(old.to_vec()));
+        }
+        let back = load(&file).unwrap();
+        let t = &back.mixer[2];
+        assert_eq!((t.enabled, t.polarity, t.swap, t.slots_enabled), (true, false, false, true));
+        let mut edited = back.clone();
+        edited.mixer[2].polarity = true;
+        apply(&edited, &mut file).unwrap();
+        let ev = events_of(&file).unwrap();
+        let d = ev.iter().filter(|e| e.id == id::MX_FLAGS).nth(2).unwrap().data().unwrap();
+        assert_eq!(d, &[0x00, 0x00, 0xa0, 0x40, 0x4C | 0x20 | 0x01, 0, 0, 0]);
+        assert_eq!(load(&file).unwrap().mixer, edited.mixer);
+    }
+
+    /// Sends stored the old way (FL 24.1 and before: kind 0x1F, id 64 + destination) are read, and edits keep that
+    /// form (spec: flp/layouts.md "Parameter ids").
+    #[test]
+    fn old_form_sends_are_read_and_kept() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        p.mixer[2].routes = vec![0, 5];
+        p.mixer[2].send_levels = vec![(5, 0.5)];
+        let mut file = create(&p).unwrap();
+        {
+            let ev = events_of_mut(&mut file).unwrap();
+            let e = ev.iter_mut().rfind(|e| e.id == id::MX_PARAMS).unwrap();
+            let mut d = e.data().unwrap().to_vec();
+            for r in d.chunks_exact_mut(MIXER_REC_LEN) {
+                if r[5] == MX_KIND_ROUTE {
+                    (r[4], r[5]) = (64 + r[4], MX_KIND_PARAM);
+                }
+            }
+            *e = Event::new(id::MX_PARAMS, Value::var(d));
+        }
+        let back = load(&file).unwrap();
+        assert_eq!(back.mixer[2].send_levels, vec![(5, 0.5)]);
+        let mut edited = back.clone();
+        edited.mixer[2].send_levels = vec![(5, 0.25)];
+        apply(&edited, &mut file).unwrap();
+        assert_eq!(load(&file).unwrap().mixer[2].send_levels, vec![(5, 0.25)]);
+        let ev = events_of(&file).unwrap();
+        let d = ev.iter().rfind(|e| e.id == id::MX_PARAMS).unwrap().data().unwrap();
+        assert!(mixer_param_records(d).all(|(_, _, k, _, _)| k != MX_KIND_ROUTE), "still in the old form");
     }
 
     /// A plugin channel made in Lemon Studio (spec: flp/events/plugins.md §2-3): its block holds the plugin name, a

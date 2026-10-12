@@ -68,7 +68,7 @@ clicking it does nothing.
 | Piano roll note editing | ✅ | Full tool set, velocity and event lanes, quantize / chop / glue / legato / strum / arpeggiate / randomize, vertical zoom, ghost channels, pattern time markers (saved) |
 | Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers, several arrangements; track height, zoom and scroll saved with the project |
 | Automation | 🚧 | Automation clips for channel, mixer and plugin parameters; no recording of movements |
-| Mixing and routing | ✅ | Mixer tracks, sends, sidechain, effect slots, meters |
+| Mixing and routing | ✅ | Mixer tracks, sends, sidechain, effect slots, meters, polarity and stereo swap, main volume and main pitch |
 | Plugin hosting | ✅ | CLAP and VST3 instruments and effects, with their editors and saved state |
 | Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ so far |
 | Exporting audio | 🚧 | Song or pattern to a WAV file (32-bit float); no MP3 or FLAC yet |

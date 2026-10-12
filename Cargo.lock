@@ -2217,6 +2217,7 @@ dependencies = [
  "open-parametric-eq-2",
  "open-sampler",
  "os-clap",
+ "os-dsp",
  "os-engine",
  "os-flp",
  "os-host",
