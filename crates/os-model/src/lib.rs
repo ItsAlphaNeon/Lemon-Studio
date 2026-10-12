@@ -309,16 +309,73 @@ pub struct ChannelSound {
     pub sampler_flags: Option<u32>,
     /// Declick mode 0..=6 (event 215, byte 83; spec: audio/declick.md); 7 and up are invalid in FL.
     pub declick: u8,
-    /// Stretch settings as stored (event 215, ints 24..27): time, pitch, multiplier, mode. The time is an int in
-    /// 1/192 beat, or a single from FL 24.2 on: kept as its bits.
+    /// Stretch settings as stored (event 215, ints 24..27): time, pitch, multiplier, mode. The time is a single in
+    /// 1/192 beat (FL 24.2 on), kept as its bits.
     pub stretch: [u32; 4],
 }
 
+/// Stretch methods as event 215 int 27 stores them (spec: audio/time-stretch.md "Fields").
+pub mod stretch_mode {
+    /// Plays faster or slower, pitch and length together.
+    pub const RESAMPLE: i32 = 0;
+    /// The realtime stretchers: the note and the channel pitch move the pitch, not the length.
+    pub const STRETCH: i32 = -1;
+    pub const STRETCH_PRO: i32 = -2;
+    /// The stretchers that stretch the sample once before it plays.
+    pub const E3_GENERIC: i32 = 1;
+    pub const E3_MONO: i32 = 2;
+    pub const SLICE_STRETCH: i32 = 3;
+    pub const SLICE_MAP: i32 = 4;
+    /// Plain playback when there is nothing to do, else e3 generic.
+    pub const AUTO: i32 = 5;
+    pub const E2_GENERIC: i32 = 6;
+    pub const E2_TRANSIENT: i32 = 7;
+    pub const E2_MONO: i32 = 8;
+    pub const E2_SPEECH: i32 = 9;
+
+    /// A realtime method (the voice stretches while it plays).
+    pub fn realtime(mode: i32) -> bool {
+        matches!(mode, STRETCH | STRETCH_PRO)
+    }
+}
+
+/// How a sample channel's stretch settings play (spec: audio/time-stretch.md "How each method plays").
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Stretching {
+    /// The sample plays as it is.
+    None,
+    /// Resample: the sample plays `speed` times as fast, pitch and length together.
+    Resample { speed: f64 },
+    /// Stretched once before it plays to `factor` times its length, its pitch moved by `cents`; notes then play the
+    /// result like any sample (the key and the channel pitch resample it).
+    Whole { factor: f64, cents: f64 },
+    /// Stretched while it plays to `factor` times its length; the stretch's `cents`, the key and the channel pitch move
+    /// the pitch, never the length.
+    Realtime { factor: f64, cents: f64 },
+}
+
 impl ChannelSound {
-    /// The resample stretch multiplier `2^(stored / 10000)` (event 215 int 26; spec: audio/audio-clips.md "Stretching by
-    /// resampling"), 1.0 when none.
+    /// The stretch multiplier `2^(stored / 10000)` (event 215 int 26), 1.0 when none; at single precision, as FL
+    /// keeps it.
     pub fn stretch_multiplier(&self) -> f64 {
-        2f64.powf(f64::from(self.stretch[2] as i32) / 10000.0)
+        f64::from(2f64.powf(f64::from(self.stretch[2] as i32) / 10000.0) as f32)
+    }
+
+    /// The stretch time in beats the sample is fitted to (event 215 int 24, a single in 1/192 beat), `None` when
+    /// not set.
+    pub fn stretch_time(&self) -> Option<f64> {
+        let t = f32::from_bits(self.stretch[0]);
+        (t.is_finite() && t >= 1.0).then(|| f64::from(t) / 192.0)
+    }
+
+    /// The stretch's own pitch shift in cents (event 215 int 25).
+    pub fn stretch_cents(&self) -> f64 {
+        f64::from(self.stretch[1] as i32)
+    }
+
+    /// The stretch method (event 215 int 27, `stretch_mode`).
+    pub fn stretch_mode(&self) -> i32 {
+        self.stretch[3] as i32
     }
 
     /// Stretches by resampling with multiplier `m` and no fitted time (the clip plays `m` times as long).
@@ -328,19 +385,44 @@ impl ChannelSound {
         self.stretch[3] = 0;
     }
 
-    /// Playback speed of a stretched sample of `duration` seconds at `bpm`, and whether the channel's pitch still
-    /// applies (spec: audio/audio-clips.md "Stretching by resampling (mode 0)"; other modes play unstretched here).
-    pub fn stretch_speed(&self, duration: f64, bpm: f64) -> (f64, bool) {
-        let [time, _, _, mode] = self.stretch;
-        if mode != 0 {
-            return (1.0, true);
+    /// Fits the sample to `beats` with the multiplier back at 1, the method and pitch kept: what resizing an audio
+    /// clip in the playlist's stretch mode does (spec: ui/playlist.md §9b).
+    pub fn set_stretch_time(&mut self, beats: f64) {
+        self.stretch[0] = ((beats * 192.0) as f32).max(1.0).to_bits();
+        self.stretch[2] = 0;
+    }
+
+    /// How many times its own length a sample of `duration` seconds lasts once stretched at `bpm`, in any method:
+    /// the stretch time (or the sample's length when none) times the multiplier.
+    pub fn stretch_factor(&self, duration: f64, bpm: f64) -> f64 {
+        let m = self.stretch_multiplier();
+        match self.stretch_time() {
+            Some(beats) if duration > 0.0 => beats * 60.0 / bpm.max(1.0) * m / duration,
+            _ => m,
         }
-        let m = f64::from(self.stretch_multiplier() as f32);
-        if time > 0 && duration > 0.0 {
-            let target = (f64::from(time) / 192.0) * (60.0 / bpm) * m;
-            (duration / target, false)
-        } else {
-            (1.0 / m, true)
+    }
+
+    /// Whether the channel's pitch still moves the sample: not when a stretch time fits it, except in the realtime
+    /// methods (spec: audio/time-stretch.md "Channel pitch").
+    pub fn channel_pitch_applies(&self) -> bool {
+        self.stretch_time().is_none() || stretch_mode::realtime(self.stretch_mode())
+    }
+
+    /// How a sample of `duration` seconds plays at `bpm` with these stretch settings.
+    pub fn stretching(&self, duration: f64, bpm: f64) -> Stretching {
+        if self.stretch == [0; 4] {
+            return Stretching::None;
+        }
+        let factor = self.stretch_factor(duration, bpm);
+        let cents = self.stretch_cents();
+        let idle = (factor - 1.0).abs() < 1e-4 && cents == 0.0;
+        match self.stretch_mode() {
+            stretch_mode::RESAMPLE if (factor - 1.0).abs() < 1e-9 => Stretching::None,
+            stretch_mode::RESAMPLE => Stretching::Resample { speed: 1.0 / factor },
+            m if stretch_mode::realtime(m) => Stretching::Realtime { factor, cents },
+            // Auto, the methods that stretch the sample first, and any value not known: nothing to do is plain playback.
+            _ if idle => Stretching::None,
+            _ => Stretching::Whole { factor, cents },
         }
     }
 }

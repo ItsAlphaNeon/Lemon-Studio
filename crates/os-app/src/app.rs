@@ -2003,6 +2003,15 @@ impl App {
         if crate::mixer::feed_meters(&mut self.state, &peaks) && self.state.shown(Win::Mixer) {
             self.damage_live(Live::Meter);
         }
+        // Audio clips follow their channel's stretch, pitch and the tempo (ui/playlist.md §9c). The lengths are worked
+        // out, not edited: the saved copy gets them too, so a fit alone (an opened FL project) is not an unsaved change.
+        if let Some(fits) = crate::playlist::audio_fits(&self.state) {
+            if crate::playlist::fit_clips(&mut self.state.project.arrangements, &fits) {
+                crate::playlist::fit_clips(&mut self.saved.0.arrangements, &fits);
+                self.state.piano.dirty = true;
+                self.damage_win(Win::Playlist);
+            }
+        }
         // Edits (notes, steps, mixer, channel volume / pan / mute, tempo) reach playback right away,
         // also during a drag (at most once per tick).
         if self.state.piano.dirty {
@@ -7303,8 +7312,12 @@ mod tests {
         app.mouse_move(r.right() - 1.0 + r.w, y);
         app.mouse_up();
         let after = pl::clips(&app.state)[ci];
-        let m = app.state.project.channels[row].sound.stretch_multiplier();
-        assert!((m - 2.0).abs() < 0.02, "multiplier {m}");
+        // The time becomes the whole sample's length (1 s at the project tempo) times two; the multiplier stays at 1.
+        let sound = app.state.project.channels[row].sound;
+        let want = app.state.tempo / 60.0 * 2.0;
+        let beats = sound.stretch_time().expect("a stretch time");
+        assert!((beats - want).abs() < 0.02 * want, "time {beats} beats, want {want}");
+        assert_eq!((sound.stretch[2], sound.stretch_mode()), (0, 0), "multiplier 1, method kept");
         assert!((f64::from(after.length) / f64::from(before.length) - 2.0).abs() < 0.02, "twice as long");
         assert_eq!(after.window, before.window, "the same part of the sample");
         app.key(&winit::keyboard::Key::Character("z".into()), true, false);
@@ -7325,6 +7338,70 @@ mod tests {
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         assert_eq!(back.channels[row2].sound.stretch, [0, 0, (-10000i32) as u32, 0]);
         let _ = (std::fs::remove_file(&path), std::fs::remove_file(&wav));
+    }
+
+    /// Audio clips follow their channel (spec: ui/playlist.md §9c): the length is worked out from the trims and the
+    /// channel's stretch, pitch and the tempo, each trim point rounded on its own. The numbers are FL 26's for a 6.4 s
+    /// sample at 130 BPM, PPQ 96: untrimmed, trimmed to 0..3200 ms and to 1600..4800 ms.
+    #[test]
+    fn audio_clips_follow_their_channel() {
+        use crate::playlist as pl;
+        use os_model::{Clip, ClipSource};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.ppq = 96;
+        app.state.tempo = 130.0;
+        app.state.playlist.reset();
+        let wav = std::env::temp_dir().join(format!("os-app-fit-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &vec![0.25; 2 * 282240]).unwrap();
+        pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let row = app.state.project.channels.len() - 1;
+        let src = ClipSource::Channel(app.state.project.channels[row].index);
+        for (track, w) in [(1, (0.0, 3200.0)), (2, (1600.0, 4800.0))] {
+            pl::arr_mut(&mut app.state).clips.push(Clip { window: Some(w), ..Clip::new(0, 1, track, src) });
+        }
+        let mut check = |app: &mut App, stretch: [u32; 4], pitch: i32, tempo: f64, want: [u32; 3], what: &str| {
+            app.state.project.channels[row].sound.stretch = stretch;
+            app.state.project.channels[row].pitch_cents = pitch;
+            app.state.tempo = tempo;
+            pl::fit_audio(&mut app.state);
+            let got: Vec<u32> = pl::clips(&app.state).iter().filter(|c| c.source == src).map(|c| c.length).collect();
+            assert_eq!(got, want, "{what}");
+            // An untrimmed clip shows the whole sample.
+            if let Some(whole) = pl::clips(&app.state).iter().find(|c| c.source == src && c.window.is_none()).copied() {
+                assert!((pl::window(&app.state, &whole).1 - 6400.0).abs() < 6.0, "{what}: {:?}", pl::window(&app.state, &whole));
+            }
+        };
+        let t = |units: f32| units.to_bits();
+        check(&mut app, [0; 4], 0, 130.0, [1331, 666, 665], "plain");
+        check(&mut app, [0, 0, 2540, 0], 0, 130.0, [1587, 794, 794], "Resample, MUL 119.25 %");
+        check(&mut app, [0, 0, 2540, 0], 10, 130.0, [1578, 789, 789], "and the channel pitch +10 cents");
+        check(&mut app, [0, 100, 2540, 5], 0, 130.0, [1587, 794, 794], "Auto, PITCH +100: the length stays");
+        check(&mut app, [t(2662.0), 0, 2540, (-1i32) as u32], 10, 130.0, [1587, 794, 793], "Stretch: TIME, no channel pitch");
+        check(&mut app, [t(488.0), 0, 0, 0], 0, 130.0, [244, 122, 122], "Resample, TIME 0:10:04");
+        check(&mut app, [t(2662.0), 0, 0, (-1i32) as u32], 0, 130.0, [1331, 666, 665], "Stretch, TIME 2662: a point on half a tick rounds up");
+        check(&mut app, [0; 4], 0, 522.0, [5345, 2673, 2673], "the tempo without a TIME");
+        check(&mut app, [t(2662.0), 0, 0, (-1i32) as u32], 0, 522.0, [1331, 666, 665], "the tempo with a TIME");
+        // A clip resized in the playlist keeps its new end (it gets a trim end), refitted alike.
+        let i = pl::clips(&app.state).iter().position(|c| c.source == src && c.window.is_none()).unwrap();
+        check(&mut app, [0; 4], 0, 130.0, [1331, 666, 665], "plain again");
+        let orig = pl::clips(&app.state)[i];
+        pl::resize_right(&mut app.state, i, &orig, 1000);
+        assert!(!pl::fit_audio(&mut app.state), "a resize already fits");
+        check(&mut app, [0, 0, 10000, 0], 0, 130.0, [2000, 1331, 1331], "x2 after the resize");
+        // The tick fits them. A fit alone is not an unsaved change (a project opens with other lengths); an edit is.
+        for c in &mut pl::arr_mut(&mut app.state).clips {
+            c.length = 100;
+        }
+        app.mark_saved();
+        app.tick();
+        let got: Vec<u32> = pl::clips(&app.state).iter().filter(|c| c.source == src).map(|c| c.length).collect();
+        assert_eq!(got, [2000, 1331, 1331], "fitted by the tick");
+        assert!(!app.unsaved(), "a fit is not an edit");
+        app.state.project.channels[row].sound.stretch = [0; 4];
+        app.tick();
+        assert!(app.unsaved(), "a stretch edit is");
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// Tools menu (spec: ui/playlist.md §10): quick quantize moves clip starts onto the snap grid (one undo step);

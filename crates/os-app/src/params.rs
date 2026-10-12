@@ -233,6 +233,7 @@ impl App {
         ui.lists.retain(|k, _| self.plugins.hosted.contains_key(k));
         let mut moved = None;
         let mut automate = Vec::new();
+        let mut stretch = Vec::new();
         for (&key, h) in &self.plugins.hosted {
             let Ok(mut p) = h.plugin.lock() else { continue };
             let weak = Arc::downgrade(&h.plugin);
@@ -247,7 +248,13 @@ impl App {
                     .collect();
                 ui.lists.insert(key, List { plugin: weak, params });
             }
+            let sampler = key < crate::plugins::FX_KEY && p.desc().name == crate::plugins::OPEN_SAMPLER;
             for e in p.take_param_events() {
+                if let (true, os_host::ParamEvent::Value(id, v)) = (sampler, &e) {
+                    if let Some(x) = ui.lists.get(&key).and_then(|l| l.params.iter().find(|x| x.id == *id)) {
+                        stretch.push((key, x.name.clone(), *v));
+                    }
+                }
                 let (os_host::ParamEvent::Begin(id) | os_host::ParamEvent::Value(id, _)) = e else { continue };
                 if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
                     moved = Some(Tweak::Plugin { key, index });
@@ -258,6 +265,16 @@ impl App {
                 if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
                     automate.push((key, index));
                 }
+            }
+        }
+        // Open Sampler's time-stretch knobs are the channel's own settings: the channel takes the editor's edits, so
+        // its audio clips get their new length (`playlist::fit_audio`), playback and saving follow (ui/playlist.md §9c).
+        for (row, name, v) in stretch {
+            let Some(ch) = self.state.project.channels.get_mut(row) else { continue };
+            let mut st = ch.sound.stretch;
+            if crate::plugins::stretch_param(&name, v, &mut st) && st != ch.sound.stretch {
+                ch.sound.stretch = st;
+                self.state.piano.dirty = true;
             }
         }
         if let Some(t) = moved {

@@ -256,13 +256,17 @@ pub fn block(p: &SamplerParams, tempo: f64, bend: f64) -> dsp::Block {
         }
         *t = dsp::Target { env, amount: f64::from(e.amt.live()), lfo: lfo(e, tempo) };
     }
-    let resample = p.ts_mode.live() == 0;
+    // Resample and the realtime methods stretch in the voices, the other methods in the processed sample; PITCH plays
+    // no part in Resample (spec §5.6).
+    let mode = p.ts_mode.live();
+    let (resample, realtime) = (mode == 0, params::stretch_realtime(mode));
     dsp::Block {
         root: p.root.live(),
         cents: f64::from(p.fine.live()) + if p.main_pitch.live() { bend } else { 0.0 },
-        ts_cents: if resample { params::ts_cents(p.ts_pitch.live()) } else { 0.0 },
-        ts_ratio: if resample { params::mul_of(p.ts_mul.live()) } else { 1.0 },
-        ts_time: if resample { p.ts_seconds(tempo) } else { None },
+        ts_cents: if realtime { params::ts_cents(p.ts_pitch.live()) } else { 0.0 },
+        ts_ratio: if resample || realtime { params::mul_of(p.ts_mul.live()) } else { 1.0 },
+        ts_time: if resample || realtime { p.ts_seconds(tempo) } else { None },
+        realtime,
         targets,
         f_type: p.f_type.live().clamp(0, 7) as u8,
         f_cut: f64::from(p.f_cut.live()),
