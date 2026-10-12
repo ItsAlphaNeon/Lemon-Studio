@@ -302,13 +302,24 @@ pub fn item_at(menu: usize, i: usize) -> Option<&'static Item> {
 /// Menu bar font: Cuprum 18 px condensed (spec §3).
 pub const BAR_FONT: Font = Font::condensed(18, 6);
 
-/// Menu bar item layout: (x0, x1, font size). Left edges are the measured word starts; widths
-/// come from the font, so the words always fit.
+/// Menu bar item layout: (x0, x1, average character width of the font). Left edges are the measured word
+/// starts. The words are as wide as the font makes them; where a text engine sets them wider than the slots
+/// were measured for, all eight are condensed one step further so that no word runs into the next.
 pub fn bar_layout(c: &mut os_ui::Canvas) -> [(f32, f32, f32); 8] {
     const X: [f32; 8] = [8.0, 35.0, 61.0, 88.0, 143.0, 176.0, 226.0, 266.0];
-    let mut out = [(0.0, 0.0, 18.0); 8];
-    for (i, m) in MENUS.iter().enumerate() {
-        out[i] = (X[i], X[i] + c.text_width(BAR_FONT, m.title), 18.0);
+    const END: f32 = 300.0;
+    let mut out = [(0.0, 0.0, 6.0); 8];
+    for width in [BAR_FONT.width, 5, 4] {
+        let f = Font::condensed(BAR_FONT.size, width);
+        let mut fits = true;
+        for (i, m) in MENUS.iter().enumerate() {
+            let x1 = X[i] + c.text_width(f, m.title);
+            fits &= x1 + 4.0 <= X.get(i + 1).copied().unwrap_or(END);
+            out[i] = (X[i], x1, f32::from(width));
+        }
+        if fits {
+            break;
+        }
     }
     out
 }

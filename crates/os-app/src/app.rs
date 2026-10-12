@@ -5192,6 +5192,18 @@ mod tests {
         assert!(json.contains("\"envvol_on\":{\"bool\":false}") && json.contains("\"sample-path\":\"\\\"\\\"\""), "{json}");
     }
 
+    /// The whole window at one scale, for looking at text: `OS_TEXT_SHOT=<file.png> OS_TEXT_SHOT_SCALE=1.25`.
+    #[test]
+    fn text_shot() {
+        let Some(out) = std::env::var_os("OS_TEXT_SHOT") else { return };
+        let scale: f32 = std::env::var("OS_TEXT_SHOT_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let Ok(mut c) = Canvas::new((1600.0 * scale) as u32, (900.0 * scale) as u32, scale) else { return };
+        let mut app = App::new(None);
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(std::path::Path::new(&out)).unwrap();
+    }
+
     #[test]
     fn monitor_shot() {
         let Some(out) = std::env::var_os("OS_MONITOR_SHOT") else { return };

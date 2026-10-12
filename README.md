@@ -232,6 +232,7 @@ about the project. Please keep in mind that support is not offered at this stage
 | Component | Use | License |
 |---|---|---|
 | [Cuprum](https://fonts.google.com/specimen/Cuprum) by Jovanny Lemonad | Interface typeface | [SIL Open Font License 1.1](crates/os-ui/fonts/Cuprum/OFL.txt) |
+| [Barlow](https://github.com/jpt/barlow) by The Barlow Project Authors | Interface typeface on Linux | [SIL Open Font License 1.1](crates/os-ui/fonts/Barlow/OFL.txt) |
 | [Tabler Icons](https://tabler.io/icons) | Interface icons | [MIT](crates/os-ui/icons/TABLER-LICENSE.txt) |
 | [NIH-plug](https://github.com/robbert-vdh/nih-plug) | Plugin framework for Lemon Studio's plugins | ISC |
 | [vst3-sys](https://github.com/RustAudio/vst3-sys) | VST3 interface bindings (plugin hosting and Lemon Studio's plugins) | GPLv3 |
