@@ -1087,7 +1087,7 @@ impl App {
     fn save(&mut self, choose: bool) {
         let s = &self.state;
         let target = if choose || s.path.is_none() {
-            crate::dialog::modal(|| rfd::FileDialog::new().add_filter("FLP project", &["flp"]).save_file())
+            crate::dialog::save_file(rfd::FileDialog::new().add_filter("FLP project", &["flp"]))
         } else {
             s.path.clone()
         };
@@ -1119,7 +1119,7 @@ impl App {
         if let Some(d) = self.state.path.as_ref().and_then(|p| p.parent()) {
             dlg = dlg.set_directory(d);
         }
-        let Some(mut target) = crate::dialog::modal(|| dlg.save_file()) else { return };
+        let Some(mut target) = crate::dialog::save_file(dlg) else { return };
         if target.extension().is_none() {
             target.set_extension("wav");
         }
@@ -3825,10 +3825,13 @@ impl App {
                     piano::delete(s, sel);
                 }
             }
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("o") => self.act(Action::MenuItem(0, views::menus::FILE_OPEN)),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE)),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
+            // FILE shortcuts (views/menus.rs). Shift picks another command: Shift+Ctrl+S = Save as; the other Shift
+            // variants have none, so they do nothing (not Open, Export or a new file).
+            Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("o") => self.act(Action::MenuItem(0, views::menus::FILE_OPEN)),
+            Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE)),
+            Key::Character(c) if ctrl && self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_AS)),
+            Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
+            Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
             _ => {}
         }
     }
@@ -4831,7 +4834,7 @@ impl App {
                 if let Some(d) = start {
                     dlg = dlg.set_directory(d);
                 }
-                if let Some(p) = crate::dialog::modal(|| dlg.pick_file()) {
+                if let Some(p) = crate::dialog::pick_file(dlg) {
                     self.open(p);
                 }
             }
@@ -6233,6 +6236,59 @@ mod tests {
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION));
         assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_3.flp").as_path()));
         assert!(dir.join("Song_2.flp").exists() && dir.join("Song_3.flp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Shift+Ctrl+S is Save as: it asks where and leaves the open file as it was. Ctrl+S saves in place without asking.
+    /// Shift+Ctrl+O / R / N have no command: they neither open, export nor write a new version.
+    #[test]
+    fn shift_ctrl_s_is_save_as() {
+        use crate::dialog::fake;
+        use winit::keyboard::Key;
+        let dir = std::env::temp_dir().join(format!("os_save_as_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        // Something to export, so Ctrl+R gets as far as its file dialog.
+        app.state.project.patterns[0].notes.push(Note::step(0, 0));
+        let song = dir.join("Song.flp");
+        app.save_to(song.clone());
+        let before = std::fs::read(&song).unwrap();
+        let key = |app: &mut App, k: &str, shift: bool| {
+            app.shift = shift;
+            app.key(&Key::Character(k.into()), true, false);
+            app.shift = false;
+        };
+
+        app.state.tempo = 99.0;
+        key(&mut app, "S", true);
+        assert_eq!(fake::shown(), (0, 1), "Save as asks where");
+        assert_eq!(std::fs::read(&song).unwrap(), before, "cancelled: the open file is not written");
+        assert!(app.unsaved());
+        let other = dir.join("Other.flp");
+        fake::answer(Some(other.clone()));
+        key(&mut app, "S", true);
+        assert_eq!(app.state.path.as_deref(), Some(other.as_path()));
+        assert!(other.exists() && !app.unsaved(), "saved to the chosen file");
+        assert_eq!(std::fs::read(&song).unwrap(), before, "the old file is left as it was");
+
+        for k in ["O", "R", "N"] {
+            key(&mut app, k, true);
+        }
+        assert_eq!(fake::shown(), (0, 2), "no open or export dialog");
+        assert!(app.export.is_none());
+        assert!(!dir.join("Other_2.flp").exists(), "no new version");
+
+        app.state.tempo = 100.0;
+        key(&mut app, "s", false);
+        assert_eq!(fake::shown(), (0, 2), "Ctrl+S does not ask");
+        assert!(!app.unsaved(), "Ctrl+S saved in place");
+        key(&mut app, "n", false);
+        assert!(dir.join("Other_2.flp").exists(), "Ctrl+N still saves a new version");
+        key(&mut app, "o", false);
+        key(&mut app, "r", false);
+        assert_eq!(fake::shown(), (1, 3), "Ctrl+O and Ctrl+R still ask for a file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

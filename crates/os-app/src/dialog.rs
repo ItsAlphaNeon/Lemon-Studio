@@ -18,6 +18,62 @@ pub fn modal<T>(show: impl FnOnce() -> T) -> T {
     show()
 }
 
+/// Shows `dlg` to pick an existing file. `None`: cancelled.
+#[cfg(not(test))]
+pub fn pick_file(dlg: rfd::FileDialog) -> Option<std::path::PathBuf> {
+    modal(|| dlg.pick_file())
+}
+
+/// Shows `dlg` to choose where to save. `None`: cancelled.
+#[cfg(not(test))]
+pub fn save_file(dlg: rfd::FileDialog) -> Option<std::path::PathBuf> {
+    modal(|| dlg.save_file())
+}
+
+#[cfg(test)]
+pub use fake::{pick_file, save_file};
+
+/// Tests never open a file dialog: each one is counted and gets the answer set with `answer` (default: cancelled).
+#[cfg(test)]
+pub mod fake {
+    use std::{cell::RefCell, path::PathBuf};
+
+    #[derive(Default)]
+    struct Files {
+        picks: u32,
+        saves: u32,
+        answer: Option<PathBuf>,
+    }
+
+    thread_local! {
+        static FILES: RefCell<Files> = RefCell::default();
+    }
+
+    /// The path the next file dialog on this thread returns.
+    pub fn answer(path: Option<PathBuf>) {
+        FILES.with_borrow_mut(|f| f.answer = path);
+    }
+
+    /// File dialogs shown on this thread so far: (open, save).
+    pub fn shown() -> (u32, u32) {
+        FILES.with_borrow(|f| (f.picks, f.saves))
+    }
+
+    pub fn pick_file(_: rfd::FileDialog) -> Option<PathBuf> {
+        FILES.with_borrow_mut(|f| {
+            f.picks += 1;
+            f.answer.take()
+        })
+    }
+
+    pub fn save_file(_: rfd::FileDialog) -> Option<PathBuf> {
+        FILES.with_borrow_mut(|f| {
+            f.saves += 1;
+            f.answer.take()
+        })
+    }
+}
+
 /// Asks a Yes / No / Cancel question (a warning). `None`: no dialog could be shown.
 pub fn yes_no_cancel(title: &str, text: &str) -> Option<Answer> {
     modal(|| ask(title, text))
