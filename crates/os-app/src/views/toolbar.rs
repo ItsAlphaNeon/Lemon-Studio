@@ -354,7 +354,7 @@ fn row2(ui: &mut Ui, s: &State) {
         ui.c.stroke_rrect(mb, 2.5, 1.0, t.toolbar_line.shade(-0.1));
     }
     let layout = menus::bar_layout(ui.c);
-    for (i, (m, (x0, x1, _))) in menus::MENUS.iter().zip(layout).enumerate() {
+    for (i, (m, (x0, x1, width))) in menus::MENUS.iter().zip(layout).enumerate() {
         let title = m.title;
         let r = Rect::new(x0 - 3.0, 47.0, x1 - x0 + 6.0, 29.0);
         let hov = ui.hit(r, Action::Menu(i), title);
@@ -364,7 +364,7 @@ fn row2(ui: &mut Ui, s: &State) {
         } else if hov || open {
             ui.c.fill_rrect(if lemon { r.inset(1.0) } else { r }, if lemon { 4.0 } else { 2.0 }, t.menu_drop_hi);
         }
-        ui.c.text(menus::BAR_FONT, x0, 51.0, if lemon && open { t.pill_text } else { t.menu_text }, title);
+        ui.c.text(Font::condensed(menus::BAR_FONT.size, width as u16), x0, 51.0, if lemon && open { t.pill_text } else { t.menu_text }, title);
     }
 
     // Master knobs: not connected to the sound yet (the mixer's master track is), so greyed out.
