@@ -26,18 +26,15 @@ pub struct Hosted {
     #[cfg(plugin_windows)]
     pub window: Option<FrameWindow>,
     /// Set while the open editor belongs to an Open plugin that joined the strip (host link).
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     pub link: Option<os_hostlink::Link>,
 }
 
 impl Hosted {
-    /// The open editor is an Open plugin's that joined the strip through the host link (Windows only so far).
+    /// The open editor is an Open plugin's that joined the strip through the host link.
     #[cfg(plugin_windows)]
     fn linked(&self) -> bool {
-        #[cfg(windows)]
-        return self.link.is_some();
-        #[cfg(not(windows))]
-        false
+        self.link.is_some()
     }
 }
 
@@ -51,8 +48,8 @@ pub enum Request {
     PitchCents(usize, i32),
     /// A preview note from an Open plugin's own keyboard (host link): row, key, velocity, on.
     Note(usize, u8, u8, bool),
-    /// "Create automation clip" from an Open plugin's own parameter menu (host link, Windows): row, parameter index.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// "Create automation clip" from an Open plugin's own parameter menu (host link): row, parameter index.
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
     Automate(usize, usize),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
     Raise(usize),
@@ -263,7 +260,7 @@ impl Plugins {
         // Trimmed audio clips start their note further into the sample (spec: plugins/open-sampler.md §7).
         p.use_start_param(SAMPLE_START);
         drop(p);
-        self.hosted.insert(row, Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(windows)] link: None });
+        self.hosted.insert(row, Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None });
         Ok(a.desc.name)
     }
 
@@ -284,7 +281,7 @@ impl Plugins {
             return Err(format!("{} could not start", a.desc.name));
         }
         drop(p);
-        self.hosted.insert(key, Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(windows)] link: None });
+        self.hosted.insert(key, Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None });
         Ok(a.desc.name)
     }
 
@@ -490,12 +487,7 @@ impl Plugins {
         // The editor takes the frame's scale (on Linux the X server's, not the main window's).
         let k = w.scale();
         let size = p.open_editor(w.area(), k)?;
-        #[cfg(windows)]
-        {
-            h.link = fit_editor(&w, size, k);
-        }
-        #[cfg(not(windows))]
-        fit_editor(&w, size, k);
+        h.link = fit_editor(&w, size, k);
         // On top: the app stacks it above its other windows (`State::raise`), and a new child window starts below
         // the open ones.
         w.raise();
@@ -553,10 +545,7 @@ impl Plugins {
                 p.close_editor();
             }
             h.window = None;
-            #[cfg(windows)]
-            {
-                h.link = None;
-            }
+            h.link = None;
         }
     }
 
@@ -632,7 +621,7 @@ impl Plugins {
         #[cfg(windows)]
         let mut rescale: Vec<(usize, f32)> = Vec::new();
         // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         for (area, m) in crate::plugin_window::take_link() {
             let row = self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
             match (row, m) {
@@ -655,7 +644,6 @@ impl Plugins {
                 if let Some(i) = info(row) {
                     w.set_info(i);
                 }
-                #[cfg(windows)]
                 if let Some(l) = &mut h.link {
                     w.set_page(l.page());
                     w.set_hint(l.hint());
@@ -664,7 +652,6 @@ impl Plugins {
                     }
                 }
                 for e in w.take_events() {
-                    #[cfg(windows)]
                     if let (FrameEvent::Page(n), Some(l)) = (&e, &mut h.link) {
                         l.set_page(*n);
                         continue;
@@ -714,7 +701,7 @@ impl Plugins {
 
 /// Sizes window `w` to its freshly opened editor (`size` in device px at `scale`). An Open plugin answers the host
 /// link's hello: its page tabs go into the strip row and its editor shrinks to what is below them.
-#[cfg(windows)]
+#[cfg(plugin_windows)]
 fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_hostlink::Link> {
     let link = os_hostlink::Link::connect(w.area() as isize);
     match &link {
@@ -726,12 +713,6 @@ fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_ho
         None => w.set_editor_size((ew as f32 / scale, eh as f32 / scale)),
     }
     link
-}
-
-/// Sizes window `w` to its freshly opened editor (`size` in device px at `scale`).
-#[cfg(all(plugin_windows, not(windows)))]
-fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) {
-    w.set_editor_size((ew as f32 / scale, eh as f32 / scale));
 }
 
 impl Drop for Hosted {

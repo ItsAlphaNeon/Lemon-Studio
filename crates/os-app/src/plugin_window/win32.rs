@@ -34,17 +34,6 @@ pub struct KeyMsg {
 
 static KEYS: Mutex<Vec<KeyMsg>> = Mutex::new(Vec::new());
 
-/// A message an Open plugin's editor sent to its frame (host link, plugin -> host).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LinkMsg {
-    /// Hint or page changed: poll the link now.
-    Changed,
-    /// Preview note from the plugin's keyboard: key, velocity, on.
-    Note(u8, u8, bool),
-    /// "Create automation clip" on the plugin parameter at this list position.
-    Automate(usize),
-}
-
 /// (editor area window, message) since the last `take_link`.
 static LINK: Mutex<Vec<(isize, LinkMsg)>> = Mutex::new(Vec::new());
 

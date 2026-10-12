@@ -9,8 +9,21 @@ pub enum Answer {
     Cancel,
 }
 
+/// Runs `show`, which opens a blocking dialog (the UI thread waits for its answer). On Linux plugin windows are kept
+/// above other windows while Lemon Studio is active, and the app cannot follow the focus while it waits: they step back
+/// for the dialog's lifetime, or they could cover it.
+pub fn modal<T>(show: impl FnOnce() -> T) -> T {
+    #[cfg(target_os = "linux")]
+    let _unpinned = crate::plugin_window::unpinned();
+    show()
+}
+
 /// Asks a Yes / No / Cancel question (a warning). `None`: no dialog could be shown.
 pub fn yes_no_cancel(title: &str, text: &str) -> Option<Answer> {
+    modal(|| ask(title, text))
+}
+
+fn ask(title: &str, text: &str) -> Option<Answer> {
     #[cfg(all(unix, not(target_os = "macos")))]
     if !on_path("zenity") {
         return on_path("kdialog").then(|| kdialog(title, text)).flatten();

@@ -1,6 +1,7 @@
 //! Shared pieces of Lemon Studio's own plugin editors ("Open" plugins): editor edits the sound hears before the host
 //! confirms them ([`live`]), menu definitions shown with the app's own popup look ([`MenuDef`], `os_ui::kit::menu`),
-//! and the Win32 parts every editor needs ([`win`]: popups, type-in boxes, painting a canvas into a window).
+//! and the native parts every editor needs: popups, type-in boxes, painting a canvas into a window ([`win`] on Windows,
+//! `x11` on Linux).
 //!
 // spec: plugins/open-sampler.md §4 (edits apply at once, menus), plugins/open-parametric-eq-2.md, plugins/plugin-formats.md
 
@@ -9,6 +10,8 @@ pub mod live;
 pub mod vals;
 #[cfg(windows)]
 pub mod win;
+#[cfg(target_os = "linux")]
+pub mod x11;
 
 use os_theme::Palette;
 use os_ui::kit::menu::{MenuItem, MenuStyle};

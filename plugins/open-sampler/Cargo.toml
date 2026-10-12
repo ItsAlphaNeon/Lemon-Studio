@@ -25,5 +25,9 @@ os-paths.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls_Dialogs", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole"] }
 
+# The open / save sample dialogs (Windows has its own).
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = "0.15"
+
 [dev-dependencies]
 tiny-skia = "0.11"

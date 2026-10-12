@@ -589,10 +589,10 @@ pub fn off_text(name: &str) -> String {
 #[cfg(not(plugin_windows))]
 pub const PLUGIN_WINDOWS: &str = "Plugin windows on this system";
 
-/// The plugin window's menus, preset list and Misc lists are app popups shown above a detached window, which only
-/// Windows does so far.
+/// The plugin window's menus, preset list and Misc lists are app popups painted in the main window: off Windows a
+/// detached window would cover them (Windows lifts them above it).
 #[cfg(all(plugin_windows, not(windows)))]
-const PLUGIN_POPUPS: &str = "Plugin window menus on Linux";
+const PLUGIN_POPUPS: &str = "Menus of detached plugin windows on Linux (dock the window)";
 
 #[derive(Debug, Clone)]
 pub enum Drag {
@@ -839,7 +839,7 @@ pub struct App {
     /// Where the canvas sits in the main window's client area (physical px; the restored window's border).
     pub canvas_off: (i32, i32),
     /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
     popup_lift: Option<usize>,
     pub bars: Vec<Bar>,
     pub hover: Option<Action>,
@@ -1090,7 +1090,7 @@ impl App {
     fn save(&mut self, choose: bool) {
         let s = &self.state;
         let target = if choose || s.path.is_none() {
-            rfd::FileDialog::new().add_filter("FLP project", &["flp"]).save_file()
+            crate::dialog::modal(|| rfd::FileDialog::new().add_filter("FLP project", &["flp"]).save_file())
         } else {
             s.path.clone()
         };
@@ -1122,7 +1122,7 @@ impl App {
         if let Some(d) = self.state.path.as_ref().and_then(|p| p.parent()) {
             dlg = dlg.set_directory(d);
         }
-        let Some(mut target) = dlg.save_file() else { return };
+        let Some(mut target) = crate::dialog::modal(|| dlg.save_file()) else { return };
         if target.extension().is_none() {
             target.set_extension("wav");
         }
@@ -1503,13 +1503,13 @@ impl App {
                         self.state.raise(Win::Hosted(row));
                         continue;
                     }
+                    // A native Wayland main window (Linux): the popups cannot be lifted above a plugin window there.
                     #[cfg(not(windows))]
-                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) => {
+                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) if self.plugins.owner == 0 => {
                         self.state.message = Some(off_text(PLUGIN_POPUPS));
                         self.invalidate();
                         continue;
                     }
-                    #[cfg(windows)]
                     Request::Menu(row, x, y) => {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
@@ -1520,7 +1520,6 @@ impl App {
                         self.invalidate();
                         continue;
                     }
-                    #[cfg(windows)]
                     Request::Presets(row, x, y) => {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
@@ -1537,7 +1536,6 @@ impl App {
                         crate::misc::set(self, row, m, v);
                         continue;
                     }
-                    #[cfg(windows)]
                     Request::MiscMenu(row, m, x, y) => {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
@@ -1581,6 +1579,14 @@ impl App {
         }
     }
 
+    /// Screen point -> canvas logical px (an X11 main window: Linux).
+    #[cfg(target_os = "linux")]
+    fn screen_to_canvas(&self, x: i32, y: i32) -> (f32, f32) {
+        let (x, y) = crate::plugin_window::screen_to_main(x, y).unwrap_or((x, y));
+        let k = self.plugins.scale;
+        ((x - self.canvas_off.0) as f32 / k, (y - self.canvas_off.1) as f32 / k)
+    }
+
     /// Screen point -> canvas logical px.
     #[cfg(windows)]
     fn screen_to_canvas(&self, x: i32, y: i32) -> (f32, f32) {
@@ -1591,9 +1597,29 @@ impl App {
         ((p.x - self.canvas_off.0) as f32 / k, (p.y - self.canvas_off.1) as f32 / k)
     }
 
+    /// Linux: mouse input on a lifted popup (`sync_lift`) goes to the app as if it happened in the main window.
+    #[cfg(target_os = "linux")]
+    fn lift_input(&mut self) {
+        let input = crate::plugin_window::take_lift_input();
+        let k = self.plugins.scale;
+        let (ox, oy) = self.canvas_off;
+        for i in &input {
+            match *i {
+                crate::plugin_window::LiftInput::Move(x, y) => {
+                    self.mouse_move((x - ox) as f32 / k, (y - oy) as f32 / k);
+                }
+                crate::plugin_window::LiftInput::Down(1) => self.mouse_down(),
+                crate::plugin_window::LiftInput::Down(2) => self.mouse_down_middle(),
+                crate::plugin_window::LiftInput::Down(3) => self.mouse_down_right(),
+                crate::plugin_window::LiftInput::Down(_) => {}
+                crate::plugin_window::LiftInput::Up => self.mouse_up(),
+            }
+        }
+    }
+
     /// After a paint: a popup opened from a detached plugin window is shown above that window (it is painted in the
     /// main window, which the detached window covers).
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     pub fn sync_lift(&mut self, canvas: &Canvas) {
         let lifted = self.popup_lift.filter(|_| self.state.playlist.popup.is_some()).and_then(|r| self.plugins.window_of(r));
         let bounds = self.overlays.iter().copied().reduce(|a, b| a.union(&b));
@@ -1962,6 +1988,8 @@ impl App {
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         self.plugin_tick();
+        #[cfg(target_os = "linux")]
+        self.lift_input();
         {
             // Scope / analyzer / peak bars: from the audio tap; repaint just the monitor when it changed.
             // The monitor advances at its own refresh rate, however often we tick.
@@ -2330,7 +2358,7 @@ impl App {
         if fl.is_dir() {
             dlg = dlg.set_directory(fl);
         }
-        if let Some(p) = dlg.pick_file() {
+        if let Some(p) = crate::dialog::modal(|| dlg.pick_file()) {
             self.load_theme_file(&p);
         }
     }
@@ -4807,7 +4835,7 @@ impl App {
                 if let Some(d) = start {
                     dlg = dlg.set_directory(d);
                 }
-                if let Some(p) = dlg.pick_file() {
+                if let Some(p) = crate::dialog::modal(|| dlg.pick_file()) {
                     self.open(p);
                 }
             }

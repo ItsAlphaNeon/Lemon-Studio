@@ -1,5 +1,5 @@
-//! The plugin editor: a Win32 child of the host's window that paints `view` with the os-ui canvas, and the editor
-//! logic (platform independent): token / fader / knob drags with the cursor held in place, wheel and reset gestures,
+//! The plugin editor: a child of the host's window (Win32, or X11 on Linux) that paints `view` with the os-ui canvas,
+//! and the editor logic (platform independent): token / fader / knob drags with the cursor held in place, wheel and reset gestures,
 //! mute / solo, A/B compare, the options and menus. Edits show and sound at once (`os_plugkit::vals`).
 //!
 // spec: plugins/open-parametric-eq-2.md (§5 hints, §6 menus, §7 interaction), plugins/host-link.md
@@ -29,16 +29,28 @@ pub struct EqEditor {
     /// The open editor window (0 = closed): parameter changes post a repaint to it.
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Arc<AtomicIsize>,
+    /// Linux: the open editor's thread waker, for the same.
+    #[cfg(target_os = "linux")]
+    slot: os_plugkit::x11::Slot,
 }
 
 impl EqEditor {
     pub fn new(params: Arc<EqParams>, shared: Arc<Shared>) -> Self {
-        EqEditor { params, shared, scale: AtomicU32::new(1f32.to_bits()), hwnd: Arc::new(AtomicIsize::new(0)) }
+        EqEditor {
+            params,
+            shared,
+            scale: AtomicU32::new(1f32.to_bits()),
+            hwnd: Arc::new(AtomicIsize::new(0)),
+            #[cfg(target_os = "linux")]
+            slot: Default::default(),
+        }
     }
 
     fn notify(&self) {
         #[cfg(windows)]
         win32::post_changed(self.hwnd.load(Ordering::Acquire));
+        #[cfg(target_os = "linux")]
+        os_plugkit::x11::notify(&self.slot);
     }
 }
 
@@ -50,7 +62,9 @@ impl Editor for EqEditor {
             ParentWindowHandle::Win32Hwnd(hwnd) => {
                 Box::new(win32::open(hwnd, scale, self.params.clone(), self.shared.clone(), context, self.hwnd.clone()))
             }
-            // Editors are Win32 windows so far: elsewhere none opens.
+            #[cfg(target_os = "linux")]
+            ParentWindowHandle::X11Window(window) => Box::new(x11::open(window, scale, self.params.clone(), self.shared.clone(), context, &self.slot)),
+            // Elsewhere no editor opens yet.
             _ => {
                 let _ = (context, scale);
                 Box::new(())
@@ -1066,6 +1080,251 @@ mod win32 {
             self.canvas.copy_to_xrgb(&mut self.buf);
             pw::blit(hdc, &self.buf, self.size.0, self.size.1);
             pw::end_paint(self.hwnd, &ps);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod x11 {
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use nih_plug::prelude::GuiContext;
+    use os_hostlink::{Cmd, PageIcon, Peer};
+    use os_plugkit::x11::{self as px, Button, Input, Window};
+    use os_theme::Palette;
+    use os_ui::Canvas;
+
+    use super::{Act, Btn, Logic, Mods};
+    use crate::analyzer::{Analyzer, Look as ALook};
+    use crate::params::{self, EqParams, Opt};
+    use crate::view::{self, Look, ViewState};
+    use crate::Shared;
+
+    /// The editor on its GUI thread.
+    struct Ed {
+        win: Window,
+        canvas: Canvas,
+        buf: Vec<u32>,
+        scale: f32,
+        size: (u32, u32),
+        params: Arc<EqParams>,
+        shared: Arc<Shared>,
+        logic: Logic,
+        palette: Palette,
+        analyzer: Analyzer,
+        scope_seen: u64,
+        last_sig: u64,
+        last_extra: u64,
+        last_view: ViewState,
+        last_hint: String,
+        dirty: bool,
+        /// The host link: the host finds the editor by the window it gave it (spec: plugins/host-link.md).
+        link: Arc<Peer>,
+    }
+
+    impl Drop for Ed {
+        /// The editor closes: the host no longer finds it.
+        fn drop(&mut self) {
+            self.link.unregister();
+        }
+    }
+
+    /// Owns the editor thread; dropping it closes the editor.
+    pub struct Handle(Option<px::EditorThread>, Arc<Shared>);
+
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            self.0.take();
+            self.1.editor_open.store(false, Ordering::Relaxed);
+        }
+    }
+
+    pub fn open(parent: u32, scale: f32, params: Arc<EqParams>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Handle {
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let size = ((view::W as f32 * scale).round() as u32, (view::H as f32 * scale).round() as u32);
+        let sh = shared.clone();
+        // One page; joined, the editor keeps its size (it has no strip row of its own).
+        let wake = slot.clone();
+        let link = Peer::register(u64::from(parent), vec![PageIcon::Plugin], (view::W, view::H), move || px::notify(&wake));
+        let peer = link.clone();
+        let thread = px::spawn(parent, size, slot, move |win| {
+            let Ok(canvas) = Canvas::new(size.0, size.1, scale) else { return };
+            let logic = Logic::new(params.clone(), shared.clone(), Some(ctx));
+            let ed = Ed {
+                win,
+                canvas,
+                buf: Vec::new(),
+                scale,
+                size,
+                params,
+                shared,
+                logic,
+                palette: os_plugkit::palette(),
+                analyzer: Analyzer::default(),
+                scope_seen: 0,
+                last_sig: 0,
+                last_extra: u64::MAX,
+                last_view: ViewState::default(),
+                last_hint: String::new(),
+                dirty: true,
+                link: peer,
+            };
+            ed.run();
+        });
+        if thread.is_none() {
+            link.unregister();
+        }
+        sh.editor_open.store(thread.is_some(), Ordering::Relaxed);
+        Handle(thread, sh)
+    }
+
+    fn btn(b: Button) -> Btn {
+        match b {
+            Button::Left => Btn::Left,
+            Button::Right => Btn::Right,
+            Button::Middle => Btn::Middle,
+        }
+    }
+
+    impl Ed {
+        fn run(mut self) {
+            while let Some(input) = self.win.next() {
+                match input {
+                    Input::Expose => self.dirty = true,
+                    Input::Tick => self.poll(),
+                    Input::Down { x, y, btn: b, dbl } => {
+                        let (x, y) = (x / self.scale, y / self.scale);
+                        let acts = self.logic.down(x, y, btn(b), self.mods(), dbl && b == Button::Left);
+                        self.act(acts);
+                    }
+                    Input::Move { x, y } => {
+                        let acts = self.logic.moved(x / self.scale, y / self.scale, self.mods());
+                        self.act(acts);
+                    }
+                    Input::Delta { dx, dy } => {
+                        let acts = self.logic.delta(dx / self.scale, dy / self.scale, self.mods());
+                        self.act(acts);
+                    }
+                    Input::Up { .. } => {
+                        self.win.unlock();
+                        let acts = self.logic.up(Btn::Left);
+                        self.act(acts);
+                    }
+                    Input::Leave => {
+                        if !self.win.locked() && !self.logic.dragging() {
+                            let acts = self.logic.leave();
+                            self.act(acts);
+                        }
+                    }
+                    Input::Wheel { x, y, notches } => {
+                        let acts = self.logic.wheel(x / self.scale, y / self.scale, notches, self.mods());
+                        self.act(acts);
+                    }
+                    Input::Key { .. } => {}
+                }
+                if self.dirty && self.win.idle() {
+                    self.paint();
+                }
+            }
+        }
+
+        fn mods(&self) -> Mods {
+            let (ctrl, shift, alt) = self.win.mods();
+            Mods { ctrl, shift, alt }
+        }
+
+        fn screen(&self, x: f32, y: f32) -> (i32, i32) {
+            self.win.to_root((x * self.scale) as i32, (y * self.scale) as i32)
+        }
+
+        /// Analyzer settings, or `None` when nothing is monitored.
+        fn analyzer_look(&self) -> Option<ALook> {
+            let b = self.params.extra_copy();
+            let on = params::byte(&b, params::MONITOR_BYTE) != 0 && (params::flag(&b, params::F_HISTOGRAM) || params::flag(&b, params::F_HEATMAP));
+            on.then(|| ALook {
+                precision: params::opt(&b, Opt::FreqPrecision).clamp(0, 3) as usize,
+                slope: params::opt(&b, Opt::PivotSlope).clamp(0, 4) as usize,
+                smoothing: params::opt(&b, Opt::TimeSmoothing).clamp(0, 4) as usize,
+                average: params::flag(&b, params::F_AVERAGE),
+            })
+        }
+
+        /// Timer / parameter change: expire confirmed overlay values, analyse new audio, repaint when anything shown
+        /// changed.
+        fn poll(&mut self) {
+            let mut dirty = self.logic.vals.expire();
+            if let Some(look) = self.analyzer_look() {
+                let n = Analyzer::size_for(&look);
+                let fresh = self.shared.scope.lock().ok().filter(|s| s.written != self.scope_seen).map(|s| (s.written, s.latest(n)));
+                if let Some((written, samples)) = fresh {
+                    self.scope_seen = written;
+                    let rate = self.shared.rate.load(Ordering::Relaxed) as f32;
+                    self.analyzer.update(&samples, rate, view::COLS, &look);
+                    dirty = true;
+                }
+            } else if !self.analyzer.cols.is_empty() {
+                self.analyzer.cols.clear();
+                dirty = true;
+            }
+            let sig = self.logic.vals.signature();
+            let ev = self.params.extra_version.load(Ordering::Acquire);
+            if dirty || sig != self.last_sig || ev != self.last_extra || self.logic.view != self.last_view || self.logic.hint != self.last_hint {
+                self.dirty = true;
+            }
+            if self.logic.hint != self.last_hint {
+                self.last_hint.clone_from(&self.logic.hint);
+                // The host shows the hint in its title bar (hosted mode).
+                self.link.set_hint(&self.logic.hint);
+                self.link.to_host(Cmd::Changed, 0);
+            }
+            // Joined the strip: "Create automation clip" works.
+            self.logic.hosted = self.link.hosted();
+        }
+
+        fn act(&mut self, acts: Vec<Act>) {
+            for a in acts {
+                match a {
+                    Act::Repaint => self.dirty = true,
+                    Act::Lock => self.win.lock(),
+                    Act::Menu(req, x, y) => {
+                        let def = self.logic.menu(&req);
+                        let (sx, sy) = self.screen(x, y);
+                        if let Some(cmd) = self.win.popup(sx, sy, &def, &self.palette, self.scale) {
+                            let acts = self.logic.pick(&req, cmd, x, y);
+                            self.act(acts);
+                        }
+                        self.dirty = true;
+                    }
+                    Act::TypeIn(id, x, y) => {
+                        let (sx, sy) = self.screen(x, y);
+                        let cur = self.logic.value_text(&id);
+                        if let Some(t) = self.win.type_in(sx, sy, &cur, self.scale) {
+                            self.logic.typed(&id, &t);
+                        }
+                        self.dirty = true;
+                    }
+                    // The host makes the clip; the index is the parameter's list position.
+                    Act::Automate(i) => {
+                        self.link.to_host(Cmd::Automate, i as isize);
+                    }
+                }
+            }
+        }
+
+        fn paint(&mut self) {
+            self.dirty = false;
+            let extra = self.params.extra_copy();
+            let histogram = params::flag(&extra, params::F_HISTOGRAM) || params::flag(&extra, params::F_HEATMAP);
+            let spectrum = (histogram && params::byte(&extra, params::MONITOR_BYTE) != 0 && !self.analyzer.cols.is_empty()).then_some(self.analyzer.cols.as_slice());
+            let look = Look { s: self.logic.shown(), extra: &extra, spectrum, rate: f64::from(self.shared.rate.load(Ordering::Relaxed)) };
+            self.logic.hits = view::paint(&mut self.canvas, &self.palette, &look, &self.logic.view);
+            self.last_sig = self.logic.vals.signature();
+            self.last_extra = self.params.extra_version.load(Ordering::Acquire);
+            self.last_view = self.logic.view.clone();
+            self.buf.resize((self.size.0 * self.size.1) as usize, 0);
+            self.canvas.copy_to_xrgb(&mut self.buf);
+            self.win.blit(&self.buf, self.size.0, self.size.1);
         }
     }
 }

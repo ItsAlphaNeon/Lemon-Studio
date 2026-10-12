@@ -1,5 +1,5 @@
-//! The plugin editor: a Win32 child of the host's window that paints `view` with the os-ui canvas, and the editor
-//! logic (platform independent): knob / fader drags with the cursor held in place, envelope node drags, wheel and
+//! The plugin editor: a child of the host's window (Win32, or X11 on Linux) that paints `view` with the os-ui canvas,
+//! and the editor logic (platform independent): knob / fader drags with the cursor held in place, envelope node drags, wheel and
 //! reset gestures, shape buttons and switches, the parameter menus. Edits show and sound at once
 //! (`os_plugkit::vals`).
 //!
@@ -26,16 +26,28 @@ pub struct Osc3Editor {
     /// The open editor window (0 = closed): parameter changes post a repaint to it.
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Arc<AtomicIsize>,
+    /// Linux: the open editor's thread waker, for the same.
+    #[cfg(target_os = "linux")]
+    slot: os_plugkit::x11::Slot,
 }
 
 impl Osc3Editor {
     pub fn new(params: Arc<Osc3Params>, shared: Arc<Shared>) -> Self {
-        Osc3Editor { params, shared, scale: AtomicU32::new(1f32.to_bits()), hwnd: Arc::new(AtomicIsize::new(0)) }
+        Osc3Editor {
+            params,
+            shared,
+            scale: AtomicU32::new(1f32.to_bits()),
+            hwnd: Arc::new(AtomicIsize::new(0)),
+            #[cfg(target_os = "linux")]
+            slot: Default::default(),
+        }
     }
 
     fn notify(&self) {
         #[cfg(windows)]
         win32::post_changed(self.hwnd.load(Ordering::Acquire));
+        #[cfg(target_os = "linux")]
+        os_plugkit::x11::notify(&self.slot);
     }
 }
 
@@ -47,7 +59,9 @@ impl Editor for Osc3Editor {
             ParentWindowHandle::Win32Hwnd(hwnd) => {
                 Box::new(win32::open(hwnd, scale, self.params.clone(), self.shared.clone(), context, self.hwnd.clone()))
             }
-            // Editors are Win32 windows so far: elsewhere none opens.
+            #[cfg(target_os = "linux")]
+            ParentWindowHandle::X11Window(window) => Box::new(x11::open(window, scale, self.params.clone(), self.shared.clone(), context, &self.slot)),
+            // Elsewhere no editor opens yet.
             _ => {
                 let _ = (context, scale);
                 Box::new(())
@@ -764,6 +778,262 @@ mod win32 {
             }
             pw::blit(hdc, &self.crop, w, h);
             pw::end_paint(self.hwnd, &ps);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod x11 {
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use nih_plug::prelude::GuiContext;
+    use os_hostlink::{Cmd, PageIcon, Peer};
+    use os_plugkit::x11::{self as px, Button, Input, Window};
+    use os_theme::Palette;
+    use os_ui::Canvas;
+
+    use super::{Act, Btn, Logic, Mods};
+    use crate::params::Osc3Params;
+    use crate::view::{self, ViewState};
+    use crate::Shared;
+
+    /// The editor on its GUI thread.
+    struct Ed {
+        win: Window,
+        canvas: Canvas,
+        buf: Vec<u32>,
+        crop: Vec<u32>,
+        scale: f32,
+        /// Painted frame size in device px.
+        size: (u32, u32),
+        params: Arc<Osc3Params>,
+        logic: Logic,
+        palette: Palette,
+        last_sig: u64,
+        last_raw: u64,
+        last_view: ViewState,
+        last_hint: String,
+        dirty: bool,
+        /// The host link: the host finds the editor by the window it gave it (spec: plugins/host-link.md).
+        link: Arc<Peer>,
+        /// The page as last agreed with the host.
+        last_page: usize,
+    }
+
+    pub fn open(parent: u32, scale: f32, params: Arc<Osc3Params>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Option<px::EditorThread> {
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let px = move |v: u32| (v as f32 * scale).round() as u32;
+        // Two pages (oscillators, envelopes); joined, the editor is what lies below the strip row.
+        let wake = slot.clone();
+        let link = Peer::register(u64::from(parent), vec![PageIcon::Plugin, PageIcon::Envelope], (view::EDITOR_W, view::HOSTED_EDITOR_H), move || px::notify(&wake));
+        let peer = link.clone();
+        let thread = px::spawn(parent, (px(view::EDITOR_W), px(view::EDITOR_H)), slot, move |win| {
+            let full = (px(view::W), px(view::H));
+            let Ok(canvas) = Canvas::new(full.0, full.1, scale) else { return };
+            let logic = Logic::new(params.clone(), shared, Some(ctx));
+            let ed = Ed {
+                win,
+                canvas,
+                buf: Vec::new(),
+                crop: Vec::new(),
+                scale,
+                size: full,
+                params,
+                logic,
+                palette: os_plugkit::palette(),
+                last_sig: 0,
+                last_raw: u64::MAX,
+                last_view: ViewState::default(),
+                last_hint: String::new(),
+                dirty: true,
+                link: peer,
+                last_page: 0,
+            };
+            ed.run();
+        });
+        if thread.is_none() {
+            link.unregister();
+        }
+        thread
+    }
+
+    impl Drop for Ed {
+        /// The editor closes: the host no longer finds it.
+        fn drop(&mut self) {
+            self.link.unregister();
+        }
+    }
+
+    fn btn(b: Button) -> Btn {
+        match b {
+            Button::Left => Btn::Left,
+            Button::Right => Btn::Right,
+            Button::Middle => Btn::Middle,
+        }
+    }
+
+    impl Ed {
+        fn run(mut self) {
+            while let Some(input) = self.win.next() {
+                match input {
+                    Input::Expose => self.dirty = true,
+                    Input::Tick => self.poll(),
+                    Input::Down { x, y, btn: b, dbl } => {
+                        let (x, y) = self.to_view(x, y);
+                        let acts = self.logic.down(x, y, btn(b), self.mods(), dbl && b == Button::Left);
+                        self.act(acts);
+                    }
+                    Input::Move { x, y } => {
+                        let (x, y) = self.to_view(x, y);
+                        let acts = self.logic.moved(x, y, self.mods());
+                        self.act(acts);
+                    }
+                    Input::Delta { dx, dy } => {
+                        let acts = self.logic.delta(dx / self.scale, dy / self.scale, self.mods());
+                        self.act(acts);
+                    }
+                    Input::Up { .. } => {
+                        self.win.unlock();
+                        let acts = self.logic.up(Btn::Left);
+                        self.act(acts);
+                    }
+                    Input::Leave => {
+                        if !self.win.locked() && !self.logic.dragging() {
+                            let acts = self.logic.leave();
+                            self.act(acts);
+                        }
+                    }
+                    Input::Wheel { x, y, notches } => {
+                        let (x, y) = self.to_view(x, y);
+                        let acts = self.logic.wheel(x, y, notches, self.mods());
+                        self.act(acts);
+                    }
+                    Input::Key { .. } => {}
+                }
+                if self.dirty && self.win.idle() {
+                    self.paint();
+                }
+            }
+        }
+
+        fn mods(&self) -> Mods {
+            let (ctrl, shift, alt) = self.win.mods();
+            Mods { ctrl, shift, alt }
+        }
+
+        /// Top of the shown crop in the painted frame: the strip row is left out when the host draws it.
+        fn crop_y(&self) -> u32 {
+            if self.logic.hosted { view::HOSTED_CROP_Y } else { view::CROP_Y }
+        }
+
+        /// Editor content size in logical px.
+        fn content(&self) -> (u32, u32) {
+            (view::EDITOR_W, if self.logic.hosted { view::HOSTED_EDITOR_H } else { view::EDITOR_H })
+        }
+
+        /// Window device px to painted-frame coordinates (the editor is a crop of the painted frame).
+        fn to_view(&self, x: f32, y: f32) -> (f32, f32) {
+            (x / self.scale + view::CROP_X as f32, y / self.scale + self.crop_y() as f32)
+        }
+
+        /// Screen position of a painted-frame point.
+        fn screen(&self, x: f32, y: f32) -> (i32, i32) {
+            let cx = ((x - view::CROP_X as f32) * self.scale) as i32;
+            let cy = ((y - self.crop_y() as f32) * self.scale) as i32;
+            self.win.to_root(cx, cy)
+        }
+
+        /// Timer / parameter change: expire confirmed overlay values, repaint when anything shown changed.
+        fn poll(&mut self) {
+            let dirty = self.logic.vals.expire();
+            let sig = self.logic.vals.signature();
+            let rv = self.params.raw_version.load(Ordering::Acquire);
+            if dirty || sig != self.last_sig || rv != self.last_raw || self.logic.view != self.last_view || self.logic.hint != self.last_hint {
+                self.dirty = true;
+            }
+            if self.logic.hint != self.last_hint {
+                self.last_hint.clone_from(&self.logic.hint);
+                // The host shows the hint in its title bar (hosted mode).
+                self.link.set_hint(&self.logic.hint);
+                self.link.to_host(Cmd::Changed, 0);
+            }
+            self.sync_link();
+        }
+
+        /// Follows the host link: joining the strip (the editor shrinks to the content below the strip row, which the
+        /// host now draws) and the host's page; a page the editor switched to itself goes to the host.
+        fn sync_link(&mut self) {
+            if self.link.hosted() && !self.logic.hosted {
+                self.logic.hosted = true;
+                let (cw, ch) = self.content();
+                let px = |v: u32| (v as f32 * self.scale).round() as u32;
+                self.win.resize(px(cw), px(ch));
+                self.dirty = true;
+            }
+            let page = self.link.page();
+            if page != self.last_page {
+                self.logic.view.tab = u8::from(page > 0);
+                self.last_page = page;
+                self.dirty = true;
+            } else if usize::from(self.logic.view.tab) != page {
+                self.last_page = usize::from(self.logic.view.tab);
+                self.link.set_page(self.last_page);
+                self.link.to_host(Cmd::Changed, 0);
+            }
+        }
+
+        fn act(&mut self, acts: Vec<Act>) {
+            for a in acts {
+                match a {
+                    Act::Repaint => self.dirty = true,
+                    Act::Lock => self.win.lock(),
+                    Act::Menu(req, x, y) => {
+                        let def = self.logic.menu(&req);
+                        let (sx, sy) = self.screen(x, y);
+                        if let Some(cmd) = self.win.popup(sx, sy, &def, &self.palette, self.scale) {
+                            let acts = self.logic.pick(&req, cmd, x, y);
+                            self.act(acts);
+                        }
+                        self.dirty = true;
+                    }
+                    Act::TypeIn(id, x, y) => {
+                        let (sx, sy) = self.screen(x, y);
+                        let cur = self.logic.value_text(&id);
+                        if let Some(t) = self.win.type_in(sx, sy, &cur, self.scale) {
+                            self.logic.typed(&id, &t);
+                        }
+                        self.dirty = true;
+                    }
+                    // The host makes the clip; the index is the parameter's list position.
+                    Act::Automate(i) => {
+                        self.link.to_host(Cmd::Automate, i as isize);
+                    }
+                }
+            }
+        }
+
+        fn paint(&mut self) {
+            self.dirty = false;
+            let hint = if self.logic.hosted { String::new() } else { self.logic.hint.clone() };
+            self.logic.hits = view::paint(&mut self.canvas, &self.palette, &self.logic.vals, &self.logic.view, &hint, self.logic.hosted);
+            self.last_sig = self.logic.vals.signature();
+            self.last_raw = self.params.raw_version.load(Ordering::Acquire);
+            self.last_view = self.logic.view.clone();
+            // Show the editor area: the painted frame minus the original's border (and the strip row when hosted).
+            let (ox, oy) = ((view::CROP_X as f32 * self.scale).round() as u32, (self.crop_y() as f32 * self.scale).round() as u32);
+            let (cw, ch) = self.content();
+            let w = ((cw as f32 * self.scale).round() as u32).min(self.size.0 - ox);
+            let h = ((ch as f32 * self.scale).round() as u32).min(self.size.1 - oy);
+            let full = self.size.0 as usize;
+            self.buf.resize(full * self.size.1 as usize, 0);
+            self.canvas.copy_to_xrgb(&mut self.buf);
+            self.crop.clear();
+            for row in oy as usize..(oy + h) as usize {
+                let at = row * full + ox as usize;
+                self.crop.extend_from_slice(&self.buf[at..at + w as usize]);
+            }
+            self.win.blit(&self.crop, w, h);
         }
     }
 }

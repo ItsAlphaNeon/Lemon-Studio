@@ -1,13 +1,17 @@
-//! Plugin windows on Linux: the frame (`super`) in an X11 window, always top-level. Plugin editors on Linux embed only in
-//! X11 windows (CLAP `x11`, VST3 `X11EmbedWindowID`), so under Wayland the frame is an XWayland window; an X11 window
-//! cannot be a child of the Wayland main window, so it is never docked. Under X11 it is transient for the main window.
+//! Plugin windows on Linux: the frame (`super`) in an X11 window. Plugin editors on Linux embed only in X11 windows (CLAP
+//! `x11`, VST3 `X11EmbedWindowID`), so the app runs its main window on X11 too (XWayland under Wayland, see `main`):
+//! then a frame docks as on Windows, a child of the main window clipped to the workspace minus the app's windows above
+//! it (the Shape extension), or detaches into a top-level window transient for the main window.
+//!
+//! When the main window is a native Wayland one (no X server to put it on) an X11 window cannot be its child: frames are
+//! always top-level, and since they cannot be owned by it either, they are kept above other windows while Lemon Studio is
+//! the active application (the main window has the focus, or a frame is the active window) and stacked normally
+//! otherwise (`main_focused`). While a blocking dialog is open they step back (`unpinned`): the app waits for its answer
+//! and cannot follow the focus, so a frame kept above would hide the dialog.
 //!
 //! One connection serves every frame (each plugin opens its own for its editor). The app reads its events on the UI tick
-//! (`pump`) and repaints what changed after handling them (`paint_dirty`).
-//!
-//! On Windows a detached frame is owned by the main window, so it stays above it. An X11 window cannot be owned by a
-//! Wayland one, so instead the frames are kept above other windows while Lemon Studio is the active application (the
-//! main window has the focus, or a frame is the active window) and stacked normally otherwise (`main_focused`).
+//! (`pump`) and repaints what changed after handling them (`paint_dirty`). Frames answer the window manager's pings
+//! (`_NET_WM_PING`), so when the app stops responding the window manager can still close a frame by ending Lemon Studio.
 //!
 // spec: ui/plugin-window.md
 
@@ -22,6 +26,7 @@ use x11rb::protocol::xproto::{
     self, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, ImageFormat, ImageOrder,
     KeyButMask, PropMode, StackMode, VisualClass, WindowClass,
 };
+use x11rb::protocol::shape::{self, ConnectionExt as _};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
@@ -32,6 +37,8 @@ x11rb::atom_manager! {
     Atoms: AtomsCookie {
         WM_PROTOCOLS,
         WM_DELETE_WINDOW,
+        WM_CLIENT_MACHINE,
+        _NET_WM_PING,
         WM_CHANGE_STATE,
         UTF8_STRING,
         _NET_WM_NAME,
@@ -69,12 +76,33 @@ struct Conn {
     frame_active: Cell<bool>,
     /// The frames are kept above other windows now (see the module notes).
     above: Cell<bool>,
+    /// The main window when it is an X11 one (0 under Wayland): frames dock into it.
+    owner: Cell<xproto::Window>,
 }
 
 thread_local! {
     static CONN: RefCell<Option<Rc<Conn>>> = const { RefCell::new(None) };
     /// The main window has the keyboard focus (`main_focused`), known before the connection opens.
     static MAIN_FOCUSED: Cell<bool> = const { Cell::new(true) };
+    /// Blocking dialogs open now (`unpinned`): the frames are not kept above while there is one.
+    static MODAL: Cell<u32> = const { Cell::new(0) };
+    /// A docked frame moved, shrank or went: part of the main window was uncovered (`take_exposed`).
+    static EXPOSED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether part of the main window was uncovered (a docked frame moved, was clipped or closed, or the X server exposed
+/// it) since the last call: the next present must show the whole canvas, not only the app's own damage (UI thread).
+pub fn take_exposed() -> bool {
+    EXPOSED.with(|e| e.replace(false))
+}
+
+/// `take_exposed` would be true: the app presents again even with nothing of its own to paint.
+pub fn exposed() -> bool {
+    EXPOSED.with(Cell::get)
+}
+
+fn expose() {
+    EXPOSED.with(|e| e.set(true));
 }
 
 /// The connection, opened on first use (`DISPLAY`: XWayland under Wayland).
@@ -101,7 +129,7 @@ fn conn() -> Result<Rc<Conn>, String> {
     let max_request = c.maximum_request_bytes();
     // Root property changes say which window is active.
     c.change_window_attributes(root, &xproto::ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE)).map_err(|e| err(&e))?;
-    let above = MAIN_FOCUSED.with(Cell::get);
+    let above = MAIN_FOCUSED.with(Cell::get) && MODAL.with(Cell::get) == 0;
     let conn = Rc::new(Conn {
         c,
         root,
@@ -113,6 +141,7 @@ fn conn() -> Result<Rc<Conn>, String> {
         frames: RefCell::new(HashMap::new()),
         frame_active: Cell::new(false),
         above: Cell::new(above),
+        owner: Cell::new(0),
     });
     CONN.with(|c| *c.borrow_mut() = Some(conn.clone()));
     Ok(conn)
@@ -122,6 +151,8 @@ fn conn() -> Result<Rc<Conn>, String> {
 struct Frame {
     conn: Rc<Conn>,
     win: xproto::Window,
+    /// Docked: the position in the main window (physical px), kept here so clipping needs no round trip.
+    pos: Cell<(i32, i32)>,
     /// The child window the plugin's editor goes into.
     area: xproto::Window,
     gc: xproto::Gcontext,
@@ -149,14 +180,19 @@ fn pixel(c: Color) -> u32 {
 }
 
 impl FrameWindow {
-    /// A hidden frame for an editor of `editor` logical px; `raise` shows it. The window manager places it (transient for
-    /// `owner`, the main window, when that is an X11 window too). The scale is the X server's (`Xft.dpi`), not
+    /// A hidden frame for an editor of `editor` logical px; `raise` shows it. Docked (a child of `owner`, the main
+    /// window, at screen position `pos`) unless `detached` or the main window is not an X11 one (`owner` 0); a detached
+    /// frame is placed by the window manager, transient for `owner`. The scale is the X server's (`Xft.dpi`), not
     /// `_scale`: under Wayland the main window's scale does not apply to X11 windows.
-    pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), _scale: f32, _pos: (i32, i32), _detached: bool) -> Result<FrameWindow, String> {
+    pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), _scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
         let conn = conn()?;
         let fail = |e: &dyn std::fmt::Display| format!("could not create the plugin window: {e}");
         let k = conn.scale;
-        let state = State::new(info, editor, true);
+        let owner = owner as xproto::Window;
+        set_owner(&conn, owner);
+        let docked = owner != 0 && !detached;
+        let state = State::new(info, editor, !docked);
+        let (parent, at) = if docked { (owner, from_root(&conn, owner, pos)) } else { (conn.root, (0, 0)) };
         let (w, h) = state.size();
         let ay = state.area_y();
         let title = state.info.name.clone();
@@ -169,7 +205,7 @@ impl FrameWindow {
         let canvas = Canvas::new(u32::from(px(w, k)), u32::from(px(h, k)), k)?;
         let made = (|| -> Result<(), Box<dyn std::error::Error>> {
             // No background: every expose is painted from the canvas.
-            c.create_window(x11rb::COPY_DEPTH_FROM_PARENT, win, conn.root, 0, 0, px(w, k), px(h, k), 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT, &CreateWindowAux::new().event_mask(events))?;
+            c.create_window(x11rb::COPY_DEPTH_FROM_PARENT, win, parent, at.0 as i16, at.1 as i16, px(w, k), px(h, k), 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT, &CreateWindowAux::new().event_mask(events))?;
             c.create_window(
                 x11rb::COPY_DEPTH_FROM_PARENT,
                 area,
@@ -188,8 +224,12 @@ impl FrameWindow {
             c.change_property8(PropMode::REPLACE, win, a._NET_WM_NAME, a.UTF8_STRING, title.as_bytes())?;
             // The desktop entry's id: the frame is grouped with Lemon Studio and gets its icon.
             c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, b"lemonstudio\0lemonstudio\0")?;
-            c.change_property32(PropMode::REPLACE, win, a.WM_PROTOCOLS, AtomEnum::ATOM, &[a.WM_DELETE_WINDOW])?;
+            c.change_property32(PropMode::REPLACE, win, a.WM_PROTOCOLS, AtomEnum::ATOM, &[a.WM_DELETE_WINDOW, a._NET_WM_PING])?;
+            // The process and its host: the window manager can end an unresponsive Lemon Studio from a frame.
             c.change_property32(PropMode::REPLACE, win, a._NET_WM_PID, AtomEnum::CARDINAL, &[std::process::id()])?;
+            if let Ok(host) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+                c.change_property8(PropMode::REPLACE, win, a.WM_CLIENT_MACHINE, AtomEnum::STRING, host.trim().as_bytes())?;
+            }
             // No decorations: the frame draws its own title bar (flags: decorations; decorations: none).
             c.change_property32(PropMode::REPLACE, win, a._MOTIF_WM_HINTS, a._MOTIF_WM_HINTS, &[2, 0, 0, 0, 0])?;
             if let Some(icon) = icon() {
@@ -198,11 +238,17 @@ impl FrameWindow {
             if owner != 0 {
                 c.change_property32(PropMode::REPLACE, win, AtomEnum::WM_TRANSIENT_FOR, AtomEnum::WINDOW, &[owner as u32])?;
             }
-            // Opened from the active application: it starts above (taken when the window is mapped).
-            if conn.above.get() {
+            // Opened from the active application: it starts above (taken when the window is mapped). Under X11 the main
+            // window owns it instead (transient for it).
+            if !docked && conn.above.get() {
                 c.change_property32(PropMode::REPLACE, win, a._NET_WM_STATE, AtomEnum::ATOM, &[a._NET_WM_STATE_ABOVE])?;
             }
             fixed_size(c, win, px(w, k), px(h, k))?;
+            // Clicks in the plugin's editor come here first (then go on to it, `pump`): they bring the window to the
+            // front of the app's windows, as clicks on the frame do.
+            for b in [xproto::ButtonIndex::M1, xproto::ButtonIndex::M2, xproto::ButtonIndex::M3] {
+                c.grab_button(false, area, EventMask::BUTTON_PRESS, xproto::GrabMode::SYNC, xproto::GrabMode::ASYNC, x11rb::NONE, x11rb::NONE, b, xproto::ModMask::ANY)?;
+            }
             c.map_window(area)?;
             // The plugin parents its editor into `area` through its own connection: it must exist on the server first.
             c.flush()?;
@@ -216,6 +262,7 @@ impl FrameWindow {
         let f = Rc::new(Frame {
             conn: conn.clone(),
             win,
+            pos: Cell::new(at),
             area,
             gc,
             state: RefCell::new(state),
@@ -228,16 +275,65 @@ impl FrameWindow {
         Ok(FrameWindow { f })
     }
 
-    /// Always: an X11 window is never a child of the main window.
+    /// A top-level window, not a child of the main window (always under Wayland).
     pub fn detached(&self) -> bool {
-        true
+        self.f.state.borrow().detached
     }
 
-    /// Docking is not possible here (see `detached`).
-    pub fn set_detached(&self, _owner: isize, _on: bool) {}
+    /// Docks the window into `owner` (a child, same place on screen) or detaches it (a top-level window transient for
+    /// `owner`). The plugin's editor stays embedded. Only when the main window is an X11 one.
+    pub fn set_detached(&self, owner: isize, on: bool) {
+        let f = &self.f;
+        let owner = owner as xproto::Window;
+        if owner == 0 || f.state.borrow().detached == on {
+            return;
+        }
+        {
+            let mut st = f.state.borrow_mut();
+            st.detached = on;
+            st.clip = None;
+            st.clip_key = None;
+        }
+        let (c, root) = (&f.conn.c, f.conn.root);
+        let screen = f.to_screen(0.0, 0.0);
+        let _ = c.unmap_window(f.win);
+        let _ = shape_reset(c, f.win);
+        if on {
+            expose();
+            let (w, h) = {
+                let cv = f.canvas.borrow();
+                (cv.pixmap.width() as u16, cv.pixmap.height() as u16)
+            };
+            let _ = size_hints(c, f.win, w, h, Some(screen));
+            let _ = c.reparent_window(f.win, root, screen.0 as i16, screen.1 as i16);
+        } else {
+            // A managed window goes back to the root when the window manager lets it go (it may have put it in a frame
+            // of its own): wait for that, or the manager's reparent would undo ours.
+            let _ = c.flush();
+            let start = std::time::Instant::now();
+            while start.elapsed() < std::time::Duration::from_millis(500) {
+                let parent = c.query_tree(f.win).ok().and_then(|t| t.reply().ok()).map(|t| t.parent);
+                if parent == Some(root) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let at = from_root(&f.conn, owner, screen);
+            f.pos.set(at);
+            let _ = c.reparent_window(f.win, owner, at.0 as i16, at.1 as i16);
+        }
+        self.raise();
+    }
 
-    /// Docked windows only.
-    pub fn clip_to(&self, _work: [i32; 4], _covers: &[[i32; 4]]) {}
+    /// Clips a docked window to `work` minus the `covers` (the app's windows and popups above it), all in the main
+    /// window (physical px). Moving the window by its title bar re-clips with the same rects.
+    pub fn clip_to(&self, work: [i32; 4], covers: &[[i32; 4]]) {
+        if self.detached() {
+            return;
+        }
+        self.f.state.borrow_mut().clip = Some((work, covers.to_vec()));
+        self.f.apply_clip();
+    }
 
     /// The native frame window (an X11 window id).
     pub fn hwnd(&self) -> isize {
@@ -249,11 +345,16 @@ impl FrameWindow {
         self.f.area as usize as *mut c_void
     }
 
-    /// Shows the window and brings it to the front.
+    /// Shows the window and brings it to the front (a docked one in front of the other docked windows).
     pub fn raise(&self) {
         let (c, a, win) = (&self.f.conn.c, &self.f.conn.atoms, self.f.win);
         let _ = c.map_window(win);
         let _ = c.configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+        if !self.detached() {
+            self.f.dirty.set(true);
+            self.f.paint();
+            return;
+        }
         // Source 2: asked for by the user (a pager), which focus stealing prevention lets through.
         let active = ClientMessageEvent::new(32, win, a._NET_ACTIVE_WINDOW, [2, x11rb::CURRENT_TIME, 0, 0, 0]);
         let _ = c.send_event(false, self.f.conn.root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, active);
@@ -265,6 +366,34 @@ impl FrameWindow {
         let mut st = self.f.state.borrow_mut();
         if st.info != info && st.drag.is_none() && st.misc_ui.drag.is_none() {
             st.info = info;
+            self.f.dirty.set(true);
+        }
+    }
+
+    /// An Open plugin joined the strip (host link): its page tabs replace the plug tab.
+    pub fn set_pages(&self, pages: Vec<PageIcon>, active: usize) {
+        let mut st = self.f.state.borrow_mut();
+        if !pages.is_empty() && (st.pages != pages || st.page != active) {
+            st.page = active.min(pages.len() - 1);
+            st.pages = pages;
+            self.f.dirty.set(true);
+        }
+    }
+
+    /// The plugin changed its page itself.
+    pub fn set_page(&self, page: usize) {
+        let mut st = self.f.state.borrow_mut();
+        if st.page != page && page < st.pages.len() {
+            st.page = page;
+            self.f.dirty.set(true);
+        }
+    }
+
+    /// The plugin's hint line (parameter under the mouse).
+    pub fn set_hint(&self, hint: String) {
+        let mut st = self.f.state.borrow_mut();
+        if st.hint != hint {
+            st.hint = hint;
             self.f.dirty.set(true);
         }
     }
@@ -307,18 +436,29 @@ impl FrameWindow {
 impl Drop for FrameWindow {
     fn drop(&mut self) {
         let f = &self.f;
+        if !f.state.borrow().detached {
+            expose();
+        }
         f.conn.frames.borrow_mut().remove(&f.win);
         let _ = f.conn.c.free_gc(f.gc);
         let _ = f.conn.c.destroy_window(f.win);
         let _ = f.conn.c.flush();
+        // An editor that held the keyboard left it with nobody.
+        focus_main();
     }
 }
 
 /// The window manager keeps the window at this size (the frame follows its editor, the user does not resize it).
 fn fixed_size(c: &RustConnection, win: xproto::Window, w: u16, h: u16) -> Result<(), Box<dyn std::error::Error>> {
+    size_hints(c, win, w, h, None)
+}
+
+/// `fixed_size`, and the place on the screen the window manager should keep (a window just detached stays put).
+fn size_hints(c: &RustConnection, win: xproto::Window, w: u16, h: u16, at: Option<(i32, i32)>) -> Result<(), Box<dyn std::error::Error>> {
     let mut hints = WmSizeHints::new();
     hints.min_size = Some((i32::from(w), i32::from(h)));
     hints.max_size = Some((i32::from(w), i32::from(h)));
+    hints.position = at.map(|(x, y)| (x11rb::properties::WmSizeHintsSpecification::UserSpecified, x, y));
     hints.set_normal_hints(c, win)?;
     Ok(())
 }
@@ -380,16 +520,47 @@ impl Frame {
         let mut xrgb = vec![0u32; w * h];
         canvas.copy_to_xrgb(&mut xrgb);
         drop(canvas);
-        let order = |p: &u32| if self.conn.lsb_first { p.to_le_bytes() } else { p.to_be_bytes() };
-        // Bands of whole rows, each small enough for one request (the request header takes a few bytes).
-        let rows = ((self.conn.max_request.saturating_sub(64)) / (w * 4).max(1)).clamp(1, h.max(1));
-        for (i, band) in xrgb.chunks(w * rows).enumerate() {
-            let bytes: Vec<u8> = band.iter().flat_map(order).collect();
-            let bh = (band.len() / w) as u16;
-            let y = (i * rows) as i16;
-            let _ = self.conn.c.put_image(ImageFormat::Z_PIXMAP, self.win, self.gc, w as u16, bh, 0, y, 0, self.conn.depth, &bytes);
-        }
-        let _ = self.conn.c.flush();
+        put_pixels(&self.conn, self.win, self.gc, &xrgb, w, h);
+    }
+
+    /// Sets a docked window's shape for its current place from `State::clip`: the workspace minus the rects covering
+    /// it. The X server exposes what comes into view (the plugin's editor included) and the main window under what
+    /// goes out of it.
+    fn apply_clip(&self) {
+        let (w, h) = {
+            let c = self.canvas.borrow();
+            (c.pixmap.width() as i32, c.pixmap.height() as i32)
+        };
+        let (x, y) = self.pos.get();
+        let me = [x, y, x + w, y + h];
+        let rects = {
+            let mut st = self.state.borrow_mut();
+            let Some((work, covers)) = st.clip.as_ref() else { return };
+            // Only what overlaps the window matters.
+            let hit = |c: &[i32; 4]| c[0] < me[2] && c[2] > me[0] && c[1] < me[3] && c[3] > me[1];
+            let covers: Vec<[i32; 4]> = covers.iter().copied().filter(hit).collect();
+            let work = *work;
+            let key: Vec<i32> = me.into_iter().chain(work).chain(covers.iter().flatten().copied()).collect();
+            if st.clip_key.as_ref() == Some(&key) {
+                return;
+            }
+            st.clip_key = Some(key);
+            let inside = work[0] <= me[0] && work[1] <= me[1] && work[2] >= me[2] && work[3] >= me[3];
+            (!inside || !covers.is_empty()).then(|| visible(me, work, &covers))
+        };
+        let c = &self.conn.c;
+        let _ = match rects {
+            None => shape_reset(c, self.win),
+            Some(rs) => {
+                let rs: Vec<xproto::Rectangle> = rs
+                    .iter()
+                    .map(|r| xproto::Rectangle { x: (r[0] - x) as i16, y: (r[1] - y) as i16, width: (r[2] - r[0]) as u16, height: (r[3] - r[1]) as u16 })
+                    .collect();
+                c.shape_rectangles(shape::SO::SET, shape::SK::BOUNDING, xproto::ClipOrdering::UNSORTED, self.win, 0, 0, &rs).map(|_| ())
+            }
+        };
+        let _ = c.flush();
+        expose();
     }
 
     /// A window point (logical px) on the X screen (physical px).
@@ -409,12 +580,24 @@ impl Frame {
             // The press grabs the pointer until the release: drags keep their motion without more.
             Reply::Repaint | Reply::Capture => self.dirty.set(true),
             Reply::Relayout => self.layout(),
+            Reply::Move if !self.state.borrow().detached => {
+                // Docked: moved by hand within the main window (the press's grab brings the motion here).
+                let (x, y) = self.pos.get();
+                self.state.borrow_mut().moving = Some((i32::from(root.0), i32::from(root.1), x, y));
+                self.dirty.set(true);
+            }
             Reply::Move => {
                 // The window manager moves it (it needs the pointer the press grabbed).
                 let _ = c.ungrab_pointer(x11rb::CURRENT_TIME);
                 let data = [root.0 as u32, root.1 as u32, MOVERESIZE_MOVE, 1, 1];
                 let _ = c.send_event(false, self.conn.root, to_root, ClientMessageEvent::new(32, self.win, a._NET_WM_MOVERESIZE, data));
                 let _ = c.flush();
+            }
+            Reply::Minimize if !self.state.borrow().detached => {
+                // A docked window hides (its channel's name button shows it again).
+                let _ = c.unmap_window(self.win);
+                let _ = c.flush();
+                expose();
             }
             Reply::Minimize => {
                 let _ = c.send_event(false, self.conn.root, to_root, ClientMessageEvent::new(32, self.win, a.WM_CHANGE_STATE, [ICONIC_STATE, 0, 0, 0, 0]));
@@ -423,12 +606,28 @@ impl Frame {
         }
     }
 
+    /// A click on the window or in its editor: it goes to the front of the app's windows.
+    fn clicked(&self) {
+        if !self.state.borrow().detached {
+            let _ = self.conn.c.configure_window(self.win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+        }
+        self.state.borrow_mut().events.push(FrameEvent::Raise);
+        os_clap::wake();
+    }
+
     fn event(&self, e: Event) {
         let k = self.scale;
         let screen = |x: f32, y: f32| self.to_screen(x, y);
         match e {
             Event::Expose(_) => self.dirty.set(true),
+            // A click in the plugin's editor (the grab on the area; `pump` lets the editor have it).
+            Event::ButtonPress(e) if e.event == self.area => self.clicked(),
             Event::ButtonPress(e) => {
+                if matches!(e.detail, 1..=3) {
+                    self.clicked();
+                    // A click on the frame (not in the editor): keys play the typing keyboard again.
+                    focus_main();
+                }
                 let (x, y) = (f32::from(e.event_x) / k, f32::from(e.event_y) / k);
                 let r = match e.detail {
                     1 => {
@@ -447,6 +646,19 @@ impl Frame {
                 self.reply(r, (e.root_x, e.root_y));
             }
             Event::ButtonRelease(e) if e.detail == 1 => self.state.borrow_mut().release(),
+            Event::MotionNotify(e) if self.state.borrow().moving.is_some() => {
+                let Some((cx, cy, wx, wy)) = self.state.borrow().moving else { return };
+                let at = (wx + i32::from(e.root_x) - cx, wy + i32::from(e.root_y) - cy);
+                if at != self.pos.get() {
+                    self.pos.set(at);
+                    let _ = self.conn.c.configure_window(self.win, &ConfigureWindowAux::new().x(at.0).y(at.1));
+                    // Re-clip at once for the new place; what the move uncovered is shown by the next present.
+                    self.apply_clip();
+                    let _ = self.conn.c.flush();
+                    expose();
+                    os_clap::wake();
+                }
+            }
             Event::MotionNotify(e) => {
                 let fine = u16::from(e.state) & u16::from(KeyButMask::CONTROL) != 0;
                 let r = self.state.borrow_mut().motion(f32::from(e.event_x) / k, f32::from(e.event_y) / k, fine);
@@ -456,9 +668,197 @@ impl Frame {
                 self.state.borrow_mut().events.push(FrameEvent::Close);
                 os_clap::wake();
             }
+            // The window manager checks the app still responds: the ping goes back to the root window.
+            Event::ClientMessage(mut e) if e.type_ == self.conn.atoms.WM_PROTOCOLS && e.data.as_data32()[0] == self.conn.atoms._NET_WM_PING => {
+                e.window = self.conn.root;
+                let _ = self.conn.c.send_event(false, self.conn.root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, e);
+                let _ = self.conn.c.flush();
+            }
             _ => {}
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Lifted overlay, as on Windows: an app popup opened from a detached plugin window is painted in the main window, under
+// the detached window (it stays above its owner). While one is open, its pixels are shown in a small window above the
+// plugin window, and its mouse input goes to the app as if it happened in the main window (`take_lift_input`).
+
+/// Mouse input on the lifted popup; positions in the main window (physical px).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiftInput {
+    Move(i32, i32),
+    /// X button: 1 left, 2 middle, 3 right.
+    Down(u8),
+    Up,
+}
+
+struct Lift {
+    win: xproto::Window,
+    gc: xproto::Gcontext,
+    /// Main-window position of the lifted rect's top-left.
+    origin: (i32, i32),
+    size: (usize, usize),
+    pixels: Vec<u32>,
+    shown: bool,
+}
+
+thread_local! {
+    static LIFT: RefCell<Option<Lift>> = const { RefCell::new(None) };
+    static LIFT_INPUT: RefCell<Vec<LiftInput>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Shows `pixels` (XRGB, `size`) above the detached window, at `origin` in main window `main` (physical px).
+pub fn lift_show(main: isize, _frame: isize, origin: (i32, i32), size: (i32, i32), pixels: Vec<u32>) {
+    let Ok(conn) = conn() else { return };
+    if main == 0 || size.0 <= 0 || size.1 <= 0 {
+        return;
+    }
+    let (x, y) = to_root(&conn, main as xproto::Window, origin);
+    let (w, h) = (size.0.min(i32::from(u16::MAX)) as usize, size.1.min(i32::from(u16::MAX)) as usize);
+    LIFT.with(|l| {
+        let mut l = l.borrow_mut();
+        let c = &conn.c;
+        if l.is_none() {
+            let (Ok(win), Ok(gc)) = (c.generate_id(), c.generate_id()) else { return };
+            let events = EventMask::EXPOSURE | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION;
+            // Not managed by the window manager: it sits where it is put, above the plugin window.
+            let aux = CreateWindowAux::new().override_redirect(1).event_mask(events);
+            if c.create_window(x11rb::COPY_DEPTH_FROM_PARENT, win, conn.root, x as i16, y as i16, w as u16, h as u16, 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT, &aux).is_err() {
+                return;
+            }
+            let _ = c.create_gc(gc, win, &CreateGCAux::new().graphics_exposures(0));
+            *l = Some(Lift { win, gc, origin, size: (w, h), pixels: Vec::new(), shown: false });
+        }
+        let Some(lift) = l.as_mut() else { return };
+        lift.origin = origin;
+        lift.size = (w, h);
+        lift.pixels = pixels;
+        let _ = c.configure_window(lift.win, &ConfigureWindowAux::new().x(x).y(y).width(w as u32).height(h as u32).stack_mode(StackMode::ABOVE));
+        if !lift.shown {
+            let _ = c.map_window(lift.win);
+            lift.shown = true;
+        }
+        put_pixels(&conn, lift.win, lift.gc, &lift.pixels, w, h);
+    });
+}
+
+/// The lifted popup closed.
+pub fn lift_hide() {
+    let Some(conn) = CONN.with(|c| c.borrow().clone()) else { return };
+    LIFT.with(|l| {
+        if let Some(lift) = l.borrow_mut().as_mut().filter(|l| l.shown) {
+            lift.shown = false;
+            let _ = conn.c.unmap_window(lift.win);
+            let _ = conn.c.flush();
+        }
+    });
+}
+
+/// Mouse input on the lifted popup since the last call (UI thread).
+pub fn take_lift_input() -> Vec<LiftInput> {
+    LIFT_INPUT.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// An event of the lifted popup's window: repaint it, or queue its input for the app. Whether it was one.
+fn lift_event(conn: &Conn, e: &Event) -> bool {
+    LIFT.with(|l| {
+        let l = l.borrow();
+        let Some(lift) = l.as_ref() else { return false };
+        let at = |x: i16, y: i16| LiftInput::Move(lift.origin.0 + i32::from(x), lift.origin.1 + i32::from(y));
+        let input = match e {
+            Event::Expose(x) if x.window == lift.win => {
+                put_pixels(conn, lift.win, lift.gc, &lift.pixels, lift.size.0, lift.size.1);
+                return true;
+            }
+            Event::ButtonPress(b) if b.event == lift.win => vec![at(b.event_x, b.event_y), LiftInput::Down(b.detail)],
+            Event::ButtonRelease(b) if b.event == lift.win => vec![at(b.event_x, b.event_y), LiftInput::Up],
+            Event::MotionNotify(m) if m.event == lift.win => vec![at(m.event_x, m.event_y)],
+            _ => return false,
+        };
+        LIFT_INPUT.with(|q| q.borrow_mut().extend(input));
+        os_clap::wake();
+        true
+    })
+}
+
+/// Copies XRGB rows of `w` (`h` rows) into `win` at (0, 0).
+fn put_pixels(conn: &Conn, win: xproto::Window, gc: xproto::Gcontext, xrgb: &[u32], w: usize, h: usize) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let order = |p: &u32| if conn.lsb_first { p.to_le_bytes() } else { p.to_be_bytes() };
+    // Bands of whole rows, each small enough for one request (the request header takes a few bytes).
+    let rows = ((conn.max_request.saturating_sub(64)) / (w * 4).max(1)).clamp(1, h.max(1));
+    for (i, band) in xrgb[..w * h].chunks(w * rows).enumerate() {
+        let bytes: Vec<u8> = band.iter().flat_map(order).collect();
+        let bh = (band.len() / w) as u16;
+        let y = (i * rows) as i16;
+        let _ = conn.c.put_image(ImageFormat::Z_PIXMAP, win, gc, w as u16, bh, 0, y, 0, conn.depth, &bytes);
+    }
+    let _ = conn.c.flush();
+}
+
+/// `rect` minus `cut`: up to four rects (left, right, top, bottom of the hole), each [left, top, right, bottom].
+fn subtract(rect: [i32; 4], cut: [i32; 4]) -> Vec<[i32; 4]> {
+    let [l, t, r, b] = rect;
+    let [cl, ct, cr, cb] = [cut[0].max(l), cut[1].max(t), cut[2].min(r), cut[3].min(b)];
+    if cl >= cr || ct >= cb {
+        return vec![rect];
+    }
+    [[l, t, cl, b], [cr, t, r, b], [cl, t, cr, ct], [cl, cb, cr, b]].into_iter().filter(|q| q[0] < q[2] && q[1] < q[3]).collect()
+}
+
+/// The parts of window rect `me` inside `work` and outside every cover.
+fn visible(me: [i32; 4], work: [i32; 4], covers: &[[i32; 4]]) -> Vec<[i32; 4]> {
+    let start = [me[0].max(work[0]), me[1].max(work[1]), me[2].min(work[2]), me[3].min(work[3])];
+    if start[0] >= start[2] || start[1] >= start[3] {
+        return Vec::new();
+    }
+    covers.iter().fold(vec![start], |parts, &c| parts.into_iter().flat_map(|p| subtract(p, c)).collect())
+}
+
+/// Back to the window's own rectangle.
+fn shape_reset(c: &RustConnection, win: xproto::Window) -> Result<(), x11rb::errors::ConnectionError> {
+    c.shape_mask(shape::SO::SET, shape::SK::BOUNDING, win, 0, 0, x11rb::NONE).map(|_| ())
+}
+
+/// The main window is `owner` (0: not an X11 one): docking needs it, and its exposures need a full present.
+fn set_owner(conn: &Conn, owner: xproto::Window) {
+    if owner == 0 || conn.owner.replace(owner) == owner {
+        return;
+    }
+    // Our own interest in its exposures (the app's toolkit keeps its own): see `take_exposed`.
+    let _ = conn.c.change_window_attributes(owner, &xproto::ChangeWindowAttributesAux::new().event_mask(EventMask::EXPOSURE));
+    // Owned windows stay above their owner without help.
+    keep_above(conn);
+}
+
+/// A screen point (physical px) in `win`'s coordinates.
+fn from_root(conn: &Conn, win: xproto::Window, (x, y): (i32, i32)) -> (i32, i32) {
+    let (x, y) = (x.clamp(-32768, 32767) as i16, y.clamp(-32768, 32767) as i16);
+    let t = conn.c.translate_coordinates(conn.root, win, x, y);
+    t.ok().and_then(|t| t.reply().ok()).map_or((i32::from(x), i32::from(y)), |r| (i32::from(r.dst_x), i32::from(r.dst_y)))
+}
+
+/// A point of `win` (physical px) on the screen.
+fn to_root(conn: &Conn, win: xproto::Window, (x, y): (i32, i32)) -> (i32, i32) {
+    let t = conn.c.translate_coordinates(win, conn.root, x.clamp(-32768, 32767) as i16, y.clamp(-32768, 32767) as i16);
+    t.ok().and_then(|t| t.reply().ok()).map_or((x, y), |r| (i32::from(r.dst_x), i32::from(r.dst_y)))
+}
+
+/// A screen point (physical px) in the main window's coordinates, when it is an X11 one.
+pub fn screen_to_main(x: i32, y: i32) -> Option<(i32, i32)> {
+    let conn = CONN.with(|c| c.borrow().clone())?;
+    let owner = conn.owner.get();
+    (owner != 0).then(|| from_root(&conn, owner, (x, y)))
+}
+
+/// The pointer on the screen (physical px), when there is an X server.
+pub fn pointer() -> Option<(i32, i32)> {
+    let conn = conn().ok()?;
+    let r = conn.c.query_pointer(conn.root).ok()?.reply().ok()?;
+    Some((i32::from(r.root_x), i32::from(r.root_y)))
 }
 
 /// The window an event is about.
@@ -486,9 +886,32 @@ pub fn pump() {
             }
             continue;
         }
-        let frame = window_of(&e).and_then(|w| conn.frames.borrow().get(&w).and_then(Weak::upgrade));
+        if let Event::Expose(x) = &e {
+            if x.window == conn.owner.get() {
+                expose();
+                continue;
+            }
+        }
+        if lift_event(&conn, &e) {
+            continue;
+        }
+        // Frames by their window, or by their editor area (clicks in the editor).
+        let frame = window_of(&e).and_then(|w| {
+            let frames = conn.frames.borrow();
+            frames.get(&w).and_then(Weak::upgrade).or_else(|| frames.values().filter_map(Weak::upgrade).find(|f| f.area == w))
+        });
+        // A click caught by an editor area's grab froze the pointer: pass it on to the editor, whatever became of the
+        // frame (a no-op for clicks on the frame itself).
+        let replay = match &e {
+            Event::ButtonPress(b) => Some(b.time),
+            _ => None,
+        };
         if let Some(f) = frame {
             f.event(e);
+        }
+        if let Some(t) = replay {
+            let _ = conn.c.allow_events(xproto::Allow::REPLAY_POINTER, t);
+            let _ = conn.c.flush();
         }
     }
 }
@@ -501,9 +924,31 @@ pub fn main_focused(focused: bool) {
     }
 }
 
-/// Keeps the frames above other windows while Lemon Studio is the active application, and only then.
+/// While held, the frames are not kept above other windows (see the module notes).
+pub struct Unpinned(());
+
+/// A blocking dialog opens (the app waits for it on the UI thread): the frames step back until the guard drops.
+pub fn unpinned() -> Unpinned {
+    MODAL.with(|m| m.set(m.get() + 1));
+    if let Some(conn) = CONN.with(|c| c.borrow().clone()) {
+        keep_above(&conn);
+    }
+    Unpinned(())
+}
+
+impl Drop for Unpinned {
+    fn drop(&mut self) {
+        MODAL.with(|m| m.set(m.get().saturating_sub(1)));
+        if let Some(conn) = CONN.with(|c| c.borrow().clone()) {
+            keep_above(&conn);
+        }
+    }
+}
+
+/// Keeps the frames above other windows while Lemon Studio is the active application and no blocking dialog is open, and
+/// only then.
 fn keep_above(conn: &Conn) {
-    let want = MAIN_FOCUSED.with(Cell::get) || conn.frame_active.get();
+    let want = conn.owner.get() == 0 && MODAL.with(Cell::get) == 0 && (MAIN_FOCUSED.with(Cell::get) || conn.frame_active.get());
     if conn.above.replace(want) == want {
         return;
     }
@@ -532,10 +977,84 @@ pub fn busy() -> bool {
     CONN.with(|c| c.borrow().as_ref().is_some_and(|c| !c.frames.borrow().is_empty())) || os_host::runloop::active()
 }
 
-/// Docked windows only (none here).
-pub fn stack(_parent: isize, _hwnds: &[isize]) {}
+/// Host link messages from Open plugins' editors since the last call: (editor area window, message). The editors run
+/// on threads of their own and queue them in `os_hostlink` (UI thread).
+pub fn take_link() -> Vec<(isize, LinkMsg)> {
+    os_hostlink::take_host_messages()
+        .into_iter()
+        .map(|(area, cmd, arg)| {
+            let m = match cmd {
+                os_hostlink::Cmd::Note => {
+                    let (k, v, on) = os_hostlink::unpack_note(arg);
+                    LinkMsg::Note(k, v, on)
+                }
+                os_hostlink::Cmd::Automate => LinkMsg::Automate(arg.max(0) as usize),
+                _ => LinkMsg::Changed,
+            };
+            (area as isize, m)
+        })
+        .collect()
+}
 
-/// The window manager places new windows.
-pub fn default_position(_owner: isize, _scale: f32) -> (i32, i32) {
-    (0, 0)
+/// Puts `parent`'s docked windows `hwnds` (bottom to top) in that order when they are not already.
+pub fn stack(parent: isize, hwnds: &[isize]) {
+    let Some(conn) = CONN.with(|c| c.borrow().clone()) else { return };
+    if hwnds.len() < 2 || parent == 0 {
+        return;
+    }
+    let Some(tree) = conn.c.query_tree(parent as xproto::Window).ok().and_then(|t| t.reply().ok()) else { return };
+    // The children's current order, bottom to top.
+    let now: Vec<isize> = tree.children.iter().map(|&w| w as isize).filter(|w| hwnds.contains(w)).collect();
+    if now == hwnds {
+        return;
+    }
+    for &h in hwnds {
+        let _ = conn.c.configure_window(h as xproto::Window, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+    }
+    let _ = conn.c.flush();
+}
+
+/// Gives the keyboard back to the main window when a plugin editor holds it, or nobody does. A plugin takes it with a
+/// click (for its text fields) and keeps it: X11 does not move it back when the user clicks elsewhere in the app (the
+/// window manager sees the same active window), nor when the plugin's window closes (it goes to nobody), and the
+/// typing keyboard would stay silent. Called on clicks in the main window and on frames, and when a frame closes.
+pub fn focus_main() {
+    let Some(conn) = CONN.with(|c| c.borrow().clone()) else { return };
+    let owner = conn.owner.get();
+    if owner == 0 {
+        return;
+    }
+    let Some(focus) = conn.c.get_input_focus().ok().and_then(|r| r.reply().ok()).map(|r| r.focus) else { return };
+    // 0: nobody; 1: PointerRoot (whatever window is under the pointer).
+    if focus == owner || !(focus <= 1 || in_frame(&conn, focus)) {
+        return;
+    }
+    let _ = conn.c.set_input_focus(xproto::InputFocus::PARENT, owner, x11rb::CURRENT_TIME);
+    let _ = conn.c.flush();
+}
+
+/// Whether `w` is one of the frames or inside one (a plugin's editor).
+fn in_frame(conn: &Conn, mut w: xproto::Window) -> bool {
+    for _ in 0..32 {
+        if conn.frames.borrow().contains_key(&w) {
+            return true;
+        }
+        match conn.c.query_tree(w).ok().and_then(|t| t.reply().ok()) {
+            Some(t) if t.parent != x11rb::NONE && t.parent != t.root => w = t.parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Screen position for a new plugin window: right of the main window's left edge, below its toolbar (physical px; the
+/// offset is logical, so the window lands on the same part of the layout at every scale). The window manager places
+/// detached windows.
+pub fn default_position(owner: isize, scale: f32) -> (i32, i32) {
+    let Ok(conn) = conn() else { return (0, 0) };
+    if owner == 0 {
+        return (0, 0);
+    }
+    let (x, y) = to_root(&conn, owner as xproto::Window, (0, 0));
+    (x + (420.0 * scale).round() as i32, y + (160.0 * scale).round() as i32)
 }

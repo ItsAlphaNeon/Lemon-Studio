@@ -271,12 +271,9 @@ fn save_as(app: &mut App, key: usize) -> Option<String> {
     let dir = dir_for(&h.plugin)?;
     let _ = std::fs::create_dir_all(&dir);
     let start = app.plugins.presets.get(&key).map(|p| shown_name(p)).unwrap_or_else(|| "New preset".into());
-    let target = rfd::FileDialog::new()
-        .set_title("Save preset as")
-        .set_directory(&dir)
-        .set_file_name(format!("{start}.{EXT}"))
-        .add_filter("Lemon Studio preset", &[EXT])
-        .save_file()?;
+    let target = crate::dialog::modal(|| {
+        rfd::FileDialog::new().set_title("Save preset as").set_directory(&dir).set_file_name(format!("{start}.{EXT}")).add_filter("Lemon Studio preset", &[EXT]).save_file()
+    })?;
     let target = if target.extension().is_some_and(|e| e.eq_ignore_ascii_case(EXT)) { target } else { target.with_extension(EXT) };
     Some(match save(&target, &h, &state) {
         Ok(()) => {

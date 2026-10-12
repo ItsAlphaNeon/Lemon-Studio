@@ -21,12 +21,26 @@ use os_ui::{Canvas, Color, Font, Rect};
 #[cfg(windows)]
 mod win32;
 #[cfg(windows)]
-pub use win32::{default_position, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow, LinkMsg};
+pub use win32::{default_position, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow};
 
 #[cfg(target_os = "linux")]
 mod x11;
 #[cfg(target_os = "linux")]
-pub use x11::{busy, default_position, main_focused, paint_dirty, pump, stack, FrameWindow};
+pub use x11::{
+    busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pump, screen_to_main, stack, take_exposed, take_lift_input, take_link, unpinned,
+    FrameWindow, LiftInput,
+};
+
+/// A message an Open plugin's editor sent to its frame (host link, plugin -> host).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkMsg {
+    /// Hint or page changed: poll the link now.
+    Changed,
+    /// Preview note from the plugin's keyboard: key, velocity, on.
+    Note(u8, u8, bool),
+    /// "Create automation clip" on the plugin parameter at this list position.
+    Automate(usize),
+}
 
 /// Title bar height (outline row included); the strip, or the editor's outline, starts here.
 pub const TITLE_H: f32 = 27.0;
@@ -166,15 +180,13 @@ struct State {
     /// Title-bar move in progress: cursor and window position (screen px) at the press. Done by hand: the system's
     /// move loop (HTCAPTION) blocks the UI thread, which would freeze all drawing while a window moves.
     moving: Option<(i32, i32, i32, i32)>,
-    /// A top-level window (menu arrow > Detached) instead of a child of the main window (always, off Windows).
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// A top-level window (menu arrow > Detached) instead of a child of the main window (always when the main window is
+    /// a native Wayland one).
     detached: bool,
     /// Docked: the workspace and the rects covering it (the app's windows and popups above this one), in the main
     /// window's client area (physical px). Kept so a move re-clips at once instead of at the app's next tick.
-    #[cfg(windows)]
     clip: Option<([i32; 4], Vec<[i32; 4]>)>,
     /// The clip last applied (window rect, workspace, covering rects), so unchanged clips are not reset.
-    #[cfg(windows)]
     clip_key: Option<Vec<i32>>,
 }
 
@@ -196,9 +208,7 @@ impl State {
             drag: None,
             moving: None,
             detached,
-            #[cfg(windows)]
             clip: None,
-            #[cfg(windows)]
             clip_key: None,
         }
     }

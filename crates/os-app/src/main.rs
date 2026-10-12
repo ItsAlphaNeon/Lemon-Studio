@@ -356,7 +356,7 @@ impl ApplicationHandler for Shell {
                 }
             }
         }
-        // Under X11 the plugin windows are transient for the main window (under Wayland they cannot be).
+        // Under X11 plugin windows dock into the main window (under Wayland they cannot: they stay top-level).
         #[cfg(target_os = "linux")]
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -383,6 +383,11 @@ impl ApplicationHandler for Shell {
         let now = Instant::now();
         let mut wake = now + Duration::from_millis(ms);
         self.pending |= self.app.tick();
+        // Linux: a docked plugin window uncovered part of the main window, which needs presenting again.
+        #[cfg(target_os = "linux")]
+        {
+            self.pending |= crate::plugin_window::exposed();
+        }
         if let Some(log) = &mut self.frames {
             let took = now.elapsed().as_secs_f64() * 1000.0;
             if took > 2.0 {
@@ -431,6 +436,12 @@ impl ApplicationHandler for Shell {
         };
         if press && self.app.loading() {
             return;
+        }
+        // Linux: a click in the main window takes the keyboard back from a plugin editor that holds it (X11 leaves it
+        // there), so the typing keyboard plays again.
+        #[cfg(target_os = "linux")]
+        if matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, .. }) {
+            crate::plugin_window::focus_main();
         }
         if let Some(log) = &mut self.frames {
             let input = matches!(
@@ -585,7 +596,11 @@ impl ApplicationHandler for Shell {
             // Audio files dropped on the playlist become audio clips (spec: ui/playlist.md §9); a dropped project opens.
             WindowEvent::DroppedFile(path) => {
                 // No mouse moves arrive during a drag and drop: take the cursor position now.
-                if let (Some(((cx, cy), _)), Ok(p)) = (screen_state(&window), window.inner_position()) {
+                let at = screen_state(&window).map(|s| s.0);
+                // X11 main window (Linux): the X server knows where the pointer is.
+                #[cfg(target_os = "linux")]
+                let at = at.or_else(|| (self.app.plugins.owner != 0).then(crate::plugin_window::pointer).flatten());
+                if let (Some((cx, cy)), Ok(p)) = (at, window.inner_position()) {
                     let (mx, my) = self.to_app(&window, f64::from(cx - p.x), f64::from(cy - p.y));
                     self.app.mouse_move(mx, my);
                 }
@@ -653,7 +668,7 @@ impl ApplicationHandler for Shell {
                 if let Some(d) = &damage {
                     self.app.canvas_off = (self.inset.0 as i32, self.inset.1 as i32);
                     self.app.paint_region(canvas, d.as_deref());
-                    #[cfg(windows)]
+                    #[cfg(plugin_windows)]
                     self.app.sync_lift(canvas);
                 }
                 // A scrolled playlist moved its pixels instead of repainting them: the buffer moves them too.
@@ -667,9 +682,9 @@ impl ApplicationHandler for Shell {
                             // it was last shown, so it gets the whole canvas.
                             let age = buf.age();
                             // A docked plugin window moved: what it uncovered needs the whole canvas.
-                            #[cfg(windows)]
+                            #[cfg(plugin_windows)]
                             let exposed = crate::plugin_window::take_exposed();
-                            #[cfg(not(windows))]
+                            #[cfg(not(plugin_windows))]
                             let exposed = false;
                             match &damage {
                                 Some(Some(rects)) if age == 1 && !exposed => {
@@ -706,8 +721,9 @@ impl ApplicationHandler for Shell {
                                 }
                                 // Nothing painted (the OS asked for a redraw): the buffer already
                                 // holds the last frame unless it was discarded.
+                                // Linux: an uncovered part of the main window shows nothing until presented again.
                                 None => {
-                                    if age != 1 {
+                                    if age != 1 || (cfg!(target_os = "linux") && exposed) {
                                         canvas.copy_region_to_xrgb_at(&mut buf, stride, (0, 0, cw as usize, ch as usize), off);
                                         draw_border(&mut buf, stride, size.height as usize, inset);
                                     }
@@ -1064,6 +1080,17 @@ fn screenshot(args: &[String]) {
 static PROXY: std::sync::Mutex<Option<EventLoopProxy<()>>> = std::sync::Mutex::new(None);
 static WAKE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Linux: the main window goes on X11 (XWayland under Wayland) so plugin windows can dock in it: plugin editors on Linux
+/// are X11 windows, and an X11 window cannot be a child of a Wayland one. Native Wayland when there is no X server, or
+/// when `OPENSTUDIO_WAYLAND=1` asks for it; plugin windows are then always detached.
+#[cfg(target_os = "linux")]
+fn use_x11() -> bool {
+    if std::env::var_os("OPENSTUDIO_WAYLAND").is_some_and(|v| v == "1") {
+        return false;
+    }
+    std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) && x11rb::rust_connection::RustConnection::connect(None).is_ok()
+}
+
 fn wake_ui() {
     if !WAKE_PENDING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         if let Ok(p) = PROXY.lock() {
@@ -1082,11 +1109,20 @@ fn main() {
         return;
     }
     let path = args.first().map(std::path::PathBuf::from);
-    let event_loop = EventLoop::<()>::with_user_event().build().expect("event loop");
+    let mut builder = EventLoop::<()>::with_user_event();
+    #[cfg(target_os = "linux")]
+    if use_x11() {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        builder.with_x11();
+    }
+    let event_loop = builder.build().expect("event loop");
     if let Ok(mut p) = PROXY.lock() {
         *p = Some(event_loop.create_proxy());
     }
     os_clap::set_waker(wake_ui);
+    // Open plugins' editors run on threads of their own off Windows and wake the app when they send something.
+    #[cfg(not(windows))]
+    os_hostlink::set_host_waker(wake_ui);
     let mut app = App::new(path);
     // MIDI controllers play the selected channel (spec: ui/midi-input.md).
     app.midi = midi_in::MidiIn::open(wake_ui);

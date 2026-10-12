@@ -385,7 +385,7 @@ mod tests {
         a.state.project.mixer[2].slots[1] = Some(crate::plugins::new_slot("Fruity Balance"));
         a.plugins.hosted.insert(
             fx_key(2, 1),
-            crate::plugins::Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(windows)] link: None },
+            crate::plugins::Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None },
         );
         a.save_to(path.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);

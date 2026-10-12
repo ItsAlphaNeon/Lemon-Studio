@@ -1,5 +1,5 @@
-//! The plugin editor: a Win32 child of the host's window that paints `view` with the os-ui canvas, and the editor
-//! logic (platform independent): knob drags with the cursor held in place, wheel and reset gestures, menus, the
+//! The plugin editor: a child of the host's window (Win32, or X11 on Linux) that paints `view` with the os-ui canvas,
+//! and the editor logic (platform independent): knob drags with the cursor held in place, wheel and reset gestures, menus, the
 //! keyboard and waveform. Values the editor sets show at once (an overlay over the host's parameter values until
 //! the host confirms them), so nothing waits for the host's next flush.
 //!
@@ -30,16 +30,28 @@ pub struct SamplerEditor {
     /// The open editor window (0 = closed): parameter changes post a repaint to it.
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Arc<AtomicIsize>,
+    /// Linux: the open editor's thread waker, for the same.
+    #[cfg(target_os = "linux")]
+    slot: os_plugkit::x11::Slot,
 }
 
 impl SamplerEditor {
     pub fn new(params: Arc<SamplerParams>, shared: Arc<Shared>) -> Self {
-        SamplerEditor { params, shared, scale: AtomicU32::new(1f32.to_bits()), hwnd: Arc::new(AtomicIsize::new(0)) }
+        SamplerEditor {
+            params,
+            shared,
+            scale: AtomicU32::new(1f32.to_bits()),
+            hwnd: Arc::new(AtomicIsize::new(0)),
+            #[cfg(target_os = "linux")]
+            slot: Default::default(),
+        }
     }
 
     fn notify(&self) {
         #[cfg(windows)]
         win32::post_changed(self.hwnd.load(Ordering::Acquire));
+        #[cfg(target_os = "linux")]
+        os_plugkit::x11::notify(&self.slot);
     }
 }
 
@@ -51,7 +63,9 @@ impl Editor for SamplerEditor {
             ParentWindowHandle::Win32Hwnd(hwnd) => {
                 Box::new(win32::open(hwnd, scale, self.params.clone(), self.shared.clone(), context, self.hwnd.clone()))
             }
-            // Editors are Win32 windows so far: elsewhere none opens.
+            #[cfg(target_os = "linux")]
+            ParentWindowHandle::X11Window(window) => Box::new(x11::open(window, scale, self.params.clone(), self.shared.clone(), context, &self.slot)),
+            // Elsewhere no editor opens yet.
             _ => {
                 let _ = (context, scale);
                 Box::new(())
@@ -331,6 +345,18 @@ impl MenuDef {
     }
     pub fn sub(&self, i: usize) -> Option<&MenuDef> {
         self.subs.iter().find(|(j, _)| *j == i).map(|(_, m)| m)
+    }
+
+    /// The same menu as the shared editor kit's (its popups take that one).
+    #[cfg(target_os = "linux")]
+    fn kit(&self) -> os_plugkit::MenuDef<Cmd> {
+        os_plugkit::MenuDef {
+            items: self.items.clone(),
+            cmds: self.cmds.clone(),
+            subs: self.subs.iter().map(|(i, m)| (*i, m.kit())).collect(),
+            style: self.style,
+            current: self.current,
+        }
     }
 }
 
@@ -2247,6 +2273,384 @@ mod win32 {
             CloseClipboard();
             out
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod x11 {
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use nih_plug::prelude::GuiContext;
+    use os_hostlink::{Cmd, PageIcon, Peer};
+    use os_plugkit::x11::{self as px, Button, Input, Window};
+    use os_theme::Palette;
+    use os_ui::Canvas;
+
+    use super::{Act, Btn, Logic, Mods, SpectrumCache};
+    use crate::params::SamplerParams;
+    use crate::view::{self, SampleView, ViewState};
+    use crate::Shared;
+
+    /// What the copy / paste audio shortcuts and menu entries say here: the audio clipboard is Windows only so far.
+    const NO_AUDIO_CLIPBOARD: &str = "Audio on the clipboard: not available yet on Linux";
+
+    /// The editor on its GUI thread.
+    struct Ed {
+        win: Window,
+        canvas: Canvas,
+        buf: Vec<u32>,
+        crop: Vec<u32>,
+        scale: f32,
+        size: (u32, u32),
+        params: Arc<SamplerParams>,
+        shared: Arc<Shared>,
+        logic: Logic,
+        palette: Palette,
+        spectrum: SpectrumCache,
+        last_sig: u64,
+        last_view: ViewState,
+        last_ver: u64,
+        last_hint: String,
+        dirty: bool,
+        /// The host link: the host finds the editor by the window it gave it (spec: plugins/host-link.md).
+        link: Arc<Peer>,
+        /// The page as last agreed with the host.
+        last_page: usize,
+    }
+
+    pub fn open(parent: u32, scale: f32, params: Arc<SamplerParams>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Option<px::EditorThread> {
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let px = move |v: u32| (v as f32 * scale).round() as u32;
+        // Two pages (sample, envelopes); joined, the editor is what lies below the strip row.
+        let wake = slot.clone();
+        let link = Peer::register(u64::from(parent), vec![PageIcon::Sample, PageIcon::Envelope], (view::EDITOR_W, view::HOSTED_EDITOR_H), move || px::notify(&wake));
+        let peer = link.clone();
+        let thread = px::spawn(parent, (px(view::EDITOR_W), px(view::EDITOR_H)), slot, move |win| {
+            let full = (px(view::W), px(view::H));
+            let Ok(canvas) = Canvas::new(full.0, full.1, scale) else { return };
+            let logic = Logic::new(params.clone(), shared.clone(), Some(ctx));
+            let ed = Ed {
+                win,
+                canvas,
+                buf: Vec::new(),
+                crop: Vec::new(),
+                scale,
+                size: full,
+                params,
+                shared,
+                logic,
+                palette: super::palette(),
+                spectrum: SpectrumCache::default(),
+                last_sig: 0,
+                last_view: ViewState::default(),
+                last_ver: 0,
+                last_hint: String::new(),
+                dirty: true,
+                link: peer,
+                last_page: 0,
+            };
+            ed.run();
+        });
+        if thread.is_none() {
+            link.unregister();
+        }
+        thread
+    }
+
+    impl Drop for Ed {
+        /// The editor closes: the host no longer finds it.
+        fn drop(&mut self) {
+            self.link.unregister();
+        }
+    }
+
+    fn btn(b: Button) -> Btn {
+        match b {
+            Button::Left => Btn::Left,
+            Button::Right => Btn::Right,
+            Button::Middle => Btn::Middle,
+        }
+    }
+
+    impl Ed {
+        fn run(mut self) {
+            while let Some(input) = self.win.next() {
+                match input {
+                    Input::Expose => self.dirty = true,
+                    Input::Tick => self.poll(),
+                    Input::Down { x, y, btn: b, dbl } => {
+                        let (x, y) = self.to_view(x, y);
+                        let acts = self.logic.down(x, y, btn(b), self.mods(), dbl && b == Button::Left);
+                        self.act(acts);
+                    }
+                    Input::Move { x, y } => {
+                        let (x, y) = self.to_view(x, y);
+                        let acts = self.logic.moved(x, y, self.mods());
+                        self.act_hover(acts);
+                    }
+                    Input::Delta { dx, dy } => {
+                        let acts = self.logic.delta(dx / self.scale, dy / self.scale, self.mods());
+                        self.act(acts);
+                    }
+                    Input::Up { .. } => {
+                        self.win.unlock();
+                        let acts = self.logic.up(Btn::Left);
+                        self.act(acts);
+                    }
+                    Input::Leave => {
+                        if !self.win.locked() && !self.logic.dragging() {
+                            let acts = self.logic.leave();
+                            self.act(acts);
+                        }
+                    }
+                    Input::Wheel { x, y, notches } => {
+                        let (x, y) = self.to_view(x, y);
+                        let acts = self.logic.wheel(x, y, notches, self.mods());
+                        self.act(acts);
+                    }
+                    // The logic takes Windows key codes: letters are their upper case.
+                    Input::Key { text: Some(c), .. } if c.is_ascii_alphabetic() => {
+                        let acts = self.logic.key(u32::from(c.to_ascii_uppercase()), self.mods());
+                        self.act(acts);
+                    }
+                    Input::Key { .. } => {}
+                }
+                if self.dirty && self.win.idle() {
+                    self.paint();
+                }
+            }
+        }
+
+        fn mods(&self) -> Mods {
+            let (ctrl, shift, alt) = self.win.mods();
+            Mods { ctrl, shift, alt }
+        }
+
+        /// Top of the shown crop in the painted frame: the strip row is left out when the host draws it.
+        fn crop_y(&self) -> u32 {
+            if self.logic.hosted { view::HOSTED_CROP_Y } else { view::CROP_Y }
+        }
+
+        /// Editor content size in logical px.
+        fn content(&self) -> (u32, u32) {
+            (view::EDITOR_W, if self.logic.hosted { view::HOSTED_EDITOR_H } else { view::EDITOR_H })
+        }
+
+        /// Window device px to painted-frame coordinates (the editor is a crop of the painted frame).
+        fn to_view(&self, x: f32, y: f32) -> (f32, f32) {
+            (x / self.scale + view::CROP_X as f32, y / self.scale + self.crop_y() as f32)
+        }
+
+        /// Screen position of a painted-frame point.
+        fn screen(&self, x: f32, y: f32) -> (i32, i32) {
+            self.win.to_root(((x - view::CROP_X as f32) * self.scale) as i32, ((y - self.crop_y() as f32) * self.scale) as i32)
+        }
+
+        /// Timer / parameter change: expire confirmed overlay values, refresh the lit keys, keep the processed sample
+        /// current, repaint when anything shown changed.
+        fn poll(&mut self) {
+            let mut dirty = self.logic.vals.expire();
+            dirty |= self.logic.refresh_lit();
+            if self.shared.stale(&self.params) {
+                self.shared.precompute_async(&self.params);
+            }
+            let sig = self.logic.vals.signature();
+            let ver = self.shared.version();
+            if dirty || sig != self.last_sig || ver != self.last_ver || self.logic.view != self.last_view || self.logic.hint != self.last_hint {
+                self.dirty = true;
+            }
+            if self.logic.hint != self.last_hint {
+                self.last_hint.clone_from(&self.logic.hint);
+                // The host shows the hint in its title bar (hosted mode).
+                self.link.set_hint(&self.logic.hint);
+                self.link.to_host(Cmd::Changed, 0);
+            }
+            self.sync_link();
+        }
+
+        /// Follows the host link: joining the strip (the editor shrinks to the content below the strip row, which the
+        /// host now draws) and the host's page; a page the editor switched to itself goes to the host.
+        fn sync_link(&mut self) {
+            if self.link.hosted() && !self.logic.hosted {
+                self.logic.hosted = true;
+                let (cw, ch) = self.content();
+                let px = |v: u32| (v as f32 * self.scale).round() as u32;
+                self.win.resize(px(cw), px(ch));
+                self.dirty = true;
+            }
+            let page = self.link.page();
+            if page != self.last_page {
+                self.logic.view.tab = u8::from(page > 0);
+                self.last_page = page;
+                self.dirty = true;
+            } else if usize::from(self.logic.view.tab) != page {
+                self.last_page = usize::from(self.logic.view.tab);
+                self.link.set_page(self.last_page);
+                self.link.to_host(Cmd::Changed, 0);
+            }
+        }
+
+        /// Hover moves repaint only when the look under the mouse could change.
+        fn act_hover(&mut self, acts: Vec<Act>) {
+            let only_repaint = acts.iter().all(|a| *a == Act::Repaint);
+            if only_repaint && !self.logic.dragging() && self.hover_target() == self.last_hover() && self.logic.hint == self.last_hint {
+                return;
+            }
+            self.act(acts);
+        }
+
+        fn hover_target(&self) -> Option<view::Target> {
+            let (x, y) = self.logic.view.mouse?;
+            self.logic.hits.iter().rev().find(|h| h.r.contains(x, y)).map(|h| h.t.clone())
+        }
+
+        fn last_hover(&self) -> Option<view::Target> {
+            let (x, y) = self.last_view.mouse?;
+            self.logic.hits.iter().rev().find(|h| h.r.contains(x, y)).map(|h| h.t.clone())
+        }
+
+        fn act(&mut self, acts: Vec<Act>) {
+            for a in acts {
+                match a {
+                    Act::Repaint => self.dirty = true,
+                    Act::Lock => self.win.lock(),
+                    Act::Menu(req, x, y) => {
+                        let def = self.logic.menu(&req);
+                        let (sx, sy) = self.screen(x, y);
+                        if let Some(cmd) = self.win.popup(sx, sy, &def.kit(), &self.palette, self.scale) {
+                            let acts = self.logic.pick(&req, cmd, x, y);
+                            self.act(acts);
+                        }
+                        self.dirty = true;
+                    }
+                    Act::TypeIn(id, x, y) => {
+                        let (sx, sy) = self.screen(x, y);
+                        let cur = self.logic.value_text(&id);
+                        if let Some(t) = self.win.type_in(sx, sy, &cur, self.scale) {
+                            self.logic.typed(&id, &t);
+                        }
+                        self.dirty = true;
+                    }
+                    Act::Automate(id) => {
+                        // The host makes the clip (spec: plugins/host-link.md); the index is the parameter's list position.
+                        let i = nih_plug::params::Params::param_map(&*self.params).iter().position(|(p, _, _)| *p == id);
+                        if let Some(i) = i {
+                            self.link.to_host(Cmd::Automate, i as isize);
+                        }
+                    }
+                    // Hosted, the host plays the preview notes on its live stream; otherwise the plugin does.
+                    Act::Note(k, v, on) => {
+                        if self.link.to_host(Cmd::Note, os_hostlink::pack_note(k, v, on)) != 1 {
+                            if let Ok(mut q) = self.shared.previews.lock() {
+                                q.push((k, f32::from(v) / 127.0, on));
+                            }
+                        }
+                    }
+                    Act::OpenDialog => {
+                        if let Some(path) = file_dialog(false) {
+                            self.load(&path);
+                        }
+                        self.dirty = true;
+                    }
+                    Act::Load(p) => {
+                        self.load(&p);
+                        self.dirty = true;
+                    }
+                    Act::Clear => {
+                        self.shared.clear(&self.params);
+                        self.dirty = true;
+                    }
+                    Act::Reload => {
+                        let p = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
+                        if !p.is_empty() {
+                            self.load(&p);
+                        }
+                        self.dirty = true;
+                    }
+                    Act::SaveAs => {
+                        let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
+                        if let (Some(s), Some(path)) = (s, file_dialog(true)) {
+                            let path = if path.to_ascii_lowercase().ends_with(".wav") { path } else { format!("{path}.wav") };
+                            self.logic.hint = match std::fs::write(&path, super::wav_bytes(&s, true)) {
+                                Ok(()) => format!("Saved {path}"),
+                                Err(e) => format!("Could not save: {e}"),
+                            };
+                        }
+                        self.dirty = true;
+                    }
+                    Act::Locate => {
+                        // The sample's folder in the file manager.
+                        let p = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
+                        if let Some(dir) = std::path::Path::new(&p).parent().filter(|d| !p.is_empty() && d.is_dir()) {
+                            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+                        }
+                    }
+                    Act::CopyAudio | Act::PasteAudio => {
+                        self.logic.hint = NO_AUDIO_CLIPBOARD.into();
+                        self.dirty = true;
+                    }
+                }
+            }
+        }
+
+        fn load(&mut self, path: &str) {
+            match self.shared.load(path, &self.params) {
+                Ok(()) => {
+                    super::remember(path);
+                    self.logic.view.wave_start = 0.0;
+                    self.logic.view.wave_len = 1.0;
+                    self.logic.hint = format!("Loaded {}", path.rsplit(['/', '\\']).next().unwrap_or(path));
+                }
+                Err(e) => self.logic.hint = e,
+            }
+        }
+
+        fn paint(&mut self) {
+            self.dirty = false;
+            let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
+            let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
+            let s = s.or_else(|| self.shared.raw.lock().ok().and_then(|r| r.clone()));
+            let bits = (self.shared.bits.load(Ordering::Relaxed) & 0x1ff) as u16;
+            let ver = self.shared.version();
+            let spectrum = match (&s, self.logic.view.spectrum) {
+                (Some(s), true) => Some(self.spectrum.get(ver, &self.logic.view, s)),
+                _ => None,
+            };
+            let sv = SampleView { sample: s.as_deref(), path: &path, bits, spectrum };
+            let hint = if self.logic.hosted { String::new() } else { self.logic.hint.clone() };
+            self.logic.hits = view::paint(&mut self.canvas, &self.palette, &self.logic.vals, &self.logic.view, &sv, &hint, self.logic.hosted);
+            self.last_sig = self.logic.vals.signature();
+            self.last_view = self.logic.view.clone();
+            self.last_ver = ver;
+            // Show the editor area: the painted frame minus FL's border.
+            let (ox, oy) = ((view::CROP_X as f32 * self.scale).round() as usize, (self.crop_y() as f32 * self.scale).round() as usize);
+            let (cw, ch) = self.content();
+            let (w, h) = ((cw as f32 * self.scale).round() as u32, (ch as f32 * self.scale).round() as u32);
+            let (w, h) = (w.min(self.size.0 - ox as u32), h.min(self.size.1 - oy as u32));
+            let full = self.size.0 as usize;
+            self.buf.resize(full * self.size.1 as usize, 0);
+            self.canvas.copy_to_xrgb(&mut self.buf);
+            self.crop.clear();
+            for row in oy..oy + h as usize {
+                self.crop.extend_from_slice(&self.buf[row * full + ox..row * full + ox + w as usize]);
+            }
+            self.win.blit(&self.crop, w, h);
+        }
+    }
+
+    /// The open / save sample dialog (the desktop's own, through its portal).
+    fn file_dialog(save: bool) -> Option<String> {
+        if os_plugkit::no_modal() {
+            return None;
+        }
+        let d = rfd::FileDialog::new();
+        let path = if save {
+            d.set_title("Save sample as").add_filter("WAV files", &["wav"]).save_file()
+        } else {
+            d.set_title("Open sample").add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3"]).pick_file()
+        };
+        path.map(|p| p.to_string_lossy().into_owned())
     }
 }
 

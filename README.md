@@ -12,7 +12,7 @@
   <a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue?style=flat-square"></a>
   <img alt="Rust 2024 edition" src="https://img.shields.io/badge/rust-2024_edition-e57324?style=flat-square&logo=rust&logoColor=white">
   <img alt="Platform: Windows | Linux" src="https://img.shields.io/badge/platform-Windows_%7C_Linux-0078d4?style=flat-square">
-  <a href="https://github.com/ItsAlphaNeon/OpenStudio/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/ItsAlphaNeon/OpenStudio/ci.yml?branch=main&style=flat-square&label=CI"></a>
+  <a href="https://github.com/ItsAlphaNeon/Lemon-Studio/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/ItsAlphaNeon/Lemon-Studio/ci.yml?branch=main&style=flat-square&label=CI"></a>
   <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-ffe066?style=flat-square">
   <a href="https://discord.gg/yC2uCuGs3M"><img alt="Discord" src="https://img.shields.io/badge/discord-join_the_server-5865f2?style=flat-square&logo=discord&logoColor=white"></a>
 </p>
@@ -81,7 +81,7 @@ clicking it does nothing.
 | Audio editing and time-stretching | ❌ | Not available yet |
 | Plugin delay compensation | ❌ | Not available yet |
 | Audio drivers | 🚧 | WASAPI (shared mode) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux; no ASIO or JACK yet |
-| Platforms | 🚧 | Windows 10 / 11; Linux (Wayland and X11) without plugin windows yet; no macOS yet |
+| Platforms | 🚧 | Windows 10 / 11; Linux (X11, and Wayland through XWayland); no macOS yet |
 | Look and themes | 🚧 | Lemon design (lemon on neutral greys, rounded-square controls) and the Classic look, switched with Ctrl+Shift+D; theme files apply to Classic; plugin editors not restyled yet |
 
 ✅ usable · 🚧 partial · ❌ not available yet
@@ -131,20 +131,26 @@ Windows, `~/.vst3` and `~/.clap` on Linux).
 
 ### Linux
 
-Lemon Studio runs natively on Wayland and on X11. A few things differ from Windows for now:
+Lemon Studio runs on X11, and on Wayland desktops through XWayland. Plugin editors on Linux are X11 windows, and an X11
+window cannot sit inside a native Wayland one; with the main window on X11 too, plugin windows dock inside it as on
+Windows (or detach, from their window menu). A few things differ from Windows for now:
 
-- **Plugin windows are not available yet.** Plugins (Lemon Studio's own and third-party CLAP / VST3) load, play and
-  save their state, but their editors do not open. Third-party plugin editors on Linux are X11 windows; under Wayland
-  they will run through XWayland.
-- **Dropping files from a file manager** onto the window works under X11 but not yet under Wayland (the windowing
-  library does not support it there). Dragging from Lemon Studio's own browser works everywhere. To get file drops on
-  Wayland meanwhile, start Lemon Studio under XWayland: `WAYLAND_DISPLAY= lemonstudio`.
+- **Native Wayland** is used only when there is no X server, or when `OPENSTUDIO_WAYLAND=1` is set. Plugin windows are
+  then always separate windows, kept above Lemon Studio while it is the active application; their window menu, Presets
+  list and Misc lists do not open, and files cannot be dropped in from a file manager (the windowing library does not
+  support it there).
+- **Scaling:** under XWayland Lemon Studio follows the X11 scale (`Xft.dpi`). If it looks soft on a fractionally scaled
+  Wayland desktop, let X11 applications scale themselves (KDE: Display Configuration > Legacy applications (X11) >
+  Apply scaling themselves).
+- **Keys** pressed while a plugin's editor has the keyboard focus do not play the typing keyboard yet, and a sample
+  dragged from Lemon Studio's browser onto a plugin window does not reach the plugin yet.
+- **Open Sampler** cannot copy or paste audio through the clipboard yet.
 - **Settings, themes and presets** live in `$XDG_CONFIG_HOME/Lemon Studio` (usually `~/.config/Lemon Studio`);
   on Windows in `%APPDATA%\Lemon Studio`. `OPENSTUDIO_USER_DIR` overrides the folder.
 - Plugins are found in `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap` and `CLAP_PATH`, and in `~/.vst3`,
   `/usr/lib/vst3` and `/usr/local/lib/vst3`.
 
-The window icon under Wayland comes from a desktop entry. To install the app with its icon and menu entry:
+To install the app with its icon and menu entry (the desktop entry also names the icon under native Wayland):
 
 ```bash
 cargo install --path crates/os-app
@@ -199,7 +205,8 @@ Lemon Studio is a Cargo workspace of focused crates:
 The roadmap is kept on the [Lemon Studio Discord server](https://discord.gg/yC2uCuGs3M), where every item is
 marked as complete, in progress or not started. The broad next steps are the engine rework (sampler voice,
 automation, delay compensation), opening projects from older FL Studio versions, audio and note recording, MIDI
-settings, ASIO output, more built-in instruments and effects, plugin windows on Linux, and macOS support.
+settings, ASIO output, more built-in instruments and effects, the rest of the plugin window features on Linux, and
+macOS support.
 
 ## Development approach
 

@@ -2172,6 +2172,7 @@ dependencies = [
  "os-plugkit",
  "os-theme",
  "os-ui",
+ "rfd",
  "tiny-skia",
  "windows-sys 0.61.2",
 ]
@@ -2319,11 +2320,13 @@ dependencies = [
 name = "os-plugkit"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "nih_plug",
  "os-paths",
  "os-theme",
  "os-ui",
  "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]
