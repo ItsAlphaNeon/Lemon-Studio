@@ -256,12 +256,13 @@ pub fn parse_value(vals: &Vals, id: &str, text: &str) -> Option<f32> {
         "ts_pitch" => (n + 1200.0) / 2400.0,
         "ts_mul" => (((n / 100.0).max(1e-3)).log2() / 4.0) + 0.5,
         "ts_time" => {
-            // "beats:16ths" or a number of beats.
+            // "bars:steps:ticks" or a number of beats.
             let parts: Vec<&str> = t.split(':').collect();
             let steps = if parts.len() >= 2 {
-                parts[0].trim().parse::<i32>().ok()? * 16 + parts[1].trim().parse::<i32>().unwrap_or(0)
+                let part = |i: usize| parts.get(i).and_then(|p| p.trim().parse::<f64>().ok()).unwrap_or(0.0);
+                parts[0].trim().parse::<f64>().ok()? * 16.0 + part(1) + part(2) / 24.0
             } else {
-                (n * 16.0) as i32
+                f64::from(n) * 4.0
             };
             params::time_norm(steps)
         }
@@ -435,6 +436,8 @@ pub struct Logic {
     /// Key held in the editor (preview) and its velocity.
     held: Option<(u8, u8)>,
     pub hosted: bool,
+    /// TIME knob drags: the position before snapping to whole steps.
+    time_drag: f32,
 }
 
 impl Logic {
@@ -451,6 +454,7 @@ impl Logic {
             copied: None,
             held: None,
             hosted: false,
+            time_drag: 0.0,
         }
     }
 
@@ -497,7 +501,7 @@ impl Logic {
         self.hint_for(id);
     }
 
-    /// Turning a time-stretch knob in Resample mode switches the mode to Auto (spec §5.6).
+    /// Turning a time-stretch knob in Resample mode switches the mode to Auto (spec §5.6; the TIME menu does not).
     fn stretch_touch(&mut self, id: &str) {
         if matches!(id, "ts_pitch" | "ts_mul" | "ts_time") && self.vals.plain("ts_mode") as i32 == 0 {
             self.edit_plain("ts_mode", params::STRETCH_AUTO as f32);
@@ -514,9 +518,9 @@ impl Logic {
         if id == "ts_time" {
             let steps = params::time_steps(self.vals.norm(id));
             let raw = self.shared.raw.lock().ok().and_then(|r| r.as_ref().map(|s| s.frames() as f64 / f64::from(s.rate.max(1))));
-            if let (true, Some(secs)) = (steps > 0, raw) {
+            if let (true, Some(secs)) = (params::time_file(steps) >= 1.0, raw) {
                 if secs > 0.0 {
-                    let bpm = f64::from(steps) / 16.0 * 60.0 / secs;
+                    let bpm = steps / 4.0 * 60.0 / secs;
                     h.push_str(&format!("  Clip tempo is {bpm:.0} BPM"));
                 }
             }
@@ -566,6 +570,7 @@ impl Logic {
                 self.stretch_touch(&id);
                 self.begin(&id);
                 self.hint_for(&id);
+                self.time_drag = self.vals.norm(&id);
                 self.view.pressed = Some(Target::Knob(id.clone()));
                 self.drag = Some(Drag::Knob { id });
                 return vec![Act::Lock, Act::Repaint];
@@ -806,7 +811,13 @@ impl Logic {
         if m.ctrl {
             rate *= fine_factor(&id);
         }
-        let v = self.vals.norm(&id) - dy * rate;
+        let v = if id == "ts_time" {
+            // TIME lands on whole steps; the drag itself keeps its fractions.
+            self.time_drag = (self.time_drag - dy * rate).clamp(0.0, 1.0);
+            params::time_snap(self.time_drag)
+        } else {
+            self.vals.norm(&id) - dy * rate
+        };
         self.set(&id, v);
         self.hint_for(&id);
         vec![Act::Repaint]
@@ -886,6 +897,7 @@ impl Logic {
                     let px_range = if id == "fine" { 200.0 } else { knob_px(&id) };
                     cur + notches * px / px_range
                 };
+                let v = if id == "ts_time" { params::time_snap(v.clamp(0.0, 1.0)) } else { v };
                 self.stretch_touch(&id);
                 self.edit(&id, v);
                 self.hint_for(&id);
@@ -1022,13 +1034,15 @@ impl Logic {
         let mut m = MenuDef::new(MenuStyle::Context);
         if id == "ts_time" {
             let cur = params::time_steps(self.vals.norm(id));
-            m.add(MenuItem::item("(none)").mark(Mark::Radio(cur == 0)), Cmd::Time(0));
+            let on = |s: i32| (cur - f64::from(s)).abs() < 1e-3;
+            m.add(MenuItem::item("(none)").mark(Mark::Radio(on(0))), Cmd::Time(0));
             let has = self.shared.raw.lock().map(|r| r.is_some()).unwrap_or(false);
             m.add(MenuItem::item("Autodetect...").enabled(has), Cmd::Time(-1));
             m.add(MenuItem::item("Project tempo").enabled(has), Cmd::Time(-1));
             m.sep();
-            for (l, s) in [("1 beat", 16), ("2 beats", 32), ("1 bar", 64), ("2 bars", 128), ("3 bars", 192), ("4 bars", 256)] {
-                m.add(MenuItem::item(l).mark(Mark::Radio(cur == s)), Cmd::Time(s));
+            // In steps (a quarter beat; spec §2.2).
+            for (l, s) in [("1 beat", 4), ("2 beats", 8), ("1 bar", 16), ("2 bars", 32), ("3 bars", 48), ("4 bars", 64)] {
+                m.add(MenuItem::item(l).mark(Mark::Radio(on(s))), Cmd::Time(s));
             }
             m.add(MenuItem::Column, Cmd::None);
         }
@@ -1086,9 +1100,9 @@ impl Logic {
             }
             Cmd::TypeIn => return vec![Act::TypeIn(id, x, y)],
             Cmd::Time(s) => {
-                let steps = if s < 0 { self.detect_beats() * 16 } else { s };
-                self.stretch_touch("ts_time");
-                self.edit("ts_time", params::time_norm(steps));
+                // The menu sets the time and leaves the method alone (a Resample channel stays Resample).
+                let steps = if s < 0 { self.detect_beats() * 4 } else { s };
+                self.edit("ts_time", params::time_norm(f64::from(steps)));
                 self.hint_for("ts_time");
             }
             Cmd::Choice(i) => {
@@ -1121,7 +1135,7 @@ impl Logic {
     /// Whole beats the loaded sample lasts at the host tempo (at least 1).
     fn detect_beats(&self) -> i32 {
         let secs = self.shared.raw.lock().ok().and_then(|r| r.as_ref().map(|s| s.frames() as f64 / f64::from(s.rate.max(1)))).unwrap_or(0.0);
-        ((secs * self.shared.tempo() / 60.0).round() as i32).clamp(1, 16)
+        ((secs * self.shared.tempo() / 60.0).round() as i32).clamp(1, (params::TIME_BARS * 4.0) as i32)
     }
 
     /// A typed value for `id`.
@@ -2710,6 +2724,36 @@ mod tests {
         let (x, y) = centre(&l, &Target::Knob("ts_pitch".into()));
         l.wheel(x, y, 1.0, Mods::default());
         assert_eq!(l.vals.plain("ts_mode") as i32, params::STRETCH_AUTO);
+    }
+
+    // spec §2.1, §2.2, §4: TIME counts bars:steps:ticks, its menu leaves the method alone, drags land on whole steps.
+    #[test]
+    fn time_knob_counts_bars_steps_and_ticks() {
+        let mut l = logic(0);
+        let req = MenuReq::Knob("ts_time".into());
+        let steps = |l: &Logic| params::time_steps(l.vals.norm("ts_time"));
+        l.pick(&req, Cmd::Time(4), 0.0, 0.0);
+        assert_eq!(params::time_text(steps(&l)), "0:04:00", "1 beat");
+        assert_eq!(l.vals.plain("ts_mode") as i32, 0, "a Resample channel stays Resample");
+        assert_eq!(params::time_text(4.488 * 4.0), "1:01:23");
+        l.typed("ts_time", "1:01:23");
+        assert!((steps(&l) - (17.0 + 23.0 / 24.0)).abs() < 1e-3, "{}", steps(&l));
+        // 16 px of single steps, then a bar per 36 px.
+        l.pick(&req, Cmd::Time(0), 0.0, 0.0);
+        let (x, y) = centre(&l, &Target::Knob("ts_time".into()));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        l.delta(0.0, -10.0, Mods::default());
+        assert!((steps(&l) - 10.0).abs() < 1e-3);
+        l.delta(0.0, -42.0, Mods::default());
+        assert!((steps(&l) - 32.0).abs() < 1e-3, "two bars: {}", steps(&l));
+        l.delta(0.0, -1.0, Mods::default());
+        assert!((steps(&l) - 32.0).abs() < 1e-3, "on whole steps: {}", steps(&l));
+        l.delta(0.0, -2.0, Mods::default());
+        assert!((steps(&l) - 33.0).abs() < 1e-3, "{}", steps(&l));
+        l.up(Btn::Left);
+        // A stored time keeps its fractions.
+        assert_eq!(params::time_from_file(params::time_file(17.5)), 17.5);
+        assert!((params::time_steps(params::time_norm(1234.25)) - 1234.25).abs() < 0.01);
     }
 
     #[test]

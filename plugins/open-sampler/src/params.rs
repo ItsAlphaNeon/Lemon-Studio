@@ -185,6 +185,23 @@ pub const DECLICK: &[&str] = &[
 pub const STRETCH: &[&str] =
     &["Resample", "Stretch", "Stretch Pro", "e3 generic", "e3 mono", "Slice stretch", "Slice map", "Auto", "e2 generic", "e2 transient", "e2 mono", "e2 speech"];
 pub const STRETCH_AUTO: i32 = 7;
+/// The stretch method each mode menu entry stores (event 215 int 27; spec: audio/time-stretch.md "Fields").
+pub const STRETCH_FILE: [i32; 12] = [0, -1, -2, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+/// Mode menu index of a stored stretch method (values not known: Auto).
+pub fn stretch_index(file: i32) -> i32 {
+    STRETCH_FILE.iter().position(|&m| m == file).map_or(STRETCH_AUTO, |i| i as i32)
+}
+
+/// Stretch and Stretch Pro: the voice stretches while it plays, the key and pitch moving only the pitch (spec §5.6).
+pub fn stretch_realtime(index: i32) -> bool {
+    matches!(index, 1 | 2)
+}
+
+/// The methods that stretch the sample once before it plays (spec §5.6).
+pub fn stretch_whole(index: i32) -> bool {
+    index >= 3
+}
 pub const FILTERS: &[&str] = &["Fast LP", "LP", "BP", "HP", "BS", "LPx2", "SVF LP", "SVF LPx2"];
 pub const LFO_SHAPES: &[&str] = &["Sine", "Triangle", "Pulse"];
 pub const REVERB_TYPES: &[&str] = &["A", "B"];
@@ -202,32 +219,49 @@ pub fn ts_cents(v: f32) -> f64 {
     (f64::from(v) * 2400.0 - 1200.0).round()
 }
 
-/// TIME knob: pixels of drag over its whole range. The first 16 px are 16ths of a beat, then one beat per 36 px up to
-/// 16 beats (spec §4).
-pub const TIME_PX: f32 = 556.0;
+/// TIME knob: the longest time in bars (a Lemon Studio limit).
+pub const TIME_BARS: f64 = 1024.0;
 
-/// TIME knob: 16ths of a beat of a knob position (0 = off).
-pub fn time_steps(v: f32) -> i32 {
-    let p = v.clamp(0.0, 1.0) * TIME_PX;
-    if p < 15.5 {
-        p.round() as i32
+/// TIME knob: pixels of drag over its whole range. The first 16 px are one step (a quarter beat) each, then one bar per
+/// 36 px (spec §4).
+pub const TIME_PX: f32 = (16.0 + (TIME_BARS - 1.0) * 36.0) as f32;
+
+/// TIME knob: steps (quarter beats) of a knob position (0 = off). Drags land on whole steps (`time_snap`); times set
+/// from a project or the playlist keep their fractions.
+pub fn time_steps(v: f32) -> f64 {
+    let p = f64::from(v.clamp(0.0, 1.0)) * f64::from(TIME_PX);
+    if p < 16.0 {
+        p
     } else {
-        ((1.0 + ((p - 16.0).max(0.0) / 36.0).floor()) as i32 * 16).min(256)
+        16.0 + (p - 16.0) / 36.0 * 16.0
     }
 }
 
-/// Knob position of a TIME value in 16ths of a beat (inverse of `time_steps`).
-pub fn time_norm(steps: i32) -> f32 {
-    if steps < 16 {
-        steps.max(0) as f32 / TIME_PX
-    } else {
-        (16.0 + (steps / 16 - 1) as f32 * 36.0 + 0.5) / TIME_PX
-    }
+/// Knob position of a TIME value in steps (inverse of `time_steps`).
+pub fn time_norm(steps: f64) -> f32 {
+    let p = if steps < 16.0 { steps.max(0.0) } else { 16.0 + (steps - 16.0) / 16.0 * 36.0 };
+    (p / f64::from(TIME_PX)).clamp(0.0, 1.0) as f32
 }
 
-/// "beats:16ths:00" as FL writes the TIME value.
-pub fn time_text(steps: i32) -> String {
-    format!("{}:{:02}:00", steps / 16, steps % 16)
+/// The knob position at the nearest whole step.
+pub fn time_snap(v: f32) -> f32 {
+    time_norm(time_steps(v).round())
+}
+
+/// "bars:steps:ticks" as FL shows the TIME value (24 ticks a step; spec §2.1).
+pub fn time_text(steps: f64) -> String {
+    let ticks = (steps.max(0.0) * 24.0).round() as u64;
+    format!("{}:{:02}:{:02}", ticks / (16 * 24), ticks / 24 % 16, ticks % 24)
+}
+
+/// TIME as event 215 int 24 stores it: a single in 1/192 beat (0 = off).
+pub fn time_file(steps: f64) -> f32 {
+    (steps * 48.0) as f32
+}
+
+/// Steps of a stored TIME (1/192 beat).
+pub fn time_from_file(units: f32) -> f64 {
+    if units.is_finite() && units >= 1.0 { f64::from(units) / 48.0 } else { 0.0 }
 }
 
 /// One envelope / LFO target of the envelope tab (Panning, Volume, Mod X, Mod Y, Pitch).
@@ -568,8 +602,8 @@ pub struct FxKey {
     pub loop_on: bool,
     pub loop_start: f32,
     pub loop_end: f32,
-    /// Time stretching in a stretch mode (not Resample): MUL ratio, TIME target length in seconds (0 = off) and the
-    /// pitch shift in cents.
+    /// Time stretching in a method that stretches the sample first: MUL ratio, TIME target length in seconds (0 = off)
+    /// and the pitch shift in cents.
     pub stretch: bool,
     pub ratio: f32,
     pub time: f32,
@@ -628,12 +662,12 @@ impl SamplerParams {
     /// TIME's target length in seconds at `tempo` BPM (`None` when TIME is off).
     pub fn ts_seconds(&self, tempo: f64) -> Option<f64> {
         let steps = time_steps(self.ts_time.live());
-        (steps > 0).then(|| f64::from(steps) / 16.0 * 60.0 / tempo.max(1.0))
+        (time_file(steps) >= 1.0).then(|| steps / 4.0 * 60.0 / tempo.max(1.0))
     }
 
     /// Precomputed settings at the host's `tempo` (TIME depends on it).
     pub fn fx_key(&self, tempo: f64) -> FxKey {
-        let stretch = self.ts_mode.live() != 0;
+        let stretch = stretch_whole(self.ts_mode.live());
         let time = if stretch { self.ts_seconds(tempo).unwrap_or(0.0) as f32 } else { 0.0 };
         FxKey {
             dc: self.fx_dc.live(),

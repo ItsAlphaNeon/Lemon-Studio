@@ -401,11 +401,11 @@ impl Plugins {
 
     /// Loads sample `path` into row `row`'s Open Sampler: its current state with a new `sample-path`, so every other
     /// setting stays. False when the row hosts nothing or the plugin refused the state.
-    /// Row `row`'s Open Sampler stretches by resampling with multiplier `m` (§9b), keeping its other settings.
-    pub fn set_sampler_stretch(&mut self, row: usize, m: f64) -> bool {
+    /// Row `row`'s Open Sampler takes the stretch settings `sound` holds (§9b), keeping its other settings.
+    pub fn set_sampler_stretch(&mut self, row: usize, sound: &os_model::ChannelSound) -> bool {
         let Some(h) = self.hosted.get(&row) else { return false };
         let Ok(mut p) = h.plugin.lock() else { return false };
-        let set = [("ts_mode", serde_json::json!({ "i32": 0 })), ("ts_mul", serde_json::json!({ "f32": stretch_mul_norm(m) }))];
+        let set = stretch_params(sound);
         let Some(new) = p.save_state().and_then(|b| with_params(&b, &set)) else { return false };
         p.load_state(&new)
     }
@@ -777,10 +777,11 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
             params.push(format!("\"{pre}_{id}\":{v}"));
         }
     }
-    // Stretching by resampling (spec: audio/audio-clips.md): Resample mode with the multiplier.
-    if ch.sound.stretch[3] == 0 && ch.sound.stretch != [0; 4] {
-        params.push("\"ts_mode\":{\"i32\":0}".to_string());
-        params.push(format!("\"ts_mul\":{{\"f32\":{}}}", stretch_mul_norm(ch.sound.stretch_multiplier())));
+    // Stretch settings (spec: audio/time-stretch.md "Fields"; Open Sampler stretches for the channel).
+    if ch.sound.stretch != [0; 4] {
+        for (id, v) in stretch_params(&ch.sound) {
+            params.push(format!("\"{id}\":{v}"));
+        }
     }
     // Factory placeholders (`%FLStudioFactoryData%`...) become real paths: the plugin opens files directly.
     let path = resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
@@ -821,6 +822,19 @@ fn json_string(s: &str) -> String {
 /// Open Sampler's MUL knob position of a stretch multiplier (25 %..400 %, doubling every quarter).
 fn stretch_mul_norm(m: f64) -> f32 {
     ((m.log2() + 2.0) / 4.0).clamp(0.0, 1.0) as f32
+}
+
+/// Open Sampler's time-stretch parameters for a channel's stretch settings: method, MUL, PITCH and TIME (spec:
+/// audio/time-stretch.md "Fields", plugins/open-sampler.md §5.6).
+fn stretch_params(sound: &os_model::ChannelSound) -> [(&'static str, serde_json::Value); 4] {
+    use open_sampler::params as sp;
+    let steps = sound.stretch_time().map_or(0.0, |beats| beats * 4.0);
+    [
+        ("ts_mode", serde_json::json!({ "i32": sp::stretch_index(sound.stretch_mode()) })),
+        ("ts_mul", serde_json::json!({ "f32": stretch_mul_norm(sound.stretch_multiplier()) })),
+        ("ts_pitch", serde_json::json!({ "f32": ((sound.stretch_cents() + 1200.0) / 2400.0).clamp(0.0, 1.0) as f32 })),
+        ("ts_time", serde_json::json!({ "f32": sp::time_norm(steps) })),
+    ]
 }
 
 /// `blob` (an Open Sampler state) with parameters set to the given JSON values.
@@ -1571,6 +1585,62 @@ mod tests {
         }
         // The 0.5 s volume attack kept from the channel still fades the click (0.9 at 0.1 s) in.
         assert!(peak > 0.01 && peak < 0.3, "the mp3 plays through the kept envelope (peak {peak})");
+    }
+
+    /// A channel's stretch settings reach its Open Sampler (spec: audio/time-stretch.md "Fields"), which plays them:
+    /// in Stretch, twice as long with the pitch moved by PITCH alone.
+    #[test]
+    fn builtin_open_sampler_takes_the_stretch_settings() {
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(OPEN_SAMPLER).expect("built-in Open Sampler");
+        let wav = std::env::temp_dir().join(format!("os-app-sampler-stretch-{}.wav", std::process::id()));
+        let tone: Vec<f32> = (0..48000)
+            .flat_map(|i| {
+                let v = ((f64::from(i) * 440.0 * std::f64::consts::TAU / 48000.0).sin() * 0.5) as f32;
+                [v, v]
+            })
+            .collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
+        let mut ch = crate::app::test_project().channels.remove(0);
+        // Stretch (a realtime method), twice as long, 300 cents up.
+        ch.sound.stretch = [0, 300, 10000, (-1i32) as u32];
+        pl.create_with(0, index, Some(&sampler_state(&ch))).unwrap();
+        assert!(pl.load_sample(0, &wav.to_string_lossy()));
+        let params = |pl: &Plugins| {
+            let st = pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap();
+            serde_json::from_slice::<serde_json::Value>(&st[8..]).unwrap()["params"].clone()
+        };
+        let f = |v: &serde_json::Value| v["f32"].as_f64().unwrap();
+        let p = params(&pl);
+        assert_eq!(p["ts_mode"], serde_json::json!({"i32": 1}), "Stretch");
+        assert!((f(&p["ts_mul"]) - 0.75).abs() < 1e-6, "x2");
+        assert!((f(&p["ts_pitch"]) - 0.625).abs() < 1e-6, "+300 cents");
+        let mut out = Vec::new();
+        {
+            let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
+            let mut i = inst.lock().unwrap();
+            i.note_on(0, 60, 0.8);
+            for _ in 0..250 {
+                let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+                i.process(48000, &mut l, &mut r);
+                out.extend_from_slice(&l);
+            }
+        }
+        let mid = &out[24000..72000];
+        let ups: Vec<usize> = mid.windows(2).enumerate().filter(|(_, w)| w[0] < 0.0 && w[1] >= 0.0).map(|(i, _)| i).collect();
+        let hz = (ups.len() - 1) as f64 * 48000.0 / (ups[ups.len() - 1] - ups[0]) as f64;
+        assert!((hz - 440.0 * 2f64.powf(0.25)).abs() < 4.0, "{hz} Hz");
+        let late = &out[80000..92000];
+        assert!(late.iter().map(|v| v * v).sum::<f32>() / late.len() as f32 > 0.0025, "still playing after the sample's own length");
+        // A stretch time set from the playlist: 4 beats = 16 steps, the multiplier back at 1.
+        let mut sound = ch.sound;
+        sound.set_stretch_time(4.0);
+        assert!(pl.set_sampler_stretch(0, &sound));
+        let p = params(&pl);
+        assert!((open_sampler::params::time_steps(f(&p["ts_time"]) as f32) - 16.0).abs() < 1e-3);
+        assert!((f(&p["ts_mul"]) - 0.5).abs() < 1e-6);
+        assert_eq!(p["ts_mode"], serde_json::json!({"i32": 1}), "the method kept");
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// The built-in Open Parametric EQ 2 starts from a project file's EQ state, plays it, and gives the state back

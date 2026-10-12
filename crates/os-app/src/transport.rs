@@ -174,7 +174,12 @@ impl Transport {
             .spawn({
                 let latest = latest.clone();
                 let inst = instruments.clone();
-                move || audio_thread(rx, s, latest, inst, SampleLibrary::new(factory))
+                move || {
+                    // The channels' Open Sampler instances stretch for themselves (spec: audio/time-stretch.md).
+                    let mut library = SampleLibrary::new(factory);
+                    library.resample_stretches = true;
+                    audio_thread(rx, s, latest, inst, library)
+                }
             })
             .expect("spawn audio thread");
         Transport { tx, latest, instruments, shared }

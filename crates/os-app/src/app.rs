@@ -7303,8 +7303,12 @@ mod tests {
         app.mouse_move(r.right() - 1.0 + r.w, y);
         app.mouse_up();
         let after = pl::clips(&app.state)[ci];
-        let m = app.state.project.channels[row].sound.stretch_multiplier();
-        assert!((m - 2.0).abs() < 0.02, "multiplier {m}");
+        // The time becomes the whole sample's length (1 s at the project tempo) times two; the multiplier stays at 1.
+        let sound = app.state.project.channels[row].sound;
+        let want = app.state.tempo / 60.0 * 2.0;
+        let beats = sound.stretch_time().expect("a stretch time");
+        assert!((beats - want).abs() < 0.02 * want, "time {beats} beats, want {want}");
+        assert_eq!((sound.stretch[2], sound.stretch_mode()), (0, 0), "multiplier 1, method kept");
         assert!((f64::from(after.length) / f64::from(before.length) - 2.0).abs() < 0.02, "twice as long");
         assert_eq!(after.window, before.window, "the same part of the sample");
         app.key(&winit::keyboard::Key::Character("z".into()), true, false);
