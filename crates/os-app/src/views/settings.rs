@@ -312,7 +312,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]),
         ],
         FILE => {
-            let user = std::env::var("APPDATA").map(|d| format!("{d}\\Lemon Studio\\")).unwrap_or_default();
+            let user = os_paths::user_dir().map(|d| format!("{}{}", d.display(), std::path::MAIN_SEPARATOR)).unwrap_or_default();
             vec![
                 g("Backup", vec![
                     pair(combo("Occasionally (every 10 minutes)", 336.0, "Autosave"), ValueR("Maximum", "100".into())),

@@ -597,6 +597,7 @@ impl Plugins {
     }
 
     /// UI tick: plugin housekeeping, then the windows' requests (a closed window is closed here).
+    #[cfg_attr(not(windows), allow(unused_variables, unused_mut))]
     pub fn idle(&mut self, info: impl Fn(usize) -> Option<ChannelInfoT>) -> Vec<Request> {
         let mut out = Vec::new();
         let mut close: Vec<usize> = Vec::new();

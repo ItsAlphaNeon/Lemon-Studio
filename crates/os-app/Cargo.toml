@@ -20,6 +20,7 @@ os-clap = { path = "../os-clap" }
 os-native = { path = "../os-native" }
 os-host.workspace = true
 os-vst3.workspace = true
+os-paths.workspace = true
 open-sampler = { path = "../../plugins/open-sampler", features = ["linked"] }
 open-parametric-eq-2 = { path = "../../plugins/open-parametric-eq-2", features = ["linked"] }
 open-3x-osc = { path = "../../plugins/open-3x-osc", features = ["linked"] }
@@ -27,7 +28,10 @@ winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"
 rfd = "0.15"
+midir = "0.11"
+tiny-skia = "0.11"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_Time", "Win32_System_Memory", "Win32_UI_Shell", "Win32_Media_Audio"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_Memory", "Win32_UI_Shell"] }

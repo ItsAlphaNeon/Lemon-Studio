@@ -585,6 +585,10 @@ pub fn off_text(name: &str) -> String {
     format!("{name}: not available yet")
 }
 
+/// What is not available off Windows yet: plugin editors live in native Win32 windows so far.
+#[cfg(not(windows))]
+pub const PLUGIN_WINDOWS: &str = if cfg!(target_os = "macos") { "Plugin windows on macOS" } else { "Plugin windows on Linux" };
+
 #[derive(Debug, Clone)]
 pub enum Drag {
     /// Vertical drag on the pattern name box steps the number (spec: ui/pattern-menu.md §1).
@@ -1250,20 +1254,20 @@ impl App {
             return true;
         }
         let name = self.state.path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "the new project".to_string(), |n| n.to_string_lossy().into_owned());
-        let answer = rfd::MessageDialog::new()
-            .set_title("Lemon Studio")
-            .set_level(rfd::MessageLevel::Warning)
-            .set_description(format!("Save the changes to {name} before {doing}?"))
-            .set_buttons(rfd::MessageButtons::YesNoCancel)
-            .show();
-        match answer {
-            rfd::MessageDialogResult::Yes => {
+        match crate::dialog::yes_no_cancel("Lemon Studio", &format!("Save the changes to {name} before {doing}?")) {
+            Some(crate::dialog::Answer::Yes) => {
                 self.save(false);
                 self.invalidate();
                 !self.unsaved()
             }
-            rfd::MessageDialogResult::No => true,
-            _ => false,
+            Some(crate::dialog::Answer::No) => true,
+            Some(crate::dialog::Answer::Cancel) => false,
+            // No dialog program (Linux without zenity or kdialog): nothing is lost unasked.
+            None => {
+                self.state.message = Some(format!("Unsaved changes: save first (Ctrl+S) before {doing}. Install zenity or kdialog to be asked."));
+                self.invalidate();
+                false
+            }
         }
     }
 
@@ -1439,6 +1443,12 @@ impl App {
             }
             self.invalidate();
         }
+        // Plugin windows are native Win32 windows so far: elsewhere opening one says so.
+        #[cfg(not(windows))]
+        if self.state.pending_open.take().is_some_and(|r| self.state.hosted_rows.contains(&r)) {
+            self.state.message = Some(off_text(PLUGIN_WINDOWS));
+            self.invalidate();
+        }
         #[cfg(windows)]
         if let Some(row) = self.state.pending_open.take().filter(|r| self.state.hosted_rows.contains(r)) {
             if let Some(info) = channel_info(&self.state.project, row) {
@@ -1451,6 +1461,16 @@ impl App {
                 }
             }
         }
+        // Plugin housekeeping on every platform (callbacks, parameter flushes, restarts, rate changes); the plugin
+        // windows' requests come with it.
+        #[cfg(windows)]
+        let requests = {
+            let (project, mixer) = (&self.state.project, &self.state.mixer);
+            self.plugins.idle(|row| if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) })
+        };
+        // No plugin windows elsewhere yet, so no requests.
+        #[cfg(not(windows))]
+        self.plugins.idle(|_| None);
         #[cfg(windows)]
         {
             // Keys pressed while a plugin window has the focus still play the typing keyboard.
@@ -1463,8 +1483,6 @@ impl App {
                     }
                 }
             }
-            let (project, mixer) = (&self.state.project, &self.state.mixer);
-            let requests = self.plugins.idle(|row| if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) });
             for r in requests {
                 use crate::plugins::Request;
                 let chans = &mut self.state.project.channels;
@@ -2181,7 +2199,7 @@ impl App {
     }
 
     /// Load a theme: a `.flstheme` (spec ui/flstheme.md) or a Lemon Studio `theme.txt`. A `.flstheme` is also
-    /// remembered as `%APPDATA%/Lemon Studio/current.flstheme` so the next start uses it.
+    /// remembered as `current.flstheme` in the user folder so the next start uses it.
     pub fn load_theme_file(&mut self, path: &std::path::Path) {
         self.load_theme_file_ex(path, true)
     }
@@ -2199,7 +2217,7 @@ impl App {
                     save_design(Design::Classic);
                 }
                 if remember && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")) {
-                    if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) {
+                    if let Some(d) = os_paths::user_dir() {
                         let _ = std::fs::create_dir_all(&d);
                         let keep = d.join("current.flstheme");
                         if keep.as_path() != path {
@@ -2222,7 +2240,7 @@ impl App {
     }
 
     /// Switch to design `d`: Lemon brings its own colours, Classic the saved theme (or the default look).
-    /// `remember` = keep the choice for the next start (`%APPDATA%/Lemon Studio/design.txt`).
+    /// `remember` = keep the choice for the next start (`design.txt` in the user folder).
     pub fn set_design(&mut self, d: Design, remember: bool) {
         self.theme = design_theme(d, remember);
         os_theme::set_current(&self.theme.colors);
@@ -2264,9 +2282,9 @@ impl App {
         let name = |d: &cpal::Device| d.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "(unknown device)".into());
         st.device = host.default_output_device().map(|d| name(&d)).unwrap_or_else(|| "(no output device)".into());
         st.devices = host.output_devices().map(|ds| ds.map(|d| name(&d)).collect()).unwrap_or_default();
-        // Built-in presets (spec: ui/theme-presets.md), then .flstheme files in %APPDATA%/Lemon Studio/themes.
+        // Built-in presets (spec: ui/theme-presets.md), then .flstheme files in the user folder's `themes`.
         st.themes = os_theme::presets::PRESETS.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect();
-        if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio").join("themes")) {
+        if let Some(d) = os_paths::user_file("themes") {
             if let Ok(rd) = std::fs::read_dir(&d) {
                 let mut v: Vec<_> = rd
                     .flatten()
@@ -2334,8 +2352,8 @@ impl App {
                 self.theme = os_theme::Theme::default();
                 os_theme::set_current(&self.theme.colors);
                 save_design(Design::Classic);
-                if let Some(d) = std::env::var_os("APPDATA") {
-                    let _ = std::fs::remove_file(PathBuf::from(d).join("Lemon Studio").join("current.flstheme"));
+                if let Some(f) = os_paths::user_file("current.flstheme") {
+                    let _ = std::fs::remove_file(f);
                 }
                 self.sync_preset();
                 self.state.message = Some("Theme: Classic".into());
@@ -2348,7 +2366,7 @@ impl App {
                     os_theme::set_current(&self.theme.colors);
                     save_design(Design::Classic);
                     // Remembered like an imported theme (loaded at the next start).
-                    if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) {
+                    if let Some(d) = os_paths::user_dir() {
                         let _ = std::fs::create_dir_all(&d);
                         let _ = std::fs::write(d.join("current.flstheme"), &text);
                     }
@@ -4967,10 +4985,10 @@ fn template_project(names: &[&str]) -> Project {
 }
 
 fn monitor_cfg_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio").join("monitor.txt"))
+    os_paths::user_file("monitor.txt")
 }
 
-/// Monitor settings from `%APPDATA%/Lemon Studio/monitor.txt` (written by the debug panel's Save), else defaults.
+/// Monitor settings from `monitor.txt` in the user folder (written by the debug panel's Save), else defaults.
 fn load_monitor_cfg() -> crate::monitor::Settings {
     let mut cfg = crate::monitor::Settings::default();
     if let Some(text) = monitor_cfg_path().and_then(|p| std::fs::read_to_string(p).ok()) {
@@ -4980,7 +4998,7 @@ fn load_monitor_cfg() -> crate::monitor::Settings {
 }
 
 fn save_monitor_cfg(cfg: &crate::monitor::Settings) -> Result<PathBuf, String> {
-    let p = monitor_cfg_path().ok_or("no APPDATA folder")?;
+    let p = monitor_cfg_path().ok_or("no user folder")?;
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
@@ -5001,34 +5019,34 @@ pub fn theme_from_file(path: &std::path::Path) -> Result<Theme, String> {
     }
 }
 
-/// The theme: the saved design's (spec: ui/lemon-design.md); for Classic `%APPDATA%/Lemon Studio/theme.txt`, else the last
-/// imported `current.flstheme`, else the default.
+/// The theme: the saved design's (spec: ui/lemon-design.md); for Classic `theme.txt` in the user folder
+/// (`os_paths::user_dir`), else the last imported `current.flstheme`, else the default.
 fn load_theme() -> Theme {
     let t = design_theme(saved_design(), true);
     os_theme::set_current(&t.colors);
     t
 }
 
-/// The settings folder from before the rename to Lemon Studio (`%APPDATA%/OpenStudio`) moves to `%APPDATA%/Lemon Studio`
-/// once, at start, so dropped browser folders, presets, the design and the theme carry over (spec: ui/lemon-design.md §12).
+/// The settings folder from before the rename to Lemon Studio (`OpenStudio`, e.g. `%APPDATA%/OpenStudio`) moves to the
+/// user folder (`os_paths::user_dir`, e.g. `%APPDATA%/Lemon Studio`) once, at start, so dropped browser folders, presets,
+/// the design and the theme carry over (spec: ui/lemon-design.md §12).
 pub fn move_old_settings() {
     if cfg!(test) {
         return;
     }
-    let Some(data) = std::env::var_os("APPDATA").map(PathBuf::from) else { return };
-    let (old, new) = (data.join("OpenStudio"), data.join("Lemon Studio"));
+    let (Some(old), Some(new)) = (os_paths::legacy_dir(), os_paths::user_dir()) else { return };
     if old.is_dir() && !new.exists() {
         let _ = std::fs::rename(&old, &new);
     }
 }
 
-/// The design named in `%APPDATA%/Lemon Studio/design.txt`; Lemon when there is none. Tests always use Classic.
+/// The design named in `design.txt` in the user folder; Lemon when there is none. Tests always use Classic.
 pub fn saved_design() -> Design {
     if cfg!(test) {
         return Design::Classic;
     }
-    std::env::var_os("APPDATA")
-        .and_then(|d| std::fs::read_to_string(PathBuf::from(d).join("Lemon Studio").join("design.txt")).ok())
+    os_paths::user_file("design.txt")
+        .and_then(|f| std::fs::read_to_string(f).ok())
         .and_then(|t| Design::parse(&t))
         .unwrap_or(Design::Lemon)
 }
@@ -5037,7 +5055,7 @@ fn save_design(d: Design) {
     if cfg!(test) {
         return;
     }
-    if let Some(dir) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) {
+    if let Some(dir) = os_paths::user_dir() {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join("design.txt"), d.name());
     }
@@ -5056,7 +5074,7 @@ fn load_theme_inner() -> Theme {
     if cfg!(test) {
         return Theme::default();
     }
-    let Some(dir) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) else { return Theme::default() };
+    let Some(dir) = os_paths::user_dir() else { return Theme::default() };
     for f in ["theme.txt", "current.flstheme"] {
         let p = dir.join(f);
         if p.exists() {

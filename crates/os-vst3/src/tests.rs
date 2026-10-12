@@ -47,24 +47,31 @@ fn peak(v: &[f32]) -> f32 {
 
 #[test]
 fn fuid_strings_follow_the_documented_layout() {
-    // In memory (COM GUID layout) Data1 / Data2 / Data3 are little-endian numbers.
     let id = IID { data: *b"OpenStudioSamplr" };
-    assert_eq!(fuid_string(&id), "6E65704F74536475696F53616D706C72");
-    let id = IID { data: [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xA0, 0xB1, 0xC2, 0xD3, 0xE4, 0xF5, 0x06, 0x17] };
-    assert_eq!(fuid_string(&id), "0403020106050807A0B1C2D3E4F50617");
+    let other = IID { data: [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xA0, 0xB1, 0xC2, 0xD3, 0xE4, 0xF5, 0x06, 0x17] };
+    if cfg!(windows) {
+        // In memory (COM GUID layout) Data1 / Data2 / Data3 are little-endian numbers.
+        assert_eq!(fuid_string(&id), "6E65704F74536475696F53616D706C72");
+        assert_eq!(fuid_string(&other), "0403020106050807A0B1C2D3E4F50617");
+    } else {
+        // Elsewhere the bytes are in string order.
+        assert_eq!(fuid_string(&id), "4F70656E53747564696F53616D706C72");
+        assert_eq!(fuid_string(&other), "0102030405060708A0B1C2D3E4F50617");
+    }
 }
 
 #[test]
 fn finds_bundles_and_single_file_modules() {
     let d = std::env::temp_dir().join(format!("os-vst3-find-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(d.join("A.vst3").join("Contents").join("x86_64-win")).unwrap();
+    std::fs::create_dir_all(d.join("A.vst3").join("Contents").join(BUNDLE_ARCH)).unwrap();
     std::fs::create_dir_all(d.join("Vendor").join("Sub")).unwrap();
     std::fs::write(d.join("Vendor").join("Sub").join("B.vst3"), b"").unwrap();
     std::fs::write(d.join("notes.txt"), b"").unwrap();
     let found = find_bundles(&[d.clone()]);
     assert_eq!(found, vec![d.join("A.vst3"), d.join("Vendor").join("Sub").join("B.vst3")]);
-    assert_eq!(module_file(&found[0]), d.join("A.vst3").join("Contents").join("x86_64-win").join("A.vst3"));
+    let module = if cfg!(windows) { "A.vst3" } else if cfg!(target_os = "macos") { "A" } else { "A.so" };
+    assert_eq!(module_file(&found[0]), d.join("A.vst3").join("Contents").join(BUNDLE_ARCH).join(module));
     assert_eq!(module_file(&found[1]), found[1]);
     assert!(Module::load(&found[0]).is_err(), "an empty bundle is not a plug-in");
     let _ = std::fs::remove_dir_all(&d);

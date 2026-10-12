@@ -462,27 +462,12 @@ pub fn date_text(t: std::time::SystemTime) -> String {
     format!("{mo}/{d}/{y} {h12}:{mi:02}:{se:02} {ap}")
 }
 
-#[cfg(windows)]
+/// A file time in the local time zone: (year, month, day, hour, minute, second).
 fn local_time(t: std::time::SystemTime) -> Option<(u16, u16, u16, u16, u16, u16)> {
-    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
-    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-    let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
-    let ft = d.as_nanos() / 100 + 116_444_736_000_000_000;
-    let ft = FILETIME { dwLowDateTime: ft as u32, dwHighDateTime: (ft >> 32) as u32 };
-    // SAFETY: plain out-parameter calls on stack values.
-    unsafe {
-        let mut utc: SYSTEMTIME = std::mem::zeroed();
-        let mut loc: SYSTEMTIME = std::mem::zeroed();
-        if FileTimeToSystemTime(&ft, &mut utc) == 0 || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut loc) == 0 {
-            return None;
-        }
-        Some((loc.wYear, loc.wMonth, loc.wDay, loc.wHour, loc.wMinute, loc.wSecond))
-    }
-}
-
-#[cfg(not(windows))]
-fn local_time(_: std::time::SystemTime) -> Option<(u16, u16, u16, u16, u16, u16)> {
-    None
+    use chrono::{Datelike, Timelike};
+    let l = chrono::DateTime::<chrono::Local>::from(t);
+    let n = |v: u32| u16::try_from(v).ok();
+    Some((u16::try_from(l.year()).ok()?, n(l.month())?, n(l.day())?, n(l.hour())?, n(l.minute())?, n(l.second())?))
 }
 
 /// The info panel above the footer: title, date, size, path of the selected disk entry (spec §6).
@@ -740,4 +725,19 @@ pub fn paint_ghost(ui: &mut Ui, s: &State) {
     ui.c.fill_rrect(r, 3.0, t.browser_row_hi.shade(0.08));
     ui.c.stroke_rrect(r, 3.0, 1.0, t.browser_tab_outline);
     ui.c.text_clip(f, r.x + 7.0, r.y + 2.0, r.w - 10.0, t.glyph, label);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// File dates read in the local time zone on every platform (spec §6): within a day of the UTC date.
+    #[test]
+    fn dates_are_local_and_twelve_hour() {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000); // 2023-11-14 22:13:20 UTC
+        let text = date_text(t);
+        assert!(text.contains("/2023 ") && (text.starts_with("11/14/") || text.starts_with("11/15/")), "{text}");
+        assert!(text.ends_with(" AM") || text.ends_with(" PM"), "{text}");
+        assert_eq!(size_text(1536), "1.50 KB");
+    }
 }

@@ -30,12 +30,12 @@ pub struct Preset {
     pub path: PathBuf,
 }
 
-/// `%APPDATA%/Lemon Studio/Presets` (`OPENSTUDIO_PRESETS` overrides it, used by tests).
+/// `Presets` in the user folder (`os_paths::user_dir`; `OPENSTUDIO_PRESETS` overrides it, used by tests).
 pub fn root() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("OPENSTUDIO_PRESETS") {
         return Some(PathBuf::from(p));
     }
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Lemon Studio").join("Presets"))
+    os_paths::user_file("Presets")
 }
 
 /// A plugin name as a folder name: characters Windows does not allow become `_`, trailing dots / spaces go.

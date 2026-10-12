@@ -70,14 +70,32 @@ fn debug() -> bool {
     os_host::debug()
 }
 
-/// The standard VST 3 folders (per user, then system) on Windows.
+/// The standard VST 3 folders (per user, then system) of the platform (spec §2).
 pub fn standard_dirs() -> Vec<PathBuf> {
     let mut v = Vec::new();
-    if let Some(l) = std::env::var_os("LOCALAPPDATA") {
-        v.push(PathBuf::from(l).join("Programs").join("Common").join("VST3"));
+    #[cfg(windows)]
+    {
+        if let Some(l) = std::env::var_os("LOCALAPPDATA") {
+            v.push(PathBuf::from(l).join("Programs").join("Common").join("VST3"));
+        }
+        if let Some(c) = std::env::var_os("COMMONPROGRAMFILES") {
+            v.push(PathBuf::from(c).join("VST3"));
+        }
     }
-    if let Some(c) = std::env::var_os("COMMONPROGRAMFILES") {
-        v.push(PathBuf::from(c).join("VST3"));
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(h) = std::env::var_os("HOME") {
+            v.push(PathBuf::from(h).join("Library/Audio/Plug-Ins/VST3"));
+        }
+        v.push(PathBuf::from("/Library/Audio/Plug-Ins/VST3"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(h) = std::env::var_os("HOME") {
+            v.push(PathBuf::from(h).join(".vst3"));
+        }
+        v.push(PathBuf::from("/usr/lib/vst3"));
+        v.push(PathBuf::from("/usr/local/lib/vst3"));
     }
     v
 }
@@ -108,28 +126,57 @@ pub fn find_bundles(dirs: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-/// The module (DLL) of a plug-in path: inside a bundle `Contents\x86_64-win\<bundle name>`, else the file itself.
+/// The window system editors are embedded in (`IPlugView` platform type): an HWND on Windows, an NSView on macOS, an X11
+/// window id elsewhere (under Wayland too, through XWayland).
+const PLATFORM_TYPE: &std::ffi::CStr = if cfg!(windows) {
+    c"HWND"
+} else if cfg!(target_os = "macos") {
+    c"NSView"
+} else {
+    c"X11EmbedWindowID"
+};
+
+/// The bundle folder holding this platform's module: `Contents/<architecture>-<platform>` (spec §2), `MacOS` on macOS.
+pub const BUNDLE_ARCH: &str = if cfg!(target_os = "macos") {
+    "MacOS"
+} else if cfg!(windows) {
+    if cfg!(target_arch = "aarch64") { "arm64-win" } else if cfg!(target_arch = "x86") { "x86-win" } else { "x86_64-win" }
+} else if cfg!(target_arch = "aarch64") {
+    "aarch64-linux"
+} else if cfg!(target_arch = "x86") {
+    "i386-linux"
+} else {
+    "x86_64-linux"
+};
+
+/// The module of a plug-in path: inside a bundle `Contents/<BUNDLE_ARCH>/` the bundle's own name on Windows, its name
+/// without `.vst3` plus `.so` on Linux (and without an extension on macOS); else the file itself.
 pub fn module_file(path: &Path) -> PathBuf {
-    if path.is_dir() {
-        let name = path.file_name().unwrap_or_default();
-        path.join("Contents").join("x86_64-win").join(name)
-    } else {
-        path.to_path_buf()
+    if !path.is_dir() {
+        return path.to_path_buf();
     }
+    let dir = path.join("Contents").join(BUNDLE_ARCH);
+    if cfg!(windows) {
+        return dir.join(path.file_name().unwrap_or_default());
+    }
+    let mut name = path.file_stem().unwrap_or_default().to_os_string();
+    if !cfg!(target_os = "macos") {
+        name.push(".so");
+    }
+    dir.join(name)
 }
 
-/// A class id as the documented 32-character FUID string (spec §3): the GUID's Data1, Data2, Data3 as numbers, then
-/// its last 8 bytes, uppercase hex.
+/// A class id as the documented 32-character FUID string (spec §3), uppercase hex. The string is the same on every
+/// platform; the bytes in memory are not: on Windows a class id is a COM GUID (Data1, Data2, Data3 little-endian
+/// numbers, then 8 bytes), elsewhere the 16 bytes are in string order.
 pub fn fuid_string(id: &IID) -> String {
     let d = &id.data;
-    let d1 = u32::from_le_bytes([d[0], d[1], d[2], d[3]]);
-    let d2 = u16::from_le_bytes([d[4], d[5]]);
-    let d3 = u16::from_le_bytes([d[6], d[7]]);
-    let mut s = format!("{d1:08X}{d2:04X}{d3:04X}");
-    for b in &d[8..] {
-        s.push_str(&format!("{b:02X}"));
-    }
-    s
+    let ordered: [u8; 16] = if cfg!(windows) {
+        [d[3], d[2], d[1], d[0], d[5], d[4], d[7], d[6], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]]
+    } else {
+        *d
+    };
+    ordered.iter().map(|b| format!("{b:02X}")).collect()
 }
 
 /// A NUL-terminated `char8` array.
@@ -181,12 +228,8 @@ impl Module {
     pub fn load(path: &Path) -> Result<Arc<Module>, String> {
         let file = module_file(path);
         unsafe {
-            let lib = libloading::Library::new(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-            if let Ok(init) = lib.get::<unsafe extern "system" fn() -> bool>(b"InitDll\0") {
-                if !init() {
-                    return Err(format!("{}: InitDll failed", file.display()));
-                }
-            }
+            let lib = os_host::load_module(&file)?;
+            let lib = module_entry(lib).map_err(|e| format!("{}: {e}", file.display()))?;
             let get = lib
                 .get::<unsafe extern "system" fn() -> *mut c_void>(b"GetPluginFactory\0")
                 .map_err(|_| format!("{}: not a VST 3 module (no GetPluginFactory)", file.display()))?;
@@ -286,11 +329,49 @@ impl Drop for Module {
         // module clean up before it is unloaded.
         self.factory = None;
         if let Some(lib) = &self.lib {
-            unsafe {
-                if let Ok(exit) = lib.get::<unsafe extern "system" fn() -> bool>(b"ExitDll\0") {
-                    exit();
-                }
+            unsafe { module_exit(lib) };
+        }
+    }
+}
+
+/// The module's own set-up after loading, before `GetPluginFactory` (spec §3): `InitDll` on Windows, `ModuleEntry`
+/// with the module's `dlopen` handle on Linux. Both are optional; a module whose set-up fails is not used.
+#[cfg(windows)]
+unsafe fn module_entry(lib: libloading::Library) -> Result<libloading::Library, String> {
+    unsafe {
+        if let Ok(init) = lib.get::<unsafe extern "system" fn() -> bool>(b"InitDll\0") {
+            if !init() {
+                return Err("InitDll failed".into());
             }
+        }
+    }
+    Ok(lib)
+}
+
+#[cfg(unix)]
+unsafe fn module_entry(lib: libloading::Library) -> Result<libloading::Library, String> {
+    unsafe {
+        let handle = libloading::os::unix::Library::from(lib).into_raw();
+        let lib: libloading::Library = libloading::os::unix::Library::from_raw(handle).into();
+        if let Ok(entry) = lib.get::<unsafe extern "C" fn(*mut c_void) -> bool>(b"ModuleEntry\0") {
+            if !entry(handle) {
+                return Err("ModuleEntry failed".into());
+            }
+        }
+        Ok(lib)
+    }
+}
+
+/// The module's clean-up before it is unloaded: `ExitDll` on Windows, `ModuleExit` on Linux.
+unsafe fn module_exit(lib: &libloading::Library) {
+    unsafe {
+        #[cfg(windows)]
+        if let Ok(exit) = lib.get::<unsafe extern "system" fn() -> bool>(b"ExitDll\0") {
+            exit();
+        }
+        #[cfg(unix)]
+        if let Ok(exit) = lib.get::<unsafe extern "C" fn() -> bool>(b"ModuleExit\0") {
+            exit();
         }
     }
 }
@@ -490,7 +571,7 @@ impl Plugin {
                 }
                 // An editor that can live in a host window.
                 if let Some(v) = owned::<dyn IPlugView>(c.create_view(c"editor".as_ptr())) {
-                    p.can_edit = v.is_platform_type_supported(c"HWND".as_ptr()) == kResultTrue;
+                    p.can_edit = v.is_platform_type_supported(PLATFORM_TYPE.as_ptr()) == kResultTrue;
                 }
                 p.read_units();
             }
@@ -798,7 +879,7 @@ impl Plugin {
         self.can_edit
     }
 
-    /// Embeds the editor in `parent` (an HWND; spec §6); returns its size in pixels. `scale` is the parent's DPI
+    /// Embeds the editor in `parent` (an HWND on Windows, an X11 window id on Linux; spec §6); returns its size in pixels. `scale` is the parent's DPI
     /// factor, given to editors that support content scaling (spec: ui/ui-scaling.md §3).
     pub fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
         if !self.can_edit {
@@ -808,7 +889,7 @@ impl Plugin {
         let c = self.controller.as_ref().ok_or("no edit controller")?;
         unsafe {
             let view = owned::<dyn IPlugView>(c.create_view(c"editor".as_ptr())).ok_or("the plug-in could not create its editor")?;
-            if view.is_platform_type_supported(c"HWND".as_ptr()) != kResultTrue {
+            if view.is_platform_type_supported(PLATFORM_TYPE.as_ptr()) != kResultTrue {
                 return Err("the editor cannot be shown in a window".into());
             }
             view.set_frame(self.frame.raw());
@@ -818,7 +899,7 @@ impl Plugin {
                     s.set_scale_factor(scale);
                 }
             }
-            if view.attached(parent, c"HWND".as_ptr()) != kResultOk {
+            if view.attached(parent, PLATFORM_TYPE.as_ptr()) != kResultOk {
                 view.set_frame(std::ptr::null_mut());
                 return Err("the plug-in refused the editor window".into());
             }

@@ -28,6 +28,7 @@ pub struct SamplerEditor {
     /// DPI scale as f32 bits.
     pub scale: AtomicU32,
     /// The open editor window (0 = closed): parameter changes post a repaint to it.
+    #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Arc<AtomicIsize>,
 }
 
@@ -50,7 +51,11 @@ impl Editor for SamplerEditor {
             ParentWindowHandle::Win32Hwnd(hwnd) => {
                 Box::new(win32::open(hwnd, scale, self.params.clone(), self.shared.clone(), context, self.hwnd.clone()))
             }
-            _ => Box::new(()),
+            // Editors are Win32 windows so far: elsewhere none opens.
+            _ => {
+                let _ = (context, scale);
+                Box::new(())
+            }
         }
     }
 
@@ -74,14 +79,13 @@ impl Editor for SamplerEditor {
     }
 }
 
-/// The palette Lemon Studio uses: the remembered `.flstheme` (`%APPDATA%/Lemon Studio/current.flstheme`, spec
+/// The palette Lemon Studio uses: the remembered `.flstheme` (`current.flstheme` in `os_paths::user_dir`, spec
 /// ui/flstheme.md), else the default one. The plugin runs in its own module, so it reads the theme itself.
 pub fn palette() -> Palette {
     if cfg!(test) {
         return Palette::default();
     }
-    std::env::var_os("APPDATA")
-        .map(|d| PathBuf::from(d).join("Lemon Studio").join("current.flstheme"))
+    os_paths::user_file("current.flstheme")
         .and_then(|p| std::fs::read(p).ok())
         .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
         .unwrap_or_default()
@@ -1160,7 +1164,7 @@ fn env_point_ids(p: &str, i: u8) -> Vec<String> {
     }
 }
 
-/// Recently loaded samples (newest first), `%APPDATA%/Lemon Studio/sampler-history.txt`.
+/// Recently loaded samples (newest first), `sampler-history.txt` in the user folder.
 pub fn history() -> Vec<String> {
     history_file().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()).unwrap_or_default()
 }
@@ -1169,7 +1173,7 @@ fn history_file() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio").join("sampler-history.txt"))
+    os_paths::user_file("sampler-history.txt")
 }
 
 pub fn remember(path: &str) {
@@ -1217,7 +1221,7 @@ pub fn wav_bytes(s: &os_engine::Sample, float: bool) -> Vec<u8> {
 
 /// Where pasted audio is kept so the plugin state can name it.
 pub fn paste_path() -> Option<PathBuf> {
-    let d = PathBuf::from(std::env::var_os("APPDATA")?).join("Lemon Studio").join("samples");
+    let d = os_paths::user_file("samples")?;
     std::fs::create_dir_all(&d).ok()?;
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     Some(d.join(format!("Pasted audio {t}.wav")))

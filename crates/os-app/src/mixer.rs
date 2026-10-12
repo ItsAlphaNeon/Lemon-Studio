@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use os_model::{MixerTrack, Rgb};
 
-use crate::app::{App, State, Win};
+use crate::app::{App, State};
 use crate::playlist::{Cmd, EditTarget, Mark, PItem, Popup};
 
 /// Mixer controls (the view registers them as `Action::Mix`). Controls that are not available yet (title-bar view
@@ -974,11 +974,15 @@ impl App {
             self.state.message = Some("This slot's plugin is not hosted (no Lemon Studio version of it yet)".into());
             return;
         }
+        #[cfg(not(windows))]
+        {
+            self.state.message = Some(crate::app::off_text(crate::app::PLUGIN_WINDOWS));
+        }
         #[cfg(windows)]
         {
             let info = fx_info(&self.state.project, &self.state.mixer, key);
             match info.map(|i| self.plugins.open_window(key, i)) {
-                Some(Ok(())) => self.state.raise(Win::Hosted(key)),
+                Some(Ok(())) => self.state.raise(crate::app::Win::Hosted(key)),
                 Some(Err(e)) => self.state.message = Some(format!("Plugin: {e}")),
                 None => {}
             }

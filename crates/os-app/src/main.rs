@@ -1,7 +1,12 @@
 //! Lemon Studio: the application window.
 
+// Plugin windows are Win32 windows so far (`plugin_window`): elsewhere what only they reach (the Misc tab, the window
+// and preset menus, their requests) is built but unused. The Windows build still reports real dead code.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 mod app;
 mod browser;
+mod dialog;
 mod icons;
 mod knobs;
 mod loading;
@@ -36,7 +41,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
-use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
+use winit::window::{CursorGrabMode, CursorIcon, ResizeDirection, Window, WindowId};
 
 use app::App;
 use os_ui::Canvas;
@@ -51,6 +56,9 @@ struct Shell {
     /// While a scroll-bar right-drag runs: the physical cursor position it is held at, and the
     /// virtual (logical) mouse position fed to the app.
     lock: Option<((f64, f64), (f32, f32))>,
+    /// The held cursor is locked by the window system (Wayland's pointer lock): it stays put by itself and cannot be
+    /// warped. Otherwise (Windows, X11) it is warped back to the anchor after each move.
+    pointer_locked: bool,
     cursor: app::Cursor,
     /// Main-window border in device pixels (left, top, right, bottom); zero when maximized.
     inset: (u32, u32, u32, u32),
@@ -217,6 +225,25 @@ fn draw_border(buf: &mut [u32], w: usize, h: usize, (l, t, r, b): (u32, u32, u32
 }
 
 impl Shell {
+    /// Holds the cursor for a drag that moves a value rather than the cursor (knobs, scroll-bar right-drags): hidden,
+    /// with raw motion driving the virtual position `virt` (`device_event`).
+    fn lock_cursor(&mut self, window: &Window, anchor: (f64, f64), virt: (f32, f32)) {
+        self.lock = Some((anchor, virt));
+        self.pointer_locked = window.set_cursor_grab(CursorGrabMode::Locked).is_ok();
+        window.set_cursor_visible(false);
+    }
+
+    /// Ends a held drag: the cursor shows again where the drag started, as if it never moved.
+    fn unlock_cursor(&mut self, window: &Window) {
+        let Some((anchor, _)) = self.lock.take() else { return };
+        // Under a pointer lock this is where the cursor reappears once unlocked.
+        let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
+        if std::mem::take(&mut self.pointer_locked) {
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+        }
+        window.set_cursor_visible(true);
+    }
+
     /// Show the cursor the app wants (resize arrows over edges and note ends).
     fn sync_cursor(&mut self, window: &Window) {
         let c = match self.edge {
@@ -301,6 +328,16 @@ impl ApplicationHandler for Shell {
             let icon = |s: u32| Icon::from_resource(1, Some(PhysicalSize::new(s, s))).ok();
             attrs.with_window_icon(icon(16)).with_taskbar_icon(icon(32))
         };
+        // Linux: the app id names the desktop entry (`lemonstudio.desktop`), where Wayland compositors find the icon;
+        // X11 takes the icon from the window.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            use winit::platform::x11::WindowAttributesExtX11;
+            let attrs = WindowAttributesExtWayland::with_name(attrs, APP_ID, APP_ID);
+            let attrs = WindowAttributesExtX11::with_name(attrs, APP_ID, APP_ID);
+            attrs.with_window_icon(linux_icon())
+        };
         let window = Rc::new(el.create_window(attrs).expect("create window"));
         let context = softbuffer::Context::new(window.clone()).expect("graphics context");
         self.surface = Some(softbuffer::Surface::new(&context, window.clone()).expect("surface"));
@@ -365,7 +402,9 @@ impl ApplicationHandler for Shell {
         let v = (virt.0 + (delta.0 / scale) as f32, virt.1 + (delta.1 / scale) as f32);
         self.lock = Some((anchor, v));
         self.app.mouse_move(v.0, v.1);
-        let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
+        if !self.pointer_locked {
+            let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
+        }
         self.pending = true;
     }
 
@@ -441,25 +480,30 @@ impl ApplicationHandler for Shell {
                     if self.app.cursor_locked() {
                         let (mx, my) = self.app.mouse;
                         let anchor = (f64::from(mx * scale) + f64::from(self.inset.0), f64::from(my * scale) + f64::from(self.inset.1));
-                        self.lock = Some((anchor, (mx, my)));
-                        window.set_cursor_visible(false);
+                        self.lock_cursor(&window, anchor, (mx, my));
                     }
                     if self.app.want_drag_window {
                         self.app.want_drag_window = false;
                         if double {
                             window.set_maximized(!window.is_maximized());
                         } else if window.is_maximized() {
-                            // Dragging a maximized window restores it under the cursor, then moves it.
-                            if let Some(((cx, cy), (l, _, r, _))) = screen_state(&window) {
-                                let frac = f64::from(cx - l) / f64::from((r - l).max(1));
-                                let grab_y = (self.app.mouse.1 * scale) as i32 + self.inset.1 as i32;
-                                window.set_maximized(false);
-                                if let Some((_, (nl, nt, nr, nb))) = screen_state(&window) {
-                                    let w = nr - nl;
-                                    let left = cx - (frac * f64::from(w)) as i32;
-                                    let rect = (left, cy - grab_y, left + w, cy - grab_y + (nb - nt));
-                                    set_rect(&window, rect);
-                                    self.grab = Some(Grab { cursor: (cx, cy), rect, edge: None });
+                            // Dragging a maximized window restores it under the cursor, then moves it. Without screen
+                            // coordinates (Linux) the window system's own move does both.
+                            match screen_state(&window) {
+                                Some(((cx, cy), (l, _, r, _))) => {
+                                    let frac = f64::from(cx - l) / f64::from((r - l).max(1));
+                                    let grab_y = (self.app.mouse.1 * scale) as i32 + self.inset.1 as i32;
+                                    window.set_maximized(false);
+                                    if let Some((_, (nl, nt, nr, nb))) = screen_state(&window) {
+                                        let w = nr - nl;
+                                        let left = cx - (frac * f64::from(w)) as i32;
+                                        let rect = (left, cy - grab_y, left + w, cy - grab_y + (nb - nt));
+                                        set_rect(&window, rect);
+                                        self.grab = Some(Grab { cursor: (cx, cy), rect, edge: None });
+                                    }
+                                }
+                                None => {
+                                    let _ = window.drag_window();
                                 }
                             }
                         } else {
@@ -473,10 +517,7 @@ impl ApplicationHandler for Shell {
                     }
                 } else {
                     self.grab = None;
-                    if let Some((anchor, _)) = self.lock.take() {
-                        let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
-                        window.set_cursor_visible(true);
-                    }
+                    self.unlock_cursor(&window);
                     self.app.mouse_up();
                     if self.app.resize_cursor && self.app.drag.is_none() {
                         self.app.resize_cursor = false;
@@ -490,8 +531,7 @@ impl ApplicationHandler for Shell {
                 if self.app.cursor_locked() {
                     let (mx, my) = self.app.mouse;
                     let anchor = (f64::from(mx * scale) + f64::from(self.inset.0), f64::from(my * scale) + f64::from(self.inset.1));
-                    self.lock = Some((anchor, (mx, my)));
-                    window.set_cursor_visible(false);
+                    self.lock_cursor(&window, anchor, (mx, my));
                 }
                 self.pending = true;
             }
@@ -500,11 +540,7 @@ impl ApplicationHandler for Shell {
                 self.pending = true;
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Right | MouseButton::Middle, .. } => {
-                if let Some((anchor, _)) = self.lock.take() {
-                    // Release where the drag started, as if the cursor never moved.
-                    let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
-                    window.set_cursor_visible(true);
-                }
+                self.unlock_cursor(&window);
                 self.app.mouse_up();
                 self.pending = true;
             }
@@ -704,6 +740,21 @@ impl ApplicationHandler for Shell {
             _ => {}
         }
     }
+}
+
+/// The application id on Linux: Wayland's app id and X11's WM_CLASS, matching `assets/lemonstudio.desktop`.
+#[cfg(all(unix, not(target_os = "macos")))]
+const APP_ID: &str = "lemonstudio";
+
+/// The window icon (X11 shows it; Wayland takes the desktop entry's): `assets/lemonstudio.png`, 256 px.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_icon() -> Option<winit::window::Icon> {
+    let png = tiny_skia::Pixmap::decode_png(include_bytes!("../assets/lemonstudio.png")).ok()?;
+    let rgba = png.pixels().iter().flat_map(|p| {
+        let c = p.demultiply();
+        [c.red(), c.green(), c.blue(), c.alpha()]
+    });
+    winit::window::Icon::from_rgba(rgba.collect(), png.width(), png.height()).ok()
 }
 
 /// `lemonstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-menu] [--browser-search TEXT] [--browser-folder DIR[|SUB]] [project.flp]`:
@@ -1028,6 +1079,7 @@ fn main() {
         mods: ModifiersState::default(),
         last_click: Instant::now() - Duration::from_secs(10),
         lock: None,
+        pointer_locked: false,
         cursor: app::Cursor::Default,
         inset: (0, 0, 0, 0),
         edge: None,

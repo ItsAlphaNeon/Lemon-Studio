@@ -36,6 +36,10 @@ fn main() {
         }
     }
 
+    #[cfg(not(windows))]
+    if sandbox71 || editor_out.is_some() {
+        eprintln!("--sandbox71 and --editor need Windows; ignored");
+    }
     #[cfg(windows)]
     if sandbox71 {
         let base = probe71::install();

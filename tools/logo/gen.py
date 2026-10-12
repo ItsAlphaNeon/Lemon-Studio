@@ -6,6 +6,7 @@ Writes:
   crates/os-app/src/logo.rs        greyscale mark as absolute M/L/Q/C/Z path data (drawn in one tint)
   crates/os-app/assets/lemonstudio.ico  app icon, 16..256 px (exe, window, taskbar), from the owner's
                                         bitmap assets/logo/icon-lemon.png (edited in icon-lemon.pdn, Paint.NET)
+  crates/os-app/assets/lemonstudio.png  the same icon at 256 px (Linux: window icon and desktop entry)
 """
 import importlib.util
 import os
@@ -61,6 +62,8 @@ def main():
     sizes = (256, 128, 64, 48, 40, 32, 24, 20, 16)
     imgs = [sq.resize((s, s), Image.LANCZOS) for s in sizes]
     imgs[0].save(os.path.join(ASSETS, "lemonstudio.ico"), sizes=[(s, s) for s in sizes], append_images=imgs[1:])
+    # Linux: the freedesktop icon named after the app id (Wayland compositors show it through lemonstudio.desktop).
+    imgs[0].save(os.path.join(ASSETS, "lemonstudio.png"))
 
 
 if __name__ == "__main__":

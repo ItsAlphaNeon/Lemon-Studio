@@ -24,6 +24,7 @@ pub struct Osc3Editor {
     /// DPI scale as f32 bits.
     pub scale: AtomicU32,
     /// The open editor window (0 = closed): parameter changes post a repaint to it.
+    #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Arc<AtomicIsize>,
 }
 
@@ -46,7 +47,11 @@ impl Editor for Osc3Editor {
             ParentWindowHandle::Win32Hwnd(hwnd) => {
                 Box::new(win32::open(hwnd, scale, self.params.clone(), self.shared.clone(), context, self.hwnd.clone()))
             }
-            _ => Box::new(()),
+            // Editors are Win32 windows so far: elsewhere none opens.
+            _ => {
+                let _ = (context, scale);
+                Box::new(())
+            }
         }
     }
 

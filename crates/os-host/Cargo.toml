@@ -7,3 +7,4 @@ license.workspace = true
 
 [dependencies]
 os-engine.workspace = true
+libloading = "0.8"

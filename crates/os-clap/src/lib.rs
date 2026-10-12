@@ -22,7 +22,7 @@ use clap_sys::events::{
     CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
 };
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
-use clap_sys::ext::gui::{clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32};
+use clap_sys::ext::gui::{clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11};
 use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
 use clap_sys::ext::params::{
     clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS,
@@ -74,7 +74,7 @@ unsafe fn cstr(p: *const c_char) -> String {
 impl Library {
     pub fn load(path: &Path) -> Result<Arc<Library>, String> {
         unsafe {
-            let lib = libloading::Library::new(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let lib = os_host::load_module(path)?;
             let entry: *const clap_plugin_entry = *lib.get::<*const clap_plugin_entry>(b"clap_entry\0").map_err(|e| format!("{}: no clap_entry ({e})", path.display()))?;
             Self::open(entry, path, Some(lib))
         }
@@ -138,14 +138,56 @@ impl Drop for Library {
     }
 }
 
-/// The standard CLAP folders (per user, then system) on Windows.
+/// The window system editors are embedded in: Win32 on Windows, Cocoa on macOS, X11 elsewhere (under Wayland too,
+/// through XWayland: plugins do not embed in Wayland surfaces).
+const WINDOW_API: &CStr = if cfg!(windows) {
+    CLAP_WINDOW_API_WIN32
+} else if cfg!(target_os = "macos") {
+    CLAP_WINDOW_API_COCOA
+} else {
+    CLAP_WINDOW_API_X11
+};
+
+/// A host window as CLAP passes it for [`WINDOW_API`]: the handle itself, or on X11 the window id it carries.
+fn window_handle(parent: *mut c_void) -> clap_window_handle {
+    if cfg!(windows) {
+        clap_window_handle { win32: parent }
+    } else if cfg!(target_os = "macos") {
+        clap_window_handle { cocoa: parent }
+    } else {
+        clap_window_handle { x11: parent as usize as std::ffi::c_ulong }
+    }
+}
+
+/// The standard CLAP folders, per user then system (CLAP's `entry.h`), and the folders in `CLAP_PATH`.
 pub fn standard_dirs() -> Vec<PathBuf> {
     let mut v = Vec::new();
-    if let Some(l) = std::env::var_os("LOCALAPPDATA") {
-        v.push(PathBuf::from(l).join("Programs").join("Common").join("CLAP"));
+    #[cfg(windows)]
+    {
+        if let Some(l) = std::env::var_os("LOCALAPPDATA") {
+            v.push(PathBuf::from(l).join("Programs").join("Common").join("CLAP"));
+        }
+        if let Some(c) = std::env::var_os("COMMONPROGRAMFILES") {
+            v.push(PathBuf::from(c).join("CLAP"));
+        }
     }
-    if let Some(c) = std::env::var_os("COMMONPROGRAMFILES") {
-        v.push(PathBuf::from(c).join("CLAP"));
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(h) = std::env::var_os("HOME") {
+            v.push(PathBuf::from(h).join("Library/Audio/Plug-Ins/CLAP"));
+        }
+        v.push(PathBuf::from("/Library/Audio/Plug-Ins/CLAP"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(h) = std::env::var_os("HOME") {
+            v.push(PathBuf::from(h).join(".clap"));
+        }
+        v.push(PathBuf::from("/usr/lib/clap"));
+        v.push(PathBuf::from("/usr/local/lib/clap"));
+    }
+    if let Some(extra) = std::env::var_os("CLAP_PATH") {
+        v.extend(std::env::split_paths(&extra).filter(|p| p.is_absolute()));
     }
     v
 }
@@ -609,14 +651,15 @@ impl Plugin {
     }
 
     pub fn has_editor(&self) -> bool {
-        !self.gui.is_null() && unsafe { (*self.gui).is_api_supported.is_some_and(|f| f(self.plugin, CLAP_WINDOW_API_WIN32.as_ptr(), false)) }
+        !self.gui.is_null() && unsafe { (*self.gui).is_api_supported.is_some_and(|f| f(self.plugin, WINDOW_API.as_ptr(), false)) }
     }
 
     pub fn editor_open(&self) -> bool {
         self.editor
     }
 
-    /// Embeds the plugin's editor in `parent` (a host window handle: HWND on Windows); returns its size in pixels.
+    /// Embeds the plugin's editor in `parent` (a host window handle: HWND on Windows, an X11 window id on Linux);
+    /// returns its size in pixels.
     /// The host draws the window frame around it (spec: ui/plugin-window.md). `scale` is the parent's DPI factor:
     /// a plugin that takes it draws at that size and reports the scaled size (spec: ui/ui-scaling.md §3).
     pub fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
@@ -626,7 +669,7 @@ impl Plugin {
         self.close_editor();
         unsafe {
             let g = &*self.gui;
-            let api = CLAP_WINDOW_API_WIN32.as_ptr();
+            let api = WINDOW_API.as_ptr();
             if !g.create.is_some_and(|c| c(self.plugin, api, false)) {
                 return Err("the plugin could not create its editor".into());
             }
@@ -636,7 +679,7 @@ impl Plugin {
             }
             let (mut w, mut h) = (0u32, 0u32);
             g.get_size.map(|f| f(self.plugin, &mut w, &mut h));
-            let cw = clap_window { api, specific: clap_window_handle { win32: parent } };
+            let cw = clap_window { api, specific: window_handle(parent) };
             if !g.set_parent.is_some_and(|f| f(self.plugin, &cw)) {
                 g.destroy.map(|d| d(self.plugin));
                 return Err("the plugin refused the editor window".into());
