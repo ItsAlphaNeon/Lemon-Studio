@@ -98,8 +98,8 @@ The full, item-by-item roadmap lives on the [Discord server](https://discord.gg/
 No prebuilt binaries are provided at this stage; Lemon Studio is built from source.
 
 ```bash
-git clone https://github.com/ItsAlphaNeon/OpenStudio.git
-cd OpenStudio
+git clone https://github.com/ItsAlphaNeon/Lemon-Studio.git
+cd Lemon-Studio
 cargo run -p os-app --release
 ```
 
