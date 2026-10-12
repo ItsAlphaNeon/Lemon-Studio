@@ -1233,7 +1233,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         // As if picked in the plugin picker (its generator tiles: the built-in ones, then the hosted instruments).
         RCmd::AddPlugin(i) => app.act(crate::app::Action::PickerTile(false, crate::views::picker::GENERATORS.len() + i)),
         RCmd::LoadSample(r) => {
-            if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "mp3", "flac", "ogg", "aif", "aiff"]).pick_file() {
+            if let Some(p) = crate::dialog::modal(|| rfd::FileDialog::new().add_filter("Audio", &["wav", "mp3", "flac", "ogg", "aif", "aiff"]).pick_file()) {
                 let s = &mut app.state;
                 let path = p.to_string_lossy().into_owned();
                 if let Some(ch) = s.project.channels.get_mut(r) {

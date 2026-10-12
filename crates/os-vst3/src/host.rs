@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 use vst3_sys as vst3_com;
 use vst3_sys::base::{kInvalidArgument, kNoInterface, kResultFalse, kResultOk, tresult, FIDString, IBStream, IUnknown};
 use vst3_sys::gui::{IPlugFrame, IPlugView, ViewRect};
+#[cfg(target_os = "linux")]
+use vst3_sys::gui::linux::{FileDescriptor, IEventHandler, IRunLoop, ITimerHandler, TimerInterval};
 use vst3_sys::utils::{SharedVstPtr, StaticVstPtr};
 use vst3_sys::vst::{
     Event, IAttributeList, IComponentHandler, IEventList, IHostApplication, IMessage, IParamValueQueue, IParameterChanges,
@@ -350,16 +352,71 @@ impl IComponentHandler for Handler {
     }
 }
 
-// ---- plug frame (editor resizes) ----
+// ---- plug frame (editor resizes; on Linux the editor's run loop) ----
 
-#[VST3(implements(IPlugFrame))]
+#[cfg_attr(target_os = "linux", VST3(implements(IPlugFrame, IRunLoop)))]
+#[cfg_attr(not(target_os = "linux"), VST3(implements(IPlugFrame)))]
 pub struct Frame {
     shared: Arc<Shared>,
+    /// What the editor registered with the run loop (Linux): its handler or timer object and the run loop's token.
+    run: RefCell<Vec<(usize, u64)>>,
 }
 
 impl Frame {
     pub fn create(shared: Arc<Shared>) -> Com<Frame> {
-        Com::new(Frame::allocate(shared))
+        Com::new(Frame::allocate(shared, RefCell::new(Vec::new())))
+    }
+
+    /// Drops what a closed editor left registered with the run loop (it should have unregistered in `removed`).
+    pub fn clear_run_loop(&self) {
+        for (_, token) in self.run.borrow_mut().drain(..) {
+            #[cfg(target_os = "linux")]
+            os_host::runloop::remove(token);
+            #[cfg(not(target_os = "linux"))]
+            let _ = token;
+        }
+    }
+
+    /// Removes the run loop entries of the handler or timer object at `key`.
+    #[cfg(target_os = "linux")]
+    fn unregister(&self, key: usize) {
+        self.run.borrow_mut().retain(|&(k, token)| {
+            if k == key {
+                os_host::runloop::remove(token);
+            }
+            k != key
+        });
+    }
+}
+
+/// Linux: plug-in editors have no message loop of their own; they hand the host their X11 connection's descriptor and
+/// their timers (spec §6), and get the callbacks on the UI thread (`os_host::runloop`).
+#[cfg(target_os = "linux")]
+impl IRunLoop for Frame {
+    unsafe fn register_event_handler(&self, h: SharedVstPtr<dyn IEventHandler>, fd: FileDescriptor) -> tresult {
+        let Some(handler) = h.upgrade() else { return kInvalidArgument };
+        let key = { h }.as_ptr() as usize;
+        let token = os_host::runloop::add_fd(fd, os_host::runloop::READ, move |fd, _| unsafe { handler.on_fd_is_set(fd) });
+        self.run.borrow_mut().push((key, token));
+        kResultOk
+    }
+
+    unsafe fn unregister_event_handler(&self, h: SharedVstPtr<dyn IEventHandler>) -> tresult {
+        self.unregister({ h }.as_ptr() as usize);
+        kResultOk
+    }
+
+    unsafe fn register_timer(&self, t: SharedVstPtr<dyn ITimerHandler>, ms: TimerInterval) -> tresult {
+        let Some(timer) = t.upgrade() else { return kInvalidArgument };
+        let key = { t }.as_ptr() as usize;
+        let token = os_host::runloop::add_timer(std::time::Duration::from_millis(ms), move || unsafe { timer.on_timer() });
+        self.run.borrow_mut().push((key, token));
+        kResultOk
+    }
+
+    unsafe fn unregister_timer(&self, t: SharedVstPtr<dyn ITimerHandler>) -> tresult {
+        self.unregister({ t }.as_ptr() as usize);
+        kResultOk
     }
 }
 

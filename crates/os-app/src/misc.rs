@@ -172,7 +172,7 @@ pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
 }
 
 /// The list menu of a Misc value (chord list, number boxes) at canvas point (x, y); the current value is ticked.
-#[cfg(windows)]
+#[cfg(plugin_windows)]
 pub fn menu(app: &crate::app::App, row: usize, m: M, x: f32, y: f32) -> crate::playlist::Popup {
     use crate::playlist::{Cmd, Mark, PItem, Popup};
     let cur = app.state.project.channels.get(row).map_or(mp::default_of(m), |ch| get(&ch.misc, m));

@@ -1,6 +1,7 @@
 //! `cargo run -p bundle-plugins [-- --install]`: builds every Lemon Studio plugin in release mode and writes
 //! `<target>/bundled/<Name>.vst3` (bundle folder) and `<Name>.clap`; `--install` copies them to the per-user plugin
-//! folders (no admin rights needed).
+//! folders (no admin rights needed): `%LOCALAPPDATA%\Programs\Common\{VST3,CLAP}` on Windows, `~/.vst3` and
+//! `~/.clap` on Linux.
 //!
 // spec: plugins/plugin-formats.md (bundles and install folders)
 
@@ -37,20 +38,50 @@ fn main() {
             .expect("cargo")
             .success();
         assert!(ok, "build of {pkg} failed");
-        let dll = target.join("release").join(format!("{stem}.dll"));
+        let lib = target.join("release").join(library_file(stem));
         let vst3 = out.join(format!("{name}.vst3"));
-        let arch = vst3.join("Contents").join("x86_64-win");
+        let arch = vst3.join("Contents").join(BUNDLE_ARCH);
         std::fs::create_dir_all(&arch).expect("vst3 bundle");
-        std::fs::copy(&dll, arch.join(format!("{name}.vst3"))).expect("copy vst3");
+        std::fs::copy(&lib, arch.join(bundle_module(name))).expect("copy vst3");
         let clap = out.join(format!("{name}.clap"));
-        std::fs::copy(&dll, &clap).expect("copy clap");
+        std::fs::copy(&lib, &clap).expect("copy clap");
         println!("{}\n{}", vst3.display(), clap.display());
         if install {
-            let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA")).join("Programs").join("Common");
-            copy_dir(&vst3, &local.join("VST3").join(format!("{name}.vst3"))).expect("install vst3");
-            std::fs::create_dir_all(local.join("CLAP")).expect("clap folder");
-            std::fs::copy(&clap, local.join("CLAP").join(format!("{name}.clap"))).expect("install clap");
-            println!("installed to {}", local.display());
+            let (vst3_dir, clap_dir) = install_dirs();
+            copy_dir(&vst3, &vst3_dir.join(format!("{name}.vst3"))).expect("install vst3");
+            std::fs::create_dir_all(&clap_dir).expect("clap folder");
+            std::fs::copy(&clap, clap_dir.join(format!("{name}.clap"))).expect("install clap");
+            println!("installed to {} and {}", vst3_dir.display(), clap_dir.display());
         }
+    }
+}
+
+/// The bundle folder holding the module: `Contents/<architecture>-<platform>` (VST 3 bundle layout).
+const BUNDLE_ARCH: &str = if cfg!(windows) {
+    if cfg!(target_arch = "aarch64") { "arm64-win" } else { "x86_64-win" }
+} else if cfg!(target_arch = "aarch64") {
+    "aarch64-linux"
+} else {
+    "x86_64-linux"
+};
+
+/// The shared library cargo writes for a `cdylib` named `stem`.
+fn library_file(stem: &str) -> String {
+    format!("{}{stem}{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX)
+}
+
+/// The module's name inside the bundle: `<Name>.vst3` on Windows, `<Name>.so` on Linux.
+fn bundle_module(name: &str) -> String {
+    if cfg!(windows) { format!("{name}.vst3") } else { format!("{name}{}", std::env::consts::DLL_SUFFIX) }
+}
+
+/// The per-user VST3 and CLAP folders.
+fn install_dirs() -> (PathBuf, PathBuf) {
+    if cfg!(windows) {
+        let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA")).join("Programs").join("Common");
+        (local.join("VST3"), local.join("CLAP"))
+    } else {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+        (home.join(".vst3"), home.join(".clap"))
     }
 }

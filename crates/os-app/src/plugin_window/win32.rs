@@ -1,0 +1,839 @@
+//! Plugin windows on Windows: the frame (`super`) in a Win32 window, docked (a child of the main window, clipped to the
+//! workspace and stacked with the app's own windows) until the menu arrow's "Detached" makes it a top-level window owned
+//! by the main window. The plugin parents its editor into a child window below the strip.
+//!
+// spec: ui/plugin-window.md, plugins/host-link.md
+
+use std::cell::RefCell;
+use std::ffi::c_void;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, Once};
+
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{
+    BeginPaint, ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, GetWindowRgn, InvalidateRect, RedrawWindow, ScreenToClient, SetWindowRgn, RDW_ALLCHILDREN, RDW_INVALIDATE,
+    RDW_UPDATENOW, RGN_AND, RGN_COPY, RGN_DIFF, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
+};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU};
+use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+use super::*;
+
+/// A key pressed or released while a plugin window has the keyboard focus (the typing keyboard keeps playing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyMsg {
+    /// Hardware scancode as winit's `PhysicalKeyExtScancode` expects it (extended keys carry 0xE000).
+    pub scancode: u32,
+    pub pressed: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+}
+
+static KEYS: Mutex<Vec<KeyMsg>> = Mutex::new(Vec::new());
+
+/// (editor area window, message) since the last `take_link`.
+static LINK: Mutex<Vec<(isize, LinkMsg)>> = Mutex::new(Vec::new());
+
+/// Link messages seen since the last call (UI thread).
+pub fn take_link() -> Vec<(isize, LinkMsg)> {
+    LINK.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
+}
+/// A docked window moved and the main window repainted what it uncovered.
+static EXPOSED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a docked plugin window uncovered part of the main window since the last call: the next present must show
+/// the whole canvas, not only the app's own damage (UI thread).
+pub fn take_exposed() -> bool {
+    EXPOSED.swap(false, Ordering::Relaxed)
+}
+
+/// Keys seen since the last call (UI thread).
+pub fn take_keys() -> Vec<KeyMsg> {
+    KEYS.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
+}
+
+static KEY_HOOK: Once = Once::new();
+
+/// Thread-wide keyboard hook: a plugin's editor (any plugin, any child window) swallows key messages, so the key
+/// events are copied here whenever the focus is inside one of our plugin frames, and the app plays them.
+unsafe extern "system" fn key_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if code == 0 {
+            let focus = GetFocus();
+            if !focus.is_null() {
+                // Inside a plugin frame: docked frames are children of the main window, so walk up to the frame.
+                let mut w = focus;
+                let mut in_frame = false;
+                while !w.is_null() && !in_frame {
+                    let mut name = [0u16; 64];
+                    let n = GetClassNameW(w, name.as_mut_ptr(), 64) as usize;
+                    in_frame = String::from_utf16_lossy(&name[..n]) == FRAME_CLASS;
+                    w = GetAncestor(w, GA_PARENT);
+                }
+                let up = lp & (1 << 31) != 0;
+                let repeat = !up && lp & (1 << 30) != 0;
+                if in_frame && !repeat {
+                    let mut sc = ((lp >> 16) & 0xff) as u32;
+                    if lp & (1 << 24) != 0 {
+                        sc |= 0xE000;
+                    }
+                    let down = |vk: u16| GetKeyState(i32::from(vk)) < 0;
+                    if let Ok(mut k) = KEYS.lock() {
+                        k.push(KeyMsg { scancode: sc, pressed: !up, ctrl: down(VK_CONTROL), alt: down(VK_MENU) });
+                    }
+                }
+            }
+        }
+        CallNextHookEx(std::ptr::null_mut(), code, wp, lp)
+    }
+}
+
+fn install_key_hook() {
+    KEY_HOOK.call_once(|| unsafe {
+        SetWindowsHookExW(WH_KEYBOARD, Some(key_hook), std::ptr::null_mut(), GetCurrentThreadId());
+    });
+}
+
+struct Win {
+    hwnd: HWND,
+    area: HWND,
+    canvas: Canvas,
+    buf: Vec<u32>,
+    scale: f32,
+    state: Rc<RefCell<State>>,
+}
+
+/// A plugin window. Dropping it destroys the native window (close the plugin's editor first).
+pub struct FrameWindow {
+    hwnd: HWND,
+    area: HWND,
+    state: Rc<RefCell<State>>,
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+const FRAME_CLASS: &str = "OpenStudioPluginFrame";
+const AREA_CLASS: &str = "OpenStudioPluginArea";
+
+impl FrameWindow {
+    /// A hidden frame for an editor of `editor` logical px at screen position `pos` (physical px): a child of `owner`
+    /// (docked) or a top-level window owned by it (`detached`).
+    pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
+        install_key_hook();
+        // Without a main window (tests) there is nothing to dock into.
+        let detached = detached || owner == 0;
+        let state = Rc::new(RefCell::new(State::new(info, editor, detached)));
+        let (w, h) = state.borrow().size();
+        let px = |v: f32| (v * scale).round() as i32;
+        unsafe {
+            let inst = GetModuleHandleW(std::ptr::null());
+            let (fc, ac) = (wide(FRAME_CLASS), wide(AREA_CLASS));
+            let cursor = LoadCursorW(std::ptr::null_mut(), IDC_ARROW);
+            for (class, proc_) in [(&fc, frame_proc as WndProc), (&ac, area_proc as WndProc)] {
+                let wc = WNDCLASSW {
+                    style: CS_DBLCLKS,
+                    lpfnWndProc: Some(proc_),
+                    cbClsExtra: 0,
+                    cbWndExtra: 0,
+                    hInstance: inst,
+                    hIcon: std::ptr::null_mut(),
+                    hCursor: cursor,
+                    hbrBackground: std::ptr::null_mut(),
+                    lpszMenuName: std::ptr::null(),
+                    lpszClassName: class.as_ptr(),
+                };
+                RegisterClassW(&wc); // fails harmlessly once registered
+            }
+            let canvas = Canvas::new(px(w) as u32, px(h) as u32, scale)?;
+            let win = Box::new(Win { hwnd: std::ptr::null_mut(), area: std::ptr::null_mut(), canvas, buf: Vec::new(), scale, state: state.clone() });
+            let title = wide(&state.borrow().info.name);
+            let mut p = POINT { x: pos.0, y: pos.1 };
+            if !detached {
+                ScreenToClient(owner as HWND, &mut p);
+            }
+            let hwnd = CreateWindowExW(
+                0,
+                fc.as_ptr(),
+                title.as_ptr(),
+                frame_style(detached),
+                p.x,
+                p.y,
+                px(w),
+                px(h),
+                owner as HWND,
+                std::ptr::null_mut(),
+                inst,
+                Box::into_raw(win) as *const c_void,
+            );
+            if hwnd.is_null() {
+                return Err("could not create the plugin window".into());
+            }
+            let ay = state.borrow().area_y();
+            let area = CreateWindowExW(
+                0,
+                ac.as_ptr(),
+                std::ptr::null(),
+                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+                px(BORDER),
+                px(ay),
+                px(editor.0),
+                px(editor.1),
+                hwnd,
+                std::ptr::null_mut(),
+                inst,
+                std::ptr::null(),
+            );
+            if let Some(w) = win_of(hwnd) {
+                w.area = area;
+            }
+            Ok(FrameWindow { hwnd, area, state })
+        }
+    }
+
+    pub fn detached(&self) -> bool {
+        self.state.borrow().detached
+    }
+
+    /// Docks the window into `owner` (a child, same place on screen) or detaches it (a top-level window owned by
+    /// `owner`). The plugin's editor stays embedded.
+    pub fn set_detached(&self, owner: isize, on: bool) {
+        if self.state.borrow().detached == on {
+            return;
+        }
+        {
+            let mut st = self.state.borrow_mut();
+            st.detached = on;
+            st.clip = None;
+            st.clip_key = None;
+        }
+        unsafe {
+            let mut r: RECT = std::mem::zeroed();
+            GetWindowRect(self.hwnd, &mut r);
+            SetWindowRgn(self.hwnd, std::ptr::null_mut(), 0);
+            ShowWindow(self.hwnd, SW_HIDE);
+            let mut p = POINT { x: r.left, y: r.top };
+            if on {
+                SetParent(self.hwnd, std::ptr::null_mut());
+                SetWindowLongPtrW(self.hwnd, GWL_STYLE, frame_style(true) as isize);
+                SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, owner);
+            } else {
+                SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, 0);
+                SetWindowLongPtrW(self.hwnd, GWL_STYLE, frame_style(false) as isize);
+                SetParent(self.hwnd, owner as HWND);
+                ScreenToClient(owner as HWND, &mut p);
+            }
+            SetWindowPos(self.hwnd, HWND_TOP, p.x, p.y, 0, 0, SWP_NOSIZE | SWP_FRAMECHANGED);
+        }
+        self.raise();
+    }
+
+    /// Clips a docked window to `work` minus the `covers` (the app's windows and popups above it), all in the parent's
+    /// client area (physical px). Moving the window by its title bar re-clips with the same rects.
+    pub fn clip_to(&self, work: [i32; 4], covers: &[[i32; 4]]) {
+        if self.detached() {
+            return;
+        }
+        self.state.borrow_mut().clip = Some((work, covers.to_vec()));
+        unsafe { apply_clip(self.hwnd, &self.state) };
+    }
+
+    /// The native frame window (drops find their plugin by it; tests drive and capture it).
+    pub fn hwnd(&self) -> isize {
+        self.hwnd as isize
+    }
+
+    /// The child window the plugin's editor goes into.
+    pub fn area(&self) -> *mut c_void {
+        self.area
+    }
+
+    pub fn raise(&self) {
+        unsafe {
+            ShowWindow(self.hwnd, SW_SHOWNORMAL);
+            SetWindowPos(self.hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            if self.detached() {
+                SetForegroundWindow(self.hwnd);
+            }
+        }
+    }
+
+    pub fn set_info(&self, info: ChannelInfo) {
+        let mut st = self.state.borrow_mut();
+        if st.info != info && st.drag.is_none() && st.misc_ui.drag.is_none() {
+            st.info = info;
+            drop(st);
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
+    /// The plugin's own page tabs (an Open plugin joined through the host link), replacing the plug tab.
+    pub fn set_pages(&self, pages: Vec<PageIcon>, active: usize) {
+        let mut st = self.state.borrow_mut();
+        if !pages.is_empty() && (st.pages != pages || st.page != active) {
+            st.page = active.min(pages.len() - 1);
+            st.pages = pages;
+            drop(st);
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
+    /// The plugin changed its page itself.
+    pub fn set_page(&self, page: usize) {
+        let mut st = self.state.borrow_mut();
+        if st.page != page && page < st.pages.len() {
+            st.page = page;
+            drop(st);
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
+    /// The plugin's hint line (parameter under the mouse).
+    pub fn set_hint(&self, hint: String) {
+        let mut st = self.state.borrow_mut();
+        if st.hint != hint {
+            st.hint = hint;
+            drop(st);
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
+    /// The loaded preset's name for the Presets box.
+    pub fn set_preset(&self, name: Option<String>) {
+        let mut st = self.state.borrow_mut();
+        if st.preset != name {
+            st.preset = name;
+            drop(st);
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
+    /// The DPI scale the frame is drawn at.
+    pub fn scale(&self) -> f32 {
+        unsafe { win_of(self.hwnd) }.map_or(1.0, |w| w.scale)
+    }
+
+    /// Redraws the frame at another DPI scale (same logical size). The editor inside is the caller's: plugins take
+    /// their scale when the editor opens (spec: ui/ui-scaling.md §3).
+    pub fn set_scale(&self, scale: f32) {
+        let Some(w) = (unsafe { win_of(self.hwnd) }) else { return };
+        if scale <= 0.0 || w.scale == scale {
+            return;
+        }
+        w.scale = scale;
+        self.state.borrow_mut().clip_key = None;
+        unsafe { layout(self.hwnd) };
+    }
+
+    /// Follows a new editor size (plugins may resize).
+    pub fn set_editor_size(&self, editor: (f32, f32)) {
+        if self.state.borrow().editor != editor {
+            self.state.borrow_mut().editor = editor;
+            unsafe { layout(self.hwnd) };
+        }
+    }
+
+    /// Shows or hides the gear strip (mixer effects open without it).
+    pub fn set_strip(&self, on: bool) {
+        if self.state.borrow().strip != on {
+            self.state.borrow_mut().strip = on;
+            unsafe { layout(self.hwnd) };
+        }
+    }
+
+    pub fn take_events(&self) -> Vec<FrameEvent> {
+        std::mem::take(&mut self.state.borrow_mut().events)
+    }
+}
+
+impl Drop for FrameWindow {
+    fn drop(&mut self) {
+        unsafe { DestroyWindow(self.hwnd) };
+    }
+}
+
+type WndProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
+
+fn frame_style(detached: bool) -> u32 {
+    if detached { WS_POPUP | WS_CLIPCHILDREN } else { WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN }
+}
+
+
+/// Puts `parent`'s docked windows `hwnds` (bottom to top) in that native order when they are not already.
+pub fn stack(parent: isize, hwnds: &[isize]) {
+    if hwnds.len() < 2 {
+        return;
+    }
+    unsafe {
+        // The children's current order, bottom to top.
+        let mut now = Vec::new();
+        let mut c = GetWindow(parent as HWND, GW_CHILD);
+        while !c.is_null() {
+            if hwnds.contains(&(c as isize)) {
+                now.push(c as isize);
+            }
+            c = GetWindow(c, GW_HWNDNEXT);
+        }
+        now.reverse();
+        if now == hwnds {
+            return;
+        }
+        for &h in hwnds {
+            SetWindowPos(h as HWND, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+}
+
+/// A child window's rect in its parent's client area (physical px).
+unsafe fn parent_rect(hwnd: HWND) -> [i32; 4] {
+    unsafe {
+        let mut r: RECT = std::mem::zeroed();
+        GetWindowRect(hwnd, &mut r);
+        let parent = GetParent(hwnd);
+        let (mut a, mut b) = (POINT { x: r.left, y: r.top }, POINT { x: r.right, y: r.bottom });
+        ScreenToClient(parent, &mut a);
+        ScreenToClient(parent, &mut b);
+        [a.x, a.y, b.x, b.y]
+    }
+}
+
+/// Sets a docked window's region for its current position from `State::clip`. The parts that come into view are
+/// repainted, the plugin's editor included: the system redraws only the frame itself, and an editor left alone keeps
+/// showing whatever was seen through the old region.
+unsafe fn apply_clip(hwnd: HWND, state: &RefCell<State>) {
+    let (me, work, covers) = {
+        let mut st = state.borrow_mut();
+        let Some((work, covers)) = st.clip.as_ref() else { return };
+        let me = unsafe { parent_rect(hwnd) };
+        // Only what overlaps the window matters.
+        let hit = |c: &[i32; 4]| c[0] < me[2] && c[2] > me[0] && c[1] < me[3] && c[3] > me[1];
+        let covers: Vec<[i32; 4]> = covers.iter().copied().filter(hit).collect();
+        let work = *work;
+        let key: Vec<i32> = me.into_iter().chain(work).chain(covers.iter().flatten().copied()).collect();
+        if st.clip_key.as_ref() == Some(&key) {
+            return;
+        }
+        st.clip_key = Some(key);
+        (me, work, covers)
+    };
+    let inside = work[0] <= me[0] && work[1] <= me[1] && work[2] >= me[2] && work[3] >= me[3];
+    let (ox, oy, w, h) = (me[0], me[1], me[2] - me[0], me[3] - me[1]);
+    unsafe {
+        let whole = CreateRectRgn(0, 0, w, h);
+        let rgn = if inside && covers.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            let rgn = CreateRectRgn(0, 0, w, h);
+            let r = CreateRectRgn(work[0] - ox, work[1] - oy, work[2] - ox, work[3] - oy);
+            CombineRgn(rgn, rgn, r, RGN_AND);
+            DeleteObject(r);
+            for c in &covers {
+                let r = CreateRectRgn(c[0] - ox, c[1] - oy, c[2] - ox, c[3] - oy);
+                CombineRgn(rgn, rgn, r, RGN_DIFF);
+                DeleteObject(r);
+            }
+            rgn
+        };
+        // What the new region shows that the old one hid (no region = the whole window).
+        let old = CreateRectRgn(0, 0, 0, 0);
+        if GetWindowRgn(hwnd, old) == 0 {
+            CombineRgn(old, whole, std::ptr::null_mut(), RGN_COPY);
+        }
+        let gained = CreateRectRgn(0, 0, 0, 0);
+        CombineRgn(gained, if rgn.is_null() { whole } else { rgn }, old, RGN_DIFF);
+        SetWindowRgn(hwnd, rgn, 1); // the system owns `rgn` now
+        RedrawWindow(hwnd, std::ptr::null(), gained, RDW_INVALIDATE | RDW_ALLCHILDREN);
+        for r in [whole, old, gained] {
+            DeleteObject(r);
+        }
+    }
+}
+
+unsafe fn win_of(hwnd: HWND) -> Option<&'static mut Win> {
+    let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut Win;
+    if p.is_null() { None } else { Some(unsafe { &mut *p }) }
+}
+
+/// Resizes the frame to its state (strip shown or not, editor size) and moves the editor area.
+unsafe fn layout(hwnd: HWND) {
+    let Some(w) = (unsafe { win_of(hwnd) }) else { return };
+    let st = w.state.borrow();
+    let (fw, fh) = st.size();
+    let px = |v: f32| (v * w.scale).round() as i32;
+    let tab_plugin = !st.misc;
+    let (ay, ed) = (st.area_y(), st.editor);
+    drop(st);
+    unsafe {
+        SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, px(fw), px(fh), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(w.area, std::ptr::null_mut(), px(BORDER), px(ay), px(ed.0), px(ed.1), SWP_NOZORDER | SWP_NOACTIVATE);
+        ShowWindow(w.area, if tab_plugin { SW_SHOW } else { SW_HIDE });
+    }
+    w.canvas.resize(px(fw) as u32, px(fh) as u32, w.scale);
+    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+}
+
+unsafe extern "system" fn area_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if msg == WM_ERASEBKGND {
+            return 1;
+        }
+        if msg == os_hostlink::message() {
+            // Plugin -> host (spec: plugins/host-link.md): queue it and wake the app so it is handled at once.
+            let m = match os_hostlink::Cmd::from_usize(wp) {
+                Some(os_hostlink::Cmd::Changed) => LinkMsg::Changed,
+                Some(os_hostlink::Cmd::Note) => {
+                    let (k, v, on) = os_hostlink::unpack_note(lp);
+                    LinkMsg::Note(k, v, on)
+                }
+                Some(os_hostlink::Cmd::Automate) => LinkMsg::Automate(lp.max(0) as usize),
+                _ => return 0,
+            };
+            if let Ok(mut q) = LINK.lock() {
+                q.push((hwnd as isize, m));
+            }
+            os_clap::wake();
+            return 1;
+        }
+        DefWindowProcW(hwnd, msg, wp, lp)
+    }
+}
+
+fn client_point(hwnd: HWND, lp: LPARAM, scale: f32, screen: bool) -> (f32, f32) {
+    let mut p = POINT { x: (lp & 0xffff) as u16 as i16 as i32, y: ((lp >> 16) & 0xffff) as u16 as i16 as i32 };
+    if screen {
+        unsafe { ScreenToClient(hwnd, &mut p) };
+    }
+    (p.x as f32 / scale, p.y as f32 / scale)
+}
+
+unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if msg == WM_NCCREATE {
+            let cs = lp as *const CREATESTRUCTW;
+            let w = (*cs).lpCreateParams as *mut Win;
+            (*w).hwnd = hwnd;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, w as isize);
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        if msg == WM_NCDESTROY {
+            let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Win;
+            if !p.is_null() {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                drop(Box::from_raw(p));
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        let Some(w) = win_of(hwnd) else { return DefWindowProcW(hwnd, msg, wp, lp) };
+        match msg {
+            WM_NCHITTEST => {
+                // The whole frame is client area; the title bar is moved by hand (WM_LBUTTONDOWN).
+                HTCLIENT as LRESULT
+            }
+            WM_ERASEBKGND => 1,
+            WM_DPICHANGED => {
+                // Only top-level (detached) windows get this: moved onto a monitor with another DPI. The app redraws
+                // the frame and reopens the editor at the new scale on its next tick (spec: ui/ui-scaling.md §3).
+                let k = (wp & 0xffff) as f32 / 96.0;
+                w.state.borrow_mut().events.push(FrameEvent::Dpi(k));
+                os_clap::wake();
+                0
+            }
+            WM_PAINT => {
+                let mut ps: PAINTSTRUCT = std::mem::zeroed();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                paint(&mut w.canvas, &w.state.borrow());
+                let (cw, ch) = (w.canvas.size().0 * w.scale, w.canvas.size().1 * w.scale);
+                let (cw, ch) = (cw.round() as u32, ch.round() as u32);
+                w.buf.resize((cw * ch) as usize, 0);
+                w.canvas.copy_to_xrgb(&mut w.buf);
+                let mut bmi: BITMAPINFO = std::mem::zeroed();
+                bmi.bmiHeader = BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: cw as i32,
+                    biHeight: -(ch as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB,
+                    ..std::mem::zeroed()
+                };
+                SetDIBitsToDevice(hdc, 0, 0, cw, ch, 0, 0, 0, ch, w.buf.as_ptr() as *const c_void, &bmi, DIB_RGB_COLORS);
+                EndPaint(hwnd, &ps);
+                0
+            }
+            WM_MOUSEACTIVATE => {
+                // Any click brings the window to the front of the app's stack (spec: ui/plugin-window.md "Docking").
+                SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                w.state.borrow_mut().events.push(FrameEvent::Raise);
+                os_clap::wake();
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
+            WM_PARENTNOTIFY if matches!((wp & 0xffff) as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) => {
+                // A click inside the plugin's editor.
+                SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                w.state.borrow_mut().events.push(FrameEvent::Raise);
+                os_clap::wake();
+                0
+            }
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+                let (x, y) = client_point(hwnd, lp, w.scale, false);
+                let r = w.state.borrow_mut().left_down(x, y, msg == WM_LBUTTONDBLCLK, &to_screen(hwnd, w.scale));
+                reply(hwnd, w, r);
+                0
+            }
+            WM_RBUTTONDOWN => {
+                let (x, y) = client_point(hwnd, lp, w.scale, false);
+                let r = w.state.borrow_mut().right_down(x, y, &to_screen(hwnd, w.scale));
+                reply(hwnd, w, r);
+                0
+            }
+            WM_MBUTTONDOWN => {
+                let (x, y) = client_point(hwnd, lp, w.scale, false);
+                let r = w.state.borrow_mut().middle_down(x, y, &to_screen(hwnd, w.scale));
+                reply(hwnd, w, r);
+                0
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = client_point(hwnd, lp, w.scale, false);
+                let moving = w.state.borrow().moving;
+                if let Some((cx, cy, wx, wy)) = moving {
+                    let mut c: POINT = std::mem::zeroed();
+                    GetCursorPos(&mut c);
+                    // Screen position; a docked window is placed in its parent's client area.
+                    let mut p = POINT { x: wx + c.x - cx, y: wy + c.y - cy };
+                    let docked = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0;
+                    if docked {
+                        ScreenToClient(GetParent(hwnd), &mut p);
+                    }
+                    SetWindowPos(hwnd, std::ptr::null_mut(), p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    if docked {
+                        // Paint what the move uncovered (the main window, other docked plugin windows and their
+                        // editors) before the next move. Left to ordinary WM_PAINTs, which wait behind the mouse
+                        // moves, the windows below lag behind and show trails of this one while it is dragged.
+                        apply_clip(hwnd, &w.state);
+                        EXPOSED.store(true, Ordering::Relaxed);
+                        RedrawWindow(GetParent(hwnd), std::ptr::null(), std::ptr::null_mut(), RDW_UPDATENOW | RDW_ALLCHILDREN);
+                    }
+                    return 0;
+                }
+                let fine = GetKeyState(VK_CONTROL as i32) < 0;
+                let r = w.state.borrow_mut().motion(x, y, fine);
+                reply(hwnd, w, r);
+                0
+            }
+            WM_LBUTTONUP => {
+                ReleaseCapture();
+                w.state.borrow_mut().release();
+                0
+            }
+            WM_CAPTURECHANGED => {
+                w.state.borrow_mut().release();
+                0
+            }
+            WM_MOUSEWHEEL => {
+                let (x, y) = client_point(hwnd, lp, w.scale, true);
+                let notches = ((wp >> 16) & 0xffff) as u16 as i16 as f32 / 120.0;
+                let r = w.state.borrow_mut().wheel(x, y, notches);
+                reply(hwnd, w, r);
+                0
+            }
+            WM_CLOSE => {
+                w.state.borrow_mut().events.push(FrameEvent::Close);
+                0
+            }
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+}
+
+/// The frame's window point (logical px) on screen (physical px).
+fn to_screen(hwnd: HWND, scale: f32) -> impl Fn(f32, f32) -> (i32, i32) {
+    move |x, y| {
+        let mut p = POINT { x: (x * scale) as i32, y: (y * scale) as i32 };
+        unsafe { ClientToScreen(hwnd, &mut p) };
+        (p.x, p.y)
+    }
+}
+
+/// Does what an input event asked of the window.
+unsafe fn reply(hwnd: HWND, w: &mut Win, r: Reply) {
+    unsafe {
+        match r {
+            Reply::None => {}
+            Reply::Repaint => {
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+            Reply::Relayout => {
+                layout(hwnd);
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+            Reply::Capture => {
+                SetCapture(hwnd);
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+            Reply::Move => {
+                // Moved by hand (WM_MOUSEMOVE): the system's move loop (HTCAPTION) blocks the UI thread.
+                let mut c: POINT = std::mem::zeroed();
+                let mut r: RECT = std::mem::zeroed();
+                GetCursorPos(&mut c);
+                GetWindowRect(hwnd, &mut r);
+                w.state.borrow_mut().moving = Some((c.x, c.y, r.left, r.top));
+                SetCapture(hwnd);
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+            Reply::Minimize => {
+                // A docked window hides (its channel's name button shows it again).
+                let cmd = if w.state.borrow().detached { SW_MINIMIZE } else { SW_HIDE };
+                ShowWindow(hwnd, cmd);
+            }
+        }
+    }
+}
+
+/// Screen position for a new plugin window: right of the owner's left edge, below its toolbar (physical px; the
+/// offset is logical, so the window lands on the same part of the layout at every scale).
+pub fn default_position(owner: isize, scale: f32) -> (i32, i32) {
+    let mut r: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetWindowRect(owner as HWND, &mut r) };
+    (r.left + (420.0 * scale).round() as i32, r.top + (160.0 * scale).round() as i32)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Lifted overlay: an app popup opened from a detached plugin window would be painted in the main window, under the
+// detached window (owned windows stay above their owner). While one is open, its pixels are shown in this small
+// window above the plugin window, and its mouse input is passed to the main window as if it happened there.
+
+struct Lift {
+    hwnd: HWND,
+    main: HWND,
+    /// Main-window client position of the lifted rect's top-left.
+    origin: (i32, i32),
+    size: (i32, i32),
+    buf: Vec<u32>,
+}
+
+static LIFT: Mutex<Option<LiftPtr>> = Mutex::new(None);
+struct LiftPtr(Box<Lift>);
+// SAFETY: only touched on the UI thread; the Mutex is just a global slot.
+unsafe impl Send for LiftPtr {}
+
+const LIFT_CLASS: &str = "OpenStudioLiftedPopup";
+
+unsafe extern "system" fn lift_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        let Ok(g) = LIFT.lock() else { return DefWindowProcW(hwnd, msg, wp, lp) };
+        let Some(l) = g.as_ref().map(|p| &p.0).filter(|l| l.hwnd == hwnd) else {
+            drop(g);
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        };
+        match msg {
+            WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
+            WM_ERASEBKGND => 1,
+            WM_PAINT => {
+                let mut ps: PAINTSTRUCT = std::mem::zeroed();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                let (w, h) = l.size;
+                if l.buf.len() == (w * h) as usize {
+                    let mut bmi: BITMAPINFO = std::mem::zeroed();
+                    bmi.bmiHeader = BITMAPINFOHEADER {
+                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: w,
+                        biHeight: -h,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB,
+                        ..std::mem::zeroed()
+                    };
+                    SetDIBitsToDevice(hdc, 0, 0, w as u32, h as u32, 0, 0, 0, h as u32, l.buf.as_ptr() as *const c_void, &bmi, DIB_RGB_COLORS);
+                }
+                EndPaint(hwnd, &ps);
+                0
+            }
+            WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP => {
+                let x = (lp & 0xffff) as u16 as i16 as i32 + l.origin.0;
+                let y = ((lp >> 16) & 0xffff) as u16 as i16 as i32 + l.origin.1;
+                let main = l.main;
+                drop(g);
+                PostMessageW(main, msg, wp, ((y as u32 & 0xffff) << 16 | (x as u32 & 0xffff)) as LPARAM);
+                0
+            }
+            _ => {
+                drop(g);
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
+        }
+    }
+}
+
+/// Shows `pixels` (`size`, XRGB) above plugin window `frame`, at main-window client position `origin`.
+pub fn lift_show(main: isize, frame: isize, origin: (i32, i32), size: (i32, i32), pixels: Vec<u32>) {
+    unsafe {
+        let mut p = POINT { x: origin.0, y: origin.1 };
+        ClientToScreen(main as HWND, &mut p);
+        let mut g = match LIFT.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if g.is_none() {
+            let inst = GetModuleHandleW(std::ptr::null());
+            let class = wide(LIFT_CLASS);
+            let wc = WNDCLASSW {
+                style: 0,
+                lpfnWndProc: Some(lift_proc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: inst,
+                hIcon: std::ptr::null_mut(),
+                hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
+                hbrBackground: std::ptr::null_mut(),
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: class.as_ptr(),
+            };
+            RegisterClassW(&wc);
+            *g = Some(LiftPtr(Box::new(Lift { hwnd: std::ptr::null_mut(), main: main as HWND, origin, size, buf: Vec::new() })));
+            drop(g);
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class.as_ptr(),
+                std::ptr::null(),
+                WS_POPUP,
+                p.x,
+                p.y,
+                size.0,
+                size.1,
+                frame as HWND,
+                std::ptr::null_mut(),
+                inst,
+                std::ptr::null(),
+            );
+            g = match LIFT.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            if let Some(l) = g.as_mut() {
+                l.0.hwnd = hwnd;
+            }
+        }
+        let Some(l) = g.as_mut().map(|p| &mut p.0) else { return };
+        l.main = main as HWND;
+        l.origin = origin;
+        l.size = size;
+        l.buf = pixels;
+        let hwnd = l.hwnd;
+        drop(g);
+        SetWindowPos(hwnd, HWND_TOP, p.x, p.y, size.0, size.1, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        InvalidateRect(hwnd, std::ptr::null(), 0);
+    }
+}
+
+/// Hides the lifted popup (none open).
+pub fn lift_hide() {
+    let l = LIFT.lock().ok().and_then(|mut g| g.take());
+    if let Some(l) = l {
+        unsafe { DestroyWindow(l.0.hwnd) };
+    }
+}
+

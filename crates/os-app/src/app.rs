@@ -585,6 +585,15 @@ pub fn off_text(name: &str) -> String {
     format!("{name}: not available yet")
 }
 
+/// What is not available where plugin windows are not (`cfg(plugin_windows)`: Windows and Linux so far).
+#[cfg(not(plugin_windows))]
+pub const PLUGIN_WINDOWS: &str = "Plugin windows on this system";
+
+/// The plugin window's menus, preset list and Misc lists are app popups painted in the main window: off Windows a
+/// detached window would cover them (Windows lifts them above it).
+#[cfg(all(plugin_windows, not(windows)))]
+const PLUGIN_POPUPS: &str = "Menus of detached plugin windows on Linux (dock the window)";
+
 #[derive(Debug, Clone)]
 pub enum Drag {
     /// Vertical drag on the pattern name box steps the number (spec: ui/pattern-menu.md §1).
@@ -830,6 +839,7 @@ pub struct App {
     /// Where the canvas sits in the main window's client area (physical px; the restored window's border).
     pub canvas_off: (i32, i32),
     /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
     popup_lift: Option<usize>,
     pub bars: Vec<Bar>,
     pub hover: Option<Action>,
@@ -1080,7 +1090,7 @@ impl App {
     fn save(&mut self, choose: bool) {
         let s = &self.state;
         let target = if choose || s.path.is_none() {
-            rfd::FileDialog::new().add_filter("FLP project", &["flp"]).save_file()
+            crate::dialog::modal(|| rfd::FileDialog::new().add_filter("FLP project", &["flp"]).save_file())
         } else {
             s.path.clone()
         };
@@ -1112,7 +1122,7 @@ impl App {
         if let Some(d) = self.state.path.as_ref().and_then(|p| p.parent()) {
             dlg = dlg.set_directory(d);
         }
-        let Some(mut target) = dlg.save_file() else { return };
+        let Some(mut target) = crate::dialog::modal(|| dlg.save_file()) else { return };
         if target.extension().is_none() {
             target.set_extension("wav");
         }
@@ -1250,20 +1260,20 @@ impl App {
             return true;
         }
         let name = self.state.path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "the new project".to_string(), |n| n.to_string_lossy().into_owned());
-        let answer = rfd::MessageDialog::new()
-            .set_title("Lemon Studio")
-            .set_level(rfd::MessageLevel::Warning)
-            .set_description(format!("Save the changes to {name} before {doing}?"))
-            .set_buttons(rfd::MessageButtons::YesNoCancel)
-            .show();
-        match answer {
-            rfd::MessageDialogResult::Yes => {
+        match crate::dialog::yes_no_cancel("Lemon Studio", &format!("Save the changes to {name} before {doing}?")) {
+            Some(crate::dialog::Answer::Yes) => {
                 self.save(false);
                 self.invalidate();
                 !self.unsaved()
             }
-            rfd::MessageDialogResult::No => true,
-            _ => false,
+            Some(crate::dialog::Answer::No) => true,
+            Some(crate::dialog::Answer::Cancel) => false,
+            // No dialog program (Linux without zenity or kdialog): nothing is lost unasked.
+            None => {
+                self.state.message = Some(format!("Unsaved changes: save first (Ctrl+S) before {doing}. Install zenity or kdialog to be asked."));
+                self.invalidate();
+                false
+            }
         }
     }
 
@@ -1439,7 +1449,13 @@ impl App {
             }
             self.invalidate();
         }
-        #[cfg(windows)]
+        // Without plugin windows opening one says so.
+        #[cfg(not(plugin_windows))]
+        if self.state.pending_open.take().is_some_and(|r| self.state.hosted_rows.contains(&r)) {
+            self.state.message = Some(off_text(PLUGIN_WINDOWS));
+            self.invalidate();
+        }
+        #[cfg(plugin_windows)]
         if let Some(row) = self.state.pending_open.take().filter(|r| self.state.hosted_rows.contains(r)) {
             if let Some(info) = channel_info(&self.state.project, row) {
                 match self.plugins.open_window(row, info) {
@@ -1451,20 +1467,29 @@ impl App {
                 }
             }
         }
+        // Plugin housekeeping on every platform (callbacks, parameter flushes, restarts, rate changes); the plugin
+        // windows' requests come with it.
+        #[cfg(plugin_windows)]
+        let requests = {
+            let (project, mixer) = (&self.state.project, &self.state.mixer);
+            self.plugins.idle(|row| if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) })
+        };
+        // No plugin windows here, so no requests.
+        #[cfg(not(plugin_windows))]
+        self.plugins.idle(|_| None);
+        // Keys pressed while a plugin window has the focus still play the typing keyboard.
         #[cfg(windows)]
-        {
-            // Keys pressed while a plugin window has the focus still play the typing keyboard.
-            for k in crate::plugin_window::take_keys() {
-                use winit::platform::scancode::PhysicalKeyExtScancode;
-                if let winit::keyboard::PhysicalKey::Code(code) = winit::keyboard::PhysicalKey::from_scancode(k.scancode) {
-                    // Space keeps playing / stopping the song (the typing keyboard does not use it).
-                    if !self.typing_key(code, k.pressed, k.ctrl, k.alt) && k.pressed && code == winit::keyboard::KeyCode::Space {
-                        self.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), k.ctrl, k.alt);
-                    }
+        for k in crate::plugin_window::take_keys() {
+            use winit::platform::scancode::PhysicalKeyExtScancode;
+            if let winit::keyboard::PhysicalKey::Code(code) = winit::keyboard::PhysicalKey::from_scancode(k.scancode) {
+                // Space keeps playing / stopping the song (the typing keyboard does not use it).
+                if !self.typing_key(code, k.pressed, k.ctrl, k.alt) && k.pressed && code == winit::keyboard::KeyCode::Space {
+                    self.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), k.ctrl, k.alt);
                 }
             }
-            let (project, mixer) = (&self.state.project, &self.state.mixer);
-            let requests = self.plugins.idle(|row| if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) });
+        }
+        #[cfg(plugin_windows)]
+        {
             for r in requests {
                 use crate::plugins::Request;
                 let chans = &mut self.state.project.channels;
@@ -1476,6 +1501,13 @@ impl App {
                             self.invalidate();
                         }
                         self.state.raise(Win::Hosted(row));
+                        continue;
+                    }
+                    // A native Wayland main window (Linux): the popups cannot be lifted above a plugin window there.
+                    #[cfg(not(windows))]
+                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) if self.plugins.owner == 0 => {
+                        self.state.message = Some(off_text(PLUGIN_POPUPS));
+                        self.invalidate();
                         continue;
                     }
                     Request::Menu(row, x, y) => {
@@ -1547,6 +1579,14 @@ impl App {
         }
     }
 
+    /// Screen point -> canvas logical px (an X11 main window: Linux).
+    #[cfg(target_os = "linux")]
+    fn screen_to_canvas(&self, x: i32, y: i32) -> (f32, f32) {
+        let (x, y) = crate::plugin_window::screen_to_main(x, y).unwrap_or((x, y));
+        let k = self.plugins.scale;
+        ((x - self.canvas_off.0) as f32 / k, (y - self.canvas_off.1) as f32 / k)
+    }
+
     /// Screen point -> canvas logical px.
     #[cfg(windows)]
     fn screen_to_canvas(&self, x: i32, y: i32) -> (f32, f32) {
@@ -1557,9 +1597,29 @@ impl App {
         ((p.x - self.canvas_off.0) as f32 / k, (p.y - self.canvas_off.1) as f32 / k)
     }
 
+    /// Linux: mouse input on a lifted popup (`sync_lift`) goes to the app as if it happened in the main window.
+    #[cfg(target_os = "linux")]
+    fn lift_input(&mut self) {
+        let input = crate::plugin_window::take_lift_input();
+        let k = self.plugins.scale;
+        let (ox, oy) = self.canvas_off;
+        for i in &input {
+            match *i {
+                crate::plugin_window::LiftInput::Move(x, y) => {
+                    self.mouse_move((x - ox) as f32 / k, (y - oy) as f32 / k);
+                }
+                crate::plugin_window::LiftInput::Down(1) => self.mouse_down(),
+                crate::plugin_window::LiftInput::Down(2) => self.mouse_down_middle(),
+                crate::plugin_window::LiftInput::Down(3) => self.mouse_down_right(),
+                crate::plugin_window::LiftInput::Down(_) => {}
+                crate::plugin_window::LiftInput::Up => self.mouse_up(),
+            }
+        }
+    }
+
     /// After a paint: a popup opened from a detached plugin window is shown above that window (it is painted in the
     /// main window, which the detached window covers).
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     pub fn sync_lift(&mut self, canvas: &Canvas) {
         let lifted = self.popup_lift.filter(|_| self.state.playlist.popup.is_some()).and_then(|r| self.plugins.window_of(r));
         let bounds = self.overlays.iter().copied().reduce(|a, b| a.union(&b));
@@ -1585,8 +1645,8 @@ impl App {
     }
 
     /// Docked plugin windows (native children) join `State::z` and are clipped to the workspace minus the drawn
-    /// windows above them and the overlays (spec: ui/plugin-window.md "Docking").
-    #[cfg(windows)]
+    /// windows above them and the overlays (spec: ui/plugin-window.md "Docking"). Detached windows leave `State::z`.
+    #[cfg(plugin_windows)]
     fn clip_docked(&mut self) {
         let docked = self.plugins.docked();
         self.state.z.retain(|w| !matches!(w, Win::Hosted(r) if !docked.contains(r)));
@@ -1914,12 +1974,22 @@ impl App {
 
     /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
-        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading()
+        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading() || self.plugin_windows_busy()
+    }
+
+    /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
+    fn plugin_windows_busy(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return crate::plugin_window::busy();
+        #[cfg(not(target_os = "linux"))]
+        false
     }
 
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         self.plugin_tick();
+        #[cfg(target_os = "linux")]
+        self.lift_input();
         {
             // Scope / analyzer / peak bars: from the audio tap; repaint just the monitor when it changed.
             // The monitor advances at its own refresh rate, however often we tick.
@@ -2181,7 +2251,7 @@ impl App {
     }
 
     /// Load a theme: a `.flstheme` (spec ui/flstheme.md) or a Lemon Studio `theme.txt`. A `.flstheme` is also
-    /// remembered as `%APPDATA%/Lemon Studio/current.flstheme` so the next start uses it.
+    /// remembered as `current.flstheme` in the user folder so the next start uses it.
     pub fn load_theme_file(&mut self, path: &std::path::Path) {
         self.load_theme_file_ex(path, true)
     }
@@ -2199,7 +2269,7 @@ impl App {
                     save_design(Design::Classic);
                 }
                 if remember && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")) {
-                    if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) {
+                    if let Some(d) = os_paths::user_dir() {
                         let _ = std::fs::create_dir_all(&d);
                         let keep = d.join("current.flstheme");
                         if keep.as_path() != path {
@@ -2222,7 +2292,7 @@ impl App {
     }
 
     /// Switch to design `d`: Lemon brings its own colours, Classic the saved theme (or the default look).
-    /// `remember` = keep the choice for the next start (`%APPDATA%/Lemon Studio/design.txt`).
+    /// `remember` = keep the choice for the next start (`design.txt` in the user folder).
     pub fn set_design(&mut self, d: Design, remember: bool) {
         self.theme = design_theme(d, remember);
         os_theme::set_current(&self.theme.colors);
@@ -2264,9 +2334,9 @@ impl App {
         let name = |d: &cpal::Device| d.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "(unknown device)".into());
         st.device = host.default_output_device().map(|d| name(&d)).unwrap_or_else(|| "(no output device)".into());
         st.devices = host.output_devices().map(|ds| ds.map(|d| name(&d)).collect()).unwrap_or_default();
-        // Built-in presets (spec: ui/theme-presets.md), then .flstheme files in %APPDATA%/Lemon Studio/themes.
+        // Built-in presets (spec: ui/theme-presets.md), then .flstheme files in the user folder's `themes`.
         st.themes = os_theme::presets::PRESETS.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect();
-        if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio").join("themes")) {
+        if let Some(d) = os_paths::user_file("themes") {
             if let Ok(rd) = std::fs::read_dir(&d) {
                 let mut v: Vec<_> = rd
                     .flatten()
@@ -2288,7 +2358,7 @@ impl App {
         if fl.is_dir() {
             dlg = dlg.set_directory(fl);
         }
-        if let Some(p) = dlg.pick_file() {
+        if let Some(p) = crate::dialog::modal(|| dlg.pick_file()) {
             self.load_theme_file(&p);
         }
     }
@@ -2334,8 +2404,8 @@ impl App {
                 self.theme = os_theme::Theme::default();
                 os_theme::set_current(&self.theme.colors);
                 save_design(Design::Classic);
-                if let Some(d) = std::env::var_os("APPDATA") {
-                    let _ = std::fs::remove_file(PathBuf::from(d).join("Lemon Studio").join("current.flstheme"));
+                if let Some(f) = os_paths::user_file("current.flstheme") {
+                    let _ = std::fs::remove_file(f);
                 }
                 self.sync_preset();
                 self.state.message = Some("Theme: Classic".into());
@@ -2348,7 +2418,7 @@ impl App {
                     os_theme::set_current(&self.theme.colors);
                     save_design(Design::Classic);
                     // Remembered like an imported theme (loaded at the next start).
-                    if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) {
+                    if let Some(d) = os_paths::user_dir() {
                         let _ = std::fs::create_dir_all(&d);
                         let _ = std::fs::write(d.join("current.flstheme"), &text);
                     }
@@ -4765,7 +4835,7 @@ impl App {
                 if let Some(d) = start {
                     dlg = dlg.set_directory(d);
                 }
-                if let Some(p) = dlg.pick_file() {
+                if let Some(p) = crate::dialog::modal(|| dlg.pick_file()) {
                     self.open(p);
                 }
             }
@@ -4884,7 +4954,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
 }
 
 /// What a plugin window's strip shows for rack row `row` (spec: ui/plugin-window.md).
-#[cfg(windows)]
+#[cfg(plugin_windows)]
 fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::ChannelInfo> {
     let ch = p.channels.get(row)?;
     Some(crate::plugin_window::ChannelInfo {
@@ -4967,10 +5037,10 @@ fn template_project(names: &[&str]) -> Project {
 }
 
 fn monitor_cfg_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio").join("monitor.txt"))
+    os_paths::user_file("monitor.txt")
 }
 
-/// Monitor settings from `%APPDATA%/Lemon Studio/monitor.txt` (written by the debug panel's Save), else defaults.
+/// Monitor settings from `monitor.txt` in the user folder (written by the debug panel's Save), else defaults.
 fn load_monitor_cfg() -> crate::monitor::Settings {
     let mut cfg = crate::monitor::Settings::default();
     if let Some(text) = monitor_cfg_path().and_then(|p| std::fs::read_to_string(p).ok()) {
@@ -4980,7 +5050,7 @@ fn load_monitor_cfg() -> crate::monitor::Settings {
 }
 
 fn save_monitor_cfg(cfg: &crate::monitor::Settings) -> Result<PathBuf, String> {
-    let p = monitor_cfg_path().ok_or("no APPDATA folder")?;
+    let p = monitor_cfg_path().ok_or("no user folder")?;
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
@@ -5001,34 +5071,34 @@ pub fn theme_from_file(path: &std::path::Path) -> Result<Theme, String> {
     }
 }
 
-/// The theme: the saved design's (spec: ui/lemon-design.md); for Classic `%APPDATA%/Lemon Studio/theme.txt`, else the last
-/// imported `current.flstheme`, else the default.
+/// The theme: the saved design's (spec: ui/lemon-design.md); for Classic `theme.txt` in the user folder
+/// (`os_paths::user_dir`), else the last imported `current.flstheme`, else the default.
 fn load_theme() -> Theme {
     let t = design_theme(saved_design(), true);
     os_theme::set_current(&t.colors);
     t
 }
 
-/// The settings folder from before the rename to Lemon Studio (`%APPDATA%/OpenStudio`) moves to `%APPDATA%/Lemon Studio`
-/// once, at start, so dropped browser folders, presets, the design and the theme carry over (spec: ui/lemon-design.md §12).
+/// The settings folder from before the rename to Lemon Studio (`OpenStudio`, e.g. `%APPDATA%/OpenStudio`) moves to the
+/// user folder (`os_paths::user_dir`, e.g. `%APPDATA%/Lemon Studio`) once, at start, so dropped browser folders, presets,
+/// the design and the theme carry over (spec: ui/lemon-design.md §12).
 pub fn move_old_settings() {
     if cfg!(test) {
         return;
     }
-    let Some(data) = std::env::var_os("APPDATA").map(PathBuf::from) else { return };
-    let (old, new) = (data.join("OpenStudio"), data.join("Lemon Studio"));
+    let (Some(old), Some(new)) = (os_paths::legacy_dir(), os_paths::user_dir()) else { return };
     if old.is_dir() && !new.exists() {
         let _ = std::fs::rename(&old, &new);
     }
 }
 
-/// The design named in `%APPDATA%/Lemon Studio/design.txt`; Lemon when there is none. Tests always use Classic.
+/// The design named in `design.txt` in the user folder; Lemon when there is none. Tests always use Classic.
 pub fn saved_design() -> Design {
     if cfg!(test) {
         return Design::Classic;
     }
-    std::env::var_os("APPDATA")
-        .and_then(|d| std::fs::read_to_string(PathBuf::from(d).join("Lemon Studio").join("design.txt")).ok())
+    os_paths::user_file("design.txt")
+        .and_then(|f| std::fs::read_to_string(f).ok())
         .and_then(|t| Design::parse(&t))
         .unwrap_or(Design::Lemon)
 }
@@ -5037,7 +5107,7 @@ fn save_design(d: Design) {
     if cfg!(test) {
         return;
     }
-    if let Some(dir) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) {
+    if let Some(dir) = os_paths::user_dir() {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join("design.txt"), d.name());
     }
@@ -5056,7 +5126,7 @@ fn load_theme_inner() -> Theme {
     if cfg!(test) {
         return Theme::default();
     }
-    let Some(dir) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) else { return Theme::default() };
+    let Some(dir) = os_paths::user_dir() else { return Theme::default() };
     for f in ["theme.txt", "current.flstheme"] {
         let p = dir.join(f);
         if p.exists() {

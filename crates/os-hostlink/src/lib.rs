@@ -6,9 +6,16 @@
 //! which page is active, and the plugin hides its own tab row. A plugin that never receives the hello (another DAW)
 //! keeps drawing its own tabs, so one binary works everywhere.
 //!
-//! Transport: window messages sent to the plugin's editor window (any plugin format ends up with one on Windows), using
-//! one registered message (`MESSAGE_NAME`), `wparam` = [`Cmd`], `lparam` = argument, result = answer. Both sides run on
-//! the GUI thread of the same process. Spec: `plugins/host-link.md`. This is a Lemon Studio design, not FL's protocol.
+//! Transport on Windows: window messages sent to the plugin's editor window (any plugin format ends up with one there),
+//! using one registered message (`MESSAGE_NAME`), `wparam` = [`Cmd`], `lparam` = argument, result = answer. Both sides
+//! run on the GUI thread of the same process.
+//!
+//! Elsewhere (Linux) the link is in-process: an Open plugin's editor registers a `Peer` under the window the host gave
+//! it, and the host finds it there. The editor runs on a thread of its own, so the peer is shared state. The Open plugins
+//! compiled into Lemon Studio share this crate with the app; a copy loaded from a bundle has its own registry and is never
+//! hosted, as in another DAW.
+//!
+//! Spec: `plugins/host-link.md`. This is a Lemon Studio design, not FL's protocol.
 // spec: plugins/host-link.md
 
 /// Name passed to `RegisterWindowMessageW`.
@@ -228,9 +235,187 @@ mod win {
 #[cfg(windows)]
 pub use win::{message, to_host, Link};
 
+#[cfg(not(windows))]
+mod local {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+    use super::*;
+
+    /// The plugin's side of the link: what the host reads and sets (any thread).
+    pub struct Peer {
+        /// The window the host gave the editor (its key in the registry).
+        parent: u64,
+        pages: Vec<PageIcon>,
+        /// Editor content size (logical px) once it has joined the strip.
+        hosted_size: (u32, u32),
+        hosted: AtomicBool,
+        page: AtomicUsize,
+        hint: Mutex<String>,
+        /// Wakes the editor's thread (the host said hello or changed the page).
+        wake: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl Peer {
+        /// A peer for an editor in host window `parent`, registered at once (until dropped by `unregister`).
+        pub fn register(parent: u64, pages: Vec<PageIcon>, hosted_size: (u32, u32), wake: impl Fn() + Send + Sync + 'static) -> Arc<Peer> {
+            let peer = Arc::new(Peer { parent, pages, hosted_size, hosted: AtomicBool::new(false), page: AtomicUsize::new(0), hint: Mutex::new(String::new()), wake: Box::new(wake) });
+            if let Ok(mut r) = REGISTRY.lock() {
+                r.retain(|(p, w)| *p != parent && w.strong_count() > 0);
+                r.push((parent, Arc::downgrade(&peer)));
+            }
+            peer
+        }
+
+        /// The editor closes: the host no longer finds it (an editor opened since in the same window stays).
+        pub fn unregister(self: &Arc<Peer>) {
+            if let Ok(mut r) = REGISTRY.lock() {
+                r.retain(|(_, w)| w.as_ptr() != Arc::as_ptr(self) && w.strong_count() > 0);
+            }
+        }
+
+        /// The host said hello: the editor leaves its tab row to the host.
+        pub fn hosted(&self) -> bool {
+            self.hosted.load(Ordering::Acquire)
+        }
+
+        /// The page the host shows.
+        pub fn page(&self) -> usize {
+            self.page.load(Ordering::Acquire)
+        }
+
+        /// The editor switched pages itself; the host follows on its next tick.
+        pub fn set_page(&self, i: usize) {
+            self.page.store(i.min(self.pages.len().saturating_sub(1)), Ordering::Release);
+        }
+
+        /// The editor's hint line, for the host's title bar.
+        pub fn set_hint(&self, s: &str) {
+            if let Ok(mut h) = self.hint.lock() {
+                if *h != s {
+                    s.clone_into(&mut h);
+                }
+            }
+        }
+
+        /// Plugin -> host (`Changed`, `Note`, `Automate`): queued for the host's next tick, which is woken. 1 when a host
+        /// is there, 0 otherwise (as unanswered messages on Windows).
+        pub fn to_host(&self, cmd: Cmd, arg: isize) -> isize {
+            if !self.hosted() {
+                return 0;
+            }
+            if let Ok(mut q) = QUEUE.lock() {
+                q.push((self.parent, cmd, arg));
+            }
+            if let Some(w) = HOST_WAKER.get() {
+                w();
+            }
+            1
+        }
+    }
+
+    static REGISTRY: Mutex<Vec<(u64, Weak<Peer>)>> = Mutex::new(Vec::new());
+    static QUEUE: Mutex<Vec<(u64, Cmd, isize)>> = Mutex::new(Vec::new());
+    static HOST_WAKER: OnceLock<fn()> = OnceLock::new();
+
+    /// Host: how plugins wake its UI loop when they send something.
+    pub fn set_host_waker(f: fn()) {
+        let _ = HOST_WAKER.set(f);
+    }
+
+    /// Host: the plugins' messages since the last call: (editor's host window, command, argument).
+    pub fn take_host_messages() -> Vec<(u64, Cmd, isize)> {
+        QUEUE.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+    }
+
+    /// Host side: a connection to the editor of an Open plugin.
+    pub struct Link {
+        peer: Arc<Peer>,
+        pub pages: Vec<PageIcon>,
+        page: usize,
+    }
+
+    impl std::fmt::Debug for Link {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Link").field("pages", &self.pages).field("page", &self.page).finish()
+        }
+    }
+
+    impl Link {
+        /// Looks for an Open plugin's editor in `area` (the window the host gave the plugin) and says hello. `None` =
+        /// an ordinary plugin: show its editor as it is.
+        pub fn connect(area: isize) -> Option<Link> {
+            let peer = REGISTRY.lock().ok()?.iter().find(|(p, _)| *p == area as u64).and_then(|(_, w)| w.upgrade())?;
+            peer.hosted.store(true, Ordering::Release);
+            (peer.wake)();
+            let page = peer.page();
+            Some(Link { pages: peer.pages.clone(), page, peer })
+        }
+
+        /// Editor content size (logical px) after the plugin joined the strip.
+        pub fn size(&self) -> Option<(u32, u32)> {
+            Some(self.peer.hosted_size).filter(|&(w, h)| w > 0 && h > 0)
+        }
+
+        /// The active page as last seen.
+        pub fn page_now(&self) -> usize {
+            self.page
+        }
+
+        /// The active page.
+        pub fn page(&mut self) -> usize {
+            self.page = self.peer.page();
+            self.page
+        }
+
+        pub fn set_page(&mut self, i: usize) {
+            let i = i.min(self.pages.len().saturating_sub(1));
+            self.peer.page.store(i, Ordering::Release);
+            (self.peer.wake)();
+            self.page = i;
+        }
+
+        /// The plugin's hint line (parameter under the mouse).
+        pub fn hint(&self) -> String {
+            self.peer.hint.lock().map(|h| h.clone()).unwrap_or_default()
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub use local::{set_host_waker, take_host_messages, Link, Peer};
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Off Windows: an editor registers, the host connects under the same window, pages and hints cross over, the
+    /// editor's messages reach the host once it is hosted.
+    #[cfg(not(windows))]
+    #[test]
+    fn local_link_connects_by_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static WAKES: AtomicUsize = AtomicUsize::new(0);
+        let peer = Peer::register(4242, vec![PageIcon::Sample, PageIcon::Envelope], (560, 390), || {
+            WAKES.fetch_add(1, Ordering::Relaxed);
+        });
+        assert_eq!(peer.to_host(Cmd::Note, pack_note(60, 100, true)), 0, "not hosted yet: the plugin plays it itself");
+        assert!(Link::connect(4243).is_none(), "another window");
+        let mut link = Link::connect(4242).expect("found by its window");
+        assert!(peer.hosted());
+        assert_eq!(link.pages, vec![PageIcon::Sample, PageIcon::Envelope]);
+        assert_eq!(link.size(), Some((560, 390)));
+        link.set_page(1);
+        assert_eq!(peer.page(), 1);
+        assert!(WAKES.load(Ordering::Relaxed) >= 2, "hello and the page change wake the editor");
+        peer.set_hint("Volume: 50 %");
+        assert_eq!(link.hint(), "Volume: 50 %");
+        assert_eq!(peer.to_host(Cmd::Automate, 7), 1);
+        assert!(take_host_messages().contains(&(4242, Cmd::Automate, 7)));
+        peer.unregister();
+        drop(link);
+        assert!(Link::connect(4242).is_none(), "gone once unregistered");
+    }
 
     #[test]
     fn size_and_hint_round_trip() {

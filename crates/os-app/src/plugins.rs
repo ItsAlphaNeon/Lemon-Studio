@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use os_host::{Descriptor, Library, SharedPlugin};
 use os_engine::{SharedEffect, SharedInstrument};
 
-#[cfg(windows)]
+#[cfg(plugin_windows)]
 use crate::plugin_window::{ChannelInfo, FrameEvent, FrameWindow};
 
 /// A plugin offered in the picker.
@@ -23,11 +23,19 @@ pub struct Available {
 
 pub struct Hosted {
     pub plugin: SharedPlugin,
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     pub window: Option<FrameWindow>,
     /// Set while the open editor belongs to an Open plugin that joined the strip (host link).
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     pub link: Option<os_hostlink::Link>,
+}
+
+impl Hosted {
+    /// The open editor is an Open plugin's that joined the strip through the host link.
+    #[cfg(plugin_windows)]
+    fn linked(&self) -> bool {
+        self.link.is_some()
+    }
 }
 
 /// What a plugin window asks of the app.
@@ -41,6 +49,7 @@ pub enum Request {
     /// A preview note from an Open plugin's own keyboard (host link): row, key, velocity, on.
     Note(usize, u8, u8, bool),
     /// "Create automation clip" from an Open plugin's own parameter menu (host link): row, parameter index.
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
     Automate(usize, usize),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
     Raise(usize),
@@ -251,7 +260,7 @@ impl Plugins {
         // Trimmed audio clips start their note further into the sample (spec: plugins/open-sampler.md §7).
         p.use_start_param(SAMPLE_START);
         drop(p);
-        self.hosted.insert(row, Hosted { plugin, #[cfg(windows)] window: None, #[cfg(windows)] link: None });
+        self.hosted.insert(row, Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None });
         Ok(a.desc.name)
     }
 
@@ -272,13 +281,13 @@ impl Plugins {
             return Err(format!("{} could not start", a.desc.name));
         }
         drop(p);
-        self.hosted.insert(key, Hosted { plugin, #[cfg(windows)] window: None, #[cfg(windows)] link: None });
+        self.hosted.insert(key, Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None });
         Ok(a.desc.name)
     }
 
     /// Removes the instance under `key` (closing its window first).
     pub fn drop_key(&mut self, key: usize) {
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         self.close_window(key);
         self.hosted.remove(&key);
         self.presets.remove(&key);
@@ -290,7 +299,7 @@ impl Plugins {
             Some(p) => self.presets.insert(key, p),
             None => self.presets.remove(&key),
         };
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         if let Some(w) = self.hosted.get(&key).and_then(|h| h.window.as_ref()) {
             w.set_preset(self.preset_name(key));
         }
@@ -438,7 +447,7 @@ impl Plugins {
 
     /// Closes every window and drops every instance (a new or opened project).
     pub fn clear(&mut self) {
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         for row in self.hosted.keys().copied().collect::<Vec<_>>() {
             self.close_window(row);
         }
@@ -459,7 +468,7 @@ impl Plugins {
     }
 
     /// Opens (or raises) row `row`'s plugin window.
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     pub fn open_window(&mut self, row: usize, info: ChannelInfo) -> Result<(), String> {
         let (owner, scale) = (self.owner, self.scale);
         let h = self.hosted.get_mut(&row).ok_or("not a plugin channel")?;
@@ -475,8 +484,10 @@ impl Plugins {
         if row >= FX_KEY {
             w.set_strip(false);
         }
-        let size = p.open_editor(w.area(), scale)?;
-        h.link = fit_editor(&w, size, scale);
+        // The editor takes the frame's scale (on Linux the X server's, not the main window's).
+        let k = w.scale();
+        let size = p.open_editor(w.area(), k)?;
+        h.link = fit_editor(&w, size, k);
         // On top: the app stacks it above its other windows (`State::raise`), and a new child window starts below
         // the open ones.
         w.raise();
@@ -527,7 +538,7 @@ impl Plugins {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     fn close_window(&mut self, row: usize) {
         if let Some(h) = self.hosted.get_mut(&row) {
             if let Ok(mut p) = h.plugin.lock() {
@@ -539,13 +550,13 @@ impl Plugins {
     }
 
     /// Row `row`'s open window (native frame handle) and whether it is detached.
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     pub fn window_of(&self, row: usize) -> Option<(isize, bool)> {
         self.hosted.get(&row).and_then(|h| h.window.as_ref()).map(|w| (w.hwnd(), w.detached()))
     }
 
     /// Docks or detaches row `row`'s window (window menu > Detached).
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     pub fn set_detached(&self, row: usize, on: bool) {
         if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
             w.set_detached(self.owner, on);
@@ -553,21 +564,21 @@ impl Plugins {
     }
 
     /// Rows whose plugin window is open and docked in the main window.
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     pub fn docked(&self) -> Vec<usize> {
         self.hosted.iter().filter(|(_, h)| h.window.as_ref().is_some_and(|w| !w.detached())).map(|(&r, _)| r).collect()
     }
 
     /// Stacks the docked windows of `rows` (bottom to top, as in `State::z`) in that order: docked windows clip each
     /// other by their native order, so it must match the app's.
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     pub fn stack(&self, rows: &[usize]) {
         let hwnds: Vec<isize> = rows.iter().filter_map(|r| self.window_of(*r)).filter(|w| !w.1).map(|w| w.0).collect();
         crate::plugin_window::stack(self.owner, &hwnds);
     }
 
     /// Clips row `row`'s docked window to `work` minus `covers` (main-window client px).
-    #[cfg(windows)]
+    #[cfg(plugin_windows)]
     pub fn clip(&self, row: usize, work: [i32; 4], covers: &[[i32; 4]]) {
         if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
             w.clip_to(work, covers);
@@ -587,7 +598,7 @@ impl Plugins {
 
     /// Closes row `row`'s plugin window when it is open; returns whether it was.
     pub fn close_if_open(&mut self, row: usize) -> bool {
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         if self.hosted.get(&row).is_some_and(|h| h.window.is_some()) {
             self.close_window(row);
             return true;
@@ -597,13 +608,20 @@ impl Plugins {
     }
 
     /// UI tick: plugin housekeeping, then the windows' requests (a closed window is closed here).
+    #[cfg_attr(not(plugin_windows), allow(unused_variables, unused_mut))]
     pub fn idle(&mut self, info: impl Fn(usize) -> Option<ChannelInfoT>) -> Vec<Request> {
+        // Linux: the frames' X11 events, then the editors' descriptors and timers (`os_host::runloop`).
+        #[cfg(target_os = "linux")]
+        {
+            crate::plugin_window::pump();
+            os_host::runloop::dispatch();
+        }
         let mut out = Vec::new();
         let mut close: Vec<usize> = Vec::new();
         #[cfg(windows)]
         let mut rescale: Vec<(usize, f32)> = Vec::new();
         // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         for (area, m) in crate::plugin_window::take_link() {
             let row = self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
             match (row, m) {
@@ -615,13 +633,13 @@ impl Plugins {
         for (&row, h) in &mut self.hosted {
             if let Ok(mut p) = h.plugin.try_lock() {
                 p.idle();
-                #[cfg(windows)]
-                if let (Some(w), None, Some((ew, eh))) = (&h.window, &h.link, p.editor_size()) {
+                #[cfg(plugin_windows)]
+                if let (Some(w), false, Some((ew, eh))) = (&h.window, h.linked(), p.editor_size()) {
                     let k = w.scale();
                     w.set_editor_size((ew as f32 / k, eh as f32 / k));
                 }
             }
-            #[cfg(windows)]
+            #[cfg(plugin_windows)]
             if let Some(w) = &h.window {
                 if let Some(i) = info(row) {
                     w.set_info(i);
@@ -657,14 +675,17 @@ impl Plugins {
                         FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
                         FrameEvent::NotAvailable(name) => Request::NotAvailable(name),
                         FrameEvent::Dpi(k) => {
+                            #[cfg(windows)]
                             rescale.push((row, k));
+                            #[cfg(not(windows))]
+                            let _ = k;
                             continue;
                         }
                     });
                 }
             }
         }
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         for row in close {
             self.close_window(row);
         }
@@ -672,13 +693,15 @@ impl Plugins {
         for (row, k) in rescale {
             self.rescale_window(row, k);
         }
+        #[cfg(target_os = "linux")]
+        crate::plugin_window::paint_dirty();
         out
     }
 }
 
 /// Sizes window `w` to its freshly opened editor (`size` in device px at `scale`). An Open plugin answers the host
 /// link's hello: its page tabs go into the strip row and its editor shrinks to what is below them.
-#[cfg(windows)]
+#[cfg(plugin_windows)]
 fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_hostlink::Link> {
     let link = os_hostlink::Link::connect(w.area() as isize);
     match &link {
@@ -696,7 +719,7 @@ impl Drop for Hosted {
     /// The editor closes before its frame window goes (a frame destroyed under an open editor took the editor's
     /// window with it, and the plugin's own close then crashed at exit).
     fn drop(&mut self) {
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         if self.window.is_some() {
             if let Ok(mut p) = self.plugin.lock() {
                 p.close_editor();
@@ -883,9 +906,9 @@ fn sample_path_of(blob: &[u8]) -> Option<String> {
     serde_json::from_str::<String>(field).ok()
 }
 
-#[cfg(windows)]
+#[cfg(plugin_windows)]
 pub type ChannelInfoT = ChannelInfo;
-#[cfg(not(windows))]
+#[cfg(not(plugin_windows))]
 pub type ChannelInfoT = ();
 
 /// Opens the bundled Open Sampler in a real plugin window, clicks through the strip and captures the window

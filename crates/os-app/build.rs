@@ -1,5 +1,6 @@
 //! Embeds `assets/lemonstudio.ico` as icon resource 1 (Windows). Uses the Windows SDK's `rc.exe`
-//! (or `$RC`); without it the build goes on and the exe just has no icon.
+//! (or `$RC`); without it the build goes on and the exe just has no icon. Also sets `cfg(plugin_windows)` where plugin
+//! windows exist.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -21,6 +22,11 @@ fn find_rc() -> Option<PathBuf> {
 }
 
 fn main() {
+    // `plugin_windows`: plugin editors open in Lemon Studio's frame windows (Win32 on Windows, X11 on Linux).
+    println!("cargo::rustc-check-cfg=cfg(plugin_windows)");
+    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("windows" | "linux")) {
+        println!("cargo::rustc-cfg=plugin_windows");
+    }
     println!("cargo:rerun-if-changed=assets/lemonstudio.rc");
     println!("cargo:rerun-if-changed=assets/lemonstudio.ico");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")

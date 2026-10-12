@@ -331,12 +331,12 @@ impl App {
     }
 }
 
-/// `%APPDATA%/Lemon Studio/browser_folders.txt`: one dropped folder per line (spec §6).
+/// `browser_folders.txt` in the user folder (`os_paths::user_dir`): one dropped folder per line (spec §6).
 fn folders_file() -> Option<std::path::PathBuf> {
     if cfg!(test) {
         return None;
     }
-    std::env::var_os("APPDATA").map(|d| std::path::PathBuf::from(d).join("Lemon Studio").join("browser_folders.txt"))
+    os_paths::user_file("browser_folders.txt")
 }
 
 pub(crate) fn load_folders() -> Vec<std::path::PathBuf> {

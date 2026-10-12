@@ -11,7 +11,8 @@
 <p>
   <a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue?style=flat-square"></a>
   <img alt="Rust 2024 edition" src="https://img.shields.io/badge/rust-2024_edition-e57324?style=flat-square&logo=rust&logoColor=white">
-  <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square">
+  <img alt="Platform: Windows | Linux" src="https://img.shields.io/badge/platform-Windows_%7C_Linux-0078d4?style=flat-square">
+  <a href="https://github.com/ItsAlphaNeon/Lemon-Studio/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/ItsAlphaNeon/Lemon-Studio/ci.yml?branch=main&style=flat-square&label=CI"></a>
   <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-ffe066?style=flat-square">
   <a href="https://discord.gg/yC2uCuGs3M"><img alt="Discord" src="https://img.shields.io/badge/discord-join_the_server-5865f2?style=flat-square&logo=discord&logoColor=white"></a>
 </p>
@@ -79,8 +80,8 @@ clicking it does nothing.
 | MIDI file import / export | ❌ | Not available yet |
 | Audio editing and time-stretching | ❌ | Not available yet |
 | Plugin delay compensation | ❌ | Not available yet |
-| Audio drivers | 🚧 | WASAPI (shared mode); no ASIO yet |
-| Platforms | 🚧 | Windows 10 / 11; Linux builds are experimental; no macOS yet |
+| Audio drivers | 🚧 | WASAPI (shared mode) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux; no ASIO or JACK yet |
+| Platforms | 🚧 | Windows 10 / 11; Linux (X11, and Wayland through XWayland); no macOS yet |
 | Look and themes | 🚧 | Lemon design (lemon on neutral greys, rounded-square controls) and the Classic look, switched with Ctrl+Shift+D; theme files apply to Classic; plugin editors not restyled yet |
 
 ✅ usable · 🚧 partial · ❌ not available yet
@@ -91,9 +92,12 @@ The full, item-by-item roadmap lives on the [Discord server](https://discord.gg/
 
 ### Prerequisites
 
-- **Windows 10 or 11** (x64). Linux and macOS support is planned.
+- **Windows 10 or 11** (x64), or **Linux** (x64; Wayland or X11). macOS support is planned.
 - **Rust**, stable toolchain with 2024 edition support (1.85 or newer), via [rustup](https://rustup.rs/).
 - *Optional:* the Windows SDK, used to embed the application icon. Without it the build still succeeds.
+- *Linux:* the ALSA development files and `pkg-config` (Debian / Ubuntu: `libasound2-dev pkg-config`; Arch:
+  `alsa-lib pkgconf`; Fedora: `alsa-lib-devel pkgconf-pkg-config`). For the "save changes?" prompt, `zenity` or
+  KDE's `kdialog`.
 
 ### Build and run
 
@@ -122,7 +126,37 @@ Build Open Sampler, Open 3x Osc and Open Parametric EQ 2 as VST3 and CLAP bundle
 cargo run -p bundle-plugins
 ```
 
-Pass `--install` to copy the bundles into the per-user plugin folders.
+Pass `--install` to copy the bundles into the per-user plugin folders (`%LOCALAPPDATA%\Programs\Common\{VST3,CLAP}` on
+Windows, `~/.vst3` and `~/.clap` on Linux).
+
+### Linux
+
+Lemon Studio runs on X11, and on Wayland desktops through XWayland. Plugin editors on Linux are X11 windows, and an X11
+window cannot sit inside a native Wayland one; with the main window on X11 too, plugin windows dock inside it as on
+Windows (or detach, from their window menu). A few things differ from Windows for now:
+
+- **Native Wayland** is used only when there is no X server, or when `OPENSTUDIO_WAYLAND=1` is set. Plugin windows are
+  then always separate windows, kept above Lemon Studio while it is the active application; their window menu, Presets
+  list and Misc lists do not open, and files cannot be dropped in from a file manager (the windowing library does not
+  support it there).
+- **Scaling:** under XWayland Lemon Studio follows the X11 scale (`Xft.dpi`). If it looks soft on a fractionally scaled
+  Wayland desktop, let X11 applications scale themselves (KDE: Display Configuration > Legacy applications (X11) >
+  Apply scaling themselves).
+- **Keys** pressed while a plugin's editor has the keyboard focus do not play the typing keyboard yet, and a sample
+  dragged from Lemon Studio's browser onto a plugin window does not reach the plugin yet.
+- **Open Sampler** cannot copy or paste audio through the clipboard yet.
+- **Settings, themes and presets** live in `$XDG_CONFIG_HOME/Lemon Studio` (usually `~/.config/Lemon Studio`);
+  on Windows in `%APPDATA%\Lemon Studio`. `OPENSTUDIO_USER_DIR` overrides the folder.
+- Plugins are found in `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap` and `CLAP_PATH`, and in `~/.vst3`,
+  `/usr/lib/vst3` and `/usr/local/lib/vst3`.
+
+To install the app with its icon and menu entry (the desktop entry also names the icon under native Wayland):
+
+```bash
+cargo install --path crates/os-app
+install -Dm644 crates/os-app/assets/lemonstudio.png ~/.local/share/icons/hicolor/256x256/apps/lemonstudio.png
+install -Dm644 crates/os-app/assets/lemonstudio.desktop ~/.local/share/applications/lemonstudio.desktop
+```
 
 ### Tests
 
@@ -159,8 +193,9 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-clap`](crates/os-clap) | CLAP plugin host |
 | [`os-vst3`](crates/os-vst3) | VST3 plugin host |
 | [`os-hostlink`](crates/os-hostlink) | Host link protocol between Lemon Studio and its own plugins |
-| [`os-native`](crates/os-native) | Experimental host for plugins built on a third-party native plugin SDK |
+| [`os-native`](crates/os-native) | Experimental host for plugins built on a third-party native plugin SDK (Windows only) |
 | [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of Lemon Studio's own plugins |
+| [`os-paths`](crates/os-paths) | Where Lemon Studio keeps its settings, themes and presets on each platform |
 | [`open-sampler`](plugins/open-sampler) | Open Sampler instrument (VST3 + CLAP) |
 | [`open-3x-osc`](plugins/open-3x-osc) | Open 3x Osc instrument (VST3 + CLAP) |
 | [`open-parametric-eq-2`](plugins/open-parametric-eq-2) | Open Parametric EQ 2 effect (VST3 + CLAP) |
@@ -170,7 +205,8 @@ Lemon Studio is a Cargo workspace of focused crates:
 The roadmap is kept on the [Lemon Studio Discord server](https://discord.gg/yC2uCuGs3M), where every item is
 marked as complete, in progress or not started. The broad next steps are the engine rework (sampler voice,
 automation, delay compensation), opening projects from older FL Studio versions, audio and note recording, MIDI
-settings, ASIO output, more built-in instruments and effects, and Linux and macOS support.
+settings, ASIO output, more built-in instruments and effects, the rest of the plugin window features on Linux, and
+macOS support.
 
 ## Development approach
 

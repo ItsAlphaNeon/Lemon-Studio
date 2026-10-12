@@ -635,6 +635,7 @@ pub fn list_on_right(m: M) -> bool {
 }
 
 /// Entries of a value's list menu: (label, value).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn list_entries(m: M) -> Vec<(String, f32)> {
     match m {
         M::ArpChord => CHORDS.iter().enumerate().map(|(i, s)| (s.to_string(), i as f32)).collect(),

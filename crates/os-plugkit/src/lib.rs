@@ -1,6 +1,7 @@
 //! Shared pieces of Lemon Studio's own plugin editors ("Open" plugins): editor edits the sound hears before the host
 //! confirms them ([`live`]), menu definitions shown with the app's own popup look ([`MenuDef`], `os_ui::kit::menu`),
-//! and the Win32 parts every editor needs ([`win`]: popups, type-in boxes, painting a canvas into a window).
+//! and the native parts every editor needs: popups, type-in boxes, painting a canvas into a window ([`win`] on Windows,
+//! `x11` on Linux).
 //!
 // spec: plugins/open-sampler.md §4 (edits apply at once, menus), plugins/open-parametric-eq-2.md, plugins/plugin-formats.md
 
@@ -9,20 +10,19 @@ pub mod live;
 pub mod vals;
 #[cfg(windows)]
 pub mod win;
-
-use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+pub mod x11;
 
 use os_theme::Palette;
 use os_ui::kit::menu::{MenuItem, MenuStyle};
 
-/// The palette Lemon Studio uses: the remembered `.flstheme` (`%APPDATA%/Lemon Studio/current.flstheme`, spec
+/// The palette Lemon Studio uses: the remembered `.flstheme` (`current.flstheme` in `os_paths::user_dir`, spec
 /// ui/flstheme.md), else the default one. A plugin runs in its own module, so it reads the theme itself.
 pub fn palette() -> Palette {
     if cfg!(test) {
         return Palette::default();
     }
-    std::env::var_os("APPDATA")
-        .map(|d| PathBuf::from(d).join("Lemon Studio").join("current.flstheme"))
+    os_paths::user_file("current.flstheme")
         .and_then(|p| std::fs::read(p).ok())
         .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
         .unwrap_or_default()

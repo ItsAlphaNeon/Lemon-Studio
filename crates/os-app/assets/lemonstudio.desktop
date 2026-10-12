@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lemon Studio
+GenericName=Digital Audio Workstation
+Comment=Pattern-based music production
+Exec=lemonstudio %f
+Icon=lemonstudio
+Terminal=false
+Categories=AudioVideo;Audio;Midi;Music;
+StartupWMClass=lemonstudio
+Keywords=DAW;music;audio;sequencer;

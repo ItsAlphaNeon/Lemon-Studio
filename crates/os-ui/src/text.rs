@@ -2,8 +2,9 @@
 //!
 //! On Windows, text goes through GDI with ClearType: the destination pixels are copied into a DIB,
 //! GDI draws the string over them (so ClearType blends against the real background), and the
-//! result is copied back. Elsewhere a fontdue fallback draws grayscale text with the same metrics
-//! model (the horizontal width is approximated by squeezing glyphs).
+//! result is copied back. Elsewhere (and on Windows with `OPENSTUDIO_TEXT=portable`) the portable
+//! engine draws grayscale text with fontdue on GDI's metrics model: the same cell height and
+//! baseline, condensed widths by squeezing glyphs, synthetic bold and italic.
 // spec: ui/main-window.md §10 (typography)
 
 use os_theme::Color;
@@ -22,6 +23,7 @@ pub enum Face {
 }
 
 impl Face {
+    #[cfg(windows)]
     fn gdi_name(self) -> &'static str {
         match self {
             Face::Ui => "Cuprum",
@@ -76,34 +78,42 @@ impl Font {
 pub type ClipPx = (i32, i32, i32, i32);
 
 pub struct TextEngine {
+    /// GDI (Windows), unless the portable engine was asked for.
     #[cfg(windows)]
-    gdi: gdi::Gdi,
-    #[cfg(not(windows))]
-    fd: fallback::Fd,
+    gdi: Option<gdi::Gdi>,
+    portable: portable::Fd,
 }
 
 impl TextEngine {
     pub fn new() -> Result<TextEngine, String> {
         #[cfg(windows)]
-        return Ok(TextEngine { gdi: gdi::Gdi::new()? });
-        #[cfg(not(windows))]
-        return Ok(TextEngine { fd: fallback::Fd::new()? });
+        let gdi = match std::env::var("OPENSTUDIO_TEXT").as_deref() {
+            Ok("portable") => None,
+            _ => Some(gdi::Gdi::new()?),
+        };
+        Ok(TextEngine {
+            #[cfg(windows)]
+            gdi,
+            portable: portable::Fd::new()?,
+        })
     }
 
     /// (width, cell height) of `s` in device pixels.
     pub fn extent(&mut self, f: Font, scale: f32, s: &str) -> (i32, i32) {
         #[cfg(windows)]
-        return self.gdi.extent(f, scale, s);
-        #[cfg(not(windows))]
-        return self.fd.extent(f, scale, s);
+        if let Some(g) = &mut self.gdi {
+            return g.extent(f, scale, s);
+        }
+        self.portable.extent(f, scale, s)
     }
 
     /// Cell height and ascent (device pixels).
     pub fn metrics(&mut self, f: Font, scale: f32) -> (i32, i32) {
         #[cfg(windows)]
-        return self.gdi.metrics(f, scale);
-        #[cfg(not(windows))]
-        return self.fd.metrics(f, scale);
+        if let Some(g) = &mut self.gdi {
+            return g.metrics(f, scale);
+        }
+        self.portable.metrics(f, scale)
     }
 
     /// Draw `s` with its cell's top-left at device (x, y). `vertical` rotates it 90° counter-clockwise
@@ -114,9 +124,10 @@ impl TextEngine {
             return;
         }
         #[cfg(windows)]
-        self.gdi.draw(pix, clip, f, scale, x, y, c, s, vertical);
-        #[cfg(not(windows))]
-        self.fd.draw(pix, clip, f, scale, x, y, c, s, vertical);
+        if let Some(g) = &mut self.gdi {
+            return g.draw(pix, clip, f, scale, x, y, c, s, vertical);
+        }
+        self.portable.draw(pix, clip, f, scale, x, y, c, s, vertical);
     }
 }
 
@@ -444,92 +455,173 @@ mod gdi {
     }
 }
 
-#[cfg(not(windows))]
-mod fallback {
+mod portable {
     use std::collections::HashMap;
 
-    use super::{ClipPx, Font, CUPRUM};
+    use super::{ClipPx, Face, Font, CUPRUM};
     use os_theme::Color;
     use tiny_skia::Pixmap;
 
+    /// Vertical metrics in em: (ascent, descent) as GDI takes them (the OS/2 table's win ascent / descent).
+    type Vm = (f32, f32);
+
+    /// The light face is Segoe UI Light on Windows; here Cuprum stands in for it, on Segoe UI's baseline (win ascent
+    /// 2210, descent 514 of 2048 units) so the layouts measured against it line up.
+    const SEGOE_UI: Vm = (2210.0 / 2048.0, 514.0 / 2048.0);
+
+    /// Synthetic italic slant (horizontal shift per pixel of height), about GDI's 12 degrees.
+    const SLANT: f32 = 0.21;
+
+    /// A rasterized glyph: coverage rows, its box relative to the pen on the baseline, and the advance.
+    struct Glyph {
+        cov: Vec<u8>,
+        w: usize,
+        h: usize,
+        xmin: i32,
+        ymin: i32,
+        advance: f32,
+    }
+
     pub struct Fd {
         font: fontdue::Font,
-        cache: HashMap<(char, u32, u32), (fontdue::Metrics, Vec<u8>)>,
+        /// Cuprum's win ascent / descent (em).
+        ui: Vm,
+        /// Cuprum's average character width (em), the reference for `Font::width`.
+        avg: f32,
+        cache: HashMap<(char, u32, u32, bool, bool), Glyph>,
+    }
+
+    /// (win ascent, win descent, average char width) in em from a TrueType font's OS/2 table.
+    fn os2(data: &[u8]) -> Option<(f32, f32, f32)> {
+        let u16_at = |o: usize| data.get(o..o + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+        let u32_at = |o: usize| data.get(o..o + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+        let table = |tag: &[u8; 4]| {
+            (0..usize::from(u16_at(4)?)).map(|i| 12 + 16 * i).find(|&r| data.get(r..r + 4) == Some(tag)).and_then(|r| u32_at(r + 8)).map(|o| o as usize)
+        };
+        let upem = f32::from(u16_at(table(b"head")? + 18)?);
+        let o = table(b"OS/2")?;
+        let em = |v: u16| f32::from(v) / upem;
+        Some((em(u16_at(o + 74)?), em(u16_at(o + 76)?), em(u16_at(o + 2)?)))
     }
 
     impl Fd {
         pub fn new() -> Result<Fd, String> {
             let font = fontdue::Font::from_bytes(CUPRUM, fontdue::FontSettings::default()).map_err(|e| e.to_string())?;
-            Ok(Fd { font, cache: HashMap::new() })
+            let (asc, desc, avg) = os2(CUPRUM).ok_or("the UI font has no OS/2 metrics")?;
+            Ok(Fd { font, ui: (asc, desc), avg, cache: HashMap::new() })
         }
 
+        /// The em height in device pixels (GDI rounds the requested height).
         fn px(f: Font, scale: f32) -> f32 {
-            f32::from(f.size) * scale
+            (f32::from(f.size) * scale).round().max(1.0)
         }
 
-        /// Horizontal squeeze for a requested average width (natural ≈ 0.42 em for Cuprum).
-        fn squeeze(f: Font) -> f32 {
-            if f.width == 0 { 1.0 } else { (f32::from(f.width) / (0.42 * f32::from(f.size))).clamp(0.3, 2.0) }
+        fn vm(&self, f: Font) -> Vm {
+            match f.face {
+                Face::Ui => self.ui,
+                Face::Light => SEGOE_UI,
+            }
         }
 
-        fn glyph(&mut self, c: char, px: f32, k: f32) -> &(fontdue::Metrics, Vec<u8>) {
-            let key = (c, px.to_bits(), k.to_bits());
+        /// Horizontal squeeze for a requested average character width (GDI's `lfWidth`).
+        fn squeeze(&self, f: Font, scale: f32) -> f32 {
+            if f.width == 0 {
+                return 1.0;
+            }
+            let want = (f32::from(f.width) * scale).round().max(1.0);
+            (want / (self.avg * Self::px(f, scale))).clamp(0.3, 2.0)
+        }
+
+        /// Synthetic bold: glyphs widen by this many pixels (and advance as much further).
+        fn embolden(px: f32) -> usize {
+            (px / 24.0).round().max(1.0) as usize
+        }
+
+        fn glyph(&mut self, c: char, f: Font, scale: f32) -> &Glyph {
+            let (px, k) = (Self::px(f, scale), self.squeeze(f, scale));
+            let key = (c, px.to_bits(), k.to_bits(), f.bold, f.italic);
             let font = &self.font;
             self.cache.entry(key).or_insert_with(|| {
-                let (mut m, cov) = font.rasterize(c, px);
-                if (k - 1.0).abs() < 1e-3 || m.width == 0 {
-                    m.advance_width *= k;
-                    return (m, cov);
-                }
-                let nw = ((m.width as f32 * k).round() as usize).max(1);
-                let mut out = vec![0u8; nw * m.height];
-                for yy in 0..m.height {
-                    for xx in 0..nw {
-                        let sx = ((xx as f32 + 0.5) / k) as usize;
-                        out[yy * nw + xx] = cov[yy * m.width + sx.min(m.width - 1)];
+                let (m, cov) = font.rasterize(c, px);
+                // Condense.
+                let (mut w, h) = (m.width, m.height);
+                let mut cov = cov;
+                let mut xmin = m.xmin;
+                if (k - 1.0).abs() > 1e-3 && w > 0 {
+                    let nw = ((w as f32 * k).round() as usize).max(1);
+                    let mut out = vec![0u8; nw * h];
+                    for y in 0..h {
+                        for x in 0..nw {
+                            let sx = (((x as f32 + 0.5) / k) as usize).min(w - 1);
+                            out[y * nw + x] = cov[y * w + sx];
+                        }
                     }
+                    xmin = (xmin as f32 * k).round() as i32;
+                    (cov, w) = (out, nw);
                 }
-                m.advance_width *= k;
-                m.xmin = (m.xmin as f32 * k).round() as i32;
-                m.width = nw;
-                (m, out)
+                let mut advance = m.advance_width * k;
+                // Bold: each pixel spreads `b` to the right.
+                if f.bold && w > 0 {
+                    let b = Self::embolden(px);
+                    let nw = w + b;
+                    let mut out = vec![0u8; nw * h];
+                    for y in 0..h {
+                        for x in 0..nw {
+                            let lo = x.saturating_sub(b);
+                            out[y * nw + x] = (lo..=x.min(w - 1)).map(|sx| cov[y * w + sx]).max().unwrap_or(0);
+                        }
+                    }
+                    (cov, w) = (out, nw);
+                    advance += b as f32;
+                }
+                // Italic: rows above the baseline shift right in proportion to their height.
+                if f.italic && w > 0 {
+                    let top = m.ymin + h as i32;
+                    let shift = |y: usize| ((top - y as i32) as f32 * SLANT).round().max(0.0) as usize;
+                    let extra = shift(0).max(shift(h.saturating_sub(1)));
+                    let nw = w + extra;
+                    let mut out = vec![0u8; nw * h];
+                    for y in 0..h {
+                        let s = shift(y);
+                        out[y * nw + s..y * nw + s + w].copy_from_slice(&cov[y * w..(y + 1) * w]);
+                    }
+                    (cov, w) = (out, nw);
+                }
+                Glyph { cov, w, h, xmin, ymin: m.ymin, advance }
             })
         }
 
         pub fn metrics(&mut self, f: Font, scale: f32) -> (i32, i32) {
             let px = Self::px(f, scale);
-            let lm = self.font.horizontal_line_metrics(px);
-            let asc = lm.map_or(px * 0.9, |m| m.ascent);
-            let desc = lm.map_or(px * 0.25, |m| -m.descent);
-            ((asc + desc).ceil() as i32, asc.round() as i32)
+            let (a, d) = self.vm(f);
+            let (asc, desc) = ((a * px).round() as i32, (d * px).round() as i32);
+            (asc + desc, asc)
         }
 
         pub fn extent(&mut self, f: Font, scale: f32, s: &str) -> (i32, i32) {
-            let (px, k) = (Self::px(f, scale), Self::squeeze(f));
-            let w: f32 = s.chars().map(|c| self.glyph(c, px, k).0.advance_width).sum();
+            let w: f32 = s.chars().map(|c| self.glyph(c, f, scale).advance).sum();
             (w.round() as i32, self.metrics(f, scale).0)
         }
 
         #[allow(clippy::too_many_arguments)]
         pub fn draw(&mut self, pix: &mut Pixmap, clip: ClipPx, f: Font, scale: f32, x: i32, y: i32, c: Color, s: &str, vertical: bool) {
-            let (px, k) = (Self::px(f, scale), Self::squeeze(f));
-            let asc = self.metrics(f, scale).1 as f32;
+            let asc = self.metrics(f, scale).1;
             let pw = pix.width() as i32;
             let mut pen = 0.0f32;
-            let chars: Vec<char> = s.chars().collect();
-            for ch in chars {
-                let (m, cov) = self.glyph(ch, px, k).clone();
-                let gx0 = pen + m.xmin as f32;
-                let gy0 = asc - m.ymin as f32 - m.height as f32;
+            for ch in s.chars() {
+                let g = self.glyph(ch, f, scale);
+                // Glyph box relative to the cell's top-left (whole pixels).
+                let gx0 = pen.round() as i32 + g.xmin;
+                let gy0 = asc - g.ymin - g.h as i32;
                 let data = pix.data_mut();
-                for j in 0..m.height {
-                    for i in 0..m.width {
-                        let a = u32::from(cov[j * m.width + i]) * u32::from(c.a) / 255;
+                for j in 0..g.h {
+                    for i in 0..g.w {
+                        let a = u32::from(g.cov[j * g.w + i]) * u32::from(c.a) / 255;
                         if a == 0 {
                             continue;
                         }
-                        let (lx, ly) = (gx0 + i as f32, gy0 + j as f32);
-                        let (dx, dy) = if vertical { (x + ly as i32, y - lx as i32) } else { (x + lx as i32, y + ly as i32) };
+                        let (lx, ly) = (gx0 + i as i32, gy0 + j as i32);
+                        let (dx, dy) = if vertical { (x + ly, y - lx) } else { (x + lx, y + ly) };
                         if dx < clip.0 || dy < clip.1 || dx >= clip.2 || dy >= clip.3 {
                             continue;
                         }
@@ -540,7 +632,38 @@ mod fallback {
                         }
                     }
                 }
-                pen += m.advance_width;
+                pen += g.advance;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn cell_and_baseline_follow_the_win_metrics() {
+            let mut fd = Fd::new().unwrap();
+            // Cuprum: win ascent 910, descent 210 of 1000 units.
+            assert_eq!(fd.metrics(Font::new(20), 1.0), (22, 18));
+            assert_eq!(fd.metrics(Font::new(20), 1.5), (33, 27));
+            // The light face sits on Segoe UI's baseline.
+            assert_eq!(fd.metrics(Font::light(32, 13), 1.0).1, 35);
+        }
+
+        #[test]
+        fn bold_italic_and_condensed_widths() {
+            let mut fd = Fd::new().unwrap();
+            let f = Font::new(20);
+            let plain = fd.extent(f, 1.0, "Pattern").0;
+            assert!(fd.extent(f.bold(), 1.0, "Pattern").0 > plain);
+            assert_eq!(fd.extent(f.italic(), 1.0, "Pattern").0, plain, "italic keeps the advances");
+            assert!(fd.extent(Font::condensed(20, 6), 1.0, "Pattern").0 < plain);
+            // Drawing stays inside the pixmap whatever the style.
+            let mut pix = Pixmap::new(64, 32).unwrap();
+            for f in [f, f.bold(), f.italic(), f.bold().italic()] {
+                fd.draw(&mut pix, (0, 0, 64, 32), f, 1.0, 60, 20, Color::rgb(0xffffff), "Wg", false);
+                fd.draw(&mut pix, (0, 0, 64, 32), f, 1.0, 2, 30, Color::rgb(0xffffff), "Wg", true);
             }
         }
     }

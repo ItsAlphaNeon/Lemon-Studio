@@ -30,12 +30,12 @@ pub struct Preset {
     pub path: PathBuf,
 }
 
-/// `%APPDATA%/Lemon Studio/Presets` (`OPENSTUDIO_PRESETS` overrides it, used by tests).
+/// `Presets` in the user folder (`os_paths::user_dir`; `OPENSTUDIO_PRESETS` overrides it, used by tests).
 pub fn root() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("OPENSTUDIO_PRESETS") {
         return Some(PathBuf::from(p));
     }
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Lemon Studio").join("Presets"))
+    os_paths::user_file("Presets")
 }
 
 /// A plugin name as a folder name: characters Windows does not allow become `_`, trailing dots / spaces go.
@@ -169,10 +169,12 @@ use crate::playlist::{Cmd, Mark, PItem, Popup};
 #[derive(Debug, Clone, PartialEq)]
 pub enum PCmd {
     /// Load this preset file into the instance.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Load(usize, PathBuf),
     /// Load the next (+1) / previous (-1) preset of the plugin.
     Step(usize, i32),
     /// Store the instance's state in a new preset file (a save dialog in the plugin's folder).
+    #[cfg_attr(not(windows), allow(dead_code))]
     SaveAs(usize),
 }
 
@@ -184,7 +186,8 @@ fn header(app: &App, key: usize) -> Option<Header> {
 
 /// The preset list rows for the instance under `key`. `nested`: presets in sub-folders go into one submenu per folder
 /// (the title-bar box); otherwise every preset is a row, sub-folder ones as "Folder/name" (the window menu's
-/// Presets submenu, which cannot open a further submenu).
+/// Presets submenu, which cannot open a further submenu). The plugin window's popups are Windows-only so far.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn items(app: &App, key: usize, nested: bool) -> Vec<PItem> {
     let Some(h) = header(app, key) else { return Vec::new() };
     let cur = app.plugins.presets.get(&key);
@@ -212,6 +215,7 @@ pub fn items(app: &App, key: usize, nested: bool) -> Vec<PItem> {
 
 /// Fills the window menu's Presets section (spec: ui/plugin-window.md "Presets"): "Presets" becomes the list
 /// (a submenu), "Save preset as..." works.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn fill_window_menu(app: &App, key: usize, menu: &mut Popup) {
     for it in menu.items.iter_mut() {
         match &*it.label {
@@ -223,6 +227,7 @@ pub fn fill_window_menu(app: &App, key: usize, menu: &mut Popup) {
 }
 
 /// The title-bar Presets box popup: the presets, then "Save preset as...".
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn popup(app: &App, key: usize, x: f32, y: f32) -> Popup {
     let mut items = items(app, key, true);
     items.push(PItem::sep());
@@ -266,12 +271,9 @@ fn save_as(app: &mut App, key: usize) -> Option<String> {
     let dir = dir_for(&h.plugin)?;
     let _ = std::fs::create_dir_all(&dir);
     let start = app.plugins.presets.get(&key).map(|p| shown_name(p)).unwrap_or_else(|| "New preset".into());
-    let target = rfd::FileDialog::new()
-        .set_title("Save preset as")
-        .set_directory(&dir)
-        .set_file_name(format!("{start}.{EXT}"))
-        .add_filter("Lemon Studio preset", &[EXT])
-        .save_file()?;
+    let target = crate::dialog::modal(|| {
+        rfd::FileDialog::new().set_title("Save preset as").set_directory(&dir).set_file_name(format!("{start}.{EXT}")).add_filter("Lemon Studio preset", &[EXT]).save_file()
+    })?;
     let target = if target.extension().is_some_and(|e| e.eq_ignore_ascii_case(EXT)) { target } else { target.with_extension(EXT) };
     Some(match save(&target, &h, &state) {
         Ok(()) => {
