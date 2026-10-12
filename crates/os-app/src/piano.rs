@@ -666,15 +666,15 @@ pub fn clamp_scroll(s: &mut State, view_h: f32) {
 pub const MIN_ROW: f32 = 6.0;
 pub const MAX_ROW: f32 = 48.0;
 
-/// Vertical zoom by `notches` wheel notches (positive = taller rows), keeping the key under grid height `y`
-/// in place (§3a). Rows stay whole pixels so the grid lines stay sharp.
-pub fn zoom_rows(s: &mut State, grid: Rect, y: f32, notches: f32) {
+/// Ctrl+middle-drag zooms the key rows by [`ROW_ZOOM_STEP`] per [`ROW_ZOOM_PX`] of vertical movement (§3a).
+pub const ROW_ZOOM_STEP: f32 = 1.15;
+pub const ROW_ZOOM_PX: f32 = 12.0;
+
+/// Vertical zoom: set the key row pitch, keeping the key at window y `y` in place (§3a). Rows stay whole pixels
+/// (clamped to [`MIN_ROW`]..[`MAX_ROW`]) so the grid lines stay sharp.
+pub fn set_rows(s: &mut State, grid: Rect, y: f32, row: f32) {
     let old = s.piano.row_h;
-    let mut new = (old * 1.15f32.powf(notches)).round();
-    if new == old && notches != 0.0 {
-        new = old + notches.signum();
-    }
-    let new = new.clamp(MIN_ROW, MAX_ROW);
+    let new = row.round().clamp(MIN_ROW, MAX_ROW);
     let at = (y - grid.y).clamp(0.0, grid.h);
     let rows = (at + s.piano.scroll_y) / old;
     s.piano.row_h = new;

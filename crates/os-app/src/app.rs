@@ -572,6 +572,9 @@ pub enum Drag {
     /// Scroll axes from a start mouse position: value = start + (mouse - m0) × ratio per axis
     /// (ratio < 0 grabs the content, as with the middle button).
     Scroll { m0: (f32, f32), axes: Vec<(Scroll, bool, f32, f32)> },
+    /// Ctrl+middle-drag in the piano roll: vertical movement zooms the key rows around `y0` (up = taller rows,
+    /// spec: ui/piano-roll.md §3a).
+    PianoRowZoom { y0: f32, row0: f32 },
     /// Right-drag on a scroll bar: horizontal mouse movement scrolls the bar, vertical movement
     /// zooms its axis around the view centre (up = zoom in).
     BarZoom { t: Scroll, m0: (f32, f32), p0: f32, ratio: f32, z0: f32, center: f32, view: f32 },
@@ -2099,6 +2102,13 @@ impl App {
                     let _ = p0;
                     self.damage_win(scroll_win(t));
                 }
+                Drag::PianoRowZoom { y0, row0 } => {
+                    if let Some(g) = self.piano_geom() {
+                        let row = row0 * piano::ROW_ZOOM_STEP.powf((y0 - y) / piano::ROW_ZOOM_PX);
+                        piano::set_rows(&mut self.state, g.grid, y0, row);
+                        self.damage_win(Win::PianoRoll);
+                    }
+                }
                 Drag::Scroll { m0, axes } => {
                     for (t, vertical, p0, ratio) in axes {
                         let d = if vertical { y - m0.1 } else { x - m0.0 };
@@ -2614,6 +2624,10 @@ impl App {
             self.state.set_knob(id, id.default_value());
             self.hint = Cow::Owned(self.state.knob_text(id));
             self.invalidate();
+            return;
+        }
+        if self.ctrl && matches!(action, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoKeys)) {
+            self.drag = Some(Drag::PianoRowZoom { y0: y, row0: self.state.piano.row_h });
             return;
         }
         let targets: &[Scroll] = match action {
@@ -3134,13 +3148,8 @@ impl App {
             self.scroll_set(t, self.scroll_get(t) - (dy + dx) * step);
             return Some(scroll_win(t));
         }
-        // Piano roll (spec: ui/piano-roll.md §3a): the wheel over the keyboard zooms the keys (also with Ctrl),
-        // Alt+wheel over the ruler zooms time.
-        if matches!(area, Some(Action::PianoKeys)) && !shift {
-            let Some(g) = self.piano_geom() else { return None };
-            piano::zoom_rows(&mut self.state, g.grid, y, dy + dx);
-            return Some(Win::PianoRoll);
-        }
+        // Piano roll (spec: ui/piano-roll.md §3a): Alt+wheel over the ruler zooms time; the keyboard takes the wheel
+        // like the grid (scroll, Ctrl = time zoom); the keys zoom with Ctrl+middle-drag.
         if matches!(area, Some(Action::PianoRuler)) && self.alt {
             let Some(g) = self.piano_geom() else { return None };
             piano::zoom_time(&mut self.state, &g, x, dy + dx);
@@ -6244,17 +6253,44 @@ mod tests {
         app.state.selected_channel = 0;
         frame(&mut app, &mut c, None);
 
-        // Wheel over the keyboard zooms the keys around the mouse (also with Ctrl); Alt+wheel over the ruler and
-        // PgUp / PgDn zoom time.
+        // The wheel over the keyboard scrolls like the grid and Ctrl+wheel there zooms time; Ctrl+middle-drag zooms
+        // the keys around the press (up = taller); Alt+wheel over the ruler and PgUp / PgDn zoom time.
         let keys = hit_rect(&app, &Action::PianoKeys);
         app.mouse_move(keys.cx(), keys.cy());
-        let k0 = app.piano_geom().unwrap().key_at(keys.cy());
-        app.wheel(0.0, 2.0, false, false);
-        assert!(app.state.piano.row_h > views::piano::ROW);
-        assert_eq!(app.piano_geom().unwrap().key_at(keys.cy()), k0, "the key under the mouse stays");
+        let sy = app.state.piano.scroll_y;
+        app.wheel(0.0, 1.0, false, false);
+        assert!(app.state.piano.scroll_y < sy, "wheel up over the keys scrolls up");
+        assert_eq!(app.state.piano.row_h, views::piano::ROW);
+        let z = app.state.piano.px_per_beat;
+        app.wheel(0.0, 1.0, false, true);
+        assert!(app.state.piano.px_per_beat > z, "Ctrl+wheel over the keys zooms time");
+        assert_eq!(app.state.piano.row_h, views::piano::ROW);
         frame(&mut app, &mut c, None);
-        app.wheel(0.0, -10.0, false, true);
-        assert!(app.state.piano.row_h < views::piano::ROW);
+        for area in [Action::PianoKeys, Action::PianoGrid] {
+            let r = hit_rect(&app, &area);
+            let (x, y) = (r.cx(), r.cy());
+            app.state.piano.row_h = views::piano::ROW;
+            app.mouse_move(x, y);
+            let k0 = app.piano_geom().unwrap().key_at(y);
+            app.ctrl = true;
+            app.mouse_down_middle();
+            app.ctrl = false;
+            app.mouse_move(x, y - 60.0);
+            assert!(app.state.piano.row_h > views::piano::ROW, "{area:?}: dragging up makes rows taller");
+            assert_eq!(app.piano_geom().unwrap().key_at(y), k0, "{area:?}: the key at the press stays");
+            app.mouse_move(x, y + 200.0);
+            assert_eq!(app.state.piano.row_h, piano::MIN_ROW, "{area:?}: dragging down shrinks to the minimum");
+            app.mouse_up();
+            frame(&mut app, &mut c, None);
+        }
+        // Without Ctrl the middle button still pans.
+        app.state.piano.row_h = views::piano::ROW;
+        let r = hit_rect(&app, &Action::PianoGrid);
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_middle();
+        app.mouse_move(r.cx(), r.cy() - 40.0);
+        app.mouse_up();
+        assert_eq!(app.state.piano.row_h, views::piano::ROW);
         frame(&mut app, &mut c, None);
         let z = app.state.piano.px_per_beat;
         let ruler = hit_rect(&app, &Action::PianoRuler);
@@ -6840,8 +6876,7 @@ mod tests {
         piano::center_keys(&mut app.state, grid.h);
         for (name, row) in [("piano_row18.png", 18.0), ("piano_row30.png", 30.0), ("piano_row8.png", 8.0)] {
             let y = grid.cy();
-            let notches = ((row / app.state.piano.row_h) as f32).ln() / 1.15f32.ln();
-            piano::zoom_rows(&mut app.state, grid, y, notches);
+            piano::set_rows(&mut app.state, grid, y, row);
             app.state.piano.row_h = row;
             frame(&mut app, &mut c, None);
             c.pixmap.save_png(dir.join(name)).unwrap();
