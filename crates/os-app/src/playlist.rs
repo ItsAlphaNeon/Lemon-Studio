@@ -973,11 +973,18 @@ fn regroup_copies(s: &mut State, from: usize) {
 
 /// Alt+wheel: change the track height by FL's 6 px steps around the track under the mouse (§6).
 pub fn zoom_rows(s: &mut State, grid: Rect, y: f32, notches: f32) {
+    let row = s.playlist.row_h + ROW_STEP * notches.round();
+    set_row_h(s, grid, y, row);
+}
+
+/// Set the track height (clamped to [`ROW_MIN`]..[`ROW_MAX`], whole 2 px steps like the saved view's 16 + 2h),
+/// keeping the track at window y `y` in place.
+pub fn set_row_h(s: &mut State, grid: Rect, y: f32, row: f32) {
     let rows = Rows::new(s);
     let cy = s.playlist_scroll.1 + (y - grid.y);
     let t = rows.at(cy.max(0.0));
     let frac = ((cy - rows.top(t)) / rows.height(t).max(1.0)).clamp(0.0, 1.0);
-    s.playlist.row_h = (s.playlist.row_h + ROW_STEP * notches.round()).clamp(ROW_MIN, ROW_MAX);
+    s.playlist.row_h = ((row / 2.0).round() * 2.0).clamp(ROW_MIN, ROW_MAX);
     let rows = Rows::new(s);
     s.playlist_scroll.1 = (rows.top(t) + frac * rows.height(t) - (y - grid.y)).max(0.0);
 }

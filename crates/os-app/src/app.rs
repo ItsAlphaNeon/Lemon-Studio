@@ -272,6 +272,11 @@ enum Damage {
     Full,
 }
 
+/// Right-drag sideways on a vertical scroll bar: the rows grow by this factor per [`BAR_ROW_PX`] moved right
+/// (the piano roll's Ctrl+middle-drag rate, spec: ui/scroll-bars.md).
+const BAR_ROW_STEP: f32 = 1.15;
+const BAR_ROW_PX: f32 = 12.0;
+
 /// The window a scroll target scrolls.
 fn scroll_win(t: Scroll) -> Win {
     match t {
@@ -575,9 +580,13 @@ pub enum Drag {
     /// Ctrl+middle-drag in the piano roll: vertical movement zooms the key rows around `y0` (up = taller rows,
     /// spec: ui/piano-roll.md §3a).
     PianoRowZoom { y0: f32, row0: f32 },
-    /// Right-drag on a scroll bar: horizontal mouse movement scrolls the bar, vertical movement
+    /// Right-drag on a horizontal scroll bar: horizontal mouse movement scrolls the bar, vertical movement
     /// zooms its axis around the view centre (up = zoom in).
     BarZoom { t: Scroll, m0: (f32, f32), p0: f32, ratio: f32, z0: f32, center: f32, view: f32 },
+    /// Right-drag on a vertical scroll bar: vertical movement scrolls (as in FL), horizontal movement resizes the
+    /// rows around the view centre where the bar has rows (right = taller). `last` = mouse at the previous move,
+    /// `row` = unrounded row height so slow drags still add up (None: the bar only scrolls). Spec: ui/scroll-bars.md.
+    BarRows { t: Scroll, last: (f32, f32), row: Option<f32> },
     /// A playlist drag (spec: ui/playlist.md).
     Pl(crate::playlist::PlDrag),
     /// A browser item pressed (`started` once it moved far enough), spec: ui/browser.md §3.
@@ -2108,6 +2117,19 @@ impl App {
                     let _ = p0;
                     self.damage_win(scroll_win(t));
                 }
+                Drag::BarRows { t, last, row } => {
+                    // Only when it moved up/down: the clamp uses last frame's bar, stale once the rows were resized.
+                    if let Some(b) = self.bar(t).filter(|_| y != last.1) {
+                        self.scroll_set(t, self.scroll_get(t) + (y - last.1) * b.ratio());
+                    }
+                    let row = row.map(|r| {
+                        let r = r * BAR_ROW_STEP.powf((x - last.0) / BAR_ROW_PX);
+                        self.set_rows(t, r);
+                        r
+                    });
+                    self.drag = Some(Drag::BarRows { t, last: (x, y), row });
+                    self.damage_win(scroll_win(t));
+                }
                 Drag::PianoRowZoom { y0, row0 } => {
                     if let Some(g) = self.piano_geom() {
                         let row = row0 * piano::ROW_ZOOM_STEP.powf((y0 - y) / piano::ROW_ZOOM_PX);
@@ -2535,7 +2557,7 @@ impl App {
     /// True while a right-drag on a scroll bar runs: the shell hides the cursor and keeps it
     /// where the drag started, feeding relative movement.
     pub fn cursor_locked(&self) -> bool {
-        matches!(self.drag, Some(Drag::BarZoom { .. } | Drag::Knob { .. }))
+        matches!(self.drag, Some(Drag::BarZoom { .. } | Drag::BarRows { .. } | Drag::Knob { .. }))
     }
 
     fn bar(&self, t: Scroll) -> Option<Bar> {
@@ -2594,8 +2616,37 @@ impl App {
         }
     }
 
+    /// Row height of a vertical scroll bar's content, where its rows can be resized (spec: ui/scroll-bars.md).
+    fn rows_get(&self, t: Scroll) -> Option<f32> {
+        match t {
+            Scroll::PianoY => Some(self.state.piano.row_h),
+            Scroll::PlaylistY => Some(self.state.playlist.row_h),
+            _ => None,
+        }
+    }
+
+    /// Resize a vertical scroll bar's rows to `row` (clamped and rounded by the view), keeping the row at the view
+    /// centre in place.
+    fn set_rows(&mut self, t: Scroll, row: f32) {
+        match t {
+            Scroll::PianoY => {
+                if let Some(g) = self.piano_geom() {
+                    let at = g.grid.cy();
+                    piano::set_rows(&mut self.state, g.grid, at, row);
+                }
+            }
+            Scroll::PlaylistY => {
+                if let Some(g) = self.pl_grid {
+                    crate::playlist::set_row_h(&mut self.state, g, g.cy(), row);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Press on a scroll bar. Left: a press off the thumb first centres the thumb on the mouse,
-    /// then dragging scrolls. Right (two-dimensional views): drag scrolls both axes.
+    /// then dragging scrolls. Right: the cursor is held; on a horizontal bar sideways scrolls and up/down zooms,
+    /// on a vertical bar up/down scrolls and sideways resizes the rows (spec: ui/scroll-bars.md).
     fn scrollbar_press(&mut self, t: Scroll, right: bool) {
         let Some(b) = self.bar(t) else { return };
         let (x, y) = self.mouse;
@@ -2606,7 +2657,9 @@ impl App {
             self.scroll_set(t, (along - b.thumb / 2.0) * b.ratio());
         }
         let p0 = self.scroll_get(t);
-        self.drag = Some(if right {
+        self.drag = Some(if right && b.vertical {
+            Drag::BarRows { t, last: (x, y), row: self.rows_get(t) }
+        } else if right {
             let z0 = self.zoom_get(t).unwrap_or(1.0);
             Drag::BarZoom { t, m0: (x, y), p0, ratio: b.ratio(), z0, center: p0 + b.view / 2.0, view: b.view }
         } else {
@@ -5148,6 +5201,65 @@ mod tests {
         app.mouse_up();
         assert!((app.scroll_get(Scroll::PianoX) - (x2 - 30.0)).abs() < 0.5);
         assert!((app.scroll_get(Scroll::PianoY) - (y2 - 36.0)).abs() < 0.5);
+        frame(&mut app, &mut c, None);
+        // Right-drag the vertical bar (spec: ui/scroll-bars.md): up/down scrolls with the cursor held, sideways
+        // does not scroll.
+        let (x3, y3, row) = (app.scroll_get(Scroll::PianoX), app.scroll_get(Scroll::PianoY), app.state.piano.row_h);
+        let thumb = |app: &App| {
+            let v = app.bar(Scroll::PianoY).unwrap();
+            (v.track.cx(), v.track.y + app.scroll_get(Scroll::PianoY) / v.max * (v.track.h - v.thumb) + v.thumb / 2.0)
+        };
+        let (tx, ty) = thumb(&app);
+        app.mouse_move(tx, ty);
+        app.mouse_down_right();
+        assert!(app.cursor_locked());
+        app.mouse_move(tx, ty + 20.0);
+        app.mouse_up();
+        assert!(app.scroll_get(Scroll::PianoY) > y3 + 20.0, "down scrolls");
+        assert_eq!((app.scroll_get(Scroll::PianoX), app.state.piano.row_h), (x3, row));
+        frame(&mut app, &mut c, None);
+        // Sideways resizes the key rows around the view centre: right = taller, left = shorter.
+        let g = app.piano_geom().unwrap().grid;
+        let centre_key = |app: &App| (g.cy() - g.y + app.state.piano.scroll_y) / app.state.piano.row_h;
+        let k0 = centre_key(&app);
+        let (tx, ty) = thumb(&app);
+        app.mouse_move(tx, ty);
+        app.mouse_down_right();
+        for i in 1..=6 {
+            app.mouse_move(tx + 4.0 * i as f32, ty);
+        }
+        app.mouse_up();
+        assert_eq!(app.state.piano.row_h, (row * 1.15f32.powi(2)).round(), "24 px right = two steps taller");
+        assert!((centre_key(&app) - k0).abs() < 0.5, "centre key kept: {} vs {k0}", centre_key(&app));
+        frame(&mut app, &mut c, None);
+        let (tx, ty) = thumb(&app);
+        app.mouse_move(tx, ty);
+        app.mouse_down_right();
+        app.mouse_move(tx - 400.0, ty);
+        app.mouse_up();
+        assert_eq!(app.state.piano.row_h, piano::MIN_ROW);
+        // Playlist: the same drag sets the track height in 2 px steps between the limits.
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let v = app.bar(Scroll::PlaylistY).unwrap();
+        let (tx, ty) = (v.track.cx(), v.track.y + v.thumb / 2.0);
+        let h0 = app.state.playlist.row_h;
+        app.mouse_move(tx, ty);
+        app.mouse_down_right();
+        app.mouse_move(tx + 12.0, ty);
+        app.mouse_up();
+        let h1 = app.state.playlist.row_h;
+        assert!(h1 > h0 && h1 % 2.0 == 0.0, "taller in 2 px steps: {h0} -> {h1}");
+        for (dx, want) in [(1000.0, crate::playlist::ROW_MAX), (-1000.0, crate::playlist::ROW_MIN)] {
+            frame(&mut app, &mut c, None);
+            app.mouse_move(tx, ty);
+            app.mouse_down_right();
+            app.mouse_move(tx + dx, ty);
+            app.mouse_up();
+            assert_eq!(app.state.playlist.row_h, want);
+        }
+        // Bars without rows (channel rack, picker) only scroll.
+        assert_eq!(app.rows_get(Scroll::RackY), None);
     }
 
     fn hit_rect(app: &App, a: &Action) -> Rect {
