@@ -1697,8 +1697,10 @@ impl App {
         }
     }
 
+    /// Whether a paint is due: damage, or a playlist scroll waiting to move its pixels (`playlist_scrolled` adds no
+    /// damage of its own; without this a scroll-bar drag or middle-drag grab showed nothing until the release).
     pub fn has_damage(&self) -> bool {
-        self.damage != Damage::None
+        self.damage != Damage::None || self.scrolled.is_some()
     }
 
     /// Take the pending damage: `None` = nothing to paint, `Some(None)` = whole frame, else the regions to repaint
@@ -5757,8 +5759,10 @@ mod tests {
         app.mouse_move(thumb_x, bar_x.track.cy());
         app.mouse_down();
         full(&mut app, &mut a);
+        // The shell paints only when `has_damage` says so: every move of these drags must ask for a frame.
         for dx in [37.0, 81.0, 60.0] {
             app.mouse_move(thumb_x + dx, bar_x.track.cy());
+            assert!(app.has_damage(), "scroll bar drag at {scale}: the move asks for a frame");
             check(&mut app, &mut a, &mut b, "scroll bar drag", Some(true), true);
         }
         app.mouse_up();
@@ -5768,6 +5772,7 @@ mod tests {
         full(&mut app, &mut a);
         for (dx, dy) in [(23.0, 31.0), (-50.0, 7.0), (-90.0, -60.0)] {
             app.mouse_move(over_grid.0 + dx, over_grid.1 + dy);
+            assert!(app.has_damage(), "middle-drag grab at {scale}: the move asks for a frame");
             check(&mut app, &mut a, &mut b, "middle-drag grab", Some(true), true);
         }
         app.mouse_up();
