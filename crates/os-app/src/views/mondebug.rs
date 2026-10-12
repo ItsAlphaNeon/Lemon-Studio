@@ -37,7 +37,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
         ui.c.text(super::fnt(12.0), r.x + (r.w - w) / 2.0, r.y + 1.0, ink, label);
         let (a, hint) = match n {
             0 => (Action::MonReset, "Reset every monitor setting to its default"),
-            1 => (Action::MonSave, "Save the settings to %APPDATA%\\OpenStudio\\monitor.txt (loaded at start)"),
+            1 => (Action::MonSave, "Save the settings to %APPDATA%\\Lemon Studio\\monitor.txt (loaded at start)"),
             _ => (Action::MonClose, "Close the debug panel (F12)"),
         };
         ui.hit(r, a, hint);

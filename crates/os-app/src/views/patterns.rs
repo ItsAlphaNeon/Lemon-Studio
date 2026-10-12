@@ -22,19 +22,34 @@ fn tick(ui: &mut Ui, r: Rect, c: Color) {
     ui.c.line(x - 1.0, y + 4.0, x + 5.0, y - 4.0, 1.5, c);
 }
 
+/// A popup panel: square with a 1 px border, or the rounded Lemon panel (spec: ui/lemon-design.md §9).
+fn panel(ui: &mut Ui, r: Rect, fill: Color) {
+    if super::lemon(ui) {
+        os_ui::kit::lemon::outlined(ui.c, r, 6.0, ui.t.menu_pop_border, fill);
+    } else {
+        ui.c.fill_rect(r, fill);
+        ui.c.stroke_rrect(r, 0.0, 1.0, ui.t.menu_pop_border);
+    }
+}
+
 pub fn paint(ui: &mut Ui, s: &State) {
     let t = ui.t;
     let font = Font::new(14);
+    let lemon = super::lemon(ui);
+    let rb = if lemon { 5.0 } else { 2.0 };
     if let Some(b) = s.pat_ui.name_box.as_ref() {
         let r = Rect::new(b.at.0, b.at.1, BOX_W, BOX_H);
-        ui.c.fill_rect(r, Color::rgb(BG));
-        ui.c.stroke_rrect(r, 0.0, 1.0, t.menu_pop_border);
+        panel(ui, r, Color::rgb(BG));
         ui.hit(r, Action::Pat(Hit::Inside), "");
         let named = matches!(b.target, BoxTarget::Name(_));
         // The colour tab: patterns and channels (spec: ui/channel-rack.md §13).
         let tabbed = named || matches!(b.target, BoxTarget::Rack(crate::rack::RBox::Channel(_)));
         let field = Rect::new(r.x + 4.0, r.y + 4.0, r.w - if tabbed { 30.0 } else { 8.0 }, 22.0);
-        ui.c.fill_rect(field, t.tempo_box);
+        if lemon {
+            ui.c.fill_rrect(field, 4.0, t.tempo_box);
+        } else {
+            ui.c.fill_rect(field, t.tempo_box);
+        }
         let tw = ui.c.text_width(font, &b.text);
         if b.fresh && !b.text.is_empty() {
             ui.c.fill_rect(Rect::new(field.x + 3.0, field.y + 3.0, tw + 2.0, 16.0), Color::rgb(0x3d6a8a));
@@ -49,17 +64,17 @@ pub fn paint(ui: &mut Ui, s: &State) {
         if named {
             let a = Rect::new(x, row, 18.0, 18.0);
             let hov = ui.hit(a, Action::Pat(Hit::Suggestions), "Name suggestions");
-            ui.c.fill_rrect(a, 2.0, if hov { t.menu_pop_hi } else { t.menu_pop });
+            ui.c.fill_rrect(a, rb, if hov { t.menu_pop_hi } else { t.menu_pop });
             crate::icons::draw(ui.c, crate::icons::Icon::ArrowRight, a.inset(3.0), t.glyph);
             x += 20.0;
         }
         let ok = Rect::new(x, row, 18.0, 18.0);
         let hov = ui.hit(ok, Action::Pat(Hit::Accept), "Accept");
-        ui.c.fill_rrect(ok, 2.0, if hov { t.menu_pop_hi } else { t.menu_pop });
+        ui.c.fill_rrect(ok, rb, if hov { t.menu_pop_hi } else { t.menu_pop });
         tick(ui, ok, t.glyph);
         let no = Rect::new(x + 20.0, row, 18.0, 18.0);
         let hov = ui.hit(no, Action::Pat(Hit::Cancel), "Cancel");
-        ui.c.fill_rrect(no, 2.0, if hov { t.menu_pop_hi } else { t.menu_pop });
+        ui.c.fill_rrect(no, rb, if hov { t.menu_pop_hi } else { t.menu_pop });
         cross(ui, no, t.glyph);
         let caption = match b.target {
             BoxTarget::Name(n) => format!("Pattern {n} name"),
@@ -89,8 +104,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
                 .collect();
             let rows = cols.iter().map(Vec::len).max().unwrap_or(0) as f32;
             let p = Rect::new(r.x, r.bottom(), SUG_W * cols.len() as f32 + 2.0, rows * SUG_ROW + 2.0);
-            ui.c.fill_rect(p, t.menu_pop);
-            ui.c.stroke_rrect(p, 0.0, 1.0, t.menu_pop_border);
+            panel(ui, p, t.menu_pop);
             ui.hit(p, Action::Pat(Hit::Inside), "");
             for (ci, col) in cols.iter().enumerate() {
                 let cx = p.x + 1.0 + ci as f32 * SUG_W;
@@ -100,7 +114,11 @@ pub fn paint(ui: &mut Ui, s: &State) {
                 for (ri, w) in col.iter().enumerate() {
                     let rr = Rect::new(cx, p.y + 1.0 + ri as f32 * SUG_ROW, SUG_W - 1.0, SUG_ROW);
                     if ui.hit(rr, Action::Pat(Hit::Suggest(ci, ri)), "Use this name") {
-                        ui.c.fill_rect(rr, t.menu_pop_hi);
+                        if lemon {
+                            os_ui::kit::row_highlight(ui.c, t, rr);
+                        } else {
+                            ui.c.fill_rect(rr, t.menu_pop_hi);
+                        }
                     }
                     ui.c.text_clip(Font::new(13), rr.x + 6.0, rr.y + 1.0, rr.w - 8.0, t.menu_pop_text, w);
                 }
@@ -125,8 +143,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
         let r = Rect::new(((s.screen.0 - w) / 2.0).round(), ((s.screen.1 - h) / 2.0).round(), w, h);
         ui.c.fill_rect(Rect::new(0.0, 0.0, s.screen.0, s.screen.1), Color::rgb(0).with_alpha(80));
         ui.hit(Rect::new(0.0, 0.0, s.screen.0, s.screen.1), Action::Swallow, "");
-        ui.c.fill_rect(r, Color::rgb(BG));
-        ui.c.stroke_rrect(r, 0.0, 1.0, t.menu_pop_border);
+        panel(ui, r, Color::rgb(BG));
         ui.hit(r, Action::Pat(Hit::Inside), "");
         ui.c.text(Font::new(13), r.x + 12.0, r.y + 8.0, t.glyph_dim, "Confirm");
         // spec: ui/channel-rack.md §18 (channels), ui/pattern-menu.md (patterns)
@@ -139,7 +156,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
         for (i, (label, hit)) in [("Ok", Hit::ConfirmOk), ("Cancel", Hit::ConfirmCancel)].into_iter().enumerate() {
             let br = Rect::new(r.right() - 180.0 + i as f32 * 86.0, r.bottom() - 34.0, 80.0, 24.0);
             let hov = ui.hit(br, Action::Pat(hit), label);
-            ui.c.fill_rrect(br, 2.0, if hov { t.menu_pop_hi } else { t.menu_pop });
+            ui.c.fill_rrect(br, rb, if hov { t.menu_pop_hi } else { t.menu_pop });
             let lw = ui.c.text_width(font, label);
             ui.c.text(font, br.x + (br.w - lw) / 2.0, br.y + 4.0, t.glyph, label);
         }

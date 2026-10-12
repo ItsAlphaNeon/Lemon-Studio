@@ -1,6 +1,6 @@
-//! Host link: the private conversation between an "Open" plugin (Open Sampler, ...) and OpenStudio's plugin window.
+//! Host link: the private conversation between an "Open" plugin (Open Sampler, ...) and Lemon Studio's plugin window.
 //!
-//! OpenStudio draws the frame of every plugin window, including the strip row (page tabs, Misc wrench, Presets, channel
+//! Lemon Studio draws the frame of every plugin window, including the strip row (page tabs, Misc wrench, Presets, channel
 //! controls). A plain VST only gets the "plug" tab. An Open plugin can instead *join* the strip: it tells the host which
 //! pages it has (sample, envelope, ...), the host draws their tabs in the same row as the Misc tab and tells the plugin
 //! which page is active, and the plugin hides its own tab row. A plugin that never receives the hello (another DAW)
@@ -8,7 +8,7 @@
 //!
 //! Transport: window messages sent to the plugin's editor window (any plugin format ends up with one on Windows), using
 //! one registered message (`MESSAGE_NAME`), `wparam` = [`Cmd`], `lparam` = argument, result = answer. Both sides run on
-//! the GUI thread of the same process. Spec: `plugins/host-link.md`. This is an OpenStudio design, not FL's protocol.
+//! the GUI thread of the same process. Spec: `plugins/host-link.md`. This is a Lemon Studio design, not FL's protocol.
 // spec: plugins/host-link.md
 
 /// Name passed to `RegisterWindowMessageW`.

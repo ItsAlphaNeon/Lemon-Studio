@@ -1,4 +1,4 @@
-//! Open 3x Osc: OpenStudio's three-oscillator synthesizer as a VST3 / CLAP plugin (nih-plug).
+//! Open 3x Osc: Lemon Studio's three-oscillator synthesizer as a VST3 / CLAP plugin (nih-plug).
 //!
 // spec: plugins/open-3x-osc.md, plugins/3x-osc.md, plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
@@ -131,7 +131,7 @@ impl Open3xOsc {
 
 impl Plugin for Open3xOsc {
     const NAME: &'static str = "Open 3x Osc";
-    const VENDOR: &'static str = "OpenStudio";
+    const VENDOR: &'static str = "Lemon Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -216,7 +216,7 @@ impl Plugin for Open3xOsc {
 
 impl ClapPlugin for Open3xOsc {
     const CLAP_ID: &'static str = "org.openstudio.open-3x-osc";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("OpenStudio's three-oscillator synthesizer");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's three-oscillator synthesizer");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::Instrument, ClapFeature::Synthesizer, ClapFeature::Stereo];
@@ -227,7 +227,7 @@ impl Vst3Plugin for Open3xOsc {
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Instrument, Vst3SubCategory::Synth];
 }
 
-// Built as a plugin module: the C entry points hosts look for. Linked into OpenStudio (`linked` feature): only the
+// Built as a plugin module: the C entry points hosts look for. Linked into Lemon Studio (`linked` feature): only the
 // symbol-free table, so several Open plugins fit in one program (spec: plugins/plugin-formats.md).
 #[cfg(not(feature = "linked"))]
 nih_export_clap!(Open3xOsc);

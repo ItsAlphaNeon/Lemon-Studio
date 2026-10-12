@@ -1,7 +1,7 @@
 //! MIDI controller input: every MIDI input device is opened at start, and note messages play the selected channel like
 //! the typing keyboard does. Device choice and other messages (controllers, pitch bend) are not handled yet.
 //!
-// spec: ui/midi-input.md (OpenStudio design)
+// spec: ui/midi-input.md (Lemon Studio design)
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 

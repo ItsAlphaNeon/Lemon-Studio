@@ -20,7 +20,7 @@ pub mod rec {
     pub const VENDOR: u32 = 56;
 }
 
-/// The type word OpenStudio writes for a new wrapper state.
+/// The type word Lemon Studio writes for a new wrapper state.
 pub const NEW_TYPE: u32 = 10;
 
 /// A parsed wrapper state: the type word and the records in file order.

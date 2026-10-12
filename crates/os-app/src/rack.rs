@@ -25,7 +25,7 @@ pub const LEN_DRAG: f32 = 4.0;
 pub const MIXER_DRAG: f32 = 10.0;
 /// Longest pattern the length box sets (32 bars, §7).
 pub const MAX_STEPS: u32 = 512;
-/// Keys the graph editor's Note tab spans (two octaves around C5, an OpenStudio choice).
+/// Keys the graph editor's Note tab spans (two octaves around C5, a Lemon Studio choice).
 pub const KEY_LO: u16 = 48;
 pub const KEY_HI: u16 = 72;
 
@@ -535,7 +535,7 @@ pub fn random_color(s: &mut State, r: usize, salt: u64) {
 }
 
 /// Color selected > Gradient: from the first selected channel's colour to the last one's (a hue sweep when they
-/// match or have none; OpenStudio's version of FL's gradient dialog).
+/// match or have none; Lemon Studio's version of FL's gradient dialog).
 pub fn gradient(s: &mut State) {
     let rows: Vec<usize> = s.rack.sel.iter().copied().filter(|&r| r < s.project.channels.len()).collect();
     if rows.len() < 2 {

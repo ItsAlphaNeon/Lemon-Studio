@@ -1,4 +1,4 @@
-//! OpenStudio's widget kit: every control the app and Open plugins draw, in one place.
+//! Lemon Studio's widget kit: every control the app and Open plugins draw, in one place.
 //!
 //! Widgets are pure painters: `kit::<widget>(canvas, &palette, rect/centre, value, State)`. Hit-testing and actions
 //! stay with the caller (immediate mode). All colours come from the theme palette (named tokens or the role
@@ -13,6 +13,7 @@ use crate::{Canvas, Font, Glyph, Rect};
 
 pub mod eq;
 pub mod inst;
+pub mod lemon;
 pub mod menu;
 
 /// Interaction state of a control. `on` (latched / active) is separate from the pointer state.
@@ -89,8 +90,19 @@ pub fn raised(c: &mut Canvas, r: Rect, base: Color, radius: f32) {
     c.fill_rect_gradient(r, base.shade(0.045), base.shade(-0.035), radius);
 }
 
+/// `raised` in the palette's design (Lemon: a flat rounded fill).
+pub fn raised_in(c: &mut Canvas, t: &Palette, r: Rect, base: Color, radius: f32) {
+    if lemon::on(t) {
+        return lemon::raised(c, r, base, radius);
+    }
+    raised(c, r, base, radius);
+}
+
 /// Sunken panel (hint bar, monitors, value displays): flat fill inside a 1 px dark border.
 pub fn sunken(c: &mut Canvas, t: &Palette, r: Rect, fill: Color) {
+    if lemon::on(t) {
+        return lemon::well(c, t, r, fill);
+    }
     c.fill_rect(r, t.s(0x1d2022));
     c.fill_rect(r.inset(1.0), fill);
 }
@@ -113,6 +125,9 @@ pub fn grip(c: &mut Canvas, t: &Palette, x: f32, y: f32) {
 /// The FL-style raised button face (spec §1): 1 px border with softened corners, an elliptical radial face
 /// (light centre, darker edges) and a darker 1 px inner rim. `on`/pressed light it orange (Highlight role).
 pub fn button(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
+    if lemon::on(t) {
+        return lemon::button(c, t, r, st);
+    }
     let bg = t.toolbar;
     let lit = st.on || st.pressed;
     if st.disabled && !lit {
@@ -151,6 +166,9 @@ pub fn icon_button(c: &mut Canvas, t: &Palette, r: Rect, st: State, icon: &crate
 
 /// Flat bevelled push button (small square buttons: scroll arrows, spin buttons).
 pub fn flat_button(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
+    if lemon::on(t) {
+        return lemon::flat_button(c, t, r, st);
+    }
     c.fill_rect(r, t.s(0x131618));
     let (a, b) = (face(t.s(0x36383a), st), face(t.s(0x2c2e30), st));
     c.fill_rect_gradient(r.inset(1.0), a, b, 0.0);
@@ -193,6 +211,9 @@ pub fn triangle(c: &mut Canvas, cx: f32, cy: f32, size: f32, dir: Dir, col: Colo
 
 /// Scroll-bar end / stepper button with an arrow.
 pub fn arrow_button(c: &mut Canvas, t: &Palette, r: Rect, dir: Dir, st: State) {
+    if lemon::on(t) {
+        return lemon::arrow_button(c, t, r, dir, st);
+    }
     flat_button(c, t, r, st);
     let col = if st.hover { t.glyph } else { t.glyph.with_alpha(150) };
     chevron(c, r.cx().round(), r.cy().round(), 5.0, dir, col);
@@ -206,6 +227,9 @@ pub fn spin_mark(c: &mut Canvas, x: f32, cy: f32, col: Color) {
 
 /// Dropdown combo: dark box, text, right arrow.
 pub fn combo(c: &mut Canvas, t: &Palette, r: Rect, text: &str, font: Font, st: State) {
+    if lemon::on(t) {
+        return lemon::combo(c, t, r, text, font, st);
+    }
     let m = METRICS;
     bordered(c, r, m.radius, t.s(0x161819), face(t.s(0x1e2022), st));
     let lh = c.line_height(font);
@@ -215,6 +239,9 @@ pub fn combo(c: &mut Canvas, t: &Palette, r: Rect, text: &str, font: Font, st: S
 
 /// Number box (step counts, track numbers): rounded, light text, spin mark.
 pub fn value_box(c: &mut Canvas, t: &Palette, r: Rect, text: &str, font: Font, st: State) {
+    if lemon::on(t) {
+        return lemon::value_box(c, t, r, text, font, st);
+    }
     bordered(c, r, METRICS.radius, t.s(0x191d1f), face(t.s(0x25282a), st));
     let lh = c.line_height(font);
     c.text_right(font, r.right() - 9.0, (r.cy() - lh / 2.0).round(), if st.hover { t.glyph } else { t.text }, text);
@@ -223,6 +250,9 @@ pub fn value_box(c: &mut Canvas, t: &Palette, r: Rect, text: &str, font: Font, s
 
 /// A pill-shaped segmented choice (PAT / SONG, picker tabs): active segment filled with the pill colour.
 pub fn pill(c: &mut Canvas, t: &Palette, r: Rect, label: &str, font: Font, st: State) {
+    if lemon::on(t) {
+        return lemon::pill(c, t, r, label, font, st);
+    }
     if st.on {
         c.fill_rrect(r, r.h / 2.0, t.pill);
         c.text_center(font, r, t.pill_text, label);
@@ -238,6 +268,9 @@ pub fn pill(c: &mut Canvas, t: &Palette, r: Rect, label: &str, font: Font, st: S
 
 /// Round LED (enable switches). `radius` 5 (rack) or 6 (mixer, playlist). Uses the Mute role (green).
 pub fn led(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, radius: f32, st: State) {
+    if lemon::on(t) {
+        return lemon::led(c, t, cx, cy, radius, st);
+    }
     let k = radius / 6.0;
     c.fill_circle(cx, cy, radius, if st.hover { t.s(0x6f7173) } else { t.s(0x595b5c) });
     c.fill_circle(cx, cy, 5.0 * k, t.s(0x283028));
@@ -263,6 +296,9 @@ pub fn cross(c: &mut Canvas, r: Rect, col: Color) {
 
 /// Selection frame (accent outline).
 pub fn focus_frame(c: &mut Canvas, t: &Palette, r: Rect, width: f32) {
+    if lemon::on(t) {
+        return lemon::focus_frame(c, t, r, width);
+    }
     c.fill_rect(Rect::new(r.x, r.y, r.w, width), t.accent);
     c.fill_rect(Rect::new(r.x, r.bottom() - width, r.w, width), t.accent);
     c.fill_rect(Rect::new(r.x, r.y, 1.0, r.h), t.accent);
@@ -285,6 +321,9 @@ pub enum KnobLook {
 }
 
 pub fn knob(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, value: f32, bipolar: bool, look: KnobLook, st: State) {
+    if lemon::on(t) {
+        return lemon::knob(c, t, cx, cy, r, value, bipolar, look, st);
+    }
     let v = value.clamp(0.0, 1.0);
     let start = 0.75 * PI;
     let sweep = 1.5 * PI;
@@ -331,6 +370,9 @@ pub fn knob(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, value: f32, b
 
 /// Fader handle centred at (cx, cy): grey cap, accent green when selected.
 pub fn fader_handle(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, selected: bool, st: State) {
+    if lemon::on(t) {
+        return lemon::fader_handle(c, t, cx, cy, selected, st);
+    }
     let h = Rect::new(cx - 7.0, cy - 11.0, 14.0, 23.0);
     c.fill_rrect(h.outset(1.0), 3.0, t.s(0x121416));
     let (top, mid, low) = if selected {
@@ -359,6 +401,9 @@ pub fn thumb(track_len: f32, pos: f32, view: f32, total: f32) -> (f32, f32) {
 
 /// Scroll bar: flat track, rounded thumb that lifts on hover / drag.
 pub fn scrollbar(c: &mut Canvas, t: &Palette, track: Rect, vertical: bool, pos: f32, view: f32, total: f32, st: State) {
+    if lemon::on(t) {
+        return lemon::scrollbar(c, t, track, vertical, pos, view, total, st);
+    }
     c.fill_rect(track, t.scrollbar);
     let len = if vertical { track.h } else { track.w };
     let (off, tl) = thumb(len, pos, view, total);
@@ -387,6 +432,12 @@ pub fn title_bar(c: &mut Canvas, t: &Palette, r: Rect, title: &str, title_x: f32
 
 /// Floating window frame: 1 px border, 5 px frame, inner line around the client. Returns the inner rect.
 pub fn float_frame(c: &mut Canvas, t: &Palette, r: Rect) -> Rect {
+    if lemon::on(t) {
+        lemon::window(c, t, r);
+        let inner = Rect::new(r.x + 7.0, r.y + 5.0, r.w - 14.0, r.h - 12.0);
+        lemon::client(c, t, Rect::new(inner.x - 1.0, inner.y + 22.0, inner.w + 2.0, inner.h - 21.0));
+        return inner;
+    }
     c.fill_rect(r, t.window_border);
     c.fill_rect(r.inset(1.0), t.window_title);
     c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, 1.0), t.window_title_hi.shade(0.04));
@@ -397,6 +448,9 @@ pub fn float_frame(c: &mut Canvas, t: &Palette, r: Rect) -> Rect {
 
 /// Dropdown / popup panel body with a soft shadow.
 pub fn popup(c: &mut Canvas, t: &Palette, r: Rect) {
+    if lemon::on(t) {
+        return lemon::popup(c, t, r);
+    }
     c.fill_rrect(r.outset(3.0), 6.0, Color::rgb(0).with_alpha(40));
     c.fill_rrect(r.outset(1.5), 4.0, Color::rgb(0).with_alpha(70));
     c.fill_rect(r, t.menu_pop_border);
@@ -405,6 +459,9 @@ pub fn popup(c: &mut Canvas, t: &Palette, r: Rect) {
 
 /// Hovered row of a list or menu.
 pub fn row_highlight(c: &mut Canvas, t: &Palette, r: Rect) {
+    if lemon::on(t) {
+        return lemon::row_highlight(c, t, r);
+    }
     c.fill_rect(r, t.menu_pop_hi);
 }
 
@@ -432,7 +489,9 @@ pub fn window_buttons(c: &mut Canvas, t: &Palette, x0: f32, y: f32, hovered: Opt
     for (i, icon) in [&tb::MINUS, &tb::SQUARES, &tb::X].into_iter().enumerate() {
         let b = Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0);
         let hov = hovered == Some(i);
-        if hov {
+        if hov && lemon::on(t) {
+            lemon::window_button_hover(c, t, b, i == 2);
+        } else if hov {
             c.fill_rrect(b, 3.0, if i == 2 { t.record.with_alpha(170) } else { t.button_hi });
         }
         c.icon(icon, b.inset(2.0), if hov { t.tx(0xffffff) } else { t.text_dim.mix(t.glyph, 0.6) });

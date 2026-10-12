@@ -3,11 +3,11 @@
 //!
 //! A third-party plugin is stored the way the project format stores every such plugin: as the wrapper plugin, whose
 //! state names the plugin (format, class id, name, vendor, file) and holds the plugin's own saved state. Plugins
-//! compiled into OpenStudio keep their own mapping (Open Sampler = sampler channels, Open Parametric EQ 2 = the
+//! compiled into Lemon Studio keep their own mapping (Open Sampler = sampler channels, Open Parametric EQ 2 = the
 //! file's parametric EQ). Native plugins keep their own state format: a hosted native instance writes its state into
 //! its channel or slot as it is, and native plugins that are not hosted keep the bytes the file had.
 //!
-// spec: flp/events/plugins.md (§4 the wrapper state, §6 what OpenStudio writes)
+// spec: flp/events/plugins.md (§4 the wrapper state, §6 what Lemon Studio writes)
 
 use os_flp::wrapper::{self, WRAPPER};
 use os_host::{Descriptor, Format};
@@ -15,7 +15,7 @@ use os_model::{Channel, ChannelKind, PluginRef, Project, SlotPlugin};
 
 use crate::plugins::{fx_of, Available, Plugins};
 
-/// A plugin compiled into OpenStudio (its library is this program).
+/// A plugin compiled into Lemon Studio (its library is this program).
 pub fn is_builtin(d: &Descriptor) -> bool {
     std::env::current_exe().is_ok_and(|exe| exe == d.path)
 }
@@ -50,7 +50,7 @@ pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
 
 /// Writes every hosted third-party plugin into `proj` (the copy a save writes): its channel or slot becomes a wrapped
 /// plugin holding the plugin's identity and current state. A channel or slot the file already held as a wrapped
-/// plugin keeps the wrapper records OpenStudio does not edit.
+/// plugin keeps the wrapper records Lemon Studio does not edit.
 pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
     for key in plugins.hosted.keys().copied().collect::<Vec<_>>() {
         let Some(d) = plugins.descriptor(key) else { continue };

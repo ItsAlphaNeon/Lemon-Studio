@@ -231,7 +231,7 @@ impl Geom {
     }
 }
 
-/// Length used for drawing: a plain step (length 0) is shown one step long (OpenStudio choice).
+/// Length used for drawing: a plain step (length 0) is shown one step long (Lemon Studio choice).
 pub fn shown_len(s: &State, n: &Note) -> u32 {
     if n.length == 0 { u32::from(s.project.ppq.max(4)) / 4 } else { n.length }
 }

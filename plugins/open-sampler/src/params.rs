@@ -670,7 +670,7 @@ impl SamplerParams {
         }
     }
 
-    /// A loop plays when "Use loop points" is on and the loop knobs mark a loop (OpenStudio rule, spec §Loop).
+    /// A loop plays when "Use loop points" is on and the loop knobs mark a loop (Lemon Studio rule, spec §Loop).
     pub fn loop_active(&self) -> bool {
         self.loop_use.live() && (self.loop_start.live() > 0.0 || self.loop_end.live() < 1.0)
     }

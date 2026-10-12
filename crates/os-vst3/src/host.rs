@@ -147,7 +147,7 @@ impl IHostApplication for HostApp {
         if name.is_null() {
             return kInvalidArgument;
         }
-        unsafe { write_str128(name, "OpenStudio") };
+        unsafe { write_str128(name, "Lemon Studio") };
         kResultOk
     }
 

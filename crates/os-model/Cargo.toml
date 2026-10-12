@@ -1,6 +1,6 @@
 [package]
 name = "os-model"
-description = "OpenStudio project data model"
+description = "Lemon Studio project data model"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,6 +1,6 @@
 //! Channel plugin window, opened from a channel's name button.
 // spec: ui/channel-rack.md §5 (name button). FL shows the generator plugin's own window here; until
-// plugins have editors OpenStudio shows a plain settings window for the channel (OpenStudio layout).
+// plugins have editors Lemon Studio shows a plain settings window for the channel (Lemon Studio layout).
 
 use os_model::ChannelKind;
 use os_ui::{Font, Rect};

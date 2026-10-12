@@ -326,7 +326,7 @@ impl Logic {
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
                 m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
-                // Automation belongs to the host: offered when OpenStudio hosts the editor (host link).
+                // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
                 m
@@ -819,7 +819,7 @@ mod tests {
         l.pick(&MenuReq::Param("o2_coarse".into()), Cmd::CopyValue("o2_coarse".into()), 0.0, 0.0);
         l.pick(&MenuReq::Param("o3_coarse".into()), Cmd::PasteValue("o3_coarse".into()), 0.0, 0.0);
         assert_eq!(l.vals.plain("o3_coarse"), 7.0);
-        // "Create automation clip" asks the host (only OpenStudio, via the host link) for parameter k's clip.
+        // "Create automation clip" asks the host (only Lemon Studio, via the host link) for parameter k's clip.
         let req = MenuReq::Param("o2_coarse".into());
         let entry = |l: &Logic| {
             let m = l.menu(&req);

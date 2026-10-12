@@ -69,7 +69,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if docked.is_none() {
         let wm = ui.t.watermark;
         icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
-        let version = concat!("OpenStudio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
+        let version = concat!("Lemon Studio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
         let vc = ui.t.version_text;
         let vw = ui.c.text_width(crate::views::fnt(16.0), version);
         ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, h - 22.0, vc, version);
@@ -195,7 +195,12 @@ pub fn window_frame_ex(ui: &mut Ui, win: Win, r: Rect, title: &str, title_x: f32
     let t = ui.t;
     ui.c.fill_rect(r, t.window_title);
     let bar = Rect::new(r.x, r.y, r.w, 23.0);
-    if !flat {
+    if kit::lemon::on(t) {
+        // Lemon (spec: ui/lemon-design.md §3): a flat bar, a hairline under it.
+        if !flat {
+            ui.c.fill_rect(Rect::new(r.x, r.y + 22.0, r.w, 1.0), t.splitter_dark);
+        }
+    } else if !flat {
         ui.c.fill_rect_gradient(bar, t.window_title.shade(0.04), t.window_title.shade(-0.03), 0.0);
         ui.c.fill_rect(Rect::new(r.x, r.y + 22.0, r.w, 1.0), t.splitter_dark);
     }
@@ -217,11 +222,15 @@ pub fn float_frame(ui: &mut Ui, s: &State, win: Win, r: Rect) -> Option<Rect> {
         return None;
     }
     let t = ui.t;
-    ui.c.fill_rect(r, ui.t.s(0x191d1f));
-    ui.c.fill_rect(r.inset(1.0), t.window_title);
-    ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, 1.0), ui.t.s(0x303436));
     let inner = Rect::new(r.x + 7.0, r.y + 5.0, r.w - 14.0, r.h - 12.0);
-    ui.c.fill_rect(Rect::new(inner.x - 1.0, inner.y + 22.0, inner.w + 2.0, inner.h - 21.0), ui.t.s(0x131718));
+    if kit::lemon::on(t) {
+        kit::float_frame(ui.c, t, r);
+    } else {
+        ui.c.fill_rect(r, ui.t.s(0x191d1f));
+        ui.c.fill_rect(r.inset(1.0), t.window_title);
+        ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, 1.0), ui.t.s(0x303436));
+        ui.c.fill_rect(Rect::new(inner.x - 1.0, inner.y + 22.0, inner.w + 2.0, inner.h - 21.0), ui.t.s(0x131718));
+    }
     ui.hit(Rect::new(r.x, r.y, r.w, 28.0), Action::WinDrag(win), "Drag to move");
     Some(inner)
 }
@@ -260,7 +269,12 @@ pub fn scrollbar(ui: &mut Ui, track: Rect, vertical: bool, pos: f32, view: f32, 
 
 /// Raised surface: soft vertical gradient (lighter at the top) so panels don't look flat.
 pub fn raised(ui: &mut Ui, r: Rect, base: Color, radius: f32) {
-    kit::raised(ui.c, r, base, radius);
+    kit::raised_in(ui.c, ui.t, r, base, radius);
+}
+
+/// Whether the Lemon design draws (spec: ui/lemon-design.md); views keep their Classic drawing otherwise.
+pub fn lemon(ui: &Ui) -> bool {
+    kit::lemon::on(ui.t)
 }
 
 /// Button face states.

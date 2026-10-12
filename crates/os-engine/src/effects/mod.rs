@@ -1,4 +1,4 @@
-//! Mixer-slot effects: OpenStudio's own recreations, configured from a project's saved
+//! Mixer-slot effects: Lemon Studio's own recreations, configured from a project's saved
 //! plugin state.
 
 mod biquad;
@@ -12,7 +12,7 @@ pub trait Effect: Send {
     fn process(&mut self, buf: &mut [f32]);
 }
 
-/// Creates an OpenStudio effect for a slot plugin, if one exists for that plugin.
+/// Creates a Lemon Studio effect for a slot plugin, if one exists for that plugin.
 /// The FLP plugin name only identifies the saved-state format.
 pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn Effect>> {
     match name {

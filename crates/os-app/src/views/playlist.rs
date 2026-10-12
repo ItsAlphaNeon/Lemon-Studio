@@ -2,6 +2,7 @@
 // spec: ui/main-window.md §5–6; ui/playlist.md
 
 use os_model::{AutoMode, Clip, ClipSource, TimeMarker};
+use os_ui::kit::lemon as lk;
 use os_ui::{Color, Font, Rect};
 
 use super::{resize_zones, rgb, window_body, FrameInfo};
@@ -26,6 +27,30 @@ const DEFAULT_BODY: u32 = 0x0d1214;
 const NOTE: u32 = 0xa5aeb3;
 const WAVE: u32 = 0xb1c7bd;
 const CURVE: u32 = 0xd8e0b0;
+
+/// A clip colour in the palette's design: Classic draws the measured value, Lemon its own neutral clip shades with
+/// the lemon selection (spec: ui/lemon-design.md §7).
+fn cc(t: &os_theme::Palette, v: u32) -> Color {
+    if !lk::on(t) {
+        return Color::rgb(v);
+    }
+    use os_theme::design::lemon as brand;
+    match v {
+        CLIP_BORDER => Color::rgb(0x1e1e1e),
+        TITLE_TOP | TITLE_BOTTOM => Color::rgb(0x5c5c5c),
+        TITLE_TEXT => Color::rgb(0xf2f2f2),
+        SEL_TITLE => brand::MAIN,
+        SEL_TEXT => brand::COLORED_DARK,
+        SEL_BODY => Color::rgb(0x2e2810),
+        MUTED_TITLE => Color::rgb(0x2b2b2b),
+        MUTED_TEXT => Color::rgb(0x767676),
+        DEFAULT_BODY => Color::rgb(0x1c1c1c),
+        NOTE => Color::rgb(0xd6d6d6),
+        WAVE => Color::rgb(0xe6e6e6),
+        CURVE => brand::HIGHLIGHT,
+        _ => t.s(v),
+    }
+}
 /// Tool button centres in the title bar, relative to the window's left edge (§1: 275..442 at x 209).
 const TOOL_X: [f32; 9] = [66.0, 86.0, 108.0, 129.0, 150.0, 171.0, 192.0, 213.0, 233.0];
 const TOOL_ICONS: [Icon; 9] =
@@ -74,20 +99,15 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         let b = Rect::new(r.x + cx - 9.0, ty, 18.0, 18.0);
         let on = s.playlist.tool == tool;
         let hov = ui.hit(b, Action::PlTool(tool), tool.hint());
-        if on {
-            ui.c.fill_rrect(b.outset(1.0), 3.0, t.glyph.with_alpha(40));
-        }
-        icons::draw(ui.c, icon, b, if on { t.glyph } else if hov { t.text.shade(0.3) } else { t.text });
+        let ink = tool_face(ui, b, on, hov);
+        icons::draw(ui.c, icon, b, ink);
     }
     // Stretch mode (Shift+M, §9b): |<->| after the tools, lit while on.
     {
         let b = Rect::new(r.x + 254.0 - 9.0, ty, 18.0, 18.0);
         let hov = ui.hit(b, Action::PlStretch, if s.playlist.stretch { "Stretch mode: on (Shift+M)" } else { "Stretch mode: off (Shift+M)" });
         let on = s.playlist.stretch;
-        if on {
-            ui.c.fill_rrect(b.outset(1.0), 3.0, t.glyph.with_alpha(40));
-        }
-        let col = if on { t.glyph } else if hov { t.text.shade(0.3) } else { t.text };
+        let col = tool_face(ui, b, on, hov);
         let (cx, cy) = (b.cx(), b.cy());
         ui.c.fill_rect(Rect::new(cx - 7.0, cy - 5.0, 1.2, 10.0), col);
         ui.c.fill_rect(Rect::new(cx + 5.8, cy - 5.0, 1.2, 10.0), col);
@@ -105,7 +125,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 
     // Track-header strip: add button and the NOTE / CHAN / PAT filters.
     let strip = Rect::new(r.x + 162.0, client.y + 1.0, 108.0, 38.0);
-    ui.c.fill_rect_gradient(strip, t.track_header.shade(0.05), t.track_header.shade(-0.03), 0.0);
+    if super::lemon(ui) {
+        ui.c.fill_rrect(strip, lk::r_btn(t), t.track_header);
+    } else {
+        ui.c.fill_rect_gradient(strip, t.track_header.shade(0.05), t.track_header.shade(-0.03), 0.0);
+    }
     icons::draw(ui.c, Icon::Plus, Rect::new(strip.x + 6.0, client.y + 20.0, 16.0, 16.0), t.glyph);
     for (i, (icon, label)) in [(Icon::Wave, "NOTE"), (Icon::Slide, "CHAN"), (Icon::PianoRoll, "PAT")].into_iter().enumerate() {
         let cx = strip.x + 45.0 + 26.0 * i as f32;
@@ -312,17 +336,23 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         let hov = ui.hit(row, Action::PlPick(src), "Select clip source (right-click a pattern to rename)");
         let filled = pick_used(s, src);
         let k = if hov { 0.05 } else { 0.0 };
-        if filled {
+        let lemon = super::lemon(ui);
+        if filled && lemon {
+            lk::outlined(ui.c, row, lk::r_btn(ui.t), ui.t.s(0x2f3539), ui.t.s(0x464e53).shade(k));
+            preview(ui, s, src, row.inset(3.0));
+        } else if filled {
             // Used source: grey button with a faint preview of its contents (pl_asher.png).
             ui.c.fill_rect(row, ui.t.s(0x2f3539));
             ui.c.fill_rect(row.inset(1.0), ui.t.s(0x464e53).shade(k));
             preview(ui, s, src, row.inset(3.0));
+        } else if lemon {
+            ui.c.fill_rrect(row, lk::r_btn(ui.t), ui.t.s(0x2a2d2e).shade(k));
         } else {
             // Empty pattern: dark face (owner's FL screenshot).
             ui.c.fill_rect_gradient(row, ui.t.s(0x2a2d2e).shade(k), ui.t.s(0x232627).shade(k), 0.0);
         }
         if src == cur && !filled {
-            ui.c.stroke_rrect(row.inset(0.5), 0.0, 1.0, ui.t.a(0xa8e44a));
+            ui.c.stroke_rrect(row.inset(0.5), if lemon { lk::r_btn(ui.t) } else { 0.0 }, 1.0, ui.t.a(0xa8e44a));
         }
         let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
         if matches!(src, ClipSource::Pattern(_)) && !filled {
@@ -335,7 +365,8 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         ui.c.text_clip(Font::new(14), row.x + 15.0, row.cy() - 8.0, row.w - 18.0, ic, &pl::source_name(s, src));
         if src == cur {
             let ax = list.x - 1.0;
-            ui.c.fill_polygon(&[(ax, row.cy() - 5.0), (ax + 6.0, row.cy()), (ax, row.cy() + 5.0)], Color::rgb(0xe64363));
+            let mark = if lemon { ui.t.accent } else { Color::rgb(0xe64363) };
+            ui.c.fill_polygon(&[(ax, row.cy() - 5.0), (ax + 6.0, row.cy()), (ax, row.cy() + 5.0)], mark);
         }
         y += PICK_ROW;
     }
@@ -560,12 +591,12 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     // On a collapsed group's strip a clip is a bar in its colour (§6a).
     if g.rows.strip(c.track) {
         let col = if s.playlist.sel.contains(&i) {
-            Color::rgb(SEL_TITLE)
+            cc(t, SEL_TITLE)
         } else {
             pl::clip_tint(s, c.source)
                 .or_else(|| pl::source_color(s, c.source))
                 .or_else(|| pl::track_info(s, c.track).and_then(|t| t.color))
-                .map_or(Color::rgb(TITLE_TOP), rgb)
+                .map_or(cc(t, TITLE_TOP), rgb)
         };
         let col = if c.muted || !pl::track_on(s, c.track) { col.mix(t.grid, 0.6) } else { col };
         ui.c.fill_rrect(r, 1.5, col);
@@ -582,27 +613,32 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
 
     // Title strip: (edge rows, highlight row, gradient top, gradient bottom, text).
     let (edge, high, top, bottom, text, body) = if selected {
-        let sel = Color::rgb(SEL_TITLE);
-        (sel.shade(-0.25), sel.shade(0.08), sel, sel.shade(-0.1), Color::rgb(SEL_TEXT), Color::rgb(SEL_BODY))
+        let sel = cc(t, SEL_TITLE);
+        (sel.shade(-0.25), sel.shade(0.08), sel, sel.shade(-0.1), cc(t, SEL_TEXT), cc(t, SEL_BODY))
     } else if c.muted {
-        let m = Color::rgb(MUTED_TITLE);
-        (m.shade(-0.2), m, m, m, Color::rgb(MUTED_TEXT), Color::rgb(DEFAULT_BODY))
+        let m = cc(t, MUTED_TITLE);
+        (m.shade(-0.2), m, m, m, cc(t, MUTED_TEXT), cc(t, DEFAULT_BODY))
     } else {
-        let body = color.map_or(Color::rgb(DEFAULT_BODY), darken);
+        let body = color.map_or(cc(t, DEFAULT_BODY), darken);
         match (kind, tint) {
             (PickKind::Audio | PickKind::Automation, Some(c)) => {
-                (offset(c, -42), offset(c, -8), offset(c, -17), offset(c, -26), Color::rgb(TITLE_TEXT), body)
+                (offset(c, -42), offset(c, -8), offset(c, -17), offset(c, -26), cc(t, TITLE_TEXT), body)
             }
-            _ => (Color::rgb(CLIP_BORDER), Color::rgb(TITLE_TOP), Color::rgb(TITLE_TOP), Color::rgb(TITLE_BOTTOM), Color::rgb(TITLE_TEXT), body),
+            _ => (cc(t, CLIP_BORDER), cc(t, TITLE_TOP), cc(t, TITLE_TOP), cc(t, TITLE_BOTTOM), cc(t, TITLE_TEXT), body),
         }
     };
     // Outline (rounded at the top only); a clip a few pixels wide keeps its colours to its edges.
     let outline = dim(t.s(0x03090d));
     let narrow = r.w < 8.0;
+    let lemon = super::lemon(ui);
     // Rect fills with the top corners knocked out (cheaper than rounded paths for hundreds of clips).
-    ui.c.fill_rect(r, outline);
+    if lemon {
+        ui.c.fill_rrect(r, lk::r_btn(t).min(r.w / 2.0).min(r.h / 2.0), outline);
+    } else {
+        ui.c.fill_rect(r, outline);
+    }
     let row = if track_on { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
-    if !narrow {
+    if !narrow && !lemon {
         ui.c.fill_rect(Rect::new(r.x, r.y, 1.0, 1.0), row);
         ui.c.fill_rect(Rect::new(r.right() - 1.0, r.y, 1.0, 1.0), row);
     }
@@ -610,12 +646,18 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let inner = Rect::new(r.x + side, r.y + 1.0, (r.w - 2.0 * side).max(1.0), r.h - 2.0);
     let title_h = TITLE_H - 2.0;
     // Edge colour behind the strip (its top corners in the outline's colour), then the highlight row and the gradient.
-    ui.c.fill_rect(Rect::new(inner.x, inner.y, inner.w, title_h + 1.0), dim(edge));
-    if !narrow && inner.w > 4.0 {
+    // Lemon (spec: ui/lemon-design.md §7): a rounded tile with a flat title strip.
+    let ir = (lk::r_btn(t) - 1.0).min(inner.w / 2.0).min(inner.h / 2.0);
+    if lemon {
+        ui.c.fill_rrect(inner, ir, dim(top));
+    } else {
+        ui.c.fill_rect(Rect::new(inner.x, inner.y, inner.w, title_h + 1.0), dim(edge));
+    }
+    if !narrow && inner.w > 4.0 && !lemon {
         ui.c.fill_rect(Rect::new(inner.x, inner.y, 1.0, 1.0), outline);
         ui.c.fill_rect(Rect::new(inner.right() - 1.0, inner.y, 1.0, 1.0), outline);
     }
-    if inner.w > 3.0 {
+    if inner.w > 3.0 && !lemon {
         ui.c.fill_rect(Rect::new(inner.x + 1.0, inner.y + 1.0, inner.w - 2.0, 1.0), dim(high));
         ui.c.fill_rect_gradient(Rect::new(inner.x + 1.0, inner.y + 2.0, inner.w - 2.0, title_h - 3.0), dim(top), dim(bottom), 0.0);
     }
@@ -624,9 +666,14 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let body_r = Rect::new(inner.x, body_r.y, inner.w, inner.bottom() - body_r.y);
     // The content is measured from the body's true edges (the drawn ones may be pulled in, `clip_draw_rect`).
     let body_at = Body { r: body_r, x: clip_x + f64::from(side), w: f64::from((full_w - 2.0 * side).max(1.0)) };
-    ui.c.fill_rect(body_r, dim(body));
-    ui.c.fill_rect(Rect::new(body_r.x, body_r.y, body_r.w, 1.0), dim(body.shade(-0.08)));
-    ui.c.fill_rect(Rect::new(body_r.x, body_r.bottom() - 1.0, body_r.w, 1.0), dim(body.shade(-0.3)));
+    if lemon {
+        ui.c.fill_rrect(body_r, ir, dim(body));
+        ui.c.fill_rect(Rect::new(body_r.x, body_r.y, body_r.w, ir.min(body_r.h)), dim(body));
+    } else {
+        ui.c.fill_rect(body_r, dim(body));
+        ui.c.fill_rect(Rect::new(body_r.x, body_r.y, body_r.w, 1.0), dim(body.shade(-0.08)));
+        ui.c.fill_rect(Rect::new(body_r.x, body_r.bottom() - 1.0, body_r.w, 1.0), dim(body.shade(-0.3)));
+    }
 
     ui.c.push_clip(inner.intersect(&g.grid));
     // Type icon (✕ when muted) and name; a narrow clip shows only its strip.
@@ -658,13 +705,13 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         ui.c.text_clip(Font::new(12), inner.x + 14.0, inner.y - 1.0, inner.w - 16.0, ic, &pl::source_name(s, c.source));
     }
     // Content.
-    let content = if c.muted { dim(text).with_alpha(90) } else { dim(Color::rgb(NOTE)) };
+    let content = if c.muted { dim(text).with_alpha(90) } else { dim(cc(t, NOTE)) };
     if !(c.muted && kind == PickKind::Pattern) {
         match (kind, c.source) {
             (PickKind::Pattern, ClipSource::Pattern(n)) => pattern_notes(ui, s, g, c, n, body_at, content),
             (PickKind::Audio, ClipSource::Channel(ch)) => {
                 // The channel colour lifted by 80 (§2); without one the measured default.
-                let wave = tint.map_or(Color::rgb(WAVE), |c| offset(c, 80));
+                let wave = tint.map_or(cc(t, WAVE), |c| offset(c, 80));
                 let col = if c.muted { content } else { dim(wave) };
                 waveform(ui, s, g, c, ch, body_at, col);
                 if !c.muted {
@@ -672,7 +719,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
                 }
             }
             (PickKind::Automation, ClipSource::Channel(ch)) => {
-                let col = if c.muted { content } else { dim(Color::rgb(CURVE)) };
+                let col = if c.muted { content } else { dim(cc(t, CURVE)) };
                 curve(ui, s, g, i, c, ch, body_at, dim(body), col);
             }
             _ => {}
@@ -973,8 +1020,8 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
         // The indent beside the members: a dark strip (FL dithers it).
         ui.c.fill_rect(Rect::new(x, y, INDENT, bh), t.s(0x2b3439));
     }
-    let (top, bottom) = (base.shade(0.035), base.shade(-0.03));
-    let k = RADIUS.min(bh / 2.0);
+    let (top, bottom) = if super::lemon(ui) { (base, base) } else { (base.shade(0.035), base.shade(-0.03)) };
+    let k = if super::lemon(ui) { lk::r_btn(t) + 1.0 } else { RADIUS }.min(bh / 2.0);
     ui.c.fill_rect_gradient(hr, top, bottom, k);
     // Square the corners that continue into the rows above / below.
     if member {
@@ -1029,6 +1076,23 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     } else {
         super::led(ui, led.cx(), led.cy(), on);
     }
+}
+
+/// The face behind a title-bar tool icon; returns the icon colour. Lemon: the active tool is a lit rounded square.
+fn tool_face(ui: &mut Ui, b: Rect, on: bool, hov: bool) -> Color {
+    let t = ui.t;
+    if super::lemon(ui) {
+        if on {
+            lk::lit(ui.c, b.outset(1.0), lk::r_btn(t), hov);
+        } else if hov {
+            ui.c.fill_rrect(b.outset(1.0), lk::r_btn(t), t.button_hi);
+        }
+        return if on { lk::ink_on_lemon() } else { t.glyph };
+    }
+    if on {
+        ui.c.fill_rrect(b.outset(1.0), 3.0, t.glyph.with_alpha(40));
+    }
+    if on { t.glyph } else if hov { t.text.shade(0.3) } else { t.text }
 }
 
 /// The open playlist popup menu and its submenu, and the inline text box (drawn above everything).
@@ -1104,8 +1168,13 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     let y = y.min(screen.1 - h - 2.0).max(0.0);
     let r = Rect::new(x, y, w, h);
     let mut rows = Vec::with_capacity(items.len());
-    ui.c.fill_rect(r, t.menu_pop);
-    ui.c.stroke_rrect(Rect::new(r.x + m.line, r.y + m.line, r.w - 2.0 * m.line, r.h - 2.0 * m.line), 0.0, m.border, t.menu_pop_border);
+    let lemon = super::lemon(ui);
+    if lemon {
+        os_ui::kit::popup(ui.c, t, r);
+    } else {
+        ui.c.fill_rect(r, t.menu_pop);
+        ui.c.stroke_rrect(Rect::new(r.x + m.line, r.y + m.line, r.w - 2.0 * m.line, r.h - 2.0 * m.line), 0.0, m.border, t.menu_pop_border);
+    }
     ui.hit(r, Action::Swallow, "");
     for (i, it) in items.iter().enumerate() {
         let (col, off) = layout[i];
@@ -1122,7 +1191,11 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             continue;
         }
         if it.head {
-            ui.c.fill_rect(rr, t.menu_pop_head);
+            if lemon {
+                ui.c.fill_rrect(Rect::new(rr.x + 3.0, rr.y + 1.0, rr.w - 6.0, rr.h - 2.0), 4.0f32.min(rr.h / 2.0 - 1.0).max(0.0), t.menu_pop_head);
+            } else {
+                ui.c.fill_rect(rr, t.menu_pop_head);
+            }
             ui.c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0 + (rr.h - os_ui::kit::menu::HEAD) / 2.0, t.menu_pop_head_text, &it.label);
             continue;
         }
@@ -1131,7 +1204,10 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         // planned). Disabled entries never light up.
         let live = it.enabled && (it.children.is_empty() || any_enabled(&it.children));
         if it.enabled {
-            if ui.hit(rr, action, it.label.to_string()) || open == Some(i) {
+            let lit = ui.hit(rr, action, it.label.to_string()) || open == Some(i);
+            if lit && lemon {
+                os_ui::kit::row_highlight(ui.c, t, rr);
+            } else if lit {
                 ui.c.fill_rect(rr, t.menu_pop_hi);
             }
         } else if matches!(it.cmd, pl::Cmd::NotYet(_)) {

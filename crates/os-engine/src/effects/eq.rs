@@ -1,4 +1,4 @@
-//! OpenStudio's 7-band parametric EQ: the band filter designs (shared by the engine's own slot effect and the Open
+//! Lemon Studio's 7-band parametric EQ: the band filter designs (shared by the engine's own slot effect and the Open
 //! Parametric EQ 2 plugin) and the effect built from a project's Parametric EQ 2 saved state.
 //!
 // spec: plugins/parametric-eq-2.md

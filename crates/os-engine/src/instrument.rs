@@ -1,5 +1,5 @@
 //! Generator plugins as engine instruments: a channel can be played by an external instrument (a hosted CLAP plugin)
-//! instead of a sample. The instance outlives engines (OpenStudio rebuilds the engine on every edit), so it is shared
+//! instead of a sample. The instance outlives engines (Lemon Studio rebuilds the engine on every edit), so it is shared
 //! behind a mutex; the audio thread only ever `try_lock`s it.
 //!
 // spec: plugins/plugin-formats.md (hosting: threading)

@@ -1,5 +1,5 @@
 //! A VST 3 instance's state bytes: the documented `.vstpreset` container (header, data chunks, chunk list), so the
-//! bytes OpenStudio stores for an instance are also a valid preset file.
+//! bytes Lemon Studio stores for an instance are also a valid preset file.
 // spec: plugins/vst3-hosting.md §8
 
 /// Chunk ids.

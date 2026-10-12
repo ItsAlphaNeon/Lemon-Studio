@@ -1,4 +1,4 @@
-//! `cargo run -p bundle-plugins [-- --install]`: builds every OpenStudio plugin in release mode and writes
+//! `cargo run -p bundle-plugins [-- --install]`: builds every Lemon Studio plugin in release mode and writes
 //! `<target>/bundled/<Name>.vst3` (bundle folder) and `<Name>.clap`; `--install` copies them to the per-user plugin
 //! folders (no admin rights needed).
 //!

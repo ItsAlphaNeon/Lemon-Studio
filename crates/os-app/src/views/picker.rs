@@ -1,5 +1,5 @@
 //! Plugin picker overlay (View > Plugin picker, F8): generators left, effects right, category tabs
-//! along the bottom. Tiles are small drawn "faces" (OpenStudio's own art, not FL thumbnails); the name
+//! along the bottom. Tiles are small drawn "faces" (Lemon Studio's own art, not FL thumbnails); the name
 //! appears in the hover tooltip only, as in FL.
 // spec: ui/plugin-picker.md
 
@@ -7,7 +7,7 @@ use os_ui::{Canvas, Color, Font, Rect};
 
 use crate::app::{Action, State, Ui};
 
-/// How a tile is drawn (spec: OpenStudio choices).
+/// How a tile is drawn (spec: Lemon Studio choices).
 #[derive(Clone, Copy)]
 #[allow(dead_code)] // faces for plugins not built yet
 pub enum Face {
@@ -335,7 +335,7 @@ fn search_icon(c: &mut Canvas, cx: f32, cy: f32) {
     c.line(cx - 2.0, cy - 9.0, cx - 2.0, cy + 6.0, 2.0, col);
 }
 
-/// Draw one tile face (all original OpenStudio art).
+/// Draw one tile face (all original Lemon Studio art).
 fn face(c: &mut Canvas, pl: &Plugin, r: Rect) {
     let acc = rgb(pl.accent);
     match pl.face {

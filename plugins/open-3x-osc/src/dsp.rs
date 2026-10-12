@@ -255,7 +255,7 @@ fn blep(t: f64, dt: f64) -> f64 {
     }
 }
 
-/// The high-quality oscillators: the wave with band-limited edges (OpenStudio choice: polyBLEP).
+/// The high-quality oscillators: the wave with band-limited edges (Lemon Studio choice: polyBLEP).
 pub fn hq(shape: u8, u: f64, dt: f64) -> f64 {
     let dt = dt.min(0.5);
     match shape {

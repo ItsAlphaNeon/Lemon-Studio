@@ -1,4 +1,4 @@
-//! OpenStudio's DSP building blocks, shared by the engine and OpenStudio's own plugins: the arithmetic the engine
+//! Lemon Studio's DSP building blocks, shared by the engine and Lemon Studio's own plugins: the arithmetic the engine
 //! pages specify, at the precision they give, so that a project plays the way it was made.
 //!
 //! - [`level`]: the level curve, knob positions as products with a reciprocal, the constant-power pan split.

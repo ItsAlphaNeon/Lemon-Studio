@@ -1,10 +1,10 @@
-//! OpenStudio's CLAP host: loads `.clap` libraries, creates instances, plays them as engine instruments
+//! Lemon Studio's CLAP host: loads `.clap` libraries, creates instances, plays them as engine instruments
 //! (`os_engine::Instrument`), saves / loads their state and shows their editors.
 //!
 //! Threading: an instance is shared as `Arc<Mutex<Plugin>>`. The UI thread creates it, activates it, opens its
 //! editor, loads / saves state and calls `idle` every tick; the audio thread only calls `Instrument` methods through
 //! the engine (with `try_lock`).
-// spec: plugins/plugin-formats.md (hosting inside OpenStudio)
+// spec: plugins/plugin-formats.md (hosting inside Lemon Studio)
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
@@ -195,7 +195,7 @@ struct HostData {
     automate: Mutex<Vec<u32>>,
 }
 
-static HOST_NAME: &CStr = c"OpenStudio";
+static HOST_NAME: &CStr = c"Lemon Studio";
 static HOST_URL: &CStr = c"";
 static HOST_VERSION: &CStr = c"0.0.1";
 
@@ -1399,7 +1399,7 @@ mod tests {
         assert!(peak > 0.1, "{} passes the input through (peak {peak})", d.name);
     }
 
-    /// The whole path OpenStudio uses: a pattern on a plugin channel, played by the engine through the hosted .clap.
+    /// The whole path Lemon Studio uses: a pattern on a plugin channel, played by the engine through the hosted .clap.
     #[test]
     fn engine_plays_a_pattern_through_open_sampler() {
         let Some(lib) = open_sampler() else { return };

@@ -1,4 +1,4 @@
-//! Open 3x Osc in OpenStudio: compiled in like Open Sampler, it plays every 3x Osc channel of a project (started from
+//! Open 3x Osc in Lemon Studio: compiled in like Open Sampler, it plays every 3x Osc channel of a project (started from
 //! the state the file holds) and every one added from the picker, the browser or the channel rack; saving writes its
 //! settings back as the file's 3x Osc state, so the file keeps its own plugin.
 //!

@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 
+use os_ui::kit::lemon as lk;
 use os_ui::kit::{self, Dir};
 use os_ui::{Color, Font, Rect};
 
@@ -311,7 +312,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]),
         ],
         FILE => {
-            let user = std::env::var("APPDATA").map(|d| format!("{d}\\OpenStudio\\")).unwrap_or_default();
+            let user = std::env::var("APPDATA").map(|d| format!("{d}\\Lemon Studio\\")).unwrap_or_default();
             vec![
                 g("Backup", vec![
                     pair(combo("Occasionally (every 10 minutes)", 336.0, "Autosave"), ValueR("Maximum", "100".into())),
@@ -332,7 +333,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]
         }
         THEME => {
-            let mut tiles = vec![("(Default)".to_string(), swatch(&os_theme::Palette::default()))];
+            // (Default) = the Lemon design, then the Classic look, then theme files (spec: ui/lemon-design.md §1).
+            use os_theme::design::lemon as brand;
+            let mut tiles = vec![("(Default)".to_string(), [brand::DARK, brand::MAIN, brand::HIGHLIGHT]), ("Classic".to_string(), swatch(&os_theme::Palette::default()))];
             for (name, text) in &st.themes {
                 tiles.push((name.clone(), swatch(&os_theme::fl::palette(&os_theme::FlTheme::parse(text)))));
             }
@@ -389,7 +392,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         }
         DEBUG => {
             let mut lines = vec![
-                format!("OpenStudio {}", env!("CARGO_PKG_VERSION")),
+                format!("Lemon Studio {}", env!("CARGO_PKG_VERSION")),
                 format!("Project: {}", s.path.as_ref().map_or("(new project)".into(), |p| p.display().to_string())),
                 format!("Saved by: {}", s.project.saved_by),
                 format!("PPQ {}, tempo {:.3}", s.project.ppq, s.tempo),
@@ -405,13 +408,13 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             vec![g("", vec![List(vec![("", 0.0)], lines.into_iter().map(|l| vec![l]).collect(), 40)])]
         }
         8 => vec![g("Licence", vec![
-            Big("OpenStudio needs no account.".into()),
+            Big("Lemon Studio needs no account.".into()),
             txt("It is free software under the GNU General Public License, version 3."),
             txt("No registration, no online services, no usage data."),
         ])],
         _ => vec![g("", vec![
             Gap(20.0),
-            Big(format!("OpenStudio {}", env!("CARGO_PKG_VERSION"))),
+            Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
             txt("A digital audio workstation written in Rust."),
             Gap(10.0),
             txt("Licence: GNU General Public License v3."),
@@ -470,10 +473,19 @@ pub fn paint(ui: &mut Ui, s: &State) {
     let t = ui.t;
     ui.hit(r, Action::Settings(SAct::Body), "");
     // Shadow, frame, title bar.
-    ui.c.fill_rrect(r.outset(4.0), 6.0, Color::rgb(0).with_alpha(50));
-    ui.c.fill_rect(r, t.s(0x1c1e21));
-    ui.c.fill_rect(r.inset(1.0), t.s(0x2b2d30));
-    ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, TABS_B - 1.0), t.s(0x25272a));
+    let lemon = super::lemon(ui);
+    if lemon {
+        // Lemon (spec: ui/lemon-design.md §10): rounded window, pill tabs, rounded groups and square checks.
+        ui.c.fill_rrect(r.outset(4.0), lk::r_panel(t) + 4.0, Color::rgb(0).with_alpha(50));
+        lk::outlined(ui.c, r, lk::r_panel(t), t.s(0x1c1e21), t.s(0x2b2d30));
+        ui.c.fill_rrect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, TABS_B - 1.0), lk::r_panel(t) - 1.0, t.s(0x25272a));
+        ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + TABS_B - lk::r_panel(t), r.w - 2.0, lk::r_panel(t)), t.s(0x25272a));
+    } else {
+        ui.c.fill_rrect(r.outset(4.0), 6.0, Color::rgb(0).with_alpha(50));
+        ui.c.fill_rect(r, t.s(0x1c1e21));
+        ui.c.fill_rect(r.inset(1.0), t.s(0x2b2d30));
+        ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, TABS_B - 1.0), t.s(0x25272a));
+    }
     ui.c.icon(&os_ui::tabler::SETTINGS, Rect::new(r.x + 7.0, r.y + 7.0, 16.0, 16.0), t.text_dim);
     let (_, _, title, _) = TABS[st.tab.min(9)];
     ui.c.text(Font::new(13), r.x + 28.0, r.y + 7.0, t.text, &format!("Settings - {title}"));
@@ -488,13 +500,24 @@ pub fn paint(ui: &mut Ui, s: &State) {
         let hov = ui.hit(tr, Action::Settings(SAct::Tab(i)), TABS[i].2);
         let on = i == st.tab;
         let body = if on { t.s(0x1d1e1f) } else { t.s(0x222425) };
-        ui.c.fill_rect(tr, body);
-        for k in 0..7 {
-            // slanted right edge
-            let k = k as f32;
-            ui.c.fill_rect(Rect::new(tr.right() + k, tr.y + 2.0 + k * 4.0, 1.0, tr.h - 2.0 - k * 4.0), body);
+        if lemon {
+            let pill = Rect::new(tr.x, tr.y + 2.0, tr.w, tr.h - 6.0);
+            if on {
+                lk::lit(ui.c, pill, lk::r_btn(t), hov);
+            } else {
+                ui.c.fill_rrect(pill, lk::r_btn(t), if hov { t.button_hi } else { body });
+            }
+        } else {
+            ui.c.fill_rect(tr, body);
+            for k in 0..7 {
+                // slanted right edge
+                let k = k as f32;
+                ui.c.fill_rect(Rect::new(tr.right() + k, tr.y + 2.0 + k * 4.0, 1.0, tr.h - 2.0 - k * 4.0), body);
+            }
         }
-        let col = if on {
+        let col = if on && lemon {
+            lk::ink_on_lemon()
+        } else if on {
             match grp {
                 0 => t.a(0x2da2ff),
                 1 => t.h(0xfdc13d),
@@ -506,7 +529,8 @@ pub fn paint(ui: &mut Ui, s: &State) {
             t.text
         };
         let lh = ui.c.line_height(font);
-        ui.c.text(font, tr.x + 10.0, (tr.cy() - lh / 2.0).round(), col, label);
+        let ty = if lemon { tr.cy() - 2.0 } else { tr.cy() };
+        ui.c.text(font, tr.x + 10.0, (ty - lh / 2.0).round(), col, label);
     }
     ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + TABS_B, r.w - 2.0, 1.0), t.s(0x1c1e21));
     // Page.
@@ -533,21 +557,28 @@ pub fn paint(ui: &mut Ui, s: &State) {
 fn paint_group(ui: &mut Ui, s: &State, gr: &Group, r: Rect, open: bool, clip: Rect) {
     let t = ui.t;
     let st = &s.settings;
-    ui.c.fill_rect(r, t.s(0x1c1e21));
-    ui.c.fill_rect(r.inset(1.0), t.s(0x25272a));
+    let lemon = super::lemon(ui);
+    if lemon {
+        lk::outlined(ui.c, r, lk::r_panel(t) - 2.0, t.s(0x1c1e21), t.s(0x25272a));
+    } else {
+        ui.c.fill_rect(r, t.s(0x1c1e21));
+        ui.c.fill_rect(r.inset(1.0), t.s(0x25272a));
+    }
     let mut y = r.y + 8.0;
     if !gr.title.is_empty() {
         let f = Font::new(13).bold();
         let tw = ui.c.text_width(f, gr.title);
         let hdr = Rect::new(r.x + 1.0, r.y + 1.0, tw + 14.0, 24.0);
-        ui.c.fill_rect(hdr, t.s(0x222427));
-        for k in 0..6 {
-            let k = k as f32;
-            ui.c.fill_rect(Rect::new(hdr.right() + k, hdr.y, 1.0, hdr.h - k * 4.0), t.s(0x222427));
+        if !lemon {
+            ui.c.fill_rect(hdr, t.s(0x222427));
+            for k in 0..6 {
+                let k = k as f32;
+                ui.c.fill_rect(Rect::new(hdr.right() + k, hdr.y, 1.0, hdr.h - k * 4.0), t.s(0x222427));
+            }
         }
-        ui.c.text(f, r.x + 4.0, r.y + 4.0, t.text, gr.title);
+        ui.c.text(f, r.x + if lemon { 8.0 } else { 4.0 }, r.y + 4.0, if lemon { t.accent } else { t.text }, gr.title);
         if !gr.note.is_empty() {
-            ui.c.text(Font::new(13), r.x + 4.0 + tw, r.y + 4.0, t.text_dim, gr.note);
+            ui.c.text(Font::new(13), r.x + if lemon { 8.0 } else { 4.0 } + tw, r.y + 4.0, t.text_dim, gr.note);
         }
         if gr.fold {
             let bar = Rect::new(r.x, r.y, r.w, 26.0);
@@ -579,9 +610,20 @@ fn check(ui: &mut Ui, key: &'static str, on: bool, x: f32, cy: f32, enabled: boo
     if !enabled {
         ui.off(hr, key);
     }
-    // Round LED (spec §3): orange when on.
-    ui.c.fill_circle(x, cy, 6.5, t.s(0x141516));
-    if on {
+    // Round LED (spec §3): orange when on. Lemon: a rounded square check, lit with a tick when on.
+    let lemon = super::lemon(ui);
+    if !lemon {
+        ui.c.fill_circle(x, cy, 6.5, t.s(0x141516));
+    }
+    if lemon {
+        let b = Rect::new(x - 6.5, cy - 6.5, 13.0, 13.0);
+        if on {
+            lk::lit(ui.c, b, lk::r_small(t), hov);
+            ui.c.polyline(&[(x - 3.5, cy), (x - 1.0, cy + 2.5), (x + 3.5, cy - 2.5)], 1.6, lk::ink_on_lemon());
+        } else {
+            lk::outlined(ui.c, b, lk::r_small(t), t.s(0x141516), if hov { t.s(0x4a4c4e) } else { t.s(0x36393a) });
+        }
+    } else if on {
         ui.c.fill_circle(x, cy, 5.5, t.h(0x952b15));
         ui.c.fill_circle(x, cy, 4.2, t.h(0xf09672));
         ui.c.fill_circle(x - 1.0, cy - 1.2, 1.6, t.h(0xffd2bc));
@@ -667,7 +709,11 @@ fn paint_row_at(ui: &mut Ui, st: &SettingsUi, group: &'static str, row: &Row, g:
                 if !on {
                     ui.off(b, label);
                 }
-                kit::bordered(ui.c, b, 2.0, t.s(0x161819), kit::face(t.s(0x212425), kit::State::hover(hov)));
+                if super::lemon(ui) {
+                    lk::outlined(ui.c, b, lk::r_btn(t), t.s(0x161819), lk::face(t.s(0x2a2d2f), kit::State::hover(hov)));
+                } else {
+                    kit::bordered(ui.c, b, 2.0, t.s(0x161819), kit::face(t.s(0x212425), kit::State::hover(hov)));
+                }
                 ui.c.text_center(Font::new(13), b, if hov { t.glyph } else { t.text }, label);
                 if !on {
                     grey(ui, b);
@@ -677,8 +723,13 @@ fn paint_row_at(ui: &mut Ui, st: &SettingsUi, group: &'static str, row: &Row, g:
         }
         Row::Slider(label, v) => {
             let tr = Rect::new(x0, cy - 2.0, 150.0, 4.0);
-            ui.c.fill_rect(tr, t.s(0x161819));
-            ui.c.fill_rect(Rect::new(tr.x, tr.y, tr.w * v, tr.h), t.h(0xc8312e));
+            if super::lemon(ui) {
+                ui.c.fill_rrect(tr, 2.0, t.s(0x161819));
+                ui.c.fill_rrect(Rect::new(tr.x, tr.y, tr.w * v, tr.h), 2.0, t.accent);
+            } else {
+                ui.c.fill_rect(tr, t.s(0x161819));
+                ui.c.fill_rect(Rect::new(tr.x, tr.y, tr.w * v, tr.h), t.h(0xc8312e));
+            }
             let hx = tr.x + tr.w * v;
             ui.c.fill_circle(hx, cy, 8.0, t.s(0x111213));
             ui.c.fill_circle(hx, cy, 7.0, t.s(0x4a4d50));
@@ -690,8 +741,12 @@ fn paint_row_at(ui: &mut Ui, st: &SettingsUi, group: &'static str, row: &Row, g:
         }
         Row::List(cols, rows, n) => {
             let b = Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 6.0);
-            ui.c.fill_rect(b, t.s(0x161819));
-            ui.c.fill_rect(b.inset(1.0), t.s(0x222527));
+            if super::lemon(ui) {
+                lk::outlined(ui.c, b, lk::r_btn(t), t.s(0x161819), t.s(0x222527));
+            } else {
+                ui.c.fill_rect(b, t.s(0x161819));
+                ui.c.fill_rect(b.inset(1.0), t.s(0x222527));
+            }
             let mut ry = b.y + 2.0;
             if cols.iter().any(|c| !c.0.is_empty()) {
                 for (c, cx) in cols {
@@ -723,6 +778,22 @@ fn paint_row_at(ui: &mut Ui, st: &SettingsUi, group: &'static str, row: &Row, g:
                 let (col, rowi) = ((i % 3) as f32, (i / 3) as f32);
                 let b = Rect::new(x0 + col * 196.0, y + 4.0 + rowi * 64.0, 186.0, 56.0);
                 let hov = ui.hit(b, Action::Settings(SAct::Preset(i)), "Load this theme");
+                if super::lemon(ui) {
+                    // Lemon: a rounded tile, framed in the main colour when chosen.
+                    use os_theme::design::lemon as brand;
+                    let rad = lk::r_btn(t);
+                    ui.c.fill_rrect(b, rad + 2.0, if i == *sel { brand::MAIN } else if hov { brand::DARK_HIGHLIGHT } else { t.s(0x161819) });
+                    let inner = b.inset(2.0);
+                    let name_bg = t.s(0x1d1e1f);
+                    ui.c.fill_rrect(inner, rad, sw[0]);
+                    let nr = Rect::new(inner.x, inner.y + 30.0, inner.w, inner.h - 30.0);
+                    ui.c.fill_rrect(nr, rad, name_bg);
+                    ui.c.fill_rect(Rect::new(nr.x, nr.y, nr.w, rad), name_bg);
+                    ui.c.fill_rrect(Rect::new(inner.x + 8.0, inner.y + 10.0, 40.0, 10.0), 3.0, sw[1]);
+                    ui.c.fill_rrect(Rect::new(inner.x + 54.0, inner.y + 10.0, 24.0, 10.0), 3.0, sw[2]);
+                    ui.c.text_center(Font::new(13).bold(), nr, t.text, name);
+                    continue;
+                }
                 ui.c.fill_rect(b, if i == *sel { t.a(0x2d7cd0) } else if hov { t.s(0x5a5c5e) } else { t.s(0x161819) });
                 let inner = b.inset(2.0);
                 ui.c.fill_rect(Rect::new(inner.x, inner.y, inner.w, 30.0), sw[0]);
@@ -766,6 +837,13 @@ fn paint_row_at(ui: &mut Ui, st: &SettingsUi, group: &'static str, row: &Row, g:
 
 fn value_red(ui: &mut Ui, b: Rect, v: &str) {
     let t = ui.t;
+    if super::lemon(ui) {
+        // Lemon: number fields are the coloured dark with lemon digits.
+        use os_theme::design::lemon as brand;
+        lk::outlined(ui.c, b, lk::r_small(t), brand::COLORED_DARK.shade(-0.25), brand::COLORED_DARK);
+        ui.c.text_center(Font::new(15), b, brand::HIGHLIGHT, v);
+        return;
+    }
     kit::bordered(ui.c, b, 3.0, t.h(0x5a2229), t.h(0x863c44));
     ui.c.text_center(Font::new(15), b, t.tx(0xf2e4e6), v);
 }

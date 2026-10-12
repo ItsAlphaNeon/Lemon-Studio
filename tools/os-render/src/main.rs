@@ -1,4 +1,4 @@
-//! os-render: render an FLP project to a 32-bit float WAV with the OpenStudio engine.
+//! os-render: render an FLP project to a 32-bit float WAV with the Lemon Studio engine.
 //!
 //! Usage: os-render <project.flp> <out.wav> [--pattern N] [--rate HZ] [--factory DIR]
 //!

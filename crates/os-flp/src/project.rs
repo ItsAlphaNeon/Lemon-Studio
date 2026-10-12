@@ -125,7 +125,7 @@ pub enum ProjectError {
     #[error("{0}")]
     Structure(String),
     /// Files saved before FL 24.2 use a channel layout that isn't specified yet
-    /// (OpenStudio-specs REQUESTS.md #4).
+    /// (specs REQUESTS.md #4).
     #[error("legacy project layout (saved by {0}) is not supported yet")]
     LegacyLayout(String),
     #[error("model does not match the file layout: {0}")]
@@ -1805,7 +1805,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         }
     }
     if let (None, Some(n), Some(at)) = (l.current_arrangement, project.current_arrangement, arr_end) {
-        // A file without event 100 (an older OpenStudio save) gets it after its last arrangement.
+        // A file without event 100 (an older Lemon Studio save) gets it after its last arrangement.
         inserts.push((at, Event::new(id::CURRENT_ARRANGEMENT, Value::U16(n))));
     }
     // The playlist view (event 242) sits right before event 100, as FL writes it.
@@ -2310,7 +2310,7 @@ fn meta_length_events(pat: &Pattern, enc: TextEnc) -> Vec<Event> {
     out
 }
 
-/// A pattern's metadata block with the spec's defaults for the fields OpenStudio doesn't edit.
+/// A pattern's metadata block with the spec's defaults for the fields Lemon Studio doesn't edit.
 fn meta_block_events(pat: &Pattern, enc: TextEnc) -> Vec<Event> {
     let mut block = vec![Event::new(id::PAT_START, Value::U16(pat.number))];
     if let Some(n) = &pat.name {
@@ -2332,7 +2332,7 @@ fn meta_block_events(pat: &Pattern, enc: TextEnc) -> Vec<Event> {
     block
 }
 
-/// Version OpenStudio writes as "saved by" (spec: flp/events/project-info.md; FL 26 opens it without a warning).
+/// Version Lemon Studio writes as "saved by" (spec: flp/events/project-info.md; FL 26 opens it without a warning).
 const COMPAT_VERSION: &str = "26.1.7.5653";
 const COMPAT_BUILD: u32 = 5653;
 /// A channel's color when none is set.
@@ -2860,7 +2860,7 @@ mod tests {
         assert_eq!((plain.channels[0].misc.swing, plain.channels[0].misc.root, plain.channels[0].sound), (1.0, 60, ChannelSound::default()));
     }
 
-    /// A plugin channel made in OpenStudio (spec: flp/events/plugins.md §2-3): its block holds the plugin name, a
+    /// A plugin channel made in Lemon Studio (spec: flp/events/plugins.md §2-3): its block holds the plugin name, a
     /// generator window record and the state after the colour flag; it reads back, and a changed state is written.
     #[test]
     fn created_plugin_channel_reads_back() {

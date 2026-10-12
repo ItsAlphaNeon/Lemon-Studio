@@ -2,7 +2,7 @@
 //!
 //! Coordinates are FL window pixels from the spec tables; the editor is the window minus its 24 px title bar, so
 //! every y is drawn at `y - OY`. Colours are palette roles (`t.s` surface, `t.a` accent, `t.h` highlight, `t.tx` text)
-//! so an imported theme recolours the plugin like the rest of OpenStudio.
+//! so an imported theme recolours the plugin like the rest of Lemon Studio.
 // spec: plugins/open-sampler.md (Look, Layout, Hints, Waveform, Keyboard)
 
 use std::f32::consts::{PI, TAU};
@@ -523,7 +523,7 @@ fn waveform(ui: &mut Ui, sv: &SampleView) {
     ui.c.fill_rect(rr(13.0, 13.0, 328.0, 434.0), t.s(0x151718));
     ui.c.fill_rect(area, t.s(0x1b1d1e));
     let (v0f, vlf) = (ui.st.wave_start as f32, ui.st.wave_len.max(1e-6) as f32);
-    // Time grid: a line every 129 px of the whole sample (FL capture), moving with the zoom (OpenStudio choice).
+    // Time grid: a line every 129 px of the whole sample (FL capture), moving with the zoom (Lemon Studio choice).
     let step = 129.0 / vlf;
     let first = ((v0f / vlf * area.w) / step).floor() as i32 + 1;
     for k in first.. {
@@ -916,7 +916,7 @@ pub fn env_geom(m: &dyn Model, p: &str, g: Rect) -> EnvGeom {
     let total: f32 = units.iter().sum();
     let x0 = g.x + 1.0;
     let room = g.w - 4.0;
-    // Too long for the graph: squeeze the whole curve (OpenStudio choice).
+    // Too long for the graph: squeeze the whole curve (Lemon Studio choice).
     let px = if total * ENV_PX > room && total > 0.0 { room / total } else { ENV_PX };
     let mut x = [x0; 6];
     for i in 0..5 {

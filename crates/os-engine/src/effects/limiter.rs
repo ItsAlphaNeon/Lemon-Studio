@@ -1,4 +1,4 @@
-//! OpenStudio's limiter, configured from Fruity Limiter saved state (minimum version:
+//! Lemon Studio's limiter, configured from Fruity Limiter saved state (minimum version:
 //! input gain + peak limiter at the ceiling; compressor and gate sections not yet modeled).
 //!
 // spec: plugins/fruity-limiter.md

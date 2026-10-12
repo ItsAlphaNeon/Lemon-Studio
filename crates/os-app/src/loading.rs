@@ -96,7 +96,7 @@ impl Drop for Loading {
     }
 }
 
-/// The progress panel, centred in the window (OpenStudio design, spec: ui/project-loading.md §3).
+/// The progress panel, centred in the window (Lemon Studio design, spec: ui/project-loading.md §3).
 pub fn panel_rect(screen: (f32, f32)) -> Rect {
     let (w, h) = (420.0, 92.0);
     Rect::new(((screen.0 - w) / 2.0).round(), ((screen.1 - h) / 2.0).round(), w, h)

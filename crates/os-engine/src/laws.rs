@@ -63,7 +63,7 @@ pub fn playback_rate(key: u16, cents: i32) -> f64 {
 /// Glide time of the Misc tab's SLIDE knob (0..1), seconds (spec: audio/channel-voices.md).
 pub fn slide_seconds(v: f32) -> f64 {
     let v = f64::from(v.clamp(0.0, 1.0));
-    // OpenStudio law until measured: 0 at the left end, about 0.094 s at the default 0.35, 4 s at the right end.
+    // Lemon Studio law until measured: 0 at the left end, about 0.094 s at the default 0.35, 4 s at the right end.
     4.0 * (2f64.powf(8.0 * v) - 1.0) / 255.0
 }
 

@@ -329,7 +329,7 @@ fn reverb(l: &mut Vec<f32>, r: &mut Vec<f32>, v: f32, b: bool, sr: f64) {
     const ALLPASS: [usize; 4] = [556, 441, 341, 225];
     const SPREAD: usize = 23;
     let rt = reverb_rt60(v, b).max(0.05);
-    // Dry / wet as measured at 50 % and up; below that both ease in from no effect (OpenStudio choice).
+    // Dry / wet as measured at 50 % and up; below that both ease in from no effect (Lemon Studio choice).
     let ease = f64::from((v / 0.5).min(1.0));
     let (dry_full, wet_db) = if b { (0.945, -17.0) } else { (0.8, -9.5) };
     let dry = 1.0 - (1.0 - dry_full) * ease;
@@ -392,7 +392,7 @@ fn reverb(l: &mut Vec<f32>, r: &mut Vec<f32>, v: f32, b: bool, sr: f64) {
     r.truncate(end);
 }
 
-/// Time stretch (WSOLA) to `ratio` × the length, pitch shifted by the factor `shift` (OpenStudio approximation of the
+/// Time stretch (WSOLA) to `ratio` × the length, pitch shifted by the factor `shift` (Lemon Studio approximation of the
 /// stretch modes).
 pub fn stretch(s: &Sample, ratio: f64, shift: f64) -> Sample {
     let n = s.frames();

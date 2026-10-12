@@ -589,7 +589,7 @@ impl Logic {
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
                 m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
-                // Automation belongs to the host: offered when OpenStudio hosts the editor (host link).
+                // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
             }
@@ -622,7 +622,7 @@ impl Logic {
                 m.sep(Cmd::None);
                 let mut about = MenuDef::new(MenuStyle::Context);
                 about.add(MenuItem::item("Open Parametric EQ 2").enabled(false), Cmd::None);
-                about.add(MenuItem::item(&format!("OpenStudio {} - GPLv3", env!("CARGO_PKG_VERSION"))).enabled(false), Cmd::None);
+                about.add(MenuItem::item(&format!("Lemon Studio {} - GPLv3", env!("CARGO_PKG_VERSION"))).enabled(false), Cmd::None);
                 about.add(MenuItem::item("Filters after the RBJ Audio EQ Cookbook").enabled(false), Cmd::None);
                 m.submenu("About", about, Cmd::None);
             }
@@ -1087,7 +1087,7 @@ mod tests {
         (h.r.cx(), h.r.cy())
     }
 
-    /// A knob's "Create automation clip" works only inside OpenStudio (host link) and asks for the parameter's list
+    /// A knob's "Create automation clip" works only inside Lemon Studio (host link) and asks for the parameter's list
     /// position: band 1 frequency is parameter 7 (spec: plugins/plugin-parameters.md §3, plugins/host-link.md).
     #[test]
     fn create_automation_clip_asks_the_host_for_the_parameter_index() {

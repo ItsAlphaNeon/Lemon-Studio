@@ -2,7 +2,7 @@
 //!
 //! The 114 parameters come in the original's order (parameter k = field k + 1 of its saved state = automation index
 //! k), each with the original's stored range, so a project's automation reaches the same control. A copy of the whole
-//! 460-byte saved state is persisted next to them (`state`): fields whose meaning OpenStudio does not change come back
+//! 460-byte saved state is persisted next to them (`state`): fields whose meaning Lemon Studio does not change come back
 //! out byte for byte (spec: plugins/3x-osc.md §1).
 //!
 // spec: plugins/3x-osc.md §1, plugins/open-3x-osc.md §4 (hint texts)
@@ -410,7 +410,7 @@ pub fn values_of(fl: &[u8]) -> Vec<i32> {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Plugin state <-> the original's saved state (OpenStudio keeps a project channel's original state, event 213)
+// Plugin state <-> the original's saved state (Lemon Studio keeps a project channel's original state, event 213)
 
 /// The plugin's own saved state (nih-plug JSON with the u64 length prefix of its CLAP state) for a channel's saved
 /// state `fl` (460 bytes).
@@ -516,7 +516,7 @@ mod tests {
         set_field(&mut fl, rec(T_VOL) + R_ON + 1, -1);
         set_field(&mut fl, rec(T_PITCH) + R_AMT + 1, 1200);
         set_field(&mut fl, rec(T_CUT) + R_FLAGS + 1, 397284480);
-        set_field(&mut fl, 109, 77); // a field OpenStudio does not use
+        set_field(&mut fl, 109, 77); // a field Lemon Studio does not use
         set_field(&mut fl, rec(T_PITCH) + R_LFO_AMT + 1, 9000); // out of the knob's range: kept
         let blob = plugin_state_from_fl(&fl);
         assert_eq!(fl_from_plugin_state(&blob).expect("parses"), fl);

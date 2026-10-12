@@ -99,7 +99,7 @@ impl ClipShape {
     }
 }
 
-/// Frames of the fade-in a late start inside an audio clip begins with (an OpenStudio choice, spec:
+/// Frames of the fade-in a late start inside an audio clip begins with (a Lemon Studio choice, spec:
 /// audio/audio-clips.md "Starting inside a clip").
 const LATE_START_SECONDS: f64 = 0.005;
 
@@ -307,7 +307,7 @@ struct Voice {
 /// Channel pitch automation range: ±2 semitones, the channel's default pitch range (spec: flp/events/automation.md).
 const AUTO_PITCH_CENTS: f64 = 200.0;
 
-/// Release fade of a live note (an OpenStudio choice, spec: ui/typing-keyboard.md open questions).
+/// Release fade of a live note (a Lemon Studio choice, spec: ui/typing-keyboard.md open questions).
 const RELEASE_SECONDS: f64 = 0.015;
 
 /// An automation clip placed on the tick line (spec: ui/playlist.md Â§8, flp/events/automation.md).
@@ -330,7 +330,7 @@ struct MixTrack {
     pan: i32,
     sep: i32,
     on: bool,
-    /// Swap left / right and reverse polarity (spec: ui/mixer.md §4; OpenStudio applies them to the matrix).
+    /// Swap left / right and reverse polarity (spec: ui/mixer.md §4; Lemon Studio applies them to the matrix).
     swap: bool,
     polarity: bool,
     /// The three-band equaliser, after the slots and before the fader.
@@ -349,7 +349,7 @@ struct MixTrack {
     routes: Vec<(usize, f32)>,
 }
 
-/// One filled mixer slot: OpenStudio's own effect or a hosted plugin, with the slot's LED and mix level.
+/// One filled mixer slot: Lemon Studio's own effect or a hosted plugin, with the slot's LED and mix level.
 struct FxSlot {
     slot: usize,
     on: bool,
@@ -472,7 +472,7 @@ pub struct Engine {
     pub report: EngineReport,
 }
 
-/// Seconds an instrument keeps running after its last note (an OpenStudio choice).
+/// Seconds an instrument keeps running after its last note (a Lemon Studio choice).
 const INSTRUMENT_TAIL_SECONDS: u64 = 5;
 /// `inst_events` velocity values below zero: a note off, a choke.
 const OFF: f32 = notes::OFF;
@@ -481,7 +481,7 @@ const CHOKE: f32 = notes::CHOKE;
 /// A tick whose every output sample stays below this magnitude (-96 dB) is quiet: the first quiet tick at or after
 /// the song's end is the file's last (spec: audio/timing.md, "Where the file ends").
 const QUIET: f32 = 1.584_893_1e-5;
-/// Safety stop for the tail: minutes rendered past the song's end before giving up on silence (an OpenStudio choice).
+/// Safety stop for the tail: minutes rendered past the song's end before giving up on silence (a Lemon Studio choice).
 const TAIL_LIMIT_SECONDS: f64 = 600.0;
 
 impl Engine {
@@ -508,7 +508,7 @@ impl Engine {
                             }
                             s
                         }
-                        // OpenStudio choice: an empty sampler channel plays a built-in tone so new
+                        // Lemon Studio choice: an empty sampler channel plays a built-in tone so new
                         // projects make sound (FL's empty sampler is silent).
                         None if ch.kind == ChannelKind::Sampler => {
                             Some(library.tones.entry(rate).or_insert_with(|| fallback_tone(rate)).clone())
@@ -731,7 +731,7 @@ impl Engine {
     }
 
     /// Plays generator-plugin channel `channel` through `inst` (a shared instance that outlives this engine).
-    /// Plugin channels, and sampler channels played by a hosted sampler plugin (OpenStudio hosts Open Sampler for every
+    /// Plugin channels, and sampler channels played by a hosted sampler plugin (Lemon Studio hosts Open Sampler for every
     /// sampler channel): the channel's notes go to `inst` instead of the engine's own sample voices.
     pub fn set_instrument(&mut self, channel: usize, inst: SharedInstrument) {
         if let Some(ch) = self.channels.get_mut(channel) {
@@ -1204,7 +1204,7 @@ impl Engine {
 
     /// Triggers the notes that start on `tick`.
     fn start_notes(&mut self, tick: u64) {
-        // A plain step lights its key for one step (instrument channels: it ends after one step, an OpenStudio choice
+        // A plain step lights its key for one step (instrument channels: it ends after one step, a Lemon Studio choice
         // for hosted plugins, which have no song-length release).
         let step = u64::from(self.ppq / 4).max(1);
         for t in std::mem::take(&mut self.late) {
@@ -1438,7 +1438,7 @@ impl Engine {
         self.frame = 0;
         self.next_trigger = 0;
         // Control points replay from the top: until the first one the channel has its own settings
-        // (an OpenStudio choice; FL's behaviour at the loop point is not measured).
+        // (a Lemon Studio choice; FL's behaviour at the loop point is not measured).
         self.sync_controls(0);
         for s in &mut self.sounding {
             if s.2 != u64::MAX {
@@ -2178,7 +2178,7 @@ mod tests {
         assert_eq!(frames[(off as usize + 1024) * 2], 0.0);
     }
 
-    /// A sampler channel played by a hosted sampler (OpenStudio's Open Sampler): its notes go to the instrument, the
+    /// A sampler channel played by a hosted sampler (Lemon Studio's Open Sampler): its notes go to the instrument, the
     /// engine's own voice for the channel (the empty sampler's tone) stays silent.
     #[test]
     fn sampler_channels_can_be_played_by_an_instrument() {
@@ -2769,7 +2769,7 @@ mod tests {
         q.mixer[1].polarity = true;
         let flipped = render_with(&q, false);
         assert!(base.iter().zip(&flipped).all(|(a, b)| (a + b).abs() < 1e-6), "polarity");
-        // Swap acts on the track's input, before its pan (an OpenStudio reading; FL's order is unmeasured).
+        // Swap acts on the track's input, before its pan (a Lemon Studio reading; FL's order is unmeasured).
         let m = MixTrack { swap: true, ..MixTrack::unity() }.compute_matrix();
         assert!(m[0][0].abs() < 1e-6 && m[1][1].abs() < 1e-6 && m[0][1] > 0.5 && m[1][0] > 0.5, "swapped: {m:?}");
         // A positive separation merges: fully mono at 64 (spec: audio/mixer.md).
