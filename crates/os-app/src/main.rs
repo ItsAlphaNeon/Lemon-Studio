@@ -605,6 +605,8 @@ impl ApplicationHandler for Shell {
                     #[cfg(windows)]
                     self.app.sync_lift(canvas);
                 }
+                // A scrolled playlist moved its pixels instead of repainting them: the buffer moves them too.
+                let moved = self.app.take_moved();
                 let t_present = Instant::now();
                 if let Some(surface) = self.surface.as_mut() {
                     if surface.resize(w, h).is_ok() {
@@ -620,13 +622,33 @@ impl ApplicationHandler for Shell {
                             let exposed = false;
                             match &damage {
                                 Some(Some(rects)) if age == 1 && !exposed => {
-                                    let mut present = Vec::with_capacity(rects.len());
+                                    let mut present = Vec::with_capacity(rects.len() + moved.len());
+                                    let mut show = |(x, y, w, h): (usize, usize, usize, usize)| {
+                                        if let (Some(width), Some(height)) = (NonZeroU32::new(w as u32), NonZeroU32::new(h as u32)) {
+                                            present.push(softbuffer::Rect { x: (x + off.0) as u32, y: (y + off.1) as u32, width, height });
+                                        }
+                                    };
+                                    // The buffer holds the canvas as it was before this paint: moving the same pixels
+                                    // keeps them equal, then the damage is copied over.
+                                    let mut areas = Vec::with_capacity(moved.len());
+                                    let (ox, oy) = (off.0 as i32, off.1 as i32);
+                                    let at = |(x0, y0, x1, y1): (i32, i32, i32, i32)| (x0 + ox, y0 + oy, x1 + ox, y1 + oy);
+                                    for m in &moved {
+                                        let (x0, y0, x1, y1) = os_ui::shift_area(m.area, canvas.scale, (cw, ch));
+                                        let keep: Vec<_> = m.keep.iter().map(|k| at(os_ui::keep_area(*k, canvas.scale, (cw, ch)))).collect();
+                                        os_ui::shift_pixels(&mut buf[..], stride, at((x0, y0, x1, y1)), m.dx, m.dy, &keep);
+                                        let a = (x0 as usize, y0 as usize, (x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
+                                        areas.push(a);
+                                        show(a);
+                                    }
+                                    let inside_moved = |p: (usize, usize, usize, usize)| {
+                                        areas.iter().any(|a| a.0 <= p.0 && a.1 <= p.1 && p.0 + p.2 <= a.0 + a.2 && p.1 + p.3 <= a.1 + a.3)
+                                    };
                                     for r in rects {
                                         let px = canvas.device_rect(*r);
                                         canvas.copy_region_to_xrgb_at(&mut buf, stride, px, off);
-                                        if let (Some(width), Some(height)) = (NonZeroU32::new(px.2 as u32), NonZeroU32::new(px.3 as u32)) {
-                                            let (x, y) = ((px.0 + off.0) as u32, (px.1 + off.1) as u32);
-                                            present.push(softbuffer::Rect { x, y, width, height });
+                                        if !inside_moved(px) {
+                                            show(px);
                                         }
                                     }
                                     let _ = if present.is_empty() { buf.present() } else { buf.present_with_damage(&present) };
@@ -656,7 +678,8 @@ impl ApplicationHandler for Shell {
                         Some(None) => format!("full {}", u64::from(cw) * u64::from(ch)),
                         Some(Some(rs)) => {
                             let px: usize = rs.iter().map(|r| canvas.device_rect(*r)).map(|(_, _, w, h)| w * h).sum();
-                            format!("rects{} {px}", rs.len())
+                            let blit = if moved.is_empty() { String::new() } else { format!(" blit{}", moved.len()) };
+                            format!("rects{} {px}{blit}", rs.len())
                         }
                     };
                     let ms = |a: Instant, b: Instant| b.duration_since(a).as_secs_f64() * 1000.0;
@@ -842,7 +865,10 @@ fn screenshot(args: &[String]) {
     if let Some(w) = app.state.z.first().copied().filter(|w| w.slot().is_some()) {
         let ws = &mut app.state.wins[w.slot().unwrap_or(0)];
         match win_rect {
-            Some(r) => ws.rect = r,
+            Some(r) => {
+                ws.rect = r;
+                ws.maxed = false;
+            }
             None => ws.maxed = true,
         }
     }
@@ -909,18 +935,43 @@ fn screenshot(args: &[String]) {
         }
         app.show_playback(app::Shown::default());
         app.paint(&mut canvas, None);
-        // Scrolling the playlist sideways (wheel or scroll bar): only its window repaints.
+        // Scrolling the playlist by wheel steps (60 px sideways, a track down, then back): its window repainted, or its
+        // drawn pixels moved (`App::playlist_scrolled`). Paint, then the window's buffer: moved like the canvas, damage copied.
         if app.state.shown(app::Win::Playlist) {
-            let t3 = Instant::now();
-            for _ in 0..20 {
-                app.state.playlist_scroll.0 += 7.0;
-                app.damage_win(app::Win::Playlist);
-                if let Some(d) = app.take_damage() {
-                    app.paint_region(&mut canvas, d.as_deref());
+            let row = app.state.playlist.row_h;
+            for (name, step) in [("sideways", (60.0, 0.0)), ("down", (0.0, row))] {
+                for moved in [false, true] {
+                    let (mut paint, mut copy) = (0.0, 0.0);
+                    for i in 0..20 {
+                        let before = app.state.playlist_scroll;
+                        let k = if i < 10 { 1.0 } else { -1.0 };
+                        app.state.playlist_scroll.0 += k * step.0;
+                        app.state.playlist_scroll.1 += k * step.1;
+                        if moved {
+                            app.playlist_scrolled(before);
+                        } else {
+                            app.damage_win(app::Win::Playlist);
+                        }
+                        let t3 = Instant::now();
+                        let Some(d) = app.take_damage() else { continue };
+                        app.paint_region(&mut canvas, d.as_deref());
+                        let t4 = Instant::now();
+                        for m in app.take_moved() {
+                            let size = (cw as u32, ch as u32);
+                            let keep: Vec<_> = m.keep.iter().map(|k| os_ui::keep_area(*k, canvas.scale, size)).collect();
+                            os_ui::shift_pixels(&mut buf[..], cw, os_ui::shift_area(m.area, canvas.scale, size), m.dx, m.dy, &keep);
+                        }
+                        for r in d.into_iter().flatten() {
+                            canvas.copy_region_to_xrgb(&mut buf, canvas.device_rect(r));
+                        }
+                        paint += t4.duration_since(t3).as_secs_f64();
+                        copy += t4.elapsed().as_secs_f64();
+                    }
+                    let how = if moved { "moved" } else { "repainted" };
+                    eprintln!("  playlist scroll {name} ({how}): paint {:.2} + copy {:.2} ms/frame", paint * 50.0, copy * 50.0);
                 }
             }
-            eprintln!("  playlist scroll: {:.2} ms/frame", t3.elapsed().as_secs_f64() * 50.0);
-            app.state.playlist_scroll.0 = 0.0;
+            app.state.playlist_scroll = (0.0, 0.0);
             app.paint(&mut canvas, None);
         }
     }

@@ -357,6 +357,21 @@ impl Canvas {
         Some(Rect::new(x0 as f32 / k, y0 as f32 / k, (x1 - x0) as f32 / k, (y1 - y0) as f32 / k))
     }
 
+    /// Start learning where a view inside another one draws: hands back what was drawn so far, for `end_drawn`.
+    pub fn begin_drawn(&mut self) -> Option<(i32, i32, i32, i32)> {
+        self.drawn.take()
+    }
+
+    /// End a view started with `begin_drawn`: the logical bounds it drew (as `take_drawn`). The bounds from before
+    /// it come back, grown by these, so the view around it still learns what it drew.
+    pub fn end_drawn(&mut self, before: Option<(i32, i32, i32, i32)>) -> Option<Rect> {
+        let mine = std::mem::replace(&mut self.drawn, before);
+        let (x0, y0, x1, y1) = mine?;
+        self.mark(x0, y0, x1, y1);
+        let k = self.scale;
+        Some(Rect::new(x0 as f32 / k, y0 as f32 / k, (x1 - x0) as f32 / k, (y1 - y0) as f32 / k))
+    }
+
     /// Whether anything drawn inside `r` (logical) would reach the current clip: views skip invisible work with it.
     pub fn visible(&self, r: Rect) -> bool {
         let k = self.scale;
@@ -379,27 +394,50 @@ impl Canvas {
     }
 
     /// Start a frame clipped to several rectangles at once (one paint for damage in separate places: a playhead,
-    /// the clock and some meters). Overlapping rects are merged, so no pixel is drawn twice.
+    /// the clock and some meters). The rects become disjoint, so no pixel is drawn twice: overlapping rects merge
+    /// when their bounding box costs little more, else the newer one is cut around the other (rects meeting at a
+    /// fractional edge share a device pixel column; merging a scroll bar and a grid strip that way would repaint
+    /// the whole grid).
     pub fn begin_region(&mut self, damage: &[Rect]) {
         self.clips.clear();
         self.region.clear();
         self.cover = None;
-        let mut rs: Vec<(i32, i32, i32, i32)> = Vec::with_capacity(damage.len());
-        for d in damage {
-            let (x, y, w, h) = self.device_rect(*d);
-            if w == 0 || h == 0 {
+        type R = (i32, i32, i32, i32);
+        let area = |r: &R| i64::from(r.2 - r.0) * i64::from(r.3 - r.1);
+        let slack = (2048.0 * self.scale * self.scale) as i64;
+        let mut todo: Vec<R> = damage
+            .iter()
+            .rev()
+            .map(|d| self.device_rect(*d))
+            .filter(|&(_, _, w, h)| w > 0 && h > 0)
+            .map(|(x, y, w, h)| (x as i32, y as i32, (x + w) as i32, (y + h) as i32))
+            .collect();
+        let mut rs: Vec<R> = Vec::with_capacity(todo.len());
+        while let Some(r) = todo.pop() {
+            let Some(i) = rs.iter().position(|o| o.0 < r.2 && o.2 > r.0 && o.1 < r.3 && o.3 > r.1) else {
+                rs.push(r);
+                continue;
+            };
+            let o = rs[i];
+            let u = (r.0.min(o.0), r.1.min(o.1), r.2.max(o.2), r.3.max(o.3));
+            if area(&u) <= area(&o) + area(&r) + slack {
+                rs.swap_remove(i);
+                todo.push(u);
                 continue;
             }
-            let mut r = (x as i32, y as i32, (x + w) as i32, (y + h) as i32);
-            // Merge with every rect it overlaps, until it overlaps none.
-            while let Some(i) = rs.iter().position(|o| o.0 < r.2 && o.2 > r.0 && o.1 < r.3 && o.3 > r.1) {
-                let o = rs.swap_remove(i);
-                r = (r.0.min(o.0), r.1.min(o.1), r.2.max(o.2), r.3.max(o.3));
-            }
-            rs.push(r);
+            // The parts of `r` outside `o`: the full-width bands above and below it, then the sides.
+            let (y0, y1) = (r.1.max(o.1), r.3.min(o.3));
+            let parts = [(r.0, r.1, r.2, o.1), (r.0, o.3, r.2, r.3), (r.0, y0, o.0, y1), (o.2, y0, r.2, y1)];
+            todo.extend(parts.into_iter().filter(|p| p.0 < p.2 && p.1 < p.3));
         }
         // Nothing to paint: one empty rect (an empty region means the whole canvas).
         self.region = if rs.is_empty() { vec![(0, 0, 0, 0)] } else { rs };
+    }
+
+    /// The frame's damage region (`begin_region`) in logical pixels: disjoint rects; empty = the whole canvas.
+    pub fn region(&self) -> Vec<Rect> {
+        let k = self.scale;
+        self.region.iter().filter(|r| r.0 < r.2 && r.1 < r.3).map(|r| Rect::new(r.0 as f32 / k, r.1 as f32 / k, (r.2 - r.0) as f32 / k, (r.3 - r.1) as f32 / k)).collect()
     }
 
     /// Promise that `r` will be painted over opaquely before the frame ends; until `set_cover(None)`, rect fills
@@ -411,6 +449,25 @@ impl Canvas {
             let k = self.scale;
             ((r.x * k).round() as i32, (r.y * k).round() as i32, (r.right() * k).round() as i32, (r.bottom() * k).round() as i32)
         });
+    }
+
+    /// Move the pixels inside `r` by `dx`, `dy` whole device pixels (a scrolled view keeps what it already drew).
+    /// `r` is rounded like a clip to it ([`shift_area`]); pixels moved past it are dropped, and the strip they leave
+    /// behind keeps its old pixels for the caller to repaint. The device pixels wholly inside a `keep` rect
+    /// ([`keep_area`]: a window drawn over the view) stay where they are.
+    pub fn shift(&mut self, r: Rect, dx: i32, dy: i32, keep: &[Rect]) {
+        let size = (self.pixmap.width(), self.pixmap.height());
+        let area = shift_area(r, self.scale, size);
+        let keep: Vec<_> = keep.iter().map(|k| keep_area(*k, self.scale, size)).collect();
+        shift_pixels(self.pixmap.pixels_mut(), size.0 as usize, area, dx, dy, &keep);
+    }
+
+    /// Logical bounds of what drawing can reach now (the clip cut by the frame's region), or None: views cull work
+    /// outside it (a waveform built for a strip that scrolled in, not for the whole clip).
+    pub fn paint_bounds(&self) -> Option<Rect> {
+        let (x0, y0, x1, y1) = self.clip_bounds();
+        let k = self.scale;
+        (x0 < x1 && y0 < y1).then(|| Rect::new(x0 as f32 / k, y0 as f32 / k, (x1 - x0) as f32 / k, (y1 - y0) as f32 / k))
     }
 
     pub fn clear(&mut self, c: Color) {
@@ -1125,6 +1182,67 @@ pub fn snap_span(a: f32, len: f32, scale: f32) -> (i32, i32) {
     (p0, ((a + len) * scale).round() as i32)
 }
 
+/// The device pixels (x0, y0, x1, y1), end-exclusive, that [`Canvas::shift`] moves for `r` on a `size` canvas at
+/// `scale`: the edges rounded as a clip to `r` rounds them, cut to the canvas.
+pub fn shift_area(r: Rect, scale: f32, (w, h): (u32, u32)) -> (i32, i32, i32, i32) {
+    let px = |v: f32, max: u32| ((v * scale).round() as i32).clamp(0, max as i32);
+    (px(r.x, w), px(r.y, h), px(r.right(), w), px(r.bottom(), h))
+}
+
+/// The device pixels wholly inside `r` (x0, y0, x1, y1), cut to the canvas: what [`Canvas::shift`] keeps in place.
+pub fn keep_area(r: Rect, scale: f32, (w, h): (u32, u32)) -> (i32, i32, i32, i32) {
+    let lo = |v: f32, max: u32| ((v * scale).ceil() as i32).clamp(0, max as i32);
+    let hi = |v: f32, max: u32| ((v * scale).floor() as i32).clamp(0, max as i32);
+    (lo(r.x, w), lo(r.y, h), hi(r.right(), w), hi(r.bottom(), h))
+}
+
+/// The device pixels wholly inside `r`, as a logical rect (empty when there are none): what a kept `r` keeps. A
+/// pixel `r` covers only in part is not kept (it blends with what is under `r`).
+pub fn inner_rect(r: Rect, scale: f32) -> Rect {
+    let (x0, y0) = ((r.x * scale).ceil(), (r.y * scale).ceil());
+    let (x1, y1) = ((r.right() * scale).floor(), (r.bottom() * scale).floor());
+    Rect::new(x0 / scale, y0 / scale, ((x1 - x0) / scale).max(0.0), ((y1 - y0) / scale).max(0.0))
+}
+
+/// Move the pixels of the device area `(x0, y0, x1, y1)` of an image (`stride` pixels a row) by `dx`, `dy`, except
+/// those in the `keep` areas, as [`Canvas::shift`] does; also for a window buffer holding the same picture, so it
+/// can follow the canvas.
+pub fn shift_pixels<T: Copy>(data: &mut [T], stride: usize, (x0, y0, x1, y1): (i32, i32, i32, i32), dx: i32, dy: i32, keep: &[(i32, i32, i32, i32)]) {
+    // The destination pixels that have a source inside the area.
+    let (dx0, dx1) = (x0.max(x0 + dx), x1.min(x1 + dx));
+    let (dy0, dy1) = (y0.max(y0 + dy), y1.min(y1 + dy));
+    if dx0 >= dx1 || dy0 >= dy1 {
+        return;
+    }
+    let kept: Vec<_> = keep
+        .iter()
+        .map(|k| (k.0.max(x0), k.1.max(y0), k.2.min(x1), k.3.min(y1)))
+        .filter(|k| k.0 < k.2 && k.1 < k.3)
+        .map(|k| {
+            let rows = (k.1..k.3).flat_map(|y| &data[y as usize * stride + k.0 as usize..y as usize * stride + k.2 as usize]);
+            (k, rows.copied().collect::<Vec<T>>())
+        })
+        .collect();
+    let n = (dx1 - dx0) as usize;
+    let mut copy = |y: i32| {
+        let src = (y - dy) as usize * stride + (dx0 - dx) as usize;
+        data.copy_within(src..src + n, y as usize * stride + dx0 as usize);
+    };
+    // Moving down, copy the bottom rows first so no source row is overwritten before it is read.
+    if dy > 0 {
+        (dy0..dy1).rev().for_each(&mut copy);
+    } else {
+        (dy0..dy1).for_each(&mut copy);
+    }
+    for (k, px) in kept {
+        let w = (k.2 - k.0) as usize;
+        for (y, row) in (k.1..k.3).zip(px.chunks_exact(w)) {
+            let at = y as usize * stride + k.0 as usize;
+            data[at..at + w].copy_from_slice(row);
+        }
+    }
+}
+
 /// Source pixels (index, weight; weights sum to 1) that the device pixel centred at `d` (device px from the image's
 /// left / top edge) reads from an `n`-pixel source when one device pixel spans `f` source pixels.
 fn taps(d: f32, f: f32, n: usize) -> Vec<(usize, f32)> {
@@ -1210,6 +1328,78 @@ mod tests {
         assert_eq!(out[2 * 9 + 4], 0xfedcba);
         assert_eq!(out[2 * 9 + 2], 0, "left of the copied region");
         assert_eq!(out[0], 0);
+    }
+
+    /// `shift` moves the pixels of its area by whole device pixels in any direction (overlapping copies included),
+    /// leaves the strip it uncovers, everything outside the area and the kept pixels alone, and rounds the area like a
+    /// clip (kept areas inwards).
+    #[test]
+    fn shift_moves_an_area() {
+        let (w, h) = (23u32, 17u32);
+        let px = |c: &Canvas, x: i32, y: i32| -> [u8; 4] {
+            let i = (y as usize * w as usize + x as usize) * 4;
+            c.pixmap.data()[i..i + 4].try_into().unwrap()
+        };
+        // Every pixel a different colour.
+        let paint = |c: &mut Canvas| {
+            for (i, p) in c.pixmap.data_mut().chunks_exact_mut(4).enumerate() {
+                p.copy_from_slice(&[(i % 251) as u8, (i / 251) as u8, (i * 7 % 253) as u8, 255]);
+            }
+        };
+        for scale in [1.0f32, 1.5] {
+            let Ok(mut c) = Canvas::new(w, h, scale) else { return };
+            // At 150 % the area (3.4, 2.2)-(13.4, 12.2) rounds to device (5, 3)-(20, 18), cut to the canvas.
+            let r = Rect::new(3.4, 2.2, 10.0, 10.0);
+            let (x0, y0, x1, y1) = shift_area(r, scale, (w, h));
+            assert!(x1 <= w as i32 && y1 <= h as i32 && x0 < x1 && y0 < y1);
+            // A window inside the area and one reaching out of it.
+            let keeps = [Rect::new(6.3, 5.6, 4.0, 3.0), Rect::new(1.2, 9.5, 5.0, 4.4)];
+            let kept: Vec<_> = keeps.iter().map(|k| keep_area(*k, scale, (w, h))).collect();
+            let cases = [(3, 0), (-4, 0), (0, 2), (0, -5), (2, -3), (-1, 4), (30, 0), (0, 0)];
+            for ((dx, dy), keep) in cases.into_iter().flat_map(|d| [(d, &[][..]), (d, &keeps[..])]) {
+                let kept = if keep.is_empty() { &[][..] } else { &kept[..] };
+                paint(&mut c);
+                let before = c.pixmap.clone();
+                let old = |x: i32, y: i32| -> [u8; 4] {
+                    let i = (y as usize * w as usize + x as usize) * 4;
+                    before.data()[i..i + 4].try_into().unwrap()
+                };
+                // A window buffer holding the canvas (wider, at an offset) follows it with the same move.
+                let (bw, off) = (w as usize + 3, (2usize, 1usize));
+                let mut buf = vec![0u32; bw * (h as usize + 2)];
+                c.copy_region_to_xrgb_at(&mut buf, bw, (0, 0, w as usize, h as usize), off);
+                c.shift(r, dx, dy, keep);
+                let at = |k: &(i32, i32, i32, i32)| (k.0 + 2, k.1 + 1, k.2 + 2, k.3 + 1);
+                shift_pixels(&mut buf, bw, (x0 + 2, y0 + 1, x1 + 2, y1 + 1), dx, dy, &kept.iter().map(at).collect::<Vec<_>>());
+                let mut fresh = vec![0u32; bw * (h as usize + 2)];
+                c.copy_region_to_xrgb_at(&mut fresh, bw, (0, 0, w as usize, h as usize), off);
+                assert!(buf == fresh, "scale {scale} shift ({dx}, {dy}): the buffer follows the canvas");
+                for y in 0..h as i32 {
+                    for x in 0..w as i32 {
+                        let inside = (x0..x1).contains(&x) && (y0..y1).contains(&y);
+                        let (sx, sy) = (x - dx, y - dy);
+                        let from_inside = (x0..x1).contains(&sx) && (y0..y1).contains(&sy);
+                        let still = kept.iter().any(|k| (k.0..k.2).contains(&x) && (k.1..k.3).contains(&y));
+                        let want = if inside && from_inside && !still { old(sx, sy) } else { old(x, y) };
+                        assert_eq!(px(&c, x, y), want, "scale {scale} shift ({dx}, {dy}) at ({x}, {y})");
+                    }
+                }
+            }
+        }
+    }
+
+    /// `paint_bounds` is the clip cut by the frame's region, in logical pixels.
+    #[test]
+    fn paint_bounds_follow_the_region() {
+        let Ok(mut c) = Canvas::new(100, 80, 2.0) else { return };
+        assert_eq!(c.paint_bounds(), Some(Rect::new(0.0, 0.0, 50.0, 40.0)));
+        c.begin_region(&[Rect::new(10.0, 5.0, 4.0, 3.0), Rect::new(30.0, 20.0, 2.0, 2.0)]);
+        assert_eq!(c.paint_bounds(), Some(Rect::new(10.0, 5.0, 22.0, 17.0)));
+        c.push_clip(Rect::new(0.0, 0.0, 12.0, 40.0));
+        assert_eq!(c.paint_bounds(), Some(Rect::new(10.0, 5.0, 2.0, 3.0)));
+        c.pop_clip();
+        c.push_clip(Rect::new(40.0, 0.0, 5.0, 5.0));
+        assert_eq!(c.paint_bounds(), None);
     }
 
     #[test]
@@ -1316,6 +1506,27 @@ mod tests {
             assert_eq!(v, if inside { 128 } else { 0 }, "x {x}: {row:?}");
         }
         assert!(c.visible(Rect::new(20.0, 0.0, 6.0, 1.0)) && !c.visible(Rect::new(19.0, 0.0, 5.0, 1.0)));
+    }
+
+    #[test]
+    fn region_rects_that_barely_touch_stay_apart() {
+        // A wide strip and a tall bar sharing one device column (fractional edges): no bounding box, every pixel of
+        // either painted once, nothing else.
+        let Ok(mut c) = Canvas::new(120, 100, 1.0) else { return };
+        c.fill_rect(Rect::new(0.0, 0.0, 120.0, 100.0), Color::rgb(0x000000));
+        let (strip, bar) = (Rect::new(10.3, 5.0, 90.0, 10.0), Rect::new(100.3, 0.0, 12.0, 90.0));
+        c.begin_region(&[strip, bar, Rect::new(40.0, 60.0, 4.0, 4.0)]);
+        let reg = c.region();
+        let area: f32 = reg.iter().map(|r| r.w * r.h).sum();
+        assert!(area < 91.0 * 10.0 + 13.0 * 90.0 + 16.0 + 1.0, "{reg:?}");
+        c.fill_rect(Rect::new(0.0, 0.0, 120.0, 100.0), Color::rgb(0xffffff).with_alpha(128));
+        let k = |r: Rect, x: usize, y: usize| r.x.floor() as usize <= x && x < r.right().ceil() as usize && r.y as usize <= y && y < r.bottom() as usize;
+        for y in 0..100 {
+            for x in 0..120 {
+                let inside = k(strip, x, y) || k(bar, x, y) || ((40..44).contains(&x) && (60..64).contains(&y));
+                assert_eq!(c.pixmap.pixel(x as u32, y as u32).unwrap().red(), if inside { 128 } else { 0 }, "pixel {x},{y}");
+            }
+        }
     }
 
     #[test]

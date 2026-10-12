@@ -5,7 +5,7 @@ use os_model::{AutoMode, Clip, ClipSource, TimeMarker};
 use os_ui::{Color, Font, Rect};
 
 use super::{resize_zones, rgb, window_body, FrameInfo};
-use crate::app::{Action, State, Ui, Win};
+use crate::app::{Action, Seg, State, Ui, Win};
 use crate::icons::{self, Icon};
 use crate::playlist::{self as pl, Mark, Overlay, PGeom, PickKind, PlTool, MARKER_H, TITLE_H, TRACKS};
 
@@ -99,7 +99,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         return; // collapsed to the title bar
     }
 
-    picker(ui, s, Rect::new(r.x, client.y, 160.0, client.h));
+    // A part of its own: a repaint of the grid alone (a scroll) skips it.
+    let pick = Rect::new(r.x, client.y, 160.0, client.h);
+    ui.part(Seg::PlPicker, pick, |ui| picker(ui, s, pick));
 
     // Track-header strip: add button and the NOTE / CHAN / PAT filters.
     let strip = Rect::new(r.x + 162.0, client.y + 1.0, 108.0, 38.0);
@@ -175,13 +177,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.fill_rect(Rect::new(x0, grid.y, 1.0, grid.h), t.playhead.with_alpha(90));
         ui.c.fill_rect(Rect::new(x1, grid.y, 1.0, grid.h), t.playhead.with_alpha(90));
     }
-    // Clips.
+    // Clips reaching the painted part of the grid (a scrolled-in strip is a small part, see `App::playlist_scrolled`);
+    // a clip draws inside its own rect.
     for (i, c) in pl::clips(s).iter().enumerate() {
-        let cr = g.clip_rect(c);
-        if cr.x > grid.right() || cr.right() < grid.x || cr.y > grid.bottom() || cr.bottom() < grid.y {
-            continue;
+        if ui.c.visible(g.clip_rect(c).outset(2.0)) {
+            clip_paint(ui, s, &g, i, c);
         }
-        clip_paint(ui, s, &g, i, c);
     }
     // Overlays.
     match s.playlist.overlay {
@@ -209,6 +210,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 
     // Track headers (§6, §6a).
     let heads = Rect::new(head_x, grid_y, head_w, grid.h);
+    debug_assert!({
+        let p = scroll_parts(s, grid);
+        p.ruler == ruler && p.heads == heads && p.lane == has_markers.then(|| Rect::new(grid_x, lane_y, grid_w, MARKER_H))
+    });
     ui.c.push_clip(heads);
     for &row in &visible {
         header(ui, s, &g, row, head_x, head_w);
@@ -221,6 +226,36 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 pub fn overview_rect(s: &State, grid: Rect) -> Rect {
     let lane_y = grid.y - if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
     Rect::new(grid.x, lane_y - 41.0, grid.w, 18.0)
+}
+
+/// The grid the playlist would paint now: None while it is collapsed to its title bar.
+pub fn grid_of(s: &State) -> Option<Rect> {
+    let (fr, fc) = super::frame_rects(s, Win::Playlist, s.win_rect(Win::Playlist));
+    (fr.h >= 2.0 * crate::app::TITLE_H).then(|| grid_rect(s, fr, fc))
+}
+
+/// The parts of a playlist painted with its grid at `grid` that follow the view (`App::playlist_scrolled`): the
+/// grid, the ruler and marker lane above it (sideways), the track headers (up and down); and the scroll bars.
+pub struct ScrollParts {
+    pub grid: Rect,
+    pub ruler: Rect,
+    pub lane: Option<Rect>,
+    pub heads: Rect,
+    pub overview: Rect,
+    /// The vertical scroll bar's column.
+    pub vbar: Rect,
+}
+
+pub fn scroll_parts(s: &State, grid: Rect) -> ScrollParts {
+    let overview = overview_rect(s, grid);
+    ScrollParts {
+        grid,
+        ruler: Rect::new(grid.x, overview.y + 21.0, grid.w, 17.0),
+        lane: (!pl::markers(s).is_empty()).then(|| Rect::new(grid.x, overview.y + 41.0, grid.w, MARKER_H)),
+        heads: Rect::new(grid.x - 110.0, grid.y, 98.0, grid.h),
+        vbar: Rect::new(grid.right(), overview.y, 22.0, grid.bottom() - overview.y),
+        overview,
+    }
 }
 
 /// The arrangement grid in a window laid out at `r` with client rect `client` (see `super::frame_rects`).
@@ -406,13 +441,15 @@ fn ruler_paint(ui: &mut Ui, s: &State, g: &PGeom, ruler: Rect, f: &FrameInfo) {
     }
     let bar_w = g.bar_w;
     let every = label_step(bar_w);
-    let first_bar = (g.scroll_x / bar_w) as i32;
-    let n = (ruler.w / bar_w).ceil() as i32 + 1;
-    for b in first_bar..first_bar + n {
+    // From the bars whose numbers still reach into view (a number is up to ~40 px wide): which labels are drawn must
+    // not depend on the scroll position, or a scrolled ruler would differ from a repainted one.
+    let first_bar = ((g.scroll_x - 48.0) / bar_w).floor().max(0.0) as i32;
+    let last_bar = ((g.scroll_x + ruler.w) / bar_w).ceil() as i32 + 1;
+    for b in first_bar..last_bar {
         if b % every != 0 {
             continue;
         }
-        let x = ruler.x + b as f32 * bar_w - g.scroll_x;
+        let x = g.xs(f64::from(b) * f64::from(bar_w));
         let size = if b % (every * 4) == 0 { 15.0 } else { 13.0 };
         ui.c.text(super::fnt(size), x + 2.0, ruler.y + (16.0 - size), t.ruler_text, &format!("{}", b + 1));
     }
@@ -442,21 +479,27 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
     ui.c.push_clip(lane);
     // A tab per marker (§7): flat left edge on its position, rounded top-right corner, slanted right edge.
     for m in pl::markers(s) {
-        let x = g.x_of(m.position as f32);
+        let x64 = g.x64(f64::from(m.position));
+        let x = x64 as f32;
         let w = pl::marker_w(m);
+        if x > lane.right() || x + w < lane.x {
+            continue;
+        }
         let (top, bottom) = (lane.y + 1.0, lane.bottom());
         let slant = (bottom - top) * 0.45;
-        let right = x + w - slant;
+        // Offsets from the marker's grid point (`PGeom::xs64`).
+        let at = |d: f32| pl::snap(x64 + f64::from(d));
+        let right = at(w - slant);
         let tab = [
             (x, bottom),
             (x, top),
             (right - 3.0, top),
-            (right - 1.2, top + 0.4),
-            (right - 0.3, top + 1.5),
-            (right + slant, bottom),
+            (at(w - slant - 1.2), top + 0.4),
+            (at(w - slant - 0.3), top + 1.5),
+            (at(w), bottom),
         ];
         ui.c.fill_polygon(&tab, t.ruler.mix(t.track_header, 0.55));
-        ui.c.text_clip(Font::new(12), x + 3.0, lane.y + 1.0, w - slant - 3.0, t.text, &marker_label(m));
+        ui.c.text_clip(Font::new(12), x + 3.0, lane.y + 1.0, right - x - 3.0, t.text, &marker_label(m));
     }
     ui.c.pop_clip();
 }
@@ -483,16 +526,18 @@ fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32) {
     let beat = t.grid_gap.mix(t.grid, 0.4);
     let unit = pl::grid_ticks(g.ppq, bar_w) as f32 * g.ppt;
     let per_bar = ((bar_w / unit).round() as i32).max(1);
+    // Bar b's x on the drawing grid (`PGeom::xs`), plus `d` content pixels.
+    let bar_x = |b: i32, d: f32| g.xs(f64::from(b) * f64::from(bar_w) + f64::from(d));
     let mut b = first_bar;
     while b < first_bar + n {
-        let x = grid.x + b as f32 * bar_w - g.scroll_x;
+        let x = bar_x(b, 0.0);
         if (b / 4) % 2 == 1 {
-            ui.c.fill_rect(Rect::new(x, grid.y, bar_w * bar_step as f32, grid.h), t.grid_alt.with_alpha(160));
+            ui.c.fill_rect(Rect::new(x, grid.y, bar_x(b + bar_step, 0.0) - x, grid.h), t.grid_alt.with_alpha(160));
         }
         if bar_step == 1 && per_bar > 1 {
             for q in 1..per_bar {
                 let c = if unit * q as f32 % (bar_w / 4.0) < 0.5 { beat } else { beat.mix(t.grid, 0.5) };
-                ui.c.fill_rect(Rect::new(x + q as f32 * unit, grid.y, 1.0, grid.h), c);
+                ui.c.fill_rect(Rect::new(bar_x(b, q as f32 * unit), grid.y, 1.0, grid.h), c);
             }
         }
         ui.c.fill_rect(Rect::new(x, grid.y, if bar_step == 1 { 2.0 } else { 1.0 }, grid.h), t.grid_bar);
@@ -510,7 +555,8 @@ fn offset(c: Color, d: i16) -> Color {
 /// automation clips in their channel's colour), the body in the track's colour, then the content.
 fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let t = ui.t;
-    let r = g.clip_rect(c);
+    let (r, clip_x) = g.clip_draw_rect(c);
+    let full_w = g.clip_rect(c).w;
     // On a collapsed group's strip a clip is a bar in its colour (§6a).
     if g.rows.strip(c.track) {
         let col = if s.playlist.sel.contains(&i) {
@@ -576,6 +622,8 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     // Body: a slightly darker first row and a darker last row.
     let body_r = g.body(c);
     let body_r = Rect::new(inner.x, body_r.y, inner.w, inner.bottom() - body_r.y);
+    // The content is measured from the body's true edges (the drawn ones may be pulled in, `clip_draw_rect`).
+    let body_at = Body { r: body_r, x: clip_x + f64::from(side), w: f64::from((full_w - 2.0 * side).max(1.0)) };
     ui.c.fill_rect(body_r, dim(body));
     ui.c.fill_rect(Rect::new(body_r.x, body_r.y, body_r.w, 1.0), dim(body.shade(-0.08)));
     ui.c.fill_rect(Rect::new(body_r.x, body_r.bottom() - 1.0, body_r.w, 1.0), dim(body.shade(-0.3)));
@@ -613,19 +661,19 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let content = if c.muted { dim(text).with_alpha(90) } else { dim(Color::rgb(NOTE)) };
     if !(c.muted && kind == PickKind::Pattern) {
         match (kind, c.source) {
-            (PickKind::Pattern, ClipSource::Pattern(n)) => pattern_notes(ui, s, g, c, n, body_r, content),
+            (PickKind::Pattern, ClipSource::Pattern(n)) => pattern_notes(ui, s, g, c, n, body_at, content),
             (PickKind::Audio, ClipSource::Channel(ch)) => {
                 // The channel colour lifted by 80 (§2); without one the measured default.
                 let wave = tint.map_or(Color::rgb(WAVE), |c| offset(c, 80));
                 let col = if c.muted { content } else { dim(wave) };
-                waveform(ui, s, g, c, ch, body_r, col);
+                waveform(ui, s, g, c, ch, body_at, col);
                 if !c.muted {
-                    fades(ui, s, g, i, c, body_r, dim(wave));
+                    fades(ui, s, g, i, c, body_at, dim(wave));
                 }
             }
             (PickKind::Automation, ClipSource::Channel(ch)) => {
                 let col = if c.muted { content } else { dim(Color::rgb(CURVE)) };
-                curve(ui, s, g, i, c, ch, body_r, dim(body), col);
+                curve(ui, s, g, i, c, ch, body_at, dim(body), col);
             }
             _ => {}
         }
@@ -633,56 +681,83 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     ui.c.pop_clip();
 }
 
-fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Rect, col: Color) {
+/// A clip's body as drawn (`r`, its edges possibly pulled in by `PGeom::clip_draw_rect`) and its true left edge and
+/// width, where the content is measured from: content positions are `x` plus a fixed offset, on the drawing grid
+/// (`PGeom::xs64`).
+#[derive(Clone, Copy)]
+struct Body {
+    r: Rect,
+    x: f64,
+    w: f64,
+}
+
+fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body, col: Color) {
     let Some(p) = s.project.pattern(n) else { return };
     if p.notes.is_empty() {
         return;
     }
+    let br = body.r;
     let (w0, wl) = pl::window(s, c);
     let (lo, hi) = p.notes.iter().fold((u16::MAX, 0u16), |(lo, hi), n| (lo.min(n.key), hi.max(n.key)));
     let span = f32::from(hi - lo + 1);
-    let h = ((body.h - 4.0) / span).clamp(1.0, 3.0);
-    let usable = body.h - 4.0 - h;
+    let h = ((br.h - 4.0) / span).clamp(1.0, 3.0);
+    let usable = br.h - 4.0 - h;
     let step = (g.ppq / 4).max(1);
-    let (x_min, x_max) = (g.grid.x.max(body.x), g.grid.right().min(body.right()));
+    // Only the notes reaching the painted part of the body.
+    let Some(area) = ui.c.paint_bounds() else { return };
+    let (x_min, x_max) = (area.x.max(br.x), area.right().min(br.right()));
+    let ppt = f64::from(g.ppt);
     for note in &p.notes {
         let pos = f64::from(note.position);
         let len = f64::from(if note.length == 0 { step } else { note.length });
         if pos + len <= w0 || pos >= w0 + wl {
             continue;
         }
-        let a = (pos.max(w0) - w0) as f32;
-        let b = ((pos + len).min(w0 + wl) - w0) as f32;
-        let x0 = body.x + a * g.ppt;
-        let x1 = (body.x + b * g.ppt).max(x0 + 1.0);
+        let a = pos.max(w0) - w0;
+        let b = (pos + len).min(w0 + wl) - w0;
+        let x0 = pl::snap(body.x + a * ppt);
+        let x1 = pl::snap(body.x + b * ppt).max(x0 + 1.0);
         if x1 < x_min || x0 > x_max {
             continue;
         }
         let k = if span <= 1.0 { 0.5 } else { f32::from(note.key - lo) / (span - 1.0) };
-        let y = body.y + 2.0 + usable * (1.0 - k);
-        ui.c.fill_rect(Rect::new(x0, y, (x1 - x0 - 1.0).max(1.0), h), col);
+        let y = pl::snap(f64::from(br.y) + 2.0 + f64::from(usable * (1.0 - k)));
+        let y1 = pl::snap(f64::from(y) + f64::from(h));
+        ui.c.fill_rect(Rect::new(x0, y, (x1 - x0 - 1.0).max(1.0), y1 - y), col);
     }
 }
 
 /// The clip's part of the sample: every device-pixel column spans the minimum to the maximum of its samples, times
 /// the clip's fades and gain, filled as one anti-aliased shape (§2, §9a).
-fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Rect, col: Color) {
+fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, col: Color) {
     let Some(path) = s.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
     let Some(w) = s.playlist.wave(&path) else { return };
+    let Some(area) = ui.c.paint_bounds() else { return };
     let (w0, _) = pl::window(s, c);
     let ms_per_tick = pl::to_src(s, c.source, 1.0);
     let frames_per_ms = f64::from(w.rate) / 1000.0;
-    let mid = body.cy();
-    let amp = body.h / 2.0 - 2.0;
-    let px = 1.0 / ui.c.scale.max(1.0);
-    let x0 = body.x.max(g.grid.x - px);
-    let x1 = body.right().min(g.grid.right() + px);
-    let clip_x = g.x_of(c.position as f32);
+    let br = body.r;
+    let mid = f64::from(br.y) + f64::from(br.h) / 2.0;
+    let amp = f64::from(br.h / 2.0 - 2.0);
+    let ppt = f64::from(g.ppt);
+    // Columns one device pixel wide, counted from the body's left edge (so a repaint of a strip draws the columns a
+    // whole repaint draws), over the painted part and a few columns beyond it (the shape's ends change the pixels
+    // next to them).
+    let px = 1.0 / f64::from(ui.c.scale.max(1.0));
+    let (lo, hi) = (f64::from(area.x) - 3.0 * px, f64::from(area.right()) + 3.0 * px);
+    let j0 = ((lo - body.x) / px).floor().max(0.0);
+    let j1 = ((hi - body.x) / px).ceil();
+    let x1 = (body.x + body.w).min(body.x + j1 * px);
+    if body.x + j0 * px >= x1 {
+        return;
+    }
+    // From the clip's start (the body starts a pixel in).
+    let side = body.x - g.x64(f64::from(c.position));
     let total_ms = f64::from(c.length) * ms_per_tick;
     let (fin, fout, gain) = (c.fade_in(), c.fade_out(), f64::from(c.gain()));
-    // Gain of the fades at screen x (the engine's law, os_model::fade_curve).
-    let shape = |x: f32| -> f32 {
-        let ms = f64::from((x - clip_x) / g.ppt) * ms_per_tick;
+    // Gain of the fades `d` px into the body (the engine's law, os_model::fade_curve).
+    let shape = |d: f64| -> f64 {
+        let ms = (side + d) / ppt * ms_per_tick;
         let mut k = gain;
         if let Some((l, t)) = fin {
             k *= os_model::fade_curve(ms / f64::from(l), f64::from(t));
@@ -690,11 +765,12 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Rect, co
         if let Some((l, t)) = fout {
             k *= os_model::fade_curve((total_ms - ms) / f64::from(l), f64::from(t));
         }
-        k as f32
+        k
     };
-    let range = |xa: f32, xb: f32| -> Option<(f32, f32)> {
-        let ms_a = w0 + f64::from((xa - body.x) / g.ppt) * ms_per_tick;
-        let ms_b = w0 + f64::from((xb - body.x) / g.ppt) * ms_per_tick;
+    // Peaks from `da` to `db` px into the body.
+    let range = |da: f64, db: f64| -> Option<(f32, f32)> {
+        let ms_a = w0 + da / ppt * ms_per_tick;
+        let ms_b = w0 + db / ppt * ms_per_tick;
         let fa = (ms_a * frames_per_ms).max(0.0) as usize / w.per;
         let fb = ((ms_b * frames_per_ms).max(0.0) as usize / w.per).max(fa + 1);
         if fa >= w.peaks.len() {
@@ -705,30 +781,36 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Rect, co
         let stride = ((fb - fa) / 32).max(1);
         Some(w.peaks[fa..fb].iter().step_by(stride).fold((f32::MAX, f32::MIN), |(lo, hi), &(a, b)| (lo.min(a), hi.max(b))))
     };
-    let mut top: Vec<(f32, f32)> = Vec::with_capacity(((x1 - x0) / px) as usize + 2);
-    let mut bottom: Vec<(f32, f32)> = Vec::with_capacity(top.capacity());
-    let mut x = x0;
+    let n = ((x1 - body.x) / px - j0).ceil().max(0.0) as usize;
+    let mut top: Vec<(f32, f32)> = Vec::with_capacity(n + 2);
+    let mut bottom: Vec<(f32, f32)> = Vec::with_capacity(n + 2);
+    let mut j = j0;
+    let mut x = body.x + j * px;
     while x < x1 {
-        let Some((lo, hi)) = range(x, x + px) else { break };
-        let k = shape(x + px * 0.5) * amp;
-        let (mut yt, mut yb) = (mid - hi.clamp(-1.0, 1.0) * k, mid - lo.clamp(-1.0, 1.0) * k);
+        let d = j * px;
+        let Some((lo, hi)) = range(d, d + px) else { break };
+        let k = shape(d + px * 0.5) * amp;
+        let (mut yt, mut yb) = (mid - f64::from(hi.clamp(-1.0, 1.0)) * k, mid - f64::from(lo.clamp(-1.0, 1.0)) * k);
         // Keep a hairline where the column is flat (a DC sample, silence).
         if yb - yt < 0.7 {
             let m = (yt + yb) / 2.0;
             (yt, yb) = (m - 0.35, m + 0.35);
         }
-        let xm = (x + px * 0.5).min(x1);
+        let (yt, yb) = (pl::snap(yt), pl::snap(yb));
+        let xm = pl::snap((x + px * 0.5).min(x1));
         if top.is_empty() {
-            top.push((x, yt));
-            bottom.push((x, yb));
+            top.push((pl::snap(x), yt));
+            bottom.push((pl::snap(x), yb));
         }
         top.push((xm, yt));
         bottom.push((xm, yb));
-        x += px;
+        j += 1.0;
+        x = body.x + j * px;
     }
     let (Some(&(_, yt)), Some(&(_, yb))) = (top.last(), bottom.last()) else { return };
-    top.push((x.min(x1), yt));
-    bottom.push((x.min(x1), yb));
+    let x = pl::snap(x.min(x1));
+    top.push((x, yt));
+    bottom.push((x, yb));
     let mut outline = top;
     outline.extend(bottom.into_iter().rev());
     ui.c.fill_polygon(&outline, col);
@@ -736,7 +818,8 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Rect, co
 
 /// An audio clip's fade curves, and its handles while the mouse is over it (§9a): fade triangles at the top
 /// corners (at the fades' ends), tension rings in the middle of each curve, the gain half-circle at the bottom.
-fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, body: Rect, wave: Color) {
+fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wave: Color) {
+    let body = edges.r;
     if body.w < 12.0 || body.h < 10.0 {
         return;
     }
@@ -744,23 +827,25 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, body: Rect, wave
     let hovered = s.playlist.hover_clip == Some(i);
     let lit = |h: pl::Handle| hovered && s.playlist.hover_handle == Some(h);
     let (fx_in, fx_out) = pl::fade_xs(s, g, c);
-    let curve = |ui: &mut Ui, xa: f32, xb: f32, t: f32, out: bool| {
+    // Points on the drawing grid, from the body's true edges (`Body`).
+    let (bottom, h) = (f64::from(body.bottom()), f64::from(body.h));
+    let curve = |ui: &mut Ui, xa: f64, xb: f64, t: f32, out: bool| {
         let n = ((xb - xa) / 2.0).ceil().max(2.0) as usize;
         let pts: Vec<(f32, f32)> = (0..=n)
             .map(|k| {
-                let u = k as f32 / n as f32;
+                let u = k as f64 / n as f64;
                 let x = if out { 1.0 - u } else { u };
-                (xa + (xb - xa) * u, body.bottom() - os_model::fade_curve(f64::from(x), f64::from(t)) as f32 * body.h)
+                (pl::snap(xa + (xb - xa) * u), pl::snap(bottom - os_model::fade_curve(x, f64::from(t)) * h))
             })
             .collect();
         ui.c.polyline(&pts, 1.4, white.with_alpha(230));
     };
     if let Some((_, t)) = c.fade_in() {
-        curve(ui, body.x, fx_in, t, false);
+        curve(ui, edges.x, f64::from(fx_in), t, false);
         ui.c.fill_rect(Rect::new(fx_in, body.y, 1.0, body.h), white.with_alpha(50));
     }
     if let Some((_, t)) = c.fade_out() {
-        curve(ui, fx_out, body.right(), t, true);
+        curve(ui, f64::from(fx_out), edges.x + edges.w, t, true);
         ui.c.fill_rect(Rect::new(fx_out - 1.0, body.y, 1.0, body.h), white.with_alpha(50));
     }
     // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse.
@@ -802,22 +887,35 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, body: Rect, wave
 }
 
 #[allow(clippy::too_many_arguments)]
-fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, body: Rect, bg: Color, col: Color) {
+fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: Body, bg: Color, col: Color) {
     let Some(a) = s.project.automation(ch) else { return };
     if a.points.is_empty() {
         return;
     }
-    let x0 = body.x.max(g.grid.x - 2.0);
-    let x1 = body.right().min(g.grid.right() + 2.0);
-    let mut pts = Vec::new();
-    let mut x = x0;
-    while x <= x1 {
-        let v = a.value_at(pl::beat_at(s, g, c, x)).unwrap_or(0.0);
-        pts.push((x, pl::value_y(body, v)));
-        x += 2.0;
+    let Some(paint) = ui.c.paint_bounds() else { return };
+    let body = edges.r;
+    // A point every 2 px from the body's left edge (so a repaint of a strip draws the points a whole repaint draws),
+    // over the painted part and a few points beyond it (the line's ends change the pixels next to them).
+    let (lo, hi) = (f64::from(paint.x) - 8.0, f64::from(paint.right()) + 8.0);
+    let k0 = ((lo - edges.x) / 2.0).floor().max(0.0);
+    let x1 = (edges.x + edges.w).min(edges.x + 2.0 * ((hi - edges.x) / 2.0).ceil());
+    let x0 = edges.x + 2.0 * k0;
+    if x0 > x1 {
+        return;
     }
-    let v = a.value_at(pl::beat_at(s, g, c, x1)).unwrap_or(0.0);
-    pts.push((x1, pl::value_y(body, v)));
+    // The beat under content x (measured from the clip's start, as `pl::beat_at`).
+    let (w0, _) = pl::window(s, c);
+    let clip_x = g.x64(f64::from(c.position));
+    let beat = |x: f64| w0 + (x - clip_x) / f64::from(g.ppt) / f64::from(g.ppq);
+    let point = |x: f64| (pl::snap(x), pl::value_y(body, a.value_at(beat(x)).unwrap_or(0.0)));
+    let mut pts = Vec::new();
+    let mut k = k0;
+    while edges.x + 2.0 * k <= x1 {
+        pts.push(point(edges.x + 2.0 * k));
+        k += 1.0;
+    }
+    pts.push(point(x1));
+    let (x0, x1) = (pl::snap(x0), pl::snap(x1));
     let mut area = pts.clone();
     area.push((x1, body.bottom()));
     area.push((x0, body.bottom()));

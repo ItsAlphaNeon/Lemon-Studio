@@ -287,6 +287,54 @@ fn scroll_win(t: Scroll) -> Win {
     }
 }
 
+/// The smallest scroll step whose move is whole device pixels on the playlist's drawing grid (1/256 px) at `scale`:
+/// 1 px at 100 %, 2 at 150 %, 4 at 125 % and 175 %. None at a scale off that grid (no move is exact there).
+fn blit_step(scale: f32) -> Option<f32> {
+    (0..=16).map(|e| 2f32.powi(e - 8)).find(|q| (f64::from(*q) * f64::from(scale)).fract() == 0.0)
+}
+
+/// `r` moved by (dx, dy).
+fn moved_by(r: Rect, dx: f64, dy: f64) -> Rect {
+    Rect::new(r.x + dx as f32, r.y + dy as f32, r.w, r.h)
+}
+
+/// The parts of `a` outside `b`: up to four rects (above, below, left and right of their overlap).
+fn rect_minus(a: Rect, b: Rect) -> Vec<Rect> {
+    let o = a.intersect(&b);
+    if o.is_empty() {
+        return if a.is_empty() { Vec::new() } else { vec![a] };
+    }
+    let ltrb = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::new(x0, y0, x1 - x0, y1 - y0);
+    [
+        ltrb(a.x, a.y, a.right(), o.y),
+        ltrb(a.x, o.bottom(), a.right(), a.bottom()),
+        ltrb(a.x, o.y, o.x, o.bottom()),
+        ltrb(o.right(), o.y, a.right(), o.bottom()),
+    ]
+    .into_iter()
+    .filter(|r| !r.is_empty())
+    .collect()
+}
+
+/// Something drawn over the playlist (`App::playlist_covers`): what it may paint or hit, the window it is (None for
+/// the toolbar) and the part of it its frame fills with opaque colour first, while it floats (`App::win_solid`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Cover {
+    bounds: Rect,
+    win: Option<Win>,
+    solid: Option<Rect>,
+}
+
+/// A canvas area a paint moved instead of repainting it (a playlist scroll): by `dx`, `dy` device pixels right and
+/// down, except the pixels wholly inside `keep` (windows over it that did not change, `os_ui::keep_area`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Moved {
+    pub area: Rect,
+    pub dx: i32,
+    pub dy: i32,
+    pub keep: Vec<Rect>,
+}
+
 /// Past this many separate damage rects, the two whose merge adds the least area are merged.
 const MAX_DAMAGE_RECTS: usize = 32;
 
@@ -402,6 +450,8 @@ pub enum Seg {
     Browser,
     Win(Win),
     Toolbar,
+    /// The playlist's clip source list (inside `Win(Playlist)`: a scroll of the grid leaves it alone).
+    PlPicker,
 }
 
 /// What each part registered and where it drew in the last paint, so a partial repaint can keep the hits of the parts
@@ -455,9 +505,10 @@ impl Ui<'_> {
                 area
             }
             _ => {
-                self.c.take_drawn();
+                // Parts may sit inside another part: that one learns what this one drew too.
+                let before = self.c.begin_drawn();
                 paint(self);
-                let drawn = self.c.take_drawn().map_or(area, |d| d.union(&area));
+                let drawn = self.c.end_drawn(before).map_or(area, |d| d.union(&area));
                 // A partial paint only saw part of what the view draws: keep last paint's extent as well.
                 match old {
                     Some(i) if !self.keep.full => drawn.union(&self.keep.parts[i].area),
@@ -815,6 +866,17 @@ pub struct App {
     pub rshift: bool,
     /// Playlist regions from the last paint (grid, ruler, marker lane).
     pl_grid: Option<Rect>,
+    /// Playlist scrolls since the last paint: how far the content moved (logical px, right and down), see
+    /// `playlist_scrolled`.
+    scrolled: Option<(f64, f64)>,
+    /// Canvas areas the next paint moves before it paints: from `take_damage`.
+    shifts: Vec<Moved>,
+    /// Areas the last paint moved: the shell moves its window buffer the same way (`take_moved`).
+    moved: Vec<Moved>,
+    /// The canvas scale at the last paint.
+    px_scale: f32,
+    /// What covered the playlist at the last paint (`playlist_covers`).
+    pl_covers: Vec<Cover>,
     /// Piano roll regions from the last paint (window, grid, velocity panel).
     piano_win: Option<Rect>,
     pub(crate) piano_grid: Option<Rect>,
@@ -941,6 +1003,11 @@ impl App {
             alt: false,
             rshift: false,
             pl_grid: None,
+            scrolled: None,
+            shifts: Vec::new(),
+            moved: Vec::new(),
+            px_scale: 1.0,
+            pl_covers: Vec::new(),
             piano_win: None,
             piano_grid: None,
             piano_panel: None,
@@ -1560,6 +1627,9 @@ impl App {
     }
 
     pub(crate) fn damage_rect(&mut self, r: Rect) {
+        if r.is_empty() {
+            return;
+        }
         match &mut self.damage {
             Damage::Full => {}
             Damage::None => self.damage = Damage::Rects(vec![r]),
@@ -1573,12 +1643,173 @@ impl App {
 
     /// Take the pending damage: `None` = nothing to paint, `Some(None)` = whole frame, else the regions to repaint
     /// (all in one `paint_region`).
+    /// A playlist scroll is resolved here (`resolve_scroll`): call it right before `paint_region`.
     pub fn take_damage(&mut self) -> Option<Option<Vec<Rect>>> {
+        self.resolve_scroll();
         match std::mem::replace(&mut self.damage, Damage::None) {
             Damage::None => None,
             Damage::Full => Some(None),
             Damage::Rects(v) => Some(Some(v)),
         }
+    }
+
+    /// The areas the last paint moved instead of repainting (a playlist scroll; `os_ui::shift_area` rounds the area,
+    /// `os_ui::keep_area` the kept rects): the shell moves the same pixels of its window buffer and presents them.
+    pub fn take_moved(&mut self) -> Vec<Moved> {
+        std::mem::take(&mut self.moved)
+    }
+
+    /// The playlist view scrolled from `before` (its horizontal and vertical scroll). The next paint moves the pixels
+    /// already drawn for it instead of repainting the window when that gives exactly what a repaint would
+    /// (`resolve_scroll`). Damage waiting inside the moving parts moves along: those pixels are stale wherever they go.
+    pub(crate) fn playlist_scrolled(&mut self, before: (f32, f32)) {
+        let now = self.state.playlist_scroll;
+        let d = (f64::from(before.0) - f64::from(now.0), f64::from(before.1) - f64::from(now.1));
+        if d == (0.0, 0.0) {
+            return;
+        }
+        if let Damage::Rects(v) = &self.damage {
+            let stale: Vec<Rect> = self
+                .scroll_moves(d)
+                .into_iter()
+                .flat_map(|(r, sx, sy)| v.iter().map(move |o| moved_by(o.intersect(&r), sx, sy).outset(1.0).intersect(&r)))
+                .collect();
+            for r in stale {
+                self.damage_rect(r);
+            }
+        }
+        let s = self.scrolled.get_or_insert((0.0, 0.0));
+        *s = (s.0 + d.0, s.1 + d.1);
+    }
+
+    /// The playlist parts a scroll by `d` (logical px) moves, with their move: the grid both ways, the ruler and
+    /// marker lane sideways, the track headers up and down (as laid out by the last paint).
+    fn scroll_moves(&self, d: (f64, f64)) -> Vec<(Rect, f64, f64)> {
+        let Some(grid) = self.pl_grid else { return Vec::new() };
+        let p = views::playlist::scroll_parts(&self.state, grid);
+        let mut v = vec![(p.grid, d.0, d.1)];
+        if d.0 != 0.0 {
+            v.push((p.ruler, d.0, 0.0));
+            v.extend(p.lane.map(|l| (l, d.0, 0.0)));
+        }
+        if d.1 != 0.0 {
+            v.push((p.heads, 0.0, d.1));
+        }
+        v
+    }
+
+    /// What is drawn over the playlist: the drawn windows above it and the toolbar.
+    fn playlist_covers(&self) -> Vec<Cover> {
+        let s = &self.state;
+        let mut v: Vec<_> = s
+            .z
+            .iter()
+            .skip_while(|&&w| w != Win::Playlist)
+            .skip(1)
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin))
+            .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
+            .collect();
+        v.push(Cover { bounds: Rect::new(0.0, 0.0, s.screen.0, views::WORK_Y + 1.0), win: None, solid: None });
+        v
+    }
+
+    /// The part of window `w` its frame fills with opaque colour first, when it floats: the pixels there depend
+    /// on the window alone, not on what is under it.
+    fn win_solid(&self, w: Win) -> Option<Rect> {
+        let s = &self.state;
+        match w {
+            Win::ChannelRack => Some(views::rack::rect(s)),
+            Win::Plugin => s.project.channels.get(s.plugin_channel).map(|_| views::channel_win::rect(s)),
+            w => {
+                let ws = &s.wins[w.slot()?];
+                let r = s.win_rect(w);
+                (!ws.maxed && !ws.mini && r.h >= 2.0 * TITLE_H).then_some(r)
+            }
+        }
+    }
+
+    /// Before a paint: turn the pending playlist scroll into canvas moves (`shifts`) and the damage they leave: the
+    /// strips scrolled into view, the scroll bars, what covers the playlist (where it is and where its pixels moved
+    /// to; a window that did not change keeps the pixels inside its frame, so only its edge and the content it
+    /// uncovers paint), the hovered control. The window is repainted instead when moving would not equal a repaint: a
+    /// distance off the drawing grid (`PGeom::xs64`) or not whole device pixels, a window moved or resized since the
+    /// last paint, an open popup or menu, a drag other than scrolling, a progress panel, the monitor debug panel.
+    fn resolve_scroll(&mut self) {
+        self.shifts.clear();
+        let Some(d) = self.scrolled.take() else { return };
+        if self.damage == Damage::Full {
+            return;
+        }
+        let k = f64::from(self.px_scale);
+        let exact = |v: f64| (v * 256.0).fract() == 0.0 && (v * k).fract() == 0.0;
+        let can = exact(d.0)
+            && exact(d.1)
+            && self.pl_grid.is_some()
+            && views::playlist::grid_of(&self.state) == self.pl_grid
+            && self.overlays.is_empty()
+            && matches!(self.drag, None | Some(Drag::Scroll { .. }))
+            && self.loading.is_none()
+            && self.export.is_none()
+            && self.state.playlist.overlay.is_none()
+            && !self.state.monitor.debug;
+        if !can {
+            return self.damage_win(Win::Playlist);
+        }
+        let grid = self.pl_grid.expect("checked");
+        // A window that is where it was at the last paint keeps the pixels its frame fills; around them it is
+        // painted where it draws (`views::paint_area`: its resize zones are hits only) and where those pixels moved.
+        // A window that moved or changed is painted where it was and where it is, with all it may paint.
+        let now = self.playlist_covers();
+        let mut covers: Vec<(Rect, Option<Rect>)> = now
+            .iter()
+            .map(|c| match (c.win, c.solid) {
+                (Some(w), Some(solid)) if self.pl_covers.contains(c) => (views::paint_area(&self.state, w), Some(solid)),
+                _ => (c.bounds, None),
+            })
+            .collect();
+        covers.extend(self.pl_covers.iter().filter(|c| !now.contains(c)).map(|c| (c.bounds, None)));
+        for (r, sx, sy) in self.scroll_moves(d) {
+            if sx.abs() >= f64::from(r.w) || sy.abs() >= f64::from(r.h) {
+                self.damage_rect(r);
+                continue;
+            }
+            // What the move leaves to paint, but for the kept pixels: those show the same as before. (Damage
+            // waiting from before stays whole: it is what changed.)
+            let mut paint = Vec::new();
+            // Covers are painted where they are; the pixels of them that moved are content's.
+            for &(c, _) in &covers {
+                paint.push(c.intersect(&r));
+                paint.push(moved_by(c, sx, sy).intersect(&r));
+            }
+            let keep: Vec<Rect> = covers.iter().filter_map(|c| c.1).map(|s| s.intersect(&r)).filter(|k| !k.is_empty()).collect();
+            self.shifts.push(Moved { area: r, dx: (sx * k) as i32, dy: (sy * k) as i32, keep: keep.clone() });
+            let (sx, sy) = (sx as f32, sy as f32);
+            // The strips scrolled into view (damage reaches out to whole device pixels, past the moved area's rounded edge).
+            if sx != 0.0 {
+                let x = if sx > 0.0 { r.x } else { r.right() + sx };
+                paint.push(Rect::new(x, r.y, sx.abs(), r.h));
+            }
+            if sy != 0.0 {
+                let y = if sy > 0.0 { r.y } else { r.bottom() + sy };
+                paint.push(Rect::new(r.x, y, r.w, sy.abs()));
+            }
+            // The hovered control's look moved off the mouse.
+            if let (Some(a), Some(h)) = (&self.hover, self.hover_rect) {
+                if hover_is_visible(a) {
+                    paint.push(moved_by(h.outset(3.0), f64::from(sx), f64::from(sy)).intersect(&r));
+                }
+            }
+            for k in &keep {
+                let kept = os_ui::inner_rect(*k, self.px_scale);
+                paint = paint.into_iter().flat_map(|p| rect_minus(p, kept)).collect();
+            }
+            for p in paint {
+                self.damage_rect(p);
+            }
+        }
+        let parts = views::playlist::scroll_parts(&self.state, grid);
+        self.damage_rect(parts.overview);
+        self.damage_rect(parts.vbar);
     }
 
     /// Repaint window `w` only (with its resize zones), or everything when it is not shown.
@@ -1720,6 +1951,20 @@ impl App {
 
     /// Paint the whole frame (None) or only the given rects, in one pass (see `Canvas::begin_region`).
     pub fn paint_region(&mut self, canvas: &mut Canvas, damage: Option<&[Rect]>) {
+        // A playlist scroll's moves (`take_damage`) go first; the damage they left is painted with the rest.
+        debug_assert!(damage.is_none() || self.scrolled.is_none(), "take_damage resolves a scroll before a partial paint");
+        self.moved.clear();
+        if damage.is_some() && self.px_scale == canvas.scale {
+            for m in std::mem::take(&mut self.shifts) {
+                canvas.shift(m.area, m.dx, m.dy, &m.keep);
+                self.moved.push(m);
+            }
+        }
+        self.shifts.clear();
+        if damage.is_none() {
+            self.scrolled = None;
+        }
+        self.px_scale = canvas.scale;
         match damage {
             Some(rects) => canvas.begin_region(rects),
             None => canvas.begin_frame(None),
@@ -1767,6 +2012,7 @@ impl App {
         self.piano_grid = find(Action::PianoGrid);
         self.piano_panel = find(Action::PianoVelocity);
         self.pl_grid = find(Action::PlaylistArea);
+        self.pl_covers = self.playlist_covers();
         self.piano_win = match (self.piano_grid, self.piano_panel) {
             // The window below its title bar: overview, ruler, keyboard, grid, velocity panel.
             (Some(g), Some(p)) => Some(Rect::new(g.x - 73.0, g.y - 41.0, g.w + 96.0, p.bottom() - g.y + 41.0)),
@@ -2140,8 +2386,18 @@ impl App {
                 Drag::Scroll { m0, axes } => {
                     for (t, vertical, p0, ratio) in axes {
                         let d = if vertical { y - m0.1 } else { x - m0.0 };
-                        self.scroll_set(t, p0 + d * ratio);
-                        self.damage_win(scroll_win(t));
+                        let v = p0 + d * ratio;
+                        if matches!(t, Scroll::PlaylistX | Scroll::PlaylistY) {
+                            // In whole steps the drawn pixels can move by (`playlist_scrolled`).
+                            let before = self.state.playlist_scroll;
+                            let cur = self.scroll_get(t);
+                            let v = blit_step(self.px_scale).map_or(v, |q| cur + ((v - cur) / q).round() * q);
+                            self.scroll_set(t, v);
+                            self.playlist_scrolled(before);
+                        } else {
+                            self.scroll_set(t, v);
+                            self.damage_win(scroll_win(t));
+                        }
                     }
                 }
                 Drag::NoteMove { x0, y0, orig } => {
@@ -3170,12 +3426,19 @@ impl App {
     }
 
     pub fn wheel(&mut self, dx: f32, dy: f32, shift: bool, ctrl: bool) {
-        // Scrolling or zooming one window repaints just that window.
+        // Scrolling or zooming one window repaints just that window; scrolling the playlist moves its pixels.
         let before = self.damage.clone();
+        let s = &self.state;
+        let view = (s.playlist_scroll, s.playlist_bar_w, s.playlist.row_h, s.playlist.pick_scroll);
         self.invalidate();
         if let Some(w) = self.wheel_act(dx, dy, shift, ctrl) {
             self.damage = before;
-            self.damage_win(w);
+            let s = &self.state;
+            if w == Win::Playlist && (s.playlist_bar_w, s.playlist.row_h, s.playlist.pick_scroll) == (view.1, view.2, view.3) {
+                self.playlist_scrolled(view.0);
+            } else {
+                self.damage_win(w);
+            }
         }
     }
 
@@ -5147,9 +5410,262 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// Scrolling the playlist moves the pixels drawn for it and paints only what scrolled in (`App::playlist_scrolled`).
+    /// Every step equals a full repaint, at 100 % and 150 %: with notes, an audio clip (fades, a waveform changing
+    /// every column), an automation clip, markers, a time selection, a track group, a zoom off the pixel grid, song
+    /// playback, windows over the playlist, drags, a popup (no move: the window repaints) and random steps.
+    #[test]
+    fn playlist_scroll_moves_pixels() {
+        let wav = std::env::temp_dir().join(format!("os-scroll-move-{}.wav", std::process::id()));
+        let audio: Vec<f32> = (0..480_000)
+            .map(|i| {
+                let t = (i / 2) as f32 / 48000.0;
+                (t * 2.0).sin() * (t * 900.0 * (1.0 + t)).sin()
+            })
+            .collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &audio).unwrap();
+        for scale in [1.0, 1.5] {
+            scroll_moves_at(&wav, scale);
+        }
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    fn scroll_moves_at(wav: &std::path::Path, scale: f32) {
+        use crate::playlist as pl;
+        let (w, h) = ((1920.0 * scale).round() as u32, (1080.0 * scale).round() as u32);
+        let Ok(mut a) = Canvas::new(w, h, scale) else { return };
+        let mut b = Canvas::new(w, h, scale).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.patterns[0].notes = (0..32).map(|i| Note { length: 30, key: 60 + (i % 7) as u16, ..Note::step(0, i * 24) }).collect();
+        let bar = 4 * u32::from(app.state.project.ppq);
+        for t in 0..14u16 {
+            for k in 0..8u32 {
+                if (u32::from(t) + k) % 3 != 0 {
+                    pl::place(&mut app.state, t, (k * 3 + u32::from(t % 2)) * bar);
+                }
+            }
+        }
+        let ci = pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 4, bar / 2).expect("audio clip");
+        let ch = pl::create_automation(&mut app.state, 0, "Auto", 0.5);
+        pl::add_point(&mut app.state, ch, 3.0, 0.9);
+        pl::add_point(&mut app.state, ch, 7.5, 0.1);
+        {
+            let arr = pl::arr_mut(&mut app.state);
+            arr.clips[ci].set_fade_in(Some((300.0, 0.3)));
+            arr.clips[ci].set_fade_out(Some((900.0, -0.4)));
+            arr.markers.push(os_model::TimeMarker::new(2 * bar, "Drop"));
+            arr.markers.push(os_model::TimeMarker::new(9 * bar + 7, "Break"));
+            arr.tracks[2].color = Some(os_model::Rgb::new(0x90, 0x58, 0x87));
+            arr.tracks[3].grouped = true;
+            arr.tracks[4].grouped = true;
+        }
+        app.state.playlist.sel = vec![3, 7];
+        app.state.playlist.range = Some((bar + 5, 5 * bar));
+        // A zoom off the drawing grid, a start between device pixels (on the 1/256 px lattice: whole steps from it stay
+        // exact in f32; a step that is not exact repaints, see "off-grid step"), a track height as a user leaves them.
+        app.state.playlist_bar_w = 37.37;
+        app.state.playlist_scroll = (123.457_031_25, 0.0);
+        app.state.playlist.row_h = 46.0;
+        let ws = &mut app.state.wins[Win::Playlist.slot().unwrap()];
+        ws.maxed = false;
+        ws.rect = Rect::new(150.3, 90.0, 1600.0, 900.0);
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        let pl = app.state.win_area(Win::Playlist);
+        let g = app.pl_grid.unwrap();
+        let what_at = |what: &str| format!("{what} at {scale}");
+        // Paint what is pending; `moves`: pixels were moved (else the window repainted); `small`: under a quarter of the
+        // playlist painted. Then the result must equal a full repaint.
+        let check = |app: &mut App, a: &mut Canvas, b: &mut Canvas, what: &str, moves: Option<bool>, small: bool| -> Vec<Rect> {
+            let what = what_at(what);
+            let d = app.take_damage();
+            let Some(Some(_)) = &d else { panic!("{what}: repaints regions, not the frame") };
+            frame_damage(app, a, d);
+            let region = a.region();
+            let area: f32 = region.iter().map(|r| r.w * r.h).sum();
+            let moved = app.take_moved();
+            if let Some(m) = moves {
+                assert_eq!(!moved.is_empty(), m, "{what}: the drawn pixels moved");
+            }
+            if small {
+                assert!(area < pl.w * pl.h / 4.0, "{what}: painted {area} of {} px²: {region:?}", pl.w * pl.h);
+            }
+            frame(app, b, None);
+            assert_same(a, b, &what);
+            region
+        };
+        let full = |app: &mut App, a: &mut Canvas| {
+            app.invalidate();
+            let d = app.take_damage();
+            frame_damage(app, a, d);
+        };
+        let over_grid = (g.x + 300.0, g.y + 200.0);
+        app.mouse_move(over_grid.0, over_grid.1);
+        full(&mut app, &mut a);
+        // Wheel steps: down, up, right, left, Shift = sideways, several before one paint.
+        app.wheel(0.0, -1.0, false, false);
+        check(&mut app, &mut a, &mut b, "wheel down", Some(true), true);
+        app.wheel(0.0, -2.0, false, false);
+        check(&mut app, &mut a, &mut b, "wheel down two", Some(true), true);
+        app.wheel(0.0, 1.0, false, false);
+        check(&mut app, &mut a, &mut b, "wheel up", Some(true), true);
+        app.wheel(-1.0, 0.0, false, false);
+        check(&mut app, &mut a, &mut b, "wheel right", Some(true), true);
+        app.wheel(1.0, 0.0, false, false);
+        check(&mut app, &mut a, &mut b, "wheel left", Some(true), true);
+        app.wheel(0.0, -1.0, true, false);
+        check(&mut app, &mut a, &mut b, "shift+wheel", Some(true), true);
+        app.wheel(-1.0, 0.0, false, false);
+        app.wheel(0.0, -1.0, false, false);
+        app.wheel(-1.0, 0.0, false, false);
+        check(&mut app, &mut a, &mut b, "three steps", Some(true), true);
+        // Over the track headers: rows move, the time line stays; the hovered group arrow (lit) moves off the mouse.
+        app.state.playlist_scroll.1 = 0.0;
+        full(&mut app, &mut a);
+        let arrow = hit_rect(&app, &Action::PlGroupArrow(2));
+        app.mouse_move(arrow.cx(), arrow.cy());
+        full(&mut app, &mut a);
+        app.wheel(0.0, -1.0, false, false);
+        check(&mut app, &mut a, &mut b, "wheel over the headers", Some(true), true);
+        app.mouse_move(over_grid.0, over_grid.1);
+        // At the start: a part of a step moves; a step off the drawing grid repaints the window.
+        app.state.playlist_scroll.0 = 30.0;
+        full(&mut app, &mut a);
+        app.wheel(1.0, 0.0, false, false);
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        check(&mut app, &mut a, &mut b, "wheel to the start", Some(true), true);
+        app.state.playlist_scroll.0 = 25.3;
+        full(&mut app, &mut a);
+        app.wheel(1.0, 0.0, false, false);
+        check(&mut app, &mut a, &mut b, "off-grid step", Some(false), false);
+        app.state.playlist_scroll.0 = 123.457_031_25;
+        full(&mut app, &mut a);
+        // Song playback: the playhead moves between steps.
+        let pg = pl::PGeom::new(&app.state, g);
+        let tick = f64::from(pg.tick_at(g.x + 400.0));
+        let shown = |tick: f64| Shown { playing: true, paused: false, tick, song: true, sounding: Vec::new() };
+        app.show_playback(shown(tick));
+        full(&mut app, &mut a);
+        // The playhead's damage before a step was taken where it was drawn; its pixels move with the step.
+        app.show_playback(shown(tick + 400.0));
+        app.wheel(-1.0, 0.0, false, false);
+        app.show_playback(shown(tick + 900.0));
+        check(&mut app, &mut a, &mut b, "scroll while playing", Some(true), true);
+        app.show_playback(shown(tick + 1300.0));
+        app.wheel(0.0, -1.0, false, false);
+        app.show_playback(shown(tick + 1700.0));
+        check(&mut app, &mut a, &mut b, "scroll down while playing", Some(true), true);
+        app.show_playback(Shown::default());
+        full(&mut app, &mut a);
+        // Dragging the overview's thumb, then grabbing the grid with the middle button.
+        let bar_x = app.bar(Scroll::PlaylistX).unwrap();
+        let pos = app.scroll_get(Scroll::PlaylistX);
+        let thumb_x = bar_x.track.x + pos / bar_x.max * (bar_x.track.w - bar_x.thumb) + bar_x.thumb / 2.0;
+        app.mouse_move(thumb_x, bar_x.track.cy());
+        app.mouse_down();
+        full(&mut app, &mut a);
+        for dx in [37.0, 81.0, 60.0] {
+            app.mouse_move(thumb_x + dx, bar_x.track.cy());
+            check(&mut app, &mut a, &mut b, "scroll bar drag", Some(true), true);
+        }
+        app.mouse_up();
+        full(&mut app, &mut a);
+        app.mouse_move(over_grid.0, over_grid.1);
+        app.mouse_down_middle();
+        full(&mut app, &mut a);
+        for (dx, dy) in [(23.0, 31.0), (-50.0, 7.0), (-90.0, -60.0)] {
+            app.mouse_move(over_grid.0 + dx, over_grid.1 + dy);
+            check(&mut app, &mut a, &mut b, "middle-drag grab", Some(true), true);
+        }
+        app.mouse_up();
+        full(&mut app, &mut a);
+        // An open popup: the window repaints.
+        app.mouse_move(over_grid.0, over_grid.1);
+        app.state.playlist.popup = Some(pl::options_menu(&app.state, g.x + 900.0, g.y + 100.0));
+        full(&mut app, &mut a);
+        app.wheel(0.0, -1.0, false, false);
+        check(&mut app, &mut a, &mut b, "popup open", Some(false), false);
+        app.state.playlist.popup = None;
+        full(&mut app, &mut a);
+
+        // Windows over the playlist: a piano roll and the channel rack.
+        let ws = &mut app.state.wins[Win::PianoRoll.slot().unwrap()];
+        ws.maxed = false;
+        ws.rect = Rect::new(g.x - 60.0, g.bottom() - 220.0, 700.0, 400.0);
+        app.state.z = vec![Win::Playlist, Win::PianoRoll, Win::ChannelRack];
+        app.state.rack_pos = (g.right() - 380.0, g.y + 120.0);
+        full(&mut app, &mut a);
+        assert_eq!(app.top_hit(over_grid.0, over_grid.1).map(|h| h.action.clone()), Some(Action::PlaylistArea), "the mouse is over the grid");
+        // They did not change: the insides of their frames keep their pixels (their edges and what they uncover paint).
+        let insides = [views::rack::rect(&app.state).inset(3.0), app.state.win_rect(Win::PianoRoll).inset(3.0)];
+        for (what, dx, dy) in [("covered: down", 0.0, -1.0), ("covered: right", -2.0, 0.0), ("covered: up", 0.0, 2.0), ("covered: left", 1.0, 0.0)] {
+            app.wheel(dx, dy, false, false);
+            let region = check(&mut app, &mut a, &mut b, what, Some(true), false);
+            for inside in insides {
+                let painted: f32 = region.iter().map(|r| r.intersect(&inside)).map(|r| r.w * r.h).sum();
+                assert!(painted < inside.w * inside.h / 10.0, "{what} at {scale}: painted {painted} px² inside {inside:?}: {region:?}");
+            }
+        }
+        // (The press raises the playlist; put the windows back over it.)
+        let covered = vec![Win::Playlist, Win::PianoRoll, Win::ChannelRack];
+        app.mouse_down_middle();
+        app.state.z = covered.clone();
+        full(&mut app, &mut a);
+        app.mouse_move(over_grid.0 + 41.0, over_grid.1 - 17.0);
+        check(&mut app, &mut a, &mut b, "covered: grab", Some(true), false);
+        app.mouse_up();
+        app.state.z = covered.clone();
+        full(&mut app, &mut a);
+        // A window over the playlist moving after a step, before the paint: its old pixels moved with the step.
+        assert!(app.playlist_covers().len() > 1, "windows over the playlist");
+        app.wheel(0.0, -1.0, false, false);
+        let old = app.win_bounds(Win::ChannelRack);
+        app.state.rack_pos.1 += 90.0;
+        app.damage_rect(old);
+        app.damage_rect(app.win_bounds(Win::ChannelRack));
+        check(&mut app, &mut a, &mut b, "covered: a window moved after a step", Some(true), false);
+
+        // Random steps: one to three wheel steps a frame, the mouse wandering over the grid (hover changes), playback.
+        let mut seed = 0x2545_f491_u32;
+        let mut rnd = |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed % n
+        };
+        for i in 0..40 {
+            if rnd(4) == 0 {
+                let (x, y) = (g.x + 20.0 + rnd(700) as f32 * 0.75, g.y + 10.0 + rnd(500) as f32 * 0.5);
+                if app.top_hit(x, y).is_some_and(|h| h.action == Action::PlaylistArea) {
+                    app.mouse_move(x, y);
+                }
+            }
+            if rnd(5) == 0 {
+                app.show_playback(shown(tick + f64::from(i) * 13.0));
+                if rnd(2) == 0 {
+                    full(&mut app, &mut a);
+                }
+            }
+            for _ in 0..=rnd(3) {
+                let step = [-2.0, -1.0, 1.0, 2.0][rnd(4) as usize];
+                if rnd(2) == 0 {
+                    app.wheel(step, 0.0, false, false);
+                } else {
+                    app.wheel(0.0, step, false, false);
+                }
+            }
+            if app.has_damage() {
+                check(&mut app, &mut a, &mut b, &format!("random step {i}"), None, false);
+            }
+        }
+    }
+
     fn assert_same(a: &Canvas, b: &Canvas, what: &str) {
+        let width = a.pixmap.width() as usize;
         let diffs = a.pixmap.data().iter().zip(b.pixmap.data()).enumerate().filter(|(_, (x, y))| x.abs_diff(**y) > 3).map(|(i, _)| i / 4);
-        let (n, bbox) = diffs.fold((0, (usize::MAX, usize::MAX, 0, 0)), |(n, m), i| (n + 1, (m.0.min(i % 1920), m.1.min(i / 1920), m.2.max(i % 1920), m.3.max(i / 1920))));
+        let (n, bbox) = diffs.fold((0, (usize::MAX, usize::MAX, 0, 0)), |(n, m), i| (n + 1, (m.0.min(i % width), m.1.min(i / width), m.2.max(i % width), m.3.max(i / width))));
         if n > 0 {
             let _ = a.pixmap.save_png(std::env::temp_dir().join("os_partial.png"));
             let _ = b.pixmap.save_png(std::env::temp_dir().join("os_full.png"));
