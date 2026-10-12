@@ -7,11 +7,11 @@
 //       audio/song-structure.md, audio/implementing.md ("Playing live"), audio/sampler-playback.md,
 //       audio/gain-laws.md, flp/events/playlist.md (clips), flp/events/patterns.md (notes),
 //       flp/events/mixer.md (routing), audio/pattern-controls.md (repeat, control points),
-//       audio/channel-envelopes.md (volume and pitch envelopes)
+//       audio/channel-envelopes.md (volume and pitch envelopes), audio/time-stretch.md
 
 use std::sync::Arc;
 
-use os_model::{ChannelKind, ClipSource, ControlPoint, Project};
+use os_model::{ChannelKind, ClipSource, ControlPoint, Project, Stretching};
 
 use crate::clock::Clock;
 use os_dsp::glide::Glide;
@@ -57,6 +57,8 @@ struct Trigger {
     from: f64,
     /// The same as a fraction of the sample (instrument channels: the sampler plugin starts there).
     start: f32,
+    /// Which buffer of the channel it plays: 0 = the channel's sample, `k` = `keyed[k - 1]` (realtime stretch).
+    buf: u16,
     /// An audio clip's fades, gain and late-start declick (`None` = plays as it is).
     shape: Option<ClipShape>,
 }
@@ -151,6 +153,16 @@ struct ChannelState {
     instrument: Slot,
     /// Polyphony, mono, portamento and cut group rules for the instrument's notes (spec: audio/channel-voices.md).
     rules: notes::Rules,
+    /// The channel's pitch (knob, control points, automation) moves its sample: not when a stretch time fits it, nor
+    /// in the realtime stretch methods, whose pitch is in `keyed` (spec: audio/time-stretch.md).
+    pitched: bool,
+    /// Trim positions (source frames) times this are positions in what the channel plays: the stretch factor when
+    /// that is a stretched copy.
+    from_scale: f64,
+    /// Realtime stretch methods: the stretch factor and cents, and the sample stretched for each key the channel's
+    /// notes play.
+    realtime: Option<(f64, f64)>,
+    keyed: Vec<(u16, Arc<Sample>)>,
 }
 
 /// Glide of the channel's volume and pan parameters towards a control point's values.
@@ -194,7 +206,20 @@ struct CtlEvent {
     value: i32,
 }
 
+/// Frames of a sample stretched to `factor` times its length.
+fn stretched_frames(s: &Sample, factor: f64) -> usize {
+    (s.frames() as f64 * factor).round().max(1.0) as usize
+}
+
 impl ChannelState {
+    /// The buffer a voice plays (`Trigger::buf`).
+    fn buffer(&self, buf: u16) -> Option<&Arc<Sample>> {
+        match buf {
+            0 => self.sample.as_ref(),
+            b => self.keyed.get(usize::from(b) - 1).map(|k| &k.1),
+        }
+    }
+
     fn reset(&mut self) {
         (self.volume, self.pan, self.base_rate) = self.init;
         self.vol_v = self.init_v;
@@ -258,7 +283,7 @@ impl ChannelState {
         match param {
             ControlPoint::VOLUME => self.glide(Some((f64::from(value) / 12800.0).clamp(0.0, 1.0)), None, (f64::from(rate) * VOLUME_GLIDE_SECONDS).round() as u32),
             ControlPoint::PAN => self.glide(None, Some((f64::from(value) / 6400.0 - 1.0).clamp(-1.0, 1.0)), (f64::from(rate) * PAN_GLIDE_SECONDS).round() as u32),
-            ControlPoint::PITCH => self.base_rate = self.src_ratio * laws::playback_rate(60, value),
+            ControlPoint::PITCH if self.pitched => self.base_rate = self.src_ratio * laws::playback_rate(60, value),
             _ => {}
         }
     }
@@ -302,6 +327,8 @@ struct Voice {
     off: Option<u64>,
     /// An audio clip's fades and gain.
     shape: Option<ClipShape>,
+    /// The channel buffer it plays (`Trigger::buf`).
+    buf: u16,
 }
 
 /// Channel pitch automation range: ±2 semitones, the channel's default pitch range (spec: flp/events/automation.md).
@@ -491,7 +518,7 @@ impl Engine {
         let ppq = project.ppq.max(1);
         let n_tracks = project.mixer.len().max(1);
 
-        let channels: Vec<ChannelState> = project
+        let mut channels: Vec<ChannelState> = project
             .channels
             .iter()
             .map(|ch| {
@@ -520,12 +547,33 @@ impl Engine {
                 };
                 let env_on = ch.kind == ChannelKind::Sampler;
                 let volume = if ch.enabled { laws::channel_gain(ch.volume) } else { 0.0 };
-                // Stretching by resampling plays the sample faster or slower (spec: audio/audio-clips.md "Stretching by
-                // resampling (mode 0)"); with a fitted time the channel's pitch no longer applies.
-                let (speed, pitched) = sample
+                // Stretching (spec: audio/time-stretch.md): resample plays the sample faster or slower; the other methods
+                // play a stretched copy, made once per library (the realtime ones one copy per key, made below). A
+                // library that leaves stretching to the host's sampler plugin plays them by resampling instead, at the
+                // stretched length.
+                let mut how = sample
                     .as_ref()
                     .filter(|_| plays_sample)
-                    .map_or((1.0, true), |s| ch.sound.stretch_speed(s.frames() as f64 / f64::from(s.rate.max(1)), tempo));
+                    .map_or(Stretching::None, |s| ch.sound.stretching(s.frames() as f64 / f64::from(s.rate.max(1)), tempo));
+                if library.resample_stretches {
+                    if let Stretching::Whole { factor, .. } | Stretching::Realtime { factor, .. } = how {
+                        how = Stretching::Resample { speed: 1.0 / factor };
+                    }
+                }
+                let (mut sample, mut speed, mut from_scale, mut realtime) = (sample, 1.0, 1.0, None);
+                match how {
+                    Stretching::None => {}
+                    Stretching::Resample { speed: s } => speed = s,
+                    Stretching::Whole { factor, cents } => {
+                        from_scale = factor;
+                        sample = sample.map(|s| library.stretched(&s, stretched_frames(&s, factor), 2f64.powf(cents / 1200.0)));
+                    }
+                    Stretching::Realtime { factor, cents } => {
+                        from_scale = factor;
+                        realtime = Some((factor, cents));
+                    }
+                }
+                let pitched = ch.sound.channel_pitch_applies() && realtime.is_none();
                 let src_ratio = sample.as_ref().map_or(1.0, |s| f64::from(s.rate) / f64::from(rate)) * speed;
                 let base_rate = src_ratio * if pitched { laws::playback_rate(60, ch.pitch_cents) } else { 1.0 };
                 let insert = usize::from(ch.mixer_track).min(n_tracks - 1);
@@ -548,6 +596,10 @@ impl Engine {
                     plugin: ch.kind == ChannelKind::Plugin,
                     instrument: Slot::default(),
                     rules: notes::Rules::new(&ch.misc, rate),
+                    pitched,
+                    from_scale,
+                    realtime,
+                    keyed: Vec::new(),
                 }
             })
             .collect();
@@ -615,13 +667,23 @@ impl Engine {
         controls.sort_by_key(|c| c.tick); // stable: equal ticks keep their order
         let (mut sched, end_tick) = schedule(project, mode, &mut report);
         sched.sort_by_key(|s| s.tick);
-        let triggers = sched
+        let mut triggers: Vec<Trigger> = sched
             .into_iter()
             .filter_map(|n: Sched| {
                 let state = channels.get(n.channel)?;
                 if state.sample.is_none() && !state.plugin {
                     return None;
                 }
+                let (from, start) = match state.sample.as_ref() {
+                    // Trims are source time: in a stretched copy they come `from_scale` times later (spec:
+                    // audio/time-stretch.md "Trims").
+                    Some(s) if s.frames() > 0 => {
+                        let from = n.from_s * f64::from(s.rate) * state.from_scale;
+                        let played = s.frames() as f64 * if state.realtime.is_some() { state.from_scale } else { 1.0 };
+                        (from, (from / played) as f32)
+                    }
+                    _ => (0.0, 0.0),
+                };
                 Some(Trigger {
                     tick: n.tick,
                     channel: n.channel,
@@ -632,8 +694,9 @@ impl Engine {
                     key: n.key,
                     end: (n.len > 0).then_some(n.tick + n.len),
                     velocity: n.velocity,
-                    from: state.sample.as_ref().map_or(0.0, |s| n.from_s * f64::from(s.rate)),
-                    start: state.sample.as_ref().filter(|s| s.frames() > 0).map_or(0.0, |s| (n.from_s * f64::from(s.rate) / s.frames() as f64) as f32),
+                    from,
+                    start,
+                    buf: 0,
                     shape: n.clip.map(|fx| {
                         let ms = |v: f32| (f64::from(v.max(0.0)) * f64::from(rate) / 1000.0).round() as u64;
                         let total = Clock::frame_of_tick(rate, ppq, tempo, n.tick + n.len) - Clock::frame_of_tick(rate, ppq, tempo, n.tick);
@@ -651,6 +714,23 @@ impl Engine {
                 })
             })
             .collect();
+
+        // Realtime stretch methods: each key a channel's notes play gets the sample stretched at that pitch (the
+        // channel pitch and the stretch's own included), and its notes play that copy as it is.
+        for t in triggers.iter_mut() {
+            let ch = &mut channels[t.channel];
+            let (Some((factor, cents)), Some(s)) = (ch.realtime, ch.sample.clone()) else { continue };
+            let i = match ch.keyed.iter().position(|k| k.0 == t.key) {
+                Some(i) => i,
+                None => {
+                    let transpose = laws::playback_rate(t.key, project.channels[t.channel].pitch_cents) * 2f64.powf(cents / 1200.0);
+                    ch.keyed.push((t.key, library.stretched(&s, stretched_frames(&s, factor), transpose)));
+                    ch.keyed.len() - 1
+                }
+            };
+            t.buf = (i + 1) as u16;
+            t.rate = 1.0;
+        }
 
         // Automation clips (song mode only): each plays its curve onto its target from its start to its end.
         let mut curves = Vec::new();
@@ -814,7 +894,11 @@ impl Engine {
         let (vel, pan) = (laws::velocity_gain(velocity), 0.0);
         let gain = ch.start_gain(vel, pan);
         let serial = ch.serial;
-        let step = laws::playback_rate(key, 0);
+        // A realtime stretch copy made for this key plays as it is.
+        let (buf, step) = match ch.keyed.iter().position(|k| k.0 == key) {
+            Some(i) => ((i + 1) as u16, 1.0),
+            None => (0, laws::playback_rate(key, 0)),
+        };
         self.note_off(channel, key); // retrigger
         self.voices.push(Voice {
             channel,
@@ -834,6 +918,7 @@ impl Engine {
             age: 0,
             off: None,
             shape: None,
+            buf,
         });
         self.sounding.push((channel, key, u64::MAX));
     }
@@ -937,7 +1022,7 @@ impl Engine {
             .filter(|t| t.cut.is_some_and(|c| c > tick))
             .filter_map(|t| {
                 let ch = self.channels.get(t.channel)?;
-                let frames = ch.sample.as_ref()?.frames() as f64;
+                let frames = ch.buffer(t.buf)?.frames() as f64;
                 let since = at - frame(t.tick);
                 let from = t.from + since as f64 * t.rate * ch.base_rate;
                 let total = t.cut.map_or(u64::MAX, |c| frame(c) - frame(t.tick));
@@ -1012,6 +1097,15 @@ impl Engine {
         self.late.retain(|t| t.channel < n);
         self.voices = std::mem::take(&mut old.voices);
         self.voices.retain(|v| v.channel < n);
+        // Voices and late clips playing a realtime stretch copy keep playing that copy.
+        for i in 0..self.voices.len() {
+            let (c, b) = (self.voices[i].channel, self.voices[i].buf);
+            self.voices[i].buf = self.adopt(&old.channels, c, b);
+        }
+        for i in 0..self.late.len() {
+            let (c, b) = (self.late[i].channel, self.late[i].buf);
+            self.late[i].buf = self.adopt(&old.channels, c, b);
+        }
         self.sounding = std::mem::take(&mut old.sounding);
         self.inst_live = std::mem::take(&mut old.inst_live);
         // Notes held at the instruments (mono / polyphony / glide state) carry over.
@@ -1037,6 +1131,17 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// The index (+ 1) in this engine's channel `c` of the copy `buf` that `old`'s channel `c` plays, added when missing.
+    fn adopt(&mut self, old: &[ChannelState], c: usize, buf: u16) -> u16 {
+        let Some(k) = (buf > 0).then(|| old.get(c).and_then(|o| o.keyed.get(usize::from(buf) - 1))).flatten().cloned() else { return 0 };
+        let ch = &mut self.channels[c];
+        let i = ch.keyed.iter().position(|x| Arc::ptr_eq(&x.1, &k.1)).unwrap_or_else(|| {
+            ch.keyed.push(k);
+            ch.keyed.len() - 1
+        });
+        (i + 1) as u16
     }
 
     /// Notes playing at the current position, as (channel index, key).
@@ -1075,7 +1180,7 @@ impl Engine {
                     }
                 }
                 Target::ChannelPitch(c) => {
-                    if let Some(ch) = self.channels.get_mut(usize::from(c)) {
+                    if let Some(ch) = self.channels.get_mut(usize::from(c)).filter(|ch| ch.pitched) {
                         let cents = ((v - 0.5) * 2.0 * AUTO_PITCH_CENTS).round() as i32;
                         ch.base_rate = ch.src_ratio * laws::playback_rate(60, cents);
                     }
@@ -1262,6 +1367,7 @@ impl Engine {
             age: 0,
             off: None,
             shape: t.shape,
+            buf: t.buf,
         });
     }
 
@@ -1510,7 +1616,7 @@ const SINC_W: f64 = 13.5;
 // spec: audio/sampler-playback.md (resampling)
 fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], span: usize, offset: usize, end: usize) -> bool {
     let ch = &channels[v.channel];
-    let Some(s) = ch.sample.as_ref() else { return false };
+    let Some(s) = ch.buffer(v.buf) else { return false };
     let n = s.frames();
     let glide = ch.ramp.filter(|r| v.serial < r.id);
     let target = ch.start_gain(v.vel, v.pan);
@@ -2635,6 +2741,113 @@ mod tests {
             assert!((slow[4 * f] - plain[2 * f]).abs() < 1e-3, "frame {}: {} vs {}", 2 * f, slow[4 * f], plain[2 * f]);
         }
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// A 48 kHz wav of sine parts (Hz, seconds), removed on drop.
+    struct Sines(std::path::PathBuf);
+
+    impl Sines {
+        fn new(name: &str, parts: &[(f64, f64)]) -> Sines {
+            let path = std::env::temp_dir().join(format!("os-engine-{name}-{}.wav", std::process::id()));
+            let mut frames = Vec::new();
+            for &(hz, secs) in parts {
+                for i in 0..(secs * 48000.0) as usize {
+                    let v = (2.0 * std::f64::consts::PI * hz * i as f64 / 48000.0).sin() as f32 * 0.5;
+                    frames.extend_from_slice(&[v, v]);
+                }
+            }
+            crate::wav::write_f32_stereo(&mut std::fs::File::create(&path).unwrap(), 48000, &frames).unwrap();
+            Sines(path)
+        }
+
+        fn path(&self) -> Option<String> {
+            Some(self.0.to_string_lossy().into_owned())
+        }
+    }
+
+    impl Drop for Sines {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// The left channel of interleaved `out` (`rate` Hz) between two times in seconds.
+    fn left(out: &[f32], rate: f64, from: f64, to: f64) -> Vec<f32> {
+        let (a, b) = ((from * rate) as usize, ((to * rate) as usize).min(out.len() / 2));
+        (a..b).map(|i| out[2 * i]).collect()
+    }
+
+    /// Frequency from the rising zero crossings.
+    fn hz(x: &[f32], rate: f64) -> f64 {
+        let ups: Vec<usize> = x.windows(2).enumerate().filter(|(_, w)| w[0] < 0.0 && w[1] >= 0.0).map(|(i, _)| i).collect();
+        assert!(ups.len() > 2, "no tone");
+        (ups.len() - 1) as f64 * rate / (ups[ups.len() - 1] - ups[0]) as f64
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
+    }
+
+    // spec: audio/time-stretch.md "How each method plays"
+    #[test]
+    fn stretch_methods_change_the_length_not_the_pitch() {
+        use os_model::{Clip, ClipSource, stretch_mode};
+        let wav = Sines::new("stretch-len", &[(440.0, 1.0)]);
+        for mode in [stretch_mode::AUTO, stretch_mode::E3_GENERIC, stretch_mode::STRETCH] {
+            let mut p = song(vec![], vec![Clip::new(0, 384 * 2, 0, ClipSource::Channel(0))]);
+            p.channels[0].kind = ChannelKind::AudioClip;
+            p.channels[0].sample_path = wav.path();
+            // Twice as long.
+            p.channels[0].sound.stretch = [0, 0, 10000, mode as u32];
+            let mut lib = SampleLibrary::new(None);
+            let out = Engine::new(&p, &mut lib, 48000, PlayMode::Song).render_all(480);
+            let f = hz(&left(&out, 48000.0, 0.3, 1.7), 48000.0);
+            assert!((f - 440.0).abs() < 2.0, "mode {mode}: {f} Hz");
+            assert!(rms(&left(&out, 48000.0, 1.5, 1.9)) > 0.1, "mode {mode}: still playing after the source's length");
+            assert!(rms(&left(&out, 48000.0, 2.2, 2.6)) < 0.01, "mode {mode}: over after twice its length");
+        }
+    }
+
+    // spec: audio/time-stretch.md "How each method plays" (realtime methods: the key moves the pitch, not the length)
+    #[test]
+    fn realtime_stretch_keeps_the_length_when_the_key_moves() {
+        use os_model::stretch_mode;
+        let wav = Sines::new("stretch-key", &[(440.0, 1.0)]);
+        // An octave up by the key, then by the channel pitch: both play 880 Hz for the whole second.
+        for (key, cents) in [(72u16, 0i32), (60, 1200)] {
+            let mut p = project(vec![Note { key, ..long_note(0, 384, 0) }], vec![]);
+            p.channels[0].sample_path = wav.path();
+            p.channels[0].pitch_cents = cents;
+            p.channels[0].sound.stretch = [0, 0, 0, stretch_mode::STRETCH as u32];
+            let out = render(&p);
+            let f = hz(&left(&out, 44100.0, 0.1, 0.9), 44100.0);
+            assert!((f - 880.0).abs() < 4.0, "key {key} pitch {cents}: {f} Hz");
+            assert!(rms(&left(&out, 44100.0, 0.7, 0.9)) > 0.1, "key {key} pitch {cents}: one second long");
+            assert!(rms(&left(&out, 44100.0, 1.2, 1.4)) < 0.01, "key {key} pitch {cents}: and no longer");
+        }
+        // Plain playback for comparison: the key resamples, half as long.
+        let mut p = project(vec![Note { key: 72, ..long_note(0, 384, 0) }], vec![]);
+        p.channels[0].sample_path = wav.path();
+        let out = render(&p);
+        assert!(rms(&left(&out, 44100.0, 0.6, 0.8)) < 0.01, "resampled: over after half a second");
+    }
+
+    // spec: audio/time-stretch.md "Trims"
+    #[test]
+    fn trims_of_a_stretched_clip_are_source_time() {
+        use os_model::{Clip, ClipSource, stretch_mode};
+        let wav = Sines::new("stretch-trim", &[(440.0, 0.5), (880.0, 0.5)]);
+        let mut clip = Clip::new(0, 384, 0, ClipSource::Channel(0));
+        // Starts half a second into the source: its 880 Hz half, stretched to a second.
+        clip.window = Some((500.0, 1000.0));
+        let mut p = song(vec![], vec![clip]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = wav.path();
+        p.channels[0].sound.stretch = [0, 0, 10000, stretch_mode::AUTO as u32];
+        let mut lib = SampleLibrary::new(None);
+        let out = Engine::new(&p, &mut lib, 48000, PlayMode::Song).render_all(480);
+        let f = hz(&left(&out, 48000.0, 0.1, 0.8), 48000.0);
+        assert!((f - 880.0).abs() < 4.0, "{f} Hz");
     }
 
     // spec: audio/timing.md "Tempo that changes"

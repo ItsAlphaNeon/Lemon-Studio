@@ -6,3 +6,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Time stretching and pitch shifting (MIT).
+signalsmith-stretch = "0.1.3"
