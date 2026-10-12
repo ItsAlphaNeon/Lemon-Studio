@@ -48,6 +48,75 @@ pub struct Project {
     pub time_signature: Option<(u16, u16)>,
     /// "Play truncated notes" (event 30; spec: audio/song-structure.md). `None` = not in the file (off).
     pub play_truncated: Option<bool>,
+    /// Playlist scroll, time zoom and track height (event 242). `None` = not in the file.
+    pub playlist_view: Option<PlaylistView>,
+}
+
+/// The playlist view a project stores: scroll, time zoom and track height (event 242, 28 bytes; spec:
+/// flp/events/playlist.md "Playlist view"). Pixels are FL's at 100 % UI scale.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PlaylistView {
+    pub raw: [u8; 28],
+}
+
+impl PlaylistView {
+    /// Largest track height code: rows are `16 + 2 × h` px, `h` = 0..=132.
+    pub const HEIGHT_MAX: u32 = 132;
+    /// The default track height code (48 px rows).
+    pub const HEIGHT_DEFAULT: u32 = 16;
+
+    /// The template's view at `ppq`: left edge 0, a 4-beat bar 60 px wide, default track height.
+    pub fn new(ppq: u16) -> Self {
+        let mut v = PlaylistView::default();
+        v.set_ticks_per_px(f64::from(ppq) * 4.0 / 60.0);
+        v.set_height(Self::HEIGHT_DEFAULT);
+        v
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        b.try_into().ok().map(|raw| PlaylistView { raw })
+    }
+
+    /// Left edge of the view, ticks.
+    pub fn left(&self) -> f64 {
+        f64::from_le_bytes(self.raw[4..12].try_into().unwrap())
+    }
+
+    pub fn set_left(&mut self, ticks: f64) {
+        self.raw[4..12].copy_from_slice(&ticks.to_le_bytes());
+    }
+
+    /// Time zoom, ticks per pixel.
+    pub fn ticks_per_px(&self) -> f64 {
+        f64::from_le_bytes(self.raw[12..20].try_into().unwrap())
+    }
+
+    pub fn set_ticks_per_px(&mut self, v: f64) {
+        self.raw[12..20].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// Vertical scroll, pixels.
+    pub fn scroll_y(&self) -> u32 {
+        u32::from_le_bytes(self.raw[20..24].try_into().unwrap())
+    }
+
+    pub fn set_scroll_y(&mut self, px: u32) {
+        self.raw[20..24].copy_from_slice(&px.to_le_bytes());
+    }
+
+    /// Track height code `h` (rows are `16 + 2 × h` px).
+    pub fn height(&self) -> u32 {
+        u32::from_le_bytes(self.raw[24..28].try_into().unwrap())
+    }
+
+    pub fn set_height(&mut self, h: u32) {
+        self.raw[24..28].copy_from_slice(&h.min(Self::HEIGHT_MAX).to_le_bytes());
+    }
+
+    /// Track row pitch in pixels.
+    pub fn row_px(&self) -> u32 {
+        16 + 2 * self.height().min(Self::HEIGHT_MAX)
+    }
 }
 
 /// Name of the group of channels that are in no user filter group (spec: flp/events/project-info.md).

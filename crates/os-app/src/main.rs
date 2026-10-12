@@ -402,6 +402,7 @@ impl ApplicationHandler for Shell {
                 self.app.ctrl = self.mods.control_key();
                 self.app.shift = self.mods.shift_key();
                 self.app.alt = self.mods.alt_key();
+                self.app.rshift &= self.app.shift;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 // Locked: turn the offset from the anchor into virtual movement, then warp back.
@@ -516,6 +517,10 @@ impl ApplicationHandler for Shell {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                // Right Shift on its own: the playlist's quick slice (spec: ui/playlist.md §3).
+                if event.physical_key == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ShiftRight) {
+                    self.app.rshift = pressed;
+                }
                 // The typing keyboard plays notes by physical key (spec: ui/typing-keyboard.md).
                 if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
                     if self.app.typing_key(code, pressed, self.mods.control_key(), self.mods.alt_key()) {

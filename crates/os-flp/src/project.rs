@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use os_model::{
     Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
     Envelope, MixerTrack,
-    Note, Pattern, PlaylistTrack, Project, ProjectInfo, Rgb, SlotPlugin, TimeMarker, CLIP_RECORD_LEN,
+    Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SlotPlugin, TimeMarker, CLIP_RECORD_LEN,
 };
 
 use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
@@ -28,6 +28,8 @@ mod id {
     pub const CURRENT_PATTERN: u8 = 67;
     /// Current arrangement number (spec: flp/events/playlist.md).
     pub const CURRENT_ARRANGEMENT: u8 = 100;
+    /// Playlist view: scroll, time zoom, track height (spec: flp/events/playlist.md "Playlist view").
+    pub const PLAYLIST_VIEW: u8 = 242;
 
     pub const CH_START: u8 = 64;
     pub const CH_END: u8 = 51;
@@ -281,6 +283,7 @@ struct Layout {
     url: Option<usize>,
     current_pattern: Option<usize>,
     current_arrangement: Option<usize>,
+    playlist_view: Option<usize>,
     channels: Vec<ChannelLoc>,
     patterns: BTreeMap<u16, PatternLoc>,
     /// Index just past the last pattern metadata block.
@@ -465,6 +468,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 }
             }
             (Region::Arrangements | Region::Mixer, id::CURRENT_ARRANGEMENT) => l.current_arrangement = Some(i),
+            (Region::Arrangements | Region::Mixer, id::PLAYLIST_VIEW) => l.playlist_view = Some(i),
             (Region::Arrangements, id::PL_NAME) => {
                 if let Some(t) = l.arrangements.last_mut().and_then(|a| a.tracks.last_mut()) {
                     t.name = Some(i);
@@ -579,6 +583,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         current_group: l.current_group.map(|i| int(&events[i])).filter(|&v| v != u32::MAX),
         time_signature: l.time_num.zip(l.time_den).map(|(n, d)| (int(&events[n]) as u16, int(&events[d]) as u16)).filter(|&(n, d)| n > 0 && d > 0),
         play_truncated: l.truncated.map(|i| int(&events[i]) != 0),
+        playlist_view: l.playlist_view.and_then(|i| events[i].data()).and_then(PlaylistView::from_bytes),
         ..Default::default()
     };
 
@@ -1795,6 +1800,14 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         // A file without event 100 (an older OpenStudio save) gets it after its last arrangement.
         inserts.push((at, Event::new(id::CURRENT_ARRANGEMENT, Value::U16(n))));
     }
+    // The playlist view (event 242) sits right before event 100, as FL writes it.
+    if let Some(v) = project.playlist_view.filter(|&v| Some(v) != current.playlist_view) {
+        match (l.playlist_view, l.current_arrangement.or(arr_end)) {
+            (Some(i), _) => set_data(&mut events[i], v.raw.to_vec()),
+            (None, Some(at)) => inserts.push((at, Event::new(id::PLAYLIST_VIEW, Value::var(v.raw.to_vec())))),
+            (None, None) => {}
+        }
+    }
     if let Some(at) = arr_end.filter(|_| !skip_arrangements) {
         let added: Vec<Event> = project
             .arrangements
@@ -2451,7 +2464,11 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     for arr in &project.arrangements {
         ev.extend(arrangement_events(arr, enc));
     }
-    // The arrangement shown, right after the last one's tracks as FL writes it (spec: flp/events/playlist.md, event 100).
+    // The playlist view and the arrangement shown, right after the last one's tracks as FL writes them
+    // (spec: flp/events/playlist.md, events 242 and 100).
+    if let Some(v) = project.playlist_view.filter(|_| !project.arrangements.is_empty()) {
+        ev.push(Event::new(id::PLAYLIST_VIEW, Value::var(v.raw.to_vec())));
+    }
     if let Some(n) = project.current_arrangement.filter(|_| !project.arrangements.is_empty()) {
         ev.push(Event::new(id::CURRENT_ARRANGEMENT, Value::U16(n)));
     }
@@ -3085,6 +3102,51 @@ mod tests {
         if let Some(keep) = std::env::var_os("OS_KEEP_FLP") {
             let _ = std::fs::write(keep, file.to_bytes().unwrap());
         }
+    }
+
+    /// The playlist view (event 242: scroll, time zoom, track height) sits before event 100, reads back and takes
+    /// edits; a file without one gets it (spec: flp/events/playlist.md "Playlist view").
+    #[test]
+    fn playlist_view_round_trips() {
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.current_arrangement = Some(0);
+        let mut v = os_model::PlaylistView::new(96);
+        assert_eq!((v.row_px(), v.ticks_per_px(), v.left(), v.scroll_y()), (48, 6.4, 0.0, 0));
+        v.set_height(22);
+        v.set_scroll_y(64);
+        p.playlist_view = Some(v);
+        let file = create(&p).unwrap();
+        let mut file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let ids: Vec<u8> = file.events().map(|e| e.id).collect();
+        let at = ids.iter().position(|&i| i == id::PLAYLIST_VIEW).expect("event 242 written");
+        assert_eq!(ids[at + 1], id::CURRENT_ARRANGEMENT, "242 comes right before 100");
+        let back = load(&file).unwrap();
+        assert_eq!(back.playlist_view, Some(v));
+        assert_eq!(back.playlist_view.unwrap().row_px(), 60);
+
+        let mut edited = back.clone();
+        let mut v2 = v;
+        v2.set_left(768.0);
+        v2.set_ticks_per_px(0.285);
+        v2.set_height(132);
+        edited.playlist_view = Some(v2);
+        apply(&edited, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(again.playlist_view, Some(v2));
+        assert_eq!(again.playlist_view.unwrap().row_px(), 280);
+        assert_eq!(file.events().filter(|e| e.id == id::PLAYLIST_VIEW).count(), 1);
+
+        // A file without event 242 gets one before event 100.
+        let mut bare = p.clone();
+        bare.playlist_view = None;
+        let mut file = FlpFile::parse(&create(&bare).unwrap().to_bytes().unwrap()).unwrap();
+        assert!(file.events().all(|e| e.id != id::PLAYLIST_VIEW));
+        apply(&p, &mut file).unwrap();
+        let ids: Vec<u8> = file.events().map(|e| e.id).collect();
+        let at = ids.iter().position(|&i| i == id::PLAYLIST_VIEW).expect("event 242 added");
+        assert_eq!(ids[at + 1], id::CURRENT_ARRANGEMENT);
+        assert_eq!(load(&file).unwrap().playlist_view, Some(v));
     }
 
     /// Event 223 records: `position, channel << 16 | param, value` (spec: flp/events/patterns.md).

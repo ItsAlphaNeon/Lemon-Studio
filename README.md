@@ -64,7 +64,7 @@ clicking it does nothing.
 |---|:---:|---|
 | Step sequencing and patterns | ✅ | Channel rack with steps, mini piano rolls, swing, per-channel loops |
 | Piano roll note editing | ✅ | Full tool set, velocity and event lanes |
-| Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers, several arrangements; adjustable track height |
+| Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers, several arrangements; track height, zoom and scroll saved with the project |
 | Automation | 🚧 | Automation clips for channel, mixer and plugin parameters; no recording of movements |
 | Mixing and routing | ✅ | Mixer tracks, sends, sidechain, effect slots, meters |
 | Plugin hosting | ✅ | CLAP and VST3 instruments and effects, with their editors and saved state |
