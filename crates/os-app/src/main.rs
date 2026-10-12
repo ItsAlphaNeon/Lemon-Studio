@@ -29,6 +29,7 @@ mod project_plugins;
 mod presets;
 mod misc;
 mod misc_page;
+mod stall;
 mod transport;
 mod views;
 
@@ -74,6 +75,8 @@ struct Shell {
     frame_start: Instant,
     /// `OS_FRAMES=<file>`: one line per frame (see `FrameLog`).
     frames: Option<FrameLog>,
+    /// Wakes the app while a modal loop holds up winit's (see `stall`).
+    watchdog: std::sync::Arc<stall::Watchdog>,
 }
 
 /// Frame timing for tuning (`OS_FRAMES=<file>`): per frame the time, what was repainted (`full` or the number of
@@ -305,6 +308,45 @@ impl Shell {
         let k = window.scale_factor();
         (((x - f64::from(self.inset.0)) / k) as f32, ((y - f64::from(self.inset.1)) / k) as f32)
     }
+
+    /// Ticks the app, asks for a frame when one is due and sets the next wake-up: from `about_to_wait`, or from a
+    /// watchdog wake while a modal loop holds up winit's (`held`, see `stall`).
+    fn step(&mut self, el: &ActiveEventLoop, held: bool) {
+        // Animate while playing; otherwise repaint a few times a second (peaks, clock).
+        let ms = if self.app.animating() { 16 } else { 100 };
+        let now = Instant::now();
+        let mut wake = now + Duration::from_millis(ms);
+        self.pending |= self.app.tick();
+        // Linux: a docked plugin window uncovered part of the main window, which needs presenting again.
+        #[cfg(target_os = "linux")]
+        {
+            self.pending |= crate::plugin_window::exposed();
+        }
+        if let Some(log) = &mut self.frames {
+            let took = now.elapsed().as_secs_f64() * 1000.0;
+            if took > 2.0 {
+                log.line(format_args!("tick {took:.2}"));
+            }
+            if held {
+                log.line(format_args!("held"));
+            }
+        }
+        // winit stops dispatching after each frame and comes back here: asking for the next frame at once would keep
+        // our WM_PAINT pending forever while playing, and the plugin windows would never paint (see `FRAME`).
+        if self.pending {
+            let next = (self.frame_start + FRAME).max(self.painted + IDLE);
+            if now >= next {
+                self.pending = false;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            } else {
+                wake = wake.min(next);
+            }
+        }
+        el.set_control_flow(ControlFlow::WaitUntil(wake));
+        self.watchdog.next(wake, held);
+    }
 }
 
 impl ApplicationHandler for Shell {
@@ -372,42 +414,17 @@ impl ApplicationHandler for Shell {
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16)));
     }
 
-    fn user_event(&mut self, _el: &ActiveEventLoop, _e: ()) {
+    fn user_event(&mut self, el: &ActiveEventLoop, _e: ()) {
         // A wake (see `wake_ui`): `about_to_wait` follows and ticks.
         WAKE_PENDING.store(false, std::sync::atomic::Ordering::Release);
+        // Unless a modal loop (a plugin's menu, a file dialog) holds up winit's: then tick from here (see `stall`).
+        if self.watchdog.take() {
+            self.step(el, true);
+        }
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        // Animate while playing; otherwise repaint a few times a second (peaks, clock).
-        let ms = if self.app.animating() { 16 } else { 100 };
-        let now = Instant::now();
-        let mut wake = now + Duration::from_millis(ms);
-        self.pending |= self.app.tick();
-        // Linux: a docked plugin window uncovered part of the main window, which needs presenting again.
-        #[cfg(target_os = "linux")]
-        {
-            self.pending |= crate::plugin_window::exposed();
-        }
-        if let Some(log) = &mut self.frames {
-            let took = now.elapsed().as_secs_f64() * 1000.0;
-            if took > 2.0 {
-                log.line(format_args!("tick {took:.2}"));
-            }
-        }
-        // winit stops dispatching after each frame and comes back here: asking for the next frame at once would keep
-        // our WM_PAINT pending forever while playing, and the plugin windows would never paint (see `FRAME`).
-        if self.pending {
-            let next = (self.frame_start + FRAME).max(self.painted + IDLE);
-            if now >= next {
-                self.pending = false;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            } else {
-                wake = wake.min(next);
-            }
-        }
-        el.set_control_flow(ControlFlow::WaitUntil(wake));
+        self.step(el, false);
     }
 
     /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor.
@@ -1130,6 +1147,11 @@ fn main() {
     if !app.state.midi_inputs.is_empty() && app.state.message.is_none() {
         app.state.message = Some(format!("MIDI input: {}", app.state.midi_inputs.join(", ")));
     }
+    // Plugin menus and dialogs run modal loops on this thread on Windows (elsewhere Open plugins' editors have threads
+    // of their own).
+    let watchdog = stall::Watchdog::new(stall::LATE);
+    #[cfg(windows)]
+    watchdog.start(wake_ui);
     let mut shell = Shell {
         app,
         window: None,
@@ -1147,6 +1169,7 @@ fn main() {
         painted: Instant::now(),
         frame_start: Instant::now(),
         frames: FrameLog::open(),
+        watchdog,
     };
     event_loop.run_app(&mut shell).expect("run");
 }
