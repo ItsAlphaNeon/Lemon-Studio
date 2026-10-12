@@ -585,9 +585,14 @@ pub fn off_text(name: &str) -> String {
     format!("{name}: not available yet")
 }
 
-/// What is not available off Windows yet: plugin editors live in native Win32 windows so far.
-#[cfg(not(windows))]
-pub const PLUGIN_WINDOWS: &str = if cfg!(target_os = "macos") { "Plugin windows on macOS" } else { "Plugin windows on Linux" };
+/// What is not available where plugin windows are not (`cfg(plugin_windows)`: Windows and Linux so far).
+#[cfg(not(plugin_windows))]
+pub const PLUGIN_WINDOWS: &str = "Plugin windows on this system";
+
+/// The plugin window's menus, preset list and Misc lists are app popups shown above a detached window, which only
+/// Windows does so far.
+#[cfg(all(plugin_windows, not(windows)))]
+const PLUGIN_POPUPS: &str = "Plugin window menus on Linux";
 
 #[derive(Debug, Clone)]
 pub enum Drag {
@@ -834,6 +839,7 @@ pub struct App {
     /// Where the canvas sits in the main window's client area (physical px; the restored window's border).
     pub canvas_off: (i32, i32),
     /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
+    #[cfg_attr(not(windows), allow(dead_code))]
     popup_lift: Option<usize>,
     pub bars: Vec<Bar>,
     pub hover: Option<Action>,
@@ -1443,13 +1449,13 @@ impl App {
             }
             self.invalidate();
         }
-        // Plugin windows are native Win32 windows so far: elsewhere opening one says so.
-        #[cfg(not(windows))]
+        // Without plugin windows opening one says so.
+        #[cfg(not(plugin_windows))]
         if self.state.pending_open.take().is_some_and(|r| self.state.hosted_rows.contains(&r)) {
             self.state.message = Some(off_text(PLUGIN_WINDOWS));
             self.invalidate();
         }
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         if let Some(row) = self.state.pending_open.take().filter(|r| self.state.hosted_rows.contains(r)) {
             if let Some(info) = channel_info(&self.state.project, row) {
                 match self.plugins.open_window(row, info) {
@@ -1463,26 +1469,27 @@ impl App {
         }
         // Plugin housekeeping on every platform (callbacks, parameter flushes, restarts, rate changes); the plugin
         // windows' requests come with it.
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         let requests = {
             let (project, mixer) = (&self.state.project, &self.state.mixer);
             self.plugins.idle(|row| if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) })
         };
-        // No plugin windows elsewhere yet, so no requests.
-        #[cfg(not(windows))]
+        // No plugin windows here, so no requests.
+        #[cfg(not(plugin_windows))]
         self.plugins.idle(|_| None);
+        // Keys pressed while a plugin window has the focus still play the typing keyboard.
         #[cfg(windows)]
-        {
-            // Keys pressed while a plugin window has the focus still play the typing keyboard.
-            for k in crate::plugin_window::take_keys() {
-                use winit::platform::scancode::PhysicalKeyExtScancode;
-                if let winit::keyboard::PhysicalKey::Code(code) = winit::keyboard::PhysicalKey::from_scancode(k.scancode) {
-                    // Space keeps playing / stopping the song (the typing keyboard does not use it).
-                    if !self.typing_key(code, k.pressed, k.ctrl, k.alt) && k.pressed && code == winit::keyboard::KeyCode::Space {
-                        self.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), k.ctrl, k.alt);
-                    }
+        for k in crate::plugin_window::take_keys() {
+            use winit::platform::scancode::PhysicalKeyExtScancode;
+            if let winit::keyboard::PhysicalKey::Code(code) = winit::keyboard::PhysicalKey::from_scancode(k.scancode) {
+                // Space keeps playing / stopping the song (the typing keyboard does not use it).
+                if !self.typing_key(code, k.pressed, k.ctrl, k.alt) && k.pressed && code == winit::keyboard::KeyCode::Space {
+                    self.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), k.ctrl, k.alt);
                 }
             }
+        }
+        #[cfg(plugin_windows)]
+        {
             for r in requests {
                 use crate::plugins::Request;
                 let chans = &mut self.state.project.channels;
@@ -1496,6 +1503,13 @@ impl App {
                         self.state.raise(Win::Hosted(row));
                         continue;
                     }
+                    #[cfg(not(windows))]
+                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) => {
+                        self.state.message = Some(off_text(PLUGIN_POPUPS));
+                        self.invalidate();
+                        continue;
+                    }
+                    #[cfg(windows)]
                     Request::Menu(row, x, y) => {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
@@ -1506,6 +1520,7 @@ impl App {
                         self.invalidate();
                         continue;
                     }
+                    #[cfg(windows)]
                     Request::Presets(row, x, y) => {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
@@ -1522,6 +1537,7 @@ impl App {
                         crate::misc::set(self, row, m, v);
                         continue;
                     }
+                    #[cfg(windows)]
                     Request::MiscMenu(row, m, x, y) => {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
@@ -1603,8 +1619,8 @@ impl App {
     }
 
     /// Docked plugin windows (native children) join `State::z` and are clipped to the workspace minus the drawn
-    /// windows above them and the overlays (spec: ui/plugin-window.md "Docking").
-    #[cfg(windows)]
+    /// windows above them and the overlays (spec: ui/plugin-window.md "Docking"). Detached windows leave `State::z`.
+    #[cfg(plugin_windows)]
     fn clip_docked(&mut self) {
         let docked = self.plugins.docked();
         self.state.z.retain(|w| !matches!(w, Win::Hosted(r) if !docked.contains(r)));
@@ -1932,7 +1948,15 @@ impl App {
 
     /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
-        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading()
+        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading() || self.plugin_windows_busy()
+    }
+
+    /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
+    fn plugin_windows_busy(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return crate::plugin_window::busy();
+        #[cfg(not(target_os = "linux"))]
+        false
     }
 
     /// Periodic housekeeping; returns whether a repaint is needed.
@@ -4902,7 +4926,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
 }
 
 /// What a plugin window's strip shows for rack row `row` (spec: ui/plugin-window.md).
-#[cfg(windows)]
+#[cfg(plugin_windows)]
 fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::ChannelInfo> {
     let ch = p.channels.get(row)?;
     Some(crate::plugin_window::ChannelInfo {

@@ -199,6 +199,7 @@ pub enum Mark {
 pub enum Cmd {
     Nothing,
     /// Plugin window menu > Detached: rack row, new state (spec: ui/plugin-window.md "Docking and the window menu").
+    #[cfg_attr(not(windows), allow(dead_code))]
     PluginDetach(usize, bool),
     NotYet(&'static str),
     Tool(PlTool),
@@ -284,8 +285,10 @@ pub enum Cmd {
     /// Plugin parameter menus (spec: plugins/plugin-parameters.md §5-6).
     Param(crate::params::PCmd),
     /// Plugin presets (spec: plugins/presets.md).
+    #[cfg_attr(not(windows), allow(dead_code))]
     Preset(crate::presets::PCmd),
     /// A Misc tab list entry: rack row, value, new value (spec: ui/plugin-window.md "Misc tab").
+    #[cfg_attr(not(windows), allow(dead_code))]
     Misc(usize, crate::misc_page::M, f32),
     /// Piano roll Tools menu (spec: ui/piano-roll.md §11).
     Piano(crate::piano_tools::NCmd),
@@ -2770,7 +2773,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             crate::misc::set(app, row, m, v);
             return None;
         }
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         Cmd::PluginDetach(row, on) => {
             app.plugins.set_detached(row, on);
             app.state.raise(crate::app::Win::Hosted(row));
@@ -3479,6 +3482,7 @@ pub fn undo_len(s: &State) -> usize {
 
 /// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): FL's entries, only Detached
 /// works yet.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
     let items = vec![
         PItem::not_yet("Piano roll"),

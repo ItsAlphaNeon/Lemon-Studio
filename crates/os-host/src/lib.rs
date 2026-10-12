@@ -11,6 +11,9 @@
 //! A `SharedPlugin` coerces to `os_engine::SharedInstrument` / `SharedEffect` (`plugin.clone() as SharedInstrument`).
 // spec: plugins/plugin-formats.md (hosting inside Lemon Studio), plugins/vst3-hosting.md
 
+#[cfg(unix)]
+pub mod runloop;
+
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};

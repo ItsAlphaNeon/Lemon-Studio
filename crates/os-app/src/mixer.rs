@@ -974,11 +974,11 @@ impl App {
             self.state.message = Some("This slot's plugin is not hosted (no Lemon Studio version of it yet)".into());
             return;
         }
-        #[cfg(not(windows))]
+        #[cfg(not(plugin_windows))]
         {
             self.state.message = Some(crate::app::off_text(crate::app::PLUGIN_WINDOWS));
         }
-        #[cfg(windows)]
+        #[cfg(plugin_windows)]
         {
             let info = fx_info(&self.state.project, &self.state.mixer, key);
             match info.map(|i| self.plugins.open_window(key, i)) {
@@ -991,7 +991,7 @@ impl App {
 }
 
 /// The plugin frame's title for a mixer slot: "Name (Insert N)" / "(Master)" (§7).
-#[cfg(windows)]
+#[cfg(plugin_windows)]
 pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate::plugin_window::ChannelInfo> {
     let (t, k) = crate::plugins::fx_of(key)?;
     let m = p.mixer.iter().find(|m| m.index == t)?;

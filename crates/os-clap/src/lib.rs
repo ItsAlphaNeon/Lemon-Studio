@@ -22,7 +22,7 @@ use clap_sys::events::{
     CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
 };
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
-use clap_sys::ext::gui::{clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11};
+use clap_sys::ext::gui::{clap_host_gui, clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11};
 use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
 use clap_sys::ext::params::{
     clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS,
@@ -235,6 +235,14 @@ struct HostData {
     rescan: AtomicU32,
     /// Parameter ids picked for "Create automation clip" in the plugin's own menus (`context_menu.rs`).
     automate: Mutex<Vec<u32>>,
+    /// The editor asked for this size (`clap_host_gui.request_resize`, device px); applied on the UI tick.
+    resize: Mutex<Option<(u32, u32)>>,
+    /// The plugin, for the run loop's callbacks (set before `init`, which may already register).
+    #[cfg(unix)]
+    plugin: std::sync::atomic::AtomicPtr<clap_plugin>,
+    /// What the plugin registered with the UI run loop (Linux): timer id or descriptor, whether a timer, token.
+    #[cfg(unix)]
+    run: Mutex<Vec<(u32, bool, u64)>>,
 }
 
 static HOST_NAME: &CStr = c"Lemon Studio";
@@ -249,10 +257,124 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
     if id == CLAP_EXT_PARAMS {
         return &HOST_PARAMS as *const clap_host_params as *const c_void;
     }
+    if id == CLAP_EXT_GUI {
+        return &HOST_GUI as *const clap_host_gui as *const c_void;
+    }
     if id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU || id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU_COMPAT {
         return &context_menu::HOST_CONTEXT_MENU as *const clap_sys::ext::context_menu::clap_host_context_menu as *const c_void;
     }
+    #[cfg(unix)]
+    if let Some(ext) = run_loop::extension(id) {
+        return ext;
+    }
     ptr::null()
+}
+
+/// Linux: plugin editors have no message loop of their own; they register timers and descriptors (their X11
+/// connection) with the host (`timer-support`, `posix-fd-support`) and get the callbacks on the UI thread through
+/// `os_host::runloop`.
+#[cfg(unix)]
+mod run_loop {
+    use super::*;
+    use clap_sys::ext::posix_fd_support::{clap_host_posix_fd_support, clap_plugin_posix_fd_support, clap_posix_fd_flags, CLAP_EXT_POSIX_FD_SUPPORT};
+    use clap_sys::ext::timer_support::{clap_host_timer_support, clap_plugin_timer_support, CLAP_EXT_TIMER_SUPPORT};
+    use clap_sys::id::clap_id;
+    use os_host::runloop;
+
+    pub(super) fn extension(id: &CStr) -> Option<*const c_void> {
+        if id == CLAP_EXT_TIMER_SUPPORT {
+            return Some(&HOST_TIMER as *const clap_host_timer_support as *const c_void);
+        }
+        if id == CLAP_EXT_POSIX_FD_SUPPORT {
+            return Some(&HOST_POSIX_FD as *const clap_host_posix_fd_support as *const c_void);
+        }
+        None
+    }
+
+    static HOST_TIMER: clap_host_timer_support = clap_host_timer_support { register_timer: Some(register_timer), unregister_timer: Some(unregister_timer) };
+    static HOST_POSIX_FD: clap_host_posix_fd_support =
+        clap_host_posix_fd_support { register_fd: Some(register_fd), modify_fd: Some(modify_fd), unregister_fd: Some(unregister_fd) };
+
+    /// Timer ids the host hands out.
+    static NEXT_TIMER: AtomicU32 = AtomicU32::new(1);
+
+    unsafe fn data<'a>(host: *const clap_host) -> &'a HostData {
+        unsafe { &*((*host).host_data as *const HostData) }
+    }
+
+    /// The plugin and its extension `id`, once it is created.
+    unsafe fn plugin_ext<T>(d: &HostData, id: &CStr) -> Option<(*const clap_plugin, *const T)> {
+        let plugin = d.plugin.load(Ordering::Acquire) as *const clap_plugin;
+        if plugin.is_null() {
+            return None;
+        }
+        let ext = unsafe { (*plugin).get_extension.map_or(ptr::null(), |g| g(plugin, id.as_ptr())) } as *const T;
+        (!ext.is_null()).then_some((plugin, ext))
+    }
+
+    unsafe extern "C" fn register_timer(host: *const clap_host, period_ms: u32, timer_id: *mut clap_id) -> bool {
+        let d = unsafe { data(host) };
+        let Some((plugin, ext)) = (unsafe { plugin_ext::<clap_plugin_timer_support>(d, CLAP_EXT_TIMER_SUPPORT) }) else { return false };
+        let Some(on_timer) = (unsafe { (*ext).on_timer }) else { return false };
+        if timer_id.is_null() {
+            return false;
+        }
+        let id = NEXT_TIMER.fetch_add(1, Ordering::Relaxed);
+        let token = runloop::add_timer(std::time::Duration::from_millis(u64::from(period_ms)), move || unsafe { on_timer(plugin, id) });
+        if let Ok(mut r) = d.run.lock() {
+            r.push((id, true, token));
+        }
+        unsafe { *timer_id = id };
+        true
+    }
+
+    unsafe extern "C" fn unregister_timer(host: *const clap_host, timer_id: clap_id) -> bool {
+        remove(unsafe { data(host) }, timer_id, true)
+    }
+
+    unsafe extern "C" fn register_fd(host: *const clap_host, fd: i32, flags: clap_posix_fd_flags) -> bool {
+        let d = unsafe { data(host) };
+        let Some((plugin, ext)) = (unsafe { plugin_ext::<clap_plugin_posix_fd_support>(d, CLAP_EXT_POSIX_FD_SUPPORT) }) else { return false };
+        let Some(on_fd) = (unsafe { (*ext).on_fd }) else { return false };
+        // The run loop's flags are CLAP's.
+        let token = runloop::add_fd(fd, flags, move |fd, got| unsafe { on_fd(plugin, fd, got) });
+        if let Ok(mut r) = d.run.lock() {
+            r.push((fd as u32, false, token));
+        }
+        true
+    }
+
+    unsafe extern "C" fn modify_fd(host: *const clap_host, fd: i32, flags: clap_posix_fd_flags) -> bool {
+        let d = unsafe { data(host) };
+        let Ok(r) = d.run.lock() else { return false };
+        r.iter().find(|e| e.0 == fd as u32 && !e.1).is_some_and(|e| runloop::modify_fd(e.2, flags))
+    }
+
+    unsafe extern "C" fn unregister_fd(host: *const clap_host, fd: i32) -> bool {
+        remove(unsafe { data(host) }, fd as u32, false)
+    }
+
+    fn remove(d: &HostData, key: u32, timer: bool) -> bool {
+        let Ok(mut r) = d.run.lock() else { return false };
+        let before = r.len();
+        r.retain(|&(k, t, token)| {
+            let hit = k == key && t == timer;
+            if hit {
+                runloop::remove(token);
+            }
+            !hit
+        });
+        before != r.len()
+    }
+
+    /// Removes whatever the plugin left registered (after it was destroyed: its callbacks must never run again).
+    pub(super) fn clear(d: &HostData) {
+        if let Ok(mut r) = d.run.lock() {
+            for (_, _, token) in r.drain(..) {
+                runloop::remove(token);
+            }
+        }
+    }
 }
 unsafe extern "C" fn host_params_rescan(host: *const clap_host, flags: u32) {
     unsafe { (*((*host).host_data as *const HostData)).rescan.fetch_or(flags, Ordering::AcqRel) };
@@ -263,6 +385,27 @@ unsafe extern "C" fn host_params_request_flush(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).flush.store(true, Ordering::Release) };
     wake();
 }
+/// The editor's requests to the host window. A resize is applied on the UI tick (`Plugin::idle`): the plugin gets its
+/// size and the frame follows `editor_size`. The editor is always embedded, so show / hide / closed do not apply.
+static HOST_GUI: clap_host_gui = clap_host_gui {
+    resize_hints_changed: Some(host_gui_hints),
+    request_resize: Some(host_gui_request_resize),
+    request_show: Some(host_gui_show_hide),
+    request_hide: Some(host_gui_show_hide),
+    closed: Some(host_gui_closed),
+};
+unsafe extern "C" fn host_gui_hints(_host: *const clap_host) {}
+unsafe extern "C" fn host_gui_request_resize(host: *const clap_host, width: u32, height: u32) -> bool {
+    if let Ok(mut r) = unsafe { (*((*host).host_data as *const HostData)).resize.lock() } {
+        *r = Some((width, height));
+    }
+    wake();
+    true
+}
+unsafe extern "C" fn host_gui_show_hide(_host: *const clap_host) -> bool {
+    false
+}
+unsafe extern "C" fn host_gui_closed(_host: *const clap_host, _was_destroyed: bool) {}
 static HOST_PARAMS: clap_host_params =
     clap_host_params { rescan: Some(host_params_rescan), clear: Some(host_params_clear), request_flush: Some(host_params_request_flush) };
 unsafe extern "C" fn host_request_restart(host: *const clap_host) {
@@ -423,6 +566,11 @@ impl Plugin {
             flush: AtomicBool::new(false),
             rescan: AtomicU32::new(0),
             automate: Mutex::new(Vec::new()),
+            resize: Mutex::new(None),
+            #[cfg(unix)]
+            plugin: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
+            #[cfg(unix)]
+            run: Mutex::new(Vec::new()),
         });
         let host = Box::new(clap_host {
             clap_version: CLAP_VERSION,
@@ -443,10 +591,14 @@ impl Plugin {
             if plugin.is_null() {
                 return Err(format!("{}: could not create {id}", lib.path.display()));
             }
+            #[cfg(unix)]
+            host_data.plugin.store(plugin as *mut clap_plugin, Ordering::Release);
             if !(*plugin).init.is_some_and(|i| i(plugin)) {
                 if let Some(d) = (*plugin).destroy {
                     d(plugin);
                 }
+                #[cfg(unix)]
+                run_loop::clear(&host_data);
                 return Err(format!("{id}: init failed"));
             }
             let ext = |name: &CStr| (*plugin).get_extension.map_or(ptr::null(), |g| g(plugin, name.as_ptr()));
@@ -633,6 +785,16 @@ impl Plugin {
                 if let Some(f) = (*self.plugin).on_main_thread {
                     f(self.plugin);
                 }
+            }
+        }
+        // The editor asked for a new size: it gets it (its own adjustment wins), and the frame follows `editor_size`.
+        let resize = self.host_data.resize.lock().ok().and_then(|mut r| r.take());
+        if let (Some((w, h)), true) = (resize, self.editor) {
+            unsafe {
+                let g = &*self.gui;
+                let (mut w, mut h) = (w, h);
+                g.adjust_size.map(|f| f(self.plugin, &mut w, &mut h));
+                g.set_size.map(|f| f(self.plugin, w, h));
             }
         }
         self.idle_params();
@@ -1209,6 +1371,8 @@ impl Drop for Plugin {
                 d(self.plugin);
             }
         }
+        #[cfg(unix)]
+        run_loop::clear(&self.host_data);
     }
 }
 

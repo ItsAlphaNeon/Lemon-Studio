@@ -931,6 +931,7 @@ impl Plugin {
                 v.set_frame(std::ptr::null_mut());
             }
         }
+        self.frame.get().clear_run_loop();
         self.editor = false;
     }
 

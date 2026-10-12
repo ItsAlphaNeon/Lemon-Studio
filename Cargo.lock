@@ -2223,6 +2223,7 @@ dependencies = [
  "tiny-skia",
  "windows-sys 0.61.2",
  "winit",
+ "x11rb",
 ]
 
 [[package]]
@@ -2265,6 +2266,7 @@ dependencies = [
 name = "os-host"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "libloading 0.8.9",
  "os-engine",
 ]

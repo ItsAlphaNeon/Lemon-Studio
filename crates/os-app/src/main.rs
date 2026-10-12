@@ -2,7 +2,7 @@
 
 // Plugin windows are Win32 windows so far (`plugin_window`): elsewhere what only they reach (the Misc tab, the window
 // and preset menus, their requests) is built but unused. The Windows build still reports real dead code.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(not(plugin_windows), allow(dead_code))]
 
 mod app;
 mod browser;
@@ -22,7 +22,7 @@ mod piano_tools;
 mod rack;
 mod patterns;
 mod playlist;
-#[cfg(windows)]
+#[cfg(plugin_windows)]
 mod plugin_window;
 mod plugins;
 mod project_plugins;
@@ -356,6 +356,16 @@ impl ApplicationHandler for Shell {
                 }
             }
         }
+        // Under X11 the plugin windows are transient for the main window (under Wayland they cannot be).
+        #[cfg(target_os = "linux")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            match window.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Xlib(h)) => self.app.plugins.owner = h.window as isize,
+                Ok(RawWindowHandle::Xcb(h)) => self.app.plugins.owner = h.window.get() as isize,
+                _ => {}
+            }
+        }
         self.app.plugins.scale = window.scale_factor() as f32;
         self.app.scan_plugins();
         self.window = Some(window);
@@ -583,10 +593,15 @@ impl ApplicationHandler for Shell {
                 window.request_redraw();
             }
             WindowEvent::HoveredFile(_) => {}
-            WindowEvent::Focused(false) => {
-                self.grab = None;
-                self.app.typing_release_all();
-                window.request_redraw();
+            WindowEvent::Focused(focused) => {
+                // Linux: plugin windows stay above the main window while Lemon Studio is the active application.
+                #[cfg(target_os = "linux")]
+                crate::plugin_window::main_focused(focused);
+                if !focused {
+                    self.grab = None;
+                    self.app.typing_release_all();
+                    window.request_redraw();
+                }
             }
             // Windows display scale changed, or the window moved to a monitor with another DPI: the canvas follows at
             // the next paint; docked plugin windows are redrawn at the new scale (spec: ui/ui-scaling.md §3).
@@ -746,15 +761,23 @@ impl ApplicationHandler for Shell {
 #[cfg(all(unix, not(target_os = "macos")))]
 const APP_ID: &str = "lemonstudio";
 
-/// The window icon (X11 shows it; Wayland takes the desktop entry's): `assets/lemonstudio.png`, 256 px.
+/// The app icon as RGBA bytes, width and height: `assets/lemonstudio.png`, 256 px (X11 windows show it; Wayland takes the
+/// desktop entry's).
 #[cfg(all(unix, not(target_os = "macos")))]
-fn linux_icon() -> Option<winit::window::Icon> {
+pub(crate) fn icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
     let png = tiny_skia::Pixmap::decode_png(include_bytes!("../assets/lemonstudio.png")).ok()?;
     let rgba = png.pixels().iter().flat_map(|p| {
         let c = p.demultiply();
         [c.red(), c.green(), c.blue(), c.alpha()]
     });
-    winit::window::Icon::from_rgba(rgba.collect(), png.width(), png.height()).ok()
+    Some((rgba.collect(), png.width(), png.height()))
+}
+
+/// The main window's icon.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_icon() -> Option<winit::window::Icon> {
+    let (rgba, w, h) = icon_rgba()?;
+    winit::window::Icon::from_rgba(rgba, w, h).ok()
 }
 
 /// `lemonstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-menu] [--browser-search TEXT] [--browser-folder DIR[|SUB]] [project.flp]`:
