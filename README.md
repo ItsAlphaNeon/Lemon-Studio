@@ -49,6 +49,8 @@ losslessly, so existing projects open, play and save without losing data it does
 >   nothing so far; they are drawn dim and say "not available yet".
 > - **No prebuilt binaries** will be published until Lemon Studio reaches a usable state. Until then it
 >   can only be built from source.
+> - **Only projects saved by the latest FL Studio 26 open for now.** Projects from older FL Studio versions
+>   are not supported yet; support for them is on the roadmap.
 > - **Project-file support is at a very early stage.** Do not overwrite your original `.flp` projects
 >   with files saved by Lemon Studio until this support is declared stable. Work on copies and keep backups.
 > - **Support is not available yet**, and issue reports will not be tracked until a later stage of
@@ -70,7 +72,7 @@ clicking it does nothing.
 | Plugin hosting | ✅ | CLAP and VST3 instruments and effects, with their editors and saved state |
 | Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ so far |
 | Exporting audio | 🚧 | Song or pattern to a WAV file (32-bit float); no MP3 or FLAC yet |
-| Project files | 🚧 | Opens and saves `.flp` projects; early, always keep backups |
+| Project files | 🚧 | Opens and saves `.flp` projects from the latest FL Studio 26 only (older versions are on the roadmap); early, always keep backups |
 | Undo | 🚧 | Per editor (piano roll, playlist); no redo or global history |
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers (notes play the selected channel); no note recording yet |
 | Audio recording | ❌ | Not available yet |
@@ -167,8 +169,8 @@ Lemon Studio is a Cargo workspace of focused crates:
 
 The roadmap is kept on the [Lemon Studio Discord server](https://discord.gg/yC2uCuGs3M), where every item is
 marked as complete, in progress or not started. The broad next steps are the engine rework (sampler voice,
-automation, delay compensation), audio and note recording, MIDI settings, ASIO output, more built-in instruments
-and effects, and Linux and macOS support.
+automation, delay compensation), opening projects from older FL Studio versions, audio and note recording, MIDI
+settings, ASIO output, more built-in instruments and effects, and Linux and macOS support.
 
 ## Development approach
 
