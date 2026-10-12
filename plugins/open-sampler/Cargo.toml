@@ -1,6 +1,6 @@
 [package]
 name = "open-sampler"
-description = "Open Sampler: OpenStudio's sampler instrument as a VST3 / CLAP plugin"
+description = "Open Sampler: Lemon Studio's sampler instrument as a VST3 / CLAP plugin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ license.workspace = true
 crate-type = ["cdylib", "lib"]
 
 [features]
-# Compiled into OpenStudio: no exported plugin entry points (they would clash with the other built-in plugins).
+# Compiled into Lemon Studio: no exported plugin entry points (they would clash with the other built-in plugins).
 linked = []
 
 [dependencies]

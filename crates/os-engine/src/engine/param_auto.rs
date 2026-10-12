@@ -8,7 +8,7 @@ use os_model::target::Target;
 
 use super::{Engine, Fx, FxSlot};
 
-/// Frames between two samples of a parameter curve (an OpenStudio choice).
+/// Frames between two samples of a parameter curve (a Lemon Studio choice).
 pub const PARAM_STEP: usize = 64;
 
 /// Where a parameter event goes.

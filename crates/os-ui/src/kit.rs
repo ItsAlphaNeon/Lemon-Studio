@@ -1,4 +1,4 @@
-//! OpenStudio's widget kit: every control the app and Open plugins draw, in one place.
+//! Lemon Studio's widget kit: every control the app and Open plugins draw, in one place.
 //!
 //! Widgets are pure painters: `kit::<widget>(canvas, &palette, rect/centre, value, State)`. Hit-testing and actions
 //! stay with the caller (immediate mode). All colours come from the theme palette (named tokens or the role

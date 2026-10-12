@@ -1,7 +1,7 @@
-//! `.flstheme` import: parse the file and turn it into an OpenStudio palette.
+//! `.flstheme` import: parse the file and turn it into a Lemon Studio palette.
 // spec: ui/flstheme.md
 //
-// OpenStudio's default palette is the measured look of the stock "Dark" theme (spec §5). Importing a theme maps
+// Lemon Studio's default palette is the measured look of the stock "Dark" theme (spec §5). Importing a theme maps
 // every surface token back to the base look (inverse of the Dark adjustment) and then forward through the
 // theme's own adjustment (§4). Tokens that the file colours directly (accent, highlight, text, LEDs, steps,
 // grids) are re-keyed from the default key colour to the theme's (same hue / saturation / lightness offset).
@@ -17,7 +17,7 @@ pub struct Surface {
     pub contrast: f32,
 }
 
-/// The stock "Dark" theme: OpenStudio's default palette was measured in it.
+/// The stock "Dark" theme: Lemon Studio's default palette was measured in it.
 pub const DARK: Surface = Surface { hue: 0.0, saturation: 0.0, lightness: -153.0, contrast: -8.0 };
 
 impl Surface {
@@ -150,7 +150,7 @@ impl FlTheme {
         }
     }
 
-    /// The stock Dark theme's key colours (what OpenStudio's default palette was measured with).
+    /// The stock Dark theme's key colours (what Lemon Studio's default palette was measured with).
     pub fn dark() -> FlTheme {
         FlTheme::parse(
             "Hue=0\nSaturation=0\nLightness=-153\nContrast=-8\nText=0\nSelected=11068490\nHighlight=-12283141\n\
@@ -213,7 +213,7 @@ pub fn shift(c: Color, from: Color, to: Color) -> Color {
     Color::from_hsl_pub(h2, s2.clamp(0.0, 1.0), (l + lt - lf).clamp(0.0, 1.0), c.a)
 }
 
-/// Mapping from OpenStudio's measured default colours to a theme, per role. Default = identity.
+/// Mapping from Lemon Studio's measured default colours to a theme, per role. Default = identity.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Xform {
     /// Surface adjustment of the theme (`None` = the stock Dark look).

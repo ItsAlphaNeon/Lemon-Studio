@@ -1,6 +1,6 @@
 //! Designs: complete looks (colours and shapes) over the same layout.
 //!
-//! `Classic` is the measured default look. `Lemon` is OpenStudio's own look: neutral greys, one lemon-yellow brand
+//! `Classic` is the measured default look. `Lemon` is Lemon Studio's own look: neutral greys, one lemon-yellow brand
 //! colour and rounded-square controls (knobs stay round). It re-colours every token and every role-mapped literal
 //! (`Palette::s/a/h/tx/led`) through a `DesignMap` (a neutral lightness ramp plus key colours), sets the tokens the
 //! map can't get right outright, and tells the widget kit which shape language to draw (`Style`).
@@ -15,7 +15,7 @@ pub enum Design {
     /// The measured default look.
     #[default]
     Classic,
-    /// OpenStudio's own look: lemon on neutral greys, rounded squares.
+    /// Lemon Studio's own look: lemon on neutral greys, rounded squares.
     Lemon,
 }
 

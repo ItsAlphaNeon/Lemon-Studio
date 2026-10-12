@@ -1,4 +1,4 @@
-//! VST 3 plugin hosting: loads `.vst3` modules, lists their audio classes and runs instances behind OpenStudio's
+//! VST 3 plugin hosting: loads `.vst3` modules, lists their audio classes and runs instances behind Lemon Studio's
 //! format-neutral hosting layer (`os_host::Library` / `os_host::Plugin`), like `os-clap` does for CLAP.
 //!
 //! Only the documented VST 3 interfaces are used (bindings: `vst3-sys`). Threading follows `os_host`: the UI thread

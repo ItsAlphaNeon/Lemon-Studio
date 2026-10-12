@@ -1,8 +1,8 @@
-//! OpenStudio audio engine.
+//! Lemon Studio audio engine.
 //!
 //! - [`sample`]: decoding and resolving sample files.
 //! - [`laws`]: gain, pan and pitch laws measured from FL Studio.
-//! - [`effects`]: OpenStudio's mixer-slot effects (EQ, limiter).
+//! - [`effects`]: Lemon Studio's mixer-slot effects (EQ, limiter).
 //! - [`clock`]: the sequencer's tick clock (ticks to samples).
 //! - [`engine`]: tick-based playback of patterns and the playlist through the mixer.
 //! - [`wav`]: writing renders to disk.

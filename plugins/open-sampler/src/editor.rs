@@ -74,14 +74,14 @@ impl Editor for SamplerEditor {
     }
 }
 
-/// The palette OpenStudio uses: the remembered `.flstheme` (`%APPDATA%/OpenStudio/current.flstheme`, spec
+/// The palette Lemon Studio uses: the remembered `.flstheme` (`%APPDATA%/Lemon Studio/current.flstheme`, spec
 /// ui/flstheme.md), else the default one. The plugin runs in its own module, so it reads the theme itself.
 pub fn palette() -> Palette {
     if cfg!(test) {
         return Palette::default();
     }
     std::env::var_os("APPDATA")
-        .map(|d| PathBuf::from(d).join("OpenStudio").join("current.flstheme"))
+        .map(|d| PathBuf::from(d).join("Lemon Studio").join("current.flstheme"))
         .and_then(|p| std::fs::read(p).ok())
         .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
         .unwrap_or_default()
@@ -644,7 +644,7 @@ impl Logic {
             Target::Knob(id) => vec![Act::Menu(MenuReq::Knob(id), x, y)],
             Target::Slider(id, _) => vec![Act::Menu(MenuReq::Knob(id), x, y)],
             Target::List(id) => {
-                // Steps back through the list (OpenStudio choice).
+                // Steps back through the list (Lemon Studio choice).
                 let n = self.vals.plain(&id) as i32;
                 let max = list_labels(&id).len() as i32;
                 self.edit_plain(&id, ((n - 1).rem_euclid(max)) as f32);
@@ -663,7 +663,7 @@ impl Logic {
         }
     }
 
-    /// Velocity from the click height on a key: 64 at the middle (OpenStudio choice), louder towards the bottom.
+    /// Velocity from the click height on a key: 64 at the middle (Lemon Studio choice), louder towards the bottom.
     fn key_velocity(&self, y: f32) -> u8 {
         let (_, kt, _, kb, _, _) = view::key_rows();
         let (kt, kb) = if self.view.hand { (view::y(365.0), view::y(454.0)) } else { (kt, kb) };
@@ -1011,7 +1011,7 @@ impl Logic {
             }
             m.subs.push((i, s));
         }
-        // Automation and remote control belong to the host: shown; "Create automation clip" goes to OpenStudio (host link).
+        // Automation and remote control belong to the host: shown; "Create automation clip" goes to Lemon Studio (host link).
         m.head("Automation");
         for l in ["Edit events", "Edit events in new window", "Edit events in piano roll", "Init song with this position", "Delete initial value"] {
             m.add(MenuItem::item(l).enabled(false), Cmd::None);
@@ -1160,7 +1160,7 @@ fn env_point_ids(p: &str, i: u8) -> Vec<String> {
     }
 }
 
-/// Recently loaded samples (newest first), `%APPDATA%/OpenStudio/sampler-history.txt`.
+/// Recently loaded samples (newest first), `%APPDATA%/Lemon Studio/sampler-history.txt`.
 pub fn history() -> Vec<String> {
     history_file().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()).unwrap_or_default()
 }
@@ -1169,7 +1169,7 @@ fn history_file() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio").join("sampler-history.txt"))
+    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio").join("sampler-history.txt"))
 }
 
 pub fn remember(path: &str) {
@@ -1217,7 +1217,7 @@ pub fn wav_bytes(s: &os_engine::Sample, float: bool) -> Vec<u8> {
 
 /// Where pasted audio is kept so the plugin state can name it.
 pub fn paste_path() -> Option<PathBuf> {
-    let d = PathBuf::from(std::env::var_os("APPDATA")?).join("OpenStudio").join("samples");
+    let d = PathBuf::from(std::env::var_os("APPDATA")?).join("Lemon Studio").join("samples");
     std::fs::create_dir_all(&d).ok()?;
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     Some(d.join(format!("Pasted audio {t}.wav")))
@@ -1330,7 +1330,7 @@ mod win32 {
         s.encode_utf16().chain(Some(0)).collect()
     }
 
-    /// One class per DLL instance: the name carries this module's address so two OpenStudio plugins never share it.
+    /// One class per DLL instance: the name carries this module's address so two Lemon Studio plugins never share it.
     fn class_name(kind: &str) -> Vec<u16> {
         wide(&format!("OpenSampler{kind}{:x}", wndproc as *const () as usize))
     }

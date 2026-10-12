@@ -332,7 +332,7 @@ fn new_pattern_file() {
     for k in 1..=2u16 {
         project.patterns.push(Pattern {
             number: max + k,
-            name: Some(format!("OpenStudio {k}")),
+            name: Some(format!("Lemon Studio {k}")),
             color: Some(Rgb::new(200, 60 * k as u8, 40)),
             notes: (0..4).map(|s| Note { key: 60 + 4 * s as u16 * k, length: 48, ..Note::step(0, s * 96) }).collect(),
             controls: vec![ControlPoint::new(0, 0, ControlPoint::VOLUME, 6400)],

@@ -1,4 +1,4 @@
-//! The spectrum behind the curves (OpenStudio design; the original's look was not captured): an FFT of the monitored
+//! The spectrum behind the curves (Lemon Studio design; the original's look was not captured): an FFT of the monitored
 //! signal mapped to the graph's columns, tilted by the pivot slope and smoothed over time.
 //!
 // spec: plugins/open-parametric-eq-2.md §2 "Spectrum"

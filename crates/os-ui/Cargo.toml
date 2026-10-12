@@ -1,6 +1,6 @@
 [package]
 name = "os-ui"
-description = "OpenStudio painting primitives: shapes and text on a CPU canvas"
+description = "Lemon Studio painting primitives: shapes and text on a CPU canvas"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

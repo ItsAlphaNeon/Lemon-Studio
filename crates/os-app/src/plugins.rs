@@ -89,11 +89,11 @@ pub struct Plugins {
 }
 
 /// Folders searched for plugin files: a format's standard folders (`standard`), then `bundled/` next to the build
-/// folders of this workspace (where `cargo run -p bundle-plugins` puts OpenStudio's own plugins).
+/// folders of this workspace (where `cargo run -p bundle-plugins` puts Lemon Studio's own plugins).
 fn search_dirs(standard: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut dirs = standard;
     if let Ok(exe) = std::env::current_exe() {
-        // target*/release/openstudio.exe -> target*/bundled, and the sibling build folders.
+        // target*/release/lemonstudio.exe -> target*/bundled, and the sibling build folders.
         if let Some(target) = exe.parent().and_then(|p| p.parent()) {
             dirs.push(target.join("bundled"));
             if let Some(ws) = target.parent() {
@@ -107,7 +107,7 @@ fn search_dirs(standard: Vec<PathBuf>) -> Vec<PathBuf> {
     dirs
 }
 
-/// Open Sampler compiled into OpenStudio and hosted through its own CLAP entry, so sampler channels never depend on
+/// Open Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
 /// finding a `.clap` file (spec: plugins/open-sampler.md §7); Open 3x Osc likewise (spec: plugins/open-3x-osc.md §6).
 pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
@@ -517,7 +517,7 @@ impl Plugins {
         *link = match p.open_editor(w.area(), scale) {
             Ok(size) => fit_editor(w, size, scale),
             Err(e) => {
-                eprintln!("openstudio: plugin editor at the new scale: {e}");
+                eprintln!("lemonstudio: plugin editor at the new scale: {e}");
                 None
             }
         };
@@ -705,9 +705,9 @@ impl Drop for Hosted {
     }
 }
 
-/// Name of OpenStudio's sampler plugin: it plays and edits every sampler channel (spec: plugins/open-sampler.md §7).
+/// Name of Lemon Studio's sampler plugin: it plays and edits every sampler channel (spec: plugins/open-sampler.md §7).
 pub const OPEN_SAMPLER: &str = "Open Sampler";
-/// Name of OpenStudio's parametric EQ plugin.
+/// Name of Lemon Studio's parametric EQ plugin.
 pub const OPEN_EQ: &str = "Open Parametric EQ 2";
 /// The plugin name a project file stores for the parametric EQ (file-format identifier, kept for interop): slots
 /// with it are played by Open Parametric EQ 2 (spec: plugins/open-parametric-eq-2.md §8).
@@ -956,7 +956,7 @@ mod tests {
     }
 
     /// Plugin editors draw at the window's DPI scale and follow a scale change (spec: ui/ui-scaling.md §3). Opens real
-    /// windows: `cargo test -p os-app --bin openstudio plugin_editors_follow_the_scale -- --ignored`.
+    /// windows: `cargo test -p os-app --bin lemonstudio plugin_editors_follow_the_scale -- --ignored`.
     #[test]
     #[ignore]
     fn plugin_editors_follow_the_scale() {
@@ -1019,7 +1019,7 @@ mod tests {
 
     /// The built-in Open Parametric EQ 2 in a mixer slot window: the frame without a strip, the editor inside it, and a
     /// click on a band's switch reaching the plugin state.
-    /// `OS_SHOT_DIR=.. cargo test -p os-app --bin openstudio eq_window_shots -- --ignored`
+    /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio eq_window_shots -- --ignored`
     #[test]
     #[ignore]
     fn eq_window_shots() {
@@ -1046,7 +1046,7 @@ mod tests {
     }
 
     /// Open 3x Osc in its window: a wheel turn on a knob changes the plugin's value AND the picture (spec:
-    /// plugins/open-3x-osc.md §5). `OS_SHOT_DIR=.. cargo test -p os-app --bin openstudio osc3_window_redraws -- --ignored`
+    /// plugins/open-3x-osc.md §5). `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio osc3_window_redraws -- --ignored`
     #[test]
     #[ignore]
     fn osc3_window_redraws() {
@@ -1766,8 +1766,8 @@ mod tests {
         assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Open Parametric EQ 2"));
     }
 
-    /// VST3 editors inside OpenStudio's plugin frame, moved off every screen and captured with PrintWindow:
-    /// `OS_SHOT_DIR=<dir> cargo test -p os-app --bin openstudio vst3_window_shots -- --ignored`.
+    /// VST3 editors inside Lemon Studio's plugin frame, moved off every screen and captured with PrintWindow:
+    /// `OS_SHOT_DIR=<dir> cargo test -p os-app --bin lemonstudio vst3_window_shots -- --ignored`.
     #[test]
     #[ignore]
     fn vst3_window_shots() {
@@ -1803,9 +1803,9 @@ mod tests {
         }
     }
 
-    /// The user's installed FL native effects show their own editors inside OpenStudio's plugin frame (spec
+    /// The user's installed FL native effects show their own editors inside Lemon Studio's plugin frame (spec
     /// plugins/fruity-abi.md, "Editors"): frame moved off every screen, captured with PrintWindow, closed and opened
-    /// again. Loads FL DLLs in-process, so ignored: `OS_SHOT_DIR=<dir> cargo test -p os-app --bin openstudio
+    /// again. Loads FL DLLs in-process, so ignored: `OS_SHOT_DIR=<dir> cargo test -p os-app --bin lemonstudio
     /// native_window_shots -- --ignored` (shots only when OS_SHOT_DIR is set). Skips without FL.
     #[test]
     #[ignore]

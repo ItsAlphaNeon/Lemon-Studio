@@ -1,4 +1,4 @@
-//! Toolbar and window-button icons, and the OpenStudio logo. Placeholders taken from Tabler Icons (MIT, see `tabler.rs`);
+//! Toolbar and window-button icons, and the Lemon Studio logo. Placeholders taken from Tabler Icons (MIT, see `tabler.rs`);
 //! each only suggests its function (no artwork is copied from any other program).
 
 use os_ui::{Canvas, Color, Glyph, Rect};
@@ -149,7 +149,7 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect, c: Color) {
     cv.icon(shape(icon), r, c);
 }
 
-/// OpenStudio logo (greyscale mark, `logo.rs`) in one tint, fitted into a circle of radius `r`.
+/// Lemon Studio logo (greyscale mark, `logo.rs`) in one tint, fitted into a circle of radius `r`.
 pub fn logo(cv: &mut Canvas, cx: f32, cy: f32, r: f32, c: Color) {
     use crate::logo::{PATHS, VIEW_H, VIEW_W};
     let k = 2.0 * r / VIEW_W.max(VIEW_H);

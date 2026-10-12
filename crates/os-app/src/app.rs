@@ -620,7 +620,7 @@ pub enum Drag {
     TimeSel { t0: u32 },
     /// Painting the event panel (note property or channel control points).
     Velocity { last_x: f32, last_y: f32 },
-    /// Right-drag in a channel lane deletes its points (an OpenStudio choice, spec §7b).
+    /// Right-drag in a channel lane deletes its points (a Lemon Studio choice, spec §7b).
     ControlErase { last_x: f32 },
     Knob { id: crate::knobs::KnobId, y0: f32, v0: f32 },
     /// Left button held on the piano keyboard: each key entered is auditioned (§8).
@@ -1174,7 +1174,7 @@ impl App {
         crate::rack::to_model(s);
         // The playlist's track height, zoom and scroll (event 242, spec: flp/events/playlist.md).
         crate::playlist::store_view(s);
-        // A file OpenStudio made before the project had a playlist has no arrangement block (FL's files always have
+        // A file Lemon Studio made before the project had a playlist has no arrangement block (FL's files always have
         // one): build it again from the model, which holds everything that file stored.
         let lacks_playlist = s.file.as_ref().and_then(|f| os_flp::project::load(f).ok()).is_some_and(|p| p.arrangements.is_empty())
             && !s.project.arrangements.is_empty();
@@ -1203,7 +1203,7 @@ impl App {
         // Deleted, cloned and moved channels are written by `apply` (os-flp `restructure`); it edits a copy so a
         // failed save leaves the loaded file as it was.
         let mut lost = os_flp::project::unsaved_parts(&s.project, &file);
-        // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, OpenStudio status).
+        // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, Lemon Studio status).
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
@@ -1251,7 +1251,7 @@ impl App {
         }
         let name = self.state.path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "the new project".to_string(), |n| n.to_string_lossy().into_owned());
         let answer = rfd::MessageDialog::new()
-            .set_title("OpenStudio")
+            .set_title("Lemon Studio")
             .set_level(rfd::MessageLevel::Warning)
             .set_description(format!("Save the changes to {name} before {doing}?"))
             .set_buttons(rfd::MessageButtons::YesNoCancel)
@@ -2180,8 +2180,8 @@ impl App {
         true
     }
 
-    /// Load a theme: a `.flstheme` (spec ui/flstheme.md) or an OpenStudio `theme.txt`. A `.flstheme` is also
-    /// remembered as `%APPDATA%/OpenStudio/current.flstheme` so the next start uses it.
+    /// Load a theme: a `.flstheme` (spec ui/flstheme.md) or a Lemon Studio `theme.txt`. A `.flstheme` is also
+    /// remembered as `%APPDATA%/Lemon Studio/current.flstheme` so the next start uses it.
     pub fn load_theme_file(&mut self, path: &std::path::Path) {
         self.load_theme_file_ex(path, true)
     }
@@ -2199,7 +2199,7 @@ impl App {
                     save_design(Design::Classic);
                 }
                 if remember && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")) {
-                    if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) {
+                    if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) {
                         let _ = std::fs::create_dir_all(&d);
                         let keep = d.join("current.flstheme");
                         if keep.as_path() != path {
@@ -2222,7 +2222,7 @@ impl App {
     }
 
     /// Switch to design `d`: Lemon brings its own colours, Classic the saved theme (or the default look).
-    /// `remember` = keep the choice for the next start (`%APPDATA%/OpenStudio/design.txt`).
+    /// `remember` = keep the choice for the next start (`%APPDATA%/Lemon Studio/design.txt`).
     pub fn set_design(&mut self, d: Design, remember: bool) {
         self.theme = design_theme(d, remember);
         os_theme::set_current(&self.theme.colors);
@@ -2264,9 +2264,9 @@ impl App {
         let name = |d: &cpal::Device| d.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "(unknown device)".into());
         st.device = host.default_output_device().map(|d| name(&d)).unwrap_or_else(|| "(no output device)".into());
         st.devices = host.output_devices().map(|ds| ds.map(|d| name(&d)).collect()).unwrap_or_default();
-        // Built-in presets (spec: ui/theme-presets.md), then .flstheme files in %APPDATA%/OpenStudio/themes.
+        // Built-in presets (spec: ui/theme-presets.md), then .flstheme files in %APPDATA%/Lemon Studio/themes.
         st.themes = os_theme::presets::PRESETS.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect();
-        if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio").join("themes")) {
+        if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio").join("themes")) {
             if let Ok(rd) = std::fs::read_dir(&d) {
                 let mut v: Vec<_> = rd
                     .flatten()
@@ -2335,7 +2335,7 @@ impl App {
                 os_theme::set_current(&self.theme.colors);
                 save_design(Design::Classic);
                 if let Some(d) = std::env::var_os("APPDATA") {
-                    let _ = std::fs::remove_file(PathBuf::from(d).join("OpenStudio").join("current.flstheme"));
+                    let _ = std::fs::remove_file(PathBuf::from(d).join("Lemon Studio").join("current.flstheme"));
                 }
                 self.sync_preset();
                 self.state.message = Some("Theme: Classic".into());
@@ -2348,7 +2348,7 @@ impl App {
                     os_theme::set_current(&self.theme.colors);
                     save_design(Design::Classic);
                     // Remembered like an imported theme (loaded at the next start).
-                    if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) {
+                    if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) {
                         let _ = std::fs::create_dir_all(&d);
                         let _ = std::fs::write(d.join("current.flstheme"), &text);
                     }
@@ -4774,7 +4774,7 @@ impl App {
             // ADD > Sampler: a new Open Sampler channel, like the plugin picker's first tile.
             (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Sampler") => self.act(Action::PickerTile(false, 0)),
             (HELP_MENU, HELP_ABOUT) => {
-                self.state.message = Some(concat!("OpenStudio ", env!("CARGO_PKG_VERSION"), " (pre-alpha), free software under the GNU GPL v3 or later").into());
+                self.state.message = Some(concat!("Lemon Studio ", env!("CARGO_PKG_VERSION"), " (pre-alpha), free software under the GNU GPL v3 or later").into());
             }
             (ADD_MENU | TOOLS_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Pattern") => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
@@ -4967,10 +4967,10 @@ fn template_project(names: &[&str]) -> Project {
 }
 
 fn monitor_cfg_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio").join("monitor.txt"))
+    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio").join("monitor.txt"))
 }
 
-/// Monitor settings from `%APPDATA%/OpenStudio/monitor.txt` (written by the debug panel's Save), else defaults.
+/// Monitor settings from `%APPDATA%/Lemon Studio/monitor.txt` (written by the debug panel's Save), else defaults.
 fn load_monitor_cfg() -> crate::monitor::Settings {
     let mut cfg = crate::monitor::Settings::default();
     if let Some(text) = monitor_cfg_path().and_then(|p| std::fs::read_to_string(p).ok()) {
@@ -4988,7 +4988,7 @@ fn save_monitor_cfg(cfg: &crate::monitor::Settings) -> Result<PathBuf, String> {
     Ok(p)
 }
 
-/// Read a `.flstheme` (spec ui/flstheme.md) or an OpenStudio theme text file.
+/// Read a `.flstheme` (spec ui/flstheme.md) or a Lemon Studio theme text file.
 pub fn theme_from_file(path: &std::path::Path) -> Result<Theme, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&bytes);
@@ -5001,7 +5001,7 @@ pub fn theme_from_file(path: &std::path::Path) -> Result<Theme, String> {
     }
 }
 
-/// The theme: the saved design's (spec: ui/lemon-design.md); for Classic `%APPDATA%/OpenStudio/theme.txt`, else the last
+/// The theme: the saved design's (spec: ui/lemon-design.md); for Classic `%APPDATA%/Lemon Studio/theme.txt`, else the last
 /// imported `current.flstheme`, else the default.
 fn load_theme() -> Theme {
     let t = design_theme(saved_design(), true);
@@ -5009,13 +5009,26 @@ fn load_theme() -> Theme {
     t
 }
 
-/// The design named in `%APPDATA%/OpenStudio/design.txt`; Lemon when there is none. Tests always use Classic.
+/// The settings folder from before the rename to Lemon Studio (`%APPDATA%/OpenStudio`) moves to `%APPDATA%/Lemon Studio`
+/// once, at start, so dropped browser folders, presets, the design and the theme carry over (spec: ui/lemon-design.md §12).
+pub fn move_old_settings() {
+    if cfg!(test) {
+        return;
+    }
+    let Some(data) = std::env::var_os("APPDATA").map(PathBuf::from) else { return };
+    let (old, new) = (data.join("OpenStudio"), data.join("Lemon Studio"));
+    if old.is_dir() && !new.exists() {
+        let _ = std::fs::rename(&old, &new);
+    }
+}
+
+/// The design named in `%APPDATA%/Lemon Studio/design.txt`; Lemon when there is none. Tests always use Classic.
 pub fn saved_design() -> Design {
     if cfg!(test) {
         return Design::Classic;
     }
     std::env::var_os("APPDATA")
-        .and_then(|d| std::fs::read_to_string(PathBuf::from(d).join("OpenStudio").join("design.txt")).ok())
+        .and_then(|d| std::fs::read_to_string(PathBuf::from(d).join("Lemon Studio").join("design.txt")).ok())
         .and_then(|t| Design::parse(&t))
         .unwrap_or(Design::Lemon)
 }
@@ -5024,7 +5037,7 @@ fn save_design(d: Design) {
     if cfg!(test) {
         return;
     }
-    if let Some(dir) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) {
+    if let Some(dir) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join("design.txt"), d.name());
     }
@@ -5043,7 +5056,7 @@ fn load_theme_inner() -> Theme {
     if cfg!(test) {
         return Theme::default();
     }
-    let Some(dir) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) else { return Theme::default() };
+    let Some(dir) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Lemon Studio")) else { return Theme::default() };
     for f in ["theme.txt", "current.flstheme"] {
         let p = dir.join(f);
         if p.exists() {

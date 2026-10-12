@@ -21,7 +21,7 @@ const PAD: f32 = 18.0;
 /// Graph editor panel height (§14), its tab row included.
 pub const GRAPH_H: f32 = 240.0;
 const GRAPH_TABS_H: f32 = 20.0;
-/// Advanced fill dialog size (§22, OpenStudio layout).
+/// Advanced fill dialog size (§22, Lemon Studio layout).
 pub const FILL_W: f32 = 285.0;
 pub const FILL_H: f32 = 446.0;
 

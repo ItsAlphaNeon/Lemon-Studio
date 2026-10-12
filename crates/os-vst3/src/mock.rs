@@ -1,5 +1,5 @@
 //! A test plug-in built into the test binary: a gain effect whose edit controller is a separate class, the layout most
-//! VST 3 plug-ins use (OpenStudio's own bundles are single-component). It covers what those bundles do not reach:
+//! VST 3 plug-ins use (Lemon Studio's own bundles are single-component). It covers what those bundles do not reach:
 //! a separate controller (connection points, setComponentState, its own state), messages created by the host,
 //! parameter output of the processor, restart requests and the teardown order.
 // spec: plugins/vst3-hosting.md

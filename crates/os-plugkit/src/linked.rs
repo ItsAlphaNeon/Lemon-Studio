@@ -1,4 +1,4 @@
-//! A CLAP entry table without exported symbols, for plugins compiled into OpenStudio itself.
+//! A CLAP entry table without exported symbols, for plugins compiled into Lemon Studio itself.
 //!
 //! nih-plug's `nih_export_clap!` / `nih_export_vst3!` define the C entry points (`clap_entry`, `GetPluginFactory`,
 //! `InitDll`, ...). Two plugins linked into one program would define them twice, so a plugin crate built with its

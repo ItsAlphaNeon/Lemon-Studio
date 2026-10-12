@@ -1,6 +1,6 @@
 [package]
 name = "os-vst3"
-description = "OpenStudio's VST3 plugin host"
+description = "Lemon Studio's VST3 plugin host"
 version.workspace = true
 # vst3-sys' COM macros generate 2021-edition code.
 edition = "2021"

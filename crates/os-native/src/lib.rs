@@ -1,6 +1,6 @@
 //! Hosting plugins written against the FL Studio native plugin SDK, loaded from the user's own installation.
 //!
-//! Implemented from `OpenStudio-specs/plugins/fruity-abi.md` (public SDK interface).
+//! Implemented from the spec `plugins/fruity-abi.md` (public SDK interface).
 //! Windows x64 only for now.
 //
 // spec: plugins/fruity-abi.md

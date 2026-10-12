@@ -1,12 +1,12 @@
 [package]
 name = "os-app"
-description = "OpenStudio: the application"
+description = "Lemon Studio: the application"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "openstudio"
+name = "lemonstudio"
 path = "src/main.rs"
 
 [dependencies]

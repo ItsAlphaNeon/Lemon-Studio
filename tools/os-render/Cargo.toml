@@ -1,6 +1,6 @@
 [package]
 name = "os-render"
-description = "Render an FLP project to WAV with the OpenStudio engine"
+description = "Render an FLP project to WAV with the Lemon Studio engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

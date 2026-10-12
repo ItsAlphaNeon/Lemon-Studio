@@ -1,4 +1,4 @@
-//! Tests host OpenStudio's own plug-ins as VST 3 (built by `cargo run -p bundle-plugins` into `<target>/bundled`), and
+//! Tests host Lemon Studio's own plug-ins as VST 3 (built by `cargo run -p bundle-plugins` into `<target>/bundled`), and
 //! skip when they are not built. `OS_VST3_PLUGIN=<bundle or module>` adds any other plug-in to `hosts_a_plugin_from_env`.
 // spec: plugins/vst3-hosting.md
 
@@ -292,7 +292,7 @@ fn automation_is_sample_accurate() {
     assert!((peak(&l[1800..]) - 0.25).abs() < 0.03, "0 dB after the flushed automation ({})", peak(&l[1800..]));
 }
 
-/// The whole path OpenStudio uses: a pattern on a plug-in channel, played by the engine through the hosted .vst3.
+/// The whole path Lemon Studio uses: a pattern on a plug-in channel, played by the engine through the hosted .vst3.
 #[test]
 fn engine_plays_a_pattern() {
     let Some((_m, shared)) = sampler() else { return };

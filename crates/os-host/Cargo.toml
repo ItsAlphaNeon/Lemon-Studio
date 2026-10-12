@@ -1,6 +1,6 @@
 [package]
 name = "os-host"
-description = "OpenStudio's format-neutral plugin hosting layer (CLAP, VST3 and native backends implement it)"
+description = "Lemon Studio's format-neutral plugin hosting layer (CLAP, VST3 and native backends implement it)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,4 +1,4 @@
-//! Plugin presets: OpenStudio's own preset store, used by every hosted plugin through its state save / load. The plugin
+//! Plugin presets: Lemon Studio's own preset store, used by every hosted plugin through its state save / load. The plugin
 //! window's title-bar Presets box lists them (an app popup), its ◀ ▶ arrows step through them, "Save preset as..."
 //! stores the current state.
 //!
@@ -30,12 +30,12 @@ pub struct Preset {
     pub path: PathBuf,
 }
 
-/// `%APPDATA%/OpenStudio/Presets` (`OPENSTUDIO_PRESETS` overrides it, used by tests).
+/// `%APPDATA%/Lemon Studio/Presets` (`OPENSTUDIO_PRESETS` overrides it, used by tests).
 pub fn root() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("OPENSTUDIO_PRESETS") {
         return Some(PathBuf::from(p));
     }
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("OpenStudio").join("Presets"))
+    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Lemon Studio").join("Presets"))
 }
 
 /// A plugin name as a folder name: characters Windows does not allow become `_`, trailing dots / spaces go.
@@ -129,7 +129,7 @@ pub fn save(path: &Path, h: &Header, state: &[u8]) -> std::io::Result<()> {
 /// different from the file's).
 pub fn load(path: &Path, id: &str) -> Result<(Header, Vec<u8>), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let (h, state) = decode(&bytes).ok_or_else(|| format!("{} is not an OpenStudio preset", path.display()))?;
+    let (h, state) = decode(&bytes).ok_or_else(|| format!("{} is not a Lemon Studio preset", path.display()))?;
     if !id.is_empty() && !h.id.is_empty() && h.id != id {
         return Err(format!("this preset belongs to {}", if h.plugin.is_empty() { &h.id } else { &h.plugin }));
     }
@@ -270,7 +270,7 @@ fn save_as(app: &mut App, key: usize) -> Option<String> {
         .set_title("Save preset as")
         .set_directory(&dir)
         .set_file_name(format!("{start}.{EXT}"))
-        .add_filter("OpenStudio preset", &[EXT])
+        .add_filter("Lemon Studio preset", &[EXT])
         .save_file()?;
     let target = if target.extension().is_some_and(|e| e.eq_ignore_ascii_case(EXT)) { target } else { target.with_extension(EXT) };
     Some(match save(&target, &h, &state) {

@@ -1,6 +1,6 @@
 [package]
 name = "os-plugkit"
-description = "Shared pieces of OpenStudio's own plugin editors: live parameter edits, menus, Win32 popups and type-in boxes"
+description = "Shared pieces of Lemon Studio's own plugin editors: live parameter edits, menus, Win32 popups and type-in boxes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

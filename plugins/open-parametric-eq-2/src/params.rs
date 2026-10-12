@@ -67,7 +67,7 @@ pub struct EqParams {
     pub kind: [IntParam; BANDS],
     pub order: [IntParam; BANDS],
     pub main: FloatParam,
-    /// The original's saved-state image holding the options, the spare bank and bytes OpenStudio does not use (fields
+    /// The original's saved-state image holding the options, the spare bank and bytes Lemon Studio does not use (fields
     /// 1..36 in it are stale: the parameters above are the truth).
     pub extra: RwLock<Vec<u8>>,
     /// Bumped on every `extra` change (repaint, audio refresh).
@@ -357,7 +357,7 @@ pub fn to_fl(s: &Settings, extra: &[u8]) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Plugin state <-> the original's saved state (for OpenStudio: project slots hold the original's state)
+// Plugin state <-> the original's saved state (for Lemon Studio: project slots hold the original's state)
 
 /// The plugin's own saved state (nih-plug JSON with the u64 length prefix of its CLAP state) for a project slot's
 /// saved state `fl` (354 bytes, event 213).
@@ -440,7 +440,7 @@ mod tests {
         set_field(&mut fl, 29 + 6, -3); // Steep 8
         set_field(&mut fl, 36, 120); // main +1.2 dB
         set_byte(&mut fl, MASK_BYTE, 0x7b);
-        set_byte(&mut fl, 330, 0x5a); // a byte OpenStudio does not use survives
+        set_byte(&mut fl, 330, 0x5a); // a byte Lemon Studio does not use survives
         let blob = plugin_state_from_fl(&fl);
         let back = fl_from_plugin_state(&blob).expect("parses");
         assert_eq!(back, fl);

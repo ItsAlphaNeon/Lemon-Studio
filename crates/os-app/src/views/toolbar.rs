@@ -52,11 +52,11 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     row1(ui, s, f);
     row2(ui, s);
 
-    // Logo spot (spans both rows): the OpenStudio mark.
+    // Logo spot (spans both rows): the Lemon Studio mark.
     // It keeps to the right edge until the window is too narrow, then the edge crops it
     // (spec ui/main-window.md §12); the toolbar never moves.
     let lx = (width - 45.0).max(LOGO_MIN_X);
-    ui.hit(Rect::new(lx - 35.0, 0.0, 78.0, 80.0), Action::MenuItem(menus::HELP_MENU, menus::HELP_ABOUT), "About OpenStudio");
+    ui.hit(Rect::new(lx - 35.0, 0.0, 78.0, 80.0), Action::MenuItem(menus::HELP_MENU, menus::HELP_ABOUT), "About Lemon Studio");
     icons::logo(ui.c, lx, 40.0, 26.0, if lemon { t.toolbar_edge } else { t.toolbar_line });
 }
 
@@ -66,7 +66,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     for (x, icon, action, hint) in [
         (4.0, Icon::Minimize, Action::Minimize, "Minimize"),
         (24.0, Icon::Restore, Action::Maximize, "Restore / maximize"),
-        (44.0, Icon::Close, Action::Close, "Exit OpenStudio"),
+        (44.0, Icon::Close, Action::Close, "Exit Lemon Studio"),
     ] {
         let r = Rect::new(x, 11.0, 19.0, 19.0);
         let hov = ui.hit(r, action, hint);
@@ -478,7 +478,7 @@ fn row2(ui: &mut Ui, s: &State) {
         ui.c.fill_rrect(np, if lemon { 6.0 } else { 2.0 }, t.news_panel);
         ui.off(np, "News");
         let tw = ui.c.text(Font::new(13), 1309.0, 53.0, t.text_faint, "Today");
-        let news = "Welcome to OpenStudio";
+        let news = "Welcome to Lemon Studio";
         let avail = 1442.0 - 1315.0 - tw;
         let nf = ui.c.fit_font(Font::new(14), news, avail);
         ui.c.text_clip(nf, 1315.0 + tw, 52.0, avail, ui.t.tx(0x9aa8b0), news);

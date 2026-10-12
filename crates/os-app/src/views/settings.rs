@@ -312,7 +312,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]),
         ],
         FILE => {
-            let user = std::env::var("APPDATA").map(|d| format!("{d}\\OpenStudio\\")).unwrap_or_default();
+            let user = std::env::var("APPDATA").map(|d| format!("{d}\\Lemon Studio\\")).unwrap_or_default();
             vec![
                 g("Backup", vec![
                     pair(combo("Occasionally (every 10 minutes)", 336.0, "Autosave"), ValueR("Maximum", "100".into())),
@@ -392,7 +392,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         }
         DEBUG => {
             let mut lines = vec![
-                format!("OpenStudio {}", env!("CARGO_PKG_VERSION")),
+                format!("Lemon Studio {}", env!("CARGO_PKG_VERSION")),
                 format!("Project: {}", s.path.as_ref().map_or("(new project)".into(), |p| p.display().to_string())),
                 format!("Saved by: {}", s.project.saved_by),
                 format!("PPQ {}, tempo {:.3}", s.project.ppq, s.tempo),
@@ -408,13 +408,13 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             vec![g("", vec![List(vec![("", 0.0)], lines.into_iter().map(|l| vec![l]).collect(), 40)])]
         }
         8 => vec![g("Licence", vec![
-            Big("OpenStudio needs no account.".into()),
+            Big("Lemon Studio needs no account.".into()),
             txt("It is free software under the GNU General Public License, version 3."),
             txt("No registration, no online services, no usage data."),
         ])],
         _ => vec![g("", vec![
             Gap(20.0),
-            Big(format!("OpenStudio {}", env!("CARGO_PKG_VERSION"))),
+            Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
             txt("A digital audio workstation written in Rust."),
             Gap(10.0),
             txt("Licence: GNU General Public License v3."),

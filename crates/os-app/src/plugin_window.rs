@@ -1,4 +1,4 @@
-//! The window around a hosted plugin's editor: OpenStudio's title bar (menu arrow, gear, channel name, "(mixer target)",
+//! The window around a hosted plugin's editor: Lemon Studio's title bar (menu arrow, gear, channel name, "(mixer target)",
 //! Presets box, minimize, close) and the gear-toggled strip, one row: the plugin's page tabs (a plain plugin has the plug
 //! tab, an Open plugin joined through the host link brings its own pages), the Misc wrench, then
 //! ON / PAN / VOL / PITCH / RANGE / TRACK.
@@ -1066,7 +1066,7 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 let (x, y) = client_point(hwnd, lp, w.scale, false);
                 let part = part_at(&w.state.borrow(), x, y);
                 if part == Some(Part::Menu) {
-                    // The app draws the menu (its own popup, like every other OpenStudio menu), below the arrow.
+                    // The app draws the menu (its own popup, like every other Lemon Studio menu), below the arrow.
                     let m = MENU_RECT;
                     let mut p = POINT { x: (m.x * w.scale) as i32, y: (m.bottom() * w.scale) as i32 };
                     ClientToScreen(hwnd, &mut p);

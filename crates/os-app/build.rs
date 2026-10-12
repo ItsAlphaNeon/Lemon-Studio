@@ -1,4 +1,4 @@
-//! Embeds `assets/openstudio.ico` as icon resource 1 (Windows). Uses the Windows SDK's `rc.exe`
+//! Embeds `assets/lemonstudio.ico` as icon resource 1 (Windows). Uses the Windows SDK's `rc.exe`
 //! (or `$RC`); without it the build goes on and the exe just has no icon.
 
 use std::path::PathBuf;
@@ -21,8 +21,8 @@ fn find_rc() -> Option<PathBuf> {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/openstudio.rc");
-    println!("cargo:rerun-if-changed=assets/openstudio.ico");
+    println!("cargo:rerun-if-changed=assets/lemonstudio.rc");
+    println!("cargo:rerun-if-changed=assets/lemonstudio.ico");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
         || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
     {
@@ -32,11 +32,11 @@ fn main() {
         println!("cargo:warning=rc.exe not found (Windows SDK); building without the app icon");
         return;
     };
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("openstudio.res");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("lemonstudio.res");
     let ok = Command::new(&rc)
         .args(["/nologo", "/fo"])
         .arg(&out)
-        .arg("assets/openstudio.rc")
+        .arg("assets/lemonstudio.rc")
         .status()
         .is_ok_and(|s| s.success());
     if ok {

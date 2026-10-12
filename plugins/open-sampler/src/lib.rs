@@ -1,4 +1,4 @@
-//! Open Sampler: OpenStudio's sampler instrument as a VST3 / CLAP plugin (nih-plug).
+//! Open Sampler: Lemon Studio's sampler instrument as a VST3 / CLAP plugin (nih-plug).
 //!
 // spec: plugins/open-sampler.md, plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
@@ -251,7 +251,7 @@ pub fn block(p: &SamplerParams, tempo: f64, bend: f64) -> dsp::Block {
         // The Panning target has no envelope (spec §3).
         let mut env = if i == dsp::PAN { None } else { e.envelope(128.0) };
         if e.tempo.live() {
-            // Tempo-based times: the time law at 120 BPM, scaled by the host tempo (OpenStudio choice).
+            // Tempo-based times: the time law at 120 BPM, scaled by the host tempo (Lemon Studio choice).
             env = env.map(|x| x.scaled(120.0 / tempo.max(1.0)));
         }
         *t = dsp::Target { env, amount: f64::from(e.amt.live()), lfo: lfo(e, tempo) };
@@ -310,7 +310,7 @@ impl OpenSampler {
 
 impl Plugin for OpenSampler {
     const NAME: &'static str = "Open Sampler";
-    const VENDOR: &'static str = "OpenStudio";
+    const VENDOR: &'static str = "Lemon Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -424,7 +424,7 @@ impl Plugin for OpenSampler {
 
 impl ClapPlugin for OpenSampler {
     const CLAP_ID: &'static str = "org.openstudio.open-sampler";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("OpenStudio's sampler instrument");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's sampler instrument");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::Instrument, ClapFeature::Sampler, ClapFeature::Stereo];
@@ -435,7 +435,7 @@ impl Vst3Plugin for OpenSampler {
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Instrument, Vst3SubCategory::Sampler];
 }
 
-// Built as a plugin module: the C entry points hosts look for. Linked into OpenStudio (`linked` feature): only the
+// Built as a plugin module: the C entry points hosts look for. Linked into Lemon Studio (`linked` feature): only the
 // symbol-free table, so several Open plugins fit in one program (spec: plugins/plugin-formats.md).
 #[cfg(not(feature = "linked"))]
 nih_export_clap!(OpenSampler);

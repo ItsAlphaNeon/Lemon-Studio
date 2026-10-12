@@ -115,7 +115,7 @@ impl M {
         M::Fine,
     ];
 
-    /// Hint label (OpenStudio wording).
+    /// Hint label (Lemon Studio wording).
     pub fn label(self) -> &'static str {
         match self {
             M::LevelPan => "Panning adjustment",

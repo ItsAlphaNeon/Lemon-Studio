@@ -1,4 +1,4 @@
-//! OpenStudio theme: named color tokens plus a global hue / saturation / lightness adjustment.
+//! Lemon Studio theme: named color tokens plus a global hue / saturation / lightness adjustment.
 //!
 //! A theme file is plain text, one `key = value` per line (`#` starts a comment):
 //!
@@ -411,7 +411,7 @@ impl Theme {
     /// Serialize as a theme file listing every token.
     pub fn to_text(&self) -> String {
         let mut s = format!(
-            "# OpenStudio theme: {}\nhue = {}\nsaturation = {}\nlightness = {}\n",
+            "# Lemon Studio theme: {}\nhue = {}\nsaturation = {}\nlightness = {}\n",
             self.name, self.adjust.hue, self.adjust.saturation, self.adjust.lightness
         );
         for name in Palette::NAMES {

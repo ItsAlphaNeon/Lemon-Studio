@@ -1,4 +1,4 @@
-//! Open Parametric EQ 2: OpenStudio's 7-band parametric EQ as a VST3 / CLAP plugin (nih-plug).
+//! Open Parametric EQ 2: Lemon Studio's 7-band parametric EQ as a VST3 / CLAP plugin (nih-plug).
 //!
 // spec: plugins/open-parametric-eq-2.md, plugins/parametric-eq-2.md, plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
@@ -178,7 +178,7 @@ impl OpenEq {
 
 impl Plugin for OpenEq {
     const NAME: &'static str = "Open Parametric EQ 2";
-    const VENDOR: &'static str = "OpenStudio";
+    const VENDOR: &'static str = "Lemon Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -264,7 +264,7 @@ impl Plugin for OpenEq {
 
 impl ClapPlugin for OpenEq {
     const CLAP_ID: &'static str = "org.openstudio.open-parametric-eq-2";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("OpenStudio's 7-band parametric EQ");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's 7-band parametric EQ");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Equalizer, ClapFeature::Stereo];
@@ -275,7 +275,7 @@ impl Vst3Plugin for OpenEq {
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Fx, Vst3SubCategory::Eq];
 }
 
-// Built as a plugin module: the C entry points hosts look for. Linked into OpenStudio (`linked` feature): only the
+// Built as a plugin module: the C entry points hosts look for. Linked into Lemon Studio (`linked` feature): only the
 // symbol-free table, so several Open plugins fit in one program (spec: plugins/plugin-formats.md).
 #[cfg(not(feature = "linked"))]
 nih_export_clap!(OpenEq);

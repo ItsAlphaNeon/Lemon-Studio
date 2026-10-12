@@ -1,5 +1,5 @@
 //! The host side of CLAP's context-menu extension: when a plugin builds the right-click menu of one of its parameters it
-//! asks the host for entries, and OpenStudio adds "Create automation clip". A pick comes back through `perform` and is
+//! asks the host for entries, and Lemon Studio adds "Create automation clip". A pick comes back through `perform` and is
 //! handed to the app by `take_automation_requests` (parameter ids). The host never pops up menus for the plugin.
 //!
 // spec: plugins/plugin-parameters.md §6 (plugin knob menus); CLAP ext/context-menu.h

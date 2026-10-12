@@ -1,4 +1,4 @@
-//! OpenStudio project data model: channels, patterns, playlist, mixer, automation.
+//! Lemon Studio project data model: channels, patterns, playlist, mixer, automation.
 //! Pure data, no I/O. Populated by `os-flp` and (later) edited by the UI and engine.
 //!
 //! Units are the project's own: positions and lengths in ticks (see [`Project::ppq`]),
@@ -472,7 +472,7 @@ impl Default for Echo {
 /// Channel rack settings of one channel (spec: flp/events/channels.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ChannelRack {
-    /// Index of the file block this channel was loaded from (`None` = created in OpenStudio). A clone keeps its
+    /// Index of the file block this channel was loaded from (`None` = created in Lemon Studio). A clone keeps its
     /// source's origin, so the writer copies the source block (spec: channels.md "Deleting, cloning and moving").
     pub origin: Option<u16>,
     /// Lock active/mute state (event 32).
@@ -1202,7 +1202,7 @@ pub mod target {
 
 impl Automation {
     /// The curve's value at `beat` (clamped to the first / last point), shaped per segment mode
-    /// (spec: ui/playlist.md §8, OpenStudio's approximations of FL's curves).
+    /// (spec: ui/playlist.md §8, Lemon Studio's approximations of FL's curves).
     pub fn value_at(&self, beat: f64) -> Option<f64> {
         let pts = &self.points;
         let first = pts.first()?;

@@ -1,6 +1,6 @@
 [package]
 name = "os-play"
-description = "Play an FLP project through the default audio output with the OpenStudio engine"
+description = "Play an FLP project through the default audio output with the Lemon Studio engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

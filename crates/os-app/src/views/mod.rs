@@ -69,7 +69,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if docked.is_none() {
         let wm = ui.t.watermark;
         icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
-        let version = concat!("OpenStudio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
+        let version = concat!("Lemon Studio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
         let vc = ui.t.version_text;
         let vw = ui.c.text_width(crate::views::fnt(16.0), version);
         ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, h - 22.0, vc, version);

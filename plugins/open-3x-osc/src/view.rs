@@ -1,9 +1,9 @@
 //! Open 3x Osc editor: painting and hit regions (platform independent), built from the `os_ui::kit` widgets and
-//! OpenStudio's own drawings (no artwork of the original).
+//! Lemon Studio's own drawings (no artwork of the original).
 //!
 //! Coordinates are FL window pixels from the spec tables; the editor is the window minus its 24 px title bar, so
 //! every y is drawn at `y - OY`. Colours are palette roles (`t.s` surface, `t.a` accent, `t.h` highlight, `t.tx`
-//! text) so an imported theme recolours the plugin like the rest of OpenStudio.
+//! text) so an imported theme recolours the plugin like the rest of Lemon Studio.
 // spec: plugins/open-3x-osc.md (§1 window, §2 oscillator page, §3 envelope page, §4 hints)
 
 use std::f32::consts::{PI, TAU};
@@ -314,7 +314,7 @@ fn fader(ui: &mut Ui, id: &str, x: f32, cy: f32) {
     ui.hit(hr, target);
 }
 
-/// The bow-tie mark used as the stereo captions (OpenStudio drawing).
+/// The bow-tie mark used as the stereo captions (Lemon Studio drawing).
 fn bowtie(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
     c.fill_polygon(&[(cx - 5.0, cy - 4.0), (cx, cy), (cx - 5.0, cy + 4.0)], col);
     c.fill_polygon(&[(cx + 5.0, cy - 4.0), (cx, cy), (cx + 5.0, cy + 4.0)], col);

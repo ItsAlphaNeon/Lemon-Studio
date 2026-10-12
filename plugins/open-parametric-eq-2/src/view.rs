@@ -1,7 +1,7 @@
 //! Open Parametric EQ 2 editor: painting and hit regions (platform independent), built from `os_ui::kit` widgets.
 //!
 //! Coordinates are the editor content's (700 x 350 logical px) from the spec tables. Greys are palette roles so an
-//! imported theme recolours the plugin like the rest of OpenStudio; band colours are signal colours.
+//! imported theme recolours the plugin like the rest of Lemon Studio; band colours are signal colours.
 // spec: plugins/open-parametric-eq-2.md (§1 window, §2 graph, §3 faders and band column, §4 bottom row)
 
 use std::f32::consts::PI;

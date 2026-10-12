@@ -1,6 +1,6 @@
-//! OpenStudio's format-neutral plugin hosting layer.
+//! Lemon Studio's format-neutral plugin hosting layer.
 //!
-//! Every plugin format OpenStudio hosts (CLAP in `os-clap`, VST3 in `os-vst3`, native plugins in `os-native`) offers
+//! Every plugin format Lemon Studio hosts (CLAP in `os-clap`, VST3 in `os-vst3`, native plugins in `os-native`) offers
 //! the same two things: a [`Library`] (a loaded plugin file that lists [`Descriptor`]s and creates instances) and a
 //! [`Plugin`] instance (activation, editor, state, parameters, and the engine-side [`Instrument`] / [`HostedEffect`]
 //! processing). The app only talks to these traits.
@@ -9,7 +9,7 @@
 //! and activates it, opens its editor, loads / saves state, reads / sets parameters and calls [`Plugin::idle`] every
 //! tick; the audio thread only calls the `Instrument` / `HostedEffect` methods through the engine (with `try_lock`).
 //! A `SharedPlugin` coerces to `os_engine::SharedInstrument` / `SharedEffect` (`plugin.clone() as SharedInstrument`).
-// spec: plugins/plugin-formats.md (hosting inside OpenStudio), plugins/vst3-hosting.md
+// spec: plugins/plugin-formats.md (hosting inside Lemon Studio), plugins/vst3-hosting.md
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ pub use os_engine::{HostedEffect, Instrument};
 pub enum Format {
     Clap,
     Vst3,
-    /// Plugins written against the native SDK of the DAW whose projects OpenStudio opens (`os-native`).
+    /// Plugins written against the native SDK of the DAW whose projects Lemon Studio opens (`os-native`).
     Native,
 }
 
@@ -68,7 +68,7 @@ pub struct Descriptor {
     pub features: Vec<String>,
     pub kind: Kind,
     /// The file it was loaded from (a `.clap` file, a `.vst3` bundle folder or module file, a DLL; for a plugin
-    /// compiled into OpenStudio, the program itself).
+    /// compiled into Lemon Studio, the program itself).
     pub path: PathBuf,
 }
 
