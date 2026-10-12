@@ -528,7 +528,8 @@ pub struct Rows {
 impl Rows {
     pub fn new(s: &State) -> Rows {
         let tracks = s.project.arrangement().map(|a| a.tracks.as_slice()).unwrap_or(&[]);
-        let row_h = s.playlist.row_h.clamp(ROW_MIN, ROW_MAX);
+        // On the drawing grid, so tops and heights add up exactly (`PGeom::xs64`).
+        let row_h = snap(f64::from(s.playlist.row_h.clamp(ROW_MIN, ROW_MAX)));
         let mut top = Vec::with_capacity(usize::from(TRACKS) + 1);
         let (mut y, mut collapsed) = (0.0, false);
         for t in 0..usize::from(TRACKS) {
@@ -586,6 +587,16 @@ pub struct PGeom {
     pub rows: std::rc::Rc<Rows>,
 }
 
+/// `v` on the grid of 1/256 px that scrolled positions are drawn at (`PGeom::xs`).
+pub fn snap64(v: f64) -> f64 {
+    (v * 256.0 + 0.5).floor() / 256.0
+}
+
+/// [`snap64`] as a drawing coordinate.
+pub fn snap(v: f64) -> f32 {
+    snap64(v) as f32
+}
+
 impl PGeom {
     pub fn new(s: &State, grid: Rect) -> PGeom {
         let ppq = u32::from(s.project.ppq.max(4));
@@ -594,8 +605,24 @@ impl PGeom {
         PGeom { grid, ppt: bar_w / (ppq * 4) as f32, scroll_x: s.playlist_scroll.0, scroll_y: s.playlist_scroll.1, ppq, bar_w, rows }
     }
 
+    /// Screen x of content x `px` (pixels from the song start), exact on the 1/256 px grid. Every position the
+    /// playlist draws is such a point plus a fixed offset, computed in f64: a scroll by whole device pixels then moves
+    /// every shape by exactly that much, so moving the drawn pixels (`App::playlist_scrolled`) equals a repaint.
+    pub fn xs64(&self, px: f64) -> f64 {
+        snap64(f64::from(self.grid.x) - f64::from(self.scroll_x) + px)
+    }
+
+    pub fn xs(&self, px: f64) -> f32 {
+        self.xs64(px) as f32
+    }
+
+    /// Screen x of `tick`, unrounded to f32 (see [`PGeom::xs64`]).
+    pub fn x64(&self, tick: f64) -> f64 {
+        self.xs64(tick * f64::from(self.ppt))
+    }
+
     pub fn x_of(&self, tick: f32) -> f32 {
-        self.grid.x + tick * self.ppt - self.scroll_x
+        self.x64(f64::from(tick)) as f32
     }
 
     pub fn tick_at(&self, x: f32) -> f32 {
@@ -603,7 +630,7 @@ impl PGeom {
     }
 
     pub fn y_of(&self, track: u16) -> f32 {
-        self.grid.y + self.rows.top(track) - self.scroll_y
+        snap(f64::from(self.grid.y) - f64::from(self.scroll_y) + f64::from(self.rows.top(track)))
     }
 
     pub fn track_at(&self, y: f32) -> u16 {
@@ -612,12 +639,25 @@ impl PGeom {
 
     /// A clip's rectangle: the row less its 3 px gap, or a thin bar on a collapsed group's strip (§6a).
     pub fn clip_rect(&self, c: &Clip) -> Rect {
-        let x = self.x_of(c.position as f32);
-        let w = (c.length as f32 * self.ppt).max(3.0);
+        let x = self.x64(f64::from(c.position));
+        let w = ((self.x64(f64::from(c.position) + f64::from(c.length)) - x) as f32).max(3.0);
+        let x = x as f32;
         if self.rows.strip(c.track) {
             return Rect::new(x, self.y_of(c.track) + 1.0, w, STRIP_H - 2.0);
         }
         Rect::new(x, self.y_of(c.track), w, self.rows.clip_h())
+    }
+
+    /// `clip_rect` for drawing: an edge further than 2048 px outside the grid is pulled in to that distance, so every
+    /// drawn position stays small and exact on the drawing grid (`PGeom::xs64`); nothing drawn from an edge reaches
+    /// that far. Also the clip's left edge in f64, where the content is measured from.
+    pub fn clip_draw_rect(&self, c: &Clip) -> (Rect, f64) {
+        const FAR: f64 = 2048.0;
+        let r = self.clip_rect(c);
+        let x = self.x64(f64::from(c.position));
+        let x0 = x.max(f64::from(self.grid.x) - FAR);
+        let x1 = (x + f64::from(r.w)).min(f64::from(self.grid.right()) + FAR);
+        (Rect::new(x0 as f32, r.y, (x1 - x0).max(0.0) as f32, r.h), x)
     }
 
     /// The body of a clip below its title strip (automation curves, notes, waveforms).
@@ -1457,7 +1497,7 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
 
 /// Height of a value in a clip body.
 pub fn value_y(body: Rect, v: f64) -> f32 {
-    body.bottom() - 2.0 - v as f32 * (body.h - 4.0)
+    snap(f64::from(body.bottom()) - 2.0 - v * f64::from(body.h - 4.0))
 }
 
 pub fn value_at_y(body: Rect, y: f32) -> f64 {
@@ -1818,7 +1858,7 @@ pub fn fade_xs(s: &State, g: &PGeom, c: &Clip) -> (f32, f32) {
     let body = g.body(c);
     let fin = c.fade_in().map_or(0.0, |f| ms_px(s, g, c, f.0)).min(body.w);
     let fout = c.fade_out().map_or(0.0, |f| ms_px(s, g, c, f.0)).min(body.w);
-    (body.x + fin, body.right() - fout)
+    (snap(f64::from(body.x) + f64::from(fin)), snap(f64::from(body.right()) - f64::from(fout)))
 }
 
 /// The middle of a fade curve drawn across `body` from `x0` to `x1` (the same height for a fade-in and a fade-out).

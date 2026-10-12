@@ -74,6 +74,14 @@ pub fn rect(s: &State) -> Rect {
     Rect::new(s.rack_pos.0, s.rack_pos.1, s.rack_size.0, s.rack_size.1)
 }
 
+/// Where the window paints: its rect and the graph editor, which hangs below it (§14).
+pub fn paint_area(s: &State) -> Rect {
+    match graph_rect(s) {
+        Some(g) => rect(s).union(&g.outset(2.0)),
+        None => rect(s),
+    }
+}
+
 /// Everything the window can paint or hit (incl. the resize zones past its edges and the graph editor, which hangs
 /// below the window, §14).
 pub fn bounds(s: &State) -> Rect {

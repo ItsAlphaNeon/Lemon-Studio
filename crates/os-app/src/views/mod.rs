@@ -90,15 +90,18 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
         ui.win = Some(win);
         let r = s.win_rect(win);
-        let a = s.win_area(win);
+        // A window paints inside its paint area (also what it marks as drawn, e.g. text's generous overhang).
+        let a = paint_area(s, win);
+        ui.c.push_clip(a);
         match win {
             Win::Playlist => ui.part(Seg::Win(win), a, |ui| playlist::paint(ui, s, r, f)),
             Win::Mixer => ui.part(Seg::Win(win), a, |ui| mixer::paint(ui, s, r, f)),
             Win::PianoRoll => ui.part(Seg::Win(win), a, |ui| piano::paint(ui, s, r, f)),
-            Win::ChannelRack => ui.part(Seg::Win(win), rack::bounds(s), |ui| rack::paint(ui, s, f)),
-            Win::Plugin => ui.part(Seg::Win(win), channel_win::bounds(s), |ui| channel_win::paint(ui, s, f)),
+            Win::ChannelRack => ui.part(Seg::Win(win), a, |ui| rack::paint(ui, s, f)),
+            Win::Plugin => ui.part(Seg::Win(win), a, |ui| channel_win::paint(ui, s, f)),
             _ => {}
         }
+        ui.c.pop_clip();
         ui.win = None;
     }
     ui.part(Seg::Toolbar, Rect::new(0.0, 0.0, w, WORK_Y), |ui| toolbar::paint(ui, s, f, w));
@@ -120,6 +123,16 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         mondebug::paint(ui, s);
     }
     overlays
+}
+
+/// Where window `w` paints: its rect (and the channel rack's graph editor hanging below it). The resize zones past
+/// its edges are hits only. A repaint that misses this skips the window; a playlist scroll paints around it.
+pub fn paint_area(s: &State, w: Win) -> Rect {
+    match w {
+        Win::ChannelRack => rack::paint_area(s),
+        Win::Plugin => channel_win::rect(s),
+        w => s.win_rect(w),
+    }
 }
 
 /// Start of a Playlist / Mixer / Piano roll window: blocks clicks through it, and (once the
