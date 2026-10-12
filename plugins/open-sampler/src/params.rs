@@ -209,14 +209,15 @@ pub const REVERB_TYPES: &[&str] = &["A", "B"];
 /// Highest key (C0 = 0 .. B10 = 131).
 pub const KEY_MAX: i32 = 131;
 
-/// Time stretch multiplier of a knob position: 25 %..400 %, doubling every quarter (FL: 100 px per octave).
+/// Time stretch multiplier of a knob position: 25 %..400 %, doubling every quarter (FL: 100 px per octave). Positions
+/// are clamped: a saved state is loaded unchecked, and an out-of-range value must not reach the stretcher.
 pub fn mul_of(v: f32) -> f64 {
-    2f64.powf(4.0 * (f64::from(v) - 0.5))
+    2f64.powf(4.0 * (f64::from(v.clamp(0.0, 1.0)) - 0.5))
 }
 
-/// Time stretch pitch in cents of a knob position (±1200).
+/// Time stretch pitch in cents of a knob position (±1200, clamped like [`mul_of`]).
 pub fn ts_cents(v: f32) -> f64 {
-    (f64::from(v) * 2400.0 - 1200.0).round()
+    (f64::from(v.clamp(0.0, 1.0)) * 2400.0 - 1200.0).round()
 }
 
 /// TIME knob: the longest time in bars (a Lemon Studio limit).

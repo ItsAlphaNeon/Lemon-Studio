@@ -1828,8 +1828,13 @@ mod tests {
         };
         let base = render("");
         assert!(base.iter().any(|v| v.abs() > 0.05), "the default plays");
+        // PITCH does nothing in Resample, the default method (spec: audio/time-stretch.md): it is tried in Stretch (a
+        // realtime method) and in e3 generic (stretched first). Knob positions are 0..1 (0.9 = +960 cents, 0.75 = x2);
+        // the last stretch case is out of range, as a saved state may hold, and must play clamped, not as NaN.
         let cases = [
-            ("start_offset", "{\"f32\":0.5}"), ("ts_pitch", "{\"f32\":700.0}"), ("ts_mul", "{\"f32\":2.0}"),
+            ("start_offset", "{\"f32\":0.5}"), ("ts_mul", "{\"f32\":0.75}"), ("ts_mode", "{\"i32\":1}"),
+            ("ts_pitch", "{\"f32\":0.9},\"ts_mode\":{\"i32\":1}"), ("ts_pitch", "{\"f32\":0.9},\"ts_mode\":{\"i32\":3}"),
+            ("ts_mul", "{\"f32\":0.75},\"ts_mode\":{\"i32\":3}"), ("ts_pitch", "{\"f32\":700.0},\"ts_mode\":{\"i32\":3}"),
             ("fx_dc", "{\"bool\":true}"), ("fx_normalize", "{\"bool\":true}"), ("fx_reverse", "{\"bool\":true}"),
             ("fx_polarity", "{\"bool\":true}"), ("fx_fade_stereo", "{\"bool\":true}"), ("fx_swap", "{\"bool\":true}"),
             ("fx_start", "{\"f32\":0.3}"), ("fx_length", "{\"f32\":0.3}"), ("fx_in", "{\"f32\":0.5}"), ("fx_out", "{\"f32\":0.5}"),
@@ -1843,6 +1848,8 @@ mod tests {
         let mut dead = Vec::new();
         for (id, v) in cases {
             let out = render(&format!("\"{id}\":{v}"));
+            // f32::max skips NaN: a NaN render would pass as "no change".
+            assert!(out.iter().all(|x| x.is_finite()), "{id} = {v}: the output is not finite");
             let diff = base.iter().zip(&out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
             eprintln!("{id:>16} = {v:<16} max diff {diff:.4}");
             if diff < 1e-3 {
