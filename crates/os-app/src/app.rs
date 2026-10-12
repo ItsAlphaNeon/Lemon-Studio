@@ -6216,7 +6216,16 @@ mod tests {
         // Alt+T adds a time marker at the play-start marker (stopped), snapped to a step.
         app.state.piano.marker = 200;
         key(&mut app, "t", false, true, false);
-        assert_eq!(app.state.piano.markers, vec![(app.state.pattern, 192, "Marker 1".to_string())]);
+        assert_eq!(piano::pattern_mut(&mut app.state).markers, vec![os_model::TimeMarker::new(192, "Marker 1")]);
+        // It is saved with the pattern and comes back on open.
+        let path = std::env::temp_dir().join(format!("os_piano_marker_{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", app.state.message);
+        app.open(path.clone());
+        let _ = std::fs::remove_file(&path);
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        assert_eq!(piano::pattern_mut(&mut app.state).markers, vec![os_model::TimeMarker::new(192, "Marker 1")]);
         frame(&mut app, &mut c, None);
 
         // Ctrl+K cycles to the next channel, wrapping; with the typing keyboard off G / K step too.

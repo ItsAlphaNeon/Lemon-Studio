@@ -278,15 +278,16 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
     Some(msg)
 }
 
-/// Add a time marker to the current pattern at `tick` snapped down to a step (§10a).
+/// Add a time marker to the current pattern at `tick` snapped down to a step (§10a). Saved with the pattern
+/// (flp/events/patterns.md, metadata block), kept sorted by position.
 pub fn add_marker(s: &mut State, tick: u32) -> String {
     let step = u32::from(s.project.ppq.max(4)) / 4;
     let tick = tick - tick % step;
-    let pattern = s.pattern;
-    let n = s.piano.markers.iter().filter(|m| m.0 == pattern).count() + 1;
+    let markers = &mut piano::pattern_mut(s).markers;
+    let n = markers.iter().filter(|m| m.kind == 0).count() + 1;
     let name = format!("Marker {n}");
-    let at = s.piano.markers.partition_point(|m| (m.0, m.1) <= (pattern, tick));
-    s.piano.markers.insert(at, (pattern, tick, name.clone()));
+    let at = markers.partition_point(|m| m.position <= tick);
+    markers.insert(at, os_model::TimeMarker::new(tick, &name));
     let bar = tick / (step * 16) + 1;
     format!("Piano roll: added \"{name}\" at bar {bar}")
 }

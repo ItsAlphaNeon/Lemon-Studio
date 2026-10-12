@@ -104,7 +104,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.veil(tab, t.window_title);
 
     overview(ui, s, &l, &g, notes, ch);
-    let markers: Vec<(u32, &str)> = s.piano.markers.iter().filter(|m| m.0 == s.pattern).map(|m| (m.1, m.2.as_str())).collect();
+    let markers: Vec<(u32, &str)> =
+        s.project.pattern(s.pattern).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, m.name.as_str())).collect();
     ruler(ui, &l, &g, range, s.piano.marker, &markers);
     // Lit keys: the one held with the mouse and this channel's notes playing now (§4).
     let mut lit: Vec<i32> = s.piano.held.into_iter().collect();

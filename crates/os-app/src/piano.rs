@@ -94,8 +94,6 @@ pub struct PianoState {
     pub row_h: f32,
     /// Ghost channels: other channels' notes of the pattern drawn dimmed (§5, Alt+V).
     pub ghosts: bool,
-    /// Time markers in the ruler (Alt+T, §10a): (pattern, tick, name). Not saved yet.
-    pub markers: Vec<(u16, u32, String)>,
     /// Random state of the Randomize and humanize tools (§11).
     pub rng: u64,
     sel: Vec<usize>,
@@ -123,7 +121,6 @@ impl Default for PianoState {
             range: None,
             row_h: ROW,
             ghosts: true,
-            markers: Vec::new(),
             rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1,
             sel: Vec::new(),
             sel_key: (0, 0),
