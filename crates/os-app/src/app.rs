@@ -165,6 +165,8 @@ pub enum Action {
     PianoVelocity,
     /// Event panel "Control" button and its menu entries (index into `Lane::ALL`).
     PianoLaneMenu,
+    /// Toolbar "Piano roll tools" button: the Tools menu (spec: ui/piano-roll.md §11).
+    PianoToolsMenu,
     PianoLanePick(usize),
     /// Arrow button of the pitch lane's scroll bar: +1 up, -1 down.
     PitchStep(i32),
@@ -570,6 +572,9 @@ pub enum Drag {
     /// Scroll axes from a start mouse position: value = start + (mouse - m0) × ratio per axis
     /// (ratio < 0 grabs the content, as with the middle button).
     Scroll { m0: (f32, f32), axes: Vec<(Scroll, bool, f32, f32)> },
+    /// Ctrl+middle-drag in the piano roll: vertical movement zooms the key rows around `y0` (up = taller rows,
+    /// spec: ui/piano-roll.md §3a).
+    PianoRowZoom { y0: f32, row0: f32 },
     /// Right-drag on a scroll bar: horizontal mouse movement scrolls the bar, vertical movement
     /// zooms its axis around the view centre (up = zoom in).
     BarZoom { t: Scroll, m0: (f32, f32), p0: f32, ratio: f32, z0: f32, center: f32, view: f32 },
@@ -803,7 +808,7 @@ pub struct App {
     pl_grid: Option<Rect>,
     /// Piano roll regions from the last paint (window, grid, velocity panel).
     piano_win: Option<Rect>,
-    piano_grid: Option<Rect>,
+    pub(crate) piano_grid: Option<Rect>,
     piano_panel: Option<Rect>,
     /// Sampler channel rows whose Open Sampler instance could not be created (not retried).
     sampler_failed: Vec<usize>,
@@ -2103,6 +2108,13 @@ impl App {
                     let _ = p0;
                     self.damage_win(scroll_win(t));
                 }
+                Drag::PianoRowZoom { y0, row0 } => {
+                    if let Some(g) = self.piano_geom() {
+                        let row = row0 * piano::ROW_ZOOM_STEP.powf((y0 - y) / piano::ROW_ZOOM_PX);
+                        piano::set_rows(&mut self.state, g.grid, y0, row);
+                        self.damage_win(Win::PianoRoll);
+                    }
+                }
                 Drag::Scroll { m0, axes } => {
                     for (t, vertical, p0, ratio) in axes {
                         let d = if vertical { y - m0.1 } else { x - m0.0 };
@@ -2620,6 +2632,10 @@ impl App {
             self.invalidate();
             return;
         }
+        if self.ctrl && matches!(action, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoKeys)) {
+            self.drag = Some(Drag::PianoRowZoom { y0: y, row0: self.state.piano.row_h });
+            return;
+        }
         let targets: &[Scroll] = match action {
             Some(Action::PianoGrid | Action::PianoNote(_)) => &[Scroll::PianoX, Scroll::PianoY],
             Some(Action::PianoKeys) => &[Scroll::PianoY],
@@ -3134,23 +3150,31 @@ impl App {
             return None;
         }
         if let Some(Action::Scrollbar(t)) = area {
-            let step = if t == Scroll::PianoY { views::piano::ROW * 3.0 } else { 60.0 };
+            let step = if t == Scroll::PianoY { self.state.piano.row_h * 3.0 } else { 60.0 };
             self.scroll_set(t, self.scroll_get(t) - (dy + dx) * step);
             return Some(scroll_win(t));
         }
+        // Piano roll (spec: ui/piano-roll.md §3a): Alt+wheel over the ruler zooms time; the keyboard takes the wheel
+        // like the grid (scroll, Ctrl = time zoom); the keys zoom with Ctrl+middle-drag.
+        if matches!(area, Some(Action::PianoRuler)) && self.alt {
+            let Some(g) = self.piano_geom() else { return None };
+            piano::zoom_time(&mut self.state, &g, x, dy + dx);
+            return Some(Win::PianoRoll);
+        }
         if matches!(area, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoKeys | Action::PianoVelocity)) {
             let Some(g) = self.piano_geom() else { return None };
-            let p = &mut self.state.piano;
             if ctrl {
                 // Zoom time around the mouse.
-                let tick = g.tick_at(x);
-                p.px_per_beat = (p.px_per_beat * 1.25f32.powf(dy + dx)).clamp(6.0, 1600.0);
-                let ppt = p.px_per_beat / f32::from(self.state.project.ppq.max(4));
-                p.scroll_x = (tick - (x - g.grid.x) / ppt).max(0.0);
-            } else if shift {
+                piano::zoom_time(&mut self.state, &g, x, dy + dx);
+                piano::clamp_scroll(&mut self.state, g.grid.h);
+                return Some(Win::PianoRoll);
+            }
+            let row = self.state.piano.row_h;
+            let p = &mut self.state.piano;
+            if shift {
                 p.scroll_x = (p.scroll_x - (dy + dx) * 120.0 / g.ppt).max(0.0);
             } else {
-                p.scroll_y -= dy * views::piano::ROW * 3.0;
+                p.scroll_y -= dy * row * 3.0;
                 p.scroll_x = (p.scroll_x - dx * 120.0 / g.ppt).max(0.0);
             }
             piano::clamp_scroll(&mut self.state, g.grid.h);
@@ -3285,6 +3309,11 @@ impl App {
             }
             return;
         }
+        // The piano roll's editing and tool keys (spec: ui/piano-roll.md §11).
+        let s = &self.state;
+        if s.shown(Win::PianoRoll) && !s.picker_open && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && crate::piano_tools::key(self, key, ctrl, alt) {
+            return;
+        }
         match key {
             Key::Named(NamedKey::Space) => self.act(if self.transport.playing() { Action::Stop } else { Action::Play }),
             Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
@@ -3334,18 +3363,6 @@ impl App {
                 let clip = self.state.piano.clipboard.clone();
                 piano::paste(&mut self.state, &clip, at);
                 self.state.piano.dirty = true;
-            }
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("b") && self.state.shown(Win::PianoRoll) => {
-                let s = &mut self.state;
-                let idx = piano::targets(s);
-                let notes = piano::notes(s);
-                let clip: Vec<Note> = idx.iter().filter_map(|&i| notes.get(i).copied()).collect();
-                let start = clip.iter().map(|n| n.position).min();
-                let end = clip.iter().map(|n| n.position + piano::shown_len(s, n)).max();
-                if let (Some(a), Some(b)) = (start, end) {
-                    piano::paste(s, &clip, b.max(a + 1));
-                    s.piano.dirty = true;
-                }
             }
             Key::Named(k @ (NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::ArrowUp | NamedKey::ArrowDown))
                 if self.state.shown(Win::PianoRoll) =>
@@ -3418,7 +3435,8 @@ impl App {
             self.typing_lit_changed();
             return true;
         }
-        if !self.typing_on() || ctrl || alt {
+        // Ctrl / Alt / Shift combinations stay shortcuts (Shift+D, Shift+Q in the piano roll).
+        if !self.typing_on() || ctrl || alt || self.shift {
             return false;
         }
         if matches!(code, KeyCode::NumpadAdd | KeyCode::NumpadSubtract) {
@@ -3939,6 +3957,10 @@ impl App {
                 self.hint = Cow::Owned(s.knob_text(id));
             }
             Action::PianoLaneMenu => s.lane_menu = true,
+            Action::PianoToolsMenu => {
+                let (x, y) = self.mouse;
+                s.playlist.popup = Some(crate::piano_tools::tools_menu(s, x - 6.0, y + 10.0));
+            }
             Action::PitchStep(dir) => {
                 s.piano.pitch_center = piano::clamp_pitch_center(s.piano.pitch_center + dir * piano::PITCH_STEP);
             }
@@ -6124,6 +6146,186 @@ mod tests {
         assert_eq!(app.state.piano.range, None, "other selections don't shade");
     }
 
+    /// Piano-roll shortcuts (spec: ui/piano-roll.md §3a, §10a, §11): edits, tool menus, ghosts, markers, channel
+    /// cycling and the wheel zooms, driven through `App::key` / `App::wheel` like the shell does.
+    #[test]
+    fn piano_shortcuts() {
+        use crate::piano_tools::{Arp, NCmd, Sub};
+        use crate::playlist::Cmd;
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        frame(&mut app, &mut c, None);
+        let ch = piano::channel(&app.state).unwrap();
+        let mine = |app: &App| -> Vec<(u32, u32, u16)> {
+            piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length, n.key)).collect()
+        };
+        let put = |app: &mut App, notes: &[(u32, u32, u16)]| {
+            let p = piano::pattern_mut(&mut app.state);
+            p.notes.retain(|n| n.channel != ch);
+            for &(pos, length, key) in notes {
+                p.notes.push(Note { length, key, ..Note::step(ch, pos) });
+            }
+            p.notes.sort_by_key(|n| n.position);
+            app.state.piano.clear_selection();
+        };
+        let key = |app: &mut App, k: &str, ctrl: bool, alt: bool, shift: bool| {
+            app.shift = shift;
+            app.key(&Key::Character(k.into()), ctrl, alt);
+            app.shift = false;
+        };
+
+        // Ctrl+Q quantizes starts and lengths, Shift+Q only starts (nothing selected = every note).
+        put(&mut app, &[(30, 40, 60)]);
+        key(&mut app, "q", true, false, false);
+        assert_eq!(mine(&app), vec![(24, 48, 60)]);
+        put(&mut app, &[(30, 40, 60)]);
+        key(&mut app, "Q", false, false, true);
+        assert_eq!(mine(&app), vec![(24, 40, 60)]);
+        // Ctrl+Z undoes it.
+        key(&mut app, "z", true, false, false);
+        assert_eq!(mine(&app), vec![(30, 40, 60)]);
+
+        // Shift+D: one step long; Ctrl+U chops at the steps; Ctrl+G glues them back.
+        put(&mut app, &[(0, 96, 60)]);
+        key(&mut app, "D", false, false, true);
+        assert_eq!(mine(&app), vec![(0, 24, 60)]);
+        put(&mut app, &[(0, 72, 60)]);
+        key(&mut app, "u", true, false, false);
+        assert_eq!(mine(&app), vec![(0, 24, 60), (24, 24, 60), (48, 24, 60)]);
+        key(&mut app, "g", true, false, false);
+        assert_eq!(mine(&app), vec![(0, 72, 60)]);
+        // Ctrl+L: legato.
+        put(&mut app, &[(0, 10, 60), (48, 10, 62)]);
+        key(&mut app, "l", true, false, false);
+        assert_eq!(mine(&app), vec![(0, 48, 60), (48, 10, 62)]);
+        // A selection limits the edit and follows the results.
+        put(&mut app, &[(0, 72, 60), (96, 72, 62)]);
+        let first = piano::notes(&app.state).iter().position(|n| n.channel == ch && n.key == 60).unwrap();
+        app.state.piano.select(app.state.pattern, ch, vec![first]);
+        key(&mut app, "u", true, false, false);
+        assert_eq!(mine(&app), vec![(0, 24, 60), (24, 24, 60), (48, 24, 60), (96, 72, 62)]);
+        assert_eq!(app.state.piano.selection(app.state.pattern, Some(ch)).len(), 3);
+        // Ctrl+X cuts the selection, Ctrl+D deselects.
+        key(&mut app, "x", true, false, false);
+        assert_eq!(mine(&app), vec![(96, 72, 62)]);
+        assert_eq!(app.state.piano.clipboard.len(), 3);
+
+        // Alt+S / A / R / Q / U open their preset menus; picking an entry runs it.
+        put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
+        for (k, sub) in [("s", Sub::Strum), ("a", Sub::Arpeggiate), ("r", Sub::Randomize), ("q", Sub::Quantize), ("u", Sub::Chop)] {
+            key(&mut app, k, false, true, false);
+            let pop = app.state.playlist.popup.take().unwrap_or_else(|| panic!("Alt+{k} opens a menu"));
+            assert!(pop.items.iter().all(|i| i.sep || matches!(i.cmd, Cmd::Piano(_))), "{sub:?}");
+        }
+        crate::playlist::run(&mut app, Cmd::Piano(NCmd::Strum { up: true, n: 64 }));
+        assert_eq!(mine(&app).iter().map(|n| n.0).collect::<Vec<_>>(), vec![0, 6, 12]);
+        put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
+        crate::playlist::run(&mut app, Cmd::Piano(NCmd::Arpeggiate(Arp::Up, 16)));
+        assert_eq!(mine(&app).iter().map(|n| n.2).collect::<Vec<_>>(), vec![60, 64, 67, 60]);
+        frame(&mut app, &mut c, None);
+
+        // The toolbar's tools button opens the Tools menu.
+        let r = hit_rect(&app, &Action::PianoToolsMenu);
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert!(app.state.playlist.popup.take().is_some_and(|p| p.items.iter().any(|i| i.cmd == Cmd::Piano(NCmd::Glue))));
+
+        // Alt+V hides and shows the ghost channels.
+        assert!(app.state.piano.ghosts);
+        key(&mut app, "v", false, true, false);
+        assert!(!app.state.piano.ghosts);
+        frame(&mut app, &mut c, None);
+        key(&mut app, "v", false, true, false);
+        assert!(app.state.piano.ghosts);
+
+        // Alt+T adds a time marker at the play-start marker (stopped), snapped to a step.
+        app.state.piano.marker = 200;
+        key(&mut app, "t", false, true, false);
+        assert_eq!(piano::pattern_mut(&mut app.state).markers, vec![os_model::TimeMarker::new(192, "Marker 1")]);
+        // It is saved with the pattern and comes back on open.
+        let path = std::env::temp_dir().join(format!("os_piano_marker_{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", app.state.message);
+        app.open(path.clone());
+        let _ = std::fs::remove_file(&path);
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        assert_eq!(piano::pattern_mut(&mut app.state).markers, vec![os_model::TimeMarker::new(192, "Marker 1")]);
+        frame(&mut app, &mut c, None);
+
+        // Ctrl+K cycles to the next channel, wrapping; with the typing keyboard off G / K step too.
+        let n = app.state.project.channels.len();
+        key(&mut app, "k", true, false, false);
+        assert_eq!(app.state.selected_channel, 1);
+        if app.typing_on() {
+            app.toggle_typing();
+        }
+        key(&mut app, "g", false, false, false);
+        key(&mut app, "g", false, false, false);
+        assert_eq!(app.state.selected_channel, n - 1);
+        // H / J skip channels without notes in the pattern.
+        key(&mut app, "j", false, false, false);
+        assert!(piano::notes(&app.state).iter().any(|nt| Some(nt.channel) == piano::channel(&app.state)));
+        app.state.selected_channel = 0;
+        frame(&mut app, &mut c, None);
+
+        // The wheel over the keyboard scrolls like the grid and Ctrl+wheel there zooms time; Ctrl+middle-drag zooms
+        // the keys around the press (up = taller); Alt+wheel over the ruler and PgUp / PgDn zoom time.
+        let keys = hit_rect(&app, &Action::PianoKeys);
+        app.mouse_move(keys.cx(), keys.cy());
+        let sy = app.state.piano.scroll_y;
+        app.wheel(0.0, 1.0, false, false);
+        assert!(app.state.piano.scroll_y < sy, "wheel up over the keys scrolls up");
+        assert_eq!(app.state.piano.row_h, views::piano::ROW);
+        let z = app.state.piano.px_per_beat;
+        app.wheel(0.0, 1.0, false, true);
+        assert!(app.state.piano.px_per_beat > z, "Ctrl+wheel over the keys zooms time");
+        assert_eq!(app.state.piano.row_h, views::piano::ROW);
+        frame(&mut app, &mut c, None);
+        for area in [Action::PianoKeys, Action::PianoGrid] {
+            let r = hit_rect(&app, &area);
+            let (x, y) = (r.cx(), r.cy());
+            app.state.piano.row_h = views::piano::ROW;
+            app.mouse_move(x, y);
+            let k0 = app.piano_geom().unwrap().key_at(y);
+            app.ctrl = true;
+            app.mouse_down_middle();
+            app.ctrl = false;
+            app.mouse_move(x, y - 60.0);
+            assert!(app.state.piano.row_h > views::piano::ROW, "{area:?}: dragging up makes rows taller");
+            assert_eq!(app.piano_geom().unwrap().key_at(y), k0, "{area:?}: the key at the press stays");
+            app.mouse_move(x, y + 200.0);
+            assert_eq!(app.state.piano.row_h, piano::MIN_ROW, "{area:?}: dragging down shrinks to the minimum");
+            app.mouse_up();
+            frame(&mut app, &mut c, None);
+        }
+        // Without Ctrl the middle button still pans.
+        app.state.piano.row_h = views::piano::ROW;
+        let r = hit_rect(&app, &Action::PianoGrid);
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_middle();
+        app.mouse_move(r.cx(), r.cy() - 40.0);
+        app.mouse_up();
+        assert_eq!(app.state.piano.row_h, views::piano::ROW);
+        frame(&mut app, &mut c, None);
+        let z = app.state.piano.px_per_beat;
+        let ruler = hit_rect(&app, &Action::PianoRuler);
+        app.mouse_move(ruler.cx(), ruler.cy());
+        app.alt = true;
+        app.wheel(0.0, 1.0, false, false);
+        app.alt = false;
+        assert!(app.state.piano.px_per_beat > z);
+        let z = app.state.piano.px_per_beat;
+        app.key(&Key::Named(NamedKey::PageDown), false, false);
+        assert!(app.state.piano.px_per_beat < z);
+        frame(&mut app, &mut c, None);
+    }
+
     /// Piano roll edits repaint only damaged regions; the result must match a full repaint.
     #[test]
     fn piano_damage_matches_full() {
@@ -6903,6 +7105,40 @@ mod tests {
             frame(&mut app, &mut c, None);
             c.pixmap.save_png(dir.join(name)).unwrap();
         }
+    }
+
+    /// Look check for the piano roll's vertical zoom, time markers and Tools menu (spec: ui/piano-roll.md §3a, §10a,
+    /// §11): `OS_SHOT_DIR=dir cargo test -p os-app piano_shots -- --ignored`.
+    #[test]
+    #[ignore]
+    fn piano_shots() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        app.state.project.patterns[0].notes = (0..16).map(|i| Note { length: 24, key: 60 + (i % 5) as u16 * 2, ..Note::step(0, i * 48) }).collect();
+        app.state.project.patterns[0].notes.push(Note { length: 96, key: 55, ..Note::step(1, 96) });
+        crate::piano_tools::add_marker(&mut app.state, 384);
+        frame(&mut app, &mut c, None);
+        let grid = app.piano_grid.unwrap();
+        piano::center_keys(&mut app.state, grid.h);
+        for (name, row) in [("piano_row18.png", 18.0), ("piano_row30.png", 30.0), ("piano_row8.png", 8.0)] {
+            let y = grid.cy();
+            piano::set_rows(&mut app.state, grid, y, row);
+            app.state.piano.row_h = row;
+            frame(&mut app, &mut c, None);
+            c.pixmap.save_png(dir.join(name)).unwrap();
+        }
+        app.state.piano.row_h = views::piano::ROW;
+        piano::center_keys(&mut app.state, grid.h);
+        let mut popup = crate::piano_tools::tools_menu(&app.state, 240.0, 120.0);
+        popup.sub = popup.items.iter().position(|i| i.label == "Strum");
+        app.state.playlist.popup = Some(popup);
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(dir.join("piano_tools_menu.png")).unwrap();
     }
 
     /// Mixer look with routing, a sidechain, slots, meters and the menus: `OS_SHOT_DIR=dir cargo test -p os-app

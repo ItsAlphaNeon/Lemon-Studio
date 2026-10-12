@@ -90,6 +90,12 @@ pub struct PianoState {
     /// Time selection made by right-dragging the ruler (ticks, start..end); the only selection
     /// that shades the grid (§10).
     pub range: Option<(u32, u32)>,
+    /// Key row pitch in pixels (vertical zoom, §3a; the measured default is [`ROW`]).
+    pub row_h: f32,
+    /// Ghost channels: other channels' notes of the pattern drawn dimmed (§5, Alt+V).
+    pub ghosts: bool,
+    /// Random state of the Randomize and humanize tools (§11).
+    pub rng: u64,
     sel: Vec<usize>,
     sel_key: (u16, u16),
     undo: Vec<(u16, Vec<Note>, Vec<ControlPoint>)>,
@@ -113,6 +119,9 @@ impl Default for PianoState {
             zoom_back: None,
             marker: 0,
             range: None,
+            row_h: ROW,
+            ghosts: true,
+            rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1,
             sel: Vec::new(),
             sel_key: (0, 0),
             undo: Vec::new(),
@@ -142,7 +151,7 @@ impl PianoState {
 
     /// Forget everything tied to the previous project.
     pub fn reset(&mut self) {
-        *self = PianoState { px_per_beat: self.px_per_beat, tool: self.tool, ..PianoState::default() };
+        *self = PianoState { px_per_beat: self.px_per_beat, row_h: self.row_h, ghosts: self.ghosts, tool: self.tool, rng: self.rng, ..PianoState::default() };
     }
 }
 
@@ -152,6 +161,8 @@ pub struct Geom {
     pub ppt: f32,
     pub scroll_x: f32,
     pub scroll_y: f32,
+    /// Key row pitch in pixels (§3a).
+    pub row: f32,
     pub step: u32,
     pub beat: u32,
     pub bar: u32,
@@ -165,6 +176,7 @@ impl Geom {
             ppt: s.piano.px_per_beat / ppq as f32,
             scroll_x: s.piano.scroll_x,
             scroll_y: s.piano.scroll_y,
+            row: s.piano.row_h,
             step: ppq / 4,
             beat: ppq,
             bar: ppq * 4,
@@ -179,13 +191,13 @@ impl Geom {
         self.scroll_x + (x - self.grid.x) / self.ppt
     }
 
-    /// Top of `key`'s row (17 px of fill, then the separator).
+    /// Top of `key`'s row (`row - 1` px of fill, then the separator).
     pub fn y_of(&self, key: i32) -> f32 {
-        self.grid.y + (TOP_KEY - key) as f32 * ROW - self.scroll_y
+        self.grid.y + (TOP_KEY - key) as f32 * self.row - self.scroll_y
     }
 
     pub fn key_at(&self, y: f32) -> i32 {
-        TOP_KEY - ((y - self.grid.y + self.scroll_y) / ROW).floor() as i32
+        TOP_KEY - ((y - self.grid.y + self.scroll_y) / self.row).floor() as i32
     }
 
     /// Keys with at least one visible pixel, lowest first.
@@ -204,7 +216,7 @@ impl Geom {
         let len = if n.length == 0 { self.step } else { n.length };
         let x = self.x_of(n.position as f32);
         let w = (len as f32 * self.ppt).max(3.0);
-        Some(Rect::new(x, self.y_of(key) - 1.0, w, 19.0))
+        Some(Rect::new(x, self.y_of(key) - 1.0, w, self.row + 1.0))
     }
 
     /// Snap a tick down to the step grid.
@@ -356,7 +368,7 @@ impl Lane {
             _ => 1.0,
         }
     }
-    fn max(self) -> f32 {
+    pub fn max(self) -> f32 {
         self.scale().min(255.0)
     }
     /// Bipolar lanes draw their stem from the centre line.
@@ -638,15 +650,45 @@ pub fn center_keys(s: &mut State, view_h: f32) {
         (Some(lo), Some(hi)) => (lo + hi) as f32 / 2.0,
         _ => 60.0,
     };
-    let max = (TOP_KEY + 1) as f32 * ROW - view_h;
-    s.piano.scroll_y = ((TOP_KEY as f32 - center) * ROW - view_h / 2.0 + ROW / 2.0).clamp(0.0, max.max(0.0)).round();
+    let row = s.piano.row_h;
+    let max = (TOP_KEY + 1) as f32 * row - view_h;
+    s.piano.scroll_y = ((TOP_KEY as f32 - center) * row - view_h / 2.0 + row / 2.0).clamp(0.0, max.max(0.0)).round();
     s.piano.scroll_x = 0.0;
 }
 
 pub fn clamp_scroll(s: &mut State, view_h: f32) {
-    let max = ((TOP_KEY + 1) as f32 * ROW - view_h).max(0.0);
+    let max = ((TOP_KEY + 1) as f32 * s.piano.row_h - view_h).max(0.0);
     s.piano.scroll_y = s.piano.scroll_y.clamp(0.0, max).round();
     s.piano.scroll_x = s.piano.scroll_x.max(0.0);
+}
+
+/// Smallest and largest key row pitch of the vertical zoom (§3a).
+pub const MIN_ROW: f32 = 6.0;
+pub const MAX_ROW: f32 = 48.0;
+
+/// Ctrl+middle-drag zooms the key rows by [`ROW_ZOOM_STEP`] per [`ROW_ZOOM_PX`] of vertical movement (§3a).
+pub const ROW_ZOOM_STEP: f32 = 1.15;
+pub const ROW_ZOOM_PX: f32 = 12.0;
+
+/// Vertical zoom: set the key row pitch, keeping the key at window y `y` in place (§3a). Rows stay whole pixels
+/// (clamped to [`MIN_ROW`]..[`MAX_ROW`]) so the grid lines stay sharp.
+pub fn set_rows(s: &mut State, grid: Rect, y: f32, row: f32) {
+    let old = s.piano.row_h;
+    let new = row.round().clamp(MIN_ROW, MAX_ROW);
+    let at = (y - grid.y).clamp(0.0, grid.h);
+    let rows = (at + s.piano.scroll_y) / old;
+    s.piano.row_h = new;
+    s.piano.scroll_y = rows * new - at;
+    clamp_scroll(s, grid.h);
+}
+
+/// Time zoom by `notches` wheel notches around grid x `x` (§3a).
+pub fn zoom_time(s: &mut State, g: &Geom, x: f32, notches: f32) {
+    let tick = g.tick_at(x);
+    let p = &mut s.piano;
+    p.px_per_beat = (p.px_per_beat * 1.25f32.powf(notches)).clamp(6.0, 1600.0);
+    let ppt = p.px_per_beat / f32::from(s.project.ppq.max(4));
+    p.scroll_x = (tick - (x - g.grid.x) / ppt).max(0.0);
 }
 
 #[cfg(test)]

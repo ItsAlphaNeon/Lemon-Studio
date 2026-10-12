@@ -569,6 +569,10 @@ pub struct Pattern {
     /// Loop mode off with loop lengths kept: the loop type value (metadata events 26 = 1 and 162; 3 = loop step
     /// channels, 2 = loop all channels). `None` = loop mode on (or no loops).
     pub loop_off: Option<u32>,
+    /// The pattern's own time markers (piano-roll Alt+T markers, time signatures, kinds kept as read), sorted by
+    /// position; the "Length" marker is not among them (it follows `length`). Metadata marker groups (spec:
+    /// flp/events/patterns.md, metadata block).
+    pub markers: Vec<TimeMarker>,
 }
 
 impl Pattern {
