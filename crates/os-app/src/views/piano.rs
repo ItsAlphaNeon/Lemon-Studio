@@ -9,7 +9,7 @@ use crate::app::{Action, Live, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
 use crate::piano::{self, Geom, Lane, Overlay, Tool};
 
-/// Grid row pitch: 17 px of fill plus a 1 px separator (§3).
+/// Default grid row pitch: 17 px of fill plus a 1 px separator (§3); the vertical zoom changes it (§3a).
 pub const ROW: f32 = 18.0;
 /// Highest key shown (B10); the lowest is 0 (C0) (§3).
 pub const TOP_KEY: i32 = 131;
@@ -104,7 +104,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.veil(tab, t.window_title);
 
     overview(ui, s, &l, &g, notes, ch);
-    ruler(ui, &l, &g, range, s.piano.marker);
+    let markers: Vec<(u32, &str)> = s.piano.markers.iter().filter(|m| m.0 == s.pattern).map(|m| (m.1, m.2.as_str())).collect();
+    ruler(ui, &l, &g, range, s.piano.marker, &markers);
     // Lit keys: the one held with the mouse and this channel's notes playing now (§4).
     let mut lit: Vec<i32> = s.piano.held.into_iter().collect();
     lit.extend(s.piano.typed.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| k));
@@ -113,11 +114,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     keyboard(ui, &l, &g, &lit);
     grid(ui, &l, &g, range);
 
-    // Notes: ghosts of the other channels first, then this channel's (§5).
+    // Notes: ghosts of the other channels first (when shown, Alt+V), then this channel's (§5).
     ui.hit(l.grid, Action::PianoGrid, "Piano roll: click to add a note, drag a note to move it or its end to resize, right-click to delete");
     ui.c.push_clip(l.grid);
     let ghost = t.text_faint.with_alpha(110);
-    for n in notes.iter().filter(|n| Some(n.channel) != ch) {
+    for n in notes.iter().filter(|n| s.piano.ghosts && Some(n.channel) != ch) {
         if let Some(nr) = g.note_rect(n).filter(|nr| nr.intersect(&l.grid).w > 0.0) {
             ui.c.stroke_rrect(nr.inset(1.5), 2.0, 1.0, ghost);
         }
@@ -161,7 +162,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
                 at += iv;
             }
         }
-        if nr.w > 12.0 {
+        if nr.w > 12.0 && g.row >= 13.0 {
             let label = key_name(i32::from(n.key));
             let w = ui.c.text_width(label_font, &label);
             let shown = if w <= nr.w - 5.0 { label } else { format!("{}..", &label[..1]) };
@@ -204,7 +205,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     arrow_button(ui, up, 2, Scroll::PianoY);
     arrow_button(ui, down, 3, Scroll::PianoY);
     let track = Rect::new(l.vscroll.x + 1.0, up.bottom(), l.vscroll.w - 2.0, (down.y - up.bottom()).max(0.0));
-    super::scrollbar(ui, track, true, s.piano.scroll_y, l.grid.h, (TOP_KEY + 1) as f32 * ROW, Scroll::PianoY);
+    super::scrollbar(ui, track, true, s.piano.scroll_y, l.grid.h, (TOP_KEY + 1) as f32 * g.row, Scroll::PianoY);
 
     velocity_panel(ui, s, &l, &g, notes, ch, &sel);
     if s.lane_menu {
@@ -246,7 +247,7 @@ fn toolbar(ui: &mut Ui, r: Rect, shift: f32, active: Tool) {
     let ox = r.x - 209.0 + shift;
     let items: [(f32, Icon, &'static str, Option<Action>); 15] = [
         (222.0, Icon::ArrowRight, "Piano roll options", None),
-        (242.0, Icon::MidiControl, "Piano roll tools", None),
+        (242.0, Icon::MidiControl, "Piano roll tools: quantize, chop, glue, strum, arpeggiate, randomize...", Some(Action::PianoToolsMenu)),
         (263.0, Icon::Magnet, "Piano roll snap", None),
         (283.0, Icon::Note, "Note properties", None),
         (305.0, Icon::Blend, "Scale and chord helpers", None),
@@ -300,7 +301,7 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     }
 }
 
-fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u32) {
+fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u32, markers: &[(u32, &str)]) {
     let t = ui.t;
     let rr = l.ruler;
     ui.hit(Rect::new(l.grid.x, rr.y, l.grid.w, rr.h), Action::PianoRuler, "Drag: move the play start - right-drag: select a time range");
@@ -326,6 +327,18 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u
         }
         let x = g.x_of((b * i64::from(g.bar)) as f32);
         ui.c.text(Font::new(13), x + 2.0, rr.y + 1.0, t.text_dim, &format!("{}", b + 1));
+    }
+    // Time markers (§10a): a flag line and the name, drawn like the playlist's marker tabs.
+    for &(tick, name) in markers {
+        let x = g.x_of(tick as f32).round();
+        if x < l.grid.x - 200.0 || x > l.grid.right() {
+            continue;
+        }
+        let w = ui.c.text_width(Font::new(12), name) + 8.0;
+        let tab = Rect::new(x, rr.y + 1.0, w, 15.0);
+        ui.c.fill_rect(tab, t.window_title);
+        ui.c.fill_rect(Rect::new(x, rr.y + 1.0, 1.0, rr.h - 1.0), t.text);
+        ui.c.text(Font::new(12), x + 4.0, rr.y + 2.0, t.text, name);
     }
     // Play-start marker: an orange downward triangle (§10, colours sampled from FL).
     let mx = g.x_of(marker as f32).round() + 0.5;
@@ -353,10 +366,11 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
     ui.c.fill_rect(Rect::new(k.right() - 1.0, k.y, 1.0, k.h), ui.t.s(0x7e8289));
     let (lo, hi) = g.visible_keys();
     // Lit white keys: the row plus half of each neighbouring black row (the white-key shape).
+    let (row, half) = (g.row, (g.row / 2.0).floor());
     for &key in lit.iter().filter(|&&key| !is_black(key) && (lo..=hi).contains(&key)) {
         let y = g.y_of(key);
-        let top = if is_black(key + 1) { y - 9.0 } else { y };
-        let bottom = if is_black(key - 1) { y + 26.0 } else { y + 17.0 };
+        let top = if is_black(key + 1) { y - half } else { y };
+        let bottom = if is_black(key - 1) { y + row - 1.0 + half } else { y + row - 1.0 };
         for i in 0..bands {
             let x = k.x + (k.w - 1.0) * i as f32 / bands as f32;
             let w = (k.w - 1.0) / bands as f32 + 1.0;
@@ -373,13 +387,15 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
                 // C: darker key, extended half a row up on the right; octave label.
                 if !lit.contains(&key) {
                     let left = t.key_white_left.shade(-0.16);
-                    ui.c.fill_rect_gradient(Rect::new(k.x, y, 45.0, 17.0), left, left, 0.0);
-                    ui.c.fill_rect(Rect::new(k.x + 45.0, y - 9.0, k.w - 46.0, 26.0), t.key_c);
+                    ui.c.fill_rect_gradient(Rect::new(k.x, y, 45.0, row - 1.0), left, left, 0.0);
+                    ui.c.fill_rect(Rect::new(k.x + 45.0, y - half, k.w - 46.0, row - 1.0 + half), t.key_c);
                 }
-                ui.c.text_right(Font::new(12), k.right() - 4.0, y + 1.0, t.key_label, &key_name(key));
-                ui.c.fill_rect(Rect::new(k.x, y + 17.0, k.w - 1.0, 1.0), sep);
+                if row >= 10.0 {
+                    ui.c.text_right(Font::new(12), k.right() - 4.0, y + 1.0 + (row - ROW) / 2.0, t.key_label, &key_name(key));
+                }
+                ui.c.fill_rect(Rect::new(k.x, y + row - 1.0, k.w - 1.0, 1.0), sep);
             }
-            5 => ui.c.fill_rect(Rect::new(k.x, y + 17.0, k.w - 1.0, 1.0), sep),
+            5 => ui.c.fill_rect(Rect::new(k.x, y + row - 1.0, k.w - 1.0, 1.0), sep),
             _ => {}
         }
     }
@@ -391,7 +407,7 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
                 let c = left.mix(right, i as f32 / 5.0);
                 let x = k.x + if i == 0 { 0.0 } else { 10.0 + 8.0 * (i - 1) as f32 };
                 let w = if i == 0 { 10.0 } else if i == 5 { 3.0 } else { 8.0 };
-                ui.c.fill_rect(Rect::new(x, y, w, 18.0), c);
+                ui.c.fill_rect(Rect::new(x, y, w, row), c);
             }
         }
     }
@@ -450,9 +466,9 @@ fn grid_rows(ui: &mut Ui, l: &Layout, g: &Geom, clip: Rect, selecting: bool) {
     for key in lo..=hi {
         let y = g.y_of(key);
         let fill = if is_black(key) { black } else { white };
-        ui.c.fill_rect(Rect::new(gr.x, y, gr.w, 17.0), fill);
-        ui.c.fill_rect(Rect::new(gr.x, y + 17.0, gr.w, 1.0), sub(white, 0x0a));
-        bands.push((y, 17.0, fill));
+        ui.c.fill_rect(Rect::new(gr.x, y, gr.w, g.row - 1.0), fill);
+        ui.c.fill_rect(Rect::new(gr.x, y + g.row - 1.0, gr.w, 1.0), sub(white, 0x0a));
+        bands.push((y, g.row - 1.0, fill));
     }
     let bar = if selecting { ui.t.s(0x0e080c) } else { t.pr_bar };
     columns(ui, g, gr, &bands, bar);

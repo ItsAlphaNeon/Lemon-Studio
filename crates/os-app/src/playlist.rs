@@ -279,6 +279,8 @@ pub enum Cmd {
     Preset(crate::presets::PCmd),
     /// A Misc tab list entry: rack row, value, new value (spec: ui/plugin-window.md "Misc tab").
     Misc(usize, crate::misc_page::M, f32),
+    /// Piano roll Tools menu (spec: ui/piano-roll.md §11).
+    Piano(crate::piano_tools::NCmd),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2548,6 +2550,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
         Cmd::Param(c) => return app.params_cmd(c),
         Cmd::Preset(c) => return crate::presets::run(app, c),
+        Cmd::Piano(c) => {
+            let m = crate::piano_tools::run(app, c);
+            app.invalidate();
+            return m;
+        }
         Cmd::Misc(row, m, v) => {
             crate::misc::set(app, row, m, v);
             return None;
@@ -2591,7 +2598,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let s = &mut app.state;
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
