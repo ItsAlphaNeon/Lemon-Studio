@@ -1,7 +1,6 @@
 //! Knobs: one value model for every rotary control, dragged vertically like FL's (spec: ui/knobs.md).
 //!
-//! Values are normalised 0..1. Knobs backed by the project (mixer pan, channel volume / pan) read and
-//! write the model; the rest live in `State::knobs` and are not connected to the engine yet.
+//! Values are normalised 0..1. Every knob reads and writes the project model.
 
 use crate::app::State;
 
@@ -14,10 +13,9 @@ pub const PER_NOTCH: f32 = 1.0 / 64.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum KnobId {
-    /// The toolbar's main volume and pitch: not connected to the sound yet, so the toolbar greys them out.
-    #[allow(dead_code)]
+    /// The toolbar's main volume (stored 0..16000, 12800 = unity at 0.8) and main pitch (-1200..1200 cents) (model
+    /// `Project::main_volume` / `main_pitch`; spec: audio/mixer.md "Main volume", audio/voice-levels.md).
     MasterVol,
-    #[allow(dead_code)]
     MasterPitch,
     /// Mixer track pan (model).
     MixPan(u16),
@@ -96,7 +94,8 @@ impl State {
             KnobId::ChanPan(i) => self.project.channels.get(i).map_or(0.5, |c| 0.5 + c.pan as f32 / 2.0).clamp(0.0, 1.0),
             // Main swing is project data, 0..=128 (spec: flp/events/project-info.md, event 11).
             KnobId::Swing => f32::from(self.project.swing.unwrap_or(0).min(128)) / 128.0,
-            _ => self.knobs.get(&id).copied().unwrap_or_else(|| id.default_value()),
+            KnobId::MasterVol => f32::from(self.project.main_volume.unwrap_or(os_model::Project::MAIN_VOLUME_DEFAULT).min(16000)) / 16000.0,
+            KnobId::MasterPitch => (0.5 + f32::from(self.project.main_pitch.unwrap_or(0)) / 2400.0).clamp(0.0, 1.0),
         }
     }
 
@@ -152,8 +151,13 @@ impl State {
                 self.project.swing = Some((v * 128.0).round() as u8);
                 self.piano.dirty = true;
             }
-            _ => {
-                self.knobs.insert(id, v);
+            KnobId::MasterVol => {
+                self.project.main_volume = Some((v * 16000.0).round() as u16);
+                self.piano.dirty = true;
+            }
+            KnobId::MasterPitch => {
+                self.project.main_pitch = Some(((v - 0.5) * 2400.0).round() as i16);
+                self.piano.dirty = true;
             }
         }
     }
@@ -164,9 +168,10 @@ impl State {
         let bipolar = (n - 0.5) * 2.0;
         match id {
             KnobId::MasterVol => {
-                let g = n / 0.8;
+                // The gain is the level curve of stored / 12800 (spec: audio/mixer.md "Main volume").
+                let g = os_dsp::level::curve(n / 0.8);
                 let db = if g > 0.0 { format!("{:.1}dB", 20.0 * g.log10()) } else { "-inf dB".into() };
-                format!("Main volume: {:.0}%  {db}  {g:.2}", g * 100.0)
+                format!("Main volume: {:.0}%  {db}  {g:.2}", n / 0.8 * 100.0)
             }
             KnobId::MasterPitch => format!("Master pitch: {:.0} cents", bipolar * 1200.0),
             KnobId::MixPan(_) => format!("Panning: {}", pan_text(bipolar)),

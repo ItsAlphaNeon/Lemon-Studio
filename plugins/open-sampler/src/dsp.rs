@@ -599,6 +599,9 @@ pub fn declick(mode: i32) -> (f64, f64, bool) {
         3 => (20.0, 20.0, true),
         4 => (100.0, 100.0, true),
         5 => (200.0, 200.0, true),
+        // Not offered in the settings, valid as stored data: no opening fade, a 2 ms closing fade, bleeding
+        // (spec: audio/declick.md). 7 and up name no preset in FL; they play as mode 0 here.
+        6 => (0.0, 2.0, true),
         _ => (0.0, 10.0, false),
     }
 }

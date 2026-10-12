@@ -690,8 +690,6 @@ pub struct State {
     pub pattern: u16,
     pub song_mode: bool,
     pub menu_open: Option<usize>,
-    /// Values of knobs that are not backed by the project (`knobs.rs`).
-    pub knobs: std::collections::HashMap<crate::knobs::KnobId, f32>,
     /// Piano roll event panel Control menu.
     pub lane_menu: bool,
     pub picker_open: bool,
@@ -931,7 +929,6 @@ impl App {
                 pattern: 1,
                 song_mode: false,
                 menu_open: None,
-                knobs: Default::default(),
                 lane_menu: false,
                 picker_open: false,
                 settings: Default::default(),
@@ -1202,15 +1199,12 @@ impl App {
         };
         // Deleted, cloned and moved channels are written by `apply` (os-flp `restructure`); it edits a copy so a
         // failed save leaves the loaded file as it was.
-        let mut lost = os_flp::project::unsaved_parts(&s.project, &file);
+        let lost = os_flp::project::unsaved_parts(&s.project, &file);
         // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, Lemon Studio status).
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
-        if s.project.mixer.iter().any(|m| m.polarity || m.swap) {
-            lost.push("polarity / swap buttons");
-        }
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))

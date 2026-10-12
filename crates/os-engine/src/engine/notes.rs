@@ -38,7 +38,8 @@ impl Rules {
 /// A note event for an instrument.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Note {
-    On { key: u8, vel: f32, start: f32 },
+    /// `fine`: the note's fine pitch in semitones, a tuning of its own on top of the channel's.
+    On { key: u8, vel: f32, start: f32, fine: f32 },
     Off(u8),
     Choke(u8),
     /// Tuning of the voices of a key, semitones from the key's own pitch.
@@ -106,11 +107,11 @@ impl Voices {
 pub(super) const OFF: f32 = -1.0;
 pub(super) const CHOKE: f32 = -2.0;
 
-/// Applies each channel's rules to one span's events `(channel, offset, key, velocity, start)` (sorted by offset) and
+/// Applies each channel's rules to one span's events `(channel, offset, key, velocity, start, fine)` (sorted by offset) and
 /// adds the glides' tuning steps; `out` gets `(channel, offset, note)` sorted by channel, then offset.
-pub(super) fn apply(events: &[(usize, u32, u8, f32, f32)], rules: &[Rules], voices: &mut [Voices], n: u32, out: &mut Vec<(usize, u32, Note)>) {
+pub(super) fn apply(events: &[(usize, u32, u8, f32, f32, f32)], rules: &[Rules], voices: &mut [Voices], n: u32, out: &mut Vec<(usize, u32, Note)>) {
     out.clear();
-    for &(c, off, key, vel, start) in events {
+    for &(c, off, key, vel, start, fine) in events {
         let (Some(r), true) = (rules.get(c).copied(), c < voices.len()) else { continue };
         if vel <= CHOKE {
             // An audio clip's end cuts the note it started.
@@ -173,7 +174,7 @@ pub(super) fn apply(events: &[(usize, u32, u8, f32, f32)], rules: &[Rules], voic
         }
         // A retriggered key: its old tuning ends with it.
         v.glides.retain(|g| g.key != key);
-        out.push((c, off, Note::On { key, vel, start }));
+        out.push((c, off, Note::On { key, vel, start, fine }));
         v.held.push((key, key));
         if let (true, Some(last)) = (r.porta, v.last) {
             if last != key && r.glide > 0 {
@@ -225,8 +226,9 @@ mod tests {
     use super::*;
 
     fn run(rules: &[Rules], voices: &mut [Voices], ev: &[(usize, u32, u8, f32, f32)], n: u32) -> Vec<(usize, u32, Note)> {
+        let ev: Vec<_> = ev.iter().map(|&(c, o, k, v, s)| (c, o, k, v, s, 0.0)).collect();
         let mut out = Vec::new();
-        apply(ev, rules, voices, n, &mut out);
+        apply(&ev, rules, voices, n, &mut out);
         out
     }
 
@@ -238,10 +240,10 @@ mod tests {
         assert_eq!(
             out.iter().map(|e| (e.1, e.2)).collect::<Vec<_>>(),
             vec![
-                (0, Note::On { key: 60, vel: 0.8, start: 0.0 }),
-                (10, Note::On { key: 62, vel: 0.8, start: 0.0 }),
+                (0, Note::On { key: 60, vel: 0.8, start: 0.0, fine: 0.0 }),
+                (10, Note::On { key: 62, vel: 0.8, start: 0.0, fine: 0.0 }),
                 (20, Note::Choke(60)),
-                (20, Note::On { key: 64, vel: 0.8, start: 0.0 }),
+                (20, Note::On { key: 64, vel: 0.8, start: 0.0, fine: 0.0 }),
             ]
         );
         // The cut note's own note off is dropped.
@@ -255,7 +257,7 @@ mod tests {
         let mut v = vec![Voices::default()];
         let out = run(&r, &mut v, &[(0, 0, 60, 0.8, 0.0), (0, 10, 67, 0.8, 0.0)], 128);
         assert_eq!(out[1].2, Note::Choke(60));
-        assert_eq!(out[2].2, Note::On { key: 67, vel: 0.8, start: 0.0 });
+        assert_eq!(out[2].2, Note::On { key: 67, vel: 0.8, start: 0.0, fine: 0.0 });
 
         let r = [Rules { mono: true, porta: true, glide: 100, ..Rules::default() }];
         let mut v = vec![Voices::default()];
@@ -279,7 +281,7 @@ mod tests {
         let mut v = vec![Voices::default()];
         run(&r, &mut v, &[(0, 0, 60, 0.8, 0.0), (0, 1, 60, OFF, 0.0)], 128);
         let out = run(&r, &mut v, &[(0, 50, 72, 0.8, 0.0)], 128);
-        assert_eq!(out[0].2, Note::On { key: 72, vel: 0.8, start: 0.0 });
+        assert_eq!(out[0].2, Note::On { key: 72, vel: 0.8, start: 0.0, fine: 0.0 });
         assert_eq!(out[1].2, Note::Tune(72, -12.0));
         // The glide continues over the next spans and ends at 0 at frame 50 + 300.
         let mut last = None;
@@ -301,7 +303,7 @@ mod tests {
         let mut v = vec![Voices::default(), Voices::default()];
         let out = run(&r, &mut v, &[(0, 0, 60, 0.8, 0.0), (1, 30, 60, 0.8, 0.0)], 128);
         assert!(out.contains(&(0, 30, Note::Choke(60))));
-        assert!(out.contains(&(1, 30, Note::On { key: 60, vel: 0.8, start: 0.0 })));
+        assert!(out.contains(&(1, 30, Note::On { key: 60, vel: 0.8, start: 0.0, fine: 0.0 })));
         assert!(all_plain(&[Rules::default()]));
     }
 }

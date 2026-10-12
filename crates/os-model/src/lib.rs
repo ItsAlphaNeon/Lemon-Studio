@@ -50,6 +50,16 @@ pub struct Project {
     pub play_truncated: Option<bool>,
     /// Playlist scroll, time zoom and track height (event 242). `None` = not in the file.
     pub playlist_view: Option<PlaylistView>,
+    /// Main volume 0..=16000, 12800 = unity (mixer record id 0 at place 0x4000; spec: audio/mixer.md "Main volume").
+    /// `None` = not in the file (12800).
+    pub main_volume: Option<u16>,
+    /// Main pitch in cents, -1200..=1200 (event 80; spec: audio/voice-levels.md). `None` = not in the file (0).
+    pub main_pitch: Option<i16>,
+}
+
+impl Project {
+    /// Default main volume (unity).
+    pub const MAIN_VOLUME_DEFAULT: u16 = 12800;
 }
 
 /// The playlist view a project stores: scroll, time zoom and track height (event 242, 28 bytes; spec:
@@ -297,7 +307,7 @@ pub struct ChannelSound {
     pub filter_type: i32,
     /// Sampler flags (event 143); value 8 = use the sample's loop points. `None` = not in the file.
     pub sampler_flags: Option<u32>,
-    /// Declick mode 0..=5 (event 215, byte 83).
+    /// Declick mode 0..=6 (event 215, byte 83; spec: audio/declick.md); 7 and up are invalid in FL.
     pub declick: u8,
     /// Stretch settings as stored (event 215, ints 24..27): time, pitch, multiplier, mode. The time is an int in
     /// 1/192 beat, or a single from FL 24.2 on: kept as its bits.
@@ -703,9 +713,11 @@ pub struct MixerTrack {
     pub pan: Option<f64>,
     /// -1.0 ..= 1.0 (stored / 64): above 0 merges toward mono (fully at 1), below 0 widens (spec: audio/mixer.md).
     pub stereo_separation: Option<f64>,
-    /// Reverse polarity and swap left / right buttons (spec: ui/mixer.md §4; file location unknown).
+    /// Reverse polarity and swap left / right buttons (event 236 flags 0x01 / 0x02; spec: audio/mixer.md, ui/mixer.md §4).
     pub polarity: bool,
     pub swap: bool,
+    /// The track's "effects enabled" switch (event 236 flag 0x04): when off no slot runs.
+    pub slots_enabled: bool,
     /// Per slot: enabled (the slot LED) and mix level 0..=1 (spec: ui/mixer.md §7).
     pub slot_on: [bool; 10],
     pub slot_mix: [f64; 10],
@@ -733,6 +745,7 @@ impl MixerTrack {
             stereo_separation: Some(0.0),
             polarity: false,
             swap: false,
+            slots_enabled: true,
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
             eq: EQ_DEFAULT,

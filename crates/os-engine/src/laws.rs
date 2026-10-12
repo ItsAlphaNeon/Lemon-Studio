@@ -60,6 +60,27 @@ pub fn playback_rate(key: u16, cents: i32) -> f64 {
     2f64.powf((f64::from(key) - 60.0) / 12.0 + f64::from(cents) / 1200.0)
 }
 
+/// Rate of a pitch in cents (0 = original speed).
+pub fn cents_rate(cents: f64) -> f64 {
+    2f64.powf(cents / 1200.0)
+}
+
+/// The channel's pitch in cents from its root note (spec: audio/voice-levels.md "The channel's levels"): the pitch
+/// knob, fine tune and root note summed in doubles and rounded to single once, then the main pitch added as a single
+/// when the channel follows it (`main` is `None` when its switch is off).
+pub fn channel_pitch(knob: f64, fine: i32, root: u8, main: Option<i32>) -> f32 {
+    let p = (knob + f64::from(fine) - f64::from(root) * 100.0) as f32;
+    match main {
+        Some(m) => p + m as f32,
+        None => p,
+    }
+}
+
+/// A note's fine pitch byte as cents (spec: audio/voice-levels.md "The note's own levels"): `fine * 10 - 1200`, 120 = 0.
+pub fn fine_pitch_cents(fine: u8) -> i32 {
+    i32::from(fine) * 10 - 1200
+}
+
 /// Glide time of the Misc tab's SLIDE knob (0..1), seconds (spec: audio/channel-voices.md).
 pub fn slide_seconds(v: f32) -> f64 {
     let v = f64::from(v.clamp(0.0, 1.0));

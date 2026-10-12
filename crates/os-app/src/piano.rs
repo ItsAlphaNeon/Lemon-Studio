@@ -1027,7 +1027,7 @@ mod tests {
     fn playback_edits_are_flagged() {
         use crate::knobs::KnobId;
         let mut a = app();
-        for id in [KnobId::MixPan(1), KnobId::ChanVol(0), KnobId::ChanPan(0)] {
+        for id in [KnobId::MixPan(1), KnobId::ChanVol(0), KnobId::ChanPan(0), KnobId::MasterVol, KnobId::MasterPitch] {
             a.state.piano.dirty = false;
             a.state.set_knob(id, 0.2);
             assert!(a.state.piano.dirty, "{id:?}");
