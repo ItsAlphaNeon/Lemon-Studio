@@ -69,7 +69,7 @@ clicking it does nothing.
 | Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers, several arrangements; track height, zoom and scroll saved with the project |
 | Automation | 🚧 | Automation clips for channel, mixer and plugin parameters; no recording of movements |
 | Mixing and routing | ✅ | Mixer tracks, sends, sidechain, effect slots, meters, polarity and stereo swap, main volume and main pitch |
-| Plugin hosting | ✅ | CLAP and VST3 instruments and effects, with their editors and saved state |
+| Plugin hosting | ✅ | CLAP and VST3 instruments and effects, with their editors and saved state; on Windows a plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio |
 | Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ so far |
 | Exporting audio | 🚧 | Song or pattern to a WAV file (32-bit float); no MP3 or FLAC yet |
 | Project files | 🚧 | Opens and saves `.flp` projects from the latest FL Studio 26 only (older versions are on the roadmap); early, always keep backups |

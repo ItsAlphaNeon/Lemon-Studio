@@ -12,7 +12,7 @@ pub mod preset;
 use std::ffi::c_char;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 pub use os_host::{set_waker, wake, Descriptor};
@@ -216,6 +216,9 @@ pub struct Module {
     factory: Option<VstPtr<dyn IPluginFactory>>,
     host: Com<HostApp>,
     lib: Option<libloading::Library>,
+    /// An address in the module's code (its factory's method table): which module the crash guard stops when it
+    /// crashes.
+    code: usize,
 }
 
 // SAFETY: the factory and host objects are only used from the UI thread (creating instances); VST 3 factories may be
@@ -243,8 +246,9 @@ impl Module {
     pub(crate) unsafe fn from_factory(path: &Path, factory: *mut c_void, lib: Option<libloading::Library>) -> Result<Arc<Module>, String> {
         let file = module_file(path);
         unsafe {
+            let code = if factory.is_null() { 0 } else { *(factory as *const usize) };
             let factory = owned::<dyn IPluginFactory>(factory);
-            let mut m = Module { path: path.to_path_buf(), plugins: Vec::new(), classes: Vec::new(), factory: None, host: HostApp::create(), lib };
+            let mut m = Module { path: path.to_path_buf(), plugins: Vec::new(), classes: Vec::new(), factory: None, host: HostApp::create(), lib, code };
             let Some(factory) = factory else { return Err(format!("{}: no plug-in factory", file.display())) };
             if let Some(f3) = factory.cast::<dyn IPluginFactory3>() {
                 f3.set_host_context(m.host.raw());
@@ -326,10 +330,20 @@ impl Module {
 impl Drop for Module {
     fn drop(&mut self) {
         // Every instance holds an `Arc` of its module, so all objects are gone: release the factory, then let the
-        // module clean up before it is unloaded.
-        self.factory = None;
-        if let Some(lib) = &self.lib {
-            unsafe { module_exit(lib) };
+        // module clean up before it is unloaded. A module whose code crashed is left loaded, as the crash left it.
+        let guard = os_host::guard::module_of(self.code as *const c_void);
+        if guard.crashed().is_none() {
+            let (factory, lib) = (&mut self.factory, &self.lib);
+            let _ = os_host::guard::call(&guard, || {
+                *factory = None;
+                if let Some(lib) = lib {
+                    unsafe { module_exit(lib) };
+                }
+            });
+        }
+        if guard.crashed().is_some() {
+            std::mem::forget(self.factory.take());
+            std::mem::forget(self.lib.take());
         }
     }
 }
@@ -386,7 +400,10 @@ impl os_host::Library for Module {
     }
 
     fn create(self: Arc<Self>, id: &str) -> Result<os_host::SharedPlugin, String> {
-        Ok(Arc::new(Mutex::new(Plugin::new(&self, id)?)))
+        let guard = os_host::guard::module_of(self.code as *const c_void);
+        let name = self.plugins.iter().find(|d| d.id.eq_ignore_ascii_case(id)).map_or(id, |d| d.name.as_str());
+        let plugin = os_host::guard::call(&guard, || Plugin::new(&self, id)).map_err(|c| os_host::guard::stopped_text(name, c))??;
+        Ok(os_host::share(plugin, guard))
     }
 }
 

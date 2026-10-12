@@ -130,10 +130,18 @@ impl Library {
 
 impl Drop for Library {
     fn drop(&mut self) {
-        unsafe {
-            if let Some(f) = (*self.entry).deinit {
-                f();
-            }
+        // A plugin file whose code crashed is left loaded, as the crash left it.
+        let guard = os_host::guard::module_of(self.entry.cast());
+        if guard.crashed().is_none() {
+            let entry = self.entry;
+            let _ = os_host::guard::call(&guard, || unsafe {
+                if let Some(f) = (*entry).deinit {
+                    f();
+                }
+            });
+        }
+        if guard.crashed().is_some() {
+            std::mem::forget(self._lib.take());
         }
     }
 }
@@ -219,7 +227,11 @@ impl os_host::Library for Library {
     }
 
     fn create(self: Arc<Self>, id: &str) -> Result<os_host::SharedPlugin, String> {
-        Ok(Arc::new(Mutex::new(Plugin::new(&self, id)?)))
+        // A plugin compiled into this program gets a guard of its own per instance (`module_of`).
+        let guard = os_host::guard::module_of(self.entry.cast());
+        let name = self.plugins.iter().find(|d| d.id == id).map_or(id, |d| d.name.as_str());
+        let plugin = os_host::guard::call(&guard, || Plugin::new(&self, id)).map_err(|c| os_host::guard::stopped_text(name, c))??;
+        Ok(os_host::share(plugin, guard))
     }
 }
 

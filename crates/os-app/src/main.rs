@@ -1172,4 +1172,12 @@ fn main() {
         watchdog,
     };
     event_loop.run_app(&mut shell).expect("run");
+    // After a contained plugin crash the process ends here, before plugin files are unloaded (a stopped plugin's code
+    // must not run again).
+    if os_host::guard::tripped() {
+        os_host::guard::exit(0);
+    }
+    // The app's plugin instances are destroyed here, on this (UI) thread, as far as the engine has let go of them.
+    drop(shell);
+    plugins::sweep_retired();
 }
