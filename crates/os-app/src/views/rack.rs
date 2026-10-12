@@ -1,6 +1,7 @@
 //! Channel rack window: a floating, resizable child window.
 // spec: ui/channel-rack.md
 
+use os_ui::kit::lemon as lk;
 use os_ui::{Color, Font, Rect};
 
 use super::{rgb, FrameInfo};
@@ -247,20 +248,29 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let win = rect(s);
     let (x, y, w, h) = (win.x, win.y, win.w, win.h);
     let c = cols(s);
-    // Frame (§1).
-    ui.c.fill_rect(win, t.window_border);
-    let body = win.inset(1.0);
-    ui.c.fill_rect(body, t.window_body);
+    let lemon = super::lemon(ui);
+    // Frame (§1). Lemon (spec: ui/lemon-design.md §5): one rounded outlined panel.
+    if lemon {
+        lk::outlined(ui.c, win, lk::r_panel(t), t.window_border, t.window_body);
+    } else {
+        ui.c.fill_rect(win, t.window_border);
+        let body = win.inset(1.0);
+        ui.c.fill_rect(body, t.window_body);
+        ui.c.fill_rect(Rect::new(body.x, body.y, body.w, 1.0), t.window_title_hi);
+    }
     ui.hit(win, Action::RackArea, "Channel rack");
-    ui.c.fill_rect(Rect::new(body.x, body.y, body.w, 1.0), t.window_title_hi);
     let bar = Rect::span(x + 1.0, x + w - 1.0, y + 1.0, y + 29.0);
     ui.hit(bar, Action::WinDrag(Win::ChannelRack), "Channel rack - drag to move");
     title_bar(ui, s, win, c, f);
 
     // Rows panel (§1, §3).
     let inner = panel(win);
-    ui.c.fill_rect(inner.outset(1.0), t.rack_inset_border);
-    ui.c.fill_rect(inner, t.rack_inset);
+    if lemon {
+        lk::outlined(ui.c, inner.outset(1.0), lk::r_btn(t), t.rack_inset_border, t.rack_inset);
+    } else {
+        ui.c.fill_rect(inner.outset(1.0), t.rack_inset_border);
+        ui.c.fill_rect(inner, t.rack_inset);
+    }
     let view_h = inner.h;
     let total_h = content_h(s);
     let vbar = total_h > view_h + 0.5;
@@ -318,12 +328,16 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         if s.rack.show_mixer {
             let mb = Rect::span(x + 66.0, x + 99.0, ry + 1.0, ry + 25.0);
             let mhov = ui.hit(mb, Action::RackMixer(i), format!("Target mixer track: {}  (double-click)", insert_name(ch.mixer_track)));
-            ui.c.fill_rrect(mb, 3.0, t.rack_control_border);
             let face = match (s.rack.colorful, ch.color) {
                 (true, Some(col)) => rgb(col).mix(t.rack_row_box, 0.5),
                 _ => t.rack_row_box,
             };
-            ui.c.fill_rect_gradient(mb.inset(1.0), face.shade(-0.04), face, 2.5);
+            if lemon {
+                lk::small_box(ui.c, t, mb, face, mhov);
+            } else {
+                ui.c.fill_rrect(mb, 3.0, t.rack_control_border);
+                ui.c.fill_rect_gradient(mb.inset(1.0), face.shade(-0.04), face, 2.5);
+            }
             let num_c = if mhov { t.glyph } else { t.text_dim.shade(0.08) };
             let label = if ch.mixer_track == 0 { "M".to_string() } else { ch.mixer_track.to_string() };
             let nf = super::light(19.0);
@@ -336,18 +350,22 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let base = ch.color.map_or(t.name_button, |col| rgb(col).mix(t.name_button, 0.35));
         let face = if focused { base.shade(0.18).mix(t.name_button_sel, 0.5) } else { base };
         let face = if nhov { face.shade(0.06) } else { face };
-        ui.c.fill_rrect(nb, 3.0, t.rack_control_border.shade(0.08));
-        ui.c.fill_rect(Rect::new(nb.x + 1.0, nb.y + 1.0, nb.w - 2.0, 1.0), face.shade(0.12));
-        ui.c.fill_rect_gradient(Rect::new(nb.x + 1.0, nb.y + 2.0, nb.w - 2.0, nb.h - 4.0), face.shade(0.03), face.shade(-0.04), 1.5);
-        let col = if ch.color.is_some() { t.name_text.shade(0.2) } else { t.name_text };
-        let col = if focused { col.shade(0.25) } else { col };
+        let col = if lemon {
+            lk::name_button(ui.c, t, nb, ch.color.map(rgb), focused, nhov)
+        } else {
+            ui.c.fill_rrect(nb, 3.0, t.rack_control_border.shade(0.08));
+            ui.c.fill_rect(Rect::new(nb.x + 1.0, nb.y + 1.0, nb.w - 2.0, 1.0), face.shade(0.12));
+            ui.c.fill_rect_gradient(Rect::new(nb.x + 1.0, nb.y + 2.0, nb.w - 2.0, nb.h - 4.0), face.shade(0.03), face.shade(-0.04), 1.5);
+            let col = if ch.color.is_some() { t.name_text.shade(0.2) } else { t.name_text };
+            if focused { col.shade(0.25) } else { col }
+        };
         let label = ch.name.clone().unwrap_or_else(|| format!("Channel {}", ch.index + 1));
         let nf = Font::new(14);
         let label = shorten(ui, nf, &label, nb.w - 8.0);
         ui.c.push_clip(nb.inset(1.0));
         if s.rack.align_left {
             let lh = ui.c.line_height(nf);
-            ui.c.text(nf, nb.x + 5.0, (nb.cy() - lh / 2.0).round(), col, &label);
+            ui.c.text(nf, nb.x + if lemon { 9.0 } else { 5.0 }, (nb.cy() - lh / 2.0).round(), col, &label);
         } else {
             ui.c.text_center(nf, nb, col, &label);
         }
@@ -358,10 +376,19 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.hit(sel_hit, Action::RackSelect(i), "Select (Up/Down)");
         ui.live(Live::Sounding, slot);
         let sounding = f.playing && !f.paused && f.sounding.iter().any(|&(n, _)| n == ch.index) && ch.enabled;
-        ui.c.fill_rect(slot, ui.t.s(0x1f2224));
-        let slot_fill = if sounding { ui.t.tx(0xd8dcde) } else { ui.t.s(0x2b2d2f) };
-        ui.c.fill_rect(slot.inset(1.0), slot_fill);
-        if selected {
+        if lemon {
+            let fill = if sounding { t.accent } else { ui.t.s(0x2b2d2f) };
+            lk::outlined(ui.c, slot, 3.0, ui.t.s(0x1f2224), fill);
+            if selected {
+                let fr = Rect::span(x + c.slot_x - 1.5, x + c.slot_x + 7.5, ry - 0.5, ry + 26.5);
+                ui.c.stroke_rrect(fr, 4.0, 1.5, t.accent);
+            }
+        } else {
+            ui.c.fill_rect(slot, ui.t.s(0x1f2224));
+            let slot_fill = if sounding { ui.t.tx(0xd8dcde) } else { ui.t.s(0x2b2d2f) };
+            ui.c.fill_rect(slot.inset(1.0), slot_fill);
+        }
+        if selected && !lemon {
             let fr = Rect::span(x + c.slot_x - 1.0, x + c.slot_x + 7.0, ry, ry + 26.0);
             ui.c.fill_rect(Rect::new(fr.x, fr.y, fr.w, 2.0), t.accent);
             ui.c.fill_rect(Rect::new(fr.x, fr.bottom() - 2.0, fr.w, 2.0), t.accent);
@@ -390,8 +417,12 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
             let lb = Rect::new(steps_right + 10.0, ry + 2.0, 24.0, 22.0);
             let has = notes.iter().any(|n| n.channel == ch.index);
             let lhov = ui.hit(lb, Action::RackLoopBox(i), "Set loop point");
-            ui.c.fill_rrect(lb, 3.0, t.rack_control_border);
-            ui.c.fill_rect_gradient(lb.inset(1.0), t.rack_row_box.shade(-0.04), t.rack_row_box, 2.5);
+            if lemon {
+                lk::small_box(ui.c, t, lb, t.rack_row_box, lhov);
+            } else {
+                ui.c.fill_rrect(lb, 3.0, t.rack_control_border);
+                ui.c.fill_rect_gradient(lb.inset(1.0), t.rack_row_box.shade(-0.04), t.rack_row_box, 2.5);
+            }
             let tc = if !has { t.text_dim.shade(-0.3) } else if lhov { t.glyph } else { t.text_dim.shade(0.08) };
             let txt = rk::row_len(s, i).to_string();
             ui.c.text_center(Font::new(13), lb, tc, &txt);
@@ -409,13 +440,18 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let k = k % len.max(1);
         let px = step_x0 + STEP_W * k as f32 - sx;
         if px >= step_x0 - 1.0 && px + 13.0 <= steps_right + 2.0 {
-            ui.c.fill_rect(Rect::new(px, y + h - 30.0, 13.0, 7.0), ui.t.s(0x5a6064));
+            if lemon {
+                ui.c.fill_rrect(Rect::new(px, y + h - 30.0, 13.0, 7.0), 2.5, t.accent);
+            } else {
+                ui.c.fill_rect(Rect::new(px, y + h - 30.0, 13.0, 7.0), ui.t.s(0x5a6064));
+            }
         }
     }
     let track = Rect::span(x + c.slot_x + 8.0, x + w - 2.0, y + h - 13.0, y + h - 6.0);
     let view = steps_shown as f32 * STEP_W;
     super::scrollbar(ui, track, false, sx, view, total_steps as f32 * STEP_W, Scroll::RackX);
-    // Redraw the bar in the rack's own look: flat track, thin dark thumb, end chevrons.
+    // Redraw the bar in the rack's own look: flat track, thin dark thumb, end chevrons (Classic only).
+    if !lemon {
     ui.c.fill_rect(track, t.scrollbar);
     ui.c.fill_rect(Rect::new(track.x, track.y, 1.0, track.h), ui.t.s(0x181c1e));
     ui.c.fill_rect(Rect::new(track.right() - 1.0, track.y, 1.0, track.h), ui.t.s(0x181c1e));
@@ -428,6 +464,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let cy = track.cy();
     ui.c.polyline(&[(track.x, cy - 3.0), (track.x - 3.0, cy), (track.x, cy + 3.0)], 1.3, chev);
     ui.c.polyline(&[(x + w - 23.0, cy - 3.0), (x + w - 20.0, cy), (x + w - 23.0, cy + 3.0)], 1.3, chev);
+    }
 
     // Resize zones: right edge, bottom edge, corner (§5).
     let (r, b) = (win.right(), win.bottom());
@@ -441,6 +478,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
 /// Title bar contents (§2, §7). Left items follow the name column; the right group follows the right edge.
 fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let t = ui.t;
+    let lemon = super::lemon(ui);
     let (x, y, r) = (win.x, win.y, win.right());
     let ohov = ui.hit(Rect::new(x + 8.0, y + 6.0, 16.0, 17.0), Action::RackOptions, "Channel options");
     ui.c.fill_polygon(&[(x + 14.0, y + 10.5), (x + 18.5, y + 14.0), (x + 14.0, y + 17.5)], if ohov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc2c8cc) });
@@ -451,11 +489,15 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     // Display filter combo (§7, §21).
     let combo = Rect::span(x + c.name_x - 1.0, x + c.name_x + c.name_w, y + 4.0, y + 27.0);
     let chov = ui.hit(combo, Action::RackFilter, "Channel display filter (PgUp/PgDn)");
-    ui.c.fill_rect(combo, ui.t.s(0x192227));
-    let cf = combo.inset(1.0);
-    ui.c.fill_rect(Rect::new(cf.x, cf.y, cf.w, 1.0), ui.t.s(0x303132));
-    ui.c.fill_rect(Rect::new(cf.x, cf.y + 1.0, cf.w, cf.h / 2.0), ui.t.s(0x202122));
-    ui.c.fill_rect(Rect::span(cf.x, cf.right(), cf.y + 1.0 + cf.h / 2.0, cf.bottom()), ui.t.s(0x1b1c1d));
+    if lemon {
+        lk::well(ui.c, t, combo, if chov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
+    } else {
+        ui.c.fill_rect(combo, ui.t.s(0x192227));
+        let cf = combo.inset(1.0);
+        ui.c.fill_rect(Rect::new(cf.x, cf.y, cf.w, 1.0), ui.t.s(0x303132));
+        ui.c.fill_rect(Rect::new(cf.x, cf.y + 1.0, cf.w, cf.h / 2.0), ui.t.s(0x202122));
+        ui.c.fill_rect(Rect::span(cf.x, cf.right(), cf.y + 1.0 + cf.h / 2.0, cf.bottom()), ui.t.s(0x1b1c1d));
+    }
     let label = match s.rack.filter {
         rk::Filter::All => "All".to_string(),
         rk::Filter::Group(g) => s.rack.groups.get(g).map_or("All".to_string(), |g| g.name.clone()),
@@ -496,8 +538,12 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     // Pattern length box (§7): "···" = Auto, else the length in steps.
     let bx = Rect::span(r - 132.0, r - 100.0, y + 4.0, y + 26.0);
     let bhov = ui.hit(bx, Action::RackLen, "Pattern length");
-    ui.c.fill_rrect(bx, 3.5, ui.t.s(0x191d1f));
-    ui.c.fill_rect_gradient(bx.inset(1.0), ui.t.s(0x35393b), ui.t.s(0x2f3335), 3.0);
+    if lemon {
+        lk::small_box(ui.c, t, bx, ui.t.s(0x35393b), bhov);
+    } else {
+        ui.c.fill_rrect(bx, 3.5, ui.t.s(0x191d1f));
+        ui.c.fill_rect_gradient(bx.inset(1.0), ui.t.s(0x35393b), ui.t.s(0x2f3335), 3.0);
+    }
     let lc = if bhov { ui.t.tx(0xffffff) } else { ui.t.tx(0xa7adb0) };
     match rk::explicit_len(s) {
         None => {
@@ -512,19 +558,38 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let lr = Rect::new(r - 90.5, y + 5.0, 19.0, 19.0);
     let lhov = ui.hit(lr, Action::RackLoop, "Loop mode");
     let green = ui.t.a(0x8fd14a);
-    if s.rack.loop_mode || lhov {
-        ui.c.stroke_rrect(lr, 3.0, 1.0, if s.rack.loop_mode { green } else { t.glyph.shade(-0.3) });
+    if lemon {
+        // Lemon: toggles are lit rounded squares with dark glyphs.
+        if s.rack.loop_mode {
+            lk::lit(ui.c, lr, lk::r_btn(t), lhov);
+        } else if lhov {
+            ui.c.fill_rrect(lr, lk::r_btn(t), t.button_hi);
+        }
+        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if s.rack.loop_mode { lk::ink_on_lemon() } else { t.glyph });
+    } else {
+        if s.rack.loop_mode || lhov {
+            ui.c.stroke_rrect(lr, 3.0, 1.0, if s.rack.loop_mode { green } else { t.glyph.shade(-0.3) });
+        }
+        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if s.rack.loop_mode { green } else if lhov { ui.t.tx(0xffffff) } else { t.glyph });
     }
-    ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if s.rack.loop_mode { green } else if lhov { ui.t.tx(0xffffff) } else { t.glyph });
     // Graph editor (§7, §14): blue outline when on.
     let gx = r - 58.0;
     let gr = Rect::new(gx - 9.5, y + 5.0, 19.0, 19.0);
     let ghov = ui.hit(gr, Action::RackGraph, "Graph editor (Ctrl+K)");
     let blue = ui.t.a(0x40a8e0);
-    if s.rack.graph_open || ghov {
-        ui.c.stroke_rrect(gr, 3.0, 1.0, if s.rack.graph_open { blue } else { t.glyph.shade(-0.3) });
-    }
-    let gc = if s.rack.graph_open { blue } else if ghov { ui.t.tx(0xffffff) } else { t.glyph };
+    let gc = if lemon {
+        if s.rack.graph_open {
+            lk::lit(ui.c, gr, lk::r_btn(t), ghov);
+        } else if ghov {
+            ui.c.fill_rrect(gr, lk::r_btn(t), t.button_hi);
+        }
+        if s.rack.graph_open { lk::ink_on_lemon() } else { t.glyph }
+    } else {
+        if s.rack.graph_open || ghov {
+            ui.c.stroke_rrect(gr, 3.0, 1.0, if s.rack.graph_open { blue } else { t.glyph.shade(-0.3) });
+        }
+        if s.rack.graph_open { blue } else if ghov { ui.t.tx(0xffffff) } else { t.glyph }
+    };
     for (i, hgt) in [5.0, 9.0, 6.0, 11.0, 4.0].into_iter().enumerate() {
         ui.c.fill_rect(Rect::new(gx - 7.0 + 3.0 * i as f32, y + 20.0 - hgt, 2.0, hgt), gc);
     }
@@ -535,17 +600,29 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let br = Rect::new(sxc - 10.0, y + 5.0, 20.0, 20.0);
     let hov = ui.hit(br, Action::RackRollView, "Interactive step sequencer / piano roll overview");
     // On (§6): orange outline with a dark orange fill; hover draws the outline.
-    if roll_view {
-        ui.c.fill_rrect(br, 3.0, ui.t.h(0xc1923a));
-        ui.c.fill_rrect(br.inset(1.0), 2.5, ui.t.h(0x574b30));
-    } else if hov {
-        ui.c.stroke_rrect(br, 3.0, 1.0, ui.t.h(0xc1923a));
-    }
-    let oc = if hov { ui.t.h(0xffd77a) } else { ui.t.h(0xffc642) };
-    for i in 0..3 {
-        let b = Rect::new(sxc - 8.0 + 5.5 * i as f32, y + 9.0, 4.5, 11.0);
-        ui.c.fill_rect(b, oc);
-        ui.c.fill_rect(Rect::new(b.x + 0.5, b.y + 2.0, b.w - 1.0, 1.0), Color::rgb(0x71292b));
+    if lemon {
+        if roll_view {
+            lk::lit(ui.c, br, lk::r_btn(t), hov);
+        } else if hov {
+            ui.c.fill_rrect(br, lk::r_btn(t), t.button_hi);
+        }
+        let oc = if roll_view { lk::ink_on_lemon() } else { t.accent };
+        for i in 0..3 {
+            ui.c.fill_rrect(Rect::new(sxc - 7.5 + 5.5 * i as f32, y + 9.0, 4.0, 11.0), 1.0, oc);
+        }
+    } else {
+        if roll_view {
+            ui.c.fill_rrect(br, 3.0, ui.t.h(0xc1923a));
+            ui.c.fill_rrect(br.inset(1.0), 2.5, ui.t.h(0x574b30));
+        } else if hov {
+            ui.c.stroke_rrect(br, 3.0, 1.0, ui.t.h(0xc1923a));
+        }
+        let oc = if hov { ui.t.h(0xffd77a) } else { ui.t.h(0xffc642) };
+        for i in 0..3 {
+            let b = Rect::new(sxc - 8.0 + 5.5 * i as f32, y + 9.0, 4.5, 11.0);
+            ui.c.fill_rect(b, oc);
+            ui.c.fill_rect(Rect::new(b.x + 0.5, b.y + 2.0, b.w - 1.0, 1.0), Color::rgb(0x71292b));
+        }
     }
     let close = Rect::new(r - 22.0, y + 6.0, 16.0, 16.0);
     let hov = ui.hit(close, Action::CloseWin(Win::ChannelRack), "Close");
@@ -556,6 +633,9 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
 fn step_button(ui: &mut Ui, r: Rect, k: u32, on: bool, past_len: bool, hov: bool, playing: bool) {
     let t = ui.t;
     let odd = (k / 4) % 2 == 1;
+    if super::lemon(ui) {
+        return lk::step(ui.c, t, r, on, odd, past_len, hov, playing);
+    }
     let (border, face) = match (past_len, odd) {
         (false, false) => (t.rack_control_border.shade(-0.1), t.step_a),
         (false, true) => (t.rack_control_border.shade(-0.1), t.step_b),
@@ -704,9 +784,13 @@ fn add_button(ui: &mut Ui, x: f32, w: f32, bottom: f32) {
     let hov = ui.hit(area, Action::RackAdd, "Add a channel");
     let (cx, cy) = ((x + w / 2.0 + 1.5).round() + 0.5, bottom - 15.5);
     let c = if hov { ui.t.h(0xffc63b) } else { ui.t.tx(0xd4dade) };
+    let lemon = super::lemon(ui);
+    if lemon && hov {
+        ui.c.fill_rrect(area.inset(1.0), lk::r_btn(t), t.button_hi);
+    }
     ui.c.fill_rect(Rect::new(cx - 4.5, cy - 1.0, 9.0, 2.0), c);
     ui.c.fill_rect(Rect::new(cx - 1.0, cy - 4.5, 2.0, 9.0), c);
-    if hov {
+    if hov && !lemon {
         let (l, r) = (x + 3.0, x + w - 1.0);
         let pts = [(l, bottom - 24.0), (r, bottom - 24.0), (r - 8.0, bottom - 6.0), (l + 7.0, bottom - 6.0), (l, bottom - 24.0)];
         ui.c.polyline(&pts, 2.0, t.add_hover);

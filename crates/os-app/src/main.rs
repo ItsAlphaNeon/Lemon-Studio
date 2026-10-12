@@ -732,6 +732,7 @@ fn screenshot(args: &[String]) {
     let mut channel = None;
     let mut win_rect: Option<os_ui::Rect> = None;
     let mut theme: Option<std::path::PathBuf> = None;
+    let mut design: Option<os_theme::Design> = None;
     let mut scale = 1.0f32;
     let mut size: Option<(u32, u32)> = None;
     let mut bar_w: Option<f32> = None;
@@ -741,6 +742,8 @@ fn screenshot(args: &[String]) {
         match a.as_str() {
             "--screenshot" => out = it.next().cloned(),
             "--theme" => theme = it.next().map(std::path::PathBuf::from),
+            // "classic" / "lemon" (spec: ui/lemon-design.md); default: the saved design.
+            "--design" => design = it.next().and_then(|v| os_theme::Design::parse(v)),
             // Device pixels per logical one (the frame stays 1920x1080 logical): 1.5 = Windows at 150 %.
             "--scale" => scale = it.next().and_then(|v| v.parse().ok()).filter(|s: &f32| *s >= 0.5 && *s <= 4.0).unwrap_or(1.0),
             "--view" => view = it.next().cloned().unwrap_or_default(),
@@ -796,6 +799,10 @@ fn screenshot(args: &[String]) {
         }
     }
     let mut app = App::new(path);
+    if let Some(d) = design {
+        app.theme = app::design_theme(d, true);
+        os_theme::set_current(&app.theme.colors);
+    }
     match theme {
         Some(t) if t.as_os_str() == "default" => {
             app.theme = os_theme::Theme::default();

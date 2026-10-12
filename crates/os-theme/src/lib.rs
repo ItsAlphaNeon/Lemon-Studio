@@ -13,8 +13,10 @@
 
 use std::fmt;
 
+pub mod design;
 pub mod fl;
 pub mod presets;
+pub use design::{Design, Style};
 pub use fl::FlTheme;
 
 /// An sRGB color with alpha.
@@ -148,11 +150,13 @@ macro_rules! tokens {
             $(#[doc = $doc] pub $name: Color,)*
             /// How measured default colours map to this theme (see `Palette::s`, `a`, `h`, `tx`, `led`).
             pub xf: fl::Xform,
+            /// Shape language of the design this palette belongs to (corner radii; spec: ui/lemon-design.md).
+            pub style: Style,
         }
 
         impl Default for Palette {
             fn default() -> Self {
-                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default() }
+                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default(), style: Style::CLASSIC }
             }
         }
 
@@ -175,7 +179,7 @@ macro_rules! tokens {
             }
 
             fn map(&self, f: impl Fn(Color) -> Color) -> Palette {
-                Palette { $($name: f(self.$name),)* xf: self.xf.clone() }
+                Palette { $($name: f(self.$name),)* xf: self.xf.clone(), style: self.style }
             }
         }
     };

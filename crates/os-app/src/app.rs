@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use os_engine::PlayMode;
 use os_model::{Channel, ChannelKind, MixerTrack, Note, Pattern, Project};
-use os_theme::{Palette, Theme};
+use os_theme::{Design, Palette, Theme};
 use os_ui::{Canvas, Rect};
 use winit::keyboard::KeyCode;
 
@@ -1717,7 +1717,7 @@ impl App {
     /// on the window alone, not on what is under it.
     fn win_solid(&self, w: Win) -> Option<Rect> {
         let s = &self.state;
-        match w {
+        let r = match w {
             Win::ChannelRack => Some(views::rack::rect(s)),
             Win::Plugin => s.project.channels.get(s.plugin_channel).map(|_| views::channel_win::rect(s)),
             w => {
@@ -1725,7 +1725,12 @@ impl App {
                 let r = s.win_rect(w);
                 (!ws.maxed && !ws.mini && r.h >= 2.0 * TITLE_H).then_some(r)
             }
-        }
+        }?;
+        // Rounded frames (Lemon, spec: ui/lemon-design.md §3): the corners show what is under the window. Leaving out
+        // a radius-wide band at the left and right leaves out all four corners.
+        let st = self.theme.colors.style;
+        let k = st.radius_panel;
+        Some(if st.lemon() { Rect::new(r.x + k, r.y, (r.w - 2.0 * k).max(0.0), r.h) } else { r })
     }
 
     /// Before a paint: turn the pending playlist scroll into canvas moves (`shifts`) and the damage they leave: the
@@ -1870,8 +1875,9 @@ impl App {
                     // The playhead line and the ruler's song-position triangle (and the marker lane between them).
                     let top = g.y - 22.0 - crate::playlist::MARKER_H;
                     for t in [old.tick, now.tick] {
+                        // The flag's outline reaches x + 10.5 (views/playlist.rs ruler_paint).
                         let x = pg.x_of(t as f32);
-                        self.damage_rect(Rect::new(x - 8.0, top, 17.0, g.bottom() - top));
+                        self.damage_rect(Rect::new(x - 8.0, top, 20.0, g.bottom() - top));
                     }
                 }
             }
@@ -2185,8 +2191,13 @@ impl App {
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         match theme_from_file(path) {
             Ok(t) => {
+                // Theme files colour the Classic design (Lemon has its own colours).
+                let was_lemon = self.design() == Design::Lemon;
                 self.theme = t;
                 os_theme::set_current(&self.theme.colors);
+                if remember && was_lemon {
+                    save_design(Design::Classic);
+                }
                 if remember && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")) {
                     if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) {
                         let _ = std::fs::create_dir_all(&d);
@@ -2196,10 +2207,27 @@ impl App {
                         }
                     }
                 }
-                self.state.message = Some(format!("Theme: {name}"));
+                self.state.message = Some(if was_lemon { format!("Theme: {name} (Classic design; Ctrl+Shift+D switches)") } else { format!("Theme: {name}") });
             }
             Err(e) => self.state.message = Some(format!("Could not load theme {name}: {e}")),
         }
+        self.invalidate();
+    }
+
+    /// The design in use (spec: ui/lemon-design.md).
+    pub fn design(&self) -> Design {
+        self.theme.colors.style.design
+    }
+
+    /// Switch to design `d`: Lemon brings its own colours, Classic the saved theme (or the default look).
+    /// `remember` = keep the choice for the next start (`%APPDATA%/OpenStudio/design.txt`).
+    pub fn set_design(&mut self, d: Design, remember: bool) {
+        self.theme = design_theme(d, remember);
+        os_theme::set_current(&self.theme.colors);
+        if remember {
+            save_design(d);
+        }
+        self.state.message = Some(format!("Design: {} (Ctrl+Shift+D switches)", d.name()));
         self.invalidate();
     }
 
@@ -2278,7 +2306,7 @@ impl App {
             }
             SAct::Preset(0) => {
                 st.preset = 0;
-                self.theme = os_theme::Theme::default();
+                self.theme = if self.design() == Design::Lemon { design_theme(Design::Lemon, false) } else { os_theme::Theme::default() };
                 os_theme::set_current(&self.theme.colors);
                 if let Some(d) = std::env::var_os("APPDATA") {
                     let _ = std::fs::remove_file(PathBuf::from(d).join("OpenStudio").join("current.flstheme"));
@@ -3590,6 +3618,16 @@ impl App {
     pub fn key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) {
         self.invalidate();
         use winit::keyboard::{Key, NamedKey};
+        // Ctrl+Shift+D: switch the design (spec: ui/lemon-design.md §1).
+        if let Key::Character(c) = key
+            && ctrl
+            && self.shift
+            && c.eq_ignore_ascii_case("d")
+        {
+            let next = self.design().next();
+            self.set_design(next, true);
+            return;
+        }
         if crate::patterns::key(&mut self.state, key, ctrl) {
             self.rack_pending();
             return;
@@ -4935,11 +4973,42 @@ pub fn theme_from_file(path: &std::path::Path) -> Result<Theme, String> {
     }
 }
 
-/// The theme: `%APPDATA%/OpenStudio/theme.txt`, else the last imported `current.flstheme`, else the default.
+/// The theme: the saved design's (spec: ui/lemon-design.md); for Classic `%APPDATA%/OpenStudio/theme.txt`, else the last
+/// imported `current.flstheme`, else the default.
 fn load_theme() -> Theme {
-    let t = load_theme_inner();
+    let t = design_theme(saved_design(), true);
     os_theme::set_current(&t.colors);
     t
+}
+
+/// The design named in `%APPDATA%/OpenStudio/design.txt`; Lemon when there is none. Tests always use Classic.
+pub fn saved_design() -> Design {
+    if cfg!(test) {
+        return Design::Classic;
+    }
+    std::env::var_os("APPDATA")
+        .and_then(|d| std::fs::read_to_string(PathBuf::from(d).join("OpenStudio").join("design.txt")).ok())
+        .and_then(|t| Design::parse(&t))
+        .unwrap_or(Design::Lemon)
+}
+
+fn save_design(d: Design) {
+    if cfg!(test) {
+        return;
+    }
+    if let Some(dir) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("design.txt"), d.name());
+    }
+}
+
+/// The theme of design `d`: Lemon's own palette, or for Classic the saved theme files (`saved` = read them).
+pub fn design_theme(d: Design, saved: bool) -> Theme {
+    match d {
+        Design::Lemon => Theme::new("Lemon", os_theme::design::palette(Design::Lemon, None), os_theme::Adjust::default()),
+        Design::Classic if saved => load_theme_inner(),
+        Design::Classic => Theme::default(),
+    }
 }
 
 fn load_theme_inner() -> Theme {
@@ -5260,9 +5329,17 @@ mod tests {
     /// Wheel scrolls and zooms, scroll-bar drags and clip drags repaint only their window, and match a full repaint.
     #[test]
     fn scroll_repaint_matches_full() {
+        for design in Design::ALL {
+            scroll_repaint_in(design);
+        }
+    }
+
+    fn scroll_repaint_in(design: Design) {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
+        // Rounded (Lemon) windows: their corners are not part of what scrolling keeps (spec: ui/lemon-design.md §3).
+        app.theme = design_theme(design, false);
         app.state.project = test_project();
         app.state.project.patterns[0].notes = (0..16).step_by(2).map(|k| Note::step(0, k * 24)).collect();
         for (track, tick) in [(0, 0), (1, 384), (2, 768), (0, 1536)] {
@@ -5425,17 +5502,20 @@ mod tests {
             .collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &audio).unwrap();
         for scale in [1.0, 1.5] {
-            scroll_moves_at(&wav, scale);
+            for design in Design::ALL {
+                scroll_moves_at(&wav, scale, design);
+            }
         }
         let _ = std::fs::remove_file(&wav);
     }
 
-    fn scroll_moves_at(wav: &std::path::Path, scale: f32) {
+    fn scroll_moves_at(wav: &std::path::Path, scale: f32, design: Design) {
         use crate::playlist as pl;
         let (w, h) = ((1920.0 * scale).round() as u32, (1080.0 * scale).round() as u32);
         let Ok(mut a) = Canvas::new(w, h, scale) else { return };
         let mut b = Canvas::new(w, h, scale).unwrap();
         let mut app = App::new(None);
+        app.theme = design_theme(design, false);
         app.state.project = test_project();
         app.state.project.patterns[0].notes = (0..32).map(|i| Note { length: 30, key: 60 + (i % 7) as u16, ..Note::step(0, i * 24) }).collect();
         let bar = 4 * u32::from(app.state.project.ppq);
@@ -6286,9 +6366,16 @@ mod tests {
     /// minimum size), minimize and maximize; damage repaints match full frames.
     #[test]
     fn window_move_resize_min_max() {
+        for design in Design::ALL {
+            window_move_resize_in(design);
+        }
+    }
+
+    fn window_move_resize_in(design: Design) {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
+        app.theme = design_theme(design, false);
         app.state.wins.iter_mut().for_each(|w| w.maxed = false);
         app.state.z = vec![Win::Playlist, Win::Mixer];
         frame(&mut app, &mut a, None);

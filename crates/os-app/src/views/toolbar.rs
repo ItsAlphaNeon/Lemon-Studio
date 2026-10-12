@@ -16,19 +16,35 @@ fn btn(x: f32, y: f32) -> Rect {
 
 pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     let t = ui.t;
+    let lemon = super::lemon(ui);
     // Bands.
-    ui.c.fill_rect_gradient(Rect::new(0.0, 0.0, width, 41.0), t.toolbar.shade(0.025), t.toolbar.shade(-0.015), 0.0);
-    ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), t.toolbar_line);
-    ui.c.fill_rect_gradient(Rect::new(0.0, 42.0, width, 39.0), t.toolbar.shade(0.02), t.toolbar.shade(-0.02), 0.0);
-    ui.c.fill_rect(Rect::new(0.0, 81.0, width, 2.0), t.toolbar_line);
+    if lemon {
+        // Lemon (spec: ui/lemon-design.md §4): flat bands, short rounded separators.
+        ui.c.fill_rect(Rect::new(0.0, 0.0, width, 81.0), t.toolbar);
+        ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), t.toolbar_line);
+        ui.c.fill_rect(Rect::new(0.0, 81.0, width, 2.0), t.toolbar_line);
+    } else {
+        ui.c.fill_rect_gradient(Rect::new(0.0, 0.0, width, 41.0), t.toolbar.shade(0.025), t.toolbar.shade(-0.015), 0.0);
+        ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), t.toolbar_line);
+        ui.c.fill_rect_gradient(Rect::new(0.0, 42.0, width, 39.0), t.toolbar.shade(0.02), t.toolbar.shade(-0.02), 0.0);
+        ui.c.fill_rect(Rect::new(0.0, 81.0, width, 2.0), t.toolbar_line);
+    }
     // Empty toolbar areas drag the window (registered first, so controls win).
     ui.hit(Rect::new(0.0, 0.0, width, 81.0), Action::DragWindow, "");
     // Group separators (2 px gaps measured in row 1 and row 2).
     for x in [379.0, 575.0, 876.0, 1048.0, 1204.0] {
+        if lemon {
+            ui.c.fill_rrect(Rect::new(x, 9.0, 2.0, 23.0), 1.0, t.toolbar_line);
+            continue;
+        }
         ui.c.fill_rect(Rect::new(x, 2.0, 1.0, 37.0), t.toolbar_line);
         ui.c.fill_rect(Rect::new(x + 1.0, 2.0, 1.0, 37.0), t.toolbar_edge.with_alpha(110));
     }
     for x in [298.0, 378.0, 576.0, 967.0, 1298.0] {
+        if lemon {
+            ui.c.fill_rrect(Rect::new(x, 50.0, 2.0, 23.0), 1.0, t.toolbar_line);
+            continue;
+        }
         ui.c.fill_rect(Rect::new(x, 44.0, 1.0, 35.0), t.toolbar_line);
         ui.c.fill_rect(Rect::new(x + 1.0, 44.0, 1.0, 35.0), t.toolbar_edge.with_alpha(110));
     }
@@ -41,7 +57,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     // (spec ui/main-window.md §12); the toolbar never moves.
     let lx = (width - 45.0).max(LOGO_MIN_X);
     ui.hit(Rect::new(lx - 35.0, 0.0, 78.0, 80.0), Action::MenuItem(menus::HELP_MENU, menus::HELP_ABOUT), "About OpenStudio");
-    icons::logo(ui.c, lx, 40.0, 26.0, t.toolbar_line);
+    icons::logo(ui.c, lx, 40.0, 26.0, if lemon { t.toolbar_edge } else { t.toolbar_line });
 }
 
 fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
@@ -68,18 +84,26 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     icons::draw(ui.c, Icon::MidiControl, Rect::span(360.0, 374.0, 17.0, 32.0), ui.t.s(0x515457));
 
     // Transport group.
+    let lemon = super::lemon(ui);
     let capsule = Rect::span(383.0, 483.0, 4.0, 36.0);
-    ui.c.fill_rrect(capsule, 15.0, t.toolbar_line.shade(-0.2));
-    ui.c.fill_rect_gradient(capsule.inset(1.0), t.sunken.shade(0.03), t.sunken.shade(-0.05), 14.0);
-    ui.c.fill_rect(Rect::new(418.0, 6.0, 1.0, 29.0), t.toolbar_line);
-    ui.c.fill_rect(Rect::new(449.0, 6.0, 1.0, 29.0), t.toolbar_line);
+    if lemon {
+        // Lemon: one rounded-square tray, each section a rounded square inside it.
+        os_ui::kit::lemon::outlined(ui.c, capsule, 7.0, t.toolbar_line.shade(-0.15), t.sunken);
+    } else {
+        ui.c.fill_rrect(capsule, 15.0, t.toolbar_line.shade(-0.2));
+        ui.c.fill_rect_gradient(capsule.inset(1.0), t.sunken.shade(0.03), t.sunken.shade(-0.05), 14.0);
+        ui.c.fill_rect(Rect::new(418.0, 6.0, 1.0, 29.0), t.toolbar_line);
+        ui.c.fill_rect(Rect::new(449.0, 6.0, 1.0, 29.0), t.toolbar_line);
+    }
     // PAT / SONG fill the whole top / bottom half of the capsule's left section.
     let pat = Rect::span(384.0, 418.0, 5.0, 20.0);
     let song = Rect::span(384.0, 418.0, 20.0, 35.0);
     ui.hit(pat, Action::PatSong(false), "Pattern mode: play the current pattern");
     ui.hit(song, Action::PatSong(true), "Song mode: play the playlist");
     for (r, label, active) in [(pat, "PAT", !s.song_mode), (song, "SONG", s.song_mode)] {
-        if active {
+        if active && lemon {
+            os_ui::kit::lemon::lit(ui.c, Rect::new(r.x + 2.0, r.y + 1.0, r.w - 3.0, r.h - 1.5), 4.0, false);
+        } else if active {
             ui.c.push_clip(r);
             ui.c.fill_rrect(capsule.inset(1.0), 14.0, t.pill);
             ui.c.pop_clip();
@@ -95,7 +119,14 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let hov = ui.hit(r, action.clone(), hint);
         let on = on || ui.down(r, &action);
         // Lit / hovered sections fill their whole slot of the capsule (clipped to its round end).
-        if on || hov {
+        if (on || hov) && lemon {
+            let seg = Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0);
+            if on {
+                os_ui::kit::lemon::lit(ui.c, seg, 5.0, hov);
+            } else {
+                ui.c.fill_rrect(seg, 5.0, t.button_hi);
+            }
+        } else if on || hov {
             ui.c.push_clip(r);
             if on {
                 ui.c.fill_rect_gradient(capsule.inset(1.0), t.on_top, t.on_bottom, 14.0);
@@ -119,21 +150,32 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     // Record: not available yet, so drawn greyed out (no hover, no press).
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
     ui.off(rec, "Recording");
-    ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.toolbar_line.shade(-0.25));
-    ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, t.button.shade(-0.12));
-    ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.mix(t.button, 0.7).shade(-0.15));
+    if lemon {
+        os_ui::kit::button(ui.c, t, Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0), os_ui::kit::State::NORMAL.with_disabled(true));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.mix(t.toolbar, 0.6));
+    } else {
+        ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.toolbar_line.shade(-0.25));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, t.button.shade(-0.12));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.mix(t.button, 0.7).shade(-0.15));
+    }
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);
     ui.hit(tb, Action::Tempo, "Tempo (drag up/down)");
-    ui.c.fill_rrect(tb, 5.0, ui.t.s(0x5b5f61));
-    ui.c.fill_rrect(tb.inset(1.0), 4.0, ui.t.s(0x5f6466));
+    if lemon {
+        os_ui::kit::lemon::well(ui.c, t, tb, t.time_panel);
+    } else {
+        ui.c.fill_rrect(tb, 5.0, ui.t.s(0x5b5f61));
+        ui.c.fill_rrect(tb.inset(1.0), 4.0, ui.t.s(0x5f6466));
+    }
+    // Lemon displays show their digits in the brand colour.
+    let digits = if lemon { t.pill } else { t.glyph };
     let whole = format!("{}", s.tempo.trunc() as i64);
     let frac = format!(".{:03}", ((s.tempo.fract()) * 1000.0).round() as i64 % 1000);
     let ww = ui.c.text_width(Font::condensed(19, 6), &whole);
     let fw = ui.c.text_width(Font::condensed(13, 5), &frac);
     let x0 = (tb.right() - 11.0 - ww - fw).max(tb.x + 2.0);
     ui.c.push_clip(tb.inset(1.0));
-    ui.c.text(Font::condensed(19, 6), x0, 9.0, t.glyph, &whole);
+    ui.c.text(Font::condensed(19, 6), x0, 9.0, digits, &whole);
     ui.c.text(Font::condensed(13, 5), x0 + ww, 16.0, t.glyph_dim.shade(0.3), &frac);
     ui.c.pop_clip();
     ui.c.fill_polygon(&[(tb.right() - 9.0, 17.0), (tb.right() - 6.0, 13.0), (tb.right() - 3.0, 17.0)], t.glyph_dim);
@@ -155,8 +197,12 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
 
     // Song position (B:S:T).
     let tp = Rect::span(745.0, 873.0, 4.0, 36.0);
-    ui.c.fill_rect(tp, ui.t.s(0x212829));
-    ui.c.fill_rect(tp.inset(1.0), t.time_panel);
+    if lemon {
+        os_ui::kit::lemon::well(ui.c, t, tp, t.time_panel);
+    } else {
+        ui.c.fill_rect(tp, ui.t.s(0x212829));
+        ui.c.fill_rect(tp.inset(1.0), t.time_panel);
+    }
     ui.hit(tp, Action::Swallow, "Song position (bar:step:tick)");
     ui.live(Live::Clock, tp);
     let (bar, step, tick) = bst_ticks(f.tick * 96.0 / f64::from(s.project.ppq.max(1)));
@@ -172,7 +218,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let step_x = tick_x - 8.0 - sw;
     let bar_x = (step_x - 8.0 - bw).max(tp.x + 2.0);
     ui.c.push_clip(tp.inset(1.0));
-    let g = t.glyph;
+    let g = digits;
     ui.c.text(big, bar_x, -3.0, g, &bar_s);
     ui.c.fill_rect(Rect::new(step_x - 5.5, 20.0, 2.0, 2.5), g);
     ui.c.fill_rect(Rect::new(step_x - 5.5, 30.0, 2.0, 2.5), g);
@@ -181,7 +227,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_rect(Rect::new(tick_x - 5.0, 29.5, 2.0, 2.0), g);
     ui.c.text(small, tick_x, 9.0, g, &tick_s);
     ui.c.pop_clip();
-    ui.c.text(Font::condensed(7, 3).bold(), 852.0, 5.0, t.glyph.shade(-0.1), "B:S:T");
+    ui.c.text(Font::condensed(7, 3).bold(), 852.0, 5.0, if lemon { t.text_dim } else { t.glyph.shade(-0.1) }, "B:S:T");
 
     // Monitors (oscilloscope / spectrum analyzer, stereo peak bars) and CPU / memory.
     monitor(ui, s);
@@ -226,8 +272,14 @@ fn monitor(ui: &mut Ui, s: &State) {
     let m = &s.monitor;
     // Left panel: border, then 84 x 31 px of picture, bottom edge at y 36. Pictures are drawn as cells, which tile at
     // any scale (spec ui/ui-scaling.md §4).
-    ui.c.fill_rect(Rect::new(880.0, 4.0, 86.0, 33.0), edge);
-    ui.c.fill_rect(Rect::new(881.0, 5.0, 84.0, 31.0), fill);
+    let lemon = super::lemon(ui);
+    let (fill, ink) = if lemon { (ui.t.time_panel, ui.t.pill.mix(ui.t.time_panel, 0.15)) } else { (fill, ink) };
+    if lemon {
+        os_ui::kit::lemon::well(ui.c, ui.t, Rect::new(880.0, 4.0, 86.0, 33.0), fill);
+    } else {
+        ui.c.fill_rect(Rect::new(880.0, 4.0, 86.0, 33.0), edge);
+        ui.c.fill_rect(Rect::new(881.0, 5.0, 84.0, 31.0), fill);
+    }
     match m.mode {
         Mode::Spectrum => {
             for c in 0..COLS {
@@ -255,8 +307,12 @@ fn monitor(ui: &mut Ui, s: &State) {
     ui.hit(Rect::new(880.0, 4.0, 86.0, 33.0), Action::Monitor, "Oscilloscope / spectrum analyzer (click to switch)");
 
     // Right panel: two peak bars (meter range .. 0 dB), light grey fading to cream at the tip, plus the held peak.
-    ui.c.fill_rect(Rect::new(968.0, 4.0, 77.0, 23.0), edge);
-    ui.c.fill_rect(Rect::new(969.0, 5.0, 75.0, 21.0), fill);
+    if lemon {
+        os_ui::kit::lemon::well(ui.c, ui.t, Rect::new(968.0, 4.0, 77.0, 23.0), fill);
+    } else {
+        ui.c.fill_rect(Rect::new(968.0, 4.0, 77.0, 23.0), edge);
+        ui.c.fill_rect(Rect::new(969.0, 5.0, 75.0, 21.0), fill);
+    }
     for i in 0..2 {
         let y = 5.0 + 11.0 * i as f32;
         let hold = (m.meter_pos(m.hold[i].0) * 75.0).round();
@@ -267,7 +323,7 @@ fn monitor(ui: &mut Ui, s: &State) {
         if len < 1.0 {
             continue;
         }
-        let (a, b) = ((0xc8, 0xce, 0xd1), (0xcd, 0xc7, 0xa8));
+        let (a, b) = if lemon { ((0xc9, 0xa9, 0x2c), (0xff, 0xf1, 0xb8)) } else { ((0xc8, 0xce, 0xd1), (0xcd, 0xc7, 0xa8)) };
         let mix = |k: f32, shade: f32| {
             let l = |u: i32, v: i32| (((u as f32 + (v - u) as f32 * k) * shade).round() as u32).min(255);
             os_ui::Color::rgb((l(a.0, b.0) << 16) | (l(a.1, b.1) << 8) | l(a.2, b.2))
@@ -290,17 +346,25 @@ fn row2(ui: &mut Ui, s: &State) {
     let t = ui.t;
     // Menu bar.
     let mb = Rect::span(4.0, 296.0, 45.0, 77.0);
-    ui.c.fill_rect_gradient(mb, t.menu_panel.shade(-0.04), t.menu_panel.shade(0.02), 2.5);
-    ui.c.stroke_rrect(mb, 2.5, 1.0, t.toolbar_line.shade(-0.1));
+    let lemon = super::lemon(ui);
+    if lemon {
+        os_ui::kit::lemon::panel(ui.c, mb, 6.0, t.menu_panel);
+    } else {
+        ui.c.fill_rect_gradient(mb, t.menu_panel.shade(-0.04), t.menu_panel.shade(0.02), 2.5);
+        ui.c.stroke_rrect(mb, 2.5, 1.0, t.toolbar_line.shade(-0.1));
+    }
     let layout = menus::bar_layout(ui.c);
     for (i, (m, (x0, x1, _))) in menus::MENUS.iter().zip(layout).enumerate() {
         let title = m.title;
         let r = Rect::new(x0 - 3.0, 47.0, x1 - x0 + 6.0, 29.0);
         let hov = ui.hit(r, Action::Menu(i), title);
-        if hov || s.menu_open == Some(i) {
-            ui.c.fill_rrect(r, 2.0, t.menu_drop_hi);
+        let open = s.menu_open == Some(i);
+        if lemon && open {
+            os_ui::kit::lemon::lit(ui.c, r.inset(1.0), 4.0, false);
+        } else if hov || open {
+            ui.c.fill_rrect(if lemon { r.inset(1.0) } else { r }, if lemon { 4.0 } else { 2.0 }, t.menu_drop_hi);
         }
-        ui.c.text(menus::BAR_FONT, x0, 51.0, t.menu_text, title);
+        ui.c.text(menus::BAR_FONT, x0, 51.0, if lemon && open { t.pill_text } else { t.menu_text }, title);
     }
 
     // Master knobs: not connected to the sound yet (the mixer's master track is), so greyed out.
@@ -318,9 +382,15 @@ fn row2(ui: &mut Ui, s: &State) {
     // Main slider panel.
     let sp = Rect::span(381.0, 575.0, 45.0, 77.0);
     ui.off(sp, "Song position slider");
-    ui.c.fill_rect(Rect::new(390.0, 61.0, 180.0, 2.0), t.sunken_dark);
-    ui.c.fill_circle(396.0, 62.0, 6.5, t.sunken_dark);
-    ui.c.line(396.0, 57.0, 396.0, 67.0, 2.0, t.pill);
+    if lemon {
+        ui.c.fill_rrect(Rect::new(390.0, 60.0, 180.0, 4.0), 2.0, t.sunken_dark);
+        ui.c.fill_rrect(Rect::new(390.0, 55.0, 12.0, 14.0), 3.0, t.button);
+        ui.c.fill_rect(Rect::new(395.0, 58.0, 2.0, 8.0), t.pill);
+    } else {
+        ui.c.fill_rect(Rect::new(390.0, 61.0, 180.0, 2.0), t.sunken_dark);
+        ui.c.fill_circle(396.0, 62.0, 6.5, t.sunken_dark);
+        ui.c.line(396.0, 57.0, 396.0, 67.0, 2.0, t.pill);
+    }
     ui.veil(Rect::span(383.0, 574.0, 50.0, 74.0), t.toolbar);
 
     // Mode buttons.
@@ -342,7 +412,11 @@ fn row2(ui: &mut Ui, s: &State) {
     icons::draw(ui.c, Icon::Magnet, Rect::span(748.0, 766.0, 52.0, 70.0), t.glyph_dim.shade(0.3));
     let snap = Rect::span(768.0, 830.0, 50.0, 72.0);
     ui.off(snap, "Global snap (each editor has its own snap)");
-    ui.c.fill_rrect(snap, 2.0, t.sunken_dark);
+    if lemon {
+        os_ui::kit::lemon::well(ui.c, t, snap, t.sunken);
+    } else {
+        ui.c.fill_rrect(snap, 2.0, t.sunken_dark);
+    }
     ui.c.text(Font::new(16), snap.x + 5.0, 51.0, t.glyph, "Line");
     icons::draw(ui.c, Icon::ArrowRight, Rect::new(snap.right() - 14.0, 55.0, 12.0, 12.0), t.glyph_dim);
     ui.veil(Rect::span(746.0, 831.0, 50.0, 72.0), t.toolbar);
@@ -350,11 +424,15 @@ fn row2(ui: &mut Ui, s: &State) {
     // Pattern selector.
     let prev = Rect::span(838.0, 851.0, 47.0, 76.0);
     ui.hit(prev, Action::PatternPrev, "Pattern options"); // spec: ui/pattern-menu.md §1
-    ui.c.fill_rrect(prev, 2.0, t.button);
+    ui.c.fill_rrect(prev, if lemon { 4.0 } else { 2.0 }, t.button);
     icons::draw(ui.c, Icon::ArrowRight, prev.inset(2.0), t.glyph);
     let pb = Rect::span(855.0, 948.0, 47.0, 76.0);
     let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(s, s.pattern.max(1)));
-    ui.c.fill_rrect(pb, 2.0, t.tempo_box.shade(if hov { 0.16 } else { 0.08 }));
+    if lemon {
+        os_ui::kit::lemon::well(ui.c, t, pb, if hov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
+    } else {
+        ui.c.fill_rrect(pb, 2.0, t.tempo_box.shade(if hov { 0.16 } else { 0.08 }));
+    }
     let name = s
         .project
         .patterns
@@ -397,7 +475,7 @@ fn row2(ui: &mut Ui, s: &State) {
     // News panel.
     let np = Rect::span(1304.0, 1470.0, 45.0, 77.0);
     {
-        ui.c.fill_rrect(np, 2.0, t.news_panel);
+        ui.c.fill_rrect(np, if lemon { 6.0 } else { 2.0 }, t.news_panel);
         ui.off(np, "News");
         let tw = ui.c.text(Font::new(13), 1309.0, 53.0, t.text_faint, "Today");
         let news = "Welcome to OpenStudio";

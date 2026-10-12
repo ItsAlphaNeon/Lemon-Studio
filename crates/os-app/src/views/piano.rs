@@ -2,6 +2,7 @@
 // spec: ui/piano-roll.md
 
 use os_model::Note;
+use os_ui::kit::lemon as lk;
 use os_ui::{Color, Font, Rect};
 
 use super::{resize_zones, window_body, FrameInfo};
@@ -92,10 +93,16 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 
     // Note-colour tab (§6).
     let tab = l.tab;
+    let lemon = super::lemon(ui);
     ui.c.fill_rect(tab, t.window_title);
     let green = t.note_top.mix(t.note_bottom, 0.6);
-    ui.c.fill_polygon(&[(tab.x, tab.bottom()), (tab.x + 31.0, tab.y), (tab.right(), tab.y), (tab.right(), tab.bottom())], green);
-    ui.c.line(tab.x + 0.5, tab.bottom() - 0.5, tab.x + 31.0, tab.y + 0.5, 1.0, t.note_top.shade(0.15));
+    if lemon {
+        // Lemon (spec: ui/lemon-design.md §6): a rounded colour tile instead of the slanted tab.
+        ui.c.fill_rrect(Rect::new(tab.x + 3.0, tab.y + 3.0, tab.w - 6.0, tab.h - 6.0), lk::r_btn(t), green);
+    } else {
+        ui.c.fill_polygon(&[(tab.x, tab.bottom()), (tab.x + 31.0, tab.y), (tab.right(), tab.y), (tab.right(), tab.bottom())], green);
+        ui.c.line(tab.x + 0.5, tab.bottom() - 0.5, tab.x + 31.0, tab.y + 0.5, 1.0, t.note_top.shade(0.15));
+    }
     let ink = green.shade(-0.3);
     ui.c.polyline(&[(tab.right() - 15.0, tab.y + 16.0), (tab.right() - 10.0, tab.y + 16.0), (tab.right() - 7.0, tab.y + 7.0), (tab.right() - 3.0, tab.y + 7.0)], 1.6, ink);
     ui.c.fill_polygon(&[(tab.right() - 4.0, tab.bottom() - 18.0), (tab.right() - 4.0, tab.bottom() - 5.0), (tab.right() - 17.0, tab.bottom() - 5.0)], ink);
@@ -121,7 +128,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let ghost = t.text_faint.with_alpha(110);
     for n in notes.iter().filter(|n| s.piano.ghosts && Some(n.channel) != ch) {
         if let Some(nr) = g.note_rect(n).filter(|nr| nr.intersect(&l.grid).w > 0.0) {
-            ui.c.stroke_rrect(nr.inset(1.5), 2.0, 1.0, ghost);
+            ui.c.stroke_rrect(nr.inset(1.5), if lemon { 3.0 } else { 2.0 }, 1.0, ghost);
         }
     }
     let label_font = Font::new(11);
@@ -142,10 +149,17 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         } else {
             (t.note_top, t.note_bottom, t.note_rim, t.note_text)
         };
-        ui.c.fill_rrect(nr, 2.0, rim);
         let body = Rect::new(nr.x + 1.0, nr.y + 1.0, (nr.w - 2.0).max(1.0), nr.h - 2.0);
-        ui.c.fill_rect_gradient(body, top, bottom, 1.0);
-        if nr.w > 6.0 {
+        if lemon {
+            // Rounded-square notes: rim, then the body as a soft top-light gradient.
+            let rad = 3.5f32.min(nr.w / 2.0).min(nr.h / 2.0);
+            ui.c.fill_rrect(nr, rad, rim);
+            ui.c.fill_rect_gradient(body, top, bottom, (rad - 1.0).max(0.0));
+        } else {
+            ui.c.fill_rrect(nr, 2.0, rim);
+            ui.c.fill_rect_gradient(body, top, bottom, 1.0);
+        }
+        if nr.w > 6.0 && !lemon {
             let hi = top.mix(bottom, 0.45);
             ui.c.fill_rect(Rect::new(body.x, body.y + 1.0, 1.0, body.h - 2.0), hi);
             ui.c.fill_rect(Rect::new(body.right() - 1.0, body.y + 1.0, 1.0, body.h - 2.0), hi);
@@ -167,7 +181,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             let label = key_name(i32::from(n.key));
             let w = ui.c.text_width(label_font, &label);
             let shown = if w <= nr.w - 5.0 { label } else { format!("{}..", &label[..1]) };
-            ui.c.text_clip(label_font, nr.x + 3.0, nr.y + 2.0, nr.w - 4.0, text, &shown);
+            ui.c.text_clip(label_font, nr.x + if lemon { 4.0 } else { 3.0 }, nr.y + 2.0, nr.w - 4.0, text, &shown);
         }
     }
     // Tool overlays (§9): marquee and zoom box (orange, rounded), slice and scrub lines.
@@ -272,7 +286,22 @@ fn toolbar(ui: &mut Ui, r: Rect, shift: f32, active: Tool) {
         };
         let on = action == Action::PianoTool(active);
         let hov = ui.hit(b, action, hint);
-        let c = if on { t.pill } else if hov { ui.t.tx(0xffffff) } else { t.glyph };
+        let c = if super::lemon(ui) {
+            // Lemon: the active tool is a lit rounded square with a dark glyph.
+            let bg = b.outset(1.0);
+            if on {
+                lk::lit(ui.c, bg, lk::r_btn(t), hov);
+            } else if hov {
+                ui.c.fill_rrect(bg, lk::r_btn(t), t.button_hi);
+            }
+            if on { lk::ink_on_lemon() } else { t.glyph }
+        } else if on {
+            t.pill
+        } else if hov {
+            ui.t.tx(0xffffff)
+        } else {
+            t.glyph
+        };
         icons::draw(ui.c, icon, b, c);
     }
     icons::draw(ui.c, Icon::Speaker, Rect::new(ox + 547.0, r.y + 4.0, 15.0, 15.0), t.text);
@@ -356,12 +385,13 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
     let k = l.keys;
     ui.hit(k, Action::PianoKeys, "Keyboard");
     ui.c.push_clip(k);
-    // White keys: a stepped horizontal gradient (§4), with a dark right edge.
-    let bands = 6;
+    // White keys: a stepped horizontal gradient (§4), with a dark right edge. Lemon: flat keys.
+    let lemon = super::lemon(ui);
+    let bands = if lemon { 1 } else { 6 };
     for i in 0..bands {
         let x = k.x + (k.w - 1.0) * i as f32 / bands as f32;
         let w = (k.w - 1.0) / bands as f32 + 1.0;
-        let c = t.key_white_left.mix(t.key_white, i as f32 / (bands - 1) as f32);
+        let c = if lemon { t.key_white } else { t.key_white_left.mix(t.key_white, i as f32 / (bands - 1) as f32) };
         ui.c.fill_rect(Rect::new(x, k.y, w, k.h), c);
     }
     ui.c.fill_rect(Rect::new(k.right() - 1.0, k.y, 1.0, k.h), ui.t.s(0x7e8289));
@@ -375,7 +405,7 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
         for i in 0..bands {
             let x = k.x + (k.w - 1.0) * i as f32 / bands as f32;
             let w = (k.w - 1.0) / bands as f32 + 1.0;
-            let c = t.key_lit_left.mix(t.key_lit, i as f32 / (bands - 1) as f32);
+            let c = if lemon { t.key_lit } else { t.key_lit_left.mix(t.key_lit, i as f32 / (bands - 1) as f32) };
             ui.c.fill_rect(Rect::new(x, top, w, bottom - top), c);
         }
         ui.c.fill_rect(Rect::new(k.right() - 1.0, top, 1.0, bottom - top), t.key_lit_edge);
@@ -386,7 +416,9 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
         match key.rem_euclid(12) {
             0 => {
                 // C: darker key, extended half a row up on the right; octave label.
-                if !lit.contains(&key) {
+                if !lit.contains(&key) && lemon {
+                    ui.c.fill_rect(Rect::new(k.x, y - half, k.w - 1.0, row - 1.0 + half), t.key_c);
+                } else if !lit.contains(&key) {
                     let left = t.key_white_left.shade(-0.16);
                     ui.c.fill_rect_gradient(Rect::new(k.x, y, 45.0, row - 1.0), left, left, 0.0);
                     ui.c.fill_rect(Rect::new(k.x + 45.0, y - half, k.w - 46.0, row - 1.0 + half), t.key_c);
@@ -404,6 +436,11 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
         if is_black(key) {
             let y = g.y_of(key);
             let (left, right) = if lit.contains(&key) { (t.key_black_lit_left, t.key_black_lit) } else { (t.key_black_left, t.key_black) };
+            if lemon {
+                // Rounded at the playing end; the left end runs under the clip.
+                ui.c.fill_rrect(Rect::new(k.x - 6.0, y, 51.0, row), 3.0f32.min(row / 2.0), right);
+                continue;
+            }
             for i in 0..6 {
                 let c = left.mix(right, i as f32 / 5.0);
                 let x = k.x + if i == 0 { 0.0 } else { 10.0 + 8.0 * (i - 1) as f32 };

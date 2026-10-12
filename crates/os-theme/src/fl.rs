@@ -161,7 +161,7 @@ impl FlTheme {
 
 /// What a token is coloured by (spec §3).
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Role {
+pub(crate) enum Role {
     Surface,
     Accent,
     Highlight,
@@ -173,7 +173,7 @@ enum Role {
     Fixed,
 }
 
-fn role(name: &str) -> Role {
+pub(crate) fn role(name: &str) -> Role {
     match name {
         "accent" | "accent_dim" | "playhead" | "velocity" | "velocity_dot" => Role::Accent,
         "on_top" | "on_bottom" | "on_glyph" | "pill" | "pill_text" | "add_hover" | "browser_tab_outline" | "browser_search"
@@ -223,10 +223,15 @@ pub struct Xform {
     pub highlight: Option<(Color, Color)>,
     pub text: Option<(Color, Color)>,
     pub mute: Option<(Color, Color)>,
+    /// A design's re-colouring (`design::palette`), applied instead of the surface / key pairs above.
+    pub design: Option<crate::design::DesignMap>,
 }
 
 impl Xform {
     pub fn surface(&self, c: Color) -> Color {
+        if let Some(d) = &self.design {
+            return d.surface(c);
+        }
         match self.surf {
             Some(s) => s.apply(DARK.invert(c)),
             None => c,
@@ -239,15 +244,27 @@ impl Xform {
         }
     }
     pub fn accent(&self, c: Color) -> Color {
+        if let Some(d) = &self.design {
+            return d.accent_of(c);
+        }
         Self::key(self.accent, c)
     }
     pub fn highlight(&self, c: Color) -> Color {
+        if let Some(d) = &self.design {
+            return d.highlight_of(c);
+        }
         Self::key(self.highlight, c)
     }
     pub fn text(&self, c: Color) -> Color {
+        if let Some(d) = &self.design {
+            return d.text_of(c);
+        }
         Self::key(self.text, c)
     }
     pub fn mute(&self, c: Color) -> Color {
+        if let Some(d) = &self.design {
+            return d.mute_of(c);
+        }
         Self::key(self.mute, c)
     }
 }
@@ -276,6 +293,7 @@ pub fn palette(th: &FlTheme) -> Palette {
         _ => None,
     };
     out.xf = Xform {
+        design: None,
         surf: (th.surface != DARK).then_some(th.surface),
         accent: pair(dark.selected, th.selected),
         highlight: pair(dark.highlight, th.highlight),

@@ -436,10 +436,15 @@ fn paint(c: &mut Canvas, st: &State) {
 fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     icon_at(c, &tb::CARET_RIGHT, 14.4, 15.5, 15.4, c_arrow());
     let g = GEAR_RECT;
-    if st.strip {
+    let lemon = os_ui::kit::lemon::on(&os_theme::current());
+    if st.strip && lemon {
+        // Lemon (spec: ui/lemon-design.md §11): the gear is a lit rounded square while the strip shows.
+        os_ui::kit::lemon::lit(c, g, 6.0, false);
+    } else if st.strip {
         c.stroke_rrect(Rect::new(g.x + 1.0, g.y + 1.0, g.w - 2.0, g.h - 2.0), 3.5, 2.0, c_gear_on());
     }
-    icon_at(c, &tb::SETTINGS_FILLED, g.cx(), g.cy(), 18.4, if st.strip { c_gear_on() } else { c_icon() });
+    let gear = if st.strip && lemon { os_ui::kit::lemon::ink_on_lemon() } else if st.strip { c_gear_on() } else { c_icon() };
+    icon_at(c, &tb::SETTINGS_FILLED, g.cx(), g.cy(), 18.4, gear);
     let p = presets_rect(w);
     let f = title_font();
     let ty = (19.0 - c.ascent(f)).round();
@@ -468,7 +473,7 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
         c.text_clip(hf, hx, hy, (end - rw - 10.0 - hx).max(0.0), c_caption(), left);
     }
     // Presets box: the loaded preset's name, or "Presets" (spec: plugins/presets.md).
-    c.fill_rrect(p, 3.0, c_presets());
+    c.fill_rrect(p, if lemon { 6.0 } else { 3.0 }, c_presets());
     c.text_clip(f, p.x + 9.0, ty, p.w - 9.0 - 31.0, c_text(), st.preset.as_deref().unwrap_or("Presets"));
     icon_at(c, &tb::CARET_LEFT, p.right() - 22.2, 15.5, 18.9, c_icon());
     icon_at(c, &tb::CARET_RIGHT, p.right() - 7.8, 15.5, 18.9, c_icon());
@@ -486,7 +491,9 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
     for i in 0..=n {
         let cell = tab_rect(i);
         let active = if i == n { st.misc } else { !st.misc && st.page == i };
-        if active {
+        if active && os_ui::kit::lemon::on(&os_theme::current()) {
+            c.fill_rrect(cell.inset(2.0), 6.0, c_body());
+        } else if active {
             c.fill_rect(cell, c_body());
         }
         let col = if active { os_theme::current().a(0x49f1b1) } else { c_icon() };
@@ -521,6 +528,11 @@ fn caption(c: &mut Canvas, cx: f32, s: &str) {
 
 fn knob(c: &mut Canvas, cx: f32, cy: f32, v: f32, bipolar: bool, dot: Color) {
     let r = 11.0;
+    let p = os_theme::current();
+    if os_ui::kit::lemon::on(&p) {
+        let look = os_ui::kit::KnobLook::Mixer { halo: r + 4.0, arc: true };
+        return os_ui::kit::knob(c, &p, cx, cy, r, v, bipolar, look, os_ui::kit::State::NORMAL);
+    }
     c.fill_circle(cx, cy, r + 4.0, os_theme::current().s(0x191c1f));
     c.fill_circle(cx, cy, r + 3.0, os_theme::current().s(0x23262a));
     c.fill_circle(cx, cy, r + 1.5, os_theme::current().s(0x191c1f));
@@ -537,12 +549,19 @@ fn knob(c: &mut Canvas, cx: f32, cy: f32, v: f32, bipolar: bool, dot: Color) {
 }
 
 fn value_box(c: &mut Canvas, r: Rect, s: &str) {
-    c.fill_rrect(r, 4.0, Color::rgb(0x631d25));
-    c.fill_rect_gradient(r.inset(1.0), Color::rgb(0x8d434b), Color::rgb(0x833941), 3.0);
+    let lemon = os_ui::kit::lemon::on(&os_theme::current());
+    if lemon {
+        use os_theme::design::lemon as brand;
+        os_ui::kit::lemon::outlined(c, r, 4.0, brand::COLORED_DARK.shade(-0.25), brand::COLORED_DARK);
+    } else {
+        c.fill_rrect(r, 4.0, Color::rgb(0x631d25));
+        c.fill_rect_gradient(r.inset(1.0), Color::rgb(0x8d434b), Color::rgb(0x833941), 3.0);
+    }
     let f = Font::light(22, 0);
     let w = c.text_width(f, s);
     let lh = c.line_height(f);
-    c.text(f, r.right() - 11.0 - w, (r.cy() - lh / 2.0).round(), Color::rgb(0xe8dfe2), s);
+    let ink = if lemon { os_theme::design::lemon::HIGHLIGHT } else { Color::rgb(0xe8dfe2) };
+    c.text(f, r.right() - 11.0 - w, (r.cy() - lh / 2.0).round(), ink, s);
 }
 
 struct Win {

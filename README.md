@@ -79,6 +79,7 @@ clicking it does nothing.
 | Plugin delay compensation | ❌ | Not available yet |
 | Audio drivers | 🚧 | WASAPI (shared mode); no ASIO yet |
 | Platforms | 🚧 | Windows 10 / 11; Linux builds are experimental; no macOS yet |
+| Look and themes | 🚧 | Lemon design (lemon on neutral greys, rounded-square controls) and the Classic look, switched with Ctrl+Shift+D; theme files apply to Classic; plugin editors not restyled yet |
 
 ✅ usable · 🚧 partial · ❌ not available yet
 
@@ -103,6 +104,7 @@ cargo run -p os-app --release
 ```
 
 Use `FILE > Export as WAV` (Ctrl+R) to render the song, or the current pattern in PAT mode, to a file.
+Ctrl+Shift+D switches between the Lemon and Classic designs (the choice is remembered).
 
 Open a project directly by passing its path:
 
@@ -148,7 +150,7 @@ OpenStudio is a Cargo workspace of focused crates:
 | [`os-flp`](crates/os-flp) | Lossless `.flp` event-stream reader/writer and model mapping |
 | [`os-engine`](crates/os-engine) | Audio engine: sampler, mixer, routing, effects, envelopes, automation |
 | [`os-dsp`](crates/os-dsp) | DSP building blocks: level curve, pan split, gain glides, mixer matrix and equaliser |
-| [`os-theme`](crates/os-theme) | Colour palette, theme files and the HSL adjustment model |
+| [`os-theme`](crates/os-theme) | Colour palette, designs (Lemon, Classic), theme files and the HSL adjustment model |
 | [`os-ui`](crates/os-ui) | CPU canvas, text rendering and the shared widget kit |
 | [`os-app`](crates/os-app) | The `openstudio` application: windows, editors, transport |
 | [`os-host`](crates/os-host) | Format-neutral plugin hosting layer (CLAP, VST3, native) |

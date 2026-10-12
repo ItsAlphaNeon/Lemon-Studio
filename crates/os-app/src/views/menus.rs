@@ -385,8 +385,14 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
     };
     let r = Rect::new(ax.min(s.screen.0 - width).max(0.0), ay, width, body_h + border * 2.0);
     let away = !r.contains(ui.mouse.0, ui.mouse.1);
-    ui.c.fill_rect(r, t.menu_pop);
-    ui.c.stroke_rrect(Rect::new(r.x + mt.line, r.y + mt.line, r.w - 2.0 * mt.line, r.h - 2.0 * mt.line), 0.0, border, t.menu_pop_border);
+    // Lemon (spec: ui/lemon-design.md §9): a rounded panel, rounded row highlights.
+    let lemon = super::lemon(ui);
+    if lemon {
+        os_ui::kit::popup(ui.c, t, r);
+    } else {
+        ui.c.fill_rect(r, t.menu_pop);
+        ui.c.stroke_rrect(Rect::new(r.x + mt.line, r.y + mt.line, r.w - 2.0 * mt.line, r.h - 2.0 * mt.line), 0.0, border, t.menu_pop_border);
+    }
     ui.hit(r, Action::Swallow, "");
 
     let font = Font::new(14);
@@ -406,7 +412,9 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                 let rr = Rect::new(col.x, y, col.w, row);
                 let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
                 let lit = hov || (*n == s.pattern && away);
-                if lit {
+                if lit && lemon {
+                    os_ui::kit::row_highlight(ui.c, t, rr);
+                } else if lit {
                     ui.c.fill_rect(rr, ui.t.s(0x03080c));
                 }
                 let col = if *n == s.pattern { t.glyph } else { t.menu_pop_text };
@@ -421,7 +429,11 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
             match item.kind {
                 Kind::Sep => ui.c.fill_rect(Rect::new(col.x, y + mt.sep_line, col.w, mt.line), t.menu_pop_head),
                 Kind::Head => {
-                    ui.c.fill_rect(rr, t.menu_pop_head);
+                    if lemon {
+                        ui.c.fill_rrect(Rect::new(rr.x + 3.0, rr.y + 1.0, rr.w - 6.0, rr.h - 2.0), 4.0f32.min(rr.h / 2.0 - 1.0).max(0.0), t.menu_pop_head);
+                    } else {
+                        ui.c.fill_rect(rr, t.menu_pop_head);
+                    }
                     ui.c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0 + (h - os_ui::kit::menu::HEAD) / 2.0, t.menu_pop_head_text, item.label);
                 }
                 Kind::Item => {
@@ -429,7 +441,11 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                     // Greyed-out entries never light up; they only say they are not available yet.
                     if ok {
                         if ui.hit(rr, item_action(menu, flat, item), item.label) {
-                            ui.c.fill_rect(rr, t.menu_pop_hi);
+                            if lemon {
+                                os_ui::kit::row_highlight(ui.c, t, rr);
+                            } else {
+                                ui.c.fill_rect(rr, t.menu_pop_hi);
+                            }
                         }
                     } else {
                         ui.off(rr, item.label);

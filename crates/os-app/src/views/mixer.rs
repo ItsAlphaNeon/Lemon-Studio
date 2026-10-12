@@ -3,6 +3,7 @@
 
 use std::f32::consts::PI;
 
+use os_ui::kit::lemon as lk;
 use os_ui::{Color, Font, Glyph, Rect};
 
 use super::{led, resize_zones, window_body, window_buttons, FrameInfo};
@@ -130,8 +131,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         "Level scale".to_string()
     };
     ui.hit(col, Action::Mix(MHit::Scale), hint);
-    ui.c.fill_rrect(col, 3.0, ui.t.s(0x191d1e));
-    ui.c.fill_rrect(col.inset(1.0), 2.5, ui.t.s(0x222527));
+    let lemon = super::lemon(ui);
+    if lemon {
+        lk::outlined(ui.c, col, lk::r_btn(ui.t), ui.t.s(0x191d1e), ui.t.s(0x222527));
+    } else {
+        ui.c.fill_rrect(col, 3.0, ui.t.s(0x191d1e));
+        ui.c.fill_rrect(col.inset(1.0), 2.5, ui.t.s(0x222527));
+    }
     // Marks closer than a label height are skipped when the window is squished.
     let mut last = f32::MIN;
     for (m, y) in SCALE {
@@ -173,7 +179,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let pb = Rect::new(px - 9.0, ly.y(HANDLE_0DB) - 9.0, 18.0, 18.0);
     if px < area.right() + 10.0 {
         let hov = ui.hit(pb, Action::Mix(MHit::Add), "Add more tracks");
-        if hov {
+        if hov && lemon {
+            ui.c.fill_rrect(pb, lk::r_btn(ui.t), ui.t.button_hi);
+        } else if hov {
             ui.c.stroke_rrect(pb, 3.0, 1.0, ui.t.h(0xf09a28));
         }
         icons::draw(ui.c, Icon::Plus, pb.inset(3.0), if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0x9aa1a5) });
@@ -300,8 +308,16 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     // Body and the strip divider.
     // The current strip's body is a shade lighter (measured: 0x26292b vs 0x232527).
     let body = if selected { ui.t.s(0x26292b) } else { ui.t.s(0x232527) };
-    ui.c.fill_rect(Rect::new(left, ly.y(HEAD_Y1) + 1.0, STRIP_W, bottom - ly.y(HEAD_Y1) - 1.0), body);
-    ui.c.fill_rect(Rect::new(left + STRIP_W - 1.0, ly.y(HEAD_Y1) + 1.0, 1.0, bottom - ly.y(HEAD_Y1) - 1.0), ui.t.s(0x1c1f21));
+    let lemon = super::lemon(ui);
+    if lemon {
+        // Lemon (spec: ui/lemon-design.md §8): each strip is a rounded card on the dark gap colour.
+        let card = Rect::new(left, ly.y(HEAD_Y1) + 1.0, STRIP_W, bottom - ly.y(HEAD_Y1) - 1.0);
+        ui.c.fill_rect(card, ui.t.s(0x131517));
+        ui.c.fill_rrect(Rect::new(card.x + 1.5, card.y + 1.0, card.w - 3.0, card.h - 4.0), lk::r_panel(t), body);
+    } else {
+        ui.c.fill_rect(Rect::new(left, ly.y(HEAD_Y1) + 1.0, STRIP_W, bottom - ly.y(HEAD_Y1) - 1.0), body);
+        ui.c.fill_rect(Rect::new(left + STRIP_W - 1.0, ly.y(HEAD_Y1) + 1.0, 1.0, bottom - ly.y(HEAD_Y1) - 1.0), ui.t.s(0x1c1f21));
+    }
     // The whole strip selects (Ctrl adds, Shift renames); controls register on top of it (spec: ui/mixer.md §2).
     ui.hit(Rect::new(left, ly.y(HEAD_Y0), STRIP_W, bottom - ly.y(HEAD_Y0)), Action::Mix(MHit::Strip(n)), mx::name(s, n));
     let hov = ui.hovering(Rect::new(left, ly.y(HEAD_Y0), STRIP_W, ly.y(PANEL_Y1) - ly.y(HEAD_Y0)));
@@ -310,7 +326,9 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     if n != 0 {
         let hr = Rect::new(left, ly.y(HEAD_Y0), STRIP_W, ly.y(HEAD_Y1) - ly.y(HEAD_Y0) + 1.0);
         ui.c.fill_rect(hr, ui.t.s(0x2b2e30));
-        if selected {
+        if selected && lemon {
+            lk::lit(ui.c, Rect::new(hr.x + 3.0, hr.y + 2.0, hr.w - 6.0, hr.h - 4.0), lk::r_btn(t), false);
+        } else if selected {
             // Hatched header for the selected strip.
             ui.c.push_clip(hr);
             for k in 0..14 {
@@ -319,7 +337,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
             }
             ui.c.pop_clip();
         }
-        let c = if selected || hov { ui.t.tx(0x9aa1a5) } else { ui.t.s(0x6d7275) };
+        let c = if selected && lemon { lk::ink_on_lemon() } else if selected || hov { ui.t.tx(0x9aa1a5) } else { ui.t.s(0x6d7275) };
         ui.c.text_center(Font::new(17), Rect::new(left, ly.y(HEAD_Y0), STRIP_W, 21.0), c, &n.to_string());
     }
 
@@ -329,8 +347,13 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
 
     // Meter slot with its tick marks; the selected strip gets a green frame.
     let meter = Rect::new(mx - 7.5, ly.y(METER_Y0), 16.0, ly.y(METER_Y1) - ly.y(METER_Y0));
-    ui.c.fill_rrect(meter, 2.0, ui.t.s(0x191d1e));
-    ui.c.fill_rect(Rect::new(meter.x + 2.0, meter.y + 2.0, 11.0, meter.h - 4.0), ui.t.s(0x232729));
+    if lemon {
+        ui.c.fill_rrect(meter, lk::r_small(t), ui.t.s(0x191d1e));
+        ui.c.fill_rrect(Rect::new(meter.x + 2.0, meter.y + 2.0, 12.0, meter.h - 4.0), 2.5, ui.t.s(0x232729));
+    } else {
+        ui.c.fill_rrect(meter, 2.0, ui.t.s(0x191d1e));
+        ui.c.fill_rect(Rect::new(meter.x + 2.0, meter.y + 2.0, 11.0, meter.h - 4.0), ui.t.s(0x232729));
+    }
     for y in [181.0, 230.0, 278.0, 327.0, 375.0, 423.0] {
         ui.c.fill_rect(Rect::new(meter.x + 3.0, ly.y(y), 9.0, 1.0), ui.t.s(0x111315));
     }
@@ -346,7 +369,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
         }
     }
     if selected {
-        ui.c.stroke_rrect(Rect::new(meter.x - 1.0, meter.y - 2.0, meter.w + 2.0, meter.h + 4.0), 1.0, 2.0, t.accent);
+        ui.c.stroke_rrect(Rect::new(meter.x - 1.0, meter.y - 2.0, meter.w + 2.0, meter.h + 4.0), if lemon { lk::r_btn(t) } else { 1.0 }, 2.0, t.accent);
     }
 
     // Name, rotated, reading upward from the bottom of the meter.
@@ -389,13 +412,21 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
 
     // Fader: track, gain marks, handle (green on the selected strip, with the track lit below it).
     let track_y1 = bottom - 99.0;
-    ui.c.fill_rect(Rect::new(mx - 1.5, ly.y(TRACK_Y0), 3.0, track_y1 - ly.y(TRACK_Y0)), ui.t.s(0x141618));
+    if lemon {
+        ui.c.fill_rrect(Rect::new(mx - 2.0, ly.y(TRACK_Y0), 4.0, track_y1 - ly.y(TRACK_Y0)), 2.0, ui.t.s(0x141618));
+    } else {
+        ui.c.fill_rect(Rect::new(mx - 1.5, ly.y(TRACK_Y0), 3.0, track_y1 - ly.y(TRACK_Y0)), ui.t.s(0x141618));
+    }
     fader_marks(ui, mx, track_y1, ly);
     let v = track.and_then(|m| m.volume).unwrap_or(0.8) as f32;
     // max/min, not clamp: a very short window gives track_y1 < ly.y(TRACK_Y0) (clamp would panic).
     let hy = (ly.y(HANDLE_0DB + (0.8 - v) * 440.0)).min(track_y1 - 5.0).max(ly.y(TRACK_Y0) + 5.0);
     if selected {
-        ui.c.fill_rect(Rect::new(mx - 1.0, hy, 2.0, track_y1 - hy), ui.t.a(0x8ec63a));
+        if lemon {
+            ui.c.fill_rrect(Rect::new(mx - 1.5, hy, 3.0, track_y1 - hy), 1.5, t.accent);
+        } else {
+            ui.c.fill_rect(Rect::new(mx - 1.0, hy, 2.0, track_y1 - hy), ui.t.a(0x8ec63a));
+        }
     }
     let hov = ui.hit(Rect::new(mx - 9.0, ly.y(TRACK_Y0) - 5.0, 18.0, track_y1 - ly.y(TRACK_Y0) + 10.0), Action::Fader(n), mx::level_text("Volume", f64::from(v)));
     fader_handle(ui, mx, hy, selected, hov);
@@ -548,8 +579,13 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         let ha = ui.hit(Rect::new(row.x, row.y, 19.0, row.h), Action::Mix(MHit::SlotArrow(k)), hint.clone());
         let hn = ui.hit(Rect::new(row.x + 19.0, row.y, row.w - 64.0, row.h), Action::Mix(MHit::SlotName(k)), hint);
         let hov = ha || hn;
-        ui.c.fill_rect(row, ui.t.s(0x1f2224));
-        ui.c.fill_rect(row.inset(1.0), if hov { ui.t.s(0x2f3335) } else { ui.t.s(0x2a2d2f) });
+        if super::lemon(ui) {
+            let face = if hov { ui.t.s(0x2f3335) } else { ui.t.s(0x2a2d2f) };
+            lk::outlined(ui.c, Rect::new(row.x + 2.0, row.y, row.w - 4.0, row.h), lk::r_btn(t).min(row.h / 2.0), ui.t.s(0x1f2224), face);
+        } else {
+            ui.c.fill_rect(row, ui.t.s(0x1f2224));
+            ui.c.fill_rect(row.inset(1.0), if hov { ui.t.s(0x2f3335) } else { ui.t.s(0x2a2d2f) });
+        }
         chevron(ui, row.x + 10.0, row.cy(), true, if ha { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
         match &plugin {
             Some(p) => ui.c.text_clip(Font::new(fs), row.x + 19.0, row.y + 4.0 * kp, 140.0, ui.t.tx(0xc9d0d4), p),
@@ -569,8 +605,12 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     // yet (a project's stored EQ plays, but is not shown here): the whole section is greyed out.
     let eq = Rect::new(r.x + 4.0, sep + 11.0, 146.0, 173.0 * kp);
     ui.off(eq, "Track equalizer");
-    ui.c.fill_rect(eq, ui.t.s(0x1f2224));
-    ui.c.fill_rect(eq.inset(1.0), ui.t.s(0x272a2c));
+    if super::lemon(ui) {
+        lk::outlined(ui.c, eq, lk::r_btn(t), ui.t.s(0x1f2224), ui.t.s(0x272a2c));
+    } else {
+        ui.c.fill_rect(eq, ui.t.s(0x1f2224));
+        ui.c.fill_rect(eq.inset(1.0), ui.t.s(0x272a2c));
+    }
     for k in 1..5 {
         ui.c.fill_rect(Rect::new(eq.x + 14.0 + 31.0 * k as f32, eq.y + 1.0, 1.0, eq.h - 2.0), ui.t.s(0x2b2e30));
     }
@@ -581,8 +621,13 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         ui.c.fill_rect(Rect::new(fx - 9.0, eq.y + 36.0 * kp, 18.0, 1.0), ui.t.s(0x3a3e41));
         ui.c.fill_rect(Rect::new(fx - 9.0, eq.y + 136.0 * kp, 18.0, 1.0), ui.t.s(0x3a3e41));
         let h = Rect::new(fx - 6.0, eq.cy() - 6.0, 12.0, 13.0);
-        ui.c.fill_rrect(h.outset(1.0), 2.0, ui.t.s(0x121416));
-        ui.c.fill_rect_gradient(h, ui.t.s(0x5e6265), ui.t.s(0x2a2d30), 2.0);
+        if super::lemon(ui) {
+            ui.c.fill_rrect(h.outset(1.0), lk::r_small(t), ui.t.s(0x121416));
+            ui.c.fill_rrect(h, lk::r_small(t) - 1.0, ui.t.s(0x4a4e51));
+        } else {
+            ui.c.fill_rrect(h.outset(1.0), 2.0, ui.t.s(0x121416));
+            ui.c.fill_rect_gradient(h, ui.t.s(0x5e6265), ui.t.s(0x2a2d30), 2.0);
+        }
         ui.c.fill_rect(Rect::new(fx - 9.0, eq.cy(), 18.0, 1.0), ui.t.s(0x111315));
         ui.off(Rect::new(fx - 9.0, eq.y, 18.0, eq.h), ["EQ band 1 (low shelf) level", "EQ band 2 (peaking) level", "EQ band 3 (high shelf) level"][k]);
     }
