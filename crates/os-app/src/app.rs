@@ -2207,6 +2207,8 @@ impl App {
                         }
                     }
                 }
+                self.state.settings.preset = usize::MAX;
+                self.sync_preset();
                 self.state.message = Some(if was_lemon { format!("Theme: {name} (Classic design; Ctrl+Shift+D switches)") } else { format!("Theme: {name}") });
             }
             Err(e) => self.state.message = Some(format!("Could not load theme {name}: {e}")),
@@ -2227,8 +2229,24 @@ impl App {
         if remember {
             save_design(d);
         }
+        self.sync_preset();
         self.state.message = Some(format!("Design: {} (Ctrl+Shift+D switches)", d.name()));
         self.invalidate();
+    }
+
+    /// The Theme preset tile shown as chosen (spec: ui/lemon-design.md §1): (Default) for Lemon, Classic for the plain
+    /// Classic look, else the theme file picked from the tiles (none when the theme came from elsewhere).
+    fn sync_preset(&mut self) {
+        let st = &mut self.state.settings;
+        st.preset = if self.theme.colors.style.lemon() {
+            0
+        } else if self.theme.colors == os_theme::Palette::default() {
+            1
+        } else if st.preset >= 2 {
+            st.preset
+        } else {
+            usize::MAX
+        };
     }
 
     /// Open the settings window on `tab` (spec: ui/settings.md §1); reads the output devices and theme files.
@@ -2240,6 +2258,8 @@ impl App {
         }
         st.open = true;
         st.tab = tab;
+        self.sync_preset();
+        let st = &mut self.state.settings;
         let host = cpal::default_host();
         let name = |d: &cpal::Device| d.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "(unknown device)".into());
         st.device = host.default_output_device().map(|d| name(&d)).unwrap_or_else(|| "(no output device)".into());
@@ -2304,21 +2324,29 @@ impl App {
                     st.folded.insert(k);
                 }
             }
+            // Tiles (spec: ui/lemon-design.md §1): 0 = (Default) = the Lemon design, 1 = the Classic look without a
+            // theme file, then the theme files (they colour the Classic design).
             SAct::Preset(0) => {
-                st.preset = 0;
-                self.theme = if self.design() == Design::Lemon { design_theme(Design::Lemon, false) } else { os_theme::Theme::default() };
+                self.set_design(Design::Lemon, true);
+                self.state.message = Some("Theme: default (Lemon)".into());
+            }
+            SAct::Preset(1) => {
+                self.theme = os_theme::Theme::default();
                 os_theme::set_current(&self.theme.colors);
+                save_design(Design::Classic);
                 if let Some(d) = std::env::var_os("APPDATA") {
                     let _ = std::fs::remove_file(PathBuf::from(d).join("OpenStudio").join("current.flstheme"));
                 }
-                self.state.message = Some("Theme: default".into());
+                self.sync_preset();
+                self.state.message = Some("Theme: Classic".into());
             }
             SAct::Preset(i) => {
-                if let Some((name, text)) = st.themes.get(i - 1).cloned() {
+                if let Some((name, text)) = st.themes.get(i - 2).cloned() {
                     st.preset = i;
                     let fl = os_theme::FlTheme::parse(&text);
                     self.theme = os_theme::Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default());
                     os_theme::set_current(&self.theme.colors);
+                    save_design(Design::Classic);
                     // Remembered like an imported theme (loaded at the next start).
                     if let Some(d) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("OpenStudio")) {
                         let _ = std::fs::create_dir_all(&d);

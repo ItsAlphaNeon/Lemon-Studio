@@ -333,7 +333,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]
         }
         THEME => {
-            let mut tiles = vec![("(Default)".to_string(), swatch(&os_theme::Palette::default()))];
+            // (Default) = the Lemon design, then the Classic look, then theme files (spec: ui/lemon-design.md §1).
+            use os_theme::design::lemon as brand;
+            let mut tiles = vec![("(Default)".to_string(), [brand::DARK, brand::MAIN, brand::HIGHLIGHT]), ("Classic".to_string(), swatch(&os_theme::Palette::default()))];
             for (name, text) in &st.themes {
                 tiles.push((name.clone(), swatch(&os_theme::fl::palette(&os_theme::FlTheme::parse(text)))));
             }
@@ -776,6 +778,22 @@ fn paint_row_at(ui: &mut Ui, st: &SettingsUi, group: &'static str, row: &Row, g:
                 let (col, rowi) = ((i % 3) as f32, (i / 3) as f32);
                 let b = Rect::new(x0 + col * 196.0, y + 4.0 + rowi * 64.0, 186.0, 56.0);
                 let hov = ui.hit(b, Action::Settings(SAct::Preset(i)), "Load this theme");
+                if super::lemon(ui) {
+                    // Lemon: a rounded tile, framed in the main colour when chosen.
+                    use os_theme::design::lemon as brand;
+                    let rad = lk::r_btn(t);
+                    ui.c.fill_rrect(b, rad + 2.0, if i == *sel { brand::MAIN } else if hov { brand::DARK_HIGHLIGHT } else { t.s(0x161819) });
+                    let inner = b.inset(2.0);
+                    let name_bg = t.s(0x1d1e1f);
+                    ui.c.fill_rrect(inner, rad, sw[0]);
+                    let nr = Rect::new(inner.x, inner.y + 30.0, inner.w, inner.h - 30.0);
+                    ui.c.fill_rrect(nr, rad, name_bg);
+                    ui.c.fill_rect(Rect::new(nr.x, nr.y, nr.w, rad), name_bg);
+                    ui.c.fill_rrect(Rect::new(inner.x + 8.0, inner.y + 10.0, 40.0, 10.0), 3.0, sw[1]);
+                    ui.c.fill_rrect(Rect::new(inner.x + 54.0, inner.y + 10.0, 24.0, 10.0), 3.0, sw[2]);
+                    ui.c.text_center(Font::new(13).bold(), nr, t.text, name);
+                    continue;
+                }
                 ui.c.fill_rect(b, if i == *sel { t.a(0x2d7cd0) } else if hov { t.s(0x5a5c5e) } else { t.s(0x161819) });
                 let inner = b.inset(2.0);
                 ui.c.fill_rect(Rect::new(inner.x, inner.y, inner.w, 30.0), sw[0]);
