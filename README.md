@@ -63,7 +63,7 @@ clicking it does nothing.
 | Area | Status | Notes |
 |---|:---:|---|
 | Step sequencing and patterns | ✅ | Channel rack with steps, mini piano rolls, swing, per-channel loops |
-| Piano roll note editing | ✅ | Full tool set, velocity and event lanes |
+| Piano roll note editing | ✅ | Full tool set, velocity and event lanes, quantize / chop / glue / legato / strum / arpeggiate / randomize, vertical zoom, ghost channels, pattern time markers (saved) |
 | Song arrangement | ✅ | Playlist with pattern, audio and automation clips, markers, several arrangements |
 | Automation | 🚧 | Automation clips for channel, mixer and plugin parameters; no recording of movements |
 | Mixing and routing | ✅ | Mixer tracks, sends, sidechain, effect slots, meters |

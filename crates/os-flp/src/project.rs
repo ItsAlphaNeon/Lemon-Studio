@@ -235,11 +235,11 @@ struct PatternLoc {
     color: Option<usize>,
     /// Loop length pairs (160, 161) after the notes.
     loops: Vec<usize>,
-    /// Metadata: 157/158 (new loop/length events go after the last), 26 / 162, 164 and the "Length" marker events.
+    /// Metadata: 157/158 (new loop/length events go after the last), 26 / 162, 164 and every marker group's events.
     meta_158: Option<usize>,
     loop_off: Vec<usize>,
     length: Option<usize>,
-    length_marker: Vec<usize>,
+    markers: Vec<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -391,13 +391,11 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                     // Metadata block: runs until the next block start or region change.
                     loc.meta_start = Some(i);
                     is_meta = true;
-                    let mut in_length_marker = false;
+                    let mut in_marker = false;
                     while let Some(n) = events.get(k) {
-                        if n.id == id::MARKER_POS {
-                            in_length_marker = int(n) >> 24 == LENGTH_MARKER_KIND;
-                        }
-                        if in_length_marker && id::MARKER_IDS.contains(&n.id) {
-                            loc.length_marker.push(k);
+                        in_marker |= n.id == id::MARKER_POS;
+                        if in_marker && id::MARKER_IDS.contains(&n.id) {
+                            loc.markers.push(k);
                         }
                         match n.id {
                             id::PAT_NAME => loc.name = Some(k),
@@ -405,7 +403,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                             157 | 158 => loc.meta_158 = Some(k),
                             id::LOOP_OFF | id::LOOP_TYPE => loc.loop_off.push(k),
                             id::PAT_LENGTH => loc.length = Some(k),
-                            id::MARKER_NAME => in_length_marker = false,
+                            id::MARKER_NAME => in_marker = false,
                             id::PAT_START | id::CH_START | id::ARR_START => break,
                             _ => {}
                         }
@@ -602,13 +600,17 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         }
     }
     for (&number, loc) in &l.patterns {
+        let length = loc.length.map(|i| int(&events[i])).filter(|&v| v != 0);
+        let mut markers = decode_markers(events, &loc.markers, enc);
+        markers.retain(|m| !(u32::from(m.kind) == LENGTH_MARKER_KIND && Some(m.position) == length));
         p.patterns.push(Pattern {
             number,
             name: text(loc.name),
             color: loc.color.map(|i| int(&events[i])).filter(|v| v >> 24 == 0xFF).map(rgb_from_bgr),
             notes: loc.notes.and_then(|i| events[i].data()).map(decode_notes).unwrap_or_default(),
             controls: loc.controls.and_then(|i| events[i].data()).map(decode_controls).unwrap_or_default(),
-            length: loc.length.map(|i| int(&events[i])).filter(|&v| v != 0),
+            length,
+            markers,
             loops: loc
                 .loops
                 .chunks_exact(2)
@@ -1665,13 +1667,13 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 inserts.push((c + 1, Event::new(id::PAT_NOTES, Value::var(encode_notes(&pat.notes)))));
             }
         }
-        if !new_block && old.map(|o| &o.notes) != Some(&pat.notes) {
-            let Some(i) = loc.and_then(|l| l.notes) else {
-                if pat.notes.is_empty() || has_block {
-                    continue;
-                }
-                return Err(ProjectError::Mismatch(format!("adding notes to pattern {} (no note block)", pat.number)));
-            };
+        let notes_changed = !new_block && old.map(|o| &o.notes) != Some(&pat.notes);
+        if notes_changed && loc.and_then(|l| l.notes).is_none() && !pat.notes.is_empty() && !has_block {
+            return Err(ProjectError::Mismatch(format!("adding notes to pattern {} (no note block)", pat.number)));
+        }
+        // Without a note event there is nothing to rewrite here (no notes, or they were added with the block above);
+        // the pattern's other parts still are.
+        if let Some(i) = loc.and_then(|l| l.notes).filter(|_| notes_changed) {
             // Reuse the original bytes of notes that didn't change (keeps unknown fields).
             let original = events[i].data().unwrap_or(&[]).to_vec();
             let mut sorted = pat.notes.clone();
@@ -1712,13 +1714,19 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
         }
         let meta_start = loc.and_then(|l| l.meta_start);
-        let wants_meta = pat.name.is_some() || pat.color.is_some() || pat.length.is_some() || pat.loop_off.is_some();
+        let wants_meta = pat.name.is_some()
+            || pat.color.is_some()
+            || pat.length.is_some()
+            || pat.loop_off.is_some()
+            || !pat.markers.is_empty();
         if meta_start.is_some()
-            && (old.map(|o| o.length) != Some(pat.length) || old.map(|o| o.loop_off) != Some(pat.loop_off))
+            && (old.map(|o| o.length) != Some(pat.length)
+                || old.map(|o| o.loop_off) != Some(pat.loop_off)
+                || old.map(|o| &o.markers) != Some(&pat.markers))
         {
-            // Loop-off flag, "Length" marker and length are rewritten together where they were.
+            // Loop-off flag, markers and length are rewritten together where they were.
             let m = loc.expect("has metadata");
-            let old_ones: Vec<usize> = m.loop_off.iter().chain(&m.length_marker).chain(m.length.iter()).copied().collect();
+            let old_ones: Vec<usize> = m.loop_off.iter().chain(&m.markers).chain(m.length.iter()).copied().collect();
             let at = old_ones.iter().min().copied().or(m.meta_158.map(|i| i + 1)).unwrap_or(m.meta_start.unwrap_or(0) + 1);
             removals.extend(old_ones);
             inserts.extend(meta_length_events(pat, enc).into_iter().rev().map(|e| (at, e)));
@@ -2263,23 +2271,27 @@ fn loop_events(loops: &[(u16, u32)]) -> Vec<Event> {
         .collect()
 }
 
-/// The metadata events between 158 and 52: loop-off flag + loop type, the "Length" marker, the length (spec:
-/// flp/events/patterns.md, metadata block).
+/// The metadata events between 158 and 52: loop-off flag + loop type, the marker groups (the pattern's markers and
+/// the "Length" marker, sorted by position as FL saves them), the length (spec: flp/events/patterns.md, metadata block).
 fn meta_length_events(pat: &Pattern, enc: TextEnc) -> Vec<Event> {
     let mut out = Vec::new();
     if let Some(t) = pat.loop_off {
         out.push(Event::new(id::LOOP_OFF, Value::U8(1)));
         out.push(Event::new(id::LOOP_TYPE, Value::U32(t)));
     }
+    let mut markers: Vec<TimeMarker> = pat.markers.clone();
     if let Some(len) = pat.length {
-        let marker = TimeMarker {
+        markers.push(TimeMarker {
             position: len,
             kind: LENGTH_MARKER_KIND as u8,
             name: LENGTH_MARKER_NAME.into(),
             numerator: 4,
             denominator: 4,
-        };
-        out.extend(marker_events(&marker, enc));
+        });
+    }
+    markers.sort_by_key(|m| m.position);
+    for m in &markers {
+        out.extend(marker_events(m, enc));
     }
     out.push(Event::new(id::PAT_LENGTH, Value::U32(pat.length.unwrap_or(0))));
     out
@@ -2442,7 +2454,7 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         ev.extend(channel_block_events(ch, project.automation(ch.index), enc)?);
         if i == 0 {
             for pat in &patterns {
-                if pat.name.is_some() || pat.color.is_some() || pat.length.is_some() || pat.loop_off.is_some() {
+                if pat.name.is_some() || pat.color.is_some() || pat.length.is_some() || pat.loop_off.is_some() || !pat.markers.is_empty() {
                     ev.extend(meta_block_events(pat, enc));
                 }
             }
@@ -3160,6 +3172,65 @@ mod tests {
         let back2 = load(&FlpFile::parse(&file2.to_bytes().unwrap()).unwrap()).unwrap();
         assert_eq!(back2, cleared);
         assert!(!events_of(&file2).unwrap().iter().any(|e| e.id == id::CH_ZIPPED || e.id == id::LOOP_CHANNEL));
+    }
+
+    /// A pattern's own time markers (piano-roll Alt+T) are marker groups in its metadata block, sorted by position
+    /// together with the "Length" marker, before 164 (spec: flp/events/patterns.md, metadata block).
+    #[test]
+    fn pattern_markers_round_trip() {
+        let mut file = FlpFile::parse(&create(&new_project()).unwrap().to_bytes().unwrap()).unwrap();
+        let mut m = load(&file).unwrap();
+        m.patterns[0].markers = vec![TimeMarker::new(0, "Pmark"), TimeMarker::new(192, "Mid"), TimeMarker::new(768, "Late")];
+        apply(&m, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back, m);
+        let ev = events_of(&file).unwrap();
+        let meta = ev.iter().position(|e| e.id == id::PAT_START).unwrap();
+        let block: Vec<(u8, u32)> = ev[meta..]
+            .iter()
+            .take_while(|e| e.id != id::PAT_LENGTH)
+            .filter(|e| e.id == id::MARKER_POS)
+            .map(|e| (e.id, int(e)))
+            .collect();
+        assert_eq!(block, vec![(148, 0), (148, 192), (148, 768)]);
+        let mut again = file.clone();
+        apply(&back, &mut again).unwrap();
+        assert_eq!(again.to_bytes().unwrap(), file.to_bytes().unwrap(), "an unchanged model writes nothing");
+
+        // With a length, the "Length" marker sits among them by position and doesn't come back as a marker.
+        let mut with_len = back.clone();
+        with_len.patterns[0].length = Some(384);
+        let mut file2 = file.clone();
+        apply(&with_len, &mut file2).unwrap();
+        let back2 = load(&FlpFile::parse(&file2.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back2, with_len);
+        let pos: Vec<u32> = events_of(&file2).unwrap().iter().filter(|e| e.id == id::MARKER_POS).map(int).collect();
+        assert_eq!(pos, vec![0, 192, 6 << 24 | 384, 768]);
+
+        // Removing them all leaves no marker group.
+        let mut none = back2.clone();
+        none.patterns[0].markers.clear();
+        none.patterns[0].length = None;
+        apply(&none, &mut file2).unwrap();
+        let file2 = FlpFile::parse(&file2.to_bytes().unwrap()).unwrap();
+        assert_eq!(load(&file2).unwrap(), none);
+        assert!(!events_of(&file2).unwrap().iter().any(|e| e.id == id::MARKER_POS));
+
+        // A pattern with nothing but a marker (no blocks in the file yet) gets its metadata block.
+        let mut empty = none.clone();
+        empty.patterns.push(Pattern { number: 7, markers: vec![TimeMarker::new(96, "Here")], ..Pattern::default() });
+        let mut file3 = file2.clone();
+        apply(&empty, &mut file3).unwrap();
+        let back3 = load(&FlpFile::parse(&file3.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back3.patterns.iter().find(|p| p.number == 7).map(|p| p.markers.clone()), Some(empty.patterns.last().unwrap().markers.clone()));
+
+        // A new file built from the model keeps them too.
+        let mut fresh = new_project();
+        fresh.patterns[0].markers = vec![TimeMarker::new(48, "New")];
+        let made = load(&FlpFile::parse(&create(&fresh).unwrap().to_bytes().unwrap()).unwrap()).unwrap();
+        let n = fresh.patterns[0].number;
+        assert_eq!(made.patterns.iter().find(|p| p.number == n).unwrap().markers, fresh.patterns[0].markers);
     }
 
     /// Automation clips on plugin parameters (a channel plugin's, a mixer slot's) are written as 227 links with the
