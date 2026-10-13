@@ -11,8 +11,9 @@ use crate::app::{App, State, Win};
 use crate::knobs::KnobId;
 use crate::playlist::{Cmd, Mark, PItem, Popup};
 
-/// Name button width at 100 % (§17): wide enough for a new project's "Lemon Sampler" at every UI scale (Lemon Studio).
-pub const NAME_W: f32 = 91.0;
+/// Name button width at 100 % (§17): wide enough for a new project's "Lemon Sampler" at every UI scale with every text
+/// engine; Linux's Barlow is the widest (Lemon Studio).
+pub const NAME_W: f32 = 94.0;
 /// FL's name button width at 100 % (§17): the measured columns right of the name button assume it.
 pub const FL_NAME_W: f32 = 82.0;
 /// Width of the mixer-box column (§17: Alt+M moves everything right of it ≈ 41 px).
@@ -1856,7 +1857,7 @@ mod tests {
     use super::*;
 
     /// A new project's channel name, "Lemon Sampler", fits the 100 % name button at every UI scale: the label keeps
-    /// 4 px on each side (§17).
+    /// 4 px on each side (§17). Runs with the platform's text engine (GDI's Cuprum on Windows, Barlow on Linux).
     #[test]
     fn default_name_button_shows_lemon_sampler_whole() {
         let app = App::new(None);
