@@ -26,6 +26,28 @@ thread_local! {
     pub static WRAP_BUILTINS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: the "real native plugins instead of Open recreations" preference for this thread, without touching the
+    /// process environment other tests read.
+    pub static NATIVE_FIRST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether an opened project's native plugins are played by the installed plugins even where a built-in Open
+/// recreation would take them (the hidden settings toggle; spec: plugins/fruity-abi.md "Opened projects").
+pub fn native_first() -> bool {
+    #[cfg(test)]
+    if let Some(v) = NATIVE_FIRST.with(|n| n.get()) {
+        return v;
+    }
+    os_native::prefer_native()
+}
+
+/// Whether a channel or slot holding file id `id` is one a built-in Open recreation plays (3x Osc, the parametric EQ).
+pub fn has_recreation(id: &str) -> bool {
+    id.eq_ignore_ascii_case(crate::osc3::FILE_NAME) || id.eq_ignore_ascii_case(crate::plugins::EQ_FILE_NAME)
+}
+
 /// Whether a hosted plugin is saved inside the wrapper: CLAP and VST3 plugins from plugin files.
 pub fn is_wrapped(d: &Descriptor) -> bool {
     #[cfg(test)]
@@ -55,7 +77,11 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
     for key in plugins.hosted.keys().copied().collect::<Vec<_>>() {
         let Some(d) = plugins.descriptor(key) else { continue };
         if d.format == Format::Native {
-            // The plugin's own state stream is what the file stores for it (spec §1, event 213).
+            // The plugin's own state stream is what the file stores for it (spec §1, event 213). An instance that
+            // did not give the file's state back byte for byte leaves the file's bytes alone (`sync_native`).
+            if plugins.hosted.get(&key).is_some_and(|h| h.keep_file_state) {
+                continue;
+            }
             if let Some(state) = plugins.state(key) {
                 store_native(proj, key, state);
             }
@@ -80,6 +106,14 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
                 slot.name = WRAPPER.into();
             }
         }
+    }
+}
+
+/// The file id (event 201) of the plugin channel or filled mixer slot under hosting key `key`.
+fn id_of_key(project: &Project, key: usize) -> Option<String> {
+    match fx_of(key) {
+        None => project.channels.get(key).filter(|c| c.kind == ChannelKind::Plugin).and_then(|c| c.plugin.clone()),
+        Some((t, k)) => project.mixer.iter().find(|m| m.index == t)?.slots[usize::from(k)].as_ref().map(|s| s.name.clone()),
     }
 }
 
@@ -139,6 +173,25 @@ pub fn find(list: &[Available], r: &PluginRef) -> Option<usize> {
         &|d| d.name == r.name,
     ];
     tests.iter().find_map(|t| list.iter().position(|a| t(&a.desc)))
+}
+
+/// The native plugin of `list` that a project names by its file id (event 201 = the plugin's folder name, which is
+/// also the native descriptor's id; spec: plugins/fruity-abi.md "Opened projects"). Case does not count: files
+/// store ids such as `Fruity slicer` for the `Fruity Slicer` folder.
+pub fn find_native(list: &[Available], file_id: &str) -> Option<usize> {
+    list.iter().position(|a| a.desc.format == Format::Native && a.desc.id.eq_ignore_ascii_case(file_id))
+}
+
+/// A hint-bar list of plugin names: sorted, each once, at most `max` named.
+fn name_list(mut names: Vec<String>, max: usize) -> String {
+    names.sort();
+    names.dedup();
+    let more = names.len().saturating_sub(max);
+    let mut s = names.iter().take(max).cloned().collect::<Vec<_>>().join(", ");
+    if more > 0 {
+        s.push_str(&format!(" and {more} more"));
+    }
+    s
 }
 
 /// What a channel's plugin is called on screen: a wrapped plugin's own name, else the plugin name.
@@ -218,6 +271,186 @@ impl crate::app::App {
             self.state.piano.dirty = true;
             self.invalidate();
         }
+    }
+
+    /// With the experimental native host on (Settings > Plugins), the native plugins an opened project names are
+    /// hosted by the installed plugins themselves (spec: plugins/fruity-abi.md "Opened projects"): see `host_native`.
+    pub(crate) fn sync_native(&mut self) {
+        if os_native::enabled() {
+            self.host_native();
+        }
+    }
+
+    /// Hosts every plugin channel and filled mixer slot that names a native plugin (its file id, event 201) and has
+    /// no instance yet, started from the state the file holds (event 213). Channels and slots the built-in Open
+    /// plugins play (3x Osc, the parametric EQ, wrapped plugins) are theirs already, so they are left alone. A plugin
+    /// still waiting for its first-load check is tried again on a later tick; one that is not installed is reported
+    /// once the scan is over and kept in the project; one that does not start is reported and kept too. An instance
+    /// that does not give the file's state back byte for byte keeps the file's bytes on a save (`Hosted::keep_file_state`).
+    pub(crate) fn host_native(&mut self) {
+        use crate::plugins::fx_key;
+        let scanning = self.sweep.is_some();
+        let pending = self.state.pending_plugin.map(|(r, _)| r);
+        let mut added = (false, false);
+        let (mut hosted, mut kept, mut missing, mut failed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let rows: Vec<(usize, String, Option<Vec<u8>>)> = (0..self.state.project.channels.len())
+            .filter(|&r| !self.state.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && !self.native_failed.contains(&r) && Some(r) != pending)
+            .filter_map(|r| {
+                let ch = &self.state.project.channels[r];
+                let name = ch.plugin.as_deref().filter(|n| ch.kind == ChannelKind::Plugin && !n.is_empty() && *n != WRAPPER)?;
+                Some((r, name.to_string(), ch.plugin_state.clone()))
+            })
+            .collect();
+        for (row, name, state) in rows {
+            let Some(i) = find_native(&self.plugins.available, &name) else {
+                if !scanning {
+                    self.native_failed.push(row);
+                    missing.push(name);
+                }
+                continue;
+            };
+            if !self.plugins.instrument_ready(i) {
+                continue;
+            }
+            match self.plugins.create_with(row, i, state.as_deref().filter(|s| !s.is_empty())) {
+                Ok(_) => {
+                    self.state.hosted_rows.push(row);
+                    added.0 = true;
+                    if !self.native_round_trips(row, state.as_deref()) {
+                        kept.push(name.clone());
+                    }
+                    hosted.push(name);
+                }
+                Err(e) => {
+                    self.native_failed.push(row);
+                    failed.push(format!("{name} ({e})"));
+                }
+            }
+        }
+        let slots: Vec<(u16, u8, String, Vec<u8>)> = self
+            .state
+            .project
+            .mixer
+            .iter()
+            .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| s.as_ref().map(|s| (m.index, k as u8, s.name.clone(), s.state.clone()))))
+            .filter(|(t, k, name, _)| {
+                let key = fx_key(*t, *k);
+                !name.is_empty() && name != WRAPPER && !self.plugins.hosted.contains_key(&key) && !self.native_failed.contains(&key)
+            })
+            .collect();
+        for (t, k, name, state) in slots {
+            let key = fx_key(t, k);
+            let Some(i) = find_native(&self.plugins.effects, &name) else {
+                if !scanning {
+                    self.native_failed.push(key);
+                    missing.push(name);
+                }
+                continue;
+            };
+            if !self.plugins.effect_ready(i) {
+                continue;
+            }
+            match self.plugins.create_effect(t, k, i, (!state.is_empty()).then_some(state.as_slice())) {
+                Ok(_) => {
+                    added.1 = true;
+                    if !self.native_round_trips(key, Some(&state)) {
+                        kept.push(name.clone());
+                    }
+                    hosted.push(name);
+                }
+                Err(e) => {
+                    self.native_failed.push(key);
+                    failed.push(format!("{name} ({e})"));
+                }
+            }
+        }
+        if added.0 {
+            self.transport.set_instruments(self.plugins.instruments());
+        }
+        if added.1 {
+            self.transport.set_effects(self.plugins.effects());
+        }
+        let mut parts = Vec::new();
+        if !hosted.is_empty() {
+            parts.push(format!("Hosted {} of the project's native plugins: {}", hosted.len(), name_list(hosted, 6)));
+        }
+        if !kept.is_empty() {
+            parts.push(format!("saving keeps the file's settings for {}", name_list(kept, 6)));
+        }
+        if !missing.is_empty() {
+            parts.push(format!("native plugins not installed (kept in the project): {}", name_list(missing, 6)));
+        }
+        if !failed.is_empty() {
+            parts.push(format!("native plugins that did not start (kept in the project): {}", name_list(failed, 4)));
+        }
+        if !parts.is_empty() {
+            self.state.message = Some(parts.join("; "));
+            self.state.piano.dirty = true;
+            self.invalidate();
+        }
+    }
+
+    /// The hidden preference changed (or the native host with it): the channels and slots a built-in recreation can
+    /// play (3x Osc, the parametric EQ) move to the side that should play them now. Each one hosted by the other side
+    /// writes its settings into the project as the file's own state, its instance is closed, and the next tick hosts
+    /// it again from that state (`sync_osc3` / `sync_effects`, or `host_native`). A row the plugin menus are just
+    /// creating is left alone. Returns how many channels and slots were switched.
+    pub(crate) fn swap_builtin_overrides(&mut self) -> usize {
+        let native = native_first();
+        let pending = self.state.pending_plugin.map(|(r, _)| r);
+        let swap: Vec<usize> = self
+            .plugins
+            .hosted
+            .keys()
+            .copied()
+            .filter(|&key| Some(key) != pending && id_of_key(&self.state.project, key).is_some_and(|id| has_recreation(&id)))
+            .filter(|&key| {
+                let Some(d) = self.plugins.descriptor(key) else { return false };
+                // Moving to the real plugins: the recreations go; moving back: the real plugins go.
+                if native { is_builtin(&d) } else { d.format == Format::Native }
+            })
+            .collect();
+        // Their settings, as the file stores them, stay in the project.
+        self.store_builtin_states();
+        for &key in &swap {
+            if self.plugins.descriptor(key).is_some_and(|d| d.format == Format::Native) && !self.plugins.hosted[&key].keep_file_state {
+                if let Some(state) = self.plugins.state(key) {
+                    store_native(&mut self.state.project, key, state);
+                }
+            }
+        }
+        for &key in &swap {
+            self.plugins.drop_key(key);
+            self.state.hosted_rows.retain(|&r| r != key);
+        }
+        // Either side may try the moved channels and slots again (a recreation that failed before, or a missing
+        // native plugin); so may any other channel or slot a recreation plays.
+        let all: Vec<usize> = self.wrap_failed.iter().chain(&self.fx_failed).chain(&self.native_failed).copied().filter(|&k| id_of_key(&self.state.project, k).is_some_and(|id| has_recreation(&id))).collect();
+        for list in [&mut self.wrap_failed, &mut self.fx_failed, &mut self.native_failed] {
+            list.retain(|k| !all.contains(k));
+        }
+        if !swap.is_empty() {
+            self.transport.set_instruments(self.plugins.instruments());
+            self.transport.set_effects(self.plugins.effects());
+            self.state.piano.dirty = true;
+        }
+        self.invalidate();
+        swap.len()
+    }
+
+    /// Whether the native instance under `key`, just started from `file_state`, gives those bytes back as its own
+    /// state. If not, the instance is marked so a save keeps the file's bytes (spec: plugins/fruity-abi.md "Saved
+    /// state": the instance would lose the file's data otherwise). No file state = the plugin starts at its defaults
+    /// and its own state is what the file gets.
+    fn native_round_trips(&mut self, key: usize, file_state: Option<&[u8]>) -> bool {
+        let Some(file) = file_state.filter(|s| !s.is_empty()) else { return true };
+        let same = self.plugins.state(key).is_some_and(|s| s == file);
+        if !same {
+            if let Some(h) = self.plugins.hosted.get_mut(&key) {
+                h.keep_file_state = true;
+            }
+        }
+        same
     }
 }
 
@@ -322,8 +555,38 @@ mod tests {
         assert_eq!(crate::mixer::inserts(&b.state), crate::mixer::inserts(&a.state));
     }
 
-    /// A stand-in native plugin: its state is four bytes.
-    struct NativeStandIn(Descriptor, Vec<u8>);
+    /// A stand-in native plugin: its state is a few bytes; `exact` false = it gives a loaded state back with one byte
+    /// appended (a plugin whose state does not round-trip, spec plugins/fruity-abi.md "Saved state").
+    struct NativeStandIn(Descriptor, Vec<u8>, bool);
+
+    /// A library of one native stand-in whose descriptor id is its folder name (as `os_native` lists them).
+    struct NativeStandInLib(Descriptor, bool);
+    impl os_host::Library for NativeStandInLib {
+        fn path(&self) -> &std::path::Path {
+            &self.0.path
+        }
+        fn plugins(&self) -> &[Descriptor] {
+            std::slice::from_ref(&self.0)
+        }
+        fn create(self: std::sync::Arc<Self>, _: &str) -> Result<os_host::SharedPlugin, String> {
+            Ok(std::sync::Arc::new(std::sync::Mutex::new(NativeStandIn(self.0.clone(), vec![0, 0], self.1))))
+        }
+    }
+
+    fn native_stand_in(name: &str, kind: os_host::Kind, exact: bool) -> crate::plugins::Available {
+        let folder = if kind == os_host::Kind::Effect { "Effects" } else { "Generators" };
+        let desc = Descriptor {
+            format: Format::Native,
+            id: name.into(),
+            name: name.into(),
+            vendor: String::new(),
+            version: String::new(),
+            features: vec![],
+            kind,
+            path: format!("C:/FL/Plugins/Fruity/{folder}/{name}/{name}_x64.dll").into(),
+        };
+        crate::plugins::Available { lib: std::sync::Arc::new(NativeStandInLib(desc.clone(), exact)), desc }
+    }
     impl os_engine::Instrument for NativeStandIn {
         fn note_on(&mut self, _: u32, _: u8, _: f32) {}
         fn note_off(&mut self, _: u32, _: u8) {}
@@ -358,6 +621,9 @@ mod tests {
         }
         fn load_state(&mut self, d: &[u8]) -> bool {
             self.1 = d.to_vec();
+            if !self.2 {
+                self.1.push(0xEE);
+            }
             true
         }
     }
@@ -381,7 +647,7 @@ mod tests {
             kind: os_host::Kind::Effect,
             path: "C:/FL/Plugins/Fruity/Effects/Balance/Fruity Balance.dll".into(),
         };
-        let plugin: os_host::SharedPlugin = std::sync::Arc::new(std::sync::Mutex::new(NativeStandIn(desc, vec![9, 8, 7, 6])));
+        let plugin: os_host::SharedPlugin = std::sync::Arc::new(std::sync::Mutex::new(NativeStandIn(desc, vec![9, 8, 7, 6], true)));
         a.state.project.mixer[2].slots[1] = Some(crate::plugins::new_slot("Fruity Balance"));
         a.plugins.hosted.insert(
             fx_key(2, 1),
@@ -393,6 +659,131 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(saved.mixer[2].slots[1], Some(SlotPlugin { name: "Fruity Balance".into(), state: vec![9, 8, 7, 6] }));
         assert_eq!(a.state.project.mixer[2].slots[1], saved.mixer[2].slots[1]);
+    }
+
+    /// An opened project's plugin channels and mixer slots that name installed native plugins are hosted by them,
+    /// started from the file's state; a plugin that is not installed is reported and kept; the states of hosted
+    /// instances are saved, except for one that did not give the file's state back, whose file bytes are kept
+    /// (spec: plugins/fruity-abi.md "Opened projects", "Saved state").
+    #[test]
+    fn opened_projects_host_their_native_plugins() {
+        let path = std::env::temp_dir().join(format!("openstudio-native-open-{}.flp", std::process::id()));
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.plugins.available = vec![native_stand_in("Harmor", os_host::Kind::Instrument, true)];
+        a.plugins.effects = vec![native_stand_in("Fruity Balance", os_host::Kind::Effect, true), native_stand_in("Gross Beat", os_host::Kind::Effect, false)];
+        let harmor = crate::app::add_plugin_channel(&mut a.state.project, "Harmor");
+        a.state.project.channels[harmor].plugin_state = Some(vec![1, 2, 3]);
+        let sytrus = crate::app::add_plugin_channel(&mut a.state.project, "Sytrus");
+        a.state.project.channels[sytrus].plugin_state = Some(vec![4]);
+        a.state.project.mixer[2].slots[1] = Some(SlotPlugin { name: "Fruity Balance".into(), state: vec![5, 6] });
+        a.state.project.mixer[3].slots[0] = Some(SlotPlugin { name: "Gross Beat".into(), state: vec![7, 8, 9] });
+        // A file id in another case than the folder name (files store `Fruity slicer`).
+        a.state.project.mixer[4].slots[0] = Some(SlotPlugin { name: "fruity balance".into(), state: vec![] });
+        let (balance, gross, lower) = (fx_key(2, 1), fx_key(3, 0), fx_key(4, 0));
+
+        a.host_native();
+        assert!(a.state.hosted_rows.contains(&harmor));
+        assert_eq!(a.plugins.state(harmor), Some(vec![1, 2, 3]));
+        assert_eq!(a.plugins.state(balance), Some(vec![5, 6]));
+        assert!(a.plugins.hosted.contains_key(&lower) && !a.plugins.hosted[&lower].keep_file_state);
+        assert_eq!(a.plugins.state(gross), Some(vec![7, 8, 9, 0xEE]));
+        assert!(!a.plugins.hosted[&harmor].keep_file_state && !a.plugins.hosted[&balance].keep_file_state);
+        assert!(a.plugins.hosted[&gross].keep_file_state);
+        assert!(!a.state.hosted_rows.contains(&sytrus) && a.native_failed.contains(&sytrus));
+        let msg = a.state.message.clone().unwrap_or_default();
+        assert!(msg.contains("Harmor") && msg.contains("Gross Beat") && msg.contains("not installed") && msg.contains("Sytrus"), "{msg}");
+        // Another tick changes nothing.
+        let n = a.plugins.hosted.len();
+        a.host_native();
+        assert_eq!((a.plugins.hosted.len(), a.state.hosted_rows.len()), (n, 1));
+
+        // Saved: hosted instances write their state; the one that did not round-trip keeps the file's bytes.
+        assert!(a.plugins.set_state(harmor, &[11, 12]) && a.plugins.set_state(balance, &[13]) && a.plugins.set_state(gross, &[14]));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((saved.channels[harmor].plugin.as_deref(), saved.channels[harmor].plugin_state.as_deref()), (Some("Harmor"), Some(&[11, 12][..])));
+        assert_eq!((saved.channels[sytrus].plugin.as_deref(), saved.channels[sytrus].plugin_state.as_deref()), (Some("Sytrus"), Some(&[4][..])));
+        assert_eq!(saved.mixer[2].slots[1], Some(SlotPlugin { name: "Fruity Balance".into(), state: vec![13] }));
+        assert_eq!(saved.mixer[3].slots[0], Some(SlotPlugin { name: "Gross Beat".into(), state: vec![7, 8, 9] }));
+        // The file's own spelling of the id is kept; the instance's state (its defaults) is written.
+        assert_eq!(saved.mixer[4].slots[0], Some(SlotPlugin { name: "fruity balance".into(), state: vec![0, 0] }));
+    }
+
+    /// The hidden "real native plugins" toggle: a 3x Osc channel and a parametric EQ slot played by the Open
+    /// recreations move to the installed plugins, started from the file's state, and back again; the settings stay
+    /// in the project across each move (spec: plugins/fruity-abi.md "Opened projects").
+    #[test]
+    fn real_native_plugins_replace_the_open_recreations_and_back() {
+        use crate::osc3::{FILE_NAME as OSC3_FILE, OPEN_3X_OSC};
+        use crate::plugins::EQ_FILE_NAME;
+        NATIVE_FIRST.with(|n| n.set(Some(false)));
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.plugins.available = crate::plugins::builtin();
+        a.plugins.available.push(native_stand_in(OSC3_FILE, os_host::Kind::Instrument, true));
+        a.plugins.effects = crate::plugins::builtin_effects();
+        a.plugins.effects.push(native_stand_in(EQ_FILE_NAME, os_host::Kind::Effect, true));
+        let row = crate::app::add_plugin_channel(&mut a.state.project, OPEN_3X_OSC);
+        let osc_file = open_3x_osc::params::default_state();
+        a.state.project.channels[row].plugin_state = Some(osc_file.clone());
+        let mut eq_file = open_parametric_eq_2::params::default_state();
+        open_parametric_eq_2::params::set_field(&mut eq_file, 1, -600);
+        a.state.project.mixer[2].slots[1] = Some(SlotPlugin { name: EQ_FILE_NAME.into(), state: eq_file.clone() });
+        let slot = fx_key(2, 1);
+        let builtin_at = |a: &App, key| a.plugins.descriptor(key).is_some_and(|d| is_builtin(&d));
+        let native_at = |a: &App, key| a.plugins.descriptor(key).is_some_and(|d| d.format == Format::Native);
+
+        // Off: the recreations play them, and the native pass leaves them alone.
+        a.sync_osc3();
+        a.sync_effects();
+        a.host_native();
+        assert!(builtin_at(&a, row) && builtin_at(&a, slot));
+
+        // On: switched to the installed plugins, started from the file's bytes.
+        NATIVE_FIRST.with(|n| n.set(Some(true)));
+        assert_eq!(a.swap_builtin_overrides(), 2);
+        assert!(!a.plugins.hosted.contains_key(&row) && !a.plugins.hosted.contains_key(&slot) && !a.state.hosted_rows.contains(&row));
+        a.sync_osc3();
+        a.sync_effects();
+        assert!(!a.plugins.hosted.contains_key(&row), "the recreation stays out");
+        a.host_native();
+        assert!(native_at(&a, row) && native_at(&a, slot) && a.state.hosted_rows.contains(&row));
+        assert_eq!(a.plugins.state(row).as_deref(), a.state.project.channels[row].plugin_state.as_deref());
+        assert_eq!(a.plugins.state(slot), Some(eq_file.clone()));
+
+        // Off again: back to the recreations, the settings still in the project.
+        NATIVE_FIRST.with(|n| n.set(Some(false)));
+        assert_eq!(a.swap_builtin_overrides(), 2);
+        assert_eq!(a.state.project.mixer[2].slots[1].as_ref().map(|s| s.state.clone()), Some(eq_file.clone()));
+        a.sync_osc3();
+        a.sync_effects();
+        assert!(builtin_at(&a, row) && builtin_at(&a, slot));
+        assert_eq!(a.plugins.eq_file_state(slot), Some(eq_file));
+        assert_eq!(a.state.project.channels[row].plugin.as_deref(), Some(OSC3_FILE));
+        let _ = osc_file;
+        NATIVE_FIRST.with(|n| n.set(None));
+    }
+
+    /// While a plugin scan runs, a native plugin that is not listed yet is neither hosted nor given up on; after the
+    /// scan it is looked for again.
+    #[test]
+    fn native_plugins_wait_for_the_scan() {
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.plugins.available = Vec::new();
+        let row = crate::app::add_plugin_channel(&mut a.state.project, "Harmor");
+        a.sweep = Some(crate::plugin_scan::Sweep::idle());
+        a.host_native();
+        assert!(!a.state.hosted_rows.contains(&row) && a.native_failed.is_empty());
+        a.sweep = None;
+        a.plugins.available = vec![native_stand_in("Harmor", os_host::Kind::Instrument, true)];
+        a.host_native();
+        assert!(a.state.hosted_rows.contains(&row));
     }
 
     /// A wrapped plugin is found by class id, else by file and name, else by name.

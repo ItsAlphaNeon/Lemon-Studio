@@ -36,13 +36,19 @@ pub fn default_fl_dir() -> PathBuf {
 }
 
 /// Whether the experimental native-plugin host is opted into for this process, via the
-/// `OPENSTUDIO_NATIVE` environment variable (`1`/`true`/`on`). The app also exposes a settings
-/// toggle; it sets this at startup so the whole process agrees.
+/// `OPENSTUDIO_NATIVE` environment variable (`1`/`true`/`on`). The app also has a settings
+/// toggle (shown only with `settings_shown`); it sets this so the whole process agrees.
 pub fn enabled() -> bool {
     matches!(
         std::env::var("OPENSTUDIO_NATIVE").as_deref(),
         Ok("1") | Ok("true") | Ok("on") | Ok("yes")
     )
+}
+
+/// Whether the app's settings show the native host toggles at all, via the `OPENSTUDIO_NATIVE_SETTINGS` environment
+/// variable (`1`/`true`/`on`/`yes`). Hidden by default; `OPENSTUDIO_NATIVE` still turns the host on without them.
+pub fn settings_shown() -> bool {
+    matches!(std::env::var("OPENSTUDIO_NATIVE_SETTINGS").as_deref(), Ok("1") | Ok("true") | Ok("on") | Ok("yes"))
 }
 
 /// Turns the opt-in on or off for this process (so a settings toggle and `enabled()` agree).
@@ -53,6 +59,30 @@ pub fn set_enabled(on: bool) {
             std::env::set_var("OPENSTUDIO_NATIVE", "1");
         } else {
             std::env::remove_var("OPENSTUDIO_NATIVE");
+        }
+    }
+}
+
+/// Whether an opened project's native plugins are played by the installed plugins even where a built-in recreation
+/// would take them (spec: plugins/fruity-abi.md "Opened projects"): only while the native host is on. Set by a
+/// second, hidden settings toggle or `OPENSTUDIO_NATIVE_FIRST`; session only, like the host toggle.
+pub fn prefer_native() -> bool {
+    enabled() && matches!(std::env::var("OPENSTUDIO_NATIVE_FIRST").as_deref(), Ok("1") | Ok("true") | Ok("on") | Ok("yes"))
+}
+
+/// The stored choice behind `prefer_native`, whether or not the host is on.
+pub fn prefer_native_set() -> bool {
+    std::env::var_os("OPENSTUDIO_NATIVE_FIRST").is_some()
+}
+
+/// Turns the preference on or off for this process.
+pub fn set_prefer_native(on: bool) {
+    // SAFETY: changed from the UI thread only; read by the same thread.
+    unsafe {
+        if on {
+            std::env::set_var("OPENSTUDIO_NATIVE_FIRST", "1");
+        } else {
+            std::env::remove_var("OPENSTUDIO_NATIVE_FIRST");
         }
     }
 }

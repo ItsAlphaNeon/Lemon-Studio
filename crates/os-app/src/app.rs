@@ -897,12 +897,15 @@ pub struct App {
     /// Sampler channel rows whose Open Sampler instance could not be created (not retried).
     sampler_failed: Vec<usize>,
     /// Mixer slots (`plugins::fx_key`) whose Open Parametric EQ 2 could not start (not retried).
-    fx_failed: Vec<usize>,
+    pub(crate) fx_failed: Vec<usize>,
     /// The running plugin scan, and the scan asked for while it runs (spec: ui/plugin-manager.md §4).
     pub(crate) sweep: Option<crate::plugin_scan::Sweep>,
     pub(crate) scan_queued: Option<crate::plugin_db::Mode>,
     /// Wrapped plugin channels (rows) and slots (`fx_key`) whose plugin was not found or did not start (not retried).
     pub(crate) wrap_failed: Vec<usize>,
+    /// Plugin channels (rows) and slots (`fx_key`) naming a native plugin that is not installed or did not start
+    /// (not retried; spec: plugins/fruity-abi.md "Opened projects").
+    pub(crate) native_failed: Vec<usize>,
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
     loading: Option<crate::loading::Loading>,
     /// A WAV export is rendering (FILE > Export): its file name and progress (0..1); the same panel shows, input waits.
@@ -947,7 +950,7 @@ impl App {
                 song_mode: false,
                 menu_open: None,
                 lane_menu: false,
-                settings: Default::default(),
+                settings: views::settings::SettingsUi { native: os_native::settings_shown(), ..Default::default() },
                 playlist_scroll: (0.0, 0.0),
                 playlist_bar_w: views::playlist::BAR_W,
                 mixer_scroll: 0.0,
@@ -1031,6 +1034,7 @@ impl App {
             sweep: None,
             scan_queued: None,
             wrap_failed: Vec::new(),
+            native_failed: Vec::new(),
             loading: None,
             export: None,
             saved: (Project::default(), 0.0),
@@ -1199,17 +1203,7 @@ impl App {
                 }
             }
         }
-        // Open Parametric EQ 2 instances hold their slot's settings: convert them back to the file's EQ state.
-        for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
-            let (Some((t, k)), Some(st)) = (crate::plugins::fx_of(key), self.plugins.eq_file_state(key)) else { continue };
-            if let Some(slot) = self.state.project.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) {
-                if slot.name == crate::plugins::EQ_FILE_NAME {
-                    slot.state = st;
-                }
-            }
-        }
-        // Open 3x Osc instances hold their channel's settings: written back as the file's 3x Osc state.
-        crate::osc3::store(&mut self.state.project, &self.plugins);
+        self.store_builtin_states();
         let s = &mut self.state;
         s.project.tempo = Some(s.tempo);
         // Lock, zip, filter groups and loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
@@ -1320,6 +1314,20 @@ impl App {
         self.save_to(target);
     }
 
+    /// The built-in recreations write their settings into the model as the file's own plugin state: Open Parametric
+    /// EQ 2 into its slots, Open 3x Osc into its channels.
+    pub(crate) fn store_builtin_states(&mut self) {
+        for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
+            let (Some((t, k)), Some(st)) = (crate::plugins::fx_of(key), self.plugins.eq_file_state(key)) else { continue };
+            if let Some(slot) = self.state.project.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) {
+                if slot.name == crate::plugins::EQ_FILE_NAME {
+                    slot.state = st;
+                }
+            }
+        }
+        crate::osc3::store(&mut self.state.project, &self.plugins);
+    }
+
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
     pub(crate) fn reset_hosted(&mut self) {
         self.plugins.clear();
@@ -1329,6 +1337,7 @@ impl App {
         self.sampler_failed.clear();
         self.fx_failed.clear();
         self.wrap_failed.clear();
+        self.native_failed.clear();
         self.transport.set_instruments(Vec::new());
         self.transport.set_effects(Vec::new());
     }
@@ -1400,6 +1409,10 @@ impl App {
     /// plays them.
     pub(crate) fn sync_effects(&mut self) {
         use crate::plugins::{fx_key, EQ_FILE_NAME, OPEN_EQ};
+        // The installed EQ plays these slots instead (`host_native`).
+        if crate::project_plugins::native_first() {
+            return;
+        }
         let Some(index) = self.plugins.effect_index(OPEN_EQ) else { return };
         let todo: Vec<(u16, u8, Vec<u8>)> = self
             .state
@@ -1436,6 +1449,7 @@ impl App {
         if self.loading.is_none() {
             self.sync_wrapped();
             self.sync_osc3();
+            self.sync_native();
         }
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
             // A row hosted this tick already started from its channel's sample.
@@ -2676,6 +2690,22 @@ impl App {
                 os_native::set_enabled(on);
                 self.start_scan(crate::plugin_db::Mode::Changed);
                 self.state.message = Some(if on { "Experimental native plugin host on: looking for native plugins".into() } else { "Experimental native plugin host off".into() });
+                // The hidden preference applies again (or stops applying) with the host.
+                if os_native::prefer_native_set() {
+                    self.swap_builtin_overrides();
+                }
+            }
+            // Real native plugins in place of the Open recreations (spec plugins/fruity-abi.md "Opened projects").
+            SAct::Check(k) if k == views::settings::NATIVE_FIRST_CHECK => {
+                let on = !os_native::prefer_native();
+                os_native::set_prefer_native(on);
+                let n = self.swap_builtin_overrides();
+                self.state.message = Some(match (on, n) {
+                    (true, 0) => "Opened projects play their own native plugins, not the Open recreations".into(),
+                    (true, n) => format!("Opened projects play their own native plugins: {n} channels / slots switched from the Open recreations"),
+                    (false, 0) => "Open recreations play their projects' plugins again".into(),
+                    (false, n) => format!("Open recreations play their projects' plugins again: {n} channels / slots switched back"),
+                });
             }
             // The plugin manager (spec: ui/plugin-manager.md §2).
             SAct::Check(k) if views::settings::plugin_check(k) => self.plugin_check(k),
@@ -5057,6 +5087,7 @@ impl App {
         self.plugins.remap(m);
         self.sampler_failed = self.sampler_failed.iter().filter_map(|&r| m(r)).collect();
         self.wrap_failed = self.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
+        self.native_failed = self.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
         self.transport.set_instruments(self.plugins.instruments());
         self.state.piano.dirty = true;
     }
@@ -6329,10 +6360,21 @@ mod tests {
         let r = hit_rect(&app, &adv);
         click(&mut app, &mut c, r);
         assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Fast declick for cut groups")), "Advanced unfolded");
+        // The native host toggle shows only with `OPENSTUDIO_NATIVE_SETTINGS` (`SettingsUi::native`); the
+        // real-native-plugins toggle only while the native host is on too (off in tests).
+        let shown = |app: &App, k| app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check(k)));
+        let r = hit_rect(&app, &Action::Settings(SAct::Tab(PLUGINS)));
+        for native in [false, true] {
+            app.state.settings.native = native;
+            click(&mut app, &mut c, r);
+            assert_eq!(shown(&app, NATIVE_HOST_CHECK), native, "native host toggle shown: {native}");
+            if !os_native::enabled() {
+                assert!(!shown(&app, crate::views::settings::NATIVE_FIRST_CHECK), "hidden");
+            }
+        }
         // The working controls keep their actions.
         for (tab, live) in [
             (FILE, SAct::Button("Manage plugins")),
-            (PLUGINS, SAct::Check(NATIVE_HOST_CHECK)),
             (PLUGINS, SAct::Button("Add folder...")),
             (PLUGINS, SAct::Button("Find new plugins")),
             (PLUGINS, SAct::Check(crate::views::settings::COMBINE_CHECK)),

@@ -152,6 +152,16 @@ pub struct Sweep {
     rx: mpsc::Receiver<Msg>,
 }
 
+impl Sweep {
+    /// A sweep that never reports (tests: "a scan is running").
+    #[cfg(test)]
+    pub fn idle() -> Sweep {
+        let (tx, rx) = mpsc::channel();
+        std::mem::forget(tx);
+        Sweep { rx }
+    }
+}
+
 /// Starts a sweep on a background thread: finds the plugin files of `prefs`' folders, scans what `mode` asks for
 /// (keeping `old`'s results for the rest) and sends the new cache.
 pub fn start(prefs: &db::Prefs, old: Cache, mode: Mode) -> Sweep {
