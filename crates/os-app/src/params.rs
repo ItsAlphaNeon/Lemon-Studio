@@ -235,7 +235,8 @@ impl App {
         let mut automate = Vec::new();
         let mut stretch = Vec::new();
         for (&key, h) in &self.plugins.hosted {
-            let Ok(mut p) = h.plugin.lock() else { continue };
+            // Never wait on a plugin the audio thread is rendering: it is read again next tick (its events stay queued).
+            let Ok(mut p) = h.plugin.try_lock() else { continue };
             let weak = Arc::downgrade(&h.plugin);
             let count = p.param_count();
             let stale = ui.lists.get(&key).is_none_or(|l| l.params.len() != count || !Weak::ptr_eq(&l.plugin, &weak));

@@ -582,6 +582,11 @@ impl Feeder {
             }
         }
         self.voices.store(e.voice_count() as u32, Ordering::Relaxed);
+        // A hosted plugin that missed a tick (busy elsewhere) is heard as a gap: a dropout like an empty block.
+        let missed = e.take_missed();
+        if missed > 0 {
+            self.shared.underruns.fetch_add(missed, Ordering::Relaxed);
+        }
         if frames > 0 && self.meters {
             self.busy += t0.elapsed();
             self.rendered += frames;
