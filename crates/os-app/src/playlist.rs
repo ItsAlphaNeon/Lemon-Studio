@@ -1700,13 +1700,25 @@ pub fn delete_point(s: &mut State, ch: u16, i: usize) {
     }
 }
 
-/// The text shown for an automation value: the target's own unit where known.
+/// The tempo an automation value stands for: `(10000 + Round(single(v) * 512000)) / 1000` BPM, 10 to 522 (spec:
+/// audio/timing.md "Tempo that changes").
+pub fn auto_tempo(v: f64) -> f64 {
+    (10000.0 + (f64::from(v as f32) * 512000.0).round_ties_even()) / 1000.0
+}
+
+/// The automation value of a tempo (the inverse of [`auto_tempo`]).
+pub fn tempo_value(bpm: f64) -> f64 {
+    ((bpm * 1000.0 - 10000.0) / 512000.0).clamp(0.0, 1.0)
+}
+
+/// The text shown for an automation value: the target's own unit where known (spec: audio/voice-levels.md "Values
+/// from automation").
 pub fn value_text(s: &State, ch: u16, v: f64) -> String {
     let tgt = s.project.automation(ch).and_then(|a| a.target).map(target::decode);
     match tgt {
-        Some(target::Target::Tempo) => format!("{:.3} BPM", 60.0 + 120.0 * v),
+        Some(target::Target::Tempo) => format!("{:.3} BPM", auto_tempo(v)),
         Some(target::Target::ChannelPan(_) | target::Target::MixerPan(_)) => crate::knobs::pan_text(((v - 0.5) * 2.0) as f32),
-        Some(target::Target::ChannelPitch(_)) => format!("{:+.0} cents", (v - 0.5) * 400.0),
+        Some(target::Target::ChannelPitch(_)) => format!("{:+} cents", os_engine::laws::auto_pitch_cents(v)),
         Some(target::Target::MixerVolume(_)) => crate::views::mixer::fader_db_text(v),
         Some(t @ (target::Target::ChannelParam(..) | target::Target::SlotParam(..))) => {
             crate::params::value_text(s, t, v).unwrap_or_else(|| format!("{:.0}%", v * 100.0))
@@ -1721,7 +1733,7 @@ pub fn parse_value(s: &State, ch: u16, text: &str) -> Option<f64> {
     let v: f64 = t.parse().ok()?;
     let tgt = s.project.automation(ch).and_then(|a| a.target).map(target::decode);
     Some(match tgt {
-        Some(target::Target::Tempo) => (v - 60.0) / 120.0,
+        Some(target::Target::Tempo) => tempo_value(v),
         _ if v > 1.0 || text.contains('%') => v / 100.0,
         _ => v,
     })
@@ -2792,7 +2804,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::PointValue(ch, i) => {
             let v = s.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.value);
             match s.project.automation(ch).and_then(|a| a.target).map(target::decode) {
-                Some(target::Target::Tempo) => format!("{:.3}", 60.0 + 120.0 * v),
+                Some(target::Target::Tempo) => format!("{:.3}", auto_tempo(v)),
                 _ => format!("{:.1}%", v * 100.0),
             }
         }

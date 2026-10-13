@@ -76,6 +76,12 @@ pub fn channel_pitch(knob: f64, fine: i32, root: u8, main: Option<i32>) -> f32 {
     }
 }
 
+/// The channel's pitch knob (cents) for an automation value `v` (0..1): `Round(9600 v) - 4800`, so a clip spans
+/// ±48 semitones whatever the channel's pitch range (spec: audio/voice-levels.md "Values from automation").
+pub fn auto_pitch_cents(v: f64) -> i32 {
+    (9600.0 * v).round_ties_even() as i32 - 4800
+}
+
 /// A note's fine pitch byte as cents (spec: audio/voice-levels.md "The note's own levels"): `fine * 10 - 1200`, 120 = 0.
 pub fn fine_pitch_cents(fine: u8) -> i32 {
     i32::from(fine) * 10 - 1200

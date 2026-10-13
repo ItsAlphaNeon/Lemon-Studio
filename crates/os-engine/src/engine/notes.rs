@@ -97,9 +97,10 @@ pub(super) enum Note {
     Tune(u8, f32),
 }
 
-/// Event velocities below zero: a note off, a choke (an audio clip's end).
+/// Event velocities below zero: a note off, a choke (an audio clip's end), a slide note.
 pub(super) const OFF: f32 = -1.0;
 pub(super) const CHOKE: f32 = -2.0;
+pub(super) const SLIDE: f32 = -3.0;
 
 /// A note event of one tick as the engine collects it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -116,11 +117,17 @@ pub(super) struct Event {
     pub fine: f32,
     /// The note has a length (a step's note has none).
     pub long: bool,
+    /// A slide note's length in ticks: its glide takes that many ticks plus one steps.
+    pub glide: u32,
 }
 
 impl Event {
     pub fn on(ch: usize, off: u32, key: u8, vel: f32) -> Event {
-        Event { ch, off, key, vel, start: 0.0, fine: 0.0, long: true }
+        Event { ch, off, key, vel, start: 0.0, fine: 0.0, long: true, glide: 0 }
+    }
+    /// A slide note of `len` ticks to `key`.
+    pub fn slide(ch: usize, off: u32, key: u8, len: u32) -> Event {
+        Event { vel: SLIDE, glide: len, ..Event::on(ch, off, key, 0.0) }
     }
     pub fn off(ch: usize, off: u32, key: u8) -> Event {
         Event { vel: OFF, ..Event::on(ch, off, key, 0.0) }
@@ -257,7 +264,7 @@ pub(super) fn apply(events: &[Event], rules: &[Rules], voices: &mut [Voices], n:
     let count = rules.len().min(voices.len());
     for e in events {
         let c = e.ch;
-        if c >= count {
+        if c >= count || e.vel == SLIDE {
             continue;
         }
         let r = rules[c];
@@ -287,6 +294,10 @@ pub(super) fn apply(events: &[Event], rules: &[Rules], voices: &mut [Voices], n:
             note_start(&mut voices[c], &r, e, out);
         }
     }
+    // Slide notes act after the tick's note ends and starts.
+    for e in events.iter().filter(|e| e.vel == SLIDE && e.ch < count) {
+        slide(&mut voices[e.ch], &rules[e.ch], e);
+    }
     // Every voice: one glide step, then the time of the tick passes.
     for (c, v) in voices.iter_mut().enumerate().take(count) {
         for g in &mut v.glides {
@@ -311,6 +322,36 @@ pub(super) fn apply(events: &[Event], rules: &[Rules], voices: &mut [Voices], n:
         v.tick += 1;
     }
     out.sort_by_key(|e| (e.0, e.1));
+}
+
+/// A slide note (spec: audio/song-structure.md "Slide notes", "Slide notes and these rules" here): every voice of the
+/// channel not in its closing fade, released ones and ones started on this tick too, glides by `key - the pitch of the
+/// highest held voice` in `len + 1` steps, replacing a glide under way from where it is. A one-shot voice counts as held
+/// while it sounds; on a mono channel the notes that only wait count too. Without a held voice nothing moves. The
+/// slide's key becomes the last levels for portamento. (The note's colour, velocity, pan and mod X / Y are not used
+/// here: instruments take the pitch only.)
+fn slide(v: &mut Voices, r: &Rules, e: &Event) {
+    let held = |p: &Voice| p.state == State::Held || (r.one_shot && p.state == State::Released);
+    let mut top: Option<f32> = None;
+    for p in v.pool.iter().filter(|p| held(p)) {
+        let pitch = f32::from(p.sent) + v.tuning(p.sent);
+        top = Some(top.map_or(pitch, |t| t.max(pitch)));
+    }
+    if r.mono {
+        for &k in &v.list {
+            top = Some(top.map_or(f32::from(k), |t| t.max(f32::from(k))));
+        }
+    }
+    let Some(top) = top else { return };
+    let by = f32::from(e.key) - top;
+    let mut keys: Vec<u8> = v.pool.iter().filter(|p| p.state != State::Closing).map(|p| p.sent).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    for k in keys {
+        let to = v.tuning(k) + by;
+        v.glide(k, to, e.glide, e.off);
+    }
+    v.last = Some(f32::from(e.key));
 }
 
 /// An audio clip's end: its voice closes.
@@ -631,5 +672,37 @@ mod tests {
         let mut v = vec![Voices::default()];
         tick(&r, &mut v, &[Event::on(0, 0, 60, 0.8)], 100);
         assert_eq!(tick(&r, &mut v, &[Event::on(0, 0, 72, 0.8)], 100).len(), 1);
+    }
+
+    // spec: audio/song-structure.md "Slide notes"; "Slide notes and these rules" here
+    #[test]
+    fn slide_notes_glide_every_voice_from_the_highest_held_one() {
+        // A chord of 60 and 64; a slide note to 67 of 2 ticks moves both by 67 - 64 = 3 semitones in three steps,
+        // the first on its own tick. It makes no note of its own.
+        let r = [sampler()];
+        let mut v = vec![Voices::default()];
+        tick(&r, &mut v, &[Event::on(0, 0, 60, 0.8), Event::on(0, 0, 64, 0.8)], 100);
+        let out = tick(&r, &mut v, &[Event::slide(0, 20, 67, 2)], 100);
+        assert_eq!(out, vec![(0, 20, Note::Tune(60, 1.0)), (0, 20, Note::Tune(64, 1.0))]);
+        let rest: Vec<Note> = (0..3).flat_map(|_| tick(&r, &mut v, &[], 100)).map(|e| e.2).collect();
+        assert_eq!(rest, vec![Note::Tune(60, 2.0), Note::Tune(64, 2.0), Note::Tune(60, 3.0), Note::Tune(64, 3.0)]);
+        // A new slide is measured from where the voices are: 64 sounds at 67 now, back to 64 in one step.
+        let out = tick(&r, &mut v, &[Event::slide(0, 0, 64, 0)], 100);
+        assert_eq!(out, vec![(0, 0, Note::Tune(60, 0.0)), (0, 0, Note::Tune(64, 0.0))]);
+        // The highest HELD voice decides: with 64's note ended, 60 is the one measured, and the released 64 moves too.
+        tick(&r, &mut v, &[Event::off(0, 0, 64)], 100);
+        let out = tick(&r, &mut v, &[Event::slide(0, 0, 62, 0)], 100);
+        assert_eq!(out, vec![(0, 0, Note::Tune(60, 2.0)), (0, 0, Note::Tune(64, 2.0))]);
+        // The slide's key is the last level: a portamento note glides from it.
+        assert_eq!(v[0].last, Some(62.0));
+        // Without a held voice nothing moves.
+        tick(&r, &mut v, &[Event::off(0, 0, 60)], 100);
+        assert!(tick(&r, &mut v, &[Event::slide(0, 0, 72, 0)], 100).is_empty());
+        // A one-shot voice counts as held while it sounds, after its note's end too.
+        let r = [Rules { one_shot: true, ring: 1e6, ..sampler() }];
+        let mut v = vec![Voices::default()];
+        tick(&r, &mut v, &[Event::on(0, 0, 60, 0.8)], 100);
+        tick(&r, &mut v, &[Event::off(0, 0, 60)], 100);
+        assert_eq!(tick(&r, &mut v, &[Event::slide(0, 0, 65, 0)], 100), vec![(0, 0, Note::Tune(60, 5.0))]);
     }
 }
