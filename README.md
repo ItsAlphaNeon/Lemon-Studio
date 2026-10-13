@@ -9,6 +9,7 @@
 <h3>A free and open-source digital audio workstation, written in Rust.</h3>
 
 <p>
+  <a href="https://github.com/ItsAlphaNeon/Lemon-Studio/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/ItsAlphaNeon/Lemon-Studio/ci.yml?branch=main&style=flat-square&label=CI"></a>
   <a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue?style=flat-square"></a>
   <img alt="Rust 2024 edition" src="https://img.shields.io/badge/rust-2024_edition-e57324?style=flat-square&logo=rust&logoColor=white">
   <img alt="Platform: Windows | Linux" src="https://img.shields.io/badge/platform-Windows_%7C_Linux-0078d4?style=flat-square">
@@ -27,6 +28,10 @@
   <a href="#license">License</a>
 </p>
 
+<br>
+
+<img alt="Lemon Studio with the browser, playlist, channel rack and piano roll open" src="docs/assets/screenshot.webp" width="900">
+
 </div>
 
 ---
@@ -35,11 +40,13 @@
 
 Lemon Studio is a pattern-based music production environment: build patterns in a step sequencer and
 piano roll, arrange them on a playlist, and mix them through a routable mixer. It is written from the
-ground up in Rust, with a sample-accurate audio engine, a fast CPU-rendered interface and support for
-modern open plugin standards.
+ground up in Rust, with a sample-accurate audio engine, a fast CPU-rendered interface and hosting for
+CLAP and VST3 plugins.
 
-A central goal is **interoperability**. Lemon Studio reads and writes the `.flp` project format
-losslessly, so existing projects open, play and save without losing data it does not yet understand.
+A central goal is **interoperability**: Lemon Studio opens and saves FL Studio projects (`.flp`). The
+project reader is built to round-trip: anything in a file that Lemon Studio does not understand yet is
+kept and written back unchanged, so a project survives being opened and saved. This support is still
+young, so read the warning below before trying it on real work.
 
 > [!WARNING]
 > **Lemon Studio is pre-alpha software.** It is under active development and is not yet a usable DAW:
@@ -49,8 +56,8 @@ losslessly, so existing projects open, play and save without losing data it does
 >   nothing so far; they are drawn dim and say "not available yet".
 > - **No prebuilt binaries** will be published until Lemon Studio reaches a usable state. Until then it
 >   can only be built from source.
-> - **Only projects saved by the latest FL Studio 26 open for now.** Projects from older FL Studio versions
->   are not supported yet; support for them is on the roadmap.
+> - **Only projects saved by FL Studio 24.2 or later open for now** (25 and 26 included). Older projects
+>   are refused with a dialog that explains how to re-save them; support for them is on the roadmap.
 > - **Project-file support is at a very early stage.** Do not overwrite your original `.flp` projects
 >   with files saved by Lemon Studio until this support is declared stable. Work on copies and keep backups.
 > - **Support is not available yet**, and issue reports will not be tracked until a later stage of
@@ -58,44 +65,43 @@ losslessly, so existing projects open, play and save without losing data it does
 
 ## Capabilities
 
-A broad picture of where Lemon Studio stands against what a complete DAW offers. Controls for anything that
-is not implemented yet are **greyed out** in the application: hovering one says "not available yet", and
-clicking it does nothing.
+Where Lemon Studio stands against what a complete DAW offers:
 
 | Area | Status | Notes |
 |---|:---:|---|
-| Step sequencing and patterns | ✅ | Channel rack with steps, mini piano rolls, swing, per-channel loops |
-| Piano roll note editing | ✅ | Full tool set, velocity and event lanes, quantize / chop / glue / legato / strum / arpeggiate / randomize, vertical zoom, ghost channels, pattern time markers (saved) |
-| Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers, several arrangements; track height, zoom and scroll saved with the project |
-| Automation | 🚧 | Automation clips for channel, mixer and plugin parameters (a clip drives every target it is linked to, also mixer slot switches and mix levels, track EQ, send levels, stereo separation and the channel's level adjustments), with all thirteen curve shapes walked exactly, values taken one tick ahead and passed on only when they change; no recording of movements, clip LFO or min / range yet |
-| Mixing and routing | ✅ | Mixer tracks, sends, effect slots, meters, polarity and stereo swap, main volume and main pitch; no sidechain inputs yet |
-| Playback engine | 🚧 | Renders whole ticks ahead of the audio device, so edits and busy moments do not leave gaps; a plugin the interface is using is waited for briefly instead of skipped, and the interface only touches a plugin when it has work for it; cut groups, voice limits, mono and portamento glides; slide notes (silent, they glide the channel's sounding notes); layer channels play their children; the channel's level adjustments (volume multiplier, pan and mod X / Y offsets) and each note's own pan and mod X / Y reach the instrument; audio clips at the sample's own level; MP3 samples placed as the original encoder output (the info frame plays as silence); the sampler's closing fades; a fast resampler while playing and the exact one for export; idle plugins are skipped; Stop ends every voice, also in hosted plugins. The CPU panel shows the audio load, the voices playing (the engine's and every plugin's), memory and dropouts, with refresh rates, a frames-per-second view and handle / thread / font counts in its right-click menu; double-clicking it opens the plugin performance monitor (each plugin's processing time, peak, total and voices; sorting, find, freeze). One audio thread: no multi-core mixing yet |
-| Plugin hosting | ✅ | CLAP and VST3 instruments and effects, with their editors and saved state; on Windows a plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio |
-| Plugin management | ✅ | Plugin menus everywhere a plugin is added (F8 lists instruments and effects: an effect goes to the selected mixer track, an instrument to the bottom of the channel rack); a plugin manager in Settings with your own search folders, a background scan at startup (each file is tried in a separate scanner process, so a broken plugin cannot take Lemon Studio down), favourites, hidden plugins, and one menu entry per plugin installed as both VST3 and CLAP (your preferred format wins). VST2 is not hosted yet |
-| Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ so far; the sampler plays a project's sample settings (start and length, the sample file's loop, the sample effects, the channel filter, declicking) and each note's own pan and filter offsets |
-| Exporting audio | 🚧 | Song or pattern to a WAV file (32-bit float); no MP3 or FLAC yet |
-| Project files | 🚧 | Opens and saves `.flp` projects saved by FL Studio 24.2 and later, 25 and 26 included (older versions are on the roadmap; a project in the layout used before version 24.2 is refused with a dialog that explains how to re-save it); early, always keep backups |
-| Undo | 🚧 | Per editor (piano roll, playlist); no redo or global history |
-| Note input | 🚧 | Mouse, computer keyboard and MIDI controllers (notes play the selected channel); no note recording yet |
-| Audio recording | ❌ | Not available yet |
-| MIDI file import / export | ❌ | Not available yet |
-| Time-stretching | ✅ | All twelve stretch methods of sampler channels and audio clips, with the length and pitch rules projects expect; audio clips in the playlist take their length (and redraw their waveform) whenever the sampler's stretch settings, the channel pitch or the tempo change; playlist stretch mode (Shift+M). One open-source stretcher (Signalsmith Stretch) plays every method, so the sound differs from the original stretchers |
-| Audio editing | ❌ | Not available yet |
-| Plugin delay compensation | ❌ | Not available yet |
-| Audio drivers | 🚧 | WASAPI (shared mode) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux; output device, sample rate and buffer length in Settings > Audio; no ASIO or JACK yet |
-| Platforms | 🚧 | Windows 10 / 11; Linux (X11, and Wayland through XWayland); no macOS yet |
-| Look and themes | 🚧 | Lemon design (lemon on neutral greys, rounded-square controls) and the Classic look, switched with Ctrl+Shift+D; theme files apply to Classic; plugin editors not restyled yet |
+| Step sequencing and patterns | ✅ | Channel rack with steps, mini piano rolls, swing and per-channel loops |
+| Piano roll | ✅ | Full tool set, velocity and event lanes, quantize, chop, strum, arpeggiate and more |
+| Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers and several arrangements |
+| Mixing and routing | ✅ | Mixer tracks, sends, effect slots and meters; no sidechain inputs yet |
+| Plugin hosting | ✅ | CLAP and VST3 instruments and effects with their editors; on Windows a crashing plugin is stopped instead of closing Lemon Studio; no VST2 yet |
+| Plugin management | ✅ | Plugin manager with your own search folders, a crash-safe background scan, favourites and hidden plugins |
+| Time-stretching | ✅ | All twelve stretch methods for samples and audio clips, played by one open-source stretcher |
+| Playback engine | 🚧 | Renders ahead of the audio device so edits do not cause dropouts; voice limits, cut groups, glides, layer channels; one audio thread for now |
+| Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape; no recording or clip LFO yet |
+| Project files | 🚧 | Opens and saves projects from FL Studio 24.2 and later; older versions are on the roadmap. Keep backups |
+| Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ |
+| Exporting audio | 🚧 | Song or pattern to a 32-bit float WAV file; no MP3 or FLAC yet |
+| Note input | 🚧 | Mouse, computer keyboard and MIDI controllers; no note recording yet |
+| Undo | 🚧 | Per editor (piano roll, playlist); no redo or global history yet |
+| Audio drivers | 🚧 | WASAPI on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux; no ASIO or JACK yet |
+| Platforms | 🚧 | Windows 10 / 11 and Linux (X11, and Wayland through XWayland); no macOS yet |
+| Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; plugin editors not restyled yet |
+| Audio recording | ❌ | |
+| MIDI file import / export | ❌ | |
+| Audio editing | ❌ | |
+| Plugin delay compensation | ❌ | |
 
 ✅ usable · 🚧 partial · ❌ not available yet
 
-The full, item-by-item roadmap lives on the [Discord server](https://discord.gg/yC2uCuGs3M).
+Per-area details are in [docs/status.md](docs/status.md). The full, item-by-item roadmap lives on the
+[Discord server](https://discord.gg/yC2uCuGs3M).
 
 ## Getting started
 
 ### Prerequisites
 
 - **Windows 10 or 11** (x64), or **Linux** (x64; Wayland or X11). macOS support is planned.
-- **Rust**, stable toolchain with 2024 edition support (1.85 or newer), via [rustup](https://rustup.rs/).
+- **Rust**, stable toolchain, 1.89 or newer, via [rustup](https://rustup.rs/).
 - **libclang** (from LLVM / Clang) and a C++ compiler, used at build time for the time stretcher (Signalsmith
   Stretch, C++, with bindings generated by bindgen). Windows: the MSVC build tools Rust already uses, plus LLVM
   (`winget install LLVM.LLVM`); if `libclang.dll` is elsewhere, set `LIBCLANG_PATH` to its folder. Linux: Debian /
@@ -133,7 +139,9 @@ cargo run -p bundle-plugins
 ```
 
 Pass `--install` to copy the bundles into the per-user plugin folders (`%LOCALAPPDATA%\Programs\Common\{VST3,CLAP}` on
-Windows, `~/.vst3` and `~/.clap` on Linux).
+Windows, `~/.vst3` and `~/.clap` on Linux). On Linux, building the bundles also needs the Wayland development files
+(Debian / Ubuntu: `libwayland-dev`; Arch: `wayland`; Fedora: `wayland-devel`), which Open Sampler's file dialogs link
+against.
 
 ### Linux
 
@@ -181,6 +189,7 @@ project files are never committed to this repository.
 | `flp-dump` | Print a project file's event stream and verify that it round-trips |
 | `os-render` | Render a project or pattern offline to a WAV file |
 | `os-play` | Play a project through the default audio output |
+| `bundle-plugins` | Build Lemon Studio's own plugins as VST3 and CLAP bundles, and optionally install them |
 
 ## Architecture
 
@@ -254,8 +263,8 @@ Lemon Studio is free software: you can redistribute it and/or modify it under th
 ## Trademarks
 
 FL Studio is a trademark of Image-Line Software. Lemon Studio is an independent project and is not
-affiliated with, sponsored by or endorsed by Image-Line Software. The `.flp` file format is referred
-to solely to describe interoperability.
+affiliated with, sponsored by or endorsed by Image-Line Software. FL Studio and its `.flp` file format
+are referred to solely to describe interoperability.
 
 VST is a registered trademark of Steinberg Media Technologies GmbH. All other trademarks are the
 property of their respective owners.
