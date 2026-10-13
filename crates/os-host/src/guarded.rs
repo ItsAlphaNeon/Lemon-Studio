@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use crate::guard::{self, Module};
 use crate::{Attention, Descriptor, HostedEffect, Instrument, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
-use os_engine::TransportInfo;
+use os_engine::{ChannelLevels, ChannelVoicing, TransportInfo};
 
 /// A plugin instance of any format, called through the crash guard. Once its code crashed (this instance, or another
 /// one of the same plugin file) it is stopped: it is never called again, nor destroyed (its memory is left as the crash
@@ -74,6 +74,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn note_on_from(&mut self, offset: u32, key: u8, velocity: f32, start: f32) {
         self.run((), |p| p.note_on_from(offset, key, velocity, start))
     }
+    fn note_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels) {
+        self.run((), |p| p.note_start(offset, key, velocity, start, levels))
+    }
     fn choke(&mut self, offset: u32, key: u8) {
         self.run((), |p| p.choke(offset, key))
     }
@@ -111,11 +114,17 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         self.run((), |p| p.param(offset, index, value))
     }
+    fn tick_params(&self) -> bool {
+        self.look(false, |p| p.tick_params())
+    }
     fn transport(&mut self, info: &TransportInfo) {
         self.run((), |p| p.transport(info))
     }
-    fn channel_levels(&mut self, volume: f32, pan: f32) -> bool {
-        self.run(false, |p| p.channel_levels(volume, pan))
+    fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
+        self.run(false, |p| p.channel_levels(levels))
+    }
+    fn channel_voicing(&mut self, voicing: &ChannelVoicing) {
+        self.run((), |p| p.channel_voicing(voicing))
     }
 }
 
@@ -131,6 +140,9 @@ impl<P: Plugin> HostedEffect for Guarded<P> {
     }
     fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
         self.run((), |p| p.param_fx(offset, index, value))
+    }
+    fn tick_params_fx(&self) -> bool {
+        self.look(false, |p| p.tick_params_fx())
     }
     fn transport_fx(&mut self, info: &TransportInfo) {
         self.run((), |p| p.transport_fx(info))
@@ -188,6 +200,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn use_start_param(&mut self, name: &str) -> bool {
         self.run(false, |p| p.use_start_param(name))
+    }
+    fn use_note_levels(&mut self) -> bool {
+        self.run(false, |p| p.use_note_levels())
     }
     fn set_offline(&mut self, offline: bool) {
         self.run((), |p| p.set_offline(offline))
@@ -369,8 +384,8 @@ mod tests {
         fn note_on(&mut self, _: u32, _: u8, _: f32) {}
         fn note_off(&mut self, _: u32, _: u8) {}
         fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
-        fn channel_levels(&mut self, volume: f32, pan: f32) -> bool {
-            self.levels = Some((volume, pan));
+        fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
+            self.levels = Some((levels.volume, levels.pan));
             true
         }
     }
@@ -429,7 +444,7 @@ mod tests {
         };
         let p = share(SelfStopping { desc, stop: None, levels: None }, Arc::new(Module::default()));
         let mut g = p.lock().unwrap();
-        assert!(g.channel_levels(0.5, -0.3));
+        assert!(g.channel_levels(ChannelLevels { volume: 0.5, pan: -0.3, ..ChannelLevels::default() }));
         assert_eq!(g.save_state(), Some(vec![5, 7]));
         assert_eq!(g.stopped(), None);
         g.idle();

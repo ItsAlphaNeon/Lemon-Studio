@@ -379,6 +379,10 @@ impl Plugins {
         }
         // Trimmed audio clips start their note further into the sample (spec: plugins/open-sampler.md §7).
         p.use_start_param(SAMPLE_START);
+        // A note's own pan and mod X / Y reach the built-in Open instruments only (spec: audio/voice-levels.md).
+        if crate::project_plugins::is_builtin(&a.desc) {
+            p.use_note_levels();
+        }
         drop(p);
         self.hosted.insert(row, Hosted::new(plugin));
         Ok(a.desc.name)

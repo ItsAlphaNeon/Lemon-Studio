@@ -17,7 +17,7 @@ use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
     clap_event_header, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
     clap_event_transport, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_EXPRESSION,
-    CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_TUNING, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
+    CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_TUNING, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
     CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE,
     CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
 };
@@ -482,6 +482,53 @@ struct Ev {
     velocity: f32,
     /// Sample start (0..1) sent as per-note modulation of `Plugin::start_param` (0 = none).
     start: f32,
+    /// The note's own pan and mod X / Y (`use_note_levels`).
+    levels: os_engine::NoteLevels,
+}
+
+impl Ev {
+    fn new(time: u32, kind: Kind, key: u8, velocity: f32) -> Ev {
+        Ev { time, kind, key, velocity, start: 0.0, levels: os_engine::NoteLevels::default() }
+    }
+}
+
+/// How an instance takes a note's own levels (`Plugin::use_note_levels`): the pan always (note expression), the mod X /
+/// mod Y as per-note modulation of these parameters (id, the span of its range) where it has them.
+#[derive(Clone, Copy, Default)]
+struct NoteParams {
+    mods: [Option<(u32, f64)>; 2],
+}
+
+/// A voice started with note levels: its note id and key, the note's mod X / Y, the modulation amounts it was sent.
+#[derive(Clone, Copy)]
+struct LevelVoice {
+    id: i32,
+    key: u8,
+    mods: [f32; 2],
+    sent: [f64; 2],
+}
+
+/// Voices kept for resending their mod amounts; the oldest go beyond this.
+const LEVEL_VOICES: usize = 512;
+
+/// A per-note modulation event of `param` by `amount` for note `id` on `key` at `time`.
+fn param_mod(time: u32, param: u32, id: i32, key: u8, amount: f64) -> clap_event_param_mod {
+    clap_event_param_mod {
+        header: clap_event_header {
+            size: std::mem::size_of::<clap_event_param_mod>() as u32,
+            time,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_: CLAP_EVENT_PARAM_MOD,
+            flags: 0,
+        },
+        param_id: param,
+        cookie: ptr::null_mut(),
+        note_id: id,
+        port_index: 0,
+        channel: 0,
+        key: i16::from(key),
+        amount,
+    }
 }
 
 /// A plugin instance.
@@ -516,6 +563,14 @@ pub struct Plugin {
     order: Vec<*const clap_event_header>,
     /// Parameter that takes a note's sample start as per-note modulation (`use_start_param`).
     start_param: Option<u32>,
+    /// Notes carry their own pan and mod X / Y (`use_note_levels`).
+    note_levels: Option<NoteParams>,
+    /// The channel's mod X / Y, added to each note's (`Instrument::channel_levels`).
+    chan_mods: [f32; 2],
+    /// Voices started with note levels, until the plugin reports their end.
+    level_voices: Vec<LevelVoice>,
+    /// Mod amounts of sounding voices to send at the start of the next block (note id, key, parameter, amount).
+    mod_resend: Vec<(i32, u8, u32, f64)>,
     next_note_id: i32,
     steady: i64,
     /// The song position for the next process call (the engine gives it while playing), and the current chunk's.
@@ -687,6 +742,10 @@ impl Plugin {
                 exprs: Vec::with_capacity(64),
                 order: Vec::with_capacity(320),
                 start_param: None,
+                note_levels: None,
+                chan_mods: [0.0; 2],
+                level_voices: Vec::new(),
+                mod_resend: Vec::new(),
                 next_note_id: 0,
                 steady: 0,
                 song: None,
@@ -785,6 +844,8 @@ impl Plugin {
         }
         self.rate = 0;
         self.ledger.clear();
+        self.level_voices.clear();
+        self.mod_resend.clear();
     }
 
     /// Lets the plugin apply the parameter edits its editor queued (and drops the events it reports back: the
@@ -818,7 +879,12 @@ impl Plugin {
         let mut w = from;
         for r in from..self.param_out.len() {
             match self.param_out[r] {
-                OutEv::NoteEnd(key, id) => self.ledger.ended(key, id),
+                OutEv::NoteEnd(key, id) => {
+                    self.ledger.ended(key, id);
+                    if id >= 0 {
+                        self.level_voices.retain(|v| v.id != id);
+                    }
+                }
                 e => {
                     self.param_out[w] = e;
                     w += 1;
@@ -896,6 +962,40 @@ impl Plugin {
             }
         }
         false
+    }
+
+    /// Sends each note's own levels (`Instrument::note_start`; UI thread): its pan as a CLAP pan note expression
+    /// `(pan + 1) / 2` right after the note on, with the note's id, and its mod X / Y plus the channel's as per-note
+    /// modulation of the parameters named `os_host::NOTE_MOD_X` / `NOTE_MOD_Y` when the plugin has them modulatable
+    /// per note id, the amount being the mod value times the parameter's range (an OpenStudio choice: a mod of 1 is
+    /// the knob's whole range). Sounding voices get the new amounts when the channel's mods change.
+    pub fn use_note_levels(&mut self) -> bool {
+        let mut np = NoteParams::default();
+        if !self.params.is_null() {
+            unsafe {
+                let count = (*self.params).count.map_or(0, |c| c(self.plugin));
+                for i in 0..count {
+                    let mut info: clap_param_info = std::mem::zeroed();
+                    if !(*self.params).get_info.is_some_and(|g| g(self.plugin, i, &mut info)) {
+                        continue;
+                    }
+                    if info.flags & CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID == 0 {
+                        continue;
+                    }
+                    let n = CStr::from_ptr(info.name.as_ptr()).to_string_lossy();
+                    let k = if n == os_host::NOTE_MOD_X {
+                        0
+                    } else if n == os_host::NOTE_MOD_Y {
+                        1
+                    } else {
+                        continue;
+                    };
+                    np.mods[k] = Some((info.id, info.max_value - info.min_value));
+                }
+            }
+        }
+        self.note_levels = Some(np);
+        true
     }
 
     /// UI-thread housekeeping: callbacks the plugin asked for, restarts, rate changes, a closed editor window.
@@ -1039,7 +1139,7 @@ impl Plugin {
     /// an instance until something arrives (or, for an effect, until its input is not quiet), so an idle instrument
     /// or effect costs nothing per block.
     fn asleep(&self) -> bool {
-        !self.sounding && self.queue.is_empty() && self.param_queue.is_empty() && self.auto.is_empty()
+        !self.sounding && self.queue.is_empty() && self.param_queue.is_empty() && self.auto.is_empty() && self.mod_resend.is_empty()
     }
 
     /// `process_chunk` with an audio input (effects): `input` holds the frames to process, `left` / `right` receive
@@ -1052,6 +1152,11 @@ impl Plugin {
         let mut rest = Vec::new();
         // Event order; a note's modulation follows its note on at the same time.
         let mut seq: Vec<Seq> = Vec::new();
+        // Sounding voices' new mod amounts (the channel's mods changed) go first.
+        for (id, key, param, amount) in self.mod_resend.drain(..) {
+            self.mods.push(param_mod(0, param, id, key, amount));
+            seq.push(Seq::Mod(self.mods.len() - 1));
+        }
         for e in self.queue.drain(..) {
             if e.time < n && e.kind == Kind::Tune {
                 // Portamento glides (spec: audio/channel-voices.md): CLAP tuning expression, semitones.
@@ -1072,13 +1177,12 @@ impl Plugin {
                 });
                 seq.push(Seq::Expr(self.exprs.len() - 1));
             } else if e.time < n {
-                // A note with a sample start gets an id, so its modulation reaches only that voice.
-                let id = match (e.kind, self.start_param) {
-                    (Kind::On, Some(_)) if e.start > 0.0 => {
-                        self.next_note_id = self.next_note_id.wrapping_add(1) & 0x7fff_ffff;
-                        self.next_note_id
-                    }
-                    _ => -1,
+                // A note with a sample start or its own levels gets an id, so its modulation reaches only that voice.
+                let id = if e.kind == Kind::On && ((self.start_param.is_some() && e.start > 0.0) || self.note_levels.is_some()) {
+                    self.next_note_id = self.next_note_id.wrapping_add(1) & 0x7fff_ffff;
+                    self.next_note_id
+                } else {
+                    -1
                 };
                 match e.kind {
                     Kind::On => self.ledger.start(e.key, id),
@@ -1104,24 +1208,48 @@ impl Plugin {
                     velocity: f64::from(e.velocity),
                 });
                 seq.push(Seq::Note(self.notes.len() - 1));
-                if let (Some(param), true) = (self.start_param, id >= 0) {
-                    self.mods.push(clap_event_param_mod {
-                        header: clap_event_header {
-                            size: std::mem::size_of::<clap_event_param_mod>() as u32,
-                            time: e.time,
-                            space_id: CLAP_CORE_EVENT_SPACE_ID,
-                            type_: CLAP_EVENT_PARAM_MOD,
-                            flags: 0,
-                        },
-                        param_id: param,
-                        cookie: ptr::null_mut(),
-                        note_id: id,
-                        port_index: 0,
-                        channel: 0,
-                        key: i16::from(e.key),
-                        amount: f64::from(e.start),
-                    });
+                if let (Some(param), true) = (self.start_param, id >= 0 && e.start > 0.0) {
+                    self.mods.push(param_mod(e.time, param, id, e.key, f64::from(e.start)));
                     seq.push(Seq::Mod(self.mods.len() - 1));
+                }
+                // The note's own levels (spec: audio/voice-levels.md "The note's own levels"): its pan as the voice's
+                // pan expression, its mod X / Y plus the channel's as per-note modulation.
+                if let (Some(np), true) = (self.note_levels, id >= 0) {
+                    let pan = e.levels.pan;
+                    if pan != 0.0 {
+                        self.exprs.push(clap_event_note_expression {
+                            header: clap_event_header {
+                                size: std::mem::size_of::<clap_event_note_expression>() as u32,
+                                time: e.time,
+                                space_id: CLAP_CORE_EVENT_SPACE_ID,
+                                type_: CLAP_EVENT_NOTE_EXPRESSION,
+                                flags: 0,
+                            },
+                            expression_id: CLAP_NOTE_EXPRESSION_PAN,
+                            note_id: id,
+                            port_index: 0,
+                            channel: 0,
+                            key: i16::from(e.key),
+                            value: f64::from((pan + 1.0) * 0.5).clamp(0.0, 1.0),
+                        });
+                        seq.push(Seq::Expr(self.exprs.len() - 1));
+                    }
+                    let own = [e.levels.mod_x, e.levels.mod_y];
+                    let mut sent = [0.0; 2];
+                    for k in 0..2 {
+                        let Some((param, span)) = np.mods[k] else { continue };
+                        sent[k] = f64::from(own[k] + self.chan_mods[k]) * span;
+                        if sent[k] != 0.0 {
+                            self.mods.push(param_mod(e.time, param, id, e.key, sent[k]));
+                            seq.push(Seq::Mod(self.mods.len() - 1));
+                        }
+                    }
+                    if np.mods.iter().any(Option::is_some) {
+                        if self.level_voices.len() >= LEVEL_VOICES {
+                            self.level_voices.remove(0);
+                        }
+                        self.level_voices.push(LevelVoice { id, key: e.key, mods: own, sent });
+                    }
                 }
             } else {
                 rest.push(Ev { time: e.time - n, ..e });
@@ -1246,6 +1374,10 @@ impl os_host::Plugin for Plugin {
         Plugin::use_start_param(self, name)
     }
 
+    fn use_note_levels(&mut self) -> bool {
+        Plugin::use_note_levels(self)
+    }
+
     fn set_offline(&mut self, offline: bool) {
         Plugin::set_offline(self, offline);
     }
@@ -1351,6 +1483,8 @@ impl os_engine::Instrument for Plugin {
         self.queue.clear();
         self.sounding = false;
         self.ledger.clear();
+        self.level_voices.clear();
+        self.mod_resend.clear();
         if self.rate == 0 {
             return;
         }
@@ -1369,23 +1503,50 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
-        self.queue.push(Ev { time: offset, kind: Kind::On, key, velocity, start: 0.0 });
+        self.queue.push(Ev::new(offset, Kind::On, key, velocity));
     }
 
     fn note_off(&mut self, offset: u32, key: u8) {
-        self.queue.push(Ev { time: offset, kind: Kind::Off, key, velocity: 0.0, start: 0.0 });
+        self.queue.push(Ev::new(offset, Kind::Off, key, 0.0));
     }
 
     fn note_on_from(&mut self, offset: u32, key: u8, velocity: f32, start: f32) {
-        self.queue.push(Ev { time: offset, kind: Kind::On, key, velocity, start: start.clamp(0.0, 1.0) });
+        self.queue.push(Ev { start: start.clamp(0.0, 1.0), ..Ev::new(offset, Kind::On, key, velocity) });
+    }
+
+    fn note_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels) {
+        self.queue.push(Ev { start: start.clamp(0.0, 1.0), levels, ..Ev::new(offset, Kind::On, key, velocity) });
     }
 
     fn choke(&mut self, offset: u32, key: u8) {
-        self.queue.push(Ev { time: offset, kind: Kind::Choke, key, velocity: 0.0, start: 0.0 });
+        self.queue.push(Ev::new(offset, Kind::Choke, key, 0.0));
     }
 
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
-        self.queue.push(Ev { time: offset, kind: Kind::Tune, key, velocity: semitones, start: 0.0 });
+        self.queue.push(Ev::new(offset, Kind::Tune, key, semitones));
+    }
+
+    /// The engine still applies the channel's volume and pan to the output (false); the channel's mod X / Y join each
+    /// note's in its modulation, and sounding voices are sent their new amounts (spec: audio/voice-levels.md "Changes
+    /// while a note sounds").
+    fn channel_levels(&mut self, levels: os_engine::ChannelLevels) -> bool {
+        let mods = [levels.mod_x, levels.mod_y];
+        if mods == self.chan_mods {
+            return false;
+        }
+        self.chan_mods = mods;
+        let Some(np) = self.note_levels else { return false };
+        for v in &mut self.level_voices {
+            for k in 0..2 {
+                let Some((param, span)) = np.mods[k] else { continue };
+                let amount = f64::from(v.mods[k] + mods[k]) * span;
+                if amount != v.sent[k] {
+                    v.sent[k] = amount;
+                    self.mod_resend.push((v.id, v.key, param, amount));
+                }
+            }
+        }
+        false
     }
 
     fn param(&mut self, offset: u32, index: u32, value: f64) {
@@ -1573,6 +1734,53 @@ mod tests {
         os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap()
     }
 
+    /// A note's own levels (`use_note_levels`): the pan as a pan note expression with the note's id right after its
+    /// note on, the mods (plus the channel's) as per-note modulation of the mod parameters; when the channel's mods
+    /// change, the sounding voice is sent its new amount. Without `use_note_levels` nothing of it is sent.
+    #[test]
+    fn note_levels_go_with_the_note() {
+        use os_engine::HostedEffect as _;
+        let entry = &open_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Open Parametric EQ 2.clap")) }.expect("linked EQ");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 48000));
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        let own = os_engine::NoteLevels { pan: 0.5, mod_x: 0.25, mod_y: -0.5 };
+        // Off: a plain note.
+        p.note_start(3, 60, 0.8, 0.0, own);
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!((p.notes.len(), p.notes[0].note_id, p.exprs.len(), p.mods.len()), (1, -1, 0, 0));
+        // On; the EQ has no mod parameters, so this test lends it one (its first parameter, range 0..1 plain).
+        assert!(p.use_note_levels());
+        assert!(p.note_levels.is_some_and(|n| n.mods == [None, None]));
+        let param = os_host::Plugin::param_info(&p, 0).unwrap().id;
+        p.note_levels = Some(NoteParams { mods: [Some((param, 2.0)), None] });
+        p.channel_levels(os_engine::ChannelLevels { mod_x: 0.25, ..Default::default() });
+        p.note_start(5, 61, 0.8, 0.0, own);
+        p.process_fx(48000, &mut l, &mut r);
+        let id = p.notes[0].note_id;
+        assert!(id >= 0);
+        assert_eq!(p.exprs.len(), 1);
+        let x = p.exprs[0];
+        assert_eq!((x.expression_id, x.note_id, x.key, x.header.time, x.value), (CLAP_NOTE_EXPRESSION_PAN, id, 61, 5, 0.75));
+        assert_eq!(p.mods.len(), 1);
+        let m = p.mods[0];
+        assert_eq!((m.param_id, m.note_id, m.header.time, m.amount), (param, id, 5, (0.25 + 0.25) * 2.0));
+        // In the event order the note on comes first.
+        assert_eq!(p.order.first().copied(), Some(&p.notes[0].header as *const clap_event_header));
+        // The channel's mod changes: the sounding voice gets its new amount at the next block's start.
+        p.channel_levels(os_engine::ChannelLevels { mod_x: -0.25, ..Default::default() });
+        p.channel_levels(os_engine::ChannelLevels { mod_x: -0.25, ..Default::default() });
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!(p.mods.len(), 1);
+        assert_eq!((p.mods[0].note_id, p.mods[0].header.time, p.mods[0].amount), (id, 0, 0.0));
+        // The voice ends: nothing more to resend.
+        p.param_out.push(OutEv::NoteEnd(61, id));
+        p.take_note_ends(0);
+        p.channel_levels(os_engine::ChannelLevels { mod_x: 0.5, ..Default::default() });
+        assert!(p.mod_resend.is_empty());
+    }
+
     /// The UI locks an instance only when it has work (spec: audio/implementing.md "Playing live"): host edits waiting
     /// for a flush, a stream at another rate and the plugin's own requests raise its attention count; an idle with
     /// nothing left to do leaves it alone, so a quiet instance is not locked again and again.
@@ -1702,7 +1910,7 @@ mod tests {
         // Main level from 0 (-18 dB) to 1 (+18 dB) over 4 beats (120 BPM: 2 s).
         let auto = Automation {
             channel: 0,
-            target: Some(os_model::target::slot_param(1, 0, 35)),
+            targets: vec![os_model::target::slot_param(1, 0, 35)],
             points: vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(4.0, 1.0)],
             header: vec![0; 21],
             tail: vec![],

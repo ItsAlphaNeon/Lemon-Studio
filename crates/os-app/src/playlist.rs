@@ -1714,7 +1714,7 @@ pub fn tempo_value(bpm: f64) -> f64 {
 /// The text shown for an automation value: the target's own unit where known (spec: audio/voice-levels.md "Values
 /// from automation").
 pub fn value_text(s: &State, ch: u16, v: f64) -> String {
-    let tgt = s.project.automation(ch).and_then(|a| a.target).map(target::decode);
+    let tgt = s.project.automation(ch).and_then(|a| a.target()).map(target::decode);
     match tgt {
         Some(target::Target::Tempo) => format!("{:.3} BPM", auto_tempo(v)),
         Some(target::Target::ChannelPan(_) | target::Target::MixerPan(_)) => crate::knobs::pan_text(((v - 0.5) * 2.0) as f32),
@@ -1731,7 +1731,7 @@ pub fn value_text(s: &State, ch: u16, v: f64) -> String {
 pub fn parse_value(s: &State, ch: u16, text: &str) -> Option<f64> {
     let t = text.trim().trim_end_matches('%').trim_end_matches("BPM").trim();
     let v: f64 = t.parse().ok()?;
-    let tgt = s.project.automation(ch).and_then(|a| a.target).map(target::decode);
+    let tgt = s.project.automation(ch).and_then(|a| a.target()).map(target::decode);
     Some(match tgt {
         Some(target::Target::Tempo) => tempo_value(v),
         _ if v > 1.0 || text.contains('%') => v / 100.0,
@@ -2803,7 +2803,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::NewMarker(_) => String::new(),
         EditTarget::PointValue(ch, i) => {
             let v = s.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.value);
-            match s.project.automation(ch).and_then(|a| a.target).map(target::decode) {
+            match s.project.automation(ch).and_then(|a| a.target()).map(target::decode) {
                 Some(target::Target::Tempo) => format!("{:.3}", auto_tempo(v)),
                 _ => format!("{:.1}%", v * 100.0),
             }

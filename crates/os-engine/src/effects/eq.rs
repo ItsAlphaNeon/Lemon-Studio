@@ -217,6 +217,12 @@ impl ParametricEq {
 }
 
 impl Effect for ParametricEq {
+    fn reset(&mut self) {
+        for s in &mut self.sections {
+            s.reset();
+        }
+    }
+
     fn process(&mut self, buf: &mut [f32]) {
         for s in &mut self.sections {
             s.process(buf);

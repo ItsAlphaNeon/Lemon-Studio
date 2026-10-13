@@ -663,12 +663,13 @@ pub fn remap_project(p: &mut Project, map: &[Option<usize>]) {
         let Some(&m) = idx.get(&a.channel) else { return false };
         a.channel = m;
         // Channel targets keep the channel in the high half (spec: flp/events/automation.md "Targets").
-        if let Some(t) = a.target {
-            let hi = (t >> 16) as u16;
-            if t != target::TEMPO && hi < 0x4000 {
-                a.target = idx.get(&hi).map(|&n| target::channel(n, t as u16));
+        a.targets.retain_mut(|t| {
+            let hi = (*t >> 16) as u16;
+            if *t == target::TEMPO || hi >= 0x4000 {
+                return true;
             }
-        }
+            idx.get(&hi).map(|&n| *t = target::channel(n, *t as u16)).is_some()
+        });
         true
     });
     for arr in &mut p.arrangements {

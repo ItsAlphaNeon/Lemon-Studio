@@ -46,6 +46,11 @@ impl Ramp {
     pub fn first(&self) -> f32 {
         self.value
     }
+
+    /// The per-sample step of the block (0 when the gain does not move).
+    pub fn step(&self) -> f32 {
+        self.step
+    }
 }
 
 impl Glide {

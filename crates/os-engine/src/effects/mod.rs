@@ -10,6 +10,9 @@ pub use biquad::Biquad;
 /// An insert effect processing interleaved stereo in place.
 pub trait Effect: Send {
     fn process(&mut self, buf: &mut [f32]);
+    /// Empties delay lines and filter states (a slot switched on during the song, spec: audio/mixer.md "Changes while
+    /// the song plays").
+    fn reset(&mut self) {}
 }
 
 /// Creates a Lemon Studio effect for a slot plugin, if one exists for that plugin.
