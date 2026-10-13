@@ -3,7 +3,7 @@
 //!
 //! A third-party plugin is stored the way the project format stores every such plugin: as the wrapper plugin, whose
 //! state names the plugin (format, class id, name, vendor, file) and holds the plugin's own saved state. Plugins
-//! compiled into Lemon Studio keep their own mapping (Open Sampler = sampler channels, Open Parametric EQ 2 = the
+//! compiled into Lemon Studio keep their own mapping (Lemon Sampler = sampler channels, Lemon Parametric EQ 2 = the
 //! file's parametric EQ). Native plugins keep their own state format: a hosted native instance writes its state into
 //! its channel or slot as it is, and native plugins that are not hosted keep the bytes the file had.
 //!
@@ -22,13 +22,13 @@ pub fn is_builtin(d: &Descriptor) -> bool {
 
 #[cfg(test)]
 thread_local! {
-    /// Tests: the built-in Open plugins stand in for third-party plugins.
+    /// Tests: the built-in Lemon plugins stand in for third-party plugins.
     pub static WRAP_BUILTINS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Tests: the "real native plugins instead of Open recreations" preference for this thread, without touching the
+    /// Tests: the "real native plugins instead of Lemon recreations" preference for this thread, without touching the
     /// process environment other tests read.
     pub static NATIVE_FIRST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
@@ -43,7 +43,7 @@ pub fn native_first() -> bool {
     os_native::prefer_native()
 }
 
-/// Whether a channel or slot holding file id `id` is one a built-in Open recreation plays (3x Osc, the parametric EQ).
+/// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, the parametric EQ).
 pub fn has_recreation(id: &str) -> bool {
     id.eq_ignore_ascii_case(crate::osc3::FILE_NAME) || id.eq_ignore_ascii_case(crate::plugins::EQ_FILE_NAME)
 }
@@ -458,11 +458,11 @@ impl crate::app::App {
 mod tests {
     use super::*;
     use crate::app::App;
-    use crate::plugins::{fx_key, OPEN_EQ, OPEN_SAMPLER};
+    use crate::plugins::{fx_key, LEMON_EQ, LEMON_SAMPLER};
 
     /// A hosted plugin channel and a mixer slot plugin are saved as wrapped plugins holding their identity and state,
     /// and the reopened project hosts them again with that state; a second save keeps working on the saved file
-    /// (spec: flp/events/plugins.md). The built-in Open plugins stand in for third-party plugins.
+    /// (spec: flp/events/plugins.md). The built-in Lemon plugins stand in for third-party plugins.
     #[test]
     fn hosted_plugins_save_and_reopen() {
         WRAP_BUILTINS.with(|w| w.set(true));
@@ -473,15 +473,15 @@ mod tests {
         a.state.path = None;
         a.plugins.available = crate::plugins::builtin();
         a.plugins.effects = crate::plugins::builtin_effects();
-        let row = crate::app::add_plugin_channel(&mut a.state.project, OPEN_SAMPLER);
-        a.plugins.create(row, a.plugins.index_of(OPEN_SAMPLER).unwrap()).unwrap();
+        let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_SAMPLER);
+        a.plugins.create(row, a.plugins.index_of(LEMON_SAMPLER).unwrap()).unwrap();
         a.state.hosted_rows.push(row);
         assert!(a.plugins.load_sample(row, "C:/samples/one.wav"));
-        let mut fl = open_parametric_eq_2::params::default_state();
-        open_parametric_eq_2::params::set_field(&mut fl, 1, -600);
-        let eq = open_parametric_eq_2::params::plugin_state_from_fl(&fl);
-        a.state.project.mixer[3].slots[2] = Some(SlotPlugin { name: OPEN_EQ.into(), state: Vec::new() });
-        a.plugins.create_effect(3, 2, a.plugins.effect_index(OPEN_EQ).unwrap(), Some(&eq)).unwrap();
+        let mut fl = lemon_parametric_eq_2::params::default_state();
+        lemon_parametric_eq_2::params::set_field(&mut fl, 1, -600);
+        let eq = lemon_parametric_eq_2::params::plugin_state_from_fl(&fl);
+        a.state.project.mixer[3].slots[2] = Some(SlotPlugin { name: LEMON_EQ.into(), state: Vec::new() });
+        a.plugins.create_effect(3, 2, a.plugins.effect_index(LEMON_EQ).unwrap(), Some(&eq)).unwrap();
         a.save_to(path.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", a.state.message);
 
@@ -492,12 +492,12 @@ mod tests {
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(WRAPPER)));
         let r = wrapped_channel(ch).unwrap();
         // (A plugin file's extension gives the format: `.clap` / `.vst3`; the stand-in's file is this program.)
-        assert_eq!(r.name, OPEN_SAMPLER);
+        assert_eq!(r.name, LEMON_SAMPLER);
         assert_eq!(std::path::PathBuf::from(&r.path), std::env::current_exe().unwrap());
         assert_eq!(Some(r.state.clone()), a.plugins.state(row));
         let s = wrapped_slot(saved.mixer[3].slots[2].as_ref().unwrap()).unwrap();
-        assert_eq!(s.name, OPEN_EQ);
-        assert_eq!(slot_title(saved.mixer[3].slots[2].as_ref().unwrap()), OPEN_EQ);
+        assert_eq!(s.name, LEMON_EQ);
+        assert_eq!(slot_title(saved.mixer[3].slots[2].as_ref().unwrap()), LEMON_EQ);
         // The model now holds what the file holds.
         assert_eq!(a.state.project.channels[row].plugin.as_deref(), Some(WRAPPER));
 
@@ -510,7 +510,7 @@ mod tests {
         assert!(b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
         assert_eq!(b.plugins.sampler_path(row).as_deref(), Some("C:/samples/one.wav"));
         assert_eq!(b.plugins.eq_file_state(fx_key(3, 2)), Some(fl));
-        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some(OPEN_EQ));
+        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some(LEMON_EQ));
 
         // Saved again (onto the opened file): the new state is written into the same wrapper.
         assert!(b.plugins.load_sample(row, "C:/samples/two.wav"));
@@ -719,7 +719,7 @@ mod tests {
     /// in the project across each move (spec: plugins/fruity-abi.md "Opened projects").
     #[test]
     fn real_native_plugins_replace_the_open_recreations_and_back() {
-        use crate::osc3::{FILE_NAME as OSC3_FILE, OPEN_3X_OSC};
+        use crate::osc3::{FILE_NAME as OSC3_FILE, LEMON_3X_OSC};
         use crate::plugins::EQ_FILE_NAME;
         NATIVE_FIRST.with(|n| n.set(Some(false)));
         let mut a = App::new(None);
@@ -728,11 +728,11 @@ mod tests {
         a.plugins.available.push(native_stand_in(OSC3_FILE, os_host::Kind::Instrument, true));
         a.plugins.effects = crate::plugins::builtin_effects();
         a.plugins.effects.push(native_stand_in(EQ_FILE_NAME, os_host::Kind::Effect, true));
-        let row = crate::app::add_plugin_channel(&mut a.state.project, OPEN_3X_OSC);
-        let osc_file = open_3x_osc::params::default_state();
+        let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_3X_OSC);
+        let osc_file = lemon_3x_osc::params::default_state();
         a.state.project.channels[row].plugin_state = Some(osc_file.clone());
-        let mut eq_file = open_parametric_eq_2::params::default_state();
-        open_parametric_eq_2::params::set_field(&mut eq_file, 1, -600);
+        let mut eq_file = lemon_parametric_eq_2::params::default_state();
+        lemon_parametric_eq_2::params::set_field(&mut eq_file, 1, -600);
         a.state.project.mixer[2].slots[1] = Some(SlotPlugin { name: EQ_FILE_NAME.into(), state: eq_file.clone() });
         let slot = fx_key(2, 1);
         let builtin_at = |a: &App, key| a.plugins.descriptor(key).is_some_and(|d| is_builtin(&d));

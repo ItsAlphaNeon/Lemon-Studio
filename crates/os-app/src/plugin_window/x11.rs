@@ -370,7 +370,7 @@ impl FrameWindow {
         }
     }
 
-    /// An Open plugin joined the strip (host link): its page tabs replace the plug tab.
+    /// A Lemon plugin joined the strip (host link): its page tabs replace the plug tab.
     pub fn set_pages(&self, pages: Vec<PageIcon>, active: usize) {
         let mut st = self.f.state.borrow_mut();
         if !pages.is_empty() && (st.pages != pages || st.page != active) {
@@ -977,7 +977,7 @@ pub fn busy() -> bool {
     CONN.with(|c| c.borrow().as_ref().is_some_and(|c| !c.frames.borrow().is_empty())) || os_host::runloop::active()
 }
 
-/// Host link messages from Open plugins' editors since the last call: (editor area window, message). The editors run
+/// Host link messages from Lemon plugins' editors since the last call: (editor area window, message). The editors run
 /// on threads of their own and queue them in `os_hostlink` (UI thread).
 pub fn take_link() -> Vec<(isize, LinkMsg)> {
     os_hostlink::take_host_messages()

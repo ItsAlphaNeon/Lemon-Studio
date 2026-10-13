@@ -1,4 +1,4 @@
-//! Open 3x Osc sound: three oscillators, their stereo spread, mixing or amplitude modulation, the five envelope / LFO
+//! Lemon 3x Osc sound: three oscillators, their stereo spread, mixing or amplitude modulation, the five envelope / LFO
 //! targets, the voice filter and the voices.
 //!
 // spec: plugins/3x-osc.md §2

@@ -1,6 +1,6 @@
-//! Open Sampler: Lemon Studio's sampler instrument as a VST3 / CLAP plugin (nih-plug).
+//! Lemon Sampler: Lemon Studio's sampler instrument as a VST3 / CLAP plugin (nih-plug).
 //!
-// spec: plugins/open-sampler.md, plugins/plugin-formats.md
+// spec: plugins/lemon-sampler.md, plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod dsp;
@@ -264,7 +264,7 @@ pub enum Task {
     Precompute,
 }
 
-pub struct OpenSampler {
+pub struct LemonSampler {
     params: Arc<SamplerParams>,
     shared: Arc<Shared>,
     engine: dsp::Engine,
@@ -275,9 +275,9 @@ pub struct OpenSampler {
     bend: f64,
 }
 
-impl Default for OpenSampler {
+impl Default for LemonSampler {
     fn default() -> Self {
-        OpenSampler {
+        LemonSampler {
             params: Arc::new(SamplerParams::default()),
             shared: Arc::new(Shared::default()),
             engine: dsp::Engine::new(44100.0),
@@ -352,7 +352,7 @@ fn take(engine: &mut dsp::Engine, p: &Processed) {
     engine.file_frames = p.file_frames;
 }
 
-impl OpenSampler {
+impl LemonSampler {
     /// Takes a newer processed sample when the background task has one ready (never blocks).
     fn pick_up_sample(&mut self, ctx: &mut impl ProcessContext<Self>) {
         let want = (self.shared.raw_version.load(Ordering::Acquire), self.params.fx_key(self.shared.tempo(), self.shared.rate()));
@@ -408,8 +408,8 @@ impl OpenSampler {
     }
 }
 
-impl Plugin for OpenSampler {
-    const NAME: &'static str = "Open Sampler";
+impl Plugin for LemonSampler {
+    const NAME: &'static str = "Lemon Sampler";
     const VENDOR: &'static str = "Lemon Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
@@ -450,7 +450,7 @@ impl Plugin for OpenSampler {
         let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
         if !path.is_empty() && path != self.shared.loaded_path() {
             if let Err(e) = self.shared.load(&path, &self.params) {
-                nih_log!("Open Sampler: {e}");
+                nih_log!("Lemon Sampler: {e}");
             }
         } else {
             self.shared.precompute(&self.params);
@@ -515,7 +515,9 @@ impl Plugin for OpenSampler {
     }
 }
 
-impl ClapPlugin for OpenSampler {
+// CLAP id and VST3 class id keep the spelling of the plugin's earlier "Open" name: hosts find saved sessions'
+// plugins by them (spec: plugins/plugin-formats.md, identity).
+impl ClapPlugin for LemonSampler {
     const CLAP_ID: &'static str = "org.openstudio.open-sampler";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's sampler instrument");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
@@ -523,26 +525,26 @@ impl ClapPlugin for OpenSampler {
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::Instrument, ClapFeature::Sampler, ClapFeature::Stereo];
 }
 
-impl Vst3Plugin for OpenSampler {
+impl Vst3Plugin for LemonSampler {
     const VST3_CLASS_ID: [u8; 16] = *b"OpenStudioSamplr";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Instrument, Vst3SubCategory::Sampler];
 }
 
 // Built as a plugin module: the C entry points hosts look for. Linked into Lemon Studio (`linked` feature): only the
-// symbol-free table, so several Open plugins fit in one program (spec: plugins/plugin-formats.md).
+// symbol-free table, so several Lemon plugins fit in one program (spec: plugins/plugin-formats.md).
 #[cfg(not(feature = "linked"))]
-nih_export_clap!(OpenSampler);
+nih_export_clap!(LemonSampler);
 #[cfg(not(feature = "linked"))]
-nih_export_vst3!(OpenSampler);
-os_plugkit::linked_clap_entry!(OpenSampler);
+nih_export_vst3!(LemonSampler);
+os_plugkit::linked_clap_entry!(LemonSampler);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// A plugin at 48 kHz playing a sine of `hz` (half scale), with its parameters' defaults.
-    fn plugin(hz: f64) -> OpenSampler {
-        let mut p = OpenSampler::default();
+    fn plugin(hz: f64) -> LemonSampler {
+        let mut p = LemonSampler::default();
         p.engine.set_rate(48000.0);
         let x: Vec<f32> = (0..48000).map(|i| (2.0 * std::f64::consts::PI * hz * i as f64 / 48000.0).sin() as f32 * 0.5).collect();
         p.engine.sample = Some(Arc::new(Sample { rate: 48000, left: x.clone(), right: x }));
@@ -664,7 +666,7 @@ mod tests {
     // spec: audio/sampler.md "The sample file": the loop is the first loop of the `smpl` chunk, wherever it sits.
     #[test]
     fn the_file_loop_and_format_are_read() {
-        let dir = std::env::temp_dir().join(format!("open-sampler-src-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lemon-sampler-src-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("a.wav");
         std::fs::write(&p, wav(1, 100_001, Some((5, 90_000)))).unwrap();

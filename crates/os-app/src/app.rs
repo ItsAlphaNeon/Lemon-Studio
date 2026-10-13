@@ -682,7 +682,7 @@ pub struct State {
     /// Requests for the plugin host, handled on the next tick: (row, `Plugins::available` index) to create, row to open.
     pub pending_plugin: Option<(usize, usize)>,
     pub pending_open: Option<usize>,
-    /// Samples to load into rows' Open Sampler instances on the next tick (browser send, drops on a rack row).
+    /// Samples to load into rows' Lemon Sampler instances on the next tick (browser send, drops on a rack row).
     pub sample_loads: Vec<(usize, String)>,
     pub file: Option<os_flp::FlpFile>,
     pub path: Option<PathBuf>,
@@ -894,9 +894,9 @@ pub struct App {
     piano_win: Option<Rect>,
     pub(crate) piano_grid: Option<Rect>,
     piano_panel: Option<Rect>,
-    /// Sampler channel rows whose Open Sampler instance could not be created (not retried).
+    /// Sampler channel rows whose Lemon Sampler instance could not be created (not retried).
     sampler_failed: Vec<usize>,
-    /// Mixer slots (`plugins::fx_key`) whose Open Parametric EQ 2 could not start (not retried).
+    /// Mixer slots (`plugins::fx_key`) whose Lemon Parametric EQ 2 could not start (not retried).
     pub(crate) fx_failed: Vec<usize>,
     /// The running plugin scan, and the scan asked for while it runs (spec: ui/plugin-manager.md §4).
     pub(crate) sweep: Option<crate::plugin_scan::Sweep>,
@@ -918,7 +918,7 @@ pub struct App {
 impl App {
     pub fn new(path: Option<PathBuf>) -> App {
         let transport = Transport::new(os_engine::SampleLibrary::default_factory_dir());
-        // Tests keep the old five-channel template; a new session starts with one Open Sampler channel.
+        // Tests keep the old five-channel template; a new session starts with one Lemon Sampler channel.
         #[cfg(test)]
         let project = test_project();
         #[cfg(not(test))]
@@ -1190,7 +1190,7 @@ impl App {
     }
 
     pub(crate) fn save_to(&mut self, target: PathBuf) {
-        // Sampler channels keep their sample in Open Sampler: copy it to the channel so the FLP stores it.
+        // Sampler channels keep their sample in Lemon Sampler: copy it to the channel so the FLP stores it.
         for row in self.state.hosted_rows.clone() {
             if self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler()) {
                 if let Some(p) = self.plugins.sampler_path(row) {
@@ -1314,8 +1314,8 @@ impl App {
         self.save_to(target);
     }
 
-    /// The built-in recreations write their settings into the model as the file's own plugin state: Open Parametric
-    /// EQ 2 into its slots, Open 3x Osc into its channels.
+    /// The built-in recreations write their settings into the model as the file's own plugin state: Lemon Parametric
+    /// EQ 2 into its slots, Lemon 3x Osc into its channels.
     pub(crate) fn store_builtin_states(&mut self) {
         for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
             let (Some((t, k)), Some(st)) = (crate::plugins::fx_of(key), self.plugins.eq_file_state(key)) else { continue };
@@ -1342,12 +1342,12 @@ impl App {
         self.transport.set_effects(Vec::new());
     }
 
-    /// Every sampler channel is played and edited by Open Sampler (owner, 2026-10-10; spec: plugins/open-sampler.md §7):
-    /// a channel without an instance gets one, started from the channel's sample and envelopes. Without Open Sampler
+    /// Every sampler channel is played and edited by Lemon Sampler (owner, 2026-10-10; spec: plugins/lemon-sampler.md §7):
+    /// a channel without an instance gets one, started from the channel's sample and envelopes. Without Lemon Sampler
     /// (plugin not found) sampler channels keep the engine's own sample playback.
     /// With a `deadline` it stops after the instance that passes it; returns whether every sampler row is done.
     fn sync_samplers(&mut self, deadline: Option<std::time::Instant>) -> bool {
-        let Some(index) = self.plugins.index_of(crate::plugins::OPEN_SAMPLER) else { return true };
+        let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) else { return true };
         let mut added = false;
         let mut done = true;
         for row in 0..self.state.project.channels.len() {
@@ -1371,7 +1371,7 @@ impl App {
                 }
                 Err(e) => {
                     self.sampler_failed.push(row);
-                    self.state.message = Some(format!("Open Sampler: {e}"));
+                    self.state.message = Some(format!("Lemon Sampler: {e}"));
                 }
             }
         }
@@ -1404,16 +1404,16 @@ impl App {
         self.loading.is_some() || self.export.is_some()
     }
 
-    /// Mixer slots that hold the project file's parametric EQ are played and edited by Open Parametric EQ 2, started
-    /// from the slot's saved state (spec: plugins/open-parametric-eq-2.md §8). Without the plugin the engine's own EQ
+    /// Mixer slots that hold the project file's parametric EQ are played and edited by Lemon Parametric EQ 2, started
+    /// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
     /// plays them.
     pub(crate) fn sync_effects(&mut self) {
-        use crate::plugins::{fx_key, EQ_FILE_NAME, OPEN_EQ};
+        use crate::plugins::{fx_key, EQ_FILE_NAME, LEMON_EQ};
         // The installed EQ plays these slots instead (`host_native`).
         if crate::project_plugins::native_first() {
             return;
         }
-        let Some(index) = self.plugins.effect_index(OPEN_EQ) else { return };
+        let Some(index) = self.plugins.effect_index(LEMON_EQ) else { return };
         let todo: Vec<(u16, u8, Vec<u8>)> = self
             .state
             .project
@@ -1427,10 +1427,10 @@ impl App {
             return;
         }
         for (t, k, fl) in todo {
-            let st = open_parametric_eq_2::params::plugin_state_from_fl(&fl);
+            let st = lemon_parametric_eq_2::params::plugin_state_from_fl(&fl);
             if let Err(e) = self.plugins.create_effect(t, k, index, Some(&st)) {
                 self.fx_failed.push(fx_key(t, k));
-                self.state.message = Some(format!("{OPEN_EQ}: {e}"));
+                self.state.message = Some(format!("{LEMON_EQ}: {e}"));
             }
         }
         self.transport.set_effects(self.plugins.effects());
@@ -1455,7 +1455,7 @@ impl App {
             // A row hosted this tick already started from its channel's sample.
             if self.state.hosted_rows.contains(&row) && self.plugins.sampler_path(row).as_deref() != Some(path.as_str()) {
                 if !self.plugins.load_sample(row, &path) {
-                    self.state.message = Some(format!("Open Sampler did not take {path}"));
+                    self.state.message = Some(format!("Lemon Sampler did not take {path}"));
                     self.invalidate();
                 }
             }
@@ -2434,7 +2434,7 @@ impl App {
     }
 
     /// A sample dropped on the channel rack at window y `y` (spec: ui/channel-rack.md, New project / drops): onto a
-    /// sampler row it replaces that channel's sample (Open Sampler loads it); elsewhere it adds an Open Sampler channel
+    /// sampler row it replaces that channel's sample (Lemon Sampler loads it); elsewhere it adds a Lemon Sampler channel
     /// named after the file.
     pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
         let s = &mut self.state;
@@ -2452,7 +2452,7 @@ impl App {
         s.selected_channel = row;
         s.rack.select_only(row);
         s.piano.dirty = true;
-        s.message = Some(format!("{} loaded in Open Sampler", stem.unwrap_or_default()));
+        s.message = Some(format!("{} loaded in Lemon Sampler", stem.unwrap_or_default()));
         self.invalidate();
     }
 
@@ -2695,16 +2695,16 @@ impl App {
                     self.swap_builtin_overrides();
                 }
             }
-            // Real native plugins in place of the Open recreations (spec plugins/fruity-abi.md "Opened projects").
+            // Real native plugins in place of the Lemon recreations (spec plugins/fruity-abi.md "Opened projects").
             SAct::Check(k) if k == views::settings::NATIVE_FIRST_CHECK => {
                 let on = !os_native::prefer_native();
                 os_native::set_prefer_native(on);
                 let n = self.swap_builtin_overrides();
                 self.state.message = Some(match (on, n) {
-                    (true, 0) => "Opened projects play their own native plugins, not the Open recreations".into(),
-                    (true, n) => format!("Opened projects play their own native plugins: {n} channels / slots switched from the Open recreations"),
-                    (false, 0) => "Open recreations play their projects' plugins again".into(),
-                    (false, n) => format!("Open recreations play their projects' plugins again: {n} channels / slots switched back"),
+                    (true, 0) => "Opened projects play their own native plugins, not the Lemon recreations".into(),
+                    (true, n) => format!("Opened projects play their own native plugins: {n} channels / slots switched from the Lemon recreations"),
+                    (false, 0) => "Lemon recreations play their projects' plugins again".into(),
+                    (false, n) => format!("Lemon recreations play their projects' plugins again: {n} channels / slots switched back"),
                 });
             }
             // The plugin manager (spec: ui/plugin-manager.md §2).
@@ -4893,7 +4893,7 @@ impl App {
         }
         let s = &mut self.state;
         if s.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
-            // Not hosted yet (just added): Open Sampler starts on the next tick and its window opens then.
+            // Not hosted yet (just added): Lemon Sampler starts on the next tick and its window opens then.
             s.pending_open = Some(i);
             self.sampler_failed.retain(|&r| r != i);
         } else if s.shown(Win::Plugin) && s.plugin_channel == i {
@@ -5096,7 +5096,7 @@ impl App {
     pub(crate) fn plugin_copy(&self, r: usize) -> Option<(usize, Vec<u8>)> {
         let ch = self.state.project.channels.get(r)?;
         let name = match ch.kind {
-            ChannelKind::Sampler | ChannelKind::AudioClip => crate::plugins::OPEN_SAMPLER.to_string(),
+            ChannelKind::Sampler | ChannelKind::AudioClip => crate::plugins::LEMON_SAMPLER.to_string(),
             // A hosted plugin is found by its identity (a wrapped channel's plugin name is the wrapper's).
             ChannelKind::Plugin => {
                 let d = self.plugins.descriptor(r)?;
@@ -5164,9 +5164,9 @@ impl App {
             }
             (0, FILE_SAVE) => self.save(false),
             (0, FILE_EXPORT) => self.export_wav(),
-            // ADD > Sampler: a new Open Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
+            // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Sampler") => {
-                if let Some(index) = self.plugins.index_of(crate::plugins::OPEN_SAMPLER) {
+                if let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
                     self.state.message = crate::plugin_menu::add_generator(self, index, None);
                 }
             }
@@ -5314,7 +5314,7 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
     let row = add_channel(p);
     let ch = &mut p.channels[row];
     ch.kind = ChannelKind::Plugin;
-    // The built-in Open 3x Osc is stored as the file's own 3x Osc.
+    // The built-in Lemon 3x Osc is stored as the file's own 3x Osc.
     ch.plugin = Some(crate::osc3::file_name(name).to_string());
     ch.name = Some(name.to_string());
     row
@@ -5325,14 +5325,14 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
 pub(crate) fn add_channel(p: &mut Project) -> usize {
     let index = p.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let track = (p.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(p));
-    p.channels.push(sampler_channel(index, crate::plugins::OPEN_SAMPLER, track));
+    p.channels.push(sampler_channel(index, crate::plugins::LEMON_SAMPLER, track));
     p.channels.len() - 1
 }
 
-/// A new project (owner's choice, 2026-10-10): one empty sampler channel, played and edited by Open Sampler, on
+/// A new project (owner's choice, 2026-10-10): one empty sampler channel, played and edited by Lemon Sampler, on
 /// insert 1, and pattern 1.
 pub fn default_project() -> Project {
-    template_project(&[crate::plugins::OPEN_SAMPLER])
+    template_project(&[crate::plugins::LEMON_SAMPLER])
 }
 
 /// A one-channel project that plays `path` once from the start (browser sample preview, spec: ui/browser.md §7).
@@ -5488,37 +5488,37 @@ mod tests {
         }
     }
 
-    /// Slots holding the file's parametric EQ get an Open Parametric EQ 2 instance and show its name; adding the EQ
-    /// stores the file's EQ (spec: plugins/open-parametric-eq-2.md §8).
+    /// Slots holding the file's parametric EQ get a Lemon Parametric EQ 2 instance and show its name; adding the EQ
+    /// stores the file's EQ (spec: plugins/lemon-parametric-eq-2.md §8).
     #[test]
     fn parametric_eq_slots_are_hosted() {
-        use crate::plugins::{fx_key, EQ_FILE_NAME, OPEN_EQ};
+        use crate::plugins::{fx_key, EQ_FILE_NAME, LEMON_EQ};
         let mut a = App::new(None);
         a.state.project = test_project();
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
-        let mut fl = open_parametric_eq_2::params::default_state();
-        open_parametric_eq_2::params::set_field(&mut fl, 1, -600);
+        let mut fl = lemon_parametric_eq_2::params::default_state();
+        lemon_parametric_eq_2::params::set_field(&mut fl, 1, -600);
         a.state.project.mixer[2].slots[1] = Some(os_model::SlotPlugin { name: EQ_FILE_NAME.into(), state: fl.clone() });
         a.sync_effects();
         assert!(a.plugins.hosted.contains_key(&fx_key(2, 1)));
-        assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some(OPEN_EQ));
+        assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some(LEMON_EQ));
         assert_eq!(a.plugins.eq_file_state(fx_key(2, 1)), Some(fl));
         // A second pass changes nothing.
         let before = a.plugins.hosted.len();
         a.sync_effects();
         assert_eq!(a.plugins.hosted.len(), before);
-        assert_eq!(crate::plugins::new_slot(OPEN_EQ).state, open_parametric_eq_2::params::default_state());
+        assert_eq!(crate::plugins::new_slot(LEMON_EQ).state, lemon_parametric_eq_2::params::default_state());
     }
 
     /// Writes the toolbar with a live-looking signal to OS_MONITOR_SHOT (a look-and-feel check, not an assertion).
     #[test]
-    fn new_project_is_one_empty_open_sampler() {
+    fn new_project_is_one_empty_lemon_sampler() {
         let p = default_project();
         assert_eq!(p.channels.len(), 1);
         let c = &p.channels[0];
-        assert_eq!((c.kind, c.name.as_deref(), c.sample_path.as_deref(), c.mixer_track), (ChannelKind::Sampler, Some("Open Sampler"), None, 1));
-        // Its starting Open Sampler state names no sample and carries the channel's envelope records.
+        assert_eq!((c.kind, c.name.as_deref(), c.sample_path.as_deref(), c.mixer_track), (ChannelKind::Sampler, Some("Lemon Sampler"), None, 1));
+        // Its starting Lemon Sampler state names no sample and carries the channel's envelope records.
         let st = crate::plugins::sampler_state(c);
         let json = String::from_utf8_lossy(&st[8..]).to_string();
         assert!(json.contains("\"envvol_on\":{\"bool\":false}") && json.contains("\"sample-path\":\"\\\"\\\"\""), "{json}");
@@ -6517,7 +6517,7 @@ mod tests {
         // Double click: the monitor, with a row for each hosted instance.
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
-        let osc = app.plugins.index_of(crate::osc3::OPEN_3X_OSC).unwrap();
+        let osc = app.plugins.index_of(crate::osc3::LEMON_3X_OSC).unwrap();
         app.plugins.create_with(0, osc, None).unwrap();
         click(&mut app, &mut c, r);
         assert!(!app.state.shown(Win::Perf), "one click does nothing");
@@ -6528,7 +6528,7 @@ mod tests {
         assert!(app.state.shown(Win::Perf) && app.state.in_front(Win::Perf));
         let p = &app.state.perf;
         assert_eq!(p.rows.len(), 1);
-        assert_eq!((p.rows[0].name.as_str(), p.rows[0].synth, p.rows[0].voices), ("Open 3x Osc", true, Some(0)));
+        assert_eq!((p.rows[0].name.as_str(), p.rows[0].synth, p.rows[0].voices), ("Lemon 3x Osc", true, Some(0)));
         assert!(app.hits.iter().any(|h| h.action == Action::Perf(PerfAct::Row(0))));
         // Sorting by a header; a second click reverses.
         let h = hit_rect(&app, &Action::Perf(PerfAct::Sort(Col::Plugin)));
@@ -6564,18 +6564,18 @@ mod tests {
         assert!(!app.state.shown(Win::Perf));
     }
 
-    /// An empty project with an Open 3x Osc played from the typing keyboard while the UI ticks, then in a playing
+    /// An empty project with a Lemon 3x Osc played from the typing keyboard while the UI ticks, then in a playing
     /// pattern: the streams keep up (no run of dropouts) and the voices end.
     #[test]
     #[ignore]
-    fn playing_open_3x_osc_keeps_the_audio_going() {
+    fn playing_lemon_3x_osc_keeps_the_audio_going() {
         use std::time::{Duration, Instant};
         use winit::keyboard::KeyCode;
         let mut app = App::new(None);
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
-        let row = add_plugin_channel(&mut app.state.project, crate::osc3::OPEN_3X_OSC);
-        let index = app.plugins.index_of(crate::osc3::OPEN_3X_OSC).unwrap();
+        let row = add_plugin_channel(&mut app.state.project, crate::osc3::LEMON_3X_OSC);
+        let index = app.plugins.index_of(crate::osc3::LEMON_3X_OSC).unwrap();
         app.plugins.create(row, index).unwrap();
         app.state.hosted_rows.push(row);
         app.transport.set_instruments(app.plugins.instruments());
@@ -6678,7 +6678,7 @@ mod tests {
         click(&mut app, &mut c, r0);
         assert!(rows(&app.state).iter().all(|r| r.item != Item::Pattern(1)));
         assert_eq!(crate::playlist::clips(&app.state).len(), n0 + 1);
-        // Plugin database tab: open Generators, drag Open Sampler onto the playlist -> a new channel.
+        // Plugin database tab: open Generators, drag Lemon Sampler onto the playlist -> a new channel.
         app.plugins = crate::plugins::Plugins::builtins();
         app.state.plugdb.rebuild(&app.plugins);
         let r0 = hit_rect(&app, &Action::BrowserTab(2));
@@ -6740,10 +6740,10 @@ mod tests {
         assert!(buf.iter().any(|v| v.abs() > 0.05), "preview is silent");
     }
 
-    /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Open Sampler, never the info
-    /// window (spec: plugins/open-sampler.md §7).
+    /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
+    /// window (spec: plugins/lemon-sampler.md §7).
     #[test]
-    fn audio_clip_channels_use_open_sampler() {
+    fn audio_clip_channels_use_lemon_sampler() {
         let mut app = App::new(None);
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
@@ -6754,11 +6754,11 @@ mod tests {
         let row = app.state.project.channels.len() - 1;
         assert_eq!(app.state.project.channels[row].kind, ChannelKind::AudioClip);
         app.plugin_tick();
-        assert!(app.state.hosted_rows.contains(&row), "Open Sampler hosts the audio clip channel");
+        assert!(app.state.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
         assert_eq!(app.plugins.sampler_path(row).as_deref(), Some(path.as_str()));
         app.toggle_channel_window(row);
         assert!(!app.state.shown(Win::Plugin), "no information window");
-        assert_eq!(app.state.pending_open, Some(row), "Open Sampler's window opens");
+        assert_eq!(app.state.pending_open, Some(row), "Lemon Sampler's window opens");
     }
 
     /// An opened project decodes its samples on worker threads, then starts its samplers behind the progress panel;
@@ -6791,7 +6791,7 @@ mod tests {
         }
         assert!(!app.loading(), "loading ends");
         for &r in &rows {
-            assert!(app.state.hosted_rows.contains(&r), "row {r} has its Open Sampler");
+            assert!(app.state.hosted_rows.contains(&r), "row {r} has its Lemon Sampler");
             assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(wav.as_str()));
         }
         let _ = std::fs::remove_file(&wav);
@@ -7050,7 +7050,7 @@ mod tests {
         app.act(Action::ToggleWin(Win::ChannelRack));
         frame(&mut app, &mut a, None);
 
-        // Name button opens the channel's Open Sampler (a sampler row never shows the info window); the slot selects.
+        // Name button opens the channel's Lemon Sampler (a sampler row never shows the info window); the slot selects.
         let hr = hit_rect(&app, &Action::ChannelSelect(2));
         click(&mut app, &mut a, hr);
         assert_eq!((app.state.pending_open, app.state.selected_channel), (Some(2), 2));
@@ -7115,15 +7115,15 @@ mod tests {
         frame(&mut app, &mut a, None);
 
         // Add channels until the rows overflow: a vertical scroll bar appears. "+" opens the generator menu
-        // (spec: ui/plugin-menu.md §1); Open Sampler adds a sampler channel at the bottom.
+        // (spec: ui/plugin-menu.md §1); Lemon Sampler adds a sampler channel at the bottom.
         app.plugins = crate::plugins::Plugins::builtins();
         app.state.plugdb.rebuild(&app.plugins);
         let n = app.state.project.channels.len();
         for _ in 0..6 {
             let hr = hit_rect(&app, &Action::RackAdd);
             click(&mut app, &mut a, hr);
-            let pick = app.state.playlist.popup.as_ref().and_then(|p| p.items.iter().find(|i| i.label == crate::plugins::OPEN_SAMPLER)).map(|i| i.cmd.clone());
-            crate::playlist::run(&mut app, pick.expect("the generator menu lists Open Sampler"));
+            let pick = app.state.playlist.popup.as_ref().and_then(|p| p.items.iter().find(|i| i.label == crate::plugins::LEMON_SAMPLER)).map(|i| i.cmd.clone());
+            crate::playlist::run(&mut app, pick.expect("the generator menu lists Lemon Sampler"));
             assert!(app.state.playlist.popup.is_none());
             frame(&mut app, &mut a, None);
         }
@@ -8227,7 +8227,7 @@ mod tests {
         assert!(pl::Rows::new(&app.state).strip(1));
     }
 
-    /// Double-clicking an audio clip opens its channel's Open Sampler and selects the channel in the rack; one
+    /// Double-clicking an audio clip opens its channel's Lemon Sampler and selects the channel in the rack; one
     /// click does not; a pattern clip opens its pattern in the piano roll (spec: ui/playlist.md §9, §2b).
     #[test]
     fn audio_clip_double_click_opens_its_sampler() {
@@ -8785,11 +8785,11 @@ mod tests {
         let p = app.state.playlist.popup.as_ref().expect("the toolbar button opens the plugin menu");
         assert!(p.y >= b.bottom(), "under the button");
         let n = app.state.project.channels.len();
-        let osc = pick(&app, crate::osc3::OPEN_3X_OSC).expect("the generators are listed");
+        let osc = pick(&app, crate::osc3::LEMON_3X_OSC).expect("the generators are listed");
         crate::playlist::run(&mut app, osc);
         assert_eq!(app.state.project.channels.len(), n + 1);
         assert_eq!(app.state.selected_channel, n);
-        assert_eq!(app.state.pending_plugin, Some((n, app.plugins.index_of(crate::osc3::OPEN_3X_OSC).unwrap())));
+        assert_eq!(app.state.pending_plugin, Some((n, app.plugins.index_of(crate::osc3::LEMON_3X_OSC).unwrap())));
         // An empty mixer slot's menu lists the effects for that slot.
         let m = crate::mixer::effect_menu(&app.state, 4, 0.0, 0.0);
         assert!(m.items.iter().any(|i| i.cmd == Cmd::Plugin(PlugCmd::Effect { index, slot: Some(4) })));

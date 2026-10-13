@@ -1,7 +1,7 @@
-//! Host link: the private conversation between an "Open" plugin (Open Sampler, ...) and Lemon Studio's plugin window.
+//! Host link: the private conversation between an "Open" plugin (Lemon Sampler, ...) and Lemon Studio's plugin window.
 //!
 //! Lemon Studio draws the frame of every plugin window, including the strip row (page tabs, Misc wrench, Presets, channel
-//! controls). A plain VST only gets the "plug" tab. An Open plugin can instead *join* the strip: it tells the host which
+//! controls). A plain VST only gets the "plug" tab. A Lemon plugin can instead *join* the strip: it tells the host which
 //! pages it has (sample, envelope, ...), the host draws their tabs in the same row as the Misc tab and tells the plugin
 //! which page is active, and the plugin hides its own tab row. A plugin that never receives the hello (another DAW)
 //! keeps drawing its own tabs, so one binary works everywhere.
@@ -10,8 +10,8 @@
 //! using one registered message (`MESSAGE_NAME`), `wparam` = [`Cmd`], `lparam` = argument, result = answer. Both sides
 //! run on the GUI thread of the same process.
 //!
-//! Elsewhere (Linux) the link is in-process: an Open plugin's editor registers a `Peer` under the window the host gave
-//! it, and the host finds it there. The editor runs on a thread of its own, so the peer is shared state. The Open plugins
+//! Elsewhere (Linux) the link is in-process: a Lemon plugin's editor registers a `Peer` under the window the host gave
+//! it, and the host finds it there. The editor runs on a thread of its own, so the peer is shared state. The Lemon plugins
 //! compiled into Lemon Studio share this crate with the app; a copy loaded from a bundle has its own registry and is never
 //! hosted, as in another DAW.
 //!
@@ -159,7 +159,7 @@ mod win {
         })
     }
 
-    /// Host side: a connection to the editor window of an Open plugin.
+    /// Host side: a connection to the editor window of a Lemon plugin.
     #[derive(Debug)]
     pub struct Link {
         editor: isize,
@@ -186,7 +186,7 @@ mod win {
     }
 
     impl Link {
-        /// Looks for an Open plugin's editor among the children of `area` (the window the host gave the plugin) and
+        /// Looks for a Lemon plugin's editor among the children of `area` (the window the host gave the plugin) and
         /// says hello. `None` = an ordinary plugin: show its editor as it is.
         pub fn connect(area: isize) -> Option<Link> {
             let editor = unsafe { GetWindow(area as HWND, GW_CHILD) } as isize;
@@ -328,7 +328,7 @@ mod local {
         QUEUE.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
     }
 
-    /// Host side: a connection to the editor of an Open plugin.
+    /// Host side: a connection to the editor of a Lemon plugin.
     pub struct Link {
         peer: Arc<Peer>,
         pub pages: Vec<PageIcon>,
@@ -342,7 +342,7 @@ mod local {
     }
 
     impl Link {
-        /// Looks for an Open plugin's editor in `area` (the window the host gave the plugin) and says hello. `None` =
+        /// Looks for a Lemon plugin's editor in `area` (the window the host gave the plugin) and says hello. `None` =
         /// an ordinary plugin: show its editor as it is.
         pub fn connect(area: isize) -> Option<Link> {
             let peer = REGISTRY.lock().ok()?.iter().find(|(p, _)| *p == area as u64).and_then(|(_, w)| w.upgrade())?;

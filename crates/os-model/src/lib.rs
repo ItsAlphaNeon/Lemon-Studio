@@ -262,7 +262,7 @@ pub enum ChannelKind {
 
 impl ChannelKind {
     /// Sampler and audio-clip channels: both are sampler channels with a sample (an audio clip channel is a sampler
-    /// with audio-clip defaults; spec: plugins/open-sampler.md §7).
+    /// with audio-clip defaults; spec: plugins/lemon-sampler.md §7).
     pub fn is_sampler(self) -> bool {
         matches!(self, ChannelKind::Sampler | ChannelKind::AudioClip)
     }

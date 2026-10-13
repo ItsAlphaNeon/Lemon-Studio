@@ -1,5 +1,5 @@
 //! Project loading: an opened project's samples are decoded on worker threads, then its sampler channels get their
-//! Open Sampler instances a few per frame, while a progress panel shows and the window takes no input. Opening a
+//! Lemon Sampler instances a few per frame, while a progress panel shows and the window takes no input. Opening a
 //! sampler afterwards never waits for a file.
 //!
 // spec: ui/project-loading.md
@@ -34,7 +34,7 @@ impl Loading {
     /// Starts decoding the sample files of `project`'s sampler channels on worker threads.
     pub fn start(project: &os_model::Project) -> Loading {
         let samplers: Vec<&os_model::Channel> = project.channels.iter().filter(|c| c.kind.is_sampler()).collect();
-        // The paths Open Sampler opens (`plugins::sampler_state`), each once.
+        // The paths Lemon Sampler opens (`plugins::sampler_state`), each once.
         let files: BTreeSet<String> = samplers
             .iter()
             .map(|c| crate::plugins::resolve_sample(c.sample_path.as_deref().unwrap_or("")))

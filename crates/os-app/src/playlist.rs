@@ -1235,7 +1235,7 @@ pub fn resize_right(s: &mut State, i: usize, orig: &Clip, len: u32) {
 pub fn stretch_clip(s: &mut State, i: usize, orig: &Clip, pos: u32, len: u32) -> bool {
     let ClipSource::Channel(ch) = orig.source else { return false };
     let Some(&(_, base)) = s.playlist.stretch_base.iter().find(|b| b.0 == ch) else { return false };
-    // Up to Open Sampler's longest TIME.
+    // Up to Lemon Sampler's longest TIME.
     let beats = (base * f64::from(len) / f64::from(orig.length.max(1))).clamp(1.0 / 192.0, 4096.0);
     if let Some(c) = s.project.channels.iter_mut().find(|c| c.index == ch) {
         c.sound.set_stretch_time(beats);
@@ -2591,7 +2591,7 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             }
         }
         PlDrag::ResizeL { .. } | PlDrag::ResizeR { .. } if !s.playlist.stretch_base.is_empty() => {
-            // Stretched channels: their Open Sampler takes the new stretch settings (§9b).
+            // Stretched channels: their Lemon Sampler takes the new stretch settings (§9b).
             for (ch, _) in std::mem::take(&mut s.playlist.stretch_base) {
                 let Some(row) = s.project.channels.iter().position(|c| c.index == ch) else { continue };
                 app.plugins.set_sampler_stretch(row, &s.project.channels[row].sound);

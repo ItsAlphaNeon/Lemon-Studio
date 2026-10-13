@@ -1,6 +1,6 @@
 [package]
 name = "os-hostlink"
-description = "Lemon Studio host link: how an Open plugin and Lemon Studio's plugin window share the window strip"
+description = "Lemon Studio host link: how a Lemon plugin and Lemon Studio's plugin window share the window strip"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

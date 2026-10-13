@@ -2,7 +2,7 @@
 //! in their own popup windows). Two looks, both measured on FL: the grey **context** menu (right-click menus, menu bar
 //! dropdowns: headers, separators, ticks, shortcuts, submenu arrows) and the dark **list** menu (choice boxes: the
 //! current entry is lit, section headers).
-// spec: ui/menus.md (context look), plugins/open-sampler.md §Menus (list look, item lists)
+// spec: ui/menus.md (context look), plugins/lemon-sampler.md §Menus (list look, item lists)
 
 use os_theme::{Color, Palette};
 

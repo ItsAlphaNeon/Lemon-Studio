@@ -282,7 +282,7 @@ mod tests {
         let (a, b) = (Arc::new(Meter::default()), Arc::new(Meter::default()));
         let t0 = Instant::now();
         let mut p = Perf::default();
-        let list = |a: &Arc<Meter>, b: &Arc<Meter>| vec![src(0, "Open Sampler", a, true), src(1 << 24, "Open Parametric EQ 2", b, false)];
+        let list = |a: &Arc<Meter>, b: &Arc<Meter>| vec![src(0, "Lemon Sampler", a, true), src(1 << 24, "Lemon Parametric EQ 2", b, false)];
         p.read(t0, list(&a, &b));
         assert!(p.rows.iter().all(|r| r.time == 0.0), "no time over the first reading");
         // 5 ms and 1 ms of processing over half a second: 10 000 and 2 000 µs per second.
@@ -290,7 +290,7 @@ mod tests {
         b.add(Duration::from_millis(1));
         a.set_voices(3);
         assert!(p.read(t0 + Duration::from_millis(500), list(&a, &b)));
-        assert_eq!(p.rows[0].name, "Open Sampler", "Time, largest first");
+        assert_eq!(p.rows[0].name, "Lemon Sampler", "Time, largest first");
         assert!((p.rows[0].time - 10_000.0).abs() < 1e-6 && (p.rows[0].share() - 1.0).abs() < 1e-9);
         assert_eq!((p.rows[0].voices, p.rows[1].voices), (Some(3), None));
         // Quieter now: Time falls, Peak and Total stay.
@@ -300,13 +300,13 @@ mod tests {
         assert_eq!(p.rows[0].peak, 0.0);
         // Text sorts A to Z; a second click reverses.
         p.sort_by(Col::Plugin);
-        assert_eq!(p.rows[0].name, "Open Parametric EQ 2");
+        assert_eq!(p.rows[0].name, "Lemon Parametric EQ 2");
         p.sort_by(Col::Plugin);
-        assert_eq!(p.rows[0].name, "Open Sampler");
+        assert_eq!(p.rows[0].name, "Lemon Sampler");
         p.find = "EQ".into();
         assert_eq!(p.shown().len(), 1);
         p.find = "channel 0".into();
-        assert_eq!(p.shown()[0].name, "Open Sampler", "the place is searched too");
+        assert_eq!(p.shown()[0].name, "Lemon Sampler", "the place is searched too");
         // Frozen: the list stays.
         p.freeze = true;
         a.add(Duration::from_millis(50));

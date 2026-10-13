@@ -182,12 +182,12 @@ pub fn run(app: &mut App, c: PlugCmd) -> Option<String> {
 }
 
 /// A new channel for generator `index` (spec §1): at the bottom of the rack, or right below row `after`; selected and
-/// in view. Open Sampler makes an empty sampler channel (hosted on the next tick); any other generator a plugin
+/// in view. Lemon Sampler makes an empty sampler channel (hosted on the next tick); any other generator a plugin
 /// channel hosting it. Its plugin window opens once it is hosted.
 pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
     let d = app.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
-    let sampler = d.name == crate::plugins::OPEN_SAMPLER && crate::project_plugins::is_builtin(&d);
+    let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
     let mut ch = if sampler { crate::app::add_channel(&mut s.project) } else { crate::app::add_plugin_channel(&mut s.project, &d.name) };
     if sampler {
         s.pending_open = Some(ch);
@@ -210,7 +210,7 @@ pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Optio
         let view_h = crate::views::rack::panel(r).h;
         s.rack_scroll = (crate::views::rack::content_h(s) - view_h).max(0.0);
     }
-    sampler.then(|| "Added a sampler channel (Open Sampler)".into())
+    sampler.then(|| "Added a sampler channel (Lemon Sampler)".into())
 }
 
 /// Effect `index` into the selected mixer track (spec §1): slot `slot`, else the first empty one.

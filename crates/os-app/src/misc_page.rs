@@ -4,8 +4,8 @@
 //! to the app as `FrameEvent::Misc`.
 //!
 //! Coordinates in the tables are FL window pixels of the measured Sampler window (568 x 466 with its title bar), the
-//! same frame of reference as Open Sampler's pages: the page's top-left is FL (4, 72).
-// spec: ui/plugin-window.md (Misc tab), plugins/open-sampler.md §9 (Misc page layout)
+//! same frame of reference as Lemon Sampler's pages: the page's top-left is FL (4, 72).
+// spec: ui/plugin-window.md (Misc tab), plugins/lemon-sampler.md §9 (Misc page layout)
 
 use os_theme::{Color, Palette};
 use os_ui::kit::{inst, State as KS};
@@ -15,7 +15,7 @@ use os_ui::{Canvas, Font, Glyph, Rect};
 /// FL x / y of the page's top-left corner.
 const OX: f32 = 4.0;
 const OY: f32 = 72.0;
-/// Page size (the joined Open Sampler editor's size).
+/// Page size (the joined Lemon Sampler editor's size).
 pub const PAGE_W: f32 = 560.0;
 pub const PAGE_H: f32 = 390.0;
 
@@ -192,7 +192,7 @@ pub const CHORDS: &[&str] = &[
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MiscVals {
     pub v: [f32; M::COUNT],
-    /// Root note, fine tuning and "Add to key" reach the sound (sampler channels: Open Sampler plays them).
+    /// Root note, fine tuning and "Add to key" reach the sound (sampler channels: Lemon Sampler plays them).
     pub tuned: bool,
 }
 
@@ -579,7 +579,7 @@ fn key_at(ui: &MiscUi, fx: f32, fy: f32) -> Option<u8> {
     (0..=131).contains(&k).then_some(k as u8)
 }
 
-/// Pixels of vertical drag for a knob's full range (spec: plugins/open-sampler.md §4), and per box step.
+/// Pixels of vertical drag for a knob's full range (spec: plugins/lemon-sampler.md §4), and per box step.
 const KNOB_PX: f32 = 256.0;
 const SPIN_PX: f32 = 8.0;
 
@@ -869,7 +869,7 @@ fn slider_track(c: &mut Canvas, t: &Palette, x0: f32, x1: f32, cy: f32, value: f
     track
 }
 
-/// Root-note keyboard (spec: plugins/open-sampler.md §3.1, same look as Open Sampler's).
+/// Root-note keyboard (spec: plugins/lemon-sampler.md §3.1, same look as Lemon Sampler's).
 fn keyboard(c: &mut Canvas, t: &Palette, root: u8, ui: &MiscUi) {
     let area = rect(KB_X0, KB_X1, KB_RULER, KB_BAR);
     c.push_clip(area);

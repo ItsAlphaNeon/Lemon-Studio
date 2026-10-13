@@ -1225,7 +1225,7 @@ impl Engine {
     }
 
     /// Plays generator-plugin channel `channel` through `inst` (a shared instance that outlives this engine).
-    /// Plugin channels, and sampler channels played by a hosted sampler plugin (Lemon Studio hosts Open Sampler for every
+    /// Plugin channels, and sampler channels played by a hosted sampler plugin (Lemon Studio hosts Lemon Sampler for every
     /// sampler channel): the channel's notes go to `inst` instead of the engine's own sample voices.
     pub fn set_instrument(&mut self, channel: usize, inst: SharedInstrument) {
         if let Some(ch) = self.channels.get_mut(channel) {
@@ -2022,7 +2022,7 @@ impl Engine {
                 if let Some(sh) = t.shape {
                     self.inst_shapes.push((t.channel, sh, 0));
                 }
-                // An audio clip ends at its cut (spec: plugins/open-sampler.md Â§7); notes end with a note off.
+                // An audio clip ends at its cut (spec: plugins/lemon-sampler.md Â§7); notes end with a note off.
                 match t.cut {
                     Some(c) => self.inst_offs.push((c, t.channel, k, true)),
                     None => self.inst_offs.push((t.end.unwrap_or(t.tick + step), t.channel, k, false)),
@@ -3327,7 +3327,7 @@ mod tests {
         assert_eq!(e.take_missed(), 0);
     }
 
-    /// A sampler channel played by a hosted sampler (Lemon Studio's Open Sampler): its notes go to the instrument, the
+    /// A sampler channel played by a hosted sampler (Lemon Studio's Lemon Sampler): its notes go to the instrument, the
     /// engine's own voice for the channel (the empty sampler's tone) stays silent.
     #[test]
     fn sampler_channels_can_be_played_by_an_instrument() {
@@ -3598,7 +3598,7 @@ mod tests {
         assert_eq!(song_notes(&p), vec![(384, Some(484)), (434, Some(484))], "on: the earlier note from the clip start, both cut at its end");
     }
 
-    // spec: plugins/open-sampler.md §7 (playlist clips through a hosted sampler: sample start and choke)
+    // spec: plugins/lemon-sampler.md §7 (playlist clips through a hosted sampler: sample start and choke)
     #[test]
     fn audio_clips_on_instruments_start_late_and_are_choked() {
         use os_model::{Clip, ClipSource};

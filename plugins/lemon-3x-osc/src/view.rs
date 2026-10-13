@@ -1,10 +1,10 @@
-//! Open 3x Osc editor: painting and hit regions (platform independent), built from the `os_ui::kit` widgets and
+//! Lemon 3x Osc editor: painting and hit regions (platform independent), built from the `os_ui::kit` widgets and
 //! Lemon Studio's own drawings (no artwork of the original).
 //!
 //! Coordinates are FL window pixels from the spec tables; the editor is the window minus its 24 px title bar, so
 //! every y is drawn at `y - OY`. Colours are palette roles (`t.s` surface, `t.a` accent, `t.h` highlight, `t.tx`
 //! text) so an imported theme recolours the plugin like the rest of Lemon Studio.
-// spec: plugins/open-3x-osc.md (§1 window, §2 oscillator page, §3 envelope page, §4 hints)
+// spec: plugins/lemon-3x-osc.md (§1 window, §2 oscillator page, §3 envelope page, §4 hints)
 
 use std::f32::consts::{PI, TAU};
 
@@ -15,7 +15,7 @@ use os_ui::{Canvas, Color, Font, Rect};
 
 use crate::params::{AM_BYTE, LFO_SHAPES};
 
-/// Painted size in logical pixels (the original's window minus its title bar; same frame as Open Sampler).
+/// Painted size in logical pixels (the original's window minus its title bar; same frame as Lemon Sampler).
 pub const W: u32 = 568;
 pub const H: u32 = 442;
 /// The editor the host shows: the painted area cropped at (`CROP_X`, `CROP_Y`) without the original's 4 px frame.
@@ -37,7 +37,7 @@ pub const LIME: u32 = 0xb8e04a;
 /// Fader handle centre line.
 pub const RED: u32 = 0xff4040;
 
-/// Envelope targets: knob ring, sub-tab text, graph line (as Open Sampler).
+/// Envelope targets: knob ring, sub-tab text, graph line (as Lemon Sampler).
 pub const TARGET_COLORS: [(u32, u32, u32); 5] = [
     (0x49e3f6, 0x29b5f9, 0x3ec1d8),
     (0x47f49a, 0x40f08c, 0x3bc97e),
@@ -476,7 +476,7 @@ fn osc_page(ui: &mut Ui) {
     inst::label(ui.c, t, 214.0, y(423.0), "PHASE RAND", false);
     let f = Font::light(36, 0);
     let lh = ui.c.line_height(f);
-    ui.c.text_right(f, 548.0, (y(414.0) - lh / 2.0).round(), t.tx(0x6d7a80), "Open 3x Osc");
+    ui.c.text_right(f, 548.0, (y(414.0) - lh / 2.0).round(), t.tx(0x6d7a80), "Lemon 3x Osc");
 }
 
 /// The phase-randomness knob: dark, ticks around it, an orange pointer turning over 300°.
@@ -504,7 +504,7 @@ fn dark_knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, r: f32) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Envelope page (spec §3: Open Sampler's envelope tab without the keyboard)
+// Envelope page (spec §3: Lemon Sampler's envelope tab without the keyboard)
 
 fn panel(ui: &mut Ui, x0: f32, x1: f32, y0: f32, y1: f32) -> Rect {
     let r = rr(x0, x1, y0, y1);
@@ -681,7 +681,7 @@ pub struct EnvGeom {
     pub px: f32,
 }
 
-/// Pixels per full knob in the envelope graph (as Open Sampler).
+/// Pixels per full knob in the envelope graph (as Lemon Sampler).
 pub const ENV_PX: f32 = 90.0;
 
 pub fn env_rect() -> Rect {

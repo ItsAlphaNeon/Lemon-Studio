@@ -99,7 +99,7 @@ and voices, with sorting, find and freeze.
 
 ## 🚧 Built-in instruments and effects
 
-- Open Sampler, Open 3x Osc (a three-oscillator synth) and Open Parametric EQ 2, also available as VST3
+- Lemon Sampler, Lemon 3x Osc (a three-oscillator synth) and Lemon Parametric EQ 2, also available as VST3
   and CLAP bundles for other hosts
 - The sampler plays a project's sample settings (start and length, the sample file's loop, the sample
   effects, the channel filter, declicking) and each note's own pan and filter offsets

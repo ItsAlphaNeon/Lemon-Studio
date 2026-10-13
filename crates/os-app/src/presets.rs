@@ -14,7 +14,7 @@ const MAGIC: &[u8] = b"OSPRESET 1\n";
 /// What a preset was saved from (the header line after the magic).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Header {
-    /// Plugin name as the host shows it ("Open Sampler").
+    /// Plugin name as the host shows it ("Lemon Sampler").
     pub plugin: String,
     /// The plugin's own id (CLAP id / VST3 class id), empty when unknown.
     pub id: String,
@@ -47,7 +47,20 @@ pub fn folder_name(plugin: &str) -> String {
 
 /// The folder of a plugin's presets.
 pub fn dir_for(plugin: &str) -> Option<PathBuf> {
-    root().map(|r| r.join(folder_name(plugin)))
+    root().map(|r| dir_in(&r, plugin))
+}
+
+/// `plugin`'s folder in `root`. A built-in plugin's folder under its earlier "Open" name becomes its folder while it has
+/// none yet, so presets saved before the rename stay listed (spec: plugins/presets.md).
+fn dir_in(root: &Path, plugin: &str) -> PathBuf {
+    let dir = root.join(folder_name(plugin));
+    if let Some((old, _)) = crate::plugins::OLD_NAMES.iter().find(|(_, now)| *now == plugin) {
+        let old = root.join(folder_name(old));
+        if old.is_dir() && !dir.exists() {
+            let _ = std::fs::rename(old, &dir);
+        }
+    }
+    dir
 }
 
 /// The presets in `dir` and its direct sub-folders, sorted by shown name (case-insensitive, folders' presets after
@@ -297,7 +310,7 @@ mod tests {
 
     #[test]
     fn preset_files_round_trip() {
-        let h = Header { plugin: "Open Sampler".into(), id: "org.openstudio.open-sampler".into(), format: "clap".into() };
+        let h = Header { plugin: "Lemon Sampler".into(), id: "org.openstudio.open-sampler".into(), format: "clap".into() };
         let state = b"\x05\0\0\0\0\0\0\0{\"a\"}\n\x00binary";
         let b = encode(&h, state);
         let (h2, s2) = decode(&b).unwrap();
@@ -335,7 +348,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Save, list, step and load through a hosted Open Sampler: the state goes through the hosting layer and back.
+    /// Presets saved under a built-in plugin's earlier "Open" name move to its folder; another plugin's folder stays.
+    #[test]
+    fn old_built_in_folders_are_taken_over() {
+        let root = tmp("old");
+        save(&file_for(&root.join("Open Sampler"), "Kick"), &Header::default(), b"x").unwrap();
+        save(&file_for(&root.join("Open Thing"), "Pad"), &Header::default(), b"x").unwrap();
+        let dir = dir_in(&root, crate::plugins::LEMON_SAMPLER);
+        assert_eq!(dir, root.join("Lemon Sampler"));
+        assert_eq!(list_in(&dir).len(), 1);
+        assert!(!root.join("Open Sampler").exists());
+        assert_eq!(dir_in(&root, "Thing"), root.join("Thing"));
+        assert!(root.join("Open Thing").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Save, list, step and load through a hosted Lemon Sampler: the state goes through the hosting layer and back.
     #[test]
     fn presets_of_a_hosted_plugin() {
         let dir = tmp("hosted");
@@ -344,11 +372,11 @@ mod tests {
         let mut app = crate::app::App::new(None);
         let mut pl = crate::plugins::Plugins::default();
         pl.available = crate::plugins::builtin();
-        let index = pl.index_of(crate::plugins::OPEN_SAMPLER).expect("built in");
+        let index = pl.index_of(crate::plugins::LEMON_SAMPLER).expect("built in");
         pl.create(0, index).unwrap();
         app.plugins = pl;
         let h = header(&app, 0).unwrap();
-        assert_eq!(h.plugin, "Open Sampler");
+        assert_eq!(h.plugin, "Lemon Sampler");
         assert!(h.id.starts_with("clap:"));
         let state = app.plugins.state(0).unwrap();
         // Two presets: the default state, and one with a sample path.

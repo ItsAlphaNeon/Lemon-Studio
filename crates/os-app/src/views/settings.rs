@@ -102,8 +102,8 @@ pub const PLUGINS: usize = 4;
 /// acts on them.
 pub const NATIVE_HOST_CHECK: &str = "Experimental: host installed native plugins";
 /// Shown only while the native host is on: an opened project's native plugins are played by the installed plugins,
-/// never by the built-in Open recreations (spec plugins/fruity-abi.md "Opened projects").
-pub const NATIVE_FIRST_CHECK: &str = "Experimental: real native plugins instead of Open recreations";
+/// never by the built-in Lemon recreations (spec plugins/fruity-abi.md "Opened projects").
+pub const NATIVE_FIRST_CHECK: &str = "Experimental: real native plugins instead of Lemon recreations";
 /// Plugin manager checks (spec: ui/plugin-manager.md §2).
 pub const STARTUP_CHECK: &str = "Find new plugins at startup";
 pub const ERRORS_CHECK: &str = "Rescan plugins with errors";

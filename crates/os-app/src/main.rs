@@ -1203,7 +1203,7 @@ fn main() {
         *p = Some(event_loop.create_proxy());
     }
     os_clap::set_waker(wake_ui);
-    // Open plugins' editors run on threads of their own off Windows and wake the app when they send something.
+    // Lemon plugins' editors run on threads of their own off Windows and wake the app when they send something.
     #[cfg(not(windows))]
     os_hostlink::set_host_waker(wake_ui);
     let mut app = App::new(path);
@@ -1213,7 +1213,7 @@ fn main() {
     if !app.state.midi_inputs.is_empty() && app.state.message.is_none() {
         app.state.message = Some(format!("MIDI input: {}", app.state.midi_inputs.join(", ")));
     }
-    // Plugin menus and dialogs run modal loops on this thread on Windows (elsewhere Open plugins' editors have threads
+    // Plugin menus and dialogs run modal loops on this thread on Windows (elsewhere Lemon plugins' editors have threads
     // of their own).
     let watchdog = stall::Watchdog::new(stall::LATE);
     #[cfg(windows)]

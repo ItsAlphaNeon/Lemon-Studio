@@ -54,7 +54,7 @@ impl VoiceLedger {
         };
     }
 
-    /// The instrument reports its voice ends (an Open plugin, or a CLAP plugin after its first NOTE_END).
+    /// The instrument reports its voice ends (a Lemon plugin, or a CLAP plugin after its first NOTE_END).
     pub fn reports(&self) -> bool {
         self.reports
     }

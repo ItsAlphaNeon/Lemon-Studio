@@ -1,7 +1,7 @@
-//! Open Sampler voices: pitch, loop, declicking, envelopes and LFOs of the five targets, the channel filter, and the
+//! Lemon Sampler voices: pitch, loop, declicking, envelopes and LFOs of the five targets, the channel filter, and the
 //! realtime stretch methods. The played sample itself is built in `fx`.
 //!
-// spec: plugins/open-sampler.md (§5 Sound), audio/sampler-playback.md (pitch, velocity, resampling),
+// spec: plugins/lemon-sampler.md (§5 Sound), audio/sampler-playback.md (pitch, velocity, resampling),
 // spec: audio/channel-envelopes.md (envelope laws), audio/sampler.md (the resampler, the loop, the end of a voice),
 // spec: audio/declick.md (opening and closing fades), audio/channel-filter.md, audio/voice-levels.md
 

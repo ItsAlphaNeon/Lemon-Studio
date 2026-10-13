@@ -405,7 +405,7 @@ pub struct Found {
 const MAX_DEPTH: u32 = 8;
 
 /// The plugin files in the switched-on folders (§4): `.clap` files and `.vst3` bundles or files (a bundle is not searched
-/// inside), then the `native` files; each file once, files of the built-in Open plugins left out.
+/// inside), then the `native` files; each file once, files of the built-in Lemon plugins left out.
 pub fn discover(dirs: &[SearchDir], native: Vec<PathBuf>) -> Vec<Found> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -456,11 +456,12 @@ fn walk(dir: &Path, depth: u32, (clap, vst3): (bool, bool), walked: &mut HashSet
     }
 }
 
-/// A file named like a built-in Open plugin: the built-in copy is used (a second copy in the process would share the
-/// built-in one's editor window class).
+/// A file named like a built-in Lemon plugin, or like one by its earlier "Open" name (same plugin id): the built-in copy
+/// is used (a second copy in the process would share the built-in one's editor window class).
 fn builtin_file(p: &Path) -> bool {
-    let builtin = [crate::plugins::OPEN_SAMPLER, crate::plugins::OPEN_EQ, crate::osc3::OPEN_3X_OSC];
-    p.file_stem().is_some_and(|s| builtin.iter().any(|b| s.eq_ignore_ascii_case(b)))
+    let builtin = [crate::plugins::LEMON_SAMPLER, crate::plugins::LEMON_EQ, crate::osc3::LEMON_3X_OSC];
+    let old = crate::plugins::OLD_NAMES.map(|(old, _)| old);
+    p.file_stem().is_some_and(|s| builtin.iter().chain(&old).any(|b| s.eq_ignore_ascii_case(b)))
 }
 
 /// A file's size and modification time (§4): a VST 3 bundle's module inside it, else the file itself.
@@ -691,9 +692,9 @@ pub fn categories(effects: bool) -> impl Iterator<Item = &'static str> {
 /// A plugin's category (§4): the first category in table order with a matching feature string.
 pub fn category(d: &Descriptor) -> &'static str {
     match d.name.as_str() {
-        n if n == crate::plugins::OPEN_SAMPLER => return "Sampler",
-        n if n == crate::osc3::OPEN_3X_OSC => return "Synth",
-        n if n == crate::plugins::OPEN_EQ => return "EQ",
+        n if n == crate::plugins::LEMON_SAMPLER => return "Sampler",
+        n if n == crate::osc3::LEMON_3X_OSC => return "Synth",
+        n if n == crate::plugins::LEMON_EQ => return "EQ",
         _ => {}
     }
     let feats: Vec<String> = d.features.iter().map(|f| f.trim().to_lowercase()).collect();
@@ -1118,7 +1119,7 @@ mod tests {
     }
 
     /// Discovery (§4): .clap files and .vst3 bundles, recursively, not inside bundles; standard folders only for their
-    /// format; switched-off folders and built-in Open plugin files are skipped.
+    /// format; switched-off folders and built-in Lemon plugin files (also by their earlier "Open" names) are skipped.
     #[test]
     fn discovery_finds_plugin_files() {
         let d = temp("discover");
@@ -1131,7 +1132,8 @@ mod tests {
         w("added/Vendor/Deep/Er/Fx.vst3");
         w("added/Bundle.vst3/Contents/x86_64-win/Bundle.vst3");
         w("added/Bundle.vst3/Contents/x86_64-win/Inner.clap");
-        w("added/Open Sampler.clap");
+        w("added/Lemon Sampler.clap");
+        w("added/Open Parametric EQ 2.vst3/Contents/x86_64-win/Open Parametric EQ 2.vst3");
         w("added/readme.txt");
         w("clap/OnlyClap.clap");
         w("clap/NotHere.vst3");

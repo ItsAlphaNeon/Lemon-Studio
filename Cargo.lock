@@ -1638,6 +1638,55 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
+name = "lemon-3x-osc"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-engine",
+ "os-hostlink",
+ "os-model",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "serde_json",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "lemon-parametric-eq-2"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-engine",
+ "os-hostlink",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "serde_json",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "lemon-sampler"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-dsp",
+ "os-engine",
+ "os-hostlink",
+ "os-model",
+ "os-paths",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "rfd",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2332,55 +2381,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
-name = "open-3x-osc"
-version = "0.0.1"
-dependencies = [
- "nih_plug",
- "os-engine",
- "os-hostlink",
- "os-model",
- "os-plugkit",
- "os-theme",
- "os-ui",
- "serde_json",
- "tiny-skia",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "open-parametric-eq-2"
-version = "0.0.1"
-dependencies = [
- "nih_plug",
- "os-engine",
- "os-hostlink",
- "os-plugkit",
- "os-theme",
- "os-ui",
- "serde_json",
- "tiny-skia",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "open-sampler"
-version = "0.0.1"
-dependencies = [
- "nih_plug",
- "os-dsp",
- "os-engine",
- "os-hostlink",
- "os-model",
- "os-paths",
- "os-plugkit",
- "os-theme",
- "os-ui",
- "rfd",
- "tiny-skia",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "orbclient"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2406,10 +2406,10 @@ version = "0.0.1"
 dependencies = [
  "chrono",
  "cpal",
+ "lemon-3x-osc",
+ "lemon-parametric-eq-2",
+ "lemon-sampler",
  "midir",
- "open-3x-osc",
- "open-parametric-eq-2",
- "open-sampler",
  "os-clap",
  "os-dsp",
  "os-engine",
@@ -2437,9 +2437,9 @@ name = "os-clap"
 version = "0.0.1"
 dependencies = [
  "clap-sys 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lemon-parametric-eq-2",
+ "lemon-sampler",
  "libloading 0.8.9",
- "open-parametric-eq-2",
- "open-sampler",
  "os-engine",
  "os-host",
  "os-model",

@@ -10,7 +10,7 @@ use std::process::Command;
 
 /// (cargo package, library file stem, display name).
 const PLUGINS: &[(&str, &str, &str)] =
-    &[("open-sampler", "open_sampler", "Open Sampler"), ("open-parametric-eq-2", "open_parametric_eq_2", "Open Parametric EQ 2"), ("open-3x-osc", "open_3x_osc", "Open 3x Osc")];
+    &[("lemon-sampler", "lemon_sampler", "Lemon Sampler"), ("lemon-parametric-eq-2", "lemon_parametric_eq_2", "Lemon Parametric EQ 2"), ("lemon-3x-osc", "lemon_3x_osc", "Lemon 3x Osc")];
 
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;

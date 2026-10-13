@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "crates/os-dsp", "tools/flp-dump", "tools/os-render", "tools/os-play", "crates/os-native", "tools/os-native-probe", "crates/os-theme", "crates/os-ui", "crates/os-app", "plugins/open-sampler", "tools/bundle-plugins", "crates/os-clap", "crates/os-hostlink", "crates/os-plugkit", "plugins/open-parametric-eq-2", "crates/os-host", "crates/os-vst3", "plugins/open-3x-osc", "crates/os-paths"]
+members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "crates/os-dsp", "tools/flp-dump", "tools/os-render", "tools/os-play", "crates/os-native", "tools/os-native-probe", "crates/os-theme", "crates/os-ui", "crates/os-app", "plugins/lemon-sampler", "tools/bundle-plugins", "crates/os-clap", "crates/os-hostlink", "crates/os-plugkit", "plugins/lemon-parametric-eq-2", "crates/os-host", "crates/os-vst3", "plugins/lemon-3x-osc", "crates/os-paths"]
 
 [workspace.package]
 version = "0.0.1"

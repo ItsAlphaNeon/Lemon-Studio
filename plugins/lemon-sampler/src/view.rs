@@ -1,9 +1,9 @@
-//! Open Sampler editor: painting and hit regions (platform independent), built from the `os_ui::kit` widgets.
+//! Lemon Sampler editor: painting and hit regions (platform independent), built from the `os_ui::kit` widgets.
 //!
 //! Coordinates are FL window pixels from the spec tables; the editor is the window minus its 24 px title bar, so
 //! every y is drawn at `y - OY`. Colours are palette roles (`t.s` surface, `t.a` accent, `t.h` highlight, `t.tx` text)
 //! so an imported theme recolours the plugin like the rest of Lemon Studio.
-// spec: plugins/open-sampler.md (Look, Layout, Hints, Waveform, Keyboard)
+// spec: plugins/lemon-sampler.md (Look, Layout, Hints, Waveform, Keyboard)
 
 use std::f32::consts::{PI, TAU};
 
@@ -539,7 +539,7 @@ fn waveform(ui: &mut Ui, sv: &SampleView) {
     for gy in [cy - 27.0, cy + 27.0] {
         ui.c.fill_rect(Rect::new(area.x, gy, area.w, 1.0), t.s(0x131516));
     }
-    let wm = "Open Sampler";
+    let wm = "Lemon Sampler";
     let f = Font::light(23, 0);
     let w = ui.c.text_width(f, wm);
     ui.c.text(f, 546.0 - w, y(328.0), t.s(0x484742), wm);

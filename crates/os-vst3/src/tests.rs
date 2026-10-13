@@ -22,12 +22,12 @@ fn module(name: &str) -> Option<Arc<Module>> {
 }
 
 fn sampler() -> Option<(Arc<Module>, os_host::SharedPlugin)> {
-    let m = module("Open Sampler")?;
+    let m = module("Lemon Sampler")?;
     let p = m.clone().create(&m.plugins()[0].id).expect("create");
     Some((m, p))
 }
 
-/// Open Sampler's state with a sample (nih-plug's VST 3 state is its JSON; persisted fields are JSON strings).
+/// Lemon Sampler's state with a sample (nih-plug's VST 3 state is its JSON; persisted fields are JSON strings).
 fn sampler_state(wav: &Path, params: &str) -> Vec<u8> {
     let inner = format!("\"{}\"", wav.to_string_lossy().replace('\\', "\\\\"));
     let path = format!("\"{}\"", inner.replace('\\', "\\\\").replace('"', "\\\""));
@@ -79,22 +79,22 @@ fn finds_bundles_and_single_file_modules() {
 
 #[test]
 fn lists_instrument_and_effect_classes() {
-    let Some(m) = module("Open Sampler") else { return };
+    let Some(m) = module("Lemon Sampler") else { return };
     let d = &m.plugins()[0];
     assert_eq!(m.plugins().len(), 1);
-    assert_eq!(d.name, "Open Sampler");
+    assert_eq!(d.name, "Lemon Sampler");
     assert!(d.is_instrument(), "{:?}", d.features);
     // Its FUID string spells "OpenStudioSamplr" in hex (the module lays the GUID out so that it reads in order).
     assert_eq!(d.uid(), "vst3:4F70656E53747564696F53616D706C72");
     assert!(!d.vendor.is_empty() && !d.version.is_empty());
-    assert_eq!(d.path, bundle("Open Sampler").unwrap());
-    let Some(eq) = module("Open Parametric EQ 2") else { return };
+    assert_eq!(d.path, bundle("Lemon Sampler").unwrap());
+    let Some(eq) = module("Lemon Parametric EQ 2") else { return };
     assert!(eq.plugins()[0].is_effect(), "{:?}", eq.plugins()[0].features);
 }
 
 /// An instrument plays notes, saves its state as a `.vstpreset` and loads it into a second instance.
 #[test]
-fn hosts_open_sampler() {
+fn hosts_lemon_sampler() {
     let Some((m, shared)) = sampler() else { return };
     let mut p = shared.lock().unwrap();
     let wav = tone("os-vst3-test.wav", 4800);
@@ -229,7 +229,7 @@ fn host_objects_follow_the_interfaces() {
 /// An effect in a mixer slot: the default EQ passes the sound through; the main level raises it.
 #[test]
 fn hosts_an_effect() {
-    let Some(m) = module("Open Parametric EQ 2") else { return };
+    let Some(m) = module("Lemon Parametric EQ 2") else { return };
     let shared = m.clone().create(&m.plugins()[0].id).unwrap();
     let mut p = shared.lock().unwrap();
     assert!(p.activate(48000));
@@ -259,7 +259,7 @@ fn automation_is_sample_accurate() {
     use os_engine::HostedEffect;
     use os_host::Plugin as _;
     use vst3_sys::vst::{IParamValueQueue, IParameterChanges};
-    let Some(m) = module("Open Parametric EQ 2") else { return };
+    let Some(m) = module("Lemon Parametric EQ 2") else { return };
     let mut p = Plugin::new(&m, &m.plugins()[0].id).unwrap();
     assert!(p.activate(48000));
     let index = (0..p.param_count()).find(|&i| p.param_info(i).is_some_and(|i| i.name == "Main level")).expect("main level") as u32;
@@ -309,7 +309,7 @@ fn engine_plays_a_pattern() {
         assert!(p.activate(48000));
     }
     let ch = os_model::Channel {
-        index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
+        index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
         enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
         layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
     };
@@ -343,7 +343,7 @@ fn mono_portamento_glides_through_the_tuning_expression() {
     }
     let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 1.0, ..Default::default() };
     let ch = os_model::Channel {
-        index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
+        index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
         enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
         layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc, sound: Default::default(),
     };
@@ -788,7 +788,7 @@ mod window {
     #[test]
     #[ignore = "shows an offscreen window"]
     fn editor_shots() {
-        for (name, setup) in [("Open Sampler", true), ("Open Parametric EQ 2", false)] {
+        for (name, setup) in [("Lemon Sampler", true), ("Lemon Parametric EQ 2", false)] {
             let Some(m) = module(name) else { continue };
             let shared = m.clone().create(&m.plugins()[0].id).unwrap();
             let mut p = shared.lock().unwrap();

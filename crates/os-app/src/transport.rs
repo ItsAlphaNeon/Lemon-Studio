@@ -205,7 +205,7 @@ impl Transport {
                 let latest = latest.clone();
                 let inst = instruments.clone();
                 move || {
-                    // The channels' Open Sampler instances stretch for themselves (spec: audio/time-stretch.md).
+                    // The channels' Lemon Sampler instances stretch for themselves (spec: audio/time-stretch.md).
                     let mut library = SampleLibrary::new(factory);
                     library.resample_stretches = true;
                     audio_thread(rx, s, latest, inst, library)
@@ -1600,7 +1600,7 @@ mod tests {
     }
 
     /// The CPU panel's voices while a pattern plays and after Stop (spec: audio/voices.md §4-§5): the engine's own
-    /// voices (a sampler channel without a hosted instrument) and a hosted Open 3x Osc's are counted; Stop leaves none.
+    /// voices (a sampler channel without a hosted instrument) and a hosted Lemon 3x Osc's are counted; Stop leaves none.
     #[test]
     #[ignore]
     fn stop_ends_every_voice() {
@@ -1611,7 +1611,7 @@ mod tests {
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![note(synth, 48), note(synth, 55), note(own, 60)], ..Default::default() }];
         let mut pl = crate::plugins::Plugins::default();
         pl.available = crate::plugins::builtin();
-        let osc = pl.index_of(crate::osc3::OPEN_3X_OSC).unwrap();
+        let osc = pl.index_of(crate::osc3::LEMON_3X_OSC).unwrap();
         pl.create_with(0, osc, None).unwrap();
         let t = Transport::new(None);
         t.set_instruments(vec![(0, pl.hosted[&0].plugin.clone() as SharedInstrument)]);

@@ -1,11 +1,11 @@
-//! Open Parametric EQ 2 parameters and saved state.
+//! Lemon Parametric EQ 2 parameters and saved state.
 //!
 //! The 36 automatable parameters come in the original's order (7 levels, 7 frequencies, 7 widths, 7 types, 7 orders,
 //! main level). Everything else (options, the spare A/B bank, mute / solo) lives in a copy of the original's 354-byte
 //! saved state (`extra`), persisted with the parameters, so a project's state goes in and comes back out unchanged in
 //! meaning (spec: plugins/parametric-eq-2.md "Saved state").
 //!
-// spec: plugins/parametric-eq-2.md, plugins/open-parametric-eq-2.md (§5 hints, §8 state)
+// spec: plugins/parametric-eq-2.md, plugins/lemon-parametric-eq-2.md (§5 hints, §8 state)
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -1,6 +1,6 @@
-//! Widgets of the EQ look (Open Parametric EQ 2): arc knobs, round buttons, fader slots and handles, band tokens.
+//! Widgets of the EQ look (Lemon Parametric EQ 2): arc knobs, round buttons, fader slots and handles, band tokens.
 //! Greys are palette surface roles; band colours are the caller's (signal colours, like meter reds).
-// spec: plugins/open-parametric-eq-2.md (§2 tokens, §3 faders and knobs, §4 buttons)
+// spec: plugins/lemon-parametric-eq-2.md (§2 tokens, §3 faders and knobs, §4 buttons)
 
 use std::f32::consts::PI;
 

@@ -1,6 +1,6 @@
-//! Open 3x Osc: Lemon Studio's three-oscillator synthesizer as a VST3 / CLAP plugin (nih-plug).
+//! Lemon 3x Osc: Lemon Studio's three-oscillator synthesizer as a VST3 / CLAP plugin (nih-plug).
 //!
-// spec: plugins/open-3x-osc.md, plugins/3x-osc.md, plugins/plugin-formats.md
+// spec: plugins/lemon-3x-osc.md, plugins/3x-osc.md, plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod dsp;
@@ -102,7 +102,7 @@ pub fn block(p: &Osc3Params, bend: f64) -> dsp::Block {
     }
 }
 
-pub struct Open3xOsc {
+pub struct Lemon3xOsc {
     params: Arc<Osc3Params>,
     shared: Arc<Shared>,
     engine: dsp::Engine,
@@ -110,13 +110,13 @@ pub struct Open3xOsc {
     bend: f64,
 }
 
-impl Default for Open3xOsc {
+impl Default for Lemon3xOsc {
     fn default() -> Self {
-        Open3xOsc { params: Arc::new(Osc3Params::default()), shared: Arc::new(Shared::default()), engine: dsp::Engine::new(44100.0), bend: 0.0 }
+        Lemon3xOsc { params: Arc::new(Osc3Params::default()), shared: Arc::new(Shared::default()), engine: dsp::Engine::new(44100.0), bend: 0.0 }
     }
 }
 
-impl Open3xOsc {
+impl Lemon3xOsc {
     fn publish_sounding(&self) {
         let mut bits = [0u64; 2];
         for k in self.engine.sounding() {
@@ -129,8 +129,8 @@ impl Open3xOsc {
     }
 }
 
-impl Plugin for Open3xOsc {
-    const NAME: &'static str = "Open 3x Osc";
+impl Plugin for Lemon3xOsc {
+    const NAME: &'static str = "Lemon 3x Osc";
     const VENDOR: &'static str = "Lemon Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
@@ -197,7 +197,7 @@ impl Plugin for Open3xOsc {
                 NoteEvent::NoteOff { note, voice_id, .. } => self.engine.note_off_id(note, voice_id),
                 NoteEvent::Choke { note, .. } => self.engine.choke(note),
                 NoteEvent::MidiPitchBend { value, .. } => {
-                    // ±2 semitones, as Open Sampler.
+                    // ±2 semitones, as Lemon Sampler.
                     self.bend = f64::from(value * 2.0 - 1.0) * 200.0;
                     blk.bend = self.bend;
                 }
@@ -219,7 +219,9 @@ impl Plugin for Open3xOsc {
     }
 }
 
-impl ClapPlugin for Open3xOsc {
+// CLAP id and VST3 class id keep the spelling of the plugin's earlier "Open" name: hosts find saved sessions'
+// plugins by them (spec: plugins/plugin-formats.md, identity).
+impl ClapPlugin for Lemon3xOsc {
     const CLAP_ID: &'static str = "org.openstudio.open-3x-osc";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's three-oscillator synthesizer");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
@@ -227,18 +229,18 @@ impl ClapPlugin for Open3xOsc {
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::Instrument, ClapFeature::Synthesizer, ClapFeature::Stereo];
 }
 
-impl Vst3Plugin for Open3xOsc {
+impl Vst3Plugin for Lemon3xOsc {
     const VST3_CLASS_ID: [u8; 16] = *b"OpenStudio3xOsc!";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Instrument, Vst3SubCategory::Synth];
 }
 
 // Built as a plugin module: the C entry points hosts look for. Linked into Lemon Studio (`linked` feature): only the
-// symbol-free table, so several Open plugins fit in one program (spec: plugins/plugin-formats.md).
+// symbol-free table, so several Lemon plugins fit in one program (spec: plugins/plugin-formats.md).
 #[cfg(not(feature = "linked"))]
-nih_export_clap!(Open3xOsc);
+nih_export_clap!(Lemon3xOsc);
 #[cfg(not(feature = "linked"))]
-nih_export_vst3!(Open3xOsc);
-os_plugkit::linked_clap_entry!(Open3xOsc);
+nih_export_vst3!(Lemon3xOsc);
+os_plugkit::linked_clap_entry!(Lemon3xOsc);
 
 #[cfg(test)]
 mod tests {

@@ -144,8 +144,8 @@ pub fn put(misc: &mut ChannelMisc, m: M, v: f32) {
     }
 }
 
-/// Open Sampler parameters that play a Misc value (name, plain value): the sampler does root note and fine tuning
-/// itself (spec: plugins/open-sampler.md §9).
+/// Lemon Sampler parameters that play a Misc value (name, plain value): the sampler does root note and fine tuning
+/// itself (spec: plugins/lemon-sampler.md §9).
 pub fn sampler_param(misc: &ChannelMisc, m: M) -> Option<(&'static str, f64)> {
     Some(match m {
         M::Root => ("Root note", f64::from(misc.root)),
@@ -156,7 +156,7 @@ pub fn sampler_param(misc: &ChannelMisc, m: M) -> Option<(&'static str, f64)> {
     })
 }
 
-/// A Misc tab edit of rack row `row`: the channel model, its hosted Open Sampler (root / fine), then playback.
+/// A Misc tab edit of rack row `row`: the channel model, its hosted Lemon Sampler (root / fine), then playback.
 pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
     let Some(ch) = app.state.project.channels.get_mut(row) else { return };
     put(&mut ch.misc, m, v);
