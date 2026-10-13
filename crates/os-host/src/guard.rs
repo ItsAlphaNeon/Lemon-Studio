@@ -419,8 +419,6 @@ mod tests {
         assert_eq!(describe(0xC000_0005), "a memory error");
     }
 
-    /// A panic in Lemon Studio's own code under the guard is still a panic.
-    #[cfg(plugin_guard)]
     /// A runtime error's object: class pointer, then the message as a counted UTF-16 string.
     #[cfg(plugin_guard)]
     #[test]
@@ -443,6 +441,8 @@ mod tests {
         assert_eq!(describe(RUNTIME_ERROR), "a plugin error");
     }
 
+    /// A panic in Lemon Studio's own code under the guard is still a panic.
+    #[cfg(plugin_guard)]
     #[test]
     fn panics_pass_through_the_guard() {
         let m = Module::default();

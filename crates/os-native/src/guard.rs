@@ -80,6 +80,7 @@ mod tests {
         assert_eq!(unsafe { call(bad as *const (), [8, 0, 0, 0, 0, 0]) }, Err(ACCESS_VIOLATION));
     }
 
+    #[cfg(windows)]
     #[test]
     fn a_raised_exception_comes_back_as_an_error() {
         if !contained() {
@@ -97,6 +98,7 @@ mod tests {
     }
 
     /// A runtime error's object: class pointer, then the message as a counted UTF-16 string.
+    #[cfg(windows)]
     #[test]
     fn a_runtime_error_gives_its_message() {
         if !contained() {
