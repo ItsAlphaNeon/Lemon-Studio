@@ -1508,6 +1508,7 @@ impl Engine {
                 continue;
             };
             inst.transport(song);
+            let own_levels = inst.channel_levels(ch.volume as f32, ch.pan as f32);
             // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md Â§2).
             for (off, index, value) in self.params.channel_span(c, 0, n) {
                 inst.param(off, index, value);
@@ -1553,7 +1554,7 @@ impl Engine {
             }
             // A sample that is still playing must not be cut off by the idle tail.
             active |= inst.active();
-            let (gl, gr) = ch.gain(1.0, 0.0);
+            let (gl, gr) = if own_levels { (1.0, 1.0) } else { ch.gain(1.0, 0.0) };
             let out = &mut self.bus[ch.insert];
             for f in 0..n {
                 out[f * 2] += l[f] * gl;

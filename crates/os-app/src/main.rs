@@ -27,6 +27,10 @@ mod rack;
 mod patterns;
 mod perf;
 mod playlist;
+mod plugin_db;
+mod plugin_manager;
+mod plugin_menu;
+mod plugin_scan;
 #[cfg(plugin_windows)]
 mod plugin_window;
 mod plugins;
@@ -414,7 +418,8 @@ impl ApplicationHandler for Shell {
             }
         }
         self.app.plugins.scale = window.scale_factor() as f32;
-        self.app.scan_plugins();
+        // Built-in and cached plugins at once, then a background scan (spec: ui/plugin-manager.md §4).
+        self.app.start_plugins();
         self.window = Some(window);
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16)));
     }
@@ -832,8 +837,7 @@ fn screenshot(args: &[String]) {
     let mut browser_search: Option<String> = None;
     let mut browser_folder: Option<String> = None;
     let mut menu: Option<usize> = None;
-    let mut picker: Option<(bool, usize)> = None;
-    let mut picker_open = false;
+    let mut plugin_menu: Option<plugin_menu::Target> = None;
     let mut settings: Option<usize> = None;
     let mut lane: Option<usize> = None;
     let mut lane_menu = false;
@@ -868,13 +872,13 @@ fn screenshot(args: &[String]) {
             "--browser-search" => browser_search = it.next().cloned(),
             "--browser-folder" => browser_folder = it.next().cloned(),
             "--browser-tab" => browser_tab = it.next().and_then(|v| v.parse().ok()),
-            "--picker" => {
-                picker_open = true;
-                if let Some(v) = it.next() {
-                    // "g2" / "e4": filter by that category
-                    let (k, n) = v.split_at(1);
-                    picker = n.parse().ok().map(|n| (k == "e", n));
-                }
+            // "all" / "gen" / "fx": that plugin menu at the window's centre (spec: ui/plugin-menu.md §5).
+            "--plugin-menu" => {
+                plugin_menu = Some(match it.next().map(String::as_str) {
+                    Some("gen") => plugin_menu::Target::Gen(None),
+                    Some("fx") => plugin_menu::Target::Fx(None),
+                    _ => plugin_menu::Target::All,
+                })
             }
             // Hover at x,y before the frame is captured.
             "--mouse" => {
@@ -969,7 +973,8 @@ fn screenshot(args: &[String]) {
     }
     app.state.rack_roll_view = rack_roll;
     app.state.menu_open = menu;
-    app.state.picker_open = picker_open;
+    // The built-in and cached plugins (no scan).
+    app.load_plugins();
     if let Some(t) = settings {
         app.open_settings(t);
     }
@@ -981,7 +986,10 @@ fn screenshot(args: &[String]) {
     if let Some(i) = lane {
         app.state.piano.lane = piano::Lane::ALL[i.min(piano::Lane::ALL.len() - 1)];
     }
-    app.state.picker_cat = picker;
+    if let Some(target) = plugin_menu {
+        let (w, h) = app.state.screen;
+        app.open_plugin_menu(target, ((w / 2.0).round(), (h / 3.0).round()));
+    }
     if let Some(w) = rack_w {
         app.state.rack_size.0 = w;
     }
@@ -1138,8 +1146,16 @@ fn wake_ui() {
 }
 
 fn main() {
-    app::move_old_settings();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // A plugin scanner process (spec: ui/plugin-manager.md §4): loads one file, prints its plugins, ends.
+    if args.first().map(String::as_str) == Some(plugin_scan::ARG) {
+        plugin_scan::child_main(&args[1..]);
+    }
+    // A child the app starts to try a native plugin before its first load (spec: plugins/fruity-abi.md).
+    if args.first().map(String::as_str) == Some(os_native::check::CHECK_ARG) {
+        os_host::guard::exit(os_native::check::run(&args[1..]));
+    }
+    app::move_old_settings();
     if args.iter().any(|a| a == "--screenshot") {
         screenshot(&args);
         return;

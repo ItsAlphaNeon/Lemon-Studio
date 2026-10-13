@@ -71,6 +71,7 @@ clicking it does nothing.
 | Mixing and routing | ✅ | Mixer tracks, sends, effect slots, meters, polarity and stereo swap, main volume and main pitch; no sidechain inputs yet |
 | Playback engine | 🚧 | Renders whole ticks ahead of the audio device, so edits and busy moments do not leave gaps; cut groups, voice limits, mono and portamento glides; the sampler's closing fades; a fast resampler while playing and the exact one for export; idle plugins are skipped; Stop ends every voice, also in hosted plugins. The CPU panel shows the audio load, the voices playing (the engine's and every plugin's), memory and dropouts, with refresh rates, a frames-per-second view and handle / thread / font counts in its right-click menu; double-clicking it opens the plugin performance monitor (each plugin's processing time, peak, total and voices; sorting, find, freeze). One audio thread: no multi-core mixing yet |
 | Plugin hosting | ✅ | CLAP and VST3 instruments and effects, with their editors and saved state; on Windows a plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio |
+| Plugin management | ✅ | Plugin menus everywhere a plugin is added (F8 lists instruments and effects: an effect goes to the selected mixer track, an instrument to the bottom of the channel rack); a plugin manager in Settings with your own search folders, a background scan at startup (each file is tried in a separate scanner process, so a broken plugin cannot take Lemon Studio down), favourites, hidden plugins, and one menu entry per plugin installed as both VST3 and CLAP (your preferred format wins). VST2 is not hosted yet |
 | Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ so far |
 | Exporting audio | 🚧 | Song or pattern to a WAV file (32-bit float); no MP3 or FLAC yet |
 | Project files | 🚧 | Opens and saves `.flp` projects from the latest FL Studio 26 only (older versions are on the roadmap; a project in the layout used before version 24.2 is refused with a dialog that explains how to re-save it); early, always keep backups |
@@ -153,7 +154,7 @@ Windows (or detach, from their window menu). A few things differ from Windows fo
 - **Settings, themes and presets** live in `$XDG_CONFIG_HOME/Lemon Studio` (usually `~/.config/Lemon Studio`);
   on Windows in `%APPDATA%\Lemon Studio`. `OPENSTUDIO_USER_DIR` overrides the folder.
 - Plugins are found in `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap` and `CLAP_PATH`, and in `~/.vst3`,
-  `/usr/lib/vst3` and `/usr/local/lib/vst3`.
+  `/usr/lib/vst3` and `/usr/local/lib/vst3`, plus any folder added in Settings > Plugins.
 
 To install the app with its icon and menu entry (the desktop entry also names the icon under native Wayland):
 
@@ -198,7 +199,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-clap`](crates/os-clap) | CLAP plugin host |
 | [`os-vst3`](crates/os-vst3) | VST3 plugin host |
 | [`os-hostlink`](crates/os-hostlink) | Host link protocol between Lemon Studio and its own plugins |
-| [`os-native`](crates/os-native) | Experimental host for plugins built on a third-party native plugin SDK (Windows only) |
+| [`os-native`](crates/os-native) | Experimental host for plugins built on a third-party native plugin SDK (Windows only): effects and generators (voices, note levels, tempo ticks); each plugin is tried in a child process before its first load, and a plugin error bypasses that plugin instead of ending the app |
 | [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of Lemon Studio's own plugins |
 | [`os-paths`](crates/os-paths) | Where Lemon Studio keeps its settings, themes and presets on each platform |
 | [`open-sampler`](plugins/open-sampler) | Open Sampler instrument (VST3 + CLAP) |

@@ -116,7 +116,7 @@ const FILE: &[Item] = &[
 const EDIT: &[Item] = &[it("Undo", "Ctrl+Z")];
 
 const ADD_PLUGINS: &[Item] = &[
-    it("More plugins...", ""),
+    it("More plugins...", "").on(),
     SEP,
     head("Channel"),
     it("Sampler", "").on(),
@@ -137,7 +137,7 @@ const ADD_OTHER: &[Item] = &[
     it("Browse all installed plugins", ""),
     it("Browse presets", ""),
     SEP,
-    it("Refresh plugin list (fast scan)", ""),
+    it("Refresh plugin list (fast scan)", "").on(),
     it("Manage plugins", ""),
     SEP,
     it("Automation for last tweaked parameter", ""),

@@ -1,11 +1,12 @@
-//! Hosted plugins (any format, through the `os-host` layer): scanning, one instance per plugin channel or mixer slot,
-//! their windows, and the instrument / effect lists the transport plays.
+//! Hosted plugins (any format, through the `os-host` layer): the plugins known (built in, and found by the plugin scan,
+//! `plugin_db` / `plugin_scan`), one instance per plugin channel or mixer slot, their windows, and the instrument /
+//! effect lists the transport plays.
 //!
-// spec: plugins/plugin-formats.md (hosting, where to find plugins, Open Sampler state), ui/plugin-window.md,
-// plugins/host-link.md (Open plugins join the window strip)
+// spec: plugins/plugin-formats.md (hosting, Open Sampler state), ui/plugin-manager.md §4 (scan results, loading for
+// use), ui/plugin-window.md, plugins/host-link.md (Open plugins join the window strip)
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use os_host::{Descriptor, Library, SharedPlugin};
@@ -14,7 +15,7 @@ use os_engine::{SharedEffect, SharedInstrument};
 #[cfg(plugin_windows)]
 use crate::plugin_window::{ChannelInfo, FrameEvent, FrameWindow};
 
-/// A plugin offered in the picker.
+/// A plugin the host knows (offered in the plugin menus unless hidden or combined away).
 #[derive(Clone)]
 pub struct Available {
     pub lib: Arc<dyn Library>,
@@ -114,26 +115,15 @@ pub struct Plugins {
     pub detach_new: bool,
     /// The preset file each instance last loaded or saved (spec: plugins/presets.md), by `hosted` key.
     pub presets: BTreeMap<usize, PathBuf>,
+    /// Plugins (uids) whose file the last scan no longer found: not listed, kept so indices stay valid.
+    pub missing: HashSet<String>,
+    /// The file and stamp each found plugin was listed from (uid -> path, size, time): an unchanged file keeps its
+    /// library (and a library loaded for use stays loaded).
+    stamps: HashMap<String, (String, u64, u64)>,
     rate: u32,
-}
-
-/// Folders searched for plugin files: a format's standard folders (`standard`), then `bundled/` next to the build
-/// folders of this workspace (where `cargo run -p bundle-plugins` puts Lemon Studio's own plugins).
-fn search_dirs(standard: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut dirs = standard;
-    if let Ok(exe) = std::env::current_exe() {
-        // target*/release/lemonstudio.exe -> target*/bundled, and the sibling build folders.
-        if let Some(target) = exe.parent().and_then(|p| p.parent()) {
-            dirs.push(target.join("bundled"));
-            if let Some(ws) = target.parent() {
-                for t in ["target", "target-dev"] {
-                    dirs.push(ws.join(t).join("bundled"));
-                }
-            }
-        }
-    }
-    dirs.dedup();
-    dirs
+    /// Verdicts of the one-time child-process check a native plugin passes before its first load here (spec:
+    /// plugins/fruity-abi.md "Crash containment"). `None`: no check (tests, where this program is the test harness).
+    native_checks: Option<os_native::check::Checks>,
 }
 
 /// Open Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
@@ -169,24 +159,51 @@ fn linked(cell: &OnceLock<Option<Arc<os_clap::Library>>>, entry: *const std::ffi
     lib.iter().flat_map(|l| l.plugins.iter().map(|d| Available { lib: l.clone(), desc: d.clone() })).collect()
 }
 
-/// One plugin format's files in its search folders, and how to load one.
-type Scan = (Vec<PathBuf>, fn(&std::path::Path) -> Result<Arc<dyn Library>, String>);
+/// Loads plugin file `path` of `format` under the crash guard (spec: plugins/plugin-formats.md, "Crash containment").
+pub fn load_file(path: &Path, format: os_host::Format) -> Result<Arc<dyn Library>, String> {
+    let load = || -> Result<Arc<dyn Library>, String> {
+        match format {
+            os_host::Format::Clap => os_clap::Library::load(path).map(|l| l as Arc<dyn Library>),
+            os_host::Format::Vst3 => os_vst3::Module::load(path).map(|l| l as Arc<dyn Library>),
+            os_host::Format::Native => os_native::NativeLibrary::load(path).map(|l| l as Arc<dyn Library>),
+        }
+    };
+    os_host::guard::catch(load).unwrap_or_else(|c| Err(format!("{}: crashed while loading ({})", path.display(), os_host::guard::describe(c))))
+}
 
-/// The plugin files of every hosted format (spec: plugins/vst3-hosting.md §2). The user's installed
-/// FL native plugins are included only when the experimental native host is opted into
-/// (`os_native::enabled()`, Settings > File or `OPENSTUDIO_NATIVE=1`): they are loaded through an
-/// unverified interop path (spec plugins/fruity-abi.md), so they stay off by default.
-fn plugin_files() -> Vec<Scan> {
-    let mut scans: Vec<Scan> = vec![
-        (os_clap::find_files(&search_dirs(os_clap::standard_dirs())), |p| os_clap::Library::load(p).map(|l| l as Arc<dyn Library>)),
-        (os_vst3::find_bundles(&search_dirs(os_vst3::standard_dirs())), |p| os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>)),
-    ];
-    if os_native::enabled() {
-        // Effects only: native generators are not offered in the UI yet (some abort on load; their
-        // output level is not yet right). An in-process native crash would take the app down.
-        scans.push((os_native::effect_dll_files(), |p| os_native::NativeLibrary::load(p).map(|l| l as Arc<dyn Library>)));
+/// The installed native plugin files (generators and effects), when the experimental native host is opted into
+/// (`os_native::enabled()`, Settings > Plugins or `OPENSTUDIO_NATIVE=1`): they are loaded through an unverified
+/// interop path (spec plugins/fruity-abi.md), so they stay off by default. Each is tried in a child process before
+/// its first load here (`Plugins::native_check`).
+pub fn native_files() -> Vec<PathBuf> {
+    if os_native::enabled() { os_native::dll_files() } else { Vec::new() }
+}
+
+/// A plugin file known from the scan cache: lists the cached plugins without loading the file, and loads it the first
+/// time an instance is created (spec: ui/plugin-manager.md §4, "Loading for use").
+struct LazyLibrary {
+    path: PathBuf,
+    format: os_host::Format,
+    plugins: Vec<Descriptor>,
+    real: OnceLock<Result<Arc<dyn Library>, String>>,
+}
+
+impl Library for LazyLibrary {
+    fn path(&self) -> &Path {
+        &self.path
     }
-    scans
+
+    fn plugins(&self) -> &[Descriptor] {
+        &self.plugins
+    }
+
+    fn create(self: Arc<Self>, id: &str) -> Result<SharedPlugin, String> {
+        let real = self.real.get_or_init(|| load_file(&self.path, self.format)).clone()?;
+        if !real.plugins().iter().any(|d| d.id == id) {
+            return Err(format!("{} no longer offers this plugin: scan for plugins again", self.path.display()));
+        }
+        real.create(id)
+    }
 }
 
 /// A format's name as the UI shows it.
@@ -198,61 +215,92 @@ pub fn format_name(f: os_host::Format) -> &'static str {
     }
 }
 
-/// Picker labels of found plugins: the name, plus the format when plugins of other formats have the same name.
-fn labels(list: &[Available]) -> Vec<String> {
-    list.iter()
-        .map(|a| {
-            let twin = list.iter().any(|b| b.desc.name == a.desc.name && b.desc.format != a.desc.format);
-            if twin { format!("{} ({})", a.desc.name, format_name(a.desc.format)) } else { a.desc.name.clone() }
-        })
-        .collect()
-}
-
 impl Plugins {
-    /// The built-in Open Sampler, then the plugin folders' instruments (first file wins for a plugin id). Files of the
-    /// built-in plugins are skipped (any format): a second copy in the process would share the built-in one's editor
-    /// window class.
-    pub fn scan() -> Plugins {
-        let mut available: Vec<Available> = builtin();
-        let mut effects: Vec<Available> = builtin_effects();
-        let files = plugin_files().into_iter().flat_map(|(files, load)| files.into_iter().map(move |f| (f, load)));
-        for (f, load) in files.filter(|(f, _)| f.file_stem().is_none_or(|s| s != OPEN_SAMPLER && s != OPEN_EQ && s != crate::osc3::OPEN_3X_OSC)) {
-            // A plugin file that crashes while it is loaded is left out (spec: plugins/plugin-formats.md, "Crash containment").
-            let loaded = os_host::guard::catch(|| load(&f)).unwrap_or_else(|c| Err(format!("{}: crashed while loading ({})", f.display(), os_host::guard::describe(c))));
-            match loaded {
-                Ok(lib) => {
-                    for d in lib.plugins().iter() {
-                        let list = if d.is_instrument() {
-                            &mut available
-                        } else if d.is_effect() {
-                            &mut effects
-                        } else {
-                            continue;
-                        };
-                        if !list.iter().any(|a| a.desc.uid() == d.uid()) {
-                            list.push(Available { lib: lib.clone(), desc: d.clone() });
-                        }
-                    }
+    /// The built-in plugins only (what the app knows before the scan cache is read).
+    pub fn builtins() -> Plugins {
+        let native_checks = (!cfg!(test)).then(|| os_native::check::Checks::load(os_paths::user_file(NATIVE_CHECKS)));
+        Plugins { available: builtin(), effects: builtin_effects(), scale: 1.0, native_checks, ..Plugins::default() }
+    }
+
+    /// Takes a scan's results (spec: ui/plugin-manager.md §4, "Results"): plugins new to this run are appended, so the
+    /// indices the lists, channels and slots use stay valid for the whole run; a plugin whose file changed gets a new
+    /// lazily loaded library; plugins no longer found are marked missing (not listed). The first file wins for a
+    /// plugin id. Built-in plugins are never replaced.
+    pub fn merge(&mut self, cache: &crate::plugin_db::Cache) {
+        let builtin: HashSet<String> = self.available.iter().chain(&self.effects).filter(|a| crate::project_plugins::is_builtin(&a.desc)).map(|a| a.desc.uid()).collect();
+        let mut seen: HashSet<String> = builtin.clone();
+        for f in cache.files.iter().filter(|f| f.status == crate::plugin_db::Status::Ok) {
+            let Some(format) = os_host::Format::parse(&f.format) else { continue };
+            let path = PathBuf::from(&f.path);
+            let descs: Vec<Descriptor> = f.plugins.iter().map(|r| r.descriptor(format, &path)).collect();
+            let lib: Arc<dyn Library> = Arc::new(LazyLibrary { path: path.clone(), format, plugins: descs.clone(), real: OnceLock::new() });
+            for d in descs {
+                let uid = d.uid();
+                let list = match d.kind {
+                    os_host::Kind::Instrument => &mut self.available,
+                    os_host::Kind::Effect => &mut self.effects,
+                    os_host::Kind::Other => continue,
+                };
+                if !seen.insert(uid.clone()) {
+                    continue;
                 }
-                Err(e) => eprintln!("plugin scan: {e}"),
+                let stamp = (f.path.clone(), f.size, f.modified);
+                match list.iter().position(|a| a.desc.uid() == uid) {
+                    Some(i) if self.stamps.get(&uid) == Some(&stamp) && list[i].desc == d => {}
+                    Some(i) => list[i] = Available { lib: lib.clone(), desc: d },
+                    None => list.push(Available { lib: lib.clone(), desc: d }),
+                }
+                self.stamps.insert(uid, stamp);
             }
         }
-        effects.sort_by_key(|a| a.desc.name.to_lowercase());
+        self.missing = self.available.iter().chain(&self.effects).map(|a| a.desc.uid()).filter(|u| !seen.contains(u)).collect();
         if std::env::var_os("OS_DEBUG").is_some() {
-            let native = effects.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
-            eprintln!("[plugins] {} instruments, {} effects ({native} native)", available.len(), effects.len());
+            eprintln!("[plugins] {} instruments, {} effects, {} missing", self.available.len(), self.effects.len(), self.missing.len());
         }
-        Plugins { available, effects, scale: 1.0, ..Plugins::default() }
     }
 
-    /// Picker labels of the instruments (`labels`), in `available` order.
-    pub fn names(&self) -> Vec<String> {
-        labels(&self.available)
+    /// Native plugins load into this process only once a child process tried them (`os_native::check`): one that
+    /// crashes, hangs or stops with an error there is refused with the reason.
+    fn native_check(&mut self, desc: &Descriptor) -> Result<(), String> {
+        if desc.format != os_host::Format::Native {
+            return Ok(());
+        }
+        let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return Ok(()) };
+        match checks.verdict(&program, &desc.path) {
+            os_native::check::Verdict::Works => Ok(()),
+            os_native::check::Verdict::Fails(why) => Err(format!("{} can't load ({why})", desc.name)),
+        }
     }
 
-    /// Picker labels of the effects, in `effects` order.
-    pub fn effect_names(&self) -> Vec<String> {
-        labels(&self.effects)
+    /// Whether effect `index` can be created without waiting: anything but a native effect whose check has not run
+    /// yet. That check is started in the background; ask again on a later tick.
+    pub fn effect_ready(&mut self, index: usize) -> bool {
+        let path = self.effects.get(index).filter(|a| a.desc.format == os_host::Format::Native).map(|a| a.desc.path.clone());
+        path.is_none_or(|p| self.native_ready(&p))
+    }
+
+    /// `effect_ready` for instrument `index` (of `available`).
+    pub fn instrument_ready(&mut self, index: usize) -> bool {
+        let path = self.available.get(index).filter(|a| a.desc.format == os_host::Format::Native).map(|a| a.desc.path.clone());
+        path.is_none_or(|p| self.native_ready(&p))
+    }
+
+    fn native_ready(&mut self, dll: &std::path::Path) -> bool {
+        let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return true };
+        checks.ready(&program, dll)
+    }
+
+    /// The built-in plugins plus every plugin file in the standard folders, scanned in this process at once (tests).
+    #[cfg(test)]
+    pub fn scan() -> Plugins {
+        use crate::plugin_db as db;
+        let prefs = db::Prefs::default();
+        let found = db::discover(&db::search_dirs(&prefs), native_files());
+        let scan = |p: &Path, f: os_host::Format| crate::plugin_scan::scan_here(p, f);
+        let cache = db::sweep(&found, &db::Cache::default(), db::Mode::All, false, 1, &scan, &|_, _, _| {});
+        let mut pl = Plugins::builtins();
+        pl.merge(&cache);
+        pl
     }
 
     /// Creates an instance of available plugin `index` for rack row `row` and activates it at the device rate.
@@ -263,6 +311,7 @@ impl Plugins {
     /// `create` with a starting state (the plugin's own saved state format).
     pub fn create_with(&mut self, row: usize, index: usize, state: Option<&[u8]>) -> Result<String, String> {
         let a = self.available.get(index).ok_or("no such plugin")?.clone();
+        self.native_check(&a.desc)?;
         let plugin = a.lib.clone().create(&a.desc.id)?;
         let mut p = plugin.lock().map_err(|_| "plugin busy")?;
         if let Some(st) = state {
@@ -291,6 +340,7 @@ impl Plugins {
         let a = self.effects.get(index).ok_or("no such effect")?.clone();
         let key = fx_key(track, slot);
         self.drop_key(key);
+        self.native_check(&a.desc)?;
         let plugin = a.lib.clone().create(&a.desc.id)?;
         let mut p = plugin.lock().map_err(|_| "plugin busy")?;
         if let Some(st) = state {
@@ -365,10 +415,9 @@ impl Plugins {
             .collect()
     }
 
-    /// Index of the available plugin called `name`.
+    /// Index of the available plugin called `name` (the built-in plugins come first).
     pub fn index_of(&self, name: &str) -> Option<usize> {
-        // A picker label first (it names the format of a plugin found in several), then the plain name.
-        labels(&self.available).iter().position(|l| l == name).or_else(|| self.available.iter().position(|a| a.desc.name == name))
+        self.available.iter().position(|a| a.desc.name == name)
     }
 
     /// Index of the effect plugin called `name`.
@@ -847,6 +896,8 @@ pub fn new_slot(name: &str) -> os_model::SlotPlugin {
         os_model::SlotPlugin { name: name.into(), state: Vec::new() }
     }
 }
+/// File (in the user folder) remembering which native plugins passed the child-process check.
+const NATIVE_CHECKS: &str = "native-checks.txt";
 /// The sampler parameter a note's sample start modulates per note (Open Sampler's START OFFSET).
 const SAMPLE_START: &str = "Sample start offset";
 
@@ -1970,9 +2021,7 @@ mod tests {
             rate: 48000,
             ..Plugins::default()
         };
-        assert_eq!(pl.names(), ["Open Sampler (CLAP)", "Open Sampler (VST3)"]);
-        assert_eq!(pl.index_of("Open Sampler (VST3)"), Some(1));
-        assert_eq!(pl.index_of("Open Sampler"), Some(0), "a plain name still finds the first");
+        assert_eq!(pl.index_of("Open Sampler"), Some(0), "a name finds the first");
         pl.create(0, 1).unwrap();
         let d = pl.descriptor(0).unwrap();
         assert_eq!(d.format, os_host::Format::Vst3);
@@ -2139,14 +2188,214 @@ mod tests {
         }
     }
 
-    /// With the experimental native host opted in, the scan offers the user's installed FL native
-    /// effects in the effect picker (spec plugins/fruity-abi.md). Skips when FL is not installed.
-    /// Ignored in the default run: it mutates the process `OPENSTUDIO_NATIVE` env var, which is
-    /// unsound to do while other parallel tests read the environment. Run with
-    /// `cargo test -p os-app native_effects_listed_when_opted_in -- --ignored`.
+    /// One installed native effect (`OS_NATIVE_ONE=<folder name>`) through the app's whole path: created and
+    /// activated at the device rate, rendered on an audio thread while its editor is open, state saved and restored,
+    /// closed and dropped. Loads FL DLLs in-process, so ignored; run once per plugin in its own process:
+    /// `OS_NATIVE_ONE="Fruity Balance" cargo test -p os-app --bin lemonstudio native_effect_lifecycle -- --ignored`.
     #[test]
     #[ignore]
-    fn native_effects_listed_when_opted_in() {
+    fn native_effect_lifecycle() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
+        let fl = os_native::default_fl_dir();
+        let dll = os_native::find_plugin(&fl, &name).expect("plugin installed");
+        let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
+        let a = Available { desc: lib.plugins()[0].clone(), lib };
+        let mut pl = Plugins { scale: 1.0, rate: 48000, effects: vec![a], ..Plugins::default() };
+        let key = fx_key(1, 0);
+        eprintln!("STEP create");
+        if let Err(e) = pl.create_effect(1, 0, 0, None) {
+            eprintln!("RESULT refused: {e}");
+            return;
+        }
+        let fx = pl.effects()[0].2.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let audio = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let (mut l, mut r) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+                let mut n = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
+                        *a = ((n + i as u64) as f32 * 0.05).sin() * 0.5;
+                        *b = *a;
+                    }
+                    fx.lock().unwrap().process_fx(48000, &mut l, &mut r);
+                    n += 512;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                l.iter().chain(&r).all(|s| s.is_finite())
+            })
+        };
+        eprintln!("STEP window");
+        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        match pl.open_window(key, info) {
+            Ok(()) => {
+                let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+                unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+                pump(&mut pl, 700);
+            }
+            Err(e) => eprintln!("STEP no window: {e}"),
+        }
+        eprintln!("STEP state");
+        let st = pl.state(key).unwrap_or_default();
+        pl.set_state(key, &st);
+        eprintln!("STEP close");
+        pl.close_if_open(key);
+        pump(&mut pl, 100);
+        stop.store(true, Ordering::Relaxed);
+        let finite = audio.join().unwrap();
+        eprintln!("STEP drop");
+        pl.drop_key(key);
+        eprintln!("RESULT ok (state {} bytes, finite output {finite})", st.len());
+    }
+
+    /// One installed native generator (`OS_NATIVE_ONE=<folder name>`) added from the channel rack's Add one ▸ menu with
+    /// the native host opted in (a mixer slot's effect list offers the native effects the same way): the next ticks
+    /// create it on the new channel, and an export of a pattern with one C5 on that channel has the note at its pitch,
+    /// centred (spec plugins/fruity-abi.md, "Voices"). Loads FL DLLs in-process and sets `OPENSTUDIO_NATIVE`, so
+    /// ignored; run in its own process:
+    /// `OS_NATIVE_ONE="Harmor" cargo test -p os-app --bin lemonstudio native_generator_from_the_rack_menu -- --ignored`.
+    /// The test process may then crash while it exits: some plugins fail in their own shutdown once the thread that
+    /// created them has ended (here the test's thread; the app creates them on its main thread, spec "Threads").
+    #[test]
+    #[ignore]
+    fn native_generator_from_the_rack_menu_plays_in_an_export() {
+        let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
+        // SAFETY: test-only, run alone; `OPENSTUDIO_NATIVE` is read only by the scan.
+        unsafe { std::env::set_var("OPENSTUDIO_NATIVE", "1") };
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        a.plugins = Plugins::scan();
+        a.state.plugdb.rebuild(&a.plugins);
+        use crate::plugin_menu::PlugCmd;
+        let fx = a.plugins.effects.iter().position(|e| e.desc.format == os_host::Format::Native).expect("a native effect");
+        let fx_menu = crate::mixer::effect_menu(&a.state, 0, 0.0, 0.0);
+        let fx_cmd = crate::playlist::Cmd::Plugin(PlugCmd::Effect { index: fx, slot: Some(0) });
+        assert!(fx_menu.items.iter().any(|it| it.cmd == fx_cmd), "slot menu lists it");
+        let pick = a.plugins.available.iter().position(|x| x.desc.name == name).expect("the plugin is found");
+        let add = crate::rack::add_one_items(&a.state).into_iter().find(|it| it.label == name).expect("Add one lists it");
+        assert!(add.cmd == crate::playlist::Cmd::Plugin(PlugCmd::Generator { index: pick, after: None }));
+        let row = a.state.project.channels.len();
+        crate::playlist::run(&mut a, add.cmd);
+        assert_eq!(a.state.pending_plugin, Some((row, pick)));
+        for _ in 0..100 {
+            a.tick();
+            if a.state.pending_plugin.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(a.state.hosted_rows.contains(&row), "hosted: {:?}", a.state.message);
+        assert_eq!(a.plugins.descriptor(row).map(|d| d.format), Some(os_host::Format::Native));
+        eprintln!("MESSAGE {:?}", a.state.message);
+        // One C5 at velocity 100, a beat long, on the new channel.
+        let channel = a.state.project.channels[row].index;
+        a.state.project.patterns[0].notes = vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(channel, 0) }];
+        let path = std::env::temp_dir().join(format!("openstudio-native-gen-{}.wav", std::process::id()));
+        a.transport.export(&a.state.project, os_engine::PlayMode::Pattern(1), 48000, path.clone());
+        let t0 = std::time::Instant::now();
+        let secs = loop {
+            match a.transport.export_status() {
+                crate::transport::Export::Done(r) => break r.expect("export"),
+                _ if t0.elapsed() > Duration::from_secs(60) => panic!("export did not finish"),
+                _ => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        let bytes = std::fs::read(&path).expect("file written");
+        let _ = std::fs::remove_file(&path);
+        let samples: Vec<f32> = bytes[44..].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let (left, right): (Vec<f32>, Vec<f32>) = samples.chunks_exact(2).map(|f| (f[0], f[1])).unzip();
+        let peak = |v: &[f32]| v.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        // Pitch from the note's middle: rising zero crossings over 0.1..0.4 s.
+        let mid = &left[4800..19200];
+        let rises = mid.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        let hz = rises as f64 / 0.3;
+        eprintln!("RESULT {secs:.2} s, peak L {:.3} R {:.3}, about {hz:.0} Hz", peak(&left), peak(&right));
+        assert!(peak(&left) > 0.01 && peak(&left) < 2.0, "audible, not too loud");
+        assert!((peak(&left) - peak(&right)).abs() < 0.2 * peak(&left), "centred");
+        // Key 60 = C5 = 261.6 Hz, within a semitone; 3x Osc sounds an octave up (spec plugins/3x-osc.md). Default
+        // patches with a plain fundamental: Harmor, Kepler, 3x Osc.
+        let near = |f: f64| (hz / f).log2().abs() < 1.0 / 12.0;
+        assert!(near(261.63) || (name == "3x Osc" && near(523.25)), "pitch {hz:.0} Hz");
+    }
+
+    /// One installed native generator (`OS_NATIVE_ONE=<folder name>`) through the app's whole path: created on a rack
+    /// row, a note played on an audio thread while its editor is open (spec plugins/fruity-abi.md, "Voices"), state
+    /// saved and restored, closed and dropped. Prints the note's peak and whether it ended after its note off. Loads FL
+    /// DLLs in-process, so ignored; run once per plugin in its own process:
+    /// `OS_NATIVE_ONE="3x Osc" cargo test -p os-app --bin lemonstudio native_generator_lifecycle -- --ignored`.
+    #[test]
+    #[ignore]
+    fn native_generator_lifecycle() {
+        let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
+        let fl = os_native::default_fl_dir();
+        let dll = os_native::find_plugin(&fl, &name).expect("plugin installed");
+        let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
+        let a = Available { desc: lib.plugins()[0].clone(), lib };
+        let mut pl = Plugins { scale: 1.0, rate: 48000, available: vec![a], ..Plugins::default() };
+        eprintln!("STEP create");
+        if let Err(e) = pl.create(0, 0) {
+            eprintln!("RESULT refused: {e}");
+            return;
+        }
+        let inst = pl.instruments()[0].1.clone();
+        // Held for half a second, then two seconds to end: (peak while held, peak in the last 100 ms, all finite).
+        let audio = std::thread::spawn(move || {
+            let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+            let (mut held, mut tail, mut finite) = (0.0f32, 0.0f32, true);
+            for block in 0..250 {
+                let mut p = inst.lock().unwrap();
+                if block == 0 {
+                    p.note_on(0, 60, 100.0 / 128.0);
+                }
+                if block == 50 {
+                    p.note_off(0, 60);
+                }
+                p.process(48000, &mut l, &mut r);
+                drop(p);
+                let peak = l.iter().chain(&r).fold(0.0f32, |m, s| m.max(s.abs()));
+                finite &= l.iter().chain(&r).all(|s| s.is_finite());
+                if block < 50 {
+                    held = held.max(peak);
+                }
+                if block >= 240 {
+                    tail = tail.max(peak);
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            (held, tail, finite)
+        });
+        eprintln!("STEP window");
+        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        match pl.open_window(0, info) {
+            Ok(()) => {
+                let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+                unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+                pump(&mut pl, 700);
+            }
+            Err(e) => eprintln!("STEP no window: {e}"),
+        }
+        let (held, tail, finite) = audio.join().unwrap();
+        eprintln!("STEP state");
+        let st = pl.state(0).unwrap_or_default();
+        pl.set_state(0, &st);
+        eprintln!("STEP close");
+        pl.close_if_open(0);
+        pump(&mut pl, 100);
+        eprintln!("STEP drop");
+        pl.drop_key(0);
+        eprintln!("RESULT ok (peak {held:.3}, after its end {tail:.4}, state {} bytes, finite output {finite})", st.len());
+    }
+
+    /// With the experimental native host opted in, the scan offers the user's installed FL native
+    /// generators and effects in the pickers (spec plugins/fruity-abi.md). Skips when FL is not installed.
+    /// Ignored in the default run: it mutates the process `OPENSTUDIO_NATIVE` env var, which is
+    /// unsound to do while other parallel tests read the environment. Run with
+    /// `cargo test -p os-app native_plugins_listed_when_opted_in -- --ignored`.
+    #[test]
+    #[ignore]
+    fn native_plugins_listed_when_opted_in() {
         let fl = os_native::default_fl_dir();
         if !fl.join("Plugins").join("Fruity").join("Effects").is_dir() {
             return;
@@ -2164,6 +2413,9 @@ mod tests {
             baseline.effects.iter().all(|a| a.desc.format != os_host::Format::Native),
             "native effects must not appear without the opt-in"
         );
+        let native = |l: &[Available]| l.iter().filter(|a| a.desc.format == os_host::Format::Native).map(|a| a.desc.name.clone()).collect::<Vec<_>>();
+        assert!(native(&opted.available).iter().any(|n| n == "3x Osc"), "native generators should be listed when opted in");
+        assert!(native(&baseline.available).is_empty(), "native generators must not appear without the opt-in");
     }
     /// An instance that records the thread it is destroyed on.
     struct Tracked(os_host::Descriptor, Arc<Mutex<Option<std::thread::ThreadId>>>);

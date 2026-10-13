@@ -8,16 +8,20 @@
 
 pub mod abi;
 pub mod adapter;
+pub mod check;
+pub mod guard;
 pub mod host;
 pub mod library;
 pub mod lock;
 pub mod stream;
 pub mod stub;
 
-pub use library::{dll_files, dll_files_in, effect_dll_files, NativeLibrary};
+pub use library::{dll_files, dll_files_in, NativeLibrary};
 
 use std::ffi::{c_char, CString};
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use abi::{flags, IntPtr, PluginObject, VoiceParams};
 use host::HostObject;
@@ -88,6 +92,9 @@ pub enum NativeError {
     Load(PathBuf, String),
     #[error("{0}: CreatePlugInstance returned null")]
     Create(PathBuf),
+    /// The plugin raised an error it did not handle while it was being created (spec: "Crash containment").
+    #[error("{0}: {1} while loading")]
+    Crashed(PathBuf, String),
 }
 
 /// Static information about a loaded plugin.
@@ -108,19 +115,55 @@ impl PluginInfo {
     pub fn uses_voice_render(&self) -> bool {
         self.flags & flags::USE_SAMPLER != 0
     }
+    /// The plugin processes no audio buffers at all (controllers, visual plugins): the host never calls its render
+    /// methods (spec: flags, NoProcess).
+    pub fn no_process(&self) -> bool {
+        self.flags & flags::NO_PROCESS != 0
+    }
 }
 
 /// Creating and destroying instances is serialised process-wide: the plugins' runtime is not made for two threads
 /// constructing instances at once (two parallel loads crashed; one GUI thread, as in the app, never does).
 static LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// While alive, the process's current folder is the plugin's own `Data` folder, when it has one: some plugins open
+/// their data files by a path relative to the current folder while they are created (spec: "Data files").
+struct DataDir(Option<PathBuf>);
+
+impl DataDir {
+    fn enter(dll: &Path) -> DataDir {
+        let Some(data) = dll.parent().map(|d| d.join("Data")).filter(|d| d.is_dir()) else { return DataDir(None) };
+        let Ok(prev) = std::env::current_dir() else { return DataDir(None) };
+        if std::env::set_current_dir(&data).is_err() {
+            return DataDir(None);
+        }
+        DataDir(Some(prev))
+    }
+}
+
+impl Drop for DataDir {
+    fn drop(&mut self) {
+        if let Some(prev) = &self.0 {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+}
+
 /// A plugin instance. Not thread-safe: call from one thread.
+///
+/// Every call into the plugin goes through `guard` (spec: "Crash containment"). When the plugin raises an error it does
+/// not handle, the instance is stopped: it is never called again, and its DLL and host object stay loaded for the rest
+/// of the process (its code may still run timers or threads that use them).
 pub struct Plugin {
     obj: *mut PluginObject,
-    // Field order matters for drop: destroy the instance, then the host, then unload the DLL.
-    host: Box<HostObject>,
-    _lib: libloading::Library,
+    // Freed in this order in `drop`: the instance, then the host, then the DLL (never for a stopped plugin).
+    host: ManuallyDrop<Box<HostObject>>,
+    lib: ManuallyDrop<libloading::Library>,
     pub info: PluginInfo,
+    /// Exception code of the error that stopped the plugin, 0 while it runs.
+    stopped: AtomicU32,
+    /// What stopped it, for the user (`guard::describe_with`).
+    reason: std::sync::OnceLock<String>,
 }
 
 impl Plugin {
@@ -135,13 +178,23 @@ impl Plugin {
         let _one = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
         trace("LoadLibrary");
         let lib = unsafe { libloading::Library::new(dll) }.map_err(|e| err(e.to_string()))?;
-        let create: libloading::Symbol<abi::CreatePlugInstance> =
-            unsafe { lib.get(b"CreatePlugInstance\0") }.map_err(|e| err(e.to_string()))?;
+        let create: abi::CreatePlugInstance =
+            *unsafe { lib.get::<abi::CreatePlugInstance>(b"CreatePlugInstance\0") }.map_err(|e| err(e.to_string()))?;
         trace("got CreatePlugInstance");
         let mut host = HostObject::new(&fl_dir.to_string_lossy(), sample_rate, max_block);
-        let host_ptr = &mut *host as *mut HostObject as *mut std::ffi::c_void;
+        let host_ptr = &mut *host as *mut HostObject as IntPtr;
+        let data = DataDir::enter(dll);
         trace("calling CreatePlugInstance");
-        let obj = unsafe { create(host_ptr, 0) };
+        let obj = match unsafe { guard::call(create as *const (), [host_ptr, 0, 0, 0, 0, 0]) } {
+            Ok(obj) => obj as *mut PluginObject,
+            Err(code) => {
+                trace(&format!("CreatePlugInstance raised {code:#x}"));
+                // Half built: its code may still hold the host and run, so neither is ever freed.
+                std::mem::forget(host);
+                std::mem::forget(lib);
+                return Err(NativeError::Crashed(dll.to_owned(), guard::describe_with(code, &guard::last_message())));
+            }
+        };
         trace(&format!("instance at {obj:p}"));
         if obj.is_null() {
             return Err(NativeError::Create(dll.to_owned()));
@@ -158,10 +211,23 @@ impl Plugin {
             }
         };
         trace(&format!("info read: {} flags {:#x}", info.long_name, info.flags));
-        let mut p = Plugin { obj, host, _lib: lib, info };
+        let p = Plugin {
+            obj,
+            host: ManuallyDrop::new(host),
+            lib: ManuallyDrop::new(lib),
+            info,
+            stopped: AtomicU32::new(0),
+            reason: std::sync::OnceLock::new(),
+        };
         p.dispatch(abi::dispatch::SET_SAMPLE_RATE, 0, sample_rate as IntPtr);
         p.dispatch(abi::dispatch::SET_BLOCK_SIZE, 0, max_block as IntPtr);
         p.dispatch(abi::dispatch::PROCESS_MODE, 0, 0);
+        drop(data);
+        if let Some(why) = p.stop_reason() {
+            // Stopped: never freed (and its drop would wait for `LIFECYCLE`, held here).
+            std::mem::forget(p);
+            return Err(NativeError::Crashed(dll.to_owned(), why));
+        }
         Ok(p)
     }
 
@@ -169,97 +235,187 @@ impl Plugin {
         unsafe { &*(*self.obj).vtable }
     }
 
+    /// The exception code of the error that stopped the plugin (`None` while it runs).
+    pub fn stopped(&self) -> Option<u32> {
+        Some(self.stopped.load(Ordering::Relaxed)).filter(|&c| c != 0)
+    }
+
+    /// What stopped the plugin, for the user: "plugin error", with the plugin's own text when it gave a short one.
+    pub fn stop_reason(&self) -> Option<String> {
+        let code = self.stopped()?;
+        Some(self.reason.get().cloned().unwrap_or_else(|| guard::describe(code)))
+    }
+
+    /// Calls plugin method `f` with the instance and `args` through the guard. `None` when the plugin is stopped, or
+    /// stops in this call (it raised an error it did not handle).
+    fn call(&self, f: *const (), args: [IntPtr; 5]) -> Option<IntPtr> {
+        if self.stopped().is_some() {
+            return None;
+        }
+        let [a, b, c, d, e] = args;
+        match unsafe { guard::call(f, [self.obj as IntPtr, a, b, c, d, e]) } {
+            Ok(r) => Some(r),
+            Err(code) => {
+                let why = guard::describe_with(code, &guard::last_message());
+                eprintln!("[native] {} stopped in {}: {why}", self.info.long_name, self.method_name(f));
+                let _ = self.reason.set(why);
+                self.stopped.store(code.max(1), Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    /// The plugin methods that share one function with another method: what a plugin leaves unimplemented (they all
+    /// point at its runtime's "abstract" stub). For diagnostics.
+    pub fn shared_methods(&self) -> Vec<&'static str> {
+        let table = self.vt() as *const abi::PluginVtbl as *const *const ();
+        let slot = |i: usize| unsafe { *table.add(i) };
+        (0..METHOD_NAMES.len()).filter(|&i| (0..METHOD_NAMES.len()).any(|j| j != i && slot(j) == slot(i))).map(|i| METHOD_NAMES[i]).collect()
+    }
+
+    /// The name of plugin method `f` (its place in the method table), for messages.
+    fn method_name(&self, f: *const ()) -> &'static str {
+        const NAMES: [&str; 20] = METHOD_NAMES;
+        let table = self.vt() as *const abi::PluginVtbl as *const *const ();
+        (0..NAMES.len()).find(|&i| unsafe { *table.add(i) } == f).map_or("a plugin method", |i| NAMES[i])
+    }
+
     /// Runs `f` holding the plugin's render lock (audio-thread calls; see `lock`).
-    fn locked<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+    fn locked<R>(&self, f: impl FnOnce(&Self) -> R) -> R {
         let lock: *const lock::PluginLock = self.host.lock();
         // SAFETY: the lock lives in the host context, which outlives this call and never moves.
         let _g = unsafe { &*lock }.guard();
         f(self)
     }
 
-    pub fn dispatch(&mut self, id: IntPtr, index: IntPtr, value: IntPtr) -> IntPtr {
-        unsafe { (self.vt().dispatcher)(self.obj, id, index, value) }
+    pub fn dispatch(&self, id: IntPtr, index: IntPtr, value: IntPtr) -> IntPtr {
+        self.call(self.vt().dispatcher as *const (), [id, index, value, 0, 0]).unwrap_or(0)
     }
 
     /// Sets the tempo (BPM) and samples per tick.
     pub fn set_tempo(&mut self, bpm: f32, ppq: u16) {
         let sr = self.host.context().sample_rate as f32;
         let spt = sr * 60.0 / bpm / f32::from(ppq);
-        unsafe {
-            (self.vt().process_event)(self.obj, abi::event::TEMPO, bpm.to_bits() as i32, spt as i32);
-        }
+        let tempo = [abi::event::TEMPO as IntPtr, bpm.to_bits() as IntPtr, spt as i32 as IntPtr, 0, 0];
+        self.call(self.vt().process_event as *const (), tempo);
         self.dispatch(abi::dispatch::SET_SAMPLES_PER_TICK, 0, spt.to_bits() as IntPtr);
     }
 
     pub fn param_name(&mut self, index: i32) -> String {
         let mut buf = [0 as c_char; 512];
-        unsafe { (self.vt().get_name)(self.obj, abi::name::PARAM, index, 0, buf.as_mut_ptr()) };
+        let args = [abi::name::PARAM as IntPtr, index as IntPtr, 0, buf.as_mut_ptr() as IntPtr, 0];
+        self.call(self.vt().get_name as *const (), args);
         host::cstr(buf.as_ptr())
     }
 
     /// Current value of a parameter (plugin-specific integer scale).
     pub fn param_value(&mut self, index: i32) -> i32 {
-        unsafe { (self.vt().process_param)(self.obj, index, 0, 2) }
+        self.call(self.vt().process_param as *const (), [index as IntPtr, 0, 2, 0, 0]).map_or(0, |v| v as i32)
     }
 
-    /// Saves the plugin state into a byte vector. Takes `&self`: the FFI call drives the plugin
-    /// through its raw object pointer and does not need Rust `&mut`.
-    pub fn save_state(&self) -> Vec<u8> {
+    /// Saves the plugin state into a byte vector (`None` when the plugin stops while saving). Takes `&self`: the FFI
+    /// call drives the plugin through its raw object pointer and does not need Rust `&mut`.
+    pub fn save_state(&self) -> Option<Vec<u8>> {
         let mut s = MemStream::new(Vec::new());
-        unsafe { (self.vt().save_restore_state)(self.obj, s.as_ptr(), 1) };
-        std::mem::take(&mut s.data)
+        self.call(self.vt().save_restore_state as *const (), [s.as_ptr() as IntPtr, 1, 0, 0, 0])?;
+        Some(std::mem::take(&mut s.data))
     }
 
-    /// Restores a previously saved plugin state.
-    pub fn restore_state(&mut self, data: &[u8]) {
+    /// Restores a previously saved plugin state; false when the plugin stops while reading it.
+    pub fn restore_state(&mut self, data: &[u8]) -> bool {
         let mut s = MemStream::new(data.to_vec());
-        unsafe { (self.vt().save_restore_state)(self.obj, s.as_ptr(), 0) };
+        self.call(self.vt().save_restore_state as *const (), [s.as_ptr() as IntPtr, 0, 0, 0, 0]).is_some()
     }
 
-    /// Starts a voice. `key` 60 = C5; `velocity` 0..1; `pan` −1..1.
-    pub fn trigger(&mut self, key: f32, velocity: f32, pan: f32, tag: IntPtr) -> IntPtr {
-        let lv = abi::LevelParams { pan, vol: velocity, pitch: key * 100.0, fcut: 0.0, fres: 0.0 };
-        let vp = VoiceParams { init: lv, fin: lv };
-        self.locked(|p| unsafe { (p.vt().trigger_voice)(p.obj, &vp, tag) })
+    /// Starts a voice with the note's own levels `init` and the final levels `fin` (the note's and its channel's);
+    /// `velocity` (0..1) is what the plugin is told when it asks for the note's velocity. `tag` names the voice in the
+    /// plugin's requests (`take_voice_requests`). `None` when the plugin started no voice (it answers -1, e.g. a sample
+    /// player without a sample) or is stopped.
+    pub fn trigger(&mut self, init: abi::LevelParams, fin: abi::LevelParams, velocity: f32, tag: IntPtr) -> Option<Voice> {
+        self.host.voices().velocity.push((tag, velocity));
+        let params = Box::into_raw(Box::new(VoiceParams { init, fin }));
+        match self.locked(|p| p.call(p.vt().trigger_voice as *const (), [params as IntPtr, tag, 0, 0, 0])) {
+            Some(NO_VOICE) => {
+                // No voice to release or kill (the plugin's Voice_Kill fails on this handle).
+                self.host.voices().velocity.retain(|v| v.0 != tag);
+                drop(unsafe { Box::from_raw(params) });
+                None
+            }
+            Some(handle) => Some(Voice { tag, handle, params }),
+            // Stopped while starting it: the plugin may hold the address, so the levels are never freed.
+            None => None,
+        }
     }
 
-    pub fn release(&mut self, voice: IntPtr) {
-        self.locked(|p| unsafe { (p.vt().voice_release)(p.obj, voice) })
+    /// Note off for `voice`: the plugin goes into its release and asks for the kill when it is done.
+    pub fn release(&mut self, voice: &Voice) {
+        self.locked(|p| p.call(p.vt().voice_release as *const (), [voice.handle, 0, 0, 0, 0]));
     }
 
-    pub fn kill(&mut self, voice: IntPtr) {
-        self.locked(|p| unsafe { (p.vt().voice_kill)(p.obj, voice) })
+    /// Ends `voice` at once and frees it.
+    pub fn kill(&mut self, voice: Voice) {
+        self.locked(|p| p.call(p.vt().voice_kill as *const (), [voice.handle, 0, 0, 0, 0]));
+        self.host.voices().velocity.retain(|v| v.0 != voice.tag);
+        if self.stopped().is_some() {
+            // The plugin may still hold the address of the levels.
+            std::mem::forget(voice);
+        }
+    }
+
+    /// Lets go of `voice` without calling the plugin: it said it freed the voice itself.
+    pub fn forget(&mut self, voice: Voice) {
+        self.host.voices().velocity.retain(|v| v.0 != voice.tag);
+    }
+
+    /// What the plugin asked of its voices since the last call: (voices to kill: the tag, and whether the host frees
+    /// it with `kill` (else `forget`); tags to release).
+    pub fn take_voice_requests(&mut self) -> (Vec<(IntPtr, bool)>, Vec<IntPtr>) {
+        let mut b = self.host.voices();
+        (std::mem::take(&mut b.kill), std::mem::take(&mut b.release))
+    }
+
+    /// Changes the sample rate the plugin works at (dispatcher `SetSampleRate`).
+    pub fn set_sample_rate(&mut self, rate: u32) {
+        self.host.context().sample_rate = rate;
+        self.dispatch(abi::dispatch::SET_SAMPLE_RATE, 0, rate as IntPtr);
     }
 
     /// Full generators: renders up to `out.len()/2` frames, returns frames rendered.
     pub fn gen_render(&mut self, out: &mut [f32]) -> usize {
         let mut n = (out.len() / 2) as i32;
-        self.locked(|p| unsafe { (p.vt().gen_render)(p.obj, out.as_mut_ptr(), &mut n) });
-        n.max(0) as usize
+        let args = [out.as_mut_ptr() as IntPtr, &mut n as *mut i32 as IntPtr, 0, 0, 0];
+        match self.locked(|p| p.call(p.vt().gen_render as *const (), args)) {
+            Some(_) => n.max(0) as usize,
+            None => 0,
+        }
     }
 
     /// Hybrid generators: renders one voice; returns false when it has no more data.
-    pub fn voice_render(&mut self, voice: IntPtr, out: &mut [f32]) -> (usize, bool) {
+    pub fn voice_render(&mut self, voice: &Voice, out: &mut [f32]) -> (usize, bool) {
         let mut n = (out.len() / 2) as i32;
-        let r = self.locked(|p| unsafe { (p.vt().voice_render)(p.obj, voice, out.as_mut_ptr(), &mut n) });
-        (n.max(0) as usize, r == 0)
+        let args = [voice.handle, out.as_mut_ptr() as IntPtr, &mut n as *mut i32 as IntPtr, 0, 0];
+        match self.locked(|p| p.call(p.vt().voice_render as *const (), args)) {
+            Some(r) => (n.max(0) as usize, r as i32 == 0),
+            None => (0, false),
+        }
     }
 
-    /// Effects: processes `buf` (interleaved stereo) in place.
-    pub fn eff_render(&mut self, buf: &mut [f32]) {
-        let n = (buf.len() / 2) as i32;
-        let b = buf.as_mut_ptr();
-        self.locked(|p| unsafe { (p.vt().eff_render)(p.obj, b, b, n) });
+    /// Effects: processes `buf` (interleaved stereo) in place. False when the plugin stopped (the buffer may then hold
+    /// anything).
+    pub fn eff_render(&mut self, buf: &mut [f32]) -> bool {
+        let n = (buf.len() / 2) as IntPtr;
+        let b = buf.as_mut_ptr() as IntPtr;
+        self.locked(|p| p.call(p.vt().eff_render as *const (), [b, b, n, 0, 0])).is_some()
     }
 
     pub fn idle(&mut self) {
-        unsafe { (self.vt().idle)(self.obj) }
+        self.call(self.vt().idle as *const (), [0; 5]);
     }
 
     /// Advances the plugin's internal clock one tick. Generators that set the `WantNewTick` flag
     /// expect this between buffers; without it their envelopes and timing do not progress.
     pub fn new_tick(&mut self) {
-        self.locked(|p| unsafe { (p.vt().new_tick)(p.obj) })
+        self.locked(|p| p.call(p.vt().new_tick as *const (), [0; 5]));
     }
 
     /// Tells the plugin whether the song is playing (dispatcher `SetPlaying`).
@@ -278,10 +434,6 @@ impl Plugin {
         unsafe { (*self.obj).editor_handle as IntPtr }
     }
 
-    pub fn killed_voices(&mut self) -> Vec<IntPtr> {
-        std::mem::take(&mut self.host.context().killed_voices)
-    }
-
     pub fn host_name(&self) -> CString {
         CString::default()
     }
@@ -289,11 +441,63 @@ impl Plugin {
 
 impl Drop for Plugin {
     fn drop(&mut self) {
-        if !self.obj.is_null() {
-            let _one = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
-            unsafe { (self.vt().destroy_object)(self.obj) };
-            self.obj = std::ptr::null_mut();
+        let _one = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
+        self.call(self.vt().destroy_object as *const (), [0; 5]);
+        if self.stopped().is_some() {
+            // Never freed (see `Plugin`).
+            return;
         }
+        // SAFETY: dropped once, here, after the instance is gone.
+        unsafe {
+            ManuallyDrop::drop(&mut self.host);
+            ManuallyDrop::drop(&mut self.lib);
+        }
+    }
+}
+
+/// What `TriggerVoice` answers when it started no voice.
+const NO_VOICE: IntPtr = -1;
+
+/// The plugin methods in method-table order.
+const METHOD_NAMES: [&str; 20] = [
+    "DestroyObject", "Dispatcher", "Idle", "SaveRestoreState", "GetName", "ProcessEvent", "ProcessParam", "Eff_Render",
+    "Gen_Render", "TriggerVoice", "Voice_Release", "Voice_Kill", "Voice_ProcessEvent", "Voice_Render", "NewTick",
+    "MIDITick", "MIDIIn", "MsgIn", "OutputVoice_ProcessEvent", "OutputVoice_Kill",
+];
+
+/// A voice a generator plays. The plugin keeps the address of its levels and reads the final ones while the voice
+/// sounds, so they stay here, at one address, until the voice is killed (spec: "Voices").
+pub struct Voice {
+    /// The host's name for the voice in the plugin's requests.
+    pub tag: IntPtr,
+    handle: IntPtr,
+    params: *mut VoiceParams,
+}
+
+// SAFETY: the levels are only touched by the thread driving the plugin, between its calls.
+unsafe impl Send for Voice {}
+
+impl Voice {
+    /// The plugin's own handle for the voice.
+    pub fn handle(&self) -> IntPtr {
+        self.handle
+    }
+
+    /// The levels the voice started with.
+    pub fn init(&self) -> abi::LevelParams {
+        unsafe { (*self.params).init }
+    }
+
+    /// Changes the final levels the plugin reads from now on (a glide, the channel's pitch).
+    pub fn set_final(&mut self, levels: abi::LevelParams) {
+        unsafe { (*self.params).fin = levels };
+    }
+}
+
+impl Drop for Voice {
+    fn drop(&mut self) {
+        // SAFETY: made by `Box::into_raw` in `trigger`; the plugin let go of it (killed, or destroyed).
+        unsafe { drop(Box::from_raw(self.params)) };
     }
 }
 

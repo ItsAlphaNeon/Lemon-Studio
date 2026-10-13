@@ -48,6 +48,13 @@ pub trait Instrument: Send {
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         let _ = (offset, index, value);
     }
+    /// The channel's volume (a gain: the level curve applied, 0 when muted) and pan (-1..1) for the next `process`
+    /// call. An instrument that works them into its voices itself returns true, and the engine then adds its output
+    /// unchanged (FL native generators get them in their voices' final levels: spec plugins/fruity-abi.md "Voices").
+    /// Default: false, the engine applies them to the output.
+    fn channel_levels(&mut self, _volume: f32, _pan: f32) -> bool {
+        false
+    }
     /// Where the song is during the next `process` call (playback only; without a call the transport is stopped).
     /// Default: ignored.
     fn transport(&mut self, info: &TransportInfo) {

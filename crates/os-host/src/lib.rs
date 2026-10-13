@@ -233,8 +233,9 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         Vec::new()
     }
 
-    /// The exception code of the crash that stopped the instance ([`Guarded`]), if one did. A stopped instance is never
-    /// called again: its instrument plays silence, its effect passes the sound through.
+    /// The exception code of the crash that stopped the instance ([`Guarded`]), or of the error it stopped itself after,
+    /// if one did. A stopped instance is never called again: its instrument plays silence, its effect passes the sound
+    /// through.
     fn stopped(&self) -> Option<u32> {
         None
     }

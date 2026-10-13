@@ -11,6 +11,7 @@
 //
 // spec: plugins/plugin-formats.md ("Crash containment")
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,24 @@ impl Module {
 static MODULES: Mutex<Vec<Arc<Module>>> = Mutex::new(Vec::new());
 /// A plugin crashed in this process and the crash was contained.
 static TRIPPED: AtomicBool = AtomicBool::new(false);
+
+/// The exception code of an error raised by the Object Pascal runtime native plugins are built in, which the plugin
+/// did not handle (spec: plugins/fruity-abi.md, "Crash containment").
+pub const RUNTIME_ERROR: u32 = 0x0EED_FADE;
+
+thread_local! {
+    /// The text of the last contained exception on this thread ([`last_message`]).
+    static LAST_MESSAGE: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// What a contained exception was (the layout `guard.c` fills).
+#[cfg(plugin_guard)]
+#[repr(C)]
+struct Fault {
+    code: u32,
+    /// The text of the runtime's error object (UTF-16, 0-terminated), empty when there is none.
+    message: [u16; 256],
+}
 
 /// The module whose code is at `addr` (a plugin file's entry point, or a table it exports). All instances of one plugin
 /// file share their `Module`, so a crash stops them all; a plugin compiled into this program gets a new `Module` on
@@ -95,14 +114,16 @@ pub fn catch<R, F: FnOnce() -> R>(f: F) -> Result<R, u32> {
     #[cfg(plugin_guard)]
     {
         let mut slot: (Option<F>, Option<R>) = (Some(f), None);
-        let mut code = 0u32;
+        let mut fault = Fault { code: 0, message: [0; 256] };
         // SAFETY: the trampoline gets the slot it was instantiated for, alive for the whole call.
-        let done = unsafe { os_host_guarded_call(trampoline::<R, F>, (&raw mut slot).cast(), &mut code) } != 0;
+        let done = unsafe { os_host_guarded_call(trampoline::<R, F>, (&raw mut slot).cast(), &mut fault) } != 0;
         match slot.1.take() {
             Some(r) if done => Ok(r),
             _ => {
                 TRIPPED.store(true, Ordering::Release);
-                Err(code.max(1))
+                let len = fault.message.iter().position(|&c| c == 0).unwrap_or(fault.message.len());
+                LAST_MESSAGE.with(|m| *m.borrow_mut() = String::from_utf16_lossy(&fault.message[..len]));
+                Err(fault.code.max(1))
             }
         }
     }
@@ -112,8 +133,8 @@ pub fn catch<R, F: FnOnce() -> R>(f: F) -> Result<R, u32> {
 
 #[cfg(plugin_guard)]
 unsafe extern "C-unwind" {
-    /// `guard.c`: calls `f(ctx)`; 0 and the exception code in `code` when it raised one the guard contains.
-    fn os_host_guarded_call(f: extern "C-unwind" fn(*mut c_void), ctx: *mut c_void, code: *mut u32) -> i32;
+    /// `guard.c`: calls `f(ctx)`; 0 and what was raised in `fault` when it raised an exception the guard contains.
+    fn os_host_guarded_call(f: extern "C-unwind" fn(*mut c_void), ctx: *mut c_void, fault: *mut Fault) -> i32;
 }
 
 /// Runs the closure in `catch`'s slot. Rust code between the guard and the plugin unwinds like a panic would.
@@ -124,6 +145,12 @@ extern "C-unwind" fn trampoline<R, F: FnOnce() -> R>(ctx: *mut c_void) {
     if let Some(f) = slot.0.take() {
         slot.1 = Some(f());
     }
+}
+
+/// The text the plugin's runtime gave the last exception contained on this thread ("" when it gave none): what the
+/// plugin would have shown in its own error box.
+pub fn last_message() -> String {
+    LAST_MESSAGE.with(|m| m.borrow().clone())
 }
 
 /// Whether plugin crashes are contained in this build.
@@ -160,6 +187,7 @@ pub fn describe(code: u32) -> String {
         0xC000_001D | 0xC000_0096 => "an invalid instruction".into(),
         0xC000_0094 => "a division by zero".into(),
         0xE06D_7363 => "an error it did not handle".into(),
+        RUNTIME_ERROR => "a plugin error".into(),
         c => format!("error {c:#010X}"),
     }
 }
@@ -389,6 +417,28 @@ mod tests {
         assert_eq!(call(&m, || ran = true), Err(0xC000_0005));
         assert!(!ran);
         assert_eq!(describe(0xC000_0005), "a memory error");
+    }
+
+    /// A runtime error's object: class pointer, then the message as a counted UTF-16 string.
+    #[cfg(plugin_guard)]
+    #[test]
+    fn a_runtime_error_gives_its_message() {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn RaiseException(code: u32, flags: u32, n: u32, args: *const usize);
+        }
+        #[repr(C)]
+        struct Counted {
+            len: i32,
+            text: [u16; 9],
+        }
+        static TEXT: Counted = Counted { len: 9, text: [66, 97, 100, 32, 105, 110, 100, 101, 120] };
+        let obj: [usize; 2] = [0, TEXT.text.as_ptr() as usize];
+        let args = [0usize, obj.as_ptr() as usize];
+        let r = catch(|| unsafe { RaiseException(RUNTIME_ERROR, 1, 2, args.as_ptr()) });
+        assert_eq!(r, Err(RUNTIME_ERROR));
+        assert_eq!(last_message(), "Bad index");
+        assert_eq!(describe(RUNTIME_ERROR), "a plugin error");
     }
 
     /// A panic in Lemon Studio's own code under the guard is still a panic.

@@ -106,6 +106,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn transport(&mut self, info: &TransportInfo) {
         self.run((), |p| p.transport(info))
     }
+    fn channel_levels(&mut self, volume: f32, pan: f32) -> bool {
+        self.run(false, |p| p.channel_levels(volume, pan))
+    }
 }
 
 impl<P: Plugin> HostedEffect for Guarded<P> {
@@ -202,8 +205,10 @@ impl<P: Plugin> Plugin for Guarded<P> {
     fn take_automation_requests(&mut self) -> Vec<u32> {
         self.run(Vec::new(), |p| p.take_automation_requests())
     }
+    /// Its module's crash, else a stop the instance reports itself (a native plugin stops one instance when it raises
+    /// an error it does not handle: spec plugins/fruity-abi.md, "Crash containment").
     fn stopped(&self) -> Option<u32> {
-        self.module.crashed()
+        self.module.crashed().or_else(|| self.look(None, |p| p.stopped()))
     }
     fn meter(&self) -> Option<Arc<Meter>> {
         Some(self.meter.clone())
@@ -333,5 +338,83 @@ mod tests {
         assert!(!p.lock().unwrap().has_editor());
         drop(p);
         assert!(!dropped.load(Ordering::Relaxed), "a crashed instance is left as it is");
+    }
+
+    /// An instrument that stops itself (it contained an error of its own) and takes the channel's levels into its voices.
+    struct SelfStopping {
+        desc: Descriptor,
+        stop: Option<u32>,
+        levels: Option<(f32, f32)>,
+    }
+
+    impl Instrument for SelfStopping {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+        fn channel_levels(&mut self, volume: f32, pan: f32) -> bool {
+            self.levels = Some((volume, pan));
+            true
+        }
+    }
+
+    impl HostedEffect for SelfStopping {
+        fn process_fx(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+
+    impl Plugin for SelfStopping {
+        fn desc(&self) -> &Descriptor {
+            &self.desc
+        }
+        fn activate(&mut self, _: u32) -> bool {
+            true
+        }
+        fn idle(&mut self) {
+            self.stop = Some(0x0EED_FADE);
+        }
+        fn has_editor(&self) -> bool {
+            false
+        }
+        fn editor_open(&self) -> bool {
+            false
+        }
+        fn open_editor(&mut self, _: *mut c_void, _: f32) -> Result<(u32, u32), String> {
+            Err("none".into())
+        }
+        fn editor_size(&self) -> Option<(u32, u32)> {
+            None
+        }
+        fn close_editor(&mut self) {}
+        fn save_state(&self) -> Option<Vec<u8>> {
+            self.levels.map(|(v, p)| vec![(v * 10.0).round() as u8, ((p + 1.0) * 10.0).round() as u8])
+        }
+        fn load_state(&mut self, _: &[u8]) -> bool {
+            true
+        }
+        fn stopped(&self) -> Option<u32> {
+            self.stop
+        }
+    }
+
+    /// The channel's levels reach an instrument that takes them, and a stop the instance reports itself counts as
+    /// stopped (spec: plugins/fruity-abi.md, "Voices" and "Crash containment").
+    #[test]
+    fn channel_levels_and_own_stops_reach_through() {
+        let desc = Descriptor {
+            format: crate::Format::Native,
+            id: "0".into(),
+            name: "Self".into(),
+            vendor: String::new(),
+            version: String::new(),
+            features: vec![],
+            kind: crate::Kind::Instrument,
+            path: Default::default(),
+        };
+        let p = share(SelfStopping { desc, stop: None, levels: None }, Arc::new(Module::default()));
+        let mut g = p.lock().unwrap();
+        assert!(g.channel_levels(0.5, -0.3));
+        assert_eq!(g.save_state(), Some(vec![5, 7]));
+        assert_eq!(g.stopped(), None);
+        g.idle();
+        assert_eq!(g.stopped(), Some(0x0EED_FADE));
     }
 }

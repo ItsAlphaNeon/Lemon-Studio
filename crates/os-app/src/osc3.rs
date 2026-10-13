@@ -178,33 +178,37 @@ mod tests {
         assert_eq!(again.channels[row], saved.channels[row]);
     }
 
-    /// The picker tile and the rack's "Add one ▸" entry add an Open 3x Osc channel and ask for the built-in plugin
-    /// (the instance itself is made on the next tick, which also opens its window: done by hand here).
+    /// The rack's Add one ▸ and Insert ▸ menus add an Open 3x Osc channel and ask for the built-in plugin (the
+    /// instance itself is made on the next tick, which also opens its window: done by hand here).
     #[test]
-    fn picker_and_rack_add_open_3x_osc_channels() {
+    fn plugin_menus_add_open_3x_osc_channels() {
+        use crate::plugin_menu::Target;
         let mut a = App::new(None);
         a.state.project = crate::app::test_project();
         a.plugins.available = crate::plugins::builtin();
-        a.state.hosted_generators = vec![OPEN_3X_OSC];
+        a.state.plugdb.rebuild(&a.plugins);
+        let index = a.plugins.index_of(OPEN_3X_OSC).unwrap();
+        let pick = |a: &App, target| crate::plugin_menu::items(&a.state, target, true).into_iter().find(|it| it.label == OPEN_3X_OSC).map(|it| it.cmd);
         let n = a.state.project.channels.len();
-        a.act(crate::app::Action::PickerTile(false, crate::views::picker::GENERATORS.len()));
+        assert!(crate::rack::add_one_items(&a.state).iter().any(|it| it.label == OPEN_3X_OSC), "Add one lists Open 3x Osc");
+        let cmd = pick(&a, Target::Gen(None)).expect("the generator menu lists Open 3x Osc");
+        crate::playlist::run(&mut a, cmd);
         assert_eq!(a.state.project.channels.len(), n + 1);
-        assert_eq!(a.state.pending_plugin, Some((n, 0)));
+        assert_eq!(a.state.pending_plugin, Some((n, index)));
         assert!(is_osc3(&a.state.project.channels[n]));
         assert_eq!(a.state.project.channels[n].name.as_deref(), Some(OPEN_3X_OSC));
-        // What the next tick hosts: the picker's entry is the built-in plugin.
-        let index = a.plugins.index_of(a.state.hosted_generators[0]).unwrap();
         assert_eq!(a.plugins.available[index].desc.name, OPEN_3X_OSC);
         a.state.pending_plugin = None;
         a.sync_osc3();
         assert!(a.state.hosted_rows.contains(&n));
         assert_eq!(a.plugins.osc3_file_state(n), Some(default_state()));
-        // The rack's Add one ▸ entry takes the same path.
-        let add = crate::rack::add_one_items(&a.state).into_iter().find(|it| it.label == OPEN_3X_OSC);
-        assert!(add.is_some_and(|it| it.cmd == crate::playlist::Cmd::Rack(crate::rack::RCmd::AddPlugin(0))), "Add one lists Open 3x Osc");
-        crate::rack::run(&mut a, crate::rack::RCmd::AddPlugin(0));
-        assert_eq!(a.state.pending_plugin, Some((n + 1, 0)));
-        assert!(is_osc3(&a.state.project.channels[n + 1]));
+        // Insert ▸ on the first row: right below it.
+        let cmd = pick(&a, Target::Gen(Some(0))).unwrap();
+        crate::playlist::run(&mut a, cmd);
+        assert_eq!(a.state.pending_plugin, Some((1, index)));
+        assert!(is_osc3(&a.state.project.channels[1]));
+        assert_eq!(a.state.selected_channel, 1);
+        assert!(a.state.hosted_rows.contains(&(n + 1)), "the channel hosted before moved down one row");
     }
 
     /// Corpus check (OPENSTUDIO_FLP_CORPUS): every 3x Osc channel of every file is hosted by Open 3x Osc from its
