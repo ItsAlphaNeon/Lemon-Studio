@@ -5,7 +5,11 @@
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
 
 mod app;
+mod audio_cfg;
+#[cfg(test)]
+mod audio_bench;
 mod browser;
+mod cpu;
 mod dialog;
 mod icons;
 mod knobs;

@@ -81,11 +81,15 @@ pub fn fine_pitch_cents(fine: u8) -> i32 {
     i32::from(fine) * 10 - 1200
 }
 
-/// Glide time of the Misc tab's SLIDE knob (0..1), seconds (spec: audio/channel-voices.md).
-pub fn slide_seconds(v: f32) -> f64 {
-    let v = f64::from(v.clamp(0.0, 1.0));
-    // Lemon Studio law until measured: 0 at the left end, about 0.094 s at the default 0.35, 4 s at the right end.
-    4.0 * (2f64.powf(8.0 * v) - 1.0) / 255.0
+/// Length in ticks of a mono or portamento glide for the Misc tab's slide time knob `slide` (slide time / 1024) at
+/// `ppq`: `x = single(slide time / 1024)`, `r = Round(single(single(exp(x ln 27) - 1) * 48) / 26)`, `n = r * (PPQ div
+/// 4) div 48`; the glide takes `n + 1` steps, one per tick (spec: audio/note-rules.md "The length of a glide"; 500 gives
+/// 3 ticks and 1024 gives 24 at 96 PPQ, whatever the tempo).
+pub fn glide_ticks(slide: f32, ppq: u16) -> u32 {
+    let x = slide.clamp(0.0, 1.0);
+    let e = ((f64::from(x) * 27f64.ln()).exp() - 1.0) as f32;
+    let r = (f64::from(e * 48.0) * (1.0 / 26.0)).round_ties_even().max(0.0) as u32;
+    r * u32::from(ppq / 4) / 48
 }
 
 /// Output frame at which a tick position starts at a constant tempo: whole ticks start where the tick clock's running

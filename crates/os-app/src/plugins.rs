@@ -516,6 +516,31 @@ impl Plugins {
     }
 
     /// The instances for the transport.
+    /// Switches every hosted instance to offline rendering (an export) or back to live playback: plugins that know
+    /// the difference use their best quality offline (Open Sampler: the resampler's exact weights).
+    pub fn set_offline(&mut self, offline: bool) {
+        for h in self.hosted.values() {
+            if let Ok(mut p) = h.plugin.lock() {
+                p.set_offline(offline);
+            }
+        }
+    }
+
+    /// Moves every hosted instance to sample rate `rate` (the audio settings changed); new ones start at it.
+    pub fn set_rate(&mut self, rate: u32) {
+        if rate == self.rate {
+            return;
+        }
+        self.rate = rate;
+        for h in self.hosted.values() {
+            if let Ok(mut p) = h.plugin.lock() {
+                if !p.activate(rate) {
+                    eprintln!("[plugins] an instance did not restart at {rate} Hz");
+                }
+            }
+        }
+    }
+
     pub fn instruments(&self) -> Vec<(usize, SharedInstrument)> {
         self.hosted.range(..FX_KEY).map(|(&r, h)| (r, h.plugin.clone() as SharedInstrument)).collect()
     }

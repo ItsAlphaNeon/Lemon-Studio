@@ -341,7 +341,7 @@ fn mono_portamento_glides_through_the_tuning_expression() {
         assert!(p.load_state(&sampler_state(&wav, "")));
         assert!(p.activate(48000));
     }
-    let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 0.35, ..Default::default() };
+    let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 1.0, ..Default::default() };
     let ch = os_model::Channel {
         index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
         enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
@@ -367,7 +367,8 @@ fn mono_portamento_glides_through_the_tuning_expression() {
     }
     let window = |from_s: f32, to_s: f32| &out[(from_s * 48000.0) as usize..(to_s * 48000.0) as usize];
     let crossings = |w: &[f32]| w.windows(2).filter(|p| p[0] <= 0.0 && p[1] > 0.0).count() as f32 / (w.len() as f32 / 48000.0);
-    let glide_s = os_engine::laws::slide_seconds(0.35) as f32;
+    // One step per tick, n + 1 ticks at 130 BPM and 96 PPQ.
+    let glide_s = (os_engine::laws::glide_ticks(1.0, 96) + 1) as f32 * 60.0 / (130.0 * 96.0);
     let (before, mid, after) =
         (crossings(window(0.5, 0.95)), crossings(window(1.0 + glide_s * 0.4, 1.0 + glide_s * 0.6)), crossings(window(1.0 + glide_s + 0.05, 2.0)));
     eprintln!("before {before:.1} Hz, mid-glide {mid:.1} Hz, after {after:.1} Hz (glide {glide_s:.3} s)");
