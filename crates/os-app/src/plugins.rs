@@ -2151,6 +2151,74 @@ mod tests {
         eprintln!("RESULT ok (state {} bytes, finite output {finite})", st.len());
     }
 
+    /// One installed native generator (`OS_NATIVE_ONE=<folder name>`) added from the channel rack's Add one ▸ menu with
+    /// the native host opted in (a mixer slot's effect list offers the native effects the same way): the next ticks
+    /// create it on the new channel, and an export of a pattern with one C5 on that channel has the note at its pitch,
+    /// centred (spec plugins/fruity-abi.md, "Voices"). Loads FL DLLs in-process and sets `OPENSTUDIO_NATIVE`, so
+    /// ignored; run in its own process:
+    /// `OS_NATIVE_ONE="Harmor" cargo test -p os-app --bin lemonstudio native_generator_from_the_rack_menu -- --ignored`.
+    /// The test process may then crash while it exits: some plugins fail in their own shutdown once the thread that
+    /// created them has ended (here the test's thread; the app creates them on its main thread, spec "Threads").
+    #[test]
+    #[ignore]
+    fn native_generator_from_the_rack_menu_plays_in_an_export() {
+        let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
+        // SAFETY: test-only, run alone; `OPENSTUDIO_NATIVE` is read only by the scan.
+        unsafe { std::env::set_var("OPENSTUDIO_NATIVE", "1") };
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        a.scan_plugins();
+        let fx = a.plugins.effects.iter().position(|e| e.desc.format == os_host::Format::Native).expect("a native effect");
+        let fx_menu = crate::mixer::effect_menu(&a.state, 0, 0.0, 0.0);
+        let fx_cmd = crate::playlist::Cmd::Mixer(crate::mixer::MCmd::AddEffect(0, fx));
+        assert!(fx_menu.items.iter().any(|it| it.label == a.state.hosted_effects[fx] && it.cmd == fx_cmd), "slot menu lists it");
+        let pick = a.state.hosted_generators.iter().position(|n| *n == name).expect("the plugin is found");
+        let add = crate::rack::add_one_items(&a.state).into_iter().find(|it| it.label == name).expect("Add one lists it");
+        assert!(add.cmd == crate::playlist::Cmd::Rack(crate::rack::RCmd::AddPlugin(pick)));
+        let row = a.state.project.channels.len();
+        crate::rack::run(&mut a, crate::rack::RCmd::AddPlugin(pick));
+        assert_eq!(a.state.pending_plugin, Some((row, pick)));
+        for _ in 0..100 {
+            a.tick();
+            if a.state.pending_plugin.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(a.state.hosted_rows.contains(&row), "hosted: {:?}", a.state.message);
+        assert_eq!(a.plugins.descriptor(row).map(|d| d.format), Some(os_host::Format::Native));
+        eprintln!("MESSAGE {:?}", a.state.message);
+        // One C5 at velocity 100, a beat long, on the new channel.
+        let channel = a.state.project.channels[row].index;
+        a.state.project.patterns[0].notes = vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(channel, 0) }];
+        let path = std::env::temp_dir().join(format!("openstudio-native-gen-{}.wav", std::process::id()));
+        a.transport.export(&a.state.project, os_engine::PlayMode::Pattern(1), 48000, path.clone());
+        let t0 = std::time::Instant::now();
+        let secs = loop {
+            match a.transport.export_status() {
+                crate::transport::Export::Done(r) => break r.expect("export"),
+                _ if t0.elapsed() > Duration::from_secs(60) => panic!("export did not finish"),
+                _ => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        let bytes = std::fs::read(&path).expect("file written");
+        let _ = std::fs::remove_file(&path);
+        let samples: Vec<f32> = bytes[44..].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let (left, right): (Vec<f32>, Vec<f32>) = samples.chunks_exact(2).map(|f| (f[0], f[1])).unzip();
+        let peak = |v: &[f32]| v.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        // Pitch from the note's middle: rising zero crossings over 0.1..0.4 s.
+        let mid = &left[4800..19200];
+        let rises = mid.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        let hz = rises as f64 / 0.3;
+        eprintln!("RESULT {secs:.2} s, peak L {:.3} R {:.3}, about {hz:.0} Hz", peak(&left), peak(&right));
+        assert!(peak(&left) > 0.01 && peak(&left) < 2.0, "audible, not too loud");
+        assert!((peak(&left) - peak(&right)).abs() < 0.2 * peak(&left), "centred");
+        // Key 60 = C5 = 261.6 Hz, within a semitone; 3x Osc sounds an octave up (spec plugins/3x-osc.md). Default
+        // patches with a plain fundamental: Harmor, Kepler, 3x Osc.
+        let near = |f: f64| (hz / f).log2().abs() < 1.0 / 12.0;
+        assert!(near(261.63) || (name == "3x Osc" && near(523.25)), "pitch {hz:.0} Hz");
+    }
+
     /// One installed native generator (`OS_NATIVE_ONE=<folder name>`) through the app's whole path: created on a rack
     /// row, a note played on an audio thread while its editor is open (spec plugins/fruity-abi.md, "Voices"), state
     /// saved and restored, closed and dropped. Prints the note's peak and whether it ended after its note off. Loads FL
