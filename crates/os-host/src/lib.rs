@@ -9,10 +9,17 @@
 //! and activates it, opens its editor, loads / saves state, reads / sets parameters and calls [`Plugin::idle`] every
 //! tick; the audio thread only calls the `Instrument` / `HostedEffect` methods through the engine (with `try_lock`).
 //! A `SharedPlugin` coerces to `os_engine::SharedInstrument` / `SharedEffect` (`plugin.clone() as SharedInstrument`).
+//!
+//! Crashes (all formats): every instance is created as a [`Guarded`] one ([`share`]), whose calls run under the crash
+//! guard ([`guard`]). A plugin whose code crashes is stopped and Lemon Studio keeps running.
 // spec: plugins/plugin-formats.md (hosting inside Lemon Studio), plugins/vst3-hosting.md
 
+pub mod guard;
+mod guarded;
 #[cfg(unix)]
 pub mod runloop;
+
+pub use guarded::{share, Guarded};
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -216,6 +223,12 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     /// CLAP context-menu host entries), by parameter id. Plugins without such menus return nothing.
     fn take_automation_requests(&mut self) -> Vec<u32> {
         Vec::new()
+    }
+
+    /// The exception code of the crash that stopped the instance ([`Guarded`]), if one did. A stopped instance is never
+    /// called again: its instrument plays silence, its effect passes the sound through.
+    fn stopped(&self) -> Option<u32> {
+        None
     }
 }
 

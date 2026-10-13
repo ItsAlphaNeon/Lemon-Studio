@@ -28,9 +28,16 @@ pub struct Hosted {
     /// Set while the open editor belongs to an Open plugin that joined the strip (host link).
     #[cfg(plugin_windows)]
     pub link: Option<os_hostlink::Link>,
+    /// The app was told that the instance stopped after a crash.
+    stop_told: bool,
 }
 
 impl Hosted {
+    /// A newly hosted instance, without a window.
+    pub fn new(plugin: SharedPlugin) -> Hosted {
+        Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None, stop_told: false }
+    }
+
     /// The open editor is an Open plugin's that joined the strip through the host link.
     #[cfg(plugin_windows)]
     fn linked(&self) -> bool {
@@ -65,6 +72,8 @@ pub enum Request {
     MiscMenu(usize, crate::misc_page::M, i32, i32),
     /// A greyed-out control of the window was clicked: the app says it is not available yet.
     NotAvailable(&'static str),
+    /// The instance stopped after a crash (its window is closed): what to tell the user.
+    Stopped(usize, String),
 }
 
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
@@ -197,7 +206,9 @@ impl Plugins {
         let mut effects: Vec<Available> = builtin_effects();
         let files = plugin_files().into_iter().flat_map(|(files, load)| files.into_iter().map(move |f| (f, load)));
         for (f, load) in files.filter(|(f, _)| f.file_stem().is_none_or(|s| s != OPEN_SAMPLER && s != OPEN_EQ && s != crate::osc3::OPEN_3X_OSC)) {
-            match load(&f) {
+            // A plugin file that crashes while it is loaded is left out (spec: plugins/plugin-formats.md, "Crash containment").
+            let loaded = os_host::guard::catch(|| load(&f)).unwrap_or_else(|c| Err(format!("{}: crashed while loading ({})", f.display(), os_host::guard::describe(c))));
+            match loaded {
                 Ok(lib) => {
                     for d in lib.plugins().iter() {
                         let list = if d.is_instrument() {
@@ -260,7 +271,7 @@ impl Plugins {
         // Trimmed audio clips start their note further into the sample (spec: plugins/open-sampler.md §7).
         p.use_start_param(SAMPLE_START);
         drop(p);
-        self.hosted.insert(row, Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None });
+        self.hosted.insert(row, Hosted::new(plugin));
         Ok(a.desc.name)
     }
 
@@ -281,7 +292,7 @@ impl Plugins {
             return Err(format!("{} could not start", a.desc.name));
         }
         drop(p);
-        self.hosted.insert(key, Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None });
+        self.hosted.insert(key, Hosted::new(plugin));
         Ok(a.desc.name)
     }
 
@@ -610,6 +621,8 @@ impl Plugins {
     /// UI tick: plugin housekeeping, then the windows' requests (a closed window is closed here).
     #[cfg_attr(not(plugin_windows), allow(unused_variables, unused_mut))]
     pub fn idle(&mut self, info: impl Fn(usize) -> Option<ChannelInfoT>) -> Vec<Request> {
+        sweep_retired();
+        os_host::guard::watch_windows(false);
         // Linux: the frames' X11 events, then the editors' descriptors and timers (`os_host::runloop`).
         #[cfg(target_os = "linux")]
         {
@@ -632,6 +645,12 @@ impl Plugins {
         }
         for (&row, h) in &mut self.hosted {
             if let Ok(mut p) = h.plugin.try_lock() {
+                // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
+                if let (Some(code), false) = (p.stopped(), h.stop_told) {
+                    h.stop_told = true;
+                    out.push(Request::Stopped(row, stopped_message(&p.desc().name, code, row >= FX_KEY)));
+                    close.push(row);
+                }
                 p.idle();
                 #[cfg(plugin_windows)]
                 if let (Some(w), false, Some((ew, eh))) = (&h.window, h.linked(), p.editor_size()) {
@@ -699,6 +718,12 @@ impl Plugins {
     }
 }
 
+/// What the user is told when instance `name` stopped after exception `code`.
+fn stopped_message(name: &str, code: u32, effect: bool) -> String {
+    let now = if effect { "its slot passes the sound through" } else { "its channel is silent" };
+    format!("{}: {now}. Save your project and restart Lemon Studio to use it again", os_host::guard::stopped_text(name, code))
+}
+
 /// Sizes window `w` to its freshly opened editor (`size` in device px at `scale`). An Open plugin answers the host
 /// link's hello: its page tabs go into the strip row and its editor shrinks to what is below them.
 #[cfg(plugin_windows)]
@@ -717,7 +742,8 @@ fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_ho
 
 impl Drop for Hosted {
     /// The editor closes before its frame window goes (a frame destroyed under an open editor took the editor's
-    /// window with it, and the plugin's own close then crashed at exit).
+    /// window with it, and the plugin's own close then crashed at exit). The instance itself is retired, not
+    /// destroyed here: see [`sweep_retired`].
     fn drop(&mut self) {
         #[cfg(plugin_windows)]
         if self.window.is_some() {
@@ -725,7 +751,37 @@ impl Drop for Hosted {
                 p.close_editor();
             }
         }
+        let plugin = self.plugin.clone();
+        let _ = RETIRED.try_with(|r| r.borrow_mut().push(plugin));
     }
+}
+
+thread_local! {
+    /// Instances the app has let go of while the engine may still hold them (it lets go on its own thread when it
+    /// swaps in a new engine). A plugin is destroyed on the UI thread, never on the engine's: plugins free their UI-side
+    /// objects in their destructors, and doing it on another thread while the UI thread delivers the plugin's
+    /// messages corrupted memory (spec: plugins/plugin-formats.md, "Destroying instances").
+    static RETIRED: std::cell::RefCell<Vec<SharedPlugin>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Destroys the retired instances nothing else holds any more (UI thread: every tick, and at exit).
+pub fn sweep_retired() {
+    let gone: Vec<SharedPlugin> = RETIRED
+        .try_with(|r| {
+            let mut r = r.borrow_mut();
+            let (gone, kept) = std::mem::take(&mut *r).into_iter().partition(|p| Arc::strong_count(p) == 1);
+            *r = kept;
+            gone
+        })
+        .unwrap_or_default();
+    // Outside the borrow: a plugin's destructor may run a message loop that retires another instance.
+    drop(gone);
+}
+
+/// Retired instances still held elsewhere (tests).
+#[cfg(test)]
+pub fn retired_count() -> usize {
+    RETIRED.with(|r| r.borrow().len())
 }
 
 /// Name of Lemon Studio's sampler plugin: it plays and edits every sampler channel (spec: plugins/open-sampler.md §7).
@@ -953,6 +1009,7 @@ pub type ChannelInfoT = ();
 mod tests {
     use super::*;
     use std::ffi::c_void;
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{HWND, RECT};
     use windows_sys::Win32::Graphics::Gdi::*;
@@ -2013,5 +2070,184 @@ mod tests {
             baseline.effects.iter().all(|a| a.desc.format != os_host::Format::Native),
             "native effects must not appear without the opt-in"
         );
+    }
+    /// An instance that records the thread it is destroyed on.
+    struct Tracked(os_host::Descriptor, Arc<Mutex<Option<std::thread::ThreadId>>>);
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            *self.1.lock().unwrap() = Some(std::thread::current().id());
+        }
+    }
+    impl os_engine::Instrument for Tracked {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_engine::HostedEffect for Tracked {
+        fn process_fx(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_host::Plugin for Tracked {
+        fn desc(&self) -> &os_host::Descriptor {
+            &self.0
+        }
+        fn activate(&mut self, _: u32) -> bool {
+            true
+        }
+        fn idle(&mut self) {}
+        fn has_editor(&self) -> bool {
+            false
+        }
+        fn editor_open(&self) -> bool {
+            false
+        }
+        fn open_editor(&mut self, _: *mut c_void, _: f32) -> Result<(u32, u32), String> {
+            Err(String::new())
+        }
+        fn editor_size(&self) -> Option<(u32, u32)> {
+            None
+        }
+        fn close_editor(&mut self) {}
+        fn save_state(&self) -> Option<Vec<u8>> {
+            None
+        }
+        fn load_state(&mut self, _: &[u8]) -> bool {
+            false
+        }
+    }
+
+    /// A removed instance the engine still plays is destroyed on the UI thread once the engine lets go of it on its own
+    /// thread, never on the engine's (spec: plugins/plugin-formats.md, "Destroying instances").
+    #[test]
+    fn removed_plugins_are_destroyed_on_the_ui_thread() {
+        let gone = Arc::new(Mutex::new(None));
+        let desc = builtin()[0].desc.clone();
+        let plugin: SharedPlugin = Arc::new(Mutex::new(Tracked(desc, gone.clone())));
+        let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+        pl.hosted.insert(3, Hosted::new(plugin));
+        let engine = pl.instruments();
+        pl.drop_key(3);
+        assert_eq!(retired_count(), 1);
+        sweep_retired();
+        assert_eq!(retired_count(), 1, "kept while the engine holds it");
+        std::thread::spawn(move || drop(engine)).join().unwrap();
+        assert_eq!(*gone.lock().unwrap(), None, "not destroyed by the engine's release");
+        pl.idle(|_| None);
+        assert_eq!(*gone.lock().unwrap(), Some(std::thread::current().id()));
+        assert_eq!(retired_count(), 0);
+    }
+    /// An effect whose processing faults once `FAULT` is set, as one with a bad pointer does.
+    struct Faulty(os_host::Descriptor, Arc<std::sync::atomic::AtomicBool>);
+    impl os_engine::Instrument for Faulty {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_engine::HostedEffect for Faulty {
+        fn process_fx(&mut self, _: u32, l: &mut [f32], _: &mut [f32]) {
+            if self.1.load(std::sync::atomic::Ordering::Relaxed) {
+                // SAFETY: deliberately not: the read faults and the crash guard catches it.
+                l[0] = unsafe { std::ptr::read_volatile(8 as *const f32) };
+            }
+        }
+    }
+    impl os_host::Plugin for Faulty {
+        fn desc(&self) -> &os_host::Descriptor {
+            &self.0
+        }
+        fn activate(&mut self, _: u32) -> bool {
+            true
+        }
+        fn idle(&mut self) {}
+        fn has_editor(&self) -> bool {
+            false
+        }
+        fn editor_open(&self) -> bool {
+            false
+        }
+        fn open_editor(&mut self, _: *mut c_void, _: f32) -> Result<(u32, u32), String> {
+            Err(String::new())
+        }
+        fn editor_size(&self) -> Option<(u32, u32)> {
+            None
+        }
+        fn close_editor(&mut self) {}
+        fn save_state(&self) -> Option<Vec<u8>> {
+            Some(vec![4, 5, 6])
+        }
+        fn load_state(&mut self, _: &[u8]) -> bool {
+            true
+        }
+    }
+
+    /// A hosted effect that crashes while the engine plays it is stopped, not the app: the user is told once, the slot
+    /// passes the sound through and a save keeps the state it last gave (spec: plugins/plugin-formats.md, "Crash
+    /// containment").
+    #[test]
+    fn a_crashed_plugin_is_stopped_and_reported_once() {
+        if !os_host::guard::contained() {
+            return;
+        }
+        let fault = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut desc = builtin_effects()[0].desc.clone();
+        desc.name = "Faulty".into();
+        let plugin = os_host::share(Faulty(desc, fault.clone()), Arc::new(os_host::guard::Module::default()));
+        let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+        let key = fx_key(1, 0);
+        pl.hosted.insert(key, Hosted::new(plugin));
+        assert_eq!(pl.state(key), Some(vec![4, 5, 6]));
+        let (_, _, fx) = pl.effects().pop().unwrap();
+        fault.store(true, std::sync::atomic::Ordering::Relaxed);
+        // The engine's thread runs into the crash.
+        let engine = fx.clone();
+        std::thread::spawn(move || engine.lock().unwrap().process_fx(48000, &mut [0.5; 8], &mut [0.5; 8])).join().unwrap();
+        let told: Vec<String> = pl.idle(|_| None).into_iter().filter_map(|r| if let Request::Stopped(k, t) = r { Some(format!("{k}: {t}")) } else { None }).collect();
+        assert_eq!(told, [format!("{key}: Faulty stopped after a memory error: its slot passes the sound through. Save your project and restart Lemon Studio to use it again")]);
+        assert!(!pl.idle(|_| None).iter().any(|r| matches!(r, Request::Stopped(..))), "told once");
+        let (mut l, mut r) = ([0.5f32; 8], [0.5f32; 8]);
+        fx.lock().unwrap().process_fx(48000, &mut l, &mut r);
+        assert_eq!((l, r), ([0.5; 8], [0.5; 8]), "passed through");
+        assert_eq!(pl.state(key), Some(vec![4, 5, 6]), "the state it last gave");
+    }
+
+    /// Third-party effects added to mixer slots with their windows open while a pattern plays, then removed one by
+    /// one, round after round. `OS_VST3_FX=<bundle>;<bundle>` (two effects whose editors run their own message
+    /// handling), `OS_ROUNDS` (default 6): `cargo test -p os-app --bin lemonstudio effect_churn -- --ignored`.
+    #[test]
+    #[ignore]
+    fn effect_churn() {
+        let Some(paths) = std::env::var("OS_VST3_FX").ok() else { return };
+        let rounds: usize = std::env::var("OS_ROUNDS").ok().and_then(|s| s.parse().ok()).unwrap_or(6);
+        let effects: Vec<Available> = paths
+            .split(';')
+            .map(|p| {
+                let lib = os_vst3::Module::load(std::path::Path::new(p)).map(|l| l as Arc<dyn Library>).expect("load");
+                let desc = lib.plugins()[0].clone();
+                Available { lib, desc }
+            })
+            .collect();
+        let mut pl = Plugins { effects, scale: 1.0, rate: 48000, ..Plugins::default() };
+        let project = crate::app::test_project();
+        let transport = crate::transport::Transport::new(None);
+        transport.update(&project);
+        transport.play(&project, os_engine::PlayMode::Pattern(1), 0.0);
+        for round in 0..rounds {
+            for i in 0..pl.effects.len() {
+                pl.create_effect(1, i as u8, i, None).unwrap();
+                let name = pl.effects[i].desc.name.clone();
+                let info = ChannelInfo { name, target: "Insert 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+                pl.open_window(fx_key(1, i as u8), info).unwrap();
+                transport.set_effects(pl.effects());
+                pump(&mut pl, 400);
+            }
+            for i in 0..pl.effects.len() {
+                pl.drop_key(fx_key(1, i as u8));
+                transport.set_effects(pl.effects());
+                pump(&mut pl, 150);
+            }
+            pump(&mut pl, 300);
+            assert_eq!(retired_count(), 0, "round {round}: the engine let go and the UI destroyed them");
+            println!("round {round} ok");
+        }
+        transport.stop();
     }
 }

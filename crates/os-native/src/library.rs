@@ -8,7 +8,7 @@
 // spec: plugins/fruity-abi.md
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use os_host::{Descriptor, Format, Kind, SharedPlugin};
 
@@ -74,9 +74,10 @@ impl os_host::Library for NativeLibrary {
             .find(|d| d.id == id)
             .cloned()
             .ok_or_else(|| format!("no native plugin {id}"))?;
-        let plugin = Plugin::load(&self.dll, &self.fl_dir, LOAD_RATE, MAX_BLOCK)
-            .map_err(|e| e.to_string())?;
-        Ok(Arc::new(Mutex::new(NativePlugin::new(plugin, desc))))
+        let load = || Plugin::load(&self.dll, &self.fl_dir, LOAD_RATE, MAX_BLOCK);
+        let plugin = os_host::guard::catch(load).map_err(|c| os_host::guard::stopped_text(&desc.name, c))?.map_err(|e| e.to_string())?;
+        let guard = os_host::guard::module_named(&self.dll);
+        Ok(os_host::share(NativePlugin::new(plugin, desc), guard))
     }
 }
 
