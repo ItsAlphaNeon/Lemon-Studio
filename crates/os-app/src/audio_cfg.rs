@@ -9,7 +9,7 @@ use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{BufferSize, SampleFormat, StreamConfig, SupportedBufferSize};
 
 /// The chosen output; `None` = the device's (or the system's) own.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioCfg {
     /// Output device by name.
     pub device: Option<String>,
@@ -17,6 +17,16 @@ pub struct AudioCfg {
     pub rate: Option<u32>,
     /// Buffer length, frames.
     pub buffer: Option<u32>,
+}
+
+/// The buffer length until one is chosen. Linux: 512 frames, since devices' own lengths there are often short enough
+/// to pop; elsewhere the device's own.
+pub const DEFAULT_BUFFER: Option<u32> = if cfg!(target_os = "linux") { Some(512) } else { None };
+
+impl Default for AudioCfg {
+    fn default() -> AudioCfg {
+        AudioCfg { device: None, rate: None, buffer: DEFAULT_BUFFER }
+    }
 }
 
 /// One setting changed from the Audio page's menus (`Cmd::Audio`).
@@ -56,7 +66,7 @@ impl AudioCfg {
         self
     }
 
-    /// `key=value` lines: `device`, `rate`, `buffer`; anything else is ignored.
+    /// `key=value` lines: `device`, `rate`, `buffer` (`device`: the device's own); anything else is ignored.
     pub fn parse(text: &str) -> AudioCfg {
         let mut c = AudioCfg::default();
         for line in text.lines() {
@@ -65,7 +75,8 @@ impl AudioCfg {
             match k.trim() {
                 "device" if !v.is_empty() => c.device = Some(v.to_string()),
                 "rate" => c.rate = v.parse().ok().filter(|&r| r >= 8000),
-                "buffer" => c.buffer = v.parse().ok().filter(|&b| b > 0),
+                "buffer" if v == "device" => c.buffer = None,
+                "buffer" => c.buffer = v.parse().ok().filter(|&b| b > 0).or(c.buffer),
                 _ => {}
             }
         }
@@ -80,8 +91,11 @@ impl AudioCfg {
         if let Some(r) = self.rate {
             s += &format!("rate={r}\n");
         }
-        if let Some(b) = self.buffer {
-            s += &format!("buffer={b}\n");
+        match self.buffer {
+            Some(b) => s += &format!("buffer={b}\n"),
+            // The device's own length, where the default is another (Linux).
+            None if DEFAULT_BUFFER.is_some() => s += "buffer=device\n",
+            None => {}
         }
         s
     }
@@ -179,5 +193,16 @@ mod tests {
         let d = AudioCfg::parse("colour=red\nrate=12\nbuffer=0\ndevice=\n");
         assert_eq!(d, AudioCfg::default());
         assert_eq!(AudioCfg::default().with(Set::Buffer(Some(512))).buffer, Some(512));
+        // The device's own buffer length is kept as chosen, also where the default is another.
+        let own = AudioCfg::default().with(Set::Buffer(None));
+        assert_eq!(AudioCfg::parse(&own.text()), own);
+    }
+
+    /// Linux starts at 512 frames (the devices' own lengths popped); elsewhere at the device's own.
+    #[test]
+    fn default_buffer_length() {
+        let want = if cfg!(target_os = "linux") { Some(512) } else { None };
+        assert_eq!(AudioCfg::default().buffer, want);
+        assert_eq!(AudioCfg::parse("rate=48000\n").buffer, want, "a settings file without a buffer length");
     }
 }
