@@ -41,13 +41,19 @@ static LINK: Mutex<Vec<(isize, LinkMsg)>> = Mutex::new(Vec::new());
 pub fn take_link() -> Vec<(isize, LinkMsg)> {
     LINK.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
 }
-/// A docked window moved and the main window repainted what it uncovered.
+/// A docked window moved, shrank or went: part of the main window was uncovered (`take_exposed`).
 static EXPOSED: AtomicBool = AtomicBool::new(false);
 
-/// Whether a docked plugin window uncovered part of the main window since the last call: the next present must show
-/// the whole canvas, not only the app's own damage (UI thread).
+/// Whether a docked plugin window uncovered part of the main window since the last call (moved, shrank, hid, was
+/// detached or closed): the next present must show the whole canvas, not only the app's own damage (UI thread).
 pub fn take_exposed() -> bool {
     EXPOSED.swap(false, Ordering::Relaxed)
+}
+
+/// The system asks the main window to repaint what a docked window uncovers, but a present of only the app's damage
+/// validates the whole window: the uncovered part would keep showing the plugin window.
+fn expose() {
+    EXPOSED.store(true, Ordering::Relaxed);
 }
 
 /// Keys seen since the last call (UI thread).
@@ -218,6 +224,7 @@ impl FrameWindow {
             ShowWindow(self.hwnd, SW_HIDE);
             let mut p = POINT { x: r.left, y: r.top };
             if on {
+                expose();
                 SetParent(self.hwnd, std::ptr::null_mut());
                 SetWindowLongPtrW(self.hwnd, GWL_STYLE, frame_style(true) as isize);
                 SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, owner);
@@ -352,6 +359,9 @@ impl FrameWindow {
 
 impl Drop for FrameWindow {
     fn drop(&mut self) {
+        if !self.detached() {
+            expose();
+        }
         unsafe { DestroyWindow(self.hwnd) };
     }
 }
@@ -465,9 +475,14 @@ unsafe fn layout(hwnd: HWND) {
     let (fw, fh) = st.size();
     let px = |v: f32| (v * w.scale).round() as i32;
     let tab_plugin = !st.misc;
-    let (ay, ed) = (st.area_y(), st.editor);
+    let (ay, ed, detached) = (st.area_y(), st.editor, st.detached);
     drop(st);
     unsafe {
+        let mut r: RECT = std::mem::zeroed();
+        GetWindowRect(hwnd, &mut r);
+        if !detached && (px(fw) < r.right - r.left || px(fh) < r.bottom - r.top) {
+            expose();
+        }
         SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, px(fw), px(fh), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(w.area, std::ptr::null_mut(), px(BORDER), px(ay), px(ed.0), px(ed.1), SWP_NOZORDER | SWP_NOACTIVATE);
         ShowWindow(w.area, if tab_plugin { SW_SHOW } else { SW_HIDE });
@@ -614,7 +629,7 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                         // editors) before the next move. Left to ordinary WM_PAINTs, which wait behind the mouse
                         // moves, the windows below lag behind and show trails of this one while it is dragged.
                         apply_clip(hwnd, &w.state);
-                        EXPOSED.store(true, Ordering::Relaxed);
+                        expose();
                         RedrawWindow(GetParent(hwnd), std::ptr::null(), std::ptr::null_mut(), RDW_UPDATENOW | RDW_ALLCHILDREN);
                     }
                     return 0;
@@ -686,8 +701,11 @@ unsafe fn reply(hwnd: HWND, w: &mut Win, r: Reply) {
             }
             Reply::Minimize => {
                 // A docked window hides (its channel's name button shows it again).
-                let cmd = if w.state.borrow().detached { SW_MINIMIZE } else { SW_HIDE };
-                ShowWindow(hwnd, cmd);
+                let detached = w.state.borrow().detached;
+                if !detached {
+                    expose();
+                }
+                ShowWindow(hwnd, if detached { SW_MINIMIZE } else { SW_HIDE });
             }
         }
     }
@@ -834,6 +852,56 @@ pub fn lift_hide() {
     let l = LIFT.lock().ok().and_then(|mut g| g.take());
     if let Some(l) = l {
         unsafe { DestroyWindow(l.0.hwnd) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A docked window that closes, hides, detaches or shrinks uncovers part of the main window, which must be presented
+    /// whole again or that part keeps showing the plugin window. Opens real windows:
+    /// `cargo test -p os-app --bin lemonstudio docked_windows_expose_the_main_window -- --ignored`.
+    #[test]
+    #[ignore]
+    fn docked_windows_expose_the_main_window() {
+        let class = wide("STATIC");
+        let owner = unsafe {
+            CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 900, 700, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null())
+        };
+        assert!(!owner.is_null());
+        let info = ChannelInfo { name: "Keys".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let docked = || {
+            let mut r: RECT = unsafe { std::mem::zeroed() };
+            unsafe { GetWindowRect(owner, &mut r) };
+            let f = FrameWindow::new(owner as isize, info.clone(), (480.0, 270.0), 1.0, (r.left + 20, r.top + 20), false).unwrap();
+            f.raise();
+            assert!(!f.detached());
+            f
+        };
+
+        let f = docked();
+        take_exposed();
+        f.set_strip(false);
+        assert!(take_exposed(), "shrinking");
+        f.set_strip(true);
+        assert!(!take_exposed(), "growing uncovers nothing");
+
+        // The title bar's minimize button hides a docked window.
+        let (w, _) = f.state.borrow().size();
+        let at = ((w - 33.0) as isize) | (15 << 16);
+        unsafe { SendMessageW(f.hwnd, WM_LBUTTONDOWN, 1, at) };
+        assert_eq!(unsafe { IsWindowVisible(f.hwnd) }, 0);
+        assert!(take_exposed(), "hiding");
+
+        f.set_detached(owner as isize, true);
+        assert!(take_exposed(), "detaching");
+        drop(f);
+        assert!(!take_exposed(), "a detached window covers nothing of the main window");
+
+        drop(docked());
+        assert!(take_exposed(), "closing");
+        unsafe { DestroyWindow(owner) };
     }
 }
 
