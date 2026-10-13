@@ -273,12 +273,31 @@ struct Voice {
     pan: (f32, f32),
     /// Its stretcher in `Engine::streams` (realtime stretch methods).
     rt: Option<u16>,
+    /// Frames left of the crossfade from the plain reading to the stretcher (a voice that starts stretching while it
+    /// plays).
+    xf: u32,
 }
 
 /// Output frames a realtime stretch voice makes at a time.
 const RT_BLOCK: usize = 128;
 
-/// The stretcher of a voice in a realtime stretch method and the reader that feeds it (spec §5.6).
+/// A realtime voice has nothing to stretch while stretching would make the sample, at the voice's pitch, no more than
+/// this much longer or shorter (seconds): it then plays the sample by resampling at its pitch. TIME is kept in 1/192 of
+/// a beat, so a sample fitted to its own duration can be a little off it (a few ms; half a unit is 2.6 ms at 60 BPM).
+/// **(OS)**
+const NEAR: f64 = 0.003;
+
+/// Frames of the crossfade from the plain reading to the stretcher when a voice starts stretching while it plays.
+/// **(OS)**
+const SWITCH: u32 = 256;
+
+/// Nothing to stretch: `frames` of sample last about as long read at `step` (its pitch) as at `speed` (the stretch).
+fn nothing_to_stretch(frames: f64, step: f64, speed: f64, rate: f64) -> bool {
+    (frames / step - frames / speed).abs() <= NEAR * rate
+}
+
+/// The stretcher of a voice in a realtime stretch method and the reader that feeds it (spec §5.6). A voice starts it
+/// only once it has something to stretch (`render_voice`).
 struct Rt {
     st: Stream,
     busy: bool,
@@ -291,27 +310,38 @@ struct Rt {
     l: Vec<f32>,
     r: Vec<f32>,
     at: usize,
-    /// Output frames still to drop: the stretcher's latency.
+    /// Output frames still to drop: the stretcher's latency, and the frames run ahead of a start inside the sample.
     skip: usize,
+    /// At a start on the sample's first frame: the last `fold_n` frames out before the start (interleaved stereo,
+    /// nearest the start first), folded back onto as many after it; `folded` of them are done.
+    fold: Vec<f32>,
+    fold_n: usize,
+    folded: usize,
 }
 
 impl Rt {
     fn new(rate: u32) -> Rt {
+        let st = Stream::new(rate);
+        let fold = vec![0.0; 2 * st.delay()];
+        let input = Vec::with_capacity(2 * (st.history() + st.lead()).max(RT_BLOCK * 16));
         Rt {
-            st: Stream::new(rate),
+            st,
             busy: false,
             started: false,
             rpos: 0,
             owed: 0.0,
-            input: Vec::with_capacity(RT_BLOCK * 16),
+            input,
             l: vec![0.0; RT_BLOCK],
             r: vec![0.0; RT_BLOCK],
             at: RT_BLOCK,
             skip: 0,
+            fold,
+            fold_n: 0,
+            folded: 0,
         }
     }
 
-    /// Pushes the next input frame onto `input`: the loop followed, silence past the end.
+    /// Pushes the next input frame onto `input`: the loop followed, silence before the start and past the end.
     fn feed(&mut self, s: &Sample, (ls, le): (f64, Option<f64>)) {
         if let Some(le) = le {
             let (ls, le) = (ls as i64, le as i64);
@@ -328,30 +358,50 @@ impl Rt {
         self.rpos += 1;
     }
 
-    /// The next output frame of a voice heard from `pos` on: `transpose` = the pitch factor, `speed` = input frames per
-    /// output frame.
-    fn frame(&mut self, s: &Sample, pos: f64, transpose: f64, speed: f64, lp: (f64, Option<f64>)) -> (f32, f32) {
-        if !self.started {
-            self.started = true;
-            (self.rpos, self.owed) = (pos.max(0.0).floor() as i64, 0.0);
-            self.input.clear();
-            for _ in 0..self.st.lead() {
-                self.feed(s, lp);
-            }
-            self.st.set_transpose(transpose);
-            self.st.start(&self.input, speed);
-            self.skip = self.st.delay();
-            self.at = RT_BLOCK;
+    /// Starts the stretcher for a voice heard from `pos` on, its latency taken out (spec: audio/time-stretch.md
+    /// "Lemon Studio"). **(OS)** How it starts: a voice on the sample's first frame starts the way the library starts a
+    /// whole buffer (silence before it; what comes out before the start is folded back onto what follows, so a
+    /// stretched note starts like the same sample stretched first). A voice further in (a start offset, a trimmed
+    /// clip, a voice that starts stretching while it plays) first gives the stretcher the frames before `pos` and runs
+    /// it one analysis interval ahead, so the note is heard at once and at full level.
+    fn start(&mut self, s: &Sample, pos: f64, transpose: f64, speed: f64, lp: (f64, Option<f64>)) {
+        let fresh = pos < 1.0;
+        let (hist, ahead) = if fresh { (0, 0) } else { (self.st.history(), self.st.interval()) };
+        let back = (ahead as f64 * speed).round() as i64;
+        self.rpos = pos.max(0.0).floor() as i64 - back - hist as i64;
+        self.owed = 0.0;
+        self.input.clear();
+        for _ in 0..hist + self.st.lead() {
+            self.feed(s, lp);
         }
+        self.st.set_transpose(transpose);
+        self.st.start(&self.input, speed);
+        self.skip = self.st.delay() + ahead;
+        self.fold_n = if fresh { self.st.delay() } else { 0 };
+        self.folded = 0;
+        self.at = RT_BLOCK;
+        self.started = true;
+    }
+
+    /// The next output frame: `transpose` = the pitch factor, `speed` = input frames per output frame.
+    fn frame(&mut self, s: &Sample, transpose: f64, speed: f64, lp: (f64, Option<f64>)) -> (f32, f32) {
         loop {
             if self.at < RT_BLOCK {
-                let f = (self.l[self.at], self.r[self.at]);
+                let (mut a, mut b) = (self.l[self.at], self.r[self.at]);
                 self.at += 1;
                 if self.skip > 0 {
                     self.skip -= 1;
+                    if self.skip < self.fold_n {
+                        (self.fold[2 * self.skip], self.fold[2 * self.skip + 1]) = (a, b);
+                    }
                     continue;
                 }
-                return f;
+                if self.folded < self.fold_n {
+                    a -= self.fold[2 * self.folded];
+                    b -= self.fold[2 * self.folded + 1];
+                    self.folded += 1;
+                }
+                return (a, b);
             }
             self.owed += RT_BLOCK as f64 * speed;
             let k = self.owed.floor();
@@ -554,6 +604,7 @@ impl Engine {
             gain: -1.0,
             pan: (1.0, 1.0),
             rt,
+            xf: 0,
         });
     }
 
@@ -754,8 +805,17 @@ fn render_voice(
         let (p0, p1) = (if v.gain < 0.0 { pan } else { v.pan }, pan);
         // The pitch factor: a resampling step, or a realtime voice's transposition (with the stretch's PITCH).
         let step = v.key_step * 2f64.powf((b.cents + m0.cents + v.tune * 100.0 + b.ts_cents) / 1200.0) * rs;
-        // What is heard moves on by `step` source frames per frame, or by `speed` in a realtime voice.
-        let advance = if rt.is_some() { speed } else { step };
+        // A realtime voice plays the sample by resampling while there is nothing to stretch (the root key, no PITCH,
+        // MUL 1 or TIME the sample's own duration); its stretcher starts the first time there is, and stays. **(OS)**
+        if let Some(x) = rt.as_mut() {
+            if !x.started && !nothing_to_stretch(n, step, speed, rate) {
+                x.start(s, v.pos, step, speed, (ls, le));
+                v.xf = if v.age > 0 { SWITCH } else { 0 };
+            }
+        }
+        let stretching = rt.as_ref().is_some_and(|x| x.started);
+        // What is heard moves on by `step` source frames per frame, or by `speed` in a stretching voice.
+        let advance = if stretching { speed } else { step };
         for j in 0..chunk {
             // The loop: past its end the position goes back by the loop's length (spec: audio/sampler.md "In a
             // sustain loop").
@@ -773,8 +833,18 @@ fn render_voice(
                 v.close = Some(Close::new(&dc, rate));
             }
             let (mut l, mut r) = match rt.as_mut() {
-                Some(x) => x.frame(s, v.pos, step, speed, (ls, le)),
-                None => resample::read(&s.left, &s.right, v.pos, step.abs(), quality),
+                Some(x) if stretching => {
+                    let (a, b) = x.frame(s, step, speed, (ls, le));
+                    if v.xf > 0 {
+                        let (pa, pb) = resample::read(&s.left, &s.right, v.pos, speed, quality);
+                        let u = v.xf as f32 / SWITCH as f32;
+                        v.xf -= 1;
+                        (a + (pa - a) * u, b + (pb - b) * u)
+                    } else {
+                        (a, b)
+                    }
+                }
+                _ => resample::read(&s.left, &s.right, v.pos, step.abs(), quality),
             };
             l = v.filt.run(0, j, l);
             r = v.filt.run(1, j, r);
@@ -1192,6 +1262,100 @@ mod tests {
             e.reset();
         }
         assert!(e.streams.iter().all(|r| !r.busy), "stretchers freed");
+    }
+
+    // spec: audio/time-stretch.md "Lemon Studio" (OS): a realtime voice with nothing to stretch plays the sample as
+    // it is, its stretcher never started (here a 44.1 kHz sample at 48 kHz: rate conversion alone).
+    #[test]
+    fn a_realtime_voice_with_nothing_to_stretch_plays_the_sample_as_it_is() {
+        let x: Vec<f32> = (0..30000).map(|i| ((i * 7919 % 2003) as f32 / 2003.0 - 0.5) * (-(i as f32) / 9000.0).exp()).collect();
+        let s = Arc::new(Sample { rate: 44100, left: x.clone(), right: x });
+        let mut plain = Engine::new(48000.0);
+        plain.sample = Some(s.clone());
+        let mut e = Engine::new(48000.0);
+        e.sample = Some(s);
+        let rt = Block { realtime: true, ts_ratio: 1.0, ..Block::default() };
+        assert_eq!(play(&mut e, 60, &rt, 0.8), play(&mut plain, 60, &Block::default(), 0.8));
+        assert!(!e.streams.is_empty() && e.streams.iter().all(|r| !r.started), "the stretcher stayed off");
+        // TIME a little off the duration (0.68 s to 0.6826 s): still nothing to stretch.
+        e.reset();
+        plain.reset();
+        let near = Block { realtime: true, ts_ratio: 1.004, ..Block::default() };
+        assert_eq!(play(&mut e, 60, &near, 0.8), play(&mut plain, 60, &Block::default(), 0.8));
+        assert!(e.streams.iter().all(|r| !r.started), "the stretcher stayed off");
+        // The same on a long sample is 0.1 s longer: stretched.
+        e.reset();
+        e.sample = Some(Arc::new(sine(440.0, 1_200_000)));
+        play(&mut e, 60, &near, 0.1);
+        assert!(e.streams.iter().any(|r| r.started), "stretching");
+    }
+
+    // spec §5.6 + audio/time-stretch.md "Lemon Studio" (OS): a voice whose pitch moves while it plays starts its
+    // stretcher then, without a click, and keeps its length.
+    #[test]
+    fn a_realtime_voice_starts_stretching_when_its_pitch_moves() {
+        let mut e = Engine::new(48000.0);
+        e.sample = Some(Arc::new(sine(440.0, 48000)));
+        let b = Block { realtime: true, ts_ratio: 1.0, ..Block::default() };
+        let mut out = play(&mut e, 60, &b, 0.1);
+        assert!(e.streams.iter().all(|r| !r.started));
+        e.tune(60, 1.0);
+        let (mut l, mut r) = (vec![0.0; 480], vec![0.0; 480]);
+        for i in 0..110 {
+            if i == 85 {
+                assert!(e.has_voices(), "still playing before the sample's own length");
+            }
+            l.fill(0.0);
+            r.fill(0.0);
+            e.render(&mut l, &mut r, &b);
+            out.extend_from_slice(&l);
+        }
+        assert!(e.streams.iter().any(|r| r.started), "stretching");
+        assert!(!e.has_voices(), "over at the sample's length");
+        let f = hz(&out[14400..43200]);
+        assert!((f - 440.0 * 2f64.powf(1.0 / 12.0)).abs() < 3.0, "{f} Hz");
+        // No click where it changes over: no step much bigger than the sine's own.
+        let jump = out[4700..5400].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        assert!(jump < 0.05, "{jump}");
+        assert!(rms(&out[4800..5400]) > 0.3, "{}", rms(&out[4800..5400]));
+    }
+
+    // spec: audio/time-stretch.md "Lemon Studio" (OS): a stretched voice from the sample's start begins the way the
+    // sample stretched first begins: on time, at its level.
+    #[test]
+    fn a_realtime_voice_starts_like_the_sample_stretched_first() {
+        let x: Vec<f32> = (0..24000)
+            .map(|i| {
+                let t = i as f64 / 48000.0;
+                ((2.0 * PI * (50.0 * t + 110.0 / 30.0 * (1.0 - (-30.0 * t).exp()))).sin() * (-12.0 * t).exp() * 0.9) as f32
+            })
+            .collect();
+        let s = Sample { rate: 48000, left: x.clone(), right: x };
+        let whole = stretch(&s, 2.0, 1.0);
+        let mut e = Engine::new(48000.0);
+        e.sample = Some(Arc::new(s));
+        let out = play(&mut e, 60, &Block { realtime: true, ts_ratio: 2.0, ..Block::default() }, 0.1);
+        let err = out.iter().zip(&whole.left).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(err < 1e-4, "{err}");
+    }
+
+    // spec: audio/time-stretch.md "Lemon Studio" (OS): a stretched voice that starts inside the sample is heard at
+    // once at full level (its stretcher is given what lies before the start).
+    #[test]
+    fn a_realtime_voice_inside_the_sample_starts_at_full_level() {
+        let mut e = Engine::new(48000.0);
+        e.sample = Some(Arc::new(sine(1000.0, 96000)));
+        let peak = |x: &[f32]| x.iter().fold(0.0, |m: f32, v| m.max(v.abs()));
+        for (ratio, key) in [(2.0, 60u8), (0.5, 60), (1.0, 67)] {
+            let b = Block { realtime: true, ts_ratio: ratio, start_offset: 0.5, ..Block::default() };
+            let out = play(&mut e, key, &b, 0.1);
+            // Peaks over two periods or more.
+            for (a, z) in [(0, 96), (96, 240), (240, 480), (480, 1440)] {
+                let db = 20.0 * (peak(&out[a..z]) / 0.5).log10();
+                assert!(db.abs() < 1.0, "ratio {ratio} key {key}, frames {a}..{z}: {db} dB");
+            }
+            e.reset();
+        }
     }
 
     // spec §5.6: Resample fits TIME by speed; PITCH plays no part.
