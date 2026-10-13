@@ -79,6 +79,10 @@ struct Shell {
     /// A title-bar move or edge resize done by hand: cursor and window rect (screen px) at the press, and the edge
     /// (None = move). The system's own move / size loops block the event loop, which froze all drawing.
     grab: Option<Grab>,
+    /// A press on the maximized window's title bar: the cursor (screen px) and its height in the window (physical px).
+    /// The window is restored under the cursor and moved once the cursor travels past the drag distance; a click
+    /// alone leaves it maximized.
+    unmax: Option<((i32, i32), i32)>,
     /// A tick or mouse input left damage that is not painted yet: `about_to_wait` asks for the frame (see `FRAME`).
     pending: bool,
     /// When the last frame was painted (finished presenting), and when its paint started.
@@ -170,6 +174,20 @@ fn set_rect(window: &Window, r: (i32, i32, i32, i32)) {
 
 #[cfg(not(windows))]
 fn set_rect(_: &Window, _: (i32, i32, i32, i32)) {}
+
+/// Whether the cursor went from `from` to `to` (screen px) farther than the system lets a click wander before it
+/// counts as a drag.
+#[cfg(windows)]
+fn past_drag_distance(from: (i32, i32), to: (i32, i32)) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SM_CYDRAG};
+    let (dx, dy) = unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+    (to.0 - from.0).abs() > dx.max(1) || (to.1 - from.1).abs() > dy.max(1)
+}
+
+#[cfg(not(windows))]
+fn past_drag_distance(from: (i32, i32), to: (i32, i32)) -> bool {
+    (to.0 - from.0).abs() > 4 || (to.1 - from.1).abs() > 4
+}
 
 impl Grab {
     /// The window rect for the cursor at `cursor`, never below `min` (physical px).
@@ -501,6 +519,22 @@ impl ApplicationHandler for Shell {
                 if self.lock.is_some() {
                     return;
                 }
+                if let (Some((at, grab_y)), Some((cursor, (l, _, r, _)))) = (self.unmax, screen_state(&window)) {
+                    if !past_drag_distance(at, cursor) {
+                        return;
+                    }
+                    // Dragging a maximized window restores it under the cursor, then moves it.
+                    self.unmax = None;
+                    let frac = f64::from(at.0 - l) / f64::from((r - l).max(1));
+                    window.set_maximized(false);
+                    if let Some((_, (nl, nt, nr, nb))) = screen_state(&window) {
+                        let w = nr - nl;
+                        let left = at.0 - (frac * f64::from(w)) as i32;
+                        let rect = (left, at.1 - grab_y, left + w, at.1 - grab_y + (nb - nt));
+                        set_rect(&window, rect);
+                        self.grab = Some(Grab { cursor: at, rect, edge: None });
+                    }
+                }
                 if let (Some(g), Some((cursor, _))) = (self.grab, screen_state(&window)) {
                     let k = window.scale_factor();
                     let min = ((1024.0 * k) as i32, (600.0 * k) as i32);
@@ -537,20 +571,13 @@ impl ApplicationHandler for Shell {
                         if double {
                             window.set_maximized(!window.is_maximized());
                         } else if window.is_maximized() {
-                            // Dragging a maximized window restores it under the cursor, then moves it. Without screen
-                            // coordinates (Linux) the window system's own move does both.
+                            // Dragging a maximized window restores it under the cursor, then moves it, once the cursor
+                            // has travelled (`unmax`). Without screen coordinates (Linux) the window system's own move
+                            // does both.
                             match screen_state(&window) {
-                                Some(((cx, cy), (l, _, r, _))) => {
-                                    let frac = f64::from(cx - l) / f64::from((r - l).max(1));
+                                Some((cursor, _)) => {
                                     let grab_y = (self.app.mouse.1 * scale) as i32 + self.inset.1 as i32;
-                                    window.set_maximized(false);
-                                    if let Some((_, (nl, nt, nr, nb))) = screen_state(&window) {
-                                        let w = nr - nl;
-                                        let left = cx - (frac * f64::from(w)) as i32;
-                                        let rect = (left, cy - grab_y, left + w, cy - grab_y + (nb - nt));
-                                        set_rect(&window, rect);
-                                        self.grab = Some(Grab { cursor: (cx, cy), rect, edge: None });
-                                    }
+                                    self.unmax = Some((cursor, grab_y));
                                 }
                                 None => {
                                     let _ = window.drag_window();
@@ -567,6 +594,7 @@ impl ApplicationHandler for Shell {
                     }
                 } else {
                     self.grab = None;
+                    self.unmax = None;
                     self.unlock_cursor(&window);
                     self.app.mouse_up();
                     if self.app.resize_cursor && self.app.drag.is_none() {
@@ -643,6 +671,7 @@ impl ApplicationHandler for Shell {
                 crate::plugin_window::main_focused(focused);
                 if !focused {
                     self.grab = None;
+                    self.unmax = None;
                     self.app.typing_release_all();
                     window.request_redraw();
                 }
@@ -1202,6 +1231,7 @@ fn main() {
         inset: (0, 0, 0, 0),
         edge: None,
         grab: None,
+        unmax: None,
         pending: false,
         painted: Instant::now(),
         frame_start: Instant::now(),
