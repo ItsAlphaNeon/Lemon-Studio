@@ -890,7 +890,6 @@ pub enum RCmd {
     ChangeColor(usize),
     RandomColor(usize),
     LoadSample(usize),
-    InsertPicker(usize),
     Clone(usize),
     Delete(usize),
     Cut(usize),
@@ -919,9 +918,6 @@ pub enum RCmd {
     LoopType(u8),
     Burn(bool),
     // Options menu (§17).
-    AddOne,
-    /// Add one ▸ a hosted instrument (index into `State::hosted_generators`).
-    AddPlugin(usize),
     SelectUnused,
     CloneSel,
     DeleteSel,
@@ -1044,12 +1040,9 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None }
 }
 
-/// Add one ▸ / Insert ▸: the plugin picker first, then the instruments it offers.
+/// Add one ▸: the generator menu, a pick goes to the bottom of the rack (spec: ui/plugin-menu.md §1).
 pub(crate) fn add_one_items(s: &State) -> Vec<PItem> {
-    let mut v = vec![it("Open plugin picker", RCmd::AddOne), PItem::sep()];
-    v.push(it("Open Sampler", RCmd::AddOne));
-    v.extend(s.hosted_generators.iter().enumerate().map(|(i, &n)| it(n, RCmd::AddPlugin(i))));
-    v
+    crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(None), true)
 }
 
 /// Right click on a name button (§18): two columns.
@@ -1069,8 +1062,8 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::not_yet("Cut itself").mark(Mark::Check(false)),
         PItem::new("Show waveform preview", Cmd::Nothing).off(),
         PItem::sep(),
-        PItem::sub("Insert", vec![it("Open plugin picker", RCmd::InsertPicker(r))]),
-        PItem::sub("Replace", vec![PItem::not_yet("Open plugin picker")]),
+        PItem::sub("Insert", crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(Some(r)), true)),
+        PItem::not_yet("Replace"),
         PItem::new("Patcherize", Cmd::Nothing).off(),
         it("Clone", RCmd::Clone(r)),
         it("Delete...", RCmd::Delete(r)),
@@ -1226,12 +1219,6 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::CloneSel => clone_rows(app, &sel),
         RCmd::MoveSel(d) => move_selected(app, d),
         RCmd::Sort(by) => sort(app, by),
-        RCmd::AddOne | RCmd::InsertPicker(_) => {
-            app.state.picker_open = true;
-            app.state.picker_cat = None;
-        }
-        // As if picked in the plugin picker (its generator tiles: the built-in ones, then the hosted instruments).
-        RCmd::AddPlugin(i) => app.act(crate::app::Action::PickerTile(false, crate::views::picker::GENERATORS.len() + i)),
         RCmd::LoadSample(r) => {
             if let Some(p) = crate::dialog::modal(|| rfd::FileDialog::new().add_filter("Audio", &["wav", "mp3", "flac", "ogg", "aif", "aiff"]).pick_file()) {
                 let s = &mut app.state;
@@ -1483,9 +1470,6 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::CloneSel
         | RCmd::MoveSel(_)
         | RCmd::Sort(_)
-        | RCmd::AddOne
-        | RCmd::AddPlugin(_)
-        | RCmd::InsertPicker(_)
         | RCmd::LoadSample(_)
         | RCmd::PianoRoll(_) => None,
     };

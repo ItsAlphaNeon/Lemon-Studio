@@ -122,15 +122,10 @@ pub enum Action {
     RackSelect(usize),
     RackMixer(usize),
     RackAdd,
-    /// Plugin picker: background (click closes), tab, "All" tab, tile (effects?, index).
-    PickerBg,
     /// A rotary control (drag vertically, wheel steps).
     Knob(crate::knobs::KnobId),
-    /// Toolbar plugin picker button.
+    /// Toolbar plugin button: the plugin menu (spec: ui/plugin-menu.md §1).
     PickerOpen,
-    PickerTab(bool, usize),
-    PickerAll,
-    PickerTile(bool, usize),
     RackResize(u8),
     /// Step / piano-roll view toggle, and a row's mini piano roll (spec: ui/channel-rack.md §6).
     RackRollView,
@@ -665,15 +660,14 @@ pub struct State {
     pub project: Project,
     /// The toolbar's scope / analyzer and peak bars (fed from the audio tap in `App::tick`).
     pub monitor: crate::monitor::Monitor,
-    /// Names of the hosted instruments offered after the built-in generators in the picker.
-    pub hosted_generators: Vec<&'static str>,
-    /// Names of the effect plugins found (mixer slots, picker effects side).
-    pub hosted_effects: Vec<&'static str>,
+    /// The plugin database: choices, last scan, the plugin menus' lists, the plugin manager's table (spec:
+    /// ui/plugin-manager.md, ui/plugin-menu.md).
+    pub plugdb: crate::plugin_db::Db,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
     /// Rack rows played by a hosted plugin.
     pub hosted_rows: Vec<usize>,
-    /// Requests for the plugin host, handled on the next tick: (row, available index) to create, row to open.
+    /// Requests for the plugin host, handled on the next tick: (row, `Plugins::available` index) to create, row to open.
     pub pending_plugin: Option<(usize, usize)>,
     pub pending_open: Option<usize>,
     /// Samples to load into rows' Open Sampler instances on the next tick (browser send, drops on a rack row).
@@ -701,11 +695,8 @@ pub struct State {
     pub menu_open: Option<usize>,
     /// Piano roll event panel Control menu.
     pub lane_menu: bool,
-    pub picker_open: bool,
     /// Settings window (OPTIONS > ... settings, F10 / F11).
     pub settings: views::settings::SettingsUi,
-    /// Plugin picker category filter: (effects half?, category index).
-    pub picker_cat: Option<(bool, usize)>,
     pub playlist_scroll: (f32, f32),
     /// Playlist horizontal zoom, pixels per bar.
     pub playlist_bar_w: f32,
@@ -893,6 +884,9 @@ pub struct App {
     sampler_failed: Vec<usize>,
     /// Mixer slots (`plugins::fx_key`) whose Open Parametric EQ 2 could not start (not retried).
     fx_failed: Vec<usize>,
+    /// The running plugin scan, and the scan asked for while it runs (spec: ui/plugin-manager.md §4).
+    pub(crate) sweep: Option<crate::plugin_scan::Sweep>,
+    pub(crate) scan_queued: Option<crate::plugin_db::Mode>,
     /// Wrapped plugin channels (rows) and slots (`fx_key`) whose plugin was not found or did not start (not retried).
     pub(crate) wrap_failed: Vec<usize>,
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
@@ -916,7 +910,7 @@ impl App {
             plugins: crate::plugins::Plugins::default(),
             state: State {
                 project,
-                hosted_generators: Vec::new(),
+                plugdb: Default::default(),
                 hosted_rows: Vec::new(),
                 pending_plugin: None,
                 pending_open: None,
@@ -935,14 +929,11 @@ impl App {
                 selected_channel: 0,
                 selected_mixer: 1,
                 mixer: Default::default(),
-                hosted_effects: Vec::new(),
                 pattern: 1,
                 song_mode: false,
                 menu_open: None,
                 lane_menu: false,
-                picker_open: false,
                 settings: Default::default(),
-                picker_cat: None,
                 playlist_scroll: (0.0, 0.0),
                 playlist_bar_w: views::playlist::BAR_W,
                 mixer_scroll: 0.0,
@@ -1020,6 +1011,8 @@ impl App {
             piano_panel: None,
             sampler_failed: Vec::new(),
             fx_failed: Vec::new(),
+            sweep: None,
+            scan_queued: None,
             wrap_failed: Vec::new(),
             loading: None,
             export: None,
@@ -1285,23 +1278,6 @@ impl App {
         self.save_to(target);
     }
 
-    /// Scans the plugin folders and offers the instruments found in the picker.
-    pub fn scan_plugins(&mut self) {
-        let mut p = crate::plugins::Plugins::scan();
-        (p.owner, p.scale) = (self.plugins.owner, self.plugins.scale);
-        self.plugins = p;
-        // Picker names live for the whole run (`Plugin::name` is static).
-        // Open Sampler is the picker's own "Sampler" tile (it plays every sampler channel), not a separate entry.
-        self.state.hosted_generators = self
-            .plugins
-            .names()
-            .into_iter()
-            .filter(|n| n != crate::plugins::OPEN_SAMPLER)
-            .map(|n| &*Box::leak(n.into_boxed_str()))
-            .collect();
-        self.state.hosted_effects = self.plugins.effect_names().into_iter().map(|n| &*Box::leak(n.into_boxed_str())).collect();
-    }
-
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
     pub(crate) fn reset_hosted(&mut self) {
         self.plugins.clear();
@@ -1408,6 +1384,7 @@ impl App {
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     fn plugin_tick(&mut self) {
+        self.scan_tick();
         self.loading_tick();
         self.export_tick();
         self.midi_tick();
@@ -1427,9 +1404,7 @@ impl App {
                 }
             }
         }
-        if let Some((row, pick)) = self.state.pending_plugin.take() {
-            // `pick` indexes the picker's hosted generators (Open Sampler is left out there).
-            let index = self.state.hosted_generators.get(pick).and_then(|n| self.plugins.index_of(n)).unwrap_or(usize::MAX);
+        if let Some((row, index)) = self.state.pending_plugin.take() {
             match self.plugins.create(row, index) {
                 Ok(name) => {
                     self.state.hosted_rows.push(row);
@@ -2383,20 +2358,17 @@ impl App {
                 st.tab = i;
                 st.scroll = 0.0;
             }
-            // The one check that does real work: opt in / out of the experimental native host and
-            // re-scan so the picker's effect list updates (spec plugins/fruity-abi.md). Its displayed
-            // state comes straight from `os_native::enabled()` (the row's default).
+            // Opt in / out of the experimental native host and scan again so the effect lists follow (spec
+            // plugins/fruity-abi.md). Its displayed state comes straight from `os_native::enabled()`.
             SAct::Check(k) if k == views::settings::NATIVE_HOST_CHECK => {
                 let on = !os_native::enabled();
                 os_native::set_enabled(on);
-                self.scan_plugins();
-                let n = self.plugins.effects.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
-                self.state.message = Some(if on {
-                    format!("Experimental native plugin host on: {n} native effects available")
-                } else {
-                    "Experimental native plugin host off".into()
-                });
+                self.start_scan(crate::plugin_db::Mode::Changed);
+                self.state.message = Some(if on { "Experimental native plugin host on: looking for native effects".into() } else { "Experimental native plugin host off".into() });
             }
+            // The plugin manager (spec: ui/plugin-manager.md §2).
+            SAct::Check(k) if views::settings::plugin_check(k) => self.plugin_check(k),
+            SAct::Plug(p) => self.plugin_act(p),
             // Checks and buttons outside `settings::LIVE` are drawn greyed out with an `Action::Placeholder` hit instead.
             SAct::Check(k) => self.state.message = Some(off_text(k)),
             SAct::Group(k) => {
@@ -2437,10 +2409,10 @@ impl App {
             }
             SAct::Button("Reset") => self.settings_act(SAct::Preset(0)),
             SAct::Button("Load theme...") => self.theme_dialog(),
-            SAct::Button("Manage plugins") => {
-                self.scan_plugins();
-                self.state.message = Some(format!("Plugin scan: {} instruments found", self.state.hosted_generators.len()));
-            }
+            SAct::Button("Manage plugins") => self.open_settings(views::settings::PLUGINS),
+            SAct::Button("Find new plugins") => self.start_scan(crate::plugin_db::Mode::Changed),
+            SAct::Button("Rescan all") => self.start_scan(crate::plugin_db::Mode::All),
+            SAct::Button("Add folder...") => self.add_plugin_folder(),
             SAct::Button(b) => self.state.message = Some(off_text(b)),
         }
         self.invalidate();
@@ -2826,9 +2798,6 @@ impl App {
         }
         let changed = hover != self.hover || hint != self.hint || resize != self.resize_cursor;
         self.resize_cursor = resize;
-        if changed && self.state.picker_open {
-            self.invalidate();
-        }
         if changed {
             // Repaint the controls that lost / gained hover and the hint panel; large background
             // regions have no hover look.
@@ -3586,6 +3555,12 @@ impl App {
             self.browser_wheel(dy + dx);
             return None;
         }
+        if matches!(area, Some(Action::Settings(views::settings::SAct::Plug(views::settings::Plug::Table | views::settings::Plug::Row(_) | views::settings::Plug::Star(_) | views::settings::Plug::Show(_))))) {
+            let n = self.state.plugdb.rows.len();
+            let top = self.state.plugdb.top as f32 - (dy + dx) * 3.0;
+            self.state.plugdb.top = (top.max(0.0) as usize).min(n.saturating_sub(views::settings::TABLE_ROWS));
+            return None;
+        }
         if matches!(area, Some(Action::Settings(_))) {
             let s = &self.state;
             let max = (views::settings::content_h(s) - views::settings::page_h(s)).max(0.0);
@@ -3736,6 +3711,9 @@ impl App {
             self.set_design(next, true);
             return;
         }
+        if self.plugin_find_key(key, ctrl) {
+            return;
+        }
         if crate::patterns::key(&mut self.state, key, ctrl) {
             self.rack_pending();
             return;
@@ -3746,7 +3724,6 @@ impl App {
         // The channel rack's keys while it is in front (spec: ui/channel-rack.md §20).
         let s = &self.state;
         if (s.z.last() == Some(&Win::ChannelRack) || s.rack.fill.is_some())
-            && !s.picker_open
             && s.menu_open.is_none()
             && !s.settings.open
             && s.playlist.edit.is_none()
@@ -3757,7 +3734,7 @@ impl App {
         }
         // The mixer's keys while it is in front (spec: ui/mixer.md §2).
         let s = &self.state;
-        if s.z.last() == Some(&Win::Mixer) && !s.picker_open && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && s.playlist.popup.is_none() && !ctrl && crate::mixer::key(self, key, alt) {
+        if s.z.last() == Some(&Win::Mixer) && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && s.playlist.popup.is_none() && !ctrl && crate::mixer::key(self, key, alt) {
             return;
         }
         // The playlist's editing keys when it is in front (spec: ui/playlist.md §5).
@@ -3773,7 +3750,7 @@ impl App {
         }
         // The piano roll's editing and tool keys (spec: ui/piano-roll.md §11).
         let s = &self.state;
-        if s.shown(Win::PianoRoll) && !s.picker_open && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && crate::piano_tools::key(self, key, ctrl, alt) {
+        if s.shown(Win::PianoRoll) && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && crate::piano_tools::key(self, key, ctrl, alt) {
             return;
         }
         match key {
@@ -3781,10 +3758,7 @@ impl App {
             Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
             Key::Named(NamedKey::F6) => self.act(Action::ToggleWin(Win::ChannelRack)),
             Key::Named(NamedKey::F7) => self.act(Action::ToggleWin(Win::PianoRoll)),
-            Key::Named(NamedKey::F8) if !alt && !ctrl => {
-                self.state.picker_open = !self.state.picker_open;
-                self.state.picker_cat = None;
-            }
+            Key::Named(NamedKey::F8) if !alt && !ctrl => self.toggle_plugin_menu(),
             Key::Named(NamedKey::F8) if alt => self.act(Action::ToggleWin(Win::Browser)),
             Key::Named(NamedKey::F9) => self.act(Action::ToggleWin(Win::Mixer)),
             Key::Named(NamedKey::F10) => self.open_settings(views::settings::MIDI),
@@ -3794,7 +3768,7 @@ impl App {
             Key::Named(NamedKey::Escape) if self.state.settings.open => self.state.settings.open = false,
             Key::Named(NamedKey::Escape) => {
                 self.state.menu_open = None;
-                self.state.picker_open = false;
+                self.state.playlist.popup = None;
                 self.state.piano.clear_selection();
             }
             // Piano roll editing keys (spec: ui/piano-roll.md §8).
@@ -3890,7 +3864,7 @@ impl App {
     /// skips the normal shortcut handling. Spec: ui/typing-keyboard.md.
     pub fn typing_key(&mut self, code: KeyCode, pressed: bool, ctrl: bool, alt: bool) -> bool {
         // A playlist text box (track / marker name, point value) takes the letters.
-        if pressed && (self.state.playlist.edit.is_some() || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing()) {
+        if pressed && (self.state.playlist.edit.is_some() || self.state.plugdb.finding || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing()) {
             return false;
         }
         if !pressed {
@@ -4410,12 +4384,14 @@ impl App {
             }
             Action::RackMixer(_) => {}
             Action::RackAdd => {
-                s.picker_open = true;
-                s.picker_cat = None;
+                let at = self.mouse;
+                self.open_plugin_menu(crate::plugin_menu::Target::Gen(None), at);
             }
+            // Under the button (spec: ui/plugin-menu.md §1).
             Action::PickerOpen => {
-                s.picker_open = true;
-                s.picker_cat = None;
+                let (x, y) = self.mouse;
+                let at = self.top_hit(x, y).map_or((x, y), |h| (h.rect.x, h.rect.bottom() + 2.0));
+                self.open_plugin_menu(crate::plugin_menu::Target::All, at);
             }
             Action::Knob(id) => {
                 self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
@@ -4434,53 +4410,6 @@ impl App {
                 s.lane_menu = false;
             }
             Action::Settings(_) => {}
-            Action::PickerBg => s.picker_open = false,
-            Action::PickerAll => s.picker_cat = None,
-            Action::PickerTab(e, i) => s.picker_cat = if s.picker_cat == Some((e, i)) { None } else { Some((e, i)) },
-            Action::PickerTile(true, i) => {
-                s.picker_open = false;
-                // Into the slot the picker was opened for, else the current track's first empty slot (spec: ui/mixer.md §7).
-                let t = s.selected_mixer;
-                let slot = s.mixer.picker_slot.take().or_else(|| {
-                    s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.iter().position(Option::is_none)).map(|k| k as u8)
-                });
-                match slot {
-                    Some(k) => {
-                        if let Some(m) = crate::mixer::run(self, crate::mixer::MCmd::AddEffect(k, i)) {
-                            self.state.message = Some(m);
-                        }
-                    }
-                    None => s.message = Some("Every slot of this track is in use".into()),
-                }
-                return;
-            }
-            Action::PickerTile(false, i) if i >= views::picker::GENERATORS.len() => {
-                s.picker_open = false;
-                let name = s.hosted_generators.get(i - views::picker::GENERATORS.len()).copied().unwrap_or("Plugin");
-                let ch = add_plugin_channel(&mut s.project, name);
-                s.pending_plugin = Some((ch, i - views::picker::GENERATORS.len()));
-                s.selected_channel = ch;
-                s.rack.select_only(ch);
-                crate::rack::autosize(s);
-                let r = views::rack::rect(s);
-                let view_h = views::rack::panel(r).h;
-                s.rack_scroll = (views::rack::content_h(s) - view_h).max(0.0);
-            }
-            Action::PickerTile(false, _) => {
-                s.picker_open = false;
-                let ch = add_channel(&mut s.project);
-                s.piano.dirty = true;
-                s.selected_channel = ch;
-                s.rack.select_only(ch);
-                crate::rack::autosize(s);
-                // Hosted by Open Sampler on the next tick (`sync_samplers`), then its window opens.
-                s.pending_open = Some(ch);
-                s.message = Some("Added a sampler channel (Open Sampler)".into());
-                // Keep the new row in view.
-                let r = views::rack::rect(s);
-                let view_h = views::rack::panel(r).h;
-                s.rack_scroll = (views::rack::content_h(s) - view_h).max(0.0);
-            }
             Action::RackResize(edges) => {
                 self.drag = Some(Drag::RackResize { edges, m0: self.mouse, s0: s.rack_size });
             }
@@ -4854,8 +4783,17 @@ impl App {
             }
             (0, FILE_SAVE) => self.save(false),
             (0, FILE_EXPORT) => self.export_wav(),
-            // ADD > Sampler: a new Open Sampler channel, like the plugin picker's first tile.
-            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Sampler") => self.act(Action::PickerTile(false, 0)),
+            // ADD > Sampler: a new Open Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
+            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Sampler") => {
+                if let Some(index) = self.plugins.index_of(crate::plugins::OPEN_SAMPLER) {
+                    self.state.message = crate::plugin_menu::add_generator(self, index, None);
+                }
+            }
+            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "More plugins...") => {
+                let at = self.mouse;
+                self.open_plugin_menu(crate::plugin_menu::Target::Gen(None), at);
+            }
+            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Refresh plugin list (fast scan)") => self.start_scan(crate::plugin_db::Mode::Changed),
             (HELP_MENU, HELP_ABOUT) => {
                 self.state.message = Some(concat!("Lemon Studio ", env!("CARGO_PKG_VERSION"), " (pre-alpha), free software under the GNU GPL v3 or later").into());
             }
@@ -4878,8 +4816,8 @@ impl App {
             (0, FILE_SAVE_VERSION) => self.save_new_version(),
             (0, FILE_EXIT) => self.want_close = true,
             (VIEW | ADD_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Plugin picker") => {
-                self.state.picker_open = true;
-                self.state.picker_cat = None;
+                let at = self.mouse;
+                self.open_plugin_menu(crate::plugin_menu::Target::All, at);
             }
             (PATTERNS, i) if i >= PATTERN_PICK => self.state.pattern = (i - PATTERN_PICK) as u16,
             (PATTERNS, i) if item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).is_some() => {
@@ -6013,7 +5951,7 @@ mod tests {
     #[test]
     fn settings_window() {
         use crate::views::menus::{item_at, OPTIONS_MENU};
-        use crate::views::settings::{SAct, FILE, GENERAL, MIDI, NATIVE_HOST_CHECK, PROJECT, TABS, THEME};
+        use crate::views::settings::{SAct, FILE, GENERAL, MIDI, NATIVE_HOST_CHECK, PLUGINS, PROJECT, TABS, THEME};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         frame(&mut app, &mut c, None);
@@ -6042,7 +5980,16 @@ mod tests {
         click(&mut app, &mut c, r);
         assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Fast declick for cut groups")), "Advanced unfolded");
         // The working controls keep their actions.
-        for (tab, live) in [(FILE, SAct::Button("Manage plugins")), (FILE, SAct::Check(NATIVE_HOST_CHECK)), (THEME, SAct::Button("Load theme...")), (THEME, SAct::Button("Reset")), (THEME, SAct::Preset(0))] {
+        for (tab, live) in [
+            (FILE, SAct::Button("Manage plugins")),
+            (PLUGINS, SAct::Check(NATIVE_HOST_CHECK)),
+            (PLUGINS, SAct::Button("Add folder...")),
+            (PLUGINS, SAct::Button("Find new plugins")),
+            (PLUGINS, SAct::Check(crate::views::settings::COMBINE_CHECK)),
+            (THEME, SAct::Button("Load theme...")),
+            (THEME, SAct::Button("Reset")),
+            (THEME, SAct::Preset(0)),
+        ] {
             let r = hit_rect(&app, &Action::Settings(SAct::Tab(tab)));
             click(&mut app, &mut c, r);
             assert!(app.hits.iter().any(|h| h.action == Action::Settings(live.clone())), "{live:?} works");
@@ -6101,7 +6048,9 @@ mod tests {
         click(&mut app, &mut c, r0);
         assert!(rows(&app.state).iter().all(|r| r.item != Item::Pattern(1)));
         assert_eq!(crate::playlist::clips(&app.state).len(), n0 + 1);
-        // Plugin database tab: open Generators, drag the Sampler onto the playlist -> a new channel.
+        // Plugin database tab: open Generators, drag Open Sampler onto the playlist -> a new channel.
+        app.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.plugins);
         let r0 = hit_rect(&app, &Action::BrowserTab(2));
         click(&mut app, &mut c, r0);
         let gi = rows(&app.state).iter().position(|r| r.label == "Generators").unwrap();
@@ -6314,7 +6263,8 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.project = test_project();
-        app.state.hosted_effects = vec!["Test FX"];
+        app.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        app.state.plugdb.rebuild(&app.plugins);
         app.state.z = vec![Win::Mixer];
         app.state.browser_tab = 2;
         app.state.browser_open.insert("2:Plugin database/Effects".into());
@@ -6534,15 +6484,18 @@ mod tests {
         app.act(Action::ToggleWin(Win::ChannelRack));
         frame(&mut app, &mut a, None);
 
-        // Add channels until the rows overflow: a vertical scroll bar appears.
+        // Add channels until the rows overflow: a vertical scroll bar appears. "+" opens the generator menu
+        // (spec: ui/plugin-menu.md §1); Open Sampler adds a sampler channel at the bottom.
+        app.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.plugins);
         let n = app.state.project.channels.len();
         for _ in 0..6 {
             let hr = hit_rect(&app, &Action::RackAdd);
             click(&mut app, &mut a, hr);
-            assert!(app.state.picker_open);
-            let tile = hit_rect(&app, &Action::PickerTile(false, 0));
-            click(&mut app, &mut a, tile);
-            assert!(!app.state.picker_open);
+            let pick = app.state.playlist.popup.as_ref().and_then(|p| p.items.iter().find(|i| i.label == crate::plugins::OPEN_SAMPLER)).map(|i| i.cmd.clone());
+            crate::playlist::run(&mut app, pick.expect("the generator menu lists Open Sampler"));
+            assert!(app.state.playlist.popup.is_none());
+            frame(&mut app, &mut a, None);
         }
         assert_eq!(app.state.project.channels.len(), n + 6);
         assert_eq!(app.state.project.channels.last().unwrap().mixer_track, 11, "after the highest insert in use (5)");
@@ -8129,7 +8082,8 @@ mod tests {
         app.state.project = test_project();
         app.state.z = vec![Win::Mixer];
         app.state.show_browser = false;
-        app.state.hosted_effects = vec!["Test Delay"];
+        app.plugins.effects = vec![crate::plugin_db::fake("Test Delay", os_host::Kind::Effect)];
+        app.state.plugdb.rebuild(&app.plugins);
         mx::select(&mut app.state, 3, false);
         mx::route(&mut app.state, 5, false, false);
         mx::route(&mut app.state, 7, false, true);
@@ -8155,5 +8109,136 @@ mod tests {
         app.state.playlist.popup = Some(mx::slot_menu(&app.state, 0, 1500.0, 150.0));
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(dir.join("mx_slot_menu.png")).unwrap();
+    }
+
+    /// F8 and the toolbar's plugin button open the menu of every plugin: an effect goes into the selected mixer track's
+    /// first empty slot, a generator to the bottom of the channel rack; F8 again closes the menu (spec:
+    /// ui/plugin-menu.md §1).
+    #[test]
+    fn plugin_menu_adds_plugins_where_they_belong() {
+        use crate::playlist::Cmd;
+        use crate::plugin_menu::PlugCmd;
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.plugins = crate::plugins::Plugins::builtins();
+        app.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
+        app.state.plugdb.rebuild(&app.plugins);
+        frame(&mut app, &mut c, None);
+        let f8 = Key::Named(NamedKey::F8);
+        let pick = |app: &App, label: &str| app.state.playlist.popup.as_ref().and_then(|p| p.items.iter().find(|i| i.label == label)).map(|i| i.cmd.clone());
+        app.key(&f8, false, false);
+        {
+            let p = app.state.playlist.popup.as_ref().expect("F8 opens the plugin menu");
+            assert!(p.items.iter().any(|i| i.head && i.label == "Generators"));
+            assert!(p.items.iter().any(|i| i.head && i.label == "Effects"));
+        }
+        // An effect: the selected track's first empty slot.
+        crate::mixer::select(&mut app.state, 2, false);
+        app.state.project.mixer[2].slots[0] = Some(os_model::SlotPlugin { name: "Taken".into(), state: Vec::new() });
+        let fx = pick(&app, "Test FX").expect("the effects are listed");
+        let index = app.plugins.effects.len() - 1;
+        assert_eq!(fx, Cmd::Plugin(PlugCmd::Effect { index, slot: None }));
+        crate::playlist::run(&mut app, fx);
+        assert!(app.state.playlist.popup.is_none());
+        assert_eq!(crate::mixer::slot_name(&app.state, 2, 1).as_deref(), Some("Test FX"));
+        // F8 twice: open, then closed.
+        app.key(&f8, false, false);
+        assert!(crate::plugin_menu::is_open(&app.state));
+        app.key(&f8, false, false);
+        assert!(app.state.playlist.popup.is_none());
+        // The toolbar button opens it under the button; a generator goes to the bottom of the rack and is selected.
+        frame(&mut app, &mut c, None);
+        let b = hit_rect(&app, &Action::PickerOpen);
+        click(&mut app, &mut c, b);
+        let p = app.state.playlist.popup.as_ref().expect("the toolbar button opens the plugin menu");
+        assert!(p.y >= b.bottom(), "under the button");
+        let n = app.state.project.channels.len();
+        let osc = pick(&app, crate::osc3::OPEN_3X_OSC).expect("the generators are listed");
+        crate::playlist::run(&mut app, osc);
+        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.selected_channel, n);
+        assert_eq!(app.state.pending_plugin, Some((n, app.plugins.index_of(crate::osc3::OPEN_3X_OSC).unwrap())));
+        // An empty mixer slot's menu lists the effects for that slot.
+        let m = crate::mixer::effect_menu(&app.state, 4, 0.0, 0.0);
+        assert!(m.items.iter().any(|i| i.cmd == Cmd::Plugin(PlugCmd::Effect { index, slot: Some(4) })));
+    }
+
+    /// Settings > Plugins (spec: ui/plugin-manager.md §2, §4): Add folder... keeps the folder and scans it in the
+    /// background; a file that is no plugin shows in the table as an error; ★ and Show change the menus; the Find box
+    /// filters; a folder switches off and goes.
+    #[test]
+    fn plugin_manager_folders_scan_and_table() {
+        use crate::views::settings::{Plug, SAct, COMBINE_CHECK, PLUGINS};
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.plugins);
+        app.open_settings(PLUGINS);
+        frame(&mut app, &mut c, None);
+        let finish = |app: &mut App| {
+            let t0 = std::time::Instant::now();
+            while app.sweep.is_some() && t0.elapsed() < std::time::Duration::from_secs(20) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                app.scan_tick();
+            }
+            assert!(app.sweep.is_none(), "the scan ends");
+        };
+        let dir = std::env::temp_dir().join(format!("os_plugin_folder_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("Broken.clap"), b"not a plugin").unwrap();
+        crate::dialog::fake::answer(Some(dir.clone()));
+        let r = hit_rect(&app, &Action::Settings(SAct::Button("Add folder...")));
+        click(&mut app, &mut c, r);
+        assert!(app.state.plugdb.prefs.folders.iter().any(|f| std::path::Path::new(&f.path) == dir), "the folder is kept");
+        assert!(app.sweep.is_some(), "adding a folder scans");
+        finish(&mut app);
+        frame(&mut app, &mut c, None);
+        let row = app.state.plugdb.rows.iter().find(|r| r.file == "Broken.clap").expect("the failed file has a row");
+        assert_eq!(row.status, "error");
+        assert!(!row.toggles);
+        assert!(app.state.message.as_deref().is_some_and(|m| m.contains("1 file with errors")), "{:?}", app.state.message);
+        // Star, then hide, an effect (one no scan found: as if listed before the scan).
+        app.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
+        app.state.plugdb.rebuild(&app.plugins);
+        frame(&mut app, &mut c, None);
+        let row_of = |app: &App| app.state.plugdb.rows.iter().position(|r| r.name == "Test FX").unwrap();
+        let r = hit_rect(&app, &Action::Settings(SAct::Plug(Plug::Star(row_of(&app)))));
+        click(&mut app, &mut c, r);
+        assert!(app.state.plugdb.lists.fx.iter().any(|e| e.name == "Test FX" && e.favorite), "starred");
+        let r = hit_rect(&app, &Action::Settings(SAct::Plug(Plug::Show(row_of(&app)))));
+        click(&mut app, &mut c, r);
+        assert!(!app.state.plugdb.lists.fx.iter().any(|e| e.name == "Test FX"), "hidden plugins leave the menus");
+        // Combining formats switches off.
+        let r = hit_rect(&app, &Action::Settings(SAct::Check(COMBINE_CHECK)));
+        click(&mut app, &mut c, r);
+        assert!(!app.state.plugdb.prefs.combine);
+        // The Find box: typing filters, Esc clears it and keeps the window open.
+        let r = hit_rect(&app, &Action::Settings(SAct::Plug(Plug::Find)));
+        click(&mut app, &mut c, r);
+        for ch in ["b", "R", "o"] {
+            app.key(&Key::Character(ch.into()), false, false);
+        }
+        assert_eq!(app.state.plugdb.rows.len(), 1, "only Broken.clap matches");
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        assert!(app.state.plugdb.find.is_empty() && !app.state.plugdb.finding && app.state.settings.open);
+        assert!(app.state.plugdb.rows.len() > 1);
+        // The folder: off (scans again), then removed.
+        frame(&mut app, &mut c, None);
+        let k = crate::plugin_db::search_dirs(&app.state.plugdb.prefs).iter().position(|d| d.path == dir).unwrap();
+        let r = hit_rect(&app, &Action::Settings(SAct::Plug(Plug::Folder(k))));
+        click(&mut app, &mut c, r);
+        assert!(app.state.plugdb.prefs.folders.iter().all(|f| !f.on));
+        finish(&mut app);
+        assert!(!app.state.plugdb.cache.files.iter().any(|f| f.path.ends_with("Broken.clap")), "a skipped folder's files drop out");
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Settings(SAct::Plug(Plug::Remove(k))));
+        click(&mut app, &mut c, r);
+        assert!(app.state.plugdb.prefs.folders.is_empty());
+        finish(&mut app);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

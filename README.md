@@ -70,6 +70,7 @@ clicking it does nothing.
 | Automation | 🚧 | Automation clips for channel, mixer and plugin parameters; no recording of movements |
 | Mixing and routing | ✅ | Mixer tracks, sends, sidechain, effect slots, meters, polarity and stereo swap, main volume and main pitch |
 | Plugin hosting | ✅ | CLAP and VST3 instruments and effects, with their editors and saved state; on Windows a plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio |
+| Plugin management | ✅ | Plugin menus everywhere a plugin is added (F8 lists instruments and effects: an effect goes to the selected mixer track, an instrument to the bottom of the channel rack); a plugin manager in Settings with your own search folders, a background scan at startup (each file is tried in a separate scanner process, so a broken plugin cannot take Lemon Studio down), favourites, hidden plugins, and one menu entry per plugin installed as both VST3 and CLAP (your preferred format wins). VST2 is not hosted yet |
 | Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ so far |
 | Exporting audio | 🚧 | Song or pattern to a WAV file (32-bit float); no MP3 or FLAC yet |
 | Project files | 🚧 | Opens and saves `.flp` projects from the latest FL Studio 26 only (older versions are on the roadmap); early, always keep backups |
@@ -152,7 +153,7 @@ Windows (or detach, from their window menu). A few things differ from Windows fo
 - **Settings, themes and presets** live in `$XDG_CONFIG_HOME/Lemon Studio` (usually `~/.config/Lemon Studio`);
   on Windows in `%APPDATA%\Lemon Studio`. `OPENSTUDIO_USER_DIR` overrides the folder.
 - Plugins are found in `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap` and `CLAP_PATH`, and in `~/.vst3`,
-  `/usr/lib/vst3` and `/usr/local/lib/vst3`.
+  `/usr/lib/vst3` and `/usr/local/lib/vst3`, plus any folder added in Settings > Plugins.
 
 To install the app with its icon and menu entry (the desktop entry also names the icon under native Wayland):
 

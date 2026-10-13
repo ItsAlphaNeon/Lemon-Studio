@@ -57,7 +57,6 @@ pub enum MCmd {
     Layout(u8),
     /// Effect slots of the current track.
     AddEffect(u8, usize),
-    Picker(u8),
     SlotDelete(u8),
     SlotMove(u8, i8),
     SlotRename(u8),
@@ -86,8 +85,6 @@ pub struct MixerUi {
     pub layout: u8,
     /// Slot names typed in the rename box (session only).
     pub slot_names: HashMap<(u16, u8), String>,
-    /// The picker was opened for this slot of the current track.
-    pub picker_slot: Option<u8>,
     pub pending: Vec<FxReq>,
     /// Meter state per track (`meters::Meter`), fed by `feed_meters`.
     pub meters: Vec<crate::meters::Meter>,
@@ -99,7 +96,7 @@ pub struct MixerUi {
 
 impl Default for MixerUi {
     fn default() -> Self {
-        MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), picker_slot: None, pending: Vec::new(), meters: Vec::new(),
+        MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), pending: Vec::new(), meters: Vec::new(),
             meter_cfg: Default::default(), meter_at: None }
     }
 }
@@ -328,10 +325,10 @@ pub fn right(app: &mut App, h: MHit) -> bool {
             ];
             s.playlist.popup = Some(Popup { x: at.0, y: at.1, items, sub: None });
         }
+        // The slot's plugin menu, like a left click (spec: ui/plugin-menu.md §1).
         MHit::SlotArrow(i) => {
-            s.mixer.picker_slot = Some(i);
-            s.picker_open = true;
-            s.picker_cat = None;
+            let t = s.selected_mixer;
+            s.playlist.popup = Some(if slot_name(s, t, i).is_some() { slot_menu(s, i, at.0, at.1) } else { effect_menu(s, i, at.0, at.1) });
         }
         MHit::SlotName(i) => {
             let t = s.selected_mixer;
@@ -660,30 +657,17 @@ pub fn layout_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None }
 }
 
-/// Empty slot: the effect list (§7.1): picker entries, then the effects found.
+/// Empty slot: the effect list (§7.1), the plugin menu for this slot (spec: ui/plugin-menu.md).
 pub fn effect_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
-    let mut items = vec![PItem::new("More plugins...", Cmd::Mixer(MCmd::Picker(slot))), PItem::not_yet("Plugin database").key("Shift+F8"), PItem::sep()];
-    if s.hosted_effects.is_empty() {
-        items.push(PItem::not_yet("(no effect plugins found)"));
-    }
-    for (i, n) in s.hosted_effects.iter().enumerate() {
-        items.push(PItem::new(*n, Cmd::Mixer(MCmd::AddEffect(slot, i))));
-    }
-    items.push(PItem::sep());
-    items.push(PItem::not_yet("Categories").mark(Mark::Radio(true)));
-    items.push(PItem::not_yet("Simple").mark(Mark::Radio(false)));
-    items.push(PItem::not_yet("Tree").mark(Mark::Radio(false)));
+    let mut items = vec![PItem::not_yet("Plugin database").key("Shift+F8"), PItem::sep()];
+    items.extend(crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), false));
     Popup { x, y, items, sub: None }
 }
 
 /// Filled slot ▸ (§7.2).
 pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
     let mx = |c: MCmd| Cmd::Mixer(c);
-    let replace: Vec<PItem> = if s.hosted_effects.is_empty() {
-        vec![PItem::not_yet("(no effect plugins found)")]
-    } else {
-        s.hosted_effects.iter().enumerate().map(|(i, n)| PItem::new(*n, mx(MCmd::AddEffect(slot, i)))).collect()
-    };
+    let replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), true);
     let items = vec![
         PItem::sub("Replace", replace),
         PItem::new("Delete...", mx(MCmd::SlotDelete(slot))),
@@ -790,21 +774,15 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::Layout(_) => None,
         MCmd::AddEffect(slot, index) => {
             let t = s.selected_mixer;
-            let Some(&nm) = s.hosted_effects.get(index) else { return None };
+            let Some(nm) = app.plugins.effects.get(index).map(|a| a.desc.name.clone()) else { return None };
             if let Some(m) = track_mut(s, t) {
-                m.slots[usize::from(slot)] = Some(crate::plugins::new_slot(nm));
+                m.slots[usize::from(slot)] = Some(crate::plugins::new_slot(&nm));
                 m.slot_on[usize::from(slot)] = true;
                 m.slot_mix[usize::from(slot)] = 1.0;
             }
             s.mixer.slot_names.remove(&(t, slot));
             s.mixer.pending.push(FxReq::Create { track: t, slot, index });
             changed(s);
-            None
-        }
-        MCmd::Picker(slot) => {
-            s.mixer.picker_slot = Some(slot);
-            s.picker_open = true;
-            s.picker_cat = None;
             None
         }
         MCmd::SlotDelete(slot) => {
@@ -1099,7 +1077,7 @@ mod tests {
     #[test]
     fn slot_commands_without_plugins() {
         let mut a = app();
-        a.state.hosted_effects = vec!["Test FX"];
+        a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
         select(&mut a.state, 2, false);
         run(&mut a, MCmd::AddEffect(0, 0));
         assert_eq!(slot_name(&a.state, 2, 0).as_deref(), Some("Test FX"));

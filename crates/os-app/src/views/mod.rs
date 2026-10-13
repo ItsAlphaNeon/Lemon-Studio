@@ -5,7 +5,6 @@ pub mod browser;
 pub mod channel_win;
 pub mod menus;
 pub mod mondebug;
-pub mod picker;
 pub mod settings;
 pub mod mixer;
 pub mod piano;
@@ -112,9 +111,6 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     rack::paint_fill(ui, s);
     patterns::paint(ui, s);
-    if s.picker_open {
-        picker::paint(ui, s);
-    }
     if s.settings.open {
         settings::paint(ui, s);
     }

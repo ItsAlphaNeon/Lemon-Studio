@@ -24,6 +24,12 @@ pub fn pick_file(dlg: rfd::FileDialog) -> Option<std::path::PathBuf> {
     modal(|| dlg.pick_file())
 }
 
+/// Shows `dlg` to pick a folder. `None`: cancelled.
+#[cfg(not(test))]
+pub fn pick_folder(dlg: rfd::FileDialog) -> Option<std::path::PathBuf> {
+    modal(|| dlg.pick_folder())
+}
+
 /// Shows `dlg` to choose where to save. `None`: cancelled.
 #[cfg(not(test))]
 pub fn save_file(dlg: rfd::FileDialog) -> Option<std::path::PathBuf> {
@@ -31,7 +37,7 @@ pub fn save_file(dlg: rfd::FileDialog) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(test)]
-pub use fake::{pick_file, save_file};
+pub use fake::{pick_file, pick_folder, save_file};
 
 /// Tests never open a file dialog: each one is counted and gets the answer set with `answer` (default: cancelled).
 #[cfg(test)]
@@ -64,6 +70,10 @@ pub mod fake {
             f.picks += 1;
             f.answer.take()
         })
+    }
+
+    pub fn pick_folder(_: rfd::FileDialog) -> Option<PathBuf> {
+        pick_file(rfd::FileDialog::new())
     }
 
     pub fn save_file(_: rfd::FileDialog) -> Option<PathBuf> {

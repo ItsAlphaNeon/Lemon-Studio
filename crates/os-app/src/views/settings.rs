@@ -1,7 +1,8 @@
 //! Settings window (OPTIONS > MIDI / Audio / General / File / Theme settings, Project settings, Project info,
 //! Debugging log; F10 / F11): ten tabs of grouped controls. The controls that work today are listed in `LIVE` and
 //! handled in `App::settings_act`; every other control is drawn greyed out and only says it is not available yet.
-// spec: ui/settings.md
+//! The Plugins tab is the plugin manager (search folders, scanning, the plugin table).
+// spec: ui/settings.md, ui/plugin-manager.md
 
 use std::collections::HashSet;
 
@@ -10,6 +11,7 @@ use os_ui::kit::{self, Dir};
 use os_ui::{Color, Font, Rect};
 
 use crate::app::{Action, State, Ui};
+use crate::plugin_db::{self as db, Col, Prefer};
 
 /// What a click in the settings window does (`Action::Settings`).
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +28,28 @@ pub enum SAct {
     Button(&'static str),
     /// Theme preset tile: 0 = default, n = `SettingsUi::themes[n - 1]`.
     Preset(usize),
+    /// The plugin manager's controls (spec: ui/plugin-manager.md §2).
+    Plug(Plug),
+}
+
+/// Plugin manager controls. Rows count in `plugin_db::search_dirs` order (folders) or in `Db::rows` (table).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Plug {
+    /// Search folder i: searched or not.
+    Folder(usize),
+    /// Remove added search folder i.
+    Remove(usize),
+    Prefer(Prefer),
+    /// Column title: sort by it (again: reverse).
+    Sort(Col),
+    /// The table body (the wheel scrolls it).
+    Table,
+    /// Table row i (its hint: the path, why a file failed).
+    Row(usize),
+    Star(usize),
+    Show(usize),
+    /// The Find box: typing filters the table.
+    Find,
 }
 
 /// Session state of the window.
@@ -45,40 +69,68 @@ pub struct SettingsUi {
     pub preset: usize,
 }
 
-/// Tabs: label, text centre x, page title, group (0 system / 1 project / 2 info) (spec §2).
-pub const TABS: [(&str, f32, &str, u8); 10] = [
-    ("MIDI", 27.0, "MIDI input / output devices", 0),
-    ("Audio", 82.0, "Audio devices / mixer", 0),
-    ("General", 146.0, "System / miscellaneous", 0),
-    ("File", 203.0, "Files & folders", 0),
-    ("Theme", 257.0, "Look and feel", 0),
-    ("Project", 337.0, "Current project", 1),
-    ("Info", 392.0, "Project credits", 1),
-    ("Debug", 462.0, "Debugging log", 2),
-    ("Account", 529.0, "Account information", 2),
-    ("About", 595.0, "About", 2),
+/// Tabs: label, page title, group (0 system / 1 project / 2 info) (spec §2). Plugins takes the place of FL's Account
+/// tab (spec: ui/plugin-manager.md §2); tabs are laid out from their text widths (`tab_rects`).
+pub const TABS: [(&str, &str, u8); 10] = [
+    ("MIDI", "MIDI input / output devices", 0),
+    ("Audio", "Audio devices / mixer", 0),
+    ("General", "System / miscellaneous", 0),
+    ("File", "Files & folders", 0),
+    ("Plugins", "Plugin manager", 0),
+    ("Theme", "Look and feel", 0),
+    ("Project", "Current project", 1),
+    ("Info", "Project credits", 1),
+    ("Debug", "Debugging log", 2),
+    ("About", "About", 2),
 ];
 pub const MIDI: usize = 0;
 pub const AUDIO: usize = 1;
 pub const GENERAL: usize = 2;
 pub const FILE: usize = 3;
+pub const PLUGINS: usize = 4;
 
-/// The one working File-tab check: opt in to the experimental FL native plugin host (spec
-/// plugins/fruity-abi.md). Its label is the key for `SAct::Check`; `App::settings_act` acts on it.
+/// Opt in to the experimental FL native plugin host (spec plugins/fruity-abi.md), on the Plugins page. Labels are the
+/// keys for `SAct::Check`; `App::settings_act` acts on them.
 pub const NATIVE_HOST_CHECK: &str = "Experimental: host installed native plugins";
+/// Plugin manager checks (spec: ui/plugin-manager.md §2).
+pub const STARTUP_CHECK: &str = "Find new plugins at startup";
+pub const ERRORS_CHECK: &str = "Rescan plugins with errors";
+pub const COMBINE_CHECK: &str = "Combine formats of the same plugin";
+
+/// Whether `key` is one of the plugin manager's own checks (handled by `App::plugin_check`).
+pub fn plugin_check(key: &str) -> bool {
+    [STARTUP_CHECK, ERRORS_CHECK, COMBINE_CHECK].contains(&key)
+}
 
 /// The checks and buttons that work (by label, handled in `App::settings_act`). Every other check, combo, value box,
 /// slider and button is not available yet: drawn greyed out, its hint and click say so.
-pub const LIVE: [&str; 4] = [NATIVE_HOST_CHECK, "Manage plugins", "Load theme...", "Reset"];
+pub const LIVE: &[&str] = &[
+    NATIVE_HOST_CHECK,
+    STARTUP_CHECK,
+    ERRORS_CHECK,
+    COMBINE_CHECK,
+    "Manage plugins",
+    "Add folder...",
+    "Find new plugins",
+    "Rescan all",
+    "Load theme...",
+    "Reset",
+];
 
 fn live(key: &str) -> bool {
     LIVE.contains(&key)
 }
 
-pub const THEME: usize = 4;
-pub const PROJECT: usize = 5;
-pub const INFO: usize = 6;
-pub const DEBUG: usize = 7;
+pub const THEME: usize = 5;
+pub const PROJECT: usize = 6;
+pub const INFO: usize = 7;
+pub const DEBUG: usize = 8;
+
+/// Plugin table rows shown at once (spec: ui/plugin-manager.md §2).
+pub const TABLE_ROWS: usize = 18;
+const TABLE_ROW_H: f32 = 17.0;
+/// Table columns: x from the table's left edge, width.
+const COLS: [(f32, f32); 8] = [(0.0, 20.0), (20.0, 38.0), (58.0, 152.0), (210.0, 50.0), (260.0, 68.0), (328.0, 112.0), (440.0, 66.0), (506.0, 80.0)];
 
 /// OPTIONS menu label -> tab (spec §1).
 pub fn tab_for_menu(label: &str) -> Option<usize> {
@@ -86,7 +138,8 @@ pub fn tab_for_menu(label: &str) -> Option<usize> {
         "MIDI settings" => MIDI,
         "Audio settings" => AUDIO,
         "General settings" => GENERAL,
-        "File settings" | "Manage plugins" => FILE,
+        "File settings" => FILE,
+        "Manage plugins" => PLUGINS,
         "Theme settings" => THEME,
         "Project general settings" => PROJECT,
         "Project info" => INFO,
@@ -142,6 +195,12 @@ pub enum Row {
     Pair(Box<Row>, Box<Row>),
     /// A display that belongs to a feature not available yet (name for the hint): drawn greyed out.
     Dim(&'static str, Box<Row>),
+    /// Plugin search folders: (path, tag, searched, added by the user).
+    Folders(Vec<(String, &'static str, bool, bool)>),
+    /// The preferred-format switch.
+    Prefer(Prefer),
+    /// The plugin table with its count and Find box (reads `State::plugdb`).
+    Table,
 }
 
 pub struct Group {
@@ -320,8 +379,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 ]),
                 g("Plugins", vec![
                     Buttons(vec![("Manage plugins", 124.0)]),
-                    Text(format!("{} instrument plugins found", s.hosted_generators.len()), true),
-                    Check(NATIVE_HOST_CHECK, os_native::enabled()),
+                    Text(format!("{} instruments, {} effects", s.plugdb.lists.gens.len(), s.plugdb.lists.fx.len()), true),
                 ]),
                 g("User data folder", vec![txt(user)]),
                 g("Browser extra search folders", vec![dim("Browser extra search folders", List(vec![("Folder", 30.0), ("Browser name", 440.0)], vec![], 12))]),
@@ -330,6 +388,24 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     dim("External tools", txt("Script editor   C:\\Windows\\System32\\Notepad.exe")),
                 ]),
                 gf("Troubleshooting", true, vec![Buttons(vec![("Repair optional features", 124.0), ("Reset browser cache", 124.0)])]),
+            ]
+        }
+        PLUGINS => {
+            let d = &s.plugdb;
+            let p = &d.prefs;
+            let folders = db::search_dirs(p).into_iter().map(|f| (f.path.display().to_string(), f.tag(), f.on, f.kind == db::DirKind::Added)).collect();
+            vec![
+                g("Search folders", vec![Folders(folders), Buttons(vec![("Add folder...", 110.0)])]),
+                g("Scanning", vec![
+                    Check(STARTUP_CHECK, p.startup_scan),
+                    Check(ERRORS_CHECK, p.rescan_errors),
+                    Check(COMBINE_CHECK, p.combine),
+                    Prefer(p.prefer),
+                    Check(NATIVE_HOST_CHECK, os_native::enabled()),
+                    Buttons(vec![("Find new plugins", 130.0), ("Rescan all", 100.0)]),
+                    Text(d.status_line(), true),
+                ]),
+                g("Plugins", vec![Table]),
             ]
         }
         THEME => {
@@ -399,27 +475,30 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 format!("Channels {}, patterns {}, mixer tracks {}", s.project.channels.len(), s.project.patterns.len(), s.project.mixer.len()),
                 format!("Output device: {}", st.device),
                 format!("Device rate: {:?}", crate::transport::Transport::device_rate()),
-                format!("Hosted instruments: {}", s.hosted_generators.len()),
+                format!("Instruments listed: {}, effects listed: {}", s.plugdb.lists.gens.len(), s.plugdb.lists.fx.len()),
             ];
-            lines.extend(s.hosted_generators.iter().map(|n| format!("  {n}")));
+            lines.extend(s.plugdb.lists.gens.iter().map(|e| format!("  {} ({})", e.label, db::format_label(e.format))));
             if let Some(m) = &s.message {
                 lines.push(format!("Last message: {m}"));
             }
             vec![g("", vec![List(vec![("", 0.0)], lines.into_iter().map(|l| vec![l]).collect(), 40)])]
         }
-        8 => vec![g("Licence", vec![
-            Big("Lemon Studio needs no account.".into()),
-            txt("It is free software under the GNU General Public License, version 3."),
-            txt("No registration, no online services, no usage data."),
-        ])],
-        _ => vec![g("", vec![
-            Gap(20.0),
-            Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
-            txt("A digital audio workstation written in Rust."),
-            Gap(10.0),
-            txt("Licence: GNU General Public License v3."),
-            txt("Fonts: Cuprum (SIL Open Font License). Icons: Tabler Icons (MIT)."),
-        ])],
+        // About also carries what FL's Account tab had (spec: ui/plugin-manager.md §2).
+        _ => vec![
+            g("", vec![
+                Gap(20.0),
+                Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
+                txt("A digital audio workstation written in Rust."),
+                Gap(10.0),
+                txt("Licence: GNU General Public License v3."),
+                txt("Fonts: Cuprum (SIL Open Font License). Icons: Tabler Icons (MIT)."),
+            ]),
+            g("Licence", vec![
+                Big("Lemon Studio needs no account.".into()),
+                txt("It is free software under the GNU General Public License, version 3."),
+                txt("No registration, no online services, no usage data."),
+            ]),
+        ],
     }
 }
 
@@ -442,6 +521,9 @@ fn row_h(r: &Row) -> f32 {
         Row::Gap(h) => *h,
         Row::Pair(a, b) => row_h(a).max(row_h(b)),
         Row::Dim(_, r) => row_h(r),
+        Row::Folders(f) => 21.0 * f.len().max(1) as f32 + 10.0,
+        Row::Prefer(_) => 27.0,
+        Row::Table => 4.0 + 18.0 + TABLE_ROW_H * TABLE_ROWS as f32 + 4.0 + 34.0,
     }
 }
 
@@ -487,17 +569,17 @@ pub fn paint(ui: &mut Ui, s: &State) {
         ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, TABS_B - 1.0), t.s(0x25272a));
     }
     ui.c.icon(&os_ui::tabler::SETTINGS, Rect::new(r.x + 7.0, r.y + 7.0, 16.0, 16.0), t.text_dim);
-    let (_, _, title, _) = TABS[st.tab.min(9)];
+    let (_, title, _) = TABS[st.tab.min(TABS.len() - 1)];
     ui.c.text(Font::new(13), r.x + 28.0, r.y + 7.0, t.text, &format!("Settings - {title}"));
     let x = Rect::new(r.right() - 26.0, r.y + 5.0, 20.0, 20.0);
     let hov = ui.hit(x, Action::Settings(SAct::Close), "Close");
     ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.glyph } else { t.text });
     // Tabs (spec §2): active text coloured by group.
     let font = Font::new(13);
-    for (i, &(label, cx, _, grp)) in TABS.iter().enumerate() {
-        let tw = ui.c.text_width(font, label);
-        let tr = Rect::span(r.x + cx - tw / 2.0 - 10.0, r.x + cx + tw / 2.0 + 10.0, r.y + 34.0, r.y + TABS_B);
-        let hov = ui.hit(tr, Action::Settings(SAct::Tab(i)), TABS[i].2);
+    let rects = tab_rects(ui, r);
+    for (i, &(label, _, grp)) in TABS.iter().enumerate() {
+        let tr = rects[i];
+        let hov = ui.hit(tr, Action::Settings(SAct::Tab(i)), TABS[i].1);
         let on = i == st.tab;
         let body = if on { t.s(0x1d1e1f) } else { t.s(0x222425) };
         if lemon {
@@ -554,9 +636,24 @@ pub fn paint(ui: &mut Ui, s: &State) {
     }
 }
 
+/// Tab rects in window `r`: text width + 10 px each side, 4 px apart, 15 px more between groups.
+fn tab_rects(ui: &mut Ui, r: Rect) -> Vec<Rect> {
+    let font = Font::new(13);
+    let mut x = r.x + 3.0;
+    let mut v = Vec::new();
+    for (i, &(label, _, grp)) in TABS.iter().enumerate() {
+        if i > 0 && TABS[i - 1].2 != grp {
+            x += 15.0;
+        }
+        let w = ui.c.text_width(font, label) + 20.0;
+        v.push(Rect::new(x.round(), r.y + 34.0, w.round(), TABS_B - 34.0));
+        x += w + 11.0;
+    }
+    v
+}
+
 fn paint_group(ui: &mut Ui, s: &State, gr: &Group, r: Rect, open: bool, clip: Rect) {
     let t = ui.t;
-    let st = &s.settings;
     let lemon = super::lemon(ui);
     if lemon {
         lk::outlined(ui.c, r, lk::r_panel(t) - 2.0, t.s(0x1c1e21), t.s(0x25272a));
@@ -595,7 +692,7 @@ fn paint_group(ui: &mut Ui, s: &State, gr: &Group, r: Rect, open: bool, clip: Re
     for row in &gr.rows {
         let h = row_h(row);
         if y + h > clip.y && y < clip.bottom() {
-            paint_row(ui, st, gr.title, row, r, y, h);
+            paint_row(ui, s, gr.title, row, r, y, h);
         }
         y += h;
     }
@@ -610,6 +707,18 @@ fn check(ui: &mut Ui, key: &'static str, on: bool, x: f32, cy: f32, enabled: boo
     if !enabled {
         ui.off(hr, key);
     }
+    led(ui, x, cy, on, hov);
+    let col = if hov { t.glyph } else { t.text };
+    let lh = ui.c.line_height(Font::new(13));
+    ui.c.text(Font::new(13), x + 11.0, (cy - lh / 2.0).round(), col, key);
+    if !enabled {
+        grey(ui, hr);
+    }
+}
+
+/// The check mark itself at (x, cy).
+fn led(ui: &mut Ui, x: f32, cy: f32, on: bool, hov: bool) {
+    let t = ui.t;
     // Round LED (spec §3): orange when on. Lemon: a rounded square check, lit with a tick when on.
     let lemon = super::lemon(ui);
     if !lemon {
@@ -631,12 +740,6 @@ fn check(ui: &mut Ui, key: &'static str, on: bool, x: f32, cy: f32, enabled: boo
         ui.c.fill_circle(x, cy, 5.5, if hov { t.s(0x6a6c6e) } else { t.s(0x58595a) });
         ui.c.fill_circle(x, cy, 4.2, t.s(0x36393a));
     }
-    let col = if hov { t.glyph } else { t.text };
-    let lh = ui.c.line_height(Font::new(13));
-    ui.c.text(Font::new(13), x + 11.0, (cy - lh / 2.0).round(), col, key);
-    if !enabled {
-        grey(ui, hr);
-    }
 }
 
 /// Greys out what was just drawn in `r` on a group body.
@@ -656,12 +759,12 @@ fn name_of(label: &'static str, group: &'static str) -> &'static str {
     }
 }
 
-fn paint_row(ui: &mut Ui, st: &SettingsUi, group: &'static str, row: &Row, g: Rect, y: f32, h: f32) {
-    paint_row_at(ui, st, group, row, g, y, h, 0.0)
+fn paint_row(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect, y: f32, h: f32) {
+    paint_row_at(ui, s, group, row, g, y, h, 0.0)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn paint_row_at(ui: &mut Ui, st: &SettingsUi, group: &'static str, row: &Row, g: Rect, y: f32, h: f32, dx: f32) {
+fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect, y: f32, h: f32, dx: f32) {
     let t = ui.t;
     let f = LABEL;
     let x0 = g.x + 12.0 + dx;
@@ -823,14 +926,199 @@ fn paint_row_at(ui: &mut Ui, st: &SettingsUi, group: &'static str, row: &Row, g:
         }
         Row::Gap(_) => {}
         Row::Pair(a, b) => {
-            paint_row_at(ui, st, group, a, g, y, h, 0.0);
-            paint_row_at(ui, st, group, b, g, y, h, 304.0);
+            paint_row_at(ui, s, group, a, g, y, h, 0.0);
+            paint_row_at(ui, s, group, b, g, y, h, 304.0);
         }
+        Row::Folders(list) => folders(ui, list, Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 6.0)),
+        Row::Prefer(cur) => prefer(ui, *cur, x0, y, ty),
+        Row::Table => table(ui, s, Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 4.0)),
         Row::Dim(name, r) => {
-            paint_row_at(ui, st, group, r, g, y, h, dx);
+            paint_row_at(ui, s, group, r, g, y, h, dx);
             let b = Rect::span(x0 - 4.0, g.right() - 8.0, y, y + h);
             ui.off(b, name);
             grey(ui, b);
+        }
+    }
+}
+
+/// A list frame (lists, the folder list, the plugin table).
+fn list_frame(ui: &mut Ui, b: Rect) {
+    let t = ui.t;
+    if super::lemon(ui) {
+        lk::outlined(ui.c, b, lk::r_btn(t), t.s(0x161819), t.s(0x222527));
+    } else {
+        ui.c.fill_rect(b, t.s(0x161819));
+        ui.c.fill_rect(b.inset(1.0), t.s(0x222527));
+    }
+}
+
+/// Search folders (spec: ui/plugin-manager.md §2): a check, the path, the tag; added folders end with a remove button.
+fn folders(ui: &mut Ui, list: &[(String, &'static str, bool, bool)], b: Rect) {
+    let t = ui.t;
+    list_frame(ui, b);
+    let f = Font::new(13);
+    let lh = ui.c.line_height(f);
+    if list.is_empty() {
+        ui.c.text(f, b.x + 8.0, (b.y + 2.0 + 10.5 - lh / 2.0).round(), t.text_dim, "(no folders)");
+    }
+    for (i, (path, tag, on, added)) in list.iter().enumerate() {
+        let rr = Rect::new(b.x + 2.0, b.y + 2.0 + i as f32 * 21.0, b.w - 4.0, 21.0);
+        if i % 2 == 1 {
+            ui.c.fill_rect(rr, t.s(0x26292b));
+        }
+        let ty = (rr.cy() - lh / 2.0).round();
+        let right = if *added { rr.right() - 26.0 } else { rr.right() - 8.0 };
+        let tag_w = ui.c.text_width(f, tag);
+        let hr = Rect::span(rr.x, right - tag_w - 8.0, rr.y, rr.bottom());
+        let hov = ui.hit(hr, Action::Settings(SAct::Plug(Plug::Folder(i))), if *on { "Searched: click to skip this folder" } else { "Skipped: click to search this folder" });
+        led(ui, rr.x + 12.0, rr.cy(), *on, hov);
+        let col = if !*on { t.text_dim } else if hov { t.glyph } else { t.text };
+        ui.c.text_clip(f, rr.x + 26.0, ty, hr.right() - rr.x - 30.0, col, path);
+        ui.c.text_right(f, right, ty, t.text_dim, tag);
+        if *added {
+            let xr = Rect::new(rr.right() - 21.0, rr.y + 2.0, 17.0, 17.0);
+            let hov = ui.hit(xr, Action::Settings(SAct::Plug(Plug::Remove(i))), "Remove this folder");
+            ui.c.icon(&os_ui::tabler::X, xr.inset(2.0), if hov { t.glyph } else { t.text_dim });
+        }
+    }
+}
+
+/// The preferred format switch (spec: ui/plugin-manager.md §3): VST3, CLAP, VST2 (greyed: not hosted yet).
+fn prefer(ui: &mut Ui, cur: Prefer, x0: f32, y: f32, ty: f32) {
+    let t = ui.t;
+    let f = LABEL;
+    let lw = ui.c.text(f, x0, ty, t.text, "Preferred format");
+    let lemon = super::lemon(ui);
+    let mut x = x0 + lw + 12.0;
+    for p in [Prefer::Vst3, Prefer::Clap, Prefer::Vst2] {
+        let b = Rect::new(x, y + 3.0, 54.0, 21.0);
+        let enabled = p != Prefer::Vst2;
+        let on = p == cur;
+        let hov = enabled && ui.hit(b, Action::Settings(SAct::Plug(Plug::Prefer(p))), "Listed when a plugin is found in several formats");
+        if !enabled {
+            ui.off(b, "VST2 hosting");
+        }
+        let ink = if lemon {
+            if on {
+                lk::lit(ui.c, b, lk::r_btn(t), hov);
+                lk::ink_on_lemon()
+            } else {
+                lk::outlined(ui.c, b, lk::r_btn(t), t.s(0x161819), lk::face(t.s(0x2a2d2f), kit::State::hover(hov)));
+                if hov { t.glyph } else { t.text }
+            }
+        } else if on {
+            kit::bordered(ui.c, b, 2.0, t.s(0x161819), t.h(0xf09672));
+            t.s(0x1c1e21)
+        } else {
+            kit::bordered(ui.c, b, 2.0, t.s(0x161819), kit::face(t.s(0x212425), kit::State::hover(hov)));
+            if hov { t.glyph } else { t.text }
+        };
+        ui.c.text_center(Font::new(13), b, ink, p.label());
+        if !enabled {
+            grey(ui, b);
+        }
+        x += 58.0;
+    }
+}
+
+/// A filled star (favourite).
+const STAR_ON: os_ui::tabler::TablerIcon = os_ui::tabler::TablerIcon { filled: true, d: os_ui::tabler::STAR.d };
+
+/// The plugin table (spec: ui/plugin-manager.md §2): sortable column titles, ★ / Show toggles, the count and the Find box.
+fn table(ui: &mut Ui, s: &State, area: Rect) {
+    let t = ui.t;
+    let d = &s.plugdb;
+    let f = Font::new(13);
+    let lh = ui.c.line_height(f);
+    let b = Rect::new(area.x, area.y, area.w, 4.0 + 18.0 + TABLE_ROW_H * TABLE_ROWS as f32 + 2.0);
+    list_frame(ui, b);
+    ui.hit(b, Action::Settings(SAct::Plug(Plug::Table)), "");
+    let x0 = b.x + 2.0;
+    // Column titles.
+    let hy = b.y + 2.0;
+    for (col, &(cx, cw)) in Col::ALL.iter().zip(&COLS) {
+        let hr = Rect::new(x0 + cx, hy, cw, 18.0);
+        let hov = ui.hit(hr, Action::Settings(SAct::Plug(Plug::Sort(*col))), "Sort by this column");
+        let tw = ui.c.text(f, hr.x + 4.0, (hr.cy() - lh / 2.0).round(), if hov { t.glyph } else { t.text_dim }, col.title());
+        if d.sort.0 == *col {
+            kit::chevron(ui.c, hr.x + 4.0 + tw + 6.0, hr.cy(), 3.0, if d.sort.1 { Dir::Up } else { Dir::Down }, t.text_dim);
+        }
+    }
+    ui.c.fill_rect(Rect::new(b.x + 1.0, hy + 18.0, b.w - 2.0, 1.0), t.s(0x161819));
+    // Rows.
+    let ry0 = hy + 19.0;
+    let n = d.rows.len();
+    let scroll = n > TABLE_ROWS;
+    let rw = b.w - 4.0 - if scroll { 10.0 } else { 0.0 };
+    if n == 0 {
+        let msg = if d.find.is_empty() { "(no plugins)" } else { "(no plugin matches)" };
+        ui.c.text(f, x0 + 8.0, ry0 + 1.0, t.text_dim, msg);
+    }
+    for (vi, row) in d.rows.iter().enumerate().skip(d.top).take(TABLE_ROWS) {
+        let rr = Rect::new(x0, ry0 + (vi - d.top) as f32 * TABLE_ROW_H, rw, TABLE_ROW_H);
+        if (vi - d.top) % 2 == 1 {
+            ui.c.fill_rect(rr, t.s(0x26292b));
+        }
+        let hint = match (row.path.is_empty(), row.note.is_empty()) {
+            (false, false) => format!("{}: {}", row.path, row.note),
+            (false, true) => row.path.clone(),
+            (true, false) => row.note.clone(),
+            (true, true) => String::new(),
+        };
+        ui.hit(rr, Action::Settings(SAct::Plug(Plug::Row(vi))), hint);
+        let ty = (rr.cy() - lh / 2.0).round();
+        if row.toggles {
+            let sr = Rect::new(x0 + COLS[0].0, rr.y, COLS[0].1, rr.h);
+            let hov = ui.hit(sr, Action::Settings(SAct::Plug(Plug::Star(vi))), if row.favorite { "Favourite: listed first in the plugin menus" } else { "Star: list it first in the plugin menus" });
+            let ir = Rect::new(sr.cx() - 6.5, sr.cy() - 6.5, 13.0, 13.0);
+            if row.favorite {
+                ui.c.icon(&STAR_ON, ir, if super::lemon(ui) { os_theme::design::lemon::MAIN } else { t.h(0xfdc13d) });
+            } else {
+                ui.c.icon(&os_ui::tabler::STAR, ir, if hov { t.glyph } else { t.s(0x58595a) });
+            }
+            let shr = Rect::new(x0 + COLS[1].0, rr.y, COLS[1].1, rr.h);
+            let hov = ui.hit(shr, Action::Settings(SAct::Plug(Plug::Show(vi))), if row.shown { "Listed in the plugin menus: click to hide" } else { "Hidden from the plugin menus: click to list" });
+            led(ui, shr.cx(), shr.cy(), row.shown, hov);
+        }
+        let col = if row.dim || !row.shown { t.text_dim } else { t.text };
+        let failed = !row.toggles && !row.status.is_empty() && row.status != "ok";
+        let cells: [(&str, Color); 6] = [
+            (&row.name, col),
+            (row.format, col),
+            (row.kind, col),
+            (&row.vendor, col),
+            (&row.status, if failed { t.h(0xe8502a) } else { col }),
+            (&row.file, col),
+        ];
+        for (k, (text, c)) in cells.iter().enumerate() {
+            let (cx, cw) = COLS[k + 2];
+            let w = (cw - 8.0).min(rr.right() - (x0 + cx) - 6.0);
+            ui.c.text_clip(f, x0 + cx + 4.0, ty, w, *c, text);
+        }
+    }
+    if scroll {
+        let track = Rect::new(b.right() - 10.0, ry0 + 2.0, 7.0, TABLE_ROW_H * TABLE_ROWS as f32 - 4.0);
+        kit::scrollbar(ui.c, t, track, true, d.top as f32 * TABLE_ROW_H, TABLE_ROW_H * TABLE_ROWS as f32, n as f32 * TABLE_ROW_H, kit::State::NORMAL);
+    }
+    // Count and Find box.
+    let fy = b.bottom() + 6.0;
+    let all = d.all_rows.len();
+    let count = if n == all { format!("{n} plugins") } else { format!("{n} of {all} plugins") };
+    ui.c.text(f, b.x + 4.0, (fy + 11.0 - lh / 2.0).round(), t.text_dim, &count);
+    let fr = Rect::new(b.right() - 220.0, fy, 220.0, 22.0);
+    let hov = ui.hit(fr, Action::Settings(SAct::Plug(Plug::Find)), "Find: type to keep the plugins whose name, vendor or file contain the text (Esc clears)");
+    let well = if d.finding { t.s(0x141516) } else if hov { t.s(0x1d1f21) } else { t.s(0x191b1c) };
+    kit::sunken(ui.c, t, fr, well);
+    ui.c.icon(&os_ui::tabler::SEARCH, Rect::new(fr.x + 5.0, fr.cy() - 6.5, 13.0, 13.0), t.text_dim);
+    let tx = fr.x + 23.0;
+    let ty = (fr.cy() - lh / 2.0).round();
+    if d.find.is_empty() && !d.finding {
+        ui.c.text(f, tx, ty, t.text_dim, "Find");
+    } else {
+        ui.c.text_clip(f, tx, ty, fr.w - 30.0, t.text, &d.find);
+        if d.finding {
+            let cx = (tx + ui.c.text_width(f, &d.find)).min(fr.right() - 6.0);
+            ui.c.fill_rect(Rect::new(cx.round() + 1.0, fr.y + 4.0, 1.0, fr.h - 8.0), t.text);
         }
     }
 }

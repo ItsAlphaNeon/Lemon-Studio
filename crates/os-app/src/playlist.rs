@@ -278,6 +278,8 @@ pub enum Cmd {
     ResetEmptyTracks,
     /// Browser options menu (spec: ui/browser.md §4).
     Browser(crate::browser::BCmd),
+    /// Plugin menus (spec: ui/plugin-menu.md).
+    Plugin(crate::plugin_menu::PlugCmd),
     /// Channel rack menus (spec: ui/channel-rack.md §17-21).
     Rack(crate::rack::RCmd),
     /// Mixer menus (spec: ui/mixer.md §6-7).
@@ -2863,6 +2865,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     // Commands that need the whole app.
     match cmd {
         Cmd::Browser(b) => return app.browser_cmd(b),
+        Cmd::Plugin(c) => return crate::plugin_menu::run(app, c),
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
         Cmd::Param(c) => return app.params_cmd(c),
@@ -2916,7 +2919,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

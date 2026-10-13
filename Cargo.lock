@@ -2423,6 +2423,7 @@ dependencies = [
  "os-ui",
  "os-vst3",
  "rfd",
+ "serde",
  "serde_json",
  "softbuffer",
  "tiny-skia",
