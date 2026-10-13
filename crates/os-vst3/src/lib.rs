@@ -811,6 +811,10 @@ impl Plugin {
                 _ => {}
             }
         }
+        // Edits still waiting for their flush: look again on the next tick.
+        if self.pending_since.is_some() {
+            self.shared.attention.raise();
+        }
     }
 
     /// A `process` call without audio, carrying the waiting parameter changes.
@@ -864,6 +868,7 @@ impl Plugin {
             v = (v * f64::from(steps)).round() / f64::from(steps);
         }
         self.auto.push((offset, id, v));
+        self.shared.attention.raise();
     }
 
     /// This chunk's automation (offset < `n`) into the input parameter changes, after the host edits at offset 0; the
@@ -899,6 +904,10 @@ impl Plugin {
                 out.push((id, v));
             }
         });
+        // The controller hears them on the UI thread.
+        if !self.from_processor.is_empty() {
+            self.shared.attention.raise();
+        }
     }
 
     pub fn has_editor(&self) -> bool {
@@ -1287,6 +1296,10 @@ impl os_host::Plugin for Plugin {
     fn take_param_events(&mut self) -> Vec<os_host::ParamEvent> {
         self.shared.events.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
     }
+
+    fn attention(&self) -> Option<Arc<os_host::Attention>> {
+        Some(self.shared.attention.clone())
+    }
 }
 
 impl os_engine::Instrument for Plugin {
@@ -1346,6 +1359,7 @@ impl os_engine::Instrument for Plugin {
         if self.rate != rate {
             // Activation is a UI-thread call: ask for it and stay silent until then.
             self.wanted_rate.store(rate, Ordering::Release);
+            self.shared.attention.raise();
             os_host::wake();
             return;
         }
@@ -1371,6 +1385,7 @@ impl os_engine::HostedEffect for Plugin {
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         if self.rate != rate {
             self.wanted_rate.store(rate, Ordering::Release);
+            self.shared.attention.raise();
             os_host::wake();
             return;
         }

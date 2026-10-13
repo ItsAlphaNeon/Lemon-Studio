@@ -240,6 +240,8 @@ impl os_host::Library for Library {
 
 /// Host-side state the plugin's callbacks reach through `clap_host::host_data`.
 struct HostData {
+    /// Raised with every request below and when the audio thread leaves work for the UI thread.
+    attention: Arc<os_host::Attention>,
     callback: AtomicBool,
     restart: AtomicBool,
     /// The plugin asked for a parameter flush (`clap_host_params.request_flush`): an edit from its editor waits in its
@@ -398,12 +400,12 @@ mod run_loop {
 }
 unsafe extern "C" fn host_params_rescan(host: *const clap_host, flags: u32) {
     unsafe { (*((*host).host_data as *const HostData)).rescan.fetch_or(flags, Ordering::AcqRel) };
-    wake();
+    unsafe { attend(host) };
 }
 unsafe extern "C" fn host_params_clear(_host: *const clap_host, _id: u32, _flags: u32) {}
 unsafe extern "C" fn host_params_request_flush(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).flush.store(true, Ordering::Release) };
-    wake();
+    unsafe { attend(host) };
 }
 /// The editor's requests to the host window. A resize is applied on the UI tick (`Plugin::idle`): the plugin gets its
 /// size and the frame follows `editor_size`. The editor is always embedded, so show / hide / closed do not apply.
@@ -419,7 +421,7 @@ unsafe extern "C" fn host_gui_request_resize(host: *const clap_host, width: u32,
     if let Ok(mut r) = unsafe { (*((*host).host_data as *const HostData)).resize.lock() } {
         *r = Some((width, height));
     }
-    wake();
+    unsafe { attend(host) };
     true
 }
 unsafe extern "C" fn host_gui_show_hide(_host: *const clap_host) -> bool {
@@ -433,11 +435,11 @@ static HOST_PARAMS: clap_host_params =
 static HOST_VOICE_INFO: clap_host_voice_info = clap_host_voice_info { changed: Some(host_voice_info_changed) };
 unsafe extern "C" fn host_voice_info_changed(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).voice_info.store(true, Ordering::Release) };
-    wake();
+    unsafe { attend(host) };
 }
 unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).restart.store(true, Ordering::Release) };
-    wake();
+    unsafe { attend(host) };
 }
 /// Below this level a block is quiet (CLAP's CONTINUE_IF_NOT_QUIET; about -100 dB).
 const QUIET: f32 = 1e-5;
@@ -445,6 +447,12 @@ const QUIET: f32 = 1e-5;
 unsafe extern "C" fn host_request_process(_host: *const clap_host) {}
 unsafe extern "C" fn host_request_callback(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).callback.store(true, Ordering::Release) };
+    unsafe { attend(host) };
+}
+
+/// The plugin left work for the UI thread: its attention count goes up and the UI wakes.
+pub(crate) unsafe fn attend(host: *const clap_host) {
+    unsafe { (*((*host).host_data as *const HostData)).attention.raise() };
     wake();
 }
 
@@ -611,6 +619,7 @@ impl Plugin {
     pub fn new(lib: &Arc<Library>, id: &str) -> Result<Plugin, String> {
         let desc = lib.plugins.iter().find(|d| d.id == id).cloned().ok_or_else(|| format!("{}: no plugin {id}", lib.path.display()))?;
         let host_data = Box::new(HostData {
+            attention: Arc::default(),
             callback: AtomicBool::new(false),
             restart: AtomicBool::new(false),
             flush: AtomicBool::new(false),
@@ -817,6 +826,9 @@ impl Plugin {
             }
         }
         self.param_out.truncate(w);
+        if w > from {
+            self.host_data.attention.raise();
+        }
     }
 
     /// Moves the queued host parameter changes into `pvals` (events at time 0).
@@ -1300,6 +1312,7 @@ impl os_host::Plugin for Plugin {
         let plain = self.plain(id, value);
         self.param_queue.retain(|q| q.0 != id);
         self.param_queue.push((id, plain));
+        self.host_data.attention.raise();
         os_host::wake();
         true
     }
@@ -1318,6 +1331,10 @@ impl os_host::Plugin for Plugin {
                 OutEv::NoteEnd(..) => None,
             })
             .collect()
+    }
+
+    fn attention(&self) -> Option<Arc<os_host::Attention>> {
+        Some(self.host_data.attention.clone())
     }
 }
 
@@ -1388,6 +1405,7 @@ impl os_engine::Instrument for Plugin {
                 eprintln!("[os-clap] {} asks for {rate} Hz (active at {})", self.desc.name, self.rate);
             }
             self.wanted_rate.store(rate, Ordering::Release);
+            self.host_data.attention.raise();
             return;
         }
         if !self.processing {
@@ -1433,6 +1451,7 @@ impl os_engine::HostedEffect for Plugin {
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         if self.rate != rate {
             self.wanted_rate.store(rate, Ordering::Release);
+            self.host_data.attention.raise();
             return;
         }
         if !self.processing {
@@ -1552,6 +1571,31 @@ mod tests {
         let entry = &open_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
         let lib = unsafe { Library::from_entry(entry, Path::new("Open Parametric EQ 2.clap")) }.expect("linked EQ");
         os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap()
+    }
+
+    /// The UI locks an instance only when it has work (spec: audio/implementing.md "Playing live"): host edits waiting
+    /// for a flush, a stream at another rate and the plugin's own requests raise its attention count; an idle with
+    /// nothing left to do leaves it alone, so a quiet instance is not locked again and again.
+    #[test]
+    fn work_for_the_ui_thread_raises_the_attention_count() {
+        let shared = open_eq();
+        let mut p = shared.lock().unwrap();
+        let a = p.attention().expect("a CLAP instance has a count");
+        assert!(p.activate(48000));
+        p.idle();
+        let quiet = a.count();
+        p.idle();
+        assert_eq!(a.count(), quiet, "nothing to do");
+        let id = p.param_info(0).unwrap().id;
+        assert!(p.set_param(id, 0.25));
+        assert!(a.count() > quiet, "an edit waits for the flush");
+        p.idle();
+        let flushed = a.count();
+        p.idle();
+        assert_eq!(a.count(), flushed, "flushed: nothing left");
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        p.process_fx(44100, &mut l, &mut r);
+        assert!(a.count() > flushed, "another rate: the UI thread reactivates it");
     }
 
     // spec: plugins/vst3-hosting.md §1 (transport)

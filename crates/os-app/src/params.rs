@@ -31,6 +31,8 @@ pub struct Entry {
 pub struct List {
     pub plugin: Weak<Mutex<dyn os_host::Plugin>>,
     pub params: Vec<Entry>,
+    /// When `params_tick` last took the instance's events (`Hosted::due`).
+    pub seen: crate::plugins::Look,
 }
 
 /// Something the user moved last (spec §5).
@@ -235,7 +237,9 @@ impl App {
         let mut automate = Vec::new();
         let mut stretch = Vec::new();
         for (&key, h) in &self.plugins.hosted {
-            // Never wait on a plugin the audio thread is rendering: it is read again next tick (its events stay queued).
+            // Only an instance with something new is locked, and never waited for: one the audio thread is rendering
+            // is read again next tick (its events stay queued).
+            let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen)) else { continue };
             let Ok(mut p) = h.plugin.try_lock() else { continue };
             let weak = Arc::downgrade(&h.plugin);
             let count = p.param_count();
@@ -247,7 +251,10 @@ impl App {
                         None => Entry { id: u32::MAX, name: String::new(), hidden: true },
                     })
                     .collect();
-                ui.lists.insert(key, List { plugin: weak, params });
+                ui.lists.insert(key, List { plugin: weak, params, seen: look });
+            }
+            if let Some(l) = ui.lists.get_mut(&key) {
+                l.seen = look;
             }
             let sampler = key < crate::plugins::FX_KEY && p.desc().name == crate::plugins::OPEN_SAMPLER;
             for e in p.take_param_events() {
@@ -428,7 +435,7 @@ mod tests {
         assert_eq!(target_of(s, fx_key(2, 3), 35), Some(target::slot_param(2, 3, 35)));
         assert_eq!(key_of(s, Target::ChannelParam(ch, 7)), Some((0, 7)));
         assert_eq!(key_of(s, Target::SlotParam(2, 3, 35)), Some((fx_key(2, 3), 35)));
-        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![Entry { id: 9, name: "Cutoff".into(), hidden: false }] });
+        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![Entry { id: 9, name: "Cutoff".into(), hidden: false }], seen: crate::plugins::Look::never() });
         assert_eq!(clip_name(s, 0, 0), "Lead - Cutoff");
         // Last tweaked keeps the two newest, newest first, without repeats.
         let p = &mut s.params;

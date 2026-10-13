@@ -14,7 +14,7 @@ use clap_sys::ext::context_menu::{
 use clap_sys::host::clap_host;
 use clap_sys::id::clap_id;
 
-use crate::{wake, HostData, Plugin};
+use crate::{HostData, Plugin};
 
 /// Action id of "Create automation clip".
 const CREATE_AUTOMATION: clap_id = 1;
@@ -50,7 +50,7 @@ unsafe extern "C" fn perform(host: *const clap_host, target: *const clap_context
         q.push(id);
     }
     data.callback.store(true, Ordering::Release);
-    wake();
+    unsafe { crate::attend(host) };
     true
 }
 
@@ -99,6 +99,8 @@ mod tests {
         let builder = clap_context_menu_builder { ctx: &mut labels as *mut Vec<String> as *mut c_void, add_item: Some(add_item), supports: None };
         let param = clap_context_menu_target { kind: CLAP_CONTEXT_MENU_TARGET_KIND_PARAM, id: 77 };
         let global = clap_context_menu_target { kind: 0, id: 0 };
+        let attention = os_host::Plugin::attention(&p).expect("a CLAP instance has a count");
+        let before = attention.count();
         unsafe {
             assert!((*ext).populate.unwrap()(host, &global, &builder));
             assert!(labels.is_empty());
@@ -108,6 +110,7 @@ mod tests {
             assert!((*ext).perform.unwrap()(host, &param, CREATE_AUTOMATION));
             assert!(!(*ext).can_popup.unwrap()(host));
         }
+        assert!(attention.count() > before, "the pick reaches the UI without it polling");
         assert_eq!(os_host::Plugin::take_automation_requests(&mut p), vec![77]);
         assert!(os_host::Plugin::take_automation_requests(&mut p).is_empty());
     }

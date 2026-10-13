@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::guard::{self, Module};
-use crate::{Descriptor, HostedEffect, Instrument, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
+use crate::{Attention, Descriptor, HostedEffect, Instrument, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
 use os_engine::TransportInfo;
 
 /// A plugin instance of any format, called through the crash guard. Once its code crashed (this instance, or another
@@ -25,18 +25,26 @@ pub struct Guarded<P: Plugin> {
     /// The state the instance last saved or loaded: what a stopped instance saves.
     state: RefCell<Option<Vec<u8>>>,
     meter: Arc<Meter>,
+    /// The instance's attention count, raised here too when it crashes (the UI then reports the stop).
+    attention: Option<Arc<Attention>>,
 }
 
 /// Shares `plugin`, code of `module`, as a guarded instance (format crates' `Library::create`).
 pub fn share<P: Plugin + 'static>(plugin: P, module: Arc<Module>) -> SharedPlugin {
-    Arc::new(Mutex::new(Guarded { inner: ManuallyDrop::new(plugin), module, state: RefCell::new(None), meter: Arc::default() }))
+    let attention = plugin.attention();
+    Arc::new(Mutex::new(Guarded { inner: ManuallyDrop::new(plugin), module, state: RefCell::new(None), meter: Arc::default(), attention }))
 }
 
 impl<P: Plugin> Guarded<P> {
     /// Runs `f` on the instance under the guard; `stopped` when its code crashed (now or before).
     fn run<R>(&mut self, stopped: R, f: impl FnOnce(&mut P) -> R) -> R {
         let inner = &mut *self.inner;
-        guard::call(&self.module, || f(inner)).unwrap_or(stopped)
+        guard::call(&self.module, || f(inner)).unwrap_or_else(|_| {
+            if let Some(a) = &self.attention {
+                a.raise();
+            }
+            stopped
+        })
     }
 
     /// `run` for the methods that only look.
@@ -213,6 +221,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     fn meter(&self) -> Option<Arc<Meter>> {
         Some(self.meter.clone())
     }
+    fn attention(&self) -> Option<Arc<Attention>> {
+        self.attention.clone()
+    }
 }
 
 #[cfg(test)]
@@ -225,6 +236,7 @@ mod tests {
         desc: Descriptor,
         crash: Arc<AtomicBool>,
         dropped: Arc<AtomicBool>,
+        attention: Arc<Attention>,
     }
 
     impl Crashy {
@@ -287,6 +299,9 @@ mod tests {
         fn load_state(&mut self, _: &[u8]) -> bool {
             true
         }
+        fn attention(&self) -> Option<Arc<Attention>> {
+            Some(self.attention.clone())
+        }
     }
 
     fn crashy() -> (SharedPlugin, Arc<AtomicBool>, Arc<AtomicBool>) {
@@ -301,7 +316,7 @@ mod tests {
             path: Default::default(),
         };
         let (crash, dropped) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
-        let p = share(Crashy { desc, crash: crash.clone(), dropped: dropped.clone() }, Arc::new(Module::default()));
+        let p = share(Crashy { desc, crash: crash.clone(), dropped: dropped.clone(), attention: Arc::default() }, Arc::new(Module::default()));
         (p, crash, dropped)
     }
 
@@ -324,10 +339,13 @@ mod tests {
     fn a_crashed_instance_stops() {
         let (p, crash, dropped) = crashy();
         assert_eq!(p.lock().unwrap().save_state(), Some(vec![1, 2, 3]));
+        let attention = p.lock().unwrap().attention().expect("the instance's count, through the guard");
+        let before = attention.count();
         crash.store(true, Ordering::Relaxed);
         let (mut l, mut r) = ([0.25f32; 4], [0.25f32; 4]);
         p.lock().unwrap().process_fx(48000, &mut l, &mut r);
         assert_eq!(p.lock().unwrap().stopped(), Some(0xC000_0005));
+        assert!(attention.count() > before, "the UI hears of the stop without polling");
         crash.store(false, Ordering::Relaxed);
         p.lock().unwrap().process_fx(48000, &mut l, &mut r);
         assert_eq!((l, r), ([0.25; 4], [0.25; 4]), "passed through");
