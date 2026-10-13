@@ -10,7 +10,7 @@
 
 use std::ffi::c_void;
 
-use os_engine::instrument::{ChannelLevels, HostedEffect, Instrument, TransportInfo};
+use os_engine::instrument::{ChannelLevels, HostedEffect, Instrument, NoteLevels, TransportInfo};
 use os_host::{Descriptor, ParamInfo};
 
 use crate::abi::{dispatch, flags, rec, IntPtr, LevelParams};
@@ -34,7 +34,7 @@ const OUTPUT_LIMIT: f32 = 4.0;
 /// A note event for the next `process` call, at its frame offset.
 #[derive(Clone, Copy)]
 enum Ev {
-    On(u8, f32),
+    On(u8, f32, NoteLevels),
     Off(u8),
     Choke(u8),
     Tune(u8, f32),
@@ -59,10 +59,11 @@ struct Live {
 }
 
 /// The levels a note's voice starts with (spec: "Voices"; `audio/voice-levels.md` "The note's own levels"): volume =
-/// the level curve of the velocity (100 of 128 gives 1), centred, pitch in cents from key 60, no filter offsets.
-pub fn note_levels(key: u8, velocity: f32) -> LevelParams {
+/// the level curve of the velocity (100 of 128 gives 1), the note's pan, pitch in cents from key 60, the note's mod X /
+/// mod Y as the filter offsets.
+pub fn note_levels(key: u8, velocity: f32, own: NoteLevels) -> LevelParams {
     let vel = velocity.clamp(0.0, 1.0) * 128.0;
-    LevelParams { pan: 0.0, vol: os_dsp::level::curve(vel * 0.01), pitch: (f32::from(key) - 60.0) * 100.0, fcut: 0.0, fres: 0.0 }
+    LevelParams { pan: own.pan, vol: os_dsp::level::curve(vel * 0.01), pitch: (f32::from(key) - 60.0) * 100.0, fcut: own.mod_x, fres: own.mod_y }
 }
 
 /// A hosted FL native plugin. One type covers both roles: the engine calls `process_fx` when it
@@ -199,13 +200,13 @@ impl NativePlugin {
 
     fn apply(&mut self, ev: Ev) {
         match ev {
-            Ev::On(key, velocity) => {
+            Ev::On(key, velocity, own) => {
                 if self.voices.len() >= MAX_VOICES {
                     self.kill_at(0);
                 }
                 let tag = self.next_tag;
                 self.next_tag += 1;
-                let init = note_levels(key, velocity);
+                let init = note_levels(key, velocity, own);
                 if let Some(voice) = self.plugin.trigger(init, self.final_levels(init, 0.0), velocity, tag) {
                     self.voices.push(Live { key, voice, released: None, tune: 0.0 });
                 }
@@ -298,7 +299,12 @@ impl NativePlugin {
 
 impl Instrument for NativePlugin {
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
-        self.events.push((offset, Ev::On(key, velocity)));
+        self.events.push((offset, Ev::On(key, velocity, NoteLevels::default())));
+    }
+
+    /// The note's own pan and mod X / Y become its voice's `Init` levels (and so part of its `Final` ones).
+    fn note_start(&mut self, offset: u32, key: u8, velocity: f32, _start: f32, levels: NoteLevels) {
+        self.events.push((offset, Ev::On(key, velocity, levels)));
     }
 
     fn note_off(&mut self, offset: u32, key: u8) {
@@ -653,6 +659,11 @@ mod tests {
         let n = 123_456_789i64;
         assert_eq!(i64::from(midi_value(n as f64 / 1_073_741_824.0)), n);
         assert_eq!(shown_name("^b^aCutoff"), "Cutoff");
+        // A note's own pan and mod X / Y are its voice's own levels (spec: "Voices").
+        let own = NoteLevels { pan: -0.5, mod_x: 0.25, mod_y: -1.0 };
+        let l = note_levels(64, 100.0 / 128.0, own);
+        assert_eq!((l.pan, l.fcut, l.fres, l.pitch), (-0.5, 0.25, -1.0, 400.0));
+        assert!((l.vol - 1.0).abs() < 1e-6, "velocity 100 gives 1: {}", l.vol);
         assert_eq!(shown_name("Plain"), "Plain");
         assert_eq!(shown_name("^"), "^");
     }

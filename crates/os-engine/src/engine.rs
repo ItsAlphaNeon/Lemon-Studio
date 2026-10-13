@@ -56,6 +56,8 @@ struct Trigger {
     end: Option<u64>,
     /// Note velocity byte (instrument channels get it as 0..=1).
     velocity: u8,
+    /// The note's own pan and mod X / Y as instruments get them.
+    levels: crate::NoteLevels,
     /// Sample position (source frames) the voice starts at.
     from: f64,
     /// The same as a fraction of the sample (instrument channels: the sampler plugin starts there).
@@ -1012,6 +1014,7 @@ impl Engine {
                     key: n.key,
                     end: (n.len > 0).then_some(n.tick + n.len),
                     velocity: n.velocity,
+                    levels: crate::NoteLevels::of_bytes(n.pan, n.mod_x, n.mod_y),
                     from,
                     start,
                     buf: 0,
@@ -1910,6 +1913,7 @@ impl Engine {
                     fine: t.fine,
                     long: t.end.is_some(),
                     glide: 0,
+                    levels: t.levels,
                 });
                 if let Some(sh) = t.shape {
                     self.inst_shapes.push((t.channel, sh, 0));
@@ -2432,12 +2436,9 @@ fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, shift: f32,
     match note {
         notes::Note::Choke(key) => inst.choke(off, key),
         notes::Note::Off(key) => inst.note_off(off, key),
-        notes::Note::On { key, vel, start, fine } => {
-            if start > 0.0 {
-                inst.note_on_from(off, key, vel, start);
-            } else {
-                inst.note_on(off, key, vel);
-            }
+        notes::Note::On { key, vel, start, fine, levels } => {
+            // The note's own pan and mod X / Y go with it (spec: audio/voice-levels.md "The note's own levels").
+            inst.note_start(off, key, vel, start, levels);
             fines[usize::from(key & 127)] = fine;
             if shift + fine != 0.0 {
                 inst.tune(off, key, shift + fine);
@@ -2500,6 +2501,9 @@ struct Sched {
     velocity: u8,
     /// Note pan byte, 64 = center.
     pan: u8,
+    /// Note mod X / mod Y bytes, 128 = none.
+    mod_x: u8,
+    mod_y: u8,
     /// Tick at which the voice is cut (audio clip end).
     cut: Option<u64>,
     /// Note length in ticks (0 = a step: it has no end of its own).
@@ -2521,6 +2525,8 @@ impl Sched {
             fine: n.fine_pitch,
             velocity: n.velocity,
             pan: n.pan,
+            mod_x: n.mod_x,
+            mod_y: n.mod_y,
             cut: None,
             len: u64::from(n.length),
             from_s: 0.0,
@@ -2775,7 +2781,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         // An audio clip plays its channel's sample from the window start (milliseconds), cut at the clip end.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
                             let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, cut: Some(start + len), len, from_s, clip: ClipFx::of(c), slide: false });
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, clip: ClipFx::of(c), slide: false });
                         }
                         Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
@@ -3507,6 +3513,39 @@ mod tests {
         let out = Engine::new(&n, &mut lib, 48000, PlayMode::Song).render_all(480);
         assert!((out[mid] - 0.5 * 0.38961).abs() < 1e-3, "{}", out[mid]);
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// Each note's own pan and mod X / Y go to the hosted instrument with the note (spec: audio/voice-levels.md "The
+    /// note's own levels"); an audio clip's note is centred.
+    #[test]
+    fn hosted_notes_carry_their_pan_and_mods() {
+        use os_model::{Clip, ClipSource};
+        #[derive(Default)]
+        struct Log(Vec<(u8, crate::NoteLevels)>);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {
+                panic!("notes start with their levels");
+            }
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn note_start(&mut self, _o: u32, key: u8, _v: f32, _start: f32, levels: crate::NoteLevels) {
+                self.0.push((key, levels));
+            }
+            fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        }
+        let mut panned = long_note(0, 48, 0);
+        (panned.pan, panned.mod_x, panned.mod_y) = (96, 192, 64);
+        let plain = Note { key: 62, ..long_note(48, 48, 0) };
+        let p = song(vec![panned, plain], vec![Clip::new(0, 96, 0, ClipSource::Pattern(1))]);
+        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+        let log = Arc::new(std::sync::Mutex::new(Log::default()));
+        e.set_instrument(0, log.clone());
+        e.render_all(480);
+        let got = log.lock().unwrap().0.clone();
+        let half = crate::NoteLevels { pan: 0.5, mod_x: 0.5, mod_y: -0.5 };
+        let centred = crate::NoteLevels::of_bytes(64, 128, 128);
+        assert_eq!(centred, crate::NoteLevels::default());
+        assert_eq!(got, vec![(60, half), (62, centred)]);
+        assert_eq!(crate::NoteLevels::of_bytes(0, 0, 255), crate::NoteLevels { pan: -1.0, mod_x: -1.0, mod_y: 127.0 / 128.0 });
     }
 
     /// A hosted instrument hears the channel pitch as each note's tuning (the engine's own voices apply it themselves).

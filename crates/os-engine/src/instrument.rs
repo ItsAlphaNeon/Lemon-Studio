@@ -19,6 +19,18 @@ pub trait Instrument: Send {
         let _ = start;
         self.note_on(offset, key, velocity);
     }
+    /// Starts a note with its own pan and mod X / Y (spec: audio/voice-levels.md "The note's own levels") and, when
+    /// `start` > 0, that far into the sample (`note_on_from`). The engine starts every note of a song this way. Default:
+    /// the levels are dropped (the instrument has no way to take them) and the note starts with `note_on_from` /
+    /// `note_on`.
+    fn note_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: NoteLevels) {
+        let _ = levels;
+        if start > 0.0 {
+            self.note_on_from(offset, key, velocity, start);
+        } else {
+            self.note_on(offset, key, velocity);
+        }
+    }
     /// Cuts a note at once, whatever its envelope (the end of an audio clip). Default: a note off.
     fn choke(&mut self, offset: u32, key: u8) {
         self.note_off(offset, key);
@@ -85,6 +97,22 @@ pub struct ChannelLevels {
 impl Default for ChannelLevels {
     fn default() -> Self {
         ChannelLevels { volume: 1.0, pan: 0.0, mod_x: 0.0, mod_y: 0.0 }
+    }
+}
+
+/// A note's own levels besides its velocity and pitch (spec: audio/voice-levels.md "The note's own levels"): pan
+/// -1..1 (`(pan byte - 64) / 64`), mod X / mod Y -1..0.992 (`(byte - 128) / 128`). Default: centred, no offsets.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NoteLevels {
+    pub pan: f32,
+    pub mod_x: f32,
+    pub mod_y: f32,
+}
+
+impl NoteLevels {
+    /// The levels of a note's pan, mod X and mod Y bytes.
+    pub fn of_bytes(pan: u8, mod_x: u8, mod_y: u8) -> NoteLevels {
+        NoteLevels { pan: (f32::from(pan) - 64.0) / 64.0, mod_x: (f32::from(mod_x) - 128.0) / 128.0, mod_y: (f32::from(mod_y) - 128.0) / 128.0 }
     }
 }
 

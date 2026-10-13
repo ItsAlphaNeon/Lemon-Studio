@@ -74,6 +74,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn note_on_from(&mut self, offset: u32, key: u8, velocity: f32, start: f32) {
         self.run((), |p| p.note_on_from(offset, key, velocity, start))
     }
+    fn note_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels) {
+        self.run((), |p| p.note_start(offset, key, velocity, start, levels))
+    }
     fn choke(&mut self, offset: u32, key: u8) {
         self.run((), |p| p.choke(offset, key))
     }
@@ -194,6 +197,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn use_start_param(&mut self, name: &str) -> bool {
         self.run(false, |p| p.use_start_param(name))
+    }
+    fn use_note_levels(&mut self) -> bool {
+        self.run(false, |p| p.use_note_levels())
     }
     fn set_offline(&mut self, offline: bool) {
         self.run((), |p| p.set_offline(offline))

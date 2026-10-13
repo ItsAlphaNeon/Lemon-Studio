@@ -87,8 +87,9 @@ pub(super) fn closing_frames(mode: u8, rate: u32) -> u32 {
 /// A note event for an instrument.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Note {
-    /// `fine`: the note's fine pitch in semitones, a tuning of its own on top of the channel's.
-    On { key: u8, vel: f32, start: f32, fine: f32 },
+    /// `fine`: the note's fine pitch in semitones, a tuning of its own on top of the channel's; `levels`: its pan and
+    /// mod X / Y.
+    On { key: u8, vel: f32, start: f32, fine: f32, levels: crate::NoteLevels },
     /// The note's end: a plugin's own release, a sampler voice's envelope release.
     Off(u8),
     /// A sampler voice's closing fade.
@@ -119,11 +120,13 @@ pub(super) struct Event {
     pub long: bool,
     /// A slide note's length in ticks: its glide takes that many ticks plus one steps.
     pub glide: u32,
+    /// The note's own pan and mod X / Y.
+    pub levels: crate::NoteLevels,
 }
 
 impl Event {
     pub fn on(ch: usize, off: u32, key: u8, vel: f32) -> Event {
-        Event { ch, off, key, vel, start: 0.0, fine: 0.0, long: true, glide: 0 }
+        Event { ch, off, key, vel, start: 0.0, fine: 0.0, long: true, glide: 0, levels: crate::NoteLevels::default() }
     }
     /// A slide note of `len` ticks to `key`.
     pub fn slide(ch: usize, off: u32, key: u8, len: u32) -> Event {
@@ -462,7 +465,7 @@ fn note_start(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, N
     };
     // A retriggered key: its old tuning ends with it.
     v.glides.retain(|g| g.key != key);
-    out.push((e.ch, e.off, Note::On { key, vel: e.vel, start: e.start, fine: e.fine }));
+    out.push((e.ch, e.off, Note::On { key, vel: e.vel, start: e.start, fine: e.fine, levels: e.levels }));
     v.pool.push(Voice { sent: key, born: v.tick, group, state: State::Held, left });
     if r.mono {
         v.sounding = Some((key, key));
@@ -490,7 +493,7 @@ mod tests {
     }
 
     fn on(key: u8) -> Note {
-        Note::On { key, vel: 0.8, start: 0.0, fine: 0.0 }
+        Note::On { key, vel: 0.8, start: 0.0, fine: 0.0, levels: crate::NoteLevels::default() }
     }
 
     fn sampler() -> Rules {
