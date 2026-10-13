@@ -1225,7 +1225,9 @@ mod tests {
         let mut p = Prefs::default();
         let d = PathBuf::from("D:/My Plugins");
         assert!(p.add_folder(&d));
-        assert!(!p.add_folder(Path::new("d:\\my plugins\\")), "the same folder once");
+        // The same folder spelled another way: case and separators count only on Windows.
+        let again = if cfg!(windows) { "d:\\my plugins\\" } else { "D:/My Plugins/" };
+        assert!(!p.add_folder(Path::new(again)), "the same folder once");
         p.toggle_folder(&d);
         assert!(!p.folders[0].on);
         if let Some(std) = search_dirs(&p).into_iter().find(|s| s.kind != DirKind::Added) {
