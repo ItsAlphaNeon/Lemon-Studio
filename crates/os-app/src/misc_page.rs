@@ -248,7 +248,7 @@ pub fn default_of(m: M) -> f32 {
         M::TimeGate | M::TimeSwing | M::ArpGate => 1.0,
         M::ArpTime => 0.58,
         M::EchoTime => 0.45,
-        M::PolySlide => 0.35,
+        M::PolySlide => 500.0 / 1024.0,
         M::FullPorta | M::MainPitch => 1.0,
         M::ArpRange => 1.0,
         M::Echoes => 4.0,

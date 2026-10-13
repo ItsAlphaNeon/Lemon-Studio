@@ -68,12 +68,13 @@ clicking it does nothing.
 | Piano roll note editing | ✅ | Full tool set, velocity and event lanes, quantize / chop / glue / legato / strum / arpeggiate / randomize, vertical zoom, ghost channels, pattern time markers (saved) |
 | Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers, several arrangements; track height, zoom and scroll saved with the project |
 | Automation | 🚧 | Automation clips for channel, mixer and plugin parameters; no recording of movements |
-| Mixing and routing | ✅ | Mixer tracks, sends, sidechain, effect slots, meters, polarity and stereo swap, main volume and main pitch |
+| Mixing and routing | ✅ | Mixer tracks, sends, effect slots, meters, polarity and stereo swap, main volume and main pitch; no sidechain inputs yet |
+| Playback engine | 🚧 | Renders whole ticks ahead of the audio device, so edits and busy moments do not leave gaps; cut groups, voice limits, mono and portamento glides; the sampler's closing fades; a fast resampler while playing and the exact one for export; idle plugins are skipped. The CPU panel shows the audio load, notes playing, memory and dropouts. One audio thread: no multi-core mixing yet |
 | Plugin hosting | ✅ | CLAP and VST3 instruments and effects, with their editors and saved state; on Windows a plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio |
 | Plugin management | ✅ | Plugin menus everywhere a plugin is added (F8 lists instruments and effects: an effect goes to the selected mixer track, an instrument to the bottom of the channel rack); a plugin manager in Settings with your own search folders, a background scan at startup (each file is tried in a separate scanner process, so a broken plugin cannot take Lemon Studio down), favourites, hidden plugins, and one menu entry per plugin installed as both VST3 and CLAP (your preferred format wins). VST2 is not hosted yet |
 | Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ so far |
 | Exporting audio | 🚧 | Song or pattern to a WAV file (32-bit float); no MP3 or FLAC yet |
-| Project files | 🚧 | Opens and saves `.flp` projects from the latest FL Studio 26 only (older versions are on the roadmap); early, always keep backups |
+| Project files | 🚧 | Opens and saves `.flp` projects from the latest FL Studio 26 only (older versions are on the roadmap; a project in the layout used before version 24.2 is refused with a dialog that explains how to re-save it); early, always keep backups |
 | Undo | 🚧 | Per editor (piano roll, playlist); no redo or global history |
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers (notes play the selected channel); no note recording yet |
 | Audio recording | ❌ | Not available yet |
@@ -81,7 +82,7 @@ clicking it does nothing.
 | Time-stretching | ✅ | All twelve stretch methods of sampler channels and audio clips, with the length and pitch rules projects expect; audio clips in the playlist take their length (and redraw their waveform) whenever the sampler's stretch settings, the channel pitch or the tempo change; playlist stretch mode (Shift+M). One open-source stretcher (Signalsmith Stretch) plays every method, so the sound differs from the original stretchers |
 | Audio editing | ❌ | Not available yet |
 | Plugin delay compensation | ❌ | Not available yet |
-| Audio drivers | 🚧 | WASAPI (shared mode) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux; no ASIO or JACK yet |
+| Audio drivers | 🚧 | WASAPI (shared mode) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux; output device, sample rate and buffer length in Settings > Audio; no ASIO or JACK yet |
 | Platforms | 🚧 | Windows 10 / 11; Linux (X11, and Wayland through XWayland); no macOS yet |
 | Look and themes | 🚧 | Lemon design (lemon on neutral greys, rounded-square controls) and the Classic look, switched with Ctrl+Shift+D; theme files apply to Classic; plugin editors not restyled yet |
 
@@ -198,7 +199,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-clap`](crates/os-clap) | CLAP plugin host |
 | [`os-vst3`](crates/os-vst3) | VST3 plugin host |
 | [`os-hostlink`](crates/os-hostlink) | Host link protocol between Lemon Studio and its own plugins |
-| [`os-native`](crates/os-native) | Experimental host for plugins built on a third-party native plugin SDK (Windows only) |
+| [`os-native`](crates/os-native) | Experimental host for plugins built on a third-party native plugin SDK (Windows only): effects and generators (voices, note levels, tempo ticks); each plugin is tried in a child process before its first load, and a plugin error bypasses that plugin instead of ending the app |
 | [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of Lemon Studio's own plugins |
 | [`os-paths`](crates/os-paths) | Where Lemon Studio keeps its settings, themes and presets on each platform |
 | [`open-sampler`](plugins/open-sampler) | Open Sampler instrument (VST3 + CLAP) |

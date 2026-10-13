@@ -5,7 +5,11 @@
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
 
 mod app;
+mod audio_cfg;
+#[cfg(test)]
+mod audio_bench;
 mod browser;
+mod cpu;
 mod dialog;
 mod icons;
 mod knobs;
@@ -1131,6 +1135,10 @@ fn main() {
     // A plugin scanner process (spec: ui/plugin-manager.md §4): loads one file, prints its plugins, ends.
     if args.first().map(String::as_str) == Some(plugin_scan::ARG) {
         plugin_scan::child_main(&args[1..]);
+    }
+    // A child the app starts to try a native plugin before its first load (spec: plugins/fruity-abi.md).
+    if args.first().map(String::as_str) == Some(os_native::check::CHECK_ARG) {
+        os_host::guard::exit(os_native::check::run(&args[1..]));
     }
     app::move_old_settings();
     if args.iter().any(|a| a == "--screenshot") {

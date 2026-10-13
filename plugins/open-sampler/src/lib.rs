@@ -347,6 +347,8 @@ impl Plugin for OpenSampler {
 
     fn initialize(&mut self, _layout: &AudioIOLayout, config: &BufferConfig, _ctx: &mut impl InitContext<Self>) -> bool {
         self.engine.set_rate(config.sample_rate);
+        // An offline render (an export) gets the resampler's exact weights; live playback the tables.
+        self.engine.quality = if config.process_mode == ProcessMode::Offline { os_dsp::resample::Quality::Exact } else { os_dsp::resample::Quality::Table };
         // A restored state names a sample: load it now (initialize may block).
         let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
         if !path.is_empty() && path != self.shared.loaded_path() {

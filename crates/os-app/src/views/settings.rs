@@ -30,6 +30,8 @@ pub enum SAct {
     Preset(usize),
     /// The plugin manager's controls (spec: ui/plugin-manager.md §2).
     Plug(Plug),
+    /// A working combo (`LIVE_COMBOS`) by its label, with its box's bottom left (where its menu opens).
+    Combo(&'static str, f32, f32),
 }
 
 /// Plugin manager controls. Rows count in `plugin_db::search_dirs` order (folders) or in `Db::rows` (table).
@@ -64,6 +66,10 @@ pub struct SettingsUi {
     /// Filled when the window opens: output devices, theme files (name, path), selected preset.
     pub devices: Vec<String>,
     pub device: String,
+    /// Audio page: the audio settings, the rate streams open at, and the status lines (kept up to date while shown).
+    pub audio: crate::audio_cfg::AudioCfg,
+    pub rate: Option<u32>,
+    pub status: [String; 2],
     /// Theme presets (name, `.flstheme` text): built-ins (spec ui/theme-presets.md), then the user's theme folder.
     pub themes: Vec<(String, String)>,
     pub preset: usize,
@@ -119,6 +125,17 @@ pub const LIVE: &[&str] = &[
 
 fn live(key: &str) -> bool {
     LIVE.contains(&key)
+}
+
+/// The combos that work (Audio page: they open a menu of choices, `App::audio_menu`).
+pub const LIVE_COMBOS: [&str; 3] = [OUTPUT_DEVICE, SAMPLE_RATE, BUFFER_LENGTH];
+pub const OUTPUT_DEVICE: &str = "Output device";
+pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
+pub const BUFFER_LENGTH: &str = "Buffer length";
+
+/// A buffer length as the Audio page shows it: frames and milliseconds at `rate`.
+pub fn buffer_text(frames: u32, rate: u32) -> String {
+    format!("{frames} frames ({:.1} ms)", f64::from(frames) * 1000.0 / f64::from(rate.max(1)))
 }
 
 pub const THEME: usize = 5;
@@ -260,13 +277,25 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             g("", vec![Buttons(vec![("Refresh device list", 136.0), ("Update MIDI scripts", 136.0)])]),
         ],
         AUDIO => {
-            let rate = crate::transport::Transport::device_rate().unwrap_or(44100);
+            // Device, rate and buffer length work (spec: ui/settings.md "Audio"); a choice of "the device's own" shows
+            // what that is.
+            let rate = st.rate.unwrap_or(44100);
+            let rate_text = match st.audio.rate {
+                Some(r) => r.to_string(),
+                None => format!("Device ({rate})"),
+            };
+            let buffer = match st.audio.buffer {
+                Some(b) => buffer_text(b, rate),
+                None => "Device default".into(),
+            };
             vec![
                 g("Input / output", vec![
-                    combo(&st.device, 360.0, "Output device"),
-                    combo(&rate.to_string(), 66.0, "Sample rate (Hz)"),
+                    combo(&st.device, 360.0, OUTPUT_DEVICE),
+                    combo(&rate_text, 120.0, SAMPLE_RATE),
+                    combo(&buffer, 160.0, BUFFER_LENGTH),
                     Check("Auto close", false),
-                    Text(format!("Status: open at {rate}Hz, shared mode (WASAPI)"), true),
+                    Text(st.status[0].clone(), true),
+                    Text(st.status[1].clone(), true),
                     List(vec![("Output devices", 0.0)], st.devices.iter().map(|d| vec![d.clone()]).collect(), 4),
                     Check2("Mix in buffer switch", false, "Triple buffer", false),
                     combo("Highest", 96.0, "Priority"),
@@ -474,7 +503,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 format!("PPQ {}, tempo {:.3}", s.project.ppq, s.tempo),
                 format!("Channels {}, patterns {}, mixer tracks {}", s.project.channels.len(), s.project.patterns.len(), s.project.mixer.len()),
                 format!("Output device: {}", st.device),
-                format!("Device rate: {:?}", crate::transport::Transport::device_rate()),
+                format!("Device rate: {:?}", st.rate),
                 format!("Instruments listed: {}, effects listed: {}", s.plugdb.lists.gens.len(), s.plugdb.lists.fx.len()),
             ];
             lines.extend(s.plugdb.lists.gens.iter().map(|e| format!("  {} ({})", e.label, db::format_label(e.format))));
@@ -779,8 +808,15 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             check(ui, a, *da, g.x + 22.0, cy, live(a));
             check(ui, b, *db, g.x + 324.0, cy, live(b));
         }
-        // Combos and value boxes: none works yet. A combo keeps showing its value (the output device, the sample
-        // rate, the project's PPQ), greyed out.
+        // The Audio page's device, rate and buffer combos open their menus.
+        Row::Combo(v, w, label) if LIVE_COMBOS.contains(label) => {
+            let b = Rect::new(x0, y + 3.0, *w, 21.0);
+            let hov = ui.hit(b, Action::Settings(SAct::Combo(label, b.x, b.bottom())), "");
+            kit::combo(ui.c, t, b, v, f, kit::State::hover(hov));
+            ui.c.text(f, b.right() + 8.0, ty, if hov { t.glyph } else { t.text }, label);
+        }
+        // Other combos and value boxes do not work yet. A combo keeps showing its value (the project's PPQ), greyed
+        // out.
         Row::Combo(v, w, label) => {
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
             ui.off(b, name_of(label, group));

@@ -11,6 +11,17 @@ typedef void (*os_host_guarded_fn)(void *);
 
 /* The code of a Microsoft C++ exception (`throw`). Rust panics on this target are raised the same way. */
 #define CXX_EXCEPTION 0xE06D7363u
+/* The code of an error raised by an Object Pascal runtime (the language native plugins are built in) and not handled
+   by the plugin (spec: plugins/fruity-abi.md, "Crash containment"). */
+#define RUNTIME_ERROR 0x0EEDFADEu
+#define MESSAGE_LEN 256
+
+/* What a contained exception was. Same layout as `guard::Fault`. */
+typedef struct {
+    unsigned long code;
+    /* The text of the runtime's error object (UTF-16, 0-terminated); empty when there is none. */
+    unsigned short message[MESSAGE_LEN];
+} os_host_fault;
 
 /* The module this file is linked into (the program). */
 static HMODULE own_module(void)
@@ -22,7 +33,37 @@ static HMODULE own_module(void)
     return own;
 }
 
-static int os_host_filter(const EXCEPTION_POINTERS *ep, unsigned long *out)
+/* A runtime error carries its error object as the second exception parameter; the object's first field after its
+   class pointer is the message, a counted UTF-16 string (spec: plugins/fruity-abi.md, "Crash containment"). Read
+   with care: any fault while reading leaves the message empty. */
+static void os_host_message(const EXCEPTION_RECORD *r, os_host_fault *out)
+{
+    out->message[0] = 0;
+    if (r->ExceptionCode != RUNTIME_ERROR || r->NumberParameters < 2)
+        return;
+    __try {
+        const unsigned char *obj = (const unsigned char *)r->ExceptionInformation[1];
+        const unsigned short *text;
+        int len, i;
+        if (!obj)
+            return;
+        text = *(const unsigned short *const *)(obj + sizeof(void *));
+        if (!text)
+            return;
+        len = *(const int *)((const unsigned char *)text - 4);
+        if (len <= 0 || len > 65536)
+            return;
+        if (len > MESSAGE_LEN - 1)
+            len = MESSAGE_LEN - 1;
+        for (i = 0; i < len; i++)
+            out->message[i] = text[i];
+        out->message[len] = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out->message[0] = 0;
+    }
+}
+
+static int os_host_filter(const EXCEPTION_POINTERS *ep, os_host_fault *out)
 {
     const EXCEPTION_RECORD *r = ep->ExceptionRecord;
     unsigned long code = r->ExceptionCode;
@@ -33,17 +74,19 @@ static int os_host_filter(const EXCEPTION_POINTERS *ep, unsigned long *out)
        Windows its fourth parameter is the image base of the module that threw it. */
     if (code == CXX_EXCEPTION && r->NumberParameters >= 4 && (HMODULE)r->ExceptionInformation[3] == own_module())
         return EXCEPTION_CONTINUE_SEARCH;
-    *out = code;
+    out->code = code;
+    os_host_message(r, out);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
-/* Calls `f(ctx)`; returns 1, or 0 with the exception code in `code` when the call raised one this frame contains. */
-int os_host_guarded_call(os_host_guarded_fn f, void *ctx, unsigned long *code)
+/* Calls `f(ctx)`; returns 1, or 0 with what was raised in `fault` when the call raised an exception this frame
+   contains. */
+int os_host_guarded_call(os_host_guarded_fn f, void *ctx, os_host_fault *fault)
 {
     __try {
         f(ctx);
         return 1;
-    } __except (os_host_filter(GetExceptionInformation(), code)) {
+    } __except (os_host_filter(GetExceptionInformation(), fault)) {
         return 0;
     }
 }

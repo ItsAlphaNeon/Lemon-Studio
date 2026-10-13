@@ -190,6 +190,12 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         false
     }
 
+    /// Tells the instance whether it renders offline (an export: no deadline, the plugin's best quality) or for live
+    /// playback (UI thread, with no stream processing the instance). Formats without such a switch ignore it.
+    fn set_offline(&mut self, offline: bool) {
+        let _ = offline;
+    }
+
     /// Number of parameters.
     fn param_count(&self) -> usize {
         0
@@ -225,8 +231,9 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         Vec::new()
     }
 
-    /// The exception code of the crash that stopped the instance ([`Guarded`]), if one did. A stopped instance is never
-    /// called again: its instrument plays silence, its effect passes the sound through.
+    /// The exception code of the crash that stopped the instance ([`Guarded`]), or of the error it stopped itself after,
+    /// if one did. A stopped instance is never called again: its instrument plays silence, its effect passes the sound
+    /// through.
     fn stopped(&self) -> Option<u32> {
         None
     }

@@ -443,7 +443,7 @@ pub struct ChannelMisc {
     pub levels: [f32; 4],
     /// Maximum polyphony; 0 = unlimited.
     pub max_poly: u32,
-    /// Slide (portamento) time knob.
+    /// Slide time knob: the stored slide time / 1024 (spec: audio/note-rules.md).
     pub slide: f32,
     /// Portamento: every new note slides from the previous one.
     pub porta: bool,
@@ -478,7 +478,7 @@ impl Default for ChannelMisc {
         ChannelMisc {
             levels: [0.0; 4],
             max_poly: 0,
-            slide: 0.35,
+            slide: 500.0 / 1024.0,
             porta: false,
             mono: false,
             gate: 1.0,
