@@ -950,7 +950,7 @@ impl App {
                 song_mode: false,
                 menu_open: None,
                 lane_menu: false,
-                settings: Default::default(),
+                settings: views::settings::SettingsUi { native: os_native::settings_shown(), ..Default::default() },
                 playlist_scroll: (0.0, 0.0),
                 playlist_bar_w: views::playlist::BAR_W,
                 mixer_scroll: 0.0,
@@ -6360,10 +6360,21 @@ mod tests {
         let r = hit_rect(&app, &adv);
         click(&mut app, &mut c, r);
         assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Fast declick for cut groups")), "Advanced unfolded");
+        // The native host toggle shows only with `OPENSTUDIO_NATIVE_SETTINGS` (`SettingsUi::native`); the
+        // real-native-plugins toggle only while the native host is on too (off in tests).
+        let shown = |app: &App, k| app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check(k)));
+        let r = hit_rect(&app, &Action::Settings(SAct::Tab(PLUGINS)));
+        for native in [false, true] {
+            app.state.settings.native = native;
+            click(&mut app, &mut c, r);
+            assert_eq!(shown(&app, NATIVE_HOST_CHECK), native, "native host toggle shown: {native}");
+            if !os_native::enabled() {
+                assert!(!shown(&app, crate::views::settings::NATIVE_FIRST_CHECK), "hidden");
+            }
+        }
         // The working controls keep their actions.
         for (tab, live) in [
             (FILE, SAct::Button("Manage plugins")),
-            (PLUGINS, SAct::Check(NATIVE_HOST_CHECK)),
             (PLUGINS, SAct::Button("Add folder...")),
             (PLUGINS, SAct::Button("Find new plugins")),
             (PLUGINS, SAct::Check(crate::views::settings::COMBINE_CHECK)),
@@ -6374,10 +6385,6 @@ mod tests {
             let r = hit_rect(&app, &Action::Settings(SAct::Tab(tab)));
             click(&mut app, &mut c, r);
             assert!(app.hits.iter().any(|h| h.action == Action::Settings(live.clone())), "{live:?} works");
-            // The real-native-plugins toggle shows only while the native host is on (off in tests).
-            if tab == PLUGINS && !os_native::enabled() {
-                assert!(!app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check(crate::views::settings::NATIVE_FIRST_CHECK))), "hidden");
-            }
         }
         assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Save preset...")));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(GENERAL)));

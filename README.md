@@ -195,11 +195,10 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-theme`](crates/os-theme) | Colour palette, designs (Lemon, Classic), theme files and the HSL adjustment model |
 | [`os-ui`](crates/os-ui) | CPU canvas, text rendering and the shared widget kit |
 | [`os-app`](crates/os-app) | The `lemonstudio` application: windows, editors, transport |
-| [`os-host`](crates/os-host) | Format-neutral plugin hosting layer (CLAP, VST3, native) |
+| [`os-host`](crates/os-host) | Format-neutral plugin hosting layer (CLAP, VST3) |
 | [`os-clap`](crates/os-clap) | CLAP plugin host |
 | [`os-vst3`](crates/os-vst3) | VST3 plugin host |
 | [`os-hostlink`](crates/os-hostlink) | Host link protocol between Lemon Studio and its own plugins |
-| [`os-native`](crates/os-native) | Experimental host for plugins built on a third-party native plugin SDK (Windows only): effects and generators (voices, note levels, tempo ticks, parameters and their automation; the channel's envelopes, LFOs and filter on a generator's voices); each plugin is tried in a child process before its first load, and a plugin error bypasses that plugin instead of ending the app |
 | [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of Lemon Studio's own plugins |
 | [`os-paths`](crates/os-paths) | Where Lemon Studio keeps its settings, themes and presets on each platform |
 | [`open-sampler`](plugins/open-sampler) | Open Sampler instrument (VST3 + CLAP) |
