@@ -422,8 +422,8 @@ pub struct PlaylistState {
     pub hover_handle: Option<Handle>,
     /// Where the arrangement name sits in the title bar (its rename box opens there).
     pub arr_anchor: (f32, f32),
-    /// Stretch mode (Shift+M, §9b): resizing an audio clip stretches it; while a resize runs, the stretch multiplier
-    /// each audio clip's channel had when it started.
+    /// Stretch mode (Shift+M, §9b): resizing an audio clip stretches it; while a resize runs, how many beats each
+    /// audio clip's channel's whole sample lasted when it started.
     pub stretch: bool,
     pub stretch_base: Vec<(u16, f64)>,
     /// Track row pitch (vertical zoom: Alt+wheel; saved in the project's playlist view).
@@ -793,20 +793,113 @@ pub fn source_kind(s: &State, src: ClipSource) -> PickKind {
     }
 }
 
-/// Seconds per tick at the project tempo.
-/// How fast an audio clip's channel plays its sample: 1 unless stretched by resampling (§9b,
-/// audio/audio-clips.md "Stretching by resampling").
+/// How fast an audio clip's channel goes through its sample: its stretch in any method (§9b, audio/time-stretch.md),
+/// times the channel's pitch where that moves the sample (no stretch time, not a realtime method), as the engine
+/// plays it (audio/audio-clips.md "Length for the song").
 pub fn audio_speed(s: &State, src: ClipSource) -> f64 {
     let ClipSource::Channel(c) = src else { return 1.0 };
     let Some(ch) = channel_of(s, c) else { return 1.0 };
-    if ch.sound.stretch == [0; 4] {
-        return 1.0;
+    let sound = &ch.sound;
+    let stretch = if sound.stretch == [0; 4] {
+        1.0
+    } else {
+        // A fitted time needs the sample's duration (the multiplier alone does not).
+        let duration = if sound.stretch_time().is_some() { sample_secs(s, ch) } else { 0.0 };
+        1.0 / sound.stretch_factor(duration, s.tempo)
+    };
+    let pitched = sound.channel_pitch_applies() && !os_model::stretch_mode::realtime(sound.stretch_mode());
+    if !pitched {
+        return stretch;
     }
-    // A fitted time needs the sample's duration (the multiplier alone does not).
-    let duration = if ch.sound.stretch[0] > 0 { ch.sample_path.as_deref().and_then(|p| s.playlist.wave(p)).map_or(0.0, |w| w.secs()) } else { 0.0 };
-    ch.sound.stretch_speed(duration, s.tempo).0
+    let main = ch.misc.main_pitch.then(|| i32::from(s.project.main_pitch.unwrap_or(0)));
+    let cents = f64::from(os_engine::laws::channel_pitch(f64::from(ch.pitch_cents), ch.misc.fine, ch.misc.root, main)) + 6000.0;
+    stretch * os_engine::laws::cents_rate(cents)
 }
 
+/// Works every audio clip's length out again from its trims and its channel's stretch, pitch and the tempo, as FL
+/// does (the stored length is not used for an audio clip): each trim point becomes ticks on its own, rounded; an
+/// untrimmed clip spans the whole sample (ui/playlist.md §9c, audio/audio-clips.md). Clips whose sample is not
+/// loaded keep their length. Returns whether a length changed. (The app's tick uses `audio_fits` + `fit_clips`.)
+#[cfg(test)]
+pub fn fit_audio(s: &mut State) -> bool {
+    audio_fits(s).is_some_and(|fits| fit_clips(&mut s.project.arrangements, &fits))
+}
+
+/// Per audio channel, the whole sample in ticks and in ms; `None` for a channel whose sample is not loaded.
+pub type Fits = HashMap<u16, Option<(f64, f64)>>;
+
+/// The fits of every channel with clips (`fit_audio`); `None` while waveforms are loading.
+pub fn audio_fits(s: &State) -> Option<Fits> {
+    if s.playlist.wave_wait {
+        return None;
+    }
+    let mut per = Fits::new();
+    for a in &s.project.arrangements {
+        for c in &a.clips {
+            let ClipSource::Channel(ch) = c.source else { continue };
+            if per.contains_key(&ch) {
+                continue;
+            }
+            let fit = (source_kind(s, c.source) == PickKind::Audio)
+                .then(|| channel_of(s, ch))
+                .flatten()
+                .map(|x| (audio_ticks(s, x), sample_secs(s, x) * 1000.0))
+                .filter(|&(t, ms)| ms > 0.0 && t > 0.0 && t.is_finite());
+            per.insert(ch, fit);
+        }
+    }
+    Some(per)
+}
+
+/// Gives the audio clips of `arrangements` their lengths from `fits` (`fit_audio`). Returns whether one changed.
+pub fn fit_clips(arrangements: &mut [os_model::Arrangement], fits: &Fits) -> bool {
+    let mut changed = false;
+    for a in arrangements {
+        for c in &mut a.clips {
+            let ClipSource::Channel(ch) = c.source else { continue };
+            let Some(&Some((t, ms))) = fits.get(&ch) else { continue };
+            let (w0, w1) = c.window.unwrap_or((0.0, ms));
+            // Scaled from the whole length, so a point that falls on half a tick stays a tie and rounds up as in FL.
+            let tick = |w: f64| (w * t / ms).round();
+            let len = (tick(w1) - tick(w0)).max(1.0) as u32;
+            if c.length != len {
+                c.length = len;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// The channel's whole sample in ticks, unrounded: the stretch time (whole 1/192 beats) or the sample's duration at
+/// the tempo, times the multiplier, over the channel pitch's rate where that moves the sample (`audio_speed`). 0 while
+/// the waveform is not loaded.
+fn audio_ticks(s: &State, ch: &os_model::Channel) -> f64 {
+    let secs = sample_secs(s, ch);
+    if secs <= 0.0 {
+        return 0.0;
+    }
+    let sound = &ch.sound;
+    let ppq = f64::from(ppq(s));
+    let base = match sound.stretch_time() {
+        Some(_) => f64::from(f32::from_bits(sound.stretch[0])) * ppq / 192.0,
+        None => secs * s.tempo.max(1.0) / 60.0 * ppq,
+    };
+    let ticks = base * sound.stretch_multiplier();
+    if !sound.channel_pitch_applies() || os_model::stretch_mode::realtime(sound.stretch_mode()) {
+        return ticks;
+    }
+    let main = ch.misc.main_pitch.then(|| i32::from(s.project.main_pitch.unwrap_or(0)));
+    let cents = f64::from(os_engine::laws::channel_pitch(f64::from(ch.pitch_cents), ch.misc.fine, ch.misc.root, main)) + 6000.0;
+    ticks / os_engine::laws::cents_rate(cents)
+}
+
+/// Seconds the channel's sample lasts (0 while its waveform is not loaded).
+fn sample_secs(s: &State, ch: &os_model::Channel) -> f64 {
+    ch.sample_path.as_deref().and_then(|p| s.playlist.wave(p)).map_or(0.0, |w| w.secs())
+}
+
+/// Seconds per tick at the project tempo.
 fn secs_per_tick(s: &State) -> f64 {
     60.0 / s.tempo.max(1.0) / f64::from(ppq(s))
 }
@@ -828,8 +921,9 @@ pub fn source_len(s: &State, src: ClipSource) -> u32 {
                 let beats = a.points.last().map_or(0.0, |p| p.beat);
                 return ((beats * f64::from(ppq(s))).round() as u32).max(bar / 4);
             }
-            let secs = channel_of(s, c).and_then(|ch| ch.sample_path.as_deref()).and_then(|p| s.playlist.wave(p)).map_or(0.0, |w| w.secs());
-            if secs > 0.0 { ((secs / secs_per_tick(s)).round() as u32).max(1) } else { bar }
+            // The whole sample at the channel's speed (`fit_audio`).
+            let t = channel_of(s, c).map_or(0.0, |ch| audio_ticks(s, ch));
+            if t > 0.0 && t.is_finite() { (t.round() as u32).max(1) } else { bar }
         }
     }
 }
@@ -1117,10 +1211,12 @@ pub fn slip(s: &mut State, i: usize, orig: &Clip, dt: i64) {
 pub fn resize_right(s: &mut State, i: usize, orig: &Clip, len: u32) {
     let (w0, _) = window(s, orig);
     let end = w0 + to_src(s, orig.source, f64::from(len));
+    // An audio clip without trims plays its whole sample (`fit_audio`): it gets a trim end. An unset pattern or
+    // automation window already means "from the start for the clip's length".
+    let audio = source_kind(s, orig.source) == PickKind::Audio && matches!(orig.source, ClipSource::Channel(_));
     if let Some(c) = arr_mut(s).clips.get_mut(i) {
         c.length = len.max(1);
-        // An unset window already means "from the start for the clip's length".
-        if orig.window.is_some() {
+        if orig.window.is_some() || audio {
             c.window = Some((w0, end));
         }
     }
@@ -1128,16 +1224,18 @@ pub fn resize_right(s: &mut State, i: usize, orig: &Clip, len: u32) {
 }
 
 /// Stretch mode (§9b): an audio clip resized to `len` ticks at `pos` keeps showing the same part of its sample: its
-/// channel's resample multiplier scales with the length (0.25..4, Open Sampler's range). False when not stretching.
+/// channel's stretch time becomes the whole sample's stretched length times the new / old clip length, the multiplier
+/// back at 1, the method and pitch kept (FL does this). False when not stretching.
 pub fn stretch_clip(s: &mut State, i: usize, orig: &Clip, pos: u32, len: u32) -> bool {
     let ClipSource::Channel(ch) = orig.source else { return false };
     let Some(&(_, base)) = s.playlist.stretch_base.iter().find(|b| b.0 == ch) else { return false };
-    let m = (base * f64::from(len) / f64::from(orig.length.max(1))).clamp(0.25, 4.0);
+    // Up to Open Sampler's longest TIME.
+    let beats = (base * f64::from(len) / f64::from(orig.length.max(1))).clamp(1.0 / 192.0, 4096.0);
     if let Some(c) = s.project.channels.iter_mut().find(|c| c.index == ch) {
-        c.sound.set_stretch_multiplier(m);
+        c.sound.set_stretch_time(beats);
     }
-    // The length the multiplier allows (clamped), the window unchanged.
-    let len = (f64::from(orig.length) * m / base).round().max(1.0) as u32;
+    // The length that time allows (clamped), the window unchanged.
+    let len = (f64::from(orig.length) * beats / base).round().max(1.0) as u32;
     let end = orig.position + orig.length;
     if let Some(c) = arr_mut(s).clips.get_mut(i) {
         c.length = len;
@@ -2156,7 +2254,13 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     orig.iter()
                         .filter_map(|(_, c)| match c.source {
                             ClipSource::Channel(ch) if source_kind(s, c.source) == PickKind::Audio => {
-                                channel_of(s, ch).map(|x| (ch, x.sound.stretch_multiplier()))
+                                // The whole sample's length in beats as the clip shows it (unknown until its waveform is
+                                // in): its stretched length, and the channel's pitch where that applies (OS: the clip then
+                                // stays under the mouse).
+                                let x = channel_of(s, ch)?;
+                                let secs = sample_secs(s, x);
+                                let k = to_src(s, c.source, 1.0);
+                                (secs > 0.0 && k > 0.0).then(|| (ch, secs * 1000.0 / k / f64::from(ppq(s))))
                             }
                             _ => None,
                         })
@@ -2469,11 +2573,10 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             }
         }
         PlDrag::ResizeL { .. } | PlDrag::ResizeR { .. } if !s.playlist.stretch_base.is_empty() => {
-            // Stretched channels: their Open Sampler takes the new multiplier (§9b).
+            // Stretched channels: their Open Sampler takes the new stretch settings (§9b).
             for (ch, _) in std::mem::take(&mut s.playlist.stretch_base) {
                 let Some(row) = s.project.channels.iter().position(|c| c.index == ch) else { continue };
-                let m = s.project.channels[row].sound.stretch_multiplier();
-                app.plugins.set_sampler_stretch(row, m);
+                app.plugins.set_sampler_stretch(row, &s.project.channels[row].sound);
             }
         }
         PlDrag::Move { orig, fresh: false, .. } | PlDrag::ResizeL { orig, .. } | PlDrag::ResizeR { orig, .. } => {

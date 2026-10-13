@@ -468,8 +468,8 @@ impl os_host::Plugin for NativePlugin {
         self.plugin.restore_state(data)
     }
 
-    fn stopped(&self) -> Option<String> {
-        self.plugin.stop_reason()
+    fn stopped(&self) -> Option<u32> {
+        self.plugin.stopped()
     }
 }
 

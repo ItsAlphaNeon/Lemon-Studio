@@ -7,6 +7,7 @@
 use std::f64::consts::PI;
 use std::sync::Arc;
 
+use os_dsp::stretch::Stream;
 use os_engine::{envelope, laws, Sample};
 
 use crate::params::FxKey;
@@ -18,6 +19,15 @@ use crate::params::FxKey;
 pub fn precompute(raw: &Sample, k: &FxKey) -> Sample {
     let sr = raw.rate.max(1) as f64;
     let (mut l, mut r) = cut(raw, k.start, k.length, sr);
+    // Time stretching runs right after the start and length (spec §5.6).
+    if k.stretch {
+        let ratio = k.ratio_for(l.len() as f64 / sr);
+        let shift = 2f64.powf(f64::from(k.shift) / 1200.0);
+        if (ratio - 1.0).abs() > 1e-4 || (shift - 1.0).abs() > 1e-4 {
+            let st = stretch(&Sample { rate: raw.rate, left: l, right: r }, ratio, shift);
+            (l, r) = (st.left, st.right);
+        }
+    }
     if k.dc {
         remove_dc(&mut l);
         remove_dc(&mut r);
@@ -75,15 +85,7 @@ pub fn precompute(raw: &Sample, k: &FxKey) -> Sample {
     if k.trim > 1e-4 {
         trim(&mut l, &mut r, k.trim / 128.0);
     }
-    let mut s = Sample { rate: raw.rate, left: l, right: r };
-    if k.stretch {
-        let ratio = k.ratio_for(s.frames() as f64 / sr);
-        let shift = 2f64.powf(f64::from(k.shift) / 1200.0);
-        if (ratio - 1.0).abs() > 1e-4 || (shift - 1.0).abs() > 1e-4 {
-            s = stretch(&s, ratio, shift);
-        }
-    }
-    s
+    Sample { rate: raw.rate, left: l, right: r }
 }
 
 /// Raised-cosine edge of `n` frames: 0 at `i` = 0, 1 at `n`.
@@ -392,91 +394,10 @@ fn reverb(l: &mut Vec<f32>, r: &mut Vec<f32>, v: f32, b: bool, sr: f64) {
     r.truncate(end);
 }
 
-/// Time stretch (WSOLA) to `ratio` × the length, pitch shifted by the factor `shift` (Lemon Studio approximation of the
-/// stretch modes).
+/// Time stretch to `ratio` × the length, the pitch moved by the factor `shift` (spec §5.6: Signalsmith Stretch).
 pub fn stretch(s: &Sample, ratio: f64, shift: f64) -> Sample {
-    let n = s.frames();
-    if n < 64 {
-        return s.clone();
-    }
-    // Stretch by ratio·shift, then resample by shift: the length becomes ratio·n and the pitch moves by shift.
-    let r = (ratio * shift).clamp(0.05, 20.0);
-    let win = ((0.046 * f64::from(s.rate)) as usize).next_power_of_two().clamp(256, 8192);
-    let hop = win / 2;
-    let search = win / 4;
-    let ha = hop as f64 / r;
-    let out_n = (n as f64 * r).ceil() as usize + win;
-    let mut ol = vec![0.0f32; out_n];
-    let mut or = vec![0.0f32; out_n];
-    let mut norm = vec![0.0f32; out_n];
-    let hann: Vec<f32> = (0..win).map(|i| (0.5 - 0.5 * (2.0 * PI * i as f64 / win as f64).cos()) as f32).collect();
-    let mono: Vec<f32> = s.left.iter().zip(&s.right).map(|(a, b)| 0.5 * (a + b)).collect();
-    let at = |v: &[f32], i: i64| if i >= 0 && (i as usize) < n { v[i as usize] } else { 0.0 };
-    let mut prev: i64 = 0;
-    let mut k = 0usize;
-    loop {
-        let out_pos = k * hop;
-        if out_pos >= out_n - win {
-            break;
-        }
-        let nominal = (k as f64 * ha) as i64;
-        if nominal >= n as i64 {
-            break;
-        }
-        let pos = if k == 0 {
-            0
-        } else {
-            // The natural continuation of the previous frame, matched against candidates around the nominal position
-            // (decimated by 4 for speed).
-            let target = prev + hop as i64;
-            let mut best = (f32::MIN, nominal);
-            let mut d = -(search as i64);
-            while d <= search as i64 {
-                let c = nominal + d;
-                let mut acc = 0.0f32;
-                let mut j = 0;
-                while j < win {
-                    acc += at(&mono, target + j as i64) * at(&mono, c + j as i64);
-                    j += 8;
-                }
-                if acc > best.0 {
-                    best = (acc, c);
-                }
-                d += 4;
-            }
-            best.1
-        };
-        for j in 0..win {
-            let w = hann[j];
-            ol[out_pos + j] += at(&s.left, pos + j as i64) * w;
-            or[out_pos + j] += at(&s.right, pos + j as i64) * w;
-            norm[out_pos + j] += w;
-        }
-        prev = pos;
-        k += 1;
-    }
-    let len = ((n as f64 * r).round() as usize).min(out_n);
-    for i in 0..len {
-        if norm[i] > 1e-3 {
-            ol[i] /= norm[i];
-            or[i] /= norm[i];
-        }
-    }
-    ol.truncate(len);
-    or.truncate(len);
-    let st = Sample { rate: s.rate, left: ol, right: or };
-    if (shift - 1.0).abs() < 1e-6 {
-        return st;
-    }
-    // Resample by the pitch factor (windowed sinc).
-    let m = ((st.frames() as f64) / shift).floor() as usize;
-    let mut left = Vec::with_capacity(m);
-    let mut right = Vec::with_capacity(m);
-    for i in 0..m {
-        let (a, b) = read(&st, i as f64 * shift, shift);
-        left.push(a);
-        right.push(b);
-    }
+    let frames = (s.frames() as f64 * ratio).round().max(1.0) as usize;
+    let (left, right) = os_dsp::stretch::whole(&s.left, &s.right, s.rate, frames, shift);
     Sample { rate: s.rate, left, right }
 }
 
@@ -546,11 +467,13 @@ pub struct Block {
     pub root: i32,
     /// Fine tune plus pitch bend, in cents.
     pub cents: f64,
-    /// Resample mode: the time-stretch pitch in cents and the stretch ratio (MUL); `time` = TIME's target length in
-    /// seconds (overrides the ratio).
+    /// Resample and the realtime stretch methods: the stretch ratio (MUL) and TIME's target length in seconds (which
+    /// overrides the ratio); the realtime methods also the PITCH shift in cents (spec §5.6).
     pub ts_cents: f64,
     pub ts_ratio: f64,
     pub ts_time: Option<f64>,
+    /// A realtime stretch method: voices stretch while they play.
+    pub realtime: bool,
     pub targets: [Target; 5],
     /// Filter type (index into `params::FILTERS`), MOD X / MOD Y positions.
     pub f_type: u8,
@@ -574,6 +497,7 @@ impl Default for Block {
             ts_cents: 0.0,
             ts_ratio: 1.0,
             ts_time: None,
+            realtime: false,
             targets: [Target::default(); 5],
             f_type: 0,
             f_cut: 1.0,
@@ -599,6 +523,9 @@ pub fn declick(mode: i32) -> (f64, f64, bool) {
         3 => (20.0, 20.0, true),
         4 => (100.0, 100.0, true),
         5 => (200.0, 200.0, true),
+        // Not offered in the settings, valid as stored data: no opening fade, a 2 ms closing fade, bleeding
+        // (spec: audio/declick.md). 7 and up name no preset in FL; they play as mode 0 here.
+        6 => (0.0, 2.0, true),
         _ => (0.0, 10.0, false),
     }
 }
@@ -630,6 +557,110 @@ struct Voice {
     /// Gain at the end of the last control span (ramps start here).
     gain: f32,
     pan: (f32, f32),
+    /// Its stretcher in `Engine::streams` (realtime stretch methods).
+    rt: Option<u16>,
+}
+
+/// Output frames a realtime stretch voice makes at a time.
+const RT_BLOCK: usize = 128;
+
+/// The stretcher of a voice in a realtime stretch method and the reader that feeds it (spec §5.6).
+struct Rt {
+    st: Stream,
+    busy: bool,
+    started: bool,
+    /// Next input frame and direction: the reader runs the stretcher's lead ahead of what is heard.
+    rpos: i64,
+    rdir: i64,
+    /// Input frames owed (fractions of a frame carried to the next block).
+    owed: f64,
+    input: Vec<f32>,
+    l: Vec<f32>,
+    r: Vec<f32>,
+    at: usize,
+    /// Output frames still to drop: the stretcher's latency.
+    skip: usize,
+}
+
+impl Rt {
+    fn new(rate: u32) -> Rt {
+        Rt {
+            st: Stream::new(rate),
+            busy: false,
+            started: false,
+            rpos: 0,
+            rdir: 1,
+            owed: 0.0,
+            input: Vec::with_capacity(RT_BLOCK * 16),
+            l: vec![0.0; RT_BLOCK],
+            r: vec![0.0; RT_BLOCK],
+            at: RT_BLOCK,
+            skip: 0,
+        }
+    }
+
+    /// Pushes the next input frame onto `input`: loops and ping-pong followed, silence past the end.
+    fn feed(&mut self, s: &Sample, (ls, le): (f64, Option<f64>), pingpong: bool) {
+        if let Some(le) = le {
+            let (ls, le) = (ls as i64, le as i64);
+            if self.rdir > 0 && self.rpos >= le {
+                if pingpong {
+                    self.rdir = -1;
+                    self.rpos = (2 * le - self.rpos - 1).max(ls);
+                } else {
+                    self.rpos -= le - ls;
+                }
+            } else if self.rdir < 0 && self.rpos < ls {
+                self.rdir = 1;
+                self.rpos = (2 * ls - self.rpos).min(le - 1);
+            }
+        }
+        let (a, b) = match usize::try_from(self.rpos) {
+            Ok(i) if i < s.frames() => (s.left[i], s.right[i]),
+            _ => (0.0, 0.0),
+        };
+        self.input.push(a);
+        self.input.push(b);
+        self.rpos += self.rdir;
+    }
+
+    /// The next output frame of a voice heard from `pos` on: `transpose` = the pitch factor, `speed` = input frames per
+    /// output frame.
+    fn frame(&mut self, s: &Sample, pos: f64, transpose: f64, speed: f64, lp: (f64, Option<f64>), pingpong: bool) -> (f32, f32) {
+        if !self.started {
+            self.started = true;
+            (self.rpos, self.rdir, self.owed) = (pos.max(0.0).floor() as i64, 1, 0.0);
+            self.input.clear();
+            for _ in 0..self.st.lead() {
+                self.feed(s, lp, pingpong);
+            }
+            self.st.set_transpose(transpose);
+            self.st.start(&self.input, speed);
+            self.skip = self.st.delay();
+            self.at = RT_BLOCK;
+        }
+        loop {
+            if self.at < RT_BLOCK {
+                let f = (self.l[self.at], self.r[self.at]);
+                self.at += 1;
+                if self.skip > 0 {
+                    self.skip -= 1;
+                    continue;
+                }
+                return f;
+            }
+            self.owed += RT_BLOCK as f64 * speed;
+            let k = self.owed.floor();
+            self.owed -= k;
+            self.input.clear();
+            for _ in 0..k as usize {
+                self.feed(s, lp, pingpong);
+            }
+            self.st.set_transpose(transpose);
+            self.st.process(&self.input, &mut self.l, &mut self.r);
+            self.at = 0;
+        }
+    }
 }
 
 pub struct Engine {
@@ -638,21 +669,50 @@ pub struct Engine {
     voices: Vec<Voice>,
     /// Free-running phases of the global LFOs.
     global_phase: [f64; 5],
+    /// Stretchers of the realtime stretch voices (made when first needed, then reused).
+    streams: Vec<Rt>,
 }
 
 pub const MAX_VOICES: usize = 128;
 
 impl Engine {
     pub fn new(rate: f32) -> Self {
-        Engine { sample: None, rate, voices: Vec::with_capacity(MAX_VOICES), global_phase: [0.0; 5] }
+        Engine { sample: None, rate, voices: Vec::with_capacity(MAX_VOICES), global_phase: [0.0; 5], streams: Vec::new() }
     }
 
     pub fn set_rate(&mut self, rate: f32) {
+        if rate != self.rate {
+            self.voices.clear();
+            self.streams.clear();
+        }
         self.rate = rate;
     }
 
     pub fn reset(&mut self) {
         self.voices.clear();
+        self.streams.iter_mut().for_each(|r| r.busy = false);
+    }
+
+    /// A free stretcher for a new realtime voice.
+    fn take_stream(&mut self) -> Option<u16> {
+        let i = match self.streams.iter().position(|r| !r.busy) {
+            Some(i) => i,
+            None if self.streams.len() < MAX_VOICES => {
+                self.streams.push(Rt::new(self.rate as u32));
+                self.streams.len() - 1
+            }
+            None => return None,
+        };
+        let r = &mut self.streams[i];
+        (r.busy, r.started) = (true, false);
+        Some(i as u16)
+    }
+
+    /// Frees the stretcher of a voice that ended.
+    fn free(&mut self, v: &Voice) {
+        if let Some(r) = v.rt.and_then(|i| self.streams.get_mut(usize::from(i))) {
+            r.busy = false;
+        }
     }
 
     /// True while any voice is playing.
@@ -665,13 +725,14 @@ impl Engine {
         self.voices.iter().filter(|v| v.kill.is_none()).map(|v| v.key)
     }
 
-    /// The playback-rate factor of Resample mode for the current sample.
-    fn resample_rate(&self, b: &Block, s: &Sample) -> f64 {
+    /// How many times its length the current sample lasts in Resample or a realtime method: TIME's length when set,
+    /// else MUL (spec §5.6).
+    fn stretch_factor(b: &Block, s: &Sample) -> f64 {
         let ratio = match b.ts_time {
             Some(t) if s.frames() > 0 => t / (s.frames() as f64 / f64::from(s.rate.max(1))),
             _ => b.ts_ratio,
         };
-        2f64.powf(b.ts_cents / 1200.0) / ratio.max(1e-3)
+        ratio.max(1e-3)
     }
 
     pub fn note_on(&mut self, key: u8, velocity: f32, b: &Block) {
@@ -680,7 +741,7 @@ impl Engine {
 
     /// `note_on` for a host note `id` (per-note modulation reaches it by that id).
     pub fn note_on_id(&mut self, key: u8, velocity: f32, id: Option<i32>, b: &Block) {
-        let Some(s) = &self.sample else { return };
+        let Some(s) = self.sample.clone() else { return };
         let zkey = if b.add_key { i32::from(key) - (b.root - 60) } else { i32::from(key) };
         if zkey < b.zone.0 || zkey > b.zone.1 || s.frames() == 0 {
             return;
@@ -693,7 +754,8 @@ impl Engine {
             }
         }
         if self.voices.len() >= MAX_VOICES {
-            self.voices.remove(0);
+            let v = self.voices.remove(0);
+            self.free(&v);
         }
         let ratio = f64::from(s.rate) / f64::from(self.rate);
         let key_step = 2f64.powf((f64::from(key) - f64::from(b.root)) / 12.0) * ratio;
@@ -707,6 +769,7 @@ impl Engine {
                 phase[i] = self.global_phase[i];
             }
         }
+        let rt = if b.realtime { self.take_stream() } else { None };
         self.voices.push(Voice {
             key,
             id,
@@ -723,6 +786,7 @@ impl Engine {
             filt: [[Svf::default(); 2]; 2],
             gain: -1.0,
             pan: (1.0, 1.0),
+            rt,
         });
     }
 
@@ -790,15 +854,22 @@ impl Engine {
             self.voices.clear();
             return;
         }
-        let rs = self.resample_rate(b, &s);
+        // Resample plays the sample faster or slower; a realtime voice reads `speed` input frames per output frame
+        // and its stretcher keeps the pitch.
+        let factor = Self::stretch_factor(b, &s);
+        let rs = if b.realtime { 1.0 } else { 1.0 / factor };
+        let speed = f64::from(s.rate) / rate / factor;
         let (ls, le) = loop_frames(b, n);
         let mut i = 0;
         while i < self.voices.len() {
-            let alive = render_voice(&mut self.voices[i], &s, b, rs, (ls, le), rate, out_l, out_r);
+            let v = &mut self.voices[i];
+            let rt = v.rt.and_then(|k| self.streams.get_mut(usize::from(k)));
+            let alive = render_voice(v, rt, &s, b, (rs, speed), (ls, le), rate, out_l, out_r);
             if alive {
                 i += 1;
             } else {
-                self.voices.swap_remove(i);
+                let v = self.voices.swap_remove(i);
+                self.free(&v);
             }
         }
     }
@@ -864,7 +935,17 @@ pub fn filter_hz(cut: f64) -> f64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_voice(v: &mut Voice, s: &Sample, b: &Block, rs: f64, (ls, le): (f64, Option<f64>), rate: f64, out_l: &mut [f32], out_r: &mut [f32]) -> bool {
+fn render_voice(
+    v: &mut Voice,
+    mut rt: Option<&mut Rt>,
+    s: &Sample,
+    b: &Block,
+    (rs, speed): (f64, f64),
+    (ls, le): (f64, Option<f64>),
+    rate: f64,
+    out_l: &mut [f32],
+    out_r: &mut [f32],
+) -> bool {
     let len = out_l.len();
     let n = s.frames() as f64;
     let frame_s = 1.0 / rate;
@@ -899,7 +980,10 @@ fn render_voice(v: &mut Voice, s: &Sample, b: &Block, rs: f64, (ls, le): (f64, O
                 }
             }
         }
-        let step = v.key_step * 2f64.powf((b.cents + m0.cents + v.tune * 100.0) / 1200.0) * rs;
+        // The pitch factor: a resampling step, or a realtime voice's transposition (with the stretch's PITCH).
+        let step = v.key_step * 2f64.powf((b.cents + m0.cents + v.tune * 100.0 + b.ts_cents) / 1200.0) * rs;
+        // What is heard moves on by `step` source frames per frame, or by `speed` in a realtime voice.
+        let advance = if rt.is_some() { speed } else { step };
         for j in 0..chunk {
             // Loop / end handling.
             if let Some(le) = le {
@@ -918,7 +1002,10 @@ fn render_voice(v: &mut Voice, s: &Sample, b: &Block, rs: f64, (ls, le): (f64, O
             if v.pos >= n || v.pos < 0.0 {
                 return false;
             }
-            let (mut l, mut r) = read(s, v.pos, step);
+            let (mut l, mut r) = match rt.as_mut() {
+                Some(x) => x.frame(s, v.pos, step, speed, (ls, le), b.pingpong),
+                None => read(s, v.pos, step),
+            };
             if !bypass {
                 let mut out = [f64::from(l), f64::from(r)];
                 for st in v.filt.iter_mut().take(stages) {
@@ -953,7 +1040,7 @@ fn render_voice(v: &mut Voice, s: &Sample, b: &Block, rs: f64, (ls, le): (f64, O
             let (pl, pr) = (p0.0 + (p1.0 - p0.0) * u, p0.1 + (p1.1 - p0.1) * u);
             out_l[f + j] += l * g * pl;
             out_r[f + j] += r * g * pr;
-            v.pos += step * v.dir;
+            v.pos += advance * v.dir;
             v.age += 1;
         }
         v.gain = g1;
@@ -1121,6 +1208,60 @@ mod tests {
         assert!((rm_hz(0.5) - 1032.75).abs() < 1e-6);
     }
 
+    fn sine(hz: f64, n: usize) -> Sample {
+        let x: Vec<f32> = (0..n).map(|i| (2.0 * PI * hz * i as f64 / 48000.0).sin() as f32 * 0.5).collect();
+        Sample { rate: 48000, left: x.clone(), right: x }
+    }
+
+    /// Frequency from the rising zero crossings.
+    fn hz(x: &[f32]) -> f64 {
+        let ups: Vec<usize> = x.windows(2).enumerate().filter(|(_, w)| w[0] < 0.0 && w[1] >= 0.0).map(|(i, _)| i).collect();
+        (ups.len() - 1) as f64 * 48000.0 / (ups[ups.len() - 1] - ups[0]) as f64
+    }
+
+    /// Renders a held note of `key` for `secs` seconds at 48 kHz.
+    fn play(e: &mut Engine, key: u8, b: &Block, secs: f64) -> Vec<f32> {
+        e.note_on(key, 100.0 / 128.0, b);
+        let mut out = Vec::new();
+        let (mut l, mut r) = (vec![0.0; 480], vec![0.0; 480]);
+        for _ in 0..(secs * 100.0) as usize {
+            l.fill(0.0);
+            r.fill(0.0);
+            e.render(&mut l, &mut r, b);
+            out.extend_from_slice(&l);
+        }
+        out
+    }
+
+    // spec §5.6: the realtime methods stretch while the voice plays; the key and PITCH move only the pitch.
+    #[test]
+    fn realtime_voices_keep_the_length_and_move_the_pitch() {
+        let mut e = Engine::new(48000.0);
+        e.sample = Some(Arc::new(sine(440.0, 48000)));
+        // Twice as long, an octave up by the key; then by PITCH.
+        for (key, cents) in [(72u8, 0.0), (60, 1200.0)] {
+            let b = Block { realtime: true, ts_ratio: 2.0, ts_cents: cents, ..Block::default() };
+            let out = play(&mut e, key, &b, 2.5);
+            let f = hz(&out[24000..72000]);
+            assert!((f - 880.0).abs() < 4.0, "key {key}: {f} Hz");
+            let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+            assert!(rms(&out[80000..92000]) > 0.1, "key {key}: still playing after the sample's own length");
+            assert!(!e.has_voices(), "key {key}: over after twice its length");
+            e.reset();
+        }
+        assert!(e.streams.iter().all(|r| !r.busy), "stretchers freed");
+    }
+
+    // spec §5.6: Resample fits TIME by speed; PITCH plays no part.
+    #[test]
+    fn resample_fits_the_time_by_speed() {
+        let mut e = Engine::new(48000.0);
+        e.sample = Some(Arc::new(sine(440.0, 48000)));
+        let b = Block { ts_time: Some(2.0), ts_cents: 0.0, ..Block::default() };
+        let out = play(&mut e, 60, &b, 1.0);
+        assert!((hz(&out[4800..43200]) - 220.0).abs() < 1.0);
+    }
+
     #[test]
     fn stretch_keeps_pitch_and_changes_length() {
         let n = 48000;
@@ -1128,6 +1269,10 @@ mod tests {
         let s = Sample { rate: 48000, left: sine.clone(), right: sine };
         let st = stretch(&s, 2.0, 1.0);
         assert_eq!(st.frames(), 2 * n);
+        // A fifth up at the same length.
+        let up = stretch(&s, 1.0, 1.5);
+        assert_eq!(up.frames(), n);
+        assert!((hz(&up.left[12000..36000]) - 660.0).abs() < 3.0);
         // Count zero crossings in the middle: the same frequency.
         let zc = |v: &[f32]| v.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
         let c = zc(&st.left[24000..72000]);

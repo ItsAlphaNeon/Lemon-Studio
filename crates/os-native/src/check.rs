@@ -34,8 +34,8 @@ pub enum Verdict {
 
 /// The child's side of the check, given the arguments after [`CHECK_ARG`] (the DLL, then the result file): tries the
 /// plugin and returns the process exit code (0 = it works). A failure writes its reason to the result file (to
-/// standard output without one) and returns 2. End the process with [`crate::guard::exit`]: a stopped plugin's library
-/// can crash while a normal exit unloads it.
+/// standard output without one) and returns 2. End the process with [`crate::guard::exit`] (the host's guard): a
+/// stopped plugin's library can crash while a normal exit unloads it.
 pub fn run(args: &[String]) -> i32 {
     let Some(dll) = args.first().map(Path::new) else { return 2 };
     let out = args.get(1).map(PathBuf::from);
@@ -99,8 +99,11 @@ fn report(out: Option<&Path>, why: &str) {
     }
 }
 
-fn stop_reason(why: Option<String>, when: &str) -> String {
-    format!("{}{when}", why.unwrap_or_else(|| "plugin error".into()))
+/// Why the plugin stopped, from its exception code and the text its runtime gave (this process tries one plugin on
+/// one thread, so the guard's last message is its).
+fn stop_reason(code: Option<u32>, when: &str) -> String {
+    let code = code.unwrap_or(crate::guard::RUNTIME_ERROR);
+    format!("{}{when}", crate::guard::describe_with(code, &crate::guard::last_message()))
 }
 
 /// A load error as a short reason: without the DLL path, and loading goes without saying ("plugin error").

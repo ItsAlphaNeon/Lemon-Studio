@@ -699,8 +699,6 @@ pub struct State {
     pub pattern: u16,
     pub song_mode: bool,
     pub menu_open: Option<usize>,
-    /// Values of knobs that are not backed by the project (`knobs.rs`).
-    pub knobs: std::collections::HashMap<crate::knobs::KnobId, f32>,
     /// Piano roll event panel Control menu.
     pub lane_menu: bool,
     pub picker_open: bool,
@@ -941,7 +939,6 @@ impl App {
                 pattern: 1,
                 song_mode: false,
                 menu_open: None,
-                knobs: Default::default(),
                 lane_menu: false,
                 picker_open: false,
                 settings: Default::default(),
@@ -1090,7 +1087,7 @@ impl App {
     fn save(&mut self, choose: bool) {
         let s = &self.state;
         let target = if choose || s.path.is_none() {
-            crate::dialog::modal(|| rfd::FileDialog::new().add_filter("FLP project", &["flp"]).save_file())
+            crate::dialog::save_file(rfd::FileDialog::new().add_filter("FLP project", &["flp"]))
         } else {
             s.path.clone()
         };
@@ -1122,7 +1119,7 @@ impl App {
         if let Some(d) = self.state.path.as_ref().and_then(|p| p.parent()) {
             dlg = dlg.set_directory(d);
         }
-        let Some(mut target) = crate::dialog::modal(|| dlg.save_file()) else { return };
+        let Some(mut target) = crate::dialog::save_file(dlg) else { return };
         if target.extension().is_none() {
             target.set_extension("wav");
         }
@@ -1212,15 +1209,12 @@ impl App {
         };
         // Deleted, cloned and moved channels are written by `apply` (os-flp `restructure`); it edits a copy so a
         // failed save leaves the loaded file as it was.
-        let mut lost = os_flp::project::unsaved_parts(&s.project, &file);
+        let lost = os_flp::project::unsaved_parts(&s.project, &file);
         // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, Lemon Studio status).
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
-        if s.project.mixer.iter().any(|m| m.polarity || m.swap) {
-            lost.push("polarity / swap buttons");
-        }
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
@@ -1582,8 +1576,8 @@ impl App {
                         self.invalidate();
                         continue;
                     }
-                    Request::Stopped(_, why) => {
-                        self.state.message = Some(why);
+                    Request::Stopped(_, text) => {
+                        self.state.message = Some(text);
                         self.invalidate();
                         continue;
                     }
@@ -1713,8 +1707,10 @@ impl App {
         }
     }
 
+    /// Whether a paint is due: damage, or a playlist scroll waiting to move its pixels (`playlist_scrolled` adds no
+    /// damage of its own; without this a scroll-bar drag or middle-drag grab showed nothing until the release).
     pub fn has_damage(&self) -> bool {
-        self.damage != Damage::None
+        self.damage != Damage::None || self.scrolled.is_some()
     }
 
     /// Take the pending damage: `None` = nothing to paint, `Some(None)` = whole frame, else the regions to repaint
@@ -2022,6 +2018,15 @@ impl App {
         let peaks = self.transport.take_track_peaks();
         if crate::mixer::feed_meters(&mut self.state, &peaks) && self.state.shown(Win::Mixer) {
             self.damage_live(Live::Meter);
+        }
+        // Audio clips follow their channel's stretch, pitch and the tempo (ui/playlist.md §9c). The lengths are worked
+        // out, not edited: the saved copy gets them too, so a fit alone (an opened FL project) is not an unsaved change.
+        if let Some(fits) = crate::playlist::audio_fits(&self.state) {
+            if crate::playlist::fit_clips(&mut self.state.project.arrangements, &fits) {
+                crate::playlist::fit_clips(&mut self.saved.0.arrangements, &fits);
+                self.state.piano.dirty = true;
+                self.damage_win(Win::Playlist);
+            }
         }
         // Edits (notes, steps, mixer, channel volume / pan / mute, tempo) reach playback right away,
         // also during a drag (at most once per tick).
@@ -3846,10 +3851,13 @@ impl App {
                     piano::delete(s, sel);
                 }
             }
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("o") => self.act(Action::MenuItem(0, views::menus::FILE_OPEN)),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE)),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
+            // FILE shortcuts (views/menus.rs). Shift picks another command: Shift+Ctrl+S = Save as; the other Shift
+            // variants have none, so they do nothing (not Open, Export or a new file).
+            Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("o") => self.act(Action::MenuItem(0, views::menus::FILE_OPEN)),
+            Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE)),
+            Key::Character(c) if ctrl && self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_AS)),
+            Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
+            Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
             _ => {}
         }
     }
@@ -4852,7 +4860,7 @@ impl App {
                 if let Some(d) = start {
                     dlg = dlg.set_directory(d);
                 }
-                if let Some(p) = crate::dialog::modal(|| dlg.pick_file()) {
+                if let Some(p) = crate::dialog::pick_file(dlg) {
                     self.open(p);
                 }
             }
@@ -5207,6 +5215,18 @@ mod tests {
         let st = crate::plugins::sampler_state(c);
         let json = String::from_utf8_lossy(&st[8..]).to_string();
         assert!(json.contains("\"envvol_on\":{\"bool\":false}") && json.contains("\"sample-path\":\"\\\"\\\"\""), "{json}");
+    }
+
+    /// The whole window at one scale, for looking at text: `OS_TEXT_SHOT=<file.png> OS_TEXT_SHOT_SCALE=1.25`.
+    #[test]
+    fn text_shot() {
+        let Some(out) = std::env::var_os("OS_TEXT_SHOT") else { return };
+        let scale: f32 = std::env::var("OS_TEXT_SHOT_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let Ok(mut c) = Canvas::new((1600.0 * scale) as u32, (900.0 * scale) as u32, scale) else { return };
+        let mut app = App::new(None);
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(std::path::Path::new(&out)).unwrap();
     }
 
     #[test]
@@ -5774,8 +5794,10 @@ mod tests {
         app.mouse_move(thumb_x, bar_x.track.cy());
         app.mouse_down();
         full(&mut app, &mut a);
+        // The shell paints only when `has_damage` says so: every move of these drags must ask for a frame.
         for dx in [37.0, 81.0, 60.0] {
             app.mouse_move(thumb_x + dx, bar_x.track.cy());
+            assert!(app.has_damage(), "scroll bar drag at {scale}: the move asks for a frame");
             check(&mut app, &mut a, &mut b, "scroll bar drag", Some(true), true);
         }
         app.mouse_up();
@@ -5785,6 +5807,7 @@ mod tests {
         full(&mut app, &mut a);
         for (dx, dy) in [(23.0, 31.0), (-50.0, 7.0), (-90.0, -60.0)] {
             app.mouse_move(over_grid.0 + dx, over_grid.1 + dy);
+            assert!(app.has_damage(), "middle-drag grab at {scale}: the move asks for a frame");
             check(&mut app, &mut a, &mut b, "middle-drag grab", Some(true), true);
         }
         app.mouse_up();
@@ -6239,6 +6262,59 @@ mod tests {
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION));
         assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_3.flp").as_path()));
         assert!(dir.join("Song_2.flp").exists() && dir.join("Song_3.flp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Shift+Ctrl+S is Save as: it asks where and leaves the open file as it was. Ctrl+S saves in place without asking.
+    /// Shift+Ctrl+O / R / N have no command: they neither open, export nor write a new version.
+    #[test]
+    fn shift_ctrl_s_is_save_as() {
+        use crate::dialog::fake;
+        use winit::keyboard::Key;
+        let dir = std::env::temp_dir().join(format!("os_save_as_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        // Something to export, so Ctrl+R gets as far as its file dialog.
+        app.state.project.patterns[0].notes.push(Note::step(0, 0));
+        let song = dir.join("Song.flp");
+        app.save_to(song.clone());
+        let before = std::fs::read(&song).unwrap();
+        let key = |app: &mut App, k: &str, shift: bool| {
+            app.shift = shift;
+            app.key(&Key::Character(k.into()), true, false);
+            app.shift = false;
+        };
+
+        app.state.tempo = 99.0;
+        key(&mut app, "S", true);
+        assert_eq!(fake::shown(), (0, 1), "Save as asks where");
+        assert_eq!(std::fs::read(&song).unwrap(), before, "cancelled: the open file is not written");
+        assert!(app.unsaved());
+        let other = dir.join("Other.flp");
+        fake::answer(Some(other.clone()));
+        key(&mut app, "S", true);
+        assert_eq!(app.state.path.as_deref(), Some(other.as_path()));
+        assert!(other.exists() && !app.unsaved(), "saved to the chosen file");
+        assert_eq!(std::fs::read(&song).unwrap(), before, "the old file is left as it was");
+
+        for k in ["O", "R", "N"] {
+            key(&mut app, k, true);
+        }
+        assert_eq!(fake::shown(), (0, 2), "no open or export dialog");
+        assert!(app.export.is_none());
+        assert!(!dir.join("Other_2.flp").exists(), "no new version");
+
+        app.state.tempo = 100.0;
+        key(&mut app, "s", false);
+        assert_eq!(fake::shown(), (0, 2), "Ctrl+S does not ask");
+        assert!(!app.unsaved(), "Ctrl+S saved in place");
+        key(&mut app, "n", false);
+        assert!(dir.join("Other_2.flp").exists(), "Ctrl+N still saves a new version");
+        key(&mut app, "o", false);
+        key(&mut app, "r", false);
+        assert_eq!(fake::shown(), (1, 3), "Ctrl+O and Ctrl+R still ask for a file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7309,8 +7385,12 @@ mod tests {
         app.mouse_move(r.right() - 1.0 + r.w, y);
         app.mouse_up();
         let after = pl::clips(&app.state)[ci];
-        let m = app.state.project.channels[row].sound.stretch_multiplier();
-        assert!((m - 2.0).abs() < 0.02, "multiplier {m}");
+        // The time becomes the whole sample's length (1 s at the project tempo) times two; the multiplier stays at 1.
+        let sound = app.state.project.channels[row].sound;
+        let want = app.state.tempo / 60.0 * 2.0;
+        let beats = sound.stretch_time().expect("a stretch time");
+        assert!((beats - want).abs() < 0.02 * want, "time {beats} beats, want {want}");
+        assert_eq!((sound.stretch[2], sound.stretch_mode()), (0, 0), "multiplier 1, method kept");
         assert!((f64::from(after.length) / f64::from(before.length) - 2.0).abs() < 0.02, "twice as long");
         assert_eq!(after.window, before.window, "the same part of the sample");
         app.key(&winit::keyboard::Key::Character("z".into()), true, false);
@@ -7331,6 +7411,70 @@ mod tests {
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         assert_eq!(back.channels[row2].sound.stretch, [0, 0, (-10000i32) as u32, 0]);
         let _ = (std::fs::remove_file(&path), std::fs::remove_file(&wav));
+    }
+
+    /// Audio clips follow their channel (spec: ui/playlist.md §9c): the length is worked out from the trims and the
+    /// channel's stretch, pitch and the tempo, each trim point rounded on its own. The numbers are FL 26's for a 6.4 s
+    /// sample at 130 BPM, PPQ 96: untrimmed, trimmed to 0..3200 ms and to 1600..4800 ms.
+    #[test]
+    fn audio_clips_follow_their_channel() {
+        use crate::playlist as pl;
+        use os_model::{Clip, ClipSource};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.ppq = 96;
+        app.state.tempo = 130.0;
+        app.state.playlist.reset();
+        let wav = std::env::temp_dir().join(format!("os-app-fit-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &vec![0.25; 2 * 282240]).unwrap();
+        pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let row = app.state.project.channels.len() - 1;
+        let src = ClipSource::Channel(app.state.project.channels[row].index);
+        for (track, w) in [(1, (0.0, 3200.0)), (2, (1600.0, 4800.0))] {
+            pl::arr_mut(&mut app.state).clips.push(Clip { window: Some(w), ..Clip::new(0, 1, track, src) });
+        }
+        let mut check = |app: &mut App, stretch: [u32; 4], pitch: i32, tempo: f64, want: [u32; 3], what: &str| {
+            app.state.project.channels[row].sound.stretch = stretch;
+            app.state.project.channels[row].pitch_cents = pitch;
+            app.state.tempo = tempo;
+            pl::fit_audio(&mut app.state);
+            let got: Vec<u32> = pl::clips(&app.state).iter().filter(|c| c.source == src).map(|c| c.length).collect();
+            assert_eq!(got, want, "{what}");
+            // An untrimmed clip shows the whole sample.
+            if let Some(whole) = pl::clips(&app.state).iter().find(|c| c.source == src && c.window.is_none()).copied() {
+                assert!((pl::window(&app.state, &whole).1 - 6400.0).abs() < 6.0, "{what}: {:?}", pl::window(&app.state, &whole));
+            }
+        };
+        let t = |units: f32| units.to_bits();
+        check(&mut app, [0; 4], 0, 130.0, [1331, 666, 665], "plain");
+        check(&mut app, [0, 0, 2540, 0], 0, 130.0, [1587, 794, 794], "Resample, MUL 119.25 %");
+        check(&mut app, [0, 0, 2540, 0], 10, 130.0, [1578, 789, 789], "and the channel pitch +10 cents");
+        check(&mut app, [0, 100, 2540, 5], 0, 130.0, [1587, 794, 794], "Auto, PITCH +100: the length stays");
+        check(&mut app, [t(2662.0), 0, 2540, (-1i32) as u32], 10, 130.0, [1587, 794, 793], "Stretch: TIME, no channel pitch");
+        check(&mut app, [t(488.0), 0, 0, 0], 0, 130.0, [244, 122, 122], "Resample, TIME 0:10:04");
+        check(&mut app, [t(2662.0), 0, 0, (-1i32) as u32], 0, 130.0, [1331, 666, 665], "Stretch, TIME 2662: a point on half a tick rounds up");
+        check(&mut app, [0; 4], 0, 522.0, [5345, 2673, 2673], "the tempo without a TIME");
+        check(&mut app, [t(2662.0), 0, 0, (-1i32) as u32], 0, 522.0, [1331, 666, 665], "the tempo with a TIME");
+        // A clip resized in the playlist keeps its new end (it gets a trim end), refitted alike.
+        let i = pl::clips(&app.state).iter().position(|c| c.source == src && c.window.is_none()).unwrap();
+        check(&mut app, [0; 4], 0, 130.0, [1331, 666, 665], "plain again");
+        let orig = pl::clips(&app.state)[i];
+        pl::resize_right(&mut app.state, i, &orig, 1000);
+        assert!(!pl::fit_audio(&mut app.state), "a resize already fits");
+        check(&mut app, [0, 0, 10000, 0], 0, 130.0, [2000, 1331, 1331], "x2 after the resize");
+        // The tick fits them. A fit alone is not an unsaved change (a project opens with other lengths); an edit is.
+        for c in &mut pl::arr_mut(&mut app.state).clips {
+            c.length = 100;
+        }
+        app.mark_saved();
+        app.tick();
+        let got: Vec<u32> = pl::clips(&app.state).iter().filter(|c| c.source == src).map(|c| c.length).collect();
+        assert_eq!(got, [2000, 1331, 1331], "fitted by the tick");
+        assert!(!app.unsaved(), "a fit is not an edit");
+        app.state.project.channels[row].sound.stretch = [0; 4];
+        app.tick();
+        assert!(app.unsaved(), "a stretch edit is");
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// Tools menu (spec: ui/playlist.md §10): quick quantize moves clip starts onto the snap grid (one undo step);

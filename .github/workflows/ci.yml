@@ -32,9 +32,10 @@ jobs:
 
       # ALSA (audio output and MIDI input). The app loads Wayland, X11 and xkbcommon at run time, but Open Sampler built
       # on its own (the bundle step) links wayland-client through its file dialogs, so that needs the Wayland package.
+      # libclang: the time stretcher's bindings are generated at build time (the Windows image ships LLVM).
       - name: Install Linux packages
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwayland-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwayland-dev libclang-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
 

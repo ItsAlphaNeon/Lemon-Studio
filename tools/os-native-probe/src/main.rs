@@ -294,8 +294,8 @@ fn generator_report(mut p: Plugin, rate: u32, out: Option<&std::path::Path>) {
         os_engine::wav::write_f32_stereo(&mut f, rate, &audio[..frames * 2]).expect("write wav");
         println!("wrote {}", out.display());
     }
-    if let Some(why) = g.stopped() {
-        println!("hosted: the plugin stopped ({why})");
+    if let Some(code) = os_host::Plugin::stopped(&g) {
+        println!("hosted: the plugin stopped ({})", os_native::guard::describe_with(code, &os_native::guard::last_message()));
     }
 }
 

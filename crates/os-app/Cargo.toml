@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 os-model.workspace = true
+os-dsp.workspace = true
 os-flp.workspace = true
 os-engine.workspace = true
 os-hostlink.workspace = true

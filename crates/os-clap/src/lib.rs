@@ -130,10 +130,18 @@ impl Library {
 
 impl Drop for Library {
     fn drop(&mut self) {
-        unsafe {
-            if let Some(f) = (*self.entry).deinit {
-                f();
-            }
+        // A plugin file whose code crashed is left loaded, as the crash left it.
+        let guard = os_host::guard::module_of(self.entry.cast());
+        if guard.crashed().is_none() {
+            let entry = self.entry;
+            let _ = os_host::guard::call(&guard, || unsafe {
+                if let Some(f) = (*entry).deinit {
+                    f();
+                }
+            });
+        }
+        if guard.crashed().is_some() {
+            std::mem::forget(self._lib.take());
         }
     }
 }
@@ -219,7 +227,11 @@ impl os_host::Library for Library {
     }
 
     fn create(self: Arc<Self>, id: &str) -> Result<os_host::SharedPlugin, String> {
-        Ok(Arc::new(Mutex::new(Plugin::new(&self, id)?)))
+        // A plugin compiled into this program gets a guard of its own per instance (`module_of`).
+        let guard = os_host::guard::module_of(self.entry.cast());
+        let name = self.plugins.iter().find(|d| d.id == id).map_or(id, |d| d.name.as_str());
+        let plugin = os_host::guard::call(&guard, || Plugin::new(&self, id)).map_err(|c| os_host::guard::stopped_text(name, c))??;
+        Ok(os_host::share(plugin, guard))
     }
 }
 
@@ -1828,8 +1840,13 @@ mod tests {
         };
         let base = render("");
         assert!(base.iter().any(|v| v.abs() > 0.05), "the default plays");
+        // PITCH does nothing in Resample, the default method (spec: audio/time-stretch.md): it is tried in Stretch (a
+        // realtime method) and in e3 generic (stretched first). Knob positions are 0..1 (0.9 = +960 cents, 0.75 = x2);
+        // the last stretch case is out of range, as a saved state may hold, and must play clamped, not as NaN.
         let cases = [
-            ("start_offset", "{\"f32\":0.5}"), ("ts_pitch", "{\"f32\":700.0}"), ("ts_mul", "{\"f32\":2.0}"),
+            ("start_offset", "{\"f32\":0.5}"), ("ts_mul", "{\"f32\":0.75}"), ("ts_mode", "{\"i32\":1}"),
+            ("ts_pitch", "{\"f32\":0.9},\"ts_mode\":{\"i32\":1}"), ("ts_pitch", "{\"f32\":0.9},\"ts_mode\":{\"i32\":3}"),
+            ("ts_mul", "{\"f32\":0.75},\"ts_mode\":{\"i32\":3}"), ("ts_pitch", "{\"f32\":700.0},\"ts_mode\":{\"i32\":3}"),
             ("fx_dc", "{\"bool\":true}"), ("fx_normalize", "{\"bool\":true}"), ("fx_reverse", "{\"bool\":true}"),
             ("fx_polarity", "{\"bool\":true}"), ("fx_fade_stereo", "{\"bool\":true}"), ("fx_swap", "{\"bool\":true}"),
             ("fx_start", "{\"f32\":0.3}"), ("fx_length", "{\"f32\":0.3}"), ("fx_in", "{\"f32\":0.5}"), ("fx_out", "{\"f32\":0.5}"),
@@ -1843,6 +1860,8 @@ mod tests {
         let mut dead = Vec::new();
         for (id, v) in cases {
             let out = render(&format!("\"{id}\":{v}"));
+            // f32::max skips NaN: a NaN render would pass as "no change".
+            assert!(out.iter().all(|x| x.is_finite()), "{id} = {v}: the output is not finite");
             let diff = base.iter().zip(&out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
             eprintln!("{id:>16} = {v:<16} max diff {diff:.4}");
             if diff < 1e-3 {
