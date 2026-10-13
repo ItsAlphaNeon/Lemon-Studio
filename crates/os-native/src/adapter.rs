@@ -11,9 +11,9 @@
 use std::ffi::c_void;
 
 use os_engine::instrument::{ChannelLevels, HostedEffect, Instrument, TransportInfo};
-use os_host::{Descriptor, ParamEvent, ParamInfo};
+use os_host::{Descriptor, ParamInfo};
 
-use crate::abi::{dispatch, flags, IntPtr, LevelParams};
+use crate::abi::{dispatch, flags, rec, IntPtr, LevelParams};
 use crate::{Plugin, Voice};
 
 /// Largest block handed to the plugin in one render; longer engine buffers are split into chunks of
@@ -38,6 +38,14 @@ enum Ev {
     Off(u8),
     Choke(u8),
     Tune(u8, f32),
+    /// Parameter index, MIDI value 0..2^30.
+    Param(u32, i32),
+}
+
+/// A normalized parameter value (0..1) as the MIDI value a native plugin takes: `Round(v * MIDI_FULL)` (spec:
+/// "Parameters"; the scale, see `rec::MIDI_FULL`).
+fn midi_value(v: f64) -> i32 {
+    (v.clamp(0.0, 1.0) * rec::MIDI_FULL).round_ties_even() as i32
 }
 
 /// A sounding generator voice.
@@ -93,6 +101,10 @@ pub struct NativePlugin {
     voice_buf: Vec<f32>,
     /// The editor is shown in a host window (ShowEditor with a parent, not yet hidden).
     editor: bool,
+    /// The MIDI value the host last gave each parameter it moved (index, value).
+    sent: Vec<(u32, i32)>,
+    /// Values the open editor's controls still have to show (interface thread, `idle`).
+    follow: Vec<(u32, i32)>,
 }
 
 // SAFETY: the engine serialises all access behind a mutex; never two threads at once.
@@ -122,6 +134,21 @@ impl NativePlugin {
             inter: vec![0.0; MAX_BLOCK * 2],
             voice_buf: vec![0.0; MAX_BLOCK * 2],
             editor: false,
+            sent: Vec::new(),
+            follow: Vec::new(),
+        }
+    }
+
+    /// Moves parameter `index` to MIDI value `midi` (the render lock is taken: audio thread), and has the editor's
+    /// control follow on the interface thread while the editor is open.
+    fn send_param(&mut self, index: u32, midi: i32) {
+        if index as usize >= self.plugin.param_count() {
+            return;
+        }
+        self.plugin.set_param_midi(index as i32, midi);
+        set_entry(&mut self.sent, index, midi);
+        if self.editor {
+            set_entry(&mut self.follow, index, midi);
         }
     }
 
@@ -202,6 +229,7 @@ impl NativePlugin {
                     self.refresh(i);
                 }
             }
+            Ev::Param(index, midi) => self.send_param(index, midi),
         }
     }
 
@@ -283,6 +311,15 @@ impl Instrument for NativePlugin {
 
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
         self.events.push((offset, Ev::Tune(key, semitones)));
+    }
+
+    /// Automated values arrive once per tick, at its start (spec: "Parameters").
+    fn param(&mut self, offset: u32, index: u32, value: f64) {
+        self.events.push((offset, Ev::Param(index, midi_value(value))));
+    }
+
+    fn tick_params(&self) -> bool {
+        true
     }
 
     /// The plugin works the channel's levels into its voices' final levels, which it reads while they sound (sounding
@@ -410,6 +447,15 @@ impl HostedEffect for NativePlugin {
     fn reset_fx(&mut self) {
         self.plugin.dispatch(dispatch::FLUSH, 0, 0);
     }
+
+    /// The engine hands an effect its tick's values before the tick is processed: they apply at once.
+    fn param_fx(&mut self, _offset: u32, index: u32, value: f64) {
+        self.send_param(index, midi_value(value));
+    }
+
+    fn tick_params_fx(&self) -> bool {
+        true
+    }
 }
 
 impl os_host::Plugin for NativePlugin {
@@ -431,6 +477,12 @@ impl os_host::Plugin for NativePlugin {
     }
 
     fn idle(&mut self) {
+        // The editor's controls follow the values the host gave (spec: "Parameters").
+        for (index, midi) in std::mem::take(&mut self.follow) {
+            if self.editor {
+                self.plugin.show_param_midi(index as i32, midi);
+            }
+        }
         self.plugin.idle();
     }
 
@@ -483,6 +535,75 @@ impl os_host::Plugin for NativePlugin {
     fn stopped(&self) -> Option<u32> {
         self.plugin.stopped()
     }
+
+    // Parameters (spec: "Parameters"): the index is the id; names and value texts from GetName; values cross as
+    // normalized 0..1 and reach the plugin as MIDI values. The plugin's own range is not known to the host.
+    fn param_count(&self) -> usize {
+        self.plugin.param_count()
+    }
+
+    fn param_info(&self, index: usize) -> Option<ParamInfo> {
+        (index < self.plugin.param_count()).then(|| ParamInfo {
+            id: index as u32,
+            name: shown_name(&self.plugin.param_name(index as i32)),
+            unit: String::new(),
+            group: String::new(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            steps: 0,
+            automatable: true,
+            read_only: false,
+            hidden: false,
+            bypass: false,
+            enumerated: false,
+        })
+    }
+
+    /// The value the host last gave the parameter; `None` before it gave one (a native plugin's own value comes in its
+    /// own units, not normalized).
+    fn param_value(&self, id: u32) -> Option<f64> {
+        self.sent.iter().find(|e| e.0 == id).map(|e| f64::from(e.1) / rec::MIDI_FULL)
+    }
+
+    /// The plugin's text for the parameter's current value; it gives no text for other values, so only the value the
+    /// host last gave it has one.
+    fn param_text(&self, id: u32, value: f64) -> Option<String> {
+        let current = self.sent.iter().find(|e| e.0 == id)?.1;
+        (current == midi_value(value) && (id as usize) < self.plugin.param_count())
+            .then(|| self.plugin.param_text(id as i32))
+            .filter(|t| !t.is_empty())
+    }
+
+    fn set_param(&mut self, id: u32, value: f64) -> bool {
+        if id as usize >= self.plugin.param_count() {
+            return false;
+        }
+        self.send_param(id, midi_value(value));
+        true
+    }
+}
+
+/// A parameter name as shown: the installed plugins start their names with caret codes ("^b^aCutoff"), which are
+/// left out (an OpenStudio choice; what the codes mean is not known).
+fn shown_name(raw: &str) -> String {
+    let mut s = raw;
+    while let Some(rest) = s.strip_prefix('^') {
+        let mut chars = rest.chars();
+        if chars.next().is_none() {
+            break;
+        }
+        s = chars.as_str();
+    }
+    s.trim().to_string()
+}
+
+/// Sets `index`'s value in a small (index, value) list.
+fn set_entry(list: &mut Vec<(u32, i32)>, index: u32, value: i32) {
+    match list.iter_mut().find(|e| e.0 == index) {
+        Some(e) => e.1 = value,
+        None => list.push((index, value)),
+    }
 }
 
 /// Window helpers for the plugin's editor window (Windows only; elsewhere there is no editor).
@@ -517,7 +638,22 @@ mod win {
     pub fn place_at_origin(_h: isize) {}
 }
 
-// Native plugins do not surface individual parameters through os_host yet (params/automation use
-// the defaults). The types are referenced here so the intent is explicit.
-#[allow(dead_code)]
-fn _param_api(_p: &ParamInfo, _e: &ParamEvent) {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parameter_values_and_names() {
+        assert_eq!(midi_value(0.0), 0);
+        assert_eq!(midi_value(1.0), 1 << 30);
+        assert_eq!(midi_value(0.5), 1 << 29);
+        assert_eq!(midi_value(2.0), 1 << 30);
+        assert_eq!(midi_value(-1.0), 0);
+        // The value an automation clip hands on goes through unchanged.
+        let n = 123_456_789i64;
+        assert_eq!(i64::from(midi_value(n as f64 / 1_073_741_824.0)), n);
+        assert_eq!(shown_name("^b^aCutoff"), "Cutoff");
+        assert_eq!(shown_name("Plain"), "Plain");
+        assert_eq!(shown_name("^"), "^");
+    }
+}

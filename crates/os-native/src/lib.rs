@@ -301,16 +301,47 @@ impl Plugin {
         self.dispatch(abi::dispatch::SET_SAMPLES_PER_TICK, 0, spt.to_bits() as IntPtr);
     }
 
-    pub fn param_name(&mut self, index: i32) -> String {
+    /// The parameter count: NumParams, or the count the plugin set later with host dispatcher 27 SetNumParams (spec:
+    /// "Parameters").
+    pub fn param_count(&self) -> usize {
+        self.host.num_params().unwrap_or(self.info.num_params).max(0) as usize
+    }
+
+    /// The name of parameter `index` (GetName section 0).
+    pub fn param_name(&self, index: i32) -> String {
+        self.get_name(abi::name::PARAM, index)
+    }
+
+    /// Parameter `index`'s current value as the plugin shows it (GetName section 1).
+    pub fn param_text(&self, index: i32) -> String {
+        self.get_name(abi::name::PARAM_VALUE, index)
+    }
+
+    fn get_name(&self, section: i32, index: i32) -> String {
         let mut buf = [0 as c_char; 512];
-        let args = [abi::name::PARAM as IntPtr, index as IntPtr, 0, buf.as_mut_ptr() as IntPtr, 0];
+        let args = [section as IntPtr, index as IntPtr, 0, buf.as_mut_ptr() as IntPtr, 0];
         self.call(self.vt().get_name as *const (), args);
+        buf[buf.len() - 1] = 0;
         host::cstr(buf.as_ptr())
     }
 
     /// Current value of a parameter (plugin-specific integer scale).
     pub fn param_value(&mut self, index: i32) -> i32 {
-        self.call(self.vt().process_param as *const (), [index as IntPtr, 0, 2, 0, 0]).map_or(0, |v| v as i32)
+        self.call(self.vt().process_param as *const (), [index as IntPtr, 0, abi::rec::GET_VALUE as IntPtr, 0, 0]).map_or(0, |v| v as i32)
+    }
+
+    /// Moves parameter `index` to `midi` (0..2^30, which the plugin maps to its control's range):
+    /// `ProcessParam(index, midi, update value | from MIDI)` under the render lock (audio thread; spec: "Parameters").
+    pub fn set_param_midi(&mut self, index: i32, midi: i32) {
+        let flags = (abi::rec::UPDATE_VALUE | abi::rec::FROM_MIDI) as IntPtr;
+        self.locked(|p| p.call(p.vt().process_param as *const (), [index as IntPtr, midi as IntPtr, flags, 0, 0]));
+    }
+
+    /// Makes the editor's control of parameter `index` show `midi`: `ProcessParam(index, midi, update control | from
+    /// MIDI)` (interface thread).
+    pub fn show_param_midi(&mut self, index: i32, midi: i32) {
+        let flags = (abi::rec::UPDATE_CONTROL | abi::rec::FROM_MIDI) as IntPtr;
+        self.call(self.vt().process_param as *const (), [index as IntPtr, midi as IntPtr, flags, 0, 0]);
     }
 
     /// Saves the plugin state into a byte vector (`None` when the plugin stops while saving). Takes `&self`: the FFI
@@ -608,6 +639,60 @@ mod tests {
         assert!(l.iter().all(|s| s.is_finite()));
         let peak = l.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         assert!(peak > 0.1 && peak < 2.0, "near unity, got {peak}");
+    }
+
+    /// Parameters are listed and moved through os_host (spec: plugins/fruity-abi.md "Parameters"): the low-pass's
+    /// cutoff, closed, takes the highs out of white noise; open, it lets them through. Ignored: native plugins can pop
+    /// modal message boxes, so run it on its own (hidden desktop).
+    #[test]
+    #[ignore]
+    #[cfg(windows)]
+    fn native_parameters_list_and_move() {
+        let Some(fl) = fl() else { return };
+        let Some(dll) = find_plugin(&fl, "Fruity Fast LP") else { return };
+        let rate = 44_100u32;
+        let p = load_plugin(&dll, &fl, rate, false).expect("load");
+        let pl = p.lock().unwrap();
+        let count = pl.param_count();
+        assert!(count > 0, "no parameters");
+        let infos: Vec<_> = (0..count).filter_map(|i| pl.param_info(i)).collect();
+        assert_eq!(infos.len(), count);
+        for i in &infos {
+            println!("parameter {}: {:?}", i.id, i.name);
+        }
+        assert!(infos.iter().all(|i| !i.name.is_empty() && !i.name.starts_with('^')), "every parameter has a name");
+        let cutoff = infos.iter().find(|i| i.name.to_lowercase().contains("cut")).map_or(0, |i| i.id);
+        assert!(pl.tick_params_fx());
+        drop(pl);
+        // White noise (a fixed LCG), measured by the energy of its first difference (the highs).
+        let mut seed = 1u32;
+        let noise: Vec<f32> = (0..rate as usize)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+            })
+            .collect();
+        let highs = |v: f64| {
+            let fx = p.clone() as os_engine::SharedEffect;
+            let mut fx = fx.lock().unwrap();
+            fx.param_fx(0, cutoff, v);
+            let mut sum = 0.0f64;
+            for block in noise.chunks(512) {
+                let (mut l, mut r) = (block.to_vec(), block.to_vec());
+                fx.process_fx(rate, &mut l, &mut r);
+                sum += l.windows(2).map(|w| f64::from(w[1] - w[0]).powi(2)).sum::<f64>();
+            }
+            sum
+        };
+        let closed = highs(0.0);
+        let open = highs(1.0);
+        println!("highs closed {closed:.3} open {open:.3}");
+        assert!(open > closed * 4.0, "closed {closed} open {open}");
+        let pl = p.lock().unwrap();
+        assert_eq!(pl.param_value(cutoff), Some(1.0));
+        let text = pl.param_text(cutoff, 1.0);
+        println!("value text {text:?}");
+        assert!(pl.param_text(cutoff, 0.5).is_none(), "no text for a value it does not have");
     }
 
     #[test]

@@ -48,6 +48,12 @@ pub trait Instrument: Send {
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         let _ = (offset, index, value);
     }
+    /// True for an instrument that takes automated parameter values once per tick, at offset 0 of the tick's
+    /// `process` call, as the automation clip hands them on (FL native plugins: spec plugins/fruity-abi.md
+    /// "Parameters"). Default false: values every few frames inside the tick (spec: plugins/plugin-parameters.md §2).
+    fn tick_params(&self) -> bool {
+        false
+    }
     /// The channel's levels for the next `process` call. An instrument that works the volume and pan into its voices
     /// itself returns true, and the engine then adds its output unchanged (FL native generators get them in their
     /// voices' final levels: spec plugins/fruity-abi.md "Voices"). Default: false, the engine applies the volume and
@@ -147,6 +153,10 @@ pub trait HostedEffect: Send {
     /// `process_fx` call.
     fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
         let _ = (offset, index, value);
+    }
+    /// [`Instrument::tick_params`] for effects.
+    fn tick_params_fx(&self) -> bool {
+        false
     }
     /// [`Instrument::transport`] for effects: the song position during the next `process_fx` call.
     fn transport_fx(&mut self, info: &TransportInfo) {

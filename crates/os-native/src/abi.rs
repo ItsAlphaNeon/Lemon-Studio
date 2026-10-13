@@ -55,6 +55,18 @@ pub mod name {
     pub const PARAM_VALUE: i32 = 1;
 }
 
+/// ProcessParam flags (spec: "ProcessParam flags").
+pub mod rec {
+    pub const UPDATE_VALUE: i32 = 1;
+    pub const GET_VALUE: i32 = 2;
+    pub const UPDATE_CONTROL: i32 = 16;
+    pub const FROM_MIDI: i32 = 32;
+    /// The full scale of a value "from MIDI". The spec's SDK text gives 0..65536, but every installed plugin tried
+    /// under this host (eight effects) maps 0..2^30 linearly onto its control's range and takes 65536 as nearly its
+    /// minimum, so OpenStudio uses 2^30 (the scale of the value an automation clip hands on).
+    pub const MIDI_FULL: f64 = 1_073_741_824.0;
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LevelParams {

@@ -111,6 +111,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         self.run((), |p| p.param(offset, index, value))
     }
+    fn tick_params(&self) -> bool {
+        self.look(false, |p| p.tick_params())
+    }
     fn transport(&mut self, info: &TransportInfo) {
         self.run((), |p| p.transport(info))
     }
@@ -131,6 +134,9 @@ impl<P: Plugin> HostedEffect for Guarded<P> {
     }
     fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
         self.run((), |p| p.param_fx(offset, index, value))
+    }
+    fn tick_params_fx(&self) -> bool {
+        self.look(false, |p| p.tick_params_fx())
     }
     fn transport_fx(&mut self, info: &TransportInfo) {
         self.run((), |p| p.transport_fx(info))

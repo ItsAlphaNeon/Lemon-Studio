@@ -1540,6 +1540,7 @@ impl Engine {
     /// Outside its clips a target keeps its last value.
     fn run_automation(&mut self, len: usize) {
         use os_model::target::Target;
+        self.params.ticks.clear();
         if self.autos.is_empty() {
             return;
         }
@@ -1578,6 +1579,12 @@ impl Engine {
         }
         let len = if now == self.auto_from { 0 } else { len.max(1) as u32 };
         for (target, n) in values {
+            // Plugin parameters: per-tick plugins get this value, the others the curve sampled through the tick
+            // (`run_param_automation`).
+            if param_auto::is_param(target) {
+                self.params.tick_value(target, n);
+                continue;
+            }
             match self.auto_last.iter_mut().find(|l| l.0 == target) {
                 Some(l) if l.1 == n => continue,
                 Some(l) => l.1 = n,
@@ -2014,9 +2021,16 @@ impl Engine {
             }
             inst.transport(song);
             let own_levels = inst.channel_levels(ch.levels());
-            // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md Â§2).
-            for (off, index, value) in self.params.channel_span(c, 0, n) {
-                inst.param(off, index, value);
+            // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md Â§2); one per tick
+            // at its start for a plugin that takes them so (spec: plugins/fruity-abi.md "Parameters").
+            if inst.tick_params() {
+                for (index, value) in self.params.channel_ticks(c) {
+                    inst.param(0, index, value);
+                }
+            } else {
+                for (off, index, value) in self.params.channel_span(c, 0, n) {
+                    inst.param(off, index, value);
+                }
             }
             for &(_, off, note) in notes {
                 send_note(&mut *inst, off.min(n.saturating_sub(1) as u32), note, shift, fines);
