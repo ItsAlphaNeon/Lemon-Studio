@@ -1,11 +1,12 @@
-//! Hosted plugins (any format, through the `os-host` layer): scanning, one instance per plugin channel or mixer slot,
-//! their windows, and the instrument / effect lists the transport plays.
+//! Hosted plugins (any format, through the `os-host` layer): the plugins known (built in, and found by the plugin scan,
+//! `plugin_db` / `plugin_scan`), one instance per plugin channel or mixer slot, their windows, and the instrument /
+//! effect lists the transport plays.
 //!
-// spec: plugins/plugin-formats.md (hosting, where to find plugins, Open Sampler state), ui/plugin-window.md,
-// plugins/host-link.md (Open plugins join the window strip)
+// spec: plugins/plugin-formats.md (hosting, Open Sampler state), ui/plugin-manager.md §4 (scan results, loading for
+// use), ui/plugin-window.md, plugins/host-link.md (Open plugins join the window strip)
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use os_host::{Descriptor, Library, SharedPlugin};
@@ -14,7 +15,7 @@ use os_engine::{SharedEffect, SharedInstrument};
 #[cfg(plugin_windows)]
 use crate::plugin_window::{ChannelInfo, FrameEvent, FrameWindow};
 
-/// A plugin offered in the picker.
+/// A plugin the host knows (offered in the plugin menus unless hidden or combined away).
 #[derive(Clone)]
 pub struct Available {
     pub lib: Arc<dyn Library>,
@@ -103,29 +104,15 @@ pub struct Plugins {
     pub detach_new: bool,
     /// The preset file each instance last loaded or saved (spec: plugins/presets.md), by `hosted` key.
     pub presets: BTreeMap<usize, PathBuf>,
+    /// Plugins (uids) whose file the last scan no longer found: not listed, kept so indices stay valid.
+    pub missing: HashSet<String>,
+    /// The file and stamp each found plugin was listed from (uid -> path, size, time): an unchanged file keeps its
+    /// library (and a library loaded for use stays loaded).
+    stamps: HashMap<String, (String, u64, u64)>,
     rate: u32,
     /// Verdicts of the one-time child-process check a native plugin passes before its first load here (spec:
     /// plugins/fruity-abi.md "Crash containment"). `None`: no check (tests, where this program is the test harness).
     native_checks: Option<os_native::check::Checks>,
-}
-
-/// Folders searched for plugin files: a format's standard folders (`standard`), then `bundled/` next to the build
-/// folders of this workspace (where `cargo run -p bundle-plugins` puts Lemon Studio's own plugins).
-fn search_dirs(standard: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut dirs = standard;
-    if let Ok(exe) = std::env::current_exe() {
-        // target*/release/lemonstudio.exe -> target*/bundled, and the sibling build folders.
-        if let Some(target) = exe.parent().and_then(|p| p.parent()) {
-            dirs.push(target.join("bundled"));
-            if let Some(ws) = target.parent() {
-                for t in ["target", "target-dev"] {
-                    dirs.push(ws.join(t).join("bundled"));
-                }
-            }
-        }
-    }
-    dirs.dedup();
-    dirs
 }
 
 /// Open Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
@@ -161,23 +148,51 @@ fn linked(cell: &OnceLock<Option<Arc<os_clap::Library>>>, entry: *const std::ffi
     lib.iter().flat_map(|l| l.plugins.iter().map(|d| Available { lib: l.clone(), desc: d.clone() })).collect()
 }
 
-/// One plugin format's files in its search folders, and how to load one.
-type Scan = (Vec<PathBuf>, fn(&std::path::Path) -> Result<Arc<dyn Library>, String>);
+/// Loads plugin file `path` of `format` under the crash guard (spec: plugins/plugin-formats.md, "Crash containment").
+pub fn load_file(path: &Path, format: os_host::Format) -> Result<Arc<dyn Library>, String> {
+    let load = || -> Result<Arc<dyn Library>, String> {
+        match format {
+            os_host::Format::Clap => os_clap::Library::load(path).map(|l| l as Arc<dyn Library>),
+            os_host::Format::Vst3 => os_vst3::Module::load(path).map(|l| l as Arc<dyn Library>),
+            os_host::Format::Native => os_native::NativeLibrary::load(path).map(|l| l as Arc<dyn Library>),
+        }
+    };
+    os_host::guard::catch(load).unwrap_or_else(|c| Err(format!("{}: crashed while loading ({})", path.display(), os_host::guard::describe(c))))
+}
 
-/// The plugin files of every hosted format (spec: plugins/vst3-hosting.md §2). The user's installed
-/// FL native plugins are included only when the experimental native host is opted into
-/// (`os_native::enabled()`, Settings > File or `OPENSTUDIO_NATIVE=1`): they are loaded through an
-/// unverified interop path (spec plugins/fruity-abi.md), so they stay off by default.
-fn plugin_files() -> Vec<Scan> {
-    let mut scans: Vec<Scan> = vec![
-        (os_clap::find_files(&search_dirs(os_clap::standard_dirs())), |p| os_clap::Library::load(p).map(|l| l as Arc<dyn Library>)),
-        (os_vst3::find_bundles(&search_dirs(os_vst3::standard_dirs())), |p| os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>)),
-    ];
-    if os_native::enabled() {
-        // Generators and effects. Each is tried in a child process before its first load here (`native_check`).
-        scans.push((os_native::dll_files(), |p| os_native::NativeLibrary::load(p).map(|l| l as Arc<dyn Library>)));
+/// The installed native plugin files (generators and effects), when the experimental native host is opted into
+/// (`os_native::enabled()`, Settings > Plugins or `OPENSTUDIO_NATIVE=1`): they are loaded through an unverified
+/// interop path (spec plugins/fruity-abi.md), so they stay off by default. Each is tried in a child process before
+/// its first load here (`Plugins::native_check`).
+pub fn native_files() -> Vec<PathBuf> {
+    if os_native::enabled() { os_native::dll_files() } else { Vec::new() }
+}
+
+/// A plugin file known from the scan cache: lists the cached plugins without loading the file, and loads it the first
+/// time an instance is created (spec: ui/plugin-manager.md §4, "Loading for use").
+struct LazyLibrary {
+    path: PathBuf,
+    format: os_host::Format,
+    plugins: Vec<Descriptor>,
+    real: OnceLock<Result<Arc<dyn Library>, String>>,
+}
+
+impl Library for LazyLibrary {
+    fn path(&self) -> &Path {
+        &self.path
     }
-    scans
+
+    fn plugins(&self) -> &[Descriptor] {
+        &self.plugins
+    }
+
+    fn create(self: Arc<Self>, id: &str) -> Result<SharedPlugin, String> {
+        let real = self.real.get_or_init(|| load_file(&self.path, self.format)).clone()?;
+        if !real.plugins().iter().any(|d| d.id == id) {
+            return Err(format!("{} no longer offers this plugin: scan for plugins again", self.path.display()));
+        }
+        real.create(id)
+    }
 }
 
 /// A format's name as the UI shows it.
@@ -189,58 +204,48 @@ pub fn format_name(f: os_host::Format) -> &'static str {
     }
 }
 
-/// Picker labels of found plugins: the name, plus the format when plugins of other formats have the same name.
-fn labels(list: &[Available]) -> Vec<String> {
-    list.iter()
-        .map(|a| {
-            let twin = list.iter().any(|b| b.desc.name == a.desc.name && b.desc.format != a.desc.format);
-            if twin { format!("{} ({})", a.desc.name, format_name(a.desc.format)) } else { a.desc.name.clone() }
-        })
-        .collect()
-}
-
 impl Plugins {
-    /// The built-in Open Sampler, then the plugin folders' instruments (first file wins for a plugin id). Files of the
-    /// built-in plugins are skipped (any format): a second copy in the process would share the built-in one's editor
-    /// window class.
-    pub fn scan() -> Plugins {
-        let mut available: Vec<Available> = builtin();
-        let mut effects: Vec<Available> = builtin_effects();
-        let files = plugin_files().into_iter().flat_map(|(files, load)| files.into_iter().map(move |f| (f, load)));
-        for (f, load) in files.filter(|(f, _)| f.file_stem().is_none_or(|s| s != OPEN_SAMPLER && s != OPEN_EQ && s != crate::osc3::OPEN_3X_OSC)) {
-            // A plugin file that crashes while it is loaded is left out (spec: plugins/plugin-formats.md, "Crash containment").
-            let loaded = os_host::guard::catch(|| load(&f)).unwrap_or_else(|c| Err(format!("{}: crashed while loading ({})", f.display(), os_host::guard::describe(c))));
-            match loaded {
-                Ok(lib) => {
-                    for d in lib.plugins().iter() {
-                        let list = if d.is_instrument() {
-                            &mut available
-                        } else if d.is_effect() {
-                            &mut effects
-                        } else {
-                            continue;
-                        };
-                        if !list.iter().any(|a| a.desc.uid() == d.uid()) {
-                            list.push(Available { lib: lib.clone(), desc: d.clone() });
-                        }
-                    }
+    /// The built-in plugins only (what the app knows before the scan cache is read).
+    pub fn builtins() -> Plugins {
+        let native_checks = (!cfg!(test)).then(|| os_native::check::Checks::load(os_paths::user_file(NATIVE_CHECKS)));
+        Plugins { available: builtin(), effects: builtin_effects(), scale: 1.0, native_checks, ..Plugins::default() }
+    }
+
+    /// Takes a scan's results (spec: ui/plugin-manager.md §4, "Results"): plugins new to this run are appended, so the
+    /// indices the lists, channels and slots use stay valid for the whole run; a plugin whose file changed gets a new
+    /// lazily loaded library; plugins no longer found are marked missing (not listed). The first file wins for a
+    /// plugin id. Built-in plugins are never replaced.
+    pub fn merge(&mut self, cache: &crate::plugin_db::Cache) {
+        let builtin: HashSet<String> = self.available.iter().chain(&self.effects).filter(|a| crate::project_plugins::is_builtin(&a.desc)).map(|a| a.desc.uid()).collect();
+        let mut seen: HashSet<String> = builtin.clone();
+        for f in cache.files.iter().filter(|f| f.status == crate::plugin_db::Status::Ok) {
+            let Some(format) = os_host::Format::parse(&f.format) else { continue };
+            let path = PathBuf::from(&f.path);
+            let descs: Vec<Descriptor> = f.plugins.iter().map(|r| r.descriptor(format, &path)).collect();
+            let lib: Arc<dyn Library> = Arc::new(LazyLibrary { path: path.clone(), format, plugins: descs.clone(), real: OnceLock::new() });
+            for d in descs {
+                let uid = d.uid();
+                let list = match d.kind {
+                    os_host::Kind::Instrument => &mut self.available,
+                    os_host::Kind::Effect => &mut self.effects,
+                    os_host::Kind::Other => continue,
+                };
+                if !seen.insert(uid.clone()) {
+                    continue;
                 }
-                Err(e) => eprintln!("plugin scan: {e}"),
+                let stamp = (f.path.clone(), f.size, f.modified);
+                match list.iter().position(|a| a.desc.uid() == uid) {
+                    Some(i) if self.stamps.get(&uid) == Some(&stamp) && list[i].desc == d => {}
+                    Some(i) => list[i] = Available { lib: lib.clone(), desc: d },
+                    None => list.push(Available { lib: lib.clone(), desc: d }),
+                }
+                self.stamps.insert(uid, stamp);
             }
         }
-        effects.sort_by_key(|a| a.desc.name.to_lowercase());
+        self.missing = self.available.iter().chain(&self.effects).map(|a| a.desc.uid()).filter(|u| !seen.contains(u)).collect();
         if std::env::var_os("OS_DEBUG").is_some() {
-            let native = |l: &[Available]| l.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
-            eprintln!(
-                "[plugins] {} instruments ({} native), {} effects ({} native)",
-                available.len(),
-                native(&available),
-                effects.len(),
-                native(&effects)
-            );
+            eprintln!("[plugins] {} instruments, {} effects, {} missing", self.available.len(), self.effects.len(), self.missing.len());
         }
-        let native_checks = (!cfg!(test)).then(|| os_native::check::Checks::load(os_paths::user_file(NATIVE_CHECKS)));
-        Plugins { available, effects, scale: 1.0, native_checks, ..Plugins::default() }
     }
 
     /// Native plugins load into this process only once a child process tried them (`os_native::check`): one that
@@ -274,14 +279,17 @@ impl Plugins {
         checks.ready(&program, dll)
     }
 
-    /// Picker labels of the instruments (`labels`), in `available` order.
-    pub fn names(&self) -> Vec<String> {
-        labels(&self.available)
-    }
-
-    /// Picker labels of the effects, in `effects` order.
-    pub fn effect_names(&self) -> Vec<String> {
-        labels(&self.effects)
+    /// The built-in plugins plus every plugin file in the standard folders, scanned in this process at once (tests).
+    #[cfg(test)]
+    pub fn scan() -> Plugins {
+        use crate::plugin_db as db;
+        let prefs = db::Prefs::default();
+        let found = db::discover(&db::search_dirs(&prefs), native_files());
+        let scan = |p: &Path, f: os_host::Format| crate::plugin_scan::scan_here(p, f);
+        let cache = db::sweep(&found, &db::Cache::default(), db::Mode::All, false, 1, &scan, &|_, _, _| {});
+        let mut pl = Plugins::builtins();
+        pl.merge(&cache);
+        pl
     }
 
     /// Creates an instance of available plugin `index` for rack row `row` and activates it at the device rate.
@@ -396,10 +404,9 @@ impl Plugins {
             .collect()
     }
 
-    /// Index of the available plugin called `name`.
+    /// Index of the available plugin called `name` (the built-in plugins come first).
     pub fn index_of(&self, name: &str) -> Option<usize> {
-        // A picker label first (it names the format of a plugin found in several), then the plain name.
-        labels(&self.available).iter().position(|l| l == name).or_else(|| self.available.iter().position(|a| a.desc.name == name))
+        self.available.iter().position(|a| a.desc.name == name)
     }
 
     /// Index of the effect plugin called `name`.
@@ -1945,9 +1952,7 @@ mod tests {
             rate: 48000,
             ..Plugins::default()
         };
-        assert_eq!(pl.names(), ["Open Sampler (CLAP)", "Open Sampler (VST3)"]);
-        assert_eq!(pl.index_of("Open Sampler (VST3)"), Some(1));
-        assert_eq!(pl.index_of("Open Sampler"), Some(0), "a plain name still finds the first");
+        assert_eq!(pl.index_of("Open Sampler"), Some(0), "a name finds the first");
         pl.create(0, 1).unwrap();
         let d = pl.descriptor(0).unwrap();
         assert_eq!(d.format, os_host::Format::Vst3);
@@ -2192,16 +2197,18 @@ mod tests {
         unsafe { std::env::set_var("OPENSTUDIO_NATIVE", "1") };
         let mut a = crate::app::App::new(None);
         a.state.project = crate::app::test_project();
-        a.scan_plugins();
+        a.plugins = Plugins::scan();
+        a.state.plugdb.rebuild(&a.plugins);
+        use crate::plugin_menu::PlugCmd;
         let fx = a.plugins.effects.iter().position(|e| e.desc.format == os_host::Format::Native).expect("a native effect");
         let fx_menu = crate::mixer::effect_menu(&a.state, 0, 0.0, 0.0);
-        let fx_cmd = crate::playlist::Cmd::Mixer(crate::mixer::MCmd::AddEffect(0, fx));
-        assert!(fx_menu.items.iter().any(|it| it.label == a.state.hosted_effects[fx] && it.cmd == fx_cmd), "slot menu lists it");
-        let pick = a.state.hosted_generators.iter().position(|n| *n == name).expect("the plugin is found");
+        let fx_cmd = crate::playlist::Cmd::Plugin(PlugCmd::Effect { index: fx, slot: Some(0) });
+        assert!(fx_menu.items.iter().any(|it| it.cmd == fx_cmd), "slot menu lists it");
+        let pick = a.plugins.available.iter().position(|x| x.desc.name == name).expect("the plugin is found");
         let add = crate::rack::add_one_items(&a.state).into_iter().find(|it| it.label == name).expect("Add one lists it");
-        assert!(add.cmd == crate::playlist::Cmd::Rack(crate::rack::RCmd::AddPlugin(pick)));
+        assert!(add.cmd == crate::playlist::Cmd::Plugin(PlugCmd::Generator { index: pick, after: None }));
         let row = a.state.project.channels.len();
-        crate::rack::run(&mut a, crate::rack::RCmd::AddPlugin(pick));
+        crate::playlist::run(&mut a, add.cmd);
         assert_eq!(a.state.pending_plugin, Some((row, pick)));
         for _ in 0..100 {
             a.tick();

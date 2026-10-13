@@ -77,9 +77,9 @@ pub enum Item {
     Channel(usize),
     /// Sample file path.
     Sample(String),
-    /// Plugin picker generator index (built-ins, then hosted).
+    /// A generator (index into `Plugins::available`).
     Generator(usize),
-    /// Plugin picker effect index.
+    /// An effect (index into `Plugins::effects`).
     Effect(usize),
     /// A non-audio file in a dropped folder (not draggable, spec §6).
     File(String),
@@ -404,19 +404,18 @@ fn plugin_node(s: &State, out: &mut Vec<Row>, parent: &str, label: String, icon:
     }
 }
 
+/// The plugin menus' generators and effects (spec: ui/plugin-menu.md §5).
 fn plugin_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
-    use crate::views::picker::GENERATORS;
     if section(s, root, "Generators", Icon::Plug, cat, out) {
         let parent = format!("{root}/Generators");
-        let names = GENERATORS.iter().map(|g| g.name).chain(s.hosted_generators.iter().copied());
-        for (i, n) in names.enumerate() {
-            leaf(out, &parent, n.to_string(), Icon::Plug, cat, false, Item::Generator(i));
+        for e in &s.plugdb.lists.gens {
+            leaf(out, &parent, e.label.clone(), Icon::Plug, cat, false, Item::Generator(e.index));
         }
     }
     if section(s, root, "Effects", Icon::Speaker, cat, out) {
         let parent = format!("{root}/Effects");
-        for (i, e) in crate::views::picker::effects(s).iter().enumerate() {
-            leaf(out, &parent, e.name.to_string(), Icon::Speaker, cat, false, Item::Effect(i));
+        for e in &s.plugdb.lists.fx {
+            leaf(out, &parent, e.label.clone(), Icon::Speaker, cat, false, Item::Effect(e.index));
         }
     }
 }

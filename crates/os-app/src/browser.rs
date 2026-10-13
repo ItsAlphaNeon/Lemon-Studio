@@ -104,13 +104,8 @@ impl App {
                 s.browser_dirs.borrow_mut().clear();
                 s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
             }
-            BCmd::Rescan => {
-                if !s.hosted_rows.is_empty() {
-                    return Some("Remove plugin channels before rescanning the plugin list".into());
-                }
-                self.scan_plugins();
-                return Some(format!("Plugin list refreshed: {} instruments found", self.state.hosted_generators.len()));
-            }
+            // A background scan (spec: ui/plugin-manager.md §4); plugins in use stay where they are.
+            BCmd::Rescan => self.start_scan(crate::plugin_db::Mode::Changed),
         }
         None
     }
@@ -272,21 +267,25 @@ impl App {
                     self.sample_to_rack(path, y);
                 }
             }
+            // As if picked in the F8 menu (spec: ui/plugin-menu.md §5): a new channel at the bottom of the rack.
             Item::Generator(i) => {
                 if spot.is_some() || win == Some(Win::ChannelRack) {
-                    self.act(Action::PickerTile(false, i));
+                    if let Some(m) = crate::plugin_menu::add_generator(self, i, None) {
+                        self.state.message = Some(m);
+                    }
                 }
             }
             // An effect dropped on the mixer goes into the slot under the mouse, else the current track's first free
-            // slot (as if picked in the plugin picker, spec §3).
+            // slot (spec §3).
             Item::Effect(i) => {
                 if win == Some(Win::Mixer) {
                     let slot = match self.top_hit(x, y).map(|h| &h.action) {
                         Some(Action::Mix(crate::mixer::MHit::SlotName(k) | crate::mixer::MHit::SlotArrow(k))) => Some(*k),
                         _ => None,
                     };
-                    self.state.mixer.picker_slot = slot;
-                    self.act(Action::PickerTile(true, i));
+                    if let Some(m) = crate::plugin_menu::add_effect(self, i, slot) {
+                        self.state.message = Some(m);
+                    }
                 }
             }
             Item::Param(key, index) => {
