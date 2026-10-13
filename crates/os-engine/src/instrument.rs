@@ -35,6 +35,11 @@ pub trait Instrument: Send {
     fn active(&self) -> bool {
         false
     }
+    /// The voices the instrument has sounding, as far as the host knows them (spec: audio/voices.md §2). Valid after
+    /// `process` and `reset`. Default: none.
+    fn voices(&self) -> usize {
+        0
+    }
     /// Silences the instrument at once: every voice, tail and queued note is dropped (Stop). Called with no
     /// stream processing the instrument.
     fn reset(&mut self) {}

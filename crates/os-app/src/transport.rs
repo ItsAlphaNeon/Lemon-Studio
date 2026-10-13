@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -99,6 +99,9 @@ pub struct Shared {
     block: AtomicU32,
     /// The output the playback or live stream opened: device name, rate, buffer length asked for.
     opened: Mutex<Option<(String, u32, Option<u32>)>>,
+    /// Each running stream's engine voices (its feeder writes them after every fill; a stream that closed drops its
+    /// counter). Spec: audio/voices.md §5.
+    engine_voices: Mutex<Vec<Weak<AtomicU32>>>,
 }
 
 /// Ring of the newest output samples.
@@ -419,6 +422,13 @@ impl Transport {
         self.shared.error.lock().ok()?.take()
     }
 
+    /// The engine's own voices sounding on every stream (playback, previews, live notes), as of their last fill.
+    /// Hosted instruments count theirs (spec: audio/voices.md §5).
+    pub fn engine_voices(&self) -> usize {
+        let Ok(v) = self.shared.engine_voices.lock() else { return 0 };
+        v.iter().filter_map(Weak::upgrade).map(|n| n.load(Ordering::Relaxed) as usize).sum()
+    }
+
     /// Device blocks that could not be filled in time (heard as a gap) since the program started.
     pub fn underruns(&self) -> u64 {
         self.shared.underruns.load(Ordering::Relaxed)
@@ -544,6 +554,8 @@ struct Feeder {
     /// Time spent rendering and frames rendered since the load was last published.
     busy: Duration,
     rendered: u64,
+    /// The engine's voices after the last fill (registered in `Shared::engine_voices`).
+    voices: Arc<AtomicU32>,
 }
 
 impl Feeder {
@@ -569,6 +581,7 @@ impl Feeder {
                 }
             }
         }
+        self.voices.store(e.voice_count() as u32, Ordering::Relaxed);
         if frames > 0 && self.meters {
             self.busy += t0.elapsed();
             self.rendered += frames;
@@ -1073,7 +1086,12 @@ fn build_any(device: &cpal::Device, format: SampleFormat, config: &StreamConfig,
 
 impl Feeder {
     fn new(engine: Arc<Mutex<Engine>>, queue: Arc<Queue>, shared: Arc<Shared>, ctl: Arc<Ctl>, rate: u32) -> Feeder {
-        Feeder { engine, queue, shared, ctl, meters: true, rate, busy: Duration::ZERO, rendered: 0 }
+        let voices = Arc::new(AtomicU32::new(0));
+        if let Ok(mut v) = shared.engine_voices.lock() {
+            v.retain(|w| w.strong_count() > 0);
+            v.push(Arc::downgrade(&voices));
+        }
+        Feeder { engine, queue, shared, ctl, meters: true, rate, busy: Duration::ZERO, rendered: 0, voices }
     }
 }
 
@@ -1555,5 +1573,30 @@ mod tests {
         assert_eq!(t.peaks(), (0.0, 0.0), "silent after stop");
         assert!(resets.load(Ordering::Relaxed) >= 1, "instrument was reset");
         assert!(!inst.lock().unwrap().active(), "no tail left to resume");
+    }
+
+    /// The CPU panel's voices while a pattern plays and after Stop (spec: audio/voices.md §4-§5): the engine's own
+    /// voices (a sampler channel without a hosted instrument) and a hosted Open 3x Osc's are counted; Stop leaves none.
+    #[test]
+    #[ignore]
+    fn stop_ends_every_voice() {
+        let mut project = crate::app::test_project();
+        let (synth, own) = (project.channels[0].index, project.channels[1].index);
+        project.channels[0].kind = os_model::ChannelKind::Plugin;
+        let note = |ch: u16, key: u16| os_model::Note { length: 384, key, ..os_model::Note::step(ch, 0) };
+        project.patterns = vec![os_model::Pattern { number: 1, notes: vec![note(synth, 48), note(synth, 55), note(own, 60)], ..Default::default() }];
+        let mut pl = crate::plugins::Plugins::default();
+        pl.available = crate::plugins::builtin();
+        let osc = pl.index_of(crate::osc3::OPEN_3X_OSC).unwrap();
+        pl.create_with(0, osc, None).unwrap();
+        let t = Transport::new(None);
+        t.set_instruments(vec![(0, pl.hosted[&0].plugin.clone() as SharedInstrument)]);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(pl.voices(), 2, "the synth's chord");
+        assert!(t.engine_voices() >= 1, "the engine's own voice");
+        t.stop();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!((t.engine_voices(), pl.voices()), (0, 0), "Stop ends every voice");
     }
 }

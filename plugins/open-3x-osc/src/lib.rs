@@ -193,7 +193,7 @@ impl Plugin for Open3xOsc {
                 at = t;
             }
             match ev {
-                NoteEvent::NoteOn { note, velocity, voice_id, .. } => self.engine.note_on(note, velocity, voice_id, &blk),
+                NoteEvent::NoteOn { note, velocity, voice_id, .. } => self.engine.host_note_on(note, velocity, voice_id, &blk),
                 NoteEvent::NoteOff { note, voice_id, .. } => self.engine.note_off_id(note, voice_id),
                 NoteEvent::Choke { note, .. } => self.engine.choke(note),
                 NoteEvent::MidiPitchBend { value, .. } => {
@@ -208,6 +208,11 @@ impl Plugin for Open3xOsc {
         if at < len {
             let (left, right) = out.split_at_mut(1);
             self.engine.render(&mut left[0][at..len], &mut right[0][at..len], &blk);
+        }
+        // Voice ends go back to the host, at the end of the block (spec: audio/voices.md §4).
+        let last = (len as u32).saturating_sub(1);
+        for (note, voice_id) in self.engine.take_ended() {
+            ctx.send_event(NoteEvent::VoiceTerminated { timing: last, voice_id, channel: 0, note });
         }
         self.publish_sounding();
         if self.engine.has_voices() { ProcessStatus::KeepAlive } else { ProcessStatus::Normal }

@@ -16,10 +16,12 @@
 
 pub mod guard;
 mod guarded;
+mod meter;
 #[cfg(unix)]
 pub mod runloop;
 
 pub use guarded::{share, Guarded};
+pub use meter::Meter;
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -234,6 +236,11 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     /// The exception code of the crash that stopped the instance ([`Guarded`]), if one did. A stopped instance is never
     /// called again: its instrument plays silence, its effect passes the sound through.
     fn stopped(&self) -> Option<u32> {
+        None
+    }
+
+    /// The instance's meter: processing time and voices, readable without locking the instance ([`Guarded`] keeps it).
+    fn meter(&self) -> Option<Arc<Meter>> {
         None
     }
 }

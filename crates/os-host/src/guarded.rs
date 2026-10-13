@@ -6,25 +6,30 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::guard::{self, Module};
-use crate::{Descriptor, HostedEffect, Instrument, ParamEvent, ParamInfo, Plugin, SharedPlugin};
+use crate::{Descriptor, HostedEffect, Instrument, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
 use os_engine::TransportInfo;
 
 /// A plugin instance of any format, called through the crash guard. Once its code crashed (this instance, or another
 /// one of the same plugin file) it is stopped: it is never called again, nor destroyed (its memory is left as the crash
 /// left it). A stopped instrument plays silence, a stopped effect passes the sound through, and its saved state is the
 /// last one it gave or was given.
+///
+/// It also keeps the instance's [`Meter`]: the time every processing call takes and the voices after it (spec:
+/// ui/plugin-performance.md §3, audio/voices.md §5).
 pub struct Guarded<P: Plugin> {
     inner: ManuallyDrop<P>,
     module: Arc<Module>,
     /// The state the instance last saved or loaded: what a stopped instance saves.
     state: RefCell<Option<Vec<u8>>>,
+    meter: Arc<Meter>,
 }
 
 /// Shares `plugin`, code of `module`, as a guarded instance (format crates' `Library::create`).
 pub fn share<P: Plugin + 'static>(plugin: P, module: Arc<Module>) -> SharedPlugin {
-    Arc::new(Mutex::new(Guarded { inner: ManuallyDrop::new(plugin), module, state: RefCell::new(None) }))
+    Arc::new(Mutex::new(Guarded { inner: ManuallyDrop::new(plugin), module, state: RefCell::new(None), meter: Arc::default() }))
 }
 
 impl<P: Plugin> Guarded<P> {
@@ -68,21 +73,32 @@ impl<P: Plugin> Instrument for Guarded<P> {
         self.run((), |p| p.tune(offset, key, semitones))
     }
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
-        let ok = self.run(false, |p| {
+        let t0 = Instant::now();
+        let voices = self.run(None, |p| {
             p.process(rate, left, right);
-            true
+            Some(p.voices())
         });
-        if !ok {
-            // Silence, also over whatever the crash left half written.
-            left.fill(0.0);
-            right.fill(0.0);
+        self.meter.add(t0.elapsed());
+        match voices {
+            Some(n) => self.meter.set_voices(n),
+            None => {
+                // Silence, also over whatever the crash left half written.
+                left.fill(0.0);
+                right.fill(0.0);
+                self.meter.set_voices(0);
+            }
         }
     }
     fn active(&self) -> bool {
         self.look(false, |p| p.active())
     }
+    fn voices(&self) -> usize {
+        self.look(0, |p| p.voices())
+    }
     fn reset(&mut self) {
-        self.run((), |p| p.reset())
+        self.run((), |p| p.reset());
+        let n = self.look(0, |p| p.voices());
+        self.meter.set_voices(n);
     }
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         self.run((), |p| p.param(offset, index, value))
@@ -95,7 +111,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
 impl<P: Plugin> HostedEffect for Guarded<P> {
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         // A crash midway leaves the block as far as the plugin got; later blocks pass through untouched.
-        self.run((), |p| p.process_fx(rate, left, right))
+        let t0 = Instant::now();
+        self.run((), |p| p.process_fx(rate, left, right));
+        self.meter.add(t0.elapsed());
     }
     fn reset_fx(&mut self) {
         self.run((), |p| p.reset_fx())
@@ -186,6 +204,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn stopped(&self) -> Option<u32> {
         self.module.crashed()
+    }
+    fn meter(&self) -> Option<Arc<Meter>> {
+        Some(self.meter.clone())
     }
 }
 

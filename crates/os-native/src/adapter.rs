@@ -34,6 +34,9 @@ pub struct NativePlugin {
     active: bool,
     /// Live generator voices: (key, voice handle).
     voices: Vec<(u8, IntPtr)>,
+    /// Released voices still ringing until the plugin kills them: (voice handle, seconds left before the host stops
+    /// counting one the plugin never kills; spec: audio/voices.md §2).
+    ringing: Vec<(IntPtr, f64)>,
     next_tag: IntPtr,
     wants_tick: bool,
     /// Samples per FL tick at the nominal tempo (generators only).
@@ -57,6 +60,7 @@ impl NativePlugin {
             rate: 0,
             active: false,
             voices: Vec::new(),
+            ringing: Vec::new(),
             next_tag: 1,
             wants_tick,
             spt: 1.0,
@@ -87,6 +91,7 @@ impl Instrument for NativePlugin {
         if let Some(pos) = self.voices.iter().position(|&(k, _)| k == key) {
             let (_, voice) = self.voices.remove(pos);
             self.plugin.release(voice);
+            self.ringing.push((voice, RINGING_SECONDS));
         }
     }
 
@@ -115,15 +120,44 @@ impl Instrument for NativePlugin {
             self.plugin.idle();
             off += len;
         }
+        // The voices the plugin ended itself (Voice_Kill), and released ones past the time limit.
+        let secs = n as f64 / f64::from(rate.max(1));
+        self.forget_killed();
+        for (_, left) in &mut self.ringing {
+            *left -= secs;
+        }
+        self.ringing.retain(|&(_, left)| left > 0.0);
     }
 
     fn active(&self) -> bool {
         !self.voices.is_empty()
     }
 
+    fn voices(&self) -> usize {
+        self.voices.len() + self.ringing.len()
+    }
+
+    /// Stop: every voice, held or ringing, is killed.
     fn reset(&mut self) {
         for (_, voice) in self.voices.drain(..) {
             self.plugin.kill(voice);
+        }
+        for (voice, _) in self.ringing.drain(..) {
+            self.plugin.kill(voice);
+        }
+        self.plugin.killed_voices();
+    }
+}
+
+/// Longest a released voice is counted while the plugin does not kill it (spec: audio/voices.md §2.5).
+const RINGING_SECONDS: f64 = 30.0;
+
+impl NativePlugin {
+    /// Drops the voices the plugin reported ended (its Voice_Kill calls to the host).
+    fn forget_killed(&mut self) {
+        for v in self.plugin.killed_voices() {
+            self.voices.retain(|&(_, h)| h != v);
+            self.ringing.retain(|&(h, _)| h != v);
         }
     }
 }

@@ -27,6 +27,8 @@ pub enum Win {
     PianoRoll,
     Browser,
     Plugin,
+    /// The Plugin performance monitor (spec: ui/plugin-performance.md).
+    Perf,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -92,8 +94,10 @@ pub enum Action {
     Typing,
     /// The toolbar's scope / spectrum panel: click switches the display.
     Monitor,
-    /// The toolbar's CPU panel: click opens Settings > Audio.
+    /// The toolbar's CPU panel: double-click opens the Plugin performance monitor, right-click its menu.
     CpuPanel,
+    /// The Plugin performance monitor's controls (spec: ui/plugin-performance.md).
+    Perf(crate::perf::PerfAct),
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -671,6 +675,8 @@ pub struct State {
     pub monitor: crate::monitor::Monitor,
     /// The toolbar's CPU panel (read in `App::tick`).
     pub cpu: crate::cpu::Cpu,
+    /// The Plugin performance monitor's readings and options (read with the CPU panel while it is shown).
+    pub perf: crate::perf::Perf,
     /// Names of the hosted instruments offered after the built-in generators in the picker.
     pub hosted_generators: Vec<&'static str>,
     /// Names of the effect plugins found (mixer slots, picker effects side).
@@ -863,6 +869,8 @@ pub struct App {
     title_click: Option<(Win, std::time::Instant, (f32, f32))>,
     /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
     rack_click: Option<(Action, std::time::Instant)>,
+    /// Last press on the CPU panel, for its double click (the Plugin performance monitor).
+    cpu_click: Option<std::time::Instant>,
     pub hint: Cow<'static, str>,
     pub mouse: (f32, f32),
     pub drag: Option<Drag>,
@@ -969,7 +977,8 @@ impl App {
                 tempo: 130.0,
                 message: None,
                 monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
-                cpu: crate::cpu::Cpu::default(),
+                cpu: crate::cpu::Cpu::saved(),
+                perf: crate::perf::Perf::default(),
                 toggles: vec!["typing"],
                 midi_inputs: Vec::new(),
                 maximized: true,
@@ -1004,6 +1013,7 @@ impl App {
             midi_held: Vec::new(),
             title_click: None,
             rack_click: None,
+            cpu_click: None,
             hint: Cow::Borrowed(""),
             mouse: (-1.0, -1.0),
             drag: None,
@@ -1799,7 +1809,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         v.push(Cover { bounds: Rect::new(0.0, 0.0, s.screen.0, views::WORK_Y + 1.0), win: None, solid: None });
@@ -1813,6 +1823,7 @@ impl App {
         let r = match w {
             Win::ChannelRack => Some(views::rack::rect(s)),
             Win::Plugin => s.project.channels.get(s.plugin_channel).map(|_| views::channel_win::rect(s)),
+            Win::Perf => Some(views::perf::rect(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -1911,12 +1922,162 @@ impl App {
     }
 
     /// Repaint window `w` only (with its resize zones), or everything when it is not shown.
+    // ---------------------------------------------------------------- CPU panel and Plugin performance monitor
+
+    /// The CPU panel's right-click menu (spec: ui/main-window.md §13).
+    fn cpu_menu(&mut self, x: f32, y: f32) {
+        use crate::cpu::{CpuCmd, Refresh};
+        use crate::playlist::{Cmd, Mark, PItem, Popup};
+        let c = &self.state.cpu;
+        let refresh = Refresh::ALL.iter().map(|&r| PItem::new(r.label(), Cmd::Cpu(CpuCmd::Refresh(r))).mark(Mark::Radio(c.refresh == r))).collect();
+        let items = vec![
+            PItem::sub("Refresh", refresh),
+            PItem::sep(),
+            PItem::new("View voice count", Cmd::Cpu(CpuCmd::Fps(false))).mark(Mark::Radio(!c.fps_view)),
+            PItem::new("View FPS", Cmd::Cpu(CpuCmd::Fps(true))).mark(Mark::Radio(c.fps_view)),
+            PItem::new("Misc", Cmd::Cpu(CpuCmd::Misc)).mark(Mark::Check(c.misc)),
+            PItem::sep(),
+            PItem::new("Plugin performance monitor", Cmd::Cpu(CpuCmd::Monitor)).mark(Mark::Check(self.state.shown(Win::Perf))),
+            PItem::new("Audio settings", Cmd::Cpu(CpuCmd::AudioSettings)),
+        ];
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+    }
+
+    /// A command of the CPU panel's menu.
+    pub(crate) fn cpu_cmd(&mut self, c: crate::cpu::CpuCmd) -> Option<String> {
+        use crate::cpu::CpuCmd;
+        match c {
+            CpuCmd::Monitor => self.toggle_perf(),
+            CpuCmd::AudioSettings => self.open_settings(views::settings::AUDIO),
+            c => self.state.cpu.set(c),
+        }
+        self.invalidate();
+        None
+    }
+
+    /// Opens the Plugin performance monitor (or brings it to the front), in the middle of the workspace the first
+    /// time (spec: ui/plugin-performance.md §1).
+    fn open_perf(&mut self) {
+        let s = &mut self.state;
+        if !s.perf.placed {
+            let w = s.work_rect();
+            let (pw, ph) = views::perf::SIZE;
+            s.perf.pos = ((w.x + (w.w - pw) / 2.0).max(0.0).round(), (w.y + (w.h - ph) / 2.0).max(views::WORK_Y).round());
+            s.perf.placed = true;
+        }
+        if !s.shown(Win::Perf) {
+            s.perf.reset();
+            let src = self.perf_sources();
+            self.state.perf.read(std::time::Instant::now(), src);
+        }
+        self.state.raise(Win::Perf);
+        self.invalidate();
+    }
+
+    /// VIEW > Plugin performance monitor and the panel menu's entry: open it, or close it when it is in front.
+    fn toggle_perf(&mut self) {
+        if self.state.shown(Win::Perf) && self.state.in_front(Win::Perf) {
+            self.close_perf();
+        } else {
+            self.open_perf();
+        }
+    }
+
+    /// Closing the monitor resets its measurements.
+    fn close_perf(&mut self) {
+        self.state.hide(Win::Perf);
+        self.state.perf.reset();
+        self.state.perf.finding = false;
+        self.invalidate();
+    }
+
+    /// Every hosted instance for the monitor, rack rows then mixer slots.
+    fn perf_sources(&self) -> Vec<crate::perf::Source> {
+        let p = &self.state.project;
+        self.plugins
+            .hosted
+            .iter()
+            .map(|(&key, h)| {
+                let (synth, place) = match crate::plugins::fx_of(key) {
+                    None => (true, p.channels.get(key).map_or_else(|| format!("Channel {}", key + 1), |c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1)))),
+                    Some((0, slot)) => (false, format!("Master, slot {}", slot + 1)),
+                    Some((track, slot)) => (false, format!("Insert {track}, slot {}", slot + 1)),
+                };
+                crate::perf::Source { key, name: h.name.clone(), patch: self.plugins.preset_name(key), place, synth, stopped: h.stopped(), meter: h.meter.clone() }
+            })
+            .collect()
+    }
+
+    fn perf_act(&mut self, a: crate::perf::PerfAct) {
+        use crate::perf::PerfAct;
+        let p = &mut self.state.perf;
+        match a {
+            PerfAct::Sort(c) => p.sort_by(c),
+            PerfAct::ResetOnTransport => p.reset_on_transport = !p.reset_on_transport,
+            PerfAct::Freeze => p.freeze = !p.freeze,
+            PerfAct::Find => p.finding = true,
+            PerfAct::List => {}
+            PerfAct::Row(i) => {
+                let Some(key) = p.shown().get(i).map(|r| r.key) else { return };
+                let now = std::time::Instant::now();
+                let double = p.last_click.is_some_and(|(k, t)| k == key && now.duration_since(t).as_millis() < 400);
+                p.last_click = if double { None } else { Some((key, now)) };
+                if double {
+                    // The channel's plugin window, or the mixer slot's.
+                    match crate::plugins::fx_of(key) {
+                        Some((track, slot)) => self.open_fx(track, slot),
+                        None => self.state.pending_open = Some(key),
+                    }
+                }
+            }
+        }
+        self.damage_win(Win::Perf);
+    }
+
+    fn perf_wheel(&mut self, notches: f32) {
+        let fit = views::perf::rows_fit(&self.state);
+        let p = &mut self.state.perf;
+        let max = p.shown().len().saturating_sub(fit);
+        p.scroll = (p.scroll.min(max) as f32 - (notches * 3.0).round()).clamp(0.0, max as f32) as usize;
+    }
+
+    /// Typing into the monitor's Find box. True when the key was taken.
+    fn perf_key(&mut self, key: &winit::keyboard::Key, ctrl: bool) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let p = &mut self.state.perf;
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                p.find.clear();
+                p.finding = false;
+            }
+            Key::Named(NamedKey::Enter) => p.finding = false,
+            Key::Named(NamedKey::Backspace) => {
+                p.find.pop();
+            }
+            Key::Named(NamedKey::Space) => p.find.push(' '),
+            Key::Character(c) if !ctrl => p.find.push_str(c),
+            _ => return false,
+        }
+        p.scroll = 0;
+        self.damage_win(Win::Perf);
+        true
+    }
+
+    /// Play and Stop clear the monitor's peaks when Reset on transport is ticked.
+    fn perf_transport(&mut self) {
+        if self.state.perf.reset_on_transport {
+            self.state.perf.reset_peaks();
+            self.damage_win(Win::Perf);
+        }
+    }
+
     pub(crate) fn damage_win(&mut self, w: Win) {
         if !self.state.shown(w) {
             return self.invalidate();
         }
         match w {
             Win::ChannelRack => self.damage_rect(views::rack::bounds(&self.state)),
+            Win::Perf => self.damage_rect(views::perf::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
             _ => self.invalidate(),
         }
@@ -2035,12 +2196,22 @@ impl App {
             self.state.message = Some(format!("Audio: {e}"));
             self.invalidate();
         }
-        // CPU panel (spec: ui/main-window.md "CPU panel"): a few readings a second.
-        {
+        // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
+        // rate.
+        let now = std::time::Instant::now();
+        if self.state.cpu.due(now) {
             let tp = &self.transport;
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());
-            let notes = if load.is_some() { tp.sounding().len() } else { 0 };
-            if self.state.cpu.update(std::time::Instant::now(), load, notes, tp.underruns()) {
+            // Every stream's engine voices and every hosted instrument's (spec: audio/voices.md §5).
+            let voices = tp.engine_voices() + self.plugins.voices();
+            let dropouts = tp.underruns();
+            if self.state.shown(Win::Perf) {
+                let src = self.perf_sources();
+                if self.state.perf.read(now, src) {
+                    self.damage_win(Win::Perf);
+                }
+            }
+            if self.state.cpu.update(now, load, voices, dropouts) {
                 self.damage_rect(CPU_RECT);
                 let (x, y) = self.mouse;
                 if self.top_hit(x, y).is_some_and(|h| h.action == Action::CpuPanel) {
@@ -2086,6 +2257,8 @@ impl App {
 
     /// Paint the whole frame (None) or only the given rects, in one pass (see `Canvas::begin_region`).
     pub fn paint_region(&mut self, canvas: &mut Canvas, damage: Option<&[Rect]>) {
+        // The CPU panel's View FPS counts painted frames.
+        self.state.cpu.frame();
         // A playlist scroll's moves (`take_damage`) go first; the damage they left is painted with the rest.
         debug_assert!(damage.is_none() || self.scrolled.is_none(), "take_damage resolves a scroll before a partial paint");
         self.moved.clear();
@@ -2746,6 +2919,7 @@ impl App {
                     match win {
                         Win::ChannelRack => self.state.rack_pos = pos,
                         Win::Plugin => self.state.plugin_pos = pos,
+                        Win::Perf => self.state.perf.pos = pos,
                         w => {
                             if let Some(i) = w.slot() {
                                 let r = &mut self.state.wins[i].rect;
@@ -3012,6 +3186,10 @@ impl App {
         if action != Some(Action::BrowserSearch) {
             self.state.browser_search_focus = false;
         }
+        // The same for the monitor's Find box (spec: ui/plugin-performance.md §1).
+        if action != Some(Action::Perf(crate::perf::PerfAct::Find)) {
+            self.state.perf.finding = false;
+        }
         if self.state.lane_menu && !matches!(action, Some(Action::PianoLanePick(_))) {
             self.state.lane_menu = false;
             return;
@@ -3043,6 +3221,7 @@ impl App {
     fn win_bounds(&self, w: Win) -> Rect {
         match w {
             Win::Plugin => views::channel_win::bounds(&self.state),
+            Win::Perf => views::perf::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
             w => self.state.win_rect(w).outset(5.0),
         }
@@ -3245,6 +3424,10 @@ impl App {
             }
             Some(Action::PatternAdd) => {
                 crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindNext, crate::patterns::PLUS_BOX_AT);
+                return self.invalidate();
+            }
+            Some(Action::CpuPanel) => {
+                self.cpu_menu(x, y);
                 return self.invalidate();
             }
             Some(Action::BrowserRow(i)) => {
@@ -3723,6 +3906,10 @@ impl App {
             self.state.settings.scroll = (self.state.settings.scroll - (dy + dx) * 63.0).min(max).max(0.0);
             return None;
         }
+        if matches!(area, Some(Action::Perf(crate::perf::PerfAct::List | crate::perf::PerfAct::Row(_)))) {
+            self.perf_wheel(dy + dx);
+            return Some(Win::Perf);
+        }
         if matches!(area, Some(Action::PlPick(_) | Action::PlPickList)) {
             self.scroll_set(Scroll::PlPick, self.scroll_get(Scroll::PlPick) - (dy + dx) * 31.0);
             return Some(Win::Playlist);
@@ -3865,6 +4052,9 @@ impl App {
         {
             let next = self.design().next();
             self.set_design(next, true);
+            return;
+        }
+        if self.state.perf.finding && self.perf_key(key, ctrl) {
             return;
         }
         if crate::patterns::key(&mut self.state, key, ctrl) {
@@ -4021,7 +4211,7 @@ impl App {
     /// skips the normal shortcut handling. Spec: ui/typing-keyboard.md.
     pub fn typing_key(&mut self, code: KeyCode, pressed: bool, ctrl: bool, alt: bool) -> bool {
         // A playlist text box (track / marker name, point value) takes the letters.
-        if pressed && (self.state.playlist.edit.is_some() || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing()) {
+        if pressed && (self.state.playlist.edit.is_some() || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing() || self.state.perf.finding) {
             return false;
         }
         if !pressed {
@@ -4430,7 +4620,16 @@ impl App {
                 }
             }
             Action::Typing => self.toggle_typing(),
-            Action::CpuPanel => self.open_settings(views::settings::AUDIO),
+            // spec: ui/main-window.md §13: a double click opens the Plugin performance monitor; one click does nothing.
+            Action::CpuPanel => {
+                let now = std::time::Instant::now();
+                let double = self.cpu_click.is_some_and(|t| now.duration_since(t).as_millis() < 400);
+                self.cpu_click = if double { None } else { Some(now) };
+                if double {
+                    self.open_perf();
+                }
+            }
+            Action::Perf(p) => self.perf_act(p),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -4444,13 +4643,19 @@ impl App {
             Action::Maximize => self.want_maximize = true,
             Action::Close => self.want_close = true,
             Action::DragWindow => self.want_drag_window = true,
-            Action::Play => match self.transport.state() {
-                // Play toggles pause (the position is held in place); Stop rewinds.
-                TransportState::Playing => self.transport.pause(),
-                TransportState::Paused => self.transport.resume(),
-                TransportState::Stopped => self.start_playback(),
-            },
-            Action::Stop => self.transport.stop(),
+            Action::Play => {
+                self.perf_transport();
+                match self.transport.state() {
+                    // Play toggles pause (the position is held in place); Stop rewinds.
+                    TransportState::Playing => self.transport.pause(),
+                    TransportState::Paused => self.transport.resume(),
+                    TransportState::Stopped => self.start_playback(),
+                }
+            }
+            Action::Stop => {
+                self.perf_transport();
+                self.transport.stop();
+            }
             Action::PatSong(song) => {
                 let changed = s.song_mode != song;
                 s.song_mode = song;
@@ -4496,6 +4701,7 @@ impl App {
             // Show a hidden window, bring a covered one to the front, hide one already in front
             // (spec: ui/channel-rack.md §5).
             Action::ToggleWin(Win::Browser) => s.show_browser = !s.show_browser,
+            Action::ToggleWin(Win::Perf) => self.toggle_perf(),
             Action::ToggleWin(w) => {
                 if s.shown(w) && s.in_front(w) {
                     s.hide(w);
@@ -4648,6 +4854,7 @@ impl App {
                 }
                 let pos = match win {
                     Win::Plugin => s.plugin_pos,
+                    Win::Perf => s.perf.pos,
                     Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
@@ -4675,6 +4882,7 @@ impl App {
                     s.wins[i].maxed = !s.wins[i].maxed;
                 }
             }
+            Action::CloseWin(Win::Perf) => self.close_perf(),
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserMenu | Action::BrowserSearch => {}
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
@@ -6226,8 +6434,16 @@ mod tests {
         let r = hit_rect(&app, &Action::CpuPanel);
         assert!(app.state.cpu.update(std::time::Instant::now(), Some(0.25), 3, 0));
         app.mouse_move(r.cx(), r.cy());
-        assert!(app.hint.contains("Audio load 25%") && app.hint.contains("3 notes"), "{}", app.hint);
+        assert!(app.hint.contains("Audio load 25%") && app.hint.contains("3 voices"), "{}", app.hint);
+        // One click does nothing; the menu's Audio settings opens the Audio tab.
         click(&mut app, &mut c, r);
+        assert!(!app.state.settings.open);
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        frame(&mut app, &mut c, None);
+        let i = app.state.playlist.popup.as_ref().expect("the panel's menu").items.iter().position(|it| it.label == "Audio settings").unwrap();
+        let item = hit_rect(&app, &Action::PlPopup(i));
+        click(&mut app, &mut c, item);
         assert!(app.state.settings.open && app.state.settings.tab == AUDIO);
         assert!(!app.state.settings.status[0].is_empty());
         let combo = |app: &App, label: &str| {
@@ -6254,6 +6470,99 @@ mod tests {
         assert_eq!(app.state.settings.audio.buffer, Some(1024));
         // Back to the defaults for the other tests in this process.
         AudioCfg::default().apply();
+    }
+
+    /// CPU panel (spec: ui/main-window.md §13): the menu's View FPS / Misc / Refresh change what it shows; a double
+    /// click opens the Plugin performance monitor (spec: ui/plugin-performance.md), which lists the hosted
+    /// instruments, sorts, finds and closes from the VIEW menu.
+    #[test]
+    fn cpu_panel_menu_and_performance_monitor() {
+        use crate::cpu::{CpuCmd, Refresh};
+        use crate::perf::{Col, PerfAct};
+        use std::time::{Duration, Instant};
+        use winit::keyboard::{Key, NamedKey, SmolStr};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::CpuPanel);
+        // The menu: Refresh radio items in a submenu, the view pair, Misc.
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        frame(&mut app, &mut c, None);
+        let labels: Vec<String> = app.state.playlist.popup.as_ref().unwrap().items.iter().map(|it| it.label.to_string()).collect();
+        for l in ["Refresh", "View voice count", "View FPS", "Misc", "Plugin performance monitor", "Audio settings"] {
+            assert!(labels.iter().any(|x| x == l), "{l} in {labels:?}");
+        }
+        let i = labels.iter().position(|x| x == "View FPS").unwrap();
+        let item = hit_rect(&app, &Action::PlPopup(i));
+        click(&mut app, &mut c, item);
+        assert!(app.state.cpu.fps_view);
+        app.state.cpu.frame();
+        app.state.cpu.frame();
+        let t0 = Instant::now();
+        assert!(app.state.cpu.update(t0, None, 4, 0));
+        assert!(app.state.cpu.hint().contains("frames per second"), "{}", app.state.cpu.hint());
+        app.cpu_cmd(CpuCmd::Fps(false));
+        app.cpu_cmd(CpuCmd::Misc);
+        assert!(app.state.cpu.update(t0, None, 4, 0), "a reading comes at once after a change");
+        let m = app.state.cpu.now.misc.expect("Misc reads the counts");
+        assert!(m.threads > 0 && m.fonts > 0, "{m:?}");
+        #[cfg(windows)]
+        assert!(m.handles > 0);
+        assert!(app.state.cpu.hint().contains("4 voices") && app.state.cpu.hint().contains(" threads"), "{}", app.state.cpu.hint());
+        frame(&mut app, &mut c, None);
+        app.cpu_cmd(CpuCmd::Misc);
+        app.cpu_cmd(CpuCmd::Refresh(Refresh::Slow));
+        assert!(app.state.cpu.update(t0, None, 0, 0));
+        assert!(!app.state.cpu.due(t0 + Duration::from_millis(500)) && app.state.cpu.due(t0 + Duration::from_millis(1000)));
+        // Double click: the monitor, with a row for each hosted instance.
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let osc = app.plugins.index_of(crate::osc3::OPEN_3X_OSC).unwrap();
+        app.plugins.create_with(0, osc, None).unwrap();
+        click(&mut app, &mut c, r);
+        assert!(!app.state.shown(Win::Perf), "one click does nothing");
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert!(app.state.shown(Win::Perf) && app.state.in_front(Win::Perf));
+        let p = &app.state.perf;
+        assert_eq!(p.rows.len(), 1);
+        assert_eq!((p.rows[0].name.as_str(), p.rows[0].synth, p.rows[0].voices), ("Open 3x Osc", true, Some(0)));
+        assert!(app.hits.iter().any(|h| h.action == Action::Perf(PerfAct::Row(0))));
+        // Sorting by a header; a second click reverses.
+        let h = hit_rect(&app, &Action::Perf(PerfAct::Sort(Col::Plugin)));
+        click(&mut app, &mut c, h);
+        assert_eq!((app.state.perf.sort, app.state.perf.desc), (Col::Plugin, false));
+        click(&mut app, &mut c, h);
+        assert!(app.state.perf.desc);
+        // Find takes the typing (the typing keyboard does not play), Esc clears it.
+        let f = hit_rect(&app, &Action::Perf(PerfAct::Find));
+        click(&mut app, &mut c, f);
+        assert!(app.state.perf.finding);
+        for ch in ["z", "z"] {
+            app.key(&Key::Character(SmolStr::new(ch)), false, false);
+        }
+        assert_eq!(app.state.perf.find, "zz");
+        assert!(app.state.perf.shown().is_empty());
+        frame(&mut app, &mut c, None);
+        app.key(&Key::Named(NamedKey::Backspace), false, false);
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        assert!(app.state.perf.find.is_empty() && !app.state.perf.finding);
+        // Reset on transport and Freeze are toggles.
+        let t = hit_rect(&app, &Action::Perf(PerfAct::Freeze));
+        click(&mut app, &mut c, t);
+        assert!(app.state.perf.freeze);
+        // VIEW > Plugin performance monitor closes it while it is in front; closing resets the readings.
+        app.act(Action::ToggleWin(Win::Perf));
+        assert!(!app.state.shown(Win::Perf) && app.state.perf.rows.is_empty());
+        app.act(Action::ToggleWin(Win::Perf));
+        assert!(app.state.shown(Win::Perf));
+        frame(&mut app, &mut c, None);
+        let x = hit_rect(&app, &Action::CloseWin(Win::Perf));
+        click(&mut app, &mut c, x);
+        assert!(!app.state.shown(Win::Perf));
     }
 
     /// Browser (spec: ui/browser.md): tabs, opening nodes, dragging a pattern and a generator onto the playlist.

@@ -968,7 +968,7 @@ impl App {
         self.invalidate();
     }
 
-    fn open_fx(&mut self, track: u16, slot: u8) {
+    pub(crate) fn open_fx(&mut self, track: u16, slot: u8) {
         let key = crate::plugins::fx_key(track, slot);
         if !self.plugins.hosted.contains_key(&key) {
             self.state.message = Some("This slot's plugin is not hosted (no Lemon Studio version of it yet)".into());

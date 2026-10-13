@@ -409,6 +409,8 @@ impl Filter {
 struct Voice {
     key: u8,
     id: Option<i32>,
+    /// Started by a host note: its end is reported back (spec: audio/voices.md §4). Editor previews are not.
+    host: bool,
     /// Velocity gain.
     vel: f64,
     /// Samples since the note-on.
@@ -438,20 +440,30 @@ pub struct Engine {
     rate: f64,
     voices: Vec<Voice>,
     rng: u64,
+    /// Host voices that ended since the last `take_ended`: (key, host note id).
+    ended: Vec<(u8, Option<i32>)>,
 }
 
 impl Engine {
     pub fn new(rate: f32) -> Self {
-        Engine { rate: f64::from(rate), voices: Vec::with_capacity(MAX_VOICES), rng: 0x9e37_79b9_7f4a_7c15 }
+        Engine { rate: f64::from(rate), voices: Vec::with_capacity(MAX_VOICES), rng: 0x9e37_79b9_7f4a_7c15, ended: Vec::with_capacity(MAX_VOICES * 2) }
     }
 
     pub fn set_rate(&mut self, rate: f32) {
         self.rate = f64::from(rate);
         self.voices.clear();
+        self.ended.clear();
     }
 
+    /// Drops every voice. Not reported: a host resetting the instrument forgets its voices itself.
     pub fn reset(&mut self) {
         self.voices.clear();
+        self.ended.clear();
+    }
+
+    /// Host voices that ended since the last call: (key, host note id).
+    pub fn take_ended(&mut self) -> std::vec::Drain<'_, (u8, Option<i32>)> {
+        self.ended.drain(..)
     }
 
     pub fn has_voices(&self) -> bool {
@@ -473,10 +485,22 @@ impl Engine {
         (x >> 11) as f64 / (1u64 << 52) as f64 - 1.0
     }
 
-    /// Starts a voice: velocity 0..1 (the host's byte / 128).
+    /// Starts a voice of the plugin's own (the editor's keyboard): velocity 0..1 (the host's byte / 128).
     pub fn note_on(&mut self, key: u8, velocity: f32, id: Option<i32>, b: &Block) {
+        self.start(key, velocity, id, false, b);
+    }
+
+    /// Starts the voice of a host note: its end is reported (spec: audio/voices.md §4).
+    pub fn host_note_on(&mut self, key: u8, velocity: f32, id: Option<i32>, b: &Block) {
+        self.start(key, velocity, id, true, b);
+    }
+
+    fn start(&mut self, key: u8, velocity: f32, id: Option<i32>, host: bool, b: &Block) {
         if self.voices.len() >= MAX_VOICES {
-            self.voices.remove(0);
+            let v = self.voices.remove(0);
+            if v.host {
+                self.ended.push((v.key, v.id));
+            }
         }
         let mut ph = [[0.0; 2]; 3];
         for (n, p) in ph.iter_mut().enumerate() {
@@ -494,6 +518,7 @@ impl Engine {
         self.voices.push(Voice {
             key,
             id,
+            host,
             vel: laws::velocity_gain(byte),
             n: 0,
             off: None,
@@ -573,7 +598,13 @@ impl Engine {
             self.span(&mut l[at..end], &mut r[at..end], b);
             at = end;
         }
-        self.voices.retain(|v| !v.done);
+        let ended = &mut self.ended;
+        self.voices.retain(|v| {
+            if v.done && v.host {
+                ended.push((v.key, v.id));
+            }
+            !v.done
+        });
     }
 
     fn span(&mut self, l: &mut [f32], r: &mut [f32], b: &Block) {

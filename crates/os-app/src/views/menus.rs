@@ -332,6 +332,7 @@ fn win_of(label: &str) -> Option<Win> {
         "Channel rack" => Win::ChannelRack,
         "Mixer" => Win::Mixer,
         "Browser" => Win::Browser,
+        "Plugin performance monitor" => Win::Perf,
         _ => return None,
     })
 }

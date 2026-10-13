@@ -25,6 +25,7 @@ mod piano;
 mod piano_tools;
 mod rack;
 mod patterns;
+mod perf;
 mod playlist;
 #[cfg(plugin_windows)]
 mod plugin_window;
@@ -848,6 +849,8 @@ fn screenshot(args: &[String]) {
     let mut size: Option<(u32, u32)> = None;
     let mut bar_w: Option<f32> = None;
     let mut wait = false;
+    let mut perf = false;
+    let mut cpu_view: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -899,6 +902,9 @@ fn screenshot(args: &[String]) {
             "--bar-w" => bar_w = it.next().and_then(|v| v.parse().ok()),
             // Let the project finish loading (samples decoded, samplers started) before the frame is captured.
             "--wait" => wait = true,
+            // The Plugin performance monitor open; the CPU panel's view ("fps" or "misc").
+            "--perf" => perf = true,
+            "--cpu" => cpu_view = it.next().cloned(),
             // Float the shown window at x,y,w,h instead of maximizing it.
             "--win" => {
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
@@ -1000,6 +1006,15 @@ fn screenshot(args: &[String]) {
     while wait && app.loading() && started.elapsed().as_secs() < 120 {
         app.tick();
         std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if perf {
+        app.act(app::Action::ToggleWin(app::Win::Perf));
+    }
+    if let Some(v) = cpu_view {
+        // Set without keeping them (`cpu_panel.txt` stays as the user left it).
+        app.state.cpu.fps_view = v == "fps";
+        app.state.cpu.misc = v == "misc";
+        app.state.cpu.update(Instant::now(), None, 0, 0);
     }
     let (w, h) = size.unwrap_or(((1920.0 * scale).round() as u32, (1080.0 * scale).round() as u32));
     let mut canvas = Canvas::new(w, h, scale).expect("canvas");
