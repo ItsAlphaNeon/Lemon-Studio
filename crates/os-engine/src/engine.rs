@@ -1205,6 +1205,12 @@ impl Engine {
         (i + 1) as u16
     }
 
+    /// The engine's own voices sounding (sampler voices, previews; hosted instruments count theirs: spec
+    /// audio/voices.md §1).
+    pub fn voice_count(&self) -> usize {
+        self.voices.len()
+    }
+
     /// Notes playing at the current position, as (channel index, key).
     pub fn sounding(&self) -> impl Iterator<Item = (usize, u16)> + '_ {
         self.sounding.iter().map(|&(c, k, _)| (c, k))

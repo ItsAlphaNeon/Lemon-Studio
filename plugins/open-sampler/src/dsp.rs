@@ -624,6 +624,8 @@ const CTL: usize = 32;
 #[derive(Clone, Copy)]
 struct Voice {
     key: u8,
+    /// Started by a host note: its end is reported back (spec: audio/voices.md §4). Editor previews are not.
+    host: bool,
     /// Host note id (per-note modulation), if the host gave one.
     id: Option<i32>,
     vel: f32,
@@ -761,26 +763,62 @@ pub struct Engine {
     global_phase: [f64; 5],
     /// Stretchers of the realtime stretch voices (made when first needed, then reused).
     streams: Vec<Rt>,
+    /// Host voices that ended since the last `take_ended`: (key, host note id).
+    ended: Vec<(u8, Option<i32>)>,
 }
 
 pub const MAX_VOICES: usize = 128;
 
 impl Engine {
     pub fn new(rate: f32) -> Self {
-        Engine { sample: None, quality: Quality::Table, rate, voices: Vec::with_capacity(MAX_VOICES), global_phase: [0.0; 5], streams: Vec::new() }
+        Engine {
+            sample: None,
+            quality: Quality::Table,
+            rate,
+            voices: Vec::with_capacity(MAX_VOICES),
+            global_phase: [0.0; 5],
+            streams: Vec::new(),
+            ended: Vec::with_capacity(MAX_VOICES * 2),
+        }
     }
 
     pub fn set_rate(&mut self, rate: f32) {
         if rate != self.rate {
             self.voices.clear();
             self.streams.clear();
+            self.ended.clear();
         }
         self.rate = rate;
     }
 
+    /// Drops every voice. Not reported: a host resetting the instrument forgets its voices itself.
     pub fn reset(&mut self) {
         self.voices.clear();
         self.streams.iter_mut().for_each(|r| r.busy = false);
+        self.ended.clear();
+    }
+
+    /// Host voices that ended since the last call, and host notes that started none: (key, host note id).
+    pub fn take_ended(&mut self) -> std::vec::Drain<'_, (u8, Option<i32>)> {
+        self.ended.drain(..)
+    }
+
+    /// A voice is over: its stretcher is free and a host voice's end is noted.
+    fn end(&mut self, v: &Voice) {
+        self.free(v);
+        if v.host {
+            self.ended.push((v.key, v.id));
+        }
+    }
+
+    /// Ends every voice at once (no sample to play).
+    fn end_all(&mut self) {
+        let voices = std::mem::take(&mut self.voices);
+        for v in &voices {
+            self.end(v);
+        }
+        self.voices = voices;
+        self.voices.clear();
     }
 
     /// A free stretcher for a new realtime voice.
@@ -825,22 +863,33 @@ impl Engine {
         ratio.max(1e-3)
     }
 
+    /// A note of the plugin's own (the editor's keyboard): its voice is not reported to the host.
     pub fn note_on(&mut self, key: u8, velocity: f32, b: &Block) {
-        self.note_on_id(key, velocity, None, b);
+        self.start(key, velocity, None, false, b);
     }
 
-    /// `note_on` for a host note `id` (per-note modulation reaches it by that id).
+    /// A host note, `id` its note id (per-note modulation reaches it by that id). Its voice's end is reported, and a
+    /// note that starts no voice is reported at once (spec: audio/voices.md §4).
     pub fn note_on_id(&mut self, key: u8, velocity: f32, id: Option<i32>, b: &Block) {
-        let Some(s) = self.sample.clone() else { return };
+        self.start(key, velocity, id, true, b);
+    }
+
+    fn start(&mut self, key: u8, velocity: f32, id: Option<i32>, host: bool, b: &Block) {
         let zkey = if b.add_key { i32::from(key) - (b.root - 60) } else { i32::from(key) };
-        if zkey < b.zone.0 || zkey > b.zone.1 || s.frames() == 0 {
-            return;
-        }
+        let s = match self.sample.clone() {
+            Some(s) if zkey >= b.zone.0 && zkey <= b.zone.1 && s.frames() > 0 => s,
+            _ => {
+                if host {
+                    self.ended.push((key, id));
+                }
+                return;
+            }
+        };
         // A new note leaves the channel's other voices alone, the same key's too (spec: audio/sampler.md "A voice");
         // cut groups and the voice limit are the host's note rules (audio/note-rules.md).
         if self.voices.len() >= MAX_VOICES {
             let v = self.voices.remove(0);
-            self.free(&v);
+            self.end(&v);
         }
         let ratio = f64::from(s.rate) / f64::from(self.rate);
         let key_step = 2f64.powf((f64::from(key) - f64::from(b.root)) / 12.0) * ratio;
@@ -857,6 +906,7 @@ impl Engine {
         let rt = if b.realtime { self.take_stream() } else { None };
         self.voices.push(Voice {
             key,
+            host,
             id,
             vel,
             pos,
@@ -932,12 +982,12 @@ impl Engine {
             self.global_phase[i] = (self.global_phase[i] + t.lfo.hz * len as f64 / rate).fract();
         }
         let Some(s) = self.sample.clone() else {
-            self.voices.clear();
+            self.end_all();
             return;
         };
         let n = s.frames();
         if n == 0 {
-            self.voices.clear();
+            self.end_all();
             return;
         }
         // Resample plays the sample faster or slower; a realtime voice reads `speed` input frames per output frame
@@ -955,7 +1005,7 @@ impl Engine {
                 i += 1;
             } else {
                 let v = self.voices.swap_remove(i);
-                self.free(&v);
+                self.end(&v);
             }
         }
     }

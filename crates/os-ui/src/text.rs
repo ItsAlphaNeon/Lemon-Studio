@@ -8,8 +8,18 @@
 //! baseline, condensed widths by squeezing glyphs, synthetic bold and italic.
 // spec: ui/main-window.md §10 (typography)
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use os_theme::Color;
 use tiny_skia::Pixmap;
+
+/// Font objects the text engines hold (GDI fonts, loaded faces): the CPU panel's Misc reading.
+static FONTS: AtomicUsize = AtomicUsize::new(0);
+
+/// How many font objects the text engines hold now (spec: ui/main-window.md §13, Misc).
+pub fn font_count() -> usize {
+    FONTS.load(Ordering::Relaxed)
+}
 
 /// The UI face, embedded so every machine renders the same glyphs.
 pub static CUPRUM: &[u8] = include_bytes!("../fonts/Cuprum/Cuprum.ttf");
@@ -307,6 +317,9 @@ mod gdi {
                     self.names[f.face as usize].as_ptr(),
                 )
             };
+            if !h.is_null() {
+                super::FONTS.fetch_add(1, super::Ordering::Relaxed);
+            }
             self.fonts.insert(key, h);
             h
         }
@@ -467,6 +480,8 @@ mod gdi {
                 for h in self.fonts.values() {
                     DeleteObject(*h);
                 }
+                let n = self.fonts.values().filter(|h| !h.is_null()).count();
+                super::FONTS.fetch_sub(n, super::Ordering::Relaxed);
                 if !self.dib.is_null() {
                     DeleteObject(self.dib);
                 }
@@ -530,10 +545,17 @@ mod portable {
         Some((em(u16_at(o + 74)?), em(u16_at(o + 76)?), em(u16_at(o + 2)?)))
     }
 
+    impl Drop for Fd {
+        fn drop(&mut self) {
+            super::FONTS.fetch_sub(1, super::Ordering::Relaxed);
+        }
+    }
+
     impl Fd {
         pub fn new() -> Result<Fd, String> {
             let font = fontdue::Font::from_bytes(CUPRUM, fontdue::FontSettings::default()).map_err(|e| e.to_string())?;
             let (asc, desc, avg) = os2(CUPRUM).ok_or("the UI font has no OS/2 metrics")?;
+            super::FONTS.fetch_add(1, super::Ordering::Relaxed);
             Ok(Fd { font, ui: (asc, desc), avg, cache: HashMap::new() })
         }
 

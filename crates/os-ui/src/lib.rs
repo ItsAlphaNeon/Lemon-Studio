@@ -16,7 +16,7 @@ use std::rc::Rc;
 use cache::{Fx, Lru};
 pub use os_theme::Color;
 pub use glyph::Glyph;
-pub use text::{Face, Font};
+pub use text::{font_count, Face, Font};
 use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
 
 /// An axis-aligned rectangle in logical pixels.

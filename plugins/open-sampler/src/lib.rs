@@ -422,6 +422,11 @@ impl Plugin for OpenSampler {
             let (left, right) = out.split_at_mut(1);
             self.engine.render(&mut left[0][at..len], &mut right[0][at..len], &blk);
         }
+        // Voice ends go back to the host, at the end of the block (spec: audio/voices.md §4).
+        let last = (len as u32).saturating_sub(1);
+        for (note, voice_id) in self.engine.take_ended() {
+            ctx.send_event(NoteEvent::VoiceTerminated { timing: last, voice_id, channel: 0, note });
+        }
         self.publish_sounding();
         // A long sample may be quiet for a while: tell the host to keep processing until the voices end.
         if self.engine.has_voices() { ProcessStatus::KeepAlive } else { ProcessStatus::Normal }

@@ -483,6 +483,9 @@ pub struct Plugin {
     latency: u32,
     tail: u32,
     sounding: bool,
+    /// The voices it plays as far as the host can tell: VST 3 reports no voice ends, so a released voice lasts the
+    /// stated tail or until the output is quiet (spec: audio/voices.md §2.5-2.6).
+    ledger: os_engine::voices::VoiceLedger,
     steady: i64,
     context: ProcessContext,
     /// The song position for the next process call (the engine gives it while playing).
@@ -562,6 +565,7 @@ impl Plugin {
                 latency: 0,
                 tail: 0,
                 sounding: false,
+                ledger: os_engine::voices::VoiceLedger::new(),
                 steady: 0,
                 context: ProcessContext::default(),
                 song: None,
@@ -721,6 +725,11 @@ impl Plugin {
             self.tail = self.processor.get_tail_samples();
         }
         self.rate = rate;
+        self.ledger.clear();
+        self.ledger.set_tail(match self.tail {
+            0 | INFINITE_TAIL => None,
+            t => Some(f64::from(t) / f64::from(rate)),
+        });
         self.context = ProcessContext {
             state: CONT_TIME_VALID,
             sample_rate: f64::from(rate),
@@ -1046,6 +1055,11 @@ impl Plugin {
                     if let Some(event) = self.note_ids.event(e) {
                         ev.push(event);
                     }
+                    match e.kind {
+                        NoteKind::On => self.ledger.start(e.key, -1),
+                        NoteKind::Off => self.ledger.release(e.key),
+                        NoteKind::Tune => {}
+                    }
                 }
             } else {
                 self.queue[kept] = Note { time: e.time - n as u32, ..e };
@@ -1115,6 +1129,11 @@ impl Plugin {
         let loud = left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
         self.sounding = self.tail == INFINITE_TAIL || loud;
         self.steady += n as i64;
+        // Quiet output ends the released voices (not with an infinite tail: such a plug-in may sound later).
+        if !self.sounding {
+            self.ledger.quiet(false);
+        }
+        self.ledger.advance(n as f64 / f64::from(self.rate.max(1)));
     }
 
     fn debug_level(&mut self, rate: u32, left: &[f32], right: &[f32]) {
@@ -1275,10 +1294,24 @@ impl os_engine::Instrument for Plugin {
         self.sounding
     }
 
+    fn voices(&self) -> usize {
+        self.ledger.count()
+    }
+
     /// Stop (spec §5): queued notes are dropped and processing restarts, which resets the plug-in's voices and tails.
+    /// Held notes also get their note offs with the next block, for plug-ins that keep voices across the restart
+    /// (spec: audio/voices.md §3).
     fn reset(&mut self) {
         self.queue.clear();
         self.sounding = false;
+        let mut sent = [false; 128];
+        let held: Vec<u8> = self.ledger.held().collect();
+        for key in held {
+            if !std::mem::replace(&mut sent[usize::from(key.min(127))], true) {
+                self.queue.push(Note { time: 0, kind: NoteKind::Off, key, velocity: 0.0 });
+            }
+        }
+        self.ledger.clear();
         // Automation still waiting is a value the parameter should have: it is kept for the next block / flush.
         if self.processing {
             unsafe { self.processor.set_processing(0) };

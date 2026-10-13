@@ -79,6 +79,15 @@ fn face(data: &'static [u8], cap_ref: f32) -> Result<FaceData, String> {
     Ok(FaceData { font, size_k, avg })
 }
 
+/// Faces an engine holds (regular, semibold, narrow): its fonts in the CPU panel's Misc reading.
+const FACES: usize = 3;
+
+impl Drop for Sw {
+    fn drop(&mut self) {
+        super::FONTS.fetch_sub(FACES, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl Sw {
     pub fn new() -> Result<Sw, String> {
         let (asc, desc, ref_avg) = super::portable::os2(CUPRUM).ok_or("the UI font has no OS/2 metrics")?;
@@ -90,7 +99,7 @@ impl Sw {
             *v = ((i as f32 / 255.0).powf(GAMMA) * 4095.0).round() as u16;
         }
         let from_lin = (0..4096).map(|i| ((i as f32 / 4095.0).powf(1.0 / GAMMA) * 255.0).round() as u8).collect();
-        Ok(Sw {
+        let sw = Sw {
             ctx: ScaleContext::new(),
             ref_sample: cuprum.avg,
             regular: face(REGULAR, cap_ref)?,
@@ -102,7 +111,9 @@ impl Sw {
             from_lin,
             glyphs: HashMap::new(),
             advances: HashMap::new(),
-        })
+        };
+        super::FONTS.fetch_add(FACES, std::sync::atomic::Ordering::Relaxed);
+        Ok(sw)
     }
 
     /// The em height in device pixels (rounded, as the layouts expect).

@@ -9,6 +9,7 @@ pub mod settings;
 pub mod mixer;
 pub mod piano;
 pub mod patterns;
+pub mod perf;
 pub mod playlist;
 pub mod rack;
 pub mod toolbar;
@@ -98,6 +99,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::PianoRoll => ui.part(Seg::Win(win), a, |ui| piano::paint(ui, s, r, f)),
             Win::ChannelRack => ui.part(Seg::Win(win), a, |ui| rack::paint(ui, s, f)),
             Win::Plugin => ui.part(Seg::Win(win), a, |ui| channel_win::paint(ui, s, f)),
+            Win::Perf => ui.part(Seg::Win(win), a, |ui| perf::paint(ui, s, f)),
             _ => {}
         }
         ui.c.pop_clip();
@@ -131,6 +133,7 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
     match w {
         Win::ChannelRack => rack::paint_area(s),
         Win::Plugin => channel_win::rect(s),
+        Win::Perf => perf::bounds(s),
         w => s.win_rect(w),
     }
 }

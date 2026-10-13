@@ -17,7 +17,7 @@ use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
     clap_event_header, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
     clap_event_transport, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_EXPRESSION,
-    CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_TUNING, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
+    CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_TUNING, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
     CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE,
     CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
 };
@@ -30,12 +30,14 @@ use clap_sys::ext::params::{
 };
 use clap_sys::ext::render::{clap_plugin_render, CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE, CLAP_RENDER_REALTIME};
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
+use clap_sys::ext::voice_info::{clap_host_voice_info, clap_plugin_voice_info, clap_voice_info, CLAP_EXT_VOICE_INFO};
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
 use clap_sys::host::clap_host;
 use clap_sys::plugin::clap_plugin;
 use clap_sys::process::{clap_process, CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, CLAP_PROCESS_TAIL};
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{clap_version_is_compatible, CLAP_VERSION};
+use os_engine::voices::VoiceLedger;
 
 mod context_menu;
 mod params;
@@ -250,6 +252,8 @@ struct HostData {
     automate: Mutex<Vec<u32>>,
     /// The editor asked for this size (`clap_host_gui.request_resize`, device px); applied on the UI tick.
     resize: Mutex<Option<(u32, u32)>>,
+    /// The plugin's voice count changed (`clap_host_voice_info.changed`): read again on the UI tick.
+    voice_info: AtomicBool,
     /// The plugin, for the run loop's callbacks (set before `init`, which may already register).
     #[cfg(unix)]
     plugin: std::sync::atomic::AtomicPtr<clap_plugin>,
@@ -272,6 +276,9 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
     }
     if id == CLAP_EXT_GUI {
         return &HOST_GUI as *const clap_host_gui as *const c_void;
+    }
+    if id == CLAP_EXT_VOICE_INFO {
+        return &HOST_VOICE_INFO as *const clap_host_voice_info as *const c_void;
     }
     if id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU || id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU_COMPAT {
         return &context_menu::HOST_CONTEXT_MENU as *const clap_sys::ext::context_menu::clap_host_context_menu as *const c_void;
@@ -421,6 +428,13 @@ unsafe extern "C" fn host_gui_show_hide(_host: *const clap_host) -> bool {
 unsafe extern "C" fn host_gui_closed(_host: *const clap_host, _was_destroyed: bool) {}
 static HOST_PARAMS: clap_host_params =
     clap_host_params { rescan: Some(host_params_rescan), clear: Some(host_params_clear), request_flush: Some(host_params_request_flush) };
+/// The plugin's voice count changed (a patch with another polyphony): the voice list's limit is read again on the UI
+/// tick (spec: audio/voices.md §2.7).
+static HOST_VOICE_INFO: clap_host_voice_info = clap_host_voice_info { changed: Some(host_voice_info_changed) };
+unsafe extern "C" fn host_voice_info_changed(host: *const clap_host) {
+    unsafe { (*((*host).host_data as *const HostData)).voice_info.store(true, Ordering::Release) };
+    wake();
+}
 unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).restart.store(true, Ordering::Release) };
     wake();
@@ -473,6 +487,10 @@ pub struct Plugin {
     /// The render extension (offline or realtime), if the plugin has one.
     render: *const clap_plugin_render,
     offline: bool,
+    /// The voice-info extension (the plugin's polyphony), if it has one.
+    voice_info: *const clap_plugin_voice_info,
+    /// The voices it plays, from the notes sent and the voice ends it reports (spec: audio/voices.md §2).
+    ledger: VoiceLedger,
     /// Kept alive for the plugin, which holds a pointer to it.
     _host: Box<clap_host>,
     host_data: Box<HostData>,
@@ -521,16 +539,19 @@ pub struct Plugin {
     _lib: Arc<Library>,
 }
 
-/// A parameter event the plugin sent the host.
+/// A parameter event the plugin sent the host, or a voice end (key, note id; taken right after the call).
 #[derive(Clone, Copy)]
 enum OutEv {
     Begin(u32),
     Value(u32, f64),
     End(u32),
+    NoteEnd(i16, i32),
 }
 
 /// Most plugin -> host parameter events kept until the app takes them.
 const MAX_OUT: usize = 4096;
+/// Room for voice ends on top of a full parameter queue (one call's worth; they never stay in the queue).
+const MAX_ENDS: usize = 4096;
 
 /// `clap_input_events` over the `Vec<*const clap_event_header>` behind `ctx`.
 unsafe extern "C" fn events_size(l: *const clap_input_events) -> u32 {
@@ -542,11 +563,21 @@ unsafe extern "C" fn events_get(l: *const clap_input_events, i: u32) -> *const c
     v.get(i as usize).copied().unwrap_or(ptr::null())
 }
 
-/// `clap_output_events.try_push` collecting parameter events into the `Vec<OutEv>` behind `ctx`.
+/// `clap_output_events.try_push` collecting parameter events and voice ends into the `Vec<OutEv>` behind `ctx`.
 unsafe extern "C" fn push_out(l: *const clap_output_events, e: *const clap_event_header) -> bool {
     unsafe {
         let v = &mut *((*l).ctx as *mut Vec<OutEv>);
-        if e.is_null() || (*e).space_id != CLAP_CORE_EVENT_SPACE_ID || v.len() >= MAX_OUT {
+        if e.is_null() || (*e).space_id != CLAP_CORE_EVENT_SPACE_ID {
+            return true;
+        }
+        if (*e).type_ == CLAP_EVENT_NOTE_END {
+            if v.len() < MAX_OUT + MAX_ENDS {
+                let n = &*(e as *const clap_event_note);
+                v.push(OutEv::NoteEnd(n.key, n.note_id));
+            }
+            return true;
+        }
+        if v.len() >= MAX_OUT {
             return true;
         }
         match (*e).type_ {
@@ -586,6 +617,7 @@ impl Plugin {
             rescan: AtomicU32::new(0),
             automate: Mutex::new(Vec::new()),
             resize: Mutex::new(None),
+            voice_info: AtomicBool::new(false),
             #[cfg(unix)]
             plugin: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
             #[cfg(unix)]
@@ -626,6 +658,7 @@ impl Plugin {
             let params = ext(CLAP_EXT_PARAMS) as *const clap_plugin_params;
             let latency = ext(CLAP_EXT_LATENCY) as *const clap_plugin_latency;
             let render = ext(CLAP_EXT_RENDER) as *const clap_plugin_render;
+            let voice_info = ext(CLAP_EXT_VOICE_INFO) as *const clap_plugin_voice_info;
             let ranges = params::read_ranges(params, plugin);
             Ok(Plugin {
                 desc,
@@ -668,6 +701,8 @@ impl Plugin {
                 latency,
                 render,
                 offline: false,
+                voice_info,
+                ledger: VoiceLedger::new(),
                 ranges,
                 param_queue: Vec::new(),
                 auto: Vec::with_capacity(params::MAX_AUTO),
@@ -708,8 +743,20 @@ impl Plugin {
         let ok = unsafe { (*self.plugin).activate.is_some_and(|a| a(self.plugin, f64::from(rate), 1, self.max_frames)) };
         if ok {
             self.rate = rate;
+            self.read_voice_info();
         }
         ok
+    }
+
+    /// The voice list's limit from the plugin's voice info (main thread, active): the voices its patch can use.
+    fn read_voice_info(&mut self) {
+        if self.voice_info.is_null() {
+            return;
+        }
+        let mut info = clap_voice_info { voice_count: 0, voice_capacity: 0, flags: 0 };
+        let ok = unsafe { (*self.voice_info).get.is_some_and(|g| g(self.plugin, &mut info)) };
+        let n = if info.voice_count > 0 { info.voice_count } else { info.voice_capacity };
+        self.ledger.set_capacity(ok.then_some(n as usize));
     }
 
     fn deactivate(&mut self) {
@@ -728,6 +775,7 @@ impl Plugin {
             }
         }
         self.rate = 0;
+        self.ledger.clear();
     }
 
     /// Lets the plugin apply the parameter edits its editor queued (and drops the events it reports back: the
@@ -745,12 +793,30 @@ impl Plugin {
         self.order.extend(self.pvals.iter().map(|e| &e.header as *const clap_event_header));
         let ins = clap_input_events { ctx: &self.order as *const Vec<*const clap_event_header> as *mut c_void, size: Some(events_size), get: Some(events_get) };
         let outs = clap_output_events { ctx: &mut self.param_out as *mut Vec<OutEv> as *mut c_void, try_push: Some(push_out) };
+        let before = self.param_out.len();
         unsafe {
             if let Some(f) = (*self.params).flush {
                 f(self.plugin, &ins, &outs);
             }
         }
+        self.take_note_ends(before);
         self.order.clear();
+    }
+
+    /// Moves the voice ends the plugin reported since `param_out` held `from` events into the voice list, keeping the
+    /// parameter events for the app (spec: audio/voices.md §2.4).
+    fn take_note_ends(&mut self, from: usize) {
+        let mut w = from;
+        for r in from..self.param_out.len() {
+            match self.param_out[r] {
+                OutEv::NoteEnd(key, id) => self.ledger.ended(key, id),
+                e => {
+                    self.param_out[w] = e;
+                    w += 1;
+                }
+            }
+        }
+        self.param_out.truncate(w);
     }
 
     /// Moves the queued host parameter changes into `pvals` (events at time 0).
@@ -842,6 +908,9 @@ impl Plugin {
         self.idle_params();
         if self.host_data.flush.swap(false, Ordering::AcqRel) || !self.param_queue.is_empty() {
             self.flush_params();
+        }
+        if self.host_data.voice_info.swap(false, Ordering::AcqRel) && self.rate != 0 {
+            self.read_voice_info();
         }
         let wanted = self.wanted_rate.swap(0, Ordering::AcqRel);
         let restart = self.host_data.restart.swap(false, Ordering::AcqRel);
@@ -999,6 +1068,11 @@ impl Plugin {
                     }
                     _ => -1,
                 };
+                match e.kind {
+                    Kind::On => self.ledger.start(e.key, id),
+                    Kind::Off => self.ledger.release(e.key),
+                    Kind::Choke | Kind::Tune => self.ledger.choke(e.key),
+                }
                 self.notes.push(clap_event_note {
                     header: clap_event_header {
                         size: std::mem::size_of::<clap_event_note>() as u32,
@@ -1092,11 +1166,18 @@ impl Plugin {
             in_events: &ins,
             out_events: &outs,
         };
+        let before = self.param_out.len();
         let status = unsafe { (*self.plugin).process.map_or(CLAP_PROCESS_CONTINUE, |f| f(self.plugin, &p)) };
         // CONTINUE / TAIL: the plugin says it is still going; CONTINUE_IF_NOT_QUIET: while its output is not silent.
         let loud = left.iter().chain(right.iter()).any(|v| v.abs() > QUIET);
         self.sounding = status == CLAP_PROCESS_CONTINUE || status == CLAP_PROCESS_TAIL || (status == CLAP_PROCESS_CONTINUE_IF_NOT_QUIET && loud);
         self.steady += i64::from(n);
+        // Voices: the ends it reported, none once it sleeps, released voices ringing out (spec: audio/voices.md §2).
+        self.take_note_ends(before);
+        if !self.sounding {
+            self.ledger.quiet(true);
+        }
+        self.ledger.advance(f64::from(n) / f64::from(self.rate.max(1)));
     }
 }
 
@@ -1230,10 +1311,11 @@ impl os_host::Plugin for Plugin {
     fn take_param_events(&mut self) -> Vec<os_host::ParamEvent> {
         let raw = std::mem::take(&mut self.param_out);
         raw.into_iter()
-            .map(|e| match e {
-                OutEv::Begin(id) => os_host::ParamEvent::Begin(id),
-                OutEv::Value(id, v) => os_host::ParamEvent::Value(id, self.normalize(id, v)),
-                OutEv::End(id) => os_host::ParamEvent::End(id),
+            .filter_map(|e| match e {
+                OutEv::Begin(id) => Some(os_host::ParamEvent::Begin(id)),
+                OutEv::Value(id, v) => Some(os_host::ParamEvent::Value(id, self.normalize(id, v))),
+                OutEv::End(id) => Some(os_host::ParamEvent::End(id)),
+                OutEv::NoteEnd(..) => None,
             })
             .collect()
     }
@@ -1244,9 +1326,14 @@ impl os_engine::Instrument for Plugin {
         self.sounding
     }
 
+    fn voices(&self) -> usize {
+        self.ledger.count()
+    }
+
     fn reset(&mut self) {
         self.queue.clear();
         self.sounding = false;
+        self.ledger.clear();
         if self.rate == 0 {
             return;
         }

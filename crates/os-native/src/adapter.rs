@@ -351,6 +351,12 @@ impl Instrument for NativePlugin {
         !self.voices.is_empty()
     }
 
+    /// Held and released voices both count until the plugin kills them or the host does after
+    /// `RELEASE_LIMIT_SECONDS` (spec: audio/voices.md §2).
+    fn voices(&self) -> usize {
+        self.voices.len()
+    }
+
     fn reset(&mut self) {
         self.events.clear();
         while !self.voices.is_empty() {

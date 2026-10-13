@@ -24,6 +24,11 @@ pub struct Available {
 
 pub struct Hosted {
     pub plugin: SharedPlugin,
+    /// Processing time and voices, read without locking the instance (spec: ui/plugin-performance.md §3,
+    /// audio/voices.md §5).
+    pub meter: Option<Arc<os_host::Meter>>,
+    /// The plugin's name (the performance monitor).
+    pub name: String,
     #[cfg(plugin_windows)]
     pub window: Option<FrameWindow>,
     /// Set while the open editor belongs to an Open plugin that joined the strip (host link).
@@ -36,7 +41,13 @@ pub struct Hosted {
 impl Hosted {
     /// A newly hosted instance, without a window.
     pub fn new(plugin: SharedPlugin) -> Hosted {
-        Hosted { plugin, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None, stop_told: false }
+        let (meter, name) = plugin.lock().map(|p| (p.meter(), p.desc().name.clone())).unwrap_or_default();
+        Hosted { plugin, meter, name, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None, stop_told: false }
+    }
+
+    /// The instance stopped after a crash.
+    pub fn stopped(&self) -> bool {
+        self.stop_told
     }
 
     /// The open editor is an Open plugin's that joined the strip through the host link.
@@ -546,6 +557,11 @@ impl Plugins {
                 }
             }
         }
+    }
+
+    /// The voices of every hosted instrument, as their last processed blocks left them (spec: audio/voices.md §5).
+    pub fn voices(&self) -> usize {
+        self.hosted.range(..FX_KEY).filter_map(|(_, h)| h.meter.as_ref()).map(|m| m.voices()).sum()
     }
 
     pub fn instruments(&self) -> Vec<(usize, SharedInstrument)> {
@@ -1740,6 +1756,59 @@ mod tests {
         }
         // The 0.5 s volume attack kept from the channel still fades the click (0.9 at 0.1 s) in.
         assert!(peak > 0.01 && peak < 0.3, "the mp3 plays through the kept envelope (peak {peak})");
+    }
+
+    /// Hosted instruments' voices (spec: audio/voices.md §2-§5): Open Sampler counts a voice until its sample ends (the
+    /// plugin reports the end), Open 3x Osc until its release is over; a reset (Stop) ends every voice at once. The
+    /// counts reach `Plugins::voices` through the instances' meters, without locking them.
+    #[test]
+    fn hosted_instrument_voices_follow_the_plugins() {
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let sampler = pl.index_of(OPEN_SAMPLER).unwrap();
+        pl.create_with(0, sampler, None).unwrap();
+        // A tenth of a second of sound.
+        let wav = std::env::temp_dir().join(format!("os-app-voices-{}.wav", std::process::id()));
+        let frames: Vec<f32> = (0..4800).flat_map(|_| [0.25f32; 2]).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frames).unwrap();
+        assert!(pl.load_sample(0, &wav.to_string_lossy()));
+        let osc = pl.index_of(crate::osc3::OPEN_3X_OSC).unwrap();
+        pl.create_with(1, osc, None).unwrap();
+        let run = |pl: &Plugins, key: usize, blocks: usize| {
+            let inst = pl.hosted[&key].plugin.clone() as SharedInstrument;
+            let mut i = inst.lock().unwrap();
+            for _ in 0..blocks {
+                let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+                i.process(48000, &mut l, &mut r);
+            }
+        };
+        let with = |pl: &Plugins, key: usize, f: &dyn Fn(&mut dyn os_engine::Instrument)| {
+            let inst = pl.hosted[&key].plugin.clone() as SharedInstrument;
+            f(&mut *inst.lock().unwrap());
+        };
+        assert_eq!(pl.voices(), 0);
+        // Three sampler notes and a chord on the synth.
+        with(&pl, 0, &|i| (60..63).for_each(|k| i.note_on(0, k, 0.8)));
+        with(&pl, 1, &|i| [48, 52, 55].into_iter().for_each(|k| i.note_on(0, k, 0.8)));
+        run(&pl, 0, 1);
+        run(&pl, 1, 1);
+        assert_eq!(pl.voices(), 6, "3 sampler voices + 3 synth voices");
+        // The sample ends while the keys are still held: its voices end with it.
+        run(&pl, 0, 20);
+        assert_eq!(pl.hosted[&0].meter.as_ref().unwrap().voices(), 0, "the sampler's voices ended with the sample");
+        assert_eq!(pl.voices(), 3);
+        // Released: the synth's voices ring out, then end.
+        with(&pl, 1, &|i| i.note_off(0, 48));
+        run(&pl, 1, 200);
+        assert_eq!(pl.voices(), 2, "the released voice ended after its release");
+        // Stop resets the instruments: nothing sounds.
+        with(&pl, 0, &|i| i.note_on(0, 60, 0.8));
+        run(&pl, 0, 1);
+        assert_eq!(pl.voices(), 3);
+        for key in [0, 1] {
+            with(&pl, key, &|i| i.reset());
+        }
+        assert_eq!(pl.voices(), 0, "Stop ends every voice");
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// A channel's stretch settings reach its Open Sampler (spec: audio/time-stretch.md "Fields"), which plays them:
