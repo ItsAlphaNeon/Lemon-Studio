@@ -1165,8 +1165,10 @@ impl Renderer {
                 return;
             }
         }
+        // Every stream frees the tick records it has played (`heard`); only playback publishes where it is.
+        let heard = self.queue.heard();
         if self.ctl.report.load(Ordering::Relaxed) {
-            if let Some((frame, tick)) = self.queue.heard() {
+            if let Some((frame, tick)) = heard {
                 self.shared.position.store(frame, Ordering::Relaxed);
                 self.shared.tick.store(tick.to_bits(), Ordering::Relaxed);
             }
@@ -1276,6 +1278,23 @@ mod tests {
         // The queue keeps one block and a few ticks, not more.
         let queued = r.queue.queued() / 2;
         assert!(queued <= 2048 + 3 * 300, "{queued} frames queued");
+    }
+
+    /// Streams that publish no position (live notes, previews) still free the tick records they have played: a live
+    /// stream used to stop taking ticks after `QUEUE_TICKS` of them (about 18 s), every block after that a dropout.
+    #[test]
+    fn streams_without_a_position_play_on_past_the_tick_records() {
+        let (e, _) = looping_engine();
+        let (mut r, ctl, shared) = renderer(e);
+        ctl.report.store(false, Ordering::Relaxed);
+        let mut block = vec![0.0f32; 2 * 512];
+        let mut blocks = 0;
+        while r.queue.ticks_written.load(Ordering::Relaxed) < 2 * QUEUE_TICKS as u64 {
+            r.render(&mut block);
+            blocks += 1;
+            assert!(blocks < 100_000, "the queue stopped taking ticks at {}", r.queue.ticks_written.load(Ordering::Relaxed));
+        }
+        assert_eq!(shared.underruns.load(Ordering::Relaxed), 0);
     }
 
     /// A feeder that cannot keep up shows as underruns, never as a stall of the callback.
