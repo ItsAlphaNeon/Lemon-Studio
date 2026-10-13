@@ -92,6 +92,8 @@ pub enum Action {
     Typing,
     /// The toolbar's scope / spectrum panel: click switches the display.
     Monitor,
+    /// The toolbar's CPU panel: click opens Settings > Audio.
+    CpuPanel,
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -404,6 +406,8 @@ pub(crate) struct Shown {
 pub(crate) const HINT_RECT: Rect = Rect::new(73.0, 5.0, 289.0, 31.0);
 /// The toolbar's output monitor (scope / analyzer and peak bars).
 const MONITOR_RECT: Rect = Rect::new(880.0, 4.0, 168.0, 33.0);
+/// The toolbar's CPU panel.
+pub(crate) const CPU_RECT: Rect = Rect::new(1053.0, 4.0, 149.0, 32.0);
 
 /// Actions whose hover state has no visual feedback (large background regions).
 fn hover_is_visible(a: &Action) -> bool {
@@ -665,6 +669,8 @@ pub struct State {
     pub project: Project,
     /// The toolbar's scope / analyzer and peak bars (fed from the audio tap in `App::tick`).
     pub monitor: crate::monitor::Monitor,
+    /// The toolbar's CPU panel (read in `App::tick`).
+    pub cpu: crate::cpu::Cpu,
     /// Names of the hosted instruments offered after the built-in generators in the picker.
     pub hosted_generators: Vec<&'static str>,
     /// Names of the effect plugins found (mixer slots, picker effects side).
@@ -963,6 +969,7 @@ impl App {
                 tempo: 130.0,
                 message: None,
                 monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
+                cpu: crate::cpu::Cpu::default(),
                 toggles: vec!["typing"],
                 midi_inputs: Vec::new(),
                 maximized: true,
@@ -1044,10 +1051,33 @@ impl App {
     }
 
     pub fn open(&mut self, path: PathBuf) {
+        // A project in the layout used before version 24.2 gets a dialog that says what to do (spec:
+        // flp/events/channels.md "Version scope"), not just a line in the hint bar.
+        let mut legacy = None;
         let result = std::fs::read(&path)
             .map_err(|e| e.to_string())
             .and_then(|b| os_flp::FlpFile::parse(&b).map_err(|e| e.to_string()))
-            .and_then(|f| os_flp::project::load(&f).map(|p| (f, p)).map_err(|e| e.to_string()));
+            .and_then(|f| match os_flp::project::load(&f) {
+                Ok(p) => Ok((f, p)),
+                Err(os_flp::project::ProjectError::LegacyLayout(v)) => {
+                    let e = os_flp::project::ProjectError::LegacyLayout(v.clone()).to_string();
+                    legacy = Some(v);
+                    Err(e)
+                }
+                Err(e) => Err(e.to_string()),
+            });
+        if let Some(v) = legacy {
+            let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            let saved = if v.trim().is_empty() { "an older version".to_string() } else { format!("version {}", v.trim()) };
+            crate::dialog::inform(
+                "Project not supported yet",
+                &format!(
+                    "Lemon Studio cannot open {name} yet.\n\nIt was saved by {saved}. Projects saved before version 24.2 use an \
+                     older channel layout that Lemon Studio does not read yet.\n\nOpen the project in version 24.2 or later, save \
+                     it again, then open the new copy here."
+                ),
+            );
+        }
         match result {
             Ok((file, project)) => {
                 self.transport.stop();
@@ -1125,6 +1155,7 @@ impl App {
         }
         let rate = Transport::device_rate().unwrap_or(44100);
         let name = target.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        self.plugins.set_offline(true);
         self.transport.export(&p, self.play_mode(), rate, target);
         self.export = Some((name, 0.0));
         self.invalidate();
@@ -1140,6 +1171,7 @@ impl App {
             }
             crate::transport::Export::Done(r) => {
                 self.export = None;
+                self.plugins.set_offline(false);
                 self.state.message = Some(match r {
                     Ok(secs) => format!("Exported {}:{:02} to {name}", (secs / 60.0) as u32, (secs % 60.0) as u32),
                     Err(e) => format!("Export failed: {e}"),
@@ -1407,7 +1439,7 @@ impl App {
     }
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
-    fn plugin_tick(&mut self) {
+    pub(crate) fn plugin_tick(&mut self) {
         self.loading_tick();
         self.export_tick();
         self.midi_tick();
@@ -2003,6 +2035,23 @@ impl App {
             self.state.message = Some(format!("Audio: {e}"));
             self.invalidate();
         }
+        // CPU panel (spec: ui/main-window.md "CPU panel"): a few readings a second.
+        {
+            let tp = &self.transport;
+            let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());
+            let notes = if load.is_some() { tp.sounding().len() } else { 0 };
+            if self.state.cpu.update(std::time::Instant::now(), load, notes, tp.underruns()) {
+                self.damage_rect(CPU_RECT);
+                let (x, y) = self.mouse;
+                if self.top_hit(x, y).is_some_and(|h| h.action == Action::CpuPanel) {
+                    self.hint = Cow::Owned(self.state.cpu.hint());
+                    self.damage_rect(HINT_RECT);
+                }
+                if self.state.settings.open && self.state.settings.tab == views::settings::AUDIO && self.audio_status() {
+                    self.invalidate();
+                }
+            }
+        }
         // Mixer meters (spec: ui/mixer.md §9): fall back after playback stops.
         let peaks = self.transport.take_track_peaks();
         if crate::mixer::feed_meters(&mut self.state, &peaks) && self.state.shown(Win::Mixer) {
@@ -2331,7 +2380,6 @@ impl App {
 
     /// Open the settings window on `tab` (spec: ui/settings.md §1); reads the output devices and theme files.
     pub fn open_settings(&mut self, tab: usize) {
-        use cpal::traits::{DeviceTrait, HostTrait};
         let st = &mut self.state.settings;
         if st.tab != tab {
             st.scroll = 0.0;
@@ -2339,11 +2387,8 @@ impl App {
         st.open = true;
         st.tab = tab;
         self.sync_preset();
+        self.audio_page();
         let st = &mut self.state.settings;
-        let host = cpal::default_host();
-        let name = |d: &cpal::Device| d.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "(unknown device)".into());
-        st.device = host.default_output_device().map(|d| name(&d)).unwrap_or_else(|| "(no output device)".into());
-        st.devices = host.output_devices().map(|ds| ds.map(|d| name(&d)).collect()).unwrap_or_default();
         // Built-in presets (spec: ui/theme-presets.md), then .flstheme files in the user folder's `themes`.
         st.themes = os_theme::presets::PRESETS.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect();
         if let Some(d) = os_paths::user_file("themes") {
@@ -2358,6 +2403,88 @@ impl App {
                 st.themes.extend(v);
             }
         }
+        self.invalidate();
+    }
+
+    /// Fills the Audio page: the output devices, the audio settings and the status (spec: ui/settings.md "Audio").
+    fn audio_page(&mut self) {
+        let (devices, default) = crate::audio_cfg::devices();
+        let cfg = crate::audio_cfg::AudioCfg::current();
+        let st = &mut self.state.settings;
+        st.device = match &cfg.device {
+            Some(d) if devices.contains(d) => d.clone(),
+            Some(d) => format!("{d} (not found: default device)"),
+            None => format!("Default ({})", default.as_deref().unwrap_or("no output device")),
+        };
+        st.devices = devices;
+        st.audio = cfg;
+        st.rate = crate::audio_cfg::rate();
+        self.audio_status();
+    }
+
+    /// The Audio page's status lines from the stream that is open; returns whether they changed.
+    fn audio_status(&mut self) -> bool {
+        let tp = &self.transport;
+        let host = cpal::default_host().id().name();
+        let first = match tp.opened() {
+            Some((name, rate, buffer)) => {
+                let block = match tp.block() {
+                    0 => String::new(),
+                    b => format!(", blocks of {}", views::settings::buffer_text(b, rate)),
+                };
+                let buffer = buffer.map_or(String::new(), |b| format!(", buffer {}", views::settings::buffer_text(b, rate)));
+                format!("Status: {name} open at {rate} Hz{block}{buffer} ({host})")
+            }
+            None => format!("Status: opens with the first note or Play ({host})"),
+        };
+        let second = match tp.underruns() {
+            0 => "No dropouts so far.".to_string(),
+            n => format!("Dropouts so far: {n} (device blocks the engine could not fill in time; a longer buffer helps)"),
+        };
+        let st = &mut self.state.settings;
+        let changed = st.status[0] != first || st.status[1] != second;
+        st.status = [first, second];
+        changed
+    }
+
+    /// The menu of an Audio page combo, under its box (`x`, `y`).
+    fn audio_menu(&mut self, label: &str, x: f32, y: f32) {
+        use crate::audio_cfg::{Set, BUFFERS, RATES};
+        use crate::playlist::{Cmd, Mark, PItem, Popup};
+        use views::settings::{BUFFER_LENGTH, OUTPUT_DEVICE, SAMPLE_RATE};
+        let st = &self.state.settings;
+        let cfg = &st.audio;
+        let rate = st.rate.unwrap_or(44100);
+        let items: Vec<PItem> = match label {
+            OUTPUT_DEVICE => std::iter::once(PItem::new("Default device", Cmd::Audio(Set::Device(None))).mark(Mark::Radio(cfg.device.is_none())))
+                .chain(st.devices.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Device(Some(d.clone())))).mark(Mark::Radio(cfg.device.as_ref() == Some(d)))))
+                .collect(),
+            SAMPLE_RATE => std::iter::once(PItem::new("Device rate", Cmd::Audio(Set::Rate(None))).mark(Mark::Radio(cfg.rate.is_none())))
+                .chain(RATES.iter().map(|&r| PItem::new(format!("{r} Hz"), Cmd::Audio(Set::Rate(Some(r)))).mark(Mark::Radio(cfg.rate == Some(r)))))
+                .collect(),
+            BUFFER_LENGTH => std::iter::once(PItem::new("Device default", Cmd::Audio(Set::Buffer(None))).mark(Mark::Radio(cfg.buffer.is_none())))
+                .chain(BUFFERS.iter().map(|&b| {
+                    PItem::new(views::settings::buffer_text(b, rate), Cmd::Audio(Set::Buffer(Some(b)))).mark(Mark::Radio(cfg.buffer == Some(b)))
+                }))
+                .collect(),
+            _ => return,
+        };
+        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None });
+        self.invalidate();
+    }
+
+    /// Changes one audio setting: kept for the next start, hosted plugins move to the new rate, and the open streams
+    /// move to the new output (spec: ui/settings.md "Audio").
+    pub fn set_audio(&mut self, s: crate::audio_cfg::Set) {
+        let cfg = crate::audio_cfg::AudioCfg::current().with(s);
+        cfg.apply();
+        if let Some(rate) = crate::audio_cfg::rate() {
+            self.plugins.set_rate(rate);
+        }
+        self.transport.reopen();
+        self.audio_page();
+        let st = &self.state.settings;
+        self.state.message = Some(format!("Audio: {}, {} Hz", st.device, st.rate.unwrap_or(0)));
         self.invalidate();
     }
 
@@ -2379,6 +2506,7 @@ impl App {
         match a {
             SAct::Body => {}
             SAct::Close => st.open = false,
+            SAct::Combo(label, x, y) => return self.audio_menu(label, x, y),
             SAct::Tab(i) => {
                 st.tab = i;
                 st.scroll = 0.0;
@@ -2776,6 +2904,9 @@ impl App {
         if hover == Some(Action::Monitor) {
             // Reading under the cursor: frequency and level of the analyzer column.
             hint = Cow::Owned(self.state.monitor.hint((x - MONITOR_RECT.x - 1.0).max(0.0) as usize));
+        }
+        if hover == Some(Action::CpuPanel) {
+            hint = Cow::Owned(self.state.cpu.hint());
         }
         let resize = matches!(hover, Some(Action::PianoNote(_)))
             && matches!(self.state.piano.tool, Tool::Draw | Tool::Paint | Tool::Select)
@@ -4299,6 +4430,7 @@ impl App {
                 }
             }
             Action::Typing => self.toggle_typing(),
+            Action::CpuPanel => self.open_settings(views::settings::AUDIO),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -6057,6 +6189,71 @@ mod tests {
         assert!(!app.state.settings.open);
         app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::F10), false, false);
         assert!(app.state.settings.open && app.state.settings.tab == MIDI);
+    }
+
+    /// A project in the layout used before version 24.2 is refused with a dialog that says what to do.
+    #[test]
+    fn older_projects_get_a_dialog() {
+        let mut file = os_flp::project::create(&test_project()).expect("create");
+        // Channel blocks without their end event: the older layout.
+        for c in &mut file.chunks {
+            if let os_flp::ChunkBody::Events(v) = &mut c.body {
+                v.retain(|e| e.id != 51);
+            }
+        }
+        let path = std::env::temp_dir().join(format!("lemon-legacy-{}.flp", std::process::id()));
+        std::fs::write(&path, file.to_bytes().expect("bytes")).expect("write");
+        let mut app = App::new(None);
+        let before = app.state.project.channels.len();
+        app.open(path.clone());
+        let _ = std::fs::remove_file(&path);
+        let told = crate::dialog::fake::informed();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].contains("before version 24.2") && told[0].contains("lemon-legacy-"), "{}", told[0]);
+        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Could not open")));
+        assert_eq!(app.state.project.channels.len(), before, "the open project stays");
+    }
+
+    /// The CPU panel opens Settings > Audio; its combos open menus over the window and a choice becomes the audio
+    /// settings (spec: ui/main-window.md "CPU panel", ui/settings.md "Audio").
+    #[test]
+    fn cpu_panel_and_audio_settings() {
+        use crate::audio_cfg::AudioCfg;
+        use crate::views::settings::{SAct, AUDIO, BUFFER_LENGTH, OUTPUT_DEVICE, SAMPLE_RATE};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::CpuPanel);
+        assert!(app.state.cpu.update(std::time::Instant::now(), Some(0.25), 3, 0));
+        app.mouse_move(r.cx(), r.cy());
+        assert!(app.hint.contains("Audio load 25%") && app.hint.contains("3 notes"), "{}", app.hint);
+        click(&mut app, &mut c, r);
+        assert!(app.state.settings.open && app.state.settings.tab == AUDIO);
+        assert!(!app.state.settings.status[0].is_empty());
+        let combo = |app: &App, label: &str| {
+            app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == label)).map(|h| h.rect).unwrap_or_else(|| panic!("{label} works"))
+        };
+        for (label, first) in [(OUTPUT_DEVICE, "Default device"), (SAMPLE_RATE, "Device rate"), (BUFFER_LENGTH, "Device default")] {
+            let r = combo(&app, label);
+            click(&mut app, &mut c, r);
+            let p = app.state.playlist.popup.as_ref().unwrap_or_else(|| panic!("{label} opens a menu"));
+            assert_eq!(p.items[0].label, first);
+            assert!((p.y - r.bottom()).abs() < 2.0, "under its box");
+            // The menu is painted over the settings window: its rows take the clicks.
+            assert!(app.top_hit(r.x + 10.0, r.bottom() + 10.0).is_some_and(|h| matches!(h.action, Action::PlPopup(_))));
+            app.state.playlist.popup = None;
+            frame(&mut app, &mut c, None);
+        }
+        let r = combo(&app, BUFFER_LENGTH);
+        click(&mut app, &mut c, r);
+        let i = app.state.playlist.popup.as_ref().unwrap().items.iter().position(|it| it.label.starts_with("1024 frames")).expect("1024 offered");
+        let r = hit_rect(&app, &Action::PlPopup(i));
+        click(&mut app, &mut c, r);
+        assert!(app.state.playlist.popup.is_none());
+        assert_eq!(AudioCfg::current().buffer, Some(1024));
+        assert_eq!(app.state.settings.audio.buffer, Some(1024));
+        // Back to the defaults for the other tests in this process.
+        AudioCfg::default().apply();
     }
 
     /// Browser (spec: ui/browser.md): tabs, opening nodes, dragging a pattern and a generator onto the playlist.

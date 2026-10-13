@@ -30,10 +30,17 @@ pub fn save_file(dlg: rfd::FileDialog) -> Option<std::path::PathBuf> {
     modal(|| dlg.save_file())
 }
 
+/// Tells the user something they need to read before going on (an information box with an OK button).
+#[cfg(not(test))]
+pub fn inform(title: &str, text: &str) {
+    modal(|| tell(title, text))
+}
+
 #[cfg(test)]
-pub use fake::{pick_file, save_file};
+pub use fake::{inform, pick_file, save_file};
 
 /// Tests never open a file dialog: each one is counted and gets the answer set with `answer` (default: cancelled).
+/// Information boxes are only recorded (`informed`).
 #[cfg(test)]
 pub mod fake {
     use std::{cell::RefCell, path::PathBuf};
@@ -43,6 +50,7 @@ pub mod fake {
         picks: u32,
         saves: u32,
         answer: Option<PathBuf>,
+        told: Vec<String>,
     }
 
     thread_local! {
@@ -72,6 +80,27 @@ pub mod fake {
             f.answer.take()
         })
     }
+
+    pub fn inform(title: &str, text: &str) {
+        FILES.with_borrow_mut(|f| f.told.push(format!("{title}: {text}")));
+    }
+
+    /// Information boxes shown on this thread so far (title: text).
+    pub fn informed() -> Vec<String> {
+        FILES.with_borrow(|f| f.told.clone())
+    }
+}
+
+#[cfg(not(test))]
+fn tell(title: &str, text: &str) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if !on_path("zenity") {
+        if on_path("kdialog") {
+            let _ = std::process::Command::new("kdialog").args(["--title", title, "--sorry", text]).status();
+        }
+        return;
+    }
+    rfd::MessageDialog::new().set_title(title).set_level(rfd::MessageLevel::Info).set_description(text).set_buttons(rfd::MessageButtons::Ok).show();
 }
 
 /// Asks a Yes / No / Cancel question (a warning). `None`: no dialog could be shown.

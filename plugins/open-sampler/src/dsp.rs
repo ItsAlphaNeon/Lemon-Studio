@@ -2,11 +2,13 @@
 //! (pitch, loop, declicking, envelopes and LFOs of the five targets, channel filter).
 //!
 // spec: plugins/open-sampler.md (§5 Sound), audio/sampler-playback.md (pitch, velocity, resampling),
-// spec: audio/channel-envelopes.md (envelope laws)
+// spec: audio/channel-envelopes.md (envelope laws), audio/sampler.md (the resampler, the end of a voice),
+// spec: audio/declick.md (opening and closing fades)
 
 use std::f64::consts::PI;
 use std::sync::Arc;
 
+use os_dsp::resample::{self, Quality};
 use os_dsp::stretch::Stream;
 use os_engine::{envelope, laws, Sample};
 
@@ -514,19 +516,105 @@ impl Default for Block {
     }
 }
 
-/// Fade lengths (ms) at a voice's start inside the sample and at a cut / note-off end, and whether a retriggered
-/// key's old voice keeps ringing (spec §5.1).
-pub fn declick(mode: i32) -> (f64, f64, bool) {
+/// A declick mode's fades (spec: audio/declick.md, the table of modes): the opening's length (ms; step removal in
+/// modes 1 and 2, a gain fade otherwise), the closing's length (ms; the sweep in mode 1, a gain fade otherwise), the
+/// fades' tension, and whether the voice bleeds (plays on past a clip's trimmed end under the closing).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Declick {
+    pub open_ms: f64,
+    pub step_removal: bool,
+    pub close_ms: f64,
+    pub sweep: bool,
+    pub tension: f32,
+    pub bleed: bool,
+}
+
+pub fn declick(mode: i32) -> Declick {
+    let d = |open_ms, close_ms, tension, bleed| Declick { open_ms, step_removal: false, close_ms, sweep: false, tension, bleed };
     match mode {
-        1 => (1.0, 10.0, false),
-        2 => (1.0, 10.0, true),
-        3 => (20.0, 20.0, true),
-        4 => (100.0, 100.0, true),
-        5 => (200.0, 200.0, true),
-        // Not offered in the settings, valid as stored data: no opening fade, a 2 ms closing fade, bleeding
-        // (spec: audio/declick.md). 7 and up name no preset in FL; they play as mode 0 here.
-        6 => (0.0, 2.0, true),
-        _ => (0.0, 10.0, false),
+        1 => Declick { step_removal: true, sweep: true, ..d(4.0, 10.0, 0.0, false) },
+        2 => Declick { step_removal: true, ..d(4.0, 20.0, 0.0, true) },
+        3 => d(20.0, 20.0, 0.0, true),
+        4 => d(100.0, 100.0, 0.0, true),
+        5 => d(200.0, 200.0, 5.0, true),
+        // Not offered in the settings, valid as stored data. 7 and up name no preset in FL; they play as mode 0 here.
+        6 => d(0.0, 2.0, 0.0, true),
+        _ => d(0.0, 10.0, 0.0, false),
+    }
+}
+
+/// Samples in a fade of `ms` at `rate`: `Round(ms * 0.001 * rate)`, at least 1.
+fn fade_len(ms: f64, rate: f64) -> u32 {
+    ((ms * 0.001 * rate).round() as u32).max(1)
+}
+
+/// A gain fade's value at table index `j` (1..=n) of a fade of `n` samples: a raised cosine, bent by the tension.
+/// Closing: `j = i + 1`; opening: `j = n - i` (spec: audio/declick.md "Gain fade").
+fn fade_gain(j: u32, n: u32, tension: f32) -> f32 {
+    let scale = (std::f64::consts::PI / f64::from(n + 1)) as f32;
+    let g = ((j as f32 * scale).cos() + 1.0) * 0.5;
+    if tension == 0.0 {
+        return g;
+    }
+    let (k4, k8) = (1.0 / tension.abs(), (tension.abs() + 1.0).ln());
+    if tension > 0.0 {
+        1.0 - (((1.0 - g) * k8).exp() - 1.0) * k4
+    } else {
+        ((g * k8).exp() - 1.0) * k4
+    }
+}
+
+/// The closing of a voice: its declick mode's fade (or sweep), `n` samples long, from the sample it starts on.
+#[derive(Clone, Copy, Debug)]
+struct Close {
+    /// Samples done.
+    i: u32,
+    n: u32,
+    tension: f32,
+    /// Mode 1's sweep: the corner's growth per sample and the length of the last millisecond's cosine.
+    sweep: Option<(f64, u32)>,
+    /// The sweep's low-pass memory per side.
+    lp: [f32; 2],
+}
+
+impl Close {
+    fn new(d: &Declick, rate: f64) -> Close {
+        let n = fade_len(d.close_ms, rate);
+        let sweep = d.sweep.then(|| (22050f64.ln() / (2f64.ln() * f64::from(n)) * 2f64.ln(), n.min(((rate * 0.001).round() as u32).max(1))));
+        Close { i: 0, n, tension: d.tension, sweep, lp: [0.0; 2] }
+    }
+
+    /// Ends every voice quickly (Stop, all notes off): mode 0's 10 ms fade.
+    fn quick(rate: f64) -> Close {
+        Close::new(&declick(0), rate)
+    }
+
+    /// The next closing sample of a stereo frame, or `None` once the closing has run through.
+    fn apply(&mut self, l: f32, r: f32, rate: f64) -> Option<(f32, f32)> {
+        if self.i >= self.n {
+            return None;
+        }
+        let i = self.i;
+        self.i += 1;
+        Some(match self.sweep {
+            // A one-pole high-pass whose corner rises from 1 Hz to 22050 Hz, then a cosine over the last millisecond
+            // (spec: audio/declick.md "Sweep").
+            Some((k, m)) => {
+                let c = ((2.0 / rate) * (f64::from(i + 1) * k).exp()).min(1.0) as f32;
+                let w = if i < self.n - m {
+                    1.0
+                } else {
+                    (((f64::from(i + 1 - (self.n - m)) * (1.0 / f64::from(m + 1)) * std::f64::consts::PI).cos() + 1.0) * 0.5) as f32
+                };
+                self.lp[0] += c * (l - self.lp[0]);
+                self.lp[1] += c * (r - self.lp[1]);
+                ((l - self.lp[0]) * w, (r - self.lp[1]) * w)
+            }
+            None => {
+                let g = fade_gain(i + 1, self.n, self.tension);
+                (l * g, r * g)
+            }
+        })
     }
 }
 
@@ -548,10 +636,10 @@ struct Voice {
     tune: f64,
     age: u64,
     off: Option<u64>,
-    /// Fade-in frames (0 = none).
-    fade_in: u32,
-    /// Cut: (frames left, fade length).
-    kill: Option<(u32, u32)>,
+    /// Opening length in samples: only a voice that starts inside its sample has one (0 = none).
+    open: u32,
+    /// The closing, once it has started (note end, choke, the end of the sample).
+    close: Option<Close>,
     phase: [f64; 5],
     filt: [[Svf; 2]; 2],
     /// Gain at the end of the last control span (ramps start here).
@@ -665,6 +753,8 @@ impl Rt {
 
 pub struct Engine {
     pub sample: Option<Arc<Sample>>,
+    /// How the resampler gets its weights: tables for live playback, the formula for an offline render.
+    pub quality: Quality,
     rate: f32,
     voices: Vec<Voice>,
     /// Free-running phases of the global LFOs.
@@ -677,7 +767,7 @@ pub const MAX_VOICES: usize = 128;
 
 impl Engine {
     pub fn new(rate: f32) -> Self {
-        Engine { sample: None, rate, voices: Vec::with_capacity(MAX_VOICES), global_phase: [0.0; 5], streams: Vec::new() }
+        Engine { sample: None, quality: Quality::Table, rate, voices: Vec::with_capacity(MAX_VOICES), global_phase: [0.0; 5], streams: Vec::new() }
     }
 
     pub fn set_rate(&mut self, rate: f32) {
@@ -722,7 +812,7 @@ impl Engine {
 
     /// Keys currently sounding.
     pub fn sounding(&self) -> impl Iterator<Item = u8> + '_ {
-        self.voices.iter().filter(|v| v.kill.is_none()).map(|v| v.key)
+        self.voices.iter().filter(|v| v.close.is_none()).map(|v| v.key)
     }
 
     /// How many times its length the current sample lasts in Resample or a realtime method: TIME's length when set,
@@ -746,13 +836,8 @@ impl Engine {
         if zkey < b.zone.0 || zkey > b.zone.1 || s.frames() == 0 {
             return;
         }
-        let (fin, fout, bleed) = declick(b.declick);
-        let fo = ((fout / 1000.0) * f64::from(self.rate)).max(1.0) as u32;
-        if !bleed {
-            for v in self.voices.iter_mut().filter(|v| v.key == key && v.kill.is_none()) {
-                v.kill = Some((fo, fo));
-            }
-        }
+        // A new note leaves the channel's other voices alone, the same key's too (spec: audio/sampler.md "A voice");
+        // cut groups and the voice limit are the host's note rules (audio/note-rules.md).
         if self.voices.len() >= MAX_VOICES {
             let v = self.voices.remove(0);
             self.free(&v);
@@ -762,7 +847,7 @@ impl Engine {
         // FL velocity byte = plugin velocity × 128; 100 = unity (spec: audio/sampler-playback.md).
         let vel = laws::velocity_gain((velocity.clamp(0.0, 1.0) * 128.0).round() as u8) as f32;
         let pos = (b.start_offset.clamp(0.0, 1.0) * s.frames() as f64).floor();
-        let fade_in = if pos > 0.0 { ((fin / 1000.0) * f64::from(self.rate)) as u32 } else { 0 };
+        let open = if pos > 0.0 { fade_len(declick(b.declick).open_ms, f64::from(self.rate)) } else { 0 };
         let mut phase = [0.0; 5];
         for (i, t) in b.targets.iter().enumerate() {
             if t.lfo.global {
@@ -780,8 +865,8 @@ impl Engine {
             tune: 0.0,
             age: 0,
             off: None,
-            fade_in,
-            kill: None,
+            open,
+            close: None,
             phase,
             filt: [[Svf::default(); 2]; 2],
             gain: -1.0,
@@ -791,13 +876,14 @@ impl Engine {
     }
 
     pub fn note_off(&mut self, key: u8, b: &Block) {
-        let fo = ((declick(b.declick).1 / 1000.0) * f64::from(self.rate)).max(1.0) as u32;
+        let close = Close::new(&declick(b.declick), f64::from(self.rate));
         let vol_env = b.targets[VOL].env.is_some();
         for v in self.voices.iter_mut().filter(|v| v.key == key && v.off.is_none()) {
             v.off = Some(v.age);
-            // A looping voice without a volume envelope ends at the note-off with the declick fade.
-            if b.loop_on && !vol_env && v.kill.is_none() {
-                v.kill = Some((fo, fo));
+            // A looping voice without a volume envelope closes at the note's end; a one-shot voice without one
+            // ignores it (spec: audio/sampler.md "The end of a voice").
+            if b.loop_on && !vol_env && v.close.is_none() {
+                v.close = Some(close);
             }
         }
     }
@@ -806,12 +892,11 @@ impl Engine {
     /// (spec §7: a trimmed audio clip).
     pub fn start_later(&mut self, id: i32, extra: f32, b: &Block) {
         let Some(s) = &self.sample else { return };
-        let fin = declick(b.declick).0;
-        let rate = f64::from(self.rate);
+        let open = fade_len(declick(b.declick).open_ms, f64::from(self.rate));
         for v in self.voices.iter_mut().filter(|v| v.id == Some(id) && v.age == 0) {
             let at = (b.start_offset + f64::from(extra)).clamp(0.0, 1.0);
             v.pos = (at * s.frames() as f64).floor();
-            v.fade_in = if v.pos > 0.0 { ((fin / 1000.0) * rate) as u32 } else { 0 };
+            v.open = if v.pos > 0.0 { open } else { 0 };
         }
     }
 
@@ -822,19 +907,20 @@ impl Engine {
         }
     }
 
-    /// Cuts the voices of `key` with the declick out fade (the host's choke: an audio clip ends).
+    /// Closes the voices of `key` with the declick mode's closing, whatever their envelopes (the host's choke: an
+    /// audio clip ends, a cut group, the voice limit; spec: audio/note-rules.md).
     pub fn choke(&mut self, key: u8, b: &Block) {
-        let fo = ((declick(b.declick).1 / 1000.0) * f64::from(self.rate)).max(1.0) as u32;
-        for v in self.voices.iter_mut().filter(|v| v.key == key && v.kill.is_none()) {
-            v.kill = Some((fo, fo));
+        let close = Close::new(&declick(b.declick), f64::from(self.rate));
+        for v in self.voices.iter_mut().filter(|v| v.key == key && v.close.is_none()) {
+            v.close = Some(close);
         }
     }
 
     /// Ends every voice with a short fade.
     pub fn all_off(&mut self) {
-        let fo = (0.01 * self.rate) as u32;
-        for v in self.voices.iter_mut().filter(|v| v.kill.is_none()) {
-            v.kill = Some((fo.max(1), fo.max(1)));
+        let close = Close::quick(f64::from(self.rate));
+        for v in self.voices.iter_mut().filter(|v| v.close.is_none()) {
+            v.close = Some(close);
         }
     }
 
@@ -864,7 +950,7 @@ impl Engine {
         while i < self.voices.len() {
             let v = &mut self.voices[i];
             let rt = v.rt.and_then(|k| self.streams.get_mut(usize::from(k)));
-            let alive = render_voice(v, rt, &s, b, (rs, speed), (ls, le), rate, out_l, out_r);
+            let alive = render_voice(v, rt, &s, b, (rs, speed), (ls, le), rate, self.quality, out_l, out_r);
             if alive {
                 i += 1;
             } else {
@@ -943,11 +1029,13 @@ fn render_voice(
     (rs, speed): (f64, f64),
     (ls, le): (f64, Option<f64>),
     rate: f64,
+    quality: Quality,
     out_l: &mut [f32],
     out_r: &mut [f32],
 ) -> bool {
     let len = out_l.len();
     let n = s.frames() as f64;
+    let dc = declick(b.declick);
     let frame_s = 1.0 / rate;
     // Low-pass types fully open and not modulated: no filter.
     let lp_type = matches!(b.f_type, 0 | 1 | 5 | 6 | 7);
@@ -999,12 +1087,17 @@ fn render_voice(
                     v.pos = (2.0 * ls - v.pos).min(le);
                 }
             }
-            if v.pos >= n || v.pos < 0.0 {
+            if v.pos < 0.0 {
                 return false;
+            }
+            // The end of the sample: the closing starts on the first sample at or past it and works on the held
+            // last frame (spec: audio/declick.md "When the closing starts").
+            if v.pos >= n && v.close.is_none() {
+                v.close = Some(Close::new(&dc, rate));
             }
             let (mut l, mut r) = match rt.as_mut() {
                 Some(x) => x.frame(s, v.pos, step, speed, (ls, le), b.pingpong),
-                None => read(s, v.pos, step),
+                None => resample::read(&s.left, &s.right, v.pos, step.abs(), quality),
             };
             if !bypass {
                 let mut out = [f64::from(l), f64::from(r)];
@@ -1021,22 +1114,21 @@ fn render_voice(
                 }
                 (l, r) = (out[0] as f32, out[1] as f32);
             }
+            // The fades act on the signal before the gains (spec: audio/declick.md "Where the fades sit"). FL works on
+            // a voice's fades only once it closes, so an opening shows only on a voice that closes while it is younger
+            // than its opening ("When the opening applies"); the step removal of modes 1 and 2 is not done here.
+            if let Some(c) = v.close.as_mut() {
+                if v.open > 0 && !dc.step_removal && v.age < u64::from(v.open) {
+                    let o = fade_gain(v.open - v.age as u32, v.open, dc.tension);
+                    (l, r) = (l * o, r * o);
+                }
+                match c.apply(l, r, rate) {
+                    Some(x) => (l, r) = x,
+                    None => return false,
+                }
+            }
             let u = j as f32 / chunk as f32;
-            let mut g = v.vel * (g0 + (g1 - g0) * u);
-            if v.fade_in > 0 {
-                let total = v.fade_in as f32;
-                let done = v.age as f32;
-                if done < total {
-                    g *= done / total;
-                }
-            }
-            if let Some((left, total)) = v.kill.as_mut() {
-                if *left == 0 {
-                    return false;
-                }
-                g *= *left as f32 / *total as f32;
-                *left -= 1;
-            }
+            let g = v.vel * (g0 + (g1 - g0) * u);
             let (pl, pr) = (p0.0 + (p1.0 - p0.0) * u, p0.1 + (p1.1 - p0.1) * u);
             out_l[f + j] += l * g * pl;
             out_r[f + j] += r * g * pr;
@@ -1051,48 +1143,6 @@ fn render_voice(
         f += chunk;
     }
     true
-}
-
-const SINC_W: f64 = 13.5;
-
-/// One stereo frame at a fractional source position: exact copy at rate 1, else a Blackman-windowed sinc
-/// with a 13.5-sample window and the cutoff lowered to the output Nyquist when pitching up.
-// spec: audio/sampler-playback.md (resampling)
-fn read(s: &Sample, pos: f64, step: f64) -> (f32, f32) {
-    let n = s.frames();
-    let step = step.abs();
-    if step == 1.0 && pos.fract() == 0.0 {
-        let i = pos as usize;
-        return (s.left[i], s.right[i]);
-    }
-    let scale = step.max(1.0);
-    let i0 = (pos - SINC_W).ceil().max(0.0) as usize;
-    let i1 = ((pos + SINC_W).floor() as usize).min(n - 1);
-    let (mut l, mut r) = (0.0f64, 0.0f64);
-    for i in i0..=i1 {
-        let t = i as f64 - pos;
-        let w = sinc(t / scale) / scale * blackman(t);
-        l += f64::from(s.left[i]) * w;
-        r += f64::from(s.right[i]) * w;
-    }
-    (l as f32, r as f32)
-}
-
-fn sinc(x: f64) -> f64 {
-    if x == 0.0 {
-        1.0
-    } else {
-        let px = PI * x;
-        px.sin() / px
-    }
-}
-
-fn blackman(t: f64) -> f64 {
-    if t.abs() >= SINC_W {
-        return 0.0;
-    }
-    let x = PI * t / SINC_W;
-    0.42 + 0.5 * x.cos() + 0.08 * (2.0 * x).cos()
 }
 
 #[cfg(test)]
@@ -1134,8 +1184,13 @@ mod tests {
         let (mut l2, mut r2) = (vec![0.0; 64], vec![0.0; 64]);
         e.render(&mut l2, &mut r2, &b);
         assert_eq!(l2[35], s.left[99]);
-        assert_eq!(l2[36], 0.0);
-        assert_eq!(e.sounding().count(), 0);
+        // Past the end the last frame is held under the 10 ms closing (spec: audio/declick.md).
+        assert!((l2[36] - s.left[99]).abs() < 1e-3 && l2[63] < l2[36], "{} {}", l2[36], l2[63]);
+        assert_eq!(e.sounding().count(), 0, "closing");
+        let (mut l3, mut r3) = (vec![0.0; 480], vec![0.0; 480]);
+        e.render(&mut l3, &mut r3, &b);
+        assert!(l3[451] > 0.0 && l3[452..].iter().all(|v| *v == 0.0), "480 closing samples");
+        assert!(!e.has_voices());
     }
 
     #[test]
@@ -1147,7 +1202,58 @@ mod tests {
         let (mut l, mut r) = (vec![0.0; 600], vec![0.0; 600]);
         e.render(&mut l, &mut r, &b);
         assert!((l[200] - 0.4).abs() < 0.01, "{}", l[200]);
-        assert_eq!(l[550], 0.0);
+        // The end comes after 500 samples; the closing fades the held last frame.
+        assert!(l[505] > 0.99 && l[550] < l[505], "{} {}", l[505], l[550]);
+        let (mut l, mut r) = (vec![0.0; 600], vec![0.0; 600]);
+        e.render(&mut l, &mut r, &b);
+        assert!(!e.has_voices());
+    }
+
+    // spec: audio/sampler.md "A voice": a channel's voices do not affect one another, the same key's neither.
+    #[test]
+    fn a_repeated_key_leaves_the_ringing_voice_alone() {
+        let mut e = Engine::new(48000.0);
+        e.sample = Some(Arc::new(sine(440.0, 48000)));
+        let b = Block::default();
+        e.note_on(60, 0.78, &b);
+        let (mut l, mut r) = (vec![0.0; 480], vec![0.0; 480]);
+        e.render(&mut l, &mut r, &b);
+        e.note_on(60, 0.78, &b);
+        e.render(&mut l, &mut r, &b);
+        assert_eq!(e.voices.len(), 2);
+        assert_eq!(e.sounding().count(), 2);
+        // A choke closes both through the mode's closing: 20 ms in mode 2.
+        let b2 = Block { declick: 2, ..Block::default() };
+        e.choke(60, &b2);
+        for _ in 0..2 {
+            l.fill(0.0);
+            e.render(&mut l, &mut r, &b2);
+        }
+        assert!(e.has_voices(), "20 ms not over after 10");
+        e.render(&mut l, &mut r, &b2);
+        e.render(&mut l, &mut r, &b2);
+        assert!(!e.has_voices());
+    }
+
+    // spec: audio/declick.md "Gain fade": the closing falls from just under 1 to just over 0; tension 5 bends it.
+    #[test]
+    fn closing_fades_follow_the_tables() {
+        assert_eq!(fade_len(10.0, 44100.0), 441);
+        assert_eq!(fade_len(4.0, 44100.0), 176);
+        assert_eq!(fade_len(2.0, 44100.0), 88);
+        let n = 441;
+        assert!(fade_gain(1, n, 0.0) > 0.9999 && fade_gain(1, n, 0.0) < 1.0);
+        assert!(fade_gain(n, n, 0.0) > 0.0 && fade_gain(n, n, 0.0) < 1e-4);
+        assert!((fade_gain(221, n, 0.0) - 0.5).abs() < 1e-6);
+        let mid = fade_gain(221, n, 5.0);
+        assert!(mid > 0.5 && mid < 1.0, "{mid}");
+        // The sweep ends silent and keeps a constant from jumping.
+        let mut c = Close::new(&declick(1), 44100.0);
+        let mut last = (1.0, 1.0);
+        while let Some(x) = c.apply(1.0, 1.0, 44100.0) {
+            last = x;
+        }
+        assert!(last.0.abs() < 1e-3);
     }
 
     #[test]

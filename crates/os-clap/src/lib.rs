@@ -28,6 +28,7 @@ use clap_sys::ext::params::{
     clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS,
     CLAP_PARAM_IS_ENUM, CLAP_PARAM_IS_HIDDEN, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
 };
+use clap_sys::ext::render::{clap_plugin_render, CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE, CLAP_RENDER_REALTIME};
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
 use clap_sys::host::clap_host;
@@ -424,6 +425,9 @@ unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).restart.store(true, Ordering::Release) };
     wake();
 }
+/// Below this level a block is quiet (CLAP's CONTINUE_IF_NOT_QUIET; about -100 dB).
+const QUIET: f32 = 1e-5;
+
 unsafe extern "C" fn host_request_process(_host: *const clap_host) {}
 unsafe extern "C" fn host_request_callback(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).callback.store(true, Ordering::Release) };
@@ -466,6 +470,9 @@ pub struct Plugin {
     state: *const clap_plugin_state,
     params: *const clap_plugin_params,
     latency: *const clap_plugin_latency,
+    /// The render extension (offline or realtime), if the plugin has one.
+    render: *const clap_plugin_render,
+    offline: bool,
     /// Kept alive for the plugin, which holds a pointer to it.
     _host: Box<clap_host>,
     host_data: Box<HostData>,
@@ -618,6 +625,7 @@ impl Plugin {
             let state = ext(CLAP_EXT_STATE) as *const clap_plugin_state;
             let params = ext(CLAP_EXT_PARAMS) as *const clap_plugin_params;
             let latency = ext(CLAP_EXT_LATENCY) as *const clap_plugin_latency;
+            let render = ext(CLAP_EXT_RENDER) as *const clap_plugin_render;
             let ranges = params::read_ranges(params, plugin);
             Ok(Plugin {
                 desc,
@@ -658,6 +666,8 @@ impl Plugin {
                 editor: false,
                 fx_in: (Vec::new(), Vec::new()),
                 latency,
+                render,
+                offline: false,
                 ranges,
                 param_queue: Vec::new(),
                 auto: Vec::with_capacity(params::MAX_AUTO),
@@ -667,6 +677,26 @@ impl Plugin {
                 _lib: lib.clone(),
             })
         }
+    }
+
+    /// Switches the plugin between offline rendering (an export) and live playback through the CLAP render extension
+    /// (UI thread). An active instance is reactivated around the switch, since plugins may read the mode when they
+    /// are activated. False when the plugin has no such switch or refused it.
+    pub fn set_offline(&mut self, offline: bool) -> bool {
+        if self.render.is_null() || self.offline == offline {
+            return false;
+        }
+        let rate = self.rate;
+        self.deactivate();
+        let mode = if offline { CLAP_RENDER_OFFLINE } else { CLAP_RENDER_REALTIME };
+        let ok = unsafe { (*self.render).set.is_some_and(|s| s(self.plugin, mode)) };
+        if ok {
+            self.offline = offline;
+        }
+        if rate != 0 {
+            self.activate(rate);
+        }
+        ok
     }
 
     /// Activates at `rate` (UI thread); reactivates when the rate changes.
@@ -923,6 +953,14 @@ impl Plugin {
         self.process_chunk_in(left, right, None);
     }
 
+    /// The plugin reported that it is done (no CONTINUE / TAIL, and quiet output with CONTINUE_IF_NOT_QUIET) and
+    /// nothing is queued for it: no notes, no parameter changes, no automation. CLAP lets the host stop calling such
+    /// an instance until something arrives (or, for an effect, until its input is not quiet), so an idle instrument
+    /// or effect costs nothing per block.
+    fn asleep(&self) -> bool {
+        !self.sounding && self.queue.is_empty() && self.param_queue.is_empty() && self.auto.is_empty()
+    }
+
     /// `process_chunk` with an audio input (effects): `input` holds the frames to process, `left` / `right` receive
     /// the output.
     fn process_chunk_in(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>) {
@@ -1056,7 +1094,7 @@ impl Plugin {
         };
         let status = unsafe { (*self.plugin).process.map_or(CLAP_PROCESS_CONTINUE, |f| f(self.plugin, &p)) };
         // CONTINUE / TAIL: the plugin says it is still going; CONTINUE_IF_NOT_QUIET: while its output is not silent.
-        let loud = left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
+        let loud = left.iter().chain(right.iter()).any(|v| v.abs() > QUIET);
         self.sounding = status == CLAP_PROCESS_CONTINUE || status == CLAP_PROCESS_TAIL || (status == CLAP_PROCESS_CONTINUE_IF_NOT_QUIET && loud);
         self.steady += i64::from(n);
     }
@@ -1113,6 +1151,10 @@ impl os_host::Plugin for Plugin {
 
     fn use_start_param(&mut self, name: &str) -> bool {
         Plugin::use_start_param(self, name)
+    }
+
+    fn set_offline(&mut self, offline: bool) {
+        Plugin::set_offline(self, offline);
     }
 
     fn param_count(&self) -> usize {
@@ -1270,6 +1312,11 @@ impl os_engine::Instrument for Plugin {
                 return;
             }
         }
+        if self.asleep() {
+            self.song = None;
+            self.steady += left.len() as i64;
+            return;
+        }
         self.queue.sort_by_key(|e| e.time);
         let song = self.song.take();
         let max = self.max_frames as usize;
@@ -1306,6 +1353,12 @@ impl os_engine::HostedEffect for Plugin {
             if !self.processing {
                 return;
             }
+        }
+        // Quiet input to a sleeping effect passes through as it is.
+        if self.asleep() && left.iter().chain(right.iter()).all(|v| v.abs() <= QUIET) {
+            self.song = None;
+            self.steady += left.len() as i64;
+            return;
         }
         let (mut il, mut ir) = std::mem::take(&mut self.fx_in);
         let song = self.song.take();
@@ -1894,7 +1947,7 @@ mod tests {
         assert!(p.load_state(&blob));
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
-        let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 0.35, ..Default::default() };
+        let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 1.0, ..Default::default() };
         let ch = os_model::Channel {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
@@ -1921,7 +1974,8 @@ mod tests {
         let window = |from_s: f32, to_s: f32| &out[(from_s * 48000.0) as usize..(to_s * 48000.0) as usize];
         let crossings = |w: &[f32]| w.windows(2).filter(|p| p[0] <= 0.0 && p[1] > 0.0).count() as f32 / (w.len() as f32 / 48000.0);
         let before = crossings(window(0.5, 0.95));
-        let glide_s = os_engine::laws::slide_seconds(0.35) as f32;
+        // One step per tick, n + 1 ticks at 130 BPM and 96 PPQ.
+        let glide_s = (os_engine::laws::glide_ticks(1.0, 96) + 1) as f32 * 60.0 / (130.0 * 96.0);
         let after = crossings(window(1.0 + glide_s + 0.05, 2.0));
         let mid = crossings(window(1.0 + glide_s * 0.4, 1.0 + glide_s * 0.6));
         eprintln!("before {before:.1} Hz, mid-glide {mid:.1} Hz, after {after:.1} Hz (glide {glide_s:.3} s)");

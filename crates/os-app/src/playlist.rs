@@ -292,6 +292,8 @@ pub enum Cmd {
     Misc(usize, crate::misc_page::M, f32),
     /// Piano roll Tools menu (spec: ui/piano-roll.md §11).
     Piano(crate::piano_tools::NCmd),
+    /// Settings > Audio menus: device, sample rate, buffer length (spec: ui/settings.md "Audio").
+    Audio(crate::audio_cfg::Set),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2876,6 +2878,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             crate::misc::set(app, row, m, v);
             return None;
         }
+        Cmd::Audio(a) => {
+            app.set_audio(a);
+            return None;
+        }
         #[cfg(plugin_windows)]
         Cmd::PluginDetach(row, on) => {
             app.plugins.set_detached(row, on);
@@ -2916,7 +2922,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

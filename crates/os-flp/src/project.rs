@@ -67,6 +67,10 @@ mod id {
     pub const CH_SAMPLER_FLAGS: u8 = 143;
     pub const CH_SAMPLE_SETTINGS: u8 = 215;
     pub const CH_ADJUST: u8 = 229;
+    /// Cut groups (word 0 cuts, word 1 cut by) and the voice settings: maximum voices, slide time, mono / portamento
+    /// (spec: audio/note-rules.md "Settings").
+    pub const CH_CUT_GROUPS: u8 = 132;
+    pub const CH_POLY: u8 = 221;
     pub const GROUP_NAME: u8 = 231;
     pub const CURRENT_GROUP: u8 = 146;
 
@@ -713,8 +717,8 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
 
 /// The Misc tab values the file stores outside the plugin state: level adjustments (event 229: pan offset,
 /// volume multiplier, -, mod X offset, mod Y offset), swing share (97, 0..=128), root note (135), fine tune (142) and
-/// the main pitch switch (215 byte 11) (spec: flp/engine-events.md "A channel", audio/voice-levels.md, audio/swing.md,
-/// audio/sampler.md).
+/// the main pitch switch (215 byte 11), cut groups (132) and the voice settings (221) (spec: flp/engine-events.md "A
+/// channel", audio/voice-levels.md, audio/swing.md, audio/sampler.md, audio/note-rules.md).
 fn load_misc(block: &[Event]) -> ChannelMisc {
     let find = |id: u8| block.iter().find(|e| e.id == id);
     let mut m = ChannelMisc::default();
@@ -733,6 +737,18 @@ fn load_misc(block: &[Event]) -> ChannelMisc {
     }
     if let Some(&b) = find(id::CH_SAMPLE_SETTINGS).and_then(Event::data).and_then(|d| d.get(11)) {
         m.main_pitch = b != 0;
+    }
+    if let Some(e) = find(id::CH_CUT_GROUPS) {
+        let v = int(e);
+        m.cut = v & 0xffff;
+        m.cut_by = v >> 16;
+    }
+    if let Some(d) = find(id::CH_POLY).and_then(Event::data).filter(|d| d.len() >= 9) {
+        let u = |i: usize| u32::from_le_bytes(d[i..i + 4].try_into().unwrap());
+        m.max_poly = u(0);
+        m.slide = (u(4) as f32 / 1024.0).clamp(0.0, 1.0);
+        m.mono = d[8] & 1 != 0;
+        m.porta = d[8] & 2 != 0;
     }
     m
 }
@@ -2892,7 +2908,7 @@ mod tests {
 
     /// The events the engine reads beyond the editable settings (spec: flp/engine-events.md): time signature,
     /// "play truncated notes", the channel's swing share, root note, sampler flags, declick and stretch settings,
-    /// level adjustments, filter, and the envelope records' flags and LFO.
+    /// level adjustments, filter, the envelope records' flags and LFO, cut groups and the voice settings.
     #[test]
     fn engine_settings_are_read() {
         let mut file = create(&new_project()).unwrap();
@@ -2913,6 +2929,9 @@ mod tests {
                 Event::new(id::CH_SAMPLER_FLAGS, Value::U32(10)),
                 Event::new(id::CH_SAMPLE_SETTINGS, Value::var(s215)),
                 Event::new(id::CH_ADJUST, ints(&[-3200, 25600, 0, 128, -256])),
+                // Cuts group 7, cut by group 9; 3 voices at most, slide time 820, mono and portamento.
+                Event::new(id::CH_CUT_GROUPS, Value::U32(9 << 16 | 7)),
+                Event::new(id::CH_POLY, Value::var([3u32.to_le_bytes(), 820u32.to_le_bytes()].concat().into_iter().chain([3u8]).collect::<Vec<u8>>())),
             ];
             add.extend((0..5).map(|_| Event::new(id::CH_ENVELOPE, ints(&env))));
             // Replace whatever envelope records the file has with five of these in the first channel.
@@ -2941,6 +2960,8 @@ mod tests {
         // Fine tune (event 142) and the main pitch switch (215 byte 11, cleared here).
         assert_eq!((c.misc.fine, c.misc.main_pitch), (-35, false));
         assert_eq!(c.misc.levels, [-0.5, 1.0, 0.5, -1.0]);
+        assert_eq!((c.misc.cut, c.misc.cut_by, c.misc.max_poly, c.misc.mono, c.misc.porta), (7, 9, 3, true, true));
+        assert_eq!(c.misc.slide, 820.0 / 1024.0);
         assert_eq!((c.sound.cutoff, c.sound.resonance, c.sound.filter_type), (128, 64, 5));
         assert_eq!((c.sound.sampler_flags, c.sound.declick, c.sound.stretch), (Some(10), 3, [1536, 25, 10000, 5]));
         let e = c.envelopes[Envelope::VOLUME];
@@ -2950,6 +2971,8 @@ mod tests {
         assert_eq!((plain.time_signature, plain.play_truncated), (None, None));
         assert_eq!((plain.channels[0].misc.swing, plain.channels[0].misc.root, plain.channels[0].sound), (1.0, 60, ChannelSound::default()));
         assert_eq!((plain.channels[0].misc.fine, plain.channels[0].misc.main_pitch), (0, true));
+        let m = plain.channels[0].misc;
+        assert_eq!((m.cut, m.cut_by, m.max_poly, m.mono, m.porta, m.slide), (0, 0, 0, false, false, 500.0 / 1024.0));
     }
 
     /// Track switches (event 236 flags), the main volume (record 0 at 0x4000) and the main pitch (event 80) are

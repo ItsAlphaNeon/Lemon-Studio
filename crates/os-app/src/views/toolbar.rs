@@ -231,16 +231,37 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
 
     // Monitors (oscilloscope / spectrum analyzer, stereo peak bars) and CPU / memory.
     monitor(ui, s);
-    // CPU / polyphony / memory panel: not measured yet, greyed out.
-    let cpu = Rect::span(1053.0, 1201.0, 4.0, 35.0);
+    // CPU panel (spec: ui/main-window.md "CPU panel"): audio load (bar, percent, recent history), memory, notes playing,
+    // dropouts. The hint is the reading in words (`App::tick`).
+    let cpu = crate::app::CPU_RECT;
     sunken(ui, cpu, t.sunken_dark);
-    ui.off(cpu, "CPU, polyphony and memory monitor");
-    ui.c.fill_rect(Rect::new(1055.0, 6.0, 1.5, 12.0), t.glyph);
-    ui.c.text_right(Font::new(17), 1136.0, 3.0, t.glyph, "-");
+    ui.hit(cpu, Action::CpuPanel, "");
+    let r = &s.cpu.now;
+    let level = |load: u32| match load {
+        0..75 => t.glyph,
+        75..100 => t.meter_high,
+        _ => t.meter_clip,
+    };
+    let k = (r.load as f32 / 100.0).min(1.0);
+    ui.c.fill_rect(Rect::new(1055.0, 6.0, 1.5, 12.0), t.glyph.with_alpha(60));
+    if k > 0.0 {
+        ui.c.fill_cell(Rect::new(1055.0, 6.0 + 12.0 * (1.0 - k), 1.5, 12.0 * k), level(r.load));
+    }
+    ui.c.text_right(Font::new(17), 1136.0, 3.0, level(r.load), &format!("{}%", r.load));
+    // One 2 px column per reading, newest on the right, full height at 100 %.
+    for (i, &h) in s.cpu.history.iter().rev().enumerate() {
+        let hh = (11.0 * h as f32 / 100.0).min(11.0).round();
+        if hh > 0.0 {
+            ui.c.fill_cell(Rect::new(1128.0 - 2.0 * i as f32, 32.0 - hh, 2.0, hh), level(h).with_alpha(170));
+        }
+    }
     ui.c.line(1055.0, 32.0, 1130.0, 32.0, 1.0, t.glyph.with_alpha(160));
-    ui.c.text_right(Font::condensed(18, 6), 1199.0, 3.0, t.glyph, "- MB");
-    ui.c.text_right(Font::condensed(18, 6), 1166.0, 17.0, t.glyph, "-");
-    ui.veil(cpu.inset(1.0), t.sunken_dark);
+    let mem = r.mem_mb.map_or("- MB".to_string(), |m| format!("{m} MB"));
+    ui.c.text_right(Font::condensed(18, 6), 1199.0, 3.0, t.glyph, &mem);
+    ui.c.text_right(Font::condensed(18, 6), 1166.0, 17.0, t.glyph, &r.notes.to_string());
+    if r.dropouts > 0 {
+        ui.c.text_right(Font::condensed(18, 6), 1199.0, 17.0, t.meter_clip, &format!("!{}", r.dropouts.min(9999)));
+    }
 
     // Utility buttons.
     let utils = [

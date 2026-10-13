@@ -506,17 +506,16 @@ pub struct Engine {
     out_tick: u64,
     out_frame: u64,
     /// Instrument channels: scheduled note ends (tick, channel, key, cut = choke at the end of an audio clip), live
-    /// notes waiting for the next tick (channel, key, velocity; negative = note off), this tick's events (channel,
-    /// offset, key, velocity (`OFF` / `CHOKE` below zero), sample start fraction) and scratch.
+    /// notes waiting for the next tick (channel, key, velocity; negative = note off), this tick's events.
     inst_offs: Vec<(u64, usize, u8, bool)>,
     /// Audio clips playing on instrument channels: (channel, shape, frames since its start).
     inst_shapes: Vec<(usize, ClipShape, u64)>,
     inst_live: Vec<(usize, u8, f32)>,
-    inst_events: Vec<(usize, u32, u8, f32, f32, f32)>,
+    inst_events: Vec<notes::Event>,
     /// Per instrument channel and key: the fine pitch (semitones) of the note last started there.
     inst_fine: Vec<[f32; 128]>,
     /// This tick's events after the channels' note rules, sorted by channel, and each channel's notes at its
-    /// instrument (spec: audio/channel-voices.md).
+    /// instrument (spec: audio/note-rules.md).
     inst_notes: Vec<(usize, u32, notes::Note)>,
     note_voices: Vec<notes::Voices>,
     scratch: (Vec<f32>, Vec<f32>),
@@ -536,10 +535,6 @@ pub struct Engine {
 
 /// Seconds an instrument keeps running after its last note (a Lemon Studio choice).
 const INSTRUMENT_TAIL_SECONDS: u64 = 5;
-/// `inst_events` velocity values below zero: a note off, a choke.
-const OFF: f32 = notes::OFF;
-const CHOKE: f32 = notes::CHOKE;
-
 /// A tick whose every output sample stays below this magnitude (-96 dB) is quiet: the first quiet tick at or after
 /// the song's end is the file's last (spec: audio/timing.md, "Where the file ends").
 const QUIET: f32 = 1.584_893_1e-5;
@@ -637,13 +632,23 @@ impl Engine {
                     frame_s: 1.0 / f64::from(rate),
                     plugin: ch.kind == ChannelKind::Plugin,
                     instrument: Slot::default(),
-                    rules: notes::Rules::new(&ch.misc, rate),
+                    rules: notes::Rules::new(&ch.misc, ppq),
                     from_scale,
                     realtime,
                     keyed: Vec::new(),
                 };
                 state.retune(knob);
                 state.init.2 = state.base_rate;
+                // What the note rules need to know of the channel's voices (spec: audio/note-rules.md).
+                let r = &mut state.rules;
+                r.plugin = ch.kind == ChannelKind::Plugin;
+                r.one_shot = ch.kind.is_sampler() && state.vol_env.is_none();
+                r.root = ch.misc.root;
+                r.close = notes::closing_frames(ch.sound.declick, rate);
+                r.ring = match (&state.sample, r.plugin) {
+                    (Some(s), false) if s.frames() > 0 => s.frames() as f64 / state.src_ratio.max(1e-9) * state.realtime.map_or(1.0, |t| t.0.max(1e-9)),
+                    _ => f64::INFINITY,
+                };
                 state
             })
             .collect();
@@ -1287,6 +1292,22 @@ impl Engine {
         }
     }
 
+    /// Renders the next whole tick for a stream that queues ticks ahead of its device (spec: audio/implementing.md
+    /// "Playing live") and hands out its samples (interleaved L/R) with the tick and the frame it starts on; `None`
+    /// once playback is over (a live engine renders again after its next note).
+    pub fn next_tick(&mut self) -> Option<(&[f32], u64, u64)> {
+        self.exporting = false;
+        if self.out_pos >= self.out.len() {
+            if self.finished() {
+                return None;
+            }
+            self.render_tick();
+        }
+        let from = self.out_pos;
+        self.out_pos = self.out.len();
+        Some((&self.out[from..], self.out_tick, self.out_frame + (from / 2) as u64))
+    }
+
     /// Renders the next tick into `self.out`, in the order of spec audio/timing.md ("What a tick does"): the clock
     /// moves; control points, then automation clips; notes that end are released, then notes that start are
     /// triggered; then the tick's samples are produced.
@@ -1371,7 +1392,7 @@ impl Engine {
         while i < self.inst_offs.len() {
             let (end, ch, key, cut) = self.inst_offs[i];
             if end <= tick || (song_end && !cut) {
-                self.inst_events.push((ch, 0, key, if cut { CHOKE } else { OFF }, 0.0, 0.0));
+                self.inst_events.push(if cut { notes::Event::choke(ch, 0, key) } else { notes::Event::off(ch, 0, key) });
                 self.inst_offs.swap_remove(i);
             } else {
                 i += 1;
@@ -1408,7 +1429,15 @@ impl Engine {
         if self.channels[t.channel].plugin {
             if self.channels[t.channel].instrument.0.is_some() {
                 let k = t.key.min(127) as u8;
-                self.inst_events.push((t.channel, 0, k, f32::from(t.velocity) / 128.0, t.start, t.fine));
+                self.inst_events.push(notes::Event {
+                    ch: t.channel,
+                    off: 0,
+                    key: k,
+                    vel: f32::from(t.velocity) / 128.0,
+                    start: t.start,
+                    fine: t.fine,
+                    long: t.end.is_some(),
+                });
                 if let Some(sh) = t.shape {
                     self.inst_shapes.push((t.channel, sh, 0));
                 }
@@ -1448,9 +1477,9 @@ impl Engine {
     /// channel's volume and pan. An instrument that is busy (locked elsewhere) is skipped for the tick.
     fn render_instruments(&mut self, n: usize, song: &TransportInfo) {
         for (ch, key, vel) in self.inst_live.drain(..) {
-            self.inst_events.push((ch, 0, key, if vel < 0.0 { OFF } else { vel }, 0.0, 0.0));
+            self.inst_events.push(if vel < 0.0 { notes::Event::off(ch, 0, key) } else { notes::Event::on(ch, 0, key, vel) });
         }
-        self.inst_events.sort_by_key(|e| e.1);
+        self.inst_events.sort_by_key(|e| e.off);
         let rules: Vec<notes::Rules> = self.channels.iter().map(|c| c.rules).collect();
         self.note_voices.resize(self.channels.len(), notes::Voices::default());
         notes::apply(&self.inst_events, &rules, &mut self.note_voices, n as u32, &mut self.inst_notes);
@@ -1676,9 +1705,9 @@ impl Drop for Engine {
                 inst.note_off(0, key.min(127) as u8);
             }
         }
-        // Mono legato notes sound under their first key.
+        // Voices whose notes have not ended (a mono voice sounds under its first key).
         for (c, v) in self.note_voices.iter().enumerate() {
-            for key in v.taken_over() {
+            for key in v.held_keys() {
                 if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
                     inst.note_off(0, key);
                 }

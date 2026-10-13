@@ -160,6 +160,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     fn use_start_param(&mut self, name: &str) -> bool {
         self.run(false, |p| p.use_start_param(name))
     }
+    fn set_offline(&mut self, offline: bool) {
+        self.run((), |p| p.set_offline(offline))
+    }
     fn param_count(&self) -> usize {
         self.look(0, |p| p.param_count())
     }
