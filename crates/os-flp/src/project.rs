@@ -118,7 +118,10 @@ mod id {
 }
 
 const NOTE_LEN: usize = 24;
+/// Clip record lengths: 88 bytes in files of FL 26, 80 bytes in files of FL 24.2 to 25 (spec: flp/layouts.md,
+/// "Playlist clip records").
 const CLIP_LEN: usize = 88;
+const CLIP_LEN_25: usize = 80;
 const MIXER_REC_LEN: usize = 12;
 const NOTE_FLAGS_DEFAULT: u16 = 0x4000;
 const PATTERN_COLOR_DEFAULT: u32 = 0x002D_2C29;
@@ -548,13 +551,34 @@ fn scan_channel(events: &[Event], start: usize, end: usize) -> ChannelLoc {
     c
 }
 
-fn text_enc(events: &[Event], version: Option<usize>) -> TextEnc {
-    let major = version
+/// The major version of the program that saved the file (26 when the file does not say).
+fn major_version(events: &[Event], version: Option<usize>) -> u32 {
+    version
         .and_then(|i| events[i].data())
         .map(|d| decode_text(d, TextEnc::Ansi))
         .and_then(|s| s.split('.').next().and_then(|m| m.parse::<u32>().ok()))
-        .unwrap_or(26);
-    if major <= 11 { TextEnc::Ansi } else { TextEnc::Utf16 }
+        .unwrap_or(26)
+}
+
+fn text_enc(events: &[Event], version: Option<usize>) -> TextEnc {
+    if major_version(events, version) <= 11 { TextEnc::Ansi } else { TextEnc::Utf16 }
+}
+
+/// The record length a clip list fits: a whole number of records, each with `00 50` at byte 4.
+fn list_clip_len(data: &[u8]) -> Option<usize> {
+    [CLIP_LEN, CLIP_LEN_25]
+        .into_iter()
+        .find(|&n| !data.is_empty() && data.len() % n == 0 && data.chunks_exact(n).all(|r| r[4..6] == [0x00, 0x50]))
+}
+
+/// The clip record length of a file: the one its clip lists fit, else the one its version suggests (spec:
+/// flp/layouts.md, "How to tell the generation").
+fn clip_len(events: &[Event], version: Option<usize>) -> usize {
+    events
+        .iter()
+        .filter(|e| e.id == id::ARR_CLIPS)
+        .find_map(|e| e.data().and_then(list_clip_len))
+        .unwrap_or_else(|| if major_version(events, version) < 26 { CLIP_LEN_25 } else { CLIP_LEN })
 }
 
 // ---------------------------------------------------------------------------------------
@@ -567,6 +591,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
     let mut l = scan(events)?;
     let enc = text_enc(events, l.version);
     l.enc = Some(enc);
+    let clen = clip_len(events, l.version);
     let text = |i: Option<usize>| i.and_then(|i| events[i].data()).map(|d| decode_text(d, enc));
 
     let mut p = Project {
@@ -649,7 +674,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             for f in &events[n + 1..] {
                 match f.id {
                     id::ARR_NAME => arr.name = f.data().map(|d| decode_text(d, enc)),
-                    id::ARR_CLIPS => arr.clips = f.data().map(decode_clips).unwrap_or_default(),
+                    id::ARR_CLIPS => arr.clips = f.data().map(|d| decode_clips(d, clen)).unwrap_or_default(),
                     id::PL_TRACK | id::ARR_START => break,
                     _ => {}
                 }
@@ -900,8 +925,10 @@ fn decode_clip(r: &[u8]) -> Clip {
             (a != -1.0 && a.is_finite() && b.is_finite()).then(|| (f64::from(a), f64::from(b)))
         }
     };
+    // A shorter record (80 bytes) leaves the rest of `raw` zero.
     let mut raw = [0u8; CLIP_RECORD_LEN];
-    raw.copy_from_slice(&r[..CLIP_RECORD_LEN]);
+    let n = r.len().min(CLIP_RECORD_LEN);
+    raw[..n].copy_from_slice(&r[..n]);
     Clip {
         position: u32_at(0),
         length: u32_at(8),
@@ -913,8 +940,8 @@ fn decode_clip(r: &[u8]) -> Clip {
     }
 }
 
-fn decode_clips(data: &[u8]) -> Vec<Clip> {
-    data.chunks_exact(CLIP_LEN).map(decode_clip).collect()
+fn decode_clips(data: &[u8], len: usize) -> Vec<Clip> {
+    data.chunks_exact(len).map(decode_clip).collect()
 }
 
 /// The record of a clip: its stored bytes with the modeled fields written over them.
@@ -954,21 +981,25 @@ fn encode_clip(c: &Clip) -> [u8; CLIP_LEN] {
     r
 }
 
-/// Clip records sorted by position. A clip without an id, or with one already used (a copy), gets the next
-/// free id (spec: playlist.md, byte 32).
-fn encode_clips(clips: &[Clip]) -> Vec<u8> {
+/// Clip records of `len` bytes sorted by position. A clip without an id, or with one already used (a copy), gets
+/// the next free id (spec: playlist.md, byte 32). 80-byte records hold 0 at bytes 76..79 (spec: flp/layouts.md).
+fn encode_clips(clips: &[Clip], len: usize) -> Vec<u8> {
     let mut sorted = clips.to_vec();
     sorted.sort_by_key(|c| c.position);
     let mut next = sorted.iter().map(Clip::id).max().unwrap_or(0) + 1;
     let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::with_capacity(sorted.len() * CLIP_LEN);
+    let mut out = Vec::with_capacity(sorted.len() * len);
     for c in &mut sorted {
         if c.id() == 0 || !seen.insert(c.id()) {
             c.set_id(next);
             seen.insert(next);
             next += 1;
         }
-        out.extend_from_slice(&encode_clip(c));
+        let mut r = encode_clip(c);
+        if len < CLIP_LEN {
+            r[76..80].fill(0);
+        }
+        out.extend_from_slice(&r[..len]);
     }
     out
 }
@@ -1493,6 +1524,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     let events = events_of_mut(file)?;
     let l = scan(events)?;
     let enc = text_enc(events, l.version);
+    let clen = clip_len(events, l.version);
     let mismatch = |what: &str, a: usize, b: usize| {
         ProjectError::Mismatch(format!("{what}: model has {a}, file has {b}"))
     };
@@ -1905,7 +1937,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             .arrangements
             .iter()
             .filter(|a| current.arrangements.iter().all(|o| o.number != a.number))
-            .flat_map(|a| arrangement_events(a, enc))
+            .flat_map(|a| arrangement_events(a, enc, clen))
             .collect();
         inserts.extend(added.into_iter().rev().map(|e| (at, e)));
     }
@@ -1920,7 +1952,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         }
         if arr.clips != old_arr.clips {
             if let Some(i) = loc.clips {
-                set_data(&mut events[i], encode_clips(&arr.clips));
+                set_data(&mut events[i], encode_clips(&arr.clips, clen));
             }
         }
         if arr.markers != old_arr.markers {
@@ -2207,6 +2239,7 @@ fn restructure(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError
     let events = events_of_mut(file)?;
     let l = scan(events)?;
     let enc = text_enc(events, l.version);
+    let clen = clip_len(events, l.version);
     let n_old = l.channels.len();
     let origin: Vec<Option<usize>> =
         project.channels.iter().map(|c| c.rack.origin.map(usize::from).filter(|&o| o < n_old)).collect();
@@ -2326,7 +2359,7 @@ fn restructure(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError
             id::ARR_CLIPS => {
                 let d = events[i].data().unwrap_or(&[]).to_vec();
                 let mut out = Vec::with_capacity(d.len());
-                for r in d.chunks_exact(CLIP_LEN) {
+                for r in d.chunks_exact(clen) {
                     let item = u16::from_le_bytes([r[6], r[7]]);
                     if item >= 0x5000 {
                         out.extend_from_slice(r);
@@ -2575,7 +2608,7 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         }
     }
     for arr in &project.arrangements {
-        ev.extend(arrangement_events(arr, enc));
+        ev.extend(arrangement_events(arr, enc, CLIP_LEN));
     }
     // The playlist view and the arrangement shown, right after the last one's tracks as FL writes them
     // (spec: flp/events/playlist.md, events 242 and 100).
@@ -2624,12 +2657,12 @@ fn track_record(t: &PlaylistTrack) -> Vec<u8> {
 }
 
 /// An arrangement block: number, name, 36, clips, markers, then the 500 track records (spec: flp/events/playlist.md).
-fn arrangement_events(arr: &Arrangement, enc: TextEnc) -> Vec<Event> {
+fn arrangement_events(arr: &Arrangement, enc: TextEnc, clen: usize) -> Vec<Event> {
     let mut ev = vec![
         Event::new(id::ARR_START, Value::U16(arr.number)),
         Event::new(id::ARR_NAME, Value::var(encode_text(arr.name.as_deref().unwrap_or("Arrangement"), enc))),
         Event::new(id::ARR_UNKNOWN, Value::U8(0)),
-        Event::new(id::ARR_CLIPS, Value::var(encode_clips(&arr.clips))),
+        Event::new(id::ARR_CLIPS, Value::var(encode_clips(&arr.clips, clen))),
     ];
     for m in &arr.markers {
         ev.extend(marker_events(m, enc));
@@ -3237,7 +3270,8 @@ mod tests {
                 match e.id {
                     id::ARR_CLIPS => {
                         let d = e.data().unwrap();
-                        assert_eq!(encode_clips(&decode_clips(d)), d, "{path}");
+                        let n = list_clip_len(d).unwrap_or(CLIP_LEN);
+                        assert_eq!(encode_clips(&decode_clips(d, n), n), d, "{path}");
                         lists += 1;
                     }
                     id::AUTO_DATA => {
@@ -3251,6 +3285,22 @@ mod tests {
             }
         }
         eprintln!("{lists} clip lists, {autos} automation records re-encode exactly");
+    }
+
+    /// Files of FL 24.2 to 25 hold 80-byte clip records: read with their fields, written back at 80 bytes with 0
+    /// at bytes 76..79; 88-byte lists are still told apart (spec: flp/layouts.md, "Playlist clip records").
+    #[test]
+    fn eighty_byte_clip_records_are_read_and_kept() {
+        let a = Clip::new(384, 288, 2, ClipSource::Pattern(1));
+        let b = Clip::new(768, 96, 0, ClipSource::Pattern(2));
+        let d = encode_clips(&[a, b], CLIP_LEN_25);
+        assert_eq!(d.len(), 2 * CLIP_LEN_25);
+        assert_eq!(list_clip_len(&d), Some(CLIP_LEN_25));
+        assert!(d[76..80].iter().all(|&x| x == 0));
+        let back = decode_clips(&d, CLIP_LEN_25);
+        assert_eq!((back[1].position, back[1].length, back[1].track), (768, 96, 0));
+        assert_eq!(encode_clips(&back, CLIP_LEN_25), d);
+        assert_eq!(list_clip_len(&encode_clips(&back, CLIP_LEN)), Some(CLIP_LEN));
     }
 
     /// A new project's playlist (clips with windows, mute, markers) and automation clips are written by `create`,

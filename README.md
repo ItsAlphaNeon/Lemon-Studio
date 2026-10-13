@@ -74,7 +74,7 @@ clicking it does nothing.
 | Plugin management | ✅ | Plugin menus everywhere a plugin is added (F8 lists instruments and effects: an effect goes to the selected mixer track, an instrument to the bottom of the channel rack); a plugin manager in Settings with your own search folders, a background scan at startup (each file is tried in a separate scanner process, so a broken plugin cannot take Lemon Studio down), favourites, hidden plugins, and one menu entry per plugin installed as both VST3 and CLAP (your preferred format wins). VST2 is not hosted yet |
 | Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ so far |
 | Exporting audio | 🚧 | Song or pattern to a WAV file (32-bit float); no MP3 or FLAC yet |
-| Project files | 🚧 | Opens and saves `.flp` projects from the latest FL Studio 26 only (older versions are on the roadmap; a project in the layout used before version 24.2 is refused with a dialog that explains how to re-save it); early, always keep backups |
+| Project files | 🚧 | Opens and saves `.flp` projects saved by FL Studio 24.2 and later, 25 and 26 included (older versions are on the roadmap; a project in the layout used before version 24.2 is refused with a dialog that explains how to re-save it); early, always keep backups |
 | Undo | 🚧 | Per editor (piano roll, playlist); no redo or global history |
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers (notes play the selected channel); no note recording yet |
 | Audio recording | ❌ | Not available yet |
