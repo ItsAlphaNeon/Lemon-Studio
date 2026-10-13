@@ -927,7 +927,27 @@ impl App {
             return;
         }
         let mut relink = false;
+        // Creates waiting for a native plugin's first check (`Plugins::effect_ready`); a newer request for the same
+        // slot replaces a waiting one.
+        let mut waiting: Vec<FxReq> = Vec::new();
+        let mut done = false;
         for r in reqs {
+            if let FxReq::Create { track, slot, .. } | FxReq::Delete { track, slot } = r {
+                waiting.retain(|w| !matches!(*w, FxReq::Create { track: t, slot: s, .. } if (t, s) == (track, slot)));
+            }
+            if let FxReq::Create { index, .. } = r {
+                if !self.plugins.effect_ready(index) {
+                    let name = self.plugins.effect_names().get(index).cloned().unwrap_or_default();
+                    let msg = format!("Trying {name} before its first load...");
+                    if self.state.message.as_deref() != Some(msg.as_str()) {
+                        self.state.message = Some(msg);
+                        done = true;
+                    }
+                    waiting.push(r);
+                    continue;
+                }
+            }
+            done = true;
             match r {
                 FxReq::Create { track, slot, index } => match self.plugins.create_effect(track, slot, index, None) {
                     Ok(_) => {
@@ -961,11 +981,15 @@ impl App {
                 }
             }
         }
+        waiting.append(&mut self.state.mixer.pending);
+        self.state.mixer.pending = waiting;
         if relink {
             self.transport.set_effects(self.plugins.effects());
             self.state.piano.dirty = true;
         }
-        self.invalidate();
+        if done {
+            self.invalidate();
+        }
     }
 
     fn open_fx(&mut self, track: u16, slot: u8) {

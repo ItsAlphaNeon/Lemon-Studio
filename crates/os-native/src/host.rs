@@ -51,12 +51,25 @@ pub struct HostObject {
     pub ctx: *mut HostContext,
 }
 
+/// What a generator asked of its voices during a call, answered by the host once the call has returned (spec:
+/// "Voices"), and what the host tells it about them.
+#[derive(Default)]
+pub struct VoiceBook {
+    /// Voices the plugin has finished (host `Voice_Kill`): the tag, and whether the host frees the voice with the
+    /// plugin's own `Voice_Kill` (the call's KillHandle; false = the plugin freed it already).
+    pub kill: Vec<(IntPtr, bool)>,
+    /// Tags of voices the plugin wants released (host `Voice_Release`).
+    pub release: Vec<IntPtr>,
+    /// Note-on velocity (0..1) of each live voice, by tag (`FPV_GetVelocity`).
+    pub velocity: Vec<(IntPtr, f32)>,
+}
+
 /// Host-side state shared with the callbacks.
 pub struct HostContext {
     pub prog_path: CString,
     pub sample_rate: u32,
-    /// Voice tags the plugin asked to kill.
-    pub killed_voices: Vec<IntPtr>,
+    /// Voice requests and voice facts. A lock, because a plugin may call from its own threads.
+    pub voices: Mutex<VoiceBook>,
     /// Calls the host couldn't serve meaningfully: (slot or dispatcher id) → count.
     pub unhandled: BTreeMap<String, u32>,
     /// Render lock behind LockMix / LockPlugin / SuspendOutput (see `lock`).
@@ -115,7 +128,7 @@ impl HostObject {
         let ctx = Box::into_raw(Box::new(HostContext {
             prog_path: CString::new(prog_path).unwrap_or_default(),
             sample_rate,
-            killed_voices: Vec::new(),
+            voices: Mutex::new(VoiceBook::default()),
             unhandled: BTreeMap::new(),
             lock: PluginLock::new(),
             _wavetables: tables,
@@ -140,6 +153,12 @@ impl HostObject {
     /// The plugin's render lock (lives as long as the host object).
     pub fn lock(&self) -> &PluginLock {
         unsafe { &(*self.ctx).lock }
+    }
+
+    /// The voice requests and facts (lives as long as the host object).
+    pub fn voices(&self) -> std::sync::MutexGuard<'_, VoiceBook> {
+        let book = unsafe { &(*self.ctx).voices };
+        book.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -190,19 +209,56 @@ unsafe extern "system" fn dispatcher(this: *mut HostObject, _sender: IntPtr, id:
     }
 }
 
-unsafe extern "system" fn voice_kill(this: *mut HostObject, sender: IntPtr, _kill_handle: i32) {
-    if let Some(c) = ctx(this) {
-        c.killed_voices.push(sender);
+fn book<'a>(this: *mut HostObject) -> Option<std::sync::MutexGuard<'a, VoiceBook>> {
+    ctx(this).map(|c| c.voices.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+// Voice_Release / Voice_Kill (Sender = the voice's tag): noted here, answered by the host after the plugin's call
+// returns, so the plugin's voice list never changes under its own feet (spec: "Voices").
+unsafe extern "system" fn voice_release(this: *mut HostObject, sender: IntPtr) {
+    if trace_enabled() {
+        eprintln!("[host] Voice_Release tag {sender}");
+    }
+    if let Some(mut b) = book(this) {
+        if !b.release.contains(&sender) {
+            b.release.push(sender);
+        }
     }
 }
 
-unsafe extern "system" fn voice_process_event(_this: *mut HostObject, _sender: IntPtr, id: IntPtr, _v: IntPtr, _f: IntPtr) -> i32 {
+unsafe extern "system" fn voice_kill(this: *mut HostObject, sender: IntPtr, kill_handle: i32) {
+    if trace_enabled() {
+        eprintln!("[host] Voice_Kill tag {sender} kill_handle {kill_handle:#x}");
+    }
+    // KillHandle is a 32-bit boolean from some plugins (1 or -1) and a byte from others: only its low byte counts.
+    let free = kill_handle & 0xFF != 0;
+    if let Some(mut b) = book(this) {
+        if !b.kill.iter().any(|k| k.0 == sender) {
+            b.kill.push((sender, free));
+        }
+    }
+}
+
+/// Voice_ProcessEvent (public SDK ids): 1 GetLength, 2 GetColor, 3 GetVelocity, 4 GetRelVelocity, 5 GetRelTime (floats
+/// as their bits), 6 SetLinkVelocity.
+unsafe extern "system" fn voice_process_event(this: *mut HostObject, sender: IntPtr, id: IntPtr, _v: IntPtr, _f: IntPtr) -> IntPtr {
+    let bits = |x: f32| x.to_bits() as IntPtr;
     match id {
-        1 => -1,   // GetLength: undefined
-        3 => 0,    // GetVelocity (float bits); 0 → plugins fall back to InitLevels.Vol
+        1 => -1, // length in ticks: undefined (notes are released by the host)
+        2 => 0,  // colour 0
+        3 => {
+            let vel = book(this).and_then(|b| b.velocity.iter().find(|v| v.0 == sender).map(|v| v.1));
+            bits(vel.unwrap_or(DEFAULT_VELOCITY))
+        }
+        4 => bits(DEFAULT_RELEASE_VELOCITY),
+        5 => bits(1.0),
         _ => 0,
     }
 }
+
+/// A note's default velocity (100 of 128) and release velocity (64 of 128), as the plugin sees them.
+pub const DEFAULT_VELOCITY: f32 = 100.0 / 128.0;
+const DEFAULT_RELEASE_VELOCITY: f32 = 0.5;
 
 /// Adds a mono or stereo source into a stereo destination, ramping from the last levels.
 unsafe fn add_wave(stereo_src: bool, src: *const f32, dst: *mut f32, len: i32, lvol: f32, rvol: f32, last_l: *mut f32, last_r: *mut f32) {
@@ -248,12 +304,11 @@ unsafe extern "system" fn time_f64(_this: *mut HostObject) -> f64 {
     0.0
 }
 
-/// ComputeLRVol: pan −1..1, volume → left/right levels.
-/// Assumption (not yet measured): a balance law, unity at center.
+/// ComputeLRVol: the host's pan split of `vol` at `pan` (spec: "Voices"; `audio/conventions.md` "Pan split"): centred,
+/// each side is `vol * 0.7071`.
 unsafe extern "system" fn compute_lr_vol(_this: *mut HostObject, l: *mut f32, r: *mut f32, pan: f32, vol: f32) {
     if let (Some(l), Some(r)) = (l.as_mut(), r.as_mut()) {
-        *l = vol * (1.0 - pan).min(1.0);
-        *r = vol * (1.0 + pan).min(1.0);
+        (*l, *r) = os_dsp::level::pan_split(vol, pan);
     }
 }
 
@@ -309,7 +364,7 @@ const fn build_vtable() -> [*const c_void; SLOTS] {
     v[1] = noop as *const c_void; // OnParamChanged
     v[2] = noop as *const c_void; // OnHint
     v[3] = compute_lr_vol_old as *const c_void;
-    v[4] = noop as *const c_void; // Voice_Release (plugin asks host to release: ignore)
+    v[4] = voice_release as *const c_void;
     v[5] = voice_kill as *const c_void;
     v[6] = voice_process_event as *const c_void;
     v[7] = lock_enter as *const c_void; // LockMix

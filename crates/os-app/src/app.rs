@@ -1427,9 +1427,20 @@ impl App {
                 }
             }
         }
-        if let Some((row, pick)) = self.state.pending_plugin.take() {
-            // `pick` indexes the picker's hosted generators (Open Sampler is left out there).
-            let index = self.state.hosted_generators.get(pick).and_then(|n| self.plugins.index_of(n)).unwrap_or(usize::MAX);
+        // `pick` indexes the picker's hosted generators (Open Sampler is left out there). A native generator waits
+        // for its first check in a child process (`Plugins::instrument_ready`).
+        let pending = self.state.pending_plugin.map(|(row, pick)| {
+            (row, self.state.hosted_generators.get(pick).and_then(|n| self.plugins.index_of(n)).unwrap_or(usize::MAX))
+        });
+        if let Some((_, index)) = pending.filter(|&(_, index)| !self.plugins.instrument_ready(index)) {
+            let name = self.plugins.names().get(index).cloned().unwrap_or_default();
+            let msg = format!("Trying {name} before its first load...");
+            if self.state.message.as_deref() != Some(msg.as_str()) {
+                self.state.message = Some(msg);
+                self.invalidate();
+            }
+        } else if let Some((row, index)) = pending {
+            self.state.pending_plugin = None;
             match self.plugins.create(row, index) {
                 Ok(name) => {
                     self.state.hosted_rows.push(row);
@@ -2390,9 +2401,10 @@ impl App {
                 let on = !os_native::enabled();
                 os_native::set_enabled(on);
                 self.scan_plugins();
-                let n = self.plugins.effects.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
+                let native = |l: &[crate::plugins::Available]| l.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
+                let (g, n) = (native(&self.plugins.available), native(&self.plugins.effects));
                 self.state.message = Some(if on {
-                    format!("Experimental native plugin host on: {n} native effects available")
+                    format!("Experimental native plugin host on: {g} native generators and {n} native effects available")
                 } else {
                     "Experimental native plugin host off".into()
                 });

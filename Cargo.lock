@@ -2497,6 +2497,7 @@ name = "os-native"
 version = "0.0.1"
 dependencies = [
  "libloading 0.8.9",
+ "os-dsp",
  "os-engine",
  "os-host",
  "thiserror 2.0.21",
@@ -2508,6 +2509,7 @@ name = "os-native-probe"
 version = "0.0.1"
 dependencies = [
  "os-engine",
+ "os-host",
  "os-native",
  "windows-sys 0.61.2",
 ]

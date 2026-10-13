@@ -71,7 +71,8 @@ fn main() {
     if i.num_params > 12 {
         println!("  … {} more", i.num_params - 12);
     }
-    let state = p.save_state();
+    println!("methods sharing one function (unimplemented): {:?}", p.shared_methods());
+    let state = p.save_state().unwrap_or_default();
     println!("default state: {} bytes, head {:02x?}", state.len(), &state[..state.len().min(24)]);
     report_log();
 
@@ -89,64 +90,14 @@ fn main() {
     }
 
     if i.is_generator() {
-        p.set_tempo(130.0, 96);
-        p.set_enabled(true);
-        p.set_playing(true);
-        let mut audio = Vec::new();
-        let mut buf = vec![0.0f32; block * 2];
-        let voice = p.trigger(60.0, 0.78125, 0.0, 1);
-        let total = rate as usize * 2;
-        let release_at = rate as usize;
-        let mut done = 0;
-        let mut alive = true;
-        let wants_tick = i.flags & os_native::abi::flags::WANT_NEW_TICK != 0;
-        // Samples per tick at this tempo/PPQ, so NewTick fires at tick boundaries like FL.
-        let spt = (rate as f32 * 60.0 / 130.0 / 96.0).max(1.0);
-        let mut next_tick = 0.0f32;
-        while done < total {
-            buf.fill(0.0);
-            if wants_tick {
-                while (done as f32) >= next_tick {
-                    p.new_tick();
-                    next_tick += spt;
-                }
-            }
-            if done >= release_at && done < release_at + block {
-                p.release(voice);
-            }
-            let n = if i.uses_voice_render() {
-                if alive {
-                    let (n, more) = p.voice_render(voice, &mut buf);
-                    alive = more;
-                    if n == 0 { block } else { n }
-                } else {
-                    block
-                }
-            } else {
-                let n = p.gen_render(&mut buf);
-                if n == 0 { block } else { n }
-            };
-            audio.extend_from_slice(&buf[..n * 2]);
-            done += n;
-            p.idle();
-        }
-        let killed = p.killed_voices();
-        p.kill(voice);
-        let peak = audio.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-        // How long was there audible output (sustain check)?
-        let active = audio.chunks(2).rposition(|s| s[0].abs() > 1e-4 || s[1].abs() > 1e-4).unwrap_or(0);
-        println!(
-            "rendered {:.2} s, peak {peak:.4}, last audible {:.3} s, plugin-killed voices {:?}",
-            audio.len() as f64 / 2.0 / f64::from(rate),
-            active as f64 / f64::from(rate),
-            killed
-        );
-        if let Some(out) = out {
-            let mut f = std::io::BufWriter::new(std::fs::File::create(&out).expect("create wav"));
-            os_engine::wav::write_f32_stereo(&mut f, rate, &audio).expect("write wav");
-            println!("wrote {}", out.display());
-        }
+        generator_report(p, rate, out.as_deref());
         report_log();
+        println!("unloaded cleanly");
+        #[cfg(windows)]
+        if sandbox71 {
+            report_sandbox();
+        }
+        return;
     } else {
         // Effect: push a 1 kHz sine through it and report what changed. Effects do not set
         // WantNewTick and must not be sent NewTick (it crashes them).
@@ -192,6 +143,159 @@ fn main() {
     #[cfg(windows)]
     if sandbox71 {
         report_sandbox();
+    }
+}
+
+/// Fundamental of `x` (mono) by autocorrelation: the shortest lag within 95 % of the best one, 30..4000 Hz.
+fn pitch_of(x: &[f32], rate: u32) -> Option<f64> {
+    let (lo, hi) = ((rate / 4000) as usize, (rate / 30) as usize);
+    if x.len() < hi * 2 || x.iter().all(|s| s.abs() < 1e-6) {
+        return None;
+    }
+    let w = x.len() - hi;
+    let corr: Vec<f64> = (lo..hi)
+        .map(|lag| {
+            let (mut c, mut e0, mut e1) = (0.0f64, 0.0f64, 0.0f64);
+            for i in 0..w {
+                let (a, b) = (f64::from(x[i]), f64::from(x[i + lag]));
+                c += a * b;
+                e0 += a * a;
+                e1 += b * b;
+            }
+            c / (e0 * e1).sqrt().max(1e-12)
+        })
+        .collect();
+    let best = corr.iter().cloned().fold(f64::MIN, f64::max);
+    // The first local peak within 95 % of the best.
+    let k = (1..corr.len() - 1).find(|&k| corr[k] >= 0.95 * best && corr[k] >= corr[k - 1] && corr[k] >= corr[k + 1])?;
+    // Parabolic refinement.
+    let (a, b, c) = (corr[k - 1], corr[k], corr[k + 1]);
+    let d = 0.5 * (a - c) / (a - 2.0 * b + c);
+    Some(f64::from(rate) / ((lo + k) as f64 + if d.is_finite() { d } else { 0.0 }))
+}
+
+fn stats(x: &[f32]) -> (f32, f64) {
+    let peak = x.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    let rms = (x.iter().map(|s| f64::from(*s) * f64::from(*s)).sum::<f64>() / x.len().max(1) as f64).sqrt();
+    (peak, rms)
+}
+
+/// Generators: (1) the plugin's own calls, a voice started at pitch 0 and at pitch 6000 cents (which one is key 60?);
+/// (2) the hosted path the app uses: a C5 note at velocity 100 through the adapter for 1 s, note off, then until the
+/// plugin has finished the voice (at most 10 s).
+fn generator_report(mut p: Plugin, rate: u32, out: Option<&std::path::Path>) {
+    use os_engine::instrument::Instrument;
+    use os_host::Plugin as _;
+    let block = 512;
+    p.set_tempo(130.0, 96);
+    p.set_enabled(true);
+    p.set_playing(true);
+    let spt = f64::from(rate) * 60.0 / 130.0 / 96.0;
+    // NewTick only for plugins that ask for it (others leave it unimplemented).
+    let wants_tick = p.info.flags & os_native::abi::flags::WANT_NEW_TICK != 0;
+    for (tag, pitch) in [(1000, 0.0f32), (1001, 6000.0)] {
+        let lv = os_native::abi::LevelParams { pan: 0.0, vol: 1.0, pitch, fcut: 0.0, fres: 0.0 };
+        let Some(v) = p.trigger(lv, lv, 100.0 / 128.0, tag) else {
+            match p.stop_reason() {
+                Some(why) => println!("pitch {pitch}: the plugin stopped while starting the voice ({why})"),
+                None => println!("pitch {pitch}: the plugin started no voice"),
+            }
+            continue;
+        };
+        println!("  voice handle {:#x}", v.handle());
+        let mut audio = Vec::new();
+        let mut buf = vec![0.0f32; block * 2];
+        let mut to_tick = 0.0;
+        let mut kills = 0;
+        let mut freed = false;
+        while audio.len() < rate as usize {
+            if to_tick <= 0.0 {
+                if wants_tick {
+                    p.new_tick();
+                }
+                to_tick += spt;
+            }
+            let len = (to_tick.ceil() as usize).clamp(1, block);
+            buf[..len * 2].fill(0.0);
+            let got = if p.info.uses_voice_render() { p.voice_render(&v, &mut buf[..len * 2]).0 } else { p.gen_render(&mut buf[..len * 2]) };
+            audio.extend(buf[..len * 2].chunks(2).map(|f| f[0]));
+            let _ = got;
+            to_tick -= len as f64;
+            let (kill, _) = p.take_voice_requests();
+            kills += kill.len();
+            freed |= kill.iter().any(|k| k.0 == tag && !k.1);
+        }
+        // The plugin may have freed the voice itself (a kill request without KillHandle).
+        if freed {
+            p.forget(v);
+        } else {
+            p.kill(v);
+        }
+        let sus = &audio[rate as usize / 5..];
+        let (peak, rms) = stats(sus);
+        let f = pitch_of(&sus[..sus.len().min(8192)], rate);
+        println!("raw voice at pitch {pitch:>6}: {} peak {peak:.4} rms {rms:.4}, kill requests {kills}",
+            f.map_or("no pitch".into(), |f| format!("{f:8.2} Hz")));
+    }
+    p.take_voice_requests();
+
+    let desc = os_host::Descriptor {
+        format: os_host::Format::Native,
+        id: p.info.long_name.clone(),
+        name: p.info.long_name.clone(),
+        vendor: String::new(),
+        version: String::new(),
+        features: Vec::new(),
+        kind: os_host::Kind::Instrument,
+        path: Default::default(),
+    };
+    let mut g = os_native::adapter::NativePlugin::new(p, desc);
+    if !g.activate(rate) {
+        println!("hosted: the plugin stopped while starting");
+        return;
+    }
+    let (mut l, mut r) = (vec![0.0f32; block], vec![0.0f32; block]);
+    let mut audio: Vec<f32> = Vec::new();
+    g.note_on(0, 60, 100.0 / 128.0);
+    let mut released_at = None;
+    let mut ended_at = None;
+    while audio.len() / 2 < rate as usize * 11 {
+        let t = audio.len() / 2;
+        if released_at.is_none() && t >= rate as usize {
+            g.note_off(0, 60);
+            released_at = Some(t);
+        }
+        g.process(rate, &mut l, &mut r);
+        for i in 0..block {
+            audio.push(l[i]);
+            audio.push(r[i]);
+        }
+        if released_at.is_some() && !g.active() {
+            ended_at = Some(audio.len() / 2);
+            break;
+        }
+    }
+    let frames = audio.len() / 2;
+    let left: Vec<f32> = audio.chunks(2).map(|f| f[0]).collect();
+    let sus = &left[rate as usize / 5..rate as usize];
+    let (peak, rms) = stats(sus);
+    let (rpeak, rrms) = stats(&audio.chunks(2).map(|f| f[1]).collect::<Vec<_>>()[rate as usize / 5..rate as usize]);
+    let f = pitch_of(&sus[..sus.len().min(8192)], rate);
+    let audible = left.iter().rposition(|s| s.abs() > 1e-4).unwrap_or(0);
+    println!(
+        "hosted C5 vel 100: {} L peak {peak:.4} rms {rms:.4} | R peak {rpeak:.4} rms {rrms:.4}; note off at 1.000 s, voice {}, last audible {:.3} s",
+        f.map_or("no pitch".into(), |f| format!("{f:8.2} Hz")),
+        ended_at.map_or("still alive at 11 s".into(), |e| format!("ended {:.3} s", e as f64 / f64::from(rate))),
+        audible as f64 / f64::from(rate),
+    );
+    g.reset();
+    if let Some(out) = out {
+        let mut f = std::io::BufWriter::new(std::fs::File::create(out).expect("create wav"));
+        os_engine::wav::write_f32_stereo(&mut f, rate, &audio[..frames * 2]).expect("write wav");
+        println!("wrote {}", out.display());
+    }
+    if let Some(code) = os_host::Plugin::stopped(&g) {
+        println!("hosted: the plugin stopped ({})", os_native::guard::describe_with(code, &os_native::guard::last_message()));
     }
 }
 
