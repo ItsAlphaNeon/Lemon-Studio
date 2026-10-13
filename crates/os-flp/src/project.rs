@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use os_model::{
     Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
     Envelope, MixerTrack,
-    Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SlotPlugin, TimeMarker, CLIP_RECORD_LEN,
+    Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, CLIP_RECORD_LEN,
 };
 
 use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
@@ -71,6 +71,19 @@ mod id {
     /// (spec: audio/note-rules.md "Settings").
     pub const CH_CUT_GROUPS: u8 = 132;
     pub const CH_POLY: u8 = 221;
+    /// A sample channel's precomputed effects and loop option (spec: audio/precomputed-effects.md "Settings").
+    pub const SMP_PING_PONG: u8 = 20;
+    pub const SMP_FEEDBACK: u8 = 69;
+    pub const SMP_FLAGS: u8 = 70;
+    pub const SMP_CUTOFF: u8 = 71;
+    pub const SMP_BOOST: u8 = 74;
+    pub const SMP_FADE_OUT: u8 = 75;
+    pub const SMP_FADE_IN: u8 = 76;
+    pub const SMP_RESONANCE: u8 = 83;
+    pub const SMP_STEREO_DELAY: u8 = 85;
+    pub const SMP_POGO: u8 = 86;
+    pub const SMP_RING: u8 = 131;
+    pub const SMP_REVERB: u8 = 139;
     pub const GROUP_NAME: u8 = 231;
     pub const CURRENT_GROUP: u8 = 146;
 
@@ -781,7 +794,56 @@ fn load_sound(block: &[Event], levels: &dyn Fn(usize) -> Option<i32>) -> Channel
             }
         }
     }
+    s.fx = load_sample_fx(block);
     s
+}
+
+/// A channel's start, length, loop options and precomputed effects (spec: audio/precomputed-effects.md "Settings");
+/// what the file does not hold keeps the default. Only read: `apply` never writes these.
+fn load_sample_fx(block: &[Event]) -> SampleFx {
+    let find = |id: u8| block.iter().find(|e| e.id == id).map(int);
+    let mut f = SampleFx::default();
+    let word = |id: u8, v: &mut u16| {
+        if let Some(x) = find(id) {
+            *v = x as u16;
+        }
+    };
+    word(id::SMP_FLAGS, &mut f.flags);
+    word(id::SMP_BOOST, &mut f.boost);
+    word(id::SMP_FADE_OUT, &mut f.fade_out);
+    word(id::SMP_FADE_IN, &mut f.fade_in);
+    word(id::SMP_STEREO_DELAY, &mut f.stereo_delay);
+    word(id::SMP_POGO, &mut f.pogo);
+    word(id::SMP_FEEDBACK, &mut f.feedback);
+    word(id::SMP_CUTOFF, &mut f.cutoff);
+    word(id::SMP_RESONANCE, &mut f.resonance);
+    if let Some(x) = find(id::SMP_RING) {
+        (f.ring_mix, f.ring_freq) = (x as u16, (x >> 16) as u16);
+    }
+    if let Some(x) = find(id::SMP_REVERB) {
+        (f.reverb, f.reverb_type) = (x as u16, (x >> 16) as u16);
+    }
+    if let Some(x) = find(id::SMP_PING_PONG) {
+        f.ping_pong = x != 0;
+    }
+    if let Some(d) = block.iter().find(|e| e.id == id::CH_SAMPLE_SETTINGS).and_then(Event::data) {
+        let byte = |o: usize, v: &mut bool| {
+            if let Some(&b) = d.get(o) {
+                *v = b != 0;
+            }
+        };
+        byte(9, &mut f.remove_dc);
+        byte(80, &mut f.normalize);
+        byte(81, &mut f.polarity);
+        byte(156, &mut f.loop_follows_reverse);
+        let u32_at = |o: usize| d.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+        let u64_at = |o: usize| d.get(o..o + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+        f.crossfade = u32_at(84).unwrap_or(f.crossfade);
+        f.trim = u32_at(88).unwrap_or(f.trim);
+        f.start_bits = u64_at(128).unwrap_or(f.start_bits);
+        f.length_bits = u64_at(136).unwrap_or(f.length_bits);
+    }
+    f
 }
 
 /// The five 68-byte envelope records of a channel (spec: audio/channel-envelopes.md); missing or short
@@ -2973,6 +3035,84 @@ mod tests {
         assert_eq!((plain.channels[0].misc.fine, plain.channels[0].misc.main_pitch), (0, true));
         let m = plain.channels[0].misc;
         assert_eq!((m.cut, m.cut_by, m.max_poly, m.mono, m.porta, m.slide), (0, 0, 0, false, false, 500.0 / 1024.0));
+    }
+
+    /// A sample channel's start, length, loop options and precomputed effects are read in the file's units (spec:
+    /// audio/precomputed-effects.md "Settings"); writing the project back leaves their events as they were.
+    #[test]
+    fn precomputed_effect_settings_are_read_and_kept() {
+        let mut file = create(&new_project()).unwrap();
+        {
+            let ev = events_of_mut(&mut file).unwrap();
+            let ch0 = ev.iter().position(|e| e.id == id::CH_START).unwrap();
+            ev.retain(|e| {
+                ![
+                    id::SMP_PING_PONG,
+                    id::SMP_FEEDBACK,
+                    id::SMP_FLAGS,
+                    id::SMP_CUTOFF,
+                    id::SMP_BOOST,
+                    id::SMP_FADE_OUT,
+                    id::SMP_FADE_IN,
+                    id::SMP_RESONANCE,
+                    id::SMP_STEREO_DELAY,
+                    id::SMP_POGO,
+                    id::SMP_RING,
+                    id::SMP_REVERB,
+                    id::CH_SAMPLE_SETTINGS,
+                ]
+                .contains(&e.id)
+            });
+            let mut s215 = vec![0u8; 168];
+            (s215[9], s215[80], s215[81], s215[156]) = (1, 1, 1, 1);
+            s215[84..88].copy_from_slice(&512u32.to_le_bytes());
+            s215[88..92].copy_from_slice(&300u32.to_le_bytes());
+            s215[128..136].copy_from_slice(&0.25f64.to_le_bytes());
+            s215[136..144].copy_from_slice(&0.5f64.to_le_bytes());
+            let add = [
+                Event::new(id::SMP_PING_PONG, Value::U8(1)),
+                Event::new(id::SMP_FEEDBACK, Value::U16(64)),
+                Event::new(id::SMP_FLAGS, Value::U16(1 | 2 | 4 | 256)),
+                Event::new(id::SMP_CUTOFF, Value::U16(512)),
+                Event::new(id::SMP_BOOST, Value::U16(64)),
+                Event::new(id::SMP_FADE_OUT, Value::U16(256)),
+                Event::new(id::SMP_FADE_IN, Value::U16(1024)),
+                Event::new(id::SMP_RESONANCE, Value::U16(1000)),
+                Event::new(id::SMP_STEREO_DELAY, Value::U16(3072)),
+                Event::new(id::SMP_POGO, Value::U16(128)),
+                Event::new(id::SMP_RING, Value::U32(100 << 16 | 200)),
+                Event::new(id::SMP_REVERB, Value::U32(200)),
+                Event::new(id::CH_SAMPLE_SETTINGS, Value::var(s215)),
+            ];
+            for (k, e) in add.into_iter().enumerate() {
+                ev.insert(ch0 + 1 + k, e);
+            }
+        }
+        let bytes = file.to_bytes().unwrap();
+        let p = load(&FlpFile::parse(&bytes).unwrap()).unwrap();
+        let f = p.channels[0].sound.fx;
+        assert_eq!(
+            (f.flags, f.boost, f.fade_out, f.fade_in, f.stereo_delay, f.pogo, f.feedback, f.cutoff, f.resonance),
+            (263, 64, 256, 1024, 3072, 128, 64, 512, 1000)
+        );
+        assert_eq!((f.ring_mix, f.ring_freq, f.reverb, f.reverb_type), (200, 100, 200, 0));
+        assert_eq!((f.ping_pong, f.remove_dc, f.normalize, f.polarity, f.loop_follows_reverse), (true, true, true, true, true));
+        assert_eq!((f.crossfade, f.trim, f.start(), f.length()), (512, 300, 0.25, 0.5));
+        // Written back unchanged: the reader takes nothing the writer would rewrite.
+        let mut again = FlpFile::parse(&bytes).unwrap();
+        apply(&p, &mut again).unwrap();
+        assert_eq!(again.to_bytes().unwrap(), bytes);
+        // A short event 215 (older files) keeps the defaults past its end.
+        let mut short = FlpFile::parse(&bytes).unwrap();
+        {
+            let ev = events_of_mut(&mut short).unwrap();
+            let e = ev.iter_mut().find(|e| e.id == id::CH_SAMPLE_SETTINGS).unwrap();
+            *e = Event::new(id::CH_SAMPLE_SETTINGS, Value::var(vec![0u8; 112]));
+        }
+        let f = load(&short).unwrap().channels[0].sound.fx;
+        let d = SampleFx::default();
+        assert_eq!((f.crossfade, f.trim, f.start_bits, f.length_bits, f.remove_dc), (d.crossfade, d.trim, d.start_bits, d.length_bits, false));
+        assert_eq!(f.boost, 64);
     }
 
     /// Track switches (event 236 flags), the main volume (record 0 at 0x4000) and the main pitch (event 80) are

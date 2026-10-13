@@ -1,9 +1,9 @@
-//! Open Sampler sound: the precomputed tools / effects / time stretch that build the played sample, and the voices
-//! (pitch, loop, declicking, envelopes and LFOs of the five targets, channel filter).
+//! Open Sampler voices: pitch, loop, declicking, envelopes and LFOs of the five targets, the channel filter, and the
+//! realtime stretch methods. The played sample itself is built in `fx`.
 //!
 // spec: plugins/open-sampler.md (§5 Sound), audio/sampler-playback.md (pitch, velocity, resampling),
-// spec: audio/channel-envelopes.md (envelope laws), audio/sampler.md (the resampler, the end of a voice),
-// spec: audio/declick.md (opening and closing fades)
+// spec: audio/channel-envelopes.md (envelope laws), audio/sampler.md (the resampler, the loop, the end of a voice),
+// spec: audio/declick.md (opening and closing fades), audio/channel-filter.md, audio/voice-levels.md
 
 use std::f64::consts::PI;
 use std::sync::Arc;
@@ -11,390 +11,6 @@ use std::sync::Arc;
 use os_dsp::resample::{self, Quality};
 use os_dsp::stretch::Stream;
 use os_engine::{envelope, laws, Sample};
-
-use crate::params::FxKey;
-
-// ---------------------------------------------------------------------------------------------------------------
-// Precomputed tools and effects (spec §5.4, §5.5, §5.6)
-
-/// Builds the played sample from the loaded one and the precomputed settings, in the spec's order.
-pub fn precompute(raw: &Sample, k: &FxKey) -> Sample {
-    let sr = raw.rate.max(1) as f64;
-    let (mut l, mut r) = cut(raw, k.start, k.length, sr);
-    // Time stretching runs right after the start and length (spec §5.6).
-    if k.stretch {
-        let ratio = k.ratio_for(l.len() as f64 / sr);
-        let shift = 2f64.powf(f64::from(k.shift) / 1200.0);
-        if (ratio - 1.0).abs() > 1e-4 || (shift - 1.0).abs() > 1e-4 {
-            let st = stretch(&Sample { rate: raw.rate, left: l, right: r }, ratio, shift);
-            (l, r) = (st.left, st.right);
-        }
-    }
-    if k.dc {
-        remove_dc(&mut l);
-        remove_dc(&mut r);
-    }
-    if k.reverse {
-        l.reverse();
-        r.reverse();
-    }
-    if k.polarity {
-        l.iter_mut().chain(r.iter_mut()).for_each(|v| *v = -*v);
-    }
-    if k.swap {
-        std::mem::swap(&mut l, &mut r);
-    }
-    if k.fade_stereo {
-        fade_stereo(&mut l, &mut r);
-    }
-    // Effects page.
-    if k.eq.abs() > 1e-4 {
-        eq_tilt(&mut l, &mut r, k.eq, sr);
-    }
-    if k.rm_mix > 1e-4 {
-        ring_mod(&mut l, &mut r, k.rm_mix, k.rm_freq, sr);
-    }
-    if k.cut < 0.999 {
-        let fc = 8.0 * 15625f64.powf(f64::from(k.cut));
-        let damp = 4.0 - 3.8 * f64::from(k.res);
-        for ch in [&mut l, &mut r] {
-            Svf::new(fc, damp, sr).run_lp(ch);
-        }
-    }
-    if k.pogo.abs() > 1e-4 {
-        pogo(&mut l, &mut r, k.pogo, sr);
-    }
-    if k.sdelay.abs() > 1e-4 {
-        stereo_delay(&mut l, &mut r, k.sdelay, sr);
-    }
-    if k.reverb > 1e-4 {
-        reverb(&mut l, &mut r, k.reverb, k.reverb_b, sr);
-    }
-    if k.normalize {
-        normalize(&mut l, &mut r);
-    }
-    if k.boost > 1e-4 {
-        let g = 1.0 + 16.0 * k.boost;
-        l.iter_mut().chain(r.iter_mut()).for_each(|v| *v *= g);
-    }
-    if k.clip {
-        l.iter_mut().chain(r.iter_mut()).for_each(|v| *v = v.clamp(-1.0, 1.0));
-    }
-    fades(&mut l, &mut r, k.fade_in, k.fade_out);
-    if k.crossfade > 1e-4 {
-        crossfade(&mut l, &mut r, k);
-    }
-    if k.trim > 1e-4 {
-        trim(&mut l, &mut r, k.trim / 128.0);
-    }
-    Sample { rate: raw.rate, left: l, right: r }
-}
-
-/// Raised-cosine edge of `n` frames: 0 at `i` = 0, 1 at `n`.
-fn edge(i: usize, n: usize) -> f32 {
-    if n == 0 {
-        return 1.0;
-    }
-    (0.5 - 0.5 * (PI * i as f64 / n as f64).cos()) as f32
-}
-
-/// SMP START / LENGTH: keep frames `start·n .. length·n` with 3.5 ms raised-cosine edges at the cuts.
-fn cut(raw: &Sample, start: f32, length: f32, sr: f64) -> (Vec<f32>, Vec<f32>) {
-    let n = raw.frames();
-    let s0 = ((f64::from(start.clamp(0.0, 1.0)) * n as f64) as usize).min(n);
-    let e0 = ((f64::from(length.clamp(0.0, 1.0)) * n as f64).round() as usize).clamp(s0, n);
-    let mut l = raw.left[s0..e0].to_vec();
-    let mut r = raw.right[s0..e0].to_vec();
-    let fade = (0.0035 * sr).round() as usize;
-    let len = l.len();
-    if s0 > 0 {
-        for i in 0..fade.min(len) {
-            let g = edge(i, fade);
-            l[i] *= g;
-            r[i] *= g;
-        }
-    }
-    if e0 < n {
-        for i in 0..fade.min(len) {
-            let g = edge(i, fade);
-            l[len - 1 - i] *= g;
-            r[len - 1 - i] *= g;
-        }
-    }
-    (l, r)
-}
-
-fn remove_dc(ch: &mut [f32]) {
-    if ch.is_empty() {
-        return;
-    }
-    let mean = (ch.iter().map(|&v| f64::from(v)).sum::<f64>() / ch.len() as f64) as f32;
-    ch.iter_mut().for_each(|v| *v -= mean);
-}
-
-/// Left fades out and right fades in over the sample (quarter cosine / sine).
-fn fade_stereo(l: &mut [f32], r: &mut [f32]) {
-    let n = l.len().max(1) as f64;
-    for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
-        let t = i as f64 / n;
-        *a *= (PI * t / 2.0).cos() as f32;
-        *b *= (PI * t / 2.0).sin() as f32;
-    }
-}
-
-/// EQ tilt gains (low A, high B) at knob `v` (−1..1), interpolated in dB between the measured points.
-pub fn eq_gains(v: f32) -> (f64, f64) {
-    const PTS: [(f64, f64, f64); 5] = [(-1.0, 0.571, 1.93), (-0.5, 0.727, 1.38), (0.0, 1.0, 1.0), (0.5, 1.6, 0.76), (1.0, 4.0, 0.55)];
-    let v = f64::from(v.clamp(-1.0, 1.0));
-    for w in PTS.windows(2) {
-        let ((x0, a0, b0), (x1, a1, b1)) = (w[0], w[1]);
-        if v <= x1 {
-            let u = (v - x0) / (x1 - x0);
-            let db = |p: f64, q: f64| 10f64.powf((20.0 * p.log10() * (1.0 - u) + 20.0 * q.log10() * u) / 20.0);
-            return (db(a0, a1), db(b0, b1));
-        }
-    }
-    (4.0, 0.55)
-}
-
-fn eq_tilt(l: &mut [f32], r: &mut [f32], v: f32, sr: f64) {
-    let (a, b) = eq_gains(v);
-    let k = 1.0 - (-2.0 * PI * 1350.0 / sr).exp();
-    for ch in [l, r] {
-        let mut low = 0.0f64;
-        for x in ch.iter_mut() {
-            let xv = f64::from(*x);
-            low += k * (xv - low);
-            *x = (a * low + b * (xv - low)) as f32;
-        }
-    }
-}
-
-/// Ring modulation frequency (Hz) of the RM FREQ knob.
-pub fn rm_hz(v: f32) -> f64 {
-    61.25 + 1943.0 * f64::from(v.clamp(0.0, 1.0))
-}
-
-fn ring_mod(l: &mut [f32], r: &mut [f32], mix: f32, freq: f32, sr: f64) {
-    let w = 2.0 * PI * rm_hz(freq) / sr;
-    let m = f64::from(mix.clamp(0.0, 1.0));
-    for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
-        let ph = w * i as f64;
-        *a = (f64::from(*a) * ((1.0 - m) + ph.sin() * m)) as f32;
-        *b = (f64::from(*b) * ((1.0 - m) + ph.cos() * m)) as f32;
-    }
-}
-
-/// Pogo: a time warp that starts fast (or slow) and settles; the length stays, silence once the source ends.
-fn pogo(l: &mut Vec<f32>, r: &mut Vec<f32>, v: f32, sr: f64) {
-    let v = f64::from(v);
-    let (a, tau) = if v > 0.0 { (0.57 * v, 0.6) } else { (3.2 * -v, 0.023) };
-    let n = l.len();
-    let (src_l, src_r) = (std::mem::take(l), std::mem::take(r));
-    *l = vec![0.0; n];
-    *r = vec![0.0; n];
-    for i in 0..n {
-        let t = i as f64 / sr;
-        // Integral of 1 + a·e^(−t/τ).
-        let p = i as f64 + a * tau * sr * (1.0 - (-t / tau).exp());
-        if p >= (n - 1) as f64 {
-            break;
-        }
-        let j = p as usize;
-        let f = (p - j as f64) as f32;
-        l[i] = src_l[j] + (src_l[j + 1] - src_l[j]) * f;
-        r[i] = src_r[j] + (src_r[j + 1] - src_r[j]) * f;
-    }
-}
-
-/// Delays one channel by |v|·2048 frames (at 44.1 kHz); the sample grows by the delay. Positive delays the left.
-fn stereo_delay(l: &mut Vec<f32>, r: &mut Vec<f32>, v: f32, sr: f64) {
-    let d = (f64::from(v.abs()) * 2048.0 * sr / 44100.0).round() as usize;
-    if d == 0 {
-        return;
-    }
-    let n = l.len();
-    let (late, early) = if v > 0.0 { (l, r) } else { (r, l) };
-    let mut nl = vec![0.0; n + d];
-    nl[d..].copy_from_slice(late);
-    *late = nl;
-    early.resize(n + d, 0.0);
-}
-
-fn normalize(l: &mut [f32], r: &mut [f32]) {
-    let peak = l.iter().chain(r.iter()).fold(0.0f32, |m, v| m.max(v.abs()));
-    if peak > 1e-9 {
-        l.iter_mut().chain(r.iter_mut()).for_each(|v| *v /= peak);
-    }
-}
-
-/// IN: gain `clamp(1 − (1 − t)·4v)`; OUT: gain `clamp(1 − t·4v)` (t = position / length).
-fn fades(l: &mut [f32], r: &mut [f32], fin: f32, fout: f32) {
-    if fin <= 0.0 && fout <= 0.0 {
-        return;
-    }
-    let n = l.len().max(1) as f32;
-    for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
-        let t = i as f32 / n;
-        let g = (1.0 - (1.0 - t) * 4.0 * fin).clamp(0.0, 1.0) * (1.0 - t * 4.0 * fout).clamp(0.0, 1.0);
-        *a *= g;
-        *b *= g;
-    }
-}
-
-/// The last `(v/2)·n` frames before the loop end crossfade linearly into the frames from the loop start.
-fn crossfade(l: &mut [f32], r: &mut [f32], k: &FxKey) {
-    let n = l.len();
-    let (s, e) = if k.loop_on {
-        let s = (f64::from(k.loop_start) * n as f64) as usize;
-        let e = ((f64::from(k.loop_end) * n as f64) as usize).min(n);
-        (s.min(e), e)
-    } else {
-        (0, n)
-    };
-    let len = ((f64::from(k.crossfade) / 2.0 * n as f64) as usize).min(e - s).min(e.saturating_sub(s));
-    if len < 2 {
-        return;
-    }
-    for ch in [l, r] {
-        for kk in 0..len {
-            let w = kk as f32 / len as f32;
-            let d = e - len + kk;
-            ch[d] = ch[d] * (1.0 - w) + ch[s + kk] * w;
-        }
-    }
-}
-
-/// Removes leading and trailing frames below `thr` (linear) on both channels.
-fn trim(l: &mut Vec<f32>, r: &mut Vec<f32>, thr: f32) {
-    let loud = |i: usize| l[i].abs() >= thr || r[i].abs() >= thr;
-    let n = l.len();
-    let Some(a) = (0..n).find(|&i| loud(i)) else {
-        l.clear();
-        r.clear();
-        return;
-    };
-    let b = (0..n).rev().find(|&i| loud(i)).unwrap_or(a) + 1;
-    l.truncate(b);
-    r.truncate(b);
-    l.drain(..a);
-    r.drain(..a);
-}
-
-/// Topology-preserving 2-pole state-variable filter (one channel).
-#[derive(Clone, Copy, Default)]
-struct Svf {
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    k: f64,
-    ic1: f64,
-    ic2: f64,
-}
-
-impl Svf {
-    fn new(fc: f64, k: f64, sr: f64) -> Svf {
-        let mut s = Svf::default();
-        s.set(fc, k, sr);
-        s
-    }
-    fn set(&mut self, fc: f64, k: f64, sr: f64) {
-        let g = (PI * fc.clamp(10.0, sr * 0.45) / sr).tan();
-        self.k = k;
-        self.a1 = 1.0 / (1.0 + g * (g + k));
-        self.a2 = g * self.a1;
-        self.a3 = g * self.a2;
-    }
-    /// One sample: (low, band, high).
-    #[inline]
-    fn tick(&mut self, x: f64) -> (f64, f64, f64) {
-        let v3 = x - self.ic2;
-        let v1 = self.a1 * self.ic1 + self.a2 * v3;
-        let v2 = self.ic2 + self.a2 * self.ic1 + self.a3 * v3;
-        self.ic1 = 2.0 * v1 - self.ic1;
-        self.ic2 = 2.0 * v2 - self.ic2;
-        (v2, v1, x - self.k * v1 - v2)
-    }
-    fn run_lp(&mut self, ch: &mut [f32]) {
-        for x in ch.iter_mut() {
-            *x = self.tick(f64::from(*x)).0 as f32;
-        }
-    }
-}
-
-/// Reverb RT60 in seconds for an amount (type B: 0.45 s at 50 %, 1.1 s at 100 %; type A: 1.0 s at 100 %).
-pub fn reverb_rt60(v: f32, b: bool) -> f64 {
-    (if b { 1.1 } else { 1.0 }) * f64::from(v.clamp(0.0, 1.0)).powf(1.29)
-}
-
-/// Freeverb-like reverb with the measured dry level, wet level and decay; the sample grows by the audible tail.
-fn reverb(l: &mut Vec<f32>, r: &mut Vec<f32>, v: f32, b: bool, sr: f64) {
-    const COMBS: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
-    const ALLPASS: [usize; 4] = [556, 441, 341, 225];
-    const SPREAD: usize = 23;
-    let rt = reverb_rt60(v, b).max(0.05);
-    // Dry / wet as measured at 50 % and up; below that both ease in from no effect (Lemon Studio choice).
-    let ease = f64::from((v / 0.5).min(1.0));
-    let (dry_full, wet_db) = if b { (0.945, -17.0) } else { (0.8, -9.5) };
-    let dry = 1.0 - (1.0 - dry_full) * ease;
-    let wet_target = 10f64.powf(wet_db / 20.0) * ease;
-    let n = l.len();
-    let tail = ((rt * 1.5 * sr) as usize).min((20.0 * sr) as usize);
-    let total = n + tail;
-    let scale = sr / 44100.0;
-    let mut out = [vec![0.0f32; total], vec![0.0f32; total]];
-    for (ch, outc) in out.iter_mut().enumerate() {
-        let off = if ch == 0 { 0 } else { SPREAD };
-        let mut combs: Vec<(Vec<f64>, usize, f64, f64)> = COMBS
-            .iter()
-            .map(|&d| {
-                let len = (((d + off) as f64) * scale).round().max(1.0) as usize;
-                let fb = 10f64.powf(-3.0 * len as f64 / (sr * rt));
-                (vec![0.0; len], 0, fb, 0.0)
-            })
-            .collect();
-        let mut aps: Vec<(Vec<f64>, usize)> =
-            ALLPASS.iter().map(|&d| (vec![0.0; (((d + off) as f64) * scale).round().max(1.0) as usize], 0)).collect();
-        let damp = 0.2;
-        for (i, o) in outc.iter_mut().enumerate() {
-            let x = if i < n { 0.5 * (f64::from(l[i]) + f64::from(r[i])) * 0.015 } else { 0.0 };
-            let mut acc = 0.0;
-            for (buf, idx, fb, store) in combs.iter_mut() {
-                let y = buf[*idx];
-                *store = y * (1.0 - damp) + *store * damp;
-                buf[*idx] = x + *store * *fb;
-                *idx = (*idx + 1) % buf.len();
-                acc += y;
-            }
-            for (buf, idx) in aps.iter_mut() {
-                let bv = buf[*idx];
-                buf[*idx] = acc + bv * 0.5;
-                *idx = (*idx + 1) % buf.len();
-                acc = bv - acc;
-            }
-            *o = acc as f32;
-        }
-    }
-    // Wet level relative to the input.
-    let rms = |a: &[f32]| (a.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>() / a.len().max(1) as f64).sqrt();
-    let rin = 0.5 * (rms(l) + rms(r));
-    let rwet = 0.5 * (rms(&out[0][..n.max(1).min(total)]) + rms(&out[1][..n.max(1).min(total)]));
-    let g = if rwet > 1e-12 { wet_target * rin / rwet } else { 0.0 };
-    l.resize(total, 0.0);
-    r.resize(total, 0.0);
-    for i in 0..total {
-        l[i] = (f64::from(l[i]) * dry + f64::from(out[0][i]) * g) as f32;
-        r[i] = (f64::from(r[i]) * dry + f64::from(out[1][i]) * g) as f32;
-    }
-    // Cut the tail where it falls below −54 dB.
-    let thr = 10f32.powf(-54.0 / 20.0);
-    let mut end = total;
-    while end > n && l[end - 1].abs() < thr && r[end - 1].abs() < thr {
-        end -= 1;
-    }
-    l.truncate(end);
-    r.truncate(end);
-}
 
 /// Time stretch to `ratio` × the length, the pitch moved by the factor `shift` (spec §5.6: Signalsmith Stretch).
 pub fn stretch(s: &Sample, ratio: f64, shift: f64) -> Sample {
@@ -477,15 +93,13 @@ pub struct Block {
     /// A realtime stretch method: voices stretch while they play.
     pub realtime: bool,
     pub targets: [Target; 5],
-    /// Filter type (index into `params::FILTERS`), MOD X / MOD Y positions.
+    /// Filter type (index into `params::FILTERS`), MOD X / MOD Y knob positions.
     pub f_type: u8,
-    pub f_cut: f64,
-    pub f_res: f64,
+    pub f_cut: f32,
+    pub f_res: f32,
     pub start_offset: f64,
+    /// "Use loop points": voices play the played sample's loop when it has one (the sampler flag of value 8).
     pub loop_on: bool,
-    pub loop_start: f64,
-    pub loop_end: f64,
-    pub pingpong: bool,
     pub declick: i32,
     pub zone: (i32, i32),
     pub add_key: bool,
@@ -506,9 +120,6 @@ impl Default for Block {
             f_res: 0.0,
             start_offset: 0.0,
             loop_on: false,
-            loop_start: 0.0,
-            loop_end: 1.0,
-            pingpong: false,
             declick: 0,
             zone: (0, crate::params::KEY_MAX),
             add_key: false,
@@ -618,8 +229,18 @@ impl Close {
     }
 }
 
-/// Frames between modulation updates.
+/// Frames between modulation updates: the voices' "tick" (**Lemon Studio**: a fixed 32 frames, where FL uses the
+/// sequencer's tick; filter coefficients, gain and pan targets change at these points).
 const CTL: usize = 32;
+
+/// A voice's pan gains for a pan position (−1..1, clamped): the constant-power split at √2, so a centred pan is 1 on
+/// both sides. The host applies the channel's own pan split on the instrument's output, so with either pan centred
+/// the product is the split of their sum (spec: audio/voice-levels.md "Final levels", audio/conventions.md
+/// "Pan split").
+pub fn pan_gains(pan: f64) -> (f32, f32) {
+    let a = (pan.clamp(-1.0, 1.0) + 1.0) * PI / 4.0;
+    ((std::f64::consts::SQRT_2 * a.cos()) as f32, (std::f64::consts::SQRT_2 * a.sin()) as f32)
+}
 
 #[derive(Clone, Copy)]
 struct Voice {
@@ -630,12 +251,15 @@ struct Voice {
     id: Option<i32>,
     vel: f32,
     pos: f64,
-    /// +1 forward, −1 backward (ping-pong loop).
-    dir: f64,
     /// Key rate times the sample / host rate ratio.
     key_step: f64,
     /// Host tuning of this key's voices, semitones (portamento glides; spec: audio/channel-voices.md).
     tune: f64,
+    /// The note's own pan (−1..1) and its filter offsets in knob units, from the host per note (CLAP note expression
+    /// PAN, per-note modulation of the filter knobs; spec: audio/voice-levels.md).
+    note_pan: f64,
+    mod_x: f32,
+    mod_y: f32,
     age: u64,
     off: Option<u64>,
     /// Opening length in samples: only a voice that starts inside its sample has one (0 = none).
@@ -643,7 +267,7 @@ struct Voice {
     /// The closing, once it has started (note end, choke, the end of the sample).
     close: Option<Close>,
     phase: [f64; 5],
-    filt: [[Svf; 2]; 2],
+    filt: Filter,
     /// Gain at the end of the last control span (ramps start here).
     gain: f32,
     pan: (f32, f32),
@@ -659,9 +283,8 @@ struct Rt {
     st: Stream,
     busy: bool,
     started: bool,
-    /// Next input frame and direction: the reader runs the stretcher's lead ahead of what is heard.
+    /// Next input frame: the reader runs the stretcher's lead ahead of what is heard.
     rpos: i64,
-    rdir: i64,
     /// Input frames owed (fractions of a frame carried to the next block).
     owed: f64,
     input: Vec<f32>,
@@ -679,7 +302,6 @@ impl Rt {
             busy: false,
             started: false,
             rpos: 0,
-            rdir: 1,
             owed: 0.0,
             input: Vec::with_capacity(RT_BLOCK * 16),
             l: vec![0.0; RT_BLOCK],
@@ -689,20 +311,12 @@ impl Rt {
         }
     }
 
-    /// Pushes the next input frame onto `input`: loops and ping-pong followed, silence past the end.
-    fn feed(&mut self, s: &Sample, (ls, le): (f64, Option<f64>), pingpong: bool) {
+    /// Pushes the next input frame onto `input`: the loop followed, silence past the end.
+    fn feed(&mut self, s: &Sample, (ls, le): (f64, Option<f64>)) {
         if let Some(le) = le {
             let (ls, le) = (ls as i64, le as i64);
-            if self.rdir > 0 && self.rpos >= le {
-                if pingpong {
-                    self.rdir = -1;
-                    self.rpos = (2 * le - self.rpos - 1).max(ls);
-                } else {
-                    self.rpos -= le - ls;
-                }
-            } else if self.rdir < 0 && self.rpos < ls {
-                self.rdir = 1;
-                self.rpos = (2 * ls - self.rpos).min(le - 1);
+            if self.rpos >= le {
+                self.rpos -= le - ls;
             }
         }
         let (a, b) = match usize::try_from(self.rpos) {
@@ -711,18 +325,18 @@ impl Rt {
         };
         self.input.push(a);
         self.input.push(b);
-        self.rpos += self.rdir;
+        self.rpos += 1;
     }
 
     /// The next output frame of a voice heard from `pos` on: `transpose` = the pitch factor, `speed` = input frames per
     /// output frame.
-    fn frame(&mut self, s: &Sample, pos: f64, transpose: f64, speed: f64, lp: (f64, Option<f64>), pingpong: bool) -> (f32, f32) {
+    fn frame(&mut self, s: &Sample, pos: f64, transpose: f64, speed: f64, lp: (f64, Option<f64>)) -> (f32, f32) {
         if !self.started {
             self.started = true;
-            (self.rpos, self.rdir, self.owed) = (pos.max(0.0).floor() as i64, 1, 0.0);
+            (self.rpos, self.owed) = (pos.max(0.0).floor() as i64, 0.0);
             self.input.clear();
             for _ in 0..self.st.lead() {
-                self.feed(s, lp, pingpong);
+                self.feed(s, lp);
             }
             self.st.set_transpose(transpose);
             self.st.start(&self.input, speed);
@@ -744,7 +358,7 @@ impl Rt {
             self.owed -= k;
             self.input.clear();
             for _ in 0..k as usize {
-                self.feed(s, lp, pingpong);
+                self.feed(s, lp);
             }
             self.st.set_transpose(transpose);
             self.st.process(&self.input, &mut self.l, &mut self.r);
@@ -755,6 +369,11 @@ impl Rt {
 
 pub struct Engine {
     pub sample: Option<Arc<Sample>>,
+    /// The played sample's loop (start and end frame, both inclusive), whether or not voices use it.
+    pub looped: Option<(usize, usize)>,
+    /// Frames of the played sample that the whole loaded file stands for: per-note starts from a host are fractions of
+    /// the file (0 = the played sample's own length).
+    pub file_frames: f64,
     /// How the resampler gets its weights: tables for live playback, the formula for an offline render.
     pub quality: Quality,
     rate: f32,
@@ -773,6 +392,8 @@ impl Engine {
     pub fn new(rate: f32) -> Self {
         Engine {
             sample: None,
+            looped: None,
+            file_frames: 0.0,
             quality: Quality::Table,
             rate,
             voices: Vec::with_capacity(MAX_VOICES),
@@ -853,6 +474,15 @@ impl Engine {
         self.voices.iter().filter(|v| v.close.is_none()).map(|v| v.key)
     }
 
+    /// The loop the voices play: the played sample's, when "Use loop points" is on and its end lies after its start
+    /// (spec: audio/sampler.md "The sample file"). Start and one past the end, in frames.
+    fn loop_frames(&self, b: &Block, n: usize) -> (f64, Option<f64>) {
+        match self.looped {
+            Some((s, e)) if b.loop_on && e > s && e < n => (s as f64, Some((e + 1) as f64)),
+            _ => (0.0, None),
+        }
+    }
+
     /// How many times its length the current sample lasts in Resample or a realtime method: TIME's length when set,
     /// else MUL (spec §5.6).
     fn stretch_factor(b: &Block, s: &Sample) -> f64 {
@@ -910,15 +540,17 @@ impl Engine {
             id,
             vel,
             pos,
-            dir: 1.0,
             key_step,
             tune: 0.0,
+            note_pan: 0.0,
+            mod_x: 0.0,
+            mod_y: 0.0,
             age: 0,
             off: None,
             open,
             close: None,
             phase,
-            filt: [[Svf::default(); 2]; 2],
+            filt: Filter::default(),
             gain: -1.0,
             pan: (1.0, 1.0),
             rt,
@@ -928,24 +560,28 @@ impl Engine {
     pub fn note_off(&mut self, key: u8, b: &Block) {
         let close = Close::new(&declick(b.declick), f64::from(self.rate));
         let vol_env = b.targets[VOL].env.is_some();
+        let looped = self.sample.as_ref().is_some_and(|s| self.loop_frames(b, s.frames()).1.is_some());
         for v in self.voices.iter_mut().filter(|v| v.key == key && v.off.is_none()) {
             v.off = Some(v.age);
             // A looping voice without a volume envelope closes at the note's end; a one-shot voice without one
             // ignores it (spec: audio/sampler.md "The end of a voice").
-            if b.loop_on && !vol_env && v.close.is_none() {
+            if looped && !vol_env && v.close.is_none() {
                 v.close = Some(close);
             }
         }
     }
 
-    /// A note that has not played yet starts `extra` (0..1 of the sample) further in, on top of START OFFSET
-    /// (spec §7: a trimmed audio clip).
+    /// A note that has not played yet starts `extra` further in, on top of START OFFSET: a fraction of the loaded file,
+    /// counted in the played sample's frames (spec §7: a trimmed audio clip; audio/precomputed-effects.md "Audio
+    /// clips": a trim selects frames of the processed sample by the file's rate).
     pub fn start_later(&mut self, id: i32, extra: f32, b: &Block) {
         let Some(s) = &self.sample else { return };
+        let n = s.frames() as f64;
+        let file = if self.file_frames > 0.0 { self.file_frames } else { n };
         let open = fade_len(declick(b.declick).open_ms, f64::from(self.rate));
         for v in self.voices.iter_mut().filter(|v| v.id == Some(id) && v.age == 0) {
-            let at = (b.start_offset + f64::from(extra)).clamp(0.0, 1.0);
-            v.pos = (at * s.frames() as f64).floor();
+            let at = b.start_offset.clamp(0.0, 1.0) * n + f64::from(extra.max(0.0)) * file;
+            v.pos = at.min(n).floor();
             v.open = if v.pos > 0.0 { open } else { 0 };
         }
     }
@@ -954,6 +590,33 @@ impl Engine {
     pub fn tune(&mut self, key: u8, semitones: f64) {
         for v in self.voices.iter_mut().filter(|v| v.key == key) {
             v.tune = semitones;
+        }
+    }
+
+    /// The voices a per-note event reaches: by note id when the host gives one, else by key.
+    fn of_note(&mut self, id: Option<i32>, key: u8) -> impl Iterator<Item = &mut Voice> {
+        self.voices.iter_mut().filter(move |v| match id {
+            Some(id) if id >= 0 => v.id == Some(id),
+            _ => v.key == key,
+        })
+    }
+
+    /// The note's own pan (−1..1, the CLAP note expression PAN), also for a voice that is already sounding.
+    pub fn pan(&mut self, id: Option<i32>, key: u8, pan: f32) {
+        for v in self.of_note(id, key) {
+            v.note_pan = f64::from(pan);
+        }
+    }
+
+    /// The note's filter offsets in knob units (per-note modulation of MOD X / MOD Y), also while it sounds.
+    pub fn modulate(&mut self, id: i32, mod_x: Option<f32>, mod_y: Option<f32>) {
+        for v in self.voices.iter_mut().filter(|v| v.id == Some(id)) {
+            if let Some(x) = mod_x {
+                v.mod_x = x;
+            }
+            if let Some(y) = mod_y {
+                v.mod_y = y;
+            }
         }
     }
 
@@ -995,12 +658,12 @@ impl Engine {
         let factor = Self::stretch_factor(b, &s);
         let rs = if b.realtime { 1.0 } else { 1.0 / factor };
         let speed = f64::from(s.rate) / rate / factor;
-        let (ls, le) = loop_frames(b, n);
+        let lp = self.loop_frames(b, n);
         let mut i = 0;
         while i < self.voices.len() {
             let v = &mut self.voices[i];
             let rt = v.rt.and_then(|k| self.streams.get_mut(usize::from(k)));
-            let alive = render_voice(v, rt, &s, b, (rs, speed), (ls, le), rate, self.quality, out_l, out_r);
+            let alive = render_voice(v, rt, &s, b, (rs, speed), lp, rate, self.quality, out_l, out_r);
             if alive {
                 i += 1;
             } else {
@@ -1011,27 +674,14 @@ impl Engine {
     }
 }
 
-/// Loop start / end in frames, `None` when no loop plays.
-fn loop_frames(b: &Block, n: usize) -> (f64, Option<f64>) {
-    if !b.loop_on {
-        return (0.0, None);
-    }
-    let ls = (b.loop_start.clamp(0.0, 1.0) * n as f64).floor();
-    let le = (b.loop_end.clamp(0.0, 1.0) * n as f64).floor().min(n as f64);
-    if le - ls < 2.0 {
-        (0.0, None)
-    } else {
-        (ls, Some(le))
-    }
-}
-
-/// Modulation at a voice time: gain, pan gains, extra cents, filter positions. `None` = the envelope has ended.
+/// Modulation at a voice time: gain, pan, extra cents, and the envelope and LFO parts of the filter knobs (singles).
+/// `None` = the envelope has ended.
 struct Mods {
     gain: f64,
     pan: f64,
     cents: f64,
-    cut: f64,
-    res: f64,
+    part_x: f32,
+    part_y: f32,
 }
 
 fn mods(v: &Voice, b: &Block, t: f64, off: Option<f64>) -> Option<Mods> {
@@ -1049,25 +699,20 @@ fn mods(v: &Voice, b: &Block, t: f64, off: Option<f64>) -> Option<Mods> {
         let w = lv / a.max(1e-9);
         gain *= 1.0 - a * (1.0 - w) / 2.0;
     }
-    let pan = lfo(PAN).clamp(-1.0, 1.0);
+    let pan = v.note_pan + lfo(PAN);
     let mut cents = lfo(PITCH) * 1200.0;
     if let Some(l) = env(PITCH) {
         cents += l.unwrap_or(0.0) * tg[PITCH].amount * 2400.0;
     }
-    let mut cut = b.f_cut + lfo(MODX) * 0.5;
+    let mut part_x = lfo(MODX) * 0.5;
     if let Some(l) = env(MODX) {
-        cut += l.unwrap_or(0.0) * tg[MODX].amount;
+        part_x += l.unwrap_or(0.0) * tg[MODX].amount;
     }
-    let mut res = b.f_res + lfo(MODY) * 0.5;
+    let mut part_y = lfo(MODY) * 0.5;
     if let Some(l) = env(MODY) {
-        res += l.unwrap_or(0.0) * tg[MODY].amount;
+        part_y += l.unwrap_or(0.0) * tg[MODY].amount;
     }
-    Some(Mods { gain, pan, cents, cut: cut.clamp(0.0, 1.0), res: res.clamp(0.0, 1.0) })
-}
-
-/// Channel filter cutoff (Hz) of a MOD X position (spec §5.3).
-pub fn filter_hz(cut: f64) -> f64 {
-    8.0 * 15625f64.powf(cut.clamp(0.0, 1.0))
+    Some(Mods { gain, pan, cents, part_x: part_x as f32, part_y: part_y as f32 })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1087,14 +732,6 @@ fn render_voice(
     let n = s.frames() as f64;
     let dc = declick(b.declick);
     let frame_s = 1.0 / rate;
-    // Low-pass types fully open and not modulated: no filter.
-    let lp_type = matches!(b.f_type, 0 | 1 | 5 | 6 | 7);
-    let modulated = b.targets[MODX].env.is_some() && b.targets[MODX].amount != 0.0
-        || b.targets[MODX].lfo.active()
-        || b.targets[MODY].env.is_some() && b.targets[MODY].amount != 0.0
-        || b.targets[MODY].lfo.active();
-    let bypass = lp_type && b.f_cut >= 0.999 && b.f_res <= 0.001 && !modulated;
-    let stages = if matches!(b.f_type, 5 | 7) { 2 } else { 1 };
     let mut f = 0;
     while f < len {
         let chunk = CTL.min(len - f);
@@ -1105,36 +742,26 @@ fn render_voice(
             Some(m) => m.gain,
             None => 0.0,
         };
+        // The filter's knob positions: the knob plus the note's offset, then the envelope and LFO part (spec:
+        // audio/channel-filter.md "Knob positions"; the host hands the note's mod X with the channel's offset in it).
+        let x = (b.f_cut + v.mod_x) + m0.part_x;
+        let y = (b.f_res + v.mod_y) + m0.part_y;
+        let corr = v.filt.tick(b.f_type, x, y, CTL, rate);
+        // The first span starts at the plain gain; type 5's correction is reached through the ramp.
         let g0 = if v.gain < 0.0 { m0.gain as f32 } else { v.gain };
-        let g1 = g1 as f32;
-        let pan = (((1.0 - m0.pan).min(1.0)) as f32, ((1.0 + m0.pan).min(1.0)) as f32);
+        let g1 = g1 as f32 * corr;
+        let pan = pan_gains(m0.pan);
         let (p0, p1) = (if v.gain < 0.0 { pan } else { v.pan }, pan);
-        if !bypass {
-            let fc = filter_hz(m0.cut);
-            let k = 2.0 - 1.95 * m0.res;
-            for st in v.filt.iter_mut().take(stages) {
-                for ch in st.iter_mut() {
-                    ch.set(fc, k, rate);
-                }
-            }
-        }
         // The pitch factor: a resampling step, or a realtime voice's transposition (with the stretch's PITCH).
         let step = v.key_step * 2f64.powf((b.cents + m0.cents + v.tune * 100.0 + b.ts_cents) / 1200.0) * rs;
         // What is heard moves on by `step` source frames per frame, or by `speed` in a realtime voice.
         let advance = if rt.is_some() { speed } else { step };
         for j in 0..chunk {
-            // Loop / end handling.
+            // The loop: past its end the position goes back by the loop's length (spec: audio/sampler.md "In a
+            // sustain loop").
             if let Some(le) = le {
-                if v.dir > 0.0 && v.pos >= le {
-                    if b.pingpong {
-                        v.dir = -1.0;
-                        v.pos = (2.0 * le - v.pos).max(ls);
-                    } else {
-                        v.pos -= le - ls;
-                    }
-                } else if v.dir < 0.0 && v.pos < ls {
-                    v.dir = 1.0;
-                    v.pos = (2.0 * ls - v.pos).min(le);
+                while v.pos >= le {
+                    v.pos -= le - ls;
                 }
             }
             if v.pos < 0.0 {
@@ -1146,24 +773,11 @@ fn render_voice(
                 v.close = Some(Close::new(&dc, rate));
             }
             let (mut l, mut r) = match rt.as_mut() {
-                Some(x) => x.frame(s, v.pos, step, speed, (ls, le), b.pingpong),
+                Some(x) => x.frame(s, v.pos, step, speed, (ls, le)),
                 None => resample::read(&s.left, &s.right, v.pos, step.abs(), quality),
             };
-            if !bypass {
-                let mut out = [f64::from(l), f64::from(r)];
-                for st in v.filt.iter_mut().take(stages) {
-                    for (c, x) in out.iter_mut().enumerate() {
-                        let (lo, bp, hi) = st[c].tick(*x);
-                        *x = match b.f_type {
-                            2 => bp,
-                            3 => hi,
-                            4 => lo + hi,
-                            _ => lo,
-                        };
-                    }
-                }
-                (l, r) = (out[0] as f32, out[1] as f32);
-            }
+            l = v.filt.run(0, j, l);
+            r = v.filt.run(1, j, r);
             // The fades act on the signal before the gains (spec: audio/declick.md "Where the fades sit"). FL works on
             // a voice's fades only once it closes, so an opening shows only on a voice that closes while it is younger
             // than its opening ("When the opening applies"); the step removal of modes 1 and 2 is not done here.
@@ -1182,9 +796,10 @@ fn render_voice(
             let (pl, pr) = (p0.0 + (p1.0 - p0.0) * u, p0.1 + (p1.1 - p0.1) * u);
             out_l[f + j] += l * g * pl;
             out_r[f + j] += r * g * pr;
-            v.pos += advance * v.dir;
+            v.pos += advance;
             v.age += 1;
         }
+        v.filt.end(chunk);
         v.gain = g1;
         v.pan = p1;
         for (i, t) in b.targets.iter().enumerate() {
@@ -1195,6 +810,219 @@ fn render_voice(
     true
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The channel filter (spec: audio/channel-filter.md)
+
+/// `Exp(double(single(z * single(ln base)))) - 1`: the curves of the filter's knob positions.
+fn curve(z: f64, ln_base: f32) -> f64 {
+    f64::from((z * f64::from(ln_base)) as f32).exp() - 1.0
+}
+
+/// `single(1 / 600)`.
+const INV600: f32 = (1.0 / 600.0) as f32;
+
+/// One side's memory of a biquad stage (singles).
+#[derive(Clone, Copy, Debug, Default)]
+struct Biquad {
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+/// One side's memory of a state-variable stage.
+#[derive(Clone, Copy, Debug, Default)]
+struct Svf {
+    low: f64,
+    band: f64,
+}
+
+/// What a tick's knob positions make of the filter.
+#[derive(Clone, Copy, Debug)]
+enum Coef {
+    /// Type 0 (the fast low-pass): its `c` moves by `step` per sample from where it stands; `r` at once.
+    Fast { step: f64, r: f64 },
+    /// Types 1 to 5: `b0, b1, b2, a1, a2` (singles), run once or twice (type 5).
+    Biquad { b: [f32; 5], twice: bool },
+    /// Types 6 and 7: `f`, `d`, and the second stage's `d` (type 7).
+    Svf { f: f64, d: f64, d2: Option<f64> },
+}
+
+/// A voice's filter (spec: audio/channel-filter.md): its memory per side, and the fast low-pass's `c`.
+#[derive(Clone, Copy, Debug)]
+struct Filter {
+    /// The fast low-pass passes the voice unfiltered until a setting first asks for filtering.
+    on: bool,
+    /// The fast low-pass's `c` (set in the voice's first tick, then gliding) and memory `v`, `o` per side.
+    c: Option<f64>,
+    fast: [(f64, f64); 2],
+    bq: [[Biquad; 2]; 2],
+    sv: [[Svf; 2]; 2],
+    coef: Coef,
+}
+
+impl Default for Filter {
+    fn default() -> Self {
+        Filter { on: false, c: None, fast: [(0.0, 0.0); 2], bq: Default::default(), sv: Default::default(), coef: Coef::Fast { step: 0.0, r: 0.0 } }
+    }
+}
+
+impl Filter {
+    /// Works out a tick's coefficients from the knob positions `x` (mod X) and `y` (mod Y), for a tick of `n` samples
+    /// at `rate`. Returns the gain correction (type 5; 1 otherwise).
+    fn tick(&mut self, kind: u8, x: f32, y: f32, n: usize, rate: f64) -> f32 {
+        let k = (44100.0 / rate) as f32;
+        match kind {
+            1..=5 => {
+                let ln51 = 51f64.ln() as f32;
+                let lnq = (0.625 * 51f64.ln()) as f32;
+                let w = ((curve(f64::from(x), ln51) * f64::from(0.0596f32) + 0.02) * f64::from(k)) as f32;
+                let w = w.max((0.02 * f64::from(k)) as f32).min(3.0);
+                let q = if y > 0.0 { (curve(f64::from(y.min(1.0)), lnq) * f64::from(0.4f32) + 0.1) as f32 } else { 0.1 };
+                let (sn, cs) = (f64::from(w).sin() as f32, f64::from(w).cos() as f32);
+                let alpha = sn / (2.0 * q);
+                let nn = 1.0 / (f64::from(alpha) + 1.0);
+                let (csd, al) = (f64::from(cs), f64::from(alpha));
+                let a1 = (nn * csd * -2.0) as f32;
+                let a2 = (nn * (1.0 - al)) as f32;
+                let b = match kind {
+                    2 => {
+                        let b0 = (nn * al) as f32;
+                        [b0, 0.0, -b0, a1, a2]
+                    }
+                    3 => {
+                        let b1 = (-(nn * (csd + 1.0))) as f32;
+                        [-b1 * 0.5, b1, -b1 * 0.5, a1, a2]
+                    }
+                    4 => {
+                        let b0 = nn as f32;
+                        [b0, a1, b0, a1, a2]
+                    }
+                    _ => {
+                        let b1 = (nn * (1.0 - csd)) as f32;
+                        [b1 * 0.5, b1, b1 * 0.5, a1, a2]
+                    }
+                };
+                self.coef = Coef::Biquad { b, twice: kind == 5 };
+                if kind == 5 {
+                    (1.0 - f64::from(q) * (3.2 - f64::from(w)) * 0.046875) as f32
+                } else {
+                    1.0
+                }
+            }
+            6 | 7 => {
+                let f = if x > 0.0 { (((f64::from(x) * 26f64.ln()).exp() - 1.0) as f32 * 0.04 * k).min(1.0) } else { 0.0 };
+                let yd = f64::from(y);
+                let d = if y <= 0.0 {
+                    1.0
+                } else if y < 1.0 {
+                    1.0 - 0.8 * yd
+                } else {
+                    0.2
+                };
+                self.coef = Coef::Svf { f: f64::from(f), d, d2: (kind == 7).then(|| d + (1.0 - d) * 0.25) };
+                1.0
+            }
+            _ => {
+                let ln601 = 601f64.ln() as f32;
+                let target = if x <= 0.0 {
+                    0.0
+                } else if x < 1.0 {
+                    (f64::from((curve(f64::from(x), ln601) * f64::from(INV600)) as f32) * f64::from(k)).min(1.0)
+                } else {
+                    1.0
+                };
+                let r = if y > 0.0 { 1.0 - f64::from((curve(1.0 - 0.625 * f64::from(y.min(1.0)), ln601) * f64::from(INV600)) as f32) } else { 0.0 };
+                self.on |= target != 1.0 || r != 0.0;
+                // The voice's first tick sets c; afterwards it glides by a limited step per sample.
+                let step = match self.c {
+                    None => {
+                        self.c = Some(target);
+                        0.0
+                    }
+                    Some(c) => {
+                        let limit = f64::from((f64::from(k) * 0.001) as f32);
+                        ((target - c) / n.max(1) as f64).clamp(-limit, limit)
+                    }
+                };
+                self.coef = Coef::Fast { step, r };
+                1.0
+            }
+        }
+    }
+
+    /// Sample `j` of the tick, one side (`side` 0 = left).
+    #[inline]
+    fn run(&mut self, side: usize, j: usize, x: f32) -> f32 {
+        match self.coef {
+            Coef::Fast { step, r } => {
+                if !self.on {
+                    return x;
+                }
+                let c = self.c.unwrap_or(1.0) + j as f64 * step;
+                let (v, o) = &mut self.fast[side];
+                *v += (f64::from(x) - *o) * c;
+                *o += *v;
+                *v *= r;
+                *o as f32
+            }
+            Coef::Biquad { b, twice } => {
+                let mut y = biquad(&mut self.bq[0][side], &b, x);
+                if twice {
+                    y = biquad(&mut self.bq[1][side], &b, y);
+                }
+                y
+            }
+            Coef::Svf { f, d, d2 } => {
+                let y = svf(&mut self.sv[0][side], f, d, f64::from(x));
+                match d2 {
+                    Some(d2) => svf(&mut self.sv[1][side], f, d2, f64::from(y)),
+                    None => y,
+                }
+            }
+        }
+    }
+
+    /// The end of a tick of `len` samples: the fast low-pass's `c` moves on, the state-variable memory is rounded.
+    fn end(&mut self, len: usize) {
+        match self.coef {
+            Coef::Fast { step, .. } => {
+                if let Some(c) = self.c.as_mut() {
+                    *c = f64::from((*c + step * len as f64) as f32);
+                }
+            }
+            Coef::Svf { .. } => {
+                for v in self.sv.iter_mut().flatten() {
+                    v.low = round_small(v.low);
+                    v.band = round_small(v.band);
+                }
+            }
+            Coef::Biquad { .. } => {}
+        }
+    }
+}
+
+/// A state-variable value at the end of a tick: rounded to single, set to 0 below 2^-24 in magnitude.
+fn round_small(v: f64) -> f64 {
+    let s = v as f32;
+    if s.abs() < 5.960_464_5e-8 { 0.0 } else { f64::from(s) }
+}
+
+#[inline]
+fn biquad(m: &mut Biquad, b: &[f32; 5], x: f32) -> f32 {
+    let d = |v: f32| f64::from(v);
+    let y = (d(x) * d(b[0]) + (((d(m.x2) * d(b[2]) + d(m.x1) * d(b[1])) - d(m.y1) * d(b[3])) - d(m.y2) * d(b[4]))) as f32;
+    (m.x2, m.x1, m.y2, m.y1) = (m.x1, x, m.y1, y);
+    y
+}
+
+#[inline]
+fn svf(m: &mut Svf, f: f64, d: f64, x: f64) -> f32 {
+    m.low += m.band * f;
+    m.band += (x - (m.band * d + m.low)) * f;
+    m.low as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1202,23 +1030,6 @@ mod tests {
     fn ramp(n: usize) -> Sample {
         let left: Vec<f32> = (0..n).map(|i| i as f32 / n as f32).collect();
         Sample { rate: 48000, right: left.clone(), left }
-    }
-
-    fn noise(n: usize, rate: u32) -> Sample {
-        let mut x: u32 = 12345;
-        let mut v = || {
-            x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
-            (x as f32 / u32::MAX as f32) * 2.0 - 1.0
-        };
-        let left: Vec<f32> = (0..n).map(|_| v() * 0.5).collect();
-        let right: Vec<f32> = (0..n).map(|_| v() * 0.5).collect();
-        Sample { rate, left, right }
-    }
-
-    fn fx() -> FxKey {
-        FxKey::neutral()
     }
 
     #[test]
@@ -1231,6 +1042,7 @@ mod tests {
         let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
         e.render(&mut l, &mut r, &b);
         assert_eq!(&l[..], &s.left[..64]);
+        assert_eq!(&r[..], &s.right[..64]);
         let (mut l2, mut r2) = (vec![0.0; 64], vec![0.0; 64]);
         e.render(&mut l2, &mut r2, &b);
         assert_eq!(l2[35], s.left[99]);
@@ -1306,62 +1118,33 @@ mod tests {
         assert!(last.0.abs() < 1e-3);
     }
 
+    // spec: audio/sampler.md "In a sustain loop": the played sample's loop, used while "Use loop points" is on.
     #[test]
     fn zone_and_loop() {
         let mut e = Engine::new(48000.0);
         e.sample = Some(Arc::new(ramp(100)));
+        e.looped = Some((50, 99));
         let b = Block { zone: (48, 59), ..Block::default() };
         e.note_on(60, 0.78, &b);
         assert!(!e.has_voices(), "outside the zone");
-        let b = Block { loop_on: true, loop_start: 0.5, loop_end: 1.0, ..Block::default() };
+        let b = Block { loop_on: true, ..Block::default() };
         e.note_on(60, 100.0 / 128.0, &b);
         let (mut l, mut r) = (vec![0.0; 400], vec![0.0; 400]);
         e.render(&mut l, &mut r, &b);
         assert!(e.has_voices(), "a loop keeps playing");
         assert_eq!(l[100], l[50], "jumps back to the loop start");
+        assert_eq!(l[99], l[149]);
         e.note_off(60, &b);
         let (mut l, mut r) = (vec![0.0; 2000], vec![0.0; 2000]);
         e.render(&mut l, &mut r, &b);
         assert!(!e.has_voices(), "note-off ends a loop without a volume envelope");
-    }
-
-    #[test]
-    fn tools_follow_the_measured_laws() {
-        let s = ramp(10);
-        assert_eq!(precompute(&s, &FxKey { reverse: true, ..fx() }).left[0], 0.9);
-        assert_eq!(precompute(&s, &FxKey { normalize: true, ..fx() }).left[9], 1.0);
-        // IN 39 %: gain 1 − (1 − t)·1.56.
-        let s = Sample { rate: 44100, left: vec![1.0; 1000], right: vec![1.0; 1000] };
-        let p = precompute(&s, &FxKey { fade_in: 0.39, ..fx() });
-        assert!((p.left[525] - 0.259).abs() < 0.01, "{}", p.left[525]);
-        let p = precompute(&s, &FxKey { fade_out: 0.39, ..fx() });
-        assert!(p.left[700] == 0.0 && (p.left[200] - 0.688).abs() < 0.01);
-        // Boost + clip.
-        let p = precompute(&Sample { rate: 44100, left: vec![0.1; 10], right: vec![0.1; 10] }, &FxKey { boost: 1.0, ..fx() });
-        assert!((p.left[0] - 1.7).abs() < 1e-5);
-        let p = precompute(&Sample { rate: 44100, left: vec![0.1; 10], right: vec![0.1; 10] }, &FxKey { boost: 1.0, clip: true, ..fx() });
-        assert_eq!(p.left[0], 1.0);
-        // Stereo delay grows the sample and delays the left side.
-        let p = precompute(&noise(1000, 44100), &FxKey { sdelay: 0.5, ..fx() });
-        assert_eq!(p.frames(), 2024);
-        assert_eq!(p.left[..1024].iter().filter(|v| **v != 0.0).count(), 0);
-        // Trim removes silence.
-        let mut q = noise(100, 44100);
-        q.left.splice(0..0, vec![0.0; 50]);
-        q.right.splice(0..0, vec![0.0; 50]);
-        assert!(precompute(&q, &FxKey { trim: 0.5, ..fx() }).frames() <= 100);
-    }
-
-    #[test]
-    fn effects_keep_their_shapes() {
-        let s = noise(44100, 44100);
-        let rev = precompute(&s, &FxKey { reverb: 1.0, ..fx() });
-        assert!(rev.frames() > s.frames(), "the reverb adds a tail");
-        let pg = precompute(&s, &FxKey { pogo: 1.0, ..fx() });
-        assert_eq!(pg.frames(), s.frames());
-        let (a, b) = eq_gains(0.5);
-        assert!((a - 1.6).abs() < 1e-9 && (b - 0.76).abs() < 1e-9);
-        assert!((rm_hz(0.5) - 1032.75).abs() < 1e-6);
+        // With "Use loop points" off the sample plays once, and the note's end does not cut it.
+        let b = Block::default();
+        e.note_on(60, 100.0 / 128.0, &b);
+        e.note_off(60, &b);
+        let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
+        e.render(&mut l, &mut r, &b);
+        assert_eq!(l[63], 63.0 / 100.0);
     }
 
     fn sine(hz: f64, n: usize) -> Sample {
@@ -1373,6 +1156,10 @@ mod tests {
     fn hz(x: &[f32]) -> f64 {
         let ups: Vec<usize> = x.windows(2).enumerate().filter(|(_, w)| w[0] < 0.0 && w[1] >= 0.0).map(|(i, _)| i).collect();
         (ups.len() - 1) as f64 * 48000.0 / (ups[ups.len() - 1] - ups[0]) as f64
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
     }
 
     /// Renders a held note of `key` for `secs` seconds at 48 kHz.
@@ -1400,7 +1187,6 @@ mod tests {
             let out = play(&mut e, key, &b, 2.5);
             let f = hz(&out[24000..72000]);
             assert!((f - 880.0).abs() < 4.0, "key {key}: {f} Hz");
-            let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
             assert!(rms(&out[80000..92000]) > 0.1, "key {key}: still playing after the sample's own length");
             assert!(!e.has_voices(), "key {key}: over after twice its length");
             e.reset();
@@ -1433,5 +1219,142 @@ mod tests {
         let zc = |v: &[f32]| v.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
         let c = zc(&st.left[24000..72000]);
         assert!((c as i32 - 440).abs() <= 6, "{c}");
+    }
+
+    /// Runs `n` ticks of a constant `x` through a filter of `kind` at knob positions `cut`, `res` (44.1 kHz); the
+    /// last output.
+    fn settle(kind: u8, cut: f32, res: f32, x: f32, ticks: usize) -> f32 {
+        let mut f = Filter::default();
+        let mut y = 0.0;
+        for _ in 0..ticks {
+            f.tick(kind, cut, res, CTL, 44100.0);
+            for j in 0..CTL {
+                y = f.run(0, j, x);
+                f.run(1, j, x);
+            }
+            f.end(CTL);
+        }
+        y
+    }
+
+    // spec: audio/channel-filter.md: the low-pass types and the band stop pass a constant, the band pass and the
+    // high pass remove it.
+    #[test]
+    fn the_filter_types_pass_or_block_a_constant() {
+        for kind in [0u8, 1, 4, 5, 6, 7] {
+            let y = settle(kind, 0.5, 0.0, 0.5, 400);
+            assert!((y - 0.5).abs() < 1e-3, "type {kind}: {y}");
+        }
+        for kind in [2u8, 3] {
+            let y = settle(kind, 0.5, 0.0, 0.5, 400);
+            assert!(y.abs() < 1e-3, "type {kind}: {y}");
+        }
+        // With resonance the fast low-pass still settles on the input.
+        let y = settle(0, 0.3, 0.6, 0.25, 2000);
+        assert!((y - 0.25).abs() < 1e-3, "{y}");
+    }
+
+    // spec: audio/channel-filter.md "Type 0": fully open and without resonance the fast low-pass is not running.
+    #[test]
+    fn an_open_fast_low_pass_leaves_the_voice_alone() {
+        let mut f = Filter::default();
+        assert_eq!(f.tick(0, 1.0, 0.0, CTL, 44100.0), 1.0);
+        assert_eq!(f.run(0, 0, 0.123), 0.123);
+        assert_eq!(f.run(1, 5, -0.5), -0.5);
+        // Once a setting asks for filtering it stays on, even back at the open position.
+        f.tick(0, 0.9, 0.0, CTL, 44100.0);
+        f.end(CTL);
+        f.tick(0, 1.0, 0.0, CTL, 44100.0);
+        assert!(f.on);
+    }
+
+    // spec: audio/channel-filter.md "Type 0": the first tick sets c, later ticks glide it by at most
+    // single(44100 / rate) * 0.001 per sample.
+    #[test]
+    fn the_fast_low_pass_glides() {
+        let mut f = Filter::default();
+        f.tick(0, 0.5, 0.0, CTL, 44100.0);
+        let c0 = f.c.unwrap();
+        assert!(c0 > 0.0 && c0 < 0.1, "{c0}");
+        f.end(CTL);
+        assert_eq!(f.c.unwrap(), c0, "no step in the first tick");
+        f.tick(0, 1.0, 0.0, CTL, 44100.0);
+        f.end(CTL);
+        let c1 = f.c.unwrap();
+        assert!((c1 - c0 - 0.032).abs() < 1e-6, "{c0} -> {c1}");
+    }
+
+    // spec: audio/channel-filter.md: type 5 lowers the voice's gain a little (the correction), the others do not.
+    #[test]
+    fn the_double_low_pass_corrects_its_gain() {
+        let mut f = Filter::default();
+        for kind in [0u8, 1, 2, 3, 4, 6, 7] {
+            assert_eq!(f.tick(kind, 0.7, 0.4, CTL, 44100.0), 1.0, "type {kind}");
+        }
+        let g = f.tick(5, 1.0, 0.0, CTL, 44100.0);
+        assert!((g - (1.0 - 0.1 * 0.2 * 0.046875) as f32).abs() < 1e-6, "{g}");
+        // Full resonance at the lowest cutoff: q = 0.4 * (51^0.625 - 1) + 0.1, w = 0.02.
+        let g = f.tick(5, 0.0, 1.0, CTL, 44100.0);
+        let q = 0.4 * ((0.625 * 51f64.ln()).exp() - 1.0) + 0.1;
+        assert!((f64::from(g) - (1.0 - q * 3.18 * 0.046875)).abs() < 1e-4, "{g}");
+    }
+
+    /// The level of a voice playing a sine of `hz` with the given block, after it settles.
+    fn level(hz: f64, b: &Block, f: impl Fn(&mut Engine)) -> (f32, f32) {
+        let mut e = Engine::new(48000.0);
+        e.sample = Some(Arc::new(sine(hz, 48000)));
+        e.note_on_id(60, 100.0 / 128.0, Some(7), b);
+        f(&mut e);
+        let (mut l, mut r) = (vec![0.0; 9600], vec![0.0; 9600]);
+        e.render(&mut l, &mut r, b);
+        (rms(&l[4800..]), rms(&r[4800..]))
+    }
+
+    #[test]
+    fn a_low_cutoff_dulls_the_voice() {
+        let open = level(9000.0, &Block::default(), |_| {}).0;
+        assert!((open - 0.5 / 2f32.sqrt()).abs() < 1e-3, "{open}");
+        for kind in [0u8, 1, 5, 6, 7] {
+            let b = Block { f_type: kind, f_cut: 0.2, ..Block::default() };
+            let dull = level(9000.0, &b, |_| {}).0;
+            assert!(dull < open * 0.1, "type {kind}: {dull}");
+        }
+    }
+
+    // spec: audio/voice-levels.md "Final levels": the note's mod X adds to the channel's.
+    #[test]
+    fn a_note_offset_moves_its_voices_filter() {
+        let b = Block { f_type: 1, f_cut: 1.0, ..Block::default() };
+        let open = level(1000.0, &b, |_| {}).0;
+        let dull = level(1000.0, &b, |e| e.modulate(7, Some(-0.8), None)).0;
+        assert!(open > 0.25 && dull < open * 0.2, "{open} {dull}");
+        // Other notes keep theirs; mod Y raises the resonance.
+        let other = level(1000.0, &b, |e| e.modulate(8, Some(-0.8), None)).0;
+        assert_eq!(other, open);
+        let b = Block { f_type: 1, f_cut: 0.75, ..Block::default() };
+        let plain = level(1000.0, &b, |_| {}).0;
+        let res = level(1000.0, &b, |e| e.modulate(7, None, Some(1.0))).0;
+        assert!(res != plain, "{plain} {res}");
+    }
+
+    // spec: audio/voice-levels.md "Final levels", audio/conventions.md "Pan split": the voice splits at √2 so the
+    // host's centred channel split makes the note's own split.
+    #[test]
+    fn a_note_pan_splits_the_voice() {
+        assert_eq!(pan_gains(0.0), (1.0, 1.0));
+        let (l, r) = pan_gains(-1.0);
+        assert!((l - 2f32.sqrt()).abs() < 1e-6 && r == 0.0);
+        let (l, r) = pan_gains(0.5);
+        let a = 1.5 * PI / 4.0;
+        assert!((l * std::f32::consts::FRAC_1_SQRT_2 - a.cos() as f32).abs() < 1e-6);
+        assert!((r * std::f32::consts::FRAC_1_SQRT_2 - a.sin() as f32).abs() < 1e-6);
+        // Pans beyond the range clamp.
+        assert_eq!(pan_gains(3.0), pan_gains(1.0));
+        let (open_l, open_r) = level(9000.0, &Block::default(), |_| {});
+        let (left, right) = level(9000.0, &Block::default(), |e| e.pan(Some(7), 60, -1.0));
+        assert!((left - open_l * 2f32.sqrt()).abs() < 1e-4 && right < 1e-6, "{left} {right} {open_r}");
+        // By key when the host names no note.
+        let (_, right) = level(9000.0, &Block::default(), |e| e.pan(None, 60, -1.0));
+        assert!(right < 1e-6);
     }
 }
