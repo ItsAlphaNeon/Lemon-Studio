@@ -1208,6 +1208,14 @@ pub mod target {
     pub const CHANNEL_VOLUME: u16 = 0;
     pub const CHANNEL_PAN: u16 = 1;
     pub const CHANNEL_PITCH: u16 = 4;
+    /// The channel's filter knobs and its level adjustments (event 229: pan offset, volume multiplier, mod X and mod
+    /// Y offsets; spec: audio/voice-levels.md "Values from automation").
+    pub const CHANNEL_CUTOFF: u16 = 2;
+    pub const CHANNEL_RESONANCE: u16 = 3;
+    pub const CHANNEL_PAN_OFFSET: u16 = 0x10;
+    pub const CHANNEL_VOLUME_MULT: u16 = 0x11;
+    pub const CHANNEL_MOD_X: u16 = 0x13;
+    pub const CHANNEL_MOD_Y: u16 = 0x14;
     pub const TEMPO: u32 = 0x4000_0005;
     pub const MIXER_VOLUME: u8 = 0xC0;
     pub const MIXER_PAN: u8 = 0xC1;
@@ -1260,6 +1268,9 @@ pub mod target {
         ChannelVolume(u16),
         ChannelPan(u16),
         ChannelPitch(u16),
+        /// Channel, one of its filter knobs or level adjustments ([`CHANNEL_CUTOFF`], [`CHANNEL_RESONANCE`],
+        /// [`CHANNEL_PAN_OFFSET`], [`CHANNEL_VOLUME_MULT`], [`CHANNEL_MOD_X`], [`CHANNEL_MOD_Y`]).
+        ChannelLevel(u16, u16),
         MixerVolume(u16),
         MixerPan(u16),
         MixerSeparation(u16),
@@ -1321,6 +1332,9 @@ pub mod target {
                 CHANNEL_VOLUME => Target::ChannelVolume(hi),
                 CHANNEL_PAN => Target::ChannelPan(hi),
                 CHANNEL_PITCH => Target::ChannelPitch(hi),
+                CHANNEL_CUTOFF | CHANNEL_RESONANCE | CHANNEL_PAN_OFFSET | CHANNEL_VOLUME_MULT | CHANNEL_MOD_X | CHANNEL_MOD_Y => {
+                    Target::ChannelLevel(hi, lo)
+                }
                 _ => Target::Other(t),
             };
         }
@@ -1331,7 +1345,12 @@ pub mod target {
     pub fn bipolar(t: u32) -> bool {
         matches!(
             decode(t),
-            Target::ChannelPan(_) | Target::ChannelPitch(_) | Target::MixerPan(_) | Target::MixerSeparation(_) | Target::MixerEq(_, _, 0)
+            Target::ChannelPan(_)
+                | Target::ChannelPitch(_)
+                | Target::ChannelLevel(_, CHANNEL_PAN_OFFSET | CHANNEL_VOLUME_MULT | CHANNEL_MOD_X | CHANNEL_MOD_Y)
+                | Target::MixerPan(_)
+                | Target::MixerSeparation(_)
+                | Target::MixerEq(_, _, 0)
         )
     }
 
@@ -1375,6 +1394,11 @@ pub mod target {
             // Track settings at a slot's place are nothing.
             assert_eq!(decode(slot(1, 2, MIXER_VOLUME)), Target::Other(slot(1, 2, MIXER_VOLUME)));
             assert!(bipolar(mixer(1, MIXER_SEPARATION)) && bipolar(mixer(1, EQ_GAIN)) && !bipolar(mixer(1, EQ_FREQ)));
+            // spec: audio/voice-levels.md "Values from automation"
+            assert_eq!(decode(channel(3, CHANNEL_CUTOFF)), Target::ChannelLevel(3, 2));
+            assert_eq!(decode(channel(3, CHANNEL_MOD_Y)), Target::ChannelLevel(3, 0x14));
+            assert_eq!(decode(channel(3, 0x12)), Target::Other(0x0003_0012));
+            assert!(bipolar(channel(0, CHANNEL_VOLUME_MULT)) && !bipolar(channel(0, CHANNEL_CUTOFF)));
         }
     }
 }

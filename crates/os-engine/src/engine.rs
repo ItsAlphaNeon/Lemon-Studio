@@ -178,6 +178,53 @@ struct ChannelState {
     /// An audio clip channel's own voice level, on what its hosted instrument plays (1 on other channels; spec:
     /// audio/audio-clips.md "Level").
     clip_level: f32,
+    /// The level adjustments and filter knobs as automation leaves them, and as the channel stores them.
+    adjust: Adjust,
+    init_adjust: Adjust,
+}
+
+/// A channel's level adjustments (event 229) and filter knob positions (spec: audio/voice-levels.md "The channel's
+/// levels", "Values from automation").
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Adjust {
+    /// Pan offset, -6400..6400.
+    pan: i32,
+    /// The volume multiplier as a gain: `curve(stored / 12800)`, 1 at the default 12800.
+    mult: f32,
+    /// Mod X and mod Y offsets, -256..256.
+    mods: [i32; 2],
+    /// Cutoff and resonance knobs (0..256) now and as stored: moving them changes the voices' mod X / mod Y by the
+    /// difference.
+    filter: [i32; 2],
+    stored_filter: [i32; 2],
+}
+
+impl Adjust {
+    /// The adjustments a channel stores (the model keeps them as knob positions: pan offset / 6400, (multiplier -
+    /// 12800) / 12800, mod offsets / 256).
+    fn of(ch: &os_model::Channel) -> Adjust {
+        let l = ch.misc.levels;
+        let at = |v: f32, scale: f32| (f64::from(v) * f64::from(scale)).round() as i32;
+        let filter = [ch.sound.cutoff, ch.sound.resonance];
+        Adjust {
+            pan: at(l[0], 6400.0).clamp(-6400, 6400),
+            mult: Adjust::multiplier((at(l[1], 12800.0) + 12800).clamp(0, 25600)),
+            mods: [at(l[2], 256.0).clamp(-256, 256), at(l[3], 256.0).clamp(-256, 256)],
+            filter,
+            stored_filter: filter,
+        }
+    }
+
+    /// The gain of a stored multiplier (0..25600): `curve(single(m) * single(1 / 12800))`.
+    fn multiplier(m: i32) -> f32 {
+        os_dsp::level::curve(os_dsp::level::knob(m, os_dsp::level::R12800))
+    }
+
+    /// The channel's mod X and mod Y: the offsets plus the filter knobs' moves, over 256.
+    fn mods(&self) -> (f32, f32) {
+        let m = |k: usize| (self.mods[k] + self.filter[k] - self.stored_filter[k]) as f32 / 256.0;
+        (m(0), m(1))
+    }
 }
 
 /// Glide of the channel's volume and pan parameters towards a control point's values.
@@ -240,6 +287,43 @@ impl ChannelState {
         self.knob = self.init_knob;
         self.vol_v = self.init_v;
         self.ramp = None;
+        self.adjust = self.init_adjust;
+    }
+
+    /// The pan with the channel's pan offset: `single(pan * 6400 + offset) * single(1 / 6400)`, the stored integers
+    /// added before they are scaled (spec: audio/voice-levels.md "The channel's levels"); the pan as it is without an
+    /// offset.
+    fn pan_of(&self, pan: f64) -> f64 {
+        if self.adjust.pan == 0 {
+            return pan;
+        }
+        f64::from((pan * 6400.0 + f64::from(self.adjust.pan)) as f32 * os_dsp::level::R6400)
+    }
+
+    /// The channel's levels for a hosted instrument.
+    fn levels(&self) -> crate::instrument::ChannelLevels {
+        let (mod_x, mod_y) = self.adjust.mods();
+        crate::instrument::ChannelLevels { volume: self.volume as f32, pan: self.pan_of(self.pan) as f32, mod_x, mod_y }
+    }
+
+    /// A value for one of the channel's filter knobs or level adjustments from an automation clip (`v` 0..1, spec:
+    /// audio/voice-levels.md "Values from automation"); sounding voices follow.
+    fn automate_level(&mut self, id: u16, v: f64) {
+        use os_model::target;
+        let round = |x: f64| x.round_ties_even() as i32;
+        let a = &mut self.adjust;
+        match id {
+            target::CHANNEL_CUTOFF => a.filter[0] = round(256.0 * v),
+            target::CHANNEL_RESONANCE => a.filter[1] = round(256.0 * v),
+            target::CHANNEL_PAN_OFFSET => a.pan = round(12800.0 * v) - 6400,
+            target::CHANNEL_VOLUME_MULT => {
+                a.mult = Adjust::multiplier(round(25600.0 * v));
+                self.volume = self.vol_gain(self.vol_v);
+            }
+            target::CHANNEL_MOD_X => a.mods[0] = round(512.0 * v) - 256,
+            target::CHANNEL_MOD_Y => a.mods[1] = round(512.0 * v) - 256,
+            _ => {}
+        }
     }
 
     /// Gain of a note that starts now: a glide in progress is already at its final values for it.
@@ -248,14 +332,16 @@ impl ChannelState {
             None => self.gain(vel, note_pan),
             Some(r) => {
                 let g = self.vol_gain(r.v1) * vel;
-                let (pl, pr) = laws::channel_pan(r.p1 + note_pan);
+                let (pl, pr) = laws::channel_pan(self.pan_of(r.p1) + note_pan);
                 ((g * pl) as f32, (g * pr) as f32)
             }
         }
     }
 
+    /// The channel's volume gain for volume parameter `v`: its level curve times the volume multiplier (spec:
+    /// audio/voice-levels.md "Final levels": the channel's two first), 0 when the channel is off.
     fn vol_gain(&self, v: f64) -> f64 {
-        if self.enabled { laws::channel_gain(v) } else { 0.0 }
+        if self.enabled { laws::channel_gain(v) * f64::from(self.adjust.mult) } else { 0.0 }
     }
 
     /// Moves the span-start values on by `frames` of a running glide.
@@ -312,6 +398,9 @@ impl ChannelState {
             ControlPoint::VOLUME => self.glide(Some((f64::from(value) / 12800.0).clamp(0.0, 1.0)), None, (f64::from(rate) * VOLUME_GLIDE_SECONDS).round() as u32),
             ControlPoint::PAN => self.glide(None, Some((f64::from(value) / 6400.0 - 1.0).clamp(-1.0, 1.0)), (f64::from(rate) * PAN_GLIDE_SECONDS).round() as u32),
             ControlPoint::PITCH => self.retune(f64::from(value)),
+            // The filter knobs' positions 0..256 (spec: audio/voice-levels.md "Values from automation").
+            os_model::target::CHANNEL_CUTOFF => self.adjust.filter[0] = value.clamp(0, 256),
+            os_model::target::CHANNEL_RESONANCE => self.adjust.filter[1] = value.clamp(0, 256),
             _ => {}
         }
     }
@@ -320,7 +409,7 @@ impl ChannelState {
     // spec: audio/sampler-playback.md (velocity multiplies volume; pans add, clamped)
     fn gain(&self, vel: f64, note_pan: f64) -> (f32, f32) {
         let g = self.volume * vel;
-        let (pl, pr) = laws::channel_pan(self.pan + note_pan);
+        let (pl, pr) = laws::channel_pan(self.pan_of(self.pan) + note_pan);
         ((g * pl) as f32, (g * pr) as f32)
     }
 }
@@ -746,7 +835,8 @@ impl Engine {
                     None
                 };
                 let env_on = ch.kind == ChannelKind::Sampler;
-                let volume = if ch.enabled { laws::channel_gain(ch.volume) } else { 0.0 };
+                let adjust = Adjust::of(ch);
+                let volume = if ch.enabled { laws::channel_gain(ch.volume) * f64::from(adjust.mult) } else { 0.0 };
                 // Stretching (spec: audio/time-stretch.md): resample plays the sample faster or slower; the other methods
                 // play a stretched copy, made once per library (the realtime ones one copy per key, made below). A
                 // library that leaves stretching to the host's sampler plugin plays them by resampling instead, at the
@@ -807,6 +897,8 @@ impl Engine {
                     realtime,
                     keyed: Vec::new(),
                     clip_level: if ch.kind == ChannelKind::AudioClip { os_dsp::level::audio_clip_level() } else { 1.0 },
+                    adjust,
+                    init_adjust: adjust,
                 };
                 state.retune(knob);
                 state.init.2 = state.base_rate;
@@ -1510,6 +1602,11 @@ impl Engine {
                         ch.retune(f64::from(laws::auto_pitch_cents(v)));
                     }
                 }
+                Target::ChannelLevel(c, id) => {
+                    if let Some(ch) = self.channels.get_mut(usize::from(c)) {
+                        ch.automate_level(id, v);
+                    }
+                }
                 // Volume Round(16000 v), pan Round((2 v - 1) * 6400), separation Round((2 v - 1) * 64) (spec:
                 // audio/mixer.md "Changes while the song plays"). At the start of playback the gains are at their
                 // targets at once.
@@ -1916,7 +2013,7 @@ impl Engine {
                 }
             }
             inst.transport(song);
-            let own_levels = inst.channel_levels(ch.volume as f32, ch.pan as f32);
+            let own_levels = inst.channel_levels(ch.levels());
             // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md Â§2).
             for (off, index, value) in self.params.channel_span(c, 0, n) {
                 inst.param(off, index, value);
@@ -2213,7 +2310,7 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
             // in the left / right gains (spec: audio/pattern-controls.md).
             let frames = f64::from(r.pos) + (f - span) as f64 + 1.0;
             let g = ch.vol_gain(r.v0 + (r.v1 - r.v0) * r.volume_at(frames)) * v.vel;
-            let (a, b) = (laws::channel_pan(r.p0 + v.pan), laws::channel_pan(r.p1 + v.pan));
+            let (a, b) = (laws::channel_pan(ch.pan_of(r.p0) + v.pan), laws::channel_pan(ch.pan_of(r.p1) + v.pan));
             let x = r.pan_at(frames);
             let (pl, pr) = (a.0 + (b.0 - a.0) * x, a.1 + (b.1 - a.1) * x);
             (gl, gr) = ((g * pl) as f32, (g * pr) as f32);
@@ -2885,6 +2982,101 @@ mod tests {
         assert!((frames[held] - g).abs() < 1e-6, "{} vs {g}", frames[held]);
         // (The probe holds its level for a whole process call; the next span after the note-off is silent.)
         assert_eq!(frames[(off as usize + 1024) * 2], 0.0);
+    }
+
+    /// Plays 1.0 on both sides and keeps the channel levels it was given; the engine applies volume and pan.
+    struct LevelProbe(Vec<crate::instrument::ChannelLevels>);
+
+    impl Instrument for LevelProbe {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, left: &mut [f32], right: &mut [f32]) {
+            left.fill(1.0);
+            right.fill(1.0);
+        }
+        fn channel_levels(&mut self, levels: crate::instrument::ChannelLevels) -> bool {
+            if self.0.last() != Some(&levels) {
+                self.0.push(levels);
+            }
+            false
+        }
+    }
+
+    // spec: audio/voice-levels.md "The channel's levels", "Final levels", "Values from automation"
+    #[test]
+    fn level_adjustments_scale_and_offset_the_channel() {
+        use os_model::{AutoPoint, Automation, Clip, ClipSource, target};
+        let mut p = song(vec![long_note(0, 384 * 4, 0)], vec![Clip::new(0, 384 * 4, 0, ClipSource::Pattern(1))]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        // Pan offset 3200, multiplier 16640 (1.3: +6.6 dB), mod X offset 64, mod Y offset -128, as the model keeps them.
+        p.channels[0].misc.levels = [0.5, 0.3, 0.25, -0.5];
+        p.channels[0].sound.cutoff = 200;
+        let mut lib = SampleLibrary::default();
+        let e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        let ch = &e.channels[0];
+        let mult = os_dsp::level::curve(os_dsp::level::knob(16640, os_dsp::level::R12800));
+        assert!((mult - 2.155).abs() < 0.01, "{mult}");
+        assert_eq!(ch.volume, laws::channel_gain(0.78125) * f64::from(mult));
+        assert_eq!(ch.pan_of(ch.pan), 0.5);
+        assert_eq!(ch.levels(), crate::instrument::ChannelLevels { volume: ch.volume as f32, pan: 0.5, mod_x: 0.25, mod_y: -0.5 });
+        // The pan and its offset are added as stored integers, then scaled once.
+        assert_eq!(ch.pan_of(-0.25), f64::from(1600.0f32 * os_dsp::level::R6400));
+        // A hosted instrument's output gets the channel's volume with the multiplier, panned with the offset.
+        let render = |p: &Project| {
+            let mut lib = SampleLibrary::default();
+            let mut e = Engine::new(p, &mut lib, 48000, PlayMode::Song);
+            let probe = Arc::new(Mutex::new(LevelProbe(vec![])));
+            e.set_instrument(0, probe.clone());
+            let mut out = Vec::new();
+            for _ in 0..800 {
+                out.extend_from_slice(e.next_tick().unwrap().0);
+            }
+            let levels = probe.lock().unwrap().0.clone();
+            (out, levels)
+        };
+        let (out, _) = render(&p);
+        let (l, r) = (out[1000], out[1001]);
+        let (pl, pr) = laws::channel_pan(0.5);
+        let g = laws::channel_gain(0.78125) * f64::from(mult);
+        assert!((f64::from(l) - g * pl).abs() < 1e-6 && (f64::from(r) - g * pr).abs() < 1e-6, "{l} {r}");
+        // Automation: the multiplier curve(Round(25600 v) / 12800), the pan offset Round(12800 v) - 6400, the cutoff
+        // Round(256 v) moving mod X by its difference to the stored 200, the mod Y offset Round(512 v) - 256.
+        let clips = [
+            (target::CHANNEL_VOLUME_MULT, 0.75),
+            (target::CHANNEL_PAN_OFFSET, 0.25),
+            (target::CHANNEL_CUTOFF, 0.5),
+            (target::CHANNEL_MOD_Y, 1.0),
+        ];
+        for (i, &(id, v)) in clips.iter().enumerate() {
+            let index = i as u16 + 1;
+            let mut c = channel();
+            c.index = index;
+            c.kind = ChannelKind::Automation;
+            p.channels.push(c);
+            let points = vec![AutoPoint::new(0.0, v), AutoPoint::new(8.0, v)];
+            p.automations.push(Automation { channel: index, targets: vec![target::channel(0, id)], points, header: vec![0; 21], tail: vec![] });
+            p.arrangements[0].clips.push(Clip::new(384, 768, index, ClipSource::Channel(index)));
+        }
+        let (out, levels) = render(&p);
+        let last = *levels.last().unwrap();
+        let mult = os_dsp::level::curve(os_dsp::level::knob(19200, os_dsp::level::R12800));
+        let g = laws::channel_gain(0.78125) * f64::from(mult);
+        assert_eq!(last, crate::instrument::ChannelLevels { volume: g as f32, pan: -0.5, mod_x: (64.0 + 128.0 - 200.0) / 256.0, mod_y: 1.0 });
+        assert_eq!(levels[0].pan, 0.5, "before the clips: as stored");
+        let f = 2 * laws::tick_to_frame(600.0, 96, 130.0, 48000) as usize;
+        let (pl, pr) = laws::channel_pan(-0.5);
+        assert!((f64::from(out[f]) - g * pl).abs() < 1e-6 && (f64::from(out[f + 1]) - g * pr).abs() < 1e-6);
+        // Starting before the clips: as stored again.
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        while e.tick <= 600 {
+            e.next_tick();
+        }
+        e.seek_tick(10);
+        assert_eq!(e.channels[0].levels().pan, 0.5);
+        // Pattern control points move the filter knobs too (0..256).
+        let mut ch = Engine::new(&p, &mut lib, 48000, PlayMode::Song).channels.remove(0);
+        ch.apply(target::CHANNEL_RESONANCE, 64, 48000);
+        assert_eq!(ch.levels().mod_y, -0.25);
     }
 
     /// spec: audio/implementing.md "Playing live": an instrument the UI thread holds for a moment is waited for, so it

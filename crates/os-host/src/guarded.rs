@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use crate::guard::{self, Module};
 use crate::{Attention, Descriptor, HostedEffect, Instrument, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
-use os_engine::TransportInfo;
+use os_engine::{ChannelLevels, TransportInfo};
 
 /// A plugin instance of any format, called through the crash guard. Once its code crashed (this instance, or another
 /// one of the same plugin file) it is stopped: it is never called again, nor destroyed (its memory is left as the crash
@@ -114,8 +114,8 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn transport(&mut self, info: &TransportInfo) {
         self.run((), |p| p.transport(info))
     }
-    fn channel_levels(&mut self, volume: f32, pan: f32) -> bool {
-        self.run(false, |p| p.channel_levels(volume, pan))
+    fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
+        self.run(false, |p| p.channel_levels(levels))
     }
 }
 
@@ -369,8 +369,8 @@ mod tests {
         fn note_on(&mut self, _: u32, _: u8, _: f32) {}
         fn note_off(&mut self, _: u32, _: u8) {}
         fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
-        fn channel_levels(&mut self, volume: f32, pan: f32) -> bool {
-            self.levels = Some((volume, pan));
+        fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
+            self.levels = Some((levels.volume, levels.pan));
             true
         }
     }
@@ -429,7 +429,7 @@ mod tests {
         };
         let p = share(SelfStopping { desc, stop: None, levels: None }, Arc::new(Module::default()));
         let mut g = p.lock().unwrap();
-        assert!(g.channel_levels(0.5, -0.3));
+        assert!(g.channel_levels(ChannelLevels { volume: 0.5, pan: -0.3, ..ChannelLevels::default() }));
         assert_eq!(g.save_state(), Some(vec![5, 7]));
         assert_eq!(g.stopped(), None);
         g.idle();

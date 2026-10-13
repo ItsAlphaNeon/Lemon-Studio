@@ -48,17 +48,37 @@ pub trait Instrument: Send {
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         let _ = (offset, index, value);
     }
-    /// The channel's volume (a gain: the level curve applied, 0 when muted) and pan (-1..1) for the next `process`
-    /// call. An instrument that works them into its voices itself returns true, and the engine then adds its output
-    /// unchanged (FL native generators get them in their voices' final levels: spec plugins/fruity-abi.md "Voices").
-    /// Default: false, the engine applies them to the output.
-    fn channel_levels(&mut self, _volume: f32, _pan: f32) -> bool {
+    /// The channel's levels for the next `process` call. An instrument that works the volume and pan into its voices
+    /// itself returns true, and the engine then adds its output unchanged (FL native generators get them in their
+    /// voices' final levels: spec plugins/fruity-abi.md "Voices"). Default: false, the engine applies the volume and
+    /// pan to the output (and the mod X / Y go nowhere).
+    fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
+        let _ = levels;
         false
     }
     /// Where the song is during the next `process` call (playback only; without a call the transport is stopped).
     /// Default: ignored.
     fn transport(&mut self, info: &TransportInfo) {
         let _ = info;
+    }
+}
+
+/// A channel's levels as its instrument gets them (spec: audio/voice-levels.md "The channel's levels").
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChannelLevels {
+    /// A gain: the level curve of the volume times that of the volume multiplier; 0 when the channel is off.
+    pub volume: f32,
+    /// The pan with the pan offset added, -1..1 and beyond (not clamped).
+    pub pan: f32,
+    /// Mod X and mod Y: the offsets of the level adjustments, plus how far automation has moved the filter's cutoff /
+    /// resonance knob from its stored position.
+    pub mod_x: f32,
+    pub mod_y: f32,
+}
+
+impl Default for ChannelLevels {
+    fn default() -> Self {
+        ChannelLevels { volume: 1.0, pan: 0.0, mod_x: 0.0, mod_y: 0.0 }
     }
 }
 

@@ -10,7 +10,7 @@
 
 use std::ffi::c_void;
 
-use os_engine::instrument::{HostedEffect, Instrument, TransportInfo};
+use os_engine::instrument::{ChannelLevels, HostedEffect, Instrument, TransportInfo};
 use os_host::{Descriptor, ParamEvent, ParamInfo};
 
 use crate::abi::{dispatch, flags, IntPtr, LevelParams};
@@ -80,8 +80,8 @@ pub struct NativePlugin {
     /// The plugin renders audio in its role: an effect that is no generator, a generator, neither with the NoProcess
     /// flag (spec: flags). Otherwise its render methods are never called: an effect passes the sound through.
     renders: bool,
-    /// The channel's volume (a gain) and pan the engine gave last (`channel_levels`).
-    channel: (f32, f32),
+    /// The channel's levels the engine gave last (`channel_levels`).
+    channel: ChannelLevels,
     /// Tempo the plugin was last told.
     bpm: f64,
     /// Frames per tick at that tempo.
@@ -115,7 +115,7 @@ impl NativePlugin {
             wants_tick,
             voice_render,
             renders,
-            channel: (1.0, 0.0),
+            channel: ChannelLevels::default(),
             bpm: DEFAULT_BPM,
             spt: 1.0,
             to_tick: 0.0,
@@ -142,11 +142,17 @@ impl NativePlugin {
         self.plugin.set_tempo(bpm as f32, PPQ);
     }
 
-    /// A voice's final levels: its own, times the channel's volume, plus the channel's pan and the voice's tuning
-    /// (spec `audio/voice-levels.md` "Final levels").
+    /// A voice's final levels: its own, times the channel's volume, plus the channel's pan, mod X / Y and the voice's
+    /// tuning (spec `audio/voice-levels.md` "Final levels").
     fn final_levels(&self, init: LevelParams, tune: f32) -> LevelParams {
-        let (volume, pan) = self.channel;
-        LevelParams { vol: init.vol * volume, pan: init.pan + pan, pitch: init.pitch + tune * 100.0, ..init }
+        let c = self.channel;
+        LevelParams {
+            vol: init.vol * c.volume,
+            pan: init.pan + c.pan,
+            pitch: init.pitch + tune * 100.0,
+            fcut: init.fcut + c.mod_x,
+            fres: init.fres + c.mod_y,
+        }
     }
 
     fn refresh(&mut self, i: usize) {
@@ -279,11 +285,11 @@ impl Instrument for NativePlugin {
         self.events.push((offset, Ev::Tune(key, semitones)));
     }
 
-    /// The plugin works the channel's volume and pan into its voices' final levels, which it reads while they sound
-    /// (sounding voices follow a change on the next block).
-    fn channel_levels(&mut self, volume: f32, pan: f32) -> bool {
-        if (volume, pan) != self.channel {
-            self.channel = (volume, pan);
+    /// The plugin works the channel's levels into its voices' final levels, which it reads while they sound (sounding
+    /// voices follow a change on the next block).
+    fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
+        if levels != self.channel {
+            self.channel = levels;
             for i in 0..self.voices.len() {
                 self.refresh(i);
             }
