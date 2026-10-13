@@ -6647,14 +6647,15 @@ mod tests {
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
-        // The all tab lists the 26 roots, all closed.
-        assert_eq!(rows(&app.state).len(), 26);
+        // The all tab lists the roots with content, all closed.
+        let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
+        assert_eq!(labels, ["Current project", "Plugin database"]);
         // Project tab: Current project opened with its patterns (default like the screenshot).
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
         click(&mut app, &mut c, r0);
         let r = rows(&app.state);
         assert_eq!(r[0].label, "Current project");
-        assert_eq!(r[1].label, "History");
+        assert_eq!(r[1].label, "Patterns");
         let pi = r.iter().position(|r| r.item == Item::Pattern(1)).expect("pattern row");
         // Drag pattern 1 onto the playlist grid: a pattern clip appears.
         let n0 = crate::playlist::clips(&app.state).len();
@@ -6948,7 +6949,7 @@ mod tests {
         assert_eq!(r[i + 1].label, "Kicks");
         assert_eq!(r[i + 2].label, "readme.txt");
         assert!(matches!(r[i + 2].item, Item::File(_)));
-        assert_eq!(r[i + 3].depth, 0, "next root follows");
+        assert_eq!(r.len(), i + 3, "the dropped folder is the last root");
         // Open the subfolder: the sample shows without extension and drags as a sample.
         frame(&mut app, &mut c, None);
         let sub = hit_rect(&app, &Action::BrowserRow(i + 1));
@@ -7020,7 +7021,7 @@ mod tests {
         // Esc clears the search and leaves the box.
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(app.state.browser_search.is_empty() && !app.state.browser_search_focus);
-        assert_eq!(rows(&app.state).len(), 26);
+        assert_eq!(rows(&app.state).len(), 2);
         // Search box on top moves the list down.
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);

@@ -21,51 +21,16 @@ pub const FOOTER_H: f32 = 28.0;
 const FOLDER: u8 = 255;
 /// Category index of files in dropped folders (text colour, spec §6).
 const FILE: u8 = 254;
-/// First `ROOTS` entry of the alphabetical disk-folder part; dropped folders are sorted in from here (spec §6).
-const FIRST_SORTED: usize = 9;
 /// Height of the info panel above the footer (spec §6).
 pub const INFO_H: f32 = 84.0;
 
-/// (label, icon, category colour index)
-const ROOTS: &[(&str, Icon, u8)] = &[
-    ("Current project", Icon::Page, 0),
-    ("Recent files", Icon::Back, 1),
-    ("Plugin database", Icon::Speaker, 2),
-    ("Plugin presets", Icon::Speaker, 3),
-    ("Channel presets", Icon::Box, 4),
-    ("Mixer presets", Icon::Mixer, 5),
-    ("Scores", Icon::Note, 6),
-    ("Audio", Icon::Person, 7),
-    ("Backup", Icon::Back, 8),
-    ("Channel envelopes", Icon::Folder, FOLDER),
-    ("Clipboard files", Icon::Folder, FOLDER),
-    ("Demo projects", Icon::Folder, FOLDER),
-    ("Envelopes", Icon::Folder, FOLDER),
-    ("Cloud", Icon::Cloud, 9),
-    ("Impulses", Icon::Folder, FOLDER),
-    ("Misc", Icon::Folder, FOLDER),
-    ("My projects", Icon::Folder, FOLDER),
-    ("Packs", Icon::Box, 2),
-    ("Project bones", Icon::Folder, FOLDER),
-    ("Recorded", Icon::Wave, 2),
-    ("Rendered", Icon::Wave, 2),
-    ("Sliced audio", Icon::Wave, 2),
-    ("Soundfonts", Icon::Folder, FOLDER),
-    ("Speech", Icon::Folder, FOLDER),
-    ("Templates", Icon::Folder, FOLDER),
-    ("User data", Icon::Person, 7),
-];
+/// (label, icon, category colour index). Only the roots with content: FL's disk-folder roots (Recent files, presets,
+/// Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders follow these.
+const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin database", Icon::Speaker, 1)];
 
-/// The "Current project" tree's sections, in screenshot order (spec §2).
-const PROJECT: &[(&str, Icon)] = &[
-    ("History", Icon::Undo),
-    ("Patterns", Icon::Note),
-    ("Effects", Icon::Speaker),
-    ("Generators", Icon::Plug),
-    ("Remote control", Icon::MidiControl),
-    ("Initialized controls", Icon::Slide),
-    ("Samples", Icon::Wave),
-];
+/// The "Current project" tree's sections, in screenshot order (spec §2), without the ones nothing is tracked in yet
+/// (History, Remote control, Initialized controls).
+const PROJECT: &[(&str, Icon)] = &[("Patterns", Icon::Note), ("Effects", Icon::Speaker), ("Generators", Icon::Plug), ("Samples", Icon::Wave)];
 
 /// What a row stands for; everything but `None` can be dragged (spec §3).
 #[derive(Debug, Clone, PartialEq)]
@@ -102,9 +67,6 @@ pub struct Row {
     pub item: Item,
     /// Disk entry (dropped folders, spec §6): shown in the info panel.
     pub path: Option<PathBuf>,
-    /// A node with no content yet (empty disk-folder roots, untracked project sections): greyed out, named in its
-    /// "not available yet" hint.
-    pub off: Option<&'static str>,
 }
 
 /// Keys of the rows that start opened (the project tab shows Patterns, like the screenshot).
@@ -178,18 +140,18 @@ fn tree(s: &State) -> Vec<Row> {
     let mut roots: Vec<Result<usize, usize>> = match tab {
         0 => (0..ROOTS.len()).map(Ok).collect(),
         1 => vec![Ok(0)],
-        2 => vec![Ok(2)],
+        2 => vec![Ok(1)],
         _ => Vec::new(),
     };
     if tab == 0 {
-        // Dropped folders sit among the disk-folder roots in alphabetical order (spec §6).
+        // Dropped folders follow the roots, in alphabetical order (spec §6).
         let name = |r: &Result<usize, usize>| match *r {
             Ok(i) => ROOTS[i].0.to_lowercase(),
             Err(f) => folder_name(&s.browser_folders[f]).to_lowercase(),
         };
         for f in 0..s.browser_folders.len() {
             let me = folder_name(&s.browser_folders[f]).to_lowercase();
-            let at = (FIRST_SORTED..roots.len()).find(|&j| name(&roots[j]) > me).unwrap_or(roots.len());
+            let at = (ROOTS.len()..roots.len()).find(|&j| name(&roots[j]) > me).unwrap_or(roots.len());
             roots.insert(at, Err(f));
         }
     }
@@ -201,7 +163,7 @@ fn tree(s: &State) -> Vec<Row> {
                 let key = disk_key(path);
                 let open = s.browser_open.contains(&key);
                 let icon = if open { Icon::FolderOpen } else { Icon::Folder };
-                out.push(Row { key: key.clone(), depth: 0, label: folder_name(path), icon, cat: FOLDER, open: Some(open), bright: true, item: Item::None, path: Some(path.clone()), off: None });
+                out.push(Row { key: key.clone(), depth: 0, label: folder_name(path), icon, cat: FOLDER, open: Some(open), bright: true, item: Item::None, path: Some(path.clone()) });
                 if open {
                     disk_rows(s, path, &key, 1, &mut out);
                 }
@@ -210,17 +172,14 @@ fn tree(s: &State) -> Vec<Row> {
         };
         let (label, icon, cat) = ROOTS[r];
         let key = format!("{tab}:{label}");
-        // Disk folders: no content ships yet (spec §2, owner decision), so they are greyed out.
-        let off = !matches!(r, 0 | 2);
-        let open = !off && is_open(s, &key);
-        out.push(Row { key: key.clone(), depth: 0, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: None, off: off.then_some(label) });
+        let open = is_open(s, &key);
+        out.push(Row { key: key.clone(), depth: 0, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: None });
         if !open {
             continue;
         }
         match r {
             0 => project_rows(s, &key, cat, &mut out),
-            2 => plugin_rows(s, &key, cat, &mut out),
-            _ => {}
+            _ => plugin_rows(s, &key, cat, &mut out),
         }
     }
     out
@@ -229,12 +188,12 @@ fn tree(s: &State) -> Vec<Row> {
 fn section(s: &State, parent: &str, label: &str, icon: Icon, cat: u8, out: &mut Vec<Row>) -> bool {
     let key = format!("{parent}/{label}");
     let open = is_open(s, &key);
-    out.push(Row { key, depth: 1, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: None, off: None });
+    out.push(Row { key, depth: 1, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: None });
     open
 }
 
 fn leaf(out: &mut Vec<Row>, parent: &str, label: String, icon: Icon, cat: u8, bright: bool, item: Item) {
-    out.push(Row { key: format!("{parent}/{label}"), depth: 2, label, icon, cat, open: None, bright, item, path: None, off: None });
+    out.push(Row { key: format!("{parent}/{label}"), depth: 2, label, icon, cat, open: None, bright, item, path: None });
 }
 
 /// Tree key of a dropped folder root (All tab).
@@ -313,7 +272,7 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
         if e.dir {
             let open = s.browser_open.contains(&k);
             let icon = if open { Icon::FolderOpen } else { Icon::Folder };
-            out.push(Row { key: k.clone(), depth, label: e.name.clone(), icon, cat: FOLDER, open: Some(open), bright: open, item: Item::None, path: Some(e.path.clone()), off: None });
+            out.push(Row { key: k.clone(), depth, label: e.name.clone(), icon, cat: FOLDER, open: Some(open), bright: open, item: Item::None, path: Some(e.path.clone()) });
             if open {
                 disk_rows(s, &e.path, &k, depth.saturating_add(1), out);
             }
@@ -325,7 +284,7 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
             } else {
                 (e.name.clone(), Item::File(p))
             };
-            out.push(Row { key: k, depth, label, icon, cat: FILE, open: None, bright: false, item, path: Some(e.path.clone()), off: None });
+            out.push(Row { key: k, depth, label, icon, cat: FILE, open: None, bright: false, item, path: Some(e.path.clone()) });
         }
     }
 }
@@ -333,14 +292,6 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
 fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
     let p = &s.project;
     for &(name, icon) in PROJECT {
-        // History, Remote control, Initialized controls: nothing tracked yet (spec §2), greyed out.
-        if matches!(name, "History" | "Remote control" | "Initialized controls") {
-            section(s, root, name, icon, cat, out);
-            if let Some(r) = out.last_mut() {
-                (r.open, r.bright, r.off) = (Some(false), false, Some(name));
-            }
-            continue;
-        }
         if !section(s, root, name, icon, cat, out) {
             continue;
         }
@@ -396,10 +347,10 @@ fn plugin_node(s: &State, out: &mut Vec<Row>, parent: &str, label: String, icon:
     }
     let k = format!("{parent}/{label}");
     let open = is_open(s, &k);
-    out.push(Row { key: k.clone(), depth: 2, label, icon, cat, open: Some(open), bright: bright || open, item, path: None, off: None });
+    out.push(Row { key: k.clone(), depth: 2, label, icon, cat, open: Some(open), bright: bright || open, item, path: None });
     if open {
         for (index, e) in s.params.visible(key) {
-            out.push(Row { key: format!("{k}/{index}"), depth: 3, label: e.name.clone(), icon: Icon::Slide, cat, open: None, bright: false, item: Item::Param(key, index), path: None, off: None });
+            out.push(Row { key: format!("{k}/{index}"), depth: 3, label: e.name.clone(), icon: Icon::Slide, cat, open: None, bright: false, item: Item::Param(key, index), path: None });
         }
     }
 }
@@ -569,18 +520,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     ui.c.fill_rect(list, t.browser_list);
     ui.hit(Rect::new(0.0, top, 201.0, list.h), Action::BrowserList, "");
     ui.c.push_clip(Rect::new(0.0, top, 201.0, list.h));
-    let cats: [Color; 10] = [
-        t.cat_project,
-        t.cat_recent,
-        t.cat_plugin_db,
-        t.cat_plugin_presets,
-        t.cat_channel_presets,
-        t.cat_mixer_presets,
-        t.cat_plugin_db.mix(t.glyph, 0.4),
-        t.cat_recent,
-        t.cat_recent,
-        t.cat_plugin_db,
-    ];
+    let cats: [Color; 2] = [t.cat_project, t.cat_plugin_db];
     let scroll = s.browser_scroll.min((rows.len() as f32 * ROW_H - list.h).max(0.0)).max(0.0);
     let sel = s.browser_sel.as_deref();
     for (i, row) in rows.iter().enumerate() {
@@ -595,23 +535,16 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             Item::Param(key, index) if ui.hovering(rect) => crate::params::row_hint(s, key, index),
             _ => row.label.clone(),
         };
-        let hov = match row.off {
-            Some(name) => {
-                ui.off(rect, name);
-                false
-            }
-            None => ui.hit(rect, Action::BrowserRow(i), hint),
-        };
+        let hov = ui.hit(rect, Action::BrowserRow(i), hint);
         if sel == Some(row.key.as_str()) || hov {
             ui.c.fill_rect(rect, t.browser_row_hi);
         }
         let base = match row.cat {
-            _ if row.off.is_some() => t.text_faint,
             FOLDER => t.browser_folder,
             FILE => t.text.shade(-0.08),
-            c => cats[usize::from(c).min(9)],
+            c => cats[usize::from(c).min(1)],
         };
-        let c = if row.off.is_some() { base } else if row.bright { base.shade(0.12) } else if row.depth > 0 { base.shade(-0.06) } else { base };
+        let c = if row.bright { base.shade(0.12) } else if row.depth > 0 { base.shade(-0.06) } else { base };
         // Expander: only an opened node shows its ▾ in the gutter (FL screenshots, spec §2).
         if row.open == Some(true) && s.browser_search.is_empty() {
             let (ax, cy) = (x - 9.0, y + ROW_H / 2.0);
@@ -622,7 +555,6 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         }
         // File-type tints (spec §6): audio / project orange, MIDI blue.
         let ic = match row.icon {
-            _ if row.off.is_some() => c,
             Icon::FileAudio | Icon::FileProject => t.browser_search,
             Icon::PianoRoll if row.cat == FILE => t.cat_plugin_db,
             _ => c,
