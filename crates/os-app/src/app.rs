@@ -6565,6 +6565,77 @@ mod tests {
         assert!(!app.state.shown(Win::Perf));
     }
 
+    /// An empty project with an Open 3x Osc played from the typing keyboard while the UI ticks, then in a playing
+    /// pattern: the streams keep up (no run of dropouts) and the voices end.
+    #[test]
+    #[ignore]
+    fn playing_open_3x_osc_keeps_the_audio_going() {
+        use std::time::{Duration, Instant};
+        use winit::keyboard::KeyCode;
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let row = add_plugin_channel(&mut app.state.project, crate::osc3::OPEN_3X_OSC);
+        let index = app.plugins.index_of(crate::osc3::OPEN_3X_OSC).unwrap();
+        app.plugins.create(row, index).unwrap();
+        app.state.hosted_rows.push(row);
+        app.transport.set_instruments(app.plugins.instruments());
+        app.state.selected_channel = row;
+        app.state.toggles.push("typing");
+        let run = |app: &mut App, ms: u64| {
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_millis(ms) {
+                app.tick();
+                std::thread::sleep(Duration::from_millis(4));
+            }
+        };
+        run(&mut app, 300);
+        // Past the live stream's first 4095 ticks (about 18 s at 140 BPM): it used to go silent there.
+        let u0 = app.transport.underruns();
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(25) {
+            app.typing_key(KeyCode::KeyZ, true, false, false);
+            run(&mut app, 200);
+            app.typing_key(KeyCode::KeyZ, false, false, false);
+            run(&mut app, 300);
+        }
+        let du = app.transport.underruns() - u0;
+        eprintln!("long live: {du} dropouts");
+        assert!(du < 5, "long live run: {du} dropouts");
+        let keys = [KeyCode::KeyZ, KeyCode::KeyX, KeyCode::KeyC, KeyCode::KeyV, KeyCode::KeyB, KeyCode::KeyN, KeyCode::KeyM, KeyCode::KeyQ, KeyCode::KeyW, KeyCode::KeyE];
+        let phase = |app: &mut App, name: &str| {
+            let u0 = app.transport.underruns();
+            for round in 0..30 {
+                for (i, &k) in keys.iter().enumerate() {
+                    if (round + i) % 3 != 0 {
+                        app.typing_key(k, true, false, false);
+                    }
+                }
+                run(app, 30);
+                for &k in &keys {
+                    app.typing_key(k, false, false, false);
+                }
+                run(app, 15);
+            }
+            run(app, 1500);
+            let du = app.transport.underruns() - u0;
+            let voices = app.transport.engine_voices() + app.plugins.voices();
+            eprintln!("{name}: {du} dropouts, {voices} voices after");
+            (du, voices)
+        };
+        let (du, v) = phase(&mut app, "live");
+        assert!(du < 5 && v == 0, "live notes: {du} dropouts, {v} voices");
+        // A pattern of the synth playing, with live notes on top, then Stop.
+        app.state.project.patterns[0].notes = (0..16).map(|i| os_model::Note { length: 24, key: 48 + (i % 5) as u16 * 3, ..os_model::Note::step(app.state.project.channels[row].index, i * 24) }).collect();
+        app.act(Action::Play);
+        run(&mut app, 300);
+        let (du, _) = phase(&mut app, "playing");
+        app.act(Action::Stop);
+        run(&mut app, 500);
+        let v = app.transport.engine_voices() + app.plugins.voices();
+        assert!(du < 5 && v == 0, "while playing: {du} dropouts; {v} voices after Stop");
+    }
+
     /// Browser (spec: ui/browser.md): tabs, opening nodes, dragging a pattern and a generator onto the playlist.
     #[test]
     fn browser_tree_and_drag() {
