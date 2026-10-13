@@ -4,16 +4,19 @@
 //! The engine works in de-interleaved stereo; FL plugins work in interleaved stereo, so this converts on the boundary.
 //! Generator voices follow spec `plugins/fruity-abi.md`, "Voices": the plugin gets the note's own levels and the final
 //! ones (with the channel's volume and pan, and its pitch as each note's tuning), NewTick on tick boundaries at the
-//! song's tempo, and its voices end when it asks.
+//! song's tempo, and its voices end when it asks. Given the channel's envelopes, LFOs and filter, the host steps them per
+//! tick into each voice's final levels and runs the voices of a plugin that renders voice by voice through the filter
+//! (`voicing`).
 //
 // spec: plugins/fruity-abi.md
 
 use std::ffi::c_void;
 
-use os_engine::instrument::{ChannelLevels, HostedEffect, Instrument, NoteLevels, TransportInfo};
+use os_engine::instrument::{ChannelLevels, ChannelVoicing, HostedEffect, Instrument, NoteLevels, TransportInfo};
 use os_host::{Descriptor, ParamInfo};
 
 use crate::abi::{dispatch, flags, rec, IntPtr, LevelParams};
+use crate::voicing::{Shape, Shaping};
 use crate::{Plugin, Voice};
 
 /// Largest block handed to the plugin in one render; longer engine buffers are split into chunks of
@@ -56,6 +59,13 @@ struct Live {
     released: Option<u64>,
     /// Its tuning from the engine (a glide, the channel's pitch), semitones.
     tune: f32,
+    /// The channel's envelopes, LFOs and filter on it (once the engine gave them).
+    shape: Option<Shape>,
+    /// Its note is off and its volume envelope is releasing it: the plugin's own release waits for the envelope's end
+    /// (an OpenStudio choice: the plugin's release would otherwise cut the envelope's release short).
+    ending: bool,
+    /// Its volume envelope ran out on the last tick (the plugin was told to release it then): the host kills it.
+    ran_out: bool,
 }
 
 /// The levels a note's voice starts with (spec: "Voices"; `audio/voice-levels.md` "The note's own levels"): volume =
@@ -100,6 +110,12 @@ pub struct NativePlugin {
     inter: Vec<f32>,
     /// One voice's output (`Voice_Render`).
     voice_buf: Vec<f32>,
+    /// The channel's envelopes, LFOs and filter (`channel_voicing`); `None` until the engine gives them.
+    shaping: Option<Shaping>,
+    /// Frames until the next tick of the envelopes and LFOs (due at 0 or below).
+    art_to_tick: f64,
+    /// The engine starts a tick at the next `process` call's first frame.
+    tick_now: bool,
     /// The editor is shown in a host window (ShowEditor with a parent, not yet hidden).
     editor: bool,
     /// The MIDI value the host last gave each parameter it moved (index, value).
@@ -134,6 +150,9 @@ impl NativePlugin {
             to_tick: 0.0,
             inter: vec![0.0; MAX_BLOCK * 2],
             voice_buf: vec![0.0; MAX_BLOCK * 2],
+            shaping: None,
+            art_to_tick: 0.0,
+            tick_now: false,
             editor: false,
             sent: Vec::new(),
             follow: Vec::new(),
@@ -168,6 +187,14 @@ impl NativePlugin {
         self.bpm = bpm;
         self.spt = (f64::from(self.rate.max(1)) * 60.0 / bpm / f64::from(PPQ)).max(1.0);
         self.plugin.set_tempo(bpm as f32, PPQ);
+        if let Some(s) = &mut self.shaping {
+            s.set_tempo(bpm);
+        }
+    }
+
+    /// Frames per tick of the channel's envelopes and LFOs (the project's ticks).
+    fn art_spt(&self) -> f64 {
+        self.shaping.as_ref().map_or(self.spt, |s| s.frames_per_tick(self.rate.max(1)))
     }
 
     /// A voice's final levels: its own, times the channel's volume, plus the channel's pan, mod X / Y and the voice's
@@ -183,10 +210,46 @@ impl NativePlugin {
         }
     }
 
+    /// Works voice `i`'s final levels out again: the channel's, its tuning, and its envelopes' and LFOs' parts.
     fn refresh(&mut self, i: usize) {
         let init = self.voices[i].voice.init();
-        let fin = self.final_levels(init, self.voices[i].tune);
+        let mut fin = self.final_levels(init, self.voices[i].tune);
+        if let Some(s) = &self.voices[i].shape {
+            fin = s.levels(fin);
+        }
         self.voices[i].voice.set_final(fin);
+    }
+
+    /// A tick of the channel's envelopes and LFOs starts: every voice steps and gets its new final levels. A released
+    /// voice whose volume envelope has run out gets the plugin's release on this tick and is killed on the next (spec:
+    /// "Voices", the channel's envelopes, LFOs and filter; an OpenStudio choice: the plugin hears its levels at 0 for a
+    /// tick before the voice goes).
+    fn art_tick(&mut self) {
+        let Some(mut sh) = self.shaping.take() else { return };
+        let nominal = sh.frames_per_tick(self.rate.max(1));
+        let channel = self.channel;
+        sh.tick();
+        let mut i = 0;
+        while i < self.voices.len() {
+            if self.voices[i].ran_out {
+                self.kill_at(i);
+                continue;
+            }
+            let init = self.voices[i].voice.init();
+            let live = &mut self.voices[i];
+            if let Some(s) = &mut live.shape {
+                sh.step(s, &init, &channel, nominal);
+                if live.ending && sh.volume_ended(s) {
+                    live.ending = false;
+                    live.ran_out = true;
+                    live.released = Some(0);
+                    self.plugin.release(&live.voice);
+                }
+            }
+            self.refresh(i);
+            i += 1;
+        }
+        self.shaping = Some(sh);
     }
 
     fn sounding(&self, key: u8) -> impl Iterator<Item = usize> + '_ {
@@ -207,15 +270,35 @@ impl NativePlugin {
                 let tag = self.next_tag;
                 self.next_tag += 1;
                 let init = note_levels(key, velocity, own);
-                if let Some(voice) = self.plugin.trigger(init, self.final_levels(init, 0.0), velocity, tag) {
-                    self.voices.push(Live { key, voice, released: None, tune: 0.0 });
+                // The channel's envelopes and LFOs take the voice's first tick at once; a plugin that renders voice by
+                // voice gets the channel filter (spec: "Voices").
+                let (channel, nominal, filter) = (self.channel, self.art_spt(), self.voice_render.then_some(self.rate.max(1)));
+                let shape = self.shaping.as_mut().map(|s| s.start(&init, &channel, filter, nominal));
+                let mut fin = self.final_levels(init, 0.0);
+                if let Some(s) = &shape {
+                    fin = s.levels(fin);
+                }
+                if let Some(voice) = self.plugin.trigger(init, fin, velocity, tag) {
+                    self.voices.push(Live { key, voice, released: None, tune: 0.0, shape, ending: false, ran_out: false });
                 }
             }
             Ev::Off(key) => {
-                let held = self.sounding(key).find(|&i| self.voices[i].released.is_none());
+                let held = self.sounding(key).find(|&i| self.voices[i].released.is_none() && !self.voices[i].ending);
                 if let Some(i) = held {
-                    self.voices[i].released = Some(0);
-                    self.plugin.release(&self.voices[i].voice);
+                    // The envelopes go into their release; with the volume envelope on the plugin's own release waits
+                    // for its end.
+                    let live = &mut self.voices[i];
+                    let mut wait = false;
+                    if let (Some(sh), Some(s)) = (&self.shaping, &mut live.shape) {
+                        sh.release(s);
+                        wait = sh.volume_on();
+                    }
+                    if wait {
+                        live.ending = true;
+                    } else {
+                        live.released = Some(0);
+                        self.plugin.release(&live.voice);
+                    }
                 }
             }
             Ev::Choke(key) => {
@@ -239,8 +322,13 @@ impl NativePlugin {
         let (kill, release) = self.plugin.take_voice_requests();
         for tag in release {
             if let Some(i) = self.voices.iter().position(|v| v.voice.tag == tag && v.released.is_none()) {
-                self.voices[i].released = Some(0);
-                self.plugin.release(&self.voices[i].voice);
+                let live = &mut self.voices[i];
+                if let (Some(sh), Some(s), false) = (&self.shaping, &mut live.shape, live.ending) {
+                    sh.release(s);
+                }
+                live.ending = false;
+                live.released = Some(0);
+                self.plugin.release(&live.voice);
             }
         }
         for (tag, free) in kill {
@@ -260,9 +348,13 @@ impl NativePlugin {
         self.inter[..len * 2].fill(0.0);
         if self.voice_render {
             let mut done = Vec::new();
-            for (i, live) in self.voices.iter().enumerate() {
+            for (i, live) in self.voices.iter_mut().enumerate() {
                 self.voice_buf[..len * 2].fill(0.0);
                 let (got, more) = self.plugin.voice_render(&live.voice, &mut self.voice_buf[..len * 2]);
+                // The channel filter, on the host's side (spec: "Voices").
+                if let Some(s) = &mut live.shape {
+                    s.filter(&mut self.voice_buf[..got.min(len) * 2]);
+                }
                 for (o, s) in self.inter[..got.min(len) * 2].iter_mut().zip(&self.voice_buf) {
                     *o += *s;
                 }
@@ -340,6 +432,19 @@ impl Instrument for NativePlugin {
         true
     }
 
+    /// The host runs the channel's envelopes, LFOs and filter on a generator's voices (spec: "Voices"); the engine's
+    /// tick starts at the next `process` call's first frame.
+    fn channel_voicing(&mut self, voicing: &ChannelVoicing) {
+        if !self.desc.is_instrument() {
+            return;
+        }
+        self.tick_now = true;
+        match &mut self.shaping {
+            Some(s) => s.set(voicing),
+            None => self.shaping = Some(Shaping::new(*voicing, self.bpm)),
+        }
+    }
+
     fn transport(&mut self, info: &TransportInfo) {
         if info.tempo > 0.0 && (info.tempo - self.bpm).abs() > 1e-6 && self.rate > 0 {
             self.set_tempo(info.tempo);
@@ -352,6 +457,13 @@ impl Instrument for NativePlugin {
         let n = left.len().min(right.len());
         left.fill(0.0);
         right.fill(0.0);
+        // A tick of the envelopes and LFOs: at the first frame when the engine starts one there (and then none more in
+        // this call), else on the plugin's own clock of the project's ticks.
+        let engine_tick = std::mem::take(&mut self.tick_now);
+        let shaped = self.shaping.is_some();
+        if engine_tick {
+            self.art_to_tick = 0.0;
+        }
         if !self.renders || self.plugin.stopped().is_some() {
             self.events.clear();
             return;
@@ -362,6 +474,10 @@ impl Instrument for NativePlugin {
         let mut next = 0;
         let mut pos = 0;
         while pos < n {
+            if shaped && self.art_to_tick <= 0.0 && (pos == 0 || !engine_tick) {
+                self.art_tick();
+                self.art_to_tick += self.art_spt();
+            }
             while let Some(&(off, ev)) = events.get(next).filter(|e| e.0 as usize <= pos) {
                 let _ = off;
                 self.apply(ev);
@@ -375,6 +491,9 @@ impl Instrument for NativePlugin {
             if self.wants_tick {
                 end = end.min(pos + self.to_tick.ceil() as usize);
             }
+            if shaped && !engine_tick {
+                end = end.min(pos + self.art_to_tick.ceil().max(1.0) as usize);
+            }
             let end = end.max(pos + 1);
             let len = end - pos;
             self.render(len);
@@ -385,6 +504,9 @@ impl Instrument for NativePlugin {
             }
             if self.wants_tick {
                 self.to_tick -= len as f64;
+            }
+            if shaped {
+                self.art_to_tick -= len as f64;
             }
             pos = end;
         }
@@ -412,6 +534,11 @@ impl Instrument for NativePlugin {
             self.kill_at(0);
         }
         self.plugin.take_voice_requests();
+        // The global LFOs start again with the next first note (an OpenStudio choice: Stop ends a render).
+        if let Some(s) = &mut self.shaping {
+            s.reset();
+        }
+        self.art_to_tick = 0.0;
     }
 }
 

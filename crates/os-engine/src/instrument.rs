@@ -74,6 +74,12 @@ pub trait Instrument: Send {
         let _ = levels;
         false
     }
+    /// The channel's envelopes, LFOs and filter, given before each tick's `process` call, whose first frame starts the
+    /// tick. An instrument that runs them on its voices takes them (FL native generators: spec plugins/fruity-abi.md
+    /// "Voices"). Default: ignored (the instrument has envelopes of its own, or none).
+    fn channel_voicing(&mut self, voicing: &ChannelVoicing) {
+        let _ = voicing;
+    }
     /// Where the song is during the next `process` call (playback only; without a call the transport is stopped).
     /// Default: ignored.
     fn transport(&mut self, info: &TransportInfo) {
@@ -97,6 +103,64 @@ pub struct ChannelLevels {
 impl Default for ChannelLevels {
     fn default() -> Self {
         ChannelLevels { volume: 1.0, pan: 0.0, mod_x: 0.0, mod_y: 0.0 }
+    }
+}
+
+/// A channel's envelopes, LFOs and filter as an instrument that runs them on its own voices gets them (spec:
+/// plugins/fruity-abi.md "Voices", the channel's envelopes, LFOs and filter; audio/envelopes-and-lfos.md,
+/// audio/channel-filter.md).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChannelVoicing {
+    /// The five records: pan, volume, mod X, mod Y, pitch.
+    pub records: [os_dsp::articulator::Record; 5],
+    /// The filter's cutoff and resonance knobs as stored (0..256) and its type (0..7). The channel's mod X / Y offsets
+    /// and automation's moves of the two knobs are in `ChannelLevels::mod_x` / `mod_y`.
+    pub cutoff: i32,
+    pub resonance: i32,
+    pub filter_type: i32,
+    /// Ticks per quarter note.
+    pub ppq: u16,
+}
+
+impl Default for ChannelVoicing {
+    /// A new channel's: its records, the filter open.
+    fn default() -> Self {
+        ChannelVoicing { records: os_dsp::articulator::Record::new_channel_records(), cutoff: 256, resonance: 0, filter_type: 0, ppq: 96 }
+    }
+}
+
+impl ChannelVoicing {
+    /// A channel's, from the project. A volume record exactly as the model fills a record the file does not have is
+    /// taken as a new channel's (its flag of value 4 keeps the volume at 1 while the envelope is off; a Lemon Studio
+    /// choice: channels made here, or read without records, must not fall silent).
+    pub fn of(ch: &os_model::Channel, ppq: u16) -> ChannelVoicing {
+        use os_dsp::articulator::Record;
+        let records = std::array::from_fn(|k| {
+            let e = &ch.envelopes[k];
+            if k == Record::VOLUME && *e == os_model::Envelope::default() {
+                return Record::new_channel(k);
+            }
+            Record {
+                flags: e.flags,
+                on: e.enabled,
+                delay: e.delay,
+                attack: e.attack,
+                hold: e.hold,
+                decay: e.decay,
+                sustain: e.sustain,
+                release: e.release,
+                amount: e.amount,
+                lfo_delay: e.lfo_delay,
+                lfo_attack: e.lfo_attack,
+                lfo_amount: e.lfo_amount,
+                lfo_speed: e.lfo_speed,
+                lfo_shape: e.lfo_shape,
+                attack_tension: e.attack_tension,
+                decay_tension: e.decay_tension,
+                release_tension: e.release_tension,
+            }
+        });
+        ChannelVoicing { records, cutoff: ch.sound.cutoff, resonance: ch.sound.resonance, filter_type: ch.sound.filter_type, ppq }
     }
 }
 

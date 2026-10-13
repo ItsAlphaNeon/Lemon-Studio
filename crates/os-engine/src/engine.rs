@@ -210,6 +210,8 @@ struct ChannelState {
     init_adjust: Adjust,
     /// A layer channel: its children and how it hands its notes on.
     layer: Option<layers::Layer>,
+    /// The envelopes, LFOs and filter its hosted instrument gets (one that runs them on its voices).
+    voicing: crate::instrument::ChannelVoicing,
     /// A hosted instrument's channel: the layer whose note it was given last. A hosted instrument hears that layer's
     /// levels on its channel's (a Lemon Studio choice: the host does not reach a plugin's voices one by one, so a
     /// child that also plays notes of its own, or of two layers, hears them all with the levels of the last one).
@@ -960,6 +962,7 @@ impl Engine {
                     adjust,
                     init_adjust: adjust,
                     layer: (ch.kind == ChannelKind::Layer).then(|| layers::Layer::of(ch)),
+                    voicing: crate::instrument::ChannelVoicing::of(ch, ppq),
                     via: None,
                 };
                 state.retune(knob);
@@ -2177,6 +2180,7 @@ impl Engine {
                 levels.mod_y += a.mods.1;
             }
             let own_levels = inst.channel_levels(levels);
+            inst.channel_voicing(&ch.voicing);
             // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md Â§2); one per tick
             // at its start for a plugin that takes them so (spec: plugins/fruity-abi.md "Parameters").
             if inst.tick_params() {
@@ -3905,6 +3909,56 @@ mod tests {
         p.patterns[0].notes = vec![long_note(0, 48, 0)];
         let got = peak(&render(&p), 0);
         assert!((got - reference * layer * 2.0).abs() < 1e-4, "{got}");
+    }
+
+    /// A hosted instrument is given the channel's envelopes, LFOs and filter before every tick's `process` call, whose
+    /// frames are that tick's; a volume record the file did not have is a new channel's (spec: plugins/fruity-abi.md
+    /// "Voices").
+    #[test]
+    fn hosted_instruments_get_the_channels_voicing_every_tick() {
+        use os_dsp::articulator::Record;
+        #[derive(Default)]
+        struct V {
+            got: Vec<crate::instrument::ChannelVoicing>,
+            frames: Vec<usize>,
+            pending: bool,
+        }
+        impl crate::Instrument for V {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {}
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn channel_voicing(&mut self, voicing: &crate::instrument::ChannelVoicing) {
+                assert!(!self.pending, "one call per process call");
+                self.got.push(*voicing);
+                self.pending = true;
+            }
+            fn process(&mut self, _rate: u32, l: &mut [f32], _r: &mut [f32]) {
+                assert!(std::mem::take(&mut self.pending), "a tick's process call follows its voicing");
+                self.frames.push(l.len());
+            }
+        }
+        let mut p = project(vec![long_note(0, 48, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let pitch = &mut p.channels[0].envelopes[os_model::Envelope::PITCH];
+        (pitch.enabled, pitch.amount, pitch.flags) = (true, 700, 1);
+        (p.channels[0].sound.cutoff, p.channels[0].sound.resonance, p.channels[0].sound.filter_type) = (100, 30, 6);
+        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Pattern(1));
+        let v = Arc::new(std::sync::Mutex::new(V::default()));
+        e.set_instrument(0, v.clone());
+        e.render_all(512);
+        let v = v.lock().unwrap();
+        assert!(v.got.len() >= 48, "{}", v.got.len());
+        let spt = 48000.0 * 60.0 / 130.0 / 96.0;
+        assert!(v.frames.iter().all(|&f| (f as f64 - spt).abs() < 1.0), "{:?}", &v.frames[..4]);
+        let g = v.got[0];
+        assert_eq!(g.records[Record::VOLUME], Record::new_channel(Record::VOLUME));
+        let r = g.records[Record::PITCH];
+        assert_eq!((r.on, r.amount, r.flags, r.attack), (true, 700, 1, 20000));
+        assert_eq!((g.cutoff, g.resonance, g.filter_type, g.ppq), (100, 30, 6, 96));
+        // A volume record from the file stays as it was.
+        let mut q = p.clone();
+        q.channels[0].envelopes[os_model::Envelope::VOLUME].flags = 2;
+        let g = crate::instrument::ChannelVoicing::of(&q.channels[0], 96);
+        assert_eq!((g.records[Record::VOLUME].flags, g.records[Record::VOLUME].release_tension), (2, 0));
     }
 
     /// A hosted instrument hears the channel pitch as each note's tuning (the engine's own voices apply it themselves).

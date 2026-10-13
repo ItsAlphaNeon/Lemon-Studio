@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use crate::guard::{self, Module};
 use crate::{Attention, Descriptor, HostedEffect, Instrument, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
-use os_engine::{ChannelLevels, TransportInfo};
+use os_engine::{ChannelLevels, ChannelVoicing, TransportInfo};
 
 /// A plugin instance of any format, called through the crash guard. Once its code crashed (this instance, or another
 /// one of the same plugin file) it is stopped: it is never called again, nor destroyed (its memory is left as the crash
@@ -122,6 +122,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     }
     fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
         self.run(false, |p| p.channel_levels(levels))
+    }
+    fn channel_voicing(&mut self, voicing: &ChannelVoicing) {
+        self.run((), |p| p.channel_voicing(voicing))
     }
 }
 
