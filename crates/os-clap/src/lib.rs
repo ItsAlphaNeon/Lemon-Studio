@@ -1819,15 +1819,20 @@ mod tests {
         let mut lib = os_engine::SampleLibrary::default();
         let mut e = os_engine::Engine::new(&project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
         e.set_instrument(0, shared);
-        let mut out = vec![0.0f32; 2 * 12000];
+        let mut out = vec![0.0f32; 2 * 16000];
         for c in out.chunks_mut(1024) {
             e.process(c);
         }
         let left: Vec<f32> = out.iter().step_by(2).copied().collect();
         let peak = (0..left.len()).max_by(|&a, &b| left[a].abs().total_cmp(&left[b].abs())).unwrap();
         assert!(left[peak].abs() > 0.2, "mp3 click heard (peak {})", left[peak]);
-        assert!((4780..4840).contains(&peak), "click at 0.1 s (frame {peak})");
-        assert!(left[10000..12000].iter().any(|v| v.abs() > 0.05), "sine after 0.2 s");
+        // The click is at source frame 4410 (0.1 s at 44.1 kHz); nothing is trimmed, so it plays after the info
+        // frame's 1152 frames of silence and the decoder's delay (1105), resampled to 48 kHz: about frame 7257
+        // (spec: audio/sample-formats.md "Other formats").
+        let at = (4410.0 + 1152.0 + 1105.0) * 48000.0 / 44100.0;
+        assert!((peak as f64 - at).abs() < 25.0, "click at frame {peak}, expected about {at:.0}");
+        // The sine starts at source frame 8820 (0.2 s), shifted the same way: about frame 12057.
+        assert!(left[13000..15000].iter().any(|v| v.abs() > 0.05), "sine after 0.2 s");
     }
 
     /// A held-then-released live note of a long sample, as the typing keyboard plays it: in tune, and it keeps

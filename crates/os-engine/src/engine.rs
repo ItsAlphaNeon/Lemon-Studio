@@ -63,6 +63,8 @@ struct Trigger {
     buf: u16,
     /// An audio clip's fades, gain and late-start declick (`None` = plays as it is).
     shape: Option<ClipShape>,
+    /// A slide note: no sound of its own, it glides the channel's voices.
+    slide: bool,
 }
 
 /// An audio clip's fades, gain and start declick on its voice's clock (spec: audio/audio-clips.md "Fades and clip
@@ -172,6 +174,9 @@ struct ChannelState {
     /// notes play.
     realtime: Option<(f64, f64)>,
     keyed: Vec<(u16, Arc<Sample>)>,
+    /// An audio clip channel's own voice level, on what its hosted instrument plays (1 on other channels; spec:
+    /// audio/audio-clips.md "Level").
+    clip_level: f32,
 }
 
 /// Glide of the channel's volume and pan parameters towards a control point's values.
@@ -351,10 +356,30 @@ struct Voice {
     shape: Option<ClipShape>,
     /// The channel buffer it plays (`Trigger::buf`).
     buf: u16,
+    /// Its note's key, and where slide notes have moved it.
+    key: u16,
+    slide: VoiceSlide,
 }
 
-/// Channel pitch automation range: ±2 semitones, the channel's default pitch range (spec: flp/events/automation.md).
-const AUTO_PITCH_CENTS: f64 = 200.0;
+/// A voice's levels as slide notes move them (spec: audio/song-structure.md "Slide notes", audio/note-rules.md
+/// "Glides"): the pitch moved in cents, the velocity byte and the note pan, singles that each tick of a glide adds its
+/// step to; the key rate the voice started with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VoiceSlide {
+    cents: f32,
+    velocity: f32,
+    pan: f32,
+    rate: f64,
+    /// Steps per tick of a glide under way, and the steps left.
+    step: (f32, f32, f32),
+    left: u32,
+}
+
+impl VoiceSlide {
+    fn new(rate: f64, velocity: u8, pan: f64) -> Self {
+        VoiceSlide { cents: 0.0, velocity: f32::from(velocity), pan: pan as f32, rate, step: (0.0, 0.0, 0.0), left: 0 }
+    }
+}
 
 /// Release fade of a live note (a Lemon Studio choice, spec: ui/typing-keyboard.md open questions).
 const RELEASE_SECONDS: f64 = 0.015;
@@ -370,6 +395,14 @@ struct AutoClip {
     /// Index into `Engine::curves`.
     curve: usize,
     target: os_model::target::Target,
+    /// The walk along the curve and the tick steps it has taken (spec: audio/automation.md "Walking the curve").
+    walk: Option<(os_model::curve::Walk, u64)>,
+}
+
+/// What an automation clip hands on: `Round(level * 2^30)` within 0..2^30 (spec: audio/automation.md "What a clip
+/// hands on"; the clip's own min / range knobs and its LFO are not applied yet).
+fn handed_on(level: f32) -> i64 {
+    ((f64::from(level) * 1_073_741_824.0).round_ties_even() as i64).clamp(0, 1 << 30)
 }
 
 struct MixTrack {
@@ -528,6 +561,10 @@ pub struct Engine {
     /// Automation clips of the playlist and their curves (song mode).
     autos: Vec<AutoClip>,
     curves: Vec<os_model::Automation>,
+    /// The value last handed on per automation target (a value is passed on only when it differs), and the tick from
+    /// which values are set in place rather than smoothed (playback's first tick after a start, seek or loop).
+    auto_last: Vec<(os_model::target::Target, i64)>,
+    auto_from: u64,
     /// Clips on plugin parameters: this tick's events.
     params: param_auto::ParamAuto,
     pub report: EngineReport,
@@ -636,6 +673,7 @@ impl Engine {
                     from_scale,
                     realtime,
                     keyed: Vec::new(),
+                    clip_level: if ch.kind == ChannelKind::AudioClip { os_dsp::level::audio_clip_level() } else { 1.0 },
                 };
                 state.retune(knob);
                 state.init.2 = state.base_rate;
@@ -741,7 +779,9 @@ impl Engine {
                     rate: laws::playback_rate(n.key, laws::fine_pitch_cents(n.fine)),
                     fine: laws::fine_pitch_cents(n.fine) as f32 / 100.0,
                     cut: n.cut,
-                    vel: laws::velocity_gain(n.velocity),
+                    // A playlist audio clip's voice has its own volume in place of a velocity: unity through a channel at
+                    // its default volume, centred (spec: audio/audio-clips.md "Level").
+                    vel: if n.cut.is_some() { f64::from(os_dsp::level::audio_clip_level()) } else { laws::velocity_gain(n.velocity) },
                     pan: laws::note_pan(n.pan),
                     key: n.key,
                     end: (n.len > 0).then_some(n.tick + n.len),
@@ -763,6 +803,7 @@ impl Engine {
                             declick: 0,
                         }
                     }),
+                    slide: n.slide,
                 })
             })
             .collect();
@@ -814,6 +855,7 @@ impl Engine {
                     from_beat: c.window.map_or(0.0, |w| w.0),
                     curve,
                     target,
+                    walk: None,
                 });
             }
         }
@@ -828,6 +870,8 @@ impl Engine {
             params: param_auto::ParamAuto::new(autos.iter().any(|a| param_auto::is_param(a.target))),
             autos,
             curves,
+            auto_last: Vec::new(),
+            auto_from: 0,
             rate,
             channels,
             bus: vec![Vec::new(); tracks.len()],
@@ -977,6 +1021,8 @@ impl Engine {
             off: None,
             shape: None,
             buf,
+            key,
+            slide: VoiceSlide::new(step, velocity, pan),
         });
         self.sounding.push((channel, key, u64::MAX));
     }
@@ -1110,6 +1156,9 @@ impl Engine {
         for ch in &mut self.channels {
             ch.reset();
         }
+        // Automation values are handed on again from here, in place.
+        self.auto_last.clear();
+        self.auto_from = tick;
         self.next_ctl = 0;
         while let Some(&e) = self.controls.get(self.next_ctl) {
             if e.tick >= tick {
@@ -1216,46 +1265,72 @@ impl Engine {
         self.sounding.iter().map(|&(c, k, _)| (c, k))
     }
 
-    /// Applies every automation clip that covers the tick starting now to its target (volumes and pans glide over
-    /// the tick, the mixer ramps its matrix). Outside its clips a target keeps its last value.
+    /// Applies every automation clip that covers the tick starting now to its target: the curve's value one tick ahead,
+    /// passed on only when it differs from the one last passed on (spec: audio/automation.md "When a clip acts").
+    /// Volumes and pans glide over the tick (set in place on playback's first tick), the mixer ramps its matrix.
+    /// Outside its clips a target keeps its last value.
     fn run_automation(&mut self, len: usize) {
         use os_model::target::Target;
         if self.autos.is_empty() {
             return;
         }
         let now = self.tick;
-        let len = len.max(1) as u32;
-        let mut done: Vec<Target> = Vec::new();
-        for a in self.autos.iter().rev() {
-            if now < a.start || now >= a.end || done.contains(&a.target) {
+        let b = os_model::curve::tick_step(self.ppq);
+        let mut values: Vec<(Target, i64)> = Vec::new();
+        for a in self.autos.iter_mut().rev() {
+            if now < a.start || now >= a.end || values.iter().any(|v| v.0 == a.target) {
                 continue;
             }
-            done.push(a.target);
-            let beat = a.from_beat + (now - a.start) as f64 / f64::from(self.ppq);
-            let Some(v) = self.curves[a.curve].value_at(beat) else { continue };
-            let v = v.clamp(0.0, 1.0);
-            // spec: flp/events/automation.md "Targets" (value scaling)
-            match a.target {
+            let pts = &self.curves[a.curve].points;
+            // The value for tick `now` is the walk's after `now + 1 - start` tick steps (and the window's step first).
+            let steps = now + 1 - a.start;
+            let (mut walk, mut taken) = match a.walk {
+                Some(w) if w.1 <= steps => w,
+                _ => {
+                    let Some(mut w) = os_model::curve::Walk::new(pts) else { continue };
+                    if a.from_beat > 0.0 {
+                        w.step(pts, a.from_beat);
+                    }
+                    (w, 0)
+                }
+            };
+            while taken < steps {
+                walk.step(pts, b);
+                taken += 1;
+            }
+            a.walk = Some((walk, taken));
+            values.push((a.target, handed_on(walk.value(pts))));
+        }
+        let len = if now == self.auto_from { 0 } else { len.max(1) as u32 };
+        for (target, n) in values {
+            match self.auto_last.iter_mut().find(|l| l.0 == target) {
+                Some(l) if l.1 == n => continue,
+                Some(l) => l.1 = n,
+                None => self.auto_last.push((target, n)),
+            }
+            let v = n as f64 / 1_073_741_824.0;
+            let r12800 = (12800.0 * v).round_ties_even() as i32;
+            match target {
+                // spec: audio/voice-levels.md "Values from automation"
                 Target::ChannelVolume(c) => {
                     if let Some(ch) = self.channels.get_mut(usize::from(c)) {
-                        ch.glide(Some(v), None, len);
+                        ch.glide(Some(f64::from(os_dsp::level::knob(r12800, os_dsp::level::R12800))), None, len);
                     }
                 }
                 Target::ChannelPan(c) => {
                     if let Some(ch) = self.channels.get_mut(usize::from(c)) {
-                        ch.glide(None, Some((v - 0.5) * 2.0), len);
+                        ch.glide(None, Some(f64::from(os_dsp::level::knob(r12800 - 6400, os_dsp::level::R6400))), len);
                     }
                 }
                 Target::ChannelPitch(c) => {
                     if let Some(ch) = self.channels.get_mut(usize::from(c)) {
-                        let cents = ((v - 0.5) * 2.0 * AUTO_PITCH_CENTS).round();
-                        ch.retune(cents);
+                        ch.retune(f64::from(laws::auto_pitch_cents(v)));
                     }
                 }
                 // Volume Round(16000 v), pan Round((2 v - 1) * 6400) (spec: audio/mixer.md "Changes while the song plays").
                 Target::MixerVolume(t) | Target::MixerPan(t) => {
                     if let Some(m) = self.tracks.get_mut(usize::from(t)) {
-                        if matches!(a.target, Target::MixerVolume(_)) {
+                        if matches!(target, Target::MixerVolume(_)) {
                             m.vol = (16000.0 * v).round_ties_even() as i32;
                         } else {
                             m.pan = ((2.0 * v - 1.0) * 6400.0).round_ties_even() as i32;
@@ -1267,7 +1342,7 @@ impl Engine {
                 // The tempo for the ticks after this one: BPM = (10000 + Round(single(v) * 512000)) / 1000 (spec:
                 // audio/timing.md "Tempo that changes"; this tick's length was settled before).
                 Target::Tempo => {
-                    let bpm = (10000.0 + (f64::from(v as f32) * 512000.0).round()) / 1000.0;
+                    let bpm = (10000.0 + (f64::from(v as f32) * 512000.0).round_ties_even()) / 1000.0;
                     if bpm != self.tempo {
                         self.tempo = bpm;
                         self.clock.set_tempo(self.rate, self.ppq, bpm);
@@ -1417,6 +1492,7 @@ impl Engine {
                 self.start_trigger(t, step);
             }
         }
+        let mut slides = Vec::new();
         while let Some(t) = self.triggers.get(self.next_trigger).copied() {
             if t.tick > tick {
                 break;
@@ -1425,7 +1501,70 @@ impl Engine {
             if t.tick < tick {
                 continue;
             }
-            self.start_trigger(t, step);
+            if t.slide {
+                slides.push(t);
+            } else {
+                self.start_trigger(t, step);
+            }
+        }
+        // Slide notes take effect after the tick's note starts (spec: audio/timing.md "What a tick does").
+        for t in slides {
+            self.start_slide(t);
+        }
+        self.step_slides();
+    }
+
+    /// A slide note (spec: audio/song-structure.md "Slide notes"): it makes no sound. Every voice of its channel that
+    /// is not fading out, released voices and voices started on this tick included, glides by `slide key - the pitch of
+    /// the highest held voice` and to the slide note's velocity and pan, in `n + 1` steps over its length `n` in ticks,
+    /// the first at once; a glide under way is replaced from where it is. A voice whose note has not ended counts as
+    /// held (a voice without the volume envelope never ends its note). Without a held voice nothing moves. On a hosted
+    /// instrument the note rules glide the pitch.
+    fn start_slide(&mut self, t: Trigger) {
+        let n = t.end.map_or(0, |e| e.saturating_sub(t.tick)).min(u64::from(u32::MAX - 1)) as u32;
+        if self.channels[t.channel].plugin {
+            if self.channels[t.channel].instrument.0.is_some() {
+                self.inst_events.push(notes::Event::slide(t.channel, 0, t.key.min(127) as u8, n));
+            }
+            return;
+        }
+        let moves = |v: &Voice| v.channel == t.channel && v.cut.is_none() && v.release.is_none();
+        let top = self.voices.iter().filter(|v| moves(v) && v.off.is_none()).map(|v| f32::from(v.key) * 100.0 + v.slide.cents).reduce(f32::max);
+        let Some(top) = top else { return };
+        let by = f32::from(t.key) * 100.0 - top;
+        let steps = (n + 1) as f32;
+        let (velocity, pan) = (f32::from(t.velocity), t.pan as f32);
+        for v in self.voices.iter_mut().filter(|v| moves(v)) {
+            let s = &mut v.slide;
+            let d = |to: f32, own: f32| if to == own { 0.0 } else { (to - own) / steps };
+            s.step = (if by == 0.0 { 0.0 } else { by / steps }, d(velocity, s.velocity), d(pan, s.pan));
+            s.left = n + 1;
+        }
+    }
+
+    /// One step of every voice's slide glide (spec: audio/note-rules.md "Glides": each level adds its step, the target
+    /// is reached by the additions, not set). The pitch moves the voice's key rate, the velocity byte its velocity
+    /// level (linearly, then the velocity law), the pan its note pan.
+    fn step_slides(&mut self) {
+        for v in &mut self.voices {
+            let s = &mut v.slide;
+            if s.left == 0 {
+                continue;
+            }
+            s.left -= 1;
+            let (dc, dv, dp) = s.step;
+            if dc != 0.0 {
+                s.cents += dc;
+                v.step = s.rate * laws::cents_rate(f64::from(s.cents));
+            }
+            if dv != 0.0 {
+                s.velocity += dv;
+                v.vel = laws::volume_curve(f64::from(s.velocity.max(0.0)) / 100.0);
+            }
+            if dp != 0.0 {
+                s.pan += dp;
+                v.pan = f64::from(s.pan);
+            }
         }
     }
 
@@ -1443,6 +1582,7 @@ impl Engine {
                     start: t.start,
                     fine: t.fine,
                     long: t.end.is_some(),
+                    glide: 0,
                 });
                 if let Some(sh) = t.shape {
                     self.inst_shapes.push((t.channel, sh, 0));
@@ -1476,6 +1616,8 @@ impl Engine {
             off: None,
             shape: t.shape,
             buf: t.buf,
+            key: t.key,
+            slide: VoiceSlide::new(t.rate, t.velocity, t.pan),
         });
     }
 
@@ -1554,7 +1696,10 @@ impl Engine {
             }
             // A sample that is still playing must not be cut off by the idle tail.
             active |= inst.active();
-            let (gl, gr) = if own_levels { (1.0, 1.0) } else { ch.gain(1.0, 0.0) };
+            // An audio clip channel's voices are its playlist clips: their own level is on the channel's output, since
+            // a hosted sampler takes velocities only up to 128 (spec: audio/audio-clips.md "Level").
+            let cl = ch.clip_level;
+            let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain(f64::from(cl), 0.0) };
             let out = &mut self.bus[ch.insert];
             for f in 0..n {
                 out[f * 2] += l[f] * gl;
@@ -1929,11 +2074,25 @@ struct Sched {
     from_s: f64,
     /// An audio clip's fades and gain.
     clip: Option<ClipFx>,
+    /// A slide note.
+    slide: bool,
 }
 
 impl Sched {
     fn note(tick: u64, n: &os_model::Note) -> Self {
-        Sched { tick, channel: usize::from(n.channel), key: n.key, fine: n.fine_pitch, velocity: n.velocity, pan: n.pan, cut: None, len: u64::from(n.length), from_s: 0.0, clip: None }
+        Sched {
+            tick,
+            channel: usize::from(n.channel),
+            key: n.key,
+            fine: n.fine_pitch,
+            velocity: n.velocity,
+            pan: n.pan,
+            cut: None,
+            len: u64::from(n.length),
+            from_s: 0.0,
+            clip: None,
+            slide: n.slide(),
+        }
     }
 }
 
@@ -2182,7 +2341,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         // An audio clip plays its channel's sample from the window start (milliseconds), cut at the clip end.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
                             let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, cut: Some(start + len), len, from_s, clip: ClipFx::of(c) });
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, cut: Some(start + len), len, from_s, clip: ClipFx::of(c), slide: false });
                         }
                         Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
@@ -2458,6 +2617,38 @@ mod tests {
         x.chunks_exact(2).map(|f| f[ch].abs()).fold(0.0, f32::max)
     }
 
+    // spec: audio/song-structure.md "Slide notes", audio/note-rules.md "Glides"
+    #[test]
+    fn slide_notes_glide_the_sounding_voice_and_make_no_sound() {
+        let slide = |position: u32, length: u32, key: u16, velocity: u8| Note { key, velocity, flags: 0x4000 | Note::SLIDE, ..long_note(position, length, 0) };
+        // A note on key 60, a slide note to 72 at tick 96 lasting 3 ticks with a lower velocity, then one back to 60.
+        let p = project(vec![long_note(0, 384, 0), slide(96, 3, 72, 50), slide(200, 0, 60, 100)], vec![]);
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+        let after = |e: &mut Engine, tick: u64| {
+            while e.tick <= tick {
+                e.next_tick();
+            }
+            assert_eq!(e.voices.len(), 1, "slide notes start no voice");
+            (e.voices[0].step, e.voices[0].vel)
+        };
+        let (rate, vel) = after(&mut e, 95);
+        // Four steps of 300 cents, the first on the slide's own tick: an octave up after tick 99.
+        let (r96, v96) = after(&mut e, 96);
+        assert!((r96 / rate - 2f64.powf(0.25)).abs() < 1e-6, "{}", r96 / rate);
+        assert!(v96 < vel);
+        let (r99, v99) = after(&mut e, 99);
+        assert!((r99 / rate - 2.0).abs() < 1e-5, "{}", r99 / rate);
+        assert!((v99 - laws::velocity_gain(50)).abs() < 1e-6);
+        assert_eq!(after(&mut e, 150).0, r99, "the glide is over");
+        // Length 0: the whole way in one step on its tick; the velocity goes back too.
+        let (r200, v200) = after(&mut e, 200);
+        assert!((r200 / rate - 1.0).abs() < 1e-5 && (v200 - vel).abs() < 1e-6);
+        // Without a sounding voice a slide note does nothing and is not heard.
+        let quiet = project(vec![slide(0, 96, 72, 100)], vec![]);
+        assert_eq!(peak(&render(&quiet), 0), 0.0);
+    }
+
     #[test]
     fn repeat_retriggers_inside_the_note() {
         let mut report = EngineReport::default();
@@ -2683,6 +2874,56 @@ mod tests {
         let f = |t: f64| laws::tick_to_frame(t, 96, 130.0, 48000);
         let got = log.lock().unwrap().0.clone();
         assert_eq!(got, vec![(0, "from", 0.25), (f(96.0), "choke", 0.0), (f(384.0), "on", 0.0), (f(480.0), "choke", 0.0)]);
+    }
+
+    // spec: audio/audio-clips.md "Level"
+    #[test]
+    fn audio_clips_play_at_unity_through_a_default_channel() {
+        use os_model::{Clip, ClipSource};
+        /// Plays 0.5 on both sides while a note sounds, as a sampler plays a constant sample at velocity 100.
+        #[derive(Default)]
+        struct Held(bool);
+        impl crate::Instrument for Held {
+            fn note_on(&mut self, _o: u32, _k: u8, v: f32) {
+                assert_eq!(v, 100.0 / 128.0, "the clip's voice reaches the sampler at velocity 100");
+                self.0 = true;
+            }
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn choke(&mut self, _o: u32, _k: u8) {
+                self.0 = false;
+            }
+            fn process(&mut self, _rate: u32, l: &mut [f32], r: &mut [f32]) {
+                let v = if self.0 { 0.5 } else { 0.0 };
+                l.fill(v);
+                r.fill(v);
+            }
+        }
+        let wav = std::env::temp_dir().join(format!("os-engine-clip-level-{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.5; 96000]).unwrap();
+        let mut p = song(vec![], vec![Clip::new(0, 192, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        assert_eq!((p.channels[0].volume, p.channels[0].pan), (0.78125, 0.0), "the channel's default volume, centred");
+        let mut lib = SampleLibrary::new(None);
+        let mid = 2 * 24000;
+        // The engine's own voice: the sample's 0.5 comes out as 0.5.
+        let out = Engine::new(&p, &mut lib, 48000, PlayMode::Song).render_all(480);
+        assert!((out[mid] - 0.5).abs() < 1e-4 && (out[mid + 1] - 0.5).abs() < 1e-4, "{} {}", out[mid], out[mid + 1]);
+        // A hosted sampler on the clip's channel likewise.
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e.set_instrument(0, Arc::new(std::sync::Mutex::new(Held::default())));
+        let out = e.render_all(480);
+        assert!((out[mid] - 0.5).abs() < 1e-4 && (out[mid + 1] - 0.5).abs() < 1e-4, "{} {}", out[mid], out[mid + 1]);
+        // Other channel volumes scale it by curve(volume) / curve(0.78125).
+        p.channels[0].volume = 1.0;
+        let out = Engine::new(&p, &mut lib, 48000, PlayMode::Song).render_all(480);
+        assert!((out[mid] - 0.5 / laws::channel_gain(0.78125) as f32).abs() < 1e-3, "{}", out[mid]);
+        // A note on a sampler channel keeps its velocity level: 0.5 times the channel's 0.39.
+        let mut n = song(vec![long_note(0, 192, 0)], vec![Clip::new(0, 192, 0, ClipSource::Pattern(1))]);
+        n.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        let out = Engine::new(&n, &mut lib, 48000, PlayMode::Song).render_all(480);
+        assert!((out[mid] - 0.5 * 0.38961).abs() < 1e-3, "{}", out[mid]);
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// A hosted instrument hears the channel pitch as each note's tuning (the engine's own voices apply it themselves).
@@ -3044,6 +3285,56 @@ mod tests {
         let m = e.tracks[1].matrix;
         assert!(m[1][0].abs() < 1e-6 && m[1][1].abs() < 1e-6, "full left: no right output {m:?}");
         let _ = &mut out;
+    }
+
+    // spec: audio/automation.md "When a clip acts", "Walking the curve"; audio/voice-levels.md "Values from automation"
+    #[test]
+    fn automation_values_are_one_tick_ahead_and_passed_on_when_changed() {
+        use os_model::{AutoMode, AutoPoint, Automation, ChannelKind, Clip, ClipSource, target};
+        let mut p = song(vec![long_note(0, 384 * 4, 0)], vec![Clip::new(0, 384 * 4, 0, ClipSource::Pattern(1))]);
+        let mut auto_ch = channel();
+        auto_ch.index = 1;
+        auto_ch.kind = ChannelKind::Automation;
+        p.channels.push(auto_ch);
+        // Channel pitch from the bottom, jumping to the top at beat 1 of a clip at tick 384, staying there for half a
+        // beat, then falling to 0.75 at beat 2.
+        let jump = AutoPoint { mode: AutoMode::Hold, ..AutoPoint::new(1.0, 1.0) };
+        let points = vec![AutoPoint::new(0.0, 0.0), jump, AutoPoint::new(1.5, 1.0), AutoPoint::new(2.0, 0.75)];
+        let a = Automation { channel: 1, target: Some(target::channel(0, target::CHANNEL_PITCH)), points, header: vec![0; 21], tail: vec![] };
+        p.automations.push(a);
+        p.arrangements[0].clips.push(Clip::new(384, 768, 1, ClipSource::Channel(1)));
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        let knob_after = |e: &mut Engine, tick: u64| {
+            while e.tick <= tick {
+                e.next_tick();
+            }
+            e.channels[0].knob
+        };
+        assert_eq!(knob_after(&mut e, 383), 0.0, "before the clip: the channel's own pitch");
+        // Round(9600 v) - 4800 cents: the whole ±48 semitones, whatever the channel's range.
+        assert_eq!(knob_after(&mut e, 384), -4800.0);
+        // The jump at beat 1 (tick 480) is handed on one tick early.
+        assert_eq!(knob_after(&mut e, 478), -4800.0);
+        assert_eq!(knob_after(&mut e, 479), 4800.0);
+        // A value is passed on only when it changes: something else moving the knob is left alone meanwhile.
+        e.channels[0].knob = 0.0;
+        assert_eq!(knob_after(&mut e, 481), 0.0);
+        // The last point's level, 0.75 = +24 semitones, is applied on the clip's last tick and kept after it.
+        assert_eq!(knob_after(&mut e, 384 + 767), 2400.0);
+        assert_eq!(knob_after(&mut e, 384 * 3 + 10), 2400.0);
+        // A seek puts the channel back to its own settings and hands the value on again.
+        e.seek_tick(500);
+        assert_eq!(e.channels[0].knob, 0.0);
+        assert_eq!(knob_after(&mut e, 500), 4800.0);
+        // Channel volume set in place on playback's first tick: no glide.
+        p.automations[0].target = Some(target::channel(0, target::CHANNEL_VOLUME));
+        p.automations[0].points = vec![AutoPoint::new(0.0, 0.5), AutoPoint::new(2.0, 0.5)];
+        p.arrangements[0].clips[1] = Clip::new(0, 768, 1, ClipSource::Channel(1));
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e.next_tick();
+        assert!(e.channels[0].ramp.is_none());
+        assert_eq!(e.channels[0].vol_v, 0.5);
     }
 
     /// Halves what passes through (a stand-in for a hosted effect plugin).

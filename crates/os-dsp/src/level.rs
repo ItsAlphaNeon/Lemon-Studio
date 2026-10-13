@@ -41,6 +41,12 @@ pub fn unity_at_centre(level: f32) -> f32 {
     (f64::from(level) * std::f64::consts::SQRT_2) as f32
 }
 
+/// The own volume of an audio clip's voice before its clip gain: `single(sqrt(2)) / curve(10000 / 12800)` in singles,
+/// so that a clip on a channel at the default volume, centred, plays at unity (spec: audio/audio-clips.md "Level").
+pub fn audio_clip_level() -> f32 {
+    std::f32::consts::SQRT_2 / curve(knob(10000, R12800))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,5 +81,14 @@ mod tests {
         let (l, r) = pan_split(1.0, 1.0);
         assert!(l.abs() < 1e-15 && r == 1.0);
         assert_eq!(pan_split(1.0, 3.0), pan_split(1.0, 1.0), "clamped");
+    }
+
+    /// An audio clip at the default channel volume, centred, plays at unity.
+    #[test]
+    fn audio_clip_level_cancels_the_default_channel() {
+        let level = audio_clip_level() * curve(knob(10000, R12800));
+        let (l, r) = pan_split(level, 0.0);
+        assert!((l - 1.0).abs() < 1e-6 && l == r, "{l}");
+        assert!((audio_clip_level() - 2.5666).abs() < 1e-3);
     }
 }

@@ -2753,7 +2753,7 @@ impl App {
                 let v = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
                 (target::mixer(t, target::MIXER_VOLUME), format!("{} - Volume", mix_name(t)), v)
             }
-            Action::Tempo => (target::TEMPO, "Tempo".into(), ((s.tempo - 60.0) / 120.0).clamp(0.0, 1.0)),
+            Action::Tempo => (target::TEMPO, "Tempo".into(), crate::playlist::tempo_value(s.tempo)),
             _ => return None,
         })
     }

@@ -4,6 +4,8 @@
 //! Units are the project's own: positions and lengths in ticks (see [`Project::ppq`]),
 //! levels as normalized `f64`s. File encodings live in `os-flp`, not here.
 
+pub mod curve;
+
 /// An RGB color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Rgb {
@@ -735,6 +737,15 @@ impl Note {
         self.group & Self::MUTED != 0
     }
 
+    /// Flag of a slide note (spec: flp/events/patterns.md, note flags).
+    pub const SLIDE: u16 = 0x0008;
+
+    /// A slide note: it makes no sound and glides the channel's sounding voices (spec: audio/song-structure.md
+    /// "Slide notes").
+    pub fn slide(&self) -> bool {
+        self.flags & Self::SLIDE != 0
+    }
+
     /// Highest repeat index (spec: flp/events/patterns.md, note repeat table).
     pub const MAX_REPEAT: u8 = 14;
 
@@ -1296,71 +1307,22 @@ pub mod target {
 }
 
 impl Automation {
-    /// The curve's value at `beat` (clamped to the first / last point), shaped per segment mode
-    /// (spec: ui/playlist.md §8, Lemon Studio's approximations of FL's curves).
+    /// The curve's value at `beat` (clamped to the first / last point), shaped per segment mode as the walk plays it
+    /// (spec: audio/automation.md "Segment shapes"). At a point's own beat it is that point's level.
     pub fn value_at(&self, beat: f64) -> Option<f64> {
         let pts = &self.points;
         let first = pts.first()?;
         if beat <= first.beat {
-            return Some(first.value);
+            return Some(f64::from(first.value as f32));
         }
         let i = pts.partition_point(|p| p.beat <= beat);
-        let Some(b) = pts.get(i) else { return Some(pts.last()?.value) };
+        let Some(b) = pts.get(i) else { return Some(f64::from(pts.last()?.value as f32)) };
         let a = pts[i - 1];
         let span = b.beat - a.beat;
         if span <= 0.0 {
-            return Some(b.value);
+            return Some(f64::from(b.value as f32));
         }
         let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
-        Some(a.value + (b.value - a.value) * shape(b.mode, f64::from(b.tension), t))
-    }
-}
-
-/// Fraction 0..1 of the way from one point's value to the next at time fraction `t` (OS approximations).
-pub fn shape(mode: AutoMode, tension: f64, t: f64) -> f64 {
-    use std::f64::consts::PI;
-    let tension = tension.clamp(-1.0, 1.0);
-    let power = |t: f64, k: f64| {
-        let e = 2f64.powf(-4.0 * k);
-        t.powf(e)
-    };
-    let single = |t: f64, times: i32| {
-        let mut v = t;
-        for _ in 0..times {
-            v = power(v, tension);
-        }
-        v
-    };
-    let double = |t: f64, times: i32| {
-        if t < 0.5 { single(t * 2.0, times) / 2.0 } else { 1.0 - single((1.0 - t) * 2.0, times) / 2.0 }
-    };
-    let freq = 1.0 + (16.0 * tension.abs()).round();
-    match mode {
-        AutoMode::Single | AutoMode::Other(_) => single(t, 1),
-        AutoMode::Single2 => single(t, 2),
-        AutoMode::Single3 => single(t, 3),
-        AutoMode::Double => double(t, 1),
-        AutoMode::Double2 => double(t, 2),
-        AutoMode::Double3 => double(t, 3),
-        AutoMode::Hold => {
-            if t >= 1.0 { 1.0 } else { 0.0 }
-        }
-        AutoMode::Stairs => {
-            let n = 4.0 + (12.0 * tension.abs()).round();
-            (t * n).floor() / n
-        }
-        AutoMode::SmoothStairs => {
-            let n = 4.0 + (12.0 * tension.abs()).round();
-            let k = (t * n).floor();
-            let f = t * n - k;
-            let ramp = ((f - 0.8) / 0.2).clamp(0.0, 1.0);
-            ((k + ramp) / n).min(1.0)
-        }
-        AutoMode::Pulse => {
-            if t >= 1.0 { 1.0 } else if (t * freq).fract() < 0.5 { 0.0 } else { 1.0 }
-        }
-        AutoMode::Wave => 0.5 - 0.5 * (t * freq * 2.0 * PI).cos(),
-        AutoMode::HalfSine => (t * PI / 2.0).sin(),
-        AutoMode::Smooth => 0.5 - 0.5 * (t * PI).cos(),
+        Some(curve::segment_value(pts, i, t))
     }
 }

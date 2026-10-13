@@ -131,7 +131,40 @@ fn vorbis_in_wav(b: &[u8]) -> Option<VorbisInWav<'_>> {
     }
 }
 
+/// The length in frames of an MP3 stream's leading info frame (a Xing / Info / VBRI tag in the first MPEG frame, after
+/// any ID3v2 tag), when it has one: 1152 for MPEG-1, 576 for MPEG-2 and 2.5. The tag is recognised as the decoder
+/// recognises it (Layer III, the side information before it all zero).
+fn mp3_info_frame(b: &[u8]) -> Option<usize> {
+    let mut pos = 0;
+    if b.len() >= 10 && &b[..3] == b"ID3" {
+        let size = b[6..10].iter().fold(0usize, |n, &x| n << 7 | usize::from(x & 0x7F));
+        pos = 10 + size + if b[5] & 0x10 != 0 { 10 } else { 0 };
+    }
+    // The first frame header: sync, a valid version, Layer III, a valid bitrate and sample rate.
+    let h = b.get(pos..pos + 4)?;
+    let version = (h[1] >> 3) & 3;
+    if h[0] != 0xFF || h[1] & 0xE0 != 0xE0 || version == 1 || (h[1] >> 1) & 3 != 1 || h[2] >> 4 == 0xF || (h[2] >> 2) & 3 == 3 {
+        return None;
+    }
+    let (mpeg1, mono) = (version == 3, h[3] >> 6 == 3);
+    let side = match (mpeg1, mono) {
+        (true, true) => 17,
+        (true, false) => 32,
+        (false, true) => 9,
+        (false, false) => 17,
+    };
+    let header = if h[1] & 1 == 0 { 6 } else { 4 };
+    let zero = |a: usize, z: usize| b.get(pos + a..pos + z).is_some_and(|s| s.iter().all(|&x| x == 0));
+    let id = |at: usize| b.get(pos + at..pos + at + 4);
+    let xing = matches!(id(4 + side), Some(b"Xing" | b"Info")) && zero(header, 4 + side);
+    let vbri = id(36) == Some(b"VBRI") && zero(header, 36);
+    (xing || vbri).then_some(if mpeg1 { 1152 } else { 576 })
+}
+
 fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Sample, String> {
+    // MP3 plays every decoded frame, the encoder's info frame as silence in front (spec: audio/sampler.md, the table
+    // of formats; audio/sample-formats.md).
+    let info_frame = mp3_info_frame(&bytes);
     let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = ext {
@@ -147,12 +180,14 @@ fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Sample, String> {
         .as_ref()
         .and_then(|p| p.audio())
         .ok_or("no audio codec parameters")?;
+    let mp3 = format.format_info().short_name == "mp3";
     let mut decoder = codecs()
-        .make_audio_decoder(params, &AudioDecoderOptions::default())
+        .make_audio_decoder(params, &AudioDecoderOptions::default().gapless(!mp3))
         .map_err(|e| e.to_string())?;
 
     let mut rate = 0;
-    let (mut left, mut right) = (Vec::new(), Vec::new());
+    let silence = if mp3 { info_frame.unwrap_or(0) } else { 0 };
+    let (mut left, mut right) = (vec![0.0; silence], vec![0.0; silence]);
     let mut buf: Vec<f32> = Vec::new();
     loop {
         let packet = match format.next_packet() {
@@ -307,20 +342,24 @@ impl SampleLibrary {
 mod tests {
     use super::*;
 
-    /// `tests/data/click_sine.mp3` (made with ffmpeg + LAME, 64 kbit/s mono, ID3v2 tag): 0.3 s at 44.1 kHz, a
-    /// 10-frame click of 0.9 at frame 4410, then a 440 Hz sine of 0.25 from frame 8820.
+    /// `tests/data/click_sine.mp3` (made with ffmpeg + LAME, 64 kbit/s mono, ID3v2 tag, LAME info frame): 0.3 s at
+    /// 44.1 kHz, a 10-frame click of 0.9 at frame 4410, then a 440 Hz sine of 0.25 from frame 8820.
     #[test]
     fn mp3_decodes_in_time_and_level() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/click_sine.mp3");
+        assert_eq!(mp3_info_frame(&std::fs::read(&path).unwrap()), Some(1152));
         let s = load(&path).expect("mp3 decodes");
         assert_eq!(s.rate, 44100);
         assert_eq!(s.left, s.right, "mono is duplicated");
         let peak = (0..s.frames()).max_by(|&a, &b| s.left[a].abs().total_cmp(&s.left[b].abs())).unwrap();
         eprintln!("frames {} click at {peak}", s.frames());
-        // The encoder delay is trimmed: the click stays where it was written.
-        assert!((4405..4425).contains(&peak), "click at {peak}");
-        assert!(s.frames().abs_diff(13230) < 64, "length {}", s.frames());
-        let tail = &s.left[9000..12000];
+        // Every decoded frame plays: the info frame's 1152 frames of silence, then the encoder delay (576) and the
+        // decoder's own (529) before the click, and whole MPEG frames to the end.
+        assert!(s.left[..1152].iter().all(|&v| v == 0.0));
+        assert!((4410 + 1152 + 1105 - 5..4410 + 1152 + 1105 + 10).contains(&peak), "click at {peak}");
+        assert_eq!(s.frames() % 1152, 0, "length {}", s.frames());
+        assert!(s.frames() >= 1152 + 1105 + 13230, "length {}", s.frames());
+        let tail = &s.left[9000 + 2257..12000 + 2257];
         let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
         assert!((rms - 0.25 / 2f32.sqrt()).abs() < 0.02, "sine rms {rms}");
     }

@@ -115,7 +115,8 @@ impl Engine {
                     continue;
                 }
                 pa.done.push(a.target);
-                let beat = a.from_beat + (f - a.start as f64) / ppq;
+                // One tick ahead, as every automation target (spec: audio/automation.md "When a clip acts").
+                let beat = a.from_beat + (f + 1.0 - a.start as f64) / ppq;
                 let Some(v) = self.curves[a.curve].value_at(beat) else { continue };
                 let v = v.clamp(0.0, 1.0);
                 match pa.last.iter_mut().find(|(t, _)| *t == a.target) {
@@ -231,7 +232,7 @@ mod tests {
     }
 
     /// A clip on a channel plugin parameter reaches the instrument as frame-accurate events every 64 frames, with the
-    /// curve's value at that frame, and stops at the clip end.
+    /// curve's value one tick (250 frames) after that frame, and stops at the clip end.
     #[test]
     fn channel_parameter_clip_drives_the_instrument() {
         let p = project(os_model::target::channel_param(0, 7));
@@ -244,9 +245,9 @@ mod tests {
         let seen = probe.lock().unwrap().seen.clone();
         assert!(seen.len() > 1000, "{} events", seen.len());
         assert!(seen.iter().all(|&(_, i, _)| i == 7));
-        // Every event carries the ramp's value at its own frame.
+        // Every event carries the ramp's value one tick ahead of its own frame.
         for &(f, _, v) in &seen {
-            let want = f as f64 / (4.0 * 24000.0);
+            let want = ((f + 250) as f64 / (4.0 * 24000.0)).min(1.0);
             assert!((v - want).abs() < 1e-6, "frame {f}: {v} vs {want}");
         }
         // The clip ends at 4 beats = 96000 frames: nothing after it.
@@ -268,7 +269,7 @@ mod tests {
         assert!(seen.len() > 300, "{}", seen.len());
         assert!(seen.iter().all(|&(_, i, _)| i == 12));
         let &(f, _, v) = seen.last().unwrap();
-        assert!((v - f as f64 / 96000.0).abs() < 1e-6);
+        assert!((v - (f + 250) as f64 / 96000.0).abs() < 1e-6);
         // Constant curve after a seek: one event, then nothing until it changes.
         let mut p = p;
         p.automations[0].points = vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(4.0, 0.25)];
