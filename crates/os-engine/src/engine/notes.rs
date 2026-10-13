@@ -87,8 +87,9 @@ pub(super) fn closing_frames(mode: u8, rate: u32) -> u32 {
 /// A note event for an instrument.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Note {
-    /// `fine`: the note's fine pitch in semitones, a tuning of its own on top of the channel's.
-    On { key: u8, vel: f32, start: f32, fine: f32 },
+    /// `fine`: the note's fine pitch in semitones, a tuning of its own on top of the channel's; `levels`: its pan and
+    /// mod X / Y.
+    On { key: u8, vel: f32, start: f32, fine: f32, levels: crate::NoteLevels },
     /// The note's end: a plugin's own release, a sampler voice's envelope release.
     Off(u8),
     /// A sampler voice's closing fade.
@@ -97,10 +98,11 @@ pub(super) enum Note {
     Tune(u8, f32),
 }
 
-/// Event velocities below zero: a note off, a choke (an audio clip's end), a slide note.
+/// Event velocities below zero: a note off, a choke (an audio clip's end), a slide note, a layer note's own cut.
 pub(super) const OFF: f32 = -1.0;
 pub(super) const CHOKE: f32 = -2.0;
 pub(super) const SLIDE: f32 = -3.0;
+pub(super) const CUT: f32 = -4.0;
 
 /// A note event of one tick as the engine collects it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -119,11 +121,22 @@ pub(super) struct Event {
     pub long: bool,
     /// A slide note's length in ticks: its glide takes that many ticks plus one steps.
     pub glide: u32,
+    /// The note's own pan and mod X / Y.
+    pub levels: crate::NoteLevels,
+    /// A note a layer handed on: the group it cuts and the group its voice belongs to as the note carries them
+    /// (`None`: the channel's own numbers).
+    pub cuts: Option<(u32, u32)>,
+    /// The layer channel it came through (its voices answer that layer's slide notes, not the channel's own).
+    pub layer: Option<usize>,
 }
 
 impl Event {
     pub fn on(ch: usize, off: u32, key: u8, vel: f32) -> Event {
-        Event { ch, off, key, vel, start: 0.0, fine: 0.0, long: true, glide: 0 }
+        Event { ch, off, key, vel, start: 0.0, fine: 0.0, long: true, glide: 0, levels: crate::NoteLevels::default(), cuts: None, layer: None }
+    }
+    /// A layer note's own cut group (spec: audio/note-rules.md "Layer channels": it acts before the note is handed on).
+    pub fn cut(ch: usize, off: u32, group: u32) -> Event {
+        Event { vel: CUT, cuts: Some((group, 0)), ..Event::on(ch, off, 0, 0.0) }
     }
     /// A slide note of `len` ticks to `key`.
     pub fn slide(ch: usize, off: u32, key: u8, len: u32) -> Event {
@@ -159,6 +172,8 @@ struct Voice {
     state: State,
     /// Frames it may still sound (its sample's rest; the closing fade once closing).
     left: f64,
+    /// The layer its note came through.
+    layer: Option<usize>,
 }
 
 /// A glide of the tuning of instrument key `key` (spec "Glides": `n + 1` equal steps, the first on the tick it
@@ -268,29 +283,16 @@ pub(super) fn apply(events: &[Event], rules: &[Rules], voices: &mut [Voices], n:
             continue;
         }
         let r = rules[c];
-        if e.vel <= CHOKE {
+        if e.vel == CUT {
+            cut(e.cuts.map_or(0, |n| n.0), voices, rules, e.off, out);
+        } else if e.vel <= CHOKE {
             choke(&mut voices[c], &r, e, out);
         } else if e.vel < 0.0 {
             note_end(&mut voices[c], &r, e, out);
         } else {
-            // The cut group acts first, on voices of every channel that started on an earlier tick.
-            if r.cut > 0 {
-                for d in 0..count {
-                    let v = &mut voices[d];
-                    let mut i = 0;
-                    while i < v.pool.len() {
-                        let p = v.pool[i];
-                        if p.group == r.cut && p.born < v.tick && p.state != State::Closing && !(p.state == State::Released && !rules[d].one_shot) {
-                            let before = v.pool.len();
-                            v.release(i, &rules[d], d, e.off, out);
-                            if v.pool.len() < before {
-                                continue;
-                            }
-                        }
-                        i += 1;
-                    }
-                }
-            }
+            // The cut group acts first, on voices of every channel that started on an earlier tick; a note a layer
+            // handed on cuts the group it carries.
+            cut(e.cuts.map_or(r.cut, |n| n.0), voices, rules, e.off, out);
             note_start(&mut voices[c], &r, e, out);
         }
     }
@@ -324,14 +326,38 @@ pub(super) fn apply(events: &[Event], rules: &[Rules], voices: &mut [Voices], n:
     out.sort_by_key(|e| (e.0, e.1));
 }
 
+/// Releases every voice of every channel that belongs to `group` and started on an earlier tick (spec "Cut groups");
+/// group 0 cuts nothing.
+fn cut(group: u32, voices: &mut [Voices], rules: &[Rules], off: u32, out: &mut Vec<(usize, u32, Note)>) {
+    if group == 0 {
+        return;
+    }
+    for d in 0..rules.len().min(voices.len()) {
+        let v = &mut voices[d];
+        let mut i = 0;
+        while i < v.pool.len() {
+            let p = v.pool[i];
+            if p.group == group && p.born < v.tick && p.state != State::Closing && !(p.state == State::Released && !rules[d].one_shot) {
+                let before = v.pool.len();
+                v.release(i, &rules[d], d, off, out);
+                if v.pool.len() < before {
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+}
+
 /// A slide note (spec: audio/song-structure.md "Slide notes", "Slide notes and these rules" here): every voice of the
 /// channel not in its closing fade, released ones and ones started on this tick too, glides by `key - the pitch of the
 /// highest held voice` in `len + 1` steps, replacing a glide under way from where it is. A one-shot voice counts as held
 /// while it sounds; on a mono channel the notes that only wait count too. Without a held voice nothing moves. The
 /// slide's key becomes the last levels for portamento. (The note's colour, velocity, pan and mod X / Y are not used
-/// here: instruments take the pitch only.)
+/// here: instruments take the pitch only.) A layer's slide note moves only the voices its notes started; a slide note
+/// of the channel's own only the others (spec "Layer channels").
 fn slide(v: &mut Voices, r: &Rules, e: &Event) {
-    let held = |p: &Voice| p.state == State::Held || (r.one_shot && p.state == State::Released);
+    let held = |p: &Voice| p.layer == e.layer && (p.state == State::Held || (r.one_shot && p.state == State::Released));
     let mut top: Option<f32> = None;
     for p in v.pool.iter().filter(|p| held(p)) {
         let pitch = f32::from(p.sent) + v.tuning(p.sent);
@@ -344,7 +370,7 @@ fn slide(v: &mut Voices, r: &Rules, e: &Event) {
     }
     let Some(top) = top else { return };
     let by = f32::from(e.key) - top;
-    let mut keys: Vec<u8> = v.pool.iter().filter(|p| p.state != State::Closing).map(|p| p.sent).collect();
+    let mut keys: Vec<u8> = v.pool.iter().filter(|p| p.state != State::Closing && p.layer == e.layer).map(|p| p.sent).collect();
     keys.sort_unstable();
     keys.dedup();
     for k in keys {
@@ -407,6 +433,13 @@ fn end_voice(v: &mut Voices, r: &Rules, i: usize, e: &Event, out: &mut Vec<(usiz
     }
 }
 
+/// The group a note's voice belongs to on a channel with rules `r` and the numbers `cut`, `cut_by` (spec "Cut
+/// groups"): "cut by", except that on a channel whose voices are not one-shot voices "cut itself" leaves a note with a
+/// length out of any group.
+pub(super) fn voice_group(r: &Rules, cut: u32, cut_by: u32, long: bool) -> u32 {
+    if !r.one_shot && cut_by == cut && long { 0 } else { cut_by }
+}
+
 /// A note's start: mono, the voice limit, then the voice with its portamento glide.
 fn note_start(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, Note)>) {
     let key = e.key;
@@ -453,8 +486,11 @@ fn note_start(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, N
         v.voice_gone(gone.sent);
     }
     // A voice belongs to "cut by"; on a channel whose voices are not one-shot, "cut itself" leaves a note with a
-    // length out of the group.
-    let group = if !r.one_shot && r.cut_by == r.cut && e.long { 0 } else { r.cut_by };
+    // length out of the group. A note a layer handed on carries its group.
+    let group = match e.cuts {
+        Some((_, group)) => group,
+        None => voice_group(r, r.cut, r.cut_by, e.long),
+    };
     let left = if r.plugin {
         f64::INFINITY
     } else {
@@ -462,8 +498,8 @@ fn note_start(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, N
     };
     // A retriggered key: its old tuning ends with it.
     v.glides.retain(|g| g.key != key);
-    out.push((e.ch, e.off, Note::On { key, vel: e.vel, start: e.start, fine: e.fine }));
-    v.pool.push(Voice { sent: key, born: v.tick, group, state: State::Held, left });
+    out.push((e.ch, e.off, Note::On { key, vel: e.vel, start: e.start, fine: e.fine, levels: e.levels }));
+    v.pool.push(Voice { sent: key, born: v.tick, group, state: State::Held, left, layer: e.layer });
     if r.mono {
         v.sounding = Some((key, key));
     }
@@ -490,7 +526,7 @@ mod tests {
     }
 
     fn on(key: u8) -> Note {
-        Note::On { key, vel: 0.8, start: 0.0, fine: 0.0 }
+        Note::On { key, vel: 0.8, start: 0.0, fine: 0.0, levels: crate::NoteLevels::default() }
     }
 
     fn sampler() -> Rules {

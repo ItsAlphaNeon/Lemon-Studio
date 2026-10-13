@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CString};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::abi::{IntPtr, VoiceParams, HOST_EXTRA_SLOTS, HOST_METHODS};
@@ -74,6 +74,8 @@ pub struct HostContext {
     pub unhandled: BTreeMap<String, u32>,
     /// Render lock behind LockMix / LockPlugin / SuspendOutput (see `lock`).
     pub lock: PluginLock,
+    /// The parameter count the plugin set with host dispatcher 27 SetNumParams; -1 until it does.
+    pub num_params: AtomicIsize,
     _wavetables: Vec<Vec<f32>>,
     _temp: Vec<f32>,
 }
@@ -131,6 +133,7 @@ impl HostObject {
             voices: Mutex::new(VoiceBook::default()),
             unhandled: BTreeMap::new(),
             lock: PluginLock::new(),
+            num_params: AtomicIsize::new(-1),
             _wavetables: tables,
             _temp: temp,
         }));
@@ -153,6 +156,12 @@ impl HostObject {
     /// The plugin's render lock (lives as long as the host object).
     pub fn lock(&self) -> &PluginLock {
         unsafe { &(*self.ctx).lock }
+    }
+
+    /// The parameter count the plugin set later (host dispatcher 27), if it did.
+    pub fn num_params(&self) -> Option<i32> {
+        let n = unsafe { &(*self.ctx).num_params }.load(Ordering::Relaxed);
+        (n >= 0).then(|| n.min(i32::MAX as isize) as i32)
     }
 
     /// The voice requests and facts (lives as long as the host object).
@@ -195,10 +204,17 @@ unsafe extern "system" fn dispatcher(this: *mut HostObject, _sender: IntPtr, id:
         // stand-in (spec plugins/fruity-abi.md, "Host dispatcher ID 71"). Without this the plugin
         // crashes; with it, effects host and render.
         71 => crate::stub::context_object(),
+        // SetNumParams: the plugin's parameter count from now on (spec: "Parameters"); answered 0 as before.
+        27 => {
+            if let Some(c) = ctx(this) {
+                c.num_params.store(value.max(0), Ordering::Relaxed);
+            }
+            0
+        }
         // Harmless notifications observed from FL 26 plugins (answered 0 with no ill effect).
         // 2 EditorResized: the host polls the editor's size on its UI tick instead.
         // 22 OnHint_Direct, 24 GetInstance (none).
-        2 | 3 | 5 | 10 | 13 | 22 | 23 | 24 | 27 | 30 | 33 | 35 | 46 | 48 | 50 | 72 | 86 => 0,
+        2 | 3 | 5 | 10 | 13 | 22 | 23 | 24 | 30 | 33 | 35 | 46 | 48 | 50 | 72 | 86 => 0,
         _ => {
             log_once(format!("host dispatcher id {id} (index {index}, value {value})"));
             if let Some(c) = ctx(this) {

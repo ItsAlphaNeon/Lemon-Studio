@@ -8,6 +8,8 @@ mod app;
 mod audio_cfg;
 #[cfg(test)]
 mod audio_bench;
+#[cfg(test)]
+mod render_check;
 mod browser;
 mod cpu;
 mod dialog;

@@ -207,15 +207,19 @@ impl Project {
             .filter(|&(new, &o)| map.get(o).copied().flatten() != Some(new as u16))
             .filter_map(|(new, &o)| {
                 let a = self.automations.iter().find(|a| usize::from(a.channel) == o)?;
-                Some(Automation { channel: new as u16, target: None, ..a.clone() })
+                Some(Automation { channel: new as u16, targets: Vec::new(), ..a.clone() })
             })
             .collect();
         self.automations.retain_mut(|a| {
             let Some(c) = m(a.channel) else { return false };
             a.channel = c;
-            if let Some(t) = a.target.filter(|&t| t >> 16 < 0x4000) {
-                a.target = m((t >> 16) as u16).map(|c| target::channel(c, t as u16));
-            }
+            // Channel targets follow their channel; a deleted channel's targets go (the file loses those links).
+            a.targets.retain_mut(|t| {
+                if *t >> 16 >= 0x4000 {
+                    return true;
+                }
+                m((*t >> 16) as u16).map(|c| *t = target::channel(c, *t as u16)).is_some()
+            });
             true
         });
         self.automations.extend(clones);
@@ -314,6 +318,100 @@ pub struct ChannelSound {
     /// Stretch settings as stored (event 215, ints 24..27): time, pitch, multiplier, mode. The time is a single in
     /// 1/192 beat (FL 24.2 on), kept as its bits.
     pub stretch: [u32; 4],
+    /// The sample's start and length, loop options and precomputed effects (read only: saving keeps the file's own
+    /// events).
+    pub fx: SampleFx,
+}
+
+/// A sample channel's start, length, loop options and precomputed effects as stored, in the file's units (spec:
+/// audio/precomputed-effects.md "Settings"). Read from a project, never written back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleFx {
+    /// Event 70: `FADE_STEREO`, `REVERSE`, `CLIP`, `SWAP`.
+    pub flags: u16,
+    /// Event 74, 0..256.
+    pub boost: u16,
+    /// Events 75 and 76, 0..1024.
+    pub fade_out: u16,
+    pub fade_in: u16,
+    /// Event 85, 0..4096, centre 2048 (above: the left side is late).
+    pub stereo_delay: u16,
+    /// Event 86, 0..512, centre 256.
+    pub pogo: u16,
+    /// Event 69: the one-pole feedback, 0..256, centre 128.
+    pub feedback: u16,
+    /// Events 71 and 83: the low-pass, cutoff 1024 = open, resonance 0..640 (a larger stored value plays as 640).
+    pub cutoff: u16,
+    pub resonance: u16,
+    /// Event 131: ring modulation mix (0..256) and frequency word.
+    pub ring_mix: u16,
+    pub ring_freq: u16,
+    /// Event 139: reverb amount (0..256, 0 = off) and type (0 or 1).
+    pub reverb: u16,
+    pub reverb_type: u16,
+    /// Event 20: a ping-pong loop.
+    pub ping_pong: bool,
+    /// Event 215 bytes 9, 80, 81.
+    pub remove_dc: bool,
+    pub normalize: bool,
+    pub polarity: bool,
+    /// Event 215 bytes 84..87: the crossfade in 1/2048 of the loop's length.
+    pub crossfade: u32,
+    /// Event 215 bytes 88..91: the trim threshold in 1/32768 of full scale, 0 = off.
+    pub trim: u32,
+    /// Event 215 bytes 128..135 and 136..143 (doubles, kept as their bits): the start as a fraction of the sample, the
+    /// length as a fraction of what follows the start.
+    pub start_bits: u64,
+    pub length_bits: u64,
+    /// Event 215 byte 156: the loop points follow a reversal.
+    pub loop_follows_reverse: bool,
+}
+
+impl SampleFx {
+    pub const FADE_STEREO: u16 = 1;
+    pub const REVERSE: u16 = 2;
+    pub const CLIP: u16 = 4;
+    pub const SWAP: u16 = 256;
+
+    /// The start, a fraction of the sample.
+    pub fn start(&self) -> f64 {
+        f64::from_bits(self.start_bits)
+    }
+
+    /// The length, a fraction of what follows the start.
+    pub fn length(&self) -> f64 {
+        f64::from_bits(self.length_bits)
+    }
+}
+
+impl Default for SampleFx {
+    /// What a new channel stores (spec: audio/precomputed-effects.md "Settings", the defaults).
+    fn default() -> Self {
+        SampleFx {
+            flags: 0,
+            boost: 0,
+            fade_out: 0,
+            fade_in: 0,
+            stereo_delay: 2048,
+            pogo: 256,
+            feedback: 128,
+            cutoff: 1024,
+            resonance: 0,
+            ring_mix: 0,
+            ring_freq: 128,
+            reverb: 0,
+            reverb_type: 1,
+            ping_pong: false,
+            remove_dc: false,
+            normalize: false,
+            polarity: false,
+            crossfade: 0,
+            trim: 0,
+            start_bits: 0f64.to_bits(),
+            length_bits: 1f64.to_bits(),
+            loop_follows_reverse: false,
+        }
+    }
 }
 
 /// Stretch methods as event 215 int 27 stores them (spec: audio/time-stretch.md "Fields").
@@ -432,7 +530,7 @@ impl ChannelSound {
 impl Default for ChannelSound {
     /// A new channel: filter open, no flags read, declick mode 0, not stretched.
     fn default() -> Self {
-        ChannelSound { cutoff: 256, resonance: 0, filter_type: 0, sampler_flags: None, declick: 0, stretch: [0; 4] }
+        ChannelSound { cutoff: 256, resonance: 0, filter_type: 0, sampler_flags: None, declick: 0, stretch: [0; 4], fx: SampleFx::default() }
     }
 }
 
@@ -472,6 +570,26 @@ pub struct ChannelMisc {
     pub add_key: bool,
     /// Fine tuning, cents (-100..=100).
     pub fine: i32,
+    /// How a layer channel hands its notes to its children (stored with every channel; only a layer uses it).
+    pub layer: LayerSettings,
+}
+
+/// A layer channel's settings besides its children (spec: audio/note-rules.md "Settings", "Layer channels").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LayerSettings {
+    /// Event 144: [`LayerSettings::RANDOM`], [`LayerSettings::CROSSFADE`], [`LayerSettings::IN_TURN`].
+    pub flags: u32,
+    /// Crossfade position, 0..=256 (event 215, int at byte 76).
+    pub crossfade: i32,
+}
+
+impl LayerSettings {
+    /// One child per note, drawn at random.
+    pub const RANDOM: u32 = 1;
+    /// The children's volumes follow the crossfade position.
+    pub const CROSSFADE: u32 = 2;
+    /// One child per note, in turn.
+    pub const IN_TURN: u32 = 4;
 }
 
 impl Default for ChannelMisc {
@@ -496,6 +614,7 @@ impl Default for ChannelMisc {
             main_pitch: true,
             add_key: false,
             fine: 0,
+            layer: LayerSettings::default(),
         }
     }
 }
@@ -1061,13 +1180,14 @@ impl PlaylistTrack {
 }
 
 /// The data of an automation clip channel (spec: flp/events/automation.md): its points (event 234) and the
-/// target it moves (event 227).
+/// targets it moves (one event 227 each).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Automation {
     /// Channel index of the automation clip channel.
     pub channel: u16,
-    /// Target id (`None` = not linked).
-    pub target: Option<u32>,
+    /// Target ids in file order (empty = not linked). A clip drives every one of them (spec: audio/automation.md
+    /// "The link"); names and value texts follow the first.
+    pub targets: Vec<u32>,
     /// Points with absolute positions in beats from the clip start, sorted.
     pub points: Vec<AutoPoint>,
     /// Stored header (21 bytes incl. the count) and tail of event 234, kept as read.
@@ -1203,9 +1323,27 @@ pub mod target {
     pub const CHANNEL_VOLUME: u16 = 0;
     pub const CHANNEL_PAN: u16 = 1;
     pub const CHANNEL_PITCH: u16 = 4;
+    /// The channel's filter knobs and its level adjustments (event 229: pan offset, volume multiplier, mod X and mod
+    /// Y offsets; spec: audio/voice-levels.md "Values from automation").
+    pub const CHANNEL_CUTOFF: u16 = 2;
+    pub const CHANNEL_RESONANCE: u16 = 3;
+    pub const CHANNEL_PAN_OFFSET: u16 = 0x10;
+    pub const CHANNEL_VOLUME_MULT: u16 = 0x11;
+    pub const CHANNEL_MOD_X: u16 = 0x13;
+    pub const CHANNEL_MOD_Y: u16 = 0x14;
     pub const TEMPO: u32 = 0x4000_0005;
     pub const MIXER_VOLUME: u8 = 0xC0;
     pub const MIXER_PAN: u8 = 0xC1;
+    pub const MIXER_SEPARATION: u8 = 0xC2;
+    /// Equaliser band `b` (0..3): gain `EQ_GAIN + b`, frequency `EQ_FREQ + b`, width `EQ_WIDTH + b`.
+    pub const EQ_GAIN: u8 = 0xD0;
+    pub const EQ_FREQ: u8 = 0xD8;
+    pub const EQ_WIDTH: u8 = 0xE0;
+    /// A slot's switch and mix level, at the slot's place.
+    pub const SLOT_ON: u8 = 0;
+    pub const SLOT_MIX: u8 = 1;
+    /// Send levels from FL 24.2 on: `0x2000 + destination` at the sending track's place.
+    pub const SEND: u16 = 0x2000;
 
     pub fn channel(ch: u16, param: u16) -> u32 {
         u32::from(ch) << 16 | u32::from(param)
@@ -1213,6 +1351,16 @@ pub mod target {
 
     pub fn mixer(track: u16, id: u8) -> u32 {
         u32::from(0x7000 + track * 64) << 16 | 0x1F00 | u32::from(id)
+    }
+
+    /// Setting `id` ([`SLOT_ON`], [`SLOT_MIX`]) of mixer track `track`'s slot `slot` (0..9).
+    pub fn slot(track: u16, slot: u8, id: u8) -> u32 {
+        u32::from(0x7000 + track * 64 + u16::from(slot)) << 16 | 0x1F00 | u32::from(id)
+    }
+
+    /// The level of track `track`'s send to track `dest`.
+    pub fn send(track: u16, dest: u16) -> u32 {
+        u32::from(0x7000 + track * 64) << 16 | u32::from(SEND + dest)
     }
 
     /// Plugin parameters are `0x8000 + k`, k = the parameter's index in the plugin's list
@@ -1235,8 +1383,19 @@ pub mod target {
         ChannelVolume(u16),
         ChannelPan(u16),
         ChannelPitch(u16),
+        /// Channel, one of its filter knobs or level adjustments ([`CHANNEL_CUTOFF`], [`CHANNEL_RESONANCE`],
+        /// [`CHANNEL_PAN_OFFSET`], [`CHANNEL_VOLUME_MULT`], [`CHANNEL_MOD_X`], [`CHANNEL_MOD_Y`]).
+        ChannelLevel(u16, u16),
         MixerVolume(u16),
         MixerPan(u16),
+        MixerSeparation(u16),
+        /// Mixer track, equaliser band (0..3), setting (0 gain, 1 frequency, 2 width).
+        MixerEq(u16, u8, u8),
+        /// Mixer track, destination track: the send level.
+        MixerSend(u16, u16),
+        /// Mixer track, slot: the slot's switch / its mix level.
+        SlotOn(u16, u8),
+        SlotMix(u16, u8),
         Tempo,
         /// Channel, parameter index of its plugin.
         ChannelParam(u16, u16),
@@ -1260,11 +1419,26 @@ pub mod target {
         if hi < 0x4000 && lo >= PLUGIN_PARAM {
             return Target::ChannelParam(hi, lo - PLUGIN_PARAM);
         }
-        if (0x7000..0x7000 + 127 * 64).contains(&hi) && (hi - 0x7000) % 64 == 0 && lo >> 8 == 0x1F {
-            let track = (hi - 0x7000) / 64;
-            return match lo as u8 {
-                MIXER_VOLUME => Target::MixerVolume(track),
-                MIXER_PAN => Target::MixerPan(track),
+        // Mixer places from FL 24.2 on (spec: flp/layouts.md "Mixer places", "Parameter ids in an automation link").
+        if (0x7000..0x7000 + 127 * 64).contains(&hi) && (hi - 0x7000) % 64 < 10 {
+            let (track, slot) = ((hi - 0x7000) / 64, ((hi - 0x7000) % 64) as u8);
+            let id = lo as u8;
+            return match lo >> 8 {
+                0x1F if id == SLOT_ON => Target::SlotOn(track, slot),
+                0x1F if id == SLOT_MIX => Target::SlotMix(track, slot),
+                _ if slot != 0 => Target::Other(t),
+                // Send levels: 0x2000 + d, and 0x1F00 + 64 + d as in the mixer's records.
+                0x20 if lo - SEND < 127 => Target::MixerSend(track, lo - SEND),
+                0x1F => match id {
+                    64..=190 => Target::MixerSend(track, u16::from(id - 64)),
+                    MIXER_VOLUME => Target::MixerVolume(track),
+                    MIXER_PAN => Target::MixerPan(track),
+                    MIXER_SEPARATION => Target::MixerSeparation(track),
+                    EQ_GAIN..=0xD2 => Target::MixerEq(track, id - EQ_GAIN, 0),
+                    EQ_FREQ..=0xDA => Target::MixerEq(track, id - EQ_FREQ, 1),
+                    EQ_WIDTH..=0xE2 => Target::MixerEq(track, id - EQ_WIDTH, 2),
+                    _ => Target::Other(t),
+                },
                 _ => Target::Other(t),
             };
         }
@@ -1273,6 +1447,9 @@ pub mod target {
                 CHANNEL_VOLUME => Target::ChannelVolume(hi),
                 CHANNEL_PAN => Target::ChannelPan(hi),
                 CHANNEL_PITCH => Target::ChannelPitch(hi),
+                CHANNEL_CUTOFF | CHANNEL_RESONANCE | CHANNEL_PAN_OFFSET | CHANNEL_VOLUME_MULT | CHANNEL_MOD_X | CHANNEL_MOD_Y => {
+                    Target::ChannelLevel(hi, lo)
+                }
                 _ => Target::Other(t),
             };
         }
@@ -1281,7 +1458,15 @@ pub mod target {
 
     /// Bipolar targets centre at 0.5.
     pub fn bipolar(t: u32) -> bool {
-        matches!(decode(t), Target::ChannelPan(_) | Target::ChannelPitch(_) | Target::MixerPan(_))
+        matches!(
+            decode(t),
+            Target::ChannelPan(_)
+                | Target::ChannelPitch(_)
+                | Target::ChannelLevel(_, CHANNEL_PAN_OFFSET | CHANNEL_VOLUME_MULT | CHANNEL_MOD_X | CHANNEL_MOD_Y)
+                | Target::MixerPan(_)
+                | Target::MixerSeparation(_)
+                | Target::MixerEq(_, _, 0)
+        )
     }
 
     #[cfg(test)]
@@ -1303,10 +1488,42 @@ pub mod target {
             assert_eq!(decode(channel(3, CHANNEL_PAN)), Target::ChannelPan(3));
             assert!(!bipolar(slot_param(1, 0, 0)));
         }
+
+        // spec: flp/events/automation.md "Targets"; flp/layouts.md "Parameter ids in an automation link"
+        #[test]
+        fn mixer_targets() {
+            assert_eq!(decode(0x7001_1F01), Target::SlotMix(0, 1), "master slot 1 mix");
+            assert_eq!(slot(0, 1, SLOT_MIX), 0x7001_1F01);
+            assert_eq!(decode(slot(3, 9, SLOT_ON)), Target::SlotOn(3, 9));
+            assert_eq!(decode(slot(3, 0, SLOT_ON)), Target::SlotOn(3, 0));
+            assert_eq!(decode(0x7280_1FC0), Target::MixerVolume(10), "Insert 10 volume");
+            assert_eq!(decode(mixer(4, MIXER_SEPARATION)), Target::MixerSeparation(4));
+            assert_eq!(decode(mixer(2, EQ_GAIN + 1)), Target::MixerEq(2, 1, 0));
+            assert_eq!(decode(mixer(2, EQ_FREQ + 2)), Target::MixerEq(2, 2, 1));
+            assert_eq!(decode(mixer(2, EQ_WIDTH)), Target::MixerEq(2, 0, 2));
+            assert_eq!(decode(mixer(2, 0xD3)), Target::Other(mixer(2, 0xD3)));
+            // Send to track 85: 0x2055 at the sending track's place; the records' 0x1F00 + 64 + d form too.
+            assert_eq!(decode(send(5, 85)), Target::MixerSend(5, 85));
+            assert_eq!(send(5, 85) & 0xFFFF, 0x2055);
+            assert_eq!(decode(mixer(5, 64 + 126)), Target::MixerSend(5, 126));
+            // Track settings at a slot's place are nothing.
+            assert_eq!(decode(slot(1, 2, MIXER_VOLUME)), Target::Other(slot(1, 2, MIXER_VOLUME)));
+            assert!(bipolar(mixer(1, MIXER_SEPARATION)) && bipolar(mixer(1, EQ_GAIN)) && !bipolar(mixer(1, EQ_FREQ)));
+            // spec: audio/voice-levels.md "Values from automation"
+            assert_eq!(decode(channel(3, CHANNEL_CUTOFF)), Target::ChannelLevel(3, 2));
+            assert_eq!(decode(channel(3, CHANNEL_MOD_Y)), Target::ChannelLevel(3, 0x14));
+            assert_eq!(decode(channel(3, 0x12)), Target::Other(0x0003_0012));
+            assert!(bipolar(channel(0, CHANNEL_VOLUME_MULT)) && !bipolar(channel(0, CHANNEL_CUTOFF)));
+        }
     }
 }
 
 impl Automation {
+    /// The first target: the one the clip is named after and whose values the playlist shows.
+    pub fn target(&self) -> Option<u32> {
+        self.targets.first().copied()
+    }
+
     /// The curve's value at `beat` (clamped to the first / last point), shaped per segment mode as the walk plays it
     /// (spec: audio/automation.md "Segment shapes"). At a point's own beat it is that point's level.
     pub fn value_at(&self, beat: f64) -> Option<f64> {

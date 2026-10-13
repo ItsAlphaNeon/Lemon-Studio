@@ -487,7 +487,7 @@ mod tests {
         let msg = a.params_drop(key, 35, 3, 384);
         assert_eq!(msg.as_deref(), Some("Created automation clip \"Open Parametric EQ 2 - Insert 2 - Main level\""));
         let ch = a.state.project.channels.last().unwrap().index;
-        assert_eq!(a.state.project.automations.last().map(|x| (x.channel, x.target)), Some((ch, Some(tgt))));
+        assert_eq!(a.state.project.automations.last().map(|x| (x.channel, x.target())), Some((ch, Some(tgt))));
         let clip = crate::playlist::arr_mut(&mut a.state).clips.last().cloned().unwrap();
         assert_eq!((clip.position, clip.track, clip.source), (384, 3, os_model::ClipSource::Channel(ch)));
         assert_eq!(value_text(&a.state, Target::SlotParam(2, 1, 0), 1.0).as_deref(), Some("18.0dB"));
@@ -507,7 +507,7 @@ mod tests {
         a.params_automate(key, 7);
         let last = a.state.project.channels.last().unwrap();
         assert_eq!(last.name.as_deref(), Some("Open Parametric EQ 2 - Insert 2 - Band 1 freq"));
-        assert_eq!(a.state.project.automations.last().and_then(|x| x.target), Some(target::slot_param(2, 1, 7)));
+        assert_eq!(a.state.project.automations.last().and_then(|x| x.target()), Some(target::slot_param(2, 1, 7)));
         a.note_host_tweak(&Action::Tempo);
         assert_eq!(a.params_menu(TOOLS_NEXT), None);
         let menu = a.state.playlist.popup.take().unwrap();
@@ -533,7 +533,7 @@ mod tests {
             let links: Vec<(u16, Target)> = project
                 .automations
                 .iter()
-                .filter_map(|x| Some((x.channel, target::decode(x.target?))))
+                .filter_map(|x| Some((x.channel, target::decode(x.target()?))))
                 .filter(|&(_, t)| matches!(t, Target::SlotParam(tr, sl, _) if eq_slot(tr, sl)))
                 .collect();
             if links.is_empty() {
@@ -579,7 +579,7 @@ mod tests {
         let key = a.state.params.lists.keys().copied().find(|&k| fx_of(k).is_some()).expect("a hosted EQ slot");
         println!("{:?}", a.params_automate(key, k));
         let auto = a.state.project.automations.last_mut().unwrap();
-        println!("target {:#010x}", auto.target.unwrap());
+        println!("target {:#010x}", auto.target().unwrap());
         let end = auto.points.last().map_or(16.0, |p| p.beat.max(16.0));
         auto.points = vec![os_model::AutoPoint::new(0.0, 0.0), os_model::AutoPoint::new(end, 1.0)];
         a.save_to(out.into());

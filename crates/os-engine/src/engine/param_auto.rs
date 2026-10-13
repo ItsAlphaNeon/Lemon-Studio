@@ -43,35 +43,73 @@ pub(super) struct ParamAuto {
     done: Vec<Target>,
     /// The playlist has clips on plugin parameters at all.
     pub any: bool,
+    /// This tick's values for plugins that take one value per tick (`Instrument::tick_params`): the walked value the
+    /// clip hands on, at offset 0, when it differs from the last one handed on (spec: plugins/fruity-abi.md
+    /// "Parameters", audio/automation.md "When a clip acts").
+    pub ticks: Vec<ParamEvent>,
+    /// Last per-tick value handed on per target (`Round(level * 2^30)`).
+    last_tick: Vec<(Target, i64)>,
 }
 
 impl ParamAuto {
     pub fn new(any: bool) -> Self {
-        ParamAuto { events: Vec::with_capacity(256), last: Vec::with_capacity(16), done: Vec::with_capacity(16), any }
+        ParamAuto {
+            events: Vec::with_capacity(256),
+            last: Vec::with_capacity(16),
+            done: Vec::with_capacity(16),
+            any,
+            ticks: Vec::with_capacity(16),
+            last_tick: Vec::with_capacity(16),
+        }
     }
 
     /// Values are sent again from scratch (after a seek: the plugin gets the value at the new position).
     pub fn forget(&mut self) {
         self.last.clear();
+        self.last_tick.clear();
+    }
+
+    /// The value `n` (`Round(level * 2^30)`) an automation clip hands on to plugin parameter `target` for the tick
+    /// starting now, kept for per-tick plugins when it changed.
+    pub fn tick_value(&mut self, target: Target, n: i64) {
+        let (dest, index) = match target {
+            Target::ChannelParam(c, k) => (Dest::Channel(usize::from(c)), k),
+            Target::SlotParam(t, s, k) => (Dest::Slot(usize::from(t), usize::from(s)), k),
+            _ => return,
+        };
+        match self.last_tick.iter_mut().find(|(t, _)| *t == target) {
+            Some((_, last)) if *last == n => return,
+            Some((_, last)) => *last = n,
+            None => self.last_tick.push((target, n)),
+        }
+        self.ticks.push(ParamEvent { dest, offset: 0, index: u32::from(index), value: n as f64 / 1_073_741_824.0 });
+    }
+
+    /// Channel `c`'s per-tick values for this tick.
+    pub fn channel_ticks(&self, c: usize) -> impl Iterator<Item = (u32, f64)> + '_ {
+        self.ticks.iter().filter(move |e| e.dest == Dest::Channel(c)).map(|e| (e.index, e.value))
     }
 
     /// Hands mixer track `t`'s slot events of this block to their hosted effects (before the track is processed).
     pub fn deliver_slots(&mut self, t: usize, effects: &[FxSlot]) {
-        if self.events.is_empty() {
+        if self.events.is_empty() && self.ticks.is_empty() {
             return;
         }
         for fx in effects {
             let Fx::Hosted(h) = &fx.fx else { continue };
             let dest = Dest::Slot(t, fx.slot);
-            if !self.events.iter().any(|e| e.dest == dest) {
+            if !self.events.iter().chain(&self.ticks).any(|e| e.dest == dest) {
                 continue;
             }
             // A busy instance misses these values: they are sent again at the next step.
             let Ok(mut h) = h.try_lock() else {
-                self.last.retain(|(tg, _)| !matches!(*tg, Target::SlotParam(a, b, _) if usize::from(a) == t && usize::from(b) == fx.slot));
+                let mine = |tg: &Target| matches!(*tg, Target::SlotParam(a, b, _) if usize::from(a) == t && usize::from(b) == fx.slot);
+                self.last.retain(|(tg, _)| !mine(tg));
+                self.last_tick.retain(|(tg, _)| !mine(tg));
                 continue;
             };
-            for e in self.events.iter().filter(|e| e.dest == dest) {
+            let list = if h.tick_params_fx() { &self.ticks } else { &self.events };
+            for e in list.iter().filter(|e| e.dest == dest) {
                 h.param_fx(e.offset, e.index, e.value);
             }
         }
@@ -88,7 +126,9 @@ impl ParamAuto {
 
     /// A busy instrument missed channel `c`'s values: send them again at the next step.
     pub fn resend_channel(&mut self, c: usize) {
-        self.last.retain(|(tg, _)| !matches!(*tg, Target::ChannelParam(ch, _) if usize::from(ch) == c));
+        let mine = |tg: &Target| matches!(*tg, Target::ChannelParam(ch, _) if usize::from(ch) == c);
+        self.last.retain(|(tg, _)| !mine(tg));
+        self.last_tick.retain(|(tg, _)| !mine(tg));
     }
 }
 
@@ -111,25 +151,33 @@ impl Engine {
             pa.done.clear();
             // Later clips win where clips on the same target overlap (as for the other targets).
             for a in self.autos.iter().rev() {
-                if !is_param(a.target) || f < a.start as f64 || f >= a.end as f64 || pa.done.contains(&a.target) {
+                if f < a.start as f64 || f >= a.end as f64 {
                     continue;
                 }
-                pa.done.push(a.target);
                 // One tick ahead, as every automation target (spec: audio/automation.md "When a clip acts").
                 let beat = a.from_beat + (f + 1.0 - a.start as f64) / ppq;
-                let Some(v) = self.curves[a.curve].value_at(beat) else { continue };
-                let v = v.clamp(0.0, 1.0);
-                match pa.last.iter_mut().find(|(t, _)| *t == a.target) {
-                    Some((_, last)) if (*last - v).abs() < 1e-7 => continue,
-                    Some((_, last)) => *last = v,
-                    None => pa.last.push((a.target, v)),
+                let mut value = None;
+                for &target in &a.targets {
+                    if !is_param(target) || pa.done.contains(&target) {
+                        continue;
+                    }
+                    pa.done.push(target);
+                    if value.is_none() {
+                        value = self.curves[a.curve].value_at(beat).map(|v| v.clamp(0.0, 1.0));
+                    }
+                    let Some(v) = value else { break };
+                    match pa.last.iter_mut().find(|(t, _)| *t == target) {
+                        Some((_, last)) if (*last - v).abs() < 1e-7 => continue,
+                        Some((_, last)) => *last = v,
+                        None => pa.last.push((target, v)),
+                    }
+                    let (dest, index) = match target {
+                        Target::ChannelParam(c, k) => (Dest::Channel(usize::from(c)), k),
+                        Target::SlotParam(t, s, k) => (Dest::Slot(usize::from(t), usize::from(s)), k),
+                        _ => continue,
+                    };
+                    pa.events.push(ParamEvent { dest, offset: step as u32, index: u32::from(index), value: v });
                 }
-                let (dest, index) = match a.target {
-                    Target::ChannelParam(c, k) => (Dest::Channel(usize::from(c)), k),
-                    Target::SlotParam(t, s, k) => (Dest::Slot(usize::from(t), usize::from(s)), k),
-                    _ => continue,
-                };
-                pa.events.push(ParamEvent { dest, offset: step as u32, index: u32::from(index), value: v });
             }
         }
     }
@@ -149,6 +197,8 @@ mod tests {
         frame: u64,
         seen: Vec<(u64, u32, f64)>,
         pending: Vec<(u32, u32, f64)>,
+        /// Takes one value per tick (`tick_params`).
+        ticks: bool,
     }
 
     impl Probe {
@@ -171,6 +221,9 @@ mod tests {
         fn param(&mut self, offset: u32, index: u32, value: f64) {
             self.pending.push((offset, index, value));
         }
+        fn tick_params(&self) -> bool {
+            self.ticks
+        }
     }
 
     impl HostedEffect for Probe {
@@ -179,6 +232,9 @@ mod tests {
         }
         fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
             self.pending.push((offset, index, value));
+        }
+        fn tick_params_fx(&self) -> bool {
+            self.ticks
         }
     }
 
@@ -208,7 +264,7 @@ mod tests {
     fn project(target: u32) -> Project {
         let auto = Automation {
             channel: 1,
-            target: Some(target),
+            targets: vec![target],
             points: vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(4.0, 1.0)],
             header: vec![0; 21],
             tail: vec![],
@@ -281,5 +337,52 @@ mod tests {
         let seen = probe.lock().unwrap().seen.clone();
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert!((seen[0].2 - 0.25).abs() < 1e-9);
+    }
+
+    /// A plugin that takes one value per tick gets the value the clip hands on for that tick, at the tick start, only
+    /// when it changed (spec: plugins/fruity-abi.md "Parameters"); instruments and slot effects alike.
+    #[test]
+    fn per_tick_plugins_get_the_handed_on_value_at_each_tick_start() {
+        let mut lib = SampleLibrary::new(None);
+        for slot in [false, true] {
+            let target = if slot { os_model::target::slot_param(1, 3, 12) } else { os_model::target::channel_param(0, 7) };
+            let p = project(target);
+            let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+            let probe = Arc::new(Mutex::new(Probe { ticks: true, ..Probe::default() }));
+            if slot {
+                e.set_effect(1, 3, probe.clone());
+            } else {
+                e.set_instrument(0, probe.clone());
+            }
+            run(&mut e, 48000 * 3, 1000);
+            let seen = probe.lock().unwrap().seen.clone();
+            // 4 beats of 96 ticks of 250 frames: a new value at every tick of the ramp, none after the clip.
+            assert_eq!(seen.len(), 384, "slot {slot}");
+            for (t, &(f, i, v)) in seen.iter().enumerate() {
+                assert_eq!(f, 250 * t as u64, "slot {slot}");
+                assert_eq!(i, if slot { 12 } else { 7 });
+                // The walk is single precision; the value handed on is a whole multiple of 2^-30.
+                let want = (t + 1) as f64 / 384.0;
+                assert!((v - want).abs() < 1e-6, "tick {t}: {v} vs {want}");
+                assert_eq!((v * 1_073_741_824.0).fract(), 0.0);
+            }
+            // A constant curve: one value, at the first tick.
+            let mut p = p;
+            p.automations[0].points = vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(4.0, 0.25)];
+            let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+            let probe = Arc::new(Mutex::new(Probe { ticks: true, ..Probe::default() }));
+            if slot {
+                e.set_effect(1, 3, probe.clone());
+            } else {
+                e.set_instrument(0, probe.clone());
+            }
+            run(&mut e, 48000, 1000);
+            // After a seek the value is handed on again.
+            e.seek(48000);
+            run(&mut e, 10000, 1000);
+            let seen = probe.lock().unwrap().seen.clone();
+            assert_eq!(seen.len(), 2, "slot {slot}: {seen:?}");
+            assert!(seen.iter().all(|s| (s.2 - 0.25).abs() < 1e-9));
+        }
     }
 }

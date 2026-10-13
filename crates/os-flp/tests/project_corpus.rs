@@ -140,7 +140,8 @@ fn playlist_edits_survive() {
         let bytes = std::fs::read(path).unwrap();
         let mut file = FlpFile::parse(&bytes).unwrap();
         let Ok(mut project) = load(&file) else { continue };
-        if project.saved_by.split('.').next() != Some("26") || project.arrangements.first().is_none_or(|a| a.clips.len() < 3) {
+        // FL 24.2 and 25 files too: their clip records are 80 bytes (spec: flp/layouts.md).
+        if !matches!(project.saved_by.split('.').next(), Some("24" | "25" | "26")) || project.arrangements.first().is_none_or(|a| a.clips.len() < 3) {
             continue;
         }
         let arr = &mut project.arrangements[0];
@@ -621,4 +622,44 @@ fn added_mixer_tracks_survive() {
         checked += 1;
     }
     assert!(checked > 100, "only {checked} files checked");
+}
+
+/// Every automation link (event 227 with a zero first field) is read into its clip's targets in file order, and a
+/// changed order is written over the same links (spec: flp/events/automation.md "Event 227").
+#[test]
+fn every_automation_link_is_read() {
+    let Some(paths) = corpus() else { return };
+    let (mut files, mut several) = (0, 0);
+    for path in &paths {
+        let bytes = std::fs::read(path).unwrap();
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        let Ok(mut project) = load(&file) else { continue };
+        let links = |f: &FlpFile| -> Vec<(u16, u32)> {
+            f.events()
+                .filter(|e| e.id == 227)
+                .filter_map(|e| e.data())
+                .filter(|d| d.len() >= 20 && d[0] == 0 && d[1] == 0)
+                .map(|d| (u16::from_le_bytes([d[2], d[3]]), u32::from_le_bytes(d[8..12].try_into().unwrap())))
+                .collect()
+        };
+        let all = links(&file);
+        for a in &project.automations {
+            let want: Vec<u32> = all.iter().filter(|l| l.0 == a.channel).map(|l| l.1).collect();
+            assert_eq!(a.targets, want, "{path}: clip channel {}", a.channel);
+        }
+        if !project.automations.iter().any(|a| a.targets.len() > 1) {
+            continue;
+        }
+        several += 1;
+        let total = file.events().count();
+        for a in &mut project.automations {
+            a.targets.reverse();
+        }
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(file.events().count(), total, "{path}: links patched in place");
+        assert_eq!(load(&file).unwrap().automations, project.automations, "{path}");
+        files += 1;
+    }
+    eprintln!("{files} files with clips on several targets rewritten ({several} found)");
 }

@@ -24,6 +24,18 @@ impl Instrument for TimedInst {
     fn note_on_from(&mut self, offset: u32, key: u8, velocity: f32, start: f32) {
         self.0.lock().unwrap().note_on_from(offset, key, velocity, start)
     }
+    fn note_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels) {
+        self.0.lock().unwrap().note_start(offset, key, velocity, start, levels)
+    }
+    fn channel_levels(&mut self, levels: os_engine::ChannelLevels) -> bool {
+        self.0.lock().unwrap().channel_levels(levels)
+    }
+    fn tick_params(&self) -> bool {
+        self.0.lock().unwrap().tick_params()
+    }
+    fn channel_voicing(&mut self, voicing: &os_engine::ChannelVoicing) {
+        self.0.lock().unwrap().channel_voicing(voicing)
+    }
     fn choke(&mut self, offset: u32, key: u8) {
         self.0.lock().unwrap().choke(offset, key)
     }

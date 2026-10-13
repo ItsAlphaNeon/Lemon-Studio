@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use os_model::{
     Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
     Envelope, MixerTrack,
-    Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SlotPlugin, TimeMarker, CLIP_RECORD_LEN,
+    Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, CLIP_RECORD_LEN,
 };
 
 use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
@@ -70,7 +70,21 @@ mod id {
     /// Cut groups (word 0 cuts, word 1 cut by) and the voice settings: maximum voices, slide time, mono / portamento
     /// (spec: audio/note-rules.md "Settings").
     pub const CH_CUT_GROUPS: u8 = 132;
+    pub const CH_LAYER_FLAGS: u8 = 144;
     pub const CH_POLY: u8 = 221;
+    /// A sample channel's precomputed effects and loop option (spec: audio/precomputed-effects.md "Settings").
+    pub const SMP_PING_PONG: u8 = 20;
+    pub const SMP_FEEDBACK: u8 = 69;
+    pub const SMP_FLAGS: u8 = 70;
+    pub const SMP_CUTOFF: u8 = 71;
+    pub const SMP_BOOST: u8 = 74;
+    pub const SMP_FADE_OUT: u8 = 75;
+    pub const SMP_FADE_IN: u8 = 76;
+    pub const SMP_RESONANCE: u8 = 83;
+    pub const SMP_STEREO_DELAY: u8 = 85;
+    pub const SMP_POGO: u8 = 86;
+    pub const SMP_RING: u8 = 131;
+    pub const SMP_REVERB: u8 = 139;
     pub const GROUP_NAME: u8 = 231;
     pub const CURRENT_GROUP: u8 = 146;
 
@@ -118,7 +132,10 @@ mod id {
 }
 
 const NOTE_LEN: usize = 24;
+/// Clip record lengths: 88 bytes in files of FL 26, 80 bytes in files of FL 24.2 to 25 (spec: flp/layouts.md,
+/// "Playlist clip records").
 const CLIP_LEN: usize = 88;
+const CLIP_LEN_25: usize = 80;
 const MIXER_REC_LEN: usize = 12;
 const NOTE_FLAGS_DEFAULT: u16 = 0x4000;
 const PATTERN_COLOR_DEFAULT: u32 = 0x002D_2C29;
@@ -548,13 +565,34 @@ fn scan_channel(events: &[Event], start: usize, end: usize) -> ChannelLoc {
     c
 }
 
-fn text_enc(events: &[Event], version: Option<usize>) -> TextEnc {
-    let major = version
+/// The major version of the program that saved the file (26 when the file does not say).
+fn major_version(events: &[Event], version: Option<usize>) -> u32 {
+    version
         .and_then(|i| events[i].data())
         .map(|d| decode_text(d, TextEnc::Ansi))
         .and_then(|s| s.split('.').next().and_then(|m| m.parse::<u32>().ok()))
-        .unwrap_or(26);
-    if major <= 11 { TextEnc::Ansi } else { TextEnc::Utf16 }
+        .unwrap_or(26)
+}
+
+fn text_enc(events: &[Event], version: Option<usize>) -> TextEnc {
+    if major_version(events, version) <= 11 { TextEnc::Ansi } else { TextEnc::Utf16 }
+}
+
+/// The record length a clip list fits: a whole number of records, each with `00 50` at byte 4.
+fn list_clip_len(data: &[u8]) -> Option<usize> {
+    [CLIP_LEN, CLIP_LEN_25]
+        .into_iter()
+        .find(|&n| !data.is_empty() && data.len() % n == 0 && data.chunks_exact(n).all(|r| r[4..6] == [0x00, 0x50]))
+}
+
+/// The clip record length of a file: the one its clip lists fit, else the one its version suggests (spec:
+/// flp/layouts.md, "How to tell the generation").
+fn clip_len(events: &[Event], version: Option<usize>) -> usize {
+    events
+        .iter()
+        .filter(|e| e.id == id::ARR_CLIPS)
+        .find_map(|e| e.data().and_then(list_clip_len))
+        .unwrap_or_else(|| if major_version(events, version) < 26 { CLIP_LEN_25 } else { CLIP_LEN })
 }
 
 // ---------------------------------------------------------------------------------------
@@ -567,6 +605,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
     let mut l = scan(events)?;
     let enc = text_enc(events, l.version);
     l.enc = Some(enc);
+    let clen = clip_len(events, l.version);
     let text = |i: Option<usize>| i.and_then(|i| events[i].data()).map(|d| decode_text(d, enc));
 
     let mut p = Project {
@@ -611,9 +650,9 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         let d = events[i].data().unwrap_or(&[]);
         let ch = u16::from_le_bytes([d[2], d[3]]);
         let target = u32::from_le_bytes(d[8..12].try_into().unwrap());
-        // A clip may drive several targets; the model holds the first (the others stay in the file).
-        if let Some(a) = p.automations.iter_mut().find(|a| a.channel == ch && a.target.is_none()) {
-            a.target = Some(target);
+        // A clip drives every target it has a link for, in file order (spec: flp/events/automation.md "Event 227").
+        if let Some(a) = p.automations.iter_mut().find(|a| a.channel == ch) {
+            a.targets.push(target);
         }
     }
     for (&number, loc) in &l.patterns {
@@ -649,7 +688,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             for f in &events[n + 1..] {
                 match f.id {
                     id::ARR_NAME => arr.name = f.data().map(|d| decode_text(d, enc)),
-                    id::ARR_CLIPS => arr.clips = f.data().map(decode_clips).unwrap_or_default(),
+                    id::ARR_CLIPS => arr.clips = f.data().map(|d| decode_clips(d, clen)).unwrap_or_default(),
                     id::PL_TRACK | id::ARR_START => break,
                     _ => {}
                 }
@@ -750,7 +789,21 @@ fn load_misc(block: &[Event]) -> ChannelMisc {
         m.mono = d[8] & 1 != 0;
         m.porta = d[8] & 2 != 0;
     }
+    m.layer = load_layer(block);
     m
+}
+
+/// A layer's flags (event 144) and crossfade position (event 215, int at byte 76) (spec: audio/note-rules.md
+/// "Settings").
+fn load_layer(block: &[Event]) -> os_model::LayerSettings {
+    let find = |id: u8| block.iter().find(|e| e.id == id);
+    os_model::LayerSettings {
+        flags: find(id::CH_LAYER_FLAGS).map_or(0, int),
+        crossfade: find(id::CH_SAMPLE_SETTINGS)
+            .and_then(Event::data)
+            .and_then(|d| d.get(76..80))
+            .map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap())),
+    }
 }
 
 /// Event 215 of a new audio clip channel as FL 26 writes it (declick mode 1, not stretched), its stretch ints
@@ -781,7 +834,56 @@ fn load_sound(block: &[Event], levels: &dyn Fn(usize) -> Option<i32>) -> Channel
             }
         }
     }
+    s.fx = load_sample_fx(block);
     s
+}
+
+/// A channel's start, length, loop options and precomputed effects (spec: audio/precomputed-effects.md "Settings");
+/// what the file does not hold keeps the default. Only read: `apply` never writes these.
+fn load_sample_fx(block: &[Event]) -> SampleFx {
+    let find = |id: u8| block.iter().find(|e| e.id == id).map(int);
+    let mut f = SampleFx::default();
+    let word = |id: u8, v: &mut u16| {
+        if let Some(x) = find(id) {
+            *v = x as u16;
+        }
+    };
+    word(id::SMP_FLAGS, &mut f.flags);
+    word(id::SMP_BOOST, &mut f.boost);
+    word(id::SMP_FADE_OUT, &mut f.fade_out);
+    word(id::SMP_FADE_IN, &mut f.fade_in);
+    word(id::SMP_STEREO_DELAY, &mut f.stereo_delay);
+    word(id::SMP_POGO, &mut f.pogo);
+    word(id::SMP_FEEDBACK, &mut f.feedback);
+    word(id::SMP_CUTOFF, &mut f.cutoff);
+    word(id::SMP_RESONANCE, &mut f.resonance);
+    if let Some(x) = find(id::SMP_RING) {
+        (f.ring_mix, f.ring_freq) = (x as u16, (x >> 16) as u16);
+    }
+    if let Some(x) = find(id::SMP_REVERB) {
+        (f.reverb, f.reverb_type) = (x as u16, (x >> 16) as u16);
+    }
+    if let Some(x) = find(id::SMP_PING_PONG) {
+        f.ping_pong = x != 0;
+    }
+    if let Some(d) = block.iter().find(|e| e.id == id::CH_SAMPLE_SETTINGS).and_then(Event::data) {
+        let byte = |o: usize, v: &mut bool| {
+            if let Some(&b) = d.get(o) {
+                *v = b != 0;
+            }
+        };
+        byte(9, &mut f.remove_dc);
+        byte(80, &mut f.normalize);
+        byte(81, &mut f.polarity);
+        byte(156, &mut f.loop_follows_reverse);
+        let u32_at = |o: usize| d.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+        let u64_at = |o: usize| d.get(o..o + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+        f.crossfade = u32_at(84).unwrap_or(f.crossfade);
+        f.trim = u32_at(88).unwrap_or(f.trim);
+        f.start_bits = u64_at(128).unwrap_or(f.start_bits);
+        f.length_bits = u64_at(136).unwrap_or(f.length_bits);
+    }
+    f
 }
 
 /// The five 68-byte envelope records of a channel (spec: audio/channel-envelopes.md); missing or short
@@ -900,8 +1002,10 @@ fn decode_clip(r: &[u8]) -> Clip {
             (a != -1.0 && a.is_finite() && b.is_finite()).then(|| (f64::from(a), f64::from(b)))
         }
     };
+    // A shorter record (80 bytes) leaves the rest of `raw` zero.
     let mut raw = [0u8; CLIP_RECORD_LEN];
-    raw.copy_from_slice(&r[..CLIP_RECORD_LEN]);
+    let n = r.len().min(CLIP_RECORD_LEN);
+    raw[..n].copy_from_slice(&r[..n]);
     Clip {
         position: u32_at(0),
         length: u32_at(8),
@@ -913,8 +1017,8 @@ fn decode_clip(r: &[u8]) -> Clip {
     }
 }
 
-fn decode_clips(data: &[u8]) -> Vec<Clip> {
-    data.chunks_exact(CLIP_LEN).map(decode_clip).collect()
+fn decode_clips(data: &[u8], len: usize) -> Vec<Clip> {
+    data.chunks_exact(len).map(decode_clip).collect()
 }
 
 /// The record of a clip: its stored bytes with the modeled fields written over them.
@@ -954,21 +1058,25 @@ fn encode_clip(c: &Clip) -> [u8; CLIP_LEN] {
     r
 }
 
-/// Clip records sorted by position. A clip without an id, or with one already used (a copy), gets the next
-/// free id (spec: playlist.md, byte 32).
-fn encode_clips(clips: &[Clip]) -> Vec<u8> {
+/// Clip records of `len` bytes sorted by position. A clip without an id, or with one already used (a copy), gets
+/// the next free id (spec: playlist.md, byte 32). 80-byte records hold 0 at bytes 76..79 (spec: flp/layouts.md).
+fn encode_clips(clips: &[Clip], len: usize) -> Vec<u8> {
     let mut sorted = clips.to_vec();
     sorted.sort_by_key(|c| c.position);
     let mut next = sorted.iter().map(Clip::id).max().unwrap_or(0) + 1;
     let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::with_capacity(sorted.len() * CLIP_LEN);
+    let mut out = Vec::with_capacity(sorted.len() * len);
     for c in &mut sorted {
         if c.id() == 0 || !seen.insert(c.id()) {
             c.set_id(next);
             seen.insert(next);
             next += 1;
         }
-        out.extend_from_slice(&encode_clip(c));
+        let mut r = encode_clip(c);
+        if len < CLIP_LEN {
+            r[76..80].fill(0);
+        }
+        out.extend_from_slice(&r[..len]);
     }
     out
 }
@@ -1031,7 +1139,7 @@ pub fn new_automation(channel: u16, target: u32, value: f64, beats: f64) -> Auto
     let (header, tail) = auto_template(os_model::target::bipolar(target));
     let mut first = AutoPoint::new(0.0, value);
     first.flag = 0;
-    Automation { channel, target: Some(target), points: vec![first, AutoPoint::new(beats.max(0.0), value)], header, tail }
+    Automation { channel, targets: vec![target], points: vec![first, AutoPoint::new(beats.max(0.0), value)], header, tail }
 }
 
 fn decode_automation(channel: u16, d: &[u8]) -> Option<Automation> {
@@ -1060,7 +1168,7 @@ fn decode_automation(channel: u16, d: &[u8]) -> Option<Automation> {
         .collect();
     let mut header = d[..AUTO_HEADER_LEN].to_vec();
     header[17..21].fill(0); // the count is written from the points
-    Some(Automation { channel, target: None, points, header, tail: d[end..].to_vec() })
+    Some(Automation { channel, targets: Vec::new(), points, header, tail: d[end..].to_vec() })
 }
 
 fn encode_automation(a: &Automation) -> Vec<u8> {
@@ -1493,6 +1601,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     let events = events_of_mut(file)?;
     let l = scan(events)?;
     let enc = text_enc(events, l.version);
+    let clen = clip_len(events, l.version);
     let mismatch = |what: &str, a: usize, b: usize| {
         ProjectError::Mismatch(format!("{what}: model has {a}, file has {b}"))
     };
@@ -1726,15 +1835,17 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 }
             }
         }
-        let Some(target) = a.target else { continue };
-        let link = l.links.iter().copied().find(|&i| events[i].data().is_some_and(|d| u16::from_le_bytes([d[2], d[3]]) == a.channel));
-        match link {
-            Some(i) => patch_bytes(&mut events[i], 8, &target.to_le_bytes()),
-            None => {
-                let at = l.channels.first().map_or(0, |c| c.start);
-                inserts.push((at, link_event(a.channel, target)));
-            }
+        // One link per target (spec: flp/events/automation.md "Event 227"): the clip's k-th link takes its k-th
+        // target, targets beyond its links get new links after its last one (before the first channel block when it
+        // has none), links beyond its targets go. Controller links are not among `l.links` and stay as they are.
+        let links: Vec<usize> =
+            l.links.iter().copied().filter(|&i| events[i].data().is_some_and(|d| u16::from_le_bytes([d[2], d[3]]) == a.channel)).collect();
+        for (&i, t) in links.iter().zip(&a.targets) {
+            patch_bytes(&mut events[i], 8, &t.to_le_bytes());
         }
+        let at = links.last().map_or_else(|| l.channels.first().map_or(0, |c| c.start), |&i| i + 1);
+        inserts.extend(a.targets.iter().skip(links.len()).rev().map(|&t| (at, link_event(a.channel, t))));
+        removals.extend(links.iter().skip(a.targets.len()));
     }
 
     // Patterns: notes, name, color. Patterns without blocks get new ones (spec: flp/events/patterns.md,
@@ -1905,7 +2016,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             .arrangements
             .iter()
             .filter(|a| current.arrangements.iter().all(|o| o.number != a.number))
-            .flat_map(|a| arrangement_events(a, enc))
+            .flat_map(|a| arrangement_events(a, enc, clen))
             .collect();
         inserts.extend(added.into_iter().rev().map(|e| (at, e)));
     }
@@ -1920,7 +2031,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         }
         if arr.clips != old_arr.clips {
             if let Some(i) = loc.clips {
-                set_data(&mut events[i], encode_clips(&arr.clips));
+                set_data(&mut events[i], encode_clips(&arr.clips, clen));
             }
         }
         if arr.markers != old_arr.markers {
@@ -2207,6 +2318,7 @@ fn restructure(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError
     let events = events_of_mut(file)?;
     let l = scan(events)?;
     let enc = text_enc(events, l.version);
+    let clen = clip_len(events, l.version);
     let n_old = l.channels.len();
     let origin: Vec<Option<usize>> =
         project.channels.iter().map(|c| c.rack.origin.map(usize::from).filter(|&o| o < n_old)).collect();
@@ -2326,7 +2438,7 @@ fn restructure(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError
             id::ARR_CLIPS => {
                 let d = events[i].data().unwrap_or(&[]).to_vec();
                 let mut out = Vec::with_capacity(d.len());
-                for r in d.chunks_exact(CLIP_LEN) {
+                for r in d.chunks_exact(clen) {
                     let item = u16::from_le_bytes([r[6], r[7]]);
                     if item >= 0x5000 {
                         out.extend_from_slice(r);
@@ -2560,9 +2672,7 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         }
     }
     for a in &project.automations {
-        if let Some(t) = a.target {
-            ev.push(link_event(a.channel, t));
-        }
+        ev.extend(a.targets.iter().map(|&t| link_event(a.channel, t)));
     }
     for (i, ch) in project.channels.iter().enumerate() {
         ev.extend(channel_block_events(ch, project.automation(ch.index), enc)?);
@@ -2575,7 +2685,7 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         }
     }
     for arr in &project.arrangements {
-        ev.extend(arrangement_events(arr, enc));
+        ev.extend(arrangement_events(arr, enc, CLIP_LEN));
     }
     // The playlist view and the arrangement shown, right after the last one's tracks as FL writes them
     // (spec: flp/events/playlist.md, events 242 and 100).
@@ -2624,12 +2734,12 @@ fn track_record(t: &PlaylistTrack) -> Vec<u8> {
 }
 
 /// An arrangement block: number, name, 36, clips, markers, then the 500 track records (spec: flp/events/playlist.md).
-fn arrangement_events(arr: &Arrangement, enc: TextEnc) -> Vec<Event> {
+fn arrangement_events(arr: &Arrangement, enc: TextEnc, clen: usize) -> Vec<Event> {
     let mut ev = vec![
         Event::new(id::ARR_START, Value::U16(arr.number)),
         Event::new(id::ARR_NAME, Value::var(encode_text(arr.name.as_deref().unwrap_or("Arrangement"), enc))),
         Event::new(id::ARR_UNKNOWN, Value::U8(0)),
-        Event::new(id::ARR_CLIPS, Value::var(encode_clips(&arr.clips))),
+        Event::new(id::ARR_CLIPS, Value::var(encode_clips(&arr.clips, clen))),
     ];
     for m in &arr.markers {
         ev.extend(marker_events(m, enc));
@@ -2975,6 +3085,105 @@ mod tests {
         assert_eq!((m.cut, m.cut_by, m.max_poly, m.mono, m.porta, m.slide), (0, 0, 0, false, false, 500.0 / 1024.0));
     }
 
+    /// A sample channel's start, length, loop options and precomputed effects are read in the file's units (spec:
+    /// audio/precomputed-effects.md "Settings"); writing the project back leaves their events as they were.
+    #[test]
+    fn precomputed_effect_settings_are_read_and_kept() {
+        let mut file = create(&new_project()).unwrap();
+        {
+            let ev = events_of_mut(&mut file).unwrap();
+            let ch0 = ev.iter().position(|e| e.id == id::CH_START).unwrap();
+            ev.retain(|e| {
+                ![
+                    id::SMP_PING_PONG,
+                    id::SMP_FEEDBACK,
+                    id::SMP_FLAGS,
+                    id::SMP_CUTOFF,
+                    id::SMP_BOOST,
+                    id::SMP_FADE_OUT,
+                    id::SMP_FADE_IN,
+                    id::SMP_RESONANCE,
+                    id::SMP_STEREO_DELAY,
+                    id::SMP_POGO,
+                    id::SMP_RING,
+                    id::SMP_REVERB,
+                    id::CH_SAMPLE_SETTINGS,
+                ]
+                .contains(&e.id)
+            });
+            let mut s215 = vec![0u8; 168];
+            (s215[9], s215[80], s215[81], s215[156]) = (1, 1, 1, 1);
+            s215[84..88].copy_from_slice(&512u32.to_le_bytes());
+            s215[88..92].copy_from_slice(&300u32.to_le_bytes());
+            s215[128..136].copy_from_slice(&0.25f64.to_le_bytes());
+            s215[136..144].copy_from_slice(&0.5f64.to_le_bytes());
+            let add = [
+                Event::new(id::SMP_PING_PONG, Value::U8(1)),
+                Event::new(id::SMP_FEEDBACK, Value::U16(64)),
+                Event::new(id::SMP_FLAGS, Value::U16(1 | 2 | 4 | 256)),
+                Event::new(id::SMP_CUTOFF, Value::U16(512)),
+                Event::new(id::SMP_BOOST, Value::U16(64)),
+                Event::new(id::SMP_FADE_OUT, Value::U16(256)),
+                Event::new(id::SMP_FADE_IN, Value::U16(1024)),
+                Event::new(id::SMP_RESONANCE, Value::U16(1000)),
+                Event::new(id::SMP_STEREO_DELAY, Value::U16(3072)),
+                Event::new(id::SMP_POGO, Value::U16(128)),
+                Event::new(id::SMP_RING, Value::U32(100 << 16 | 200)),
+                Event::new(id::SMP_REVERB, Value::U32(200)),
+                Event::new(id::CH_SAMPLE_SETTINGS, Value::var(s215)),
+            ];
+            for (k, e) in add.into_iter().enumerate() {
+                ev.insert(ch0 + 1 + k, e);
+            }
+        }
+        let bytes = file.to_bytes().unwrap();
+        let p = load(&FlpFile::parse(&bytes).unwrap()).unwrap();
+        let f = p.channels[0].sound.fx;
+        assert_eq!(
+            (f.flags, f.boost, f.fade_out, f.fade_in, f.stereo_delay, f.pogo, f.feedback, f.cutoff, f.resonance),
+            (263, 64, 256, 1024, 3072, 128, 64, 512, 1000)
+        );
+        assert_eq!((f.ring_mix, f.ring_freq, f.reverb, f.reverb_type), (200, 100, 200, 0));
+        assert_eq!((f.ping_pong, f.remove_dc, f.normalize, f.polarity, f.loop_follows_reverse), (true, true, true, true, true));
+        assert_eq!((f.crossfade, f.trim, f.start(), f.length()), (512, 300, 0.25, 0.5));
+        // Written back unchanged: the reader takes nothing the writer would rewrite.
+        let mut again = FlpFile::parse(&bytes).unwrap();
+        apply(&p, &mut again).unwrap();
+        assert_eq!(again.to_bytes().unwrap(), bytes);
+        // A short event 215 (older files) keeps the defaults past its end.
+        let mut short = FlpFile::parse(&bytes).unwrap();
+        {
+            let ev = events_of_mut(&mut short).unwrap();
+            let e = ev.iter_mut().find(|e| e.id == id::CH_SAMPLE_SETTINGS).unwrap();
+            *e = Event::new(id::CH_SAMPLE_SETTINGS, Value::var(vec![0u8; 112]));
+        }
+        let f = load(&short).unwrap().channels[0].sound.fx;
+        let d = SampleFx::default();
+        assert_eq!((f.crossfade, f.trim, f.start_bits, f.length_bits, f.remove_dc), (d.crossfade, d.trim, d.start_bits, d.length_bits, false));
+        assert_eq!(f.boost, 64);
+    }
+
+    /// A layer's flags (event 144) and crossfade position (event 215, int at byte 76) are read (spec:
+    /// audio/note-rules.md "Settings"); without them a channel has flags 0.
+    #[test]
+    fn layer_settings_are_read() {
+        let mut file = create(&new_project()).unwrap();
+        {
+            let ev = events_of_mut(&mut file).unwrap();
+            let ch0 = ev.iter().position(|e| e.id == id::CH_START).unwrap();
+            ev.retain(|e| e.id != id::CH_SAMPLE_SETTINGS);
+            let mut s215 = vec![0u8; 168];
+            s215[76..80].copy_from_slice(&160i32.to_le_bytes());
+            ev.insert(ch0 + 1, Event::new(id::CH_LAYER_FLAGS, Value::U32(6)));
+            ev.insert(ch0 + 1, Event::new(id::CH_SAMPLE_SETTINGS, Value::var(s215)));
+        }
+        let p = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        let l = p.channels[0].misc.layer;
+        assert_eq!((l.flags, l.crossfade), (os_model::LayerSettings::CROSSFADE | os_model::LayerSettings::IN_TURN, 160));
+        let plain = load(&create(&new_project()).unwrap()).unwrap();
+        assert_eq!(plain.channels[0].misc.layer.flags, 0);
+    }
+
     /// Track switches (event 236 flags), the main volume (record 0 at 0x4000) and the main pitch (event 80) are
     /// written by `create` and `apply` and read back (spec: flp/layouts.md, audio/mixer.md, audio/voice-levels.md).
     #[test]
@@ -3237,7 +3446,8 @@ mod tests {
                 match e.id {
                     id::ARR_CLIPS => {
                         let d = e.data().unwrap();
-                        assert_eq!(encode_clips(&decode_clips(d)), d, "{path}");
+                        let n = list_clip_len(d).unwrap_or(CLIP_LEN);
+                        assert_eq!(encode_clips(&decode_clips(d, n), n), d, "{path}");
                         lists += 1;
                     }
                     id::AUTO_DATA => {
@@ -3251,6 +3461,22 @@ mod tests {
             }
         }
         eprintln!("{lists} clip lists, {autos} automation records re-encode exactly");
+    }
+
+    /// Files of FL 24.2 to 25 hold 80-byte clip records: read with their fields, written back at 80 bytes with 0
+    /// at bytes 76..79; 88-byte lists are still told apart (spec: flp/layouts.md, "Playlist clip records").
+    #[test]
+    fn eighty_byte_clip_records_are_read_and_kept() {
+        let a = Clip::new(384, 288, 2, ClipSource::Pattern(1));
+        let b = Clip::new(768, 96, 0, ClipSource::Pattern(2));
+        let d = encode_clips(&[a, b], CLIP_LEN_25);
+        assert_eq!(d.len(), 2 * CLIP_LEN_25);
+        assert_eq!(list_clip_len(&d), Some(CLIP_LEN_25));
+        assert!(d[76..80].iter().all(|&x| x == 0));
+        let back = decode_clips(&d, CLIP_LEN_25);
+        assert_eq!((back[1].position, back[1].length, back[1].track), (768, 96, 0));
+        assert_eq!(encode_clips(&back, CLIP_LEN_25), d);
+        assert_eq!(list_clip_len(&encode_clips(&back, CLIP_LEN)), Some(CLIP_LEN));
     }
 
     /// A new project's playlist (clips with windows, mute, markers) and automation clips are written by `create`,
@@ -3538,8 +3764,55 @@ mod tests {
         m.reorder_channels(&[1, 0, 2, 3]);
         apply(&m, &mut file).unwrap();
         let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
-        assert_eq!(again.automations[0].target.map(decode), Some(Target::ChannelParam(0, 35)));
-        assert_eq!(again.automations[1].target.map(decode), Some(Target::SlotParam(1, 0, 8)));
+        assert_eq!(again.automations[0].target().map(decode), Some(Target::ChannelParam(0, 35)));
+        assert_eq!(again.automations[1].target().map(decode), Some(Target::SlotParam(1, 0, 8)));
+    }
+
+    /// A clip with several targets has one link each: all are read in file order, an unchanged model writes the file
+    /// back byte for byte, and changed targets patch, add or remove links; controller links stay as they are (spec:
+    /// flp/events/automation.md "Event 227").
+    #[test]
+    fn several_targets_of_one_clip_round_trip() {
+        use os_model::target::{channel, mixer, MIXER_VOLUME};
+        let mut p = new_project();
+        p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(2, "Sidechain", 0) });
+        let mut a = new_automation(2, mixer(1, MIXER_VOLUME), 0.5, 4.0);
+        a.targets.extend([mixer(2, MIXER_VOLUME), channel(0, 0)]);
+        p.automations.push(a);
+        let mut arr = default_arrangement();
+        arr.clips = vec![Clip::new(0, 384, 0, ClipSource::Channel(2))];
+        p.arrangements = vec![arr];
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        // A controller link (first field 0x8000 and up) before them.
+        let events = events_of_mut(&mut file).unwrap();
+        let first = events.iter().position(|e| e.id == id::AUTO_LINK).unwrap();
+        let mut ctl = link_event(0, 0x1234_5678).data().unwrap().to_vec();
+        ctl[0..2].copy_from_slice(&0x8001u16.to_le_bytes());
+        events.insert(first, Event::new(id::AUTO_LINK, Value::var(ctl.clone())));
+        let bytes = file.to_bytes().unwrap();
+        let file = FlpFile::parse(&bytes).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.automations[0].targets, p.automations[0].targets);
+        let mut same = file.clone();
+        apply(&back, &mut same).unwrap();
+        assert_eq!(same.to_bytes().unwrap(), bytes, "unchanged: byte for byte");
+        let links = |f: &FlpFile| {
+            events_of(f).unwrap().iter().filter(|e| e.id == id::AUTO_LINK).filter_map(|e| e.data()).map(|d| d.to_vec()).collect::<Vec<_>>()
+        };
+        // Fewer targets (the third link goes), more (new links follow the clip's last one), none.
+        let more = vec![mixer(1, MIXER_VOLUME), channel(1, 0), mixer(3, MIXER_VOLUME), mixer(4, MIXER_VOLUME)];
+        for targets in [vec![mixer(1, MIXER_VOLUME), channel(1, 0)], more, vec![]] {
+            let mut m = back.clone();
+            m.automations[0].targets = targets.clone();
+            let mut f = file.clone();
+            apply(&m, &mut f).unwrap();
+            let f = FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+            assert_eq!(load(&f).unwrap().automations[0].targets, targets);
+            let l = links(&f);
+            assert_eq!(l.len(), targets.len() + 1);
+            assert_eq!(l[0], ctl, "the controller link is left alone");
+            assert!(l[1..].iter().all(|d| d[2..4] == 2u16.to_le_bytes()));
+        }
     }
 
     /// Deleting, cloning and moving channels rewrites the blocks in model order and renumbers notes, control
@@ -3573,7 +3846,7 @@ mod tests {
         let names: Vec<_> = back.channels.iter().map(|c| c.name.clone().unwrap_or_default()).collect();
         assert_eq!(names, ["Hat", "Kick", "Kick #2", "Hat - Channel volume"]);
         assert_eq!(back.automations[0].channel, 3);
-        assert_eq!(back.automations[0].target, Some(os_model::target::channel(0, 0)));
+        assert_eq!(back.automations[0].targets, vec![os_model::target::channel(0, 0)]);
         assert!(back.arrangements[0].clips.iter().any(|c| c.source == ClipSource::Channel(3)));
         let count = |p: &Project, ch: u16| p.patterns.iter().flat_map(|p| &p.notes).filter(|n| n.channel == ch).count();
         assert_eq!(count(&back, 2), 0, "a clone has no notes");
