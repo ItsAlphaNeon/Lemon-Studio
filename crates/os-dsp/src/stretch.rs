@@ -67,8 +67,20 @@ impl Stream {
         self.st.output_latency()
     }
 
+    /// Frames before the starting point that [`Stream::start`] can take as well (the input it has heard: its block
+    /// and one interval in all, the lead included).
+    pub fn history(&self) -> usize {
+        ((f64::from(self.rate) * 0.15).ceil() as usize).saturating_sub(self.lead())
+    }
+
+    /// Output frames between two analyses (30 ms at the default settings).
+    pub fn interval(&self) -> usize {
+        (f64::from(self.rate) * 0.03).round() as usize
+    }
+
     /// Starts afresh at a starting point: `ahead` holds the first [`Stream::lead`] frames from it on (interleaved
-    /// stereo), `speed` the input frames per output frame to come. Input then goes on from the frame after `ahead`.
+    /// stereo), after up to [`Stream::history`] frames before it; `speed` is the input frames per output frame to
+    /// come. Input then goes on from the frame after `ahead`.
     pub fn start(&mut self, ahead: &[f32], speed: f64) {
         self.st.reset();
         self.st.seek(ahead, speed);
