@@ -111,25 +111,33 @@ impl Engine {
             pa.done.clear();
             // Later clips win where clips on the same target overlap (as for the other targets).
             for a in self.autos.iter().rev() {
-                if !is_param(a.target) || f < a.start as f64 || f >= a.end as f64 || pa.done.contains(&a.target) {
+                if f < a.start as f64 || f >= a.end as f64 {
                     continue;
                 }
-                pa.done.push(a.target);
                 // One tick ahead, as every automation target (spec: audio/automation.md "When a clip acts").
                 let beat = a.from_beat + (f + 1.0 - a.start as f64) / ppq;
-                let Some(v) = self.curves[a.curve].value_at(beat) else { continue };
-                let v = v.clamp(0.0, 1.0);
-                match pa.last.iter_mut().find(|(t, _)| *t == a.target) {
-                    Some((_, last)) if (*last - v).abs() < 1e-7 => continue,
-                    Some((_, last)) => *last = v,
-                    None => pa.last.push((a.target, v)),
+                let mut value = None;
+                for &target in &a.targets {
+                    if !is_param(target) || pa.done.contains(&target) {
+                        continue;
+                    }
+                    pa.done.push(target);
+                    if value.is_none() {
+                        value = self.curves[a.curve].value_at(beat).map(|v| v.clamp(0.0, 1.0));
+                    }
+                    let Some(v) = value else { break };
+                    match pa.last.iter_mut().find(|(t, _)| *t == target) {
+                        Some((_, last)) if (*last - v).abs() < 1e-7 => continue,
+                        Some((_, last)) => *last = v,
+                        None => pa.last.push((target, v)),
+                    }
+                    let (dest, index) = match target {
+                        Target::ChannelParam(c, k) => (Dest::Channel(usize::from(c)), k),
+                        Target::SlotParam(t, s, k) => (Dest::Slot(usize::from(t), usize::from(s)), k),
+                        _ => continue,
+                    };
+                    pa.events.push(ParamEvent { dest, offset: step as u32, index: u32::from(index), value: v });
                 }
-                let (dest, index) = match a.target {
-                    Target::ChannelParam(c, k) => (Dest::Channel(usize::from(c)), k),
-                    Target::SlotParam(t, s, k) => (Dest::Slot(usize::from(t), usize::from(s)), k),
-                    _ => continue,
-                };
-                pa.events.push(ParamEvent { dest, offset: step as u32, index: u32::from(index), value: v });
             }
         }
     }
@@ -208,7 +216,7 @@ mod tests {
     fn project(target: u32) -> Project {
         let auto = Automation {
             channel: 1,
-            target: Some(target),
+            targets: vec![target],
             points: vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(4.0, 1.0)],
             header: vec![0; 21],
             tail: vec![],

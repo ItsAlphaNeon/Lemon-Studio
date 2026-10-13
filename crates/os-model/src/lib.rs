@@ -207,15 +207,19 @@ impl Project {
             .filter(|&(new, &o)| map.get(o).copied().flatten() != Some(new as u16))
             .filter_map(|(new, &o)| {
                 let a = self.automations.iter().find(|a| usize::from(a.channel) == o)?;
-                Some(Automation { channel: new as u16, target: None, ..a.clone() })
+                Some(Automation { channel: new as u16, targets: Vec::new(), ..a.clone() })
             })
             .collect();
         self.automations.retain_mut(|a| {
             let Some(c) = m(a.channel) else { return false };
             a.channel = c;
-            if let Some(t) = a.target.filter(|&t| t >> 16 < 0x4000) {
-                a.target = m((t >> 16) as u16).map(|c| target::channel(c, t as u16));
-            }
+            // Channel targets follow their channel; a deleted channel's targets go (the file loses those links).
+            a.targets.retain_mut(|t| {
+                if *t >> 16 >= 0x4000 {
+                    return true;
+                }
+                m((*t >> 16) as u16).map(|c| *t = target::channel(c, *t as u16)).is_some()
+            });
             true
         });
         self.automations.extend(clones);
@@ -1061,13 +1065,14 @@ impl PlaylistTrack {
 }
 
 /// The data of an automation clip channel (spec: flp/events/automation.md): its points (event 234) and the
-/// target it moves (event 227).
+/// targets it moves (one event 227 each).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Automation {
     /// Channel index of the automation clip channel.
     pub channel: u16,
-    /// Target id (`None` = not linked).
-    pub target: Option<u32>,
+    /// Target ids in file order (empty = not linked). A clip drives every one of them (spec: audio/automation.md
+    /// "The link"); names and value texts follow the first.
+    pub targets: Vec<u32>,
     /// Points with absolute positions in beats from the clip start, sorted.
     pub points: Vec<AutoPoint>,
     /// Stored header (21 bytes incl. the count) and tail of event 234, kept as read.
@@ -1307,6 +1312,11 @@ pub mod target {
 }
 
 impl Automation {
+    /// The first target: the one the clip is named after and whose values the playlist shows.
+    pub fn target(&self) -> Option<u32> {
+        self.targets.first().copied()
+    }
+
     /// The curve's value at `beat` (clamped to the first / last point), shaped per segment mode as the walk plays it
     /// (spec: audio/automation.md "Segment shapes"). At a point's own beat it is that point's level.
     pub fn value_at(&self, beat: f64) -> Option<f64> {

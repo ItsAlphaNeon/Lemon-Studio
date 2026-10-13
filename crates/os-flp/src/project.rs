@@ -611,9 +611,9 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         let d = events[i].data().unwrap_or(&[]);
         let ch = u16::from_le_bytes([d[2], d[3]]);
         let target = u32::from_le_bytes(d[8..12].try_into().unwrap());
-        // A clip may drive several targets; the model holds the first (the others stay in the file).
-        if let Some(a) = p.automations.iter_mut().find(|a| a.channel == ch && a.target.is_none()) {
-            a.target = Some(target);
+        // A clip drives every target it has a link for, in file order (spec: flp/events/automation.md "Event 227").
+        if let Some(a) = p.automations.iter_mut().find(|a| a.channel == ch) {
+            a.targets.push(target);
         }
     }
     for (&number, loc) in &l.patterns {
@@ -1031,7 +1031,7 @@ pub fn new_automation(channel: u16, target: u32, value: f64, beats: f64) -> Auto
     let (header, tail) = auto_template(os_model::target::bipolar(target));
     let mut first = AutoPoint::new(0.0, value);
     first.flag = 0;
-    Automation { channel, target: Some(target), points: vec![first, AutoPoint::new(beats.max(0.0), value)], header, tail }
+    Automation { channel, targets: vec![target], points: vec![first, AutoPoint::new(beats.max(0.0), value)], header, tail }
 }
 
 fn decode_automation(channel: u16, d: &[u8]) -> Option<Automation> {
@@ -1060,7 +1060,7 @@ fn decode_automation(channel: u16, d: &[u8]) -> Option<Automation> {
         .collect();
     let mut header = d[..AUTO_HEADER_LEN].to_vec();
     header[17..21].fill(0); // the count is written from the points
-    Some(Automation { channel, target: None, points, header, tail: d[end..].to_vec() })
+    Some(Automation { channel, targets: Vec::new(), points, header, tail: d[end..].to_vec() })
 }
 
 fn encode_automation(a: &Automation) -> Vec<u8> {
@@ -1726,15 +1726,17 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 }
             }
         }
-        let Some(target) = a.target else { continue };
-        let link = l.links.iter().copied().find(|&i| events[i].data().is_some_and(|d| u16::from_le_bytes([d[2], d[3]]) == a.channel));
-        match link {
-            Some(i) => patch_bytes(&mut events[i], 8, &target.to_le_bytes()),
-            None => {
-                let at = l.channels.first().map_or(0, |c| c.start);
-                inserts.push((at, link_event(a.channel, target)));
-            }
+        // One link per target (spec: flp/events/automation.md "Event 227"): the clip's k-th link takes its k-th
+        // target, targets beyond its links get new links after its last one (before the first channel block when it
+        // has none), links beyond its targets go. Controller links are not among `l.links` and stay as they are.
+        let links: Vec<usize> =
+            l.links.iter().copied().filter(|&i| events[i].data().is_some_and(|d| u16::from_le_bytes([d[2], d[3]]) == a.channel)).collect();
+        for (&i, t) in links.iter().zip(&a.targets) {
+            patch_bytes(&mut events[i], 8, &t.to_le_bytes());
         }
+        let at = links.last().map_or_else(|| l.channels.first().map_or(0, |c| c.start), |&i| i + 1);
+        inserts.extend(a.targets.iter().skip(links.len()).rev().map(|&t| (at, link_event(a.channel, t))));
+        removals.extend(links.iter().skip(a.targets.len()));
     }
 
     // Patterns: notes, name, color. Patterns without blocks get new ones (spec: flp/events/patterns.md,
@@ -2560,9 +2562,7 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         }
     }
     for a in &project.automations {
-        if let Some(t) = a.target {
-            ev.push(link_event(a.channel, t));
-        }
+        ev.extend(a.targets.iter().map(|&t| link_event(a.channel, t)));
     }
     for (i, ch) in project.channels.iter().enumerate() {
         ev.extend(channel_block_events(ch, project.automation(ch.index), enc)?);
@@ -3538,8 +3538,55 @@ mod tests {
         m.reorder_channels(&[1, 0, 2, 3]);
         apply(&m, &mut file).unwrap();
         let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
-        assert_eq!(again.automations[0].target.map(decode), Some(Target::ChannelParam(0, 35)));
-        assert_eq!(again.automations[1].target.map(decode), Some(Target::SlotParam(1, 0, 8)));
+        assert_eq!(again.automations[0].target().map(decode), Some(Target::ChannelParam(0, 35)));
+        assert_eq!(again.automations[1].target().map(decode), Some(Target::SlotParam(1, 0, 8)));
+    }
+
+    /// A clip with several targets has one link each: all are read in file order, an unchanged model writes the file
+    /// back byte for byte, and changed targets patch, add or remove links; controller links stay as they are (spec:
+    /// flp/events/automation.md "Event 227").
+    #[test]
+    fn several_targets_of_one_clip_round_trip() {
+        use os_model::target::{channel, mixer, MIXER_VOLUME};
+        let mut p = new_project();
+        p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(2, "Sidechain", 0) });
+        let mut a = new_automation(2, mixer(1, MIXER_VOLUME), 0.5, 4.0);
+        a.targets.extend([mixer(2, MIXER_VOLUME), channel(0, 0)]);
+        p.automations.push(a);
+        let mut arr = default_arrangement();
+        arr.clips = vec![Clip::new(0, 384, 0, ClipSource::Channel(2))];
+        p.arrangements = vec![arr];
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        // A controller link (first field 0x8000 and up) before them.
+        let events = events_of_mut(&mut file).unwrap();
+        let first = events.iter().position(|e| e.id == id::AUTO_LINK).unwrap();
+        let mut ctl = link_event(0, 0x1234_5678).data().unwrap().to_vec();
+        ctl[0..2].copy_from_slice(&0x8001u16.to_le_bytes());
+        events.insert(first, Event::new(id::AUTO_LINK, Value::var(ctl.clone())));
+        let bytes = file.to_bytes().unwrap();
+        let file = FlpFile::parse(&bytes).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.automations[0].targets, p.automations[0].targets);
+        let mut same = file.clone();
+        apply(&back, &mut same).unwrap();
+        assert_eq!(same.to_bytes().unwrap(), bytes, "unchanged: byte for byte");
+        let links = |f: &FlpFile| {
+            events_of(f).unwrap().iter().filter(|e| e.id == id::AUTO_LINK).filter_map(|e| e.data()).map(|d| d.to_vec()).collect::<Vec<_>>()
+        };
+        // Fewer targets (the third link goes), more (new links follow the clip's last one), none.
+        let more = vec![mixer(1, MIXER_VOLUME), channel(1, 0), mixer(3, MIXER_VOLUME), mixer(4, MIXER_VOLUME)];
+        for targets in [vec![mixer(1, MIXER_VOLUME), channel(1, 0)], more, vec![]] {
+            let mut m = back.clone();
+            m.automations[0].targets = targets.clone();
+            let mut f = file.clone();
+            apply(&m, &mut f).unwrap();
+            let f = FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+            assert_eq!(load(&f).unwrap().automations[0].targets, targets);
+            let l = links(&f);
+            assert_eq!(l.len(), targets.len() + 1);
+            assert_eq!(l[0], ctl, "the controller link is left alone");
+            assert!(l[1..].iter().all(|d| d[2..4] == 2u16.to_le_bytes()));
+        }
     }
 
     /// Deleting, cloning and moving channels rewrites the blocks in model order and renumbers notes, control
@@ -3573,7 +3620,7 @@ mod tests {
         let names: Vec<_> = back.channels.iter().map(|c| c.name.clone().unwrap_or_default()).collect();
         assert_eq!(names, ["Hat", "Kick", "Kick #2", "Hat - Channel volume"]);
         assert_eq!(back.automations[0].channel, 3);
-        assert_eq!(back.automations[0].target, Some(os_model::target::channel(0, 0)));
+        assert_eq!(back.automations[0].targets, vec![os_model::target::channel(0, 0)]);
         assert!(back.arrangements[0].clips.iter().any(|c| c.source == ClipSource::Channel(3)));
         let count = |p: &Project, ch: u16| p.patterns.iter().flat_map(|p| &p.notes).filter(|n| n.channel == ch).count();
         assert_eq!(count(&back, 2), 0, "a clone has no notes");

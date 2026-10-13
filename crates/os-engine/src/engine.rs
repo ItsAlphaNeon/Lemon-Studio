@@ -386,7 +386,7 @@ impl VoiceSlide {
 const RELEASE_SECONDS: f64 = 0.015;
 
 /// An automation clip placed on the tick line (spec: ui/playlist.md Â§8, flp/events/automation.md).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct AutoClip {
     /// Ticks at which the clip starts and ends.
     start: u64,
@@ -395,7 +395,8 @@ struct AutoClip {
     from_beat: f64,
     /// Index into `Engine::curves`.
     curve: usize,
-    target: os_model::target::Target,
+    /// Every target the clip drives (one link each, spec: audio/automation.md "The link"), unknown ones left out.
+    targets: Vec<os_model::target::Target>,
     /// The walk along the curve and the tick steps it has taken (spec: audio/automation.md "Walking the curve").
     walk: Option<(os_model::curve::Walk, u64)>,
 }
@@ -849,12 +850,18 @@ impl Engine {
             for c in project.arrangement().map(|a| a.clips.as_slice()).unwrap_or(&[]) {
                 let ClipSource::Channel(ch) = c.source else { continue };
                 let Some(a) = project.automation(ch) else { continue };
-                let Some(target) = a.target.map(os_model::target::decode) else { continue };
-                if !clip_audible(project, c) {
+                if a.targets.is_empty() || !clip_audible(project, c) {
                     continue;
                 }
-                // Plugin parameters play (spec: plugins/plugin-parameters.md Â§2); tempo and unknown targets do not.
-                if matches!(target, os_model::target::Target::Other(_)) {
+                // A clip drives every target it is linked to; unknown targets are left out, and a clip without a known
+                // one is ignored (spec: flp/events/automation.md "Event 227").
+                let targets: Vec<_> = a
+                    .targets
+                    .iter()
+                    .map(|&t| os_model::target::decode(t))
+                    .filter(|t| !matches!(t, os_model::target::Target::Other(_)))
+                    .collect();
+                if targets.is_empty() {
                     report.automation_clips_ignored += 1;
                     continue;
                 }
@@ -870,7 +877,7 @@ impl Engine {
                     end: u64::from(c.end()),
                     from_beat: c.window.map_or(0.0, |w| w.0),
                     curve,
-                    target,
+                    targets,
                     walk: None,
                 });
             }
@@ -883,7 +890,7 @@ impl Engine {
             main_gain,
             main_glide: os_dsp::glide::Glide::new(main_gain),
             exporting: false,
-            params: param_auto::ParamAuto::new(autos.iter().any(|a| param_auto::is_param(a.target))),
+            params: param_auto::ParamAuto::new(autos.iter().flat_map(|a| &a.targets).any(|&t| param_auto::is_param(t))),
             autos,
             curves,
             auto_last: Vec::new(),
@@ -1321,7 +1328,8 @@ impl Engine {
         let b = os_model::curve::tick_step(self.ppq);
         let mut values: Vec<(Target, i64)> = Vec::new();
         for a in self.autos.iter_mut().rev() {
-            if now < a.start || now >= a.end || values.iter().any(|v| v.0 == a.target) {
+            // Where clips on one target overlap, the latest decides that target.
+            if now < a.start || now >= a.end || a.targets.iter().all(|t| values.iter().any(|v| v.0 == *t)) {
                 continue;
             }
             let pts = &self.curves[a.curve].points;
@@ -1342,7 +1350,12 @@ impl Engine {
                 taken += 1;
             }
             a.walk = Some((walk, taken));
-            values.push((a.target, handed_on(walk.value(pts))));
+            let n = handed_on(walk.value(pts));
+            for &t in &a.targets {
+                if !values.iter().any(|v| v.0 == t) {
+                    values.push((t, n));
+                }
+            }
         }
         let len = if now == self.auto_from { 0 } else { len.max(1) as u32 };
         for (target, n) in values {
@@ -3393,7 +3406,7 @@ mod tests {
         auto_ch.kind = ChannelKind::Automation;
         p.channels.push(auto_ch);
         // A flat tempo clip at 0.25: (10000 + Round(0.25 * 512000)) / 1000 = 138 BPM.
-        p.automations.push(Automation { channel: 1, target: Some(target::TEMPO), points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![] });
+        p.automations.push(Automation { channel: 1, targets: vec![target::TEMPO], points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![] });
         p.arrangements[0].clips.push(Clip::new(0, 384 * 4, 1, ClipSource::Channel(1)));
         let mut lib = SampleLibrary::new(None);
         let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
@@ -3426,7 +3439,7 @@ mod tests {
             .map(os_model::MixerTrack::new)
             .collect();
         // Channel volume falls from 1.0 to 0.0 over 8 beats, starting at bar 2.
-        let a = Automation { channel: 1, target: Some(target::channel(0, 0)), points: vec![AutoPoint::new(0.0, 1.0), AutoPoint::new(8.0, 0.0)], header: vec![0; 21], tail: vec![] };
+        let a = Automation { channel: 1, targets: vec![target::channel(0, 0)], points: vec![AutoPoint::new(0.0, 1.0), AutoPoint::new(8.0, 0.0)], header: vec![0; 21], tail: vec![] };
         p.automations.push(a);
         p.arrangements[0].clips.push(Clip::new(384, 768, 1, ClipSource::Channel(1)));
         let mut lib = SampleLibrary::new(None);
@@ -3448,7 +3461,7 @@ mod tests {
         let after = at(&mut e, 384.0 * 3.5);
         assert!(after < 0.03, "after the clip it keeps the last value: {after}");
         // A mixer pan clip moves the track's matrix.
-        p.automations[0].target = Some(target::mixer(1, target::MIXER_PAN));
+        p.automations[0].targets = vec![target::mixer(1, target::MIXER_PAN)];
         p.automations[0].points = vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(8.0, 0.0)];
         let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
         e.seek(laws::tick_to_frame(400.0, 96, 130.0, 48000));
@@ -3456,6 +3469,43 @@ mod tests {
         let m = e.tracks[1].matrix;
         assert!(m[1][0].abs() < 1e-6 && m[1][1].abs() < 1e-6, "full left: no right output {m:?}");
         let _ = &mut out;
+    }
+
+    // spec: flp/events/automation.md "Event 227" (one link per target); audio/automation.md "The link", "When a clip acts"
+    #[test]
+    fn an_automation_clip_drives_every_target_it_is_linked_to() {
+        use os_model::{AutoPoint, Automation, ChannelKind, Clip, ClipSource, target};
+        let mut p = song(vec![long_note(0, 384 * 4, 0)], vec![Clip::new(0, 384 * 4, 0, ClipSource::Pattern(1))]);
+        for i in [1u16, 2] {
+            let mut c = channel();
+            c.index = i;
+            c.kind = ChannelKind::Automation;
+            p.channels.push(c);
+        }
+        p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        let flat = |v| vec![AutoPoint::new(0.0, v), AutoPoint::new(8.0, v)];
+        // One clip on the channel volume and two mixer volumes, an unknown target among them.
+        let targets = vec![target::channel(0, 0), target::mixer(1, target::MIXER_VOLUME), 0x7FFF_FFFF, target::mixer(2, target::MIXER_VOLUME)];
+        p.automations.push(Automation { channel: 1, targets, points: flat(0.25), header: vec![0; 21], tail: vec![] });
+        // A later clip on mixer track 2 only: it decides that target while the first keeps the others.
+        p.automations.push(Automation { channel: 2, targets: vec![target::mixer(2, target::MIXER_VOLUME)], points: flat(0.5), header: vec![0; 21], tail: vec![] });
+        p.arrangements[0].clips.push(Clip::new(0, 768, 1, ClipSource::Channel(1)));
+        p.arrangements[0].clips.push(Clip::new(96, 768, 2, ClipSource::Channel(2)));
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        assert_eq!(e.report.automation_clips_ignored, 0);
+        e.next_tick();
+        // Round(16000 v) for the mixer, Round(12800 v) through the level curve for the channel.
+        assert_eq!((e.tracks[1].vol, e.tracks[2].vol), (4000, 4000));
+        assert!((e.channels[0].vol_v - f64::from(os_dsp::level::knob(3200, os_dsp::level::R12800))).abs() < 1e-9);
+        while e.tick <= 100 {
+            e.next_tick();
+        }
+        assert_eq!((e.tracks[1].vol, e.tracks[2].vol), (4000, 8000));
+        // A clip whose targets are all unknown is ignored.
+        p.automations[1].targets = vec![0x7FFF_FFFF];
+        let e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        assert_eq!((e.autos.len(), e.report.automation_clips_ignored), (1, 1));
     }
 
     // spec: audio/automation.md "When a clip acts", "Walking the curve"; audio/voice-levels.md "Values from automation"
@@ -3471,7 +3521,7 @@ mod tests {
         // beat, then falling to 0.75 at beat 2.
         let jump = AutoPoint { mode: AutoMode::Hold, ..AutoPoint::new(1.0, 1.0) };
         let points = vec![AutoPoint::new(0.0, 0.0), jump, AutoPoint::new(1.5, 1.0), AutoPoint::new(2.0, 0.75)];
-        let a = Automation { channel: 1, target: Some(target::channel(0, target::CHANNEL_PITCH)), points, header: vec![0; 21], tail: vec![] };
+        let a = Automation { channel: 1, targets: vec![target::channel(0, target::CHANNEL_PITCH)], points, header: vec![0; 21], tail: vec![] };
         p.automations.push(a);
         p.arrangements[0].clips.push(Clip::new(384, 768, 1, ClipSource::Channel(1)));
         let mut lib = SampleLibrary::new(None);
@@ -3499,7 +3549,7 @@ mod tests {
         assert_eq!(e.channels[0].knob, 0.0);
         assert_eq!(knob_after(&mut e, 500), 4800.0);
         // Channel volume set in place on playback's first tick: no glide.
-        p.automations[0].target = Some(target::channel(0, target::CHANNEL_VOLUME));
+        p.automations[0].targets = vec![target::channel(0, target::CHANNEL_VOLUME)];
         p.automations[0].points = vec![AutoPoint::new(0.0, 0.5), AutoPoint::new(2.0, 0.5)];
         p.arrangements[0].clips[1] = Clip::new(0, 768, 1, ClipSource::Channel(1));
         let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);

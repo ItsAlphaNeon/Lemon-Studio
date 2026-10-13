@@ -1702,7 +1702,7 @@ mod tests {
         // Main level from 0 (-18 dB) to 1 (+18 dB) over 4 beats (120 BPM: 2 s).
         let auto = Automation {
             channel: 0,
-            target: Some(os_model::target::slot_param(1, 0, 35)),
+            targets: vec![os_model::target::slot_param(1, 0, 35)],
             points: vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(4.0, 1.0)],
             header: vec![0; 21],
             tail: vec![],
