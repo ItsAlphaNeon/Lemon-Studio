@@ -9,6 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use nih_plug::prelude::*;
 use os_engine::envelope;
+use os_model::SampleFx;
 
 pub type Fmt = Arc<dyn Fn(f32) -> String + Send + Sync>;
 
@@ -137,10 +138,14 @@ fn side_text() -> Fmt {
     })
 }
 
-/// A 0..1 knob shown in percent.
 /// Poly modulation id of "Sample start offset": per-note sample start.
 pub const START_OFFSET_POLY: u32 = 0;
+/// Poly modulation ids of the filter knobs: a host adds a note's mod X / mod Y to them per note, in knob units (spec:
+/// audio/voice-levels.md "Final levels", audio/channel-filter.md "Knob positions").
+pub const MOD_X_POLY: u32 = 1;
+pub const MOD_Y_POLY: u32 = 2;
 
+/// A 0..1 knob shown in percent.
 pub fn knob(name: &str, default: f32) -> FloatParam {
     FloatParam::new(name, default, FloatRange::Linear { min: 0.0, max: 1.0 }).with_value_to_string(percent())
 }
@@ -362,6 +367,11 @@ pub struct SamplerParams {
     /// The loaded sample's path (empty = none).
     #[persist = "sample-path"]
     pub sample_path: Arc<RwLock<String>>,
+    /// The precomputed settings a project file stores for the channel, as `fx_text` writes them (empty = none). They
+    /// play while the knobs stand where those values put them: start and length keep their doubles, and values beyond
+    /// a knob's range are kept (spec: audio/precomputed-effects.md "Settings").
+    #[persist = "file-settings"]
+    pub file_settings: Arc<RwLock<String>>,
     /// Frames of the loaded sample (loop knob texts are in samples).
     pub frames: Arc<AtomicU32>,
 
@@ -441,6 +451,9 @@ pub struct SamplerParams {
     pub fx_sdelay: FloatParam,
     #[id = "fx_pogo"]
     pub fx_pogo: FloatParam,
+    /// The loop points move with a reversal (event 215 byte 156; no control on the page).
+    #[id = "fx_loop_follows"]
+    pub fx_loop_follows: BoolParam,
 
     // Tab 2: envelope / instrument.
     #[nested(id_prefix = "envpan", group = "Panning")]
@@ -492,6 +505,7 @@ impl Default for SamplerParams {
         };
         SamplerParams {
             sample_path: Arc::new(RwLock::new(String::new())),
+            file_settings: Arc::new(RwLock::new(String::new())),
             keep_disk: BoolParam::new("Keep on disk", false),
             resample: BoolParam::new("Resample", true),
             load_regions: BoolParam::new("Load regions", true),
@@ -538,13 +552,15 @@ impl Default for SamplerParams {
             fx_reverb: knob("Reverb amount", 0.0),
             fx_sdelay: FloatParam::new("Stereo delay", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }).with_value_to_string(side_text()),
             fx_pogo: bi_knob("Pogo effect", 0.0),
+            // (Lemon Studio) On for a new channel: what most project files store.
+            fx_loop_follows: BoolParam::new("Loop points follow a reversal", true).hide(),
             env_pan: EnvParams::new("Panning", 0),
             env_vol: EnvParams::new("Volume", -101),
             env_modx: EnvParams::new("Mod X", 0),
             env_mody: EnvParams::new("Mod Y", 0),
             env_pitch: EnvParams::new("Pitch", 0),
-            f_cut: knob("Filter frequency (modulation X)", 1.0),
-            f_res: knob("Filter bandwidth (modulation Y)", 0.0),
+            f_cut: knob("Filter frequency (modulation X)", 1.0).with_poly_modulation_id(MOD_X_POLY),
+            f_res: knob("Filter bandwidth (modulation Y)", 0.0).with_poly_modulation_id(MOD_Y_POLY),
             f_type: choice("Filter type", 0, FILTERS),
             root: IntParam::new("Root note", 60, IntRange::Linear { min: 0, max: KEY_MAX }).with_value_to_string(Arc::new(note_name)),
             fine: IntParam::new("Fine tuning", 0, IntRange::Linear { min: -100, max: 100 }).with_value_to_string(Arc::new(|v| format!("{v} cents"))),
@@ -571,38 +587,143 @@ impl SamplerParams {
     }
 }
 
-/// Precomputed-effect settings: the processed sample is rebuilt when these change.
+/// A precomputed setting's knob position and the value a project file stores for it (spec:
+/// audio/precomputed-effects.md "Settings"): stored = base + Round(knob * span), limited to 0..=max; a stored value
+/// puts the knob at (stored - base) / span, limited to the knob's range lo..1. **(Lemon Studio)** The spans are the
+/// knobs' ranges from the sample page's measured laws (plugins/open-sampler.md §5.4, §5.5) brought to the stored units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Unit {
+    pub base: f64,
+    pub span: f64,
+    pub lo: f32,
+    pub max: f64,
+}
+
+impl Unit {
+    const fn new(base: f64, span: f64, lo: f32, max: f64) -> Unit {
+        Unit { base, span, lo, max }
+    }
+
+    /// The stored value of a knob position.
+    pub fn stored(&self, knob: f32) -> u32 {
+        let k = f64::from(if knob.is_finite() { knob.clamp(self.lo, 1.0) } else { 0.0 });
+        (self.base + (k * self.span).round_ties_even()).clamp(0.0, self.max) as u32
+    }
+
+    /// The knob position of a stored value.
+    pub fn knob(&self, stored: u32) -> f32 {
+        (((f64::from(stored) - self.base) / self.span) as f32).clamp(self.lo, 1.0)
+    }
+}
+
+/// The precomputed settings' units (stored values in the file's own scales).
+pub mod unit {
+    use super::Unit;
+    const W: f64 = 65535.0;
+    /// Quick fade in / out: 256 = silent at the far end; the knob's 100 % reaches silence at a quarter.
+    pub const FADE: Unit = Unit::new(0.0, 1024.0, 0.0, W);
+    /// Boost: gain `v / 16 + 1`, 17 at 100 %.
+    pub const BOOST: Unit = Unit::new(0.0, 256.0, 0.0, W);
+    /// Stereo delay: centre 2048, 100 % right = the left side 2048 frames late (at 44100 Hz).
+    pub const STEREO_DELAY: Unit = Unit::new(2048.0, 2048.0, -1.0, W);
+    /// Pogo: centre 256.
+    pub const POGO: Unit = Unit::new(256.0, 256.0, -1.0, W);
+    /// EQ (the one-pole feedback): centre 128.
+    pub const FEEDBACK: Unit = Unit::new(128.0, 128.0, -1.0, W);
+    /// CUT: 0 % = 128 (the lowest value the spec tried; the knob's own minimum is not known), 100 % = 1024 = open.
+    pub const CUTOFF: Unit = Unit::new(128.0, 896.0, 0.0, W);
+    /// RES: 100 % = 640, the largest value that plays.
+    pub const RESONANCE: Unit = Unit::new(0.0, 640.0, 0.0, W);
+    /// RM MIX, RM FREQ, REVERB: 0..256 (RM FREQ's default 50 % = 128).
+    pub const RING_MIX: Unit = Unit::new(0.0, 256.0, 0.0, W);
+    pub const RING_FREQ: Unit = Unit::new(0.0, 256.0, 0.0, W);
+    pub const REVERB: Unit = Unit::new(0.0, 256.0, 0.0, W);
+    /// Crossfade: in 1/2048 of the loop; 100 % = half the loop.
+    pub const CROSSFADE: Unit = Unit::new(0.0, 1024.0, 0.0, u32::MAX as f64);
+    /// Trim: a threshold in 1/32768 of full scale; 100 % = 256 (1/128).
+    pub const TRIM: Unit = Unit::new(0.0, 256.0, 0.0, u32::MAX as f64);
+}
+
+/// `SampleFx` as text (the `file-settings` field): its values in declaration order, comma-separated, the start and
+/// length as the bits of their doubles.
+pub fn fx_text(f: &SampleFx) -> String {
+    let b = |v: bool| u64::from(v);
+    let vals: [u64; 22] = [
+        f.flags.into(),
+        f.boost.into(),
+        f.fade_out.into(),
+        f.fade_in.into(),
+        f.stereo_delay.into(),
+        f.pogo.into(),
+        f.feedback.into(),
+        f.cutoff.into(),
+        f.resonance.into(),
+        f.ring_mix.into(),
+        f.ring_freq.into(),
+        f.reverb.into(),
+        f.reverb_type.into(),
+        b(f.ping_pong),
+        b(f.remove_dc),
+        b(f.normalize),
+        b(f.polarity),
+        f.crossfade.into(),
+        f.trim.into(),
+        f.start_bits,
+        f.length_bits,
+        b(f.loop_follows_reverse),
+    ];
+    vals.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+}
+
+/// The inverse of [`fx_text`] (`None` for empty or malformed text).
+pub fn fx_from_text(t: &str) -> Option<SampleFx> {
+    let mut v = [0u64; 22];
+    let mut n = 0;
+    for (i, part) in t.split(',').enumerate() {
+        *v.get_mut(i)? = part.trim().parse().ok()?;
+        n = i + 1;
+    }
+    if n != v.len() {
+        return None;
+    }
+    let w = |x: u64| u16::try_from(x).ok();
+    let d = |x: u64| u32::try_from(x).ok();
+    Some(SampleFx {
+        flags: w(v[0])?,
+        boost: w(v[1])?,
+        fade_out: w(v[2])?,
+        fade_in: w(v[3])?,
+        stereo_delay: w(v[4])?,
+        pogo: w(v[5])?,
+        feedback: w(v[6])?,
+        cutoff: w(v[7])?,
+        resonance: w(v[8])?,
+        ring_mix: w(v[9])?,
+        ring_freq: w(v[10])?,
+        reverb: w(v[11])?,
+        reverb_type: w(v[12])?,
+        ping_pong: v[13] != 0,
+        remove_dc: v[14] != 0,
+        normalize: v[15] != 0,
+        polarity: v[16] != 0,
+        crossfade: d(v[17])?,
+        trim: d(v[18])?,
+        start_bits: v[19],
+        length_bits: v[20],
+        loop_follows_reverse: v[21] != 0,
+    })
+}
+
+/// What builds the played sample: it is rebuilt when this changes (spec: audio/precomputed-effects.md).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FxKey {
-    pub dc: bool,
-    pub normalize: bool,
-    pub reverse: bool,
-    pub polarity: bool,
-    pub fade_stereo: bool,
-    pub swap: bool,
-    pub start: f32,
-    pub length: f32,
-    pub fade_in: f32,
-    pub fade_out: f32,
-    pub crossfade: f32,
-    pub trim: f32,
-    pub boost: f32,
-    pub eq: f32,
-    pub rm_mix: f32,
-    pub rm_freq: f32,
-    pub cut: f32,
-    pub res: f32,
-    pub clip: bool,
-    pub reverb_b: bool,
-    pub reverb: f32,
-    pub sdelay: f32,
-    pub pogo: f32,
-    /// Declicking mode (the precomputed edges of the sample).
-    pub declick: i32,
-    /// Loop points (0..1 of the length) and whether a loop plays: the crossfade needs them.
-    pub loop_on: bool,
-    pub loop_start: f32,
-    pub loop_end: f32,
+    /// The settings in the file's units.
+    pub fx: SampleFx,
+    /// **(Lemon Studio)** The loop knobs' own loop (fractions of the sample after start, length and stretching), when
+    /// they are off their defaults: it takes the place of the file's loop.
+    pub knob_loop: Option<(f32, f32)>,
+    /// The output rate (Hz): files below 8000 Hz are converted to it, and it enters `rs`.
+    pub rate: u32,
     /// Time stretching in a method that stretches the sample first: MUL ratio, TIME target length in seconds (0 = off)
     /// and the pitch shift in cents.
     pub stretch: bool,
@@ -612,41 +733,9 @@ pub struct FxKey {
 }
 
 impl FxKey {
-    /// No effect at all (a plain copy).
+    /// No setting at all (the file as it is) at 44100 Hz.
     pub fn neutral() -> FxKey {
-        FxKey {
-            dc: false,
-            normalize: false,
-            reverse: false,
-            polarity: false,
-            fade_stereo: false,
-            swap: false,
-            start: 0.0,
-            length: 1.0,
-            fade_in: 0.0,
-            fade_out: 0.0,
-            crossfade: 0.0,
-            trim: 0.0,
-            boost: 0.0,
-            eq: 0.0,
-            rm_mix: 0.0,
-            rm_freq: 0.5,
-            cut: 1.0,
-            res: 0.0,
-            clip: false,
-            reverb_b: true,
-            reverb: 0.0,
-            sdelay: 0.0,
-            pogo: 0.0,
-            declick: 0,
-            loop_on: false,
-            loop_start: 0.0,
-            loop_end: 1.0,
-            stretch: false,
-            ratio: 1.0,
-            time: 0.0,
-            shift: 0.0,
-        }
+        FxKey { fx: SampleFx::default(), knob_loop: None, rate: 44100, stretch: false, ratio: 1.0, time: 0.0, shift: 0.0 }
     }
 
     /// Stretch ratio for a sample of `secs` seconds: TIME's target length when set, else MUL.
@@ -666,48 +755,71 @@ impl SamplerParams {
         (time_file(steps) >= 1.0).then(|| steps / 4.0 * 60.0 / tempo.max(1.0))
     }
 
-    /// Precomputed settings at the host's `tempo` (TIME depends on it).
-    pub fn fx_key(&self, tempo: f64) -> FxKey {
+    /// The project file's settings for the channel, if the host gave them.
+    pub fn file_fx(&self) -> Option<SampleFx> {
+        self.file_settings.read().ok().and_then(|t| fx_from_text(&t))
+    }
+
+    /// The precomputed settings in the file's units: each from its knob, or the file's own value while the knob stands
+    /// where that value puts it.
+    pub fn sample_fx(&self) -> SampleFx {
+        let file = self.file_fx();
+        let keep = |unit: &Unit, knob: f32, of: fn(&SampleFx) -> u32| -> u32 {
+            match &file {
+                Some(f) if unit.knob(of(f)) == knob => of(f),
+                _ => unit.stored(knob),
+            }
+        };
+        let word = |unit: &Unit, knob: f32, of: fn(&SampleFx) -> u32| keep(unit, knob, of).min(65535) as u16;
+        let flag = |on: bool, bit: u16| if on { bit } else { 0 };
+        let (start, length) = (self.fx_start.live(), self.fx_length.live());
+        let range = |knob: f32, bits: Option<u64>| match bits {
+            Some(b) if f64::from_bits(b) as f32 == knob => b,
+            _ => f64::from(knob.clamp(0.0, 1.0)).to_bits(),
+        };
+        SampleFx {
+            flags: flag(self.fx_fade_stereo.live(), SampleFx::FADE_STEREO)
+                | flag(self.fx_reverse.live(), SampleFx::REVERSE)
+                | flag(self.fx_clip.live(), SampleFx::CLIP)
+                | flag(self.fx_swap.live(), SampleFx::SWAP),
+            boost: word(&unit::BOOST, self.fx_boost.live(), |f| f.boost.into()),
+            fade_out: word(&unit::FADE, self.fx_out.live(), |f| f.fade_out.into()),
+            fade_in: word(&unit::FADE, self.fx_in.live(), |f| f.fade_in.into()),
+            stereo_delay: word(&unit::STEREO_DELAY, self.fx_sdelay.live(), |f| f.stereo_delay.into()),
+            pogo: word(&unit::POGO, self.fx_pogo.live(), |f| f.pogo.into()),
+            feedback: word(&unit::FEEDBACK, self.fx_eq.live(), |f| f.feedback.into()),
+            cutoff: word(&unit::CUTOFF, self.fx_cut.live(), |f| f.cutoff.into()),
+            resonance: word(&unit::RESONANCE, self.fx_res.live(), |f| f.resonance.into()),
+            ring_mix: word(&unit::RING_MIX, self.fx_rm_mix.live(), |f| f.ring_mix.into()),
+            ring_freq: word(&unit::RING_FREQ, self.fx_rm_freq.live(), |f| f.ring_freq.into()),
+            reverb: word(&unit::REVERB, self.fx_reverb.live(), |f| f.reverb.into()),
+            reverb_type: self.fx_reverb_type.live().clamp(0, 1) as u16,
+            ping_pong: self.loop_pingpong.live(),
+            remove_dc: self.fx_dc.live(),
+            normalize: self.fx_normalize.live(),
+            polarity: self.fx_polarity.live(),
+            crossfade: keep(&unit::CROSSFADE, self.fx_crossfade.live(), |f| f.crossfade),
+            trim: keep(&unit::TRIM, self.fx_trim.live(), |f| f.trim),
+            start_bits: range(start, file.map(|f| f.start_bits)),
+            length_bits: range(length, file.map(|f| f.length_bits)),
+            loop_follows_reverse: self.fx_loop_follows.live(),
+        }
+    }
+
+    /// Precomputed settings at the host's `tempo` (TIME depends on it) and output `rate`.
+    pub fn fx_key(&self, tempo: f64, rate: u32) -> FxKey {
         let stretch = stretch_whole(self.ts_mode.live());
         let time = if stretch { self.ts_seconds(tempo).unwrap_or(0.0) as f32 } else { 0.0 };
+        let (ls, le) = (self.loop_start.live(), self.loop_end.live());
         FxKey {
-            dc: self.fx_dc.live(),
-            normalize: self.fx_normalize.live(),
-            reverse: self.fx_reverse.live(),
-            polarity: self.fx_polarity.live(),
-            fade_stereo: self.fx_fade_stereo.live(),
-            swap: self.fx_swap.live(),
-            start: self.fx_start.live(),
-            length: self.fx_length.live(),
-            fade_in: self.fx_in.live(),
-            fade_out: self.fx_out.live(),
-            crossfade: self.fx_crossfade.live(),
-            trim: self.fx_trim.live(),
-            boost: self.fx_boost.live(),
-            eq: self.fx_eq.live(),
-            rm_mix: self.fx_rm_mix.live(),
-            rm_freq: self.fx_rm_freq.live(),
-            cut: self.fx_cut.live(),
-            res: self.fx_res.live(),
-            clip: self.fx_clip.live(),
-            reverb_b: self.fx_reverb_type.live() == 1,
-            reverb: self.fx_reverb.live(),
-            sdelay: self.fx_sdelay.live(),
-            pogo: self.fx_pogo.live(),
-            declick: self.declick.live(),
-            loop_on: self.loop_active(),
-            loop_start: self.loop_start.live(),
-            loop_end: self.loop_end.live(),
+            fx: self.sample_fx(),
+            knob_loop: (ls > 0.0 || le < 1.0).then_some((ls, le)),
+            rate,
             stretch,
             ratio: if stretch { mul_of(self.ts_mul.live()) as f32 } else { 1.0 },
             time,
             shift: if stretch { ts_cents(self.ts_pitch.live()) as f32 } else { 0.0 },
         }
-    }
-
-    /// A loop plays when "Use loop points" is on and the loop knobs mark a loop (Lemon Studio rule, spec §Loop).
-    pub fn loop_active(&self) -> bool {
-        self.loop_use.live() && (self.loop_start.live() > 0.0 || self.loop_end.live() < 1.0)
     }
 }
 

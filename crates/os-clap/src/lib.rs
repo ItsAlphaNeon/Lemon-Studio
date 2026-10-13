@@ -2240,8 +2240,10 @@ mod tests {
         // PITCH does nothing in Resample, the default method (spec: audio/time-stretch.md): it is tried in Stretch (a
         // realtime method) and in e3 generic (stretched first). Knob positions are 0..1 (0.9 = +960 cents, 0.75 = x2);
         // the last stretch case is out of range, as a saved state may hold, and must play clamped, not as NaN.
+        // A realtime method alone has nothing to stretch at the root key and plays as Resample (spec:
+        // audio/time-stretch.md "Lemon Studio"), so it is checked the other way round below.
         let cases = [
-            ("start_offset", "{\"f32\":0.5}"), ("ts_mul", "{\"f32\":0.75}"), ("ts_mode", "{\"i32\":1}"),
+            ("start_offset", "{\"f32\":0.5}"), ("ts_mul", "{\"f32\":0.75}"),
             ("ts_pitch", "{\"f32\":0.9},\"ts_mode\":{\"i32\":1}"), ("ts_pitch", "{\"f32\":0.9},\"ts_mode\":{\"i32\":3}"),
             ("ts_mul", "{\"f32\":0.75},\"ts_mode\":{\"i32\":3}"), ("ts_pitch", "{\"f32\":700.0},\"ts_mode\":{\"i32\":3}"),
             ("fx_dc", "{\"bool\":true}"), ("fx_normalize", "{\"bool\":true}"), ("fx_reverse", "{\"bool\":true}"),
@@ -2266,6 +2268,9 @@ mod tests {
             }
         }
         assert!(dead.is_empty(), "no change in the sound: {dead:?}");
+        let same = render("\"ts_mode\":{\"i32\":1}");
+        let diff = base.iter().zip(&same).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(same.iter().all(|x| x.is_finite()) && diff < 1e-3, "Stretch with nothing to stretch: max diff {diff}");
     }
 
     fn serde_string(s: &str) -> String {

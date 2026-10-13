@@ -318,6 +318,100 @@ pub struct ChannelSound {
     /// Stretch settings as stored (event 215, ints 24..27): time, pitch, multiplier, mode. The time is a single in
     /// 1/192 beat (FL 24.2 on), kept as its bits.
     pub stretch: [u32; 4],
+    /// The sample's start and length, loop options and precomputed effects (read only: saving keeps the file's own
+    /// events).
+    pub fx: SampleFx,
+}
+
+/// A sample channel's start, length, loop options and precomputed effects as stored, in the file's units (spec:
+/// audio/precomputed-effects.md "Settings"). Read from a project, never written back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleFx {
+    /// Event 70: `FADE_STEREO`, `REVERSE`, `CLIP`, `SWAP`.
+    pub flags: u16,
+    /// Event 74, 0..256.
+    pub boost: u16,
+    /// Events 75 and 76, 0..1024.
+    pub fade_out: u16,
+    pub fade_in: u16,
+    /// Event 85, 0..4096, centre 2048 (above: the left side is late).
+    pub stereo_delay: u16,
+    /// Event 86, 0..512, centre 256.
+    pub pogo: u16,
+    /// Event 69: the one-pole feedback, 0..256, centre 128.
+    pub feedback: u16,
+    /// Events 71 and 83: the low-pass, cutoff 1024 = open, resonance 0..640 (a larger stored value plays as 640).
+    pub cutoff: u16,
+    pub resonance: u16,
+    /// Event 131: ring modulation mix (0..256) and frequency word.
+    pub ring_mix: u16,
+    pub ring_freq: u16,
+    /// Event 139: reverb amount (0..256, 0 = off) and type (0 or 1).
+    pub reverb: u16,
+    pub reverb_type: u16,
+    /// Event 20: a ping-pong loop.
+    pub ping_pong: bool,
+    /// Event 215 bytes 9, 80, 81.
+    pub remove_dc: bool,
+    pub normalize: bool,
+    pub polarity: bool,
+    /// Event 215 bytes 84..87: the crossfade in 1/2048 of the loop's length.
+    pub crossfade: u32,
+    /// Event 215 bytes 88..91: the trim threshold in 1/32768 of full scale, 0 = off.
+    pub trim: u32,
+    /// Event 215 bytes 128..135 and 136..143 (doubles, kept as their bits): the start as a fraction of the sample, the
+    /// length as a fraction of what follows the start.
+    pub start_bits: u64,
+    pub length_bits: u64,
+    /// Event 215 byte 156: the loop points follow a reversal.
+    pub loop_follows_reverse: bool,
+}
+
+impl SampleFx {
+    pub const FADE_STEREO: u16 = 1;
+    pub const REVERSE: u16 = 2;
+    pub const CLIP: u16 = 4;
+    pub const SWAP: u16 = 256;
+
+    /// The start, a fraction of the sample.
+    pub fn start(&self) -> f64 {
+        f64::from_bits(self.start_bits)
+    }
+
+    /// The length, a fraction of what follows the start.
+    pub fn length(&self) -> f64 {
+        f64::from_bits(self.length_bits)
+    }
+}
+
+impl Default for SampleFx {
+    /// What a new channel stores (spec: audio/precomputed-effects.md "Settings", the defaults).
+    fn default() -> Self {
+        SampleFx {
+            flags: 0,
+            boost: 0,
+            fade_out: 0,
+            fade_in: 0,
+            stereo_delay: 2048,
+            pogo: 256,
+            feedback: 128,
+            cutoff: 1024,
+            resonance: 0,
+            ring_mix: 0,
+            ring_freq: 128,
+            reverb: 0,
+            reverb_type: 1,
+            ping_pong: false,
+            remove_dc: false,
+            normalize: false,
+            polarity: false,
+            crossfade: 0,
+            trim: 0,
+            start_bits: 0f64.to_bits(),
+            length_bits: 1f64.to_bits(),
+            loop_follows_reverse: false,
+        }
+    }
 }
 
 /// Stretch methods as event 215 int 27 stores them (spec: audio/time-stretch.md "Fields").
@@ -436,7 +530,7 @@ impl ChannelSound {
 impl Default for ChannelSound {
     /// A new channel: filter open, no flags read, declick mode 0, not stretched.
     fn default() -> Self {
-        ChannelSound { cutoff: 256, resonance: 0, filter_type: 0, sampler_flags: None, declick: 0, stretch: [0; 4] }
+        ChannelSound { cutoff: 256, resonance: 0, filter_type: 0, sampler_flags: None, declick: 0, stretch: [0; 4], fx: SampleFx::default() }
     }
 }
 

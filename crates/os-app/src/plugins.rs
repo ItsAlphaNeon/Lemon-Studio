@@ -956,8 +956,10 @@ const NATIVE_CHECKS: &str = "native-checks.txt";
 /// The sampler parameter a note's sample start modulates per note (Open Sampler's START OFFSET).
 const SAMPLE_START: &str = "Sample start offset";
 
-/// Open Sampler's starting state for a sampler channel of the project: its sample and its five envelope records
-/// (nih-plug JSON state with the u64 length prefix of its CLAP state; spec: plugins/open-sampler.md §6, §7).
+/// Open Sampler's starting state for a sampler channel of the project: its sample, its five envelope records, its
+/// stretch settings, the sample's start, length, loop options and precomputed effects, and the channel filter and
+/// declick mode (nih-plug JSON state with the u64 length prefix of its CLAP state; spec: plugins/open-sampler.md §6,
+/// §7).
 pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
     let mut params = Vec::new();
     // Model records: panning, volume, cutoff (Mod X), resonance (Mod Y), pitch.
@@ -986,12 +988,22 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
             params.push(format!("\"{id}\":{v}"));
         }
     }
+    for (id, v) in sample_params(&ch.sound) {
+        params.push(format!("\"{id}\":{v}"));
+    }
     // Factory placeholders (`%FLStudioFactoryData%`...) become real paths: the plugin opens files directly.
     let path = resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
     let path = path.as_str();
-    // The persisted field is a JSON string holding JSON.
+    // The persisted fields are JSON strings holding JSON. The file's own precomputed values travel whole: Open Sampler
+    // plays them while its knobs stand where they put them (values beyond a knob's range, start and length doubles).
     let inner = json_string(path);
-    let state = format!("{{\"version\":\"0.0.1\",\"params\":{{{}}},\"fields\":{{\"sample-path\":{}}}}}", params.join(","), json_string(&inner));
+    let settings = json_string(&open_sampler::params::fx_text(&ch.sound.fx));
+    let state = format!(
+        "{{\"version\":\"0.0.1\",\"params\":{{{}}},\"fields\":{{\"sample-path\":{},\"file-settings\":{}}}}}",
+        params.join(","),
+        json_string(&inner),
+        json_string(&settings)
+    );
     let mut blob = (state.len() as u64).to_le_bytes().to_vec();
     blob.extend_from_slice(state.as_bytes());
     blob
@@ -1038,6 +1050,57 @@ fn stretch_params(sound: &os_model::ChannelSound) -> [(&'static str, serde_json:
         ("ts_pitch", serde_json::json!({ "f32": ((sound.stretch_cents() + 1200.0) / 2400.0).clamp(0.0, 1.0) as f32 })),
         ("ts_time", serde_json::json!({ "f32": sp::time_norm(steps) })),
     ]
+}
+
+/// Open Sampler's parameters for a channel's sample settings: start and length, the precomputed effects and the loop
+/// options (spec: audio/precomputed-effects.md "Settings"), the channel filter (audio/channel-filter.md: knob
+/// positions = stored / 256) and the declick mode (audio/declick.md). "Use loop points" only when the file has the
+/// sampler flags (value 8).
+fn sample_params(sound: &os_model::ChannelSound) -> Vec<(&'static str, serde_json::Value)> {
+    use open_sampler::params::{unit, Unit};
+    use os_model::SampleFx;
+    use serde_json::json;
+    let fx = &sound.fx;
+    let f = |v: f32| json!({ "f32": v });
+    let b = |v: bool| json!({ "bool": v });
+    let knob = |u: &Unit, v: u32| f(u.knob(v));
+    let flag = |bit: u16| b(fx.flags & bit != 0);
+    let mut out = vec![
+        ("fx_start", f(fx.start().clamp(0.0, 1.0) as f32)),
+        ("fx_length", f(fx.length().clamp(0.0, 1.0) as f32)),
+        ("fx_in", knob(&unit::FADE, fx.fade_in.into())),
+        ("fx_out", knob(&unit::FADE, fx.fade_out.into())),
+        ("fx_crossfade", knob(&unit::CROSSFADE, fx.crossfade)),
+        ("fx_trim", knob(&unit::TRIM, fx.trim)),
+        ("fx_boost", knob(&unit::BOOST, fx.boost.into())),
+        ("fx_eq", knob(&unit::FEEDBACK, fx.feedback.into())),
+        ("fx_rm_mix", knob(&unit::RING_MIX, fx.ring_mix.into())),
+        ("fx_rm_freq", knob(&unit::RING_FREQ, fx.ring_freq.into())),
+        ("fx_cut", knob(&unit::CUTOFF, fx.cutoff.into())),
+        ("fx_res", knob(&unit::RESONANCE, fx.resonance.into())),
+        ("fx_reverb", knob(&unit::REVERB, fx.reverb.into())),
+        ("fx_reverb_type", json!({ "i32": i32::from(fx.reverb_type.min(1)) })),
+        ("fx_sdelay", knob(&unit::STEREO_DELAY, fx.stereo_delay.into())),
+        ("fx_pogo", knob(&unit::POGO, fx.pogo.into())),
+        ("fx_dc", b(fx.remove_dc)),
+        ("fx_normalize", b(fx.normalize)),
+        ("fx_polarity", b(fx.polarity)),
+        ("fx_reverse", flag(SampleFx::REVERSE)),
+        ("fx_fade_stereo", flag(SampleFx::FADE_STEREO)),
+        ("fx_swap", flag(SampleFx::SWAP)),
+        ("fx_clip", flag(SampleFx::CLIP)),
+        ("loop_pingpong", b(fx.ping_pong)),
+        ("fx_loop_follows", b(fx.loop_follows_reverse)),
+        ("f_cut", f(sound.cutoff.clamp(0, 256) as f32 / 256.0)),
+        ("f_res", f(sound.resonance.clamp(0, 256) as f32 / 256.0)),
+        ("f_type", json!({ "i32": sound.filter_type.clamp(0, 7) })),
+        // Open Sampler's list holds modes 0 to 5: mode 6 (valid only as stored data) plays as mode 0 (Lemon Studio).
+        ("declick", json!({ "i32": if sound.declick <= 5 { i32::from(sound.declick) } else { 0 } })),
+    ];
+    if let Some(flags) = sound.sampler_flags {
+        out.push(("loop_use", b(flags & 8 != 0)));
+    }
+    out
 }
 
 /// Writes an edit of one of Open Sampler's time-stretch parameters (`name`, at normalized value `norm`) into a
@@ -1919,6 +1982,72 @@ mod tests {
         assert!((open_sampler::params::time_steps(f(&p["ts_time"]) as f32) - 16.0).abs() < 1e-3);
         assert!((f(&p["ts_mul"]) - 0.5).abs() < 1e-6);
         assert_eq!(p["ts_mode"], serde_json::json!({"i32": 1}), "the method kept");
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    /// A channel's sample settings reach its Open Sampler (spec: audio/precomputed-effects.md "Settings",
+    /// audio/channel-filter.md, audio/declick.md): the knobs stand where the file's values put them, the file's own
+    /// values travel whole, and the sample is played as they build it.
+    #[test]
+    fn builtin_open_sampler_takes_the_sample_settings() {
+        use open_sampler::params::fx_from_text;
+        use os_model::SampleFx;
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(OPEN_SAMPLER).expect("built-in Open Sampler");
+        let saved = |pl: &Plugins, row| {
+            let st = pl.hosted[&row].plugin.lock().unwrap().save_state().unwrap();
+            serde_json::from_slice::<serde_json::Value>(&st[8..]).unwrap()
+        };
+        let f = |v: &serde_json::Value| v["f32"].as_f64().unwrap();
+        let mut ch = crate::app::test_project().channels.remove(0);
+        let fx = SampleFx {
+            flags: SampleFx::REVERSE | SampleFx::SWAP,
+            boost: 128,
+            stereo_delay: 1024,
+            trim: 32768,
+            normalize: true,
+            start_bits: 0.25f64.to_bits(),
+            loop_follows_reverse: true,
+            ..SampleFx::default()
+        };
+        ch.sound.fx = fx;
+        (ch.sound.cutoff, ch.sound.resonance, ch.sound.filter_type, ch.sound.declick, ch.sound.sampler_flags) = (128, 64, 3, 2, Some(2));
+        pl.create_with(0, index, Some(&sampler_state(&ch))).unwrap();
+        let v = saved(&pl, 0);
+        let p = &v["params"];
+        assert_eq!((&p["fx_reverse"], &p["fx_swap"], &p["fx_normalize"]), (&serde_json::json!({"bool": true}), &serde_json::json!({"bool": true}), &serde_json::json!({"bool": true})));
+        assert_eq!((&p["fx_clip"], &p["fx_fade_stereo"]), (&serde_json::json!({"bool": false}), &serde_json::json!({"bool": false})));
+        assert!((f(&p["fx_boost"]) - 0.5).abs() < 1e-6 && (f(&p["fx_sdelay"]) + 0.5).abs() < 1e-6 && f(&p["fx_trim"]) == 1.0);
+        assert!((f(&p["fx_start"]) - 0.25).abs() < 1e-9 && f(&p["fx_length"]) == 1.0);
+        assert!((f(&p["f_cut"]) - 0.5).abs() < 1e-9 && (f(&p["f_res"]) - 0.25).abs() < 1e-9);
+        assert_eq!((&p["f_type"], &p["declick"]), (&serde_json::json!({"i32": 3}), &serde_json::json!({"i32": 2})));
+        assert_eq!(p["loop_use"], serde_json::json!({"bool": false}), "sampler flags without 8");
+        // The file's values whole: the trim threshold beyond the knob's range is kept.
+        let field: String = serde_json::from_str(v["fields"]["file-settings"].as_str().unwrap()).unwrap();
+        assert_eq!(fx_from_text(&field), Some(fx));
+
+        // The sound: reversed and swapped, nothing else.
+        let wav = std::env::temp_dir().join(format!("os-app-sampler-fx-{}.wav", std::process::id()));
+        let frames: Vec<f32> = (0..1000).flat_map(|i| [i as f32 / 1000.0, -(i as f32) / 2000.0]).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frames).unwrap();
+        let mut ch = crate::app::test_project().channels.remove(0);
+        ch.sound.fx = SampleFx { flags: SampleFx::REVERSE | SampleFx::SWAP, ..SampleFx::default() };
+        pl.create_with(1, index, Some(&sampler_state(&ch))).unwrap();
+        assert!(pl.load_sample(1, &wav.to_string_lossy()));
+        let inst = pl.hosted[&1].plugin.clone() as SharedInstrument;
+        let mut i = inst.lock().unwrap();
+        let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+        for _ in 0..20 {
+            // The processed sample is built in the background: wait for it.
+            i.process(48000, &mut l, &mut r);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        i.note_on(0, 60, 100.0 / 128.0);
+        let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+        i.process(48000, &mut l, &mut r);
+        assert!((l[0] + 999.0 / 2000.0).abs() < 1e-6 && (r[0] - 0.999).abs() < 1e-6, "{} {}", l[0], r[0]);
+        assert!((l[10] + 989.0 / 2000.0).abs() < 1e-6 && (r[10] - 0.989).abs() < 1e-6, "{} {}", l[10], r[10]);
+        drop(i);
         let _ = std::fs::remove_file(&wav);
     }
 

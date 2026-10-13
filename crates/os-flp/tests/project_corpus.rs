@@ -140,7 +140,8 @@ fn playlist_edits_survive() {
         let bytes = std::fs::read(path).unwrap();
         let mut file = FlpFile::parse(&bytes).unwrap();
         let Ok(mut project) = load(&file) else { continue };
-        if project.saved_by.split('.').next() != Some("26") || project.arrangements.first().is_none_or(|a| a.clips.len() < 3) {
+        // FL 24.2 and 25 files too: their clip records are 80 bytes (spec: flp/layouts.md).
+        if !matches!(project.saved_by.split('.').next(), Some("24" | "25" | "26")) || project.arrangements.first().is_none_or(|a| a.clips.len() < 3) {
             continue;
         }
         let arr = &mut project.arrangements[0];
