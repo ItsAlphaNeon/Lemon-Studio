@@ -37,6 +37,9 @@ pub struct Hosted {
     pub link: Option<os_hostlink::Link>,
     /// The app was told that the instance stopped after a crash.
     stop_told: bool,
+    /// A native instance started from a project's state that it did not give back byte for byte: a save keeps the
+    /// file's bytes instead of this instance's state (spec: plugins/fruity-abi.md "Saved state").
+    pub keep_file_state: bool,
     /// Its attention count, read without locking it (`os_host::Attention`); `None`: looked at on every tick.
     pub attention: Option<Arc<os_host::Attention>>,
     /// The count and time `idle` last looked at it (`Hosted::due`).
@@ -73,6 +76,7 @@ impl Hosted {
             #[cfg(plugin_windows)]
             link: None,
             stop_told: false,
+            keep_file_state: false,
             attention,
             seen: Look::never(),
         }
@@ -2299,6 +2303,61 @@ mod tests {
         eprintln!("STEP drop");
         pl.drop_key(key);
         eprintln!("RESULT ok (state {} bytes, finite output {finite})", st.len());
+    }
+
+    /// A project file's native plugins (`OS_NATIVE_FLP=<path>`) hosted the way an opened project's are with the native
+    /// host on (`App::host_native`, spec plugins/fruity-abi.md "Opened projects"): prints each plugin channel and filled
+    /// slot with what became of it (hosted, hosted but keeping the file's state, not installed, did not start), then
+    /// renders a few blocks through every instance. Loads FL DLLs in-process: ignored, run alone on a hidden desktop:
+    /// `OS_NATIVE_FLP="x.flp" cargo test -p os-app --bin lemonstudio native_plugins_of_an_opened_project -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn native_plugins_of_an_opened_project() {
+        let Some(flp) = std::env::var_os("OS_NATIVE_FLP").map(PathBuf::from) else { return };
+        os_native::set_enabled(true);
+        let mut app = crate::app::App::new(None);
+        app.plugins = Plugins::scan();
+        eprintln!("STEP {} native plugins listed", app.plugins.available.iter().chain(&app.plugins.effects).filter(|a| a.desc.format == os_host::Format::Native).count());
+        app.open(flp);
+        eprintln!("STEP opened: {:?}", app.state.message);
+        // The app's order: the built-in Open plugins take their channels and slots first.
+        app.sync_effects();
+        app.sync_osc3();
+        for _ in 0..3 {
+            app.host_native();
+        }
+        eprintln!("STEP {:?}", app.state.message);
+        let proj = app.state.project.clone();
+        let mut keys: Vec<(usize, String)> = proj.channels.iter().enumerate().filter_map(|(r, c)| Some((r, format!("channel {r} {}", c.plugin.clone()?)))).collect();
+        keys.extend(proj.mixer.iter().flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| Some((fx_key(m.index, k as u8), format!("track {} slot {k} {}", m.index, s.as_ref()?.name))))));
+        for (key, label) in &keys {
+            let what = match app.plugins.hosted.get(key) {
+                Some(h) if h.keep_file_state => "hosted, keeps the file's state",
+                Some(_) => "hosted",
+                None if app.native_failed.contains(key) => "not installed or did not start",
+                None => "not hosted (built-in or wrapped)",
+            };
+            eprintln!("RESULT {label:50} {what}");
+        }
+        let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+        for (row, inst) in app.plugins.instruments() {
+            let mut p = inst.lock().unwrap();
+            p.note_on(0, 60, 0.8);
+            for _ in 0..20 {
+                p.process(48000, &mut l, &mut r);
+            }
+            p.note_off(0, 60);
+            eprintln!("RESULT channel {row} renders, peak {:.3}", l.iter().chain(&r).fold(0.0f32, |m, s| m.max(s.abs())));
+        }
+        for (t, k, fx) in app.plugins.effects() {
+            let mut p = fx.lock().unwrap();
+            for _ in 0..20 {
+                p.process_fx(48000, &mut l, &mut r);
+            }
+            eprintln!("RESULT track {t} slot {k} renders, finite {}", l.iter().chain(&r).all(|s| s.is_finite()));
+        }
+        app.reset_hosted();
+        eprintln!("RESULT done");
     }
 
     /// One installed native generator (`OS_NATIVE_ONE=<folder name>`) added from the channel rack's Add one ▸ menu with

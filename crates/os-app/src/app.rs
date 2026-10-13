@@ -903,6 +903,9 @@ pub struct App {
     pub(crate) scan_queued: Option<crate::plugin_db::Mode>,
     /// Wrapped plugin channels (rows) and slots (`fx_key`) whose plugin was not found or did not start (not retried).
     pub(crate) wrap_failed: Vec<usize>,
+    /// Plugin channels (rows) and slots (`fx_key`) naming a native plugin that is not installed or did not start
+    /// (not retried; spec: plugins/fruity-abi.md "Opened projects").
+    pub(crate) native_failed: Vec<usize>,
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
     loading: Option<crate::loading::Loading>,
     /// A WAV export is rendering (FILE > Export): its file name and progress (0..1); the same panel shows, input waits.
@@ -1031,6 +1034,7 @@ impl App {
             sweep: None,
             scan_queued: None,
             wrap_failed: Vec::new(),
+            native_failed: Vec::new(),
             loading: None,
             export: None,
             saved: (Project::default(), 0.0),
@@ -1329,6 +1333,7 @@ impl App {
         self.sampler_failed.clear();
         self.fx_failed.clear();
         self.wrap_failed.clear();
+        self.native_failed.clear();
         self.transport.set_instruments(Vec::new());
         self.transport.set_effects(Vec::new());
     }
@@ -1436,6 +1441,7 @@ impl App {
         if self.loading.is_none() {
             self.sync_wrapped();
             self.sync_osc3();
+            self.sync_native();
         }
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
             // A row hosted this tick already started from its channel's sample.
@@ -5057,6 +5063,7 @@ impl App {
         self.plugins.remap(m);
         self.sampler_failed = self.sampler_failed.iter().filter_map(|&r| m(r)).collect();
         self.wrap_failed = self.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
+        self.native_failed = self.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
         self.transport.set_instruments(self.plugins.instruments());
         self.state.piano.dirty = true;
     }
