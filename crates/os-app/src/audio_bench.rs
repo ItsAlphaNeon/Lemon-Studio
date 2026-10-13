@@ -1,4 +1,4 @@
-//! Audio-thread load on a real project: opens it as the app does (Open Sampler instances, hosted effects), renders the
+//! Audio-thread load on a real project: opens it as the app does (Lemon Sampler instances, hosted effects), renders the
 //! song tick by tick and prints how long each second of audio took to render, as a share of one core. Ticks render the
 //! same way during playback, so a second near 100 % here is a second that drops out live.
 //!

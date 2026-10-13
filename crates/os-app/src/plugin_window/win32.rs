@@ -278,7 +278,7 @@ impl FrameWindow {
         }
     }
 
-    /// The plugin's own page tabs (an Open plugin joined through the host link), replacing the plug tab.
+    /// The plugin's own page tabs (a Lemon plugin joined through the host link), replacing the plug tab.
     pub fn set_pages(&self, pages: Vec<PageIcon>, active: usize) {
         let mut st = self.state.borrow_mut();
         if !pages.is_empty() && (st.pages != pages || st.page != active) {

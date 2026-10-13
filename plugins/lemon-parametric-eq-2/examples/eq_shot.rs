@@ -1,18 +1,18 @@
-//! Renders the Open Parametric EQ 2 editor offscreen:
-//! `cargo run -p open-parametric-eq-2 --example eq_shot -- out.png [default|demo] [x,y] [spectrum|heatmap]`.
+//! Renders the Lemon Parametric EQ 2 editor offscreen:
+//! `cargo run -p lemon-parametric-eq-2 --example eq_shot -- out.png [default|demo] [x,y] [spectrum|heatmap]`.
 //! `demo` moves a few bands; `x,y` = mouse position (hover looks); `spectrum` analyses pink-ish noise as monitored input.
 use std::sync::Arc;
 
-use open_parametric_eq_2::analyzer::{Analyzer, Look as ALook};
-use open_parametric_eq_2::editor::{Btn, Logic, Mods};
-use open_parametric_eq_2::params::{self, freq_id, level_id, order_id, type_id, width_id, EqParams};
-use open_parametric_eq_2::view::{self, Look};
-use open_parametric_eq_2::Shared;
+use lemon_parametric_eq_2::analyzer::{Analyzer, Look as ALook};
+use lemon_parametric_eq_2::editor::{Btn, Logic, Mods};
+use lemon_parametric_eq_2::params::{self, freq_id, level_id, order_id, type_id, width_id, EqParams};
+use lemon_parametric_eq_2::view::{self, Look};
+use lemon_parametric_eq_2::Shared;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |i: usize| args.get(i).map(String::as_str).filter(|a| !a.is_empty() && *a != "-");
-    let out = arg(1).unwrap_or("open-parametric-eq-2.png");
+    let out = arg(1).unwrap_or("lemon-parametric-eq-2.png");
     let mut l = Logic::new(Arc::new(EqParams::default()), Arc::new(Shared::default()), None);
     if arg(2) == Some("demo") {
         l.vals.edit_plain(&level_id(0), 4.5);

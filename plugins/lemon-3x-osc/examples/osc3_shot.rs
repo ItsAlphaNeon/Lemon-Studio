@@ -1,18 +1,18 @@
-//! Renders the Open 3x Osc editor offscreen:
-//! `cargo run -p open-3x-osc --example osc3_shot -- out.png [osc|env|demo] [x,y] [crop]`.
+//! Renders the Lemon 3x Osc editor offscreen:
+//! `cargo run -p lemon-3x-osc --example osc3_shot -- out.png [osc|env|demo] [x,y] [crop]`.
 //! `env` shows the envelope page (volume); `demo` sets a few oscillator controls; `x,y` = mouse position (hover looks,
 //! `OS_PRESS` presses); `crop` saves only the editor area the host shows (560 x 437).
 use std::sync::Arc;
 
-use open_3x_osc::editor::{Btn, Logic, Mods};
-use open_3x_osc::params::Osc3Params;
-use open_3x_osc::view;
-use open_3x_osc::Shared;
+use lemon_3x_osc::editor::{Btn, Logic, Mods};
+use lemon_3x_osc::params::Osc3Params;
+use lemon_3x_osc::view;
+use lemon_3x_osc::Shared;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |i: usize| args.get(i).map(String::as_str).filter(|a| !a.is_empty() && *a != "-");
-    let out = arg(1).unwrap_or("open-3x-osc.png");
+    let out = arg(1).unwrap_or("lemon-3x-osc.png");
     let mut l = Logic::new(Arc::new(Osc3Params::default()), Arc::new(Shared::default()), None);
     match arg(2) {
         Some("env") => {

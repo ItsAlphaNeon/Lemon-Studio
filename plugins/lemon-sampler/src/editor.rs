@@ -3,7 +3,7 @@
 //! keyboard and waveform. Values the editor sets show at once (an overlay over the host's parameter values until
 //! the host confirms them), so nothing waits for the host's next flush.
 //!
-// spec: plugins/open-sampler.md (§2 menus, §2.3 waveform, §3.1 keyboard, §4 interaction), plugins/host-link.md,
+// spec: plugins/lemon-sampler.md (§2 menus, §2.3 waveform, §3.1 keyboard, §4 interaction), plugins/host-link.md,
 // spec: plugins/plugin-formats.md (editors)
 
 use std::any::Any;
@@ -183,7 +183,7 @@ impl Model for Vals {
     }
 }
 
-/// Default values of a fresh Open Sampler (offscreen renders, tests).
+/// Default values of a fresh Lemon Sampler (offscreen renders, tests).
 pub struct Defaults(pub Vals);
 
 impl Defaults {
@@ -562,7 +562,7 @@ impl Logic {
 
     pub fn down(&mut self, x: f32, y: f32, btn: Btn, m: Mods, double: bool) -> Vec<Act> {
         if debug() {
-            eprintln!("[open-sampler] down {x},{y} {btn:?} -> {:?} ({} hits)", self.at(x, y), self.hits.len());
+            eprintln!("[lemon-sampler] down {x},{y} {btn:?} -> {:?} ({} hits)", self.at(x, y), self.hits.len());
         }
         let Some(t) = self.at(x, y) else { return vec![] };
         if btn == Btn::Middle || (btn == Btn::Left && m.alt && t.param().is_some() && !matches!(t, Target::Key(_))) {
@@ -1392,7 +1392,7 @@ mod win32 {
 
     /// One class per DLL instance: the name carries this module's address so two Lemon Studio plugins never share it.
     fn class_name(kind: &str) -> Vec<u16> {
-        wide(&format!("OpenSampler{kind}{:x}", wndproc as *const () as usize))
+        wide(&format!("LemonSampler{kind}{:x}", wndproc as *const () as usize))
     }
 
     fn register(kind: &str, proc_: WNDPROC) -> Vec<u16> {
@@ -1442,7 +1442,7 @@ mod win32 {
                 tracking: false,
                 slot: slot.clone(),
             });
-            let title = wide("Open Sampler");
+            let title = wide("Lemon Sampler");
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -1709,7 +1709,7 @@ mod win32 {
                         self.lock = Some(p);
                         let n = ShowCursor(0);
                         if super::debug() {
-                            eprintln!("[open-sampler] lock at {},{} (cursor count {n})", p.x, p.y);
+                            eprintln!("[lemon-sampler] lock at {},{} (cursor count {n})", p.x, p.y);
                         }
                         if n >= 0 {
                             while ShowCursor(0) >= 0 {}
@@ -1997,10 +1997,10 @@ mod win32 {
         }
     }
 
-    /// Tests that click at random set `OPENSAMPLER_NO_MODAL`: menus, type-in boxes and file dialogs then return nothing
+    /// Tests that click at random set `LEMONSAMPLER_NO_MODAL`: menus, type-in boxes and file dialogs then return nothing
     /// instead of running a modal loop.
     fn no_modal() -> bool {
-        std::env::var_os("OPENSAMPLER_NO_MODAL").is_some()
+        std::env::var_os("LEMONSAMPLER_NO_MODAL").is_some()
     }
 
     fn popup_at(owner: HWND, x: i32, y: i32, def: &MenuDef, pal: &Palette, scale: f32, parent: Option<RECT>) -> PopRes {

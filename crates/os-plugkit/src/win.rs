@@ -1,4 +1,4 @@
-//! Win32 parts of an Open plugin editor: window classes, painting a canvas into a window, the cursor held in place
+//! Win32 parts of a Lemon plugin editor: window classes, painting a canvas into a window, the cursor held in place
 //! during a drag, popup menus painted with `os_ui::kit::menu` (never native menus), and the "Type in value" box.
 
 use std::ffi::c_void;

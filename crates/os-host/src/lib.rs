@@ -149,8 +149,8 @@ pub trait Library: Send + Sync {
     fn create(self: Arc<Self>, id: &str) -> Result<SharedPlugin, String>;
 }
 
-/// The parameter of a built-in Open instrument that takes a note's mod X as per-note modulation (`use_note_levels`;
-/// spec: plugins/open-sampler.md, plugins/3x-osc.md parameter names).
+/// The parameter of a built-in Lemon instrument that takes a note's mod X as per-note modulation (`use_note_levels`;
+/// spec: plugins/lemon-sampler.md, plugins/3x-osc.md parameter names).
 pub const NOTE_MOD_X: &str = "Filter frequency (modulation X)";
 /// The same for a note's mod Y.
 pub const NOTE_MOD_Y: &str = "Filter bandwidth (modulation Y)";
@@ -192,7 +192,7 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     }
 
     /// Sends each note's sample start (`Instrument::note_on_from`) as per-note modulation of the parameter named
-    /// `name` (spec: plugins/open-sampler.md §7). False when the plugin or format cannot (notes play from the top).
+    /// `name` (spec: plugins/lemon-sampler.md §7). False when the plugin or format cannot (notes play from the top).
     fn use_start_param(&mut self, name: &str) -> bool {
         let _ = name;
         false
@@ -200,7 +200,7 @@ pub trait Plugin: Instrument + HostedEffect + Send {
 
     /// Sends each note's own pan and mod X / Y (`Instrument::note_start`) to the instance: the pan as a per-note
     /// expression, the mods as per-note modulation of the parameters named [`NOTE_MOD_X`] / [`NOTE_MOD_Y`] where it has
-    /// them (UI thread). For the built-in Open plugins only (an OpenStudio choice: other plugins have no agreed way to
+    /// them (UI thread). For the built-in Lemon plugins only (an OpenStudio choice: other plugins have no agreed way to
     /// take FL-style note levels). False when the format cannot.
     fn use_note_levels(&mut self) -> bool {
         false

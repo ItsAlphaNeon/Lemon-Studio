@@ -1,8 +1,8 @@
-//! Open Sampler parameters. Every control of the editor is a host-visible parameter, addressed by its id. Most are
+//! Lemon Sampler parameters. Every control of the editor is a host-visible parameter, addressed by its id. Most are
 //! stored as the knob position 0..1 (FL's knobs are positions too) and converted where they are used; the value
 //! texts follow FL's hint bar.
 //!
-// spec: plugins/open-sampler.md (§Controls: ids, ranges, defaults, value texts)
+// spec: plugins/lemon-sampler.md (§Controls: ids, ranges, defaults, value texts)
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
@@ -13,7 +13,7 @@ use os_model::SampleFx;
 
 pub type Fmt = Arc<dyn Fn(f32) -> String + Send + Sync>;
 
-/// Editor edits the host has not handed back yet (spec: plugins/open-sampler.md §4 "Edits apply at once").
+/// Editor edits the host has not handed back yet (spec: plugins/lemon-sampler.md §4 "Edits apply at once").
 ///
 /// The editor tells the host about every edit; nih-plug then changes the parameter only when the host passes the edit
 /// back (VST3 while processing) or flushes (CLAP), and some hosts do neither. So the sound reads parameters through
@@ -590,7 +590,7 @@ impl SamplerParams {
 /// A precomputed setting's knob position and the value a project file stores for it (spec:
 /// audio/precomputed-effects.md "Settings"): stored = base + Round(knob * span), limited to 0..=max; a stored value
 /// puts the knob at (stored - base) / span, limited to the knob's range lo..1. **(Lemon Studio)** The spans are the
-/// knobs' ranges from the sample page's measured laws (plugins/open-sampler.md §5.4, §5.5) brought to the stored units.
+/// knobs' ranges from the sample page's measured laws (plugins/lemon-sampler.md §5.4, §5.5) brought to the stored units.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Unit {
     pub base: f64,

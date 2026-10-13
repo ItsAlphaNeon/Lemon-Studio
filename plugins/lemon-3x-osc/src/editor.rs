@@ -3,7 +3,7 @@
 //! reset gestures, shape buttons and switches, the parameter menus. Edits show and sound at once
 //! (`os_plugkit::vals`).
 //!
-// spec: plugins/open-3x-osc.md (§4 hints, §5 interaction), plugins/host-link.md
+// spec: plugins/lemon-3x-osc.md (§4 hints, §5 interaction), plugins/host-link.md
 
 use std::any::Any;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
@@ -476,7 +476,7 @@ mod win32 {
         let px = |v: u32| (v as f32 * scale).round() as u32;
         let full = (px(view::W), px(view::H));
         unsafe {
-            let class = pw::register("Open3xOscView", Some(wndproc));
+            let class = pw::register("Lemon3xOscView", Some(wndproc));
             let win = Box::new(Win {
                 hwnd: std::ptr::null_mut(),
                 canvas: Canvas::new(full.0, full.1, scale).expect("canvas"),
@@ -495,7 +495,7 @@ mod win32 {
                 tracking: false,
                 slot: slot.clone(),
             });
-            let title = pw::wide("Open 3x Osc");
+            let title = pw::wide("Lemon 3x Osc");
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),

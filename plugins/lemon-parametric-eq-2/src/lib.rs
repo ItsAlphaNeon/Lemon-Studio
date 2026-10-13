@@ -1,6 +1,6 @@
-//! Open Parametric EQ 2: Lemon Studio's 7-band parametric EQ as a VST3 / CLAP plugin (nih-plug).
+//! Lemon Parametric EQ 2: Lemon Studio's 7-band parametric EQ as a VST3 / CLAP plugin (nih-plug).
 //!
-// spec: plugins/open-parametric-eq-2.md, plugins/parametric-eq-2.md, plugins/plugin-formats.md
+// spec: plugins/lemon-parametric-eq-2.md, plugins/parametric-eq-2.md, plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod analyzer;
@@ -85,7 +85,7 @@ impl BandDsp {
     }
 }
 
-pub struct OpenEq {
+pub struct LemonEq {
     params: Arc<EqParams>,
     shared: Arc<Shared>,
     sr: f64,
@@ -100,9 +100,9 @@ pub struct OpenEq {
     feed: Vec<f32>,
 }
 
-impl Default for OpenEq {
+impl Default for LemonEq {
     fn default() -> Self {
-        OpenEq {
+        LemonEq {
             params: Arc::new(EqParams::default()),
             shared: Arc::new(Shared::default()),
             sr: 44100.0,
@@ -122,7 +122,7 @@ fn glide(cur: f64, to: f64, a: f64) -> f64 {
     if (to - v).abs() < 1e-5 { to } else { v }
 }
 
-impl OpenEq {
+impl LemonEq {
     /// Options from the state image (never blocks: keeps the last values while the editor writes).
     fn read_extra(&mut self) {
         let v = self.params.extra_version.load(Ordering::Acquire);
@@ -176,8 +176,8 @@ impl OpenEq {
     }
 }
 
-impl Plugin for OpenEq {
-    const NAME: &'static str = "Open Parametric EQ 2";
+impl Plugin for LemonEq {
+    const NAME: &'static str = "Lemon Parametric EQ 2";
     const VENDOR: &'static str = "Lemon Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
@@ -262,7 +262,9 @@ impl Plugin for OpenEq {
     }
 }
 
-impl ClapPlugin for OpenEq {
+// CLAP id and VST3 class id keep the spelling of the plugin's earlier "Open" name: hosts find saved sessions'
+// plugins by them (spec: plugins/plugin-formats.md, identity).
+impl ClapPlugin for LemonEq {
     const CLAP_ID: &'static str = "org.openstudio.open-parametric-eq-2";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's 7-band parametric EQ");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
@@ -270,15 +272,15 @@ impl ClapPlugin for OpenEq {
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Equalizer, ClapFeature::Stereo];
 }
 
-impl Vst3Plugin for OpenEq {
+impl Vst3Plugin for LemonEq {
     const VST3_CLASS_ID: [u8; 16] = *b"OpenStudioParEQ2";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Fx, Vst3SubCategory::Eq];
 }
 
 // Built as a plugin module: the C entry points hosts look for. Linked into Lemon Studio (`linked` feature): only the
-// symbol-free table, so several Open plugins fit in one program (spec: plugins/plugin-formats.md).
+// symbol-free table, so several Lemon plugins fit in one program (spec: plugins/plugin-formats.md).
 #[cfg(not(feature = "linked"))]
-nih_export_clap!(OpenEq);
+nih_export_clap!(LemonEq);
 #[cfg(not(feature = "linked"))]
-nih_export_vst3!(OpenEq);
-os_plugkit::linked_clap_entry!(OpenEq);
+nih_export_vst3!(LemonEq);
+os_plugkit::linked_clap_entry!(LemonEq);

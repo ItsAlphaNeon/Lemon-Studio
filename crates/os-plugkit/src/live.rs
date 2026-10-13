@@ -1,4 +1,4 @@
-//! Editor edits the host has not handed back yet (spec: plugins/open-sampler.md §4 "Edits apply at once").
+//! Editor edits the host has not handed back yet (spec: plugins/lemon-sampler.md §4 "Edits apply at once").
 //!
 //! The editor tells the host about every edit; nih-plug then changes the parameter only when the host passes the edit
 //! back (VST3 while processing) or flushes (CLAP), and some hosts do neither. So the sound reads parameters through

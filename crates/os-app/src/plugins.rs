@@ -2,8 +2,8 @@
 //! `plugin_db` / `plugin_scan`), one instance per plugin channel or mixer slot, their windows, and the instrument /
 //! effect lists the transport plays.
 //!
-// spec: plugins/plugin-formats.md (hosting, Open Sampler state), ui/plugin-manager.md §4 (scan results, loading for
-// use), ui/plugin-window.md, plugins/host-link.md (Open plugins join the window strip)
+// spec: plugins/plugin-formats.md (hosting, Lemon Sampler state), ui/plugin-manager.md §4 (scan results, loading for
+// use), ui/plugin-window.md, plugins/host-link.md (Lemon plugins join the window strip)
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ pub struct Hosted {
     pub name: String,
     #[cfg(plugin_windows)]
     pub window: Option<FrameWindow>,
-    /// Set while the open editor belongs to an Open plugin that joined the strip (host link).
+    /// Set while the open editor belongs to a Lemon plugin that joined the strip (host link).
     #[cfg(plugin_windows)]
     pub link: Option<os_hostlink::Link>,
     /// The app was told that the instance stopped after a crash.
@@ -103,7 +103,7 @@ impl Hosted {
         self.stop_told
     }
 
-    /// The open editor is an Open plugin's that joined the strip through the host link.
+    /// The open editor is a Lemon plugin's that joined the strip through the host link.
     #[cfg(plugin_windows)]
     fn linked(&self) -> bool {
         self.link.is_some()
@@ -118,9 +118,9 @@ pub enum Request {
     Volume(usize, f64),
     Pan(usize, f64),
     PitchCents(usize, i32),
-    /// A preview note from an Open plugin's own keyboard (host link): row, key, velocity, on.
+    /// A preview note from a Lemon plugin's own keyboard (host link): row, key, velocity, on.
     Note(usize, u8, u8, bool),
-    /// "Create automation clip" from an Open plugin's own parameter menu (host link): row, parameter index.
+    /// "Create automation clip" from a Lemon plugin's own parameter menu (host link): row, parameter index.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     Automate(usize, usize),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
@@ -179,21 +179,21 @@ pub struct Plugins {
     native_checks: Option<os_native::check::Checks>,
 }
 
-/// Open Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
-/// finding a `.clap` file (spec: plugins/open-sampler.md §7); Open 3x Osc likewise (spec: plugins/open-3x-osc.md §6).
+/// Lemon Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
+/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon 3x Osc likewise (spec: plugins/lemon-3x-osc.md §6).
 pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
-    let mut v = linked(&LIB, &open_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, OPEN_SAMPLER);
-    v.extend(linked(&OSC3, &open_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::OPEN_3X_OSC));
+    let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
+    v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_3X_OSC));
     v
 }
 
-/// Open Parametric EQ 2, compiled in the same way: offered for every mixer slot, and it plays the slots a project
-/// saved with the original EQ (spec: plugins/open-parametric-eq-2.md §8).
+/// Lemon Parametric EQ 2, compiled in the same way: offered for every mixer slot, and it plays the slots a project
+/// saved with the original EQ (spec: plugins/lemon-parametric-eq-2.md §8).
 pub fn builtin_effects() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
-    linked(&LIB, &open_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, OPEN_EQ)
+    linked(&LIB, &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_EQ)
 }
 
 /// The plugins of a CLAP entry table linked into this program.
@@ -381,9 +381,9 @@ impl Plugins {
         if !p.activate(self.rate) {
             return Err(format!("{} could not start", a.desc.name));
         }
-        // Trimmed audio clips start their note further into the sample (spec: plugins/open-sampler.md §7).
+        // Trimmed audio clips start their note further into the sample (spec: plugins/lemon-sampler.md §7).
         p.use_start_param(SAMPLE_START);
-        // A note's own pan and mod X / Y reach the built-in Open instruments only (spec: audio/voice-levels.md).
+        // A note's own pan and mod X / Y reach the built-in Lemon instruments only (spec: audio/voice-levels.md).
         if crate::project_plugins::is_builtin(&a.desc) {
             p.use_note_levels();
         }
@@ -516,20 +516,20 @@ impl Plugins {
         p.set_param(info.id, n.clamp(0.0, 1.0))
     }
 
-    /// The project-file state of the Open Parametric EQ 2 in mixer slot `key` (its plugin state converted back),
+    /// The project-file state of the Lemon Parametric EQ 2 in mixer slot `key` (its plugin state converted back),
     /// `None` when the slot hosts something else.
     pub fn eq_file_state(&self, key: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&key)?;
         let p = h.plugin.lock().ok()?;
-        if p.desc().name != OPEN_EQ {
+        if p.desc().name != LEMON_EQ {
             return None;
         }
-        open_parametric_eq_2::params::fl_from_plugin_state(&p.save_state()?)
+        lemon_parametric_eq_2::params::fl_from_plugin_state(&p.save_state()?)
     }
 
-    /// Loads sample `path` into row `row`'s Open Sampler: its current state with a new `sample-path`, so every other
+    /// Loads sample `path` into row `row`'s Lemon Sampler: its current state with a new `sample-path`, so every other
     /// setting stays. False when the row hosts nothing or the plugin refused the state.
-    /// Row `row`'s Open Sampler takes the stretch settings `sound` holds (§9b), keeping its other settings.
+    /// Row `row`'s Lemon Sampler takes the stretch settings `sound` holds (§9b), keeping its other settings.
     pub fn set_sampler_stretch(&mut self, row: usize, sound: &os_model::ChannelSound) -> bool {
         let Some(h) = self.hosted.get(&row) else { return false };
         let Ok(mut p) = h.plugin.lock() else { return false };
@@ -563,7 +563,7 @@ impl Plugins {
     }
 
     /// Drops file `path` on row `row`'s plugin window at screen point (x, y), as Explorer would: the window under the
-    /// point that accepts files gets `WM_DROPFILES`. Open Sampler rows without one (the strip, the frame) load the sample
+    /// point that accepts files gets `WM_DROPFILES`. Lemon Sampler rows without one (the strip, the frame) load the sample
     /// through their state. Returns whether the plugin got the file.
     #[cfg(windows)]
     pub fn drop_file(&mut self, row: usize, x: i32, y: i32, path: &str, sampler: bool) -> bool {
@@ -583,7 +583,7 @@ impl Plugins {
         self.presets.clear();
     }
 
-    /// The sample file an Open Sampler instance holds (its persisted `sample-path`), `Some("")` when it has none.
+    /// The sample file a Lemon Sampler instance holds (its persisted `sample-path`), `Some("")` when it has none.
     pub fn sampler_path(&self, row: usize) -> Option<String> {
         let h = self.hosted.get(&row)?;
         let blob = h.plugin.lock().ok()?.save_state()?;
@@ -592,7 +592,7 @@ impl Plugins {
 
     /// The instances for the transport.
     /// Switches every hosted instance to offline rendering (an export) or back to live playback: plugins that know
-    /// the difference use their best quality offline (Open Sampler: the resampler's exact weights).
+    /// the difference use their best quality offline (Lemon Sampler: the resampler's exact weights).
     pub fn set_offline(&mut self, offline: bool) {
         for h in self.hosted.values() {
             if let Ok(mut p) = h.plugin.lock() {
@@ -873,7 +873,7 @@ fn stopped_message(name: &str, code: u32, effect: bool) -> String {
     format!("{}: {now}. Save your project and restart Lemon Studio to use it again", os_host::guard::stopped_text(name, code))
 }
 
-/// Sizes window `w` to its freshly opened editor (`size` in device px at `scale`). An Open plugin answers the host
+/// Sizes window `w` to its freshly opened editor (`size` in device px at `scale`). A Lemon plugin answers the host
 /// link's hello: its page tabs go into the strip row and its editor shrinks to what is below them.
 #[cfg(plugin_windows)]
 fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_hostlink::Link> {
@@ -933,36 +933,40 @@ pub fn retired_count() -> usize {
     RETIRED.with(|r| r.borrow().len())
 }
 
-/// Name of Lemon Studio's sampler plugin: it plays and edits every sampler channel (spec: plugins/open-sampler.md §7).
-pub const OPEN_SAMPLER: &str = "Open Sampler";
+/// Name of Lemon Studio's sampler plugin: it plays and edits every sampler channel (spec: plugins/lemon-sampler.md §7).
+pub const LEMON_SAMPLER: &str = "Lemon Sampler";
 /// Name of Lemon Studio's parametric EQ plugin.
-pub const OPEN_EQ: &str = "Open Parametric EQ 2";
+pub const LEMON_EQ: &str = "Lemon Parametric EQ 2";
 /// The plugin name a project file stores for the parametric EQ (file-format identifier, kept for interop): slots
-/// with it are played by Open Parametric EQ 2 (spec: plugins/open-parametric-eq-2.md §8).
+/// with it are played by Lemon Parametric EQ 2 (spec: plugins/lemon-parametric-eq-2.md §8).
 pub const EQ_FILE_NAME: &str = "Fruity Parametric EQ 2";
+/// The built-in plugins' names before the line was renamed "Lemon" (2026-10-13), with their names now: plugin files and
+/// preset folders made earlier still carry them (spec: plugins/plugin-formats.md, identity).
+pub const OLD_NAMES: [(&str, &str); 3] =
+    [("Open Sampler", LEMON_SAMPLER), ("Open Parametric EQ 2", LEMON_EQ), ("Open 3x Osc", crate::osc3::LEMON_3X_OSC)];
 
 /// What the mixer shows for a slot's stored plugin name.
 pub fn slot_label(name: &str) -> &str {
-    if name == EQ_FILE_NAME { OPEN_EQ } else { name }
+    if name == EQ_FILE_NAME { LEMON_EQ } else { name }
 }
 
-/// A new slot for effect `name`: what the project stores (Open Parametric EQ 2 as the file's EQ with its default
+/// A new slot for effect `name`: what the project stores (Lemon Parametric EQ 2 as the file's EQ with its default
 /// state, so the file opens elsewhere; other effects by name).
 pub fn new_slot(name: &str) -> os_model::SlotPlugin {
-    if name == OPEN_EQ {
-        os_model::SlotPlugin { name: EQ_FILE_NAME.into(), state: open_parametric_eq_2::params::default_state() }
+    if name == LEMON_EQ {
+        os_model::SlotPlugin { name: EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() }
     } else {
         os_model::SlotPlugin { name: name.into(), state: Vec::new() }
     }
 }
 /// File (in the user folder) remembering which native plugins passed the child-process check.
 const NATIVE_CHECKS: &str = "native-checks.txt";
-/// The sampler parameter a note's sample start modulates per note (Open Sampler's START OFFSET).
+/// The sampler parameter a note's sample start modulates per note (Lemon Sampler's START OFFSET).
 const SAMPLE_START: &str = "Sample start offset";
 
-/// Open Sampler's starting state for a sampler channel of the project: its sample, its five envelope records, its
+/// Lemon Sampler's starting state for a sampler channel of the project: its sample, its five envelope records, its
 /// stretch settings, the sample's start, length, loop options and precomputed effects, and the channel filter and
-/// declick mode (nih-plug JSON state with the u64 length prefix of its CLAP state; spec: plugins/open-sampler.md §6,
+/// declick mode (nih-plug JSON state with the u64 length prefix of its CLAP state; spec: plugins/lemon-sampler.md §6,
 /// §7).
 pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
     let mut params = Vec::new();
@@ -986,7 +990,7 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
             params.push(format!("\"{pre}_{id}\":{v}"));
         }
     }
-    // Stretch settings (spec: audio/time-stretch.md "Fields"; Open Sampler stretches for the channel).
+    // Stretch settings (spec: audio/time-stretch.md "Fields"; Lemon Sampler stretches for the channel).
     if ch.sound.stretch != [0; 4] {
         for (id, v) in stretch_params(&ch.sound) {
             params.push(format!("\"{id}\":{v}"));
@@ -998,10 +1002,10 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
     // Factory placeholders (`%FLStudioFactoryData%`...) become real paths: the plugin opens files directly.
     let path = resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
     let path = path.as_str();
-    // The persisted fields are JSON strings holding JSON. The file's own precomputed values travel whole: Open Sampler
+    // The persisted fields are JSON strings holding JSON. The file's own precomputed values travel whole: Lemon Sampler
     // plays them while its knobs stand where they put them (values beyond a knob's range, start and length doubles).
     let inner = json_string(path);
-    let settings = json_string(&open_sampler::params::fx_text(&ch.sound.fx));
+    let settings = json_string(&lemon_sampler::params::fx_text(&ch.sound.fx));
     let state = format!(
         "{{\"version\":\"0.0.1\",\"params\":{{{}}},\"fields\":{{\"sample-path\":{},\"file-settings\":{}}}}}",
         params.join(","),
@@ -1037,16 +1041,16 @@ fn json_string(s: &str) -> String {
     o
 }
 
-/// `blob` (an Open Sampler state) with its `sample-path` field replaced by `path`.
-/// Open Sampler's MUL knob position of a stretch multiplier (25 %..400 %, doubling every quarter).
+/// `blob` (a Lemon Sampler state) with its `sample-path` field replaced by `path`.
+/// Lemon Sampler's MUL knob position of a stretch multiplier (25 %..400 %, doubling every quarter).
 fn stretch_mul_norm(m: f64) -> f32 {
     ((m.log2() + 2.0) / 4.0).clamp(0.0, 1.0) as f32
 }
 
-/// Open Sampler's time-stretch parameters for a channel's stretch settings: method, MUL, PITCH and TIME (spec:
-/// audio/time-stretch.md "Fields", plugins/open-sampler.md §5.6).
+/// Lemon Sampler's time-stretch parameters for a channel's stretch settings: method, MUL, PITCH and TIME (spec:
+/// audio/time-stretch.md "Fields", plugins/lemon-sampler.md §5.6).
 fn stretch_params(sound: &os_model::ChannelSound) -> [(&'static str, serde_json::Value); 4] {
-    use open_sampler::params as sp;
+    use lemon_sampler::params as sp;
     let steps = sound.stretch_time().map_or(0.0, |beats| beats * 4.0);
     [
         ("ts_mode", serde_json::json!({ "i32": sp::stretch_index(sound.stretch_mode()) })),
@@ -1056,12 +1060,12 @@ fn stretch_params(sound: &os_model::ChannelSound) -> [(&'static str, serde_json:
     ]
 }
 
-/// Open Sampler's parameters for a channel's sample settings: start and length, the precomputed effects and the loop
+/// Lemon Sampler's parameters for a channel's sample settings: start and length, the precomputed effects and the loop
 /// options (spec: audio/precomputed-effects.md "Settings"), the channel filter (audio/channel-filter.md: knob
 /// positions = stored / 256) and the declick mode (audio/declick.md). "Use loop points" only when the file has the
 /// sampler flags (value 8).
 fn sample_params(sound: &os_model::ChannelSound) -> Vec<(&'static str, serde_json::Value)> {
-    use open_sampler::params::{unit, Unit};
+    use lemon_sampler::params::{unit, Unit};
     use os_model::SampleFx;
     use serde_json::json;
     let fx = &sound.fx;
@@ -1098,7 +1102,7 @@ fn sample_params(sound: &os_model::ChannelSound) -> Vec<(&'static str, serde_jso
         ("f_cut", f(sound.cutoff.clamp(0, 256) as f32 / 256.0)),
         ("f_res", f(sound.resonance.clamp(0, 256) as f32 / 256.0)),
         ("f_type", json!({ "i32": sound.filter_type.clamp(0, 7) })),
-        // Open Sampler's list holds modes 0 to 5: mode 6 (valid only as stored data) plays as mode 0 (Lemon Studio).
+        // Lemon Sampler's list holds modes 0 to 5: mode 6 (valid only as stored data) plays as mode 0 (Lemon Studio).
         ("declick", json!({ "i32": if sound.declick <= 5 { i32::from(sound.declick) } else { 0 } })),
     ];
     if let Some(flags) = sound.sampler_flags {
@@ -1107,10 +1111,10 @@ fn sample_params(sound: &os_model::ChannelSound) -> Vec<(&'static str, serde_jso
     out
 }
 
-/// Writes an edit of one of Open Sampler's time-stretch parameters (`name`, at normalized value `norm`) into a
+/// Writes an edit of one of Lemon Sampler's time-stretch parameters (`name`, at normalized value `norm`) into a
 /// channel's stretch settings (event 215 ints 24..27, the inverse of `stretch_params`). False for other parameters.
 pub fn stretch_param(name: &str, norm: f64, stretch: &mut [u32; 4]) -> bool {
-    use open_sampler::params as sp;
+    use lemon_sampler::params as sp;
     let v = norm.clamp(0.0, 1.0) as f32;
     match name {
         "Time stretch (time)" => {
@@ -1129,7 +1133,7 @@ pub fn stretch_param(name: &str, norm: f64, stretch: &mut [u32; 4]) -> bool {
     true
 }
 
-/// `blob` (an Open Sampler state) with parameters set to the given JSON values.
+/// `blob` (a Lemon Sampler state) with parameters set to the given JSON values.
 fn with_params(blob: &[u8], set: &[(&str, serde_json::Value)]) -> Option<Vec<u8>> {
     let prefixed = blob.len() > 8 && blob[0] != b'{';
     let json = if prefixed { &blob[8..] } else { blob };
@@ -1204,7 +1208,7 @@ fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
     }
 }
 
-/// The `sample-path` field of an Open Sampler state blob.
+/// The `sample-path` field of a Lemon Sampler state blob.
 fn sample_path_of(blob: &[u8]) -> Option<String> {
     let json = blob.get(8..).filter(|_| blob.len() > 8 && blob[0] != b'{').unwrap_or(blob);
     let v: serde_json::Value = serde_json::from_slice(json).ok()?;
@@ -1217,8 +1221,8 @@ pub type ChannelInfoT = ChannelInfo;
 #[cfg(not(plugin_windows))]
 pub type ChannelInfoT = ();
 
-/// Opens the bundled Open Sampler in a real plugin window, clicks through the strip and captures the window
-/// (`OS_SHOT_DIR=<dir> OS_CLAP=<Open Sampler.clap> cargo test -p os-app plugin_window_shots -- --ignored`).
+/// Opens the bundled Lemon Sampler in a real plugin window, clicks through the strip and captures the window
+/// (`OS_SHOT_DIR=<dir> OS_CLAP=<Lemon Sampler.clap> cargo test -p os-app plugin_window_shots -- --ignored`).
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
@@ -1296,9 +1300,9 @@ mod tests {
             (r.right - r.left, r.bottom - r.top)
         };
         let mut pl = Plugins { available: builtin(), scale: 1.5, rate: 48000, ..Plugins::default() };
-        let index = pl.index_of(OPEN_SAMPLER).expect("built-in Open Sampler");
+        let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: OPEN_SAMPLER.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: LEMON_SAMPLER.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 200);
         let w = pl.hosted[&0].window.as_ref().unwrap();
@@ -1330,11 +1334,11 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let hwnd = pl.hosted[&0].window.as_ref().unwrap().hwnd();
-        assert!(pl.hosted[&0].link.is_some(), "Open Sampler should join the strip");
+        assert!(pl.hosted[&0].link.is_some(), "Lemon Sampler should join the strip");
         capture(hwnd, &dir.join("win_sample.bmp"));
         click(hwnd, 68, 47); // second page tab
         pump(&mut pl, 300);
@@ -1347,7 +1351,7 @@ mod tests {
         capture(hwnd, &dir.join("win_nostrip.bmp"));
     }
 
-    /// The built-in Open Parametric EQ 2 in a mixer slot window: the frame without a strip, the editor inside it, and a
+    /// The built-in Lemon Parametric EQ 2 in a mixer slot window: the frame without a strip, the editor inside it, and a
     /// click on a band's switch reaching the plugin state.
     /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio eq_window_shots -- --ignored`
     #[test]
@@ -1356,10 +1360,10 @@ mod tests {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
         let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        let index = pl.effect_index(OPEN_EQ).expect("built-in EQ");
+        let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
         pl.create_effect(1, 0, index, None).unwrap();
         let key = fx_key(1, 0);
-        let info = ChannelInfo { name: OPEN_EQ.into(), target: "Insert 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: LEMON_EQ.into(), target: "Insert 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(key, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
@@ -1368,33 +1372,33 @@ mod tests {
         assert!(editor != 0, "the editor is a child of the frame");
         let mask = |pl: &Plugins| pl.eq_file_state(key).map(|b| b[318]);
         assert_eq!(mask(&pl), Some(0x7f));
-        // Band 3's switch (editor coordinates, spec: plugins/open-parametric-eq-2.md §3): mutes band 3.
+        // Band 3's switch (editor coordinates, spec: plugins/lemon-parametric-eq-2.md §3): mutes band 3.
         click(editor, 549 + 21 * 2 + 6, 296);
         pump(&mut pl, 200);
         capture(frame, &dir.join("eq_window_muted.bmp"));
         assert_eq!(mask(&pl), Some(0x7f & !4));
     }
 
-    /// Open 3x Osc in its window: a wheel turn on a knob changes the plugin's value AND the picture (spec:
-    /// plugins/open-3x-osc.md §5). `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio osc3_window_redraws -- --ignored`
+    /// Lemon 3x Osc in its window: a wheel turn on a knob changes the plugin's value AND the picture (spec:
+    /// plugins/lemon-3x-osc.md §5). `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio osc3_window_redraws -- --ignored`
     #[test]
     #[ignore]
     fn osc3_window_redraws() {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        let index = pl.index_of(crate::osc3::OPEN_3X_OSC).expect("built-in Open 3x Osc");
+        let index = pl.index_of(crate::osc3::LEMON_3X_OSC).expect("built-in Lemon 3x Osc");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: crate::osc3::OPEN_3X_OSC.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: crate::osc3::LEMON_3X_OSC.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
         assert!(editor != 0, "the editor is a child of the frame");
         // Where osc 2's coarse knob is drawn (painted-frame coordinates -> editor client, hosted crop).
-        let mut c = os_ui::Canvas::new(open_3x_osc::view::W, open_3x_osc::view::H, 1.0).unwrap();
+        let mut c = os_ui::Canvas::new(lemon_3x_osc::view::W, lemon_3x_osc::view::H, 1.0).unwrap();
         struct Mid;
-        impl open_3x_osc::view::Model for Mid {
+        impl lemon_3x_osc::view::Model for Mid {
             fn norm(&self, _: &str) -> f32 {
                 0.5
             }
@@ -1405,10 +1409,10 @@ mod tests {
                 String::new()
             }
         }
-        let hits = open_3x_osc::view::paint(&mut c, &os_theme::Palette::default(), &Mid, &Default::default(), "", true);
-        let t = open_3x_osc::view::Target::Knob("o2_coarse".into());
+        let hits = lemon_3x_osc::view::paint(&mut c, &os_theme::Palette::default(), &Mid, &Default::default(), "", true);
+        let t = lemon_3x_osc::view::Target::Knob("o2_coarse".into());
         let r = hits.iter().rev().find(|h| h.t == t).expect("coarse knob").r;
-        let (cx, cy) = ((r.cx() - open_3x_osc::view::CROP_X as f32) as i32, (r.cy() - open_3x_osc::view::HOSTED_CROP_Y as f32) as i32);
+        let (cx, cy) = ((r.cx() - lemon_3x_osc::view::CROP_X as f32) as i32, (r.cy() - lemon_3x_osc::view::HOSTED_CROP_Y as f32) as i32);
         let mut er: RECT = unsafe { std::mem::zeroed() };
         unsafe { GetWindowRect(editor as HWND, &mut er) };
         let state = |pl: &Plugins| pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap();
@@ -1433,12 +1437,12 @@ mod tests {
     fn plugin_editor_stress() {
         let Some(clap) = std::env::var_os("OS_CLAP") else { return };
         // Right clicks and list buttons open modal menus; the plugin skips them under this switch.
-        unsafe { std::env::set_var("OPENSAMPLER_NO_MODAL", "1") };
+        unsafe { std::env::set_var("LEMONSAMPLER_NO_MODAL", "1") };
         let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -1529,7 +1533,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -1603,7 +1607,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -1686,7 +1690,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -1702,7 +1706,7 @@ mod tests {
         pump(&mut pl, 300);
         let mut project = crate::app::test_project();
         project.channels.clear();
-        let row = crate::app::add_plugin_channel(&mut project, "Open Sampler");
+        let row = crate::app::add_plugin_channel(&mut project, "Lemon Sampler");
         assert_eq!(row, 0);
         let transport = crate::transport::Transport::new(None);
         transport.update(&project);
@@ -1766,7 +1770,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -1799,7 +1803,7 @@ mod tests {
         p.canonicalize().unwrap().to_string_lossy().trim_start_matches(r"\\?\").to_string()
     }
 
-    /// Main swing delays an off-beat step played by a hosted Open Sampler (spec: flp/events/project-info.md "Swing timing").
+    /// Main swing delays an off-beat step played by a hosted Lemon Sampler (spec: flp/events/project-info.md "Swing timing").
     #[test]
     fn swing_reaches_hosted_sampler() {
         let wav = std::env::temp_dir().join(format!("os-swing-click-{}.wav", std::process::id()));
@@ -1807,7 +1811,7 @@ mod tests {
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &click).unwrap();
         let onsets = |swing: u8| -> Vec<usize> {
             let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
-            let index = pl.index_of(OPEN_SAMPLER).unwrap();
+            let index = pl.index_of(LEMON_SAMPLER).unwrap();
             let mut p = crate::app::test_project();
             p.channels.truncate(1);
             p.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note::step(0, 0), os_model::Note::step(0, 24)], ..Default::default() }];
@@ -1849,12 +1853,12 @@ mod tests {
         assert!((shift - 2769).abs() < 20, "{shift}");
     }
 
-    /// Open Sampler is compiled in: no `.clap` file is needed, and a sample loads into a running instance without
+    /// Lemon Sampler is compiled in: no `.clap` file is needed, and a sample loads into a running instance without
     /// touching its other settings.
     #[test]
-    fn builtin_open_sampler_takes_a_sample() {
+    fn builtin_lemon_sampler_takes_a_sample() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        let index = pl.index_of(OPEN_SAMPLER).expect("built-in Open Sampler");
+        let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         let mut ch = crate::app::test_project().channels.remove(0);
         ch.envelopes[1].enabled = true;
         ch.envelopes[1].attack = 65536 / 2;
@@ -1880,20 +1884,20 @@ mod tests {
         assert!(peak > 0.01 && peak < 0.3, "the mp3 plays through the kept envelope (peak {peak})");
     }
 
-    /// Hosted instruments' voices (spec: audio/voices.md §2-§5): Open Sampler counts a voice until its sample ends (the
-    /// plugin reports the end), Open 3x Osc until its release is over; a reset (Stop) ends every voice at once. The
+    /// Hosted instruments' voices (spec: audio/voices.md §2-§5): Lemon Sampler counts a voice until its sample ends (the
+    /// plugin reports the end), Lemon 3x Osc until its release is over; a reset (Stop) ends every voice at once. The
     /// counts reach `Plugins::voices` through the instances' meters, without locking them.
     #[test]
     fn hosted_instrument_voices_follow_the_plugins() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        let sampler = pl.index_of(OPEN_SAMPLER).unwrap();
+        let sampler = pl.index_of(LEMON_SAMPLER).unwrap();
         pl.create_with(0, sampler, None).unwrap();
         // A tenth of a second of sound.
         let wav = std::env::temp_dir().join(format!("os-app-voices-{}.wav", std::process::id()));
         let frames: Vec<f32> = (0..4800).flat_map(|_| [0.25f32; 2]).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frames).unwrap();
         assert!(pl.load_sample(0, &wav.to_string_lossy()));
-        let osc = pl.index_of(crate::osc3::OPEN_3X_OSC).unwrap();
+        let osc = pl.index_of(crate::osc3::LEMON_3X_OSC).unwrap();
         pl.create_with(1, osc, None).unwrap();
         let run = |pl: &Plugins, key: usize, blocks: usize| {
             let inst = pl.hosted[&key].plugin.clone() as SharedInstrument;
@@ -1933,12 +1937,12 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
-    /// A channel's stretch settings reach its Open Sampler (spec: audio/time-stretch.md "Fields"), which plays them:
+    /// A channel's stretch settings reach its Lemon Sampler (spec: audio/time-stretch.md "Fields"), which plays them:
     /// in Stretch, twice as long with the pitch moved by PITCH alone.
     #[test]
-    fn builtin_open_sampler_takes_the_stretch_settings() {
+    fn builtin_lemon_sampler_takes_the_stretch_settings() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        let index = pl.index_of(OPEN_SAMPLER).expect("built-in Open Sampler");
+        let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         let wav = std::env::temp_dir().join(format!("os-app-sampler-stretch-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..48000)
             .flat_map(|i| {
@@ -1983,21 +1987,21 @@ mod tests {
         sound.set_stretch_time(4.0);
         assert!(pl.set_sampler_stretch(0, &sound));
         let p = params(&pl);
-        assert!((open_sampler::params::time_steps(f(&p["ts_time"]) as f32) - 16.0).abs() < 1e-3);
+        assert!((lemon_sampler::params::time_steps(f(&p["ts_time"]) as f32) - 16.0).abs() < 1e-3);
         assert!((f(&p["ts_mul"]) - 0.5).abs() < 1e-6);
         assert_eq!(p["ts_mode"], serde_json::json!({"i32": 1}), "the method kept");
         let _ = std::fs::remove_file(&wav);
     }
 
-    /// A channel's sample settings reach its Open Sampler (spec: audio/precomputed-effects.md "Settings",
+    /// A channel's sample settings reach its Lemon Sampler (spec: audio/precomputed-effects.md "Settings",
     /// audio/channel-filter.md, audio/declick.md): the knobs stand where the file's values put them, the file's own
     /// values travel whole, and the sample is played as they build it.
     #[test]
-    fn builtin_open_sampler_takes_the_sample_settings() {
-        use open_sampler::params::fx_from_text;
+    fn builtin_lemon_sampler_takes_the_sample_settings() {
+        use lemon_sampler::params::fx_from_text;
         use os_model::SampleFx;
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        let index = pl.index_of(OPEN_SAMPLER).expect("built-in Open Sampler");
+        let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         let saved = |pl: &Plugins, row| {
             let st = pl.hosted[&row].plugin.lock().unwrap().save_state().unwrap();
             serde_json::from_slice::<serde_json::Value>(&st[8..]).unwrap()
@@ -2055,12 +2059,12 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
-    /// Open Sampler's time-stretch parameters read back into the channel's stretch settings (`stretch_param`, the
+    /// Lemon Sampler's time-stretch parameters read back into the channel's stretch settings (`stretch_param`, the
     /// inverse of `stretch_params`): what the app does with the editor's edits (spec: ui/playlist.md §9c).
     #[test]
-    fn open_sampler_stretch_parameters_give_the_channel_settings() {
+    fn lemon_sampler_stretch_parameters_give_the_channel_settings() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        let index = pl.index_of(OPEN_SAMPLER).expect("built-in Open Sampler");
+        let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         let mut ch = crate::app::test_project().channels.remove(0);
         let read = |pl: &Plugins| {
             let p = pl.hosted[&0].plugin.lock().unwrap();
@@ -2083,13 +2087,13 @@ mod tests {
         assert_eq!(read(&pl), ch.sound.stretch);
     }
 
-    /// The built-in Open Parametric EQ 2 starts from a project file's EQ state, plays it, and gives the state back
-    /// (spec: plugins/open-parametric-eq-2.md §8).
+    /// The built-in Lemon Parametric EQ 2 starts from a project file's EQ state, plays it, and gives the state back
+    /// (spec: plugins/lemon-parametric-eq-2.md §8).
     #[test]
     fn builtin_parametric_eq_takes_and_gives_the_file_state() {
-        use open_parametric_eq_2::params::{default_state, field, plugin_state_from_fl, set_field};
+        use lemon_parametric_eq_2::params::{default_state, field, plugin_state_from_fl, set_field};
         let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        let index = pl.effect_index(OPEN_EQ).expect("built-in EQ");
+        let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
         // Band 4 (default frequency: the middle of the scale) at +12 dB.
         let mut fl = default_state();
         set_field(&mut fl, 4, 1200);
@@ -2112,16 +2116,16 @@ mod tests {
             }
         }
         assert!((peak - 0.398).abs() < 0.03, "+12 dB at the band (peak {peak})");
-        assert_eq!(slot_label(EQ_FILE_NAME), OPEN_EQ);
-        assert_eq!(new_slot(OPEN_EQ).name, EQ_FILE_NAME);
+        assert_eq!(slot_label(EQ_FILE_NAME), LEMON_EQ);
+        assert_eq!(new_slot(LEMON_EQ).name, EQ_FILE_NAME);
     }
 
-    /// Playlist clips through Open Sampler (spec: plugins/open-sampler.md §7): a note can start partway into the sample
+    /// Playlist clips through Lemon Sampler (spec: plugins/lemon-sampler.md §7): a note can start partway into the sample
     /// (per-note modulation of the start offset) and a choke ends it at once.
     #[test]
-    fn open_sampler_starts_late_and_chokes() {
+    fn lemon_sampler_starts_late_and_chokes() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        let index = pl.index_of(OPEN_SAMPLER).unwrap();
+        let index = pl.index_of(LEMON_SAMPLER).unwrap();
         pl.create_with(0, index, None).unwrap();
         // One second: silent first half, 0.5 in the second.
         let wav = std::env::temp_dir().join("os-app-start-late.wav");
@@ -2152,15 +2156,15 @@ mod tests {
         assert!(after[3..].iter().all(|&p| p < 1e-4), "choked: {after:?}");
     }
 
-    /// A file dropped on an open Open Sampler window (what a browser drag released over it does) reaches its editor
+    /// A file dropped on an open Lemon Sampler window (what a browser drag released over it does) reaches its editor
     /// the way an Explorer drop does: `OS_CLAP` not needed (`cargo test -p os-app drop_on -- --ignored`).
     #[test]
     #[ignore]
     fn drop_on_plugin_window_loads_the_sample() {
         use windows_sys::Win32::Foundation::RECT;
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        pl.create(0, pl.index_of(OPEN_SAMPLER).unwrap()).unwrap();
-        let info = ChannelInfo { name: "Open Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        pl.create(0, pl.index_of(LEMON_SAMPLER).unwrap()).unwrap();
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2195,7 +2199,7 @@ mod tests {
     /// the same plugin in both formats gets format labels in the picker and each label finds its own entry.
     #[test]
     fn vst3_plugins_host_like_clap_ones() {
-        let (Some(clap), Some(vst3)) = (bundled("Open Sampler.clap"), bundled("Open Sampler.vst3")) else { return };
+        let (Some(clap), Some(vst3)) = (bundled("Lemon Sampler.clap"), bundled("Lemon Sampler.vst3")) else { return };
         let available = |p: &std::path::Path, load: fn(&std::path::Path) -> Result<Arc<dyn Library>, String>| {
             let lib = load(p).unwrap();
             Available { desc: lib.plugins()[0].clone(), lib }
@@ -2209,14 +2213,14 @@ mod tests {
             rate: 48000,
             ..Plugins::default()
         };
-        assert_eq!(pl.index_of("Open Sampler"), Some(0), "a name finds the first");
+        assert_eq!(pl.index_of("Lemon Sampler"), Some(0), "a name finds the first");
         pl.create(0, 1).unwrap();
         let d = pl.descriptor(0).unwrap();
         assert_eq!(d.format, os_host::Format::Vst3);
         assert!(d.uid().starts_with("vst3:") && d.uid().len() == 5 + 32);
         let wav = std::env::temp_dir().join("os-app-vst3.wav");
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
-        // A VST3 instance takes a bare component state too (here Open Sampler's JSON with the sample).
+        // A VST3 instance takes a bare component state too (here Lemon Sampler's JSON with the sample).
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
         assert!(pl.set_state(0, json.as_bytes()), "the sample reaches the VST3 instance");
         let state = pl.state(0).unwrap();
@@ -2235,7 +2239,7 @@ mod tests {
     /// flp/events/plugins.md §4).
     #[test]
     fn vst3_plugins_save_and_reopen() {
-        let (Some(smp), Some(eq)) = (bundled("Open Sampler.vst3"), bundled("Open Parametric EQ 2.vst3")) else { return };
+        let (Some(smp), Some(eq)) = (bundled("Lemon Sampler.vst3"), bundled("Lemon Parametric EQ 2.vst3")) else { return };
         let load = |p: &std::path::Path| {
             let lib = os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>).unwrap();
             Available { desc: lib.plugins()[0].clone(), lib }
@@ -2249,12 +2253,12 @@ mod tests {
         a.state.path = None;
         a.plugins.available = vec![load(&smp)];
         a.plugins.effects = vec![load(&eq)];
-        let row = crate::app::add_plugin_channel(&mut a.state.project, "Open Sampler");
+        let row = crate::app::add_plugin_channel(&mut a.state.project, "Lemon Sampler");
         a.plugins.create(row, 0).unwrap();
         a.state.hosted_rows.push(row);
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
         assert!(a.plugins.set_state(row, json.as_bytes()));
-        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { name: "Open Parametric EQ 2".into(), state: Vec::new() });
+        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { name: "Lemon Parametric EQ 2".into(), state: Vec::new() });
         a.plugins.create_effect(3, 2, 0, None).unwrap();
         // An edit of the effect, through the hosting layer, flushed into its processor.
         {
@@ -2274,7 +2278,7 @@ mod tests {
         // The file names each class by its id.
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let r = crate::project_plugins::wrapped_channel(&saved.channels[row]).unwrap();
-        assert_eq!((r.format.as_str(), r.id.as_str(), r.name.as_str()), ("vst3", a.plugins.available[0].desc.id.as_str(), "Open Sampler"));
+        assert_eq!((r.format.as_str(), r.id.as_str(), r.name.as_str()), ("vst3", a.plugins.available[0].desc.id.as_str(), "Lemon Sampler"));
         assert_eq!(r.state, ch_state);
         let s = crate::project_plugins::wrapped_slot(saved.mixer[3].slots[2].as_ref().unwrap()).unwrap();
         assert_eq!((s.format.as_str(), s.id.as_str()), ("vst3", a.plugins.effects[0].desc.id.as_str()));
@@ -2294,7 +2298,7 @@ mod tests {
         assert_eq!(b.plugins.descriptor(row).unwrap().format, os_host::Format::Vst3);
         assert_eq!(b.plugins.state(row).as_deref(), Some(&ch_state[..]));
         assert_eq!(b.plugins.state(fx_key(3, 2)).as_deref(), Some(&fx_state[..]));
-        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Open Parametric EQ 2"));
+        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Lemon Parametric EQ 2"));
     }
 
     /// VST3 editors inside Lemon Studio's plugin frame, moved off every screen and captured with PrintWindow:
@@ -2304,7 +2308,7 @@ mod tests {
     fn vst3_window_shots() {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
-        for (file, effect) in [("Open Sampler.vst3", false), ("Open Parametric EQ 2.vst3", true)] {
+        for (file, effect) in [("Lemon Sampler.vst3", false), ("Lemon Parametric EQ 2.vst3", true)] {
             let Some(path) = bundled(file) else { continue };
             let lib = os_vst3::Module::load(&path).unwrap();
             let a = Available { desc: lib.plugins()[0].clone(), lib };
@@ -2453,7 +2457,7 @@ mod tests {
         eprintln!("STEP {} native plugins listed", app.plugins.available.iter().chain(&app.plugins.effects).filter(|a| a.desc.format == os_host::Format::Native).count());
         app.open(flp);
         eprintln!("STEP opened: {:?}", app.state.message);
-        // The app's order: the built-in Open plugins take their channels and slots first.
+        // The app's order: the built-in Lemon plugins take their channels and slots first.
         app.sync_effects();
         app.sync_osc3();
         for _ in 0..3 {

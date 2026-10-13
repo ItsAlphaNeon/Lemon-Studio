@@ -1,11 +1,11 @@
-//! Open 3x Osc parameters and saved state.
+//! Lemon 3x Osc parameters and saved state.
 //!
 //! The 114 parameters come in the original's order (parameter k = field k + 1 of its saved state = automation index
 //! k), each with the original's stored range, so a project's automation reaches the same control. A copy of the whole
 //! 460-byte saved state is persisted next to them (`state`): fields whose meaning Lemon Studio does not change come back
 //! out byte for byte (spec: plugins/3x-osc.md §1).
 //!
-// spec: plugins/3x-osc.md §1, plugins/open-3x-osc.md §4 (hint texts)
+// spec: plugins/3x-osc.md §1, plugins/lemon-3x-osc.md §4 (hint texts)
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};

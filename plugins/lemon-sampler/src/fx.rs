@@ -3,7 +3,7 @@
 //! in the file's units (`os_model::SampleFx`) and in the order and arithmetic of the spec.
 //!
 // spec: audio/precomputed-effects.md, audio/time-stretch.md ("Where it runs", "Lemon Studio"),
-// spec: plugins/open-sampler.md (§5.4 - §5.6), audio/conventions.md (Round, single)
+// spec: plugins/lemon-sampler.md (§5.4 - §5.6), audio/conventions.md (Round, single)
 
 use std::f64::consts::PI;
 

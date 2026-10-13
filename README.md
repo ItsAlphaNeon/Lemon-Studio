@@ -132,7 +132,7 @@ cargo run -p os-app --release -- path/to/project.flp
 
 ### Plugins
 
-Build Open Sampler, Open 3x Osc and Open Parametric EQ 2 as VST3 and CLAP bundles (written to `target/bundled/`):
+Build Lemon Sampler, Lemon 3x Osc and Lemon Parametric EQ 2 as VST3 and CLAP bundles (written to `target/bundled/`):
 
 ```bash
 cargo run -p bundle-plugins
@@ -140,8 +140,12 @@ cargo run -p bundle-plugins
 
 Pass `--install` to copy the bundles into the per-user plugin folders (`%LOCALAPPDATA%\Programs\Common\{VST3,CLAP}` on
 Windows, `~/.vst3` and `~/.clap` on Linux). On Linux, building the bundles also needs the Wayland development files
-(Debian / Ubuntu: `libwayland-dev`; Arch: `wayland`; Fedora: `wayland-devel`), which Open Sampler's file dialogs link
+(Debian / Ubuntu: `libwayland-dev`; Arch: `wayland`; Fedora: `wayland-devel`), which Lemon Sampler's file dialogs link
 against.
+
+The plugins were called Open Sampler, Open 3x Osc and Open Parametric EQ 2 before. They keep their plugin IDs, so
+sessions saved with the old names still open with the new bundles; delete any old `Open *.vst3` / `Open *.clap`
+bundles you installed, or hosts will list each plugin twice.
 
 ### Linux
 
@@ -158,7 +162,7 @@ Windows (or detach, from their window menu). A few things differ from Windows fo
   Apply scaling themselves).
 - **Keys** pressed while a plugin's editor has the keyboard focus do not play the typing keyboard yet, and a sample
   dragged from Lemon Studio's browser onto a plugin window does not reach the plugin yet.
-- **Open Sampler** cannot copy or paste audio through the clipboard yet.
+- **Lemon Sampler** cannot copy or paste audio through the clipboard yet.
 - **Settings, themes and presets** live in `$XDG_CONFIG_HOME/Lemon Studio` (usually `~/.config/Lemon Studio`);
   on Windows in `%APPDATA%\Lemon Studio`. `OPENSTUDIO_USER_DIR` overrides the folder.
 - Plugins are found in `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap` and `CLAP_PATH`, and in `~/.vst3`,
@@ -210,9 +214,9 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-hostlink`](crates/os-hostlink) | Host link protocol between Lemon Studio and its own plugins |
 | [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of Lemon Studio's own plugins |
 | [`os-paths`](crates/os-paths) | Where Lemon Studio keeps its settings, themes and presets on each platform |
-| [`open-sampler`](plugins/open-sampler) | Open Sampler instrument (VST3 + CLAP) |
-| [`open-3x-osc`](plugins/open-3x-osc) | Open 3x Osc instrument (VST3 + CLAP) |
-| [`open-parametric-eq-2`](plugins/open-parametric-eq-2) | Open Parametric EQ 2 effect (VST3 + CLAP) |
+| [`lemon-sampler`](plugins/lemon-sampler) | Lemon Sampler instrument (VST3 + CLAP) |
+| [`lemon-3x-osc`](plugins/lemon-3x-osc) | Lemon 3x Osc instrument (VST3 + CLAP) |
+| [`lemon-parametric-eq-2`](plugins/lemon-parametric-eq-2) | Lemon Parametric EQ 2 effect (VST3 + CLAP) |
 
 ## Roadmap
 

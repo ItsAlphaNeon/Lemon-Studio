@@ -1,6 +1,6 @@
 [package]
-name = "open-3x-osc"
-description = "Open 3x Osc: Lemon Studio's three-oscillator synthesizer as a VST3 / CLAP plugin"
+name = "lemon-sampler"
+description = "Lemon Sampler: Lemon Studio's sampler instrument as a VST3 / CLAP plugin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,15 +15,20 @@ linked = []
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
 os-engine.workspace = true
+os-dsp.workspace = true
 os-model.workspace = true
 os-hostlink.workspace = true
 os-plugkit = { path = "../../crates/os-plugkit" }
 os-ui = { path = "../../crates/os-ui" }
 os-theme = { path = "../../crates/os-theme" }
-serde_json = "1"
+os-paths.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls_Dialogs", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole"] }
+
+# The open / save sample dialogs (Windows has its own).
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = "0.15"
 
 [dev-dependencies]
 tiny-skia = "0.11"

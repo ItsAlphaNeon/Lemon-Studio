@@ -1,8 +1,8 @@
-//! Open Parametric EQ 2 editor: painting and hit regions (platform independent), built from `os_ui::kit` widgets.
+//! Lemon Parametric EQ 2 editor: painting and hit regions (platform independent), built from `os_ui::kit` widgets.
 //!
 //! Coordinates are the editor content's (700 x 350 logical px) from the spec tables. Greys are palette roles so an
 //! imported theme recolours the plugin like the rest of Lemon Studio; band colours are signal colours.
-// spec: plugins/open-parametric-eq-2.md (§1 window, §2 graph, §3 faders and band column, §4 bottom row)
+// spec: plugins/lemon-parametric-eq-2.md (§1 window, §2 graph, §3 faders and band column, §4 bottom row)
 
 use std::f32::consts::PI;
 
@@ -334,7 +334,7 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
 
     // Wordmark.
     let wm = t.s(0x2f3d47);
-    let x = 9.0 + c.text(Font::light(15, 0), 9.0, 316.0, wm, "OPEN PARAMETRIC");
+    let x = 9.0 + c.text(Font::light(15, 0), 9.0, 316.0, wm, "LEMON PARAMETRIC");
     let x = x + 5.0 + c.text(Font::light(22, 0), x + 5.0, 310.0, wm, "EQ");
     c.text(Font::light(14, 0), x + 2.0, 322.0, wm, "2");
 

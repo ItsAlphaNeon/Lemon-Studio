@@ -1,7 +1,7 @@
-//! Instrument-window controls (channel / plugin windows: Open Sampler and later Open plugins): the FL-style dial with
+//! Instrument-window controls (channel / plugin windows: Lemon Sampler and later Lemon plugins): the FL-style dial with
 //! a 360° value ring, the big brushed filter knob, round radios, outlined panels with a header tab, the A/B switch,
-//! the fine-tune slider and the dark list box. Measured looks: spec `plugins/open-sampler.md` §Look.
-// spec: plugins/open-sampler.md (Look: dial, big dial, radio, panel, A/B switch, slider, list box)
+//! the fine-tune slider and the dark list box. Measured looks: spec `plugins/lemon-sampler.md` §Look.
+// spec: plugins/lemon-sampler.md (Look: dial, big dial, radio, panel, A/B switch, slider, list box)
 
 use std::f32::consts::{PI, TAU};
 
@@ -64,7 +64,7 @@ pub fn big_dial_angle(value: f32) -> f32 {
 
 /// Big filter knob (MOD X / MOD Y): seven dark ticks 45° apart (none at the bottom), a black ring lit from above, a
 /// metal cap bright at the top and dark below its middle, and a coloured pointer dot on the ring (measured, spec
-/// plugins/open-sampler.md §3). Hover brightens the metal.
+/// plugins/lemon-sampler.md §3). Hover brightens the metal.
 pub fn big_dial(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, value: f32, dot: Color, st: State) {
     let hot = st.hover || st.pressed;
     for k in 0..8 {

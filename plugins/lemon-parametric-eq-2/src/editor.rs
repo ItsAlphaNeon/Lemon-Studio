@@ -2,7 +2,7 @@
 //! and the editor logic (platform independent): token / fader / knob drags with the cursor held in place, wheel and reset gestures,
 //! mute / solo, A/B compare, the options and menus. Edits show and sound at once (`os_plugkit::vals`).
 //!
-// spec: plugins/open-parametric-eq-2.md (§5 hints, §6 menus, §7 interaction), plugins/host-link.md
+// spec: plugins/lemon-parametric-eq-2.md (§5 hints, §6 menus, §7 interaction), plugins/host-link.md
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
@@ -640,7 +640,7 @@ impl Logic {
                 m.submenu("Heatmap position", opt_menu(&extra, Opt::HeatmapPosition, &["Top", "Bottom", "Full"], 0), Cmd::None);
                 m.sep(Cmd::None);
                 let mut about = MenuDef::new(MenuStyle::Context);
-                about.add(MenuItem::item("Open Parametric EQ 2").enabled(false), Cmd::None);
+                about.add(MenuItem::item("Lemon Parametric EQ 2").enabled(false), Cmd::None);
                 about.add(MenuItem::item(&format!("Lemon Studio {} - GPLv3", env!("CARGO_PKG_VERSION"))).enabled(false), Cmd::None);
                 about.add(MenuItem::item("Filters after the RBJ Audio EQ Cookbook").enabled(false), Cmd::None);
                 m.submenu("About", about, Cmd::None);
@@ -795,7 +795,7 @@ mod win32 {
         let scale = if scale > 0.0 { scale } else { 1.0 };
         let size = ((view::W as f32 * scale).round() as u32, (view::H as f32 * scale).round() as u32);
         unsafe {
-            let class = pw::register("OpenParametricEq2View", Some(wndproc));
+            let class = pw::register("LemonParametricEq2View", Some(wndproc));
             let win = Box::new(Win {
                 hwnd: std::ptr::null_mut(),
                 canvas: Canvas::new(size.0, size.1, scale).expect("canvas"),
@@ -816,7 +816,7 @@ mod win32 {
                 tracking: false,
                 slot: slot.clone(),
             });
-            let title = pw::wide("Open Parametric EQ 2");
+            let title = pw::wide("Lemon Parametric EQ 2");
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),

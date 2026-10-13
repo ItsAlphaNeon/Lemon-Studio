@@ -1783,7 +1783,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 None => inserts.push((loc.end, Event::new(id::CH_GROUP, Value::U32(ch.rack.group)))),
             }
         }
-        // A sampler's sample (Open Sampler loads one): event 196 replaced, or added right after event 20 where FL
+        // A sampler's sample (Lemon Sampler loads one): event 196 replaced, or added right after event 20 where FL
         // writes it (spec: flp/events/channels.md). Clearing a sample is not written yet (the old path stays).
         if ch.sample_path != old.sample_path {
             if let Some(p) = &ch.sample_path {

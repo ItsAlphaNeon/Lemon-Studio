@@ -1,6 +1,6 @@
 //! Keeps the app ticking and painting while a modal message loop holds up winit's.
 //!
-//! Plugin menus, type-in boxes and file dialogs (Open plugins' and other plugins' alike) run a message loop of their
+//! Plugin menus, type-in boxes and file dialogs (Lemon plugins' and other plugins' alike) run a message loop of their
 //! own on the UI thread until they close. winit's loop waits meanwhile, and `about_to_wait` and its wake-up time with
 //! it, so nothing ticked or painted while such a menu was open: the playhead, meters and clock stood still. Those
 //! loops still dispatch posted messages (a user event among them) and paint messages.

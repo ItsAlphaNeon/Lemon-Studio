@@ -1,5 +1,5 @@
 //! Renders a project file the way FILE > Export as WAV does, from a test, for comparing Lemon Studio's sound with
-//! other renders of the same file: the project opens as in the app (Open Sampler on sampler channels, the built-in
+//! other renders of the same file: the project opens as in the app (Lemon Sampler on sampler channels, the built-in
 //! effects and, when asked, the installed CLAP / VST3 plugins), the hosted plugins run offline at the render rate,
 //! and the song is written as a 32-bit float WAV. It also prints what plays each channel and mixer slot.
 //!

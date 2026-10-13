@@ -3,7 +3,7 @@
 //! and the native parts every editor needs: popups, type-in boxes, painting a canvas into a window ([`win`] on Windows,
 //! `x11` on Linux).
 //!
-// spec: plugins/open-sampler.md §4 (edits apply at once, menus), plugins/open-parametric-eq-2.md, plugins/plugin-formats.md
+// spec: plugins/lemon-sampler.md §4 (edits apply at once, menus), plugins/lemon-parametric-eq-2.md, plugins/plugin-formats.md
 
 pub mod linked;
 pub mod live;
@@ -85,8 +85,8 @@ pub fn debug() -> bool {
     *ON.get_or_init(|| std::env::var_os("OS_DEBUG").is_some())
 }
 
-/// Tests that click at random set `OPENSTUDIO_PLUGIN_NO_MODAL` (or Open Sampler's `OPENSAMPLER_NO_MODAL`): menus and
+/// Tests that click at random set `OPENSTUDIO_PLUGIN_NO_MODAL` (or Lemon Sampler's `LEMONSAMPLER_NO_MODAL`): menus and
 /// type-in boxes then return nothing instead of running a modal loop.
 pub fn no_modal() -> bool {
-    std::env::var_os("OPENSTUDIO_PLUGIN_NO_MODAL").is_some() || std::env::var_os("OPENSAMPLER_NO_MODAL").is_some()
+    std::env::var_os("OPENSTUDIO_PLUGIN_NO_MODAL").is_some() || std::env::var_os("LEMONSAMPLER_NO_MODAL").is_some()
 }

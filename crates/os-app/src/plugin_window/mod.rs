@@ -1,6 +1,6 @@
 //! The window around a hosted plugin's editor: Lemon Studio's title bar (menu arrow, gear, channel name, "(mixer target)",
 //! Presets box, minimize, close) and the gear-toggled strip, one row: the plugin's page tabs (a plain plugin has the plug
-//! tab, an Open plugin joined through the host link brings its own pages), the Misc wrench, then
+//! tab, a Lemon plugin joined through the host link brings its own pages), the Misc wrench, then
 //! ON / PAN / VOL / PITCH / RANGE / TRACK. The plugin parents its editor into a child area below the strip.
 //!
 //! This module is the frame itself, the same everywhere: its state, drawing (os-ui) and what input does to it. The
@@ -10,7 +10,7 @@
 //! - `x11` (Linux): always a top-level window. Plugin editors on Linux embed only in X11 windows, so under Wayland the
 //!   frame is an XWayland window, and an X11 window cannot be a child of the Wayland main window.
 //!
-// spec: ui/plugin-window.md, plugins/host-link.md, plugins/open-sampler.md (strip geometry), ui/knobs.md (drag 1/1024 per px)
+// spec: ui/plugin-window.md, plugins/host-link.md, plugins/lemon-sampler.md (strip geometry), ui/knobs.md (drag 1/1024 per px)
 
 use std::f32::consts::PI;
 
@@ -31,7 +31,7 @@ pub use x11::{
     FrameWindow, LiftInput,
 };
 
-/// A message an Open plugin's editor sent to its frame (host link, plugin -> host).
+/// A message a Lemon plugin's editor sent to its frame (host link, plugin -> host).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkMsg {
     /// Hint or page changed: poll the link now.

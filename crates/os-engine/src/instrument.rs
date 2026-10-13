@@ -14,7 +14,7 @@ pub trait Instrument: Send {
     /// Ends a note `offset` frames into the next `process` call.
     fn note_off(&mut self, offset: u32, key: u8);
     /// Starts a note `start` (0..1) of the way into the instrument's sample (a trimmed audio clip; spec:
-    /// plugins/open-sampler.md §7). Instruments without a sample start position play it from the top.
+    /// plugins/lemon-sampler.md §7). Instruments without a sample start position play it from the top.
     fn note_on_from(&mut self, offset: u32, key: u8, velocity: f32, start: f32) {
         let _ = start;
         self.note_on(offset, key, velocity);

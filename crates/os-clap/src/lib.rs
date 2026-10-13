@@ -940,7 +940,7 @@ impl Plugin {
     }
 
     /// Sends each note's sample start (`Instrument::note_on_from`) as per-note modulation of the parameter named
-    /// `name`, which must be modulatable per note id (UI thread; spec: plugins/open-sampler.md §7). False if the
+    /// `name`, which must be modulatable per note id (UI thread; spec: plugins/lemon-sampler.md §7). False if the
     /// plugin has no such parameter (notes then play from the top).
     pub fn use_start_param(&mut self, name: &str) -> bool {
         self.start_param = None;
@@ -1713,13 +1713,13 @@ mod tests {
     use super::*;
     use os_engine::Instrument;
 
-    /// Loads the bundled Open Sampler (built by `cargo run -p bundle-plugins`) when it is there.
-    fn open_sampler() -> Option<Arc<Library>> {
+    /// Loads the bundled Lemon Sampler (built by `cargo run -p bundle-plugins`) when it is there.
+    fn lemon_sampler() -> Option<Arc<Library>> {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         // This test's own build folder (target*/debug/deps/x.exe -> target*), then the usual ones.
         let own = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.parent()?.parent()?.to_path_buf()));
         for t in own.into_iter().chain(["target-dev", "target"].map(|t| root.join(t))) {
-            let p = t.join("bundled").join("Open Sampler.clap");
+            let p = t.join("bundled").join("Lemon Sampler.clap");
             if p.exists() {
                 return Some(Library::load(&p).expect("load"));
             }
@@ -1727,10 +1727,10 @@ mod tests {
         None
     }
 
-    /// The built-in Open Parametric EQ 2, linked into the test binary.
-    fn open_eq() -> os_host::SharedPlugin {
-        let entry = &open_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
-        let lib = unsafe { Library::from_entry(entry, Path::new("Open Parametric EQ 2.clap")) }.expect("linked EQ");
+    /// The built-in Lemon Parametric EQ 2, linked into the test binary.
+    fn lemon_eq() -> os_host::SharedPlugin {
+        let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ 2.clap")) }.expect("linked EQ");
         os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap()
     }
 
@@ -1740,8 +1740,8 @@ mod tests {
     #[test]
     fn note_levels_go_with_the_note() {
         use os_engine::HostedEffect as _;
-        let entry = &open_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
-        let lib = unsafe { Library::from_entry(entry, Path::new("Open Parametric EQ 2.clap")) }.expect("linked EQ");
+        let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ 2.clap")) }.expect("linked EQ");
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         assert!(os_host::Plugin::activate(&mut p, 48000));
         let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
@@ -1786,7 +1786,7 @@ mod tests {
     /// nothing left to do leaves it alone, so a quiet instance is not locked again and again.
     #[test]
     fn work_for_the_ui_thread_raises_the_attention_count() {
-        let shared = open_eq();
+        let shared = lemon_eq();
         let mut p = shared.lock().unwrap();
         let a = p.attention().expect("a CLAP instance has a count");
         assert!(p.activate(48000));
@@ -1837,7 +1837,7 @@ mod tests {
         let stopped = transport_event(&os_engine::TransportInfo { playing: false, looping: None, ..song });
         assert_eq!(stopped.flags & (CLAP_TRANSPORT_IS_PLAYING | CLAP_TRANSPORT_IS_LOOP_ACTIVE), 0);
         // A plugin processes with it (and without it on the next block).
-        let p = open_eq();
+        let p = lemon_eq();
         let mut p = p.lock().unwrap();
         assert!(p.activate(48000));
         let (mut l, mut r) = (vec![0.1f32; 5000], vec![0.1f32; 5000]);
@@ -1849,7 +1849,7 @@ mod tests {
     // spec: plugins/plugin-parameters.md §1 (list order = automation index), parametric-eq-2.md (parameter order)
     #[test]
     fn parameter_list_follows_the_plugin_order() {
-        let p = open_eq();
+        let p = lemon_eq();
         let p = p.lock().unwrap();
         let infos: Vec<os_host::ParamInfo> = (0..p.param_count()).filter_map(|i| p.param_info(i)).collect();
         assert_eq!(infos.len(), 36);
@@ -1870,7 +1870,7 @@ mod tests {
     // spec: plugins/plugin-parameters.md §2
     #[test]
     fn parameter_automation_reaches_the_plugin() {
-        let shared = open_eq();
+        let shared = lemon_eq();
         let mut p = shared.lock().unwrap();
         assert!(p.activate(48000));
         let ids: Vec<u32> = (0..p.param_count()).filter_map(|i| p.param_info(i)).map(|i| i.id).collect();
@@ -1899,7 +1899,7 @@ mod tests {
     #[test]
     fn automation_clip_moves_a_slot_plugin_parameter() {
         use os_model::{AutoPoint, Automation, Channel, ChannelKind, Clip, ClipSource, Project};
-        let shared = open_eq();
+        let shared = lemon_eq();
         assert!(shared.lock().unwrap().activate(48000));
         let main = shared.lock().unwrap().param_info(35).unwrap().id;
         let auto_ch = Channel {
@@ -1939,7 +1939,7 @@ mod tests {
     /// reaching the plugin's state.
     #[test]
     fn parameters_through_the_hosting_layer() {
-        let Some(lib) = open_sampler() else { return };
+        let Some(lib) = lemon_sampler() else { return };
         let shared = os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap();
         let mut p = shared.lock().unwrap();
         assert!(p.param_count() > 20);
@@ -1958,13 +1958,13 @@ mod tests {
     }
 
     #[test]
-    fn hosts_open_sampler() {
-        let Some(lib) = open_sampler() else {
-            eprintln!("Open Sampler.clap not built; skipped");
+    fn hosts_lemon_sampler() {
+        let Some(lib) = lemon_sampler() else {
+            eprintln!("Lemon Sampler.clap not built; skipped");
             return;
         };
         let d = &lib.plugins[0];
-        assert_eq!(d.name, "Open Sampler");
+        assert_eq!(d.name, "Lemon Sampler");
         assert!(d.is_instrument());
         let mut p = Plugin::new(&lib, &d.id).unwrap();
         assert!(p.has_editor());
@@ -2012,8 +2012,8 @@ mod tests {
 
     /// The whole path Lemon Studio uses: a pattern on a plugin channel, played by the engine through the hosted .clap.
     #[test]
-    fn engine_plays_a_pattern_through_open_sampler() {
-        let Some(lib) = open_sampler() else { return };
+    fn engine_plays_a_pattern_through_lemon_sampler() {
+        let Some(lib) = lemon_sampler() else { return };
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         let wav = std::env::temp_dir().join("os-clap-engine.wav");
         let tone: Vec<f32> = (0..9600).flat_map(|i| { let v = (i as f32 * 0.03).sin() * 0.5; [v, v] }).collect();
@@ -2025,7 +2025,7 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
@@ -2041,13 +2041,13 @@ mod tests {
         let mut out = vec![0.0f32; 1024];
         e.process(&mut out);
         let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        assert!(peak > 0.05, "engine output through Open Sampler (peak {peak})");
+        assert!(peak > 0.05, "engine output through Lemon Sampler (peak {peak})");
     }
 
-    /// An MP3 sample (os-engine's fixture: click of 0.9 at 0.1 s) loads and plays through Open Sampler at 48 kHz.
+    /// An MP3 sample (os-engine's fixture: click of 0.9 at 0.1 s) loads and plays through Lemon Sampler at 48 kHz.
     #[test]
-    fn open_sampler_plays_an_mp3() {
-        let Some(lib) = open_sampler() else { return };
+    fn lemon_sampler_plays_an_mp3() {
+        let Some(lib) = lemon_sampler() else { return };
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         let mp3 = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../os-engine/tests/data/click_sine.mp3");
         let mp3 = mp3.canonicalize().unwrap().to_string_lossy().trim_start_matches(r"\\?\").to_string();
@@ -2058,7 +2058,7 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
@@ -2091,7 +2091,7 @@ mod tests {
     /// sounding past the engine's 5 s idle tail until the sample ends.
     #[test]
     fn long_live_note_is_in_tune_and_not_cut_off() {
-        let Some(lib) = open_sampler() else { return };
+        let Some(lib) = lemon_sampler() else { return };
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         // 30 s of a 441 Hz sine at 44.1 kHz.
         let wav = std::env::temp_dir().join("os-clap-long.wav");
@@ -2104,7 +2104,7 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
@@ -2141,7 +2141,7 @@ mod tests {
     /// One note_on through the engine (as the typing keyboard plays it) must fire the sample exactly once.
     #[test]
     fn one_note_on_fires_the_sample_once() {
-        let Some(lib) = open_sampler() else { return };
+        let Some(lib) = lemon_sampler() else { return };
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         // A single-unit impulse then silence: every voice start is one spike.
         let wav = std::env::temp_dir().join("os-clap-impulse.wav");
@@ -2156,7 +2156,7 @@ mod tests {
         assert!(p.activate(48000));
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
@@ -2193,10 +2193,10 @@ mod tests {
     }
 
     /// JSON string literal holding `s` as a JSON string (nih-plug stores persisted fields as serialised JSON).
-    /// Every sound control of Open Sampler must change what a note sounds like (state-set parameters, rendered here).
+    /// Every sound control of Lemon Sampler must change what a note sounds like (state-set parameters, rendered here).
     #[test]
-    fn open_sampler_parameters_change_the_sound() {
-        let Some(lib) = open_sampler() else { return };
+    fn lemon_sampler_parameters_change_the_sound() {
+        let Some(lib) = lemon_sampler() else { return };
         // A 2 s decaying saw-ish tone at 44.1 kHz, stereo with different channels.
         let wav = std::env::temp_dir().join("os-clap-params.wav");
         let n = 44100 * 2;
@@ -2279,12 +2279,12 @@ mod tests {
     }
 
     /// Mono + portamento on the channel (the Misc tab): a second, overlapping note does not start a new attack; the
-    /// sounding note glides to the new key through CLAP tuning expressions, which Open Sampler follows.
+    /// sounding note glides to the new key through CLAP tuning expressions, which Lemon Sampler follows.
     // spec: audio/channel-voices.md
     #[test]
-    fn mono_portamento_glides_through_open_sampler() {
-        let entry = &open_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
-        let lib = unsafe { Library::from_entry(entry, Path::new("Open Sampler.clap")) }.expect("linked Open Sampler");
+    fn mono_portamento_glides_through_lemon_sampler() {
+        let entry = &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Sampler.clap")) }.expect("linked Lemon Sampler");
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         // 4 s of a 441 Hz sine at 48 kHz.
         let wav = std::env::temp_dir().join("os-clap-porta.wav");
@@ -2298,7 +2298,7 @@ mod tests {
         let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
         let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 1.0, ..Default::default() };
         let ch = os_model::Channel {
-            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Open Sampler".into()), plugin_state: None, color: None,
+            index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc, sound: Default::default(),
         };
