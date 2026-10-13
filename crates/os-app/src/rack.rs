@@ -11,8 +11,10 @@ use crate::app::{App, State, Win};
 use crate::knobs::KnobId;
 use crate::playlist::{Cmd, Mark, PItem, Popup};
 
-/// Name button width at 100 % (§17).
-pub const NAME_W: f32 = 82.0;
+/// Name button width at 100 % (§17): wide enough for a new project's "Lemon Sampler" at every UI scale (Lemon Studio).
+pub const NAME_W: f32 = 91.0;
+/// FL's name button width at 100 % (§17): the measured columns right of the name button assume it.
+pub const FL_NAME_W: f32 = 82.0;
 /// Width of the mixer-box column (§17: Alt+M moves everything right of it ≈ 41 px).
 pub const MIX_W: f32 = 41.0;
 /// Extra width of loop mode (§15).
@@ -1852,6 +1854,20 @@ pub fn to_model(s: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new project's channel name, "Lemon Sampler", fits the 100 % name button at every UI scale: the label keeps
+    /// 4 px on each side (§17).
+    #[test]
+    fn default_name_button_shows_lemon_sampler_whole() {
+        let app = App::new(None);
+        let w = crate::views::rack::cols(&app.state).name_w;
+        assert_eq!(w, NAME_W);
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            let mut c = os_ui::Canvas::new(64, 64, scale).expect("canvas");
+            let text = c.text_width(os_ui::Font::new(14), crate::plugins::LEMON_SAMPLER);
+            assert!(text <= w - 8.0, "{text} px at scale {scale}");
+        }
+    }
 
     /// Clone, move and delete renumber the channels' notes so each note keeps its channel (§17-18).
     #[test]

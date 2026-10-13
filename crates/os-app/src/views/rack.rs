@@ -12,8 +12,8 @@ use crate::rack::{self as rk, FillHit, FillType, Tab};
 
 pub const ROW_H: f32 = 30.0;
 pub const STEP_W: f32 = 16.0;
-/// Default outer size (§1).
-pub const DEFAULT_SIZE: (f32, f32) = (499.0, 246.0);
+/// Default outer size (§1): 16 steps, FL's 499 px plus Lemon Studio's wider name button (§17).
+pub const DEFAULT_SIZE: (f32, f32) = (499.0 + rk::NAME_W - rk::FL_NAME_W, 246.0);
 /// Smallest height: one row (§5).
 pub const MIN_H: f32 = 96.0 + ROW_H;
 /// Space above the first row and below the last one inside the rows panel.
@@ -46,7 +46,7 @@ pub struct Cols {
 pub fn cols(s: &State) -> Cols {
     let mix_off = if s.rack.show_mixer { 0.0 } else { rk::MIX_W };
     let name_w = (rk::NAME_W * s.rack.name_pct as f32 / 100.0).round();
-    let dx = name_w - rk::NAME_W - mix_off;
+    let dx = name_w - rk::FL_NAME_W - mix_off;
     Cols { name_x: 108.0 - mix_off, name_w, dx, slot_x: 200.0 + dx, step_x: 217.0 + dx, loop_w: if s.rack.loop_mode { rk::LOOP_W } else { 0.0 } }
 }
 

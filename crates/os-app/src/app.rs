@@ -7082,7 +7082,7 @@ mod tests {
         step(&mut app, &mut a, &|ap| ap.mouse_down());
         step(&mut app, &mut a, &|ap| { ap.mouse_move(r.right() + 318.0, r.bottom() + 58.0); });
         step(&mut app, &mut a, &|ap| ap.mouse_up());
-        assert_eq!(app.state.rack_size, (819.0, 306.0));
+        assert_eq!(app.state.rack_size, (views::rack::DEFAULT_SIZE.0 + 320.0, 306.0));
         assert_eq!(views::rack::visible_steps(&app.state), 36);
         frame(&mut app, &mut b, None);
         assert_same(&a, &b, "after mixer drag and resize");
@@ -7093,11 +7093,12 @@ mod tests {
         click(&mut app, &mut a, hr);
         assert_eq!(crate::rack::pattern_steps(&app.state), 32);
 
-        // Sizes snap to whole steps / rows, down to 4 steps and one row.
-        assert_eq!(views::rack::snap_size(&app.state, 822.0, 300.0), (819.0, 306.0));
-        assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (307.0, 126.0));
+        // Sizes snap to whole steps / rows, down to 4 steps and one row (FL's widths plus the wider name button).
+        let d = crate::rack::NAME_W - crate::rack::FL_NAME_W;
+        assert_eq!(views::rack::snap_size(&app.state, 822.0 + d, 300.0), (819.0 + d, 306.0));
+        assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (307.0 + d, 126.0));
         let keep = app.state.rack_size;
-        app.state.rack_size = (307.0, 126.0);
+        app.state.rack_size = (307.0 + d, 126.0);
         assert_eq!(views::rack::visible_steps(&app.state), 4);
         app.state.rack_size = keep;
 
