@@ -26,6 +26,28 @@ thread_local! {
     pub static WRAP_BUILTINS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: the "real native plugins instead of Open recreations" preference for this thread, without touching the
+    /// process environment other tests read.
+    pub static NATIVE_FIRST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether an opened project's native plugins are played by the installed plugins even where a built-in Open
+/// recreation would take them (the hidden settings toggle; spec: plugins/fruity-abi.md "Opened projects").
+pub fn native_first() -> bool {
+    #[cfg(test)]
+    if let Some(v) = NATIVE_FIRST.with(|n| n.get()) {
+        return v;
+    }
+    os_native::prefer_native()
+}
+
+/// Whether a channel or slot holding file id `id` is one a built-in Open recreation plays (3x Osc, the parametric EQ).
+pub fn has_recreation(id: &str) -> bool {
+    id.eq_ignore_ascii_case(crate::osc3::FILE_NAME) || id.eq_ignore_ascii_case(crate::plugins::EQ_FILE_NAME)
+}
+
 /// Whether a hosted plugin is saved inside the wrapper: CLAP and VST3 plugins from plugin files.
 pub fn is_wrapped(d: &Descriptor) -> bool {
     #[cfg(test)]
@@ -84,6 +106,14 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
                 slot.name = WRAPPER.into();
             }
         }
+    }
+}
+
+/// The file id (event 201) of the plugin channel or filled mixer slot under hosting key `key`.
+fn id_of_key(project: &Project, key: usize) -> Option<String> {
+    match fx_of(key) {
+        None => project.channels.get(key).filter(|c| c.kind == ChannelKind::Plugin).and_then(|c| c.plugin.clone()),
+        Some((t, k)) => project.mixer.iter().find(|m| m.index == t)?.slots[usize::from(k)].as_ref().map(|s| s.name.clone()),
     }
 }
 
@@ -360,6 +390,54 @@ impl crate::app::App {
         }
     }
 
+    /// The hidden preference changed (or the native host with it): the channels and slots a built-in recreation can
+    /// play (3x Osc, the parametric EQ) move to the side that should play them now. Each one hosted by the other side
+    /// writes its settings into the project as the file's own state, its instance is closed, and the next tick hosts
+    /// it again from that state (`sync_osc3` / `sync_effects`, or `host_native`). A row the plugin menus are just
+    /// creating is left alone. Returns how many channels and slots were switched.
+    pub(crate) fn swap_builtin_overrides(&mut self) -> usize {
+        let native = native_first();
+        let pending = self.state.pending_plugin.map(|(r, _)| r);
+        let swap: Vec<usize> = self
+            .plugins
+            .hosted
+            .keys()
+            .copied()
+            .filter(|&key| Some(key) != pending && id_of_key(&self.state.project, key).is_some_and(|id| has_recreation(&id)))
+            .filter(|&key| {
+                let Some(d) = self.plugins.descriptor(key) else { return false };
+                // Moving to the real plugins: the recreations go; moving back: the real plugins go.
+                if native { is_builtin(&d) } else { d.format == Format::Native }
+            })
+            .collect();
+        // Their settings, as the file stores them, stay in the project.
+        self.store_builtin_states();
+        for &key in &swap {
+            if self.plugins.descriptor(key).is_some_and(|d| d.format == Format::Native) && !self.plugins.hosted[&key].keep_file_state {
+                if let Some(state) = self.plugins.state(key) {
+                    store_native(&mut self.state.project, key, state);
+                }
+            }
+        }
+        for &key in &swap {
+            self.plugins.drop_key(key);
+            self.state.hosted_rows.retain(|&r| r != key);
+        }
+        // Either side may try the moved channels and slots again (a recreation that failed before, or a missing
+        // native plugin); so may any other channel or slot a recreation plays.
+        let all: Vec<usize> = self.wrap_failed.iter().chain(&self.fx_failed).chain(&self.native_failed).copied().filter(|&k| id_of_key(&self.state.project, k).is_some_and(|id| has_recreation(&id))).collect();
+        for list in [&mut self.wrap_failed, &mut self.fx_failed, &mut self.native_failed] {
+            list.retain(|k| !all.contains(k));
+        }
+        if !swap.is_empty() {
+            self.transport.set_instruments(self.plugins.instruments());
+            self.transport.set_effects(self.plugins.effects());
+            self.state.piano.dirty = true;
+        }
+        self.invalidate();
+        swap.len()
+    }
+
     /// Whether the native instance under `key`, just started from `file_state`, gives those bytes back as its own
     /// state. If not, the instance is marked so a save keeps the file's bytes (spec: plugins/fruity-abi.md "Saved
     /// state": the instance would lose the file's data otherwise). No file state = the plugin starts at its defaults
@@ -634,6 +712,61 @@ mod tests {
         assert_eq!(saved.mixer[3].slots[0], Some(SlotPlugin { name: "Gross Beat".into(), state: vec![7, 8, 9] }));
         // The file's own spelling of the id is kept; the instance's state (its defaults) is written.
         assert_eq!(saved.mixer[4].slots[0], Some(SlotPlugin { name: "fruity balance".into(), state: vec![0, 0] }));
+    }
+
+    /// The hidden "real native plugins" toggle: a 3x Osc channel and a parametric EQ slot played by the Open
+    /// recreations move to the installed plugins, started from the file's state, and back again; the settings stay
+    /// in the project across each move (spec: plugins/fruity-abi.md "Opened projects").
+    #[test]
+    fn real_native_plugins_replace_the_open_recreations_and_back() {
+        use crate::osc3::{FILE_NAME as OSC3_FILE, OPEN_3X_OSC};
+        use crate::plugins::EQ_FILE_NAME;
+        NATIVE_FIRST.with(|n| n.set(Some(false)));
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.plugins.available = crate::plugins::builtin();
+        a.plugins.available.push(native_stand_in(OSC3_FILE, os_host::Kind::Instrument, true));
+        a.plugins.effects = crate::plugins::builtin_effects();
+        a.plugins.effects.push(native_stand_in(EQ_FILE_NAME, os_host::Kind::Effect, true));
+        let row = crate::app::add_plugin_channel(&mut a.state.project, OPEN_3X_OSC);
+        let osc_file = open_3x_osc::params::default_state();
+        a.state.project.channels[row].plugin_state = Some(osc_file.clone());
+        let mut eq_file = open_parametric_eq_2::params::default_state();
+        open_parametric_eq_2::params::set_field(&mut eq_file, 1, -600);
+        a.state.project.mixer[2].slots[1] = Some(SlotPlugin { name: EQ_FILE_NAME.into(), state: eq_file.clone() });
+        let slot = fx_key(2, 1);
+        let builtin_at = |a: &App, key| a.plugins.descriptor(key).is_some_and(|d| is_builtin(&d));
+        let native_at = |a: &App, key| a.plugins.descriptor(key).is_some_and(|d| d.format == Format::Native);
+
+        // Off: the recreations play them, and the native pass leaves them alone.
+        a.sync_osc3();
+        a.sync_effects();
+        a.host_native();
+        assert!(builtin_at(&a, row) && builtin_at(&a, slot));
+
+        // On: switched to the installed plugins, started from the file's bytes.
+        NATIVE_FIRST.with(|n| n.set(Some(true)));
+        assert_eq!(a.swap_builtin_overrides(), 2);
+        assert!(!a.plugins.hosted.contains_key(&row) && !a.plugins.hosted.contains_key(&slot) && !a.state.hosted_rows.contains(&row));
+        a.sync_osc3();
+        a.sync_effects();
+        assert!(!a.plugins.hosted.contains_key(&row), "the recreation stays out");
+        a.host_native();
+        assert!(native_at(&a, row) && native_at(&a, slot) && a.state.hosted_rows.contains(&row));
+        assert_eq!(a.plugins.state(row).as_deref(), a.state.project.channels[row].plugin_state.as_deref());
+        assert_eq!(a.plugins.state(slot), Some(eq_file.clone()));
+
+        // Off again: back to the recreations, the settings still in the project.
+        NATIVE_FIRST.with(|n| n.set(Some(false)));
+        assert_eq!(a.swap_builtin_overrides(), 2);
+        assert_eq!(a.state.project.mixer[2].slots[1].as_ref().map(|s| s.state.clone()), Some(eq_file.clone()));
+        a.sync_osc3();
+        a.sync_effects();
+        assert!(builtin_at(&a, row) && builtin_at(&a, slot));
+        assert_eq!(a.plugins.eq_file_state(slot), Some(eq_file));
+        assert_eq!(a.state.project.channels[row].plugin.as_deref(), Some(OSC3_FILE));
+        let _ = osc_file;
+        NATIVE_FIRST.with(|n| n.set(None));
     }
 
     /// While a plugin scan runs, a native plugin that is not listed yet is neither hosted nor given up on; after the

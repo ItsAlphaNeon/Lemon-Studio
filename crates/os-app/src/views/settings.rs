@@ -98,6 +98,9 @@ pub const PLUGINS: usize = 4;
 /// Opt in to the experimental FL native plugin host (spec plugins/fruity-abi.md), on the Plugins page. Labels are the
 /// keys for `SAct::Check`; `App::settings_act` acts on them.
 pub const NATIVE_HOST_CHECK: &str = "Experimental: host installed native plugins";
+/// Shown only while the native host is on: an opened project's native plugins are played by the installed plugins,
+/// never by the built-in Open recreations (spec plugins/fruity-abi.md "Opened projects").
+pub const NATIVE_FIRST_CHECK: &str = "Experimental: real native plugins instead of Open recreations";
 /// Plugin manager checks (spec: ui/plugin-manager.md §2).
 pub const STARTUP_CHECK: &str = "Find new plugins at startup";
 pub const ERRORS_CHECK: &str = "Rescan plugins with errors";
@@ -112,6 +115,7 @@ pub fn plugin_check(key: &str) -> bool {
 /// slider and button is not available yet: drawn greyed out, its hint and click say so.
 pub const LIVE: &[&str] = &[
     NATIVE_HOST_CHECK,
+    NATIVE_FIRST_CHECK,
     STARTUP_CHECK,
     ERRORS_CHECK,
     COMBINE_CHECK,
@@ -423,17 +427,22 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             let d = &s.plugdb;
             let p = &d.prefs;
             let folders = db::search_dirs(p).into_iter().map(|f| (f.path.display().to_string(), f.tag(), f.on, f.kind == db::DirKind::Added)).collect();
+            let mut scanning = vec![
+                Check(STARTUP_CHECK, p.startup_scan),
+                Check(ERRORS_CHECK, p.rescan_errors),
+                Check(COMBINE_CHECK, p.combine),
+                Prefer(p.prefer),
+                Check(NATIVE_HOST_CHECK, os_native::enabled()),
+            ];
+            // The second native toggle appears only while the native host is on.
+            if os_native::enabled() {
+                scanning.push(Check(NATIVE_FIRST_CHECK, os_native::prefer_native()));
+            }
+            scanning.push(Buttons(vec![("Find new plugins", 130.0), ("Rescan all", 100.0)]));
+            scanning.push(Text(d.status_line(), true));
             vec![
                 g("Search folders", vec![Folders(folders), Buttons(vec![("Add folder...", 110.0)])]),
-                g("Scanning", vec![
-                    Check(STARTUP_CHECK, p.startup_scan),
-                    Check(ERRORS_CHECK, p.rescan_errors),
-                    Check(COMBINE_CHECK, p.combine),
-                    Prefer(p.prefer),
-                    Check(NATIVE_HOST_CHECK, os_native::enabled()),
-                    Buttons(vec![("Find new plugins", 130.0), ("Rescan all", 100.0)]),
-                    Text(d.status_line(), true),
-                ]),
+                g("Scanning", scanning),
                 g("Plugins", vec![Table]),
             ]
         }

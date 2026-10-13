@@ -57,6 +57,10 @@ impl crate::app::App {
     /// instance's state when the channel has none). A row waiting for the picker's own instance is left to it; a row
     /// whose instance failed is not tried again.
     pub(crate) fn sync_osc3(&mut self) {
+        // The installed 3x Osc plays these channels instead (`host_native`).
+        if crate::project_plugins::native_first() {
+            return;
+        }
         let Some(index) = self.plugins.index_of(OPEN_3X_OSC) else { return };
         let pending = self.state.pending_plugin.map(|(r, _)| r);
         let rows: Vec<usize> = (0..self.state.project.channels.len())

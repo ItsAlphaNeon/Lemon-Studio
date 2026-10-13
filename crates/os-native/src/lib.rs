@@ -56,6 +56,30 @@ pub fn set_enabled(on: bool) {
     }
 }
 
+/// Whether an opened project's native plugins are played by the installed plugins even where a built-in recreation
+/// would take them (spec: plugins/fruity-abi.md "Opened projects"): only while the native host is on. Set by a
+/// second, hidden settings toggle or `OPENSTUDIO_NATIVE_FIRST`; session only, like the host toggle.
+pub fn prefer_native() -> bool {
+    enabled() && matches!(std::env::var("OPENSTUDIO_NATIVE_FIRST").as_deref(), Ok("1") | Ok("true") | Ok("on") | Ok("yes"))
+}
+
+/// The stored choice behind `prefer_native`, whether or not the host is on.
+pub fn prefer_native_set() -> bool {
+    std::env::var_os("OPENSTUDIO_NATIVE_FIRST").is_some()
+}
+
+/// Turns the preference on or off for this process.
+pub fn set_prefer_native(on: bool) {
+    // SAFETY: changed from the UI thread only; read by the same thread.
+    unsafe {
+        if on {
+            std::env::set_var("OPENSTUDIO_NATIVE_FIRST", "1");
+        } else {
+            std::env::remove_var("OPENSTUDIO_NATIVE_FIRST");
+        }
+    }
+}
+
 /// One installed FL native plugin found on disk.
 #[derive(Debug, Clone)]
 pub struct Installed {
