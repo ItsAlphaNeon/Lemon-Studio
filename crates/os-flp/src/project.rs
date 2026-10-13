@@ -70,6 +70,7 @@ mod id {
     /// Cut groups (word 0 cuts, word 1 cut by) and the voice settings: maximum voices, slide time, mono / portamento
     /// (spec: audio/note-rules.md "Settings").
     pub const CH_CUT_GROUPS: u8 = 132;
+    pub const CH_LAYER_FLAGS: u8 = 144;
     pub const CH_POLY: u8 = 221;
     pub const GROUP_NAME: u8 = 231;
     pub const CURRENT_GROUP: u8 = 146;
@@ -750,7 +751,21 @@ fn load_misc(block: &[Event]) -> ChannelMisc {
         m.mono = d[8] & 1 != 0;
         m.porta = d[8] & 2 != 0;
     }
+    m.layer = load_layer(block);
     m
+}
+
+/// A layer's flags (event 144) and crossfade position (event 215, int at byte 76) (spec: audio/note-rules.md
+/// "Settings").
+fn load_layer(block: &[Event]) -> os_model::LayerSettings {
+    let find = |id: u8| block.iter().find(|e| e.id == id);
+    os_model::LayerSettings {
+        flags: find(id::CH_LAYER_FLAGS).map_or(0, int),
+        crossfade: find(id::CH_SAMPLE_SETTINGS)
+            .and_then(Event::data)
+            .and_then(|d| d.get(76..80))
+            .map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap())),
+    }
 }
 
 /// Event 215 of a new audio clip channel as FL 26 writes it (declick mode 1, not stretched), its stretch ints
@@ -2973,6 +2988,27 @@ mod tests {
         assert_eq!((plain.channels[0].misc.fine, plain.channels[0].misc.main_pitch), (0, true));
         let m = plain.channels[0].misc;
         assert_eq!((m.cut, m.cut_by, m.max_poly, m.mono, m.porta, m.slide), (0, 0, 0, false, false, 500.0 / 1024.0));
+    }
+
+    /// A layer's flags (event 144) and crossfade position (event 215, int at byte 76) are read (spec:
+    /// audio/note-rules.md "Settings"); without them a channel has flags 0.
+    #[test]
+    fn layer_settings_are_read() {
+        let mut file = create(&new_project()).unwrap();
+        {
+            let ev = events_of_mut(&mut file).unwrap();
+            let ch0 = ev.iter().position(|e| e.id == id::CH_START).unwrap();
+            ev.retain(|e| e.id != id::CH_SAMPLE_SETTINGS);
+            let mut s215 = vec![0u8; 168];
+            s215[76..80].copy_from_slice(&160i32.to_le_bytes());
+            ev.insert(ch0 + 1, Event::new(id::CH_LAYER_FLAGS, Value::U32(6)));
+            ev.insert(ch0 + 1, Event::new(id::CH_SAMPLE_SETTINGS, Value::var(s215)));
+        }
+        let p = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        let l = p.channels[0].misc.layer;
+        assert_eq!((l.flags, l.crossfade), (os_model::LayerSettings::CROSSFADE | os_model::LayerSettings::IN_TURN, 160));
+        let plain = load(&create(&new_project()).unwrap()).unwrap();
+        assert_eq!(plain.channels[0].misc.layer.flags, 0);
     }
 
     /// Track switches (event 236 flags), the main volume (record 0 at 0x4000) and the main pitch (event 80) are

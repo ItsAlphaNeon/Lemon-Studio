@@ -476,6 +476,26 @@ pub struct ChannelMisc {
     pub add_key: bool,
     /// Fine tuning, cents (-100..=100).
     pub fine: i32,
+    /// How a layer channel hands its notes to its children (stored with every channel; only a layer uses it).
+    pub layer: LayerSettings,
+}
+
+/// A layer channel's settings besides its children (spec: audio/note-rules.md "Settings", "Layer channels").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LayerSettings {
+    /// Event 144: [`LayerSettings::RANDOM`], [`LayerSettings::CROSSFADE`], [`LayerSettings::IN_TURN`].
+    pub flags: u32,
+    /// Crossfade position, 0..=256 (event 215, int at byte 76).
+    pub crossfade: i32,
+}
+
+impl LayerSettings {
+    /// One child per note, drawn at random.
+    pub const RANDOM: u32 = 1;
+    /// The children's volumes follow the crossfade position.
+    pub const CROSSFADE: u32 = 2;
+    /// One child per note, in turn.
+    pub const IN_TURN: u32 = 4;
 }
 
 impl Default for ChannelMisc {
@@ -500,6 +520,7 @@ impl Default for ChannelMisc {
             main_pitch: true,
             add_key: false,
             fine: 0,
+            layer: LayerSettings::default(),
         }
     }
 }

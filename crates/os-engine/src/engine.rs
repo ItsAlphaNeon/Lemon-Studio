@@ -22,6 +22,7 @@ use crate::instrument::{Instrument, SharedInstrument, Slot, TransportInfo};
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
+mod layers;
 mod notes;
 mod param_auto;
 pub use param_auto::PARAM_STEP;
@@ -68,6 +69,30 @@ struct Trigger {
     shape: Option<ClipShape>,
     /// A slide note: no sound of its own, it glides the channel's voices.
     slide: bool,
+    /// A note a layer handed on: the layer and the child's crossfade gain.
+    via: Option<Via>,
+    /// The group it cuts and the group its voice belongs to as the note carries them from a layer (`None`: the
+    /// channel's own).
+    cuts: Option<(u32, u32)>,
+}
+
+/// The layer a voice's note came through, and the child's crossfade gain (1 without the crossfade) (spec:
+/// audio/note-rules.md "Layer channels").
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Via {
+    layer: usize,
+    gain: f64,
+}
+
+/// What a layer adds to the levels of the voices its notes started (spec: audio/note-rules.md "Layer channels": the
+/// final volume is multiplied by the layer's volume, its pan, pitch and mods add): its volume with the multiplier (0
+/// when it is off), its pan with the offset, its pitch knob in cents, its mod X / mod Y.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LayerAdds {
+    volume: f64,
+    pan: f64,
+    cents: f64,
+    mods: (f32, f32),
 }
 
 /// An audio clip's fades, gain and start declick on its voice's clock (spec: audio/audio-clips.md "Fades and clip
@@ -183,6 +208,12 @@ struct ChannelState {
     /// The level adjustments and filter knobs as automation leaves them, and as the channel stores them.
     adjust: Adjust,
     init_adjust: Adjust,
+    /// A layer channel: its children and how it hands its notes on.
+    layer: Option<layers::Layer>,
+    /// A hosted instrument's channel: the layer whose note it was given last. A hosted instrument hears that layer's
+    /// levels on its channel's (a Lemon Studio choice: the host does not reach a plugin's voices one by one, so a
+    /// child that also plays notes of its own, or of two layers, hears them all with the levels of the last one).
+    via: Option<Via>,
 }
 
 /// A channel's level adjustments (event 229) and filter knob positions (spec: audio/voice-levels.md "The channel's
@@ -302,6 +333,21 @@ impl ChannelState {
         f64::from((pan * 6400.0 + f64::from(self.adjust.pan)) as f32 * os_dsp::level::R6400)
     }
 
+    /// What this channel adds as a layer to its children's voices. The pitch is the pitch knob alone (a Lemon Studio
+    /// choice: the spec compares a layer's pitch knob only, with its fine tune, root note and the main pitch at their
+    /// defaults).
+    fn layer_adds(&self) -> LayerAdds {
+        LayerAdds { volume: self.volume, pan: self.pan_of(self.pan), cents: self.knob, mods: self.adjust.mods() }
+    }
+
+    /// The gain of a note that starts now (`start_gain`) of a voice whose note came through a layer.
+    fn start_gain_via(&self, vel: f64, note_pan: f64, layer: Option<(LayerAdds, f64)>) -> (f32, f32) {
+        match layer {
+            None => self.start_gain(vel, note_pan),
+            Some((a, gain)) => self.start_gain(vel * a.volume * gain, note_pan + a.pan),
+        }
+    }
+
     /// The channel's levels for a hosted instrument.
     fn levels(&self) -> crate::instrument::ChannelLevels {
         let (mod_x, mod_y) = self.adjust.mods();
@@ -407,6 +453,14 @@ impl ChannelState {
         }
     }
 
+    /// `gain` for a voice whose note came through a layer.
+    fn gain_via(&self, vel: f64, note_pan: f64, layer: Option<(LayerAdds, f64)>) -> (f32, f32) {
+        match layer {
+            None => self.gain(vel, note_pan),
+            Some((a, gain)) => self.gain(vel * a.volume * gain, note_pan + a.pan),
+        }
+    }
+
     /// Gain of a note on this channel: channel volume × velocity × pan.
     // spec: audio/sampler-playback.md (velocity multiplies volume; pans add, clamped)
     fn gain(&self, vel: f64, note_pan: f64) -> (f32, f32) {
@@ -451,6 +505,8 @@ struct Voice {
     /// Its note's key, and where slide notes have moved it.
     key: u16,
     slide: VoiceSlide,
+    /// The layer its note came through.
+    via: Option<Via>,
 }
 
 /// A voice's levels as slide notes move them (spec: audio/song-structure.md "Slide notes", audio/note-rules.md
@@ -785,6 +841,8 @@ pub struct Engine {
     auto_from: u64,
     /// Clips on plugin parameters: this tick's events.
     params: param_auto::ParamAuto,
+    /// The project's random generator (random layers; spec: audio/channel-misc.md "FL's random generator").
+    rng: layers::Mt19937,
     pub report: EngineReport,
 }
 
@@ -901,6 +959,8 @@ impl Engine {
                     clip_level: if ch.kind == ChannelKind::AudioClip { os_dsp::level::audio_clip_level() } else { 1.0 },
                     adjust,
                     init_adjust: adjust,
+                    layer: (ch.kind == ChannelKind::Layer).then(|| layers::Layer::of(ch)),
+                    via: None,
                 };
                 state.retune(knob);
                 state.init.2 = state.base_rate;
@@ -987,7 +1047,7 @@ impl Engine {
             .into_iter()
             .filter_map(|n: Sched| {
                 let state = channels.get(n.channel)?;
-                if state.sample.is_none() && !state.plugin {
+                if state.sample.is_none() && !state.plugin && state.layer.is_none() {
                     return None;
                 }
                 let (from, start) = match state.sample.as_ref() {
@@ -1033,6 +1093,8 @@ impl Engine {
                         }
                     }),
                     slide: n.slide,
+                    via: None,
+                    cuts: None,
                 })
             })
             .collect();
@@ -1041,18 +1103,21 @@ impl Engine {
         // channel's pitch with its fine tune, root and main pitch, and the stretch's own included), and its notes play
         // that copy as it is.
         for t in triggers.iter_mut() {
-            let ch = &mut channels[t.channel];
-            let (Some((factor, cents)), Some(s)) = (ch.realtime, ch.sample.clone()) else { continue };
-            let i = match ch.keyed.iter().position(|k| k.0 == t.key) {
-                Some(i) => i,
-                None => {
-                    let transpose = laws::playback_rate(t.key, 0) * laws::cents_rate(ch.pitch_from_60()) * 2f64.powf(cents / 1200.0);
-                    ch.keyed.push((t.key, library.stretched(&s, stretched_frames(&s, factor), transpose)));
-                    ch.keyed.len() - 1
-                }
-            };
-            t.buf = (i + 1) as u16;
-            t.rate = 1.0;
+            if let Some(i) = keyed_copy(&mut channels[t.channel], library, t.key) {
+                t.buf = (i + 1) as u16;
+                t.rate = 1.0;
+            }
+        }
+        // A layer's notes play on its children: they get the copies for the keys the layer plays.
+        let layered: Vec<(usize, u16)> = triggers
+            .iter()
+            .filter_map(|t| channels[t.channel].layer.as_ref().map(|l| (l.children.clone(), t.key)))
+            .flat_map(|(children, key)| children.into_iter().map(move |c| (c, key)))
+            .collect();
+        for (c, key) in layered {
+            if let Some(ch) = channels.get_mut(c) {
+                keyed_copy(ch, library, key);
+            }
         }
 
         // Automation clips (song mode only): each plays its curve onto its target from its start to its end.
@@ -1103,6 +1168,10 @@ impl Engine {
             main_glide: os_dsp::glide::Glide::new(main_gain),
             exporting: false,
             params: param_auto::ParamAuto::new(autos.iter().flat_map(|a| &a.targets).any(|&t| param_auto::is_param(t))),
+            // Seeded, one output taken, at every start of playback or of a render (spec: audio/channel-misc.md "FL's
+            // random generator"; whether FL's live playback draws as its render does is not covered, Lemon Studio
+            // does).
+            rng: layers::Mt19937::for_playback(),
             autos,
             curves,
             auto_last: Vec::new(),
@@ -1274,6 +1343,7 @@ impl Engine {
             buf,
             key,
             slide: VoiceSlide::new(step, velocity, pan),
+            via: None,
         });
         self.sounding.push((channel, key, u64::MAX));
     }
@@ -1458,6 +1528,19 @@ impl Engine {
         self.late.retain(|t| t.channel < n);
         self.voices = std::mem::take(&mut old.voices);
         self.voices.retain(|v| v.channel < n);
+        // The random generator and whose turn it is on each layer go on; voices keep their layer while it is one.
+        self.rng = old.rng.clone();
+        let is_layer = |c: usize| self.channels.get(c).is_some_and(|ch| ch.layer.is_some());
+        for v in &mut self.voices {
+            v.via = v.via.filter(|w| is_layer(w.layer));
+        }
+        let vias: Vec<Option<Via>> = old.channels.iter().map(|o| o.via.filter(|w| is_layer(w.layer))).collect();
+        for (new, (o, via)) in self.channels.iter_mut().zip(old.channels.iter().zip(vias)) {
+            if let (Some(a), Some(b)) = (new.layer.as_mut(), o.layer.as_ref()) {
+                a.turn = b.turn;
+            }
+            new.via = via;
+        }
         // Voices and late clips playing a realtime stretch copy keep playing that copy.
         for i in 0..self.voices.len() {
             let (c, b) = (self.voices[i].channel, self.voices[i].buf);
@@ -1833,6 +1916,8 @@ impl Engine {
             }
             if t.slide {
                 slides.push(t);
+            } else if self.channels[t.channel].layer.is_some() {
+                self.hand_on(t, step);
             } else {
                 self.start_trigger(t, step);
             }
@@ -1850,15 +1935,28 @@ impl Engine {
     /// the first at once; a glide under way is replaced from where it is. A voice whose note has not ended counts as
     /// held (a voice without the volume envelope never ends its note). Without a held voice nothing moves. On a hosted
     /// instrument the note rules glide the pitch.
+    ///
+    /// A slide note on a layer moves the voices the layer's notes started, on all its children; a slide note on a
+    /// child does not move those (spec: audio/note-rules.md "Layer channels").
     fn start_slide(&mut self, t: Trigger) {
         let n = t.end.map_or(0, |e| e.saturating_sub(t.tick)).min(u64::from(u32::MAX - 1)) as u32;
-        if self.channels[t.channel].plugin {
+        let key = t.key.min(127) as u8;
+        let is_layer = self.channels[t.channel].layer.is_some();
+        if let Some(layer) = &self.channels[t.channel].layer {
+            for (i, &c) in layer.children.iter().enumerate() {
+                let hosted = self.channels.get(c).is_some_and(|ch| ch.plugin && ch.instrument.0.is_some());
+                if hosted && !layer.children[..i].contains(&c) {
+                    self.inst_events.push(notes::Event { layer: Some(t.channel), ..notes::Event::slide(c, 0, key, n) });
+                }
+            }
+        } else if self.channels[t.channel].plugin {
             if self.channels[t.channel].instrument.0.is_some() {
-                self.inst_events.push(notes::Event::slide(t.channel, 0, t.key.min(127) as u8, n));
+                self.inst_events.push(notes::Event::slide(t.channel, 0, key, n));
             }
             return;
         }
-        let moves = |v: &Voice| v.channel == t.channel && v.cut.is_none() && v.release.is_none();
+        let own = |v: &Voice| if is_layer { v.via.is_some_and(|w| w.layer == t.channel) } else { v.channel == t.channel && v.via.is_none() };
+        let moves = |v: &Voice| own(v) && v.cut.is_none() && v.release.is_none();
         let top = self.voices.iter().filter(|v| moves(v) && v.off.is_none()).map(|v| f32::from(v.key) * 100.0 + v.slide.cents).reduce(f32::max);
         let Some(top) = top else { return };
         let by = f32::from(t.key) * 100.0 - top;
@@ -1903,6 +2001,7 @@ impl Engine {
         self.sounding.push((t.channel, t.key, t.end.unwrap_or(t.tick + step)));
         if self.channels[t.channel].plugin {
             if self.channels[t.channel].instrument.0.is_some() {
+                self.channels[t.channel].via = t.via;
                 let k = t.key.min(127) as u8;
                 self.inst_events.push(notes::Event {
                     ch: t.channel,
@@ -1914,6 +2013,8 @@ impl Engine {
                     long: t.end.is_some(),
                     glide: 0,
                     levels: t.levels,
+                    cuts: t.cuts,
+                    layer: t.via.map(|w| w.layer),
                 });
                 if let Some(sh) = t.shape {
                     self.inst_shapes.push((t.channel, sh, 0));
@@ -1926,7 +2027,8 @@ impl Engine {
             }
             return;
         }
-        let gain = self.channels[t.channel].start_gain(t.vel, t.pan);
+        let layer = t.via.and_then(|w| self.channels.get(w.layer).map(|l| (l.layer_adds(), w.gain)));
+        let gain = self.channels[t.channel].start_gain_via(t.vel, t.pan, layer);
         let serial = self.channels[t.channel].serial;
         self.voices.push(Voice {
             channel: t.channel,
@@ -1949,7 +2051,48 @@ impl Engine {
             buf: t.buf,
             key: t.key,
             slide: VoiceSlide::new(t.rate, t.velocity, t.pan),
+            via: t.via,
         });
+    }
+
+    /// A note on a layer channel (spec: audio/note-rules.md "Layer channels"). It makes no voice of its own: its cut
+    /// group acts with the layer's own numbers (by the rule for channels whose voices are not one-shot voices), then
+    /// the note goes to the children the layer's mode picks, in the order of the list. A child whose voices are
+    /// one-shot voices and that has a group set writes its own numbers into the note, for itself and the children
+    /// after it, and with each child the note's cut acts again. Each child plays the note as its own (its mono,
+    /// portamento and voice limit apply), with the layer's levels added to its voice's and the crossfade gain on the
+    /// volume. A child that is switched off is passed over; so is a child that is itself a layer (a Lemon Studio
+    /// choice: layers among a layer's children are not covered).
+    fn hand_on(&mut self, t: Trigger, step: u64) {
+        let rng = &mut self.rng;
+        let Some(layer) = self.channels[t.channel].layer.as_mut() else { return };
+        let picked: Vec<(usize, f64)> = layer.places(rng).map(|i| (layer.children[i], layer.gain(i))).collect();
+        let r = self.channels[t.channel].rules;
+        let mut cuts = (r.cut, notes::voice_group(&r, r.cut, r.cut_by, t.end.is_some()));
+        if cuts.0 > 0 {
+            self.inst_events.push(notes::Event::cut(t.channel, 0, cuts.0));
+        }
+        self.sounding.push((t.channel, t.key, t.end.unwrap_or(t.tick + step)));
+        let adds = self.channels[t.channel].layer_adds();
+        for (child, gain) in picked {
+            let Some(ch) = self.channels.get(child).filter(|ch| ch.enabled && ch.layer.is_none()) else { continue };
+            let r = ch.rules;
+            if r.one_shot && (r.cut > 0 || r.cut_by > 0) {
+                cuts = (r.cut, r.cut_by);
+            }
+            if ch.sample.is_none() && !ch.plugin {
+                continue;
+            }
+            // A hosted instrument hears the layer's pitch as part of the note's tuning (the engine's voices follow
+            // the layer's pitch while they sound).
+            let mut c = Trigger { channel: child, via: Some(Via { layer: t.channel, gain }), cuts: Some(cuts), fine: t.fine + (adds.cents / 100.0) as f32, ..t };
+            if ch.realtime.is_some() {
+                if let Some(i) = ch.keyed.iter().position(|k| k.0 == t.key) {
+                    (c.buf, c.rate) = ((i + 1) as u16, 1.0);
+                }
+            }
+            self.start_trigger(c, step);
+        }
     }
 
     /// Sends this tick's note events to each instrument and mixes its output into the channel's insert with the
@@ -2024,7 +2167,16 @@ impl Engine {
                 }
             }
             inst.transport(song);
-            let own_levels = inst.channel_levels(ch.levels());
+            // The layer whose notes it plays adds its levels to the channel's.
+            let layer = ch.via.and_then(|w| self.channels.get(w.layer).map(|l| (l.layer_adds(), w.gain)));
+            let mut levels = ch.levels();
+            if let Some((a, gain)) = layer {
+                levels.volume = (f64::from(levels.volume) * a.volume * gain) as f32;
+                levels.pan += a.pan as f32;
+                levels.mod_x += a.mods.0;
+                levels.mod_y += a.mods.1;
+            }
+            let own_levels = inst.channel_levels(levels);
             // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md Â§2); one per tick
             // at its start for a plugin that takes them so (spec: plugins/fruity-abi.md "Parameters").
             if inst.tick_params() {
@@ -2054,7 +2206,7 @@ impl Engine {
             // An audio clip channel's voices are its playlist clips: their own level is on the channel's output, since
             // a hosted sampler takes velocities only up to 128 (spec: audio/audio-clips.md "Level").
             let cl = ch.clip_level;
-            let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain(f64::from(cl), 0.0) };
+            let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain_via(f64::from(cl), 0.0, layer) };
             let out = &mut self.bus[ch.insert];
             for f in 0..n {
                 out[f * 2] += l[f] * gl;
@@ -2251,12 +2403,30 @@ const SINC_W: f64 = 13.5;
 /// change = constant). Rate 1 copies samples exactly. Other rates use a Blackman-windowed sinc with a fixed
 /// 13.5-sample window; above rate 1 the cutoff drops to the output Nyquist (`1/rate`).
 // spec: audio/sampler-playback.md (resampling)
+/// The place in `ch.keyed` of the copy of its sample stretched for `key`, made when missing (realtime stretch methods
+/// only): the channel's pitch with its fine tune, root and main pitch, and the stretch's own included.
+fn keyed_copy(ch: &mut ChannelState, library: &mut SampleLibrary, key: u16) -> Option<usize> {
+    let (Some((factor, cents)), Some(s)) = (ch.realtime, ch.sample.clone()) else { return None };
+    Some(match ch.keyed.iter().position(|k| k.0 == key) {
+        Some(i) => i,
+        None => {
+            let transpose = laws::playback_rate(key, 0) * laws::cents_rate(ch.pitch_from_60()) * 2f64.powf(cents / 1200.0);
+            ch.keyed.push((key, library.stretched(&s, stretched_frames(&s, factor), transpose)));
+            ch.keyed.len() - 1
+        }
+    })
+}
+
 fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], span: usize, offset: usize, end: usize) -> bool {
     let ch = &channels[v.channel];
     let Some(s) = ch.buffer(v.buf) else { return false };
     let n = s.frames();
     let glide = ch.ramp.filter(|r| v.serial < r.id);
-    let target = ch.start_gain(v.vel, v.pan);
+    // A layer's note: the layer's volume and crossfade gain multiply, its pan and pitch add (spec: audio/note-rules.md
+    // "Layer channels").
+    let layer = v.via.and_then(|w| channels.get(w.layer).map(|l| (l.layer_adds(), w.gain)));
+    let (lv, lp) = layer.map_or((1.0, 0.0), |(a, g)| (a.volume * g, a.pan));
+    let target = ch.start_gain_via(v.vel, v.pan, layer);
     if glide.is_none() && target != v.dest {
         // Any edit smooths over this span (a control point's glide is handled per frame below).
         let len = end.saturating_sub(offset).max(1) as u32;
@@ -2267,7 +2437,7 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
     let (mut gl, mut gr) = v.gain;
     let (dl, dr) = v.delta;
     let mut left = v.ramp_left;
-    let base_step = ch.base_rate * v.step;
+    let base_step = ch.base_rate * v.step * layer.map_or(1.0, |(a, _)| laws::cents_rate(a.cents));
     let mut step = base_step;
     let out = &mut bus[ch.insert];
     // Rate 1 copies samples only while the position is whole (a voice that was pitched keeps its fraction).
@@ -2327,8 +2497,8 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
             // The volume parameter glides linearly and the volume law applies to it; the pan glides linearly
             // in the left / right gains (spec: audio/pattern-controls.md).
             let frames = f64::from(r.pos) + (f - span) as f64 + 1.0;
-            let g = ch.vol_gain(r.v0 + (r.v1 - r.v0) * r.volume_at(frames)) * v.vel;
-            let (a, b) = (laws::channel_pan(ch.pan_of(r.p0) + v.pan), laws::channel_pan(ch.pan_of(r.p1) + v.pan));
+            let g = ch.vol_gain(r.v0 + (r.v1 - r.v0) * r.volume_at(frames)) * v.vel * lv;
+            let (a, b) = (laws::channel_pan(ch.pan_of(r.p0) + v.pan + lp), laws::channel_pan(ch.pan_of(r.p1) + v.pan + lp));
             let x = r.pan_at(frames);
             let (pl, pr) = (a.0 + (b.0 - a.0) * x, a.1 + (b.1 - a.1) * x);
             (gl, gr) = ((g * pl) as f32, (g * pr) as f32);
@@ -3546,6 +3716,195 @@ mod tests {
         assert_eq!(centred, crate::NoteLevels::default());
         assert_eq!(got, vec![(60, half), (62, centred)]);
         assert_eq!(crate::NoteLevels::of_bytes(0, 0, 255), crate::NoteLevels { pan: -1.0, mod_x: -1.0, mod_y: 127.0 / 128.0 });
+    }
+
+    /// Records what a layer's child is given, by frame: note ons (velocity), offs, chokes and tunings (semitones); it
+    /// outputs 1.0 while a note is held.
+    #[derive(Default)]
+    struct Rec {
+        at: u64,
+        log: Vec<(u64, &'static str, u8, f32)>,
+        held: Vec<u8>,
+    }
+
+    impl crate::Instrument for Rec {
+        fn note_on(&mut self, o: u32, key: u8, v: f32) {
+            self.log.push((self.at + u64::from(o), "on", key, v));
+            self.held.push(key);
+        }
+        fn note_off(&mut self, o: u32, key: u8) {
+            self.log.push((self.at + u64::from(o), "off", key, 0.0));
+            self.held.retain(|&k| k != key);
+        }
+        fn choke(&mut self, o: u32, key: u8) {
+            self.log.push((self.at + u64::from(o), "choke", key, 0.0));
+            self.held.retain(|&k| k != key);
+        }
+        fn tune(&mut self, o: u32, key: u8, semitones: f32) {
+            self.log.push((self.at + u64::from(o), "tune", key, semitones));
+        }
+        fn process(&mut self, _rate: u32, l: &mut [f32], r: &mut [f32]) {
+            let v = if self.held.is_empty() { 0.0 } else { 1.0 };
+            l.fill(v);
+            r.fill(v);
+            self.at += l.len() as u64;
+        }
+    }
+
+    /// A project whose channel 0 is a layer with `flags` over the channels of `kinds` (1, 2, ...).
+    fn layered(flags: u32, notes: Vec<Note>, kinds: &[ChannelKind]) -> Project {
+        let mut p = project(notes, vec![]);
+        p.channels[0].kind = ChannelKind::Layer;
+        p.channels[0].layer_children = (1..=kinds.len() as u16).collect();
+        p.channels[0].misc.layer.flags = flags;
+        for (i, &kind) in kinds.iter().enumerate() {
+            p.channels.push(Channel { index: i as u16 + 1, kind, ..channel() });
+        }
+        p
+    }
+
+    /// The engine for `p` with every channel but the first played by a recorder.
+    fn recorded(p: &Project) -> (Engine, Vec<Arc<std::sync::Mutex<Rec>>>) {
+        let mut e = Engine::new(p, &mut SampleLibrary::new(None), 48000, PlayMode::Pattern(1));
+        let recs: Vec<_> = (1..p.channels.len())
+            .map(|c| {
+                let r = Arc::new(std::sync::Mutex::new(Rec::default()));
+                e.set_instrument(c, r.clone());
+                r
+            })
+            .collect();
+        (e, recs)
+    }
+
+    /// The events of kind `kind` a recorder got: (frame, key, value).
+    fn got(r: &Arc<std::sync::Mutex<Rec>>, kind: &str) -> Vec<(u64, u8, f32)> {
+        r.lock().unwrap().log.iter().filter(|l| l.1 == kind).map(|l| (l.0, l.2, l.3)).collect()
+    }
+
+    /// A layer's note makes no sound of its own: every child plays it as its own note, with the layer's pitch on its
+    /// tuning and the layer's volume and pan on its levels (spec: audio/note-rules.md "Layer channels").
+    #[test]
+    fn layer_notes_play_on_every_child_with_the_layers_levels() {
+        let kinds = [ChannelKind::Plugin, ChannelKind::Plugin];
+        let mut p = layered(0, vec![long_note(0, 48, 0)], &kinds);
+        (p.channels[0].volume, p.channels[0].pitch_cents, p.channels[0].pan) = (1.0, 300, 0.5);
+        let (mut e, recs) = recorded(&p);
+        let out = e.render_all(512);
+        let end = laws::tick_to_frame(48.0, 96, 130.0, 48000);
+        for r in &recs {
+            assert_eq!(got(r, "on"), vec![(0, 60, 100.0 / 128.0)]);
+            assert_eq!(got(r, "tune"), vec![(0, 60, 3.0)]);
+            assert_eq!(got(r, "off"), vec![(end, 60, 0.0)]);
+        }
+        // The same notes written on the children themselves: the layer's volume and pan are what differs.
+        let mut direct = p.clone();
+        direct.patterns[0].notes = vec![Note { channel: 1, ..long_note(0, 48, 0) }, Note { channel: 2, ..long_note(0, 48, 0) }];
+        let (mut e, _) = recorded(&direct);
+        let plain = e.render_all(512);
+        let (pl, pr) = laws::channel_pan(0.5);
+        let (cl, cr) = laws::channel_pan(0.0);
+        let layer = laws::channel_gain(1.0);
+        let f = 1000;
+        assert!(plain[f * 2] > 0.1);
+        assert!((f64::from(out[f * 2]) - f64::from(plain[f * 2]) * layer * pl / cl).abs() < 1e-5, "{} {}", out[f * 2], plain[f * 2]);
+        assert!((f64::from(out[f * 2 + 1]) - f64::from(plain[f * 2 + 1]) * layer * pr / cr).abs() < 1e-5);
+    }
+
+    /// Flag 4: one child per note in turn, from the first; flag 1: one at random, drawn from the project's generator
+    /// (seeded and one output taken at the start).
+    #[test]
+    fn layers_hand_notes_on_in_turn_or_at_random() {
+        let notes: Vec<Note> = (0..12).map(|i| long_note(i * 24, 12, 0)).collect();
+        let order = |flags: u32| {
+            let p = layered(flags, notes.clone(), &[ChannelKind::Plugin, ChannelKind::Plugin, ChannelKind::Plugin]);
+            let (mut e, recs) = recorded(&p);
+            e.render_all(512);
+            let mut ons: Vec<(u64, usize)> = recs.iter().enumerate().flat_map(|(c, r)| got(r, "on").into_iter().map(move |o| (o.0, c))).collect();
+            ons.sort_unstable();
+            ons.into_iter().map(|o| o.1).collect::<Vec<usize>>()
+        };
+        assert_eq!(order(os_model::LayerSettings::IN_TURN), [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]);
+        let mut g = layers::Mt19937::for_playback();
+        let drawn: Vec<usize> = (0..12).map(|_| layers::place(g.next_u32(), 3)).collect();
+        assert_eq!(order(os_model::LayerSettings::RANDOM), drawn);
+        assert_eq!(order(os_model::LayerSettings::RANDOM | os_model::LayerSettings::IN_TURN), drawn);
+        // Flags 0: every child gets every note.
+        assert_eq!(order(0).len(), 36);
+    }
+
+    /// The note goes from child to child with its cut numbers: a first child of one-shot voices set to cut itself
+    /// makes the second child's voices belong to its group, so the next layer note cuts both; a layer set to cut
+    /// itself cuts nothing (notes with a length); another channel cuts the children through the layer's "cut by".
+    #[test]
+    fn a_layer_note_carries_its_cut_numbers_from_child_to_child() {
+        let notes = vec![long_note(0, 96, 0), long_note(48, 96, 0)];
+        let at = laws::tick_to_frame(48.0, 96, 130.0, 48000);
+        let mut p = layered(0, notes.clone(), &[ChannelKind::Sampler, ChannelKind::Plugin]);
+        (p.channels[1].misc.cut, p.channels[1].misc.cut_by) = (1, 1);
+        let (mut e, recs) = recorded(&p);
+        e.render_all(512);
+        assert_eq!(got(&recs[0], "choke").first().map(|c| c.0), Some(at));
+        assert_eq!(got(&recs[1], "off").first().map(|c| c.0), Some(at));
+        assert_eq!(got(&recs[1], "on").len(), 2);
+
+        let mut p = layered(0, notes.clone(), &[ChannelKind::Plugin, ChannelKind::Plugin]);
+        (p.channels[0].misc.cut, p.channels[0].misc.cut_by) = (1, 1);
+        let (mut e, recs) = recorded(&p);
+        e.render_all(512);
+        let first_end = laws::tick_to_frame(96.0, 96, 130.0, 48000);
+        for r in &recs {
+            assert_eq!(got(r, "off").first().map(|c| c.0), Some(first_end));
+        }
+
+        // Channel 3 is not a child; its note at tick 48 cuts group 2, which the layer's notes belong to.
+        let mut p = layered(0, vec![long_note(0, 96, 0), Note { channel: 3, ..long_note(48, 12, 0) }], &[ChannelKind::Plugin, ChannelKind::Plugin, ChannelKind::Plugin]);
+        p.channels[0].layer_children = vec![1, 2];
+        p.channels[0].misc.cut_by = 2;
+        p.channels[3].misc.cut = 2;
+        let (mut e, recs) = recorded(&p);
+        e.render_all(512);
+        for r in &recs[..2] {
+            assert_eq!(got(r, "off").first().map(|c| c.0), Some(at));
+        }
+    }
+
+    /// A slide note on the layer moves the voices of the layer's notes on all children; a slide note on a child moves
+    /// that child's own voices, not the layer's.
+    #[test]
+    fn a_layers_slide_note_moves_the_voices_of_its_notes() {
+        let slide = |position: u32, key: u16, channel: u16| Note { key, channel, flags: 0x4000 | Note::SLIDE, ..long_note(position, 0, 0) };
+        let notes = vec![long_note(0, 192, 0), Note { key: 64, channel: 1, ..long_note(0, 192, 0) }, slide(24, 67, 0), slide(48, 76, 1)];
+        let p = layered(0, notes, &[ChannelKind::Plugin, ChannelKind::Plugin]);
+        let (mut e, recs) = recorded(&p);
+        e.render_all(512);
+        let (t24, t48) = (laws::tick_to_frame(24.0, 96, 130.0, 48000), laws::tick_to_frame(48.0, 96, 130.0, 48000));
+        assert_eq!(got(&recs[0], "tune"), vec![(t24, 60, 7.0), (t48, 64, 12.0)]);
+        assert_eq!(got(&recs[1], "tune"), vec![(t24, 60, 7.0)]);
+    }
+
+    /// The engine's own sampler voices of a layer's note: the layer's volume and the crossfade gain multiply the
+    /// child's level (crossfade 64 over two children: 0.75 and 0.25; one child alone gets the position, 0.25).
+    #[test]
+    fn engine_voices_of_a_layer_take_its_volume_and_crossfade() {
+        let kinds = [ChannelKind::Sampler, ChannelKind::Sampler];
+        let mut alone = layered(0, vec![Note { channel: 1, ..long_note(0, 48, 0) }], &kinds);
+        alone.channels[0].volume = 1.0;
+        let reference = peak(&render(&alone), 0);
+        assert!(reference > 0.05);
+        let layer = laws::channel_gain(1.0) as f32;
+        for (children, want) in [(vec![1, 2], 1.0f32), (vec![1], 0.25), (vec![2, 1], 1.0)] {
+            let mut p = alone.clone();
+            p.patterns[0].notes = vec![long_note(0, 48, 0)];
+            p.channels[0].layer_children = children.clone();
+            p.channels[0].misc.layer = os_model::LayerSettings { flags: os_model::LayerSettings::CROSSFADE, crossfade: 64 };
+            let got = peak(&render(&p), 0);
+            assert!((got - reference * layer * want).abs() < 1e-4, "{children:?}: {got} vs {}", reference * layer * want);
+        }
+        // Without the crossfade both children play at full level.
+        let mut p = alone.clone();
+        p.patterns[0].notes = vec![long_note(0, 48, 0)];
+        let got = peak(&render(&p), 0);
+        assert!((got - reference * layer * 2.0).abs() < 1e-4, "{got}");
     }
 
     /// A hosted instrument hears the channel pitch as each note's tuning (the engine's own voices apply it themselves).
