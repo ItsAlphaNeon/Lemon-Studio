@@ -89,15 +89,3 @@ pub fn dll_files() -> Vec<PathBuf> {
 pub fn dll_files_in(fl_dir: &Path) -> Vec<PathBuf> {
     crate::installed(fl_dir).into_iter().map(|p| p.path).collect()
 }
-
-/// Only the installed native *effect* DLLs under the default FL folder. The app offers these
-/// (effects host and render correctly); native generators are not offered in the UI yet because
-/// some abort on load and their output level is not yet right (spec plugins/fruity-abi.md,
-/// "Status"), and an in-process native crash would take the app down.
-pub fn effect_dll_files() -> Vec<PathBuf> {
-    crate::installed(&crate::default_fl_dir())
-        .into_iter()
-        .filter(|p| !p.is_generator)
-        .map(|p| p.path)
-        .collect()
-}

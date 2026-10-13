@@ -16,7 +16,7 @@ pub mod lock;
 pub mod stream;
 pub mod stub;
 
-pub use library::{dll_files, dll_files_in, effect_dll_files, NativeLibrary};
+pub use library::{dll_files, dll_files_in, NativeLibrary};
 
 use std::ffi::{c_char, CString};
 use std::mem::ManuallyDrop;
@@ -93,8 +93,8 @@ pub enum NativeError {
     #[error("{0}: CreatePlugInstance returned null")]
     Create(PathBuf),
     /// The plugin raised an error it did not handle while it was being created (spec: "Crash containment").
-    #[error("{0}: {why} while loading", why = guard::describe(*.1))]
-    Crashed(PathBuf, u32),
+    #[error("{0}: {1} while loading")]
+    Crashed(PathBuf, String),
 }
 
 /// Static information about a loaded plugin.
@@ -162,6 +162,8 @@ pub struct Plugin {
     pub info: PluginInfo,
     /// Exception code of the error that stopped the plugin, 0 while it runs.
     stopped: AtomicU32,
+    /// What stopped it, for the user (`guard::describe_with`).
+    reason: std::sync::OnceLock<String>,
 }
 
 impl Plugin {
@@ -190,7 +192,7 @@ impl Plugin {
                 // Half built: its code may still hold the host and run, so neither is ever freed.
                 std::mem::forget(host);
                 std::mem::forget(lib);
-                return Err(NativeError::Crashed(dll.to_owned(), code));
+                return Err(NativeError::Crashed(dll.to_owned(), guard::describe_with(code, &guard::last_message())));
             }
         };
         trace(&format!("instance at {obj:p}"));
@@ -209,15 +211,22 @@ impl Plugin {
             }
         };
         trace(&format!("info read: {} flags {:#x}", info.long_name, info.flags));
-        let p = Plugin { obj, host: ManuallyDrop::new(host), lib: ManuallyDrop::new(lib), info, stopped: AtomicU32::new(0) };
+        let p = Plugin {
+            obj,
+            host: ManuallyDrop::new(host),
+            lib: ManuallyDrop::new(lib),
+            info,
+            stopped: AtomicU32::new(0),
+            reason: std::sync::OnceLock::new(),
+        };
         p.dispatch(abi::dispatch::SET_SAMPLE_RATE, 0, sample_rate as IntPtr);
         p.dispatch(abi::dispatch::SET_BLOCK_SIZE, 0, max_block as IntPtr);
         p.dispatch(abi::dispatch::PROCESS_MODE, 0, 0);
         drop(data);
-        if let Some(code) = p.stopped() {
+        if let Some(why) = p.stop_reason() {
             // Stopped: never freed (and its drop would wait for `LIFECYCLE`, held here).
             std::mem::forget(p);
-            return Err(NativeError::Crashed(dll.to_owned(), code));
+            return Err(NativeError::Crashed(dll.to_owned(), why));
         }
         Ok(p)
     }
@@ -231,6 +240,12 @@ impl Plugin {
         Some(self.stopped.load(Ordering::Relaxed)).filter(|&c| c != 0)
     }
 
+    /// What stopped the plugin, for the user: "plugin error", with the plugin's own text when it gave a short one.
+    pub fn stop_reason(&self) -> Option<String> {
+        let code = self.stopped()?;
+        Some(self.reason.get().cloned().unwrap_or_else(|| guard::describe(code)))
+    }
+
     /// Calls plugin method `f` with the instance and `args` through the guard. `None` when the plugin is stopped, or
     /// stops in this call (it raised an error it did not handle).
     fn call(&self, f: *const (), args: [IntPtr; 5]) -> Option<IntPtr> {
@@ -241,11 +256,28 @@ impl Plugin {
         match unsafe { guard::call(f, [self.obj as IntPtr, a, b, c, d, e]) } {
             Ok(r) => Some(r),
             Err(code) => {
+                let why = guard::describe_with(code, &guard::last_message());
+                eprintln!("[native] {} stopped in {}: {why}", self.info.long_name, self.method_name(f));
+                let _ = self.reason.set(why);
                 self.stopped.store(code.max(1), Ordering::Relaxed);
-                eprintln!("[native] {} stopped: {}", self.info.long_name, guard::describe(code));
                 None
             }
         }
+    }
+
+    /// The plugin methods that share one function with another method: what a plugin leaves unimplemented (they all
+    /// point at its runtime's "abstract" stub). For diagnostics.
+    pub fn shared_methods(&self) -> Vec<&'static str> {
+        let table = self.vt() as *const abi::PluginVtbl as *const *const ();
+        let slot = |i: usize| unsafe { *table.add(i) };
+        (0..METHOD_NAMES.len()).filter(|&i| (0..METHOD_NAMES.len()).any(|j| j != i && slot(j) == slot(i))).map(|i| METHOD_NAMES[i]).collect()
+    }
+
+    /// The name of plugin method `f` (its place in the method table), for messages.
+    fn method_name(&self, f: *const ()) -> &'static str {
+        const NAMES: [&str; 20] = METHOD_NAMES;
+        let table = self.vt() as *const abi::PluginVtbl as *const *const ();
+        (0..NAMES.len()).find(|&i| unsafe { *table.add(i) } == f).map_or("a plugin method", |i| NAMES[i])
     }
 
     /// Runs `f` holding the plugin's render lock (audio-thread calls; see `lock`).
@@ -295,20 +327,57 @@ impl Plugin {
         self.call(self.vt().save_restore_state as *const (), [s.as_ptr() as IntPtr, 0, 0, 0, 0]).is_some()
     }
 
-    /// Starts a voice. `key` 60 = C5; `velocity` 0..1; `pan` −1..1.
-    pub fn trigger(&mut self, key: f32, velocity: f32, pan: f32, tag: IntPtr) -> IntPtr {
-        let lv = abi::LevelParams { pan, vol: velocity, pitch: key * 100.0, fcut: 0.0, fres: 0.0 };
-        let vp = VoiceParams { init: lv, fin: lv };
-        let vp = &vp as *const VoiceParams as IntPtr;
-        self.locked(|p| p.call(p.vt().trigger_voice as *const (), [vp, tag, 0, 0, 0])).unwrap_or(0)
+    /// Starts a voice with the note's own levels `init` and the final levels `fin` (the note's and its channel's);
+    /// `velocity` (0..1) is what the plugin is told when it asks for the note's velocity. `tag` names the voice in the
+    /// plugin's requests (`take_voice_requests`). `None` when the plugin started no voice (it answers -1, e.g. a sample
+    /// player without a sample) or is stopped.
+    pub fn trigger(&mut self, init: abi::LevelParams, fin: abi::LevelParams, velocity: f32, tag: IntPtr) -> Option<Voice> {
+        self.host.voices().velocity.push((tag, velocity));
+        let params = Box::into_raw(Box::new(VoiceParams { init, fin }));
+        match self.locked(|p| p.call(p.vt().trigger_voice as *const (), [params as IntPtr, tag, 0, 0, 0])) {
+            Some(NO_VOICE) => {
+                // No voice to release or kill (the plugin's Voice_Kill fails on this handle).
+                self.host.voices().velocity.retain(|v| v.0 != tag);
+                drop(unsafe { Box::from_raw(params) });
+                None
+            }
+            Some(handle) => Some(Voice { tag, handle, params }),
+            // Stopped while starting it: the plugin may hold the address, so the levels are never freed.
+            None => None,
+        }
     }
 
-    pub fn release(&mut self, voice: IntPtr) {
-        self.locked(|p| p.call(p.vt().voice_release as *const (), [voice, 0, 0, 0, 0]));
+    /// Note off for `voice`: the plugin goes into its release and asks for the kill when it is done.
+    pub fn release(&mut self, voice: &Voice) {
+        self.locked(|p| p.call(p.vt().voice_release as *const (), [voice.handle, 0, 0, 0, 0]));
     }
 
-    pub fn kill(&mut self, voice: IntPtr) {
-        self.locked(|p| p.call(p.vt().voice_kill as *const (), [voice, 0, 0, 0, 0]));
+    /// Ends `voice` at once and frees it.
+    pub fn kill(&mut self, voice: Voice) {
+        self.locked(|p| p.call(p.vt().voice_kill as *const (), [voice.handle, 0, 0, 0, 0]));
+        self.host.voices().velocity.retain(|v| v.0 != voice.tag);
+        if self.stopped().is_some() {
+            // The plugin may still hold the address of the levels.
+            std::mem::forget(voice);
+        }
+    }
+
+    /// Lets go of `voice` without calling the plugin: it said it freed the voice itself.
+    pub fn forget(&mut self, voice: Voice) {
+        self.host.voices().velocity.retain(|v| v.0 != voice.tag);
+    }
+
+    /// What the plugin asked of its voices since the last call: (voices to kill: the tag, and whether the host frees
+    /// it with `kill` (else `forget`); tags to release).
+    pub fn take_voice_requests(&mut self) -> (Vec<(IntPtr, bool)>, Vec<IntPtr>) {
+        let mut b = self.host.voices();
+        (std::mem::take(&mut b.kill), std::mem::take(&mut b.release))
+    }
+
+    /// Changes the sample rate the plugin works at (dispatcher `SetSampleRate`).
+    pub fn set_sample_rate(&mut self, rate: u32) {
+        self.host.context().sample_rate = rate;
+        self.dispatch(abi::dispatch::SET_SAMPLE_RATE, 0, rate as IntPtr);
     }
 
     /// Full generators: renders up to `out.len()/2` frames, returns frames rendered.
@@ -322,9 +391,9 @@ impl Plugin {
     }
 
     /// Hybrid generators: renders one voice; returns false when it has no more data.
-    pub fn voice_render(&mut self, voice: IntPtr, out: &mut [f32]) -> (usize, bool) {
+    pub fn voice_render(&mut self, voice: &Voice, out: &mut [f32]) -> (usize, bool) {
         let mut n = (out.len() / 2) as i32;
-        let args = [voice, out.as_mut_ptr() as IntPtr, &mut n as *mut i32 as IntPtr, 0, 0];
+        let args = [voice.handle, out.as_mut_ptr() as IntPtr, &mut n as *mut i32 as IntPtr, 0, 0];
         match self.locked(|p| p.call(p.vt().voice_render as *const (), args)) {
             Some(r) => (n.max(0) as usize, r as i32 == 0),
             None => (0, false),
@@ -365,10 +434,6 @@ impl Plugin {
         unsafe { (*self.obj).editor_handle as IntPtr }
     }
 
-    pub fn killed_voices(&mut self) -> Vec<IntPtr> {
-        std::mem::take(&mut self.host.context().killed_voices)
-    }
-
     pub fn host_name(&self) -> CString {
         CString::default()
     }
@@ -387,6 +452,52 @@ impl Drop for Plugin {
             ManuallyDrop::drop(&mut self.host);
             ManuallyDrop::drop(&mut self.lib);
         }
+    }
+}
+
+/// What `TriggerVoice` answers when it started no voice.
+const NO_VOICE: IntPtr = -1;
+
+/// The plugin methods in method-table order.
+const METHOD_NAMES: [&str; 20] = [
+    "DestroyObject", "Dispatcher", "Idle", "SaveRestoreState", "GetName", "ProcessEvent", "ProcessParam", "Eff_Render",
+    "Gen_Render", "TriggerVoice", "Voice_Release", "Voice_Kill", "Voice_ProcessEvent", "Voice_Render", "NewTick",
+    "MIDITick", "MIDIIn", "MsgIn", "OutputVoice_ProcessEvent", "OutputVoice_Kill",
+];
+
+/// A voice a generator plays. The plugin keeps the address of its levels and reads the final ones while the voice
+/// sounds, so they stay here, at one address, until the voice is killed (spec: "Voices").
+pub struct Voice {
+    /// The host's name for the voice in the plugin's requests.
+    pub tag: IntPtr,
+    handle: IntPtr,
+    params: *mut VoiceParams,
+}
+
+// SAFETY: the levels are only touched by the thread driving the plugin, between its calls.
+unsafe impl Send for Voice {}
+
+impl Voice {
+    /// The plugin's own handle for the voice.
+    pub fn handle(&self) -> IntPtr {
+        self.handle
+    }
+
+    /// The levels the voice started with.
+    pub fn init(&self) -> abi::LevelParams {
+        unsafe { (*self.params).init }
+    }
+
+    /// Changes the final levels the plugin reads from now on (a glide, the channel's pitch).
+    pub fn set_final(&mut self, levels: abi::LevelParams) {
+        unsafe { (*self.params).fin = levels };
+    }
+}
+
+impl Drop for Voice {
+    fn drop(&mut self) {
+        // SAFETY: made by `Box::into_raw` in `trigger`; the plugin let go of it (killed, or destroyed).
+        unsafe { drop(Box::from_raw(self.params)) };
     }
 }
 

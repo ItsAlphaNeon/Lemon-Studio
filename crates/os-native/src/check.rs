@@ -64,7 +64,16 @@ pub fn run(args: &[String]) -> i32 {
         *b = *a;
     }
     if desc.is_instrument() {
-        p.process(RATE, &mut l, &mut r);
+        // A note: started, held, released, then everything stopped.
+        p.note_on(0, 60, 100.0 / 128.0);
+        for _ in 0..8 {
+            p.process(RATE, &mut l, &mut r);
+        }
+        p.note_off(0, 60);
+        for _ in 0..8 {
+            p.process(RATE, &mut l, &mut r);
+        }
+        p.reset();
     } else {
         p.process_fx(RATE, &mut l, &mut r);
     }
@@ -96,7 +105,7 @@ fn stop_reason(why: Option<String>, when: &str) -> String {
 
 /// A load error as a short reason: without the DLL path, and loading goes without saying ("plugin error").
 fn reason_of(e: &str) -> String {
-    let e = e.rsplit_once(": ").map_or(e, |(_, rest)| rest);
+    let e = e.split_once(".dll: ").map_or(e, |(_, rest)| rest);
     e.strip_suffix(" while loading").unwrap_or(e).to_string()
 }
 
@@ -420,7 +429,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// The whole check in a hidden child for the installed native effects: `OS_NATIVE_CHECK_PROGRAM` = the app's
+    /// The whole check in a hidden child for the installed native plugins: `OS_NATIVE_CHECK_PROGRAM` = the app's
     /// program (it runs `--native-check`), `OS_NATIVE_CHECK` = comma-separated plugin folder names, or `all`. Prints one
     /// verdict per plugin; nothing shows on screen. Ignored: it loads the user's installed plugins.
     /// `cargo test -p os-native checks_in_a_hidden_child -- --ignored --nocapture`
@@ -431,7 +440,7 @@ mod tests {
             return;
         };
         let dlls: Vec<PathBuf> = if names == "all" {
-            crate::effect_dll_files()
+            crate::dll_files()
         } else {
             names.split(',').filter_map(|n| crate::find_plugin(&crate::default_fl_dir(), n.trim())).collect()
         };
@@ -446,8 +455,10 @@ mod tests {
 
     #[test]
     fn a_load_error_becomes_a_short_reason() {
-        let e = crate::NativeError::Crashed(PathBuf::from(r"C:\x\Y_x64.dll"), crate::guard::RUNTIME_ERROR).to_string();
+        let e = crate::NativeError::Crashed(PathBuf::from(r"C:\x\Y_x64.dll"), "plugin error".into()).to_string();
         assert_eq!(reason_of(&e), "plugin error");
+        let e = crate::NativeError::Crashed(PathBuf::from(r"C:\x\Y_x64.dll"), "plugin error: No file: x".into()).to_string();
+        assert_eq!(reason_of(&e), "plugin error: No file: x");
         assert_eq!(reason_of(r"C:\x\Y_x64.dll: GetProcAddress failed"), "GetProcAddress failed");
     }
 }

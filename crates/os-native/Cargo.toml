@@ -9,6 +9,7 @@ license.workspace = true
 libloading = "0.8"
 thiserror.workspace = true
 os-engine.workspace = true
+os-dsp.workspace = true
 os-host.workspace = true
 
 [build-dependencies]

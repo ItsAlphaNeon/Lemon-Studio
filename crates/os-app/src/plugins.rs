@@ -170,9 +170,8 @@ fn plugin_files() -> Vec<Scan> {
         (os_vst3::find_bundles(&search_dirs(os_vst3::standard_dirs())), |p| os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>)),
     ];
     if os_native::enabled() {
-        // Effects only: native generators are not offered in the UI yet (some abort on load; their
-        // output level is not yet right). An in-process native crash would take the app down.
-        scans.push((os_native::effect_dll_files(), |p| os_native::NativeLibrary::load(p).map(|l| l as Arc<dyn Library>)));
+        // Generators and effects. Each is tried in a child process before its first load here (`native_check`).
+        scans.push((os_native::dll_files(), |p| os_native::NativeLibrary::load(p).map(|l| l as Arc<dyn Library>)));
     }
     scans
 }
@@ -225,8 +224,14 @@ impl Plugins {
         }
         effects.sort_by_key(|a| a.desc.name.to_lowercase());
         if std::env::var_os("OS_DEBUG").is_some() {
-            let native = effects.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
-            eprintln!("[plugins] {} instruments, {} effects ({native} native)", available.len(), effects.len());
+            let native = |l: &[Available]| l.iter().filter(|a| a.desc.format == os_host::Format::Native).count();
+            eprintln!(
+                "[plugins] {} instruments ({} native), {} effects ({} native)",
+                available.len(),
+                native(&available),
+                effects.len(),
+                native(&effects)
+            );
         }
         let native_checks = (!cfg!(test)).then(|| os_native::check::Checks::load(os_paths::user_file(NATIVE_CHECKS)));
         Plugins { available, effects, scale: 1.0, native_checks, ..Plugins::default() }
@@ -248,12 +253,19 @@ impl Plugins {
     /// Whether effect `index` can be created without waiting: anything but a native effect whose check has not run
     /// yet. That check is started in the background; ask again on a later tick.
     pub fn effect_ready(&mut self, index: usize) -> bool {
-        let Some(a) = self.effects.get(index) else { return true };
-        if a.desc.format != os_host::Format::Native {
-            return true;
-        }
+        let path = self.effects.get(index).filter(|a| a.desc.format == os_host::Format::Native).map(|a| a.desc.path.clone());
+        path.is_none_or(|p| self.native_ready(&p))
+    }
+
+    /// `effect_ready` for instrument `index` (of `available`).
+    pub fn instrument_ready(&mut self, index: usize) -> bool {
+        let path = self.available.get(index).filter(|a| a.desc.format == os_host::Format::Native).map(|a| a.desc.path.clone());
+        path.is_none_or(|p| self.native_ready(&p))
+    }
+
+    fn native_ready(&mut self, dll: &std::path::Path) -> bool {
         let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return true };
-        checks.ready(&program, &a.desc.path)
+        checks.ready(&program, dll)
     }
 
     /// Picker labels of the instruments (`labels`), in `available` order.
@@ -2041,14 +2053,82 @@ mod tests {
         eprintln!("RESULT ok (state {} bytes, finite output {finite})", st.len());
     }
 
-    /// With the experimental native host opted in, the scan offers the user's installed FL native
-    /// effects in the effect picker (spec plugins/fruity-abi.md). Skips when FL is not installed.
-    /// Ignored in the default run: it mutates the process `OPENSTUDIO_NATIVE` env var, which is
-    /// unsound to do while other parallel tests read the environment. Run with
-    /// `cargo test -p os-app native_effects_listed_when_opted_in -- --ignored`.
+    /// One installed native generator (`OS_NATIVE_ONE=<folder name>`) through the app's whole path: created on a rack
+    /// row, a note played on an audio thread while its editor is open (spec plugins/fruity-abi.md, "Voices"), state
+    /// saved and restored, closed and dropped. Prints the note's peak and whether it ended after its note off. Loads FL
+    /// DLLs in-process, so ignored; run once per plugin in its own process:
+    /// `OS_NATIVE_ONE="3x Osc" cargo test -p os-app --bin lemonstudio native_generator_lifecycle -- --ignored`.
     #[test]
     #[ignore]
-    fn native_effects_listed_when_opted_in() {
+    fn native_generator_lifecycle() {
+        let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
+        let fl = os_native::default_fl_dir();
+        let dll = os_native::find_plugin(&fl, &name).expect("plugin installed");
+        let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
+        let a = Available { desc: lib.plugins()[0].clone(), lib };
+        let mut pl = Plugins { scale: 1.0, rate: 48000, available: vec![a], ..Plugins::default() };
+        eprintln!("STEP create");
+        if let Err(e) = pl.create(0, 0) {
+            eprintln!("RESULT refused: {e}");
+            return;
+        }
+        let inst = pl.instruments()[0].1.clone();
+        // Held for half a second, then two seconds to end: (peak while held, peak in the last 100 ms, all finite).
+        let audio = std::thread::spawn(move || {
+            let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+            let (mut held, mut tail, mut finite) = (0.0f32, 0.0f32, true);
+            for block in 0..250 {
+                let mut p = inst.lock().unwrap();
+                if block == 0 {
+                    p.note_on(0, 60, 100.0 / 128.0);
+                }
+                if block == 50 {
+                    p.note_off(0, 60);
+                }
+                p.process(48000, &mut l, &mut r);
+                drop(p);
+                let peak = l.iter().chain(&r).fold(0.0f32, |m, s| m.max(s.abs()));
+                finite &= l.iter().chain(&r).all(|s| s.is_finite());
+                if block < 50 {
+                    held = held.max(peak);
+                }
+                if block >= 240 {
+                    tail = tail.max(peak);
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            (held, tail, finite)
+        });
+        eprintln!("STEP window");
+        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        match pl.open_window(0, info) {
+            Ok(()) => {
+                let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+                unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+                pump(&mut pl, 700);
+            }
+            Err(e) => eprintln!("STEP no window: {e}"),
+        }
+        let (held, tail, finite) = audio.join().unwrap();
+        eprintln!("STEP state");
+        let st = pl.state(0).unwrap_or_default();
+        pl.set_state(0, &st);
+        eprintln!("STEP close");
+        pl.close_if_open(0);
+        pump(&mut pl, 100);
+        eprintln!("STEP drop");
+        pl.drop_key(0);
+        eprintln!("RESULT ok (peak {held:.3}, after its end {tail:.4}, state {} bytes, finite output {finite})", st.len());
+    }
+
+    /// With the experimental native host opted in, the scan offers the user's installed FL native
+    /// generators and effects in the pickers (spec plugins/fruity-abi.md). Skips when FL is not installed.
+    /// Ignored in the default run: it mutates the process `OPENSTUDIO_NATIVE` env var, which is
+    /// unsound to do while other parallel tests read the environment. Run with
+    /// `cargo test -p os-app native_plugins_listed_when_opted_in -- --ignored`.
+    #[test]
+    #[ignore]
+    fn native_plugins_listed_when_opted_in() {
         let fl = os_native::default_fl_dir();
         if !fl.join("Plugins").join("Fruity").join("Effects").is_dir() {
             return;
@@ -2066,5 +2146,8 @@ mod tests {
             baseline.effects.iter().all(|a| a.desc.format != os_host::Format::Native),
             "native effects must not appear without the opt-in"
         );
+        let native = |l: &[Available]| l.iter().filter(|a| a.desc.format == os_host::Format::Native).map(|a| a.desc.name.clone()).collect::<Vec<_>>();
+        assert!(native(&opted.available).iter().any(|n| n == "3x Osc"), "native generators should be listed when opted in");
+        assert!(native(&baseline.available).is_empty(), "native generators must not appear without the opt-in");
     }
 }

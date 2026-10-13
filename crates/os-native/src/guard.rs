@@ -6,6 +6,7 @@
 //
 // spec: plugins/fruity-abi.md
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::abi::IntPtr;
@@ -19,6 +20,21 @@ pub const ACCESS_VIOLATION: u32 = 0xC000_0005;
 /// A plugin of this process raised an error that was contained.
 static TRIPPED: AtomicBool = AtomicBool::new(false);
 
+/// What a contained error was (the layout `guard.c` fills).
+#[repr(C)]
+struct Fault {
+    code: u32,
+    address: usize,
+    params: [usize; 2],
+    /// The text of the plugin runtime's error object (UTF-16, 0-terminated), empty when there is none.
+    message: [u16; 256],
+}
+
+thread_local! {
+    /// The text of the last contained error on this thread (`last_message`).
+    static LAST_MESSAGE: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
 #[cfg(native_guard)]
 unsafe extern "C" {
     fn os_native_guarded_call(
@@ -30,7 +46,7 @@ unsafe extern "C" {
         e: IntPtr,
         g: IntPtr,
         ret: *mut IntPtr,
-        code: *mut u32,
+        fault: *mut Fault,
     ) -> i32;
 }
 
@@ -44,13 +60,23 @@ unsafe extern "C" {
 pub unsafe fn call(f: *const (), args: [IntPtr; 6]) -> Result<IntPtr, u32> {
     #[cfg(native_guard)]
     {
-        let (mut ret, mut code) = (0, 0u32);
+        let mut ret = 0;
+        let mut fault = Fault { code: 0, address: 0, params: [0; 2], message: [0; 256] };
         let [a, b, c, d, e, g] = args;
-        if unsafe { os_native_guarded_call(f, a, b, c, d, e, g, &mut ret, &mut code) } != 0 {
+        if unsafe { os_native_guarded_call(f, a, b, c, d, e, g, &mut ret, &mut fault) } != 0 {
             Ok(ret)
         } else {
             TRIPPED.store(true, Ordering::Relaxed);
-            Err(code)
+            let len = fault.message.iter().position(|&c| c == 0).unwrap_or(fault.message.len());
+            let text = String::from_utf16_lossy(&fault.message[..len]);
+            if trace() {
+                eprintln!(
+                    "[guard] {:#010X} at {:#x} (params {:#x}, {:#x}) {text:?}",
+                    fault.code, fault.address, fault.params[0], fault.params[1]
+                );
+            }
+            LAST_MESSAGE.with(|m| *m.borrow_mut() = text);
+            Err(fault.code)
         }
     }
     #[cfg(not(native_guard))]
@@ -59,6 +85,16 @@ pub unsafe fn call(f: *const (), args: [IntPtr; 6]) -> Result<IntPtr, u32> {
         let [a, b, c, d, e, g] = args;
         Ok(unsafe { std::mem::transmute::<*const (), Method>(f)(a, b, c, d, e, g) })
     }
+}
+
+/// The text the plugin's runtime gave the last error contained on this thread ("" when it gave none): what the
+/// plugin would have shown in its own error box.
+pub fn last_message() -> String {
+    LAST_MESSAGE.with(|m| m.borrow().clone())
+}
+
+fn trace() -> bool {
+    std::env::var_os("OS_NATIVE_TRACE").is_some()
 }
 
 /// Whether plugin errors are contained in this build.
@@ -92,6 +128,17 @@ pub fn describe(code: u32) -> String {
         RUNTIME_ERROR => "plugin error".into(),
         ACCESS_VIOLATION => "memory error".into(),
         c => format!("exception {c:#010X}"),
+    }
+}
+
+/// `describe` with the plugin's own text when it gave a short one: `plugin error: List index out of bounds (0)`.
+pub fn describe_with(code: u32, message: &str) -> String {
+    let text = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text.trim_end_matches('.');
+    if text.is_empty() || text.chars().count() > 100 {
+        describe(code)
+    } else {
+        format!("{}: {text}", describe(code))
     }
 }
 
@@ -129,5 +176,33 @@ mod tests {
             0
         }
         assert_eq!(unsafe { call(raise as *const (), [0; 6]) }, Err(RUNTIME_ERROR));
+    }
+
+    /// A runtime error's object: class pointer, then the message as a counted UTF-16 string.
+    #[cfg(native_guard)]
+    #[test]
+    fn a_runtime_error_gives_its_message() {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn RaiseException(code: u32, flags: u32, n: u32, args: *const usize);
+        }
+        #[repr(C)]
+        struct Counted {
+            len: i32,
+            text: [u16; 9],
+        }
+        static TEXT: Counted = Counted { len: 9, text: [b'B' as u16, b'a' as u16, b'd' as u16, b' ' as u16, b'i' as u16, b'n' as u16, b'd' as u16, b'e' as u16, b'x' as u16] };
+        static mut OBJ: [usize; 2] = [0, 0];
+        unsafe extern "system" fn raise() -> IntPtr {
+            unsafe {
+                OBJ[1] = TEXT.text.as_ptr() as usize;
+                let args = [0usize, std::ptr::addr_of!(OBJ) as usize];
+                RaiseException(RUNTIME_ERROR, 1, 2, args.as_ptr());
+            }
+            0
+        }
+        assert_eq!(unsafe { call(raise as *const (), [0; 6]) }, Err(RUNTIME_ERROR));
+        assert_eq!(last_message(), "Bad index");
+        assert_eq!(describe_with(RUNTIME_ERROR, &last_message()), "plugin error: Bad index");
     }
 }
