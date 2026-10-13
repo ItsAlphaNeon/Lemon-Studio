@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use os_host::{Descriptor, Library, SharedPlugin};
 use os_engine::{SharedEffect, SharedInstrument};
@@ -36,13 +37,61 @@ pub struct Hosted {
     pub link: Option<os_hostlink::Link>,
     /// The app was told that the instance stopped after a crash.
     stop_told: bool,
+    /// Its attention count, read without locking it (`os_host::Attention`); `None`: looked at on every tick.
+    pub attention: Option<Arc<os_host::Attention>>,
+    /// The count and time `idle` last looked at it (`Hosted::due`).
+    seen: Look,
 }
+
+/// When the UI last locked an instance for one of its per-tick jobs: the attention count it acted on, and when.
+#[derive(Debug, Clone, Copy)]
+pub struct Look {
+    pub count: u64,
+    pub at: Instant,
+}
+
+impl Look {
+    /// Never looked at yet: due at once.
+    pub fn never() -> Look {
+        Look { count: u64::MAX, at: Instant::now() }
+    }
+}
+
+/// An instance whose count did not move is still looked at this often (anything a plugin did not report).
+const LOOK_EVERY: Duration = Duration::from_millis(250);
 
 impl Hosted {
     /// A newly hosted instance, without a window.
     pub fn new(plugin: SharedPlugin) -> Hosted {
-        let (meter, name) = plugin.lock().map(|p| (p.meter(), p.desc().name.clone())).unwrap_or_default();
-        Hosted { plugin, meter, name, #[cfg(plugin_windows)] window: None, #[cfg(plugin_windows)] link: None, stop_told: false }
+        let (meter, attention, name) = plugin.lock().map(|p| (p.meter(), p.attention(), p.desc().name.clone())).unwrap_or_default();
+        Hosted {
+            plugin,
+            meter,
+            name,
+            #[cfg(plugin_windows)]
+            window: None,
+            #[cfg(plugin_windows)]
+            link: None,
+            stop_told: false,
+            attention,
+            seen: Look::never(),
+        }
+    }
+
+    /// Whether a per-tick job last done at `last` should lock the instance now, and the look to remember if it does:
+    /// its attention count moved, its editor is open, it has no count, or `LOOK_EVERY` passed. Otherwise the UI leaves
+    /// it to the audio thread (spec: audio/implementing.md "Playing live").
+    pub fn due(&self, last: Look) -> Option<Look> {
+        let now = Instant::now();
+        let Some(a) = &self.attention else {
+            return Some(Look { count: 0, at: now });
+        };
+        let count = a.count();
+        #[cfg(plugin_windows)]
+        let editor = self.window.is_some();
+        #[cfg(not(plugin_windows))]
+        let editor = false;
+        (count != last.count || editor || now.duration_since(last.at) >= LOOK_EVERY).then_some(Look { count, at: now })
     }
 
     /// The instance stopped after a crash.
@@ -734,7 +783,9 @@ impl Plugins {
             }
         }
         for (&row, h) in &mut self.hosted {
-            if let Ok(mut p) = h.plugin.try_lock() {
+            let look = h.due(h.seen);
+            if let Some(mut p) = look.and_then(|_| h.plugin.try_lock().ok()) {
+                h.seen = look.unwrap_or(h.seen);
                 // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
                 if let (Some(code), false) = (p.stopped(), h.stop_told) {
                     h.stop_told = true;
@@ -2459,6 +2510,27 @@ mod tests {
         fn load_state(&mut self, _: &[u8]) -> bool {
             false
         }
+    }
+
+    /// The UI locks an instance for its per-tick jobs only when it has work: its attention count moved, its editor is
+    /// open, or `LOOK_EVERY` passed; an instance without a count is looked at on every tick (spec:
+    /// audio/implementing.md "Playing live").
+    #[test]
+    fn instances_are_looked_at_when_they_ask() {
+        let fx = &builtin_effects()[0];
+        let h = Hosted::new(fx.lib.clone().create(&fx.desc.id).unwrap());
+        let a = h.attention.clone().expect("a built-in plugin has a count");
+        let first = h.due(Look::never()).expect("a new instance is looked at");
+        assert!(h.due(first).is_none(), "nothing new: left alone");
+        a.raise();
+        let next = h.due(first).expect("it asked");
+        assert!(next.count > first.count);
+        assert!(h.due(next).is_none());
+        assert!(h.due(Look { at: next.at - LOOK_EVERY, ..next }).is_some(), "looked at after a while anyway");
+        let untracked = Hosted::new(Arc::new(Mutex::new(Tracked(fx.desc.clone(), Arc::new(Mutex::new(None))))));
+        assert!(untracked.attention.is_none());
+        let seen = untracked.due(Look::never()).unwrap();
+        assert!(untracked.due(seen).is_some(), "no count: every tick");
     }
 
     /// A removed instance the engine still plays is destroyed on the UI thread once the engine lets go of it on its own

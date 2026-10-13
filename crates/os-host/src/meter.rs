@@ -5,6 +5,24 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
+/// A count an instance raises when it has work for the UI thread (callbacks it asked for, parameter events for the
+/// app, a flush, a restart, a new rate). The UI locks an instance only when its count moved since it last looked (or
+/// its editor is open, or a while has passed), so it rarely holds an instance the audio thread is about to render
+/// (spec: audio/implementing.md "Playing live"). Raised from any thread; never blocks.
+#[derive(Debug, Default)]
+pub struct Attention(AtomicU64);
+
+impl Attention {
+    pub fn raise(&self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
+
+    /// The count so far: a reader that saw a lower one has work waiting.
+    pub fn count(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Meter {
     /// Nanoseconds spent in the instance's processing calls since it was created.

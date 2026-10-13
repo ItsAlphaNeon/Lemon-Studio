@@ -74,6 +74,8 @@ impl Plugin {
             plain = plain.round();
         }
         self.auto.push((offset, id, plain));
+        // A sleeping instance takes it in the UI thread's flush.
+        self.host_data.attention.raise();
     }
 
     /// Adds this chunk's automation values (time < `n`) to `pvals` after the host edits, in time order, and moves the
@@ -116,5 +118,9 @@ impl Plugin {
             }
         }
         self.processed = false;
+        // Edits still waiting: look again on the next tick.
+        if !self.auto.is_empty() || !self.param_queue.is_empty() {
+            self.host_data.attention.raise();
+        }
     }
 }

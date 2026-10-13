@@ -21,7 +21,7 @@ mod meter;
 pub mod runloop;
 
 pub use guarded::{share, Guarded};
-pub use meter::Meter;
+pub use meter::{Attention, Meter};
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -242,6 +242,11 @@ pub trait Plugin: Instrument + HostedEffect + Send {
 
     /// The instance's meter: processing time and voices, readable without locking the instance ([`Guarded`] keeps it).
     fn meter(&self) -> Option<Arc<Meter>> {
+        None
+    }
+
+    /// Its attention count ([`Attention`]); `None`: the UI looks at it on every tick.
+    fn attention(&self) -> Option<Arc<Attention>> {
         None
     }
 }

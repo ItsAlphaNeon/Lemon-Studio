@@ -9,7 +9,8 @@
 //       flp/events/mixer.md (routing), audio/pattern-controls.md (repeat, control points),
 //       audio/channel-envelopes.md (volume and pitch envelopes), audio/time-stretch.md
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::time::{Duration, Instant};
 
 use os_model::{ChannelKind, ClipSource, ControlPoint, Project, Stretching};
 
@@ -17,7 +18,7 @@ use crate::clock::Clock;
 use os_dsp::glide::Glide;
 use crate::effects::Effect;
 use crate::envelope;
-use crate::instrument::{SharedInstrument, Slot, TransportInfo};
+use crate::instrument::{Instrument, SharedInstrument, Slot, TransportInfo};
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
@@ -551,6 +552,15 @@ pub struct Engine {
     /// instrument (spec: audio/note-rules.md).
     inst_notes: Vec<(usize, u32, notes::Note)>,
     note_voices: Vec<notes::Voices>,
+    /// Per instrument channel: the frames of the ticks its instrument missed (still busy after `BUSY_WAIT`) and the
+    /// notes it missed (channel, note); both are made up when it is reached again, so it stays in time with the song.
+    inst_owed: Vec<usize>,
+    inst_missed: Vec<(usize, notes::Note)>,
+    /// When this tick stops waiting for hosted plugins busy elsewhere (set at its first wait, `busy_wait` from then).
+    busy_until: Option<Instant>,
+    busy_wait: Duration,
+    /// Ticks hosted plugins missed since `take_missed` (each heard as a gap on its channel or track).
+    missed: u64,
     scratch: (Vec<f32>, Vec<f32>),
     /// Dry copy of a track buffer for slots mixed below 100 %.
     fx_dry: Vec<f32>,
@@ -572,6 +582,12 @@ pub struct Engine {
 
 /// Seconds an instrument keeps running after its last note (a Lemon Studio choice).
 const INSTRUMENT_TAIL_SECONDS: u64 = 5;
+
+/// How long one tick waits in all for hosted plugins that are busy elsewhere: the UI thread holds an instance for
+/// microseconds at a time (its housekeeping), longer only to open an editor, load a state or restart it. A plugin
+/// still busy after that misses the tick (spec: audio/implementing.md "Playing live").
+const BUSY_WAIT: Duration = Duration::from_millis(2);
+
 /// A tick whose every output sample stays below this magnitude (-96 dB) is quiet: the first quiet tick at or after
 /// the song's end is the file's last (spec: audio/timing.md, "Where the file ends").
 const QUIET: f32 = 1.584_893_1e-5;
@@ -904,6 +920,11 @@ impl Engine {
             inst_fine: Vec::new(),
             inst_notes: Vec::with_capacity(64),
             note_voices: vec![notes::Voices::default(); project.channels.len()],
+            inst_owed: Vec::new(),
+            inst_missed: Vec::new(),
+            busy_until: None,
+            busy_wait: BUSY_WAIT,
+            missed: 0,
             scratch: (Vec::new(), Vec::new()),
             fx_dry: Vec::new(),
             inst_tail: 0,
@@ -922,6 +943,11 @@ impl Engine {
             }
             ch.plugin = true;
             ch.instrument = Slot(Some(inst));
+            // A new instance owes nothing its predecessor missed.
+            if let Some(o) = self.inst_owed.get_mut(channel) {
+                *o = 0;
+            }
+            self.inst_missed.retain(|m| m.0 != channel);
         }
     }
 
@@ -934,6 +960,12 @@ impl Engine {
         t.effects.retain(|e| e.slot != slot);
         let at = t.effects.partition_point(|e| e.slot < slot);
         t.effects.insert(at, FxSlot { slot, on: t.slot_on[slot], mix: t.slot_mix[slot], fx: Fx::Hosted(fx) });
+    }
+
+    /// Ticks hosted plugins missed since the last call (each one still busy elsewhere after the tick's wait), heard as
+    /// a gap on its channel or mixer track.
+    pub fn take_missed(&mut self) -> u64 {
+        std::mem::take(&mut self.missed)
     }
 
     /// Peak level per mixer track (L, R) since the last call, after each track's fader; resets them. `out` keeps the
@@ -1223,6 +1255,17 @@ impl Engine {
         self.inst_offs.retain(|o| o.1 < n);
         self.inst_shapes = std::mem::take(&mut old.inst_shapes);
         self.inst_shapes.retain(|s| s.0 < n);
+        // An instance that plays on still owes what it missed; a new one starts afresh.
+        let same = |c: usize| match (self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()), old.channels.get(c).and_then(|ch| ch.instrument.0.as_ref())) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        let owed: Vec<usize> = old.inst_owed.iter().enumerate().map(|(c, &o)| if same(c) { o } else { 0 }).collect();
+        let mut missed = std::mem::take(&mut old.inst_missed);
+        missed.retain(|m| same(m.0));
+        self.inst_owed = owed;
+        self.inst_missed = missed;
+        self.missed = old.missed;
         // The main volume glides from where it was.
         self.main_glide = old.main_glide;
         self.exporting = old.exporting;
@@ -1400,6 +1443,7 @@ impl Engine {
         let tick = self.tick;
         let (start, len) = self.clock.advance();
         let song = self.transport_at(start);
+        self.busy_until = None;
         self.run_controls();
         self.run_automation(len);
         self.run_param_automation(len);
@@ -1622,7 +1666,8 @@ impl Engine {
     }
 
     /// Sends this tick's note events to each instrument and mixes its output into the channel's insert with the
-    /// channel's volume and pan. An instrument that is busy (locked elsewhere) is skipped for the tick.
+    /// channel's volume and pan. An instrument busy elsewhere is waited for (`lock_busy`); one still busy misses the
+    /// tick and makes it up when it is reached again.
     fn render_instruments(&mut self, n: usize, song: &TransportInfo) {
         for (ch, key, vel) in self.inst_live.drain(..) {
             self.inst_events.push(if vel < 0.0 { notes::Event::off(ch, 0, key) } else { notes::Event::on(ch, 0, key, vel) });
@@ -1644,17 +1689,21 @@ impl Engine {
         }
         let mut active = false;
         for (c, ch) in self.channels.iter().enumerate() {
-            let Some(inst) = &ch.instrument.0 else { continue };
-            let Ok(mut inst) = inst.try_lock() else {
+            // A poisoned instance (it panicked while held) stays silent.
+            let Some(inst) = ch.instrument.0.as_ref().filter(|i| !i.is_poisoned()) else { continue };
+            let first = self.inst_notes.partition_point(|e| e.0 < c);
+            let notes = self.inst_notes[first..].iter().take_while(|e| e.0 == c);
+            let Some(mut inst) = lock_busy(inst, &mut self.busy_until, self.busy_wait, self.exporting) else {
+                // Still busy: it misses the tick. Its notes wait and its frames are owed, so it stays in time.
                 self.params.resend_channel(c);
+                self.inst_missed.extend(notes.map(|&(c, _, note)| (c, note)));
+                if self.inst_owed.len() <= c {
+                    self.inst_owed.resize(c + 1, 0);
+                }
+                self.inst_owed[c] += n;
+                self.missed += 1;
                 continue;
             };
-            inst.transport(song);
-            let own_levels = inst.channel_levels(ch.volume as f32, ch.pan as f32);
-            // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md Â§2).
-            for (off, index, value) in self.params.channel_span(c, 0, n) {
-                inst.param(off, index, value);
-            }
             // The channel's pitch (knob, control points, automation, fine tune, root note, main pitch) reaches the
             // instrument as each note's tuning, with the note's fine pitch, on top of any glide; notes keep the pitch they
             // started with.
@@ -1664,25 +1713,37 @@ impl Engine {
                 self.inst_fine.resize(c + 1, [0.0; 128]);
             }
             let fines = &mut self.inst_fine[c];
-            let first = self.inst_notes.partition_point(|e| e.0 < c);
-            for &(_, off, note) in self.inst_notes[first..].iter().take_while(|e| e.0 == c) {
-                let off = off.min(n.saturating_sub(1) as u32);
-                match note {
-                    notes::Note::Choke(key) => inst.choke(off, key),
-                    notes::Note::Off(key) => inst.note_off(off, key),
-                    notes::Note::On { key, vel, start, fine } => {
-                        if start > 0.0 {
-                            inst.note_on_from(off, key, vel, start);
-                        } else {
-                            inst.note_on(off, key, vel);
-                        }
-                        fines[usize::from(key & 127)] = fine;
-                        if shift + fine != 0.0 {
-                            inst.tune(off, key, shift + fine);
-                        }
+            // Ticks it missed are made up first: their notes at once, then their frames, unheard (at most a second;
+            // an instance held longer than that loses that much of its place).
+            let owed = self.inst_owed.get_mut(c).map_or(0, std::mem::take);
+            if owed > 0 || self.inst_missed.iter().any(|m| m.0 == c) {
+                inst.transport(song);
+                let mut i = 0;
+                while i < self.inst_missed.len() {
+                    if self.inst_missed[i].0 == c {
+                        send_note(&mut *inst, 0, self.inst_missed.remove(i).1, shift, fines);
+                    } else {
+                        i += 1;
                     }
-                    notes::Note::Tune(key, semitones) => inst.tune(off, key, semitones + shift + fines[usize::from(key & 127)]),
                 }
+                let mut left = owed.min(self.rate as usize);
+                while left > 0 {
+                    let k = left.min(self.scratch.0.len());
+                    if k == 0 {
+                        break;
+                    }
+                    inst.process(self.rate, &mut self.scratch.0[..k], &mut self.scratch.1[..k]);
+                    left -= k;
+                }
+            }
+            inst.transport(song);
+            let own_levels = inst.channel_levels(ch.volume as f32, ch.pan as f32);
+            // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md Â§2).
+            for (off, index, value) in self.params.channel_span(c, 0, n) {
+                inst.param(off, index, value);
+            }
+            for &(_, off, note) in notes {
+                send_note(&mut *inst, off.min(n.saturating_sub(1) as u32), note, shift, fines);
             }
             let (l, r) = (&mut self.scratch.0[..n], &mut self.scratch.1[..n]);
             inst.process(self.rate, l, r);
@@ -1728,11 +1789,12 @@ impl Engine {
             let mut buf = std::mem::take(&mut self.bus[t]);
             let rate = self.rate;
             let (dry, l, r) = (&mut self.fx_dry, &mut self.scratch.0, &mut self.scratch.1);
+            let busy = (&mut self.busy_until, self.busy_wait, self.exporting, &mut self.missed);
             let track = &mut self.tracks[t];
             // A slot runs when its own switch is on and the track's slots are enabled (spec: audio/mixer.md).
             if track.slots_enabled {
                 for fx in &mut track.effects {
-                    run_slot(fx, &mut buf, rate, song, dry, l, r);
+                    run_slot(fx, &mut buf, rate, song, dry, l, r, (&mut *busy.0, busy.1, busy.2, &mut *busy.3));
                 }
             }
             track.eq.process(&mut buf);
@@ -1997,7 +2059,17 @@ fn blackman(t: f64) -> f64 {
 }
 
 /// One mixer slot over interleaved `buf`: skipped when its LED is off, blended with the dry signal by its mix level.
-fn run_slot(fx: &mut FxSlot, buf: &mut [f32], rate: u32, song: &TransportInfo, dry: &mut Vec<f32>, l: &mut Vec<f32>, r: &mut Vec<f32>) {
+#[allow(clippy::too_many_arguments)]
+fn run_slot(
+    fx: &mut FxSlot,
+    buf: &mut [f32],
+    rate: u32,
+    song: &TransportInfo,
+    dry: &mut Vec<f32>,
+    l: &mut Vec<f32>,
+    r: &mut Vec<f32>,
+    (until, wait, export, missed): (&mut Option<Instant>, Duration, bool, &mut u64),
+) {
     if !fx.on || fx.mix <= 0.0 {
         return;
     }
@@ -2009,8 +2081,12 @@ fn run_slot(fx: &mut FxSlot, buf: &mut [f32], rate: u32, song: &TransportInfo, d
     match &mut fx.fx {
         Fx::Own(e) => e.process(buf),
         Fx::Hosted(h) => {
-            // A busy instance (its window is being set up) passes the sound through for this block.
-            let Ok(mut h) = h.try_lock() else { return };
+            // An instance still busy elsewhere after the tick's wait passes the sound through for this tick (a
+            // poisoned one always does).
+            let Some(mut h) = lock_busy(h, until, wait, export) else {
+                *missed += u64::from(!h.is_poisoned());
+                return;
+            };
             let n = buf.len() / 2;
             l.clear();
             r.clear();
@@ -2030,6 +2106,47 @@ fn run_slot(fx: &mut FxSlot, buf: &mut [f32], rate: u32, song: &TransportInfo, d
         for (o, x) in buf.iter_mut().zip(dry.iter()) {
             *o = *o * m + *x * d;
         }
+    }
+}
+
+/// Hands one note event to an instrument at frame `off` of its next block. `shift`: the channel's pitch in semitones;
+/// `fines`: per key, the fine pitch of the note last started there (notes keep the pitch they started with).
+fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, shift: f32, fines: &mut [f32; 128]) {
+    match note {
+        notes::Note::Choke(key) => inst.choke(off, key),
+        notes::Note::Off(key) => inst.note_off(off, key),
+        notes::Note::On { key, vel, start, fine } => {
+            if start > 0.0 {
+                inst.note_on_from(off, key, vel, start);
+            } else {
+                inst.note_on(off, key, vel);
+            }
+            fines[usize::from(key & 127)] = fine;
+            if shift + fine != 0.0 {
+                inst.tune(off, key, shift + fine);
+            }
+        }
+        notes::Note::Tune(key, semitones) => inst.tune(off, key, semitones + shift + fines[usize::from(key & 127)]),
+    }
+}
+
+/// Locks a hosted plugin the UI thread also uses. While it is busy there the tick waits, until `until` (set at the
+/// tick's first wait, `wait` from then); `None` once that has passed. An export waits as long as it takes.
+fn lock_busy<'a, T: ?Sized>(m: &'a Mutex<T>, until: &mut Option<Instant>, wait: Duration, export: bool) -> Option<MutexGuard<'a, T>> {
+    if export {
+        return m.lock().ok();
+    }
+    loop {
+        match m.try_lock() {
+            Ok(g) => return Some(g),
+            Err(TryLockError::Poisoned(_)) => return None,
+            Err(TryLockError::WouldBlock) => {}
+        }
+        let now = Instant::now();
+        if now >= *until.get_or_insert(now + wait) {
+            return None;
+        }
+        std::thread::yield_now();
     }
 }
 
@@ -2562,6 +2679,60 @@ mod tests {
         assert!((frames[held] - g).abs() < 1e-6, "{} vs {g}", frames[held]);
         // (The probe holds its level for a whole process call; the next span after the note-off is silent.)
         assert_eq!(frames[(off as usize + 1024) * 2], 0.0);
+    }
+
+    /// spec: audio/implementing.md "Playing live": an instrument the UI thread holds for a moment is waited for, so it
+    /// misses no frame and no note.
+    #[test]
+    fn instruments_busy_for_a_moment_are_waited_for() {
+        let mut p = project(vec![long_note(0, 48, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.busy_wait = Duration::from_secs(30);
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        let held = probe.lock().unwrap();
+        let render = std::thread::spawn(move || {
+            let mut out = vec![0.0f32; 512 * 2];
+            e.process(&mut out);
+            (e, out)
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        drop(held);
+        let (mut e, out) = render.join().unwrap();
+        assert_eq!(e.take_missed(), 0);
+        let p = probe.lock().unwrap();
+        assert_eq!(p.at, e.frame, "every rendered frame was processed");
+        assert_eq!(p.log.iter().map(|l| (l.0, l.1)).collect::<Vec<_>>(), vec![(0, true)]);
+        assert!(out.iter().all(|v| *v > 0.0), "the note sounds from the first frame");
+    }
+
+    /// An instrument still busy after the wait misses the tick: its notes wait and its frames are made up when it is
+    /// reached again, so it plays on in time (heard as a gap, not as a shift).
+    #[test]
+    fn instruments_busy_too_long_catch_up() {
+        let mut p = project(vec![long_note(0, 96, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.busy_wait = Duration::ZERO;
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        let mut out = vec![0.0f32; 512 * 2];
+        let held = probe.lock().unwrap();
+        e.process(&mut out);
+        drop(held);
+        let missed = e.take_missed();
+        assert!(missed >= 2, "{missed}");
+        assert!(out.iter().all(|v| *v == 0.0), "a gap while it is busy");
+        assert_eq!(probe.lock().unwrap().at, 0);
+        e.process(&mut out);
+        let p = probe.lock().unwrap();
+        assert_eq!(p.at, e.frame, "in time again");
+        assert_eq!(p.log.iter().map(|l| (l.0, l.1)).collect::<Vec<_>>(), vec![(0, true)], "the note it missed, where it was due");
+        assert!(out[out.len() - 2] > 0.0, "playing again");
+        assert_eq!(e.take_missed(), 0);
     }
 
     /// A sampler channel played by a hosted sampler (Lemon Studio's Open Sampler): its notes go to the instrument, the

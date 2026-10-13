@@ -103,6 +103,8 @@ pub struct Shared {
     pub restart: AtomicI32,
     /// Size the editor asked for (`resizeView`).
     pub size: Mutex<Option<(i32, i32)>>,
+    /// Raised with everything above and when the audio thread leaves work for the UI thread.
+    pub attention: Arc<os_host::Attention>,
 }
 
 /// Most plug-in edits kept until the app takes them.
@@ -116,6 +118,7 @@ impl Shared {
                 None => q.push((id, v)),
             }
         }
+        self.attention.raise();
     }
 
     fn event(&self, e: os_host::ParamEvent) {
@@ -124,6 +127,7 @@ impl Shared {
                 v.push(e);
             }
         }
+        self.attention.raise();
     }
 }
 
@@ -347,6 +351,7 @@ impl IComponentHandler for Handler {
 
     unsafe fn restart_component(&self, flags: i32) -> tresult {
         self.shared.restart.fetch_or(flags, Ordering::AcqRel);
+        self.shared.attention.raise();
         os_host::wake();
         kResultOk
     }
@@ -429,6 +434,7 @@ impl IPlugFrame for Frame {
         if let Ok(mut s) = self.shared.size.lock() {
             *s = Some((r.right - r.left, r.bottom - r.top));
         }
+        self.shared.attention.raise();
         // The host frame follows on its next tick; the view hears its new size now.
         if let Some(v) = view.upgrade() {
             unsafe { v.on_size(new_size) };
