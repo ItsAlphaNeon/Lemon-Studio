@@ -423,24 +423,61 @@ struct MixTrack {
     eq: os_dsp::mixer::TrackEq,
     /// Insert effects in slot order (applied before the fader).
     effects: Vec<FxSlot>,
-    /// Slot LEDs and mix levels by slot, for hosted effects attached later.
+    /// Slot switches and stored mix levels (0..12800) by slot, for hosted effects attached later.
     slot_on: [bool; 10],
-    slot_mix: [f32; 10],
+    slot_mix: [i32; 10],
     /// Largest |sample| per side after the fader since the meters last read them.
     peak: [f32; 2],
     /// The fader matrix's target gains `[[L←L, L←R], [R←L, R←R]]`, and the gains as they glide towards them.
     matrix: [[f32; 2]; 2],
     gains: [[Glide; 2]; 2],
-    /// (destination, send gain). Sidechain-only routes (level 0) are dropped.
-    routes: Vec<(usize, f32)>,
+    /// The track's sends. Routes at level 0 (sidechain only) pass no audio but stay: automation may raise them.
+    routes: Vec<Route>,
+    /// The settings as stored, put back when playback starts at another position.
+    stored: Stored,
 }
 
-/// One filled mixer slot: Lemon Studio's own effect or a hosted plugin, with the slot's LED and mix level.
+/// A mixer track's settings as the project stores them.
+#[derive(Debug, Clone)]
+struct Stored {
+    vol: i32,
+    pan: i32,
+    sep: i32,
+    eq: [[i32; 3]; 3],
+    slot_on: [bool; 10],
+    slot_mix: [i32; 10],
+    /// Send gains, one per route.
+    sends: Vec<f32>,
+}
+
+/// A send to another track: its gain and the gain as it glides there (spec: audio/mixer.md "Sends", "Gains ramp").
+struct Route {
+    dest: usize,
+    gain: f32,
+    glide: Glide,
+}
+
+/// One filled mixer slot: Lemon Studio's own effect or a hosted plugin, with the slot's switch and stored mix level
+/// (0..12800) and its dry level as it glides (spec: audio/mixer.md "An effect slot").
 struct FxSlot {
     slot: usize,
     on: bool,
-    mix: f32,
+    mix: i32,
+    dry: Glide,
+    /// Switched on during the song: the effect is emptied before it runs again.
+    fresh: bool,
     fx: Fx,
+}
+
+impl FxSlot {
+    fn new(slot: usize, on: bool, mix: i32, fx: Fx) -> FxSlot {
+        FxSlot { slot, on, mix, dry: Glide::new(os_dsp::mixer::dry_level(mix)), fresh: false, fx }
+    }
+}
+
+/// A stored mix level (0..12800) from the model's 0..1.
+fn mix_level(v: f64) -> i32 {
+    (v.clamp(0.0, 1.0) * 12800.0).round() as i32
 }
 
 enum Fx {
@@ -462,11 +499,90 @@ impl MixTrack {
             eq: os_dsp::mixer::TrackEq::default(),
             effects: Vec::new(),
             slot_on: [true; 10],
-            slot_mix: [1.0; 10],
+            slot_mix: [12800; 10],
             peak: [0.0; 2],
             matrix: unity,
             gains: unity.map(|r| r.map(Glide::new)),
             routes: vec![],
+            stored: Stored {
+                vol: 12800,
+                pan: 0,
+                sep: 0,
+                eq: os_dsp::mixer::EQ_DEFAULT,
+                slot_on: [true; 10],
+                slot_mix: [12800; 10],
+                sends: vec![],
+            },
+        }
+    }
+
+    /// The settings as they are now, kept to be put back by [`MixTrack::restore`].
+    fn store(&mut self) {
+        self.stored = Stored {
+            vol: self.vol,
+            pan: self.pan,
+            sep: self.sep,
+            eq: [0, 1, 2].map(|b| self.eq.settings(b)),
+            slot_on: self.slot_on,
+            slot_mix: self.slot_mix,
+            sends: self.routes.iter().map(|r| r.gain).collect(),
+        };
+    }
+
+    /// Puts the stored settings back (playback starting at another position: nothing of an automation clip holds
+    /// before the clip; spec: audio/automation.md "When a clip acts"), with every gain at its target when `settle`,
+    /// else gliding there.
+    fn restore(&mut self, settle: bool) {
+        let s = self.stored.clone();
+        (self.vol, self.pan, self.sep) = (s.vol, s.pan, s.sep);
+        for (b, band) in s.eq.iter().enumerate() {
+            for (f, &v) in band.iter().enumerate() {
+                if self.eq.settings(b)[f] != v {
+                    self.eq.set(b, f, v);
+                }
+            }
+        }
+        for k in 0..10 {
+            self.set_slot_on(k, s.slot_on[k]);
+            self.set_slot_mix(k, s.slot_mix[k]);
+        }
+        for (r, &g) in self.routes.iter_mut().zip(&s.sends) {
+            r.gain = g;
+        }
+        self.matrix = self.compute_matrix();
+        if settle {
+            self.settle();
+        }
+    }
+
+    /// Every gain at its target at once: the matrix, the slots' dry levels, the sends.
+    fn settle(&mut self) {
+        self.gains = self.matrix.map(|r| r.map(Glide::new));
+        for fx in &mut self.effects {
+            fx.dry = Glide::new(os_dsp::mixer::dry_level(fx.mix));
+        }
+        for r in &mut self.routes {
+            r.glide = Glide::new(r.gain);
+        }
+    }
+
+    /// Slot `slot`'s switch. A slot switched on empties its effect first; neither way fades (spec: audio/mixer.md
+    /// "Changes while the song plays").
+    fn set_slot_on(&mut self, slot: usize, on: bool) {
+        let Some(s) = self.slot_on.get_mut(slot) else { return };
+        *s = on;
+        for fx in self.effects.iter_mut().filter(|f| f.slot == slot) {
+            fx.fresh |= on && !fx.on;
+            fx.on = on;
+        }
+    }
+
+    /// Slot `slot`'s stored mix level (0..12800); its dry level glides there.
+    fn set_slot_mix(&mut self, slot: usize, mix: i32) {
+        let Some(m) = self.slot_mix.get_mut(slot) else { return };
+        *m = mix;
+        for fx in self.effects.iter_mut().filter(|f| f.slot == slot) {
+            fx.mix = mix;
         }
     }
 
@@ -709,7 +825,7 @@ impl Engine {
             .collect();
 
         let tracks: Vec<MixTrack> = if project.mixer.is_empty() {
-            vec![MixTrack::unity()]
+            vec![MixTrack { eq: os_dsp::mixer::TrackEq::new(os_dsp::mixer::EQ_DEFAULT, rate), ..MixTrack::unity() }]
         } else {
             project
                 .mixer
@@ -720,7 +836,7 @@ impl Engine {
                         let Some(slot) = slot else { continue };
                         match crate::effects::from_slot(&slot.name, &slot.state, rate) {
                             Some(fx) => {
-                                effects.push(FxSlot { slot: k, on: m.slot_on[k], mix: m.slot_mix[k] as f32, fx: Fx::Own(fx) });
+                                effects.push(FxSlot::new(k, m.slot_on[k], mix_level(m.slot_mix[k]), Fx::Own(fx)));
                                 report.effects_active += 1;
                             }
                             None => report.effects_bypassed += 1,
@@ -735,9 +851,9 @@ impl Engine {
                             .map(|&r| {
                                 // A route without a level record is at unity (spec: flp/engine-events.md "The mixer").
                                 let level = m.send_levels.iter().find(|(d, _)| *d == r).map(|&(_, l)| l);
-                                (usize::from(r), level.map_or(1.0, |l| os_dsp::mixer::send_gain((l * 16000.0).round() as i32)))
+                                let gain = level.map_or(1.0, |l| os_dsp::mixer::send_gain((l * 16000.0).round() as i32));
+                                Route { dest: usize::from(r), gain, glide: Glide::new(gain) }
                             })
-                            .filter(|&(_, g)| g > 0.0)
                             .collect()
                     };
                     let mut t = MixTrack {
@@ -751,13 +867,14 @@ impl Engine {
                         eq: os_dsp::mixer::TrackEq::new(m.eq, rate),
                         effects,
                         slot_on: m.slot_on,
-                        slot_mix: m.slot_mix.map(|v| v as f32),
+                        slot_mix: m.slot_mix.map(mix_level),
                         routes,
                         ..MixTrack::unity()
                     };
                     // At the start of the song every gain is at its target.
                     t.matrix = t.compute_matrix();
                     t.gains = t.matrix.map(|r| r.map(Glide::new));
+                    t.store();
                     t
                 })
                 .collect()
@@ -966,7 +1083,7 @@ impl Engine {
         }
         t.effects.retain(|e| e.slot != slot);
         let at = t.effects.partition_point(|e| e.slot < slot);
-        t.effects.insert(at, FxSlot { slot, on: t.slot_on[slot], mix: t.slot_mix[slot], fx: Fx::Hosted(fx) });
+        t.effects.insert(at, FxSlot::new(slot, t.slot_on[slot], t.slot_mix[slot], Fx::Hosted(fx)));
     }
 
     /// Ticks hosted plugins missed since the last call (each one still busy elsewhere after the tick's wait), heard as
@@ -1144,6 +1261,9 @@ impl Engine {
         self.tick = tick;
         self.frame = self.clock.next_start();
         self.next_trigger = self.triggers.partition_point(|t| t.tick < tick);
+        for t in &mut self.tracks {
+            t.restore(true);
+        }
         self.sync_controls(tick);
         self.late = self.clips_under_way(tick);
         self.params.forget();
@@ -1279,11 +1399,18 @@ impl Engine {
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
                 new.gains = o.gains;
+                // Sends and slot mix levels glide on from where they were.
+                if new.routes.len() == o.routes.len() && new.routes.iter().zip(&o.routes).all(|(a, b)| a.dest == b.dest) {
+                    for (a, b) in new.routes.iter_mut().zip(&o.routes) {
+                        a.glide = b.glide;
+                    }
+                }
                 // Own effects keep their state (delay lines, envelopes) when the slot layout is unchanged; the new
                 // slot LEDs and mix levels apply.
                 let same = new.effects.len() == o.effects.len() && new.effects.iter().zip(&o.effects).all(|(a, b)| a.slot == b.slot);
                 if same {
                     for (a, b) in new.effects.iter_mut().zip(&mut o.effects) {
+                        a.dry = b.dry;
                         if let (Fx::Own(_), Fx::Own(_)) = (&a.fx, &b.fx) {
                             std::mem::swap(&mut a.fx, &mut b.fx);
                         }
@@ -1383,15 +1510,54 @@ impl Engine {
                         ch.retune(f64::from(laws::auto_pitch_cents(v)));
                     }
                 }
-                // Volume Round(16000 v), pan Round((2 v - 1) * 6400) (spec: audio/mixer.md "Changes while the song plays").
-                Target::MixerVolume(t) | Target::MixerPan(t) => {
+                // Volume Round(16000 v), pan Round((2 v - 1) * 6400), separation Round((2 v - 1) * 64) (spec:
+                // audio/mixer.md "Changes while the song plays"). At the start of playback the gains are at their
+                // targets at once.
+                Target::MixerVolume(t) | Target::MixerPan(t) | Target::MixerSeparation(t) => {
                     if let Some(m) = self.tracks.get_mut(usize::from(t)) {
-                        if matches!(target, Target::MixerVolume(_)) {
-                            m.vol = (16000.0 * v).round_ties_even() as i32;
-                        } else {
-                            m.pan = ((2.0 * v - 1.0) * 6400.0).round_ties_even() as i32;
+                        match target {
+                            Target::MixerVolume(_) => m.vol = (16000.0 * v).round_ties_even() as i32,
+                            Target::MixerPan(_) => m.pan = ((2.0 * v - 1.0) * 6400.0).round_ties_even() as i32,
+                            _ => m.sep = ((2.0 * v - 1.0) * 64.0).round_ties_even() as i32,
                         }
                         m.matrix = m.compute_matrix();
+                        if len == 0 {
+                            m.gains = m.matrix.map(|r| r.map(Glide::new));
+                        }
+                    }
+                }
+                // Gain Round((2 v - 1) * 1800), frequency and width Round(65536 v), taken at the tick start.
+                Target::MixerEq(t, band, field) => {
+                    if let Some(m) = self.tracks.get_mut(usize::from(t)) {
+                        let value = if field == 0 { ((2.0 * v - 1.0) * 1800.0).round_ties_even() } else { (65536.0 * v).round_ties_even() };
+                        m.eq.set(usize::from(band), usize::from(field), value as i32);
+                    }
+                }
+                // A send's gain curve(single(v * 1.25)), gliding like the fader's gains. Only routes the project has
+                // carry sound, so a value for a send without a route does nothing.
+                Target::MixerSend(t, d) => {
+                    if let Some(route) = self.tracks.get_mut(usize::from(t)).and_then(|m| m.routes.iter_mut().find(|r| r.dest == usize::from(d))) {
+                        route.gain = os_dsp::mixer::send_gain_auto(v);
+                        if len == 0 {
+                            route.glide = Glide::new(route.gain);
+                        }
+                    }
+                }
+                // A slot's switch: on when Round(v) = 1 (half to even).
+                Target::SlotOn(t, s) => {
+                    if let Some(m) = self.tracks.get_mut(usize::from(t)) {
+                        m.set_slot_on(usize::from(s), v.round_ties_even() == 1.0);
+                    }
+                }
+                // A slot's mix level Round(12800 v); its dry level glides there.
+                Target::SlotMix(t, s) => {
+                    if let Some(m) = self.tracks.get_mut(usize::from(t)) {
+                        m.set_slot_mix(usize::from(s), r12800);
+                        if len == 0 {
+                            for fx in m.effects.iter_mut().filter(|f| f.slot == usize::from(s)) {
+                                fx.dry = Glide::new(os_dsp::mixer::dry_level(fx.mix));
+                            }
+                        }
                     }
                 }
                 // Plugin parameters: sampled through the tick by `run_param_automation`.
@@ -1807,7 +1973,7 @@ impl Engine {
             // A slot runs when its own switch is on and the track's slots are enabled (spec: audio/mixer.md).
             if track.slots_enabled {
                 for fx in &mut track.effects {
-                    run_slot(fx, &mut buf, rate, song, dry, l, r, (&mut *busy.0, busy.1, busy.2, &mut *busy.3));
+                    run_slot(fx, &mut buf, rate, limit, song, dry, l, r, (&mut *busy.0, busy.1, busy.2, &mut *busy.3));
                 }
             }
             track.eq.process(&mut buf);
@@ -1838,9 +2004,22 @@ impl Engine {
                 pk[0] = pk[0].max(f[0].abs());
                 pk[1] = pk[1].max(f[1].abs());
             }
-            for &(dest, g) in &self.tracks[t].routes {
-                for (d, s) in self.bus[dest].iter_mut().zip(&buf) {
-                    *d += *s * g;
+            // Sends glide like the matrix gains; a route at 0 passes nothing.
+            let (tracks, bus) = (&mut self.tracks, &mut self.bus);
+            for route in &mut tracks[t].routes {
+                let mut ramp = route.glide.block(route.gain, frames, limit);
+                let out = &mut bus[route.dest];
+                if !ramp.is_flat() {
+                    for (d, s) in out.chunks_exact_mut(2).zip(buf.chunks_exact(2)) {
+                        let g = ramp.next();
+                        d[0] += s[0] * g;
+                        d[1] += s[1] * g;
+                    }
+                } else if ramp.first() != 0.0 {
+                    let g = ramp.first();
+                    for (d, s) in out.iter_mut().zip(&buf) {
+                        *d += *s * g;
+                    }
                 }
             }
             self.bus[t] = buf;
@@ -1881,8 +2060,12 @@ impl Engine {
         self.tick = 0;
         self.frame = 0;
         self.next_trigger = 0;
-        // Control points replay from the top: until the first one the channel has its own settings
-        // (a Lemon Studio choice; FL's behaviour at the loop point is not measured).
+        // Control points replay from the top: until the first one the channel has its own settings, and mixer tracks
+        // glide back to theirs until automation hands its values on again (a Lemon Studio choice; FL's behaviour at
+        // the loop point is not measured).
+        for t in &mut self.tracks {
+            t.restore(false);
+        }
         self.sync_controls(0);
         for s in &mut self.sounding {
             if s.2 != u64::MAX {
@@ -2071,36 +2254,50 @@ fn blackman(t: f64) -> f64 {
     0.42 + 0.5 * x.cos() + 0.08 * (2.0 * x).cos()
 }
 
-/// One mixer slot over interleaved `buf`: skipped when its LED is off, blended with the dry signal by its mix level.
+/// One tick of a mixer slot over interleaved `buf`: skipped when its switch is off, blended with the dry signal by its
+/// dry level, which glides to its mix level by at most `limit` a sample (spec: audio/mixer.md "An effect slot", "A
+/// slot's mix level while it moves"). A slot at mix 0 still runs its effect.
 #[allow(clippy::too_many_arguments)]
 fn run_slot(
     fx: &mut FxSlot,
     buf: &mut [f32],
     rate: u32,
+    limit: f32,
     song: &TransportInfo,
     dry: &mut Vec<f32>,
     l: &mut Vec<f32>,
     r: &mut Vec<f32>,
     (until, wait, export, missed): (&mut Option<Instant>, Duration, bool, &mut u64),
 ) {
-    if !fx.on || fx.mix <= 0.0 {
+    let n = buf.len() / 2;
+    let ramp = fx.dry.block(os_dsp::mixer::dry_level(fx.mix), n, limit);
+    if !fx.on {
         return;
     }
-    let blend = fx.mix < 1.0;
+    let blend = !(ramp.is_flat() && ramp.first() == 0.0);
     if blend {
         dry.clear();
         dry.extend_from_slice(buf);
     }
+    let fresh = std::mem::take(&mut fx.fresh);
     match &mut fx.fx {
-        Fx::Own(e) => e.process(buf),
+        Fx::Own(e) => {
+            if fresh {
+                e.reset();
+            }
+            e.process(buf)
+        }
         Fx::Hosted(h) => {
             // An instance still busy elsewhere after the tick's wait passes the sound through for this tick (a
             // poisoned one always does).
             let Some(mut h) = lock_busy(h, until, wait, export) else {
                 *missed += u64::from(!h.is_poisoned());
+                fx.fresh |= fresh;
                 return;
             };
-            let n = buf.len() / 2;
+            if fresh {
+                h.reset_fx();
+            }
             l.clear();
             r.clear();
             l.extend(buf.chunks_exact(2).map(|f| f[0]));
@@ -2114,11 +2311,7 @@ fn run_slot(
         }
     }
     if blend {
-        // out = wet * m + dry * (1 - m), single arithmetic (spec: audio/mixer.md "An effect slot").
-        let (m, d) = (fx.mix, 1.0 - fx.mix);
-        for (o, x) in buf.iter_mut().zip(dry.iter()) {
-            *o = *o * m + *x * d;
-        }
+        os_dsp::mixer::slot_blend(buf, dry, ramp);
     }
 }
 
@@ -2170,8 +2363,8 @@ fn processing_order(tracks: &[MixTrack]) -> Vec<usize> {
             return; // done, or a cycle (ignored)
         }
         state[t] = 1;
-        for &(d, _) in &tracks[t].routes {
-            visit(d, tracks, state, order);
+        for r in &tracks[t].routes {
+            visit(r.dest, tracks, state, order);
         }
         state[t] = 2;
         order.push(t);
@@ -3506,6 +3699,93 @@ mod tests {
         p.automations[1].targets = vec![0x7FFF_FFFF];
         let e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
         assert_eq!((e.autos.len(), e.report.automation_clips_ignored), (1, 1));
+    }
+
+    /// Passes the sound through and counts how often it was emptied.
+    struct Emptied(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl crate::instrument::HostedEffect for Emptied {
+        fn process_fx(&mut self, _rate: u32, _left: &mut [f32], _right: &mut [f32]) {}
+
+        fn reset_fx(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    // spec: audio/mixer.md "Changes while the song plays", "An effect slot", "Equaliser"; flp/events/automation.md "Targets"
+    #[test]
+    fn automation_drives_mixer_slots_equaliser_sends_and_separation() {
+        use os_model::{AutoPoint, Automation, ChannelKind, Clip, ClipSource, target};
+        let mut p = song(vec![long_note(0, 384 * 4, 0)], vec![Clip::new(0, 384 * 4, 0, ClipSource::Pattern(1))]);
+        p.channels[0].mixer_track = 1;
+        p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        // A send at level 0 (sidechain only) passes nothing until automation raises it.
+        p.mixer[1].routes = vec![0, 2];
+        p.mixer[1].send_levels = vec![(2, 0.0)];
+        let clips = [
+            (target::slot(1, 0, target::SLOT_MIX), 0.5),
+            (target::slot(1, 1, target::SLOT_ON), 0.5),
+            (target::mixer(1, target::EQ_GAIN + 1), 0.75),
+            (target::mixer(1, target::EQ_FREQ + 2), 0.5),
+            (target::send(1, 2), 0.8),
+            (target::mixer(1, target::MIXER_SEPARATION), 1.0),
+        ];
+        for (i, &(t, v)) in clips.iter().enumerate() {
+            let index = i as u16 + 1;
+            let mut c = channel();
+            c.index = index;
+            c.kind = ChannelKind::Automation;
+            p.channels.push(c);
+            let points = vec![AutoPoint::new(0.0, v), AutoPoint::new(8.0, v)];
+            p.automations.push(Automation { channel: index, targets: vec![t], points, header: vec![0; 21], tail: vec![] });
+            p.arrangements[0].clips.push(Clip::new(384, 768, index, ClipSource::Channel(index)));
+        }
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        assert_eq!(e.report.automation_clips_ignored, 0);
+        let resets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        e.set_effect(1, 0, Arc::new(Mutex::new(Halve)));
+        e.set_effect(1, 1, Arc::new(Mutex::new(Emptied(resets.clone()))));
+        let ticks = |e: &mut Engine, tick: u64| {
+            while e.tick <= tick {
+                e.next_tick();
+            }
+        };
+        let dry = os_dsp::mixer::dry_level;
+        ticks(&mut e, 383);
+        let t = &e.tracks[1];
+        assert_eq!((t.slot_mix[0], t.slot_on[1], t.eq.settings(1)[0], t.sep), (12800, true, 0, 0), "before the clips: as stored");
+        assert_eq!(t.routes.iter().map(|r| (r.dest, r.gain)).collect::<Vec<_>>(), vec![(0, 1.0), (2, 0.0)]);
+        ticks(&mut e, 384);
+        let t = &e.tracks[1];
+        // Mix Round(12800 v); the switch Round(v) = 1 with halves to even (0.5 is off); EQ gain Round((2 v - 1) * 1800),
+        // frequency Round(65536 v); send curve(single(v * 1.25)); separation Round((2 v - 1) * 64).
+        assert_eq!((t.slot_mix[0], t.effects[0].mix), (6400, 6400));
+        assert!(!t.slot_on[1] && !t.effects[1].on);
+        assert_eq!((t.eq.settings(1)[0], t.eq.settings(2)[1]), (900, 32768));
+        assert!(!t.eq.is_flat());
+        assert_eq!(t.routes[1].gain, os_dsp::mixer::send_gain_auto(0.8));
+        assert_eq!(t.sep, 64);
+        // The dry level and the send glide there: by at most the engine's limit per sample.
+        assert!(t.effects[0].dry.current < dry(6400) && t.effects[0].dry.current > 0.0, "dry: {:?}", t.effects[0].dry);
+        assert!(t.routes[1].glide.current > 0.0 && t.routes[1].glide.current < t.routes[1].gain);
+        ticks(&mut e, 600);
+        let t = &e.tracks[1];
+        assert_eq!((t.effects[0].dry.current, t.routes[1].glide.current), (dry(6400), t.routes[1].gain));
+        // Starting before the clips puts the stored settings back at once; the slot switched on again is emptied first.
+        e.seek_tick(100);
+        let t = &e.tracks[1];
+        assert_eq!((t.slot_mix[0], t.slot_on[1], t.eq.settings(1)[0], t.eq.settings(2)[1], t.sep), (12800, true, 0, 55825, 0));
+        assert_eq!((t.effects[0].dry.current, t.routes[1].gain, t.routes[1].glide.current), (0.0, 0.0, 0.0));
+        assert_eq!(resets.load(std::sync::atomic::Ordering::Relaxed), 0);
+        ticks(&mut e, 100);
+        assert_eq!(resets.load(std::sync::atomic::Ordering::Relaxed), 1);
+        // Playback starting inside the clips: every level at its target from the first tick.
+        e.seek_tick(500);
+        ticks(&mut e, 500);
+        let t = &e.tracks[1];
+        assert_eq!((t.effects[0].dry.current, t.routes[1].glide.current), (dry(6400), t.routes[1].gain));
+        assert_eq!(t.gains.map(|r| r.map(|g| g.current)), t.matrix);
     }
 
     // spec: audio/automation.md "When a clip acts", "Walking the curve"; audio/voice-levels.md "Values from automation"

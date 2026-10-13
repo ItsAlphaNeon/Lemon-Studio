@@ -1211,6 +1211,16 @@ pub mod target {
     pub const TEMPO: u32 = 0x4000_0005;
     pub const MIXER_VOLUME: u8 = 0xC0;
     pub const MIXER_PAN: u8 = 0xC1;
+    pub const MIXER_SEPARATION: u8 = 0xC2;
+    /// Equaliser band `b` (0..3): gain `EQ_GAIN + b`, frequency `EQ_FREQ + b`, width `EQ_WIDTH + b`.
+    pub const EQ_GAIN: u8 = 0xD0;
+    pub const EQ_FREQ: u8 = 0xD8;
+    pub const EQ_WIDTH: u8 = 0xE0;
+    /// A slot's switch and mix level, at the slot's place.
+    pub const SLOT_ON: u8 = 0;
+    pub const SLOT_MIX: u8 = 1;
+    /// Send levels from FL 24.2 on: `0x2000 + destination` at the sending track's place.
+    pub const SEND: u16 = 0x2000;
 
     pub fn channel(ch: u16, param: u16) -> u32 {
         u32::from(ch) << 16 | u32::from(param)
@@ -1218,6 +1228,16 @@ pub mod target {
 
     pub fn mixer(track: u16, id: u8) -> u32 {
         u32::from(0x7000 + track * 64) << 16 | 0x1F00 | u32::from(id)
+    }
+
+    /// Setting `id` ([`SLOT_ON`], [`SLOT_MIX`]) of mixer track `track`'s slot `slot` (0..9).
+    pub fn slot(track: u16, slot: u8, id: u8) -> u32 {
+        u32::from(0x7000 + track * 64 + u16::from(slot)) << 16 | 0x1F00 | u32::from(id)
+    }
+
+    /// The level of track `track`'s send to track `dest`.
+    pub fn send(track: u16, dest: u16) -> u32 {
+        u32::from(0x7000 + track * 64) << 16 | u32::from(SEND + dest)
     }
 
     /// Plugin parameters are `0x8000 + k`, k = the parameter's index in the plugin's list
@@ -1242,6 +1262,14 @@ pub mod target {
         ChannelPitch(u16),
         MixerVolume(u16),
         MixerPan(u16),
+        MixerSeparation(u16),
+        /// Mixer track, equaliser band (0..3), setting (0 gain, 1 frequency, 2 width).
+        MixerEq(u16, u8, u8),
+        /// Mixer track, destination track: the send level.
+        MixerSend(u16, u16),
+        /// Mixer track, slot: the slot's switch / its mix level.
+        SlotOn(u16, u8),
+        SlotMix(u16, u8),
         Tempo,
         /// Channel, parameter index of its plugin.
         ChannelParam(u16, u16),
@@ -1265,11 +1293,26 @@ pub mod target {
         if hi < 0x4000 && lo >= PLUGIN_PARAM {
             return Target::ChannelParam(hi, lo - PLUGIN_PARAM);
         }
-        if (0x7000..0x7000 + 127 * 64).contains(&hi) && (hi - 0x7000) % 64 == 0 && lo >> 8 == 0x1F {
-            let track = (hi - 0x7000) / 64;
-            return match lo as u8 {
-                MIXER_VOLUME => Target::MixerVolume(track),
-                MIXER_PAN => Target::MixerPan(track),
+        // Mixer places from FL 24.2 on (spec: flp/layouts.md "Mixer places", "Parameter ids in an automation link").
+        if (0x7000..0x7000 + 127 * 64).contains(&hi) && (hi - 0x7000) % 64 < 10 {
+            let (track, slot) = ((hi - 0x7000) / 64, ((hi - 0x7000) % 64) as u8);
+            let id = lo as u8;
+            return match lo >> 8 {
+                0x1F if id == SLOT_ON => Target::SlotOn(track, slot),
+                0x1F if id == SLOT_MIX => Target::SlotMix(track, slot),
+                _ if slot != 0 => Target::Other(t),
+                // Send levels: 0x2000 + d, and 0x1F00 + 64 + d as in the mixer's records.
+                0x20 if lo - SEND < 127 => Target::MixerSend(track, lo - SEND),
+                0x1F => match id {
+                    64..=190 => Target::MixerSend(track, u16::from(id - 64)),
+                    MIXER_VOLUME => Target::MixerVolume(track),
+                    MIXER_PAN => Target::MixerPan(track),
+                    MIXER_SEPARATION => Target::MixerSeparation(track),
+                    EQ_GAIN..=0xD2 => Target::MixerEq(track, id - EQ_GAIN, 0),
+                    EQ_FREQ..=0xDA => Target::MixerEq(track, id - EQ_FREQ, 1),
+                    EQ_WIDTH..=0xE2 => Target::MixerEq(track, id - EQ_WIDTH, 2),
+                    _ => Target::Other(t),
+                },
                 _ => Target::Other(t),
             };
         }
@@ -1286,7 +1329,10 @@ pub mod target {
 
     /// Bipolar targets centre at 0.5.
     pub fn bipolar(t: u32) -> bool {
-        matches!(decode(t), Target::ChannelPan(_) | Target::ChannelPitch(_) | Target::MixerPan(_))
+        matches!(
+            decode(t),
+            Target::ChannelPan(_) | Target::ChannelPitch(_) | Target::MixerPan(_) | Target::MixerSeparation(_) | Target::MixerEq(_, _, 0)
+        )
     }
 
     #[cfg(test)]
@@ -1307,6 +1353,28 @@ pub mod target {
             assert_eq!(decode(mixer(1, MIXER_VOLUME)), Target::MixerVolume(1));
             assert_eq!(decode(channel(3, CHANNEL_PAN)), Target::ChannelPan(3));
             assert!(!bipolar(slot_param(1, 0, 0)));
+        }
+
+        // spec: flp/events/automation.md "Targets"; flp/layouts.md "Parameter ids in an automation link"
+        #[test]
+        fn mixer_targets() {
+            assert_eq!(decode(0x7001_1F01), Target::SlotMix(0, 1), "master slot 1 mix");
+            assert_eq!(slot(0, 1, SLOT_MIX), 0x7001_1F01);
+            assert_eq!(decode(slot(3, 9, SLOT_ON)), Target::SlotOn(3, 9));
+            assert_eq!(decode(slot(3, 0, SLOT_ON)), Target::SlotOn(3, 0));
+            assert_eq!(decode(0x7280_1FC0), Target::MixerVolume(10), "Insert 10 volume");
+            assert_eq!(decode(mixer(4, MIXER_SEPARATION)), Target::MixerSeparation(4));
+            assert_eq!(decode(mixer(2, EQ_GAIN + 1)), Target::MixerEq(2, 1, 0));
+            assert_eq!(decode(mixer(2, EQ_FREQ + 2)), Target::MixerEq(2, 2, 1));
+            assert_eq!(decode(mixer(2, EQ_WIDTH)), Target::MixerEq(2, 0, 2));
+            assert_eq!(decode(mixer(2, 0xD3)), Target::Other(mixer(2, 0xD3)));
+            // Send to track 85: 0x2055 at the sending track's place; the records' 0x1F00 + 64 + d form too.
+            assert_eq!(decode(send(5, 85)), Target::MixerSend(5, 85));
+            assert_eq!(send(5, 85) & 0xFFFF, 0x2055);
+            assert_eq!(decode(mixer(5, 64 + 126)), Target::MixerSend(5, 126));
+            // Track settings at a slot's place are nothing.
+            assert_eq!(decode(slot(1, 2, MIXER_VOLUME)), Target::Other(slot(1, 2, MIXER_VOLUME)));
+            assert!(bipolar(mixer(1, MIXER_SEPARATION)) && bipolar(mixer(1, EQ_GAIN)) && !bipolar(mixer(1, EQ_FREQ)));
         }
     }
 }

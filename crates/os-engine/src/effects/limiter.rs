@@ -34,6 +34,10 @@ impl Limiter {
 }
 
 impl Effect for Limiter {
+    fn reset(&mut self) {
+        self.env = 1.0;
+    }
+
     fn process(&mut self, buf: &mut [f32]) {
         for f in buf.chunks_exact_mut(2) {
             let l = f[0] * self.gain;
