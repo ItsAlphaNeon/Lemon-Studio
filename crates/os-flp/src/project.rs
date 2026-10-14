@@ -3524,6 +3524,10 @@ mod tests {
         assert_eq!(c.misc, want.misc);
         assert!(c.misc.main_pitch, "an added event 215 keeps the main pitch switch on");
         let ev = events_of(&file).unwrap();
+        // Event 215 is shared with the Misc tab's writer, which owns root and fine: each is added once.
+        for eid in [id::CH_SAMPLE_SETTINGS, id::CH_ROOT, id::CH_FINE] {
+            assert_eq!(ev.iter().filter(|e| e.id == eid).count(), 1, "event {eid}");
+        }
         let rec = ev.iter().find(|e| e.id == id::CH_LOOP_POINTS).and_then(Event::data).unwrap();
         assert_eq!(rec.len(), 43, "FL's record size");
         let env = ev.iter().filter(|e| e.id == id::CH_ENVELOPE).nth(Envelope::VOLUME).and_then(Event::data).unwrap();
