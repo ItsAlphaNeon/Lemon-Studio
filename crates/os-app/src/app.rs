@@ -9772,7 +9772,8 @@ mod tests {
 
     /// VST2 plugins through the app's own paths, with real plugins: `OS_VST2_DIR` is a folder of the DPF-Plugins
     /// release (Kars and 3BandEQ, each also there as VST3 and CLAP), `OS_VST2_DIR32` (optional) the release's 32-bit
-    /// folder, `OS_SHOT_DIR` (optional) gets pictures of Settings > Plugins.
+    /// folder, `OS_SHOT_DIR` (optional) gets pictures of Settings > Plugins, `OS_VST2_KEEP` (optional) a copy of the saved
+    /// project (for opening in other software).
     /// - Settings > Plugins (spec: ui/plugin-manager.md §2, §4): both folders added with Add folder... and scanned, the
     ///   32-bit VST2 plugins listed as failed with that reason, VST2 picked as the preferred format.
     /// - Kars added from the rack's Add one ▸ menu, 3BandEQ from its insert's slot menu, an automation clip made on the
@@ -9959,10 +9960,23 @@ mod tests {
             assert_eq!(after, (0.0, 0.0), "silent after Stop");
         }
 
-        // Saved: both plugins stored as wrapped VST2 plugins with their state, the clip aimed at the EQ.
+        // Saved: both plugins stored as wrapped VST2 plugins with their state, the clip aimed at the EQ. Kars' last
+        // parameter is first moved off its default, so the state that comes back is known not to be the default one.
         let path = std::env::temp_dir().join(format!("lemon-vst2-{}.flp", std::process::id()));
+        let moved = {
+            let mut p = a.plugins.hosted[&row].plugin.lock().unwrap();
+            let info = p.param_info(p.param_count() - 1).unwrap();
+            let v = if p.param_value(info.id).is_some_and(|v| v > 0.5) { 0.25 } else { 0.75 };
+            assert!(p.set_param(info.id, v));
+            p.idle();
+            println!("Kars {} set to {v} ({:?})", info.name, p.param_text(info.id, v));
+            (info.id, v)
+        };
         let (ch_state, fx_state) = (a.plugins.state(row).unwrap(), a.plugins.state(key).unwrap());
         a.save_to(path.clone());
+        if let Some(keep) = std::env::var_os("OS_VST2_KEEP") {
+            std::fs::copy(&path, &keep).unwrap();
+        }
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let r = crate::project_plugins::wrapped_channel(&saved.channels[row]).expect("a wrapped channel");
@@ -9991,6 +10005,8 @@ mod tests {
         assert_eq!(b.plugins.descriptor(key).map(|d| d.format), Some(Format::Vst2));
         assert_eq!(b.plugins.state(row).as_deref(), Some(&ch_state[..]));
         assert_eq!(b.plugins.state(key).as_deref(), Some(&fx_state[..]));
+        let back = b.plugins.hosted[&row].plugin.lock().unwrap().param_value(moved.0);
+        assert!(back.is_some_and(|v| (v - moved.1).abs() < 1e-6), "Kars' moved parameter came back as {back:?}");
         b.tick();
         check("reopened", &notes(&export(&mut b, "reopened")));
 
