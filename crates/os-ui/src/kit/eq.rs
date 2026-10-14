@@ -1,16 +1,22 @@
-//! Widgets of the EQ look (Lemon Parametric EQ 2): arc knobs, round buttons, fader slots and handles, band tokens.
-//! Greys are palette surface roles; band colours are the caller's (signal colours, like meter reds).
-// spec: plugins/lemon-parametric-eq-2.md (§2 tokens, §3 faders and knobs, §4 buttons)
+//! Widgets of the EQ look (Lemon Parametric EQ): arc knobs, round buttons, fader slots and handles, band tokens.
+//! Greys are palette surface roles; band colours are the caller's (signal colours, like meter reds). The Lemon design
+//! draws each its own way in the same place (rounded squares for buttons).
+// spec: plugins/lemon-parametric-eq-2.md (§2 tokens, §3 faders and knobs, §4 buttons); ui/lemon-design.md §11
 
 use std::f32::consts::PI;
 
 use os_theme::{Color, Palette};
 
+use super::lemon::{self, plug};
 use super::State;
 use crate::{Canvas, Font, Rect};
 
 /// Arc knob: dark disc and ring, the value arc in `col` from 7:30 o'clock clockwise over 270°. Hover brightens the arc.
 pub fn arc_knob(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, value: f32, col: Color, st: State) {
+    if lemon::on(t) {
+        lemon::dial(c, cx, cy, r + 1.0, 2.0, value, false, col, st);
+        return;
+    }
     let (start, sweep) = (0.75 * PI, 1.5 * PI);
     c.fill_circle(cx, cy, r + 1.0, t.s(0x15212a));
     c.arc(cx, cy, r - 0.8, start, sweep, 2.0, t.s(0x22323d));
@@ -25,6 +31,11 @@ pub fn arc_knob(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, value: f3
 
 /// Round button: dark disc with a lighter outline ring; `on` fills it light (labels then draw dark, see [`ink`]).
 pub fn round_button(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, st: State) {
+    if lemon::on(t) {
+        // A rounded square of the same size.
+        lemon::plug_button(c, Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), if r >= 10.0 { 7.0 } else { 4.0 }, st);
+        return;
+    }
     c.fill_circle(cx, cy, r + 1.0, t.s(0x111c23));
     let ring = if st.hover || st.pressed { t.s(0x3c4f5c) } else { t.s(0x2c3c47) };
     c.stroke_circle(cx, cy, r - 0.5, 1.2, ring);
@@ -42,6 +53,9 @@ pub fn round_button(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, st: S
 
 /// Label / glyph colour on a [`round_button`].
 pub fn ink(t: &Palette, st: State) -> Color {
+    if lemon::on(t) {
+        return if st.on { os_theme::design::lemon::COLORED_DARK } else if st.hover { Color::rgb(0xffffff) } else { os_theme::design::lemon::TEXT };
+    }
     if st.on {
         t.s(0x23303a)
     } else if st.hover {
@@ -53,11 +67,26 @@ pub fn ink(t: &Palette, st: State) -> Color {
 
 /// A fader slot (rounded track with a light outline).
 pub fn slot(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
+    if lemon::on(t) {
+        lemon::outlined(c, r, r.w / 2.0, if st.hover { Color::rgb(0x111111) } else { Color::rgb(0x191919) }, plug::WELL);
+        return;
+    }
     let line = if st.hover { t.s(0x435662) } else { t.s(0x36454f) };
     c.fill_rrect(r, r.w / 2.0, line);
     c.fill_rrect(r.inset(1.5), (r.w / 2.0 - 1.5).max(0.0), t.s(0x1a2933));
     // Faint marks every 6 dB are drawn by the caller; a centre line here.
     c.fill_rect(Rect::new(r.cx() - 0.5, r.y + r.w / 2.0, 1.0, r.h - r.w), t.s(0x1e2e38));
+}
+
+/// Fader handle centred at (cx, cy) with a centre line in `line` (Lemon design; Classic draws [`handle`]).
+pub fn handle_lined(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, line: Color, st: State) {
+    if !lemon::on(t) {
+        return handle(c, t, cx, cy, st);
+    }
+    c.fill_rrect(Rect::new(cx - 6.5, cy - 5.0, 13.0, 10.0), 3.5, Color::rgb(0x151515));
+    let (a, b) = if st.hover || st.pressed { (0x7d7d7d, 0x575757) } else { (0x6f6f6f, 0x4c4c4c) };
+    c.fill_rect_gradient(Rect::new(cx - 5.5, cy - 4.0, 11.0, 8.0), Color::rgb(a), Color::rgb(b), 2.5);
+    c.fill_rect(Rect::new(cx - 3.5, cy - 0.5, 7.0, 1.2), line);
 }
 
 /// Fader handle centred at (cx, cy): a 10 x 9 rounded cap.
@@ -74,6 +103,14 @@ pub fn handle(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, st: State) {
 pub fn token(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, n: usize, col: Color, alpha: f32, big: bool) {
     let r = if big { 11.5 } else { 9.0 };
     let a = |x: Color, f: f32| x.with_alpha((f32::from(x.a) * f * alpha.clamp(0.0, 1.0)) as u8);
+    if lemon::on(t) {
+        // A dark disc, a full ring in the band colour, the number upright.
+        c.fill_circle(cx, cy, r, a(Color::rgb(0x181818), 0.88));
+        c.stroke_circle(cx, cy, r - 0.8, if big { 2.0 } else { 1.5 }, a(col, 1.0));
+        let f = Font::new(12).bold();
+        c.text_center(f, Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), a(col, 1.0), &(n + 1).to_string());
+        return;
+    }
     c.fill_circle(cx, cy, r + 1.5, a(t.s(0x0d1418), 0.55));
     c.fill_circle(cx, cy, r, a(t.s(0x1a2329), 0.88));
     let gap = 0.42;

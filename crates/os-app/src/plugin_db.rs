@@ -456,10 +456,10 @@ fn walk(dir: &Path, depth: u32, (clap, vst3): (bool, bool), walked: &mut HashSet
     }
 }
 
-/// A file named like a built-in Lemon plugin, or like one by its earlier "Open" name (same plugin id): the built-in copy
+/// A file named like a built-in Lemon plugin, or like one by an earlier name (same plugin id): the built-in copy
 /// is used (a second copy in the process would share the built-in one's editor window class).
 fn builtin_file(p: &Path) -> bool {
-    let builtin = [crate::plugins::LEMON_SAMPLER, crate::plugins::LEMON_EQ, crate::osc3::LEMON_3X_OSC];
+    let builtin = [crate::plugins::LEMON_SAMPLER, crate::plugins::LEMON_EQ, crate::osc3::LEMON_TRIO];
     let old = crate::plugins::OLD_NAMES.map(|(old, _)| old);
     p.file_stem().is_some_and(|s| builtin.iter().chain(&old).any(|b| s.eq_ignore_ascii_case(b)))
 }
@@ -697,7 +697,7 @@ pub fn categories(effects: bool) -> impl Iterator<Item = &'static str> {
 pub fn category(d: &Descriptor) -> &'static str {
     match d.name.as_str() {
         n if n == crate::plugins::LEMON_SAMPLER => return "Sampler",
-        n if n == crate::osc3::LEMON_3X_OSC => return "Synth",
+        n if n == crate::osc3::LEMON_TRIO => return "Synth",
         n if n == crate::plugins::LEMON_EQ => return "EQ",
         _ => {}
     }

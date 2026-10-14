@@ -88,7 +88,7 @@ fn lists_instrument_and_effect_classes() {
     assert_eq!(d.uid(), "vst3:4F70656E53747564696F53616D706C72");
     assert!(!d.vendor.is_empty() && !d.version.is_empty());
     assert_eq!(d.path, bundle("Lemon Sampler").unwrap());
-    let Some(eq) = module("Lemon Parametric EQ 2") else { return };
+    let Some(eq) = module("Lemon Parametric EQ") else { return };
     assert!(eq.plugins()[0].is_effect(), "{:?}", eq.plugins()[0].features);
 }
 
@@ -229,7 +229,7 @@ fn host_objects_follow_the_interfaces() {
 /// An effect in a mixer slot: the default EQ passes the sound through; the main level raises it.
 #[test]
 fn hosts_an_effect() {
-    let Some(m) = module("Lemon Parametric EQ 2") else { return };
+    let Some(m) = module("Lemon Parametric EQ") else { return };
     let shared = m.clone().create(&m.plugins()[0].id).unwrap();
     let mut p = shared.lock().unwrap();
     assert!(p.activate(48000));
@@ -259,7 +259,7 @@ fn automation_is_sample_accurate() {
     use os_engine::HostedEffect;
     use os_host::Plugin as _;
     use vst3_sys::vst::{IParamValueQueue, IParameterChanges};
-    let Some(m) = module("Lemon Parametric EQ 2") else { return };
+    let Some(m) = module("Lemon Parametric EQ") else { return };
     let mut p = Plugin::new(&m, &m.plugins()[0].id).unwrap();
     assert!(p.activate(48000));
     let index = (0..p.param_count()).find(|&i| p.param_info(i).is_some_and(|i| i.name == "Main level")).expect("main level") as u32;
@@ -788,7 +788,7 @@ mod window {
     #[test]
     #[ignore = "shows an offscreen window"]
     fn editor_shots() {
-        for (name, setup) in [("Lemon Sampler", true), ("Lemon Parametric EQ 2", false)] {
+        for (name, setup) in [("Lemon Sampler", true), ("Lemon Parametric EQ", false)] {
             let Some(m) = module(name) else { continue };
             let shared = m.clone().create(&m.plugins()[0].id).unwrap();
             let mut p = shared.lock().unwrap();

@@ -1756,10 +1756,10 @@ mod tests {
         None
     }
 
-    /// The built-in Lemon Parametric EQ 2, linked into the test binary.
+    /// The built-in Lemon Parametric EQ, linked into the test binary.
     fn lemon_eq() -> os_host::SharedPlugin {
         let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
-        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ 2.clap")) }.expect("linked EQ");
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ.clap")) }.expect("linked EQ");
         os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap()
     }
 
@@ -1770,7 +1770,7 @@ mod tests {
     fn note_levels_go_with_the_note() {
         use os_engine::HostedEffect as _;
         let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
-        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ 2.clap")) }.expect("linked EQ");
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ.clap")) }.expect("linked EQ");
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         assert!(os_host::Plugin::activate(&mut p, 48000));
         let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);

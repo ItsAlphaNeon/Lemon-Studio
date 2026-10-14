@@ -50,11 +50,11 @@ pub fn dir_for(plugin: &str) -> Option<PathBuf> {
     root().map(|r| dir_in(&r, plugin))
 }
 
-/// `plugin`'s folder in `root`. A built-in plugin's folder under its earlier "Open" name becomes its folder while it has
-/// none yet, so presets saved before the rename stay listed (spec: plugins/presets.md).
+/// `plugin`'s folder in `root`. A built-in plugin's folder under an earlier name (the newest one there) becomes its
+/// folder while it has none yet, so presets saved before a rename stay listed (spec: plugins/presets.md).
 fn dir_in(root: &Path, plugin: &str) -> PathBuf {
     let dir = root.join(folder_name(plugin));
-    if let Some((old, _)) = crate::plugins::OLD_NAMES.iter().find(|(_, now)| *now == plugin) {
+    for (old, _) in crate::plugins::OLD_NAMES.iter().filter(|(_, now)| *now == plugin) {
         let old = root.join(folder_name(old));
         if old.is_dir() && !dir.exists() {
             let _ = std::fs::rename(old, &dir);
@@ -348,10 +348,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Presets saved under a built-in plugin's earlier "Open" name move to its folder; another plugin's folder stays.
+    /// Presets saved under a built-in plugin's earlier names move to its folder; another plugin's folder stays.
     #[test]
     fn old_built_in_folders_are_taken_over() {
         let root = tmp("old");
+        save(&file_for(&root.join("Open 3x Osc"), "Bass"), &Header::default(), b"x").unwrap();
+        save(&file_for(&root.join("Lemon 3x Osc"), "Lead"), &Header::default(), b"x").unwrap();
+        let dir = dir_in(&root, crate::osc3::LEMON_TRIO);
+        assert_eq!(dir, root.join("Lemon Trio"));
+        assert_eq!(list_in(&dir)[0].name, "Lead");
+        assert!(root.join("Open 3x Osc").exists());
         save(&file_for(&root.join("Open Sampler"), "Kick"), &Header::default(), b"x").unwrap();
         save(&file_for(&root.join("Open Thing"), "Pad"), &Header::default(), b"x").unwrap();
         let dir = dir_in(&root, crate::plugins::LEMON_SAMPLER);

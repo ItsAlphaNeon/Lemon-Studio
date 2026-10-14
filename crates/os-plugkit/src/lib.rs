@@ -24,14 +24,28 @@ pub use x11 as gui;
 #[cfg(target_os = "macos")]
 pub use mac as gui;
 
+use os_theme::design::Design;
 use os_theme::Palette;
 use os_ui::kit::menu::{MenuItem, MenuStyle};
 
-/// The palette Lemon Studio uses: the remembered `.flstheme` (`current.flstheme` in `os_paths::user_dir`, spec
-/// ui/flstheme.md), else the default one. A plugin runs in its own module, so it reads the theme itself.
+/// The palette Lemon Studio uses. Inside Lemon Studio (the plugin compiled in) it is the app's own
+/// (`os_theme::set_current`), so the editor follows the app's design and theme. Elsewhere the plugin runs in its own
+/// module and reads the settings itself: the design named in `design.txt` in `os_paths::user_dir` (Lemon when there
+/// is none, spec ui/lemon-design.md), and for Classic the remembered `.flstheme` (`current.flstheme`, spec
+/// ui/flstheme.md), else the default one.
 pub fn palette() -> Palette {
+    if let Some(p) = os_theme::host_current() {
+        return (*p).clone();
+    }
     if cfg!(test) {
         return Palette::default();
+    }
+    let design = os_paths::user_file("design.txt")
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|t| Design::parse(&t))
+        .unwrap_or(Design::Lemon);
+    if design != Design::Classic {
+        return os_theme::design::palette(design, None);
     }
     os_paths::user_file("current.flstheme")
         .and_then(|p| std::fs::read(p).ok())

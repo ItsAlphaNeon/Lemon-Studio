@@ -3,7 +3,7 @@
 //!
 //! A third-party plugin is stored the way the project format stores every such plugin: as the wrapper plugin, whose
 //! state names the plugin (format, class id, name, vendor, file) and holds the plugin's own saved state. Plugins
-//! compiled into Lemon Studio keep their own mapping (Lemon Sampler = sampler channels, Lemon Parametric EQ 2 = the
+//! compiled into Lemon Studio keep their own mapping (Lemon Sampler = sampler channels, Lemon Parametric EQ = the
 //! file's parametric EQ). Native plugins keep their own state format: a hosted native instance writes its state into
 //! its channel or slot as it is, and native plugins that are not hosted keep the bytes the file had.
 //!
@@ -719,7 +719,7 @@ mod tests {
     /// in the project across each move (spec: plugins/fruity-abi.md "Opened projects").
     #[test]
     fn real_native_plugins_replace_the_open_recreations_and_back() {
-        use crate::osc3::{FILE_NAME as OSC3_FILE, LEMON_3X_OSC};
+        use crate::osc3::{FILE_NAME as OSC3_FILE, LEMON_TRIO};
         use crate::plugins::EQ_FILE_NAME;
         NATIVE_FIRST.with(|n| n.set(Some(false)));
         let mut a = App::new(None);
@@ -728,7 +728,7 @@ mod tests {
         a.plugins.available.push(native_stand_in(OSC3_FILE, os_host::Kind::Instrument, true));
         a.plugins.effects = crate::plugins::builtin_effects();
         a.plugins.effects.push(native_stand_in(EQ_FILE_NAME, os_host::Kind::Effect, true));
-        let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_3X_OSC);
+        let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_TRIO);
         let osc_file = lemon_3x_osc::params::default_state();
         a.state.project.channels[row].plugin_state = Some(osc_file.clone());
         let mut eq_file = lemon_parametric_eq_2::params::default_state();

@@ -138,7 +138,7 @@ $link.TargetPath = "$env:USERPROFILE\.cargo\bin\lemonstudio.exe"
 $link.Save()
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon 3x Osc and Lemon Parametric EQ 2 as
+**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
 VST3 and CLAP plugins and installs them in `%LOCALAPPDATA%\Programs\Common\VST3` and `...\CLAP`, where DAWs find them.
 
 **Notes**
@@ -181,7 +181,7 @@ install -Dm644 crates/os-app/assets/lemonstudio.png ~/.local/share/icons/hicolor
 install -Dm644 crates/os-app/assets/lemonstudio.desktop ~/.local/share/applications/lemonstudio.desktop
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon 3x Osc and Lemon Parametric EQ 2 as
+**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
 VST3 and CLAP plugins and installs them in `~/.vst3` and `~/.clap`.
 
 **Notes**
@@ -227,7 +227,7 @@ Finder opens `.flp` projects with it. Without `--install` the app is only writte
 cargo run -p bundle-app -- --install
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon 3x Osc and Lemon Parametric EQ 2 as
+**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
 VST3 and CLAP plugin bundles, signed ad hoc so that Apple silicon loads them, and installs them in
 `~/Library/Audio/Plug-Ins/VST3` and `.../CLAP`.
 
@@ -262,9 +262,10 @@ Use `FILE > Export as WAV` (Ctrl+R) to render the song, or the current pattern i
 Ctrl+Shift+D switches between the Lemon and Classic designs (the choice is remembered). On macOS, Command stands in for
 Ctrl.
 
-Lemon Studio's plugins were called Open Sampler, Open 3x Osc and Open Parametric EQ 2 before. They keep their plugin
-IDs, so sessions saved with the old names still open with the new plugins; delete any old `Open *.vst3` /
-`Open *.clap` bundles you installed, or DAWs will list each plugin twice.
+Lemon Trio and Lemon Parametric EQ were called Lemon 3x Osc and Lemon Parametric EQ 2 before, and earlier all three
+plugins were called Open Sampler, Open 3x Osc and Open Parametric EQ 2. They keep their plugin IDs, so sessions saved
+with the old names still open with the new plugins. `bundle-plugins --install` removes bundles it installed under the
+old names; delete any others you copied yourself, or DAWs will list each plugin twice.
 
 ### Tests
 
@@ -306,8 +307,8 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of Lemon Studio's own plugins |
 | [`os-paths`](crates/os-paths) | Where Lemon Studio keeps its settings, themes and presets on each platform |
 | [`lemon-sampler`](plugins/lemon-sampler) | Lemon Sampler instrument (VST3 + CLAP) |
-| [`lemon-3x-osc`](plugins/lemon-3x-osc) | Lemon 3x Osc instrument (VST3 + CLAP) |
-| [`lemon-parametric-eq-2`](plugins/lemon-parametric-eq-2) | Lemon Parametric EQ 2 effect (VST3 + CLAP) |
+| [`lemon-3x-osc`](plugins/lemon-3x-osc) | Lemon Trio instrument (VST3 + CLAP) |
+| [`lemon-parametric-eq-2`](plugins/lemon-parametric-eq-2) | Lemon Parametric EQ effect (VST3 + CLAP) |
 
 ## Roadmap
 

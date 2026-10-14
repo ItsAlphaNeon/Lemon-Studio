@@ -99,16 +99,9 @@ impl Editor for SamplerEditor {
     }
 }
 
-/// The palette Lemon Studio uses: the remembered `.flstheme` (`current.flstheme` in `os_paths::user_dir`, spec
-/// ui/flstheme.md), else the default one. The plugin runs in its own module, so it reads the theme itself.
+/// The palette Lemon Studio uses (`os_plugkit::palette`: the app's inside Lemon Studio, else the saved design).
 pub fn palette() -> Palette {
-    if cfg!(test) {
-        return Palette::default();
-    }
-    os_paths::user_file("current.flstheme")
-        .and_then(|p| std::fs::read(p).ok())
-        .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
-        .unwrap_or_default()
+    os_plugkit::palette()
 }
 
 // ---------------------------------------------------------------------------------------------------------------

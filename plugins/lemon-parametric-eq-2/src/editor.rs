@@ -647,7 +647,7 @@ impl Logic {
                 m.submenu("Heatmap position", opt_menu(&extra, Opt::HeatmapPosition, &["Top", "Bottom", "Full"], 0), Cmd::None);
                 m.sep(Cmd::None);
                 let mut about = MenuDef::new(MenuStyle::Context);
-                about.add(MenuItem::item("Lemon Parametric EQ 2").enabled(false), Cmd::None);
+                about.add(MenuItem::item("Lemon Parametric EQ").enabled(false), Cmd::None);
                 about.add(MenuItem::item(&format!("Lemon Studio {} - GPLv3", env!("CARGO_PKG_VERSION"))).enabled(false), Cmd::None);
                 about.add(MenuItem::item("Filters after the RBJ Audio EQ Cookbook").enabled(false), Cmd::None);
                 m.submenu("About", about, Cmd::None);
@@ -823,7 +823,7 @@ mod win32 {
                 tracking: false,
                 slot: slot.clone(),
             });
-            let title = pw::wide("Lemon Parametric EQ 2");
+            let title = pw::wide("Lemon Parametric EQ");
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),

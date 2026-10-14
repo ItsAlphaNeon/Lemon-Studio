@@ -1,4 +1,4 @@
-//! Renders the Lemon Parametric EQ 2 editor offscreen:
+//! Renders the Lemon Parametric EQ editor offscreen:
 //! `cargo run -p lemon-parametric-eq-2 --example eq_shot -- out.png [default|demo] [x,y] [spectrum|heatmap]`.
 //! `demo` moves a few bands; `x,y` = mouse position (hover looks); `spectrum` analyses pink-ish noise as monitored input.
 use std::sync::Arc;
@@ -47,10 +47,10 @@ fn main() {
         a.update(&s, 44100.0, view::COLS, &ALook { precision: 2, slope: 2, smoothing: 0, average: false });
         spectrum = Some(a.cols);
     }
-    let theme = std::env::var_os("OS_THEME")
-        .and_then(|p| std::fs::read(p).ok())
-        .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
-        .unwrap_or_default();
+    // `OS_DESIGN=lemon` paints the Lemon design; `OS_THEME=file.flstheme` a Classic theme.
+    let design = std::env::var("OS_DESIGN").ok().and_then(|d| os_theme::Design::parse(&d)).unwrap_or_default();
+    let flstheme = std::env::var_os("OS_THEME").and_then(|p| std::fs::read(p).ok()).map(|b| os_theme::FlTheme::parse(&String::from_utf8_lossy(&b)));
+    let theme = os_theme::design::palette(design, flstheme.as_ref());
     // `OS_SHOT_SCALE=3` renders at that display scale (the picker's high-resolution tiles).
     let k: f32 = std::env::var("OS_SHOT_SCALE").ok().and_then(|v| v.parse().ok()).filter(|k: &f32| *k > 0.0).unwrap_or(1.0);
     let s = |v: u32| (v as f32 * k).round() as u32;

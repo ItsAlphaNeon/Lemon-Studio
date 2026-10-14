@@ -345,6 +345,11 @@ pub fn current() -> std::sync::Arc<Palette> {
     std::sync::Arc::new(Palette::default())
 }
 
+/// The palette a host in this process set with [`set_current`], if it set one.
+pub fn host_current() -> Option<std::sync::Arc<Palette>> {
+    CURRENT.read().ok().and_then(|g| g.clone())
+}
+
 pub fn set_current(p: &Palette) {
     if let Ok(mut g) = CURRENT.write() {
         *g = Some(std::sync::Arc::new(p.clone()));

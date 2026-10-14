@@ -1,6 +1,6 @@
 [package]
 name = "lemon-parametric-eq-2"
-description = "Lemon Parametric EQ 2: Lemon Studio's 7-band parametric EQ as a VST3 / CLAP plugin"
+description = "Lemon Parametric EQ: Lemon Studio's 7-band parametric EQ as a VST3 / CLAP plugin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
