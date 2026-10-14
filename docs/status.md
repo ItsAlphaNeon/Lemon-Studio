@@ -88,6 +88,10 @@ accented as FL does (the first beat of each bar in 4/4 and 3/4), through the mas
 button for five sounds. It is never in an export, and it is remembered between sessions. Not yet: the
 "Metronome track" setting, and following time-signature markers (it follows the project's signature).
 
+**Closing windows.** VIEW > Close all windows (F12), Close all unfocused windows (Ctrl+F12: all but the one
+in front) and Close all plugin windows (Alt+F12: channel settings and plugin editors); the browser stays.
+Not yet: Align all channel editors, Arrange windows.
+
 ## 🚧 Automation
 
 - Automation clips for channel, mixer and plugin parameters

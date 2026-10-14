@@ -55,6 +55,28 @@ impl Win {
     }
 }
 
+/// The three VIEW > Layout close commands (spec: ui/close-windows.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseAll {
+    /// Every window (F12).
+    All,
+    /// Every window but the focused one (Ctrl+F12).
+    Unfocused,
+    /// The channel settings window and the hosted plugin windows (Alt+F12).
+    Plugins,
+}
+
+impl CloseAll {
+    pub fn from_label(label: &str) -> Option<CloseAll> {
+        Some(match label {
+            "Close all windows" => CloseAll::All,
+            "Close all unfocused windows" => CloseAll::Unfocused,
+            "Close all plugin windows" => CloseAll::Plugins,
+            _ => return None,
+        })
+    }
+}
+
 /// Resize edge bits for `Action::WinResize`.
 pub const EDGE_L: u8 = 1;
 pub const EDGE_R: u8 = 2;
@@ -694,6 +716,9 @@ pub struct State {
     pub path: Option<PathBuf>,
     /// Open child windows, bottom to top.
     pub z: Vec<Win>,
+    /// The empty workspace took the last click: no window has the focus (Ctrl+F12 closes them all,
+    /// spec: ui/close-windows.md §2).
+    pub no_focus: bool,
     pub show_browser: bool,
     pub rack_pos: (f32, f32),
     pub rack_size: (f32, f32),
@@ -817,6 +842,7 @@ impl State {
     pub fn raise(&mut self, w: Win) {
         self.z.retain(|&o| o != w);
         self.z.push(w);
+        self.no_focus = false;
     }
 
     pub fn hide(&mut self, w: Win) {
@@ -941,6 +967,7 @@ impl App {
                 file: None,
                 path: None,
                 z: vec![Win::Playlist, Win::ChannelRack],
+                no_focus: false,
                 show_browser: true,
                 rack_pos: (317.0, 195.0),
                 rack_size: views::rack::DEFAULT_SIZE,
@@ -2058,6 +2085,30 @@ impl App {
         self.state.hide(Win::Perf);
         self.state.perf.reset();
         self.state.perf.finding = false;
+        self.invalidate();
+    }
+
+    /// VIEW > Close all windows (F12), Close all unfocused windows (Ctrl+F12), Close all plugin windows (Alt+F12)
+    /// (spec: ui/close-windows.md). The browser is a panel and stays.
+    pub(crate) fn close_windows(&mut self, what: CloseAll) {
+        let plugin = |w: Win| matches!(w, Win::Plugin | Win::Hosted(_));
+        // The focused window is the one in front, unless the empty workspace took the last click.
+        let keep = match what {
+            CloseAll::Unfocused if !self.state.no_focus => self.state.z.last().copied(),
+            _ => None,
+        };
+        let closing: Vec<Win> = self.state.z.iter().copied().filter(|&w| Some(w) != keep && (what != CloseAll::Plugins || plugin(w))).collect();
+        for w in closing {
+            match w {
+                Win::Perf => self.close_perf(),
+                w => self.state.hide(w),
+            }
+        }
+        // Hosted plugin windows (rack rows and mixer slots; detached ones are not in the stack).
+        let rows: Vec<usize> = self.plugins.hosted.keys().copied().collect();
+        for row in rows.into_iter().filter(|&r| keep != Some(Win::Hosted(r))) {
+            self.plugins.close_if_open(row);
+        }
         self.invalidate();
     }
 
@@ -3303,6 +3354,9 @@ impl App {
                 self.state.raise(w);
                 self.invalidate();
             }
+            self.state.no_focus = false;
+        } else if self.state.work_rect().contains(x, y) {
+            self.state.no_focus = true;
         }
     }
 
@@ -4223,6 +4277,14 @@ impl App {
             Key::Named(NamedKey::F11) => self.open_settings(views::settings::INFO),
             // Monitor debug panel (views/mondebug.rs) parked 2026-10-09: its values are now the defaults. Uncomment to tune again.
             // Key::Named(NamedKey::F12) => self.state.monitor.debug = !self.state.monitor.debug,
+            // spec: ui/close-windows.md (Shift+F12, Align all channel editors, is not available yet).
+            Key::Named(NamedKey::F12) if !self.shift => self.close_windows(if ctrl {
+                CloseAll::Unfocused
+            } else if alt {
+                CloseAll::Plugins
+            } else {
+                CloseAll::All
+            }),
             Key::Named(NamedKey::Escape) if self.state.settings.open => self.state.settings.open = false,
             Key::Named(NamedKey::Escape) => {
                 self.state.menu_open = None;
@@ -5316,6 +5378,10 @@ impl App {
                 if let Some(m) = crate::patterns::run(&mut self.state, cmd, at) {
                     self.state.message = Some(m);
                 }
+            }
+            (VIEW, i) if item_at(VIEW, i).and_then(|it| CloseAll::from_label(it.label)).is_some() => {
+                let what = item_at(VIEW, i).and_then(|it| CloseAll::from_label(it.label)).expect("checked");
+                self.close_windows(what);
             }
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::METRONOME_LABEL) => self.toggle_metronome(),
@@ -8717,6 +8783,69 @@ mod tests {
         drag(&mut app, &mut c, at(2 * bar, 2), at(3 * bar, 2));
         assert_eq!((pos(&app, 0).0, pos(&app, 2).0), (2 * bar, 3 * bar), "the group moved together");
         assert_eq!(app.state.playlist.sel.len(), 2);
+    }
+
+    /// VIEW > Close all windows / unfocused / plugin windows and F12, Ctrl+F12, Alt+F12 (spec: ui/close-windows.md):
+    /// the browser stays; the focused window is the one in front, none after a click on the empty workspace.
+    #[test]
+    fn close_all_windows() {
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        let all = vec![Win::Playlist, Win::Mixer, Win::Plugin, Win::ChannelRack, Win::Perf, Win::PianoRoll];
+        let f12 = Key::Named(NamedKey::F12);
+        let view = |label: &str| (0..60).find(|&i| views::menus::item_at(views::menus::VIEW, i).is_some_and(|it| it.label == label)).unwrap();
+        for label in ["Close all windows", "Close all plugin windows", "Close all unfocused windows"] {
+            let it = views::menus::item_at(views::menus::VIEW, view(label)).unwrap();
+            assert!(views::menus::works(views::menus::VIEW, it), "{label} is not greyed out");
+        }
+
+        // F12 and the menu entry: everything but the browser.
+        app.state.z = all.clone();
+        app.key(&f12, false, false);
+        assert!(app.state.z.is_empty());
+        assert!(app.state.show_browser);
+        app.state.z = all.clone();
+        app.menu_item(views::menus::VIEW, view("Close all windows"));
+        assert!(app.state.z.is_empty());
+
+        // Alt+F12: only the channel settings window (and hosted plugin windows).
+        app.state.z = all.clone();
+        app.key(&f12, false, true);
+        assert_eq!(app.state.z, vec![Win::Playlist, Win::Mixer, Win::ChannelRack, Win::Perf, Win::PianoRoll]);
+        app.state.z = all.clone();
+        app.menu_item(views::menus::VIEW, view("Close all plugin windows"));
+        assert!(!app.state.shown(Win::Plugin) && app.state.z.len() == all.len() - 1);
+
+        // Ctrl+F12: all but the one in front (the last clicked).
+        app.state.z = all.clone();
+        app.state.raise(Win::Mixer);
+        app.key(&f12, true, false);
+        assert_eq!(app.state.z, vec![Win::Mixer]);
+        app.state.z = all.clone();
+        app.menu_item(views::menus::VIEW, view("Close all unfocused windows"));
+        assert_eq!(app.state.z, vec![Win::PianoRoll]);
+        // A click on the empty workspace leaves no window focused: Ctrl+F12 closes them all.
+        app.state.z = vec![Win::ChannelRack];
+        frame(&mut app, &mut c, None);
+        let work = app.state.work_rect();
+        app.mouse_move(work.right() - 20.0, work.bottom() - 20.0);
+        app.mouse_down();
+        app.mouse_up();
+        assert!(app.state.no_focus);
+        app.key(&f12, true, false);
+        assert!(app.state.z.is_empty());
+        // Opening or clicking a window focuses it again.
+        app.state.raise(Win::Playlist);
+        app.state.raise(Win::Mixer);
+        assert!(!app.state.no_focus);
+        app.key(&f12, true, false);
+        assert_eq!(app.state.z, vec![Win::Mixer]);
+        // Shift+F12 (Align all channel editors) is not available yet: nothing closes.
+        app.shift = true;
+        app.key(&f12, false, false);
+        app.shift = false;
+        assert_eq!(app.state.z, vec![Win::Mixer]);
     }
 
     /// Playlist navigation and editing shortcuts (spec: ui/playlist.md §3, §3a, §4, §5, §6): Alt+wheel = track
