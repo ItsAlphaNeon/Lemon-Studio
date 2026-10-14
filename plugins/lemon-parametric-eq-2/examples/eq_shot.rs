@@ -47,10 +47,6 @@ fn main() {
         a.update(&s, 44100.0, view::COLS, &ALook { precision: 2, slope: 2, smoothing: 0, average: false });
         spectrum = Some(a.cols);
     }
-    // `OS_DESIGN=lemon` paints the Lemon design; `OS_THEME=file.flstheme` a Classic theme.
-    let design = std::env::var("OS_DESIGN").ok().and_then(|d| os_theme::Design::parse(&d)).unwrap_or_default();
-    let flstheme = std::env::var_os("OS_THEME").and_then(|p| std::fs::read(p).ok()).map(|b| os_theme::FlTheme::parse(&String::from_utf8_lossy(&b)));
-    let theme = os_theme::design::palette(design, flstheme.as_ref());
     // `OS_SHOT_SCALE=3` renders at that display scale (the picker's high-resolution tiles).
     let k: f32 = std::env::var("OS_SHOT_SCALE").ok().and_then(|v| v.parse().ok()).filter(|k: &f32| *k > 0.0).unwrap_or(1.0);
     let s = |v: u32| (v as f32 * k).round() as u32;
@@ -58,7 +54,7 @@ fn main() {
     let paint = |l: &mut Logic, c: &mut os_ui::Canvas| {
         let extra = l.params.extra_copy();
         let look = Look { s: l.shown(), extra: &extra, spectrum: spectrum.as_deref(), rate: 44100.0 };
-        l.hits = view::paint(c, &theme, &look, &l.view);
+        l.hits = view::paint(c, &look, &l.view);
     };
     paint(&mut l, &mut c);
     if let Some((x, y)) = arg(3).and_then(|m| m.split_once(',')).and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?))) {

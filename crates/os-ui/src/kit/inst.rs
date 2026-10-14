@@ -1,7 +1,9 @@
 //! Instrument-window controls (channel / plugin windows: Lemon Sampler and later Lemon plugins): the FL-style dial with
 //! a 360° value ring, the big brushed filter knob, round radios, outlined panels with a header tab, the A/B switch,
 //! the fine-tune slider and the dark list box. Measured looks: spec `plugins/lemon-sampler.md` §Look. The Lemon
-//! design draws every one of them its own way in the same place (spec `ui/lemon-design.md` §11).
+//! design draws every one of them its own way in the same place (spec `ui/lemon-design.md` §11.1). The controls the
+//! app's own windows share (the Misc page) keep both looks; those only the plugins draw (big dial, Reset button, A/B
+//! switch, graph background) have the Lemon look only, as the plugins have no Classic look.
 // spec: plugins/lemon-sampler.md (Look: dial, big dial, radio, panel, A/B switch, slider, list box)
 
 use std::f32::consts::{PI, TAU};
@@ -70,69 +72,26 @@ pub fn big_dial_angle(value: f32) -> f32 {
     (210.0 + 300.0 * value.clamp(0.0, 1.0)).to_radians()
 }
 
-/// Big filter knob (MOD X / MOD Y): seven dark ticks 45° apart (none at the bottom), a black ring lit from above, a
-/// metal cap bright at the top and dark below its middle, and a coloured pointer dot on the ring (measured, spec
-/// plugins/lemon-sampler.md §3). Hover brightens the metal.
-pub fn big_dial(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, value: f32, dot: Color, st: State) {
+/// Big filter knob (MOD X / MOD Y): seven ticks 45° apart (none at the bottom) around a large knob turning over 300°
+/// with the value arc in `dot`. Hover brightens it.
+pub fn big_dial(c: &mut Canvas, cx: f32, cy: f32, value: f32, dot: Color, st: State) {
     let hot = st.hover || st.pressed;
-    if lemon::on(t) {
-        // The same ticks around a large lemon-design knob turning over the same 300°.
-        for k in [0, 1, 2, 3, 5, 6, 7] {
-            let a = (k as f32 * 45.0).to_radians();
-            let (s, co) = (a.sin(), -a.cos());
-            c.line(cx + 26.5 * s, cy + 26.5 * co, cx + 30.5 * s, cy + 30.5 * co, 1.2, plug::TICK);
-        }
-        let (start, sweep) = (big_dial_angle(0.0) - PI / 2.0, 300f32.to_radians());
-        c.arc(cx, cy, 22.5, start, sweep, 3.0, plug::TRACK);
-        let v = value.clamp(0.0, 1.0);
-        if v > 0.004 {
-            c.arc(cx, cy, 22.5, start, sweep * v, 3.0, if hot { dot.mix(Color::rgb(0xffffff), 0.2) } else { dot });
-        }
-        let (top, bottom) = if hot { (0x5c5c5c, 0x404040) } else { (0x525252, 0x383838) };
-        c.fill_rect_gradient(Rect::new(cx - 19.0, cy - 19.0, 38.0, 38.0), Color::rgb(top), Color::rgb(bottom), 19.0);
-        let a = big_dial_angle(value);
-        let (s, co) = (a.sin(), -a.cos());
-        c.line(cx + 6.0 * s, cy + 6.0 * co, cx + 16.0 * s, cy + 16.0 * co, 2.4, Color::rgb(0xe6e6e6));
-        return;
-    }
-    for k in 0..8 {
-        if k == 4 {
-            continue;
-        }
+    for k in [0, 1, 2, 3, 5, 6, 7] {
         let a = (k as f32 * 45.0).to_radians();
         let (s, co) = (a.sin(), -a.cos());
-        c.line(cx + 25.5 * s, cy + 25.5 * co, cx + 30.5 * s, cy + 30.5 * co, 1.2, t.s(0x151718));
+        c.line(cx + 26.5 * s, cy + 26.5 * co, cx + 30.5 * s, cy + 30.5 * co, 1.2, plug::TICK);
     }
-    // Drop shadow below, then the ring: black, the top lit grey (fading out towards 3 and 9 o'clock).
-    c.fill_circle(cx, cy + 3.5, 24.5, t.s(0x000000).with_alpha(110));
-    c.fill_circle(cx, cy, 24.0, t.s(0x000000));
-    let segs = 24;
-    for i in 0..segs {
-        let a0 = -PI + i as f32 / segs as f32 * PI;
-        let m = a0 + PI / segs as f32 / 2.0;
-        let lit = (-m.sin()).max(0.0).powf(3.0);
-        c.arc(cx, cy, 21.0, a0, PI / segs as f32 + 0.02, 5.5, t.s(0x000000).mix(t.s(0x6a6b6b), lit));
+    let (start, sweep) = (big_dial_angle(0.0) - PI / 2.0, 300f32.to_radians());
+    c.arc(cx, cy, 22.5, start, sweep, 3.0, plug::TRACK);
+    let v = value.clamp(0.0, 1.0);
+    if v > 0.004 {
+        c.arc(cx, cy, 22.5, start, sweep * v, 3.0, if hot { dot.mix(Color::rgb(0xffffff), 0.2) } else { dot });
     }
-    // Cap: spun metal. A conic sheen (bright towards 1 and 7 o'clock) under a vertical light: lighter at the top,
-    // darker below the middle (measured).
-    let cap = Rect::new(cx - 17.5, cy - 17.5, 35.0, 35.0);
-    let (lo, hi) = if hot { (t.s(0x2a2c2e), t.s(0x7a7c7e)) } else { (t.s(0x1f2122), t.s(0x6e7071)) };
-    let n = 96;
-    let r = 17.6;
-    for k in 0..n {
-        let a0 = k as f32 / n as f32 * TAU;
-        let a1 = (k + 1) as f32 / n as f32 * TAU + 0.01;
-        let m = (a0 + a1) / 2.0;
-        let sheen = (2.0 * (m + PI / 3.0)).cos().max(0.0).powf(14.0) * 0.9 + 0.2 * (-m.sin()).max(0.0);
-        c.fill_polygon(&[(cx, cy), (cx + r * a0.cos(), cy + r * a0.sin()), (cx + r * a1.cos(), cy + r * a1.sin())], lo.mix(hi, sheen));
-    }
-    c.fill_rect_gradient(cap, t.s(0xffffff).with_alpha(if hot { 80 } else { 64 }), t.s(0x000000).with_alpha(0), 17.5);
-    c.fill_rect_gradient(cap, t.s(0x000000).with_alpha(0), t.s(0x000000).with_alpha(40), 17.5);
-    c.stroke_circle(cx, cy, 17.5, 1.0, t.s(0x282a2b));
-    c.arc(cx, cy, 17.5, 0.2 * PI, 0.6 * PI, 1.2, t.s(0x353738));
+    let (top, bottom) = if hot { (0x5c5c5c, 0x404040) } else { (0x525252, 0x383838) };
+    c.fill_rect_gradient(Rect::new(cx - 19.0, cy - 19.0, 38.0, 38.0), Color::rgb(top), Color::rgb(bottom), 19.0);
     let a = big_dial_angle(value);
-    let (x, y) = (cx + 20.8 * a.sin(), cy - 20.8 * a.cos());
-    c.fill_rect(Rect::new((x - 1.0).round(), (y - 1.0).round(), 2.0, 2.0), dot);
+    let (s, co) = (a.sin(), -a.cos());
+    c.line(cx + 6.0 * s, cy + 6.0 * co, cx + 16.0 * s, cy + 16.0 * co, 2.4, Color::rgb(0xe6e6e6));
 }
 
 /// Round radio / toggle, 15 px: dark with a grey ring when off, glowing red-orange when on; a disabled option that is
@@ -267,47 +226,21 @@ pub fn list_box(c: &mut Canvas, t: &Palette, r: Rect, text: &str, st: State) {
     c.glyph(ac, &g);
 }
 
-/// Small flat push button with a text label ("Reset").
-pub fn text_button(c: &mut Canvas, t: &Palette, r: Rect, s: &str, st: State) {
-    if lemon::on(t) {
-        let ink = lemon::plug_button(c, r, 6.0, st);
-        c.text_center(LABEL, r, ink, s);
-        return;
-    }
-    c.fill_rrect(r, 2.0, t.s(0x161819));
-    let (a, b) = if st.pressed {
-        (t.s(0x1f2123), t.s(0x232628))
-    } else if st.hover {
-        (t.s(0x35383a), t.s(0x2c2f31))
-    } else {
-        (t.s(0x2c2f31), t.s(0x25282a))
-    };
-    c.fill_rect_gradient(r.inset(1.0), a, b, 1.5);
-    c.text_center(LABEL, r, if st.hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) }, s);
+/// Small push button with a text label ("Reset"), lit when `st.on`.
+pub fn text_button(c: &mut Canvas, r: Rect, s: &str, st: State) {
+    let ink = lemon::plug_button(c, r, 6.0, st);
+    c.text_center(LABEL, r, ink, s);
 }
 
-/// Vertical A / B switch (reverb type): a rounded slot with a ball on the chosen side, letters to the right.
-pub fn ab_switch(c: &mut Canvas, t: &Palette, r: Rect, b: bool, st: State) {
+/// Vertical A / B switch (reverb type): a rounded slot with a lit square on the chosen side, letters to the right.
+pub fn ab_switch(c: &mut Canvas, r: Rect, b: bool, st: State) {
     let slot = Rect::new(r.x, r.y, 12.0, r.h);
-    if lemon::on(t) {
-        lemon::field(c, slot, State { pressed: false, ..st });
-        let by = if b { slot.bottom() - 6.5 } else { slot.y + 6.5 };
-        lemon::lit(c, Rect::new(slot.x + 1.5, by - 4.5, 9.0, 9.0), 3.0, st.hover);
-        let f = Font::new(12).bold();
-        let lh = c.line_height(f);
-        let (on, off) = (os_theme::design::lemon::TEXT, plug::FAINT);
-        c.text(f, slot.right() + 4.0, (slot.y + 6.5 - lh / 2.0).round(), if b { off } else { on }, "A");
-        c.text(f, slot.right() + 4.0, (slot.bottom() - 6.5 - lh / 2.0).round(), if b { on } else { off }, "B");
-        return;
-    }
-    c.fill_rrect(slot, 6.0, t.s(0x151718));
-    c.fill_rrect(slot.inset(1.0), 5.0, if st.hover { t.s(0x2a2d2f) } else { t.s(0x222527) });
+    lemon::field(c, slot, State { pressed: false, ..st });
     let by = if b { slot.bottom() - 6.5 } else { slot.y + 6.5 };
-    c.fill_circle(slot.cx(), by, 4.8, t.s(0x9a9fa3));
-    c.fill_circle(slot.cx(), by - 0.6, 3.8, t.s(0xd4d8dc));
+    lemon::lit(c, Rect::new(slot.x + 1.5, by - 4.5, 9.0, 9.0), 3.0, st.hover);
     let f = Font::new(12).bold();
     let lh = c.line_height(f);
-    let (on, off) = (t.tx(0xd2d8dc), t.s(0x7c8184));
+    let (on, off) = (os_theme::design::lemon::TEXT, plug::FAINT);
     c.text(f, slot.right() + 4.0, (slot.y + 6.5 - lh / 2.0).round(), if b { off } else { on }, "A");
     c.text(f, slot.right() + 4.0, (slot.bottom() - 6.5 - lh / 2.0).round(), if b { on } else { off }, "B");
 }
@@ -345,15 +278,9 @@ pub fn hslider(c: &mut Canvas, t: &Palette, x0: f32, x1: f32, cy: f32, value: f3
     track
 }
 
-/// Envelope / LFO graph background.
-/// Graph background with its 1 px dark border.
-pub fn graph_bg(c: &mut Canvas, t: &Palette, r: Rect) {
-    if lemon::on(t) {
-        lemon::plug_well(c, r, 6.0);
-        return;
-    }
-    c.fill_rect(r, t.s(0x191f23));
-    c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0), t.s(0x1b1d1e));
+/// Envelope / LFO graph background: a dark well.
+pub fn graph_bg(c: &mut Canvas, r: Rect) {
+    lemon::plug_well(c, r, 6.0);
 }
 
 #[cfg(test)]
@@ -379,15 +306,15 @@ mod tests {
             for st in [State::NORMAL, State::hover(true), State::NORMAL.with_disabled(true)] {
             dial(&mut c, &t, 20.0, 20.0, 11.5, 13.5, 0.31, false, t.a(0x47f49a), st);
             dial(&mut c, &t, 50.0, 20.0, 8.0, 10.0, 0.1, true, t.a(0x47f49a), st);
-            big_dial(&mut c, &t, 100.0, 40.0, 1.0, t.a(0x5ea733), st);
+            big_dial(&mut c, 100.0, 40.0, 1.0, t.a(0x5ea733), st);
             radio(&mut c, &t, 150.0, 20.0, true, st);
             list_box(&mut c, &t, Rect::new(2.0, 60.0, 100.0, 20.0), "Fast LP", st);
-            ab_switch(&mut c, &t, Rect::new(150.0, 40.0, 24.0, 26.0), true, st);
+            ab_switch(&mut c, Rect::new(150.0, 40.0, 24.0, 26.0), true, st);
             hslider(&mut c, &t, 10.0, 110.0, 100.0, 0.5, st);
             panel(&mut c, &t, Rect::new(2.0, 2.0, 60.0, 40.0));
             panel_tab(&mut c, &t, Rect::new(2.0, 2.0, 60.0, 40.0), 40.0, "Filter");
-            text_button(&mut c, &t, Rect::new(2.0, 90.0, 40.0, 20.0), "Reset", st);
-            graph_bg(&mut c, &t, Rect::new(60.0, 60.0, 50.0, 30.0));
+            text_button(&mut c, Rect::new(2.0, 90.0, 40.0, 20.0), "Reset", st);
+            graph_bg(&mut c, Rect::new(60.0, 60.0, 50.0, 30.0));
             caption(&mut c, &t, 30.0, 40.0, "AMT", st.disabled);
             label(&mut c, &t, 120.0, 100.0, "Tempo", st.disabled);
             }

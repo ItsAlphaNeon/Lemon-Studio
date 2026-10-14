@@ -1429,7 +1429,7 @@ mod tests {
                 String::new()
             }
         }
-        let hits = lemon_3x_osc::view::paint(&mut c, &os_theme::Palette::default(), &Mid, &Default::default(), "", true);
+        let hits = lemon_3x_osc::view::paint(&mut c, &os_theme::design::palette(os_theme::Design::Lemon, None), &Mid, &Default::default(), "", true);
         let t = lemon_3x_osc::view::Target::Knob("o2_coarse".into());
         let r = hits.iter().rev().find(|h| h.t == t).expect("coarse knob").r;
         let (cx, cy) = ((r.cx() - lemon_3x_osc::view::CROP_X as f32) as i32, (r.cy() - lemon_3x_osc::view::HOSTED_CROP_Y as f32) as i32);

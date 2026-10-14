@@ -36,10 +36,7 @@ fn main() {
         _ => None,
     };
     let sv = SampleView { sample: sample.as_ref(), path, bits, spectrum: spec.as_ref().map(|(w, h, p)| (*w, *h, p.as_slice())) };
-    // `OS_DESIGN=lemon` paints the Lemon design; `OS_THEME=file.flstheme` a Classic theme.
-    let design = std::env::var("OS_DESIGN").ok().and_then(|d| os_theme::Design::parse(&d)).unwrap_or_default();
-    let flstheme = std::env::var_os("OS_THEME").and_then(|p| std::fs::read(p).ok()).map(|b| os_theme::FlTheme::parse(&String::from_utf8_lossy(&b)));
-    let theme = os_theme::design::palette(design, flstheme.as_ref());
+    let theme = os_plugkit::palette();
     view::paint(&mut c, &theme, &vals, &st, &sv, "", hosted);
     if std::env::var_os("OS_BENCH").is_some() {
         // Full-frame paint time (what a knob drag repaints).

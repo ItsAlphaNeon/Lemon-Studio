@@ -160,7 +160,7 @@ Not yet: Align all channel editors, Arrange windows.
 - The Lemon design (lemon on neutral greys, rounded-square controls) and the Classic look, switched with
   Ctrl+Shift+D
 - Theme files apply to the Classic look
-- Not yet: restyled plugin editors
+- Lemon Studio's own plugin editors are drawn in the Lemon design only, whatever design the app shows
 
 ## ❌ Not available yet
 

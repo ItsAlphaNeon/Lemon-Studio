@@ -1079,7 +1079,7 @@ mod win32 {
             let histogram = params::flag(&extra, params::F_HISTOGRAM) || params::flag(&extra, params::F_HEATMAP);
             let spectrum = (histogram && params::byte(&extra, params::MONITOR_BYTE) != 0 && !self.analyzer.cols.is_empty()).then_some(self.analyzer.cols.as_slice());
             let look = Look { s: self.logic.shown(), extra: &extra, spectrum, rate: f64::from(self.shared.rate.load(Ordering::Relaxed)) };
-            self.logic.hits = view::paint(&mut self.canvas, &self.palette, &look, &self.logic.view);
+            self.logic.hits = view::paint(&mut self.canvas, &look, &self.logic.view);
             self.last_sig = self.logic.vals.signature();
             self.last_extra = self.params.extra_version.load(Ordering::Acquire);
             self.last_view = self.logic.view.clone();
@@ -1325,7 +1325,7 @@ mod gui {
             let histogram = params::flag(&extra, params::F_HISTOGRAM) || params::flag(&extra, params::F_HEATMAP);
             let spectrum = (histogram && params::byte(&extra, params::MONITOR_BYTE) != 0 && !self.analyzer.cols.is_empty()).then_some(self.analyzer.cols.as_slice());
             let look = Look { s: self.logic.shown(), extra: &extra, spectrum, rate: f64::from(self.shared.rate.load(Ordering::Relaxed)) };
-            self.logic.hits = view::paint(&mut self.canvas, &self.palette, &look, &self.logic.view);
+            self.logic.hits = view::paint(&mut self.canvas, &look, &self.logic.view);
             self.last_sig = self.logic.vals.signature();
             self.last_extra = self.params.extra_version.load(Ordering::Acquire);
             self.last_view = self.logic.view.clone();
@@ -1350,7 +1350,7 @@ mod tests {
         let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
         let extra = l.params.extra_copy();
         let look = view::Look { s: l.shown(), extra: &extra, spectrum: None, rate: 48000.0 };
-        l.hits = view::paint(&mut c, &os_theme::Palette::default(), &look, &l.view);
+        l.hits = view::paint(&mut c, &look, &l.view);
     }
 
     fn centre(l: &Logic, t: Target) -> (f32, f32) {

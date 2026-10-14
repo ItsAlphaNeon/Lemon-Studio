@@ -1057,7 +1057,7 @@ mod tests {
 
     fn paint(l: &mut Logic) {
         let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
-        l.hits = view::paint(&mut c, &os_theme::Palette::default(), &l.vals, &l.view, "", false);
+        l.hits = view::paint(&mut c, &os_plugkit::palette(), &l.vals, &l.view, "", false);
     }
 
     fn centre(l: &Logic, t: &Target) -> (f32, f32) {
@@ -1214,7 +1214,7 @@ mod tests {
         let mut l = logic();
         assert!(l.hits.iter().any(|h| h.t == Target::Tab(1)));
         let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
-        l.hits = view::paint(&mut c, &os_theme::Palette::default(), &l.vals, &l.view, "", true);
+        l.hits = view::paint(&mut c, &os_plugkit::palette(), &l.vals, &l.view, "", true);
         assert!(!l.hits.iter().any(|h| matches!(h.t, Target::Tab(_))));
         // Every control lies inside the area shown when hosted.
         let top = view::HOSTED_CROP_Y as f32;

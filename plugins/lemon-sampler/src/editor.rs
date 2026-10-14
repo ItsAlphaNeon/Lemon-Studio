@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nih_plug::prelude::*;
-use os_theme::Palette;
 use os_ui::kit::menu::{Mark, MenuItem, MenuStyle};
 use os_ui::Rect;
 
@@ -97,11 +96,6 @@ impl Editor for SamplerEditor {
     fn param_values_changed(&self) {
         self.notify();
     }
-}
-
-/// The palette Lemon Studio uses (`os_plugkit::palette`: the app's inside Lemon Studio, else the saved design).
-pub fn palette() -> Palette {
-    os_plugkit::palette()
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1431,7 +1425,7 @@ mod win32 {
                 logic: Logic::new(params.clone(), shared.clone(), Some(ctx)),
                 params,
                 shared,
-                palette: super::palette(),
+                palette: os_plugkit::palette(),
                 spectrum: SpectrumCache::default(),
                 last_sig: 0,
                 last_view: ViewState::default(),
@@ -2370,7 +2364,7 @@ mod gui {
                 params,
                 shared,
                 logic,
-                palette: super::palette(),
+                palette: os_plugkit::palette(),
                 spectrum: SpectrumCache::default(),
                 last_sig: 0,
                 last_view: ViewState::default(),
@@ -2731,7 +2725,7 @@ mod tests {
     fn paint(l: &mut Logic) {
         let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
         let sv = SampleView { sample: None, path: "", bits: 16, spectrum: None };
-        l.hits = view::paint(&mut c, &Palette::default(), &l.vals, &l.view, &sv, "", false);
+        l.hits = view::paint(&mut c, &os_plugkit::palette(), &l.vals, &l.view, &sv, "", false);
     }
 
     fn centre(l: &Logic, t: &Target) -> (f32, f32) {

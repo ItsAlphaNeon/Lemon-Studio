@@ -31,10 +31,7 @@ fn main() {
         }
         _ => {}
     }
-    // `OS_DESIGN=lemon` paints the Lemon design; `OS_THEME=file.flstheme` a Classic theme.
-    let design = std::env::var("OS_DESIGN").ok().and_then(|d| os_theme::Design::parse(&d)).unwrap_or_default();
-    let flstheme = std::env::var_os("OS_THEME").and_then(|p| std::fs::read(p).ok()).map(|b| os_theme::FlTheme::parse(&String::from_utf8_lossy(&b)));
-    let theme = os_theme::design::palette(design, flstheme.as_ref());
+    let theme = os_plugkit::palette();
     // `OS_SHOT_SCALE=3` renders at that display scale (the picker's high-resolution tiles).
     let k: f32 = std::env::var("OS_SHOT_SCALE").ok().and_then(|v| v.parse().ok()).filter(|k: &f32| *k > 0.0).unwrap_or(1.0);
     let s = |v: u32| (v as f32 * k).round() as u32;

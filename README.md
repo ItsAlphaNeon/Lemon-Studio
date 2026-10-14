@@ -88,7 +88,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Undo | 🚧 | Per editor (piano roll, playlist); no redo or global history yet |
 | Audio drivers | 🚧 | WASAPI on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no ASIO or JACK yet |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
-| Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; plugin editors not restyled yet |
+| Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; Lemon plugin editors in the Lemon design only |
 | Audio recording | ❌ | |
 | MIDI file import / export | ❌ | |
 | Audio editing | ❌ | |

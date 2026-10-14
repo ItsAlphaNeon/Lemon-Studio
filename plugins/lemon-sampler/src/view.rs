@@ -1,10 +1,9 @@
 //! Lemon Sampler editor: painting and hit regions (platform independent), built from the `os_ui::kit` widgets.
 //!
 //! Coordinates are FL window pixels from the spec tables; the editor is the window minus its 24 px title bar, so
-//! every y is drawn at `y - OY`. Colours are palette roles (`t.s` surface, `t.a` accent, `t.h` highlight, `t.tx` text)
-//! so an imported theme recolours the plugin like the rest of Lemon Studio. The Lemon design draws the same layout its
-//! own way (`kit::lemon::plug`): outlined panels, square toggles, a grey waveform in a dark well.
-// spec: plugins/lemon-sampler.md (Look, Layout, Hints, Waveform, Keyboard); ui/lemon-design.md §11
+//! every y is drawn at `y - OY`. It is drawn in the Lemon design only (`kit::lemon::plug`; the plugins have no Classic
+//! look): outlined panels, square toggles, a grey waveform in a dark well.
+// spec: plugins/lemon-sampler.md (Look, Layout, Hints, Waveform, Keyboard); ui/lemon-design.md §11.1
 
 use std::f32::consts::{PI, TAU};
 
@@ -54,18 +53,15 @@ const CAP: Font = inst::CAPTION;
 /// The filter's MOD X / MOD Y captions (larger than knob captions).
 const MOD_CAP: Font = Font::new(10).bold();
 
-/// An accent colour of the view: the Lemon design draws the sample page's orange and the root key's blues in lemon.
+/// An accent colour of the view: the sample page's orange and the root key's blues are drawn in lemon.
 fn accent(t: &Palette, hex: u32) -> Color {
-    if lemon::on(t) {
-        match hex {
-            ORANGE | 0x77a9e6 => return brand::MAIN,
-            0x235fc3 => return brand::DEEP,
-            0x5785d2 => return brand::DEEP.mix(brand::MAIN, 0.5),
-            0x225cc3 => return brand::COLORED_DARK,
-            _ => {}
-        }
+    match hex {
+        ORANGE | 0x77a9e6 => brand::MAIN,
+        0x235fc3 => brand::DEEP,
+        0x5785d2 => brand::DEEP.mix(brand::MAIN, 0.5),
+        0x225cc3 => brand::COLORED_DARK,
+        _ => t.a(hex),
     }
-    t.a(hex)
 }
 
 pub fn y(v: f32) -> f32 {
@@ -245,29 +241,15 @@ impl Ui<'_> {
 pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, sv: &SampleView, hint: &str, hosted: bool) -> Vec<Hit> {
     let mut ui = Ui { c, t, m, st, hits: Vec::new() };
     ui.c.begin_frame(None);
-    let lemon = lemon::on(t);
-    if lemon {
-        ui.c.clear(plug::BG);
-    } else {
-        ui.c.clear(t.s(0x25292b));
-        ui.c.fill_rect(Rect::span(4.0, 563.0, 1.0, y(461.0)), t.s(0x202324));
-        // Frame edges (measured): a dark line inside the frame and one at its outer edge.
-        for r in [Rect::span(4.0, 4.0, 1.0, y(461.0)), Rect::span(563.0, 563.0, 1.0, y(461.0)), Rect::span(4.0, 563.0, y(461.0), y(461.0))] {
-            ui.c.fill_rect(r, t.s(0x181b1c));
-        }
-        for r in [Rect::span(0.0, 0.0, 0.0, y(465.0)), Rect::span(567.0, 567.0, 0.0, y(465.0)), Rect::span(0.0, 567.0, y(465.0), y(465.0))] {
-            ui.c.fill_rect(r, t.s(0x191d1f));
-        }
-    }
+    ui.c.clear(plug::BG);
     if !hosted {
         tab_strip(&mut ui);
         if !hint.is_empty() {
             let lh = ui.c.line_height(LABEL);
             let (left, right) = hint.split_once('\t').unwrap_or((hint, ""));
-            let col = if lemon { plug::DIM } else { t.tx(0xb4bfc7) };
-            ui.c.text_clip(LABEL, 100.0, (y(48.0) - lh / 2.0).round(), 300.0, col, left);
+            ui.c.text_clip(LABEL, 100.0, (y(48.0) - lh / 2.0).round(), 300.0, plug::DIM, left);
             if !right.is_empty() {
-                ui.c.text_right(LABEL, 556.0, (y(48.0) - lh / 2.0).round(), col, right);
+                ui.c.text_right(LABEL, 556.0, (y(48.0) - lh / 2.0).round(), plug::DIM, right);
             }
         }
     }
@@ -365,35 +347,11 @@ pub fn page_icon(c: &mut Canvas, page: u8, cx: f32, cy: f32, col: Color) {
 // Tab strip (only when no host draws it)
 
 fn tab_strip(ui: &mut Ui) {
-    let t = ui.t;
-    if lemon::on(t) {
-        let hover = (0..2u8).find(|&i| ui.state(rr(5.0 + 43.0 * f32::from(i), 49.0 + 43.0 * f32::from(i), 26.0, 71.0), &Target::Tab(i)).hover);
-        lemon::page_strip(ui.c, rr(4.0, 563.0, 25.0, 71.0), 2, ui.st.tab, hover, &|i| 5.0 + 43.0 * f32::from(i), &mut |c, i, x, yy, col| page_icon(c, i, x, yy, col));
-        for i in 0..2u8 {
-            let x0 = 5.0 + 43.0 * f32::from(i);
-            ui.hit(rr(x0, x0 + 44.0, 26.0, 71.0), Target::Tab(i));
-        }
-        return;
-    }
-    ui.c.fill_rect(rr(4.0, 563.0, 25.0, 71.0), t.s(0x151718));
-    ui.c.fill_rect(rr(4.0, 563.0, 26.0, 70.0), t.s(0x1b1d1e));
+    let hover = (0..2u8).find(|&i| ui.state(rr(5.0 + 43.0 * f32::from(i), 49.0 + 43.0 * f32::from(i), 26.0, 71.0), &Target::Tab(i)).hover);
+    lemon::page_strip(ui.c, rr(4.0, 563.0, 25.0, 71.0), 2, ui.st.tab, hover, &|i| 5.0 + 43.0 * f32::from(i), &mut |c, i, x, yy, col| page_icon(c, i, x, yy, col));
     for i in 0..2u8 {
         let x0 = 5.0 + 43.0 * f32::from(i);
-        let cell = rr(x0, x0 + 44.0, 26.0, 71.0);
-        let active = ui.st.tab == i;
-        let st = ui.state(cell, &Target::Tab(i));
-        if active {
-            ui.c.fill_rect(cell, t.s(0x202324));
-        }
-        let col = if active {
-            t.a(0x49f1b1)
-        } else if st.hover {
-            t.tx(0xffffff)
-        } else {
-            t.tx(0xd5dbdf)
-        };
-        page_icon(ui.c, i, 27.0 + 43.0 * f32::from(i), y(48.0), col);
-        ui.hit(cell, Target::Tab(i));
+        ui.hit(rr(x0, x0 + 44.0, 26.0, 71.0), Target::Tab(i));
     }
 }
 
@@ -402,7 +360,6 @@ fn tab_strip(ui: &mut Ui) {
 
 fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     let t = ui.t;
-    let lemon = lemon::on(t);
     // File panel.
     panel(ui, 11.0, 280.0, 78.0, 114.0, 0.0, "");
     label(ui, 21.0, 96.0, "File");
@@ -414,16 +371,12 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     let lh = ui.c.line_height(LABEL);
     let ty = (y(96.0) - lh / 2.0).round();
     let w = ui.c.text_width(LABEL, stem).min(150.0);
-    let (name_col, ext_col) = if lemon { (brand::TEXT, Color::rgb(0x8c8c8c)) } else { (t.tx(0xd2d8dc), t.s(0x8c9296)) };
+    let (name_col, ext_col) = (brand::TEXT, Color::rgb(0x8c8c8c));
     ui.c.text_clip(LABEL, 46.0, ty, 150.0, name_col, stem);
     ui.c.text_clip(LABEL, 46.0 + w, ty, 150.0 - w, ext_col, ext);
     ui.hit(rr(44.0, 200.0, 85.0, 107.0), Target::FileName);
-    if lemon {
-        // One rounded group with thin separators.
-        lemon::field(ui.c, rr(204.0, 274.0, 84.0, 108.0), State::NORMAL);
-    } else {
-        ui.c.fill_rect(rr(204.0, 274.0, 84.0, 108.0), t.s(0x1a1c1d));
-    }
+    // One rounded group with thin separators.
+    lemon::field(ui.c, rr(204.0, 274.0, 84.0, 108.0), State::NORMAL);
     for (x0, x1, target, ic, size) in [
         (205.0, 234.0, Target::FileOpen, &tb::FOLDER_OPEN, 17.0),
         (236.0, 255.0, Target::FileBrowse, &tb::FOLDER_SEARCH, 16.0),
@@ -431,19 +384,13 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     ] {
         let r = rr(x0, x1, 85.0, 107.0);
         let st = ui.state(r, &target);
-        if lemon {
-            if st.hover || st.pressed {
-                ui.c.fill_rrect(r.inset(1.0), 4.0, if st.pressed { Color::rgb(0x1f1f1f) } else { Color::rgb(0x353535) });
-            }
-            if x0 > 205.0 {
-                ui.c.fill_rect(rr(x0 - 1.0, x0 - 1.0, 88.0, 104.0), plug::FIELD_LINE);
-            }
-            icon(ui.c, ic, r.cx(), r.cy(), size, if st.hover { brand::MAIN } else { brand::TEXT });
-            ui.hit(r, target);
-            continue;
+        if st.hover || st.pressed {
+            ui.c.fill_rrect(r.inset(1.0), 4.0, if st.pressed { Color::rgb(0x1f1f1f) } else { Color::rgb(0x353535) });
         }
-        ui.c.fill_rect(r, if st.pressed { t.s(0x1d1f20) } else if st.hover { t.s(0x2e3133) } else { t.s(0x242728) });
-        icon(ui.c, ic, r.cx(), r.cy(), size, if st.hover { t.tx(0xffffff) } else { t.tx(0xd5dbdf) });
+        if x0 > 205.0 {
+            ui.c.fill_rect(rr(x0 - 1.0, x0 - 1.0, 88.0, 104.0), plug::FIELD_LINE);
+        }
+        icon(ui.c, ic, r.cx(), r.cy(), size, if st.hover { brand::MAIN } else { brand::TEXT });
         ui.hit(r, target);
     }
 
@@ -459,7 +406,7 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     knob(ui, "start_offset", 45.0, 286.0, BIG, ORANGE, false, "START OFFSET");
     knob(ui, "loop_start", 98.0, 286.0, BIG, ORANGE, false, "START");
     knob(ui, "loop_end", 140.0, 286.0, BIG, ORANGE, false, "END");
-    icon(ui.c, &tb::ROTATE_CLOCKWISE_2, 119.0, y(286.0) + 21.0, 11.0, if lemon { brand::MAIN } else { t.a(0x9fb4c8) });
+    icon(ui.c, &tb::ROTATE_CLOCKWISE_2, 119.0, y(286.0) + 21.0, 11.0, brand::MAIN);
     radio(ui, "loop_use", 184.0, 274.0, "Use loop points", false);
     radio(ui, "loop_pingpong", 184.0, 294.0, "Ping pong loop", false);
 
@@ -472,7 +419,7 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     if ui.m.plain("ts_mode") as i32 == params::STRETCH_AUTO {
         // Auto picks a method; FL shows the one in use under the box.
         let f = Font::new(11);
-        ui.c.text(f, 460.0, y(125.0), if lemon { plug::FAINT } else { t.s(0x8c9296) }, "e3 generic");
+        ui.c.text(f, 460.0, y(125.0), plug::FAINT, "e3 generic");
     }
 
     let fx = panel(ui, 287.0, 556.0, 162.0, 319.0, 0.0, "");
@@ -481,40 +428,21 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
         let r = Rect::new(x - 11.0, y(163.0), 22.0, 19.0);
         let target = Target::FxPage(i);
         let st = ui.state(r, &target);
-        if lemon {
-            // The chosen page is a lit rounded square.
-            let on = ui.st.fx_page == i;
-            let face = Rect::new(x - 11.0, y(172.0) - 10.0, 22.0, 20.0);
-            if on {
-                lemon::lit(ui.c, face, 6.0, st.hover);
-            } else if st.hover {
-                ui.c.fill_rrect(face, 6.0, Color::rgb(0x3d3d3d));
-            }
-            icon(ui.c, ic, x, y(172.0), 16.0, if on { brand::COLORED_DARK } else if st.hover { brand::TEXT } else { plug::DIM });
-            ui.hit(r, target);
-            continue;
-        }
-        if ui.st.fx_page == i {
-            ui.c.fill_rect(r, t.s(0x191b1c));
-        }
-        let col = if ui.st.fx_page == i {
-            t.a(ORANGE)
+        // The chosen page is a lit rounded square.
+        let on = ui.st.fx_page == i;
+        let face = Rect::new(x - 11.0, y(172.0) - 10.0, 22.0, 20.0);
+        if on {
+            lemon::lit(ui.c, face, 6.0, st.hover);
         } else if st.hover {
-            t.tx(0xffffff)
-        } else {
-            t.tx(0xd5dbdf)
-        };
-        icon(ui.c, ic, x, y(172.0), 16.0, col);
+            ui.c.fill_rrect(face, 6.0, Color::rgb(0x3d3d3d));
+        }
+        icon(ui.c, ic, x, y(172.0), 16.0, if on { brand::COLORED_DARK } else if st.hover { brand::TEXT } else { plug::DIM });
         ui.hit(r, target);
     }
-    if lemon {
-        // A panel title like the others.
-        let f = LABEL.bold();
-        let lh = ui.c.line_height(f);
-        ui.c.text(f, 337.0, (y(172.0) - lh / 2.0).round(), brand::TEXT, "Precomputed effects");
-    } else {
-        label(ui, 337.0, 172.0, "Precomputed effects");
-    }
+    // A panel title like the others.
+    let f = LABEL.bold();
+    let lh = ui.c.line_height(f);
+    ui.c.text(f, 337.0, (y(172.0) - lh / 2.0).round(), brand::TEXT, "Precomputed effects");
     if ui.st.fx_page == 0 {
         radio(ui, "fx_dc", 302.0, 199.0, "Remove DC offset", false);
         radio(ui, "fx_normalize", 302.0, 221.0, "Normalize", false);
@@ -534,15 +462,11 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
         }
     } else {
         // BOOST + CLIP share a darker group box.
-        if lemon {
-            lemon::outlined(ui.c, rr(291.0, 334.0, 187.0, 255.0), 8.0, plug::PANEL_LINE, Color::rgb(0x2d2d2d));
-        } else {
-            ui.c.fill_rrect(rr(291.0, 334.0, 187.0, 255.0), 4.0, t.s(0x202324));
-        }
+        lemon::outlined(ui.c, rr(291.0, 334.0, 187.0, 255.0), 8.0, plug::PANEL_LINE, Color::rgb(0x2d2d2d));
         knob(ui, "fx_boost", 312.5, 206.5, BIG, ORANGE, false, "BOOST");
         radio(ui, "fx_clip", 302.0, 246.0, "", false);
         let lh = ui.c.line_height(CAP);
-        inst::caption_at(ui.c, 311.0, (y(246.0) - lh / 2.0).round(), if lemon { plug::DIM } else { t.tx(0xb4bfc7) }, "CLIP", inst::CAPTION_TRACK);
+        inst::caption_at(ui.c, 311.0, (y(246.0) - lh / 2.0).round(), plug::DIM, "CLIP", inst::CAPTION_TRACK);
         ui.hits.last_mut().unwrap().r.w += 30.0;
         knob(ui, "fx_eq", 355.0, 206.5, BIG, ORANGE, true, "EQ");
         knob(ui, "fx_rm_mix", 403.0, 206.5, BIG, ORANGE, false, "RM MIX");
@@ -552,7 +476,7 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
         let ab = rr(303.0, 315.0, 271.0, 296.0);
         let target = Target::ReverbAb;
         let st = ui.state(Rect::new(ab.x, ab.y, 26.0, ab.h), &target);
-        inst::ab_switch(ui.c, t, ab, ui.m.plain("fx_reverb_type") > 0.5, st);
+        inst::ab_switch(ui.c, ab, ui.m.plain("fx_reverb_type") > 0.5, st);
         ui.hit(Rect::new(ab.x - 2.0, ab.y - 2.0, 28.0, ab.h + 4.0), target);
         knob(ui, "fx_reverb", 355.0, 283.5, BIG, ORANGE, false, "");
         inst::caption(ui.c, t, 342.0, y(283.5) + 17.5, "REVERB", false);
@@ -588,133 +512,9 @@ pub fn wave_range(st: &ViewState, frames: usize) -> (f64, f64) {
     (st.wave_start * n, st.wave_len.max(1e-6) * n)
 }
 
+/// The waveform panel: a dark well with the wave in light grey, lemon loop markers over a faint lemon tint, the
+/// wordmark in its top-right corner and an outlined overview bar.
 fn waveform(ui: &mut Ui, sv: &SampleView) {
-    let t = ui.t;
-    if lemon::on(t) {
-        return waveform_lemon(ui, sv);
-    }
-    let area = wave_area();
-    // Panel: dark top / left / bottom edges, a shade inside the left one, a separator above the overview bar (measured).
-    ui.c.fill_rect(rr(12.0, 555.0, 327.0, 435.0), t.s(0x090b0c));
-    ui.c.fill_rect(rr(12.0, 555.0, 436.0, 436.0), t.s(0x101213));
-    ui.c.fill_rect(rr(13.0, 13.0, 328.0, 434.0), t.s(0x151718));
-    ui.c.fill_rect(area, t.s(0x1b1d1e));
-    let (v0f, vlf) = (ui.st.wave_start as f32, ui.st.wave_len.max(1e-6) as f32);
-    // Time grid: a line every 129 px of the whole sample (FL capture), moving with the zoom (Lemon Studio choice).
-    let step = 129.0 / vlf;
-    let first = ((v0f / vlf * area.w) / step).floor() as i32 + 1;
-    for k in first.. {
-        let gx = (12.0 + k as f32 * step - v0f / vlf * area.w).round();
-        if gx > area.right() {
-            break;
-        }
-        if gx > area.x {
-            ui.c.fill_rect(Rect::new(gx, area.y, 1.0, area.h), t.s(0x131516));
-        }
-    }
-    let cy = area.y + (area.h / 2.0).floor();
-    for gy in [cy - 27.0, cy + 27.0] {
-        ui.c.fill_rect(Rect::new(area.x, gy, area.w, 1.0), t.s(0x131516));
-    }
-    let wm = "Lemon Sampler";
-    let f = Font::light(23, 0);
-    let w = ui.c.text_width(f, wm);
-    ui.c.text(f, 546.0 - w, y(328.0), t.s(0x484742), wm);
-    // Overview bar (a scroll bar: arrow buttons and a thumb over the visible range, the whole sample drawn in it).
-    let ov = overview_track();
-    ui.c.fill_rect(rr(12.0, 555.0, 437.0, 453.0), t.s(0x111314));
-    for (x0, x1) in [(12.0, 26.0), (541.0, 555.0)] {
-        ui.c.fill_rect(rr(x0, x1, 437.0, 453.0), t.s(0x313334));
-        ui.c.fill_rect(rr(x0 + 1.0, x1 - 1.0, 438.0, 452.0), t.s(0x282a2b));
-    }
-    for (x, dir) in [(19.5, -1i8), (548.5, 1)] {
-        let r = Rect::new(x - 7.0, y(437.0), 15.0, 17.0);
-        let target = Target::WaveArrow(dir);
-        let st = ui.state(r, &target);
-        let col = if st.hover { t.tx(0xd8dcde) } else { t.s(0x161819) };
-        kit::chevron(ui.c, x, y(445.5), 3.5, if dir < 0 { kit::Dir::Left } else { kit::Dir::Right }, col);
-        ui.hit(r, target);
-    }
-    {
-        let (a, b) = thumb_span(ui.st, ov);
-        ui.c.fill_rect(Rect::new(a, ov.y, b - a, ov.h), t.s(0x313334));
-        ui.c.fill_rect(Rect::new(a + 1.0, ov.y + 1.0, b - a - 2.0, ov.h - 2.0), t.s(0x282a2b));
-    }
-    ui.hit(ov, Target::Overview(ov));
-    ui.hit(area, Target::Wave(area));
-    let Some(s) = sv.sample else {
-        ui.c.fill_rect(Rect::new(area.x, area.cy().round(), area.w, 1.0), t.s(0x6a6e70));
-        return;
-    };
-    let n = s.frames();
-    let (v0, vl) = wave_range(ui.st, n);
-    if ui.st.spectrum {
-        if let Some((w, h, px)) = sv.spectrum {
-            ui.c.image(area, w, h, px);
-        }
-    } else if ui.st.multichannel {
-        let top = Rect::new(area.x, area.y, area.w, area.h / 2.0);
-        let bot = Rect::new(area.x, area.y + area.h / 2.0, area.w, area.h / 2.0);
-        ui.c.fill_rect(Rect::new(area.x, bot.y.round(), area.w, 1.0), t.s(0x101112));
-        wave_line(ui.c, &s.left, None, top, v0, vl, top.h * 0.5, t.tx(0xe6e0e0), 1.4);
-        wave_line(ui.c, &s.right, None, bot, v0, vl, bot.h * 0.5, t.tx(0xe6e0e0), 1.4);
-    } else {
-        wave_line(ui.c, &s.left, Some(&s.right), area, v0, vl, area.h * 0.5, t.tx(0xe6e0e0), 1.8);
-    }
-    // Loop and start markers (when a loop plays / an offset is set).
-    let fx = |f: f64| area.x + ((f - v0) / vl) as f32 * area.w;
-    let off = f64::from(ui.m.norm("start_offset")) * n as f64;
-    if off > 0.0 {
-        let x = fx(off).round();
-        if x >= area.x && x <= area.right() {
-            ui.c.fill_rect(Rect::new(x, area.y, 1.0, area.h), t.a(ORANGE).with_alpha(170));
-        }
-    }
-    if ui.on("loop_use") && (ui.m.norm("loop_start") > 0.0 || ui.m.norm("loop_end") < 1.0) {
-        for (i, id) in [(0u8, "loop_start"), (1, "loop_end")] {
-            let x = fx(f64::from(ui.m.norm(id)) * n as f64).round();
-            if x < area.x - 3.0 || x > area.right() + 3.0 {
-                continue;
-            }
-            let target = Target::LoopHandle(i);
-            let hr = Rect::new(x - 3.0, area.y, 7.0, area.h);
-            let st = ui.state(hr, &target);
-            let col = t.a(0x47f49a).with_alpha(if st.hover || st.pressed { 255 } else { 190 });
-            ui.c.fill_rect(Rect::new(x, area.y, 1.0, area.h), col);
-            let tri = if i == 0 {
-                [(x + 1.0, area.y), (x + 7.0, area.y), (x + 1.0, area.y + 6.0)]
-            } else {
-                [(x, area.y), (x - 6.0, area.y), (x, area.y + 6.0)]
-            };
-            ui.c.fill_polygon(&tri, col);
-            ui.hit(hr, target);
-        }
-    }
-    // Overview: whole sample, the visible range is the thumb.
-    let inner = Rect::new(ov.x + 1.0, ov.y, ov.w - 2.0, ov.h);
-    wave_line(ui.c, &s.left, Some(&s.right), inner, 0.0, n as f64, ov.h * 0.5, t.s(0xa3a5a6), 1.3);
-    // Bit depth and channel readout.
-    let bits = format!("{}", sv.bits & 0xff);
-    let zw = ui.c.text_width(LABEL, &bits);
-    let info = Rect::new(526.0 - zw, y(418.0), zw + 30.0, 16.0);
-    let st = ui.state(info, &Target::WaveInfo);
-    let col = if st.hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) };
-    let lh = ui.c.line_height(LABEL);
-    ui.c.text(LABEL, 537.0 - zw, (y(426.5) - lh / 2.0).round(), col, &bits);
-    // Sample-properties mark: an outlined box with square top corners.
-    let b = rr(541.0, 551.0, 423.0, 430.0);
-    for r in [Rect::new(b.x, b.y, b.w, 1.0), Rect::new(b.x, b.bottom() - 1.0, b.w, 1.0), Rect::new(b.x, b.y, 1.0, b.h), Rect::new(b.right() - 1.0, b.y, 1.0, b.h)] {
-        ui.c.fill_rect(r, col);
-    }
-    for x in [b.x - 0.0, b.right() - 2.0] {
-        ui.c.fill_rect(Rect::new(x, b.y - 1.0, 2.0, 2.0), col);
-    }
-    ui.hit(info, Target::WaveInfo);
-}
-
-/// The waveform panel in the Lemon design: a dark well with the wave in light grey, lemon loop markers over a faint
-/// lemon tint, the wordmark in its top-right corner and an outlined overview bar (same places as [`waveform`]).
-fn waveform_lemon(ui: &mut Ui, sv: &SampleView) {
     let area = wave_area();
     lemon::plug_well(ui.c, area.outset(1.0), 8.0);
     ui.c.push_clip(area.inset(1.0));
@@ -959,7 +759,6 @@ fn fft(re: &mut [f32], im: &mut [f32]) {
 
 fn envelope_tab(ui: &mut Ui) {
     let t = ui.t;
-    let lemon = lemon::on(t);
     let sub = ui.st.sub.min(4) as usize;
     // Measured text spans of the five target tabs (FL capture t2_*); our text is centred in each.
     const SPANS: [(f32, f32); 5] = [(16.0, 55.0), (65.0, 103.0), (113.0, 145.0), (155.0, 187.0), (197.0, 220.0)];
@@ -970,24 +769,7 @@ fn envelope_tab(ui: &mut Ui) {
         let cell = rr(x0 - 5.0, x1 + 4.0, 78.0, 106.0);
         let target = Target::SubTab(i as u8);
         let st = ui.state(cell, &target);
-        let active = sub == i;
-        if lemon {
-            lemon::text_tab(ui.c, cell, x, n, LABEL, t.a(TARGET_COLORS[i].1), active, st);
-            ui.hit(cell, target);
-            continue;
-        }
-        if active {
-            ui.c.fill_rect(cell, t.s(0x1b1d1e));
-        }
-        let col = if active {
-            t.a(TARGET_COLORS[i].1)
-        } else if st.hover {
-            t.tx(0xffffff)
-        } else {
-            t.tx(0xd2d8dc)
-        };
-        let lh = ui.c.line_height(LABEL);
-        ui.c.text(LABEL, x, (y(92.0) - lh / 2.0).round(), col, n);
+        lemon::text_tab(ui.c, cell, x, n, LABEL, t.a(TARGET_COLORS[i].1), sub == i, st);
         ui.hit(cell, target);
     }
     let p = ENV_PREFIX[sub];
@@ -1003,20 +785,14 @@ fn envelope_tab(ui: &mut Ui) {
         ui.hits.last_mut().map(|h| h.r.w += lw + 4.0);
         let mr = Rect::new(277.0, y(117.0), 14.0, 16.0);
         let st = ui.state(mr, &Target::EnvMenu);
-        let col = if lemon {
-            if st.hover { brand::MAIN } else { plug::DIM }
-        } else if st.hover {
-            t.tx(0xffffff)
-        } else {
-            t.tx(0xd5dbdf)
-        };
+        let col = if st.hover { brand::MAIN } else { plug::DIM };
         let mut g = os_ui::Glyph::new();
         let (ax, ay) = (284.0, y(126.0));
         g.polygon(&[(ax - 2.5, ay - 4.5), (ax + 3.0, ay), (ax - 2.5, ay + 4.5)]);
         ui.c.glyph(col, &g);
         ui.hit(mr, Target::EnvMenu);
         let g = env_rect();
-        inst::graph_bg(ui.c, t, g);
+        inst::graph_bg(ui.c, g);
         env_graph(ui, g, p, t.a(line));
         for (k, x, cap) in [("delay", 33.0, "DELAY"), ("att", 67.0, "ATT"), ("hold", 101.0, "HOLD"), ("dec", 135.0, "DEC"), ("sus", 169.0, "SUS"), ("rel", 203.0, "REL")] {
             knob(ui, &id(k), x, 243.0, MID, arc, false, cap);
@@ -1042,28 +818,13 @@ fn envelope_tab(ui: &mut Ui) {
         let r = Rect::new(x - 10.0, y(114.0), 21.0, 19.0);
         let target = Target::Set(id("lfo_shape"), i as f32);
         let st = ui.state(r, &target);
-        if lemon {
-            let col = lemon::choice_button(ui.c, r, i == shape, t.a(arc), st);
-            lfo_icon(ui.c, i, x, y(123.0), col);
-            ui.hit(r, target);
-            continue;
-        }
-        if i == shape {
-            ui.c.fill_rect(r, t.s(0x1a1c1d));
-        }
-        let col = if i == shape {
-            t.a(arc)
-        } else if st.hover {
-            t.tx(0xffffff)
-        } else {
-            t.tx(0xd5dbdf)
-        };
+        let col = lemon::choice_button(ui.c, r, i == shape, t.a(arc), st);
         lfo_icon(ui.c, i, x, y(123.0), col);
         ui.hit(r, target);
     }
     label(ui, 377.0, 123.0, "LFO");
     let lg = rr(311.0, 442.0, 140.0, 222.0);
-    inst::graph_bg(ui.c, t, lg);
+    inst::graph_bg(ui.c, lg);
     lfo_graph(ui, lg, p, t.a(line));
     for (k, x, cap) in [("lfo_delay", 326.0, "DELAY"), ("lfo_att", 359.0, "ATT"), ("lfo_amt", 393.0, "AMT"), ("lfo_speed", 427.0, "SPEED")] {
         knob(ui, &id(k), x, 241.0, MID, arc, k == "lfo_amt", cap);
@@ -1076,7 +837,7 @@ fn envelope_tab(ui: &mut Ui) {
     // Filter.
     let fr = panel(ui, 457.0, 556.0, 113.0, 310.0, 0.0, "");
     inst::panel_tab(ui.c, t, fr, 55.0, "Filter");
-    let cap = if lemon { plug::DIM } else { t.tx(0xb4bfc7) };
+    let cap = plug::DIM;
     ui.c.text(MOD_CAP, 504.0, y(131.0) - 6.0, cap, "MOD X");
     big_knob(ui, "f_cut", 492.5, 168.5, 0x5ea733);
     big_knob(ui, "f_res", 520.0, 233.5, 0xc8a032);
@@ -1104,7 +865,7 @@ fn big_knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, dot: u32) {
     let r = Rect::new(cx - 26.0, cy - 26.0, 52.0, 52.0);
     let target = Target::Knob(id.into());
     let st = ui.state(r, &target);
-    inst::big_dial(ui.c, ui.t, cx, cy, ui.m.norm(id), ui.t.a(dot), st);
+    inst::big_dial(ui.c, cx, cy, ui.m.norm(id), ui.t.a(dot), st);
     ui.hit(r, target);
 }
 
@@ -1339,7 +1100,7 @@ fn root_panel(ui: &mut Ui) {
     inst::panel_tab(ui.c, t, pr, (tw + 16.0).max(98.0), &title);
     let reset = rr(14.0, 60.0, 340.0, 360.0);
     let st = ui.state(reset, &Target::RootReset);
-    inst::text_button(ui.c, t, reset, "Reset", st);
+    inst::text_button(ui.c, reset, "Reset", st);
     ui.hit(reset, Target::RootReset);
     radio(ui, "main_pitch", 80.0, 350.0, "Enable main pitch", false);
     radio(ui, "add_key", 200.0, 350.0, "Add to key", false);
@@ -1350,30 +1111,11 @@ fn root_panel(ui: &mut Ui) {
     let st = ui.state(sr, &target);
     inst::hslider(ui.c, t, 333.0, 435.0, y(350.0), ui.m.norm("fine"), st);
     ui.hit(sr, target);
-    // Multi-touch button: a slanted frame, orange while on, white on hover.
+    // Multi-touch button: lit while on.
     let hr = Rect::new(522.0, y(337.0), 34.0, 26.0);
     let st = ui.state(hr, &Target::Hand);
-    if lemon::on(t) {
-        let ink = lemon::plug_button(ui.c, hr.inset(1.0), 6.0, st.with_on(ui.st.hand));
-        icon(ui.c, &tb::HAND_FINGER, 541.0, y(350.0), 18.0, ink);
-        ui.hit(hr, Target::Hand);
-        if ui.st.hand {
-            hand_keyboard(ui, root);
-        } else {
-            keyboard(ui, root, lo, hi, zone);
-        }
-        return;
-    }
-    let frame = if ui.st.hand { Some(t.a(ORANGE)) } else if st.hover { Some(t.tx(0xffffff)) } else { None };
-    if let Some(col) = frame {
-        let (x0, x1, y0, y1) = (hr.x + 1.0, hr.right() - 1.0, hr.y + 1.0, hr.bottom() - 1.0);
-        let pts = [(x0 + 8.0, y0), (x1, y0), (x1, y1), (x0, y1)];
-        for i in 0..4 {
-            let (a, b) = (pts[i], pts[(i + 1) % 4]);
-            ui.c.line(a.0, a.1, b.0, b.1, 1.2, col);
-        }
-    }
-    icon(ui.c, &tb::HAND_FINGER, 541.0, y(350.0), 18.0, if ui.st.hand { t.a(ORANGE) } else { t.tx(0xd5dbdf) });
+    let ink = lemon::plug_button(ui.c, hr.inset(1.0), 6.0, st.with_on(ui.st.hand));
+    icon(ui.c, &tb::HAND_FINGER, 541.0, y(350.0), 18.0, ink);
     ui.hit(hr, Target::Hand);
     if ui.st.hand {
         hand_keyboard(ui, root);
