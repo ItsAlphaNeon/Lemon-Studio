@@ -37,12 +37,12 @@ pub struct Shared {
     pub directory: CString,
     /// Raised with everything above.
     pub attention: Arc<Attention>,
-    /// The transport plugins read (`GET_TIME`): written by the instance's processing calls only, one at a time (the
-    /// instance's mutex), before the plugin processes; plugins read it during processing.
+    /// The transport plugins read (`GET_TIME`): written by the instance's own calls only (processing, activation, a
+    /// stop), one at a time under the instance's mutex; plugins read it during processing.
     time: UnsafeCell<TimeInfo>,
 }
 
-// SAFETY: `time` is only written by the instance's processing calls (see the field) and read by the plugin.
+// SAFETY: `time` is only written by the instance's own calls (see the field) and read by the plugin.
 unsafe impl Sync for Shared {}
 
 /// Most editor edits kept until the app takes them.
@@ -70,7 +70,7 @@ impl Shared {
         unsafe { self.time.get().read() }
     }
 
-    /// Sets the transport the plugin reads next (the instance's processing calls only).
+    /// Sets the transport the plugin reads next (the instance's own calls only, see `time`).
     pub fn set_time(&self, t: TimeInfo) {
         // SAFETY: see `time`.
         unsafe { self.time.get().write(t) }

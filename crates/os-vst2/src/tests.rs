@@ -229,6 +229,43 @@ fn the_transport_reaches_the_plugin() {
     assert_eq!(tempo, 140.0);
 }
 
+/// After a Stop, and after an export (which the app ends with the same reset, its last block still playing), the first
+/// block of the next Play reports a transport change; what plugins read in between says the song is stopped.
+#[test]
+fn the_first_block_after_a_stop_or_an_export_reports_a_transport_change() {
+    use abi::time::*;
+    let (_m, mut p) = synth();
+    p.activate(48000);
+    let song =
+        os_engine::TransportInfo { playing: true, tempo: 120.0, frame: 0, beats: 0.0, bar_start: 0.0, bar: 0, numerator: 4, denominator: 4, looping: None };
+    let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
+    let mut block = |p: &mut Plugin, song: Option<&os_engine::TransportInfo>| {
+        if let Some(s) = song {
+            p.transport(s);
+        }
+        p.process(48000, &mut l, &mut r);
+        probe(|q| q.times.last().unwrap().0) & (PLAYING | TRANSPORT_CHANGED)
+    };
+    // An export renders offline and ends playing; the app then resets every instrument.
+    p.set_offline(true);
+    assert_eq!(block(&mut p, Some(&song)), PLAYING | TRANSPORT_CHANGED);
+    assert_eq!(block(&mut p, Some(&song)), PLAYING, "nothing changed");
+    p.reset();
+    p.set_offline(false);
+    assert_eq!(p.inst.shared.time().flags & (PLAYING | TRANSPORT_CHANGED), 0, "stopped at once, for plugins that read it in between");
+    // The live Play after it.
+    assert_eq!(block(&mut p, Some(&song)), PLAYING | TRANSPORT_CHANGED);
+    assert_eq!(block(&mut p, Some(&song)), PLAYING);
+    // A Stop: a block without the song (stopped) reports the change once, and so does the next Play.
+    p.reset();
+    assert_eq!(block(&mut p, None), TRANSPORT_CHANGED);
+    assert_eq!(block(&mut p, None), 0);
+    assert_eq!(block(&mut p, Some(&song)), PLAYING | TRANSPORT_CHANGED);
+    // A Stop straight into a Play.
+    p.reset();
+    assert_eq!(block(&mut p, Some(&song)), PLAYING | TRANSPORT_CHANGED);
+}
+
 #[test]
 fn states_round_trip_as_chunks_or_parameter_lists() {
     let (m, mut p) = gain();

@@ -423,6 +423,9 @@ pub struct Plugin {
     steady: u64,
     /// The song position for the next process call (the engine gives it while playing).
     song: Option<os_engine::TransportInfo>,
+    /// The transport stopped (`reset`): the next piece the plugin processes reports a transport change, whatever it
+    /// says, since the plugin may last have seen it playing.
+    restarted: bool,
     dbg_peak: f32,
     dbg_frames: u64,
     _module: Arc<Module>,
@@ -471,6 +474,7 @@ impl Plugin {
             ledger: os_engine::voices::VoiceLedger::new(),
             steady: 0,
             song: None,
+            restarted: false,
             dbg_peak: 0.0,
             dbg_frames: 0,
             _module: module.clone(),
@@ -635,7 +639,7 @@ impl Plugin {
     }
 
     /// The transport the plugin reads during the piece starting at frame `at`: the engine's (`song`) while playing,
-    /// else stopped where it was.
+    /// else stopped where it was. A change of playing, or the first piece after a stop, is flagged as a transport change.
     fn set_time(&mut self, song: Option<os_engine::TransportInfo>, at: u32, rate: u32) {
         use abi::time::*;
         let mut t = self.inst.shared.time();
@@ -666,10 +670,22 @@ impl Plugin {
             None if t.flags & TEMPO_VALID == 0 => t.sample_pos = self.steady as f64,
             None => {}
         }
-        if (t.flags & PLAYING != 0) != was_playing {
+        let restarted = std::mem::take(&mut self.restarted);
+        if (t.flags & PLAYING != 0) != was_playing || restarted {
             t.flags |= TRANSPORT_CHANGED;
         }
         self.inst.shared.set_time(t);
+    }
+
+    /// The transport stopped (`reset`: Stop, a new Play, the start and the end of an export): what the plugin reads says
+    /// so at once, and its next piece reports the change. An export's last block is still playing, and no block follows
+    /// it before the next Play, so without this that Play would not be flagged as a change.
+    fn stop_time(&mut self) {
+        use abi::time::*;
+        let mut t = self.inst.shared.time();
+        t.flags &= !(PLAYING | CYCLE_ACTIVE | TRANSPORT_CHANGED);
+        self.inst.shared.set_time(t);
+        self.restarted = true;
     }
 
     /// Processes one piece (at most `MAX_FRAMES` frames): `input` is an effect's input, else the inputs are silent.
@@ -1007,8 +1023,9 @@ impl os_engine::Instrument for Plugin {
     }
 
     /// Stop: queued notes are dropped, held notes get their note offs, and all sound and notes are switched off with the
-    /// next block, whose processing starts anew (spec: audio/voices.md §3).
+    /// next block, whose processing starts anew (spec: audio/voices.md §3). The transport is stopped (`stop_time`).
     fn reset(&mut self) {
+        self.stop_time();
         self.queue.clear();
         self.sounding = false;
         let mut sent = [false; 128];
