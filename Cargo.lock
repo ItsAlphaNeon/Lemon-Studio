@@ -2409,6 +2409,7 @@ dependencies = [
  "lemon-3x-osc",
  "lemon-parametric-eq-2",
  "lemon-sampler",
+ "libc",
  "midir",
  "os-clap",
  "os-dsp",

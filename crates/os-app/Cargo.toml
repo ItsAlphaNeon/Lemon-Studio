@@ -40,3 +40,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["resource_manager", "shape"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
