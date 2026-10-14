@@ -131,7 +131,7 @@ and voices, with sorting, find and freeze.
 
 - Windows 10 / 11
 - Linux: X11, and Wayland through XWayland (see the [Linux notes](../README.md#linux))
-- macOS 11 or newer (see the [macOS notes](../README.md#macos))
+- macOS 11 or newer, supported at the same level as Linux (see the [macOS notes](../README.md#macos))
 
 ## 🚧 Look and themes
 

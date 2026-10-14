@@ -43,6 +43,9 @@ piano roll, arrange them on a playlist, and mix them through a routable mixer. I
 ground up in Rust, with a sample-accurate audio engine, a fast CPU-rendered interface and hosting for
 CLAP and VST3 plugins.
 
+Lemon Studio runs on Windows, Linux and macOS, and every change is built and tested on all three. macOS is supported
+at the same level as Linux; the few differences are listed in the [macOS notes](#macos).
+
 A central goal is **interoperability**: Lemon Studio opens and saves FL Studio projects (`.flp`). The
 project reader is built to round-trip: anything in a file that Lemon Studio does not understand yet is
 kept and written back unchanged, so a project survives being opened and saved. This support is still
@@ -84,7 +87,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers; no note recording yet |
 | Undo | 🚧 | Per editor (piano roll, playlist); no redo or global history yet |
 | Audio drivers | 🚧 | WASAPI on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no ASIO or JACK yet |
-| Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer |
+| Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
 | Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; plugin editors not restyled yet |
 | Audio recording | ❌ | |
 | MIDI file import / export | ❌ | |
@@ -179,6 +182,9 @@ install -Dm644 crates/os-app/assets/lemonstudio.desktop ~/.local/share/applicati
 ```
 
 ### macOS
+
+macOS 11 and newer is supported at the same level as Linux, with the same features, and continuous integration builds
+and tests every change on macOS alongside Windows and Linux.
 
 Plugin windows dock inside the main window as on Windows, or detach (from their window menu) into windows of their own
 that stay above Lemon Studio while it is the active application. A few things differ from Windows and Linux:
