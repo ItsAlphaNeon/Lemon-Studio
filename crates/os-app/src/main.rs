@@ -379,9 +379,8 @@ impl Shell {
         // macOS: Quit from the menu bar or the Dock asks about unsaved changes as closing the window does.
         #[cfg(target_os = "macos")]
         {
-            if macos::take_quit() && self.app.confirm_discard("closing") {
-                el.exit();
-                return;
+            if macos::take_quit() {
+                macos::answer_quit(self.app.confirm_discard("closing"));
             }
             // A project double-clicked in the Finder opens as a dropped one would.
             for path in macos::take_opened() {
@@ -517,6 +516,17 @@ impl ApplicationHandler for Shell {
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.step(el, false);
+    }
+
+    /// macOS: a quit the user agreed to (`macos::answer_quit`) ends the process from AppKit, after this: the plugin
+    /// windows close and the instances go as they do when `run_app` returns.
+    #[cfg(target_os = "macos")]
+    fn exiting(&mut self, _el: &ActiveEventLoop) {
+        if os_host::guard::tripped() {
+            return;
+        }
+        self.app.plugins.clear();
+        plugins::sweep_retired();
     }
 
     /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor.

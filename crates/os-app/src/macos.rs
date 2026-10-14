@@ -21,7 +21,7 @@ use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSURL};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
-/// Quit was chosen (menu bar, Dock, Cmd+Q) and not handled yet.
+/// Quit was chosen (menu bar, Dock, Cmd+Q, logging out) and not answered yet.
 static QUIT: AtomicBool = AtomicBool::new(false);
 
 /// Files the Finder asked the app to open, not handled yet.
@@ -32,17 +32,26 @@ thread_local! {
     static RESTORE: Cell<Option<NSRect>> = const { Cell::new(None) };
 }
 
-/// Whether the user asked to quit since the last call: the app asks about unsaved changes, then ends the event loop.
+/// Whether the user asked to quit since the last call: the app asks about unsaved changes and answers with `answer_quit`.
 pub fn take_quit() -> bool {
     QUIT.swap(false, Ordering::AcqRel)
 }
 
-/// `-applicationShouldTerminate:` for winit's application delegate: the quit is cancelled and handed to the app, which
-/// asks about unsaved changes before it ends (winit would let AppKit end the process at once).
+/// The answer to a quit (`take_quit`). `false` cancels it (a logout or shutdown that asked stops too); `true` lets
+/// AppKit end the process, which winit reports as the loop exiting (the app shuts down in `exiting`) — winit cannot end
+/// its loop by itself while AppKit waits for this answer.
+pub fn answer_quit(quit: bool) {
+    if let Some(mtm) = MainThreadMarker::new() {
+        NSApplication::sharedApplication(mtm).replyToApplicationShouldTerminate(quit);
+    }
+}
+
+/// `-applicationShouldTerminate:` for winit's application delegate: the answer waits (`NSTerminateLater`) for the app,
+/// which asks about unsaved changes first (winit would let AppKit end the process at once).
 extern "C-unwind" fn should_terminate(_this: &AnyObject, _cmd: Sel, _app: &NSApplication) -> NSApplicationTerminateReply {
     QUIT.store(true, Ordering::Release);
     crate::wake_ui();
-    NSApplicationTerminateReply::TerminateCancel
+    NSApplicationTerminateReply::TerminateLater
 }
 
 /// Files the Finder asked the app to open since the last call (a double-clicked project, a file dropped on the Dock
