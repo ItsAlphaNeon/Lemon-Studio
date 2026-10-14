@@ -55,4 +55,6 @@ pub enum Input {
     Expose,
     /// The polling period passed, or a parameter changed.
     Tick,
+    /// A file dropped on the window (macOS so far: `mac::Window::accept_files`).
+    Drop { path: String },
 }

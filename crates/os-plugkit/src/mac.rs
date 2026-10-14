@@ -2,12 +2,13 @@
 //! loop unchanged: the editor's view (a flipped `NSView`, a subview of the host's) is made on the main thread in
 //! `spawn`, as AppKit wants, and the editor runs on a GUI thread of its own; the view's event methods queue what
 //! happens for that thread (`Window::next`), and the frames it paints go back to the main thread as the view's layer
-//! contents. Popup menus painted with `os_ui::kit::menu` (never native menus) and the "Type in value" box are borderless
-//! panels the GUI thread asks the main thread for and then runs like the X11 ones; event monitors stand in for X11's
-//! grabs (a press elsewhere cancels, keys go to the box). The cursor is held during a knob drag by hiding it and
-//! detaching it from the mouse. Positions are device px (points times the window's backing scale), screen positions
-//! device px from the top left of the main screen. The GUI thread never waits on the main thread past the editor's
-//! closing (the host closes editors on the main thread, waiting for the GUI thread).
+//! contents. Popup menus painted with `os_ui::kit::menu` (never native menus) and the "Type in value" box are
+//! borderless panels the GUI thread asks the main thread for and then runs like the X11 ones; event monitors stand in
+//! for X11's grabs (a press elsewhere cancels, keys go to the box). The cursor is held during a knob drag by hiding it
+//! and detaching it from the mouse. A view can take dropped files, and WAV audio goes to and from the clipboard.
+//! Positions are device px (points times the window's backing scale), screen positions device px from the top left of
+//! the main screen. The GUI thread never waits on the main thread past the editor's closing (the host closes editors on
+//! the main thread, waiting for the GUI thread).
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -23,15 +24,15 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{msg_send, sel, AllocAnyThread, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSCursor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSPanel, NSPopUpMenuWindowLevel, NSScreen,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindowStyleMask,
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSCursor, NSDragOperation, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSPanel, NSPasteboard,
+    NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindowStyleMask,
 };
 use objc2_core_foundation::{kCFRunLoopCommonModes, CFRetained, CFRunLoop};
 use objc2_core_graphics::{
     kCGColorSpaceSRGB, CGAssociateMouseAndMouseCursorPosition, CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGDisplayBounds, CGImage,
     CGImageAlphaInfo, CGImageByteOrderInfo, CGMainDisplayID,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSArray, NSData, NSPoint, NSRect, NSSize, NSString, NSURL};
 use os_theme::{Color, Palette};
 use os_ui::kit::menu as kmenu;
 use os_ui::{Canvas, Font, Rect};
@@ -46,6 +47,8 @@ pub type Parent = usize;
 const TICK: Duration = Duration::from_millis(30);
 /// Points of precise (trackpad) scrolling that make one wheel notch.
 const POINTS_PER_NOTCH: f64 = 24.0;
+/// Audio on the clipboard: WAV (the type macOS gives `.wav` files; Windows' `CF_WAVE`).
+const WAV_TYPE: &str = "com.microsoft.waveform-audio";
 
 // -------------------------------------------------------------------------------------------------------------------
 // The GUI thread
@@ -77,6 +80,7 @@ enum Ev {
     Leave,
     Key { sym: u32 },
     Expose,
+    Drop(String),
     /// A press outside every surface while a popup or box is open.
     Outside,
 }
@@ -357,6 +361,8 @@ fn view_class() -> &'static AnyClass {
             ] {
                 b.add_method(s, on_event as extern "C-unwind" fn(_, _, _));
             }
+            b.add_method(sel!(draggingEntered:), drag_enter as extern "C-unwind" fn(_, _, _) -> _);
+            b.add_method(sel!(performDragOperation:), drag_drop as extern "C-unwind" fn(_, _, _) -> _);
             b.add_method(sel!(updateLayer), update_layer as extern "C-unwind" fn(_, _));
             b.add_method(sel!(viewDidChangeBackingProperties), expose as extern "C-unwind" fn(_, _));
             b.add_method(sel!(viewDidMoveToWindow), expose as extern "C-unwind" fn(_, _));
@@ -391,6 +397,26 @@ extern "C-unwind" fn expose(v: &NSView, _: Sel) {
     if let Some((id, shared, _)) = target(v) {
         shared.push(Raw { surface: id, ev: Ev::Expose, mods: (false, false, false) });
     }
+}
+
+/// A file dragged over a view that takes files (`Window::accept_files`) is copied in.
+extern "C-unwind" fn drag_enter(_: &NSView, _: Sel, sender: Option<&AnyObject>) -> NSDragOperation {
+    if sender.and_then(dragged_file).is_some() { NSDragOperation::Copy } else { NSDragOperation::None }
+}
+
+extern "C-unwind" fn drag_drop(v: &NSView, _: Sel, sender: Option<&AnyObject>) -> Bool {
+    let (Some(path), Some((id, shared, _))) = (sender.and_then(dragged_file), target(v)) else { return Bool::NO };
+    shared.push(Raw { surface: id, ev: Ev::Drop(path), mods: (false, false, false) });
+    Bool::YES
+}
+
+/// The (first) file of a drag.
+fn dragged_file(sender: &AnyObject) -> Option<String> {
+    // SAFETY: AppKit passes an `NSDraggingInfo`.
+    let pb: Option<Retained<NSPasteboard>> = unsafe { msg_send![sender, draggingPasteboard] };
+    // SAFETY: a static pasteboard type.
+    let url = pb?.stringForType(unsafe { NSPasteboardTypeFileURL })?;
+    NSURL::URLWithString(&url)?.to_file_path().map(|p| p.to_string_lossy().into_owned())
 }
 
 thread_local! {
@@ -774,6 +800,7 @@ impl Window {
             Ev::Leave => Some(Input::Leave),
             Ev::Key { sym } => Some(Input::Key { sym, text: keysym_char(sym) }),
             Ev::Expose => Some(Input::Expose),
+            Ev::Drop(path) => Some(Input::Drop { path }),
             Ev::Outside => None,
         }
     }
@@ -848,6 +875,32 @@ impl Window {
     /// editor closes meanwhile.
     pub fn dialog<R: Send + 'static>(&self, f: impl FnOnce() -> R + Send + 'static) -> Option<R> {
         self.call(move |_| f())
+    }
+
+    /// Takes files dropped on the window: they arrive as `Input::Drop`.
+    pub fn accept_files(&self) {
+        let id = self.id;
+        on_main(move |_| {
+            if let Some(v) = view_of(id) {
+                // SAFETY: a static pasteboard type.
+                v.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
+            }
+        });
+    }
+
+    /// Puts WAV audio on the clipboard; whether it went.
+    pub fn copy_audio(&self, wav: Vec<u8>) -> bool {
+        let r = self.call(move |_| {
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            pb.setData_forType(Some(&NSData::with_bytes(&wav)), &NSString::from_str(WAV_TYPE))
+        });
+        r.unwrap_or(false)
+    }
+
+    /// WAV audio on the clipboard, if any.
+    pub fn paste_audio(&self) -> Option<Vec<u8>> {
+        self.call(|_| NSPasteboard::generalPasteboard().dataForType(&NSString::from_str(WAV_TYPE)).map(|d| d.to_vec())).flatten()
     }
 
     pub fn locked(&self) -> bool {

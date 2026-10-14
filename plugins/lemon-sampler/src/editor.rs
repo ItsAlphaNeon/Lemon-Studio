@@ -2328,9 +2328,9 @@ mod gui {
     use crate::view::{self, SampleView, ViewState};
     use crate::Shared;
 
-    /// What the copy / paste audio shortcuts and menu entries say here: the audio clipboard is Windows only so far.
-    const NO_AUDIO_CLIPBOARD: &str =
-        if cfg!(target_os = "macos") { "Audio on the clipboard: not available yet on macOS" } else { "Audio on the clipboard: not available yet on Linux" };
+    /// What the copy / paste audio shortcuts and menu entries say on Linux: no audio clipboard there yet.
+    #[cfg(not(target_os = "macos"))]
+    const NO_AUDIO_CLIPBOARD: &str = "Audio on the clipboard: not available yet on Linux";
 
     /// The editor on its GUI thread.
     struct Ed {
@@ -2387,6 +2387,9 @@ mod gui {
                 link: peer,
                 last_page: 0,
             };
+            // Sample files dropped on the editor load (as on Windows).
+            #[cfg(target_os = "macos")]
+            ed.win.accept_files();
             ed.run();
         });
         if thread.is_none() {
@@ -2452,6 +2455,8 @@ mod gui {
                         self.act(acts);
                     }
                     Input::Key { .. } => {}
+                    // A sample file dropped on the editor (macOS so far).
+                    Input::Drop { path } => self.act(vec![Act::Load(path)]),
                 }
                 if self.dirty && self.win.idle() {
                     self.paint();
@@ -2626,6 +2631,26 @@ mod gui {
                             let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
                         }
                     }
+                    #[cfg(target_os = "macos")]
+                    Act::CopyAudio => {
+                        let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
+                        if let Some(s) = s {
+                            if self.win.copy_audio(super::wav_bytes(&s, false)) {
+                                self.logic.hint = "Audio copied to the clipboard".into();
+                            }
+                        }
+                        self.dirty = true;
+                    }
+                    #[cfg(target_os = "macos")]
+                    Act::PasteAudio => {
+                        if let (Some(bytes), Some(path)) = (self.win.paste_audio(), super::paste_path()) {
+                            if std::fs::write(&path, bytes).is_ok() {
+                                self.load(&path.to_string_lossy());
+                            }
+                        }
+                        self.dirty = true;
+                    }
+                    #[cfg(not(target_os = "macos"))]
                     Act::CopyAudio | Act::PasteAudio => {
                         self.logic.hint = NO_AUDIO_CLIPBOARD.into();
                         self.dirty = true;

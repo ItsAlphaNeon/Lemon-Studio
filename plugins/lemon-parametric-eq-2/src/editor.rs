@@ -1228,7 +1228,7 @@ mod gui {
                         let acts = self.logic.wheel(x / self.scale, y / self.scale, notches, self.mods());
                         self.act(acts);
                     }
-                    Input::Key { .. } => {}
+                    Input::Key { .. } | Input::Drop { .. } => {}
                 }
                 if self.dirty && self.win.idle() {
                     self.paint();

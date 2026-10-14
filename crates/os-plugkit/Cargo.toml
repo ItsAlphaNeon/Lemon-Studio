@@ -21,8 +21,8 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString", "NSArray", "NSEnumerator", "NSObject"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-quartz-core", "NSResponder", "NSView", "NSEvent", "NSWindow", "NSPanel", "NSScreen", "NSTrackingArea", "NSCursor", "NSGraphics"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString", "NSArray", "NSData", "NSEnumerator", "NSObject", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-quartz-core", "NSResponder", "NSView", "NSEvent", "NSWindow", "NSPanel", "NSScreen", "NSTrackingArea", "NSCursor", "NSGraphics", "NSPasteboard", "NSDragging"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "CFRunLoop", "CFString", "CFCGTypes"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGImage", "CGDataProvider", "CGColorSpace", "CGRemoteOperation", "CGDirectDisplay", "CGError", "libc"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "CATransaction"] }
