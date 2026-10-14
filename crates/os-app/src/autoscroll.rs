@@ -1,9 +1,15 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Auto scrolling (toolbar, OPTIONS > Auto scrolling, the button's right-click menu): while the song or a pattern plays,
 //! the view that shows the position follows the playhead, continuously or a quarter page at a time. A program setting,
 //! not part of the project: kept in the user folder (`autoscroll.txt`).
 // spec: ui/auto-scrolling.md
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock}; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {

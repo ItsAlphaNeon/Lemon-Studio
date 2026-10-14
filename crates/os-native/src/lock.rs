@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The per-plugin render lock behind the host's `LockMix` / `UnlockMix`, `LockPlugin` / `UnlockPlugin` and
 //! `SuspendOutput` / `ResumeOutput` methods (spec plugins/fruity-abi.md, "Editors": an editor runs on the GUI
 //! thread while the audio thread renders; a plugin brackets edits that must not race its rendering with these

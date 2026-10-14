@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The metronome: while its switch is on, a click on every quarter note of the playing position, accented on every
 //! `numerator`-th, added to the master track's input (so the master track and the main volume apply to it). Live
 //! playback only: an export never clicks. The five sounds are Lemon Studio's own, synthesized here.

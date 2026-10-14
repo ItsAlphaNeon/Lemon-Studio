@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! os-render: render an FLP project to a 32-bit float WAV with the Lemon Studio engine.
 //!
 //! Usage: os-render <project.flp> <out.wav> [--pattern N] [--rate HZ] [--factory DIR]

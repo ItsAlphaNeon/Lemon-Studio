@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Plugin scanning (spec: ui/plugin-manager.md §4): each plugin file is loaded in a separate scanner process (this
 //! program started with `--scan-plugin`), so a plugin that crashes, hangs or opens a window while it loads cannot harm
 //! the app; the sweep runs on a background thread and hands its results to the UI thread.

@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Lemon Sampler voices: pitch, loop, declicking, envelopes and LFOs of the five targets, the channel filter, and the
 //! realtime stretch methods. The played sample itself is built in `fx`.
 //!
@@ -751,7 +757,8 @@ fn mods(v: &Voice, b: &Block, t: f64, off: Option<f64>) -> Option<Mods> {
         gain *= 1.0 - a * (1.0 - w) / 2.0;
     }
     let pan = v.note_pan + lfo(PAN);
-    let mut cents = lfo(PITCH) * 1200.0;
+    // The amounts at full scale are 2400 cents, as FL stores them (spec: audio/envelopes-and-lfos.md).
+    let mut cents = lfo(PITCH) * 2400.0;
     if let Some(l) = env(PITCH) {
         cents += l.unwrap_or(0.0) * tg[PITCH].amount * 2400.0;
     }

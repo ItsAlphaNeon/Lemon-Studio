@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Channel note rules of instrument channels: cut groups, the voice limit, mono and portamento (the plugin window's
 //! Misc tab). They act on the note events the engine sends an instrument, once per tick, so they work with any plugin;
 //! the glides need a plugin that takes per-key tuning (`Instrument::tune`: CLAP note expression).

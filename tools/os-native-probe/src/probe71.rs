@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Dynamic observation of the undocumented host object that FL native plugins request through
 //! host dispatcher ID 71 during `CreatePlugInstance` (see spec `plugins/fruity-abi.md`). Black-box,
 //! inside our own process: we hand the plugin a self-consistent sandbox object and record which of

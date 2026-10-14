@@ -36,6 +36,10 @@
 
 ---
 
+> [!CAUTION]
+> **Not for use in ArtCraft.** Lemon Studio is Copyright (C) 2026 ItsAlphaNeon. This code, in its entirety, is not
+> to be used as part of the ArtCraft suite: no file, crate, plugin or tool from this repository, in whole or in part.
+
 ## Overview
 
 Lemon Studio is a pattern-based music production environment: build patterns in a step sequencer and
@@ -359,8 +363,13 @@ about the project. Please keep in mind that support is not offered at this stage
 
 ## License
 
+Copyright (C) 2026 ItsAlphaNeon.
+
 Lemon Studio is free software: you can redistribute it and/or modify it under the terms of the
 [GNU General Public License](LICENSE), version 3 or (at your option) any later version.
+
+**This code, in its entirety, is not to be used as part of the ArtCraft suite.** That covers every file in this
+repository, in whole or in part. Every source file states this in its header.
 
 ## Trademarks
 
@@ -374,4 +383,6 @@ property of their respective owners.
 <div align="center">
 <br>
 <img alt="" src="docs/assets/mark.png" width="48">
+<br>
+<sub>Copyright © 2026 ItsAlphaNeon. Not to be used as part of the ArtCraft suite.</sub>
 </div>

@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Tick-based playback engine: schedules notes from patterns / playlist clips on the sequencer's tick clock, plays
 //! sampler and audio-clip channels, and sums them through the mixer routing graph. Everything that is scheduled
 //! happens at a tick's start; the engine renders whole ticks and hands them out in the block sizes the caller asks
@@ -192,6 +198,9 @@ struct ChannelState {
     frame_s: f64,
     /// A generator plugin channel; it sounds only once an instrument is attached (`Engine::set_instrument`).
     plugin: bool,
+    /// A sampler channel: the instrument playing it (Lemon Sampler) applies the root note and fine tune itself, so its
+    /// notes' tuning leaves them out (spec: plugins/lemon-sampler.md §7).
+    own_tuning: bool,
     instrument: Slot,
     /// Polyphony, mono, portamento and cut group rules for the instrument's notes (spec: audio/channel-voices.md).
     rules: notes::Rules,
@@ -440,6 +449,18 @@ impl ChannelState {
     /// The channel's pitch in cents from key 60.
     fn pitch_from_60(&self) -> f64 {
         f64::from(laws::channel_pitch(self.knob, self.fine, self.root, self.main)) + 6000.0
+    }
+
+    /// The tuning (semitones) a hosted instrument hears with each note: the channel's pitch, without the root note and
+    /// fine tune when the instrument applies those itself.
+    fn hosted_shift(&self) -> f32 {
+        let shift = if self.own_tuning {
+            if self.pitched { (f64::from(laws::channel_pitch(self.knob, 0, 60, self.main)) + 6000.0) / 100.0 } else { 0.0 }
+        } else {
+            12.0 * (self.base_rate / self.src_ratio).log2()
+        };
+        let shift = shift as f32;
+        if shift.is_finite() && shift.abs() > 1e-3 { shift } else { 0.0 }
     }
 
     /// A control point replaces the channel's own setting (spec: audio/pattern-controls.md).
@@ -959,6 +980,7 @@ impl Engine {
                     pitch_env: env_on.then(|| envelope::Params::new(&ch.envelopes[os_model::Envelope::PITCH])).flatten(),
                     frame_s: 1.0 / f64::from(rate),
                     plugin: ch.kind == ChannelKind::Plugin,
+                    own_tuning: ch.kind.is_sampler(),
                     instrument: Slot::default(),
                     rules: notes::Rules::new(&ch.misc, ppq),
                     from_scale,
@@ -2173,11 +2195,10 @@ impl Engine {
                 self.missed += 1;
                 continue;
             };
-            // The channel's pitch (knob, control points, automation, fine tune, root note, main pitch) reaches the
-            // instrument as each note's tuning, with the note's fine pitch, on top of any glide; notes keep the pitch they
-            // started with.
-            let shift = (12.0 * (ch.base_rate / ch.src_ratio).log2()) as f32;
-            let shift = if shift.is_finite() && shift.abs() > 1e-3 { shift } else { 0.0 };
+            // The channel's pitch (knob, control points, automation, fine tune, root note, main pitch; a sampler
+            // channel's instrument applies root and fine itself) reaches the instrument as each note's tuning, with the
+            // note's fine pitch, on top of any glide; notes keep the pitch they started with.
+            let shift = ch.hosted_shift();
             if self.inst_fine.len() <= c {
                 self.inst_fine.resize(c + 1, [0.0; 128]);
             }
@@ -4025,6 +4046,14 @@ mod tests {
         let got = tunes(&p);
         assert_eq!(got.len(), 1);
         assert!((got[0].1 + 2.5).abs() < 1e-3, "{got:?}");
+        // A sampler channel's instrument (Lemon Sampler) applies root note and fine tune itself: the tuning leaves them
+        // out. A plugin channel's tuning holds them.
+        (p.channels[0].misc.root, p.channels[0].misc.fine) = (48, 30);
+        let got = tunes(&p);
+        assert!((got[0].1 + 2.5).abs() < 1e-3, "{got:?}");
+        p.channels[0].kind = ChannelKind::Plugin;
+        let got = tunes(&p);
+        assert!((got[0].1 - (12.0 - 2.5 + 0.3)).abs() < 1e-3, "{got:?}");
     }
 
     // spec: audio/audio-clips.md "Starting inside a clip"

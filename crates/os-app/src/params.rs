@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Plugin parameters in the app: the parameter lists of hosted instances (shown in the browser, "Browse parameters"),
 //! the last tweaked parameter (Tools / Add menus), and automation clips on plugin parameters (targets, names, value
 //! texts).
@@ -277,11 +283,16 @@ impl App {
         }
         // Lemon Sampler's time-stretch knobs are the channel's own settings: the channel takes the editor's edits, so
         // its audio clips get their new length (`playlist::fit_audio`), playback and saving follow (ui/playlist.md §9c).
+        // So are its root note page's: the engine applies the main pitch switch.
         for (row, name, v) in stretch {
             let Some(ch) = self.state.project.channels.get_mut(row) else { continue };
             let mut st = ch.sound.stretch;
+            let mut misc = ch.misc;
             if crate::plugins::stretch_param(&name, v, &mut st) && st != ch.sound.stretch {
                 ch.sound.stretch = st;
+                self.state.piano.dirty = true;
+            } else if crate::plugins::misc_param(&name, v, &mut misc) && misc != ch.misc {
+                ch.misc = misc;
                 self.state.piano.dirty = true;
             }
         }

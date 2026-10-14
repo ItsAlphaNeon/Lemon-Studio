@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The played sample: what is done once to the loaded sample before any voice plays it. Start and length, the loop
 //! points, files below 8000 Hz, time stretching in the methods that stretch first, and the precomputed effects, all
 //! in the file's units (`os_model::SampleFx`) and in the order and arithmetic of the spec.

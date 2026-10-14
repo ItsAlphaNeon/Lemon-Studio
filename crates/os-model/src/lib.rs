@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Lemon Studio project data model: channels, patterns, playlist, mixer, automation.
 //! Pure data, no I/O. Populated by `os-flp` and (later) edited by the UI and engine.
 //!
@@ -311,20 +317,42 @@ pub struct ChannelSound {
     pub cutoff: i32,
     pub resonance: i32,
     pub filter_type: i32,
-    /// Sampler flags (event 143); value 8 = use the sample's loop points. `None` = not in the file.
+    /// Sampler flags (event 143): `RESAMPLE`, `LOAD_REGIONS`, `LOAD_SLICES`, `USE_LOOP`, `KEEP_ON_DISK`. `None` = not
+    /// in the file.
     pub sampler_flags: Option<u32>,
     /// Declick mode 0..=6 (event 215, byte 83; spec: audio/declick.md); 7 and up are invalid in FL.
     pub declick: u8,
     /// Stretch settings as stored (event 215, ints 24..27): time, pitch, multiplier, mode. The time is a single in
     /// 1/192 beat (FL 24.2 on), kept as its bits.
     pub stretch: [u32; 4],
-    /// The sample's start and length, loop options and precomputed effects (read only: saving keeps the file's own
-    /// events).
+    /// The sample's start and length, loop options and precomputed effects (saving writes them for sampler
+    /// channels).
     pub fx: SampleFx,
+    /// Loop start and end in sample frames (event 251); -1 / `i64::MAX` = the sample's own ends. `None` = not in the
+    /// file (the whole sample).
+    pub loop_points: Option<[i64; 2]>,
+    /// Sample start offset, a share of the sample (event 215, double at byte 144), kept as its bits.
+    pub start_offset_bits: u64,
+}
+
+impl ChannelSound {
+    /// Sampler flags (event 143) values.
+    pub const RESAMPLE: u32 = 1;
+    pub const LOAD_REGIONS: u32 = 2;
+    pub const LOAD_SLICES: u32 = 4;
+    pub const USE_LOOP: u32 = 8;
+    pub const KEEP_ON_DISK: u32 = 0x100;
+    /// Flags of a channel without event 143 (FL's new sampler channel).
+    pub const DEFAULT_FLAGS: u32 = Self::LOAD_REGIONS | Self::USE_LOOP;
+
+    /// The sample start offset (share of the sample).
+    pub fn start_offset(&self) -> f64 {
+        f64::from_bits(self.start_offset_bits)
+    }
 }
 
 /// A sample channel's start, length, loop options and precomputed effects as stored, in the file's units (spec:
-/// audio/precomputed-effects.md "Settings"). Read from a project, never written back.
+/// audio/precomputed-effects.md "Settings"). Saving writes it back for sampler channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SampleFx {
     /// Event 70: `FADE_STEREO`, `REVERSE`, `CLIP`, `SWAP`.
@@ -530,7 +558,17 @@ impl ChannelSound {
 impl Default for ChannelSound {
     /// A new channel: filter open, no flags read, declick mode 0, not stretched.
     fn default() -> Self {
-        ChannelSound { cutoff: 256, resonance: 0, filter_type: 0, sampler_flags: None, declick: 0, stretch: [0; 4], fx: SampleFx::default() }
+        ChannelSound {
+            cutoff: 256,
+            resonance: 0,
+            filter_type: 0,
+            sampler_flags: None,
+            declick: 0,
+            stretch: [0; 4],
+            fx: SampleFx::default(),
+            loop_points: None,
+            start_offset_bits: 0,
+        }
     }
 }
 
@@ -570,6 +608,8 @@ pub struct ChannelMisc {
     pub add_key: bool,
     /// Fine tuning, cents (-100..=100).
     pub fine: i32,
+    /// Key zone: lowest and highest key that play (event 215 ints at bytes 68 and 72); 0 and 256 = no zone.
+    pub key_range: [i32; 2],
     /// How a layer channel hands its notes to its children (stored with every channel; only a layer uses it).
     pub layer: LayerSettings,
 }
@@ -614,6 +654,7 @@ impl Default for ChannelMisc {
             main_pitch: true,
             add_key: false,
             fine: 0,
+            key_range: [0, 256],
             layer: LayerSettings::default(),
         }
     }

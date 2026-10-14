@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Project loading: an opened project's samples are decoded on worker threads, then its sampler channels get their
 //! Lemon Sampler instances a few per frame, while a progress panel shows and the window takes no input. Opening a
 //! sampler afterwards never waits for a file.

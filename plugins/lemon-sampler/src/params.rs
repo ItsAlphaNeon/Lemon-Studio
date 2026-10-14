@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Lemon Sampler parameters. Every control of the editor is a host-visible parameter, addressed by its id. Most are
 //! stored as the knob position 0..1 (FL's knobs are positions too) and converted where they are used; the value
 //! texts follow FL's hint bar.
@@ -714,6 +720,81 @@ pub fn fx_from_text(t: &str) -> Option<SampleFx> {
     })
 }
 
+/// The precomputed settings' knob positions (plain values) and switches: what [`fx_from_knobs`] turns into the file's
+/// units. The host reads them from a saved state to store a channel's settings (spec: plugins/lemon-sampler.md §7).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FxKnobs {
+    pub fade_stereo: bool,
+    pub reverse: bool,
+    pub clip: bool,
+    pub swap: bool,
+    pub boost: f32,
+    pub fade_out: f32,
+    pub fade_in: f32,
+    pub stereo_delay: f32,
+    pub pogo: f32,
+    pub eq: f32,
+    pub cutoff: f32,
+    pub resonance: f32,
+    pub ring_mix: f32,
+    pub ring_freq: f32,
+    pub reverb: f32,
+    pub reverb_type: i32,
+    pub ping_pong: bool,
+    pub remove_dc: bool,
+    pub normalize: bool,
+    pub polarity: bool,
+    pub crossfade: f32,
+    pub trim: f32,
+    pub start: f32,
+    pub length: f32,
+    pub loop_follows: bool,
+}
+
+/// The precomputed settings in the file's units: each from its knob, or `file`'s own value while the knob stands where
+/// that value puts it.
+pub fn fx_from_knobs(k: &FxKnobs, file: Option<&SampleFx>) -> SampleFx {
+    let keep = |unit: &Unit, knob: f32, of: fn(&SampleFx) -> u32| -> u32 {
+        match file {
+            Some(f) if unit.knob(of(f)) == knob => of(f),
+            _ => unit.stored(knob),
+        }
+    };
+    let word = |unit: &Unit, knob: f32, of: fn(&SampleFx) -> u32| keep(unit, knob, of).min(65535) as u16;
+    let flag = |on: bool, bit: u16| if on { bit } else { 0 };
+    let range = |knob: f32, bits: Option<u64>| match bits {
+        Some(b) if f64::from_bits(b) as f32 == knob => b,
+        _ => f64::from(knob.clamp(0.0, 1.0)).to_bits(),
+    };
+    SampleFx {
+        flags: flag(k.fade_stereo, SampleFx::FADE_STEREO)
+            | flag(k.reverse, SampleFx::REVERSE)
+            | flag(k.clip, SampleFx::CLIP)
+            | flag(k.swap, SampleFx::SWAP),
+        boost: word(&unit::BOOST, k.boost, |f| f.boost.into()),
+        fade_out: word(&unit::FADE, k.fade_out, |f| f.fade_out.into()),
+        fade_in: word(&unit::FADE, k.fade_in, |f| f.fade_in.into()),
+        stereo_delay: word(&unit::STEREO_DELAY, k.stereo_delay, |f| f.stereo_delay.into()),
+        pogo: word(&unit::POGO, k.pogo, |f| f.pogo.into()),
+        feedback: word(&unit::FEEDBACK, k.eq, |f| f.feedback.into()),
+        cutoff: word(&unit::CUTOFF, k.cutoff, |f| f.cutoff.into()),
+        resonance: word(&unit::RESONANCE, k.resonance, |f| f.resonance.into()),
+        ring_mix: word(&unit::RING_MIX, k.ring_mix, |f| f.ring_mix.into()),
+        ring_freq: word(&unit::RING_FREQ, k.ring_freq, |f| f.ring_freq.into()),
+        reverb: word(&unit::REVERB, k.reverb, |f| f.reverb.into()),
+        reverb_type: k.reverb_type.clamp(0, 1) as u16,
+        ping_pong: k.ping_pong,
+        remove_dc: k.remove_dc,
+        normalize: k.normalize,
+        polarity: k.polarity,
+        crossfade: keep(&unit::CROSSFADE, k.crossfade, |f| f.crossfade),
+        trim: keep(&unit::TRIM, k.trim, |f| f.trim),
+        start_bits: range(k.start, file.map(|f| f.start_bits)),
+        length_bits: range(k.length, file.map(|f| f.length_bits)),
+        loop_follows_reverse: k.loop_follows,
+    }
+}
+
 /// What builds the played sample: it is rebuilt when this changes (spec: audio/precomputed-effects.md).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FxKey {
@@ -763,46 +844,37 @@ impl SamplerParams {
     /// The precomputed settings in the file's units: each from its knob, or the file's own value while the knob stands
     /// where that value puts it.
     pub fn sample_fx(&self) -> SampleFx {
-        let file = self.file_fx();
-        let keep = |unit: &Unit, knob: f32, of: fn(&SampleFx) -> u32| -> u32 {
-            match &file {
-                Some(f) if unit.knob(of(f)) == knob => of(f),
-                _ => unit.stored(knob),
-            }
-        };
-        let word = |unit: &Unit, knob: f32, of: fn(&SampleFx) -> u32| keep(unit, knob, of).min(65535) as u16;
-        let flag = |on: bool, bit: u16| if on { bit } else { 0 };
-        let (start, length) = (self.fx_start.live(), self.fx_length.live());
-        let range = |knob: f32, bits: Option<u64>| match bits {
-            Some(b) if f64::from_bits(b) as f32 == knob => b,
-            _ => f64::from(knob.clamp(0.0, 1.0)).to_bits(),
-        };
-        SampleFx {
-            flags: flag(self.fx_fade_stereo.live(), SampleFx::FADE_STEREO)
-                | flag(self.fx_reverse.live(), SampleFx::REVERSE)
-                | flag(self.fx_clip.live(), SampleFx::CLIP)
-                | flag(self.fx_swap.live(), SampleFx::SWAP),
-            boost: word(&unit::BOOST, self.fx_boost.live(), |f| f.boost.into()),
-            fade_out: word(&unit::FADE, self.fx_out.live(), |f| f.fade_out.into()),
-            fade_in: word(&unit::FADE, self.fx_in.live(), |f| f.fade_in.into()),
-            stereo_delay: word(&unit::STEREO_DELAY, self.fx_sdelay.live(), |f| f.stereo_delay.into()),
-            pogo: word(&unit::POGO, self.fx_pogo.live(), |f| f.pogo.into()),
-            feedback: word(&unit::FEEDBACK, self.fx_eq.live(), |f| f.feedback.into()),
-            cutoff: word(&unit::CUTOFF, self.fx_cut.live(), |f| f.cutoff.into()),
-            resonance: word(&unit::RESONANCE, self.fx_res.live(), |f| f.resonance.into()),
-            ring_mix: word(&unit::RING_MIX, self.fx_rm_mix.live(), |f| f.ring_mix.into()),
-            ring_freq: word(&unit::RING_FREQ, self.fx_rm_freq.live(), |f| f.ring_freq.into()),
-            reverb: word(&unit::REVERB, self.fx_reverb.live(), |f| f.reverb.into()),
-            reverb_type: self.fx_reverb_type.live().clamp(0, 1) as u16,
+        fx_from_knobs(&self.fx_knobs(), self.file_fx().as_ref())
+    }
+
+    /// The precomputed settings' knobs and switches as the sound uses them.
+    pub fn fx_knobs(&self) -> FxKnobs {
+        FxKnobs {
+            fade_stereo: self.fx_fade_stereo.live(),
+            reverse: self.fx_reverse.live(),
+            clip: self.fx_clip.live(),
+            swap: self.fx_swap.live(),
+            boost: self.fx_boost.live(),
+            fade_out: self.fx_out.live(),
+            fade_in: self.fx_in.live(),
+            stereo_delay: self.fx_sdelay.live(),
+            pogo: self.fx_pogo.live(),
+            eq: self.fx_eq.live(),
+            cutoff: self.fx_cut.live(),
+            resonance: self.fx_res.live(),
+            ring_mix: self.fx_rm_mix.live(),
+            ring_freq: self.fx_rm_freq.live(),
+            reverb: self.fx_reverb.live(),
+            reverb_type: self.fx_reverb_type.live(),
             ping_pong: self.loop_pingpong.live(),
             remove_dc: self.fx_dc.live(),
             normalize: self.fx_normalize.live(),
             polarity: self.fx_polarity.live(),
-            crossfade: keep(&unit::CROSSFADE, self.fx_crossfade.live(), |f| f.crossfade),
-            trim: keep(&unit::TRIM, self.fx_trim.live(), |f| f.trim),
-            start_bits: range(start, file.map(|f| f.start_bits)),
-            length_bits: range(length, file.map(|f| f.length_bits)),
-            loop_follows_reverse: self.fx_loop_follows.live(),
+            crossfade: self.fx_crossfade.live(),
+            trim: self.fx_trim.live(),
+            start: self.fx_start.live(),
+            length: self.fx_length.live(),
+            loop_follows: self.fx_loop_follows.live(),
         }
     }
 
