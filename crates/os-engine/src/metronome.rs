@@ -191,14 +191,58 @@ impl Metronome {
             self.playing = Some((accent, 0));
         }
         let (Some((accent, pos)), Some((_, clicks))) = (self.playing.as_mut(), self.clicks.as_ref()) else { return };
-        let buf = &clicks[usize::from(*accent)];
-        for f in out.chunks_exact_mut(2) {
-            let Some(&v) = buf.get(*pos) else { break };
-            f[0] += v;
-            f[1] += v;
-            *pos += 1;
+        if add(&clicks[usize::from(*accent)], pos, out) {
+            self.playing = None;
         }
-        if *pos >= buf.len() {
+    }
+}
+
+/// Adds `buf` from `pos` to `out` (interleaved stereo, the same on both sides) and moves `pos` on. Returns whether the
+/// click is over.
+fn add(buf: &[f32], pos: &mut usize, out: &mut [f32]) -> bool {
+    for f in out.chunks_exact_mut(2) {
+        let Some(&v) = buf.get(*pos) else { break };
+        f[0] += v;
+        f[1] += v;
+        *pos += 1;
+    }
+    *pos >= buf.len()
+}
+
+/// Clicks started on demand rather than on the beat: the Tempo tapper's taps (spec: ui/tempo-tapper.md §8). Always
+/// Tick, the metronome's default sound, whatever the switch is set to; a new click cuts the one before.
+pub struct TapClicks {
+    rate: u32,
+    /// Plain, accented: rendered at the first click.
+    clicks: Option<[Vec<f32>; 2]>,
+    /// The click sounding: accented, next sample.
+    playing: Option<(bool, usize)>,
+}
+
+impl TapClicks {
+    pub fn new(rate: u32) -> TapClicks {
+        TapClicks { rate, clicks: None, playing: None }
+    }
+
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    /// A click from the next sample `mix` adds.
+    pub fn start(&mut self, accent: bool) {
+        let rate = self.rate;
+        self.clicks.get_or_insert_with(|| [render(Sound::Tick, false, rate), render(Sound::Tick, true, rate)]);
+        self.playing = Some((accent, 0));
+    }
+
+    pub fn sounding(&self) -> bool {
+        self.playing.is_some()
+    }
+
+    /// Adds the click sounding to `out` (interleaved stereo).
+    pub fn mix(&mut self, out: &mut [f32]) {
+        let (Some((accent, pos)), Some(clicks)) = (self.playing.as_mut(), self.clicks.as_ref()) else { return };
+        if add(&clicks[usize::from(*accent)], pos, out) {
             self.playing = None;
         }
     }
@@ -273,6 +317,28 @@ mod tests {
         let mut buf = vec![0.0; 2400];
         m.tick(0, 4, 4, false, &mut buf);
         assert!(buf.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn a_tap_click_is_the_tick_sound_whatever_the_switch_says() {
+        let mut c = TapClicks::new(48000);
+        let mut buf = vec![0.0; 2000];
+        c.mix(&mut buf);
+        assert!(buf.iter().all(|&s| s == 0.0) && !c.sounding(), "nothing before a tap");
+        for accent in [false, true] {
+            c.start(accent);
+            let tick = render(Sound::Tick, accent, 48000);
+            let mut out = vec![0.0; tick.len() * 2 + 200];
+            // Over two blocks, the second one ending past the click.
+            let (a, b) = out.split_at_mut(300);
+            c.mix(a);
+            assert!(c.sounding());
+            c.mix(b);
+            assert!(!c.sounding());
+            let left: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
+            assert_eq!(&left[..tick.len()], &tick[..], "accent {accent}");
+            assert!(out.chunks_exact(2).all(|f| f[0] == f[1]) && left[tick.len()..].iter().all(|&s| s == 0.0));
+        }
     }
 
     #[test]

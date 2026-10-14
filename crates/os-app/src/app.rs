@@ -2252,13 +2252,15 @@ impl App {
         self.damage_win(Win::Tapper);
     }
 
-    /// A tap at `t` seconds on the tapper's clock: it counts (§2), lights the pad (§4) and, with Apply tempo on, a new
-    /// tempo becomes the project tempo (§5).
+    /// A tap at `t` seconds on the tapper's clock: it counts (§2), lights the pad (§4), clicks (the metronome's Tick,
+    /// accented on the taps the beat bar shows orange, §8) and, with Apply tempo on, a new tempo becomes the project
+    /// tempo (§5).
     fn tap(&mut self, t: f64) {
         let tp = &mut self.state.tapper;
         let bpm = tp.count.tap(t);
         tp.flash_at = Some(std::time::Instant::now());
         tp.flash = 1.0;
+        self.transport.tap_click(tp.count.bar().is_some_and(|(_, accent)| accent));
         if let Some(bpm) = bpm.filter(|_| crate::tapper::get().apply) {
             self.set_tempo(bpm);
         }

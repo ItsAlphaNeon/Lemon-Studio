@@ -94,8 +94,8 @@ button for five sounds. It is never in an export, and it is remembered between s
 
 **Tempo tapper.** VIEW > Tempo tapper or Ctrl+F5: click the pad (or press a key on a MIDI keyboard) in time.
 The average of the taps, in whole BPM, becomes the project tempo while Apply tempo is on; the beat bar counts
-the taps in groups of four. Apply tempo is remembered between sessions. Not yet: nudge, Sync, Mute and now
-(drawn greyed out).
+the taps in groups of four. Each tap clicks with the metronome's Tick sound, the first of each four accented.
+Apply tempo is remembered between sessions. Not yet: nudge, Sync, Mute and now (drawn greyed out).
 
 **Closing windows.** VIEW > Close all windows (F12), Close all unfocused windows (Ctrl+F12: all but the one
 in front) and Close all plugin windows (Alt+F12: channel settings and plugin editors); the browser stays.

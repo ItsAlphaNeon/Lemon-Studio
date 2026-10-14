@@ -849,6 +849,8 @@ pub struct Engine {
     /// signature's numerator (spec: ui/metronome.md §4).
     metronome: Option<crate::metronome::Metronome>,
     beats_per_accent: u16,
+    /// The Tempo tapper's clicks (`tap_click`), on any live stream.
+    tap_clicks: crate::metronome::TapClicks,
     pub report: EngineReport,
 }
 
@@ -1226,6 +1228,7 @@ impl Engine {
             inst_active: false,
             metronome: None,
             beats_per_accent: project.time_signature.map_or(4, |s| s.0.max(1)),
+            tap_clicks: crate::metronome::TapClicks::new(rate),
             report,
         }
     }
@@ -1233,6 +1236,13 @@ impl Engine {
     /// Clicks with `switch` while playing live (spec: ui/metronome.md); an export never does.
     pub fn set_metronome(&mut self, switch: std::sync::Arc<crate::metronome::Switch>) {
         self.metronome = Some(crate::metronome::Metronome::new(switch, self.rate));
+    }
+
+    /// A click from the next tick, for a tap on the Tempo tapper (spec: ui/tempo-tapper.md §8): the metronome's Tick,
+    /// accented or not, into the master track like the metronome's clicks; also on a stream of live notes.
+    pub fn tap_click(&mut self, accent: bool) {
+        self.tap_clicks.start(accent);
+        self.tail_done = false;
     }
 
     /// Plays generator-plugin channel `channel` through `inst` (a shared instance that outlives this engine).
@@ -1421,9 +1431,9 @@ impl Engine {
         let drained = self.out_pos >= self.out.len();
         if self.live_only {
             let rest_silent = self.out[self.out_pos.min(self.out.len())..].iter().all(|&s| s == 0.0);
-            return rest_silent && self.voices.is_empty() && self.inst_tail == 0 && self.inst_live.is_empty();
+            return rest_silent && self.voices.is_empty() && self.inst_tail == 0 && self.inst_live.is_empty() && !self.tap_clicks.sounding();
         }
-        !self.looping && drained && self.tail_done && self.inst_live.is_empty()
+        !self.looping && drained && self.tail_done && self.inst_live.is_empty() && !self.tap_clicks.sounding()
     }
 
     /// Start playback in the tick that contains `frame` (at the project tempo; notes before that tick are not
@@ -1518,6 +1528,10 @@ impl Engine {
         self.looping = old.looping;
         // The metronome carries on, with a click that is sounding (rebuilt at a new rate).
         self.metronome = old.metronome.take().map(|m| if m.rate() == self.rate { m } else { crate::metronome::Metronome::new(m.switch().clone(), self.rate) });
+        // So does a tap's click (a tap usually changes the tempo while its click sounds).
+        if old.tap_clicks.rate() == self.rate {
+            std::mem::swap(&mut self.tap_clicks, &mut old.tap_clicks);
+        }
         let tick = old.tick;
         self.clock = if self.rate == old.rate && self.ppq == old.ppq {
             let mut c = old.clock;
@@ -1852,6 +1866,9 @@ impl Engine {
         if let Some(m) = self.metronome.as_mut().filter(|_| !self.exporting && !self.live_only) {
             let start = self.looping || tick < self.end_tick;
             m.tick(tick, self.ppq, self.beats_per_accent, start, &mut self.bus[0][..len * 2]);
+        }
+        if !self.exporting {
+            self.tap_clicks.mix(&mut self.bus[0][..len * 2]);
         }
         self.tick = tick + 1;
         self.frame = start + len as u64;
@@ -4722,5 +4739,32 @@ mod tests {
         let mut out = vec![0.0; 2 * 48000];
         e.process(&mut out);
         assert!(out.iter().all(|&s| s == 0.0), "muted master");
+    }
+
+    // spec: ui/tempo-tapper.md §8
+    #[test]
+    fn a_tap_clicks_on_a_stream_of_live_notes_and_carries_over_a_rebuild() {
+        let p = project(vec![], vec![]);
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.clear_schedule();
+        assert!(e.finished());
+        e.tap_click(true);
+        assert!(!e.finished(), "a click keeps a stream of live notes going");
+        let mut out = vec![0.0; 2 * 240];
+        e.process(&mut out);
+        let on = click_onsets(&out, 48000);
+        assert_eq!(on.len(), 1);
+        assert!(on[0].0 < 2 && (on[0].1 - 1.0).abs() < 0.05, "accented Tick from the start: {on:?}");
+        // The tempo changes while it sounds: the rebuilt engine plays the rest of it.
+        let mut p2 = p.clone();
+        p2.tempo = Some(90.0);
+        let mut e2 = Engine::new(&p2, &mut lib, 48000, PlayMode::Pattern(1));
+        e2.clear_schedule();
+        e2.continue_from(&mut e);
+        let mut rest = vec![0.0; 2 * 2000];
+        e2.process(&mut rest);
+        assert!(rest.iter().any(|&s| s != 0.0));
+        assert!(e2.finished(), "silent again once the click is over");
     }
 }
