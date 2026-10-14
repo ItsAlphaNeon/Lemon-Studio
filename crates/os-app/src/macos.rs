@@ -1,9 +1,13 @@
 //! The main window on macOS, where winit leaves gaps: its frame in screen coordinates (title-bar moves and edge resizes
-//! are done by hand, as on Windows: winit cannot start a system resize of a borderless window here) and quitting from
-//! the menu bar or the Dock, which AppKit would do without asking to save.
+//! are done by hand, as on Windows: winit cannot start a system resize of a borderless window here), maximizing, and
+//! quitting from the menu bar or the Dock, which AppKit would do without asking to save.
+//!
+//! Maximizing is done here too: winit asks AppKit whether a borderless window is zoomed by giving it a title bar for a
+//! moment, and a window whose style changes while a mouse button is down never gets that button's release.
 //!
 //! Screen coordinates are winit's: device px from the top-left of the primary screen.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use objc2::rc::Retained;
@@ -16,6 +20,11 @@ use winit::window::Window;
 
 /// Quit was chosen (menu bar, Dock, Cmd+Q) and not handled yet.
 static QUIT: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// The frame the maximized window goes back to.
+    static RESTORE: Cell<Option<NSRect>> = const { Cell::new(None) };
+}
 
 /// Whether the user asked to quit since the last call: the app asks about unsaved changes, then ends the event loop.
 pub fn take_quit() -> bool {
@@ -81,4 +90,40 @@ pub fn set_rect(window: &Window, r: (i32, i32, i32, i32)) {
     let pt = |v: i32| f64::from(v) / k;
     let size = NSSize::new(pt(r.2 - r.0), pt(r.3 - r.1));
     win.setFrame_display(NSRect::new(NSPoint::new(pt(r.0), top - pt(r.1) - size.height), size), true);
+}
+
+/// The work area of the window's screen (points, AppKit's coordinates): the screen without the menu bar and the Dock.
+fn work_area(win: &NSWindow) -> Option<NSRect> {
+    win.screen().map(|s| s.visibleFrame())
+}
+
+/// Whether the window fills its screen's work area.
+pub fn is_maximized(window: &Window) -> bool {
+    let Some(win) = ns_window(window) else { return false };
+    let (f, Some(w)) = (win.frame(), work_area(&win)) else { return false };
+    let near = |a: f64, b: f64| (a - b).abs() < 1.0;
+    near(f.origin.x, w.origin.x) && near(f.origin.y, w.origin.y) && near(f.size.width, w.size.width) && near(f.size.height, w.size.height)
+}
+
+/// Fills the screen's work area with the window, or gives it its restored frame back (for a window that started
+/// maximized: winit's size, centred in the work area).
+pub fn set_maximized(window: &Window, on: bool) {
+    let Some(win) = ns_window(window) else { return };
+    let Some(work) = work_area(&win) else { return };
+    if on == is_maximized(window) {
+        return;
+    }
+    let frame = if on {
+        RESTORE.set(Some(win.frame()));
+        work
+    } else {
+        RESTORE.take().unwrap_or_else(|| {
+            let k = window.scale_factor();
+            let size = window.inner_size();
+            let (w, h) = ((f64::from(size.width) / k).min(work.size.width), (f64::from(size.height) / k).min(work.size.height));
+            let (w, h) = if (w, h) == (work.size.width, work.size.height) { (w * 0.9, h * 0.85) } else { (w, h) };
+            NSRect::new(NSPoint::new(work.origin.x + (work.size.width - w) / 2.0, work.origin.y + (work.size.height - h) / 2.0), NSSize::new(w, h))
+        })
+    };
+    win.setFrame_display(frame, true);
 }

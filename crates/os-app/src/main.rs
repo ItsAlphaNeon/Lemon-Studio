@@ -165,7 +165,18 @@ fn screen_state(window: &Window) -> Option<((i32, i32), (i32, i32, i32, i32))> {
 }
 
 #[cfg(target_os = "macos")]
-use macos::{screen_state, set_rect};
+use macos::{is_maximized, screen_state, set_maximized, set_rect};
+
+/// Whether the window fills the screen's work area.
+#[cfg(not(target_os = "macos"))]
+fn is_maximized(window: &Window) -> bool {
+    window.is_maximized()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_maximized(window: &Window, on: bool) {
+    window.set_maximized(on);
+}
 
 #[cfg(not(any(windows, target_os = "macos")))]
 fn screen_state(_: &Window) -> Option<((i32, i32), (i32, i32, i32, i32))> {
@@ -231,7 +242,7 @@ const TOP_GRIP: f32 = 4.0;
 const CORNER: f32 = 14.0;
 
 fn insets(window: &Window) -> (u32, u32, u32, u32) {
-    if window.is_maximized() || window.fullscreen().is_some() {
+    if is_maximized(window) || window.fullscreen().is_some() {
         return (0, 0, 0, 0);
     }
     let k = window.scale_factor() as f32;
@@ -416,6 +427,16 @@ impl ApplicationHandler for Shell {
             // Layouts are measured at 1920x1080 and are not responsive yet; below this they break.
             .with_min_inner_size(LogicalSize::new(1024.0, 600.0))
             .with_maximized(true);
+        // macOS: the restored size (the window's size once un-maximized) fits the screen; a Mac's screen is often
+        // smaller than 1920 x 1080 points, and AppKit would leave the window hanging off it.
+        #[cfg(target_os = "macos")]
+        let attrs = match el.primary_monitor() {
+            Some(m) => {
+                let screen = m.size().to_logical::<f64>(m.scale_factor());
+                attrs.with_inner_size(LogicalSize::new((screen.width * 0.9).clamp(1024.0, 1920.0), (screen.height * 0.85).clamp(600.0, 1080.0)))
+            }
+            None => attrs,
+        };
         // App icon: resource 1, embedded by build.rs from assets/lemonstudio.ico.
         #[cfg(windows)]
         let attrs = {
@@ -563,7 +584,7 @@ impl ApplicationHandler for Shell {
                     // Dragging a maximized window restores it under the cursor, then moves it.
                     self.unmax = None;
                     let frac = f64::from(at.0 - l) / f64::from((r - l).max(1));
-                    window.set_maximized(false);
+                    set_maximized(&window, false);
                     if let Some((_, (nl, nt, nr, nb))) = screen_state(&window) {
                         let w = nr - nl;
                         let left = at.0 - (frac * f64::from(w)) as i32;
@@ -606,8 +627,8 @@ impl ApplicationHandler for Shell {
                     if self.app.want_drag_window {
                         self.app.want_drag_window = false;
                         if double {
-                            window.set_maximized(!window.is_maximized());
-                        } else if window.is_maximized() {
+                            set_maximized(&window, !is_maximized(&window));
+                        } else if is_maximized(&window) {
                             // Dragging a maximized window restores it under the cursor, then moves it, once the cursor
                             // has travelled (`unmax`). Without screen coordinates (Linux) the window system's own move
                             // does both.
@@ -868,7 +889,7 @@ impl ApplicationHandler for Shell {
                 }
                 if self.app.want_maximize {
                     self.app.want_maximize = false;
-                    window.set_maximized(!window.is_maximized());
+                    set_maximized(&window, !is_maximized(&window));
                 }
                 if self.app.want_close {
                     self.app.want_close = false;
