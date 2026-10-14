@@ -5291,7 +5291,7 @@ impl App {
         }
     }
 
-    fn menu_item(&mut self, menu: usize, item: usize) {
+    pub(crate) fn menu_item(&mut self, menu: usize, item: usize) {
         use views::menus::*;
         match (menu, item) {
             (0, FILE_NEW) => {
@@ -5358,6 +5358,13 @@ impl App {
             (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Stop sound") => {
                 self.transport.stop();
                 self.state.message = Some("Sound stopped".into());
+            }
+            // spec: ui/unused-channels.md
+            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Select unused channels") => {
+                self.state.message = crate::rack::run(self, crate::rack::RCmd::SelectUnused);
+            }
+            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Purge unused audio clips") => {
+                self.state.message = crate::rack::run(self, crate::rack::RCmd::Purge);
             }
             (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Reset empty playlist tracks") => {
                 if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::ResetEmptyTracks) {

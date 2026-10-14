@@ -11,6 +11,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 - Channel rack with steps and mini piano rolls
 - Swing and per-channel loops
+- Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)
 
 ## ✅ Piano roll
 
