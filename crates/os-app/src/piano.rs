@@ -96,6 +96,10 @@ pub struct PianoState {
     pub ghosts: bool,
     /// Random state of the Randomize and humanize tools (§11).
     pub rng: u64,
+    /// The grid / event panel split (a program setting, spec: ui/event-panel-splitter.md).
+    pub split: crate::piano_split::Split,
+    /// Last press on the splitter, for its double click.
+    pub split_click: Option<std::time::Instant>,
     sel: Vec<usize>,
     sel_key: (u16, u16),
     undo: Vec<(u16, Vec<Note>, Vec<ControlPoint>)>,
@@ -122,6 +126,8 @@ impl Default for PianoState {
             row_h: ROW,
             ghosts: true,
             rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1,
+            split: crate::piano_split::load(),
+            split_click: None,
             sel: Vec::new(),
             sel_key: (0, 0),
             undo: Vec::new(),
@@ -151,7 +157,7 @@ impl PianoState {
 
     /// Forget everything tied to the previous project.
     pub fn reset(&mut self) {
-        *self = PianoState { px_per_beat: self.px_per_beat, row_h: self.row_h, ghosts: self.ghosts, tool: self.tool, rng: self.rng, ..PianoState::default() };
+        *self = PianoState { px_per_beat: self.px_per_beat, row_h: self.row_h, ghosts: self.ghosts, tool: self.tool, rng: self.rng, split: self.split, ..PianoState::default() };
     }
 }
 

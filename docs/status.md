@@ -18,6 +18,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Full tool set, with velocity and event lanes
 - Quantize, chop, glue, legato, strum, arpeggiate and randomize
 - Vertical zoom and ghost channels
+- Resizable event panel: drag the splitter, double-click it to hide or show the panel (remembered)
 - Pattern time markers, saved with the project
 
 ## ✅ Song arrangement

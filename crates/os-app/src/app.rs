@@ -194,6 +194,8 @@ pub enum Action {
     PianoNote(usize),
     PianoKeys,
     PianoVelocity,
+    /// The band between the grid and the event panel (spec: ui/event-panel-splitter.md).
+    PianoSplitter,
     /// Event panel "Control" button and its menu entries (index into `Lane::ALL`).
     PianoLaneMenu,
     /// Toolbar "Piano roll tools" button: the Tools menu (spec: ui/piano-roll.md §11).
@@ -645,6 +647,9 @@ pub enum Drag {
     /// next step is due at `next`) (spec: ui/song-position-slider.md §3).
     SongPos { dx: f32 },
     SongPosHold { next: std::time::Instant },
+    /// The piano roll's grid / event panel splitter: `dy` = grab offset from the band's top, `top` = the grid's top,
+    /// `h` = the height the grid and the panel share.
+    PianoSplit { dy: f32, top: f32, h: f32 },
     /// Monitor debug panel slider.
     MonParam(usize),
     /// Piano roll: move notes (originals by index), resize their ends, erase, draw velocities.
@@ -2482,6 +2487,25 @@ impl App {
         self.piano_grid.map(|g| Geom::new(&self.state, g))
     }
 
+    /// A press on the piano roll's splitter: drags it; a double click hides / brings back the event panel (spec:
+    /// ui/event-panel-splitter.md §2).
+    fn piano_split_press(&mut self) {
+        let now = std::time::Instant::now();
+        let p = &mut self.state.piano;
+        let double = p.split_click.is_some_and(|t| now.duration_since(t).as_millis() < 400);
+        p.split_click = if double { None } else { Some(now) };
+        if double {
+            p.split = p.split.toggled();
+            crate::piano_split::save(p.split);
+            return self.damage_piano();
+        }
+        let band = self.hits.iter().find(|h| h.action == Action::PianoSplitter).map(|h| h.rect);
+        if let (Some(band), Some(g), Some(panel)) = (band, self.piano_grid, self.piano_panel) {
+            let h = panel.bottom() - g.y - crate::piano_split::BAND;
+            self.drag = Some(Drag::PianoSplit { dy: self.mouse.1 - band.y, top: g.y, h });
+        }
+    }
+
     /// The playlist grid from the last paint.
     pub fn pl_grid(&self) -> Option<Rect> {
         self.pl_grid
@@ -3214,6 +3238,13 @@ impl App {
                     return true;
                 }
                 Drag::SongPos { dx } => self.song_pos_drag(dx),
+                Drag::PianoSplit { dy, top, h } => {
+                    let split = self.state.piano.split.dragged(y - dy - top, h);
+                    if split != self.state.piano.split {
+                        self.state.piano.split = split;
+                        self.damage_piano();
+                    }
+                }
                 Drag::SongPosHold { .. } => {}
                 Drag::Tempo { y0, t0 } => {
                     let t = (t0 + f64::from(y0 - y).round()).clamp(10.0, 522.0);
@@ -3398,6 +3429,9 @@ impl App {
                 e if e == EDGE_L | EDGE_T || e == EDGE_R | EDGE_B => Cursor::NwseResize,
                 _ => Cursor::NeswResize,
             };
+        }
+        if matches!((&self.drag, &self.hover), (Some(Drag::PianoSplit { .. }), _) | (None, Some(Action::PianoSplitter))) {
+            return Cursor::NsResize;
         }
         let edges = match (&self.drag, &self.hover) {
             (Some(Drag::RackResize { edges, .. }), _) => *edges,
@@ -3724,6 +3758,7 @@ impl App {
             }
             Some(Drag::ZoomBox { x0, y0 }) => self.zoom_to(x0, y0),
             Some(Drag::SongPos { .. }) => self.song_pos_release(),
+            Some(Drag::PianoSplit { .. }) => crate::piano_split::save(self.state.piano.split),
             Some(Drag::Marker) if self.transport.playing() && !self.transport.song() => {
                 self.start_playback();
             }
@@ -4798,6 +4833,9 @@ impl App {
         if self.rack_act(&a) {
             return;
         }
+        if a == Action::PianoSplitter {
+            return self.piano_split_press();
+        }
         if matches!(a, Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys) {
             self.piano_click(&a);
             return;
@@ -4811,7 +4849,7 @@ impl App {
         }
         let s = &mut self.state;
         match a {
-            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::PianoRuler | Action::Scrollbar(_) | Action::ScrollStep(..) => {}
+            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::PianoRuler | Action::PianoSplitter | Action::Scrollbar(_) | Action::ScrollStep(..) => {}
             Action::PianoTool(t) => {
                 s.piano.tool = t;
                 s.piano.overlay = None;
@@ -7748,6 +7786,68 @@ mod tests {
             }
         }
         assert_eq!(loud, 0, "erased notes still sounding: {:?}", app.transport.sounding());
+    }
+
+    /// The grid / event panel splitter (spec: ui/event-panel-splitter.md): drag with the minimums and collapsing,
+    /// double click to hide and bring back the panel, the vertical resize cursor.
+    #[test]
+    fn event_panel_splitter() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        frame(&mut app, &mut c, None);
+        let band = hit_rect(&app, &Action::PianoSplitter);
+        let (grid, panel) = (app.piano_grid.unwrap(), app.piano_panel.unwrap());
+        assert_eq!((panel.h, band.y), (177.0, panel.y - 8.0), "the default layout");
+        let h = panel.bottom() - grid.y - 8.0;
+        app.mouse_move(band.cx(), band.y + 3.0);
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.cursor(), Cursor::NsResize);
+
+        // Dragging up 100 px gives the panel 100 px more, keeping the grab offset.
+        app.mouse_down();
+        app.mouse_move(band.cx(), band.y - 97.0);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.piano_panel.unwrap().h, 277.0);
+        assert_eq!(app.piano_grid.unwrap().h + app.piano_panel.unwrap().h, h);
+        // Down to 30 px of panel: held at 45; past half of that, collapsed.
+        let drag_to = |app: &mut App, c: &mut Canvas, panel_h: f32| {
+            let b = hit_rect(app, &Action::PianoSplitter);
+            app.state.piano.split_click = None;
+            app.mouse_move(b.cx(), b.y + 3.0);
+            app.mouse_down();
+            app.mouse_move(b.cx(), panel.bottom() - panel_h - 8.0 + 3.0);
+            app.mouse_up();
+            frame(app, c, None);
+            app.piano_panel.unwrap().h
+        };
+        assert_eq!(drag_to(&mut app, &mut c, 30.0), 45.0);
+        assert_eq!(drag_to(&mut app, &mut c, 20.0), 0.0);
+        assert!(app.state.piano.split.panel_collapsed());
+        assert_eq!(hit_rect(&app, &Action::PianoSplitter).bottom(), panel.bottom(), "the band at the bottom");
+        // Open again at 200 px, then a double click collapses it and another brings back 200 px.
+        assert_eq!(drag_to(&mut app, &mut c, 200.0), 200.0);
+        let b = hit_rect(&app, &Action::PianoSplitter);
+        app.state.piano.split_click = None;
+        app.mouse_move(b.cx(), b.y + 3.0);
+        for _ in 0..2 {
+            app.mouse_down();
+            app.mouse_up();
+        }
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.piano_panel.unwrap().h, 0.0);
+        let b = hit_rect(&app, &Action::PianoSplitter);
+        app.mouse_move(b.cx(), b.y + 3.0);
+        for _ in 0..2 {
+            app.mouse_down();
+            app.mouse_up();
+        }
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.piano_panel.unwrap().h, 200.0);
+        // Up to under the ruler: the grid collapses and the panel takes the whole height.
+        assert_eq!(drag_to(&mut app, &mut c, h - 10.0), h);
+        assert_eq!(app.piano_grid.unwrap().h, 0.0);
     }
 
     /// Event panel: the Repeat lane and the channel control lanes (spec: ui/piano-roll.md §7a, §7b).

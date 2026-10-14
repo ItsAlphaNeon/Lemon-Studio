@@ -31,6 +31,7 @@ mod osc3;
 mod monitor;
 mod params;
 mod piano;
+mod piano_split;
 mod piano_tools;
 mod rack;
 mod patterns;
