@@ -1,14 +1,13 @@
 //! `cargo run -p bundle-app [-- --install]` (macOS): builds Lemon Studio in release mode and writes
-//! `<target>/bundled/Lemon Studio.app`: the program, its icon (made from `crates/os-app/assets/logo/icon-lemon.png`) and
-//! an `Info.plist` that lets the Finder open `.flp` projects with it. The bundle is signed ad hoc, as Apple silicon
+//! `<target>/bundled/Lemon Studio.app`: the program, its icon (`crates/os-app/assets/lemonstudio.icns`, made from the
+//! Icon Composer document `assets/logo/macOS.icon` by `tools/logo/macos-icns.sh`) and an `Info.plist` that lets the
+//! Finder open `.flp` projects with it. The bundle is signed ad hoc, as Apple silicon
 //! requires of any program it runs. `--install` copies it to `~/Applications`.
 //!
 //! The macOS counterpart of Linux's desktop entry (`crates/os-app/assets/lemonstudio.desktop`).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
-
-use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 
 const NAME: &str = "Lemon Studio";
 const EXE: &str = "lemonstudio";
@@ -43,7 +42,7 @@ fn main() {
     std::fs::copy(target.join("release").join(EXE), macos.join(EXE)).expect("copy the program");
     std::fs::write(contents.join("Info.plist"), info_plist()).expect("Info.plist");
     std::fs::write(contents.join("PkgInfo"), "APPL????").expect("PkgInfo");
-    icon(&root.join("crates/os-app/assets/logo/icon-lemon.png"), &target.join("bundled"), &resources.join(format!("{EXE}.icns")));
+    std::fs::copy(root.join("crates/os-app/assets/lemonstudio.icns"), resources.join(format!("{EXE}.icns"))).expect("copy the icon");
     run(Command::new("codesign").args(["--force", "--sign", "-"]).arg(&app), "codesign");
     println!("{}", app.display());
 
@@ -114,50 +113,4 @@ fn info_plist() -> String {
 </plist>
 "#
     )
-}
-
-/// Writes the app icon: `src` (transparent margin cropped, centred on a square) in every size an `.icns` holds, at 80 %
-/// of the cell as macOS icons are drawn, through `iconutil`.
-fn icon(src: &Path, scratch: &Path, out: &Path) {
-    let png = Pixmap::load_png(src).expect("icon-lemon.png");
-    let (x0, y0, x1, y1) = alpha_bounds(&png);
-    let set = scratch.join(format!("{EXE}.iconset"));
-    let _ = std::fs::remove_dir_all(&set);
-    std::fs::create_dir_all(&set).expect("iconset folder");
-    for (px, name) in [
-        (16, "16x16"),
-        (32, "16x16@2x"),
-        (32, "32x32"),
-        (64, "32x32@2x"),
-        (128, "128x128"),
-        (256, "128x128@2x"),
-        (256, "256x256"),
-        (512, "256x256@2x"),
-        (512, "512x512"),
-        (1024, "512x512@2x"),
-    ] {
-        let mut cell = Pixmap::new(px, px).expect("icon cell");
-        let (w, h) = ((x1 - x0) as f32, (y1 - y0) as f32);
-        let k = px as f32 * 0.8 / w.max(h);
-        let (dx, dy) = ((px as f32 - w * k) / 2.0, (px as f32 - h * k) / 2.0);
-        let paint = PixmapPaint { quality: FilterQuality::Bicubic, ..PixmapPaint::default() };
-        let t = Transform::from_translate(-(x0 as f32), -(y0 as f32)).post_scale(k, k).post_translate(dx, dy);
-        cell.draw_pixmap(0, 0, png.as_ref(), &paint, t, None);
-        cell.save_png(set.join(format!("icon_{name}.png"))).expect("icon png");
-    }
-    run(Command::new("iconutil").args(["-c", "icns", "-o"]).arg(out).arg(&set), "iconutil");
-    let _ = std::fs::remove_dir_all(&set);
-}
-
-/// The box (x0, y0, x1, y1; end-exclusive) of the pixels that are not fully transparent.
-fn alpha_bounds(p: &Pixmap) -> (u32, u32, u32, u32) {
-    let (w, h) = (p.width(), p.height());
-    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
-    for (i, c) in p.pixels().iter().enumerate() {
-        if c.alpha() > 0 {
-            let (x, y) = (i as u32 % w, i as u32 / w);
-            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
-        }
-    }
-    if x1 <= x0 { (0, 0, w, h) } else { (x0, y0, x1, y1) }
 }

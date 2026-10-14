@@ -6,4 +6,3 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-tiny-skia = "0.11"
