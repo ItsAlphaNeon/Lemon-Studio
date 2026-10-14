@@ -318,13 +318,13 @@ pub struct ChannelSound {
     /// Stretch settings as stored (event 215, ints 24..27): time, pitch, multiplier, mode. The time is a single in
     /// 1/192 beat (FL 24.2 on), kept as its bits.
     pub stretch: [u32; 4],
-    /// The sample's start and length, loop options and precomputed effects (read only: saving keeps the file's own
-    /// events).
+    /// The sample's start and length, loop options and precomputed effects (saving writes them for sampler
+    /// channels).
     pub fx: SampleFx,
 }
 
 /// A sample channel's start, length, loop options and precomputed effects as stored, in the file's units (spec:
-/// audio/precomputed-effects.md "Settings"). Read from a project, never written back.
+/// audio/precomputed-effects.md "Settings"). Saving writes it back for sampler channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SampleFx {
     /// Event 70: `FADE_STEREO`, `REVERSE`, `CLIP`, `SWAP`.

@@ -1244,9 +1244,14 @@ impl App {
     }
 
     pub(crate) fn save_to(&mut self, target: PathBuf) {
-        // Sampler channels keep their sample in Lemon Sampler: copy it to the channel so the FLP stores it.
+        // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
+        // them.
         for row in self.state.hosted_rows.clone() {
             if self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler()) {
+                let lemon = self.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
+                if let Some(st) = self.plugins.state(row).filter(|_| lemon) {
+                    crate::plugins::store_sampler(&mut self.state.project.channels[row], &st);
+                }
                 if let Some(p) = self.plugins.sampler_path(row) {
                     // A placeholder path that still names the same file is kept as the project wrote it.
                     let ch = &mut self.state.project.channels[row];
@@ -7384,6 +7389,105 @@ mod tests {
         app.toggle_channel_window(row);
         assert!(!app.state.shown(Win::Plugin), "no information window");
         assert_eq!(app.state.pending_open, Some(row), "Lemon Sampler's window opens");
+    }
+
+    /// Lemon Sampler's settings are saved with the project and come back when it is reopened (spec:
+    /// plugins/lemon-sampler.md §7): envelopes and LFOs, the channel filter, declick, "Use loop points" and the
+    /// precomputed settings. Untouched settings keep the channel's own values.
+    #[test]
+    fn sampler_settings_save_and_reopen() {
+        use serde_json::json;
+        let flp = std::env::temp_dir().join(format!("os_sampler_settings_{}.flp", std::process::id()));
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        a.plugins.available = crate::plugins::builtin();
+        a.sync_samplers(None);
+        let row = (0..a.state.project.channels.len()).find(|&r| a.state.project.channels[r].kind.is_sampler()).expect("a sampler channel");
+        assert!(a.state.hosted_rows.contains(&row));
+        let untouched = a.state.project.channels[row].clone();
+        let edits = [
+            ("envvol_on", json!({ "bool": true })),
+            ("envvol_att", json!({ "f32": 0.5 })),
+            ("envvol_tempo", json!({ "bool": true })),
+            ("envvol_lfo_amt", json!({ "f32": -0.5 })),
+            ("envvol_lfo_shape", json!({ "i32": 2 })),
+            ("envpitch_amt", json!({ "f32": 0.25 })),
+            ("f_cut", json!({ "f32": 0.25 })),
+            ("f_type", json!({ "i32": 3 })),
+            ("declick", json!({ "i32": 2 })),
+            ("loop_use", json!({ "bool": false })),
+            ("fx_reverse", json!({ "bool": true })),
+            ("fx_boost", json!({ "f32": 0.5 })),
+            ("fx_start", json!({ "f32": 0.25 })),
+            ("fx_sdelay", json!({ "f32": -0.5 })),
+        ];
+        let st = crate::plugins::with_params(&a.plugins.state(row).unwrap(), &edits).unwrap();
+        assert!(a.plugins.set_state(row, &st));
+
+        // Saving copies them into the channel, in the file's units.
+        a.save_to(flp.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let ch = &a.state.project.channels[row];
+        let vol = &ch.envelopes[os_model::Envelope::VOLUME];
+        assert!(vol.enabled && vol.attack == 32768 && vol.flags & 1 == 1 && vol.lfo_amount == -64 && vol.lfo_shape == 2);
+        assert_eq!(ch.envelopes[os_model::Envelope::PITCH].amount, 32);
+        assert_eq!((ch.sound.cutoff, ch.sound.filter_type, ch.sound.declick, ch.sound.sampler_flags), (64, 3, 2, Some(0)));
+        let fx = ch.sound.fx;
+        assert_eq!((fx.flags, fx.boost, fx.stereo_delay, fx.start()), (os_model::SampleFx::REVERSE, 128, 1024, 0.25));
+        // Everything not edited is as it was.
+        assert_eq!(ch.envelopes[os_model::Envelope::PAN], untouched.envelopes[os_model::Envelope::PAN]);
+        assert_eq!((fx.fade_in, fx.pogo, fx.length_bits), (untouched.sound.fx.fade_in, untouched.sound.fx.pogo, untouched.sound.fx.length_bits));
+        assert_eq!(ch.sound.resonance, untouched.sound.resonance);
+
+        // Reopened: the file holds them, and the new Lemon Sampler starts with them.
+        let saved = ch.clone();
+        let mut b = App::new(None);
+        b.plugins = crate::plugins::Plugins::default();
+        b.plugins.available = crate::plugins::builtin();
+        b.open(flp.clone());
+        let _ = std::fs::remove_file(&flp);
+        let t0 = std::time::Instant::now();
+        while !b.state.hosted_rows.contains(&row) && t0.elapsed() < std::time::Duration::from_secs(20) {
+            b.plugin_tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let reopened = &b.state.project.channels[row];
+        assert_eq!((reopened.envelopes, reopened.sound), (saved.envelopes, saved.sound));
+        let st = b.plugins.state(row).expect("Lemon Sampler hosted again");
+        let v: serde_json::Value = serde_json::from_slice(&st[8..]).unwrap();
+        for (id, want) in &edits {
+            let got = &v["params"][*id];
+            match (got.get("f32"), want.get("f32")) {
+                (Some(g), Some(w)) => assert!((g.as_f64().unwrap() - w.as_f64().unwrap()).abs() < 1e-6, "{id}: {got} != {want}"),
+                _ => assert_eq!(got, want, "{id}"),
+            }
+        }
+    }
+
+    /// A Lemon Sampler state read back into the channel it started from changes nothing: every value the file holds,
+    /// even one a knob cannot show exactly, is kept while its knob is untouched.
+    #[test]
+    fn untouched_sampler_settings_store_as_they_were() {
+        let mut pl = crate::plugins::Plugins::default();
+        pl.available = crate::plugins::builtin();
+        let index = pl.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
+        let mut ch = test_project().channels.remove(0);
+        let vol = &mut ch.envelopes[os_model::Envelope::VOLUME];
+        (vol.enabled, vol.attack, vol.sustain, vol.lfo_amount, vol.lfo_shape, vol.flags) = (true, 50, 77, -3, 1, 4 | 2);
+        ch.envelopes[os_model::Envelope::PITCH].amount = 1200;
+        (ch.sound.cutoff, ch.sound.resonance, ch.sound.filter_type, ch.sound.declick, ch.sound.sampler_flags) = (300, 64, 5, 6, Some(10));
+        ch.sound.fx = os_model::SampleFx {
+            flags: os_model::SampleFx::SWAP,
+            boost: 77,
+            trim: 32768,
+            start_bits: 0.1f64.to_bits(),
+            crossfade: 3,
+            ..Default::default()
+        };
+        pl.create_with(0, index, Some(&crate::plugins::sampler_state(&ch))).unwrap();
+        let mut back = ch.clone();
+        crate::plugins::store_sampler(&mut back, &pl.state(0).unwrap());
+        assert_eq!(back, ch);
     }
 
     /// An opened project decodes its samples on worker threads, then starts its samplers behind the progress panel;

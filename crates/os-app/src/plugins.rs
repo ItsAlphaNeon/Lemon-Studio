@@ -1000,9 +1000,16 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
             ("dec_t", f(e.decay_tension.clamp(-128, 128) as f32 / 128.0)),
             ("rel_t", f(e.release_tension.clamp(-128, 128) as f32 / 128.0)),
             ("amt", f(e.amount.clamp(-128, 128) as f32 / 128.0)),
+            ("lfo_delay", time(e.lfo_delay)),
+            ("lfo_att", time(e.lfo_attack)),
+            ("lfo_speed", time(e.lfo_speed)),
+            ("lfo_amt", f(e.lfo_amount.clamp(-128, 128) as f32 / 128.0)),
         ] {
             params.push(format!("\"{pre}_{id}\":{v}"));
         }
+        params.push(format!("\"{pre}_lfo_shape\":{{\"i32\":{}}}", e.lfo_shape.clamp(0, 2)));
+        params.push(format!("\"{pre}_tempo\":{{\"bool\":{}}}", e.flags & 1 != 0));
+        params.push(format!("\"{pre}_lfo_tempo\":{{\"bool\":{}}}", e.flags & 2 != 0));
     }
     // Stretch settings (spec: audio/time-stretch.md "Fields"; Lemon Sampler stretches for the channel).
     if ch.sound.stretch != [0; 4] {
@@ -1029,6 +1036,109 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
     let mut blob = (state.len() as u64).to_le_bytes().to_vec();
     blob.extend_from_slice(state.as_bytes());
     blob
+}
+
+/// Writes Lemon Sampler's settings from its saved `state` into its channel, the inverse of [`sampler_state`]: the five
+/// envelope records with their LFOs, the channel filter, the declick mode, "Use loop points" (sampler flags value 8)
+/// and the sample's start, length, loop options and precomputed effects (spec: plugins/lemon-sampler.md §7). A value
+/// whose knob still stands where the channel's value puts it keeps the channel's value, so an untouched setting is
+/// saved as the file had it. The stretch settings follow the editor's edits as they happen (`params_tick`).
+pub fn store_sampler(ch: &mut os_model::Channel, state: &[u8]) {
+    use lemon_sampler::params as sp;
+    let json = state.get(8..).filter(|_| state.len() > 8 && state[0] != b'{').unwrap_or(state);
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(json) else { return };
+    let Some(params) = v.get("params").and_then(|p| p.as_object()) else { return };
+    let f = |id: &str| params.get(id)?.get("f32")?.as_f64().map(|x| x as f32);
+    let i = |id: &str| params.get(id)?.get("i32")?.as_i64().map(|x| x as i32);
+    let b = |id: &str| params.get(id)?.get("bool")?.as_bool();
+    // The channel's value while the knob stands where it puts it, else the knob's.
+    let keep = |cur: i32, knob: Option<f32>, to_knob: &dyn Fn(i32) -> f32, from_knob: &dyn Fn(f32) -> i32| match knob {
+        Some(k) if to_knob(cur) != k => from_knob(k),
+        _ => cur,
+    };
+    let time_knob = |c: i32| c.max(0) as f32 / 65536.0;
+    let field = |k: f32| sp::time_field(k);
+    let unit_knob = |c: i32| c.clamp(-128, 128) as f32 / 128.0;
+    let units = |k: f32| (k * 128.0).round() as i32;
+    let sus_knob = |c: i32| c.clamp(0, 128) as f32 / 128.0;
+    for (e, pre) in ch.envelopes.iter_mut().zip(["envpan", "envvol", "envmodx", "envmody", "envpitch"]) {
+        let id = |s: &str| format!("{pre}_{s}");
+        e.enabled = b(&id("on")).unwrap_or(e.enabled);
+        for (val, s) in [(&mut e.delay, "delay"), (&mut e.attack, "att"), (&mut e.hold, "hold"), (&mut e.decay, "dec"), (&mut e.release, "rel")] {
+            *val = keep(*val, f(&id(s)), &time_knob, &field);
+        }
+        for (val, s) in [(&mut e.lfo_delay, "lfo_delay"), (&mut e.lfo_attack, "lfo_att"), (&mut e.lfo_speed, "lfo_speed")] {
+            *val = keep(*val, f(&id(s)), &time_knob, &field);
+        }
+        e.sustain = keep(e.sustain, f(&id("sus")), &sus_knob, &units);
+        for (val, s) in [
+            (&mut e.attack_tension, "att_t"),
+            (&mut e.decay_tension, "dec_t"),
+            (&mut e.release_tension, "rel_t"),
+            (&mut e.amount, "amt"),
+            (&mut e.lfo_amount, "lfo_amt"),
+        ] {
+            *val = keep(*val, f(&id(s)), &unit_knob, &units);
+        }
+        if let Some(shape) = i(&id("lfo_shape")).filter(|&s| s != e.lfo_shape.clamp(0, 2)) {
+            e.lfo_shape = shape;
+        }
+        // Flags: 1 = envelope times follow the tempo, 2 = LFO times follow the tempo.
+        for (bit, s) in [(1, "tempo"), (2, "lfo_tempo")] {
+            if let Some(on) = b(&id(s)) {
+                e.flags = if on { e.flags | bit } else { e.flags & !bit };
+            }
+        }
+    }
+    let s = &mut ch.sound;
+    let filter_knob = |c: i32| c.clamp(0, 256) as f32 / 256.0;
+    let filter_units = |k: f32| (k * 256.0).round() as i32;
+    s.cutoff = keep(s.cutoff, f("f_cut"), &filter_knob, &filter_units);
+    s.resonance = keep(s.resonance, f("f_res"), &filter_knob, &filter_units);
+    if let Some(t) = i("f_type").filter(|&t| t != s.filter_type.clamp(0, 7)) {
+        s.filter_type = t;
+    }
+    // Mode 6 plays (and is shown) as mode 0: it stays 6 until another mode is picked.
+    if let Some(d) = i("declick").filter(|&d| d != if s.declick <= 5 { i32::from(s.declick) } else { 0 }) {
+        s.declick = d.clamp(0, 5) as u8;
+    }
+    // "Use loop points" is on for a channel without sampler flags.
+    if let Some(on) = b("loop_use") {
+        let flags = s.sampler_flags.unwrap_or(8);
+        let new = if on { flags | 8 } else { flags & !8 };
+        if new != flags || s.sampler_flags.is_some() {
+            s.sampler_flags = Some(new);
+        }
+    }
+    let mut k = sp::SamplerParams::default().fx_knobs();
+    let knob = |id: &str, v: &mut f32| *v = f(id).unwrap_or(*v);
+    let switch = |id: &str, v: &mut bool| *v = b(id).unwrap_or(*v);
+    knob("fx_start", &mut k.start);
+    knob("fx_length", &mut k.length);
+    knob("fx_in", &mut k.fade_in);
+    knob("fx_out", &mut k.fade_out);
+    knob("fx_crossfade", &mut k.crossfade);
+    knob("fx_trim", &mut k.trim);
+    knob("fx_boost", &mut k.boost);
+    knob("fx_eq", &mut k.eq);
+    knob("fx_rm_mix", &mut k.ring_mix);
+    knob("fx_rm_freq", &mut k.ring_freq);
+    knob("fx_cut", &mut k.cutoff);
+    knob("fx_res", &mut k.resonance);
+    knob("fx_reverb", &mut k.reverb);
+    knob("fx_sdelay", &mut k.stereo_delay);
+    knob("fx_pogo", &mut k.pogo);
+    switch("fx_dc", &mut k.remove_dc);
+    switch("fx_normalize", &mut k.normalize);
+    switch("fx_polarity", &mut k.polarity);
+    switch("fx_reverse", &mut k.reverse);
+    switch("fx_fade_stereo", &mut k.fade_stereo);
+    switch("fx_swap", &mut k.swap);
+    switch("fx_clip", &mut k.clip);
+    switch("loop_pingpong", &mut k.ping_pong);
+    switch("fx_loop_follows", &mut k.loop_follows);
+    k.reverb_type = i("fx_reverb_type").unwrap_or(k.reverb_type);
+    s.fx = sp::fx_from_knobs(&k, Some(&s.fx));
 }
 
 /// A project sample path as a file path (placeholders resolved against the install folder, else unchanged).
@@ -1148,7 +1258,7 @@ pub fn stretch_param(name: &str, norm: f64, stretch: &mut [u32; 4]) -> bool {
 }
 
 /// `blob` (a Lemon Sampler state) with parameters set to the given JSON values.
-fn with_params(blob: &[u8], set: &[(&str, serde_json::Value)]) -> Option<Vec<u8>> {
+pub(crate) fn with_params(blob: &[u8], set: &[(&str, serde_json::Value)]) -> Option<Vec<u8>> {
     let prefixed = blob.len() > 8 && blob[0] != b'{';
     let json = if prefixed { &blob[8..] } else { blob };
     let mut v: serde_json::Value = serde_json::from_slice(json).ok()?;
