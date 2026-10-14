@@ -9780,7 +9780,7 @@ mod tests {
     ///   EQ's master gain and drawn rising: a song export of eight C5 notes has each note at its beat, at its pitch and
     ///   louder than the one before. Played live (with an audio device), then stopped: silent at once.
     /// - Saved, reopened (both found as VST2 with their state, the clip kept) and exported again; then opened with only
-    ///   the VST3 and CLAP copies listed, to show what same-name substitution does with a VST2 state.
+    ///   the VST3 and CLAP copies listed: those copies play them, from their own defaults, and the hint bar says so.
     ///
     /// Loads the plugins in this process, so ignored:
     /// `OS_VST2_DIR=<dir> cargo test -p os-app --bin lemonstudio vst2_plugins_through_the_app -- --ignored --nocapture`
@@ -10010,18 +10010,25 @@ mod tests {
         b.tick();
         check("reopened", &notes(&export(&mut b, "reopened")));
 
-        // Same-name substitution: with no VST2 copy listed, the project's VST2 plugins are looked for by name.
+        // With no VST2 copy listed, the project's VST2 plugins are played by their copies in another format, from those
+        // copies' defaults (the saved state is the VST2 plugin's), and the hint bar names them.
         let mut v = App::new(None);
         v.plugins = lists(&|f| f != Format::Vst2);
         v.open(path.clone());
         v.sync_wrapped();
         let _ = std::fs::remove_file(&path);
-        for (what, k, state) in [("Kars", row, &ch_state), ("3BandEQ", key, &fx_state)] {
-            let d = v.plugins.descriptor(k);
-            let took = v.plugins.hosted.get(&k).map(|h| h.plugin.lock().unwrap().load_state(state));
-            println!("substitution: {what} hosted as {:?}, takes the VST2 state: {took:?}", d.map(|d| d.format));
+        for k in [row, key] {
+            assert!(v.plugins.descriptor(k).is_some_and(|d| d.format != Format::Vst2), "{k} played by a copy: {:?}", v.state.message);
         }
-        println!("substitution message: {:?}", v.state.message);
+        let msg = v.state.message.clone().unwrap_or_default();
+        assert!(msg.contains("from its default settings") && msg.contains("Kars (VST2 as") && msg.contains("3 Band EQ (VST2 as"), "{msg}");
+        let fresh = {
+            let mut f = lists(&|f| f != Format::Vst2);
+            let i = v.plugins.available.iter().position(|x| Some(&x.desc) == v.plugins.descriptor(row).as_ref()).unwrap();
+            f.create_with(row, i, None).unwrap();
+            f.state(row)
+        };
+        assert_eq!(v.plugins.state(row), fresh, "Kars' copy starts from its defaults");
         v.tick();
         let n = notes(&export(&mut v, "substituted"));
         println!("substituted: {:?}", n.iter().map(|(o, p, f)| format!("{o:+} fr, {p:.3}, {f:.0} Hz")).collect::<Vec<_>>());
