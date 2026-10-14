@@ -1,7 +1,8 @@
 //! `cargo run -p bundle-plugins [-- --install]`: builds every Lemon Studio plugin in release mode and writes
-//! `<target>/bundled/<Name>.vst3` (bundle folder) and `<Name>.clap`; `--install` copies them to the per-user plugin
-//! folders (no admin rights needed): `%LOCALAPPDATA%\Programs\Common\{VST3,CLAP}` on Windows, `~/.vst3` and
-//! `~/.clap` on Linux.
+//! `<target>/bundled/<Name>.vst3` (bundle folder) and `<Name>.clap` (a bundle folder too on macOS, ad-hoc signed like
+//! the VST3 one so Apple silicon loads them); `--install` copies them to the per-user plugin folders (no admin rights
+//! needed): `%LOCALAPPDATA%\Programs\Common\{VST3,CLAP}` on Windows, `~/.vst3` and `~/.clap` on Linux,
+//! `~/Library/Audio/Plug-Ins/{VST3,CLAP}` on macOS.
 //!
 // spec: plugins/plugin-formats.md (bundles and install folders)
 
@@ -40,24 +41,42 @@ fn main() {
         assert!(ok, "build of {pkg} failed");
         let lib = target.join("release").join(library_file(stem));
         let vst3 = out.join(format!("{name}.vst3"));
-        let arch = vst3.join("Contents").join(BUNDLE_ARCH);
-        std::fs::create_dir_all(&arch).expect("vst3 bundle");
-        std::fs::copy(&lib, arch.join(bundle_module(name))).expect("copy vst3");
         let clap = out.join(format!("{name}.clap"));
-        std::fs::copy(&lib, &clap).expect("copy clap");
+        if cfg!(target_os = "macos") {
+            mac_bundle(&lib, &vst3, pkg, name);
+            mac_bundle(&lib, &clap, pkg, name);
+        } else {
+            let arch = vst3.join("Contents").join(BUNDLE_ARCH);
+            std::fs::create_dir_all(&arch).expect("vst3 bundle");
+            std::fs::copy(&lib, arch.join(bundle_module(name))).expect("copy vst3");
+            std::fs::copy(&lib, &clap).expect("copy clap");
+        }
         println!("{}\n{}", vst3.display(), clap.display());
         if install {
             let (vst3_dir, clap_dir) = install_dirs();
+            // A signed bundle is replaced whole (a file left from an older build would break its signature).
+            if cfg!(target_os = "macos") {
+                for old in [vst3_dir.join(format!("{name}.vst3")), clap_dir.join(format!("{name}.clap"))] {
+                    let _ = std::fs::remove_dir_all(old);
+                }
+            }
             copy_dir(&vst3, &vst3_dir.join(format!("{name}.vst3"))).expect("install vst3");
-            std::fs::create_dir_all(&clap_dir).expect("clap folder");
-            std::fs::copy(&clap, clap_dir.join(format!("{name}.clap"))).expect("install clap");
+            if clap.is_dir() {
+                copy_dir(&clap, &clap_dir.join(format!("{name}.clap"))).expect("install clap");
+            } else {
+                std::fs::create_dir_all(&clap_dir).expect("clap folder");
+                std::fs::copy(&clap, clap_dir.join(format!("{name}.clap"))).expect("install clap");
+            }
             println!("installed to {} and {}", vst3_dir.display(), clap_dir.display());
         }
     }
 }
 
-/// The bundle folder holding the module: `Contents/<architecture>-<platform>` (VST 3 bundle layout).
-const BUNDLE_ARCH: &str = if cfg!(windows) {
+/// The bundle folder holding the module: `Contents/<architecture>-<platform>` (VST 3 bundle layout), `Contents/MacOS`
+/// on macOS.
+const BUNDLE_ARCH: &str = if cfg!(target_os = "macos") {
+    "MacOS"
+} else if cfg!(windows) {
     if cfg!(target_arch = "aarch64") { "arm64-win" } else { "x86_64-win" }
 } else if cfg!(target_arch = "aarch64") {
     "aarch64-linux"
@@ -70,9 +89,70 @@ fn library_file(stem: &str) -> String {
     format!("{}{stem}{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX)
 }
 
-/// The module's name inside the bundle: `<Name>.vst3` on Windows, `<Name>.so` on Linux.
+/// The module's name inside the bundle: `<Name>.vst3` on Windows, `<Name>.so` on Linux, `<Name>` on macOS.
 fn bundle_module(name: &str) -> String {
-    if cfg!(windows) { format!("{name}.vst3") } else { format!("{name}{}", std::env::consts::DLL_SUFFIX) }
+    if cfg!(windows) {
+        format!("{name}.vst3")
+    } else if cfg!(target_os = "macos") {
+        name.to_owned()
+    } else {
+        format!("{name}{}", std::env::consts::DLL_SUFFIX)
+    }
+}
+
+/// A macOS plugin bundle at `bundle` (`.vst3` or `.clap`, written afresh): `Contents/Info.plist`, `Contents/PkgInfo`
+/// and the module in `Contents/MacOS`, ad-hoc signed (Apple silicon loads no unsigned code).
+fn mac_bundle(lib: &Path, bundle: &Path, pkg: &str, name: &str) {
+    if bundle.is_dir() {
+        std::fs::remove_dir_all(bundle).expect("old bundle");
+    } else if bundle.exists() {
+        std::fs::remove_file(bundle).expect("old bundle");
+    }
+    let contents = bundle.join("Contents");
+    let arch = contents.join(BUNDLE_ARCH);
+    std::fs::create_dir_all(&arch).expect("bundle folder");
+    std::fs::copy(lib, arch.join(bundle_module(name))).expect("copy module");
+    let format = bundle.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    std::fs::write(contents.join("PkgInfo"), "BNDL????").expect("PkgInfo");
+    std::fs::write(contents.join("Info.plist"), info_plist(&format!("org.lemonstudio.{pkg}.{format}"), name)).expect("Info.plist");
+    let signed = Command::new("codesign").args(["--force", "--sign", "-"]).arg(bundle).status().is_ok_and(|s| s.success());
+    assert!(signed, "could not sign {}", bundle.display());
+}
+
+/// A plugin bundle's `Info.plist`.
+fn info_plist(id: &str, name: &str) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>English</string>
+    <key>CFBundleExecutable</key>
+    <string>{name}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{id}</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>{name}</string>
+    <key>CFBundleDisplayName</key>
+    <string>{name}</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+    <key>CFBundleVersion</key>
+    <string>{version}</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+"#
+    )
 }
 
 /// The per-user VST3 and CLAP folders.
@@ -80,6 +160,9 @@ fn install_dirs() -> (PathBuf, PathBuf) {
     if cfg!(windows) {
         let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA")).join("Programs").join("Common");
         (local.join("VST3"), local.join("CLAP"))
+    } else if cfg!(target_os = "macos") {
+        let plugins = PathBuf::from(std::env::var_os("HOME").expect("HOME")).join("Library").join("Audio").join("Plug-Ins");
+        (plugins.join("VST3"), plugins.join("CLAP"))
     } else {
         let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
         (home.join(".vst3"), home.join(".clap"))
