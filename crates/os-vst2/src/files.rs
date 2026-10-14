@@ -24,8 +24,10 @@ pub const EXTENSION: &str = if cfg!(windows) {
 /// The folders VST 2 plugins are usually installed in (there is no single standard one).
 ///
 /// Windows: the folder installers record in the registry, then those of the usual ones that exist (at least
-/// `Program Files\VSTPlugins`). macOS: `~/Library/Audio/Plug-Ins/VST` and `/Library/Audio/Plug-Ins/VST`. Linux:
-/// `VST_PATH` when it is set, else `~/.vst`, `/usr/lib/vst`, `/usr/local/lib/vst` and the `lxvst` ones that exist.
+/// `Program Files\VSTPlugins`). The `Program Files (x86)` ones are among them: many installers put 64-bit plugins
+/// there too (32-bit ones found there are listed as such). macOS: `~/Library/Audio/Plug-Ins/VST` and
+/// `/Library/Audio/Plug-Ins/VST`. Linux: `VST_PATH` when it is set, else `~/.vst`, `/usr/lib/vst`, `/usr/local/lib/vst`
+/// and the `lxvst` ones that exist.
 pub fn standard_dirs() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = Vec::new();
     #[cfg(windows)]
@@ -33,12 +35,15 @@ pub fn standard_dirs() -> Vec<PathBuf> {
         v.extend(registry_dir());
         let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
         let program_files = env("ProgramFiles");
+        let program_files_x86 = env("ProgramFiles(x86)");
         let common = env("CommonProgramFiles");
         let usual = [
             program_files.as_ref().map(|p| p.join("VSTPlugins")),
             program_files.as_ref().map(|p| p.join("Steinberg").join("VSTPlugins")),
             common.as_ref().map(|c| c.join("VST2")),
             common.as_ref().map(|c| c.join("Steinberg").join("VST2")),
+            program_files_x86.as_ref().map(|p| p.join("VSTPlugins")),
+            program_files_x86.as_ref().map(|p| p.join("Steinberg").join("VSTPlugins")),
         ];
         let first = usual[0].clone();
         v.extend(usual.into_iter().flatten().filter(|p| p.is_dir()));
