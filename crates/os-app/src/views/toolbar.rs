@@ -50,7 +50,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     }
 
     row1(ui, s, f);
-    row2(ui, s);
+    row2(ui, s, f);
 
     // Logo spot (spans both rows): the Lemon Studio mark.
     // It keeps to the right edge until the window is too narrow, then the edge crops it
@@ -375,7 +375,7 @@ fn monitor(ui: &mut Ui, s: &State) {
     ui.c.stroke_circle(1037.0, 33.5, 4.0, 2.0, ui.t.s(0x66737d));
 }
 
-fn row2(ui: &mut Ui, s: &State) {
+fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let t = ui.t;
     // Menu bar.
     let mb = Rect::span(4.0, 296.0, 45.0, 77.0);
@@ -411,19 +411,48 @@ fn row2(ui: &mut Ui, s: &State) {
         ui.c.fill_circle(358.0 + 17.5 * a.cos(), 61.0 + 17.5 * a.sin(), 0.7, t.glyph_dim);
     }
 
-    // Main slider panel.
-    let sp = Rect::span(381.0, 575.0, 45.0, 77.0);
-    ui.off(sp, "Song position slider");
+    // Song position slider (spec: ui/song-position-slider.md): the handle follows the playhead while playing.
+    let sp = crate::song_pos::PANEL;
+    let range = crate::song_pos::range(s);
+    let pos = crate::song_pos::shown(s, f.playing, f.song, f.tick, f.song_pos_drag);
+    ui.live(Live::Clock, sp);
+    match range {
+        Some(_) => {
+            ui.hit(sp, Action::SongPos, crate::song_pos::hint(s, pos));
+        }
+        // An empty playlist in SONG mode: nothing to move through.
+        None => {
+            ui.hit(sp, Action::Swallow, "Song position: the playlist is empty");
+        }
+    }
+    let hx = range.map(|len| crate::song_pos::handle_x(pos, len).round());
     if lemon {
         ui.c.fill_rrect(Rect::new(390.0, 60.0, 180.0, 4.0), 2.0, t.sunken_dark);
-        ui.c.fill_rrect(Rect::new(390.0, 55.0, 12.0, 14.0), 3.0, t.button);
-        ui.c.fill_rect(Rect::new(395.0, 58.0, 2.0, 8.0), t.pill);
+        match hx {
+            Some(hx) => {
+                use os_theme::design::lemon as brand;
+                ui.c.fill_rrect(Rect::new(390.0, 60.0, hx - 390.0, 4.0), 2.0, brand::MAIN);
+                ui.c.fill_rrect(Rect::new(hx - 6.0, 55.0, 12.0, 14.0), 3.0, t.button);
+                ui.c.fill_rect(Rect::new(hx - 1.0, 58.0, 2.0, 8.0), brand::MAIN);
+            }
+            None => ui.c.fill_rect(Rect::new(394.0, 58.0, 2.0, 8.0), t.button),
+        }
     } else {
-        ui.c.fill_rect(Rect::new(390.0, 61.0, 180.0, 2.0), t.sunken_dark);
-        ui.c.fill_circle(396.0, 62.0, 6.5, t.sunken_dark);
-        ui.c.line(396.0, 57.0, 396.0, 67.0, 2.0, t.pill);
+        // Classic: the measured colours (§1).
+        ui.c.fill_rect(Rect::new(394.0, 60.0, 172.0, 4.0), ui.t.s(0x343739));
+        match hx {
+            Some(hx) => {
+                let green = ui.t.a(0xa8e44a);
+                ui.c.fill_rect(Rect::new(394.0, 60.0, hx - 394.0, 4.0), green);
+                ui.c.fill_circle(hx + 0.5, 62.0, 6.5, ui.t.s(0x1c1f21));
+                ui.c.fill_circle(hx + 0.5, 62.0, 5.5, ui.t.s(0x26292b));
+                ui.c.fill_rect(Rect::new(hx, 56.0, 1.0, 2.0), ui.t.s(0x9a9d9f));
+                ui.c.fill_rect(Rect::new(hx, 58.0, 1.0, 7.0), green);
+                ui.c.fill_rect(Rect::new(hx, 65.0, 1.0, 3.0), ui.t.s(0x686b6d));
+            }
+            None => ui.c.fill_rect(Rect::new(395.0, 56.0, 1.0, 12.0), ui.t.s(0x282b2d)),
+        }
     }
-    ui.veil(Rect::span(383.0, 574.0, 50.0, 74.0), t.toolbar);
 
     // Mode buttons (spec: ui/main-window.md §3). Typing keyboard, auto scrolling (spec: ui/auto-scrolling.md) and enable
     // groups (spec: ui/enable-groups.md) work.

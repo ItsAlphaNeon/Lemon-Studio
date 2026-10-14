@@ -120,6 +120,8 @@ pub enum Action {
     AutoScroll,
     /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G).
     EnableGroups,
+    /// The toolbar's song position slider (spec: ui/song-position-slider.md).
+    SongPos,
     /// The toolbar's scope / spectrum panel: click switches the display.
     Monitor,
     /// The toolbar's CPU panel: double-click opens the Plugin performance monitor, right-click its menu.
@@ -639,6 +641,10 @@ pub enum Drag {
     RackMixer { ch: usize, y0: f32, v0: u16 },
     Fader { track: u16, y0: f32, v0: f64 },
     Tempo { y0: f32, t0: f64 },
+    /// The song position slider's handle (`dx` = grab offset from its centre), or the button held on its track (the
+    /// next step is due at `next`) (spec: ui/song-position-slider.md §3).
+    SongPos { dx: f32 },
+    SongPosHold { next: std::time::Instant },
     /// Monitor debug panel slider.
     MonParam(usize),
     /// Piano roll: move notes (originals by index), resize their ends, erase, draw velocities.
@@ -2291,7 +2297,7 @@ impl App {
 
     /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
-        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading() || self.plugin_windows_busy()
+        self.transport.playing() || matches!(self.drag, Some(Drag::SongPosHold { .. })) || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading() || self.plugin_windows_busy()
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -2322,6 +2328,7 @@ impl App {
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
         let now = std::time::Instant::now();
+        self.song_pos_tick(now);
         if self.state.cpu.due(now) {
             let tp = &self.transport;
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());
@@ -2431,6 +2438,7 @@ impl App {
             song: self.shown.song,
             peaks: self.transport.peaks(),
             sounding: self.shown.sounding.clone(),
+            song_pos_drag: matches!(self.drag, Some(Drag::SongPos { .. })),
         };
         let overlays = views::paint(&mut ui, &self.state, &info);
         self.keep.parts = std::mem::take(&mut self.keep.next);
@@ -2463,6 +2471,10 @@ impl App {
         match self.piano_win {
             Some(r) => self.damage_rect(r),
             None => self.invalidate(),
+        }
+        // In PAT mode the song position slider shows the play-start marker within the pattern's length.
+        if !self.state.song_mode {
+            self.damage_rect(crate::song_pos::PANEL);
         }
     }
 
@@ -3201,6 +3213,8 @@ impl App {
                     self.set_mon_param(i, x);
                     return true;
                 }
+                Drag::SongPos { dx } => self.song_pos_drag(dx),
+                Drag::SongPosHold { .. } => {}
                 Drag::Tempo { y0, t0 } => {
                     let t = (t0 + f64::from(y0 - y).round()).clamp(10.0, 522.0);
                     if self.state.tempo != t {
@@ -3581,6 +3595,7 @@ impl App {
                 self.autoscroll_menu(x, y);
                 return self.invalidate();
             }
+            Some(Action::SongPos) => return self.song_pos_jump(),
             Some(Action::BrowserRow(i)) => {
                 if self.browser_remove_root(*i) || self.params_browser_right(*i, x, y) {
                     return;
@@ -3708,6 +3723,7 @@ impl App {
                 }
             }
             Some(Drag::ZoomBox { x0, y0 }) => self.zoom_to(x0, y0),
+            Some(Drag::SongPos { .. }) => self.song_pos_release(),
             Some(Drag::Marker) if self.transport.playing() && !self.transport.song() => {
                 self.start_playback();
             }
@@ -4067,6 +4083,10 @@ impl App {
             self.perf_wheel(dy + dx);
             return Some(Win::Perf);
         }
+        if matches!(area, Some(Action::SongPos)) {
+            self.song_pos_wheel(dy);
+            return None;
+        }
         if matches!(area, Some(Action::PlPick(_) | Action::PlPickList)) {
             self.scroll_set(Scroll::PlPick, self.scroll_get(Scroll::PlPick) - (dy + dx) * 31.0);
             return Some(Win::Playlist);
@@ -4347,7 +4367,7 @@ impl App {
 
     /// Start playback in the mode the PAT / SONG switch shows. Pattern mode loops the current pattern from the piano
     /// roll's play-start marker (§10); song mode plays the playlist from its start and stops at its end.
-    fn start_playback(&mut self) {
+    pub(crate) fn start_playback(&mut self) {
         let p = crate::rack::play_project(&self.state);
         let song = self.state.song_mode;
         if song && p.arrangement().is_none_or(|a| a.clips.is_empty()) {
@@ -4875,6 +4895,7 @@ impl App {
                 self.invalidate();
             }
             Action::Tempo => self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo }),
+            Action::SongPos => self.song_pos_press(),
             Action::Menu(i) => {
                 s.pat_ui.menu_at = None;
                 s.menu_open = if s.menu_open == Some(i) { None } else { Some(i) };
@@ -8853,6 +8874,77 @@ mod tests {
         app.key(&f12, false, false);
         app.shift = false;
         assert_eq!(app.state.z, vec![Win::Mixer]);
+    }
+
+    /// The toolbar's song position slider (spec: ui/song-position-slider.md), with FL's measured numbers: an 8.25-bar
+    /// song; a click beside the handle steps 1/88 of it toward the pointer and holding repeats up to the pointer; the
+    /// handle drags; right-click jumps; the wheel moves 3/64 (down = later); PAT mode moves through the pattern (the
+    /// play-start marker); an empty playlist disables it in SONG mode.
+    #[test]
+    fn song_position_slider() {
+        use crate::song_pos::{handle_x, PANEL};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project.arrangements =
+            vec![os_model::Arrangement { number: 1, clips: vec![os_model::Clip::new(0, 3168, 0, os_model::ClipSource::Pattern(1))], ..Default::default() }];
+        app.state.song_mode = true;
+        app.state.playlist.pos = 0;
+        frame(&mut app, &mut c, None);
+        assert_eq!(hit_rect(&app, &Action::SongPos), PANEL);
+        let y = 62.0;
+        let pos = |app: &App| app.state.playlist.pos;
+
+        // A click beside the handle: one step (36 ticks); the release ends it.
+        app.mouse_move(480.0, y);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!(pos(&app), 36);
+        assert_eq!(app.hint, "Song position: 1:02:12");
+        // Held: steps every repeat until the handle is under the pointer (1584 ticks), then it stays.
+        app.mouse_down();
+        assert_eq!(pos(&app), 72);
+        let t0 = std::time::Instant::now();
+        for i in 1..60 {
+            app.song_pos_tick(t0 + std::time::Duration::from_millis(250 * i));
+        }
+        assert_eq!(pos(&app), 1584, "stopped under the pointer");
+        assert!(app.animating(), "the hold ticks at animation rate");
+        app.mouse_up();
+        assert!(!matches!(app.drag, Some(Drag::SongPos { .. } | Drag::SongPosHold { .. })));
+        // The handle drags (keeping the grab offset).
+        frame(&mut app, &mut c, None);
+        assert_eq!(handle_x(1584, 3168), 480.0);
+        app.mouse_move(482.0, y);
+        app.mouse_down();
+        app.mouse_move(438.0, y);
+        assert_eq!(pos(&app), 764);
+        app.mouse_up();
+        // Right click jumps to the pointer, clamped to the last tick.
+        app.mouse_move(565.0, y);
+        app.mouse_down_right();
+        assert_eq!(pos(&app), 3167);
+        // The wheel: up = earlier, down = later, 149 ticks a notch.
+        frame(&mut app, &mut c, None);
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(pos(&app), 3018);
+        app.wheel(0.0, -2.0, false, false);
+        assert_eq!(pos(&app), 3167);
+
+        // PAT mode: through the (empty, one-bar) pattern; right-click at the middle.
+        app.state.song_mode = false;
+        frame(&mut app, &mut c, None);
+        app.mouse_move(480.0, y);
+        app.mouse_down_right();
+        assert_eq!(app.state.piano.marker, 192);
+        assert_eq!(app.hint, "Song position: 1:09:00");
+
+        // SONG mode with an empty playlist: disabled.
+        app.state.song_mode = true;
+        app.state.project.arrangements[0].clips.clear();
+        frame(&mut app, &mut c, None);
+        assert!(app.hits.iter().all(|h| h.action != Action::SongPos));
+        app.mouse_down_right();
+        assert_eq!(pos(&app), 3167);
     }
 
     /// Playlist navigation and editing shortcuts (spec: ui/playlist.md §3, §3a, §4, §5, §6): Alt+wheel = track

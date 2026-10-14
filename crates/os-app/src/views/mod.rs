@@ -35,6 +35,8 @@ pub struct FrameInfo {
     pub peaks: (f32, f32),
     /// Notes playing now, as (channel index, key).
     pub sounding: Vec<(u16, u16)>,
+    /// The song position slider's handle is being dragged (it shows the dragged position, not the playhead).
+    pub song_pos_drag: bool,
 }
 
 /// UI text at a nominal size (Cuprum; spec §10).
