@@ -194,8 +194,18 @@ fn fill(target: &Target, menu: &NSMenu) {
     }
 }
 
+/// Keys the application menu keeps (`app_menu`), which macOS users expect there: Hide (Command+H), Hide Others, Quit,
+/// Settings. A shortcut of the window's menus on one of them is not shown (Ctrl+H, TOOLS > Stop sound, would be
+/// Command+H: the key hides Lemon Studio).
+const RESERVED: &[(&str, NSEventModifierFlags)] = &[
+    ("h", NSEventModifierFlags::Command),
+    ("h", NSEventModifierFlags::Command.union(NSEventModifierFlags::Option)),
+    ("q", NSEventModifierFlags::Command),
+    (",", NSEventModifierFlags::Command),
+];
+
 /// A shortcut as `MENUS` writes it ("Shift+Ctrl+S", "Alt+F8", "F5") as a menu key equivalent: the key, and Command for
-/// Ctrl, Option for Alt. `None` for keys a menu cannot show.
+/// Ctrl, Option for Alt. `None` for keys a menu cannot show, and for the application menu's own (`RESERVED`).
 fn key_equivalent(shortcut: &str) -> Option<(String, NSEventModifierFlags)> {
     let mut parts: Vec<&str> = shortcut.split('+').collect();
     let key = parts.pop().filter(|k| !k.is_empty())?;
@@ -221,7 +231,7 @@ fn key_equivalent(shortcut: &str) -> Option<(String, NSEventModifierFlags)> {
         k if k.chars().count() == 1 => k.to_lowercase(),
         _ => return None,
     };
-    Some((key, mods))
+    (!RESERVED.iter().any(|&(k, m)| k == key && m == mods)).then_some((key, mods))
 }
 
 #[cfg(test)]
@@ -237,5 +247,8 @@ mod tests {
         assert_eq!(k("Alt+F8"), Some((vec![0xF70B], NSEventModifierFlags::Option)));
         assert_eq!(k("Shift+Ctrl+Up"), Some((vec![0xF700], NSEventModifierFlags::Shift | NSEventModifierFlags::Command)));
         assert_eq!(k(""), None);
+        // The application menu's keys stay its own: TOOLS > Stop sound shows no shortcut.
+        assert_eq!(k("Ctrl+H"), None);
+        assert!(k("Shift+Ctrl+H").is_some());
     }
 }
