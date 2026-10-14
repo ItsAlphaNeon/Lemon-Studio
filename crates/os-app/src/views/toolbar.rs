@@ -523,7 +523,7 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
         (Icon::Browser, Action::ToggleWin(Win::Browser), s.show_browser, "Browser (Alt+F8)"),
         (Icon::Project, Action::Placeholder("Project picker"), false, "Project picker"),
         (Icon::Plug, Action::PickerOpen, false, "Add a plugin (F8)"),
-        (Icon::AudioEditor, Action::Placeholder("Audio editor"), false, "Audio editor"),
+        (Icon::Kick, Action::ToggleWin(Win::Tapper), s.shown(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
         (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller"),
         (Icon::Store, Action::Placeholder("Plugin store"), false, "Plugin store"),
     ];

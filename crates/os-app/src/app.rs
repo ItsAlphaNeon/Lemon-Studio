@@ -7141,6 +7141,13 @@ mod tests {
         assert!(!app.state.shown(Win::Tapper));
         let row = bar_model(&app.state)[VIEW].rows.iter().find(|r| r.label == "Tempo tapper").cloned().unwrap();
         assert_eq!(row.mark, Mark::Check(false));
+        // The toolbar's kick drum button (the 8th window button) opens and closes it too.
+        let b = hit_rect(&app, &Action::ToggleWin(Win::Tapper));
+        assert_eq!((b.x, hint(&app, &Action::ToggleWin(Win::Tapper)).as_str()), (973.0 + 33.0 * 7.0, "Tempo tapper (Ctrl+F5)"));
+        click(&mut app, &mut c, b);
+        assert!(app.state.shown(Win::Tapper) && app.state.in_front(Win::Tapper));
+        click(&mut app, &mut c, b);
+        assert!(!app.state.shown(Win::Tapper));
     }
 
     /// The tapper's flash fades on the ticks (spec: ui/tempo-tapper.md §4, §8): each repaints just the pad, which shows
