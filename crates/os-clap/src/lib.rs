@@ -75,9 +75,10 @@ unsafe fn cstr(p: *const c_char) -> String {
 }
 
 impl Library {
+    /// Loads plugin `path`: a `.clap` file, or on macOS a `.clap` bundle (its `init` gets the bundle's path).
     pub fn load(path: &Path) -> Result<Arc<Library>, String> {
         unsafe {
-            let lib = os_host::load_module(path)?;
+            let lib = os_host::load_module(&module_file(path))?;
             let entry: *const clap_plugin_entry = *lib.get::<*const clap_plugin_entry>(b"clap_entry\0").map_err(|e| format!("{}: no clap_entry ({e})", path.display()))?;
             Self::open(entry, path, Some(lib))
         }
@@ -203,14 +204,27 @@ pub fn standard_dirs() -> Vec<PathBuf> {
     v
 }
 
-/// `.clap` files directly inside the given folders (and one level of subfolders).
+/// Whether `p` is a CLAP plugin: a `.clap` file, or on macOS a `.clap` bundle folder (`Name.clap/Contents/MacOS/...`).
+pub fn is_plugin(p: &Path) -> bool {
+    p.extension().is_some_and(|x| x.eq_ignore_ascii_case("clap")) && (p.is_file() || (cfg!(target_os = "macos") && p.is_dir()))
+}
+
+/// The module file of plugin `path`: on macOS a bundle's executable (`os_host::bundle`), else the file itself.
+pub fn module_file(path: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return os_host::bundle::module_file(path);
+    #[cfg(not(target_os = "macos"))]
+    path.to_path_buf()
+}
+
+/// CLAP plugins directly inside the given folders (and in their subfolders; a macOS bundle is not searched inside).
 pub fn find_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for d in dirs {
         let Ok(rd) = std::fs::read_dir(d) else { continue };
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("clap")) && p.is_file() {
+            if is_plugin(&p) {
                 out.push(p);
             } else if p.is_dir() {
                 out.extend(find_files(&[p]));
@@ -252,15 +266,16 @@ struct HostData {
     rescan: AtomicU32,
     /// Parameter ids picked for "Create automation clip" in the plugin's own menus (`context_menu.rs`).
     automate: Mutex<Vec<u32>>,
-    /// The editor asked for this size (`clap_host_gui.request_resize`, device px); applied on the UI tick.
+    /// The editor asked for this size (`clap_host_gui.request_resize`, in its own units: device px, points on macOS);
+    /// applied on the UI tick.
     resize: Mutex<Option<(u32, u32)>>,
     /// The plugin's voice count changed (`clap_host_voice_info.changed`): read again on the UI tick.
     voice_info: AtomicBool,
     /// The plugin, for the run loop's callbacks (set before `init`, which may already register).
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     plugin: std::sync::atomic::AtomicPtr<clap_plugin>,
     /// What the plugin registered with the UI run loop (Linux): timer id or descriptor, whether a timer, token.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     run: Mutex<Vec<(u32, bool, u64)>>,
 }
 
@@ -285,7 +300,7 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
     if id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU || id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU_COMPAT {
         return &context_menu::HOST_CONTEXT_MENU as *const clap_sys::ext::context_menu::clap_host_context_menu as *const c_void;
     }
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     if let Some(ext) = run_loop::extension(id) {
         return ext;
     }
@@ -294,8 +309,9 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
 
 /// Linux: plugin editors have no message loop of their own; they register timers and descriptors (their X11
 /// connection) with the host (`timer-support`, `posix-fd-support`) and get the callbacks on the UI thread through
-/// `os_host::runloop`.
-#[cfg(unix)]
+/// `os_host::runloop`. Not offered on macOS: editors there run on the main thread's run loop, which the app's event
+/// loop (winit's) runs.
+#[cfg(all(unix, not(target_os = "macos")))]
 mod run_loop {
     use super::*;
     use clap_sys::ext::posix_fd_support::{clap_host_posix_fd_support, clap_plugin_posix_fd_support, clap_posix_fd_flags, CLAP_EXT_POSIX_FD_SUPPORT};
@@ -584,6 +600,9 @@ pub struct Plugin {
     dbg_frames: u64,
     /// The editor is open (parented into a host window).
     editor: bool,
+    /// Device pixels per unit of the open editor's sizes: 1, except on macOS, where editors measure in points
+    /// (`open_editor`).
+    editor_scale: f32,
     /// Input copies for effect processing (mixer slots).
     fx_in: (Vec<f32>, Vec<f32>),
     /// Parameter ranges in list order (id, min, max, stepped), read after init and on a rescan (values cross the
@@ -682,9 +701,9 @@ impl Plugin {
             automate: Mutex::new(Vec::new()),
             resize: Mutex::new(None),
             voice_info: AtomicBool::new(false),
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "macos")))]
             plugin: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "macos")))]
             run: Mutex::new(Vec::new()),
         });
         let host = Box::new(clap_host {
@@ -706,13 +725,13 @@ impl Plugin {
             if plugin.is_null() {
                 return Err(format!("{}: could not create {id}", lib.path.display()));
             }
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "macos")))]
             host_data.plugin.store(plugin as *mut clap_plugin, Ordering::Release);
             if !(*plugin).init.is_some_and(|i| i(plugin)) {
                 if let Some(d) = (*plugin).destroy {
                     d(plugin);
                 }
-                #[cfg(unix)]
+                #[cfg(all(unix, not(target_os = "macos")))]
                 run_loop::clear(&host_data);
                 return Err(format!("{id}: init failed"));
             }
@@ -765,6 +784,7 @@ impl Plugin {
                 dbg_peak: 0.0,
                 dbg_frames: 0,
                 editor: false,
+                editor_scale: 1.0,
                 fx_in: (Vec::new(), Vec::new()),
                 latency,
                 render,
@@ -1043,15 +1063,18 @@ impl Plugin {
         self.editor
     }
 
-    /// Embeds the plugin's editor in `parent` (a host window handle: HWND on Windows, an X11 window id on Linux);
-    /// returns its size in pixels.
+    /// Embeds the plugin's editor in `parent` (a host window handle: HWND on Windows, an NSView on macOS, an X11 window
+    /// id on Linux); returns its size in pixels.
     /// The host draws the window frame around it (spec: ui/plugin-window.md). `scale` is the parent's DPI factor:
-    /// a plugin that takes it draws at that size and reports the scaled size (spec: ui/ui-scaling.md §3).
+    /// a plugin that takes it draws at that size and reports the scaled size (spec: ui/ui-scaling.md §3). On macOS the
+    /// editor measures in points and follows its window's backing scale itself (CLAP: no `set_scale` with Cocoa), so
+    /// its sizes are turned into pixels at `scale` here, and back for the plugin.
     pub fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
         if !self.has_editor() {
             return Err(format!("{} has no editor", self.desc.name));
         }
         self.close_editor();
+        self.editor_scale = if cfg!(target_os = "macos") && scale > 0.0 { scale } else { 1.0 };
         unsafe {
             let g = &*self.gui;
             let api = WINDOW_API.as_ptr();
@@ -1059,7 +1082,7 @@ impl Plugin {
                 return Err("the plugin could not create its editor".into());
             }
             // CLAP: the scale goes between create and set_parent; a plugin that refuses it handles DPI itself.
-            if scale > 0.0 {
+            if scale > 0.0 && !cfg!(target_os = "macos") {
                 g.set_scale.map(|f| f(self.plugin, f64::from(scale)));
             }
             let (mut w, mut h) = (0u32, 0u32);
@@ -1071,7 +1094,7 @@ impl Plugin {
             }
             g.show.map(|f| f(self.plugin));
             self.editor = true;
-            Ok((w, h))
+            Ok(self.to_px((w, h)))
         }
     }
 
@@ -1081,7 +1104,13 @@ impl Plugin {
             return None;
         }
         let (mut w, mut h) = (0u32, 0u32);
-        unsafe { (*self.gui).get_size.is_some_and(|f| f(self.plugin, &mut w, &mut h)) }.then_some((w, h))
+        unsafe { (*self.gui).get_size.is_some_and(|f| f(self.plugin, &mut w, &mut h)) }.then(|| self.to_px((w, h)))
+    }
+
+    /// An editor size as the plugin gives it (points on macOS) in pixels.
+    fn to_px(&self, (w, h): (u32, u32)) -> (u32, u32) {
+        let px = |v: u32| (v as f32 * self.editor_scale).round() as u32;
+        (px(w), px(h))
     }
 
     pub fn close_editor(&mut self) {
@@ -1703,7 +1732,7 @@ impl Drop for Plugin {
                 d(self.plugin);
             }
         }
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         run_loop::clear(&self.host_data);
     }
 }

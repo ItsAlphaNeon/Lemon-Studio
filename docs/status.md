@@ -123,6 +123,7 @@ and voices, with sorting, find and freeze.
 
 - WASAPI (shared mode) on Windows
 - ALSA (and PipeWire / PulseAudio through it) on Linux
+- Core Audio on macOS
 - Output device, sample rate and buffer length in Settings > Audio
 - Not yet: ASIO, JACK
 
@@ -130,7 +131,7 @@ and voices, with sorting, find and freeze.
 
 - Windows 10 / 11
 - Linux: X11, and Wayland through XWayland (see the [Linux notes](../README.md#linux))
-- Not yet: macOS
+- macOS 11 or newer, supported at the same level as Linux (see the [macOS notes](../README.md#macos))
 
 ## 🚧 Look and themes
 

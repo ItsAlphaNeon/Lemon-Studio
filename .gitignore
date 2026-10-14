@@ -10,3 +10,6 @@ target-dev/
 .env
 CLAUDE.md
 .claude/
+
+# macOS Finder metadata
+.DS_Store

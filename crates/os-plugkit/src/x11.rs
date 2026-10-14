@@ -2,7 +2,7 @@
 //! on a GUI thread of its own with its own connection, as other plugin toolkits do on Linux (any host works, none has to
 //! run the editor's loop); painting a canvas into it; the cursor held in place during a knob drag (XInput 2 raw
 //! motion, else pointer motion with the pointer warped back); popup menus painted with `os_ui::kit::menu` (never native menus) and the "Type in value" box. The Win32
-//! counterpart is `win`.
+//! counterpart is `win`; `mac` has this API on macOS, and the input types are shared (`input`).
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,43 +22,16 @@ use x11rb::protocol::xproto::{
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
+pub use crate::input::{keysym, keysym_char, Button, Input};
 use crate::MenuDef;
+
+/// The host's window: an X11 window id.
+pub type Parent = u32;
 
 /// The editor's polling period (overlay expiry, meters): the Win32 editors' timer.
 const TICK: Duration = Duration::from_millis(30);
 /// Two presses closer than this are a double click (ms of server time).
 const DOUBLE_CLICK_MS: u32 = 400;
-
-/// Key symbols the editors and boxes look at (`<X11/keysymdef.h>`).
-pub mod keysym {
-    pub const BACKSPACE: u32 = 0xff08;
-    pub const RETURN: u32 = 0xff0d;
-    pub const ESCAPE: u32 = 0xff1b;
-    pub const HOME: u32 = 0xff50;
-    pub const LEFT: u32 = 0xff51;
-    pub const UP: u32 = 0xff52;
-    pub const RIGHT: u32 = 0xff53;
-    pub const DOWN: u32 = 0xff54;
-    pub const END: u32 = 0xff57;
-    pub const KP_ENTER: u32 = 0xff8d;
-    pub const DELETE: u32 = 0xffff;
-}
-
-/// The character a key symbol types, if any.
-pub fn keysym_char(sym: u32) -> Option<char> {
-    match sym {
-        0x20..=0x7e | 0xa0..=0xff => char::from_u32(sym),
-        0xffb0..=0xffb9 => char::from_digit(sym - 0xffb0, 10),
-        0xffaa => Some('*'),
-        0xffab => Some('+'),
-        0xffad => Some('-'),
-        0xffae => Some('.'),
-        0xffaf => Some('/'),
-        // Unicode key symbols.
-        0x0100_0100..=0x0110_ffff => char::from_u32(sym - 0x0100_0000),
-        _ => None,
-    }
-}
 
 // -------------------------------------------------------------------------------------------------------------------
 // The GUI thread
@@ -141,7 +114,7 @@ impl Drop for EditorThread {
 
 /// Opens an editor window of `size` device px in the host's X11 window `parent` and runs `run` with it on a thread of
 /// its own. `None` when there is no X11 display.
-pub fn spawn(parent: u32, size: (u32, u32), slot: &Slot, run: impl FnOnce(Window) + Send + 'static) -> Option<EditorThread> {
+pub fn spawn(parent: Parent, size: (u32, u32), slot: &Slot, run: impl FnOnce(Window) + Send + 'static) -> Option<EditorThread> {
     let waker = Waker::new()?;
     let win = match Window::open(parent, size, waker.clone()) {
         Ok(w) => w,
@@ -159,31 +132,6 @@ pub fn spawn(parent: u32, size: (u32, u32), slot: &Slot, run: impl FnOnce(Window
 
 // -------------------------------------------------------------------------------------------------------------------
 // The window
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Button {
-    Left,
-    Right,
-    Middle,
-}
-
-/// What happened in the window. Positions are the window's device px.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Input {
-    Down { x: f32, y: f32, btn: Button, dbl: bool },
-    Up { btn: Button },
-    Move { x: f32, y: f32 },
-    /// The held cursor moved this far (device px; `lock`).
-    Delta { dx: f32, dy: f32 },
-    /// Notches, up positive.
-    Wheel { x: f32, y: f32, notches: f32 },
-    Leave,
-    Key { sym: u32, text: Option<char> },
-    /// Part of the window needs painting.
-    Expose,
-    /// The polling period passed, or a parameter changed.
-    Tick,
-}
 
 /// Key symbols by key code (the server's keyboard mapping).
 struct Keymap {
@@ -498,6 +446,11 @@ impl Window {
         let (x, y) = (x.clamp(-32768, 32767) as i16, y.clamp(-32768, 32767) as i16);
         let t = self.c.translate_coordinates(self.win, self.root, x, y);
         t.ok().and_then(|t| t.reply().ok()).map_or((i32::from(x), i32::from(y)), |r| (i32::from(r.dst_x), i32::from(r.dst_y)))
+    }
+
+    /// Runs a desktop dialog (a file dialog): here, at once on this thread (`mac` runs it on the main thread).
+    pub fn dialog<R: Send + 'static>(&self, f: impl FnOnce() -> R + Send + 'static) -> Option<R> {
+        Some(f())
     }
 
     pub fn locked(&self) -> bool {

@@ -404,8 +404,8 @@ pub struct Found {
 /// How deep below a search folder plugin files are looked for.
 const MAX_DEPTH: u32 = 8;
 
-/// The plugin files in the switched-on folders (§4): `.clap` files and `.vst3` bundles or files (a bundle is not searched
-/// inside), then the `native` files; each file once, files of the built-in Lemon plugins left out.
+/// The plugin files in the switched-on folders (§4): `.clap` files (and bundles on macOS) and `.vst3` bundles or files (a
+/// bundle is not searched inside), then the `native` files; each file once, files of the built-in Lemon plugins left out.
 pub fn discover(dirs: &[SearchDir], native: Vec<PathBuf>) -> Vec<Found> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -440,7 +440,7 @@ fn walk(dir: &Path, depth: u32, (clap, vst3): (bool, bool), walked: &mut HashSet
     for p in entries {
         let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase());
         let format = match ext.as_deref() {
-            Some("clap") if clap && p.is_file() => Some(Format::Clap),
+            Some("clap") if clap && os_clap::is_plugin(&p) => Some(Format::Clap),
             Some("vst3") if vst3 && (p.is_dir() || p.is_file()) => Some(Format::Vst3),
             _ => None,
         };
@@ -464,9 +464,13 @@ fn builtin_file(p: &Path) -> bool {
     p.file_stem().is_some_and(|s| builtin.iter().chain(&old).any(|b| s.eq_ignore_ascii_case(b)))
 }
 
-/// A file's size and modification time (§4): a VST 3 bundle's module inside it, else the file itself.
+/// A file's size and modification time (§4): a bundle's module inside it (VST 3; CLAP on macOS), else the file itself.
 pub fn stamp(path: &Path, format: Format) -> (u64, u64) {
-    let module = if format == Format::Vst3 { os_vst3::module_file(path) } else { path.to_path_buf() };
+    let module = match format {
+        Format::Vst3 => os_vst3::module_file(path),
+        Format::Clap => os_clap::module_file(path),
+        Format::Native => path.to_path_buf(),
+    };
     let file = if module.exists() { module } else { path.to_path_buf() };
     let Ok(md) = std::fs::metadata(&file) else { return (0, 0) };
     let modified = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
@@ -1118,7 +1122,7 @@ mod tests {
         d
     }
 
-    /// Discovery (§4): .clap files and .vst3 bundles, recursively, not inside bundles; standard folders only for their
+    /// Discovery (§4): .clap files (bundles on macOS) and .vst3 bundles, recursively, not inside bundles; standard folders only for their
     /// format; switched-off folders and built-in Lemon plugin files (also by their earlier "Open" names) are skipped.
     #[test]
     fn discovery_finds_plugin_files() {
@@ -1135,6 +1139,8 @@ mod tests {
         w("added/Lemon Sampler.clap");
         w("added/Open Parametric EQ 2.vst3/Contents/x86_64-win/Open Parametric EQ 2.vst3");
         w("added/readme.txt");
+        // A macOS CLAP bundle: a plugin on macOS, a plain folder elsewhere.
+        w("added/Mac/Keys.clap/Contents/MacOS/Keys");
         w("clap/OnlyClap.clap");
         w("clap/NotHere.vst3");
         w("off/Hidden.clap");
@@ -1146,15 +1152,12 @@ mod tests {
         ];
         let found = discover(&dirs, Vec::new());
         let names: Vec<(String, Format)> = found.iter().map(|f| (f.path.strip_prefix(&d).unwrap().to_string_lossy().replace('\\', "/"), f.format)).collect();
-        assert_eq!(
-            names,
-            vec![
-                ("clap/OnlyClap.clap".to_string(), Format::Clap),
-                ("added/Bundle.vst3".to_string(), Format::Vst3),
-                ("added/Vendor/Deep/Er/Fx.vst3".to_string(), Format::Vst3),
-                ("added/Vendor/Synth.clap".to_string(), Format::Clap),
-            ]
-        );
+        let mut want = vec![("clap/OnlyClap.clap".to_string(), Format::Clap), ("added/Bundle.vst3".to_string(), Format::Vst3)];
+        if cfg!(target_os = "macos") {
+            want.push(("added/Mac/Keys.clap".to_string(), Format::Clap));
+        }
+        want.extend([("added/Vendor/Deep/Er/Fx.vst3".to_string(), Format::Vst3), ("added/Vendor/Synth.clap".to_string(), Format::Clap)]);
+        assert_eq!(names, want);
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -1,7 +1,7 @@
-//! The plugin editor: a child of the host's window (Win32, or X11 on Linux) that paints `view` with the os-ui canvas,
-//! and the editor logic (platform independent): knob / fader drags with the cursor held in place, envelope node drags, wheel and
-//! reset gestures, shape buttons and switches, the parameter menus. Edits show and sound at once
-//! (`os_plugkit::vals`).
+//! The plugin editor: a child of the host's window (Win32, X11 on Linux, an NSView on macOS) that paints `view` with
+//! the os-ui canvas, and the editor logic (platform independent): knob / fader drags with the cursor held in place,
+//! envelope node drags, wheel and reset gestures, shape buttons and switches, the parameter menus. Edits show and sound
+//! at once (`os_plugkit::vals`).
 //!
 // spec: plugins/lemon-3x-osc.md (§4 hints, §5 interaction), plugins/host-link.md
 
@@ -26,9 +26,9 @@ pub struct Osc3Editor {
     /// The open editor window (0 = closed): parameter changes post a repaint to it.
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Arc<AtomicIsize>,
-    /// Linux: the open editor's thread waker, for the same.
-    #[cfg(target_os = "linux")]
-    slot: os_plugkit::x11::Slot,
+    /// Linux and macOS: the open editor's thread waker, for the same.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    slot: os_plugkit::gui::Slot,
 }
 
 impl Osc3Editor {
@@ -38,7 +38,7 @@ impl Osc3Editor {
             shared,
             scale: AtomicU32::new(1f32.to_bits()),
             hwnd: Arc::new(AtomicIsize::new(0)),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             slot: Default::default(),
         }
     }
@@ -46,8 +46,8 @@ impl Osc3Editor {
     fn notify(&self) {
         #[cfg(windows)]
         win32::post_changed(self.hwnd.load(Ordering::Acquire));
-        #[cfg(target_os = "linux")]
-        os_plugkit::x11::notify(&self.slot);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        os_plugkit::gui::notify(&self.slot);
     }
 }
 
@@ -60,7 +60,13 @@ impl Editor for Osc3Editor {
                 Box::new(win32::open(hwnd, scale, self.params.clone(), self.shared.clone(), context, self.hwnd.clone()))
             }
             #[cfg(target_os = "linux")]
-            ParentWindowHandle::X11Window(window) => Box::new(x11::open(window, scale, self.params.clone(), self.shared.clone(), context, &self.slot)),
+            ParentWindowHandle::X11Window(window) => Box::new(gui::open(window, scale, self.params.clone(), self.shared.clone(), context, &self.slot)),
+            // macOS hosts set no scale (sizes are points): the editor paints at its window's backing scale.
+            #[cfg(target_os = "macos")]
+            ParentWindowHandle::AppKitNsView(view) => {
+                let scale = os_plugkit::gui::backing_scale(view as usize);
+                Box::new(gui::open(view as usize, scale, self.params.clone(), self.shared.clone(), context, &self.slot))
+            }
             // Elsewhere no editor opens yet.
             _ => {
                 let _ = (context, scale);
@@ -782,14 +788,14 @@ mod win32 {
     }
 }
 
-#[cfg(target_os = "linux")]
-mod x11 {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod gui {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     use nih_plug::prelude::GuiContext;
     use os_hostlink::{Cmd, PageIcon, Peer};
-    use os_plugkit::x11::{self as px, Button, Input, Window};
+    use os_plugkit::gui::{self as px, Button, Input, Window};
     use os_theme::Palette;
     use os_ui::Canvas;
 
@@ -821,12 +827,12 @@ mod x11 {
         last_page: usize,
     }
 
-    pub fn open(parent: u32, scale: f32, params: Arc<Osc3Params>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Option<px::EditorThread> {
+    pub fn open(parent: px::Parent, scale: f32, params: Arc<Osc3Params>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Option<px::EditorThread> {
         let scale = if scale > 0.0 { scale } else { 1.0 };
         let px = move |v: u32| (v as f32 * scale).round() as u32;
         // Two pages (oscillators, envelopes); joined, the editor is what lies below the strip row.
         let wake = slot.clone();
-        let link = Peer::register(u64::from(parent), vec![PageIcon::Plugin, PageIcon::Envelope], (view::EDITOR_W, view::HOSTED_EDITOR_H), move || px::notify(&wake));
+        let link = Peer::register(parent as u64, vec![PageIcon::Plugin, PageIcon::Envelope], (view::EDITOR_W, view::HOSTED_EDITOR_H), move || px::notify(&wake));
         let peer = link.clone();
         let thread = px::spawn(parent, (px(view::EDITOR_W), px(view::EDITOR_H)), slot, move |win| {
             let full = (px(view::W), px(view::H));
@@ -909,7 +915,7 @@ mod x11 {
                         let acts = self.logic.wheel(x, y, notches, self.mods());
                         self.act(acts);
                     }
-                    Input::Key { .. } => {}
+                    Input::Key { .. } | Input::Drop { .. } => {}
                 }
                 if self.dirty && self.win.idle() {
                     self.paint();

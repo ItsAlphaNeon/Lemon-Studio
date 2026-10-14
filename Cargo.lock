@@ -451,6 +451,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "bundle-app"
+version = "0.0.1"
+
+[[package]]
 name = "bundle-plugins"
 version = "0.0.1"
 
@@ -2080,7 +2084,9 @@ dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
  "objc2 0.6.5",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
 ]
 
 [[package]]
@@ -2189,6 +2195,7 @@ checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
 dependencies = [
  "bitflags 2.13.2",
  "dispatch2",
+ "libc",
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-io-surface",
@@ -2307,6 +2314,7 @@ dependencies = [
  "bitflags 2.13.2",
  "objc2 0.6.5",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
 ]
 
@@ -2404,12 +2412,20 @@ dependencies = [
 name = "os-app"
 version = "0.0.1"
 dependencies = [
+ "block2 0.6.2",
  "chrono",
  "cpal",
  "lemon-3x-osc",
  "lemon-parametric-eq-2",
  "lemon-sampler",
+ "libc",
  "midir",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "os-clap",
  "os-dsp",
  "os-engine",
@@ -2532,8 +2548,15 @@ dependencies = [
 name = "os-plugkit"
 version = "0.0.1"
 dependencies = [
+ "block2 0.6.2",
  "libc",
  "nih_plug",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "os-paths",
  "os-theme",
  "os-ui",

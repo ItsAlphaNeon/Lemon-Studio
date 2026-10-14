@@ -1,6 +1,7 @@
-//! The plugin editor: a child of the host's window (Win32, or X11 on Linux) that paints `view` with the os-ui canvas,
-//! and the editor logic (platform independent): token / fader / knob drags with the cursor held in place, wheel and reset gestures,
-//! mute / solo, A/B compare, the options and menus. Edits show and sound at once (`os_plugkit::vals`).
+//! The plugin editor: a child of the host's window (Win32, X11 on Linux, an NSView on macOS) that paints `view` with
+//! the os-ui canvas, and the editor logic (platform independent): token / fader / knob drags with the cursor held in
+//! place, wheel and reset gestures, mute / solo, A/B compare, the options and menus. Edits show and sound at once
+//! (`os_plugkit::vals`).
 //!
 // spec: plugins/lemon-parametric-eq-2.md (§5 hints, §6 menus, §7 interaction), plugins/host-link.md
 
@@ -29,9 +30,9 @@ pub struct EqEditor {
     /// The open editor window (0 = closed): parameter changes post a repaint to it.
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Arc<AtomicIsize>,
-    /// Linux: the open editor's thread waker, for the same.
-    #[cfg(target_os = "linux")]
-    slot: os_plugkit::x11::Slot,
+    /// Linux and macOS: the open editor's thread waker, for the same.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    slot: os_plugkit::gui::Slot,
 }
 
 impl EqEditor {
@@ -41,7 +42,7 @@ impl EqEditor {
             shared,
             scale: AtomicU32::new(1f32.to_bits()),
             hwnd: Arc::new(AtomicIsize::new(0)),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             slot: Default::default(),
         }
     }
@@ -49,8 +50,8 @@ impl EqEditor {
     fn notify(&self) {
         #[cfg(windows)]
         win32::post_changed(self.hwnd.load(Ordering::Acquire));
-        #[cfg(target_os = "linux")]
-        os_plugkit::x11::notify(&self.slot);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        os_plugkit::gui::notify(&self.slot);
     }
 }
 
@@ -63,7 +64,13 @@ impl Editor for EqEditor {
                 Box::new(win32::open(hwnd, scale, self.params.clone(), self.shared.clone(), context, self.hwnd.clone()))
             }
             #[cfg(target_os = "linux")]
-            ParentWindowHandle::X11Window(window) => Box::new(x11::open(window, scale, self.params.clone(), self.shared.clone(), context, &self.slot)),
+            ParentWindowHandle::X11Window(window) => Box::new(gui::open(window, scale, self.params.clone(), self.shared.clone(), context, &self.slot)),
+            // macOS hosts set no scale (sizes are points): the editor paints at its window's backing scale.
+            #[cfg(target_os = "macos")]
+            ParentWindowHandle::AppKitNsView(view) => {
+                let scale = os_plugkit::gui::backing_scale(view as usize);
+                Box::new(gui::open(view as usize, scale, self.params.clone(), self.shared.clone(), context, &self.slot))
+            }
             // Elsewhere no editor opens yet.
             _ => {
                 let _ = (context, scale);
@@ -1084,14 +1091,14 @@ mod win32 {
     }
 }
 
-#[cfg(target_os = "linux")]
-mod x11 {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod gui {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     use nih_plug::prelude::GuiContext;
     use os_hostlink::{Cmd, PageIcon, Peer};
-    use os_plugkit::x11::{self as px, Button, Input, Window};
+    use os_plugkit::gui::{self as px, Button, Input, Window};
     use os_theme::Palette;
     use os_ui::Canvas;
 
@@ -1140,13 +1147,13 @@ mod x11 {
         }
     }
 
-    pub fn open(parent: u32, scale: f32, params: Arc<EqParams>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Handle {
+    pub fn open(parent: px::Parent, scale: f32, params: Arc<EqParams>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Handle {
         let scale = if scale > 0.0 { scale } else { 1.0 };
         let size = ((view::W as f32 * scale).round() as u32, (view::H as f32 * scale).round() as u32);
         let sh = shared.clone();
         // One page; joined, the editor keeps its size (it has no strip row of its own).
         let wake = slot.clone();
-        let link = Peer::register(u64::from(parent), vec![PageIcon::Plugin], (view::W, view::H), move || px::notify(&wake));
+        let link = Peer::register(parent as u64, vec![PageIcon::Plugin], (view::W, view::H), move || px::notify(&wake));
         let peer = link.clone();
         let thread = px::spawn(parent, size, slot, move |win| {
             let Ok(canvas) = Canvas::new(size.0, size.1, scale) else { return };
@@ -1221,7 +1228,7 @@ mod x11 {
                         let acts = self.logic.wheel(x / self.scale, y / self.scale, notches, self.mods());
                         self.act(acts);
                     }
-                    Input::Key { .. } => {}
+                    Input::Key { .. } | Input::Drop { .. } => {}
                 }
                 if self.dirty && self.win.idle() {
                     self.paint();

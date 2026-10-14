@@ -667,7 +667,16 @@ fn raise_priority() {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS: the user-interactive class keeps the feeder on the performance cores.
+#[cfg(target_os = "macos")]
+fn raise_priority() {
+    // SAFETY: changes the calling thread's own QoS class.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn raise_priority() {}
 
 fn attach(e: &mut Engine, inst: &Instruments) {

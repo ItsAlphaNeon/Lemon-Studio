@@ -252,7 +252,29 @@ fn handles_threads() -> (u32, u32) {
     (fds, threads)
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+/// Open file descriptors and threads.
+#[cfg(target_os = "macos")]
+fn handles_threads() -> (u32, u32) {
+    let pid = std::process::id() as libc::c_int;
+    // SAFETY: with a null buffer `proc_pidinfo` only reports the bytes the descriptor list needs.
+    let fd_bytes = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    let fds = (fd_bytes.max(0) as usize / std::mem::size_of::<libc::proc_fdinfo>()) as u32;
+    (fds, task_info().map_or(0, |t| t.pti_threadnum as u32))
+}
+
+/// The task's counters (threads, resident memory).
+#[cfg(target_os = "macos")]
+fn task_info() -> Option<libc::proc_taskinfo> {
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    // SAFETY: a plain query on our own process into a struct of the size we pass.
+    unsafe {
+        let mut t: libc::proc_taskinfo = std::mem::zeroed();
+        let got = libc::proc_pidinfo(std::process::id() as libc::c_int, libc::PROC_PIDTASKINFO, 0, (&raw mut t).cast(), size);
+        (got == size).then_some(t)
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn handles_threads() -> (u32, u32) {
     (0, 0)
 }
@@ -278,7 +300,13 @@ pub fn memory_mb() -> Option<u64> {
     Some(pages * 4096 >> 20)
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+/// Memory the program uses (resident size), MB.
+#[cfg(target_os = "macos")]
+pub fn memory_mb() -> Option<u64> {
+    task_info().map(|t| t.pti_resident_size >> 20)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn memory_mb() -> Option<u64> {
     None
 }
@@ -303,7 +331,7 @@ mod tests {
         assert_eq!(c.history.len(), HISTORY);
         assert!(c.read(None, 0, 0, Some(100), 1, None), "a dropout shows");
         assert!(c.hint().contains("1 dropout") && c.hint().contains("100 MB") && c.hint().contains("0 voices"));
-        assert!(memory_mb().is_some_and(|m| m > 0) || cfg!(not(any(windows, target_os = "linux"))));
+        assert!(memory_mb().is_some_and(|m| m > 0) || cfg!(not(any(windows, target_os = "linux", target_os = "macos"))));
     }
 
     /// Refresh rates, the FPS view and Misc (spec: ui/main-window.md §13).
@@ -329,7 +357,7 @@ mod tests {
         c.set(CpuCmd::Misc);
         c.update(t0 + Duration::from_millis(1000), None, 3, 0);
         let m = c.now.misc.expect("Misc readings");
-        if cfg!(any(windows, target_os = "linux")) {
+        if cfg!(any(windows, target_os = "linux", target_os = "macos")) {
             assert!(m.handles > 0 && m.threads > 0, "{m:?}");
         }
         assert!(c.hint().contains("threads"));

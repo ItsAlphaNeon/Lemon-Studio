@@ -573,6 +573,20 @@ impl Plugins {
         sampler && self.load_sample(row, path)
     }
 
+    /// The hosted row whose plugin window is at screen point (x, y).
+    #[cfg(target_os = "macos")]
+    pub fn row_at_screen(&self, x: i32, y: i32) -> Option<usize> {
+        let frame = crate::plugin_window::row_window_at(x, y)?;
+        self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|f| f.hwnd() == frame)).map(|(&r, _)| r)
+    }
+
+    /// Drops file `path` on row `row`'s plugin window: macOS plugins take files only from a drag session of their own,
+    /// so only Lemon Sampler rows load it (through their state). Returns whether the plugin got the file.
+    #[cfg(target_os = "macos")]
+    pub fn drop_file(&mut self, row: usize, _x: i32, _y: i32, path: &str, sampler: bool) -> bool {
+        sampler && self.load_sample(row, path)
+    }
+
     /// Closes every window and drops every instance (a new or opened project).
     pub fn clear(&mut self) {
         #[cfg(plugin_windows)]
@@ -665,15 +679,15 @@ impl Plugins {
             return;
         }
         self.scale = scale;
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         for row in self.docked() {
             self.rescale_window(row, scale);
         }
     }
 
     /// Redraws row `row`'s window at `scale`: the frame resizes and the editor is reopened, since plugins take their
-    /// scale when the editor opens. The plugin's page is kept.
-    #[cfg(windows)]
+    /// scale when the editor opens (on macOS its sizes are measured at it). The plugin's page is kept.
+    #[cfg(any(windows, target_os = "macos"))]
     fn rescale_window(&mut self, row: usize, scale: f32) {
         let Some(Hosted { plugin, window: Some(w), link, .. }) = self.hosted.get_mut(&row) else { return };
         if w.scale() == scale {
@@ -778,7 +792,7 @@ impl Plugins {
         }
         let mut out = Vec::new();
         let mut close: Vec<usize> = Vec::new();
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         let mut rescale: Vec<(usize, f32)> = Vec::new();
         // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
         #[cfg(plugin_windows)]
@@ -843,9 +857,9 @@ impl Plugins {
                         FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
                         FrameEvent::NotAvailable(name) => Request::NotAvailable(name),
                         FrameEvent::Dpi(k) => {
-                            #[cfg(windows)]
+                            #[cfg(any(windows, target_os = "macos"))]
                             rescale.push((row, k));
-                            #[cfg(not(windows))]
+                            #[cfg(not(any(windows, target_os = "macos")))]
                             let _ = k;
                             continue;
                         }
@@ -857,7 +871,7 @@ impl Plugins {
         for row in close {
             self.close_window(row);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         for (row, k) in rescale {
             self.rescale_window(row, k);
         }
