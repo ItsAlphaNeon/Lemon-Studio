@@ -9769,4 +9769,245 @@ mod tests {
         finish(&mut app);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// VST2 plugins through the app's own paths, with real plugins: `OS_VST2_DIR` is a folder of the DPF-Plugins
+    /// release (Kars and 3BandEQ, each also there as VST3 and CLAP), `OS_VST2_DIR32` (optional) the release's 32-bit
+    /// folder, `OS_SHOT_DIR` (optional) gets pictures of Settings > Plugins.
+    /// - Settings > Plugins (spec: ui/plugin-manager.md §2, §4): both folders added with Add folder... and scanned, the
+    ///   32-bit VST2 plugins listed as failed with that reason, VST2 picked as the preferred format.
+    /// - Kars added from the rack's Add one ▸ menu, 3BandEQ from its insert's slot menu, an automation clip made on the
+    ///   EQ's master gain and drawn rising: a song export of eight C5 notes has each note at its beat, at its pitch and
+    ///   louder than the one before. Played live (with an audio device), then stopped: silent at once.
+    /// - Saved, reopened (both found as VST2 with their state, the clip kept) and exported again; then opened with only
+    ///   the VST3 and CLAP copies listed, to show what same-name substitution does with a VST2 state.
+    ///
+    /// Loads the plugins in this process, so ignored:
+    /// `OS_VST2_DIR=<dir> cargo test -p os-app --bin lemonstudio vst2_plugins_through_the_app -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn vst2_plugins_through_the_app() {
+        use crate::playlist::{self as pl, Cmd};
+        use crate::plugin_menu::PlugCmd;
+        use crate::plugins::fx_key;
+        use crate::views::settings::{Plug, SAct, PLUGINS};
+        use os_host::Format;
+        use std::time::Duration;
+        use winit::keyboard::{Key, NamedKey};
+        let Some(dir) = std::env::var_os("OS_VST2_DIR").map(PathBuf::from) else { return };
+        let dir32 = std::env::var_os("OS_VST2_DIR32").map(PathBuf::from);
+        let shots = std::env::var_os("OS_SHOT_DIR").map(PathBuf::from);
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.plugins = crate::plugins::Plugins::builtins();
+        let rate = crate::transport::Transport::device_rate().unwrap_or(48000);
+        a.state.plugdb.rebuild(&a.plugins);
+        // Only the added folders are scanned: the standard ones hold the user's own plugins.
+        a.state.plugdb.prefs.standard_off = crate::plugin_db::search_dirs(&a.state.plugdb.prefs).iter().map(|d| d.path.display().to_string()).collect();
+        a.open_settings(PLUGINS);
+        frame(&mut a, &mut c, None);
+        let finish = |a: &mut App| {
+            let t0 = std::time::Instant::now();
+            while a.sweep.is_some() && t0.elapsed() < std::time::Duration::from_secs(120) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                a.scan_tick();
+            }
+            assert!(a.sweep.is_none(), "the scan ends");
+        };
+        for d in std::iter::once(&dir).chain(&dir32) {
+            crate::dialog::fake::answer(Some(d.clone()));
+            let r = hit_rect(&a, &Action::Settings(SAct::Button("Add folder...")));
+            click(&mut a, &mut c, r);
+            finish(&mut a);
+        }
+        println!("scan: {:?}", a.state.message);
+        let r = hit_rect(&a, &Action::Settings(SAct::Plug(Plug::Prefer(crate::plugin_db::Prefer::Vst2))));
+        click(&mut a, &mut c, r);
+        assert_eq!(a.state.plugdb.prefs.prefer, crate::plugin_db::Prefer::Vst2);
+        let vst2: Vec<&crate::plugin_db::TableRow> = a.state.plugdb.all_rows.iter().filter(|r| r.format == "VST2" || r.file.ends_with("-vst.dll")).collect();
+        for r in &vst2 {
+            println!("  {:22} {:5} {:10} {:8} {:30} {}", r.name, r.format, r.kind, r.status, r.file, r.note);
+        }
+        let ok = |name: &str| vst2.iter().any(|r| r.name.replace(' ', "") == name && r.format == "VST2" && r.status != "error");
+        assert!(ok("Kars") && ok("3BandEQ"), "Kars and 3BandEQ listed as VST2");
+        if dir32.is_some() {
+            assert!(vst2.iter().any(|r| r.status == "error" && r.note.contains("32-bit")), "32-bit plugins listed with the reason");
+        }
+        if let Some(d) = &shots {
+            frame(&mut a, &mut c, None);
+            c.pixmap.save_png(d.join("vst2_settings_plugins.png")).unwrap();
+            let r = hit_rect(&a, &Action::Settings(SAct::Plug(Plug::Find)));
+            click(&mut a, &mut c, r);
+            for ch in "-vst".chars() {
+                a.key(&Key::Character(ch.to_string().into()), false, false);
+            }
+            frame(&mut a, &mut c, None);
+            c.pixmap.save_png(d.join("vst2_settings_plugins_vst.png")).unwrap();
+            a.key(&Key::Named(NamedKey::Escape), false, false);
+        }
+        a.state.settings.open = false;
+
+        // Kars from the rack's Add one ▸ menu: with VST2 preferred, its one entry is the VST2 copy.
+        let add = crate::rack::add_one_items(&a.state).into_iter().find(|it| it.label == "Kars").expect("Add one lists Kars");
+        let row = a.state.project.channels.len();
+        pl::run(&mut a, add.cmd);
+        for _ in 0..200 {
+            a.tick();
+            if a.state.pending_plugin.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(a.state.hosted_rows.contains(&row), "Kars hosted: {:?}", a.state.message);
+        assert_eq!(a.plugins.descriptor(row).map(|d| d.format), Some(Format::Vst2));
+        // 3BandEQ in the first slot of Kars' insert, from the slot's menu.
+        let track = a.state.project.channels[row].mixer_track;
+        crate::mixer::select(&mut a.state, track, false);
+        let eq = a.plugins.effects.iter().position(|e| e.desc.format == Format::Vst2 && e.desc.name.replace(' ', "") == "3BandEQ").expect("3BandEQ");
+        let menu = crate::mixer::effect_menu(&a.state, 0, 0.0, 0.0);
+        let cmd = Cmd::Plugin(PlugCmd::Effect { index: eq, slot: Some(0) });
+        assert!(menu.items.iter().any(|it| it.cmd == cmd), "the slot menu lists the VST2 copy");
+        pl::run(&mut a, cmd);
+        let key = fx_key(track, 0);
+        for _ in 0..200 {
+            a.tick();
+            if a.plugins.hosted.contains_key(&key) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(a.plugins.descriptor(key).map(|d| d.format), Some(Format::Vst2), "the EQ is hosted: {:?}", a.state.message);
+        // Eight C5 notes, a beat each, on the pattern placed at the song's start.
+        let ch = a.state.project.channels[row].index;
+        let ppq = u32::from(a.state.project.ppq);
+        a.state.project.patterns[0].notes = (0..8).map(|i| os_model::Note { length: ppq, key: 60, ..os_model::Note::step(ch, i * ppq) }).collect();
+        a.state.playlist.reset();
+        pl::arr_mut(&mut a.state).clips.push(os_model::Clip::new(0, 8 * ppq, 0, os_model::ClipSource::Pattern(1)));
+        // The EQ's master gain automated from its lowest to its highest over the eight beats.
+        a.params_tick();
+        let master = a.state.params.lists[&key].params.iter().position(|p| p.name == "Master").expect("a Master parameter");
+        println!("automate: {:?}", a.params_automate(key, master));
+        let auto = a.state.project.channels.last().unwrap().index;
+        {
+            let x = a.state.project.automation_mut(auto).unwrap();
+            assert_eq!(x.points.len(), 2);
+            x.points[0].value = 0.0;
+            x.points[1].value = 1.0;
+        }
+        let tempo = f64::from(a.state.tempo);
+        let export = |a: &mut App, tag: &str| -> Vec<f32> {
+            let path = std::env::temp_dir().join(format!("lemon-vst2-{tag}-{}.wav", std::process::id()));
+            a.transport.export(&a.state.project, os_engine::PlayMode::Song, rate, path.clone());
+            let t0 = std::time::Instant::now();
+            let _secs = loop {
+                match a.transport.export_status() {
+                    crate::transport::Export::Done(r) => break r.expect("export"),
+                    _ if t0.elapsed() > Duration::from_secs(60) => panic!("export did not finish"),
+                    _ => std::thread::sleep(Duration::from_millis(10)),
+                }
+            };
+            let bytes = std::fs::read(&path).expect("file written");
+            let _ = std::fs::remove_file(&path);
+            bytes[44..].chunks_exact(8).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
+        };
+        // Per note: (frames from its beat to where it first reaches half its peak, peak, pitch in Hz by autocorrelation).
+        let beat = f64::from(rate) * 60.0 / tempo;
+        let notes = |left: &[f32]| -> Vec<(i64, f32, f64)> {
+            (0..8)
+                .map(|i| {
+                    let s = (i as f64 * beat).round() as usize;
+                    let w = &left[s..(s + beat as usize).min(left.len())];
+                    let peak = w.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                    let from = s.saturating_sub(512);
+                    let onset = left[from..].iter().position(|v| v.abs() > 0.5 * peak).map_or(i64::MAX, |k| (from + k) as i64 - s as i64);
+                    let x = &w[2400..2400 + 4096];
+                    let corr = |lag: usize| x.iter().zip(&x[lag..]).map(|(p, q)| p * q).sum::<f32>();
+                    let best = (80..480).map(corr).fold(f32::MIN, f32::max);
+                    let lag = (80..480).find(|&l| corr(l) > 0.9 * best && corr(l) >= corr(l - 1) && corr(l) >= corr(l + 1)).unwrap_or(0);
+                    (onset, peak, f64::from(rate) / lag.max(1) as f64)
+                })
+                .collect()
+        };
+        let check = |label: &str, n: &[(i64, f32, f64)]| {
+            println!("{label}: {:?}", n.iter().map(|(o, p, f)| format!("{o:+} fr, {p:.3}, {f:.0} Hz")).collect::<Vec<_>>());
+            for (i, &(onset, peak, hz)) in n.iter().enumerate() {
+                assert!(onset.abs() <= 64, "{label}: note {i} starts {onset} frames from its beat");
+                assert!((hz / 261.63).log2().abs() < 1.0 / 12.0, "{label}: note {i} at {hz:.0} Hz, not C5");
+                if i > 0 {
+                    assert!(peak > n[i - 1].1 * 1.2, "{label}: note {i} is not louder than the one before");
+                }
+            }
+        };
+        a.tick();
+        let first = notes(&export(&mut a, "first"));
+        check("export", &first);
+
+        // Live: the pattern plays on the device, Stop silences it.
+        if crate::transport::Transport::device_rate().is_some() {
+            a.transport.take_peaks();
+            a.transport.play(&a.state.project, os_engine::PlayMode::Pattern(1), 0.0);
+            std::thread::sleep(Duration::from_millis(1200));
+            let heard = a.transport.take_peaks();
+            let tick = a.transport.tick();
+            a.transport.stop();
+            std::thread::sleep(Duration::from_millis(100));
+            a.transport.take_peaks();
+            std::thread::sleep(Duration::from_millis(200));
+            let after = a.transport.take_peaks();
+            println!("live: peaks {heard:?} while playing (at tick {tick:.0}), {after:?} from 100 ms after Stop");
+            assert!(heard.0 > 0.01, "heard while playing");
+            assert_eq!(after, (0.0, 0.0), "silent after Stop");
+        }
+
+        // Saved: both plugins stored as wrapped VST2 plugins with their state, the clip aimed at the EQ.
+        let path = std::env::temp_dir().join(format!("lemon-vst2-{}.flp", std::process::id()));
+        let (ch_state, fx_state) = (a.plugins.state(row).unwrap(), a.plugins.state(key).unwrap());
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let r = crate::project_plugins::wrapped_channel(&saved.channels[row]).expect("a wrapped channel");
+        assert_eq!((r.format.as_str(), r.id.as_str(), r.name.as_str()), ("vst2", a.plugins.descriptor(row).unwrap().id.as_str(), "Kars"));
+        assert_eq!(r.state, ch_state);
+        let slot = saved.mixer.iter().find(|m| m.index == track).and_then(|m| m.slots[0].as_ref());
+        let s = slot.and_then(crate::project_plugins::wrapped_slot).expect("a wrapped slot");
+        assert_eq!((s.format.as_str(), s.state == fx_state), ("vst2", true));
+        let target = a.state.project.automations.last().unwrap().target();
+        assert!(saved.automations.iter().any(|x| x.target() == target), "the clip is saved");
+        println!("saved: Kars state {} bytes ({:?}...), 3BandEQ state {} bytes", ch_state.len(), &ch_state[..ch_state.len().min(25)], fx_state.len());
+
+        // Reopened: found as VST2 again, with the saved state, and sounding the same.
+        let lists = |keep: &dyn Fn(Format) -> bool| {
+            let mut p = crate::plugins::Plugins::builtins();
+            p.available = a.plugins.available.iter().filter(|x| keep(x.desc.format)).cloned().collect();
+            p.effects = a.plugins.effects.iter().filter(|x| keep(x.desc.format)).cloned().collect();
+            p
+        };
+        let mut b = App::new(None);
+        b.plugins = lists(&|_| true);
+        b.open(path.clone());
+        b.sync_wrapped();
+        assert!(b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
+        assert_eq!(b.plugins.descriptor(row).map(|d| d.format), Some(Format::Vst2));
+        assert_eq!(b.plugins.descriptor(key).map(|d| d.format), Some(Format::Vst2));
+        assert_eq!(b.plugins.state(row).as_deref(), Some(&ch_state[..]));
+        assert_eq!(b.plugins.state(key).as_deref(), Some(&fx_state[..]));
+        b.tick();
+        check("reopened", &notes(&export(&mut b, "reopened")));
+
+        // Same-name substitution: with no VST2 copy listed, the project's VST2 plugins are looked for by name.
+        let mut v = App::new(None);
+        v.plugins = lists(&|f| f != Format::Vst2);
+        v.open(path.clone());
+        v.sync_wrapped();
+        let _ = std::fs::remove_file(&path);
+        for (what, k, state) in [("Kars", row, &ch_state), ("3BandEQ", key, &fx_state)] {
+            let d = v.plugins.descriptor(k);
+            let took = v.plugins.hosted.get(&k).map(|h| h.plugin.lock().unwrap().load_state(state));
+            println!("substitution: {what} hosted as {:?}, takes the VST2 state: {took:?}", d.map(|d| d.format));
+        }
+        println!("substitution message: {:?}", v.state.message);
+        v.tick();
+        let n = notes(&export(&mut v, "substituted"));
+        println!("substituted: {:?}", n.iter().map(|(o, p, f)| format!("{o:+} fr, {p:.3}, {f:.0} Hz")).collect::<Vec<_>>());
+    }
 }
