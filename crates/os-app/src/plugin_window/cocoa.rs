@@ -220,6 +220,17 @@ define_class!(
             }
         }
 
+        /// The other buttons' releases and middle drags mean nothing to the frame; a docked one keeps them from the main
+        /// window behind it (it would get releases without their presses).
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, _e: &NSEvent) {}
+
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, _e: &NSEvent) {}
+
+        #[unsafe(method(otherMouseDragged:))]
+        fn other_mouse_dragged(&self, _e: &NSEvent) {}
+
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, e: &NSEvent) {
             if let Some(f) = self.ivars().upgrade() {
@@ -298,6 +309,14 @@ define_class!(
         fn can_become_main(&self) -> bool {
             false
         }
+
+        /// Keys that no view of the panel takes end here (the typing keyboard has them already, see `monitor`), not in
+        /// AppKit's beep.
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, _e: &NSEvent) {}
+
+        #[unsafe(method(keyUp:))]
+        fn key_up(&self, _e: &NSEvent) {}
     }
 );
 
@@ -1062,7 +1081,9 @@ pub fn lift_show(main: isize, _frame: isize, origin: (i32, i32), size: (i32, i32
     let at = owner_to_screen(owner, NSPoint::new(f64::from(origin.0) / k, f64::from(origin.1) / k));
     let (w, h) = (f64::from(size.0) / k, f64::from(size.1) / k);
     let img = image(pixels, size.0 as usize, size.1 as usize);
-    LIFT.with(|l| {
+    // The panel and view are taken out before AppKit is called: showing the panel draws it (`update_layer`), which reads
+    // `LIFT` again.
+    let shown = LIFT.with(|l| {
         let mut l = l.borrow_mut();
         if l.is_none() {
             let style = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
@@ -1079,14 +1100,16 @@ pub fn lift_show(main: isize, _frame: isize, origin: (i32, i32), size: (i32, i32
             panel.setContentView(Some(&view));
             *l = Some(Lift { panel, view, origin, scale: k, image: None });
         }
-        let Some(lift) = l.as_mut() else { return };
+        let lift = l.as_mut()?;
         lift.origin = origin;
         lift.scale = k;
         lift.image = img;
-        lift.panel.setFrame_display(rect(at.x, at.y - h, w, h), false);
-        lift.view.setNeedsDisplay(true);
-        lift.panel.orderFront(None);
+        Some((lift.panel.clone(), lift.view.clone()))
     });
+    let Some((panel, view)) = shown else { return };
+    panel.setFrame_display(rect(at.x, at.y - h, w, h), false);
+    view.setNeedsDisplay(true);
+    panel.orderFront(None);
 }
 
 /// The lifted popup closed.

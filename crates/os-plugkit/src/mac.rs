@@ -29,7 +29,7 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{kCFRunLoopCommonModes, CFRetained, CFRunLoop};
 use objc2_core_graphics::{
-    kCGColorSpaceSRGB, CGAssociateMouseAndMouseCursorPosition, CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGDisplayBounds, CGImage,
+    CGAssociateMouseAndMouseCursorPosition, CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGDisplayBounds, CGImage,
     CGImageAlphaInfo, CGImageByteOrderInfo, CGMainDisplayID,
 };
 use objc2_foundation::{NSArray, NSData, NSPoint, NSRect, NSSize, NSString, NSURL};
@@ -339,7 +339,7 @@ fn view_class() -> &'static AnyClass {
             .expect("a free class name");
         // SAFETY: each function has the selector's signature.
         unsafe {
-            for s in [sel!(isFlipped), sel!(isOpaque), sel!(wantsUpdateLayer)] {
+            for s in [sel!(isFlipped), sel!(isOpaque), sel!(wantsUpdateLayer), sel!(acceptsFirstResponder)] {
                 b.add_method(s, yes as extern "C-unwind" fn(_, _) -> _);
             }
             b.add_method(sel!(acceptsFirstMouse:), first_mouse as extern "C-unwind" fn(_, _, _) -> _);
@@ -542,7 +542,8 @@ fn place(v: &NSView) {
     v.setFrameOrigin(NSPoint::new(0.0, y));
 }
 
-/// A frame as an image: XRGB rows of `w` (sRGB, as painted).
+/// A frame as an image: XRGB rows of `w`, in the display's colour space as Lemon Studio's own windows are (softbuffer's),
+/// so an editor's colours match the frame around it.
 fn image(px: &[u32], w: u32, h: u32) -> Option<CFRetained<CGImage>> {
     let n = w as usize * h as usize;
     if n == 0 || px.len() < n {
@@ -561,8 +562,7 @@ fn image(px: &[u32], w: u32, h: u32) -> Option<CFRetained<CGImage>> {
         drop(unsafe { Box::from_raw(info) });
         return None;
     };
-    // SAFETY: a static colour space name.
-    let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }));
+    let space = CGColorSpace::new_device_rgb();
     // XRGB words in memory order: 32-bit little endian, the top byte skipped.
     let bits = CGBitmapInfo(CGImageAlphaInfo::NoneSkipFirst.0 | CGImageByteOrderInfo::Order32Little.0);
     // SAFETY: the provider holds `w * h` 32-bit pixels; no decode array.
@@ -809,7 +809,12 @@ impl Window {
     fn call<R: Send + 'static>(&self, f: impl FnOnce(MainThreadMarker) -> R + Send + 'static) -> Option<R> {
         let done = Arc::new((Mutex::new(None), Condvar::new()));
         let d = done.clone();
+        let shared = self.shared.clone();
         on_main(move |mtm| {
+            // Closed before the main thread got to it: nothing is shown for an editor that is gone (a file dialog).
+            if shared.quitting() {
+                return;
+            }
             let r = f(mtm);
             if let Ok(mut s) = d.0.lock() {
                 *s = Some(r);
