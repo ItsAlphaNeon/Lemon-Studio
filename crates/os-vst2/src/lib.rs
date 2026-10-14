@@ -824,7 +824,8 @@ impl Plugin {
         }
     }
 
-    /// The instance's state ([`state`]): the plugin's chunk, or its program and parameter values.
+    /// The instance's state ([`state`]): the plugin's chunk, or its parameter values (the program is not kept: FL
+    /// Studio's layout for it is not known).
     pub fn save_state(&self) -> Option<Vec<u8>> {
         let saved = if self.inst.flags() & flags::CHUNKS != 0 {
             let mut p: *mut c_void = std::ptr::null_mut();
@@ -835,13 +836,12 @@ impl Plugin {
             // SAFETY: the plugin's chunk holds `size` bytes until its next call.
             Saved::Chunk(unsafe { std::slice::from_raw_parts(p as *const u8, size as usize) }.to_vec())
         } else {
-            let program = self.inst.dispatch(op::GET_PROGRAM, 0, 0, std::ptr::null_mut(), 0.0) as i32;
-            Saved::Params { program, values: (0..self.inst.num_params()).map(|i| self.inst.get(i)).collect() }
+            Saved::Params { program: None, values: (0..self.inst.num_params()).map(|i| self.inst.get(i)).collect() }
         };
         Some(saved.to_bytes())
     }
 
-    /// Restores a `save_state` blob (also the state FL Studio keeps for a chunk plugin).
+    /// Restores a `save_state` blob, one FL Studio saved, or one Lemon Studio's first saves wrote ([`state`]).
     pub fn load_state(&mut self, data: &[u8]) -> bool {
         match Saved::parse(data, self.inst.flags() & flags::CHUNKS != 0) {
             Some(Saved::Chunk(mut c)) => {
@@ -850,7 +850,7 @@ impl Plugin {
                 true
             }
             Some(Saved::Params { program, values }) => {
-                if (0..self.inst.num_programs()).contains(&program) {
+                if let Some(program) = program.filter(|p| (0..self.inst.num_programs()).contains(p)) {
                     self.inst.dispatch(op::SET_PROGRAM, 0, program as isize, std::ptr::null_mut(), 0.0);
                 }
                 for (i, v) in (0..self.inst.num_params()).zip(values) {
