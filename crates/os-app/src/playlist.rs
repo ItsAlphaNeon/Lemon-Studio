@@ -1041,8 +1041,12 @@ pub fn targets(s: &State) -> Vec<usize> {
     if s.playlist.sel.is_empty() { (0..clips(s).len()).collect() } else { s.playlist.sel.clone() }
 }
 
-/// `idx` plus every clip that shares a group with one of them (grouped clips select and move as one, §3a).
+/// `idx` plus every clip that shares a group with one of them (grouped clips select and move as one, §3a); just `idx`
+/// while Enable groups is off (spec: ui/enable-groups.md §3).
 pub fn with_groups(s: &State, mut idx: Vec<usize>) -> Vec<usize> {
+    if !crate::enable_groups::on() {
+        return idx;
+    }
     let groups: Vec<u16> = idx.iter().filter_map(|&i| clips(s).get(i)).map(Clip::group).filter(|&g| g != 0).collect();
     if groups.is_empty() {
         return idx;

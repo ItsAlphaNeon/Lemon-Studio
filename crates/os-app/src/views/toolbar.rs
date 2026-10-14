@@ -425,7 +425,8 @@ fn row2(ui: &mut Ui, s: &State) {
     }
     ui.veil(Rect::span(383.0, 574.0, 50.0, 74.0), t.toolbar);
 
-    // Mode buttons (spec: ui/main-window.md §3). Typing keyboard and auto scrolling (spec: ui/auto-scrolling.md) work.
+    // Mode buttons (spec: ui/main-window.md §3). Typing keyboard, auto scrolling (spec: ui/auto-scrolling.md) and enable
+    // groups (spec: ui/enable-groups.md) work.
     for (i, (icon, hint)) in [
         (Icon::TypingKeyboard, "Typing keyboard to piano keyboard (Ctrl+T)"),
         (Icon::AutoScroll, "Auto scrolling - right-click for continuous scrolling"),
@@ -439,6 +440,7 @@ fn row2(ui: &mut Ui, s: &State) {
         let (on, action) = match i {
             0 => (s.toggles.contains(&"typing"), Action::Typing),
             1 => (crate::autoscroll::on(), Action::AutoScroll),
+            3 => (crate::enable_groups::on(), Action::EnableGroups),
             _ => (false, Action::Placeholder(hint)),
         };
         tool_button(ui, btn(580.0 + 33.0 * i as f32, 45.0), icon, on, action, hint);

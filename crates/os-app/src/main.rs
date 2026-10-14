@@ -14,6 +14,7 @@ mod render_check;
 mod browser;
 mod cpu;
 mod dialog;
+mod enable_groups;
 mod icons;
 mod knobs;
 mod loading;

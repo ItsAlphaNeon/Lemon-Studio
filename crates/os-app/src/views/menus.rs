@@ -81,6 +81,8 @@ pub const OPT_THEME: usize = 5;
 pub const METRONOME_LABEL: &str = "Metronome";
 /// OPTIONS > Auto scrolling (spec: ui/auto-scrolling.md §1).
 pub const AUTOSCROLL_LABEL: &str = "Auto scrolling";
+/// OPTIONS > Enable groups (spec: ui/enable-groups.md §1).
+pub const GROUPS_LABEL: &str = "Enable groups";
 /// Index of the OPTIONS menu.
 pub const OPTIONS_MENU: usize = 5;
 /// OPTIONS > Project info (the toolbar's info button).
@@ -233,7 +235,7 @@ const OPTIONS: &[Item] = &[
     it("Step edit", "Ctrl+E").tick(),
     it("Loop record", "").tick(),
     it(AUTOSCROLL_LABEL, "").on().tick(),
-    it("Enable groups", "Shift+Alt+G").tick(),
+    it(GROUPS_LABEL, "Shift+Alt+G").on().tick(),
     it("Multilink to controllers", "Ctrl+J").tick(),
 ];
 
@@ -371,6 +373,7 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
         (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
         (Mark::Check(_), _) if item.label == METRONOME_LABEL => Mark::Check(crate::metronome::on()),
         (Mark::Check(_), _) if item.label == AUTOSCROLL_LABEL => Mark::Check(crate::autoscroll::on()),
+        (Mark::Check(_), _) if item.label == GROUPS_LABEL => Mark::Check(crate::enable_groups::on()),
         (mk, _) => mk,
     }
 }

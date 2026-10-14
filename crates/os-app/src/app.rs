@@ -96,6 +96,8 @@ pub enum Action {
     Metronome,
     /// Auto scrolling switch (toolbar, OPTIONS menu); right-click on the button for continuous scrolling.
     AutoScroll,
+    /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G).
+    EnableGroups,
     /// The toolbar's scope / spectrum panel: click switches the display.
     Monitor,
     /// The toolbar's CPU panel: double-click opens the Plugin performance monitor, right-click its menu.
@@ -4155,6 +4157,15 @@ impl App {
             self.set_design(next, true);
             return;
         }
+        // Shift+Alt+G: Enable groups (spec: ui/enable-groups.md §1), everywhere the main window has the keyboard.
+        if let Key::Character(c) = key
+            && alt
+            && self.shift
+            && !ctrl
+            && c.eq_ignore_ascii_case("g")
+        {
+            return self.toggle_groups();
+        }
         if self.plugin_find_key(key, ctrl) {
             return;
         }
@@ -4300,6 +4311,14 @@ impl App {
         } else {
             s.toggles.push("typing");
         }
+        self.invalidate();
+    }
+
+    /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G): the playlist's clips are deselected, as in FL.
+    pub fn toggle_groups(&mut self) {
+        let on = crate::enable_groups::toggle();
+        self.state.playlist.sel.clear();
+        self.state.message = Some(if on { "Groups enabled" } else { "Groups disabled" }.into());
         self.invalidate();
     }
 
@@ -4723,6 +4742,7 @@ impl App {
             Action::Typing => self.toggle_typing(),
             Action::Metronome => self.toggle_metronome(),
             Action::AutoScroll => self.toggle_autoscroll(),
+            Action::EnableGroups => self.toggle_groups(),
             // spec: ui/main-window.md §13: a double click opens the Plugin performance monitor; one click does nothing.
             Action::CpuPanel => {
                 let now = std::time::Instant::now();
@@ -5300,6 +5320,7 @@ impl App {
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::METRONOME_LABEL) => self.toggle_metronome(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::AUTOSCROLL_LABEL) => self.toggle_autoscroll(),
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::GROUPS_LABEL) => self.toggle_groups(),
             (m, i) if item_at(m, i).is_some_and(|it| crate::params::menu_handles(it.label)) => {
                 let label = item_at(m, i).map_or("", |it| it.label);
                 if let Some(msg) = self.params_menu(label) {
@@ -8621,6 +8642,81 @@ mod tests {
         assert_eq!(arr.clips.len(), pl::clips(&app.state).len());
         assert!(!arr.tracks[0].enabled);
         assert_eq!(back.automation(ch).map(|a| a.points.len()), Some(n + 1));
+    }
+
+    /// Enable groups (spec: ui/enable-groups.md): the toolbar button, OPTIONS > Enable groups and Shift+Alt+G toggle it
+    /// and deselect the clips; while off, a grouped clip selects and moves alone and Shift+G groups only the selection;
+    /// the groups themselves are kept.
+    #[test]
+    fn enable_groups_switch() {
+        use crate::playlist as pl;
+        use winit::keyboard::Key;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.playlist.reset();
+        app.state.playlist.row_h = pl::ROW_H;
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let g = pl::PGeom::new(&app.state, app.pl_grid().expect("playlist grid"));
+        let bar = 4 * u32::from(app.state.project.ppq);
+        let at = |t: u32, track: u16| (g.x_of(t as f32) + 10.0, g.y_of(track) + 30.0);
+        let drag = |app: &mut App, c: &mut Canvas, (x0, y0): (f32, f32), (x1, y1): (f32, f32)| {
+            app.state.playlist.last_clip = None;
+            app.mouse_move(x0, y0);
+            app.mouse_down();
+            for i in 1..=10 {
+                let k = i as f32 / 10.0;
+                app.mouse_move(x0 + (x1 - x0) * k, y0 + (y1 - y0) * k);
+            }
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        let pos = |app: &App, t: u16| pl::clips(&app.state).iter().find(|c| c.track == t).map(|c| (c.position, c.group())).unwrap();
+        // Clips on tracks 0 and 1 grouped; a loose clip on track 2.
+        for t in 0..3 {
+            drag(&mut app, &mut c, at(t as u32 * bar, t), at(t as u32 * bar, t));
+        }
+        app.state.playlist.sel = vec![0, 1];
+        app.shift = true;
+        app.key(&Key::Character("G".into()), false, false);
+        app.shift = false;
+
+        // The toolbar button (lit while on) turns it off and deselects.
+        assert!(crate::enable_groups::on());
+        let r = hit_rect(&app, &Action::EnableGroups);
+        assert_eq!((r.x, r.y), (679.0, 45.0));
+        click(&mut app, &mut c, r);
+        assert!(!crate::enable_groups::on());
+        assert!(app.state.playlist.sel.is_empty(), "toggling deselects, as in FL");
+        // Off: the grouped clip moves alone; the group is kept.
+        drag(&mut app, &mut c, at(0, 0), at(bar, 0));
+        assert_eq!((pos(&app, 0).0, pos(&app, 1).0), (bar, bar), "only the dragged clip moved");
+        assert_eq!(app.state.playlist.sel.len(), 1);
+        assert!(pos(&app, 0).1 != 0 && pos(&app, 0).1 == pos(&app, 1).1);
+        // Off: Shift+G groups just the selection (track 0 and the loose clip), leaving its old mate behind.
+        let i0 = pl::clips(&app.state).iter().position(|c| c.track == 0).unwrap();
+        let i2 = pl::clips(&app.state).iter().position(|c| c.track == 2).unwrap();
+        app.state.playlist.sel = vec![i0, i2];
+        app.shift = true;
+        app.key(&Key::Character("G".into()), false, false);
+        app.shift = false;
+        assert_eq!(pos(&app, 0).1, pos(&app, 2).1);
+        assert_ne!(pos(&app, 0).1, pos(&app, 1).1);
+
+        // Shift+Alt+G and OPTIONS > Enable groups toggle it too; on again, a click selects the whole group.
+        app.shift = true;
+        app.key(&Key::Character("G".into()), false, true);
+        app.shift = false;
+        assert!(crate::enable_groups::on());
+        let opt = (0..60).find(|&i| views::menus::item_at(views::menus::OPTIONS_MENU, i).is_some_and(|it| it.label == "Enable groups")).unwrap();
+        app.menu_item(views::menus::OPTIONS_MENU, opt);
+        assert!(!crate::enable_groups::on());
+        app.menu_item(views::menus::OPTIONS_MENU, opt);
+        assert!(crate::enable_groups::on());
+        drag(&mut app, &mut c, at(2 * bar, 2), at(3 * bar, 2));
+        assert_eq!((pos(&app, 0).0, pos(&app, 2).0), (2 * bar, 3 * bar), "the group moved together");
+        assert_eq!(app.state.playlist.sel.len(), 2);
     }
 
     /// Playlist navigation and editing shortcuts (spec: ui/playlist.md §3, §3a, §4, §5, §6): Alt+wheel = track

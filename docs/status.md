@@ -23,6 +23,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 - Playlist with pattern, audio and automation clips
 - Clip groups, markers and several arrangements
+- Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
 - Auto scrolling (toolbar, OPTIONS menu): while playing, the playlist follows the playhead (the piano roll in
   pattern mode), continuously or a quarter page at a time (right-click on the button)
