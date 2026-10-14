@@ -355,7 +355,11 @@ fn the_host_answers_what_plugins_ask() {
 #[test]
 fn versions_and_kinds() {
     assert_eq!(version_text(0x01_02_03, 1), "1.2.3");
-    assert_eq!(version_text(0, 1100), "1100");
+    // Observed pairs: each DPF plugin's VST 2 vendor version and the version its VST3 copy reports.
+    for (vendor, vst3) in [(256, "0.1.0"), (0x1_0000, "1.0.0"), (0x1_0100, "1.1.0"), (0x3_020A, "3.2.10")] {
+        assert_eq!(version_text(vendor, vendor), vst3);
+    }
+    assert_eq!(version_text(0, 0x100), "0.1.0", "the effect's own field when the vendor gives none");
     assert_eq!(version_text(0, 0), "");
     assert_eq!(id_text(abi::fourcc(*b"4FTP")), "34465450");
     assert_eq!(id_text(-1), "FFFFFFFF");

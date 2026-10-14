@@ -52,15 +52,16 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(&b[..end]).trim().to_string()
 }
 
-/// A plugin's version as the plugin manager shows it: a vendor version of the usual `0xMMmmpp` form as `M.m.p`, a
-/// small one as it is.
+/// A plugin's version as the plugin manager shows it: the vendor version (else the effect's own version field) read as
+/// `0xMMmmpp`, major, minor and patch, at every size. Small numbers are read the same way: DPF's plugins answer 256 for
+/// the version their VST3 copies call 0.1.0, as 65536 is 1.0.0 and 0x3020A is 3.2.10 (spec: ui/plugin-manager.md §4,
+/// "VST2 versions").
 fn version_text(vendor: i32, effect: i32) -> String {
     let v = if vendor > 0 { vendor } else { effect };
-    match v {
-        ..=0 => String::new(),
-        0x1_0000.. => format!("{}.{}.{}", v >> 16, (v >> 8) & 0xFF, v & 0xFF),
-        _ => v.to_string(),
+    if v <= 0 {
+        return String::new();
     }
+    format!("{}.{}.{}", v >> 16, (v >> 8) & 0xFF, v & 0xFF)
 }
 
 /// Instrument, effect or neither, from the plugin's flags, category and outputs.
