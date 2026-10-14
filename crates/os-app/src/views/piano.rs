@@ -45,12 +45,15 @@ pub struct Layout {
     pub panel: Rect,
 }
 
-pub fn layout(r: Rect) -> Layout {
+/// `split`: how the height under the ruler is shared by the grid and the event panel (spec:
+/// ui/event-panel-splitter.md; the default puts the splitter at bottom − 185, §1).
+pub fn layout(r: Rect, split: crate::piano_split::Split) -> Layout {
+    use crate::piano_split::BAND;
     let bottom = r.bottom();
     let gx = r.x + 73.0;
     let gr = r.right() - 23.0;
     let gy = r.y + 64.0;
-    let split = bottom - 185.0;
+    let split = gy + split.grid_h(bottom - gy - BAND);
     Layout {
         tab: Rect::new(r.x, r.y + 23.0, 71.0, 41.0),
         overview: Rect::new(r.x + 72.0, r.y + 23.0, gr - r.x - 72.0 + 2.0, 22.0),
@@ -58,9 +61,9 @@ pub fn layout(r: Rect) -> Layout {
         keys: Rect::new(r.x, gy, 71.0, split - gy),
         grid: Rect::new(gx, gy, gr - gx, split - gy),
         vscroll: Rect::new(gr + 1.0, r.y + 23.0, r.right() - gr - 1.0, split - r.y - 23.0),
-        splitter: Rect::new(r.x, split, r.w, 8.0),
-        label: Rect::new(r.x, split + 8.0, 71.0, bottom - split - 8.0),
-        panel: Rect::new(gx, split + 8.0, gr - gx, bottom - split - 8.0),
+        splitter: Rect::new(r.x, split, r.w, BAND),
+        label: Rect::new(r.x, split + BAND, 71.0, bottom - split - BAND),
+        panel: Rect::new(gx, split + BAND, gr - gx, bottom - split - BAND),
     }
 }
 
@@ -82,7 +85,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     if r.h < 2.0 * crate::app::TITLE_H {
         return; // collapsed to the title bar
     }
-    let l = layout(r);
+    let l = layout(r, s.piano.split);
     let g = Geom::new(s, l.grid);
     let ch = channel.map(|c| c.index);
     let pat = s.project.patterns.iter().find(|p| p.number == s.pattern);
@@ -515,12 +518,18 @@ fn grid_rows(ui: &mut Ui, l: &Layout, g: &Geom, clip: Rect, selecting: bool) {
 
 fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Option<u16>, sel: &[usize]) {
     let t = ui.t;
-    // Splitter with a grip (§1). Resizing the event panel is not available yet: the grip is greyed out.
+    // Splitter with a grip (§1): drag to share the height, double-click to hide / show the event panel (spec:
+    // ui/event-panel-splitter.md). The grip stays on a collapsed band so that it can be found.
     ui.c.fill_rect(l.splitter, t.window_title);
-    ui.off(l.splitter, "Event panel resizing");
+    ui.hit(l.splitter, Action::PianoSplitter, "Event panel: drag to resize, double-click to hide or show");
     let gx = l.grid.x + l.grid.w / 2.0 - 8.0;
     for i in 0..5 {
         ui.c.fill_rect(Rect::new(gx + i as f32 * 3.0, l.splitter.y + 4.0, 1.0, 1.0), t.text_faint);
+    }
+    if l.panel.h < 1.0 {
+        // Collapsed: only its (empty) place, which the app reads for the window's extent.
+        ui.hit(l.panel, Action::PianoVelocity, "");
+        return;
     }
     // Label column.
     ui.c.fill_rect(l.label, t.window_title);

@@ -156,6 +156,8 @@ enum Cmd {
     /// Live note (typing keyboard): channel (rack position), key, velocity; `NoteOff` releases.
     NoteOn(usize, u16, u8),
     NoteOff(usize, u16),
+    /// A tap on the Tempo tapper: a click, accented or not, like a live note.
+    TapClick(bool),
     Stop,
     /// Render to a WAV file with the hosted plugins (FILE > Export): project, mode, sample rate, file.
     Export(Box<Project>, PlayMode, u32, PathBuf),
@@ -319,6 +321,12 @@ impl Transport {
 
     pub fn note_off(&self, channel: usize, key: u16) {
         let _ = self.tx.send(Cmd::NoteOff(channel, key));
+    }
+
+    /// A tap on the Tempo tapper (spec: ui/tempo-tapper.md §8): the metronome's Tick, accented or not, where a live
+    /// note would play (into playback while playing, else on the live stream).
+    pub fn tap_click(&self, accent: bool) {
+        let _ = self.tx.send(Cmd::TapClick(accent));
     }
 
     /// Hold playback where it is (Playing -> Paused); `resume` continues from the same place.
@@ -787,12 +795,15 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     swap(s, &mut library);
                 }
             }
-            Ok(Cmd::NoteOn(ch, key, vel)) => {
+            Ok(cmd @ (Cmd::NoteOn(..) | Cmd::TapClick(_))) => {
+                // A click needs no channel: it also opens the live stream before any project was sent.
+                let empty = Project::default();
+                let project = live_project.as_ref().or(matches!(cmd, Cmd::TapClick(_)).then_some(&empty));
                 let target = match session.as_ref() {
                     Some(s) if !s.paused() => Some(s),
                     _ => {
                         if live.is_none() {
-                            if let Some(p) = &live_project {
+                            if let Some(p) = project {
                                 match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst, At::default()) {
                                     Ok(s) => live = Some(s),
                                     Err(e) => report(&shared, e),
@@ -804,7 +815,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 };
                 if let Some(s) = target {
                     if let Ok(mut e) = s.engine.lock() {
-                        e.note_on(ch, key, vel);
+                        match cmd {
+                            Cmd::NoteOn(ch, key, vel) => e.note_on(ch, key, vel),
+                            Cmd::TapClick(accent) => e.tap_click(accent),
+                            _ => {}
+                        }
                     }
                     s.feed.wake();
                 }
@@ -1041,6 +1056,10 @@ impl Session {
         }
         if kind != Kind::Preview {
             attach(&mut e, inst);
+        }
+        // Playback clicks with the metronome switch; live notes and previews never do (spec: ui/metronome.md §4).
+        if song {
+            e.set_metronome(crate::metronome::switch());
         }
         // Seek before anything is queued, so the first block is already the start position.
         if at.tick > 0.0 {

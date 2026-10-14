@@ -11,19 +11,26 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 - Channel rack with steps and mini piano rolls
 - Swing and per-channel loops
+- Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)
 
 ## ✅ Piano roll
 
 - Full tool set, with velocity and event lanes
 - Quantize, chop, glue, legato, strum, arpeggiate and randomize
 - Vertical zoom and ghost channels
+- Resizable event panel: drag the splitter, double-click it to hide or show the panel (remembered)
 - Pattern time markers, saved with the project
 
 ## ✅ Song arrangement
 
 - Playlist with pattern, audio and automation clips
 - Clip groups, markers and several arrangements
+- Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
+- Song position slider in the toolbar: drag, click to step, right-click to jump, wheel; it follows playback
+  (through the pattern in PAT mode)
+- Auto scrolling (toolbar, OPTIONS menu): while playing, the playlist follows the playhead (the piano roll in
+  pattern mode), continuously or a quarter page at a time (right-click on the button)
 
 ## ✅ Mixing and routing
 
@@ -79,6 +86,21 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 dropouts. Its right-click menu has refresh rates, a frames-per-second view and handle / thread / font
 counts. Double-clicking it opens the plugin performance monitor: each plugin's processing time, peak, total
 and voices, with sorting, find and freeze.
+
+**Metronome.** The toolbar button, OPTIONS > Metronome or Ctrl+M: a click on every quarter note while playing,
+accented as FL does (the first beat of each bar in 4/4 and 3/4), through the master track. Right-click the
+button for five sounds. It is never in an export, and it is remembered between sessions. Not yet: the
+"Metronome track" setting, and following time-signature markers (it follows the project's signature).
+
+**Tempo tapper.** VIEW > Tempo tapper, Ctrl+F5 or the kick drum button on the toolbar: click the pad (or press
+a key on a MIDI keyboard) in time. The average of the taps, in whole BPM, becomes the project tempo while Apply
+tempo is on; the beat bar counts the taps in groups of four. Each tap clicks with the metronome's Tick sound,
+the first of each four accented. Apply tempo is remembered between sessions. Not yet: nudge, Sync, Mute and now
+(drawn greyed out).
+
+**Closing windows.** VIEW > Close all windows (F12), Close all unfocused windows (Ctrl+F12: all but the one
+in front) and Close all plugin windows (Alt+F12: channel settings and plugin editors); the browser stays.
+Not yet: Align all channel editors, Arrange windows.
 
 ## 🚧 Automation
 

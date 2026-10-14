@@ -5,6 +5,7 @@
 //! - [`effects`]: Lemon Studio's mixer-slot effects (EQ, limiter).
 //! - [`clock`]: the sequencer's tick clock (ticks to samples).
 //! - [`engine`]: tick-based playback of patterns and the playlist through the mixer.
+//! - [`metronome`]: the click on every beat while playing live.
 //! - [`voices`]: a hosted instrument's voices as the host counts them.
 //! - [`wav`]: writing renders to disk.
 
@@ -14,6 +15,7 @@ pub mod engine;
 pub mod envelope;
 pub mod instrument;
 pub mod laws;
+pub mod metronome;
 pub mod sample;
 pub mod voices;
 pub mod wav;

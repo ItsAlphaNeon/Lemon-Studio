@@ -6,6 +6,7 @@
 
 mod app;
 mod audio_cfg;
+mod autoscroll;
 #[cfg(test)]
 mod audio_bench;
 #[cfg(test)]
@@ -13,6 +14,7 @@ mod render_check;
 mod browser;
 mod cpu;
 mod dialog;
+mod enable_groups;
 mod icons;
 mod knobs;
 mod loading;
@@ -22,12 +24,14 @@ mod macos;
 #[cfg(target_os = "macos")]
 mod menu_bar;
 mod meters;
+mod metronome;
 mod midi_in;
 mod mixer;
 mod osc3;
 mod monitor;
 mod params;
 mod piano;
+mod piano_split;
 mod piano_tools;
 mod rack;
 mod patterns;
@@ -44,7 +48,9 @@ mod project_plugins;
 mod presets;
 mod misc;
 mod misc_page;
+mod song_pos;
 mod stall;
+mod tapper;
 mod transport;
 mod views;
 

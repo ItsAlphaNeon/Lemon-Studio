@@ -227,6 +227,8 @@ pub struct RackUi {
     pub opts: BTreeSet<&'static str>,
     /// Channels waiting for the delete confirmation's Ok.
     pub pending_delete: Option<Vec<usize>>,
+    /// The channels waiting are unused audio clips (Purge unused audio clips, spec: ui/unused-channels.md §4).
+    pub purging: bool,
     /// Channels to delete now (the confirmation was accepted; the app removes them).
     pub delete_now: Option<Vec<usize>>,
     /// Advanced fill dialog (§22).
@@ -257,6 +259,7 @@ impl Default for RackUi {
             value_clip: None,
             opts: ["Show complete piano roll preview", "Show a mute button on the piano roll preview"].into_iter().collect(),
             pending_delete: None,
+            purging: false,
             delete_now: None,
             fill: None,
         }
@@ -591,7 +594,8 @@ pub fn toggle_lock(s: &mut State, r: usize) {
     }
 }
 
-/// Channels with no notes in any pattern that no playlist clip uses (Select unused channels).
+/// Channels with no notes in any pattern that no playlist clip uses (Select unused channels,
+/// spec: ui/unused-channels.md §1).
 pub fn unused(s: &State) -> BTreeSet<usize> {
     let used_clip = |i: u16| s.project.arrangements.iter().any(|a| a.clips.iter().any(|c| c.source == ClipSource::Channel(i)));
     s.project
@@ -760,6 +764,7 @@ pub fn clone_rows(app: &mut App, rows: &[usize]) {
 
 /// Ask before deleting rows (§18: "The selected channel is about to be deleted.").
 pub fn ask_delete(s: &mut State, rows: Vec<usize>) {
+    s.rack.purging = false;
     if rows.is_empty() {
         return;
     }
@@ -769,6 +774,18 @@ pub fn ask_delete(s: &mut State, rows: Vec<usize>) {
     }
     s.rack.pending_delete = Some(rows);
     s.pat_ui.confirm = true;
+}
+
+/// Purge unused audio clips: the unused audio-clip channels go, after the delete confirmation (Lemon Studio cannot
+/// undo a channel deletion yet; spec: ui/unused-channels.md §4).
+pub fn ask_purge(s: &mut State) -> Option<String> {
+    let rows: Vec<usize> = unused(s).into_iter().filter(|&r| s.project.channels[r].kind == ChannelKind::AudioClip).collect();
+    if rows.is_empty() {
+        return Some("No unused audio clips".into());
+    }
+    ask_delete(s, rows);
+    s.rack.purging = s.rack.pending_delete.is_some();
+    None
 }
 
 /// Delete rows now: the channels, their notes and clips go.
@@ -923,6 +940,7 @@ pub enum RCmd {
     Burn(bool),
     // Options menu (§17).
     SelectUnused,
+    Purge,
     CloneSel,
     DeleteSel,
     MoveSel(i32),
@@ -968,7 +986,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     let items = vec![
         PItem::sub("Add one", add_one_items(s)),
         PItem::not_yet("Loop starter").mark(Mark::Check(false)),
-        PItem::not_yet("Purge unused audio clips"),
+        it("Purge unused audio clips", RCmd::Purge),
         PItem::head("Channels"),
         it("Select unused channels", RCmd::SelectUnused),
         off(it("Clone selected", RCmd::CloneSel).key("Alt+C"), none),
@@ -1402,6 +1420,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             s.rack.sel = unused(s);
             Some(format!("{} unused channel(s) selected", s.rack.sel.len()))
         }
+        RCmd::Purge => ask_purge(s),
         RCmd::ColorGradient => {
             gradient(s);
             None
@@ -1890,6 +1909,53 @@ mod tests {
         assert_eq!(app.state.project.channels.len(), n);
         assert_eq!(name(&app, 1), n1);
         assert!(app.state.project.patterns[0].notes.iter().all(|x| usize::from(x.channel) < n));
+    }
+
+    /// TOOLS > Select unused channels and Purge unused audio clips (spec: ui/unused-channels.md): unused = no notes in any
+    /// pattern and no playlist clip; purge takes only the unused audio-clip channels, after the delete confirmation.
+    #[test]
+    fn select_unused_and_purge_audio_clips() {
+        use crate::views::menus::{item_at, works, TOOLS_MENU};
+        use os_model::Clip;
+        use winit::keyboard::{Key, NamedKey};
+        let mut app = App::new(None);
+        // Rows: 0 sampler with a note, 1 sampler unused, 2 audio clip with a note only, 3 audio clip with a playlist
+        // clip, 4 audio clip unused.
+        for r in 2..5 {
+            app.state.project.channels[r].kind = ChannelKind::AudioClip;
+        }
+        let idx = |app: &App, r: usize| app.state.project.channels[r].index;
+        let (i0, i2, i3) = (idx(&app, 0), idx(&app, 2), idx(&app, 3));
+        crate::patterns::pat_mut(&mut app.state, 2).notes = vec![Note::step(i0, 0), Note::step(i2, 3)];
+        crate::playlist::arr_mut(&mut app.state).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
+        let tools = |label: &str| (0..80).find(|&i| item_at(TOOLS_MENU, i).is_some_and(|it| it.label == label)).unwrap();
+        for label in ["Select unused channels", "Purge unused audio clips"] {
+            assert!(works(TOOLS_MENU, item_at(TOOLS_MENU, tools(label)).unwrap()), "{label} is not greyed out");
+        }
+
+        app.menu_item(TOOLS_MENU, tools("Select unused channels"));
+        assert_eq!(app.state.rack.sel, BTreeSet::from([1, 4]));
+        assert_eq!(app.state.message.as_deref(), Some("2 unused channel(s) selected"));
+
+        // Purge asks first (no undo for channels yet); Cancel keeps everything.
+        let names = |app: &App| app.state.project.channels.iter().map(|c| c.name.clone().unwrap_or_default()).collect::<Vec<_>>();
+        let before = names(&app);
+        app.menu_item(TOOLS_MENU, tools("Purge unused audio clips"));
+        assert_eq!(app.state.rack.pending_delete, Some(vec![4]));
+        assert!(app.state.rack.purging && app.state.pat_ui.confirm);
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        assert_eq!(names(&app), before);
+        // Ok deletes only the unused audio-clip channel.
+        assert_eq!(run(&mut app, RCmd::Purge), None);
+        app.key(&Key::Named(NamedKey::Enter), false, false);
+        assert_eq!(names(&app), before[..4].to_vec());
+        assert!(!app.state.pat_ui.confirm);
+        // Nothing left to purge: said, not asked.
+        assert_eq!(run(&mut app, RCmd::Purge).as_deref(), Some("No unused audio clips"));
+        assert!(!app.state.pat_ui.confirm);
+        // The usual delete confirmation is worded as before.
+        ask_delete(&mut app.state, vec![1]);
+        assert!(!app.state.rack.purging);
     }
 
     /// Lock, zip, groups, swing, loop lengths and a restructured rack survive saving into an opened file ("Saving").

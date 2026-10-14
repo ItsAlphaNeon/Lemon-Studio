@@ -77,6 +77,12 @@ pub const FILE_EXIT: usize = 16;
 /// OPTIONS > Theme settings (flat index: header counts).
 #[cfg(test)]
 pub const OPT_THEME: usize = 5;
+/// OPTIONS > Metronome (spec: ui/metronome.md §1).
+pub const METRONOME_LABEL: &str = "Metronome";
+/// OPTIONS > Auto scrolling (spec: ui/auto-scrolling.md §1).
+pub const AUTOSCROLL_LABEL: &str = "Auto scrolling";
+/// OPTIONS > Enable groups (spec: ui/enable-groups.md §1).
+pub const GROUPS_LABEL: &str = "Enable groups";
 /// Index of the OPTIONS menu.
 pub const OPTIONS_MENU: usize = 5;
 /// OPTIONS > Project info (the toolbar's info button).
@@ -182,15 +188,15 @@ const VIEW_ITEMS: &[Item] = &[
     it("Browser", "Alt+F8").on().tick(),
     it("Project picker", "Ctrl+F8"),
     it("Plugin picker", "F8").on(),
-    it("Tempo tapper", "Ctrl+F5"),
+    it("Tempo tapper", "Ctrl+F5").tick(),
     it("Touch controller", "Alt+F7"),
     it("Script output", ""),
     it("Toolbars", "").sub(),
     it("Plugin performance monitor", ""),
     head("Layout"),
-    it("Close all windows", "F12"),
-    it("Close all plugin windows", "Alt+F12"),
-    it("Close all unfocused windows", "Ctrl+F12"),
+    it("Close all windows", "F12").on(),
+    it("Close all plugin windows", "Alt+F12").on(),
+    it("Close all unfocused windows", "Ctrl+F12").on(),
     it("Align all channel editors", "Shift+F12"),
     it("Arrange windows", "").sub(),
     it("Background", "").sub(),
@@ -222,14 +228,14 @@ const OPTIONS: &[Item] = &[
     it("Enable MIDI master sync", "").tick(),
     head("Switches"),
     it("Typing keyboard to piano", "Ctrl+T").on().tick(),
-    it("Metronome", "Ctrl+M").tick(),
+    it(METRONOME_LABEL, "Ctrl+M").on().tick(),
     it("Recording precount", "Ctrl+P").tick(),
     it("Start on input", "Ctrl+I").tick(),
     it("Blend recorded notes", "Ctrl+B").tick(),
     it("Step edit", "Ctrl+E").tick(),
     it("Loop record", "").tick(),
-    it("Auto scrolling", "").tick(),
-    it("Enable groups", "Shift+Alt+G").tick(),
+    it(AUTOSCROLL_LABEL, "").on().tick(),
+    it(GROUPS_LABEL, "Shift+Alt+G").on().tick(),
     it("Multilink to controllers", "Ctrl+J").tick(),
 ];
 
@@ -259,8 +265,8 @@ const TOOLS_B: &[Item] = &[
     SEP,
     it("Prepare for performance mode", ""),
     it("Prepare for MIDI export", ""),
-    it("Select unused channels", ""),
-    it("Purge unused audio clips", ""),
+    it("Select unused channels", "").on(),
+    it("Purge unused audio clips", "").on(),
     it("Switch smart disable for all plugins", ""),
     it("Switch all audio clip channels to", "").sub(),
     it("Switch selected audio clip channels to", "").sub(),
@@ -333,6 +339,8 @@ fn win_of(label: &str) -> Option<Win> {
         "Mixer" => Win::Mixer,
         "Browser" => Win::Browser,
         "Plugin performance monitor" => Win::Perf,
+        // spec: ui/tempo-tapper.md §1
+        "Tempo tapper" => Win::Tapper,
         _ => return None,
     })
 }
@@ -365,6 +373,9 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
         (Mark::Check(_), true) if item.label == "Browser" => Mark::Check(s.show_browser),
         (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
         (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
+        (Mark::Check(_), _) if item.label == METRONOME_LABEL => Mark::Check(crate::metronome::on()),
+        (Mark::Check(_), _) if item.label == AUTOSCROLL_LABEL => Mark::Check(crate::autoscroll::on()),
+        (Mark::Check(_), _) if item.label == GROUPS_LABEL => Mark::Check(crate::enable_groups::on()),
         (mk, _) => mk,
     }
 }

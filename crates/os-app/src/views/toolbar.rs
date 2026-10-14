@@ -50,7 +50,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     }
 
     row1(ui, s, f);
-    row2(ui, s);
+    row2(ui, s, f);
 
     // Logo spot (spans both rows): the Lemon Studio mark.
     // It keeps to the right edge until the window is too narrow, then the edge crops it
@@ -181,9 +181,9 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_polygon(&[(tb.right() - 9.0, 17.0), (tb.right() - 6.0, 13.0), (tb.right() - 3.0, 17.0)], t.glyph_dim);
     ui.c.fill_polygon(&[(tb.right() - 9.0, 22.0), (tb.right() - 6.0, 26.0), (tb.right() - 3.0, 22.0)], t.glyph_dim);
 
-    // Recording options.
+    // Recording options. The metronome works (spec: ui/metronome.md); the others wait for recording.
+    tool_button(ui, btn(580.0, 4.0), Icon::Metronome, crate::metronome::on(), Action::Metronome, "Metronome (Ctrl+M) - right-click for the sound");
     for (i, (icon, hint)) in [
-        (Icon::Metronome, "Metronome"),
         (Icon::WaitInput, "Wait for input to start recording"),
         (Icon::Countdown, "Countdown before recording"),
         (Icon::Blend, "Blend recording"),
@@ -192,7 +192,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     .into_iter()
     .enumerate()
     {
-        tool_button(ui, btn(580.0 + 33.0 * i as f32, 4.0), icon, false, Action::Placeholder(hint), hint);
+        tool_button(ui, btn(613.0 + 33.0 * i as f32, 4.0), icon, false, Action::Placeholder(hint), hint);
     }
 
     // Song position (B:S:T).
@@ -375,7 +375,7 @@ fn monitor(ui: &mut Ui, s: &State) {
     ui.c.stroke_circle(1037.0, 33.5, 4.0, 2.0, ui.t.s(0x66737d));
 }
 
-fn row2(ui: &mut Ui, s: &State) {
+fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let t = ui.t;
     // Menu bar.
     let mb = Rect::span(4.0, 296.0, 45.0, 77.0);
@@ -411,32 +411,67 @@ fn row2(ui: &mut Ui, s: &State) {
         ui.c.fill_circle(358.0 + 17.5 * a.cos(), 61.0 + 17.5 * a.sin(), 0.7, t.glyph_dim);
     }
 
-    // Main slider panel.
-    let sp = Rect::span(381.0, 575.0, 45.0, 77.0);
-    ui.off(sp, "Song position slider");
+    // Song position slider (spec: ui/song-position-slider.md): the handle follows the playhead while playing.
+    let sp = crate::song_pos::PANEL;
+    let range = crate::song_pos::range(s);
+    let pos = crate::song_pos::shown(s, f.playing, f.song, f.tick, f.song_pos_drag);
+    ui.live(Live::Clock, sp);
+    match range {
+        Some(_) => {
+            ui.hit(sp, Action::SongPos, crate::song_pos::hint(s, pos));
+        }
+        // An empty playlist in SONG mode: nothing to move through.
+        None => {
+            ui.hit(sp, Action::Swallow, "Song position: the playlist is empty");
+        }
+    }
+    let hx = range.map(|len| crate::song_pos::handle_x(pos, len).round());
     if lemon {
         ui.c.fill_rrect(Rect::new(390.0, 60.0, 180.0, 4.0), 2.0, t.sunken_dark);
-        ui.c.fill_rrect(Rect::new(390.0, 55.0, 12.0, 14.0), 3.0, t.button);
-        ui.c.fill_rect(Rect::new(395.0, 58.0, 2.0, 8.0), t.pill);
+        match hx {
+            Some(hx) => {
+                use os_theme::design::lemon as brand;
+                ui.c.fill_rrect(Rect::new(390.0, 60.0, hx - 390.0, 4.0), 2.0, brand::MAIN);
+                ui.c.fill_rrect(Rect::new(hx - 6.0, 55.0, 12.0, 14.0), 3.0, t.button);
+                ui.c.fill_rect(Rect::new(hx - 1.0, 58.0, 2.0, 8.0), brand::MAIN);
+            }
+            None => ui.c.fill_rect(Rect::new(394.0, 58.0, 2.0, 8.0), t.button),
+        }
     } else {
-        ui.c.fill_rect(Rect::new(390.0, 61.0, 180.0, 2.0), t.sunken_dark);
-        ui.c.fill_circle(396.0, 62.0, 6.5, t.sunken_dark);
-        ui.c.line(396.0, 57.0, 396.0, 67.0, 2.0, t.pill);
+        // Classic: the measured colours (§1).
+        ui.c.fill_rect(Rect::new(394.0, 60.0, 172.0, 4.0), ui.t.s(0x343739));
+        match hx {
+            Some(hx) => {
+                let green = ui.t.a(0xa8e44a);
+                ui.c.fill_rect(Rect::new(394.0, 60.0, hx - 394.0, 4.0), green);
+                ui.c.fill_circle(hx + 0.5, 62.0, 6.5, ui.t.s(0x1c1f21));
+                ui.c.fill_circle(hx + 0.5, 62.0, 5.5, ui.t.s(0x26292b));
+                ui.c.fill_rect(Rect::new(hx, 56.0, 1.0, 2.0), ui.t.s(0x9a9d9f));
+                ui.c.fill_rect(Rect::new(hx, 58.0, 1.0, 7.0), green);
+                ui.c.fill_rect(Rect::new(hx, 65.0, 1.0, 3.0), ui.t.s(0x686b6d));
+            }
+            None => ui.c.fill_rect(Rect::new(395.0, 56.0, 1.0, 12.0), ui.t.s(0x282b2d)),
+        }
     }
-    ui.veil(Rect::span(383.0, 574.0, 50.0, 74.0), t.toolbar);
 
-    // Mode buttons.
+    // Mode buttons (spec: ui/main-window.md §3). Typing keyboard, auto scrolling (spec: ui/auto-scrolling.md) and enable
+    // groups (spec: ui/enable-groups.md) work.
     for (i, (icon, hint)) in [
         (Icon::TypingKeyboard, "Typing keyboard to piano keyboard (Ctrl+T)"),
-        (Icon::StepEdit, "Step editing"),
-        (Icon::Slide, "Slide / portamento"),
-        (Icon::Link, "Multilink to controllers"),
-        (Icon::MidiControl, "MIDI note controls"),
+        (Icon::AutoScroll, "Auto scrolling - right-click for continuous scrolling"),
+        (Icon::StepEdit, "Step editing (Ctrl+E)"),
+        (Icon::Link, "Enable groups (Shift+Alt+G)"),
+        (Icon::MidiControl, "Multilink to controllers (Ctrl+J)"),
     ]
     .into_iter()
     .enumerate()
     {
-        let (on, action) = if i == 0 { (s.toggles.contains(&"typing"), Action::Typing) } else { (false, Action::Placeholder(hint)) };
+        let (on, action) = match i {
+            0 => (s.toggles.contains(&"typing"), Action::Typing),
+            1 => (crate::autoscroll::on(), Action::AutoScroll),
+            3 => (crate::enable_groups::on(), Action::EnableGroups),
+            _ => (false, Action::Placeholder(hint)),
+        };
         tool_button(ui, btn(580.0 + 33.0 * i as f32, 45.0), icon, on, action, hint);
     }
 
@@ -488,7 +523,7 @@ fn row2(ui: &mut Ui, s: &State) {
         (Icon::Browser, Action::ToggleWin(Win::Browser), s.show_browser, "Browser (Alt+F8)"),
         (Icon::Project, Action::Placeholder("Project picker"), false, "Project picker"),
         (Icon::Plug, Action::PickerOpen, false, "Add a plugin (F8)"),
-        (Icon::AudioEditor, Action::Placeholder("Audio editor"), false, "Audio editor"),
+        (Icon::Kick, Action::ToggleWin(Win::Tapper), s.shown(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
         (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller"),
         (Icon::Store, Action::Placeholder("Plugin store"), false, "Plugin store"),
     ];

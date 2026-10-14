@@ -1,5 +1,6 @@
 //! Toolbar and window-button icons, and the Lemon Studio logo. Placeholders taken from Tabler Icons (MIT, see `tabler.rs`);
-//! each only suggests its function (no artwork is copied from any other program).
+//! each only suggests its function (no artwork is copied from any other program). Where Tabler has nothing that fits,
+//! Lemon Studio draws its own on the same grid (`KICK`).
 
 use os_ui::{Canvas, Color, Glyph, Rect};
 
@@ -26,6 +27,7 @@ pub enum Icon {
     Info,
     Download,
     TypingKeyboard,
+    AutoScroll,
     StepEdit,
     Slide,
     Link,
@@ -38,7 +40,7 @@ pub enum Icon {
     Browser,
     Project,
     Plug,
-    AudioEditor,
+    Kick,
     Touch,
     Store,
     Globe,
@@ -71,6 +73,10 @@ pub enum Icon {
     FileBlank,
 }
 
+/// A kick drum seen from the side on its two legs, its pedal's beater against the head (the Tempo tapper). Lemon
+/// Studio's own, in Tabler's style: 24-unit grid, outline, absolute M/L/C/Z only.
+const KICK: TablerIcon = TablerIcon { filled: false, d: "M 13.5 10.5 C 13.5 14.366 12.381 17.5 11 17.5 C 9.619 17.5 8.5 14.366 8.5 10.5 C 8.5 6.634 9.619 3.5 11 3.5 C 12.381 3.5 13.5 6.634 13.5 10.5 Z M 11 3.5 L 19 3.5 M 11 17.5 L 19 17.5 M 19 3.5 C 20.381 3.5 21.5 6.634 21.5 10.5 C 21.5 14.366 20.381 17.5 19 17.5 M 3 21 L 8 19.5 M 4.8 20.5 L 6.4 12.6 M 8.3 10.8 C 8.3 11.628 7.628 12.3 6.8 12.3 C 5.972 12.3 5.3 11.628 5.3 10.8 C 5.3 9.972 5.972 9.3 6.8 9.3 C 7.628 9.3 8.3 9.972 8.3 10.8 Z M 12 17.3 L 11 21 M 18 17.3 L 19 21" };
+
 fn shape(icon: Icon) -> &'static TablerIcon {
     match icon {
         Icon::Minimize => &tb::MINUS,
@@ -92,6 +98,7 @@ fn shape(icon: Icon) -> &'static TablerIcon {
         Icon::Info => &tb::INFO_CIRCLE,
         Icon::Download => &tb::DOWNLOAD,
         Icon::TypingKeyboard => &tb::KEYBOARD,
+        Icon::AutoScroll => &tb::ARROW_AUTOFIT_RIGHT,
         Icon::StepEdit => &tb::GRID_DOTS,
         Icon::Slide => &tb::TRENDING_UP,
         Icon::Link => &tb::LINK,
@@ -105,7 +112,7 @@ fn shape(icon: Icon) -> &'static TablerIcon {
         Icon::Project => &tb::FILE,
         Icon::Page => &tb::FILE_TEXT,
         Icon::Plug => &tb::PLUG,
-        Icon::AudioEditor => &tb::WAVE_SINE,
+        Icon::Kick => &KICK,
         Icon::Touch => &tb::HAND_FINGER,
         Icon::Store => &tb::SHOPPING_BAG,
         Icon::Globe => &tb::WORLD,

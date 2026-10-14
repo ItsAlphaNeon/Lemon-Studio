@@ -298,6 +298,10 @@ pub enum Cmd {
     Audio(crate::audio_cfg::Set),
     /// The toolbar CPU panel's menu (spec: ui/main-window.md §13).
     Cpu(crate::cpu::CpuCmd),
+    /// The metronome button's menu: the click sound (spec: ui/metronome.md §2).
+    MetronomeSound(os_engine::metronome::Sound),
+    /// The auto-scrolling button's menu (spec: ui/auto-scrolling.md §2).
+    ContinuousScrolling,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1037,8 +1041,12 @@ pub fn targets(s: &State) -> Vec<usize> {
     if s.playlist.sel.is_empty() { (0..clips(s).len()).collect() } else { s.playlist.sel.clone() }
 }
 
-/// `idx` plus every clip that shares a group with one of them (grouped clips select and move as one, §3a).
+/// `idx` plus every clip that shares a group with one of them (grouped clips select and move as one, §3a); just `idx`
+/// while Enable groups is off (spec: ui/enable-groups.md §3).
 pub fn with_groups(s: &State, mut idx: Vec<usize>) -> Vec<usize> {
+    if !crate::enable_groups::on() {
+        return idx;
+    }
     let groups: Vec<u16> = idx.iter().filter_map(|&i| clips(s).get(i)).map(Clip::group).filter(|&g| g != 0).collect();
     if groups.is_empty() {
         return idx;
@@ -2900,6 +2908,16 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             return None;
         }
         Cmd::Cpu(c) => return app.cpu_cmd(c),
+        Cmd::MetronomeSound(sound) => {
+            crate::metronome::set_sound(sound);
+            app.invalidate();
+            return Some(format!("Metronome sound: {}", sound.label()));
+        }
+        Cmd::ContinuousScrolling => {
+            let on = crate::autoscroll::toggle_continuous();
+            app.invalidate();
+            return Some(if on { "Continuous scrolling on" } else { "Continuous scrolling off" }.into());
+        }
         #[cfg(plugin_windows)]
         Cmd::PluginDetach(row, on) => {
             app.plugins.set_detached(row, on);
@@ -2940,7 +2958,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

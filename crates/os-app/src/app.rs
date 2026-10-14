@@ -29,6 +29,8 @@ pub enum Win {
     Plugin,
     /// The Plugin performance monitor (spec: ui/plugin-performance.md).
     Perf,
+    /// The Tempo tapper (spec: ui/tempo-tapper.md).
+    Tapper,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -52,6 +54,28 @@ impl Win {
             Win::PianoRoll => (540.0, 320.0),
             _ => (0.0, 0.0),
         }
+    }
+}
+
+/// The three VIEW > Layout close commands (spec: ui/close-windows.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseAll {
+    /// Every window (F12).
+    All,
+    /// Every window but the focused one (Ctrl+F12).
+    Unfocused,
+    /// The channel settings window and the hosted plugin windows (Alt+F12).
+    Plugins,
+}
+
+impl CloseAll {
+    pub fn from_label(label: &str) -> Option<CloseAll> {
+        Some(match label {
+            "Close all windows" => CloseAll::All,
+            "Close all unfocused windows" => CloseAll::Unfocused,
+            "Close all plugin windows" => CloseAll::Plugins,
+            _ => return None,
+        })
     }
 }
 
@@ -92,12 +116,22 @@ pub enum Action {
     Placeholder(&'static str),
     /// Typing keyboard to piano switch (toolbar, OPTIONS menu, Ctrl+T).
     Typing,
+    /// Metronome switch (toolbar, OPTIONS menu, Ctrl+M); right-click on the button picks the sound.
+    Metronome,
+    /// Auto scrolling switch (toolbar, OPTIONS menu); right-click on the button for continuous scrolling.
+    AutoScroll,
+    /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G).
+    EnableGroups,
+    /// The toolbar's song position slider (spec: ui/song-position-slider.md).
+    SongPos,
     /// The toolbar's scope / spectrum panel: click switches the display.
     Monitor,
     /// The toolbar's CPU panel: double-click opens the Plugin performance monitor, right-click its menu.
     CpuPanel,
     /// The Plugin performance monitor's controls (spec: ui/plugin-performance.md).
     Perf(crate::perf::PerfAct),
+    /// The Tempo tapper's pad and Apply tempo switch (spec: ui/tempo-tapper.md).
+    Tapper(crate::tapper::TapAct),
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -164,6 +198,8 @@ pub enum Action {
     PianoNote(usize),
     PianoKeys,
     PianoVelocity,
+    /// The band between the grid and the event panel (spec: ui/event-panel-splitter.md).
+    PianoSplitter,
     /// Event panel "Control" button and its menu entries (index into `Lane::ALL`).
     PianoLaneMenu,
     /// Toolbar "Piano roll tools" button: the Tools menu (spec: ui/piano-roll.md §11).
@@ -407,6 +443,8 @@ pub(crate) const HINT_RECT: Rect = Rect::new(73.0, 5.0, 289.0, 31.0);
 const MONITOR_RECT: Rect = Rect::new(880.0, 4.0, 168.0, 33.0);
 /// The toolbar's CPU panel.
 pub(crate) const CPU_RECT: Rect = Rect::new(1053.0, 4.0, 149.0, 32.0);
+/// What a tempo change repaints in the toolbar (the tempo box and the transport around it).
+const TEMPO_RECT: Rect = Rect::new(380.0, 0.0, 200.0, 83.0);
 
 /// Actions whose hover state has no visual feedback (large background regions).
 fn hover_is_visible(a: &Action) -> bool {
@@ -431,6 +469,7 @@ fn hover_is_visible(a: &Action) -> bool {
             | Action::RackGraphArea
             | Action::WinDrag(_)
             | Action::WinResize(..)
+            | Action::Tapper(crate::tapper::TapAct::Pad)
     )
 }
 
@@ -611,6 +650,13 @@ pub enum Drag {
     RackMixer { ch: usize, y0: f32, v0: u16 },
     Fader { track: u16, y0: f32, v0: f64 },
     Tempo { y0: f32, t0: f64 },
+    /// The song position slider's handle (`dx` = grab offset from its centre), or the button held on its track (the
+    /// next step is due at `next`) (spec: ui/song-position-slider.md §3).
+    SongPos { dx: f32 },
+    SongPosHold { next: std::time::Instant },
+    /// The piano roll's grid / event panel splitter: `dy` = grab offset from the band's top, `top` = the grid's top,
+    /// `h` = the height the grid and the panel share.
+    PianoSplit { dy: f32, top: f32, h: f32 },
     /// Monitor debug panel slider.
     MonParam(usize),
     /// Piano roll: move notes (originals by index), resize their ends, erase, draw velocities.
@@ -675,6 +721,8 @@ pub struct State {
     pub cpu: crate::cpu::Cpu,
     /// The Plugin performance monitor's readings and options (read with the CPU panel while it is shown).
     pub perf: crate::perf::Perf,
+    /// The Tempo tapper: where it is, the count of taps, the pad's flash.
+    pub tapper: crate::tapper::TapperUi,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
     /// Rack rows played by a hosted plugin.
@@ -688,6 +736,9 @@ pub struct State {
     pub path: Option<PathBuf>,
     /// Open child windows, bottom to top.
     pub z: Vec<Win>,
+    /// The empty workspace took the last click: no window has the focus (Ctrl+F12 closes them all,
+    /// spec: ui/close-windows.md §2).
+    pub no_focus: bool,
     pub show_browser: bool,
     pub rack_pos: (f32, f32),
     pub rack_size: (f32, f32),
@@ -811,6 +862,7 @@ impl State {
     pub fn raise(&mut self, w: Win) {
         self.z.retain(|&o| o != w);
         self.z.push(w);
+        self.no_focus = false;
     }
 
     pub fn hide(&mut self, w: Win) {
@@ -935,6 +987,7 @@ impl App {
                 file: None,
                 path: None,
                 z: vec![Win::Playlist, Win::ChannelRack],
+                no_focus: false,
                 show_browser: true,
                 rack_pos: (317.0, 195.0),
                 rack_size: views::rack::DEFAULT_SIZE,
@@ -973,6 +1026,7 @@ impl App {
                 monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
                 cpu: crate::cpu::Cpu::saved(),
                 perf: crate::perf::Perf::default(),
+                tapper: Default::default(),
                 toggles: vec!["typing"],
                 midi_inputs: Vec::new(),
                 maximized: true,
@@ -1808,7 +1862,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         v.push(Cover { bounds: Rect::new(0.0, 0.0, s.screen.0, views::WORK_Y + 1.0), win: None, solid: None });
@@ -1823,6 +1877,7 @@ impl App {
             Win::ChannelRack => Some(views::rack::rect(s)),
             Win::Plugin => s.project.channels.get(s.plugin_channel).map(|_| views::channel_win::rect(s)),
             Win::Perf => Some(views::perf::rect(s)),
+            Win::Tapper => Some(views::tapper::rect(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -1942,6 +1997,71 @@ impl App {
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
     }
 
+    /// The metronome button's right-click menu: the sound (spec: ui/metronome.md §2).
+    fn metronome_menu(&mut self, x: f32, y: f32) {
+        use crate::playlist::{Cmd, Mark, PItem, Popup};
+        use os_engine::metronome::Sound;
+        let now = crate::metronome::sound();
+        let mut items = vec![PItem::head("Metronome sound")];
+        items.extend(Sound::ALL.iter().map(|&s| PItem::new(s.label(), Cmd::MetronomeSound(s)).mark(Mark::Radio(s == now))));
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+    }
+
+    /// Metronome switch (toolbar, OPTIONS menu, Ctrl+M): heard from the next beat, also while playing.
+    pub fn toggle_metronome(&mut self) {
+        let on = crate::metronome::toggle();
+        self.state.message = Some(if on { "Metronome on" } else { "Metronome off" }.into());
+        self.invalidate();
+    }
+
+    /// The auto-scrolling button's right-click menu (spec: ui/auto-scrolling.md §2).
+    fn autoscroll_menu(&mut self, x: f32, y: f32) {
+        use crate::playlist::{Cmd, Mark, PItem, Popup};
+        let items = vec![PItem::new("Continuous scrolling", Cmd::ContinuousScrolling).mark(Mark::Check(crate::autoscroll::continuous()))];
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+    }
+
+    /// Auto scrolling switch (toolbar, OPTIONS menu): followed from the next move of the playhead.
+    pub fn toggle_autoscroll(&mut self) {
+        let on = crate::autoscroll::toggle();
+        self.state.message = Some(if on { "Auto scrolling on" } else { "Auto scrolling off" }.into());
+        self.invalidate();
+    }
+
+    /// Auto scrolling (spec: ui/auto-scrolling.md §5): the playlist (song) or the piano roll (pattern) scrolls so the
+    /// shown playing position stays in view. Left alone while the mouse drags a scroll bar.
+    fn auto_scroll(&mut self) {
+        let set = crate::autoscroll::get();
+        let now = &self.shown;
+        if !set.on || !now.playing || now.paused || matches!(self.drag, Some(Drag::Scroll { .. } | Drag::BarZoom { .. } | Drag::BarRows { .. })) {
+            return;
+        }
+        let tick = now.tick as f32;
+        let ppq = f32::from(self.state.project.ppq.max(4));
+        if now.song {
+            let Some(g) = self.pl_grid.filter(|_| self.state.shown(Win::Playlist)) else { return };
+            let left = self.state.playlist_scroll.0;
+            let x = tick * self.state.playlist_bar_w / (ppq * 4.0);
+            if let Some(v) = crate::autoscroll::follow(left, g.w, x, set.continuous) {
+                // In whole steps the drawn pixels can move by (`playlist_scrolled`).
+                let v = blit_step(self.px_scale).map_or(v, |q| left + ((v - left) / q).round() * q);
+                let before = self.state.playlist_scroll;
+                self.scroll_set(Scroll::PlaylistX, v);
+                self.playlist_scrolled(before);
+            }
+        } else {
+            let Some(g) = self.piano_grid.filter(|_| self.state.shown(Win::PianoRoll)) else { return };
+            let left = self.scroll_get(Scroll::PianoX);
+            let x = tick * self.state.piano.px_per_beat / ppq;
+            if let Some(v) = crate::autoscroll::follow(left, g.w, x, set.continuous) {
+                self.scroll_set(Scroll::PianoX, v);
+                if self.scroll_get(Scroll::PianoX) != left {
+                    self.damage_win(Win::PianoRoll);
+                }
+            }
+        }
+    }
+
     /// A command of the CPU panel's menu.
     pub(crate) fn cpu_cmd(&mut self, c: crate::cpu::CpuCmd) -> Option<String> {
         use crate::cpu::CpuCmd;
@@ -1987,6 +2107,30 @@ impl App {
         self.state.hide(Win::Perf);
         self.state.perf.reset();
         self.state.perf.finding = false;
+        self.invalidate();
+    }
+
+    /// VIEW > Close all windows (F12), Close all unfocused windows (Ctrl+F12), Close all plugin windows (Alt+F12)
+    /// (spec: ui/close-windows.md). The browser is a panel and stays.
+    pub(crate) fn close_windows(&mut self, what: CloseAll) {
+        let plugin = |w: Win| matches!(w, Win::Plugin | Win::Hosted(_));
+        // The focused window is the one in front, unless the empty workspace took the last click.
+        let keep = match what {
+            CloseAll::Unfocused if !self.state.no_focus => self.state.z.last().copied(),
+            _ => None,
+        };
+        let closing: Vec<Win> = self.state.z.iter().copied().filter(|&w| Some(w) != keep && (what != CloseAll::Plugins || plugin(w))).collect();
+        for w in closing {
+            match w {
+                Win::Perf => self.close_perf(),
+                w => self.state.hide(w),
+            }
+        }
+        // Hosted plugin windows (rack rows and mixer slots; detached ones are not in the stack).
+        let rows: Vec<usize> = self.plugins.hosted.keys().copied().collect();
+        for row in rows.into_iter().filter(|&r| keep != Some(Win::Hosted(r))) {
+            self.plugins.close_if_open(row);
+        }
         self.invalidate();
     }
 
@@ -2070,6 +2214,83 @@ impl App {
         }
     }
 
+    // ---------------------------------------------------------------- Tempo tapper (spec: ui/tempo-tapper.md)
+
+    /// VIEW > Tempo tapper and Ctrl+F5: open it (or bring it to the front), centred over the main window the first
+    /// time in a run and then where it was left; close it when it is in front (§1, §8).
+    fn toggle_tapper(&mut self) {
+        let s = &mut self.state;
+        if s.shown(Win::Tapper) && s.in_front(Win::Tapper) {
+            s.hide(Win::Tapper);
+        } else {
+            if !s.tapper.placed {
+                let (w, h) = views::tapper::SIZE;
+                s.tapper.pos = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::WORK_Y).round());
+                s.tapper.placed = true;
+            }
+            s.raise(Win::Tapper);
+        }
+        self.invalidate();
+    }
+
+    fn tapper_act(&mut self, a: crate::tapper::TapAct) {
+        use crate::tapper::TapAct;
+        match a {
+            TapAct::Pad => {
+                let t = self.state.tapper.clock();
+                self.tap(t);
+            }
+            // Turning Apply tempo on writes the tempo on the pad to the project at once (§5).
+            TapAct::Apply => {
+                if crate::tapper::toggle_apply() {
+                    if let Some(bpm) = self.state.tapper.count.tempo() {
+                        self.set_tempo(bpm);
+                    }
+                }
+            }
+        }
+        self.damage_win(Win::Tapper);
+    }
+
+    /// A tap at `t` seconds on the tapper's clock: it counts (§2), lights the pad (§4), clicks (the metronome's Tick,
+    /// accented on the taps the beat bar shows orange, §8) and, with Apply tempo on, a new tempo becomes the project
+    /// tempo (§5).
+    fn tap(&mut self, t: f64) {
+        let tp = &mut self.state.tapper;
+        let bpm = tp.count.tap(t);
+        tp.flash_at = Some(std::time::Instant::now());
+        tp.flash = 1.0;
+        let accent = tp.count.bar().is_some_and(|(_, accent)| accent);
+        #[cfg(test)]
+        tp.test_clicks.push(accent);
+        #[cfg(not(test))]
+        self.transport.tap_click(accent);
+        if let Some(bpm) = bpm.filter(|_| crate::tapper::get().apply) {
+            self.set_tempo(bpm);
+        }
+        self.damage_win(Win::Tapper);
+    }
+
+    /// A key on a MIDI keyboard taps while the tapper is open (its pad's hint, §1); the keys of a chord tap once.
+    fn midi_tap(&mut self) {
+        let t = self.state.tapper.clock();
+        if !self.state.tapper.count.last().is_some_and(|l| t - l < crate::tapper::MIDI_CHORD) {
+            self.tap(t);
+        }
+    }
+
+    /// Sets the project tempo, kept in the tempo box's range (10-522 BPM): playback follows from the next tick, the
+    /// toolbar shows it. Returns the tempo set.
+    fn set_tempo(&mut self, bpm: f64) -> f64 {
+        let t = bpm.clamp(10.0, 522.0);
+        if self.state.tempo != t {
+            self.state.tempo = t;
+            self.state.piano.dirty = true;
+            self.damage_rect(TEMPO_RECT);
+        }
+        t
+    }
+
     pub(crate) fn damage_win(&mut self, w: Win) {
         if !self.state.shown(w) {
             return self.invalidate();
@@ -2077,6 +2298,7 @@ impl App {
         match w {
             Win::ChannelRack => self.damage_rect(views::rack::bounds(&self.state)),
             Win::Perf => self.damage_rect(views::perf::bounds(&self.state)),
+            Win::Tapper => self.damage_rect(views::tapper::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
             _ => self.invalidate(),
         }
@@ -2114,6 +2336,7 @@ impl App {
     pub(crate) fn show_playback(&mut self, now: Shown) {
         let old = std::mem::replace(&mut self.shown, now.clone());
         if now.playing != old.playing || now.paused != old.paused || now.song != old.song {
+            self.auto_scroll();
             return self.invalidate();
         }
         if !now.playing {
@@ -2147,6 +2370,7 @@ impl App {
                     self.damage_rect(r);
                 }
             }
+            self.auto_scroll();
         }
         if now.sounding != old.sounding {
             self.damage_live(Live::Sounding);
@@ -2165,9 +2389,15 @@ impl App {
         self.damage_rect(HINT_RECT);
     }
 
-    /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
+    /// The monitor is moving (a signal or a decay), or the tapper's pad fading: the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
-        self.transport.playing() || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading() || self.plugin_windows_busy()
+        self.transport.playing()
+            || matches!(self.drag, Some(Drag::SongPosHold { .. }))
+            || self.state.monitor.active()
+            || self.state.mixer.meters.iter().any(|m| m.active())
+            || self.loading()
+            || self.plugin_windows_busy()
+            || self.state.tapper.flash_at.is_some()
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -2198,6 +2428,7 @@ impl App {
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
         let now = std::time::Instant::now();
+        self.song_pos_tick(now);
         if self.state.cpu.due(now) {
             let tp = &self.transport;
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());
@@ -2221,6 +2452,10 @@ impl App {
                     self.invalidate();
                 }
             }
+        }
+        // The tapper's pad fades back after a tap (spec: ui/tempo-tapper.md §4).
+        if self.state.tapper.fade(now) && self.state.shown(Win::Tapper) {
+            self.damage_rect(views::tapper::pad_rect(&self.state));
         }
         // Mixer meters (spec: ui/mixer.md §9): fall back after playback stops.
         let peaks = self.transport.take_track_peaks();
@@ -2307,6 +2542,7 @@ impl App {
             song: self.shown.song,
             peaks: self.transport.peaks(),
             sounding: self.shown.sounding.clone(),
+            song_pos_drag: matches!(self.drag, Some(Drag::SongPos { .. })),
         };
         let overlays = views::paint(&mut ui, &self.state, &info);
         self.keep.parts = std::mem::take(&mut self.keep.next);
@@ -2340,10 +2576,33 @@ impl App {
             Some(r) => self.damage_rect(r),
             None => self.invalidate(),
         }
+        // In PAT mode the song position slider shows the play-start marker within the pattern's length.
+        if !self.state.song_mode {
+            self.damage_rect(crate::song_pos::PANEL);
+        }
     }
 
     fn piano_geom(&self) -> Option<Geom> {
         self.piano_grid.map(|g| Geom::new(&self.state, g))
+    }
+
+    /// A press on the piano roll's splitter: drags it; a double click hides / brings back the event panel (spec:
+    /// ui/event-panel-splitter.md §2).
+    fn piano_split_press(&mut self) {
+        let now = std::time::Instant::now();
+        let p = &mut self.state.piano;
+        let double = p.split_click.is_some_and(|t| now.duration_since(t).as_millis() < 400);
+        p.split_click = if double { None } else { Some(now) };
+        if double {
+            p.split = p.split.toggled();
+            crate::piano_split::save(p.split);
+            return self.damage_piano();
+        }
+        let band = self.hits.iter().find(|h| h.action == Action::PianoSplitter).map(|h| h.rect);
+        if let (Some(band), Some(g), Some(panel)) = (band, self.piano_grid, self.piano_panel) {
+            let h = panel.bottom() - g.y - crate::piano_split::BAND;
+            self.drag = Some(Drag::PianoSplit { dy: self.mouse.1 - band.y, top: g.y, h });
+        }
     }
 
     /// The playlist grid from the last paint.
@@ -2939,6 +3198,7 @@ impl App {
                         Win::ChannelRack => self.state.rack_pos = pos,
                         Win::Plugin => self.state.plugin_pos = pos,
                         Win::Perf => self.state.perf.pos = pos,
+                        Win::Tapper => self.state.tapper.pos = pos,
                         w => {
                             if let Some(i) = w.slot() {
                                 let r = &mut self.state.wins[i].rect;
@@ -3077,14 +3337,19 @@ impl App {
                     self.set_mon_param(i, x);
                     return true;
                 }
-                Drag::Tempo { y0, t0 } => {
-                    let t = (t0 + f64::from(y0 - y).round()).clamp(10.0, 522.0);
-                    if self.state.tempo != t {
-                        self.state.tempo = t;
-                        self.state.piano.dirty = true;
+                Drag::SongPos { dx } => self.song_pos_drag(dx),
+                Drag::PianoSplit { dy, top, h } => {
+                    let split = self.state.piano.split.dragged(y - dy - top, h);
+                    if split != self.state.piano.split {
+                        self.state.piano.split = split;
+                        self.damage_piano();
                     }
+                }
+                Drag::SongPosHold { .. } => {}
+                Drag::Tempo { y0, t0 } => {
+                    let t = self.set_tempo(t0 + f64::from(y0 - y).round());
                     self.hint = Cow::Owned(format!("Tempo {t:.3} BPM"));
-                    self.damage_rect(Rect::new(380.0, 0.0, 200.0, 83.0));
+                    self.damage_rect(TEMPO_RECT);
                     self.damage_rect(HINT_RECT);
                 }
             }
@@ -3210,10 +3475,13 @@ impl App {
             self.state.lane_menu = false;
             return;
         }
-        // Any click outside an open menu closes it.
+        // Any click outside an open menu closes it. VIEW's window entries are window toggles: one clicked in the menu
+        // closes the menu and toggles its window.
         if self.state.menu_open.is_some() && !matches!(action, Some(Action::MenuItem(..)) | Some(Action::Menu(_))) {
             self.state.menu_open = None;
-            return;
+            if !(matches!(action, Some(Action::ToggleWin(_))) && self.overlays.iter().any(|r| r.contains(x, y))) {
+                return;
+            }
         }
         self.raise_under_mouse();
         if let Some(a) = action {
@@ -3230,6 +3498,9 @@ impl App {
                 self.state.raise(w);
                 self.invalidate();
             }
+            self.state.no_focus = false;
+        } else if self.state.work_rect().contains(x, y) {
+            self.state.no_focus = true;
         }
     }
 
@@ -3238,6 +3509,7 @@ impl App {
         match w {
             Win::Plugin => views::channel_win::bounds(&self.state),
             Win::Perf => views::perf::bounds(&self.state),
+            Win::Tapper => views::tapper::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
             w => self.state.win_rect(w).outset(5.0),
         }
@@ -3257,6 +3529,9 @@ impl App {
                 e if e == EDGE_L | EDGE_T || e == EDGE_R | EDGE_B => Cursor::NwseResize,
                 _ => Cursor::NeswResize,
             };
+        }
+        if matches!((&self.drag, &self.hover), (Some(Drag::PianoSplit { .. }), _) | (None, Some(Action::PianoSplitter))) {
+            return Cursor::NsResize;
         }
         let edges = match (&self.drag, &self.hover) {
             (Some(Drag::RackResize { edges, .. }), _) => *edges,
@@ -3446,6 +3721,15 @@ impl App {
                 self.cpu_menu(x, y);
                 return self.invalidate();
             }
+            Some(Action::Metronome) => {
+                self.metronome_menu(x, y);
+                return self.invalidate();
+            }
+            Some(Action::AutoScroll) => {
+                self.autoscroll_menu(x, y);
+                return self.invalidate();
+            }
+            Some(Action::SongPos) => return self.song_pos_jump(),
             Some(Action::BrowserRow(i)) => {
                 if self.browser_remove_root(*i) || self.params_browser_right(*i, x, y) {
                     return;
@@ -3573,6 +3857,8 @@ impl App {
                 }
             }
             Some(Drag::ZoomBox { x0, y0 }) => self.zoom_to(x0, y0),
+            Some(Drag::SongPos { .. }) => self.song_pos_release(),
+            Some(Drag::PianoSplit { .. }) => crate::piano_split::save(self.state.piano.split),
             Some(Drag::Marker) if self.transport.playing() && !self.transport.song() => {
                 self.start_playback();
             }
@@ -3932,6 +4218,10 @@ impl App {
             self.perf_wheel(dy + dx);
             return Some(Win::Perf);
         }
+        if matches!(area, Some(Action::SongPos)) {
+            self.song_pos_wheel(dy);
+            return None;
+        }
         if matches!(area, Some(Action::PlPick(_) | Action::PlPickList)) {
             self.scroll_set(Scroll::PlPick, self.scroll_get(Scroll::PlPick) - (dy + dx) * 31.0);
             return Some(Win::Playlist);
@@ -4076,6 +4366,15 @@ impl App {
             self.set_design(next, true);
             return;
         }
+        // Shift+Alt+G: Enable groups (spec: ui/enable-groups.md §1), everywhere the main window has the keyboard.
+        if let Key::Character(c) = key
+            && alt
+            && self.shift
+            && !ctrl
+            && c.eq_ignore_ascii_case("g")
+        {
+            return self.toggle_groups();
+        }
         if self.plugin_find_key(key, ctrl) {
             return;
         }
@@ -4123,6 +4422,8 @@ impl App {
         }
         match key {
             Key::Named(NamedKey::Space) => self.act(if self.transport.playing() { Action::Stop } else { Action::Play }),
+            // spec: ui/tempo-tapper.md §1
+            Key::Named(NamedKey::F5) if ctrl => self.act(Action::ToggleWin(Win::Tapper)),
             Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
             Key::Named(NamedKey::F6) => self.act(Action::ToggleWin(Win::ChannelRack)),
             Key::Named(NamedKey::F7) => self.act(Action::ToggleWin(Win::PianoRoll)),
@@ -4133,6 +4434,14 @@ impl App {
             Key::Named(NamedKey::F11) => self.open_settings(views::settings::INFO),
             // Monitor debug panel (views/mondebug.rs) parked 2026-10-09: its values are now the defaults. Uncomment to tune again.
             // Key::Named(NamedKey::F12) => self.state.monitor.debug = !self.state.monitor.debug,
+            // spec: ui/close-windows.md (Shift+F12, Align all channel editors, is not available yet).
+            Key::Named(NamedKey::F12) if !self.shift => self.close_windows(if ctrl {
+                CloseAll::Unfocused
+            } else if alt {
+                CloseAll::Plugins
+            } else {
+                CloseAll::All
+            }),
             Key::Named(NamedKey::Escape) if self.state.settings.open => self.state.settings.open = false,
             Key::Named(NamedKey::Escape) => {
                 self.state.menu_open = None;
@@ -4149,6 +4458,7 @@ impl App {
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => self.act(Action::PianoUndo),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("t") => self.toggle_typing(),
+            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("m") => self.toggle_metronome(),
             // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
             // tools (until a typing keyboard exists, which will take them).
             Key::Character(c) if !ctrl && !alt && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
@@ -4194,7 +4504,7 @@ impl App {
 
     /// Start playback in the mode the PAT / SONG switch shows. Pattern mode loops the current pattern from the piano
     /// roll's play-start marker (§10); song mode plays the playlist from its start and stops at its end.
-    fn start_playback(&mut self) {
+    pub(crate) fn start_playback(&mut self) {
         let p = crate::rack::play_project(&self.state);
         let song = self.state.song_mode;
         if song && p.arrangement().is_none_or(|a| a.clips.is_empty()) {
@@ -4220,6 +4530,14 @@ impl App {
         } else {
             s.toggles.push("typing");
         }
+        self.invalidate();
+    }
+
+    /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G): the playlist's clips are deselected, as in FL.
+    pub fn toggle_groups(&mut self) {
+        let on = crate::enable_groups::toggle();
+        self.state.playlist.sel.clear();
+        self.state.message = Some(if on { "Groups enabled" } else { "Groups disabled" }.into());
         self.invalidate();
     }
 
@@ -4295,6 +4613,9 @@ impl App {
         for m in msgs {
             match m {
                 crate::midi_in::Msg::On(key, velocity) => {
+                    if self.state.shown(Win::Tapper) {
+                        self.midi_tap();
+                    }
                     let row = self.state.selected_channel;
                     if row >= self.state.project.channels.len() {
                         continue;
@@ -4617,6 +4938,9 @@ impl App {
         if self.rack_act(&a) {
             return;
         }
+        if a == Action::PianoSplitter {
+            return self.piano_split_press();
+        }
         if matches!(a, Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys) {
             self.piano_click(&a);
             return;
@@ -4630,7 +4954,7 @@ impl App {
         }
         let s = &mut self.state;
         match a {
-            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::PianoRuler | Action::Scrollbar(_) | Action::ScrollStep(..) => {}
+            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::PianoRuler | Action::PianoSplitter | Action::Scrollbar(_) | Action::ScrollStep(..) => {}
             Action::PianoTool(t) => {
                 s.piano.tool = t;
                 s.piano.overlay = None;
@@ -4641,6 +4965,9 @@ impl App {
                 }
             }
             Action::Typing => self.toggle_typing(),
+            Action::Metronome => self.toggle_metronome(),
+            Action::AutoScroll => self.toggle_autoscroll(),
+            Action::EnableGroups => self.toggle_groups(),
             // spec: ui/main-window.md §13: a double click opens the Plugin performance monitor; one click does nothing.
             Action::CpuPanel => {
                 let now = std::time::Instant::now();
@@ -4651,6 +4978,7 @@ impl App {
                 }
             }
             Action::Perf(p) => self.perf_act(p),
+            Action::Tapper(a) => self.tapper_act(a),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -4711,6 +5039,7 @@ impl App {
                 self.invalidate();
             }
             Action::Tempo => self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo }),
+            Action::SongPos => self.song_pos_press(),
             Action::Menu(i) => {
                 s.pat_ui.menu_at = None;
                 s.menu_open = if s.menu_open == Some(i) { None } else { Some(i) };
@@ -4723,6 +5052,7 @@ impl App {
             // (spec: ui/channel-rack.md §5).
             Action::ToggleWin(Win::Browser) => s.show_browser = !s.show_browser,
             Action::ToggleWin(Win::Perf) => self.toggle_perf(),
+            Action::ToggleWin(Win::Tapper) => self.toggle_tapper(),
             Action::ToggleWin(w) => {
                 if s.shown(w) && s.in_front(w) {
                     s.hide(w);
@@ -4831,6 +5161,7 @@ impl App {
                 let pos = match win {
                     Win::Plugin => s.plugin_pos,
                     Win::Perf => s.perf.pos,
+                    Win::Tapper => s.tapper.pos,
                     Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
@@ -5127,7 +5458,7 @@ impl App {
         }
     }
 
-    fn menu_item(&mut self, menu: usize, item: usize) {
+    pub(crate) fn menu_item(&mut self, menu: usize, item: usize) {
         use views::menus::*;
         match (menu, item) {
             (0, FILE_NEW) => {
@@ -5195,6 +5526,13 @@ impl App {
                 self.transport.stop();
                 self.state.message = Some("Sound stopped".into());
             }
+            // spec: ui/unused-channels.md
+            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Select unused channels") => {
+                self.state.message = crate::rack::run(self, crate::rack::RCmd::SelectUnused);
+            }
+            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Purge unused audio clips") => {
+                self.state.message = crate::rack::run(self, crate::rack::RCmd::Purge);
+            }
             (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Reset empty playlist tracks") => {
                 if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::ResetEmptyTracks) {
                     self.state.message = Some(m);
@@ -5215,7 +5553,14 @@ impl App {
                     self.state.message = Some(m);
                 }
             }
+            (VIEW, i) if item_at(VIEW, i).and_then(|it| CloseAll::from_label(it.label)).is_some() => {
+                let what = item_at(VIEW, i).and_then(|it| CloseAll::from_label(it.label)).expect("checked");
+                self.close_windows(what);
+            }
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::METRONOME_LABEL) => self.toggle_metronome(),
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::AUTOSCROLL_LABEL) => self.toggle_autoscroll(),
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::GROUPS_LABEL) => self.toggle_groups(),
             (m, i) if item_at(m, i).is_some_and(|it| crate::params::menu_handles(it.label)) => {
                 let label = item_at(m, i).map_or("", |it| it.label);
                 if let Some(msg) = self.params_menu(label) {
@@ -6478,6 +6823,143 @@ mod tests {
         AudioCfg::default().apply();
     }
 
+    /// Metronome (spec: ui/metronome.md §1-2): the toolbar button and OPTIONS > Metronome toggle the shared switch
+    /// (the button lit while on); right-click on the button lists the five sounds with the current one marked.
+    #[test]
+    fn metronome_button_menu_and_sound() {
+        use os_engine::metronome::Sound;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let was = crate::metronome::on();
+        let r = hit_rect(&app, &Action::Metronome);
+        assert_eq!((r.x, r.y), (580.0, 4.0));
+        click(&mut app, &mut c, r);
+        assert_eq!(crate::metronome::on(), !was);
+        let opt = (0..60).find(|&i| views::menus::item_at(views::menus::OPTIONS_MENU, i).is_some_and(|it| it.label == "Metronome")).unwrap();
+        app.menu_item(views::menus::OPTIONS_MENU, opt);
+        assert_eq!(crate::metronome::on(), was);
+        // The sound menu: a header, then the sounds; picking one keeps the switch.
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        frame(&mut app, &mut c, None);
+        let labels: Vec<String> = app.state.playlist.popup.as_ref().unwrap().items.iter().map(|it| it.label.to_string()).collect();
+        assert_eq!(labels, ["Metronome sound", "Hi-hat", "Tick", "Beep", "Cowbell", "Pulse"]);
+        let before = crate::metronome::sound();
+        let i = labels.iter().position(|x| x == "Cowbell").unwrap();
+        let item = hit_rect(&app, &Action::PlPopup(i));
+        click(&mut app, &mut c, item);
+        assert_eq!((crate::metronome::sound(), crate::metronome::on()), (Sound::Cowbell, was));
+        crate::metronome::set_sound(before);
+    }
+
+    /// Auto scrolling (spec: ui/auto-scrolling.md §1-2): the toolbar button and OPTIONS > Auto scrolling toggle the
+    /// switch (the button lit while on); right-click on the button toggles continuous scrolling.
+    #[test]
+    fn auto_scrolling_button_and_menu() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        assert!(!crate::autoscroll::on());
+        let r = hit_rect(&app, &Action::AutoScroll);
+        assert_eq!((r.x, r.y), (613.0, 45.0));
+        click(&mut app, &mut c, r);
+        assert!(crate::autoscroll::on());
+        let opt = (0..60).find(|&i| views::menus::item_at(views::menus::OPTIONS_MENU, i).is_some_and(|it| it.label == "Auto scrolling")).unwrap();
+        app.menu_item(views::menus::OPTIONS_MENU, opt);
+        assert!(!crate::autoscroll::on());
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        frame(&mut app, &mut c, None);
+        let labels: Vec<String> = app.state.playlist.popup.as_ref().unwrap().items.iter().map(|it| it.label.to_string()).collect();
+        assert_eq!(labels, ["Continuous scrolling"]);
+        let item = hit_rect(&app, &Action::PlPopup(0));
+        click(&mut app, &mut c, item);
+        assert_eq!(crate::autoscroll::get(), crate::autoscroll::Settings { on: false, continuous: false });
+    }
+
+    /// Auto scrolling follows the playhead (spec: ui/auto-scrolling.md §5): the playlist in song mode, the piano roll in
+    /// pattern mode; continuous at a third of the width, paged by a quarter page at 7/8; not while paused or off. The
+    /// playlist's scroll is drawn by moving pixels: each frame must equal a full repaint.
+    #[test]
+    fn auto_scrolling_follows_the_playhead() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        crate::playlist::place(&mut app.state, 0, 0);
+        crate::playlist::place(&mut app.state, 1, 1536);
+        for w in [Win::Playlist, Win::PianoRoll] {
+            let ws = &mut app.state.wins[w.slot().unwrap()];
+            ws.maxed = false;
+            ws.rect = Rect::new(220.0, 90.0, 1000.0, 480.0);
+        }
+        let play = |tick: f64, song: bool| Shown { playing: true, paused: false, tick, song, sounding: Vec::new() };
+        crate::autoscroll::toggle();
+
+        // Song mode, playlist in front.
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut a, None);
+        let g = app.pl_grid.expect("playlist shown");
+        let ppt = |app: &App| app.state.playlist_bar_w / (f32::from(app.state.project.ppq.max(4)) * 4.0);
+        let tick_at = |app: &App, x: f32| f64::from(x / ppt(app));
+        app.show_playback(play(0.0, true));
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut a, d);
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        // Continuous: still up to a third, then held there.
+        app.show_playback(play(tick_at(&app, g.w / 3.0 - 2.0), true));
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        for k in [0.5, 0.52, 0.9] {
+            let x = g.w * k;
+            app.show_playback(play(tick_at(&app, x), true));
+            assert!((app.state.playlist_scroll.0 - (x - g.w / 3.0)).abs() <= 0.5, "continuous at {k}");
+            let d = app.take_damage();
+            frame_damage(&mut app, &mut a, d);
+            frame(&mut app, &mut b, None);
+            assert_same(&a, &b, &format!("continuous at {k}"));
+        }
+        // Paged: nothing until 7/8 of the width, then a quarter page.
+        crate::autoscroll::toggle_continuous();
+        app.state.playlist_scroll.0 = 0.0;
+        frame(&mut app, &mut a, None);
+        app.show_playback(play(tick_at(&app, g.w * 0.8), true));
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        app.show_playback(play(tick_at(&app, g.w * 0.9), true));
+        assert!((app.state.playlist_scroll.0 - g.w * 0.275).abs() <= 0.5, "paged: {}", app.state.playlist_scroll.0);
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut a, d);
+        frame(&mut app, &mut b, None);
+        assert_same(&a, &b, "paged step");
+        // Back to the start: the view goes with it.
+        app.show_playback(play(0.0, true));
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        // Paused: the view stays.
+        app.show_playback(Shown { paused: true, ..play(tick_at(&app, g.w * 3.0), true) });
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        // Off: the view stays.
+        app.show_playback(play(0.0, true));
+        crate::autoscroll::toggle();
+        app.show_playback(play(tick_at(&app, g.w * 3.0), true));
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        app.show_playback(Shown::default());
+
+        // Pattern mode, piano roll in front: its own width and zoom.
+        crate::autoscroll::toggle();
+        app.state.z = vec![Win::PianoRoll];
+        frame(&mut app, &mut a, None);
+        let g = app.piano_grid.expect("piano roll shown");
+        let ppq = f64::from(app.state.project.ppq.max(4));
+        let tick = f64::from(g.w) * 0.9 / f64::from(app.state.piano.px_per_beat) * ppq;
+        app.show_playback(play(0.0, false));
+        app.show_playback(play(tick, false));
+        assert!((app.scroll_get(Scroll::PianoX) - g.w * 0.275).abs() <= 0.5, "piano roll paged: {}", app.scroll_get(Scroll::PianoX));
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut a, d);
+        frame(&mut app, &mut b, None);
+        assert_same(&a, &b, "piano roll step");
+    }
+
     /// CPU panel (spec: ui/main-window.md §13): the menu's View FPS / Misc / Refresh change what it shows; a double
     /// click opens the Plugin performance monitor (spec: ui/plugin-performance.md), which lists the hosted
     /// instruments, sorts, finds and closes from the VIEW menu.
@@ -6569,6 +7051,142 @@ mod tests {
         let x = hit_rect(&app, &Action::CloseWin(Win::Perf));
         click(&mut app, &mut c, x);
         assert!(!app.state.shown(Win::Perf));
+    }
+
+    /// Tempo tapper (spec: ui/tempo-tapper.md): VIEW > Tempo tapper opens it centred over the main window, ticked in
+    /// the menu; clicks on the pad set the project tempo (whole BPM, clamped to the tempo box) while Apply tempo is on,
+    /// only show it while off, and turning it on applies the shown tempo; a long pause starts a new count; MIDI keys
+    /// tap (a chord once); the title bar moves it, Ctrl+F5 and its close button close it, and it reopens where it was.
+    #[test]
+    fn tempo_tapper_window() {
+        use crate::tapper::TapAct;
+        use views::menus::{bar_model, Mark, VIEW};
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let view = hit_rect(&app, &Action::Menu(VIEW));
+        click(&mut app, &mut c, view);
+        let item = hit_rect(&app, &Action::ToggleWin(Win::Tapper));
+        click(&mut app, &mut c, item);
+        assert!(app.state.shown(Win::Tapper) && app.state.in_front(Win::Tapper));
+        assert_eq!(views::tapper::rect(&app.state), Rect::new(882.0, 393.0, 156.0, 294.0), "156 x 294, centred over the main window");
+        let row = bar_model(&app.state)[VIEW].rows.iter().find(|r| r.label == "Tempo tapper").cloned().unwrap();
+        assert_eq!((row.enabled, row.mark, row.shortcut), (true, Mark::Check(true), "Ctrl+F5"));
+        // The hints; the controls that do nothing yet only say so.
+        let hint = |app: &App, a: &Action| app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.hint.to_string()).unwrap();
+        assert_eq!(hint(&app, &Action::Tapper(TapAct::Pad)), "Tap me, or press any key on your MIDI keyboard");
+        for name in [
+            "Nudge tempo to align time (Left / pitch bend)",
+            "Nudge tempo to align time (Right / pitch bend)",
+            "Resynchronize to taps",
+            "Mute all audio during first taps (during playback)",
+            "Mute now, for a few bars (during playback)",
+        ] {
+            assert_eq!(hint(&app, &Action::Placeholder(name)), format!("{name}: not available yet"));
+        }
+
+        // Apply tempo on (the default): from the second tap, every tempo is the project's.
+        let pad = hit_rect(&app, &Action::Tapper(TapAct::Pad));
+        let tap = |app: &mut App, c: &mut Canvas, t: f64| {
+            app.state.tapper.test_time = Some(t);
+            click(app, c, pad);
+        };
+        assert!(crate::tapper::get().apply);
+        assert_eq!(app.state.tempo, 130.0);
+        tap(&mut app, &mut c, 10.0);
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (None, 130.0), "one tap: TAP stays");
+        assert!(app.state.tapper.flash == 1.0 && app.animating(), "a tap lights the pad, which then fades");
+        tap(&mut app, &mut c, 10.5);
+        assert_eq!(app.state.tempo, 120.0);
+        tap(&mut app, &mut c, 11.0);
+        tap(&mut app, &mut c, 11.4);
+        assert_eq!(app.state.tempo, 129.0, "the average of every interval, rounded (128.57)");
+        assert!(app.unsaved(), "a tapped tempo is a change to the project");
+        // Off: the pad shows the tempo, the project keeps its own; turning it on applies the pad's.
+        let apply = hit_rect(&app, &Action::Tapper(TapAct::Apply));
+        click(&mut app, &mut c, apply);
+        assert!(!crate::tapper::get().apply);
+        tap(&mut app, &mut c, 11.8);
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (Some(133.0), 129.0));
+        click(&mut app, &mut c, apply);
+        assert!(crate::tapper::get().apply);
+        assert_eq!(app.state.tempo, 133.0);
+        // A long pause starts a new count (the tempo stays); the project tempo stays in 10-522.
+        tap(&mut app, &mut c, 20.0);
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (None, 133.0));
+        tap(&mut app, &mut c, 20.05);
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (Some(1200.0), 522.0));
+        // MIDI keys tap while the window is open; a chord's keys are one tap.
+        for t in [30.0, 30.03, 30.5] {
+            app.state.tapper.test_time = Some(t);
+            app.midi_tap();
+        }
+        assert_eq!(app.state.tempo, 120.0);
+        // Every tap clicked, accented on the first of each four of a count (§8); the chord's second key did not.
+        let (t, f) = (true, false);
+        assert_eq!(app.state.tapper.test_clicks, [t, f, f, f, t, t, f, t, f]);
+        frame(&mut app, &mut c, None);
+
+        // The title bar moves it; Ctrl+F5 closes it while it is in front and reopens it where it was left.
+        let title = hit_rect(&app, &Action::WinDrag(Win::Tapper));
+        app.mouse_move(title.x + 40.0, title.cy());
+        app.mouse_down();
+        app.mouse_move(title.x + 40.0 - 300.0, title.cy() + 100.0);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.state.tapper.pos, (582.0, 493.0));
+        app.key(&Key::Named(NamedKey::F5), true, false);
+        assert!(!app.state.shown(Win::Tapper));
+        assert!(app.state.shown(Win::Playlist), "Ctrl+F5 is not F5");
+        app.key(&Key::Named(NamedKey::F5), true, false);
+        assert!(app.state.shown(Win::Tapper) && app.state.tapper.pos == (582.0, 493.0));
+        assert_eq!(app.state.tapper.count.tempo(), Some(120.0), "the last tempo stays on the pad");
+        frame(&mut app, &mut c, None);
+        let x = hit_rect(&app, &Action::CloseWin(Win::Tapper));
+        click(&mut app, &mut c, x);
+        assert!(!app.state.shown(Win::Tapper));
+        let row = bar_model(&app.state)[VIEW].rows.iter().find(|r| r.label == "Tempo tapper").cloned().unwrap();
+        assert_eq!(row.mark, Mark::Check(false));
+        // The toolbar's kick drum button (the 8th window button) opens and closes it too.
+        let b = hit_rect(&app, &Action::ToggleWin(Win::Tapper));
+        assert_eq!((b.x, hint(&app, &Action::ToggleWin(Win::Tapper)).as_str()), (973.0 + 33.0 * 7.0, "Tempo tapper (Ctrl+F5)"));
+        click(&mut app, &mut c, b);
+        assert!(app.state.shown(Win::Tapper) && app.state.in_front(Win::Tapper));
+        click(&mut app, &mut c, b);
+        assert!(!app.state.shown(Win::Tapper));
+    }
+
+    /// The tapper's flash fades on the ticks (spec: ui/tempo-tapper.md §4, §8): each repaints just the pad, which shows
+    /// the same as a full paint, in both designs; once out, ticking stops.
+    #[test]
+    fn tempo_tapper_flash_repaints_the_pad() {
+        use std::time::{Duration, Instant};
+        for design in Design::ALL {
+            let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+            let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+            let mut app = App::new(None);
+            app.theme = design_theme(design, false);
+            app.act(Action::ToggleWin(Win::Tapper));
+            app.state.tapper.test_time = Some(1.0);
+            app.act(Action::Tapper(crate::tapper::TapAct::Pad));
+            app.state.tapper.test_time = Some(1.5);
+            app.act(Action::Tapper(crate::tapper::TapAct::Pad));
+            frame(&mut app, &mut a, None);
+            let _ = app.take_damage();
+            let pad = views::tapper::pad_rect(&app.state);
+            for (ms, what) in [(100, "fading"), (300, "gone")] {
+                app.state.tapper.flash_at = Some(Instant::now() - Duration::from_millis(ms));
+                app.tick();
+                let d = app.take_damage();
+                let Some(Some(rects)) = &d else { panic!("{what}: repaints regions, not the frame") };
+                assert!(rects.iter().any(|r| r.intersect(&pad) == pad), "{what}: the pad is repainted ({rects:?})");
+                frame_damage(&mut app, &mut a, d);
+                frame(&mut app, &mut b, None);
+                assert_same(&a, &b, &format!("{design:?}: flash {what}"));
+            }
+            assert!(!app.animating() && app.state.tapper.flash == 0.0);
+        }
     }
 
     /// An empty project with a Lemon 3x Osc played from the typing keyboard while the UI ticks, then in a playing
@@ -7412,6 +8030,68 @@ mod tests {
             }
         }
         assert_eq!(loud, 0, "erased notes still sounding: {:?}", app.transport.sounding());
+    }
+
+    /// The grid / event panel splitter (spec: ui/event-panel-splitter.md): drag with the minimums and collapsing,
+    /// double click to hide and bring back the panel, the vertical resize cursor.
+    #[test]
+    fn event_panel_splitter() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        frame(&mut app, &mut c, None);
+        let band = hit_rect(&app, &Action::PianoSplitter);
+        let (grid, panel) = (app.piano_grid.unwrap(), app.piano_panel.unwrap());
+        assert_eq!((panel.h, band.y), (177.0, panel.y - 8.0), "the default layout");
+        let h = panel.bottom() - grid.y - 8.0;
+        app.mouse_move(band.cx(), band.y + 3.0);
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.cursor(), Cursor::NsResize);
+
+        // Dragging up 100 px gives the panel 100 px more, keeping the grab offset.
+        app.mouse_down();
+        app.mouse_move(band.cx(), band.y - 97.0);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.piano_panel.unwrap().h, 277.0);
+        assert_eq!(app.piano_grid.unwrap().h + app.piano_panel.unwrap().h, h);
+        // Down to 30 px of panel: held at 45; past half of that, collapsed.
+        let drag_to = |app: &mut App, c: &mut Canvas, panel_h: f32| {
+            let b = hit_rect(app, &Action::PianoSplitter);
+            app.state.piano.split_click = None;
+            app.mouse_move(b.cx(), b.y + 3.0);
+            app.mouse_down();
+            app.mouse_move(b.cx(), panel.bottom() - panel_h - 8.0 + 3.0);
+            app.mouse_up();
+            frame(app, c, None);
+            app.piano_panel.unwrap().h
+        };
+        assert_eq!(drag_to(&mut app, &mut c, 30.0), 45.0);
+        assert_eq!(drag_to(&mut app, &mut c, 20.0), 0.0);
+        assert!(app.state.piano.split.panel_collapsed());
+        assert_eq!(hit_rect(&app, &Action::PianoSplitter).bottom(), panel.bottom(), "the band at the bottom");
+        // Open again at 200 px, then a double click collapses it and another brings back 200 px.
+        assert_eq!(drag_to(&mut app, &mut c, 200.0), 200.0);
+        let b = hit_rect(&app, &Action::PianoSplitter);
+        app.state.piano.split_click = None;
+        app.mouse_move(b.cx(), b.y + 3.0);
+        for _ in 0..2 {
+            app.mouse_down();
+            app.mouse_up();
+        }
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.piano_panel.unwrap().h, 0.0);
+        let b = hit_rect(&app, &Action::PianoSplitter);
+        app.mouse_move(b.cx(), b.y + 3.0);
+        for _ in 0..2 {
+            app.mouse_down();
+            app.mouse_up();
+        }
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.piano_panel.unwrap().h, 200.0);
+        // Up to under the ruler: the grid collapses and the panel takes the whole height.
+        assert_eq!(drag_to(&mut app, &mut c, h - 10.0), h);
+        assert_eq!(app.piano_grid.unwrap().h, 0.0);
     }
 
     /// Event panel: the Repeat lane and the channel control lanes (spec: ui/piano-roll.md §7a, §7b).
@@ -8400,6 +9080,216 @@ mod tests {
         assert_eq!(arr.clips.len(), pl::clips(&app.state).len());
         assert!(!arr.tracks[0].enabled);
         assert_eq!(back.automation(ch).map(|a| a.points.len()), Some(n + 1));
+    }
+
+    /// Enable groups (spec: ui/enable-groups.md): the toolbar button, OPTIONS > Enable groups and Shift+Alt+G toggle it
+    /// and deselect the clips; while off, a grouped clip selects and moves alone and Shift+G groups only the selection;
+    /// the groups themselves are kept.
+    #[test]
+    fn enable_groups_switch() {
+        use crate::playlist as pl;
+        use winit::keyboard::Key;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.playlist.reset();
+        app.state.playlist.row_h = pl::ROW_H;
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let g = pl::PGeom::new(&app.state, app.pl_grid().expect("playlist grid"));
+        let bar = 4 * u32::from(app.state.project.ppq);
+        let at = |t: u32, track: u16| (g.x_of(t as f32) + 10.0, g.y_of(track) + 30.0);
+        let drag = |app: &mut App, c: &mut Canvas, (x0, y0): (f32, f32), (x1, y1): (f32, f32)| {
+            app.state.playlist.last_clip = None;
+            app.mouse_move(x0, y0);
+            app.mouse_down();
+            for i in 1..=10 {
+                let k = i as f32 / 10.0;
+                app.mouse_move(x0 + (x1 - x0) * k, y0 + (y1 - y0) * k);
+            }
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        let pos = |app: &App, t: u16| pl::clips(&app.state).iter().find(|c| c.track == t).map(|c| (c.position, c.group())).unwrap();
+        // Clips on tracks 0 and 1 grouped; a loose clip on track 2.
+        for t in 0..3 {
+            drag(&mut app, &mut c, at(t as u32 * bar, t), at(t as u32 * bar, t));
+        }
+        app.state.playlist.sel = vec![0, 1];
+        app.shift = true;
+        app.key(&Key::Character("G".into()), false, false);
+        app.shift = false;
+
+        // The toolbar button (lit while on) turns it off and deselects.
+        assert!(crate::enable_groups::on());
+        let r = hit_rect(&app, &Action::EnableGroups);
+        assert_eq!((r.x, r.y), (679.0, 45.0));
+        click(&mut app, &mut c, r);
+        assert!(!crate::enable_groups::on());
+        assert!(app.state.playlist.sel.is_empty(), "toggling deselects, as in FL");
+        // Off: the grouped clip moves alone; the group is kept.
+        drag(&mut app, &mut c, at(0, 0), at(bar, 0));
+        assert_eq!((pos(&app, 0).0, pos(&app, 1).0), (bar, bar), "only the dragged clip moved");
+        assert_eq!(app.state.playlist.sel.len(), 1);
+        assert!(pos(&app, 0).1 != 0 && pos(&app, 0).1 == pos(&app, 1).1);
+        // Off: Shift+G groups just the selection (track 0 and the loose clip), leaving its old mate behind.
+        let i0 = pl::clips(&app.state).iter().position(|c| c.track == 0).unwrap();
+        let i2 = pl::clips(&app.state).iter().position(|c| c.track == 2).unwrap();
+        app.state.playlist.sel = vec![i0, i2];
+        app.shift = true;
+        app.key(&Key::Character("G".into()), false, false);
+        app.shift = false;
+        assert_eq!(pos(&app, 0).1, pos(&app, 2).1);
+        assert_ne!(pos(&app, 0).1, pos(&app, 1).1);
+
+        // Shift+Alt+G and OPTIONS > Enable groups toggle it too; on again, a click selects the whole group.
+        app.shift = true;
+        app.key(&Key::Character("G".into()), false, true);
+        app.shift = false;
+        assert!(crate::enable_groups::on());
+        let opt = (0..60).find(|&i| views::menus::item_at(views::menus::OPTIONS_MENU, i).is_some_and(|it| it.label == "Enable groups")).unwrap();
+        app.menu_item(views::menus::OPTIONS_MENU, opt);
+        assert!(!crate::enable_groups::on());
+        app.menu_item(views::menus::OPTIONS_MENU, opt);
+        assert!(crate::enable_groups::on());
+        drag(&mut app, &mut c, at(2 * bar, 2), at(3 * bar, 2));
+        assert_eq!((pos(&app, 0).0, pos(&app, 2).0), (2 * bar, 3 * bar), "the group moved together");
+        assert_eq!(app.state.playlist.sel.len(), 2);
+    }
+
+    /// VIEW > Close all windows / unfocused / plugin windows and F12, Ctrl+F12, Alt+F12 (spec: ui/close-windows.md):
+    /// the browser stays (and the Tempo tapper for Alt+F12); the focused window is the one in front, none after a
+    /// click on the empty workspace.
+    #[test]
+    fn close_all_windows() {
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        let all = vec![Win::Playlist, Win::Mixer, Win::Plugin, Win::ChannelRack, Win::Perf, Win::Tapper, Win::PianoRoll];
+        let f12 = Key::Named(NamedKey::F12);
+        let view = |label: &str| (0..60).find(|&i| views::menus::item_at(views::menus::VIEW, i).is_some_and(|it| it.label == label)).unwrap();
+        for label in ["Close all windows", "Close all plugin windows", "Close all unfocused windows"] {
+            let it = views::menus::item_at(views::menus::VIEW, view(label)).unwrap();
+            assert!(views::menus::works(views::menus::VIEW, it), "{label} is not greyed out");
+        }
+
+        // F12 and the menu entry: everything but the browser.
+        app.state.z = all.clone();
+        app.key(&f12, false, false);
+        assert!(app.state.z.is_empty());
+        assert!(app.state.show_browser);
+        app.state.z = all.clone();
+        app.menu_item(views::menus::VIEW, view("Close all windows"));
+        assert!(app.state.z.is_empty());
+
+        // Alt+F12: only the channel settings window (and hosted plugin windows).
+        app.state.z = all.clone();
+        app.key(&f12, false, true);
+        assert_eq!(app.state.z, vec![Win::Playlist, Win::Mixer, Win::ChannelRack, Win::Perf, Win::Tapper, Win::PianoRoll], "the Tempo tapper stays too");
+        app.state.z = all.clone();
+        app.menu_item(views::menus::VIEW, view("Close all plugin windows"));
+        assert!(!app.state.shown(Win::Plugin) && app.state.z.len() == all.len() - 1);
+
+        // Ctrl+F12: all but the one in front (the last clicked).
+        app.state.z = all.clone();
+        app.state.raise(Win::Mixer);
+        app.key(&f12, true, false);
+        assert_eq!(app.state.z, vec![Win::Mixer]);
+        app.state.z = all.clone();
+        app.menu_item(views::menus::VIEW, view("Close all unfocused windows"));
+        assert_eq!(app.state.z, vec![Win::PianoRoll]);
+        // A click on the empty workspace leaves no window focused: Ctrl+F12 closes them all.
+        app.state.z = vec![Win::ChannelRack];
+        frame(&mut app, &mut c, None);
+        let work = app.state.work_rect();
+        app.mouse_move(work.right() - 20.0, work.bottom() - 20.0);
+        app.mouse_down();
+        app.mouse_up();
+        assert!(app.state.no_focus);
+        app.key(&f12, true, false);
+        assert!(app.state.z.is_empty());
+        // Opening or clicking a window focuses it again.
+        app.state.raise(Win::Playlist);
+        app.state.raise(Win::Mixer);
+        assert!(!app.state.no_focus);
+        app.key(&f12, true, false);
+        assert_eq!(app.state.z, vec![Win::Mixer]);
+        // Shift+F12 (Align all channel editors) is not available yet: nothing closes.
+        app.shift = true;
+        app.key(&f12, false, false);
+        app.shift = false;
+        assert_eq!(app.state.z, vec![Win::Mixer]);
+    }
+
+    /// The toolbar's song position slider (spec: ui/song-position-slider.md), with FL's measured numbers: an 8.25-bar
+    /// song; a click beside the handle steps 1/88 of it toward the pointer and holding repeats up to the pointer; the
+    /// handle drags; right-click jumps; the wheel moves 3/64 (down = later); PAT mode moves through the pattern (the
+    /// play-start marker); an empty playlist disables it in SONG mode.
+    #[test]
+    fn song_position_slider() {
+        use crate::song_pos::{handle_x, PANEL};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project.arrangements =
+            vec![os_model::Arrangement { number: 1, clips: vec![os_model::Clip::new(0, 3168, 0, os_model::ClipSource::Pattern(1))], ..Default::default() }];
+        app.state.song_mode = true;
+        app.state.playlist.pos = 0;
+        frame(&mut app, &mut c, None);
+        assert_eq!(hit_rect(&app, &Action::SongPos), PANEL);
+        let y = 62.0;
+        let pos = |app: &App| app.state.playlist.pos;
+
+        // A click beside the handle: one step (36 ticks); the release ends it.
+        app.mouse_move(480.0, y);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!(pos(&app), 36);
+        assert_eq!(app.hint, "Song position: 1:02:12");
+        // Held: steps every repeat until the handle is under the pointer (1584 ticks), then it stays.
+        app.mouse_down();
+        assert_eq!(pos(&app), 72);
+        let t0 = std::time::Instant::now();
+        for i in 1..60 {
+            app.song_pos_tick(t0 + std::time::Duration::from_millis(250 * i));
+        }
+        assert_eq!(pos(&app), 1584, "stopped under the pointer");
+        assert!(app.animating(), "the hold ticks at animation rate");
+        app.mouse_up();
+        assert!(!matches!(app.drag, Some(Drag::SongPos { .. } | Drag::SongPosHold { .. })));
+        // The handle drags (keeping the grab offset).
+        frame(&mut app, &mut c, None);
+        assert_eq!(handle_x(1584, 3168), 480.0);
+        app.mouse_move(482.0, y);
+        app.mouse_down();
+        app.mouse_move(438.0, y);
+        assert_eq!(pos(&app), 764);
+        app.mouse_up();
+        // Right click jumps to the pointer, clamped to the last tick.
+        app.mouse_move(565.0, y);
+        app.mouse_down_right();
+        assert_eq!(pos(&app), 3167);
+        // The wheel: up = earlier, down = later, 149 ticks a notch.
+        frame(&mut app, &mut c, None);
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(pos(&app), 3018);
+        app.wheel(0.0, -2.0, false, false);
+        assert_eq!(pos(&app), 3167);
+
+        // PAT mode: through the (empty, one-bar) pattern; right-click at the middle.
+        app.state.song_mode = false;
+        frame(&mut app, &mut c, None);
+        app.mouse_move(480.0, y);
+        app.mouse_down_right();
+        assert_eq!(app.state.piano.marker, 192);
+        assert_eq!(app.hint, "Song position: 1:09:00");
+
+        // SONG mode with an empty playlist: disabled.
+        app.state.song_mode = true;
+        app.state.project.arrangements[0].clips.clear();
+        frame(&mut app, &mut c, None);
+        assert!(app.hits.iter().all(|h| h.action != Action::SongPos));
+        app.mouse_down_right();
+        assert_eq!(pos(&app), 3167);
     }
 
     /// Playlist navigation and editing shortcuts (spec: ui/playlist.md §3, §3a, §4, §5, §6): Alt+wheel = track
