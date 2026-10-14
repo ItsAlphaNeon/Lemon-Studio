@@ -1,4 +1,4 @@
-//! Text on Linux: outlines through swash (TrueType hinting, quarter-pixel pen positions, blending in a
+//! Text on Linux and macOS: outlines through swash (TrueType hinting, quarter-pixel pen positions, blending in a
 //! gamma of 1.8) in the Barlow family (SIL OFL 1.1, see `fonts/Barlow/OFL.txt`), which stays crisp at the
 //! fractional scales Wayland and X11 desktops run at.
 //!
