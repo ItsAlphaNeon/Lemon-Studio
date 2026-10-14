@@ -1,5 +1,5 @@
 //! Hosted plugins in project files: what a save writes for plugin channels and mixer slots played by third-party
-//! plugins (CLAP, VST3), and which plugin an opened project's wrapped channels and slots get.
+//! plugins (CLAP, VST3, VST2), and which plugin an opened project's wrapped channels and slots get.
 //!
 //! A third-party plugin is stored the way the project format stores every such plugin: as the wrapper plugin, whose
 //! state names the plugin (format, class id, name, vendor, file) and holds the plugin's own saved state. Plugins
@@ -48,13 +48,13 @@ pub fn has_recreation(id: &str) -> bool {
     id.eq_ignore_ascii_case(crate::osc3::FILE_NAME) || id.eq_ignore_ascii_case(crate::plugins::EQ_FILE_NAME)
 }
 
-/// Whether a hosted plugin is saved inside the wrapper: CLAP and VST3 plugins from plugin files.
+/// Whether a hosted plugin is saved inside the wrapper: CLAP, VST3 and VST2 plugins from plugin files.
 pub fn is_wrapped(d: &Descriptor) -> bool {
     #[cfg(test)]
     if WRAP_BUILTINS.with(|w| w.get()) {
-        return matches!(d.format, Format::Clap | Format::Vst3);
+        return matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2);
     }
-    matches!(d.format, Format::Clap | Format::Vst3) && !is_builtin(d)
+    matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2) && !is_builtin(d)
 }
 
 /// The project-file identity of a hosted plugin with its saved state.
@@ -62,7 +62,7 @@ pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
     PluginRef {
         format: d.format.as_str().into(),
         // A CLAP id has no place in the wrapper state (spec §4): such plugins are found by file and name.
-        id: if d.format == Format::Vst3 { d.id.clone() } else { String::new() },
+        id: if matches!(d.format, Format::Vst3 | Format::Vst2) { d.id.clone() } else { String::new() },
         name: d.name.clone(),
         vendor: d.vendor.clone(),
         path: d.path.to_string_lossy().into_owned(),

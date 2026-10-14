@@ -18,7 +18,12 @@ pub mod rec {
     pub const NAME: u32 = 54;
     pub const PATH: u32 = 55;
     pub const VENDOR: u32 = 56;
+    /// A VST2 plugin's VST version (2400 in every VST2 wrapper state FL Studio wrote that has been seen).
+    pub const VST_VERSION: u32 = 57;
 }
+
+/// What Lemon Studio writes as a new VST2 wrapper state's VST version.
+const VST2_VERSION: u32 = 2400;
 
 /// The type word Lemon Studio writes for a new wrapper state.
 pub const NEW_TYPE: u32 = 10;
@@ -104,6 +109,11 @@ fn format_of(r: &Records, path: &str) -> &'static str {
     }
 }
 
+/// A VST2 unique id record (a little-endian 32-bit number: `'4FTP'` is stored `PTF4`) as 8 hex digits, `34465450`.
+fn vst2_id(b: &[u8]) -> Option<String> {
+    Some(format!("{:08X}", u32::from_le_bytes(b.try_into().ok()?)))
+}
+
 /// The plugin a wrapper state names. `None` when `data` is not a wrapper state.
 pub fn decode(data: &[u8]) -> Option<PluginRef> {
     let r = Records::parse(data)?;
@@ -111,7 +121,7 @@ pub fn decode(data: &[u8]) -> Option<PluginRef> {
     let format = format_of(&r, &path);
     let id = match format {
         "vst3" => r.get(rec::GUID).filter(|g| g.len() == 16).map(hex).unwrap_or_default(),
-        "vst2" => r.get(rec::FOURCC).map(hex).unwrap_or_default(),
+        "vst2" => r.get(rec::FOURCC).and_then(vst2_id).unwrap_or_default(),
         _ => String::new(),
     };
     Some(PluginRef {
@@ -137,6 +147,17 @@ pub fn encode(base: Option<&[u8]>, p: &PluginRef) -> Vec<u8> {
         }
     } else {
         r.remove(rec::GUID);
+    }
+    if p.format == "vst2" {
+        if let Ok(id) = u32::from_str_radix(&p.id, 16) {
+            r.set(rec::FOURCC, id.to_le_bytes().to_vec());
+        }
+        if r.get(rec::VST_VERSION).is_none() {
+            r.set(rec::VST_VERSION, VST2_VERSION.to_le_bytes().to_vec());
+        }
+    } else {
+        r.remove(rec::FOURCC);
+        r.remove(rec::VST_VERSION);
     }
     r.set(rec::STATE, p.state.clone());
     r.set(rec::NAME, p.name.as_bytes().to_vec());
@@ -202,7 +223,7 @@ mod tests {
         }
         .to_bytes();
         let mut p = decode(&base).unwrap();
-        assert_eq!((p.format.as_str(), p.id.as_str(), p.name.as_str()), ("vst2", "01020304", "Old"));
+        assert_eq!((p.format.as_str(), p.id.as_str(), p.name.as_str()), ("vst2", "04030201", "Old"));
         assert!(p.state.is_empty());
         // Unchanged: the same bytes.
         assert_eq!(encode(Some(&base), &p), base);
@@ -210,9 +231,34 @@ mod tests {
         let out = Records::parse(&encode(Some(&base), &p)).unwrap();
         assert_eq!(out.kind, 8);
         let ids: Vec<u32> = out.records.iter().map(|r| r.0).collect();
-        assert_eq!(ids, [2, rec::INFO, rec::FOURCC, rec::STATE, rec::NAME, rec::PATH]);
+        assert_eq!(ids, [2, rec::INFO, rec::FOURCC, rec::STATE, rec::NAME, rec::PATH, rec::VST_VERSION]);
+        assert_eq!(out.get(rec::FOURCC), Some(&[1, 2, 3, 4][..]));
         assert_eq!(out.get(2), Some(&[0xFF; 25][..]));
         assert_eq!(out.get(rec::STATE), Some(&[9; 7][..]));
+    }
+
+    /// FL Studio keeps a VST2 plugin's unique id little-endian (TruePianos, `'4FTP'`, is stored `PTF4`).
+    #[test]
+    fn vst2_ids_are_stored_as_fl_studio_stores_them() {
+        let p = PluginRef {
+            format: "vst2".into(),
+            id: "34465450".into(),
+            name: "TruePianos".into(),
+            vendor: "4Front".into(),
+            path: "C:\\VstPlugins\\TruePianos x64.dll".into(),
+            state: vec![0xF7, 0xFF, 0xFF, 0xFF, 13],
+        };
+        let b = encode(None, &p);
+        let r = Records::parse(&b).unwrap();
+        assert_eq!(r.get(rec::FOURCC), Some(&b"PTF4"[..]));
+        assert_eq!(r.get(rec::VST_VERSION), Some(&2400u32.to_le_bytes()[..]));
+        assert_eq!(r.get(rec::GUID), None);
+        assert_eq!(decode(&b), Some(p.clone()));
+        // The same channel saved as a VST3 plugin: no VST2 records left.
+        let v3 = PluginRef { format: "vst3".into(), id: "000102030405060708090A0B0C0D0E0F".into(), path: "C:\\VST3\\TruePianos.vst3".into(), ..p };
+        let r = Records::parse(&encode(Some(&b), &v3)).unwrap();
+        assert_eq!((r.get(rec::FOURCC), r.get(rec::VST_VERSION)), (None, None));
+        assert_eq!(decode(&r.to_bytes()).unwrap().format, "vst3");
     }
 
     #[test]
