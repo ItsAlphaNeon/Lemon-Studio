@@ -97,13 +97,19 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
 
-/// The format of a wrapped plugin: a class-id record = VST3, else by the file extension (spec: plugins.md §4).
+/// The format of a wrapped plugin: by the file extension, else a VST2 id record = VST2, else a class-id record = VST3,
+/// else VST2. FL Studio 2026 keeps a 16-byte class-id record next to some VST2 plugins' id, so the id decides first
+/// (spec: plugins.md §4).
 fn format_of(r: &Records, path: &str) -> &'static str {
     let lower = path.to_ascii_lowercase();
-    if r.get(rec::GUID).is_some_and(|g| g.len() == 16) || lower.ends_with(".vst3") {
+    if lower.ends_with(".vst3") {
         "vst3"
     } else if lower.ends_with(".clap") {
         "clap"
+    } else if r.get(rec::FOURCC).is_some() {
+        "vst2"
+    } else if r.get(rec::GUID).is_some_and(|g| g.len() == 16) {
+        "vst3"
     } else {
         "vst2"
     }
@@ -258,6 +264,22 @@ mod tests {
         let v3 = PluginRef { format: "vst3".into(), id: "000102030405060708090A0B0C0D0E0F".into(), path: "C:\\VST3\\TruePianos.vst3".into(), ..p };
         let r = Records::parse(&encode(Some(&b), &v3)).unwrap();
         assert_eq!((r.get(rec::FOURCC), r.get(rec::VST_VERSION)), (None, None));
+        assert_eq!(decode(&r.to_bytes()).unwrap().format, "vst3");
+    }
+
+    /// FL Studio 2026 saved Krush (a VST2 plugin) with a 16-byte class-id record next to its VST2 id: still VST2. A
+    /// class id without a VST2 id or a known extension is VST3.
+    #[test]
+    fn the_vst2_id_decides_before_a_class_id() {
+        let mut r = Records { kind: 12, records: vec![] };
+        r.set(rec::FOURCC, b"rKkt".to_vec());
+        r.set(rec::GUID, b"tTSVKkkrrush\0\0\0\0".to_vec());
+        r.set(rec::NAME, b"Krush".to_vec());
+        r.set(rec::PATH, b"C:\\VSTs\\Krush.dll".to_vec());
+        let p = decode(&r.to_bytes()).unwrap();
+        assert_eq!((p.format.as_str(), p.id.as_str()), ("vst2", "746B4B72"));
+        r.remove(rec::FOURCC);
+        r.remove(rec::PATH);
         assert_eq!(decode(&r.to_bytes()).unwrap().format, "vst3");
     }
 
