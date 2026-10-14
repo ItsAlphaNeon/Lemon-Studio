@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Tick-based playback engine: schedules notes from patterns / playlist clips on the sequencer's tick clock, plays
 //! sampler and audio-clip channels, and sums them through the mixer routing graph. Everything that is scheduled
 //! happens at a tick's start; the engine renders whole ticks and hands them out in the block sizes the caller asks

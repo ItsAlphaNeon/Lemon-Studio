@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Renders a project file the way FILE > Export as WAV does, from a test, for comparing Lemon Studio's sound with
 //! other renders of the same file: the project opens as in the app (Lemon Sampler on sampler channels, the built-in
 //! effects and, when asked, the installed CLAP / VST3 plugins), the hosted plugins run offline at the render rate,

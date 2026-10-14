@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The spectrum behind the curves (Lemon Studio design; the original's look was not captured): an FFT of the monitored
 //! signal mapped to the graph's columns, tilted by the pivot slope and smoothed over time.
 //!

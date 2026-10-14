@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Enable groups (toolbar, OPTIONS > Enable groups, Shift+Alt+G): while on, grouped playlist clips select, move and
 //! group as one; while off, each clip is on its own (the groups are kept). A program setting, not part of the project:
 //! kept in the user folder (`groups.txt`).

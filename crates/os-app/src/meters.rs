@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Mixer peak meters: ballistics (rise, fall, peak hold), the level scale law and the colour zones. Every number lives
 //! in one table (`PARAMS`; values tuned by eye against FL by the owner, 2026-10-10).
 //!

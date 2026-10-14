@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The metronome switch and sound (toolbar, OPTIONS > Metronome, Ctrl+M, the button's right-click menu). A program
 //! setting, not part of the project: kept in the user folder (`metronome.txt`) and shared with every playing engine,
 //! which hears a change from its next beat.

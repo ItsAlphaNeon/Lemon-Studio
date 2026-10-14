@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Pattern selector and PATTERNS menu commands: find empty, rename / colour, clone, insert, delete, move,
 //! transpose, plus the name box and the delete confirmation.
 // spec: ui/pattern-menu.md

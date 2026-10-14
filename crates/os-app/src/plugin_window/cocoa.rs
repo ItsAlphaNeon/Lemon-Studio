@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Plugin windows on macOS: the frame (`super`) in an AppKit view. Docked, as on Windows: a subview of the main window's
 //! view (winit's, the owner), above the app's own drawing (softbuffer's layer in the same view), masked to the workspace
 //! minus the app's windows and popups above it (a shape layer on the frame's layer; clicks outside the mask fall through

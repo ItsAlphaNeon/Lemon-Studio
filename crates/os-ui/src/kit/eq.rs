@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Widgets of the EQ look (Lemon Parametric EQ 2): arc knobs, round buttons, fader slots and handles, band tokens.
 //! Greys are palette surface roles; band colours are the caller's (signal colours, like meter reds).
 // spec: plugins/lemon-parametric-eq-2.md (§2 tokens, §3 faders and knobs, §4 buttons)
