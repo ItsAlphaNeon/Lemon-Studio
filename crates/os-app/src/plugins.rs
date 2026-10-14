@@ -979,15 +979,16 @@ const NATIVE_CHECKS: &str = "native-checks.txt";
 const SAMPLE_START: &str = "Sample start offset";
 
 /// Lemon Sampler's starting state for a sampler channel of the project: its sample, its five envelope records, its
-/// stretch settings, the sample's start, length, loop options and precomputed effects, and the channel filter and
-/// declick mode (nih-plug JSON state with the u64 length prefix of its CLAP state; spec: plugins/lemon-sampler.md §6,
-/// §7).
+/// stretch settings, the sample's start, length, loop points, loop options and precomputed effects, the channel
+/// filter, declick mode and sampler flags, and the root note page (nih-plug JSON state with the u64 length prefix of
+/// its CLAP state; spec: plugins/lemon-sampler.md §6, §7).
 pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
     let mut params = Vec::new();
     // Model records: panning, volume, cutoff (Mod X), resonance (Mod Y), pitch.
-    for (e, pre) in ch.envelopes.iter().zip(["envpan", "envvol", "envmodx", "envmody", "envpitch"]) {
+    for (k, (e, pre)) in ch.envelopes.iter().zip(ENV_PREFIXES).enumerate() {
         let f = |v: f32| format!("{{\"f32\":{v}}}");
         let time = |field: i32| f(field.max(0) as f32 / 65536.0);
+        let scale = amount_scale(k);
         params.push(format!("\"{pre}_on\":{{\"bool\":{}}}", e.enabled));
         for (id, v) in [
             ("delay", time(e.delay)),
@@ -999,17 +1000,18 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
             ("att_t", f(e.attack_tension.clamp(-128, 128) as f32 / 128.0)),
             ("dec_t", f(e.decay_tension.clamp(-128, 128) as f32 / 128.0)),
             ("rel_t", f(e.release_tension.clamp(-128, 128) as f32 / 128.0)),
-            ("amt", f(e.amount.clamp(-128, 128) as f32 / 128.0)),
+            ("amt", f(e.amount.clamp(-scale, scale) as f32 / scale as f32)),
             ("lfo_delay", time(e.lfo_delay)),
             ("lfo_att", time(e.lfo_attack)),
             ("lfo_speed", time(e.lfo_speed)),
-            ("lfo_amt", f(e.lfo_amount.clamp(-128, 128) as f32 / 128.0)),
+            ("lfo_amt", f(e.lfo_amount.clamp(-scale, scale) as f32 / scale as f32)),
         ] {
             params.push(format!("\"{pre}_{id}\":{v}"));
         }
         params.push(format!("\"{pre}_lfo_shape\":{{\"i32\":{}}}", e.lfo_shape.clamp(0, 2)));
-        params.push(format!("\"{pre}_tempo\":{{\"bool\":{}}}", e.flags & 1 != 0));
-        params.push(format!("\"{pre}_lfo_tempo\":{{\"bool\":{}}}", e.flags & 2 != 0));
+        for (bit, id) in ENV_FLAGS {
+            params.push(format!("\"{pre}_{id}\":{{\"bool\":{}}}", e.flags & bit != 0));
+        }
     }
     // Stretch settings (spec: audio/time-stretch.md "Fields"; Lemon Sampler stretches for the channel).
     if ch.sound.stretch != [0; 4] {
@@ -1023,6 +1025,9 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
     // Factory placeholders (`%FLStudioFactoryData%`...) become real paths: the plugin opens files directly.
     let path = resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
     let path = path.as_str();
+    for (id, v) in channel_params(ch, || sample_frames(path)) {
+        params.push(format!("\"{id}\":{v}"));
+    }
     // The persisted fields are JSON strings holding JSON. The file's own precomputed values travel whole: Lemon Sampler
     // plays them while its knobs stand where they put them (values beyond a knob's range, start and length doubles).
     let inner = json_string(path);
@@ -1039,10 +1044,11 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
 }
 
 /// Writes Lemon Sampler's settings from its saved `state` into its channel, the inverse of [`sampler_state`]: the five
-/// envelope records with their LFOs, the channel filter, the declick mode, "Use loop points" (sampler flags value 8)
-/// and the sample's start, length, loop options and precomputed effects (spec: plugins/lemon-sampler.md §7). A value
-/// whose knob still stands where the channel's value puts it keeps the channel's value, so an untouched setting is
-/// saved as the file had it. The stretch settings follow the editor's edits as they happen (`params_tick`).
+/// envelope records with their LFOs, the channel filter, the declick mode, the sampler flags, the sample's start,
+/// length, loop points, start offset, loop options and precomputed effects, and the root note page (spec:
+/// plugins/lemon-sampler.md §7). A value whose knob still stands where the channel's value puts it keeps the channel's
+/// value, so an untouched setting is saved as the file had it. The stretch settings follow the editor's edits as they
+/// happen (`params_tick`).
 pub fn store_sampler(ch: &mut os_model::Channel, state: &[u8]) {
     use lemon_sampler::params as sp;
     let json = state.get(8..).filter(|_| state.len() > 8 && state[0] != b'{').unwrap_or(state);
@@ -1061,8 +1067,12 @@ pub fn store_sampler(ch: &mut os_model::Channel, state: &[u8]) {
     let unit_knob = |c: i32| c.clamp(-128, 128) as f32 / 128.0;
     let units = |k: f32| (k * 128.0).round() as i32;
     let sus_knob = |c: i32| c.clamp(0, 128) as f32 / 128.0;
-    for (e, pre) in ch.envelopes.iter_mut().zip(["envpan", "envvol", "envmodx", "envmody", "envpitch"]) {
+    for (k, (e, pre)) in ch.envelopes.iter_mut().zip(ENV_PREFIXES).enumerate() {
         let id = |s: &str| format!("{pre}_{s}");
+        // Amounts: -128..128, the pitch record's in cents.
+        let scale = amount_scale(k);
+        let amt_knob = |c: i32| c.clamp(-scale, scale) as f32 / scale as f32;
+        let amt_units = |k: f32| (k * scale as f32).round() as i32;
         e.enabled = b(&id("on")).unwrap_or(e.enabled);
         for (val, s) in [(&mut e.delay, "delay"), (&mut e.attack, "att"), (&mut e.hold, "hold"), (&mut e.decay, "dec"), (&mut e.release, "rel")] {
             *val = keep(*val, f(&id(s)), &time_knob, &field);
@@ -1071,20 +1081,16 @@ pub fn store_sampler(ch: &mut os_model::Channel, state: &[u8]) {
             *val = keep(*val, f(&id(s)), &time_knob, &field);
         }
         e.sustain = keep(e.sustain, f(&id("sus")), &sus_knob, &units);
-        for (val, s) in [
-            (&mut e.attack_tension, "att_t"),
-            (&mut e.decay_tension, "dec_t"),
-            (&mut e.release_tension, "rel_t"),
-            (&mut e.amount, "amt"),
-            (&mut e.lfo_amount, "lfo_amt"),
-        ] {
+        for (val, s) in [(&mut e.attack_tension, "att_t"), (&mut e.decay_tension, "dec_t"), (&mut e.release_tension, "rel_t")] {
             *val = keep(*val, f(&id(s)), &unit_knob, &units);
+        }
+        for (val, s) in [(&mut e.amount, "amt"), (&mut e.lfo_amount, "lfo_amt")] {
+            *val = keep(*val, f(&id(s)), &amt_knob, &amt_units);
         }
         if let Some(shape) = i(&id("lfo_shape")).filter(|&s| s != e.lfo_shape.clamp(0, 2)) {
             e.lfo_shape = shape;
         }
-        // Flags: 1 = envelope times follow the tempo, 2 = LFO times follow the tempo.
-        for (bit, s) in [(1, "tempo"), (2, "lfo_tempo")] {
+        for (bit, s) in ENV_FLAGS {
             if let Some(on) = b(&id(s)) {
                 e.flags = if on { e.flags | bit } else { e.flags & !bit };
             }
@@ -1102,12 +1108,28 @@ pub fn store_sampler(ch: &mut os_model::Channel, state: &[u8]) {
     if let Some(d) = i("declick").filter(|&d| d != if s.declick <= 5 { i32::from(s.declick) } else { 0 }) {
         s.declick = d.clamp(0, 5) as u8;
     }
-    // "Use loop points" is on for a channel without sampler flags.
-    if let Some(on) = b("loop_use") {
-        let flags = s.sampler_flags.unwrap_or(8);
-        let new = if on { flags | 8 } else { flags & !8 };
-        if new != flags || s.sampler_flags.is_some() {
-            s.sampler_flags = Some(new);
+    // A channel without sampler flags has those of FL's new channel (Load regions, Use loop points); it gets the
+    // event when one of them changes.
+    let flags = s.sampler_flags.unwrap_or(os_model::ChannelSound::DEFAULT_FLAGS);
+    let mut new = flags;
+    for (bit, id) in SAMPLER_FLAGS {
+        if let Some(on) = b(id) {
+            new = if on { new | bit } else { new & !bit };
+        }
+    }
+    if new != flags || s.sampler_flags.is_some() {
+        s.sampler_flags = Some(new);
+    }
+    if let Some(k) = f("start_offset").filter(|&k| k != s.start_offset().clamp(0.0, 1.0) as f32) {
+        s.start_offset_bits = f64::from(k).to_bits();
+    }
+    // Loop points: frames of the file, the knobs fractions of it (the file is read only when they matter).
+    let (ls, le) = (f("loop_start").unwrap_or(0.0), f("loop_end").unwrap_or(1.0));
+    if s.loop_points.is_some() || ls > 0.0 || le < 1.0 {
+        let path = v.get("fields").and_then(|x| x.get("sample-path")).and_then(|x| x.as_str());
+        let path = path.and_then(|p| serde_json::from_str::<String>(p).ok()).unwrap_or_default();
+        if let Some(n) = sample_frames(&path).filter(|&n| (ls, le) != loop_knobs(s.loop_points, n)) {
+            s.loop_points = Some([loop_frame(ls, n), loop_frame(le, n)]);
         }
     }
     let mut k = sp::SamplerParams::default().fx_knobs();
@@ -1139,6 +1161,116 @@ pub fn store_sampler(ch: &mut os_model::Channel, state: &[u8]) {
     switch("fx_loop_follows", &mut k.loop_follows);
     k.reverb_type = i("fx_reverb_type").unwrap_or(k.reverb_type);
     s.fx = sp::fx_from_knobs(&k, Some(&s.fx));
+    // The root note page.
+    let m = &mut ch.misc;
+    if let Some(r) = i("root").filter(|&r| r != i32::from(m.root).clamp(0, sp::KEY_MAX)) {
+        m.root = r.clamp(0, 127) as u8;
+    }
+    if let Some(x) = i("fine").filter(|&x| x != m.fine.clamp(-100, 100)) {
+        m.fine = x;
+    }
+    m.main_pitch = b("main_pitch").unwrap_or(m.main_pitch);
+    m.add_key = b("add_key").unwrap_or(m.add_key);
+    for (k, id) in ["zone_lo", "zone_hi"].into_iter().enumerate() {
+        if let Some(z) = i(id).filter(|&z| z != m.key_range[k].clamp(0, sp::KEY_MAX)) {
+            m.key_range[k] = zone_units(z);
+        }
+    }
+}
+
+/// The five envelope records' parameter prefixes in Lemon Sampler, in the model's order.
+const ENV_PREFIXES: [&str; 5] = ["envpan", "envvol", "envmodx", "envmody", "envpitch"];
+/// Envelope record flags and their switches: 1 = envelope times follow the tempo, 2 = LFO times follow the tempo,
+/// 0x20 = global LFO (spec: audio/envelopes-and-lfos.md).
+const ENV_FLAGS: [(i32, &str); 3] = [(1, "tempo"), (2, "lfo_tempo"), (0x20, "lfo_global")];
+/// Sampler flags (event 143) and their switches (spec: flp/events/channels.md "Sampler flags").
+const SAMPLER_FLAGS: [(u32, &str); 5] = [
+    (os_model::ChannelSound::RESAMPLE, "resample"),
+    (os_model::ChannelSound::LOAD_REGIONS, "load_regions"),
+    (os_model::ChannelSound::LOAD_SLICES, "load_slices"),
+    (os_model::ChannelSound::USE_LOOP, "loop_use"),
+    (os_model::ChannelSound::KEEP_ON_DISK, "keep_disk"),
+];
+
+/// Units of envelope record `k`'s amounts at full scale: 128, the pitch record's 2400 cents (spec:
+/// audio/envelopes-and-lfos.md).
+fn amount_scale(k: usize) -> i32 {
+    if k == os_model::Envelope::PITCH { 2400 } else { 128 }
+}
+
+/// The stored key zone end for Lemon Sampler's key: its highest key is FL's "no zone" 256.
+fn zone_units(key: i32) -> i32 {
+    if key >= lemon_sampler::params::KEY_MAX { 256 } else { key.max(0) }
+}
+
+/// Frames of the sample file at `path` (placeholders resolved), when it can be read.
+fn sample_frames(path: &str) -> Option<u64> {
+    let path = resolve_sample(path);
+    if path.is_empty() {
+        return None;
+    }
+    let s = os_engine::sample::load_shared(std::path::Path::new(&path)).ok()?;
+    Some(s.frames() as u64).filter(|&n| n > 0)
+}
+
+/// Lemon Sampler's loop start / end knobs for stored loop points (frames) of a sample of `n` frames: fractions of its
+/// last frame's index, where FL's END knob stops; -1, `i64::MAX` and points past it are the sample's ends.
+fn loop_knobs(points: Option<[i64; 2]>, n: u64) -> (f32, f32) {
+    let last = n.saturating_sub(1);
+    let Some([s, e]) = points.filter(|_| last > 0) else { return (0.0, 1.0) };
+    let share = |v: i64| (v as f64 / last as f64).clamp(0.0, 1.0) as f32;
+    (if s < 0 { 0.0 } else { share(s) }, if e < 0 || e as u64 >= last { 1.0 } else { share(e) })
+}
+
+/// The stored frame of loop knob position `k` for a sample of `n` frames (the inverse of [`loop_knobs`]).
+fn loop_frame(k: f32, n: u64) -> i64 {
+    (f64::from(k.clamp(0.0, 1.0)) * n.saturating_sub(1) as f64).round() as i64
+}
+
+/// Lemon Sampler's parameters for what a channel stores outside its sound settings: the root note page (root note,
+/// fine tune, main pitch, add to key, key zone), the start offset, the sampler flags' switches and the loop points
+/// (`frames` gives the sample's length; it is read only for loop points).
+fn channel_params(ch: &os_model::Channel, frames: impl FnOnce() -> Option<u64>) -> Vec<(&'static str, serde_json::Value)> {
+    use lemon_sampler::params::KEY_MAX;
+    use serde_json::json;
+    let (m, s) = (&ch.misc, &ch.sound);
+    let mut out = vec![
+        ("root", json!({ "i32": i32::from(m.root).clamp(0, KEY_MAX) })),
+        ("fine", json!({ "i32": m.fine.clamp(-100, 100) })),
+        ("main_pitch", json!({ "bool": m.main_pitch })),
+        ("add_key", json!({ "bool": m.add_key })),
+        ("zone_lo", json!({ "i32": m.key_range[0].clamp(0, KEY_MAX) })),
+        ("zone_hi", json!({ "i32": m.key_range[1].clamp(0, KEY_MAX) })),
+        ("start_offset", json!({ "f32": s.start_offset().clamp(0.0, 1.0) as f32 })),
+    ];
+    let flags = s.sampler_flags.unwrap_or(os_model::ChannelSound::DEFAULT_FLAGS);
+    // "Use loop points" only when the file has the flags (`sample_params`).
+    out.extend(SAMPLER_FLAGS.iter().filter(|(_, id)| *id != "loop_use").map(|&(bit, id)| (id, json!({ "bool": flags & bit != 0 }))));
+    if s.loop_points.is_some() {
+        if let Some(n) = frames() {
+            let (ls, le) = loop_knobs(s.loop_points, n);
+            out.push(("loop_start", json!({ "f32": ls })));
+            out.push(("loop_end", json!({ "f32": le })));
+        }
+    }
+    out
+}
+
+/// Writes an edit of one of Lemon Sampler's root note page parameters (`name`, at normalized value `norm`) into the
+/// channel's settings, so playback follows it (the engine applies the main pitch). False for other parameters.
+pub fn misc_param(name: &str, norm: f64, misc: &mut os_model::ChannelMisc) -> bool {
+    use lemon_sampler::params::KEY_MAX;
+    let key = || (norm.clamp(0.0, 1.0) * f64::from(KEY_MAX)).round() as i32;
+    match name {
+        "Root note" => misc.root = key().min(127) as u8,
+        "Fine tuning" => misc.fine = (norm.clamp(0.0, 1.0) * 200.0 - 100.0).round() as i32,
+        "Affected by the main pitch" => misc.main_pitch = norm >= 0.5,
+        "Add root note to key" => misc.add_key = norm >= 0.5,
+        "Zone low key" => misc.key_range[0] = zone_units(key()),
+        "Zone high key" => misc.key_range[1] = zone_units(key()),
+        _ => return false,
+    }
+    true
 }
 
 /// A project sample path as a file path (placeholders resolved against the install folder, else unchanged).
@@ -1230,7 +1362,7 @@ fn sample_params(sound: &os_model::ChannelSound) -> Vec<(&'static str, serde_jso
         ("declick", json!({ "i32": if sound.declick <= 5 { i32::from(sound.declick) } else { 0 } })),
     ];
     if let Some(flags) = sound.sampler_flags {
-        out.push(("loop_use", b(flags & 8 != 0)));
+        out.push(("loop_use", b(flags & os_model::ChannelSound::USE_LOOP != 0)));
     }
     out
 }
@@ -2181,6 +2313,21 @@ mod tests {
         assert!((l[10] + 989.0 / 2000.0).abs() < 1e-6 && (r[10] - 0.989).abs() < 1e-6, "{} {}", l[10], r[10]);
         drop(i);
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// Lemon Sampler's root note page edits reach the channel as they happen (`misc_param`): the engine plays the main
+    /// pitch switch; the key zone's top key is FL's "no zone".
+    #[test]
+    fn lemon_sampler_root_page_edits_give_the_channel_settings() {
+        use lemon_sampler::params::KEY_MAX;
+        let mut m = os_model::ChannelMisc::default();
+        assert!(misc_param("Affected by the main pitch", 0.0, &mut m) && !m.main_pitch);
+        assert!(misc_param("Add root note to key", 1.0, &mut m) && m.add_key);
+        assert!(misc_param("Root note", 48.0 / f64::from(KEY_MAX), &mut m) && m.root == 48);
+        assert!(misc_param("Fine tuning", 0.4, &mut m) && m.fine == -20);
+        assert!(misc_param("Zone low key", 37.0 / f64::from(KEY_MAX), &mut m) && misc_param("Zone high key", 1.0, &mut m));
+        assert_eq!(m.key_range, [37, 256]);
+        assert!(!misc_param("Pitch shift", 0.5, &mut m));
     }
 
     /// Lemon Sampler's time-stretch parameters read back into the channel's stretch settings (`stretch_param`, the
