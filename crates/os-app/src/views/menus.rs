@@ -77,6 +77,8 @@ pub const FILE_EXIT: usize = 16;
 /// OPTIONS > Theme settings (flat index: header counts).
 #[cfg(test)]
 pub const OPT_THEME: usize = 5;
+/// OPTIONS > Metronome (spec: ui/metronome.md §1).
+pub const METRONOME_LABEL: &str = "Metronome";
 /// Index of the OPTIONS menu.
 pub const OPTIONS_MENU: usize = 5;
 /// OPTIONS > Project info (the toolbar's info button).
@@ -222,7 +224,7 @@ const OPTIONS: &[Item] = &[
     it("Enable MIDI master sync", "").tick(),
     head("Switches"),
     it("Typing keyboard to piano", "Ctrl+T").on().tick(),
-    it("Metronome", "Ctrl+M").tick(),
+    it(METRONOME_LABEL, "Ctrl+M").on().tick(),
     it("Recording precount", "Ctrl+P").tick(),
     it("Start on input", "Ctrl+I").tick(),
     it("Blend recorded notes", "Ctrl+B").tick(),
@@ -365,6 +367,7 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
         (Mark::Check(_), true) if item.label == "Browser" => Mark::Check(s.show_browser),
         (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
         (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
+        (Mark::Check(_), _) if item.label == METRONOME_LABEL => Mark::Check(crate::metronome::on()),
         (mk, _) => mk,
     }
 }

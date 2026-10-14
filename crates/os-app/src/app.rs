@@ -92,6 +92,8 @@ pub enum Action {
     Placeholder(&'static str),
     /// Typing keyboard to piano switch (toolbar, OPTIONS menu, Ctrl+T).
     Typing,
+    /// Metronome switch (toolbar, OPTIONS menu, Ctrl+M); right-click on the button picks the sound.
+    Metronome,
     /// The toolbar's scope / spectrum panel: click switches the display.
     Monitor,
     /// The toolbar's CPU panel: double-click opens the Plugin performance monitor, right-click its menu.
@@ -1942,6 +1944,23 @@ impl App {
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
     }
 
+    /// The metronome button's right-click menu: the sound (spec: ui/metronome.md §2).
+    fn metronome_menu(&mut self, x: f32, y: f32) {
+        use crate::playlist::{Cmd, Mark, PItem, Popup};
+        use os_engine::metronome::Sound;
+        let now = crate::metronome::sound();
+        let mut items = vec![PItem::head("Metronome sound")];
+        items.extend(Sound::ALL.iter().map(|&s| PItem::new(s.label(), Cmd::MetronomeSound(s)).mark(Mark::Radio(s == now))));
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+    }
+
+    /// Metronome switch (toolbar, OPTIONS menu, Ctrl+M): heard from the next beat, also while playing.
+    pub fn toggle_metronome(&mut self) {
+        let on = crate::metronome::toggle();
+        self.state.message = Some(if on { "Metronome on" } else { "Metronome off" }.into());
+        self.invalidate();
+    }
+
     /// A command of the CPU panel's menu.
     pub(crate) fn cpu_cmd(&mut self, c: crate::cpu::CpuCmd) -> Option<String> {
         use crate::cpu::CpuCmd;
@@ -3446,6 +3465,10 @@ impl App {
                 self.cpu_menu(x, y);
                 return self.invalidate();
             }
+            Some(Action::Metronome) => {
+                self.metronome_menu(x, y);
+                return self.invalidate();
+            }
             Some(Action::BrowserRow(i)) => {
                 if self.browser_remove_root(*i) || self.params_browser_right(*i, x, y) {
                     return;
@@ -4149,6 +4172,7 @@ impl App {
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => self.act(Action::PianoUndo),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("t") => self.toggle_typing(),
+            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("m") => self.toggle_metronome(),
             // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
             // tools (until a typing keyboard exists, which will take them).
             Key::Character(c) if !ctrl && !alt && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
@@ -4641,6 +4665,7 @@ impl App {
                 }
             }
             Action::Typing => self.toggle_typing(),
+            Action::Metronome => self.toggle_metronome(),
             // spec: ui/main-window.md §13: a double click opens the Plugin performance monitor; one click does nothing.
             Action::CpuPanel => {
                 let now = std::time::Instant::now();
@@ -5216,6 +5241,7 @@ impl App {
                 }
             }
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::METRONOME_LABEL) => self.toggle_metronome(),
             (m, i) if item_at(m, i).is_some_and(|it| crate::params::menu_handles(it.label)) => {
                 let label = item_at(m, i).map_or("", |it| it.label);
                 if let Some(msg) = self.params_menu(label) {
@@ -6476,6 +6502,36 @@ mod tests {
         assert_eq!(app.state.settings.audio.buffer, Some(1024));
         // Back to the defaults for the other tests in this process.
         AudioCfg::default().apply();
+    }
+
+    /// Metronome (spec: ui/metronome.md §1-2): the toolbar button and OPTIONS > Metronome toggle the shared switch
+    /// (the button lit while on); right-click on the button lists the five sounds with the current one marked.
+    #[test]
+    fn metronome_button_menu_and_sound() {
+        use os_engine::metronome::Sound;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let was = crate::metronome::on();
+        let r = hit_rect(&app, &Action::Metronome);
+        assert_eq!((r.x, r.y), (580.0, 4.0));
+        click(&mut app, &mut c, r);
+        assert_eq!(crate::metronome::on(), !was);
+        let opt = (0..60).find(|&i| views::menus::item_at(views::menus::OPTIONS_MENU, i).is_some_and(|it| it.label == "Metronome")).unwrap();
+        app.menu_item(views::menus::OPTIONS_MENU, opt);
+        assert_eq!(crate::metronome::on(), was);
+        // The sound menu: a header, then the sounds; picking one keeps the switch.
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        frame(&mut app, &mut c, None);
+        let labels: Vec<String> = app.state.playlist.popup.as_ref().unwrap().items.iter().map(|it| it.label.to_string()).collect();
+        assert_eq!(labels, ["Metronome sound", "Hi-hat", "Tick", "Beep", "Cowbell", "Pulse"]);
+        let before = crate::metronome::sound();
+        let i = labels.iter().position(|x| x == "Cowbell").unwrap();
+        let item = hit_rect(&app, &Action::PlPopup(i));
+        click(&mut app, &mut c, item);
+        assert_eq!((crate::metronome::sound(), crate::metronome::on()), (Sound::Cowbell, was));
+        crate::metronome::set_sound(before);
     }
 
     /// CPU panel (spec: ui/main-window.md §13): the menu's View FPS / Misc / Refresh change what it shows; a double

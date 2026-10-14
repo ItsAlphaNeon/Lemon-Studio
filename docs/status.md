@@ -80,6 +80,11 @@ dropouts. Its right-click menu has refresh rates, a frames-per-second view and h
 counts. Double-clicking it opens the plugin performance monitor: each plugin's processing time, peak, total
 and voices, with sorting, find and freeze.
 
+**Metronome.** The toolbar button, OPTIONS > Metronome or Ctrl+M: a click on every quarter note while playing,
+accented as FL does (the first beat of each bar in 4/4 and 3/4), through the master track. Right-click the
+button for five sounds. It is never in an export, and it is remembered between sessions. Not yet: the
+"Metronome track" setting, and following time-signature markers (it follows the project's signature).
+
 ## 🚧 Automation
 
 - Automation clips for channel, mixer and plugin parameters

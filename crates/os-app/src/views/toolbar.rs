@@ -181,9 +181,9 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_polygon(&[(tb.right() - 9.0, 17.0), (tb.right() - 6.0, 13.0), (tb.right() - 3.0, 17.0)], t.glyph_dim);
     ui.c.fill_polygon(&[(tb.right() - 9.0, 22.0), (tb.right() - 6.0, 26.0), (tb.right() - 3.0, 22.0)], t.glyph_dim);
 
-    // Recording options.
+    // Recording options. The metronome works (spec: ui/metronome.md); the others wait for recording.
+    tool_button(ui, btn(580.0, 4.0), Icon::Metronome, crate::metronome::on(), Action::Metronome, "Metronome (Ctrl+M) - right-click for the sound");
     for (i, (icon, hint)) in [
-        (Icon::Metronome, "Metronome"),
         (Icon::WaitInput, "Wait for input to start recording"),
         (Icon::Countdown, "Countdown before recording"),
         (Icon::Blend, "Blend recording"),
@@ -192,7 +192,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     .into_iter()
     .enumerate()
     {
-        tool_button(ui, btn(580.0 + 33.0 * i as f32, 4.0), icon, false, Action::Placeholder(hint), hint);
+        tool_button(ui, btn(613.0 + 33.0 * i as f32, 4.0), icon, false, Action::Placeholder(hint), hint);
     }
 
     // Song position (B:S:T).

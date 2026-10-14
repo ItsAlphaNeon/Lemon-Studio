@@ -1042,6 +1042,10 @@ impl Session {
         if kind != Kind::Preview {
             attach(&mut e, inst);
         }
+        // Playback clicks with the metronome switch; live notes and previews never do (spec: ui/metronome.md §4).
+        if song {
+            e.set_metronome(crate::metronome::switch());
+        }
         // Seek before anything is queued, so the first block is already the start position.
         if at.tick > 0.0 {
             e.seek_tick(at.tick as u64);

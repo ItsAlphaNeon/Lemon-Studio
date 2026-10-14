@@ -845,6 +845,10 @@ pub struct Engine {
     params: param_auto::ParamAuto,
     /// The project's random generator (random layers; spec: audio/channel-misc.md "FL's random generator").
     rng: layers::Mt19937,
+    /// The metronome of a playback stream (`set_metronome`), and the beats from one accent to the next: the project
+    /// signature's numerator (spec: ui/metronome.md §4).
+    metronome: Option<crate::metronome::Metronome>,
+    beats_per_accent: u16,
     pub report: EngineReport,
 }
 
@@ -1220,8 +1224,15 @@ impl Engine {
             fx_dry: Vec::new(),
             inst_tail: 0,
             inst_active: false,
+            metronome: None,
+            beats_per_accent: project.time_signature.map_or(4, |s| s.0.max(1)),
             report,
         }
+    }
+
+    /// Clicks with `switch` while playing live (spec: ui/metronome.md); an export never does.
+    pub fn set_metronome(&mut self, switch: std::sync::Arc<crate::metronome::Switch>) {
+        self.metronome = Some(crate::metronome::Metronome::new(switch, self.rate));
     }
 
     /// Plays generator-plugin channel `channel` through `inst` (a shared instance that outlives this engine).
@@ -1505,6 +1516,8 @@ impl Engine {
     /// the ticks after it.
     pub fn continue_from(&mut self, old: &mut Engine) {
         self.looping = old.looping;
+        // The metronome carries on, with a click that is sounding (rebuilt at a new rate).
+        self.metronome = old.metronome.take().map(|m| if m.rate() == self.rate { m } else { crate::metronome::Metronome::new(m.switch().clone(), self.rate) });
         let tick = old.tick;
         self.clock = if self.rate == old.rate && self.ppq == old.ppq {
             let mut c = old.clock;
@@ -1833,6 +1846,12 @@ impl Engine {
         self.render_instruments(len, &song);
         for ch in &mut self.channels {
             ch.advance(len as u32);
+        }
+        // The metronome's click enters the master track (spec: ui/metronome.md §4): live playback only, and no new
+        // click once a song is over.
+        if let Some(m) = self.metronome.as_mut().filter(|_| !self.exporting && !self.live_only) {
+            let start = self.looping || tick < self.end_tick;
+            m.tick(tick, self.ppq, self.beats_per_accent, start, &mut self.bus[0][..len * 2]);
         }
         self.tick = tick + 1;
         self.frame = start + len as u64;
@@ -4631,5 +4650,77 @@ mod tests {
         let e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
         assert!((e.triggers[0].rate - 2f64.powf(1000.0 / 1200.0)).abs() < 1e-9, "fine pitch 220 = +1000 cents");
         assert!((e.channels[0].base_rate / e.channels[0].src_ratio - 1.0).abs() < 1e-9, "the channel is not moved");
+    }
+
+    // spec: ui/metronome.md §4
+    fn metronome_on() -> std::sync::Arc<crate::metronome::Switch> {
+        let sw = std::sync::Arc::new(crate::metronome::Switch::default());
+        sw.set_on(true);
+        sw.set_sound(crate::metronome::Sound::Beep);
+        sw
+    }
+
+    /// Frames where sound starts after at least 100 silent ones, with the peak of the next 5 ms.
+    fn click_onsets(out: &[f32], rate: u32) -> Vec<(u64, f32)> {
+        let left: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
+        let mut v = Vec::new();
+        let mut last: Option<usize> = None;
+        for (i, &s) in left.iter().enumerate() {
+            if s.abs() < 1e-6 {
+                continue;
+            }
+            if last.is_none_or(|l| i - l > 100) {
+                let n = (rate / 200) as usize;
+                v.push((i as u64, left[i..(i + n).min(left.len())].iter().fold(0.0f32, |m, x| m.max(x.abs()))));
+            }
+            last = Some(i);
+        }
+        v
+    }
+
+    #[test]
+    fn metronome_clicks_every_beat_of_a_playing_pattern_and_accents_the_bar() {
+        // An empty pattern in 3/4 loops a bar of three beats: accented, plain, plain, accented, ...
+        let mut p = project(vec![], vec![]);
+        p.time_signature = Some((3, 4));
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::new(None);
+        let rate = 48000;
+        let mut e = Engine::new(&p, &mut lib, rate, PlayMode::Pattern(1));
+        e.set_looping(true);
+        e.set_metronome(metronome_on());
+        // Three seconds: seven beats.
+        let mut out = vec![0.0; 2 * rate as usize * 3];
+        e.process(&mut out);
+        let on = click_onsets(&out, rate);
+        // 130 BPM: a beat every 0.4615 s. Ticks are whole samples (the loop restarts the clock) and a sine's first
+        // sample is 0, so an onset is within a few frames of the beat's exact time.
+        let beats: Vec<u64> = (0..7).map(|b| crate::clock::Clock::frame_of_tick(rate, 96, 130.0, 96 * b)).collect();
+        assert_eq!(on.len(), beats.len(), "{on:?}");
+        for ((f, _), b) in on.iter().zip(&beats) {
+            assert!(f.abs_diff(*b) <= 3, "{f} vs beat {b}");
+        }
+        let accented: Vec<bool> = on.iter().map(|o| o.1 > on[1].1 * 1.3).collect();
+        assert_eq!(accented, [true, false, false, true, false, false, true]);
+    }
+
+    #[test]
+    fn metronome_is_never_in_an_export_and_follows_the_master_track() {
+        let mut p = project(vec![], vec![]);
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_metronome(metronome_on());
+        let mut out = Vec::new();
+        e.render_ticks(400, &mut out);
+        assert!(out.iter().all(|&s| s == 0.0), "an export never clicks");
+        // The master track muted: playback is silent too.
+        p.mixer[0].enabled = false;
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_looping(true);
+        e.set_metronome(metronome_on());
+        let mut out = vec![0.0; 2 * 48000];
+        e.process(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0), "muted master");
     }
 }

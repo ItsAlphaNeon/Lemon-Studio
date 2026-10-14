@@ -22,6 +22,7 @@ mod macos;
 #[cfg(target_os = "macos")]
 mod menu_bar;
 mod meters;
+mod metronome;
 mod midi_in;
 mod mixer;
 mod osc3;
