@@ -25,7 +25,7 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 fn main() {
     let install = std::env::args().any(|a| a == "--install");
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repository root");
     let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
     let target = if target.is_relative() { root.join(target) } else { target };
     let out = target.join("bundled");
