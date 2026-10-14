@@ -79,6 +79,8 @@ pub const FILE_EXIT: usize = 16;
 pub const OPT_THEME: usize = 5;
 /// OPTIONS > Metronome (spec: ui/metronome.md §1).
 pub const METRONOME_LABEL: &str = "Metronome";
+/// OPTIONS > Auto scrolling (spec: ui/auto-scrolling.md §1).
+pub const AUTOSCROLL_LABEL: &str = "Auto scrolling";
 /// Index of the OPTIONS menu.
 pub const OPTIONS_MENU: usize = 5;
 /// OPTIONS > Project info (the toolbar's info button).
@@ -230,7 +232,7 @@ const OPTIONS: &[Item] = &[
     it("Blend recorded notes", "Ctrl+B").tick(),
     it("Step edit", "Ctrl+E").tick(),
     it("Loop record", "").tick(),
-    it("Auto scrolling", "").tick(),
+    it(AUTOSCROLL_LABEL, "").on().tick(),
     it("Enable groups", "Shift+Alt+G").tick(),
     it("Multilink to controllers", "Ctrl+J").tick(),
 ];
@@ -368,6 +370,7 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
         (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
         (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
         (Mark::Check(_), _) if item.label == METRONOME_LABEL => Mark::Check(crate::metronome::on()),
+        (Mark::Check(_), _) if item.label == AUTOSCROLL_LABEL => Mark::Check(crate::autoscroll::on()),
         (mk, _) => mk,
     }
 }

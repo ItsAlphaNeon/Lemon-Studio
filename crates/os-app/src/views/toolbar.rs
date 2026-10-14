@@ -425,18 +425,22 @@ fn row2(ui: &mut Ui, s: &State) {
     }
     ui.veil(Rect::span(383.0, 574.0, 50.0, 74.0), t.toolbar);
 
-    // Mode buttons.
+    // Mode buttons (spec: ui/main-window.md §3). Typing keyboard and auto scrolling (spec: ui/auto-scrolling.md) work.
     for (i, (icon, hint)) in [
         (Icon::TypingKeyboard, "Typing keyboard to piano keyboard (Ctrl+T)"),
-        (Icon::StepEdit, "Step editing"),
-        (Icon::Slide, "Slide / portamento"),
-        (Icon::Link, "Multilink to controllers"),
-        (Icon::MidiControl, "MIDI note controls"),
+        (Icon::AutoScroll, "Auto scrolling - right-click for continuous scrolling"),
+        (Icon::StepEdit, "Step editing (Ctrl+E)"),
+        (Icon::Link, "Enable groups (Shift+Alt+G)"),
+        (Icon::MidiControl, "Multilink to controllers (Ctrl+J)"),
     ]
     .into_iter()
     .enumerate()
     {
-        let (on, action) = if i == 0 { (s.toggles.contains(&"typing"), Action::Typing) } else { (false, Action::Placeholder(hint)) };
+        let (on, action) = match i {
+            0 => (s.toggles.contains(&"typing"), Action::Typing),
+            1 => (crate::autoscroll::on(), Action::AutoScroll),
+            _ => (false, Action::Placeholder(hint)),
+        };
         tool_button(ui, btn(580.0 + 33.0 * i as f32, 45.0), icon, on, action, hint);
     }
 

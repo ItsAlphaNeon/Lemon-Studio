@@ -94,6 +94,8 @@ pub enum Action {
     Typing,
     /// Metronome switch (toolbar, OPTIONS menu, Ctrl+M); right-click on the button picks the sound.
     Metronome,
+    /// Auto scrolling switch (toolbar, OPTIONS menu); right-click on the button for continuous scrolling.
+    AutoScroll,
     /// The toolbar's scope / spectrum panel: click switches the display.
     Monitor,
     /// The toolbar's CPU panel: double-click opens the Plugin performance monitor, right-click its menu.
@@ -1961,6 +1963,54 @@ impl App {
         self.invalidate();
     }
 
+    /// The auto-scrolling button's right-click menu (spec: ui/auto-scrolling.md §2).
+    fn autoscroll_menu(&mut self, x: f32, y: f32) {
+        use crate::playlist::{Cmd, Mark, PItem, Popup};
+        let items = vec![PItem::new("Continuous scrolling", Cmd::ContinuousScrolling).mark(Mark::Check(crate::autoscroll::continuous()))];
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+    }
+
+    /// Auto scrolling switch (toolbar, OPTIONS menu): followed from the next move of the playhead.
+    pub fn toggle_autoscroll(&mut self) {
+        let on = crate::autoscroll::toggle();
+        self.state.message = Some(if on { "Auto scrolling on" } else { "Auto scrolling off" }.into());
+        self.invalidate();
+    }
+
+    /// Auto scrolling (spec: ui/auto-scrolling.md §5): the playlist (song) or the piano roll (pattern) scrolls so the
+    /// shown playing position stays in view. Left alone while the mouse drags a scroll bar.
+    fn auto_scroll(&mut self) {
+        let set = crate::autoscroll::get();
+        let now = &self.shown;
+        if !set.on || !now.playing || now.paused || matches!(self.drag, Some(Drag::Scroll { .. } | Drag::BarZoom { .. } | Drag::BarRows { .. })) {
+            return;
+        }
+        let tick = now.tick as f32;
+        let ppq = f32::from(self.state.project.ppq.max(4));
+        if now.song {
+            let Some(g) = self.pl_grid.filter(|_| self.state.shown(Win::Playlist)) else { return };
+            let left = self.state.playlist_scroll.0;
+            let x = tick * self.state.playlist_bar_w / (ppq * 4.0);
+            if let Some(v) = crate::autoscroll::follow(left, g.w, x, set.continuous) {
+                // In whole steps the drawn pixels can move by (`playlist_scrolled`).
+                let v = blit_step(self.px_scale).map_or(v, |q| left + ((v - left) / q).round() * q);
+                let before = self.state.playlist_scroll;
+                self.scroll_set(Scroll::PlaylistX, v);
+                self.playlist_scrolled(before);
+            }
+        } else {
+            let Some(g) = self.piano_grid.filter(|_| self.state.shown(Win::PianoRoll)) else { return };
+            let left = self.scroll_get(Scroll::PianoX);
+            let x = tick * self.state.piano.px_per_beat / ppq;
+            if let Some(v) = crate::autoscroll::follow(left, g.w, x, set.continuous) {
+                self.scroll_set(Scroll::PianoX, v);
+                if self.scroll_get(Scroll::PianoX) != left {
+                    self.damage_win(Win::PianoRoll);
+                }
+            }
+        }
+    }
+
     /// A command of the CPU panel's menu.
     pub(crate) fn cpu_cmd(&mut self, c: crate::cpu::CpuCmd) -> Option<String> {
         use crate::cpu::CpuCmd;
@@ -2133,6 +2183,7 @@ impl App {
     pub(crate) fn show_playback(&mut self, now: Shown) {
         let old = std::mem::replace(&mut self.shown, now.clone());
         if now.playing != old.playing || now.paused != old.paused || now.song != old.song {
+            self.auto_scroll();
             return self.invalidate();
         }
         if !now.playing {
@@ -2166,6 +2217,7 @@ impl App {
                     self.damage_rect(r);
                 }
             }
+            self.auto_scroll();
         }
         if now.sounding != old.sounding {
             self.damage_live(Live::Sounding);
@@ -3469,6 +3521,10 @@ impl App {
                 self.metronome_menu(x, y);
                 return self.invalidate();
             }
+            Some(Action::AutoScroll) => {
+                self.autoscroll_menu(x, y);
+                return self.invalidate();
+            }
             Some(Action::BrowserRow(i)) => {
                 if self.browser_remove_root(*i) || self.params_browser_right(*i, x, y) {
                     return;
@@ -4666,6 +4722,7 @@ impl App {
             }
             Action::Typing => self.toggle_typing(),
             Action::Metronome => self.toggle_metronome(),
+            Action::AutoScroll => self.toggle_autoscroll(),
             // spec: ui/main-window.md §13: a double click opens the Plugin performance monitor; one click does nothing.
             Action::CpuPanel => {
                 let now = std::time::Instant::now();
@@ -5242,6 +5299,7 @@ impl App {
             }
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::METRONOME_LABEL) => self.toggle_metronome(),
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::AUTOSCROLL_LABEL) => self.toggle_autoscroll(),
             (m, i) if item_at(m, i).is_some_and(|it| crate::params::menu_handles(it.label)) => {
                 let label = item_at(m, i).map_or("", |it| it.label);
                 if let Some(msg) = self.params_menu(label) {
@@ -6532,6 +6590,113 @@ mod tests {
         click(&mut app, &mut c, item);
         assert_eq!((crate::metronome::sound(), crate::metronome::on()), (Sound::Cowbell, was));
         crate::metronome::set_sound(before);
+    }
+
+    /// Auto scrolling (spec: ui/auto-scrolling.md §1-2): the toolbar button and OPTIONS > Auto scrolling toggle the
+    /// switch (the button lit while on); right-click on the button toggles continuous scrolling.
+    #[test]
+    fn auto_scrolling_button_and_menu() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        assert!(!crate::autoscroll::on());
+        let r = hit_rect(&app, &Action::AutoScroll);
+        assert_eq!((r.x, r.y), (613.0, 45.0));
+        click(&mut app, &mut c, r);
+        assert!(crate::autoscroll::on());
+        let opt = (0..60).find(|&i| views::menus::item_at(views::menus::OPTIONS_MENU, i).is_some_and(|it| it.label == "Auto scrolling")).unwrap();
+        app.menu_item(views::menus::OPTIONS_MENU, opt);
+        assert!(!crate::autoscroll::on());
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        frame(&mut app, &mut c, None);
+        let labels: Vec<String> = app.state.playlist.popup.as_ref().unwrap().items.iter().map(|it| it.label.to_string()).collect();
+        assert_eq!(labels, ["Continuous scrolling"]);
+        let item = hit_rect(&app, &Action::PlPopup(0));
+        click(&mut app, &mut c, item);
+        assert_eq!(crate::autoscroll::get(), crate::autoscroll::Settings { on: false, continuous: false });
+    }
+
+    /// Auto scrolling follows the playhead (spec: ui/auto-scrolling.md §5): the playlist in song mode, the piano roll in
+    /// pattern mode; continuous at a third of the width, paged by a quarter page at 7/8; not while paused or off. The
+    /// playlist's scroll is drawn by moving pixels: each frame must equal a full repaint.
+    #[test]
+    fn auto_scrolling_follows_the_playhead() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        crate::playlist::place(&mut app.state, 0, 0);
+        crate::playlist::place(&mut app.state, 1, 1536);
+        for w in [Win::Playlist, Win::PianoRoll] {
+            let ws = &mut app.state.wins[w.slot().unwrap()];
+            ws.maxed = false;
+            ws.rect = Rect::new(220.0, 90.0, 1000.0, 480.0);
+        }
+        let play = |tick: f64, song: bool| Shown { playing: true, paused: false, tick, song, sounding: Vec::new() };
+        crate::autoscroll::toggle();
+
+        // Song mode, playlist in front.
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut a, None);
+        let g = app.pl_grid.expect("playlist shown");
+        let ppt = |app: &App| app.state.playlist_bar_w / (f32::from(app.state.project.ppq.max(4)) * 4.0);
+        let tick_at = |app: &App, x: f32| f64::from(x / ppt(app));
+        app.show_playback(play(0.0, true));
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut a, d);
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        // Continuous: still up to a third, then held there.
+        app.show_playback(play(tick_at(&app, g.w / 3.0 - 2.0), true));
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        for k in [0.5, 0.52, 0.9] {
+            let x = g.w * k;
+            app.show_playback(play(tick_at(&app, x), true));
+            assert!((app.state.playlist_scroll.0 - (x - g.w / 3.0)).abs() <= 0.5, "continuous at {k}");
+            let d = app.take_damage();
+            frame_damage(&mut app, &mut a, d);
+            frame(&mut app, &mut b, None);
+            assert_same(&a, &b, &format!("continuous at {k}"));
+        }
+        // Paged: nothing until 7/8 of the width, then a quarter page.
+        crate::autoscroll::toggle_continuous();
+        app.state.playlist_scroll.0 = 0.0;
+        frame(&mut app, &mut a, None);
+        app.show_playback(play(tick_at(&app, g.w * 0.8), true));
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        app.show_playback(play(tick_at(&app, g.w * 0.9), true));
+        assert!((app.state.playlist_scroll.0 - g.w * 0.275).abs() <= 0.5, "paged: {}", app.state.playlist_scroll.0);
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut a, d);
+        frame(&mut app, &mut b, None);
+        assert_same(&a, &b, "paged step");
+        // Back to the start: the view goes with it.
+        app.show_playback(play(0.0, true));
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        // Paused: the view stays.
+        app.show_playback(Shown { paused: true, ..play(tick_at(&app, g.w * 3.0), true) });
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        // Off: the view stays.
+        app.show_playback(play(0.0, true));
+        crate::autoscroll::toggle();
+        app.show_playback(play(tick_at(&app, g.w * 3.0), true));
+        assert_eq!(app.state.playlist_scroll.0, 0.0);
+        app.show_playback(Shown::default());
+
+        // Pattern mode, piano roll in front: its own width and zoom.
+        crate::autoscroll::toggle();
+        app.state.z = vec![Win::PianoRoll];
+        frame(&mut app, &mut a, None);
+        let g = app.piano_grid.expect("piano roll shown");
+        let ppq = f64::from(app.state.project.ppq.max(4));
+        let tick = f64::from(g.w) * 0.9 / f64::from(app.state.piano.px_per_beat) * ppq;
+        app.show_playback(play(0.0, false));
+        app.show_playback(play(tick, false));
+        assert!((app.scroll_get(Scroll::PianoX) - g.w * 0.275).abs() <= 0.5, "piano roll paged: {}", app.scroll_get(Scroll::PianoX));
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut a, d);
+        frame(&mut app, &mut b, None);
+        assert_same(&a, &b, "piano roll step");
     }
 
     /// CPU panel (spec: ui/main-window.md §13): the menu's View FPS / Misc / Refresh change what it shows; a double

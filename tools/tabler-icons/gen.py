@@ -87,6 +87,7 @@ ICONS = [
     ("FLASK_2", "flask-2", "outline"),
     ("MAXIMIZE", "maximize", "outline"),
     ("SETTINGS_FILLED", "settings", "filled"),
+    ("ARROW_AUTOFIT_RIGHT", "arrow-autofit-right", "outline"),
 ]
 
 NUM = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
