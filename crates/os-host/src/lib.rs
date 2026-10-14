@@ -14,6 +14,8 @@
 //! guard ([`guard`]). A plugin whose code crashes is stopped and Lemon Studio keeps running.
 // spec: plugins/plugin-formats.md (hosting inside Lemon Studio), plugins/vst3-hosting.md
 
+#[cfg(target_os = "macos")]
+pub mod bundle;
 pub mod guard;
 mod guarded;
 mod meter;
@@ -285,20 +287,20 @@ pub fn wake() {
 
 /// Loads a plugin module (DLL / shared object) for a backend.
 ///
-/// On Linux the module stays mapped after it is closed (`RTLD_NODELETE`), as other Linux hosts do: plugins leave
-/// threads and thread-local destructors behind, and once the code is unmapped those crash the host when they run.
+/// On Linux and macOS the module stays mapped after it is closed (`RTLD_NODELETE`), as other hosts there do: plugins
+/// leave threads and thread-local destructors behind, and once the code is unmapped those crash the host when they run.
 ///
 /// # Safety
 /// Loading runs the module's initialisers (see `libloading::Library::new`).
 pub unsafe fn load_module(path: &Path) -> Result<libloading::Library, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let lib = {
         use libloading::os::unix::{Library, RTLD_LOCAL, RTLD_NOW};
-        /// `<dlfcn.h>` (glibc and musl).
-        const RTLD_NODELETE: std::ffi::c_int = 0x1000;
+        /// `<dlfcn.h>`: glibc and musl, Apple's.
+        const RTLD_NODELETE: std::ffi::c_int = if cfg!(target_os = "macos") { 0x80 } else { 0x1000 };
         unsafe { Library::open(Some(path), RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE) }.map(libloading::Library::from)
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let lib = unsafe { libloading::Library::new(path) };
     lib.map_err(|e| format!("{}: {e}", path.display()))
 }

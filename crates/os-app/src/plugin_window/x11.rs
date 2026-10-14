@@ -684,15 +684,6 @@ impl Frame {
 // the detached window (it stays above its owner). While one is open, its pixels are shown in a small window above the
 // plugin window, and its mouse input goes to the app as if it happened in the main window (`take_lift_input`).
 
-/// Mouse input on the lifted popup; positions in the main window (physical px).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LiftInput {
-    Move(i32, i32),
-    /// X button: 1 left, 2 middle, 3 right.
-    Down(u8),
-    Up,
-}
-
 struct Lift {
     win: xproto::Window,
     gc: xproto::Gcontext,
@@ -797,25 +788,6 @@ fn put_pixels(conn: &Conn, win: xproto::Window, gc: xproto::Gcontext, xrgb: &[u3
         let _ = conn.c.put_image(ImageFormat::Z_PIXMAP, win, gc, w as u16, bh, 0, y, 0, conn.depth, &bytes);
     }
     let _ = conn.c.flush();
-}
-
-/// `rect` minus `cut`: up to four rects (left, right, top, bottom of the hole), each [left, top, right, bottom].
-fn subtract(rect: [i32; 4], cut: [i32; 4]) -> Vec<[i32; 4]> {
-    let [l, t, r, b] = rect;
-    let [cl, ct, cr, cb] = [cut[0].max(l), cut[1].max(t), cut[2].min(r), cut[3].min(b)];
-    if cl >= cr || ct >= cb {
-        return vec![rect];
-    }
-    [[l, t, cl, b], [cr, t, r, b], [cl, t, cr, ct], [cl, cb, cr, b]].into_iter().filter(|q| q[0] < q[2] && q[1] < q[3]).collect()
-}
-
-/// The parts of window rect `me` inside `work` and outside every cover.
-fn visible(me: [i32; 4], work: [i32; 4], covers: &[[i32; 4]]) -> Vec<[i32; 4]> {
-    let start = [me[0].max(work[0]), me[1].max(work[1]), me[2].min(work[2]), me[3].min(work[3])];
-    if start[0] >= start[2] || start[1] >= start[3] {
-        return Vec::new();
-    }
-    covers.iter().fold(vec![start], |parts, &c| parts.into_iter().flat_map(|p| subtract(p, c)).collect())
 }
 
 /// Back to the window's own rectangle.
@@ -975,25 +947,6 @@ pub fn paint_dirty() {
 /// and editors stay responsive.
 pub fn busy() -> bool {
     CONN.with(|c| c.borrow().as_ref().is_some_and(|c| !c.frames.borrow().is_empty())) || os_host::runloop::active()
-}
-
-/// Host link messages from Lemon plugins' editors since the last call: (editor area window, message). The editors run
-/// on threads of their own and queue them in `os_hostlink` (UI thread).
-pub fn take_link() -> Vec<(isize, LinkMsg)> {
-    os_hostlink::take_host_messages()
-        .into_iter()
-        .map(|(area, cmd, arg)| {
-            let m = match cmd {
-                os_hostlink::Cmd::Note => {
-                    let (k, v, on) = os_hostlink::unpack_note(arg);
-                    LinkMsg::Note(k, v, on)
-                }
-                os_hostlink::Cmd::Automate => LinkMsg::Automate(arg.max(0) as usize),
-                _ => LinkMsg::Changed,
-            };
-            (area as isize, m)
-        })
-        .collect()
 }
 
 /// Puts `parent`'s docked windows `hwnds` (bottom to top) in that order when they are not already.

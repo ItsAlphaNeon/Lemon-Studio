@@ -1,7 +1,7 @@
 //! Lemon Studio: the application window.
 
-// Plugin windows are Win32 windows so far (`plugin_window`): elsewhere what only they reach (the Misc tab, the window
-// and preset menus, their requests) is built but unused. The Windows build still reports real dead code.
+// Plugin windows exist on Windows, Linux and macOS (`plugin_window`): elsewhere what only they reach (the Misc tab, the
+// window and preset menus, their requests) is built but unused. Those builds still report real dead code.
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
 
 mod app;
@@ -489,6 +489,14 @@ impl ApplicationHandler for Shell {
                 Ok(RawWindowHandle::Xlib(h)) => self.app.plugins.owner = h.window as isize,
                 Ok(RawWindowHandle::Xcb(h)) => self.app.plugins.owner = h.window.get() as isize,
                 _ => {}
+            }
+        }
+        // macOS: plugin windows dock into the main window's view (winit's).
+        #[cfg(target_os = "macos")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(RawWindowHandle::AppKit(h)) = window.window_handle().map(|h| h.as_raw()) {
+                self.app.plugins.owner = h.ns_view.as_ptr() as isize;
             }
         }
         self.app.plugins.scale = window.scale_factor() as f32;

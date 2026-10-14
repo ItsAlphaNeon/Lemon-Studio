@@ -22,9 +22,10 @@ fn find_rc() -> Option<PathBuf> {
 }
 
 fn main() {
-    // `plugin_windows`: plugin editors open in Lemon Studio's frame windows (Win32 on Windows, X11 on Linux).
+    // `plugin_windows`: plugin editors open in Lemon Studio's frame windows (Win32 on Windows, X11 on Linux, AppKit on
+    // macOS).
     println!("cargo::rustc-check-cfg=cfg(plugin_windows)");
-    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("windows" | "linux")) {
+    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("windows" | "linux" | "macos")) {
         println!("cargo::rustc-cfg=plugin_windows");
     }
     println!("cargo:rerun-if-changed=assets/lemonstudio.rc");

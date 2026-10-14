@@ -210,7 +210,7 @@ impl App {
             return;
         }
         // Plugin windows float above the main window: a sample released over one goes into that plugin.
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         if let Item::Sample(path) = &item {
             if self.sample_to_plugin_window(path) {
                 return;
