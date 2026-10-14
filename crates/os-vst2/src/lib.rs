@@ -786,7 +786,8 @@ impl Plugin {
 
     /// Embeds the editor in `parent` (an HWND on Windows, an NSView on macOS, an X11 window id on Linux); returns its
     /// size in pixels. `scale` is the parent's DPI factor: outside macOS it is offered to the plugin through the
-    /// content-scale extension many plugins take (vendor op-code `'PreS'` / `'AeCs'`); on macOS editors measure in
+    /// content-scale extension many plugins take (vendor op-code `'PreS'` / `'AeCs'`), 1 included: plugins keep the
+    /// last scale they were told, and some guess one from the monitor when told none. On macOS editors measure in
     /// points and follow their window's backing scale themselves, so their sizes are turned into pixels at `scale`.
     pub fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
         if !self.has_editor() {
@@ -795,7 +796,7 @@ impl Plugin {
         self.close_editor();
         let mac = cfg!(target_os = "macos");
         self.editor_scale = if mac && scale > 0.0 { scale } else { 1.0 };
-        if !mac && scale > 0.0 && (scale - 1.0).abs() > 0.01 {
+        if !mac && scale > 0.0 {
             self.inst.dispatch(op::CUSTOM, abi::fourcc(*b"PreS"), abi::fourcc(*b"AeCs") as isize, std::ptr::null_mut(), scale);
         }
         if let Ok(mut s) = self.inst.shared.size.lock() {

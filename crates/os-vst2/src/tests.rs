@@ -275,6 +275,12 @@ fn the_editor_opens_in_its_parent_reports_edits_and_follows_resizes() {
     let size = p.open_editor(0x1234 as *mut c_void, 1.0).expect("editor");
     assert_eq!(size, (300, 200));
     assert_eq!(logged("editor open"), ["editor open 4660"]);
+    // Outside macOS the scale is told even at 1: a plugin keeps the last one it was told.
+    if cfg!(target_os = "macos") {
+        assert!(logged("scale").is_empty());
+    } else {
+        assert_eq!(logged("scale"), ["scale 1"]);
+    }
     assert!(p.editor_open());
     unsafe { mock::edit(p.inst.effect, 0, 0.6) };
     assert_eq!(p.take_param_events(), [ParamEvent::Begin(0), ParamEvent::Value(0, 0.6f32 as f64), ParamEvent::End(0)]);

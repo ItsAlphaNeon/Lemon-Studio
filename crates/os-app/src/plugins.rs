@@ -1814,6 +1814,99 @@ mod tests {
         assert!(keys[0].pressed && !keys[1].pressed && keys[0].scancode == 0x10);
     }
 
+    /// A VST2 plugin's editor in a real plugin window at 100, 150 and 200 % (spec: ui/ui-scaling.md §3): the frame's
+    /// editor area must fit the editor's own window at each scale (neither clipped nor left with a gap), and a real
+    /// mouse drag in it (`OS_VST2_DRAG=x,y` in editor pixels as it first opens, default the middle) must reach the app
+    /// as an edit. The window first opens at the monitor's scale, as in the app (whose DPI awareness the test takes).
+    /// Moves the desktop cursor. Screenshots go to `OS_SHOT_DIR` when it is set.
+    /// `OS_VST2=<plugin dll> cargo test -p os-app --bin lemonstudio vst2_editor_scales -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn vst2_editor_scales() {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT};
+        let Some(file) = std::env::var_os("OS_VST2") else { return };
+        let dir = std::env::var_os("OS_SHOT_DIR").map(std::path::PathBuf::from);
+        let drag = std::env::var("OS_VST2_DRAG").ok().and_then(|s| s.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<i32>().ok()?, y.trim().parse::<i32>().ok()?))));
+        // Per-monitor DPI awareness, as winit gives the app: plugins see the monitor's own DPI, as they do there.
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+            fn GetDpiForSystem() -> u32;
+        }
+        const PER_MONITOR_AWARE_V2: isize = -4;
+        unsafe { SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2) };
+        let monitor = unsafe { GetDpiForSystem() } as f32 / 96.0;
+        let lib = load_file(std::path::Path::new(&file), os_host::Format::Vst2).expect("load");
+        let desc = lib.plugins()[0].clone();
+        let name = desc.name.clone();
+        let mut pl = Plugins { available: vec![Available { lib, desc }], scale: monitor, rate: 48000, ..Plugins::default() };
+        pl.create(0, 0).unwrap();
+        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 500);
+        let size = |h: HWND| unsafe {
+            let mut r: RECT = std::mem::zeroed();
+            GetWindowRect(h, &mut r);
+            (r.right - r.left, r.bottom - r.top)
+        };
+        let handles = |pl: &Plugins| {
+            let w = pl.hosted[&0].window.as_ref().unwrap();
+            let area = w.area() as HWND;
+            (w.hwnd() as HWND, area, unsafe { GetWindow(area, GW_CHILD) })
+        };
+        let shot = |pl: &Plugins, tag: &str| {
+            if let Some(d) = &dir {
+                let stem = name.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
+                capture(handles(pl).0 as isize, &d.join(format!("vst2_{stem}_{tag}.bmp")));
+            }
+        };
+        let (frame, _, editor) = handles(&pl);
+        assert!(!editor.is_null(), "the editor is a child of the frame's editor area");
+        // A drag at the monitor's scale: what the editor reports is what "last tweaked" and automation recording hear.
+        let (ew, eh) = size(editor);
+        let (x, y) = drag.unwrap_or((ew / 2, eh / 2));
+        let mut p = POINT { x, y };
+        unsafe {
+            ClientToScreen(editor, &mut p);
+            SetForegroundWindow(frame);
+        }
+        pump(&mut pl, 200);
+        let input = |flags: u32, dx: i32, dy: i32| unsafe {
+            let i = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } };
+            SendInput(1, &i, std::mem::size_of::<INPUT>() as i32);
+        };
+        let _ = pl.hosted[&0].plugin.lock().unwrap().take_param_events();
+        unsafe { SetCursorPos(p.x, p.y) };
+        pump(&mut pl, 50);
+        input(MOUSEEVENTF_LEFTDOWN, 0, 0);
+        pump(&mut pl, 50);
+        for _ in 0..40 {
+            input(MOUSEEVENTF_MOVE, 0, -3);
+            pump(&mut pl, 12);
+        }
+        input(MOUSEEVENTF_LEFTUP, 0, 0);
+        pump(&mut pl, 200);
+        let edits = pl.hosted[&0].plugin.lock().unwrap().take_param_events();
+        println!("{name}: opened at the monitor's {monitor} as {ew} x {eh}; a drag at ({x}, {y}) gave {} edits, starting {:?}", edits.len(), &edits[..edits.len().min(3)]);
+        shot(&pl, "monitor");
+        if drag.is_some() {
+            assert!(!edits.is_empty(), "the drag reached no parameter");
+        }
+        let mut base = None;
+        for k in [1.0f32, 1.5, 2.0] {
+            pl.rescale_window(0, k);
+            pump(&mut pl, 600);
+            let (_, area, editor) = handles(&pl);
+            let (e, a) = (size(editor), size(area));
+            let reported = pl.hosted[&0].plugin.lock().unwrap().editor_size();
+            let b = *base.get_or_insert(e);
+            println!("{name} at {k}: editor window {e:?} ({:.2} x its size at 1), editor area {a:?}, reported {reported:?}", e.0 as f32 / b.0 as f32);
+            shot(&pl, &format!("{}", (k * 100.0) as u32));
+            assert_eq!(a, e, "at {k} the editor area fits the editor's window");
+        }
+    }
+
     fn fixture_mp3() -> String {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../os-engine/tests/data/click_sine.mp3");
         p.canonicalize().unwrap().to_string_lossy().trim_start_matches(r"\\?\").to_string()
