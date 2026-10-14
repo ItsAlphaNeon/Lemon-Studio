@@ -188,7 +188,7 @@ const VIEW_ITEMS: &[Item] = &[
     it("Browser", "Alt+F8").on().tick(),
     it("Project picker", "Ctrl+F8"),
     it("Plugin picker", "F8").on(),
-    it("Tempo tapper", "Ctrl+F5"),
+    it("Tempo tapper", "Ctrl+F5").tick(),
     it("Touch controller", "Alt+F7"),
     it("Script output", ""),
     it("Toolbars", "").sub(),
@@ -339,6 +339,8 @@ fn win_of(label: &str) -> Option<Win> {
         "Mixer" => Win::Mixer,
         "Browser" => Win::Browser,
         "Plugin performance monitor" => Win::Perf,
+        // spec: ui/tempo-tapper.md §1
+        "Tempo tapper" => Win::Tapper,
         _ => return None,
     })
 }

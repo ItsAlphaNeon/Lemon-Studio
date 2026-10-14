@@ -29,6 +29,8 @@ pub enum Win {
     Plugin,
     /// The Plugin performance monitor (spec: ui/plugin-performance.md).
     Perf,
+    /// The Tempo tapper (spec: ui/tempo-tapper.md).
+    Tapper,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -128,6 +130,8 @@ pub enum Action {
     CpuPanel,
     /// The Plugin performance monitor's controls (spec: ui/plugin-performance.md).
     Perf(crate::perf::PerfAct),
+    /// The Tempo tapper's pad and Apply tempo switch (spec: ui/tempo-tapper.md).
+    Tapper(crate::tapper::TapAct),
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -439,6 +443,8 @@ pub(crate) const HINT_RECT: Rect = Rect::new(73.0, 5.0, 289.0, 31.0);
 const MONITOR_RECT: Rect = Rect::new(880.0, 4.0, 168.0, 33.0);
 /// The toolbar's CPU panel.
 pub(crate) const CPU_RECT: Rect = Rect::new(1053.0, 4.0, 149.0, 32.0);
+/// What a tempo change repaints in the toolbar (the tempo box and the transport around it).
+const TEMPO_RECT: Rect = Rect::new(380.0, 0.0, 200.0, 83.0);
 
 /// Actions whose hover state has no visual feedback (large background regions).
 fn hover_is_visible(a: &Action) -> bool {
@@ -463,6 +469,7 @@ fn hover_is_visible(a: &Action) -> bool {
             | Action::RackGraphArea
             | Action::WinDrag(_)
             | Action::WinResize(..)
+            | Action::Tapper(crate::tapper::TapAct::Pad)
     )
 }
 
@@ -714,6 +721,8 @@ pub struct State {
     pub cpu: crate::cpu::Cpu,
     /// The Plugin performance monitor's readings and options (read with the CPU panel while it is shown).
     pub perf: crate::perf::Perf,
+    /// The Tempo tapper: where it is, the count of taps, the pad's flash.
+    pub tapper: crate::tapper::TapperUi,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
     /// Rack rows played by a hosted plugin.
@@ -1017,6 +1026,7 @@ impl App {
                 monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
                 cpu: crate::cpu::Cpu::saved(),
                 perf: crate::perf::Perf::default(),
+                tapper: Default::default(),
                 toggles: vec!["typing"],
                 midi_inputs: Vec::new(),
                 maximized: true,
@@ -1852,7 +1862,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         v.push(Cover { bounds: Rect::new(0.0, 0.0, s.screen.0, views::WORK_Y + 1.0), win: None, solid: None });
@@ -1867,6 +1877,7 @@ impl App {
             Win::ChannelRack => Some(views::rack::rect(s)),
             Win::Plugin => s.project.channels.get(s.plugin_channel).map(|_| views::channel_win::rect(s)),
             Win::Perf => Some(views::perf::rect(s)),
+            Win::Tapper => Some(views::tapper::rect(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -2203,6 +2214,77 @@ impl App {
         }
     }
 
+    // ---------------------------------------------------------------- Tempo tapper (spec: ui/tempo-tapper.md)
+
+    /// VIEW > Tempo tapper and Ctrl+F5: open it (or bring it to the front), centred over the main window the first
+    /// time in a run and then where it was left; close it when it is in front (§1, §8).
+    fn toggle_tapper(&mut self) {
+        let s = &mut self.state;
+        if s.shown(Win::Tapper) && s.in_front(Win::Tapper) {
+            s.hide(Win::Tapper);
+        } else {
+            if !s.tapper.placed {
+                let (w, h) = views::tapper::SIZE;
+                s.tapper.pos = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::WORK_Y).round());
+                s.tapper.placed = true;
+            }
+            s.raise(Win::Tapper);
+        }
+        self.invalidate();
+    }
+
+    fn tapper_act(&mut self, a: crate::tapper::TapAct) {
+        use crate::tapper::TapAct;
+        match a {
+            TapAct::Pad => {
+                let t = self.state.tapper.clock();
+                self.tap(t);
+            }
+            // Turning Apply tempo on writes the tempo on the pad to the project at once (§5).
+            TapAct::Apply => {
+                if crate::tapper::toggle_apply() {
+                    if let Some(bpm) = self.state.tapper.count.tempo() {
+                        self.set_tempo(bpm);
+                    }
+                }
+            }
+        }
+        self.damage_win(Win::Tapper);
+    }
+
+    /// A tap at `t` seconds on the tapper's clock: it counts (§2), lights the pad (§4) and, with Apply tempo on, a new
+    /// tempo becomes the project tempo (§5).
+    fn tap(&mut self, t: f64) {
+        let tp = &mut self.state.tapper;
+        let bpm = tp.count.tap(t);
+        tp.flash_at = Some(std::time::Instant::now());
+        tp.flash = 1.0;
+        if let Some(bpm) = bpm.filter(|_| crate::tapper::get().apply) {
+            self.set_tempo(bpm);
+        }
+        self.damage_win(Win::Tapper);
+    }
+
+    /// A key on a MIDI keyboard taps while the tapper is open (its pad's hint, §1); the keys of a chord tap once.
+    fn midi_tap(&mut self) {
+        let t = self.state.tapper.clock();
+        if !self.state.tapper.count.last().is_some_and(|l| t - l < crate::tapper::MIDI_CHORD) {
+            self.tap(t);
+        }
+    }
+
+    /// Sets the project tempo, kept in the tempo box's range (10-522 BPM): playback follows from the next tick, the
+    /// toolbar shows it. Returns the tempo set.
+    fn set_tempo(&mut self, bpm: f64) -> f64 {
+        let t = bpm.clamp(10.0, 522.0);
+        if self.state.tempo != t {
+            self.state.tempo = t;
+            self.state.piano.dirty = true;
+            self.damage_rect(TEMPO_RECT);
+        }
+        t
+    }
+
     pub(crate) fn damage_win(&mut self, w: Win) {
         if !self.state.shown(w) {
             return self.invalidate();
@@ -2210,6 +2292,7 @@ impl App {
         match w {
             Win::ChannelRack => self.damage_rect(views::rack::bounds(&self.state)),
             Win::Perf => self.damage_rect(views::perf::bounds(&self.state)),
+            Win::Tapper => self.damage_rect(views::tapper::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
             _ => self.invalidate(),
         }
@@ -2300,9 +2383,15 @@ impl App {
         self.damage_rect(HINT_RECT);
     }
 
-    /// The monitor is moving (a signal or a decay): the shell should tick at animation rate.
+    /// The monitor is moving (a signal or a decay), or the tapper's pad fading: the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
-        self.transport.playing() || matches!(self.drag, Some(Drag::SongPosHold { .. })) || self.state.monitor.active() || self.state.mixer.meters.iter().any(|m| m.active()) || self.loading() || self.plugin_windows_busy()
+        self.transport.playing()
+            || matches!(self.drag, Some(Drag::SongPosHold { .. }))
+            || self.state.monitor.active()
+            || self.state.mixer.meters.iter().any(|m| m.active())
+            || self.loading()
+            || self.plugin_windows_busy()
+            || self.state.tapper.flash_at.is_some()
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -2357,6 +2446,10 @@ impl App {
                     self.invalidate();
                 }
             }
+        }
+        // The tapper's pad fades back after a tap (spec: ui/tempo-tapper.md §4).
+        if self.state.tapper.fade(now) && self.state.shown(Win::Tapper) {
+            self.damage_rect(views::tapper::pad_rect(&self.state));
         }
         // Mixer meters (spec: ui/mixer.md §9): fall back after playback stops.
         let peaks = self.transport.take_track_peaks();
@@ -3099,6 +3192,7 @@ impl App {
                         Win::ChannelRack => self.state.rack_pos = pos,
                         Win::Plugin => self.state.plugin_pos = pos,
                         Win::Perf => self.state.perf.pos = pos,
+                        Win::Tapper => self.state.tapper.pos = pos,
                         w => {
                             if let Some(i) = w.slot() {
                                 let r = &mut self.state.wins[i].rect;
@@ -3247,13 +3341,9 @@ impl App {
                 }
                 Drag::SongPosHold { .. } => {}
                 Drag::Tempo { y0, t0 } => {
-                    let t = (t0 + f64::from(y0 - y).round()).clamp(10.0, 522.0);
-                    if self.state.tempo != t {
-                        self.state.tempo = t;
-                        self.state.piano.dirty = true;
-                    }
+                    let t = self.set_tempo(t0 + f64::from(y0 - y).round());
                     self.hint = Cow::Owned(format!("Tempo {t:.3} BPM"));
-                    self.damage_rect(Rect::new(380.0, 0.0, 200.0, 83.0));
+                    self.damage_rect(TEMPO_RECT);
                     self.damage_rect(HINT_RECT);
                 }
             }
@@ -3379,10 +3469,13 @@ impl App {
             self.state.lane_menu = false;
             return;
         }
-        // Any click outside an open menu closes it.
+        // Any click outside an open menu closes it. VIEW's window entries are window toggles: one clicked in the menu
+        // closes the menu and toggles its window.
         if self.state.menu_open.is_some() && !matches!(action, Some(Action::MenuItem(..)) | Some(Action::Menu(_))) {
             self.state.menu_open = None;
-            return;
+            if !(matches!(action, Some(Action::ToggleWin(_))) && self.overlays.iter().any(|r| r.contains(x, y))) {
+                return;
+            }
         }
         self.raise_under_mouse();
         if let Some(a) = action {
@@ -3410,6 +3503,7 @@ impl App {
         match w {
             Win::Plugin => views::channel_win::bounds(&self.state),
             Win::Perf => views::perf::bounds(&self.state),
+            Win::Tapper => views::tapper::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
             w => self.state.win_rect(w).outset(5.0),
         }
@@ -4322,6 +4416,8 @@ impl App {
         }
         match key {
             Key::Named(NamedKey::Space) => self.act(if self.transport.playing() { Action::Stop } else { Action::Play }),
+            // spec: ui/tempo-tapper.md §1
+            Key::Named(NamedKey::F5) if ctrl => self.act(Action::ToggleWin(Win::Tapper)),
             Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
             Key::Named(NamedKey::F6) => self.act(Action::ToggleWin(Win::ChannelRack)),
             Key::Named(NamedKey::F7) => self.act(Action::ToggleWin(Win::PianoRoll)),
@@ -4511,6 +4607,9 @@ impl App {
         for m in msgs {
             match m {
                 crate::midi_in::Msg::On(key, velocity) => {
+                    if self.state.shown(Win::Tapper) {
+                        self.midi_tap();
+                    }
                     let row = self.state.selected_channel;
                     if row >= self.state.project.channels.len() {
                         continue;
@@ -4873,6 +4972,7 @@ impl App {
                 }
             }
             Action::Perf(p) => self.perf_act(p),
+            Action::Tapper(a) => self.tapper_act(a),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -4946,6 +5046,7 @@ impl App {
             // (spec: ui/channel-rack.md §5).
             Action::ToggleWin(Win::Browser) => s.show_browser = !s.show_browser,
             Action::ToggleWin(Win::Perf) => self.toggle_perf(),
+            Action::ToggleWin(Win::Tapper) => self.toggle_tapper(),
             Action::ToggleWin(w) => {
                 if s.shown(w) && s.in_front(w) {
                     s.hide(w);
@@ -5054,6 +5155,7 @@ impl App {
                 let pos = match win {
                     Win::Plugin => s.plugin_pos,
                     Win::Perf => s.perf.pos,
+                    Win::Tapper => s.tapper.pos,
                     Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
@@ -6943,6 +7045,132 @@ mod tests {
         let x = hit_rect(&app, &Action::CloseWin(Win::Perf));
         click(&mut app, &mut c, x);
         assert!(!app.state.shown(Win::Perf));
+    }
+
+    /// Tempo tapper (spec: ui/tempo-tapper.md): VIEW > Tempo tapper opens it centred over the main window, ticked in
+    /// the menu; clicks on the pad set the project tempo (whole BPM, clamped to the tempo box) while Apply tempo is on,
+    /// only show it while off, and turning it on applies the shown tempo; a long pause starts a new count; MIDI keys
+    /// tap (a chord once); the title bar moves it, Ctrl+F5 and its close button close it, and it reopens where it was.
+    #[test]
+    fn tempo_tapper_window() {
+        use crate::tapper::TapAct;
+        use views::menus::{bar_model, Mark, VIEW};
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let view = hit_rect(&app, &Action::Menu(VIEW));
+        click(&mut app, &mut c, view);
+        let item = hit_rect(&app, &Action::ToggleWin(Win::Tapper));
+        click(&mut app, &mut c, item);
+        assert!(app.state.shown(Win::Tapper) && app.state.in_front(Win::Tapper));
+        assert_eq!(views::tapper::rect(&app.state), Rect::new(882.0, 393.0, 156.0, 294.0), "156 x 294, centred over the main window");
+        let row = bar_model(&app.state)[VIEW].rows.iter().find(|r| r.label == "Tempo tapper").cloned().unwrap();
+        assert_eq!((row.enabled, row.mark, row.shortcut), (true, Mark::Check(true), "Ctrl+F5"));
+        // The hints; the controls that do nothing yet only say so.
+        let hint = |app: &App, a: &Action| app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.hint.to_string()).unwrap();
+        assert_eq!(hint(&app, &Action::Tapper(TapAct::Pad)), "Tap me, or press any key on your MIDI keyboard");
+        for name in [
+            "Nudge tempo to align time (Left / pitch bend)",
+            "Nudge tempo to align time (Right / pitch bend)",
+            "Resynchronize to taps",
+            "Mute all audio during first taps (during playback)",
+            "Mute now, for a few bars (during playback)",
+        ] {
+            assert_eq!(hint(&app, &Action::Placeholder(name)), format!("{name}: not available yet"));
+        }
+
+        // Apply tempo on (the default): from the second tap, every tempo is the project's.
+        let pad = hit_rect(&app, &Action::Tapper(TapAct::Pad));
+        let tap = |app: &mut App, c: &mut Canvas, t: f64| {
+            app.state.tapper.test_time = Some(t);
+            click(app, c, pad);
+        };
+        assert!(crate::tapper::get().apply);
+        assert_eq!(app.state.tempo, 130.0);
+        tap(&mut app, &mut c, 10.0);
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (None, 130.0), "one tap: TAP stays");
+        assert!(app.state.tapper.flash == 1.0 && app.animating(), "a tap lights the pad, which then fades");
+        tap(&mut app, &mut c, 10.5);
+        assert_eq!(app.state.tempo, 120.0);
+        tap(&mut app, &mut c, 11.0);
+        tap(&mut app, &mut c, 11.4);
+        assert_eq!(app.state.tempo, 129.0, "the average of every interval, rounded (128.57)");
+        assert!(app.unsaved(), "a tapped tempo is a change to the project");
+        // Off: the pad shows the tempo, the project keeps its own; turning it on applies the pad's.
+        let apply = hit_rect(&app, &Action::Tapper(TapAct::Apply));
+        click(&mut app, &mut c, apply);
+        assert!(!crate::tapper::get().apply);
+        tap(&mut app, &mut c, 11.8);
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (Some(133.0), 129.0));
+        click(&mut app, &mut c, apply);
+        assert!(crate::tapper::get().apply);
+        assert_eq!(app.state.tempo, 133.0);
+        // A long pause starts a new count (the tempo stays); the project tempo stays in 10-522.
+        tap(&mut app, &mut c, 20.0);
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (None, 133.0));
+        tap(&mut app, &mut c, 20.05);
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (Some(1200.0), 522.0));
+        // MIDI keys tap while the window is open; a chord's keys are one tap.
+        for t in [30.0, 30.03, 30.5] {
+            app.state.tapper.test_time = Some(t);
+            app.midi_tap();
+        }
+        assert_eq!(app.state.tempo, 120.0);
+        frame(&mut app, &mut c, None);
+
+        // The title bar moves it; Ctrl+F5 closes it while it is in front and reopens it where it was left.
+        let title = hit_rect(&app, &Action::WinDrag(Win::Tapper));
+        app.mouse_move(title.x + 40.0, title.cy());
+        app.mouse_down();
+        app.mouse_move(title.x + 40.0 - 300.0, title.cy() + 100.0);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.state.tapper.pos, (582.0, 493.0));
+        app.key(&Key::Named(NamedKey::F5), true, false);
+        assert!(!app.state.shown(Win::Tapper));
+        assert!(app.state.shown(Win::Playlist), "Ctrl+F5 is not F5");
+        app.key(&Key::Named(NamedKey::F5), true, false);
+        assert!(app.state.shown(Win::Tapper) && app.state.tapper.pos == (582.0, 493.0));
+        assert_eq!(app.state.tapper.count.tempo(), Some(120.0), "the last tempo stays on the pad");
+        frame(&mut app, &mut c, None);
+        let x = hit_rect(&app, &Action::CloseWin(Win::Tapper));
+        click(&mut app, &mut c, x);
+        assert!(!app.state.shown(Win::Tapper));
+        let row = bar_model(&app.state)[VIEW].rows.iter().find(|r| r.label == "Tempo tapper").cloned().unwrap();
+        assert_eq!(row.mark, Mark::Check(false));
+    }
+
+    /// The tapper's flash fades on the ticks (spec: ui/tempo-tapper.md §4, §8): each repaints just the pad, which shows
+    /// the same as a full paint, in both designs; once out, ticking stops.
+    #[test]
+    fn tempo_tapper_flash_repaints_the_pad() {
+        use std::time::{Duration, Instant};
+        for design in Design::ALL {
+            let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+            let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+            let mut app = App::new(None);
+            app.theme = design_theme(design, false);
+            app.act(Action::ToggleWin(Win::Tapper));
+            app.state.tapper.test_time = Some(1.0);
+            app.act(Action::Tapper(crate::tapper::TapAct::Pad));
+            app.state.tapper.test_time = Some(1.5);
+            app.act(Action::Tapper(crate::tapper::TapAct::Pad));
+            frame(&mut app, &mut a, None);
+            let _ = app.take_damage();
+            let pad = views::tapper::pad_rect(&app.state);
+            for (ms, what) in [(100, "fading"), (300, "gone")] {
+                app.state.tapper.flash_at = Some(Instant::now() - Duration::from_millis(ms));
+                app.tick();
+                let d = app.take_damage();
+                let Some(Some(rects)) = &d else { panic!("{what}: repaints regions, not the frame") };
+                assert!(rects.iter().any(|r| r.intersect(&pad) == pad), "{what}: the pad is repainted ({rects:?})");
+                frame_damage(&mut app, &mut a, d);
+                frame(&mut app, &mut b, None);
+                assert_same(&a, &b, &format!("{design:?}: flash {what}"));
+            }
+            assert!(!app.animating() && app.state.tapper.flash == 0.0);
+        }
     }
 
     /// An empty project with a Lemon 3x Osc played from the typing keyboard while the UI ticks, then in a playing
@@ -8914,13 +9142,14 @@ mod tests {
     }
 
     /// VIEW > Close all windows / unfocused / plugin windows and F12, Ctrl+F12, Alt+F12 (spec: ui/close-windows.md):
-    /// the browser stays; the focused window is the one in front, none after a click on the empty workspace.
+    /// the browser stays (and the Tempo tapper for Alt+F12); the focused window is the one in front, none after a
+    /// click on the empty workspace.
     #[test]
     fn close_all_windows() {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        let all = vec![Win::Playlist, Win::Mixer, Win::Plugin, Win::ChannelRack, Win::Perf, Win::PianoRoll];
+        let all = vec![Win::Playlist, Win::Mixer, Win::Plugin, Win::ChannelRack, Win::Perf, Win::Tapper, Win::PianoRoll];
         let f12 = Key::Named(NamedKey::F12);
         let view = |label: &str| (0..60).find(|&i| views::menus::item_at(views::menus::VIEW, i).is_some_and(|it| it.label == label)).unwrap();
         for label in ["Close all windows", "Close all plugin windows", "Close all unfocused windows"] {
@@ -8940,7 +9169,7 @@ mod tests {
         // Alt+F12: only the channel settings window (and hosted plugin windows).
         app.state.z = all.clone();
         app.key(&f12, false, true);
-        assert_eq!(app.state.z, vec![Win::Playlist, Win::Mixer, Win::ChannelRack, Win::Perf, Win::PianoRoll]);
+        assert_eq!(app.state.z, vec![Win::Playlist, Win::Mixer, Win::ChannelRack, Win::Perf, Win::Tapper, Win::PianoRoll], "the Tempo tapper stays too");
         app.state.z = all.clone();
         app.menu_item(views::menus::VIEW, view("Close all plugin windows"));
         assert!(!app.state.shown(Win::Plugin) && app.state.z.len() == all.len() - 1);
