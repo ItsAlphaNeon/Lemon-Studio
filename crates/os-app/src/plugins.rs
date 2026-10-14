@@ -1777,16 +1777,22 @@ mod tests {
         assert!(after < before * 0.5, "MOD X down did not change what the app plays ({before} -> {after})");
     }
 
-    /// Keys typed while the plugin window has the focus must reach the app (the typing keyboard keeps playing).
+    /// Keys typed while the plugin window has the focus must reach the app (the typing keyboard keeps playing): a CLAP
+    /// plugin (`OS_CLAP`) or a VST2 one (`OS_VST2`), whose editor first gets a click at (300, 60).
     #[test]
     #[ignore]
     fn keys_in_a_plugin_window_reach_the_app() {
-        let Some(clap) = std::env::var_os("OS_CLAP") else { return };
-        let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
-        let desc = lib.plugins[0].clone();
+        let (file, format) = match (std::env::var_os("OS_CLAP"), std::env::var_os("OS_VST2")) {
+            (Some(f), _) => (f, os_host::Format::Clap),
+            (None, Some(f)) => (f, os_host::Format::Vst2),
+            (None, None) => return,
+        };
+        let lib = load_file(std::path::Path::new(&file), format).expect("load");
+        let desc = lib.plugins()[0].clone();
+        let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name, target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
