@@ -40,10 +40,11 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 ## ✅ Plugin hosting
 
-- CLAP and VST3 instruments and effects, with their editors and saved state
+- CLAP, VST3 and VST2 instruments and effects, with their editors and saved state
+- VST2 shells (one file offering several plugins); a VST2 plugin's state is saved in the layout FL Studio's projects use
 - On Windows, a plugin that crashes is stopped (its slot passes the sound through) instead of closing
   Lemon Studio
-- Not yet: VST2
+- Not yet: 32-bit plugins, and Intel-only plugins on Apple silicon (they need a bridge)
 
 ## ✅ Plugin management
 
@@ -53,7 +54,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - A background scan at startup; each file is tried in a separate scanner process, so a broken plugin
   cannot take Lemon Studio down
 - Favourites and hidden plugins
-- One menu entry per plugin installed as both VST3 and CLAP (your preferred format wins)
+- One menu entry per plugin installed in several formats (VST3, CLAP, VST2: your preferred format wins)
 
 ## ✅ Time-stretching
 
