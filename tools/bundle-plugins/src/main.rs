@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! `cargo run -p bundle-plugins [-- --install]`: builds every Lemon Studio plugin in release mode and writes
 //! `<target>/bundled/<Name>.vst3` (bundle folder) and `<Name>.clap` (a bundle folder too on macOS, ad-hoc signed like
 //! the VST3 one so Apple silicon loads them); `--install` copies them to the per-user plugin folders (no admin rights

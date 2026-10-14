@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Automation of CLAP parameters: values from the engine (`Instrument::param` / `HostedEffect::param_fx`, by parameter
 //! index and normalized value) become `CLAP_EVENT_PARAM_VALUE` events at their frame offsets inside `process`, merged in
 //! time order with the host's own edits and the notes. When nothing processes the instance the newest values are

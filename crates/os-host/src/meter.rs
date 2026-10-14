@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! What a hosted instance costs and plays, published by the audio thread and read by the UI without locking the
 //! instance: processing time (the Plugin performance monitor) and voices (the polyphony counter).
 // spec: ui/plugin-performance.md §3, audio/voices.md §5

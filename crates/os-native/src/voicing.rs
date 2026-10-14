@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The channel's envelopes, LFOs and filter on a native generator's voices (spec: plugins/fruity-abi.md "Voices", the
 //! channel's envelopes, LFOs and filter, an OpenStudio design): the host steps the five envelopes and LFOs once per
 //! tick into each voice's final levels; a plugin that renders voice by voice (UseSampler) also has each voice run

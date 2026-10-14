@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Popup menus: layout and painting, independent of the window they live in (the app paints them in its frame, plugins
 //! in their own popup windows). Two looks, both measured on FL: the grey **context** menu (right-click menus, menu bar
 //! dropdowns: headers, separators, ticks, shortcuts, submenu arrows) and the dark **list** menu (choice boxes: the

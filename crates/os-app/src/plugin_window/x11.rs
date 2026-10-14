@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Plugin windows on Linux: the frame (`super`) in an X11 window. Plugin editors on Linux embed only in X11 windows (CLAP
 //! `x11`, VST3 `X11EmbedWindowID`), so the app runs its main window on X11 too (XWayland under Wayland, see `main`):
 //! then a frame docks as on Windows, a child of the main window clipped to the workspace minus the app's windows above

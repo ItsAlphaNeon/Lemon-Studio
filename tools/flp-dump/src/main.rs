@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! flp-dump: print an FLP file's chunks and event stream, then verify the lossless
 //! round-trip and the alignment checks.
 //!
@@ -74,7 +80,7 @@ fn dump(out: &mut impl Write, file: &FlpFile, source: &[u8]) -> io::Result<bool>
     for (at, chunk) in file.chunk_offsets() {
         write!(
             out,
-            "{at:#010x}  chunk {}  len {}",
+            "{at:#010x}  chunk {}  len {}", // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
             chunk.tag,
             chunk.payload_len()
         )?;

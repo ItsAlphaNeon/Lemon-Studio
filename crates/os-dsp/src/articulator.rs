@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! A channel's five articulators (pan, volume, mod X, mod Y, pitch): an envelope and an LFO each, stepped once per
 //! sequencer tick for every voice, and the parts they give a voice's levels.
 //!

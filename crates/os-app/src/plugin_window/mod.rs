@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The window around a hosted plugin's editor: Lemon Studio's title bar (menu arrow, gear, channel name, "(mixer target)",
 //! Presets box, minimize, close) and the gear-toggled strip, one row: the plugin's page tabs (a plain plugin has the plug
 //! tab, a Lemon plugin joined through the host link brings its own pages), the Misc wrench, then

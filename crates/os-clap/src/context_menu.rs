@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The host side of CLAP's context-menu extension: when a plugin builds the right-click menu of one of its parameters it
 //! asks the host for entries, and Lemon Studio adds "Create automation clip". A pick comes back through `perform` and is
 //! handed to the app by `take_automation_requests` (parameter ids). The host never pops up menus for the plugin.
@@ -73,7 +79,7 @@ impl Plugin {
 mod tests {
     use super::*;
 
-    use clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU;
+    use clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
 
     /// Collects the labels a builder was given.
     unsafe extern "C" fn add_item(b: *const clap_context_menu_builder, kind: u32, data: *const c_void) -> bool {

@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Generator plugins as engine instruments: a channel can be played by an external instrument (a hosted CLAP plugin)
 //! instead of a sample. The instance outlives engines (Lemon Studio rebuilds the engine on every edit), so it is shared
 //! behind a mutex; the audio thread only ever `try_lock`s it.

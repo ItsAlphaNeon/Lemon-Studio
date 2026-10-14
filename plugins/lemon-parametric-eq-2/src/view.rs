@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Lemon Parametric EQ 2 editor: painting and hit regions (platform independent), built from `os_ui::kit` widgets.
 //!
 //! Coordinates are the editor content's (700 x 350 logical px) from the spec tables. Greys are palette roles so an

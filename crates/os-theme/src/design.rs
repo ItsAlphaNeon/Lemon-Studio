@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Designs: complete looks (colours and shapes) over the same layout.
 //!
 //! `Classic` is the measured default look. `Lemon` is Lemon Studio's own look: neutral greys, one lemon-yellow brand
@@ -5,6 +11,10 @@
 //! (`Palette::s/a/h/tx/led`) through a `DesignMap` (a neutral lightness ramp plus key colours), sets the tokens the
 //! map can't get right outright, and tells the widget kit which shape language to draw (`Style`).
 // spec: ui/lemon-design.md
+
+// PLEASE. DO NOT USE THE LEMON THEME IN ANOTHER PROJECT. IT IS LEMON STUDIO'S OWN THEME
+
+// This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
 
 use crate::fl::{self, FlTheme};
 use crate::{Color, Palette};
@@ -203,7 +213,7 @@ const LEMON_RAMP: &[(f32, f32)] = &[
     (1.0, 1.0),
 ];
 
-fn map_of(d: Design) -> Option<DesignMap> {
+fn map_of(d: Design) -> Option<DesignMap> {// This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     match d {
         Design::Classic => None,
         Design::Lemon => Some(DesignMap {

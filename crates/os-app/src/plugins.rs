@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Hosted plugins (any format, through the `os-host` layer): the plugins known (built in, and found by the plugin scan,
 //! `plugin_db` / `plugin_scan`), one instance per plugin channel or mixer slot, their windows, and the instrument /
 //! effect lists the transport plays.
