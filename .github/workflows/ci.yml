@@ -1,5 +1,5 @@
-# Builds and tests Lemon Studio on Windows and Linux for every push to main and every pull request, so a change that
-# breaks either platform shows up before it is merged.
+# Builds and tests Lemon Studio on Windows, Linux and macOS for every push to main and every pull request, so a change
+# that breaks any platform shows up before it is merged.
 name: CI
 
 on:
@@ -27,12 +27,14 @@ jobs:
             os: windows-latest
           - name: Linux
             os: ubuntu-24.04
+          - name: macOS
+            os: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       # ALSA (audio output and MIDI input). The app loads Wayland, X11 and xkbcommon at run time, but Lemon Sampler built
       # on its own (the bundle step) links wayland-client through its file dialogs, so that needs the Wayland package.
-      # libclang: the time stretcher's bindings are generated at build time (the Windows image ships LLVM).
+      # libclang: the time stretcher's bindings are generated at build time (the Windows image ships LLVM, the macOS one Xcode's).
       - name: Install Linux packages
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwayland-dev libclang-dev pkg-config
@@ -47,6 +49,10 @@ jobs:
       # The plugin bundles (VST3 + CLAP): the hosting tests load them, and skip without them.
       - name: Bundle plugins
         run: cargo run -p bundle-plugins --locked
+
+      - name: Bundle the app
+        if: runner.os == 'macOS'
+        run: cargo run -p bundle-app --locked
 
       - name: Test
         run: cargo test --workspace --locked
