@@ -7,10 +7,18 @@ use std::sync::{Arc, OnceLock};
 
 use os_engine::metronome::{Sound, Switch};
 
+#[cfg_attr(test, allow(dead_code))]
 static SWITCH: OnceLock<Arc<Switch>> = OnceLock::new();
 
-/// The switch every playback engine clicks with: read from `metronome.txt` the first time (tests: off, Tick).
+/// The switch every playback engine clicks with: read from `metronome.txt` the first time (tests: off, Tick, one per
+/// test thread so that tests running side by side don't see each other's clicks).
 pub fn switch() -> Arc<Switch> {
+    #[cfg(test)]
+    {
+        thread_local!(static TEST: Arc<Switch> = Arc::new(Switch::default()));
+        TEST.with(Arc::clone)
+    }
+    #[cfg(not(test))]
     SWITCH.get_or_init(|| Arc::new(load())).clone()
 }
 
@@ -59,10 +67,8 @@ pub fn text(s: &Switch) -> String {
     format!("on={}\nsound={}\n", u8::from(s.on()), s.sound().key())
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn load() -> Switch {
-    if cfg!(test) {
-        return Switch::default();
-    }
     os_paths::user_file("metronome.txt").and_then(|f| std::fs::read_to_string(f).ok()).map(|t| parse(&t)).unwrap_or_default()
 }
 
