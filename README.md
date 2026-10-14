@@ -183,6 +183,7 @@ install -Dm644 crates/os-app/assets/lemonstudio.desktop ~/.local/share/applicati
 Plugin windows dock inside the main window as on Windows, or detach (from their window menu) into windows of their own
 that stay above Lemon Studio while it is the active application. A few things differ from Windows and Linux:
 
+- **Menu bar:** the window's menus (FILE … HELP) are also in the macOS menu bar, with the same entries.
 - **Keys:** Command stands in for Ctrl in every shortcut (Command+S saves, Command+Shift+D switches the design), and
   Control+click is a right click. Quit (Command+Q, the menu bar, the Dock) asks about unsaved changes like closing the
   window does.
