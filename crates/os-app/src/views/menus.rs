@@ -9,7 +9,7 @@ use os_ui::{Font, Rect};
 
 use crate::app::{Action, State, Ui, Win};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Item,
     /// Section header row (not clickable).
@@ -17,7 +17,7 @@ pub enum Kind {
     Sep,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mark {
     None,
     Check(bool),
@@ -357,6 +357,85 @@ fn item_action(menu: usize, i: usize, item: &Item) -> Action {
     Action::MenuItem(menu, i)
 }
 
+/// An entry's tick or radio state now: window entries follow their window (the browser its panel), the typing keyboard
+/// switch its toggle; other ticks are drawn unticked.
+fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
+    match (item.mark, menu == VIEW) {
+        // The browser is a panel of its own, shown by its own switch.
+        (Mark::Check(_), true) if item.label == "Browser" => Mark::Check(s.show_browser),
+        (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
+        (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
+        (mk, _) => mk,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The menus as a native menu bar shows them (macOS): the same entries and what they do, built from `MENUS` and the
+// project as the dropdown is, so the two never differ.
+
+/// One row of a menu in the native menu bar.
+#[derive(Clone, PartialEq)]
+pub struct BarRow {
+    pub kind: Kind,
+    pub label: String,
+    /// As written in `MENUS` ("Shift+Ctrl+S").
+    pub shortcut: &'static str,
+    pub enabled: bool,
+    pub mark: Mark,
+    /// What choosing it does (`pick`): menu and flat item index (`PATTERN_PICK + n` for pattern `n`).
+    pub pick: Option<(usize, usize)>,
+}
+
+/// A menu of the native menu bar: its title ("File") and rows; columns follow one another, a separator between them.
+#[derive(Clone, PartialEq)]
+pub struct BarMenu {
+    pub title: String,
+    pub rows: Vec<BarRow>,
+}
+
+/// The menu bar for the project and windows as they are now.
+pub fn bar_model(s: &State) -> Vec<BarMenu> {
+    MENUS
+        .iter()
+        .enumerate()
+        .map(|(mi, m)| {
+            let mut rows = Vec::new();
+            let mut flat = 0usize;
+            for (ci, (_, items)) in m.cols.iter().enumerate() {
+                if ci > 0 && !rows.is_empty() {
+                    rows.push(BarRow { kind: Kind::Sep, label: String::new(), shortcut: "", enabled: false, mark: Mark::None, pick: None });
+                }
+                if mi == PATTERNS && ci == 0 {
+                    for n in crate::patterns::listed(s) {
+                        let mark = Mark::Radio(n == s.pattern);
+                        rows.push(BarRow { kind: Kind::Item, label: crate::patterns::name_of(s, n), shortcut: "", enabled: true, mark, pick: Some((mi, PATTERN_PICK + n as usize)) });
+                    }
+                }
+                for item in items.iter() {
+                    let enabled = item.kind == Kind::Item && works(mi, item);
+                    let pick = enabled.then_some((mi, flat));
+                    rows.push(BarRow { kind: item.kind, label: item.label.to_string(), shortcut: item.shortcut, enabled, mark: mark_of(s, mi, item), pick });
+                    flat += 1;
+                }
+            }
+            BarMenu { title: bar_title(m.title), rows }
+        })
+        .collect()
+}
+
+/// A menu's title as a native menu bar writes it: "FILE" is "File".
+pub fn bar_title(title: &str) -> String {
+    title.chars().enumerate().map(|(i, c)| if i == 0 { c } else { c.to_ascii_lowercase() }).collect()
+}
+
+/// What choosing the menu bar row `pick` (`BarRow::pick`) does: what the same row of the dropdown does.
+pub fn pick(menu: usize, i: usize) -> Action {
+    match item_at(menu, i) {
+        Some(item) if i < PATTERN_PICK => item_action(menu, i, item),
+        _ => Action::MenuItem(menu, i),
+    }
+}
+
 // Row heights follow the display scale like FL's popup menus (spec: ui/ui-scaling.md §2).
 fn row_h(m: &os_ui::kit::menu::Metrics, it: &Item) -> f32 {
     match it.kind {
@@ -463,12 +542,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                         ui.off(rr, item.label);
                     }
                     let color = if ok { t.menu_pop_text } else { t.menu_pop_dim };
-                    // Tick state: window entries follow the window, others are drawn unticked.
-                    let mark = match (item.mark, menu == VIEW) {
-                        (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
-                        (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
-                        (mk, _) => mk,
-                    };
+                    let mark = mark_of(s, menu, item);
                     let (mx, my) = (rr.x + 10.0, rr.y + row / 2.0);
                     match mark {
                         Mark::Check(true) => {
@@ -526,5 +600,37 @@ mod tests {
         assert_eq!(MENUS[VIEW].title, "VIEW");
         assert_eq!(MENUS[OPTIONS_MENU].title, "OPTIONS");
         assert_eq!(item_at(OPTIONS_MENU, OPT_THEME).map(|it| it.label), Some("Theme settings"));
+    }
+
+    /// The native menu bar (macOS) is the dropdowns: every entry in order, greyed out and ticked alike, choosing one
+    /// doing what the dropdown's does, and the project's patterns in PATTERNS.
+    #[test]
+    fn bar_model_follows_the_dropdowns() {
+        let mut app = crate::app::App::new(None);
+        let bar = bar_model(&app.state);
+        assert_eq!(bar.iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["File", "Edit", "Add", "Patterns", "View", "Options", "Tools", "Help"]);
+        for (mi, m) in MENUS.iter().enumerate() {
+            let items: Vec<&Item> = m.cols.iter().flat_map(|(_, items)| items.iter()).collect();
+            let rows: Vec<&BarRow> = bar[mi].rows.iter().filter(|r| r.pick.is_none_or(|(_, i)| i < PATTERN_PICK)).collect();
+            // The columns' separator rows aside, the rows are the items.
+            let rows: Vec<&BarRow> = rows.into_iter().filter(|r| r.kind != Kind::Sep || items.iter().any(|it| it.kind == Kind::Sep)).collect();
+            let named: Vec<(&str, bool)> = rows.iter().filter(|r| r.kind == Kind::Item).map(|r| (r.label.as_str(), r.enabled)).collect();
+            let want: Vec<(&str, bool)> = items.iter().filter(|it| it.kind == Kind::Item).map(|it| (it.label, works(mi, it))).collect();
+            assert_eq!(named, want, "{}", m.title);
+        }
+        let save = bar[0].rows.iter().find(|r| r.label == "Save").unwrap();
+        assert_eq!((save.shortcut, save.pick), ("Ctrl+S", Some((0, FILE_SAVE))));
+        let playlist = bar[VIEW].rows.iter().find(|r| r.label == "Playlist").unwrap();
+        assert_eq!(pick(VIEW, playlist.pick.unwrap().1), Action::ToggleWin(Win::Playlist));
+        assert_eq!(playlist.mark, Mark::Check(app.state.shown(Win::Playlist)));
+        // Patterns in use head PATTERNS, the current one marked.
+        assert_eq!(bar[PATTERNS].rows[0].label, "Find first empty...", "a new project uses no pattern yet");
+        app.state.project.patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
+        let first = bar_model(&app.state)[PATTERNS].rows[0].clone();
+        assert_eq!((first.label.as_str(), first.mark, first.pick), ("Intro", Mark::Radio(true), Some((PATTERNS, PATTERN_PICK + 1))));
+        // Live state: hiding the playlist unticks it.
+        app.state.hide(Win::Playlist);
+        let playlist = bar_model(&app.state)[VIEW].rows.iter().find(|r| r.label == "Playlist").unwrap().clone();
+        assert_eq!(playlist.mark, Mark::Check(false));
     }
 }

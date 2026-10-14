@@ -19,6 +19,8 @@ mod loading;
 mod logo;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod menu_bar;
 mod meters;
 mod midi_in;
 mod mixer;
@@ -387,6 +389,14 @@ impl Shell {
                 self.app.drop_file(path);
                 self.pending = true;
             }
+            // The menu bar: what was chosen in it, then its entries as they read now.
+            for (menu, i) in menu_bar::take_picks() {
+                // As a click on the window's own menu does (`App::mouse_down`): the whole canvas is painted again.
+                self.app.invalidate();
+                self.app.act(views::menus::pick(menu, i));
+                self.pending = true;
+            }
+            menu_bar::update(views::menus::bar_model(&self.app.state));
         }
         self.pending |= self.app.tick();
         // Linux: a docked plugin window uncovered part of the main window, which needs presenting again.
@@ -498,6 +508,8 @@ impl ApplicationHandler for Shell {
                 self.app.plugins.owner = h.ns_view.as_ptr() as isize;
             }
         }
+        #[cfg(target_os = "macos")]
+        menu_bar::install();
         self.app.plugins.scale = window.scale_factor() as f32;
         // Built-in and cached plugins at once, then a background scan (spec: ui/plugin-manager.md §4).
         self.app.start_plugins();
