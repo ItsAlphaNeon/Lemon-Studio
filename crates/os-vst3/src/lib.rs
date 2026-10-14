@@ -150,20 +150,24 @@ pub const BUNDLE_ARCH: &str = if cfg!(target_os = "macos") {
 };
 
 /// The module of a plug-in path: inside a bundle `Contents/<BUNDLE_ARCH>/` the bundle's own name on Windows, its name
-/// without `.vst3` plus `.so` on Linux (and without an extension on macOS); else the file itself.
+/// without `.vst3` plus `.so` on Linux, and on macOS the executable its `Info.plist` names (else its name without
+/// `.vst3`); else the file itself.
 pub fn module_file(path: &Path) -> PathBuf {
     if !path.is_dir() {
         return path.to_path_buf();
     }
-    let dir = path.join("Contents").join(BUNDLE_ARCH);
-    if cfg!(windows) {
-        return dir.join(path.file_name().unwrap_or_default());
-    }
-    let mut name = path.file_stem().unwrap_or_default().to_os_string();
-    if !cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    return os_host::bundle::module_file(path);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let dir = path.join("Contents").join(BUNDLE_ARCH);
+        if cfg!(windows) {
+            return dir.join(path.file_name().unwrap_or_default());
+        }
+        let mut name = path.file_stem().unwrap_or_default().to_os_string();
         name.push(".so");
+        dir.join(name)
     }
-    dir.join(name)
 }
 
 /// A class id as the documented 32-character FUID string (spec §3), uppercase hex. The string is the same on every
@@ -232,7 +236,7 @@ impl Module {
         let file = module_file(path);
         unsafe {
             let lib = os_host::load_module(&file)?;
-            let lib = module_entry(lib).map_err(|e| format!("{}: {e}", file.display()))?;
+            let lib = module_entry(lib, path).map_err(|e| format!("{}: {e}", file.display()))?;
             let get = lib
                 .get::<unsafe extern "system" fn() -> *mut c_void>(b"GetPluginFactory\0")
                 .map_err(|_| format!("{}: not a VST 3 module (no GetPluginFactory)", file.display()))?;
@@ -349,9 +353,10 @@ impl Drop for Module {
 }
 
 /// The module's own set-up after loading, before `GetPluginFactory` (spec §3): `InitDll` on Windows, `ModuleEntry`
-/// with the module's `dlopen` handle on Linux. Both are optional; a module whose set-up fails is not used.
+/// with the module's `dlopen` handle on Linux, `bundleEntry` with the bundle (`path`, a `CFBundleRef`) on macOS. All
+/// are optional; a module whose set-up fails is not used.
 #[cfg(windows)]
-unsafe fn module_entry(lib: libloading::Library) -> Result<libloading::Library, String> {
+unsafe fn module_entry(lib: libloading::Library, _path: &Path) -> Result<libloading::Library, String> {
     unsafe {
         if let Ok(init) = lib.get::<unsafe extern "system" fn() -> bool>(b"InitDll\0") {
             if !init() {
@@ -362,8 +367,8 @@ unsafe fn module_entry(lib: libloading::Library) -> Result<libloading::Library, 
     Ok(lib)
 }
 
-#[cfg(unix)]
-unsafe fn module_entry(lib: libloading::Library) -> Result<libloading::Library, String> {
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe fn module_entry(lib: libloading::Library, _path: &Path) -> Result<libloading::Library, String> {
     unsafe {
         let handle = libloading::os::unix::Library::from(lib).into_raw();
         let lib: libloading::Library = libloading::os::unix::Library::from_raw(handle).into();
@@ -376,15 +381,33 @@ unsafe fn module_entry(lib: libloading::Library) -> Result<libloading::Library, 
     }
 }
 
-/// The module's clean-up before it is unloaded: `ExitDll` on Windows, `ModuleExit` on Linux.
+/// The module keeps its own reference to the bundle (the SDK's `bundleEntry` retains it until `bundleExit`).
+#[cfg(target_os = "macos")]
+unsafe fn module_entry(lib: libloading::Library, path: &Path) -> Result<libloading::Library, String> {
+    unsafe {
+        if let Ok(entry) = lib.get::<unsafe extern "C" fn(*mut c_void) -> bool>(b"bundleEntry\0") {
+            let bundle = os_host::bundle::Bundle::open(path).ok_or("not a bundle")?;
+            if !entry(bundle.as_ptr()) {
+                return Err("bundleEntry failed".into());
+            }
+        }
+        Ok(lib)
+    }
+}
+
+/// The module's clean-up before it is unloaded: `ExitDll` on Windows, `ModuleExit` on Linux, `bundleExit` on macOS.
 unsafe fn module_exit(lib: &libloading::Library) {
     unsafe {
         #[cfg(windows)]
         if let Ok(exit) = lib.get::<unsafe extern "system" fn() -> bool>(b"ExitDll\0") {
             exit();
         }
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         if let Ok(exit) = lib.get::<unsafe extern "C" fn() -> bool>(b"ModuleExit\0") {
+            exit();
+        }
+        #[cfg(target_os = "macos")]
+        if let Ok(exit) = lib.get::<unsafe extern "C" fn() -> bool>(b"bundleExit\0") {
             exit();
         }
     }
@@ -450,6 +473,9 @@ pub struct Plugin {
     shared: Arc<Shared>,
     desc: Descriptor,
     editor: bool,
+    /// Device pixels per unit of the open editor's sizes: 1, except on macOS, where editors measure in points
+    /// (`open_editor`).
+    editor_scale: f32,
     /// The plug-in can show an editor in a host window.
     can_edit: bool,
     /// Active at this rate (0 = inactive).
@@ -542,6 +568,7 @@ impl Plugin {
                 shared,
                 desc,
                 editor: false,
+                editor_scale: 1.0,
                 can_edit: false,
                 rate: 0,
                 wanted_rate: AtomicU32::new(0),
@@ -914,13 +941,16 @@ impl Plugin {
         self.can_edit
     }
 
-    /// Embeds the editor in `parent` (an HWND on Windows, an X11 window id on Linux; spec §6); returns its size in pixels. `scale` is the parent's DPI
-    /// factor, given to editors that support content scaling (spec: ui/ui-scaling.md §3).
+    /// Embeds the editor in `parent` (an HWND on Windows, an NSView on macOS, an X11 window id on Linux; spec §6); returns
+    /// its size in pixels. `scale` is the parent's DPI factor, given to editors that support content scaling (spec:
+    /// ui/ui-scaling.md §3). On macOS editors measure in points and follow their window's backing scale themselves (no
+    /// content scaling there), so their sizes are turned into pixels at `scale` here.
     pub fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
         if !self.can_edit {
             return Err(format!("{} has no editor", self.desc.name));
         }
         self.close_editor();
+        self.editor_scale = if cfg!(target_os = "macos") && scale > 0.0 { scale } else { 1.0 };
         let c = self.controller.as_ref().ok_or("no edit controller")?;
         unsafe {
             let view = owned::<dyn IPlugView>(c.create_view(c"editor".as_ptr())).ok_or("the plug-in could not create its editor")?;
@@ -929,7 +959,7 @@ impl Plugin {
             }
             view.set_frame(self.frame.raw());
             // Content scale before attaching, so the editor opens at its final size (optional interface).
-            if scale > 0.0 {
+            if scale > 0.0 && !cfg!(target_os = "macos") {
                 if let Some(s) = view.cast::<dyn IPlugViewContentScaleSupport>() {
                     s.set_scale_factor(scale);
                 }
@@ -945,7 +975,7 @@ impl Plugin {
             if let Ok(mut s) = self.shared.size.lock() {
                 *s = None;
             }
-            Ok(((r.right - r.left).max(0) as u32, (r.bottom - r.top).max(0) as u32))
+            Ok(self.to_px(r.right - r.left, r.bottom - r.top))
         }
     }
 
@@ -953,10 +983,16 @@ impl Plugin {
     pub fn editor_size(&self) -> Option<(u32, u32)> {
         let v = self.view.as_ref()?;
         if let Some((w, h)) = self.shared.size.lock().ok().and_then(|s| *s) {
-            return Some((w.max(0) as u32, h.max(0) as u32));
+            return Some(self.to_px(w, h));
         }
         let mut r = ViewRect::default();
-        (unsafe { v.get_size(&mut r) } == kResultOk).then(|| ((r.right - r.left).max(0) as u32, (r.bottom - r.top).max(0) as u32))
+        (unsafe { v.get_size(&mut r) } == kResultOk).then(|| self.to_px(r.right - r.left, r.bottom - r.top))
+    }
+
+    /// An editor size as the plug-in gives it (points on macOS) in pixels.
+    fn to_px(&self, w: i32, h: i32) -> (u32, u32) {
+        let px = |v: i32| (v.max(0) as f32 * self.editor_scale).round() as u32;
+        (px(w), px(h))
     }
 
     pub fn close_editor(&mut self) {
