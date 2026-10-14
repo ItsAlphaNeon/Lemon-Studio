@@ -38,7 +38,12 @@ pub fn child_main(args: &[String]) -> ! {
     let path = args.get(1).map(PathBuf::from);
     let out = match (format, path) {
         (Some(format), Some(path)) => match crate::plugins::load_file(&path, format) {
-            Ok(lib) => serde_json::json!({ "ok": true, "plugins": lib.plugins().iter().map(Record::of).collect::<Vec<_>>() }),
+            Ok(lib) => {
+                let out = serde_json::json!({ "ok": true, "plugins": lib.plugins().iter().map(Record::of).collect::<Vec<_>>() });
+                // Dropping it would unload the plugin (on Windows), running the clean-up code this process skips.
+                std::mem::forget(lib);
+                out
+            }
             Err(e) => serde_json::json!({ "ok": false, "error": e, "crashed": os_host::guard::tripped() }),
         },
         _ => serde_json::json!({ "ok": false, "error": format!("usage: {ARG} clap|vst3|vst2|native <path>") }),
