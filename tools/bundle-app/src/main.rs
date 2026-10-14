@@ -1,8 +1,9 @@
 //! `cargo run -p bundle-app [-- --install]` (macOS): builds Lemon Studio in release mode and writes
-//! `<target>/bundled/Lemon Studio.app`: the program, its icon (`crates/os-app/assets/lemonstudio.icns`, made from the
-//! Icon Composer document `assets/logo/macOS.icon` by `tools/logo/macos-icns.sh`) and an `Info.plist` that lets the
-//! Finder open `.flp` projects with it. The bundle is signed ad hoc, as Apple silicon
-//! requires of any program it runs. `--install` copies it to `~/Applications`.
+//! `<target>/bundled/Lemon Studio.app`: the program, its icon and an `Info.plist` that lets the Finder open `.flp`
+//! projects with it. The icon is made from the Icon Composer document `assets/logo/macOS.icon` by
+//! `tools/logo/macos-icon.sh`: `assets/lemonstudio.car` (the bundle's `Assets.car`) is the icon macOS 26 and later draw,
+//! in every appearance, and `assets/lemonstudio.icns` the one older macOS shows. The bundle is signed ad hoc, as Apple
+//! silicon requires of any program it runs. `--install` copies it to `~/Applications`.
 //!
 //! The macOS counterpart of Linux's desktop entry (`crates/os-app/assets/lemonstudio.desktop`).
 
@@ -42,7 +43,9 @@ fn main() {
     std::fs::copy(target.join("release").join(EXE), macos.join(EXE)).expect("copy the program");
     std::fs::write(contents.join("Info.plist"), info_plist()).expect("Info.plist");
     std::fs::write(contents.join("PkgInfo"), "APPL????").expect("PkgInfo");
-    std::fs::copy(root.join("crates/os-app/assets/lemonstudio.icns"), resources.join(format!("{EXE}.icns"))).expect("copy the icon");
+    let assets = root.join("crates/os-app/assets");
+    std::fs::copy(assets.join(format!("{EXE}.car")), resources.join("Assets.car")).expect("copy the icon");
+    std::fs::copy(assets.join(format!("{EXE}.icns")), resources.join(format!("{EXE}.icns"))).expect("copy the icon");
     run(Command::new("codesign").args(["--force", "--sign", "-"]).arg(&app), "codesign");
     println!("{}", app.display());
 
@@ -79,6 +82,8 @@ fn info_plist() -> String {
 	<key>CFBundleIdentifier</key>
 	<string>{IDENTIFIER}</string>
 	<key>CFBundleIconFile</key>
+	<string>{EXE}</string>
+	<key>CFBundleIconName</key>
 	<string>{EXE}</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
