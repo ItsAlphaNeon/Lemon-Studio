@@ -1,6 +1,7 @@
 //! The main window on macOS, where winit leaves gaps: its frame in screen coordinates (title-bar moves and edge resizes
-//! are done by hand, as on Windows: winit cannot start a system resize of a borderless window here), maximizing, and
-//! quitting from the menu bar or the Dock, which AppKit would do without asking to save.
+//! are done by hand, as on Windows: winit cannot start a system resize of a borderless window here), maximizing,
+//! quitting from the menu bar or the Dock, which AppKit would do without asking to save, and files opened from the
+//! Finder (they come as an Apple Event, not on the command line).
 //!
 //! Maximizing is done here too: winit asks AppKit whether a borderless window is zoomed by giving it a title bar for a
 //! moment, and a window whose style changes while a mouse button is down never gets that button's release.
@@ -8,18 +9,23 @@
 //! Screen coordinates are winit's: device px from the top-left of the primary screen.
 
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{sel, MainThreadMarker};
 use objc2_app_kit::{NSApplication, NSApplicationTerminateReply, NSEvent, NSScreen, NSView, NSWindow};
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSURL};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 /// Quit was chosen (menu bar, Dock, Cmd+Q) and not handled yet.
 static QUIT: AtomicBool = AtomicBool::new(false);
+
+/// Files the Finder asked the app to open, not handled yet.
+static OPENED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 thread_local! {
     /// The frame the maximized window goes back to.
@@ -39,24 +45,43 @@ extern "C-unwind" fn should_terminate(_this: &AnyObject, _cmd: Sel, _app: &NSApp
     NSApplicationTerminateReply::TerminateCancel
 }
 
-/// Routes quitting through the app (`take_quit`). Call once the event loop runs (winit's delegate is set then).
-pub fn hook_quit() {
+/// Files the Finder asked the app to open since the last call (a double-clicked project, a file dropped on the Dock
+/// icon), oldest first.
+pub fn take_opened() -> Vec<PathBuf> {
+    OPENED.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default()
+}
+
+/// `-application:openURLs:` for winit's application delegate: the files go to the app (`take_opened`).
+extern "C-unwind" fn open_urls(_this: &AnyObject, _cmd: Sel, _app: &NSApplication, urls: &NSArray<NSURL>) {
+    let paths = urls.iter().filter_map(|u| u.path()).map(|p| PathBuf::from(p.to_string()));
+    if let Ok(mut o) = OPENED.lock() {
+        o.extend(paths);
+    }
+    crate::wake_ui();
+}
+
+/// Routes quitting (`take_quit`) and files opened from the Finder (`take_opened`) through the app. Call once the event
+/// loop is built (winit sets its delegate then) and before it runs: the files the app is launched to open arrive
+/// before the launch ends.
+pub fn hook_app() {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let app = NSApplication::sharedApplication(mtm);
-    // SAFETY: the delegate winit installed is alive for the event loop's lifetime.
-    let Some(delegate) = (unsafe { app.delegate() }) else { return };
+    let Some(delegate) = app.delegate() else { return };
     let delegate: &AnyObject = (*delegate).as_ref();
-    let class = delegate.class();
-    let imp: unsafe extern "C-unwind" fn() = unsafe {
-        std::mem::transmute::<extern "C-unwind" fn(&AnyObject, Sel, &NSApplication) -> NSApplicationTerminateReply, unsafe extern "C-unwind" fn()>(
+    let class = std::ptr::from_ref(delegate.class()).cast_mut();
+    // SAFETY: each adds a method winit's delegate class does not implement, with the matching signature and type
+    // encoding (NSUInteger (self, _cmd, sender); void (self, _cmd, application, urls)).
+    unsafe {
+        let imp = std::mem::transmute::<extern "C-unwind" fn(&AnyObject, Sel, &NSApplication) -> NSApplicationTerminateReply, unsafe extern "C-unwind" fn()>(
             should_terminate,
-        )
-    };
-    // NSUInteger (self, _cmd, sender): the method's type encoding.
-    let types = c"Q@:@";
-    // SAFETY: adds a method the class does not have (winit's delegate does not implement it), with a matching
-    // signature and encoding.
-    unsafe { objc2::ffi::class_addMethod(std::ptr::from_ref(class).cast_mut(), sel!(applicationShouldTerminate:), imp, types.as_ptr()) };
+        );
+        objc2::ffi::class_addMethod(class, sel!(applicationShouldTerminate:), imp, c"Q@:@".as_ptr());
+        let imp = std::mem::transmute::<extern "C-unwind" fn(&AnyObject, Sel, &NSApplication, &NSArray<NSURL>), unsafe extern "C-unwind" fn()>(open_urls);
+        objc2::ffi::class_addMethod(class, sel!(application:openURLs:), imp, c"v@:@@".as_ptr());
+    }
+    // AppKit notes what a delegate answers to when it is set: set again, it sees the new methods.
+    let delegate = app.delegate();
+    app.setDelegate(delegate.as_deref());
 }
 
 fn ns_window(window: &Window) -> Option<Retained<NSWindow>> {

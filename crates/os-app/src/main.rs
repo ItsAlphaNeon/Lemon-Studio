@@ -378,9 +378,16 @@ impl Shell {
         let mut wake = now + Duration::from_millis(ms);
         // macOS: Quit from the menu bar or the Dock asks about unsaved changes as closing the window does.
         #[cfg(target_os = "macos")]
-        if macos::take_quit() && self.app.confirm_discard("closing") {
-            el.exit();
-            return;
+        {
+            if macos::take_quit() && self.app.confirm_discard("closing") {
+                el.exit();
+                return;
+            }
+            // A project double-clicked in the Finder opens as a dropped one would.
+            for path in macos::take_opened() {
+                self.app.drop_file(path);
+                self.pending = true;
+            }
         }
         self.pending |= self.app.tick();
         // Linux: a docked plugin window uncovered part of the main window, which needs presenting again.
@@ -484,8 +491,6 @@ impl ApplicationHandler for Shell {
                 _ => {}
             }
         }
-        #[cfg(target_os = "macos")]
-        macos::hook_quit();
         self.app.plugins.scale = window.scale_factor() as f32;
         // Built-in and cached plugins at once, then a background scan (spec: ui/plugin-manager.md §4).
         self.app.start_plugins();
@@ -1271,6 +1276,9 @@ fn main() {
         builder.with_x11();
     }
     let event_loop = builder.build().expect("event loop");
+    // Before the launch: the files the app is launched to open come ahead of `resumed`.
+    #[cfg(target_os = "macos")]
+    macos::hook_app();
     if let Ok(mut p) = PROXY.lock() {
         *p = Some(event_loop.create_proxy());
     }
