@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! VST 2 plugin hosting: loads VST 2 plugin files (Windows DLLs, Linux shared objects, macOS `.vst` bundles), lists the
 //! plugins they offer and runs instances behind Lemon Studio's format-neutral hosting layer (`os_host::Library` /
 //! `os_host::Plugin`), like `os-vst3` and `os-clap` do for their formats.
