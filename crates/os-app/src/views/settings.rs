@@ -1034,7 +1034,7 @@ fn folders(ui: &mut Ui, list: &[(String, &'static str, bool, bool)], b: Rect) {
     }
 }
 
-/// The preferred format switch (spec: ui/plugin-manager.md §3): VST3, CLAP, VST2 (greyed: not hosted yet).
+/// The preferred format switch (spec: ui/plugin-manager.md §3): VST3, CLAP, VST2.
 fn prefer(ui: &mut Ui, cur: Prefer, x0: f32, y: f32, ty: f32) {
     let t = ui.t;
     let f = LABEL;
@@ -1043,12 +1043,8 @@ fn prefer(ui: &mut Ui, cur: Prefer, x0: f32, y: f32, ty: f32) {
     let mut x = x0 + lw + 12.0;
     for p in [Prefer::Vst3, Prefer::Clap, Prefer::Vst2] {
         let b = Rect::new(x, y + 3.0, 54.0, 21.0);
-        let enabled = p != Prefer::Vst2;
         let on = p == cur;
-        let hov = enabled && ui.hit(b, Action::Settings(SAct::Plug(Plug::Prefer(p))), "Listed when a plugin is found in several formats");
-        if !enabled {
-            ui.off(b, "VST2 hosting");
-        }
+        let hov = ui.hit(b, Action::Settings(SAct::Plug(Plug::Prefer(p))), "Listed when a plugin is found in several formats");
         let ink = if lemon {
             if on {
                 lk::lit(ui.c, b, lk::r_btn(t), hov);
@@ -1065,9 +1061,6 @@ fn prefer(ui: &mut Ui, cur: Prefer, x0: f32, y: f32, ty: f32) {
             if hov { t.glyph } else { t.text }
         };
         ui.c.text_center(Font::new(13), b, ink, p.label());
-        if !enabled {
-            grey(ui, b);
-        }
         x += 58.0;
     }
 }

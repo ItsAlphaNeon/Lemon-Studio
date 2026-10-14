@@ -21,6 +21,7 @@ os-clap = { path = "../os-clap" }
 os-native = { path = "../os-native" }
 os-host.workspace = true
 os-vst3.workspace = true
+os-vst2.workspace = true
 os-paths.workspace = true
 lemon-sampler = { path = "../../plugins/lemon-sampler", features = ["linked"] }
 lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", features = ["linked"] }

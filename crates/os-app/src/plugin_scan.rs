@@ -41,7 +41,7 @@ pub fn child_main(args: &[String]) -> ! {
             Ok(lib) => serde_json::json!({ "ok": true, "plugins": lib.plugins().iter().map(Record::of).collect::<Vec<_>>() }),
             Err(e) => serde_json::json!({ "ok": false, "error": e, "crashed": os_host::guard::tripped() }),
         },
-        _ => serde_json::json!({ "ok": false, "error": format!("usage: {ARG} clap|vst3|native <path>") }),
+        _ => serde_json::json!({ "ok": false, "error": format!("usage: {ARG} clap|vst3|vst2|native <path>") }),
     };
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "{TAG}{out}");
