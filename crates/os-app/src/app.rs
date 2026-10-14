@@ -7584,8 +7584,9 @@ mod tests {
     }
 
     /// The Misc tab's values are saved with the channel and come back on open (spec: audio/channel-misc.md
-    /// "Settings", audio/voice-levels.md, audio/swing.md, audio/note-rules.md): the first save adds their events, a
-    /// later one patches them.
+    /// "Settings", audio/voice-levels.md, audio/swing.md, audio/note-rules.md), tracking, the arpeggiator and the echo
+    /// delay included: the first save adds their events, a later one patches them. (Full portamento is not saved yet:
+    /// OpenStudio-specs REQUESTS.md #5.)
     #[test]
     fn channel_misc_save_and_reopen() {
         use crate::misc_page::M;
@@ -7621,6 +7622,29 @@ mod tests {
             (M::Fine, -35.0),
             (M::MainPitch, 0.0),
             (M::AddKey, 1.0),
+            (M::VolMid, 80.0),
+            (M::VolPan, 0.75),
+            (M::VolModX, 0.25),
+            (M::VolModY, 1.0),
+            (M::KeyMid, 72.0),
+            (M::KeyPan, 0.0),
+            (M::KeyModY, 0.625),
+            (M::ArpDir, 4.0),
+            (M::ArpTime, 600.0 / 997.0),
+            (M::ArpGate, 0.625),
+            (M::ArpRange, 0.0),
+            (M::ArpRepeat, 3.0),
+            (M::ArpSlide, 1.0),
+            (M::ArpChord, 7.0),
+            (M::EchoFeed, 0.375),
+            (M::EchoPan, 0.625),
+            (M::EchoModX, 0.25),
+            (M::EchoModY, 0.625),
+            (M::EchoPitch, 0.625),
+            (M::EchoTime, 0.125),
+            (M::Echoes, 7.0),
+            (M::PingPong, 1.0),
+            (M::FatMode, 1.0),
         ];
         for (m, v) in first {
             crate::misc::set(&mut a, row, m, v);
@@ -7642,6 +7666,14 @@ mod tests {
             (M::Root, 72.0),
             (M::Fine, 20.0),
             (M::MainPitch, 1.0),
+            (M::VolMid, 100.0),
+            (M::KeyPan, 0.625),
+            (M::ArpDir, 3.0),
+            (M::ArpChord, -1.0),
+            (M::ArpRepeat, 1.0),
+            (M::EchoFeed, 0.5),
+            (M::EchoModY, 0.5),
+            (M::FatMode, 0.0),
         ];
         for (m, v) in second {
             crate::misc::set(&mut b, row, m, v);
