@@ -1,7 +1,7 @@
-//! The plugin editor: a child of the host's window (Win32, or X11 on Linux) that paints `view` with the os-ui canvas,
-//! and the editor logic (platform independent): knob drags with the cursor held in place, wheel and reset gestures, menus, the
-//! keyboard and waveform. Values the editor sets show at once (an overlay over the host's parameter values until
-//! the host confirms them), so nothing waits for the host's next flush.
+//! The plugin editor: a child of the host's window (Win32, X11 on Linux, an NSView on macOS) that paints `view` with
+//! the os-ui canvas, and the editor logic (platform independent): knob drags with the cursor held in place, wheel and
+//! reset gestures, menus, the keyboard and waveform. Values the editor sets show at once (an overlay over the host's
+//! parameter values until the host confirms them), so nothing waits for the host's next flush.
 //!
 // spec: plugins/lemon-sampler.md (§2 menus, §2.3 waveform, §3.1 keyboard, §4 interaction), plugins/host-link.md,
 // spec: plugins/plugin-formats.md (editors)
@@ -30,9 +30,9 @@ pub struct SamplerEditor {
     /// The open editor window (0 = closed): parameter changes post a repaint to it.
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Arc<AtomicIsize>,
-    /// Linux: the open editor's thread waker, for the same.
-    #[cfg(target_os = "linux")]
-    slot: os_plugkit::x11::Slot,
+    /// Linux and macOS: the open editor's thread waker, for the same.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    slot: os_plugkit::gui::Slot,
 }
 
 impl SamplerEditor {
@@ -42,7 +42,7 @@ impl SamplerEditor {
             shared,
             scale: AtomicU32::new(1f32.to_bits()),
             hwnd: Arc::new(AtomicIsize::new(0)),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             slot: Default::default(),
         }
     }
@@ -50,8 +50,8 @@ impl SamplerEditor {
     fn notify(&self) {
         #[cfg(windows)]
         win32::post_changed(self.hwnd.load(Ordering::Acquire));
-        #[cfg(target_os = "linux")]
-        os_plugkit::x11::notify(&self.slot);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        os_plugkit::gui::notify(&self.slot);
     }
 }
 
@@ -64,7 +64,13 @@ impl Editor for SamplerEditor {
                 Box::new(win32::open(hwnd, scale, self.params.clone(), self.shared.clone(), context, self.hwnd.clone()))
             }
             #[cfg(target_os = "linux")]
-            ParentWindowHandle::X11Window(window) => Box::new(x11::open(window, scale, self.params.clone(), self.shared.clone(), context, &self.slot)),
+            ParentWindowHandle::X11Window(window) => Box::new(gui::open(window, scale, self.params.clone(), self.shared.clone(), context, &self.slot)),
+            // macOS hosts set no scale (sizes are points): the editor paints at its window's backing scale.
+            #[cfg(target_os = "macos")]
+            ParentWindowHandle::AppKitNsView(view) => {
+                let scale = os_plugkit::gui::backing_scale(view as usize);
+                Box::new(gui::open(view as usize, scale, self.params.clone(), self.shared.clone(), context, &self.slot))
+            }
             // Elsewhere no editor opens yet.
             _ => {
                 let _ = (context, scale);
@@ -349,7 +355,7 @@ impl MenuDef {
     }
 
     /// The same menu as the shared editor kit's (its popups take that one).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn kit(&self) -> os_plugkit::MenuDef<Cmd> {
         os_plugkit::MenuDef {
             items: self.items.clone(),
@@ -2306,14 +2312,14 @@ mod win32 {
     }
 }
 
-#[cfg(target_os = "linux")]
-mod x11 {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod gui {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     use nih_plug::prelude::GuiContext;
     use os_hostlink::{Cmd, PageIcon, Peer};
-    use os_plugkit::x11::{self as px, Button, Input, Window};
+    use os_plugkit::gui::{self as px, Button, Input, Window};
     use os_theme::Palette;
     use os_ui::Canvas;
 
@@ -2323,7 +2329,8 @@ mod x11 {
     use crate::Shared;
 
     /// What the copy / paste audio shortcuts and menu entries say here: the audio clipboard is Windows only so far.
-    const NO_AUDIO_CLIPBOARD: &str = "Audio on the clipboard: not available yet on Linux";
+    const NO_AUDIO_CLIPBOARD: &str =
+        if cfg!(target_os = "macos") { "Audio on the clipboard: not available yet on macOS" } else { "Audio on the clipboard: not available yet on Linux" };
 
     /// The editor on its GUI thread.
     struct Ed {
@@ -2349,12 +2356,12 @@ mod x11 {
         last_page: usize,
     }
 
-    pub fn open(parent: u32, scale: f32, params: Arc<SamplerParams>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Option<px::EditorThread> {
+    pub fn open(parent: px::Parent, scale: f32, params: Arc<SamplerParams>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Option<px::EditorThread> {
         let scale = if scale > 0.0 { scale } else { 1.0 };
         let px = move |v: u32| (v as f32 * scale).round() as u32;
         // Two pages (sample, envelopes); joined, the editor is what lies below the strip row.
         let wake = slot.clone();
-        let link = Peer::register(u64::from(parent), vec![PageIcon::Sample, PageIcon::Envelope], (view::EDITOR_W, view::HOSTED_EDITOR_H), move || px::notify(&wake));
+        let link = Peer::register(parent as u64, vec![PageIcon::Sample, PageIcon::Envelope], (view::EDITOR_W, view::HOSTED_EDITOR_H), move || px::notify(&wake));
         let peer = link.clone();
         let thread = px::spawn(parent, (px(view::EDITOR_W), px(view::EDITOR_H)), slot, move |win| {
             let full = (px(view::W), px(view::H));
@@ -2578,7 +2585,7 @@ mod x11 {
                         }
                     }
                     Act::OpenDialog => {
-                        if let Some(path) = file_dialog(false) {
+                        if let Some(path) = file_dialog(&self.win, false) {
                             self.load(&path);
                         }
                         self.dirty = true;
@@ -2600,7 +2607,7 @@ mod x11 {
                     }
                     Act::SaveAs => {
                         let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
-                        if let (Some(s), Some(path)) = (s, file_dialog(true)) {
+                        if let (Some(s), Some(path)) = (s, file_dialog(&self.win, true)) {
                             let path = if path.to_ascii_lowercase().ends_with(".wav") { path } else { format!("{path}.wav") };
                             self.logic.hint = match std::fs::write(&path, super::wav_bytes(&s, true)) {
                                 Ok(()) => format!("Saved {path}"),
@@ -2610,9 +2617,12 @@ mod x11 {
                         self.dirty = true;
                     }
                     Act::Locate => {
-                        // The sample's folder in the file manager.
+                        // The sample's folder in the file manager (on macOS a Finder window with the sample picked).
                         let p = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
                         if let Some(dir) = std::path::Path::new(&p).parent().filter(|d| !p.is_empty() && d.is_dir()) {
+                            #[cfg(target_os = "macos")]
+                            let _ = (dir, std::process::Command::new("open").arg("-R").arg(&p).spawn());
+                            #[cfg(not(target_os = "macos"))]
                             let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
                         }
                     }
@@ -2669,18 +2679,21 @@ mod x11 {
         }
     }
 
-    /// The open / save sample dialog (the desktop's own, through its portal).
-    fn file_dialog(save: bool) -> Option<String> {
+    /// The open / save sample dialog: the desktop's own (through its portal on Linux; on macOS AppKit's, run on the main
+    /// thread).
+    fn file_dialog(win: &Window, save: bool) -> Option<String> {
         if os_plugkit::no_modal() {
             return None;
         }
-        let d = rfd::FileDialog::new();
-        let path = if save {
-            d.set_title("Save sample as").add_filter("WAV files", &["wav"]).save_file()
-        } else {
-            d.set_title("Open sample").add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3"]).pick_file()
-        };
-        path.map(|p| p.to_string_lossy().into_owned())
+        let path = win.dialog(move || {
+            let d = rfd::FileDialog::new();
+            if save {
+                d.set_title("Save sample as").add_filter("WAV files", &["wav"]).save_file()
+            } else {
+                d.set_title("Open sample").add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3"]).pick_file()
+            }
+        });
+        path.flatten().map(|p| p.to_string_lossy().into_owned())
     }
 }
 
