@@ -17,6 +17,8 @@ mod icons;
 mod knobs;
 mod loading;
 mod logo;
+#[cfg(target_os = "macos")]
+mod macos;
 mod meters;
 mod midi_in;
 mod mixer;
@@ -92,6 +94,8 @@ struct Shell {
     frames: Option<FrameLog>,
     /// Wakes the app while a modal loop holds up winit's (see `stall`).
     watchdog: std::sync::Arc<stall::Watchdog>,
+    /// macOS: the left button went down with Control held, which is a right click there; its release is one too.
+    ctrl_click: bool,
 }
 
 /// Frame timing for tuning (`OS_FRAMES=<file>`): per frame the time, what was repainted (`full` or the number of
@@ -133,6 +137,11 @@ const FRAME: Duration = Duration::from_millis(16);
 /// (Counting `FRAME` from the end of a frame instead held everything to 16 ms plus the paint: 30-45 fps.)
 const IDLE: Duration = Duration::from_millis(4);
 
+/// The app's Ctrl: the Control key, and on macOS the Command key (Command + S saves there).
+fn ctrl(m: ModifiersState) -> bool {
+    m.control_key() || (cfg!(target_os = "macos") && m.super_key())
+}
+
 #[derive(Clone, Copy)]
 struct Grab {
     cursor: (i32, i32),
@@ -155,7 +164,10 @@ fn screen_state(window: &Window) -> Option<((i32, i32), (i32, i32, i32, i32))> {
     Some(((p.x, p.y), (r.left, r.top, r.right, r.bottom)))
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+use macos::{screen_state, set_rect};
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn screen_state(_: &Window) -> Option<((i32, i32), (i32, i32, i32, i32))> {
     None
 }
@@ -172,7 +184,7 @@ fn set_rect(window: &Window, r: (i32, i32, i32, i32)) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn set_rect(_: &Window, _: (i32, i32, i32, i32)) {}
 
 /// Whether the cursor went from `from` to `to` (screen px) farther than the system lets a click wander before it
@@ -332,6 +344,14 @@ impl Shell {
         })
     }
 
+    /// The app's modifier flags from the keyboard's.
+    fn sync_mods(&mut self) {
+        self.app.ctrl = ctrl(self.mods) && !(self.ctrl_click && !self.mods.super_key());
+        self.app.shift = self.mods.shift_key();
+        self.app.alt = self.mods.alt_key();
+        self.app.rshift &= self.app.shift;
+    }
+
     /// Logical app coordinates of a physical window position (the canvas sits inside the border).
     fn to_app(&self, window: &Window, x: f64, y: f64) -> (f32, f32) {
         let k = window.scale_factor();
@@ -345,6 +365,12 @@ impl Shell {
         let ms = if self.app.animating() { 16 } else { 100 };
         let now = Instant::now();
         let mut wake = now + Duration::from_millis(ms);
+        // macOS: Quit from the menu bar or the Dock asks about unsaved changes as closing the window does.
+        #[cfg(target_os = "macos")]
+        if macos::take_quit() && self.app.confirm_discard("closing") {
+            el.exit();
+            return;
+        }
         self.pending |= self.app.tick();
         // Linux: a docked plugin window uncovered part of the main window, which needs presenting again.
         #[cfg(target_os = "linux")]
@@ -437,6 +463,8 @@ impl ApplicationHandler for Shell {
                 _ => {}
             }
         }
+        #[cfg(target_os = "macos")]
+        macos::hook_quit();
         self.app.plugins.scale = window.scale_factor() as f32;
         // Built-in and cached plugins at once, then a background scan (spec: ui/plugin-manager.md §4).
         self.app.start_plugins();
@@ -499,6 +527,18 @@ impl ApplicationHandler for Shell {
                 log.input = Some(Instant::now());
             }
         }
+        // macOS: Control + click is a right click (the app's Ctrl is Command there, see `ctrl`).
+        #[cfg(target_os = "macos")]
+        let event = match event {
+            WindowEvent::MouseInput { device_id, state, button: MouseButton::Left }
+                if if state == ElementState::Pressed { self.mods.control_key() } else { self.ctrl_click } =>
+            {
+                self.ctrl_click = state == ElementState::Pressed;
+                self.sync_mods();
+                WindowEvent::MouseInput { device_id, state, button: MouseButton::Right }
+            }
+            e => e,
+        };
         match event {
             WindowEvent::CloseRequested => {
                 if self.app.confirm_discard("closing") {
@@ -507,10 +547,7 @@ impl ApplicationHandler for Shell {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
-                self.app.ctrl = self.mods.control_key();
-                self.app.shift = self.mods.shift_key();
-                self.app.alt = self.mods.alt_key();
-                self.app.rshift &= self.app.shift;
+                self.sync_mods();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 // Locked: turn the offset from the anchor into virtual movement, then warp back.
@@ -627,7 +664,7 @@ impl ApplicationHandler for Shell {
                     MouseScrollDelta::LineDelta(x, y) => (x, y),
                     MouseScrollDelta::PixelDelta(p) => (p.x as f32 / 40.0, p.y as f32 / 40.0),
                 };
-                self.app.wheel(dx, dy, self.mods.shift_key(), self.mods.control_key());
+                self.app.wheel(dx, dy, self.mods.shift_key(), ctrl(self.mods));
                 self.pending = true;
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -638,7 +675,7 @@ impl ApplicationHandler for Shell {
                 }
                 // The typing keyboard plays notes by physical key (spec: ui/typing-keyboard.md).
                 if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
-                    if self.app.typing_key(code, pressed, self.mods.control_key(), self.mods.alt_key()) {
+                    if self.app.typing_key(code, pressed, ctrl(self.mods), self.mods.alt_key()) {
                         if self.app.has_damage() {
                             window.request_redraw();
                         }
@@ -646,7 +683,21 @@ impl ApplicationHandler for Shell {
                     }
                 }
                 if pressed && !event.repeat {
-                    self.app.key(&event.logical_key, self.mods.control_key(), self.mods.alt_key());
+                    // macOS: Option and Command change the character a key types (Option+S is "ß"); shortcuts go by the
+                    // key itself.
+                    #[cfg(target_os = "macos")]
+                    let event = {
+                        use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+                        let mut event = event;
+                        if self.mods.alt_key() || self.mods.super_key() {
+                            event.logical_key = match event.key_without_modifiers() {
+                                winit::keyboard::Key::Character(c) if self.mods.shift_key() => winit::keyboard::Key::Character(c.to_uppercase().into()),
+                                k => k,
+                            };
+                        }
+                        event
+                    };
+                    self.app.key(&event.logical_key, ctrl(self.mods), self.mods.alt_key());
                     window.request_redraw();
                 }
             }
@@ -1237,6 +1288,7 @@ fn main() {
         frame_start: Instant::now(),
         frames: FrameLog::open(),
         watchdog,
+        ctrl_click: false,
     };
     event_loop.run_app(&mut shell).expect("run");
     // After a contained plugin crash the process ends here, before plugin files are unloaded (a stopped plugin's code

@@ -2080,6 +2080,7 @@ dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
  "objc2 0.6.5",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
 ]
 
@@ -2411,6 +2412,9 @@ dependencies = [
  "lemon-sampler",
  "libc",
  "midir",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "os-clap",
  "os-dsp",
  "os-engine",
