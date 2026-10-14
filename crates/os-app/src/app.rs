@@ -9781,6 +9781,7 @@ mod tests {
     ///   louder than the one before. Played live (with an audio device), then stopped: silent at once.
     /// - Saved, reopened (both found as VST2 with their state, the clip kept) and exported again; then opened with only
     ///   the VST3 and CLAP copies listed: those copies play them, from their own defaults, and the hint bar says so.
+    ///   Saved so, the file keeps both VST2 plugins byte for byte; once Kars' copy is changed, it is saved as that copy.
     ///
     /// Loads the plugins in this process, so ignored:
     /// `OS_VST2_DIR=<dir> cargo test -p os-app --bin lemonstudio vst2_plugins_through_the_app -- --ignored --nocapture`
@@ -10029,8 +10030,40 @@ mod tests {
             f.state(row)
         };
         assert_eq!(v.plugins.state(row), fresh, "Kars' copy starts from its defaults");
+        // Saved untouched: the copies leave both wrappers as the file had them, so the VST2 plugins and their settings
+        // stay in the project (spec: flp/events/plugins.md §4).
+        let path2 = std::env::temp_dir().join(format!("lemon-vst2-copies-{}.flp", std::process::id()));
+        let reread = |p: &std::path::Path| os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(p).unwrap()).unwrap()).unwrap();
+        let wrappers = |p: &os_model::Project| {
+            let slot = p.mixer.iter().find(|m| m.index == track).and_then(|m| m.slots[0].clone());
+            ((p.channels[row].plugin.clone(), p.channels[row].plugin_state.clone()), slot)
+        };
+        v.save_to(path2.clone());
+        assert!(v.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", v.state.message);
+        assert!(wrappers(&reread(&path2)) == wrappers(&saved), "untouched copies keep the VST2 plugins byte for byte");
+        // Kars' copy changed: saved as that copy with its state; the EQ's copy, untouched, still keeps the VST2 EQ.
+        {
+            let mut p = v.plugins.hosted[&row].plugin.lock().unwrap();
+            let info = p.param_info(p.param_count() - 1).unwrap();
+            let x = if p.param_value(info.id).is_some_and(|x| x > 0.5) { 0.25 } else { 0.75 };
+            assert!(p.set_param(info.id, x));
+            p.idle();
+        }
+        let kars = v.plugins.state(row).unwrap();
+        assert_ne!(Some(&kars), fresh.as_ref(), "Kars' copy changed");
+        v.save_to(path2.clone());
+        let again = reread(&path2);
+        let _ = std::fs::remove_file(&path2);
+        let r = crate::project_plugins::wrapped_channel(&again.channels[row]).expect("a wrapped channel");
+        let d = v.plugins.descriptor(row).unwrap();
+        assert_eq!((r.format.as_str(), r.name.as_str(), r.state == kars), (d.format.as_str(), d.name.as_str(), true));
+        assert!(wrappers(&again).1 == wrappers(&saved).1, "the untouched EQ copy keeps the VST2 EQ");
+        println!("copies saved: untouched as the VST2 plugins; Kars' changed copy as {} ({} bytes of state)", r.format, kars.len());
         v.tick();
         let n = notes(&export(&mut v, "substituted"));
         println!("substituted: {:?}", n.iter().map(|(o, p, f)| format!("{o:+} fr, {p:.3}, {f:.0} Hz")).collect::<Vec<_>>());
+        // (Its automation clip moves the EQ copy's Master, which then counts as a change for the next save.)
+        let start = v.plugins.hosted[&key].stand_in.clone();
+        println!("EQ copy after the export: {}", if start == v.plugins.state(key) { "unchanged" } else { "changed" });
     }
 }
