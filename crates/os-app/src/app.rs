@@ -588,7 +588,7 @@ pub fn off_text(name: &str) -> String {
     format!("{name}: not available yet")
 }
 
-/// What is not available where plugin windows are not (`cfg(plugin_windows)`: Windows and Linux so far).
+/// What is not available where plugin windows are not (`cfg(plugin_windows)`: Windows, Linux and macOS so far).
 #[cfg(not(plugin_windows))]
 pub const PLUGIN_WINDOWS: &str = "Plugin windows on this system";
 
@@ -1513,7 +1513,7 @@ impl App {
         #[cfg(not(plugin_windows))]
         self.plugins.idle(|_| None);
         // Keys pressed while a plugin window has the focus still play the typing keyboard.
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         for k in crate::plugin_window::take_keys() {
             use winit::platform::scancode::PhysicalKeyExtScancode;
             if let winit::keyboard::PhysicalKey::Code(code) = winit::keyboard::PhysicalKey::from_scancode(k.scancode) {
@@ -1619,8 +1619,8 @@ impl App {
         }
     }
 
-    /// Screen point -> canvas logical px (an X11 main window: Linux).
-    #[cfg(target_os = "linux")]
+    /// Screen point -> canvas logical px (an X11 main window: Linux; macOS).
+    #[cfg(all(plugin_windows, not(windows)))]
     fn screen_to_canvas(&self, x: i32, y: i32) -> (f32, f32) {
         let (x, y) = crate::plugin_window::screen_to_main(x, y).unwrap_or((x, y));
         let k = self.plugins.scale;
@@ -1637,8 +1637,8 @@ impl App {
         ((p.x - self.canvas_off.0) as f32 / k, (p.y - self.canvas_off.1) as f32 / k)
     }
 
-    /// Linux: mouse input on a lifted popup (`sync_lift`) goes to the app as if it happened in the main window.
-    #[cfg(target_os = "linux")]
+    /// Linux and macOS: mouse input on a lifted popup (`sync_lift`) goes to the app as if it happened in the main window.
+    #[cfg(all(plugin_windows, not(windows)))]
     fn lift_input(&mut self) {
         let input = crate::plugin_window::take_lift_input();
         let k = self.plugins.scale;
@@ -2181,7 +2181,7 @@ impl App {
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         self.plugin_tick();
-        #[cfg(target_os = "linux")]
+        #[cfg(all(plugin_windows, not(windows)))]
         self.lift_input();
         {
             // Scope / analyzer / peak bars: from the audio tap; repaint just the monitor when it changed.
@@ -2457,18 +2457,25 @@ impl App {
     }
 
     /// A browser sample released over a hosted plugin window (it sits above the main window, which keeps the mouse
-    /// capture during the drag): the plugin gets the file as if it came from Explorer. Returns whether it was one.
-    #[cfg(windows)]
+    /// capture during the drag): the plugin gets the file as if it came from Explorer (on macOS only Lemon Sampler takes
+    /// it, through its state). Returns whether it was one.
+    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn sample_to_plugin_window(&mut self, path: &str) -> bool {
-        use windows_sys::Win32::Foundation::POINT;
-        let mut pt = POINT { x: 0, y: 0 };
-        if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt) } == 0 {
-            return false;
-        }
-        let Some(row) = self.plugins.row_at_screen(pt.x, pt.y) else { return false };
+        #[cfg(windows)]
+        let (x, y) = {
+            use windows_sys::Win32::Foundation::POINT;
+            let mut pt = POINT { x: 0, y: 0 };
+            if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt) } == 0 {
+                return false;
+            }
+            (pt.x, pt.y)
+        };
+        #[cfg(target_os = "macos")]
+        let Some((x, y)) = crate::plugin_window::pointer() else { return false };
+        let Some(row) = self.plugins.row_at_screen(x, y) else { return false };
         let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
         let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned());
-        if self.plugins.drop_file(row, pt.x, pt.y, path, sampler) {
+        if self.plugins.drop_file(row, x, y, path, sampler) {
             if let Some(ch) = self.state.project.channels.get_mut(row).filter(|_| sampler) {
                 ch.name = name.clone();
                 ch.sample_path = Some(path.to_string());

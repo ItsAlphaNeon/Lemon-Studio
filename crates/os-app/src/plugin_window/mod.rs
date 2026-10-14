@@ -7,8 +7,11 @@
 //! native window around it is the platform's:
 //! - `win32`: docked (a child of the main window, clipped to the workspace and stacked with the app's own windows) until
 //!   the menu arrow's "Detached" makes it a top-level window owned by the main window.
-//! - `x11` (Linux): always a top-level window. Plugin editors on Linux embed only in X11 windows, so under Wayland the
-//!   frame is an XWayland window, and an X11 window cannot be a child of the Wayland main window.
+//! - `x11` (Linux): docked as on Windows when the main window is an X11 one; always a top-level window under Wayland.
+//!   Plugin editors on Linux embed only in X11 windows, so under Wayland the frame is an XWayland window, and an X11
+//!   window cannot be a child of the Wayland main window.
+//! - `cocoa` (macOS): docked as on Windows (a view in the main window's view, masked to the workspace) until "Detached"
+//!   moves it into a panel of its own, kept above the main window while Lemon Studio is active.
 //!
 // spec: ui/plugin-window.md, plugins/host-link.md, plugins/lemon-sampler.md (strip geometry), ui/knobs.md (drag 1/1024 per px)
 
@@ -27,9 +30,14 @@ pub use win32::{default_position, lift_hide, lift_show, stack, take_exposed, tak
 mod x11;
 #[cfg(target_os = "linux")]
 pub use x11::{
-    busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pump, screen_to_main, stack, take_exposed, take_lift_input, take_link, unpinned,
-    FrameWindow, LiftInput,
+    busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pump, screen_to_main, stack, take_exposed, take_lift_input, unpinned,
+    FrameWindow,
 };
+
+#[cfg(target_os = "macos")]
+mod cocoa;
+#[cfg(target_os = "macos")]
+pub use cocoa::{default_position, lift_hide, lift_show, pointer, row_window_at, screen_to_main, stack, take_exposed, take_keys, take_lift_input, FrameWindow};
 
 /// A message a Lemon plugin's editor sent to its frame (host link, plugin -> host).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +48,36 @@ pub enum LinkMsg {
     Note(u8, u8, bool),
     /// "Create automation clip" on the plugin parameter at this list position.
     Automate(usize),
+}
+
+/// Mouse input on the lifted popup (see `lift_show`); positions in the main window (physical px).
+#[cfg(not(windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiftInput {
+    Move(i32, i32),
+    /// X button: 1 left, 2 middle, 3 right.
+    Down(u8),
+    Up,
+}
+
+/// Host link messages from Lemon plugins' editors since the last call: (editor area window, message). The editors queue
+/// them in `os_hostlink` (on Linux from threads of their own; UI thread).
+#[cfg(not(windows))]
+pub fn take_link() -> Vec<(isize, LinkMsg)> {
+    os_hostlink::take_host_messages()
+        .into_iter()
+        .map(|(area, cmd, arg)| {
+            let m = match cmd {
+                os_hostlink::Cmd::Note => {
+                    let (k, v, on) = os_hostlink::unpack_note(arg);
+                    LinkMsg::Note(k, v, on)
+                }
+                os_hostlink::Cmd::Automate => LinkMsg::Automate(arg.max(0) as usize),
+                _ => LinkMsg::Changed,
+            };
+            (area as isize, m)
+        })
+        .collect()
 }
 
 /// Title bar height (outline row included); the strip, or the editor's outline, starts here.
@@ -143,7 +181,7 @@ pub enum FrameEvent {
     /// A Misc tab keyboard key: key, velocity, pressed.
     Note(u8, u8, bool),
     /// A detached window moved to a monitor with another DPI: the app redraws it at this scale (spec: ui/ui-scaling.md §3).
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     Dpi(f32),
     /// A greyed-out control was clicked: the app says it is not available yet.
     NotAvailable(&'static str),
@@ -516,6 +554,27 @@ fn value_box(c: &mut Canvas, r: Rect, s: &str) {
     let lh = c.line_height(f);
     let ink = if lemon { os_theme::design::lemon::HIGHLIGHT } else { Color::rgb(0xe8dfe2) };
     c.text(f, r.right() - 11.0 - w, (r.cy() - lh / 2.0).round(), ink, s);
+}
+
+/// `rect` minus `cut`: up to four rects (left, right, top, bottom of the hole), each [left, top, right, bottom].
+#[cfg(not(windows))]
+fn subtract(rect: [i32; 4], cut: [i32; 4]) -> Vec<[i32; 4]> {
+    let [l, t, r, b] = rect;
+    let [cl, ct, cr, cb] = [cut[0].max(l), cut[1].max(t), cut[2].min(r), cut[3].min(b)];
+    if cl >= cr || ct >= cb {
+        return vec![rect];
+    }
+    [[l, t, cl, b], [cr, t, r, b], [cl, t, cr, ct], [cl, cb, cr, b]].into_iter().filter(|q| q[0] < q[2] && q[1] < q[3]).collect()
+}
+
+/// The parts of window rect `me` inside `work` and outside every cover (a docked frame's clip, off Windows).
+#[cfg(not(windows))]
+fn visible(me: [i32; 4], work: [i32; 4], covers: &[[i32; 4]]) -> Vec<[i32; 4]> {
+    let start = [me[0].max(work[0]), me[1].max(work[1]), me[2].min(work[2]), me[3].min(work[3])];
+    if start[0] >= start[2] || start[1] >= start[3] {
+        return Vec::new();
+    }
+    covers.iter().fold(vec![start], |parts, &c| parts.into_iter().flat_map(|p| subtract(p, c)).collect())
 }
 
 // ---------------------------------------------------------------------------------------------------------------

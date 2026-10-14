@@ -2082,6 +2082,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
 ]
 
 [[package]]
@@ -2308,6 +2309,7 @@ dependencies = [
  "bitflags 2.13.2",
  "objc2 0.6.5",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
 ]
 
@@ -2405,6 +2407,7 @@ dependencies = [
 name = "os-app"
 version = "0.0.1"
 dependencies = [
+ "block2 0.6.2",
  "chrono",
  "cpal",
  "lemon-3x-osc",
@@ -2414,7 +2417,10 @@ dependencies = [
  "midir",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "os-clap",
  "os-dsp",
  "os-engine",
