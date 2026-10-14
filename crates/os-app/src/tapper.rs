@@ -106,6 +106,9 @@ pub struct TapperUi {
     /// Tests tap at times of their own.
     #[cfg(test)]
     pub test_time: Option<f64>,
+    /// Tests record the taps' clicks (accented or not) instead of opening an audio device.
+    #[cfg(test)]
+    pub test_clicks: Vec<bool>,
 }
 
 impl Default for TapperUi {
@@ -119,6 +122,8 @@ impl Default for TapperUi {
             epoch: Instant::now(),
             #[cfg(test)]
             test_time: None,
+            #[cfg(test)]
+            test_clicks: Vec::new(),
         }
     }
 }

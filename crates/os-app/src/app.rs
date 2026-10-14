@@ -2260,7 +2260,11 @@ impl App {
         let bpm = tp.count.tap(t);
         tp.flash_at = Some(std::time::Instant::now());
         tp.flash = 1.0;
-        self.transport.tap_click(tp.count.bar().is_some_and(|(_, accent)| accent));
+        let accent = tp.count.bar().is_some_and(|(_, accent)| accent);
+        #[cfg(test)]
+        tp.test_clicks.push(accent);
+        #[cfg(not(test))]
+        self.transport.tap_click(accent);
         if let Some(bpm) = bpm.filter(|_| crate::tapper::get().apply) {
             self.set_tempo(bpm);
         }
@@ -7119,6 +7123,9 @@ mod tests {
             app.midi_tap();
         }
         assert_eq!(app.state.tempo, 120.0);
+        // Every tap clicked, accented on the first of each four of a count (§8); the chord's second key did not.
+        let (t, f) = (true, false);
+        assert_eq!(app.state.tapper.test_clicks, [t, f, f, f, t, t, f, t, f]);
         frame(&mut app, &mut c, None);
 
         // The title bar moves it; Ctrl+F5 closes it while it is in front and reopens it where it was left.
