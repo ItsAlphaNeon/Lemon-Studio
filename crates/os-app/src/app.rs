@@ -7583,6 +7583,75 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// The Misc tab's values are saved with the channel and come back on open (spec: audio/channel-misc.md
+    /// "Settings", audio/voice-levels.md, audio/swing.md, audio/note-rules.md): the first save adds their events, a
+    /// later one patches them.
+    #[test]
+    fn channel_misc_save_and_reopen() {
+        use crate::misc_page::M;
+        let flp = std::env::temp_dir().join(format!("os_channel_misc_{}.flp", std::process::id()));
+        let reopen = |a: &mut App| {
+            a.save_to(flp.clone());
+            assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+            let mut b = App::new(None);
+            b.plugins = crate::plugins::Plugins::default();
+            b.open(flp.clone());
+            b
+        };
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        let row = 0;
+        let untouched = a.state.project.channels[row].misc;
+        // Values the file's units hold exactly.
+        let first = [
+            (M::LevelPan, 0.25),
+            (M::LevelVol, 0.75),
+            (M::LevelModX, 0.625),
+            (M::LevelModY, 0.375),
+            (M::PolyMax, 3.0),
+            (M::PolySlide, 820.0 / 1024.0),
+            (M::Porta, 1.0),
+            (M::Mono, 1.0),
+            (M::TimeGate, 499.0 / 997.0),
+            (M::TimeShift, 0.25),
+            (M::TimeSwing, 0.5),
+            (M::Cut, 2.0),
+            (M::CutBy, 3.0),
+            (M::Root, 48.0),
+            (M::Fine, -35.0),
+            (M::MainPitch, 0.0),
+            (M::AddKey, 1.0),
+        ];
+        for (m, v) in first {
+            crate::misc::set(&mut a, row, m, v);
+        }
+        let want = a.state.project.channels[row].misc;
+        assert_ne!(want, untouched);
+        let mut b = reopen(&mut a);
+        assert_eq!(b.state.project.channels[row].misc, want);
+
+        let second = [
+            (M::LevelPan, 0.5),
+            (M::LevelVol, 0.25),
+            (M::PolyMax, 0.0),
+            (M::Mono, 0.0),
+            (M::TimeGate, 1.0),
+            (M::TimeShift, 0.5),
+            (M::TimeSwing, 1.0),
+            (M::CutBy, 0.0),
+            (M::Root, 72.0),
+            (M::Fine, 20.0),
+            (M::MainPitch, 1.0),
+        ];
+        for (m, v) in second {
+            crate::misc::set(&mut b, row, m, v);
+        }
+        let want = b.state.project.channels[row].misc;
+        let c = reopen(&mut b);
+        let _ = std::fs::remove_file(&flp);
+        assert_eq!(c.state.project.channels[row].misc, want);
+    }
+
     /// Opening, loading and saving leave no unsaved changes; an edit does; "Save new version" numbers the file.
     #[test]
     fn unsaved_changes_and_new_versions() {
