@@ -9,7 +9,7 @@
 //! not part of the project: kept in the user folder (`autoscroll.txt`).
 // spec: ui/auto-scrolling.md
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock}; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {

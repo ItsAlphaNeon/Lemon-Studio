@@ -86,7 +86,7 @@ pub fn module_file(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     use super::*;
 
     /// A bundle's executable comes from its `Info.plist`; without one, the bundle's name in `Contents/MacOS`.

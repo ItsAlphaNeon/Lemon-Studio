@@ -92,7 +92,7 @@ fn render_project() {
 }
 
 /// What plays each channel and mixer slot: the hosted plugin (name, format) or the engine.
-fn report(app: &crate::app::App) {
+fn report(app: &crate::app::App) { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     let p = &app.state.project;
     for (row, c) in p.channels.iter().enumerate() {
         if matches!(c.kind, ChannelKind::Automation | ChannelKind::Layer) {

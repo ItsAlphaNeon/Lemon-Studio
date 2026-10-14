@@ -79,7 +79,7 @@ impl Plugin {
 mod tests {
     use super::*;
 
-    use clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU;
+    use clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
 
     /// Collects the labels a builder was given.
     unsafe extern "C" fn add_item(b: *const clap_context_menu_builder, kind: u32, data: *const c_void) -> bool {

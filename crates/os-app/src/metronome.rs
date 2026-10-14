@@ -9,7 +9,7 @@
 //! which hears a change from its next beat.
 // spec: ui/metronome.md §1-3
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock}; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
 
 use os_engine::metronome::{Sound, Switch};
 

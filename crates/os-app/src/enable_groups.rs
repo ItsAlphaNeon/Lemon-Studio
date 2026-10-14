@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 static ON: OnceLock<AtomicBool> = OnceLock::new();
 
 #[cfg(test)]
-thread_local! {
+thread_local! { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     /// Tests run in parallel threads: each has its own switch, so one test turning it off never changes another's clicks.
     static TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }

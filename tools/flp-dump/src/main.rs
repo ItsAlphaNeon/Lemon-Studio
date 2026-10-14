@@ -80,7 +80,7 @@ fn dump(out: &mut impl Write, file: &FlpFile, source: &[u8]) -> io::Result<bool>
     for (at, chunk) in file.chunk_offsets() {
         write!(
             out,
-            "{at:#010x}  chunk {}  len {}",
+            "{at:#010x}  chunk {}  len {}", // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
             chunk.tag,
             chunk.payload_len()
         )?;

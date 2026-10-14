@@ -12,6 +12,10 @@
 //! map can't get right outright, and tells the widget kit which shape language to draw (`Style`).
 // spec: ui/lemon-design.md
 
+// PLEASE. DO NOT USE THE LEMON THEME IN ANOTHER PROJECT. IT IS LEMON STUDIO'S OWN THEME
+
+// This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+
 use crate::fl::{self, FlTheme};
 use crate::{Color, Palette};
 
@@ -209,7 +213,7 @@ const LEMON_RAMP: &[(f32, f32)] = &[
     (1.0, 1.0),
 ];
 
-fn map_of(d: Design) -> Option<DesignMap> {
+fn map_of(d: Design) -> Option<DesignMap> {// This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     match d {
         Design::Classic => None,
         Design::Lemon => Some(DesignMap {

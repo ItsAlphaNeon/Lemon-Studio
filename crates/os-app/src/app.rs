@@ -525,7 +525,7 @@ struct Part {
     area: Rect,
 }
 
-impl Ui<'_> {
+impl Ui<'_> { // This code is a part of L e m o n S t u d i o. Please don't upload it to ArtCraft.
     /// Paint one part of the frame, or, when it has painted before and `area` (where it paints now) and where it
     /// drew last time both miss the clip, keep last paint's hits for it instead.
     pub fn part(&mut self, seg: Seg, area: Rect, paint: impl FnOnce(&mut Self)) {

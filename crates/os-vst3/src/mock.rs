@@ -78,7 +78,7 @@ impl Probe {
 /// Counts a plug-in object as alive until it is freed.
 pub struct Live(Arc<Probe>);
 
-impl Live {
+impl Live { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     fn new(p: &Arc<Probe>) -> Live {
         p.live.fetch_add(1, Ordering::AcqRel);
         Live(p.clone())

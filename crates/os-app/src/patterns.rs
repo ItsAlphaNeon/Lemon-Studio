@@ -78,7 +78,7 @@ pub enum Hit {
     /// Column, row of a suggestion (column 0 = recent names).
     Suggest(usize, usize),
     Color,
-    Swatch(usize),
+    Swatch(usize), // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     ConfirmOk,
     ConfirmCancel,
     Inside,

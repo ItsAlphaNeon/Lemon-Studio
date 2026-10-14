@@ -92,7 +92,7 @@ pub struct VoiceParams {
 
 /// The plugin object: method-table pointer followed by the documented fields.
 #[repr(C)]
-pub struct PluginObject {
+pub struct PluginObject { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     pub vtable: *const PluginVtbl,
     pub host_tag: IntPtr,
     pub info: *const PluginInfo,

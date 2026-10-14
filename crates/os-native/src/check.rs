@@ -17,7 +17,7 @@
 //
 // spec: plugins/fruity-abi.md
 
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf}; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 

@@ -110,7 +110,7 @@ mod tests {
     /// --ignored`.
     #[test]
     #[ignore]
-    fn midi_loopback() {
+    fn midi_loopback() { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
         use std::sync::atomic::{AtomicUsize, Ordering};
         static WAKES: AtomicUsize = AtomicUsize::new(0);
         fn wake() {
