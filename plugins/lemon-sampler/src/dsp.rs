@@ -751,7 +751,8 @@ fn mods(v: &Voice, b: &Block, t: f64, off: Option<f64>) -> Option<Mods> {
         gain *= 1.0 - a * (1.0 - w) / 2.0;
     }
     let pan = v.note_pan + lfo(PAN);
-    let mut cents = lfo(PITCH) * 1200.0;
+    // The amounts at full scale are 2400 cents, as FL stores them (spec: audio/envelopes-and-lfos.md).
+    let mut cents = lfo(PITCH) * 2400.0;
     if let Some(l) = env(PITCH) {
         cents += l.unwrap_or(0.0) * tg[PITCH].amount * 2400.0;
     }

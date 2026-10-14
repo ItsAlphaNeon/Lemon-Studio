@@ -277,11 +277,16 @@ impl App {
         }
         // Lemon Sampler's time-stretch knobs are the channel's own settings: the channel takes the editor's edits, so
         // its audio clips get their new length (`playlist::fit_audio`), playback and saving follow (ui/playlist.md §9c).
+        // So are its root note page's: the engine applies the main pitch switch.
         for (row, name, v) in stretch {
             let Some(ch) = self.state.project.channels.get_mut(row) else { continue };
             let mut st = ch.sound.stretch;
+            let mut misc = ch.misc;
             if crate::plugins::stretch_param(&name, v, &mut st) && st != ch.sound.stretch {
                 ch.sound.stretch = st;
+                self.state.piano.dirty = true;
+            } else if crate::plugins::misc_param(&name, v, &mut misc) && misc != ch.misc {
+                ch.misc = misc;
                 self.state.piano.dirty = true;
             }
         }

@@ -1244,9 +1244,14 @@ impl App {
     }
 
     pub(crate) fn save_to(&mut self, target: PathBuf) {
-        // Sampler channels keep their sample in Lemon Sampler: copy it to the channel so the FLP stores it.
+        // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
+        // them.
         for row in self.state.hosted_rows.clone() {
             if self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler()) {
+                let lemon = self.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
+                if let Some(st) = self.plugins.state(row).filter(|_| lemon) {
+                    crate::plugins::store_sampler(&mut self.state.project.channels[row], &st);
+                }
                 if let Some(p) = self.plugins.sampler_path(row) {
                     // A placeholder path that still names the same file is kept as the project wrote it.
                     let ch = &mut self.state.project.channels[row];
@@ -7384,6 +7389,162 @@ mod tests {
         app.toggle_channel_window(row);
         assert!(!app.state.shown(Win::Plugin), "no information window");
         assert_eq!(app.state.pending_open, Some(row), "Lemon Sampler's window opens");
+    }
+
+    /// Lemon Sampler's settings are saved with the project and come back when it is reopened (spec:
+    /// plugins/lemon-sampler.md §7): envelopes and LFOs, the channel filter, declick, the sampler flags, the start
+    /// offset, the precomputed settings and the root note page. Untouched settings keep the channel's own values.
+    #[test]
+    fn sampler_settings_save_and_reopen() {
+        use serde_json::json;
+        let flp = std::env::temp_dir().join(format!("os_sampler_settings_{}.flp", std::process::id()));
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        a.plugins.available = crate::plugins::builtin();
+        a.sync_samplers(None);
+        let row = (0..a.state.project.channels.len()).find(|&r| a.state.project.channels[r].kind.is_sampler()).expect("a sampler channel");
+        assert!(a.state.hosted_rows.contains(&row));
+        let untouched = a.state.project.channels[row].clone();
+        let edits = [
+            ("envvol_on", json!({ "bool": true })),
+            ("envvol_att", json!({ "f32": 0.5 })),
+            ("envvol_tempo", json!({ "bool": true })),
+            ("envvol_lfo_amt", json!({ "f32": -0.5 })),
+            ("envvol_lfo_shape", json!({ "i32": 2 })),
+            ("envpitch_amt", json!({ "f32": 0.25 })),
+            ("f_cut", json!({ "f32": 0.25 })),
+            ("f_type", json!({ "i32": 3 })),
+            ("declick", json!({ "i32": 2 })),
+            ("loop_use", json!({ "bool": false })),
+            ("fx_reverse", json!({ "bool": true })),
+            ("fx_boost", json!({ "f32": 0.5 })),
+            ("fx_start", json!({ "f32": 0.25 })),
+            ("fx_sdelay", json!({ "f32": -0.5 })),
+            ("envpan_lfo_global", json!({ "bool": true })),
+            ("keep_disk", json!({ "bool": true })),
+            ("resample", json!({ "bool": true })),
+            ("start_offset", json!({ "f32": 0.125 })),
+            ("root", json!({ "i32": 48 })),
+            ("fine", json!({ "i32": -20 })),
+            ("main_pitch", json!({ "bool": false })),
+            ("add_key", json!({ "bool": true })),
+            ("zone_lo", json!({ "i32": 37 })),
+            ("zone_hi", json!({ "i32": 60 })),
+        ];
+        let st = crate::plugins::with_params(&a.plugins.state(row).unwrap(), &edits).unwrap();
+        assert!(a.plugins.set_state(row, &st));
+
+        // Saving copies them into the channel, in the file's units.
+        a.save_to(flp.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let ch = &a.state.project.channels[row];
+        let vol = &ch.envelopes[os_model::Envelope::VOLUME];
+        assert!(vol.enabled && vol.attack == 32768 && vol.flags & 1 == 1 && vol.lfo_amount == -64 && vol.lfo_shape == 2);
+        // The pitch record's amount is in cents (±2400).
+        assert_eq!(ch.envelopes[os_model::Envelope::PITCH].amount, 600);
+        assert_eq!(ch.envelopes[os_model::Envelope::PAN].flags & 0x20, 0x20, "global LFO");
+        // FL's new channel's flags (Load regions, Use loop points), loop points off, Keep on disk and Resample on.
+        assert_eq!((ch.sound.cutoff, ch.sound.filter_type, ch.sound.declick, ch.sound.sampler_flags), (64, 3, 2, Some(0x103)));
+        assert_eq!(ch.sound.start_offset(), 0.125);
+        let m = ch.misc;
+        assert_eq!((m.root, m.fine, m.main_pitch, m.add_key, m.key_range), (48, -20, false, true, [37, 60]));
+        let fx = ch.sound.fx;
+        assert_eq!((fx.flags, fx.boost, fx.stereo_delay, fx.start()), (os_model::SampleFx::REVERSE, 128, 1024, 0.25));
+        // Everything not edited is as it was.
+        assert_eq!(ch.envelopes[os_model::Envelope::PAN].attack, untouched.envelopes[os_model::Envelope::PAN].attack);
+        assert_eq!((fx.fade_in, fx.pogo, fx.length_bits), (untouched.sound.fx.fade_in, untouched.sound.fx.pogo, untouched.sound.fx.length_bits));
+        assert_eq!(ch.sound.resonance, untouched.sound.resonance);
+
+        // Reopened: the file holds them, and the new Lemon Sampler starts with them.
+        let saved = ch.clone();
+        let mut b = App::new(None);
+        b.plugins = crate::plugins::Plugins::default();
+        b.plugins.available = crate::plugins::builtin();
+        b.open(flp.clone());
+        let _ = std::fs::remove_file(&flp);
+        let t0 = std::time::Instant::now();
+        while !b.state.hosted_rows.contains(&row) && t0.elapsed() < std::time::Duration::from_secs(20) {
+            b.plugin_tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let reopened = &b.state.project.channels[row];
+        assert_eq!((reopened.envelopes, reopened.sound), (saved.envelopes, saved.sound));
+        let (m, n) = (reopened.misc, saved.misc);
+        assert_eq!((m.root, m.fine, m.main_pitch, m.add_key, m.key_range), (n.root, n.fine, n.main_pitch, n.add_key, n.key_range));
+        let st = b.plugins.state(row).expect("Lemon Sampler hosted again");
+        let v: serde_json::Value = serde_json::from_slice(&st[8..]).unwrap();
+        for (id, want) in &edits {
+            let got = &v["params"][*id];
+            match (got.get("f32"), want.get("f32")) {
+                (Some(g), Some(w)) => assert!((g.as_f64().unwrap() - w.as_f64().unwrap()).abs() < 1e-6, "{id}: {got} != {want}"),
+                _ => assert_eq!(got, want, "{id}"),
+            }
+        }
+    }
+
+    /// A Lemon Sampler state read back into the channel it started from changes nothing: every value the file holds,
+    /// even one a knob cannot show exactly, is kept while its knob is untouched.
+    #[test]
+    fn untouched_sampler_settings_store_as_they_were() {
+        let mut pl = crate::plugins::Plugins::default();
+        pl.available = crate::plugins::builtin();
+        let index = pl.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
+        let mut ch = test_project().channels.remove(0);
+        let vol = &mut ch.envelopes[os_model::Envelope::VOLUME];
+        (vol.enabled, vol.attack, vol.sustain, vol.lfo_amount, vol.lfo_shape, vol.flags) = (true, 50, 77, -3, 1, 0x20 | 4 | 2);
+        (ch.envelopes[os_model::Envelope::PITCH].amount, ch.envelopes[os_model::Envelope::PITCH].lfo_amount) = (1201, -7);
+        (ch.sound.cutoff, ch.sound.resonance, ch.sound.filter_type, ch.sound.declick, ch.sound.sampler_flags) = (300, 64, 5, 6, Some(0x10b));
+        (ch.sound.start_offset_bits, ch.sound.loop_points) = (0.3f64.to_bits(), Some([12, 34]));
+        (ch.misc.root, ch.misc.fine, ch.misc.main_pitch, ch.misc.add_key, ch.misc.key_range) = (48, -35, false, true, [37, 300]);
+        ch.sound.fx = os_model::SampleFx {
+            flags: os_model::SampleFx::SWAP,
+            boost: 77,
+            trim: 32768,
+            start_bits: 0.1f64.to_bits(),
+            crossfade: 3,
+            ..Default::default()
+        };
+        pl.create_with(0, index, Some(&crate::plugins::sampler_state(&ch))).unwrap();
+        let mut back = ch.clone();
+        crate::plugins::store_sampler(&mut back, &pl.state(0).unwrap());
+        assert_eq!(back, ch);
+    }
+
+    /// Loop points are frames of the sample file and Lemon Sampler's loop knobs fractions of its last frame's index
+    /// (2000 for this 2001-frame file; spec: plugins/lemon-sampler.md §7): FL's values for the sample's ends show the
+    /// whole sample, stored points come back while the knobs are untouched, and a moved knob stores its frame.
+    #[test]
+    fn sampler_loop_points_are_frames_of_the_file() {
+        use serde_json::json;
+        let wav = std::env::temp_dir().join(format!("os_loop_points_{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &[0.25; 4002]).unwrap();
+        let mut pl = crate::plugins::Plugins::default();
+        pl.available = crate::plugins::builtin();
+        let index = pl.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
+        let mut ch = test_project().channels.remove(0);
+        ch.sample_path = Some(wav.to_string_lossy().into_owned());
+        let knobs = |pl: &crate::plugins::Plugins| {
+            let v: serde_json::Value = serde_json::from_slice(&pl.state(0).unwrap()[8..]).unwrap();
+            (v["params"]["loop_start"]["f32"].as_f64().unwrap(), v["params"]["loop_end"]["f32"].as_f64().unwrap())
+        };
+        for (points, want) in [([-1, i64::MAX], (0.0, 1.0)), ([500, 1500], (0.25, 0.75))] {
+            ch.sound.loop_points = Some(points);
+            pl.create_with(0, index, Some(&crate::plugins::sampler_state(&ch))).unwrap();
+            assert_eq!(knobs(&pl), want);
+            let mut back = ch.clone();
+            crate::plugins::store_sampler(&mut back, &pl.state(0).unwrap());
+            assert_eq!(back.sound.loop_points, Some(points), "untouched");
+        }
+        let st = crate::plugins::with_params(&pl.state(0).unwrap(), &[("loop_start", json!({ "f32": 0.5 }))]).unwrap();
+        crate::plugins::store_sampler(&mut ch, &st);
+        assert_eq!(ch.sound.loop_points, Some([1000, 1500]));
+        // A channel without loop points gets them once a knob moves.
+        ch.sound.loop_points = None;
+        pl.create_with(0, index, Some(&crate::plugins::sampler_state(&ch))).unwrap();
+        let st = crate::plugins::with_params(&pl.state(0).unwrap(), &[("loop_end", json!({ "f32": 0.5 }))]).unwrap();
+        crate::plugins::store_sampler(&mut ch, &st);
+        let _ = std::fs::remove_file(&wav);
+        assert_eq!(ch.sound.loop_points, Some([0, 1000]));
     }
 
     /// An opened project decodes its samples on worker threads, then starts its samplers behind the progress panel;
