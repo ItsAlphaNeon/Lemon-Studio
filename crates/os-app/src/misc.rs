@@ -133,7 +133,7 @@ pub fn put(misc: &mut ChannelMisc, m: M, v: f32) {
         M::ArpRange => misc.arp.range = whole(v),
         M::ArpRepeat => misc.arp.repeat = whole(v),
         M::ArpSlide => misc.arp.slide = on(v),
-        M::ArpChord => misc.arp.chord = whole(v),
+        M::ArpChord => misc.arp.chord = v.round() as i32,
         M::EchoFeed => misc.echo.feed = v,
         M::EchoPan => misc.echo.pan = bi_in(v),
         M::EchoModX => misc.echo.mod_x = bi_in(v),

@@ -591,9 +591,9 @@ pub struct ChannelMisc {
     pub gate: f32,
     pub shift: f32,
     pub swing: f32,
-    /// Full portamento.
+    /// Full portamento. Not saved: where the file keeps it is an open question (OpenStudio-specs REQUESTS.md #5).
     pub full_porta: bool,
-    /// Velocity tracking (0) and key tracking (1).
+    /// Tracking by volume (0) and by key (1) (spec: audio/channel-misc.md "Tracking").
     pub tracking: [Tracking; 2],
     /// Cut group this channel cuts, and the group that cuts it; 0 = none.
     pub cut: u32,
@@ -645,7 +645,7 @@ impl Default for ChannelMisc {
             shift: 0.0,
             swing: 1.0,
             full_porta: true,
-            tracking: [Tracking::default(); 2],
+            tracking: [Tracking { mid: 100, ..Tracking::default() }, Tracking::default()],
             cut: 0,
             cut_by: 0,
             arp: Arpeggio::default(),
@@ -660,12 +660,12 @@ impl Default for ChannelMisc {
     }
 }
 
-/// One tracking page of the Misc tab (velocity or key).
+/// One tracking page of the Misc tab (by volume or by key; spec: audio/channel-misc.md "Settings").
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tracking {
-    /// Middle point (velocity or MIDI key).
+    /// Middle point: the mid volume (100 for a new channel) or the mid key (60).
     pub mid: u8,
-    /// To panning, Mod X, Mod Y (bipolar).
+    /// To panning, Mod X, Mod Y (bipolar; 1.0 = a stored amount of 256).
     pub pan: f32,
     pub mod_x: f32,
     pub mod_y: f32,
@@ -677,49 +677,62 @@ impl Default for Tracking {
     }
 }
 
-/// The Misc tab's arpeggiator.
+/// The Misc tab's arpeggiator (spec: audio/channel-misc.md "Settings", "Arpeggiator").
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Arpeggio {
-    /// 0 off, 1 up, 2 down, 3 up-down sticky, 4 up-down bounce, 5 random.
+    /// 0 off, 1 up, 2 down, 3 up-down (bounce), 4 up-down (sticky), 5 random.
     pub direction: u8,
-    /// Time and gate knobs.
+    /// Time knob: the stored time 450..=1447 as 0..=1; 1.0 (1447) = hold.
     pub time: f32,
+    /// Gate knob: the stored gate 0..=48 as 0..=1; 1.0 = the whole step.
     pub gate: f32,
-    /// Range in octaves (1..).
+    /// Range in octaves, 0..=6; 0 puts every chord note an octave above the one before.
     pub range: u32,
-    /// Note repeat; 0 = none.
+    /// How often the whole chord plays inside each octave, 1..=6.
     pub repeat: u32,
     pub slide: bool,
-    /// Chord list index (0 = auto with sustain).
-    pub chord: u32,
+    /// -1 = the held notes, 0 = the note alone, k >= 1 = entry k of the chords file.
+    pub chord: i32,
+}
+
+impl Arpeggio {
+    /// The time knob of a new channel (stored 1024, one step).
+    pub const TIME_DEFAULT: f32 = (1024.0 - 450.0) / 997.0;
 }
 
 impl Default for Arpeggio {
     fn default() -> Self {
-        Arpeggio { direction: 0, time: 0.58, gate: 1.0, range: 1, repeat: 0, slide: false, chord: 0 }
+        Arpeggio { direction: 0, time: Arpeggio::TIME_DEFAULT, gate: 1.0, range: 1, repeat: 1, slide: false, chord: -1 }
     }
 }
 
-/// The Misc tab's echo delay.
+/// The Misc tab's echo delay (spec: audio/channel-misc.md "Settings", "Echo delay").
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Echo {
-    /// Feedback and time knobs.
+    /// Feed knob: the stored feed 0..=25600 as 0..=1 (0.5 = 100 %, 0 = no echo).
     pub feed: f32,
+    /// Time knob: the stored time 0..=384 as 0..=1 (48 = one step).
     pub time: f32,
-    /// Panning, Mod X, Mod Y and pitch of each echo (bipolar).
+    /// Pan step (bipolar; 1.0 = a stored 19200), Mod X and Mod Y moves (bipolar; 0 = the value stays) and pitch step
+    /// (bipolar; 1.0 = 1200 cents) of each echo.
     pub pan: f32,
     pub mod_x: f32,
     pub mod_y: f32,
     pub pitch: f32,
-    /// Number of echoes (1..).
+    /// Number of echoes.
     pub echoes: u32,
     pub ping_pong: bool,
     pub fat: bool,
 }
 
+impl Echo {
+    /// The time knob of a new channel (stored 144, three steps).
+    pub const TIME_DEFAULT: f32 = 144.0 / 384.0;
+}
+
 impl Default for Echo {
     fn default() -> Self {
-        Echo { feed: 0.0, time: 0.45, pan: 0.0, mod_x: 0.0, mod_y: 0.0, pitch: 0.0, echoes: 4, ping_pong: false, fat: false }
+        Echo { feed: 0.0, time: Echo::TIME_DEFAULT, pan: 0.0, mod_x: 0.0, mod_y: 0.0, pitch: 0.0, echoes: 4, ping_pong: false, fat: false }
     }
 }
 

@@ -280,6 +280,8 @@ cargo test --workspace
 Tests that need an audio device are marked `#[ignore]` and run with `cargo test -p os-app -- --ignored`.
 Project-file corpus tests run when `OPENSTUDIO_FLP_CORPUS` points to a text file listing `.flp` paths;
 project files are never committed to this repository.
+The watermark test (`cargo test -p watermark`) checks that every source file opens with the copyright and ArtCraft
+header.
 
 ### Command-line tools
 
