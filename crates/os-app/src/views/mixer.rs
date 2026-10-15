@@ -556,8 +556,9 @@ fn send_knob(ui: &mut Ui, s: &State, n: u16, kx: f32, ky: f32, level: f64) {
     let id = KnobId::Send(s.selected_mixer, n);
     mixer_knob(ui, kx, ky, 10.0, 13.0, s.knob(id), None);
     if level > 0.0 {
-        let end = 0.75 * PI + (level as f32).min(1.0) * 1.5 * PI;
-        ui.c.arc(kx, ky, 12.5, 0.75 * PI, end, 2.0, ui.t.accent);
+        // From the knob's zero to its pointer (the arc takes a sweep, not an end angle).
+        let sweep = (level as f32).min(1.0) * 1.5 * PI;
+        ui.c.arc(kx, ky, 12.5, 0.75 * PI, sweep, 2.0, ui.t.accent);
     }
 }
 
