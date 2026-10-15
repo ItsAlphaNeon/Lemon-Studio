@@ -21,6 +21,7 @@ use os_ui::kit::{inst, State};
 use os_ui::tabler as tb;
 use os_ui::{Canvas, Color, Font, Rect};
 
+use crate::dsp;
 use crate::params::{AM_BYTE, LFO_SHAPES};
 
 /// Painted size in logical pixels (the original's window minus its title bar; same frame as Lemon Sampler).
@@ -129,6 +130,22 @@ pub struct Hit {
     pub t: Target,
 }
 
+/// Whether `id` is an oscillator's shape (`o1_shape` .. `o3_shape`).
+pub fn is_osc_shape(id: &str) -> bool {
+    id.starts_with('o') && id.ends_with("_shape")
+}
+
+/// Whether target `t` changes the sound today. Greyed out: the Custom shape (it plays silence: no shape can be loaded
+/// yet) and the Panning LFO (the panning record is not played, spec §2.6). Greyed-out controls draw their disabled
+/// look and the editor only names them.
+pub fn works(t: &Target) -> bool {
+    match t {
+        Target::Set(id, v) if is_osc_shape(id) => *v as u8 != dsp::CUSTOM,
+        Target::Knob(id) | Target::Set(id, _) => !id.starts_with("pan_lfo_"),
+        _ => true,
+    }
+}
+
 /// Editor-only state (not saved).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewState {
@@ -164,8 +181,11 @@ impl Ui<'_> {
     fn flag(&self, b: usize) -> bool {
         self.m.plain("flags").round() as i32 & (1 << b) != 0
     }
-    /// Hover / pressed look of a control occupying `r`.
+    /// Hover / pressed look of a control occupying `r`; greyed-out controls (`works`) are disabled and never light up.
     fn state(&self, r: Rect, t: &Target) -> State {
+        if !works(t) {
+            return State { disabled: true, ..State::NORMAL };
+        }
         let pressed = self.st.pressed.as_ref() == Some(t);
         let hover = !pressed && self.st.pressed.is_none() && self.st.mouse.is_some_and(|(x, y)| r.contains(x, y));
         State { hover, pressed, ..State::NORMAL }
@@ -361,6 +381,12 @@ fn osc_page(ui: &mut Ui) {
             if s == INVERT {
                 let col = if sel { brand::MAIN } else if st.hover { brand::TEXT } else { Color::rgb(0x8a8a8a) };
                 invert_glyph(ui.c, x, cyy + 2.0, col);
+            } else if st.disabled {
+                // Greyed out (Custom): a faint glyph, outlined when it is the chosen shape.
+                if sel {
+                    ui.c.stroke_rrect(Rect::new(x - 15.5, cyy - 14.5, 31.0, 29.0), 8.0, 1.0, plug::OFF);
+                }
+                shape_glyph(ui.c, s, x, cyy, plug::OFF, plug::PANEL);
             } else {
                 if sel {
                     lemon::lit(ui.c, Rect::new(x - 16.0, cyy - 15.0, 32.0, 30.0), 8.0, st.hover);
@@ -459,7 +485,7 @@ fn dial(ui: &mut Ui, id: &str, cx: f32, cy: f32, look: KnobLook, accent: u32, bi
     inst::dial(ui.c, ui.t, cx, cy, look.r, look.ring, ui.m.norm(id), bipolar, ui.t.a(accent), st);
     if !caption.is_empty() {
         let dy = if id.ends_with("_amt") && !id.ends_with("lfo_amt") { 21.5 } else { 17.5 };
-        inst::caption(ui.c, ui.t, cx, cy + dy, caption, false);
+        inst::caption(ui.c, ui.t, cx, cy + dy, caption, st.disabled);
     }
     ui.hit(hr, target);
 }
@@ -541,6 +567,10 @@ fn envelope_page(ui: &mut Ui) {
     lfo_graph(ui, lg, p, t.a(line));
     for (k, x, cap) in [("lfo_delay", 326.0, "DELAY"), ("lfo_att", 359.0, "ATT"), ("lfo_amt", 393.0, "AMT"), ("lfo_speed", 427.0, "SPEED")] {
         dial(ui, &id(k), x, 241.0, MID, arc, k == "lfo_amt", cap);
+    }
+    if !works(&Target::Knob(id("lfo_amt"))) {
+        // Nothing in the panel plays (the Panning LFO).
+        lemon::plug_veil(ui.c, lr);
     }
 
     // Filter.
@@ -698,8 +728,16 @@ fn lfo_graph(ui: &mut Ui, g: Rect, p: &str, col: Color) {
 // ---------------------------------------------------------------------------------------------------------------
 // Hints (spec §4)
 
-/// The hint line for a target: the parameter's name and value as the original words them.
+/// The hint line for a target: the parameter's name and value as the original words them; a greyed-out control
+/// (`works`) is named as not available yet.
 pub fn hint(t: &Target, m: &dyn Model, names: &dyn Fn(&str) -> String) -> String {
+    if !works(t) {
+        let name = match t {
+            Target::Set(id, _) if is_osc_shape(id) => format!("Osc {} custom shape", &id[1..2]),
+            _ => t.param().map(|id| names(id)).unwrap_or_default(),
+        };
+        return format!("{name}: not available yet");
+    }
     match t {
         Target::Knob(id) | Target::Toggle(id) | Target::List(id) => {
             if id == "hq" {

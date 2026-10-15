@@ -128,7 +128,18 @@ pub fn token_pos(s: &Settings, k: usize) -> (f32, f32) {
     (x_of(b.freq), y_of(db))
 }
 
+/// Whether target `t` does anything today. Greyed out: LIN and HQ (the EQ runs plain biquads: no linear phase, no
+/// oversampling); the editor also greys out the menu entries nothing reads yet. Greyed-out controls draw their
+/// disabled look and the editor only names them.
+pub fn works(t: Target) -> bool {
+    !matches!(t, Target::Lin | Target::Hq)
+}
+
+/// Hover / pressed look of a control; greyed-out controls (`works`) are disabled and never light up.
 fn st(vs: &ViewState, r: Rect, t: Target) -> State {
+    if !works(t) {
+        return State { disabled: true, ..State::NORMAL };
+    }
     let hover = vs.pressed.is_none() && vs.mouse.is_some_and(|(x, y)| r.contains(x, y));
     State::new(hover, vs.pressed == Some(t), false)
 }

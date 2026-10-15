@@ -5,8 +5,9 @@
 // and not any other part of Lemon Studio.
 
 //! Renders the Lemon Trio editor offscreen:
-//! `cargo run -p lemon-3x-osc --example osc3_shot -- out.png [osc|env|demo] [x,y] [crop]`.
-//! `env` shows the envelope page (volume); `demo` sets a few oscillator controls; `x,y` = mouse position (hover looks,
+//! `cargo run -p lemon-3x-osc --example osc3_shot -- out.png [osc|env|pan|custom|demo] [x,y] [crop]`.
+//! `env` shows the envelope page (volume), `pan` its Panning page (LFO greyed out); `custom` puts osc 1 on the Custom
+//! shape (greyed out); `demo` sets a few oscillator controls; `x,y` = mouse position (hover looks,
 //! `OS_PRESS` presses); `crop` saves only the editor area the host shows (560 x 437).
 use std::sync::Arc;
 
@@ -25,6 +26,11 @@ fn main() {
             l.view.tab = 1;
             l.vals.edit_plain("vol_env", 1.0);
         }
+        Some("pan") => {
+            l.view.tab = 1;
+            l.view.sub = 0;
+        }
+        Some("custom") => l.vals.edit_plain("o1_shape", 6.0),
         Some("demo") => {
             l.vals.edit_plain("o1_shape", 3.0);
             l.vals.edit_plain("o2_shape", 2.0);

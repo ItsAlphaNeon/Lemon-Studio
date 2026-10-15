@@ -27,7 +27,9 @@ pub fn round_button(c: &mut Canvas, cx: f32, cy: f32, r: f32, st: State) {
 
 /// Label / glyph colour on a [`round_button`].
 pub fn ink(st: State) -> Color {
-    if st.on {
+    if st.disabled {
+        plug::OFF
+    } else if st.on {
         brand::COLORED_DARK
     } else if st.hover {
         Color::rgb(0xffffff)

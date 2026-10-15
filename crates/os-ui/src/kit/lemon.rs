@@ -358,6 +358,8 @@ pub mod plug {
     /// Secondary text (captions, glyphs) and disabled text.
     pub const DIM: Color = Color::rgb(0xa3a3a3);
     pub const FAINT: Color = Color::rgb(0x7f7f7f);
+    /// Captions and glyphs of controls that are greyed out (not available yet).
+    pub const OFF: Color = Color::rgb(0x5f5f5f);
     /// The large plugin name in wordmarks.
     pub const WORDMARK: Color = Color::rgb(0x6b6b6b);
     /// Page strip (standalone editors): background and its bottom line.
@@ -418,6 +420,12 @@ pub fn plug_panel(c: &mut Canvas, r: Rect) {
     outlined(c, r, 10.0, plug::PANEL_LINE, plug::PANEL);
 }
 
+/// Greys out a panel (`plug_panel`) whose controls do nothing yet: the editor background over it, at the strength of
+/// the app's veil over controls that are not available.
+pub fn plug_veil(c: &mut Canvas, r: Rect) {
+    c.fill_rrect(r, 10.0, plug::BG.with_alpha(155));
+}
+
 /// Display well (graphs, waveform), radius `radius`.
 pub fn plug_well(c: &mut Canvas, r: Rect, radius: f32) {
     outlined(c, r, radius, plug::WELL_LINE, plug::WELL);
@@ -429,9 +437,13 @@ pub fn field(c: &mut Canvas, r: Rect, st: State) {
     outlined(c, r, 6.0_f32.min(r.h / 2.0), plug::FIELD_LINE, fill);
 }
 
-/// Raised button (rounded square, radius `radius`): grey face with a dark outline, lit lemon when `st.on`. Returns
-/// the colour for its label or glyph.
+/// Raised button (rounded square, radius `radius`): grey face with a dark outline, lit lemon when `st.on`; disabled,
+/// only an outline (olive when on, as a disabled `toggle`). Returns the colour for its label or glyph.
 pub fn plug_button(c: &mut Canvas, r: Rect, radius: f32, st: State) -> Color {
+    if st.disabled {
+        c.stroke_rrect(r.inset(0.5), (radius - 0.5).max(0.0), 1.0, if st.on { Color::rgb(0x6e6436) } else { plug::FACE });
+        return plug::OFF;
+    }
     if st.on {
         c.fill_rrect(r, radius, brand::DEEP);
         lit(c, r.inset(1.0), (radius - 1.0).max(0.0), st.hover);
@@ -508,8 +520,14 @@ pub fn text_tab(c: &mut Canvas, cell: Rect, x: f32, name: &str, font: Font, col:
 }
 
 /// A small button of a set (LFO shapes): the chosen one on a dark rounded square. Returns its glyph colour (`col`
-/// when chosen).
+/// when chosen, `plug::OFF` when disabled).
 pub fn choice_button(c: &mut Canvas, r: Rect, on: bool, col: Color, st: State) -> Color {
+    if st.disabled {
+        if on {
+            outlined(c, r, 5.0, plug::FIELD_LINE, plug::FIELD);
+        }
+        return plug::OFF;
+    }
     if on {
         outlined(c, r, 5.0, plug::FIELD_LINE, plug::FIELD);
     } else if st.hover {

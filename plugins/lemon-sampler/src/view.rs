@@ -154,6 +154,24 @@ pub struct Hit {
     pub t: Target,
 }
 
+/// The name of a control that does nothing yet, `None` for the ones that work: the Content toggles (keep on disk,
+/// resample, load regions, load slice markers: nothing reads them) and the envelope presets menu (no presets yet).
+/// Greyed-out controls draw their disabled look and the editor only names them.
+pub fn off_name(t: &Target) -> Option<&'static str> {
+    match t {
+        Target::Toggle(id) if matches!(id.as_str(), "keep_disk" | "resample" | "load_regions" | "load_slices") => {
+            Some(hint_text(id).unwrap_or("This option"))
+        }
+        Target::EnvMenu => Some("Channel envelope presets"),
+        _ => None,
+    }
+}
+
+/// Whether target `t` does anything today (`off_name`).
+pub fn works(t: &Target) -> bool {
+    off_name(t).is_none()
+}
+
 /// Editor-only state (not saved).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewState {
@@ -233,8 +251,11 @@ impl Ui<'_> {
     fn on(&self, id: &str) -> bool {
         self.m.plain(id) > 0.5
     }
-    /// Hover / pressed look of a control occupying `r`.
+    /// Hover / pressed look of a control occupying `r`; greyed-out controls (`works`) are disabled and never light up.
     fn state(&self, r: Rect, t: &Target) -> State {
+        if !works(t) {
+            return State { disabled: true, ..State::NORMAL };
+        }
         let pressed = self.st.pressed.as_ref() == Some(t);
         let hover = !pressed && self.st.pressed.is_none() && self.st.mouse.is_some_and(|(x, y)| r.contains(x, y));
         State { hover, pressed, ..State::NORMAL }
@@ -303,22 +324,22 @@ fn knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, look: KnobLook, accent: u32, bi
     if !caption.is_empty() {
         // The envelope AMT caption sits lower than the others (measured).
         let dy = if id.starts_with("env") && id.ends_with("_amt") && !id.ends_with("lfo_amt") { 21.5 } else { 17.5 };
-        inst::caption(ui.c, ui.t, cx, cy + dy, caption, false);
+        inst::caption(ui.c, ui.t, cx, cy + dy, caption, st.disabled);
     }
     ui.hit(hr, target);
 }
 
-/// A round radio / toggle with an optional label to its right; `dim` = drawn disabled (it still toggles).
-fn radio(ui: &mut Ui, id: &str, cx: f32, cy: f32, label: &str, dim: bool) {
+/// A round radio / toggle with an optional label to its right (greyed out when it does nothing yet, `works`).
+fn radio(ui: &mut Ui, id: &str, cx: f32, cy: f32, label: &str) {
     let on = ui.on(id);
     let cy = y(cy);
     let lw = if label.is_empty() { 0.0 } else { ui.c.text_width(LABEL, label) + 4.0 };
     let r = Rect::new(cx - 8.0, cy - 8.0, 16.0 + lw, 16.0);
     let target = Target::Toggle(id.into());
-    let st = ui.state(r, &target).with_disabled(dim);
+    let st = ui.state(r, &target);
     inst::radio(ui.c, ui.t, cx, cy, on, st);
     if !label.is_empty() {
-        inst::label(ui.c, ui.t, cx + 10.0, cy, label, dim);
+        inst::label(ui.c, ui.t, cx + 10.0, cy, label, st.disabled);
     }
     ui.hit(r, target);
 }
@@ -401,10 +422,10 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     }
 
     panel(ui, 11.0, 280.0, 121.0, 232.0, 69.0, "Content");
-    radio(ui, "keep_disk", 25.0, 158.0, "Keep on disk", false);
-    radio(ui, "resample", 25.0, 178.0, "Resample", true);
-    radio(ui, "load_regions", 153.0, 158.0, "Load regions", true);
-    radio(ui, "load_slices", 153.0, 178.0, "Load slice markers", true);
+    radio(ui, "keep_disk", 25.0, 158.0, "Keep on disk");
+    radio(ui, "resample", 25.0, 178.0, "Resample");
+    radio(ui, "load_regions", 153.0, 158.0, "Load regions");
+    radio(ui, "load_slices", 153.0, 178.0, "Load slice markers");
     label(ui, 21.0, 209.0, "Declicking mode");
     list(ui, "declick", 124.0, 270.0, 199.0, 219.0);
 
@@ -413,8 +434,8 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     knob(ui, "loop_start", 98.0, 286.0, BIG, ORANGE, false, "START");
     knob(ui, "loop_end", 140.0, 286.0, BIG, ORANGE, false, "END");
     icon(ui.c, &tb::ROTATE_CLOCKWISE_2, 119.0, y(286.0) + 21.0, 11.0, brand::MAIN);
-    radio(ui, "loop_use", 184.0, 274.0, "Use loop points", false);
-    radio(ui, "loop_pingpong", 184.0, 294.0, "Ping pong loop", false);
+    radio(ui, "loop_use", 184.0, 274.0, "Use loop points");
+    radio(ui, "loop_pingpong", 184.0, 294.0, "Ping pong loop");
 
     panel(ui, 287.0, 556.0, 78.0, 155.0, 105.0, "Time stretching");
     knob(ui, "ts_pitch", 312.0, 121.0, BIG, ORANGE, true, "PITCH");
@@ -450,12 +471,12 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     let lh = ui.c.line_height(f);
     ui.c.text(f, 337.0, (y(172.0) - lh / 2.0).round(), brand::TEXT, "Precomputed effects");
     if ui.st.fx_page == 0 {
-        radio(ui, "fx_dc", 302.0, 199.0, "Remove DC offset", false);
-        radio(ui, "fx_normalize", 302.0, 221.0, "Normalize", false);
-        radio(ui, "fx_reverse", 302.0, 243.0, "Reverse", false);
-        radio(ui, "fx_polarity", 430.0, 199.0, "Reverse polarity", false);
-        radio(ui, "fx_fade_stereo", 430.0, 221.0, "Fade stereo", false);
-        radio(ui, "fx_swap", 430.0, 243.0, "Swap stereo", false);
+        radio(ui, "fx_dc", 302.0, 199.0, "Remove DC offset");
+        radio(ui, "fx_normalize", 302.0, 221.0, "Normalize");
+        radio(ui, "fx_reverse", 302.0, 243.0, "Reverse");
+        radio(ui, "fx_polarity", 430.0, 199.0, "Reverse polarity");
+        radio(ui, "fx_fade_stereo", 430.0, 221.0, "Fade stereo");
+        radio(ui, "fx_swap", 430.0, 243.0, "Swap stereo");
         for (id, x, cap) in [
             ("fx_start", 312.0, "SMP START"),
             ("fx_length", 354.0, "LENGTH"),
@@ -470,7 +491,7 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
         // BOOST + CLIP share a darker group box.
         lemon::outlined(ui.c, rr(291.0, 334.0, 187.0, 255.0), 8.0, plug::PANEL_LINE, Color::rgb(0x2d2d2d));
         knob(ui, "fx_boost", 312.5, 206.5, BIG, ORANGE, false, "BOOST");
-        radio(ui, "fx_clip", 302.0, 246.0, "", false);
+        radio(ui, "fx_clip", 302.0, 246.0, "");
         let lh = ui.c.line_height(CAP);
         inst::caption_at(ui.c, 311.0, (y(246.0) - lh / 2.0).round(), plug::DIM, "CLIP", inst::CAPTION_TRACK);
         ui.hits.last_mut().unwrap().r.w += 30.0;
@@ -786,12 +807,12 @@ fn envelope_tab(ui: &mut Ui) {
     if sub != 0 {
         let pr = panel(ui, 11.0, 297.0, 113.0, 310.0, 0.0, "");
         inst::panel_tab(ui.c, t, pr, 84.0, "");
-        radio(ui, &id("on"), 21.0, 123.0, "", false);
+        radio(ui, &id("on"), 21.0, 123.0, "");
         let lw = label(ui, 32.0, 123.0, "Envelope");
         ui.hits.last_mut().map(|h| h.r.w += lw + 4.0);
         let mr = Rect::new(277.0, y(117.0), 14.0, 16.0);
         let st = ui.state(mr, &Target::EnvMenu);
-        let col = if st.hover { brand::MAIN } else { plug::DIM };
+        let col = if st.disabled { plug::OFF } else if st.hover { brand::MAIN } else { plug::DIM };
         let mut g = os_ui::Glyph::new();
         let (ax, ay) = (284.0, y(126.0));
         g.polygon(&[(ax - 2.5, ay - 4.5), (ax + 3.0, ay), (ax - 2.5, ay + 4.5)]);
@@ -813,7 +834,7 @@ fn envelope_tab(ui: &mut Ui) {
             inst::caption_spaced(ui.c, t, x, y(283.0) - 4.0, "TENSION", false, 2.3);
         }
         label(ui, 240.0, 292.0, "Tempo");
-        radio(ui, &id("tempo"), 284.0, 292.0, "", false);
+        radio(ui, &id("tempo"), 284.0, 292.0, "");
     }
 
     // LFO.
@@ -836,9 +857,9 @@ fn envelope_tab(ui: &mut Ui) {
         knob(ui, &id(k), x, 241.0, MID, arc, k == "lfo_amt", cap);
     }
     label(ui, 336.0, 292.0, "Tempo");
-    radio(ui, &id("lfo_tempo"), 380.0, 292.0, "", false);
+    radio(ui, &id("lfo_tempo"), 380.0, 292.0, "");
     label(ui, 394.0, 292.0, "Global");
-    radio(ui, &id("lfo_global"), 436.0, 292.0, "", false);
+    radio(ui, &id("lfo_global"), 436.0, 292.0, "");
 
     // Filter.
     let fr = panel(ui, 457.0, 556.0, 113.0, 310.0, 0.0, "");
@@ -1108,8 +1129,8 @@ fn root_panel(ui: &mut Ui) {
     let st = ui.state(reset, &Target::RootReset);
     inst::text_button(ui.c, reset, "Reset", st);
     ui.hit(reset, Target::RootReset);
-    radio(ui, "main_pitch", 80.0, 350.0, "Enable main pitch", false);
-    radio(ui, "add_key", 200.0, 350.0, "Add to key", false);
+    radio(ui, "main_pitch", 80.0, 350.0, "Enable main pitch");
+    radio(ui, "add_key", 200.0, 350.0, "Add to key");
     label(ui, 279.0, 350.0, "Fine tune");
     let track = Rect::new(339.0, y(350.0) - 9.0, 90.0, 18.0);
     let target = Target::Slider("fine".into(), track);
@@ -1428,8 +1449,12 @@ pub fn time_ms(frames: f64, rate: u32) -> String {
     format!("{}:{:03}", ms / 1000, ms % 1000)
 }
 
-/// The hint for the control under the mouse at (`x`, `yy`).
+/// The hint for the control under the mouse at (`x`, `yy`); a greyed-out control (`off_name`) is named as not
+/// available yet.
 pub fn hint(t: &Target, m: &dyn Model, st: &ViewState, sv: &SampleView, x: f32, yy: f32) -> String {
+    if let Some(name) = off_name(t) {
+        return format!("{name}: not available yet");
+    }
     match t {
         Target::Knob(id) | Target::Toggle(id) | Target::List(id) | Target::Slider(id, _) => param_hint(m, id),
         Target::Set(id, v) if id.ends_with("lfo_shape") => match *v as i32 {

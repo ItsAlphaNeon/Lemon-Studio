@@ -186,7 +186,7 @@ pub fn caption(c: &mut Canvas, t: &Palette, cx: f32, y: f32, s: &str, disabled: 
 pub fn caption_spaced(c: &mut Canvas, t: &Palette, cx: f32, y: f32, s: &str, disabled: bool, track: f32) {
     let w = caption_width(c, s, track);
     let col = if lemon::on(t) {
-        if disabled { Color::rgb(0x5f5f5f) } else { plug::DIM }
+        if disabled { plug::OFF } else { plug::DIM }
     } else if disabled {
         t.s(0x606364)
     } else {
