@@ -2835,6 +2835,10 @@ impl App {
             song_pos_drag: matches!(self.drag, Some(Drag::SongPos { .. })),
         };
         let overlays = views::paint(&mut ui, &self.state, &info);
+        if self.state.cables.get_mut().take_slowed() {
+            self.state.message = Some("Mixer cables hang still: the mixer is too slow to redraw them swinging (General settings > Animations)".into());
+            self.damage_win(Win::Mixer);
+        }
         self.keep.parts = std::mem::take(&mut self.keep.next);
         self.keep.prev.clear();
         self.keep.prev_bars.clear();

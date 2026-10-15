@@ -32,6 +32,10 @@ const MAX_DT: f32 = 0.05;
 const CURVE: usize = 128;
 /// Longest a pre-rendered shape is simulated for, substeps (10 s).
 const SETTLE_MAX: usize = 2400;
+/// A mixer paint (simulation included) slower than this while the cables swing is slow...
+const SLOW: std::time::Duration = std::time::Duration::from_millis(8);
+/// ...and this many slow paints in a row hang the cables still for the session.
+const SLOW_PAINTS: u32 = 8;
 
 /// A tunable factor of the simulation.
 pub struct Param {
@@ -172,6 +176,12 @@ pub struct Cables {
     /// Substeps in a row with every rope still; `None` = moving.
     still: Option<u32>,
     acc: f32,
+    /// Time the last `advance` took, counted into the next paint's cost.
+    sim: std::time::Duration,
+    /// Slow paints in a row while swinging (`paint_cost`).
+    slow: u32,
+    /// The cables were made still because the mixer was slow to redraw them; not yet reported (`take_slowed`).
+    slowed: bool,
 }
 
 fn arc_len(pts: &[Pt]) -> f32 {
@@ -215,6 +225,23 @@ impl Cables {
     pub fn animate(&mut self, on: bool) {
         self.still_cables = !on;
         self.still = None;
+        self.slow = 0;
+    }
+
+    /// A mixer paint that ran while the cables swung took `cost`. Once the mixer has been too slow to redraw them
+    /// at animation rate (a large project with many sends), they hang still in their pre-rendered shapes, for this
+    /// session: the saved Animations setting stands, and choosing "Entertain me" tries again.
+    pub fn paint_cost(&mut self, cost: std::time::Duration) {
+        self.slow = if cost + std::mem::take(&mut self.sim) > SLOW { self.slow + 1 } else { 0 };
+        if self.slow >= SLOW_PAINTS {
+            self.animate(false);
+            self.slowed = true;
+        }
+    }
+
+    /// Whether `paint_cost` has just made the cables still (once).
+    pub fn take_slowed(&mut self) -> bool {
+        std::mem::take(&mut self.slowed)
     }
 
     /// A mixer paint starts, with track `current` current: cables not connected again before `end` are unplugged.
@@ -342,6 +369,7 @@ impl Cables {
             self.acc = 0.0;
             return None;
         }
+        let t0 = std::time::Instant::now();
         let before = self.bounds();
         self.acc = (self.acc + dt.min(MAX_DT)).min(MAX_DT);
         let tu = &self.tuning;
@@ -354,6 +382,7 @@ impl Cables {
             }
         }
         let after = self.bounds();
+        self.sim = t0.elapsed();
         match (before, after) {
             (Some(a), Some(b)) => Some(a.union(&b).outset(2.0)),
             (a, b) => a.or(b).map(|r| r.outset(2.0)),
@@ -576,6 +605,31 @@ mod tests {
         plug(&mut still, 3, &[(4, (140.0, 200.0), b)]);
         assert!(!still.moving());
         assert_eq!(still.ropes[0].p[0], (140.0, 200.0));
+    }
+
+    #[test]
+    fn a_mixer_slow_to_redraw_hangs_the_cables_still() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        let mut c = Cables::default();
+        plug(&mut c, 1, &[(4, (50.0, 200.0), (230.0, 198.0))]);
+        assert!(c.moving());
+        // A few slow paints, or slow ones broken by a quick one, are not enough.
+        for _ in 0..SLOW_PAINTS - 1 {
+            c.paint_cost(ms(20));
+        }
+        c.paint_cost(ms(2));
+        for _ in 0..SLOW_PAINTS - 1 {
+            c.paint_cost(ms(20));
+        }
+        assert!(c.moving() && !c.take_slowed());
+        c.paint_cost(ms(20));
+        assert!(c.still_cables && !c.moving(), "slow paints in a row hang the cables still");
+        assert!(c.take_slowed() && !c.take_slowed(), "reported once");
+        // Turning animations back on tries again.
+        c.animate(true);
+        c.paint_cost(ms(20));
+        assert!(!c.still_cables);
     }
 
     #[test]
