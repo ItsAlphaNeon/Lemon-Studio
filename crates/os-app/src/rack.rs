@@ -1146,7 +1146,12 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
         }
         None => v.extend([PItem::not_yet("Copy value"), PItem::new("Paste value", Cmd::Nothing).off()]),
     }
-    v.extend([PItem::not_yet("Type in value..."), PItem::not_yet("Set...")]);
+    // spec: ui/type-in-value.md §8
+    v.push(match knob {
+        Some(k) => PItem::new("Type in value...", Cmd::TypeIn(crate::typein::Target::Knob(k))),
+        None => PItem::not_yet("Type in value..."),
+    });
+    v.push(PItem::not_yet("Set..."));
     v
 }
 

@@ -206,6 +206,8 @@ pub enum Action {
     MixerArea,
     RackArea,
     Swallow,
+    /// The value box of "Type in value..." (spec: ui/type-in-value.md).
+    TypeIn(crate::typein::TiAct),
     /// Piano roll: empty grid, a note (index into the pattern's notes), keyboard, velocity panel.
     PianoGrid,
     PianoNote(usize),
@@ -3475,6 +3477,13 @@ impl App {
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
         self.pressed = action.clone();
+        // The value box is modal: only its own parts take clicks (spec: ui/type-in-value.md §1).
+        if crate::typein::is_open(&self.state) {
+            if let Some(Action::TypeIn(a)) = action {
+                crate::typein::click(&mut self.state, a);
+            }
+            return;
+        }
         // Playlist popup menus close on any click outside them; a click elsewhere accepts an open text box.
         if self.state.playlist.popup.is_some() && !matches!(action, Some(Action::PlPopup(_) | Action::PlPopupSub(_))) {
             self.state.playlist.popup = None;
@@ -3695,6 +3704,9 @@ impl App {
     /// Middle button: grab-scroll the Piano roll and Playlist (FL manual: middle-drag scrolls
     /// both directions).
     pub fn mouse_down_middle(&mut self) {
+        if crate::typein::is_open(&self.state) {
+            return;
+        }
         self.raise_under_mouse();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
@@ -3727,6 +3739,9 @@ impl App {
     /// Right button: delete notes in the piano roll (spec: ui/piano-roll.md §8); right-drag on
     /// a scroll bar scrolls.
     pub fn mouse_down_right(&mut self) {
+        if crate::typein::is_open(&self.state) {
+            return;
+        }
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
         if self.state.menu_open.is_some() {
@@ -5274,7 +5289,7 @@ impl App {
             Action::CloseWin(Win::Perf) => self.close_perf(),
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch => {}
-            Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
+            Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow | Action::TypeIn(_) => {}
             Action::PlTool(_)
             | Action::PlSnap
             | Action::PlOptions
@@ -8564,6 +8579,115 @@ mod tests {
 
     /// The piano roll title's target channel (spec: ui/piano-target-channel.md): hint, the channel menu and a pick,
     /// the wheel through the channels with notes, right-click for the channel's window.
+    /// "Type in value..." (spec: ui/type-in-value.md): the knob menu's item opens the value box at the mouse; typed text
+    /// sets the knob on Enter, Esc leaves it; the box is modal; the mode buttons switch and the accepted mode is kept.
+    #[test]
+    fn type_in_value() {
+        use crate::knobs::KnobId;
+        use crate::playlist::EditTarget;
+        use crate::typein::{Target, TiAct};
+        use winit::keyboard::{Key, NamedKey, SmolStr};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.z = vec![Win::ChannelRack];
+        frame(&mut app, &mut c, None);
+        let typ = |app: &mut App, text: &str| {
+            for ch in text.chars() {
+                let k = if ch == ' ' { Key::Named(NamedKey::Space) } else { Key::Character(SmolStr::new(ch.to_string())) };
+                app.key(&k, false, false);
+            }
+        };
+        let enter = |app: &mut App| app.key(&Key::Named(NamedKey::Enter), false, false);
+        // Right-click the first row's volume knob, pick "Type in value...".
+        let open = |app: &mut App, c: &mut Canvas, k: KnobId| {
+            let r = hit_rect(app, &Action::Knob(k));
+            app.mouse_move(r.cx(), r.cy());
+            app.mouse_down_right();
+            app.mouse_up();
+            let menu = app.state.playlist.popup.clone().expect("knob menu");
+            let i = menu.items.iter().position(|i| i.label == "Type in value...").expect("item");
+            assert!(menu.items[i].enabled);
+            app.mouse_move(r.cx() + 40.0, r.cy() + 300.0);
+            app.act(Action::PlPopup(i));
+            frame(app, c, None);
+        };
+        let vol = KnobId::ChanVol(0);
+        open(&mut app, &mut c, vol);
+        let e = app.state.playlist.edit.clone().expect("value box");
+        assert_eq!(e.target, EditTarget::TypeIn(Target::Knob(vol), false));
+        assert!(e.sel, "the field opens selected");
+        assert_eq!(e.text, crate::typein::text(&app.state, Target::Knob(vol), false));
+        assert!(e.text.ends_with("dB"), "{}", e.text);
+        // Bottom-right corner 10 px right of / below the mouse (§1).
+        let (mx, my) = app.mouse;
+        assert_eq!((e.at.0 + crate::typein::W, e.at.1 + crate::typein::H), (mx + 10.0, my + 10.0));
+        assert_eq!(crate::typein::caption(&app.state, Target::Knob(vol)), "Value for Channel volume");
+        // Typing replaces the selected text; Enter sets -6 dB.
+        typ(&mut app, "-6 dB");
+        assert_eq!(app.state.playlist.edit.as_ref().unwrap().text, "-6 dB");
+        enter(&mut app);
+        assert!(app.state.playlist.edit.is_none());
+        assert!(app.state.knob_text(vol).contains("-6.0dB"), "{}", app.state.knob_text(vol));
+        // Esc leaves the value; unreadable text too (OS).
+        frame(&mut app, &mut c, None);
+        let before = app.state.knob(vol);
+        open(&mut app, &mut c, vol);
+        typ(&mut app, "-20");
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        assert!(app.state.playlist.edit.is_none());
+        assert_eq!(app.state.knob(vol), before);
+        frame(&mut app, &mut c, None);
+        open(&mut app, &mut c, vol);
+        typ(&mut app, "abc");
+        enter(&mut app);
+        assert_eq!(app.state.knob(vol), before);
+        // Modal: a click elsewhere keeps the box; the A button switches to normalized, ✓ accepts and the mode stays.
+        frame(&mut app, &mut c, None);
+        open(&mut app, &mut c, vol);
+        app.mouse_move(5.0, 1000.0);
+        app.mouse_down();
+        app.mouse_up();
+        assert!(app.state.playlist.edit.is_some(), "modal");
+        frame(&mut app, &mut c, None);
+        let a = hit_rect(&app, &Action::TypeIn(TiAct::Mode(true)));
+        click(&mut app, &mut c, a);
+        let e = app.state.playlist.edit.clone().unwrap();
+        assert_eq!(e.target, EditTarget::TypeIn(Target::Knob(vol), true));
+        assert!(e.sel);
+        typ(&mut app, "0.5");
+        let ok = hit_rect(&app, &Action::TypeIn(TiAct::Accept));
+        click(&mut app, &mut c, ok);
+        assert!(app.state.playlist.edit.is_none());
+        assert!((app.state.knob(vol) - 0.5).abs() < 1e-6);
+        assert!(app.state.playlist.typein_norm, "the accepted mode is kept");
+        // The pan box then opens in A; switch back to the value mode and type a pan.
+        let pan = KnobId::ChanPan(0);
+        open(&mut app, &mut c, pan);
+        assert_eq!(app.state.playlist.edit.as_ref().unwrap().text, "0.5");
+        let v = hit_rect(&app, &Action::TypeIn(TiAct::Mode(false)));
+        click(&mut app, &mut c, v);
+        assert_eq!(app.state.playlist.edit.as_ref().unwrap().text, "Centered");
+        typ(&mut app, "25% left");
+        enter(&mut app);
+        assert_eq!(app.state.knob_text(pan), "Channel panning: 25% left");
+        assert!(!app.state.playlist.typein_norm);
+        // ✗ closes.
+        frame(&mut app, &mut c, None);
+        open(&mut app, &mut c, pan);
+        typ(&mut app, "50");
+        let x = hit_rect(&app, &Action::TypeIn(TiAct::Close));
+        click(&mut app, &mut c, x);
+        assert!(app.state.playlist.edit.is_none());
+        assert_eq!(app.state.knob_text(pan), "Channel panning: 25% left");
+        // Accepting the field as it opened keeps the exact value.
+        app.state.set_knob(pan, 0.6234);
+        frame(&mut app, &mut c, None);
+        open(&mut app, &mut c, pan);
+        enter(&mut app);
+        assert_eq!(app.state.knob(pan), 0.6234);
+    }
+
     #[test]
     fn piano_target_channel() {
         use crate::playlist::Mark;

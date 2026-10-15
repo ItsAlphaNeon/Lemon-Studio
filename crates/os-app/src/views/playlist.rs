@@ -1112,7 +1112,11 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
             }
         }
     }
-    if let Some(e) = &s.playlist.edit {
+    if let Some(e) = &s.playlist.edit
+        && let pl::EditTarget::TypeIn(t, norm) = e.target
+    {
+        super::typein::paint(ui, s, e, t, norm);
+    } else if let Some(e) = &s.playlist.edit {
         let t = ui.t;
         let r = Rect::new(e.at.0, e.at.1, 150.0, 20.0);
         ui.hit(r, Action::Swallow, "Type, Enter accepts, Esc cancels");
