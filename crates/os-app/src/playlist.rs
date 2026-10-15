@@ -296,6 +296,8 @@ pub enum Cmd {
     Mixer(crate::mixer::MCmd),
     /// Plugin parameter menus (spec: plugins/plugin-parameters.md §5-6).
     Param(crate::params::PCmd),
+    /// "Type in value..." of a knob or parameter menu (spec: ui/type-in-value.md).
+    TypeIn(crate::typein::Target),
     /// Plugin presets (spec: plugins/presets.md).
     #[cfg_attr(not(windows), allow(dead_code))]
     Preset(crate::presets::PCmd),
@@ -385,6 +387,8 @@ pub enum EditTarget {
     SlotName(u16, u8),
     /// The current arrangement's name (§12).
     ArrangementName,
+    /// The value box of "Type in value..." and whether it reads normalized values (spec: ui/type-in-value.md).
+    TypeIn(crate::typein::Target, bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -393,6 +397,8 @@ pub struct TextEdit {
     pub text: String,
     /// Where the box is drawn (screen).
     pub at: (f32, f32),
+    /// The whole text is selected: typing replaces it (the value box opens so, spec: ui/type-in-value.md §1).
+    pub sel: bool,
 }
 
 /// A waveform summary for drawing audio clips: min/max per `per` frames (left channel + right mixed).
@@ -433,6 +439,8 @@ pub struct PlaylistState {
     pub overlay: Option<Overlay>,
     pub popup: Option<Popup>,
     pub edit: Option<TextEdit>,
+    /// The value box's mode last accepted: normalized (spec: ui/type-in-value.md §3).
+    pub typein_norm: bool,
     /// Soloed track: its own state and the others' before the solo.
     pub solo: Option<(u16, Vec<bool>)>,
     /// Zoom tool: the view before "zoom out" (bar width, scroll x, scroll y).
@@ -476,6 +484,7 @@ impl Default for PlaylistState {
             overlay: None,
             popup: None,
             edit: None,
+            typein_norm: false,
             solo: None,
             zoom_back: None,
             hover_clip: None,
@@ -2861,8 +2870,9 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::PatternName(n) => source_name(s, ClipSource::Pattern(n)),
         EditTarget::MixerName(n) => crate::mixer::name(s, n),
         EditTarget::SlotName(t, k) => crate::mixer::slot_name(s, t, k).unwrap_or_default(),
+        EditTarget::TypeIn(t, norm) => crate::typein::text(s, t, norm),
     };
-    s.playlist.edit = Some(TextEdit { target, text, at });
+    s.playlist.edit = Some(TextEdit { target, text, at, sel: false });
 }
 
 /// Enter in the text box.
@@ -2910,6 +2920,7 @@ pub fn commit_edit(s: &mut State) {
                 s.mixer.slot_names.insert((t, k), text);
             }
         }
+        EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
         EditTarget::PatternName(n) => {
             if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
                 p.name = (!text.is_empty()).then_some(text);
@@ -2935,6 +2946,12 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
         Cmd::Param(c) => return app.params_cmd(c),
+        Cmd::TypeIn(t) => {
+            let at = app.mouse;
+            crate::typein::open(&mut app.state, t, at);
+            app.invalidate();
+            return None;
+        }
         Cmd::Preset(c) => return crate::presets::run(app, c),
         Cmd::Piano(c) => {
             let m = crate::piano_tools::run(app, c);
@@ -3112,7 +3129,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             (!delete_space(s)).then(|| "Delete space: make a time selection first (right-drag the ruler)".into())
         }
-        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) => None,
+        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) => None,
         Cmd::StretchMode => {
             s.playlist.stretch = !s.playlist.stretch;
             Some(if s.playlist.stretch { "Stretch mode on: resizing an audio clip stretches it".into() } else { "Stretch mode off".into() })
@@ -3581,11 +3598,21 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         match key {
             Key::Named(NamedKey::Enter) => commit_edit(&mut app.state),
             Key::Named(NamedKey::Escape) => app.state.playlist.edit = None,
+            // A selected text goes as a whole (the value box, spec: ui/type-in-value.md §1, §8).
             Key::Named(NamedKey::Backspace) => {
-                e.text.pop();
+                if std::mem::take(&mut e.sel) {
+                    e.text.clear();
+                } else {
+                    e.text.pop();
+                }
             }
-            Key::Named(NamedKey::Space) => e.text.push(' '),
-            Key::Character(c) if !ctrl => e.text.push_str(c),
+            Key::Named(NamedKey::Space) | Key::Character(_) if !ctrl => {
+                if std::mem::take(&mut e.sel) {
+                    e.text.clear();
+                }
+                e.text.push_str(if let Key::Character(c) = key { c } else { " " });
+            }
+            Key::Character(c) if c.eq_ignore_ascii_case("a") && matches!(e.target, EditTarget::TypeIn(..)) => e.sel = !e.text.is_empty(),
             _ => {}
         }
         app.invalidate();

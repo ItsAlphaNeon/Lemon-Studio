@@ -60,6 +60,7 @@ mod song_pos;
 mod stall;
 mod tapper;
 mod transport;
+mod typein;
 mod views;
 
 use std::num::NonZeroU32;

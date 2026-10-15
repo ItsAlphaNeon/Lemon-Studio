@@ -142,6 +142,21 @@ fn value_of(s: &State, key: usize, index: usize) -> Option<f64> {
     v
 }
 
+/// Parameter `index` of instance `key`: its name, its normalized value, and setting it (the value box, spec:
+/// ui/type-in-value.md).
+pub(crate) fn param_name(s: &State, key: usize, index: usize) -> Option<String> {
+    Some(s.params.lists.get(&key)?.params.get(index)?.name.clone())
+}
+
+pub(crate) fn param_value(s: &State, key: usize, index: usize) -> Option<f64> {
+    value_of(s, key, index)
+}
+
+pub(crate) fn set_param_value(s: &State, key: usize, index: usize, v: f64) -> bool {
+    let Some(id) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return false };
+    s.params.plugin(key).is_some_and(|p| p.lock().is_ok_and(|mut p| p.set_param(id, v)))
+}
+
 /// "Create automation clip" for parameter `index` of instance `key`: target, clip name, current value.
 pub fn automation(s: &State, key: usize, index: usize) -> Option<(u32, String, f64)> {
     Some((target_of(s, key, index)?, clip_name(s, key, index), value_of(s, key, index).unwrap_or(0.5)))
@@ -201,7 +216,11 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         PItem::head("Value"),
         copy,
         paste,
-        PItem::not_yet("Type in value..."),
+        // spec: ui/type-in-value.md §8 (normalized mode only)
+        match param {
+            Some((key, index)) => PItem::new("Type in value...", Cmd::TypeIn(crate::typein::Target::Param(key, index))),
+            None => PItem::not_yet("Type in value..."),
+        },
         PItem::not_yet("Set..."),
     ]
 }
