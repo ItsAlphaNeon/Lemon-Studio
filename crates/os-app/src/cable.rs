@@ -25,6 +25,8 @@ const REST: f32 = 0.01;
 const SETTLE: u32 = 30;
 /// Longest frame stepped, s (a stall must not explode the ropes).
 const MAX_DT: f32 = 0.05;
+/// Samples of a cable's resting curve.
+const CURVE: usize = 128;
 
 /// A tunable factor of the simulation.
 pub struct Param {
@@ -120,10 +122,16 @@ impl Tuning {
             }
         }
     }
-    /// A cable's length for a span of `d` px: a parabola sagging `Sag` px.
-    fn length(&self, d: f32) -> f32 {
+    /// A cable's shape at rest from socket `a` to socket `b`, finely sampled: a parabola sagging `Sag` px below the
+    /// line between them. Its length is the cable's (so a new cable starts neither stretched nor buckled).
+    fn curve(&self, a: Pt, b: Pt) -> Vec<Pt> {
         let sag = self.v[k::SAG];
-        d + 8.0 * sag * sag / (3.0 * d.max(sag).max(1.0))
+        (0..=CURVE)
+            .map(|i| {
+                let t = i as f32 / CURVE as f32;
+                (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t + 4.0 * sag * t * (1.0 - t))
+            })
+            .collect()
     }
 }
 
@@ -155,6 +163,10 @@ pub struct Cables {
     /// Substeps in a row with every rope still; `None` = moving.
     still: Option<u32>,
     acc: f32,
+}
+
+fn arc_len(pts: &[Pt]) -> f32 {
+    pts.windows(2).map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1)).sum()
 }
 
 /// `pts` resampled to `n` points evenly along its length.
@@ -205,18 +217,14 @@ impl Cables {
     /// send knob). `master`: either end is on the master strip.
     pub fn connect(&mut self, key: u16, a: Pt, b: Pt, master: bool, color: Color) {
         let tu = &self.tuning;
-        let len = tu.length((b.0 - a.0).hypot(b.1 - a.1));
+        let rest = tu.curve(a, b);
+        let len = arc_len(&rest);
         let n = ((len / tu.v[k::SPACING]).round() as usize + 1).clamp(MIN_POINTS, MAX_POINTS);
         let seg = len / (n - 1) as f32;
-        let (sag, tug) = (tu.v[k::SAG], tu.v[k::TUG]);
+        let tug = tu.v[k::TUG];
         let Some(r) = self.ropes.iter_mut().find(|r| r.key == key) else {
             // A new cable starts at rest in its sag.
-            let p: Vec<Pt> = (0..n)
-                .map(|i| {
-                    let t = i as f32 / (n - 1) as f32;
-                    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t + 4.0 * sag * t * (1.0 - t))
-                })
-                .collect();
+            let p = resample(&rest, n);
             self.ropes.push(Rope { key, master, color, seg, q: p.clone(), p, seen: true });
             self.still = None;
             return;
@@ -229,18 +237,23 @@ impl Cables {
         if da == (0.0, 0.0) && db == (0.0, 0.0) && r.p.len() == n && r.seg == seg {
             return;
         }
-        // The excess of a jump over the tug bends the cable along (fading toward the other end); the rest the cable
-        // feels as a yank on its socket.
+        // The excess of a jump over the tug moves the cable's whole resting shape to the new sockets, keeping its
+        // swing: the cable passes through itself rather than folding into a loop when one socket crosses the other.
+        // The rest the cable feels as a yank on its socket.
         let excess = |(dx, dy): Pt| {
             let d = dx.hypot(dy);
             if d > tug { (dx * (1.0 - tug / d), dy * (1.0 - tug / d)) } else { (0.0, 0.0) }
         };
         let (ca, cb) = (excess(da), excess(db));
-        for i in 0..=last {
-            let t = i as f32 / last as f32;
-            let (cx, cy) = (ca.0 * (1.0 - t) + cb.0 * t, ca.1 * (1.0 - t) + cb.1 * t);
-            r.p[i] = (r.p[i].0 + cx, r.p[i].1 + cy);
-            r.q[i] = (r.q[i].0 + cx, r.q[i].1 + cy);
+        if ca != (0.0, 0.0) || cb != (0.0, 0.0) {
+            let (oa, ob) = (r.p[0], r.p[last]);
+            let from = resample(&tu.curve(oa, ob), last + 1);
+            let to = resample(&tu.curve((oa.0 + ca.0, oa.1 + ca.1), (ob.0 + cb.0, ob.1 + cb.1)), last + 1);
+            for i in 0..=last {
+                let (dx, dy) = (to[i].0 - from[i].0, to[i].1 - from[i].1);
+                r.p[i] = (r.p[i].0 + dx, r.p[i].1 + dy);
+                r.q[i] = (r.q[i].0 + dx, r.q[i].1 + dy);
+            }
         }
         if r.p.len() != n {
             r.p = resample(&r.p, n);
@@ -461,6 +474,31 @@ mod tests {
         let now = mid(&c);
         assert!(now.0 < rest.0 - 1.0 && now.1 < rest.1 - 1.0, "{rest:?} -> {now:?}");
         assert!(settle(&mut c) < 15.0);
+    }
+
+
+    fn crossings(pts: &[Pt]) -> usize {
+        let cross = |a: Pt, b: Pt, c: Pt, d: Pt| {
+            let o = |p: Pt, q: Pt, r: Pt| (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0);
+            (o(a, b, c) > 0.0) != (o(a, b, d) > 0.0) && (o(c, d, a) > 0.0) != (o(c, d, b) > 0.0)
+        };
+        let n = pts.len();
+        (0..n - 1).map(|i| (i + 2..n - 1).filter(|&j| cross(pts[i], pts[i + 1], pts[j], pts[j + 1])).count()).sum()
+    }
+
+    #[test]
+    fn a_socket_passing_the_other_does_not_loop_the_cable() {
+        let mut c = Cables::default();
+        plug(&mut c, 1, &[(4, (50.0, 200.0), (230.0, 198.0)), (0, (50.0, 200.0), (20.0, 198.0))]);
+        for (cur, x) in [(9, 650.0), (1, 50.0), (2, 90.0)] {
+            plug(&mut c, cur, &[(4, (x, 200.0), (230.0, 198.0)), (0, (x, 200.0), (20.0, 198.0))]);
+            for f in 0..90 {
+                c.advance(1.0 / 60.0);
+                for r in &c.ropes {
+                    assert_eq!(crossings(&r.p), 0, "cable {} crosses itself {f} frames after the switch to {cur}", r.key);
+                }
+            }
+        }
     }
 
     #[test]
