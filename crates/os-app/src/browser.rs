@@ -230,7 +230,7 @@ impl App {
         // Snapped playlist position under the mouse.
         let spot = grid.map(|grid| {
             let g = pl::PGeom::new(s, grid);
-            (g.track_at(y), pl::snap_down(s, &g, g.tick_at(x), alt))
+            (g.track_at(y), pl::snap_place(s, &g, g.tick_at(x), alt))
         });
         match item {
             Item::Pattern(n) => {

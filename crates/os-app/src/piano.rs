@@ -106,8 +106,8 @@ pub struct PianoState {
     pub split: crate::piano_split::Split,
     /// Last press on the splitter, for its double click.
     pub split_click: Option<std::time::Instant>,
-    /// The magnet button's setting (spec: ui/piano-snap.md): kept while the program runs, not saved.
-    pub snap: crate::piano_snap::PianoSnap,
+    /// The magnet button's setting (spec: ui/piano-snap.md): a program setting, kept in the user folder (crate::snap).
+    pub snap: crate::snap::EditorSnap,
     sel: Vec<usize>,
     sel_key: (u16, u16),
     undo: Vec<(u16, Vec<Note>, Vec<ControlPoint>)>,
@@ -136,7 +136,7 @@ impl Default for PianoState {
             rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1,
             split: crate::piano_split::load(),
             split_click: None,
-            snap: crate::piano_snap::PianoSnap::default(),
+            snap: crate::snap::EditorSnap::default(),
             sel: Vec::new(),
             sel_key: (0, 0),
             undo: Vec::new(),

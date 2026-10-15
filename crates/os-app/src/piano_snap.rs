@@ -12,9 +12,7 @@ use crate::app::State;
 use crate::piano::{self, Geom};
 use crate::piano_tools::NCmd;
 use crate::playlist::{Cmd, Mark, PItem, Popup, Snap};
-
-/// The toolbar's global snap, which Main follows. Its control is not available yet and shows Line (§8).
-pub const GLOBAL: Snap = Snap::Line;
+use crate::snap::EditorSnap;
 
 /// From this zoom (px per beat) up, Line does not snap (§4: FL's maximum zoom; §8).
 const NO_LINE_PPB: f32 = 768.0;
@@ -22,40 +20,6 @@ const NO_LINE_PPB: f32 = 768.0;
 const LINE_MIN_PX: f32 = 10.0;
 /// Events and Markers catch a target this close (§3).
 const CATCH_PX: f32 = 5.0;
-
-/// The magnet button's setting (§2). Kept while the program runs, not saved (§8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PianoSnap {
-    /// The global snap.
-    #[default]
-    Main,
-    /// Line, Cell, (none) and the fixed units, as the playlist names them.
-    Grid(Snap),
-    /// The starts and ends of the pattern's notes.
-    Events,
-    /// The pattern's time markers.
-    Markers,
-}
-
-impl PianoSnap {
-    pub fn label(self) -> &'static str {
-        match self {
-            PianoSnap::Main => "Main",
-            PianoSnap::Grid(sn) => sn.label(),
-            PianoSnap::Events => "Events",
-            PianoSnap::Markers => "Markers",
-        }
-    }
-
-    /// The grid setting, Main resolved; None for Events and Markers.
-    fn grid(self) -> Option<Snap> {
-        match self {
-            PianoSnap::Main => Some(GLOBAL),
-            PianoSnap::Grid(sn) => Some(sn),
-            PianoSnap::Events | PianoSnap::Markers => None,
-        }
-    }
-}
 
 /// Line's unit at a zoom (§4): the smallest of step, 1/2 beat, beat and bar at least 10 px wide; one tick from
 /// 768 px per beat up.
@@ -67,9 +31,9 @@ pub fn line_unit(ppq: u32, px_per_beat: f32) -> u32 {
     [ppq / 4, ppq / 2, ppq].into_iter().find(|&u| u > 0 && px(u) >= LINE_MIN_PX).unwrap_or(ppq * 4).max(1)
 }
 
-/// A setting's unit in ticks at a zoom (§3); None for (none), Events and Markers.
-pub fn unit_of(snap: PianoSnap, ppq: u32, px_per_beat: f32) -> Option<u32> {
-    match snap.grid()? {
+/// A setting's unit in ticks at a zoom, Main read as `global` (§3); None for (none), Events and Markers.
+pub fn unit_of(snap: EditorSnap, global: Snap, ppq: u32, px_per_beat: f32) -> Option<u32> {
+    match snap.grid(global)? {
         Snap::None => None,
         Snap::Line | Snap::Cell => Some(line_unit(ppq, px_per_beat)),
         sn => Some(sn.ticks(ppq, 0.0)),
@@ -82,19 +46,14 @@ fn ppq(s: &State) -> u32 {
 
 /// The current setting's unit at the piano roll's zoom.
 pub fn unit(s: &State) -> Option<u32> {
-    unit_of(s.piano.snap, ppq(s), s.piano.px_per_beat)
-}
-
-/// The global snap's unit at the piano roll's zoom: Quick quantize uses it (§6, §8).
-pub fn global_unit(s: &State) -> u32 {
-    unit_of(PianoSnap::Main, ppq(s), s.piano.px_per_beat).unwrap_or(1)
+    unit_of(s.piano.snap, s.global_snap.now, ppq(s), s.piano.px_per_beat)
 }
 
 /// What Events and Markers catch (§3): the starts and ends of the pattern's notes (the other channels' too while
 /// ghost channels show), or its time markers. `skip`: notes being dragged.
 fn targets(s: &State, skip: &[usize]) -> Vec<u32> {
     match s.piano.snap {
-        PianoSnap::Events => {
+        EditorSnap::Events => {
             let ch = piano::channel(s);
             piano::notes(s)
                 .iter()
@@ -103,7 +62,7 @@ fn targets(s: &State, skip: &[usize]) -> Vec<u32> {
                 .flat_map(|(_, n)| [n.position, n.position + piano::shown_len(s, n)])
                 .collect()
         }
-        PianoSnap::Markers => s.project.pattern(s.pattern).map_or(Vec::new(), |p| p.markers.iter().map(|m| m.position).collect()),
+        EditorSnap::Markers => s.project.pattern(s.pattern).map_or(Vec::new(), |p| p.markers.iter().map(|m| m.position).collect()),
         _ => Vec::new(),
     }
 }
@@ -129,7 +88,7 @@ pub fn place(s: &State, g: &Geom, tick: f32, alt: bool) -> u32 {
         return c;
     }
     match unit(s) {
-        Some(u) if s.piano.snap.grid() == Some(Snap::Cell) => t as u32 / u * u,
+        Some(u) if s.piano.snap.grid(s.global_snap.now) == Some(Snap::Cell) => t as u32 / u * u,
         Some(u) => (t / u as f32).round() as u32 * u,
         None => t as u32,
     }
@@ -160,10 +119,10 @@ pub fn cell(s: &State, tick: f32) -> u32 {
 /// The Snap menu (§2). The caller opens it 11 px left of and below the button's centre (§1).
 pub fn snap_menu(s: &State, x: f32, y: f32) -> Popup {
     let now = s.piano.snap;
-    let radio = |p: PianoSnap| PItem::new(p.label(), Cmd::Piano(NCmd::Snap(p))).mark(Mark::Radio(now == p));
-    let mut items = vec![radio(PianoSnap::Main), PItem::sep(), radio(PianoSnap::Grid(Snap::Line)), radio(PianoSnap::Grid(Snap::Cell)), PItem::sep()];
-    items.extend(Snap::MENU.iter().filter(|sn| !matches!(sn, Snap::Line | Snap::Cell)).map(|&sn| radio(PianoSnap::Grid(sn))));
-    items.extend([PItem::sep(), radio(PianoSnap::Events), radio(PianoSnap::Markers)]);
+    let radio = |p: EditorSnap| PItem::new(p.label(), Cmd::Piano(NCmd::Snap(p))).mark(Mark::Radio(now == p));
+    let mut items = vec![radio(EditorSnap::Main), PItem::sep(), radio(EditorSnap::Grid(Snap::Line)), radio(EditorSnap::Grid(Snap::Cell)), PItem::sep()];
+    items.extend(Snap::MENU.iter().filter(|sn| !matches!(sn, Snap::Line | Snap::Cell)).map(|&sn| radio(EditorSnap::Grid(sn))));
+    items.extend([PItem::sep(), radio(EditorSnap::Events), radio(EditorSnap::Markers)]);
     Popup { x, y, items, sub: None }
 }
 
@@ -174,9 +133,10 @@ pub fn lengths_menu(x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None }
 }
 
-/// Pick a Snap menu entry.
-pub fn set(s: &mut State, p: PianoSnap) -> String {
+/// Pick a Snap menu entry (kept in the user folder, §8).
+pub fn set(s: &mut State, p: EditorSnap) -> String {
     s.piano.snap = p;
+    crate::snap::save(s);
     format!("Piano roll snap: {}", p.label())
 }
 
@@ -209,16 +169,20 @@ mod tests {
         assert_eq!(line_unit(96, 10.0), 96);
         assert_eq!(line_unit(96, 6.0), 384);
         // The fixed units at PPQ 96 and the settings without one.
-        let u = |p: PianoSnap| unit_of(p, 96, 96.0);
-        assert_eq!(u(PianoSnap::Main), Some(24));
-        assert_eq!(u(PianoSnap::Grid(Snap::Cell)), Some(24));
-        assert_eq!(u(PianoSnap::Grid(Snap::SixthStep)), Some(4));
-        assert_eq!(u(PianoSnap::Grid(Snap::ThirdStep)), Some(8));
-        assert_eq!(u(PianoSnap::Grid(Snap::ThirdBeat)), Some(32));
-        assert_eq!(u(PianoSnap::Grid(Snap::Bar)), Some(384));
-        assert_eq!(u(PianoSnap::Grid(Snap::None)), None);
-        assert_eq!(u(PianoSnap::Events), None);
-        assert_eq!(u(PianoSnap::Markers), None);
+        let u = |p: EditorSnap| unit_of(p, Snap::Line, 96, 96.0);
+        assert_eq!(u(EditorSnap::Main), Some(24));
+        assert_eq!(u(EditorSnap::Grid(Snap::Cell)), Some(24));
+        assert_eq!(u(EditorSnap::Grid(Snap::SixthStep)), Some(4));
+        assert_eq!(u(EditorSnap::Grid(Snap::ThirdStep)), Some(8));
+        assert_eq!(u(EditorSnap::Grid(Snap::ThirdBeat)), Some(32));
+        assert_eq!(u(EditorSnap::Grid(Snap::Bar)), Some(384));
+        assert_eq!(u(EditorSnap::Grid(Snap::None)), None);
+        assert_eq!(u(EditorSnap::Events), None);
+        assert_eq!(u(EditorSnap::Markers), None);
+        // Main reads the global snap with the piano roll's rules.
+        assert_eq!(unit_of(EditorSnap::Main, Snap::Beat, 96, 96.0), Some(96));
+        assert_eq!(unit_of(EditorSnap::Main, Snap::Cell, 96, 20.0), Some(48));
+        assert_eq!(unit_of(EditorSnap::Main, Snap::None, 96, 96.0), None);
     }
 
     #[test]
