@@ -4452,13 +4452,19 @@ impl App {
         let ch = piano::channel(&self.state);
         let p = piano::pattern_mut(&mut self.state);
         let mut span: Option<(f32, f32)> = None;
+        let mut edited = None;
         for n in p.notes.iter_mut().filter(|n| Some(n.channel) == ch) {
             let nx = g.x_of(n.position as f32);
             if nx >= a && nx <= b {
                 lane.set(n, v);
+                edited = Some(*n);
                 let end = g.x_of((n.position + n.length.max(g.step)) as f32);
                 span = Some(span.map_or((nx, end), |(l, r)| (l.min(nx), r.max(end))));
             }
+        }
+        // The next notes placed take the edited note's controls.
+        if edited.is_some() {
+            self.state.piano.last_controls = edited;
         }
         // Only the panel columns of the changed lollipops (the hint is left alone: a damage
         // union with the hint panel would cover most of the window).
@@ -5110,6 +5116,7 @@ impl App {
                 let orig: Vec<(usize, Note)> =
                     std::iter::once(i).chain(idx.into_iter().filter(|&j| j != i)).filter_map(|j| notes.get(j).map(|&m| (j, m))).collect();
                 s.piano.last_len = n.length.max(g.step);
+                s.piano.last_controls = Some(n);
                 let nr = g.note_rect(&n).unwrap_or_default();
                 self.drag = Some(if x >= nr.right() - resize_zone(nr.w) {
                     self.resize_cursor = true;
