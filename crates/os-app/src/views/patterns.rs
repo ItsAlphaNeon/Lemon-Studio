@@ -7,7 +7,7 @@
 //! Pattern name box (with suggestions and colour swatches) and the delete confirmation.
 // spec: ui/pattern-menu.md §3, §4
 
-use os_ui::{Color, Font, Rect};
+use os_ui::{Color, Font, Glyph, Rect};
 
 use super::rgb;
 use crate::app::{Action, State, Ui};
@@ -38,6 +38,44 @@ fn panel(ui: &mut Ui, r: Rect, fill: Color) {
     }
 }
 
+/// The name box's colour tab (opens the swatches). Classic: a left-pointing tab down the box's right edge, with a dark
+/// rim and a lit top edge (spec: ui/pattern-menu.md §4). Lemon: a rounded colour tile beside the name field, as the
+/// piano roll's title tile (spec: ui/lemon-design.md).
+fn colour_tab(ui: &mut Ui, r: Rect, col: Color, hint: &'static str) {
+    let t = ui.t;
+    if super::lemon(ui) {
+        let tile = Rect::new(r.right() - 26.0, r.y + 4.0, 22.0, 22.0);
+        let hov = ui.hit(tile, Action::Pat(Hit::Color), hint);
+        let rad = os_ui::kit::lemon::r_small(t).max(4.0);
+        let line = if hov { t.glyph } else { col.shade(-0.4) };
+        os_ui::kit::lemon::outlined(ui.c, tile, rad, line, if hov { col.shade(0.12) } else { col });
+        // A small chevron: the tile opens the colours.
+        let (cx, cy) = (tile.x + tile.w / 2.0, tile.y + tile.h / 2.0);
+        let luma = (0.299 * f32::from(col.r) + 0.587 * f32::from(col.g) + 0.114 * f32::from(col.b)) / 255.0;
+        let ink = if luma > 0.55 { Color::rgb(0x473900) } else { Color::rgb(0xffffff).with_alpha(200) };
+        ui.c.line(cx - 3.0, cy - 1.5, cx, cy + 1.5, 1.5, ink);
+        ui.c.line(cx, cy + 1.5, cx + 3.0, cy - 1.5, 1.5, ink);
+        return;
+    }
+    let tab = Rect::new(r.right() - 22.0, r.y + 4.0, 18.0, r.h - 8.0);
+    let hov = ui.hit(tab, Action::Pat(Hit::Color), hint);
+    // The tab's outline: a body with a point at the middle of its left side.
+    let shape = |k: f32| {
+        let (x0, x1, y0, y1, cy) = (tab.x + 6.0 + k, tab.right() - k, tab.y + k, tab.bottom() - k, tab.y + tab.h / 2.0);
+        let p = 6.0 - k * 0.6;
+        [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, cy + p), (tab.x + k * 1.6, cy), (x0, cy - p)]
+    };
+    let mut g = Glyph::new();
+    g.polygon(&shape(0.0));
+    ui.c.glyph(if hov { t.glyph } else { Color::rgb(0x0e1012) }, &g);
+    let mut g = Glyph::new();
+    g.polygon(&shape(1.0));
+    ui.c.glyph(if hov { col.shade(0.12) } else { col }, &g);
+    // Lit top edge and a darker bottom edge on the body, like Classic's raised faces.
+    ui.c.fill_rect(Rect::new(tab.x + 7.0, tab.y + 1.0, tab.w - 8.0, 1.0), col.shade(0.25));
+    ui.c.fill_rect(Rect::new(tab.x + 7.0, tab.bottom() - 2.0, tab.w - 8.0, 1.0), col.shade(-0.25));
+}
+
 pub fn paint(ui: &mut Ui, s: &State) {
     let t = ui.t;
     let font = Font::new(14);
@@ -50,7 +88,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
         let named = matches!(b.target, BoxTarget::Name(_));
         // The colour tab: patterns and channels (spec: ui/channel-rack.md §13).
         let tabbed = named || matches!(b.target, BoxTarget::Rack(crate::rack::RBox::Channel(_)));
-        let field = Rect::new(r.x + 4.0, r.y + 4.0, r.w - if tabbed { 30.0 } else { 8.0 }, 22.0);
+        let field = Rect::new(r.x + 4.0, r.y + 4.0, r.w - if !tabbed { 8.0 } else if lemon { 34.0 } else { 30.0 }, 22.0);
         if lemon {
             ui.c.fill_rrect(field, 4.0, t.tempo_box);
         } else {
@@ -94,15 +132,9 @@ pub fn paint(ui: &mut Ui, s: &State) {
             _ => None,
         };
         if let Some(col) = tab_col {
-            // Colour tab: a left-pointing tab in the pattern / channel colour.
             let col = col.map_or(Color::rgb(0x925755), rgb);
-            let tab = Rect::new(r.right() - 22.0, r.y + 4.0, 18.0, r.h - 8.0);
-            let hov = ui.hit(tab, Action::Pat(Hit::Color), if named { "Pattern colour" } else { "Channel colour" });
-            ui.c.fill_rect(Rect::new(tab.x + 5.0, tab.y, tab.w - 5.0, tab.h), col);
-            ui.c.fill_rect(Rect::new(tab.x, tab.y + tab.h / 2.0 - 5.0, 5.0, 10.0), col);
-            if hov {
-                ui.c.stroke_rrect(tab, 0.0, 1.0, t.glyph);
-            }
+            let hint = if named { "Pattern colour" } else { "Channel colour" };
+            colour_tab(ui, r, col, hint);
         }
         if b.suggestions {
             let cols: Vec<Vec<String>> = std::iter::once(s.pat_ui.recent.clone())
