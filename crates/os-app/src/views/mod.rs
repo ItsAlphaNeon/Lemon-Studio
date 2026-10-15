@@ -9,6 +9,7 @@
 
 pub mod browser;
 pub mod channel_win;
+pub mod dialog;
 pub mod menus;
 pub mod mondebug;
 pub mod settings;
@@ -135,6 +136,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if s.monitor.debug {
         mondebug::paint(ui, s);
     }
+    // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
+    dialog::paint(ui, s);
     overlays
 }
 

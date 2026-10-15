@@ -285,15 +285,27 @@ fn load_into(app: &mut App, key: usize, path: &Path) -> Option<String> {
     })
 }
 
+/// Save preset as...: the save dialog, in the plugin's preset folder (`save_chosen` writes the file).
 fn save_as(app: &mut App, key: usize) -> Option<String> {
     let h = header(app, key)?;
-    let Some(state) = app.plugins.state(key) else { return Some(format!("{} has no state to save", h.plugin)) };
+    if app.plugins.state(key).is_none() {
+        return Some(format!("{} has no state to save", h.plugin));
+    }
     let dir = dir_for(&h.plugin)?;
     let _ = std::fs::create_dir_all(&dir);
     let start = app.plugins.presets.get(&key).map(|p| shown_name(p)).unwrap_or_else(|| "New preset".into());
-    let target = crate::dialog::modal(|| {
-        rfd::FileDialog::new().set_title("Save preset as").set_directory(&dir).set_file_name(format!("{start}.{EXT}")).add_filter("Lemon Studio preset", &[EXT]).save_file()
-    })?;
+    let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Save, "Save preset as", "preset", crate::dialog::Then::SavePreset(key))
+        .filter("Lemon Studio preset", &[EXT])
+        .start(Some(&dir))
+        .name(&format!("{start}.{EXT}"));
+    app.file_dialog(dlg);
+    None
+}
+
+/// The preset file chosen in Save preset as...: the plugin's state is written there. Returns the status message.
+pub fn save_chosen(app: &mut App, key: usize, target: PathBuf) -> Option<String> {
+    let h = header(app, key)?;
+    let Some(state) = app.plugins.state(key) else { return Some(format!("{} has no state to save", h.plugin)) };
     let target = if target.extension().is_some_and(|e| e.eq_ignore_ascii_case(EXT)) { target } else { target.with_extension(EXT) };
     Some(match save(&target, &h, &state) {
         Ok(()) => {

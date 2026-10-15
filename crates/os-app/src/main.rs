@@ -20,6 +20,7 @@ mod render_check;
 mod browser;
 mod cpu;
 mod dialog;
+mod filedlg;
 mod enable_groups;
 mod icons;
 mod knobs;
@@ -393,11 +394,24 @@ impl Shell {
         let ms = if self.app.animating() { 16 } else { 100 };
         let now = Instant::now();
         let mut wake = now + Duration::from_millis(ms);
-        // macOS: Quit from the menu bar or the Dock asks about unsaved changes as closing the window does.
+        // Unsaved changes were answered (or there were none): the window closes.
+        if self.app.want_exit {
+            el.exit();
+        }
+        // macOS: Quit from the menu bar or the Dock asks about unsaved changes as closing the window does; AppKit waits
+        // for the answer. A Quit while a dialog is open is turned down (the dialog is answered first).
         #[cfg(target_os = "macos")]
         {
             if macos::take_quit() {
-                macos::answer_quit(self.app.confirm_discard("closing"));
+                if self.app.modal_open() {
+                    macos::answer_quit(false);
+                } else {
+                    self.app.ask_discard("closing", crate::dialog::Next::Quit);
+                    self.pending = true;
+                }
+            }
+            if let Some(quit) = self.app.quit_answer.take() {
+                macos::answer_quit(quit);
             }
             // A project double-clicked in the Finder opens as a dropped one would.
             for path in macos::take_opened() {
@@ -611,10 +625,15 @@ impl ApplicationHandler for Shell {
             e => e,
         };
         match event {
+            // While a dialog is open the window stays (the dialog is answered first).
             WindowEvent::CloseRequested => {
-                if self.app.confirm_discard("closing") {
+                if !self.app.modal_open() {
+                    self.app.ask_discard("closing", crate::dialog::Next::Close);
+                }
+                if self.app.want_exit {
                     el.exit();
                 }
+                window.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
@@ -753,7 +772,8 @@ impl ApplicationHandler for Shell {
                         return;
                     }
                 }
-                if pressed && !event.repeat {
+                // A dialog takes repeats too (typing, moving through its list).
+                if pressed && (!event.repeat || self.app.modal_open()) {
                     // macOS: Option and Command change the character a key types (Option+S is "ß"); shortcuts go by the
                     // key itself.
                     #[cfg(target_os = "macos")]
@@ -943,8 +963,13 @@ impl ApplicationHandler for Shell {
                 }
                 if self.app.want_close {
                     self.app.want_close = false;
-                    if self.app.confirm_discard("closing") {
+                    if !self.app.modal_open() {
+                        self.app.ask_discard("closing", crate::dialog::Next::Close);
+                    }
+                    if self.app.want_exit {
                         el.exit();
+                    } else {
+                        window.request_redraw();
                     }
                 }
             }
