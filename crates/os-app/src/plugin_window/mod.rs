@@ -725,6 +725,19 @@ impl State {
                 }
                 return Reply::None;
             }
+            if let Some(old) = self.misc_ui.held {
+                // Dragging along the keyboard lets go of the held key and sounds each key entered.
+                match misc_hit(self, x, y) {
+                    Some(crate::misc_page::Hit::Key(k)) if k != old => {
+                        self.misc_ui.held = Some(k);
+                        self.events.push(FrameEvent::Note(old, 0, false));
+                        self.events.push(FrameEvent::Note(k, 100, true));
+                        os_clap::wake();
+                        return Reply::Repaint;
+                    }
+                    _ => return Reply::None,
+                }
+            }
             if self.drag.is_none() && self.moving.is_none() {
                 let h = misc_hit(self, x, y);
                 if h != self.misc_ui.hover {
@@ -987,5 +1000,28 @@ mod tests {
         fx.info.misc = None;
         assert_eq!(part_at(&fx, 383.0 + dx, 47.0), Some(Part::Off("Panning")));
         assert_eq!(part_at(&fx, 349.0 + dx, 47.0), Some(Part::Off("Effect on / off")));
+    }
+
+    /// A Misc keyboard key sounds while the button is held: sliding to the next key lets go of it and sounds that one,
+    /// the release lets go of the last.
+    #[test]
+    fn misc_keys_sound_while_held() {
+        use crate::misc_page::Hit;
+        let mut st = state(true, "Insert 1");
+        st.misc = true;
+        st.editor = (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H);
+        let (w, h) = st.size();
+        let find = |st: &State, k: u8| {
+            (0..w as i32).flat_map(|x| (0..h as i32).map(move |y| (x as f32, y as f32))).find(|&(x, y)| misc_hit(st, x, y) == Some(Hit::Key(k))).unwrap()
+        };
+        let (c, cs) = (find(&st, 60), find(&st, 61));
+        let screen = |_: f32, _: f32| (0, 0);
+        assert_eq!(st.left_down(c.0, c.1, false, &screen), Reply::Capture);
+        assert_eq!(st.motion(c.0, c.1, false), Reply::None, "the held key keeps sounding");
+        assert_eq!(st.motion(cs.0, cs.1, false), Reply::Repaint);
+        st.release();
+        let notes: Vec<(u8, bool)> = st.events.iter().filter_map(|e| if let FrameEvent::Note(k, _, on) = e { Some((*k, *on)) } else { None }).collect();
+        assert_eq!(notes, [(60, true), (60, false), (61, true), (61, false)]);
+        assert_eq!(st.misc_ui.held, None);
     }
 }
