@@ -77,15 +77,28 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
     let channel = s.project.channels.get(s.selected_channel);
     let name = channel.and_then(|c| c.name.clone()).unwrap_or_else(|| "(none)".into());
-    let title = format!("Piano roll - {name}  ");
+    let title = "Piano roll - ";
     window_body(ui, r);
     let outer = r;
     let floating = !s.wins[Win::PianoRoll.slot().unwrap_or(0)].maxed && r.h >= 2.0 * crate::app::TITLE_H;
-    let (r, _) = super::framed(ui, s, Win::PianoRoll, r, &title, 365.0, true);
-    // The title's › (channel menu): not available yet, greyed out.
-    let ax = r.x + 365.0 + ui.c.text_width(Font::new(17), &title);
-    ui.c.text(Font::new(17), ax, r.y + 1.0, t.text_faint, "\u{203a}");
-    ui.off(Rect::new(ax - 3.0, r.y + 2.0, 13.0, 19.0), "Piano roll channel menu");
+    let (r, _) = super::framed(ui, s, Win::PianoRoll, r, title, 365.0, true);
+    // The target channel: name and arrow, orange with a ▾ while hovered (spec: ui/piano-target-channel.md §1).
+    let font = Font::new(17);
+    let nx = r.x + 365.0 + ui.c.text_width(font, title);
+    let nw = ui.c.text_width(font, &name);
+    let hov = ui.hit(
+        Rect::new(nx - 2.0, r.y + 2.0, nw + 22.0, 19.0),
+        Action::PianoTarget,
+        "Target channel (wheel: channels with notes; right-click: settings)",
+    );
+    let orange = t.h(0xfb9531);
+    ui.c.text(font, nx, r.y + 1.0, if hov { orange } else { t.text }, &name);
+    let (ax, ay) = (nx + nw + 11.0, r.y + 12.0);
+    if hov {
+        os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Down, orange);
+    } else {
+        os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Right, t.text_dim);
+    }
     let shift = if floating { -4.0 } else { 0.0 };
     toolbar(ui, s, r, shift);
     if r.h < 2.0 * crate::app::TITLE_H {

@@ -196,6 +196,8 @@ pub enum Action {
     BrowserList,
     /// Title-bar up arrow: close every node of the tab.
     BrowserCollapse,
+    /// Title-bar curved arrow: Reread structure (spec: ui/browser.md §4, "Title-bar icons").
+    BrowserReread,
     /// Title-bar ▸: the browser options menu (spec: ui/browser.md §4).
     BrowserMenu,
     /// The search field (focus it, §5).
@@ -217,6 +219,9 @@ pub enum Action {
     PianoToolsMenu,
     /// Toolbar magnet: the Snap menu; right-click: Stock note lengths (spec: ui/piano-snap.md §1).
     PianoSnapMenu,
+    /// The channel name in the title: the channel menu; right-click: channel settings; wheel: channels with notes
+    /// (spec: ui/piano-target-channel.md).
+    PianoTarget,
     PianoLanePick(usize),
     /// Arrow button of the pitch lane's scroll bar: +1 up, -1 down.
     PitchStep(i32),
@@ -3751,6 +3756,15 @@ impl App {
                 self.metronome_menu(x, y);
                 return self.invalidate();
             }
+            Some(Action::PianoTarget) => {
+                // spec: ui/piano-target-channel.md §4
+                let row = self.state.selected_channel;
+                if row < self.state.project.channels.len() {
+                    self.state.playlist.popup = None;
+                    self.toggle_channel_window(row);
+                }
+                return self.invalidate();
+            }
             Some(Action::PianoSnapMenu | Action::GlobalSnap) => {
                 // spec: ui/piano-snap.md §7, ui/global-snap.md §4
                 self.state.playlist.popup = Some(crate::piano_snap::lengths_menu(x, y));
@@ -4260,6 +4274,11 @@ impl App {
         if matches!(area, Some(Action::SongPos)) {
             self.song_pos_wheel(dy);
             return None;
+        }
+        if matches!(area, Some(Action::PianoTarget)) && dy != 0.0 {
+            // spec: ui/piano-target-channel.md §3
+            crate::piano_tools::cycle_channel(self, if dy < 0.0 { 1 } else { -1 }, true);
+            return Some(Win::PianoRoll);
         }
         if matches!(area, Some(Action::GlobalSnap)) && dy != 0.0 {
             // One setting per notch, down toward Bar (spec: ui/global-snap.md §1).
@@ -5170,6 +5189,11 @@ impl App {
                 let (x, y) = self.mouse;
                 s.playlist.popup = Some(crate::piano_tools::tools_menu(s, x - 6.0, y + 10.0));
             }
+            Action::PianoTarget => {
+                // Top-left 4 px left of the name, 11 px below the title text's centre (spec: ui/piano-target-channel.md §2).
+                let b = self.hits.iter().rev().find(|h| h.action == Action::PianoTarget).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
+                s.playlist.popup = Some(crate::piano_tools::target_menu(s, b.x + 2.0 - 4.0, b.cy() + 11.0));
+            }
             Action::PianoSnapMenu => {
                 // Top-left 11 px left of and below the button's centre (spec: ui/piano-snap.md §1).
                 let b = self.hits.iter().rev().find(|h| h.action == Action::PianoSnapMenu).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
@@ -5249,7 +5273,7 @@ impl App {
             }
             Action::CloseWin(Win::Perf) => self.close_perf(),
             Action::CloseWin(w) => s.hide(w),
-            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserMenu | Action::BrowserSearch => {}
+            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch => {}
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
             Action::PlTool(_)
             | Action::PlSnap
@@ -8538,6 +8562,105 @@ mod tests {
         assert_eq!(app.state.piano.range, None, "other selections don't shade");
     }
 
+    /// The piano roll title's target channel (spec: ui/piano-target-channel.md): hint, the channel menu and a pick,
+    /// the wheel through the channels with notes, right-click for the channel's window.
+    #[test]
+    fn piano_target_channel() {
+        use crate::playlist::Mark;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        // Notes on Kick, Clap and Hat (rows 0, 1, 2); Snare and Pluck have none.
+        let p = piano::pattern_mut(&mut app.state);
+        for ch in 0..3u16 {
+            p.notes.push(Note::step(ch, u32::from(ch) * 24));
+        }
+        frame(&mut app, &mut c, None);
+        let b = hit_rect(&app, &Action::PianoTarget);
+        let hint = app.hits.iter().rev().find(|h| h.action == Action::PianoTarget).map(|h| h.hint.to_string()).unwrap();
+        assert!(hint.starts_with("Target channel"), "{hint}");
+
+        // Click: the menu 4 px left of the name, 11 px below the title's centre (§2).
+        click(&mut app, &mut c, b);
+        let menu = app.state.playlist.popup.clone().expect("channel menu");
+        assert_eq!((menu.x, menu.y), (b.x - 2.0, b.cy() + 11.0));
+        let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(
+            labels,
+            ["Current pattern", "Kick", "Clap", "Hat", "Unsorted", "Kick", "Clap", "Hat", "Snare", "Pluck", "", "Auto locate"]
+        );
+        let ticked: Vec<bool> = menu.items.iter().map(|i| i.mark == Mark::Check(true)).collect();
+        assert_eq!(ticked, [false, true, true, true, false, true, true, true, false, false, false, false]);
+        assert!(!menu.items[11].enabled, "Auto locate is not available yet");
+
+        // Picking Snare retargets the piano roll; the rack follows.
+        let i = menu.items.iter().position(|i| i.label == "Snare").unwrap();
+        app.act(Action::PlPopup(i));
+        assert_eq!(app.state.selected_channel, 3);
+        assert!(app.state.rack.sel.contains(&3) && app.state.rack.sel.len() == 1);
+        assert_eq!(app.state.message.as_deref(), Some("Piano roll: Snare"));
+        assert!(app.state.playlist.popup.is_none());
+
+        // A filter group gets its own section, before Unsorted.
+        app.state.rack.groups.push(crate::rack::Group { name: "Drums".into(), members: [0, 3].into_iter().collect() });
+        let menu = crate::piano_tools::target_menu(&app.state, 0.0, 0.0);
+        let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(labels[4..], ["Drums", "Kick", "Snare", "Unsorted", "Clap", "Hat", "Pluck", "", "Auto locate"]);
+        app.state.rack.groups.clear();
+
+        // Wheel (§3): from Snare (no notes) down gives Kick (wrapping), up from Snare gives Hat.
+        frame(&mut app, &mut c, None);
+        let wheel = |app: &mut App, c: &mut Canvas, dy: f32| {
+            let b = hit_rect(app, &Action::PianoTarget);
+            app.mouse_move(b.cx(), b.cy());
+            app.wheel(0.0, dy, false, false);
+            frame(app, c, None);
+            app.state.selected_channel
+        };
+        assert_eq!(wheel(&mut app, &mut c, -1.0), 0);
+        assert_eq!(wheel(&mut app, &mut c, -1.0), 1);
+        assert_eq!(wheel(&mut app, &mut c, -1.0), 2);
+        assert_eq!(wheel(&mut app, &mut c, -1.0), 0, "wraps");
+        assert_eq!(wheel(&mut app, &mut c, 1.0), 2, "up goes back");
+        assert!(app.state.rack.sel.contains(&2));
+        app.state.selected_channel = 3;
+        assert_eq!(wheel(&mut app, &mut c, 1.0), 2, "up from a channel without notes");
+        // With one channel holding notes, every notch stays on it.
+        piano::pattern_mut(&mut app.state).notes.retain(|n| n.channel == 1);
+        assert_eq!(wheel(&mut app, &mut c, -1.0), 1);
+        assert_eq!(wheel(&mut app, &mut c, -1.0), 1);
+        assert_eq!(wheel(&mut app, &mut c, 1.0), 1);
+
+        // Right-click: the channel's settings window (§4).
+        let b = hit_rect(&app, &Action::PianoTarget);
+        app.mouse_move(b.cx(), b.cy());
+        app.mouse_down_right();
+        assert_eq!(app.state.pending_open, Some(1), "Clap's sampler window opens");
+    }
+
+    /// The browser's title-bar arrows (spec: ui/browser.md §4, "Title-bar icons"): Reread keeps open nodes,
+    /// Collapse closes them.
+    #[test]
+    fn browser_title_icons() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.browser_tab = 2;
+        app.state.browser_open.insert("2:Plugin database/Effects".into());
+        frame(&mut app, &mut c, None);
+        let hint = |app: &App, a: Action| app.hits.iter().rev().find(|h| h.action == a).map(|h| h.hint.to_string()).unwrap();
+        assert_eq!(hint(&app, Action::BrowserReread), "Reread structure (Ctrl+R)");
+        assert_eq!(hint(&app, Action::BrowserCollapse), "Collapse structure (Ctrl+Up)");
+        let r = hit_rect(&app, &Action::BrowserReread);
+        click(&mut app, &mut c, r);
+        assert!(app.state.browser_open.contains("2:Plugin database/Effects"), "Reread keeps open nodes");
+        let r = hit_rect(&app, &Action::BrowserCollapse);
+        click(&mut app, &mut c, r);
+        assert!(!app.state.browser_open.iter().any(|k| k.starts_with("2:")), "Collapse closes the tab's nodes");
+    }
+
     /// The piano roll's magnet button (spec: ui/piano-snap.md): its two menus, where clicks, moves, resizes and the
     /// snap's commands land under each kind of setting, Alt, the zoom-dependent Line unit, kept over a reset.
     #[test]
@@ -10169,6 +10292,12 @@ mod tests {
         app.mouse_up();
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(dir.join("piano_snap_lengths.png")).unwrap();
+        // The title's target channel, hovered with its menu open (ui/piano-target-channel.md).
+        app.state.playlist.popup = None;
+        frame(&mut app, &mut c, None);
+        let b = hit_rect(&app, &Action::PianoTarget);
+        click(&mut app, &mut c, b);
+        c.pixmap.save_png(dir.join("piano_target_menu.png")).unwrap();
         // The toolbar's snap panel (ui/global-snap.md): its menu open, the longest label, snapping off.
         app.state.playlist.popup = None;
         frame(&mut app, &mut c, None);

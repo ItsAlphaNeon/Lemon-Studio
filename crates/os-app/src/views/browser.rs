@@ -487,11 +487,17 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         ui.c.stroke_rrect(Rect::new(3.0, 86.0, 15.0, 16.0), 2.0, 1.2, t.browser_tab_outline);
     }
     icons::draw(ui.c, Icon::ArrowRight, Rect::new(5.0, 87.0, 12.0, 14.0), if mhov || menu_open { t.glyph } else { t.text_dim });
-    icons::draw(ui.c, Icon::ArrowUp, Rect::new(19.0, 87.0, 12.0, 14.0), t.text_dim);
-    ui.hit(Rect::new(17.0, 85.0, 16.0, 18.0), Action::BrowserCollapse, "Collapse all");
-    // Back: not available yet, greyed out.
-    ui.off(Rect::new(33.0, 85.0, 15.0, 18.0), "Back");
-    icons::draw(ui.c, Icon::Back, Rect::new(34.0, 87.0, 12.0, 14.0), t.text_faint);
+    // Collapse structure and Reread structure (spec §4, "Title-bar icons"): outlined like the ▸ while hovered.
+    for (r, icon, action, hint) in [
+        (Rect::new(17.0, 85.0, 16.0, 18.0), Icon::ArrowUp, Action::BrowserCollapse, "Collapse structure (Ctrl+Up)"),
+        (Rect::new(33.0, 85.0, 15.0, 18.0), Icon::Back, Action::BrowserReread, "Reread structure (Ctrl+R)"),
+    ] {
+        let hov = ui.hit(r, action, hint);
+        if hov {
+            ui.c.stroke_rrect(Rect::new(r.x + 1.0, 86.0, r.w - 1.0, 16.0), 2.0, 1.2, t.browser_tab_outline);
+        }
+        icons::draw(ui.c, icon, Rect::new(r.x + 1.0, 87.0, 12.0, 14.0), if hov { t.glyph } else { t.text_dim });
+    }
     ui.c.text(os_ui::Font::new(14), 52.0, 85.0, t.text_dim, "Browser");
     // Tabs (spec ui/browser.md §1).
     ui.c.fill_rect(Rect::span(0.0, 200.0, 106.0, 141.0), t.browser_tabs);

@@ -57,6 +57,8 @@ pub enum NCmd {
     /// The magnet button's menus (spec: ui/piano-snap.md): the snap setting, a stock length for new notes.
     Snap(crate::snap::EditorSnap),
     StockLength(crate::playlist::Snap),
+    /// Make a channel rack row the piano roll's channel (the title's channel menu).
+    Target(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,30 +223,68 @@ fn zoom_key(app: &mut App, notches: f32) -> bool {
 }
 
 /// Select the channel `dir` rows away, wrapping; `with_notes` skips channels without notes in the pattern (§11).
-fn cycle_channel(app: &mut App, dir: i32, with_notes: bool) -> bool {
+pub(crate) fn cycle_channel(app: &mut App, dir: i32, with_notes: bool) -> bool {
     let s = &mut app.state;
     let n = s.project.channels.len();
     if n == 0 {
         return true;
     }
-    let used = |s: &State, row: usize| {
-        let ch = s.project.channels[row].index;
-        piano::notes(s).iter().any(|nt| nt.channel == ch)
-    };
     let mut row = s.selected_channel.min(n - 1);
     for _ in 0..n {
         row = (row as i32 + dir).rem_euclid(n as i32) as usize;
-        if !with_notes || used(s, row) {
-            s.selected_channel = row;
-            s.rack.select_only(row);
-            s.piano.clear_selection();
-            let name = s.project.channels[row].name.clone().unwrap_or_else(|| format!("Channel {}", row + 1));
-            s.message = Some(format!("Piano roll: {name}"));
+        if !with_notes || has_notes(s, row) {
+            s.message = Some(target(s, row));
             break;
         }
     }
     app.invalidate();
     true
+}
+
+/// Whether a channel rack row has notes in the current pattern.
+fn has_notes(s: &State, row: usize) -> bool {
+    let ch = s.project.channels[row].index;
+    piano::notes(s).iter().any(|nt| nt.channel == ch)
+}
+
+fn channel_name(s: &State, row: usize) -> String {
+    s.project.channels[row].name.clone().unwrap_or_else(|| format!("Channel {}", row + 1))
+}
+
+/// Make `row` the piano roll's channel; the rack selects it. Returns the status message.
+pub fn target(s: &mut State, row: usize) -> String {
+    s.selected_channel = row;
+    s.rack.select_only(row);
+    s.piano.clear_selection();
+    format!("Piano roll: {}", channel_name(s, row))
+}
+
+/// The title's channel menu (spec: ui/piano-target-channel.md §2, §5): the channels with notes in the pattern,
+/// then one section per rack filter group and Unsorted; a ✓ marks the channels with notes.
+pub fn target_menu(s: &State, x: f32, y: f32) -> Popup {
+    let n = s.project.channels.len();
+    let row_item = |row: usize| {
+        let it = PItem::new(channel_name(s, row), Cmd::Piano(NCmd::Target(row)));
+        if has_notes(s, row) { it.mark(Mark::Check(true)) } else { it }
+    };
+    let head = |name: String| PItem { label: name.into(), ..PItem::head("") };
+    let mut items = vec![PItem::head("Current pattern")];
+    items.extend((0..n).filter(|&r| has_notes(s, r)).map(row_item));
+    for g in &s.rack.groups {
+        let rows: Vec<usize> = g.members.iter().copied().filter(|&r| r < n).collect();
+        if !rows.is_empty() {
+            items.push(head(g.name.clone()));
+            items.extend(rows.into_iter().map(row_item));
+        }
+    }
+    let unsorted: Vec<usize> = (0..n).filter(|r| !s.rack.groups.iter().any(|g| g.members.contains(r))).collect();
+    if !unsorted.is_empty() {
+        items.push(PItem::head("Unsorted"));
+        items.extend(unsorted.into_iter().map(row_item));
+    }
+    items.push(PItem::sep());
+    items.push(PItem::not_yet("Auto locate"));
+    Popup { x, y, items, sub: None }
 }
 
 /// Run a command; returns a status message.
@@ -297,6 +337,14 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
         }
         NCmd::Snap(p) => return Some(crate::piano_snap::set(s, p)),
         NCmd::StockLength(sn) => return Some(crate::piano_snap::set_length(s, sn)),
+        NCmd::Target(row) => {
+            if row >= s.project.channels.len() {
+                return None;
+            }
+            let m = target(s, row);
+            app.invalidate();
+            return Some(m);
+        }
     };
     s.piano.dirty = true;
     Some(msg)
