@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Raw object layouts and method tables of the FL native plugin interface.
 //!
 // spec: plugins/fruity-abi.md
@@ -86,7 +92,7 @@ pub struct VoiceParams {
 
 /// The plugin object: method-table pointer followed by the documented fields.
 #[repr(C)]
-pub struct PluginObject {
+pub struct PluginObject { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     pub vtable: *const PluginVtbl,
     pub host_tag: IntPtr,
     pub info: *const PluginInfo,

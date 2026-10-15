@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Renders the Lemon Parametric EQ 2 editor offscreen:
 //! `cargo run -p lemon-parametric-eq-2 --example eq_shot -- out.png [default|demo] [x,y] [spectrum|heatmap]`.
 //! `demo` moves a few bands; `x,y` = mouse position (hover looks); `spectrum` analyses pink-ish noise as monitored input.

@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The Plugin performance monitor's readings: every hosted instance's processing time per second, its peak and total
 //! since the measurements were reset, and an instrument's voices. The window is `views/perf.rs`.
 // spec: ui/plugin-performance.md

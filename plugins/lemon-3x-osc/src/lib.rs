@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Lemon 3x Osc: Lemon Studio's three-oscillator synthesizer as a VST3 / CLAP plugin (nih-plug).
 //!
 // spec: plugins/lemon-3x-osc.md, plugins/3x-osc.md, plugins/plugin-formats.md

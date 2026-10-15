@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The toolbar's output monitor: an oscilloscope / spectrum analyzer panel (click switches) and the stereo peak meter.
 //!
 //! Fed from the audio thread's tap (the last samples that left the output, mono) and the per-channel peaks since the

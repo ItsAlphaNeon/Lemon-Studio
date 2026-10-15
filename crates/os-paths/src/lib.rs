@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Where Lemon Studio keeps its own files: settings, the remembered theme and design, presets, browser folders.
 //!
 //! One folder per user, shared by the application and its own plugins (a plugin runs in its own module and reads the

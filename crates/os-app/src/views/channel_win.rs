@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Channel plugin window, opened from a channel's name button.
 // spec: ui/channel-rack.md §5 (name button). FL shows the generator plugin's own window here; until
 // plugins have editors Lemon Studio shows a plain settings window for the channel (Lemon Studio layout).

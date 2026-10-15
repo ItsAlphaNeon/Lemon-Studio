@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The Tempo tapper (VIEW > Tempo tapper, Ctrl+F5): taps on its pad give a tempo, the average of the time between the
 //! taps as a whole number of BPM, written to the project tempo while Apply tempo is on. The counting is here, free of
 //! any clock (taps are times in seconds); the window is `views/tapper.rs`. Apply tempo, Sync and Mute are program

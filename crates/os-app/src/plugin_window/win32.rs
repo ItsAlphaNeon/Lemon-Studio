@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Plugin windows on Windows: the frame (`super`) in a Win32 window, docked (a child of the main window, clipped to the
 //! workspace and stacked with the app's own windows) until the menu arrow's "Detached" makes it a top-level window owned
 //! by the main window. The plugin parents its editor into a child window below the strip.

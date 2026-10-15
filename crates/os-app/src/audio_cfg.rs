@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Audio device settings (Settings > Audio): the output device, sample rate and buffer length. They are kept in the
 //! user folder (`audio.txt`) and every stream the transport opens uses them; a device that is gone, a rate it does not
 //! offer or a buffer length it refuses falls back to the system's default device and that device's own rate and buffer.

@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Host link: the private conversation between an "Open" plugin (Lemon Sampler, ...) and Lemon Studio's plugin window.
 //!
 //! Lemon Studio draws the frame of every plugin window, including the strip row (page tabs, Misc wrench, Presets, channel

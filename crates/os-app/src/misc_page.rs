@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The plugin window's Misc tab (a host feature, the same for every channel): levels adjustment, polyphony, time,
 //! tracking, cut groups, arpeggiator, echo delay and the root note with its keyboard. The frame draws it with the
 //! instrument kit in place of the plugin's editor; values come from the channel (`ChannelInfo::misc`), edits go back

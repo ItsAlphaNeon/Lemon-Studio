@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Editor edits the host has not handed back yet (spec: plugins/lemon-sampler.md §4 "Edits apply at once").
 //!
 //! The editor tells the host about every edit; nih-plug then changes the parameter only when the host passes the edit

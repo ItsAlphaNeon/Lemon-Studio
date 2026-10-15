@@ -1,3 +1,10 @@
+/* Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+ * and not any other part of Lemon Studio.
+ */
+
 /* Runs a call into hosted plugin code under structured exception handling (Windows, MSVC).
  *
  * An access violation or another processor exception inside a plugin, or a C++ exception it throws and does not catch

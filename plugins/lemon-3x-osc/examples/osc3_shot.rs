@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Renders the Lemon 3x Osc editor offscreen:
 //! `cargo run -p lemon-3x-osc --example osc3_shot -- out.png [osc|env|demo] [x,y] [crop]`.
 //! `env` shows the envelope page (volume); `demo` sets a few oscillator controls; `x,y` = mouse position (hover looks,

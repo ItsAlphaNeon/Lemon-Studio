@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! macOS plugin bundles: a `.clap` or `.vst3` plugin is a bundle folder (`Name.clap/Contents/MacOS/<executable>`) whose
 //! `Info.plist` names the module to load (`CFBundleExecutable`). Core Foundation reads the bundle, as other hosts do;
 //! VST 3 modules also get the bundle itself (`bundleEntry(CFBundleRef)`).
@@ -80,7 +86,7 @@ pub fn module_file(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     use super::*;
 
     /// A bundle's executable comes from its `Info.plist`; without one, the bundle's name in `Contents/MacOS`.

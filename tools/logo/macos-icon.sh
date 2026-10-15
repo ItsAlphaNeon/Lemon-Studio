@@ -1,4 +1,10 @@
 #!/bin/sh
+# Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+# and not any other part of Lemon Studio.
+
 # Generate the macOS app icon from the Icon Composer document crates/os-app/assets/logo/macOS.icon:
 #
 #     tools/logo/macos-icon.sh            (on macOS, with Xcode and Icon Composer in /Applications; run from anywhere)
