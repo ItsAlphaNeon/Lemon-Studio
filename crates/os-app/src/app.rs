@@ -3821,10 +3821,17 @@ impl App {
                 return self.invalidate();
             }
         }
-        // Knobs, faders and the tempo: "Create automation clip" (spec: ui/playlist.md §8).
+        // Knobs, faders and the tempo: "Create automation clip" (spec: ui/playlist.md §8) and "Type in value..."
+        // (spec: ui/type-in-value.md §8).
         if let Some(a) = action.as_ref() {
-            if let Some((tgt, name, v)) = self.automation_target(a) {
-                self.state.playlist.popup = Some(crate::playlist::knob_menu(tgt, name, v, x, y));
+            let typein = match *a {
+                Action::Knob(k) => Some(crate::typein::Target::Knob(k)),
+                Action::Fader(t) => Some(crate::typein::Target::Fader(t)),
+                _ => None,
+            };
+            let auto = self.automation_target(a);
+            if auto.is_some() || typein.is_some() {
+                self.state.playlist.popup = Some(crate::playlist::knob_menu(auto, typein, x, y));
                 return self.invalidate();
             }
             if self.playlist_act(a, true) {
@@ -8686,6 +8693,75 @@ mod tests {
         open(&mut app, &mut c, pan);
         enter(&mut app);
         assert_eq!(app.state.knob(pan), 0.6234);
+    }
+    /// "Type in value..." from the toolbar's and the mixer's short menus (spec: ui/type-in-value.md §6, §8): master
+    /// pitch's Hz box, a mixer fader in dB, the mixer pan's menu keeps its automation part.
+    #[test]
+    fn type_in_value_toolbar_and_mixer() {
+        use crate::knobs::KnobId;
+        use crate::playlist::EditTarget;
+        use crate::typein::Target;
+        use winit::keyboard::{Key, NamedKey, SmolStr};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let typ = |app: &mut App, text: &str| {
+            for ch in text.chars() {
+                let k = if ch == ' ' { Key::Named(NamedKey::Space) } else { Key::Character(SmolStr::new(ch.to_string())) };
+                app.key(&k, false, false);
+            }
+            app.key(&Key::Named(NamedKey::Enter), false, false);
+        };
+        // Right-click `a`, check the menu's labels, pick "Type in value...".
+        let open = |app: &mut App, c: &mut Canvas, a: Action, auto: bool| {
+            let r = hit_rect(app, &a);
+            app.mouse_move(r.cx(), r.cy());
+            app.mouse_down_right();
+            app.mouse_up();
+            let menu = app.state.playlist.popup.clone().expect("knob menu");
+            assert_eq!(menu.items.iter().any(|i| i.label == "Create automation clip"), auto, "{a:?}");
+            let i = menu.items.iter().position(|i| i.label == "Type in value...").expect("item");
+            assert!(menu.items[i].enabled);
+            app.act(Action::PlPopup(i));
+            frame(app, c, None);
+            app.state.playlist.edit.clone().expect("value box")
+        };
+        let pitch = Target::Knob(KnobId::MasterPitch);
+        let e = open(&mut app, &mut c, Action::Knob(KnobId::MasterPitch), false);
+        assert_eq!(e.target, EditTarget::TypeIn(pitch, false));
+        assert_eq!(e.text, "440");
+        assert_eq!(crate::typein::width(pitch), crate::typein::W_PLAIN);
+        assert_eq!(crate::typein::caption(&app.state, pitch), "Master pitch (Hz)");
+        typ(&mut app, "466.16");
+        assert_eq!(app.state.knob_text(KnobId::MasterPitch), "Master pitch: +100 cents");
+        frame(&mut app, &mut c, None);
+        open(&mut app, &mut c, Action::Knob(KnobId::MasterVol), false);
+        typ(&mut app, "-6");
+        assert!(app.state.knob_text(KnobId::MasterVol).contains("-6.0dB"), "{}", app.state.knob_text(KnobId::MasterVol));
+        // A mixer fader: dB through the fader law, clamped to its top.
+        frame(&mut app, &mut c, None);
+        let e = open(&mut app, &mut c, Action::Fader(1), true);
+        assert_eq!(e.target, EditTarget::TypeIn(Target::Fader(1), false));
+        assert_eq!(e.text, "0.0dB");
+        assert_eq!(crate::typein::caption(&app.state, Target::Fader(1)), "Value for Insert 1 - Volume");
+        typ(&mut app, "-6");
+        let vol = |app: &App| crate::mixer::track(&app.state, 1).unwrap().volume.unwrap();
+        assert!(crate::mixer::level_text("Volume", vol(&app)).contains("-6.0dB"));
+        frame(&mut app, &mut c, None);
+        open(&mut app, &mut c, Action::Fader(1), true);
+        typ(&mut app, "10");
+        assert_eq!(crate::mixer::level_text("Volume", vol(&app)), "Volume: 125%  5.6dB  1.90");
+        // The mixer pan and stereo separation.
+        frame(&mut app, &mut c, None);
+        open(&mut app, &mut c, Action::Knob(KnobId::MixPan(2)), true);
+        typ(&mut app, "40 left");
+        assert_eq!(app.state.knob_text(KnobId::MixPan(2)), "Panning: 40% left");
+        frame(&mut app, &mut c, None);
+        open(&mut app, &mut c, Action::Knob(KnobId::MixSep(2)), false);
+        typ(&mut app, "50");
+        assert!(app.state.knob_text(KnobId::MixSep(2)).ends_with("50% merged"), "{}", app.state.knob_text(KnobId::MixSep(2)));
     }
 
     #[test]

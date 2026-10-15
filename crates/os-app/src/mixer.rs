@@ -136,7 +136,7 @@ pub fn track(s: &State, n: u16) -> Option<&MixerTrack> {
     s.project.mixer.iter().find(|m| m.index == n)
 }
 
-fn track_mut(s: &mut State, n: u16) -> Option<&mut MixerTrack> {
+pub(crate) fn track_mut(s: &mut State, n: u16) -> Option<&mut MixerTrack> {
     s.project.mixer.iter_mut().find(|m| m.index == n)
 }
 

@@ -17,6 +17,8 @@ use crate::playlist::EditTarget;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Target {
     Knob(KnobId),
+    /// A mixer track's volume fader (0..1, the fader law; spec: ui/mixer.md §4).
+    Fader(u16),
     /// A plugin parameter: hosted key, parameter index.
     Param(usize, usize),
 }
@@ -45,8 +47,8 @@ enum Unit {
     Pan,
     /// "Original", "40% merged"; "separated" is the negative side.
     Sep,
-    /// dB through the knob's gain law.
-    Db(KnobId),
+    /// dB through the control's gain law.
+    Db(Law),
     /// A percent of the knob (OS: swing, mix level).
     Percent,
     /// Master pitch: A4 in Hz.
@@ -55,11 +57,21 @@ enum Unit {
     Plain,
 }
 
+/// The gain laws of the dB controls (spec: audio/gain-laws.md).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Law {
+    Channel,
+    Main,
+    Fader,
+}
+
 fn unit(t: Target) -> Unit {
     match t {
         Target::Knob(KnobId::ChanPan(_) | KnobId::MixPan(_)) => Unit::Pan,
         Target::Knob(KnobId::MixSep(_)) => Unit::Sep,
-        Target::Knob(k @ (KnobId::ChanVol(_) | KnobId::MasterVol | KnobId::Send(..))) => Unit::Db(k),
+        Target::Knob(KnobId::ChanVol(_)) => Unit::Db(Law::Channel),
+        Target::Knob(KnobId::MasterVol) => Unit::Db(Law::Main),
+        Target::Knob(KnobId::Send(..)) | Target::Fader(_) => Unit::Db(Law::Fader),
         Target::Knob(KnobId::Swing | KnobId::SlotMix(..)) => Unit::Percent,
         Target::Knob(KnobId::MasterPitch) => Unit::Hz,
         Target::Param(..) => Unit::Plain,
@@ -99,6 +111,7 @@ pub fn caption(s: &State, t: Target) -> String {
             format!("{} - {label}", crate::mixer::name(s, m))
         }
         Target::Knob(k) => knob_label(s, k),
+        Target::Fader(m) => format!("{} - Volume", crate::mixer::name(s, m)),
         Target::Param(key, index) => crate::params::param_name(s, key, index).unwrap_or_else(|| format!("Parameter {}", index + 1)),
     };
     format!("Value for {name}")
@@ -110,17 +123,17 @@ fn knob_label(s: &State, k: KnobId) -> String {
     text.split_once(':').map_or(text.clone(), |(a, _)| a.to_string())
 }
 
-/// The knob's gain at position `n` (spec: audio/gain-laws.md).
-fn gain(k: KnobId, n: f64) -> f64 {
-    match k {
-        KnobId::MasterVol => f64::from(os_dsp::level::curve((n / 0.8) as f32)),
-        KnobId::Send(..) => os_engine::laws::fader_gain(n),
-        _ => os_engine::laws::channel_gain(n),
+/// The gain at position `n` (spec: audio/gain-laws.md).
+fn gain(l: Law, n: f64) -> f64 {
+    match l {
+        Law::Main => f64::from(os_dsp::level::curve((n / 0.8) as f32)),
+        Law::Fader => os_engine::laws::fader_gain(n),
+        Law::Channel => os_engine::laws::channel_gain(n),
     }
 }
 
 /// The position 0..1 whose gain is `g` (the laws rise monotonically), clamped to the knob's range.
-fn position_for_gain(k: KnobId, g: f64) -> f64 {
+fn position_for_gain(k: Law, g: f64) -> f64 {
     if g <= 0.0 {
         return 0.0;
     }
@@ -138,6 +151,7 @@ fn position_for_gain(k: KnobId, g: f64) -> f64 {
 fn get(s: &State, t: Target) -> Option<f64> {
     match t {
         Target::Knob(k) => Some(f64::from(s.knob(k))),
+        Target::Fader(m) => Some(crate::mixer::track(s, m)?.volume.unwrap_or(0.8)),
         Target::Param(key, index) => crate::params::param_value(s, key, index),
     }
 }
@@ -145,6 +159,12 @@ fn get(s: &State, t: Target) -> Option<f64> {
 fn set(s: &mut State, t: Target, v: f64) {
     match t {
         Target::Knob(k) => s.set_knob(k, v as f32),
+        Target::Fader(m) => {
+            if let Some(t) = crate::mixer::track_mut(s, m) {
+                t.volume = Some(v.clamp(0.0, 1.0));
+                s.piano.dirty = true;
+            }
+        }
         Target::Param(key, index) => {
             if !crate::params::set_param_value(s, key, index, v) {
                 s.message = Some("The plugin did not take the value".into());
@@ -336,7 +356,7 @@ mod tests {
     fn decibels_and_hertz() {
         let t = Target::Knob(KnobId::ChanVol(0));
         let n = parse(t, false, "-6 dB").unwrap();
-        assert!((20.0 * gain(KnobId::ChanVol(0), n).log10() + 6.0).abs() < 1e-6);
+        assert!((20.0 * gain(Law::Channel, n).log10() + 6.0).abs() < 1e-6);
         assert_eq!(parse(t, false, "-6dB"), Some(n));
         assert_eq!(parse(t, false, "3 dB"), Some(1.0));
         assert_eq!(parse(t, false, "-inf"), Some(0.0));

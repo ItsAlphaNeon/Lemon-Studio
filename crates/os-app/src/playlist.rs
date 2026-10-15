@@ -1963,14 +1963,21 @@ pub fn marker_menu(i: usize, x: f32, y: f32) -> Popup {
     Popup { x, y, items: vec![PItem::head("Time marker"), PItem::new("Rename...", Cmd::RenameMarker(i)), PItem::new("Delete", Cmd::DeleteMarker(i))], sub: None }
 }
 
-/// A knob's right-click menu with "Create automation clip" (§8).
-pub fn knob_menu(tgt: u32, name: String, value: f64, x: f32, y: f32) -> Popup {
-    let items = vec![
-        PItem::head("Automation"),
-        PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, value)),
-        PItem::not_yet("Edit events"),
-        PItem::not_yet("Link to controller..."),
-    ];
+/// The short right-click menu of the toolbar's and the mixer's knobs, faders and the tempo: "Create automation clip"
+/// (§8) when the control can be automated, "Type in value..." when it takes one (spec: ui/type-in-value.md §8).
+pub fn knob_menu(auto: Option<(u32, String, f64)>, typein: Option<crate::typein::Target>, x: f32, y: f32) -> Popup {
+    let mut items = Vec::new();
+    if let Some((tgt, name, value)) = auto {
+        items.extend([
+            PItem::head("Automation"),
+            PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, value)),
+            PItem::not_yet("Edit events"),
+            PItem::not_yet("Link to controller..."),
+        ]);
+    }
+    if let Some(t) = typein {
+        items.extend([PItem::head("Value"), PItem::new("Type in value...", Cmd::TypeIn(t))]);
+    }
     Popup { x, y, items, sub: None }
 }
 
