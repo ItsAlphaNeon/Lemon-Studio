@@ -677,6 +677,27 @@ mod separate {
         assert!(at("ctrl.terminate") < at("comp.terminate"));
         assert_eq!(probe.live.load(Ordering::Acquire), 0, "every plug-in object was released");
     }
+
+    /// Stop resets the instrument and Play resets it again before any block has run: the note offs Stop queued for
+    /// held notes still reach the plug-in with the next block.
+    #[test]
+    fn note_offs_survive_a_second_reset() {
+        let probe = Arc::new(Probe::default());
+        let (_m, mut p) = instance(&probe);
+        assert!(p.activate(48000));
+        let (mut l, mut r) = ones(64);
+        Instrument::process(&mut p, 48000, &mut l, &mut r);
+        // As when a block delivered note on 60 (the mock takes no notes).
+        p.ledger.start(60, -1);
+        Instrument::note_off(&mut p, 0, 62);
+        Instrument::note_on(&mut p, 0, 64, 0.8);
+        Instrument::reset(&mut p);
+        Instrument::reset(&mut p);
+        let mut queued: Vec<(bool, u8)> = p.queue.iter().map(|n| (matches!(n.kind, NoteKind::Off), n.key)).collect();
+        queued.sort();
+        assert_eq!(queued, [(true, 60), (true, 62)], "only the note offs are kept, each once");
+        assert!(p.queue.iter().all(|n| n.time == 0));
+    }
 }
 
 #[cfg(windows)]
