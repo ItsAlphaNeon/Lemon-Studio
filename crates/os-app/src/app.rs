@@ -10215,8 +10215,14 @@ mod tests {
         let first = notes(&export(&mut a, "first"));
         check("export", &first);
 
-        // Live: the pattern plays on the device, Stop silences it.
+        // Live: the pattern plays on the device, Stop silences it. The export left the EQ's Master at the top of its
+        // clip, far too loud for the speakers, so it plays at Master's default (pattern playback leaves it there).
         if crate::transport::Transport::device_rate().is_some() {
+            {
+                let mut p = a.plugins.hosted[&key].plugin.lock().unwrap();
+                let info = p.param_info(master).unwrap();
+                assert!(p.set_param(info.id, info.default));
+            }
             a.transport.take_peaks();
             a.transport.play(&a.state.project, os_engine::PlayMode::Pattern(1), 0.0);
             std::thread::sleep(Duration::from_millis(1200));
@@ -10229,6 +10235,7 @@ mod tests {
             let after = a.transport.take_peaks();
             println!("live: peaks {heard:?} while playing (at tick {tick:.0}), {after:?} from 100 ms after Stop");
             assert!(heard.0 > 0.01, "heard while playing");
+            assert!(heard.0 < 1.0, "played at a level the speakers take, not clipped ({:.2})", heard.0);
             assert_eq!(after, (0.0, 0.0), "silent after Stop");
         }
 
