@@ -106,6 +106,8 @@ pub struct PianoState {
     pub split: crate::piano_split::Split,
     /// Last press on the splitter, for its double click.
     pub split_click: Option<std::time::Instant>,
+    /// The magnet button's setting (spec: ui/piano-snap.md): kept while the program runs, not saved.
+    pub snap: crate::piano_snap::PianoSnap,
     sel: Vec<usize>,
     sel_key: (u16, u16),
     undo: Vec<(u16, Vec<Note>, Vec<ControlPoint>)>,
@@ -134,6 +136,7 @@ impl Default for PianoState {
             rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1,
             split: crate::piano_split::load(),
             split_click: None,
+            snap: crate::piano_snap::PianoSnap::default(),
             sel: Vec::new(),
             sel_key: (0, 0),
             undo: Vec::new(),
@@ -163,7 +166,7 @@ impl PianoState {
 
     /// Forget everything tied to the previous project.
     pub fn reset(&mut self) {
-        *self = PianoState { px_per_beat: self.px_per_beat, row_h: self.row_h, ghosts: self.ghosts, tool: self.tool, rng: self.rng, split: self.split, ..PianoState::default() };
+        *self = PianoState { px_per_beat: self.px_per_beat, row_h: self.row_h, ghosts: self.ghosts, tool: self.tool, rng: self.rng, split: self.split, snap: self.snap, ..PianoState::default() };
     }
 }
 
@@ -229,17 +232,6 @@ impl Geom {
         let x = self.x_of(n.position as f32);
         let w = (len as f32 * self.ppt).max(3.0);
         Some(Rect::new(x, self.y_of(key) - 1.0, w, self.row + 1.0))
-    }
-
-    /// Snap a tick down to the step grid.
-    pub fn snap_down(&self, tick: f32) -> u32 {
-        let t = tick.max(0.0) as u32;
-        t - t % self.step
-    }
-
-    /// Snap a tick delta to the nearest step.
-    pub fn snap_delta(&self, dt: f32) -> i64 {
-        (dt / self.step as f32).round() as i64 * i64::from(self.step)
     }
 }
 
@@ -842,7 +834,7 @@ mod tests {
             let y = g.y_of(key) + 8.0;
             assert_eq!(g.key_at(y), key);
         }
-        assert_eq!(g.snap_down(g.tick_at(g.x_of(100.0))), 96);
+        assert_eq!(crate::piano_snap::place(&a.state, &g, g.tick_at(g.x_of(100.0)), false), 96);
         assert_eq!(key_name_check(60), "C5");
     }
 

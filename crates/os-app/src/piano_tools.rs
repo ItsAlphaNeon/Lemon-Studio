@@ -39,6 +39,8 @@ pub enum NCmd {
     Legato,
     /// Cut notes at every `1/n` note line inside them.
     Chop(u32),
+    /// Cut notes at every snap unit inside them (Ctrl+U; one-tick pieces without a unit, spec: ui/piano-snap.md §6).
+    QuickChop,
     Glue,
     DiscardLengths,
     Duplicate,
@@ -52,6 +54,9 @@ pub enum NCmd {
     AddMarker,
     /// Open one of the tool submenus at the mouse (Alt+Q / U / S / A / R).
     Menu(Sub),
+    /// The magnet button's menus (spec: ui/piano-snap.md): the snap setting, a stock length for new notes.
+    Snap(crate::piano_snap::PianoSnap),
+    StockLength(crate::playlist::Snap),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +134,7 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Quick quantize start times", Quantize { strength: 100, starts_only: true }).key("Shift+Q"),
         PItem::sub("Quantize", sub_items(Sub::Quantize)).key("Alt+Q"),
         item("Quick legato", Legato).key("Ctrl+L"),
-        item("Quick chop", Chop(16)).key("Ctrl+U"),
+        item("Quick chop", QuickChop).key("Ctrl+U"),
         PItem::sub("Chop", sub_items(Sub::Chop)).key("Alt+U"),
         PItem::sub("Strum", sub_items(Sub::Strum)).key("Alt+S"),
         PItem::sub("Arpeggiate", sub_items(Sub::Arpeggiate)).key("Alt+A"),
@@ -151,7 +156,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if ctrl && is(c, "q") => NCmd::Quantize { strength: 100, starts_only: false },
         Key::Character(c) if shift && !ctrl && !alt && is(c, "q") => NCmd::Quantize { strength: 100, starts_only: true },
         Key::Character(c) if ctrl && !alt && is(c, "l") => NCmd::Legato,
-        Key::Character(c) if ctrl && !alt && is(c, "u") => NCmd::Chop(16),
+        Key::Character(c) if ctrl && !alt && is(c, "u") => NCmd::QuickChop,
         Key::Character(c) if ctrl && !alt && is(c, "g") => NCmd::Glue,
         Key::Character(c) if ctrl && !alt && is(c, "b") => NCmd::Duplicate,
         Key::Character(c) if shift && !ctrl && !alt && is(c, "d") => NCmd::DiscardLengths,
@@ -243,17 +248,21 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
     let ppq = u32::from(s.project.ppq.max(4));
     let step = ppq / 4;
     let ticks = |n: u32| (ppq * 4 / n.max(1)).max(1);
+    // Quick quantize uses the global snap, Discard lengths and Quick chop the piano roll's (spec: ui/piano-snap.md §6).
+    let global = crate::piano_snap::global_unit(s);
+    let unit = crate::piano_snap::unit(s);
     let done = |changed: bool, what: &str| if changed { format!("Piano roll: {what}") } else { format!("Piano roll: {what}: nothing to change") };
     let msg = match cmd {
         NCmd::Quantize { strength, starts_only } => {
             let k = f32::from(strength.min(100)) / 100.0;
-            let ch = apply(s, |_, ns| ns.into_iter().map(|n| quantize(n, step, k, starts_only)).collect());
+            let ch = apply(s, |_, ns| ns.into_iter().map(|n| quantize(n, global, k, starts_only)).collect());
             done(ch, if starts_only { "quantized start times" } else { "quantized" })
         }
         NCmd::Legato => done(apply(s, |_, ns| legato(ns)), "legato"),
         NCmd::Chop(n) => done(apply(s, |_, ns| chop(ns, ticks(n))), "chopped"),
+        NCmd::QuickChop => done(apply(s, |_, ns| chop(ns, unit.unwrap_or(1))), "chopped"),
         NCmd::Glue => done(apply(s, |_, ns| glue(ns)), "glued"),
-        NCmd::DiscardLengths => done(apply(s, |_, ns| ns.into_iter().map(|n| Note { length: step, ..n }).collect()), "discarded lengths"),
+        NCmd::DiscardLengths => done(apply(s, |_, ns| ns.into_iter().map(|n| Note { length: unit.unwrap_or(0), ..n }).collect()), "discarded lengths"),
         NCmd::Duplicate => {
             duplicate(s);
             return None;
@@ -279,6 +288,8 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             app.state.playlist.popup = Some(Popup { x, y, items: sub_items(sub), sub: None });
             return None;
         }
+        NCmd::Snap(p) => return Some(crate::piano_snap::set(s, p)),
+        NCmd::StockLength(sn) => return Some(crate::piano_snap::set_length(s, sn)),
     };
     s.piano.dirty = true;
     Some(msg)

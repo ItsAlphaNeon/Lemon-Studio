@@ -210,6 +210,8 @@ pub enum Action {
     PianoLaneMenu,
     /// Toolbar "Piano roll tools" button: the Tools menu (spec: ui/piano-roll.md §11).
     PianoToolsMenu,
+    /// Toolbar magnet: the Snap menu; right-click: Stock note lengths (spec: ui/piano-snap.md §1).
+    PianoSnapMenu,
     PianoLanePick(usize),
     /// Arrow button of the pitch lane's scroll bar: +1 up, -1 down.
     PitchStep(i32),
@@ -3152,7 +3154,7 @@ impl App {
                 }
                 Drag::Slice => {
                     if let Some(g) = self.piano_geom() {
-                        let t = g.snap_down(g.tick_at(x) + g.step as f32 / 2.0);
+                        let t = crate::piano_snap::place(&self.state, &g, g.tick_at(x), self.alt);
                         self.state.piano.overlay = Some(Overlay::Slice(t));
                     }
                     self.damage_piano();
@@ -3163,13 +3165,13 @@ impl App {
                 }
                 Drag::Marker => {
                     if let Some(g) = self.piano_geom() {
-                        self.state.piano.marker = g.snap_down(g.tick_at(x) + g.step as f32 / 2.0);
+                        self.state.piano.marker = crate::piano_snap::place(&self.state, &g, g.tick_at(x), self.alt);
                     }
                     self.damage_piano();
                 }
                 Drag::TimeSel { t0 } => {
                     if let Some(g) = self.piano_geom() {
-                        let t = g.snap_down(g.tick_at(x) + g.step as f32 / 2.0);
+                        let t = crate::piano_snap::place(&self.state, &g, g.tick_at(x), self.alt);
                         piano::select_range(&mut self.state, t0.min(t), t0.max(t));
                     }
                     self.damage_piano();
@@ -3736,6 +3738,10 @@ impl App {
                 self.metronome_menu(x, y);
                 return self.invalidate();
             }
+            Some(Action::PianoSnapMenu) => {
+                self.state.playlist.popup = Some(crate::piano_snap::lengths_menu(x, y));
+                return self.invalidate();
+            }
             Some(Action::AutoScroll) => {
                 self.autoscroll_menu(x, y);
                 return self.invalidate();
@@ -3795,7 +3801,7 @@ impl App {
         }
         if action == Some(Action::PianoRuler) {
             if let Some(g) = self.piano_geom() {
-                let t = g.snap_down(g.tick_at(x) + g.step as f32 / 2.0);
+                let t = crate::piano_snap::place(&self.state, &g, g.tick_at(x), self.alt);
                 self.state.piano.clear_selection();
                 self.drag = Some(Drag::TimeSel { t0: t });
                 self.damage_piano();
@@ -3861,7 +3867,7 @@ impl App {
         match self.drag.clone() {
             Some(Drag::Slice) => {
                 if let Some(g) = self.piano_geom() {
-                    let t = g.snap_down(g.tick_at(self.mouse.0) + g.step as f32 / 2.0);
+                    let t = crate::piano_snap::place(&self.state, &g, g.tick_at(self.mouse.0), self.alt);
                     if piano::slice(&mut self.state, t) > 0 {
                         self.state.piano.dirty = true;
                     }
@@ -3889,11 +3895,15 @@ impl App {
         self.drag = None;
     }
 
-    /// Move (`resize == false`) or resize the dragged notes from their originals, snapped to steps.
+    /// Move (`resize == false`) or resize the dragged notes from their originals; the distance follows the snap
+    /// (spec: ui/piano-snap.md §5, §8), measured from the grabbed note's start, or its end for a resize.
     fn drag_notes(&mut self, x0: f32, y0: f32, orig: &[(usize, Note)], resize: bool) {
         let Some(g) = self.piano_geom() else { return };
         let (x, y) = self.mouse;
-        let mut dt = g.snap_delta((x - x0) / g.ppt);
+        let unit = crate::piano_snap::unit(&self.state).unwrap_or(1);
+        let from = orig.first().map_or(0, |&(_, o)| if resize { o.position + o.length.max(unit) } else { o.position });
+        let skip: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
+        let mut dt = crate::piano_snap::delta(&self.state, &g, from, (x - x0) / g.ppt, self.alt, &skip);
         let mut held = None;
         let was_held = self.state.piano.held;
         let rects = |s: &State| -> Vec<Rect> {
@@ -3906,8 +3916,9 @@ impl App {
         if resize {
             for &(i, o) in orig {
                 if let Some(n) = p.notes.get_mut(i) {
-                    let len = i64::from(o.length.max(g.step)) + dt;
-                    n.length = len.max(i64::from(g.step)) as u32;
+                    // The shortest note a resize leaves is one unit (spec: ui/piano-snap.md §8).
+                    let len = i64::from(o.length.max(unit)) + dt;
+                    n.length = len.max(i64::from(unit)) as u32;
                 }
             }
             let first = orig.first().and_then(|&(i, _)| p.notes.get(i)).map(|n| n.length);
@@ -4121,7 +4132,7 @@ impl App {
         };
         let x = g.x_of(head);
         let tick = if x >= g.grid.x && x < g.grid.right() { head } else { g.scroll_x };
-        g.snap_down(tick)
+        crate::piano_snap::place(s, &g, tick, false)
     }
 
     /// Delete the channel lane's control points between two x positions.
@@ -4130,8 +4141,8 @@ impl App {
         let lane = self.state.piano.lane;
         let (Some(ch), Some(param)) = (piano::channel(&self.state), lane.param()) else { return };
         let (a, b) = (last_x.min(x), last_x.max(x));
-        let from = g.snap_down(g.tick_at(a).max(0.0));
-        let to = g.snap_down(g.tick_at(b).max(0.0));
+        let from = crate::piano_snap::cell(&self.state, g.tick_at(a));
+        let to = crate::piano_snap::cell(&self.state, g.tick_at(b));
         if piano::erase_controls(&mut self.state, ch, param, from, to) > 0 {
             self.damage_rect(panel);
         }
@@ -4145,12 +4156,15 @@ impl App {
         if lane.is_channel() {
             let (Some(ch), Some(param)) = (piano::channel(&self.state), lane.param()) else { return };
             let center = self.state.piano.pitch_center;
-            let t0 = g.snap_down(g.tick_at(last_x).max(0.0));
-            let t1 = g.snap_down(g.tick_at(x).max(0.0));
-            let (lo, hi) = (t0.min(t1), t0.max(t1));
-            let step = g.step.max(1);
-            // A point is set when the cursor enters a snap step (its value is the path height at the
-            // step's start, as in FL's captured ramps) and on the press; staying inside a step keeps it.
+            let t0 = crate::piano_snap::cell(&self.state, g.tick_at(last_x));
+            let t1 = crate::piano_snap::cell(&self.state, g.tick_at(x));
+            // A point is set when the cursor enters a snap unit (its value is the path height at the
+            // unit's start, as in FL's captured ramps) and on the press; staying inside a unit keeps it.
+            // Without a unit, one point at the pointer (spec: ui/piano-snap.md §8).
+            let (lo, hi, step) = match crate::piano_snap::unit(&self.state) {
+                Some(u) => (t0.min(t1), t0.max(t1), u),
+                None => (t1, t1, 1),
+            };
             let press = last_x == x && last_y == y;
             let mut t = lo;
             loop {
@@ -4671,11 +4685,12 @@ impl App {
     }
 
     /// Arrow keys in the piano roll (§9): Left/Right scroll; Shift+arrows move the selection (or
-    /// every note) one snap unit / semitone; Ctrl+Up/Down move it an octave.
+    /// every note) one snap unit (a tick without one, spec: ui/piano-snap.md §6) / semitone; Ctrl+Up/Down
+    /// move it an octave.
     fn piano_arrow(&mut self, k: winit::keyboard::NamedKey, ctrl: bool) {
         use winit::keyboard::NamedKey::*;
         let Some(g) = self.piano_geom() else { return };
-        let step = g.step as i64;
+        let step = i64::from(crate::piano_snap::unit(&self.state).unwrap_or(1));
         let (dt, dk) = match (k, ctrl, self.shift) {
             (ArrowUp, true, _) => (0, 12),
             (ArrowDown, true, _) => (0, -12),
@@ -4729,7 +4744,7 @@ impl App {
                     piano::snapshot(s);
                     s.piano.clear_selection();
                     let key = g.key_at(y).clamp(0, views::piano::TOP_KEY);
-                    let start = g.snap_down(g.tick_at(x));
+                    let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
                     let i = piano::add_note(s, ch, start, key);
                     let len = piano::notes(s)[i].length;
                     s.piano.dirty = true;
@@ -4740,7 +4755,7 @@ impl App {
                 }
                 Tool::Slice => {
                     self.drag = Some(Drag::Slice);
-                    self.state.piano.overlay = Some(Overlay::Slice(g.snap_down(g.tick_at(x) + g.step as f32 / 2.0)));
+                    self.state.piano.overlay = Some(Overlay::Slice(crate::piano_snap::place(&self.state, &g, g.tick_at(x), self.alt)));
                     self.damage_piano();
                     return;
                 }
@@ -4784,7 +4799,7 @@ impl App {
             Action::PianoGrid => {
                 piano::snapshot(s);
                 s.piano.clear_selection();
-                let i = piano::add_note(s, ch, g.snap_down(g.tick_at(x)), g.key_at(y));
+                let i = piano::add_note(s, ch, crate::piano_snap::place(s, &g, g.tick_at(x), self.alt), g.key_at(y));
                 let n = piano::notes(s)[i];
                 s.piano.last_len = n.length;
                 self.drag = Some(Drag::NoteMove { x0: x, y0: y, orig: vec![(i, n)] });
@@ -4958,7 +4973,7 @@ impl App {
         }
         if a == Action::PianoRuler {
             if let Some(g) = self.piano_geom() {
-                self.state.piano.marker = g.snap_down(g.tick_at(self.mouse.0) + g.step as f32 / 2.0);
+                self.state.piano.marker = crate::piano_snap::place(&self.state, &g, g.tick_at(self.mouse.0), self.alt);
                 self.drag = Some(Drag::Marker);
             }
             return;
@@ -5127,6 +5142,11 @@ impl App {
             Action::PianoToolsMenu => {
                 let (x, y) = self.mouse;
                 s.playlist.popup = Some(crate::piano_tools::tools_menu(s, x - 6.0, y + 10.0));
+            }
+            Action::PianoSnapMenu => {
+                // Top-left 11 px left of and below the button's centre (spec: ui/piano-snap.md §1).
+                let b = self.hits.iter().rev().find(|h| h.action == Action::PianoSnapMenu).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
+                s.playlist.popup = Some(crate::piano_snap::snap_menu(s, b.cx() - 11.0, b.cy() + 11.0));
             }
             Action::PitchStep(dir) => {
                 s.piano.pitch_center = piano::clamp_pitch_center(s.piano.pitch_center + dir * piano::PITCH_STEP);
@@ -8491,6 +8511,201 @@ mod tests {
         assert_eq!(app.state.piano.range, None, "other selections don't shade");
     }
 
+    /// The piano roll's magnet button (spec: ui/piano-snap.md): its two menus, where clicks, moves, resizes and the
+    /// snap's commands land under each kind of setting, Alt, the zoom-dependent Line unit, kept over a reset.
+    #[test]
+    fn piano_snap() {
+        use crate::piano_snap::PianoSnap;
+        use crate::piano_tools::NCmd;
+        use crate::playlist::{Cmd, Mark, Snap};
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        frame(&mut app, &mut c, None);
+        let ch = piano::channel(&app.state).unwrap();
+        let g = app.piano_geom().unwrap();
+        assert_eq!(g.ppt, 1.0, "96 px per beat at PPQ 96: Line is a step");
+        let row = |k: i32| g.y_of(k) + 8.0;
+        let x_of = |app: &App, t: f32| app.piano_geom().unwrap().x_of(t);
+        let mine = |app: &App| -> Vec<(u32, u32, u16)> {
+            piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length, n.key)).collect()
+        };
+        let put = |app: &mut App, notes: &[(u32, u32, u16)]| {
+            let p = piano::pattern_mut(&mut app.state);
+            p.notes.retain(|n| n.channel != ch);
+            for &(pos, length, key) in notes {
+                p.notes.push(Note { length, key, ..Note::step(ch, pos) });
+            }
+            p.notes.sort_by_key(|n| n.position);
+            app.state.piano.clear_selection();
+        };
+        let click = |app: &mut App, c: &mut Canvas, x: f32, y: f32| {
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        // A left-drag along C5's row between two ticks.
+        let drag = |app: &mut App, c: &mut Canvas, t0: f32, t1: f32| {
+            frame(app, c, None);
+            let (x0, x1, y) = (x_of(app, t0), x_of(app, t1), row(60));
+            app.mouse_move(x0, y);
+            app.mouse_down();
+            for i in 1..=10 {
+                app.mouse_move(x0 + (x1 - x0) * i as f32 / 10.0, y);
+            }
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        // A Draw click at tick `t` on C5's empty row; returns where the new note starts (and removes it).
+        let place = |app: &mut App, c: &mut Canvas, t: f32| -> u32 {
+            frame(app, c, None);
+            let x = x_of(app, t);
+            click(app, c, x, row(60));
+            let p = piano::pattern_mut(&mut app.state);
+            let i = p.notes.iter().position(|n| n.channel == ch && n.key == 60).expect("a note was drawn");
+            let at = p.notes.remove(i).position;
+            frame(app, c, None);
+            at
+        };
+        let pick = |app: &mut App, p: PianoSnap| crate::playlist::run(app, Cmd::Piano(NCmd::Snap(p)));
+        let hint = |app: &App| app.hits.iter().rev().find(|h| h.action == Action::PianoSnapMenu).map(|h| h.hint.to_string()).unwrap();
+        let key = |app: &mut App, k: &str, ctrl: bool, shift: bool| {
+            app.shift = shift;
+            app.key(&Key::Character(k.into()), ctrl, false);
+            app.shift = false;
+        };
+        let nudge = |app: &mut App| {
+            app.shift = true;
+            app.key(&Key::Named(NamedKey::ArrowRight), false, false);
+            app.shift = false;
+        };
+
+        // The magnet is live: its hint names the setting; a click opens the Snap menu 11 px left of and below its
+        // centre, Main marked (§1, §2, §8).
+        let b = hit_rect(&app, &Action::PianoSnapMenu);
+        assert_eq!(hint(&app), "Snap to grid: Main (right-click: stock note lengths)");
+        click(&mut app, &mut c, b.cx(), b.cy());
+        let pop = app.state.playlist.popup.take().expect("the Snap menu opens");
+        assert_eq!((pop.x, pop.y), (b.cx() - 11.0, b.cy() + 11.0));
+        let marked: Vec<&str> = pop.items.iter().filter(|i| i.mark == Mark::Radio(true)).map(|i| &*i.label).collect();
+        assert_eq!(marked, vec!["Main"]);
+        assert_eq!(pop.items.iter().filter(|i| !i.sep).count(), 17);
+        assert_eq!(pick(&mut app, PianoSnap::Grid(Snap::ThirdBeat)).as_deref(), Some("Piano roll snap: 1/3 beat"));
+        frame(&mut app, &mut c, None);
+        assert_eq!(hint(&app), "Snap to grid: 1/3 beat (right-click: stock note lengths)");
+        assert_eq!((place(&mut app, &mut c, 40.0), place(&mut app, &mut c, 50.0)), (32, 64));
+
+        // Placing (§3, §5): the nearest unit, Cell down, (none) the tick under the pointer, Alt never snaps.
+        for (p, t, alt, want) in [
+            (PianoSnap::Main, 40.0, false, 48),
+            (PianoSnap::Grid(Snap::Line), 30.0, false, 24),
+            (PianoSnap::Grid(Snap::Step), 40.0, false, 48),
+            (PianoSnap::Grid(Snap::HalfBeat), 40.0, false, 48),
+            (PianoSnap::Grid(Snap::Cell), 47.0, false, 24),
+            (PianoSnap::Grid(Snap::None), 40.0, false, 40),
+            (PianoSnap::Main, 40.0, true, 40),
+        ] {
+            pick(&mut app, p);
+            app.alt = alt;
+            assert_eq!(place(&mut app, &mut c, t), want, "{p:?} at {t}, alt {alt}");
+            app.alt = false;
+        }
+
+        // Line follows the zoom (§4): 1/2 beat at 30 px per beat, a step at 600, no snapping from 768 up.
+        pick(&mut app, PianoSnap::Main);
+        for (ppb, t, want) in [(30.0, 70.0, 48), (30.0, 80.0, 96), (600.0, 40.0, 48), (800.0, 40.3, 40)] {
+            app.state.piano.px_per_beat = ppb;
+            frame(&mut app, &mut c, None);
+            assert_eq!(place(&mut app, &mut c, t), want, "{ppb} px per beat");
+        }
+        app.state.piano.px_per_beat = 96.0;
+        frame(&mut app, &mut c, None);
+
+        // Events: the edges of a note from 240 to 312 catch clicks within 5 px; Markers the same with a marker.
+        put(&mut app, &[(240, 72, 64)]);
+        pick(&mut app, PianoSnap::Events);
+        for (t, want) in [(244.0, 240), (247.0, 247), (309.0, 312), (318.0, 318)] {
+            assert_eq!(place(&mut app, &mut c, t), want, "Events at {t}");
+        }
+        pick(&mut app, PianoSnap::Markers);
+        piano::pattern_mut(&mut app.state).markers = vec![os_model::TimeMarker::new(192, "M")];
+        for (t, want) in [(187.0, 192), (195.0, 192), (198.0, 198), (244.0, 244)] {
+            assert_eq!(place(&mut app, &mut c, t), want, "Markers at {t}");
+        }
+        piano::pattern_mut(&mut app.state).markers.clear();
+
+        // Moving snaps the distance, so an off-grid note keeps its offset; a resize snaps the change of length,
+        // down to one unit (one tick without a unit); Alt moves freely (§5, §8).
+        pick(&mut app, PianoSnap::Main);
+        put(&mut app, &[(40, 48, 60)]);
+        drag(&mut app, &mut c, 50.0, 80.0);
+        assert_eq!(mine(&app), vec![(64, 48, 60)]);
+        app.alt = true;
+        drag(&mut app, &mut c, 74.0, 104.0);
+        app.alt = false;
+        assert_eq!(mine(&app), vec![(94, 48, 60)]);
+        put(&mut app, &[(40, 48, 60)]);
+        drag(&mut app, &mut c, 87.0, 104.0);
+        assert_eq!(mine(&app), vec![(40, 72, 60)], "the end dragged +17 ticks lands on 112");
+        drag(&mut app, &mut c, 111.0, 20.0);
+        assert_eq!(mine(&app), vec![(40, 24, 60)], "a resize keeps one unit");
+        pick(&mut app, PianoSnap::Grid(Snap::None));
+        drag(&mut app, &mut c, 63.0, 20.0);
+        assert_eq!(mine(&app), vec![(40, 1, 60)], "one tick without a unit");
+        // Events: the dragged start goes to another note's edge within 5 px.
+        pick(&mut app, PianoSnap::Events);
+        put(&mut app, &[(40, 48, 60), (240, 72, 64)]);
+        drag(&mut app, &mut c, 50.0, 247.0);
+        assert!(mine(&app).contains(&(240, 48, 60)), "{:?}", mine(&app));
+
+        // Shift+arrows, Discard lengths and Quick chop use the unit; without one a tick, length 0, one-tick pieces.
+        // Quick quantize keeps the global snap (Line) (§6).
+        for (p, moved, discarded) in [(PianoSnap::Grid(Snap::None), 101, 0), (PianoSnap::Main, 124, 24), (PianoSnap::Grid(Snap::Beat), 196, 96)] {
+            pick(&mut app, p);
+            put(&mut app, &[(100, 96, 60)]);
+            nudge(&mut app);
+            key(&mut app, "d", false, true);
+            assert_eq!(mine(&app), vec![(moved, discarded, 60)], "{p:?}");
+        }
+        pick(&mut app, PianoSnap::Grid(Snap::None));
+        put(&mut app, &[(96, 96, 60)]);
+        key(&mut app, "u", true, false);
+        assert_eq!(mine(&app).len(), 96);
+        assert!(mine(&app).iter().all(|n| n.1 == 1));
+        pick(&mut app, PianoSnap::Grid(Snap::HalfBeat));
+        put(&mut app, &[(96, 96, 60)]);
+        key(&mut app, "u", true, false);
+        assert_eq!(mine(&app), vec![(96, 48, 60), (144, 48, 60)]);
+        pick(&mut app, PianoSnap::Grid(Snap::None));
+        put(&mut app, &[(30, 40, 60)]);
+        key(&mut app, "q", true, false);
+        assert_eq!(mine(&app), vec![(24, 48, 60)]);
+
+        // Right-click: Stock note lengths at the mouse; Beat makes the next notes 96 ticks, the snap stays (§7).
+        put(&mut app, &[]);
+        app.mouse_move(b.cx(), b.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        let pop = app.state.playlist.popup.take().expect("Stock note lengths opens");
+        assert_eq!((pop.x, pop.y), (b.cx(), b.cy()));
+        assert!(pop.items[0].head && pop.items[0].label == "Stock note lengths");
+        assert!(pop.items.iter().any(|i| i.cmd == Cmd::Piano(NCmd::StockLength(Snap::Beat))));
+        let m = crate::playlist::run(&mut app, Cmd::Piano(NCmd::StockLength(Snap::Beat)));
+        assert_eq!(m.as_deref(), Some("New notes: Beat"));
+        assert_eq!(app.state.piano.snap, PianoSnap::Grid(Snap::None));
+        frame(&mut app, &mut c, None);
+        assert_eq!(place(&mut app, &mut c, 50.0), 50);
+        assert_eq!(app.state.piano.last_len, 96, "the drawn note was a beat long");
+
+        // The setting outlives a project change (§8).
+        app.state.piano.reset();
+        assert_eq!(app.state.piano.snap, PianoSnap::Grid(Snap::None));
+    }
+
     /// Piano-roll shortcuts (spec: ui/piano-roll.md §3a, §10a, §11): edits, tool menus, ghosts, markers, channel
     /// cycling and the wheel zooms, driven through `App::key` / `App::wheel` like the shell does.
     #[test]
@@ -9730,8 +9945,8 @@ mod tests {
         }
     }
 
-    /// Look check for the piano roll's vertical zoom, time markers and Tools menu (spec: ui/piano-roll.md §3a, §10a,
-    /// §11): `OS_SHOT_DIR=dir cargo test -p os-app piano_shots -- --ignored`.
+    /// Look check for the piano roll's vertical zoom, time markers, Tools menu and snap menus (spec: ui/piano-roll.md
+    /// §3a, §10a, §11; ui/piano-snap.md): `OS_SHOT_DIR=dir cargo test -p os-app piano_shots -- --ignored`.
     #[test]
     #[ignore]
     fn piano_shots() {
@@ -9762,6 +9977,23 @@ mod tests {
         app.state.playlist.popup = Some(popup);
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(dir.join("piano_tools_menu.png")).unwrap();
+        // The magnet's two menus, opened as a click and a right-click open them.
+        app.state.playlist.popup = None;
+        app.state.piano.snap = crate::piano_snap::PianoSnap::Grid(crate::playlist::Snap::ThirdBeat);
+        frame(&mut app, &mut c, None);
+        let b = hit_rect(&app, &Action::PianoSnapMenu);
+        app.mouse_move(b.cx(), b.cy());
+        app.mouse_down();
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(dir.join("piano_snap_menu.png")).unwrap();
+        app.state.playlist.popup = None;
+        frame(&mut app, &mut c, None);
+        app.mouse_move(b.cx(), b.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(dir.join("piano_snap_lengths.png")).unwrap();
     }
 
     /// Mixer look with routing, a sidechain, slots, meters and the menus: `OS_SHOT_DIR=dir cargo test -p os-app
