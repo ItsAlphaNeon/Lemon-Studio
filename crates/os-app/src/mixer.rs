@@ -893,7 +893,8 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub("Trim unused tracks", trim_items(s)),
         PItem::not_yet("Switch smart disable for all plugins"),
         PItem::not_yet("Remove all (audio editor) instances"),
-        PItem::new("Cable physics (debug)...", Cmd::Mixer(MCmd::CablePhysics)).mark(Mark::Check(s.cables.borrow().debug)),
+        // The cable physics debug panel, hidden from users; uncomment to tune the cables again.
+        // PItem::new("Cable physics (debug)...", Cmd::Mixer(MCmd::CablePhysics)).mark(Mark::Check(s.cables.borrow().debug)),
         PItem::head(Box::leak(format!("Mixer track ({})", name(s, s.selected_mixer)).into_boxed_str())),
     ];
     items.extend(track_items(s.selected_mixer));
