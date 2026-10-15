@@ -675,7 +675,7 @@ pub enum Drag {
     /// Change a channel's mixer track (spec: ui/channel-rack.md §5).
     RackMixer { ch: usize, y0: f32, v0: u16 },
     Fader { track: u16, y0: f32, v0: f64 },
-    Tempo { y0: f32, t0: f64 },
+    Tempo { y0: f32, t0: f64, step: f64 },
     /// The song position slider's handle (`dx` = grab offset from its centre), or the button held on its track (the
     /// next step is due at `next`) (spec: ui/song-position-slider.md §3).
     SongPos { dx: f32 },
@@ -821,6 +821,9 @@ pub struct State {
     /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
     pub tempo: f64,
+    /// Where the tempo box's tenths, hundredths and thousandths digits start (x), as last painted: a drag from a digit
+    /// steps the tempo by that digit (views/toolbar.rs).
+    pub tempo_digits: std::cell::Cell<[f32; 3]>,
     /// The time display shows minute:second:centisecond instead of bar:step:tick (a click toggles it).
     pub clock_msc: bool,
     pub message: Option<String>,
@@ -1082,6 +1085,7 @@ impl App {
                 browser_hist: Vec::new(),
                 browser_hist_pos: 0,
                 tempo: 130.0,
+                tempo_digits: std::cell::Cell::new([f32::INFINITY; 3]),
                 message: None,
                 monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
                 cpu: crate::cpu::Cpu::saved(),
@@ -3638,8 +3642,9 @@ impl App {
                     }
                 }
                 Drag::SongPosHold { .. } => {}
-                Drag::Tempo { y0, t0 } => {
-                    let t = self.set_tempo(t0 + f64::from(y0 - y).round());
+                Drag::Tempo { y0, t0, step } => {
+                    // Rounded to the box's thousandths, so repeated steps don't drift.
+                    let t = self.set_tempo(((t0 + f64::from(y0 - y).round() * step) * 1000.0).round() / 1000.0);
                     self.hint = Cow::Owned(format!("Tempo {t:.3} BPM"));
                     self.damage_rect(TEMPO_RECT);
                     self.damage_rect(HINT_RECT);
@@ -5455,7 +5460,13 @@ impl App {
                 self.invalidate();
             }
             Action::CableDebug(d) => self.cable_debug(d),
-            Action::Tempo => self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo }),
+            Action::Tempo => {
+                // The digit under the press sets the step: the whole number, else the decimal place it is over.
+                let x = self.mouse.0;
+                let n = s.tempo_digits.get().iter().filter(|&&d| x >= d).count();
+                let step = [1.0, 0.1, 0.01, 0.001][n];
+                self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo, step });
+            }
             Action::SongPos => self.song_pos_press(),
             Action::Clock => {
                 s.clock_msc = !s.clock_msc;
@@ -6439,14 +6450,37 @@ mod tests {
         frame(&mut app, &mut a, None);
         let r = hit_rect(&app, &Action::Tempo);
         let t0 = app.state.tempo;
-        app.mouse_move(r.cx(), r.cy());
+        // On the whole number.
+        let x = app.state.tempo_digits.get()[0] - 4.0;
+        app.mouse_move(x, r.cy());
         frame(&mut app, &mut a, None);
         app.mouse_down();
         assert!(app.cursor_locked(), "tempo drags lock the cursor");
-        app.mouse_move(r.cx(), r.cy() - 10.0);
+        app.mouse_move(x, r.cy() - 10.0);
         assert_eq!(app.state.tempo, t0 + 10.0);
         app.mouse_up();
         assert!(!app.cursor_locked());
+    }
+
+    #[test]
+    fn tempo_drag_steps_by_the_digit_it_starts_on() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut a, None);
+        let y = hit_rect(&app, &Action::Tempo).cy();
+        let d = app.state.tempo_digits.get();
+        assert!(d[0] < d[1] && d[1] < d[2], "{d:?}");
+        let whole = d[0] - 4.0;
+        for (x, step) in [(whole, 1.0), ((d[0] + d[1]) / 2.0, 0.1), ((d[1] + d[2]) / 2.0, 0.01), (d[2] + 2.0, 0.001)] {
+            app.state.tempo = 130.0;
+            frame(&mut app, &mut a, None);
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_move(x, y - 3.0);
+            app.mouse_up();
+            let want = 130.0 + 3.0 * step;
+            assert!((app.state.tempo - want).abs() < 1e-9, "from x {x}: {} vs {want}", app.state.tempo);
+        }
     }
 
     #[test]

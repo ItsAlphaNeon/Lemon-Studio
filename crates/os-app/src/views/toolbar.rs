@@ -166,7 +166,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);
-    ui.hit(tb, Action::Tempo, "Tempo (drag up/down)");
+    ui.hit(tb, Action::Tempo, "Tempo (drag up/down: the whole number, or the decimal place the drag starts on)");
     if lemon {
         os_ui::kit::lemon::well(ui.c, t, tb, t.time_panel);
     } else {
@@ -180,6 +180,9 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let ww = ui.c.text_width(Font::condensed(19, 6), &whole);
     let fw = ui.c.text_width(Font::condensed(13, 5), &frac);
     let x0 = (tb.right() - 11.0 - ww - fw).max(tb.x + 2.0);
+    // Where each decimal digit starts, for the drag's step (the point counts as the whole number).
+    let mut small = |n: usize| x0 + ww + ui.c.text_width(Font::condensed(13, 5), &frac[..n]);
+    s.tempo_digits.set([small(1), small(2), small(3)]);
     ui.c.push_clip(tb.inset(1.0));
     ui.c.text(Font::condensed(19, 6), x0, 9.0, digits, &whole);
     ui.c.text(Font::condensed(13, 5), x0 + ww, 16.0, t.glyph_dim.shade(0.3), &frac);
