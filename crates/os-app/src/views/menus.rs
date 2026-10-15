@@ -651,3 +651,72 @@ mod tests {
         assert_eq!(playlist.mark, Mark::Check(false));
     }
 }
+
+/// A pattern's right-click menu in the playlist picker: the PATTERNS commands without the pattern list
+/// (spec: ui/pattern-menu.md §3); commands not built yet are greyed out.
+pub fn pattern_popup(x: f32, y: f32) -> crate::playlist::Popup {
+    use crate::playlist::{Cmd, PItem, Popup};
+    let items = PAT_CMDS
+        .iter()
+        .map(|it| match it.kind {
+            Kind::Sep => PItem::sep(),
+            Kind::Head => PItem::head(it.label),
+            Kind::Item => match crate::patterns::Cmd::from_label(it.label) {
+                Some(c) if it.works => PItem::new(it.label, Cmd::Pattern(c)).key(it.shortcut),
+                _ => PItem::not_yet(it.label).key(it.shortcut),
+            },
+        })
+        .collect();
+    Popup { x, y, items, sub: None }
+}
+
+/// The hint bar's right-click menu: toolbar options and layout presets (not available yet, greyed out).
+pub fn hint_popup(x: f32, y: f32) -> crate::playlist::Popup {
+    use crate::playlist::{Mark, PItem, Popup};
+    let tick = |label: &'static str, on: bool| PItem::not_yet(label).mark(Mark::Check(on));
+    let radio = |label: &'static str, on: bool| PItem::not_yet(label).mark(Mark::Radio(on));
+    let items = vec![
+        PItem::head("Toolbars"),
+        tick("Edit", true),
+        tick("Separators", true),
+        tick("Flat buttons", false),
+        tick("Show detected MIDI chords near the hint bar", true),
+        PItem::sep(),
+        tick("Hint bar", true),
+        PItem::not_yet("Hide").key("Ctrl+F11"),
+        PItem::col(),
+        PItem::head("Presets"),
+        radio("Compact", false),
+        radio("Default (hint above menu)", false),
+        radio("Default (macOS)", false),
+        radio("Default", false),
+        radio("Classic", true),
+        radio("Modern (macOS)", false),
+        radio("Modern (Windows)", false),
+        radio("Single line centered", false),
+        radio("Single line", false),
+    ];
+    Popup { x, y, items, sub: None }
+}
+
+/// The time display's right-click menu: its mode (bar:step:tick or minute:second:centisecond work; SMPTE and the
+/// middle unit are not available yet).
+pub fn clock_popup(s: &State, x: f32, y: f32) -> crate::playlist::Popup {
+    use crate::playlist::{Cmd, Mark, PItem, Popup};
+    let mut items = vec![
+        PItem::head("Mode"),
+        PItem::new("Bar : Beat/Step : Tick", Cmd::ClockMsc(false)).mark(Mark::Radio(!s.clock_msc)),
+        PItem::new("Minute : Second : Centisecond", Cmd::ClockMsc(true)).mark(Mark::Radio(s.clock_msc)),
+    ];
+    for fps in [
+        "SMPTE 23.976 fps", "SMPTE 24 fps", "SMPTE 25 fps", "SMPTE 29.97 fps (drop)", "SMPTE 29.97 (non-drop)", "SMPTE 30 fps",
+        "SMPTE 48 fps", "SMPTE 50 fps", "SMPTE 59.94 fps (drop)", "SMPTE 59.94 (non-drop)", "SMPTE 60 fps", "SMPTE 72 fps",
+        "SMPTE 120 fps",
+    ] {
+        items.push(PItem::not_yet(fps).mark(Mark::Radio(false)));
+    }
+    items.push(PItem::head("Middle unit"));
+    items.push(PItem::not_yet("Step").mark(Mark::Radio(true)));
+    items.push(PItem::not_yet("Beat").mark(Mark::Radio(false)));
+    Popup { x, y, items, sub: None }
+}

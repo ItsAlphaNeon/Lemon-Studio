@@ -130,6 +130,8 @@ pub enum Action {
     EnableGroups,
     /// The toolbar's song position slider (spec: ui/song-position-slider.md).
     SongPos,
+    /// The time display (song position read-out): a click toggles its mode, right-click opens its menu.
+    Clock,
     /// The toolbar's snap combo: the Snap menu; right-click: Stock note lengths; wheel: the next / previous setting
     /// (spec: ui/global-snap.md §1).
     GlobalSnap,
@@ -813,6 +815,8 @@ pub struct State {
     /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
     pub tempo: f64,
+    /// The time display shows minute:second:centisecond instead of bar:step:tick (a click toggles it).
+    pub clock_msc: bool,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
     /// MIDI input devices that are open (their notes play the selected channel; spec: ui/midi-input.md).
@@ -1068,6 +1072,7 @@ impl App {
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
                 toggles: vec!["typing"],
+                clock_msc: false,
                 midi_inputs: Vec::new(),
                 maximized: true,
                 piano: PianoState::default(),
@@ -3966,6 +3971,14 @@ impl App {
                 return self.invalidate();
             }
             Some(Action::SongPos) => return self.song_pos_jump(),
+            Some(Action::Clock) => {
+                self.state.playlist.popup = Some(views::menus::clock_popup(&self.state, x, y));
+                return self.invalidate();
+            }
+            Some(Action::DragWindow) if HINT_RECT.contains(x, y) => {
+                self.state.playlist.popup = Some(views::menus::hint_popup(x, y));
+                return self.invalidate();
+            }
             Some(Action::BrowserRow(i)) => {
                 if self.browser_remove_root(*i) || self.params_browser_right(*i, x, y) {
                     return;
@@ -5160,12 +5173,10 @@ impl App {
                 if let os_model::ClipSource::Pattern(n) = src {
                     self.state.pattern = n;
                 }
-                if right {
-                    // Right-click on a pattern: rename it (OS choice).
-                    if let os_model::ClipSource::Pattern(n) = src {
-                        let at = self.top_hit(self.mouse.0, self.mouse.1).map_or(self.mouse, |h| (h.rect.x, h.rect.y));
-                        pl::start_edit(&mut self.state, pl::EditTarget::PatternName(n), at);
-                    }
+                if right && matches!(src, os_model::ClipSource::Pattern(_)) {
+                    // Right-click on a pattern: the PATTERNS commands for it (spec: ui/pattern-menu.md §3).
+                    let (x, y) = self.mouse;
+                    self.state.playlist.popup = Some(views::menus::pattern_popup(x, y));
                 }
             }
             Action::PlPopup(i) => {
@@ -5287,6 +5298,14 @@ impl App {
             Action::Stop => {
                 self.perf_transport();
                 self.transport.stop();
+                // Stop rewinds: the song position slider goes back to the start (of the time selection, if any).
+                let s = &mut self.state;
+                if s.song_mode {
+                    s.playlist.pos = s.playlist.range.map_or(0, |(a, _)| a);
+                } else {
+                    s.piano.marker = 0;
+                }
+                self.invalidate();
             }
             Action::PatSong(song) => {
                 let changed = s.song_mode != song;
@@ -5323,6 +5342,10 @@ impl App {
             }
             Action::Tempo => self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo }),
             Action::SongPos => self.song_pos_press(),
+            Action::Clock => {
+                s.clock_msc = !s.clock_msc;
+                self.invalidate();
+            }
             Action::GlobalSnap => {
                 // Its top-left at the combo's bottom-left (spec: ui/global-snap.md §2).
                 let b = self.hits.iter().rev().find(|h| h.action == Action::GlobalSnap).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);

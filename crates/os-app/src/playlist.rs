@@ -314,6 +314,10 @@ pub enum Cmd {
     MetronomeSound(os_engine::metronome::Sound),
     /// The auto-scrolling button's menu (spec: ui/auto-scrolling.md §2).
     ContinuousScrolling,
+    /// A PATTERNS command from a pattern's right-click menu in the picker (spec: ui/pattern-menu.md §3).
+    Pattern(crate::patterns::Cmd),
+    /// The time display's mode: minute:second:centisecond (true) or bar:step:tick.
+    ClockMsc(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -455,6 +459,9 @@ pub struct PlaylistState {
     /// audio clip's channel's whole sample lasted when it started.
     pub stretch: bool,
     pub stretch_base: Vec<(u16, f64)>,
+    /// A resized clip's length, kept for its source: new clips of that source are placed / painted at this length
+    /// until a clip of natural length is clicked (OS, as FL does).
+    pub lock_len: Option<(ClipSource, u32)>,
     /// Track row pitch (vertical zoom: Alt+wheel; saved in the project's playlist view).
     pub row_h: f32,
     /// Last header click (track, time) for double-click rename.
@@ -492,6 +499,7 @@ impl Default for PlaylistState {
             arr_anchor: (300.0, 90.0),
             stretch: false,
             stretch_base: Vec::new(),
+            lock_len: None,
             row_h: ROW_H,
             last_header: None,
             last_clip: None,
@@ -1044,7 +1052,10 @@ pub fn snap_delta(s: &State, g: &PGeom, dt: f32, alt: bool) -> i64 {
 /// Place a clip of the current source on `track` at `tick`; returns its index.
 pub fn place(s: &mut State, track: u16, tick: u32) -> usize {
     let src = source(s);
-    let len = source_len(s, src);
+    let len = match s.playlist.lock_len {
+        Some((l, n)) if l == src => n,
+        _ => source_len(s, src),
+    };
     let audio = source_kind(s, src) == PickKind::Audio && matches!(src, ClipSource::Channel(_));
     let a = arr_mut(s);
     let mut c = Clip::new(tick, len, track, src);
@@ -2233,14 +2244,16 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 zoom_toggle(app);
                 return;
             }
+            // The Slice tool's right button on empty grid still draws a slice line.
+            PlTool::Slice if hit.is_none() => {
+                app.drag = Some(Drag::Pl(PlDrag::RightPending { x0: x, y0: y }));
+                return;
+            }
+            // Any other tool: the right button is the Delete tool while held (also starting on empty grid).
             _ => {
-                if hit.is_some() {
-                    snapshot(s);
-                    app.drag = Some(Drag::Pl(PlDrag::Erase));
-                    erase_at(app, grid);
-                } else {
-                    app.drag = Some(Drag::Pl(PlDrag::RightPending { x0: x, y0: y }));
-                }
+                snapshot(s);
+                app.drag = Some(Drag::Pl(PlDrag::Erase));
+                erase_at(app, grid);
                 return;
             }
         }
@@ -2309,6 +2322,8 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     s.pattern = n;
                 }
                 s.playlist.picker = source_kind(s, c.source);
+                // A resized clip lends its length to the clips placed next; a clip of natural length clears it.
+                s.playlist.lock_len = (c.length != source_len(s, c.source)).then_some((c.source, c.length));
                 // Grouped clips go along (§3a); clicking one selects its whole group.
                 let grouped = clips(s)[i].group() != 0;
                 let mut group = with_groups(s, if s.playlist.sel.contains(&i) { s.playlist.sel.clone() } else { vec![i] });
@@ -2633,6 +2648,12 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
     let s = &mut app.state;
     let g = PGeom::new(s, grid);
     let overlay = s.playlist.overlay.take();
+    // A resized clip's new length is used for the next clips of its source.
+    if let PlDrag::ResizeL { orig, .. } | PlDrag::ResizeR { orig, .. } = &d
+        && let Some(c) = orig.first().and_then(|&(i, _)| clips(s).get(i))
+    {
+        s.playlist.lock_len = Some((c.source, c.length));
+    }
     match d {
         PlDrag::Slice { .. } => {
             if let Some(Overlay::Slice { tick, t0, t1 }) = overlay {
@@ -2953,6 +2974,17 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
         Cmd::Param(c) => return app.params_cmd(c),
+        Cmd::Pattern(c) => {
+            let at = crate::patterns::box_at_mouse(app.mouse);
+            let m = crate::patterns::run(&mut app.state, c, at);
+            app.invalidate();
+            return m;
+        }
+        Cmd::ClockMsc(on) => {
+            app.state.clock_msc = on;
+            app.invalidate();
+            return None;
+        }
         Cmd::TypeIn(t) => {
             let at = app.mouse;
             crate::typein::open(&mut app.state, t, at);
@@ -3024,7 +3056,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMsc(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

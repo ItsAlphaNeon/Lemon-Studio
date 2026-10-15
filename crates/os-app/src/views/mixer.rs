@@ -398,23 +398,27 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     mixer_knob(ui, kx, ly.y(PAN_Y), 10.5, 15.0, s.knob(pan), Some(true));
 
     // Reverse polarity (⇕) and swap left / right (⇔) buttons, lit when on, then the separation knob (§4).
+    // They keep their size and spacing below the fader's top at any mixer height (FL's short mixer stacks them the
+    // same way), so they are placed from the fader's top, not scaled with it.
     let (pol, swp) = (track.is_some_and(|m| m.polarity), track.is_some_and(|m| m.swap));
-    let pr = Rect::new(sx - 8.0, ly.y(SEP_Y) - 8.0, 16.0, 16.0);
+    let top = ly.y(TRACK_Y0);
+    let (sep_y, swap_y, ring_y) = (top + SEP_Y - TRACK_Y0, top + SWAP_Y - TRACK_Y0, top + RING_Y - TRACK_Y0);
+    let pr = Rect::new(sx - 8.0, sep_y - 8.0, 16.0, 16.0);
     let hp = ui.hit(pr, Action::Mix(MHit::Polarity(n)), "Reverse polarity");
     let mut g = Glyph::new();
-    g.polygon(&[(sx - 5.0, ly.y(SEP_Y) - 1.5), (sx, ly.y(SEP_Y) - 6.0), (sx + 5.0, ly.y(SEP_Y) - 1.5)]);
-    g.polygon(&[(sx - 5.0, ly.y(SEP_Y) + 1.5), (sx, ly.y(SEP_Y) + 6.0), (sx + 5.0, ly.y(SEP_Y) + 1.5)]);
+    g.polygon(&[(sx - 5.0, sep_y - 1.5), (sx, sep_y - 6.0), (sx + 5.0, sep_y - 1.5)]);
+    g.polygon(&[(sx - 5.0, sep_y + 1.5), (sx, sep_y + 6.0), (sx + 5.0, sep_y + 1.5)]);
     ui.c.glyph(if pol { ui.t.h(0xf3b234) } else if hp { ui.t.tx(0xffffff) } else { ui.t.tx(0xb7c3ca) }, &g);
-    let wr = Rect::new(sx - 8.0, ly.y(SWAP_Y) - 8.0, 16.0, 16.0);
+    let wr = Rect::new(sx - 8.0, swap_y - 8.0, 16.0, 16.0);
     let hw = ui.hit(wr, Action::Mix(MHit::Swap(n)), "Swap left & right channels");
     let mut g = Glyph::new();
-    g.polygon(&[(sx - 1.0, ly.y(SWAP_Y) - 6.0), (sx - 7.0, ly.y(SWAP_Y)), (sx - 1.0, ly.y(SWAP_Y) + 6.0)]);
-    g.polygon(&[(sx + 1.5, ly.y(SWAP_Y) - 6.0), (sx + 7.5, ly.y(SWAP_Y)), (sx + 1.5, ly.y(SWAP_Y) + 6.0)]);
+    g.polygon(&[(sx - 1.0, swap_y - 6.0), (sx - 7.0, swap_y), (sx - 1.0, swap_y + 6.0)]);
+    g.polygon(&[(sx + 1.5, swap_y - 6.0), (sx + 7.5, swap_y), (sx + 1.5, swap_y + 6.0)]);
     ui.c.glyph(if swp { Color::rgb(0x5fb6f0) } else if hw { ui.t.tx(0xffffff) } else { ui.t.tx(0xb7c3ca) }, &g);
-    ui.c.fill_rect(Rect::new(sx - 0.5, ly.y(SWAP_Y) - 6.0, 1.0, 12.0), ui.t.s(0x5a6266));
+    ui.c.fill_rect(Rect::new(sx - 0.5, swap_y - 6.0, 1.0, 12.0), ui.t.s(0x5a6266));
     let sep = KnobId::MixSep(n);
-    ui.hit(Rect::new(sx - 9.0, ly.y(RING_Y) - 9.0, 18.0, 18.0), Action::Knob(sep), s.knob_text(sep));
-    mixer_knob(ui, sx, ly.y(RING_Y), 6.0, 9.5, s.knob(sep), Some(true));
+    ui.hit(Rect::new(sx - 9.0, ring_y - 9.0, 18.0, 18.0), Action::Knob(sep), s.knob_text(sep));
+    mixer_knob(ui, sx, ring_y, 6.0, 9.5, s.knob(sep), Some(true));
 
     // Fader: track, gain marks, handle (green on the selected strip, with the track lit below it).
     let track_y1 = bottom - 99.0;
