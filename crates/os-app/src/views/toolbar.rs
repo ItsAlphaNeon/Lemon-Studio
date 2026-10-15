@@ -481,18 +481,31 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
         tool_button(ui, btn(580.0 + 33.0 * i as f32, 45.0), icon, on, action, hint);
     }
 
-    // Snap.
-    icons::draw(ui.c, Icon::Magnet, Rect::span(748.0, 766.0, 52.0, 70.0), t.glyph_dim.shade(0.3));
+    // Snap panel (spec: ui/global-snap.md §1): the magnet turns snapping on / off, the combo holds the global snap.
+    let global = s.global_snap.now;
+    let on = global != crate::playlist::Snap::None;
+    ui.hit(Rect::span(746.0, 767.0, 50.0, 72.0), Action::GlobalSnapToggle, crate::snap::MAGNET_HINT);
+    let magnet = if lemon {
+        if on { t.glyph_dim } else { t.glyph_dim.mix(t.toolbar, 0.55) }
+    } else {
+        t.tx(if on { 0x8b959c } else { 0x52585c })
+    };
+    icons::draw(ui.c, Icon::Magnet, Rect::span(748.0, 766.0, 52.0, 70.0), magnet);
     let snap = Rect::span(768.0, 830.0, 50.0, 72.0);
-    ui.off(snap, "Global snap (each editor has its own snap)");
+    let hov = ui.hit(snap, Action::GlobalSnap, crate::snap::HINT);
     if lemon {
-        os_ui::kit::lemon::well(ui.c, t, snap, t.sunken);
+        os_ui::kit::lemon::well(ui.c, t, snap, if hov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
     } else {
         ui.c.fill_rrect(snap, 2.0, t.sunken_dark);
     }
-    ui.c.text(Font::new(16), snap.x + 5.0, 51.0, t.glyph, "Line");
-    icons::draw(ui.c, Icon::ArrowRight, Rect::new(snap.right() - 14.0, 55.0, 12.0, 12.0), t.glyph_dim);
-    ui.veil(Rect::span(746.0, 831.0, 50.0, 72.0), t.toolbar);
+    // The longest labels ("1/6 step") are narrowed to fit before the arrow.
+    let label = global.label();
+    let room = snap.w - 5.0 - 14.0;
+    let font = if ui.c.text_width(Font::new(16), label) <= room { Font::new(16) } else { Font::condensed(16, 6) };
+    ui.c.text(font, snap.x + 5.0, 51.0, t.glyph, label);
+    // The arrow points down while the mouse is over the combo (§1).
+    let dir = if hov { os_ui::kit::Dir::Down } else { os_ui::kit::Dir::Right };
+    os_ui::kit::triangle(ui.c, snap.right() - 8.0, 61.0, 3.5, dir, t.glyph_dim);
 
     // Pattern selector.
     let prev = Rect::span(838.0, 851.0, 47.0, 76.0);

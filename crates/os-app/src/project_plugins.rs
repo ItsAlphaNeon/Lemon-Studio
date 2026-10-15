@@ -620,6 +620,29 @@ mod tests {
         assert_eq!(crate::mixer::inserts(&b.state), crate::mixer::inserts(&a.state));
     }
 
+    /// Trim unused tracks leaves fewer tracks than the file has; the save drops the rest (spec:
+    /// ui/mixer-track-commands.md §4, flp/events/mixer.md "Removing tracks").
+    #[test]
+    fn trimmed_mixer_saves_and_reopens() {
+        let path = std::env::temp_dir().join(format!("openstudio-trim-{}.flp", std::process::id()));
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.save_to(path.clone());
+        a.state.project.channels[4].mixer_track = 9;
+        a.state.project.mixer[9].name = Some("Nine".into());
+        crate::mixer::run(&mut a, crate::mixer::MCmd::Trim { non_empty: false });
+        assert_eq!(crate::mixer::inserts(&a.state), 5);
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", a.state.message);
+        let mut b = App::new(None);
+        b.open(path.clone());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(b.state.project.mixer, a.state.project.mixer);
+        assert_eq!(b.state.project.channels[4].mixer_track, 5);
+    }
+
     /// A stand-in native plugin: its state is a few bytes; `exact` false = it gives a loaded state back with one byte
     /// appended (a plugin whose state does not round-trip, spec plugins/fruity-abi.md "Saved state").
     struct NativeStandIn(Descriptor, Vec<u8>, bool);

@@ -33,6 +33,7 @@ impl App {
                 s.browser_open.retain(|k| !k.starts_with(&tab));
                 s.browser_scroll = 0.0;
             }
+            Action::BrowserReread => reread(s),
             Action::BrowserList => {}
             Action::BrowserMenu => {
                 let (x, y) = view::MENU_AT;
@@ -106,10 +107,7 @@ impl App {
                 s.browser_open.retain(|k| !k.starts_with(&tab));
                 s.browser_scroll = 0.0;
             }
-            BCmd::Reread => {
-                s.browser_dirs.borrow_mut().clear();
-                s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
-            }
+            BCmd::Reread => reread(s),
             // A background scan (spec: ui/plugin-manager.md §4); plugins in use stay where they are.
             BCmd::Rescan => self.start_scan(crate::plugin_db::Mode::Changed),
         }
@@ -230,7 +228,7 @@ impl App {
         // Snapped playlist position under the mouse.
         let spot = grid.map(|grid| {
             let g = pl::PGeom::new(s, grid);
-            (g.track_at(y), pl::snap_down(s, &g, g.tick_at(x), alt))
+            (g.track_at(y), pl::snap_place(s, &g, g.tick_at(x), alt))
         });
         match item {
             Item::Pattern(n) => {
@@ -416,6 +414,12 @@ pub fn options_menu(s: &crate::app::State) -> Vec<PItem> {
         PItem::not_yet("Configure extra folders"),
         b("Refresh plugin list (fast scan)", BCmd::Rescan),
     ]
+}
+
+/// Reread structure (spec §4): folders are read from disk again; open nodes and the selection stay.
+fn reread(s: &mut crate::app::State) {
+    s.browser_dirs.borrow_mut().clear();
+    s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
 }
 
 /// Select a row and record it in the navigation history (spec §4).

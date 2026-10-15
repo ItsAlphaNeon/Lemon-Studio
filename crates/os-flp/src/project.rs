@@ -2055,6 +2055,7 @@ fn write_sampler(events: &mut [Event], loc: &ChannelLoc, ch: &Channel, old: &Cha
 pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
     restructure(project, file)?;
     grow_mixer(project, file)?;
+    shrink_mixer(project, file)?;
     let current = load(file)?;
     let events = events_of_mut(file)?;
     let l = scan(events)?;
@@ -2771,6 +2772,40 @@ fn grow_mixer(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError>
     set_data(&mut events[params_at], data);
     set_int(&mut events[count], new as u32);
     events.splice(at..at, blocks);
+    Ok(())
+}
+
+/// Removes insert tracks when the model has fewer tracks than the file (spec: flp/events/mixer.md "Removing tracks"):
+/// the inserts just before the last ("current") track lose their blocks and their parameter records, and the count
+/// (event 103) follows. The model's tracks are already renumbered; [`apply`] then patches the kept ones as usual.
+fn shrink_mixer(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
+    let events = events_of_mut(file)?;
+    let l = scan(events)?;
+    let (old, new) = (l.mixer.len(), project.mixer.len());
+    if new < 2 || new >= old {
+        return Ok(());
+    }
+    let missing = |what: &str| ProjectError::Structure(format!("mixer without {what}"));
+    let count = events.iter().position(|e| e.id == id::MX_COUNT).ok_or_else(|| missing("a track count"))?;
+    let start = |m: &MixerLoc| m.color.into_iter().chain(m.color_flag).min();
+    // Tracks new-1 .. old-2 go: from the first one's header to the last track's header.
+    let from = start(&l.mixer[new - 1]).ok_or_else(|| missing("a track header"))?;
+    let to = start(&l.mixer[old - 1]).ok_or_else(|| missing("a last track"))?;
+    let params_at = l.mixer_params.ok_or_else(|| missing("parameter records"))?;
+    if from <= count || to <= from || params_at <= to {
+        return Err(ProjectError::Structure("mixer events out of order".into()));
+    }
+    let (lo, hi) = (mixer_location((new - 1) as u16, 0), mixer_location((old - 1) as u16, 0));
+    let data = events[params_at].data().unwrap_or(&[]).to_vec();
+    let kept: Vec<u8> = data
+        .chunks(MIXER_REC_LEN)
+        .filter(|r| r.len() < MIXER_REC_LEN || !(lo..hi).contains(&u16::from_le_bytes([r[6], r[7]])))
+        .flatten()
+        .copied()
+        .collect();
+    set_data(&mut events[params_at], kept);
+    events.drain(from..to);
+    set_int(&mut events[count], new as u32);
     Ok(())
 }
 
@@ -4164,10 +4199,23 @@ mod tests {
         let tracks: Vec<u16> = mixer_param_records(params).filter(|r| r.3 >= 0x7000).map(|r| (r.3 - 0x7000) / 64).collect();
         assert!(tracks.windows(2).all(|w| w[0] <= w[1]), "records stay in track order");
         assert_eq!(tracks.iter().filter(|&&t| t == 19).count(), 32);
-        // Fewer tracks than the file is still refused.
+        // Fewer tracks (spec: flp/events/mixer.md "Removing tracks"): inserts 18 and 19 go with their records, the
+        // current track comes back as 18 with everything it had.
         let mut fewer = back.clone();
-        fewer.mixer.truncate(19);
-        assert!(apply(&fewer, &mut file).is_err());
+        let mut current = fewer.mixer.pop().unwrap();
+        fewer.mixer.truncate(18);
+        current.index = 18;
+        fewer.mixer.push(current);
+        fewer.mixer[17].name = Some("Kept".into());
+        apply(&fewer, &mut file).unwrap();
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back.mixer, fewer.mixer);
+        let ev = events_of(&file).unwrap();
+        assert_eq!(ev.iter().find(|e| e.id == id::MX_COUNT).map(int), Some(19));
+        let params = ev.iter().rfind(|e| e.id == id::MX_PARAMS).unwrap().data().unwrap();
+        let tracks: std::collections::BTreeSet<u16> =
+            mixer_param_records(params).filter(|r| r.3 >= 0x7000).map(|r| (r.3 - 0x7000) / 64).collect();
+        assert_eq!(tracks, (0..18).chain([501]).collect());
     }
 
     #[test]

@@ -18,6 +18,7 @@ use os_model::{
 use os_ui::Rect;
 
 use crate::app::{App, Drag, State};
+use crate::snap::EditorSnap;
 
 /// Track row pitch at the default size (spec: ui/main-window.md §6); a clip fills its row less the 3 px gap.
 pub const ROW_H: f32 = 48.0;
@@ -209,7 +210,10 @@ pub enum Cmd {
     PluginDetach(usize, bool),
     NotYet(&'static str),
     Tool(PlTool),
-    Snap(Snap),
+    /// The playlist's magnet setting (§4).
+    Snap(EditorSnap),
+    /// The main toolbar's global snap (spec: ui/global-snap.md §2).
+    GlobalSnap(Snap),
     Undo,
     Cut,
     Copy,
@@ -292,6 +296,8 @@ pub enum Cmd {
     Mixer(crate::mixer::MCmd),
     /// Plugin parameter menus (spec: plugins/plugin-parameters.md §5-6).
     Param(crate::params::PCmd),
+    /// "Type in value..." of a knob or parameter menu (spec: ui/type-in-value.md).
+    TypeIn(crate::typein::Target),
     /// Plugin presets (spec: plugins/presets.md).
     #[cfg_attr(not(windows), allow(dead_code))]
     Preset(crate::presets::PCmd),
@@ -381,6 +387,8 @@ pub enum EditTarget {
     SlotName(u16, u8),
     /// The current arrangement's name (§12).
     ArrangementName,
+    /// The value box of "Type in value..." and whether it reads normalized values (spec: ui/type-in-value.md).
+    TypeIn(crate::typein::Target, bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -389,6 +397,8 @@ pub struct TextEdit {
     pub text: String,
     /// Where the box is drawn (screen).
     pub at: (f32, f32),
+    /// The whole text is selected: typing replaces it (the value box opens so, spec: ui/type-in-value.md §1).
+    pub sel: bool,
 }
 
 /// A waveform summary for drawing audio clips: min/max per `per` frames (left channel + right mixed).
@@ -410,7 +420,8 @@ type Snapshot = (Vec<Clip>, Vec<TimeMarker>, Vec<PlaylistTrack>, Vec<Automation>
 
 pub struct PlaylistState {
     pub tool: PlTool,
-    pub snap: Snap,
+    /// The magnet's setting (§4); Main follows the global snap (spec: ui/global-snap.md).
+    pub snap: EditorSnap,
     /// The current clip source (what Draw / Paint place); `None` = the current pattern.
     pub source: Option<ClipSource>,
     pub picker: PickKind,
@@ -428,6 +439,8 @@ pub struct PlaylistState {
     pub overlay: Option<Overlay>,
     pub popup: Option<Popup>,
     pub edit: Option<TextEdit>,
+    /// The value box's mode last accepted: normalized (spec: ui/type-in-value.md §3).
+    pub typein_norm: bool,
     /// Soloed track: its own state and the others' before the solo.
     pub solo: Option<(u16, Vec<bool>)>,
     /// Zoom tool: the view before "zoom out" (bar width, scroll x, scroll y).
@@ -459,7 +472,7 @@ impl Default for PlaylistState {
     fn default() -> Self {
         PlaylistState {
             tool: PlTool::Draw,
-            snap: Snap::Line,
+            snap: EditorSnap::Main,
             source: None,
             picker: PickKind::Pattern,
             pick_scroll: 0.0,
@@ -471,6 +484,7 @@ impl Default for PlaylistState {
             overlay: None,
             popup: None,
             edit: None,
+            typein_norm: false,
             solo: None,
             zoom_back: None,
             hover_clip: None,
@@ -991,13 +1005,30 @@ pub fn clip_at(s: &State, g: &PGeom, x: f32, y: f32) -> Option<usize> {
     clips(s).iter().enumerate().rev().find(|(_, c)| g.clip_rect(c).contains(x, y)).map(|(i, _)| i)
 }
 
-/// Snap a tick down to the snap unit (Alt = no snap).
-pub fn snap_down(s: &State, g: &PGeom, tick: f32, alt: bool) -> u32 {
+/// The playlist's snap setting with Main read as the global snap (§4). Events and Markers are not available here.
+pub fn grid_snap(s: &State) -> Snap {
+    s.playlist.snap.grid(s.global_snap.now).unwrap_or(Snap::Line)
+}
+
+/// Where a click at `tick` lands (§4): the nearest unit (Cell: the start of the cell it is in), the tick under the
+/// pointer for (none). Alt: no snapping.
+pub fn snap_place(s: &State, g: &PGeom, tick: f32, alt: bool) -> u32 {
+    let t = tick.max(0.0);
+    let sn = grid_snap(s);
+    if alt || sn == Snap::None {
+        return t as u32;
+    }
+    let u = sn.ticks(g.ppq, g.bar_w);
+    if sn == Snap::Cell { t as u32 / u * u } else { (t / u as f32).round() as u32 * u }
+}
+
+/// The song position set on the ruler: down to the unit (Alt: the tick under the pointer).
+fn snap_down(s: &State, g: &PGeom, tick: f32, alt: bool) -> u32 {
     let t = tick.max(0.0) as u32;
     if alt {
         return t;
     }
-    let u = s.playlist.snap.ticks(g.ppq, g.bar_w);
+    let u = grid_snap(s).ticks(g.ppq, g.bar_w);
     t - t % u
 }
 
@@ -1006,7 +1037,7 @@ pub fn snap_delta(s: &State, g: &PGeom, dt: f32, alt: bool) -> i64 {
     if alt {
         return dt.round() as i64;
     }
-    let u = s.playlist.snap.ticks(g.ppq, g.bar_w) as f32;
+    let u = grid_snap(s).ticks(g.ppq, g.bar_w) as f32;
     ((dt / u).round() * u) as i64
 }
 
@@ -1175,10 +1206,14 @@ pub fn store_view(s: &mut State) {
     }
 }
 
-/// Shift+Tab: the next of the common snap settings (Line, Cell, Beat, Bar, none).
-pub fn next_snap(sn: Snap) -> Snap {
+/// Shift+Tab: the next of the common snap settings (Line, Cell, Beat, Bar, none); from any other setting, Line.
+pub fn next_snap(p: EditorSnap) -> EditorSnap {
     const CYCLE: [Snap; 5] = [Snap::Line, Snap::Cell, Snap::Beat, Snap::Bar, Snap::None];
-    CYCLE.iter().position(|&x| x == sn).map_or(Snap::Line, |i| CYCLE[(i + 1) % CYCLE.len()])
+    let at = match p {
+        EditorSnap::Grid(sn) => CYCLE.iter().position(|&x| x == sn),
+        _ => None,
+    };
+    EditorSnap::Grid(at.map_or(Snap::Line, |i| CYCLE[(i + 1) % CYCLE.len()]))
 }
 
 /// Split clip `i` at `tick` (inside it); the right part keeps the content in place. Returns the new clip's index.
@@ -1758,7 +1793,7 @@ pub fn parse_value(s: &State, ch: u16, text: &str) -> Option<f64> {
 // Menus (§10)
 
 pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
-    let snap_items = Snap::MENU.iter().map(|&sn| PItem::new(sn.label(), Cmd::Snap(sn)).mark(Mark::Radio(s.playlist.snap == sn))).collect();
+    let snap_items = snap_items(s);
     let tools = PlTool::ALL.iter().map(|&t| PItem::new(format!("{t:?}"), Cmd::Tool(t)).mark(Mark::Radio(s.playlist.tool == t))).collect();
     let items = vec![
         PItem::sub(
@@ -1832,9 +1867,19 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None }
 }
 
+/// The magnet's Snap menu and the ▸ menu's Snap submenu (§4): Main, Line, Cell, (none) to Bar; Events and Markers
+/// are not available yet.
+fn snap_items(s: &State) -> Vec<PItem> {
+    let now = s.playlist.snap;
+    let radio = |p: EditorSnap| PItem::new(p.label(), Cmd::Snap(p)).mark(Mark::Radio(now == p));
+    let mut items = vec![radio(EditorSnap::Main), PItem::sep(), radio(EditorSnap::Grid(Snap::Line)), radio(EditorSnap::Grid(Snap::Cell)), PItem::sep()];
+    items.extend(Snap::MENU.iter().filter(|sn| !matches!(sn, Snap::Line | Snap::Cell)).map(|&sn| radio(EditorSnap::Grid(sn))));
+    items.extend([PItem::sep(), PItem::not_yet("Events"), PItem::not_yet("Markers")]);
+    items
+}
+
 pub fn snap_menu(s: &State, x: f32, y: f32) -> Popup {
-    let items = Snap::MENU.iter().map(|&sn| PItem::new(sn.label(), Cmd::Snap(sn)).mark(Mark::Radio(s.playlist.snap == sn))).collect();
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items: snap_items(s), sub: None }
 }
 
 pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
@@ -1918,14 +1963,21 @@ pub fn marker_menu(i: usize, x: f32, y: f32) -> Popup {
     Popup { x, y, items: vec![PItem::head("Time marker"), PItem::new("Rename...", Cmd::RenameMarker(i)), PItem::new("Delete", Cmd::DeleteMarker(i))], sub: None }
 }
 
-/// A knob's right-click menu with "Create automation clip" (§8).
-pub fn knob_menu(tgt: u32, name: String, value: f64, x: f32, y: f32) -> Popup {
-    let items = vec![
-        PItem::head("Automation"),
-        PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, value)),
-        PItem::not_yet("Edit events"),
-        PItem::not_yet("Link to controller..."),
-    ];
+/// The short right-click menu of the toolbar's and the mixer's knobs, faders and the tempo: "Create automation clip"
+/// (§8) when the control can be automated, "Type in value..." when it takes one (spec: ui/type-in-value.md §8).
+pub fn knob_menu(auto: Option<(u32, String, f64)>, typein: Option<crate::typein::Target>, x: f32, y: f32) -> Popup {
+    let mut items = Vec::new();
+    if let Some((tgt, name, value)) = auto {
+        items.extend([
+            PItem::head("Automation"),
+            PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, value)),
+            PItem::not_yet("Edit events"),
+            PItem::not_yet("Link to controller..."),
+        ]);
+    }
+    if let Some(t) = typein {
+        items.extend([PItem::head("Value"), PItem::new("Type in value...", Cmd::TypeIn(t))]);
+    }
     Popup { x, y, items, sub: None }
 }
 
@@ -2239,7 +2291,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             None => {
                 snapshot(s);
                 s.playlist.sel.clear();
-                let start = snap_down(s, &g, tick, alt);
+                let start = snap_place(s, &g, tick, alt);
                 let i = place(s, track, start);
                 let c = clips(s)[i];
                 if tool == PlTool::Paint {
@@ -2316,7 +2368,7 @@ fn snap_round(s: &State, g: &PGeom, tick: f32, alt: bool) -> u32 {
     if alt {
         return tick.max(0.0).round() as u32;
     }
-    let u = s.playlist.snap.ticks(g.ppq, g.bar_w) as f32;
+    let u = grid_snap(s).ticks(g.ppq, g.bar_w) as f32;
     ((tick / u).round() * u).max(0.0) as u32
 }
 
@@ -2402,7 +2454,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
         }
         PlDrag::ResizeR { x0, orig } => {
             let dt = snap_delta(s, &g, (x - x0) / g.ppt, alt);
-            let min = if alt { 1 } else { s.playlist.snap.ticks(g.ppq, g.bar_w) } as i64;
+            let min = if alt { 1 } else { grid_snap(s).ticks(g.ppq, g.bar_w) } as i64;
             for &(i, o) in &orig {
                 let len = (i64::from(o.length) + dt).max(min) as u32;
                 if !stretch_clip(s, i, &o, o.position, len) {
@@ -2496,7 +2548,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             let s = &mut app.state;
             let mut beat = beat0 + f64::from((x - x0) / g.ppt) / f64::from(g.ppq);
             if !alt {
-                let u = f64::from(s.playlist.snap.ticks(g.ppq, g.bar_w)) / f64::from(g.ppq);
+                let u = f64::from(grid_snap(s).ticks(g.ppq, g.bar_w)) / f64::from(g.ppq);
                 let (w0, _) = window(s, &c);
                 beat = w0 + ((beat - w0) / u).round() * u;
             }
@@ -2825,8 +2877,9 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::PatternName(n) => source_name(s, ClipSource::Pattern(n)),
         EditTarget::MixerName(n) => crate::mixer::name(s, n),
         EditTarget::SlotName(t, k) => crate::mixer::slot_name(s, t, k).unwrap_or_default(),
+        EditTarget::TypeIn(t, norm) => crate::typein::text(s, t, norm),
     };
-    s.playlist.edit = Some(TextEdit { target, text, at });
+    s.playlist.edit = Some(TextEdit { target, text, at, sel: false });
 }
 
 /// Enter in the text box.
@@ -2874,6 +2927,7 @@ pub fn commit_edit(s: &mut State) {
                 s.mixer.slot_names.insert((t, k), text);
             }
         }
+        EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
         EditTarget::PatternName(n) => {
             if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
                 p.name = (!text.is_empty()).then_some(text);
@@ -2899,6 +2953,12 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
         Cmd::Param(c) => return app.params_cmd(c),
+        Cmd::TypeIn(t) => {
+            let at = app.mouse;
+            crate::typein::open(&mut app.state, t, at);
+            app.invalidate();
+            return None;
+        }
         Cmd::Preset(c) => return crate::presets::run(app, c),
         Cmd::Piano(c) => {
             let m = crate::piano_tools::run(app, c);
@@ -2970,10 +3030,12 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             s.playlist.tool = t;
             None
         }
-        Cmd::Snap(sn) => {
-            s.playlist.snap = sn;
-            Some(format!("Snap: {}", sn.label()))
+        Cmd::Snap(p) => {
+            s.playlist.snap = p;
+            crate::snap::save(s);
+            Some(format!("Snap: {}", p.label()))
         }
+        Cmd::GlobalSnap(sn) => Some(crate::snap::set(s, sn)),
         Cmd::Undo => (!undo(s)).then(|| "Nothing to undo".into()),
         Cmd::Copy => {
             copy(s);
@@ -3004,7 +3066,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::ShiftTime(d) => {
             snapshot(s);
-            let u = grid.map_or(ppq(s), |g| s.playlist.snap.ticks(ppq(s), PGeom::new(s, g).bar_w)) as i64;
+            let u = grid.map_or(ppq(s), |g| grid_snap(s).ticks(ppq(s), PGeom::new(s, g).bar_w)) as i64;
             let idx = targets(s);
             let arr = arr_mut(s);
             let min = idx.iter().filter_map(|&i| arr.clips.get(i)).map(|c| i64::from(c.position)).min().unwrap_or(0);
@@ -3067,13 +3129,14 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::CycleSnap => {
             s.playlist.snap = next_snap(s.playlist.snap);
+            crate::snap::save(s);
             Some(format!("Snap: {}", s.playlist.snap.label()))
         }
         Cmd::DeleteSpace => {
             snapshot(s);
             (!delete_space(s)).then(|| "Delete space: make a time selection first (right-drag the ruler)".into())
         }
-        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) => None,
+        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) => None,
         Cmd::StretchMode => {
             s.playlist.stretch = !s.playlist.stretch;
             Some(if s.playlist.stretch { "Stretch mode on: resizing an audio clip stretches it".into() } else { "Stretch mode off".into() })
@@ -3382,7 +3445,7 @@ pub(crate) fn hsl_rgb(h: f32, s: f32, l: f32) -> Rgb {
 /// nearest snap step (on the nearest beat when snapping is off); lengths stay. One undo step.
 pub fn quantize_starts(s: &mut State) -> String {
     let p = ppq(s);
-    let unit = match s.playlist.snap.ticks(p, s.playlist_bar_w) {
+    let unit = match grid_snap(s).ticks(p, s.playlist_bar_w) {
         0 | 1 => p,
         u => u,
     };
@@ -3542,11 +3605,21 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         match key {
             Key::Named(NamedKey::Enter) => commit_edit(&mut app.state),
             Key::Named(NamedKey::Escape) => app.state.playlist.edit = None,
+            // A selected text goes as a whole (the value box, spec: ui/type-in-value.md §1, §8).
             Key::Named(NamedKey::Backspace) => {
-                e.text.pop();
+                if std::mem::take(&mut e.sel) {
+                    e.text.clear();
+                } else {
+                    e.text.pop();
+                }
             }
-            Key::Named(NamedKey::Space) => e.text.push(' '),
-            Key::Character(c) if !ctrl => e.text.push_str(c),
+            Key::Named(NamedKey::Space) | Key::Character(_) if !ctrl => {
+                if std::mem::take(&mut e.sel) {
+                    e.text.clear();
+                }
+                e.text.push_str(if let Key::Character(c) = key { c } else { " " });
+            }
+            Key::Character(c) if c.eq_ignore_ascii_case("a") && matches!(e.target, EditTarget::TypeIn(..)) => e.sel = !e.text.is_empty(),
             _ => {}
         }
         app.invalidate();
@@ -3581,6 +3654,12 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && (c.eq_ignore_ascii_case("g") || c.eq_ignore_ascii_case("u")) => Cmd::UngroupClips,
         Key::Named(NamedKey::End) if !ctrl && !alt => Cmd::ZoomSelection,
         Key::Named(NamedKey::Tab) if shift && !ctrl && !alt => Cmd::CycleSnap,
+        // The global snap on / off (spec: ui/global-snap.md §1).
+        Key::Named(NamedKey::Backspace) if !ctrl && !alt => {
+            app.state.message = Some(crate::snap::toggle(&mut app.state));
+            app.invalidate();
+            return true;
+        }
         Key::Character(c) if !ctrl && !alt && !app.typing_on() && PlTool::from_letter(c).is_some() => {
             Cmd::Tool(PlTool::from_letter(c).expect("checked"))
         }
@@ -3664,7 +3743,7 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::not_yet("Save channel state as..."),
         PItem::not_yet("Browse channel states"),
         PItem::sep(),
-        PItem::not_yet("Route to free mixer track").key("Ctrl+L"),
+        PItem::new("Route to free mixer track", Cmd::Rack(crate::rack::RCmd::AssignFree(row))).key("Ctrl+L"),
     ];
     Popup { x, y, items, sub: None }
 }

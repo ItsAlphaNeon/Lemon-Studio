@@ -39,6 +39,8 @@ pub enum NCmd {
     Legato,
     /// Cut notes at every `1/n` note line inside them.
     Chop(u32),
+    /// Cut notes at every snap unit inside them (Ctrl+U; one-tick pieces without a unit, spec: ui/piano-snap.md §6).
+    QuickChop,
     Glue,
     DiscardLengths,
     Duplicate,
@@ -52,6 +54,11 @@ pub enum NCmd {
     AddMarker,
     /// Open one of the tool submenus at the mouse (Alt+Q / U / S / A / R).
     Menu(Sub),
+    /// The magnet button's menus (spec: ui/piano-snap.md): the snap setting, a stock length for new notes.
+    Snap(crate::snap::EditorSnap),
+    StockLength(crate::playlist::Snap),
+    /// Make a channel rack row the piano roll's channel (the title's channel menu).
+    Target(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +136,7 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Quick quantize start times", Quantize { strength: 100, starts_only: true }).key("Shift+Q"),
         PItem::sub("Quantize", sub_items(Sub::Quantize)).key("Alt+Q"),
         item("Quick legato", Legato).key("Ctrl+L"),
-        item("Quick chop", Chop(16)).key("Ctrl+U"),
+        item("Quick chop", QuickChop).key("Ctrl+U"),
         PItem::sub("Chop", sub_items(Sub::Chop)).key("Alt+U"),
         PItem::sub("Strum", sub_items(Sub::Strum)).key("Alt+S"),
         PItem::sub("Arpeggiate", sub_items(Sub::Arpeggiate)).key("Alt+A"),
@@ -151,7 +158,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if ctrl && is(c, "q") => NCmd::Quantize { strength: 100, starts_only: false },
         Key::Character(c) if shift && !ctrl && !alt && is(c, "q") => NCmd::Quantize { strength: 100, starts_only: true },
         Key::Character(c) if ctrl && !alt && is(c, "l") => NCmd::Legato,
-        Key::Character(c) if ctrl && !alt && is(c, "u") => NCmd::Chop(16),
+        Key::Character(c) if ctrl && !alt && is(c, "u") => NCmd::QuickChop,
         Key::Character(c) if ctrl && !alt && is(c, "g") => NCmd::Glue,
         Key::Character(c) if ctrl && !alt && is(c, "b") => NCmd::Duplicate,
         Key::Character(c) if shift && !ctrl && !alt && is(c, "d") => NCmd::DiscardLengths,
@@ -190,6 +197,12 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         }
         Key::Named(NamedKey::PageUp) if !ctrl && !alt => return zoom_key(app, 1.0),
         Key::Named(NamedKey::PageDown) if !ctrl && !alt => return zoom_key(app, -1.0),
+        // The global snap on / off (spec: ui/global-snap.md §1).
+        Key::Named(NamedKey::Backspace) if !ctrl && !alt => {
+            app.state.message = Some(crate::snap::toggle(&mut app.state));
+            app.invalidate();
+            return true;
+        }
         _ => return false,
     };
     if let Some(m) = run(app, cmd) {
@@ -210,30 +223,68 @@ fn zoom_key(app: &mut App, notches: f32) -> bool {
 }
 
 /// Select the channel `dir` rows away, wrapping; `with_notes` skips channels without notes in the pattern (§11).
-fn cycle_channel(app: &mut App, dir: i32, with_notes: bool) -> bool {
+pub(crate) fn cycle_channel(app: &mut App, dir: i32, with_notes: bool) -> bool {
     let s = &mut app.state;
     let n = s.project.channels.len();
     if n == 0 {
         return true;
     }
-    let used = |s: &State, row: usize| {
-        let ch = s.project.channels[row].index;
-        piano::notes(s).iter().any(|nt| nt.channel == ch)
-    };
     let mut row = s.selected_channel.min(n - 1);
     for _ in 0..n {
         row = (row as i32 + dir).rem_euclid(n as i32) as usize;
-        if !with_notes || used(s, row) {
-            s.selected_channel = row;
-            s.rack.select_only(row);
-            s.piano.clear_selection();
-            let name = s.project.channels[row].name.clone().unwrap_or_else(|| format!("Channel {}", row + 1));
-            s.message = Some(format!("Piano roll: {name}"));
+        if !with_notes || has_notes(s, row) {
+            s.message = Some(target(s, row));
             break;
         }
     }
     app.invalidate();
     true
+}
+
+/// Whether a channel rack row has notes in the current pattern.
+fn has_notes(s: &State, row: usize) -> bool {
+    let ch = s.project.channels[row].index;
+    piano::notes(s).iter().any(|nt| nt.channel == ch)
+}
+
+fn channel_name(s: &State, row: usize) -> String {
+    s.project.channels[row].name.clone().unwrap_or_else(|| format!("Channel {}", row + 1))
+}
+
+/// Make `row` the piano roll's channel; the rack selects it. Returns the status message.
+pub fn target(s: &mut State, row: usize) -> String {
+    s.selected_channel = row;
+    s.rack.select_only(row);
+    s.piano.clear_selection();
+    format!("Piano roll: {}", channel_name(s, row))
+}
+
+/// The title's channel menu (spec: ui/piano-target-channel.md §2, §5): the channels with notes in the pattern,
+/// then one section per rack filter group and Unsorted; a ✓ marks the channels with notes.
+pub fn target_menu(s: &State, x: f32, y: f32) -> Popup {
+    let n = s.project.channels.len();
+    let row_item = |row: usize| {
+        let it = PItem::new(channel_name(s, row), Cmd::Piano(NCmd::Target(row)));
+        if has_notes(s, row) { it.mark(Mark::Check(true)) } else { it }
+    };
+    let head = |name: String| PItem { label: name.into(), ..PItem::head("") };
+    let mut items = vec![PItem::head("Current pattern")];
+    items.extend((0..n).filter(|&r| has_notes(s, r)).map(row_item));
+    for g in &s.rack.groups {
+        let rows: Vec<usize> = g.members.iter().copied().filter(|&r| r < n).collect();
+        if !rows.is_empty() {
+            items.push(head(g.name.clone()));
+            items.extend(rows.into_iter().map(row_item));
+        }
+    }
+    let unsorted: Vec<usize> = (0..n).filter(|r| !s.rack.groups.iter().any(|g| g.members.contains(r))).collect();
+    if !unsorted.is_empty() {
+        items.push(PItem::head("Unsorted"));
+        items.extend(unsorted.into_iter().map(row_item));
+    }
+    items.push(PItem::sep());
+    items.push(PItem::not_yet("Auto locate"));
+    Popup { x, y, items, sub: None }
 }
 
 /// Run a command; returns a status message.
@@ -243,17 +294,22 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
     let ppq = u32::from(s.project.ppq.max(4));
     let step = ppq / 4;
     let ticks = |n: u32| (ppq * 4 / n.max(1)).max(1);
+    // Quick quantize, Discard lengths and Quick chop use the piano roll's snap (spec: ui/piano-snap.md §6,
+    // ui/global-snap.md §3).
+    let unit = crate::piano_snap::unit(s);
     let done = |changed: bool, what: &str| if changed { format!("Piano roll: {what}") } else { format!("Piano roll: {what}: nothing to change") };
     let msg = match cmd {
         NCmd::Quantize { strength, starts_only } => {
             let k = f32::from(strength.min(100)) / 100.0;
-            let ch = apply(s, |_, ns| ns.into_iter().map(|n| quantize(n, step, k, starts_only)).collect());
+            // Without a unit ((none), Events, Markers) nothing changes.
+            let ch = unit.is_some_and(|u| apply(s, |_, ns| ns.into_iter().map(|n| quantize(n, u, k, starts_only)).collect()));
             done(ch, if starts_only { "quantized start times" } else { "quantized" })
         }
         NCmd::Legato => done(apply(s, |_, ns| legato(ns)), "legato"),
         NCmd::Chop(n) => done(apply(s, |_, ns| chop(ns, ticks(n))), "chopped"),
+        NCmd::QuickChop => done(apply(s, |_, ns| chop(ns, unit.unwrap_or(1))), "chopped"),
         NCmd::Glue => done(apply(s, |_, ns| glue(ns)), "glued"),
-        NCmd::DiscardLengths => done(apply(s, |_, ns| ns.into_iter().map(|n| Note { length: step, ..n }).collect()), "discarded lengths"),
+        NCmd::DiscardLengths => done(apply(s, |_, ns| ns.into_iter().map(|n| Note { length: unit.unwrap_or(0), ..n }).collect()), "discarded lengths"),
         NCmd::Duplicate => {
             duplicate(s);
             return None;
@@ -278,6 +334,16 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             let (x, y) = app.mouse;
             app.state.playlist.popup = Some(Popup { x, y, items: sub_items(sub), sub: None });
             return None;
+        }
+        NCmd::Snap(p) => return Some(crate::piano_snap::set(s, p)),
+        NCmd::StockLength(sn) => return Some(crate::piano_snap::set_length(s, sn)),
+        NCmd::Target(row) => {
+            if row >= s.project.channels.len() {
+                return None;
+            }
+            let m = target(s, row);
+            app.invalidate();
+            return Some(m);
         }
     };
     s.piano.dirty = true;

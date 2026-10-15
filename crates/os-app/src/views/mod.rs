@@ -20,6 +20,7 @@ pub mod playlist;
 pub mod rack;
 pub mod tapper;
 pub mod toolbar;
+pub mod typein;
 
 use std::borrow::Cow;
 

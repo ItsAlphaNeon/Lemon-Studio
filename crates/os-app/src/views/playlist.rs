@@ -100,7 +100,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     icons::draw(ui.c, Icon::ArrowRight, b, if hov { t.glyph } else { t.text });
     let b = Rect::new(r.x + 33.0 - 9.0, ty, 18.0, 18.0);
     let hov = ui.hit(b, Action::PlSnap, format!("Snap: {}", s.playlist.snap.label()));
-    icons::draw(ui.c, Icon::Magnet, b, if hov || s.playlist.snap != pl::Snap::None { t.glyph } else { t.text });
+    icons::draw(ui.c, Icon::Magnet, b, if hov || pl::grid_snap(s) != pl::Snap::None { t.glyph } else { t.text });
     for ((tool, icon), cx) in PlTool::ALL.into_iter().zip(TOOL_ICONS).zip(TOOL_X) {
         let b = Rect::new(r.x + cx - 9.0, ty, 18.0, 18.0);
         let on = s.playlist.tool == tool;
@@ -1112,7 +1112,11 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
             }
         }
     }
-    if let Some(e) = &s.playlist.edit {
+    if let Some(e) = &s.playlist.edit
+        && let pl::EditTarget::TypeIn(t, norm) = e.target
+    {
+        super::typein::paint(ui, s, e, t, norm);
+    } else if let Some(e) = &s.playlist.edit {
         let t = ui.t;
         let r = Rect::new(e.at.0, e.at.1, 150.0, 20.0);
         ui.hit(r, Action::Swallow, "Type, Enter accepts, Esc cancels");

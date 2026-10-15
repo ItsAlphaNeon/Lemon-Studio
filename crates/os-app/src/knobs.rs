@@ -179,7 +179,11 @@ impl State {
                 let db = if g > 0.0 { format!("{:.1}dB", 20.0 * g.log10()) } else { "-inf dB".into() };
                 format!("Main volume: {:.0}%  {db}  {g:.2}", n / 0.8 * 100.0)
             }
-            KnobId::MasterPitch => format!("Master pitch: {:.0} cents", bipolar * 1200.0),
+            // A sign above zero: "+100 cents" (spec: ui/type-in-value.md §6).
+            KnobId::MasterPitch => match (bipolar * 1200.0).round() as i32 {
+                c if c > 0 => format!("Master pitch: +{c} cents"),
+                c => format!("Master pitch: {c} cents"),
+            },
             KnobId::MixPan(_) => format!("Panning: {}", pan_text(bipolar)),
             KnobId::ChanPan(_) => format!("Channel panning: {}", pan_text(bipolar)),
             KnobId::MixSep(_) => crate::mixer::sep_text(f64::from(bipolar)),
@@ -212,7 +216,7 @@ mod tests {
         s.set_knob(KnobId::MasterPitch, 0.5 + 0.1 / 24.0);
         assert_eq!(s.knob_text(KnobId::MasterPitch), "Master pitch: 0 cents", "close enough: snaps");
         s.set_knob(KnobId::MasterPitch, 0.5 + 1.5 / 24.0);
-        assert_eq!(s.knob_text(KnobId::MasterPitch), "Master pitch: 150 cents", "between semitones it is smooth");
+        assert_eq!(s.knob_text(KnobId::MasterPitch), "Master pitch: +150 cents", "between semitones it is smooth");
         s.set_knob(KnobId::MasterPitch, 2.0);
         assert_eq!(s.knob(KnobId::MasterPitch), 1.0);
         s.set_knob(KnobId::MixPan(1), 0.75);

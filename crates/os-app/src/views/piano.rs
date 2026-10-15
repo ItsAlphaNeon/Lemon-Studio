@@ -77,17 +77,30 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
     let channel = s.project.channels.get(s.selected_channel);
     let name = channel.and_then(|c| c.name.clone()).unwrap_or_else(|| "(none)".into());
-    let title = format!("Piano roll - {name}  ");
+    let title = "Piano roll - ";
     window_body(ui, r);
     let outer = r;
     let floating = !s.wins[Win::PianoRoll.slot().unwrap_or(0)].maxed && r.h >= 2.0 * crate::app::TITLE_H;
-    let (r, _) = super::framed(ui, s, Win::PianoRoll, r, &title, 365.0, true);
-    // The title's › (channel menu): not available yet, greyed out.
-    let ax = r.x + 365.0 + ui.c.text_width(Font::new(17), &title);
-    ui.c.text(Font::new(17), ax, r.y + 1.0, t.text_faint, "\u{203a}");
-    ui.off(Rect::new(ax - 3.0, r.y + 2.0, 13.0, 19.0), "Piano roll channel menu");
+    let (r, _) = super::framed(ui, s, Win::PianoRoll, r, title, 365.0, true);
+    // The target channel: name and arrow, orange with a ▾ while hovered (spec: ui/piano-target-channel.md §1).
+    let font = Font::new(17);
+    let nx = r.x + 365.0 + ui.c.text_width(font, title);
+    let nw = ui.c.text_width(font, &name);
+    let hov = ui.hit(
+        Rect::new(nx - 2.0, r.y + 2.0, nw + 22.0, 19.0),
+        Action::PianoTarget,
+        "Target channel (wheel: channels with notes; right-click: settings)",
+    );
+    let orange = t.h(0xfb9531);
+    ui.c.text(font, nx, r.y + 1.0, if hov { orange } else { t.text }, &name);
+    let (ax, ay) = (nx + nw + 11.0, r.y + 12.0);
+    if hov {
+        os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Down, orange);
+    } else {
+        os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Right, t.text_dim);
+    }
     let shift = if floating { -4.0 } else { 0.0 };
-    toolbar(ui, r, shift, s.piano.tool);
+    toolbar(ui, s, r, shift);
     if r.h < 2.0 * crate::app::TITLE_H {
         return; // collapsed to the title bar
     }
@@ -266,13 +279,14 @@ fn corner_button(ui: &mut Ui, b: Rect) {
 
 /// Toolbar icons in the title bar (§2): the editing tools and undo; the menus and helpers that are not available yet
 /// are greyed out. `shift` moves the icons (the floating window draws them 4 px further left, §1a).
-fn toolbar(ui: &mut Ui, r: Rect, shift: f32, active: Tool) {
+fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
     let t = ui.t;
+    let active = s.piano.tool;
     let ox = r.x - 209.0 + shift;
     let items: [(f32, Icon, &'static str, Option<Action>); 15] = [
         (222.0, Icon::ArrowRight, "Piano roll options", None),
         (242.0, Icon::MidiControl, "Piano roll tools: quantize, chop, glue, strum, arpeggiate, randomize...", Some(Action::PianoToolsMenu)),
-        (263.0, Icon::Magnet, "Piano roll snap", None),
+        (263.0, Icon::Magnet, "", Some(Action::PianoSnapMenu)),
         (283.0, Icon::Note, "Note properties", None),
         (305.0, Icon::Blend, "Scale and chord helpers", None),
         (327.0, Icon::Undo, "Undo (Ctrl+Z)", Some(Action::PianoUndo)),
@@ -294,6 +308,8 @@ fn toolbar(ui: &mut Ui, r: Rect, shift: f32, active: Tool) {
             continue;
         };
         let on = action == Action::PianoTool(active);
+        // The magnet's hint names the current snap (spec: ui/piano-snap.md §8).
+        let hint: std::borrow::Cow<'static, str> = if action == Action::PianoSnapMenu { crate::piano_snap::hint(s).into() } else { hint.into() };
         let hov = ui.hit(b, action, hint);
         let c = if super::lemon(ui) {
             // Lemon: the active tool is a lit rounded square with a dark glyph.
