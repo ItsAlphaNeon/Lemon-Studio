@@ -1134,8 +1134,8 @@ impl Session {
         let (device, format, mut config) = (out.device, out.format, out.config);
         let rate = config.sample_rate;
         let mut e = Engine::new(project, library, rate, mode);
-        // Pattern playback loops on the bar line.
-        e.set_looping(song && matches!(mode, PlayMode::Pattern(_)));
+        // Playback loops: a pattern on its bar line, the song at its end (back to the start).
+        e.set_looping(song);
         if kind == Kind::Live {
             e.clear_schedule();
         }

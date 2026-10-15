@@ -941,6 +941,9 @@ pub struct App {
     typing_synced: bool,
     /// The piano-roll key held with the mouse, sounding as a live note until released: (rack row, key).
     mouse_note: Option<(usize, u16)>,
+    /// Velocity of the next key the mouse sounds (a keyboard click sets it from the click's x; back to the default
+    /// after use).
+    key_velocity: u8,
     /// MIDI controller input, and its held notes: (key, rack row they started on).
     pub midi: crate::midi_in::MidiIn,
     midi_held: Vec<(u8, usize)>,
@@ -1105,6 +1108,7 @@ impl App {
             typing_octave: 0,
             typing_synced: false,
             mouse_note: None,
+            key_velocity: TYPING_VELOCITY,
             midi: crate::midi_in::MidiIn::none(),
             midi_held: Vec::new(),
             title_click: None,
@@ -3391,6 +3395,7 @@ impl App {
                         let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
                         if k != key {
                             self.drag = Some(Drag::PianoKeys { key: k });
+                            self.key_velocity = self.key_click_velocity(x);
                             self.hold_key(Some(k), true);
                         }
                     }
@@ -4189,12 +4194,25 @@ impl App {
         dirty.extend(rects(&self.state));
         self.damage_notes(&dirty);
         if held.is_some() {
-            self.hold_key(held, true);
+            let play = self.audition();
+            self.hold_key(held, play);
         }
     }
 
     /// Set the key held with the mouse (lit on the keyboard). With `play` it sounds as a live note, like a typing-keyboard
     /// key, until another key is held or the button is released (§8).
+    /// Notes clicked or dragged in the piano roll are auditioned, except while playback runs (it is heard already).
+    fn audition(&self) -> bool {
+        !(self.transport.playing() && !self.transport.paused())
+    }
+
+    /// Velocity of a click on the piano roll's keyboard at `x`: soft at the keys' left end, loud at their tips (as FL).
+    fn key_click_velocity(&self, x: f32) -> u8 {
+        let Some(g) = self.piano_grid else { return TYPING_VELOCITY };
+        let (left, w) = (g.x - 73.0, 71.0);
+        (1.0 + 126.0 * ((x - left) / w).clamp(0.0, 1.0)).round() as u8
+    }
+
     fn hold_key(&mut self, key: Option<i32>, play: bool) {
         if self.state.piano.held == key {
             return;
@@ -4207,7 +4225,7 @@ impl App {
         if let (Some(k), true, Some(row)) = (key, play, row) {
             let k = k.clamp(0, views::piano::TOP_KEY) as u16;
             self.sync_live();
-            self.transport.note_on(row, k, TYPING_VELOCITY);
+            self.transport.note_on(row, k, std::mem::replace(&mut self.key_velocity, TYPING_VELOCITY));
             self.mouse_note = Some((row, k));
         }
         // The keyboard column.
@@ -5019,7 +5037,8 @@ impl App {
                     let len = piano::notes(s)[i].length;
                     s.piano.dirty = true;
                     self.drag = Some(Drag::NotePaint { key, start, len });
-                    self.hold_key(Some(key), true);
+                    let play = self.audition();
+                    self.hold_key(Some(key), play);
                     self.damage_piano();
                     return;
                 }
@@ -5073,7 +5092,8 @@ impl App {
                 let n = piano::notes(s)[i];
                 s.piano.last_len = n.length;
                 self.drag = Some(Drag::NoteMove { x0: x, y0: y, orig: vec![(i, n)] });
-                self.hold_key(Some(i32::from(n.key)), true);
+                let play = self.audition();
+                self.hold_key(Some(i32::from(n.key)), play);
             }
             Action::PianoNote(i) => {
                 let Some(&n) = piano::notes(s).get(i) else { return };
@@ -5095,7 +5115,8 @@ impl App {
                     self.resize_cursor = true;
                     Drag::NoteResize { x0: x, orig }
                 } else {
-                    self.hold_key(Some(i32::from(n.key)), true);
+                    let play = self.audition();
+                    self.hold_key(Some(i32::from(n.key)), play);
                     Drag::NoteMove { x0: x, y0: y, orig }
                 });
             }
@@ -5107,6 +5128,7 @@ impl App {
             Action::PianoKeys => {
                 let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
                 self.drag = Some(Drag::PianoKeys { key: k });
+                self.key_velocity = self.key_click_velocity(x);
                 self.hold_key(Some(k), true);
             }
             _ => {}

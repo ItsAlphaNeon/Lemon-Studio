@@ -126,12 +126,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let col = Rect::new(r.x + 9.0, ly.y(METER_Y0), 28.0, bottom - 156.0 - ly.y(METER_Y0));
     let cfg = &s.mixer.meter_cfg;
     let floor = cfg.v[meters::k::FLOOR_DB];
+    // The column is the law's whole range (130-924 at the measured size) squeezed evenly into its height, so marks and
+    // bars keep their proportions at any mixer height (the strips' fixed-size controls do not apply here).
+    let law_h = meters::LAW_BOTTOM - meters::LAW_TOP;
+    let cy = |abs: f32| col.y + (abs - meters::LAW_TOP) / law_h * col.h;
     let hint = if col.contains(ui.mouse.0, ui.mouse.1) {
         // The level at the mouse (the scale is not linear in y: invert it through the law).
-        let ref_y = (0..=400).map(|i| meters::LAW_TOP + (meters::LAW_BOTTOM - meters::LAW_TOP) * i as f32 / 400.0)
-            .min_by(|a, b| (ly.y(*a) - ui.mouse.1).abs().total_cmp(&(ly.y(*b) - ui.mouse.1).abs()))
-            .unwrap_or(meters::LAW_BOTTOM);
-        let db = meters::db_at((meters::LAW_BOTTOM - ref_y) / (meters::LAW_BOTTOM - meters::LAW_TOP), floor);
+        let db = meters::db_at((col.bottom() - ui.mouse.1) / col.h.max(1.0), floor);
         format!("Current  {db:.2}dB  {:.2}", 10f32.powf(db / 20.0))
     } else {
         "Level scale".to_string()
@@ -144,24 +145,37 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.fill_rrect(col, 3.0, ui.t.s(0x191d1e));
         ui.c.fill_rrect(col.inset(1.0), 2.5, ui.t.s(0x222527));
     }
-    // Marks closer than a label height are skipped when the window is squished.
-    let mut last = f32::MIN;
-    for (m, y) in SCALE {
-        let y = ly.y(y);
-        if y - last < 14.0 {
-            continue;
+    // Marks closer than a label height are skipped when the window is squished: "0" always shows, "+3" only with room
+    // above it, the rest downward from "0".
+    let zero = cy(SCALE[1].1);
+    let plus = cy(SCALE[0].1);
+    let mut marks: Vec<(&str, f32)> = Vec::new();
+    if zero - plus >= 14.0 {
+        marks.push((SCALE[0].0, plus));
+    }
+    marks.push((SCALE[1].0, zero));
+    let mut last = zero;
+    for &(m, y) in &SCALE[2..] {
+        let y = cy(y);
+        if y - last >= 14.0 {
+            marks.push((m, y));
+            last = y;
         }
-        last = y;
+    }
+    for (m, y) in marks {
         ui.c.text_center(Font::new(12), Rect::new(col.x, y - 8.0, col.w, 15.0), ui.t.s(0x7f8a90), m);
         ui.c.fill_rect(Rect::new(col.x + 4.0, y + 7.0, col.w - 8.0, 1.0), ui.t.s(0x111315));
     }
     for k in 0..4 {
-        ui.c.fill_rect(Rect::new(col.x + 4.0, ly.y(893.0 + 7.5 * k as f32), col.w - 8.0, 1.0), ui.t.s(0x111315));
+        let y = cy(893.0 + 7.5 * k as f32);
+        if y - last >= 10.0 {
+            ui.c.fill_rect(Rect::new(col.x + 4.0, y, col.w - 8.0, 1.0), ui.t.s(0x111315));
+        }
     }
     // The bars cover the labels (measured: two 13 px bars filling the column inside its 1 px border).
     ui.live(Live::Meter, col);
     if let Some(m) = s.mixer.meters.get(usize::from(s.selected_mixer)) {
-        let ys = |db: f32| ly.y(meters::law_y(db, floor)).min(col.bottom() - 1.0);
+        let ys = |db: f32| cy(meters::law_y(db, floor)).min(col.bottom() - 1.0);
         for i in 0..2 {
             meter_bar(ui, col.x + 1.0 + 13.0 * i as f32, 13.0, col.bottom() - 1.0, m.db[i], m.hold[i], cfg, &ys);
         }
