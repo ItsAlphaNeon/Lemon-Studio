@@ -105,6 +105,8 @@ pub struct Shared {
     block: AtomicU32,
     /// The output the playback or live stream opened: device name, rate, buffer length asked for.
     opened: Mutex<Option<(String, u32, Option<u32>)>>,
+    /// An instrument's editor is open (`Transport::listen`).
+    listening: AtomicBool,
     /// Each running stream's engine voices (its feeder writes them after every fill; a stream that closed drops its
     /// counter). Spec: audio/voices.md §5.
     engine_voices: Mutex<Vec<Weak<AtomicU32>>>,
@@ -164,6 +166,8 @@ enum Cmd {
     NoteOff(usize, u16),
     /// A tap on the Tempo tapper: a click, accented or not, like a live note.
     TapClick(bool),
+    /// An instrument's editor opened or the last one closed (`Transport::listen`).
+    Listen(bool),
     Stop,
     /// Render to a WAV file with the hosted plugins (FILE > Export): project, mode, sample rate, file.
     Export(Box<Project>, PlayMode, u32, PathBuf),
@@ -333,6 +337,15 @@ impl Transport {
     /// note would play (into playback while playing, else on the live stream).
     pub fn tap_click(&self, accent: bool) {
         let _ = self.tx.send(Cmd::TapClick(accent));
+    }
+
+    /// An instrument's editor is open (or the last one closed). Its own keyboard plays notes the host never sees, which
+    /// only sound if the plugin is processed: while nothing plays (stopped or paused) the live stream stays open and
+    /// keeps processing the hosted instruments. The live stream uses the project from the last `play` / `update`.
+    pub fn listen(&self, on: bool) {
+        if self.shared.listening.swap(on, Ordering::AcqRel) != on {
+            let _ = self.tx.send(Cmd::Listen(on));
+        }
     }
 
     /// Hold playback where it is (Playing -> Paused); `resume` continues from the same place.
@@ -578,6 +591,11 @@ impl Feeder {
     fn fill(&mut self, block: usize) {
         let block = 2 * block.max(self.queue.block.load(Ordering::Relaxed)) as u64;
         let Ok(mut e) = self.engine.lock() else { return };
+        // A paused (or stopped) stream renders no more: its fade plays from what is queued, and the engine starts no
+        // note that another stream (live notes, an open editor) would then hear ringing at the instruments.
+        if self.ctl.paused.load(Ordering::Relaxed) && self.queue.queued() > 0 {
+            return;
+        }
         let t0 = Instant::now();
         let mut frames = 0u64;
         let mut tick_len = 0u64;
@@ -762,6 +780,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     // Streams that were stopped and finish their fade before they are dropped.
     let mut closing: Vec<(Session, Instant)> = Vec::new();
     let mut reset_pending = false;
+    // An instrument's editor is open: the live stream stays open while nothing plays (`Transport::listen`). A stream
+    // that would not open is tried again on the next change of state, not every loop.
+    let mut listen = false;
+    let mut listen_retry = false;
     let swap = |s: &mut Session, library: &mut SampleLibrary| {
         // Build outside the lock, then swap at the playing position.
         let mut e = Engine::new(&s.project, library, s.rate, s.mode);
@@ -778,6 +800,23 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     let report = |shared: &Shared, e: String| {
         if let Ok(mut slot) = shared.error.lock() {
             *slot = Some(e);
+        }
+    };
+    // The live stream: live notes, previews of plugin channels, and the instruments while an editor is open.
+    let open_live = |p: &Project, awake: bool, library: &mut SampleLibrary| {
+        let s = Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, library, shared.clone(), &inst, At::default())?;
+        if let Ok(mut e) = s.engine.lock() {
+            e.set_awake(awake);
+        }
+        Ok::<Session, String>(s)
+    };
+    // A paused playback lets go of the notes it holds at the instruments once the live stream processes them (live
+    // notes, an open editor): there they would ring for as long as it is paused.
+    let release_paused = |session: &Option<Session>| {
+        if let Some(s) = session.as_ref().filter(|s| s.paused()) {
+            if let Ok(mut e) = s.engine.lock() {
+                e.release_instruments();
+            }
         }
     };
     let retire = |s: Session, closing: &mut Vec<(Session, Instant)>| {
@@ -801,6 +840,16 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     swap(s, &mut library);
                 }
             }
+            Ok(Cmd::Listen(on)) => {
+                listen = on;
+                listen_retry = true;
+                if let Some(s) = &live {
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.set_awake(on);
+                    }
+                    s.feed.wake();
+                }
+            }
             Ok(cmd @ (Cmd::NoteOn(..) | Cmd::TapClick(_))) => {
                 // A click needs no channel: it also opens the live stream before any project was sent.
                 let empty = Project::default();
@@ -810,12 +859,13 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     _ => {
                         if live.is_none() {
                             if let Some(p) = project {
-                                match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst, At::default()) {
+                                match open_live(p, listen, &mut library) {
                                     Ok(s) => live = Some(s),
                                     Err(e) => report(&shared, e),
                                 }
                             }
                         }
+                        release_paused(&session);
                         live.as_ref()
                     }
                 };
@@ -863,7 +913,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     let running = session.as_ref().is_some_and(|s| !s.paused());
                     if !running && live.is_none() {
                         if let Some(p) = live_project.as_ref().or(Some(&*project)) {
-                            match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst, At::default()) {
+                            match open_live(p, listen, &mut library) {
                                 Ok(s) => live = Some(s),
                                 Err(e) => report(&shared, e),
                             }
@@ -871,7 +921,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     }
                     let target = match session.as_ref() {
                         Some(s) if !s.paused() => Some(s),
-                        _ => live.as_ref(),
+                        _ => {
+                            release_paused(&session);
+                            live.as_ref()
+                        }
                     };
                     if let Some(s) = target {
                         let tempo = project.tempo.unwrap_or(140.0);
@@ -903,6 +956,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 closing.clear();
                 reset_instruments(&inst);
                 reset_pending = false;
+                listen_retry = true;
                 live_project = Some((*project).clone());
                 match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, At { tick: start, paused: false }) {
                     Ok(s) => session = Some(s),
@@ -915,6 +969,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             }
             Ok(Cmd::Reopen) => {
                 live = None;
+                listen_retry = true;
                 preview = None;
                 preview_until = None;
                 closing.clear();
@@ -939,8 +994,17 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 if let Some(s) = &session {
                     s.ctl.paused.store(true, Ordering::Relaxed);
                 }
+                if listen || live.is_some() {
+                    release_paused(&session);
+                }
+                listen_retry = true;
             }
             Ok(Cmd::Resume) => {
+                // As for Play: the live stream must not process the same plugin instances as the playback. Its held
+                // notes are released (the playback delivers their note offs).
+                if session.is_some() {
+                    live = None;
+                }
                 if let Some(s) = &session {
                     s.ctl.paused.store(false, Ordering::Relaxed);
                 }
@@ -950,6 +1014,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     retire(s, &mut closing);
                 }
                 reset_pending = true;
+                listen_retry = true;
             }
             Ok(Cmd::Export(project, mode, rate, path)) => {
                 // Every stream that could process the plugins goes at once (no fade), and they start from silence.
@@ -967,6 +1032,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     *slot = Some(result);
                 }
                 shared.exporting.store(false, Ordering::Release);
+                listen_retry = true;
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
@@ -989,6 +1055,18 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 shared.rewind(0.0);
             }
         }
+        // While an editor is open and nothing plays, the live stream processes the instruments (once the stopped
+        // streams are gone and the instruments reset).
+        if listen && listen_retry && live.is_none() && !reset_pending && closing.is_empty() && session.as_ref().is_none_or(|s| s.paused()) {
+            listen_retry = false;
+            if let Some(p) = live_project.as_ref() {
+                release_paused(&session);
+                match open_live(p, true, &mut library) {
+                    Ok(s) => live = Some(s),
+                    Err(e) => eprintln!("lemonstudio: live stream for the open plugin editor: {e}"),
+                }
+            }
+        }
         // A pattern loops inside the engine; a song ends when it has played out and everything has rung out.
         if session.as_ref().is_some_and(|s| s.done.load(Ordering::Relaxed)) {
             if let Some(s) = session.take() {
@@ -997,6 +1075,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     shared.rewind(0.0);
                 }
             }
+            listen_retry = true;
         }
     }
 }

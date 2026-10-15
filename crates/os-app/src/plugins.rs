@@ -672,6 +672,15 @@ impl Plugins {
         self.hosted.range(..FX_KEY).map(|(&r, h)| (r, h.plugin.clone() as SharedInstrument)).collect()
     }
 
+    /// Whether an instrument's editor is open: its own keyboard plays it without the host, so the transport keeps it
+    /// processed while nothing plays (`Transport::listen`).
+    pub fn editor_open(&self) -> bool {
+        #[cfg(plugin_windows)]
+        return self.hosted.range(..FX_KEY).any(|(_, h)| h.window.is_some());
+        #[cfg(not(plugin_windows))]
+        false
+    }
+
     /// Opens (or raises) row `row`'s plugin window.
     #[cfg(plugin_windows)]
     pub fn open_window(&mut self, row: usize, info: ChannelInfo) -> Result<(), String> {

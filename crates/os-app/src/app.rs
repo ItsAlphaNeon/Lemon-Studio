@@ -1602,6 +1602,12 @@ impl App {
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
         self.plugins.idle(|_| None);
+        // An open instrument editor is processed while nothing plays, so notes from its own keyboard sound.
+        let listen = self.plugins.editor_open();
+        if listen {
+            self.sync_live();
+        }
+        self.transport.listen(listen);
         // Keys pressed while a plugin window has the focus still play the typing keyboard.
         #[cfg(any(windows, target_os = "macos"))]
         for k in crate::plugin_window::take_keys() {
