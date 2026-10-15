@@ -3709,7 +3709,7 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::not_yet("Save channel state as..."),
         PItem::not_yet("Browse channel states"),
         PItem::sep(),
-        PItem::not_yet("Route to free mixer track").key("Ctrl+L"),
+        PItem::new("Route to free mixer track", Cmd::Rack(crate::rack::RCmd::AssignFree(row))).key("Ctrl+L"),
     ];
     Popup { x, y, items, sub: None }
 }

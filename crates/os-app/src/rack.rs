@@ -515,7 +515,7 @@ pub fn row_steps(s: &State, r: usize, len: u32) -> Vec<bool> {
 // ---------------------------------------------------------------------------------------------------------
 // Channel edits
 
-fn channel_name(s: &State, r: usize) -> String {
+pub(crate) fn channel_name(s: &State, r: usize) -> String {
     s.project.channels.get(r).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default()
 }
 
@@ -528,12 +528,6 @@ pub fn clone_name(s: &State, r: usize) -> String {
     };
     let taken = |cand: &str| s.project.channels.iter().any(|c| c.name.as_deref() == Some(cand));
     (2..).map(|k| format!("{base} #{k}")).find(|c| !taken(c)).expect("unbounded")
-}
-
-/// Lowest insert (1..=125) no channel is routed to.
-pub fn free_insert(s: &State) -> u16 {
-    let max = crate::mixer::max_insert(&s.project);
-    (1..=max).find(|t| !s.project.channels.iter().any(|c| c.mixer_track == *t)).unwrap_or(max)
 }
 
 fn seed() -> u64 {
@@ -1355,24 +1349,9 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             }
             None
         }
-        RCmd::AssignFree(r) => {
-            let t = free_insert(s);
-            if let Some(c) = s.project.channels.get_mut(r) {
-                c.mixer_track = t;
-                s.piano.dirty = true;
-            }
-            Some(format!("Routed to Insert {t}"))
-        }
-        RCmd::AssignFreeSel => {
-            for &r in &sel {
-                let t = free_insert(s);
-                if let Some(c) = s.project.channels.get_mut(r) {
-                    c.mixer_track = t;
-                }
-            }
-            s.piano.dirty = true;
-            None
-        }
+        // spec: ui/mixer-track-commands.md §1
+        RCmd::AssignFree(r) => crate::mixer::route_free(s, &[r]),
+        RCmd::AssignFreeSel => crate::mixer::route_free(s, &sel),
         RCmd::SelectMixerTracks => {
             if let Some(t) = sel.first().and_then(|&r| s.project.channels.get(r)).map(|c| c.mixer_track) {
                 s.selected_mixer = t;
