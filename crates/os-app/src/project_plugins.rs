@@ -79,7 +79,7 @@ pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
 /// Writes every hosted third-party plugin into `proj` (the copy a save writes): its channel or slot becomes a wrapped
 /// plugin holding the plugin's identity and current state. A channel or slot the file already held as a wrapped
 /// plugin keeps the wrapper records Lemon Studio does not edit. A copy in another format that stands in for the plugin
-/// the file names, and still has the state it started with, leaves the file's wrapper as it is ([`untouched_stand_in`]).
+/// the file names, and that the user has not edited, leaves the file's wrapper as it is ([`untouched_stand_in`]).
 pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
     for key in plugins.hosted.keys().copied().collect::<Vec<_>>() {
         let Some(d) = plugins.descriptor(key) else { continue };
@@ -97,11 +97,10 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
         if !is_wrapped(&d) {
             continue;
         }
-        let state = plugins.state(key).unwrap_or_default();
-        if untouched_stand_in(proj, plugins, key, &d, &state) {
+        if untouched_stand_in(proj, plugins, key, &d) {
             continue;
         }
-        let r = plugin_ref(&d, state);
+        let r = plugin_ref(&d, plugins.state(key).unwrap_or_default());
         match fx_of(key) {
             None => {
                 let Some(ch) = proj.channels.get_mut(key).filter(|c| c.kind == ChannelKind::Plugin) else { continue };
@@ -119,18 +118,20 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
     }
 }
 
-/// Whether the instance under `key` (descriptor `d`, current state `state`) is a copy in another format standing in for
-/// the wrapped plugin its channel or slot names in `proj`, and still has the state it started with. Its save would
-/// replace the named plugin and its saved settings with the copy at its defaults, so the wrapper keeps the file's bytes.
-/// Once the copy is changed (a parameter, a preset), or once a save has written it (the channel or slot then names the
-/// copy itself), it is saved as what is hosted.
-fn untouched_stand_in(proj: &Project, plugins: &Plugins, key: usize, d: &Descriptor, state: &[u8]) -> bool {
-    let Some(start) = plugins.hosted.get(&key).and_then(|h| h.stand_in.as_deref()) else { return false };
+/// Whether the instance under `key` (descriptor `d`) is a copy in another format standing in for the wrapped plugin its
+/// channel or slot names in `proj`, not edited by the user (`Hosted::stand_in`). Its save would replace the named plugin
+/// and its saved settings with the copy, so the wrapper keeps the file's bytes. Playback and automation clips moving the
+/// copy's parameters do not count. Once the user edits it (in its window, with the parameter menu, by loading a preset),
+/// or once a save has written it (the channel or slot then names the copy itself), it is saved as what is hosted.
+fn untouched_stand_in(proj: &Project, plugins: &Plugins, key: usize, d: &Descriptor) -> bool {
+    if !plugins.hosted.get(&key).is_some_and(|h| h.stand_in) {
+        return false;
+    }
     let named = match fx_of(key) {
         None => proj.channels.get(key).and_then(wrapped_channel),
         Some((t, k)) => proj.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_ref()).and_then(wrapped_slot),
     };
-    start == state && named.is_some_and(|r| switched_format(d, &r).is_some())
+    named.is_some_and(|r| switched_format(d, &r).is_some())
 }
 
 /// The file id (event 201) of the plugin channel or filled mixer slot under hosting key `key`.
@@ -326,7 +327,7 @@ impl crate::app::App {
         }
         if !switched.is_empty() {
             let names = name_list(switched, 4);
-            parts.push(format!("Played by a copy in another format, from its default settings (saved as the original until changed): {names}"));
+            parts.push(format!("Played by a copy in another format, from its default settings (saved as the original until edited): {names}"));
         }
         if !parts.is_empty() {
             self.state.message = Some(parts.join("; "));
@@ -852,8 +853,9 @@ mod tests {
 
     /// A wrapped plugin found only as its copy in another format starts from its defaults (the saved state is the other
     /// format's) and the hint bar says so, next to the plugins that are not found; one found in its own format gets the
-    /// saved state. Saved untouched, the copy leaves the file's wrapper byte for byte; once changed, it is saved as what
-    /// it is, and from then on as any hosted plugin. The built-in Lemon Parametric EQ 2 (a CLAP plugin) stands in.
+    /// saved state. Until the user edits it, the copy leaves the file's wrapper byte for byte, also when something else
+    /// (playback, an automation clip) changed its state; once edited, it is saved as what it is, and from then on as any
+    /// hosted plugin. The built-in Lemon Parametric EQ 2 (a CLAP plugin) stands in.
     #[test]
     fn copies_in_another_format_start_from_their_defaults() {
         WRAP_BUILTINS.with(|w| w.set(true));
@@ -887,7 +889,7 @@ mod tests {
         assert_eq!(a.plugins.eq_file_state(fx_key(3, 0)), Some(fl), "the CLAP state is");
         assert!(a.wrap_failed.contains(&row));
         let told = "Plugins not found (kept in the project): Nowhere; Played by a copy in another format, from its default settings \
-                    (saved as the original until changed): Lemon Parametric EQ 2 (VST2 as CLAP)";
+                    (saved as the original until edited): Lemon Parametric EQ 2 (VST2 as CLAP)";
         assert_eq!(a.state.message.as_deref(), Some(told));
         a.plugins.drop_key(fresh);
         a.state.project.mixer[4].slots[0] = None;
@@ -905,11 +907,21 @@ mod tests {
         a.save_to(path.clone());
         assert_eq!(reload(&path).mixer[2].slots[0], named);
 
-        // Changed: saved as the copy that plays it, with its own state. (The stand-in's file is this program, so the
-        // saved path names it; a plugin file's extension would give the format.)
-        let exe = std::env::current_exe().unwrap();
+        // Its state changed by something other than the user (as an automation clip does): still the file's wrapper.
         let start = a.plugins.state(fx_key(2, 0)).unwrap();
         assert!(a.plugins.set_state(fx_key(2, 0), &eq));
+        a.save_to(path.clone());
+        assert_eq!(reload(&path).mixer[2].slots[0], named, "not the user's edit");
+
+        // Edited by the user (Paste value in the parameter menu): saved as the copy that plays it, with its own state.
+        // (The stand-in's file is this program, so the saved path names it; a plugin file's extension would give the
+        // format.)
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(a.browse_params(fx_key(2, 0)), None);
+        a.state.params.copied = Some(0.75);
+        let paste = crate::playlist::Cmd::Param(crate::params::PCmd::Paste(fx_key(2, 0), 0));
+        assert_eq!(crate::playlist::run(&mut a, paste), None);
+        a.plugins.hosted[&fx_key(2, 0)].plugin.lock().unwrap().idle();
         a.save_to(path.clone());
         let r = wrapped_slot(reload(&path).mixer[2].slots[0].as_ref().unwrap()).unwrap();
         assert_eq!((std::path::PathBuf::from(&r.path), r.id.as_str()), (exe.clone(), ""));

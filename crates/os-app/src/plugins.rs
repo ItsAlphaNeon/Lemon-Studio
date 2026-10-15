@@ -47,10 +47,10 @@ pub struct Hosted {
     /// file's bytes instead of this instance's state (spec: plugins/fruity-abi.md "Saved state").
     pub keep_file_state: bool,
     /// A copy in another format standing in for the wrapped plugin a project names (`project_plugins::switched_format`),
-    /// and the state it started with: while its state is still that one, a save leaves the channel's or slot's wrapper
-    /// bytes as the file had them, so the named plugin and its settings stay in the project (spec: flp/events/plugins.md
-    /// §4, "copy in another format").
-    pub stand_in: Option<Vec<u8>>,
+    /// not edited by the user yet: a save leaves the channel's or slot's wrapper bytes as the file had them, so the named
+    /// plugin and its settings stay in the project. Playback and automation moving its parameters are not edits; the
+    /// user's own are (`Plugins::mark_edited`). Spec: flp/events/plugins.md §4, "copy in another format".
+    pub stand_in: bool,
     /// Its attention count, read without locking it (`os_host::Attention`); `None`: looked at on every tick.
     pub attention: Option<Arc<os_host::Attention>>,
     /// The count and time `idle` last looked at it (`Hosted::due`).
@@ -88,7 +88,7 @@ impl Hosted {
             link: None,
             stop_told: false,
             keep_file_state: false,
-            stand_in: None,
+            stand_in: false,
             attention,
             seen: Look::never(),
         }
@@ -516,12 +516,19 @@ impl Plugins {
         self.hosted.get(&key)?.plugin.lock().ok()?.save_state()
     }
 
-    /// Marks the instance under `key`, just created, as a copy standing in for a plugin in another format, remembering
-    /// the state it starts with (`Hosted::stand_in`).
+    /// Marks the instance under `key`, just created, as a copy standing in for a plugin in another format
+    /// (`Hosted::stand_in`).
     pub fn mark_stand_in(&mut self, key: usize) {
-        let start = self.state(key).unwrap_or_default();
         if let Some(h) = self.hosted.get_mut(&key) {
-            h.stand_in = Some(start);
+            h.stand_in = true;
+        }
+    }
+
+    /// The user edited the instance under `key`: in its own window, with the parameter menu, or by loading a preset. A
+    /// copy standing in for another format's plugin is saved as itself from then on (`Hosted::stand_in`).
+    pub fn mark_edited(&mut self, key: usize) {
+        if let Some(h) = self.hosted.get_mut(&key) {
+            h.stand_in = false;
         }
     }
 

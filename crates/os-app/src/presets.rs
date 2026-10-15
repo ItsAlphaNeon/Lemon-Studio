@@ -276,6 +276,7 @@ fn load_into(app: &mut App, key: usize, path: &Path) -> Option<String> {
     let h = header(app, key)?;
     Some(match load(path, &h.id) {
         Ok((_, state)) if app.plugins.set_state(key, &state) => {
+            app.plugins.mark_edited(key);
             app.plugins.set_preset(key, Some(path.to_path_buf()));
             format!("Preset: {}", shown_name(path))
         }
