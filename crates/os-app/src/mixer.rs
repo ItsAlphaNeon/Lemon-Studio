@@ -74,6 +74,8 @@ pub enum MCmd {
     Layout(u8),
     /// Options ▸ Cable physics: open / close the cables' debug panel (Lemon Studio's own).
     CablePhysics,
+    /// General settings ▸ Animations: simulate the cables (true) or hang them still; kept for the next start.
+    Animations(bool),
     /// Effect slots of the current track.
     AddEffect(u8, usize),
     SlotDelete(u8),
@@ -1052,6 +1054,11 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::CablePhysics => {
             let c = s.cables.get_mut();
             c.debug = !c.debug;
+            None
+        }
+        MCmd::Animations(on) => {
+            s.cables.get_mut().animate(on);
+            crate::app::save_animations(on);
             None
         }
         MCmd::AddEffect(slot, index) => {

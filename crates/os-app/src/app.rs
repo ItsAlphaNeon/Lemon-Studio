@@ -1068,7 +1068,11 @@ impl App {
                 browser_folders: crate::browser::load_folders(),
                 params: Default::default(),
                 browser_dirs: Default::default(),
-                cables: std::cell::RefCell::new(crate::cable::Cables::with(load_cable_cfg())),
+                cables: std::cell::RefCell::new({
+                    let mut c = crate::cable::Cables::with(load_cable_cfg());
+                    c.animate(load_animations());
+                    c
+                }),
                 browser_scroll: 0.0,
                 browser_sel: None,
                 browser_drag: None,
@@ -3168,7 +3172,8 @@ impl App {
     fn audio_menu(&mut self, label: &str, x: f32, y: f32) {
         use crate::audio_cfg::{Set, BUFFERS, RATES};
         use crate::playlist::{Cmd, Mark, PItem, Popup};
-        use views::settings::{BUFFER_LENGTH, OUTPUT_DEVICE, SAMPLE_RATE};
+        use views::settings::{ANIMATIONS, BUFFER_LENGTH, OUTPUT_DEVICE, SAMPLE_RATE};
+        let still = self.state.cables.borrow().still_cables;
         let st = &self.state.settings;
         let cfg = &st.audio;
         let rate = st.rate.unwrap_or(44100);
@@ -3184,6 +3189,10 @@ impl App {
                     PItem::new(views::settings::buffer_text(b, rate), Cmd::Audio(Set::Buffer(Some(b)))).mark(Mark::Radio(cfg.buffer == Some(b)))
                 }))
                 .collect(),
+            ANIMATIONS => {
+                let item = |label: &'static str, on: bool| PItem::new(label, Cmd::Mixer(crate::mixer::MCmd::Animations(on))).mark(Mark::Radio(still != on));
+                vec![item("Entertain me", true), item("Off", false)]
+            }
             _ => return,
         };
         self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None });
@@ -6142,6 +6151,25 @@ fn load_cable_cfg() -> crate::cable::Tuning {
         t.load(&text);
     }
     t
+}
+
+/// General settings ▸ Animations from `animations.txt` in the user folder: on unless it says "Off". Tests always
+/// animate.
+fn load_animations() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    os_paths::user_file("animations.txt").and_then(|f| std::fs::read_to_string(f).ok()).is_none_or(|t| t.trim() != "Off")
+}
+
+pub fn save_animations(on: bool) {
+    if cfg!(test) {
+        return;
+    }
+    if let Some(dir) = os_paths::user_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("animations.txt"), if on { "Entertain me" } else { "Off" });
+    }
 }
 
 fn save_cable_cfg(t: &crate::cable::Tuning) -> Result<PathBuf, String> {

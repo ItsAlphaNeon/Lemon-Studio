@@ -12,6 +12,9 @@
 //! The mixer view connects every cable each time it paints (`begin` / `connect` / `end`); the app steps the ropes on
 //! its tick while any of them moves, and they fall asleep once still. The simulation's factors are `PARAMS`, tuned
 //! live in the cable debug panel (views/cabledebug.rs, Mixer options ▸ Cable physics) and saved to `cables.txt`.
+//!
+//! With animations off (General settings ▸ Animations), cables hang still in a pre-rendered shape: the one the
+//! simulation settles to for their span, worked out once (`settled`) and kept until a factor changes.
 
 use os_ui::{Color, Rect};
 
@@ -27,6 +30,8 @@ const SETTLE: u32 = 30;
 const MAX_DT: f32 = 0.05;
 /// Samples of a cable's resting curve.
 const CURVE: usize = 128;
+/// Longest a pre-rendered shape is simulated for, substeps (10 s).
+const SETTLE_MAX: usize = 2400;
 
 /// A tunable factor of the simulation.
 pub struct Param {
@@ -156,6 +161,10 @@ pub struct Cables {
     pub tuning: Tuning,
     /// The debug panel is open.
     pub debug: bool,
+    /// Animations off: no simulation, every cable hangs still in its pre-rendered shape.
+    pub still_cables: bool,
+    /// Pre-rendered shapes by span (rounded, px), relative to the first socket.
+    shapes: std::collections::HashMap<(i32, i32), Vec<Pt>>,
     ropes: Vec<Rope>,
     /// The current track at the last paint, and which way it moved this paint (-1 left, 1 right, 0 none).
     current: Option<u16>,
@@ -197,6 +206,14 @@ impl Cables {
     /// Set factor `i` (the debug panel): the cables take it at once.
     pub fn set(&mut self, i: usize, x: f32) {
         self.tuning.set(i, x);
+        self.shapes.clear();
+        self.still = None;
+    }
+
+    /// Turn the simulation on or off (General settings ▸ Animations). Off, the cables snap to their pre-rendered
+    /// shapes at the next paint; on, they start from there.
+    pub fn animate(&mut self, on: bool) {
+        self.still_cables = !on;
         self.still = None;
     }
 
@@ -222,6 +239,9 @@ impl Cables {
         let n = ((len / tu.v[k::SPACING]).round() as usize + 1).clamp(MIN_POINTS, MAX_POINTS);
         let seg = len / (n - 1) as f32;
         let tug = tu.v[k::TUG];
+        if self.still_cables {
+            return self.hang_still(key, a, b, master, color, seg);
+        }
         let Some(r) = self.ropes.iter_mut().find(|r| r.key == key) else {
             // A new cable starts at rest in its sag.
             let p = resample(&rest, n);
@@ -265,11 +285,26 @@ impl Cables {
         self.still = None;
     }
 
+    /// Animations off: cable `key` hangs still in the pre-rendered shape for its span.
+    fn hang_still(&mut self, key: u16, a: Pt, b: Pt, master: bool, color: Color, seg: f32) {
+        let span = ((b.0 - a.0).round() as i32, (b.1 - a.1).round() as i32);
+        let tu = &self.tuning;
+        let shape = self.shapes.entry(span).or_insert_with(|| settled(tu, (span.0 as f32, span.1 as f32)));
+        let mut p: Vec<Pt> = shape.iter().map(|&(x, y)| (a.0 + x, a.1 + y)).collect();
+        let last = p.len() - 1;
+        (p[0], p[last]) = (a, b);
+        let rope = Rope { key, master, color, seg, q: p.clone(), p, seen: true };
+        match self.ropes.iter_mut().find(|r| r.key == key) {
+            Some(r) => *r = rope,
+            None => self.ropes.push(rope),
+        }
+    }
+
     /// The paint is over: unplug cables it did not connect, and give the rest the track change's kick and lift.
     pub fn end(&mut self) {
         self.ropes.retain(|r| r.seen);
         let (kick, lift) = (self.tuning.v[k::KICK], self.tuning.v[k::LIFT]);
-        if self.switched == 0.0 || (kick == 0.0 && lift == 0.0) {
+        if self.still_cables || self.switched == 0.0 || (kick == 0.0 && lift == 0.0) {
             return;
         }
         // A velocity change, strongest mid-cable (the sockets hold the ends): against the move, and up.
@@ -293,7 +328,7 @@ impl Cables {
 
     /// Whether any cable is still moving (the app keeps ticking fast while so).
     pub fn moving(&self) -> bool {
-        !self.ropes.is_empty() && self.still.is_none_or(|n| n < SETTLE)
+        !self.still_cables && !self.ropes.is_empty() && self.still.is_none_or(|n| n < SETTLE)
     }
 
     /// Every cable: whether it plugs into the master strip, its points and its colour.
@@ -334,6 +369,24 @@ impl Cables {
         }
         Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
     }
+}
+
+/// The shape a cable spanning `d` from its first socket settles to (points relative to that socket): its resting curve,
+/// simulated until still.
+fn settled(tu: &Tuning, d: Pt) -> Vec<Pt> {
+    let rest = tu.curve((0.0, 0.0), d);
+    let len = arc_len(&rest);
+    let n = ((len / tu.v[k::SPACING]).round() as usize + 1).clamp(MIN_POINTS, MAX_POINTS);
+    let p = resample(&rest, n);
+    let mut r = Rope { key: 0, master: false, color: Color::rgb(0), seg: len / (n - 1) as f32, q: p.clone(), p, seen: true };
+    let mut still = 0;
+    for _ in 0..SETTLE_MAX {
+        still = if substep(&mut r, tu) < REST { still + 1 } else { 0 };
+        if still >= SETTLE {
+            break;
+        }
+    }
+    r.p
 }
 
 /// One Verlet substep of a rope; returns how far its fastest point moved.
@@ -499,6 +552,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn still_cables_hang_in_the_settled_shape() {
+        let (a, b) = ((50.0, 200.0), (230.0, 198.0));
+        let mut sim = Cables::default();
+        plug(&mut sim, 1, &[(4, a, b)]);
+        settle(&mut sim);
+        let mut still = Cables::default();
+        still.animate(false);
+        plug(&mut still, 1, &[(4, a, b)]);
+        assert!(!still.moving());
+        assert_eq!(still.advance(1.0 / 60.0), None);
+        // The pre-rendered shape is where the simulation comes to rest (within its rest slack).
+        let (s, t) = (&sim.ropes[0].p, &still.ropes[0].p);
+        assert_eq!(s.len(), t.len());
+        let off = s.iter().zip(t).map(|(p, q)| (p.0 - q.0).hypot(p.1 - q.1)).fold(0.0, f32::max);
+        assert!(off < 4.0, "{off} px from the settled cable");
+        assert_eq!((t[0], t[t.len() - 1]), (a, b));
+        // A track change moves the still cable without a swing, and the kick does not apply.
+        still.set(k::KICK, 2000.0);
+        plug(&mut still, 3, &[(4, (140.0, 200.0), b)]);
+        assert!(!still.moving());
+        assert_eq!(still.ropes[0].p[0], (140.0, 200.0));
     }
 
     #[test]
