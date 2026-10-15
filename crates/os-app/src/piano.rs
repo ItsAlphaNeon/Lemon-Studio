@@ -74,6 +74,9 @@ pub struct PianoState {
     pub px_per_beat: f32,
     /// Length of the last note added, moved or resized; 0 = not yet (§8: first note is PPQ/2).
     pub last_len: u32,
+    /// The last note clicked or edited in the event panel: new notes take its controls (velocity, pan, release, cutoff,
+    /// resonance, fine pitch, repeat, colour), as FL does; `None` = the defaults.
+    pub last_controls: Option<Note>,
     /// The project changed since the playing engine last got it (notes, steps, mixer, channel
     /// settings, tempo); `App::tick` sends it to the transport.
     pub dirty: bool,
@@ -120,6 +123,7 @@ impl Default for PianoState {
             scroll_y: ((TOP_KEY - 72) as f32) * ROW,
             px_per_beat: 96.0,
             last_len: 0,
+            last_controls: None,
             dirty: false,
             held: None,
             typed: Vec::new(),
@@ -508,10 +512,25 @@ pub fn undo(s: &mut State) -> bool {
 pub fn add_note(s: &mut State, channel: u16, tick: u32, key: i32) -> usize {
     let ppq = u32::from(s.project.ppq.max(4));
     let length = if s.piano.last_len > 0 { s.piano.last_len } else { ppq / 2 };
-    let note = Note { length, key: key.clamp(0, TOP_KEY) as u16, ..Note::step(channel, tick) };
+    let mut note = Note { length, key: key.clamp(0, TOP_KEY) as u16, ..Note::step(channel, tick) };
+    if let Some(t) = s.piano.last_controls {
+        copy_controls(&t, &mut note);
+    }
     let p = pattern_mut(s);
     p.notes.push(note);
     p.notes.len() - 1
+}
+
+/// The controls a new note takes from the last one touched; never its place, length, key or mute.
+pub fn copy_controls(from: &Note, to: &mut Note) {
+    to.velocity = from.velocity;
+    to.pan = from.pan;
+    to.release = from.release;
+    to.mod_x = from.mod_x;
+    to.mod_y = from.mod_y;
+    to.fine_pitch = from.fine_pitch;
+    to.repeat = from.repeat;
+    to.group = (to.group & Note::MUTED) | (from.group & !Note::MUTED);
 }
 
 /// Delete notes by index.
@@ -697,6 +716,18 @@ pub fn zoom_time(s: &mut State, g: &Geom, x: f32, notches: f32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_notes_copy_controls_not_place_or_mute() {
+        use super::*;
+        let mut from = Note { velocity: 33, pan: 10, release: 90, mod_x: 200, mod_y: 7, fine_pitch: 130, repeat: 3, group: 0x05, ..Note::step(0, 480) };
+        from.group |= Note::MUTED;
+        let mut to = Note { length: 48, key: 72, ..Note::step(1, 96) };
+        copy_controls(&from, &mut to);
+        assert_eq!((to.velocity, to.pan, to.release, to.mod_x, to.mod_y, to.fine_pitch, to.repeat), (33, 10, 90, 200, 7, 130, 3));
+        assert_eq!(to.group, 0x05, "the colour comes along, the mute does not");
+        assert_eq!((to.position, to.length, to.key, to.channel), (96, 48, 72, 1));
+    }
+
     #[test]
     fn lanes_map_values_and_centres() {
         let panel = Rect::new(0.0, 100.0, 10.0, 200.0);

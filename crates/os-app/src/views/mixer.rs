@@ -106,6 +106,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     title_tools(ui, s, r);
     if r.h < 2.0 * TITLE_H {
         // Collapsed to the title bar: only the slot panel's title with the window buttons.
+        s.cables.borrow_mut().clear();
         slot_panel(ui, s, Rect::new(r.right() - panel_w, r.y, panel_w, r.h));
         return;
     }
@@ -126,12 +127,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let col = Rect::new(r.x + 9.0, ly.y(METER_Y0), 28.0, bottom - 156.0 - ly.y(METER_Y0));
     let cfg = &s.mixer.meter_cfg;
     let floor = cfg.v[meters::k::FLOOR_DB];
+    // The column is the law's whole range (130-924 at the measured size) squeezed evenly into its height, so marks and
+    // bars keep their proportions at any mixer height (the strips' fixed-size controls do not apply here).
+    let law_h = meters::LAW_BOTTOM - meters::LAW_TOP;
+    let cy = |abs: f32| col.y + (abs - meters::LAW_TOP) / law_h * col.h;
     let hint = if col.contains(ui.mouse.0, ui.mouse.1) {
         // The level at the mouse (the scale is not linear in y: invert it through the law).
-        let ref_y = (0..=400).map(|i| meters::LAW_TOP + (meters::LAW_BOTTOM - meters::LAW_TOP) * i as f32 / 400.0)
-            .min_by(|a, b| (ly.y(*a) - ui.mouse.1).abs().total_cmp(&(ly.y(*b) - ui.mouse.1).abs()))
-            .unwrap_or(meters::LAW_BOTTOM);
-        let db = meters::db_at((meters::LAW_BOTTOM - ref_y) / (meters::LAW_BOTTOM - meters::LAW_TOP), floor);
+        let db = meters::db_at((col.bottom() - ui.mouse.1) / col.h.max(1.0), floor);
         format!("Current  {db:.2}dB  {:.2}", 10f32.powf(db / 20.0))
     } else {
         "Level scale".to_string()
@@ -144,24 +146,37 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.fill_rrect(col, 3.0, ui.t.s(0x191d1e));
         ui.c.fill_rrect(col.inset(1.0), 2.5, ui.t.s(0x222527));
     }
-    // Marks closer than a label height are skipped when the window is squished.
-    let mut last = f32::MIN;
-    for (m, y) in SCALE {
-        let y = ly.y(y);
-        if y - last < 14.0 {
-            continue;
+    // Marks closer than a label height are skipped when the window is squished: "0" always shows, "+3" only with room
+    // above it, the rest downward from "0".
+    let zero = cy(SCALE[1].1);
+    let plus = cy(SCALE[0].1);
+    let mut marks: Vec<(&str, f32)> = Vec::new();
+    if zero - plus >= 14.0 {
+        marks.push((SCALE[0].0, plus));
+    }
+    marks.push((SCALE[1].0, zero));
+    let mut last = zero;
+    for &(m, y) in &SCALE[2..] {
+        let y = cy(y);
+        if y - last >= 14.0 {
+            marks.push((m, y));
+            last = y;
         }
-        last = y;
+    }
+    for (m, y) in marks {
         ui.c.text_center(Font::new(12), Rect::new(col.x, y - 8.0, col.w, 15.0), ui.t.s(0x7f8a90), m);
         ui.c.fill_rect(Rect::new(col.x + 4.0, y + 7.0, col.w - 8.0, 1.0), ui.t.s(0x111315));
     }
     for k in 0..4 {
-        ui.c.fill_rect(Rect::new(col.x + 4.0, ly.y(893.0 + 7.5 * k as f32), col.w - 8.0, 1.0), ui.t.s(0x111315));
+        let y = cy(893.0 + 7.5 * k as f32);
+        if y - last >= 10.0 {
+            ui.c.fill_rect(Rect::new(col.x + 4.0, y, col.w - 8.0, 1.0), ui.t.s(0x111315));
+        }
     }
     // The bars cover the labels (measured: two 13 px bars filling the column inside its 1 px border).
     ui.live(Live::Meter, col);
     if let Some(m) = s.mixer.meters.get(usize::from(s.selected_mixer)) {
-        let ys = |db: f32| ly.y(meters::law_y(db, floor)).min(col.bottom() - 1.0);
+        let ys = |db: f32| cy(meters::law_y(db, floor)).min(col.bottom() - 1.0);
         for i in 0..2 {
             meter_bar(ui, col.x + 1.0 + 13.0 * i as f32, 13.0, col.bottom() - 1.0, m.db[i], m.hold[i], cfg, &ys);
         }
@@ -199,9 +214,51 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let sb = Rect::new(area.x + 13.0, bottom - 14.0, area.w - 20.0, 9.0);
     super::scrollbar(ui, sb, false, s.mixer_scroll, area.w, (f32::from(inserts) + 1.0) * STRIP_W, crate::app::Scroll::MixerX);
     chevron(ui, area.x + 5.0, bottom - 9.5, false, ui.t.s(0x5d6366));
+    cables(ui, s, strips, area, bottom);
 
     slot_panel(ui, s, Rect::new(r.right() - panel_w, r.y, panel_w, r.h));
     resize_zones(ui, s, Win::Mixer, outer);
+}
+
+/// The routing cables (spec: ui/mixer.md §5): one from the current track's ⬇ into each of its send knobs, sagging
+/// and swinging (crate::cable). Sockets on strips scrolled out of view still hold their cable's end.
+fn cables(ui: &mut Ui, s: &State, strips: Rect, area: Rect, bottom: f32) {
+    let socket_x = |n: u16| match n {
+        0 => strips.x + 44.0 + 22.0,
+        n => area.x + STRIP_W * f32::from(n - 1) - s.mixer_scroll + 22.0,
+    };
+    // Each cable is plugged in under the middle of its ⬇ and its knob, which are drawn again over the cables' ends.
+    let (ay, ky) = (bottom - 38.0, bottom - 40.0);
+    let cur = s.selected_mixer;
+    let from = (socket_x(cur), ay);
+    let sends: Vec<(u16, f64)> = (0..=mx::inserts(s)).filter(|&n| n != cur).filter_map(|n| Some((n, mx::send(s, cur, n)?))).collect();
+    let mut cables = s.cables.borrow_mut();
+    cables.begin(cur);
+    for &(n, level) in &sends {
+        // A send at zero is dimmed, as its knob.
+        let col = if level <= 0.0 { ui.t.accent.mix(ui.t.s(0x26292b), 0.65) } else { ui.t.accent };
+        cables.connect(n, from, (socket_x(n), ky), cur == 0 || n == 0, col);
+    }
+    cables.end();
+    // Cables between inserts are clipped where the inserts scroll; those into the master are not.
+    for (master, pts, col) in cables.each() {
+        ui.c.push_clip(if master { strips } else { area });
+        ui.c.polyline(pts, 2.0, col);
+        ui.c.pop_clip();
+    }
+    drop(cables);
+    if sends.is_empty() {
+        return;
+    }
+    let clip = |n: u16| if n == 0 { strips } else { area };
+    ui.c.push_clip(clip(cur));
+    down_arrow(ui, from.0, ay);
+    ui.c.pop_clip();
+    for (n, level) in sends {
+        ui.c.push_clip(clip(n));
+        send_knob(ui, s, n, socket_x(n), ky, level);
+        ui.c.pop_clip();
+    }
 }
 
 fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
@@ -398,23 +455,27 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     mixer_knob(ui, kx, ly.y(PAN_Y), 10.5, 15.0, s.knob(pan), Some(true));
 
     // Reverse polarity (⇕) and swap left / right (⇔) buttons, lit when on, then the separation knob (§4).
+    // They keep their size and spacing below the fader's top at any mixer height (FL's short mixer stacks them the
+    // same way), so they are placed from the fader's top, not scaled with it.
     let (pol, swp) = (track.is_some_and(|m| m.polarity), track.is_some_and(|m| m.swap));
-    let pr = Rect::new(sx - 8.0, ly.y(SEP_Y) - 8.0, 16.0, 16.0);
+    let top = ly.y(TRACK_Y0);
+    let (sep_y, swap_y, ring_y) = (top + SEP_Y - TRACK_Y0, top + SWAP_Y - TRACK_Y0, top + RING_Y - TRACK_Y0);
+    let pr = Rect::new(sx - 8.0, sep_y - 8.0, 16.0, 16.0);
     let hp = ui.hit(pr, Action::Mix(MHit::Polarity(n)), "Reverse polarity");
     let mut g = Glyph::new();
-    g.polygon(&[(sx - 5.0, ly.y(SEP_Y) - 1.5), (sx, ly.y(SEP_Y) - 6.0), (sx + 5.0, ly.y(SEP_Y) - 1.5)]);
-    g.polygon(&[(sx - 5.0, ly.y(SEP_Y) + 1.5), (sx, ly.y(SEP_Y) + 6.0), (sx + 5.0, ly.y(SEP_Y) + 1.5)]);
+    g.polygon(&[(sx - 5.0, sep_y - 1.5), (sx, sep_y - 6.0), (sx + 5.0, sep_y - 1.5)]);
+    g.polygon(&[(sx - 5.0, sep_y + 1.5), (sx, sep_y + 6.0), (sx + 5.0, sep_y + 1.5)]);
     ui.c.glyph(if pol { ui.t.h(0xf3b234) } else if hp { ui.t.tx(0xffffff) } else { ui.t.tx(0xb7c3ca) }, &g);
-    let wr = Rect::new(sx - 8.0, ly.y(SWAP_Y) - 8.0, 16.0, 16.0);
+    let wr = Rect::new(sx - 8.0, swap_y - 8.0, 16.0, 16.0);
     let hw = ui.hit(wr, Action::Mix(MHit::Swap(n)), "Swap left & right channels");
     let mut g = Glyph::new();
-    g.polygon(&[(sx - 1.0, ly.y(SWAP_Y) - 6.0), (sx - 7.0, ly.y(SWAP_Y)), (sx - 1.0, ly.y(SWAP_Y) + 6.0)]);
-    g.polygon(&[(sx + 1.5, ly.y(SWAP_Y) - 6.0), (sx + 7.5, ly.y(SWAP_Y)), (sx + 1.5, ly.y(SWAP_Y) + 6.0)]);
+    g.polygon(&[(sx - 1.0, swap_y - 6.0), (sx - 7.0, swap_y), (sx - 1.0, swap_y + 6.0)]);
+    g.polygon(&[(sx + 1.5, swap_y - 6.0), (sx + 7.5, swap_y), (sx + 1.5, swap_y + 6.0)]);
     ui.c.glyph(if swp { Color::rgb(0x5fb6f0) } else if hw { ui.t.tx(0xffffff) } else { ui.t.tx(0xb7c3ca) }, &g);
-    ui.c.fill_rect(Rect::new(sx - 0.5, ly.y(SWAP_Y) - 6.0, 1.0, 12.0), ui.t.s(0x5a6266));
+    ui.c.fill_rect(Rect::new(sx - 0.5, swap_y - 6.0, 1.0, 12.0), ui.t.s(0x5a6266));
     let sep = KnobId::MixSep(n);
-    ui.hit(Rect::new(sx - 9.0, ly.y(RING_Y) - 9.0, 18.0, 18.0), Action::Knob(sep), s.knob_text(sep));
-    mixer_knob(ui, sx, ly.y(RING_Y), 6.0, 9.5, s.knob(sep), Some(true));
+    ui.hit(Rect::new(sx - 9.0, ring_y - 9.0, 18.0, 18.0), Action::Knob(sep), s.knob_text(sep));
+    mixer_knob(ui, sx, ring_y, 6.0, 9.5, s.knob(sep), Some(true));
 
     // Fader: track, gain marks, handle (green on the selected strip, with the track lit below it).
     let track_y1 = bottom - 99.0;
@@ -456,32 +517,22 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     ui.c.fill_circle(sx, by - 100.0, 2.6, ui.t.tx(0xd8e0e6));
     ui.veil(Rect::new(sx - 9.0, by - 149.0, 18.0, 55.0), body);
 
-    // Routing (spec: ui/mixer.md §5): the current track's green ⬇ with its cables, a send knob where the current
-    // track sends, else the ▲ "route to this track" button; an orange "^" marks tracks that receive a route.
+    // Routing (spec: ui/mixer.md §5): the current track's green ⬇ (its cables are drawn over all strips: `cables`),
+    // a send knob where the current track sends, else the ▲ "route to this track" button; an orange "^" marks tracks that receive a route.
     let ay = by - 38.0;
     let cur = s.selected_mixer;
     let cur_name = mx::name(s, cur);
     if selected {
-        let a = [(kx - 3.0, ay - 6.0), (kx + 3.0, ay - 6.0), (kx + 3.0, ay - 1.0), (kx + 7.0, ay - 1.0), (kx, ay + 6.0), (kx - 7.0, ay - 1.0), (kx - 3.0, ay - 1.0)];
-        ui.c.fill_polygon(&a, t.accent);
-        if track.is_some_and(|m| !m.routes.is_empty()) {
-            ui.c.polyline(&[(kx, ay + 6.0), (kx - 1.0, ay + 18.0), (kx - 6.0, ay + 28.0), (kx - 7.0, ay + 38.0)], 2.0, t.accent);
-        }
+        down_arrow(ui, kx, ay);
     } else if let Some(level) = mx::send(s, cur, n) {
-        // Send knob (fader law) with its arc, the green "^" that removes the route, and the cable from below.
-        let (ky, side) = (by - 40.0, level <= 0.0);
+        // Send knob (fader law) with its arc, the green "^" that removes the route; its cable is drawn with the others.
+        let ky = by - 40.0;
         let id = KnobId::Send(cur, n);
         ui.hit(Rect::new(kx - 13.0, ky - 13.0, 26.0, 26.0), Action::Knob(id), s.knob_text(id));
-        mixer_knob(ui, kx, ky, 10.0, 13.0, s.knob(id), None);
-        let cable = if side { t.accent.mix(ui.t.s(0x26292b), 0.65) } else { t.accent };
-        if !side {
-            let end = 0.75 * PI + (level as f32 / 1.0).min(1.0) * 1.5 * PI;
-            ui.c.arc(kx, ky, 12.5, 0.75 * PI, end, 2.0, t.accent);
-        }
+        send_knob(ui, s, n, kx, ky, level);
         let ur = Rect::new(kx - 6.0, by - 61.0, 12.0, 8.0);
         let hov = ui.hit(ur, Action::Mix(MHit::Unroute(n)), format!("Remove the send from {cur_name} to {}", mx::name(s, n)));
         ui.c.fill_polygon(&[(kx - 4.0, by - 55.0), (kx, by - 59.0), (kx + 4.0, by - 55.0)], if hov { ui.t.tx(0xffffff) } else { t.accent });
-        ui.c.polyline(&[(kx - 3.0, by - 28.0), (kx - 1.0, by - 18.0), (kx + 6.0, by - 9.0), (kx + 10.0, by)], 2.0, cable);
     } else if !(master && cur == 0) {
         let hint = format!("Enable send from {cur_name} to {}  Ctrl/Shift", mx::name(s, n));
         let hov = ui.hit(Rect::new(kx - 8.0, ay - 8.0, 16.0, 14.0), Action::Mix(MHit::Route(n)), hint);
@@ -491,6 +542,23 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
         if !master && mx::receives(s, n) {
             ui.c.fill_polygon(&[(kx - 3.5, ay - 9.0), (kx, ay - 12.5), (kx + 3.5, ay - 9.0)], ui.t.h(0xf09a28));
         }
+    }
+}
+
+/// The current track's green ⬇ (centred on `ay`): where its cables leave.
+fn down_arrow(ui: &mut Ui, kx: f32, ay: f32) {
+    let a = [(kx - 3.0, ay - 6.0), (kx + 3.0, ay - 6.0), (kx + 3.0, ay - 1.0), (kx + 7.0, ay - 1.0), (kx, ay + 6.0), (kx - 7.0, ay - 1.0), (kx - 3.0, ay - 1.0)];
+    ui.c.fill_polygon(&a, ui.t.accent);
+}
+
+/// The send knob from the current track into track `n`, with its level arc (none at zero).
+fn send_knob(ui: &mut Ui, s: &State, n: u16, kx: f32, ky: f32, level: f64) {
+    let id = KnobId::Send(s.selected_mixer, n);
+    mixer_knob(ui, kx, ky, 10.0, 13.0, s.knob(id), None);
+    if level > 0.0 {
+        // From the knob's zero to its pointer (the arc takes a sweep, not an end angle).
+        let sweep = (level as f32).min(1.0) * 1.5 * PI;
+        ui.c.arc(kx, ky, 12.5, 0.75 * PI, sweep, 2.0, ui.t.accent);
     }
 }
 

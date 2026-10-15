@@ -72,6 +72,10 @@ pub enum MCmd {
     Route { dst: u16, only: bool, side: bool },
     /// Layout menu: Wide (the only layout drawn; the others are greyed out).
     Layout(u8),
+    /// Options ▸ Cable physics: open / close the cables' debug panel (Lemon Studio's own).
+    CablePhysics,
+    /// General settings ▸ Animations: simulate the cables (true) or hang them still; kept for the next start.
+    Animations(bool),
     /// Effect slots of the current track.
     AddEffect(u8, usize),
     SlotDelete(u8),
@@ -889,6 +893,8 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub("Trim unused tracks", trim_items(s)),
         PItem::not_yet("Switch smart disable for all plugins"),
         PItem::not_yet("Remove all (audio editor) instances"),
+        // The cable physics debug panel, hidden from users; uncomment to tune the cables again.
+        // PItem::new("Cable physics (debug)...", Cmd::Mixer(MCmd::CablePhysics)).mark(Mark::Check(s.cables.borrow().debug)),
         PItem::head(Box::leak(format!("Mixer track ({})", name(s, s.selected_mixer)).into_boxed_str())),
     ];
     items.extend(track_items(s.selected_mixer));
@@ -1046,6 +1052,16 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::Route { dst, only, side } => route(s, dst, only, side),
         // Wide is the layout shown; the others are greyed out in the menu.
         MCmd::Layout(_) => None,
+        MCmd::CablePhysics => {
+            let c = s.cables.get_mut();
+            c.debug = !c.debug;
+            None
+        }
+        MCmd::Animations(on) => {
+            s.cables.get_mut().animate(on);
+            crate::app::save_animations(on);
+            None
+        }
         MCmd::AddEffect(slot, index) => {
             let t = s.selected_mixer;
             let Some(nm) = app.plugins.effects.get(index).map(|a| a.desc.name.clone()) else { return None };

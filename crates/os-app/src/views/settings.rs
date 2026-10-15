@@ -140,8 +140,10 @@ fn live(key: &str) -> bool {
     LIVE.contains(&key)
 }
 
-/// The combos that work (Audio page: they open a menu of choices, `App::audio_menu`).
-pub const LIVE_COMBOS: [&str; 3] = [OUTPUT_DEVICE, SAMPLE_RATE, BUFFER_LENGTH];
+/// The combos that work (they open a menu of choices, `App::audio_menu`).
+pub const LIVE_COMBOS: [&str; 4] = [OUTPUT_DEVICE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
+/// General ▸ Display: "Entertain me" simulates the mixer's cables, "Off" hangs them still (crate::cable).
+pub const ANIMATIONS: &str = "Animations";
 pub const OUTPUT_DEVICE: &str = "Output device";
 pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
@@ -337,7 +339,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 combo("Main", 64.0, "Pop-ups scaling"),
                 combo("Main", 64.0, "Toolbars scaling"),
                 combo("Off", 64.0, "Transparent windows"),
-                combo("Entertain me", 126.0, "Animations"),
+                combo(if s.cables.borrow().still_cables { "Off" } else { "Entertain me" }, 126.0, ANIMATIONS),
                 Slider("Smoothing", 0.2),
                 combo("Ultrasmooth", 126.0, "Animation refresh rate"),
                 Check2("Force refreshes", true, "Transparent menus", true),
@@ -829,7 +831,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             check(ui, a, *da, g.x + 22.0, cy, live(a));
             check(ui, b, *db, g.x + 324.0, cy, live(b));
         }
-        // The Audio page's device, rate and buffer combos open their menus.
+        // The Audio page's device, rate and buffer combos and General's Animations open their menus.
         Row::Combo(v, w, label) if LIVE_COMBOS.contains(label) => {
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
             let hov = ui.hit(b, Action::Settings(SAct::Combo(label, b.x, b.bottom())), "");

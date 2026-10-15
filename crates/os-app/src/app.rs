@@ -130,6 +130,8 @@ pub enum Action {
     EnableGroups,
     /// The toolbar's song position slider (spec: ui/song-position-slider.md).
     SongPos,
+    /// The time display (song position read-out): a click toggles its mode, right-click opens its menu.
+    Clock,
     /// The toolbar's snap combo: the Snap menu; right-click: Stock note lengths; wheel: the next / previous setting
     /// (spec: ui/global-snap.md §1).
     GlobalSnap,
@@ -148,6 +150,8 @@ pub enum Action {
     MonReset,
     MonSave,
     MonClose,
+    /// Cable physics debug panel (views/cabledebug.rs).
+    CableDebug(crate::cable::DebugAct),
     Minimize,
     Maximize,
     Close,
@@ -671,7 +675,10 @@ pub enum Drag {
     /// Change a channel's mixer track (spec: ui/channel-rack.md §5).
     RackMixer { ch: usize, y0: f32, v0: u16 },
     Fader { track: u16, y0: f32, v0: f64 },
-    Tempo { y0: f32, t0: f64 },
+    /// A plain press on a mixer strip, held: the strip under the cursor is selected as it slides across, to preview
+    /// tracks one after another.
+    MixSelect,
+    Tempo { y0: f32, t0: f64, step: f64 },
     /// The song position slider's handle (`dx` = grab offset from its centre), or the button held on its track (the
     /// next step is due at `next`) (spec: ui/song-position-slider.md §3).
     SongPos { dx: f32 },
@@ -681,6 +688,8 @@ pub enum Drag {
     PianoSplit { dy: f32, top: f32, h: f32 },
     /// Monitor debug panel slider.
     MonParam(usize),
+    /// Cable physics debug panel slider.
+    CableParam(usize),
     /// Piano roll: move notes (originals by index), resize their ends, erase, draw velocities.
     NoteMove { x0: f32, y0: f32, orig: Vec<(usize, Note)> },
     NoteResize { x0: f32, orig: Vec<(usize, Note)> },
@@ -799,6 +808,8 @@ pub struct State {
     pub browser_folders: Vec<PathBuf>,
     /// Directory listings of dropped folders, until reread.
     pub browser_dirs: std::cell::RefCell<std::collections::HashMap<PathBuf, std::rc::Rc<Vec<views::browser::Entry>>>>,
+    /// The mixer's routing cables, hung by the mixer view as it paints and swung on the tick.
+    pub cables: std::cell::RefCell<crate::cable::Cables>,
     pub browser_scroll: f32,
     pub browser_sel: Option<String>,
     pub browser_drag: Option<(String, f32, f32)>,
@@ -813,6 +824,11 @@ pub struct State {
     /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
     pub tempo: f64,
+    /// Where the tempo box's tenths, hundredths and thousandths digits start (x), as last painted: a drag from a digit
+    /// steps the tempo by that digit (views/toolbar.rs).
+    pub tempo_digits: std::cell::Cell<[f32; 3]>,
+    /// The time display shows minute:second:centisecond instead of bar:step:tick (a click toggles it).
+    pub clock_msc: bool,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
     /// MIDI input devices that are open (their notes play the selected channel; spec: ui/midi-input.md).
@@ -937,6 +953,11 @@ pub struct App {
     typing_synced: bool,
     /// The piano-roll key held with the mouse, sounding as a live note until released: (rack row, key).
     mouse_note: Option<(usize, u16)>,
+    /// When the mixer's cables were last stepped (`None` while they are still).
+    cables_at: Option<std::time::Instant>,
+    /// Velocity of the next key the mouse sounds (a keyboard click sets it from the click's x; back to the default
+    /// after use).
+    key_velocity: u8,
     /// MIDI controller input, and its held notes: (key, rack row they started on).
     pub midi: crate::midi_in::MidiIn,
     midi_held: Vec<(u8, usize)>,
@@ -1053,6 +1074,11 @@ impl App {
                 browser_folders: crate::browser::load_folders(),
                 params: Default::default(),
                 browser_dirs: Default::default(),
+                cables: std::cell::RefCell::new({
+                    let mut c = crate::cable::Cables::with(load_cable_cfg());
+                    c.animate(load_animations());
+                    c
+                }),
                 browser_scroll: 0.0,
                 browser_sel: None,
                 browser_drag: None,
@@ -1062,12 +1088,14 @@ impl App {
                 browser_hist: Vec::new(),
                 browser_hist_pos: 0,
                 tempo: 130.0,
+                tempo_digits: std::cell::Cell::new([f32::INFINITY; 3]),
                 message: None,
                 monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
                 cpu: crate::cpu::Cpu::saved(),
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
                 toggles: vec!["typing"],
+                clock_msc: false,
                 midi_inputs: Vec::new(),
                 maximized: true,
                 piano: PianoState::default(),
@@ -1100,6 +1128,8 @@ impl App {
             typing_octave: 0,
             typing_synced: false,
             mouse_note: None,
+            cables_at: None,
+            key_velocity: TYPING_VELOCITY,
             midi: crate::midi_in::MidiIn::none(),
             midi_held: Vec::new(),
             title_click: None,
@@ -2592,6 +2622,45 @@ impl App {
         self.damage_rect(HINT_RECT);
     }
 
+    /// The cable physics panel's controls (views/cabledebug.rs).
+    fn cable_debug(&mut self, d: crate::cable::DebugAct) {
+        use crate::cable::DebugAct;
+        let c = self.state.cables.get_mut();
+        match d {
+            DebugAct::Param(i) => {
+                self.drag = Some(Drag::CableParam(i));
+                let x = self.mouse.0;
+                return self.set_cable_param(i, x);
+            }
+            DebugAct::Reset => {
+                for i in 0..crate::cable::PARAMS.len() {
+                    c.set(i, crate::cable::PARAMS[i].default);
+                }
+            }
+            DebugAct::Save => {
+                self.state.message = Some(match save_cable_cfg(&c.tuning) {
+                    Ok(p) => format!("Cable physics saved to {}", p.display()),
+                    Err(e) => format!("Cable physics not saved: {e}"),
+                });
+            }
+            DebugAct::Close => c.debug = false,
+        }
+        self.invalidate();
+    }
+
+    /// Cable debug panel slider `i` follows mouse x; the cables take the new value at once.
+    fn set_cable_param(&mut self, i: usize, x: f32) {
+        let t = views::cabledebug::slider(i);
+        let p = &crate::cable::PARAMS[i];
+        let k = ((x - t.x) / t.w).clamp(0.0, 1.0);
+        let c = self.state.cables.get_mut();
+        c.set(i, p.min + (p.max - p.min) * k);
+        self.hint = Cow::Owned(format!("{}: {}", p.name, c.tuning.text(i)));
+        self.damage_rect(views::cabledebug::PANEL);
+        self.damage_rect(HINT_RECT);
+        self.damage_win(Win::Mixer);
+    }
+
     /// The monitor is moving (a signal or a decay), or the tapper's pad fading: the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
         self.transport.playing()
@@ -2601,6 +2670,7 @@ impl App {
             || self.loading()
             || self.plugin_windows_busy()
             || self.state.tapper.flash_at.is_some()
+            || self.state.cables.borrow().moving()
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -2609,6 +2679,22 @@ impl App {
         return crate::plugin_window::busy();
         #[cfg(not(target_os = "linux"))]
         false
+    }
+
+    /// The mixer's cables swing until still: step them and repaint where they were and are.
+    fn cables_tick(&mut self, now: std::time::Instant) {
+        if !self.state.shown(Win::Mixer) {
+            self.state.cables.get_mut().clear();
+            self.cables_at = None;
+            return;
+        }
+        let dt = self.cables_at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+        let cables = self.state.cables.get_mut();
+        let moved = cables.advance(dt);
+        self.cables_at = cables.moving().then_some(now);
+        if let Some(r) = moved {
+            self.damage_rect(r);
+        }
     }
 
     /// Periodic housekeeping; returns whether a repaint is needed.
@@ -2632,6 +2718,7 @@ impl App {
         // rate.
         let now = std::time::Instant::now();
         self.song_pos_tick(now);
+        self.cables_tick(now);
         if self.state.cpu.due(now) {
             let tp = &self.transport;
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());
@@ -3092,7 +3179,8 @@ impl App {
     fn audio_menu(&mut self, label: &str, x: f32, y: f32) {
         use crate::audio_cfg::{Set, BUFFERS, RATES};
         use crate::playlist::{Cmd, Mark, PItem, Popup};
-        use views::settings::{BUFFER_LENGTH, OUTPUT_DEVICE, SAMPLE_RATE};
+        use views::settings::{ANIMATIONS, BUFFER_LENGTH, OUTPUT_DEVICE, SAMPLE_RATE};
+        let still = self.state.cables.borrow().still_cables;
         let st = &self.state.settings;
         let cfg = &st.audio;
         let rate = st.rate.unwrap_or(44100);
@@ -3108,6 +3196,10 @@ impl App {
                     PItem::new(views::settings::buffer_text(b, rate), Cmd::Audio(Set::Buffer(Some(b)))).mark(Mark::Radio(cfg.buffer == Some(b)))
                 }))
                 .collect(),
+            ANIMATIONS => {
+                let item = |label: &'static str, on: bool| PItem::new(label, Cmd::Mixer(crate::mixer::MCmd::Animations(on))).mark(Mark::Radio(still != on));
+                vec![item("Entertain me", true), item("Off", false)]
+            }
             _ => return,
         };
         self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None });
@@ -3386,6 +3478,7 @@ impl App {
                         let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
                         if k != key {
                             self.drag = Some(Drag::PianoKeys { key: k });
+                            self.key_velocity = self.key_click_velocity(x);
                             self.hold_key(Some(k), true);
                         }
                     }
@@ -3511,6 +3604,17 @@ impl App {
                     self.state.pattern = (i32::from(p0) + steps).clamp(1, i32::from(crate::patterns::MAX)) as u16;
                     self.invalidate();
                 }
+                Drag::MixSelect => {
+                    // The strip whose column the cursor is in, whatever its height.
+                    let under = self.hits.iter().rev().find_map(|h| match h.action {
+                        Action::Mix(crate::mixer::MHit::Strip(n)) if x >= h.rect.x && x < h.rect.right() => Some(n),
+                        _ => None,
+                    });
+                    if let Some(n) = under.filter(|&n| n != self.state.selected_mixer) {
+                        crate::mixer::select(&mut self.state, n, false);
+                        self.damage_win(Win::Mixer);
+                    }
+                }
                 Drag::Fader { track, y0, v0 } => {
                     let per_px = views::mixer::FADER_PER_PX / f64::from(views::mixer::scale(self.state.win_rect(Win::Mixer)));
                     let v = (v0 - f64::from(y - y0) * per_px).clamp(0.0, 1.0);
@@ -3539,6 +3643,10 @@ impl App {
                     self.set_mon_param(i, x);
                     return true;
                 }
+                Drag::CableParam(i) => {
+                    self.set_cable_param(i, x);
+                    return true;
+                }
                 Drag::SongPos { dx } => self.song_pos_drag(dx),
                 Drag::PianoSplit { dy, top, h } => {
                     let split = self.state.piano.split.dragged(y - dy - top, h);
@@ -3548,8 +3656,9 @@ impl App {
                     }
                 }
                 Drag::SongPosHold { .. } => {}
-                Drag::Tempo { y0, t0 } => {
-                    let t = self.set_tempo(t0 + f64::from(y0 - y).round());
+                Drag::Tempo { y0, t0, step } => {
+                    // Rounded to the box's thousandths, so repeated steps don't drift.
+                    let t = self.set_tempo(((t0 + f64::from(y0 - y).round() * step) * 1000.0).round() / 1000.0);
                     self.hint = Cow::Owned(format!("Tempo {t:.3} BPM"));
                     self.damage_rect(TEMPO_RECT);
                     self.damage_rect(HINT_RECT);
@@ -3763,10 +3872,10 @@ impl App {
         }
     }
 
-    /// True while a right-drag on a scroll bar runs: the shell hides the cursor and keeps it
-    /// where the drag started, feeding relative movement.
+    /// True while a drag moves a value rather than the cursor (knobs, the tempo, scroll-bar right-drags): the shell
+    /// hides the cursor and keeps it where the drag started, feeding relative movement.
     pub fn cursor_locked(&self) -> bool {
-        matches!(self.drag, Some(Drag::BarZoom { .. } | Drag::BarRows { .. } | Drag::Knob { .. }))
+        matches!(self.drag, Some(Drag::BarZoom { .. } | Drag::BarRows { .. } | Drag::Knob { .. } | Drag::Tempo { .. }))
     }
 
     fn bar(&self, t: Scroll) -> Option<Bar> {
@@ -3966,6 +4075,14 @@ impl App {
                 return self.invalidate();
             }
             Some(Action::SongPos) => return self.song_pos_jump(),
+            Some(Action::Clock) => {
+                self.state.playlist.popup = Some(views::menus::clock_popup(&self.state, x, y));
+                return self.invalidate();
+            }
+            Some(Action::DragWindow) if HINT_RECT.contains(x, y) => {
+                self.state.playlist.popup = Some(views::menus::hint_popup(x, y));
+                return self.invalidate();
+            }
             Some(Action::BrowserRow(i)) => {
                 if self.browser_remove_root(*i) || self.params_browser_right(*i, x, y) {
                     return;
@@ -4024,6 +4141,11 @@ impl App {
             let d = crate::monitor::PARAMS[i].default;
             self.state.monitor.cfg.set(i, d);
             return self.damage_rect(views::mondebug::PANEL);
+        }
+        if let Some(Action::CableDebug(crate::cable::DebugAct::Param(i))) = action {
+            self.state.cables.get_mut().set(i, crate::cable::PARAMS[i].default);
+            self.damage_rect(views::cabledebug::PANEL);
+            return self.damage_win(Win::Mixer);
         }
         if action == Some(Action::PianoRuler) {
             if let Some(g) = self.piano_geom() {
@@ -4176,12 +4298,25 @@ impl App {
         dirty.extend(rects(&self.state));
         self.damage_notes(&dirty);
         if held.is_some() {
-            self.hold_key(held, true);
+            let play = self.audition();
+            self.hold_key(held, play);
         }
     }
 
     /// Set the key held with the mouse (lit on the keyboard). With `play` it sounds as a live note, like a typing-keyboard
     /// key, until another key is held or the button is released (§8).
+    /// Notes clicked or dragged in the piano roll are auditioned, except while playback runs (it is heard already).
+    fn audition(&self) -> bool {
+        !(self.transport.playing() && !self.transport.paused())
+    }
+
+    /// Velocity of a click on the piano roll's keyboard at `x`: soft at the keys' left end, loud at their tips (as FL).
+    fn key_click_velocity(&self, x: f32) -> u8 {
+        let Some(g) = self.piano_grid else { return TYPING_VELOCITY };
+        let (left, w) = (g.x - 73.0, 71.0);
+        (1.0 + 126.0 * ((x - left) / w).clamp(0.0, 1.0)).round() as u8
+    }
+
     fn hold_key(&mut self, key: Option<i32>, play: bool) {
         if self.state.piano.held == key {
             return;
@@ -4194,7 +4329,7 @@ impl App {
         if let (Some(k), true, Some(row)) = (key, play, row) {
             let k = k.clamp(0, views::piano::TOP_KEY) as u16;
             self.sync_live();
-            self.transport.note_on(row, k, TYPING_VELOCITY);
+            self.transport.note_on(row, k, std::mem::replace(&mut self.key_velocity, TYPING_VELOCITY));
             self.mouse_note = Some((row, k));
         }
         // The keyboard column.
@@ -4421,13 +4556,19 @@ impl App {
         let ch = piano::channel(&self.state);
         let p = piano::pattern_mut(&mut self.state);
         let mut span: Option<(f32, f32)> = None;
+        let mut edited = None;
         for n in p.notes.iter_mut().filter(|n| Some(n.channel) == ch) {
             let nx = g.x_of(n.position as f32);
             if nx >= a && nx <= b {
                 lane.set(n, v);
+                edited = Some(*n);
                 let end = g.x_of((n.position + n.length.max(g.step)) as f32);
                 span = Some(span.map_or((nx, end), |(l, r)| (l.min(nx), r.max(end))));
             }
+        }
+        // The next notes placed take the edited note's controls.
+        if edited.is_some() {
+            self.state.piano.last_controls = edited;
         }
         // Only the panel columns of the changed lollipops (the hint is left alone: a damage
         // union with the hint panel would cover most of the window).
@@ -5006,7 +5147,8 @@ impl App {
                     let len = piano::notes(s)[i].length;
                     s.piano.dirty = true;
                     self.drag = Some(Drag::NotePaint { key, start, len });
-                    self.hold_key(Some(key), true);
+                    let play = self.audition();
+                    self.hold_key(Some(key), play);
                     self.damage_piano();
                     return;
                 }
@@ -5060,7 +5202,8 @@ impl App {
                 let n = piano::notes(s)[i];
                 s.piano.last_len = n.length;
                 self.drag = Some(Drag::NoteMove { x0: x, y0: y, orig: vec![(i, n)] });
-                self.hold_key(Some(i32::from(n.key)), true);
+                let play = self.audition();
+                self.hold_key(Some(i32::from(n.key)), play);
             }
             Action::PianoNote(i) => {
                 let Some(&n) = piano::notes(s).get(i) else { return };
@@ -5077,12 +5220,14 @@ impl App {
                 let orig: Vec<(usize, Note)> =
                     std::iter::once(i).chain(idx.into_iter().filter(|&j| j != i)).filter_map(|j| notes.get(j).map(|&m| (j, m))).collect();
                 s.piano.last_len = n.length.max(g.step);
+                s.piano.last_controls = Some(n);
                 let nr = g.note_rect(&n).unwrap_or_default();
                 self.drag = Some(if x >= nr.right() - resize_zone(nr.w) {
                     self.resize_cursor = true;
                     Drag::NoteResize { x0: x, orig }
                 } else {
-                    self.hold_key(Some(i32::from(n.key)), true);
+                    let play = self.audition();
+                    self.hold_key(Some(i32::from(n.key)), play);
                     Drag::NoteMove { x0: x, y0: y, orig }
                 });
             }
@@ -5094,6 +5239,7 @@ impl App {
             Action::PianoKeys => {
                 let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
                 self.drag = Some(Drag::PianoKeys { key: k });
+                self.key_velocity = self.key_click_velocity(x);
                 self.hold_key(Some(k), true);
             }
             _ => {}
@@ -5160,12 +5306,10 @@ impl App {
                 if let os_model::ClipSource::Pattern(n) = src {
                     self.state.pattern = n;
                 }
-                if right {
-                    // Right-click on a pattern: rename it (OS choice).
-                    if let os_model::ClipSource::Pattern(n) = src {
-                        let at = self.top_hit(self.mouse.0, self.mouse.1).map_or(self.mouse, |h| (h.rect.x, h.rect.y));
-                        pl::start_edit(&mut self.state, pl::EditTarget::PatternName(n), at);
-                    }
+                if right && matches!(src, os_model::ClipSource::Pattern(_)) {
+                    // Right-click on a pattern: the PATTERNS commands for it (spec: ui/pattern-menu.md §3).
+                    let (x, y) = self.mouse;
+                    self.state.playlist.popup = Some(views::menus::pattern_popup(x, y));
                 }
             }
             Action::PlPopup(i) => {
@@ -5287,6 +5431,14 @@ impl App {
             Action::Stop => {
                 self.perf_transport();
                 self.transport.stop();
+                // Stop rewinds: the song position slider goes back to the start (of the time selection, if any).
+                let s = &mut self.state;
+                if s.song_mode {
+                    s.playlist.pos = s.playlist.range.map_or(0, |(a, _)| a);
+                } else {
+                    s.piano.marker = 0;
+                }
+                self.invalidate();
             }
             Action::PatSong(song) => {
                 let changed = s.song_mode != song;
@@ -5321,8 +5473,19 @@ impl App {
                 s.monitor.debug = false;
                 self.invalidate();
             }
-            Action::Tempo => self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo }),
+            Action::CableDebug(d) => self.cable_debug(d),
+            Action::Tempo => {
+                // The digit under the press sets the step: the whole number, else the decimal place it is over.
+                let x = self.mouse.0;
+                let n = s.tempo_digits.get().iter().filter(|&&d| x >= d).count();
+                let step = [1.0, 0.1, 0.01, 0.001][n];
+                self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo, step });
+            }
             Action::SongPos => self.song_pos_press(),
+            Action::Clock => {
+                s.clock_msc = !s.clock_msc;
+                self.invalidate();
+            }
             Action::GlobalSnap => {
                 // Its top-left at the combo's bottom-left (spec: ui/global-snap.md §2).
                 let b = self.hits.iter().rev().find(|h| h.action == Action::GlobalSnap).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
@@ -5370,8 +5533,12 @@ impl App {
                 s.playlist.source = None;
             }
             Action::Mix(h) => {
+                let plain_strip = matches!(h, crate::mixer::MHit::Strip(_)) && !self.ctrl && !self.shift;
                 if let Some(m) = crate::mixer::hit(self, h) {
                     self.state.message = Some(m);
+                }
+                if plain_strip {
+                    self.drag = Some(Drag::MixSelect);
                 }
             }
             Action::Fader(t) => {
@@ -6001,6 +6168,48 @@ fn load_monitor_cfg() -> crate::monitor::Settings {
     cfg
 }
 
+fn cable_cfg_path() -> Option<PathBuf> {
+    os_paths::user_file("cables.txt")
+}
+
+/// Cable physics factors from `cables.txt` in the user folder (written by the cable debug panel's Save), else
+/// defaults.
+fn load_cable_cfg() -> crate::cable::Tuning {
+    let mut t = crate::cable::Tuning::default();
+    if let Some(text) = cable_cfg_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        t.load(&text);
+    }
+    t
+}
+
+/// General settings ▸ Animations from `animations.txt` in the user folder: on unless it says "Off". Tests always
+/// animate.
+fn load_animations() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    os_paths::user_file("animations.txt").and_then(|f| std::fs::read_to_string(f).ok()).is_none_or(|t| t.trim() != "Off")
+}
+
+pub fn save_animations(on: bool) {
+    if cfg!(test) {
+        return;
+    }
+    if let Some(dir) = os_paths::user_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("animations.txt"), if on { "Entertain me" } else { "Off" });
+    }
+}
+
+fn save_cable_cfg(t: &crate::cable::Tuning) -> Result<PathBuf, String> {
+    let p = cable_cfg_path().ok_or("no user folder")?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, t.dump()).map_err(|e| e.to_string())?;
+    Ok(p)
+}
+
 fn save_monitor_cfg(cfg: &crate::monitor::Settings) -> Result<PathBuf, String> {
     let p = monitor_cfg_path().ok_or("no user folder")?;
     if let Some(d) = p.parent() {
@@ -6250,6 +6459,69 @@ mod tests {
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(back.patterns[0].notes.len(), 2);
+    }
+
+    #[test]
+    fn tempo_drag_locks_the_cursor() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut a, None);
+        let r = hit_rect(&app, &Action::Tempo);
+        let t0 = app.state.tempo;
+        // On the whole number.
+        let x = app.state.tempo_digits.get()[0] - 4.0;
+        app.mouse_move(x, r.cy());
+        frame(&mut app, &mut a, None);
+        app.mouse_down();
+        assert!(app.cursor_locked(), "tempo drags lock the cursor");
+        app.mouse_move(x, r.cy() - 10.0);
+        assert_eq!(app.state.tempo, t0 + 10.0);
+        app.mouse_up();
+        assert!(!app.cursor_locked());
+    }
+
+    #[test]
+    fn tempo_drag_steps_by_the_digit_it_starts_on() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut a, None);
+        let y = hit_rect(&app, &Action::Tempo).cy();
+        let d = app.state.tempo_digits.get();
+        assert!(d[0] < d[1] && d[1] < d[2], "{d:?}");
+        let whole = d[0] - 4.0;
+        for (x, step) in [(whole, 1.0), ((d[0] + d[1]) / 2.0, 0.1), ((d[1] + d[2]) / 2.0, 0.01), (d[2] + 2.0, 0.001)] {
+            app.state.tempo = 130.0;
+            frame(&mut app, &mut a, None);
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_move(x, y - 3.0);
+            app.mouse_up();
+            let want = 130.0 + 3.0 * step;
+            assert!((app.state.tempo - want).abs() < 1e-9, "from x {x}: {} vs {want}", app.state.tempo);
+        }
+    }
+
+    #[test]
+    fn a_held_press_slides_the_mixer_selection_across_strips() {
+        use crate::mixer::MHit;
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut a, None);
+        let (r2, r3) = (hit_rect(&app, &Action::Mix(MHit::Strip(2))), hit_rect(&app, &Action::Mix(MHit::Strip(3))));
+        app.mouse_move(r2.cx(), r2.cy());
+        app.mouse_down();
+        assert_eq!(app.state.selected_mixer, 2);
+        // Into the next strip's column, above the strips: still follows the column.
+        app.mouse_move(r3.cx(), r3.y - 30.0);
+        assert_eq!(app.state.selected_mixer, 3);
+        app.mouse_move(r2.cx(), r2.cy());
+        assert_eq!(app.state.selected_mixer, 2);
+        app.mouse_up();
+        app.mouse_move(r3.cx(), r3.cy());
+        assert_eq!(app.state.selected_mixer, 2, "released: hovering selects nothing");
+        assert_eq!(app.state.mixer.sel, Vec::<u16>::new());
     }
 
     #[test]
