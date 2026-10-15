@@ -1131,7 +1131,8 @@ fn table(ui: &mut Ui, s: &State, area: Rect) {
             led(ui, shr.cx(), shr.cy(), row.shown, hov);
         }
         let col = if row.dim || !row.shown { t.text_dim } else { t.text };
-        let failed = !row.toggles && !row.status.is_empty() && row.status != "ok";
+        // A plugin this program cannot load is listed dimmed, not as an error.
+        let failed = !row.toggles && !row.status.is_empty() && row.status != "ok" && row.status != db::Status::Unsupported.text();
         let cells: [(&str, Color); 6] = [
             (&row.name, col),
             (row.format, col),

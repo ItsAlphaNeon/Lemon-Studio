@@ -154,7 +154,7 @@ VST3 and CLAP plugins and installs them in `%LOCALAPPDATA%\Programs\Common\VST3`
   `CLAP_PATH`, plus any folder added in Settings > Plugins. VST2 plugins are found in the folder their installers
   record (`HKEY_LOCAL_MACHINE\SOFTWARE\VST`, `VSTPluginsPath`) and in those of `%PROGRAMFILES%\VSTPlugins`,
   `%PROGRAMFILES%\Steinberg\VSTPlugins`, `%COMMONPROGRAMFILES%\VST2` and `%COMMONPROGRAMFILES%\Steinberg\VST2` that
-  exist. 32-bit VST2 plugins cannot be loaded.
+  exist. 32-bit VST2 plugins cannot be loaded: they are listed as not supported, without being tried.
 
 ### Linux
 
@@ -258,7 +258,8 @@ that stay above Lemon Studio while it is the active application. A few things di
   overrides the folder.
 - Plugins are found in `~/Library/Audio/Plug-Ins/{CLAP,VST3,VST}`, `/Library/Audio/Plug-Ins/{CLAP,VST3,VST}` and
   `CLAP_PATH`, plus any folder added in Settings > Plugins. Audio Units are not supported. On Apple silicon, plugins
-  built for Intel Macs only (common among older VST2 plugins) cannot be loaded.
+  built for Intel Macs only (common among older VST2 plugins) cannot be loaded; VST2 ones are listed as not supported,
+  without being tried.
 
 ### Using Lemon Studio
 

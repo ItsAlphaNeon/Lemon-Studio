@@ -135,8 +135,45 @@ pub fn is_plugin(p: &Path) -> bool {
     exports(&mut f).is_some_and(|names| names.iter().any(|n| ENTRY_POINTS.contains(&n.as_str())))
 }
 
-/// The architecture of a Windows library ("x86" for a 32-bit one), when `p` is one: a plugin that cannot load in this
-/// program is reported as such instead of with the system's loader error.
+/// Why plugin `path` cannot load in this program, when its file tells without being loaded: a 32-bit Windows plugin in
+/// 64-bit Lemon Studio, or a plugin built for Intel Macs only in Lemon Studio on Apple silicon. Such a plugin is
+/// reported with this reason instead of with the system's loader error, and is not tried in a scanner.
+pub fn unsupported(path: &Path) -> Option<String> {
+    let file = module_file(path);
+    if cfg!(all(windows, target_pointer_width = "64")) && pe_machine(&file) == Some("x86") {
+        return Some("a 32-bit plugin, which a 64-bit program cannot load".into());
+    }
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) && macho_cpus(&file).is_some_and(|c| !c.is_empty() && !c.contains(&CPU_ARM64)) {
+        return Some("built for Intel Macs only, which Lemon Studio on Apple silicon cannot load".into());
+    }
+    None
+}
+
+/// Mach-O CPU types: 64-bit Intel and Apple silicon.
+pub const CPU_X86_64: u32 = 0x0100_0007;
+pub const CPU_ARM64: u32 = 0x0100_000C;
+
+/// The CPU types a Mach-O file is built for: one for a thin file, each slice's for a universal one. `None` when `p` is
+/// not a Mach-O file.
+pub fn macho_cpus(p: &Path) -> Option<Vec<u32>> {
+    let mut f = File::open(p).ok()?;
+    let head = read_at(&mut f, 0, 8)?;
+    let be = |b: &[u8], at: usize| Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?));
+    match be(&head, 0)? {
+        // Thin files, little-endian: 64-bit and 32-bit.
+        0xCFFA_EDFE | 0xCEFA_EDFE => Some(vec![u32_at(&head, 4)?]),
+        // Universal files (big-endian headers): `fat_arch` entries of 20 bytes, `fat_arch_64` of 32.
+        magic @ (0xCAFE_BABE | 0xCAFE_BABF) => {
+            let n = (be(&head, 4)? as usize).min(32);
+            let size = if magic == 0xCAFE_BABE { 20 } else { 32 };
+            let table = read_at(&mut f, 8, n * size)?;
+            (0..n).map(|i| be(&table, i * size)).collect()
+        }
+        _ => None,
+    }
+}
+
+/// The architecture of a Windows library ("x86" for a 32-bit one), when `p` is one.
 pub fn pe_machine(p: &Path) -> Option<&'static str> {
     let mut f = File::open(p).ok()?;
     let pe = pe_header(&mut f)?;
@@ -382,6 +419,53 @@ mod tests {
         assert_eq!(exports(&mut Cursor::new(b"\x7FELF".to_vec())), None);
     }
 
+    /// A thin Mach-O file of `cpu` (64-bit, little-endian), or a universal one with a slice per CPU.
+    fn macho(cpus: &[u32]) -> Vec<u8> {
+        let mut b = Vec::new();
+        if let [cpu] = cpus {
+            b.extend(0xFEED_FACFu32.to_le_bytes());
+            b.extend(cpu.to_le_bytes());
+        } else {
+            b.extend(0xCAFE_BABEu32.to_be_bytes());
+            b.extend((cpus.len() as u32).to_be_bytes());
+            for cpu in cpus {
+                b.extend(cpu.to_be_bytes());
+                b.extend([0; 16]);
+            }
+        }
+        b.extend([0; 32]);
+        b
+    }
+
+    #[test]
+    fn reads_the_cpus_of_mach_o_files() {
+        let d = std::env::temp_dir().join(format!("os-vst2-macho-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let write = |name: &str, b: Vec<u8>| {
+            let p = d.join(name);
+            std::fs::write(&p, b).unwrap();
+            p
+        };
+        assert_eq!(macho_cpus(&write("intel", macho(&[CPU_X86_64]))), Some(vec![CPU_X86_64]));
+        assert_eq!(macho_cpus(&write("universal", macho(&[CPU_X86_64, CPU_ARM64]))), Some(vec![CPU_X86_64, CPU_ARM64]));
+        assert_eq!(macho_cpus(&write("text", b"not a binary".to_vec())), None);
+        // An Intel-only bundle cannot load in Lemon Studio on Apple silicon; a universal one can.
+        let bundle = |name: &str, cpus: &[u32]| {
+            let b = d.join(format!("{name}.vst"));
+            std::fs::create_dir_all(b.join("Contents/MacOS")).unwrap();
+            std::fs::write(b.join("Contents/MacOS").join(name), macho(cpus)).unwrap();
+            b
+        };
+        let (old, both) = (bundle("Old", &[CPU_X86_64]), bundle("Both", &[CPU_X86_64, CPU_ARM64]));
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            assert!(unsupported(&old).is_some_and(|w| w.contains("Intel Macs only")));
+        } else {
+            assert_eq!(unsupported(&old), None);
+        }
+        assert_eq!(unsupported(&both), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn plugin_files_are_told_apart_by_their_exports() {
         let d = std::env::temp_dir().join(format!("os-vst2-files-{}", std::process::id()));
@@ -411,6 +495,13 @@ mod tests {
         std::fs::write(&x86, pe_with_exports(&["main"], 0x014C)).unwrap();
         assert_eq!(pe_machine(&x86), Some("x86"));
         assert_eq!(pe_machine(&d.join("notes.txt")), None);
+        // A 32-bit plugin cannot load in 64-bit Lemon Studio on Windows; the same file means nothing elsewhere.
+        let why = unsupported(&x86);
+        if cfg!(all(windows, target_pointer_width = "64")) {
+            assert!(why.is_some_and(|w| w.contains("32-bit")));
+        } else if !cfg!(target_os = "macos") {
+            assert_eq!(why, None);
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 }

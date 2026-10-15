@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub use files::{exports, has_extension, is_plugin, module_file, pe_machine, standard_dirs, ENTRY_POINTS, EXTENSION};
+pub use files::{exports, has_extension, is_plugin, macho_cpus, module_file, pe_machine, standard_dirs, unsupported, CPU_ARM64, CPU_X86_64, ENTRY_POINTS, EXTENSION};
 pub use os_host::{set_waker, wake, Descriptor};
 
 use abi::{category, flags, op, Effect, Events, Main, MidiEvent, ParameterProperties, Rect, TimeInfo};
@@ -248,8 +248,8 @@ impl Module {
     /// plugin once (VST 2 has no other way to describe one), and a shell's plugins one by one.
     pub fn load(path: &Path) -> Result<Arc<Module>, String> {
         let file = module_file(path);
-        if cfg!(all(windows, target_pointer_width = "64")) && pe_machine(&file) == Some("x86") {
-            return Err(format!("{}: a 32-bit plugin, which a 64-bit program cannot load", file.display()));
+        if let Some(why) = unsupported(path) {
+            return Err(format!("{}: {why}", file.display()));
         }
         unsafe {
             let lib = os_host::load_module(&file)?;

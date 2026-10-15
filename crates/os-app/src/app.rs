@@ -10099,10 +10099,12 @@ mod tests {
         for r in &vst2 {
             println!("  {:22} {:5} {:10} {:8} {:30} {}", r.name, r.format, r.kind, r.status, r.file, r.note);
         }
-        let ok = |name: &str| vst2.iter().any(|r| r.name.replace(' ', "") == name && r.format == "VST2" && r.status != "error");
+        let ok = |name: &str| vst2.iter().any(|r| r.name.replace(' ', "") == name && r.format == "VST2" && r.status == "ok");
         assert!(ok("Kars") && ok("3BandEQ"), "Kars and 3BandEQ listed as VST2");
         if dir32.is_some() {
-            assert!(vst2.iter().any(|r| r.status == "error" && r.note.contains("32-bit")), "32-bit plugins listed with the reason");
+            let unsupported = crate::plugin_db::Status::Unsupported.text();
+            assert!(vst2.iter().any(|r| r.status == unsupported && r.note.contains("32-bit")), "32-bit plugins listed as not supported, with the reason");
+            assert!(!vst2.iter().any(|r| r.status == "error" && r.note.contains("32-bit")), "and not as errors");
         }
         if let Some(d) = &shots {
             frame(&mut a, &mut c, None);

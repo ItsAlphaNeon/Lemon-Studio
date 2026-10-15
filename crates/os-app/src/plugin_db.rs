@@ -200,6 +200,10 @@ pub enum Status {
     Timeout,
     /// Loaded, but no instrument or effect in it.
     Empty,
+    /// A plugin this program cannot load, as its file tells without loading it (a 32-bit plugin, one built for Intel
+    /// Macs only on Apple silicon): listed with the reason, not counted as an error, scanned again only when the file
+    /// changes (or Rescan all).
+    Unsupported,
 }
 
 impl Status {
@@ -216,6 +220,7 @@ impl Status {
             Status::Crashed => "crashed",
             Status::Timeout => "timed out",
             Status::Empty => "no plugins",
+            Status::Unsupported => "not supported",
         }
     }
 }
@@ -912,7 +917,7 @@ pub fn table(available: &[Available], effects: &[Available], cache: &Cache, pref
             note: f.error.clone(),
             favorite: false,
             shown: false,
-            dim: false,
+            dim: f.status == Status::Unsupported,
             toggles: false,
         });
     }
@@ -1242,6 +1247,30 @@ mod tests {
         // The standard VST2 folders are listed, tagged.
         let dirs = search_dirs(&Prefs::default());
         assert!(dirs.iter().any(|s| s.kind == DirKind::Standard(Format::Vst2) && s.tag() == "VST2"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A plugin this program cannot load (a 32-bit one) is listed as not supported, dimmed and with its reason: not
+    /// an error in the scan's report, and not tried again by "Rescan plugins with errors".
+    #[test]
+    fn plugins_that_cannot_load_here_are_not_errors() {
+        let d = temp("unsupported");
+        std::fs::write(d.join("Old.dll"), b"plugin").unwrap();
+        let found = vec![Found { path: d.join("Old.dll"), format: Format::Vst2 }];
+        let tries = AtomicUsize::new(0);
+        let scan = |_: &Path, _: Format| {
+            tries.fetch_add(1, Ordering::Relaxed);
+            Scanned::failed(Status::Unsupported, "a 32-bit plugin, which a 64-bit program cannot load")
+        };
+        let progress = |_: usize, _: usize, _: &Path| {};
+        let first = sweep(&found, &Cache::default(), Mode::Changed, false, 1, &scan, &progress);
+        assert_eq!(first.files[0].status, Status::Unsupported);
+        assert_eq!(compare(&Cache::default(), &first).errors, 0);
+        sweep(&found, &first, Mode::Changed, true, 1, &scan, &progress);
+        assert_eq!(tries.load(Ordering::Relaxed), 1, "not scanned again with the errors");
+        let rows = table(&[], &[], &first, &Prefs::default(), &HashSet::new());
+        assert_eq!((rows[0].status.as_str(), rows[0].format, rows[0].dim), ("not supported", "VST2", true));
+        assert!(rows[0].note.contains("32-bit"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
