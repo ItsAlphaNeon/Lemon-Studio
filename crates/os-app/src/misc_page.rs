@@ -166,31 +166,24 @@ impl M {
     }
 }
 
-/// Arpeggiator chord list (index = stored chord value, `M::ArpChord`): common chord names.
-pub const CHORDS: &[&str] = &[
-    "Auto (sustain)",
-    "Auto",
-    "Major",
-    "Major add9",
-    "Major 6",
-    "Major 7",
-    "Major 9",
-    "Minor",
-    "Minor add9",
-    "Minor 6",
-    "Minor 7",
-    "Minor 9",
-    "7th",
-    "9th",
-    "Sus2",
-    "Sus4",
-    "7sus4",
-    "Diminished",
-    "Diminished 7",
-    "Augmented",
-    "Power (5th)",
-    "Octave",
-];
+/// Entries of FL 24.1's chords file, which the stored arpeggio chord `k >= 1` names (spec: audio/channel-misc.md
+/// "Settings", "The chords file").
+pub const CHORD_ENTRIES: i32 = 88;
+
+/// The name of arpeggio chord `k` (`M::ArpChord`): -1 = the held notes, 0 = the note alone, `k >= 1` = entry `k` of
+/// the chords file. Only entries 1, 7, 10 and 72 are known (their intervals 4,3 / 4,4 / 4,3,2 / 3,2,2,3); the others
+/// show their number.
+pub fn chord_name(k: i32) -> String {
+    match k {
+        -1 => "Held notes".into(),
+        0 => "Note alone".into(),
+        1 => "Major".into(),
+        7 => "Augmented".into(),
+        10 => "Major 6".into(),
+        72 => "Minor pentatonic".into(),
+        k => format!("Chord {k}"),
+    }
+}
 
 /// Values of the page, indexed by `M`. Knobs are 0..1 (bipolar knobs centred at 0.5), switches 0 / 1, boxes and
 /// lists whole numbers (0 = `---` for boxes that can be off), `Root` a MIDI key (60 = C5), `Fine` cents ±100,
@@ -252,13 +245,15 @@ pub fn default_of(m: M) -> f32 {
         M::VolPan | M::VolModX | M::VolModY | M::KeyPan | M::KeyModX | M::KeyModY => 0.5,
         M::EchoPan | M::EchoModX | M::EchoModY | M::EchoPitch => 0.5,
         M::TimeGate | M::TimeSwing | M::ArpGate => 1.0,
-        M::ArpTime => 0.58,
-        M::EchoTime => 0.45,
+        M::ArpTime => os_model::Arpeggio::TIME_DEFAULT,
+        M::EchoTime => os_model::Echo::TIME_DEFAULT,
         M::PolySlide => 500.0 / 1024.0,
         M::FullPorta | M::MainPitch => 1.0,
-        M::ArpRange => 1.0,
+        M::ArpRange | M::ArpRepeat => 1.0,
+        M::ArpChord => -1.0,
         M::Echoes => 4.0,
-        M::Root | M::VolMid | M::KeyMid => 60.0,
+        M::VolMid => 100.0,
+        M::Root | M::KeyMid => 60.0,
         _ => 0.0,
     }
 }
@@ -268,11 +263,12 @@ pub fn range_of(m: M) -> (f32, f32) {
     match m {
         M::PolyMax => (0.0, 999.0),
         M::Cut | M::CutBy => (0.0, 999.0),
-        M::ArpRange => (1.0, 10.0),
-        M::ArpRepeat => (0.0, 99.0),
-        M::Echoes => (1.0, 10.0),
+        // spec: audio/channel-misc.md "Settings" (the echo count's control range was not found; 0 and 10 were exported).
+        M::ArpRange => (0.0, 6.0),
+        M::ArpRepeat => (1.0, 6.0),
+        M::Echoes => (0.0, 10.0),
         M::ArpDir => (0.0, 5.0),
-        M::ArpChord => (0.0, (CHORDS.len() - 1) as f32),
+        M::ArpChord => (-1.0, CHORD_ENTRIES as f32),
         M::Root | M::VolMid | M::KeyMid => (0.0, 131.0),
         M::Fine => (-100.0, 100.0),
         _ => (0.0, 1.0),
@@ -294,14 +290,18 @@ pub fn value_text(m: M, v: f32) -> String {
         Kind::Spin { dash } if dash && v < 0.5 => "none".into(),
         Kind::Spin { .. } => format!("{}", v.round() as i32),
         _ => match m {
-            M::ArpChord => CHORDS.get(v.round().max(0.0) as usize).copied().unwrap_or("").into(),
-            M::ArpDir => ["off", "up", "down", "up and down (sticky)", "up and down (bounce)", "random"][v.round().clamp(0.0, 5.0) as usize].into(),
+            M::ArpChord => chord_name(v.round() as i32),
+            M::ArpDir => ARP_DIR_NAMES[v.round().clamp(0.0, 5.0) as usize].into(),
             M::Fine => format!("{:+.0} cents", v),
-            M::Root | M::VolMid | M::KeyMid => note_name(v.round() as i32),
+            M::VolMid => format!("{}", v.round() as i32),
+            M::Root | M::KeyMid => note_name(v.round() as i32),
             _ => format!("{v}"),
         },
     }
 }
+
+/// Arpeggio directions by stored value (spec: audio/channel-misc.md "Settings").
+const ARP_DIR_NAMES: [&str; 6] = ["off", "up", "down", "up and down (bounce)", "up and down (sticky)", "random"];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Kind {
@@ -644,7 +644,7 @@ pub fn list_on_right(m: M) -> bool {
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn list_entries(m: M) -> Vec<(String, f32)> {
     match m {
-        M::ArpChord => CHORDS.iter().enumerate().map(|(i, s)| (s.to_string(), i as f32)).collect(),
+        M::ArpChord => (-1..=CHORD_ENTRIES).map(|k| (chord_name(k), k as f32)).collect(),
         _ => {
             let (lo, hi) = range_of(m);
             let dash = matches!(kind(m), Kind::Spin { dash: true });
@@ -737,8 +737,8 @@ pub fn paint(c: &mut Canvas, t: &Palette, ax: f32, ay: f32, v: &MiscVals, ui: &M
     let (x0, x1, y0, y1) = CHORD_BOX;
     let cr = rect(x0, x1, y0, y1);
     inst::label(c, t, 166.0 + dx(), cr.cy(), "Chord", false);
-    let chord = CHORDS.get(v.get(M::ArpChord).round().max(0.0) as usize).copied().unwrap_or("");
-    inst::list_box(c, t, cr, chord, hov(ui, v, Hit::Value(M::ArpChord)));
+    let chord = chord_name(v.get(M::ArpChord).round() as i32);
+    inst::list_box(c, t, cr, &chord, hov(ui, v, Hit::Value(M::ArpChord)));
     // Buttons.
     let (x0, x1, y0, y1) = CUT_SELF;
     dark_button(c, t, rect(x0, x1, y0, y1), "Cut self", hov(ui, v, Hit::CutSelf).hover);
@@ -1012,13 +1012,21 @@ mod tests {
         assert_eq!(drag_value(&ui, 0.0, 100.0 - 64.0, true), Some((M::LevelVol, 0.5625)));
         ui.drag = Some((M::Echoes, 100.0, 4.0));
         assert_eq!(drag_value(&ui, 0.0, 84.0, false), Some((M::Echoes, 6.0)));
-        assert_eq!(drag_value(&ui, 0.0, 400.0, false), Some((M::Echoes, 1.0)), "clamped");
+        assert_eq!(drag_value(&ui, 0.0, 400.0, false), Some((M::Echoes, 0.0)), "clamped");
         assert_eq!(click_value(M::Mono, 0.0), Some(1.0));
         assert_eq!(click_value(M::LevelPan, 0.5), None);
         assert_eq!(wheel_value(M::PolyMax, 0.0, 1.0), Some(1.0));
         assert_eq!(list_entries(M::PolyMax)[0].0, "---");
         assert_eq!(value_text(M::LevelPan, 0.75), "+50%");
         assert_eq!(value_text(M::Root, 60.0), "C5");
+        // The arpeggiator's values as the file stores them (spec: audio/channel-misc.md "Settings").
+        assert_eq!(value_text(M::ArpDir, 3.0), "up and down (bounce)");
+        assert_eq!(value_text(M::ArpDir, 4.0), "up and down (sticky)");
+        assert_eq!((value_text(M::ArpChord, -1.0), value_text(M::ArpChord, 0.0), value_text(M::ArpChord, 1.0)), ("Held notes".into(), "Note alone".into(), "Major".into()));
+        let chords = list_entries(M::ArpChord);
+        assert_eq!((chords.len(), chords[0].1, chords[chords.len() - 1].1), (90, -1.0, 88.0));
+        assert_eq!((value_text(M::ArpRepeat, 1.0), list_entries(M::ArpRepeat).len()), ("1".into(), 6));
+        assert_eq!(value_text(M::VolMid, 100.0), "100");
     }
 
     #[test]
