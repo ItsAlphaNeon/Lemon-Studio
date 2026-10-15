@@ -11,6 +11,9 @@
 // spec: plugins/plugin-formats.md (hosting, Lemon Sampler state), ui/plugin-manager.md §4 (scan results, loading for
 // use), ui/plugin-window.md, plugins/host-link.md (Lemon plugins join the window strip)
 
+#[cfg(target_os = "macos")]
+pub mod window_check;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
