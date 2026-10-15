@@ -8,6 +8,7 @@
 // spec: ui/main-window.md
 
 pub mod browser;
+pub mod cabledebug;
 pub mod channel_win;
 pub mod dialog;
 pub mod menus;
@@ -135,6 +136,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     browser::paint_ghost(ui, s);
     if s.monitor.debug {
         mondebug::paint(ui, s);
+    }
+    if s.cables.borrow().debug {
+        cabledebug::paint(ui, s);
     }
     // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
     dialog::paint(ui, s);

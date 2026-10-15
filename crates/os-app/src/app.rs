@@ -150,6 +150,8 @@ pub enum Action {
     MonReset,
     MonSave,
     MonClose,
+    /// Cable physics debug panel (views/cabledebug.rs).
+    CableDebug(crate::cable::DebugAct),
     Minimize,
     Maximize,
     Close,
@@ -683,6 +685,8 @@ pub enum Drag {
     PianoSplit { dy: f32, top: f32, h: f32 },
     /// Monitor debug panel slider.
     MonParam(usize),
+    /// Cable physics debug panel slider.
+    CableParam(usize),
     /// Piano roll: move notes (originals by index), resize their ends, erase, draw velocities.
     NoteMove { x0: f32, y0: f32, orig: Vec<(usize, Note)> },
     NoteResize { x0: f32, orig: Vec<(usize, Note)> },
@@ -1064,7 +1068,7 @@ impl App {
                 browser_folders: crate::browser::load_folders(),
                 params: Default::default(),
                 browser_dirs: Default::default(),
-                cables: Default::default(),
+                cables: std::cell::RefCell::new(crate::cable::Cables::with(load_cable_cfg())),
                 browser_scroll: 0.0,
                 browser_sel: None,
                 browser_drag: None,
@@ -2607,6 +2611,45 @@ impl App {
         self.damage_rect(HINT_RECT);
     }
 
+    /// The cable physics panel's controls (views/cabledebug.rs).
+    fn cable_debug(&mut self, d: crate::cable::DebugAct) {
+        use crate::cable::DebugAct;
+        let c = self.state.cables.get_mut();
+        match d {
+            DebugAct::Param(i) => {
+                self.drag = Some(Drag::CableParam(i));
+                let x = self.mouse.0;
+                return self.set_cable_param(i, x);
+            }
+            DebugAct::Reset => {
+                for i in 0..crate::cable::PARAMS.len() {
+                    c.set(i, crate::cable::PARAMS[i].default);
+                }
+            }
+            DebugAct::Save => {
+                self.state.message = Some(match save_cable_cfg(&c.tuning) {
+                    Ok(p) => format!("Cable physics saved to {}", p.display()),
+                    Err(e) => format!("Cable physics not saved: {e}"),
+                });
+            }
+            DebugAct::Close => c.debug = false,
+        }
+        self.invalidate();
+    }
+
+    /// Cable debug panel slider `i` follows mouse x; the cables take the new value at once.
+    fn set_cable_param(&mut self, i: usize, x: f32) {
+        let t = views::cabledebug::slider(i);
+        let p = &crate::cable::PARAMS[i];
+        let k = ((x - t.x) / t.w).clamp(0.0, 1.0);
+        let c = self.state.cables.get_mut();
+        c.set(i, p.min + (p.max - p.min) * k);
+        self.hint = Cow::Owned(format!("{}: {}", p.name, c.tuning.text(i)));
+        self.damage_rect(views::cabledebug::PANEL);
+        self.damage_rect(HINT_RECT);
+        self.damage_win(Win::Mixer);
+    }
+
     /// The monitor is moving (a signal or a decay), or the tapper's pad fading: the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
         self.transport.playing()
@@ -3573,6 +3616,10 @@ impl App {
                     self.set_mon_param(i, x);
                     return true;
                 }
+                Drag::CableParam(i) => {
+                    self.set_cable_param(i, x);
+                    return true;
+                }
                 Drag::SongPos { dx } => self.song_pos_drag(dx),
                 Drag::PianoSplit { dy, top, h } => {
                     let split = self.state.piano.split.dragged(y - dy - top, h);
@@ -4066,6 +4113,11 @@ impl App {
             let d = crate::monitor::PARAMS[i].default;
             self.state.monitor.cfg.set(i, d);
             return self.damage_rect(views::mondebug::PANEL);
+        }
+        if let Some(Action::CableDebug(crate::cable::DebugAct::Param(i))) = action {
+            self.state.cables.get_mut().set(i, crate::cable::PARAMS[i].default);
+            self.damage_rect(views::cabledebug::PANEL);
+            return self.damage_win(Win::Mixer);
         }
         if action == Some(Action::PianoRuler) {
             if let Some(g) = self.piano_geom() {
@@ -5393,6 +5445,7 @@ impl App {
                 s.monitor.debug = false;
                 self.invalidate();
             }
+            Action::CableDebug(d) => self.cable_debug(d),
             Action::Tempo => self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo }),
             Action::SongPos => self.song_pos_press(),
             Action::Clock => {
@@ -6075,6 +6128,29 @@ fn load_monitor_cfg() -> crate::monitor::Settings {
         cfg.load(&text);
     }
     cfg
+}
+
+fn cable_cfg_path() -> Option<PathBuf> {
+    os_paths::user_file("cables.txt")
+}
+
+/// Cable physics factors from `cables.txt` in the user folder (written by the cable debug panel's Save), else
+/// defaults.
+fn load_cable_cfg() -> crate::cable::Tuning {
+    let mut t = crate::cable::Tuning::default();
+    if let Some(text) = cable_cfg_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        t.load(&text);
+    }
+    t
+}
+
+fn save_cable_cfg(t: &crate::cable::Tuning) -> Result<PathBuf, String> {
+    let p = cable_cfg_path().ok_or("no user folder")?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, t.dump()).map_err(|e| e.to_string())?;
+    Ok(p)
 }
 
 fn save_monitor_cfg(cfg: &crate::monitor::Settings) -> Result<PathBuf, String> {

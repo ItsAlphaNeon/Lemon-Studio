@@ -233,7 +233,7 @@ fn cables(ui: &mut Ui, s: &State, strips: Rect, area: Rect, bottom: f32) {
     let from = (socket_x(cur), ay);
     let sends: Vec<(u16, f64)> = (0..=mx::inserts(s)).filter(|&n| n != cur).filter_map(|n| Some((n, mx::send(s, cur, n)?))).collect();
     let mut cables = s.cables.borrow_mut();
-    cables.begin();
+    cables.begin(cur);
     for &(n, level) in &sends {
         // A send at zero is dimmed, as its knob.
         let col = if level <= 0.0 { ui.t.accent.mix(ui.t.s(0x26292b), 0.65) } else { ui.t.accent };
