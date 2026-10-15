@@ -4,16 +4,19 @@
 // This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
 // and not any other part of Lemon Studio.
 
-//! Lemon Parametric EQ 2 editor: painting and hit regions (platform independent), built from `os_ui::kit` widgets.
+//! Lemon Parametric EQ editor: painting and hit regions (platform independent), built from `os_ui::kit` widgets.
 //!
-//! Coordinates are the editor content's (700 x 350 logical px) from the spec tables. Greys are palette roles so an
-//! imported theme recolours the plugin like the rest of Lemon Studio; band colours are signal colours.
-// spec: plugins/lemon-parametric-eq-2.md (§1 window, §2 graph, §3 faders and band column, §4 bottom row)
+//! Coordinates are the editor content's (700 x 350 logical px) from the spec tables. It is drawn in the Lemon design
+//! only (the plugins have no Classic look): a dark graph well, a lemon curve, pastel band colours, rounded buttons.
+// spec: plugins/lemon-parametric-eq-2.md (§1 window, §2 graph, §3 faders and band column, §4 bottom row);
+// ui/lemon-design.md §11.1
 
 use std::f32::consts::PI;
 
 use os_engine::effects::eq::{self, freq_hz, has_level, Settings, BANDS};
-use os_theme::{Color, Palette};
+use os_theme::design::lemon as brand;
+use os_theme::Color;
+use os_ui::kit::lemon::{self, plug};
 use os_ui::kit::{self, eq as keq, State};
 use os_ui::{Canvas, Font, Rect};
 
@@ -32,7 +35,8 @@ pub const PX_PER_DB: f32 = 246.0 / 36.0;
 /// Columns the curves and the spectrum are computed for.
 pub const COLS: usize = 500;
 
-pub const BAND_COLORS: [u32; BANDS] = [0x8855cc, 0xc254a3, 0xbc6353, 0xb4b850, 0x56b24c, 0x42ad94, 0x446ea9];
+/// The band colours: the original's hues as light pastels on the dark greys.
+pub const BAND_COLORS: [u32; BANDS] = [0xc6a6f2, 0xf2a6d4, 0xf5b29a, 0xe9d27e, 0xacdd90, 0x92d9c7, 0xa1c0f2];
 
 pub const MAIN_X: f32 = 525.0;
 pub const TRACK_TOP: f32 = 25.0;
@@ -124,7 +128,18 @@ pub fn token_pos(s: &Settings, k: usize) -> (f32, f32) {
     (x_of(b.freq), y_of(db))
 }
 
+/// Whether target `t` does anything today. Greyed out: LIN and HQ (the EQ runs plain biquads: no linear phase, no
+/// oversampling); the editor also greys out the menu entries nothing reads yet. Greyed-out controls draw their
+/// disabled look and the editor only names them.
+pub fn works(t: Target) -> bool {
+    !matches!(t, Target::Lin | Target::Hq)
+}
+
+/// Hover / pressed look of a control; greyed-out controls (`works`) are disabled and never light up.
 fn st(vs: &ViewState, r: Rect, t: Target) -> State {
+    if !works(t) {
+        return State { disabled: true, ..State::NORMAL };
+    }
     let hover = vs.pressed.is_none() && vs.mouse.is_some_and(|(x, y)| r.contains(x, y));
     State::new(hover, vs.pressed == Some(t), false)
 }
@@ -134,12 +149,14 @@ fn c_hz(octave: i32) -> f64 {
     440.0 * 2f64.powf(f64::from(octave * 12 - 57) / 12.0)
 }
 
-pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hit> {
+pub fn paint(c: &mut Canvas, look: &Look, vs: &ViewState) -> Vec<Hit> {
     let mut hits = Vec::new();
     c.begin_frame(None);
-    c.fill_rect_gradient(Rect::new(0.0, 0.0, W as f32, H as f32), t.s(0x233642), t.s(0x0f1a21), 0.0);
+    c.fill_rect(Rect::new(0.0, 0.0, W as f32, H as f32), plug::BG);
     let small = Font::new(9).bold();
-    let label = t.tx(0x9aa8b4);
+    let label = Color::rgb(0x8f8f8f);
+    // Rounded chips (octaves, ranges, frequencies).
+    let chip = |c: &mut Canvas, r: Rect, col: Color| c.fill_rrect(r, 3.0, col);
 
     // Octave row (C1 .. C9) and frequency range row.
     let fx = |hz: f64| x_of(eq::freq_pos(hz));
@@ -148,7 +165,7 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
     edges.push(PLOT_X1 + 1.0);
     for (i, w) in edges.windows(2).enumerate() {
         let r = Rect::new(w[0], 7.0, (w[1] - w[0] - 1.0).max(0.0), 10.0);
-        c.fill_rect(r, t.s(0x303d46));
+        chip(c, r, Color::rgb(0x353535));
         if (1..=9).contains(&i) {
             c.text(small, r.x + 3.0, r.y - 1.0, label, &format!("C{i}"));
         }
@@ -157,20 +174,24 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
     for (a, b, name) in ranges {
         let (x0, x1) = (fx(a), if b >= 20000.0 { PLOT_X1 + 1.0 } else { fx(b) });
         let r = Rect::new(x0, 20.0, (x1 - x0 - 1.0).max(0.0), 10.0);
-        c.fill_rect(r, t.s(0x2b3943));
-        c.text_center(small, Rect::new(r.x, r.y - 1.0, r.w, r.h), label, name);
+        chip(c, r, Color::rgb(0x3d3d3d));
+        c.text_center(small, Rect::new(r.x, r.y - 1.0, r.w, r.h), Color::rgb(0xbdbdbd), name);
     }
 
     // Plot.
-    let mid = Rect::new(PLOT.x, PLOT.y, PLOT.w, ZERO_Y - PLOT.y);
-    c.fill_rect_gradient(mid, t.s(0x17262d), t.s(0x1f2c33), 0.0);
-    c.fill_rect_gradient(Rect::new(PLOT.x, ZERO_Y, PLOT.w, PLOT.bottom() - ZERO_Y), t.s(0x1f2c33), t.s(0x1c292f), 0.0);
+    lemon::plug_well(c, PLOT.outset(1.0), 6.0);
+    c.push_clip(PLOT.inset(0.5));
     hits.push(Hit { r: PLOT, t: Target::Graph });
     for i in 0..=24 {
         let db = 18.0 - 1.5 * f64::from(i);
         let y = y_of(db).round();
         let major = i % 4 == 0;
-        c.fill_rect(Rect::new(PLOT.x, y, PLOT.w, 1.0), if major { t.s(0x2c3b44) } else { t.s(0x1d2b33) });
+        let col = match major {
+            _ if i == 12 => Color::rgb(0x3a3a3a),
+            true => Color::rgb(0x2c2c2c),
+            false => Color::rgb(0x232323),
+        };
+        c.fill_rect(Rect::new(PLOT.x, y, PLOT.w, 1.0), col);
     }
     // Every 10 Hz to 100, every 100 Hz to 1k, every 1 kHz to 10k, then 20 kHz; decades brighter.
     let grid = [10.0, 100.0, 1000.0, 10000.0]
@@ -179,8 +200,10 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
         .filter(|(hz, _)| (20.0..=20000.0).contains(hz));
     for (hz, decade) in grid {
         let x = fx(hz).round();
-        c.fill_rect(Rect::new(x, PLOT.y, 1.0, PLOT.h), if decade { t.s(0x2e3f48) } else { t.s(0x24333b) });
+        let col = if decade { Color::rgb(0x353535) } else { Color::rgb(0x272727) };
+        c.fill_rect(Rect::new(x, PLOT.y, 1.0, PLOT.h), col);
     }
+    c.pop_clip();
 
     // Spectrum (monitor on, histogram enabled).
     let range_db = [60.0, 90.0, 120.0][(params::opt(look.extra, Opt::Range) - 1).clamp(0, 2) as usize];
@@ -194,7 +217,7 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
         }
         pts.push((PLOT.right(), PLOT.bottom()));
         if flag(look.extra, params::F_HISTOGRAM) {
-            c.fill_polygon(&pts, t.s(0x3a5a6a).with_alpha(115));
+            c.fill_polygon(&pts, Color::rgb(0x5a5a5a).with_alpha(110));
         }
         // Heatmap strip: the same levels as colour (top, bottom or behind the whole plot).
         if flag(look.extra, params::F_HEATMAP) {
@@ -230,21 +253,22 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
         let band = s.bands[k];
         let pts = curve_of(&|hz| band.response_db(hz, rate));
         let col = band_color(k);
+        // Filled to the 0 dB line.
         let mut fill = pts.clone();
-        fill.push((PLOT.right(), PLOT.bottom()));
-        fill.push((PLOT.x, PLOT.bottom()));
+        fill.push((PLOT.right(), ZERO_Y));
+        fill.push((PLOT.x, ZERO_Y));
         c.push_clip(PLOT);
         c.fill_polygon(&fill, col.with_alpha(40));
-        c.polyline(&pts, 1.5, col.shade(0.15));
+        c.polyline(&pts, 1.2, col.with_alpha(230));
         c.pop_clip();
     }
     let total = curve_of(&|hz| s.response_db(hz, rate));
     let mut fill = total.clone();
-    fill.push((PLOT.right(), PLOT.bottom()));
-    fill.push((PLOT.x, PLOT.bottom()));
+    fill.push((PLOT.right(), ZERO_Y));
+    fill.push((PLOT.x, ZERO_Y));
     c.push_clip(PLOT);
-    c.fill_polygon(&fill, t.tx(0xe8eef2).with_alpha(14));
-    c.polyline(&total, 1.6, t.tx(0xe8eef2));
+    c.fill_polygon(&fill, brand::MAIN.with_alpha(26));
+    c.polyline(&total, 1.8, brand::MAIN);
     c.pop_clip();
 
     // Frequency labels and the dB scale.
@@ -252,13 +276,13 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
     for w in marks.windows(2) {
         let (x0, x1) = (fx(w[0]), if w[1] >= 20000.0 { PLOT_X1 + 1.0 } else { fx(w[1]) });
         let r = Rect::new(x0, 282.0, (x1 - x0 - 1.0).max(0.0), 10.0);
-        c.fill_rect(r, t.s(0x263138));
+        chip(c, r, Color::rgb(0x353535));
         let txt = if w[0] >= 1000.0 { format!("{}k", w[0] / 1000.0) } else { format!("{}", w[0]) };
-        c.text(small, r.x + 3.0, r.y - 1.0, t.tx(0x7c8a96), &txt);
+        c.text(small, r.x + 3.0, r.y - 1.0, label, &txt);
     }
     for db in [18, 12, 6, 0, -6, -12, -18] {
         let s = if db > 0 { format!("+{db}") } else { db.to_string() };
-        c.text_right(Font::new(9), 522.0, y_of(f64::from(db)) - 6.0, t.tx(0x7c8a96), &s);
+        c.text_right(Font::new(9), 522.0, y_of(f64::from(db)) - 6.0, label, &s);
     }
 
     // Tokens (on top of the curves).
@@ -272,13 +296,15 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
             let lit = !has_level(b.kind) || b.db.abs() > 0.005;
             let alpha = if !s.audible(k) { 0.35 } else if lit { 1.0 } else { 0.62 };
             let big = vs.active == Some(k);
-            keq::token(c, t, x, y, k, band_color(k), alpha, big);
+            keq::token(c, x, y, k, band_color(k), alpha, big);
             hits.push(Hit { r: Rect::new(x - 10.0, y - 10.0, 20.0, 20.0), t: Target::Token(k) });
             if big {
                 let f = Font::new(11);
-                let col = band_color(k).shade(0.2);
                 let ry = (y + 13.0).min(PLOT.bottom() - 26.0);
-                c.text_center(f, Rect::new(x - 30.0, ry, 60.0, 13.0), col, &params::hz_text(b.hz()));
+                // The readout on a dark chip.
+                c.fill_rrect(Rect::new(x - 26.0, ry + 1.0, 52.0, 25.0), 5.0, Color::rgb(0x141414).with_alpha(210));
+                let col = band_color(k);
+                c.text_center(f.bold(), Rect::new(x - 30.0, ry, 60.0, 13.0), col, &params::hz_text(b.hz()));
                 c.text_center(f, Rect::new(x - 30.0, ry + 12.0, 60.0, 13.0), col, &format!("{:.0}%", b.width * 100.0));
             }
         }
@@ -287,8 +313,8 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
     // Main fader.
     let main_r = Rect::new(MAIN_X, TRACK_TOP, 13.0, TRACK_BOTTOM - TRACK_TOP + 1.0);
     let mst = st(vs, main_r, Target::Fader(MAIN_FADER));
-    keq::slot(c, t, main_r, mst);
-    keq::handle(c, t, main_r.cx(), y_of(s.main_db), mst);
+    keq::slot(c, main_r, mst);
+    keq::handle(c, main_r.cx(), y_of(s.main_db), brand::MAIN, mst);
     hits.push(Hit { r: main_r, t: Target::Fader(MAIN_FADER) });
 
     // Band columns.
@@ -298,78 +324,79 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
         let col = band_color(k);
         let track = Rect::new(x, 18.0, 13.0, TRACK_BOTTOM - 18.0 + 1.0);
         let fst = st(vs, track, Target::Fader(k));
-        keq::slot(c, t, track, fst);
+        // The slot starts under the type tab.
+        keq::slot(c, Rect::new(x, 27.0, 13.0, TRACK_BOTTOM - 27.0 + 1.0), fst);
         let tab = Rect::new(x, 4.0, 13.0, 22.0);
         let tab_st = st(vs, tab, Target::TypeTab(k));
         let tab_col = if tab_st.hover || tab_st.pressed { col.shade(0.15) } else { col };
-        c.fill_rrect(tab, 3.0, tab_col);
-        c.fill_rrect(Rect::new(x + 1.5, 21.0, 10.0, 14.0), 5.0, t.s(0x1a2933));
-        let ink = col.shade(-0.78);
+        c.fill_rrect(Rect::new(x, 4.0, 13.0, 21.0), 4.0, tab_col);
+        let ink = Color::rgb(0x262626);
         type_icon(c, b.kind, x + 6.5, 10.5, ink);
         order_mark(c, b.order, x + 6.5, 17.5, ink, b.kind);
         hits.push(Hit { r: Rect::new(x, 4.0, 13.0, 12.0), t: Target::TypeTab(k) });
         hits.push(Hit { r: Rect::new(x, 16.0, 13.0, 5.0), t: Target::OrderMark(k) });
         if has_level(b.kind) {
-            keq::handle(c, t, track.cx(), y_of(b.db), fst);
+            keq::handle(c, track.cx(), y_of(b.db), col, fst);
             hits.push(Hit { r: Rect::new(x, TRACK_TOP + 2.0, 13.0, TRACK_BOTTOM - TRACK_TOP - 1.0), t: Target::Fader(k) });
         }
         // Mute / solo switch.
         let sw = Rect::new(x, 294.0, 13.0, 5.0);
-        let swc = if s.audible(k) { col.mix(Color::rgb(0xffffff), 0.3) } else { t.s(0x3a454e) };
         let sst = st(vs, sw.outset(2.0), Target::Switch(k));
-        c.fill_rect(sw, if sst.hover { swc.shade(0.15) } else { swc });
-        c.fill_rect(Rect::new(sw.x, sw.bottom(), sw.w, 1.0), swc.shade(-0.5));
+        let swc = if s.audible(k) { col } else { Color::rgb(0x3d3d3d) };
+        c.fill_rrect(Rect::new(x, 293.0, 13.0, 6.0), 3.0, if sst.hover { swc.mix(Color::rgb(0xffffff), 0.25) } else { swc });
         hits.push(Hit { r: sw.outset(2.0), t: Target::Switch(k) });
         // Knobs.
         let cx = x + 6.5;
         for (y, tgt, v) in [(FREQ_Y, Target::Freq(k), b.freq), (BW_Y, Target::Bw(k), b.width)] {
             let r = Rect::new(cx - KNOB_R - 1.0, y - KNOB_R - 1.0, 2.0 * KNOB_R + 2.0, 2.0 * KNOB_R + 2.0);
-            keq::arc_knob(c, t, cx, y, KNOB_R, v as f32, col, st(vs, r, tgt));
+            keq::arc_knob(c, cx, y, KNOB_R, v as f32, col, st(vs, r, tgt));
             hits.push(Hit { r, t: tgt });
         }
     }
     let cap = Font::condensed(12, 0).bold();
-    c.text_right(cap, 545.0, FREQ_Y - 8.0, t.s(0x3b4d5a), "FREQ");
-    c.text_right(cap, 545.0, BW_Y - 8.0, t.s(0x3b4d5a), "BW");
+    let cap_col = Color::rgb(0x7a7a7a);
+    c.text_right(cap, 545.0, FREQ_Y - 8.0, cap_col, "FREQ");
+    c.text_right(cap, 545.0, BW_Y - 8.0, cap_col, "BW");
     let ph = Rect::new(524.0, 289.0, 16.0, 14.0);
     let pst = st(vs, ph, Target::Phones);
     let on = flag(look.extra, params::F_SOLO_SHIFT);
-    let pcol = if on { t.tx(0xc8d2da) } else if pst.hover { t.tx(0x6f8290) } else { t.s(0x3b4d5a) };
+    let pcol = match (on, pst.hover) {
+        (true, _) => brand::MAIN,
+        (false, true) => brand::TEXT,
+        (false, false) => Color::rgb(0x8f8f8f),
+    };
     headphones(c, 532.0, 296.0, pcol);
     hits.push(Hit { r: ph, t: Target::Phones });
 
     // Wordmark.
-    let wm = t.s(0x2f3d47);
-    let x = 9.0 + c.text(Font::light(15, 0), 9.0, 316.0, wm, "LEMON PARAMETRIC");
-    let x = x + 5.0 + c.text(Font::light(22, 0), x + 5.0, 310.0, wm, "EQ");
-    c.text(Font::light(14, 0), x + 2.0, 322.0, wm, "2");
+    lemon::wordmark(c, 9.0, 303.0, true, "PARAMETRIC EQ", Font::condensed(25, 0), Font::condensed(11, 0).bold());
 
     // Bottom buttons.
     let mut button = |c: &mut Canvas, cx: f32, cy: f32, r: f32, tgt: Target, lit: bool| -> State {
         let rect = Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r);
         let s = st(vs, rect, tgt).with_on(lit);
-        keq::round_button(c, t, cx, cy, r, s);
+        keq::round_button(c, cx, cy, r, s);
         hits.push(Hit { r: rect, t: tgt });
         s
     };
     let s1 = button(c, 261.0, 324.0, 11.0, Target::Options, false);
-    kit::triangle(c, 262.0, 324.0, 6.0, kit::Dir::Right, keq::ink(t, s1));
+    kit::triangle(c, 262.0, 324.0, 6.0, kit::Dir::Right, keq::ink(s1));
     let lin = flag(look.extra, params::F_LIN);
     let s2 = button(c, 298.0, 328.0, 15.0, Target::Lin, lin);
-    c.text_center(Font::condensed(13, 0).bold(), Rect::new(283.0, 320.0, 30.0, 16.0), keq::ink(t, s2), "LIN");
+    c.text_center(Font::condensed(13, 0).bold(), Rect::new(283.0, 320.0, 30.0, 16.0), keq::ink(s2), "LIN");
     let hq = byte(look.extra, params::HQ_BYTE);
     let s3 = button(c, 337.0, 328.0, 15.0, Target::Hq, hq != 0);
     let sub = if hq & 2 != 0 { "+" } else if flag(look.extra, params::F_HQ_ENHANCED) { "E" } else { "L" };
-    let hx = c.text(Font::condensed(13, 0).bold(), 326.0, 319.0, keq::ink(t, s3), "HQ");
-    c.text(Font::new(8).bold(), 326.0 + hx, 327.0, keq::ink(t, s3), sub);
+    let hx = c.text(Font::condensed(13, 0).bold(), 326.0, 319.0, keq::ink(s3), "HQ");
+    c.text(Font::new(8).bold(), 326.0 + hx, 327.0, keq::ink(s3), sub);
     let tok = byte(look.extra, params::TOKENS_BYTE) != 0;
-    let s4 = button(c, 377.0, 328.0, 15.0, Target::Tokens, false);
-    let tc = if tok { keq::ink(t, s4.with_on(false)).shade(0.3) } else { keq::ink(t, s4).shade(-0.3) };
-    kit::tick(c, Rect::new(370.0, 321.0, 14.0, 14.0), tc);
+    // Lit while the tokens show.
+    let s4 = button(c, 377.0, 328.0, 15.0, Target::Tokens, tok);
+    kit::tick(c, Rect::new(370.0, 321.0, 14.0, 14.0), keq::ink(s4));
     let mon = byte(look.extra, params::MONITOR_BYTE);
     for (i, mx) in [409.0, 424.0, 440.0].into_iter().enumerate() {
         let s5 = button(c, mx, 322.0, 6.5, Target::Monitor(i as u8), mon == i as u8);
-        let g = keq::ink(t, s5);
+        let g = keq::ink(s5);
         match i {
             0 => c.fill_rect(Rect::new(mx - 2.5, 321.5, 5.0, 1.2), g),
             1 => c.fill_rect(Rect::new(mx - 0.6, 319.5, 1.2, 5.0), g),
@@ -377,13 +404,14 @@ pub fn paint(c: &mut Canvas, t: &Palette, look: &Look, vs: &ViewState) -> Vec<Hi
         }
     }
     let lab = Font::condensed(11, 0).bold();
-    c.text_center(lab, Rect::new(394.0, 333.0, 60.0, 13.0), t.tx(0x6c7c88), "MONITOR");
+    let lab_col = Color::rgb(0x8f8f8f);
+    c.text_center(lab, Rect::new(394.0, 333.0, 60.0, 13.0), lab_col, "MONITOR");
     let s6 = button(c, 467.0, 321.0, 10.0, Target::Store, false);
-    kit::triangle(c, 467.0, 322.0, 6.0, kit::Dir::Down, keq::ink(t, s6));
+    kit::triangle(c, 467.0, 322.0, 6.0, kit::Dir::Down, keq::ink(s6));
     let s7 = button(c, 491.0, 321.0, 10.0, Target::Flip, false);
-    kit::triangle(c, 491.0, 318.5, 5.0, kit::Dir::Up, keq::ink(t, s7));
-    kit::triangle(c, 491.0, 324.0, 5.0, kit::Dir::Down, keq::ink(t, s7));
-    c.text_center(lab, Rect::new(449.0, 333.0, 60.0, 13.0), t.tx(0x6c7c88), "COMPARE");
+    kit::triangle(c, 491.0, 318.5, 5.0, kit::Dir::Up, keq::ink(s7));
+    kit::triangle(c, 491.0, 324.0, 5.0, kit::Dir::Down, keq::ink(s7));
+    c.text_center(lab, Rect::new(449.0, 333.0, 60.0, 13.0), lab_col, "COMPARE");
     hits
 }
 

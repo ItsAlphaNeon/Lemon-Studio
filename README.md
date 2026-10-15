@@ -92,7 +92,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Undo | 🚧 | Per editor (piano roll, playlist); no redo or global history yet |
 | Audio drivers | 🚧 | WASAPI on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no ASIO or JACK yet |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
-| Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; plugin editors not restyled yet |
+| Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; Lemon plugin editors in the Lemon design only |
 | Audio recording | ❌ | |
 | MIDI file import / export | ❌ | |
 | Audio editing | ❌ | |
@@ -142,7 +142,7 @@ $link.TargetPath = "$env:USERPROFILE\.cargo\bin\lemonstudio.exe"
 $link.Save()
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon 3x Osc and Lemon Parametric EQ 2 as
+**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
 VST3 and CLAP plugins and installs them in `%LOCALAPPDATA%\Programs\Common\VST3` and `...\CLAP`, where DAWs find them.
 
 **Notes**
@@ -188,7 +188,7 @@ install -Dm644 crates/os-app/assets/lemonstudio.png ~/.local/share/icons/hicolor
 install -Dm644 crates/os-app/assets/lemonstudio.desktop ~/.local/share/applications/lemonstudio.desktop
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon 3x Osc and Lemon Parametric EQ 2 as
+**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
 VST3 and CLAP plugins and installs them in `~/.vst3` and `~/.clap`.
 
 **Notes**
@@ -235,7 +235,7 @@ Finder opens `.flp` projects with it. Without `--install` the app is only writte
 cargo run -p bundle-app -- --install
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon 3x Osc and Lemon Parametric EQ 2 as
+**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
 VST3 and CLAP plugin bundles, signed ad hoc so that Apple silicon loads them, and installs them in
 `~/Library/Audio/Plug-Ins/VST3` and `.../CLAP`.
 
@@ -271,9 +271,10 @@ Use `FILE > Export as WAV` (Ctrl+R) to render the song, or the current pattern i
 Ctrl+Shift+D switches between the Lemon and Classic designs (the choice is remembered). On macOS, Command stands in for
 Ctrl.
 
-Lemon Studio's plugins were called Open Sampler, Open 3x Osc and Open Parametric EQ 2 before. They keep their plugin
-IDs, so sessions saved with the old names still open with the new plugins; delete any old `Open *.vst3` /
-`Open *.clap` bundles you installed, or DAWs will list each plugin twice.
+Lemon Trio and Lemon Parametric EQ were called Lemon 3x Osc and Lemon Parametric EQ 2 before, and earlier all three
+plugins were called Open Sampler, Open 3x Osc and Open Parametric EQ 2. They keep their plugin IDs, so sessions saved
+with the old names still open with the new plugins. `bundle-plugins --install` removes bundles it installed under the
+old names; delete any others you copied yourself, or DAWs will list each plugin twice.
 
 ### Tests
 
@@ -284,6 +285,8 @@ cargo test --workspace
 Tests that need an audio device are marked `#[ignore]` and run with `cargo test -p os-app -- --ignored`.
 Project-file corpus tests run when `OPENSTUDIO_FLP_CORPUS` points to a text file listing `.flp` paths;
 project files are never committed to this repository.
+The watermark test (`cargo test -p watermark`) checks that every source file opens with the copyright and ArtCraft
+header.
 
 ### Command-line tools
 
@@ -316,8 +319,8 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of Lemon Studio's own plugins |
 | [`os-paths`](crates/os-paths) | Where Lemon Studio keeps its settings, themes and presets on each platform |
 | [`lemon-sampler`](plugins/lemon-sampler) | Lemon Sampler instrument (VST3 + CLAP) |
-| [`lemon-3x-osc`](plugins/lemon-3x-osc) | Lemon 3x Osc instrument (VST3 + CLAP) |
-| [`lemon-parametric-eq-2`](plugins/lemon-parametric-eq-2) | Lemon Parametric EQ 2 effect (VST3 + CLAP) |
+| [`lemon-3x-osc`](plugins/lemon-3x-osc) | Lemon Trio instrument (VST3 + CLAP) |
+| [`lemon-parametric-eq-2`](plugins/lemon-parametric-eq-2) | Lemon Parametric EQ effect (VST3 + CLAP) |
 
 ## Roadmap
 

@@ -42,10 +42,7 @@ fn main() {
         _ => None,
     };
     let sv = SampleView { sample: sample.as_ref(), path, bits, spectrum: spec.as_ref().map(|(w, h, p)| (*w, *h, p.as_slice())) };
-    let theme = std::env::var_os("OS_THEME")
-        .and_then(|p| std::fs::read(p).ok())
-        .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
-        .unwrap_or_default();
+    let theme = os_plugkit::palette();
     view::paint(&mut c, &theme, &vals, &st, &sv, "", hosted);
     if std::env::var_os("OS_BENCH").is_some() {
         // Full-frame paint time (what a knob drag repaints).

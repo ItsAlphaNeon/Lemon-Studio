@@ -288,7 +288,7 @@ mod tests {
         let (a, b) = (Arc::new(Meter::default()), Arc::new(Meter::default()));
         let t0 = Instant::now();
         let mut p = Perf::default();
-        let list = |a: &Arc<Meter>, b: &Arc<Meter>| vec![src(0, "Lemon Sampler", a, true), src(1 << 24, "Lemon Parametric EQ 2", b, false)];
+        let list = |a: &Arc<Meter>, b: &Arc<Meter>| vec![src(0, "Lemon Sampler", a, true), src(1 << 24, "Lemon Parametric EQ", b, false)];
         p.read(t0, list(&a, &b));
         assert!(p.rows.iter().all(|r| r.time == 0.0), "no time over the first reading");
         // 5 ms and 1 ms of processing over half a second: 10 000 and 2 000 µs per second.
@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(p.rows[0].peak, 0.0);
         // Text sorts A to Z; a second click reverses.
         p.sort_by(Col::Plugin);
-        assert_eq!(p.rows[0].name, "Lemon Parametric EQ 2");
+        assert_eq!(p.rows[0].name, "Lemon Parametric EQ");
         p.sort_by(Col::Plugin);
         assert_eq!(p.rows[0].name, "Lemon Sampler");
         p.find = "EQ".into();

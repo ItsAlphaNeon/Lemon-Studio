@@ -178,6 +178,17 @@ fn check(m: &mut MenuDef<Cmd>, label: &str, on: bool, c: Cmd) {
     m.add(MenuItem::item(label).mark(Mark::Check(on)), c);
 }
 
+/// A check entry for a setting nothing reads yet: greyed out.
+fn check_off(m: &mut MenuDef<Cmd>, label: &str, on: bool) {
+    m.add(MenuItem::item(label).mark(Mark::Check(on)).enabled(false), Cmd::None);
+}
+
+/// `m` with every entry greyed out (settings nothing reads yet).
+fn greyed(mut m: MenuDef<Cmd>) -> MenuDef<Cmd> {
+    m.items = m.items.into_iter().map(|it| it.enabled(false)).collect();
+    m
+}
+
 fn opt_menu(extra: &[u8], o: Opt, names: &[&str], first: i32) -> MenuDef<Cmd> {
     let mut m = MenuDef::new(MenuStyle::Context);
     let cur = params::opt(extra, o);
@@ -314,8 +325,9 @@ impl Logic {
             }
             Some(Target::Graph) => format!("{}Hz {:.1}dB", eq::freq_hz(view::n_of(x)).round(), view::db_of(y)),
             Some(Target::Options) => "Options".into(),
-            Some(Target::Lin) => "Linear phase".into(),
-            Some(Target::Hq) => "High quality (oversampling)".into(),
+            // Greyed out (`view::works`).
+            Some(Target::Lin) => "Linear phase: not available yet".into(),
+            Some(Target::Hq) => "High quality (oversampling): not available yet".into(),
             Some(Target::Tokens) => "View band tokens".into(),
             Some(Target::Phones) => "Band solo on shift".into(),
             Some(Target::Monitor(m)) => format!("Monitor: {}", ["off", "input", "output"][usize::from(m.min(2))]),
@@ -394,6 +406,11 @@ impl Logic {
     pub fn down(&mut self, x: f32, y: f32, btn: Btn, m: Mods, _dbl: bool) -> Vec<Act> {
         self.view.mouse = Some((x, y));
         let Some(t) = self.hit(x, y) else { return vec![] };
+        if !view::works(t) {
+            // Greyed-out controls only say so.
+            self.hint = self.hint_for(Some(t), x, y);
+            return vec![Act::Repaint];
+        }
         let extra = self.params.extra_copy();
         let mut acts = vec![Act::Repaint];
         let lock = |l: &mut Logic, d: Drag, ids: &[String]| {
@@ -629,14 +646,16 @@ impl Logic {
                 m.head("Options", Cmd::None);
                 check(&mut m, "Lock spare state", LOCK_SPARE.load(Ordering::Relaxed), Cmd::LockSpare);
                 m.submenu("Band solo on Shift", self.solo_menu(&extra), Cmd::None);
-                m.submenu("Minimum phase mod speed", opt_menu(&extra, Opt::MinPhaseSpeed, &["Off", "Medium", "Smooth"], 0), Cmd::None);
+                // Greyed out: nothing reads the mod speeds, phase rotation or the heatmap's enhanced frequency and high
+                // precision yet.
+                m.submenu("Minimum phase mod speed", greyed(opt_menu(&extra, Opt::MinPhaseSpeed, &["Off", "Medium", "Smooth"], 0)), Cmd::None);
                 let mut lin = MenuDef::new(MenuStyle::Context);
                 for (i, n) in ["Normal", "Fast", "Faster", "Ultra"].iter().enumerate() {
                     radio(&mut lin, n, byte(&extra, params::LIN_SPEED_BYTE) == i as u8, Cmd::Byte(params::LIN_SPEED_BYTE, i as u8));
                 }
-                m.submenu("Linear phase mod speed", lin, Cmd::None);
+                m.submenu("Linear phase mod speed", greyed(lin), Cmd::None);
                 m.head("Visualization", Cmd::None);
-                check(&mut m, "Phase rotation", flag(&extra, params::F_PHASE_ROTATION), Cmd::Flag(params::F_PHASE_ROTATION));
+                check_off(&mut m, "Phase rotation", flag(&extra, params::F_PHASE_ROTATION));
                 m.submenu("Monitor input", opt_menu(&extra, Opt::MonitorInput, &["Mid", "Side", "Left", "Right"], 1), Cmd::None);
                 m.head("Histogram", Cmd::None);
                 check(&mut m, "Enabled", flag(&extra, params::F_HISTOGRAM), Cmd::Flag(params::F_HISTOGRAM));
@@ -647,13 +666,12 @@ impl Logic {
                 check(&mut m, "Average mode", flag(&extra, params::F_AVERAGE), Cmd::Flag(params::F_AVERAGE));
                 m.head("Heatmap", Cmd::None);
                 check(&mut m, "Enabled", flag(&extra, params::F_HEATMAP), Cmd::Flag(params::F_HEATMAP));
-                check(&mut m, "Enhanced frequency", byte(&extra, params::ENHANCED_OFF_BYTE) == 0, Cmd::Enhanced);
-                let hp = byte(&extra, params::HEAT_PRECISION_BYTE) != 0;
-                check(&mut m, "High precision", hp, Cmd::Byte(params::HEAT_PRECISION_BYTE, u8::from(!hp)));
+                check_off(&mut m, "Enhanced frequency", byte(&extra, params::ENHANCED_OFF_BYTE) == 0);
+                check_off(&mut m, "High precision", byte(&extra, params::HEAT_PRECISION_BYTE) != 0);
                 m.submenu("Heatmap position", opt_menu(&extra, Opt::HeatmapPosition, &["Top", "Bottom", "Full"], 0), Cmd::None);
                 m.sep(Cmd::None);
                 let mut about = MenuDef::new(MenuStyle::Context);
-                about.add(MenuItem::item("Lemon Parametric EQ 2").enabled(false), Cmd::None);
+                about.add(MenuItem::item("Lemon Parametric EQ").enabled(false), Cmd::None);
                 about.add(MenuItem::item(&format!("Lemon Studio {} - GPLv3", env!("CARGO_PKG_VERSION"))).enabled(false), Cmd::None);
                 about.add(MenuItem::item("Filters after the RBJ Audio EQ Cookbook").enabled(false), Cmd::None);
                 m.submenu("About", about, Cmd::None);
@@ -676,10 +694,11 @@ impl Logic {
         m
     }
 
+    /// Solo mode and "Inherit bandwidth": greyed out, as no solo reads them yet (Shift+click solos the band as it is).
     fn solo_menu(&self, extra: &[u8]) -> MenuDef<Cmd> {
         let mut m = opt_menu(extra, Opt::SoloMode, &["Adaptive", "Bandpass"], 0);
         check(&mut m, "Inherit bandwidth", flag(extra, params::F_INHERIT_BW), Cmd::Flag(params::F_INHERIT_BW));
-        m
+        greyed(m)
     }
 
     pub fn pick(&mut self, _req: &MenuReq, cmd: Cmd, x: f32, y: f32) -> Vec<Act> {
@@ -829,7 +848,7 @@ mod win32 {
                 tracking: false,
                 slot: slot.clone(),
             });
-            let title = pw::wide("Lemon Parametric EQ 2");
+            let title = pw::wide("Lemon Parametric EQ");
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -1085,7 +1104,7 @@ mod win32 {
             let histogram = params::flag(&extra, params::F_HISTOGRAM) || params::flag(&extra, params::F_HEATMAP);
             let spectrum = (histogram && params::byte(&extra, params::MONITOR_BYTE) != 0 && !self.analyzer.cols.is_empty()).then_some(self.analyzer.cols.as_slice());
             let look = Look { s: self.logic.shown(), extra: &extra, spectrum, rate: f64::from(self.shared.rate.load(Ordering::Relaxed)) };
-            self.logic.hits = view::paint(&mut self.canvas, &self.palette, &look, &self.logic.view);
+            self.logic.hits = view::paint(&mut self.canvas, &look, &self.logic.view);
             self.last_sig = self.logic.vals.signature();
             self.last_extra = self.params.extra_version.load(Ordering::Acquire);
             self.last_view = self.logic.view.clone();
@@ -1331,7 +1350,7 @@ mod gui {
             let histogram = params::flag(&extra, params::F_HISTOGRAM) || params::flag(&extra, params::F_HEATMAP);
             let spectrum = (histogram && params::byte(&extra, params::MONITOR_BYTE) != 0 && !self.analyzer.cols.is_empty()).then_some(self.analyzer.cols.as_slice());
             let look = Look { s: self.logic.shown(), extra: &extra, spectrum, rate: f64::from(self.shared.rate.load(Ordering::Relaxed)) };
-            self.logic.hits = view::paint(&mut self.canvas, &self.palette, &look, &self.logic.view);
+            self.logic.hits = view::paint(&mut self.canvas, &look, &self.logic.view);
             self.last_sig = self.logic.vals.signature();
             self.last_extra = self.params.extra_version.load(Ordering::Acquire);
             self.last_view = self.logic.view.clone();
@@ -1356,7 +1375,7 @@ mod tests {
         let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
         let extra = l.params.extra_copy();
         let look = view::Look { s: l.shown(), extra: &extra, spectrum: None, rate: 48000.0 };
-        l.hits = view::paint(&mut c, &os_theme::Palette::default(), &look, &l.view);
+        l.hits = view::paint(&mut c, &look, &l.view);
     }
 
     fn centre(l: &Logic, t: Target) -> (f32, f32) {
@@ -1423,6 +1442,35 @@ mod tests {
         assert!((eq::freq_hz(f64::from(l.vals.plain(&freq_id(0)))) - 440.0).abs() < 0.05);
         let o = l.menu(&MenuReq::Options);
         assert_eq!(o.find("-120dB"), Some(Cmd::Opt(Opt::Range, 3)));
+    }
+
+    /// Whether the first entry labelled `label` in `m` or its submenus can be picked.
+    fn clickable(m: &MenuDef<Cmd>, label: &str) -> bool {
+        let it = m.items.iter().chain(m.subs.iter().flat_map(|(_, s)| s.items.iter()));
+        it.clone().find(|it| matches!(it, MenuItem::Item { label: l, .. } if l == label)).unwrap_or_else(|| panic!("no {label}")).clickable()
+    }
+
+    #[test]
+    fn greyed_out_controls_only_say_so() {
+        let mut l = logic();
+        let extra = l.params.extra_copy();
+        for t in [Target::Lin, Target::Hq] {
+            let (x, y) = centre(&l, t);
+            for btn in [Btn::Left, Btn::Right] {
+                assert_eq!(l.down(x, y, btn, Mods::default(), false), vec![Act::Repaint], "{t:?}");
+            }
+            assert!(l.hint.ends_with(": not available yet"), "{}", l.hint);
+        }
+        assert_eq!(l.params.extra_copy(), extra, "LIN and HQ left alone");
+        // Options nothing reads yet are greyed out; the analyzer's are not.
+        let o = l.menu(&MenuReq::Options);
+        for label in ["Phase rotation", "Enhanced frequency", "High precision", "Smooth", "Ultra", "Adaptive", "Inherit bandwidth"] {
+            assert!(!clickable(&o, label), "{label}");
+        }
+        for label in ["Lock spare state", "-120dB", "Average mode", "Highest"] {
+            assert!(clickable(&o, label), "{label}");
+        }
+        assert!(l.menu(&MenuReq::Phones).items.iter().all(|it| !it.clickable()));
     }
 
     #[test]

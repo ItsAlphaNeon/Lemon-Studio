@@ -4,7 +4,7 @@
 // This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
 // and not any other part of Lemon Studio.
 
-//! Lemon Parametric EQ 2: Lemon Studio's 7-band parametric EQ as a VST3 / CLAP plugin (nih-plug).
+//! Lemon Parametric EQ: Lemon Studio's 7-band parametric EQ as a VST3 / CLAP plugin (nih-plug).
 //!
 // spec: plugins/lemon-parametric-eq-2.md, plugins/parametric-eq-2.md, plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
@@ -183,7 +183,7 @@ impl LemonEq {
 }
 
 impl Plugin for LemonEq {
-    const NAME: &'static str = "Lemon Parametric EQ 2";
+    const NAME: &'static str = "Lemon Parametric EQ";
     const VENDOR: &'static str = "Lemon Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";

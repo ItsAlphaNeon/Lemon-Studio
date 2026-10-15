@@ -481,7 +481,7 @@ mod tests {
         let key = fx_key(2, 1);
         assert_eq!(a.browse_params(key), None);
         assert_eq!(a.state.params.visible(key).count(), 36);
-        let node = "1:Current project/Effects/Lemon Parametric EQ 2 (Insert 2)";
+        let node = "1:Current project/Effects/Lemon Parametric EQ (Insert 2)";
         assert_eq!((a.state.show_browser, a.state.browser_tab, a.state.browser_sel.as_deref()), (true, PROJECT_TAB, Some(node)));
         let list = rows(&a.state);
         let names: Vec<&str> = list.iter().filter(|r| matches!(r.item, Item::Param(k, _) if k == key)).map(|r| r.label.as_str()).collect();
@@ -494,7 +494,7 @@ mod tests {
         let menu = a.state.playlist.popup.take().unwrap();
         let tgt = target::slot_param(2, 1, 35);
         let create = menu.items.iter().find(|i| i.label == "Create automation clip").unwrap();
-        assert_eq!(create.cmd, Cmd::CreateAutomation(tgt, "Lemon Parametric EQ 2 - Insert 2 - Main level".into(), 0.5));
+        assert_eq!(create.cmd, Cmd::CreateAutomation(tgt, "Lemon Parametric EQ - Insert 2 - Main level".into(), 0.5));
         // Copy value (main level), then paste another value onto band 1 level.
         crate::playlist::run(&mut a, Cmd::Param(PCmd::Copy(key, 35)));
         assert_eq!(a.state.params.copied, Some(0.5));
@@ -505,7 +505,7 @@ mod tests {
 
         // Dropped on the playlist: a clip there, aimed at the parameter.
         let msg = a.params_drop(key, 35, 3, 384);
-        assert_eq!(msg.as_deref(), Some("Created automation clip \"Lemon Parametric EQ 2 - Insert 2 - Main level\""));
+        assert_eq!(msg.as_deref(), Some("Created automation clip \"Lemon Parametric EQ - Insert 2 - Main level\""));
         let ch = a.state.project.channels.last().unwrap().index;
         assert_eq!(a.state.project.automations.last().map(|x| (x.channel, x.target())), Some((ch, Some(tgt))));
         let clip = crate::playlist::arr_mut(&mut a.state).clips.last().cloned().unwrap();
@@ -522,11 +522,11 @@ mod tests {
         a.state.params.note(Tweak::Plugin { key, index: 35 });
         a.params_menu(ADD_LAST);
         let last = a.state.project.channels.last().unwrap();
-        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ 2 - Insert 2 - Main level #2"));
+        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Insert 2 - Main level #2"));
         // A plugin's own knob menu (host link): a clip on band 1 frequency.
         a.params_automate(key, 7);
         let last = a.state.project.channels.last().unwrap();
-        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ 2 - Insert 2 - Band 1 freq"));
+        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Insert 2 - Band 1 freq"));
         assert_eq!(a.state.project.automations.last().and_then(|x| x.target()), Some(target::slot_param(2, 1, 7)));
         a.note_host_tweak(&Action::Tempo);
         assert_eq!(a.params_menu(TOOLS_NEXT), None);
@@ -535,7 +535,7 @@ mod tests {
     }
 
     /// Corpus check (OPENSTUDIO_FLP_CORPUS): automation clips made on Parametric EQ 2 slot parameters load as slot
-    /// parameter targets of the hosted Lemon Parametric EQ 2, and every clip whose name still ends in the parameter
+    /// parameter targets of the hosted Lemon Parametric EQ, and every clip whose name still ends in the parameter
     /// name ("... - Band 7 freq") points at the parameter of that name: the index maps 1:1 (spec §3, §7).
     #[test]
     fn corpus_eq_automation_points_at_the_same_parameters() {

@@ -44,9 +44,9 @@ pub fn vals(misc: &ChannelMisc) -> MiscVals {
     v
 }
 
-/// The page values of channel `ch`: root note and fine tuning play only on sampler channels (`set`).
+/// The page values of channel `ch`: "Add to key" plays only on sampler channels (`set`).
 pub fn vals_of(ch: &Channel) -> MiscVals {
-    MiscVals { tuned: ch.kind.is_sampler(), ..vals(&ch.misc) }
+    MiscVals { sampler: ch.kind.is_sampler(), ..vals(&ch.misc) }
 }
 
 /// One page value of `misc`.
@@ -133,7 +133,7 @@ pub fn put(misc: &mut ChannelMisc, m: M, v: f32) {
         M::ArpRange => misc.arp.range = whole(v),
         M::ArpRepeat => misc.arp.repeat = whole(v),
         M::ArpSlide => misc.arp.slide = on(v),
-        M::ArpChord => misc.arp.chord = whole(v),
+        M::ArpChord => misc.arp.chord = v.round() as i32,
         M::EchoFeed => misc.echo.feed = v,
         M::EchoPan => misc.echo.pan = bi_in(v),
         M::EchoModX => misc.echo.mod_x = bi_in(v),

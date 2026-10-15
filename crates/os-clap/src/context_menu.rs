@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn parameter_menus_offer_create_automation_clip() {
         let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const c_void;
-        let lib = unsafe { crate::Library::from_entry(entry, std::path::Path::new("Lemon Parametric EQ 2.clap")) }.expect("linked EQ");
+        let lib = unsafe { crate::Library::from_entry(entry, std::path::Path::new("Lemon Parametric EQ.clap")) }.expect("linked EQ");
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         let host: *const clap_host = &*p._host;
         let ext = unsafe { (*host).get_extension.unwrap()(host, CLAP_EXT_CONTEXT_MENU.as_ptr()) } as *const clap_host_context_menu;

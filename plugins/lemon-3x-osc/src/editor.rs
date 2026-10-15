@@ -234,6 +234,11 @@ impl Logic {
     pub fn down(&mut self, x: f32, y: f32, btn: Btn, m: Mods, _dbl: bool) -> Vec<Act> {
         self.view.mouse = Some((x, y));
         let Some(t) = self.hit(x, y) else { return vec![] };
+        if !view::works(&t) {
+            // Greyed-out controls only say so.
+            self.hint = self.hint_for(Some(&t));
+            return vec![Act::Repaint];
+        }
         let mut acts = vec![Act::Repaint];
         match (&t, btn) {
             (Target::Knob(id), Btn::Left) if m.alt => self.reset(id),
@@ -333,9 +338,15 @@ impl Logic {
     /// Wheel: one step per notch (1/128 of the range for times and speeds), spec §5.
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, _m: Mods) -> Vec<Act> {
         let Some(t) = self.hit(x, y) else { return vec![] };
+        if !view::works(&t) {
+            self.hint = self.hint_for(Some(&t));
+            return vec![Act::Repaint];
+        }
         match &t {
             Target::Knob(id) | Target::List(id) | Target::Set(id, _) => {
                 let (lo, hi) = self.range(id);
+                // The wheel stops short of the Custom shape (greyed out).
+                let hi = if view::is_osc_shape(id) { hi.min(i32::from(crate::dsp::NOISE)) } else { hi };
                 let steps = (hi - lo) as f32;
                 let step = if steps > WHEEL_STEPS { (steps / WHEEL_STEPS).round() } else { 1.0 };
                 let plain = (self.vals.plain(id) + notches.signum() * step).clamp(lo as f32, hi as f32);
@@ -507,7 +518,7 @@ mod win32 {
                 tracking: false,
                 slot: slot.clone(),
             });
-            let title = pw::wide("Lemon 3x Osc");
+            let title = pw::wide("Lemon Trio");
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -1063,7 +1074,7 @@ mod tests {
 
     fn paint(l: &mut Logic) {
         let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
-        l.hits = view::paint(&mut c, &os_theme::Palette::default(), &l.vals, &l.view, "", false);
+        l.hits = view::paint(&mut c, &os_plugkit::palette(), &l.vals, &l.view, "", false);
     }
 
     fn centre(l: &Logic, t: &Target) -> (f32, f32) {
@@ -1216,11 +1227,43 @@ mod tests {
     }
 
     #[test]
+    fn greyed_out_controls_only_say_so() {
+        let mut l = logic();
+        // The Custom shape plays silence: its button does not pick it.
+        let s0 = l.vals.plain("o1_shape");
+        let (x, y) = centre(&l, &Target::Set("o1_shape".into(), 6.0));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.vals.plain("o1_shape"), s0);
+        assert_eq!(l.hint, "Osc 1 custom shape: not available yet");
+        // The wheel over a shape stops short of it.
+        let (x, y) = centre(&l, &Target::Set("o1_shape".into(), 0.0));
+        for _ in 0..8 {
+            l.wheel(x, y, 1.0, Mods::default());
+        }
+        assert_eq!(l.vals.plain("o1_shape") as u8, crate::dsp::NOISE);
+        // The Panning LFO is not played: no drag, wheel, reset or menu.
+        l.view.tab = 1;
+        l.view.sub = 0;
+        paint(&mut l);
+        let (x, y) = centre(&l, &Target::Knob("pan_lfo_amt".into()));
+        let v0 = l.vals.norm("pan_lfo_amt");
+        for btn in [Btn::Left, Btn::Middle, Btn::Right] {
+            assert_eq!(l.down(x, y, btn, Mods::default(), false), vec![Act::Repaint], "{btn:?}");
+        }
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(l.vals.norm("pan_lfo_amt"), v0);
+        assert!(!l.dragging());
+        assert!(l.hint.ends_with(": not available yet"), "{}", l.hint);
+        // The other targets' LFOs play.
+        assert!(view::works(&Target::Knob("vol_lfo_amt".into())));
+    }
+
+    #[test]
     fn hosted_editor_leaves_the_tabs_to_the_host() {
         let mut l = logic();
         assert!(l.hits.iter().any(|h| h.t == Target::Tab(1)));
         let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
-        l.hits = view::paint(&mut c, &os_theme::Palette::default(), &l.vals, &l.view, "", true);
+        l.hits = view::paint(&mut c, &os_plugkit::palette(), &l.vals, &l.view, "", true);
         assert!(!l.hits.iter().any(|h| matches!(h.t, Target::Tab(_))));
         // Every control lies inside the area shown when hosted.
         let top = view::HOSTED_CROP_Y as f32;

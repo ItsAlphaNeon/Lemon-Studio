@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nih_plug::prelude::*;
-use os_theme::Palette;
 use os_ui::kit::menu::{Mark, MenuItem, MenuStyle};
 use os_ui::Rect;
 
@@ -103,18 +102,6 @@ impl Editor for SamplerEditor {
     fn param_values_changed(&self) {
         self.notify();
     }
-}
-
-/// The palette Lemon Studio uses: the remembered `.flstheme` (`current.flstheme` in `os_paths::user_dir`, spec
-/// ui/flstheme.md), else the default one. The plugin runs in its own module, so it reads the theme itself.
-pub fn palette() -> Palette {
-    if cfg!(test) {
-        return Palette::default();
-    }
-    os_paths::user_file("current.flstheme")
-        .and_then(|p| std::fs::read(p).ok())
-        .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
-        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -577,6 +564,11 @@ impl Logic {
             eprintln!("[lemon-sampler] down {x},{y} {btn:?} -> {:?} ({} hits)", self.at(x, y), self.hits.len());
         }
         let Some(t) = self.at(x, y) else { return vec![] };
+        if !view::works(&t) {
+            // Greyed-out controls only say so.
+            self.hint = self.hover_hint(x, y);
+            return vec![Act::Repaint];
+        }
         if btn == Btn::Middle || (btn == Btn::Left && m.alt && t.param().is_some() && !matches!(t, Target::Key(_))) {
             // Middle click / Alt+click resets (spec §4).
             return match t.param().map(str::to_string) {
@@ -1019,8 +1011,10 @@ impl Logic {
                 m.add(MenuItem::item("Reload").enabled(has_path), Cmd::Reload);
                 m.add(MenuItem::item("Save as...").enabled(has), Cmd::SaveAs);
                 m.add(MenuItem::item("Locate file").enabled(has_path), Cmd::Locate);
-                m.add(MenuItem::item("Copy audio to clipboard").shortcut("Ctrl+C").enabled(has), Cmd::CopyAudio);
-                m.add(MenuItem::item("Paste audio from clipboard").shortcut("Ctrl+V"), Cmd::PasteAudio);
+                // Audio on the clipboard: Windows and macOS so far.
+                let clip = cfg!(any(windows, target_os = "macos"));
+                m.add(MenuItem::item("Copy audio to clipboard").shortcut("Ctrl+C").enabled(has && clip), Cmd::CopyAudio);
+                m.add(MenuItem::item("Paste audio from clipboard").shortcut("Ctrl+V").enabled(clip), Cmd::PasteAudio);
                 m.sep();
                 m.add(MenuItem::item("Edit in audio editor").shortcut("Ctrl+E").enabled(false), Cmd::None);
                 m.add(MenuItem::item("Edit in pitch corrector").enabled(false), Cmd::None);
@@ -1444,7 +1438,7 @@ mod win32 {
                 logic: Logic::new(params.clone(), shared.clone(), Some(ctx)),
                 params,
                 shared,
-                palette: super::palette(),
+                palette: os_plugkit::palette(),
                 spectrum: SpectrumCache::default(),
                 last_sig: 0,
                 last_view: ViewState::default(),
@@ -2383,7 +2377,7 @@ mod gui {
                 params,
                 shared,
                 logic,
-                palette: super::palette(),
+                palette: os_plugkit::palette(),
                 spectrum: SpectrumCache::default(),
                 last_sig: 0,
                 last_view: ViewState::default(),
@@ -2744,7 +2738,7 @@ mod tests {
     fn paint(l: &mut Logic) {
         let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
         let sv = SampleView { sample: None, path: "", bits: 16, spectrum: None };
-        l.hits = view::paint(&mut c, &Palette::default(), &l.vals, &l.view, &sv, "", false);
+        l.hits = view::paint(&mut c, &os_plugkit::palette(), &l.vals, &l.view, &sv, "", false);
     }
 
     fn centre(l: &Logic, t: &Target) -> (f32, f32) {
@@ -2775,6 +2769,27 @@ mod tests {
         // Alt+wheel jumps to the end.
         l.wheel(x, y, 1.0, Mods { alt: true, ..Mods::default() });
         assert_eq!(l.vals.norm("start_offset"), 1.0);
+    }
+
+    #[test]
+    fn greyed_out_controls_only_say_so() {
+        let mut l = logic(0);
+        for id in ["keep_disk", "resample", "load_regions", "load_slices"] {
+            let t = Target::Toggle(id.into());
+            let v0 = l.vals.plain(id);
+            let (x, y) = centre(&l, &t);
+            for btn in [Btn::Left, Btn::Middle, Btn::Right] {
+                l.down(x, y, btn, Mods::default(), false);
+            }
+            assert_eq!(l.vals.plain(id), v0, "{id}");
+            assert!(l.hint.ends_with(": not available yet"), "{}", l.hint);
+        }
+        assert!(view::works(&Target::Toggle("loop_use".into())));
+        // The envelope presets menu has no presets yet.
+        let mut l = logic(1);
+        let (x, y) = centre(&l, &Target::EnvMenu);
+        assert!(!l.down(x, y, Btn::Left, Mods::default(), false).iter().any(|a| matches!(a, Act::Menu(..))));
+        assert_eq!(l.hint, "Channel envelope presets: not available yet");
     }
 
     #[test]

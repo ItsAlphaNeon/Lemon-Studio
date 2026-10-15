@@ -4,7 +4,7 @@
 // This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
 // and not any other part of Lemon Studio.
 
-//! Lemon 3x Osc in Lemon Studio: compiled in like Lemon Sampler, it plays every 3x Osc channel of a project (started from
+//! Lemon Trio in Lemon Studio: compiled in like Lemon Sampler, it plays every 3x Osc channel of a project (started from
 //! the state the file holds) and every one added from the picker, the browser or the channel rack; saving writes its
 //! settings back as the file's 3x Osc state, so the file keeps its own plugin.
 //!
@@ -15,7 +15,7 @@ use os_model::{Channel, ChannelKind, Project};
 use crate::plugins::{Plugins, FX_KEY};
 
 /// The built-in plugin's name (picker, window title).
-pub const LEMON_3X_OSC: &str = "Lemon 3x Osc";
+pub const LEMON_TRIO: &str = "Lemon Trio";
 /// The plugin id project files store for it (event 201).
 pub const FILE_NAME: &str = "3x Osc";
 
@@ -26,28 +26,28 @@ pub fn is_osc3(ch: &Channel) -> bool {
 
 /// The plugin id a new channel of picker plugin `name` stores.
 pub fn file_name(name: &str) -> &str {
-    if name == LEMON_3X_OSC { FILE_NAME } else { name }
+    if name == LEMON_TRIO { FILE_NAME } else { name }
 }
 
 /// What the UI calls a channel's plugin `name` (the file id of the built-in plugin shows as the built-in plugin).
 pub fn label(name: &str) -> &str {
-    if name == FILE_NAME { LEMON_3X_OSC } else { name }
+    if name == FILE_NAME { LEMON_TRIO } else { name }
 }
 
 impl Plugins {
-    /// The project-file state of the Lemon 3x Osc on rack row `row` (its plugin state converted back), `None` when the
+    /// The project-file state of the Lemon Trio on rack row `row` (its plugin state converted back), `None` when the
     /// row hosts something else.
     pub fn osc3_file_state(&self, row: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&row)?;
         let p = h.plugin.lock().ok()?;
-        if p.desc().name != LEMON_3X_OSC || !crate::project_plugins::is_builtin(p.desc()) {
+        if p.desc().name != LEMON_TRIO || !crate::project_plugins::is_builtin(p.desc()) {
             return None;
         }
         lemon_3x_osc::params::fl_from_plugin_state(&p.save_state()?)
     }
 }
 
-/// Before a save: every hosted Lemon 3x Osc writes its settings into its channel as the file's 3x Osc.
+/// Before a save: every hosted Lemon Trio writes its settings into its channel as the file's 3x Osc.
 pub fn store(proj: &mut Project, plugins: &Plugins) {
     for row in plugins.hosted.range(..FX_KEY).map(|(&k, _)| k).collect::<Vec<_>>() {
         let Some(st) = plugins.osc3_file_state(row) else { continue };
@@ -59,7 +59,7 @@ pub fn store(proj: &mut Project, plugins: &Plugins) {
 }
 
 impl crate::app::App {
-    /// Hosts Lemon 3x Osc on every 3x Osc channel without an instance, started from the channel's saved state (a new
+    /// Hosts Lemon Trio on every 3x Osc channel without an instance, started from the channel's saved state (a new
     /// instance's state when the channel has none). A row waiting for the picker's own instance is left to it; a row
     /// whose instance failed is not tried again.
     pub(crate) fn sync_osc3(&mut self) {
@@ -67,7 +67,7 @@ impl crate::app::App {
         if crate::project_plugins::native_first() {
             return;
         }
-        let Some(index) = self.plugins.index_of(LEMON_3X_OSC) else { return };
+        let Some(index) = self.plugins.index_of(LEMON_TRIO) else { return };
         let pending = self.state.pending_plugin.map(|(r, _)| r);
         let rows: Vec<usize> = (0..self.state.project.channels.len())
             .filter(|&r| is_osc3(&self.state.project.channels[r]))
@@ -87,7 +87,7 @@ impl crate::app::App {
                 }
                 Err(e) => {
                     self.wrap_failed.push(row);
-                    self.state.message = Some(format!("{LEMON_3X_OSC}: {e}"));
+                    self.state.message = Some(format!("{LEMON_TRIO}: {e}"));
                 }
             }
         }
@@ -110,13 +110,13 @@ mod tests {
         pl.hosted[&row].plugin.clone() as SharedInstrument
     }
 
-    /// The built-in Lemon 3x Osc starts from a project file's 3x Osc state, plays it, and gives the same bytes back
+    /// The built-in Lemon Trio starts from a project file's 3x Osc state, plays it, and gives the same bytes back
     /// (spec: plugins/lemon-3x-osc.md §6).
     #[test]
     fn builtin_lemon_3x_osc_takes_and_gives_the_file_state() {
         let mut pl = Plugins::default();
         pl.available = crate::plugins::builtin();
-        let index = pl.index_of(LEMON_3X_OSC).expect("built-in Lemon 3x Osc");
+        let index = pl.index_of(LEMON_TRIO).expect("built-in Lemon Trio");
         assert!(crate::project_plugins::is_builtin(&pl.available[index].desc));
         let mut fl = default_state();
         set_field(&mut fl, op::osc(0) + op::SHAPE + 1, 3); // osc 1: saw
@@ -153,10 +153,10 @@ mod tests {
         a.state.path = None;
         a.plugins.available = crate::plugins::builtin();
         // Added as the picker adds it: a plugin channel storing the file id, shown with the built-in name.
-        let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_3X_OSC);
+        let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_TRIO);
         let ch = &a.state.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
-        assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(LEMON_3X_OSC));
+        assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(LEMON_TRIO));
         // Hosted with a new instance's settings, then one is edited.
         a.sync_osc3();
         assert!(a.state.hosted_rows.contains(&row));
@@ -188,7 +188,7 @@ mod tests {
         assert_eq!(again.channels[row], saved.channels[row]);
     }
 
-    /// The rack's Add one ▸ and Insert ▸ menus add a Lemon 3x Osc channel and ask for the built-in plugin (the
+    /// The rack's Add one ▸ and Insert ▸ menus add a Lemon Trio channel and ask for the built-in plugin (the
     /// instance itself is made on the next tick, which also opens its window: done by hand here).
     #[test]
     fn plugin_menus_add_lemon_3x_osc_channels() {
@@ -197,17 +197,17 @@ mod tests {
         a.state.project = crate::app::test_project();
         a.plugins.available = crate::plugins::builtin();
         a.state.plugdb.rebuild(&a.plugins);
-        let index = a.plugins.index_of(LEMON_3X_OSC).unwrap();
-        let pick = |a: &App, target| crate::plugin_menu::items(&a.state, target, true).into_iter().find(|it| it.label == LEMON_3X_OSC).map(|it| it.cmd);
+        let index = a.plugins.index_of(LEMON_TRIO).unwrap();
+        let pick = |a: &App, target| crate::plugin_menu::items(&a.state, target, true).into_iter().find(|it| it.label == LEMON_TRIO).map(|it| it.cmd);
         let n = a.state.project.channels.len();
-        assert!(crate::rack::add_one_items(&a.state).iter().any(|it| it.label == LEMON_3X_OSC), "Add one lists Lemon 3x Osc");
-        let cmd = pick(&a, Target::Gen(None)).expect("the generator menu lists Lemon 3x Osc");
+        assert!(crate::rack::add_one_items(&a.state).iter().any(|it| it.label == LEMON_TRIO), "Add one lists Lemon Trio");
+        let cmd = pick(&a, Target::Gen(None)).expect("the generator menu lists Lemon Trio");
         crate::playlist::run(&mut a, cmd);
         assert_eq!(a.state.project.channels.len(), n + 1);
         assert_eq!(a.state.pending_plugin, Some((n, index)));
         assert!(is_osc3(&a.state.project.channels[n]));
-        assert_eq!(a.state.project.channels[n].name.as_deref(), Some(LEMON_3X_OSC));
-        assert_eq!(a.plugins.available[index].desc.name, LEMON_3X_OSC);
+        assert_eq!(a.state.project.channels[n].name.as_deref(), Some(LEMON_TRIO));
+        assert_eq!(a.plugins.available[index].desc.name, LEMON_TRIO);
         a.state.pending_plugin = None;
         a.sync_osc3();
         assert!(a.state.hosted_rows.contains(&n));
@@ -221,7 +221,7 @@ mod tests {
         assert!(a.state.hosted_rows.contains(&(n + 1)), "the channel hosted before moved down one row");
     }
 
-    /// Corpus check (OPENSTUDIO_FLP_CORPUS): every 3x Osc channel of every file is hosted by Lemon 3x Osc from its
+    /// Corpus check (OPENSTUDIO_FLP_CORPUS): every 3x Osc channel of every file is hosted by Lemon Trio from its
     /// saved state, gives the same bytes back, and an unedited save leaves the whole project as it was.
     #[test]
     fn corpus_osc3_channels_survive_hosting_and_saving() {

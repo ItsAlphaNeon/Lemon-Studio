@@ -192,16 +192,16 @@ pub struct Plugins {
 }
 
 /// Lemon Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
-/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon 3x Osc likewise (spec: plugins/lemon-3x-osc.md §6).
+/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio likewise (spec: plugins/lemon-3x-osc.md §6).
 pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
-    v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_3X_OSC));
+    v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
     v
 }
 
-/// Lemon Parametric EQ 2, compiled in the same way: offered for every mixer slot, and it plays the slots a project
+/// Lemon Parametric EQ, compiled in the same way: offered for every mixer slot, and it plays the slots a project
 /// saved with the original EQ (spec: plugins/lemon-parametric-eq-2.md §8).
 pub fn builtin_effects() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
@@ -546,7 +546,7 @@ impl Plugins {
         p.set_param(info.id, n.clamp(0.0, 1.0))
     }
 
-    /// The project-file state of the Lemon Parametric EQ 2 in mixer slot `key` (its plugin state converted back),
+    /// The project-file state of the Lemon Parametric EQ in mixer slot `key` (its plugin state converted back),
     /// `None` when the slot hosts something else.
     pub fn eq_file_state(&self, key: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&key)?;
@@ -980,21 +980,27 @@ pub fn retired_count() -> usize {
 /// Name of Lemon Studio's sampler plugin: it plays and edits every sampler channel (spec: plugins/lemon-sampler.md §7).
 pub const LEMON_SAMPLER: &str = "Lemon Sampler";
 /// Name of Lemon Studio's parametric EQ plugin.
-pub const LEMON_EQ: &str = "Lemon Parametric EQ 2";
+pub const LEMON_EQ: &str = "Lemon Parametric EQ";
 /// The plugin name a project file stores for the parametric EQ (file-format identifier, kept for interop): slots
-/// with it are played by Lemon Parametric EQ 2 (spec: plugins/lemon-parametric-eq-2.md §8).
+/// with it are played by Lemon Parametric EQ (spec: plugins/lemon-parametric-eq-2.md §8).
 pub const EQ_FILE_NAME: &str = "Fruity Parametric EQ 2";
-/// The built-in plugins' names before the line was renamed "Lemon" (2026-10-13), with their names now: plugin files and
-/// preset folders made earlier still carry them (spec: plugins/plugin-formats.md, identity).
-pub const OLD_NAMES: [(&str, &str); 3] =
-    [("Open Sampler", LEMON_SAMPLER), ("Open Parametric EQ 2", LEMON_EQ), ("Open 3x Osc", crate::osc3::LEMON_3X_OSC)];
+/// The built-in plugins' earlier names, newest first, with their names now: "Lemon Parametric EQ 2" and "Lemon 3x Osc"
+/// (2026-10-13 to 2026-10-14), and the "Open" names before the line was renamed "Lemon". Plugin files and preset
+/// folders made earlier still carry them (spec: plugins/plugin-formats.md, identity).
+pub const OLD_NAMES: [(&str, &str); 5] = [
+    ("Lemon Parametric EQ 2", LEMON_EQ),
+    ("Lemon 3x Osc", crate::osc3::LEMON_TRIO),
+    ("Open Sampler", LEMON_SAMPLER),
+    ("Open Parametric EQ 2", LEMON_EQ),
+    ("Open 3x Osc", crate::osc3::LEMON_TRIO),
+];
 
 /// What the mixer shows for a slot's stored plugin name.
 pub fn slot_label(name: &str) -> &str {
     if name == EQ_FILE_NAME { LEMON_EQ } else { name }
 }
 
-/// A new slot for effect `name`: what the project stores (Lemon Parametric EQ 2 as the file's EQ with its default
+/// A new slot for effect `name`: what the project stores (Lemon Parametric EQ as the file's EQ with its default
 /// state, so the file opens elsewhere; other effects by name).
 pub fn new_slot(name: &str) -> os_model::SlotPlugin {
     if name == LEMON_EQ {
@@ -1637,7 +1643,7 @@ mod tests {
         capture(hwnd, &dir.join("win_nostrip.bmp"));
     }
 
-    /// The built-in Lemon Parametric EQ 2 in a mixer slot window: the frame without a strip, the editor inside it, and a
+    /// The built-in Lemon Parametric EQ in a mixer slot window: the frame without a strip, the editor inside it, and a
     /// click on a band's switch reaching the plugin state.
     /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio eq_window_shots -- --ignored`
     #[test]
@@ -1665,7 +1671,7 @@ mod tests {
         assert_eq!(mask(&pl), Some(0x7f & !4));
     }
 
-    /// Lemon 3x Osc in its window: a wheel turn on a knob changes the plugin's value AND the picture (spec:
+    /// Lemon Trio in its window: a wheel turn on a knob changes the plugin's value AND the picture (spec:
     /// plugins/lemon-3x-osc.md §5). `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio osc3_window_redraws -- --ignored`
     #[test]
     #[ignore]
@@ -1673,9 +1679,9 @@ mod tests {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        let index = pl.index_of(crate::osc3::LEMON_3X_OSC).expect("built-in Lemon 3x Osc");
+        let index = pl.index_of(crate::osc3::LEMON_TRIO).expect("built-in Lemon Trio");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: crate::osc3::LEMON_3X_OSC.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: crate::osc3::LEMON_TRIO.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -1695,7 +1701,7 @@ mod tests {
                 String::new()
             }
         }
-        let hits = lemon_3x_osc::view::paint(&mut c, &os_theme::Palette::default(), &Mid, &Default::default(), "", true);
+        let hits = lemon_3x_osc::view::paint(&mut c, &os_theme::design::palette(os_theme::Design::Lemon, None), &Mid, &Default::default(), "", true);
         let t = lemon_3x_osc::view::Target::Knob("o2_coarse".into());
         let r = hits.iter().rev().find(|h| h.t == t).expect("coarse knob").r;
         let (cx, cy) = ((r.cx() - lemon_3x_osc::view::CROP_X as f32) as i32, (r.cy() - lemon_3x_osc::view::HOSTED_CROP_Y as f32) as i32);
@@ -2270,7 +2276,7 @@ mod tests {
     }
 
     /// Hosted instruments' voices (spec: audio/voices.md §2-§5): Lemon Sampler counts a voice until its sample ends (the
-    /// plugin reports the end), Lemon 3x Osc until its release is over; a reset (Stop) ends every voice at once. The
+    /// plugin reports the end), Lemon Trio until its release is over; a reset (Stop) ends every voice at once. The
     /// counts reach `Plugins::voices` through the instances' meters, without locking them.
     #[test]
     fn hosted_instrument_voices_follow_the_plugins() {
@@ -2282,7 +2288,7 @@ mod tests {
         let frames: Vec<f32> = (0..4800).flat_map(|_| [0.25f32; 2]).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frames).unwrap();
         assert!(pl.load_sample(0, &wav.to_string_lossy()));
-        let osc = pl.index_of(crate::osc3::LEMON_3X_OSC).unwrap();
+        let osc = pl.index_of(crate::osc3::LEMON_TRIO).unwrap();
         pl.create_with(1, osc, None).unwrap();
         let run = |pl: &Plugins, key: usize, blocks: usize| {
             let inst = pl.hosted[&key].plugin.clone() as SharedInstrument;
@@ -2487,7 +2493,7 @@ mod tests {
         assert_eq!(read(&pl), ch.sound.stretch);
     }
 
-    /// The built-in Lemon Parametric EQ 2 starts from a project file's EQ state, plays it, and gives the state back
+    /// The built-in Lemon Parametric EQ starts from a project file's EQ state, plays it, and gives the state back
     /// (spec: plugins/lemon-parametric-eq-2.md §8).
     #[test]
     fn builtin_parametric_eq_takes_and_gives_the_file_state() {
@@ -2639,7 +2645,7 @@ mod tests {
     /// flp/events/plugins.md §4).
     #[test]
     fn vst3_plugins_save_and_reopen() {
-        let (Some(smp), Some(eq)) = (bundled("Lemon Sampler.vst3"), bundled("Lemon Parametric EQ 2.vst3")) else { return };
+        let (Some(smp), Some(eq)) = (bundled("Lemon Sampler.vst3"), bundled("Lemon Parametric EQ.vst3")) else { return };
         let load = |p: &std::path::Path| {
             let lib = os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>).unwrap();
             Available { desc: lib.plugins()[0].clone(), lib }
@@ -2658,7 +2664,7 @@ mod tests {
         a.state.hosted_rows.push(row);
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
         assert!(a.plugins.set_state(row, json.as_bytes()));
-        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { name: "Lemon Parametric EQ 2".into(), state: Vec::new() });
+        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { name: "Lemon Parametric EQ".into(), state: Vec::new() });
         a.plugins.create_effect(3, 2, 0, None).unwrap();
         // An edit of the effect, through the hosting layer, flushed into its processor.
         {
@@ -2698,7 +2704,7 @@ mod tests {
         assert_eq!(b.plugins.descriptor(row).unwrap().format, os_host::Format::Vst3);
         assert_eq!(b.plugins.state(row).as_deref(), Some(&ch_state[..]));
         assert_eq!(b.plugins.state(fx_key(3, 2)).as_deref(), Some(&fx_state[..]));
-        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Lemon Parametric EQ 2"));
+        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Lemon Parametric EQ"));
     }
 
     /// VST3 editors inside Lemon Studio's plugin frame, moved off every screen and captured with PrintWindow:
@@ -2708,7 +2714,7 @@ mod tests {
     fn vst3_window_shots() {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
-        for (file, effect) in [("Lemon Sampler.vst3", false), ("Lemon Parametric EQ 2.vst3", true)] {
+        for (file, effect) in [("Lemon Sampler.vst3", false), ("Lemon Parametric EQ.vst3", true)] {
             let Some(path) = bundled(file) else { continue };
             let lib = os_vst3::Module::load(&path).unwrap();
             let a = Available { desc: lib.plugins()[0].clone(), lib };
