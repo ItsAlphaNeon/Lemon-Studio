@@ -1237,6 +1237,18 @@ fn box_at_row(s: &State, r: usize, mouse: (f32, f32)) -> (f32, f32) {
     crate::views::rack::name_rect(s, r).map_or(crate::patterns::box_at_mouse(mouse), |nb| (nb.x, nb.y))
 }
 
+/// The sample chosen in Load sample...: row `r`'s channel takes it (and its name).
+pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
+    let s = &mut app.state;
+    let path = p.to_string_lossy().into_owned();
+    if let Some(ch) = s.project.channels.get_mut(r) {
+        ch.name = p.file_stem().map(|n| n.to_string_lossy().into_owned());
+        ch.sample_path = Some(path.clone());
+    }
+    s.sample_loads.push((r, path));
+    s.piano.dirty = true;
+}
+
 /// Run a rack menu command. Returns a status message.
 pub fn run(app: &mut App, c: RCmd) -> Option<String> {
     let mouse = app.mouse;
@@ -1247,16 +1259,12 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::MoveSel(d) => move_selected(app, d),
         RCmd::Sort(by) => sort(app, by),
         RCmd::LoadSample(r) => {
-            if let Some(p) = crate::dialog::modal(|| rfd::FileDialog::new().add_filter("Audio", &["wav", "mp3", "flac", "ogg", "aif", "aiff"]).pick_file()) {
-                let s = &mut app.state;
-                let path = p.to_string_lossy().into_owned();
-                if let Some(ch) = s.project.channels.get_mut(r) {
-                    ch.name = p.file_stem().map(|n| n.to_string_lossy().into_owned());
-                    ch.sample_path = Some(path.clone());
-                }
-                s.sample_loads.push((r, path));
-                s.piano.dirty = true;
-            }
+            // Starts in the folder of the channel's sample, when it has one.
+            let dir = app.state.project.channels.get(r).and_then(|c| c.sample_path.as_deref()).map(crate::plugins::resolve_sample).map(std::path::PathBuf::from);
+            let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Load sample", "audio", crate::dialog::Then::RackSample(r))
+                .filter("Audio", &["wav", "mp3", "flac", "ogg", "aif", "aiff"])
+                .start(dir.as_deref().and_then(std::path::Path::parent));
+            app.file_dialog(dlg);
         }
         RCmd::PianoRoll(r) => {
             app.focus_channel(r);

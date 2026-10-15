@@ -29,7 +29,6 @@ lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"
-rfd = "0.15"
 midir = "0.11"
 tiny-skia = "0.11"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -42,8 +41,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["resource_manager", "shape"] }
 
-# The main window's chrome (`macos`) and plugin windows (`plugin_window::cocoa`): the objc2 crates softbuffer and rfd
-# already use.
+# The main window's chrome (`macos`) and plugin windows (`plugin_window::cocoa`): the objc2 crates softbuffer already
+# uses.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 objc2 = "0.6"

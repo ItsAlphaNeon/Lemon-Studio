@@ -275,6 +275,8 @@ pub enum Action {
     RackFill(crate::rack::FillHit),
     /// Pattern name box, suggestions, swatches, delete confirmation (spec: ui/pattern-menu.md).
     Pat(crate::patterns::Hit),
+    /// A message box or the file dialog (spec: ui/dialogs.md).
+    Dlg(crate::dialog::DHit),
 }
 
 /// Scrollable view axes. Scroll values are in content pixels (see `App::scroll_get`).
@@ -728,6 +730,10 @@ pub enum Drag {
     RackLen { y0: f32, v0: u32 },
     RackLoopLen { row: usize, y0: f32, v0: u32 },
     RackGraph,
+    /// A dialog's caption (offset of the mouse from its top-left), the file list's scroll bar (`ratio` = list pixels
+    /// per pixel moved), spec: ui/dialogs.md.
+    Dialog { dx: f32, dy: f32 },
+    DialogBar { y0: f32, s0: f32, ratio: f32 },
 }
 
 pub struct State {
@@ -821,6 +827,8 @@ pub struct State {
     pub wins: [WinState; 3],
     /// Size of the shell window in logical pixels (set each paint).
     pub screen: (f32, f32),
+    /// Open message boxes and file dialogs, bottom to top (spec: ui/dialogs.md).
+    pub dialogs: Vec<crate::dialog::Modal>,
 }
 
 impl State {
@@ -944,6 +952,14 @@ pub struct App {
     pub want_minimize: bool,
     pub want_maximize: bool,
     pub want_close: bool,
+    /// The window may close now (unsaved changes were answered): the shell ends the program.
+    pub want_exit: bool,
+    /// macOS: the answer to a Quit, for AppKit (`macos::answer_quit`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub quit_answer: Option<bool>,
+    /// Linux: while a dialog is open, detached plugin windows are not kept above the main window (they would cover it).
+    #[cfg(all(plugin_windows, target_os = "linux"))]
+    unpinned: Option<crate::plugin_window::Unpinned>,
     pub want_drag_window: bool,
     /// Show the horizontal-resize cursor (hovering or dragging a note end).
     pub resize_cursor: bool,
@@ -1064,6 +1080,7 @@ impl App {
                     WinState { rect: Rect::new(480.0, 140.0, 1000.0, 640.0), maxed: true, mini: false },
                 ],
                 screen: (1920.0, 1080.0),
+                dialogs: Vec::new(),
             },
             theme: load_theme(),
             transport,
@@ -1094,6 +1111,10 @@ impl App {
             want_minimize: false,
             want_maximize: false,
             want_close: false,
+            want_exit: false,
+            quit_answer: None,
+            #[cfg(all(plugin_windows, target_os = "linux"))]
+            unpinned: None,
             want_drag_window: false,
             resize_cursor: false,
             ctrl: false,
@@ -1161,14 +1182,12 @@ impl App {
         if let Some(v) = legacy {
             let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
             let saved = if v.trim().is_empty() { "an older version".to_string() } else { format!("version {}", v.trim()) };
-            crate::dialog::inform(
-                "Project not supported yet",
-                &format!(
-                    "Lemon Studio cannot open {name} yet.\n\nIt was saved by {saved}. Projects saved before version 24.2 use an \
-                     older channel layout that Lemon Studio does not read yet.\n\nOpen the project in version 24.2 or later, save \
-                     it again, then open the new copy here."
-                ),
+            let rest = format!(
+                " yet.\n\nIt was saved by {saved}. Projects saved before version 24.2 use an older channel layout that Lemon \
+                 Studio does not read yet.\n\nOpen the project in version 24.2 or later, save it again, then open the new copy \
+                 here."
             );
+            self.tell(crate::dialog::Kind::Info, "Project not supported yet", crate::dialog::spans(&["Lemon Studio cannot open ", &name, &rest]));
         }
         match result {
             Ok((file, project)) => {
@@ -1206,16 +1225,38 @@ impl App {
         }
     }
 
+    /// FILE > Save (`choose` = false: to the project's file, when it has one) and Save as.
     fn save(&mut self, choose: bool) {
-        let s = &self.state;
-        let target = if choose || s.path.is_none() {
-            crate::dialog::save_file(rfd::FileDialog::new().add_filter("FLP project", &["flp"]))
+        if choose {
+            self.save_dialog(None);
         } else {
-            s.path.clone()
-        };
-        if let Some(target) = target {
-            self.save_to(target);
+            self.save_then(None);
         }
+    }
+
+    /// Saves the project to its file, or asks where (a project without one); then `next`, once it is saved.
+    fn save_then(&mut self, next: Option<crate::dialog::Next>) {
+        let Some(path) = self.state.path.clone() else { return self.save_dialog(next) };
+        self.save_to(path);
+        if let Some(n) = next {
+            self.go_on_if_saved(n);
+        }
+    }
+
+    /// The Save project as dialog, starting in the project's folder with its name.
+    fn save_dialog(&mut self, next: Option<crate::dialog::Next>) {
+        use crate::filedlg::{FileDlg, Mode};
+        let path = self.state.path.clone();
+        let name = path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "Untitled.flp".to_string(), |n| n.to_string_lossy().into_owned());
+        let dlg = FileDlg::new(Mode::Save, "Save project as", "project", crate::dialog::Then::SaveProject(next))
+            .filter("FLP project", &["flp"])
+            .start(path.as_deref().and_then(|p| p.parent()))
+            .name(&name);
+        self.file_dialog(dlg);
+    }
+
+    fn go_on_if_saved(&mut self, n: crate::dialog::Next) {
+        if self.unsaved() { self.held_back(n) } else { self.go_on(n) }
     }
 
     /// FILE > Export as WAV (Ctrl+R, the toolbar's render button): renders what Play would play (the playlist in SONG
@@ -1237,14 +1278,23 @@ impl App {
             return self.invalidate();
         }
         let stem = self.state.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
-        let mut dlg = rfd::FileDialog::new().add_filter("WAV audio", &["wav"]).set_file_name(format!("{stem}.wav"));
-        if let Some(d) = self.state.path.as_ref().and_then(|p| p.parent()) {
-            dlg = dlg.set_directory(d);
+        let dir = self.state.path.as_ref().and_then(|p| p.parent()).map(std::path::Path::to_path_buf);
+        let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Save, "Export as WAV", "export", crate::dialog::Then::ExportWav)
+            .filter("WAV audio", &["wav"])
+            .start(dir.as_deref())
+            .name(&format!("{stem}.wav"));
+        self.file_dialog(dlg);
+    }
+
+    /// The export's file was chosen: the render starts.
+    fn export_to(&mut self, mut target: PathBuf) {
+        if self.export.is_some() {
+            return;
         }
-        let Some(mut target) = crate::dialog::save_file(dlg) else { return };
         if target.extension().is_none() {
             target.set_extension("wav");
         }
+        let p = crate::rack::play_project(&self.state);
         let rate = Transport::device_rate().unwrap_or(44100);
         let name = target.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         self.plugins.set_offline(true);
@@ -1367,27 +1417,141 @@ impl App {
     }
 
     /// Before the project is replaced or the app closes (`doing`: "closing", ...): with unsaved changes, asks to save
-    /// them. True = go ahead (saved, or the changes are not wanted); false = cancelled.
-    pub fn confirm_discard(&mut self, doing: &str) -> bool {
-        if !self.unsaved() || cfg!(test) {
-            return true;
+    /// them (spec: ui/dialogs.md §1f), and `next` follows once they are saved or not wanted; otherwise right away.
+    pub fn ask_discard(&mut self, doing: &str, next: crate::dialog::Next) {
+        use crate::dialog::{spans, Answer, Kind, Msg, Then};
+        #[cfg(test)]
+        let quiet = !crate::dialog::fake::is_live();
+        #[cfg(not(test))]
+        let quiet = false;
+        if !self.unsaved() || quiet {
+            return self.go_on(next);
         }
-        let name = self.state.path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "the new project".to_string(), |n| n.to_string_lossy().into_owned());
-        match crate::dialog::yes_no_cancel("Lemon Studio", &format!("Save the changes to {name} before {doing}?")) {
-            Some(crate::dialog::Answer::Yes) => {
-                self.save(false);
-                self.invalidate();
-                !self.unsaved()
+        let name = self.state.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+        let text = match &name {
+            Some(n) => spans(&["Save the changes to ", n, &format!(" before {doing}?")]),
+            None => spans(&[&format!("Save the changes to the new project before {doing}?")]),
+        };
+        self.show_msg(Msg::new(Kind::Question, "Confirm", text, &[Answer::Yes, Answer::No, Answer::Cancel], Then::Discard(next)));
+    }
+
+    /// The work that waited for unsaved changes goes on.
+    fn go_on(&mut self, n: crate::dialog::Next) {
+        use crate::dialog::Next;
+        match n {
+            Next::Close => self.want_exit = true,
+            Next::Quit => self.quit_answer = Some(true),
+            Next::NewProject => self.new_project(),
+            Next::OpenDialog => self.open_dialog(),
+            Next::Open(p) => self.open(p),
+        }
+        self.invalidate();
+    }
+
+    /// The work that waited for unsaved changes is called off (cancelled, or the save did not happen).
+    fn held_back(&mut self, n: crate::dialog::Next) {
+        if n == crate::dialog::Next::Quit {
+            self.quit_answer = Some(false);
+        }
+    }
+
+    /// A dialog was answered: what waited for it (spec: ui/dialogs.md §5).
+    pub(crate) fn dialog_done(&mut self, then: crate::dialog::Then, reply: crate::dialog::Reply) {
+        use crate::dialog::{Answer, Reply, Then};
+        let file = match &reply {
+            Reply::File(p) => p.clone(),
+            Reply::Button(_) => None,
+        };
+        match then {
+            Then::Nothing | Then::Replace(_) => {}
+            Then::Discard(next) => match reply {
+                Reply::Button(Answer::Yes) => self.save_then(Some(next)),
+                Reply::Button(Answer::No) => self.go_on(next),
+                _ => self.held_back(next),
+            },
+            Then::SaveProject(next) => match (file, next) {
+                (Some(p), next) => {
+                    self.save_to(p);
+                    if let Some(n) = next {
+                        self.go_on_if_saved(n);
+                    }
+                }
+                (None, Some(n)) => self.held_back(n),
+                (None, None) => {}
+            },
+            Then::ExportWav => {
+                if let Some(p) = file {
+                    self.export_to(p);
+                }
             }
-            Some(crate::dialog::Answer::No) => true,
-            Some(crate::dialog::Answer::Cancel) => false,
-            // No dialog program (Linux without zenity or kdialog): nothing is lost unasked.
-            None => {
-                self.state.message = Some(format!("Unsaved changes: save first (Ctrl+S) before {doing}. Install zenity or kdialog to be asked."));
-                self.invalidate();
-                false
+            Then::OpenProject => {
+                if let Some(p) = file {
+                    self.open(p);
+                }
+            }
+            Then::LoadTheme => {
+                if let Some(p) = file {
+                    self.load_theme_file(&p);
+                }
+            }
+            Then::PluginFolder => {
+                if let Some(p) = file {
+                    self.plugin_folder_chosen(p);
+                }
+            }
+            Then::SavePreset(key) => {
+                if let Some(p) = file {
+                    self.state.message = crate::presets::save_chosen(self, key, p);
+                }
+            }
+            Then::RackSample(row) => {
+                if let Some(p) = file {
+                    crate::rack::sample_chosen(self, row, p);
+                }
             }
         }
+        self.invalidate();
+    }
+
+    /// A dialog opened or closed: Linux's detached plugin windows step back while one is open.
+    pub(crate) fn modal_changed(&mut self) {
+        #[cfg(all(plugin_windows, target_os = "linux"))]
+        {
+            let open = self.modal_open();
+            if open != self.unpinned.is_some() {
+                self.unpinned = open.then(crate::plugin_window::unpinned);
+            }
+        }
+        self.invalidate();
+    }
+
+    /// FILE > New project.
+    fn new_project(&mut self) {
+        self.transport.stop();
+        self.reset_hosted();
+        let s = &mut self.state;
+        s.project = default_project();
+        s.file = None;
+        s.path = None;
+        s.tempo = 130.0;
+        s.pattern = 1;
+        s.piano.reset();
+        s.playlist.reset();
+        crate::playlist::load_view(s);
+        s.rack.reset();
+        crate::rack::from_model(s);
+        s.piano.dirty = true;
+        s.message = Some("New project".into());
+        self.mark_saved();
+    }
+
+    /// FILE > Open: the open dialog, starting in the project's folder.
+    fn open_dialog(&mut self) {
+        let start = self.state.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+        let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Open project", "project", crate::dialog::Then::OpenProject)
+            .filter("FLP project", &["flp"])
+            .start(start.as_deref());
+        self.file_dialog(dlg);
     }
 
     /// FILE > Save new version (Ctrl+N): saves next to the project as "name_2.flp", "name_3.flp", ... (the first free
@@ -2691,11 +2855,11 @@ impl App {
     /// A file dropped on the window: audio onto the playlist becomes an audio clip; a project opens.
     pub fn drop_file(&mut self, path: PathBuf) {
         let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        if self.modal_open() {
+            return self.dialog_drop(path);
+        }
         if ext == "flp" {
-            if !self.confirm_discard("opening another project") {
-                return;
-            }
-            return self.open(path);
+            return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
         }
         if path.is_dir() {
             return self.add_browser_folder(path);
@@ -2961,14 +3125,11 @@ impl App {
 
     /// Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
     fn theme_dialog(&mut self) {
-        let mut dlg = rfd::FileDialog::new().add_filter("Theme", &["flstheme", "txt"]).set_title("Load theme");
         let fl = std::path::Path::new(r"C:\Program Files\Image-Line\FL Studio 2026\Artwork\Themes");
-        if fl.is_dir() {
-            dlg = dlg.set_directory(fl);
-        }
-        if let Some(p) = crate::dialog::modal(|| dlg.pick_file()) {
-            self.load_theme_file(&p);
-        }
+        let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Load theme", "theme", crate::dialog::Then::LoadTheme)
+            .filter("Theme", &["flstheme", "txt"])
+            .start(Some(fl));
+        self.file_dialog(dlg);
     }
 
     fn settings_act(&mut self, a: views::settings::SAct) {
@@ -3336,6 +3497,8 @@ impl App {
                     self.invalidate();
                 }
                 Drag::RackGraph => self.rack_graph_at((x, y)),
+                Drag::Dialog { dx, dy } => self.dialog_drag(x - dx, y - dy),
+                Drag::DialogBar { y0, s0, ratio } => self.dialog_scroll(s0 + (y - y0) * ratio),
                 Drag::PatternBox { y0, p0 } => {
                     let (y0, p0): (f32, u16) = (y0.to_owned(), p0.to_owned());
                     let steps = ((y0 - y) / crate::patterns::DRAG_STEP).trunc() as i32;
@@ -3477,6 +3640,13 @@ impl App {
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
         self.pressed = action.clone();
+        // A dialog takes every click (spec: ui/dialogs.md §3).
+        if self.modal_open() {
+            if let Some(Action::Dlg(h)) = action {
+                self.dialog_click(h);
+            }
+            return;
+        }
         // The value box is modal: only its own parts take clicks (spec: ui/type-in-value.md §1).
         if crate::typein::is_open(&self.state) {
             if let Some(Action::TypeIn(a)) = action {
@@ -3704,7 +3874,7 @@ impl App {
     /// Middle button: grab-scroll the Piano roll and Playlist (FL manual: middle-drag scrolls
     /// both directions).
     pub fn mouse_down_middle(&mut self) {
-        if crate::typein::is_open(&self.state) {
+        if crate::typein::is_open(&self.state) || self.modal_open() {
             return;
         }
         self.raise_under_mouse();
@@ -3739,7 +3909,7 @@ impl App {
     /// Right button: delete notes in the piano roll (spec: ui/piano-roll.md §8); right-drag on
     /// a scroll bar scrolls.
     pub fn mouse_down_right(&mut self) {
-        if crate::typein::is_open(&self.state) {
+        if crate::typein::is_open(&self.state) || self.modal_open() {
             return;
         }
         let (x, y) = self.mouse;
@@ -4261,6 +4431,9 @@ impl App {
     }
 
     pub fn wheel(&mut self, dx: f32, dy: f32, shift: bool, ctrl: bool) {
+        if self.modal_open() {
+            return self.dialog_wheel(dy);
+        }
         // Scrolling or zooming one window repaints just that window; scrolling the playlist moves its pixels.
         let before = self.damage.clone();
         let s = &self.state;
@@ -4450,6 +4623,10 @@ impl App {
 
     pub fn key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) {
         self.invalidate();
+        // A dialog takes every key.
+        if self.modal_open() {
+            return self.dialog_key(key, ctrl, alt);
+        }
         use winit::keyboard::{Key, NamedKey};
         // Ctrl+Shift+D: switch the design (spec: ui/lemon-design.md §1).
         if let Key::Character(c) = key
@@ -4645,7 +4822,7 @@ impl App {
     /// skips the normal shortcut handling. Spec: ui/typing-keyboard.md.
     pub fn typing_key(&mut self, code: KeyCode, pressed: bool, ctrl: bool, alt: bool) -> bool {
         // A playlist text box (track / marker name, point value) takes the letters.
-        if pressed && (self.state.playlist.edit.is_some() || self.state.plugdb.finding || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing() || self.state.perf.finding) {
+        if pressed && (self.modal_open() || self.state.playlist.edit.is_some() || self.state.plugdb.finding || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing() || self.state.perf.finding) {
             return false;
         }
         if !pressed {
@@ -5179,6 +5356,7 @@ impl App {
                 crate::patterns::run(s, crate::patterns::Cmd::FindFirst, crate::patterns::PLUS_BOX_AT);
             }
             Action::Pat(h) => crate::patterns::hit(s, h),
+            Action::Dlg(h) => self.dialog_click(h),
             Action::PlPickList => {}
             Action::PlPickAdd => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
@@ -5577,45 +5755,13 @@ impl App {
     pub(crate) fn menu_item(&mut self, menu: usize, item: usize) {
         use views::menus::*;
         match (menu, item) {
-            (0, FILE_NEW) => {
-                if !self.confirm_discard("starting a new project") {
-                    return;
-                }
-                self.transport.stop();
-                self.reset_hosted();
-                let s = &mut self.state;
-                s.project = default_project();
-                s.file = None;
-                s.path = None;
-                s.tempo = 130.0;
-                s.pattern = 1;
-                s.piano.reset();
-                s.playlist.reset();
-                crate::playlist::load_view(s);
-                s.rack.reset();
-                crate::rack::from_model(s);
-                s.piano.dirty = true;
-                s.message = Some("New project".into());
-                self.mark_saved();
-            }
+            (0, FILE_NEW) => self.ask_discard("starting a new project", crate::dialog::Next::NewProject),
             // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
             (OPTIONS_MENU | ADD_MENU, i) if item_at(menu, i).and_then(|it| views::settings::tab_for_menu(it.label)).is_some() => {
                 let tab = item_at(menu, i).and_then(|it| views::settings::tab_for_menu(it.label)).expect("checked");
                 self.open_settings(tab);
             }
-            (0, FILE_OPEN) => {
-                if !self.confirm_discard("opening another project") {
-                    return;
-                }
-                let start = self.state.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf()));
-                let mut dlg = rfd::FileDialog::new().add_filter("FLP project", &["flp"]);
-                if let Some(d) = start {
-                    dlg = dlg.set_directory(d);
-                }
-                if let Some(p) = crate::dialog::pick_file(dlg) {
-                    self.open(p);
-                }
-            }
+            (0, FILE_OPEN) => self.ask_discard("opening another project", crate::dialog::Next::OpenDialog),
             (0, FILE_SAVE) => self.save(false),
             (0, FILE_EXPORT) => self.export_wav(),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
@@ -6882,11 +7028,252 @@ mod tests {
         let before = app.state.project.channels.len();
         app.open(path.clone());
         let _ = std::fs::remove_file(&path);
-        let told = crate::dialog::fake::informed();
-        assert_eq!(told.len(), 1, "{told:?}");
-        assert!(told[0].contains("before version 24.2") && told[0].contains("lemon-legacy-"), "{}", told[0]);
+        assert_eq!(app.state.dialogs.len(), 1);
+        let (title, text) = app.top_message().expect("a message box");
+        assert_eq!(title, "Project not supported yet");
+        assert!(text.contains("before version 24.2") && text.contains("lemon-legacy-"), "{text}");
         assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Could not open")));
         assert_eq!(app.state.project.channels.len(), before, "the open project stays");
+        // Its Ok closes it (Enter presses the focused button).
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter), false, false);
+        assert!(!app.modal_open());
+    }
+
+    /// Press `k` (a character or a named key) with the modifiers given.
+    fn press(app: &mut App, k: winit::keyboard::Key, ctrl: bool, alt: bool) {
+        app.key(&k, ctrl, alt);
+    }
+
+    fn typed(app: &mut App, s: &str) {
+        press(app, winit::keyboard::Key::Character(s.into()), false, false);
+    }
+
+    fn named(app: &mut App, k: winit::keyboard::NamedKey) {
+        press(app, winit::keyboard::Key::Named(k), false, false);
+    }
+
+    fn top_file(app: &App) -> &crate::filedlg::FileDlg {
+        match &app.state.dialogs.last().expect("a dialog").body {
+            crate::dialog::Body::File(f) => f,
+            crate::dialog::Body::Msg(m) => panic!("a message box is on top: {}", m.plain()),
+        }
+    }
+
+    /// Unsaved changes are asked about in a message box drawn in the window (spec: ui/dialogs.md §1f, §3): Cancel
+    /// stays, No goes on, Yes saves first (a project without a file through the save dialog) and then goes on; the
+    /// typing keyboard does not play while it is open; both designs paint it and its buttons take clicks and keys.
+    #[test]
+    fn unsaved_changes_are_asked_in_the_window() {
+        use crate::dialog::{fake, DHit, Next};
+        use crate::views::menus::FILE_NEW;
+        use winit::keyboard::NamedKey;
+        let Ok(mut c) = Canvas::new(1280, 800, 1.0) else { return };
+        fake::live(true);
+        let dir = std::env::temp_dir().join(format!("os_dialog_unsaved_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for design in [Design::Classic, Design::Lemon] {
+            let mut app = App::new(None);
+            app.set_design(design, false);
+            app.state.tempo = 99.0;
+            assert!(app.unsaved());
+            app.menu_item(0, FILE_NEW);
+            let (title, text) = app.top_message().expect("asked");
+            assert_eq!(title, "Confirm");
+            assert_eq!(text, "Save the changes to the new project before starting a new project?");
+            assert!(!app.typing_key(KeyCode::KeyQ, true, false, false), "the typing keyboard waits");
+            frame(&mut app, &mut c, None);
+            // Cancel (a click) stays.
+            let r = hit_rect(&app, &Action::Dlg(DHit::Button(2)));
+            click(&mut app, &mut c, r);
+            assert!(!app.modal_open() && app.unsaved() && app.state.tempo == 99.0, "Cancel keeps the project");
+            // Clicks behind a dialog do nothing.
+            app.menu_item(0, FILE_NEW);
+            frame(&mut app, &mut c, None);
+            app.mouse_move(5.0, 5.0);
+            app.mouse_down();
+            app.mouse_up();
+            assert!(app.modal_open());
+            // N (the accelerator) = No: the new project replaces the changes.
+            typed(&mut app, "n");
+            assert!(!app.modal_open() && !app.unsaved() && app.state.tempo == 130.0, "No goes on");
+            // Yes on a project without a file: the save dialog, then the window may close.
+            app.state.tempo = 98.0;
+            app.ask_discard("closing", Next::Close);
+            frame(&mut app, &mut c, None);
+            named(&mut app, NamedKey::Tab);
+            named(&mut app, NamedKey::Tab);
+            named(&mut app, NamedKey::Tab);
+            named(&mut app, NamedKey::Enter);
+            assert_eq!(app.state.dialogs.len(), 1, "Tab went round to Yes");
+            let f = top_file(&app);
+            assert_eq!((f.mode, f.name.text.as_str(), f.name.all), (crate::filedlg::Mode::Save, "Untitled.flp", true));
+            frame(&mut app, &mut c, None);
+            let target = dir.join(format!("Tune {design:?}"));
+            typed(&mut app, &target.display().to_string());
+            assert!(!app.want_exit);
+            named(&mut app, NamedKey::Enter);
+            let saved = dir.join(format!("Tune {design:?}.flp"));
+            assert!(saved.exists() && !app.unsaved(), "saved with the type's extension: {:?}", app.state.message);
+            assert!(app.want_exit && !app.modal_open(), "then the window closes");
+            // Save as onto that file: the replace question starts on No; Yes replaces.
+            app.want_exit = false;
+            app.state.tempo = 97.0;
+            app.save(true);
+            frame(&mut app, &mut c, None);
+            assert_eq!(top_file(&app).dir, dir, "the dialog starts in the project's folder");
+            named(&mut app, NamedKey::Enter);
+            assert_eq!(app.state.dialogs.len(), 2);
+            assert_eq!(app.top_message().unwrap().1, format!("Tune {design:?}.flp already exists.\nDo you want to replace it?"));
+            frame(&mut app, &mut c, None);
+            named(&mut app, NamedKey::Enter);
+            assert_eq!(app.state.dialogs.len(), 1, "No goes back to the dialog");
+            assert!(app.unsaved());
+            named(&mut app, NamedKey::Enter);
+            typed(&mut app, "y");
+            assert!(!app.modal_open() && !app.unsaved(), "replaced");
+        }
+        fake::live(false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The file dialog (spec: ui/dialogs.md §4): rows, double clicks, Up / Back, the type combo, the wheel, the caption
+    /// drag, typing a name, Esc; in both designs.
+    #[test]
+    fn file_dialog_browses_and_answers() {
+        use crate::dialog::{fake, DHit};
+        use crate::filedlg::{Mode, ROW_H};
+        use crate::views::menus::FILE_OPEN;
+        use winit::keyboard::NamedKey;
+        let Ok(mut c) = Canvas::new(1280, 800, 1.0) else { return };
+        fake::live(true);
+        let dir = std::env::temp_dir().join(format!("os_dialog_browse_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Beats")).unwrap();
+        std::fs::write(dir.join("Beats").join("Loop.flp"), b"not a project").unwrap();
+        for i in 0..40 {
+            std::fs::write(dir.join(format!("Song {i:02}.flp")), b"x").unwrap();
+        }
+        std::fs::write(dir.join("Zebra.txt"), b"x").unwrap();
+        for design in [Design::Classic, Design::Lemon] {
+            let mut app = App::new(None);
+            app.set_design(design, false);
+            app.state.path = Some(dir.join("Song 00.flp"));
+            app.menu_item(0, FILE_OPEN);
+            frame(&mut app, &mut c, None);
+            let f = top_file(&app);
+            assert_eq!((f.mode, &f.dir, f.entries.len()), (Mode::Open, &dir, 41), "FLP files and the folder");
+            assert_eq!(f.entries[0].name, "Beats");
+            // The wheel scrolls the list; the caption drags the dialog.
+            app.mouse_move(640.0, 400.0);
+            app.wheel(0.0, -2.0, false, false);
+            assert_eq!(top_file(&app).scroll, 6.0 * ROW_H);
+            app.wheel(0.0, 10.0, false, false);
+            assert_eq!(top_file(&app).scroll, 0.0);
+            frame(&mut app, &mut c, None);
+            let cap = hit_rect(&app, &Action::Dlg(DHit::Caption));
+            let at = app.state.dialogs[0].rect.get();
+            app.mouse_move(cap.x + 40.0, cap.cy());
+            app.mouse_down();
+            app.mouse_move(cap.x + 10.0, cap.cy() + 30.0);
+            app.mouse_up();
+            assert_eq!(app.state.dialogs[0].at, Some((at.x - 30.0, at.y + 30.0)));
+            frame(&mut app, &mut c, None);
+            // A double click opens the folder; Alt+Up goes back up with it selected.
+            let row = hit_rect(&app, &Action::Dlg(DHit::Row(0)));
+            click(&mut app, &mut c, row);
+            click(&mut app, &mut c, row);
+            assert_eq!(top_file(&app).dir, dir.join("Beats"));
+            press(&mut app, winit::keyboard::Key::Named(NamedKey::ArrowUp), false, true);
+            assert_eq!(top_file(&app).dir, dir);
+            assert_eq!(top_file(&app).sel, Some(0));
+            // All files lists the text file too.
+            frame(&mut app, &mut c, None);
+            let r = hit_rect(&app, &Action::Dlg(DHit::Filter));
+            click(&mut app, &mut c, r);
+            assert!(top_file(&app).filter_open);
+            let r = hit_rect(&app, &Action::Dlg(DHit::FilterItem(1)));
+            click(&mut app, &mut c, r);
+            assert_eq!(top_file(&app).entries.len(), 42);
+            // Typing a name that is not there is refused in the status; Backspace edits.
+            typed(&mut app, "Nothing.flp");
+            named(&mut app, NamedKey::Enter);
+            assert!(app.modal_open());
+            assert_eq!(top_file(&app).status_text(), "Nothing.flp was not found");
+            frame(&mut app, &mut c, None);
+            for _ in 0.."Nothing.flp".len() {
+                named(&mut app, NamedKey::Backspace);
+            }
+            assert_eq!(top_file(&app).name.text, "");
+            // Down picks a row; the main button opens the file (not a real project: the hint bar says so).
+            named(&mut app, NamedKey::ArrowDown);
+            assert_eq!(top_file(&app).name.text, "Song 00.flp");
+            let r = hit_rect(&app, &Action::Dlg(DHit::Accept));
+            click(&mut app, &mut c, r);
+            assert!(!app.modal_open());
+            assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Could not open")), "{:?}", app.state.message);
+            // Esc cancels.
+            app.menu_item(0, FILE_OPEN);
+            named(&mut app, NamedKey::Escape);
+            assert!(!app.modal_open());
+        }
+        fake::live(false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Look check for the dialogs in both designs: `OS_SHOT_DIR=dir cargo test -p os-app dialog_shots -- --ignored`.
+    #[test]
+    #[ignore]
+    fn dialog_shots() {
+        use crate::dialog::{fake, spans, Answer, Kind, Msg, Then};
+        let Some(out) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let out = std::path::PathBuf::from(out);
+        let Ok(mut c) = Canvas::new(1280, 800, 1.0) else { return };
+        fake::live(true);
+        let dir = std::env::temp_dir().join(format!("os_dialog_shots_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Drums")).unwrap();
+        std::fs::create_dir_all(dir.join("Vocals")).unwrap();
+        for (n, len) in [("Club mix.flp", 48_213), ("Demo.flp", 9_120), ("Night drive.flp", 131_072), ("Sketch 3.flp", 2_048)] {
+            std::fs::write(dir.join(n), vec![0u8; len]).unwrap();
+        }
+        for design in [Design::Classic, Design::Lemon] {
+            let name = format!("{design:?}").to_lowercase();
+            let mut app = App::new(None);
+            app.set_design(design, false);
+            app.state.path = Some(dir.join("Demo.flp"));
+            for (kind, title, text, buttons, tag) in [
+                (Kind::Question, "Confirm", spans(&["Save the changes to ", "Demo.flp", " before closing?"]), &[Answer::Yes, Answer::No, Answer::Cancel][..], "question"),
+                (Kind::Warning, "Confirm save as", spans(&["", "Demo.flp", " already exists.\nDo you want to replace it?"]), &[Answer::Yes, Answer::No][..], "warning"),
+                (Kind::Error, "Error", spans(&["The file doesn't exist or has been moved."]), &[Answer::Ok][..], "error"),
+                (Kind::Info, "Project not supported yet", spans(&["Lemon Studio cannot open ", "Old.flp", " yet.\n\nIt was saved by version 12.3. Projects saved before version 24.2 use an older channel layout that Lemon Studio does not read yet."]), &[Answer::Ok][..], "info"),
+            ] {
+                let mut m = Msg::new(kind, title, text, buttons, Then::Nothing);
+                // As in the app, the replace question starts on No.
+                m.focus = usize::from(tag == "warning");
+                app.show_msg(m);
+                frame(&mut app, &mut c, None);
+                app.mouse_move(-1.0, -1.0);
+                frame(&mut app, &mut c, None);
+                c.pixmap.save_png(out.join(format!("dialog_{name}_{tag}.png"))).unwrap();
+                app.state.dialogs.clear();
+                app.modal_changed();
+            }
+            app.save(true);
+            frame(&mut app, &mut c, None);
+            let row = hit_rect(&app, &Action::Dlg(crate::dialog::DHit::Row(3)));
+            app.mouse_move(row.cx(), row.cy());
+            frame(&mut app, &mut c, None);
+            c.pixmap.save_png(out.join(format!("dialog_{name}_save.png"))).unwrap();
+            app.state.dialogs.clear();
+            app.file_dialog(crate::filedlg::FileDlg::new(crate::filedlg::Mode::Folder, "Add a plugin folder", "plugins", Then::PluginFolder).start(Some(&dir)));
+            frame(&mut app, &mut c, None);
+            c.pixmap.save_png(out.join(format!("dialog_{name}_folder.png"))).unwrap();
+            app.state.dialogs.clear();
+            app.modal_changed();
+        }
+        fake::live(false);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The CPU panel opens Settings > Audio; its combos open menus over the window and a choice becomes the audio
