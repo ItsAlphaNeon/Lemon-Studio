@@ -3853,10 +3853,10 @@ impl App {
         }
     }
 
-    /// True while a right-drag on a scroll bar runs: the shell hides the cursor and keeps it
-    /// where the drag started, feeding relative movement.
+    /// True while a drag moves a value rather than the cursor (knobs, the tempo, scroll-bar right-drags): the shell
+    /// hides the cursor and keeps it where the drag started, feeding relative movement.
     pub fn cursor_locked(&self) -> bool {
-        matches!(self.drag, Some(Drag::BarZoom { .. } | Drag::BarRows { .. } | Drag::Knob { .. }))
+        matches!(self.drag, Some(Drag::BarZoom { .. } | Drag::BarRows { .. } | Drag::Knob { .. } | Drag::Tempo { .. }))
     }
 
     fn bar(&self, t: Scroll) -> Option<Bar> {
@@ -6430,6 +6430,23 @@ mod tests {
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(back.patterns[0].notes.len(), 2);
+    }
+
+    #[test]
+    fn tempo_drag_locks_the_cursor() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut a, None);
+        let r = hit_rect(&app, &Action::Tempo);
+        let t0 = app.state.tempo;
+        app.mouse_move(r.cx(), r.cy());
+        frame(&mut app, &mut a, None);
+        app.mouse_down();
+        assert!(app.cursor_locked(), "tempo drags lock the cursor");
+        app.mouse_move(r.cx(), r.cy() - 10.0);
+        assert_eq!(app.state.tempo, t0 + 10.0);
+        app.mouse_up();
+        assert!(!app.cursor_locked());
     }
 
     #[test]
