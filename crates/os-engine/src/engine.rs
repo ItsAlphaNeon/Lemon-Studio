@@ -816,6 +816,9 @@ pub struct Engine {
     looping: bool,
     /// Only live notes, no schedule: finished once everything is silent; the tail rule does not apply.
     live_only: bool,
+    /// A live-only engine that never finishes: its hosted instruments are processed every tick, so notes played in
+    /// their own editors sound (`set_awake`).
+    awake: bool,
     /// The tail rule has ended the song: a tick at or after its end stayed quiet (spec: audio/timing.md).
     tail_done: bool,
     tempo: f64,
@@ -1225,6 +1228,7 @@ impl Engine {
             end_tick,
             looping: false,
             live_only: false,
+            awake: false,
             tail_done: false,
             tempo,
             ppq,
@@ -1346,6 +1350,25 @@ impl Engine {
         self.live_only = true;
     }
 
+    /// Keep a live-only engine running while nothing plays (an instrument's editor is open): its instruments are
+    /// processed every tick, so notes from the editor's own keyboard sound. Off, it finishes again once silent.
+    pub fn set_awake(&mut self, on: bool) {
+        self.awake = on;
+    }
+
+    /// Note offs now for every note held at the hosted instruments, which this engine then forgets (they do not
+    /// sound again when it plays on). For a paused playback while another stream processes the same instruments (live
+    /// notes, an open editor): its held notes would ring there for as long as it is paused.
+    pub fn release_instruments(&mut self) {
+        self.send_held_offs();
+        self.inst_offs.clear();
+        let channels = &self.channels;
+        self.sounding.retain(|&(c, _, _)| channels.get(c).is_none_or(|ch| ch.instrument.0.is_none()));
+        for v in &mut self.note_voices {
+            *v = notes::Voices::default();
+        }
+    }
+
     /// Start a live note on channel `channel` (rack position) at the next tick; it rings until
     /// `note_off` (or the sample ends). Velocity 0..=128, 100 = unity.
     pub fn note_on(&mut self, channel: usize, key: u16, velocity: u8) {
@@ -1448,10 +1471,13 @@ impl Engine {
 
     /// True once playback is over and everything handed out (never while looping). A song ends by the tail rule: on
     /// the first quiet tick at or after its end. An engine that only plays live notes is over while it is silent and
-    /// starts again with the next note.
+    /// starts again with the next note; one kept awake (`set_awake`) is never over.
     pub fn finished(&self) -> bool {
         let drained = self.out_pos >= self.out.len();
         if self.live_only {
+            if self.awake {
+                return false;
+            }
             let rest_silent = self.out[self.out_pos.min(self.out.len())..].iter().all(|&s| s == 0.0);
             return rest_silent && self.voices.is_empty() && self.inst_tail == 0 && self.inst_live.is_empty() && !self.tap_clicks.sounding();
         }
@@ -1608,6 +1634,7 @@ impl Engine {
         self.note_voices = std::mem::take(&mut old.note_voices);
         self.note_voices.resize(n, notes::Voices::default());
         self.inst_tail = old.inst_tail;
+        self.awake = old.awake;
         self.inst_offs = std::mem::take(&mut old.inst_offs);
         self.inst_offs.retain(|o| o.1 < n);
         self.inst_shapes = std::mem::take(&mut old.inst_shapes);
@@ -2433,22 +2460,26 @@ impl Engine {
 /// Notes still held on instruments end when the engine goes away (stop, or a new song).
 impl Drop for Engine {
     fn drop(&mut self) {
-        for &(_, c, key, _) in &self.inst_offs {
-            if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
-                inst.note_off(0, key);
-            }
-        }
-        for &(c, key, _) in self.sounding.iter().filter(|s| s.2 == u64::MAX) {
-            if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
-                inst.note_off(0, key.min(127) as u8);
-            }
-        }
+        self.send_held_offs();
+    }
+}
+
+impl Engine {
+    /// A note off to its instrument for every note held there: scheduled notes that have not ended, live notes, and
+    /// voices whose notes have not ended.
+    fn send_held_offs(&self) {
+        let mut held: Vec<(usize, u8)> = self.inst_offs.iter().map(|&(_, c, key, _)| (c, key)).collect();
+        held.extend(self.sounding.iter().filter(|s| s.2 == u64::MAX).map(|&(c, key, _)| (c, key.min(127) as u8)));
         // Voices whose notes have not ended (a mono voice sounds under its first key).
         for (c, v) in self.note_voices.iter().enumerate() {
-            for key in v.held_keys() {
-                if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
-                    inst.note_off(0, key);
-                }
+            held.extend(v.held_keys().map(|key| (c, key)));
+        }
+        // A note can be held in more than one of these: one note off each.
+        held.sort_unstable();
+        held.dedup();
+        for (c, key) in held {
+            if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
+                inst.note_off(0, key);
             }
         }
     }
@@ -3407,6 +3438,56 @@ mod tests {
         let (gl, _) = laws::channel_pan(0.0);
         let g = (laws::channel_gain(p.channels[0].volume) * gl) as f32;
         assert!(frames.chunks_exact(2).all(|f| f[0] == 0.0 || (f[0] - g).abs() < 1e-6));
+    }
+
+    /// An instrument's editor is open: the live engine keeps processing it with no note from the host, so a note
+    /// from the editor's own keyboard sounds; closed, the engine is over once silent.
+    #[test]
+    fn an_awake_live_engine_processes_its_instruments() {
+        let mut p = project(vec![], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.clear_schedule();
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        assert!(e.next_tick().is_none(), "idle live engine renders nothing");
+        e.set_awake(true);
+        let quiet = e.next_tick().map(|(s, _, _)| s.iter().all(|&v| v == 0.0));
+        assert_eq!(quiet, Some(true), "awake: rendered, silent");
+        assert!(probe.lock().unwrap().at > 0, "the instrument was processed");
+        // A key pressed in the plugin's editor (the host sent no note).
+        probe.lock().unwrap().held.push(70);
+        let loud = e.next_tick().map(|(s, _, _)| s.iter().any(|&v| v != 0.0));
+        assert_eq!(loud, Some(true), "the editor's note is heard");
+        probe.lock().unwrap().held.clear();
+        e.set_awake(false);
+        let mut ticks = 0;
+        while e.next_tick().is_some() {
+            ticks += 1;
+            assert!(ticks < 10_000, "finishes once silent");
+        }
+    }
+
+    /// A paused playback whose instruments another stream processes lets go of its held notes, once.
+    #[test]
+    fn released_instrument_notes_end_once() {
+        let mut p = project(vec![], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        e.note_on(0, 64, 100);
+        let mut out = vec![0.0f32; 256];
+        e.process(&mut out);
+        assert_eq!(probe.lock().unwrap().held, [64]);
+        e.release_instruments();
+        assert!(probe.lock().unwrap().held.is_empty(), "released at once");
+        e.note_off(0, 64);
+        drop(e);
+        let offs = probe.lock().unwrap().log.iter().filter(|l| !l.1).count();
+        assert_eq!(offs, 1, "one note off");
     }
 
     #[test]

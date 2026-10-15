@@ -278,6 +278,9 @@ struct HostData {
     resize: Mutex<Option<(u32, u32)>>,
     /// The plugin's voice count changed (`clap_host_voice_info.changed`): read again on the UI tick.
     voice_info: AtomicBool,
+    /// The plugin asked to be processed (`clap_host.request_process`), e.g. a note from its editor's keyboard: a
+    /// sleeping instance runs the next block.
+    process: AtomicBool,
     /// The plugin, for the run loop's callbacks (set before `init`, which may already register).
     #[cfg(all(unix, not(target_os = "macos")))]
     plugin: std::sync::atomic::AtomicPtr<clap_plugin>,
@@ -467,7 +470,9 @@ unsafe extern "C" fn host_request_restart(host: *const clap_host) {
 /// Below this level a block is quiet (CLAP's CONTINUE_IF_NOT_QUIET; about -100 dB).
 const QUIET: f32 = 1e-5;
 
-unsafe extern "C" fn host_request_process(_host: *const clap_host) {}
+unsafe extern "C" fn host_request_process(host: *const clap_host) {
+    unsafe { (*((*host).host_data as *const HostData)).process.store(true, Ordering::Release) };
+}
 unsafe extern "C" fn host_request_callback(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).callback.store(true, Ordering::Release) };
     unsafe { attend(host) };
@@ -719,6 +724,7 @@ impl Plugin {
             automate: Mutex::new(Vec::new()),
             resize: Mutex::new(None),
             voice_info: AtomicBool::new(false),
+            process: AtomicBool::new(false),
             #[cfg(all(unix, not(target_os = "macos")))]
             plugin: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
             #[cfg(all(unix, not(target_os = "macos")))]
@@ -1209,17 +1215,23 @@ impl Plugin {
     }
 
     /// The plugin reported that it is done (no CONTINUE / TAIL, and quiet output with CONTINUE_IF_NOT_QUIET) and
-    /// nothing is queued for it: no notes, no parameter changes, no automation. CLAP lets the host stop calling such
-    /// an instance until something arrives (or, for an effect, until its input is not quiet), so an idle instrument
-    /// or effect costs nothing per block.
+    /// nothing is queued for it: no notes, no parameter changes, no automation, no request to be processed. CLAP lets
+    /// the host stop calling such an instance until something arrives (or, for an effect, until its input is not
+    /// quiet), so an idle instrument or effect costs nothing per block. One with its editor open stays awake: notes
+    /// from the editor's own keyboard reach it without the host, and not every plugin asks to be processed for them.
     fn asleep(&self) -> bool {
-        !self.sounding && self.queue.is_empty() && self.param_queue.is_empty() && self.auto.is_empty() && self.mod_resend.is_empty()
+        !self.sounding
+            && !self.editor
+            && !self.host_data.process.load(Ordering::Acquire)
+            && self.queue.is_empty() && self.param_queue.is_empty() && self.auto.is_empty() && self.mod_resend.is_empty()
     }
 
     /// `process_chunk` with an audio input (effects): `input` holds the frames to process, `left` / `right` receive
     /// the output.
     fn process_chunk_in(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>) {
         let n = left.len() as u32;
+        // This block answers a request to be processed; one made while it runs asks for the next.
+        self.host_data.process.store(false, Ordering::Release);
         self.notes.clear();
         self.mods.clear();
         self.exprs.clear();

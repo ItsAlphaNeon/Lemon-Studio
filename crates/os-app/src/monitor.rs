@@ -406,6 +406,9 @@ impl Monitor {
                 // Blur in power, then back to dB.
                 db((raw[a..b].iter().map(|d| 10f32.powf(d / 10.0)).sum::<f32>() / (b - a) as f32).sqrt())
             };
+            // Below the floor is silence: a silent signal on a live stream would otherwise lift a resting bar to the
+            // floor and drop it again on every refresh, repainting forever.
+            let target = if target < floor { SILENT_DB } else { target };
             let cur = self.bars_db[c];
             let next = if target > cur {
                 if cur <= SILENT_DB { target.max(floor) * rise + floor * (1.0 - rise) } else { cur + (target - cur) * rise }
@@ -457,6 +460,27 @@ fn fft_in_place(re: &mut [f32], im: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A live stream playing silence (an open plugin editor keeps one running): the analyzer rests and stops
+    /// repainting.
+    #[test]
+    fn silence_on_a_live_stream_settles() {
+        let mut m = Monitor::default();
+        let t0 = Instant::now();
+        let mut total = 0u64;
+        let mut settled = true;
+        for i in 0..40u32 {
+            total += 2400;
+            let changed = m.update(t0 + Duration::from_millis(50 * u64::from(i)), 48000, || (0.0, 0.0), |b| {
+                b.fill(0.0);
+                total
+            });
+            if i >= 20 {
+                settled &= !changed && !m.active();
+            }
+        }
+        assert!(settled);
+    }
 
     fn sine(hz: f32, rate: u32, amp: f32, out: &mut [f32]) {
         for (i, v) in out.iter_mut().enumerate() {

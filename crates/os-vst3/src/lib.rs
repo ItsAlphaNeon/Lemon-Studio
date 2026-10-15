@@ -1355,11 +1355,16 @@ impl os_engine::Instrument for Plugin {
 
     /// Stop (spec §5): queued notes are dropped and processing restarts, which resets the plug-in's voices and tails.
     /// Held notes also get their note offs with the next block, for plug-ins that keep voices across the restart
-    /// (spec: audio/voices.md §3).
+    /// (spec: audio/voices.md §3). Note offs still waiting for that block stay queued: Stop resets, and Play resets
+    /// again before any block has run.
     fn reset(&mut self) {
-        self.queue.clear();
+        self.queue.retain(|n| matches!(n.kind, NoteKind::Off));
         self.sounding = false;
         let mut sent = [false; 128];
+        for n in &mut self.queue {
+            n.time = 0;
+            sent[usize::from(n.key.min(127))] = true;
+        }
         let held: Vec<u8> = self.ledger.held().collect();
         for key in held {
             if !std::mem::replace(&mut sent[usize::from(key.min(127))], true) {
