@@ -935,6 +935,8 @@ pub struct App {
     typing_held: Vec<(KeyCode, usize, u16)>,
     pub typing_octave: i32,
     typing_synced: bool,
+    /// The piano-roll key held with the mouse, sounding as a live note until released: (rack row, key).
+    mouse_note: Option<(usize, u16)>,
     /// MIDI controller input, and its held notes: (key, rack row they started on).
     pub midi: crate::midi_in::MidiIn,
     midi_held: Vec<(u8, usize)>,
@@ -1097,6 +1099,7 @@ impl App {
             typing_held: Vec::new(),
             typing_octave: 0,
             typing_synced: false,
+            mouse_note: None,
             midi: crate::midi_in::MidiIn::none(),
             midi_held: Vec::new(),
             title_click: None,
@@ -1837,10 +1840,7 @@ impl App {
                     Request::Note(row, key, vel, on) => {
                         // The plugin's own keyboard plays on the live stream, like the typing keyboard.
                         if on {
-                            if !self.typing_synced {
-                                self.typing_synced = true;
-                                self.transport.update(&crate::rack::play_project(&self.state));
-                            }
+                            self.sync_live();
                             self.transport.note_on(row, u16::from(key), vel);
                         } else {
                             self.transport.note_off(row, u16::from(key));
@@ -4174,14 +4174,22 @@ impl App {
         }
     }
 
-    /// Set the key held with the mouse (lit on the keyboard), auditioning it if `play`.
+    /// Set the key held with the mouse (lit on the keyboard). With `play` it sounds as a live note, like a typing-keyboard
+    /// key, until another key is held or the button is released (§8).
     fn hold_key(&mut self, key: Option<i32>, play: bool) {
         if self.state.piano.held == key {
             return;
         }
         self.state.piano.held = key;
-        if let (Some(k), true, Some(ch)) = (key, play, piano::channel(&self.state)) {
-            self.preview(ch, k);
+        if let Some((row, k)) = self.mouse_note.take() {
+            self.transport.note_off(row, k);
+        }
+        let row = piano::channel(&self.state).and_then(|ch| self.state.project.channels.iter().position(|c| c.index == ch));
+        if let (Some(k), true, Some(row)) = (key, play, row) {
+            let k = k.clamp(0, views::piano::TOP_KEY) as u16;
+            self.sync_live();
+            self.transport.note_on(row, k, TYPING_VELOCITY);
+            self.mouse_note = Some((row, k));
         }
         // The keyboard column.
         match self.piano_grid {
@@ -4844,11 +4852,7 @@ impl App {
         if !(0..=127).contains(&key) || row >= self.state.project.channels.len() {
             return true;
         }
-        if !self.typing_synced {
-            // The live stream needs the project before the first note.
-            self.typing_synced = true;
-            self.transport.update(&crate::rack::play_project(&self.state));
-        }
+        self.sync_live();
         let key = key as u16;
         self.transport.note_on(row, key, TYPING_VELOCITY);
         self.typing_held.push((code, row, key));
@@ -4856,8 +4860,20 @@ impl App {
         true
     }
 
-    /// Release every held typing-keyboard note (focus lost, switch off): no hanging notes.
+    /// The live stream needs the project before the first live note.
+    fn sync_live(&mut self) {
+        if !self.typing_synced {
+            self.typing_synced = true;
+            self.transport.update(&crate::rack::play_project(&self.state));
+        }
+    }
+
+    /// Release every held typing-keyboard note and the piano-roll key held with the mouse (focus lost, switch off,
+    /// rows renumbered): no hanging notes.
     pub fn typing_release_all(&mut self) {
+        if let Some((row, key)) = self.mouse_note.take() {
+            self.transport.note_off(row, key);
+        }
         if self.typing_held.is_empty() {
             return;
         }
@@ -4884,11 +4900,7 @@ impl App {
                     if row >= self.state.project.channels.len() {
                         continue;
                     }
-                    if !self.typing_synced {
-                        // The live stream needs the project before the first note.
-                        self.typing_synced = true;
-                        self.transport.update(&crate::rack::play_project(&self.state));
-                    }
+                    self.sync_live();
                     self.transport.note_on(row, u16::from(key), velocity);
                     self.midi_held.push((key, row));
                 }
@@ -9889,6 +9901,8 @@ mod tests {
         }
         // The dragged note's key is lit on the keyboard while held.
         assert_eq!(app.state.piano.held, Some(i32::from(key0) + 4));
+        // It sounds at that key until the button is released, not for a fixed preview length.
+        assert_eq!(app.mouse_note.map(|n| n.1), Some(key0 + 4));
         // (The overview mini-map refreshes on release, so compare the keyboard column only.)
         frame(&mut app, &mut b, None);
         let g = app.piano_geom().unwrap();
@@ -9901,6 +9915,7 @@ mod tests {
         assert_eq!(bad, 0, "keyboard while dragging a note (lit key)");
         step(&mut app, &mut a, |ap| ap.mouse_up());
         assert_eq!(app.state.piano.held, None);
+        assert_eq!(app.mouse_note, None, "the note stops with the button");
         let n = piano::notes(&app.state)[0];
         assert!(n.position > 0 && n.key == key0 + 4, "note moved right and 4 keys up: {n:?}");
         let r = app.piano_geom().unwrap().note_rect(&n).unwrap();
@@ -9928,14 +9943,17 @@ mod tests {
         step(&mut app, &mut a, |ap| { ap.mouse_move(kx, g.y_of(72) + 8.0); });
         step(&mut app, &mut a, |ap| ap.mouse_down());
         assert_eq!(app.state.piano.held, Some(72));
+        assert_eq!(app.mouse_note.map(|n| n.1), Some(72));
         for key in [71, 70, 69] {
             step(&mut app, &mut a, |ap| { ap.mouse_move(kx, g.y_of(key) + 8.0); });
             assert_eq!(app.state.piano.held, Some(key));
+            assert_eq!(app.mouse_note.map(|n| i32::from(n.1)), Some(key), "only the key under the mouse sounds");
         }
         frame(&mut app, &mut b, None);
         assert_same(&a, &b, "keyboard drag");
         step(&mut app, &mut a, |ap| ap.mouse_up());
         assert_eq!(app.state.piano.held, None);
+        assert_eq!(app.mouse_note, None, "the key stops with the button");
         frame(&mut app, &mut b, None);
         assert_same(&a, &b, "keyboard released");
     }
