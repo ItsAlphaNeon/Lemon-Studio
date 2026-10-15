@@ -801,6 +801,8 @@ pub struct State {
     pub browser_folders: Vec<PathBuf>,
     /// Directory listings of dropped folders, until reread.
     pub browser_dirs: std::cell::RefCell<std::collections::HashMap<PathBuf, std::rc::Rc<Vec<views::browser::Entry>>>>,
+    /// The mixer's routing cables, hung by the mixer view as it paints and swung on the tick.
+    pub cables: std::cell::RefCell<crate::cable::Cables>,
     pub browser_scroll: f32,
     pub browser_sel: Option<String>,
     pub browser_drag: Option<(String, f32, f32)>,
@@ -941,6 +943,8 @@ pub struct App {
     typing_synced: bool,
     /// The piano-roll key held with the mouse, sounding as a live note until released: (rack row, key).
     mouse_note: Option<(usize, u16)>,
+    /// When the mixer's cables were last stepped (`None` while they are still).
+    cables_at: Option<std::time::Instant>,
     /// Velocity of the next key the mouse sounds (a keyboard click sets it from the click's x; back to the default
     /// after use).
     key_velocity: u8,
@@ -1060,6 +1064,7 @@ impl App {
                 browser_folders: crate::browser::load_folders(),
                 params: Default::default(),
                 browser_dirs: Default::default(),
+                cables: Default::default(),
                 browser_scroll: 0.0,
                 browser_sel: None,
                 browser_drag: None,
@@ -1108,6 +1113,7 @@ impl App {
             typing_octave: 0,
             typing_synced: false,
             mouse_note: None,
+            cables_at: None,
             key_velocity: TYPING_VELOCITY,
             midi: crate::midi_in::MidiIn::none(),
             midi_held: Vec::new(),
@@ -2610,6 +2616,7 @@ impl App {
             || self.loading()
             || self.plugin_windows_busy()
             || self.state.tapper.flash_at.is_some()
+            || self.state.cables.borrow().moving()
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -2618,6 +2625,22 @@ impl App {
         return crate::plugin_window::busy();
         #[cfg(not(target_os = "linux"))]
         false
+    }
+
+    /// The mixer's cables swing until still: step them and repaint where they were and are.
+    fn cables_tick(&mut self, now: std::time::Instant) {
+        if !self.state.shown(Win::Mixer) {
+            self.state.cables.get_mut().clear();
+            self.cables_at = None;
+            return;
+        }
+        let dt = self.cables_at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+        let cables = self.state.cables.get_mut();
+        let moved = cables.advance(dt);
+        self.cables_at = cables.moving().then_some(now);
+        if let Some(r) = moved {
+            self.damage_rect(r);
+        }
     }
 
     /// Periodic housekeeping; returns whether a repaint is needed.
@@ -2641,6 +2664,7 @@ impl App {
         // rate.
         let now = std::time::Instant::now();
         self.song_pos_tick(now);
+        self.cables_tick(now);
         if self.state.cpu.due(now) {
             let tp = &self.transport;
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());

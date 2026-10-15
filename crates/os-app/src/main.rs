@@ -18,6 +18,7 @@ mod audio_bench;
 #[cfg(test)]
 mod render_check;
 mod browser;
+mod cable;
 mod cpu;
 mod dialog;
 mod filedlg;
