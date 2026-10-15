@@ -57,18 +57,19 @@ pub mod k {
 }
 
 pub const PARAMS: [Param; 11] = [
-    // The sockets sit about 39 px above the mixer's bottom: 48 px dips the low point just below the window.
-    p("Sag", 48.0, 0.0, 150.0, 0, "px", "How far a cable sags below its sockets at rest (sets each cable's length)"),
-    p("Gravity", 1800.0, 0.0, 6000.0, 0, "px/s²", "Pull downward"),
-    p("Speed kept", 0.30, 0.01, 1.0, 2, "/s", "Share of its speed a cable keeps each second (lower settles sooner)"),
-    p("Stiffness", 0.85, 0.0, 1.0, 2, "x", "How straight a cable wants to stay (0 = a limp chain)"),
-    p("Bend strength", 0.25, 0.0, 1.0, 2, "x", "How hard the stiffness pushes back"),
+    // Defaults tuned by eye in the debug panel (2026-10-15). The sockets sit about 39 px above the mixer's bottom, so
+    // the sag dips the low point below the window.
+    p("Sag", 58.0, 0.0, 150.0, 0, "px", "How far a cable sags below its sockets at rest (sets each cable's length)"),
+    p("Gravity", 986.0, 0.0, 6000.0, 0, "px/s²", "Pull downward"),
+    p("Speed kept", 0.01, 0.01, 1.0, 2, "/s", "Share of its speed a cable keeps each second (lower settles sooner)"),
+    p("Stiffness", 1.0, 0.0, 1.0, 2, "x", "How straight a cable wants to stay (0 = a limp chain)"),
+    p("Bend strength", 0.71, 0.0, 1.0, 2, "x", "How hard the stiffness pushes back"),
     p("Iterations", 16.0, 1.0, 60.0, 0, "", "Constraint passes per substep (more = less stretchy)"),
-    p("Point spacing", 8.0, 3.0, 30.0, 0, "px", "Length between a cable's points (smaller = smoother, more work)"),
-    p("Max speed", 2880.0, 100.0, 10000.0, 0, "px/s", "Fastest a point may move"),
-    p("Switch tug", 64.0, 0.0, 600.0, 0, "px", "On a track change or a jump, how much of the move the cable feels as a yank (the rest moves it along)"),
+    p("Point spacing", 3.0, 3.0, 30.0, 0, "px", "Length between a cable's points (smaller = smoother, more work)"),
+    p("Max speed", 878.0, 100.0, 10000.0, 0, "px/s", "Fastest a point may move"),
+    p("Switch tug", 4.0, 0.0, 600.0, 0, "px", "On a track change or a jump, how much of the move the cable feels as a yank (the rest moves it along)"),
     p("Switch kick", 0.0, 0.0, 3000.0, 0, "px/s", "On a track change, a sideways shove against the move"),
-    p("Switch lift", 0.0, 0.0, 3000.0, 0, "px/s", "On a track change, an upward pop"),
+    p("Switch lift", 43.0, 0.0, 3000.0, 0, "px/s", "On a track change, an upward pop"),
 ];
 
 /// What the debug panel's controls do (views/cabledebug.rs).
