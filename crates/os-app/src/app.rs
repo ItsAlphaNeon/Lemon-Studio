@@ -675,6 +675,9 @@ pub enum Drag {
     /// Change a channel's mixer track (spec: ui/channel-rack.md §5).
     RackMixer { ch: usize, y0: f32, v0: u16 },
     Fader { track: u16, y0: f32, v0: f64 },
+    /// A plain press on a mixer strip, held: the strip under the cursor is selected as it slides across, to preview
+    /// tracks one after another.
+    MixSelect,
     Tempo { y0: f32, t0: f64, step: f64 },
     /// The song position slider's handle (`dx` = grab offset from its centre), or the button held on its track (the
     /// next step is due at `next`) (spec: ui/song-position-slider.md §3).
@@ -3601,6 +3604,17 @@ impl App {
                     self.state.pattern = (i32::from(p0) + steps).clamp(1, i32::from(crate::patterns::MAX)) as u16;
                     self.invalidate();
                 }
+                Drag::MixSelect => {
+                    // The strip whose column the cursor is in, whatever its height.
+                    let under = self.hits.iter().rev().find_map(|h| match h.action {
+                        Action::Mix(crate::mixer::MHit::Strip(n)) if x >= h.rect.x && x < h.rect.right() => Some(n),
+                        _ => None,
+                    });
+                    if let Some(n) = under.filter(|&n| n != self.state.selected_mixer) {
+                        crate::mixer::select(&mut self.state, n, false);
+                        self.damage_win(Win::Mixer);
+                    }
+                }
                 Drag::Fader { track, y0, v0 } => {
                     let per_px = views::mixer::FADER_PER_PX / f64::from(views::mixer::scale(self.state.win_rect(Win::Mixer)));
                     let v = (v0 - f64::from(y - y0) * per_px).clamp(0.0, 1.0);
@@ -5519,8 +5533,12 @@ impl App {
                 s.playlist.source = None;
             }
             Action::Mix(h) => {
+                let plain_strip = matches!(h, crate::mixer::MHit::Strip(_)) && !self.ctrl && !self.shift;
                 if let Some(m) = crate::mixer::hit(self, h) {
                     self.state.message = Some(m);
+                }
+                if plain_strip {
+                    self.drag = Some(Drag::MixSelect);
                 }
             }
             Action::Fader(t) => {
@@ -6481,6 +6499,29 @@ mod tests {
             let want = 130.0 + 3.0 * step;
             assert!((app.state.tempo - want).abs() < 1e-9, "from x {x}: {} vs {want}", app.state.tempo);
         }
+    }
+
+    #[test]
+    fn a_held_press_slides_the_mixer_selection_across_strips() {
+        use crate::mixer::MHit;
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut a, None);
+        let (r2, r3) = (hit_rect(&app, &Action::Mix(MHit::Strip(2))), hit_rect(&app, &Action::Mix(MHit::Strip(3))));
+        app.mouse_move(r2.cx(), r2.cy());
+        app.mouse_down();
+        assert_eq!(app.state.selected_mixer, 2);
+        // Into the next strip's column, above the strips: still follows the column.
+        app.mouse_move(r3.cx(), r3.y - 30.0);
+        assert_eq!(app.state.selected_mixer, 3);
+        app.mouse_move(r2.cx(), r2.cy());
+        assert_eq!(app.state.selected_mixer, 2);
+        app.mouse_up();
+        app.mouse_move(r3.cx(), r3.cy());
+        assert_eq!(app.state.selected_mixer, 2, "released: hovering selects nothing");
+        assert_eq!(app.state.mixer.sel, Vec::<u16>::new());
     }
 
     #[test]
