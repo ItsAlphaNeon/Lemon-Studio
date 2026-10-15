@@ -17,7 +17,10 @@ use std::process::Command;
 
 /// (cargo package, library file stem, display name).
 const PLUGINS: &[(&str, &str, &str)] =
-    &[("lemon-sampler", "lemon_sampler", "Lemon Sampler"), ("lemon-parametric-eq-2", "lemon_parametric_eq_2", "Lemon Parametric EQ 2"), ("lemon-3x-osc", "lemon_3x_osc", "Lemon 3x Osc")];
+    &[("lemon-sampler", "lemon_sampler", "Lemon Sampler"), ("lemon-parametric-eq-2", "lemon_parametric_eq_2", "Lemon Parametric EQ"), ("lemon-3x-osc", "lemon_3x_osc", "Lemon Trio")];
+/// The plugins' earlier display names: an install removes bundles left under them (same plugin ids, so a DAW would
+/// list each plugin twice).
+const OLD_NAMES: &[&str] = &["Lemon Parametric EQ 2", "Lemon 3x Osc", "Open Sampler", "Open Parametric EQ 2", "Open 3x Osc"];
 
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
@@ -60,6 +63,11 @@ fn main() {
         println!("{}\n{}", vst3.display(), clap.display());
         if install {
             let (vst3_dir, clap_dir) = install_dirs();
+            for old in OLD_NAMES {
+                for path in [vst3_dir.join(format!("{old}.vst3")), clap_dir.join(format!("{old}.clap"))] {
+                    let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+                }
+            }
             // A signed bundle is replaced whole (a file left from an older build would break its signature).
             if cfg!(target_os = "macos") {
                 for old in [vst3_dir.join(format!("{name}.vst3")), clap_dir.join(format!("{name}.clap"))] {

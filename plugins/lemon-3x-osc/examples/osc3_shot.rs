@@ -4,9 +4,10 @@
 // This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
 // and not any other part of Lemon Studio.
 
-//! Renders the Lemon 3x Osc editor offscreen:
-//! `cargo run -p lemon-3x-osc --example osc3_shot -- out.png [osc|env|demo] [x,y] [crop]`.
-//! `env` shows the envelope page (volume); `demo` sets a few oscillator controls; `x,y` = mouse position (hover looks,
+//! Renders the Lemon Trio editor offscreen:
+//! `cargo run -p lemon-3x-osc --example osc3_shot -- out.png [osc|env|pan|custom|demo] [x,y] [crop]`.
+//! `env` shows the envelope page (volume), `pan` its Panning page (LFO greyed out); `custom` puts osc 1 on the Custom
+//! shape (greyed out); `demo` sets a few oscillator controls; `x,y` = mouse position (hover looks,
 //! `OS_PRESS` presses); `crop` saves only the editor area the host shows (560 x 437).
 use std::sync::Arc;
 
@@ -25,6 +26,11 @@ fn main() {
             l.view.tab = 1;
             l.vals.edit_plain("vol_env", 1.0);
         }
+        Some("pan") => {
+            l.view.tab = 1;
+            l.view.sub = 0;
+        }
+        Some("custom") => l.vals.edit_plain("o1_shape", 6.0),
         Some("demo") => {
             l.vals.edit_plain("o1_shape", 3.0);
             l.vals.edit_plain("o2_shape", 2.0);
@@ -37,10 +43,7 @@ fn main() {
         }
         _ => {}
     }
-    let theme = std::env::var_os("OS_THEME")
-        .and_then(|p| std::fs::read(p).ok())
-        .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
-        .unwrap_or_default();
+    let theme = os_plugkit::palette();
     // `OS_SHOT_SCALE=3` renders at that display scale (the picker's high-resolution tiles).
     let k: f32 = std::env::var("OS_SHOT_SCALE").ok().and_then(|v| v.parse().ok()).filter(|k: &f32| *k > 0.0).unwrap_or(1.0);
     let s = |v: u32| (v as f32 * k).round() as u32;

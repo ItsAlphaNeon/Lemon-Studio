@@ -4,21 +4,24 @@
 // This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
 // and not any other part of Lemon Studio.
 
-//! Lemon 3x Osc editor: painting and hit regions (platform independent), built from the `os_ui::kit` widgets and
+//! Lemon Trio editor: painting and hit regions (platform independent), built from the `os_ui::kit` widgets and
 //! Lemon Studio's own drawings (no artwork of the original).
 //!
 //! Coordinates are FL window pixels from the spec tables; the editor is the window minus its 24 px title bar, so
-//! every y is drawn at `y - OY`. Colours are palette roles (`t.s` surface, `t.a` accent, `t.h` highlight, `t.tx`
-//! text) so an imported theme recolours the plugin like the rest of Lemon Studio.
-// spec: plugins/lemon-3x-osc.md (§1 window, §2 oscillator page, §3 envelope page, §4 hints)
+//! every y is drawn at `y - OY`. It is drawn in the Lemon design only (`kit::lemon::plug`; the plugins have no Classic
+//! look): each oscillator a card, lemon for the chosen shape and the values.
+// spec: plugins/lemon-3x-osc.md (§1 window, §2 oscillator page, §3 envelope page, §4 hints); ui/lemon-design.md §11
 
 use std::f32::consts::{PI, TAU};
 
+use os_theme::design::lemon as brand;
 use os_theme::Palette;
+use os_ui::kit::lemon::{self, plug};
 use os_ui::kit::{inst, State};
 use os_ui::tabler as tb;
 use os_ui::{Canvas, Color, Font, Rect};
 
+use crate::dsp;
 use crate::params::{AM_BYTE, LFO_SHAPES};
 
 /// Painted size in logical pixels (the original's window minus its title bar; same frame as Lemon Sampler).
@@ -35,13 +38,6 @@ pub const HOSTED_CROP_Y: u32 = CROP_Y + STRIP_ROWS;
 pub const HOSTED_EDITOR_H: u32 = EDITOR_H - STRIP_ROWS;
 /// Height of the original's title bar (the host draws its own).
 pub const OY: f32 = 24.0;
-
-/// Selected shape glyphs, pan and phase-randomness pointers.
-pub const ORANGE: u32 = 0xf2a13a;
-/// Coarse / fine value markers.
-pub const LIME: u32 = 0xb8e04a;
-/// Fader handle centre line.
-pub const RED: u32 = 0xff4040;
 
 /// Envelope targets: knob ring, sub-tab text, graph line (as Lemon Sampler).
 pub const TARGET_COLORS: [(u32, u32, u32); 5] = [
@@ -134,6 +130,22 @@ pub struct Hit {
     pub t: Target,
 }
 
+/// Whether `id` is an oscillator's shape (`o1_shape` .. `o3_shape`).
+pub fn is_osc_shape(id: &str) -> bool {
+    id.starts_with('o') && id.ends_with("_shape")
+}
+
+/// Whether target `t` changes the sound today. Greyed out: the Custom shape (it plays silence: no shape can be loaded
+/// yet) and the Panning LFO (the panning record is not played, spec §2.6). Greyed-out controls draw their disabled
+/// look and the editor only names them.
+pub fn works(t: &Target) -> bool {
+    match t {
+        Target::Set(id, v) if is_osc_shape(id) => *v as u8 != dsp::CUSTOM,
+        Target::Knob(id) | Target::Set(id, _) => !id.starts_with("pan_lfo_"),
+        _ => true,
+    }
+}
+
 /// Editor-only state (not saved).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewState {
@@ -169,8 +181,11 @@ impl Ui<'_> {
     fn flag(&self, b: usize) -> bool {
         self.m.plain("flags").round() as i32 & (1 << b) != 0
     }
-    /// Hover / pressed look of a control occupying `r`.
+    /// Hover / pressed look of a control occupying `r`; greyed-out controls (`works`) are disabled and never light up.
     fn state(&self, r: Rect, t: &Target) -> State {
+        if !works(t) {
+            return State { disabled: true, ..State::NORMAL };
+        }
         let pressed = self.st.pressed.as_ref() == Some(t);
         let hover = !pressed && self.st.pressed.is_none() && self.st.mouse.is_some_and(|(x, y)| r.contains(x, y));
         State { hover, pressed, ..State::NORMAL }
@@ -182,19 +197,15 @@ impl Ui<'_> {
 pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &str, hosted: bool) -> Vec<Hit> {
     let mut ui = Ui { c, t, m, st, hits: Vec::new() };
     ui.c.begin_frame(None);
-    ui.c.clear(t.s(0x25292b));
-    ui.c.fill_rect(Rect::span(4.0, 563.0, 1.0, y(461.0)), t.s(0x202324));
-    for r in [Rect::span(0.0, 0.0, 0.0, y(465.0)), Rect::span(567.0, 567.0, 0.0, y(465.0)), Rect::span(0.0, 567.0, y(465.0), y(465.0))] {
-        ui.c.fill_rect(r, t.s(0x191d1f));
-    }
+    ui.c.clear(plug::BG);
     if !hosted {
         tab_strip(&mut ui);
         if !hint.is_empty() {
             let lh = ui.c.line_height(LABEL);
             let (left, right) = hint.split_once('\t').unwrap_or((hint, ""));
-            ui.c.text_clip(LABEL, 100.0, (y(48.0) - lh / 2.0).round(), 300.0, t.tx(0xb4bfc7), left);
+            ui.c.text_clip(LABEL, 100.0, (y(48.0) - lh / 2.0).round(), 300.0, plug::DIM, left);
             if !right.is_empty() {
-                ui.c.text_right(LABEL, 556.0, (y(48.0) - lh / 2.0).round(), t.tx(0xb4bfc7), right);
+                ui.c.text_right(LABEL, 556.0, (y(48.0) - lh / 2.0).round(), plug::DIM, right);
             }
         }
     }
@@ -218,86 +229,49 @@ pub fn page_icon(c: &mut Canvas, page: u8, cx: f32, cy: f32, col: Color) {
 }
 
 fn tab_strip(ui: &mut Ui) {
-    let t = ui.t;
-    ui.c.fill_rect(rr(4.0, 563.0, 25.0, 71.0), t.s(0x151718));
-    ui.c.fill_rect(rr(4.0, 563.0, 26.0, 70.0), t.s(0x1b1d1e));
+    let hover = (0..2u8).find(|&i| ui.state(rr(5.0 + 43.0 * f32::from(i), 49.0 + 43.0 * f32::from(i), 26.0, 71.0), &Target::Tab(i)).hover);
+    lemon::page_strip(ui.c, rr(4.0, 563.0, 25.0, 71.0), 2, ui.st.tab, hover, &|i| 5.0 + 43.0 * f32::from(i), &mut |c, i, x, yy, col| page_icon(c, i, x, yy, col));
     for i in 0..2u8 {
         let x0 = 5.0 + 43.0 * f32::from(i);
-        let cell = rr(x0, x0 + 44.0, 26.0, 71.0);
-        let active = ui.st.tab == i;
-        let st = ui.state(cell, &Target::Tab(i));
-        if active {
-            ui.c.fill_rect(cell, t.s(0x202324));
-        }
-        let col = if active {
-            t.a(0x49f1b1)
-        } else if st.hover {
-            t.tx(0xffffff)
-        } else {
-            t.tx(0xd5dbdf)
-        };
-        page_icon(ui.c, i, 27.0 + 43.0 * f32::from(i), y(48.0), col);
-        ui.hit(cell, Target::Tab(i));
+        ui.hit(rr(x0, x0 + 44.0, 26.0, 71.0), Target::Tab(i));
     }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Oscillator page (spec §2)
 
-/// Clock angle (radians from 12 o'clock, clockwise) of a knob value: 7 o'clock .. 5 o'clock (300°).
-pub fn knob_angle(v: f32) -> f32 {
-    (v.clamp(0.0, 1.0) - 0.5) * (300.0f32).to_radians()
-}
-
-fn polar(cx: f32, cy: f32, a: f32, d: f32) -> (f32, f32) {
-    (cx + d * a.sin(), cy - d * a.cos())
-}
-
-/// A brushed-metal knob in a dark socket: `ticks` marks around it, a coloured marker on the rim at the value.
-#[allow(clippy::too_many_arguments)]
-fn metal_knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, r: f32, ticks: usize, accent: u32, value_text: bool) {
-    let t = ui.t;
+/// A knob 2.5 px larger than the original's metal one, `ticks` marks over its 270° when there are many (the coarse
+/// semitones); `value_text` shows the value on its disc. Bipolar except the mix knob.
+fn metal_knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, r: f32, ticks: usize, value_text: bool) {
     let cy = y(cy);
     let target = Target::Knob(id.into());
     let hr = Rect::new(cx - r - 7.0, cy - r - 7.0, 2.0 * r + 14.0, 2.0 * r + 14.0);
     let st = ui.state(hr, &target);
     let v = ui.m.norm(id);
-    // Tick marks around the socket.
-    let ring = r + 7.0;
-    for i in 0..ticks {
-        let a = knob_angle(i as f32 / (ticks - 1).max(1) as f32);
-        let (x0, y0) = polar(cx, cy, a, ring - 1.5);
-        let (x1, y1) = polar(cx, cy, a, ring + 1.5);
-        ui.c.line(x0, y0, x1, y1, 1.0, t.s(0x3e484d));
+    let r = r + 2.5;
+    if ticks > 5 {
+        for i in 0..ticks {
+            let a = 0.75 * PI + 1.5 * PI * i as f32 / (ticks - 1) as f32;
+            let (r0, r1) = (r + 3.5, r + 6.5);
+            let col = if i % 12 == 0 { Color::rgb(0x7a7a7a) } else { plug::TICK };
+            ui.c.line(cx + r0 * a.cos(), cy + r0 * a.sin(), cx + r1 * a.cos(), cy + r1 * a.sin(), 1.0, col);
+        }
     }
-    // Socket, drop shadow and the metal face (light rim on top, darker centre for a dished look).
-    ui.c.fill_circle(cx, cy + 1.5, r + 4.0, t.s(0x000000).with_alpha(60));
-    ui.c.fill_circle(cx, cy, r + 3.5, t.s(0x1e2427));
-    ui.c.fill_circle(cx, cy, r + 2.2, t.s(0x2c3438));
-    let lift = if st.hover || st.pressed { -0.8 } else { 0.0 };
-    let face = Rect::new(cx - r, cy - r + lift, 2.0 * r, 2.0 * r);
-    // Dark brushed face: a light rim lit from above around a dished dark centre.
-    ui.c.fill_rect_gradient(face, t.s(0xc4cace), t.s(0x343a3e), r);
-    ui.c.fill_rect_gradient(face.inset(r * 0.14), t.s(0x353c40), t.s(0x575f64), r * 0.86);
-    ui.c.stroke_circle(cx, cy + lift, r * 0.86, 0.8, t.s(0x1c2124).with_alpha(160));
-    // Value marker on the rim.
-    let a = knob_angle(v);
-    let (x0, y0) = polar(cx, cy, a, r + 2.5);
-    let (x1, y1) = polar(cx, cy, a, r + 7.5);
-    ui.c.line(x0, y0, x1, y1, 2.4, t.a(accent));
+    let w = (r * 0.12).clamp(2.2, 2.8);
+    lemon::dial(ui.c, cx, cy, r, w, v, !id.ends_with("_mix"), brand::MAIN, st);
     if value_text {
+        lemon::dial_disc(ui.c, cx, cy, r - w - 1.5, st);
         let s = format!("{}", ui.m.plain(id).round() as i32);
-        let f = Font::new(13);
+        let f = Font::new(13).bold();
         let lh = ui.c.line_height(f);
         let w = ui.c.text_width(f, &s);
-        ui.c.text(f, (cx - w / 2.0).round(), (cy + lift - lh / 2.0).round(), t.tx(0xdfe4e7), &s);
+        ui.c.text(f, (cx - w / 2.0).round(), (cy - lh / 2.0).round(), brand::TEXT, &s);
     }
     ui.hit(hr, target);
 }
 
-/// A vertical fader: dark slot with ticks, handle with a red centre line at the value (centre = 0).
+/// A vertical fader: ticks, a thin groove and a rounded grey cap with a lemon centre line at the value (centre = 0).
 fn fader(ui: &mut Ui, id: &str, x: f32, cy: f32) {
-    let t = ui.t;
     let (top, bot) = (y(cy - 40.0), y(cy + 40.0));
     let target = Target::Knob(id.into());
     let hr = Rect::new(x - 13.0, top - 6.0, 26.0, bot - top + 12.0);
@@ -305,18 +279,15 @@ fn fader(ui: &mut Ui, id: &str, x: f32, cy: f32) {
     for k in 0..9 {
         let yy = top + (bot - top) * k as f32 / 8.0;
         let w = if k % 4 == 0 { 6.0 } else { 4.0 };
-        ui.c.fill_rect(Rect::new(x - 8.0 - w, yy.round(), w, 1.0), t.s(0x4d585e));
-        ui.c.fill_rect(Rect::new(x + 9.0, yy.round(), w, 1.0), t.s(0x4d585e));
+        ui.c.fill_rect(Rect::new(x - 8.0 - w, yy.round(), w, 1.0), plug::TICK);
+        ui.c.fill_rect(Rect::new(x + 9.0, yy.round(), w, 1.0), plug::TICK);
     }
-    ui.c.fill_rrect(Rect::new(x - 3.0, top - 2.0, 6.0, bot - top + 4.0), 2.0, t.s(0x1f2629));
-    ui.c.fill_rect(Rect::new(x - 1.0, top, 2.0, bot - top), t.s(0x101415));
-    let v = ui.m.norm(id);
-    let hy = (bot - (bot - top) * v).round();
-    let h = Rect::new(x - 12.0, hy - 6.0, 24.0, 12.0);
-    ui.c.fill_rrect(h.outset(1.0), 2.0, t.s(0x000000).with_alpha(90));
-    let (a, b) = if st.hover || st.pressed { (0x4a5257, 0x262c2f) } else { (0x3d4448, 0x1e2326) };
-    ui.c.fill_rect_gradient(h, t.s(a), t.s(b), 2.0);
-    ui.c.fill_rect(Rect::new(h.x + 2.0, hy - 0.5, h.w - 4.0, 1.5), t.a(RED));
+    ui.c.fill_rrect(Rect::new(x - 2.5, top - 2.0, 5.0, bot - top + 4.0), 2.5, Color::rgb(0x1a1a1a));
+    let hy = (bot - (bot - top) * ui.m.norm(id)).round();
+    ui.c.fill_rrect(Rect::new(x - 12.0, hy - 7.0, 24.0, 14.0), 4.5, Color::rgb(0x151515));
+    let (a, b) = if st.hover || st.pressed { (0x7a7a7a, 0x555555) } else { (0x6c6c6c, 0x4b4b4b) };
+    ui.c.fill_rect_gradient(Rect::new(x - 11.0, hy - 6.0, 22.0, 12.0), Color::rgb(a), Color::rgb(b), 3.5);
+    ui.c.fill_rrect(Rect::new(x - 8.0, hy - 0.75, 16.0, 1.5), 0.75, brand::MAIN);
     ui.hit(hr, target);
 }
 
@@ -327,7 +298,8 @@ fn bowtie(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
 }
 
 /// Shape glyph `shape` (0..6) centred on (`cx`, `cy`), about 24 x 18 px.
-fn shape_glyph(c: &mut Canvas, shape: i32, cx: f32, cy: f32, col: Color) {
+/// `pips` = the noise die's dots.
+fn shape_glyph(c: &mut Canvas, shape: i32, cx: f32, cy: f32, col: Color, pips: Color) {
     let (w, h) = (11.0, 8.0);
     let pts: Vec<(f32, f32)> = match shape {
         0 => (0..=32)
@@ -353,7 +325,7 @@ fn shape_glyph(c: &mut Canvas, shape: i32, cx: f32, cy: f32, col: Color) {
             let r = Rect::new(cx - 9.0, cy - 9.0, 18.0, 18.0);
             c.fill_rrect(r, 3.5, col);
             for (dx, dy) in [(-4.0, -4.0), (4.0, 4.0), (0.0, 0.0)] {
-                c.fill_circle(cx + dx, cy + dy, 1.7, Color::rgb(0xffffff).with_alpha(150));
+                c.fill_circle(cx + dx, cy + dy, 1.7, pips);
             }
             return;
         }
@@ -379,33 +351,25 @@ fn invert_glyph(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
 
 fn osc_page(ui: &mut Ui) {
     let t = ui.t;
-    // Background: a soft radial grey lightest at the top middle (measured colours), then the dark bottom band.
-    let area = rr(4.0, 563.0, 72.0, 385.0);
-    ui.c.push_clip(area);
-    ui.c.fill_radial(Rect::new(40.0, y(72.0) - 346.0, 520.0, 692.0), t.s(0x78878e), t.s(0x515b61));
-    ui.c.pop_clip();
-    for (x, col) in [(4.0, 0x2c3337), (5.0, 0x3d474c), (562.0, 0x3d474c), (563.0, 0x2c3337)] {
-        ui.c.fill_rect(rr(x, x, 72.0, 385.0), t.s(col));
-    }
-    let band = rr(4.0, 563.0, 386.0, 461.0);
-    ui.c.push_clip(band);
-    ui.c.fill_radial(Rect::new(4.0 - 100.0, y(386.0) - 40.0, 760.0, 230.0), t.s(0x2a363b), t.s(0x212a2e));
-    ui.c.pop_clip();
-    ui.c.fill_rect(rr(4.0, 563.0, 386.0, 386.0), t.s(0x1a2023));
+    // Flat background, the bottom band a step darker.
+    ui.c.fill_rect(rr(4.0, 563.0, 72.0, 385.0), plug::BG);
+    ui.c.fill_rect(rr(4.0, 563.0, 386.0, 461.0), Color::rgb(0x232323));
+    ui.c.fill_rect(rr(4.0, 563.0, 386.0, 386.0), Color::rgb(0x1a1a1a));
 
-    let ink = t.tx(0x2d3438);
+    let ink = plug::DIM;
     for n in 0..3 {
         let o = n + 1;
         let cy = row_y(n);
         let id = |s: &str| format!("o{o}_{s}");
-        // Number tab.
+        // The oscillator's card and its number badge.
         let (top, bot) = (y(cy - 27.0), y(cy + 28.0));
-        ui.c.fill_polygon(&[(8.0, top), (30.0, top), (40.0, (top + bot) / 2.0), (30.0, bot), (8.0, bot)], t.s(0x2f3a40));
-        let f = Font::light(34, 0).italic();
         let s = o.to_string();
+        lemon::plug_panel(ui.c, Rect::new(6.0, y(cy) - 45.0, 556.0, if n < 2 { 103.0 } else { 89.0 }));
+        ui.c.fill_rrect(Rect::new(10.0, top, 30.0, 55.0), 7.0, Color::rgb(0x262626));
+        let f = Font::new(28).bold();
         let lh = ui.c.line_height(f);
         let w = ui.c.text_width(f, &s);
-        ui.c.text(f, (24.0 - w / 2.0).round(), ((top + bot) / 2.0 - lh / 2.0).round(), t.tx(0xc4ccd0), &s);
+        ui.c.text(f, (25.0 - w / 2.0).round(), ((top + bot) / 2.0 - lh / 2.0).round(), brand::MAIN, &s);
         // Shapes and invert.
         let shape = ui.m.plain(&id("shape")).round() as i32;
         for (s, x, dy) in SHAPE_BUTTONS {
@@ -413,35 +377,35 @@ fn osc_page(ui: &mut Ui) {
             let target = if s == INVERT { Target::Flag(n) } else { Target::Set(id("shape"), s as f32) };
             let hr = Rect::new(x - 17.0, cyy - 17.0, 34.0, 34.0);
             let st = ui.state(hr, &target);
+            let sel = if s == INVERT { ui.flag(n) } else { shape == s };
             if s == INVERT {
-                let on = ui.flag(n);
-                let col = if on { t.a(ORANGE) } else if st.hover { t.tx(0xe4e8ea) } else { t.tx(0xc9ced1) };
+                let col = if sel { brand::MAIN } else if st.hover { brand::TEXT } else { Color::rgb(0x8a8a8a) };
                 invert_glyph(ui.c, x, cyy + 2.0, col);
-            } else {
-                let sel = shape == s;
+            } else if st.disabled {
+                // Greyed out (Custom): a faint glyph, outlined when it is the chosen shape.
                 if sel {
-                    ui.c.fill_circle(x, cyy, 19.0, t.s(0x2a2f32));
-                    ui.c.fill_circle(x, cyy, 18.0, t.s(0x3a4044));
+                    ui.c.stroke_rrect(Rect::new(x - 15.5, cyy - 14.5, 31.0, 29.0), 8.0, 1.0, plug::OFF);
                 }
-                let col = if sel {
-                    t.a(ORANGE)
+                shape_glyph(ui.c, s, x, cyy, plug::OFF, plug::PANEL);
+            } else {
+                if sel {
+                    lemon::lit(ui.c, Rect::new(x - 16.0, cyy - 15.0, 32.0, 30.0), 8.0, st.hover);
                 } else if st.hover {
-                    t.s(0x4a5459)
-                } else {
-                    t.s(0x2d3236)
-                };
-                shape_glyph(ui.c, s, x, cyy, col);
+                    ui.c.fill_rrect(Rect::new(x - 16.0, cyy - 15.0, 32.0, 30.0), 8.0, Color::rgb(0x3d3d3d));
+                }
+                let (col, pips) = if sel { (brand::COLORED_DARK, brand::MAIN) } else if st.hover { (brand::TEXT, Color::rgb(0x3d3d3d)) } else { (Color::rgb(0x8a8a8a), plug::PANEL) };
+                shape_glyph(ui.c, s, x, cyy, col, pips);
             }
             ui.hit(hr, target);
         }
         // Stereo faders, pitch, pan, mix.
         fader(ui, &id("phase"), 236.0, cy);
         fader(ui, &id("detune"), 266.0, cy);
-        metal_knob(ui, &id("coarse"), 342.0, cy, 22.0, 25, LIME, true);
-        metal_knob(ui, &id("fine"), 405.0, cy, 16.0, 5, LIME, false);
-        metal_knob(ui, &id("pan"), 467.0, cy, 16.0, 5, ORANGE, false);
+        metal_knob(ui, &id("coarse"), 342.0, cy, 22.0, 25, true);
+        metal_knob(ui, &id("fine"), 405.0, cy, 16.0, 5, false);
+        metal_knob(ui, &id("pan"), 467.0, cy, 16.0, 5, false);
         if n > 0 {
-            metal_knob(ui, &format!("o{o}_mix"), 527.0, cy, 21.0, 5, LIME, false);
+            metal_knob(ui, &format!("o{o}_mix"), 527.0, cy, 21.0, 5, false);
         }
         // Captions under rows 1 and 2 (the bottom band covers row 3's, as in the original).
         if n == 2 {
@@ -478,34 +442,19 @@ fn osc_page(ui: &mut Ui) {
     inst::label(ui.c, t, 111.0, y(423.0), "HQ", false);
     ui.hit(r, Target::Toggle("hq".into()));
     dark_knob(ui, "rand", 168.0, 423.0, 17.0);
-    bowtie(ui.c, 206.0, y(423.0), t.tx(0xb4bfc7));
+    bowtie(ui.c, 206.0, y(423.0), plug::DIM);
     inst::label(ui.c, t, 214.0, y(423.0), "PHASE RAND", false);
-    let f = Font::light(36, 0);
-    let lh = ui.c.line_height(f);
-    ui.c.text_right(f, 548.0, (y(414.0) - lh / 2.0).round(), t.tx(0x6d7a80), "Lemon 3x Osc");
+    // The lemon mark and "LEMON" over a large "TRIO".
+    lemon::wordmark(ui.c, 551.0, y(389.0), false, "TRIO", Font::condensed(40, 0), Font::condensed(11, 0).bold());
 }
 
-/// The phase-randomness knob: dark, ticks around it, an orange pointer turning over 300°.
+/// The phase-randomness knob.
 fn dark_knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, r: f32) {
-    let t = ui.t;
     let cy = y(cy);
     let target = Target::Knob(id.into());
     let hr = Rect::new(cx - r - 6.0, cy - r - 6.0, 2.0 * r + 12.0, 2.0 * r + 12.0);
     let st = ui.state(hr, &target);
-    for i in 0..5 {
-        let a = knob_angle(i as f32 / 4.0);
-        let (x0, y0) = polar(cx, cy, a, r + 4.0);
-        let (x1, y1) = polar(cx, cy, a, r + 8.0);
-        ui.c.line(x0, y0, x1, y1, 1.0, t.s(0x56636a));
-    }
-    ui.c.fill_circle(cx, cy, r + 3.0, t.s(0x141a1d));
-    let lift = if st.hover || st.pressed { -0.8 } else { 0.0 };
-    ui.c.fill_rect_gradient(Rect::new(cx - r, cy - r + lift, 2.0 * r, 2.0 * r), t.s(0x4b555a), t.s(0x15191b), r);
-    ui.c.fill_rect_gradient(Rect::new(cx - r + 2.0, cy - r + 2.0 + lift, 2.0 * r - 4.0, 2.0 * r - 4.0), t.s(0x2f373b), t.s(0x1e2427), r - 2.0);
-    let a = knob_angle(ui.m.norm(id));
-    let (x0, y0) = polar(cx, cy + lift, a, r * 0.45);
-    let (x1, y1) = polar(cx, cy + lift, a, r - 2.5);
-    ui.c.line(x0, y0, x1, y1, 2.6, t.a(ORANGE));
+    lemon::dial(ui.c, cx, cy, r + 3.0, 2.6, ui.m.norm(id), false, brand::MAIN, st);
     ui.hit(hr, target);
 }
 
@@ -536,7 +485,7 @@ fn dial(ui: &mut Ui, id: &str, cx: f32, cy: f32, look: KnobLook, accent: u32, bi
     inst::dial(ui.c, ui.t, cx, cy, look.r, look.ring, ui.m.norm(id), bipolar, ui.t.a(accent), st);
     if !caption.is_empty() {
         let dy = if id.ends_with("_amt") && !id.ends_with("lfo_amt") { 21.5 } else { 17.5 };
-        inst::caption(ui.c, ui.t, cx, cy + dy, caption, false);
+        inst::caption(ui.c, ui.t, cx, cy + dy, caption, st.disabled);
     }
     ui.hit(hr, target);
 }
@@ -557,7 +506,7 @@ fn label(ui: &mut Ui, x: f32, cy: f32, s: &str) -> f32 {
 
 fn envelope_page(ui: &mut Ui) {
     let t = ui.t;
-    ui.c.fill_rect(rr(4.0, 563.0, 72.0, 461.0), t.s(0x202324));
+    ui.c.fill_rect(rr(4.0, 563.0, 72.0, 461.0), plug::BG);
     let sub = ui.st.sub.min(4) as usize;
     const SPANS: [(f32, f32); 5] = [(16.0, 55.0), (65.0, 103.0), (113.0, 145.0), (155.0, 187.0), (197.0, 220.0)];
     for (i, n) in TARGET_NAMES.iter().enumerate() {
@@ -567,19 +516,7 @@ fn envelope_page(ui: &mut Ui) {
         let cell = rr(x0 - 5.0, x1 + 4.0, 78.0, 106.0);
         let target = Target::SubTab(i as u8);
         let st = ui.state(cell, &target);
-        let active = sub == i;
-        if active {
-            ui.c.fill_rect(cell, t.s(0x1b1d1e));
-        }
-        let col = if active {
-            t.a(TARGET_COLORS[i].1)
-        } else if st.hover {
-            t.tx(0xffffff)
-        } else {
-            t.tx(0xd2d8dc)
-        };
-        let lh = ui.c.line_height(LABEL);
-        ui.c.text(LABEL, x, (y(92.0) - lh / 2.0).round(), col, n);
+        lemon::text_tab(ui.c, cell, x, n, LABEL, t.a(TARGET_COLORS[i].1), sub == i, st);
         ui.hit(cell, target);
     }
     let p = ENV_PREFIX[sub];
@@ -596,7 +533,7 @@ fn envelope_page(ui: &mut Ui) {
             h.r.w += lw + 4.0;
         }
         let g = env_rect();
-        inst::graph_bg(ui.c, t, g);
+        inst::graph_bg(ui.c, g);
         env_graph(ui, g, p, t.a(line));
         for (k, x, cap) in [("delay", 33.0, "DELAY"), ("att", 67.0, "ATT"), ("hold", 101.0, "HOLD"), ("dec", 135.0, "DEC"), ("sus", 169.0, "SUS"), ("rel", 203.0, "REL")] {
             dial(ui, &id(k), x, 243.0, MID, arc, false, cap);
@@ -620,34 +557,30 @@ fn envelope_page(ui: &mut Ui) {
         let r = Rect::new(x - 10.0, y(114.0), 21.0, 19.0);
         let target = Target::Set(id("lfo_shape"), i as f32);
         let st = ui.state(r, &target);
-        if i == shape {
-            ui.c.fill_rect(r, t.s(0x1a1c1d));
-        }
-        let col = if i == shape {
-            t.a(arc)
-        } else if st.hover {
-            t.tx(0xffffff)
-        } else {
-            t.tx(0xd5dbdf)
-        };
+        let col = lemon::choice_button(ui.c, r, i == shape, t.a(arc), st);
         lfo_icon(ui.c, i, x, y(123.0), col);
         ui.hit(r, target);
     }
     label(ui, 377.0, 123.0, "LFO");
     let lg = rr(311.0, 442.0, 140.0, 222.0);
-    inst::graph_bg(ui.c, t, lg);
+    inst::graph_bg(ui.c, lg);
     lfo_graph(ui, lg, p, t.a(line));
     for (k, x, cap) in [("lfo_delay", 326.0, "DELAY"), ("lfo_att", 359.0, "ATT"), ("lfo_amt", 393.0, "AMT"), ("lfo_speed", 427.0, "SPEED")] {
         dial(ui, &id(k), x, 241.0, MID, arc, k == "lfo_amt", cap);
+    }
+    if !works(&Target::Knob(id("lfo_amt"))) {
+        // Nothing in the panel plays (the Panning LFO).
+        lemon::plug_veil(ui.c, lr);
     }
 
     // Filter.
     let fr = panel(ui, 457.0, 556.0, 113.0, 310.0);
     inst::panel_tab(ui.c, t, fr, 55.0, "Filter");
-    ui.c.text(MOD_CAP, 504.0, y(131.0) - 6.0, t.tx(0xb4bfc7), "MOD X");
+    let cap = plug::DIM;
+    ui.c.text(MOD_CAP, 504.0, y(131.0) - 6.0, cap, "MOD X");
     big_knob(ui, "cutoff", 492.5, 168.5, 0x5ea733);
     big_knob(ui, "resonance", 520.0, 233.5, 0xc8a032);
-    ui.c.text(MOD_CAP, 464.0, y(264.0) - 7.0, t.tx(0xb4bfc7), "MOD Y");
+    ui.c.text(MOD_CAP, 464.0, y(264.0) - 7.0, cap, "MOD Y");
     let r = rr(463.0, 549.0, 282.0, 302.0);
     let target = Target::List("filter".into());
     let st = ui.state(r, &target);
@@ -675,7 +608,7 @@ fn big_knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, dot: u32) {
     let r = Rect::new(cx - 26.0, cy - 26.0, 52.0, 52.0);
     let target = Target::Knob(id.into());
     let st = ui.state(r, &target);
-    inst::big_dial(ui.c, ui.t, cx, cy, ui.m.norm(id), ui.t.a(dot), st);
+    inst::big_dial(ui.c, cx, cy, ui.m.norm(id), ui.t.a(dot), st);
     ui.hit(r, target);
 }
 
@@ -795,8 +728,16 @@ fn lfo_graph(ui: &mut Ui, g: Rect, p: &str, col: Color) {
 // ---------------------------------------------------------------------------------------------------------------
 // Hints (spec §4)
 
-/// The hint line for a target: the parameter's name and value as the original words them.
+/// The hint line for a target: the parameter's name and value as the original words them; a greyed-out control
+/// (`works`) is named as not available yet.
 pub fn hint(t: &Target, m: &dyn Model, names: &dyn Fn(&str) -> String) -> String {
+    if !works(t) {
+        let name = match t {
+            Target::Set(id, _) if is_osc_shape(id) => format!("Osc {} custom shape", &id[1..2]),
+            _ => t.param().map(|id| names(id)).unwrap_or_default(),
+        };
+        return format!("{name}: not available yet");
+    }
     match t {
         Target::Knob(id) | Target::Toggle(id) | Target::List(id) => {
             if id == "hq" {

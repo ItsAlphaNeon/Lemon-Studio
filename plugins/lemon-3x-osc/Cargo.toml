@@ -1,6 +1,6 @@
 [package]
 name = "lemon-3x-osc"
-description = "Lemon 3x Osc: Lemon Studio's three-oscillator synthesizer as a VST3 / CLAP plugin"
+description = "Lemon Trio: Lemon Studio's three-oscillator synthesizer as a VST3 / CLAP plugin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -30,19 +30,14 @@ pub use x11 as gui;
 #[cfg(target_os = "macos")]
 pub use mac as gui;
 
+use os_theme::design::Design;
 use os_theme::Palette;
 use os_ui::kit::menu::{MenuItem, MenuStyle};
 
-/// The palette Lemon Studio uses: the remembered `.flstheme` (`current.flstheme` in `os_paths::user_dir`, spec
-/// ui/flstheme.md), else the default one. A plugin runs in its own module, so it reads the theme itself.
+/// The palette Lemon Studio's plugin editors draw with: always the Lemon design's, whatever design the app or a saved
+/// setting names (the plugins' Classic look is retired, spec ui/lemon-design.md §11.1). Their menus use it too.
 pub fn palette() -> Palette {
-    if cfg!(test) {
-        return Palette::default();
-    }
-    os_paths::user_file("current.flstheme")
-        .and_then(|p| std::fs::read(p).ok())
-        .map(|b| os_theme::fl::palette(&os_theme::FlTheme::parse(&String::from_utf8_lossy(&b))))
-        .unwrap_or_default()
+    os_theme::design::palette(Design::Lemon, None)
 }
 
 /// A menu to show: rows, what each does, submenus by row.

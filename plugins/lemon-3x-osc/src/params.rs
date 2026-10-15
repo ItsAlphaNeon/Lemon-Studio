@@ -4,7 +4,7 @@
 // This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
 // and not any other part of Lemon Studio.
 
-//! Lemon 3x Osc parameters and saved state.
+//! Lemon Trio parameters and saved state.
 //!
 //! The 114 parameters come in the original's order (parameter k = field k + 1 of its saved state = automation index
 //! k), each with the original's stored range, so a project's automation reaches the same control. A copy of the whole

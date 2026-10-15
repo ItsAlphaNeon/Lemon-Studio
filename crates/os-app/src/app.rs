@@ -954,7 +954,7 @@ pub struct App {
     piano_panel: Option<Rect>,
     /// Sampler channel rows whose Lemon Sampler instance could not be created (not retried).
     sampler_failed: Vec<usize>,
-    /// Mixer slots (`plugins::fx_key`) whose Lemon Parametric EQ 2 could not start (not retried).
+    /// Mixer slots (`plugins::fx_key`) whose Lemon Parametric EQ could not start (not retried).
     pub(crate) fx_failed: Vec<usize>,
     /// The running plugin scan, and the scan asked for while it runs (spec: ui/plugin-manager.md §4).
     pub(crate) sweep: Option<crate::plugin_scan::Sweep>,
@@ -1380,7 +1380,7 @@ impl App {
     }
 
     /// The built-in recreations write their settings into the model as the file's own plugin state: Lemon Parametric
-    /// EQ 2 into its slots, Lemon 3x Osc into its channels.
+    /// EQ into its slots, Lemon Trio into its channels.
     pub(crate) fn store_builtin_states(&mut self) {
         for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
             let (Some((t, k)), Some(st)) = (crate::plugins::fx_of(key), self.plugins.eq_file_state(key)) else { continue };
@@ -1469,7 +1469,7 @@ impl App {
         self.loading.is_some() || self.export.is_some()
     }
 
-    /// Mixer slots that hold the project file's parametric EQ are played and edited by Lemon Parametric EQ 2, started
+    /// Mixer slots that hold the project file's parametric EQ are played and edited by Lemon Parametric EQ, started
     /// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
     /// plays them.
     pub(crate) fn sync_effects(&mut self) {
@@ -5677,7 +5677,7 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
     let row = add_channel(p);
     let ch = &mut p.channels[row];
     ch.kind = ChannelKind::Plugin;
-    // The built-in Lemon 3x Osc is stored as the file's own 3x Osc.
+    // The built-in Lemon Trio is stored as the file's own 3x Osc.
     ch.plugin = Some(crate::osc3::file_name(name).to_string());
     ch.name = Some(name.to_string());
     row
@@ -5851,7 +5851,7 @@ mod tests {
         }
     }
 
-    /// Slots holding the file's parametric EQ get a Lemon Parametric EQ 2 instance and show its name; adding the EQ
+    /// Slots holding the file's parametric EQ get a Lemon Parametric EQ instance and show its name; adding the EQ
     /// stores the file's EQ (spec: plugins/lemon-parametric-eq-2.md §8).
     #[test]
     fn parametric_eq_slots_are_hosted() {
@@ -7017,7 +7017,7 @@ mod tests {
         // Double click: the monitor, with a row for each hosted instance.
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
-        let osc = app.plugins.index_of(crate::osc3::LEMON_3X_OSC).unwrap();
+        let osc = app.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
         app.plugins.create_with(0, osc, None).unwrap();
         click(&mut app, &mut c, r);
         assert!(!app.state.shown(Win::Perf), "one click does nothing");
@@ -7028,7 +7028,7 @@ mod tests {
         assert!(app.state.shown(Win::Perf) && app.state.in_front(Win::Perf));
         let p = &app.state.perf;
         assert_eq!(p.rows.len(), 1);
-        assert_eq!((p.rows[0].name.as_str(), p.rows[0].synth, p.rows[0].voices), ("Lemon 3x Osc", true, Some(0)));
+        assert_eq!((p.rows[0].name.as_str(), p.rows[0].synth, p.rows[0].voices), ("Lemon Trio", true, Some(0)));
         assert!(app.hits.iter().any(|h| h.action == Action::Perf(PerfAct::Row(0))));
         // Sorting by a header; a second click reverses.
         let h = hit_rect(&app, &Action::Perf(PerfAct::Sort(Col::Plugin)));
@@ -7200,7 +7200,7 @@ mod tests {
         }
     }
 
-    /// An empty project with a Lemon 3x Osc played from the typing keyboard while the UI ticks, then in a playing
+    /// An empty project with a Lemon Trio played from the typing keyboard while the UI ticks, then in a playing
     /// pattern: the streams keep up (no run of dropouts) and the voices end.
     #[test]
     #[ignore]
@@ -7210,8 +7210,8 @@ mod tests {
         let mut app = App::new(None);
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
-        let row = add_plugin_channel(&mut app.state.project, crate::osc3::LEMON_3X_OSC);
-        let index = app.plugins.index_of(crate::osc3::LEMON_3X_OSC).unwrap();
+        let row = add_plugin_channel(&mut app.state.project, crate::osc3::LEMON_TRIO);
+        let index = app.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
         app.plugins.create(row, index).unwrap();
         app.state.hosted_rows.push(row);
         app.transport.set_instruments(app.plugins.instruments());
@@ -9951,11 +9951,11 @@ mod tests {
         let p = app.state.playlist.popup.as_ref().expect("the toolbar button opens the plugin menu");
         assert!(p.y >= b.bottom(), "under the button");
         let n = app.state.project.channels.len();
-        let osc = pick(&app, crate::osc3::LEMON_3X_OSC).expect("the generators are listed");
+        let osc = pick(&app, crate::osc3::LEMON_TRIO).expect("the generators are listed");
         crate::playlist::run(&mut app, osc);
         assert_eq!(app.state.project.channels.len(), n + 1);
         assert_eq!(app.state.selected_channel, n);
-        assert_eq!(app.state.pending_plugin, Some((n, app.plugins.index_of(crate::osc3::LEMON_3X_OSC).unwrap())));
+        assert_eq!(app.state.pending_plugin, Some((n, app.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap())));
         // An empty mixer slot's menu lists the effects for that slot.
         let m = crate::mixer::effect_menu(&app.state, 4, 0.0, 0.0);
         assert!(m.items.iter().any(|i| i.cmd == Cmd::Plugin(PlugCmd::Effect { index, slot: Some(4) })));

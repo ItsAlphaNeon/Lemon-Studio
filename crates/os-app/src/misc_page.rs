@@ -191,8 +191,8 @@ pub fn chord_name(k: i32) -> String {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MiscVals {
     pub v: [f32; M::COUNT],
-    /// Root note, fine tuning and "Add to key" reach the sound (sampler channels: Lemon Sampler plays them).
-    pub tuned: bool,
+    /// A sampler channel: "Add to key" reaches the sound (Lemon Sampler plays it; the engine has no such setting).
+    pub sampler: bool,
 }
 
 impl Default for MiscVals {
@@ -202,7 +202,7 @@ impl Default for MiscVals {
         for m in M::ALL {
             v[m as usize] = default_of(m);
         }
-        MiscVals { v, tuned: true }
+        MiscVals { v, sampler: true }
     }
 }
 
@@ -215,12 +215,15 @@ impl MiscVals {
     }
 }
 
-/// Whether value `m` reaches the sound today: polyphony, slide, porta / mono, swing and cut groups (the engine's note
-/// rules); root note, fine tuning and "Add to key" when `v.tuned`. The others are drawn greyed out.
+/// Whether value `m` reaches the sound today: the level adjustments; polyphony, slide, porta / mono, swing and cut
+/// groups (the engine's note rules); root note, fine tuning and main pitch (the channel's pitch); "Add to key" when
+/// `v.sampler`. The others (gate, shift, full porta, tracking, arpeggiator, echo delay) are drawn greyed out.
 pub fn works(m: M, v: &MiscVals) -> bool {
     match m {
+        M::LevelPan | M::LevelVol | M::LevelModX | M::LevelModY => true,
         M::PolyMax | M::PolySlide | M::Porta | M::Mono | M::TimeSwing | M::Cut | M::CutBy => true,
-        M::Root | M::Fine | M::AddKey => v.tuned,
+        M::Root | M::Fine | M::MainPitch => true,
+        M::AddKey => v.sampler,
         _ => false,
     }
 }
@@ -232,9 +235,8 @@ pub fn off_name(h: Hit, v: &MiscVals) -> Option<&'static str> {
         Hit::Value(m) | Hit::Step(m, _) => (!works(m, v)).then(|| m.label()),
         Hit::ArpDir(_) => Some("Arpeggiator"),
         Hit::TrackTab(_) => Some("Tracking"),
-        Hit::Reset => (!v.tuned).then_some("Root note"),
         Hit::Touch => Some("Multi-touch keyboard"),
-        Hit::CutSelf | Hit::Key(_) | Hit::Keyboard => None,
+        Hit::CutSelf | Hit::Reset | Hit::Key(_) | Hit::Keyboard => None,
     }
 }
 
@@ -657,29 +659,37 @@ pub fn list_entries(m: M) -> Vec<(String, f32)> {
 // ----------------------------------------------------------------------------------------------------------------
 // Painting
 
-/// Hover state of `h` (greyed-out controls never light up).
-fn hov(ui: &MiscUi, v: &MiscVals, h: Hit) -> KS {
-    KS::hover(ui.hover == Some(h) && off_name(h, v).is_none())
+/// State of the control under hit `h`: greyed-out controls are disabled and never light up.
+fn state_of(ui: &MiscUi, v: &MiscVals, h: Hit) -> KS {
+    let off = off_name(h, v).is_some();
+    KS::hover(ui.hover == Some(h) && !off).with_disabled(off)
 }
 
-/// Greyed out (FL px rects): whole panels with nothing working, then single controls (`works`).
+/// Veils over what is greyed out: whole panels with nothing working, rounded like the panel in the Lemon design. The
+/// single controls (`works`) draw their disabled look; Classic veils them too (FL px rects).
 fn veil_off(c: &mut Canvas, t: &Palette, v: &MiscVals) {
     let veil = t.s(0x222525).with_alpha(crate::app::OFF_VEIL);
-    // Levels adjustment, tracking, arpeggiator, echo delay.
-    for i in [0, 3, 5, 6] {
+    let lemon = t.style.lemon();
+    // Tracking, arpeggiator, echo delay.
+    for i in [3, 5, 6] {
         let (x0, x1, y0, y1, _, _) = PANELS[i];
-        c.fill_rect(rect(x0, x1, y0, y1), veil);
+        if lemon {
+            // The corners of the Lemon panel (`inst::panel`).
+            c.fill_rrect(rect(x0, x1, y0, y1), 10.0, veil);
+        } else {
+            c.fill_rect(rect(x0, x1, y0, y1), veil);
+        }
+    }
+    if lemon {
+        return;
     }
     // Time: gate, shift and full porta (swing works).
     c.fill_rect(rect(329.0, 396.0, 104.0, 150.0), veil);
     c.fill_rect(rect(328.0, 410.0, 153.0, 171.0), veil);
-    if v.tuned {
-        // Main pitch and the multi-touch hand.
-        c.fill_rect(rect(70.0, 190.0, 341.0, 359.0), veil);
-        c.fill_rect(rect(TOUCH.0 - 10.0, TOUCH.0 + 10.0, TOUCH.1 - 10.0, TOUCH.1 + 10.0), veil);
-    } else {
-        // The whole root note row (the keyboard below still plays).
-        c.fill_rect(rect(12.0, 555.0, 318.0, 362.0), veil);
+    // The multi-touch hand, and "Add to key" on a channel that is not a sampler.
+    c.fill_rect(rect(TOUCH.0 - 10.0, TOUCH.0 + 10.0, TOUCH.1 - 10.0, TOUCH.1 + 10.0), veil);
+    if !v.sampler {
+        c.fill_rect(rect(190.0, 270.0, 341.0, 359.0), veil);
     }
 }
 
@@ -705,53 +715,60 @@ pub fn paint(c: &mut Canvas, t: &Palette, ax: f32, ay: f32, v: &MiscVals, ui: &M
         // SLIDE only acts with Porta / Mono: drawn dimmed otherwise.
         let off = m == M::PolySlide && v.get(M::Porta) < 0.5 && v.get(M::Mono) < 0.5;
         let ring_col = if off { accent.mix(t.s(0x222525), 0.45) } else { accent };
-        let st = hov(ui, v, Hit::Value(mm));
+        let st = state_of(ui, v, Hit::Value(mm));
         inst::dial(c, t, x, y, r, ring, v.get(mm), bipolar, ring_col, st);
-        // The kit dial colours its dot from the accent; FL's Misc dots have their own colours.
-        let a = inst::dial_angle(v.get(mm), bipolar);
-        let d = r - 3.5;
-        let by = if st.hover { y - 1.0 } else { y };
-        let (px, py) = (x + d * a.cos(), by + d * a.sin());
-        c.fill_rect(Rect::new((px - 1.0).round(), (py - 1.0).round(), 2.0, 2.0), t.a(dot));
-        inst::caption(c, t, x, capy + dy(), cap, off);
+        // The Classic kit dial colours its dot from the accent; FL's Misc dots have their own colours. The Lemon dial
+        // has a pointer line and no dot.
+        if !t.style.lemon() && !st.disabled {
+            let a = inst::dial_angle(v.get(mm), bipolar);
+            let d = r - 3.5;
+            let by = if st.hover { y - 1.0 } else { y };
+            let (px, py) = (x + d * a.cos(), by + d * a.sin());
+            c.fill_rect(Rect::new((px - 1.0).round(), (py - 1.0).round(), 2.0, 2.0), t.a(dot));
+        }
+        inst::caption(c, t, x, capy + dy(), cap, off || st.disabled);
     }
     for &(m, cx, cy, label, left) in &RADIOS {
         let (x, y) = p(cx, cy);
-        inst::radio(c, t, x, y, v.get(m) >= 0.5, hov(ui, v, Hit::Value(m)));
+        let st = state_of(ui, v, Hit::Value(m));
+        inst::radio(c, t, x, y, v.get(m) >= 0.5, st);
         if left {
             let w = c.text_width(inst::LABEL, label);
-            inst::label(c, t, x - 11.0 - w, y, label, false);
+            inst::label(c, t, x - 11.0 - w, y, label, st.disabled);
         } else {
-            inst::label(c, t, x + 11.0, y, label, false);
+            inst::label(c, t, x + 11.0, y, label, st.disabled);
         }
     }
     for &(m, x0, x1, y0, y1, label, lx) in &SPINS {
         let r = rect(x0, x1, y0, y1);
-        inst::label(c, t, lx + dx(), r.cy(), label, false);
+        let st = state_of(ui, v, Hit::Value(m));
+        inst::label(c, t, lx + dx(), r.cy(), label, st.disabled);
         let dash = matches!(kind(m), Kind::Spin { dash: true });
         let val = v.get(m).round() as i32;
         let text = if dash && val == 0 { None } else { Some(val.to_string()) };
-        spin_box(c, t, r, text.as_deref(), hov(ui, v, Hit::Value(m)));
+        spin_box(c, t, r, text.as_deref(), st);
     }
     // Chord list.
     let (x0, x1, y0, y1) = CHORD_BOX;
     let cr = rect(x0, x1, y0, y1);
-    inst::label(c, t, 166.0 + dx(), cr.cy(), "Chord", false);
+    let st = state_of(ui, v, Hit::Value(M::ArpChord));
+    inst::label(c, t, 166.0 + dx(), cr.cy(), "Chord", st.disabled);
     let chord = chord_name(v.get(M::ArpChord).round() as i32);
-    inst::list_box(c, t, cr, &chord, hov(ui, v, Hit::Value(M::ArpChord)));
+    inst::list_box(c, t, cr, &chord, st);
     // Buttons.
     let (x0, x1, y0, y1) = CUT_SELF;
-    dark_button(c, t, rect(x0, x1, y0, y1), "Cut self", hov(ui, v, Hit::CutSelf).hover);
+    dark_button(c, t, rect(x0, x1, y0, y1), "Cut self", state_of(ui, v, Hit::CutSelf).hover);
     let (x0, x1, y0, y1) = RESET;
-    dark_button(c, t, rect(x0, x1, y0, y1), "Reset", hov(ui, v, Hit::Reset).hover);
+    dark_button(c, t, rect(x0, x1, y0, y1), "Reset", state_of(ui, v, Hit::Reset).hover);
     // Tracking Mid slider: orange from the left end to the thumb.
     let mid = track_m(M::VolMid, ui.track_key);
     let (mx0, mx1, mcy) = MID_SLIDER;
     let (sx0, scy) = p(mx0, mcy);
     let sx1 = mx1 + dx();
-    inst::label(c, t, 455.0 + dx(), scy, "Mid", false);
+    let st = state_of(ui, v, Hit::Value(mid));
+    inst::label(c, t, 455.0 + dx(), scy, "Mid", st.disabled);
     let (lo, hi) = range_of(mid);
-    let track = slider_track(c, t, sx0, sx1, scy, (v.get(mid) - lo) / (hi - lo), hov(ui, v, Hit::Value(mid)), Some(accent));
+    let track = slider_track(c, t, sx0, sx1, scy, (v.get(mid) - lo) / (hi - lo), st, (!st.disabled).then_some(accent));
     let _ = track;
     // Root note row.
     let root = v.get(M::Root).round() as i32;
@@ -759,9 +776,10 @@ pub fn paint(c: &mut Canvas, t: &Palette, ax: f32, ay: f32, v: &MiscVals, ui: &M
     c.text(inst::LABEL, 15.0 + dx(), (326.0 + dy() - lh / 2.0).round(), t.tx(0xd2d8dc), &format!("Root note: {}", note_name(root)));
     inst::label(c, t, 279.0 + dx(), 350.0 + dy(), "Fine tune", false);
     let (fx0, fx1, fcy) = FINE_SLIDER;
-    inst::hslider(c, t, fx0 + dx(), fx1 + dx(), fcy + dy(), (v.get(M::Fine) + 100.0) / 200.0, hov(ui, v, Hit::Value(M::Fine)));
+    inst::hslider(c, t, fx0 + dx(), fx1 + dx(), fcy + dy(), (v.get(M::Fine) + 100.0) / 200.0, state_of(ui, v, Hit::Value(M::Fine)));
     let (hx, hy) = p(TOUCH.0, TOUCH.1);
-    c.icon(&tb::HAND_FINGER, Rect::new(hx - 9.0, hy - 9.0, 18.0, 18.0), t.tx(0xd2d8dc));
+    let hand = if state_of(ui, v, Hit::Touch).disabled { t.text_faint } else { t.tx(0xd2d8dc) };
+    c.icon(&tb::HAND_FINGER, Rect::new(hx - 9.0, hy - 9.0, 18.0, 18.0), hand);
     keyboard(c, t, root as u8, ui);
     veil_off(c, t, v);
     c.pop_clip();
@@ -777,7 +795,7 @@ fn headers(c: &mut Canvas, t: &Palette, v: &MiscVals, ui: &MiscUi) {
         if on {
             c.fill_rect(rect(x0, x1, 80.0, 97.0), t.s(0x1b1d1e));
         }
-        let col = if on { t.a(0xffa830) } else if hov(ui, v, Hit::TrackTab(i == 1)).hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) };
+        let col = if on { t.a(0xffa830) } else if state_of(ui, v, Hit::TrackTab(i == 1)).hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) };
         let s = if i == 0 { "Vol" } else { "Key" };
         let w = c.text_width(inst::LABEL, s);
         c.text(inst::LABEL, ((x0 + x1) / 2.0 + dx() - w / 2.0).round(), ty, col, s);
@@ -792,7 +810,7 @@ fn headers(c: &mut Canvas, t: &Palette, v: &MiscVals, ui: &MiscUi) {
         if i == dir {
             c.fill_rect(Rect::new(x - 9.5, 187.0 + dy(), 19.0, 19.0), t.s(0x1b1d1e));
         }
-        let col = if hov(ui, v, Hit::ArpDir(i as u8)).hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) };
+        let col = if state_of(ui, v, Hit::ArpDir(i as u8)).hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) };
         let tri = |c: &mut Canvas, up: bool, cy: f32, h: f32| {
             let mut g = Glyph::new();
             let s = if up { -1.0 } else { 1.0 };
@@ -830,7 +848,7 @@ fn headers(c: &mut Canvas, t: &Palette, v: &MiscVals, ui: &MiscUi) {
 }
 
 /// FL's number box: a rounded grey block, brightest across its middle, with the value right-aligned (or `---`) and
-/// small up / down arrows at its right edge.
+/// small up / down arrows at its right edge; a disabled box has a faint value.
 fn spin_box(c: &mut Canvas, t: &Palette, r: Rect, text: Option<&str>, st: KS) {
     c.fill_rrect(Rect::new(r.x + 1.0, r.y + 1.5, r.w - 1.0, r.h), 3.0, t.s(0x353a3d).with_alpha(160));
     let lift = if st.hover { 0x0a } else { 0 };
@@ -850,7 +868,8 @@ fn spin_box(c: &mut Canvas, t: &Palette, r: Rect, text: Option<&str>, st: KS) {
             let f = Font::light(19, 0);
             let w = c.text_width(f, s);
             let lh = c.line_height(f);
-            c.text(f, (r.right() - 9.0 - w).round(), (cy - lh / 2.0).round(), t.tx(0xcad6da), s);
+            let ink = if st.disabled { t.text_faint } else { t.tx(0xcad6da) };
+            c.text(f, (r.right() - 9.0 - w).round(), (cy - lh / 2.0).round(), ink, s);
         }
     }
 }
@@ -994,13 +1013,19 @@ mod tests {
         assert_eq!(off_name(Hit::Value(M::TimeSwing), &v), None);
         assert_eq!(off_name(Hit::Value(M::Fine), &v), None);
         assert_eq!(off_name(Hit::Key(60), &v), None);
+        assert_eq!(off_name(Hit::Value(M::LevelVol), &v), None, "the engine plays the level adjustments");
+        assert_eq!(off_name(Hit::Value(M::MainPitch), &v), None, "the main pitch switch moves the channel's pitch");
+        assert_eq!(off_name(Hit::Value(M::AddKey), &v), None);
         assert_eq!(off_name(Hit::Value(M::EchoFeed), &v), Some("Echo feedback"));
+        assert_eq!(off_name(Hit::Value(M::TimeGate), &v), Some("Note gate"));
+        assert_eq!(off_name(Hit::Value(M::FullPorta), &v), Some("Full portamento"));
         assert_eq!(off_name(Hit::ArpDir(2), &v), Some("Arpeggiator"));
-        assert_eq!(off_name(Hit::Value(M::MainPitch), &v), Some("Affected by the main pitch"));
-        // Not a sampler: root note and fine tuning do nothing.
-        v.tuned = false;
-        assert_eq!(off_name(Hit::Value(M::Fine), &v), Some("Fine tuning"));
-        assert_eq!(off_name(Hit::Reset, &v), Some("Root note"));
+        assert_eq!(off_name(Hit::Touch, &v), Some("Multi-touch keyboard"));
+        // Not a sampler: root note and fine tuning still tune the channel; only "Add to key" does nothing.
+        v.sampler = false;
+        assert_eq!(off_name(Hit::Value(M::Fine), &v), None);
+        assert_eq!(off_name(Hit::Reset, &v), None);
+        assert_eq!(off_name(Hit::Value(M::AddKey), &v), Some("Add root note to the key"));
         assert_eq!(off_name(Hit::CutSelf, &v), None);
     }
 
@@ -1041,7 +1066,9 @@ mod tests {
         v.set(M::PolyMax, 3.0);
         v.set(M::ArpDir, 4.0);
         paint(&mut c, &t, 7.0, 0.0, &v, &ui);
-        v.tuned = false;
+        v.sampler = false;
         paint(&mut c, &t, 7.0, 0.0, &v, &ui);
+        let lemon = os_theme::design::palette(os_theme::Design::Lemon, None);
+        paint(&mut c, &lemon, 7.0, 0.0, &v, &ui);
     }
 }

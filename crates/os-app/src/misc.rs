@@ -44,9 +44,9 @@ pub fn vals(misc: &ChannelMisc) -> MiscVals {
     v
 }
 
-/// The page values of channel `ch`: root note and fine tuning play only on sampler channels (`set`).
+/// The page values of channel `ch`: "Add to key" plays only on sampler channels (`set`).
 pub fn vals_of(ch: &Channel) -> MiscVals {
-    MiscVals { tuned: ch.kind.is_sampler(), ..vals(&ch.misc) }
+    MiscVals { sampler: ch.kind.is_sampler(), ..vals(&ch.misc) }
 }
 
 /// One page value of `misc`.
