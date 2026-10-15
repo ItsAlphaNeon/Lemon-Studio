@@ -789,13 +789,8 @@ impl State {
         use crate::misc_page::{self as mp, Hit, M};
         let h = misc_hit(self, x, y)?;
         let vals = self.info.misc?;
-        // Greyed-out controls (and setting the root note from a key where it does nothing) only say so.
-        let off = match (b, h) {
-            (Btn::Right, Hit::Key(_)) if !vals.tuned => Some("Root note"),
-            (Btn::Right, Hit::Key(_)) => None,
-            _ => mp::off_name(h, &vals),
-        };
-        if let Some(name) = off {
+        // Greyed-out controls only say so.
+        if let Some(name) = mp::off_name(h, &vals) {
             if b != Btn::Middle {
                 self.events.push(FrameEvent::NotAvailable(name));
                 os_clap::wake();
@@ -941,11 +936,11 @@ mod tests {
     fn frame_shots() {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
-        let misc = |tuned: bool| {
+        let misc = |sampler: bool| {
             let mut st = state(true, "Insert 1");
             st.misc = true;
             st.editor = (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H);
-            st.info.misc = Some(crate::misc_page::MiscVals { tuned, ..Default::default() });
+            st.info.misc = Some(crate::misc_page::MiscVals { sampler, ..Default::default() });
             st
         };
         let effect = || {
@@ -965,6 +960,15 @@ mod tests {
             paint(&mut c, &st);
             c.pixmap.save_png(dir.join(name)).unwrap();
         }
+        // The Misc page again in the Lemon design.
+        os_theme::set_current(&os_theme::design::palette(os_theme::Design::Lemon, None));
+        for (name, st) in [("frame_misc_lemon.png", misc(true)), ("frame_misc_plugin_lemon.png", misc(false))] {
+            let (w, h) = st.size();
+            let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
+            paint(&mut c, &st);
+            c.pixmap.save_png(dir.join(name)).unwrap();
+        }
+        os_theme::set_current(&os_theme::Palette::default());
     }
 
     /// Strip controls that do nothing yet are greyed out: RANGE / TRACK, and ON / PAN / VOL / PITCH of an effect.
