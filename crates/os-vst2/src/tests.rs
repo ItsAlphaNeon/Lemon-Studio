@@ -404,6 +404,12 @@ fn versions_and_kinds() {
     }
     assert_eq!(version_text(0, 0x100), "0.1.0", "the effect's own field when the vendor gives none");
     assert_eq!(version_text(0, 0), "");
+    // Older plugins' decimal versions (observed: Dimension Expander, VST Speek), and hex ones in the same range.
+    assert_eq!(version_text(1005, 1005), "1.0.0.5");
+    assert_eq!(version_text(1000, 1000), "1.0.0.0");
+    for (v, hex) in [(0x0900, "0.9.0"), (0x0414, "0.4.20"), (0x2710 - 1, "0.39.15")] {
+        assert_eq!(version_text(v, v), hex);
+    }
     assert_eq!(id_text(abi::fourcc(*b"4FTP")), "34465450");
     assert_eq!(id_text(-1), "FFFFFFFF");
     assert_eq!(kind_of(flags::INSTRUMENT, category::UNKNOWN, 2), os_host::Kind::Instrument);

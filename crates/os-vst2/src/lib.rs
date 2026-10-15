@@ -62,10 +62,17 @@ fn text(b: &[u8]) -> String {
 /// `0xMMmmpp`, major, minor and patch, at every size. Small numbers are read the same way: DPF's plugins answer 256 for
 /// the version their VST3 copies call 0.1.0, as 65536 is 1.0.0 and 0x3020A is 3.2.10 (spec: ui/plugin-manager.md §4,
 /// "VST2 versions").
+///
+/// Older plugins count in decimal instead, four digits as VST's own version numbers do (Dimension Expander's 1005 is
+/// 1.0.0.5, VST Speek's 1000 is 1.0.0.0). A four-digit number whose hex reading ends above patch 99 is read that way:
+/// no hex version has such a patch, while decimal ones mostly do. One that ends lower (1100, read 0.4.76) stays hex.
 fn version_text(vendor: i32, effect: i32) -> String {
     let v = if vendor > 0 { vendor } else { effect };
     if v <= 0 {
         return String::new();
+    }
+    if (1000..=9999).contains(&v) && v & 0xFF > 99 {
+        return format!("{}.{}.{}.{}", v / 1000, v / 100 % 10, v / 10 % 10, v % 10);
     }
     format!("{}.{}.{}", v >> 16, (v >> 8) & 0xFF, v & 0xFF)
 }
