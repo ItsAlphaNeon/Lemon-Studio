@@ -26,7 +26,6 @@ pub enum Prefer {
     #[default]
     Vst3,
     Clap,
-    /// Not hosted yet: offered greyed out.
     Vst2,
 }
 
@@ -201,6 +200,10 @@ pub enum Status {
     Timeout,
     /// Loaded, but no instrument or effect in it.
     Empty,
+    /// A plugin this program cannot load, as its file tells without loading it (a 32-bit plugin, one built for Intel
+    /// Macs only on Apple silicon): listed with the reason, not counted as an error, scanned again only when the file
+    /// changes (or Rescan all).
+    Unsupported,
 }
 
 impl Status {
@@ -217,6 +220,7 @@ impl Status {
             Status::Crashed => "crashed",
             Status::Timeout => "timed out",
             Status::Empty => "no plugins",
+            Status::Unsupported => "not supported",
         }
     }
 }
@@ -364,15 +368,20 @@ impl SearchDir {
         match self.kind {
             DirKind::Standard(Format::Clap) => "CLAP",
             DirKind::Standard(Format::Vst3) => "VST3",
+            DirKind::Standard(Format::Vst2) => "VST2",
             DirKind::Standard(Format::Native) => "native",
             DirKind::Added => "All formats",
         }
     }
 }
 
-/// Every search folder: the VST 3 and CLAP standard folders, then the added ones.
+/// Every search folder: the VST 3, CLAP and VST 2 standard folders, then the added ones.
 pub fn search_dirs(p: &Prefs) -> Vec<SearchDir> {
-    let standard = os_vst3::standard_dirs().into_iter().map(|d| (d, Format::Vst3)).chain(os_clap::standard_dirs().into_iter().map(|d| (d, Format::Clap)));
+    let standard = os_vst3::standard_dirs()
+        .into_iter()
+        .map(|d| (d, Format::Vst3))
+        .chain(os_clap::standard_dirs().into_iter().map(|d| (d, Format::Clap)))
+        .chain(os_vst2::standard_dirs().into_iter().map(|d| (d, Format::Vst2)));
     let mut v: Vec<SearchDir> = Vec::new();
     for (path, f) in standard {
         if !v.iter().any(|d| d.kind == DirKind::Standard(f) && same_path(&d.path, &path)) {
@@ -410,20 +419,22 @@ pub struct Found {
 /// How deep below a search folder plugin files are looked for.
 const MAX_DEPTH: u32 = 8;
 
-/// The plugin files in the switched-on folders (§4): `.clap` files (and bundles on macOS) and `.vst3` bundles or files (a
-/// bundle is not searched inside), then the `native` files; each file once, files of the built-in Lemon plugins left out.
+/// The plugin files in the switched-on folders (§4): `.clap` files (and bundles on macOS), `.vst3` bundles or files and
+/// VST 2 plugins (`.vst` bundles on macOS; elsewhere libraries that export a VST 2 entry point: `os_vst2::is_plugin`); a
+/// bundle is not searched inside. Then the `native` files; each file once, files of the built-in Lemon plugins left out.
 pub fn discover(dirs: &[SearchDir], native: Vec<PathBuf>) -> Vec<Found> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     let mut walked = HashSet::new();
     for d in dirs.iter().filter(|d| d.on) {
-        let (clap, vst3) = match d.kind {
-            DirKind::Standard(Format::Clap) => (true, false),
-            DirKind::Standard(Format::Vst3) => (false, true),
-            DirKind::Standard(Format::Native) => (false, false),
-            DirKind::Added => (true, true),
+        let formats = match d.kind {
+            DirKind::Standard(Format::Clap) => Formats { clap: true, ..Formats::NONE },
+            DirKind::Standard(Format::Vst3) => Formats { vst3: true, ..Formats::NONE },
+            DirKind::Standard(Format::Vst2) => Formats { vst2: true, ..Formats::NONE },
+            DirKind::Standard(Format::Native) => Formats::NONE,
+            DirKind::Added => Formats { clap: true, vst3: true, vst2: true },
         };
-        walk(&d.path, 0, (clap, vst3), &mut walked, &mut seen, &mut out);
+        walk(&d.path, 0, formats, &mut walked, &mut seen, &mut out);
     }
     for p in native {
         if seen.insert(path_key(&p)) {
@@ -434,10 +445,22 @@ pub fn discover(dirs: &[SearchDir], native: Vec<PathBuf>) -> Vec<Found> {
     out
 }
 
-fn walk(dir: &Path, depth: u32, (clap, vst3): (bool, bool), walked: &mut HashSet<(PathBuf, bool, bool)>, seen: &mut HashSet<String>, out: &mut Vec<Found>) {
+/// The formats a folder is searched for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Formats {
+    clap: bool,
+    vst3: bool,
+    vst2: bool,
+}
+
+impl Formats {
+    const NONE: Formats = Formats { clap: false, vst3: false, vst2: false };
+}
+
+fn walk(dir: &Path, depth: u32, formats: Formats, walked: &mut HashSet<(PathBuf, Formats)>, seen: &mut HashSet<String>, out: &mut Vec<Found>) {
     // A folder reached twice (links, nested search folders) is searched once.
     let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    if depth > MAX_DEPTH || !walked.insert((canon, clap, vst3)) {
+    if depth > MAX_DEPTH || !walked.insert((canon, formats)) {
         return;
     }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -446,8 +469,9 @@ fn walk(dir: &Path, depth: u32, (clap, vst3): (bool, bool), walked: &mut HashSet
     for p in entries {
         let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase());
         let format = match ext.as_deref() {
-            Some("clap") if clap && os_clap::is_plugin(&p) => Some(Format::Clap),
-            Some("vst3") if vst3 && (p.is_dir() || p.is_file()) => Some(Format::Vst3),
+            Some("clap") if formats.clap && os_clap::is_plugin(&p) => Some(Format::Clap),
+            Some("vst3") if formats.vst3 && (p.is_dir() || p.is_file()) => Some(Format::Vst3),
+            Some(x) if x == os_vst2::EXTENSION && formats.vst2 && os_vst2::is_plugin(&p) => Some(Format::Vst2),
             _ => None,
         };
         match format {
@@ -456,7 +480,7 @@ fn walk(dir: &Path, depth: u32, (clap, vst3): (bool, bool), walked: &mut HashSet
                     out.push(Found { path: p, format });
                 }
             }
-            None if p.is_dir() => walk(&p, depth + 1, (clap, vst3), walked, seen, out),
+            None if p.is_dir() => walk(&p, depth + 1, formats, walked, seen, out),
             None => {}
         }
     }
@@ -470,11 +494,13 @@ fn builtin_file(p: &Path) -> bool {
     p.file_stem().is_some_and(|s| builtin.iter().chain(&old).any(|b| s.eq_ignore_ascii_case(b)))
 }
 
-/// A file's size and modification time (§4): a bundle's module inside it (VST 3; CLAP on macOS), else the file itself.
+/// A file's size and modification time (§4): a bundle's module inside it (VST 3; CLAP and VST 2 on macOS), else the file
+/// itself.
 pub fn stamp(path: &Path, format: Format) -> (u64, u64) {
     let module = match format {
         Format::Vst3 => os_vst3::module_file(path),
         Format::Clap => os_clap::module_file(path),
+        Format::Vst2 => os_vst2::module_file(path),
         Format::Native => path.to_path_buf(),
     };
     let file = if module.exists() { module } else { path.to_path_buf() };
@@ -631,7 +657,7 @@ fn vendors_match(a: &str, b: &str) -> bool {
     a.is_empty() || b.is_empty() || a.starts_with(&b) || b.starts_with(&a)
 }
 
-/// Lower ranks are listed first: the built-in plugins, the preferred format, then VST3, CLAP, (VST2), native.
+/// Lower ranks are listed first: the built-in plugins, the preferred format, then VST3, CLAP, VST2, native.
 fn rank(d: &Descriptor, prefer: Prefer) -> usize {
     if crate::project_plugins::is_builtin(d) {
         return 0;
@@ -639,7 +665,7 @@ fn rank(d: &Descriptor, prefer: Prefer) -> usize {
     let preferred = match prefer {
         Prefer::Vst3 => Some(Format::Vst3),
         Prefer::Clap => Some(Format::Clap),
-        Prefer::Vst2 => None,
+        Prefer::Vst2 => Some(Format::Vst2),
     };
     if Some(d.format) == preferred {
         return 1;
@@ -647,6 +673,7 @@ fn rank(d: &Descriptor, prefer: Prefer) -> usize {
     match d.format {
         Format::Vst3 => 2,
         Format::Clap => 3,
+        Format::Vst2 => 4,
         Format::Native => 5,
     }
 }
@@ -890,7 +917,7 @@ pub fn table(available: &[Available], effects: &[Available], cache: &Cache, pref
             note: f.error.clone(),
             favorite: false,
             shown: false,
-            dim: false,
+            dim: f.status == Status::Unsupported,
             toggles: false,
         });
     }
@@ -1108,6 +1135,26 @@ mod tests {
         assert!(l.fx.iter().any(|e| e.index == 0) && !l.fx.iter().any(|e| e.index == 1));
     }
 
+    /// A VST2 copy of a plugin is listed after its VST3 and CLAP copies, unless VST2 is the preferred format.
+    #[test]
+    fn vst2_copies_rank_after_vst3_and_clap_unless_preferred() {
+        let list = vec![fx(Format::Vst2, "56657262", "Verb", "U Audio"), fx(Format::Clap, "com.u.verb", "Verb", "U Audio"), fx(Format::Vst3, "AAAA", "Verb", "U Audio")];
+        let none = HashSet::new();
+        let mut prefs = Prefs::default();
+        assert_eq!(combined_into(&list, &prefs, &none), vec![Some(2), Some(2), None]);
+        prefs.prefer = Prefer::Clap;
+        assert_eq!(combined_into(&list, &prefs, &none), vec![Some(1), None, Some(1)]);
+        prefs.prefer = Prefer::Vst2;
+        assert_eq!(combined_into(&list, &prefs, &none), vec![None, Some(0), Some(0)]);
+        // Without the CLAP and VST3 copies, the VST2 one is listed whatever the preference.
+        prefs.prefer = Prefer::Vst3;
+        prefs.toggle_hidden("clap:com.u.verb");
+        prefs.toggle_hidden("vst3:AAAA");
+        assert_eq!(combined_into(&list, &prefs, &none), vec![None, None, None]);
+        let off = Prefs { combine: false, ..Prefs::default() };
+        assert_eq!(labels(&lists(&[], &list, &off, &none).fx), vec!["Verb (CLAP)", "Verb (VST2)", "Verb (VST3)"]);
+    }
+
     #[test]
     fn categories_follow_the_feature_tables() {
         let c = |kind, f: &[&str]| category(&desc(Format::Clap, "x", "X", "", kind, f));
@@ -1164,6 +1211,66 @@ mod tests {
         }
         want.extend([("added/Vendor/Deep/Er/Fx.vst3".to_string(), Format::Vst3), ("added/Vendor/Synth.clap".to_string(), Format::Clap)]);
         assert_eq!(names, want);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// VST2 plugins: `.vst` bundles on macOS; elsewhere libraries with the plugin extension only when they export a VST2
+    /// entry point (`os_vst2::is_plugin` reads the export table: an ordinary library gets no scanner).
+    #[test]
+    fn discovery_finds_vst2_plugins() {
+        let d = temp("discover_vst2");
+        let ext = os_vst2::EXTENSION;
+        let bundle = |p: &str| std::fs::create_dir_all(d.join(p).join("Contents").join("MacOS")).unwrap();
+        let file = |p: &str| {
+            std::fs::create_dir_all(d.join(p).parent().unwrap()).unwrap();
+            std::fs::write(d.join(p), b"not a library").unwrap();
+        };
+        if cfg!(target_os = "macos") {
+            bundle("vst2/Synth.vst");
+            bundle("added/Vendor/Fx.vst");
+            bundle("vst3/NotHere.vst");
+        } else {
+            file(&format!("vst2/Support.{ext}"));
+            file(&format!("added/Helper.{ext}"));
+        }
+        file("vst2/readme.txt");
+        let dirs = vec![
+            SearchDir { path: d.join("vst2"), kind: DirKind::Standard(Format::Vst2), on: true },
+            SearchDir { path: d.join("vst3"), kind: DirKind::Standard(Format::Vst3), on: true },
+            SearchDir { path: d.join("added"), kind: DirKind::Added, on: true },
+        ];
+        let found: Vec<(String, Format)> =
+            discover(&dirs, Vec::new()).iter().map(|f| (f.path.strip_prefix(&d).unwrap().to_string_lossy().replace('\\', "/"), f.format)).collect();
+        let want: Vec<(String, Format)> =
+            if cfg!(target_os = "macos") { vec![("vst2/Synth.vst".into(), Format::Vst2), ("added/Vendor/Fx.vst".into(), Format::Vst2)] } else { vec![] };
+        assert_eq!(found, want);
+        // The standard VST2 folders are listed, tagged.
+        let dirs = search_dirs(&Prefs::default());
+        assert!(dirs.iter().any(|s| s.kind == DirKind::Standard(Format::Vst2) && s.tag() == "VST2"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A plugin this program cannot load (a 32-bit one) is listed as not supported, dimmed and with its reason: not
+    /// an error in the scan's report, and not tried again by "Rescan plugins with errors".
+    #[test]
+    fn plugins_that_cannot_load_here_are_not_errors() {
+        let d = temp("unsupported");
+        std::fs::write(d.join("Old.dll"), b"plugin").unwrap();
+        let found = vec![Found { path: d.join("Old.dll"), format: Format::Vst2 }];
+        let tries = AtomicUsize::new(0);
+        let scan = |_: &Path, _: Format| {
+            tries.fetch_add(1, Ordering::Relaxed);
+            Scanned::failed(Status::Unsupported, "a 32-bit plugin, which a 64-bit program cannot load")
+        };
+        let progress = |_: usize, _: usize, _: &Path| {};
+        let first = sweep(&found, &Cache::default(), Mode::Changed, false, 1, &scan, &progress);
+        assert_eq!(first.files[0].status, Status::Unsupported);
+        assert_eq!(compare(&Cache::default(), &first).errors, 0);
+        sweep(&found, &first, Mode::Changed, true, 1, &scan, &progress);
+        assert_eq!(tries.load(Ordering::Relaxed), 1, "not scanned again with the errors");
+        let rows = table(&[], &[], &first, &Prefs::default(), &HashSet::new());
+        assert_eq!((rows[0].status.as_str(), rows[0].format, rows[0].dim), ("not supported", "VST2", true));
+        assert!(rows[0].note.contains("32-bit"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

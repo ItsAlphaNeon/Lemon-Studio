@@ -1305,6 +1305,11 @@ fn main() {
     if args.first().map(String::as_str) == Some(os_native::check::CHECK_ARG) {
         os_host::guard::exit(os_native::check::run(&args[1..]));
     }
+    // Plugin editors in real plugin windows, checked from the main thread (`plugins::window_check`).
+    #[cfg(target_os = "macos")]
+    if args.first().map(String::as_str) == Some("--plugin-window-check") {
+        std::process::exit(plugins::window_check::run(&args[1..]));
+    }
     app::move_old_settings();
     if args.iter().any(|a| a == "--screenshot") {
         screenshot(&args);

@@ -6,10 +6,10 @@
 
 //! Lemon Studio's format-neutral plugin hosting layer.
 //!
-//! Every plugin format Lemon Studio hosts (CLAP in `os-clap`, VST3 in `os-vst3`, native plugins in `os-native`) offers
-//! the same two things: a [`Library`] (a loaded plugin file that lists [`Descriptor`]s and creates instances) and a
-//! [`Plugin`] instance (activation, editor, state, parameters, and the engine-side [`Instrument`] / [`HostedEffect`]
-//! processing). The app only talks to these traits.
+//! Every plugin format Lemon Studio hosts (CLAP in `os-clap`, VST3 in `os-vst3`, VST2 in `os-vst2`, native plugins in
+//! `os-native`) offers the same two things: a [`Library`] (a loaded plugin file that lists [`Descriptor`]s and creates
+//! instances) and a [`Plugin`] instance (activation, editor, state, parameters, and the engine-side [`Instrument`] /
+//! [`HostedEffect`] processing). The app only talks to these traits.
 //!
 //! Threading (all formats): an instance is shared as [`SharedPlugin`] (`Arc<Mutex<dyn Plugin>>`). The UI thread creates
 //! and activates it, opens its editor, loads / saves state, reads / sets parameters and calls [`Plugin::idle`] every
@@ -42,23 +42,25 @@ pub use os_engine::{HostedEffect, Instrument};
 pub enum Format {
     Clap,
     Vst3,
+    Vst2,
     /// Plugins written against the native SDK of the DAW whose projects Lemon Studio opens (`os-native`).
     Native,
 }
 
 impl Format {
-    /// Short lowercase name, used in plugin identities (`Descriptor::uid`): "clap", "vst3", "native".
+    /// Short lowercase name, used in plugin identities (`Descriptor::uid`): "clap", "vst3", "vst2", "native".
     pub fn as_str(self) -> &'static str {
         match self {
             Format::Clap => "clap",
             Format::Vst3 => "vst3",
+            Format::Vst2 => "vst2",
             Format::Native => "native",
         }
     }
 
     /// The format named by `as_str`.
     pub fn parse(s: &str) -> Option<Format> {
-        [Format::Clap, Format::Vst3, Format::Native].into_iter().find(|f| f.as_str() == s)
+        [Format::Clap, Format::Vst3, Format::Vst2, Format::Native].into_iter().find(|f| f.as_str() == s)
     }
 }
 
@@ -79,16 +81,16 @@ pub enum Kind {
 pub struct Descriptor {
     pub format: Format,
     /// Format-specific id, stable across versions and machines: the CLAP plugin id, the VST3 class id as 32
-    /// uppercase hex digits, a native plugin's file stem.
+    /// uppercase hex digits, the VST2 unique id as 8 uppercase hex digits, a native plugin's file stem.
     pub id: String,
     pub name: String,
     pub vendor: String,
     pub version: String,
-    /// CLAP features, or the VST3 class's subcategories (split at `|`).
+    /// CLAP features, or the VST3 class's subcategories (split at `|`); for VST2, "Instrument" / "Fx" and its category.
     pub features: Vec<String>,
     pub kind: Kind,
-    /// The file it was loaded from (a `.clap` file, a `.vst3` bundle folder or module file, a DLL; for a plugin
-    /// compiled into Lemon Studio, the program itself).
+    /// The file it was loaded from (a `.clap` file, a `.vst3` bundle folder or module file, a `.vst` bundle, a DLL or
+    /// shared object; for a plugin compiled into Lemon Studio, the program itself).
     pub path: PathBuf,
 }
 

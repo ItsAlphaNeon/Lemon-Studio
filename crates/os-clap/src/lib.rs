@@ -28,6 +28,7 @@ use clap_sys::events::{
     CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
 };
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
+use clap_sys::ext::audio_ports::{clap_audio_port_info, clap_plugin_audio_ports, CLAP_EXT_AUDIO_PORTS};
 use clap_sys::ext::gui::{clap_host_gui, clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11};
 use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
 use clap_sys::ext::params::{
@@ -611,6 +612,17 @@ pub struct Plugin {
     editor_scale: f32,
     /// Input copies for effect processing (mixer slots).
     fx_in: (Vec<f32>, Vec<f32>),
+    /// The audio-ports extension, if the plugin has one.
+    audio_ports: *const clap_plugin_audio_ports,
+    /// Channels of the main input and output ports, read at activation: 0 without such a port. A plugin without the
+    /// audio-ports extension is taken as stereo in and out.
+    ins: usize,
+    outs: usize,
+    /// Buffers for channels the host has no audio for (a mono input's mix of both sides, channels beyond two), and the
+    /// channel pointers of the current process call: sized at activation, so the audio thread never allocates.
+    scratch: Vec<f32>,
+    in_ptrs: Vec<*mut f32>,
+    out_ptrs: Vec<*mut f32>,
     /// Parameter ranges in list order (id, min, max, stepped), read after init and on a rescan (values cross the
     /// hosting layer normalized).
     ranges: Vec<params::Range>,
@@ -748,6 +760,7 @@ impl Plugin {
             let latency = ext(CLAP_EXT_LATENCY) as *const clap_plugin_latency;
             let render = ext(CLAP_EXT_RENDER) as *const clap_plugin_render;
             let voice_info = ext(CLAP_EXT_VOICE_INFO) as *const clap_plugin_voice_info;
+            let audio_ports = ext(CLAP_EXT_AUDIO_PORTS) as *const clap_plugin_audio_ports;
             let ranges = params::read_ranges(params, plugin);
             Ok(Plugin {
                 desc,
@@ -792,6 +805,12 @@ impl Plugin {
                 editor: false,
                 editor_scale: 1.0,
                 fx_in: (Vec::new(), Vec::new()),
+                audio_ports,
+                ins: 2,
+                outs: 2,
+                scratch: Vec::new(),
+                in_ptrs: Vec::new(),
+                out_ptrs: Vec::new(),
                 latency,
                 render,
                 offline: false,
@@ -834,12 +853,32 @@ impl Plugin {
             return true;
         }
         self.deactivate();
+        self.read_ports();
         let ok = unsafe { (*self.plugin).activate.is_some_and(|a| a(self.plugin, f64::from(rate), 1, self.max_frames)) };
         if ok {
             self.rate = rate;
             self.read_voice_info();
         }
         ok
+    }
+
+    /// The channels of the plugin's main input and output ports (main thread, inactive: ports only change then), and
+    /// buffers for them. Without the audio-ports extension the plugin is taken as stereo in and out.
+    fn read_ports(&mut self) {
+        let main = |is_input: bool| -> Option<usize> {
+            let ports = unsafe { self.audio_ports.as_ref() }?;
+            if unsafe { ports.count.map_or(0, |c| c(self.plugin, is_input)) } == 0 {
+                return Some(0);
+            }
+            // SAFETY: plain data the plugin fills.
+            let mut info: clap_audio_port_info = unsafe { std::mem::zeroed() };
+            let ok = unsafe { ports.get.is_some_and(|g| g(self.plugin, 0, is_input, &mut info)) };
+            Some(if ok { (info.channel_count as usize).min(64) } else { 2 })
+        };
+        (self.ins, self.outs) = (main(true).unwrap_or(2), main(false).unwrap_or(2));
+        self.scratch = vec![0.0; (self.ins + self.outs) * self.max_frames as usize];
+        self.in_ptrs = Vec::with_capacity(self.ins);
+        self.out_ptrs = Vec::with_capacity(self.outs);
     }
 
     /// The voice list's limit from the plugin's voice info (main thread, active): the voices its patch can use.
@@ -1314,14 +1353,44 @@ impl Plugin {
         self.processed = true;
         let ins = clap_input_events { ctx: &self.order as *const Vec<*const clap_event_header> as *mut c_void, size: Some(events_size), get: Some(events_get) };
         let outs = clap_output_events { ctx: &mut self.param_out as *mut Vec<OutEv> as *mut c_void, try_push: Some(push_out) };
-        let mut chans = [left.as_mut_ptr(), right.as_mut_ptr()];
-        let mut buf = clap_audio_buffer { data32: chans.as_mut_ptr(), data64: ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
-        let has_in = input.is_some();
-        let mut in_chans = match input {
-            Some((l, r)) => [l.as_mut_ptr(), r.as_mut_ptr()],
-            None => [ptr::null_mut(), ptr::null_mut()],
+        // Channels as the plugin's main ports have them: the host's two sides, a mono input their average, others
+        // scratch (zeroed inputs, unheard outputs).
+        let frames = n as usize;
+        let max = self.max_frames as usize;
+        let base = self.scratch.as_mut_ptr();
+        // SAFETY: scratch holds `max_frames` frames for every input and output channel.
+        let spare = |k: usize| unsafe {
+            let s = base.add(k * max);
+            std::ptr::write_bytes(s, 0, frames);
+            s
         };
-        let in_buf = clap_audio_buffer { data32: in_chans.as_mut_ptr(), data64: ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
+        self.out_ptrs.clear();
+        for c in 0..self.outs {
+            self.out_ptrs.push(match c {
+                0 => left.as_mut_ptr(),
+                1 => right.as_mut_ptr(),
+                _ => spare(self.ins + c),
+            });
+        }
+        self.in_ptrs.clear();
+        let has_in = input.is_some() && self.ins > 0;
+        if let Some((l, r)) = input.filter(|_| self.ins > 0) {
+            if self.ins == 1 {
+                let s = spare(0);
+                // SAFETY: `spare` gave `frames` zeroed frames.
+                let mono = unsafe { std::slice::from_raw_parts_mut(s, frames) };
+                mono.iter_mut().zip(l.iter().zip(r.iter())).for_each(|(m, (a, b))| *m = (a + b) * 0.5);
+                self.in_ptrs.push(s);
+            } else {
+                self.in_ptrs.push(l.as_mut_ptr());
+                self.in_ptrs.push(r.as_mut_ptr());
+                for c in 2..self.ins {
+                    self.in_ptrs.push(spare(c));
+                }
+            }
+        }
+        let mut buf = clap_audio_buffer { data32: self.out_ptrs.as_mut_ptr(), data64: ptr::null_mut(), channel_count: self.outs as u32, latency: 0, constant_mask: 0 };
+        let in_buf = clap_audio_buffer { data32: self.in_ptrs.as_mut_ptr(), data64: ptr::null_mut(), channel_count: self.ins as u32, latency: 0, constant_mask: 0 };
         // The engine's transport while playing; without one the host is free running (spec: plugins/vst3-hosting.md §1).
         let transport = match self.chunk_song {
             Some(t) => {
@@ -1335,14 +1404,18 @@ impl Plugin {
             frames_count: n,
             transport,
             audio_inputs: if has_in { &in_buf } else { ptr::null() },
-            audio_outputs: &mut buf,
+            audio_outputs: if self.outs > 0 { &mut buf } else { ptr::null_mut() },
             audio_inputs_count: u32::from(has_in),
-            audio_outputs_count: 1,
+            audio_outputs_count: u32::from(self.outs > 0),
             in_events: &ins,
             out_events: &outs,
         };
         let before = self.param_out.len();
         let status = unsafe { (*self.plugin).process.map_or(CLAP_PROCESS_CONTINUE, |f| f(self.plugin, &p)) };
+        // A mono output is heard on both sides.
+        if self.outs == 1 {
+            right.copy_from_slice(left);
+        }
         // CONTINUE / TAIL: the plugin says it is still going; CONTINUE_IF_NOT_QUIET: while its output is not silent.
         let loud = left.iter().chain(right.iter()).any(|v| v.abs() > QUIET);
         self.sounding = status == CLAP_PROCESS_CONTINUE || status == CLAP_PROCESS_TAIL || (status == CLAP_PROCESS_CONTINUE_IF_NOT_QUIET && loud);
@@ -1744,9 +1817,40 @@ impl Drop for Plugin {
 }
 
 #[cfg(test)]
+mod mono_mock;
+#[cfg(test)]
 mod tests {
     use super::*;
     use os_engine::Instrument;
+
+    /// A plugin whose main ports are mono (DPF's Kars has a mono output) gets one channel each way: its output is
+    /// heard on both sides, and an effect's input reaches it as the average of both sides. Without the audio-ports
+    /// extension a plugin still gets two.
+    #[test]
+    fn mono_ports_get_one_channel() {
+        use crate::mono_mock::{ENTRY, SEEN_IN, SEEN_OUT};
+        use os_engine::HostedEffect as _;
+        use std::sync::atomic::Ordering::Relaxed;
+        let entry = &ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Mono Test.clap")) }.expect("mock");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 48000));
+        assert_eq!((p.ins, p.outs), (1, 1));
+        // As an effect: left 1, right 0 reach it as 0.5; its output (0.5 * 0.5 + 0.25) is heard on both sides.
+        let (mut l, mut r) = (vec![1.0f32; 64], vec![0.0f32; 64]);
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!((SEEN_IN.load(Relaxed), SEEN_OUT.load(Relaxed)), (1, 1));
+        assert!(l.iter().chain(&r).all(|v| (v - 0.5).abs() < 1e-6), "{:?} {:?}", &l[..2], &r[..2]);
+        // As an instrument: no input, the one output on both sides.
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        p.process(48000, &mut l, &mut r);
+        assert_eq!((SEEN_IN.load(Relaxed), SEEN_OUT.load(Relaxed)), (0, 1));
+        assert!(l.iter().chain(&r).all(|v| (v - 0.25).abs() < 1e-6));
+        // A plugin without the extension (taken away from the mock here) is stereo in and out.
+        p.audio_ports = ptr::null();
+        p.read_ports();
+        assert_eq!((p.ins, p.outs), (2, 2));
+    }
 
     /// Loads the bundled Lemon Sampler (built by `cargo run -p bundle-plugins`) when it is there.
     fn lemon_sampler() -> Option<Arc<Library>> {

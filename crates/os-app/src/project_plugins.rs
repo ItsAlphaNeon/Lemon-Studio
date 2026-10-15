@@ -5,7 +5,7 @@
 // and not any other part of Lemon Studio.
 
 //! Hosted plugins in project files: what a save writes for plugin channels and mixer slots played by third-party
-//! plugins (CLAP, VST3), and which plugin an opened project's wrapped channels and slots get.
+//! plugins (CLAP, VST3, VST2), and which plugin an opened project's wrapped channels and slots get.
 //!
 //! A third-party plugin is stored the way the project format stores every such plugin: as the wrapper plugin, whose
 //! state names the plugin (format, class id, name, vendor, file) and holds the plugin's own saved state. Plugins
@@ -19,7 +19,7 @@ use os_flp::wrapper::{self, WRAPPER};
 use os_host::{Descriptor, Format};
 use os_model::{Channel, ChannelKind, PluginRef, Project, SlotPlugin};
 
-use crate::plugins::{fx_of, Available, Plugins};
+use crate::plugins::{format_name, fx_of, Available, Plugins};
 
 /// A plugin compiled into Lemon Studio (its library is this program).
 pub fn is_builtin(d: &Descriptor) -> bool {
@@ -54,13 +54,13 @@ pub fn has_recreation(id: &str) -> bool {
     id.eq_ignore_ascii_case(crate::osc3::FILE_NAME) || id.eq_ignore_ascii_case(crate::plugins::EQ_FILE_NAME)
 }
 
-/// Whether a hosted plugin is saved inside the wrapper: CLAP and VST3 plugins from plugin files.
+/// Whether a hosted plugin is saved inside the wrapper: CLAP, VST3 and VST2 plugins from plugin files.
 pub fn is_wrapped(d: &Descriptor) -> bool {
     #[cfg(test)]
     if WRAP_BUILTINS.with(|w| w.get()) {
-        return matches!(d.format, Format::Clap | Format::Vst3);
+        return matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2);
     }
-    matches!(d.format, Format::Clap | Format::Vst3) && !is_builtin(d)
+    matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2) && !is_builtin(d)
 }
 
 /// The project-file identity of a hosted plugin with its saved state.
@@ -68,7 +68,7 @@ pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
     PluginRef {
         format: d.format.as_str().into(),
         // A CLAP id has no place in the wrapper state (spec §4): such plugins are found by file and name.
-        id: if d.format == Format::Vst3 { d.id.clone() } else { String::new() },
+        id: if matches!(d.format, Format::Vst3 | Format::Vst2) { d.id.clone() } else { String::new() },
         name: d.name.clone(),
         vendor: d.vendor.clone(),
         path: d.path.to_string_lossy().into_owned(),
@@ -78,7 +78,8 @@ pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
 
 /// Writes every hosted third-party plugin into `proj` (the copy a save writes): its channel or slot becomes a wrapped
 /// plugin holding the plugin's identity and current state. A channel or slot the file already held as a wrapped
-/// plugin keeps the wrapper records Lemon Studio does not edit.
+/// plugin keeps the wrapper records Lemon Studio does not edit. A copy in another format that stands in for the plugin
+/// the file names, and that the user has not edited, leaves the file's wrapper as it is ([`untouched_stand_in`]).
 pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
     for key in plugins.hosted.keys().copied().collect::<Vec<_>>() {
         let Some(d) = plugins.descriptor(key) else { continue };
@@ -96,8 +97,10 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
         if !is_wrapped(&d) {
             continue;
         }
-        let state = plugins.state(key).unwrap_or_default();
-        let r = plugin_ref(&d, state);
+        if untouched_stand_in(proj, plugins, key, &d) {
+            continue;
+        }
+        let r = plugin_ref(&d, plugins.state(key).unwrap_or_default());
         match fx_of(key) {
             None => {
                 let Some(ch) = proj.channels.get_mut(key).filter(|c| c.kind == ChannelKind::Plugin) else { continue };
@@ -113,6 +116,22 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
             }
         }
     }
+}
+
+/// Whether the instance under `key` (descriptor `d`) is a copy in another format standing in for the wrapped plugin its
+/// channel or slot names in `proj`, not edited by the user (`Hosted::stand_in`). Its save would replace the named plugin
+/// and its saved settings with the copy, so the wrapper keeps the file's bytes. Playback and automation clips moving the
+/// copy's parameters do not count. Once the user edits it (in its window, with the parameter menu, by loading a preset),
+/// or once a save has written it (the channel or slot then names the copy itself), it is saved as what is hosted.
+fn untouched_stand_in(proj: &Project, plugins: &Plugins, key: usize, d: &Descriptor) -> bool {
+    if !plugins.hosted.get(&key).is_some_and(|h| h.stand_in) {
+        return false;
+    }
+    let named = match fx_of(key) {
+        None => proj.channels.get(key).and_then(wrapped_channel),
+        Some((t, k)) => proj.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_ref()).and_then(wrapped_slot),
+    };
+    named.is_some_and(|r| switched_format(d, &r).is_some())
 }
 
 /// The file id (event 201) of the plugin channel or filled mixer slot under hosting key `key`.
@@ -169,7 +188,8 @@ fn same_file(a: &std::path::Path, b: &str) -> bool {
 }
 
 /// The plugin of `list` a wrapped plugin names: the same format and class id, else the same file and name, else the
-/// same format and name, else the same name.
+/// same format and name, else the same name (a copy in another format, which does not get the saved state:
+/// [`switched_format`]).
 pub fn find(list: &[Available], r: &PluginRef) -> Option<usize> {
     let format = Format::parse(&r.format);
     let tests: [&dyn Fn(&Descriptor) -> bool; 4] = [
@@ -179,6 +199,16 @@ pub fn find(list: &[Available], r: &PluginRef) -> Option<usize> {
         &|d| d.name == r.name,
     ];
     tests.iter().find_map(|t| list.iter().position(|a| t(&a.desc)))
+}
+
+/// When `d`, found for wrapped plugin `r`, is its copy in another format: what the hint bar says about it ("Kars (VST2
+/// as CLAP)"). The saved state is the other format's, which a copy may take without reading it the same way, so the
+/// copy starts from its defaults instead. The very file the project names is that plugin, whatever format its
+/// extension suggested (spec: flp/events/plugins.md §4).
+pub fn switched_format(d: &Descriptor, r: &PluginRef) -> Option<String> {
+    let saved = Format::parse(&r.format)?;
+    let same = saved == d.format || (!r.path.is_empty() && same_file(&d.path, &r.path));
+    (!same).then(|| format!("{} ({} as {})", r.name, format_name(saved), format_name(d.format)))
 }
 
 /// The native plugin of `list` that a project names by its file id (event 201 = the plugin's folder name, which is
@@ -215,24 +245,34 @@ pub fn slot_title(s: &SlotPlugin) -> String {
 
 impl crate::app::App {
     /// Hosts the wrapped plugins of an opened project (spec: flp/events/plugins.md §4): each wrapped channel and slot
-    /// whose plugin is found starts from the state the file holds. A plugin that is not found keeps its saved data
-    /// (written back unchanged) and is not looked for again.
+    /// whose plugin is found starts from the state the file holds, or from its defaults when only a copy in another
+    /// format is found (the hint bar names those; a save keeps the file's wrapper for them until they are changed,
+    /// `Hosted::stand_in`). A plugin that is not found keeps its saved data (written back unchanged) and is not looked
+    /// for again.
     pub(crate) fn sync_wrapped(&mut self) {
         use crate::plugins::fx_key;
         let mut added = (false, false);
-        let mut missing = Vec::new();
+        let (mut missing, mut switched) = (Vec::new(), Vec::new());
         for row in 0..self.state.project.channels.len() {
             if self.state.hosted_rows.contains(&row) || self.wrap_failed.contains(&row) {
                 continue;
             }
             let Some(r) = wrapped_channel(&self.state.project.channels[row]) else { continue };
-            let made = find(&self.plugins.available, &r).map(|i| self.plugins.create_with(row, i, Some(&r.state)));
+            let made = find(&self.plugins.available, &r).map(|i| {
+                let other = switched_format(&self.plugins.available[i].desc, &r);
+                let state = other.is_none().then_some(r.state.as_slice());
+                (other, self.plugins.create_with(row, i, state))
+            });
             match made {
-                Some(Ok(_)) => {
+                Some((other, Ok(_))) => {
                     self.state.hosted_rows.push(row);
                     added.0 = true;
+                    if other.is_some() {
+                        self.plugins.mark_stand_in(row);
+                    }
+                    switched.extend(other);
                 }
-                Some(Err(e)) => {
+                Some((_, Err(e))) => {
                     self.wrap_failed.push(row);
                     missing.push(format!("{} ({e})", r.name));
                 }
@@ -251,9 +291,20 @@ impl crate::app::App {
             .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.wrap_failed.contains(&fx_key(t, k)))
             .collect();
         for (t, k, r) in slots {
-            match find(&self.plugins.effects, &r).map(|i| self.plugins.create_effect(t, k, i, Some(&r.state))) {
-                Some(Ok(_)) => added.1 = true,
-                Some(Err(e)) => {
+            let made = find(&self.plugins.effects, &r).map(|i| {
+                let other = switched_format(&self.plugins.effects[i].desc, &r);
+                let state = other.is_none().then_some(r.state.as_slice());
+                (other, self.plugins.create_effect(t, k, i, state))
+            });
+            match made {
+                Some((other, Ok(_))) => {
+                    added.1 = true;
+                    if other.is_some() {
+                        self.plugins.mark_stand_in(fx_key(t, k));
+                    }
+                    switched.extend(other);
+                }
+                Some((_, Err(e))) => {
                     self.wrap_failed.push(fx_key(t, k));
                     missing.push(format!("{} ({e})", r.name));
                 }
@@ -269,9 +320,17 @@ impl crate::app::App {
         if added.1 {
             self.transport.set_effects(self.plugins.effects());
         }
+        let mut parts = Vec::new();
         if !missing.is_empty() {
             missing.dedup();
-            self.state.message = Some(format!("Plugins not found (kept in the project): {}", missing.join(", ")));
+            parts.push(format!("Plugins not found (kept in the project): {}", missing.join(", ")));
+        }
+        if !switched.is_empty() {
+            let names = name_list(switched, 4);
+            parts.push(format!("Played by a copy in another format, from its default settings (saved as the original until edited): {names}"));
+        }
+        if !parts.is_empty() {
+            self.state.message = Some(parts.join("; "));
         }
         if added.0 || added.1 || !missing.is_empty() {
             self.state.piano.dirty = true;
@@ -790,6 +849,91 @@ mod tests {
         a.plugins.available = vec![native_stand_in("Harmor", os_host::Kind::Instrument, true)];
         a.host_native();
         assert!(a.state.hosted_rows.contains(&row));
+    }
+
+    /// A wrapped plugin found only as its copy in another format starts from its defaults (the saved state is the other
+    /// format's) and the hint bar says so, next to the plugins that are not found; one found in its own format gets the
+    /// saved state. Until the user edits it, the copy leaves the file's wrapper byte for byte, also when something else
+    /// (playback, an automation clip) changed its state; once edited, it is saved as what it is, and from then on as any
+    /// hosted plugin. The built-in Lemon Parametric EQ (a CLAP plugin) stands in.
+    #[test]
+    fn copies_in_another_format_start_from_their_defaults() {
+        WRAP_BUILTINS.with(|w| w.set(true));
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.plugins.available = crate::plugins::builtin();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let mut fl = lemon_parametric_eq_2::params::default_state();
+        lemon_parametric_eq_2::params::set_field(&mut fl, 1, -600);
+        let eq = lemon_parametric_eq_2::params::plugin_state_from_fl(&fl);
+        let saved_as = |format: &str, name: &str, file: &str| PluginRef {
+            format: format.into(),
+            id: if format == "vst2" { "4C455132".into() } else { String::new() },
+            name: name.into(),
+            vendor: String::new(),
+            path: format!("C:/Plugins/{file}"),
+            state: eq.clone(),
+        };
+        let slot = |r: &PluginRef| Some(SlotPlugin { name: WRAPPER.into(), state: wrapper::encode(None, r) });
+        a.state.project.mixer[2].slots[0] = slot(&saved_as("vst2", LEMON_EQ, "Lemon EQ.dll"));
+        a.state.project.mixer[3].slots[0] = slot(&saved_as("clap", LEMON_EQ, "Lemon EQ.clap"));
+        let row = crate::app::add_plugin_channel(&mut a.state.project, WRAPPER);
+        a.state.project.channels[row].plugin_state = Some(wrapper::encode(None, &saved_as("vst2", "Nowhere", "Nowhere.dll")));
+        a.sync_wrapped();
+
+        let fresh = fx_key(4, 0);
+        a.plugins.create_effect(4, 0, a.plugins.effect_index(LEMON_EQ).unwrap(), None).unwrap();
+        let defaults = a.plugins.eq_file_state(fresh);
+        assert_ne!(defaults, Some(fl.clone()));
+        assert_eq!(a.plugins.eq_file_state(fx_key(2, 0)), defaults, "the VST2 copy's state is not given to the CLAP plugin");
+        assert_eq!(a.plugins.eq_file_state(fx_key(3, 0)), Some(fl), "the CLAP state is");
+        assert!(a.wrap_failed.contains(&row));
+        let told = format!(
+            "Plugins not found (kept in the project): Nowhere; Played by a copy in another format, from its default settings \
+             (saved as the original until edited): {LEMON_EQ} (VST2 as CLAP)"
+        );
+        assert_eq!(a.state.message.as_deref(), Some(told.as_str()));
+        a.plugins.drop_key(fresh);
+        a.state.project.mixer[4].slots[0] = None;
+
+        // Saved untouched: the VST2 plugin's wrapper is written as the file had it; the CLAP plugin as itself.
+        let path = std::env::temp_dir().join(format!("openstudio-stand-in-{}.flp", std::process::id()));
+        let reload = |path: &std::path::Path| os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(path).unwrap()).unwrap()).unwrap();
+        let named = a.state.project.mixer[2].slots[0].clone();
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = reload(&path);
+        assert_eq!(saved.mixer[2].slots[0], named, "byte for byte");
+        assert_eq!(wrapped_slot(saved.mixer[3].slots[0].as_ref().unwrap()).unwrap().state, a.plugins.state(fx_key(3, 0)).unwrap());
+        // Saved again, still untouched: the same.
+        a.save_to(path.clone());
+        assert_eq!(reload(&path).mixer[2].slots[0], named);
+
+        // Its state changed by something other than the user (as an automation clip does): still the file's wrapper.
+        let start = a.plugins.state(fx_key(2, 0)).unwrap();
+        assert!(a.plugins.set_state(fx_key(2, 0), &eq));
+        a.save_to(path.clone());
+        assert_eq!(reload(&path).mixer[2].slots[0], named, "not the user's edit");
+
+        // Edited by the user (Paste value in the parameter menu): saved as the copy that plays it, with its own state.
+        // (The stand-in's file is this program, so the saved path names it; a plugin file's extension would give the
+        // format.)
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(a.browse_params(fx_key(2, 0)), None);
+        a.state.params.copied = Some(0.75);
+        let paste = crate::playlist::Cmd::Param(crate::params::PCmd::Paste(fx_key(2, 0), 0));
+        assert_eq!(crate::playlist::run(&mut a, paste), None);
+        a.plugins.hosted[&fx_key(2, 0)].plugin.lock().unwrap().idle();
+        a.save_to(path.clone());
+        let r = wrapped_slot(reload(&path).mixer[2].slots[0].as_ref().unwrap()).unwrap();
+        assert_eq!((std::path::PathBuf::from(&r.path), r.id.as_str()), (exe.clone(), ""));
+        assert_eq!(Some(r.state), a.plugins.state(fx_key(2, 0)));
+        // From then on the project names the copy: back at its first state, it is saved as it is.
+        assert!(a.plugins.set_state(fx_key(2, 0), &start));
+        a.save_to(path.clone());
+        let r = wrapped_slot(reload(&path).mixer[2].slots[0].as_ref().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((std::path::PathBuf::from(&r.path), r.state), (exe, start));
     }
 
     /// A wrapped plugin is found by class id, else by file and name, else by name.

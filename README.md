@@ -39,13 +39,14 @@
 > [!CAUTION]
 > **Not for use in ArtCraft.** Lemon Studio is Copyright (C) 2026 ItsAlphaNeon. This code, in its entirety, is not
 > to be used as part of the ArtCraft suite: no file, crate, plugin or tool from this repository, in whole or in part.
+> The [third-party components](#third-party-components) it includes keep their own licences.
 
 ## Overview
 
 Lemon Studio is a pattern-based music production environment: build patterns in a step sequencer and
 piano roll, arrange them on a playlist, and mix them through a routable mixer. It is written from the
 ground up in Rust, with a sample-accurate audio engine, a fast CPU-rendered interface and hosting for
-CLAP and VST3 plugins.
+CLAP, VST3 and VST2 plugins.
 
 Lemon Studio runs on Windows, Linux and macOS, and every change is built and tested on all three. macOS is supported
 at the same level as Linux; the few differences are listed in the [macOS notes](#macos).
@@ -80,7 +81,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Piano roll | ✅ | Full tool set, velocity and event lanes, quantize, chop, strum, arpeggiate and more |
 | Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers and several arrangements |
 | Mixing and routing | ✅ | Mixer tracks, sends, effect slots and meters; no sidechain inputs yet |
-| Plugin hosting | ✅ | CLAP and VST3 instruments and effects with their editors; on Windows a crashing plugin is stopped instead of closing Lemon Studio; no VST2 yet |
+| Plugin hosting | ✅ | CLAP, VST3 and VST2 instruments and effects with their editors; on Windows a crashing plugin is stopped instead of closing Lemon Studio; no 32-bit plugins |
 | Plugin management | ✅ | Plugin manager with your own search folders, a crash-safe background scan, favourites and hidden plugins |
 | Time-stretching | ✅ | All twelve stretch methods for samples and audio clips, played by one open-source stretcher |
 | Playback engine | 🚧 | Renders ahead of the audio device so edits do not cause dropouts; voice limits, cut groups, glides, layer channels; one audio thread for now |
@@ -150,7 +151,10 @@ VST3 and CLAP plugins and installs them in `%LOCALAPPDATA%\Programs\Common\VST3`
 - A plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio.
 - Settings, themes and presets live in `%APPDATA%\Lemon Studio`. `OPENSTUDIO_USER_DIR` overrides the folder.
 - Plugins are found in `%LOCALAPPDATA%\Programs\Common\{VST3,CLAP}`, `%COMMONPROGRAMFILES%\{VST3,CLAP}` and
-  `CLAP_PATH`, plus any folder added in Settings > Plugins.
+  `CLAP_PATH`, plus any folder added in Settings > Plugins. VST2 plugins are found in the folder their installers
+  record (`HKEY_LOCAL_MACHINE\SOFTWARE\VST`, `VSTPluginsPath`) and in those of `%PROGRAMFILES%\VSTPlugins`,
+  `%PROGRAMFILES%\Steinberg\VSTPlugins`, `%COMMONPROGRAMFILES%\VST2` and `%COMMONPROGRAMFILES%\Steinberg\VST2` that
+  exist. 32-bit VST2 plugins cannot be loaded: they are listed as not supported, without being tried.
 
 ### Linux
 
@@ -206,8 +210,9 @@ Windows (or detach, from their window menu). A few things differ from Windows fo
 - **Lemon Sampler** cannot copy or paste audio through the clipboard yet.
 - **Settings, themes and presets** live in `$XDG_CONFIG_HOME/Lemon Studio` (usually `~/.config/Lemon Studio`).
   `OPENSTUDIO_USER_DIR` overrides the folder.
-- Plugins are found in `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap` and `CLAP_PATH`, and in `~/.vst3`,
-  `/usr/lib/vst3` and `/usr/local/lib/vst3`, plus any folder added in Settings > Plugins.
+- Plugins are found in `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap` and `CLAP_PATH`, in `~/.vst3`,
+  `/usr/lib/vst3` and `/usr/local/lib/vst3`, and in `VST_PATH` (else `~/.vst`, `/usr/lib/vst`, `/usr/local/lib/vst` and
+  the `lxvst` folders that exist) for VST2, plus any folder added in Settings > Plugins.
 
 ### macOS
 
@@ -251,8 +256,10 @@ that stay above Lemon Studio while it is the active application. A few things di
   `/Applications/FL Studio *.app`; `OPENSTUDIO_FACTORY` overrides it.
 - **Settings, themes and presets** live in `~/Library/Application Support/Lemon Studio`. `OPENSTUDIO_USER_DIR`
   overrides the folder.
-- Plugins are found in `~/Library/Audio/Plug-Ins/{CLAP,VST3}`, `/Library/Audio/Plug-Ins/{CLAP,VST3}` and `CLAP_PATH`,
-  plus any folder added in Settings > Plugins. Audio Units are not supported.
+- Plugins are found in `~/Library/Audio/Plug-Ins/{CLAP,VST3,VST}`, `/Library/Audio/Plug-Ins/{CLAP,VST3,VST}` and
+  `CLAP_PATH`, plus any folder added in Settings > Plugins. Audio Units are not supported. On Apple silicon, plugins
+  built for Intel Macs only (common among older VST2 plugins) cannot be loaded; VST2 ones are listed as not supported,
+  without being tried.
 
 ### Using Lemon Studio
 
@@ -281,7 +288,7 @@ Tests that need an audio device are marked `#[ignore]` and run with `cargo test 
 Project-file corpus tests run when `OPENSTUDIO_FLP_CORPUS` points to a text file listing `.flp` paths;
 project files are never committed to this repository.
 The watermark test (`cargo test -p watermark`) checks that every source file opens with the copyright and ArtCraft
-header.
+header, or with its shared form in a file that holds others' work.
 
 ### Command-line tools
 
@@ -306,9 +313,10 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-theme`](crates/os-theme) | Colour palette, designs (Lemon, Classic), theme files and the HSL adjustment model |
 | [`os-ui`](crates/os-ui) | CPU canvas, text rendering and the shared widget kit |
 | [`os-app`](crates/os-app) | The `lemonstudio` application: windows, editors, transport |
-| [`os-host`](crates/os-host) | Format-neutral plugin hosting layer (CLAP, VST3) |
+| [`os-host`](crates/os-host) | Format-neutral plugin hosting layer (CLAP, VST3, VST2) |
 | [`os-clap`](crates/os-clap) | CLAP plugin host |
 | [`os-vst3`](crates/os-vst3) | VST3 plugin host |
+| [`os-vst2`](crates/os-vst2) | VST2 plugin host, on a clean-room description of the interface (no Steinberg SDK) |
 | [`os-hostlink`](crates/os-hostlink) | Host link protocol between Lemon Studio and its own plugins |
 | [`os-plugkit`](crates/os-plugkit) | Shared editor pieces of Lemon Studio's own plugins |
 | [`os-paths`](crates/os-paths) | Where Lemon Studio keeps its settings, themes and presets on each platform |
@@ -352,6 +360,8 @@ about the project. Please keep in mind that support is not offered at this stage
 | [Tabler Icons](https://tabler.io/icons) | Interface icons | [MIT](crates/os-ui/icons/TABLER-LICENSE.txt) |
 | [NIH-plug](https://github.com/robbert-vdh/nih-plug) | Plugin framework for Lemon Studio's plugins | ISC |
 | [vst3-sys](https://github.com/RustAudio/vst3-sys) | VST3 interface bindings (plugin hosting and Lemon Studio's plugins) | GPLv3 |
+| [vst2sdk](https://github.com/Xaymar/vst2sdk) by Xaymar | Clean-room description of the VST2 interface, which `os-vst2`'s bindings are written from | [BSD 3-Clause](crates/os-vst2/LICENSE-vst2sdk.txt) |
+| [FST](https://git.iem.at/zmoelnig/FST) by IOhannes m zmölnig | Reverse-engineered VST2 interface: the parts vst2sdk leaves out (time info, edit gestures) | GPLv3 or later |
 | [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) by Geraint Luff / Signalsmith Audio Ltd, with Signalsmith Linear | Time stretching and pitch shifting | MIT |
 | [signalsmith-stretch](https://github.com/colinmarc/signalsmith-stretch-rs) by Colin Marc | Rust bindings to Signalsmith Stretch | MIT |
 | Rust crates listed in `Cargo.lock` | Various | Their respective licenses |
@@ -364,7 +374,9 @@ Lemon Studio is free software: you can redistribute it and/or modify it under th
 [GNU General Public License](LICENSE), version 3 or (at your option) any later version.
 
 **This code, in its entirety, is not to be used as part of the ArtCraft suite.** That covers every file in this
-repository, in whole or in part. Every source file states this in its header.
+repository, in whole or in part, except the third-party components listed above, which keep their authors' copyright
+and licences. Every source file states this in its header; the two that hold others' work
+(`crates/os-vst2/src/abi.rs`, `crates/os-ui/src/tabler.rs`) say it covers Lemon Studio's own parts only.
 
 ## Trademarks
 

@@ -44,10 +44,15 @@ pub fn child_main(args: &[String]) -> ! {
     let path = args.get(1).map(PathBuf::from);
     let out = match (format, path) {
         (Some(format), Some(path)) => match crate::plugins::load_file(&path, format) {
-            Ok(lib) => serde_json::json!({ "ok": true, "plugins": lib.plugins().iter().map(Record::of).collect::<Vec<_>>() }),
+            Ok(lib) => {
+                let out = serde_json::json!({ "ok": true, "plugins": lib.plugins().iter().map(Record::of).collect::<Vec<_>>() });
+                // Dropping it would unload the plugin (on Windows), running the clean-up code this process skips.
+                std::mem::forget(lib);
+                out
+            }
             Err(e) => serde_json::json!({ "ok": false, "error": e, "crashed": os_host::guard::tripped() }),
         },
-        _ => serde_json::json!({ "ok": false, "error": format!("usage: {ARG} clap|vst3|native <path>") }),
+        _ => serde_json::json!({ "ok": false, "error": format!("usage: {ARG} clap|vst3|vst2|native <path>") }),
     };
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "{TAG}{out}");
@@ -141,10 +146,22 @@ pub fn scan_here(path: &Path, format: Format) -> Scanned {
     }
 }
 
-/// How the sweep scans one file: native files in this process (nothing is loaded), the others in a scanner process.
+/// How the sweep scans one file: a plugin this program cannot load (its file tells) is not tried at all; native files
+/// are scanned in this process (nothing is loaded), the others in a scanner process.
 fn scan_file(path: &Path, format: Format) -> Scanned {
+    if let Some(why) = unsupported(path, format) {
+        return Scanned::failed(Status::Unsupported, why);
+    }
     // Tests scan in this process (a test program is no scanner).
     if format == Format::Native || cfg!(test) { scan_here(path, format) } else { scan_in_child(path, format) }
+}
+
+/// Why plugin file `path` cannot load in this program, when its file tells without loading it (`os_vst2::unsupported`).
+fn unsupported(path: &Path, format: Format) -> Option<String> {
+    match format {
+        Format::Vst2 => os_vst2::unsupported(path),
+        _ => None,
+    }
 }
 
 /// What the sweep thread tells the UI thread.
@@ -304,6 +321,27 @@ mod tests {
         assert_eq!((bad.status, bad.error.as_str()), (Status::Error, "no clap_entry"));
         assert_eq!(parse(r#"{"ok":false,"error":"x","crashed":true}"#).status, Status::Crashed);
         assert_eq!(parse("garbage").status, Status::Error);
+    }
+
+    /// A VST2 plugin built for Intel Macs only is listed as not supported on Apple silicon without being tried; a file
+    /// that tells nothing is scanned as usual.
+    #[test]
+    fn plugins_that_cannot_load_here_are_not_tried() {
+        let d = std::env::temp_dir().join(format!("os_scan_unsupported_{}", std::process::id()));
+        let bundle = d.join("Old.vst");
+        std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        let mut intel = 0xFEED_FACFu32.to_le_bytes().to_vec();
+        intel.extend(os_vst2::CPU_X86_64.to_le_bytes());
+        intel.extend([0; 32]);
+        std::fs::write(bundle.join("Contents/MacOS/Old"), intel).unwrap();
+        let r = scan_file(&bundle, Format::Vst2);
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            assert_eq!(r.status, Status::Unsupported);
+            assert!(r.error.contains("Intel Macs only"), "{}", r.error);
+        } else {
+            assert_ne!(r.status, Status::Unsupported);
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A file that is not a plugin fails in this process without harm.

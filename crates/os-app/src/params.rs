@@ -240,6 +240,7 @@ impl App {
         let ui = &mut self.state.params;
         ui.lists.retain(|k, _| self.plugins.hosted.contains_key(k));
         let mut moved = None;
+        let mut edited = Vec::new();
         let mut automate = Vec::new();
         let mut stretch = Vec::new();
         for (&key, h) in &self.plugins.hosted {
@@ -270,6 +271,7 @@ impl App {
                     }
                 }
                 let (os_host::ParamEvent::Begin(id) | os_host::ParamEvent::Value(id, _)) = e else { continue };
+                edited.push(key);
                 if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
                     moved = Some(Tweak::Plugin { key, index });
                 }
@@ -280,6 +282,10 @@ impl App {
                     automate.push((key, index));
                 }
             }
+        }
+        // A knob moved in a plugin's own window is the user's edit (`Plugins::mark_edited`).
+        for key in edited {
+            self.plugins.mark_edited(key);
         }
         // Lemon Sampler's time-stretch knobs are the channel's own settings: the channel takes the editor's edits, so
         // its audio clips get their new length (`playlist::fit_audio`), playback and saving follow (ui/playlist.md §9c).
@@ -382,6 +388,9 @@ impl App {
                 let (Some(v), Some(id)) = (self.state.params.copied, id) else { return None };
                 let p = self.state.params.plugin(key)?;
                 let ok = p.lock().ok()?.set_param(id, v);
+                if ok {
+                    self.plugins.mark_edited(key);
+                }
                 (!ok).then(|| "The plugin did not take the value".to_string())
             }
         }

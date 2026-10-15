@@ -2437,6 +2437,7 @@ dependencies = [
  "os-paths",
  "os-theme",
  "os-ui",
+ "os-vst2",
  "os-vst3",
  "rfd",
  "serde",
@@ -2584,6 +2585,16 @@ dependencies = [
  "os-theme",
  "swash",
  "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "os-vst2"
+version = "0.0.1"
+dependencies = [
+ "libloading 0.8.9",
+ "os-engine",
+ "os-host",
  "windows-sys 0.61.2",
 ]
 
