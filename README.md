@@ -39,6 +39,7 @@
 > [!CAUTION]
 > **Not for use in ArtCraft.** Lemon Studio is Copyright (C) 2026 ItsAlphaNeon. This code, in its entirety, is not
 > to be used as part of the ArtCraft suite: no file, crate, plugin or tool from this repository, in whole or in part.
+> The [third-party components](#third-party-components) it includes keep their own licences.
 
 ## Overview
 
@@ -286,7 +287,7 @@ Tests that need an audio device are marked `#[ignore]` and run with `cargo test 
 Project-file corpus tests run when `OPENSTUDIO_FLP_CORPUS` points to a text file listing `.flp` paths;
 project files are never committed to this repository.
 The watermark test (`cargo test -p watermark`) checks that every source file opens with the copyright and ArtCraft
-header.
+header, or with its shared form in a file that holds others' work.
 
 ### Command-line tools
 
@@ -372,7 +373,9 @@ Lemon Studio is free software: you can redistribute it and/or modify it under th
 [GNU General Public License](LICENSE), version 3 or (at your option) any later version.
 
 **This code, in its entirety, is not to be used as part of the ArtCraft suite.** That covers every file in this
-repository, in whole or in part. Every source file states this in its header.
+repository, in whole or in part, except the third-party components listed above, which keep their authors' copyright
+and licences. Every source file states this in its header; the two that hold others' work
+(`crates/os-vst2/src/abi.rs`, `crates/os-ui/src/tabler.rs`) say it covers Lemon Studio's own parts only.
 
 ## Trademarks
 
