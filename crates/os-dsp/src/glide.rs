@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! The gain glide: gains do not jump, they move to a new target by a limited step per sample, planned once per block.
 //!
 // spec: audio/conventions.md ("Glide"), audio/mixer.md ("Gains ramp")

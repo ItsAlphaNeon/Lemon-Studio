@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! X11 parts of a Lemon plugin editor (Linux; XWayland under Wayland): the editor's window, a child of the host's, run
 //! on a GUI thread of its own with its own connection, as other plugin toolkits do on Linux (any host works, none has to
 //! run the editor's loop); painting a canvas into it; the cursor held in place during a knob drag (XInput 2 raw

@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Typed view of an FLP event stream: [`load`] maps events to an [`os_model::Project`],
 //! [`apply`] writes model values back into the original stream in place, so everything the
 //! model doesn't cover (unknown events, plugin states, …) is preserved and an unedited
@@ -67,6 +73,8 @@ mod id {
     pub const CH_SAMPLER_FLAGS: u8 = 143;
     pub const CH_SAMPLE_SETTINGS: u8 = 215;
     pub const CH_ADJUST: u8 = 229;
+    /// A sample's loop start and end in frames (spec: flp/events/channels.md "Loop points").
+    pub const CH_LOOP_POINTS: u8 = 251;
     /// Cut groups (word 0 cuts, word 1 cut by) and the voice settings: maximum voices, slide time, mono / portamento
     /// (spec: audio/note-rules.md "Settings").
     pub const CH_CUT_GROUPS: u8 = 132;
@@ -755,9 +763,10 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
 }
 
 /// The Misc tab values the file stores outside the plugin state: level adjustments (event 229: pan offset,
-/// volume multiplier, -, mod X offset, mod Y offset), swing share (97, 0..=128), root note (135), fine tune (142) and
-/// the main pitch switch (215 byte 11), cut groups (132) and the voice settings (221) (spec: flp/engine-events.md "A
-/// channel", audio/voice-levels.md, audio/swing.md, audio/sampler.md, audio/note-rules.md).
+/// volume multiplier, -, mod X offset, mod Y offset), swing share (97, 0..=128), root note (135), fine tune (142),
+/// the main pitch and add-to-key switches and the key zone (215 bytes 11 and 63, ints at 68 and 72), cut groups (132)
+/// and the voice settings (221) (spec: flp/engine-events.md "A channel", audio/voice-levels.md, audio/swing.md,
+/// audio/sampler.md, audio/note-rules.md, flp/events/channels.md).
 fn load_misc(block: &[Event]) -> ChannelMisc {
     let find = |id: u8| block.iter().find(|e| e.id == id);
     let mut m = ChannelMisc::default();
@@ -774,8 +783,18 @@ fn load_misc(block: &[Event]) -> ChannelMisc {
     if let Some(e) = find(id::CH_FINE) {
         m.fine = int(e) as i32;
     }
-    if let Some(&b) = find(id::CH_SAMPLE_SETTINGS).and_then(Event::data).and_then(|d| d.get(11)) {
-        m.main_pitch = b != 0;
+    if let Some(d) = find(id::CH_SAMPLE_SETTINGS).and_then(Event::data) {
+        if let Some(&b) = d.get(11) {
+            m.main_pitch = b != 0;
+        }
+        if let Some(&b) = d.get(63) {
+            m.add_key = b != 0;
+        }
+        for (k, v) in m.key_range.iter_mut().enumerate() {
+            if let Some(b) = d.get(68 + 4 * k..72 + 4 * k) {
+                *v = i32::from_le_bytes(b.try_into().unwrap());
+            }
+        }
     }
     if let Some(e) = find(id::CH_CUT_GROUPS) {
         let v = int(e);
@@ -833,13 +852,32 @@ fn load_sound(block: &[Event], levels: &dyn Fn(usize) -> Option<i32>) -> Channel
                 *v = u32::from_le_bytes(b.try_into().unwrap());
             }
         }
+        if let Some(b) = d.get(144..152) {
+            s.start_offset_bits = u64::from_le_bytes(b.try_into().unwrap());
+        }
     }
+    s.loop_points = find(id::CH_LOOP_POINTS).and_then(Event::data).and_then(|d| d.get(4..20)).map(|d| {
+        let at = |i: usize| i64::from_le_bytes(d[i..i + 8].try_into().unwrap());
+        [at(0), at(8)]
+    });
     s.fx = load_sample_fx(block);
     s
 }
 
+/// Event 251 as FL 26 writes it for a sample whose loop points stand at its ends (frames -1 and `i64::MAX`), the
+/// frames replaced by `points` (spec: flp/events/channels.md "Loop points").
+fn loop_points_251(points: [i64; 2]) -> Vec<u8> {
+    let mut d = 2u32.to_le_bytes().to_vec();
+    for v in points {
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    d.extend_from_slice(&(-1f64).to_le_bytes());
+    d.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x00, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x7f, 0x00, 0x00]);
+    d
+}
+
 /// A channel's start, length, loop options and precomputed effects (spec: audio/precomputed-effects.md "Settings");
-/// what the file does not hold keeps the default. Only read: `apply` never writes these.
+/// what the file does not hold keeps the default. `apply` writes them for sampler channels (`write_sampler`).
 fn load_sample_fx(block: &[Event]) -> SampleFx {
     let find = |id: u8| block.iter().find(|e| e.id == id).map(int);
     let mut f = SampleFx::default();
@@ -1590,6 +1628,178 @@ fn patch_bytes(e: &mut Event, offset: usize, bytes: &[u8]) {
     }
 }
 
+/// An integer event of `id` holding `v`, sized by its id range (spec: flp/container.md).
+fn int_event(id: u8, v: u32) -> Event {
+    Event::new(
+        id,
+        match id {
+            0..=63 => Value::U8(v as u8),
+            64..=127 => Value::U16(v as u16),
+            _ => Value::U32(v),
+        },
+    )
+}
+
+/// One 68-byte envelope record (the inverse of `decode_envelopes`).
+fn encode_envelope(e: &Envelope) -> [u8; 68] {
+    let ints = [
+        e.flags,
+        // FL writes -1 for an envelope that is on (spec: audio/envelopes-and-lfos.md).
+        -i32::from(e.enabled),
+        e.delay,
+        e.attack,
+        e.hold,
+        e.decay,
+        e.sustain,
+        e.release,
+        e.amount,
+        e.lfo_delay,
+        e.lfo_attack,
+        e.lfo_amount,
+        e.lfo_speed,
+        e.lfo_shape,
+        e.attack_tension,
+        e.decay_tension,
+        e.release_tension,
+    ];
+    let mut d = [0u8; 68];
+    for (k, v) in ints.iter().enumerate() {
+        d[4 * k..4 * k + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    d
+}
+
+/// The event 215 fields a sampler's settings hold (the inverse of `load_sound`, `load_sample_fx` and `load_misc`):
+/// remove DC, the main pitch switch, add root note to key, the key zone, normalize, polarity, declick mode, crossfade,
+/// trim, start, length, the start offset and the loop following a reversal.
+fn sample_settings_fields(ch: &Channel) -> [(usize, Vec<u8>); 14] {
+    let (s, f, m) = (&ch.sound, &ch.sound.fx, &ch.misc);
+    [
+        (9, vec![u8::from(f.remove_dc)]),
+        (11, vec![u8::from(m.main_pitch)]),
+        (63, vec![u8::from(m.add_key)]),
+        (68, m.key_range[0].to_le_bytes().to_vec()),
+        (72, m.key_range[1].to_le_bytes().to_vec()),
+        (80, vec![u8::from(f.normalize)]),
+        (81, vec![u8::from(f.polarity)]),
+        (83, vec![s.declick]),
+        (84, f.crossfade.to_le_bytes().to_vec()),
+        (88, f.trim.to_le_bytes().to_vec()),
+        (128, f.start_bits.to_le_bytes().to_vec()),
+        (136, f.length_bits.to_le_bytes().to_vec()),
+        (144, s.start_offset_bits.to_le_bytes().to_vec()),
+        (156, vec![u8::from(f.loop_follows_reverse)]),
+    ]
+}
+
+/// The settings of a sampler channel that Lemon Sampler edits (spec: plugins/lemon-sampler.md §7): the five envelope
+/// records (218), the filter (219 ints 3..5), the sampler flags (143), root note (135) and fine tune (142), the loop
+/// points (251), the event 215 fields of `sample_settings_fields`, and the precomputed effects' own events
+/// (audio/precomputed-effects.md "Settings"). Events the block holds
+/// are patched; a value the block lacks is added before its end event when it differs from what reading the block
+/// without it gives.
+fn write_sampler(events: &mut [Event], loc: &ChannelLoc, ch: &Channel, old: &Channel, inserts: &mut Vec<(usize, Event)>) {
+    let find = |events: &[Event], id: u8| (loc.start + 1..loc.end).find(|&k| events[k].id == id);
+    let mut add = Vec::new();
+    if ch.envelopes != old.envelopes {
+        let recs: Vec<usize> = (loc.start + 1..loc.end).filter(|&k| events[k].id == id::CH_ENVELOPE).collect();
+        for (n, (e, o)) in ch.envelopes.iter().zip(&old.envelopes).enumerate() {
+            let rec = encode_envelope(e);
+            match recs.get(n) {
+                // A short record reads as the defaults: it is replaced whole.
+                Some(&k) if events[k].data().is_some_and(|d| d.len() < 68) => set_data(&mut events[k], rec.to_vec()),
+                Some(&k) if e != o => patch_bytes(&mut events[k], 0, &rec),
+                Some(_) => {}
+                // Records are matched by position: every missing one is added, in order.
+                None => add.push(Event::new(id::CH_ENVELOPE, Value::var(rec.to_vec()))),
+            }
+        }
+    }
+    let (s, o) = (&ch.sound, &old.sound);
+    if let Some(i) = loc.levels {
+        for (at, v, was) in [(12, s.cutoff, o.cutoff), (16, s.resonance, o.resonance), (20, s.filter_type, o.filter_type)] {
+            if v == was {
+                continue;
+            }
+            let mut d = events[i].data().unwrap_or(&[]).to_vec();
+            if d.len() < at + 4 {
+                d.resize(at + 4, 0);
+            }
+            d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+            set_data(&mut events[i], d);
+        }
+    }
+    if let Some(v) = s.sampler_flags.filter(|&v| Some(v) != o.sampler_flags) {
+        match find(events, id::CH_SAMPLER_FLAGS) {
+            Some(i) => set_int(&mut events[i], v),
+            None => add.push(int_event(id::CH_SAMPLER_FLAGS, v)),
+        }
+    }
+    let (m, n) = (&ch.misc, &old.misc);
+    for (eid, v, was) in [(id::CH_ROOT, u32::from(m.root), u32::from(n.root)), (id::CH_FINE, m.fine as u32, n.fine as u32)] {
+        if v == was {
+            continue;
+        }
+        match find(events, eid) {
+            Some(i) => set_int(&mut events[i], v),
+            None => add.push(int_event(eid, v)),
+        }
+    }
+    if s.loop_points != o.loop_points {
+        // A record can't be taken out in place: without loop points it holds the sample's ends.
+        let points = s.loop_points.unwrap_or([-1, i64::MAX]);
+        match find(events, id::CH_LOOP_POINTS) {
+            Some(i) => patch_bytes(&mut events[i], 4, &[points[0].to_le_bytes(), points[1].to_le_bytes()].concat()),
+            None => add.push(Event::new(id::CH_LOOP_POINTS, Value::var(loop_points_251(points)))),
+        }
+    }
+    let fields = sample_settings_fields(ch);
+    let changed = fields != sample_settings_fields(old);
+    match find(events, id::CH_SAMPLE_SETTINGS) {
+        // A shorter record (older files) keeps what does not fit. The stretch ints are written above.
+        Some(i) if changed => {
+            for (at, bytes) in &fields {
+                patch_bytes(&mut events[i], *at, bytes);
+            }
+        }
+        Some(_) => {}
+        // FL's record of a new channel (`audio_clip_215`) with the channel's own values.
+        None if changed || s.stretch != o.stretch => {
+            let mut d = audio_clip_215(s.stretch);
+            for (at, bytes) in &fields {
+                d[*at..*at + bytes.len()].copy_from_slice(bytes);
+            }
+            add.push(Event::new(id::CH_SAMPLE_SETTINGS, Value::var(d)));
+        }
+        None => {}
+    }
+    let (f, g) = (&s.fx, &o.fx);
+    for (eid, v, was) in [
+        (id::SMP_PING_PONG, u32::from(f.ping_pong), u32::from(g.ping_pong)),
+        (id::SMP_FEEDBACK, f.feedback.into(), g.feedback.into()),
+        (id::SMP_FLAGS, f.flags.into(), g.flags.into()),
+        (id::SMP_CUTOFF, f.cutoff.into(), g.cutoff.into()),
+        (id::SMP_BOOST, f.boost.into(), g.boost.into()),
+        (id::SMP_FADE_OUT, f.fade_out.into(), g.fade_out.into()),
+        (id::SMP_FADE_IN, f.fade_in.into(), g.fade_in.into()),
+        (id::SMP_RESONANCE, f.resonance.into(), g.resonance.into()),
+        (id::SMP_STEREO_DELAY, f.stereo_delay.into(), g.stereo_delay.into()),
+        (id::SMP_POGO, f.pogo.into(), g.pogo.into()),
+        (id::SMP_RING, u32::from(f.ring_mix) | u32::from(f.ring_freq) << 16, u32::from(g.ring_mix) | u32::from(g.ring_freq) << 16),
+        (id::SMP_REVERB, u32::from(f.reverb) | u32::from(f.reverb_type) << 16, u32::from(g.reverb) | u32::from(g.reverb_type) << 16),
+    ] {
+        if v == was {
+            continue;
+        }
+        match find(events, eid) {
+            Some(i) => set_int(&mut events[i], v),
+            None => add.push(int_event(eid, v)),
+        }
+    }
+    // Inserts at one index land in reverse order.
+    inserts.extend(add.into_iter().rev().map(|e| (loc.end, e)));
+}
+
 /// Writes the model back into `file`, changing only the events that hold modeled values
 /// that differ from what's stored. Returns an error when the model's shape (number of
 /// channels, patterns with notes, mixer tracks, …) doesn't match the file: adding or
@@ -1710,6 +1920,9 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 }
                 k += 1;
             }
+        }
+        if ch.kind.is_sampler() {
+            write_sampler(events, loc, ch, old, &mut inserts);
         }
         if ch.name != old.name {
             match (loc.name, &ch.name) {
@@ -3016,9 +3229,80 @@ mod tests {
         assert_eq!(again.patterns[0].notes.len(), 2);
     }
 
+    /// A sampler channel's settings that Lemon Sampler edits are saved (spec: plugins/lemon-sampler.md §7): a block
+    /// made by `create` holds none of their events, so they are added; saving again patches them in place; another
+    /// channel's events are left alone.
+    #[test]
+    fn sampler_settings_are_saved() {
+        let mut p = new_project();
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        // The file's blocks are the model's channels, as after a save.
+        for (i, c) in p.channels.iter_mut().enumerate() {
+            c.rack.origin = Some(i as u16);
+        }
+        let ch = &mut p.channels[0];
+        let vol = &mut ch.envelopes[Envelope::VOLUME];
+        (vol.enabled, vol.attack, vol.sustain, vol.release_tension) = (true, 50, 100, -101);
+        (vol.flags, vol.lfo_amount, vol.lfo_speed, vol.lfo_shape) = (3, -64, 40000, 2);
+        ch.envelopes[Envelope::PITCH].amount = 64;
+        (ch.sound.cutoff, ch.sound.resonance, ch.sound.filter_type, ch.sound.declick, ch.sound.sampler_flags) = (128, 64, 5, 3, Some(0));
+        ch.sound.fx = SampleFx {
+            flags: SampleFx::REVERSE | SampleFx::SWAP,
+            boost: 128,
+            stereo_delay: 1024,
+            ring_mix: 64,
+            ring_freq: 200,
+            reverb: 30,
+            reverb_type: 0,
+            ping_pong: true,
+            normalize: true,
+            trim: 32768,
+            start_bits: 0.25f64.to_bits(),
+            length_bits: 0.5f64.to_bits(),
+            loop_follows_reverse: true,
+            ..SampleFx::default()
+        };
+        (ch.sound.loop_points, ch.sound.start_offset_bits) = (Some([694, 18000]), 0.125f64.to_bits());
+        (ch.misc.root, ch.misc.fine, ch.misc.add_key, ch.misc.key_range) = (48, -35, true, [37, 60]);
+        ch.envelopes[Envelope::PAN].flags = 0x20;
+        apply(&p, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        let (c, want) = (&back.channels[0], &p.channels[0]);
+        assert_eq!(c.envelopes, want.envelopes);
+        assert_eq!(c.sound, want.sound);
+        assert_eq!(c.misc, want.misc);
+        assert!(c.misc.main_pitch, "an added event 215 keeps the main pitch switch on");
+        let ev = events_of(&file).unwrap();
+        let rec = ev.iter().find(|e| e.id == id::CH_LOOP_POINTS).and_then(Event::data).unwrap();
+        assert_eq!(rec.len(), 43, "FL's record size");
+        let env = ev.iter().filter(|e| e.id == id::CH_ENVELOPE).nth(Envelope::VOLUME).and_then(Event::data).unwrap();
+        assert_eq!(&env[4..8], &(-1i32).to_le_bytes(), "an envelope that is on is written as -1, as FL does");
+        assert_eq!(back.channels[1], load(&create(&new_project()).unwrap()).unwrap().channels[1]);
+
+        // Saved again: the events are there now and are patched, none added.
+        let mut file = file;
+        let count = |f: &FlpFile| events_of(f).unwrap().len();
+        let before = count(&file);
+        let ch = &mut p.channels[0];
+        ch.envelopes[Envelope::VOLUME].attack = 32768;
+        (ch.sound.cutoff, ch.sound.declick, ch.sound.sampler_flags) = (256, 0, Some(8));
+        (ch.sound.fx.flags, ch.sound.fx.boost, ch.sound.fx.ping_pong) = (0, 0, false);
+        ch.sound.fx.start_bits = 0f64.to_bits();
+        (ch.sound.loop_points, ch.sound.start_offset_bits) = (None, 0);
+        (ch.misc.root, ch.misc.fine, ch.misc.add_key, ch.misc.main_pitch, ch.misc.key_range) = (60, 0, false, false, [0, 256]);
+        apply(&p, &mut file).unwrap();
+        assert_eq!(count(&file), before);
+        let back = load(&file).unwrap();
+        assert_eq!(back.channels[0].envelopes, p.channels[0].envelopes);
+        // Loop points taken away stay as a record holding the sample's ends.
+        assert_eq!(back.channels[0].sound, ChannelSound { loop_points: Some([-1, i64::MAX]), ..p.channels[0].sound });
+        assert_eq!(back.channels[0].misc, p.channels[0].misc);
+    }
+
     /// The events the engine reads beyond the editable settings (spec: flp/engine-events.md): time signature,
     /// "play truncated notes", the channel's swing share, root note, sampler flags, declick and stretch settings,
-    /// level adjustments, filter, the envelope records' flags and LFO, cut groups and the voice settings.
+    /// add to key, key zone, start offset and loop points, level adjustments, filter, the envelope records' flags and LFO, cut groups and the voice settings.
     #[test]
     fn engine_settings_are_read() {
         let mut file = create(&new_project()).unwrap();
@@ -3030,6 +3314,13 @@ mod tests {
             for (k, v) in [1536u32, 25, 10000, 5].iter().enumerate() {
                 s215[96 + 4 * k..100 + 4 * k].copy_from_slice(&v.to_le_bytes());
             }
+            // Add to key, key zone 37..60, start offset 1/8.
+            s215[63] = 1;
+            s215[68..76].copy_from_slice(&[37i32.to_le_bytes(), 60i32.to_le_bytes()].concat());
+            s215[144..152].copy_from_slice(&0.125f64.to_le_bytes());
+            // Event 251 as FL 26 saved it with loop start 694, end 695 (frames).
+            let hex = "02000000b602000000000000b702000000000000000000000000f0bfffffffff00ffffff7fffffff7f0100";
+            let r251: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
             let ints = |v: &[i32]| Value::var(v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>());
             let env = [1, -1, 100, 20000, 20000, 30000, 50, 20000, 0, 2000, 3000, -64, 20000, 2, 0, 0, -101];
             let mut add = vec![
@@ -3038,6 +3329,7 @@ mod tests {
                 Event::new(id::CH_FINE, Value::U32(-35i32 as u32)),
                 Event::new(id::CH_SAMPLER_FLAGS, Value::U32(10)),
                 Event::new(id::CH_SAMPLE_SETTINGS, Value::var(s215)),
+                Event::new(id::CH_LOOP_POINTS, Value::var(r251)),
                 Event::new(id::CH_ADJUST, ints(&[-3200, 25600, 0, 128, -256])),
                 // Cuts group 7, cut by group 9; 3 voices at most, slide time 820, mono and portamento.
                 Event::new(id::CH_CUT_GROUPS, Value::U32(9 << 16 | 7)),
@@ -3069,6 +3361,8 @@ mod tests {
         assert_eq!((c.misc.swing, c.misc.root), (0.5, 48));
         // Fine tune (event 142) and the main pitch switch (215 byte 11, cleared here).
         assert_eq!((c.misc.fine, c.misc.main_pitch), (-35, false));
+        assert_eq!((c.misc.add_key, c.misc.key_range), (true, [37, 60]));
+        assert_eq!((c.sound.loop_points, c.sound.start_offset()), (Some([694, 695]), 0.125));
         assert_eq!(c.misc.levels, [-0.5, 1.0, 0.5, -1.0]);
         assert_eq!((c.misc.cut, c.misc.cut_by, c.misc.max_poly, c.misc.mono, c.misc.porta), (7, 9, 3, true, true));
         assert_eq!(c.misc.slide, 820.0 / 1024.0);
@@ -3082,6 +3376,7 @@ mod tests {
         assert_eq!((plain.channels[0].misc.swing, plain.channels[0].misc.root, plain.channels[0].sound), (1.0, 60, ChannelSound::default()));
         assert_eq!((plain.channels[0].misc.fine, plain.channels[0].misc.main_pitch), (0, true));
         let m = plain.channels[0].misc;
+        assert_eq!((m.add_key, m.key_range), (false, [0, 256]));
         assert_eq!((m.cut, m.cut_by, m.max_poly, m.mono, m.porta, m.slide), (0, 0, 0, false, false, 500.0 / 1024.0));
     }
 
