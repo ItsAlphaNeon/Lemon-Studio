@@ -919,6 +919,9 @@ pub struct State {
     /// The main window's monitor's own scale (device pixels per logical one, whatever Main GUI scaling says; set at
     /// every window event): General ▸ Display's PPI ruler follows it (`crate::ppi`).
     pub display_scale: f32,
+    /// The UI's scale at the last paint (the canvas's device px per logical one, Main GUI scaling applied): the top
+    /// band's own scale is reckoned against it (`views::band_k`).
+    pub ui_scale: f32,
     /// Open message boxes and file dialogs, bottom to top (spec: ui/dialogs.md).
     pub dialogs: Vec<crate::dialog::Modal>,
     /// The working time's clock and the Song info box (Settings > Info, `project_info`).
@@ -1217,6 +1220,7 @@ impl App {
                 ],
                 screen: (1920.0, 1080.0),
                 display_scale: 1.0,
+                ui_scale: 1.0,
                 dialogs: Vec::new(),
                 credits: Default::default(),
                 clip_colors: Default::default(),
@@ -2229,6 +2233,13 @@ impl App {
         }
     }
 
+    /// The mouse in the top band's own px (`views::band_k`), for its controls laid out there (the tempo digits, the song
+    /// position slider, the monitor's columns).
+    pub(crate) fn band_mouse(&self) -> (f32, f32) {
+        let k = views::band_k(&self.state);
+        (self.mouse.0 / k, self.mouse.1 / k)
+    }
+
     /// Whether a paint is due: damage, or a playlist scroll waiting to move its pixels (`playlist_scrolled` adds no
     /// damage of its own; without this a scroll-bar drag or middle-drag grab showed nothing until the release).
     pub fn has_damage(&self) -> bool {
@@ -2250,7 +2261,18 @@ impl App {
                 // The Toolbars menu (spec: ui/toolbar-menu.md §2, §4): without separators the rows' pixels move after
                 // painting, so the toolbar repaints whole; the floating hint bar repeats the hint panel.
                 let o = self.state.toolbar;
-                let band = views::toolbar::band(self.state.screen.0);
+                // The top band at another Toolbars scale (spec: ui/ui-scaling.md §1): its parts damage themselves in
+                // the band's own px (`HINT_RECT`, `TEMPO_RECT`, `CPU_RECT`, ...), so what lies within its height at
+                // 1:1 is damaged where the band draws it too (damage given in the window's px only repaints a little
+                // more).
+                let k = views::band_k(&self.state);
+                if !o.hidden && (k - 1.0).abs() > 1e-4 {
+                    let up: Vec<Rect> = v.iter().filter(|r| r.y < views::WORK_Y).map(|&r| views::band_rect(&self.state, r)).collect();
+                    for r in up {
+                        add_damage(&mut v, r);
+                    }
+                }
+                let band = views::band_rect(&self.state, views::toolbar::band(self.state.screen.0 / k));
                 if !o.separators && !o.hidden && v.iter().any(|r| !r.intersect(&band).is_empty()) {
                     add_damage(&mut v, band);
                 }
@@ -2324,7 +2346,7 @@ impl App {
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
-            v.push(Cover { bounds: Rect::new(0.0, 0.0, s.screen.0, views::WORK_Y + 1.0), win: None, solid: None });
+            v.push(Cover { bounds: Rect::new(0.0, 0.0, s.screen.0, views::work_y(s) + 1.0), win: None, solid: None });
         }
         // The floating hint bar (spec: ui/toolbar-menu.md §4).
         if s.toolbar.hint_bar {
@@ -3072,6 +3094,7 @@ impl App {
             None => canvas.begin_frame(None),
         }
         self.state.screen = canvas.size();
+        self.state.ui_scale = canvas.scale;
         // The main window or the workspace shrank: the windows keep their part in it (`win_clamp::keep_all`). Moved
         // during a partial paint, the next frame is painted whole.
         if crate::win_clamp::keep_all(&mut self.state) && damage.is_some() {
@@ -4194,7 +4217,7 @@ impl App {
         };
         if hover == Some(Action::Monitor) {
             // Reading under the cursor: frequency and level of the analyzer column.
-            hint = Cow::Owned(self.state.monitor.hint((x - MONITOR_RECT.x - 1.0).max(0.0) as usize));
+            hint = Cow::Owned(self.state.monitor.hint((x / views::band_k(&self.state) - MONITOR_RECT.x - 1.0).max(0.0) as usize));
         }
         if hover == Some(Action::CpuPanel) {
             hint = Cow::Owned(self.state.cpu.hint());
@@ -4639,7 +4662,8 @@ impl App {
                 return self.invalidate();
             }
             Some(Action::PatternAdd) => {
-                crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindNext, crate::patterns::PLUS_BOX_AT);
+                let at = views::band_rect(&self.state, Rect::new(crate::patterns::PLUS_BOX_AT.0, crate::patterns::PLUS_BOX_AT.1, 0.0, 0.0));
+                crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindNext, (at.x, at.y));
                 return self.invalidate();
             }
             Some(Action::CpuPanel) => {
@@ -6156,7 +6180,7 @@ impl App {
                 s.monitor.toggle();
                 self.damage_rect(MONITOR_RECT);
                 // The hint (frequency read-out) follows the new mode.
-                let (x, _) = self.mouse;
+                let (x, _) = self.band_mouse();
                 self.hint = Cow::Owned(self.state.monitor.hint((x - MONITOR_RECT.x - 1.0).max(0.0) as usize));
                 self.damage_rect(HINT_RECT);
             }
@@ -6224,7 +6248,7 @@ impl App {
             Action::CableDebug(d) => self.cable_debug(d),
             Action::Tempo => {
                 // The digit under the press sets the step: the whole number, else the decimal place it is over.
-                let x = self.mouse.0;
+                let x = self.mouse.0 / views::band_k(s); // the tempo box is laid out in band px
                 let n = s.tempo_digits.get().iter().filter(|&&d| x >= d).count();
                 let step = [1.0, 0.1, 0.01, 0.001][n];
                 self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo, step });
@@ -6268,12 +6292,14 @@ impl App {
             }
             // spec: ui/pattern-menu.md §1
             Action::PatternPrev => {
-                s.pat_ui.menu_at = Some((837.0, 75.0));
+                let k = views::band_k(s);
+                s.pat_ui.menu_at = Some((837.0 * k, 75.0 * k));
                 s.menu_open = Some(views::menus::PATTERNS);
             }
             Action::PatternNext => self.drag = Some(Drag::PatternBox { y0: self.mouse.1, p0: s.pattern.max(1) }),
             Action::PatternAdd => {
-                crate::patterns::run(s, crate::patterns::Cmd::FindFirst, crate::patterns::PLUS_BOX_AT);
+                let at = views::band_rect(s, Rect::new(crate::patterns::PLUS_BOX_AT.0, crate::patterns::PLUS_BOX_AT.1, 0.0, 0.0));
+                crate::patterns::run(s, crate::patterns::Cmd::FindFirst, (at.x, at.y));
             }
             Action::Pat(h) => crate::patterns::hit(s, h),
             Action::Dlg(h) => self.dialog_click(h),
@@ -6888,21 +6914,27 @@ impl App {
                 s.toolbar.hidden = !s.toolbar.hidden;
                 s.menu_open = None;
                 s.menu_sub = None;
-                let dy = if s.toolbar.hidden { -views::WORK_Y } else { views::WORK_Y };
-                let top = views::work_y(s);
-                let lift = |y: &mut f32| *y = (*y + dy).max(top);
-                for w in &mut s.wins {
-                    lift(&mut w.rect.y);
-                }
-                for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos] {
-                    lift(&mut pos.1);
-                }
+                let h = views::band_h(s);
+                lift_windows(s, if s.toolbar.hidden { -h } else { h });
             }
         }
         if sw != Switch::Hide {
             s.toolbar.save();
         }
         self.invalidate();
+    }
+}
+
+/// Moves the floating windows `dy` down with the workspace's top, keeping them below it: the toolbar hidden or shown
+/// (spec: ui/toolbar-menu.md §5), its band grown or shrunk by Toolbars scaling (spec: ui/ui-scaling.md §1).
+pub(crate) fn lift_windows(s: &mut State, dy: f32) {
+    let top = views::work_y(s);
+    let lift = |y: &mut f32| *y = (*y + dy).max(top);
+    for w in &mut s.wins {
+        lift(&mut w.rect.y);
+    }
+    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos] {
+        lift(&mut pos.1);
     }
 }
 

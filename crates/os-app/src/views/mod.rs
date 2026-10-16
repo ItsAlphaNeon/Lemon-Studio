@@ -70,9 +70,33 @@ pub fn popup_scale(main: f32) -> f32 {
 pub const WORK_Y: f32 = 83.0;
 
 /// Top of the workspace and the browser now: the window's top while the toolbar is hidden (spec: ui/toolbar-menu.md
-/// §5).
+/// §5), else the top band's bottom (`band_h`).
 pub fn work_y(s: &State) -> f32 {
-    if s.toolbar.hidden { 0.0 } else { WORK_Y }
+    if s.toolbar.hidden { 0.0 } else { band_h(s) }
+}
+
+/// Display scale of the main window's top band (the toolbar rows with the menu bar, `WORK_Y` tall in its own px) for a
+/// window at scale `main`: General ▸ Display ▸ Toolbars scaling (Main = `main`). Spec: ui/ui-scaling.md §1.
+pub fn toolbar_scale(main: f32) -> f32 {
+    let pct = crate::prefs::choice(&crate::prefs::TOOLBARS_SCALING).strip_suffix('%').and_then(|p| p.parse::<f32>().ok());
+    pct.map_or(main, |p| p / 100.0)
+}
+
+/// The window's px per px of the top band at the last paint's scale: 1 at Toolbars scaling Main.
+pub fn band_k(s: &State) -> f32 {
+    let main = s.ui_scale.max(0.01);
+    toolbar_scale(main) / main
+}
+
+/// Height of the top band in the window's px (shown or not): `WORK_Y` at its scale.
+pub fn band_h(s: &State) -> f32 {
+    WORK_Y * band_k(s)
+}
+
+/// Rect `r` of the top band, in the band's own px (`toolbar`, `app::HINT_RECT`...), in the window's px.
+pub fn band_rect(s: &State, r: Rect) -> Rect {
+    let k = band_k(s);
+    Rect::new(r.x * k, r.y * k, r.w * k, r.h * k)
 }
 /// Width of the docked browser incl. the splitter (§4).
 pub const BROWSER_W: f32 = 209.0;
@@ -140,7 +164,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         ui.win = None;
     }
     if !s.toolbar.hidden {
-        ui.part(Seg::Toolbar, Rect::new(0.0, 0.0, w, WORK_Y), |ui| toolbar::paint(ui, s, f, w));
+        // At Toolbars scaling (spec: ui/ui-scaling.md §1): the band works in its own px, `k` of the window's each, so
+        // it is `w / k` of them wide; what doesn't fit is left out (`toolbar::room`).
+        let scale = toolbar_scale(ui.c.scale);
+        ui.part(Seg::Toolbar, Rect::new(0.0, 0.0, w, band_h(s)), |ui| ui.scaled(scale, |ui, k| toolbar::paint(ui, s, f, w / k)));
     }
     // The floating hint bar, over every window (spec: ui/toolbar-menu.md §4).
     if s.toolbar.hint_bar {

@@ -103,6 +103,17 @@ pub const POPUPS_SCALING: Combo = Combo {
     default: 0,
 };
 
+/// General ▸ Display: the scale of the main window's top band (window buttons, hint panel, transport, menu bar,
+/// toolbar). Main = the main GUI's; a percentage replaces it. Everything below the band keeps the main scale; menus
+/// opened from the band keep Pop-ups scaling. Read by `views::toolbar_scale` at every event and paint, so it applies at
+/// once, with no restart. Spec: ui/ui-scaling.md §1 "Toolbars scaling".
+pub const TOOLBARS_SCALING: Combo = Combo {
+    key: "toolbars_scaling",
+    label: "Toolbars scaling",
+    choices: &["Main", "100%", "125%", "150%", "175%", "200%", "250%", "300%", "350%", "400%"],
+    default: 0,
+};
+
 /// General ▸ Display: sample waveforms coloured by what they are made of: Off, Color map (the Waves gradient by
 /// spectral centroid) or Multiband (three colours by band power); `crate::waves`. It takes effect at once. Spec:
 /// ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)".
@@ -368,6 +379,12 @@ pub const TRANSPARENT_WINDOWS: Combo = Combo { key: "transparent_windows", label
 pub const OPTIMIZE_FOR: Combo =
     Combo { key: "optimize_for", label: "Optimize for", choices: &["Multi-button mouse", "Pencil", "Multi-touch monitor"], default: 0 };
 
+/// General ▸ Input: stored and shown only. The windowing system hands Lemon Studio a pen's tip and barrel button as the
+/// mouse's left and right buttons, so there is nothing to swap yet; when Lemon Studio reads pen input, on swaps what the
+/// tip and the barrel button do. Spec: ui/settings-choices.md "Input: Optimize for (2026-10-16)" (Invert pencil
+/// buttons).
+pub const INVERT_PENCIL_BUTTONS: Check = Check { key: "invert_pencil_buttons", label: "Invert pencil buttons", default: false };
+
 /// Audio ▸ Input / output: while another program is in front, the audio output closes and a playing transport pauses;
 /// both come back with the focus (`crate::auto_close`). Spec: ui/settings-choices.md "Input / output: Auto close; CPU
 /// and Mixer: Smart disable, Align tick lengths, Resampling quality (2026-10-16)".
@@ -462,9 +479,10 @@ pub const CHECKS: &[&Check] = &[
     &AUTO_CLOSE,
     &SMART_DISABLE,
     &ALIGN_TICK_LENGTHS,
+    &INVERT_PENCIL_BUTTONS,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &TRANSPARENT_WINDOWS, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &TRANSPARENT_WINDOWS, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING, &TOOLBARS_SCALING];
 /// The declared combos no settings page shows (a window of their own does): General ▸ Input ▸ Manage shortcuts' rows
 /// (`crate::shortcuts`). Read by the declaration tests.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -650,7 +668,14 @@ impl App {
 
     /// Entry `i` of a declared combo's menu was chosen (`Cmd::Pref`): kept; returns the message.
     pub(crate) fn pref_choose(&mut self, c: &'static Combo, i: usize) -> Option<String> {
+        let band = crate::views::band_h(&self.state);
         set_choice(c, i);
+        // Toolbars scaling: the workspace's top follows the band's new height, the floating windows with it (spec:
+        // ui/ui-scaling.md §1).
+        if c.key == TOOLBARS_SCALING.key && !self.state.toolbar.hidden {
+            let dy = crate::views::band_h(&self.state) - band;
+            crate::app::lift_windows(&mut self.state, dy);
+        }
         self.invalidate();
         Some(format!("{}: {}", c.label, choice(c)))
     }
@@ -722,7 +747,7 @@ main_gui_scaling = 200%
         assert_eq!(choice(&MAIN_GUI_SCALING), "125%");
         assert_eq!(find_combo("Main GUI scaling"), Some(&MAIN_GUI_SCALING));
         assert_eq!(find_check("Automatically check for updates"), Some(&TEST_CHECK));
-        assert_eq!((find_check("Main GUI scaling"), find_combo("Toolbars scaling"), find_check("")), (None, None, None));
+        assert_eq!((find_check("Main GUI scaling"), find_combo("Language"), find_check("")), (None, None, None));
     }
 
     /// Every declaration has its own key and label, a default among its choices, and a control of its kind with that
@@ -805,11 +830,11 @@ main_gui_scaling = 200%
         let mut app = App::new(None);
         app.open_settings(settings::GENERAL);
         app.paint(&mut c, None);
-        // Main GUI scaling opens its list under its box, System marked; Toolbars scaling is not available yet.
+        // Main GUI scaling opens its list under its box, System marked; Language is not available yet.
         let combo = |app: &App| {
             app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == MAIN_GUI_SCALING.label)).map(|h| h.rect).expect("the combo works")
         };
-        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Toolbars scaling")));
+        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Language")));
         let r = combo(&app);
         click(&mut app, &mut c, r);
         let p = app.state.playlist.popup.as_ref().expect("its menu");
@@ -1334,5 +1359,32 @@ main_gui_scaling = 200%
         let mut v = vec![0u32; 1920 * 1080];
         c.copy_to_xrgb(&mut v);
         v
+    }
+
+    /// "Invert pencil buttons" (General ▸ Input; spec: ui/settings-choices.md "Input: Optimize for"): off by default,
+    /// ticked and unticked on the page, kept for the next start; nothing reads it yet (pens arrive as the mouse).
+    #[test]
+    fn invert_pencil_buttons_is_stored_and_shown() {
+        assert!(!check(&INVERT_PENCIL_BUTTONS));
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let key = Action::Settings(SAct::Check(INVERT_PENCIL_BUTTONS.label));
+        let mut app = App::new(None);
+        app.open_settings(settings::GENERAL);
+        app.state.settings.folded.extend(["Display", "Language"]);
+        app.paint(&mut c, None);
+        let r = hit_rect(&app, &key);
+        click(&mut app, &mut c, r);
+        assert!(check(&INVERT_PENCIL_BUTTONS));
+        assert_eq!(app.state.message.as_deref(), Some("Invert pencil buttons: on"));
+        // Kept: a new start shows it ticked; a click unticks it.
+        let mut app = App::new(None);
+        app.open_settings(settings::GENERAL);
+        app.state.settings.folded.extend(["Display", "Language"]);
+        app.paint(&mut c, None);
+        assert!(check(&INVERT_PENCIL_BUTTONS));
+        let r = hit_rect(&app, &key);
+        click(&mut app, &mut c, r);
+        assert!(!check(&INVERT_PENCIL_BUTTONS));
+        assert_eq!(app.state.message.as_deref(), Some("Invert pencil buttons: off"));
     }
 }
