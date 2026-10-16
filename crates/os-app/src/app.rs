@@ -3346,6 +3346,13 @@ impl App {
                 (target::mixer(t, target::MIXER_VOLUME), format!("{} - Volume", mix_name(t)), v)
             }
             Action::Tempo => (target::TEMPO, "Tempo".into(), crate::playlist::tempo_value(s.tempo)),
+            Action::Knob(k @ crate::knobs::KnobId::Eq(t, b, f)) => {
+                s.project.mixer.iter().find(|m| m.index == t)?;
+                let param = [target::EQ_GAIN, target::EQ_FREQ, target::EQ_WIDTH][usize::from(f.min(2))] + b.min(2);
+                let text = s.knob_text(k);
+                let label = text.split_once(':').map_or(text.as_str(), |(a, _)| a);
+                (target::mixer(t, param), format!("{} - {label}", mix_name(t)), f64::from(s.knob(k)))
+            }
             _ => return None,
         })
     }
@@ -6526,6 +6533,40 @@ mod tests {
         app.mouse_move(r3.cx(), r3.cy());
         assert_eq!(app.state.selected_mixer, 2, "released: hovering selects nothing");
         assert_eq!(app.state.mixer.sel, Vec::<u16>::new());
+    }
+
+    #[test]
+    fn mixer_eq_fader_and_knobs_edit_the_track() {
+        use crate::knobs::KnobId;
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        app.state.z = vec![Win::Mixer];
+        app.state.selected_mixer = 1;
+        frame(&mut app, &mut a, None);
+        let i = app.state.project.mixer.iter().position(|m| m.index == 1).unwrap();
+        // Band 2's fader: up 40 px is a quarter of the range, +9 dB.
+        let r = hit_rect(&app, &Action::Knob(KnobId::Eq(1, 1, 0)));
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_move(r.cx(), r.cy() - 40.0);
+        app.mouse_up();
+        assert_eq!(app.state.project.mixer[i].eq[1][0], 900);
+        frame(&mut app, &mut a, None);
+        let hint = app.hits.iter().find(|h| h.action == Action::Knob(KnobId::Eq(1, 1, 0))).map(|h| h.hint.to_string());
+        assert_eq!(hint.as_deref(), Some("EQ band 2 (peaking) level: 9.0dB"));
+        let (target, name, v) = app.automation_target(&Action::Knob(KnobId::Eq(1, 1, 0))).unwrap();
+        assert_eq!((target, name.as_str()), (os_model::target::mixer(1, os_model::target::EQ_GAIN + 1), "Insert 1 - EQ band 2 (peaking) level"));
+        assert!((v - 0.75).abs() < 1e-6);
+        // Band 3's frequency knob, when the panel is tall enough to show it.
+        if app.hits.iter().any(|h| h.action == Action::Knob(KnobId::Eq(1, 2, 1))) {
+            let r = hit_rect(&app, &Action::Knob(KnobId::Eq(1, 2, 1)));
+            app.mouse_move(r.cx(), r.cy());
+            app.mouse_down();
+            app.mouse_move(r.cx(), r.cy() - 20.0);
+            app.mouse_up();
+            assert!(app.state.project.mixer[i].eq[2][1] > os_model::EQ_DEFAULT[2][1]);
+        }
     }
 
     #[test]

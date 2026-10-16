@@ -34,6 +34,21 @@ pub enum KnobId {
     ChanPan(usize),
     /// Channel rack main swing, 0..100 % (spec: ui/channel-rack.md §7; playback: flp/events/project-info.md).
     Swing,
+    /// Mixer track `.0`'s equaliser: band `.1` (0 low shelf, 1 peaking, 2 high shelf), setting `.2` (0 gain, the
+    /// band's fader; 1 frequency; 2 width) (model `MixerTrack::eq`; spec: ui/mixer.md §8, audio/mixer.md "Equaliser").
+    Eq(u16, u8, u8),
+}
+
+/// The equaliser's band names as its hints give them (spec: ui/mixer.md §8).
+const EQ_BANDS: [&str; 3] = ["EQ band 1 (low shelf)", "EQ band 2 (peaking)", "EQ band 3 (high shelf)"];
+
+/// A stored equaliser setting as a 0..1 position: gain -1800..1800 (0.01 dB), frequency and width 0..65536.
+fn eq_pos(field: u8, v: i32) -> f32 {
+    if field == 0 {
+        ((v as f32 / 1800.0 + 1.0) / 2.0).clamp(0.0, 1.0)
+    } else {
+        (v as f32 / 65536.0).clamp(0.0, 1.0)
+    }
 }
 
 impl KnobId {
@@ -55,6 +70,8 @@ impl KnobId {
             // spec: ui/channel-rack.md §11 (0.4 % / px volume, 0.8 % / px pan) and §7 (30 px = 17 % swing).
             KnobId::ChanVol(_) | KnobId::ChanPan(_) => 0.004,
             KnobId::Swing => 0.17 / 30.0,
+            // A band's gain fader: its handle about follows the mouse over the graph's height.
+            KnobId::Eq(_, _, 0) => 1.0 / 160.0,
             _ => PER_PX,
         }
     }
@@ -66,6 +83,7 @@ impl KnobId {
             KnobId::ChanVol(_) => 0.78125,
             KnobId::SlotMix(..) => 1.0,
             KnobId::Swing => 0.0,
+            KnobId::Eq(_, b, f) => eq_pos(f, os_model::EQ_DEFAULT[usize::from(b.min(2))][usize::from(f.min(2))]),
             _ => 0.5,
         }
     }
@@ -102,6 +120,11 @@ impl State {
             KnobId::Swing => f32::from(self.project.swing.unwrap_or(0).min(128)) / 128.0,
             KnobId::MasterVol => f32::from(self.project.main_volume.unwrap_or(os_model::Project::MAIN_VOLUME_DEFAULT).min(16000)) / 16000.0,
             KnobId::MasterPitch => (0.5 + f32::from(self.project.main_pitch.unwrap_or(0)) / 2400.0).clamp(0.0, 1.0),
+            KnobId::Eq(t, b, f) => {
+                let (b, f) = (usize::from(b.min(2)), usize::from(f.min(2)));
+                let eq = self.project.mixer.iter().find(|m| m.index == t).map_or(os_model::EQ_DEFAULT, |m| m.eq);
+                eq_pos(f as u8, eq[b][f])
+            }
         }
     }
 
@@ -165,6 +188,13 @@ impl State {
                 self.project.main_pitch = Some(((v - 0.5) * 2400.0).round() as i16);
                 self.piano.dirty = true;
             }
+            KnobId::Eq(t, b, f) => {
+                if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
+                    let stored = if f == 0 { ((v * 2.0 - 1.0) * 1800.0).round() as i32 } else { (v * 65536.0).round() as i32 };
+                    m.eq[usize::from(b.min(2))][usize::from(f.min(2))] = stored;
+                    self.piano.dirty = true;
+                }
+            }
         }
     }
 
@@ -196,6 +226,15 @@ impl State {
                 format!("Channel volume: {:.0}%  {db}  {g:.2}", n * 100.0)
             }
             KnobId::Swing => format!("Main swing: {:.0}%", n * 100.0),
+            // "EQ band 1 (low shelf) level: 0.0dB", "... freq: 90Hz", "... width: 0.27" (spec: ui/mixer.md §8).
+            KnobId::Eq(_, b, f) => {
+                let band = EQ_BANDS[usize::from(b.min(2))];
+                match f {
+                    0 => format!("{band} level: {:.1}dB", ((n * 2.0 - 1.0) * 1800.0).round() / 100.0),
+                    1 => format!("{band} freq: {:.0}Hz", os_dsp::mixer::eq_frequency((n * 65536.0).round() as i32)),
+                    _ => format!("{band} width: {n:.2}"),
+                }
+            }
         }
     }
 }
@@ -224,5 +263,25 @@ mod tests {
         assert_eq!(s.knob_text(KnobId::Swing), "Main swing: 0%");
         s.project.channels = vec![os_model::Channel { volume: 0.78, ..crate::app::test_project().channels[0].clone() }];
         assert_eq!(s.knob_text(KnobId::ChanVol(0)), "Channel volume: 78%  -5.2dB  0.55");
+    }
+
+    #[test]
+    fn eq_knobs() {
+        let mut app = crate::app::App::new(None);
+        let s = &mut app.state;
+        let t = s.project.mixer[1].index;
+        assert_eq!(s.knob_text(KnobId::Eq(t, 0, 0)), "EQ band 1 (low shelf) level: 0.0dB");
+        assert_eq!(s.knob_text(KnobId::Eq(t, 0, 1)), "EQ band 1 (low shelf) freq: 90Hz");
+        assert_eq!(s.knob_text(KnobId::Eq(t, 2, 1)), "EQ band 3 (high shelf) freq: 8000Hz");
+        assert_eq!(s.knob_text(KnobId::Eq(t, 1, 2)), "EQ band 2 (peaking) width: 0.27");
+        for (b, f) in [(0, 0), (1, 1), (2, 2)] {
+            assert_eq!(s.knob(KnobId::Eq(t, b, f)), KnobId::Eq(t, b, f).default_value(), "starts at the default");
+        }
+        s.set_knob(KnobId::Eq(t, 1, 0), 0.25);
+        assert_eq!(s.project.mixer[1].eq[1][0], -900);
+        assert_eq!(s.knob_text(KnobId::Eq(t, 1, 0)), "EQ band 2 (peaking) level: -9.0dB");
+        s.set_knob(KnobId::Eq(t, 2, 1), 0.5);
+        assert_eq!(s.project.mixer[1].eq[2][1], 32768);
+        assert!(s.piano.dirty);
     }
 }

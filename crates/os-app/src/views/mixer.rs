@@ -675,10 +675,10 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     let sep = r.y + 61.0 + 330.0 * kp;
     ui.c.fill_rect(Rect::new(r.x, sep, r.w, 1.0), ui.t.s(0x1f2224));
 
-    // Equalizer: response graph, three band gain faders, band knobs. Editing the track equalizer is not available
-    // yet (a project's stored EQ plays, but is not shown here): the whole section is greyed out.
+    // Equalizer: response graph, three band gain faders (±18 dB), band frequency and width knobs (spec: ui/mixer.md §8).
     let eq = Rect::new(r.x + 4.0, sep + 11.0, 146.0, 173.0 * kp);
-    ui.off(eq, "Track equalizer");
+    let settings = track.map_or(os_model::EQ_DEFAULT, |m| m.eq);
+    ui.hit(eq, Action::Swallow, "Track equalizer");
     if super::lemon(ui) {
         lk::outlined(ui.c, eq, lk::r_btn(t), ui.t.s(0x1f2224), ui.t.s(0x272a2c));
     } else {
@@ -688,22 +688,41 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     for k in 1..5 {
         ui.c.fill_rect(Rect::new(eq.x + 14.0 + 31.0 * k as f32, eq.y + 1.0, 1.0, eq.h - 2.0), ui.t.s(0x2b2e30));
     }
-    ui.c.fill_rect(Rect::new(eq.x + 1.0, eq.cy() - 1.0, eq.w - 2.0, 2.0), ui.t.tx(0xc9cfd3));
+    // The response curve: the three bands' summed gain over the graph's width, which spans the frequency knob's
+    // 10 Hz .. 16 kHz law; ±18 dB fills the graph's half-height.
+    let half = eq.h / 2.0 - 4.0;
+    let steps = (eq.w - 2.0) as usize;
+    let pts: Vec<(f32, f32)> = (0..=steps)
+        .map(|i| {
+            let p = i as f32 / steps as f32;
+            let hz = os_dsp::mixer::eq_frequency((p * 65536.0).round() as i32);
+            let db = os_dsp::mixer::eq_response_db(settings, 44100, f64::from(hz)) as f32;
+            (eq.x + 1.0 + p * (eq.w - 2.0), eq.cy() - (db / 18.0).clamp(-1.0, 1.0) * half)
+        })
+        .collect();
+    ui.c.push_clip(eq.inset(1.0));
+    ui.c.polyline(&pts, 2.0, ui.t.tx(0xc9cfd3));
+    ui.c.pop_clip();
     for k in 0..3 {
         let fx = r.x + 162.0 + 22.0 * k as f32;
         ui.c.fill_rect(Rect::new(fx - 2.0, eq.y + 1.0, 4.0, eq.h - 2.0), ui.t.s(0x17191b));
         ui.c.fill_rect(Rect::new(fx - 9.0, eq.y + 36.0 * kp, 18.0, 1.0), ui.t.s(0x3a3e41));
         ui.c.fill_rect(Rect::new(fx - 9.0, eq.y + 136.0 * kp, 18.0, 1.0), ui.t.s(0x3a3e41));
-        let h = Rect::new(fx - 6.0, eq.cy() - 6.0, 12.0, 13.0);
+        ui.c.fill_rect(Rect::new(fx - 9.0, eq.cy(), 18.0, 1.0), ui.t.s(0x111315));
+        let id = KnobId::Eq(n, k as u8, 0);
+        let hov = ui.hit(Rect::new(fx - 9.0, eq.y, 18.0, eq.h), Action::Knob(id), s.knob_text(id));
+        // The handle travels ±(half-height − 8) for ±18 dB.
+        let hy = eq.cy() - (s.knob(id) * 2.0 - 1.0) * (eq.h / 2.0 - 8.0);
+        let h = Rect::new(fx - 6.0, hy - 6.0, 12.0, 13.0);
+        let face = if hov { 0x585c5f } else { 0x4a4e51 };
         if super::lemon(ui) {
             ui.c.fill_rrect(h.outset(1.0), lk::r_small(t), ui.t.s(0x121416));
-            ui.c.fill_rrect(h, lk::r_small(t) - 1.0, ui.t.s(0x4a4e51));
+            ui.c.fill_rrect(h, lk::r_small(t) - 1.0, ui.t.s(face));
         } else {
             ui.c.fill_rrect(h.outset(1.0), 2.0, ui.t.s(0x121416));
-            ui.c.fill_rect_gradient(h, ui.t.s(0x5e6265), ui.t.s(0x2a2d30), 2.0);
+            ui.c.fill_rect_gradient(h, ui.t.s(if hov { 0x6c7073 } else { 0x5e6265 }), ui.t.s(0x2a2d30), 2.0);
         }
-        ui.c.fill_rect(Rect::new(fx - 9.0, eq.cy(), 18.0, 1.0), ui.t.s(0x111315));
-        ui.off(Rect::new(fx - 9.0, eq.y, 18.0, eq.h), ["EQ band 1 (low shelf) level", "EQ band 2 (peaking) level", "EQ band 3 (high shelf) level"][k]);
+        ui.c.fill_rect(Rect::new(fx - 5.0, hy, 10.0, 1.0), ui.t.s(0x111315));
     }
     let ly = eq.bottom() + 8.0;
     if knobs {
@@ -715,9 +734,9 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         }
         for k in 0..3 {
             let (kx, ky) = (r.x + 162.0 + 22.0 * k as f32, ly + 20.0 + 20.0 * row as f32);
-            ui.off(Rect::new(kx - 9.0, ky - 9.0, 18.0, 18.0), if row == 0 { "EQ band frequency" } else { "EQ band width" });
-            let look = os_ui::kit::KnobLook::Mixer { halo: 8.0, arc: true };
-            os_ui::kit::knob(ui.c, ui.t, kx, ky, 7.0, 0.5, true, look, os_ui::kit::State::NORMAL.with_disabled(true));
+            let id = KnobId::Eq(n, k as u8, 1 + row as u8);
+            ui.hit(Rect::new(kx - 9.0, ky - 9.0, 18.0, 18.0), Action::Knob(id), s.knob_text(id));
+            mixer_knob(ui, kx, ky, 7.0, 8.0, s.knob(id), Some(false));
         }
     }
     let mut g = Glyph::new();
@@ -732,8 +751,6 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         ui.c.glyph(ui.t.tx(0x8c969c), &g);
     }
     let b = r.bottom();
-    let eq_bottom = if knobs { ly + 50.0 } else { eq.bottom() + 2.0 };
-    ui.veil(Rect::span(r.x, r.right(), sep + 1.0, eq_bottom.min(b - 67.0)), ui.t.s(0x2e3133));
 
     // Output rows at the bottom: audio outputs are not available yet, greyed out.
     ui.c.fill_rect(Rect::new(r.x, b - 66.0, r.w, 1.0), ui.t.s(0x1f2224));
