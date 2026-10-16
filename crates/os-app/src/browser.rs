@@ -37,7 +37,7 @@ impl App {
             Action::BrowserReread => reread(s),
             Action::BrowserList => {}
             Action::BrowserMenu => {
-                let (x, y) = view::MENU_AT;
+                let (x, y) = view::menu_at(s);
                 let open = s.playlist.popup.as_ref().is_some_and(|p| p.x == x && p.y == y);
                 s.playlist.popup = if open { None } else { Some(Popup { x, y, items: options_menu(s), sub: None }) };
             }
@@ -171,7 +171,7 @@ impl App {
     /// Whether the mouse is over the docked browser.
     pub(crate) fn over_browser(&self) -> bool {
         let (x, y) = self.mouse;
-        self.state.show_browser && x < crate::views::BROWSER_W && y >= crate::views::WORK_Y
+        self.state.show_browser && x < crate::views::BROWSER_W && y >= crate::views::work_y(&self.state)
     }
 
     /// Whether typed letters belong to the browser search (the typing keyboard leaves them alone).

@@ -16,6 +16,64 @@ use crate::icons::{self, Icon};
 /// Leftmost logo centre: just right of the last toolbar control (the news panel / downloads, x 1473).
 const LOGO_MIN_X: f32 = 1520.0;
 
+/// The Toolbars menu's switches (spec: ui/toolbar-menu.md §8): app-wide, kept for the session only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Opts {
+    /// Group and row separator lines (§2).
+    pub separators: bool,
+    /// Square buttons without face and edges (§3).
+    pub flat: bool,
+    /// The floating hint bar at the window's bottom-left (§4).
+    pub hint_bar: bool,
+    /// Toolbar and menu bar hidden, the browser and workspace up to the window's top (§5).
+    pub hidden: bool,
+}
+
+impl Default for Opts {
+    fn default() -> Self {
+        Opts { separators: true, flat: false, hint_bar: false, hidden: false }
+    }
+}
+
+/// The Toolbars menu entries that work (§8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switch {
+    Separators,
+    Flat,
+    HintBar,
+    Hide,
+}
+
+/// The toolbar's two rows, the bottom edge excepted: one band, repainted whole while the separators are off (their
+/// contents are moved by a pixel after painting, `paint`).
+pub fn band(width: f32) -> Rect {
+    Rect::new(0.0, 0.0, width, 81.0)
+}
+
+/// The floating hint bar: 400 x 82 at the window's left edge, its bottom 2 px above the window's (§4).
+pub fn hint_bar_rect(s: &State) -> Rect {
+    Rect::new(0.0, s.screen.1 - 84.0, 400.0, 82.0)
+}
+
+/// The floating hint bar (§4): a near-black panel with the hint at its top left and a round grip at its right, over
+/// every window. Clicks on it go nowhere.
+pub fn paint_hint_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
+    let t = ui.t;
+    let r = hint_bar_rect(s);
+    ui.hit(r, Action::Swallow, "");
+    let (edge, mid) = (t.s(0x141618), t.s(0x111213));
+    let half = (r.h / 2.0).round();
+    ui.c.fill_rect_gradient(Rect::new(r.x, r.y, r.w, half), edge, mid, 0.0);
+    ui.c.fill_rect_gradient(Rect::new(r.x, r.y + half, r.w, r.h - half), mid, edge, 0.0);
+    let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
+    ui.c.text_clip(Font::new(14), r.x + 7.0, r.y + 5.0, r.w - 50.0, t.text, hint);
+    let (cx, cy) = (r.right() - 22.0, r.cy());
+    ui.c.fill_circle(cx, cy, 11.0, t.s(0x24272a));
+    for (dx, dy) in [(-3.0, -3.0), (3.0, -3.0), (-3.0, 3.0), (3.0, 3.0)] {
+        ui.c.fill_circle(cx + dx, cy + dy, 1.3, t.s(0x5c6164));
+    }
+}
+
 fn btn(x: f32, y: f32) -> Rect {
     Rect::new(x, y, 30.0, 33.0)
 }
@@ -23,22 +81,27 @@ fn btn(x: f32, y: f32) -> Rect {
 pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     let t = ui.t;
     let lemon = super::lemon(ui);
+    // Separator lines: off from the Toolbars menu (spec: ui/toolbar-menu.md §2).
+    let seps = s.toolbar.separators;
     // Bands.
     if lemon {
         // Lemon (spec: ui/lemon-design.md §4): flat bands, short rounded separators.
         ui.c.fill_rect(Rect::new(0.0, 0.0, width, 81.0), t.toolbar);
-        ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), t.toolbar_line);
+        if seps {
+            ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), t.toolbar_line);
+        }
         ui.c.fill_rect(Rect::new(0.0, 81.0, width, 2.0), t.toolbar_line);
     } else {
         ui.c.fill_rect_gradient(Rect::new(0.0, 0.0, width, 41.0), t.toolbar.shade(0.025), t.toolbar.shade(-0.015), 0.0);
-        ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), t.toolbar_line);
+        let line = if seps { t.toolbar_line } else { t.toolbar.shade(-0.015) };
+        ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), line);
         ui.c.fill_rect_gradient(Rect::new(0.0, 42.0, width, 39.0), t.toolbar.shade(0.02), t.toolbar.shade(-0.02), 0.0);
         ui.c.fill_rect(Rect::new(0.0, 81.0, width, 2.0), t.toolbar_line);
     }
     // Empty toolbar areas drag the window (registered first, so controls win).
     ui.hit(Rect::new(0.0, 0.0, width, 81.0), Action::DragWindow, "");
     // Group separators (2 px gaps measured in row 1 and row 2).
-    for x in [379.0, 575.0, 876.0, 1048.0, 1204.0] {
+    for x in [379.0, 575.0, 876.0, 1048.0, 1204.0].into_iter().filter(|_| seps) {
         if lemon {
             ui.c.fill_rrect(Rect::new(x, 9.0, 2.0, 23.0), 1.0, t.toolbar_line);
             continue;
@@ -46,7 +109,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         ui.c.fill_rect(Rect::new(x, 2.0, 1.0, 37.0), t.toolbar_line);
         ui.c.fill_rect(Rect::new(x + 1.0, 2.0, 1.0, 37.0), t.toolbar_edge.with_alpha(110));
     }
-    for x in [298.0, 378.0, 576.0, 967.0, 1298.0] {
+    for x in [298.0, 378.0, 576.0, 967.0, 1298.0].into_iter().filter(|_| seps) {
         if lemon {
             ui.c.fill_rrect(Rect::new(x, 50.0, 2.0, 23.0), 1.0, t.toolbar_line);
             continue;
@@ -57,6 +120,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
 
     row1(ui, s, f);
     row2(ui, s, f);
+    // Without separators row 1's contents move 1 px down and row 2's 1 px up, over the row line (§2). The pixels are
+    // moved after painting; the band is always repainted whole then (`App::take_damage`).
+    if !seps {
+        let d = ui.c.scale.round().max(1.0) as i32;
+        ui.c.shift(Rect::new(0.0, 0.0, width, 42.0), 0, d, &[]);
+        ui.c.shift(Rect::new(0.0, 41.0, width, 40.0), 0, -d, &[]);
+    }
 
     // Logo spot (spans both rows): the Lemon Studio mark.
     // It keeps to the right edge until the window is too narrow, then the edge crops it
@@ -562,9 +632,9 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
             continue;
         }
         let hov = ui.hit(r, action.clone(), hint) || ui.down(r, &action);
-        super::button_face(ui, r, if hov { super::Look::Hot } else { super::Look::Off });
         let _ = open;
-        icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), if hov { t.on_glyph } else { t.glyph });
+        let ink = super::tool_face(ui, r, if hov { super::Look::Hot } else { super::Look::Off });
+        icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), ink);
     }
 
     // News panel.

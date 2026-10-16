@@ -484,7 +484,8 @@ fn paint_info(ui: &mut Ui, s: &State, path: &Path, r: Rect) {
 
 /// Top of the rows: below the search box when "Search box on top" is on (spec §4).
 pub fn list_top(s: &State) -> f32 {
-    if opt(s, OPT_TOP) { LIST_Y + SEARCH_ROW } else { LIST_Y }
+    let lift = super::work_y(s) - super::WORK_Y;
+    lift + if opt(s, OPT_TOP) { LIST_Y + SEARCH_ROW } else { LIST_Y }
 }
 
 /// Height of the search row above the list ("Search box on top").
@@ -497,33 +498,36 @@ pub fn max_scroll(s: &State) -> f32 {
 
 pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     let t = ui.t;
+    // Measured with the browser top at `WORK_Y`; it moves up with a hidden toolbar (spec: ui/toolbar-menu.md §5).
+    let dy = r.y - super::WORK_Y;
     ui.hit(r, Action::Swallow, "");
     // Title bar.
-    ui.c.fill_rect(Rect::span(0.0, 200.0, 83.0, 105.0), t.browser_title);
-    let menu_open = s.playlist.popup.as_ref().is_some_and(|p| p.x == MENU_AT.0 && p.y == MENU_AT.1);
-    let mhov = ui.hit(Rect::new(2.0, 85.0, 16.0, 18.0), Action::BrowserMenu, "Browser options");
+    ui.c.fill_rect(Rect::span(0.0, 200.0, 83.0 + dy, 105.0 + dy), t.browser_title);
+    let at = menu_at(s);
+    let menu_open = s.playlist.popup.as_ref().is_some_and(|p| p.x == at.0 && p.y == at.1);
+    let mhov = ui.hit(Rect::new(2.0, 85.0 + dy, 16.0, 18.0), Action::BrowserMenu, "Browser options");
     if mhov || menu_open {
-        ui.c.stroke_rrect(Rect::new(3.0, 86.0, 15.0, 16.0), 2.0, 1.2, t.browser_tab_outline);
+        ui.c.stroke_rrect(Rect::new(3.0, 86.0 + dy, 15.0, 16.0), 2.0, 1.2, t.browser_tab_outline);
     }
-    icons::draw(ui.c, Icon::ArrowRight, Rect::new(5.0, 87.0, 12.0, 14.0), if mhov || menu_open { t.glyph } else { t.text_dim });
+    icons::draw(ui.c, Icon::ArrowRight, Rect::new(5.0, 87.0 + dy, 12.0, 14.0), if mhov || menu_open { t.glyph } else { t.text_dim });
     // Collapse structure and Reread structure (spec §4, "Title-bar icons"): outlined like the ▸ while hovered.
     for (r, icon, action, hint) in [
-        (Rect::new(17.0, 85.0, 16.0, 18.0), Icon::ArrowUp, Action::BrowserCollapse, "Collapse structure (Ctrl+Up)"),
-        (Rect::new(33.0, 85.0, 15.0, 18.0), Icon::Back, Action::BrowserReread, "Reread structure (Ctrl+R)"),
+        (Rect::new(17.0, 85.0 + dy, 16.0, 18.0), Icon::ArrowUp, Action::BrowserCollapse, "Collapse structure (Ctrl+Up)"),
+        (Rect::new(33.0, 85.0 + dy, 15.0, 18.0), Icon::Back, Action::BrowserReread, "Reread structure (Ctrl+R)"),
     ] {
         let hov = ui.hit(r, action, hint);
         if hov {
-            ui.c.stroke_rrect(Rect::new(r.x + 1.0, 86.0, r.w - 1.0, 16.0), 2.0, 1.2, t.browser_tab_outline);
+            ui.c.stroke_rrect(Rect::new(r.x + 1.0, 86.0 + dy, r.w - 1.0, 16.0), 2.0, 1.2, t.browser_tab_outline);
         }
-        icons::draw(ui.c, icon, Rect::new(r.x + 1.0, 87.0, 12.0, 14.0), if hov { t.glyph } else { t.text_dim });
+        icons::draw(ui.c, icon, Rect::new(r.x + 1.0, 87.0 + dy, 12.0, 14.0), if hov { t.glyph } else { t.text_dim });
     }
-    ui.c.text(os_ui::Font::new(14), 52.0, 85.0, t.text_dim, "Browser");
+    ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
     // Tabs (spec ui/browser.md §1).
-    ui.c.fill_rect(Rect::span(0.0, 200.0, 106.0, 141.0), t.browser_tabs);
+    ui.c.fill_rect(Rect::span(0.0, 200.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
     const TIPS: [&str; 5] = ["All", "Current project", "Plugin database", "Online content", "Favorites"];
     for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Globe, Icon::Star].into_iter().enumerate() {
         let cx = 20.0 + 40.0 * i as f32;
-        let rr = Rect::new(cx - 18.0, 108.0, 36.0, 30.0);
+        let rr = Rect::new(cx - 18.0, 108.0 + dy, 36.0, 30.0);
         // Online content and favorites: not available yet, greyed out.
         let hov = if i >= OFF_TABS {
             ui.off(rr, TIPS[i]);
@@ -535,13 +539,14 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             ui.c.stroke_rrect(rr, 4.0, 1.5, t.browser_tab_outline);
         }
         let c = if i >= OFF_TABS { t.text_faint } else if hov || i == s.browser_tab { t.glyph } else { t.glyph.shade(-0.1) };
-        icons::draw(ui.c, icon, Rect::new(cx - 9.0, 114.0, 18.0, 18.0), c);
+        icons::draw(ui.c, icon, Rect::new(cx - 9.0, 114.0 + dy, 18.0, 18.0), c);
     }
     // List.
     let top = list_top(s);
-    if top > LIST_Y {
-        ui.c.fill_rect(Rect::new(0.0, LIST_Y, 201.0, SEARCH_ROW), t.browser_footer);
-        search_box(ui, s, Rect::new(13.0, LIST_Y + 4.0, 163.0, 20.0));
+    let search_on_top = opt(s, OPT_TOP);
+    if search_on_top {
+        ui.c.fill_rect(Rect::new(0.0, LIST_Y + dy, 201.0, SEARCH_ROW), t.browser_footer);
+        search_box(ui, s, Rect::new(13.0, LIST_Y + dy + 4.0, 163.0, 20.0));
     }
     let rows = rows(s);
     let info = info_path(&rows, s);
@@ -612,7 +617,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     ui.c.fill_rrect(tags, 3.0, t.sunken);
     ui.c.text_center(os_ui::Font::condensed(11, 6).bold(), tags, ui.t.tx(0xc0c8cc), "TAGS");
     ui.veil(tags, t.browser_footer);
-    if top == LIST_Y {
+    if !search_on_top {
         search_box(ui, s, Rect::new(57.0, fy + 4.0, 119.0, 20.0));
     } else {
         ui.c.fill_rrect(Rect::new(57.0, fy + 4.0, 119.0, 20.0), 3.0, t.sunken);
@@ -622,8 +627,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     let hov = ui.hit(glass, Action::BrowserSearch, "Search the browser (Enter = find next, Esc = clear)");
     icons::draw(ui.c, Icon::Search, Rect::new(180.0, fy + 5.0, 17.0, 17.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
     // Splitter.
-    ui.c.fill_rect(Rect::new(201.0, 83.0, 6.0, r.h), t.splitter);
-    ui.c.fill_rect(Rect::new(207.0, 83.0, 2.0, r.h), t.splitter_dark);
+    ui.c.fill_rect(Rect::new(201.0, r.y, 6.0, r.h), t.splitter);
+    ui.c.fill_rect(Rect::new(207.0, r.y, 2.0, r.h), t.splitter_dark);
 }
 
 /// A long disk name shortened in the middle with ".." to fit `w` (FL screenshots, spec §6).
@@ -646,7 +651,9 @@ fn middle_cut(ui: &mut Ui, f: os_ui::Font, text: &str, w: f32) -> String {
 const OFF_TABS: usize = 3;
 
 /// Where the options menu opens (just below the title bar's ▸, spec §4).
-pub const MENU_AT: (f32, f32) = (1.0, 105.0);
+pub fn menu_at(s: &State) -> (f32, f32) {
+    (1.0, 105.0 + super::work_y(s) - super::WORK_Y)
+}
 
 /// The search field (spec §5): typed text, a caret while focused; click focuses.
 fn search_box(ui: &mut Ui, s: &State, r: Rect) {

@@ -621,6 +621,8 @@ pub struct Ui<'a> {
     pub win: Option<Win>,
     keep: &'a mut Keep,
     live: &'a mut Vec<(Live, Rect)>,
+    /// Square toolbar buttons are drawn flat (the Toolbars menu, spec: ui/toolbar-menu.md §3).
+    pub flat: bool,
 }
 
 impl Ui<'_> {
@@ -846,6 +848,8 @@ pub struct State {
     pub tempo_digits: std::cell::Cell<[f32; 3]>,
     /// The time display's mode and middle unit (spec: ui/time-display.md): app-wide, for the session.
     pub clock: crate::clock::Clock,
+    /// The Toolbars menu's switches (spec: ui/toolbar-menu.md §8): app-wide, for the session.
+    pub toolbar: views::toolbar::Opts,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
     /// MIDI input devices that are open (their notes play the selected channel; spec: ui/midi-input.md).
@@ -882,7 +886,8 @@ impl State {
     /// The workspace: right of the browser, below the toolbar.
     pub fn work_rect(&self) -> Rect {
         let left = if self.show_browser { views::BROWSER_W } else { 0.0 };
-        Rect::new(left, views::WORK_Y, (self.screen.0 - left).max(0.0), (self.screen.1 - views::WORK_Y).max(0.0))
+        let top = views::work_y(self);
+        Rect::new(left, top, (self.screen.0 - left).max(0.0), (self.screen.1 - top).max(0.0))
     }
 
     /// The window's floating rect, kept at least its minimum size and inside the screen.
@@ -892,9 +897,10 @@ impl State {
         let (mw, mh) = w.min_size();
         let (sw, sh) = self.screen;
         let rw = r.w.min(sw).max(mw);
-        let rh = r.h.min(sh - views::WORK_Y).max(mh);
+        let top = views::work_y(self);
+        let rh = r.h.min(sh - top).max(mh);
         let x = r.x.min(sw - rw).max(0.0);
-        let y = r.y.min(sh - rh).max(views::WORK_Y);
+        let y = r.y.min(sh - rh).max(top);
         Rect::new(x, y, rw, rh)
     }
 
@@ -1118,6 +1124,7 @@ impl App {
                 tapper: Default::default(),
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::default(),
+                toolbar: views::toolbar::Opts::default(),
                 midi_inputs: Vec::new(),
                 maximized: true,
                 piano: PianoState::default(),
@@ -2080,7 +2087,19 @@ impl App {
         match std::mem::replace(&mut self.damage, Damage::None) {
             Damage::None => None,
             Damage::Full => Some(None),
-            Damage::Rects(v) => Some(Some(v)),
+            Damage::Rects(mut v) => {
+                // The Toolbars menu (spec: ui/toolbar-menu.md §2, §4): without separators the rows' pixels move after
+                // painting, so the toolbar repaints whole; the floating hint bar repeats the hint panel.
+                let o = self.state.toolbar;
+                let band = views::toolbar::band(self.state.screen.0);
+                if !o.separators && !o.hidden && v.iter().any(|r| !r.intersect(&band).is_empty()) {
+                    add_damage(&mut v, band);
+                }
+                if o.hint_bar && v.iter().any(|r| !r.intersect(&HINT_RECT).is_empty()) {
+                    add_damage(&mut v, views::toolbar::hint_bar_rect(&self.state));
+                }
+                Some(Some(v))
+            }
         }
     }
 
@@ -2140,7 +2159,13 @@ impl App {
             .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
-        v.push(Cover { bounds: Rect::new(0.0, 0.0, s.screen.0, views::WORK_Y + 1.0), win: None, solid: None });
+        if !s.toolbar.hidden {
+            v.push(Cover { bounds: Rect::new(0.0, 0.0, s.screen.0, views::WORK_Y + 1.0), win: None, solid: None });
+        }
+        // The floating hint bar (spec: ui/toolbar-menu.md §4).
+        if s.toolbar.hint_bar {
+            v.push(Cover { bounds: views::toolbar::hint_bar_rect(s).outset(1.0), win: None, solid: None });
+        }
         v
     }
 
@@ -2356,7 +2381,7 @@ impl App {
         if !s.perf.placed {
             let w = s.work_rect();
             let (pw, ph) = views::perf::SIZE;
-            s.perf.pos = ((w.x + (w.w - pw) / 2.0).max(0.0).round(), (w.y + (w.h - ph) / 2.0).max(views::WORK_Y).round());
+            s.perf.pos = ((w.x + (w.w - pw) / 2.0).max(0.0).round(), (w.y + (w.h - ph) / 2.0).max(views::work_y(s)).round());
             s.perf.placed = true;
         }
         if !s.shown(Win::Perf) {
@@ -2500,7 +2525,7 @@ impl App {
         } else {
             if !s.tapper.placed {
                 let (w, h) = views::tapper::SIZE;
-                s.tapper.pos = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::WORK_Y).round());
+                s.tapper.pos = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
                 s.tapper.placed = true;
             }
             s.raise(Win::Tapper);
@@ -2864,6 +2889,7 @@ impl App {
             win: None,
             keep: &mut self.keep,
             live: &mut self.live,
+            flat: self.state.toolbar.flat,
         };
         let info = views::FrameInfo {
             title,
@@ -3531,7 +3557,8 @@ impl App {
                 }
                 Drag::Window { win, dx, dy } => {
                     let old = self.win_bounds(win);
-                    let pos = ((x - dx).max(0.0), (y - dy).max(views::WORK_Y));
+                    let top = views::work_y(&self.state);
+                    let pos = ((x - dx).max(0.0), (y - dy).max(top));
                     let (sw, sh) = self.state.screen;
                     match win {
                         Win::ChannelRack => self.state.rack_pos = pos,
@@ -3542,7 +3569,7 @@ impl App {
                             if let Some(i) = w.slot() {
                                 let r = &mut self.state.wins[i].rect;
                                 r.x = pos.0.min(sw - 100.0).max(0.0);
-                                r.y = pos.1.min(sh - 30.0).max(views::WORK_Y);
+                                r.y = pos.1.min(sh - 30.0).max(top);
                             }
                         }
                     }
@@ -3562,7 +3589,7 @@ impl App {
                         r.w = (r0.w + dx).max(mw);
                     }
                     if edges & EDGE_T != 0 {
-                        r.h = (r0.h - dy).max(mh).min((r0.bottom() - views::WORK_Y).max(mh));
+                        r.h = (r0.h - dy).max(mh).min((r0.bottom() - views::work_y(&self.state)).max(mh));
                         r.y = r0.bottom() - r.h;
                     }
                     if edges & EDGE_B != 0 {
@@ -4173,8 +4200,9 @@ impl App {
                 self.state.playlist.popup = Some(views::menus::clock_popup(&self.state, x, y));
                 return self.invalidate();
             }
-            Some(Action::DragWindow) if HINT_RECT.contains(x, y) => {
-                self.state.playlist.popup = Some(views::menus::hint_popup(x, y));
+            // The Toolbars menu: on the hint panel and on bare toolbar background (spec: ui/toolbar-menu.md §1).
+            Some(Action::DragWindow) => {
+                self.state.playlist.popup = Some(views::menus::hint_popup(&self.state, x, y));
                 return self.invalidate();
             }
             // Toolbar buttons with a right-click action: armed here, run on the release (spec: ui/toolbar-buttons.md §2).
@@ -4971,6 +4999,8 @@ impl App {
             Key::Named(NamedKey::F8) if alt => self.act(Action::ToggleWin(Win::Browser)),
             Key::Named(NamedKey::F9) => self.act(Action::ToggleWin(Win::Mixer)),
             Key::Named(NamedKey::F10) => self.open_settings(views::settings::MIDI),
+            // Toolbars > Hide (spec: ui/toolbar-menu.md §5).
+            Key::Named(NamedKey::F11) if ctrl => self.toolbar_switch(views::toolbar::Switch::Hide),
             Key::Named(NamedKey::F11) => self.open_settings(views::settings::INFO),
             // Monitor debug panel (views/mondebug.rs) parked 2026-10-09: its values are now the defaults. Uncomment to tune again.
             // Key::Named(NamedKey::F12) => self.state.monitor.debug = !self.state.monitor.debug,
@@ -6192,6 +6222,36 @@ impl App {
         let items = fill(&self.state);
         self.state.playlist.popup = Some(crate::playlist::Popup { x: at.right(), y: at.y - 2.0, items, sub: None });
         self.state.menu_sub = Some(i);
+    }
+}
+
+impl App {
+    /// A Toolbars menu switch (spec: ui/toolbar-menu.md §2-5, §8). Hide (Ctrl+F11) takes the toolbar and menu bar away
+    /// and moves the browser and the workspace up to the window's top, the floating windows with them; a second Hide
+    /// brings everything back.
+    pub(crate) fn toolbar_switch(&mut self, sw: views::toolbar::Switch) {
+        use views::toolbar::Switch;
+        let s = &mut self.state;
+        match sw {
+            Switch::Separators => s.toolbar.separators = !s.toolbar.separators,
+            Switch::Flat => s.toolbar.flat = !s.toolbar.flat,
+            Switch::HintBar => s.toolbar.hint_bar = !s.toolbar.hint_bar,
+            Switch::Hide => {
+                s.toolbar.hidden = !s.toolbar.hidden;
+                s.menu_open = None;
+                s.menu_sub = None;
+                let dy = if s.toolbar.hidden { -views::WORK_Y } else { views::WORK_Y };
+                let top = views::work_y(s);
+                let lift = |y: &mut f32| *y = (*y + dy).max(top);
+                for w in &mut s.wins {
+                    lift(&mut w.rect.y);
+                }
+                for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos] {
+                    lift(&mut pos.1);
+                }
+            }
+        }
+        self.invalidate();
     }
 }
 
@@ -12010,6 +12070,132 @@ mod tests {
         assert_eq!(app.hits.iter().find(|h| h.action == Action::Clock).unwrap().hint, "Song position (bar:beat:tick)");
         pick(&mut app, &mut c, "Minute : Second : Centisecond");
         assert!(app.state.clock.mode == Mode::Msc && app.state.clock.beat);
+    }
+
+    /// The Toolbars menu (spec: ui/toolbar-menu.md §8): on the hint panel, on bare toolbar background and as VIEW >
+    /// Toolbars ▸; Separators (on), Flat buttons, Hint bar (off) and Hide (Ctrl+F11) work, the rest stays greyed with
+    /// our layout checked. Separators off: no lines, row 1 one pixel down and row 2 one up, also after a partial
+    /// repaint. Flat: no face on an unlit button. Hint bar: the floating panel, repainted with the hint panel. Hide:
+    /// no toolbar, the browser, workspace and floating windows up by its height; Ctrl+F11 brings them back.
+    #[test]
+    fn toolbars_menu() {
+        use crate::playlist::Mark;
+        use crate::views::toolbar::{band, hint_bar_rect, Opts};
+        use views::menus::{item_at, submenu, toolbar_items, works, MENUS, VIEW};
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.state.toolbar, Opts { separators: true, flat: false, hint_bar: false, hidden: false });
+        // The menu, from the hint panel and from bare background.
+        let open = |app: &mut App, c: &mut Canvas, (x, y): (f32, f32)| {
+            app.mouse_move(x, y);
+            app.mouse_down_right();
+            app.mouse_up();
+            frame(app, c, None);
+            app.state.playlist.popup.clone().expect("the Toolbars menu")
+        };
+        let bare = (1490.0, 20.0);
+        assert_eq!(app.top_hit(bare.0, bare.1).map(|h| h.action.clone()), Some(Action::DragWindow));
+        for at in [(200.0, 20.0), bare] {
+            let p = open(&mut app, &mut c, at);
+            assert_eq!(p.items, toolbar_items(&app.state));
+            app.key(&Key::Named(NamedKey::Escape), false, false);
+        }
+        let items = toolbar_items(&app.state);
+        let row = |label: &str| items.iter().find(|i| i.label == label).unwrap_or_else(|| panic!("{label}"));
+        for (label, enabled, mark) in [
+            ("Edit", false, Mark::Check(false)),
+            ("Separators", true, Mark::Check(true)),
+            ("Flat buttons", true, Mark::Check(false)),
+            ("Show detected MIDI chords near the hint bar", false, Mark::Check(false)),
+            ("Hint bar", true, Mark::Check(false)),
+            ("Hide", true, Mark::Check(false)),
+        ] {
+            assert_eq!((row(label).enabled, row(label).mark), (enabled, mark), "{label}");
+        }
+        assert_eq!(row("Hide").key, "Ctrl+F11");
+        let presets: Vec<_> = items.iter().skip_while(|i| i.label != "Presets").skip(1).collect();
+        assert!(presets.len() == 9 && presets.iter().all(|i| !i.enabled));
+        assert_eq!(presets.iter().filter(|i| i.mark == Mark::Radio(true)).map(|i| i.label.as_ref()).collect::<Vec<&str>>(), ["Classic"]);
+        // VIEW > Toolbars ▸ is the same menu.
+        let entry = MENUS[VIEW].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == "Toolbars").unwrap();
+        assert!(works(VIEW, item_at(VIEW, entry).unwrap()));
+        assert_eq!(submenu(VIEW, "Toolbars").unwrap()(&app.state), items);
+        let pick = |app: &mut App, c: &mut Canvas, label: &str| {
+            let p = open(app, c, (200.0, 20.0));
+            let i = p.items.iter().position(|it| it.label == label).unwrap();
+            let r = hit_rect(app, &Action::PlPopup(i));
+            click(app, c, r);
+            app.mouse_move(1300.0, 600.0);
+            frame(app, c, None);
+        };
+        let px = |c: &Canvas, x: u32, y: u32| c.pixmap.pixel(x, y).unwrap();
+        let column = |c: &Canvas, x: u32| (0..83).map(|y| px(c, x, y)).collect::<Vec<_>>();
+        // Separators off: the lines go, row 1 moves down a pixel, row 2 up one.
+        let (r1, r2) = (column(&c, 595), column(&c, 990));
+        let line = px(&c, 379, 20);
+        pick(&mut app, &mut c, "Separators");
+        assert!(!app.state.toolbar.separators);
+        assert_ne!(px(&c, 379, 20), line);
+        let (s1, s2) = (column(&c, 595), column(&c, 990));
+        // Row 41 (the old line) holds row 2's top pixel: the rows close over it.
+        assert_eq!(s1[1..=40], r1[0..=39]);
+        assert_eq!(s2[41..80], r2[42..81]);
+        // A partial repaint of the toolbar repaints it whole, so the pixels move once.
+        app.damage = Damage::None;
+        app.damage_rect(CPU_RECT);
+        let (d, b) = (app.take_damage(), band(1920.0));
+        assert!(matches!(&d, Some(Some(v)) if v.iter().any(|r| r.contains(b.x, b.y) && r.contains(b.right() - 1.0, b.bottom() - 1.0))), "{d:?}");
+        frame_damage(&mut app, &mut c, d);
+        assert_eq!((column(&c, 595), column(&c, 990)), (s1, s2));
+        pick(&mut app, &mut c, "Separators");
+        assert!(app.state.toolbar.separators && column(&c, 595) == r1);
+        // Flat buttons: an unlit button is just its icon on the toolbar background.
+        assert_ne!(px(&c, 580, 20), px(&c, 611, 20));
+        pick(&mut app, &mut c, "Flat buttons");
+        assert!(app.state.toolbar.flat);
+        assert_eq!(px(&c, 580, 20), px(&c, 611, 20));
+        pick(&mut app, &mut c, "Flat buttons");
+        // Hint bar: the floating panel at the bottom-left, over the windows; it repaints with the hint panel.
+        pick(&mut app, &mut c, "Hint bar");
+        let hb = hint_bar_rect(&app.state);
+        assert_eq!(hb, Rect::new(0.0, 1080.0 - 84.0, 400.0, 82.0));
+        assert_eq!(app.top_hit(hb.cx(), hb.cy()).map(|h| h.action.clone()), Some(Action::Swallow));
+        let p = px(&c, 2, hb.y as u32 + 2);
+        assert!(p.red() < 0x20 && p.green() < 0x20 && p.blue() < 0x20, "{p:?}");
+        app.damage = Damage::None;
+        app.damage_rect(HINT_RECT);
+        assert!(matches!(app.take_damage(), Some(Some(v)) if v.iter().any(|r| r.contains(hb.x, hb.y) && r.contains(hb.right() - 1.0, hb.bottom() - 1.0))));
+        pick(&mut app, &mut c, "Hint bar");
+        assert!(!app.state.toolbar.hint_bar);
+        // Hide (Ctrl+F11): no toolbar; the browser and the workspace from the top, the floating playlist up with them.
+        app.state.show_browser = true;
+        app.state.wins[0].maxed = false;
+        app.state.wins[0].rect = Rect::new(400.0, 200.0, 900.0, 500.0);
+        app.state.raise(Win::Playlist);
+        frame(&mut app, &mut c, None);
+        let tab = hit_rect(&app, &Action::BrowserTab(1));
+        app.key(&Key::Named(NamedKey::F11), true, false);
+        frame(&mut app, &mut c, None);
+        assert!(app.state.toolbar.hidden && !app.state.settings.open);
+        assert_eq!(app.state.work_rect().y, 0.0);
+        assert!(!app.hits.iter().any(|h| h.action == Action::Clock || h.action == Action::DragWindow));
+        assert_eq!(hit_rect(&app, &Action::BrowserTab(1)).y, tab.y - views::WORK_Y);
+        assert_eq!(app.state.win_rect(Win::Playlist).y, 200.0 - views::WORK_Y);
+        // Ctrl+F11 again: everything as it was.
+        app.key(&Key::Named(NamedKey::F11), true, false);
+        frame(&mut app, &mut c, None);
+        assert!(!app.state.toolbar.hidden && app.hits.iter().any(|h| h.action == Action::Clock));
+        assert_eq!((app.state.work_rect().y, app.state.win_rect(Win::Playlist).y), (views::WORK_Y, 200.0));
+        assert_eq!(hit_rect(&app, &Action::BrowserTab(1)), tab);
+        // From the menu too; F11 alone is still Project info.
+        pick(&mut app, &mut c, "Hide");
+        assert!(app.state.toolbar.hidden);
+        app.key(&Key::Named(NamedKey::F11), true, false);
+        app.key(&Key::Named(NamedKey::F11), false, false);
+        assert!(!app.state.toolbar.hidden && app.state.settings.open);
     }
 
     /// TOOLS / the channel rack's options > Switch all / selected audio clip channels to ▸ (spec: ui/channel-switches.md

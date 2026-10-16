@@ -404,6 +404,8 @@ pub fn submenu(menu: usize, label: &str) -> Option<fn(&State) -> Vec<crate::play
         (TOOLS_MENU, DECLICK_LABEL) => Some(crate::rack::declick_items),
         (TOOLS_MENU, CLIPS_ALL_LABEL) => Some(|_| crate::rack::stretch_items(true)),
         (TOOLS_MENU, CLIPS_SEL_LABEL) => Some(|_| crate::rack::stretch_items(false)),
+        // spec: ui/toolbar-menu.md §8
+        (VIEW, "Toolbars") => Some(toolbar_items),
         _ => None,
     }
 }
@@ -718,7 +720,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["Effect", CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["Effect", "Toolbars", CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");
@@ -726,7 +728,7 @@ mod tests {
         // ADD > Effect: the effect plugin menu as a submenu (spec: ui/plugin-menu.md §1-2).
         let fx = submenu(ADD_MENU, "Effect").unwrap()(&app.state);
         assert_eq!(fx, crate::plugin_menu::items(&app.state, crate::plugin_menu::Target::Fx(None), true));
-        for label in ["New from template", "Import", "Toolbars", "One-click audio recording", "Set keyboard focus for all plugins to"] {
+        for label in ["New from template", "Import", "One-click audio recording", "Set keyboard focus for all plugins to"] {
             let (mi, it) = MENUS.iter().enumerate().find_map(|(mi, m)| m.cols.iter().flat_map(|(_, items)| items.iter()).find(|it| it.label == label).map(|it| (mi, it))).unwrap();
             assert!(!works(mi, it), "{label} stays greyed out");
         }
@@ -776,20 +778,29 @@ pub fn pattern_popup(x: f32, y: f32) -> crate::playlist::Popup {
     Popup { x, y, items, sub: None }
 }
 
-/// The hint bar's right-click menu: toolbar options and layout presets (not available yet, greyed out).
-pub fn hint_popup(x: f32, y: f32) -> crate::playlist::Popup {
-    use crate::playlist::{Mark, PItem, Popup};
-    let tick = |label: &'static str, on: bool| PItem::not_yet(label).mark(Mark::Check(on));
+/// The Toolbars menu: the hint panel's and the bare toolbar's right-click menu (spec: ui/toolbar-menu.md §8).
+pub fn hint_popup(s: &State, x: f32, y: f32) -> crate::playlist::Popup {
+    crate::playlist::Popup { x, y, items: toolbar_items(s), sub: None }
+}
+
+/// The Toolbars menu's entries, also VIEW > Toolbars ▸ (spec: ui/toolbar-menu.md §1, §8): Separators, Flat buttons,
+/// Hint bar and Hide work; the toolbar editor, the MIDI chords and every layout but ours (checked) stay greyed out.
+pub fn toolbar_items(s: &State) -> Vec<crate::playlist::PItem> {
+    use crate::playlist::{Cmd, Mark, PItem};
+    use crate::views::toolbar::Switch;
+    let o = s.toolbar;
+    let switch = |label: &'static str, sw: Switch, on: bool| PItem::new(label, Cmd::Toolbar(sw)).mark(Mark::Check(on));
     let radio = |label: &'static str, on: bool| PItem::not_yet(label).mark(Mark::Radio(on));
-    let items = vec![
+    vec![
         PItem::head("Toolbars"),
-        tick("Edit", true),
-        tick("Separators", true),
-        tick("Flat buttons", false),
-        tick("Show detected MIDI chords near the hint bar", true),
+        PItem::not_yet("Edit").mark(Mark::Check(false)),
+        switch("Separators", Switch::Separators, o.separators),
+        switch("Flat buttons", Switch::Flat, o.flat),
+        PItem::not_yet("Show detected MIDI chords near the hint bar").mark(Mark::Check(false)),
         PItem::sep(),
-        tick("Hint bar", true),
-        PItem::not_yet("Hide").key("Ctrl+F11"),
+        switch("Hint bar", Switch::HintBar, o.hint_bar),
+        // A command: always the dim mark (§1).
+        switch("Hide", Switch::Hide, false).key("Ctrl+F11"),
         PItem::col(),
         PItem::head("Presets"),
         radio("Compact", false),
@@ -801,8 +812,7 @@ pub fn hint_popup(x: f32, y: f32) -> crate::playlist::Popup {
         radio("Modern (Windows)", false),
         radio("Single line centered", false),
         radio("Single line", false),
-    ];
-    Popup { x, y, items, sub: None }
+    ]
 }
 
 /// The time display's right-click menu: Mode and Middle unit, one dot each (spec: ui/time-display.md §1).
