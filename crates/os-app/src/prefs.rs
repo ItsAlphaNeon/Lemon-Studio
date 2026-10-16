@@ -176,6 +176,25 @@ pub const AUTO_NAME_CHANNELS: Check = Check { key: "auto_name_channels", label: 
 pub const AUTO_NAME_EFFECT_SLOTS: Check =
     Check { key: "auto_name_effect_slots", label: "Auto name effect slots", default: false };
 
+/// General ▸ Miscellaneous: a plugin added from now on (a new channel's, a new effect in a slot) opens its window
+/// detached (`Plugins::added`); plugins that exist keep their own mode. Spec: ui/settings-choices.md "Miscellaneous:
+/// naming, detached plugins and startup".
+pub const DETACH_NEW: Check = Check { key: "detach_new_plugins", label: "Detach all new plugins", default: false };
+
+/// General ▸ Miscellaneous: a detached window opening for the first time goes on the main window's monitor; off, on
+/// the primary monitor (`plugin_window::first_position`, Windows only). A reopened one goes where it was either way.
+/// Spec: as above.
+pub const DETACHED_WITH_MAIN: Check =
+    Check { key: "detached_with_main_window", label: "Open detached plugins with the main window", default: false };
+
+/// General ▸ Miscellaneous: stored and shown only (native plugins have no typing keyboard option). Spec: as above.
+pub const TYPING_PRIORITY_OFF: Check =
+    Check { key: "disable_typing_priority", label: "Disable typing keyboard priority by default", default: false };
+
+/// General ▸ Miscellaneous: at most `plugins::MAX_EDITORS` plugin editor windows open; opening another first closes the
+/// one opened earliest (`Plugins::open_window`). Spec: as above.
+pub const LIMIT_EDITORS: Check = Check { key: "limit_plugin_editors", label: "Limit the number of open plugin editors", default: true };
+
 /// General ▸ Miscellaneous: the project Lemon Studio starts with when no project file is passed to it
 /// (`App::startup_project`). Spec: ui/settings-choices.md, as above.
 pub const STARTUP_PROJECT: Combo =
@@ -198,6 +217,10 @@ pub const CHECKS: &[&Check] = &[
     &HIDE_PLUGIN_TOOLBAR,
     &AUTO_NAME_CHANNELS,
     &AUTO_NAME_EFFECT_SLOTS,
+    &DETACH_NEW,
+    &DETACHED_WITH_MAIN,
+    &TYPING_PRIORITY_OFF,
+    &LIMIT_EDITORS,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT];

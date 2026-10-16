@@ -1264,6 +1264,7 @@ impl App {
             match r {
                 FxReq::Create { track, slot, index } => match self.plugins.create_effect(track, slot, index, None) {
                     Ok(_) => {
+                        self.plugins.added(crate::plugins::fx_key(track, slot));
                         relink = true;
                         self.open_fx(track, slot);
                     }

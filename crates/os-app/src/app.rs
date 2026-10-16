@@ -1722,6 +1722,11 @@ impl App {
                 Ok(_) => {
                     self.state.hosted_rows.push(row);
                     added = true;
+                    // A channel just added (ADD ▸ Lemon Sampler): its window is about to open (spec:
+                    // ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
+                    if self.state.pending_open == Some(row) {
+                        self.plugins.added(row);
+                    }
                 }
                 Err(e) => {
                     self.sampler_failed.push(row);
@@ -1827,6 +1832,7 @@ impl App {
             self.state.pending_plugin = None;
             match self.plugins.create(row, index) {
                 Ok(name) => {
+                    self.plugins.added(row);
                     self.state.hosted_rows.push(row);
                     self.transport.set_instruments(self.plugins.instruments());
                     self.state.piano.dirty = true;
@@ -9103,6 +9109,29 @@ mod tests {
         app.toggle_channel_window(row);
         assert!(!app.state.shown(Win::Plugin), "no information window");
         assert_eq!(app.state.pending_open, Some(row), "Lemon Sampler's window opens");
+    }
+
+    /// ADD ▸ Lemon Sampler with "Detach all new plugins" on: the new channel's instance opens detached; channels added
+    /// before and the project's own keep docked (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins
+    /// and startup").
+    #[test]
+    fn added_sampler_channels_take_the_detach_check() {
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        a.plugins.available = crate::plugins::builtin();
+        let sampler = a.plugins.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
+        crate::plugin_menu::add_generator(&mut a, sampler, None);
+        let off = a.state.pending_open.expect("its window opens once hosted");
+        a.sync_samplers(None);
+        a.state.pending_open = None;
+        crate::prefs::set_check(&crate::prefs::DETACH_NEW, true);
+        crate::plugin_menu::add_generator(&mut a, sampler, None);
+        let on = a.state.pending_open.unwrap();
+        a.sync_samplers(None);
+        let detached = |r: usize| a.plugins.hosted[&r].detached;
+        assert!(detached(on));
+        assert!(!detached(off), "added before: keeps its mode");
+        assert!(!detached(0), "the project's channel");
     }
 
     /// Lemon Sampler's settings are saved with the project and come back when it is reopened (spec:
