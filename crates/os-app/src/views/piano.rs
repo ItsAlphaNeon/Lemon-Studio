@@ -223,10 +223,17 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         }
         None => {}
     }
-    // Playhead (pattern mode).
-    if f.playing && !f.song {
-        let x = g.x_of(f.tick as f32);
+    // Playhead: the pattern's own in pattern mode; in song mode where the song is in this pattern, while a clip of
+    // it plays there.
+    let head = if !f.playing { None } else if f.song { piano::pattern_tick_in_song(s, f.tick) } else { Some(f.tick) };
+    if let Some(tick) = head {
+        let x = g.x_of(tick as f32);
         ui.c.fill_rect(Rect::new(x, l.grid.y, 1.5, l.grid.h), t.playhead);
+    } else if let Some(tick) = (!f.playing && s.song_mode).then(|| piano::pattern_tick_in_song(s, f64::from(s.playlist.pos))).flatten() {
+        // Stopped in song mode on a place where this pattern plays: a grey line there.
+        let x = g.x_of(tick as f32).round();
+        ui.c.fill_rect(Rect::new(x - 1.0, l.grid.y, 3.0, l.grid.h), ui.t.s(0x38373b));
+        ui.c.fill_rect(Rect::new(x, l.grid.y, 1.0, l.grid.h), ui.t.s(0x53585c));
     } else if !f.playing {
         // Stopped: a grey line at the play-start marker (§10).
         let x = g.x_of(s.piano.marker as f32).round();

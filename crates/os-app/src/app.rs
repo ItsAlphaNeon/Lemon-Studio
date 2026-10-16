@@ -708,6 +708,8 @@ pub enum Drag {
     Scrub { tick: f32 },
     /// Ruler: move the play-start marker; right-drag a time selection from `t0`.
     Marker,
+    /// Ruler in SONG mode over a pattern the playlist plays: the song position follows (see `piano_song_seek`).
+    SongRuler,
     TimeSel { t0: u32 },
     /// Painting the event panel (note property or channel control points).
     Velocity { last_x: f32, last_y: f32 },
@@ -2595,10 +2597,12 @@ impl App {
                     }
                 }
             }
-            if !now.song && piano {
+            if piano {
                 if let Some(g) = self.piano_geom() {
                     let grid = g.grid;
-                    for t in [old.tick, now.tick] {
+                    // In song mode the piano roll's playhead is where its pattern plays, while a clip of it does.
+                    let at = |t: f64| if now.song { piano::pattern_tick_in_song(&self.state, t) } else { Some(t) };
+                    for t in [at(old.tick), at(now.tick)].into_iter().flatten() {
                         self.damage_rect(Rect::new(g.x_of(t as f32) - 2.0, grid.y, 5.0, grid.h));
                     }
                 }
@@ -3474,6 +3478,13 @@ impl App {
                     }
                     self.damage_piano();
                 }
+                Drag::SongRuler => {
+                    if let Some(g) = self.piano_geom() {
+                        let t = crate::piano_snap::place(&self.state, &g, g.tick_at(x), self.alt);
+                        self.piano_song_seek(t, false);
+                    }
+                    self.damage_piano();
+                }
                 Drag::TimeSel { t0 } => {
                     if let Some(g) = self.piano_geom() {
                         let t = crate::piano_snap::place(&self.state, &g, g.tick_at(x), self.alt);
@@ -4301,6 +4312,7 @@ impl App {
             Some(Drag::Marker) if self.transport.playing() && !self.transport.song() => {
                 self.start_playback();
             }
+            Some(Drag::SongRuler) => self.song_pos_release(),
             _ => {}
         }
         if had_overlay {
@@ -4626,14 +4638,25 @@ impl App {
             return;
         }
         let v = lane.value_at(panel, y);
-        let (a, b) = (last_x.min(x) - 3.0, last_x.max(x) + 3.0);
-        let ch = piano::channel(&self.state);
+        let (ta, tb) = (g.tick_at(last_x.min(x)), g.tick_at(last_x.max(x)));
+        // The notes the cursor's path covers: those starting inside it, and the note already playing where the path
+        // begins (the latest start at or before it; before the first note, the first one), so a click anywhere above
+        // or below a note's line sets it. A selection limits this to the selected notes (FL's manual: select first to
+        // reach one of several notes that start together).
+        let cand = piano::targets(&self.state);
+        let starts = || cand.iter().filter_map(|&i| piano::notes(&self.state).get(i)).map(|n| n.position);
+        let anchor = starts().filter(|&p| p as f32 <= ta).max().or_else(|| starts().min());
+        let hit: Vec<usize> = cand
+            .iter()
+            .copied()
+            .filter(|&i| piano::notes(&self.state).get(i).is_some_and(|n| Some(n.position) == anchor || (n.position as f32 >= ta && n.position as f32 <= tb)))
+            .collect();
         let p = piano::pattern_mut(&mut self.state);
         let mut span: Option<(f32, f32)> = None;
         let mut edited = None;
-        for n in p.notes.iter_mut().filter(|n| Some(n.channel) == ch) {
+        for (i, n) in p.notes.iter_mut().enumerate() {
             let nx = g.x_of(n.position as f32);
-            if nx >= a && nx <= b {
+            if hit.contains(&i) {
                 lane.set(n, v);
                 edited = Some(*n);
                 let end = g.x_of((n.position + n.length.max(g.step)) as f32);
@@ -4914,6 +4937,9 @@ impl App {
             return;
         }
         match key {
+            // Space starts and stops (rewinding); Ctrl+Space starts and pauses, like the Play button (FL's manual,
+            // keyboard shortcuts: "Start/Stop Playback", "Start/Pause Playback").
+            Key::Named(NamedKey::Space) if ctrl => self.act(Action::Play),
             Key::Named(NamedKey::Space) => self.act(if self.transport.playing() { Action::Stop } else { Action::Play }),
             // spec: ui/tempo-tapper.md §1
             Key::Named(NamedKey::F5) if ctrl => self.act(Action::ToggleWin(Win::Tapper)),
@@ -4993,6 +5019,22 @@ impl App {
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
             _ => {}
         }
+    }
+
+    /// SONG mode, a press or drag in the piano roll's ruler at pattern tick `t`: when the playlist plays this pattern
+    /// there, the song position moves to that place, as a click in the playlist ruler would (the clip under the
+    /// current position first, else the next one, else the first). A playing song plays on from there (on release
+    /// when dragging); a paused one stops there, so Play resumes from that point. False: the pattern does not play
+    /// that tick anywhere in the song.
+    fn piano_song_seek(&mut self, t: u32, press: bool) -> bool {
+        let tp = &self.transport;
+        let near = if tp.playing() && tp.song() { tp.tick() as u32 } else { self.state.playlist.pos };
+        let Some(at) = piano::song_tick_of(&self.state, t, near) else { return false };
+        if press && tp.playing() && tp.song() && tp.paused() {
+            tp.stop();
+        }
+        self.set_song_pos(at, press);
+        true
     }
 
     /// Start playback in the mode the PAT / SONG switch shows. Pattern mode loops the current pattern from the piano
@@ -5448,8 +5490,13 @@ impl App {
         }
         if a == Action::PianoRuler {
             if let Some(g) = self.piano_geom() {
-                self.state.piano.marker = crate::piano_snap::place(&self.state, &g, g.tick_at(self.mouse.0), self.alt);
-                self.drag = Some(Drag::Marker);
+                let t = crate::piano_snap::place(&self.state, &g, g.tick_at(self.mouse.0), self.alt);
+                if self.state.song_mode && self.piano_song_seek(t, true) {
+                    self.drag = Some(Drag::SongRuler);
+                } else {
+                    self.state.piano.marker = t;
+                    self.drag = Some(Drag::Marker);
+                }
             }
             return;
         }
@@ -9196,6 +9243,89 @@ mod tests {
         app.act(Action::Play);
         step();
         assert_eq!(app.transport.state(), T::Stopped);
+    }
+
+    /// A click in the event panel sets the note already playing where it lands (the latest start at or before it),
+    /// above or below its line, in a gap after it too; left of the first note, the first note (spec: ui/piano-roll.md
+    /// §7, "Drag in the event panel").
+    #[test]
+    fn event_panel_click_sets_the_note_already_playing() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        let ch = piano::channel(&app.state).unwrap();
+        let p = piano::pattern_mut(&mut app.state);
+        p.notes.retain(|n| n.channel != ch);
+        p.notes.extend([96, 192].map(|pos| os_model::Note { length: 48, key: 60, velocity: 64, ..os_model::Note::step(ch, pos) }));
+        frame(&mut app, &mut c, None);
+        let (g, panel) = (app.piano_geom().unwrap(), app.piano_panel.unwrap());
+        let vel = |app: &App| -> Vec<u8> {
+            piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| n.velocity).collect()
+        };
+        let (low, high) = (panel.bottom() - panel.h * 0.1, panel.y + panel.h * 0.1);
+        let click = |app: &mut App, tick: f32, y: f32| {
+            let x = g.x_of(tick);
+            app.paint_velocity(x, y, x, y);
+        };
+        click(&mut app, 10.0, low);
+        let first = vel(&app);
+        assert!(first[0] < 20 && first[1] == 64, "left of the first note: {first:?}");
+        click(&mut app, 160.0, high);
+        let gap = vel(&app);
+        assert!(gap[0] > 100 && gap[1] == 64, "a gap: the note before it: {gap:?}");
+        click(&mut app, 200.0, low);
+        let inside = vel(&app);
+        assert!(inside[0] > 100 && inside[1] < 20, "inside the second note: {inside:?}");
+    }
+
+    /// SONG mode: a click in the piano roll's ruler moves the song position to where that tick of the pattern plays
+    /// (the clip under the current position first, else the next, else the first); the piano roll's playhead maps
+    /// the song position back into the pattern while a clip of it plays. A tick no clip shows keeps the old
+    /// behaviour (the play-start marker).
+    #[test]
+    fn piano_ruler_in_song_mode_seeks_the_song() {
+        use crate::playlist as pl;
+        use os_model::{Clip, ClipSource};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.pattern = 1;
+        app.state.song_mode = true;
+        // Pattern 1 at bar 2 (window 0..384) and at bar 5 showing its second half only (window 192..384).
+        let mut cut = Clip::new(4 * 384, 192, 0, ClipSource::Pattern(1));
+        cut.window = Some((192.0, 384.0));
+        let mut whole = Clip::new(384, 384, 0, ClipSource::Pattern(1));
+        whole.window = Some((0.0, 384.0));
+        pl::arr_mut(&mut app.state).clips = vec![whole, cut];
+        assert_eq!(piano::song_tick_of(&app.state, 96, 0), Some(480), "before both clips: the first that shows it");
+        assert_eq!(piano::song_tick_of(&app.state, 96, 1000), Some(480), "only the first clip shows tick 96");
+        assert_eq!(piano::song_tick_of(&app.state, 240, 1600), Some(1584), "the clip under the position");
+        assert_eq!(piano::song_tick_of(&app.state, 240, 800), Some(1584), "the next clip after the position");
+        assert_eq!(piano::pattern_tick_in_song(&app.state, 1584.0), Some(240.0));
+        assert_eq!(piano::pattern_tick_in_song(&app.state, 1000.0), None, "between the clips");
+        // Stopped: the press moves the song position.
+        assert!(app.piano_song_seek(96, true));
+        assert_eq!(app.state.playlist.pos, 480);
+        // A tick no clip shows: nothing moves.
+        pl::arr_mut(&mut app.state).clips.truncate(1);
+        assert!(!app.piano_song_seek(500, true));
+        assert_eq!(app.state.playlist.pos, 480);
+    }
+
+    /// Shortening a pattern clip that plays its whole pattern cuts it: it gets a window and plays only that.
+    #[test]
+    fn a_resized_pattern_clip_plays_only_its_window() {
+        use crate::playlist as pl;
+        use os_model::{Clip, ClipSource};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        pl::arr_mut(&mut app.state).clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(1))];
+        let i = 0;
+        let orig = pl::clips(&app.state)[i];
+        assert_eq!(orig.window, None, "a new pattern clip plays its whole pattern");
+        pl::resize_right(&mut app.state, i, &orig, 48);
+        let c = pl::clips(&app.state)[i];
+        assert_eq!((c.length, c.window), (48, Some((0.0, 48.0))));
     }
 
     /// Same with right-drag erasing and note moves while playing (needs an audio device).
