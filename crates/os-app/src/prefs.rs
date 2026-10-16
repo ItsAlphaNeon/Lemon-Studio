@@ -73,6 +73,13 @@ pub const POPUPS_SCALING: Combo = Combo {
     default: 0,
 };
 
+/// General ▸ Language: how note names read (`crate::note_names`; FL asks for a restart, Lemon Studio renames at once).
+/// Spec: ui/settings-choices.md "Note names and Black notes".
+pub const NOTE_NAMES: Combo = Combo { key: "note_names", label: "Note names", choices: &["English", "Germanic", "Solfege (do, re, mi, ...)"], default: 0 };
+
+/// General ▸ Language: black keys as sharps of the key below or flats of the key above (`crate::note_names`).
+pub const BLACK_NOTES: Combo = Combo { key: "black_notes", label: "Black notes", choices: &["Sharps - #", "Flats - \u{266d}"], default: 0 };
+
 /// File ▸ Backup: how often the project is backed up (`crate::backup`). Spec: ui/settings-choices.md "Backup files".
 pub const AUTOSAVE: Combo = Combo {
     key: "autosave",
@@ -100,7 +107,7 @@ pub const BACKUP_LOCATION: Combo = Combo {
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &AUTOSAVE, &BACKUP_LOCATION];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION];
 
 /// Tests only: a check that exercises the settings page. An FL service Lemon Studio leaves out (ui/options-coverage.md
 /// §4), so it is never declared for real.
