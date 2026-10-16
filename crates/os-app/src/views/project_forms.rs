@@ -4,7 +4,8 @@
 // This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
 // and not any other part of Lemon Studio.
 
-//! The project's forms (`crate::project_forms`), painted as dialogs in the message boxes' frame: Rename project.
+//! The project's forms (`crate::project_forms`), painted as dialogs in the message boxes' frame: Rename project (Save as
+//! and New project: `views::save_form`).
 // spec: ui/data-folder.md §6
 
 use os_ui::{kit, Font, Rect};
@@ -18,17 +19,18 @@ use crate::project_forms::{FHit, Form, Rename};
 pub fn paint(ui: &mut Ui, s: &State, m: &Modal, f: &Form) {
     match f {
         Form::Rename(f) => rename(ui, s, m, f),
+        Form::Save(f) => super::save_form::paint(ui, s, m, f),
     }
 }
 
 /// A label at (x, y).
-fn label(ui: &mut Ui, x: f32, y: f32, text: &str, enabled: bool) {
+pub(super) fn label(ui: &mut Ui, x: f32, y: f32, text: &str, enabled: bool) {
     let t = ui.t;
     ui.c.text(Font::new(13), x, y, if enabled { t.text } else { t.text_faint }, text);
 }
 
 /// A check at left edge `x`, centred on `cy`: a small box, ticked when `on`, and its label; greyed when not `enabled`.
-fn check(ui: &mut Ui, x: f32, cy: f32, text: &str, on: bool, enabled: bool, h: FHit, hint: &'static str) {
+pub(super) fn check(ui: &mut Ui, x: f32, cy: f32, text: &str, on: bool, enabled: bool, h: FHit, hint: &'static str) {
     let t = ui.t;
     let f = Font::new(13);
     let w = 20.0 + ui.c.text_width(f, text);

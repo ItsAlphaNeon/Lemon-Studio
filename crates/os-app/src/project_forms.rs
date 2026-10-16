@@ -5,8 +5,9 @@
 // and not any other part of Lemon Studio.
 
 //! The project's forms, shown as dialogs (`dialog::Body::Project`): Rename project (Settings ▸ Project ▸ Data folder ▸
-//! Rename). What a form does once answered: `crate::data_folder`. `views::project_forms` paints them.
-// spec: ui/data-folder.md §6
+//! Rename), and the Save as and New project forms (`crate::save_form`). What Rename does once answered:
+//! `crate::data_folder`. `views::project_forms` and `views::save_form` paint them.
+// spec: ui/data-folder.md §6, §7
 
 use winit::keyboard::{Key, NamedKey};
 
@@ -18,17 +19,28 @@ use crate::dialog::{spans, Answer, Body, Field, Kind, Msg, Reply, Then};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Form {
     Rename(Rename),
+    /// Save as or New project.
+    Save(Box<crate::save_form::SaveForm>),
 }
 
 /// The parts of a form that take clicks (`dialog::DHit::Form`); Cancel and the caption's × are the dialog's own.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FHit {
-    /// A text field, by its place in the form (`Rename::FIELDS`).
+    /// A text field, by its place in the form (`Rename::FIELDS`; Save as: the name, then the Information fields).
     Field(u8),
-    /// A check, by its place in the form (`Rename::CHECKS`).
+    /// A check, by its place in the form (`Rename::CHECKS`, `save_form::CHECKS`).
     Check(u8),
-    /// The main button: Rename.
+    /// The main button: Rename, Save or Create.
     Main,
+    /// Save as and New project: Skip, Auto, the folder button, a combo's box (`save_form::SaveForm::list`), an entry of
+    /// the open list, the Information group's fold, and a click anywhere but the open list (it closes).
+    Skip,
+    Auto,
+    Folder,
+    Combo(u8),
+    Item(u8),
+    Fold,
+    Shut,
 }
 
 /// Rename project (spec: ui/data-folder.md §6): the project's name; Rename data folder, with the folder's name; Use
@@ -100,6 +112,9 @@ impl App {
 
     /// A click on a part of the top form; `Some` closes it with that answer.
     pub(crate) fn form_click(&mut self, h: FHit) -> Option<Reply> {
+        if matches!(top(self), Some(Form::Save(_))) {
+            return self.save_form_click(h);
+        }
         let Some(Form::Rename(f)) = top(self) else { return None };
         match h {
             FHit::Field(0) => f.focus = 0,
@@ -117,7 +132,7 @@ impl App {
                     f.focus = 0;
                 }
             }
-            FHit::Check(_) => {}
+            FHit::Check(_) | FHit::Skip | FHit::Auto | FHit::Folder | FHit::Combo(_) | FHit::Item(_) | FHit::Fold | FHit::Shut => {}
             FHit::Main => return self.form_accept(),
         }
         self.invalidate();
@@ -138,6 +153,9 @@ impl App {
 
     /// A key while a form is on top; `Some` closes it with that answer.
     pub(crate) fn form_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> Option<Reply> {
+        if matches!(top(self), Some(Form::Save(_))) {
+            return self.save_form_key(key, ctrl, alt);
+        }
         match key {
             Key::Named(NamedKey::Escape) => return Some(Reply::Button(Answer::Cancel)),
             Key::Named(NamedKey::Enter) => return self.form_accept(),
@@ -159,9 +177,11 @@ impl App {
         None
     }
 
-    /// The top form closed with `reply`: Rename asks for confirmation (spec: ui/data-folder.md §6).
+    /// The top form closed with `reply`: Rename asks for confirmation (spec: ui/data-folder.md §6); Save as and New
+    /// project: `App::save_form_closed`.
     pub(crate) fn form_closed(&mut self, f: Form, reply: Reply) {
         match f {
+            Form::Save(f) => self.save_form_closed(*f, reply),
             Form::Rename(f) => {
                 if reply != Reply::Button(Answer::Ok) {
                     return;

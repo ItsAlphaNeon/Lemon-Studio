@@ -74,6 +74,7 @@ mod presets;
 mod misc;
 mod misc_page;
 mod note_names;
+mod save_form;
 mod scroll_speed;
 mod search_folders;
 mod settings_file;
@@ -1459,6 +1460,8 @@ fn main() {
     // Default template and Startup project").
     if start {
         app.startup_project();
+        // Ask for data folder "On startup": the New project form over it (spec: ui/data-folder.md §7).
+        app.startup_form();
     }
     // MIDI controllers play the selected channel (spec: ui/midi-input.md).
     app.midi = midi_in::MidiIn::open(wake_ui);

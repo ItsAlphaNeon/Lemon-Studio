@@ -1395,8 +1395,17 @@ impl App {
         }
     }
 
-    /// The Save project as dialog, starting in the project's folder with its name.
+    /// Save as: for a project never saved, Lemon Studio's Save as form while Ask for data folder says so (spec:
+    /// ui/data-folder.md §7, `crate::save_form`), else the file dialog.
     fn save_dialog(&mut self, next: Option<crate::dialog::Next>) {
+        if self.state.path.is_none() && crate::save_form::asks_on_save() {
+            return self.open_save_form(next);
+        }
+        self.save_file_dialog(next);
+    }
+
+    /// The Save project as dialog, starting in the project's folder with its name.
+    pub(crate) fn save_file_dialog(&mut self, next: Option<crate::dialog::Next>) {
         use crate::filedlg::{FileDlg, Mode};
         let path = self.state.path.clone();
         let name = path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "Untitled.flp".to_string(), |n| n.to_string_lossy().into_owned());
@@ -1629,7 +1638,10 @@ impl App {
         match n {
             Next::Close => self.want_exit = true,
             Next::Quit => self.quit_answer = Some(true),
-            Next::NewProject => self.new_project(),
+            Next::NewProject => {
+                self.new_project();
+                self.offer_new_form();
+            }
             Next::OpenDialog => self.open_dialog(),
             Next::Open(p) => self.open(p),
         }
@@ -9122,6 +9134,8 @@ mod tests {
         use winit::keyboard::NamedKey;
         let Ok(mut c) = Canvas::new(1280, 800, 1.0) else { return };
         fake::live(true);
+        // Saving a project never saved goes to the file dialog without Lemon Studio's Save as form (`crate::save_form`).
+        crate::prefs::set_choice(&crate::prefs::ASK_DATA_FOLDER, crate::save_form::DONT_ASK);
         let dir = std::env::temp_dir().join(format!("os_dialog_unsaved_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

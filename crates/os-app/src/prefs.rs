@@ -419,7 +419,7 @@ pub const PROJECT_DATA_SIZE_WARNING: Combo = Combo {
     default: 1,
 };
 
-/// Project ▸ Data folder: when Lemon Studio's Save as and New project forms come up (`crate::project_forms`): saving a
+/// Project ▸ Data folder: when Lemon Studio's Save as and New project forms come up (`crate::save_form`): saving a
 /// project never saved, FILE ▸ New, the program's start. A program setting, not the project's. Spec:
 /// ui/data-folder.md §1, §7.
 pub const ASK_DATA_FOLDER: Combo = Combo {

@@ -61,6 +61,8 @@ pub enum DThen {
     Changed(PathBuf),
     /// Rename's confirmation: the project's new name and, with Rename data folder ticked, the folder's.
     Rename { name: String, folder: Option<String> },
+    /// The Save as and New project forms' folder button: the picker of their root folder (`crate::save_form`).
+    FormRoot,
 }
 
 /// What a pick in one of the data folder's menus does (`playlist::Cmd::DataFolder`).
@@ -207,7 +209,7 @@ pub fn adopt(s: &State, path: &str) -> String {
 }
 
 /// Files were made or renamed in the data folder: the browser reads its folders again (`views::browser::list_dir`).
-fn reread(s: &State) {
+pub(crate) fn reread(s: &State) {
     s.browser_dirs.borrow_mut().clear();
 }
 
@@ -241,13 +243,19 @@ impl App {
     /// the copies from now on (Lemon Sampler loads them), which counts as a change of the project. Returns the message.
     pub(crate) fn copy_used_samples(&mut self) -> Option<String> {
         let dir = folder(&self.state)?;
+        Some(self.copy_used_samples_to(&dir))
+    }
+
+    /// Copies every sample the project uses into `<dir>/Samples`, as `copy_used_samples` does for the data folder (the
+    /// Save as and New project forms copy into the folder they make). Returns the message.
+    pub(crate) fn copy_used_samples_to(&mut self, dir: &Path) -> String {
         let (mut copied, mut failed) = (0, 0);
         for row in 0..self.state.project.channels.len() {
             // A hosted Lemon Sampler's own sample is the one it plays; it loads the copy too.
             let hosted = self.plugins.sampler_path(row);
             let listed = self.state.project.channels[row].sample_path.as_deref().filter(|p| !p.is_empty()).map(crate::plugins::resolve_sample);
             let Some(src) = hosted.clone().filter(|p| !p.is_empty()).or(listed) else { continue };
-            match copy_sample(Path::new(&src), &dir) {
+            match copy_sample(Path::new(&src), dir) {
                 Ok(to) => {
                     let to = to.to_string_lossy().into_owned();
                     if hosted.is_some_and(|h| h != to) {
@@ -262,10 +270,10 @@ impl App {
         reread(&self.state);
         self.invalidate();
         let to = dir.join(SAMPLES_DIR);
-        Some(match failed {
+        match failed {
             0 => format!("Copied {copied} samples to {}", to.display()),
             n => format!("Copied {copied} samples to {} ({n} not found or not copied)", to.display()),
-        })
+        }
     }
 
     /// The folder button (or the path beside it): a folder picker, then what to do with the project (spec:
@@ -319,6 +327,8 @@ impl App {
                     self.rename_project(&name, folder.as_deref());
                 }
             }
+            (DThen::FormRoot, Reply::File(Some(dir))) => self.form_root_chosen(dir),
+            (DThen::FormRoot, _) => {}
         }
         self.invalidate();
     }
