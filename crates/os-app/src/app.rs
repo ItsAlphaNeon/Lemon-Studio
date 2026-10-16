@@ -6033,6 +6033,10 @@ impl App {
                 self.ask_time_signature();
                 None
             }
+            crate::patterns::Cmd::OpenInBrowser => {
+                self.browser_jump(crate::browser::Jump::Patterns);
+                None
+            }
             _ => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
                 crate::patterns::run(&mut self.state, cmd, at)
@@ -6150,7 +6154,12 @@ impl App {
 fn pattern_shortcut(key: &winit::keyboard::Key, ctrl: bool, shift: bool) -> Option<crate::patterns::Cmd> {
     use crate::patterns::Cmd;
     use winit::keyboard::{Key, NamedKey};
-    let Key::Named(k) = key else { return None };
+    let k = match key {
+        // spec: ui/browser-commands.md §4
+        Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("p") => return Some(Cmd::OpenInBrowser),
+        Key::Named(k) => k,
+        _ => return None,
+    };
     Some(match (k, ctrl, shift) {
         (NamedKey::F4, false, true) => Cmd::FindFirst,
         (NamedKey::F4, false, false) => Cmd::FindNext,
@@ -11749,6 +11758,65 @@ mod tests {
         for (m, label) in [(VIEW, "Undo history"), (VIEW, "Remote control"), (ADD_MENU, "Browse all installed plugins"), (ADD_MENU, "Browse presets")] {
             assert!(!works(m, item_at(m, index(m, label)).unwrap()), "{label}");
         }
+    }
+
+    /// PATTERNS > Open in project browser (spec: ui/browser-commands.md §4-5): the browser shown on the Current project
+    /// tab with Patterns opened and the current pattern's row selected (the section itself when the pattern is not
+    /// listed); other open sections stay open. Shift+Ctrl+P and the picker's pattern menu do the same.
+    #[test]
+    fn open_pattern_in_project_browser() {
+        use crate::playlist::{self as pl, Cmd};
+        use crate::views::browser::{project_root, rows, section_key, Item, PROJECT_TAB};
+        use views::menus::{item_at, works, MENUS, PATTERNS};
+        use winit::keyboard::Key;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.patterns.push(os_model::Pattern { number: 2, name: Some("Drums".into()), ..Default::default() });
+        app.state.pattern = 2;
+        let (pats, fx) = (section_key("Patterns").unwrap(), section_key("Effects").unwrap());
+        let reset = |app: &mut App| {
+            let s = &mut app.state;
+            s.show_browser = false;
+            s.browser_tab = 0;
+            s.browser_search = "kick".into();
+            s.browser_sel = None;
+            s.browser_open.remove(&pats);
+            s.browser_open.remove(&project_root());
+            s.browser_open.insert(fx.clone());
+        };
+        let entry = MENUS[PATTERNS].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == "Open in project browser").unwrap();
+        assert!(works(PATTERNS, item_at(PATTERNS, entry).unwrap()));
+        let check = |app: &App, want: &str| {
+            let s = &app.state;
+            assert!(s.show_browser && s.browser_tab == PROJECT_TAB && s.browser_search.is_empty());
+            assert!(s.browser_open.contains(&project_root()) && s.browser_open.contains(&pats) && s.browser_open.contains(&fx));
+            assert_eq!(s.browser_sel.as_deref(), Some(want));
+        };
+        let drums = |app: &App| rows(&app.state).into_iter().find(|r| r.item == Item::Pattern(2)).map(|r| r.key);
+        reset(&mut app);
+        app.menu_item(PATTERNS, entry);
+        let drums = drums(&app).expect("pattern 2 listed");
+        check(&app, &drums);
+        // A pattern the section does not list: the section is selected.
+        reset(&mut app);
+        app.state.pattern = 7;
+        app.menu_item(PATTERNS, entry);
+        check(&app, &pats);
+        // Shift+Ctrl+P (the playlist in front keeps it for Performance mode, ui/playlist.md).
+        app.state.pattern = 2;
+        reset(&mut app);
+        app.state.z.retain(|&w| w != Win::Playlist);
+        app.shift = true;
+        app.key(&Key::Character("P".into()), true, false);
+        app.shift = false;
+        check(&app, &drums);
+        // The picker's pattern menu.
+        let popup = views::menus::pattern_popup(0.0, 0.0);
+        let item = popup.items.iter().find(|i| i.label == "Open in project browser").expect("in the pattern menu");
+        assert!(item.enabled && item.cmd == Cmd::Pattern(crate::patterns::Cmd::OpenInBrowser));
+        reset(&mut app);
+        pl::run(&mut app, Cmd::Pattern(crate::patterns::Cmd::OpenInBrowser));
+        check(&app, &drums);
     }
 
     /// TOOLS / the channel rack's options > Switch all / selected audio clip channels to ▸ (spec: ui/channel-switches.md

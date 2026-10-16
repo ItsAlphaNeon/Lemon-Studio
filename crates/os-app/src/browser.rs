@@ -149,6 +149,21 @@ impl App {
             Jump::Find => {
                 self.browser_act(&Action::BrowserSearch);
             }
+            // §4-5: Patterns opened, the current pattern's row selected when listed (else the section's).
+            Jump::Patterns => {
+                let Some(key) = view::section_key("Patterns") else { return };
+                if s.browser_tab != view::PROJECT_TAB {
+                    s.browser_tab = view::PROJECT_TAB;
+                    s.browser_scroll = 0.0;
+                }
+                s.browser_search.clear();
+                s.browser_open.insert(view::project_root());
+                s.browser_open.insert(key.clone());
+                let cur = view::Item::Pattern(s.pattern);
+                let row = view::rows(s).into_iter().find(|r| r.item == cur).map(|r| r.key);
+                select(s, row.as_ref().unwrap_or(&key));
+                reveal(s);
+            }
         }
         self.invalidate();
     }
@@ -404,6 +419,8 @@ pub enum Jump {
     PluginDb,
     /// TOOLS > Browser find... (Ctrl+F): the keyboard goes to the search field (§3).
     Find,
+    /// PATTERNS > Open in project browser (Shift+Ctrl+P): the Patterns section, the other sections left as they are (§4).
+    Patterns,
 }
 
 impl Jump {

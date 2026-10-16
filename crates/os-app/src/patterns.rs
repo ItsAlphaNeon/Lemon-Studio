@@ -47,6 +47,9 @@ pub enum Cmd {
     MoveDown,
     /// Set time signature...: a dialog, run by `App::pattern_cmd` (spec: ui/pattern-time-signature.md).
     TimeSignature,
+    /// Open in project browser: the browser's Patterns section, run by `App::pattern_cmd`
+    /// (spec: ui/browser-commands.md §4).
+    OpenInBrowser,
 }
 
 impl Cmd {
@@ -67,6 +70,7 @@ impl Cmd {
             "Move up" => Cmd::MoveUp,
             "Move down" => Cmd::MoveDown,
             "Set time signature..." => Cmd::TimeSignature,
+            "Open in project browser" => Cmd::OpenInBrowser,
             _ => return None,
         })
     }
@@ -339,8 +343,8 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
             s.pattern = cur + 1;
         }
         Cmd::MoveUp | Cmd::MoveDown => {}
-        // Opens dialogs: `App::pattern_cmd` runs it.
-        Cmd::TimeSignature => {}
+        // Dialogs and the browser: `App::pattern_cmd` runs them.
+        Cmd::TimeSignature | Cmd::OpenInBrowser => {}
     }
     None
 }
