@@ -24,6 +24,9 @@ pub const DEFAULT_SIZE: (f32, f32) = (499.0 + rk::NAME_W - rk::FL_NAME_W, 246.0)
 pub const MIN_H: f32 = 96.0 + ROW_H;
 /// Space above the first row and below the last one inside the rows panel.
 const PAD: f32 = 18.0;
+/// The Classic name button's face: the channel colour mixed this far toward the theme's neutral face (`clip_colors`
+/// stores new clip channels' colours through it).
+pub const NAME_MIX: f32 = 0.35;
 /// Graph editor panel height (§14), its tab row included.
 pub const GRAPH_H: f32 = 240.0;
 const GRAPH_TABS_H: f32 = 20.0;
@@ -353,7 +356,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         }
         // Name button (§13): the channel colour fills the face.
         let nhov = ui.hit(nb, Action::ChannelSelect(i), "Click: plugin window, Shift+click: rename, right-click: channel menu");
-        let base = ch.color.map_or(t.name_button, |col| rgb(col).mix(t.name_button, 0.35));
+        let base = ch.color.map_or(t.name_button, |col| rgb(col).mix(t.name_button, NAME_MIX));
         let face = if focused { base.shade(0.18).mix(t.name_button_sel, 0.5) } else { base };
         let face = if nhov { face.shade(0.06) } else { face };
         let col = if lemon {
