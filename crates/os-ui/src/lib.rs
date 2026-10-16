@@ -97,6 +97,12 @@ pub struct Canvas {
     drawn: Option<(i32, i32, i32, i32)>,
 }
 
+/// The scale and clips `Canvas::rescale` replaced, for `Canvas::unscale`.
+pub struct Rescaled {
+    scale: f32,
+    clips: Vec<Rect>,
+}
+
 /// Coverage (0..=255) of a shape, `w` x `h` device pixels.
 struct Coverage {
     w: i32,
@@ -169,6 +175,24 @@ impl Canvas {
         self.scale = scale;
         self.clips.clear();
         self.region.clear();
+    }
+
+    /// Paints at `scale` from here until `unscale`: a part of the frame scaled apart from the rest (popup menus, spec:
+    /// ui/ui-scaling.md §1). Logical px become `scale` device px; the clips keep their device bounds.
+    pub fn rescale(&mut self, scale: f32) -> Rescaled {
+        let old = Rescaled { scale: self.scale, clips: self.clips.clone() };
+        let k = self.scale / scale;
+        for c in &mut self.clips {
+            *c = Rect::new(c.x * k, c.y * k, c.w * k, c.h * k);
+        }
+        self.scale = scale;
+        old
+    }
+
+    /// Back to the scale and clips `rescale` replaced.
+    pub fn unscale(&mut self, old: Rescaled) {
+        self.scale = old.scale;
+        self.clips = old.clips;
     }
 
     /// Logical size.
@@ -1334,6 +1358,20 @@ mod tests {
         assert_eq!(out[2 * 9 + 4], 0xfedcba);
         assert_eq!(out[2 * 9 + 2], 0, "left of the copied region");
         assert_eq!(out[0], 0);
+    }
+
+    /// `rescale` paints at another scale inside the same clip (device bounds); `unscale` comes back.
+    #[test]
+    fn rescale_paints_at_another_scale() {
+        let Ok(mut c) = Canvas::new(20, 10, 1.0) else { return };
+        let px = |c: &Canvas, x: usize, y: usize| c.pixmap.data()[(y * 20 + x) * 4];
+        c.push_clip(Rect::new(0.0, 0.0, 6.0, 10.0));
+        let old = c.rescale(2.0);
+        assert_eq!((c.size(), c.clip_rect()), ((10.0, 5.0), Rect::new(0.0, 0.0, 3.0, 5.0)));
+        c.fill_rect(Rect::new(1.0, 1.0, 4.0, 1.0), Color::rgb(0xff0000));
+        c.unscale(old);
+        assert_eq!((c.scale, c.clip_rect()), (1.0, Rect::new(0.0, 0.0, 6.0, 10.0)));
+        assert_eq!([px(&c, 2, 2), px(&c, 5, 3), px(&c, 6, 2), px(&c, 1, 2), px(&c, 2, 4)], [255, 255, 0, 0, 0], "device 2..6 x 2..4, cut at 6");
     }
 
     /// `shift` moves the pixels of its area by whole device pixels in any direction (overlapping copies included),

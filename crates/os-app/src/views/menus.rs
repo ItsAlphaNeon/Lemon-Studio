@@ -462,7 +462,9 @@ fn row_h(m: &os_ui::kit::menu::Metrics, it: &Item) -> f32 {
     }
 }
 
-pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
+/// Paints menu `menu`'s dropdown under its title. `k`: the canvas is at the Pop-ups scaling, a window position `x` is
+/// `x / k` (see `Ui::scaled`).
+pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
     let Some(m) = MENUS.get(menu) else { return };
     let x0 = bar_layout(ui.c)[menu].0;
     let t = ui.t;
@@ -491,7 +493,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
         (true, Some(at)) => at,
         _ => (x0 - 4.0, 78.0),
     };
-    let r = Rect::new(ax.min(s.screen.0 - width).max(0.0), ay, width, body_h + border * 2.0);
+    let r = Rect::new((ax / k).min(s.screen.0 / k - width).max(0.0), ay / k, width, body_h + border * 2.0);
     let away = !r.contains(ui.mouse.0, ui.mouse.1);
     // Lemon (spec: ui/lemon-design.md §9): a rounded panel, rounded row highlights.
     let lemon = super::lemon(ui);

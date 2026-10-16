@@ -1104,13 +1104,16 @@ fn tool_face(ui: &mut Ui, b: Rect, on: bool, hov: bool) -> Color {
 /// The open playlist popup menu and its submenu, and the inline text box (drawn above everything).
 pub fn paint_overlays(ui: &mut Ui, s: &State) {
     if let Some(p) = &s.playlist.popup {
-        let (w, h) = ui.c.size();
-        let (_, rows) = popup_list(ui, &p.items, p.x, p.y, (w, h), p.sub, false);
-        if let Some(i) = p.sub {
-            if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
-                popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true);
+        // At the Pop-ups scaling (spec: ui/ui-scaling.md §1).
+        ui.scaled(super::popup_scale(ui.c.scale), |ui, k| {
+            let (w, h) = ui.c.size();
+            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, false);
+            if let Some(i) = p.sub {
+                if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
+                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true);
+                }
             }
-        }
+        });
     }
     if let Some(e) = &s.playlist.edit
         && let pl::EditTarget::TypeIn(t, norm) = e.target

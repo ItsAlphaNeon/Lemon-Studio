@@ -64,10 +64,43 @@ pub const MAIN_GUI_SCALING: Combo = Combo {
     default: 0,
 };
 
+/// General ▸ Display: the scale of popup menus and combo lists. Main = the main GUI's; a percentage replaces it. Read
+/// by `views::popup_scale` at every paint, so it applies at once (FL needs a restart). Spec: ui/ui-scaling.md §1–2.
+pub const POPUPS_SCALING: Combo = Combo {
+    key: "popups_scaling",
+    label: "Pop-ups scaling",
+    choices: &["Main", "100%", "125%", "150%", "175%", "200%", "250%", "300%", "350%", "400%"],
+    default: 0,
+};
+
+/// File ▸ Backup: how often the project is backed up (`crate::backup`). Spec: ui/settings-choices.md "Backup files".
+pub const AUTOSAVE: Combo = Combo {
+    key: "autosave",
+    label: "Autosave",
+    choices: &[
+        "Never (just remind every 10 minutes)",
+        "Rarely (every 15 minutes)",
+        "Occasionally (every 10 minutes)",
+        "Regularly (every 5 minutes)",
+        "Frequently (every 5 minutes & before risky operations)",
+        "Very frequently (every minute & before risky operations)",
+    ],
+    default: 2,
+};
+
+/// File ▸ Backup: where backups go. Both write to the global folder until Lemon Studio has project data folders
+/// (`crate::backup`). Spec: ui/settings-choices.md "Backup files".
+pub const BACKUP_LOCATION: Combo = Combo {
+    key: "backup_location",
+    label: "Location",
+    choices: &["Always save to the global folder", "Save to the project data folder if there is one"],
+    default: 1,
+};
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &AUTOSAVE, &BACKUP_LOCATION];
 
 /// Tests only: a check that exercises the settings page. An FL service Lemon Studio leaves out (ui/options-coverage.md
 /// §4), so it is never declared for real.
@@ -289,7 +322,7 @@ mod tests {
         assert_eq!(choice(&MAIN_GUI_SCALING), "125%");
         assert_eq!(find_combo("Main GUI scaling"), Some(&MAIN_GUI_SCALING));
         assert_eq!(find_check("Automatically check for updates"), Some(&TEST_CHECK));
-        assert_eq!((find_check("Main GUI scaling"), find_combo("Pop-ups scaling"), find_check("")), (None, None, None));
+        assert_eq!((find_check("Main GUI scaling"), find_combo("Toolbars scaling"), find_check("")), (None, None, None));
     }
 
     /// Every declaration has its own key and label, a default among its choices, and a control of its kind with that
@@ -357,11 +390,11 @@ mod tests {
         let mut app = App::new(None);
         app.open_settings(settings::GENERAL);
         app.paint(&mut c, None);
-        // Main GUI scaling opens its list under its box, System marked; Pop-ups scaling is not available yet.
+        // Main GUI scaling opens its list under its box, System marked; Toolbars scaling is not available yet.
         let combo = |app: &App| {
             app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == MAIN_GUI_SCALING.label)).map(|h| h.rect).expect("the combo works")
         };
-        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Pop-ups scaling")));
+        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Toolbars scaling")));
         let r = combo(&app);
         click(&mut app, &mut c, r);
         let p = app.state.playlist.popup.as_ref().expect("its menu");
@@ -394,5 +427,42 @@ mod tests {
         // Its neighbours are not declared: greyed out.
         assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Send usage data")));
         assert!(!app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check("Send usage data"))));
+    }
+
+    /// Pop-ups scaling: menus and combo lists are painted at its scale, rows as ui-scaling.md §2 has them, from where they
+    /// were opened; clicks find their entries. Main follows the window.
+    #[test]
+    fn pop_ups_scaling_scales_menus() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::GENERAL);
+        app.paint(&mut c, None);
+        let combo = |app: &App| {
+            app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == POPUPS_SCALING.label)).map(|h| h.rect).expect("the combo works")
+        };
+        let r = combo(&app);
+        click(&mut app, &mut c, r);
+        let main = hit_rect(&app, &Action::PlPopup(1));
+        assert_eq!(main.h, 19.0, "Main at 100 %");
+        let item = hit_rect(&app, &Action::PlPopup(5));
+        click(&mut app, &mut c, item);
+        assert_eq!((choice(&POPUPS_SCALING), app.state.message.as_deref()), ("200%", Some("Pop-ups scaling: 200%")));
+        // At 200 % on a 100 % window: item rows 12k + 7 = 31 px, the panel's border 2 px, text twice as wide.
+        let r = combo(&app);
+        click(&mut app, &mut c, r);
+        let p = app.state.playlist.popup.as_ref().expect("its menu");
+        let (px, py) = (p.x, p.y);
+        let (first, big) = (hit_rect(&app, &Action::PlPopup(0)), hit_rect(&app, &Action::PlPopup(1)));
+        assert_eq!((big.h, first.y - py, first.x - px), (31.0, 2.0, 2.0));
+        assert!((1.8..2.2).contains(&(big.w / main.w)), "{} -> {}", main.w, big.w);
+        click(&mut app, &mut c, first);
+        assert_eq!(choice(&POPUPS_SCALING), "Main", "the click finds the scaled entry");
+        // Menu bar dropdowns too.
+        set_choice(&POPUPS_SCALING, 3);
+        app.state.settings.open = false;
+        app.state.menu_open = Some(0);
+        app.paint(&mut c, None);
+        let save = app.hits.iter().rev().find(|h| h.action == crate::views::menus::pick(0, crate::views::menus::FILE_SAVE)).map(|h| h.rect).expect("FILE > Save");
+        assert_eq!(save.h, 25.0, "150 %: 12k + 7");
     }
 }
