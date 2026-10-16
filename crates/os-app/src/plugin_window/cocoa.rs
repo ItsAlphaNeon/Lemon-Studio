@@ -220,9 +220,11 @@ define_class!(
         }
 
         #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, _e: &NSEvent) {
+        fn mouse_up(&self, e: &NSEvent) {
             if let Some(f) = self.ivars().upgrade() {
-                f.state.borrow_mut().release();
+                let (x, y) = f.local(e);
+                let r = f.state.borrow_mut().left_up(x, y);
+                f.reply(r);
             }
         }
 
