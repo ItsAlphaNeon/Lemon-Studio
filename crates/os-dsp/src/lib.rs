@@ -14,6 +14,7 @@
 //! - [`stretch`]: time stretching and pitch shifting (Signalsmith Stretch).
 //! - [`articulator`]: a channel's envelopes and LFOs, stepped once per tick for every voice.
 //! - [`channel_filter`]: the channel filter a voice runs through.
+//! - [`tone`]: the spectral make-up of a sound's stretches, for colourful waveforms.
 //!
 // spec: audio/conventions.md, audio/mixer.md, audio/sampler.md, audio/time-stretch.md, audio/envelopes-and-lfos.md,
 // audio/channel-filter.md
@@ -25,3 +26,4 @@ pub mod level;
 pub mod mixer;
 pub mod resample;
 pub mod stretch;
+pub mod tone;

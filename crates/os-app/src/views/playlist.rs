@@ -9,6 +9,7 @@
 
 use os_model::{AutoMode, Clip, ClipSource, TimeMarker};
 use os_ui::kit::lemon as lk;
+use os_theme::waves::Waves;
 use os_ui::{Color, Font, Rect};
 
 use super::{resize_zones, rgb, window_body, FrameInfo};
@@ -734,7 +735,9 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
                 // The channel colour lifted by 80 (§2); without one the measured default.
                 let wave = tint.map_or(cc(t, WAVE), |c| offset(c, 80));
                 let col = if c.muted { content } else { dim(wave) };
-                waveform(ui, s, g, c, ch, body_at, col);
+                // Colorful waveforms colour a clip that plays; a muted one keeps its grey.
+                let waves = (!c.muted).then(|| crate::waves::current(t));
+                waveform(ui, s, g, c, ch, body_at, col, waves.as_ref().map(|w| (w, &dim as &dyn Fn(Color) -> Color)));
                 if !c.muted {
                     fades(ui, s, g, i, c, body_at, dim(wave));
                 }
@@ -796,8 +799,10 @@ fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body
 }
 
 /// The clip's part of the sample: every device-pixel column spans the minimum to the maximum of its samples, times
-/// the clip's fades and gain, filled as one anti-aliased shape (§2, §9a).
-fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, col: Color) {
+/// the clip's fades and gain, filled as one anti-aliased shape (§2, §9a). With `colours` (the colourful waveforms
+/// setting, and how the clip dims its colours) each column takes the colour of the frames behind it.
+#[allow(clippy::too_many_arguments)]
+fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, col: Color, colours: Option<(&Waves, &dyn Fn(Color) -> Color)>) {
     let Some(path) = s.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
     let Some(w) = s.playlist.wave(&path) else { return };
     let Some(area) = ui.c.paint_bounds() else { return };
@@ -881,7 +886,20 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     bottom.push((x, yb));
     let mut outline = top;
     outline.extend(bottom.into_iter().rev());
-    ui.c.fill_polygon(&outline, col);
+    // Colorful waveforms (spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"): the same shape,
+    // each device-pixel column in the colour of the frames it shows; silence keeps the plain colour.
+    let tones = colours.filter(|(w, _)| w.on()).and_then(|_| s.playlist.tones(&path));
+    match (colours, tones) {
+        (Some((waves, dim)), Some(tones)) => {
+            let frames = |d: f64| (w0 + d / ppt * ms_per_tick) * frames_per_ms;
+            ui.c.fill_polygon_columns(&outline, &mut |x| {
+                let d = ((f64::from(x) - body.x) / px).floor() * px;
+                let t = tones.span(frames(d), frames(d + px));
+                waves.colour(t.centroid(), t.band_powers()).map_or(col, dim)
+            });
+        }
+        _ => ui.c.fill_polygon(&outline, col),
+    }
 }
 
 /// An audio clip's fade curves, and its handles while the mouse is over it (§9a): fade triangles at the top
