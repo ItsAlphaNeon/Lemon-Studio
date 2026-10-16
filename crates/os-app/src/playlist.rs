@@ -318,6 +318,8 @@ pub enum Cmd {
     Pattern(crate::patterns::Cmd),
     /// The time display's mode: minute:second:centisecond (true) or bar:step:tick.
     ClockMsc(bool),
+    /// A settings page combo declared in `crate::prefs`: that entry of its choices.
+    Pref(&'static crate::prefs::Combo, usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3006,6 +3008,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             return None;
         }
         Cmd::Cpu(c) => return app.cpu_cmd(c),
+        Cmd::Pref(c, i) => return app.pref_choose(c, i),
         Cmd::MetronomeSound(sound) => {
             crate::metronome::set_sound(sound);
             app.invalidate();
@@ -3448,6 +3451,8 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             s.piano.dirty = true;
             None
         }
+        // Run above.
+        Cmd::Pref(..) => None,
     };
     app.invalidate();
     msg

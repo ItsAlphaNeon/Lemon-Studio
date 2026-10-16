@@ -899,8 +899,9 @@ impl Plugins {
                         FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
                         FrameEvent::NotAvailable(name) => Request::NotAvailable(name),
                         FrameEvent::Dpi(k) => {
+                            // A Main GUI scaling percentage replaces the monitor's scale (spec: ui/ui-scaling.md §1).
                             #[cfg(any(windows, target_os = "macos"))]
-                            rescale.push((row, k));
+                            rescale.push((row, crate::gui_scale(f64::from(k)) as f32));
                             #[cfg(not(any(windows, target_os = "macos")))]
                             let _ = k;
                             continue;

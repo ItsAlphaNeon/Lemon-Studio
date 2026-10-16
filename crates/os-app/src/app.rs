@@ -3243,6 +3243,8 @@ impl App {
         match a {
             SAct::Body => {}
             SAct::Close => st.open = false,
+            // The program settings declared in `crate::prefs`.
+            SAct::Combo(label, x, y) if crate::prefs::find_combo(label).is_some() => return self.pref_menu(label, x, y),
             SAct::Combo(label, x, y) => return self.audio_menu(label, x, y),
             SAct::Tab(i) => {
                 st.tab = i;
@@ -3275,6 +3277,7 @@ impl App {
             // The plugin manager (spec: ui/plugin-manager.md §2).
             SAct::Check(k) if views::settings::plugin_check(k) => self.plugin_check(k),
             SAct::Plug(p) => self.plugin_act(p),
+            SAct::Check(k) if crate::prefs::find_check(k).is_some() => self.pref_toggle(k),
             // Checks and buttons outside `settings::LIVE` are drawn greyed out with an `Action::Placeholder` hit instead.
             SAct::Check(k) => self.state.message = Some(off_text(k)),
             SAct::Group(k) => {

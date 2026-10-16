@@ -53,6 +53,7 @@ mod plugin_scan;
 #[cfg(plugin_windows)]
 mod plugin_window;
 mod plugins;
+mod prefs;
 mod project_plugins;
 mod presets;
 mod misc;
@@ -273,11 +274,24 @@ const BORDER: (f32, f32, f32, f32) = (6.0, 2.0, 6.0, 6.0);
 const TOP_GRIP: f32 = 4.0;
 const CORNER: f32 = 14.0;
 
+/// The UI's scale (device pixels per logical one) on a monitor whose own is `system`: Settings > General > Display >
+/// Main GUI scaling keeps it (System) or replaces it with a percentage (spec: ui/ui-scaling.md §1).
+pub(crate) fn gui_scale(system: f64) -> f64 {
+    let pct = prefs::choice(&prefs::MAIN_GUI_SCALING).strip_suffix('%').and_then(|p| p.parse::<f64>().ok());
+    pct.map_or(system, |p| p / 100.0)
+}
+
+/// The main window's UI scale: its monitor's, or the one chosen (`gui_scale`). Read at every event and paint, so a new
+/// choice applies at once, as a change of the monitor's scale does.
+fn ui_scale(window: &Window) -> f64 {
+    gui_scale(window.scale_factor())
+}
+
 fn insets(window: &Window) -> (u32, u32, u32, u32) {
     if is_maximized(window) || window.fullscreen().is_some() {
         return (0, 0, 0, 0);
     }
-    let k = window.scale_factor() as f32;
+    let k = ui_scale(window) as f32;
     let d = |v: f32| (v * k).round() as u32;
     (d(BORDER.0), d(BORDER.1), d(BORDER.2), d(BORDER.3))
 }
@@ -359,7 +373,7 @@ impl Shell {
         }
         let size = window.inner_size();
         let (w, h) = (f64::from(size.width), f64::from(size.height));
-        let k = window.scale_factor();
+        let k = ui_scale(window);
         let (l, r, b) = (f64::from(self.inset.0), f64::from(self.inset.2), f64::from(self.inset.3));
         let t = f64::from(TOP_GRIP) * k;
         let c = f64::from(CORNER) * k;
@@ -397,7 +411,7 @@ impl Shell {
 
     /// Logical app coordinates of a physical window position (the canvas sits inside the border).
     fn to_app(&self, window: &Window, x: f64, y: f64) -> (f32, f32) {
-        let k = window.scale_factor();
+        let k = ui_scale(window);
         (((x - f64::from(self.inset.0)) / k) as f32, ((y - f64::from(self.inset.1)) / k) as f32)
     }
 
@@ -553,7 +567,7 @@ impl ApplicationHandler for Shell {
         }
         #[cfg(target_os = "macos")]
         menu_bar::install();
-        self.app.plugins.scale = window.scale_factor() as f32;
+        self.app.plugins.scale = ui_scale(&window) as f32;
         // Built-in and cached plugins at once, then a background scan (spec: ui/plugin-manager.md §4).
         self.app.start_plugins();
         self.window = Some(window);
@@ -587,7 +601,7 @@ impl ApplicationHandler for Shell {
     /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor.
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         let (DeviceEvent::MouseMotion { delta }, Some((anchor, virt)), Some(window)) = (event, self.lock, self.window.clone()) else { return };
-        let scale = window.scale_factor();
+        let scale = ui_scale(&window);
         let v = (virt.0 + (delta.0 / scale) as f32, virt.1 + (delta.1 / scale) as f32);
         self.lock = Some((anchor, v));
         self.app.mouse_move(v.0, v.1);
@@ -599,7 +613,7 @@ impl ApplicationHandler for Shell {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(window) = self.window.clone() else { return };
-        let scale = window.scale_factor() as f32;
+        let scale = ui_scale(&window) as f32;
         // A project is loading (spec: ui/project-loading.md §2): presses, wheel turns and drops wait until it is done;
         // releases still go through so nothing stays held.
         let press = match &event {
@@ -835,7 +849,7 @@ impl ApplicationHandler for Shell {
             // Windows display scale changed, or the window moved to a monitor with another DPI: the canvas follows at
             // the next paint; docked plugin windows are redrawn at the new scale (spec: ui/ui-scaling.md §3).
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.app.plugins.set_scale(scale_factor as f32);
+                self.app.plugins.set_scale(gui_scale(scale_factor) as f32);
                 self.inset = insets(&window);
                 self.app.invalidate();
                 window.request_redraw();
@@ -872,6 +886,8 @@ impl ApplicationHandler for Shell {
                 if canvas.pixmap.width() != cw || canvas.pixmap.height() != ch || canvas.scale != scale {
                     canvas.resize(cw, ch, scale);
                     self.app.invalidate();
+                    // Main GUI scaling changed: docked plugin windows follow (spec: ui/ui-scaling.md §3).
+                    self.app.plugins.set_scale(scale);
                 }
                 // The window may have reached a monitor with another refresh rate.
                 let monitor = window.current_monitor();
@@ -1441,5 +1457,19 @@ mod tests {
         assert_eq!(frame_interval(Some(1_000_000)), IDLE);
         assert_eq!(frame_interval(None), FRAME);
         assert_eq!(frame_interval(Some(0)), FRAME);
+    }
+
+    /// Main GUI scaling (spec: ui/ui-scaling.md §1): System keeps the monitor's scale, a percentage replaces it.
+    #[test]
+    fn main_gui_scaling_replaces_the_monitor_scale() {
+        let choices = prefs::MAIN_GUI_SCALING.choices;
+        let mut got = Vec::new();
+        for i in 0..choices.len() {
+            prefs::set_choice(&prefs::MAIN_GUI_SCALING, i);
+            got.push(gui_scale(1.5));
+        }
+        assert_eq!(got, [1.5, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0]);
+        prefs::set_choice(&prefs::MAIN_GUI_SCALING, 0);
+        assert_eq!(gui_scale(1.25), 1.25);
     }
 }

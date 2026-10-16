@@ -1,0 +1,398 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
+//! Program settings of the settings window, declared once below: checks and combos kept together in the user folder
+//! (`settings.txt`, `key=value` lines; lines it does not know are kept, a missing or unreadable value is the default),
+//! never in the project. The settings page draws a declared control live: a check toggles on a click; a combo shows its
+//! choice and opens the list of its choices, the current one radio-marked. A change is kept at once. Undeclared
+//! controls (without a module of their own) stay greyed out.
+//!
+//! Making a greyed-out check or combo of the settings window work:
+//! 1. Declare it: a `pub const` [`Check`] or [`Combo`] whose `label` is the control's label in
+//!    `views::settings::page` (the page finds it by it) and whose `key` names it in the file (stable: a later change of
+//!    label keeps what users chose); then list it in [`CHECKS`] or [`COMBOS`].
+//!    ```ignore
+//!    /// General ▸ Miscellaneous (spec: ui/...): what it does.
+//!    pub const AUTO_NAME_CHANNELS: Check = Check { key: "auto_name_channels", label: "Auto name channels", default: true };
+//!    ```
+//! 2. Read it where its behaviour lives: `prefs::check(&prefs::AUTO_NAME_CHANNELS)` is the check's state;
+//!    `prefs::choice(&prefs::MAIN_GUI_SCALING)` is the chosen entry's text (`prefs::index` its position).
+//!
+//! That is all: a value is read when it is needed, so a change counts from the next read (a setting that must also act
+//! the moment it changes adds that to `App::pref_toggle` / `App::pref_choose`). Settings with a module and file of
+//! their own (audio, auto scrolling, metronome, snap, enable groups, animations, the plugin manager's) and combos whose
+//! choices are found at run time (output devices) are not declared here.
+// spec: ui/settings.md, ui/options-coverage.md
+
+use std::sync::{Mutex, OnceLock}; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+
+use crate::app::App;
+
+/// A check (LED) on a settings page.
+#[derive(Debug, PartialEq)]
+pub struct Check {
+    /// Its name in `settings.txt`.
+    pub key: &'static str,
+    /// The label its page shows; unique among the declared settings.
+    pub label: &'static str,
+    pub default: bool,
+}
+
+/// A combo on a settings page: the box shows the current choice, its menu lists them all.
+#[derive(Debug, PartialEq)]
+pub struct Combo {
+    /// Its name in `settings.txt`.
+    pub key: &'static str,
+    /// The label its page shows; unique among the declared settings.
+    pub label: &'static str,
+    /// As the box and the menu show them; the file keeps the chosen one's text.
+    pub choices: &'static [&'static str],
+    /// Index in `choices`.
+    pub default: usize,
+}
+
+/// General ▸ Display: the UI's scale. System = the monitor's (the operating system's); a percentage replaces it.
+/// Read by `crate::gui_scale` at every event and paint, so it applies at once (FL needs a restart). Spec:
+/// ui/ui-scaling.md §1.
+pub const MAIN_GUI_SCALING: Combo = Combo {
+    key: "main_gui_scaling",
+    label: "Main GUI scaling",
+    choices: &["System", "100%", "125%", "150%", "175%", "200%", "250%", "300%", "350%", "400%"],
+    default: 0,
+};
+
+/// The declared checks.
+pub const CHECKS: &[&Check] = &[];
+/// The declared combos.
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING];
+
+/// Tests only: a check that exercises the settings page. An FL service Lemon Studio leaves out (ui/options-coverage.md
+/// §4), so it is never declared for real.
+#[cfg(test)]
+pub const TEST_CHECK: Check = Check { key: "test_check", label: "Automatically check for updates", default: true };
+
+fn checks() -> impl Iterator<Item = &'static Check> {
+    #[cfg(test)]
+    let more: &[&Check] = &[&TEST_CHECK];
+    #[cfg(not(test))]
+    let more: &[&Check] = &[];
+    CHECKS.iter().chain(more).copied()
+}
+
+/// The declared check its page labels `label`.
+pub fn find_check(label: &str) -> Option<&'static Check> {
+    checks().find(|c| c.label == label)
+}
+
+/// The declared combo its page labels `label`.
+pub fn find_combo(label: &str) -> Option<&'static Combo> {
+    COMBOS.iter().copied().find(|c| c.label == label)
+}
+
+/// Whether check `c` is on.
+pub fn check(c: &Check) -> bool {
+    read(|s| check_in(s, c))
+}
+
+/// Turns check `c` on or off and keeps it.
+pub fn set_check(c: &Check, on: bool) {
+    write(c.key, if on { "1" } else { "0" });
+}
+
+/// Toggles check `c` and keeps it; returns the new state.
+pub fn toggle(c: &Check) -> bool {
+    let on = !check(c);
+    set_check(c, on);
+    on
+}
+
+/// The position of combo `c`'s choice in its `choices`.
+pub fn index(c: &Combo) -> usize {
+    read(|s| index_in(s, c))
+}
+
+/// The text of combo `c`'s choice.
+pub fn choice(c: &Combo) -> &'static str {
+    c.choices[index(c)]
+}
+
+/// Chooses entry `i` of combo `c` and keeps it (an index past its choices changes nothing).
+pub fn set_choice(c: &Combo, i: usize) {
+    if let Some(v) = c.choices.get(i) {
+        write(c.key, v);
+    }
+}
+
+fn check_in(s: &Store, c: &Check) -> bool {
+    match s.get(c.key) {
+        Some("1") => true,
+        Some("0") => false,
+        _ => c.default,
+    }
+}
+
+fn index_in(s: &Store, c: &Combo) -> usize {
+    s.get(c.key).and_then(|v| c.choices.iter().position(|ch| *ch == v)).unwrap_or(c.default)
+}
+
+/// The file's lines as read: lines of keys this version does not know are written back as they were.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Store {
+    lines: Vec<String>,
+}
+
+impl Store {
+    fn parse(text: &str) -> Store {
+        Store { lines: text.lines().map(String::from).collect() }
+    }
+
+    fn text(&self) -> String {
+        self.lines.iter().map(|l| format!("{l}\n")).collect()
+    }
+
+    /// The value of `key`: its last line's.
+    fn get(&self, key: &str) -> Option<&str> {
+        self.lines.iter().rev().filter_map(|l| l.split_once('=')).find(|(k, _)| k.trim() == key).map(|(_, v)| v.trim())
+    }
+
+    /// Sets `key` to `value`: its first line is replaced (and any later one dropped), or a line is added at the end.
+    fn set(&mut self, key: &str, value: &str) {
+        let line = format!("{key}={value}");
+        let mut found = false;
+        self.lines.retain_mut(|l| {
+            if !l.split_once('=').is_some_and(|(k, _)| k.trim() == key) {
+                return true;
+            }
+            if found {
+                return false;
+            }
+            found = true;
+            l.clone_from(&line);
+            true
+        });
+        if !found {
+            self.lines.push(line);
+        }
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    /// Tests run in parallel threads: each has its own settings, and none reads or writes the user folder.
+    static TEST: std::cell::RefCell<Store> = std::cell::RefCell::new(Store::default());
+}
+
+/// Runs `f` on the settings: read from `settings.txt` the first time.
+fn read<R>(f: impl FnOnce(&Store) -> R) -> R {
+    #[cfg(test)]
+    return TEST.with(|s| f(&s.borrow()));
+    #[cfg(not(test))]
+    f(&STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Sets `key` to `value` and keeps the file when that changed it.
+fn write(key: &str, value: &str) {
+    #[cfg(test)]
+    TEST.with(|s| s.borrow_mut().set(key, value));
+    #[cfg(not(test))]
+    {
+        let mut s = STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner());
+        if s.get(key) != Some(value) {
+            s.set(key, value);
+            save(&s);
+        }
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn load() -> Store {
+    os_paths::user_file("settings.txt").and_then(|f| std::fs::read_to_string(f).ok()).map(|t| Store::parse(&t)).unwrap_or_default()
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn save(s: &Store) {
+    if let Some(dir) = os_paths::user_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("settings.txt"), s.text());
+    }
+}
+
+/// The settings window's side: what a declared control does when clicked (`views::settings` draws them).
+impl App {
+    /// A declared check was clicked (`SAct::Check`): toggles and keeps it.
+    pub(crate) fn pref_toggle(&mut self, label: &str) {
+        let Some(c) = find_check(label) else { return };
+        let on = toggle(c);
+        self.state.message = Some(format!("{}: {}", c.label, if on { "on" } else { "off" }));
+        self.invalidate();
+    }
+
+    /// A declared combo was clicked (`SAct::Combo`): the menu of its choices under its box (`x`, `y`), the current one
+    /// marked.
+    pub(crate) fn pref_menu(&mut self, label: &str, x: f32, y: f32) {
+        use crate::playlist::{Cmd, Mark, PItem, Popup};
+        let Some(c) = find_combo(label) else { return };
+        let now = index(c);
+        let items = c.choices.iter().enumerate().map(|(i, &ch)| PItem::new(ch, Cmd::Pref(c, i)).mark(Mark::Radio(i == now))).collect();
+        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None });
+        self.invalidate();
+    }
+
+    /// Entry `i` of a declared combo's menu was chosen (`Cmd::Pref`): kept; returns the message.
+    pub(crate) fn pref_choose(&mut self, c: &'static Combo, i: usize) -> Option<String> {
+        set_choice(c, i);
+        self.invalidate();
+        Some(format!("{}: {}", c.label, choice(c)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Action;
+    use crate::views::settings::{self, Row, SAct};
+    use os_ui::{Canvas, Rect};
+
+    #[test]
+    fn file_keeps_unknown_lines_and_defaults_what_is_missing() {
+        let mut s = Store::parse("theme=dark\njunk\nmain_gui_scaling=150%\n");
+        assert_eq!(index_in(&s, &MAIN_GUI_SCALING), 3);
+        assert!(check_in(&s, &TEST_CHECK), "missing: the default");
+        s.set("test_check", "0");
+        s.set("main_gui_scaling", "System");
+        assert_eq!(s.text(), "theme=dark\njunk\nmain_gui_scaling=System\ntest_check=0\n");
+        assert!(!check_in(&s, &TEST_CHECK));
+        // Values it cannot read are the defaults; a key set twice keeps one line.
+        let mut s = Store::parse("test_check=yes\nmain_gui_scaling=90%\nmain_gui_scaling = 200% \n");
+        assert!(check_in(&s, &TEST_CHECK));
+        assert_eq!(index_in(&s, &MAIN_GUI_SCALING), 5, "the last line counts");
+        s.set("main_gui_scaling", "125%");
+        assert_eq!(s.text(), "test_check=yes\nmain_gui_scaling=125%\n");
+        assert_eq!(index_in(&Store::parse("main_gui_scaling=90%"), &MAIN_GUI_SCALING), 0);
+    }
+
+    #[test]
+    fn reading_and_changing_settings() {
+        assert_eq!((check(&TEST_CHECK), choice(&MAIN_GUI_SCALING)), (true, "System"));
+        assert!(!toggle(&TEST_CHECK) && !check(&TEST_CHECK));
+        set_check(&TEST_CHECK, true);
+        assert!(check(&TEST_CHECK));
+        set_choice(&MAIN_GUI_SCALING, 2);
+        assert_eq!((index(&MAIN_GUI_SCALING), choice(&MAIN_GUI_SCALING)), (2, "125%"));
+        set_choice(&MAIN_GUI_SCALING, 99);
+        assert_eq!(choice(&MAIN_GUI_SCALING), "125%");
+        assert_eq!(find_combo("Main GUI scaling"), Some(&MAIN_GUI_SCALING));
+        assert_eq!(find_check("Automatically check for updates"), Some(&TEST_CHECK));
+        assert_eq!((find_check("Main GUI scaling"), find_combo("Pop-ups scaling"), find_check("")), (None, None, None));
+    }
+
+    /// Every declaration has its own key and label, a default among its choices, and a control of its kind with that
+    /// label on a settings page (checks: an enabled check; combos: a combo).
+    #[test]
+    fn declarations_match_the_settings_pages() {
+        let app = App::new(None);
+        let mut checks_shown = Vec::new();
+        let mut combos_shown = Vec::new();
+        fn walk(r: &Row, checks: &mut Vec<&'static str>, combos: &mut Vec<&'static str>) {
+            match r {
+                Row::Check(k, _) => checks.push(*k),
+                Row::Check2(a, _, b, _) => checks.extend([*a, *b]),
+                Row::Combo(_, _, l) => combos.push(*l),
+                Row::Pair(a, b) => {
+                    walk(a, checks, combos);
+                    walk(b, checks, combos);
+                }
+                _ => {}
+            }
+        }
+        for tab in 0..settings::TABS.len() {
+            for g in settings::page(tab, &app.state) {
+                for r in &g.rows {
+                    walk(r, &mut checks_shown, &mut combos_shown);
+                }
+            }
+        }
+        let mut keys = Vec::new();
+        let mut labels = Vec::new();
+        for c in checks() {
+            assert!(checks_shown.contains(&c.label), "{} is a check on a settings page", c.label);
+            keys.push(c.key);
+            labels.push(c.label);
+        }
+        for c in COMBOS {
+            assert!(combos_shown.contains(&c.label), "{} is a combo on a settings page", c.label);
+            assert!(c.default < c.choices.len(), "{}: default among its choices", c.label);
+            keys.push(c.key);
+            labels.push(c.label);
+        }
+        for (i, k) in keys.iter().enumerate() {
+            assert!(!k.is_empty() && !k.contains('=') && k.trim() == *k, "key {k:?}");
+            assert!(!keys[..i].contains(k), "key {k} declared twice");
+            assert!(!labels[..i].contains(&labels[i]), "label {} declared twice (TEST_CHECK may need another label)", labels[i]);
+        }
+    }
+
+    fn hit_rect(app: &App, a: &Action) -> Rect {
+        app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.rect).unwrap_or_else(|| panic!("no hit for {a:?}"))
+    }
+
+    fn click(app: &mut App, c: &mut Canvas, r: Rect) {
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_up();
+        app.paint(c, None);
+    }
+
+    /// The page draws declared controls live: a check toggles and is kept, a combo lists its choices and shows the
+    /// chosen one; undeclared controls stay greyed out.
+    #[test]
+    fn declared_controls_work_on_the_settings_page() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::GENERAL);
+        app.paint(&mut c, None);
+        // Main GUI scaling opens its list under its box, System marked; Pop-ups scaling is not available yet.
+        let combo = |app: &App| {
+            app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == MAIN_GUI_SCALING.label)).map(|h| h.rect).expect("the combo works")
+        };
+        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Pop-ups scaling")));
+        let r = combo(&app);
+        click(&mut app, &mut c, r);
+        let p = app.state.playlist.popup.as_ref().expect("its menu");
+        let labels: Vec<&str> = p.items.iter().map(|it| it.label.as_ref()).collect();
+        assert_eq!(labels, MAIN_GUI_SCALING.choices);
+        assert_eq!(p.items[0].mark, crate::playlist::Mark::Radio(true));
+        assert!(p.items[1..].iter().all(|it| it.mark == crate::playlist::Mark::Radio(false)));
+        assert!((p.y - r.bottom()).abs() < 2.0, "under its box");
+        let item = hit_rect(&app, &Action::PlPopup(2));
+        click(&mut app, &mut c, item);
+        assert!(app.state.playlist.popup.is_none());
+        assert_eq!(choice(&MAIN_GUI_SCALING), "125%");
+        assert_eq!(app.state.message.as_deref(), Some("Main GUI scaling: 125%"));
+        // The menu marks the new choice.
+        let r = combo(&app);
+        click(&mut app, &mut c, r);
+        assert_eq!(app.state.playlist.popup.as_ref().unwrap().items[2].mark, crate::playlist::Mark::Radio(true));
+        app.state.playlist.popup = None;
+        // The test check (Updates and privacy, further down the page: the groups above it folded) toggles.
+        app.state.settings.folded.extend(["Display", "Language", "Input", "Undo history"]);
+        app.paint(&mut c, None);
+        let key = Action::Settings(SAct::Check(TEST_CHECK.label));
+        let r = hit_rect(&app, &key);
+        click(&mut app, &mut c, r);
+        assert!(!check(&TEST_CHECK));
+        assert_eq!(app.state.message.as_deref(), Some("Automatically check for updates: off"));
+        let r = hit_rect(&app, &key);
+        click(&mut app, &mut c, r);
+        assert!(check(&TEST_CHECK));
+        // Its neighbours are not declared: greyed out.
+        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Send usage data")));
+        assert!(!app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check("Send usage data"))));
+    }
+}
