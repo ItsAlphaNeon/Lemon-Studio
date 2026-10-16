@@ -6093,8 +6093,12 @@ impl App {
         }
     }
 
-    /// Press on a step (spec: ui/channel-rack.md §9): selects the row, toggles the step, starts painting.
-    fn rack_step(&mut self, i: usize, k: u32) {
+    /// Press on a step with the left button, or the `right` one (spec: ui/channel-rack.md §9): selects the row, sets
+    /// the step and starts painting. "Use both mouse buttons in step sequencer" (spec: ui/settings-choices.md "Input:
+    /// Click-and-hold and both mouse buttons (2026-10-16)"): off, either button toggles the step; on, the left one sets
+    /// it and the right one clears it. Either way the drag that follows sets (left) or clears (right) each step it
+    /// crosses.
+    fn rack_step(&mut self, i: usize, k: u32, right: bool) {
         self.state.rack.select_only(i);
         self.focus_channel(i);
         let s = &mut self.state;
@@ -6105,8 +6109,12 @@ impl App {
                 crate::rack::set_len(s, Some((k / 16 + 1) * 16));
             }
         }
-        let on = crate::rack::toggle_step(s, i, k);
-        self.drag = Some(Drag::RackPaint { row: i, on, last: k });
+        if crate::prefs::check(&crate::prefs::BOTH_MOUSE_BUTTONS) {
+            crate::rack::set_step(s, i, k, !right);
+        } else {
+            crate::rack::toggle_step(s, i, k);
+        }
+        self.drag = Some(Drag::RackPaint { row: i, on: !right, last: k });
     }
 
     /// Speaker (spec: ui/channel-rack.md §7): plays the current pattern; while it plays, pauses / resumes.
@@ -6180,7 +6188,7 @@ impl App {
                     rk::toggle_mute(s, i);
                 }
             }
-            Action::Step(i, k) => self.rack_step(i, k),
+            Action::Step(i, k) => self.rack_step(i, k, false),
             Action::RackMixer(i) => {
                 let s = &mut self.state;
                 if double {
@@ -6245,7 +6253,7 @@ impl App {
                 return true;
             }
             Action::Step(i, k) => {
-                self.rack_step(i, k);
+                self.rack_step(i, k, true);
                 return true;
             }
             Action::RackGraphArea => {

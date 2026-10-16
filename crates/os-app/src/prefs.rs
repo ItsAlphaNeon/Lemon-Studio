@@ -210,6 +210,12 @@ pub const SHOW_SPLASH: Check = Check { key: "show_startup_splash", label: "Show 
 /// gets one, this check silences it. Spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
 pub const SILENT_STARTUP: Check = Check { key: "silent_startup", label: "Silent startup", default: false };
 
+/// General ▸ Input: off, a left or a right click on a step of the step sequencer toggles it; on, the left button only
+/// sets steps and the right one only clears them. A drag sets (left) or clears (right) the steps it crosses either way
+/// (`App::rack_step`). Spec: ui/settings-choices.md "Input: Click-and-hold and both mouse buttons (2026-10-16)".
+pub const BOTH_MOUSE_BUTTONS: Check =
+    Check { key: "both_mouse_buttons_step_sequencer", label: "Use both mouse buttons in step sequencer", default: false };
+
 /// General ▸ Miscellaneous: the project Lemon Studio starts with when no project file is passed to it
 /// (`App::startup_project`). Spec: ui/settings-choices.md, as above.
 pub const STARTUP_PROJECT: Combo =
@@ -238,6 +244,7 @@ pub const CHECKS: &[&Check] = &[
     &LIMIT_EDITORS,
     &SHOW_SPLASH,
     &SILENT_STARTUP,
+    &BOTH_MOUSE_BUTTONS,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS];

@@ -2218,4 +2218,105 @@ mod tests {
         }
         set_check(&AUTO_ZIP_EMPTY, false);
     }
+
+    /// The rack shown with row 0's steps `on` (the rest off), painted so its step buttons can be hit.
+    fn step_app(c: &mut os_ui::Canvas, on: &[u32]) -> App {
+        let mut app = App::new(None);
+        app.state.z = vec![crate::app::Win::ChannelRack];
+        let ch = ch_index(&app.state, 0).expect("row 0");
+        let ps = per_step(&app.state);
+        let n = app.state.pattern;
+        crate::patterns::pat_mut(&mut app.state, n).notes = on.iter().map(|&k| Note::step(ch, k * ps)).collect();
+        app.paint(c, None);
+        app
+    }
+
+    /// Row 0's steps that are on among the first 16.
+    fn steps(app: &App) -> Vec<u32> {
+        let (ch, ps) = (ch_index(&app.state, 0).expect("row 0"), per_step(&app.state));
+        let notes = app.state.project.pattern(app.state.pattern).map(|p| p.notes.clone()).unwrap_or_default();
+        (0..16).filter(|&k| step_on(&notes, ch, k, ps)).collect()
+    }
+
+    /// Presses the left or `right` button on row 0's step `k`, moves over to step `to`, and releases.
+    fn press(app: &mut App, right: bool, k: u32, to: u32) {
+        let at = |app: &App, k: u32| {
+            let r = app.hits.iter().rev().find(|h| h.action == crate::app::Action::Step(0, k)).map(|h| h.rect).expect("step shown");
+            (r.cx(), r.cy())
+        };
+        let (x, y) = at(app, k);
+        app.mouse_move(x, y);
+        if right {
+            app.mouse_down_right();
+        } else {
+            app.mouse_down();
+        }
+        let (x, y) = at(app, to);
+        app.mouse_move(x, y);
+        app.mouse_up();
+    }
+
+    /// "Use both mouse buttons in step sequencer", off as found (spec: ui/settings-choices.md "Input: Click-and-hold
+    /// and both mouse buttons (2026-10-16)", the table's Off column): a left or a right click toggles the step; a left
+    /// drag sets each step it crosses on, a right drag sets each one off.
+    #[test]
+    fn step_buttons_with_both_mouse_buttons_off() {
+        use crate::prefs::{check, BOTH_MOUSE_BUTTONS};
+        let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
+        assert!(!check(&BOTH_MOUSE_BUTTONS), "off by default");
+        for (right, start, want, row) in [
+            (false, vec![], vec![2], "left click on an off step: on"),
+            (false, vec![2], vec![], "left click on an on step: off"),
+            (true, vec![2], vec![], "right click on an on step: off"),
+            (true, vec![], vec![2], "right click on an off step: on"),
+        ] {
+            let mut app = step_app(&mut c, &start);
+            press(&mut app, right, 2, 2);
+            assert_eq!(steps(&app), want, "{row}");
+            assert_eq!(app.state.selected_channel, 0, "{row}: the row is selected");
+        }
+        // Drags, from an off and from an on step: left sets every step crossed, right clears them.
+        let mut app = step_app(&mut c, &[5, 9]);
+        press(&mut app, false, 3, 7);
+        assert_eq!(steps(&app), vec![3, 4, 5, 6, 7, 9], "left drag along the row");
+        let mut app = step_app(&mut c, &[2, 3, 5, 6, 7, 9]);
+        press(&mut app, true, 2, 6);
+        assert_eq!(steps(&app), vec![7, 9], "right drag along the row");
+        let mut app = step_app(&mut c, &[4, 9]);
+        press(&mut app, false, 4, 6);
+        assert_eq!(steps(&app), vec![4, 5, 6, 9], "left drag from an on step");
+        let mut app = step_app(&mut c, &[9]);
+        press(&mut app, true, 4, 6);
+        assert_eq!(steps(&app), vec![9], "right drag from an off step");
+    }
+
+    /// The check on (spec, as above, the On column): the left button only sets a step, the right one only clears it;
+    /// drags as with it off (the spec's choice for Lemon Studio).
+    #[test]
+    fn step_buttons_with_both_mouse_buttons_on() {
+        use crate::prefs::{set_check, BOTH_MOUSE_BUTTONS};
+        let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
+        set_check(&BOTH_MOUSE_BUTTONS, true);
+        for (right, start, want, row) in [
+            (false, vec![], vec![2], "left click on an off step: on"),
+            (false, vec![2], vec![2], "left click on an on step: stays on"),
+            (true, vec![2], vec![], "right click on an on step: off"),
+            (true, vec![], vec![], "right click on an off step: stays off"),
+        ] {
+            let mut app = step_app(&mut c, &start);
+            press(&mut app, right, 2, 2);
+            assert_eq!(steps(&app), want, "{row}");
+        }
+        let mut app = step_app(&mut c, &[5, 9]);
+        press(&mut app, false, 3, 7);
+        assert_eq!(steps(&app), vec![3, 4, 5, 6, 7, 9], "left drag along the row");
+        let mut app = step_app(&mut c, &[2, 3, 5, 6, 7, 9]);
+        press(&mut app, true, 2, 6);
+        assert_eq!(steps(&app), vec![7, 9], "right drag along the row");
+        // Back the other way: a drag to the left covers the same steps.
+        let mut app = step_app(&mut c, &[]);
+        press(&mut app, false, 7, 4);
+        assert_eq!(steps(&app), vec![4, 5, 6, 7], "left drag leftwards");
+        set_check(&BOTH_MOUSE_BUTTONS, false);
+    }
 }
