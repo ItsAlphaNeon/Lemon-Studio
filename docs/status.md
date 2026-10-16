@@ -82,6 +82,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The channel's level adjustments (volume multiplier, pan and mod X / Y offsets) and each note's own pan
   and mod X / Y reach the instrument
 - Audio clips play at the sample's own level
+- Audio clip fades follow the measured fade curve. Automatic crossfades (Project settings) fade overlapping
+  audio clips on a track into each other and follow moves, the tempo and undo; the playlist draws each one
+  as an X with a handle that bends both fades
 - MP3 samples are placed as the original encoder output (the info frame plays as silence)
 - The sampler's closing fades
 - A fast resampler while playing, and the exact one for export
@@ -127,6 +130,10 @@ Not yet: Align all channel editors, Arrange windows.
   (General settings ▸ Advanced ▸ Threaded project sample loading)
 - A save that writes a file over General settings ▸ Hints and warnings ▸ Project data size warning (100 MB
   unless changed) says how big the file is
+- Data folders (Project settings): a project's own folder for its backups and copied samples, Copy used
+  samples, Rename (the folder and the file), and the browser's Project data. The first save of a new project
+  opens a Save as form that can make that folder (General ▸ Ask for data folder decides when; File ▸ New can
+  open a New project form)
 - Still early: always work on copies and keep backups
 
 ## 🚧 Built-in instruments and effects
@@ -195,8 +202,11 @@ Not yet: Align all channel editors, Arrange windows.
   double-click can be swapped
 - File ▸ Browser extra search folders: the folders added to the browser, renamed or replaced from here
 - General ▸ Display ▸ High visibility: a white record dot, brighter channel names and light scroll bar thumbs
-- Not yet: the MIDI page, the recording settings, Toolbars scaling, theme adjustments, Invert pencil buttons,
-  Associate project files and data folders
+- General ▸ Display ▸ Toolbars scaling: the main window's top band at its own size; panels that don't fit
+  leave an arrow
+- General ▸ System ▸ Associate project files (Windows): `.flp` files open with Lemon Studio, for your user
+  only, and unticking puts the previous program back
+- Not yet: the MIDI page, the recording settings and the theme adjustments (the themes are being redone)
 
 ## ❌ Not available yet
 
