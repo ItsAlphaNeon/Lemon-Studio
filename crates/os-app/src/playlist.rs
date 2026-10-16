@@ -1606,7 +1606,8 @@ pub fn track_after_used(s: &State) -> u16 {
     clips(s).iter().map(|c| c.track + 1).max().unwrap_or(0).min(TRACKS - 1)
 }
 
-/// Create an automation clip for `target` (§8): a new type-5 channel named `name`, two flat points at `value`,
+/// Create an automation clip for `target` (§8): a new type-5 channel named `name` (its colour from
+/// `State::clip_colors`), two flat points at `value`,
 /// a clip over the time selection, else `automation_span` (spec: plugins/plugin-parameters.md §5), on the first free
 /// track below the last used one.
 pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16 {
@@ -1624,7 +1625,8 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         name: Some(name.to_string()),
         plugin: None,
         plugin_state: None,
-        color: Some(Rgb::new(0x5a, 0x74, 0x4c)),
+        // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
+        color: Some(s.clip_colors.new_channel(index)),
         enabled: true,
         volume: 1.0,
         pan: 0.0,
@@ -1666,7 +1668,8 @@ pub fn unique_channel_name(s: &State, name: &str) -> String {
     (2..).map(|k| format!("{name} #{k}")).find(|n| !taken(n)).unwrap_or_default()
 }
 
-/// Add an audio clip channel for a sample file and place it at `tick` on `track` (§9).
+/// Add an audio clip channel for a sample file and place it at `tick` on `track` (§9). The channel's colour comes from
+/// `State::clip_colors`.
 pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Option<usize> {
     s.playlist.wave(path)?;
     snapshot(s);
@@ -1679,7 +1682,8 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
         name: Some(name),
         plugin: None,
         plugin_state: None,
-        color: None,
+        // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
+        color: Some(s.clip_colors.new_channel(index)),
         enabled: true,
         volume: 0.78125,
         pan: 0.0,

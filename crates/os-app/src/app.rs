@@ -875,6 +875,9 @@ pub struct State {
     pub dialogs: Vec<crate::dialog::Modal>,
     /// The working time's clock and the Song info box (Settings > Info, `project_info`).
     pub credits: crate::project_info::Credits,
+    /// The current theme's rule for the colours of new audio and automation clips' channels (`App::clip_colors`, kept
+    /// up to date by `App::follow_settings`).
+    pub clip_colors: crate::clip_colors::ClipColors,
 }
 
 impl State {
@@ -1144,6 +1147,7 @@ impl App {
                 screen: (1920.0, 1080.0),
                 dialogs: Vec::new(),
                 credits: Default::default(),
+                clip_colors: Default::default(),
             },
             theme: load_theme(),
             transport,
@@ -2765,12 +2769,24 @@ impl App {
     }
 
     /// General ▸ Miscellaneous checks that follow a change, on every tick and before a frame: "Select first channel with
-    /// notes when the pattern changes" (`App::pattern_tick`), "Auto zoom in piano roll" (`piano::open_tick`).
+    /// notes when the pattern changes" (`App::pattern_tick`), "Auto zoom in piano roll" (`piano::open_tick`). Also the
+    /// theme's rule for new clips' channel colours, which the code making them reads from the state.
     fn follow_settings(&mut self) {
         self.pattern_tick();
         if crate::piano::open_tick(&mut self.state) {
             self.invalidate();
         }
+        let clips = self.clip_colors();
+        if self.state.clip_colors != clips {
+            self.state.clip_colors = clips;
+        }
+    }
+
+    /// The current theme's rule for the colours of new audio and automation clips' channels (read-only): its
+    /// `OverrideClips` ("Audio and automation clips use note colors", off without a theme file) and note colours.
+    /// Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)".
+    pub fn clip_colors(&self) -> crate::clip_colors::ClipColors {
+        crate::clip_colors::ClipColors::of(self.theme.fl.as_ref())
     }
 
     /// The mixer's cables swing until still: step them and repaint where they were and are.
@@ -3538,7 +3554,7 @@ impl App {
                 if let Some((name, text)) = st.themes.get(i - 2).cloned() {
                     st.preset = i;
                     let fl = os_theme::FlTheme::parse(&text);
-                    self.theme = os_theme::Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default());
+                    self.theme = os_theme::Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default()).with_fl(fl);
                     os_theme::set_current(&self.theme.colors);
                     save_design(Design::Classic);
                     // Remembered like an imported theme (loaded at the next start).
@@ -6559,7 +6575,7 @@ pub fn theme_from_file(path: &std::path::Path) -> Result<Theme, String> {
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")) {
         let fl = os_theme::FlTheme::parse(&text);
-        Ok(Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default()))
+        Ok(Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default()).with_fl(fl))
     } else {
         Theme::parse(&name, &text)
     }
