@@ -3475,6 +3475,9 @@ impl App {
         st.tab = tab;
         self.sync_preset();
         self.audio_page();
+        // General ▸ System's association check shows what Windows says now (`crate::file_assoc`).
+        #[cfg(windows)]
+        self.assoc_read();
         let st = &mut self.state.settings;
         // Built-in presets (spec: ui/theme-presets.md), then .flstheme files in the user folder's `themes`.
         st.themes = os_theme::presets::PRESETS.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect();
@@ -3744,6 +3747,12 @@ impl App {
             SAct::Tab(i) => {
                 st.tab = i;
                 st.scroll = 0.0;
+                // Read again whenever the General page opens (spec: ui/settings-choices.md "System: Associate project
+                // files with application").
+                #[cfg(windows)]
+                if i == views::settings::GENERAL {
+                    self.assoc_read();
+                }
             }
             // Opt in / out of the experimental native host and scan again so the effect lists follow (spec
             // plugins/fruity-abi.md). Its displayed state comes straight from `os_native::enabled()`.
@@ -3777,6 +3786,9 @@ impl App {
             SAct::Check(k) if k == views::settings::CROSSFADES_CHECK => self.toggle_auto_crossfades(),
             SAct::Check(k) if k == views::settings::SHOW_INFO_CHECK => self.toggle_show_info(),
             SAct::Check(k) if k == views::settings::LIGHT_MODE_CHECK || k == views::settings::NOTE_COLORS_CHECK => self.toggle_theme_option(k),
+            // The only place that writes the registry (`crate::file_assoc`).
+            #[cfg(windows)]
+            SAct::Check(k) if k == views::settings::ASSOCIATE_CHECK => self.assoc_click(),
             // A time division's value box: the mouse wheel changes it (`wheel_act`).
             SAct::Number(label) => self.state.message = Some(format!("{label}: the mouse wheel changes it")),
             // Checks and buttons outside `settings::LIVE` are drawn greyed out with an `Action::Placeholder` hit instead.

@@ -161,6 +161,9 @@ pub struct SettingsUi {
     /// `signature as usize` (0 = time division), kept while the program runs; `None` = 4/4 (spec:
     /// ui/settings-choices.md "Set as time division").
     pub bar_memory: [Option<(u16, u16)>; 2],
+    /// General ▸ System: `.flp` files open with this program, as Windows said when the page last opened or was
+    /// clicked (`crate::file_assoc`); always false on macOS and Linux, where the check is greyed.
+    pub assoc: bool,
 }
 
 /// Tabs: label, page title, group (0 system / 1 project / 2 info) (spec §2). Plugins takes the place of FL's Account
@@ -200,6 +203,16 @@ pub fn plugin_check(key: &str) -> bool {
     [STARTUP_CHECK, ERRORS_CHECK, COMBINE_CHECK].contains(&key)
 }
 
+/// General ▸ System: whether `.flp` files open with this program. Not a stored setting: on Windows the check shows what
+/// the registry says (`SettingsUi::assoc`, `crate::file_assoc`); on macOS and Linux it is greyed. Spec:
+/// ui/settings-choices.md "System: Associate project files with application (2026-10-16)".
+pub const ASSOCIATE_CHECK: &str = "Associate project files with application";
+/// Its hint where the system's own "Open with" settings decide (spec).
+#[cfg(target_os = "macos")]
+const ASSOCIATE_ELSEWHERE: &str = "The app bundle declares .flp files; the system's Open with settings decide";
+#[cfg(all(not(windows), not(target_os = "macos")))]
+const ASSOCIATE_ELSEWHERE: &str = "The desktop file declares .flp files; the system's Open with settings decide";
+
 /// The checks and buttons that work (by label, handled in `App::settings_act`). Apart from these, `LIVE_COMBOS` and the
 /// program settings declared in `crate::prefs`, every other check, combo, value box, slider and button is not available
 /// yet: drawn greyed out, its hint and click say so.
@@ -223,6 +236,7 @@ pub const LIVE: &[&str] = &[
     "Rescan all",
     "Load theme...",
     "Reset",
+    ASSOCIATE_CHECK,
 ];
 
 /// `LIVE`, and the checks declared in `crate::prefs`.
@@ -539,7 +553,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Buttons(vec![("Manage messages", 138.0)]),
                 combo("100MB (default)", 110.0, "Project data size warning"),
             ]),
-            gf("System", false, vec![Check("Associate project files with application", true)]),
+            gf("System", false, vec![Check(ASSOCIATE_CHECK, s.settings.assoc)]),
             gf("Updates and privacy", false, vec![
                 Check("Automatically check for updates", true),
                 Check("Automatically download program updates", true),
@@ -1039,6 +1053,10 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
         Row::Check(k, _) if *k == crate::prefs::THICK_LINES.label && !thick_lines_live(ui.c.scale) => {
             check_greyed(ui, k, x0 + 10.0, cy, "Thick lines: from 200 % scaling")
         }
+        // General ▸ System's association: the system's own "Open with" settings decide on macOS and Linux (spec:
+        // ui/settings-choices.md "System: Associate project files with application").
+        #[cfg(not(windows))]
+        Row::Check(k, _) if *k == ASSOCIATE_CHECK => check_greyed(ui, k, x0 + 10.0, cy, ASSOCIATE_ELSEWHERE),
         // A check that is not available yet shows its default, greyed out.
         Row::Check(k, d) => check(ui, k, *d, x0 + 10.0, cy, live(k)),
         Row::Off(k, d) => check(ui, k, *d, x0 + 10.0, cy, false),
