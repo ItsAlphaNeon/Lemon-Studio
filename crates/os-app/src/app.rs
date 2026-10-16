@@ -868,6 +868,8 @@ pub struct State {
     pub maximized: bool,
     pub piano: PianoState,
     pub playlist: crate::playlist::PlaylistState,
+    /// The project's undo history (spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
+    pub history: crate::history::History,
     /// The main toolbar's snap, which the editors' Main follows (spec: ui/global-snap.md).
     pub global_snap: crate::snap::Global,
     pub pat_ui: crate::patterns::PatternUi,
@@ -1151,6 +1153,7 @@ impl App {
                 maximized: true,
                 piano: PianoState::default(),
                 playlist: crate::playlist::PlaylistState::default(),
+                history: Default::default(),
                 global_snap: Default::default(),
                 pat_ui: Default::default(),
                 wins: [
@@ -1302,6 +1305,7 @@ impl App {
                 s.path = Some(path);
                 s.piano.reset();
                 s.playlist.reset();
+                s.history.reset();
                 crate::playlist::load_view(s);
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
@@ -1656,6 +1660,7 @@ impl App {
         s.pattern = 1;
         s.piano.reset();
         s.playlist.reset();
+        s.history.reset();
         crate::playlist::load_view(s);
         s.rack.reset();
         crate::rack::from_model(s);
@@ -3469,6 +3474,14 @@ impl App {
     /// Settings > Project ▸ a time division's value box (`label`, `settings::LIVE_NUMBERS`) moved by `delta` (the
     /// mouse wheel). It stays in its range; a file's value outside it can only move toward it.
     fn settings_number(&mut self, label: &str, delta: i32) -> Option<String> {
+        // The value boxes declared in `crate::prefs` (General ▸ Undo history ▸ Maximum undo levels).
+        if let Some(n) = crate::prefs::find_number(label) {
+            let v = (i32::from(crate::prefs::number(n)) + delta).clamp(i32::from(n.min), i32::from(n.max)) as u16;
+            crate::prefs::set_number(n, v);
+            crate::history::trim(&mut self.state);
+            self.invalidate();
+            return Some(format!("{}: {v}", n.label));
+        }
         let (lo, hi) = views::settings::number_range(label)?;
         let (beats, steps) = self.state.project.bar();
         let beat_box = label == views::settings::BEATS_PER_BAR;
@@ -3490,6 +3503,7 @@ impl App {
             s.project.set_ppq(to);
             crate::piano::rescale(s, from, to);
             crate::playlist::rescale(s, from, to);
+            crate::history::rescale(s, from, to);
             if let Some(notes) = &mut s.rack.clipboard {
                 notes.iter_mut().for_each(|n| n.rescale(from, to));
             }
@@ -4354,6 +4368,7 @@ impl App {
             }
         }
         if let Some(Action::Knob(id)) = action {
+            crate::history::knob(&mut self.state, id, false);
             self.state.set_knob(id, id.default_value());
             self.hint = Cow::Owned(self.state.knob_text(id));
             self.invalidate();
@@ -4522,7 +4537,7 @@ impl App {
                 Tool::Select => self.piano_click(&a),
                 Tool::Zoom => self.zoom_toggle(),
                 _ => {
-                    piano::snapshot(&mut self.state);
+                    piano::snapshot_as(&mut self.state, "Piano roll delete note");
                     self.drag = Some(Drag::NoteErase);
                     self.erase_at(x, y);
                 }
@@ -4532,6 +4547,12 @@ impl App {
 
     pub fn mouse_up(&mut self) {
         self.hold = None;
+        self.release();
+        // An undo step whose press changed nothing goes (spec: ui/settings-choices.md "Undo history").
+        crate::history::settle(&mut self.state);
+    }
+
+    fn release(&mut self) {
         // An armed window button acts if the release is over it (`acts_on_release`).
         if let Some(a) = self.armed.take() {
             let (x, y) = self.mouse;
@@ -5060,6 +5081,9 @@ impl App {
                 v = (v * 24.0).round() / 24.0; // wheel steps from the nearest semitone
             }
             let v = v + dy.signum() * id.notch() * if dy == 0.0 { 0.0 } else { 1.0 };
+            if v.clamp(0.0, 1.0) != self.state.knob(id) {
+                crate::history::knob(&mut self.state, id, true);
+            }
             self.state.set_knob(id, v);
             self.hint = Cow::Owned(self.state.knob_text(id));
             return None;
@@ -5188,6 +5212,14 @@ impl App {
         if self.browser_key(key, ctrl, alt) {
             return;
         }
+        // Ctrl+Z / Ctrl+Alt+Z: the project's undo history, whichever window is in front (spec: ui/settings-choices.md
+        // "Undo history: the four checks (2026-10-16)").
+        if let Key::Character(c) = key
+            && ctrl
+            && c.eq_ignore_ascii_case("z")
+        {
+            return self.undo_key(alt);
+        }
         // The channel rack's keys while it is in front (spec: ui/channel-rack.md §20).
         let s = &self.state;
         if (s.z.last() == Some(&Win::ChannelRack) || s.rack.fill.is_some())
@@ -5256,7 +5288,6 @@ impl App {
                     s.piano.select(s.pattern, ch, all);
                 }
             }
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => self.act(Action::PianoUndo),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("t") => self.toggle_typing(),
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("m") => self.toggle_metronome(),
             // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
@@ -5287,7 +5318,7 @@ impl App {
                 let s = &mut self.state;
                 let sel = s.piano.selection(s.pattern, piano::channel(s));
                 if !sel.is_empty() {
-                    piano::snapshot(s);
+                    piano::snapshot_as(s, "Piano roll delete note");
                     piano::delete(s, sel);
                 }
             }
@@ -5510,7 +5541,7 @@ impl App {
             let note = if let Action::PianoNote(i) = *a { Some(i) } else { None };
             match tool {
                 Tool::Delete => {
-                    piano::snapshot(s);
+                    piano::snapshot_as(s, "Piano roll delete note");
                     self.drag = Some(Drag::NoteErase);
                     self.erase_at(x, y);
                     return;
@@ -5524,7 +5555,7 @@ impl App {
                     return;
                 }
                 Tool::Paint if note.is_none() => {
-                    piano::snapshot(s);
+                    piano::snapshot_as(s, "Piano roll add note");
                     s.piano.clear_selection();
                     let key = g.key_at(y).clamp(0, views::piano::TOP_KEY);
                     let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
@@ -5582,7 +5613,7 @@ impl App {
         let s = &mut self.state;
         match *a {
             Action::PianoGrid => {
-                piano::snapshot(s);
+                piano::snapshot_as(s, "Piano roll add note");
                 s.piano.clear_selection();
                 let i = piano::add_note(s, ch, crate::piano_snap::place(s, &g, g.tick_at(x), self.alt), g.key_at(y));
                 let i = piano::paint_mono(s, i);
@@ -5779,11 +5810,7 @@ impl App {
                 s.piano.tool = t;
                 s.piano.overlay = None;
             }
-            Action::PianoUndo => {
-                if !piano::undo(s) {
-                    s.message = Some("Nothing to undo".into());
-                }
-            }
+            Action::PianoUndo => s.message = crate::history::ctrl_z(s),
             Action::Typing => self.toggle_typing(),
             Action::Metronome => self.toggle_metronome(),
             Action::AutoScroll => self.toggle_autoscroll(),
@@ -5960,6 +5987,7 @@ impl App {
                 self.open_plugin_menu(crate::plugin_menu::Target::All, at);
             }
             Action::Knob(id) => {
+                crate::history::knob(s, id, false);
                 self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
                 self.hint = Cow::Owned(s.knob_text(id));
             }
@@ -6107,6 +6135,14 @@ impl App {
         }
     }
 
+    /// Ctrl+Z (`alt` = Ctrl+Alt+Z) and EDIT's entries: a move in the project's undo history (`crate::history`; spec:
+    /// ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
+    pub(crate) fn undo_key(&mut self, alt: bool) {
+        let s = &mut self.state;
+        s.message = if alt { crate::history::ctrl_alt_z(s) } else { crate::history::ctrl_z(s) };
+        self.invalidate();
+    }
+
     /// Press on a step with the left button, or the `right` one (spec: ui/channel-rack.md §9): selects the row, sets
     /// the step and starts painting. "Use both mouse buttons in step sequencer" (spec: ui/settings-choices.md "Input:
     /// Click-and-hold and both mouse buttons (2026-10-16)"): off, either button toggles the step; on, the left one sets
@@ -6117,6 +6153,8 @@ impl App {
         self.focus_channel(i);
         let s = &mut self.state;
         s.piano.clear_selection();
+        // One undo step for the press and the painting that follows.
+        crate::rack::snapshot(s);
         // A step past an explicit length grows the pattern to the bar holding it (§5).
         if let Some(l) = crate::rack::explicit_len(s) {
             if k >= l {
@@ -6404,8 +6442,9 @@ impl App {
                     self.state.message = Some(msg);
                 }
             }
-            // EDIT > Undo = Ctrl+Z (piano-roll undo).
-            (EDIT_MENU, i) if item_at(EDIT_MENU, i).is_some_and(|it| it.label == "Undo") => self.act(Action::PianoUndo),
+            // EDIT > Undo = Ctrl+Z, Redo = Ctrl+Alt+Z: the project's undo history (`undo_key`).
+            (EDIT_MENU, i) if item_at(EDIT_MENU, i).is_some_and(|it| it.label == "Undo") => self.undo_key(false),
+            (EDIT_MENU, i) if item_at(EDIT_MENU, i).is_some_and(|it| it.label == "Redo") => self.undo_key(true),
             (m, i) => {
                 let label = item_at(m, i).map_or("item", |it| it.label);
                 self.state.message = Some(format!("{label}: not available yet"));
@@ -9185,12 +9224,13 @@ mod tests {
         // The all tab lists the roots with content, all closed.
         let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
         assert_eq!(labels, ["Current project", "Plugin database"]);
-        // Project tab: Current project opened with its patterns (default like the screenshot).
+        // Project tab: Current project opened with its patterns (default like the screenshot), History above them.
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
         click(&mut app, &mut c, r0);
         let r = rows(&app.state);
         assert_eq!(r[0].label, "Current project");
-        assert_eq!(r[1].label, "Patterns");
+        assert_eq!((r[1].label.as_str(), r[1].open), ("History", Some(false)));
+        assert_eq!(r[2].label, "Patterns");
         let pi = r.iter().position(|r| r.item == Item::Pattern(1)).expect("pattern row");
         // Drag pattern 1 onto the playlist grid: a pattern clip appears.
         let n0 = crate::playlist::clips(&app.state).len();

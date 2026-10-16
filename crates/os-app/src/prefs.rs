@@ -54,6 +54,19 @@ pub struct Combo {
     pub default: usize,
 }
 
+/// A value box on a settings page (the red box with a number): the mouse wheel changes it, one per notch, within
+/// `min..=max` (`App::settings_number`).
+#[derive(Debug, PartialEq)]
+pub struct Number {
+    /// Its name in `settings.txt`.
+    pub key: &'static str,
+    /// The label its page shows; unique among the declared settings.
+    pub label: &'static str,
+    pub min: u16,
+    pub max: u16,
+    pub default: u16,
+}
+
 /// General ▸ Display: the UI's scale. System = the monitor's (the operating system's); a percentage replaces it.
 /// Read by `crate::gui_scale` at every event and paint, so it applies at once (FL needs a restart). Spec:
 /// ui/ui-scaling.md §1.
@@ -226,6 +239,32 @@ pub const STARTUP_PROJECT: Combo =
 /// ui/settings-choices.md "Input: Click-and-hold and both mouse buttons (2026-10-16)".
 pub const CLICK_AND_HOLD: Check = Check { key: "click_and_hold_gestures", label: "Click-and-hold & special gesture functions", default: false };
 
+/// General ▸ Undo history: the most steps the project's undo history keeps; past it the oldest step goes
+/// (`crate::history`). FL's range was not measured: Lemon Studio's is 1 to 999. Spec: ui/settings-choices.md "Undo
+/// history: the four checks (2026-10-16)".
+pub const MAX_UNDO_LEVELS: Number = Number { key: "max_undo_levels", label: "Maximum undo levels", min: 1, max: 999, default: 100 };
+
+/// General ▸ Undo history: knob turns are undo steps; off, they make none (`history::knob`). Spec: as above.
+pub const UNDO_KNOB_TWEAKS: Check = Check { key: "undo_knob_tweaks", label: "Undo knob tweaks", default: true };
+
+/// General ▸ Undo history: on (classic), Ctrl+Z steps back once more per press and Ctrl+Alt+Z redoes; off, Ctrl+Z
+/// toggles the last move and Ctrl+Alt+Z steps back further (`history::ctrl_z`). EDIT follows. Spec: as above.
+pub const ALTERNATE_UNDO: Check = Check { key: "alternate_undo_mode", label: "Alternate undo mode", default: true };
+
+/// General ▸ Undo history: stored and shown only. Lemon Studio does not record audio yet, so no undone recording can
+/// go to the recycle bin; recording will read it. Spec: as above (not measured: it needs recording).
+pub const UNDONE_RECORDINGS_TO_BIN: Check =
+    Check { key: "undone_recordings_to_recycle_bin", label: "Put undone recordings in the recycle bin", default: true };
+
+/// General ▸ Undo history: Ctrl+Z also shows the browser's Current project ▸ History, opened
+/// (`browser::show_history`). Spec: as above.
+pub const UNDO_HISTORY_IN_BROWSER: Check =
+    Check { key: "show_undo_history_in_browser", label: "Show undo history in the browser when undoing changes", default: false };
+
+/// General ▸ Undo history: the browser's History lists the newest step first, "Last reset" last (`History::entries`).
+/// Spec: as above.
+pub const RECENT_CHANGES_TOP: Check = Check { key: "undo_history_newest_first", label: "Show recent changes at the top", default: false };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -251,9 +290,17 @@ pub const CHECKS: &[&Check] = &[
     &SILENT_STARTUP,
     &BOTH_MOUSE_BUTTONS,
     &CLICK_AND_HOLD,
+    &UNDO_KNOB_TWEAKS,
+    &ALTERNATE_UNDO,
+    &UNDONE_RECORDINGS_TO_BIN,
+    &UNDO_HISTORY_IN_BROWSER,
+    &RECENT_CHANGES_TOP,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS];
+
+/// The declared value boxes.
+pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS];
 
 /// Tests only: a check that exercises the settings page. An FL service Lemon Studio leaves out (ui/options-coverage.md
 /// §4), so it is never declared for real.
@@ -276,6 +323,21 @@ pub fn find_check(label: &str) -> Option<&'static Check> {
 /// The declared combo its page labels `label`.
 pub fn find_combo(label: &str) -> Option<&'static Combo> {
     COMBOS.iter().copied().find(|c| c.label == label)
+}
+
+/// The declared value box its page labels `label`.
+pub fn find_number(label: &str) -> Option<&'static Number> {
+    NUMBERS.iter().copied().find(|n| n.label == label)
+}
+
+/// Value box `n`'s value.
+pub fn number(n: &Number) -> u16 {
+    read(|s| number_in(s, n))
+}
+
+/// Sets value box `n` (kept within its range) and keeps it.
+pub fn set_number(n: &Number, v: u16) {
+    write(n.key, &v.clamp(n.min, n.max).to_string());
 }
 
 /// Whether check `c` is on.
@@ -329,6 +391,10 @@ fn check_in(s: &Store, c: &Check) -> bool {
         Some("0") => false,
         _ => c.default,
     }
+}
+
+fn number_in(s: &Store, n: &Number) -> u16 {
+    s.get(n.key).and_then(|v| v.parse().ok()).filter(|v| (n.min..=n.max).contains(v)).unwrap_or(n.default)
 }
 
 fn index_in(s: &Store, c: &Combo) -> usize {
@@ -490,20 +556,22 @@ mod tests {
     }
 
     /// Every declaration has its own key and label, a default among its choices, and a control of its kind with that
-    /// label on a settings page (checks: an enabled check; combos: a combo).
+    /// label on a settings page (checks: an enabled check; combos: a combo; value boxes: a value box).
     #[test]
     fn declarations_match_the_settings_pages() {
         let app = App::new(None);
         let mut checks_shown = Vec::new();
         let mut combos_shown = Vec::new();
-        fn walk(r: &Row, checks: &mut Vec<&'static str>, combos: &mut Vec<&'static str>) {
+        let mut numbers_shown = Vec::new();
+        fn walk(r: &Row, checks: &mut Vec<&'static str>, combos: &mut Vec<&'static str>, numbers: &mut Vec<&'static str>) {
             match r {
                 Row::Check(k, _) => checks.push(*k),
                 Row::Check2(a, _, b, _) => checks.extend([*a, *b]),
                 Row::Combo(_, _, l) => combos.push(*l),
+                Row::Value(_, l) => numbers.push(*l),
                 Row::Pair(a, b) => {
-                    walk(a, checks, combos);
-                    walk(b, checks, combos);
+                    walk(a, checks, combos, numbers);
+                    walk(b, checks, combos, numbers);
                 }
                 _ => {}
             }
@@ -511,7 +579,7 @@ mod tests {
         for tab in 0..settings::TABS.len() {
             for g in settings::page(tab, &app.state) {
                 for r in &g.rows {
-                    walk(r, &mut checks_shown, &mut combos_shown);
+                    walk(r, &mut checks_shown, &mut combos_shown, &mut numbers_shown);
                 }
             }
         }
@@ -527,6 +595,12 @@ mod tests {
             assert!(c.default < c.choices.len(), "{}: default among its choices", c.label);
             keys.push(c.key);
             labels.push(c.label);
+        }
+        for n in NUMBERS {
+            assert!(numbers_shown.contains(&n.label), "{} is a value box on a settings page", n.label);
+            assert!((n.min..=n.max).contains(&n.default), "{}: default in its range", n.label);
+            keys.push(n.key);
+            labels.push(n.label);
         }
         for (i, k) in keys.iter().enumerate() {
             assert!(!k.is_empty() && !k.contains('=') && k.trim() == *k, "key {k:?}");

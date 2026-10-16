@@ -34,7 +34,6 @@ pub const MARKER_H: f32 = 17.0;
 pub const EDGE: f32 = 6.0;
 /// Number of tracks (flp playlist.md).
 pub const TRACKS: u16 = 500;
-const UNDO_DEPTH: usize = 200;
 
 /// Playlist tools (§3) and their letters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -435,7 +434,9 @@ impl Wave {
     }
 }
 
-type Snapshot = (Vec<Clip>, Vec<TimeMarker>, Vec<PlaylistTrack>, Vec<Automation>, Vec<[u32; 4]>);
+/// What a playlist undo step keeps (`crate::history`): the shown arrangement's clips, markers and tracks, the
+/// automation data and the channels' stretch settings.
+pub(crate) type Snapshot = (Vec<Clip>, Vec<TimeMarker>, Vec<PlaylistTrack>, Vec<Automation>, Vec<[u32; 4]>);
 
 pub struct PlaylistState {
     pub tool: PlTool,
@@ -489,7 +490,6 @@ pub struct PlaylistState {
     pub tones: RefCell<HashMap<String, Option<Rc<os_dsp::tone::Tones>>>>,
     /// A project is loading and its files decode off the UI thread: waveforms wait (spec: ui/project-loading.md).
     pub wave_wait: bool,
-    undo: Vec<Snapshot>,
 }
 
 impl Default for PlaylistState {
@@ -523,7 +523,6 @@ impl Default for PlaylistState {
             waves: RefCell::new(HashMap::new()),
             tones: RefCell::new(HashMap::new()),
             wave_wait: false,
-            undo: Vec::new(),
         }
     }
 }
@@ -1017,21 +1016,28 @@ pub fn to_src(s: &State, src: ClipSource, ticks: f64) -> f64 {
     }
 }
 
-/// Undo snapshot of everything the playlist edits.
+/// Undo snapshot of everything the playlist edits: a step of the project's undo history (`crate::history`).
 pub fn snapshot(s: &mut State) {
-    let a = arr_mut(s);
-    let (clips, markers, tracks) = (a.clips.clone(), a.markers.clone(), a.tracks.clone());
-    let stretch = s.project.channels.iter().map(|c| c.sound.stretch).collect();
-    let snap = (clips, markers, tracks, s.project.automations.clone(), stretch);
-    let u = &mut s.playlist.undo;
-    u.push(snap);
-    if u.len() > UNDO_DEPTH {
-        u.remove(0);
-    }
+    snapshot_as(s, "Playlist edit");
 }
 
-pub fn undo(s: &mut State) -> bool {
-    let Some((c, m, t, a, st)) = s.playlist.undo.pop() else { return false };
+/// `snapshot`, the step named `name` (as the browser's History lists it; spec: ui/settings-choices.md "Undo history:
+/// the four checks (2026-10-16)").
+pub fn snapshot_as(s: &mut State, name: &'static str) {
+    arr_mut(s);
+    let snap = crate::history::Snap::Playlist(Box::new(capture(s)));
+    crate::history::record(s, name, snap);
+}
+
+/// The playlist's undo state now (`snapshot`).
+pub(crate) fn capture(s: &State) -> Snapshot {
+    let (clips, markers, tracks) = s.project.arrangement().map(|a| (a.clips.clone(), a.markers.clone(), a.tracks.clone())).unwrap_or_default();
+    let stretch = s.project.channels.iter().map(|c| c.sound.stretch).collect();
+    (clips, markers, tracks, s.project.automations.clone(), stretch)
+}
+
+/// Puts an undo state back (undo and redo, `crate::history`).
+pub(crate) fn restore(s: &mut State, (c, m, t, a, st): Snapshot) {
     let arr = arr_mut(s);
     arr.clips = c;
     arr.markers = m;
@@ -1042,7 +1048,6 @@ pub fn undo(s: &mut State) -> bool {
     }
     s.playlist.sel.clear();
     s.piano.dirty = true;
-    true
 }
 
 /// Topmost clip under (x, y): the last one in the list (drawn on top).
@@ -2335,7 +2340,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             }
             // Any other tool: the right button is the Delete tool while held (also starting on empty grid).
             _ => {
-                snapshot(s);
+                snapshot_as(s, "Playlist delete clip");
                 app.drag = Some(Drag::Pl(PlDrag::Erase));
                 erase_at(app, grid);
                 return;
@@ -2345,7 +2350,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
 
     match tool {
         PlTool::Delete => {
-            snapshot(s);
+            snapshot_as(s, "Playlist delete clip");
             app.drag = Some(Drag::Pl(PlDrag::Erase));
             erase_at(app, grid);
         }
@@ -2386,7 +2391,8 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 s.playlist.overlay = Some(Overlay::Slice { tick: t, t0: track, t1: track });
             }
             None => {
-                snapshot(s);
+                // FL's name for placing the current source's clip (spec: ui/settings-choices.md "Undo history").
+                snapshot_as(s, "Playlist fill paint clip");
                 s.playlist.sel.clear();
                 let start = snap_place(s, &g, tick, alt);
                 let i = place(s, track, start);
@@ -2747,7 +2753,7 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             if let Some(Overlay::Slice { tick, t0, t1 }) = overlay {
                 snapshot(s);
                 if slice(s, tick, t0, t1) == 0 {
-                    s.playlist.undo.pop();
+                    crate::history::unrecord(s);
                 }
             }
         }
@@ -2776,7 +2782,7 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             // A click that changed nothing leaves no undo step.
             let same = orig.iter().all(|(i, o)| clips(s).get(*i) == Some(o));
             if same && !app.shift {
-                s.playlist.undo.pop();
+                crate::history::unrecord(s);
             }
         }
         _ => {}
@@ -2852,7 +2858,7 @@ pub fn show_arrangement(s: &mut State, n: u16) {
     s.playlist.sel.clear();
     s.playlist.hover_clip = None;
     s.playlist.hover_handle = None;
-    s.playlist.undo.clear();
+    crate::history::forget_playlist(s);
     s.piano.dirty = true;
 }
 
@@ -3163,7 +3169,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             Some(format!("Snap: {}", p.label()))
         }
         Cmd::GlobalSnap(sn) => Some(crate::snap::set(s, sn)),
-        Cmd::Undo => (!undo(s)).then(|| "Nothing to undo".into()),
+        Cmd::Undo => crate::history::ctrl_z(s),
         Cmd::Copy => {
             copy(s);
             None
@@ -3238,7 +3244,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             match group_clips(s) {
                 0 => {
-                    s.playlist.undo.pop();
+                    crate::history::unrecord(s);
                     Some("Group: select two or more clips first".into())
                 }
                 n => Some(format!("Grouped {n} clips")),
@@ -3248,7 +3254,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             match ungroup_clips(s) {
                 0 => {
-                    s.playlist.undo.pop();
+                    crate::history::unrecord(s);
                     Some("Ungroup: no grouped clip is selected".into())
                 }
                 n => Some(format!("Ungrouped {n} clips")),
@@ -3713,7 +3719,7 @@ pub fn consolidate(app: &mut App) -> String {
             c.muted = true;
         }
     }
-    s.playlist.undo.pop(); // one undo step for the whole consolidation (add_audio_clip snapshots)
+    crate::history::unrecord(s); // one undo step for the whole consolidation (add_audio_clip snapshots)
     match add_audio_clip(s, &path, track, a) {
         Some(i) => {
             // The render's own length, exactly.
@@ -3847,16 +3853,12 @@ pub fn rescale(s: &mut State, from: u16, to: u16) {
     if let Some((_, len)) = &mut pl.lock_len {
         *len = rescale_length(*len, from, to);
     }
-    for (clips, markers, ..) in &mut pl.undo {
-        clips.iter_mut().for_each(|c| c.rescale(from, to));
-        markers.iter_mut().for_each(|m| m.rescale(from, to));
-    }
 }
 
 /// A playlist edit changed nothing: drop its undo step (used by tests).
 #[cfg(test)]
 pub fn undo_len(s: &State) -> usize {
-    s.playlist.undo.len()
+    s.history.len()
 }
 
 /// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): FL's entries, only Detached
