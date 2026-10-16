@@ -72,6 +72,14 @@ pub enum Then {
     RackSample(usize),
     /// The replace question of the Save dialog under it: Yes answers that dialog with this path.
     Replace(PathBuf),
+    /// Switch all / selected audio clip channels to ▸: Ok sets these rack rows to this stretch method (spec:
+    /// ui/channel-switches.md §1).
+    StretchClips(Vec<usize>, i32),
+    /// The time signature conflict question for this pattern: Yes removes its start marker and opens the dialog
+    /// (spec: ui/pattern-time-signature.md §3).
+    ReplaceSignature(u16),
+    /// The time signature dialog: Accept (Ok) puts numerator / denominator at the start of this pattern (§2).
+    Signature(u16, u8, u8),
 }
 
 /// What waits for the save-changes question.
@@ -134,6 +142,8 @@ pub fn spans(parts: &[&str]) -> Vec<(String, bool)> {
 pub enum Body {
     Msg(Msg),
     File(Box<FileDlg>),
+    /// PATTERNS > Set time signature... (`timesig`).
+    TimeSig(crate::timesig::SigForm),
 }
 
 /// A dialog on the stack (`State::dialogs`, bottom to top; only the top one takes input).
@@ -176,6 +186,8 @@ pub enum DHit {
     FilterItem(usize),
     Accept,
     Cancel,
+    /// Time signature dialog: the denominator's value box (true) or the numerator's; Accept is `Accept`.
+    SigValue(bool),
 }
 
 /// A one-line text field: the text, the caret (in characters) and whether all of it is selected (typing replaces it).
@@ -341,6 +353,12 @@ impl App {
         self.modal_changed();
     }
 
+    /// Shows a form of the app's own (the time signature dialog) over everything.
+    pub(crate) fn show_form(&mut self, body: Body) {
+        self.state.dialogs.push(Modal::new(body));
+        self.modal_changed();
+    }
+
     /// A message box with Ok only.
     pub(crate) fn tell(&mut self, kind: Kind, title: &str, text: Vec<(String, bool)>) {
         self.show_msg(Msg::new(kind, title, text, &[Answer::Ok], Then::Nothing));
@@ -372,6 +390,11 @@ impl App {
                 }
                 f.then
             }
+            Body::TimeSig(f) => {
+                // Its value list goes with it.
+                self.state.playlist.popup = None;
+                Then::Signature(f.pattern, f.num, f.den)
+            }
         };
         // The replace question answers the Save dialog under it.
         if let Then::Replace(p) = then {
@@ -388,13 +411,14 @@ impl App {
         Some(match &self.state.dialogs.last()?.body {
             Body::Msg(m) => Reply::Button(m.escape()),
             Body::File(_) => Reply::File(None),
+            Body::TimeSig(_) => Reply::Button(Answer::Cancel),
         })
     }
 
     fn top_file(&mut self) -> Option<&mut FileDlg> {
         match &mut self.state.dialogs.last_mut()?.body {
             Body::File(f) => Some(f),
-            Body::Msg(_) => None,
+            Body::Msg(_) | Body::TimeSig(_) => None,
         }
     }
 
@@ -436,12 +460,15 @@ impl App {
             DHit::Button(i) => {
                 let a = match &m.body {
                     Body::Msg(msg) => msg.buttons.get(i).copied(),
-                    Body::File(_) => None,
+                    Body::File(_) | Body::TimeSig(_) => None,
                 };
                 if let Some(a) = a {
                     self.answer(Reply::Button(a));
                 }
             }
+            // The time signature dialog (spec: ui/pattern-time-signature.md §1-2).
+            DHit::SigValue(den) => self.sig_list(den),
+            DHit::Accept if matches!(m.body, Body::TimeSig(_)) => self.answer(Reply::Button(Answer::Ok)),
             _ => {
                 let Some(f) = self.top_file() else { return };
                 let out = match h {
@@ -551,6 +578,16 @@ impl App {
                 FileKey::Outcome(o) => self.file_outcome(o),
                 FileKey::Cancel => self.answer(Reply::File(None)),
             },
+            // Esc closes an open value list first, then the dialog (as its ×); Enter presses Accept, its only button.
+            Body::TimeSig(_) => {
+                let list = self.state.playlist.popup.is_some();
+                match key {
+                    Key::Named(NamedKey::Escape) if list => self.state.playlist.popup = None,
+                    Key::Named(NamedKey::Escape) => self.answer(Reply::Button(Answer::Cancel)),
+                    Key::Named(NamedKey::Enter) if !list => self.answer(Reply::Button(Answer::Ok)),
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -595,7 +632,7 @@ impl App {
     pub fn top_message(&self) -> Option<(String, String)> {
         match &self.state.dialogs.last()?.body {
             Body::Msg(m) => Some((m.title.clone(), m.plain())),
-            Body::File(_) => None,
+            Body::File(_) | Body::TimeSig(_) => None,
         }
     }
 }

@@ -4,8 +4,9 @@
 // This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
 // and not any other part of Lemon Studio.
 
-//! Browser behaviour: tabs, tree open/close, selection, scrolling and drag and drop into the project.
-// spec: ui/browser.md
+//! Browser behaviour: tabs, tree open/close, selection, scrolling and drag and drop into the project, and the menu
+//! bar's ways in.
+// spec: ui/browser.md, ui/browser-commands.md
 
 use os_model::{ChannelKind, ClipSource};
 
@@ -36,7 +37,7 @@ impl App {
             Action::BrowserReread => reread(s),
             Action::BrowserList => {}
             Action::BrowserMenu => {
-                let (x, y) = view::MENU_AT;
+                let (x, y) = view::menu_at(s);
                 let open = s.playlist.popup.as_ref().is_some_and(|p| p.x == x && p.y == y);
                 s.playlist.popup = if open { None } else { Some(Popup { x, y, items: options_menu(s), sub: None }) };
             }
@@ -114,10 +115,63 @@ impl App {
         None
     }
 
+    /// A way into the browser from the menu bar or its keys (spec: ui/browser-commands.md): the browser is shown first
+    /// when hidden.
+    pub(crate) fn browser_jump(&mut self, j: Jump) {
+        self.state.show_browser = true;
+        let s = &mut self.state;
+        match j {
+            // §1: the Current project tab with that section alone open, and selected. The search is cleared so that it
+            // shows (as Browse parameters does).
+            Jump::Section(name) => {
+                let Some(key) = view::section_key(name) else { return };
+                if s.browser_tab != view::PROJECT_TAB {
+                    s.browser_tab = view::PROJECT_TAB;
+                    s.browser_scroll = 0.0;
+                }
+                s.browser_search.clear();
+                for other in view::sections().filter(|&l| l != name).filter_map(view::section_key) {
+                    s.browser_open.remove(&other);
+                }
+                s.browser_open.insert(view::project_root());
+                s.browser_open.insert(key.clone());
+                select(s, &key);
+                reveal(s);
+            }
+            // §1-2: the tab as it was left, its open nodes and selection kept.
+            Jump::PluginDb => {
+                if s.browser_tab != view::PLUGIN_TAB {
+                    s.browser_tab = view::PLUGIN_TAB;
+                    s.browser_scroll = 0.0;
+                }
+            }
+            // §3: exactly as a click in the search field.
+            Jump::Find => {
+                self.browser_act(&Action::BrowserSearch);
+            }
+            // §4-5: Patterns opened, the current pattern's row selected when listed (else the section's).
+            Jump::Patterns => {
+                let Some(key) = view::section_key("Patterns") else { return };
+                if s.browser_tab != view::PROJECT_TAB {
+                    s.browser_tab = view::PROJECT_TAB;
+                    s.browser_scroll = 0.0;
+                }
+                s.browser_search.clear();
+                s.browser_open.insert(view::project_root());
+                s.browser_open.insert(key.clone());
+                let cur = view::Item::Pattern(s.pattern);
+                let row = view::rows(s).into_iter().find(|r| r.item == cur).map(|r| r.key);
+                select(s, row.as_ref().unwrap_or(&key));
+                reveal(s);
+            }
+        }
+        self.invalidate();
+    }
+
     /// Whether the mouse is over the docked browser.
     pub(crate) fn over_browser(&self) -> bool {
         let (x, y) = self.mouse;
-        self.state.show_browser && x < crate::views::BROWSER_W && y >= crate::views::WORK_Y
+        self.state.show_browser && x < crate::views::BROWSER_W && y >= crate::views::work_y(&self.state)
     }
 
     /// Whether typed letters belong to the browser search (the typing keyboard leaves them alone).
@@ -354,6 +408,41 @@ fn save_folders(folders: &[std::path::PathBuf]) {
     }
     let text: String = folders.iter().map(|f| format!("{}\r\n", f.display())).collect();
     let _ = std::fs::write(p, text);
+}
+
+/// The menu bar's ways into the browser (spec: ui/browser-commands.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jump {
+    /// VIEW's Browser section: this section of the Current project tree (§1).
+    Section(&'static str),
+    /// VIEW > Plugin database (Shift+F8), ADD > Browse plugin database: the Plugin database tab (§1, §2).
+    PluginDb,
+    /// TOOLS > Browser find... (Ctrl+F): the keyboard goes to the search field (§3).
+    Find,
+    /// PATTERNS > Open in project browser (Shift+Ctrl+P): the Patterns section, the other sections left as they are (§4).
+    Patterns,
+}
+
+impl Jump {
+    /// The jump behind entry `label` of menu `menu`. `None` for other entries, and for a section the tree does not list
+    /// (History, Remote control: their entries stay greyed out).
+    pub fn from_label(menu: usize, label: &str) -> Option<Jump> {
+        use crate::views::menus::{ADD_MENU, TOOLS_MENU, VIEW};
+        let j = match (menu, label) {
+            (VIEW, "Undo history") => Jump::Section("History"),
+            (VIEW, "Patterns") => Jump::Section("Patterns"),
+            (VIEW, "Generators in use") => Jump::Section("Generators"),
+            (VIEW, "Effects in use") => Jump::Section("Effects"),
+            (VIEW, "Remote control") => Jump::Section("Remote control"),
+            (VIEW, "Plugin database") | (ADD_MENU, "Browse plugin database") => Jump::PluginDb,
+            (TOOLS_MENU, "Browser find...") => Jump::Find,
+            _ => return None,
+        };
+        match j {
+            Jump::Section(name) => view::section_key(name).map(|_| j),
+            _ => Some(j),
+        }
+    }
 }
 
 /// Options-menu commands (spec §4).

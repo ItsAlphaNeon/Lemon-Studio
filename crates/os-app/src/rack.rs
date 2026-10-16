@@ -32,7 +32,7 @@ pub const ZIP_H: f32 = 12.0;
 pub const LEN_DRAG: f32 = 4.0;
 /// Pixels of vertical drag per insert on the mixer box (§12).
 pub const MIXER_DRAG: f32 = 10.0;
-/// Longest pattern the length box sets (32 bars, §7).
+/// Longest pattern the length box sets in a 4/4 project (32 bars, §7); see [`max_steps`].
 pub const MAX_STEPS: u32 = 512;
 /// Keys the graph editor's Note tab spans (two octaves around C5, a Lemon Studio choice).
 pub const KEY_LO: u16 = 48;
@@ -393,21 +393,53 @@ pub fn explicit_len(s: &State) -> Option<u32> {
     s.project.pattern(s.pattern).and_then(|p| p.length).filter(|&l| l > 0).map(|l| (l / ps).max(1))
 }
 
-/// Pattern length in steps: the explicit length, else whole bars past the last used step, at least one bar (§3, §7).
+/// Pattern length in steps (§3, §7, §23): the explicit length, else the content rounded up to whole bars of the
+/// pattern's own signature (the project's where it has none), at least one bar: the length the engine plays.
 pub fn pattern_steps(s: &State) -> u32 {
     if let Some(l) = explicit_len(s) {
         return l;
     }
-    let ps = per_step(s);
-    let last = s.project.pattern(s.pattern).and_then(|p| p.notes.iter().map(|n| n.position / ps).max());
-    last.map_or(16, |l| (l / 16 + 1) * 16)
+    s.project.pattern_length(s.pattern).div_ceil(per_step(s)).max(1)
+}
+
+/// Steps in a bar of the project's signature: what the length box's Set to ▸ N bars counts (§23).
+pub fn bar_steps(s: &State) -> u32 {
+    (s.project.bar_ticks() / per_step(s)).max(1)
+}
+
+/// Steps in a beat of the project's signature (16 / denominator): the length of the step colour groups (§3, §23).
+pub fn beat_steps(s: &State) -> u32 {
+    let den = s.project.time_signature.map_or(4, |(_, d)| d);
+    (s.project.bar_of(1, den) / per_step(s)).max(1)
+}
+
+/// Longest pattern the length box sets: 32 bars of the project's signature, at least [`MAX_STEPS`].
+pub fn max_steps(s: &State) -> u32 {
+    MAX_STEPS.max(32 * bar_steps(s))
+}
+
+/// The current pattern's bars up to tick `end`, as `(start, end)` ticks (§6, §23): its own signature's from each
+/// marker on, the project's before the first; a marker cuts the bar it falls in.
+pub fn pattern_bars(s: &State, end: u32) -> Vec<(u32, u32)> {
+    let regions = s.project.pattern_bars(s.pattern);
+    let mut bars = Vec::new();
+    for (i, &(start, bar, _)) in regions.iter().enumerate() {
+        let stop = regions.get(i + 1).map_or(end, |r| r.0.min(end));
+        let mut t = start;
+        while t < stop {
+            bars.push((t, (t + bar).min(stop)));
+            t += bar;
+        }
+    }
+    bars
 }
 
 /// Set the current pattern's length (`None` = Auto).
 pub fn set_len(s: &mut State, steps: Option<u32>) {
     let ps = per_step(s);
     let n = s.pattern.max(1);
-    crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(MAX_STEPS) * ps);
+    let max = max_steps(s);
+    crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
     s.piano.dirty = true;
 }
 
@@ -514,6 +546,24 @@ pub fn row_steps(s: &State, r: usize, len: u32) -> Vec<bool> {
 
 // ---------------------------------------------------------------------------------------------------------
 // Channel edits
+
+/// Put row `r` into the filter group `name` and show that group (ADD > Audio clip / Automation clip, spec:
+/// ui/add-clip-channels.md §1-3). A missing group is made, before "Unsorted" in the file's order.
+pub fn join_group(s: &mut State, r: usize, name: &str) {
+    let rack = &mut s.rack;
+    let g = match rack.groups.iter().position(|g| g.name == name) {
+        Some(g) => g,
+        None => {
+            let at = rack.unsorted_at.unwrap_or(rack.groups.len()).min(rack.groups.len());
+            rack.groups.insert(at, Group { name: name.to_string(), members: BTreeSet::new() });
+            rack.unsorted_at = rack.unsorted_at.map(|u| u.max(at) + 1);
+            at
+        }
+    };
+    rack.groups[g].members.insert(r);
+    rack.filter = Filter::Group(g);
+    autosize(s);
+}
 
 pub(crate) fn channel_name(s: &State, r: usize) -> String {
     s.project.channels.get(r).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default()
@@ -952,6 +1002,12 @@ pub enum RCmd {
     TransposeSel,
     AssignFreeSel,
     SelectMixerTracks,
+    /// Change declicking for selected channels to ▸: declick mode 0..5 (spec: audio/declick.md).
+    DeclickSel(u8),
+    /// Switch all plugin editors to ▸: detached (true) or attached.
+    DetachAll(bool),
+    /// Switch all (true) / selected audio clip channels to ▸: a stretch method as stored (event 215 int 27).
+    StretchClips(bool, i32),
     ZipSel,
     UnzipAll,
     AutoResize(AutoResize),
@@ -1013,13 +1069,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::not_yet("Burn selected loops to pattern"),
         off(it("Assign selected to free mixer track(s)", RCmd::AssignFreeSel).key("Ctrl+L"), none),
         off(it("Select mixer tracks for the selected channels", RCmd::SelectMixerTracks), none),
-        PItem::sub(
-            "Change declicking for selected channels to",
-            ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"]
-                .into_iter()
-                .map(PItem::not_yet)
-                .collect(),
-        ),
+        PItem::sub(crate::views::menus::DECLICK_LABEL, declick_items(s)),
         PItem::sep(),
         off(it("Zip selected", RCmd::ZipSel).key("Alt+Z"), none),
         it("Unzip all", RCmd::UnzipAll).key("Alt+U"),
@@ -1055,9 +1105,9 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         opt(s, "Detached"),
         PItem::head("Switch"),
         PItem::not_yet("Switch smart disable for all plugins"),
-        PItem::sub("Switch all audio clip channels to", vec![PItem::not_yet("Resample"), PItem::not_yet("Stretch")]),
-        PItem::sub("Switch selected audio clip channels to", vec![PItem::not_yet("Resample"), PItem::not_yet("Stretch")]),
-        PItem::sub("Switch all plugin editors to", vec![PItem::not_yet("Attached"), PItem::not_yet("Detached")]),
+        PItem::sub(crate::views::menus::CLIPS_ALL_LABEL, stretch_items(true)),
+        PItem::sub(crate::views::menus::CLIPS_SEL_LABEL, stretch_items(false)),
+        PItem::sub(crate::views::menus::EDITORS_LABEL, editor_items()),
     ];
     Popup { x, y, items, sub: None }
 }
@@ -1066,6 +1116,86 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
 pub(crate) fn add_one_items(s: &State) -> Vec<PItem> {
     crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(None), true)
 }
+
+/// Change declicking for selected channels to ▸ (§17, also TOOLS): the six declick modes in their order, named as Lemon
+/// Sampler's list names them (spec: audio/declick.md), greyed out while no channel is selected.
+pub(crate) fn declick_items(s: &State) -> Vec<PItem> {
+    let none = s.rack.sel.is_empty();
+    lemon_sampler::params::DECLICK
+        .iter()
+        .enumerate()
+        .map(|(m, &label)| {
+            let i = it(label, RCmd::DeclickSel(m as u8));
+            if none { i.off() } else { i }
+        })
+        .collect()
+}
+
+/// Switch all plugin editors to ▸ (§17 "Switch", also TOOLS; spec: ui/plugin-window.md "Docking"); greyed out where
+/// plugin editors have no windows of their own.
+pub(crate) fn editor_items() -> Vec<PItem> {
+    let item = |label: &'static str, on: bool| if cfg!(plugin_windows) { it(label, RCmd::DetachAll(on)) } else { it(label, RCmd::DetachAll(on)).off() };
+    vec![item("Attached", false), item("Detached", true)]
+}
+
+/// Switch all (`all`) / selected audio clip channels to ▸ (§17 "Switch", also TOOLS; spec: ui/channel-switches.md §1):
+/// the stretch methods named and stored as audio/time-stretch.md gives them, in two columns with headers, no marks.
+pub(crate) fn stretch_items(all: bool) -> Vec<PItem> {
+    use lemon_sampler::params::{STRETCH, STRETCH_FILE};
+    let pick = |i: usize| it(STRETCH[i], RCmd::StretchClips(all, STRETCH_FILE[i]));
+    let mut v = Vec::new();
+    for (head, picks) in [("Realtime", 0..3), ("Elastique", 3..5), ("Special", 5..7)] {
+        v.push(PItem::head(head));
+        v.extend(picks.map(pick));
+    }
+    v.push(PItem::col());
+    v.push(pick(7));
+    v.push(PItem::head("Legacy"));
+    v.extend((8..STRETCH.len()).map(pick));
+    v
+}
+
+/// Asks before setting stretch method `method` on every audio clip channel (`all`) or on the selected ones (`sel`);
+/// nothing when no channel is concerned (spec: ui/channel-switches.md §1, §6).
+fn ask_stretch(app: &mut App, all: bool, method: i32, sel: &[usize]) {
+    use crate::dialog::{spans, Answer, Kind, Msg, Then};
+    let chans = &app.state.project.channels;
+    let rows: Vec<usize> = (0..chans.len()).filter(|&r| chans[r].kind == ChannelKind::AudioClip && (all || sel.contains(&r))).collect();
+    if rows.is_empty() {
+        return;
+    }
+    let name = lemon_sampler::params::STRETCH[lemon_sampler::params::stretch_index(method) as usize].to_lowercase();
+    let which = if all { "All" } else { "Selected" };
+    let text = format!("{which} audio clip channels will be set to {name} mode. Some channels may need manual time adjustment.");
+    app.show_msg(Msg::new(Kind::Warning, "Confirm", spans(&[&text]), &[Answer::Ok, Answer::Cancel], Then::StretchClips(rows, method)));
+}
+
+/// Rows `rows` take stretch method `method`, their TIME, PITCH and MUL kept: the channel's sound settings, which the
+/// engine plays and the project saves, and its Lemon Sampler (spec: ui/channel-switches.md §1).
+pub(crate) fn set_stretch(app: &mut App, rows: &[usize], method: i32) {
+    for &r in rows {
+        let Some(c) = app.state.project.channels.get_mut(r) else { continue };
+        c.sound.stretch[3] = method as u32;
+        app.plugins.set_sampler_stretch(r, &c.sound);
+    }
+    app.state.piano.dirty = true;
+}
+
+/// Every selected channel (`rows`) takes declick mode `mode`: the channel's sound settings, which the engine plays, and
+/// a sampler channel's Lemon Sampler, which plays it in their place (spec: audio/declick.md, plugins/lemon-sampler.md §7).
+fn set_declick(app: &mut App, rows: &[usize], mode: u8) {
+    for &r in rows {
+        let Some(c) = app.state.project.channels.get_mut(r) else { continue };
+        c.sound.declick = mode;
+        if c.kind.is_sampler() {
+            app.plugins.set_param_named(r, SAMPLER_DECLICK, f64::from(mode));
+        }
+    }
+    app.state.piano.dirty = true;
+}
+
+/// Lemon Sampler's declick mode parameter (its index is the mode).
+const SAMPLER_DECLICK: &str = "Declicking mode";
 
 /// Right click on a name button (§18): two columns.
 pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
@@ -1201,11 +1331,11 @@ pub fn filter_edit_menu(s: &State, x: f32, y: f32) -> Popup {
 
 /// Pattern length box right click (§7).
 pub fn length_menu(s: &State, x: f32, y: f32) -> Popup {
-    let cur = explicit_len(s);
+    let (cur, bar) = (explicit_len(s), bar_steps(s));
     let mut items = vec![PItem::head("Set to"), it("Auto", RCmd::SetLen(None)).mark(Mark::Radio(cur.is_none()))];
     for bars in [1u32, 2, 4, 8, 16, 32] {
         let label = if bars == 1 { "1 bar".to_string() } else { format!("{bars} bars") };
-        items.push(it(label, RCmd::SetLen(Some(bars * 16))).mark(Mark::Radio(cur == Some(bars * 16))));
+        items.push(it(label, RCmd::SetLen(Some(bars * bar))).mark(Mark::Radio(cur == Some(bars * bar))));
     }
     Popup { x, y, items, sub: None }
 }
@@ -1270,6 +1400,11 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             app.focus_channel(r);
             app.state.raise(Win::PianoRoll);
         }
+        RCmd::DeclickSel(mode) => set_declick(app, &sel, mode),
+        RCmd::StretchClips(all, method) => ask_stretch(app, all, method, &sel),
+        // spec: ui/plugin-window.md "Docking and the window menu"
+        #[cfg(plugin_windows)]
+        RCmd::DetachAll(on) => app.plugins.set_all_detached(on),
         _ => {}
     }
     let s = &mut app.state;
@@ -1492,7 +1627,10 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::MoveSel(_)
         | RCmd::Sort(_)
         | RCmd::LoadSample(_)
-        | RCmd::PianoRoll(_) => None,
+        | RCmd::PianoRoll(_)
+        | RCmd::DeclickSel(_)
+        | RCmd::DetachAll(_)
+        | RCmd::StretchClips(..) => None,
     };
     app.invalidate();
     msg
@@ -1523,18 +1661,15 @@ pub fn play_project(s: &State) -> Project {
     p
 }
 
-/// Repeat each row's first `loop_len` steps up to the end of every pattern; notes past the loop length go.
+/// Repeat each row's first `loop_len` steps up to the end of every pattern (its length as played, §23); notes past
+/// the loop length go.
 fn expand_loops(p: &mut Project, s: &State, rows: &[usize]) {
     let ps = per_step(s);
-    let bar = ps * 16;
+    let ends: Vec<u32> = p.patterns.iter().map(|pat| p.pattern_length(pat.number)).collect();
     for &r in rows {
         let (Some(&len), Some(ch)) = (s.rack.loop_len.get(&r), p.channels.get(r).map(|c| c.index)) else { continue };
         let span = len.max(1) * ps;
-        for pat in &mut p.patterns {
-            let end = pat.length.filter(|&l| l > 0).unwrap_or_else(|| {
-                let last = pat.notes.iter().map(|n| n.position + n.length).max().unwrap_or(0);
-                (last / bar + 1) * bar
-            });
+        for (pat, &end) in p.patterns.iter_mut().zip(&ends) {
             let src: Vec<Note> = pat.notes.iter().filter(|n| n.channel == ch && n.position < span).copied().collect();
             if src.is_empty() {
                 continue;

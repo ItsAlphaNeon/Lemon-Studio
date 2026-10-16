@@ -2964,23 +2964,11 @@ fn fallback_tone(rate: u32) -> Arc<Sample> {
     Arc::new(Sample { rate, right: left.clone(), left })
 }
 
-/// Ticks in a bar: `PPQ * 4 * numerator / denominator` (spec: audio/timing.md, "Settings").
-fn bar_ticks(project: &Project) -> u64 {
-    let (num, den) = project.time_signature.unwrap_or((4, 4));
-    (u64::from(project.ppq.max(1)) * 4 * u64::from(num.max(1)) / u64::from(den.max(1))).max(1)
-}
-
-/// A pattern's length in ticks: an explicit length (the channel rack's length box, spec: ui/channel-rack.md Â§7) wins;
-/// otherwise the end of its last note (a length of 0 counting as 1) rounded up to whole bars, at least one bar. A
-/// pattern whose notes end exactly on a bar line is that long (spec: audio/timing.md, "Where the song ends").
+/// A pattern's length in ticks, by the rule the app shares ([`Project::pattern_length`]): an explicit length wins;
+/// otherwise its last note's end rounded up to a bar line of the pattern's own time signature, at least one bar (spec:
+/// audio/song-structure.md, "Time signatures and a pattern's length"; audio/timing.md, "Where the song ends").
 fn pattern_length(project: &Project, number: u16) -> u64 {
-    let Some(p) = project.patterns.iter().find(|p| p.number == number) else { return bar_ticks(project) };
-    if let Some(l) = p.length.filter(|&l| l > 0) {
-        return u64::from(l);
-    }
-    let bar = bar_ticks(project);
-    let last = p.notes.iter().map(|n| u64::from(n.position) + u64::from(n.length.max(1))).max().unwrap_or(0);
-    last.div_ceil(bar).max(1) * bar
+    u64::from(project.pattern_length(number))
 }
 
 /// Note triggers plus the song's end tick: in pattern mode the pattern's length, in song mode the largest end of a
@@ -3671,6 +3659,38 @@ mod tests {
             ..Default::default()
         }];
         p
+    }
+
+    /// A pattern's bars are its own (spec: audio/song-structure.md, "Time signatures and a pattern's length"): the
+    /// table's rows at 96 PPQ, the last note ending at 300, as the pattern's length in pattern mode.
+    #[test]
+    fn pattern_length_follows_the_patterns_own_time_signature() {
+        use os_model::{Clip, TimeMarker};
+        let sig = |position: u32, n: u8, d: u8| TimeMarker { position, kind: TimeMarker::SIGNATURE, name: format!("{n}/{d}"), numerator: n, denominator: d };
+        let ending = |end: u32| vec![Note { length: end - 192, ..Note::step(0, 192) }];
+        let len = |p: &Project| Engine::new(p, &mut SampleLibrary::new(None), 48000, PlayMode::Pattern(1)).end_tick();
+        // The arrangement has a clip of the pattern at bar 3.
+        let at = |notes: Vec<Note>, project_sig: Option<(u16, u16)>, pattern: Vec<TimeMarker>, arrangement: Vec<TimeMarker>| {
+            let mut p = song(notes, vec![Clip::new(768, 384, 0, ClipSource::Pattern(1))]);
+            p.time_signature = project_sig;
+            p.patterns[0].markers = pattern;
+            p.arrangements[0].markers = arrangement;
+            len(&p)
+        };
+        assert_eq!(at(ending(300), None, vec![], vec![]), 384, "4/4, no marker");
+        assert_eq!(at(ending(300), Some((3, 4)), vec![], vec![]), 576, "project in 3/4");
+        assert_eq!(at(ending(300), None, vec![], vec![sig(0, 3, 4)]), 384, "3/4 marker in the arrangement at 0");
+        assert_eq!(at(ending(300), None, vec![], vec![sig(768, 3, 4)]), 384, "3/4 marker in the arrangement at the clip");
+        assert_eq!(at(ending(300), None, vec![sig(0, 3, 4)], vec![]), 576, "3/4 marker at the pattern's start");
+        assert_eq!(at(ending(500), None, vec![sig(0, 3, 4)], vec![]), 576, "a note ending at 500");
+        assert_eq!(at(ending(300), None, vec![sig(192, 3, 4)], vec![]), 480, "3/4 marker at tick 192: 192 + 288");
+        // Ending exactly on a bar line; an empty pattern is one bar of its own signature; the explicit length wins.
+        assert_eq!(at(ending(384), None, vec![], vec![]), 384);
+        assert_eq!(at(vec![], None, vec![sig(0, 3, 8)], vec![]), 144);
+        let mut p = project(ending(300), vec![]);
+        p.patterns[0].markers = vec![sig(0, 3, 4)];
+        p.patterns[0].length = Some(192);
+        assert_eq!(len(&p), 192);
     }
 
     fn song_triggers(p: &Project) -> Vec<u64> {

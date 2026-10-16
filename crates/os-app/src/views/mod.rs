@@ -59,8 +59,14 @@ pub fn light(size: f32) -> os_ui::Font {
     os_ui::Font::light(size.round() as u16, 0)
 }
 
-/// Top of the workspace (§1).
+/// Top of the workspace (§1) below the toolbar.
 pub const WORK_Y: f32 = 83.0;
+
+/// Top of the workspace and the browser now: the window's top while the toolbar is hidden (spec: ui/toolbar-menu.md
+/// §5).
+pub fn work_y(s: &State) -> f32 {
+    if s.toolbar.hidden { 0.0 } else { WORK_Y }
+}
 /// Width of the docked browser incl. the splitter (§4).
 pub const BROWSER_W: f32 = 209.0;
 
@@ -76,7 +82,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
 
     // Workspace (§9): watermark, then docked windows on top.
     let left = if s.show_browser { BROWSER_W } else { 0.0 };
-    let work = Rect::new(left, WORK_Y, w - left, h - WORK_Y);
+    let top = work_y(s);
+    let work = Rect::new(left, top, w - left, h - top);
     let docked = s.docked();
     if docked.is_none() {
         let wm = ui.t.watermark;
@@ -92,7 +99,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     let docked_at = s.z.iter().rposition(|&w| s.is_max(w));
     // Each part is skipped by a repaint that misses it (`Ui::part`).
     if s.show_browser {
-        let r = Rect::new(0.0, WORK_Y, BROWSER_W, h - WORK_Y);
+        let r = Rect::new(0.0, top, BROWSER_W, h - top);
         ui.part(Seg::Browser, r, |ui| browser::paint(ui, s, r));
     }
     let _ = work;
@@ -125,20 +132,30 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         ui.c.pop_clip();
         ui.win = None;
     }
-    ui.part(Seg::Toolbar, Rect::new(0.0, 0.0, w, WORK_Y), |ui| toolbar::paint(ui, s, f, w));
-    let overlays = ui.hit_count();
-    // A menu opened from the settings window (Audio page combos) goes over it.
-    if !s.settings.open {
-        playlist::paint_overlays(ui, s);
+    if !s.toolbar.hidden {
+        ui.part(Seg::Toolbar, Rect::new(0.0, 0.0, w, WORK_Y), |ui| toolbar::paint(ui, s, f, w));
     }
+    // The floating hint bar, over every window (spec: ui/toolbar-menu.md §4).
+    if s.toolbar.hint_bar {
+        toolbar::paint_hint_bar(ui, s, f);
+    }
+    let overlays = ui.hit_count();
     if let Some(m) = s.menu_open {
         menus::paint_dropdown(ui, s, m);
+    }
+    // A menu opened from the settings window (Audio page combos) goes over it; a dropdown's submenu over the dropdown;
+    // the time signature dialog's value lists over the dialog.
+    let over_dialog = crate::timesig::form_open(s);
+    if !s.settings.open && !over_dialog {
+        playlist::paint_overlays(ui, s);
     }
     rack::paint_fill(ui, s);
     patterns::paint(ui, s);
     if s.settings.open {
         settings::paint(ui, s);
-        playlist::paint_overlays(ui, s);
+        if !over_dialog {
+            playlist::paint_overlays(ui, s);
+        }
     }
     browser::paint_ghost(ui, s);
     if s.monitor.debug {
@@ -149,6 +166,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
     dialog::paint(ui, s);
+    if over_dialog {
+        playlist::paint_overlays(ui, s);
+    }
     overlays
 }
 
@@ -334,25 +354,43 @@ pub fn button_face(ui: &mut Ui, r: Rect, look: Look) {
     kit::button(ui.c, ui.t, r, look.state());
 }
 
+/// A square toolbar button's face for `look` and the colour of its icon. With the Toolbars menu's Flat buttons on
+/// (spec: ui/toolbar-menu.md §3) there is no face: a lit button is a slightly darker flat square with a blue icon
+/// (Lemon: its button shade, the icon in the brand colour), the others just their icon.
+pub fn tool_face(ui: &mut Ui, r: Rect, look: Look) -> Color {
+    let lit = matches!(look, Look::On | Look::Hot);
+    if !ui.flat {
+        button_face(ui, r, look);
+    } else if lit && lemon(ui) {
+        ui.c.fill_rrect(r.inset(1.0), ui.t.style.radius, ui.t.button);
+        return os_theme::design::lemon::MAIN;
+    } else if lit {
+        ui.c.fill_rect(Rect::new(r.x, r.y + 1.0, r.w, r.h - 2.0), ui.t.s(0x282c2e));
+        return ui.t.a(0x4589c7);
+    }
+    match look {
+        Look::On | Look::Hot => ui.t.on_glyph,
+        Look::Hover => ui.t.tx(0xffffff),
+        Look::Off => ui.t.glyph,
+    }
+}
+
 /// A 30×33 toolbar button (§1). `on` draws the orange "on" state.
 /// An `Action::Placeholder` button is not available yet: drawn greyed out, never lit (`Ui::off`).
 pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, hint: &'static str) {
     if matches!(action, Action::Placeholder(_)) {
         ui.off(r, hint);
         let st = kit::State::NORMAL.with_disabled(true);
-        kit::button(ui.c, ui.t, r, st);
+        if !ui.flat {
+            kit::button(ui.c, ui.t, r, st);
+        }
         icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), kit::ink(ui.t, st));
         return;
     }
     let hov = ui.hit(r, action.clone(), hint);
     let down = ui.down(r, &action);
     let look = if on { Look::On } else if down { Look::Hot } else if hov { Look::Hover } else { Look::Off };
-    button_face(ui, r, look);
-    let c = match look {
-        Look::On | Look::Hot => ui.t.on_glyph,
-        Look::Hover => ui.t.tx(0xffffff),
-        Look::Off => ui.t.glyph,
-    };
+    let c = tool_face(ui, r, look);
     icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), c);
 }
 

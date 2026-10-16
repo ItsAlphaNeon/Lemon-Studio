@@ -183,13 +183,20 @@ pub struct Geom {
     /// Key row pitch in pixels (§3a).
     pub row: f32,
     pub step: u32,
+    /// Beat and bar of the pattern's grid at its start.
     pub beat: u32,
     pub bar: u32,
+    /// The pattern's own bar grid, `(start, bar, beat)` per time-signature region (`Project::pattern_bars`): its
+    /// time-signature markers set its bars and beats (3/8: a bar every 6 steps, spec: ui/pattern-time-signature.md §2).
+    pub bars: Vec<(u32, u32, u32)>,
 }
 
 impl Geom {
     pub fn new(s: &State, grid: Rect) -> Geom {
         let ppq = u32::from(s.project.ppq.max(4));
+        // A beat is the signature's note value: a quarter in 4/4, an eighth in 3/8.
+        let bars: Vec<(u32, u32, u32)> =
+            s.project.pattern_bars(s.pattern).into_iter().map(|(start, bar, (num, _))| (start, bar, (bar / u32::from(num.max(1))).max(1))).collect();
         Geom {
             grid,
             ppt: s.piano.px_per_beat / ppq as f32,
@@ -197,9 +204,31 @@ impl Geom {
             scroll_y: s.piano.scroll_y,
             row: s.piano.row_h,
             step: ppq / 4,
-            beat: ppq,
-            bar: ppq * 4,
+            beat: bars[0].2,
+            bar: bars[0].1,
+            bars,
         }
+    }
+
+    /// Whether `tick` is on a bar line and on a beat line of the pattern's grid.
+    pub fn line_at(&self, tick: u32) -> (bool, bool) {
+        let &(start, bar, beat) = self.bars.iter().rev().find(|r| r.0 <= tick).unwrap_or(&self.bars[0]);
+        let d = tick.saturating_sub(start);
+        (d % bar == 0, d % beat == 0)
+    }
+
+    /// The bar lines before `end` ticks, with their bar numbers from 1.
+    pub fn bar_lines(&self, end: f32) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for (i, &(start, bar, _)) in self.bars.iter().enumerate() {
+            let next = self.bars.get(i + 1).map_or(u32::MAX, |r| r.0);
+            let mut t = start;
+            while t < next && (t as f32) < end {
+                out.push((t, out.len() as u32 + 1));
+                t = t.saturating_add(bar);
+            }
+        }
+        out
     }
 
     pub fn x_of(&self, tick: f32) -> f32 {
@@ -284,14 +313,10 @@ pub fn shown_len(s: &State, n: &Note) -> u32 {
     if n.length == 0 { u32::from(s.project.ppq.max(4)) / 4 } else { n.length }
 }
 
-/// Pattern length in ticks as the engine loops it: the rack's explicit length, else whole bars past the last note end.
-pub fn pattern_length(s: &State, notes: &[Note]) -> u32 {
-    if let Some(l) = s.project.pattern(s.pattern).and_then(|p| p.length).filter(|&l| l > 0) {
-        return l;
-    }
-    let bar = u32::from(s.project.ppq.max(1)) * 4;
-    let end = notes.iter().map(|n| n.position + shown_len(s, n)).max().unwrap_or(0);
-    (end / bar + 1) * bar
+/// Pattern `n`'s length in ticks as the engine loops it: the rack's explicit length, else its last note's end rounded
+/// up to a bar line of its own time signature (`Project::pattern_length`, spec: audio/song-structure.md).
+pub fn pattern_length(s: &State, n: u16) -> u32 {
+    s.project.pattern_length(n)
 }
 
 /// What the event panel edits (spec: ui/piano-roll.md §7a, §7b). The first seven are note properties, the

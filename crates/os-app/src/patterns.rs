@@ -45,6 +45,13 @@ pub enum Cmd {
     Delete,
     MoveUp,
     MoveDown,
+    /// Set time signature...: a dialog, run by `App::pattern_cmd` (spec: ui/pattern-time-signature.md).
+    TimeSignature,
+    /// Open in project browser: the browser's Patterns section, run by `App::pattern_cmd`
+    /// (spec: ui/browser-commands.md §4).
+    OpenInBrowser,
+    /// Split by channel: one pattern per channel with notes (spec: ui/split-by-channel.md §2).
+    SplitByChannel,
 }
 
 impl Cmd {
@@ -64,6 +71,9 @@ impl Cmd {
             "Delete" => Cmd::Delete,
             "Move up" => Cmd::MoveUp,
             "Move down" => Cmd::MoveDown,
+            "Set time signature..." => Cmd::TimeSignature,
+            "Open in project browser" => Cmd::OpenInBrowser,
+            "Split by channel" => Cmd::SplitByChannel,
             _ => return None,
         })
     }
@@ -358,8 +368,63 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
             s.pattern = cur + 1;
         }
         Cmd::MoveUp | Cmd::MoveDown => {}
+        Cmd::SplitByChannel => split_by_channel(s),
+        // Dialogs and the browser: `App::pattern_cmd` runs them.
+        Cmd::TimeSignature | Cmd::OpenInBrowser => {}
     }
     None
+}
+
+/// PATTERNS > Split by channel (spec: ui/split-by-channel.md §2). Channels with notes in the current pattern, in rack
+/// order: the pattern keeps the first one's notes and takes its name; each further one gets a pattern of its own named
+/// after it, right after the current one in channel order (later patterns move up with their clips, as Insert one),
+/// with the original's colour, markers and other settings but only that channel's notes. Every playlist clip of the
+/// original gets one clip per new pattern at the same place, under it. No notes: nothing happens. One undo step.
+pub fn split_by_channel(s: &mut State) {
+    let cur = s.pattern.max(1);
+    let Some(orig) = s.project.pattern(cur).cloned() else { return };
+    let chans: Vec<(u16, String)> = s
+        .project
+        .channels
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| orig.notes.iter().any(|n| n.channel == c.index))
+        .map(|(r, c)| (c.index, crate::rack::channel_name(s, r)))
+        .collect();
+    let Some(((first, name), rest)) = chans.split_first() else { return };
+    let k = rest.len() as u16;
+    // Room for the new numbers: no used pattern may move past the last one.
+    let last = s.project.patterns.iter().filter(|p| used(p)).map(|p| p.number).max().unwrap_or(cur).max(cur);
+    if usize::from(last) + rest.len() > usize::from(MAX) {
+        return;
+    }
+    let undo = crate::playlist::Extra::Patterns { patterns: s.project.patterns.clone(), current: cur };
+    crate::playlist::snapshot_with(s, Some(undo));
+    // Notes of a channel no longer in the rack stay with the original.
+    let p = pat_mut(s, cur);
+    p.notes.retain(|n| n.channel == *first || !chans.iter().any(|c| c.0 == n.channel));
+    p.name = Some(name.clone());
+    s.piano.dirty = true;
+    if k == 0 {
+        return;
+    }
+    renumber(s, |n| Some(if n > cur { n + k } else { n }));
+    for (j, (ch, name)) in (1..).zip(rest) {
+        // Control points stay with the original (only notes are divided).
+        let notes = orig.notes.iter().filter(|n| n.channel == *ch).copied().collect();
+        *pat_mut(s, cur + j) = Pattern { number: cur + j, name: Some(name.clone()), notes, controls: Vec::new(), ..orig.clone() };
+    }
+    if let Some(a) = s.project.arrangement_mut() {
+        // Clips are drawn in record order: the new ones go just before their original, which stays on top.
+        let mut clips = Vec::with_capacity(a.clips.len());
+        for c in std::mem::take(&mut a.clips) {
+            if c.source == ClipSource::Pattern(cur) {
+                clips.extend((1..=k).map(|j| os_model::Clip { source: ClipSource::Pattern(cur + j), ..c }));
+            }
+            clips.push(c);
+        }
+        a.clips = clips;
+    }
 }
 
 /// Ok in the delete confirmation (channels waiting in the rack go to the app, which removes them).
