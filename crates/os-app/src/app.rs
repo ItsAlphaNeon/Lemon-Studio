@@ -1486,7 +1486,7 @@ impl App {
     /// Writes the project to `target`: the size of the file written, None when the save failed.
     fn write_project(&mut self, target: PathBuf) -> Option<u64> {
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
-        crate::backup::keep_overwritten(&target);
+        crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
         // them.
         for row in self.state.hosted_rows.clone() {
@@ -1545,6 +1545,7 @@ impl App {
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
         crate::project_info::stamp(s, &mut proj);
+        crate::data_folder::stamp(s, &mut proj);
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         let result = os_flp::project::apply(&proj, &mut file)
@@ -3714,6 +3715,7 @@ impl App {
             SAct::Close => st.open = false,
             // The program settings declared in `crate::prefs`.
             SAct::Combo(views::settings::DEFAULT_TEMPLATE, x, y) => return self.template_menu(x, y),
+            SAct::Combo(crate::data_folder::COMBO, x, y) => return self.data_folder_menu(x, y),
             SAct::Combo(label, x, y) if crate::prefs::find_combo(label).is_some() => return self.pref_menu(label, x, y),
             SAct::Combo(label, x, y) => return self.audio_menu(label, x, y),
             SAct::Slider(label, x, w) => return self.pref_slider_press(label, x, w),
@@ -9010,7 +9012,7 @@ mod tests {
         assert_eq!(app.state.message.as_deref(), Some("Send master sync: not available yet"));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
         click(&mut app, &mut c, r);
-        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Ask for data folder")), "a combo that does not work yet is greyed out");
+        assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Ask for data folder", ..)))), "Ask for data folder works");
         assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Timebase (PPQ)", ..)))), "the PPQ combo works");
         let adv = Action::Settings(SAct::Group("Advanced"));
         let r = hit_rect(&app, &adv);

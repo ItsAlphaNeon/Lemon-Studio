@@ -131,8 +131,9 @@ pub const AUTOSAVE: Combo = Combo {
     default: 2,
 };
 
-/// File ▸ Backup: where backups go. Both write to the global folder until Lemon Studio has project data folders
-/// (`crate::backup`). Spec: ui/settings-choices.md "Backup files".
+/// File ▸ Backup: where backups go. "Save to the project data folder if there is one" writes a project with a data
+/// folder to `<data folder>/Backup` (`crate::data_folder::backup_folder`). Spec: ui/settings-choices.md "Backup files",
+/// ui/data-folder.md §3.
 pub const BACKUP_LOCATION: Combo = Combo {
     key: "backup_location",
     label: "Location",
@@ -418,6 +419,27 @@ pub const PROJECT_DATA_SIZE_WARNING: Combo = Combo {
     default: 1,
 };
 
+/// Project ▸ Data folder: when Lemon Studio's Save as and New project forms come up (`crate::project_forms`): saving a
+/// project never saved, FILE ▸ New, the program's start. A program setting, not the project's. Spec:
+/// ui/data-folder.md §1, §7.
+pub const ASK_DATA_FOLDER: Combo = Combo {
+    key: "ask_for_data_folder",
+    label: "Ask for data folder",
+    choices: &[
+        "On startup, when starting a new project and when saving unsaved projects",
+        "When starting a new project and when saving unsaved projects",
+        "When starting a new project only",
+        "When saving unsaved projects only",
+        "Don't ask",
+    ],
+    default: 3,
+};
+
+/// Project ▸ Data folder: the samples a project uses are copied into `<data folder>/Samples` (`crate::data_folder`):
+/// all of them when it is ticked (after a question), then each sample loaded while it is ticked. A program setting,
+/// not the project's. Spec: ui/data-folder.md §4.
+pub const COPY_USED_SAMPLES: Check = Check { key: "copy_used_samples", label: "Copy used samples to the project folder", default: false };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -462,9 +484,10 @@ pub const CHECKS: &[&Check] = &[
     &AUTO_CLOSE,
     &SMART_DISABLE,
     &ALIGN_TICK_LENGTHS,
+    &COPY_USED_SAMPLES,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &TRANSPARENT_WINDOWS, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &TRANSPARENT_WINDOWS, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING, &ASK_DATA_FOLDER];
 /// The declared combos no settings page shows (a window of their own does): General ▸ Input ▸ Manage shortcuts' rows
 /// (`crate::shortcuts`). Read by the declaration tests.
 #[cfg_attr(not(test), allow(dead_code))]

@@ -24,6 +24,7 @@ mod cable;
 mod clip_colors;
 mod clock;
 mod cpu;
+mod data_folder;
 mod dialog;
 mod filedlg;
 mod enable_groups;

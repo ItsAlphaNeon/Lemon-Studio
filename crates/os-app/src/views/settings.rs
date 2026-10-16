@@ -349,7 +349,8 @@ pub enum Row {
     Check(&'static str, bool),
     /// Two checks side by side (second at x 340).
     Check2(&'static str, bool, &'static str, bool),
-    /// Disabled check (drawn dim).
+    /// Disabled check (drawn dim). No page has one at the moment.
+    #[allow(dead_code)]
     Off(&'static str, bool),
     /// Combo box: value, box width, label to its right.
     Combo(String, f32, &'static str),
@@ -390,6 +391,8 @@ pub enum Row {
     InfoFooter(Vec<String>),
     /// General ▸ Display's PPI ruler (`crate::ppi`, `ppi_ruler`).
     Ppi,
+    /// Project ▸ Data folder's Rename button, folder button and path (`super::data_folder`).
+    DataFolder,
 }
 
 pub struct Group {
@@ -643,11 +646,13 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]
         }
         PROJECT => vec![
-            g("Data folder", vec![
-                combo("Don't use a data folder", 306.0, ""),
-                txt("(none)"),
-                combo("When saving unsaved projects only", 444.0, "Ask for data folder"),
-                Off("Copy used samples to the project folder", false),
+            // The project's data folder (events 167 and 202) and two program settings (spec: ui/data-folder.md §1);
+            // drawn by `super::data_folder`.
+            g(super::data_folder::GROUP, vec![
+                combo(crate::data_folder::choice_text(&s.project), 306.0, crate::data_folder::COMBO),
+                DataFolder,
+                combo(crate::prefs::choice(&crate::prefs::ASK_DATA_FOLDER), 444.0, crate::prefs::ASK_DATA_FOLDER.label),
+                Check(crate::prefs::COPY_USED_SAMPLES.label, false),
             ]),
             g("Time settings", {
                 // The bar as the project holds it (4/4 when the file has none), in the mode of event 35: a time
@@ -764,6 +769,7 @@ fn row_h(r: &Row) -> f32 {
         Row::Table => 4.0 + 18.0 + TABLE_ROW_H * TABLE_ROWS as f32 + 4.0 + 34.0,
         Row::Edit(f, _) => if f.multiline() { COMMENT_LINE_H * COMMENT_LINES as f32 + 12.0 } else { 28.0 },
         Row::InfoFooter(lines) => (lines.len() as f32 * FOOTER_LINE_H + 8.0).max(36.0),
+        Row::DataFolder => super::data_folder::FOLDER_ROW_H,
     }
 }
 
@@ -980,7 +986,7 @@ pub fn thick_lines_live(scale: f32) -> bool {
 }
 
 /// The check mark itself at (x, cy).
-fn led(ui: &mut Ui, x: f32, cy: f32, on: bool, hov: bool) {
+pub(super) fn led(ui: &mut Ui, x: f32, cy: f32, on: bool, hov: bool) {
     let t = ui.t;
     // Round LED (spec §3): orange when on. Lemon: a rounded square check, lit with a tick when on.
     let lemon = super::lemon(ui);
@@ -1006,7 +1012,7 @@ fn led(ui: &mut Ui, x: f32, cy: f32, on: bool, hov: bool) {
 }
 
 /// Greys out what was just drawn in `r` on a group body.
-fn grey(ui: &mut Ui, r: Rect) {
+pub(super) fn grey(ui: &mut Ui, r: Rect) {
     let bg = ui.t.s(0x25272a);
     ui.veil(r, bg);
 }
@@ -1035,6 +1041,8 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
     let lh = ui.c.line_height(f);
     let ty = (cy - lh / 2.0).round();
     match row {
+        // Project ▸ Data folder's rows.
+        _ if super::data_folder::shows(group) => super::data_folder::paint_row(ui, s, row, g, x0, y, h),
         // General ▸ Display's Thick lines works from 200 % scaling: below, greyed out, it says so.
         Row::Check(k, _) if *k == crate::prefs::THICK_LINES.label && !thick_lines_live(ui.c.scale) => {
             check_greyed(ui, k, x0 + 10.0, cy, "Thick lines: from 200 % scaling")
@@ -1252,6 +1260,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             }
             paint_row_at(ui, s, group, &Row::Buttons(vec![(RESET_WORK_TIME, 150.0)]), g, by, 36.0, bx - g.x - 12.0);
         }
+        Row::DataFolder => super::data_folder::paint_row(ui, s, row, g, x0, y, h),
     }
 }
 

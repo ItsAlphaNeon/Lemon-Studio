@@ -10,6 +10,7 @@
 pub mod browser;
 pub mod cabledebug;
 pub mod channel_win;
+pub mod data_folder;
 pub mod dialog;
 pub mod menus;
 pub mod mondebug;
