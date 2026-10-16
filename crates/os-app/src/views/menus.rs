@@ -526,9 +526,23 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
         Vec::new()
     };
     let list_w = pats.iter().map(|(_, n)| ui.c.text_width(Font::new(14), n) + 28.0).fold(80.0f32, f32::max).ceil();
-    let col_w = |ci: usize, w: f32| if menu == PATTERNS && ci == 0 { list_w } else { w };
+    // A column is FL's width, or wider when an entry needs it in this font: its label, then its shortcut or its ▸.
+    let mut col_ws = Vec::with_capacity(m.cols.len());
+    for (ci, (w, items)) in m.cols.iter().enumerate() {
+        if menu == PATTERNS && ci == 0 {
+            col_ws.push(list_w);
+            continue;
+        }
+        let f = Font::new(14);
+        let mut need = *w;
+        for it in items.iter().filter(|it| matches!(it.kind, Kind::Item)) {
+            let key = if it.shortcut.is_empty() { 0.0 } else { ui.c.text_width(f.italic(), it.shortcut) + 16.0 };
+            need = need.max(20.0 + ui.c.text_width(f, it.label) + key + if it.sub { 18.0 } else { 8.0 });
+        }
+        col_ws.push(need.ceil());
+    }
 
-    let width: f32 = m.cols.iter().enumerate().map(|(ci, (w, _))| col_w(ci, *w)).sum::<f32>() + border * 2.0;
+    let width: f32 = col_ws.iter().sum::<f32>() + border * 2.0;
     let col_h = |items: &[Item]| items.iter().map(|it| row_h(&mt, it)).sum::<f32>();
     let body_h = m
         .cols
@@ -559,8 +573,8 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
     let open = s.menu_sub.filter(|_| s.playlist.popup.is_some());
     let mut cx = r.x + border;
     let mut flat = 0usize;
-    for (ci, (cw, items)) in m.cols.iter().enumerate() {
-        let cw = &col_w(ci, *cw);
+    for (ci, (_, items)) in m.cols.iter().enumerate() {
+        let cw = &col_ws[ci];
         let col = Rect::new(cx, r.y + border, *cw, body_h);
         if ci > 0 {
             ui.c.fill_rect(Rect::new(cx - 1.0, col.y, 1.0, body_h), t.menu_pop_head);
