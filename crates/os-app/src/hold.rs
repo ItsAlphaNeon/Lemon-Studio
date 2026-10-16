@@ -73,6 +73,8 @@ impl NoteType {
         [NoteType::Plain, NoteType::Slide, NoteType::Porta][(periods % 3) as usize]
     }
 
+    /// Note `n`'s type.
+    #[cfg(test)]
     pub fn of(n: &Note) -> NoteType {
         if n.slide() {
             NoteType::Slide

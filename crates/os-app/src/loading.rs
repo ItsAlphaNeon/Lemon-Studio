@@ -32,6 +32,7 @@ pub struct Loading {
     pub label: String,
     rx: Receiver<(String, Option<Arc<Sample>>)>,
     /// The threads decoding (`workers`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub workers: usize,
     /// Decodes kept alive until the instances took them (`os_engine::sample::load_shared` hands out live ones).
     held: Vec<Arc<Sample>>,

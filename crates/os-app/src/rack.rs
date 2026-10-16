@@ -2462,7 +2462,7 @@ mod tests {
             app.state.rack.zipped = [4].into();
             app.tick();
             assert_eq!(zips(&app), vec![4], "no switch yet, check {on}");
-            let mut switch = |app: &mut App, p: u16| {
+            let switch = |app: &mut App, p: u16| {
                 app.state.pattern = p;
                 app.tick();
                 zips(app)
