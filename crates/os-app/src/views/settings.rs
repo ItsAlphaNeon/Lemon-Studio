@@ -522,7 +522,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Check("Auto select linked modules", true),
                 Check("Auto zoom in piano roll", false),
                 Check("Small scrollbars in editors", false),
-                Check2("Detach all new plugins", false, "Open detached plugins with the main window", false),
+                Check2("Detach all new plugins", false, "Open detached plugins with the FL Studio window", false),
                 Check("Disable typing keyboard priority by default", false),
                 Check("Alternate meter scale", false),
                 Check("Show startup splash screen", true),

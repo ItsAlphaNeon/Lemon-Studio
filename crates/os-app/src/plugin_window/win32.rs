@@ -255,6 +255,12 @@ impl FrameWindow {
         unsafe { apply_clip(self.hwnd, &self.state) };
     }
 
+    /// The frame's top-left on screen (physical px), `None` while it is minimized.
+    pub fn position(&self) -> Option<(i32, i32)> {
+        let mut r: RECT = unsafe { std::mem::zeroed() };
+        (unsafe { IsIconic(self.hwnd) == 0 && GetWindowRect(self.hwnd, &mut r) != 0 }).then_some((r.left, r.top))
+    }
+
     /// The native frame window (drops find their plugin by it; tests drive and capture it).
     pub fn hwnd(&self) -> isize {
         self.hwnd as isize
@@ -726,6 +732,29 @@ pub fn default_position(owner: isize, scale: f32) -> (i32, i32) {
     let mut r: RECT = unsafe { std::mem::zeroed() };
     unsafe { GetWindowRect(owner as HWND, &mut r) };
     (r.left + (420.0 * scale).round() as i32, r.top + (160.0 * scale).round() as i32)
+}
+
+/// Screen position for a detached window opening for the first time (physical px): where `default_position` puts a new
+/// window, moved onto the main window's monitor (`with_main`) or onto the primary monitor (Settings "Open detached
+/// plugins with the FL Studio window"; spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and
+/// startup").
+pub fn first_position(owner: isize, scale: f32, with_main: bool) -> (i32, i32) {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY};
+    let p = default_position(owner, scale);
+    let work = |m| unsafe {
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        (GetMonitorInfoW(m, &mut mi) != 0).then(|| [mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom])
+    };
+    let (from, to) = unsafe {
+        let to = if with_main { MonitorFromWindow(owner as HWND, MONITOR_DEFAULTTOPRIMARY) } else { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+        (work(MonitorFromPoint(POINT { x: p.0, y: p.1 }, MONITOR_DEFAULTTONEAREST)), work(to))
+    };
+    let keep = ((200.0 * scale).round() as i32, (100.0 * scale).round() as i32);
+    match (from, to) {
+        (Some(from), Some(to)) => super::moved_to(p, from, to, keep),
+        _ => p,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------

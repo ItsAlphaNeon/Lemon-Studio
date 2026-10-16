@@ -58,6 +58,17 @@ pub struct Hosted {
     pub attention: Option<Arc<os_host::Attention>>,
     /// The count and time `idle` last looked at it (`Hosted::due`).
     seen: Look,
+    /// Its window opens detached: set when the user adds it while "Detach all new plugins" is on (`Plugins::added`),
+    /// then the mode its window had when it last closed (spec: ui/settings-choices.md "Miscellaneous: naming, detached
+    /// plugins and startup").
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
+    pub detached: bool,
+    /// Where its detached window was when it last closed (screen px): reopened, it goes back there (spec: as above).
+    #[cfg(plugin_windows)]
+    pub placed: Option<(i32, i32)>,
+    /// When its open window opened (`Plugins::opens`): the limit on open editors closes the earliest first.
+    #[cfg(plugin_windows)]
+    opened: u64,
 }
 
 /// When the UI last locked an instance for one of its per-tick jobs: the attention count it acted on, and when.
@@ -94,6 +105,11 @@ impl Hosted {
             stand_in: false,
             attention,
             seen: Look::never(),
+            detached: false,
+            #[cfg(plugin_windows)]
+            placed: None,
+            #[cfg(plugin_windows)]
+            opened: 0,
         }
     }
 
@@ -159,6 +175,18 @@ pub enum Request {
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
 pub const FX_KEY: usize = 1 << 24;
 
+/// Plugin editor windows open at once under "Limit the number of open plugin editors" (FL's hint: 25; spec:
+/// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
+pub const MAX_EDITORS: usize = 25;
+
+/// Of the open windows (`hosted` key, when it opened), the one to close before another opens, so that no more than
+/// `max` are open: the one opened earliest, while `max` or more are open.
+#[cfg_attr(not(plugin_windows), allow(dead_code))]
+fn earliest_over(open: impl Iterator<Item = (usize, u64)>, max: usize) -> Option<usize> {
+    let open: Vec<(usize, u64)> = open.collect();
+    open.iter().min_by_key(|o| o.1).filter(|_| open.len() >= max).map(|o| o.0)
+}
+
 /// The `hosted` key of mixer track `track`'s slot `slot`.
 pub fn fx_key(track: u16, slot: u8) -> usize {
     FX_KEY + usize::from(track) * 16 + usize::from(slot)
@@ -179,8 +207,9 @@ pub struct Plugins {
     /// Main window handle (owner of plugin windows).
     pub owner: isize,
     pub scale: f32,
-    /// New plugin windows open detached (settings "Detach all new plugins"; off = docked like FL's default).
-    pub detach_new: bool,
+    /// Plugin windows opened so far (stamps `Hosted::opened`).
+    #[cfg(plugin_windows)]
+    opens: u64,
     /// The preset file each instance last loaded or saved (spec: plugins/presets.md), by `hosted` key.
     pub presets: BTreeMap<usize, PathBuf>,
     /// Plugins (uids) whose file the last scan no longer found: not listed, kept so indices stay valid.
@@ -429,6 +458,16 @@ impl Plugins {
         drop(p);
         self.hosted.insert(key, Hosted::new(plugin));
         Ok(a.desc.name)
+    }
+
+    /// The user just added the instance under `key` (a new channel's plugin, a new effect in a slot): its window opens
+    /// detached while "Detach all new plugins" is on. Instances a project brings open docked, as before (spec:
+    /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
+    pub fn added(&mut self, key: usize) {
+        let on = crate::prefs::check(&crate::prefs::DETACH_NEW);
+        if let Some(h) = self.hosted.get_mut(&key) {
+            h.detached = on;
+        }
     }
 
     /// Removes the instance under `key` (closing its window first).
@@ -685,15 +724,28 @@ impl Plugins {
     #[cfg(plugin_windows)]
     pub fn open_window(&mut self, row: usize, info: ChannelInfo) -> Result<(), String> {
         let (owner, scale) = (self.owner, self.scale);
-        let h = self.hosted.get_mut(&row).ok_or("not a plugin channel")?;
+        let h = self.hosted.get(&row).ok_or("not a plugin channel")?;
         if let Some(w) = &h.window {
             w.raise();
             return Ok(());
         }
+        // At most `MAX_EDITORS` open: the one opened earliest closes (its plugin keeps running). Spec:
+        // ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
+        if crate::prefs::check(&crate::prefs::LIMIT_EDITORS) {
+            while let Some(k) = earliest_over(self.hosted.iter().filter(|(_, h)| h.window.is_some()).map(|(&k, h)| (k, h.opened)), MAX_EDITORS) {
+                self.close_window(k);
+            }
+        }
+        let Some(h) = self.hosted.get_mut(&row) else { return Err("not a plugin channel".into()) };
         let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
-        let pos = crate::plugin_window::default_position(owner, scale);
+        // A detached window reopens where it was; the first time, on a monitor as the settings say (spec: as above).
+        let pos = match (h.detached, h.placed) {
+            (true, Some(at)) => at,
+            (true, None) => crate::plugin_window::first_position(owner, scale, crate::prefs::check(&crate::prefs::DETACHED_WITH_MAIN)),
+            (false, _) => crate::plugin_window::default_position(owner, scale),
+        };
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size.
-        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, self.detach_new)?;
+        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, h.detached)?;
         // Mixer effects have no channel strip (spec: ui/mixer.md §7).
         if row >= FX_KEY {
             w.set_strip(false);
@@ -707,6 +759,8 @@ impl Plugins {
         w.raise();
         drop(p);
         h.window = Some(w);
+        self.opens += 1;
+        h.opened = self.opens;
         let name = self.preset_name(row);
         if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
             w.set_preset(name);
@@ -755,6 +809,15 @@ impl Plugins {
     #[cfg(plugin_windows)]
     fn close_window(&mut self, row: usize) {
         if let Some(h) = self.hosted.get_mut(&row) {
+            // The mode and place it reopens in (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins
+            // and startup").
+            if let Some(w) = &h.window {
+                h.detached = w.detached();
+                #[cfg(windows)]
+                if h.detached {
+                    h.placed = w.position().or(h.placed);
+                }
+            }
             if let Ok(mut p) = h.plugin.lock() {
                 p.close_editor();
             }
@@ -3282,5 +3345,79 @@ mod tests {
             println!("round {round} ok");
         }
         transport.stop();
+    }
+
+    /// The four plugin window checks as found in FL; "Detach all new plugins": an instance the user adds takes the
+    /// check's state as its window mode, one that exists keeps its own (spec: ui/settings-choices.md "Miscellaneous:
+    /// naming, detached plugins and startup").
+    #[test]
+    fn new_plugins_take_the_detach_check() {
+        use crate::prefs::{check, DETACHED_WITH_MAIN, DETACH_NEW, LIMIT_EDITORS, TYPING_PRIORITY_OFF};
+        assert_eq!((check(&DETACH_NEW), check(&DETACHED_WITH_MAIN), check(&TYPING_PRIORITY_OFF), check(&LIMIT_EDITORS)), (false, false, false, true));
+        let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
+        pl.create_effect(1, 0, index, None).unwrap();
+        assert!(!pl.hosted[&fx_key(1, 0)].detached, "a project's instance opens docked");
+        pl.added(fx_key(1, 0));
+        assert!(!pl.hosted[&fx_key(1, 0)].detached, "check off: docked");
+        crate::prefs::set_check(&DETACH_NEW, true);
+        pl.create_effect(1, 1, index, None).unwrap();
+        pl.added(fx_key(1, 1));
+        assert!(pl.hosted[&fx_key(1, 1)].detached, "check on: detached");
+        assert!(!pl.hosted[&fx_key(1, 0)].detached, "an existing plugin keeps its mode");
+    }
+
+    /// "Limit the number of open plugin editors": with 25 open, the one opened earliest closes before another opens
+    /// (spec: as above).
+    #[test]
+    fn the_earliest_editor_closes_past_the_limit() {
+        assert_eq!(MAX_EDITORS, 25);
+        // Key 24 opened earliest.
+        let open: Vec<(usize, u64)> = (0..25).map(|i| (i, 50 - i as u64)).collect();
+        assert_eq!(earliest_over(open[..24].iter().copied(), MAX_EDITORS), None, "24 open: the 25th opens beside them");
+        assert_eq!(earliest_over(open.iter().copied(), MAX_EDITORS), Some(24));
+        assert_eq!(earliest_over(std::iter::empty(), MAX_EDITORS), None);
+    }
+
+    /// The limit and the reopening place with real windows (spec: as above): a detached window moved, closed and
+    /// reopened comes back where it was; of 26 Lemon Parametric EQ windows the first opened closes, its plugin still
+    /// hosted; without the check there is no limit. Opens real windows:
+    /// `cargo test -p os-app --bin lemonstudio editor_limit_and_reopen_place -- --ignored`
+    #[test]
+    #[ignore]
+    fn editor_limit_and_reopen_place() {
+        let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
+        let info = |t: u16| ChannelInfo { name: LEMON_EQ.into(), target: format!("Insert {t}"), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: t, misc: None };
+        let keys: Vec<usize> = (0..26u16).map(|i| fx_key(1 + i / 8, (i % 8) as u8)).collect();
+        for &k in &keys {
+            let (t, s) = fx_of(k).unwrap();
+            pl.create_effect(t, s, index, None).unwrap();
+        }
+        let open = |pl: &Plugins| pl.hosted.values().filter(|h| h.window.is_some()).count();
+        // Without a main window every frame is detached.
+        pl.open_window(keys[0], info(1)).unwrap();
+        let hwnd = pl.window_of(keys[0]).unwrap().0;
+        unsafe { SetWindowPos(hwnd as HWND, std::ptr::null_mut(), 300, 200, 0, 0, SWP_NOSIZE | SWP_NOZORDER) };
+        pump(&mut pl, 50);
+        assert!(pl.close_if_open(keys[0]));
+        assert_eq!((pl.hosted[&keys[0]].detached, pl.hosted[&keys[0]].placed), (true, Some((300, 200))));
+        pl.open_window(keys[0], info(1)).unwrap();
+        assert_eq!(pl.hosted[&keys[0]].window.as_ref().unwrap().position(), Some((300, 200)), "reopened where it was");
+        for &k in &keys[1..25] {
+            pl.open_window(k, info(fx_of(k).unwrap().0)).unwrap();
+            pump(&mut pl, 10);
+        }
+        assert_eq!(open(&pl), 25);
+        pl.open_window(keys[25], info(4)).unwrap();
+        assert_eq!(open(&pl), 25, "the 26th closed the earliest first");
+        assert!(pl.hosted[&keys[0]].window.is_none() && pl.hosted.contains_key(&keys[0]), "closed, its plugin kept");
+        crate::prefs::set_check(&crate::prefs::LIMIT_EDITORS, false);
+        pl.open_window(keys[0], info(1)).unwrap();
+        assert_eq!(open(&pl), 26, "no limit");
+        for &k in &keys {
+            pl.drop_key(k);
+        }
+        pump(&mut pl, 100);
     }
 }
