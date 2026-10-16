@@ -235,8 +235,12 @@ pub const NUMERATORS: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 
 pub const DENOMINATORS: &[u16] = &[2, 4, 8, 16];
 pub const BEATS_PER_BAR: &str = "Beats per bar";
 pub const STEPS_PER_BEAT: &str = "Steps per beat";
+/// Project ▸ Advanced ▸ Panning law (event 23; spec: ui/settings-choices.md "Project", audio/gain-laws.md "Panning
+/// law: Triangular"): FL's choices and their values.
+pub const PANNING_LAW: &str = "Panning law";
+pub const PANNING_LAWS: [(&str, u8); 2] = [("Circular", 0), ("Triangular", 2)];
 /// The Project page's combos that work (their menus: `App::audio_menu`).
-pub const PROJECT_COMBOS: [&str; 4] = [TIMEBASE, SET_AS, NUMERATOR, DENOMINATOR];
+pub const PROJECT_COMBOS: [&str; 5] = [TIMEBASE, SET_AS, NUMERATOR, DENOMINATOR, PANNING_LAW];
 /// The value boxes that work, with their ranges (the mouse wheel changes them: `App::settings_number`).
 pub const LIVE_NUMBERS: [(&str, u16, u16); 2] = [(BEATS_PER_BAR, 1, 32), (STEPS_PER_BEAT, 1, 16)];
 
@@ -375,14 +379,10 @@ fn gf(title: &'static str, closed: bool, rows: Vec<Row>) -> Group {
 fn combo(v: &str, w: f32, label: &'static str) -> Row {
     Row::Combo(v.into(), w, label)
 }
-/// The panning law's name for event 23 (0 Circular, 2 Triangular; spec: flp/engine-events.md "Project"); a value
-/// outside those shows as a number.
-fn panning_text(law: Option<u8>) -> String {
-    match law {
-        None | Some(0) => "Circular".into(),
-        Some(2) => "Triangular".into(),
-        Some(v) => v.to_string(),
-    }
+/// The panning law's name for event 23 (`PANNING_LAWS`; none is Circular); a value outside those shows as a number.
+pub fn panning_text(law: Option<u8>) -> String {
+    let v = law.unwrap_or(0);
+    PANNING_LAWS.iter().find(|l| l.1 == v).map_or_else(|| v.to_string(), |l| l.0.to_string())
 }
 fn txt(v: impl Into<String>) -> Row {
     Row::Text(v.into(), false)
@@ -627,10 +627,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 }
                 rows
             }),
-            // Panning law, fast declick and automatic crossfades show the project's values, greyed: their sound is not
-            // played yet (events 23, 40, 44; spec: flp/engine-events.md "Project"). The check shows what the engine plays.
+            // The panning law (event 23) and the check show what the engine plays. Fast declick and automatic
+            // crossfades show the project's values, greyed: their sound is not played yet (events 40, 44; spec:
+            // flp/engine-events.md "Project").
             gf("Advanced", true, vec![
-                combo(&panning_text(s.project.panning_law), 82.0, "Panning law"),
+                combo(&panning_text(s.project.panning_law), 82.0, PANNING_LAW),
                 Check(TRUNCATED_CHECK, s.project.play_truncated),
                 Check("Fast declick for cut groups", s.project.fast_declick.unwrap_or(false)),
             ]),
@@ -993,8 +994,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 ui.c.text(f, b.right() + 8.0, ty, if hov { t.glyph } else { t.text }, label);
             }
         }
-        // Other combos and value boxes do not work yet. A combo keeps showing its value (the project's panning law), greyed
-        // out.
+        // Other combos and value boxes do not work yet. A combo keeps showing its value, greyed out.
         Row::Combo(v, w, label) => {
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
             ui.off(b, name_of(label, group));
