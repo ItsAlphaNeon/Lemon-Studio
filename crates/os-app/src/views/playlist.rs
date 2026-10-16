@@ -165,6 +165,15 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let over = Rect::new(grid_x, client.y + 1.0, grid_w, hbar);
     debug_assert_eq!(over, overview_rect(s, grid));
     super::scrollbar(ui, over, false, sx, grid_w, bars * bar_w, crate::app::Scroll::PlaylistX);
+    // High visibility: two lighter edges at the top and bottom of the track, around the thumb (spec:
+    // ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High visibility").
+    if crate::high_visibility::on() && over.h >= 6.0 {
+        for (i, hex) in crate::high_visibility::PLAYLIST_EDGES.into_iter().enumerate() {
+            let k = i as f32;
+            ui.c.fill_rect(Rect::new(over.x, over.y + k, over.w, 1.0), t.s(hex));
+            ui.c.fill_rect(Rect::new(over.x, over.bottom() - 1.0 - k, over.w, 1.0), t.s(hex));
+        }
+    }
     overview(ui, s, over, bars * bar_t);
     let ruler = ruler_rect(s, grid);
     ruler_paint(ui, s, &g, ruler, f);
@@ -408,7 +417,13 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
     let hov = ui.hit(tr, Action::Scrollbar(crate::app::Scroll::PlPick), "Drag to scroll");
     let th = Rect::new(tr.x, tr.y + off, tr.w, thumb);
     ui.c.fill_rect(th, ui.t.s(0x36383a));
-    ui.c.fill_rect(th.inset(1.0), ui.t.s(0x2c2e30).shade(if hov { 0.06 } else { 0.0 }));
+    // A light thumb under High visibility (`os_ui::kit::scroll_thumb`).
+    let face = if crate::high_visibility::on() {
+        os_ui::kit::scroll_thumb(ui.t, os_ui::kit::State::hover(hov), true)
+    } else {
+        ui.t.s(0x2c2e30).shade(if hov { 0.06 } else { 0.0 })
+    };
+    ui.c.fill_rect(th.inset(1.0), face);
     ui.c.fill_rect(Rect::new(th.cx() - 1.0, th.cy() - 2.5, 2.0, 5.0), ui.t.s(0x000000));
     ui.bars.push(crate::app::Bar { target: crate::app::Scroll::PlPick, track: tr, vertical: true, max, view: list.h, thumb });
     // Footer "+": new pattern (find first empty).

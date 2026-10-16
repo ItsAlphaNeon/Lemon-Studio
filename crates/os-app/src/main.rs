@@ -25,6 +25,7 @@ mod cpu;
 mod dialog;
 mod filedlg;
 mod enable_groups;
+mod high_visibility;
 mod history;
 mod hold;
 mod keep_on_disk;

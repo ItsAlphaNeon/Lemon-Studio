@@ -153,16 +153,18 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
             icons::draw(ui.c, icon, g, c);
         }
     }
-    // Record: not available yet, so drawn greyed out (no hover, no press).
+    // Record: not available yet, so drawn greyed out (no hover, no press). Its dot is white under High visibility
+    // (`crate::high_visibility`), greyed out the same way.
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
     ui.off(rec, "Recording");
+    let dot = crate::high_visibility::record_dot(t, crate::high_visibility::on());
     if lemon {
         os_ui::kit::button(ui.c, t, Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0), os_ui::kit::State::NORMAL.with_disabled(true));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.mix(t.toolbar, 0.6));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, dot.mix(t.toolbar, 0.6));
     } else {
         ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.toolbar_line.shade(-0.25));
         ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, t.button.shade(-0.12));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.mix(t.button, 0.7).shade(-0.15));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, dot.mix(t.button, 0.7).shade(-0.15));
     }
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);

@@ -2972,6 +2972,9 @@ impl App {
         // Plugin editors in this process colour their waveforms as the views do (spec: ui/settings-choices.md
         // "Display: Colorful waveforms (2026-10-16)").
         crate::waves::publish(&self.theme.colors);
+        // The widget kit's scroll bars follow High visibility (spec: ui/settings-choices.md "Display: PPI ruler, Force
+        // refreshes, Thick lines, High visibility").
+        crate::high_visibility::publish();
         // Last paint's hits stay available to the parts this one skips (see `Ui::part`).
         std::mem::swap(&mut self.hits, &mut self.keep.prev);
         std::mem::swap(&mut self.bars, &mut self.keep.prev_bars);

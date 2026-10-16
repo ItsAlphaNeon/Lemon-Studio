@@ -258,6 +258,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let (x, y, w, h) = (win.x, win.y, win.w, win.h);
     let c = cols(s);
     let lemon = super::lemon(ui);
+    let hv = crate::high_visibility::on();
     // Frame (§1). Lemon (spec: ui/lemon-design.md §5): one rounded outlined panel.
     if lemon {
         lk::outlined(ui.c, win, lk::r_panel(t), t.window_border, t.window_body);
@@ -347,7 +348,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
                 ui.c.fill_rrect(mb, 3.0, t.rack_control_border);
                 ui.c.fill_rect_gradient(mb.inset(1.0), face.shade(-0.04), face, 2.5);
             }
-            let num_c = if mhov { t.glyph } else { t.text_dim.shade(0.08) };
+            // Brighter under High visibility (the Lemon look's brightest text colour, also on hover).
+            let num_c = if mhov && !(hv && lemon) { t.glyph } else { crate::high_visibility::rack_number(t, lemon, hv) };
             let label = if ch.mixer_track == 0 { "M".to_string() } else { ch.mixer_track.to_string() };
             let nf = super::light(19.0);
             let lh = ui.c.line_height(nf);
@@ -359,13 +361,16 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let base = ch.color.map_or(t.name_button, |col| rgb(col).mix(t.name_button, NAME_MIX));
         let face = if focused { base.shade(0.18).mix(t.name_button_sel, 0.5) } else { base };
         let face = if nhov { face.shade(0.06) } else { face };
+        // The name text is brighter under High visibility (`crate::high_visibility::rack_name`).
+        let name_c = crate::high_visibility::rack_name(t, lemon, hv);
         let col = if lemon {
-            lk::name_button(ui.c, t, nb, ch.color.map(rgb), focused, nhov)
+            let col = lk::name_button(ui.c, t, nb, ch.color.map(rgb), focused, nhov);
+            if focused { col } else { name_c }
         } else {
             ui.c.fill_rrect(nb, 3.0, t.rack_control_border.shade(0.08));
             ui.c.fill_rect(Rect::new(nb.x + 1.0, nb.y + 1.0, nb.w - 2.0, 1.0), face.shade(0.12));
             ui.c.fill_rect_gradient(Rect::new(nb.x + 1.0, nb.y + 2.0, nb.w - 2.0, nb.h - 4.0), face.shade(0.03), face.shade(-0.04), 1.5);
-            let col = if ch.color.is_some() { t.name_text.shade(0.2) } else { t.name_text };
+            let col = if ch.color.is_some() { name_c.shade(0.2) } else { name_c };
             if focused { col.shade(0.25) } else { col }
         };
         let label = ch.name.clone().unwrap_or_else(|| format!("Channel {}", ch.index + 1));
@@ -468,8 +473,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let tlen = (view / total_px * track.w).clamp(16.0f32.min(track.w), track.w.max(0.0));
     let max = (total_px - view).max(0.0);
     let off = if max > 0.0 { sx / max * (track.w - tlen) } else { 0.0 };
-    ui.c.fill_rect(Rect::new(track.x + off + 6.0, track.y + 2.0, (tlen - 12.0).max(8.0), 3.0), ui.t.s(0x14181a));
-    let chev = ui.t.s(0x3c4042);
+    // Light thumb and chevrons under High visibility (`os_ui::kit::scroll_thumb`, `scroll_arrow`).
+    let thumb_c = if hv { os_ui::kit::scroll_thumb(t, os_ui::kit::State::NORMAL, true) } else { ui.t.s(0x14181a) };
+    ui.c.fill_rect(Rect::new(track.x + off + 6.0, track.y + 2.0, (tlen - 12.0).max(8.0), 3.0), thumb_c);
+    let chev = os_ui::kit::scroll_arrow(t, os_ui::kit::State::NORMAL, hv).unwrap_or(ui.t.s(0x3c4042));
     let cy = track.cy();
     ui.c.polyline(&[(track.x, cy - 3.0), (track.x - 3.0, cy), (track.x, cy + 3.0)], 1.3, chev);
     ui.c.polyline(&[(x + w - 23.0, cy - 3.0), (x + w - 20.0, cy), (x + w - 23.0, cy + 3.0)], 1.3, chev);
@@ -608,11 +615,14 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let sxc = r - 35.0;
     let br = Rect::new(sxc - 10.0, y + 5.0, 20.0, 20.0);
     let hov = ui.hit(br, Action::RackRollView, "Interactive step sequencer / piano roll overview");
-    // On (§6): orange outline with a dark orange fill; hover draws the outline.
+    // On (§6): orange outline with a dark orange fill; hover draws the outline. Off under High visibility: always the
+    // hover look, in the Classic look the measured 2 px orange outline (spec: ui/settings-choices.md "Display: PPI
+    // ruler, Force refreshes, Thick lines, High visibility").
+    let hv = crate::high_visibility::on();
     if lemon {
         if roll_view {
             lk::lit(ui.c, br, lk::r_btn(t), hov);
-        } else if hov {
+        } else if hov || hv {
             ui.c.fill_rrect(br, lk::r_btn(t), t.button_hi);
         }
         let oc = if roll_view { lk::ink_on_lemon() } else { t.accent };
@@ -623,6 +633,8 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
         if roll_view {
             ui.c.fill_rrect(br, 3.0, ui.t.h(0xc1923a));
             ui.c.fill_rrect(br.inset(1.0), 2.5, ui.t.h(0x574b30));
+        } else if hv {
+            ui.c.stroke_rrect(br, 3.0, 2.0, ui.t.h(0xf9b83f));
         } else if hov {
             ui.c.stroke_rrect(br, 3.0, 1.0, ui.t.h(0xc1923a));
         }

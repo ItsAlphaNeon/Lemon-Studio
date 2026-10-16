@@ -339,6 +339,12 @@ pub const CURSORS_SCALING: Combo = Combo {
 pub const LEGACY_SCALING: Combo =
     Combo { key: "legacy_scaling", label: "Legacy scaling", choices: &["Main", "100%", "200%", "300%", "400%"], default: 0 };
 
+/// General ▸ Display: some controls drawn brighter, in both looks, at once (FL asks for a restart): the record dot,
+/// the rack's names, track numbers and overview toggle, every scroll bar and the playlist's horizontal one
+/// (`crate::high_visibility`). Spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High
+/// visibility (2026-10-16)".
+pub const HIGH_VISIBILITY: Check = Check { key: "high_visibility", label: "High visibility", default: false };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -376,6 +382,7 @@ pub const CHECKS: &[&Check] = &[
     &FAST_SAMPLE_PREVIEW,
     &AUTO_KEEP_ON_DISK,
     &THREADED_SAMPLE_LOADING,
+    &HIGH_VISIBILITY,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &CURSORS_SCALING, &LEGACY_SCALING];

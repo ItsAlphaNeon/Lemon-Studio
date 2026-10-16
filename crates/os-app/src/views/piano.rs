@@ -302,7 +302,7 @@ fn arrow_button(ui: &mut Ui, b: Rect, dir: u8, target: Scroll) {
     let act = Action::ScrollStep(target, step);
     let hov = ui.hit(b, act.clone(), "Scroll");
     let st = kit::State::new(hov, ui.down(b, &act), false);
-    kit::arrow_button(ui.c, ui.t, b, d, st);
+    kit::scroll_arrow_button(ui.c, ui.t, b, d, st);
 }
 
 /// The square button with a dot above the vertical scroll bar (§1a): not available yet, greyed out.
@@ -686,7 +686,9 @@ fn pitch_scroll(ui: &mut Ui, s: &State, l: &Layout) {
         ui.c.fill_rect(r, if hov { t.scrollbar.shade(0.2) } else { t.scrollbar.shade(0.1) });
         let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
         let d = if dir > 0 { -2.0 } else { 2.0 };
-        ui.c.fill_polygon(&[(cx - 4.0, cy - d), (cx, cy + d), (cx + 4.0, cy - d)], t.text_dim);
+        // Light under High visibility (`os_ui::kit::scroll_arrow`).
+        let col = os_ui::kit::scroll_arrow(t, os_ui::kit::State::hover(hov), crate::high_visibility::on()).unwrap_or(t.text_dim);
+        ui.c.fill_polygon(&[(cx - 4.0, cy - d), (cx, cy + d), (cx + 4.0, cy - d)], col);
     }
 }
 
