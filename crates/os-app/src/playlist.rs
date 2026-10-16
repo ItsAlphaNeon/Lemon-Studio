@@ -976,18 +976,12 @@ fn secs_per_tick(s: &State) -> f64 {
     60.0 / s.tempo.max(1.0) / f64::from(ppq(s))
 }
 
-/// Natural length of a source in ticks: a pattern's whole bars, a sample's duration, an automation's last point.
+/// Natural length of a source in ticks: a pattern's length (its bars, the engine's rule: `Project::pattern_length`,
+/// spec: audio/song-structure.md), a sample's duration, an automation's last point.
 pub fn source_len(s: &State, src: ClipSource) -> u32 {
     let bar = bar(s);
     match src {
-        ClipSource::Pattern(n) => {
-            if let Some(l) = s.project.pattern(n).and_then(|p| p.length).filter(|&l| l > 0) {
-                return l;
-            }
-            let notes = s.project.pattern(n).map(|p| p.notes.as_slice()).unwrap_or(&[]);
-            let end = notes.iter().map(|x| x.position + crate::piano::shown_len(s, x)).max().unwrap_or(0);
-            if notes.is_empty() { bar } else { (end / bar + 1) * bar }
-        }
+        ClipSource::Pattern(n) => s.project.pattern_length(n),
         ClipSource::Channel(c) => {
             if let Some(a) = s.project.automation(c) {
                 let beats = a.points.last().map_or(0.0, |p| p.beat);
@@ -998,6 +992,18 @@ pub fn source_len(s: &State, src: ClipSource) -> u32 {
             if t > 0.0 && t.is_finite() { (t.round() as u32).max(1) } else { bar }
         }
     }
+}
+
+/// Pattern `n`'s length changed from `old` (its time signature, spec: ui/pattern-time-signature.md §5): its clips that
+/// were not resized by hand (uncut, at the old natural length) take the new one, in every arrangement.
+pub fn refit_pattern_clips(s: &mut State, n: u16, old: u32) {
+    let new = s.project.pattern_length(n);
+    for a in &mut s.project.arrangements {
+        for c in a.clips.iter_mut().filter(|c| c.source == ClipSource::Pattern(n) && c.window.is_none() && c.length == old) {
+            c.length = new;
+        }
+    }
+    s.piano.dirty = true;
 }
 
 /// A clip's window in its source's unit (pattern ticks, audio ms, automation beats), filled in when unset.

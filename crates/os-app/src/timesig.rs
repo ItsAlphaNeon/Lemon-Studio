@@ -31,13 +31,23 @@ pub fn start_marker(s: &State, n: u16) -> Option<usize> {
     s.project.pattern(n)?.markers.iter().position(|m| m.kind == TimeMarker::SIGNATURE && m.position == 0)
 }
 
-/// Accept: pattern `n` gets `num` / `den` at its start, first among its markers (they stay sorted by position). The
-/// marker needs no name: the marker lanes show a signature marker as its signature.
+/// Accept: pattern `n` gets `num` / `den` at its start, first among its markers (they stay sorted by position), named
+/// after the signature as FL names it ("3/8", §4-5). The pattern's bars follow it, and so do its clips that kept their
+/// natural length.
 pub fn set_start(s: &mut State, n: u16, num: u8, den: u8) {
+    let old = s.project.pattern_length(n);
     let markers = &mut crate::patterns::pat_mut(s, n).markers;
     markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && m.position == 0));
-    markers.insert(0, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(0, "") });
-    s.piano.dirty = true;
+    markers.insert(0, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(0, &format!("{num}/{den}")) });
+    crate::playlist::refit_pattern_clips(s, n, old);
+}
+
+/// Yes to the conflict question took the start marker away: the pattern's bars are the project's again (§3).
+pub fn remove_start(s: &mut State, n: u16) {
+    let Some(i) = start_marker(s, n) else { return };
+    let old = s.project.pattern_length(n);
+    crate::patterns::pat_mut(s, n).markers.remove(i);
+    crate::playlist::refit_pattern_clips(s, n, old);
 }
 
 /// The time signature dialog is the top dialog.
@@ -76,10 +86,7 @@ impl App {
 
     /// Yes to the conflict question: the start marker goes at once, then the dialog opens (§3).
     pub(crate) fn replace_signature(&mut self, n: u16) {
-        if let Some(i) = start_marker(&self.state, n) {
-            crate::patterns::pat_mut(&mut self.state, n).markers.remove(i);
-            self.state.piano.dirty = true;
-        }
+        remove_start(&mut self.state, n);
         self.open_time_signature(n);
     }
 

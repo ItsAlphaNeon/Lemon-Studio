@@ -12502,9 +12502,10 @@ mod tests {
 
     /// PATTERNS > Set time signature... (spec: ui/pattern-time-signature.md): the "Time signature change" dialog opens at
     /// 4/4; its value boxes open the app's popup lists (Numerator 1..16, Denominator 2/4/8/16, the current value marked);
-    /// Accept puts a time-signature marker at the start of the current pattern, which the marker lanes show as "3/8" and
-    /// saving keeps. With one there already the conflict question comes first: No leaves it, Yes removes it and opens
-    /// the dialog, which closed without Accept leaves no start marker. The pattern menu has the command too.
+    /// Accept puts a time-signature marker named after it ("3/8") at the start of the current pattern, which the marker
+    /// lanes show once and saving keeps. With one there already the conflict question comes first: No leaves it, Yes
+    /// removes it and opens the dialog, which closed without Accept leaves no start marker. The pattern menu has the
+    /// command too.
     #[test]
     fn pattern_time_signature() {
         use crate::dialog::{Answer, Body, DHit, Kind};
@@ -12571,10 +12572,10 @@ mod tests {
         let accept = hit_rect(&app, &Action::Dlg(DHit::Accept));
         click(&mut app, &mut c, accept);
         assert!(!app.modal_open());
-        let want = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: 3, denominator: 8, ..TimeMarker::new(0, "") };
+        let want = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: 3, denominator: 8, ..TimeMarker::new(0, "3/8") };
         assert_eq!(app.state.project.pattern(1).unwrap().markers, [want.clone(), TimeMarker::new(192, "Mid")]);
         assert!(app.unsaved() && app.state.piano.dirty);
-        assert_eq!(crate::views::playlist::marker_label(&want), "3/8", "shown so in the marker lanes");
+        assert_eq!(crate::views::playlist::marker_label(&want), "3/8", "shown once in the marker lanes");
         // Saved with the pattern.
         let path = std::env::temp_dir().join(format!("os-app-timesig-{}.flp", std::process::id()));
         app.save_to(path.clone());
@@ -12608,9 +12609,117 @@ mod tests {
         assert_eq!(form(&app), Some(SigForm { pattern: 2, num: 4, den: 4 }));
         app.key(&Key::Named(NamedKey::Enter), false, false);
         assert!(!app.modal_open());
-        let four = TimeMarker { kind: TimeMarker::SIGNATURE, ..TimeMarker::new(0, "") };
+        let four = TimeMarker { kind: TimeMarker::SIGNATURE, ..TimeMarker::new(0, "4/4") };
         assert_eq!(app.state.project.pattern(2).unwrap().markers, [four]);
         assert!(start(&app).is_none(), "pattern 1 keeps none");
+    }
+
+    /// A pattern's length follows its own time signature (spec: audio/song-structure.md, "Time signatures and a
+    /// pattern's length"; ui/pattern-time-signature.md §2, §4-5): the table's rows, the same in the playlist and the
+    /// piano roll, the channel rack's length still first. Set time signature... names its marker "3/8", shown once (the
+    /// playlist's "4/4" markers too); the pattern's clips that kept their natural length take the new one, and the old
+    /// one back when Yes takes the marker away; clips resized or cut by hand keep theirs. The piano roll's bars and
+    /// beats follow the pattern's signature: 3/8, a bar every 6 steps.
+    #[test]
+    fn pattern_length_follows_its_time_signature() {
+        use crate::piano::{pattern_length, Geom};
+        use crate::playlist::{self as pl, Cmd};
+        use os_model::{Clip, ClipSource, TimeMarker};
+        use views::playlist::marker_label;
+        use winit::keyboard::{Key, NamedKey};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.pattern = 1;
+        let note = |end: u32| Note { length: 100, ..Note::step(0, end - 100) };
+        let sig = |pos: u32, num: u8, den: u8| TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(pos, &format!("{num}/{den}")) };
+        let len = |app: &App| {
+            let (playlist, piano) = (pl::source_len(&app.state, ClipSource::Pattern(1)), pattern_length(&app.state, 1));
+            assert_eq!(playlist, piano, "the playlist and the piano roll agree");
+            playlist
+        };
+        let set = |app: &mut App, project: (u16, u16), arr: Vec<TimeMarker>, own: Vec<TimeMarker>, end: u32| {
+            app.state.project.time_signature = Some(project);
+            pl::arr_mut(&mut app.state).markers = arr;
+            let p = &mut app.state.project.patterns[0];
+            (p.notes, p.markers, p.length) = (vec![note(end)], own, None);
+        };
+        // The table: 96 PPQ, the last note ends at 300; the clip at 768.
+        let rows = [
+            ((4, 4), vec![], vec![], 384),
+            ((3, 4), vec![], vec![], 576),
+            ((4, 4), vec![sig(0, 3, 4)], vec![], 384),
+            ((4, 4), vec![sig(768, 3, 4)], vec![], 384),
+            ((4, 4), vec![], vec![sig(0, 3, 4)], 576),
+            ((4, 4), vec![], vec![sig(192, 3, 4)], 480),
+        ];
+        pl::arr_mut(&mut app.state).clips = vec![Clip::new(768, 384, 0, ClipSource::Pattern(1))];
+        for (i, (project, arr, own, want)) in rows.into_iter().enumerate() {
+            set(&mut app, project, arr, own, 300);
+            assert_eq!(len(&app), want, "row {}", i + 1);
+        }
+        set(&mut app, (4, 4), vec![], vec![sig(0, 3, 4)], 500);
+        assert_eq!(len(&app), 576, "a note ending at 500 with the 3/4 marker at 0");
+        set(&mut app, (4, 4), vec![], vec![sig(0, 3, 4)], 384);
+        assert_eq!(len(&app), 576, "at least one bar");
+        set(&mut app, (4, 4), vec![], vec![], 384);
+        assert_eq!(len(&app), 384, "a note ending on a bar line");
+        app.state.project.patterns[0].length = Some(192);
+        assert_eq!(len(&app), 192, "the channel rack's length wins");
+        // The piano roll's grid at 3/4 from tick 192: 4/4 bars before it, a bar line at it, 3/4 bars after it.
+        set(&mut app, (4, 4), vec![], vec![sig(192, 3, 4)], 300);
+        let g = Geom::new(&app.state, Rect::new(0.0, 0.0, 800.0, 400.0));
+        assert_eq!(g.bar_lines(1000.0), [(0, 1), (192, 2), (480, 3), (768, 4)]);
+        assert_eq!([96, 192, 288, 384, 480].map(|t| g.line_at(t)), [(false, true), (true, true), (false, true), (false, true), (true, true)]);
+        // Set time signature... 3/8 on a 4/4 pattern with clips: natural length (in both arrangements), resized and cut
+        // by hand, and another pattern's.
+        set(&mut app, (4, 4), vec![], vec![], 300);
+        let natural = Clip::new(0, 384, 0, ClipSource::Pattern(1));
+        let resized = Clip::new(384, 768, 1, ClipSource::Pattern(1));
+        let cut = Clip { window: Some((96.0, 480.0)), ..Clip::new(1536, 384, 2, ClipSource::Pattern(1)) };
+        let other = Clip::new(0, 384, 3, ClipSource::Pattern(2));
+        pl::arr_mut(&mut app.state).clips = vec![natural, resized, cut, other];
+        let mut second = app.state.project.arrangements[0].clone();
+        second.clips = vec![natural];
+        app.state.project.arrangements.push(second);
+        let lengths = |app: &App| app.state.project.arrangements.iter().map(|a| a.clips.iter().map(|c| c.length).collect::<Vec<_>>()).collect::<Vec<_>>();
+        assert_eq!(len(&app), 384);
+        pl::run(&mut app, Cmd::Pattern(crate::patterns::Cmd::TimeSignature));
+        app.sig_pick(false, 3);
+        app.sig_pick(true, 8);
+        app.key(&Key::Named(NamedKey::Enter), false, false);
+        assert!(!app.modal_open());
+        let marker = &app.state.project.pattern(1).unwrap().markers[0];
+        assert_eq!((marker, marker.name.as_str(), marker_label(marker).as_str()), (&sig(0, 3, 8), "3/8", "3/8"));
+        assert_eq!(len(&app), 432, "three bars of 144");
+        assert_eq!(lengths(&app), [vec![432, 768, 384, 384], vec![432]]);
+        let g = Geom::new(&app.state, Rect::new(0.0, 0.0, 800.0, 400.0));
+        assert_eq!((g.step, g.beat, g.bar), (24, 48, 144));
+        let bars: Vec<u32> = (0..=12).filter(|&i| g.line_at(i * 24).0).collect();
+        let beats: Vec<u32> = (0..=12).filter(|&i| g.line_at(i * 24).1).collect();
+        assert_eq!((bars, beats), (vec![0, 6, 12], vec![0, 2, 4, 6, 8, 10, 12]), "a bar every 6 steps, a beat every 2");
+        assert_eq!(g.bar_lines(500.0), [(0, 1), (144, 2), (288, 3), (432, 4)]);
+        // An empty 3/8 pattern is one 3/8 bar (§4).
+        app.state.project.patterns[0].notes.clear();
+        assert_eq!(len(&app), 144);
+        app.state.project.patterns[0].notes = vec![note(300)];
+        // Yes to the conflict question takes the marker away at once: back to 4/4 bars and lengths.
+        pl::run(&mut app, Cmd::Pattern(crate::patterns::Cmd::TimeSignature));
+        app.key(&Key::Character("y".into()), false, false);
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        assert!(!app.modal_open() && app.state.project.pattern(1).unwrap().markers.is_empty());
+        assert_eq!(len(&app), 384);
+        assert_eq!(lengths(&app), [vec![384, 768, 384, 384], vec![384]]);
+        // The playlist's own time-signature markers ("4/4") are shown once too; they leave the pattern's length alone.
+        pl::run(&mut app, Cmd::AddSignature);
+        let m = pl::arr_mut(&mut app.state).markers.last().cloned().unwrap();
+        assert_eq!((m.name.as_str(), marker_label(&m).as_str()), ("4/4", "4/4"));
+        assert_eq!(len(&app), 384);
+        // A named signature marker still shows its name after the signature.
+        assert_eq!(marker_label(&TimeMarker { name: "Verse".into(), ..sig(0, 3, 4) }), "3/4 Verse");
+        // The piano roll draws the 3/8 grid.
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        crate::timesig::set_start(&mut app.state, 1, 3, 8);
+        frame(&mut app, &mut c, None);
     }
 
     /// Settings > Plugins (spec: ui/plugin-manager.md §2, §4): Add folder... keeps the folder and scans it in the
