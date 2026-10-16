@@ -149,13 +149,14 @@ Not yet: Align all channel editors, Arrange windows.
 
 - One history for the whole project, with redo: Ctrl+Z, Ctrl+Alt+Z and the EDIT menu, which names the step
 - Covers the piano roll, the playlist, step-sequencer edits and knob turns (channel, main, mixer panning and
-  stereo separation, effect mix, send levels, swing)
+  stereo separation, effect mix, send levels, swing), sample loads, the project's initial values, PATTERNS ▸ Split
+  by channel and ADD's audio and automation clip channels
 - The browser's Current project ▸ History lists the steps from "Last reset"; undone steps are grey, and a click
   on one goes back or forward to it
 - General settings ▸ Undo history: Maximum undo levels, Undo knob tweaks, Alternate undo mode, and showing the
   history in the browser, newest first if wanted
-- Not yet: mixer faders and plugin parameters, adding or deleting channels, project settings; "Put undone
-  recordings in the recycle bin" waits for recording
+- Not yet: mixer faders and plugin parameters, other ways of adding or deleting channels, project settings;
+  "Put undone recordings in the recycle bin" waits for recording
 
 ## 🚧 Audio drivers
 
@@ -163,6 +164,8 @@ Not yet: Align all channel editors, Arrange windows.
 - ALSA (and PipeWire / PulseAudio through it) on Linux
 - Core Audio on macOS
 - Output device, sample rate and buffer length in Settings > Audio
+- Auto close (Settings > Audio): the output closes while another program is in front, and a playing song pauses
+  until Lemon Studio is back in front
 - Not yet: ASIO, JACK
 
 ## 🚧 Platforms
@@ -179,6 +182,18 @@ Not yet: Align all channel editors, Arrange windows.
 - Lemon Studio's own plugin editors are drawn in the Lemon design only, whatever design the app shows
 - Smooth scrolling: the wheel and the scroll bars' arrows ease the editors' views (General settings ▸ Display ▸
   Smoothing, and Animation refresh rate for how often animations redraw)
+
+## 🚧 Settings
+
+- The General, Audio, File, Theme, Project and Info pages work: the controls that are not greyed out act, but for
+  a few that are only kept for now (Smart disable, Resampling quality and others Lemon Studio has nothing to change
+  with yet); the program's choices are kept in `settings.txt` in the user folder
+- General ▸ Input ▸ Manage shortcuts: the F8 keys (browser, plugin picker, plugin database) and the audio clip
+  double-click can be swapped
+- File ▸ Browser extra search folders: the folders added to the browser, renamed or replaced from here
+- General ▸ Display ▸ High visibility: a white record dot, brighter channel names and light scroll bar thumbs
+- Not yet: the MIDI page, the recording settings, Toolbars scaling, transparent menus and windows, theme
+  adjustments, Invert pencil buttons, Associate project files and data folders
 
 ## ❌ Not available yet
 
