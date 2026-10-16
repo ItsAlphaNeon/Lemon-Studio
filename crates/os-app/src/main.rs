@@ -90,6 +90,8 @@ mod typein;
 mod views;
 mod waves;
 mod win_clamp;
+#[cfg(windows)]
+mod file_assoc;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;

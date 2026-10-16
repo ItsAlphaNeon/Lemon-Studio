@@ -604,9 +604,10 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
         .enumerate()
         .map(|(ci, (_, items))| if menu == PATTERNS && ci == 0 { pats.len() as f32 * row } else { col_h(items) })
         .fold(0.0, f32::max);
+    // Under its title in the menu bar, which is drawn at Toolbars scaling (`super::band_k`; spec: ui/ui-scaling.md §1).
     let (ax, ay) = match (menu == PATTERNS, s.pat_ui.menu_at) {
         (true, Some(at)) => at,
-        _ => (x0 - 4.0, 78.0),
+        _ => ((x0 - 4.0) * super::band_k(s), 78.0 * super::band_k(s)),
     };
     let r = Rect::new((ax / k).min(s.screen.0 / k - width).max(0.0), ay / k, width, body_h + border * 2.0);
     let away = !r.contains(ui.mouse.0, ui.mouse.1);
