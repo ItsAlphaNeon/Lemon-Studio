@@ -165,6 +165,8 @@ struct ChannelState {
     volume: f64,
     /// Channel pan, −1..=1.
     pan: f64,
+    /// The project's panning law (event 23), for the channel pan.
+    pan_law: laws::PanLaw,
     insert: usize,
     /// Sample-rate conversion × channel pitch.
     base_rate: f64,
@@ -391,7 +393,7 @@ impl ChannelState {
             None => self.gain(vel, note_pan),
             Some(r) => {
                 let g = self.vol_gain(r.v1) * vel;
-                let (pl, pr) = laws::channel_pan(self.pan_of(r.p1) + note_pan);
+                let (pl, pr) = laws::channel_pan_law(self.pan_of(r.p1) + note_pan, self.pan_law);
                 ((g * pl) as f32, (g * pr) as f32)
             }
         }
@@ -488,7 +490,7 @@ impl ChannelState {
     // spec: audio/sampler-playback.md (velocity multiplies volume; pans add, clamped)
     fn gain(&self, vel: f64, note_pan: f64) -> (f32, f32) {
         let g = self.volume * vel;
-        let (pl, pr) = laws::channel_pan(self.pan_of(self.pan) + note_pan);
+        let (pl, pr) = laws::channel_pan_law(self.pan_of(self.pan) + note_pan, self.pan_law);
         ((g * pl) as f32, (g * pr) as f32)
     }
 }
@@ -584,6 +586,8 @@ struct MixTrack {
     pan: i32,
     sep: i32,
     on: bool,
+    /// The project's panning law (event 23), for the pan in the matrix.
+    law: laws::PanLaw,
     /// Swap left / right and reverse polarity, on the fader matrix (spec: audio/mixer.md "Fader matrix").
     swap: bool,
     polarity: bool,
@@ -663,6 +667,7 @@ impl MixTrack {
             pan: 0,
             sep: 0,
             on: true,
+            law: laws::PanLaw::Circular,
             swap: false,
             polarity: false,
             slots_enabled: true,
@@ -756,10 +761,11 @@ impl MixTrack {
         }
     }
 
-    /// The fader matrix (volume, pan, stereo separation, switch; spec: audio/mixer.md "Fader matrix") with swap and
-    /// polarity on top, as `[[L←L, L←R], [R←L, R←R]]`.
+    /// The fader matrix (volume, pan under the project's panning law, stereo separation, switch; spec: audio/mixer.md
+    /// "Fader matrix", audio/gain-laws.md "Panning law: Triangular") with swap and polarity on top, as
+    /// `[[L←L, L←R], [R←L, R←R]]`.
     fn compute_matrix(&self) -> [[f32; 2]; 2] {
-        let [ll, rl, rr, lr] = os_dsp::mixer::fader_matrix(self.vol, self.pan, self.sep, self.on);
+        let [ll, rl, rr, lr] = os_dsp::mixer::fader_matrix_law(self.vol, self.pan, self.sep, self.on, self.law);
         let mut m = [[ll, rl], [lr, rr]];
         // Swap exchanges the two outputs after pan and separation, not the inputs: (LL, RR, RL, LR) become
         // (LR, RL, RR, LL).
@@ -902,6 +908,10 @@ impl Engine {
         let tempo = project.tempo.unwrap_or(140.0);
         let ppq = project.ppq.max(1);
         let n_tracks = project.mixer.len().max(1);
+        // The panning law of the channel and mixer track pans (event 23; spec: audio/gain-laws.md "Panning law:
+        // Triangular"). Not of other pans: whether it moves them was not measured. An edit is heard from the next tick,
+        // as any pan edit (`continue_from`).
+        let pan_law = laws::PanLaw::from_event(project.panning_law);
 
         let mut channels: Vec<ChannelState> = project
             .channels
@@ -968,6 +978,7 @@ impl Engine {
                     sample,
                     volume,
                     pan: ch.pan,
+                    pan_law,
                     insert,
                     base_rate: src_ratio,
                     enabled: ch.enabled,
@@ -1017,7 +1028,7 @@ impl Engine {
             .collect();
 
         let tracks: Vec<MixTrack> = if project.mixer.is_empty() {
-            vec![MixTrack { eq: os_dsp::mixer::TrackEq::new(os_dsp::mixer::EQ_DEFAULT, rate), ..MixTrack::unity() }]
+            vec![MixTrack { eq: os_dsp::mixer::TrackEq::new(os_dsp::mixer::EQ_DEFAULT, rate), law: pan_law, ..MixTrack::unity() }]
         } else {
             project
                 .mixer
@@ -1053,6 +1064,7 @@ impl Engine {
                         pan: (m.pan.unwrap_or(0.0) * 6400.0).round() as i32,
                         sep: (m.stereo_separation.unwrap_or(0.0) * 64.0).round() as i32,
                         on: m.enabled,
+                        law: pan_law,
                         swap: m.swap,
                         polarity: m.polarity,
                         slots_enabled: m.slots_enabled,
@@ -2599,7 +2611,8 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
             // in the left / right gains (spec: audio/pattern-controls.md).
             let frames = f64::from(r.pos) + (f - span) as f64 + 1.0;
             let g = ch.vol_gain(r.v0 + (r.v1 - r.v0) * r.volume_at(frames)) * v.vel * lv;
-            let (a, b) = (laws::channel_pan(ch.pan_of(r.p0) + v.pan + lp), laws::channel_pan(ch.pan_of(r.p1) + v.pan + lp));
+            let law = ch.pan_law;
+            let (a, b) = (laws::channel_pan_law(ch.pan_of(r.p0) + v.pan + lp, law), laws::channel_pan_law(ch.pan_of(r.p1) + v.pan + lp, law));
             let x = r.pan_at(frames);
             let (pl, pr) = (a.0 + (b.0 - a.0) * x, a.1 + (b.1 - a.1) * x);
             (gl, gr) = ((g * pl) as f32, (g * pr) as f32);
@@ -4728,6 +4741,52 @@ mod tests {
         let mut peaks = Vec::new();
         e.take_track_peaks(&mut peaks);
         assert!(peaks[1][0] > 0.0 && peaks[0][0] > 0.0 && peaks[2][0] == 0.0, "track meters: {peaks:?}");
+    }
+
+    /// spec: audio/gain-laws.md "Panning law: Triangular": event 23 = 2 changes the channel pan and the mixer track
+    /// pan (the louder side stays at the centre level, the quieter one falls in a straight line); 0 or no event keeps
+    /// the circular laws. Heard end to end: a channel panned right 0.5 into an insert panned left 0.5.
+    #[test]
+    fn panning_law_triangular_moves_channel_and_mixer_pans() {
+        let mut p = insert_project();
+        p.channels[0].pan = 0.5;
+        p.mixer[1].pan = Some(-0.5);
+        let engine = |law: Option<u8>| {
+            let mut q = p.clone();
+            q.panning_law = law;
+            Engine::new(&q, &mut SampleLibrary::new(None), 44100, PlayMode::Pattern(1))
+        };
+        let near = |a: f32, b: f64, tol: f64| (f64::from(a) - b).abs() < tol;
+        // The channel: 0.7071 × (0.5, 1) of its volume under Triangular, cos / sin under Circular (also for 0).
+        for (law, want) in [(Some(2), laws::channel_pan_law(0.5, laws::PanLaw::Triangular)), (None, laws::channel_pan(0.5)), (Some(0), laws::channel_pan(0.5))] {
+            let e = engine(law);
+            let ch = &e.channels[0];
+            let (l, r) = ch.gain(1.0, 0.0);
+            assert!(near(l, ch.volume * want.0, 1e-6) && near(r, ch.volume * want.1, 1e-6), "{law:?}: {l} {r}");
+        }
+        let c = laws::channel_pan(0.0).0;
+        let (l, r) = laws::channel_pan_law(0.5, laws::PanLaw::Triangular);
+        assert!((l / c - 0.5).abs() < 1e-12 && (r / c - 1.0).abs() < 1e-12);
+        // The insert: [[L←L, L←R], [R←L, R←R]] = [[0.75, 0.25], [0, 0.5]] under Triangular, the measured circular
+        // values otherwise.
+        let m = engine(Some(2)).tracks[1].matrix;
+        assert!(near(m[0][0], 0.75, 2e-4) && near(m[0][1], 0.25, 2e-4) && near(m[1][0], 0.0, 2e-4) && near(m[1][1], 0.5, 2e-4), "{m:?}");
+        let m = engine(None).tracks[1].matrix;
+        assert!(near(m[0][0], 1.0068, 1e-4) && near(m[0][1], 0.2997, 1e-3) && near(m[1][1], 0.5412, 1e-4), "{m:?}");
+        // End to end: left over right at the loudest frame is (0.75 × 0.5 + 0.25 × 1) / (0.5 × 1) = 1.25 under
+        // Triangular; circular gives (1.0068 × 0.4142 + 0.2997) / 0.5412.
+        let ratio = |law: Option<u8>| {
+            let mut q = p.clone();
+            q.panning_law = law;
+            let out = render_with(&q, false);
+            let i = (0..out.len() / 2).max_by(|&a, &b| out[2 * a + 1].abs().total_cmp(&out[2 * b + 1].abs())).unwrap();
+            f64::from(out[2 * i]) / f64::from(out[2 * i + 1])
+        };
+        assert!((ratio(Some(2)) - 1.25).abs() < 1e-3, "{}", ratio(Some(2)));
+        let (cl, cr) = laws::channel_pan(0.5);
+        let m = engine(None).tracks[1].matrix;
+        let circular = (f64::from(m[0][0]) * cl + f64::from(m[0][1]) * cr) / (f64::from(m[1][1]) * cr);
+        assert!((ratio(None) - circular).abs() < 1e-3, "{} {circular}", ratio(None));
     }
 
     /// spec: audio/mixer.md "Fader matrix": polarity flips the sign, swap exchanges the outputs, separation merges.

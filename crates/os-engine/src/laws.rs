@@ -10,6 +10,8 @@
 
 use std::f64::consts::{FRAC_PI_4, SQRT_2};
 
+pub use os_dsp::level::PanLaw;
+
 /// The shared volume curve: `(11^x − 1) / 10`.
 pub fn volume_curve(x: f64) -> f64 {
     (11f64.powf(x.max(0.0)) - 1.0) / 10.0
@@ -39,6 +41,21 @@ pub fn fader_gain(f: f64) -> f64 {
 pub fn channel_pan(p: f64) -> (f64, f64) {
     let a = (1.0 + p.clamp(-1.0, 1.0)) * FRAC_PI_4;
     (a.cos(), a.sin())
+}
+
+/// Channel pan (−1..=1) under the project's panning law (event 23): [`channel_pan`] when Circular. Triangular keeps
+/// the louder side at the centre level and lowers the quieter side in a straight line, `L = 0.7071·min(1, 1 − p)`,
+/// `R = 0.7071·min(1, 1 + p)`, from the circular centre's own values, so the centre is the same bit for bit (spec:
+/// audio/gain-laws.md "Panning law: Triangular").
+pub fn channel_pan_law(p: f64, law: PanLaw) -> (f64, f64) {
+    match law {
+        PanLaw::Circular => channel_pan(p),
+        PanLaw::Triangular => {
+            let p = p.clamp(-1.0, 1.0);
+            let (l, r) = channel_pan(0.0);
+            (l * (1.0 - p).min(1.0), r * (1.0 + p).min(1.0))
+        }
+    }
 }
 
 /// Mixer track pan (−1..=1) as a stereo matrix `[[L←L, L←R], [R←L, R←R]]`.
@@ -118,6 +135,22 @@ mod tests {
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() <= tol
+    }
+
+    /// spec: audio/gain-laws.md "Panning law: Triangular", the channel table (each side over the centre level, to 4
+    /// decimals); Circular is `channel_pan`, and the centre is the same under both.
+    #[test]
+    fn channel_pan_triangular() {
+        let centre = channel_pan(0.0).0;
+        for (p, l, r) in [(-1.0, 1.0, 0.0), (-0.5, 1.0, 0.4999), (-0.25, 1.0, 0.7499), (0.25, 0.75, 1.0), (0.5, 0.5001, 1.0)] {
+            let (gl, gr) = channel_pan_law(p, PanLaw::Triangular);
+            assert!(close(gl / centre, l, 2e-4) && close(gr / centre, r, 2e-4), "{p}: {} {}", gl / centre, gr / centre);
+        }
+        assert_eq!(channel_pan_law(0.0, PanLaw::Triangular), channel_pan(0.0));
+        assert_eq!(channel_pan_law(1.5, PanLaw::Triangular), channel_pan_law(1.0, PanLaw::Triangular), "clamped");
+        for p in [-1.0, -0.5, -0.1, 0.0, 0.3, 0.5, 1.0] {
+            assert_eq!(channel_pan_law(p, PanLaw::Circular), channel_pan(p));
+        }
     }
 
     #[test]

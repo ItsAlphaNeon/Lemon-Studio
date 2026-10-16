@@ -3267,6 +3267,11 @@ impl App {
                     PItem::new(views::settings::SET_AS_SIGNATURE, Cmd::TimeMode(true)).mark(Mark::Radio(sig)),
                 ]
             }
+            // Project ▸ Advanced ▸ Panning law (event 23), FL's two choices.
+            views::settings::PANNING_LAW => {
+                let now = self.state.project.panning_law.unwrap_or(0);
+                views::settings::PANNING_LAWS.iter().map(|&(name, v)| PItem::new(name, Cmd::PanningLaw(v)).mark(Mark::Radio(v == now))).collect()
+            }
             // One of the time signature's two numbers: a numerator is the beats per bar (the steps per beat stay), a
             // denominator d makes 16 / d steps per beat (events 17, 18).
             views::settings::NUMERATOR | views::settings::DENOMINATOR => {
@@ -3390,6 +3395,18 @@ impl App {
         }
         self.invalidate();
         Some(format!("Timebase: {to} PPQ"))
+    }
+
+    /// Settings > Project ▸ Advanced ▸ Panning law (event 23: 0 Circular, 2 Triangular; spec: audio/gain-laws.md
+    /// "Panning law: Triangular"): the law of the channel and mixer track pans. Playback follows from its next tick, as
+    /// for any pan edit; the project counts as changed. A file without the event is Circular.
+    pub fn set_panning_law(&mut self, law: u8) -> Option<String> {
+        if self.state.project.panning_law.unwrap_or(0) != law {
+            self.state.project.panning_law = Some(law);
+            self.state.piano.dirty = true;
+        }
+        self.invalidate();
+        Some(format!("Panning law: {}", views::settings::panning_text(Some(law))))
     }
 
     /// Settings > Project ▸ Advanced ▸ Play truncated notes in clips (spec: audio/song-structure.md "Play truncated
@@ -6979,7 +6996,7 @@ mod tests {
     }
 
     /// Settings > Project ▸ Panning law, Fast declick for cut groups, Automatic crossfades (events 23, 40, 44; spec:
-    /// flp/engine-events.md "Project"): not played yet, so greyed, but they show the project's values.
+    /// flp/engine-events.md "Project") show the project's values; the last two are not played yet, so greyed.
     #[test]
     fn project_settings_show_the_unplayed_settings() {
         use crate::views::settings::Row;
@@ -7004,7 +7021,55 @@ mod tests {
         let p = &mut app.state.project;
         (p.panning_law, p.fast_declick, p.auto_crossfades) = (Some(2), Some(true), Some(true));
         assert_eq!(get(&app), (Some("Triangular".into()), Some(true), Some(true)));
-        assert!(!views::settings::PROJECT_COMBOS.contains(&"Panning law"), "greyed");
+        assert!(views::settings::PROJECT_COMBOS.contains(&"Panning law"), "the panning law works");
+    }
+
+    /// Settings > Project ▸ Advanced ▸ Panning law (spec: ui/settings-choices.md "Project", audio/gain-laws.md
+    /// "Panning law: Triangular"): FL's two choices with the project's marked; a pick changes event 23 at once (the
+    /// engine gets the project again, the project counts as changed), saved and opened again, also patched in an
+    /// opened file.
+    #[test]
+    fn project_settings_panning_law() {
+        use crate::playlist::Mark;
+        use crate::views::settings::{SAct, PANNING_LAW, PROJECT};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        (app.state.file, app.state.path) = (None, None);
+        app.mark_saved();
+        app.open_settings(PROJECT);
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Settings(SAct::Group("Advanced")));
+        click(&mut app, &mut c, r);
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(PANNING_LAW)), "not greyed");
+        let r = app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == PANNING_LAW)).map(|h| h.rect).expect("Panning law works");
+        click(&mut app, &mut c, r);
+        let items: Vec<_> = app.state.playlist.popup.as_ref().expect("a menu").items.iter().map(|it| (it.label.to_string(), it.mark.clone())).collect();
+        assert_eq!(items, vec![("Circular".to_string(), Mark::Radio(true)), ("Triangular".to_string(), Mark::Radio(false))], "a project without event 23");
+        app.state.playlist.popup = None;
+        frame(&mut app, &mut c, None);
+        app.state.piano.dirty = false;
+        project_pick(&mut app, &mut c, PANNING_LAW, "Triangular", 2);
+        assert_eq!(app.state.project.panning_law, Some(2));
+        assert_eq!(app.state.message.as_deref(), Some("Panning law: Triangular"));
+        assert!(app.state.piano.dirty && app.unsaved(), "playback and the title follow");
+        let shown = |app: &App| project_rows(app).into_iter().find_map(|r| match r {
+            views::settings::Row::Combo(v, _, l) if l == PANNING_LAW => Some(v),
+            _ => None,
+        });
+        assert_eq!(shown(&app).as_deref(), Some("Triangular"));
+        // Saved and opened again; back to Circular in the opened project (23 = 0, patched), saved over it.
+        let path = std::env::temp_dir().join(format!("lemon-project-panning-{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let mut opened = App::new(None);
+        opened.open(path.clone());
+        assert_eq!(opened.state.project.panning_law, Some(2));
+        crate::playlist::run(&mut opened, crate::playlist::Cmd::PanningLaw(0));
+        assert!(opened.unsaved());
+        opened.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(back.panning_law, Some(0));
     }
 
     #[test]

@@ -2317,6 +2317,21 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
         }
     }
+    // The panning law (event 23: 0 Circular, 2 Triangular; spec: flp/engine-events.md "Project").
+    if let Some(v) = project.panning_law.filter(|&v| Some(v) != current.panning_law) {
+        match unread(id::PANNING_LAW) {
+            Some(i) => set_int(&mut events[i], v.into()),
+            None => {
+                // Behind the last of 156, 67, 9, 11, 80, 17, 18 and 35 the file has (so before 44, 30 and 10).
+                let at = [l.tempo, l.current_pattern, unread(9), l.swing, l.main_pitch, l.time_num, l.time_den, unread(id::TIME_MODE)]
+                    .into_iter()
+                    .flatten()
+                    .max()
+                    .map_or(0, |i| i + 1);
+                settings.push((at, int_event(id::PANNING_LAW, v.into())));
+            }
+        }
+    }
     // Event 30 is there with 1 when on; off removes it, as FL does (it never writes 0; spec: flp/engine-events.md
     // "Event 30").
     if project.play_truncated != current.play_truncated {
@@ -4285,7 +4300,8 @@ mod tests {
     /// a file that has them (an opened project keeps every other event as it was) and removes 30 for off. Both write
     /// the project settings in FL 26's order ("Order in the file": 156, 67, 9, 11, 80, 17, 18, 35, 23, 44, 30, 10, then
     /// the information): `apply` adds a missing 11, 80, 17, 18, 35 or 30 behind the last of the settings before it
-    /// that the file has. 23, 44 and 40 are read and left as they are.
+    /// that the file has. 44 and 40 are read and left as they are; 23 as long as the model's is the file's
+    /// (`panning_law_round_trips`).
     #[test]
     fn time_settings_and_truncated_notes_round_trip() {
         const ORDER: [u8; 12] =
@@ -4461,6 +4477,73 @@ mod tests {
         q.tempo = Some(100.0);
         apply(&q, &mut file).unwrap();
         assert_eq!(load(&reparse(&file)).unwrap().fast_declick, Some(true));
+    }
+
+    /// Settings > Project ▸ Advanced ▸ Panning law (event 23: 0 Circular, 2 Triangular; spec: flp/engine-events.md
+    /// "Project", "Order in the file"): `create` writes the model's value in FL's order; `apply` patches it where the
+    /// file has it, else adds it behind the last of 156, 67, 9, 11, 80, 17, 18 and 35 the file has (before 44, 30 and
+    /// 10). Circular is written as 0, as FL's default template holds it; a model without one leaves the file as it is.
+    #[test]
+    fn panning_law_round_trips() {
+        const ORDER: [u8; 11] =
+            [id::TEMPO, id::CURRENT_PATTERN, id::SWING, id::MAIN_PITCH, id::TIME_NUM, id::TIME_DEN, id::TIME_MODE, id::PANNING_LAW, id::AUTO_CROSSFADES, id::PLAY_TRUNCATED, id::TITLE];
+        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        let prelude = |f: &FlpFile| -> Vec<(u8, u32)> {
+            events_of(f).unwrap().iter().take_while(|e| e.id != id::CH_START).filter(|e| ORDER.contains(&e.id)).map(|e| (e.id, int(e))).collect()
+        };
+        let ids = |f: &FlpFile| -> Vec<u8> { prelude(f).into_iter().map(|e| e.0).collect() };
+        let law_of = |f: &FlpFile| prelude(f).into_iter().find(|e| e.0 == id::PANNING_LAW).map(|e| e.1);
+        let mut p = new_project();
+        (p.bar, p.bar_as_signature, p.play_truncated, p.auto_crossfades) = (Some((4, 4)), Some(true), true, Some(true));
+        // Written by `create` behind 35, before 44 and 30.
+        p.panning_law = Some(2);
+        let file = reparse(&create(&p).unwrap());
+        assert_eq!(law_of(&file), Some(2));
+        let full = ids(&file);
+        let at = |eid: u8| full.iter().position(|&e| e == eid).unwrap();
+        assert!(at(id::TIME_MODE) + 1 == at(id::PANNING_LAW) && at(id::PANNING_LAW) + 1 == at(id::AUTO_CROSSFADES), "{full:?}");
+        assert_eq!(load(&file).unwrap().panning_law, Some(2));
+        // Patched in place: back to Circular is 0, nothing else moves.
+        let mut q = load(&file).unwrap();
+        q.panning_law = Some(0);
+        let mut patched = file.clone();
+        apply(&q, &mut patched).unwrap();
+        let patched = reparse(&patched);
+        let (a, b) = (events_of(&file).unwrap(), events_of(&patched).unwrap());
+        assert_eq!(a.len(), b.len());
+        assert!(a.iter().zip(b.iter()).all(|(x, y)| if x.id == id::PANNING_LAW { int(y) == 0 } else { x == y }));
+        assert_eq!(load(&patched).unwrap().panning_law, Some(0));
+        // Unchanged: the file stays byte for byte.
+        let mut same = patched.clone();
+        apply(&load(&patched).unwrap(), &mut same).unwrap();
+        assert_eq!(same.to_bytes().unwrap(), patched.to_bytes().unwrap());
+        // Added to a file without it: behind 35, or behind 18 when there is no 35, or behind the current pattern;
+        // always before 44 and 30.
+        for (mode, bar) in [(Some(true), Some((4, 4))), (None, Some((3, 2))), (None, None)] {
+            let mut start = p.clone();
+            (start.panning_law, start.bar_as_signature, start.bar) = (None, mode, bar);
+            let mut file = reparse(&create(&start).unwrap());
+            assert_eq!(law_of(&file), None);
+            let mut q = load(&file).unwrap();
+            q.panning_law = Some(2);
+            apply(&q, &mut file).unwrap();
+            let file = reparse(&file);
+            let want: Vec<u8> = full
+                .iter()
+                .copied()
+                .filter(|&e| (e != id::TIME_MODE || mode.is_some()) && (![id::TIME_NUM, id::TIME_DEN].contains(&e) || bar.is_some()))
+                .collect();
+            assert_eq!(ids(&file), want, "{mode:?} {bar:?}");
+            assert_eq!(load(&file).unwrap().panning_law, Some(2));
+        }
+        // A model without one writes nothing.
+        let mut start = p.clone();
+        start.panning_law = None;
+        let mut file = reparse(&create(&start).unwrap());
+        let mut q = load(&file).unwrap();
+        q.tempo = Some(99.0);
+        apply(&q, &mut file).unwrap();
+        assert_eq!(law_of(&reparse(&file)), None);
     }
 
     /// Settings > Project ▸ Timebase (PPQ): the header's PPQ and every tick count of the project change together;

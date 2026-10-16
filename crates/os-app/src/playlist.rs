@@ -319,6 +319,8 @@ pub enum Cmd {
     TimeMode(bool),
     /// Settings > Project ▸ Timebase (PPQ).
     Timebase(u16),
+    /// Settings > Project ▸ Advanced ▸ Panning law: event 23's value (0 Circular, 2 Triangular).
+    PanningLaw(u8),
     /// The auto-scrolling button's menu (spec: ui/auto-scrolling.md §2).
     ContinuousScrolling,
     /// A PATTERNS command from a pattern's right-click menu in the picker (spec: ui/pattern-menu.md §3).
@@ -3029,6 +3031,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Bar(beats, steps) => return app.set_bar(beats, steps),
         Cmd::TimeMode(signature) => return app.set_time_mode(signature),
         Cmd::Timebase(ppq) => return app.set_timebase(ppq),
+        Cmd::PanningLaw(law) => return app.set_panning_law(law),
         Cmd::ContinuousScrolling => {
             let on = crate::autoscroll::toggle_continuous();
             app.invalidate();
@@ -3074,7 +3077,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::Bar(..) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMsc(_) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::Bar(..) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::PanningLaw(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMsc(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
