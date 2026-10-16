@@ -451,6 +451,9 @@ pub enum Extra {
         source: Option<ClipSource>,
         picker: PickKind,
     },
+    /// The patterns changed (PATTERNS > Split by channel, spec: ui/split-by-channel.md §2): they come back, with the
+    /// current pattern.
+    Patterns { patterns: Vec<os_model::Pattern>, current: u16 },
 }
 
 pub struct PlaylistState {
@@ -1039,14 +1042,22 @@ pub fn undo(s: &mut State) -> bool {
     for (ch, v) in s.project.channels.iter_mut().zip(stretch) {
         ch.sound.stretch = v;
     }
-    if let Some(Extra::Channel { index, groups, filter, unsorted_at, sel, selected, source, picker }) = extra.map(|e| *e) {
-        // The app removes channels (`App::rack_pending`, which the Undo command runs); the rest comes back now.
-        if let Some(row) = s.project.channels.iter().position(|c| c.index == index) {
-            s.rack.delete_now = Some(vec![row]);
+    match extra.map(|e| *e) {
+        Some(Extra::Channel { index, groups, filter, unsorted_at, sel, selected, source, picker }) => {
+            // The app removes channels (`App::rack_pending`, which the Undo command runs); the rest comes back now.
+            if let Some(row) = s.project.channels.iter().position(|c| c.index == index) {
+                s.rack.delete_now = Some(vec![row]);
+            }
+            (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (groups, filter, unsorted_at);
+            (s.rack.sel, s.selected_channel) = (sel, selected);
+            (s.playlist.source, s.playlist.picker) = (source, picker);
         }
-        (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (groups, filter, unsorted_at);
-        (s.rack.sel, s.selected_channel) = (sel, selected);
-        (s.playlist.source, s.playlist.picker) = (source, picker);
+        Some(Extra::Patterns { patterns, current }) => {
+            s.project.patterns = patterns;
+            s.pattern = current;
+            s.piano.clear_selection();
+        }
+        None => {}
     }
     s.playlist.sel.clear();
     s.piano.dirty = true;

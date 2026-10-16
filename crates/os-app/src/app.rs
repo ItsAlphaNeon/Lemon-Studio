@@ -12306,6 +12306,86 @@ mod tests {
         assert!(!works(ADD_MENU, item_at(ADD_MENU, entry("Layer")).unwrap()), "Layer stays greyed out");
     }
 
+    /// PATTERNS > Split by channel (spec: ui/split-by-channel.md §2): rack order; the pattern keeps the first
+    /// channel's notes under its name, the others get patterns of their own right after it (later ones move up with
+    /// their clips) with the original's colour, markers and settings; each clip of the original gets one clip per new
+    /// pattern at its place, under it, unselected. One channel: a rename; no notes: nothing. One undo step.
+    #[test]
+    fn split_by_channel() {
+        use crate::patterns::Cmd as PCmd;
+        use crate::playlist::{self as pl, Cmd};
+        use os_model::{Clip, ClipSource, ControlPoint, TimeMarker};
+        use views::menus::{item_at, pattern_popup, works, MENUS, PATTERNS};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        // Rack order Kick, Snare, Hat, Clap, Pluck (channel indices 0, 3, 2, 1, 4).
+        app.state.project.channels.swap(1, 3);
+        let step = |ch: u16, k: u32| Note::step(ch, k * 24);
+        let sig = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: 3, denominator: 4, ..TimeMarker::new(0, "3/4") };
+        let color = Some(os_model::Rgb::new(0x45, 0x94, 0x6a));
+        let p1 = Pattern {
+            number: 1,
+            color,
+            notes: vec![step(1, 0), step(0, 1), step(3, 2), step(0, 3), step(1, 4)],
+            controls: vec![ControlPoint::new(0, 0, ControlPoint::VOLUME, 9000)],
+            loops: vec![(0, 8)],
+            markers: vec![sig.clone()],
+            ..Pattern::default()
+        };
+        let p2 = Pattern { number: 2, name: Some("Verse".into()), notes: vec![step(2, 0)], ..Pattern::default() };
+        let p3 = Pattern { number: 3, notes: vec![step(2, 0), step(2, 4)], ..Pattern::default() };
+        app.state.project.patterns = vec![p1.clone(), p2, p3];
+        let mut cut = Clip::new(1536, 192, 2, ClipSource::Pattern(1));
+        cut.window = Some((96.0, 288.0));
+        let clips = vec![Clip::new(192, 384, 0, ClipSource::Pattern(1)), Clip::new(768, 384, 1, ClipSource::Pattern(2)), cut];
+        pl::arr_mut(&mut app.state).clips = clips.clone();
+        app.state.playlist.sel = vec![1];
+        let before = (app.state.project.patterns.clone(), clips.clone());
+        app.state.pattern = 1;
+        let entry = MENUS[PATTERNS].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == "Split by channel").unwrap();
+        assert!(works(PATTERNS, item_at(PATTERNS, entry).unwrap()));
+        let popup = pattern_popup(0.0, 0.0);
+        let it = popup.items.iter().find(|i| i.label == "Split by channel").unwrap();
+        assert!(it.enabled && it.cmd == Cmd::Pattern(PCmd::SplitByChannel), "also in the pattern menu");
+        app.menu_item(PATTERNS, entry);
+        let s = &app.state;
+        let pat = |n: u16| s.project.pattern(n).unwrap();
+        let summary = |n: u16| (pat(n).name.clone().unwrap_or_default(), pat(n).notes.iter().map(|x| (x.channel, x.position)).collect::<Vec<_>>());
+        assert_eq!(summary(1), ("Kick".into(), vec![(0, 24), (0, 72)]));
+        assert_eq!(summary(2), ("Snare".into(), vec![(3, 48)]));
+        assert_eq!(summary(3), ("Clap".into(), vec![(1, 0), (1, 96)]));
+        assert_eq!(summary(4), ("Verse".into(), vec![(2, 0)]), "later patterns move up");
+        assert_eq!(pat(5).notes.len(), 2);
+        for n in 2..=3 {
+            let p = pat(n);
+            assert_eq!((p.color, &p.markers, &p.loops, p.length, p.controls.is_empty()), (color, &p1.markers, &p1.loops, None, true), "pattern {n}");
+        }
+        assert_eq!((pat(1).color, &pat(1).controls, &pat(1).markers), (color, &p1.controls, &p1.markers));
+        assert_eq!(s.pattern, 1, "the first stays current");
+        // The playlist: one clip per new pattern at each clip of the original, just before it (the original on top).
+        let at = |c: &Clip| (c.source, c.position, c.length, c.track, c.window);
+        let want: Vec<_> = [(2, 0), (3, 0), (1, 0), (4, 1), (2, 2), (3, 2), (1, 2)]
+            .into_iter()
+            .map(|(p, k)| at(&Clip { source: ClipSource::Pattern(p), ..clips[k] }))
+            .collect();
+        assert_eq!(pl::clips(s).iter().map(at).collect::<Vec<_>>(), want);
+        assert!(s.playlist.sel.is_empty(), "nothing selected");
+        assert!(app.unsaved());
+        // One undo step.
+        assert_eq!(pl::run(&mut app, Cmd::Undo), None);
+        assert_eq!((app.state.project.patterns.clone(), pl::clips(&app.state).to_vec()), before);
+        // A pattern with one channel's notes is only renamed; one without notes stays as it is.
+        app.state.pattern = 3;
+        let n = pl::undo_len(&app.state);
+        app.pattern_cmd(PCmd::SplitByChannel);
+        let s = &app.state;
+        assert_eq!((s.project.patterns.len(), s.project.pattern(3).unwrap().name.as_deref(), pl::clips(s).len()), (3, Some("Hat"), 3));
+        assert_eq!(pl::undo_len(s), n + 1);
+        app.state.pattern = 7;
+        app.pattern_cmd(PCmd::SplitByChannel);
+        assert_eq!((app.state.project.patterns.len(), pl::undo_len(&app.state)), (3, n + 1));
+    }
+
     /// TOOLS / the channel rack's options > Switch all / selected audio clip channels to ▸ (spec: ui/channel-switches.md
     /// §1, §6): the stretch methods in two columns; a pick asks "Confirm" first; Ok sets the method on the audio clip
     /// channels (all, or the selected ones) and their Lemon Sampler, keeping TIME, PITCH and MUL; Cancel changes nothing;
