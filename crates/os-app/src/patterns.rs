@@ -114,6 +114,9 @@ pub struct NameBox {
     pub at: (f32, f32),
     pub suggestions: bool,
     pub palette: bool,
+    /// Opened for a new pattern (find empty, insert one): accepting it makes the pattern the playlist's clip
+    /// source, listed in the picker even while empty, so it can be placed at once.
+    pub created: bool,
 }
 
 #[derive(Debug, Default)]
@@ -143,11 +146,24 @@ pub fn used(p: &Pattern) -> bool {
     !p.notes.is_empty() || !p.controls.is_empty() || p.name.is_some()
 }
 
-/// Numbers of the used patterns, ascending.
+/// Numbers of the listed patterns, ascending: the used ones, those placed in the playlist, and the playlist's clip
+/// source (a new pattern, empty until notes are added).
 pub fn listed(s: &State) -> Vec<u16> {
     let mut v: Vec<u16> = s.project.patterns.iter().filter(|p| used(p)).map(|p| p.number).collect();
+    v.extend(crate::playlist::clips(s).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }));
+    if let Some(ClipSource::Pattern(n)) = s.playlist.source {
+        v.push(n);
+    }
     v.sort_unstable();
+    v.dedup();
     v
+}
+
+/// A new pattern's name box: accepting it lists the pattern and makes it the playlist's clip source.
+fn created_box(s: &mut State) {
+    if let Some(b) = s.pat_ui.name_box.as_mut() {
+        b.created = true;
+    }
 }
 
 pub fn name_of(s: &State, n: u16) -> String {
@@ -276,7 +292,7 @@ pub fn open_name_box(s: &mut State, target: BoxTarget, at: (f32, f32)) {
         BoxTarget::Transpose(_) => String::new(),
         BoxTarget::Rack(b) => crate::rack::box_text(s, b),
     };
-    s.pat_ui.name_box = Some(NameBox { target, text, fresh: true, at, suggestions: false, palette: false });
+    s.pat_ui.name_box = Some(NameBox { target, text, fresh: true, at, suggestions: false, palette: false, created: false });
 }
 
 /// Where a box opened from a menu / key goes: the mouse over its colour tab (§4).
@@ -294,12 +310,17 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
         Cmd::FindFirst => {
             s.pattern = first_empty(s);
             open_name_box(s, BoxTarget::Name(s.pattern), at);
+            created_box(s);
         }
         Cmd::FindNext => {
             s.pattern = next_empty(s, cur);
             open_name_box(s, BoxTarget::Name(s.pattern), at);
+            created_box(s);
         }
-        Cmd::FindNextNoName => s.pattern = next_empty(s, cur),
+        Cmd::FindNextNoName => {
+            s.pattern = next_empty(s, cur);
+            s.playlist.source = Some(ClipSource::Pattern(s.pattern));
+        }
         Cmd::SelectInPlaylist => {
             let sel: Vec<usize> = crate::playlist::clips(s)
                 .iter()
@@ -330,6 +351,7 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
         Cmd::InsertOne => {
             renumber(s, |n| Some(if n >= cur { (n + 1).min(MAX) } else { n }));
             open_name_box(s, BoxTarget::Name(cur), at);
+            created_box(s);
         }
         Cmd::Clone => {
             if cur >= MAX {
@@ -466,6 +488,9 @@ pub fn accept(s: &mut State) {
             let name = (!text.is_empty() && text != format!("Pattern {n}")).then_some(text.clone());
             if name.is_some() || s.project.pattern(n).is_some() {
                 pat_mut(s, n).name = name;
+            }
+            if b.created {
+                s.playlist.source = Some(ClipSource::Pattern(n));
             }
             if !text.is_empty() {
                 s.pat_ui.recent.retain(|r| *r != text);
@@ -620,6 +645,24 @@ mod tests {
         accept(s);
         assert_eq!(listed(s), vec![1, 2, 3, 4, 5]);
         assert_eq!(name_of(s, 4), "Probe");
+    }
+
+    /// A new pattern is placeable at once: accepting its name box, default name included, lists it in the picker
+    /// and makes it the playlist's clip source while it is still empty; placed, it stays listed.
+    #[test]
+    fn a_new_empty_pattern_is_listed_and_picked() {
+        let mut app = app();
+        let s = &mut app.state;
+        s.playlist.source = Some(ClipSource::Pattern(1));
+        run(s, Cmd::FindFirst, (0.0, 0.0));
+        accept(s);
+        assert_eq!((s.pattern, s.playlist.source), (4, Some(ClipSource::Pattern(4))));
+        assert_eq!(listed(s), vec![1, 2, 3, 4, 5]);
+        assert_eq!(crate::playlist::source(s), ClipSource::Pattern(4));
+        // Without a name box (Ctrl+F4) alike.
+        run(s, Cmd::FindNextNoName, (0.0, 0.0));
+        assert_eq!((s.pattern, s.playlist.source), (6, Some(ClipSource::Pattern(6))));
+        assert_eq!(listed(s), vec![1, 2, 3, 5, 6]);
     }
 
     #[test]

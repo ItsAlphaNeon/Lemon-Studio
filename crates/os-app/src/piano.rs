@@ -266,6 +266,46 @@ impl Geom {
     }
 }
 
+/// Where the current pattern plays in the song: each clip of it that sounds (not muted, on a track that is on), as
+/// (song tick of the clip's start, pattern tick there, length), in song order. A clip that plays its whole pattern
+/// (no window) lasts the pattern's length.
+pub fn song_spans(s: &State) -> Vec<(u32, u32, u32)> {
+    let whole = pattern_length(s, s.pattern);
+    let track_on = |t: u16| s.project.arrangement().and_then(|a| a.tracks.get(usize::from(t))).is_none_or(|t| t.enabled);
+    let mut v: Vec<(u32, u32, u32)> = crate::playlist::clips(s)
+        .iter()
+        .filter(|c| c.source == os_model::ClipSource::Pattern(s.pattern) && !c.muted && track_on(c.track))
+        .map(|c| match c.window {
+            Some(w) => (c.position, w.0.max(0.0).round() as u32, c.length),
+            None => (c.position, 0, whole),
+        })
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+/// The pattern tick at song tick `t`, when a clip of the current pattern plays there (the latest-starting one).
+pub fn pattern_tick_in_song(s: &State, t: f64) -> Option<f64> {
+    song_spans(s)
+        .into_iter()
+        .rev()
+        .find(|&(at, _, len)| t >= f64::from(at) && t < f64::from(at) + f64::from(len))
+        .map(|(at, from, _)| f64::from(from) + (t - f64::from(at)))
+}
+
+/// The song tick where pattern tick `t` plays: in the clip that plays at song tick `near` if it shows `t`, else in the
+/// first clip after `near` that does, else in the first one. None when no clip of the pattern shows `t`.
+pub fn song_tick_of(s: &State, t: u32, near: u32) -> Option<u32> {
+    let shows: Vec<(u32, u32, u32)> = song_spans(s).into_iter().filter(|&(_, from, len)| t >= from && t < from + len).collect();
+    let place = |&(at, from, _): &(u32, u32, u32)| at + (t - from);
+    shows
+        .iter()
+        .find(|&&(at, _, len)| near >= at && near < at + len)
+        .or_else(|| shows.iter().find(|&&(at, _, _)| at >= near))
+        .or_else(|| shows.first())
+        .map(place)
+}
+
 /// Length used for drawing: a plain step (length 0) is shown one step long (Lemon Studio choice).
 pub fn shown_len(s: &State, n: &Note) -> u32 {
     if n.length == 0 { u32::from(s.project.ppq.max(4)) / 4 } else { n.length }
