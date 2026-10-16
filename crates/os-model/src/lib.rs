@@ -10,6 +10,7 @@
 //! Units are the project's own: positions and lengths in ticks (see [`Project::ppq`]),
 //! levels as normalized `f64`s. File encodings live in `os-flp`, not here.
 
+pub mod crossfade;
 pub mod curve;
 
 /// An RGB color.
@@ -1453,6 +1454,57 @@ impl Clip {
         self.set_f32(44, ms);
         self.set_f32(48, tension);
         self.raw[56] = if ms > 0.0 { self.raw[56] | 2 } else { self.raw[56] & !2 };
+    }
+
+    /// Whether the fade-in / fade-out was set with the clip's own handle (bits 0 and 1 of byte 56). A fade without
+    /// its bit belongs to the project's automatic crossfades while they are on (spec: audio/audio-clips.md
+    /// "Automatic crossfades", [`crossfade`]).
+    pub fn fade_in_set(&self) -> bool {
+        self.raw[56] & 1 != 0
+    }
+
+    pub fn fade_out_set(&self) -> bool {
+        self.raw[56] & 2 != 0
+    }
+
+    /// The fade-in / fade-out as the record holds it, bit or not: (milliseconds, tension), `None` for a length of 0.
+    /// Kept in step with the clips while automatic crossfades are on ([`crossfade::derive`]), this is the fade that
+    /// plays (with them off, every stored fade plays).
+    pub fn stored_fade_in(&self) -> Option<(f32, f32)> {
+        let ms = self.f32_at(36);
+        (ms.is_finite() && ms > 0.0).then(|| (ms, self.f32_at(40)))
+    }
+
+    pub fn stored_fade_out(&self) -> Option<(f32, f32)> {
+        let ms = self.f32_at(44);
+        (ms.is_finite() && ms > 0.0).then(|| (ms, self.f32_at(48)))
+    }
+
+    /// The stored tensions (bytes 40 and 48), whatever the lengths.
+    pub fn fade_in_tension(&self) -> f32 {
+        self.f32_at(40)
+    }
+
+    pub fn fade_out_tension(&self) -> f32 {
+        self.f32_at(48)
+    }
+
+    /// Sets a tension alone: the length and the bit stay.
+    pub fn set_fade_in_tension(&mut self, t: f32) {
+        self.set_f32(40, t);
+    }
+
+    pub fn set_fade_out_tension(&mut self, t: f32) {
+        self.set_f32(48, t);
+    }
+
+    /// Sets a length alone (milliseconds, 0 = none): the tension and the bit stay ([`crossfade`]).
+    pub fn set_fade_in_length(&mut self, ms: f32) {
+        self.set_f32(36, ms);
+    }
+
+    pub fn set_fade_out_length(&mut self, ms: f32) {
+        self.set_f32(44, ms);
     }
 
     /// The clip's gain (bytes 52..56): 1.0 when the record holds no usable value.
