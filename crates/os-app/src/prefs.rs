@@ -298,6 +298,13 @@ pub const READ_TEMPO: Check = Check { key: "read_sample_tempo", label: "Read sam
 pub const ANIMATION_REFRESH_RATE: Combo =
     Combo { key: "animation_refresh_rate", label: "Animation refresh rate", choices: &["Less smooth", "Smooth", "Ultrasmooth"], default: 2 };
 
+/// General ▸ Advanced: about detached plugin windows (top-level windows of their own). Off, one dragged by its title
+/// bar keeps the title bar on the screens; on, it goes anywhere (`win_clamp::bar_on_screens`, Windows only: on Linux
+/// and macOS detached windows are not limited either way yet). Windows inside the main window keep their part in the
+/// workspace whatever this says (`crate::win_clamp`). Spec: ui/settings-choices.md "Advanced: Don't limit windows to
+/// screen (2026-10-16)".
+pub const DONT_LIMIT_WINDOWS: Check = Check { key: "dont_limit_windows_to_screen", label: "Don't limit windows to screen", default: false };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -330,6 +337,7 @@ pub const CHECKS: &[&Check] = &[
     &RECENT_CHANGES_TOP,
     &READ_ROOT_NOTE,
     &READ_TEMPO,
+    &DONT_LIMIT_WINDOWS,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE];

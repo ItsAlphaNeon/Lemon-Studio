@@ -916,7 +916,8 @@ impl State {
         Rect::new(left, views::WORK_Y, (self.screen.0 - left).max(0.0), (self.screen.1 - views::WORK_Y).max(0.0))
     }
 
-    /// The window's floating rect, kept at least its minimum size and inside the screen.
+    /// The window's floating rect, kept at least its minimum size and at most the screen's, with its part in the
+    /// workspace (`win_clamp::keep`).
     pub fn float_rect(&self, w: Win) -> Rect {
         let Some(i) = w.slot() else { return Rect::new(0.0, 0.0, 0.0, 0.0) };
         let r = self.wins[i].rect;
@@ -924,8 +925,7 @@ impl State {
         let (sw, sh) = self.screen;
         let rw = r.w.min(sw).max(mw);
         let rh = r.h.min(sh - views::WORK_Y).max(mh);
-        let x = r.x.min(sw - rw).max(0.0);
-        let y = r.y.min(sh - rh).max(views::WORK_Y);
+        let (x, y) = crate::win_clamp::keep(r.x, r.y, rw, self.work_rect());
         Rect::new(x, y, rw, rh)
     }
 
@@ -1012,7 +1012,7 @@ pub struct App {
     pub midi: crate::midi_in::MidiIn,
     midi_held: Vec<(u8, usize)>,
     /// Last title-bar press (window, time, position), for double-click maximize / restore.
-    title_click: Option<(Win, std::time::Instant, (f32, f32))>,
+    pub(crate) title_click: Option<(Win, std::time::Instant, (f32, f32))>,
     /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
     rack_click: Option<(Action, std::time::Instant)>,
     /// Last press on the CPU panel, for its double click (the Plugin performance monitor).
@@ -2957,6 +2957,11 @@ impl App {
             None => canvas.begin_frame(None),
         }
         self.state.screen = canvas.size();
+        // The main window or the workspace shrank: the windows keep their part in it (`win_clamp::keep_all`). Moved
+        // during a partial paint, the next frame is painted whole.
+        if crate::win_clamp::keep_all(&mut self.state) && damage.is_some() {
+            self.invalidate();
+        }
         // Plugin editors in this process colour their waveforms as the views do (spec: ui/settings-choices.md
         // "Display: Colorful waveforms (2026-10-16)").
         crate::waves::publish(&self.theme.colors);
@@ -3852,21 +3857,8 @@ impl App {
                 }
                 Drag::Window { win, dx, dy } => {
                     let old = self.win_bounds(win);
-                    let pos = ((x - dx).max(0.0), (y - dy).max(views::WORK_Y));
-                    let (sw, sh) = self.state.screen;
-                    match win {
-                        Win::ChannelRack => self.state.rack_pos = pos,
-                        Win::Plugin => self.state.plugin_pos = pos,
-                        Win::Perf => self.state.perf.pos = pos,
-                        Win::Tapper => self.state.tapper.pos = pos,
-                        w => {
-                            if let Some(i) = w.slot() {
-                                let r = &mut self.state.wins[i].rect;
-                                r.x = pos.0.min(sw - 100.0).max(0.0);
-                                r.y = pos.1.min(sh - 30.0).max(views::WORK_Y);
-                            }
-                        }
-                    }
+                    // The window keeps its part in the workspace, whatever "Don't limit windows to screen" says.
+                    crate::win_clamp::drag_to(&mut self.state, win, (x - dx, y - dy));
                     let new = self.win_bounds(win);
                     self.damage_rect(old.union(&new));
                 }
@@ -6491,6 +6483,7 @@ impl App {
                 let what = item_at(VIEW, i).and_then(|it| CloseAll::from_label(it.label)).expect("checked");
                 self.close_windows(what);
             }
+            (VIEW, i) if item_at(VIEW, i).is_some_and(|it| it.label == INTO_WORKSPACE_LABEL) => self.move_into_workspace(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::METRONOME_LABEL) => self.toggle_metronome(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::AUTOSCROLL_LABEL) => self.toggle_autoscroll(),
