@@ -230,7 +230,7 @@ mod tests {
     use os_ui::{Canvas, Rect};
 
     fn row(c: &Combo) -> usize {
-        ROWS.iter().position(|r| std::ptr::eq(*r, c)).expect("a row")
+        ROWS.iter().position(|r| r.key == c.key).expect("a row")
     }
 
     fn texts(f: &Form) -> Vec<&'static str> {
@@ -260,7 +260,7 @@ mod tests {
         assert_eq!(CLIP_MODS, ["(disabled)", "(none)", "Alt"]);
         // They are program settings, not on a settings page.
         for c in ROWS {
-            assert!(prefs::OFF_PAGE_COMBOS.iter().any(|o| std::ptr::eq(*o, c)), "{} is declared", c.label);
+            assert!(prefs::OFF_PAGE_COMBOS.iter().any(|o| o.key == c.key), "{} is declared", c.label);
         }
     }
 

@@ -71,14 +71,21 @@ fn replace(s: &mut State, row: usize, new: PathBuf) -> bool {
     if s.browser_folders.contains(&new) {
         return false;
     }
-    let key = view::disk_key(&old);
-    s.browser_open.retain(|k| !k.starts_with(&key));
+    forget_open(s, &old);
     if let Some(name) = s.browser_names.remove(&old) {
         s.browser_names.insert(new.clone(), name);
     }
     s.browser_folders[row] = new;
     crate::browser::save_folders(s);
     true
+}
+
+/// Forgets which of `path`'s folders are open in the browser: its root and the folders under it, not a sibling
+/// whose name starts the same.
+fn forget_open(s: &mut State, path: &Path) {
+    let key = view::disk_key(path);
+    let under = format!("{key}/");
+    s.browser_open.retain(|k| *k != key && !k.starts_with(&under));
 }
 
 /// Removes row `row`: its folder leaves the browser with its name.
@@ -88,8 +95,7 @@ fn remove(s: &mut State, row: usize) {
     }
     let path = s.browser_folders.remove(row);
     s.browser_names.remove(&path);
-    let key = view::disk_key(&path);
-    s.browser_open.retain(|k| !k.starts_with(&key));
+    forget_open(s, &path);
     s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
     crate::browser::save_folders(s);
     s.message = Some(format!("Removed {} from the browser", path.display()));
@@ -304,6 +310,23 @@ mod tests {
         // The group is not greyed out any more; External tools still is.
         assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder("Browser extra search folders")));
         assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("External tools")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Removing a row forgets which of its folders were open in the browser, not those of a folder whose name starts
+    /// the same.
+    #[test]
+    fn removing_a_row_keeps_a_sibling_open() {
+        let (root, dirs) = folders("forget", &["Kit", "Kit 2"]);
+        let mut app = App::new(None);
+        app.drop_file(dirs[0].clone());
+        app.drop_file(dirs[1].clone());
+        let s = &mut app.state;
+        let (one, two) = (view::disk_key(&dirs[0]), view::disk_key(&dirs[1]));
+        s.browser_open.extend([one.clone(), format!("{one}/Snares"), two.clone(), format!("{two}/Snares")]);
+        remove(s, 0);
+        assert!(!s.browser_open.contains(&one) && !s.browser_open.contains(&format!("{one}/Snares")));
+        assert!(s.browser_open.contains(&two) && s.browser_open.contains(&format!("{two}/Snares")), "the sibling stays open");
         let _ = std::fs::remove_dir_all(&root);
     }
 
