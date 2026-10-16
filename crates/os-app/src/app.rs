@@ -6249,6 +6249,9 @@ fn template_project(names: &[&str]) -> Project {
         channels: names.iter().enumerate().map(|(i, n)| channel(i as u16, n)).collect(),
         patterns: vec![Pattern { number: 1, ..Pattern::default() }],
         mixer,
+        // FL's default template holds event 30 = 1: "Play truncated notes in clips" is on in a new project (spec:
+        // flp/engine-events.md "Project", "Event 30").
+        play_truncated: Some(true),
         ..Project::default()
     }
 }
@@ -6562,7 +6565,8 @@ mod tests {
     /// Settings > Project (spec: ui/settings.md "Project", audio/song-structure.md): the Numerator and Denominator
     /// combos list their choices with the project's signature marked, and a pick changes the project at once (the
     /// pattern lengths the editors use follow; the project counts as changed); "Play truncated notes in clips" shows
-    /// and switches the project's setting. Both survive a save and reopen, of a new project and of an opened one.
+    /// and switches the project's setting, on in a new project. Both survive a save and reopen, of a new project and of
+    /// an opened one.
     #[test]
     fn project_settings_time_signature_and_truncated_notes() {
         use crate::playlist::Mark;
@@ -6607,7 +6611,9 @@ mod tests {
         assert_eq!(app.state.project.time_signature, Some((3, 8)));
         assert_eq!((shown(&app, NUMERATOR).as_deref(), shown(&app, DENOMINATOR).as_deref()), (Some("3"), Some("8")));
         assert_eq!(crate::piano::pattern_length(&app.state, &notes), 432);
-        // Play truncated notes: off when the file does not say (what the engine plays); a click switches it.
+        // Play truncated notes: on in a new project, as in FL's default template (spec: flp/engine-events.md "Event
+        // 30"), on File > New too; a click switches it.
+        assert_eq!(default_project().play_truncated, Some(true));
         let r = hit_rect(&app, &Action::Settings(SAct::Group("Advanced")));
         click(&mut app, &mut c, r);
         assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(TRUNCATED_CHECK)), "it works");
@@ -6616,8 +6622,8 @@ mod tests {
             views::settings::Row::Check(k, v) if k == TRUNCATED_CHECK => Some(v),
             _ => None,
         });
-        assert_eq!((app.state.project.play_truncated, on(&app)), (None, Some(false)));
-        for want in [true, false, true] {
+        assert_eq!((app.state.project.play_truncated, on(&app)), (Some(true), Some(true)));
+        for want in [false, true] {
             click(&mut app, &mut c, r);
             assert_eq!((app.state.project.play_truncated, on(&app)), (Some(want), Some(want)));
         }

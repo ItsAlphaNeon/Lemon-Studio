@@ -339,6 +339,9 @@ struct Layout {
     time_den: Option<usize>,
     truncated: Option<usize>,
     main_pitch: Option<usize>,
+    /// Project settings the model does not read whose place FL's order fixes (9, 35, 23, 44; spec:
+    /// flp/engine-events.md "Project", "Order in the file"): the id and where it first stands, to place 17, 18 and 30.
+    unread_settings: Vec<(u8, usize)>,
     groups: Vec<usize>,
     current_group: Option<usize>,
 }
@@ -475,6 +478,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 id::TIME_DEN if l.time_den.is_none() => l.time_den = Some(i),
                 id::PLAY_TRUNCATED if l.truncated.is_none() => l.truncated = Some(i),
                 id::MAIN_PITCH if l.main_pitch.is_none() => l.main_pitch = Some(i),
+                9 | 35 | 23 | 44 if !l.unread_settings.iter().any(|&(k, _)| k == e.id) => l.unread_settings.push((e.id, i)),
                 id::GROUP_NAME => l.groups.push(i),
                 id::CURRENT_GROUP => l.current_group = Some(i),
                 _ => {}
@@ -2133,11 +2137,13 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         set_int(&mut events[i], v.into());
     }
 
+    // Project settings the file lacks (11, 80, 17, 18, 30), in FL 26's order of them; see below.
+    let mut settings: Vec<(usize, Event)> = Vec::new();
     // Channel rack settings: main swing, filter groups, current filter (spec: flp/events/project-info.md).
     if let Some(v) = project.swing.filter(|&v| Some(v) != current.swing) {
         match l.swing {
             Some(i) => set_int(&mut events[i], v.into()),
-            None if v != 0 => inserts.push((l.tempo.map_or(0, |i| i + 1), Event::new(id::SWING, Value::U8(v)))),
+            None if v != 0 => settings.push((l.tempo.map_or(0, |i| i + 1), Event::new(id::SWING, Value::U8(v)))),
             None => {}
         }
     }
@@ -2147,14 +2153,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             Some(i) => set_int(&mut events[i], u32::from(v as u16)),
             None if v != 0 => {
                 let at = l.swing.or(l.tempo).map_or(0, |i| i + 1);
-                inserts.push((at, Event::new(id::MAIN_PITCH, Value::U16(v as u16))));
+                settings.push((at, Event::new(id::MAIN_PITCH, Value::U16(v as u16))));
             }
             None => {}
         }
     }
     // Time signature (events 17, 18) and "play truncated notes" (event 30): patched where the file has them, else
-    // added in the order of the project events in spec: flp/engine-events.md "Project" (17 and 18 before the swing and
-    // the main pitch, 30 behind them). The model's `None` is 4/4 and off.
+    // added where FL 26 writes them (spec: flp/engine-events.md "Project", "Order in the file": 156, 67, 9, 11, 80, 17,
+    // 18, 35, 23, 44, 30, 10), behind the last of the settings before them that the file has. The model's `None` is
+    // 4/4 and off.
+    let unread = |eid: u8| l.unread_settings.iter().find(|s| s.0 == eid).map(|s| s.1);
     if project.time_signature != current.time_signature {
         let (n, d) = project.time_signature.unwrap_or((4, 4));
         let (n, d) = (u32::from(signature_byte(n)), u32::from(signature_byte(d)));
@@ -2165,18 +2173,17 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
             (Some(a), None) => {
                 set_int(&mut events[a], n);
-                inserts.push((a + 1, int_event(id::TIME_DEN, d)));
+                settings.push((a + 1, int_event(id::TIME_DEN, d)));
             }
             (None, Some(b)) => {
                 set_int(&mut events[b], d);
-                inserts.push((b, int_event(id::TIME_NUM, n)));
+                settings.push((b, int_event(id::TIME_NUM, n)));
             }
             (None, None) => {
-                // Before the first of 11, 80 and 30 the file has, else right after the tempo. Events added at one
-                // place end up in the reverse order of their pushes: 17, 18, then a swing or main pitch added there.
-                let at = [l.swing, l.main_pitch, l.truncated].into_iter().flatten().min().or(l.tempo.map(|i| i + 1)).unwrap_or(0);
-                inserts.push((at, int_event(id::TIME_DEN, d)));
-                inserts.push((at, int_event(id::TIME_NUM, n)));
+                // Behind the last of 156, 67, 9, 11 and 80 the file has (so before 35, 23, 44, 30 and 10).
+                let at = [l.tempo, l.current_pattern, unread(9), l.swing, l.main_pitch].into_iter().flatten().max().map_or(0, |i| i + 1);
+                settings.push((at, int_event(id::TIME_NUM, n)));
+                settings.push((at, int_event(id::TIME_DEN, d)));
             }
         }
     }
@@ -2185,13 +2192,19 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         match l.truncated {
             Some(i) => set_int(&mut events[i], v),
             None => {
-                // Behind the last of 156, 17, 18, 11 and 80 the file has; first in the list, so that it also ends up
-                // behind events added at the same place.
-                let at = [l.tempo, l.time_num, l.time_den, l.swing, l.main_pitch].into_iter().flatten().max().map_or(0, |i| i + 1);
-                inserts.insert(0, (at, int_event(id::PLAY_TRUNCATED, v)));
+                // Behind the last of 156, 67, 9, 11, 80, 17, 18, 35, 23 and 44 the file has (so before 10).
+                let at = [l.tempo, l.current_pattern, unread(9), l.swing, l.main_pitch, l.time_num, l.time_den, unread(35), unread(23), unread(44)]
+                    .into_iter()
+                    .flatten()
+                    .max()
+                    .map_or(0, |i| i + 1);
+                settings.push((at, int_event(id::PLAY_TRUNCATED, v)));
             }
         }
     }
+    // Inserts at one place end up in reverse order of pushing: settings added at one place keep FL's order, ahead of
+    // project information added there.
+    inserts.extend(settings.into_iter().rev());
     let groups_at = l
         .groups
         .first()
@@ -3201,17 +3214,17 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         Event::new(169, Value::U32(15)),
         Event::new(id::TEMPO, Value::U32((project.tempo.unwrap_or(130.0) * 1000.0).round() as u32)),
     ];
-    // The time signature and "play truncated notes" where the model has them, around the swing and the main pitch as
-    // spec: flp/engine-events.md "Project" lists them (17, 18, 11, 80, 30).
-    if let Some((n, d)) = project.time_signature {
-        ev.push(Event::new(id::TIME_NUM, Value::U8(signature_byte(n))));
-        ev.push(Event::new(id::TIME_DEN, Value::U8(signature_byte(d))));
-    }
     if let Some(v) = project.swing.filter(|&v| v != 0) {
         ev.push(Event::new(id::SWING, Value::U8(v)));
     }
     if let Some(v) = project.main_pitch.filter(|&v| v != 0) {
         ev.push(Event::new(id::MAIN_PITCH, Value::U16(v as u16)));
+    }
+    // The time signature and "play truncated notes" where the model has them, after the swing and the main pitch as FL
+    // 26 writes them (spec: flp/engine-events.md "Project", "Order in the file": 11, 80, 17, 18, ..., 30).
+    if let Some((n, d)) = project.time_signature {
+        ev.push(Event::new(id::TIME_NUM, Value::U8(signature_byte(n))));
+        ev.push(Event::new(id::TIME_DEN, Value::U8(signature_byte(d))));
     }
     if let Some(on) = project.play_truncated {
         ev.push(Event::new(id::PLAY_TRUNCATED, Value::U8(u8::from(on))));
@@ -4101,38 +4114,48 @@ mod tests {
 
     /// The time signature (events 17, 18) and "play truncated notes" (event 30) are saved (spec: audio/song-structure.md,
     /// flp/engine-events.md "Project"): `create` writes them where the model has them; `apply` patches them in place in
-    /// a file that has them (an opened project keeps every other event as it was) and adds them in the listed order,
-    /// 17, 18 before the swing and the main pitch and 30 behind them, where it has not.
+    /// a file that has them (an opened project keeps every other event as it was) and, where it has not, adds them where
+    /// FL 26 writes them ("Order in the file": 156, 67, 9, 11, 80, 17, 18, 35, 23, 44, 30, 10).
     #[test]
     fn time_signature_and_truncated_notes_round_trip() {
-        let project_ids = |f: &FlpFile| -> Vec<u8> {
-            let keep = [id::TEMPO, id::TIME_NUM, id::TIME_DEN, id::SWING, id::MAIN_PITCH, id::PLAY_TRUNCATED];
-            events_of(f).unwrap().iter().map(|e| e.id).filter(|i| keep.contains(i)).collect()
+        const ORDER: [u8; 12] =
+            [id::TEMPO, id::CURRENT_PATTERN, 9, id::SWING, id::MAIN_PITCH, id::TIME_NUM, id::TIME_DEN, 35, 23, 44, id::PLAY_TRUNCATED, 10];
+        let prelude_ids = |f: &FlpFile, keep: &[u8]| -> Vec<u8> {
+            events_of(f).unwrap().iter().take_while(|e| e.id != id::CH_START).map(|e| e.id).filter(|i| keep.contains(i)).collect()
         };
+        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        let settings = [id::TEMPO, id::SWING, id::MAIN_PITCH, id::TIME_NUM, id::TIME_DEN, id::PLAY_TRUNCATED];
         // A new project.
         let mut p = new_project();
         (p.time_signature, p.play_truncated, p.swing, p.main_pitch) = (Some((3, 4)), Some(true), Some(64), Some(100));
-        let file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let file = reparse(&create(&p).unwrap());
         let back = load(&file).unwrap();
         assert_eq!((back.time_signature, back.play_truncated), (Some((3, 4)), Some(true)));
-        assert_eq!(project_ids(&file), [id::TEMPO, id::TIME_NUM, id::TIME_DEN, id::SWING, id::MAIN_PITCH, id::PLAY_TRUNCATED]);
+        assert_eq!(prelude_ids(&file, &settings), settings);
         // Switched off and back to 4/4, they stay in the file with those values.
         let mut off = back.clone();
         (off.time_signature, off.play_truncated) = (Some((4, 4)), Some(false));
-        let file = FlpFile::parse(&create(&off).unwrap().to_bytes().unwrap()).unwrap();
+        let file = reparse(&create(&off).unwrap());
         assert_eq!((load(&file).unwrap().time_signature, load(&file).unwrap().play_truncated), (Some((4, 4)), Some(false)));
 
-        // An opened file: FL's project events with events the model does not know between them.
-        let mut fl = create(&new_project()).unwrap();
-        {
-            let ev = events_of_mut(&mut fl).unwrap();
+        // A file laid out as FL 26 writes one: its settings behind the tempo in FL's order, those the model does not
+        // read among them, without the ids in `missing`.
+        let fl_file = |missing: &[u8]| -> FlpFile {
+            let mut f = create(&Project { current_pattern: None, ..new_project() }).unwrap();
+            let ev = events_of_mut(&mut f).unwrap();
             let t = ev.iter().position(|e| e.id == id::TEMPO).unwrap();
-            let prelude = [(9, 1), (id::TIME_NUM, 4), (id::TIME_DEN, 4), (10, 1), (id::SWING, 0), (id::MAIN_PITCH, 0), (28, 1), (id::PLAY_TRUNCATED, 1)];
-            for (k, (eid, v)) in prelude.into_iter().enumerate() {
-                ev.insert(t + 1 + k, int_event(eid, v));
+            let value = |eid: u8| match eid {
+                id::TIME_NUM | id::TIME_DEN => 4,
+                id::SWING => 64,
+                _ => 1,
+            };
+            for (k, eid) in ORDER[1..].iter().copied().filter(|e| !missing.contains(e)).enumerate() {
+                ev.insert(t + 1 + k, int_event(eid, value(eid)));
             }
-        }
-        let fl = FlpFile::parse(&fl.to_bytes().unwrap()).unwrap();
+            reparse(&f)
+        };
+        let fl = fl_file(&[]);
+        assert_eq!(prelude_ids(&fl, &ORDER), ORDER);
         let before = events_of(&fl).unwrap().clone();
         let opened = load(&fl).unwrap();
         assert_eq!((opened.time_signature, opened.play_truncated), (Some((4, 4)), Some(true)));
@@ -4142,7 +4165,7 @@ mod tests {
         let mut edited = opened.clone();
         (edited.time_signature, edited.play_truncated) = (Some((7, 8)), Some(false));
         apply(&edited, &mut file).unwrap();
-        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let file = reparse(&file);
         let after = events_of(&file).unwrap();
         assert_eq!(after.len(), before.len(), "patched in place, nothing added");
         for (a, b) in after.iter().zip(&before) {
@@ -4156,27 +4179,50 @@ mod tests {
         let again = load(&file).unwrap();
         assert_eq!((again.time_signature, again.play_truncated), (Some((7, 8)), Some(false)));
 
-        // A file without them (a new project saved before they were set) gets them right after the tempo, also when
-        // the swing and the main pitch are added in the same save.
-        let mut plain = create(&new_project()).unwrap();
+        // Missing from such a file, they are added where FL writes them: 17, 18 behind 80 (before 35, 23, 44), 30
+        // behind 44 (before 10), or behind 18 when the file has none of 35, 23, 44.
+        let cases: [(&[u8], &[u8]); 4] = [
+            (&[id::TIME_NUM, id::TIME_DEN, id::PLAY_TRUNCATED], &ORDER),
+            (&[id::TIME_NUM, id::TIME_DEN], &ORDER),
+            (&[id::PLAY_TRUNCATED], &ORDER),
+            (
+                &[id::TIME_NUM, id::TIME_DEN, 35, 23, 44, id::PLAY_TRUNCATED],
+                &[id::TEMPO, id::CURRENT_PATTERN, 9, id::SWING, id::MAIN_PITCH, id::TIME_NUM, id::TIME_DEN, id::PLAY_TRUNCATED, 10],
+            ),
+        ];
+        for (missing, want) in cases {
+            let mut file = fl_file(missing);
+            let mut q = load(&file).unwrap();
+            (q.time_signature, q.play_truncated) = (Some((6, 8)), Some(false));
+            apply(&q, &mut file).unwrap();
+            let file = reparse(&file);
+            assert_eq!(prelude_ids(&file, &ORDER), want, "missing {missing:?}");
+            let back = load(&file).unwrap();
+            assert_eq!((back.time_signature, back.play_truncated), (Some((6, 8)), Some(false)));
+        }
+
+        // A Lemon Studio file without them, the swing, the main pitch or project information: settings added in one
+        // save keep FL's order (11, 80, 17, 18, 30) and stand before the information added with them.
+        let mut plain = create(&Project { current_pattern: None, info: ProjectInfo::default(), ..new_project() }).unwrap();
         let mut q = load(&plain).unwrap();
         assert_eq!((q.time_signature, q.play_truncated), (None, None));
         (q.time_signature, q.play_truncated, q.swing, q.main_pitch) = (Some((6, 8)), Some(true), Some(32), Some(-100));
+        q.info.title = Some("Song".into());
         apply(&q, &mut plain).unwrap();
-        let ids = project_ids(&plain);
-        assert_eq!(ids[..3], [id::TEMPO, id::TIME_NUM, id::TIME_DEN]);
-        assert_eq!(ids.last(), Some(&id::PLAY_TRUNCATED));
-        assert_eq!(ids.len(), 6);
-        let back = load(&FlpFile::parse(&plain.to_bytes().unwrap()).unwrap()).unwrap();
+        let plain = reparse(&plain);
+        let with_title = [id::TEMPO, id::SWING, id::MAIN_PITCH, id::TIME_NUM, id::TIME_DEN, id::PLAY_TRUNCATED, id::TITLE];
+        assert_eq!(prelude_ids(&plain, &with_title), with_title);
+        let back = load(&plain).unwrap();
         assert_eq!((back.time_signature, back.play_truncated, back.swing, back.main_pitch), (Some((6, 8)), Some(true), Some(32), Some(-100)));
-        // Next to the events a file has: 17, 18 before the swing, 30 behind the main pitch.
+        assert_eq!(back.info.title.as_deref(), Some("Song"));
+        // One with the swing and the main pitch: 17, 18 and 30 behind them.
         let mut p = new_project();
         (p.swing, p.main_pitch) = (Some(64), Some(100));
         let mut file = create(&p).unwrap();
         let mut q = load(&file).unwrap();
         (q.time_signature, q.play_truncated) = (Some((5, 4)), Some(false));
         apply(&q, &mut file).unwrap();
-        assert_eq!(project_ids(&file), [id::TEMPO, id::TIME_NUM, id::TIME_DEN, id::SWING, id::MAIN_PITCH, id::PLAY_TRUNCATED]);
+        assert_eq!(prelude_ids(&file, &settings), settings);
         assert_eq!((load(&file).unwrap().time_signature, load(&file).unwrap().play_truncated), (Some((5, 4)), Some(false)));
     }
 
