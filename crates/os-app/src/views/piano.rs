@@ -208,11 +208,36 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
                 at += iv;
             }
         }
-        if nr.w > 12.0 && g.row >= 13.0 {
+        // A slide note shows a small filled triangle at its right end, a note with its own portamento switch a small
+        // curved stroke (spec: ui/settings-choices.md "Input: Click-and-hold and both mouse buttons (2026-10-16)";
+        // flp/events/patterns.md "Note flags"; audio/note-rules.md). The key name keeps clear of them.
+        let mut room = nr.w;
+        if (n.slide() || n.porta()) && body.w >= 8.0 && body.h >= 4.0 {
+            let h = (body.h - 4.0).clamp(3.0, 9.0);
+            let w = (h * 0.7).min(body.w / 2.0 - 1.0);
+            let (mut x1, cy) = (body.right() - 2.0, body.y + body.h / 2.0);
+            if n.slide() {
+                ui.c.fill_polygon(&[(x1 - w, cy - h / 2.0), (x1, cy), (x1 - w, cy + h / 2.0)], text);
+                room = x1 - w - 2.0 - nr.x;
+                x1 -= w + 2.0;
+            }
+            if n.porta() && x1 - w > body.x {
+                // A quarter of an ellipse rising from the lower left to the upper right.
+                let pts: Vec<(f32, f32)> = (0..=8)
+                    .map(|k| {
+                        let a = k as f32 / 8.0 * std::f32::consts::FRAC_PI_2;
+                        (x1 - w * a.cos(), cy + h / 2.0 - h * a.sin())
+                    })
+                    .collect();
+                ui.c.polyline(&pts, 1.5, text);
+                room = x1 - w - 2.0 - nr.x;
+            }
+        }
+        if room > 12.0 && g.row >= 13.0 {
             let label = key_name(i32::from(n.key));
             let w = ui.c.text_width(label_font, &label);
-            let shown = if w <= nr.w - 5.0 { label } else { format!("{}..", &label[..1]) };
-            ui.c.text_clip(label_font, nr.x + if lemon { 4.0 } else { 3.0 }, nr.y + 2.0, nr.w - 4.0, text, &shown);
+            let shown = if w <= room - 5.0 { label } else { format!("{}..", &label[..1]) };
+            ui.c.text_clip(label_font, nr.x + if lemon { 4.0 } else { 3.0 }, nr.y + 2.0, room - 4.0, text, &shown);
         }
     }
     // Tool overlays (§9): marquee and zoom box (orange, rounded), slice and scrub lines.

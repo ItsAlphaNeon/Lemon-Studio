@@ -1016,6 +1016,8 @@ pub struct App {
     pub hint: Cow<'static, str>,
     pub mouse: (f32, f32),
     pub drag: Option<Drag>,
+    /// A held click that has not moved yet (Click-and-hold & special gesture functions, `crate::hold`).
+    pub hold: Option<crate::hold::Hold>,
     pub want_minimize: bool,
     pub want_maximize: bool,
     pub want_close: bool,
@@ -1190,6 +1192,7 @@ impl App {
             hint: Cow::Borrowed(""),
             mouse: (-1.0, -1.0),
             drag: None,
+            hold: None,
             want_minimize: false,
             want_maximize: false,
             want_close: false,
@@ -2770,6 +2773,7 @@ impl App {
             || self.plugin_windows_busy()
             || self.state.tapper.flash_at.is_some()
             || self.state.cables.borrow().moving()
+            || self.hold.is_some()
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -2839,6 +2843,7 @@ impl App {
         // rate.
         let now = std::time::Instant::now();
         self.song_pos_tick(now);
+        self.hold_tick(now);
         self.cables_tick(now);
         self.backup_tick(now);
         self.work_tick(now);
@@ -2992,7 +2997,7 @@ impl App {
     }
 
     /// Repaint the piano roll body (note edits change the grid, overview and velocity panel).
-    fn damage_piano(&mut self) {
+    pub(crate) fn damage_piano(&mut self) {
         match self.piano_win {
             Some(r) => self.damage_rect(r),
             None => self.invalidate(),
@@ -3003,7 +3008,7 @@ impl App {
         }
     }
 
-    fn piano_geom(&self) -> Option<Geom> {
+    pub(crate) fn piano_geom(&self) -> Option<Geom> {
         self.piano_grid.map(|g| Geom::new(&self.state, g))
     }
 
@@ -3663,6 +3668,7 @@ impl App {
     /// Mouse moved; returns whether a repaint is needed.
     pub fn mouse_move(&mut self, x: f32, y: f32) -> bool {
         self.mouse = (x, y);
+        self.hold_moved(x, y);
         if let Some(d) = self.drag.clone() {
             match d {
                 Drag::Browser { item, label, m0, started } => self.browser_drag_move(label, m0, started, item),
@@ -4085,6 +4091,7 @@ impl App {
 
     pub fn mouse_down(&mut self) {
         self.invalidate();
+        self.hold = None;
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
         self.pressed = action.clone();
@@ -4524,6 +4531,7 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        self.hold = None;
         // An armed window button acts if the release is over it (`acts_on_release`).
         if let Some(a) = self.armed.take() {
             let (x, y) = self.mouse;
@@ -4599,7 +4607,7 @@ impl App {
 
     /// Move (`resize == false`) or resize the dragged notes from their originals; the distance follows the snap
     /// (spec: ui/piano-snap.md §5, §8), measured from the grabbed note's start, or its end for a resize.
-    fn drag_notes(&mut self, x0: f32, y0: f32, orig: &[(usize, Note)], resize: bool) {
+    pub(crate) fn drag_notes(&mut self, x0: f32, y0: f32, orig: &[(usize, Note)], resize: bool) {
         let Some(g) = self.piano_geom() else { return };
         let (x, y) = self.mouse;
         let unit = crate::piano_snap::unit(&self.state).unwrap_or(1);
@@ -5583,6 +5591,8 @@ impl App {
                 self.drag = Some(Drag::NoteMove { x0: x, y0: y, orig: vec![(i, n)] });
                 let play = self.audition();
                 self.hold_key(Some(i32::from(n.key)), play);
+                // Held without a move, the new note's type cycles (Click-and-hold & special gesture functions).
+                self.hold_start(crate::hold::Kind::NewNote);
             }
             Action::PianoNote(i) => {
                 let Some(&n) = piano::notes(s).get(i) else { return };
@@ -5609,6 +5619,10 @@ impl App {
                     self.hold_key(Some(i32::from(n.key)), play);
                     Drag::NoteMove { x0: x, y0: y, orig }
                 });
+                // Held without a move, the notes are cloned (Click-and-hold & special gesture functions).
+                if matches!(self.drag, Some(Drag::NoteMove { .. })) {
+                    self.hold_start(crate::hold::Kind::Notes);
+                }
             }
             Action::PianoVelocity => {
                 piano::snapshot(s);

@@ -221,6 +221,11 @@ pub const BOTH_MOUSE_BUTTONS: Check =
 pub const STARTUP_PROJECT: Combo =
     Combo { key: "startup_project", label: "Startup project", choices: &["Empty project", "Default template", "Last used project"], default: 1 };
 
+/// General ▸ Input: a held click that doesn't move does more: in the piano roll the Draw tool's new note cycles plain,
+/// slide, porta, and a note held on is cloned; in the playlist a clip held on is cloned (`crate::hold`). Spec:
+/// ui/settings-choices.md "Input: Click-and-hold and both mouse buttons (2026-10-16)".
+pub const CLICK_AND_HOLD: Check = Check { key: "click_and_hold_gestures", label: "Click-and-hold & special gesture functions", default: false };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -245,6 +250,7 @@ pub const CHECKS: &[&Check] = &[
     &SHOW_SPLASH,
     &SILENT_STARTUP,
     &BOTH_MOUSE_BUTTONS,
+    &CLICK_AND_HOLD,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS];

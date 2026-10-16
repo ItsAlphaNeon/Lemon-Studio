@@ -1024,6 +1024,30 @@ impl Note {
         self.flags & Self::SLIDE != 0
     }
 
+    /// Byte-19 value of a note's own portamento switch (spec: audio/note-rules.md, "A note's own portamento switch").
+    pub const PORTA: u8 = 0x10;
+
+    /// The note's own portamento switch: it inverts the channel's portamento for this note (spec: as above).
+    pub fn porta(&self) -> bool {
+        self.group & Self::PORTA != 0
+    }
+
+    pub fn set_slide(&mut self, on: bool) {
+        if on {
+            self.flags |= Self::SLIDE;
+        } else {
+            self.flags &= !Self::SLIDE;
+        }
+    }
+
+    pub fn set_porta(&mut self, on: bool) {
+        if on {
+            self.group |= Self::PORTA;
+        } else {
+            self.group &= !Self::PORTA;
+        }
+    }
+
     /// Highest repeat index (spec: flp/events/patterns.md, note repeat table).
     pub const MAX_REPEAT: u8 = 14;
 

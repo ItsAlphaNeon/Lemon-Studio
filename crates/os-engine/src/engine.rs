@@ -75,6 +75,8 @@ struct Trigger {
     shape: Option<ClipShape>,
     /// A slide note: no sound of its own, it glides the channel's voices.
     slide: bool,
+    /// The note's own portamento switch (spec: audio/note-rules.md, "A note's own portamento switch").
+    porta: bool,
     /// A note a layer handed on: the layer and the child's crossfade gain.
     via: Option<Via>,
     /// The group it cuts and the group its voice belongs to as the note carries them from a layer (`None`: the
@@ -1145,6 +1147,7 @@ impl Engine {
                         }
                     }),
                     slide: n.slide,
+                    porta: n.porta,
                     via: None,
                     cuts: None,
                 })
@@ -2167,6 +2170,7 @@ impl Engine {
                     levels: t.levels,
                     cuts: t.cuts,
                     layer: t.via.map(|w| w.layer),
+                    porta: t.porta,
                 });
                 if let Some(sh) = t.shape {
                     self.inst_shapes.push((t.channel, sh, 0));
@@ -2841,6 +2845,8 @@ struct Sched {
     clip: Option<ClipFx>,
     /// A slide note.
     slide: bool,
+    /// The note's own portamento switch.
+    porta: bool,
 }
 
 impl Sched {
@@ -2859,6 +2865,7 @@ impl Sched {
             from_s: 0.0,
             clip: None,
             slide: n.slide(),
+            porta: n.porta(),
         }
     }
 }
@@ -3108,7 +3115,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         // An audio clip plays its channel's sample from the window start (milliseconds), cut at the clip end.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
                             let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, clip: ClipFx::of(c), slide: false });
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, clip: ClipFx::of(c), slide: false, porta: false });
                         }
                         Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
