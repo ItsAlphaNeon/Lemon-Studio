@@ -117,10 +117,22 @@ impl App {
 
     /// Writes `keys` as notes at the song position, one step long, for the selected channel; they become the
     /// selection, the position moves on one step (the start is where the position was, not snapped). One undo step.
+    /// In SONG mode the notes go where the pattern plays at the song position, as the piano roll shows it
+    /// (`piano::pattern_tick_in_song`); where no clip of it plays, nothing is written.
     fn step_edit_write(&mut self, keys: &[(u16, u8)]) {
         let s = &mut self.state;
         let Some(ch) = crate::piano::channel(s) else { return };
-        let at = crate::song_pos::stored(s);
+        let pos = crate::song_pos::stored(s);
+        let at = if s.song_mode {
+            let Some(t) = crate::piano::pattern_tick_in_song(s, f64::from(pos)) else {
+                s.message = Some(format!("Step edit: {} does not play at the song position", crate::patterns::name_of(s, s.pattern)));
+                self.invalidate();
+                return;
+            };
+            t as u32
+        } else {
+            pos
+        };
         let len = step(s);
         let snap = crate::history::Snap::pattern(s, s.pattern);
         crate::history::record(s, crate::history::STEP_EDIT, snap);
@@ -133,7 +145,7 @@ impl App {
         }
         s.piano.select(s.pattern, ch, new);
         s.piano.dirty = true;
-        let to = at + len;
+        let to = pos + len;
         if s.song_mode {
             s.playlist.pos = to;
             // The initial values follow a song position move, as with the slider (`App::set_song_pos`).
@@ -237,12 +249,21 @@ mod tests {
         assert_eq!(notes(&app), [(0, st, 48, 100), (st, st, 50, 100)]);
         assert_eq!((app.state.piano.marker, selected(&app)), (2 * st, vec![1]), "the earlier note is deselected");
         assert_eq!(app.hint, "Song position: 1:03:00");
-        // In SONG mode the song position is the playlist's.
+        // In SONG mode the song position is the playlist's, and the notes go where the pattern plays there, as the
+        // piano roll shows it: a clip of it at bar 3, the position a beat into it.
         app.state.song_mode = true;
-        app.state.playlist.pos = 4 * st;
+        let bar = app.state.project.bar_ticks();
+        let clip = os_model::Clip::new(2 * bar, bar, 0, os_model::ClipSource::Pattern(app.state.pattern));
+        crate::playlist::arr_mut(&mut app.state).clips = vec![clip];
+        app.state.playlist.pos = 2 * bar + 4 * st;
         tap(&mut app, KeyCode::KeyC);
         assert_eq!(notes(&app)[2], (4 * st, st, 52, 100));
-        assert_eq!((app.state.playlist.pos, app.state.piano.marker), (5 * st, 2 * st));
+        assert_eq!((app.state.playlist.pos, app.state.piano.marker), (2 * bar + 5 * st, 2 * st));
+        // Where no clip of the pattern plays, nothing is written and the position stays.
+        app.state.playlist.pos = bar / 2;
+        tap(&mut app, KeyCode::KeyV);
+        assert_eq!((notes(&app).len(), app.state.playlist.pos), (3, bar / 2));
+        assert!(app.state.message.as_deref().is_some_and(|m| m.contains("does not play at the song position")));
     }
 
     /// Keys held together give one chord, written on the release of the last one with every key pressed since the
