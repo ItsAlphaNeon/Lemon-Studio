@@ -108,7 +108,7 @@ pub const BACKUP_LOCATION: Combo = Combo {
 /// mixer); off, unsolo turns everything on. Spec: ui/settings-choices.md "Miscellaneous: what four checks do".
 pub const RESTORE_AFTER_SOLO: Check = Check { key: "restore_after_solo", label: "Restore previous state after solo", default: false };
 
-/// General ▸ Miscellaneous: switching pattern selects the first channel with notes in it (`crate::rack::follow_pattern`).
+/// General ▸ Miscellaneous: switching pattern selects the first channel with notes in it (`App::pattern_tick`).
 pub const SELECT_FIRST_CHANNEL: Check =
     Check { key: "select_first_channel", label: "Select first channel with notes when the pattern changes", default: false };
 
@@ -117,6 +117,14 @@ pub const AUTO_ZOOM_PIANO: Check = Check { key: "auto_zoom_piano", label: "Auto 
 
 /// General ▸ Miscellaneous: thin editor scroll bars without arrow buttons (`crate::views::small_scrollbars`).
 pub const SMALL_SCROLLBARS: Check = Check { key: "small_scrollbars", label: "Small scrollbars in editors", default: false };
+
+/// General ▸ Miscellaneous: a pattern switch zips the channels with nothing in the new pattern (`App::pattern_tick`).
+/// Spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project".
+pub const AUTO_ZIP_EMPTY: Check = Check { key: "auto_zip_empty_channels", label: "Auto zip empty channels", default: false };
+
+/// General ▸ Miscellaneous: a painted note deletes the notes of other keys under it (`crate::piano::paint_mono`).
+/// Spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project".
+pub const MONO_PAINTING: Check = Check { key: "monophonic_painting", label: "Monophonic painting in piano roll", default: false };
 
 /// Project ▸ Playlist: a new project's "Automatic crossfades" (event 44) takes this value, whatever FL's template file
 /// holds (`app::default_project`); opening a file keeps the file's. A program setting, on by default. Spec:
@@ -143,6 +151,8 @@ pub const CHECKS: &[&Check] = &[
     &SELECT_FIRST_CHANNEL,
     &AUTO_ZOOM_PIANO,
     &SMALL_SCROLLBARS,
+    &AUTO_ZIP_EMPTY,
+    &MONO_PAINTING,
     &AUTO_CROSSFADES_NEW,
     &PLAY_TRUNCATED_ON_TRANSPORT,
     &RESET_PLUGINS_ON_TRANSPORT,

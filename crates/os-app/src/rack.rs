@@ -597,24 +597,41 @@ pub fn solo(s: &mut State, r: usize) {
     s.piano.dirty = true;
 }
 
-/// "Select first channel with notes when the pattern changes" (spec: ui/settings-choices.md "Miscellaneous"): run on
-/// every tick and before each frame (`App::follow_settings`), so every way of switching pattern counts (numpad - / +, the pattern picker and box, the
-/// playlist...). On a switch, the lowest-numbered channel with notes or steps in the new pattern becomes the only
-/// selected channel and the focused one; a pattern without any (also one just made with "+") leaves the selection
-/// alone. A new or opened project is not a switch.
+/// What follows a pattern switch. Run on every tick and before each frame (`App::follow_settings`), so every way of
+/// switching pattern counts (numpad - / +, the pattern picker and box, a new pattern, the playlist...); a new or opened
+/// project is not a switch. Two General ▸ Miscellaneous checks (spec: ui/settings-choices.md "Miscellaneous"):
+/// - "Auto zip empty channels": the channels with notes or steps in the new pattern are unzipped and every other one
+///   is zipped; a pattern without any unzips every channel. Zipping by hand works as ever between switches.
+/// - "Select first channel with notes when the pattern changes": the lowest-numbered channel with notes or steps in
+///   the new pattern becomes the only selected channel and the focused one; a pattern without any (also one just made
+///   with "+") leaves the selection alone.
 impl App {
     pub(crate) fn pattern_tick(&mut self) {
         let now = self.state.pattern;
         let seen = self.state.rack.pattern_seen.replace(now);
-        if seen.is_none_or(|p| p == now) || !crate::prefs::check(&crate::prefs::SELECT_FIRST_CHANNEL) {
+        if seen.is_none_or(|p| p == now) {
             return;
         }
+        // Per rack row: the channel has notes or steps in the new pattern.
         let s = &self.state;
-        let Some(p) = s.project.pattern(now) else { return };
-        let Some(r) = s.project.channels.iter().position(|c| p.notes.iter().any(|n| n.channel == c.index)) else { return };
-        self.state.rack.select_only(r);
-        self.focus_channel(r);
-        self.invalidate();
+        let used: Vec<bool> = match s.project.pattern(now) {
+            Some(p) => s.project.channels.iter().map(|c| p.notes.iter().any(|n| n.channel == c.index)).collect(),
+            None => vec![false; s.project.channels.len()],
+        };
+        if crate::prefs::check(&crate::prefs::AUTO_ZIP_EMPTY) {
+            let s = &mut self.state;
+            let zipped: BTreeSet<usize> = used.iter().enumerate().filter(|&(_, &u)| !u).map(|(r, _)| r).collect();
+            s.rack.zipped = if zipped.len() == used.len() { BTreeSet::new() } else { zipped };
+            autosize(s);
+            self.invalidate();
+        }
+        if crate::prefs::check(&crate::prefs::SELECT_FIRST_CHANNEL) {
+            if let Some(r) = used.iter().position(|&u| u) {
+                self.state.rack.select_only(r);
+                self.focus_channel(r);
+                self.invalidate();
+            }
+        }
     }
 }
 
@@ -2155,5 +2172,41 @@ mod tests {
             assert_eq!(selection(&app).1, if on { 1 } else { 4 }, "before the frame (check {on})");
         }
         set_check(&SELECT_FIRST_CHANNEL, false);
+    }
+
+    /// "Auto zip empty channels" (spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and
+    /// Startup project"), the measured case: steps on Kick and HiHat in pattern 1 and on Clap in pattern 2. On, each
+    /// pattern switch unzips the channels with notes or steps in the new pattern and zips the others; an empty pattern
+    /// unzips them all; zipping by hand holds until the next switch. Off: the zips stay as they are.
+    #[test]
+    fn auto_zip_empty_channels() {
+        use crate::prefs::{set_check, AUTO_ZIP_EMPTY};
+        for on in [false, true] {
+            set_check(&AUTO_ZIP_EMPTY, on);
+            let mut app = App::new(None);
+            app.state.project = crate::app::test_project();
+            // Rows: 0 Kick, 1 Clap, 2 Hat, 3 Snare, 4 Pluck.
+            let pat = |number: u16, notes: Vec<Note>| os_model::Pattern { number, notes, ..Default::default() };
+            app.state.project.patterns = vec![pat(1, vec![Note::step(0, 0), Note::step(2, 48)]), pat(2, vec![Note::step(1, 96)]), pat(3, Vec::new())];
+            let zips = |app: &App| app.state.rack.zipped.iter().copied().collect::<Vec<usize>>();
+            app.state.rack.zipped = [4].into();
+            app.tick();
+            assert_eq!(zips(&app), vec![4], "no switch yet, check {on}");
+            let mut switch = |app: &mut App, p: u16| {
+                app.state.pattern = p;
+                app.tick();
+                zips(app)
+            };
+            assert_eq!(switch(&mut app, 2), if on { vec![0, 2, 3, 4] } else { vec![4] }, "pattern 2, check {on}");
+            assert_eq!(switch(&mut app, 1), if on { vec![1, 3, 4] } else { vec![4] }, "pattern 1, check {on}");
+            // Zipping by hand works between switches.
+            app.state.rack.zipped.insert(0);
+            app.tick();
+            assert_eq!(zips(&app), if on { vec![0, 1, 3, 4] } else { vec![0, 4] }, "zipped by hand, check {on}");
+            // A pattern without notes (as one just made with "+") unzips every channel.
+            assert_eq!(switch(&mut app, 3), if on { Vec::new() } else { vec![0, 4] }, "empty pattern, check {on}");
+            assert_eq!(switch(&mut app, 9), if on { Vec::new() } else { vec![0, 4] }, "a pattern with no data, check {on}");
+        }
+        set_check(&AUTO_ZIP_EMPTY, false);
     }
 }

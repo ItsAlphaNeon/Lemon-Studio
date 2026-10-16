@@ -4658,14 +4658,15 @@ impl App {
     }
 
     /// Paint tool: fill `key`'s row with notes `len` apart from `start` up to the mouse (either
-    /// direction), skipping slots that already hold a note of this channel on that key.
+    /// direction), skipping slots that already hold a note of this channel on that key. Each note laid deletes the
+    /// other keys' notes under it with "Monophonic painting in piano roll" on (`piano::paint_mono`).
     fn paint_notes(&mut self, key: i32, start: u32, len: u32) {
         let (Some(g), Some(ch)) = (self.piano_geom(), piano::channel(&self.state)) else { return };
         let len = len.max(1);
         let t = g.tick_at(self.mouse.0).max(0.0) as i64;
         let k = (t - i64::from(start)).div_euclid(i64::from(len));
         let (a, b) = (k.min(0), k.max(0));
-        let mut added = Vec::new();
+        let (mut added, mut deleted) = (Vec::new(), false);
         for j in a..=b {
             let pos = i64::from(start) + j * i64::from(len);
             if pos < 0 {
@@ -4676,13 +4677,17 @@ impl App {
             if !taken {
                 let i = piano::add_note(&mut self.state, ch, pos, key);
                 piano::pattern_mut(&mut self.state).notes[i].length = len;
-                added.push(i);
+                let before = piano::notes(&self.state).len();
+                let i = piano::paint_mono(&mut self.state, i);
+                deleted |= piano::notes(&self.state).len() < before;
+                added.push(piano::notes(&self.state)[i]);
             }
         }
-        if !added.is_empty() {
+        if deleted {
+            self.damage_piano();
+        } else if !added.is_empty() {
             self.state.piano.dirty = true;
-            let notes = piano::notes(&self.state);
-            let rects: Vec<Rect> = added.iter().filter_map(|&i| g.note_rect(&notes[i])).collect();
+            let rects: Vec<Rect> = added.iter().filter_map(|n| g.note_rect(n)).collect();
             self.damage_notes(&rects);
         }
     }
@@ -5428,6 +5433,7 @@ impl App {
                     let key = g.key_at(y).clamp(0, views::piano::TOP_KEY);
                     let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
                     let i = piano::add_note(s, ch, start, key);
+                    let i = piano::paint_mono(s, i);
                     let len = piano::notes(s)[i].length;
                     s.piano.dirty = true;
                     self.drag = Some(Drag::NotePaint { key, start, len });
@@ -5483,6 +5489,7 @@ impl App {
                 piano::snapshot(s);
                 s.piano.clear_selection();
                 let i = piano::add_note(s, ch, crate::piano_snap::place(s, &g, g.tick_at(x), self.alt), g.key_at(y));
+                let i = piano::paint_mono(s, i);
                 let n = piano::notes(s)[i];
                 s.piano.last_len = n.length;
                 self.drag = Some(Drag::NoteMove { x0: x, y0: y, orig: vec![(i, n)] });
@@ -12527,5 +12534,68 @@ mod tests {
         let d = v.plugins.descriptor(row).unwrap();
         assert_eq!((r.format.as_str(), r.name.as_str(), r.state == kars), (d.format.as_str(), d.name.as_str(), true));
         println!("Kars' changed copy saved as {} ({} bytes of state)", r.format, kars.len());
+    }
+
+    /// "Monophonic painting in piano roll" (spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default
+    /// template and Startup project"): on, a draw-tool click and each note of a paint drag delete the notes of other
+    /// keys whose time overlaps the new note, in the same channel and pattern, as part of the paint's undo step. Off,
+    /// and for other channels or notes beside it, the notes stay.
+    #[test]
+    fn monophonic_painting_in_piano_roll() {
+        use crate::prefs::{set_check, MONO_PAINTING};
+        use os_model::Note;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let note = |ch: u16, key: u16, at: u32, len: u32| Note { key, length: len, ..Note::step(ch, at) };
+        let keys = |app: &App, ch: u16| {
+            let mut v: Vec<(u16, u32)> = piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| (n.key, n.position)).collect();
+            v.sort_unstable();
+            v
+        };
+        for on in [false, true] {
+            set_check(&MONO_PAINTING, on);
+            let mut app = App::new(None);
+            app.state.z = vec![Win::PianoRoll];
+            app.state.selected_channel = 0;
+            // A draw-tool click: an eighth-long G5 (ppq 96) over channel 1's C5; channel 2's G5 and channel 1's later
+            // D5 are not under it. The click's drag then moves the new note a beat on (it still is the one dragged).
+            let start = vec![note(0, 60, 0, 96), note(1, 67, 0, 96), note(0, 62, 384, 96)];
+            piano::pattern_mut(&mut app.state).notes = start.clone();
+            frame(&mut app, &mut c, None);
+            let g = app.piano_geom().expect("piano roll shown");
+            let at = |g: &Geom, key: i32, tick: u32| (g.x_of(tick as f32) + 2.0, g.y_of(key) + g.row / 2.0);
+            let (x, y) = at(&g, 67, 0);
+            app.mouse_move(x, y);
+            app.mouse_down();
+            let (x, y) = at(&g, 67, 96);
+            app.mouse_move(x, y);
+            app.mouse_up();
+            let want: Vec<(u16, u32)> = if on { vec![(62, 384), (67, 96)] } else { vec![(60, 0), (62, 384), (67, 96)] };
+            assert_eq!(keys(&app, 0), want, "draw click, check {on}");
+            assert_eq!(keys(&app, 1), vec![(67, 0)], "another channel's notes stay");
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(piano::notes(&app.state), &start[..], "one undo step, check {on}");
+
+            // A paint drag of E5s an eighth apart over a run of C5s: each E5 deletes the C5 under it.
+            let run: Vec<Note> = (0..3).map(|k| note(0, 60, 96 * k, 48)).collect();
+            piano::pattern_mut(&mut app.state).notes = run.clone();
+            app.state.piano.last_len = 48;
+            app.act(Action::PianoTool(Tool::Paint));
+            frame(&mut app, &mut c, None);
+            let g = app.piano_geom().expect("piano roll shown");
+            let (x, y) = at(&g, 64, 0);
+            app.mouse_move(x, y);
+            app.mouse_down();
+            let (x, y) = at(&g, 64, 200);
+            app.mouse_move(x, y);
+            app.mouse_up();
+            let painted: Vec<(u16, u32)> = (0..5).map(|k| (64, 48 * k)).collect();
+            let kept: Vec<(u16, u32)> = if on { Vec::new() } else { run.iter().map(|n| (60, n.position)).collect() };
+            let mut want = [kept, painted].concat();
+            want.sort_unstable();
+            assert_eq!(keys(&app, 0), want, "paint drag, check {on}");
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(piano::notes(&app.state), &run[..], "one undo step for the drag, check {on}");
+        }
+        set_check(&MONO_PAINTING, false);
     }
 }

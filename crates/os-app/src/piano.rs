@@ -546,6 +546,35 @@ pub fn add_note(s: &mut State, channel: u16, tick: u32, key: i32) -> usize {
     p.notes.len() - 1
 }
 
+/// "Monophonic painting in piano roll" (spec: ui/settings-choices.md "Miscellaneous: seven more checks"): with the
+/// check on, painting note `i` (a draw-tool click, each note a paint drag lays) deletes the notes of other keys of its
+/// channel whose time overlaps it (start before its end, end after its start; a step counts one step long). Notes on
+/// its own key are left to the paint rules. Run after the paint's snapshot, so the deletion undoes with the paint.
+/// Returns note `i`'s index after the deletion.
+pub fn paint_mono(s: &mut State, i: usize) -> usize {
+    if !crate::prefs::check(&crate::prefs::MONO_PAINTING) {
+        return i;
+    }
+    let Some(&n) = notes(s).get(i) else { return i };
+    let (start, end) = (n.position, n.position + shown_len(s, &n));
+    let gone: Vec<usize> = notes(s)
+        .iter()
+        .enumerate()
+        .filter(|&(j, m)| j != i && m.channel == n.channel && m.key != n.key && m.position < end && m.position + shown_len(s, m) > start)
+        .map(|(j, _)| j)
+        .collect();
+    if gone.is_empty() {
+        return i;
+    }
+    let p = pattern_mut(s);
+    for &j in gone.iter().rev() {
+        p.notes.remove(j);
+    }
+    s.piano.clear_selection();
+    s.piano.dirty = true;
+    i - gone.iter().filter(|&&j| j < i).count()
+}
+
 /// The controls a new note takes from the last one touched; never its place, length, key or mute.
 pub fn copy_controls(from: &Note, to: &mut Note) {
     to.velocity = from.velocity;
