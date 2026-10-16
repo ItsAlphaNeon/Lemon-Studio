@@ -3085,6 +3085,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::ClockMode(m) => {
             app.state.clock.mode = m;
+            app.state.clock.save();
             app.invalidate();
             return None;
         }
@@ -3106,6 +3107,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::ClockBeat(on) => {
             app.state.clock.beat = on;
+            app.state.clock.save();
             app.invalidate();
             return None;
         }

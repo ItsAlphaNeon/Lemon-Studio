@@ -5,7 +5,7 @@
 // and not any other part of Lemon Studio.
 
 //! The toolbar time display's modes: bar:step:tick, bar:beat:tick, minute:second:centisecond and SMPTE timecode.
-//! App-wide, kept for the session only.
+//! App-wide, kept in `settings.txt` (`settings_file`) across runs.
 // spec: ui/time-display.md
 
 use crate::views::toolbar::{bst_ticks, msc_ticks};
@@ -18,6 +18,22 @@ pub enum Mode {
     Msc,
     /// SMPTE timecode at `RATES[i]`.
     Smpte(usize),
+}
+
+impl Mode {
+    /// Its entry in the display's menu, also what `settings.txt` keeps under `clock_mode`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Bar => "Bar : Beat/Step : Tick",
+            Mode::Msc => "Minute : Second : Centisecond",
+            Mode::Smpte(i) => RATES[i.min(RATES.len() - 1)].label,
+        }
+    }
+
+    /// The mode whose menu entry is `text`.
+    fn of_label(text: &str) -> Option<Mode> {
+        [Mode::Bar, Mode::Msc].into_iter().chain((0..RATES.len()).map(Mode::Smpte)).find(|m| m.label() == text)
+    }
 }
 
 /// An SMPTE rate: its menu entry, the frame clock it is shown on, whether frames run 1000/1001 slower than that
@@ -58,6 +74,21 @@ pub struct Clock {
 }
 
 impl Clock {
+    /// The settings kept in `settings.txt`: `clock_mode` (the mode's menu entry) and `clock_middle_unit` (`Step` or
+    /// `Beat`); the default for one that is missing or not known.
+    pub fn load() -> Clock {
+        use crate::settings_file::get;
+        let mode = get("clock_mode").and_then(|t| Mode::of_label(&t)).unwrap_or_default();
+        Clock { mode, beat: get("clock_middle_unit").as_deref() == Some("Beat") }
+    }
+
+    /// Keeps the settings for the next start.
+    pub fn save(&self) {
+        use crate::settings_file::write;
+        write("clock_mode", self.mode.label());
+        write("clock_middle_unit", if self.beat { "Beat" } else { "Step" });
+    }
+
     /// A left click: Bar and minute:second:centisecond in turn; SMPTE goes to Bar (§3).
     pub fn toggle(&mut self) {
         self.mode = if self.mode == Mode::Bar { Mode::Msc } else { Mode::Bar };
@@ -131,6 +162,20 @@ mod tests {
 
     fn rate_of(label: &str) -> &'static Rate {
         RATES.iter().find(|r| r.label == label).unwrap()
+    }
+
+    /// Every mode is kept as its menu entry and read back; an unknown entry or unit reads the default.
+    #[test]
+    fn settings_are_kept() {
+        assert_eq!(Clock::load(), Clock::default());
+        for m in [Mode::Bar, Mode::Msc].into_iter().chain((0..RATES.len()).map(Mode::Smpte)) {
+            Clock { mode: m, beat: true }.save();
+            assert_eq!(Clock::load(), Clock { mode: m, beat: true });
+        }
+        assert_eq!(crate::settings_file::get("clock_mode").as_deref(), Some("SMPTE 120 fps"));
+        crate::settings_file::write("clock_mode", "SMPTE 1000 fps");
+        crate::settings_file::write("clock_middle_unit", "Quarter");
+        assert_eq!(Clock::load(), Clock::default());
     }
 
     #[test]

@@ -820,9 +820,9 @@ pub fn clock_popup(s: &State, x: f32, y: f32) -> crate::playlist::Popup {
     use crate::clock::{Mode, RATES};
     use crate::playlist::{Cmd, Mark, PItem, Popup};
     let c = s.clock;
-    let mode = |label: &'static str, m: Mode| PItem::new(label, Cmd::ClockMode(m)).mark(Mark::Radio(c.mode == m));
-    let mut items = vec![PItem::head("Mode"), mode("Bar : Beat/Step : Tick", Mode::Bar), mode("Minute : Second : Centisecond", Mode::Msc)];
-    items.extend(RATES.iter().enumerate().map(|(i, r)| mode(r.label, Mode::Smpte(i))));
+    let mode = |m: Mode| PItem::new(m.label(), Cmd::ClockMode(m)).mark(Mark::Radio(c.mode == m));
+    let mut items = vec![PItem::head("Mode"), mode(Mode::Bar), mode(Mode::Msc)];
+    items.extend((0..RATES.len()).map(|i| mode(Mode::Smpte(i))));
     items.push(PItem::head("Middle unit"));
     items.push(PItem::new("Step", Cmd::ClockBeat(false)).mark(Mark::Radio(!c.beat)));
     items.push(PItem::new("Beat", Cmd::ClockBeat(true)).mark(Mark::Radio(c.beat)));

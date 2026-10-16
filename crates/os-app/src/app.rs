@@ -1125,8 +1125,8 @@ impl App {
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
                 toggles: vec!["typing"],
-                clock: crate::clock::Clock::default(),
-                toolbar: views::toolbar::Opts::default(),
+                clock: crate::clock::Clock::load(),
+                toolbar: views::toolbar::Opts::load(),
                 midi_inputs: Vec::new(),
                 maximized: true,
                 piano: PianoState::default(),
@@ -5674,6 +5674,7 @@ impl App {
             Action::SongPos => self.song_pos_press(),
             Action::Clock => {
                 s.clock.toggle();
+                s.clock.save();
                 self.invalidate();
             }
             Action::GlobalSnap => {
@@ -6315,6 +6316,9 @@ impl App {
                     lift(&mut pos.1);
                 }
             }
+        }
+        if sw != Switch::Hide {
+            s.toolbar.save();
         }
         self.invalidate();
     }
@@ -12227,6 +12231,24 @@ mod tests {
         assert_eq!(app.hits.iter().find(|h| h.action == Action::Clock).unwrap().hint, "Song position (bar:beat:tick)");
         pick(&mut app, &mut c, "Minute : Second : Centisecond");
         assert!(app.state.clock.mode == Mode::Msc && app.state.clock.beat);
+        // Kept for the next start (settings.txt).
+        assert_eq!(App::new(None).state.clock, app.state.clock);
+    }
+
+    /// The Toolbars switches but Hide, and the time display's mode, are found again at the next start (settings.txt;
+    /// spec: ui/toolbar-menu.md §8, ui/time-display.md §3).
+    #[test]
+    fn header_settings_are_kept() {
+        use views::toolbar::{Opts, Switch};
+        let mut app = App::new(None);
+        assert_eq!((app.state.toolbar, app.state.clock), (Opts::default(), crate::clock::Clock::default()));
+        for sw in [Switch::Separators, Switch::Flat, Switch::HintBar, Switch::Hide] {
+            app.toolbar_switch(sw);
+        }
+        app.act(Action::Clock);
+        let next = App::new(None);
+        assert_eq!(next.state.toolbar, Opts { separators: false, flat: true, hint_bar: true, hidden: false });
+        assert_eq!(next.state.clock.mode, crate::clock::Mode::Msc);
     }
 
     /// The Toolbars menu (spec: ui/toolbar-menu.md §8): on the hint panel, on bare toolbar background and as VIEW >

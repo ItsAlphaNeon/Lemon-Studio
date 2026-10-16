@@ -16,7 +16,8 @@ use crate::icons::{self, Icon};
 /// Leftmost logo centre: just right of the last toolbar control (the news panel / downloads, x 1473).
 const LOGO_MIN_X: f32 = 1520.0;
 
-/// The Toolbars menu's switches (spec: ui/toolbar-menu.md §8): app-wide, kept for the session only.
+/// The Toolbars menu's switches (spec: ui/toolbar-menu.md §8): app-wide, kept in `settings.txt` across runs but for
+/// Hide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opts {
     /// Group and row separator lines (§2).
@@ -32,6 +33,29 @@ pub struct Opts {
 impl Default for Opts {
     fn default() -> Self {
         Opts { separators: true, flat: false, hint_bar: false, hidden: false }
+    }
+}
+
+impl Opts {
+    /// The switches kept in `settings.txt` (`toolbar_separators`, `toolbar_flat_buttons`, `toolbar_hint_bar`); the
+    /// default for one that is missing. Hide is not kept: a start shows the toolbar.
+    pub fn load() -> Opts {
+        use crate::settings_file::flag;
+        let d = Opts::default();
+        Opts {
+            separators: flag("toolbar_separators", d.separators),
+            flat: flag("toolbar_flat_buttons", d.flat),
+            hint_bar: flag("toolbar_hint_bar", d.hint_bar),
+            hidden: false,
+        }
+    }
+
+    /// Keeps the switches but Hide for the next start.
+    pub fn save(&self) {
+        use crate::settings_file::set_flag;
+        set_flag("toolbar_separators", self.separators);
+        set_flag("toolbar_flat_buttons", self.flat);
+        set_flag("toolbar_hint_bar", self.hint_bar);
     }
 }
 

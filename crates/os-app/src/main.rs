@@ -58,6 +58,7 @@ mod project_plugins;
 mod presets;
 mod misc;
 mod misc_page;
+mod settings_file;
 mod snap;
 mod song_pos;
 mod stall;
