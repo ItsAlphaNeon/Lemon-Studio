@@ -133,8 +133,8 @@ const ADD_PLUGINS: &[Item] = &[
     head("Channel"),
     it("Sampler", "").on(),
     head("Misc"),
-    it("Audio clip", ""),
-    it("Automation clip", ""),
+    it("Audio clip", "").on(),
+    it("Automation clip", "").on(),
     it("Layer", ""),
     SEP,
     // The plugin menus' display mode (spec: ui/plugin-menu.md §2-3; `mark_of` puts the dot).

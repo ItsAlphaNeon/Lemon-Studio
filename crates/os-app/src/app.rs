@@ -5872,12 +5872,21 @@ impl App {
             return;
         }
         let s = &mut self.state;
+        let sampler = s.project.channels.get(i).is_some_and(|c| c.kind.is_sampler());
+        if !sampler && s.shown(Win::Plugin) && s.plugin_channel == i {
+            s.hide(Win::Plugin);
+        } else {
+            self.open_channel_window(i);
+        }
+    }
+
+    /// Open rack row `i`'s window (not hosted: Lemon Sampler's for a sampler or audio clip, else the channel window).
+    pub(crate) fn open_channel_window(&mut self, i: usize) {
+        let s = &mut self.state;
         if s.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
             // Not hosted yet (just added): Lemon Sampler starts on the next tick and its window opens then.
             s.pending_open = Some(i);
             self.sampler_failed.retain(|&r| r != i);
-        } else if s.shown(Win::Plugin) && s.plugin_channel == i {
-            s.hide(Win::Plugin);
         } else {
             if !s.shown(Win::Plugin) {
                 let r = views::rack::rect(s);
@@ -5886,6 +5895,18 @@ impl App {
             s.plugin_channel = i;
             s.raise(Win::Plugin);
         }
+    }
+
+    /// ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the channel goes last in the rack (kept
+    /// in view) and its window opens: an audio clip's settings (Lemon Sampler's window), an automation clip's channel
+    /// window.
+    pub(crate) fn add_clip_channel(&mut self, kind: ChannelKind) {
+        let row = crate::playlist::add_clip_channel(&mut self.state, kind);
+        let s = &mut self.state;
+        let view_h = views::rack::panel(views::rack::rect(s)).h;
+        s.rack_scroll = (views::rack::content_h(s) - view_h).max(0.0);
+        self.open_channel_window(row);
+        self.invalidate();
     }
 
     /// Press on a step (spec: ui/channel-rack.md §9): selects the row, toggles the step, starts painting.
@@ -6055,7 +6076,7 @@ impl App {
     }
 
     /// Channels whose deletion was confirmed go now (spec: ui/channel-rack.md §18).
-    fn rack_pending(&mut self) {
+    pub(crate) fn rack_pending(&mut self) {
         if let Some(rows) = self.state.rack.delete_now.take() {
             crate::rack::delete_rows(self, &rows);
         }
@@ -6136,6 +6157,11 @@ impl App {
                 if let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
                     self.state.message = crate::plugin_menu::add_generator(self, index, None);
                 }
+            }
+            // ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3).
+            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| matches!(it.label, "Audio clip" | "Automation clip")) => {
+                let audio = item_at(ADD_MENU, i).is_some_and(|it| it.label == "Audio clip");
+                self.add_clip_channel(if audio { ChannelKind::AudioClip } else { ChannelKind::Automation });
             }
             (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "More plugins...") => {
                 let at = self.mouse;
@@ -12196,6 +12222,88 @@ mod tests {
         app.key(&Key::Named(NamedKey::F11), true, false);
         app.key(&Key::Named(NamedKey::F11), false, false);
         assert!(!app.state.toolbar.hidden && app.state.settings.open);
+    }
+
+    /// ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the channel goes last, named and routed to
+    /// the master, alone selected, into its filter group (made before Unsorted) with the filter on it, as the
+    /// playlist's clip source; its window opens; the automation clip has FL's default points and no target and saves
+    /// so; each add is one undo step. Layer stays greyed out.
+    #[test]
+    fn add_audio_and_automation_clip_channels() {
+        use crate::playlist::{self as pl, PickKind};
+        use crate::rack::{Filter, Group};
+        use os_model::{AutoMode, ClipSource};
+        use views::menus::{item_at, works, ADD_MENU};
+        let entry = |label: &str| (0..).find(|&i| item_at(ADD_MENU, i).is_some_and(|it| it.label == label)).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        // A file's groups: Drums, then Unsorted.
+        app.state.rack.groups = vec![Group { name: "Drums".into(), members: [0, 3].into_iter().collect() }];
+        app.state.rack.unsorted_at = Some(1);
+        app.state.rack.select_only(1);
+        app.state.selected_channel = 1;
+        let before = (app.state.playlist.source, app.state.playlist.picker);
+        let clips = pl::clips(&app.state).len();
+        let names = |app: &App| app.state.rack.groups.iter().map(|g| g.name.clone()).collect::<Vec<_>>();
+        // Audio clip.
+        app.menu_item(ADD_MENU, entry("Audio clip"));
+        let s = &app.state;
+        let ch = s.project.channels.last().unwrap();
+        assert_eq!((s.project.channels.len(), ch.index, ch.kind, ch.name.as_deref()), (6, 5, ChannelKind::AudioClip, Some("Audio Clip")));
+        assert_eq!((ch.mixer_track, ch.sample_path.as_deref(), ch.sound), (0, None, Default::default()));
+        assert_eq!((s.rack.sel.iter().copied().collect::<Vec<_>>(), s.selected_channel), (vec![5], 5));
+        assert_eq!((names(&app), app.state.rack.unsorted_at, app.state.rack.filter), (vec!["Drums".into(), "Audio".into()], Some(2), Filter::Group(1)));
+        let s = &app.state;
+        assert_eq!(s.rack.groups[1].members.iter().copied().collect::<Vec<_>>(), [5]);
+        assert_eq!((s.playlist.source, s.playlist.picker, pl::clips(s).len()), (Some(ClipSource::Channel(5)), PickKind::Audio, clips));
+        assert_eq!(s.pending_open, Some(5), "its settings (Lemon Sampler's window) open");
+        assert!(app.unsaved());
+        // Automation clip.
+        app.state.pending_open = None;
+        app.menu_item(ADD_MENU, entry("Automation clip"));
+        let s = &app.state;
+        let ch = s.project.channels.last().unwrap();
+        assert_eq!((ch.index, ch.kind, ch.name.as_deref(), ch.mixer_track), (6, ChannelKind::Automation, Some("Automation Clip"), 0));
+        let a = s.project.automation(6).expect("its points").clone();
+        let pts: Vec<_> = a.points.iter().map(|p| (p.beat, p.value, p.tension, p.mode)).collect();
+        assert_eq!(pts, [(0.0, 0.5, 0.0, AutoMode::Single), (4.0, 0.5, 0.0, AutoMode::Single)]);
+        assert!(a.targets.is_empty() && a.header[8] == 1);
+        assert_eq!((names(&app), app.state.rack.unsorted_at, app.state.rack.filter), (vec!["Drums".into(), "Audio".into(), "Automation".into()], Some(3), Filter::Group(2)));
+        let s = &app.state;
+        assert!(s.shown(Win::Plugin) && s.plugin_channel == 6 && s.pending_open.is_none(), "its channel window opens");
+        assert_eq!((s.playlist.source, s.playlist.picker), (Some(ClipSource::Channel(6)), PickKind::Automation));
+        // Another audio clip: a unique name, the same group.
+        app.menu_item(ADD_MENU, entry("Audio clip"));
+        let s = &app.state;
+        assert_eq!(s.project.channels[7].name.as_deref(), Some("Audio Clip #2"));
+        assert_eq!((s.rack.groups.len(), s.rack.filter), (3, Filter::Group(1)));
+        assert_eq!(s.rack.groups[1].members.iter().copied().collect::<Vec<_>>(), [5, 7]);
+        // Saved as FL stores them: types 4 and 5, the groups before Unsorted, the automation's points and no link.
+        let path = std::env::temp_dir().join(format!("os_add_clips_{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(back.groups, ["Drums", "Audio", "Automation", os_model::UNSORTED_GROUP]);
+        let kinds: Vec<_> = back.channels[5..].iter().map(|c| (c.kind, c.name.clone().unwrap_or_default(), c.rack.group)).collect();
+        assert_eq!(kinds, [(ChannelKind::AudioClip, "Audio Clip".into(), 1), (ChannelKind::Automation, "Automation Clip".into(), 2), (ChannelKind::AudioClip, "Audio Clip #2".into(), 1)]);
+        assert_eq!(back.current_group, Some(1));
+        let a2 = back.automation(6).expect("saved points");
+        assert_eq!((&a2.points, &a2.targets, a2.header[8]), (&a.points, &Vec::new(), 1));
+        // Undo, one step each: the channel goes, the groups, filter, selection and clip source come back.
+        let undo = |app: &mut App| crate::playlist::run(app, crate::playlist::Cmd::Undo);
+        assert_eq!(undo(&mut app), None);
+        assert_eq!((app.state.project.channels.len(), app.state.rack.groups[1].members.len()), (7, 1));
+        assert_eq!(undo(&mut app), None);
+        let s = &app.state;
+        assert_eq!((s.project.channels.len(), s.project.automation(6).is_none()), (6, true));
+        assert_eq!((names(&app), app.state.rack.filter, app.state.selected_channel), (vec!["Drums".into(), "Audio".into()], Filter::Group(1), 5));
+        undo(&mut app);
+        let s = &app.state;
+        assert_eq!(s.project.channels.len(), 5);
+        assert_eq!((names(&app), app.state.rack.unsorted_at, app.state.rack.filter), (vec!["Drums".into()], Some(1), Filter::All));
+        let s = &app.state;
+        assert_eq!((s.rack.sel.iter().copied().collect::<Vec<_>>(), s.selected_channel, (s.playlist.source, s.playlist.picker)), (vec![1], 1, before));
+        assert!(!works(ADD_MENU, item_at(ADD_MENU, entry("Layer")).unwrap()), "Layer stays greyed out");
     }
 
     /// TOOLS / the channel rack's options > Switch all / selected audio clip channels to ▸ (spec: ui/channel-switches.md

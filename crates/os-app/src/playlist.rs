@@ -426,7 +426,32 @@ impl Wave {
     }
 }
 
-type Snapshot = (Vec<Clip>, Vec<TimeMarker>, Vec<PlaylistTrack>, Vec<Automation>, Vec<[u32; 4]>);
+/// One undo step: the current arrangement's clips, markers and tracks, the automation data and the channels' stretch
+/// settings, plus what a command beyond the playlist changed ([`Extra`]).
+struct Snapshot {
+    clips: Vec<Clip>,
+    markers: Vec<TimeMarker>,
+    tracks: Vec<PlaylistTrack>,
+    automations: Vec<Automation>,
+    stretch: Vec<[u32; 4]>,
+    extra: Option<Box<Extra>>,
+}
+
+/// The part of an undo step outside the playlist, for the commands that are one undo step with it.
+pub enum Extra {
+    /// A channel was added (ADD > Audio clip / Automation clip, spec: ui/add-clip-channels.md §3): undo removes it
+    /// again and brings back the rack's filter groups, filter and selection and the playlist's clip source.
+    Channel {
+        index: u16,
+        groups: Vec<crate::rack::Group>,
+        filter: crate::rack::Filter,
+        unsorted_at: Option<usize>,
+        sel: std::collections::BTreeSet<usize>,
+        selected: usize,
+        source: Option<ClipSource>,
+        picker: PickKind,
+    },
+}
 
 pub struct PlaylistState {
     pub tool: PlTool,
@@ -988,10 +1013,15 @@ pub fn to_src(s: &State, src: ClipSource, ticks: f64) -> f64 {
 
 /// Undo snapshot of everything the playlist edits.
 pub fn snapshot(s: &mut State) {
+    snapshot_with(s, None);
+}
+
+/// Undo snapshot of the playlist plus `extra`: one step for a command that also changes the rack or the patterns.
+pub fn snapshot_with(s: &mut State, extra: Option<Extra>) {
     let a = arr_mut(s);
     let (clips, markers, tracks) = (a.clips.clone(), a.markers.clone(), a.tracks.clone());
     let stretch = s.project.channels.iter().map(|c| c.sound.stretch).collect();
-    let snap = (clips, markers, tracks, s.project.automations.clone(), stretch);
+    let snap = Snapshot { clips, markers, tracks, automations: s.project.automations.clone(), stretch, extra: extra.map(Box::new) };
     let u = &mut s.playlist.undo;
     u.push(snap);
     if u.len() > UNDO_DEPTH {
@@ -1000,14 +1030,23 @@ pub fn snapshot(s: &mut State) {
 }
 
 pub fn undo(s: &mut State) -> bool {
-    let Some((c, m, t, a, st)) = s.playlist.undo.pop() else { return false };
+    let Some(Snapshot { clips, markers, tracks, automations, stretch, extra }) = s.playlist.undo.pop() else { return false };
     let arr = arr_mut(s);
-    arr.clips = c;
-    arr.markers = m;
-    arr.tracks = t;
-    s.project.automations = a;
-    for (ch, v) in s.project.channels.iter_mut().zip(st) {
+    arr.clips = clips;
+    arr.markers = markers;
+    arr.tracks = tracks;
+    s.project.automations = automations;
+    for (ch, v) in s.project.channels.iter_mut().zip(stretch) {
         ch.sound.stretch = v;
+    }
+    if let Some(Extra::Channel { index, groups, filter, unsorted_at, sel, selected, source, picker }) = extra.map(|e| *e) {
+        // The app removes channels (`App::rack_pending`, which the Undo command runs); the rest comes back now.
+        if let Some(row) = s.project.channels.iter().position(|c| c.index == index) {
+            s.rack.delete_now = Some(vec![row]);
+        }
+        (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (groups, filter, unsorted_at);
+        (s.rack.sel, s.selected_channel) = (sel, selected);
+        (s.playlist.source, s.playlist.picker) = (source, picker);
     }
     s.playlist.sel.clear();
     s.piano.dirty = true;
@@ -1633,6 +1672,48 @@ pub fn unique_channel_name(s: &State, name: &str) -> String {
         return name.to_string();
     }
     (2..).map(|k| format!("{name} #{k}")).find(|n| !taken(n)).unwrap_or_default()
+}
+
+/// ADD > Audio clip and ADD > Automation clip (spec: ui/add-clip-channels.md §3): a channel of `kind` at the end of
+/// the rack named "Audio Clip" / "Automation Clip" (made unique), on the master, the only selected channel, in the
+/// rack filter group "Audio" / "Automation" with the filter on it, and the playlist's clip source; no clip is
+/// placed. An audio clip has no sample and the default stretch and declick settings; an automation clip has FL's
+/// two default points and no target. One undo step. Returns the rack row.
+pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
+    let audio = kind == ChannelKind::AudioClip;
+    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let r = &s.rack;
+    let (sel, selected, source, picker) = (r.sel.clone(), s.selected_channel, s.playlist.source, s.playlist.picker);
+    snapshot_with(s, Some(Extra::Channel { index, groups: r.groups.clone(), filter: r.filter, unsorted_at: r.unsorted_at, sel, selected, source, picker }));
+    let name = unique_channel_name(s, if audio { "Audio Clip" } else { "Automation Clip" });
+    s.project.channels.push(Channel {
+        index,
+        kind,
+        name: Some(name),
+        plugin: None,
+        plugin_state: None,
+        color: (!audio).then(|| Rgb::new(0x5a, 0x74, 0x4c)),
+        enabled: true,
+        volume: if audio { 0.78125 } else { 1.0 },
+        pan: 0.0,
+        pitch_cents: 0,
+        mixer_track: 0,
+        sample_path: None,
+        layer_children: Vec::new(),
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+    });
+    if !audio {
+        // Two points, at 0 and at 4 beats (one 4/4 bar), both 0.5, single curve without tension (§2).
+        s.project.automations.push(os_flp::project::untargeted_automation(index, 0.5, 4.0));
+    }
+    let row = s.project.channels.len() - 1;
+    s.selected_channel = row;
+    s.rack.select_only(row);
+    crate::rack::join_group(s, row, if audio { "Audio" } else { "Automation" });
+    s.playlist.source = Some(ClipSource::Channel(index));
+    s.playlist.picker = if audio { PickKind::Audio } else { PickKind::Automation };
+    s.piano.dirty = true;
+    row
 }
 
 /// Add an audio clip channel for a sample file and place it at `tick` on `track` (§9).
@@ -2994,6 +3075,18 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.toolbar_switch(sw);
             return None;
         }
+        Cmd::Undo => {
+            let done = undo(&mut app.state);
+            // A step that added a channel queued it for removal: it goes now, and the rack selection the step had
+            // comes back after it.
+            if app.state.rack.delete_now.is_some() {
+                let s = &app.state;
+                let keep = (s.rack.sel.clone(), s.selected_channel, s.message.clone());
+                app.rack_pending();
+                (app.state.rack.sel, app.state.selected_channel, app.state.message) = keep;
+            }
+            return (!done).then(|| "Nothing to undo".into());
+        }
         Cmd::ClockBeat(on) => {
             app.state.clock.beat = on;
             app.invalidate();
@@ -3074,7 +3167,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::Undo => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -3086,7 +3179,6 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             Some(format!("Snap: {}", p.label()))
         }
         Cmd::GlobalSnap(sn) => Some(crate::snap::set(s, sn)),
-        Cmd::Undo => (!undo(s)).then(|| "Nothing to undo".into()),
         Cmd::Copy => {
             copy(s);
             None

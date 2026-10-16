@@ -515,6 +515,24 @@ pub fn row_steps(s: &State, r: usize, len: u32) -> Vec<bool> {
 // ---------------------------------------------------------------------------------------------------------
 // Channel edits
 
+/// Put row `r` into the filter group `name` and show that group (ADD > Audio clip / Automation clip, spec:
+/// ui/add-clip-channels.md §1-3). A missing group is made, before "Unsorted" in the file's order.
+pub fn join_group(s: &mut State, r: usize, name: &str) {
+    let rack = &mut s.rack;
+    let g = match rack.groups.iter().position(|g| g.name == name) {
+        Some(g) => g,
+        None => {
+            let at = rack.unsorted_at.unwrap_or(rack.groups.len()).min(rack.groups.len());
+            rack.groups.insert(at, Group { name: name.to_string(), members: BTreeSet::new() });
+            rack.unsorted_at = rack.unsorted_at.map(|u| u.max(at) + 1);
+            at
+        }
+    };
+    rack.groups[g].members.insert(r);
+    rack.filter = Filter::Group(g);
+    autosize(s);
+}
+
 pub(crate) fn channel_name(s: &State, r: usize) -> String {
     s.project.channels.get(r).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default()
 }
