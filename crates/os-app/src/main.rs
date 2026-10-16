@@ -63,6 +63,7 @@ mod misc_page;
 mod note_names;
 mod snap;
 mod song_pos;
+mod splash;
 mod stall;
 mod tapper;
 mod templates;
@@ -117,6 +118,8 @@ struct Shell {
     /// Shortest time from one frame's start to the next, from the refresh rate of `frame_monitor` (see `frame_interval`).
     frame: Duration,
     frame_monitor: Option<winit::monitor::MonitorHandle>,
+    /// The startup splash until the main window shows its first frame (`splash`).
+    splash: Option<splash::Splash>,
     /// `OS_FRAMES=<file>`: one line per frame (see `FrameLog`).
     frames: Option<FrameLog>,
     /// Wakes the app while a modal loop holds up winit's (see `stall`).
@@ -981,6 +984,8 @@ impl ApplicationHandler for Shell {
                     }
                 }
                 self.painted = Instant::now();
+                // The main window shows its first frame: the splash goes.
+                self.splash = None;
                 if let Some(log) = &mut self.frames {
                     let what = match &damage {
                         None => "none".to_string(),
@@ -1400,6 +1405,10 @@ fn main() {
         builder.with_x11();
     }
     let event_loop = builder.build().expect("event loop");
+    // The startup splash, from here until the main window shows (spec: ui/settings-choices.md "Miscellaneous: naming,
+    // detached plugins and startup"). After the event loop: on Windows building it makes the process per-monitor DPI
+    // aware, which the splash's size follows.
+    let splash = splash::open();
     // Before the launch: the files the app is launched to open come ahead of `resumed`.
     #[cfg(target_os = "macos")]
     macos::hook_app();
@@ -1447,6 +1456,7 @@ fn main() {
         frame_start: Instant::now(),
         frame: FRAME,
         frame_monitor: None,
+        splash,
         frames: FrameLog::open(),
         watchdog,
         ctrl_click: false,
