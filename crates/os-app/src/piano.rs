@@ -109,6 +109,8 @@ pub struct PianoState {
     pub split: crate::piano_split::Split,
     /// Last press on the splitter, for its double click.
     pub split_click: Option<std::time::Instant>,
+    /// Whether the window was shown at the last tick (`None` = not yet seen), to notice it opening ([`open_tick`]).
+    pub was_shown: Option<bool>,
     /// The magnet button's setting (spec: ui/piano-snap.md): a program setting, kept in the user folder (crate::snap).
     pub snap: crate::snap::EditorSnap,
     sel: Vec<usize>,
@@ -140,6 +142,7 @@ impl Default for PianoState {
             rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1,
             split: crate::piano_split::load(),
             split_click: None,
+            was_shown: None,
             snap: crate::snap::EditorSnap::default(),
             sel: Vec::new(),
             sel_key: (0, 0),
@@ -680,6 +683,42 @@ pub fn center_keys(s: &mut State, view_h: f32) {
     s.piano.scroll_x = 0.0;
 }
 
+/// "Auto zoom in piano roll" (spec: ui/settings-choices.md "Miscellaneous"): run on every tick and before each frame
+/// (`App::follow_settings`); when the window opens (hidden → shown) with the check on, [`auto_zoom`] on its note grid. Returns whether it zoomed. The
+/// window shown when a project opens or the program starts is not an opening.
+pub fn open_tick(s: &mut State) -> bool {
+    let shown = s.shown(crate::app::Win::PianoRoll);
+    let was = s.piano.was_shown.replace(shown);
+    if !(shown && was == Some(false) && crate::prefs::check(&crate::prefs::AUTO_ZOOM_PIANO)) {
+        return false;
+    }
+    let grid = crate::views::piano::grid_rect(s);
+    if grid.w < 1.0 || grid.h < 1.0 {
+        return false; // collapsed to its title bar: nothing to fit
+    }
+    auto_zoom(s, grid);
+    true
+}
+
+/// Zoom on the pattern and the channel's notes in a note grid `grid`: from bar 1, the pattern's length plus half a
+/// bar fills the width (FL: a 2-bar pattern shows 2.49 bars); the rows are the tallest that fit the channel's pitch
+/// range plus four spare rows, whole pixels between [`MIN_ROW`] and the default × 1.25, and the range is centred. A
+/// channel without notes: C5 centred at [`MIN_ROW`] rows.
+pub fn auto_zoom(s: &mut State, grid: Rect) {
+    let ppq = f32::from(s.project.ppq.max(4));
+    let span = pattern_length(s, notes(s)) as f32 + s.project.bar_ticks() as f32 / 2.0;
+    s.piano.px_per_beat = (grid.w / span * ppq).clamp(6.0, 1600.0);
+    let ch = channel(s);
+    let keys = notes(s).iter().filter(|n| Some(n.channel) == ch).map(|n| i32::from(n.key));
+    let range = keys.clone().min().zip(keys.max());
+    s.piano.row_h = match range {
+        Some((lo, hi)) => (grid.h / (hi - lo + 1 + 4) as f32).floor().clamp(MIN_ROW, (ROW * 1.25).floor()),
+        None => MIN_ROW,
+    };
+    s.piano.zoom_back = None;
+    center_keys(s, grid.h);
+}
+
 pub fn clamp_scroll(s: &mut State, view_h: f32) {
     let max = ((TOP_KEY + 1) as f32 * s.piano.row_h - view_h).max(0.0);
     s.piano.scroll_y = s.piano.scroll_y.clamp(0.0, max).round();
@@ -1075,5 +1114,64 @@ mod tests {
 
     fn key_name_check(k: i32) -> String {
         crate::views::piano::key_name(k)
+    }
+
+    /// "Auto zoom in piano roll" (spec: ui/settings-choices.md "Miscellaneous"): opening the window zooms on the
+    /// pattern (from bar 1, its length plus half a bar fills the grid) and on the channel's pitch range (centred, rows
+    /// the tallest fitting it plus four spare rows, at most the default × 1.25); without notes, C5 is centred at the
+    /// smallest rows. Off: the zoom stays.
+    #[test]
+    fn auto_zoom_in_piano_roll() {
+        use super::*;
+        use crate::app::{Action, App, Win};
+        use crate::prefs::{set_check, AUTO_ZOOM_PIANO};
+        for on in [false, true] {
+            set_check(&AUTO_ZOOM_PIANO, on);
+            let mut app = App::new(None);
+            app.state.project = crate::app::test_project();
+            app.state.selected_channel = 0;
+            // A floating window: a grid about 300 px tall.
+            let ws = &mut app.state.wins[Win::PianoRoll.slot().expect("a window")];
+            (ws.maxed, ws.rect) = (false, Rect::new(300.0, 150.0, 1000.0, 560.0));
+            // C4, D4 ... F#5 (19 keys), an eighth each from the second eighth on: they end in bar 2, a 2-bar pattern.
+            let notes: Vec<Note> = (0..10u16).map(|k| Note { key: 48 + 2 * k, length: 48, ..Note::step(0, 48 * (u32::from(k) + 1)) }).collect();
+            pattern_mut(&mut app.state).notes = notes;
+            let open = |app: &mut App| {
+                app.state.hide(Win::PianoRoll);
+                app.tick();
+                app.act(Action::ToggleWin(Win::PianoRoll));
+                app.tick();
+                let grid = crate::views::piano::grid_rect(&app.state);
+                (grid, Geom::new(&app.state, grid))
+            };
+            let before = (app.state.piano.px_per_beat, app.state.piano.row_h);
+            let (grid, g) = open(&mut app);
+            if !on {
+                assert_eq!((app.state.piano.px_per_beat, app.state.piano.row_h), before, "off: the zoom stays");
+                continue;
+            }
+            let bar = app.state.project.bar_ticks() as f32;
+            assert!((grid.w / g.ppt / bar - 2.5).abs() < 0.01, "2 bars + half a bar fill the grid: {}", grid.w / g.ppt / bar);
+            assert_eq!(g.scroll_x, 0.0, "from bar 1");
+            assert_eq!(g.row, (grid.h / 23.0).floor(), "19 keys + 4 spare rows in {} px", grid.h);
+            assert!(g.row < 22.0);
+            let mid = (g.y_of(66) + g.y_of(48) + g.row) / 2.0;
+            assert!((mid - grid.cy()).abs() <= g.row, "the range is centred: {mid} in {grid:?}");
+            // The grid opened is where the window paints it.
+            if let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) {
+                app.paint(&mut c, None);
+                assert_eq!(app.piano_grid, Some(grid));
+            }
+            // Short notes on few keys: the rows stop at the default × 1.25.
+            pattern_mut(&mut app.state).notes.truncate(1);
+            let (_, g) = open(&mut app);
+            assert_eq!(g.row, (ROW * 1.25).floor());
+            // No notes: C5 centred at the smallest rows.
+            pattern_mut(&mut app.state).notes.clear();
+            let (grid, g) = open(&mut app);
+            assert_eq!(g.row, MIN_ROW);
+            assert!((g.y_of(60) + g.row / 2.0 - grid.cy()).abs() <= g.row, "C5 centred");
+        }
+        set_check(&AUTO_ZOOM_PIANO, false);
     }
 }

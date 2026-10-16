@@ -113,12 +113,15 @@ pub struct MixerUi {
     pub meter_cfg: crate::meters::Settings,
     /// When the meters last advanced.
     pub meter_at: Option<std::time::Instant>,
+    /// The last solo: the tracks it kept on and the states (track, enabled) from before the first solo, put back by
+    /// unsolo when "Restore previous state after solo" is on.
+    pub solo: Option<(Vec<u16>, Vec<(u16, bool)>)>,
 }
 
 impl Default for MixerUi {
     fn default() -> Self {
         MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), pending: Vec::new(), meters: Vec::new(),
-            meter_cfg: Default::default(), meter_at: None }
+            meter_cfg: Default::default(), meter_at: None, solo: None }
     }
 }
 
@@ -399,18 +402,39 @@ pub fn solo(s: &mut State, n: u16) {
 }
 
 /// Solo `n` with the tracks it sends to (down to the master) and, for `alt`, the tracks sending into it; back to
-/// all on when exactly that set is already the audible one (spec: ui/mixer-track-commands.md §5).
+/// all on when exactly that set is already the audible one (spec: ui/mixer-track-commands.md §5), or, with "Restore
+/// previous state after solo" on, to the states from before the first solo (a solo moved to another track keeps them;
+/// spec: ui/settings-choices.md "Miscellaneous").
 pub fn solo_with(s: &mut State, n: u16, alt: bool) {
     let mut keep = reach(s, n, true);
     if alt {
         keep.extend(reach(s, n, false));
     }
     keep.push(0);
-    let soloed = s.project.mixer.iter().all(|m| m.index == 0 || keep.contains(&m.index) == m.enabled);
+    let soloed = audible_set(s, &keep);
+    // A solo still in effect (the last solo's set, untouched since) keeps the states saved when it started.
+    let in_solo = s.mixer.solo.as_ref().is_some_and(|(k, _)| audible_set(s, k));
+    let before = match s.mixer.solo.take() {
+        Some((_, b)) if in_solo => b,
+        _ => s.project.mixer.iter().map(|m| (m.index, m.enabled)).collect(),
+    };
+    let back = soloed && in_solo && crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO);
     for m in s.project.mixer.iter_mut() {
-        m.enabled = soloed || keep.contains(&m.index);
+        m.enabled = if back {
+            before.iter().find(|b| b.0 == m.index).is_none_or(|b| b.1)
+        } else {
+            soloed || keep.contains(&m.index)
+        };
+    }
+    if !soloed {
+        s.mixer.solo = Some((keep, before));
     }
     changed(s);
+}
+
+/// The tracks on besides the master are exactly `keep`.
+fn audible_set(s: &State, keep: &[u16]) -> bool {
+    s.project.mixer.iter().all(|m| m.index == 0 || keep.contains(&m.index) == m.enabled)
 }
 
 /// `n` and every track it reaches through sends (`down`), or every track reaching it (`!down`).

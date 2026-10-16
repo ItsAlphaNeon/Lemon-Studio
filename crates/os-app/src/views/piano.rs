@@ -51,17 +51,22 @@ pub struct Layout {
 
 /// `split`: how the height under the ruler is shared by the grid and the event panel (spec:
 /// ui/event-panel-splitter.md; the default puts the splitter at bottom − 185, §1).
+///
+/// The overview (the horizontal scroll bar) is 22 px tall and the vertical scroll bar's column 22 px wide; with
+/// "Small scrollbars in editors" 11 and 12 px (about half, as FL's playlist measured; spec: ui/settings-choices.md
+/// "Miscellaneous"), the room going to the ruler and the grid.
 pub fn layout(r: Rect, split: crate::piano_split::Split) -> Layout {
     use crate::piano_split::BAND;
+    let (hbar, vcol) = if super::small_scrollbars() { (11.0, 12.0) } else { (22.0, 22.0) };
     let bottom = r.bottom();
     let gx = r.x + 73.0;
-    let gr = r.right() - 23.0;
+    let gr = r.right() - vcol - 1.0;
     let gy = r.y + 64.0;
     let split = gy + split.grid_h(bottom - gy - BAND);
     Layout {
         tab: Rect::new(r.x, r.y + 23.0, 71.0, 41.0),
-        overview: Rect::new(r.x + 72.0, r.y + 23.0, gr - r.x - 72.0 + 2.0, 22.0),
-        ruler: Rect::new(r.x + 72.0, r.y + 45.0, gr - r.x - 72.0 + 2.0, 19.0),
+        overview: Rect::new(r.x + 72.0, r.y + 23.0, gr - r.x - 72.0 + 2.0, hbar),
+        ruler: Rect::new(r.x + 72.0, r.y + 23.0 + hbar, gr - r.x - 72.0 + 2.0, 41.0 - hbar),
         keys: Rect::new(r.x, gy, 71.0, split - gy),
         grid: Rect::new(gx, gy, gr - gx, split - gy),
         vscroll: Rect::new(gr + 1.0, r.y + 23.0, r.right() - gr - 1.0, split - r.y - 23.0),
@@ -69,6 +74,12 @@ pub fn layout(r: Rect, split: crate::piano_split::Split) -> Layout {
         label: Rect::new(r.x, split + BAND, 71.0, bottom - split - BAND),
         panel: Rect::new(gx, split + BAND, gr - gx, bottom - split - BAND),
     }
+}
+
+/// The note grid the piano roll would paint now (where it opens, before it is painted).
+pub fn grid_rect(s: &State) -> Rect {
+    let (r, _) = super::frame_rects(s, Win::PianoRoll, s.win_rect(Win::PianoRoll));
+    layout(r, s.piano.split).grid
 }
 
 pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
@@ -233,13 +244,17 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     ui.c.pop_clip();
 
-    // Vertical scroll bar.
+    // Vertical scroll bar: arrow buttons at its ends; small scroll bars have none and run along the grid.
     ui.c.fill_rect(Rect::new(l.vscroll.x, l.ruler.y, l.vscroll.w, l.grid.bottom() - l.ruler.y), t.scrollbar);
-    let up = Rect::new(l.vscroll.x, l.ruler.y, l.vscroll.w, 19.0);
-    let down = Rect::new(l.vscroll.x, l.grid.bottom() - 19.0, l.vscroll.w, 19.0);
-    arrow_button(ui, up, 2, Scroll::PianoY);
-    arrow_button(ui, down, 3, Scroll::PianoY);
-    let track = Rect::new(l.vscroll.x + 1.0, up.bottom(), l.vscroll.w - 2.0, (down.y - up.bottom()).max(0.0));
+    let track = if super::small_scrollbars() {
+        Rect::new(l.vscroll.x + 1.0, l.grid.y, l.vscroll.w - 2.0, l.grid.h)
+    } else {
+        let up = Rect::new(l.vscroll.x, l.grid.y - 19.0, l.vscroll.w, 19.0);
+        let down = Rect::new(l.vscroll.x, l.grid.bottom() - 19.0, l.vscroll.w, 19.0);
+        arrow_button(ui, up, 2, Scroll::PianoY);
+        arrow_button(ui, down, 3, Scroll::PianoY);
+        Rect::new(l.vscroll.x + 1.0, up.bottom(), l.vscroll.w - 2.0, (down.y - up.bottom()).max(0.0))
+    };
     super::scrollbar(ui, track, true, s.piano.scroll_y, l.grid.h, (TOP_KEY + 1) as f32 * g.row, Scroll::PianoY);
 
     velocity_panel(ui, s, &l, &g, notes, ch, &sel);
@@ -338,11 +353,14 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     let view = l.grid.w / g.ppt;
     let len = piano::pattern_length(s, notes) as f32;
     let span = len.max(g.scroll_x + view) + view / 2.0;
-    // Scroll arrows at both ends (§1a); the bar runs between them.
-    arrow_button(ui, Rect::new(o.x, o.y, 19.0, o.h), 0, Scroll::PianoX);
-    arrow_button(ui, Rect::new(l.grid.right() - 19.0, o.y, 19.0, o.h), 1, Scroll::PianoX);
+    // Scroll arrows at both ends (§1a); the bar runs between them (small scroll bars: no arrows).
+    let arrow = if super::small_scrollbars() { 0.0 } else { 19.0 };
+    if arrow > 0.0 {
+        arrow_button(ui, Rect::new(o.x, o.y, arrow, o.h), 0, Scroll::PianoX);
+        arrow_button(ui, Rect::new(l.grid.right() - arrow, o.y, arrow, o.h), 1, Scroll::PianoX);
+    }
     corner_button(ui, Rect::new(l.vscroll.x, o.y, l.vscroll.w, o.h));
-    let track = Rect::new(o.x + 19.0, o.y, (l.grid.right() - o.x - 38.0).max(0.0), o.h);
+    let track = Rect::new(o.x + arrow, o.y, (l.grid.right() - o.x - 2.0 * arrow).max(0.0), o.h);
     super::scrollbar(ui, track, false, g.scroll_x * g.ppt, l.grid.w, span * g.ppt, Scroll::PianoX);
     // Mini-map: one dash per note of the channel.
     let dash = t.note_top.mix(t.note_bottom, 0.5);
@@ -356,8 +374,10 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
 
 fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u32, markers: &[(u32, &str)]) {
     let t = ui.t;
-    let rr = l.ruler;
-    ui.hit(Rect::new(l.grid.x, rr.y, l.grid.w, rr.h), Action::PianoRuler, "Drag: move the play start - right-drag: select a time range");
+    ui.hit(Rect::new(l.grid.x, l.ruler.y, l.grid.w, l.ruler.h), Action::PianoRuler, "Drag: move the play start - right-drag: select a time range");
+    // The content keeps to the bottom 19 px; small scroll bars make the ruler taller, the extra band plain.
+    ui.c.fill_rect(Rect::new(l.ruler.x, l.ruler.y, l.ruler.w, l.ruler.h - 19.0), t.ruler);
+    let rr = Rect::new(l.ruler.x, l.ruler.bottom() - 19.0, l.ruler.w, 19.0);
     ui.c.fill_rect(Rect::new(rr.x, rr.y, rr.w, 17.0), t.ruler);
     ui.c.fill_rect(Rect::new(rr.x, rr.y + 17.0, rr.w, 1.0), ui.t.s(0x16191c));
     ui.c.fill_rect(Rect::new(rr.x, rr.y + 18.0, rr.w, 1.0), ui.t.s(0x090c0f));
@@ -622,11 +642,12 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
 }
 
 /// The pitch lane's own vertical scroll bar with arrow buttons, right of the panel (spec §7b): the window
-/// is 482 cents tall over ±4800 cents and each arrow click moves it 455 cents.
+/// is 482 cents tall over ±4800 cents and each arrow click moves it 455 cents. In the vertical scroll bar's column.
 fn pitch_scroll(ui: &mut Ui, s: &State, l: &Layout) {
     let t = ui.t;
-    let col = Rect::new(l.panel.right() + 3.0, l.panel.y, 19.0, l.panel.h);
-    let btn = 20.0_f32.min(col.h / 3.0);
+    let col = Rect::new(l.vscroll.x + 2.0, l.panel.y, l.vscroll.w - 3.0, l.panel.h);
+    // Small scroll bars: no arrow buttons.
+    let btn = if super::small_scrollbars() { 0.0 } else { 20.0_f32.min(col.h / 3.0) };
     let (up, down) = (Rect::new(col.x, col.y, col.w, btn), Rect::new(col.x, col.bottom() - btn, col.w, btn));
     let track = Rect::new(col.x, up.bottom(), col.w, (down.y - up.bottom()).max(1.0));
     // Content in cents: the top edge of the window is `4800 - pos`.
@@ -634,7 +655,8 @@ fn pitch_scroll(ui: &mut Ui, s: &State, l: &Layout) {
     let view = 482.0;
     let top_edge = (s.piano.pitch_center as f32 + view / 2.0).min(piano::PITCH_RANGE as f32);
     super::scrollbar(ui, track, true, piano::PITCH_RANGE as f32 - top_edge, view, total, Scroll::PitchY);
-    for (r, dir, name) in [(up, 1, "Scroll the lane up"), (down, -1, "Scroll the lane down")] {
+    let arrows = if btn > 0.0 { vec![(up, 1, "Scroll the lane up"), (down, -1, "Scroll the lane down")] } else { Vec::new() };
+    for (r, dir, name) in arrows {
         let hov = ui.hit(r, Action::PitchStep(dir), name);
         ui.c.fill_rect(r, if hov { t.scrollbar.shade(0.2) } else { t.scrollbar.shade(0.1) });
         let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);

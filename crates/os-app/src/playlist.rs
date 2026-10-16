@@ -1522,9 +1522,14 @@ pub fn delete_track(s: &mut State, t: u16) {
     s.piano.dirty = true;
 }
 
-/// Track LED: mute / unmute (a solo ends first).
+/// Track LED: mute / unmute. A solo ends first: with "Restore previous state after solo" on, its saved states come
+/// back; off, the states stay as they are.
 pub fn toggle_track(s: &mut State, t: u16) {
-    end_solo(s);
+    if crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO) {
+        end_solo(s);
+    } else {
+        s.playlist.solo = None;
+    }
     let arr = arr_mut(s);
     if let Some(tr) = arr.tracks.get_mut(usize::from(t)) {
         tr.enabled = !tr.enabled;
@@ -1532,7 +1537,8 @@ pub fn toggle_track(s: &mut State, t: u16) {
     s.piano.dirty = true;
 }
 
-/// Ctrl+click / right-click on the LED: solo the track (others muted); again restores the states.
+/// Ctrl+click / right-click on the LED: solo the track (others muted); again ends the solo (see [`end_solo`]). A solo
+/// moved to another track keeps the states from before the first one.
 pub fn toggle_solo(s: &mut State, t: u16) {
     if let Some((was, _)) = s.playlist.solo {
         end_solo(s);
@@ -1549,11 +1555,14 @@ pub fn toggle_solo(s: &mut State, t: u16) {
     s.piano.dirty = true;
 }
 
+/// Unsolo: every track on, or, with "Restore previous state after solo" on, the states from before the solo (spec:
+/// ui/settings-choices.md "Miscellaneous").
 fn end_solo(s: &mut State) {
     if let Some((_, states)) = s.playlist.solo.take() {
+        let back = crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO);
         let arr = arr_mut(s);
-        for (tr, on) in arr.tracks.iter_mut().zip(states) {
-            tr.enabled = on;
+        for (k, tr) in arr.tracks.iter_mut().enumerate() {
+            tr.enabled = !back || states.get(k).copied().unwrap_or(tr.enabled);
         }
         s.piano.dirty = true;
     }
