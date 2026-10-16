@@ -25,6 +25,8 @@
 //! the moment it changes adds that to `App::pref_toggle` / `App::pref_choose`). Settings with a module and file of
 //! their own (audio, auto scrolling, metronome, snap, enable groups, animations, the plugin manager's) and combos whose
 //! choices are found at run time (output devices) are not declared here.
+//!
+//! Sliders ([`Slider`], listed in [`SLIDERS`]) are declared the same way and read with `prefs::slider`.
 // spec: ui/settings.md, ui/options-coverage.md
 
 use std::sync::{Mutex, OnceLock}; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
@@ -65,6 +67,21 @@ pub struct Number {
     pub min: u16,
     pub max: u16,
     pub default: u16,
+}
+
+/// A slider on a settings page: a whole number from 0 to `max`, its handle as far along the track as the value is. A
+/// click or a drag sets it from where the mouse is along the track, a wheel notch over it moves it by `step`; it shows
+/// no value (`App::pref_slider_press`, `App::pref_slider_wheel`).
+#[derive(Debug, PartialEq)]
+pub struct Slider {
+    /// Its name in `settings.txt`.
+    pub key: &'static str,
+    /// The label its page shows; unique among the declared settings.
+    pub label: &'static str,
+    pub max: u16,
+    pub default: u16,
+    /// What one wheel notch over it adds or takes.
+    pub step: u16,
 }
 
 /// General ▸ Display: the UI's scale. System = the monitor's (the operating system's); a percentage replaces it.
@@ -312,7 +329,52 @@ pub const CHECKS: &[&Check] = &[
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS];
 
 /// The declared value boxes.
-pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS];
+pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BROWSER_PREVIEW_TRACK];
+
+/// General ▸ Input: the editors scroll by the vertical wheel's steps times value / 256 (`crate::scroll_speed`);
+/// Shift+wheel keeps its own step. Spec: ui/settings-choices.md "Input: Vertical and Horizontal scrolling speed".
+pub const VERTICAL_SCROLLING_SPEED: Slider =
+    Slider { key: "vertical_scrolling_speed", label: "Vertical scrolling speed", max: 512, default: 256, step: 32 };
+
+/// General ▸ Input: the same for the sideways wheel (a tilt wheel, a touchpad's sideways swipe).
+pub const HORIZONTAL_SCROLLING_SPEED: Slider =
+    Slider { key: "horizontal_scrolling_speed", label: "Horizontal scrolling speed", max: 512, default: 256, step: 32 };
+
+/// The declared sliders.
+pub const SLIDERS: &[&Slider] = &[&VERTICAL_SCROLLING_SPEED, &HORIZONTAL_SCROLLING_SPEED];
+
+/// Audio ▸ Mixer: the insert track the browser's previews enter the mixer at; 0, shown "---", plays them straight into
+/// the master (`crate::preview_track`). The wheel offers the open project's insert tracks (`App::settings_number`), up
+/// to 125, the most a project file shows (spec: ui/mixer.md §1). Spec: ui/settings-choices.md "Mixer: Browser preview
+/// track".
+pub const BROWSER_PREVIEW_TRACK: Number = Number { key: "browser_preview_track", label: "Browser preview track", min: 0, max: 125, default: 0 };
+
+/// The declared slider its page labels `label`.
+pub fn find_slider(label: &str) -> Option<&'static Slider> {
+    SLIDERS.iter().copied().find(|s| s.label == label)
+}
+
+/// Slider `s`'s value, 0 to its `max`.
+pub fn slider(s: &Slider) -> u16 {
+    read(|st| slider_in(st, s))
+}
+
+/// Sets slider `s` (to its `max` at most) and keeps it.
+pub fn set_slider(s: &Slider, v: u16) {
+    write(s.key, &v.min(s.max).to_string());
+}
+
+/// Value box `n` as its box shows it: its number, or "---" for 0 in a box whose range starts at 0 (none).
+pub fn number_text(n: &Number) -> String {
+    match number(n) {
+        0 if n.min == 0 => "---".into(),
+        v => v.to_string(),
+    }
+}
+
+fn slider_in(st: &Store, s: &Slider) -> u16 {
+    st.get(s.key).and_then(|v| v.parse::<u16>().ok()).map_or(s.default, |v| v.min(s.max))
+}
 
 /// Tests only: a check that exercises the settings page. An FL service Lemon Studio leaves out (ui/options-coverage.md
 /// §4), so it is never declared for real.
@@ -524,6 +586,33 @@ impl App {
         set_choice(c, i);
         self.invalidate();
         Some(format!("{}: {}", c.label, choice(c)))
+    }
+}
+
+/// The settings window's side of the declared sliders.
+impl App {
+    /// A declared slider was pressed (`SAct::Slider`, its track `w` wide from `x`): set from the mouse, then dragged
+    /// (`Drag::PrefSlider`).
+    pub(crate) fn pref_slider_press(&mut self, label: &'static str, x: f32, w: f32) {
+        self.pref_slider_drag(label, x, w);
+        self.drag = Some(crate::app::Drag::PrefSlider { label, x, w });
+    }
+
+    /// Sets the declared slider labelled `label` from the mouse along its track (`w` wide from `x`).
+    pub(crate) fn pref_slider_drag(&mut self, label: &str, x: f32, w: f32) {
+        let Some(s) = find_slider(label) else { return };
+        let at = ((self.mouse.0 - x) / w.max(1.0)).clamp(0.0, 1.0);
+        set_slider(s, (at * f32::from(s.max)).round() as u16);
+        self.invalidate();
+    }
+
+    /// Wheel notches over the declared slider labelled `label`: up (`notches` > 0) moves it by its step toward its
+    /// `max`.
+    pub(crate) fn pref_slider_wheel(&mut self, label: &str, notches: i32) {
+        let Some(s) = find_slider(label) else { return };
+        let v = i32::from(slider(s)) + notches * i32::from(s.step);
+        set_slider(s, v.clamp(0, i32::from(s.max)) as u16);
+        self.invalidate();
     }
 }
 
@@ -779,5 +868,191 @@ mod tests {
         assert_eq!(choice(&COLORFUL_WAVEFORMS), "Multiband");
         assert_eq!(app.state.message.as_deref(), Some("Colorful waveforms: Multiband"));
         set_choice(&COLORFUL_WAVEFORMS, 0);
+    }
+
+    /// Every declared slider is a slider on a settings page, with a key and a label of its own among all the
+    /// declarations, a default in range and a step.
+    #[test]
+    fn sliders_match_the_settings_pages() {
+        let app = App::new(None);
+        let mut shown = Vec::new();
+        fn walk(r: &Row, shown: &mut Vec<&'static str>) {
+            match r {
+                Row::Slider(l, _) => shown.push(*l),
+                Row::Pair(a, b) => {
+                    walk(a, shown);
+                    walk(b, shown);
+                }
+                _ => {}
+            }
+        }
+        for tab in 0..settings::TABS.len() {
+            for g in settings::page(tab, &app.state) {
+                for r in &g.rows {
+                    walk(r, &mut shown);
+                }
+            }
+        }
+        let mut keys: Vec<&str> = checks().map(|c| c.key).chain(COMBOS.iter().map(|c| c.key)).chain(NUMBERS.iter().map(|n| n.key)).collect();
+        let mut labels: Vec<&str> = checks().map(|c| c.label).chain(COMBOS.iter().map(|c| c.label)).chain(NUMBERS.iter().map(|n| n.label)).collect();
+        for s in SLIDERS {
+            assert!(shown.contains(&s.label), "{} is a slider on a settings page", s.label);
+            assert!(s.default <= s.max && s.step > 0, "{}: default and step", s.label);
+            assert!(!s.key.is_empty() && !s.key.contains('=') && s.key.trim() == s.key, "key {:?}", s.key);
+            assert!(!keys.contains(&s.key), "key {} declared twice", s.key);
+            assert!(!s.label.is_empty() && !labels.contains(&s.label), "label {} declared twice", s.label);
+            keys.push(s.key);
+            labels.push(s.label);
+        }
+    }
+
+    /// A slider is stored as a number: unreadable is the default, past the range its end. A value box whose range
+    /// starts at 0 shows 0 as "---".
+    #[test]
+    fn slider_values_and_the_preview_track() {
+        let s = Store::parse("vertical_scrolling_speed=96\nhorizontal_scrolling_speed=fast\n");
+        assert_eq!((slider_in(&s, &VERTICAL_SCROLLING_SPEED), slider_in(&s, &HORIZONTAL_SCROLLING_SPEED)), (96, 256));
+        assert_eq!(slider_in(&Store::parse("vertical_scrolling_speed=9000"), &VERTICAL_SCROLLING_SPEED), 512);
+        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), 256, "unset: the middle");
+        set_slider(&VERTICAL_SCROLLING_SPEED, 600);
+        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), 512);
+        set_slider(&VERTICAL_SCROLLING_SPEED, 0);
+        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), 0);
+        set_slider(&VERTICAL_SCROLLING_SPEED, 256);
+        assert_eq!(find_slider("Vertical scrolling speed"), Some(&VERTICAL_SCROLLING_SPEED));
+        assert_eq!((find_slider(""), find_slider("Smoothing")), (None, None));
+        assert_eq!((number(&BROWSER_PREVIEW_TRACK), number_text(&BROWSER_PREVIEW_TRACK).as_str()), (0, "---"));
+        set_number(&BROWSER_PREVIEW_TRACK, 5);
+        assert_eq!((number(&BROWSER_PREVIEW_TRACK), number_text(&BROWSER_PREVIEW_TRACK).as_str()), (5, "5"));
+        set_number(&BROWSER_PREVIEW_TRACK, 0);
+        assert_eq!(number_text(&MAX_UNDO_LEVELS), "100", "a box from 1 shows its number");
+        assert_eq!(find_number("Browser preview track"), Some(&BROWSER_PREVIEW_TRACK));
+    }
+
+    // spec: ui/settings-choices.md "Input: Vertical and Horizontal scrolling speed (2026-10-16)"
+    /// General ▸ Input's scrolling speeds are live sliders: a click sets one from where it lands on the track, a drag
+    /// follows the mouse, the wheel moves it by 32 a notch; the handle shows the value.
+    #[test]
+    fn scrolling_speed_sliders_work() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::GENERAL);
+        app.state.settings.folded.extend(["Display", "Language"]);
+        app.paint(&mut c, None);
+        let track = |app: &App, s: &Slider| {
+            app.hits
+                .iter()
+                .rev()
+                .find_map(|h| match h.action {
+                    Action::Settings(SAct::Slider(l, x, w)) if l == s.label => Some((h.rect, x, w)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{} works", s.label))
+        };
+        for s in SLIDERS {
+            assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(s.label)), "{} is not greyed out", s.label);
+        }
+        let (r, x, w) = track(&app, &VERTICAL_SCROLLING_SPEED);
+        // A click three quarters along: 384; a drag past the left end: 0.
+        app.mouse_move(x + w * 0.75, r.cy());
+        app.mouse_down();
+        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), 384);
+        app.mouse_move(x - 40.0, r.cy() + 30.0);
+        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), 0);
+        app.mouse_move(x + w * 0.25, r.cy() + 30.0);
+        app.mouse_up();
+        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), 128);
+        app.mouse_move(x + w + 40.0, r.cy());
+        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), 128, "released: the mouse no longer moves it");
+        assert_eq!(slider(&HORIZONTAL_SCROLLING_SPEED), 256, "the other one stays");
+        app.paint(&mut c, None);
+        // The wheel: 32 a notch, kept in 0..=512.
+        let (r, _, _) = track(&app, &HORIZONTAL_SCROLLING_SPEED);
+        app.mouse_move(r.cx(), r.cy());
+        let scroll = app.state.settings.scroll;
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(slider(&HORIZONTAL_SCROLLING_SPEED), 288);
+        app.wheel(0.0, -1.0, false, false);
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(slider(&HORIZONTAL_SCROLLING_SPEED), 224);
+        assert_eq!(app.state.settings.scroll, scroll, "the page does not scroll");
+        set_slider(&HORIZONTAL_SCROLLING_SPEED, 500);
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(slider(&HORIZONTAL_SCROLLING_SPEED), 512);
+        set_slider(&HORIZONTAL_SCROLLING_SPEED, 10);
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(slider(&HORIZONTAL_SCROLLING_SPEED), 0);
+        // The handle is drawn where the value is: the canvas changes with it.
+        set_slider(&HORIZONTAL_SCROLLING_SPEED, 0);
+        app.invalidate();
+        app.paint(&mut c, None);
+        let at0 = shot(&c);
+        set_slider(&HORIZONTAL_SCROLLING_SPEED, 512);
+        app.invalidate();
+        app.paint(&mut c, None);
+        assert_ne!(shot(&c), at0, "the handle moved");
+        set_slider(&VERTICAL_SCROLLING_SPEED, 256);
+        set_slider(&HORIZONTAL_SCROLLING_SPEED, 256);
+    }
+
+    // spec: ui/settings-choices.md "Mixer: Browser preview track (2026-10-16)"
+    /// Audio ▸ Mixer's Browser preview track box shows "---" or a track; the wheel steps it from "---" through the
+    /// open project's insert tracks, one a notch, and a click says so.
+    #[test]
+    fn browser_preview_track_box() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::AUDIO);
+        app.paint(&mut c, None);
+        let shown = |app: &App| {
+            let rows = settings::page(settings::AUDIO, &app.state).into_iter().flat_map(|g| g.rows);
+            rows.into_iter().find_map(|r| match r {
+                Row::Value(v, l) if l == BROWSER_PREVIEW_TRACK.label => Some(v),
+                _ => None,
+            })
+        };
+        assert_eq!(shown(&app).as_deref(), Some("---"), "the box shows --- for none");
+        let key = Action::Settings(SAct::Number(BROWSER_PREVIEW_TRACK.label));
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(BROWSER_PREVIEW_TRACK.label)));
+        let r = hit_rect(&app, &key);
+        click(&mut app, &mut c, r);
+        assert_eq!(app.state.message.as_deref(), Some("Browser preview track: the mouse wheel changes it"));
+        app.mouse_move(r.cx(), r.cy());
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(number(&BROWSER_PREVIEW_TRACK), 1);
+        assert_eq!(app.state.message.as_deref(), Some("Browser preview track: 1"));
+        app.wheel(0.0, 2.0, false, false);
+        assert_eq!(number(&BROWSER_PREVIEW_TRACK), 2, "one a notch");
+        app.wheel(0.0, -1.0, false, false);
+        app.wheel(0.0, -1.0, false, false);
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!((number(&BROWSER_PREVIEW_TRACK), app.state.message.as_deref()), (0, Some("Browser preview track: ---")));
+        // Up to the open project's last insert track.
+        let inserts = crate::mixer::inserts(&app.state);
+        assert!(inserts > 0);
+        set_number(&BROWSER_PREVIEW_TRACK, inserts);
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(number(&BROWSER_PREVIEW_TRACK), inserts);
+        // A track another project had comes back in range.
+        set_number(&BROWSER_PREVIEW_TRACK, inserts + 10);
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(number(&BROWSER_PREVIEW_TRACK), inserts);
+        // The box shows the value.
+        set_number(&BROWSER_PREVIEW_TRACK, 0);
+        app.invalidate();
+        app.paint(&mut c, None);
+        let before = shot(&c);
+        set_number(&BROWSER_PREVIEW_TRACK, 7);
+        app.invalidate();
+        app.paint(&mut c, None);
+        assert_ne!(shot(&c), before, "the box shows 7");
+        assert_eq!(shown(&app).as_deref(), Some("7"));
+        set_number(&BROWSER_PREVIEW_TRACK, 0);
+    }
+
+    fn shot(c: &Canvas) -> Vec<u32> {
+        let mut v = vec![0u32; 1920 * 1080];
+        c.copy_to_xrgb(&mut v);
+        v
     }
 }

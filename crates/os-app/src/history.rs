@@ -223,6 +223,15 @@ pub fn record(s: &mut State, name: &'static str, snap: Snap) {
     h.trim();
 }
 
+/// Names the newest step `name` while its press is held (recorded since the last release): a gesture that turned into
+/// another edit, as a held click's clone (`crate::hold`). The step keeps what it holds.
+pub fn rename(s: &mut State, name: &'static str) {
+    let h = &mut s.history;
+    if h.fresh && h.done > 0 && h.done == h.steps.len() {
+        h.steps[h.done - 1].name = name;
+    }
+}
+
 /// Drops the newest step: its edit changed nothing after all.
 pub fn unrecord(s: &mut State) {
     let h = &mut s.history;
