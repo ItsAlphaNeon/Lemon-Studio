@@ -46,11 +46,11 @@ impl Answer {
             Answer::Ok => "Ok",
         }
     }
+}
 
-    /// Its accelerator: the label's first letter, pressed without Alt (spec §1e).
-    fn accel(self) -> char {
-        self.label().chars().next().map_or(' ', |c| c.to_ascii_lowercase())
-    }
+/// A button's accelerator: its label's first letter, pressed without Alt (spec §1e).
+fn accel(label: &str) -> char {
+    label.chars().next().map_or(' ', |c| c.to_ascii_lowercase())
 }
 
 /// The work that waits for a dialog's answer (`App::dialog_done`).
@@ -82,6 +82,8 @@ pub enum Then {
     ReplaceSignature(u16),
     /// The time signature dialog: Accept (Ok) puts numerator / denominator at the start of this pattern (§2).
     Signature(u16, u8, u8),
+    /// The project's data folder: its questions and folder pickers (`crate::data_folder`).
+    DataFolder(crate::data_folder::DThen),
 }
 
 /// What waits for the save-changes question.
@@ -121,11 +123,24 @@ pub struct Msg {
     /// answered Ok (or Yes) while it is ticked, and whether it is ticked. None: the box has no such check. Spec:
     /// ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)".
     pub remember: Option<(&'static crate::messages::Message, bool)>,
+    /// The buttons' own labels, in the order of `buttons` (empty: the answers' labels, "Yes", "No", ...).
+    pub labels: Vec<&'static str>,
 }
 
 impl Msg {
     pub fn new(kind: Kind, title: &str, text: Vec<(String, bool)>, buttons: &[Answer], then: Then) -> Msg {
-        Msg { kind, title: title.into(), text, buttons: buttons.to_vec(), focus: 0, then, remember: None }
+        Msg { kind, title: title.into(), text, buttons: buttons.to_vec(), focus: 0, then, remember: None, labels: Vec::new() }
+    }
+
+    /// The same box with buttons labelled `labels` (in the order of its buttons) instead of the answers' names.
+    pub fn labelled(mut self, labels: &[&'static str]) -> Msg {
+        self.labels = labels.to_vec();
+        self
+    }
+
+    /// Button `i`'s label.
+    pub fn label(&self, i: usize) -> &'static str {
+        self.labels.get(i).copied().or_else(|| self.buttons.get(i).map(|b| b.label())).unwrap_or("")
     }
 
     /// The button Esc and the caption's × press: Cancel, else No, else the last one.
@@ -152,6 +167,8 @@ pub enum Body {
     Shortcuts(crate::shortcuts::Form),
     /// PATTERNS > Set time signature... (`timesig`).
     TimeSig(crate::timesig::SigForm),
+    /// Rename project, Save as and New project (`crate::project_forms`).
+    Project(crate::project_forms::Form),
 }
 
 /// A dialog on the stack (`State::dialogs`, bottom to top; only the top one takes input).
@@ -203,6 +220,8 @@ pub enum DHit {
     Apply,
     /// Time signature dialog: the denominator's value box (true) or the numerator's; Accept is `Accept`.
     SigValue(bool),
+    /// Rename project, Save as and New project: their parts (`crate::project_forms`).
+    Form(crate::project_forms::FHit),
 }
 
 /// A one-line text field: the text, the caret (in characters) and whether all of it is selected (typing replaces it).
@@ -414,6 +433,7 @@ impl App {
                 f.then
             }
             Body::Shortcuts(f) => return self.shortcuts_closed(&f, reply == Reply::Button(Answer::Ok)),
+            Body::Project(f) => return self.form_closed(f, reply),
             Body::TimeSig(f) => {
                 // Its value list goes with it.
                 self.state.playlist.popup = None;
@@ -437,13 +457,14 @@ impl App {
             Body::File(_) => Reply::File(None),
             Body::Shortcuts(_) => Reply::Button(Answer::Cancel),
             Body::TimeSig(_) => Reply::Button(Answer::Cancel),
+            Body::Project(_) => Reply::Button(Answer::Cancel),
         })
     }
 
     fn top_file(&mut self) -> Option<&mut FileDlg> {
         match &mut self.state.dialogs.last_mut()?.body {
             Body::File(f) => Some(f),
-            Body::Msg(_) | Body::Shortcuts(_) | Body::TimeSig(_) => None,
+            Body::Msg(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) => None,
         }
     }
 
@@ -497,7 +518,7 @@ impl App {
             DHit::Button(i) => {
                 let a = match &m.body {
                     Body::Msg(msg) => msg.buttons.get(i).copied(),
-                    Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) => None,
+                    Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) => None,
                 };
                 if let Some(a) = a {
                     self.answer(Reply::Button(a));
@@ -521,6 +542,12 @@ impl App {
             // The time signature dialog (spec: ui/pattern-time-signature.md §1-2).
             DHit::SigValue(den) => self.sig_list(den),
             DHit::Accept if matches!(m.body, Body::TimeSig(_)) => self.answer(Reply::Button(Answer::Ok)),
+            // Rename project, Save as and New project: a part that closes the form answers it.
+            DHit::Form(h) => {
+                if let Some(reply) = self.form_click(h) {
+                    self.answer(reply);
+                }
+            }
             _ => {
                 let Some(f) = self.top_file() else { return };
                 let out = match h {
@@ -617,7 +644,7 @@ impl App {
                     Key::Named(NamedKey::Escape) => Some(msg.escape()),
                     Key::Character(c) if !ctrl => {
                         let c = c.chars().next().map(|c| c.to_ascii_lowercase());
-                        msg.buttons.iter().copied().find(|b| Some(b.accel()) == c)
+                        (0..msg.buttons.len()).find(|&i| Some(accel(msg.label(i))) == c).map(|i| msg.buttons[i])
                     }
                     _ => None,
                 };
@@ -644,6 +671,11 @@ impl App {
                     Key::Named(NamedKey::Escape) => self.answer(Reply::Button(Answer::Cancel)),
                     Key::Named(NamedKey::Enter) if !list => self.answer(Reply::Button(Answer::Ok)),
                     _ => {}
+                }
+            }
+            Body::Project(_) => {
+                if let Some(reply) = self.form_key(key, ctrl, alt) {
+                    self.answer(reply);
                 }
             }
         }
@@ -690,7 +722,7 @@ impl App {
     pub fn top_message(&self) -> Option<(String, String)> {
         match &self.state.dialogs.last()?.body {
             Body::Msg(m) => Some((m.title.clone(), m.plain())),
-            Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) => None,
+            Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) => None,
         }
     }
 }

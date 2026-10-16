@@ -1399,8 +1399,17 @@ impl App {
         }
     }
 
-    /// The Save project as dialog, starting in the project's folder with its name.
+    /// Save as: for a project never saved, Lemon Studio's Save as form while Ask for data folder says so (spec:
+    /// ui/data-folder.md §7, `crate::save_form`), else the file dialog.
     fn save_dialog(&mut self, next: Option<crate::dialog::Next>) {
+        if self.state.path.is_none() && crate::save_form::asks_on_save() {
+            return self.open_save_form(next);
+        }
+        self.save_file_dialog(next);
+    }
+
+    /// The Save project as dialog, starting in the project's folder with its name.
+    pub(crate) fn save_file_dialog(&mut self, next: Option<crate::dialog::Next>) {
         use crate::filedlg::{FileDlg, Mode};
         let path = self.state.path.clone();
         let name = path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "Untitled.flp".to_string(), |n| n.to_string_lossy().into_owned());
@@ -1490,7 +1499,7 @@ impl App {
     /// Writes the project to `target`: the size of the file written, None when the save failed.
     fn write_project(&mut self, target: PathBuf) -> Option<u64> {
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
-        crate::backup::keep_overwritten(&target);
+        crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
         // them.
         for row in self.state.hosted_rows.clone() {
@@ -1549,6 +1558,7 @@ impl App {
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
         crate::project_info::stamp(s, &mut proj);
+        crate::data_folder::stamp(s, &mut proj);
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         let result = os_flp::project::apply(&proj, &mut file)
@@ -1632,7 +1642,10 @@ impl App {
         match n {
             Next::Close => self.want_exit = true,
             Next::Quit => self.quit_answer = Some(true),
-            Next::NewProject => self.new_project(),
+            Next::NewProject => {
+                self.new_project();
+                self.offer_new_form();
+            }
             Next::OpenDialog => self.open_dialog(),
             Next::Open(p) => self.open(p),
         }
@@ -1723,6 +1736,7 @@ impl App {
                     crate::timesig::set_start(&mut self.state, n, num, den);
                 }
             }
+            Then::DataFolder(d) => self.data_folder_done(d, reply),
         }
         self.invalidate();
     }
@@ -3305,6 +3319,8 @@ impl App {
     pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
         let s = &mut self.state;
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
+        // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
+        let path = crate::data_folder::adopt(s, &path);
         let row = match views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind.is_sampler()) {
             Some(r) => {
                 crate::history::load_sample(s, r);
@@ -3743,6 +3759,7 @@ impl App {
             SAct::Close => st.open = false,
             // The program settings declared in `crate::prefs`.
             SAct::Combo(views::settings::DEFAULT_TEMPLATE, x, y) => return self.template_menu(x, y),
+            SAct::Combo(crate::data_folder::COMBO, x, y) => return self.data_folder_menu(x, y),
             SAct::Combo(label, x, y) if crate::prefs::find_combo(label).is_some() => return self.pref_menu(label, x, y),
             SAct::Combo(label, x, y) => return self.audio_menu(label, x, y),
             SAct::Slider(label, x, w) => return self.pref_slider_press(label, x, w),
@@ -3784,6 +3801,7 @@ impl App {
             // The plugin manager (spec: ui/plugin-manager.md §2).
             SAct::Check(k) if views::settings::plugin_check(k) => self.plugin_check(k),
             SAct::Plug(p) => self.plugin_act(p),
+            SAct::Check(k) if k == crate::prefs::COPY_USED_SAMPLES.label => self.toggle_copy_samples(),
             SAct::Check(k) if crate::prefs::find_check(k).is_some() => self.pref_toggle(k),
             SAct::Check(k) if k == views::settings::TRUNCATED_CHECK => self.toggle_play_truncated(),
             SAct::Check(k) if k == views::settings::CROSSFADES_CHECK => self.toggle_auto_crossfades(),
@@ -3843,6 +3861,8 @@ impl App {
             SAct::Button("Add folder...") => self.add_plugin_folder(),
             SAct::Button(views::settings::RESET_WORK_TIME) => self.reset_work_time(),
             SAct::Button(views::settings::MANAGE_SHORTCUTS) => return self.open_shortcuts(),
+            SAct::Button(crate::data_folder::RENAME) => self.open_rename(),
+            SAct::Button(crate::data_folder::SET_FOLDER) => self.data_folder_pick(),
             SAct::Button(b) => self.state.message = Some(off_text(b)),
             // The Info page's boxes (spec: ui/settings.md "Info").
             SAct::Info(f) => return self.info_act(f),
@@ -9057,7 +9077,7 @@ mod tests {
         assert_eq!(app.state.message.as_deref(), Some("Send master sync: not available yet"));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
         click(&mut app, &mut c, r);
-        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Ask for data folder")), "a combo that does not work yet is greyed out");
+        assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Ask for data folder", ..)))), "Ask for data folder works");
         assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Timebase (PPQ)", ..)))), "the PPQ combo works");
         let adv = Action::Settings(SAct::Group("Advanced"));
         let r = hit_rect(&app, &adv);
@@ -9147,6 +9167,7 @@ mod tests {
             crate::dialog::Body::Msg(m) => panic!("a message box is on top: {}", m.plain()),
             crate::dialog::Body::Shortcuts(_) => panic!("Manage shortcuts is on top"),
             crate::dialog::Body::TimeSig(_) => panic!("the time signature dialog is on top"),
+            crate::dialog::Body::Project(_) => panic!("a project form is on top"),
         }
     }
 
@@ -9160,6 +9181,8 @@ mod tests {
         use winit::keyboard::NamedKey;
         let Ok(mut c) = Canvas::new(1280, 800, 1.0) else { return };
         fake::live(true);
+        // Saving a project never saved goes to the file dialog without Lemon Studio's Save as form (`crate::save_form`).
+        crate::prefs::set_choice(&crate::prefs::ASK_DATA_FOLDER, crate::save_form::DONT_ASK);
         let dir = std::env::temp_dir().join(format!("os_dialog_unsaved_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

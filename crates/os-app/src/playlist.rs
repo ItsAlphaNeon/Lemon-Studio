@@ -344,6 +344,8 @@ pub enum Cmd {
     Template(String),
     /// Settings > General ▸ Hints and warnings ▸ the Manage messages menu (`crate::messages`).
     Messages(crate::messages::Pick),
+    /// Settings > Project ▸ Data folder's menus and the forms' lists (`crate::data_folder`).
+    DataFolder(crate::data_folder::DCmd),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3328,6 +3330,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return Some(crate::messages::pick(p));
         }
+        Cmd::DataFolder(c) => return app.data_folder_cmd(c),
         Cmd::MetronomeSound(sound) => {
             crate::metronome::set_sound(sound);
             app.invalidate();
@@ -3787,6 +3790,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Genre(_) => None,
         Cmd::Template(_) => None,
         Cmd::Messages(_) => None,
+        Cmd::DataFolder(_) => None,
     };
     app.invalidate();
     msg

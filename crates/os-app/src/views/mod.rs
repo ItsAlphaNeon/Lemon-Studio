@@ -10,6 +10,7 @@
 pub mod browser;
 pub mod cabledebug;
 pub mod channel_win;
+pub mod data_folder;
 pub mod dialog;
 pub mod menus;
 pub mod mondebug;
@@ -19,7 +20,9 @@ pub mod piano;
 pub mod patterns;
 pub mod perf;
 pub mod playlist;
+pub mod project_forms;
 pub mod rack;
+pub mod save_form;
 pub mod tapper;
 pub mod toolbar;
 pub mod typein;

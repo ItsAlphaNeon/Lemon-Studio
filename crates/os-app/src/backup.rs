@@ -8,9 +8,10 @@
 //! when it ends and the project changed since the last backup or save, the project is written to
 //! `<user folder>/Projects/Backup` as `<name> (autosaved on M-D-YYYY at HhMM).flp`, and the oldest autosaves of that
 //! name beyond Maximum are deleted. Saving over a file first copies the old file there as
-//! `<name> (overwritten on M-D-YYYY at HhMM).flp`. Location's "project data folder" is the global folder until Lemon
-//! Studio has project data folders. Not yet: Never's reminder and the backups "before risky operations".
-// spec: ui/settings-choices.md "Backup files"
+//! `<name> (overwritten on M-D-YYYY at HhMM).flp`. With Location's "project data folder" (the default), a project with a
+//! data folder backs up to `<data folder>/Backup` instead (`crate::data_folder::backup_folder`). Not yet: Never's
+//! reminder and the backups "before risky operations".
+// spec: ui/settings-choices.md "Backup files", ui/data-folder.md §3
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -41,8 +42,9 @@ pub fn interval(i: usize) -> Option<Duration> {
     MINUTES.get(i).copied().filter(|&m| m > 0).map(|m| Duration::from_secs(m * 60))
 }
 
-/// Where backups go: `<user folder>/Projects/Backup` (for both Location choices so far). Tests: the folder their thread
-/// set in `TEST_DIR`, else none (nothing is written).
+/// The global backup folder: `<user folder>/Projects/Backup` (a project with a data folder may back up there instead:
+/// `crate::data_folder::backup_folder`). Tests: the folder their thread set in `TEST_DIR`, else none (nothing is
+/// written).
 pub fn folder() -> Option<PathBuf> {
     #[cfg(test)]
     return TEST_DIR.with(|d| d.borrow().clone());
@@ -99,10 +101,10 @@ pub fn prune(dir: &Path, name: &str, max: usize) {
     }
 }
 
-/// Before the project is saved over `target`: an existing file there is copied to the backup folder as
+/// Before the project is saved over `target`: an existing file there is copied to the backup folder `dir` as
 /// `<name> (overwritten on ...).flp` (a copy of that name made earlier in the same minute is kept).
-pub fn keep_overwritten(target: &Path) {
-    let Some(dir) = folder().filter(|_| target.is_file()) else { return };
+pub fn keep_overwritten(target: &Path, dir: Option<PathBuf>) {
+    let Some(dir) = dir.filter(|_| target.is_file()) else { return };
     let to = dir.join(file_name(&project_name(Some(target)), "overwritten", chrono::Local::now().naive_local()));
     if !to.exists() && std::fs::create_dir_all(&dir).is_ok() {
         let _ = std::fs::copy(target, to);
@@ -145,7 +147,7 @@ impl App {
     /// `MAXIMUM`. Returns the file (one already written in the same minute is not overwritten); None while the project
     /// cannot be written now.
     pub(crate) fn write_backup(&mut self, t: NaiveDateTime) -> Option<Result<PathBuf, String>> {
-        let Some(dir) = folder() else { return Some(Err("no user folder".into())) };
+        let Some(dir) = crate::data_folder::backup_folder(&self.state, self.state.path.as_deref()) else { return Some(Err("no user folder".into())) };
         let name = project_name(self.state.path.as_deref());
         let target = dir.join(file_name(&name, "autosaved", t));
         if target.exists() {

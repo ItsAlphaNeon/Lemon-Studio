@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use os_model::{
     Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
-    Envelope, InitControl, MixerTrack,
+    DataFolder, Envelope, InitControl, MixerTrack,
     Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, WorkTime, CLIP_RECORD_LEN,
 };
 
@@ -745,6 +745,11 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         playlist_view: l.playlist_view.and_then(|i| events[i].data()).and_then(PlaylistView::from_bytes),
         work_time: l.work_time.and_then(|i| events[i].data()).and_then(work_time_from),
         show_info: l.show_info.map(|i| int(&events[i]) != 0),
+        // Events 167 and 202 (spec: ui/data-folder.md §2); 202 is read as it is, empty or not.
+        data_folder: (l.info_167.is_some() || l.info_202.is_some()).then(|| DataFolder {
+            choice: l.info_167.map_or(0, |i| int(&events[i])),
+            folder: l.info_202.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)).unwrap_or_default(),
+        }),
         init_controls,
         ..Default::default()
     };
@@ -2246,8 +2251,30 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     let place = |p: usize| {
         order[..p].iter().rev().find_map(|i| i.map(|i| i + 1)).or_else(|| order[p + 1..].iter().find_map(|&i| i)).unwrap_or(info_at)
     };
+    // The data folder's choice and folder (167, 202; spec: ui/data-folder.md §2), places 3 and 4: patched in place, or
+    // added between the author and the comments when the model's differs from the file's (a missing event reads as
+    // 0 / empty, so an unchanged model adds nothing).
+    let mut folder_added = Vec::new();
+    if project.data_folder != current.data_folder {
+        let (df, old) = (project.data_folder.clone().unwrap_or_default(), current.data_folder.clone().unwrap_or_default());
+        if df.choice != old.choice {
+            match l.info_167 {
+                Some(i) => set_int(&mut events[i], df.choice),
+                None => folder_added.push((place(3), int_event(id::INFO_167, df.choice))),
+            }
+        }
+        if df.folder != old.folder {
+            match l.info_202 {
+                Some(i) => set_data(&mut events[i], encode_text(&df.folder, enc)),
+                None => folder_added.push((place(4), Event::new(id::INFO_202, Value::var(encode_text(&df.folder, enc))))),
+            }
+        }
+    }
     let mut added = Vec::new();
     for (k, &(eid, value, old)) in fields.iter().enumerate() {
+        if k == 3 {
+            added.append(&mut folder_added);
+        }
         if value == old {
             continue;
         }
@@ -3489,6 +3516,12 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         (id::COMMENTS, info.comments.as_deref().map(comments_to_file)),
         (id::URL, info.url.clone()),
     ] {
+        // The data folder (167, 202) between the author and the comments, when the model has one (spec:
+        // ui/data-folder.md §2).
+        if let Some(df) = project.data_folder.as_ref().filter(|_| id == id::COMMENTS) {
+            ev.push(int_event(id::INFO_167, df.choice));
+            ev.push(Event::new(id::INFO_202, Value::var(encode_text(&df.folder, enc))));
+        }
         let v = value.unwrap_or_default();
         if id != id::URL || !v.is_empty() {
             ev.push(Event::new(id, Value::var(encode_text(&v, enc))));
@@ -5476,6 +5509,57 @@ mod tests {
         let mut m5 = load(&file).unwrap();
         m5.info.title = Some("T".into());
         assert_eq!(info_ids(&saved(&m5, &file)), [id::TITLE, id::WORK_TIME]);
+    }
+
+    /// The data folder (events 167, 202; spec: ui/data-folder.md §2): read as the file holds it, an unchanged model
+    /// writes nothing, a changed one is patched in place, and one the file lacks goes between the author and the
+    /// comments; `create` writes it there when the model has one, and nothing without.
+    #[test]
+    fn data_folder_round_trips() {
+        let info_ids = |file: &FlpFile| -> Vec<u8> {
+            let keep = [id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::WORK_TIME];
+            events_of(file).unwrap().iter().map(|e| e.id).filter(|i| keep.contains(i)).collect()
+        };
+        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        // Without one: `create` writes neither event; the model has none.
+        let file = reparse(&create(&new_project()).unwrap());
+        assert_eq!(info_ids(&file), [id::AUTHOR, id::COMMENTS, id::WORK_TIME]);
+        let mut m = load(&file).unwrap();
+        assert_eq!(m.data_folder, None);
+        // Choosing "Don't use a data folder" explicitly adds nothing.
+        m.data_folder = Some(DataFolder::default());
+        let mut same = file.clone();
+        apply(&m, &mut same).unwrap();
+        assert_eq!(same.to_bytes().unwrap(), file.to_bytes().unwrap());
+        // A specified folder goes between the author and the comments, 202 as UTF-16 text with its backslash.
+        m.data_folder = Some(DataFolder { choice: DataFolder::SPECIFIED, folder: "C:\\Songs\\My song\\".into() });
+        let mut f2 = file.clone();
+        apply(&m, &mut f2).unwrap();
+        let f2 = reparse(&f2);
+        assert_eq!(info_ids(&f2), [id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::WORK_TIME]);
+        assert_eq!(event_data(&f2, id::INFO_202), Some(utf16z("C:\\Songs\\My song\\")));
+        let back = load(&f2).unwrap();
+        assert_eq!(back.data_folder, m.data_folder);
+        let mut again = f2.clone();
+        apply(&back, &mut again).unwrap();
+        assert_eq!(again.to_bytes().unwrap(), f2.to_bytes().unwrap(), "an unchanged model writes nothing");
+        // Patched in place: relative, its folder rewritten; then none, 202 empty (just the terminator).
+        let mut m3 = back.clone();
+        m3.data_folder = Some(DataFolder { choice: DataFolder::RELATIVE, folder: "D:\\Elsewhere\\".into() });
+        let mut f3 = f2.clone();
+        apply(&m3, &mut f3).unwrap();
+        assert_eq!(events_of(&f3).unwrap().len(), events_of(&f2).unwrap().len());
+        assert_eq!(load(&reparse(&f3)).unwrap().data_folder, m3.data_folder);
+        m3.data_folder = Some(DataFolder::default());
+        apply(&m3, &mut f3).unwrap();
+        assert_eq!(event_data(&f3, id::INFO_202), Some(vec![0, 0]));
+        assert_eq!(load(&reparse(&f3)).unwrap().data_folder, Some(DataFolder::default()));
+        // `create` with one: in FL's order, and read back.
+        let mut p = new_project();
+        p.data_folder = Some(DataFolder { choice: DataFolder::RELATIVE, folder: "C:\\Work\\".into() });
+        let f4 = reparse(&create(&p).unwrap());
+        assert_eq!(info_ids(&f4), [id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::WORK_TIME]);
+        assert_eq!(load(&f4).unwrap().data_folder, p.data_folder);
     }
 
     /// Event 237 (start and time spent, two doubles in days) and event 10 (show info on opening): `create` writes the

@@ -24,6 +24,7 @@ mod cable;
 mod clip_colors;
 mod clock;
 mod cpu;
+mod data_folder;
 mod dialog;
 mod filedlg;
 mod enable_groups;
@@ -66,12 +67,14 @@ mod plugins;
 mod ppi;
 mod prefs;
 mod preview_track;
+mod project_forms;
 mod project_info;
 mod project_plugins;
 mod presets;
 mod misc;
 mod misc_page;
 mod note_names;
+mod save_form;
 mod scroll_speed;
 mod search_folders;
 mod settings_file;
@@ -1459,6 +1462,8 @@ fn main() {
     // Default template and Startup project").
     if start {
         app.startup_project();
+        // Ask for data folder "On startup": the New project form over it (spec: ui/data-folder.md §7).
+        app.startup_form();
     }
     // MIDI controllers play the selected channel (spec: ui/midi-input.md).
     app.midi = midi_in::MidiIn::open(wake_ui);

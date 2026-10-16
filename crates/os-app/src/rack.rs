@@ -1513,7 +1513,8 @@ pub fn read_tags(ch: &mut os_model::Channel, path: &std::path::Path) {
 /// `read_tags`), one history step (`history::load_sample`).
 pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
     let s = &mut app.state;
-    let path = p.to_string_lossy().into_owned();
+    // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
+    let path = crate::data_folder::adopt(s, &p.to_string_lossy());
     if r < s.project.channels.len() {
         crate::history::load_sample(s, r);
     }

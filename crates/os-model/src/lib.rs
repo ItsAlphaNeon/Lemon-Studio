@@ -82,6 +82,9 @@ pub struct Project {
     /// "Show info on opening" (event 10; spec: flp/events/project-info.md): opening the project shows its Song info
     /// box. `None` = not in the file (off).
     pub show_info: Option<bool>,
+    /// The project's data folder: the Project page's choice and the folder (events 167 and 202; spec:
+    /// ui/data-folder.md §2). `None` = neither event in the file (Don't use a data folder).
+    pub data_folder: Option<DataFolder>,
     /// The project's initial values, in file order (event 216; spec: ui/settings-choices.md "Advanced: Initialize
     /// controls automatically"): controls that take a value when the song starts.
     pub init_controls: Vec<InitControl>,
@@ -483,6 +486,27 @@ impl Project {
             });
         }
     }
+}
+
+/// A project's data folder as the file keeps it (spec: ui/data-folder.md §2, flp/events/project-info.md): a folder of
+/// its own for its backups and the copies of the samples it uses. An event the file lacks reads as its default.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DataFolder {
+    /// Event 167, the Project page's choice: [`DataFolder::NONE`], [`DataFolder::RELATIVE`] or
+    /// [`DataFolder::SPECIFIED`].
+    pub choice: u32,
+    /// Event 202, the folder the choice resolves to, as the file holds it: with a trailing backslash, empty for none.
+    /// It is not always the data folder: with [`DataFolder::RELATIVE`] that is the project file's own folder.
+    pub folder: String,
+}
+
+impl DataFolder {
+    /// Don't use a data folder.
+    pub const NONE: u32 = 0;
+    /// Store data relative to the project file.
+    pub const RELATIVE: u32 = 1;
+    /// Store data in the specified folder.
+    pub const SPECIFIED: u32 = 2;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
