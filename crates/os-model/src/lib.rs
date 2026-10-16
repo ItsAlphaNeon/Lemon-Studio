@@ -68,6 +68,13 @@ pub struct Project {
 impl Project {
     /// Default main volume (unity).
     pub const MAIN_VOLUME_DEFAULT: u16 = 12800;
+
+    /// Ticks in a bar of the project's time signature (4/4 when the file has none): `PPQ * 4 * numerator / denominator`
+    /// (spec: audio/timing.md "Settings").
+    pub fn bar_ticks(&self) -> u32 {
+        let (num, den) = self.time_signature.unwrap_or((4, 4));
+        (u32::from(self.ppq.max(1)) * 4 * u32::from(num.max(1)) / u32::from(den.max(1))).max(1)
+    }
 }
 
 /// The playlist view a project stores: scroll, time zoom and track height (event 242, 28 bytes; spec:

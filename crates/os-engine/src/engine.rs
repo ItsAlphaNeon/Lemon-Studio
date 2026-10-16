@@ -823,6 +823,9 @@ pub struct Engine {
     tail_done: bool,
     tempo: f64,
     ppq: u16,
+    /// The project's time signature, numerator and denominator (4/4 when the file has none): what hosted plugins are
+    /// told (spec: plugins/vst3-hosting.md §1).
+    signature: (u16, u16),
     bus: Vec<Vec<f32>>,
     /// The last rendered tick (interleaved L/R), how much of it has been handed out, its tick index and first sample.
     out: Vec<f32>,
@@ -1232,6 +1235,7 @@ impl Engine {
             tail_done: false,
             tempo,
             ppq,
+            signature: project.time_signature.map_or((4, 4), |(n, d)| (n.max(1), d.max(1))),
             out: Vec::with_capacity(8192),
             out_pos: 0,
             out_tick: 0,
@@ -2382,7 +2386,7 @@ impl Engine {
     }
 
     /// The transport hosted plugins see at `frame` (spec: plugins/vst3-hosting.md Â§1): playing at the project tempo,
-    /// in 4/4 (the project's time signature is not read yet), with the pattern loop while looping.
+    /// in the project's time signature, with the pattern loop while looping.
     fn transport_at(&self, frame: u64) -> TransportInfo {
         let mut start = TransportInfo {
             playing: true,
@@ -2391,8 +2395,8 @@ impl Engine {
             beats: 0.0,
             bar_start: 0.0,
             bar: 0,
-            numerator: 4,
-            denominator: 4,
+            numerator: self.signature.0,
+            denominator: self.signature.1,
             looping: None,
         };
         if self.looping && self.end_tick > 0 {
@@ -3193,6 +3197,28 @@ mod tests {
         let later = t.advanced(48000 * 3, 48000);
         assert_eq!((later.frame, later.bar), (144000, 1));
         assert!((later.beats - 6.5).abs() < 1e-9 && (later.bar_start - 4.0).abs() < 1e-9, "{later:?}");
+    }
+
+    /// spec: plugins/vst3-hosting.md §1: the transport carries the project's time signature, and its bars and the
+    /// pattern loop follow it (a pattern is whole bars of the signature, spec: audio/song-structure.md).
+    #[test]
+    fn plugins_see_the_project_time_signature() {
+        let mut p = project(vec![long_note(0, 96, 0)], vec![]);
+        p.time_signature = Some((6, 8));
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let inst = Arc::new(std::sync::Mutex::new(Clock::default()));
+        e.set_instrument(0, inst.clone());
+        e.set_looping(true);
+        let mut out = vec![0.0f32; 512 * 2];
+        e.process(&mut out);
+        let t = inst.lock().unwrap().seen[0].0;
+        // A 6/8 bar is three quarter notes: the one-bar pattern loops after 3 beats, and beat 4 is in bar 1.
+        assert_eq!((t.numerator, t.denominator, t.looping), (6, 8, Some((0.0, 3.0))));
+        let fpb = 48000.0 * 60.0 / 130.0;
+        let later = TransportInfo { looping: None, ..t }.advanced((4.0 * fpb) as u64, 48000);
+        assert_eq!((later.bar, later.bar_start), (1, 3.0), "{later:?}");
     }
 
     // spec: audio/swing.md (whole ticks; notes in the first half of an odd step move towards its middle)
