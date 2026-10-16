@@ -520,6 +520,13 @@ impl Transport {
         self.shared.opened.lock().ok()?.clone()
     }
 
+    /// Shows as playing without starting anything: what the UI sees between Play and the first sound (tests have no
+    /// device, so a real Play stops again).
+    #[cfg(test)]
+    pub(crate) fn pretend_playing(&self) {
+        self.shared.state.store(PLAYING, Ordering::Release);
+    }
+
     /// Streams open now, fading ones included (each holds its voice counter in `Shared::engine_voices`).
     #[cfg(test)]
     fn streams(&self) -> usize {

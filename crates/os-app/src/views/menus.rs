@@ -89,6 +89,8 @@ pub const METRONOME_LABEL: &str = "Metronome";
 pub const AUTOSCROLL_LABEL: &str = "Auto scrolling";
 /// OPTIONS > Enable groups (spec: ui/enable-groups.md §1).
 pub const GROUPS_LABEL: &str = "Enable groups";
+/// OPTIONS > Step edit (spec: ui/step-edit.md).
+pub const STEP_EDIT_LABEL: &str = "Step edit";
 /// VIEW > Into workspace: windows partly outside the workspace move fully back in (`App::move_into_workspace`). A plain
 /// entry after "Arrange windows", whose submenu isn't built (spec: ui/settings-choices.md "Advanced: Don't limit
 /// windows to screen (2026-10-16)").
@@ -247,7 +249,7 @@ const OPTIONS: &[Item] = &[
     it("Recording precount", "Ctrl+P").tick(),
     it("Start on input", "Ctrl+I").tick(),
     it("Blend recorded notes", "Ctrl+B").tick(),
-    it("Step edit", "Ctrl+E").tick(),
+    it(STEP_EDIT_LABEL, "Ctrl+E").on().tick(),
     it("Loop record", "").tick(),
     it(AUTOSCROLL_LABEL, "").on().tick(),
     it(GROUPS_LABEL, "Shift+Alt+G").on().tick(),
@@ -474,6 +476,7 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
         (Mark::Check(_), _) if item.label == METRONOME_LABEL => Mark::Check(crate::metronome::on()),
         (Mark::Check(_), _) if item.label == AUTOSCROLL_LABEL => Mark::Check(crate::autoscroll::on()),
         (Mark::Check(_), _) if item.label == GROUPS_LABEL => Mark::Check(crate::enable_groups::on()),
+        (Mark::Check(_), _) if item.label == STEP_EDIT_LABEL => Mark::Check(crate::step_edit::on()),
         (mk, _) => mk,
     }
 }

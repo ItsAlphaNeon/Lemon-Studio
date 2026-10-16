@@ -81,6 +81,7 @@ mod snap;
 mod song_pos;
 mod splash;
 mod stall;
+mod step_edit;
 mod tapper;
 mod templates;
 mod timesig;
