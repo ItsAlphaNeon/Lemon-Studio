@@ -269,6 +269,37 @@ mod tests {
         assert!(audio.iter().chain(&auto).all(|c| before.contains(&Some(*c))));
     }
 
+    /// The Lemon design honours the setting too (spec, as above): the Theme page's toggle keeps it in the applied theme
+    /// text there as well, and new clips' channels follow it. The colours are stored as for Classic; Lemon's rack
+    /// mixes them 60 % toward its own name button face (`os_ui::kit::lemon::name_button`), which keeps them in their
+    /// hue family, still tinted, and leaves the name text readable.
+    #[test]
+    fn the_lemon_design_honours_the_setting() {
+        for on in [false, true] {
+            let mut app = App::new(None);
+            app.set_design(os_theme::Design::Lemon, false);
+            if on {
+                app.toggle_theme_option(crate::views::settings::NOTE_COLORS_CHECK);
+            }
+            app.tick();
+            assert_eq!(app.clip_colors().note_colors, on);
+            let (audio, auto) = new_channels(&mut app, 4);
+            let (face, text) = (app.theme.colors.name_button, app.theme.colors.name_text);
+            for &c in audio.iter().chain(&auto) {
+                let (h, s, _) = drawn(c).hsl();
+                if on {
+                    assert!((ON_HUES.0 - 2.0..=ON_HUES.1 + 2.0).contains(&h), "{c:?}: hue {h}");
+                } else {
+                    assert!((s - OFF.0).abs() < 0.025, "{c:?}: saturation {s}");
+                }
+                let lemon = crate::views::rgb(c).mix(face, 0.6);
+                let (lh, ls, ll) = lemon.hsl();
+                assert!(apart(lh, h) < 12.0 && ls > 0.03, "Lemon face {lemon:?} of {c:?}: hue {lh} (was {h}), s {ls}");
+                assert!(text.hsl().2 - ll > 0.45, "name text on {lemon:?}");
+            }
+        }
+    }
+
     /// The colour stored is the one the rack draws at the measured values: for the measured buttons it lands among
     /// FL's stored audio-clip pastels (one component near 0x68, one near 0x7e).
     #[test]
