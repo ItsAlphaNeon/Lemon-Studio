@@ -8,7 +8,8 @@
 //! project as opened or made). An edit records a step holding what it is about to change (`record`); undo and redo
 //! swap that with the project's, so a step always holds the other side of itself: the state before it while it is
 //! done, the state after it while it is undone. Covered: a pattern's notes, control points and length (the piano roll
-//! and the step sequencer), the playlist (`playlist::snapshot`), knob turns and sample loads (`load_sample`).
+//! and the step sequencer), the playlist (`playlist::snapshot`), knob turns, sample loads (`load_sample`) and the
+//! project's initial values (`crate::init`).
 //!
 //! The settings of General ▸ Undo history (`crate::prefs`): Maximum undo levels (past it the oldest step goes), Undo
 //! knob tweaks, Alternate undo mode (what Ctrl+Z and Ctrl+Alt+Z do), Show undo history in the browser when undoing
@@ -27,6 +28,9 @@ pub const LAST_RESET: &str = "Last reset";
 pub const STEP_SEQ_EDIT: &str = "Step seq edit";
 /// A sample loaded into a channel (FL's name; spec: ui/settings-choices.md "Undo history: the four checks").
 pub const LOAD_SAMPLE: &str = "Load channel sample(s)";
+/// "Create automation clip" (FL's name), with the control's initial value while "Initialize controls automatically" is
+/// on (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
+pub const CREATE_AUTOMATION: &str = "Create automation clip";
 
 /// What a step changes, as it is on the other side of the step.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +47,11 @@ pub enum Snap {
     /// Channel `row` as a sample dropped below the rack's rows made it (`App::sample_to_rack`); `None` while it
     /// doesn't exist. Only the last row comes and goes.
     Channel { row: usize, ch: Option<Box<os_model::Channel>> },
+    /// Control `.0`'s entry in the project's initial values; `None` while it isn't in the list (`crate::init`).
+    Init(u32, Option<os_model::InitControl>),
+    /// Several of these in one step, put back last first ("Create automation clip": the playlist and the initial
+    /// value).
+    Several(Vec<Snap>),
 }
 
 impl Snap {
@@ -73,6 +82,35 @@ impl Snap {
             // A channel gone since is left as the step has it (`put` does nothing then).
             Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
             Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.project.channels.get(*row).cloned().map(Box::new) },
+            Snap::Init(t, _) => Snap::Init(*t, crate::init::entry(s, *t)),
+            Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
+        }
+    }
+
+    /// Whether this holds the playlist (`forget_playlist`).
+    fn has_playlist(&self) -> bool {
+        match self {
+            Snap::Playlist(_) => true,
+            Snap::Several(v) => v.iter().any(Snap::has_playlist),
+            _ => false,
+        }
+    }
+
+    /// `rescale` for this.
+    fn rescale(&mut self, from: u16, to: u16) {
+        match self {
+            Snap::Pattern { notes, controls, length, .. } => {
+                notes.iter_mut().for_each(|n| n.rescale(from, to));
+                controls.iter_mut().for_each(|c| c.rescale(from, to));
+                *length = length.map(|l| os_model::rescale_length(l, from, to));
+            }
+            Snap::Playlist(p) => {
+                p.0.iter_mut().for_each(|c| c.rescale(from, to));
+                p.1.iter_mut().for_each(|m| m.rescale(from, to));
+            }
+            Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
+            // A channel or an initial value holds no ticks.
+            Snap::Knob(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) => {}
         }
     }
 
@@ -100,6 +138,8 @@ impl Snap {
                 Some(c) if row == s.project.channels.len() => crate::rack::push_channel(s, *c),
                 _ => {}
             },
+            Snap::Init(t, e) => crate::init::put(s, t, e),
+            Snap::Several(v) => v.into_iter().rev().for_each(|x| x.put(s)),
         }
         s.piano.dirty = true;
     }
@@ -393,7 +433,7 @@ pub fn forget_playlist(s: &mut State) {
     let mut done = 0;
     let mut kept = Vec::with_capacity(h.steps.len());
     for (i, st) in std::mem::take(&mut h.steps).into_iter().enumerate() {
-        if !matches!(st.snap, Snap::Playlist(_)) {
+        if !st.snap.has_playlist() {
             done += usize::from(i < h.done);
             kept.push(st);
         }
@@ -405,19 +445,7 @@ pub fn forget_playlist(s: &mut State) {
 /// markers follow, so no undo brings back ticks of the old timebase.
 pub fn rescale(s: &mut State, from: u16, to: u16) {
     for st in &mut s.history.steps {
-        match &mut st.snap {
-            Snap::Pattern { notes, controls, length, .. } => {
-                notes.iter_mut().for_each(|n| n.rescale(from, to));
-                controls.iter_mut().for_each(|c| c.rescale(from, to));
-                *length = length.map(|l| os_model::rescale_length(l, from, to));
-            }
-            Snap::Playlist(p) => {
-                p.0.iter_mut().for_each(|c| c.rescale(from, to));
-                p.1.iter_mut().for_each(|m| m.rescale(from, to));
-            }
-            // A channel holds no ticks.
-            Snap::Knob(..) | Snap::Sample { .. } | Snap::Channel { .. } => {}
-        }
+        st.snap.rescale(from, to);
     }
 }
 

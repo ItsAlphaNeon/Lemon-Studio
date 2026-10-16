@@ -292,6 +292,11 @@ pub const READ_ROOT_NOTE: Check = Check { key: "read_sample_root_note", label: "
 /// above.
 pub const READ_TEMPO: Check = Check { key: "read_sample_tempo", label: "Read sample tempo information", default: true };
 
+/// General ▸ Advanced: "Create automation clip" also puts the control in the project's initial values with its value at
+/// that moment, replacing an earlier one, in the same undo step (`playlist::create_automation`, `crate::init`). Spec:
+/// ui/settings-choices.md "Advanced: Initialize controls automatically (2026-10-16)".
+pub const INIT_CONTROLS: Check = Check { key: "init_controls_automatically", label: "Initialize controls automatically", default: true };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -324,6 +329,7 @@ pub const CHECKS: &[&Check] = &[
     &RECENT_CHANGES_TOP,
     &READ_ROOT_NOTE,
     &READ_TEMPO,
+    &INIT_CONTROLS,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS];

@@ -34,10 +34,19 @@ pub const INFO_H: f32 = 84.0;
 /// Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders follow these.
 const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin database", Icon::Speaker, 1)];
 
-/// The "Current project" tree's sections, in screenshot order (spec §2), without the ones nothing is tracked in yet
-/// (Remote control, Initialized controls). History: the undo history (spec: ui/settings-choices.md "Undo history: the
-/// four checks (2026-10-16)").
-const PROJECT: &[(&str, Icon)] = &[("History", Icon::Undo), ("Patterns", Icon::Note), ("Effects", Icon::Speaker), ("Generators", Icon::Plug), ("Samples", Icon::Wave)];
+/// The "Current project" tree's sections, in screenshot order (spec §2), without the one nothing is tracked in yet
+/// (Remote control). History: the undo history (spec: ui/settings-choices.md "Undo history: the four checks
+/// (2026-10-16)"). Initialized controls: the project's initial values, shown only while there are some (spec:
+/// ui/settings-choices.md "Advanced: Initialize controls automatically").
+const PROJECT: &[(&str, Icon)] = &[
+    ("History", Icon::Undo),
+    ("Patterns", Icon::Note),
+    ("Effects", Icon::Speaker),
+    ("Generators", Icon::Plug),
+    (INITIALIZED_CONTROLS, Icon::Slide),
+    ("Samples", Icon::Wave),
+];
+pub const INITIALIZED_CONTROLS: &str = "Initialized controls";
 
 /// What a row stands for; everything but `None`, `File` and `History` can be dragged (spec §3).
 #[derive(Debug, Clone, PartialEq)]
@@ -302,6 +311,9 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
 fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
     let p = &s.project;
     for &(name, icon) in PROJECT {
+        if name == INITIALIZED_CONTROLS && p.init_controls.is_empty() {
+            continue;
+        }
         if !section(s, root, name, icon, cat, out) {
             continue;
         }
@@ -336,6 +348,12 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                         let label = crate::params::effect_label(s, m.index, k as u8).unwrap_or_default();
                         plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, crate::plugins::fx_key(m.index, k as u8));
                     }
+                }
+            }
+            // "<owner> - <setting>", as the automation clip on the control is named.
+            INITIALIZED_CONTROLS => {
+                for c in &p.init_controls {
+                    leaf(out, &parent, crate::init::name(s, c.target), Icon::Slide, cat, false, Item::None);
                 }
             }
             "Samples" => {

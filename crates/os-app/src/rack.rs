@@ -753,6 +753,11 @@ pub fn remap_project(p: &mut Project, map: &[Option<usize>]) {
             ClipSource::Pattern(_) => true,
         });
     }
+    // Initial values: a place below 0x2000 is a channel's index (spec: flp/layouts.md "Mixer places").
+    p.init_controls.retain_mut(|c| {
+        let hi = (c.target >> 16) as u16;
+        hi >= 0x2000 || idx.get(&hi).map(|&n| c.target = u32::from(n) << 16 | (c.target & 0xFFFF)).is_some()
+    });
 }
 
 /// Apply a new channel order (`order` = old rows top to bottom; rows left out are deleted) to the project, the
@@ -1210,13 +1215,15 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
 
 /// The Automation / Remote control / Value groups shared by knob and LED menus (§19).
 fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)>) -> Vec<PItem> {
+    // spec: ui/settings-choices.md "Advanced: Initialize controls automatically"
+    let [init, delete] = crate::init::items(s, auto.as_ref().map(|a| (a.0, a.2)));
     let mut v = vec![
         PItem::head("Automation"),
         PItem::not_yet("Edit events"),
         PItem::new("Edit events in new window", Cmd::Nothing).off(),
         PItem::new("Edit events in piano roll", Cmd::Nothing).off(),
-        PItem::not_yet("Init song with this position"),
-        PItem::new("Delete initial value", Cmd::Nothing).off(),
+        init,
+        delete,
         PItem::sep(),
     ];
     v.push(match auto {

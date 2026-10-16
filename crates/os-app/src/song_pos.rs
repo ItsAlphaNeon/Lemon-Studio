@@ -89,6 +89,9 @@ impl App {
         let s = &mut self.state;
         if s.song_mode {
             s.playlist.pos = t;
+            // The initial values follow a song position move (spec: ui/settings-choices.md "Advanced: Initialize
+            // controls automatically").
+            crate::init::apply(s);
         } else {
             s.piano.marker = t;
         }
