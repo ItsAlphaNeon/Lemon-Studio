@@ -1277,12 +1277,16 @@ pub fn slip(s: &mut State, i: usize, orig: &Clip, dt: i64) {
 pub fn resize_right(s: &mut State, i: usize, orig: &Clip, len: u32) {
     let (w0, _) = window(s, orig);
     let end = w0 + to_src(s, orig.source, f64::from(len));
-    // An audio clip without trims plays its whole sample (`fit_audio`): it gets a trim end. An unset pattern or
-    // automation window already means "from the start for the clip's length".
-    let audio = source_kind(s, orig.source) == PickKind::Audio && matches!(orig.source, ClipSource::Channel(_));
+    // An audio clip without trims plays its whole sample (`fit_audio`), and an uncut pattern clip its whole pattern
+    // whatever its length (spec: audio/song-structure.md): resized, either gets a window and plays only that. An
+    // unset automation window already means "from the start for the clip's length".
+    let cuts = match orig.source {
+        ClipSource::Pattern(_) => true,
+        ClipSource::Channel(_) => source_kind(s, orig.source) == PickKind::Audio,
+    };
     if let Some(c) = arr_mut(s).clips.get_mut(i) {
         c.length = len.max(1);
-        if orig.window.is_some() || audio {
+        if orig.window.is_some() || cuts {
             c.window = Some((w0, end));
         }
     }
