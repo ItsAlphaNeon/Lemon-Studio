@@ -59,6 +59,7 @@ mod plugin_scan;
 #[cfg(plugin_windows)]
 mod plugin_window;
 mod plugins;
+mod ppi;
 mod prefs;
 mod preview_track;
 mod project_info;
@@ -638,6 +639,8 @@ impl ApplicationHandler for Shell {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(window) = self.window.clone() else { return };
         let scale = ui_scale(&window) as f32;
+        // The monitor's own scale, for General ▸ Display's PPI ruler (`crate::ppi`).
+        self.app.state.display_scale = window.scale_factor() as f32;
         // A project is loading (spec: ui/project-loading.md §2): presses, wheel turns and drops wait until it is done;
         // releases still go through so nothing stays held.
         let press = match &event {

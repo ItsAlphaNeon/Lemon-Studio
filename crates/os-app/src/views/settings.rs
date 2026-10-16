@@ -48,6 +48,9 @@ pub enum SAct {
     /// A slider declared in `crate::prefs` by its label, with its track's left and width: a press sets it and drags it
     /// (`App::pref_slider_press`), the wheel steps it (`App::pref_slider_wheel`).
     Slider(&'static str, f32, f32),
+    /// General ▸ Display's PPI ruler: a press starts a drag of its end (`App::ppi_press`), the wheel steps it
+    /// (`App::ppi_wheel`).
+    Ppi,
 }
 
 /// The Info page's text boxes: the project's credits (spec: ui/settings.md "Info", flp/events/project-info.md).
@@ -373,6 +376,8 @@ pub enum Row {
     Edit(InfoField, f32),
     /// The Info page's footer: small grey lines at the left, the Reset working time button at the bottom right.
     InfoFooter(Vec<String>),
+    /// General ▸ Display's PPI ruler (`crate::ppi`, `ppi_ruler`).
+    Ppi,
 }
 
 pub struct Group {
@@ -478,9 +483,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         GENERAL => vec![
             Group { note: " (requires a restart to take effect)", ..gf("Display", false, vec![
                 combo("System", 64.0, "Main GUI scaling"),
-                dim("Display PPI", txt("Define 1 inch / 2.54 cm or set display's PPI")),
-                dim("Display PPI", Text("(96 PPI/advised scaling: 100%)".into(), true)),
-                Slider("", 0.25),
+                // spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High visibility
+                // (2026-10-16)".
+                txt("Define 1 inch / 2.54 cm or set display's PPI"),
+                Text(crate::ppi::label(crate::ppi::ppi(s.display_scale), s.display_scale), true),
+                Ppi,
                 combo("Main", 64.0, "Pop-ups scaling"),
                 combo("Main", 64.0, "Toolbars scaling"),
                 combo("Off", 64.0, "Transparent windows"),
@@ -488,7 +495,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Slider("Smoothing", 0.2),
                 combo("Ultrasmooth", 126.0, "Animation refresh rate"),
                 Check2("Force refreshes", true, "Transparent menus", true),
-                Off("Thick lines", true),
+                Check("Thick lines", false),
                 Check("High visibility", false),
                 combo("Off", 146.0, "Colorful waveforms"),
             ]) },
@@ -730,7 +737,7 @@ fn row_h(r: &Row) -> f32 {
         Row::Check(..) | Row::Check2(..) | Row::Off(..) => 21.0,
         Row::Combo(..) | Row::Value(..) | Row::ValueR(..) => 27.0,
         Row::Buttons(..) => 36.0,
-        Row::Slider(..) => 28.0,
+        Row::Slider(..) | Row::Ppi => 28.0,
         Row::List(c, _, n) => (if c.iter().any(|c| !c.0.is_empty()) { 18.0 } else { 0.0 }) + 17.0 * *n as f32 + 10.0,
         Row::Text(_, dim) => if *dim { 16.0 } else { 20.0 },
         Row::Big(_) => 28.0,
@@ -938,6 +945,27 @@ fn check(ui: &mut Ui, key: &'static str, on: bool, x: f32, cy: f32, enabled: boo
     }
 }
 
+/// A declared check that can't be changed now, for a reason other than "not available yet": it shows its state
+/// greyed out, and its hit only shows `hint` (a click and the wheel act as on the page's body).
+fn check_greyed(ui: &mut Ui, key: &'static str, x: f32, cy: f32, hint: &'static str) {
+    let on = crate::prefs::find_check(key).is_some_and(crate::prefs::check);
+    let t = ui.t;
+    let tw = ui.c.text_width(Font::new(13), key);
+    let hr = Rect::new(x - 8.0, cy - 9.0, tw + 26.0, 18.0);
+    ui.hit(hr, Action::Settings(SAct::Body), hint);
+    led(ui, x, cy, on, false);
+    let lh = ui.c.line_height(Font::new(13));
+    ui.c.text(Font::new(13), x + 11.0, (cy - lh / 2.0).round(), t.text, key);
+    grey(ui, hr);
+}
+
+/// Whether General ▸ Display's Thick lines (`crate::prefs::THICK_LINES`) can be changed on a canvas at `scale` (the
+/// effective UI scale): from 200 % (spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines,
+/// High visibility (2026-10-16)").
+pub fn thick_lines_live(scale: f32) -> bool {
+    (scale * 100.0).round() >= 200.0
+}
+
 /// The check mark itself at (x, cy).
 fn led(ui: &mut Ui, x: f32, cy: f32, on: bool, hov: bool) {
     let t = ui.t;
@@ -994,6 +1022,10 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
     let lh = ui.c.line_height(f);
     let ty = (cy - lh / 2.0).round();
     match row {
+        // General ▸ Display's Thick lines works from 200 % scaling: below, greyed out, it says so.
+        Row::Check(k, _) if *k == crate::prefs::THICK_LINES.label && !thick_lines_live(ui.c.scale) => {
+            check_greyed(ui, k, x0 + 10.0, cy, "Thick lines: from 200 % scaling")
+        }
         // A check that is not available yet shows its default, greyed out.
         Row::Check(k, d) => check(ui, k, *d, x0 + 10.0, cy, live(k)),
         Row::Off(k, d) => check(ui, k, *d, x0 + 10.0, cy, false),
@@ -1174,6 +1206,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             paint_row_at(ui, s, group, b, g, y, h, 304.0);
         }
         Row::Folders(list) => folders(ui, list, Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 6.0)),
+        Row::Ppi => ppi_ruler(ui, s, x0, cy),
         Row::Prefer(cur) => prefer(ui, *cur, x0, y, ty),
         Row::Table => table(ui, s, Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 4.0)),
         Row::Dim(name, r) => {
@@ -1489,6 +1522,33 @@ fn table(ui: &mut Ui, s: &State, area: Rect) {
             ui.c.fill_rect(Rect::new(cx.round() + 1.0, fr.y + 4.0, 1.0, fr.h - 8.0), t.text);
         }
     }
+}
+
+/// General ▸ Display's PPI ruler from `x` (the page's left margin), centred a little above `cy` (spec:
+/// ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High visibility (2026-10-16)"): a dark
+/// track as long as 400 device pixels with ticks under it every 100, filled from its left end N device pixels long
+/// (+1 for the rounded end), grey at rest and orange (Lemon: the accent) while the mouse is over the bar or drags it.
+fn ppi_ruler(ui: &mut Ui, s: &State, x: f32, cy: f32) {
+    let t = ui.t;
+    // Logical px per device px.
+    let px = 1.0 / ui.c.scale.max(0.01);
+    let n = crate::ppi::ppi(s.display_scale);
+    let track = Rect::new(x, cy - 6.0, f32::from(crate::ppi::MAX) * px, 6.0);
+    let a = Action::Settings(SAct::Ppi);
+    let hit = Rect::new(track.x - 4.0, track.y - 4.0, track.w + 8.0, 18.0);
+    let hov = ui.hit(hit, a.clone(), "Display PPI: drag, or turn the mouse wheel");
+    let active = hov || ui.held(&a);
+    ui.c.fill_rrect(track, 3.0, t.s(0x161819));
+    for i in 1..=4 {
+        let tx = x + 100.0 * i as f32 * px;
+        ui.c.fill_rect(Rect::new(tx - px, track.bottom() + 2.0, px, 4.0), t.text_dim);
+    }
+    let col = match (active, super::lemon(ui)) {
+        (false, _) => t.tx(0xb9bfc3),
+        (true, false) => t.h(0xffbc40),
+        (true, true) => t.accent,
+    };
+    ui.c.fill_rrect(Rect::new(x, track.y, f32::from(n + 1) * px, track.h), 3.0, col);
 }
 
 /// A slider's track `tr` filled up to `v` (0..=1) and its handle there, centred on `cy`.

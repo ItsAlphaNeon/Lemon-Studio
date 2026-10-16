@@ -339,6 +339,21 @@ pub const CURSORS_SCALING: Combo = Combo {
 pub const LEGACY_SCALING: Combo =
     Combo { key: "legacy_scaling", label: "Legacy scaling", choices: &["Main", "100%", "200%", "300%", "400%"], default: 0 };
 
+/// General ▸ Display: stored and shown only. Lemon Studio redraws its whole window itself each frame, so there is
+/// nothing to force. Spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High visibility
+/// (2026-10-16)".
+pub const FORCE_REFRESHES: Check = Check { key: "force_refreshes", label: "Force refreshes", default: true };
+
+/// General ▸ Display: stored and shown, greyed out while the effective UI scale is under 200 %
+/// (`views::settings::thick_lines_live`). Lemon Studio already draws its lines at the scale's width, so it changes
+/// nothing yet. Spec: as above.
+pub const THICK_LINES: Check = Check { key: "thick_lines", label: "Thick lines", default: false };
+
+/// General ▸ Input: stored and shown only. Lemon Studio has no pen or touch input yet; when it does, these choices are
+/// where it starts. Spec: ui/settings-choices.md "Input: Optimize for (2026-10-16)".
+pub const OPTIMIZE_FOR: Combo =
+    Combo { key: "optimize_for", label: "Optimize for", choices: &["Multi-button mouse", "Pencil", "Multi-touch monitor"], default: 0 };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -376,9 +391,11 @@ pub const CHECKS: &[&Check] = &[
     &FAST_SAMPLE_PREVIEW,
     &AUTO_KEEP_ON_DISK,
     &THREADED_SAMPLE_LOADING,
+    &FORCE_REFRESHES,
+    &THICK_LINES,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &CURSORS_SCALING, &LEGACY_SCALING];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR];
 
 /// The declared value boxes.
 pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BROWSER_PREVIEW_TRACK];
@@ -1033,6 +1050,70 @@ mod tests {
         }
         set_choice(&CURSORS_SCALING, 0);
         set_choice(&LEGACY_SCALING, 0);
+    }
+
+    // spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High visibility (2026-10-16)",
+    // "Input: Optimize for (2026-10-16)"
+    /// Force refreshes (on), Thick lines (off) and Optimize for (Multi-button mouse, of three) have their defaults and
+    /// are kept in the settings file; on the General page Force refreshes toggles and Optimize for lists its choices
+    /// and keeps the one picked.
+    #[test]
+    fn display_and_input_settings() {
+        let s = Store::parse("");
+        assert_eq!((check_in(&s, &FORCE_REFRESHES), check_in(&s, &THICK_LINES), index_in(&s, &OPTIMIZE_FOR)), (true, false, 0));
+        let s = Store::parse("force_refreshes=0\nthick_lines=1\noptimize_for=Multi-touch monitor\n");
+        assert_eq!((check_in(&s, &FORCE_REFRESHES), check_in(&s, &THICK_LINES), index_in(&s, &OPTIMIZE_FOR)), (false, true, 2));
+        assert_eq!(OPTIMIZE_FOR.choices, ["Multi-button mouse", "Pencil", "Multi-touch monitor"]);
+        assert_eq!((find_check("Force refreshes"), find_check("Thick lines")), (Some(&FORCE_REFRESHES), Some(&THICK_LINES)));
+        assert_eq!(find_combo("Optimize for"), Some(&OPTIMIZE_FOR));
+
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::GENERAL);
+        app.paint(&mut c, None);
+        let r = hit_rect(&app, &Action::Settings(SAct::Check(FORCE_REFRESHES.label)));
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(FORCE_REFRESHES.label)), "not greyed out");
+        click(&mut app, &mut c, r);
+        assert!(!check(&FORCE_REFRESHES));
+        assert_eq!(app.state.message.as_deref(), Some("Force refreshes: off"));
+        let combo = |app: &App| {
+            app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == OPTIMIZE_FOR.label)).map(|h| h.rect).expect("the combo works")
+        };
+        let r = combo(&app);
+        click(&mut app, &mut c, r);
+        let labels: Vec<String> = app.state.playlist.popup.as_ref().expect("its menu").items.iter().map(|it| it.label.to_string()).collect();
+        assert_eq!(labels, OPTIMIZE_FOR.choices);
+        let item = hit_rect(&app, &Action::PlPopup(1));
+        click(&mut app, &mut c, item);
+        assert_eq!((choice(&OPTIMIZE_FOR), app.state.message.as_deref()), ("Pencil", Some("Optimize for: Pencil")));
+        set_check(&FORCE_REFRESHES, true);
+        set_choice(&OPTIMIZE_FOR, 0);
+    }
+
+    // spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High visibility (2026-10-16)"
+    /// Thick lines is greyed out while the effective UI scale is under 200 % (a click changes nothing, the hint says
+    /// why) and works from 200 %, the Main GUI scaling chosen or the display's.
+    #[test]
+    fn thick_lines_from_200_percent() {
+        assert!(!settings::thick_lines_live(1.0) && !settings::thick_lines_live(1.75) && !settings::thick_lines_live(1.994));
+        assert!(settings::thick_lines_live(2.0) && settings::thick_lines_live(2.5) && settings::thick_lines_live(4.0));
+        let key = Action::Settings(SAct::Check(THICK_LINES.label));
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::GENERAL);
+        app.paint(&mut c, None);
+        assert!(!app.hits.iter().any(|h| h.action == key), "greyed out at 100 %");
+        let greyed = app.hits.iter().rev().find(|h| h.hint == "Thick lines: from 200 % scaling").map(|h| h.rect).expect("its hint");
+        click(&mut app, &mut c, greyed);
+        assert!(!check(&THICK_LINES), "a click changes nothing");
+        let Ok(mut c) = Canvas::new(3840, 2160, 2.0) else { return };
+        app.invalidate();
+        app.paint(&mut c, None);
+        let r = hit_rect(&app, &key);
+        click(&mut app, &mut c, r);
+        assert!(check(&THICK_LINES), "live at 200 %");
+        assert_eq!(app.state.message.as_deref(), Some("Thick lines: on"));
+        set_check(&THICK_LINES, false);
     }
 
     // spec: ui/settings-choices.md "Input: Vertical and Horizontal scrolling speed (2026-10-16)"
