@@ -45,6 +45,9 @@ pub enum SAct {
     Genres(f32, f32),
     /// A working value box (`LIVE_NUMBERS`) by its label: the mouse wheel changes it (`App::settings_number`).
     Number(&'static str),
+    /// A slider declared in `crate::prefs` by its label, with its track's left and width: a press sets it and drags it
+    /// (`App::pref_slider_press`), the wheel steps it (`App::pref_slider_wheel`).
+    Slider(&'static str, f32, f32),
 }
 
 /// The Info page's text boxes: the project's credits (spec: ui/settings.md "Info", flp/events/project-info.md).
@@ -465,7 +468,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 ]),
                 g("Mixer", vec![
                     combo("24-point sinc", 122.0, "Resampling quality"),
-                    Value("---".into(), "Browser preview track"),
+                    Value(crate::prefs::number_text(&crate::prefs::BROWSER_PREVIEW_TRACK), "Browser preview track"),
                     Value("---".into(), "Metronome track"),
                     Check("Play truncated notes on transport", true),
                     Check("Reset plugins on transport", false),
@@ -1065,19 +1068,19 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 x += w + 8.0;
             }
         }
+        // A slider declared in `crate::prefs` (General ▸ Input's scrolling speeds): its handle sits at its value (no
+        // number shows); a click or a drag sets it (`App::pref_slider_press`), the wheel steps it.
+        Row::Slider(label, _) if crate::prefs::find_slider(label).is_some() => {
+            let Some(sl) = crate::prefs::find_slider(label) else { return };
+            let v = f32::from(crate::prefs::slider(sl)) / f32::from(sl.max.max(1));
+            let tr = Rect::new(x0, cy - 2.0, 150.0, 4.0);
+            let hov = ui.hit(Rect::span(tr.x - 9.0, tr.right() + 9.0, cy - 9.0, cy + 9.0), Action::Settings(SAct::Slider(label, tr.x, tr.w)), "");
+            slider_track(ui, tr, cy, v);
+            ui.c.text(f, tr.right() + 12.0, ty, if hov { t.glyph } else { t.text }, label);
+        }
         Row::Slider(label, v) => {
             let tr = Rect::new(x0, cy - 2.0, 150.0, 4.0);
-            if super::lemon(ui) {
-                ui.c.fill_rrect(tr, 2.0, t.s(0x161819));
-                ui.c.fill_rrect(Rect::new(tr.x, tr.y, tr.w * v, tr.h), 2.0, t.accent);
-            } else {
-                ui.c.fill_rect(tr, t.s(0x161819));
-                ui.c.fill_rect(Rect::new(tr.x, tr.y, tr.w * v, tr.h), t.h(0xc8312e));
-            }
-            let hx = tr.x + tr.w * v;
-            ui.c.fill_circle(hx, cy, 8.0, t.s(0x111213));
-            ui.c.fill_circle(hx, cy, 7.0, t.s(0x4a4d50));
-            ui.c.fill_rect(Rect::new(hx - 0.5, cy - 6.0, 1.0, 5.0), t.s(0x1a1b1c));
+            slider_track(ui, tr, cy, *v);
             let lw = ui.c.text(f, tr.right() + 12.0, ty, t.text, label);
             let r = Rect::span(tr.x - 9.0, tr.right() + 14.0 + lw, cy - 9.0, cy + 9.0);
             ui.off(r, name_of(label, group));
@@ -1486,6 +1489,22 @@ fn table(ui: &mut Ui, s: &State, area: Rect) {
             ui.c.fill_rect(Rect::new(cx.round() + 1.0, fr.y + 4.0, 1.0, fr.h - 8.0), t.text);
         }
     }
+}
+
+/// A slider's track `tr` filled up to `v` (0..=1) and its handle there, centred on `cy`.
+fn slider_track(ui: &mut Ui, tr: Rect, cy: f32, v: f32) {
+    let t = ui.t;
+    if super::lemon(ui) {
+        ui.c.fill_rrect(tr, 2.0, t.s(0x161819));
+        ui.c.fill_rrect(Rect::new(tr.x, tr.y, tr.w * v, tr.h), 2.0, t.accent);
+    } else {
+        ui.c.fill_rect(tr, t.s(0x161819));
+        ui.c.fill_rect(Rect::new(tr.x, tr.y, tr.w * v, tr.h), t.h(0xc8312e));
+    }
+    let hx = tr.x + tr.w * v;
+    ui.c.fill_circle(hx, cy, 8.0, t.s(0x111213));
+    ui.c.fill_circle(hx, cy, 7.0, t.s(0x4a4d50));
+    ui.c.fill_rect(Rect::new(hx - 0.5, cy - 6.0, 1.0, 5.0), t.s(0x1a1b1c));
 }
 
 fn value_red(ui: &mut Ui, b: Rect, v: &str) {

@@ -771,6 +771,8 @@ pub enum Drag {
     /// per pixel moved), spec: ui/dialogs.md.
     Dialog { dx: f32, dy: f32 },
     DialogBar { y0: f32, s0: f32, ratio: f32 },
+    /// A slider declared in `crate::prefs` follows the mouse along its track (`w` wide from `x`).
+    PrefSlider { label: &'static str, x: f32, w: f32 },
 }
 
 pub struct State {
@@ -3485,11 +3487,14 @@ impl App {
     fn settings_number(&mut self, label: &str, delta: i32) -> Option<String> {
         // The value boxes declared in `crate::prefs` (General ▸ Undo history ▸ Maximum undo levels).
         if let Some(n) = crate::prefs::find_number(label) {
-            let v = (i32::from(crate::prefs::number(n)) + delta).clamp(i32::from(n.min), i32::from(n.max)) as u16;
+            // Audio ▸ Browser preview track offers "---" and the open project's insert tracks; one past them comes
+            // back in range (spec: ui/settings-choices.md "Mixer: Browser preview track").
+            let max = if n == &crate::prefs::BROWSER_PREVIEW_TRACK { n.max.min(crate::mixer::inserts(&self.state)) } else { n.max };
+            let v = (i32::from(crate::prefs::number(n)) + delta).clamp(i32::from(n.min), i32::from(max.max(n.min))) as u16;
             crate::prefs::set_number(n, v);
             crate::history::trim(&mut self.state);
             self.invalidate();
-            return Some(format!("{}: {v}", n.label));
+            return Some(format!("{}: {}", n.label, crate::prefs::number_text(n)));
         }
         let (lo, hi) = views::settings::number_range(label)?;
         let (beats, steps) = self.state.project.bar();
@@ -3562,6 +3567,7 @@ impl App {
             SAct::Combo(views::settings::DEFAULT_TEMPLATE, x, y) => return self.template_menu(x, y),
             SAct::Combo(label, x, y) if crate::prefs::find_combo(label).is_some() => return self.pref_menu(label, x, y),
             SAct::Combo(label, x, y) => return self.audio_menu(label, x, y),
+            SAct::Slider(label, x, w) => return self.pref_slider_press(label, x, w),
             SAct::Tab(i) => {
                 st.tab = i;
                 st.scroll = 0.0;
@@ -3995,6 +4001,7 @@ impl App {
                     }
                 }
                 Drag::SongPosHold { .. } => {}
+                Drag::PrefSlider { label, x: x0, w } => self.pref_slider_drag(label, x0, w),
                 Drag::Tempo { y0, t0, step } => {
                     // Rounded to the box's thousandths, so repeated steps don't drift.
                     let t = self.set_tempo(((t0 + f64::from(y0 - y).round() * step) * 1000.0).round() / 1000.0);
@@ -5008,6 +5015,14 @@ impl App {
             self.state.plugdb.top = (top.max(0.0) as usize).min(n.saturating_sub(views::settings::TABLE_ROWS));
             return None;
         }
+        // General ▸ Input's scrolling speeds: a notch moves a slider by its step, up for more (spec:
+        // ui/settings-choices.md "Input: Vertical and Horizontal scrolling speed").
+        if let Some(Action::Settings(views::settings::SAct::Slider(label, ..))) = area {
+            if dy + dx != 0.0 {
+                self.pref_slider_wheel(label, if dy + dx > 0.0 { 1 } else { -1 });
+            }
+            return None;
+        }
         // Project ▸ a time division's value box: one per notch, up for more (spec: ui/settings-choices.md "Set as time
         // division").
         if let Some(Action::Settings(views::settings::SAct::Number(label))) = area {
@@ -5055,6 +5070,8 @@ impl App {
         }
         if let Some(Action::Scrollbar(t)) = area {
             let step = if t == Scroll::PianoY { self.state.piano.row_h * 3.0 } else { 60.0 };
+            // An editor's bar scrolls at the scrolling speeds (`crate::scroll_speed`); the picker list keeps its step.
+            let (dx, dy) = if shift || t == Scroll::PlPick { (dx, dy) } else { crate::scroll_speed::scaled(dx, dy) };
             self.scroll_set(t, self.scroll_get(t) - (dy + dx) * step);
             return Some(scroll_win(t));
         }
@@ -5078,6 +5095,7 @@ impl App {
             if shift {
                 p.scroll_x = (p.scroll_x - (dy + dx) * 120.0 / g.ppt).max(0.0);
             } else {
+                let (dx, dy) = crate::scroll_speed::scaled(dx, dy);
                 p.scroll_y -= dy * row * 3.0;
                 p.scroll_x = (p.scroll_x - dx * 120.0 / g.ppt).max(0.0);
             }
@@ -5125,7 +5143,7 @@ impl App {
         }
         let rack_area = self.top_hit(x, y).is_some_and(|h| h.win == Some(Win::ChannelRack));
         if rack_area {
-            let (rx, ry) = if shift { (dy + dx, 0.0) } else { (dx, dy) };
+            let (rx, ry) = if shift { (dy + dx, 0.0) } else { crate::scroll_speed::scaled(dx, dy) };
             self.scroll_set(Scroll::RackY, self.scroll_get(Scroll::RackY) - ry * views::rack::ROW_H);
             self.scroll_set(Scroll::RackX, self.scroll_get(Scroll::RackX) - rx * 4.0 * views::rack::STEP_W);
             return Some(Win::ChannelRack);
@@ -5138,10 +5156,12 @@ impl App {
         );
         let s = &mut self.state;
         let (dx, dy) = if shift { (dy, dx) } else { (dx, dy) };
+        // What the playlist and the mixer scroll by (`crate::scroll_speed`); zooms take the wheel's own steps.
+        let (sx, sy) = if shift { (dx, dy) } else { crate::scroll_speed::scaled(dx, dy) };
         let row_h = s.playlist.row_h;
         match area {
             Some(Action::Fader(_) | Action::Mix(_) | Action::MixerArea) => {
-                s.mixer_scroll = (s.mixer_scroll - (dy + dx) * 44.0).max(0.0);
+                s.mixer_scroll = (s.mixer_scroll - (sy + sx) * 44.0).max(0.0);
                 Some(Win::Mixer)
             }
             // Alt+wheel anywhere in the playlist: track height (spec: ui/playlist.md §3, §6).
@@ -5166,12 +5186,12 @@ impl App {
                 None
             }
             Some(Action::PlHeader(_) | Action::PlLed(_) | Action::PlGroupArrow(_)) => {
-                s.playlist_scroll.1 = (s.playlist_scroll.1 - dy * row_h).max(0.0);
+                s.playlist_scroll.1 = (s.playlist_scroll.1 - sy * row_h).max(0.0);
                 Some(Win::Playlist)
             }
             Some(Action::PlaylistArea) => {
-                s.playlist_scroll.0 = (s.playlist_scroll.0 - dx * 60.0).max(0.0);
-                s.playlist_scroll.1 = (s.playlist_scroll.1 - dy * row_h).max(0.0);
+                s.playlist_scroll.0 = (s.playlist_scroll.0 - sx * 60.0).max(0.0);
+                s.playlist_scroll.1 = (s.playlist_scroll.1 - sy * row_h).max(0.0);
                 Some(Win::Playlist)
             }
             _ => None,
