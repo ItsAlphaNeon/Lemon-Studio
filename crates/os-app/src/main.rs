@@ -54,6 +54,7 @@ mod plugin_scan;
 mod plugin_window;
 mod plugins;
 mod prefs;
+mod project_info;
 mod project_plugins;
 mod presets;
 mod misc;
@@ -800,8 +801,8 @@ impl ApplicationHandler for Shell {
                         return;
                     }
                 }
-                // A dialog takes repeats too (typing, moving through its list).
-                if pressed && (!event.repeat || self.app.modal_open()) {
+                // A dialog takes repeats too (typing, moving through its list), and so does an Info box being edited.
+                if pressed && (!event.repeat || self.app.modal_open() || self.app.info_editing()) {
                     // macOS: Option and Command change the character a key types (Option+S is "ß"); shortcuts go by the
                     // key itself.
                     #[cfg(target_os = "macos")]
@@ -1053,6 +1054,7 @@ fn screenshot(args: &[String]) {
     let mut menu: Option<usize> = None;
     let mut plugin_menu: Option<plugin_menu::Target> = None;
     let mut settings: Option<usize> = None;
+    let mut info_edit: Option<usize> = None;
     let mut lane: Option<usize> = None;
     let mut lane_menu = false;
     let mut pans: Option<Vec<f32>> = None;
@@ -1104,6 +1106,8 @@ fn screenshot(args: &[String]) {
             "--lane" => lane = it.next().and_then(|v| v.parse().ok()),
             "--pans" => pans = it.next().map(|v| v.split(',').filter_map(|p| p.parse().ok()).collect()),
             "--settings" => settings = it.next().and_then(|v| v.parse().ok()),
+            // With --settings 7: that Info box (0 title .. 4 web link) being edited.
+            "--info-edit" => info_edit = it.next().and_then(|v| v.parse().ok()),
             "--lane-menu" => lane_menu = true,
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
             "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
@@ -1191,6 +1195,10 @@ fn screenshot(args: &[String]) {
     app.load_plugins();
     if let Some(t) = settings {
         app.open_settings(t);
+    }
+    if let Some(i) = info_edit {
+        use views::settings::InfoField as F;
+        app.info_act([F::Title, F::Author, F::Genre, F::Comments, F::Url][i.min(4)]);
     }
     app.state.lane_menu = lane_menu;
     // "--pans 0.2,0.8": mixer pan knob values for inserts 1.. (normalised), to check the value arcs.

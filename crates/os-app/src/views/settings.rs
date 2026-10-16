@@ -39,6 +39,63 @@ pub enum SAct {
     Plug(Plug),
     /// A working combo (`LIVE_COMBOS`) by its label, with its box's bottom left (where its menu opens).
     Combo(&'static str, f32, f32),
+    /// An Info page text box: click to edit (`App::info_act`).
+    Info(InfoField),
+}
+
+/// The Info page's text boxes: the project's credits (spec: ui/settings.md "Info", flp/events/project-info.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfoField {
+    Title,
+    Author,
+    Genre,
+    /// Several lines: Enter starts a new one.
+    Comments,
+    Url,
+}
+
+impl InfoField {
+    pub fn multiline(self) -> bool {
+        self == InfoField::Comments
+    }
+
+    pub fn get(self, i: &os_model::ProjectInfo) -> &Option<String> {
+        match self {
+            InfoField::Title => &i.title,
+            InfoField::Author => &i.author,
+            InfoField::Genre => &i.genre,
+            InfoField::Comments => &i.comments,
+            InfoField::Url => &i.url,
+        }
+    }
+
+    pub fn get_mut(self, i: &mut os_model::ProjectInfo) -> &mut Option<String> {
+        match self {
+            InfoField::Title => &mut i.title,
+            InfoField::Author => &mut i.author,
+            InfoField::Genre => &mut i.genre,
+            InfoField::Comments => &mut i.comments,
+            InfoField::Url => &mut i.url,
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            InfoField::Title => "Project title: the window caption shows it instead of the file name",
+            InfoField::Author => "Project author",
+            InfoField::Genre => "Project genre",
+            InfoField::Comments => "Project comments",
+            InfoField::Url => "Project web link",
+        }
+    }
+}
+
+/// The Info box that has the keyboard: its field and the text being typed (the file dialog's text field: caret,
+/// selection). Enter, a click elsewhere or another tab writes it into the project; Esc drops it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InfoEdit {
+    pub field: InfoField,
+    pub text: crate::dialog::Field,
 }
 
 /// Plugin manager controls. Rows count in `plugin_db::search_dirs` order (folders) or in `Db::rows` (table).
@@ -80,6 +137,8 @@ pub struct SettingsUi {
     /// Theme presets (name, `.flstheme` text): built-ins (spec ui/theme-presets.md), then the user's theme folder.
     pub themes: Vec<(String, String)>,
     pub preset: usize,
+    /// The Info page's box being edited.
+    pub info_edit: Option<InfoEdit>,
     /// The Plugins page shows the experimental native host toggles: `os_native::settings_shown()` at startup.
     pub native: bool,
 }
@@ -254,6 +313,8 @@ pub enum Row {
     Prefer(Prefer),
     /// The plugin table with its count and Find box (reads `State::plugdb`).
     Table,
+    /// An Info text box: field, width (0 = to the panel's right edge). The Genre box has a ▸ after it.
+    Edit(InfoField, f32),
 }
 
 pub struct Group {
@@ -516,29 +577,29 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]),
             gf("Playlist", false, vec![Check2("Automatic crossfades", true, "Enable automatic crossfades in new projects", true)]),
         ],
+        // The credits are edited in place (spec: ui/settings.md "Info"; events 194 / 207 / 206 / 195 / 197,
+        // flp/events/project-info.md). The genre list, "Show info on opening" and the working time (the start date, the
+        // time spent, Reset working time) have no spec yet: greyed or left out.
         INFO => {
-            let i = &s.project.info;
-            let or = |v: &Option<String>| v.clone().unwrap_or_default();
             let clips: usize = s.project.arrangements.iter().map(|a| a.clips.len()).sum();
             let notes: usize = s.project.patterns.iter().map(|p| p.notes.len()).sum();
-            let mut rows = vec![
+            vec![g("Project credits", vec![
                 Text("Title".into(), true),
-                Big(or(&i.title)),
+                pair(Edit(InfoField::Title, 288.0), Off("Show info on opening", false)),
                 Text("Author".into(), true),
-                Big(or(&i.author)),
+                Edit(InfoField::Author, 0.0),
                 Text("Genre".into(), true),
-                Big(or(&i.genre)),
+                Edit(InfoField::Genre, 288.0),
                 Text("Comments".into(), true),
-            ];
-            let comments = or(&i.comments);
-            let lines: Vec<String> = comments.lines().map(String::from).collect();
-            rows.push(List(vec![("", 0.0)], lines.into_iter().map(|l| vec![l]).collect(), 14));
-            rows.push(Text("Web link".into(), true));
-            rows.push(Big(or(&i.url)));
-            rows.push(Gap(8.0));
-            rows.push(txt(format!("Channels: {}, Mixer Tracks: {}", s.project.channels.len(), s.project.mixer.len())));
-            rows.push(txt(format!("Arrangements: {}, PL clips: {clips}, Notes: {notes}", s.project.arrangements.len())));
-            vec![g("Project credits", rows)]
+                Edit(InfoField::Comments, 0.0),
+                Text("Web link".into(), true),
+                Edit(InfoField::Url, 0.0),
+                Gap(8.0),
+                // FL's footer also counts "Plugins" and "PL tracks"; what those count is not in the spec: left out.
+                txt(format!("Channels: {}, Mixer Tracks: {}", s.project.channels.len(), s.project.mixer.len())),
+                txt(format!("Arrangements: {}, PL clips: {clips}, Notes: {notes}", s.project.arrangements.len())),
+                Buttons(vec![("Reset working time", 150.0)]),
+            ])]
         }
         DEBUG => {
             let mut lines = vec![
@@ -598,6 +659,7 @@ fn row_h(r: &Row) -> f32 {
         Row::Folders(f) => 21.0 * f.len().max(1) as f32 + 10.0,
         Row::Prefer(_) => 27.0,
         Row::Table => 4.0 + 18.0 + TABLE_ROW_H * TABLE_ROWS as f32 + 4.0 + 34.0,
+        Row::Edit(f, _) => if f.multiline() { COMMENT_LINE_H * COMMENT_LINES as f32 + 12.0 } else { 28.0 },
     }
 }
 
@@ -1026,7 +1088,123 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             ui.off(b, name);
             grey(ui, b);
         }
+        Row::Edit(field, w) => {
+            let w = if *w > 0.0 { *w } else { g.right() - 8.0 - (x0 - 4.0) };
+            let b = Rect::new(x0 - 4.0, y + 2.0, w, h - 4.0);
+            info_box(ui, s, *field, b);
+            // The genre list (FL's ▸) has no spec yet.
+            if *field == InfoField::Genre {
+                let a = Rect::new(b.right() + 4.0, b.y, 22.0, b.h);
+                ui.off(a, "Genre list");
+                kit::combo(ui.c, t, a, "", f, kit::State::NORMAL);
+                grey(ui, a);
+            }
+        }
     }
+}
+
+/// Lines the Comments box shows, and their pitch.
+const COMMENT_LINES: usize = 24;
+const COMMENT_LINE_H: f32 = 17.0;
+
+/// An Info text box: the project's text, or the text being typed with its caret or selection. A one-line box scrolls
+/// sideways to keep the caret in view; Comments wraps its lines at the box's width and, while edited, scrolls to the
+/// caret's line.
+fn info_box(ui: &mut Ui, s: &State, field: InfoField, b: Rect) {
+    let t = ui.t;
+    let f = LABEL;
+    let lh = ui.c.line_height(f);
+    let edit = s.settings.info_edit.as_ref().filter(|e| e.field == field).map(|e| &e.text);
+    let hint = match (edit.is_some(), field.multiline()) {
+        (false, _) => field.hint(),
+        (true, false) => "Enter accepts, Esc cancels",
+        (true, true) => "Enter starts a new line; a click elsewhere accepts, Esc cancels",
+    };
+    let hov = ui.hit(b, Action::Settings(SAct::Info(field)), hint);
+    let well = if edit.is_some() { t.s(0x141516) } else if hov { t.s(0x1d1f21) } else { t.s(0x191b1c) };
+    kit::sunken(ui.c, t, b, well);
+    let shown = field.get(&s.project.info).as_deref().unwrap_or("");
+    let (text, caret, all) = match edit {
+        Some(e) => (e.text.as_str(), Some(e.caret), e.all && !e.text.is_empty()),
+        None => (shown, None, false),
+    };
+    let sel = if super::lemon(ui) { os_theme::design::lemon::COLORED_DARK } else { t.a(0x2d5a8c) };
+    let inner = Rect::new(b.x + 6.0, b.y + 3.0, b.w - 12.0, b.h - 6.0);
+    ui.c.push_clip(inner);
+    if !field.multiline() {
+        let caret_x = caret.map_or(0.0, |c| ui.c.text_width(f, &text[..byte_at(text, c)]));
+        let x = inner.x - (caret_x - (inner.w - 2.0)).max(0.0);
+        let y = (b.cy() - lh / 2.0).round();
+        if all {
+            let w = ui.c.text_width(f, text);
+            ui.c.fill_rect(Rect::new(x - 1.0, y, w + 2.0, lh), sel);
+        }
+        ui.c.text(f, x, y, t.text, text);
+        if caret.is_some() && !all {
+            ui.c.fill_rect(Rect::new((x + caret_x).round(), y, 1.0, lh), t.text);
+        }
+    } else {
+        let lines = wrap(ui, f, text, inner.w - 2.0);
+        // The caret's line: the last one starting at or before it.
+        let at = caret.map(|c| lines.iter().rposition(|&(start, _)| start <= c).unwrap_or(0));
+        let top = at.map_or(0, |l| (l + 1).saturating_sub(COMMENT_LINES));
+        for (i, &(start, n)) in lines.iter().enumerate().skip(top).take(COMMENT_LINES) {
+            let y = inner.y + 1.0 + (i - top) as f32 * COMMENT_LINE_H + ((COMMENT_LINE_H - lh) / 2.0).round();
+            let line = &text[byte_at(text, start)..byte_at(text, start + n)];
+            if all {
+                let w = ui.c.text_width(f, line);
+                ui.c.fill_rect(Rect::new(inner.x - 1.0, y, w + 2.0, lh), sel);
+            }
+            ui.c.text(f, inner.x, y, t.text, line);
+            if let (Some(c), Some(l)) = (caret, at) {
+                if l == i && !all {
+                    let cx = ui.c.text_width(f, &text[byte_at(text, start)..byte_at(text, c)]);
+                    ui.c.fill_rect(Rect::new((inner.x + cx).round(), y, 1.0, lh), t.text);
+                }
+            }
+        }
+    }
+    ui.c.pop_clip();
+}
+
+/// Byte offset of character `i` in `s` (its length past the end).
+fn byte_at(s: &str, i: usize) -> usize {
+    s.char_indices().nth(i).map_or(s.len(), |(b, _)| b)
+}
+
+/// The lines `text` shows in `w` px: (first character, characters) of each, in characters. A line longer than `w`
+/// breaks after its last space that fits, else where it is full; the line break itself belongs to no line.
+fn wrap(ui: &mut Ui, f: Font, text: &str, w: f32) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut base = 0;
+    for para in text.split('\n') {
+        let chars: Vec<char> = para.chars().collect();
+        let mut start = 0;
+        loop {
+            let (mut x, mut end, mut space) = (0.0, start, None);
+            while end < chars.len() {
+                let cw = ui.c.text_width(f, chars[end].encode_utf8(&mut [0; 4]));
+                if x + cw > w && end > start {
+                    break;
+                }
+                x += cw;
+                end += 1;
+                if chars[end - 1] == ' ' {
+                    space = Some(end);
+                }
+            }
+            if end < chars.len() {
+                end = space.unwrap_or(end);
+            }
+            out.push((base + start, end - start));
+            if end >= chars.len() {
+                break;
+            }
+            start = end;
+        }
+        base += chars.len() + 1;
+    }
+    out
 }
 
 /// A list frame (lists, the folder list, the plugin table).
