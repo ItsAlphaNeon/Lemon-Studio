@@ -195,6 +195,15 @@ pub const TYPING_PRIORITY_OFF: Check =
 /// one opened earliest (`Plugins::open_window`). Spec: as above.
 pub const LIMIT_EDITORS: Check = Check { key: "limit_plugin_editors", label: "Limit the number of open plugin editors", default: true };
 
+/// General ▸ Miscellaneous: at start, a borderless window centred on the primary monitor shows the logo mark until the
+/// main window shows (`crate::splash`). A program setting, read at start. Spec: ui/settings-choices.md "Miscellaneous:
+/// naming, detached plugins and startup".
+pub const SHOW_SPLASH: Check = Check { key: "show_startup_splash", label: "Show startup splash screen", default: true };
+
+/// General ▸ Miscellaneous: stored and shown only. Lemon Studio has no startup sound (and does not use FL's); if it ever
+/// gets one, this check silences it. Spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
+pub const SILENT_STARTUP: Check = Check { key: "silent_startup", label: "Silent startup", default: false };
+
 /// General ▸ Miscellaneous: the project Lemon Studio starts with when no project file is passed to it
 /// (`App::startup_project`). Spec: ui/settings-choices.md, as above.
 pub const STARTUP_PROJECT: Combo =
@@ -221,6 +230,8 @@ pub const CHECKS: &[&Check] = &[
     &DETACHED_WITH_MAIN,
     &TYPING_PRIORITY_OFF,
     &LIMIT_EDITORS,
+    &SHOW_SPLASH,
+    &SILENT_STARTUP,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT];
