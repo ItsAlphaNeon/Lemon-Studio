@@ -210,6 +210,11 @@ pub struct RackUi {
     pub locked: BTreeSet<usize>,
     /// The channel the last solo click soloed.
     pub soloed: Option<usize>,
+    /// Mute states (`enabled` per row) from before the first solo: what unsolo puts back when "Restore previous
+    /// state after solo" is on.
+    pub pre_solo: Option<Vec<bool>>,
+    /// The current pattern at the last tick (`None` = not yet seen), to notice a switch ([`App::pattern_tick`]).
+    pub pattern_seen: Option<u16>,
     /// Name button width in percent (§17).
     pub name_pct: u32,
     pub show_mixer: bool,
@@ -249,6 +254,8 @@ impl Default for RackUi {
             zipped: BTreeSet::new(),
             locked: BTreeSet::new(),
             soloed: None,
+            pre_solo: None,
+            pattern_seen: None,
             name_pct: 100,
             show_mixer: true,
             colorful: false,
@@ -294,6 +301,7 @@ impl RackUi {
             g.members = set(&g.members);
         }
         self.soloed = self.soloed.and_then(m);
+        self.pre_solo = None; // rows renumbered: unsolo turns everything on
         self.loop_len = self.loop_len.iter().filter_map(|(&r, &l)| m(r).map(|n| (n, l))).collect();
         if let Some(f) = self.fill.as_mut() {
             match m(f.row) {
@@ -562,22 +570,59 @@ pub fn gradient(s: &mut State) {
     }
 }
 
-/// Ctrl / Alt + click on a LED (§10): solo this channel; the same click again on the soloed channel unmutes all.
-/// Locked channels keep their state.
+/// Ctrl / Alt + click on a LED (§10): solo this channel; the same click again on the soloed channel unmutes all, or,
+/// with "Restore previous state after solo" on, puts back the states from before the first solo (a solo moved to
+/// another channel keeps them; spec: ui/settings-choices.md "Miscellaneous"). Locked channels keep their state.
 pub fn solo(s: &mut State, r: usize) {
-    let n = s.project.channels.len();
     let locked = s.rack.locked.clone();
-    let soloed_now = s.project.channels.get(r).is_some_and(|c| c.enabled)
-        && (0..n).filter(|&i| i != r && !locked.contains(&i)).all(|i| !s.project.channels[i].enabled);
+    let soloed_now = solo_of(s, r);
+    // A solo still in effect (the last solo click's shape, untouched since) keeps the states saved when it started.
+    let in_solo = s.rack.soloed.is_some_and(|a| solo_of(s, a));
+    if !soloed_now && !in_solo {
+        s.rack.pre_solo = Some(s.project.channels.iter().map(|c| c.enabled).collect());
+    }
+    let back = if soloed_now { s.rack.pre_solo.take().filter(|_| in_solo && crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO)) } else { None };
     for (i, c) in s.project.channels.iter_mut().enumerate() {
-        if i == r {
-            c.enabled = true;
-        } else if !locked.contains(&i) {
-            c.enabled = soloed_now;
+        if locked.contains(&i) {
+            if i == r {
+                c.enabled = true;
+            }
+        } else if let Some(b) = &back {
+            c.enabled = b.get(i).copied().unwrap_or(true);
+        } else {
+            c.enabled = i == r || soloed_now;
         }
     }
     s.rack.soloed = (!soloed_now).then_some(r);
     s.piano.dirty = true;
+}
+
+/// "Select first channel with notes when the pattern changes" (spec: ui/settings-choices.md "Miscellaneous"): run on
+/// every tick and before each frame (`App::follow_settings`), so every way of switching pattern counts (numpad - / +, the pattern picker and box, the
+/// playlist...). On a switch, the lowest-numbered channel with notes or steps in the new pattern becomes the only
+/// selected channel and the focused one; a pattern without any (also one just made with "+") leaves the selection
+/// alone. A new or opened project is not a switch.
+impl App {
+    pub(crate) fn pattern_tick(&mut self) {
+        let now = self.state.pattern;
+        let seen = self.state.rack.pattern_seen.replace(now);
+        if seen.is_none_or(|p| p == now) || !crate::prefs::check(&crate::prefs::SELECT_FIRST_CHANNEL) {
+            return;
+        }
+        let s = &self.state;
+        let Some(p) = s.project.pattern(now) else { return };
+        let Some(r) = s.project.channels.iter().position(|c| p.notes.iter().any(|n| n.channel == c.index)) else { return };
+        self.state.rack.select_only(r);
+        self.focus_channel(r);
+        self.invalidate();
+    }
+}
+
+/// Channel `r` is the only unlocked channel on.
+fn solo_of(s: &State, r: usize) -> bool {
+    let locked = &s.rack.locked;
+    s.project.channels.get(r).is_some_and(|c| c.enabled)
+        && s.project.channels.iter().enumerate().all(|(i, c)| i == r || locked.contains(&i) || !c.enabled)
 }
 
 pub fn toggle_mute(s: &mut State, r: usize) {
@@ -2019,5 +2064,96 @@ mod tests {
         assert_eq!(n.position / 24, 4, "time shift stays inside its step");
         assert_eq!(Tab::Vel.text(&Note::step(0, 0), 24), "Velocity 78%");
         assert_eq!(key_name(60), "C5");
+    }
+
+    /// "Restore previous state after solo" (spec: ui/settings-choices.md "Miscellaneous"), as measured in the channel
+    /// rack, the playlist and the mixer: mute B, solo A (the second time moving the solo on to C), unsolo. Off:
+    /// everything on; on: the states from before the first solo (B muted). A locked channel keeps its state.
+    #[test]
+    fn restore_previous_state_after_solo() {
+        use crate::prefs::{set_check, RESTORE_AFTER_SOLO};
+        for on in [false, true] {
+            set_check(&RESTORE_AFTER_SOLO, on);
+            for moved in [false, true] {
+                let what = format!("check {}, solo {}", if on { "on" } else { "off" }, if moved { "moved" } else { "kept" });
+                let (a, b, c) = (0, 1, 2);
+                let want = |i: usize| !(on && i == b);
+                let mut app = App::new(None);
+                app.state.project = crate::app::test_project();
+                let s = &mut app.state;
+
+                // Channel rack (Ctrl+click on the LEDs); channel 5 is locked and muted.
+                toggle_mute(s, b);
+                toggle_mute(s, 4);
+                toggle_lock(s, 4);
+                solo(s, a);
+                assert!(s.project.channels.iter().enumerate().all(|(i, ch)| ch.enabled == (i == a)), "rack solo, {what}");
+                if moved {
+                    solo(s, c);
+                    assert!(s.project.channels.iter().enumerate().all(|(i, ch)| ch.enabled == (i == c)), "rack solo moved, {what}");
+                }
+                solo(s, if moved { c } else { a });
+                let got: Vec<bool> = s.project.channels.iter().map(|ch| ch.enabled).collect();
+                assert_eq!(got, (0..5).map(|i| i != 4 && want(i)).collect::<Vec<_>>(), "rack, {what}");
+
+                // Playlist tracks.
+                let tracks = |s: &mut State| crate::playlist::arr_mut(s).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
+                crate::playlist::toggle_track(s, b as u16);
+                crate::playlist::toggle_solo(s, a as u16);
+                if moved {
+                    crate::playlist::toggle_solo(s, c as u16);
+                    assert!(tracks(s).iter().enumerate().all(|(i, &on)| on == (i == c)), "playlist solo moved, {what}");
+                }
+                crate::playlist::toggle_solo(s, if moved { c } else { a } as u16);
+                assert!(tracks(s).iter().enumerate().all(|(i, &on)| on == want(i)), "playlist, {what}");
+
+                // Mixer inserts (right-click on the LEDs): inserts 1, 2 and 3 are A, B and C.
+                crate::mixer::track_mut(s, 2).expect("insert 2").enabled = false;
+                crate::mixer::solo(s, 1);
+                if moved {
+                    crate::mixer::solo(s, 3);
+                    assert!(s.project.mixer.iter().all(|m| m.enabled == matches!(m.index, 0 | 3)), "mixer solo moved, {what}");
+                }
+                crate::mixer::solo(s, if moved { 3 } else { 1 });
+                assert!(s.project.mixer.iter().all(|m| m.enabled == (!on || m.index != 2)), "mixer, {what}");
+            }
+        }
+        set_check(&RESTORE_AFTER_SOLO, false);
+    }
+
+    /// "Select first channel with notes when the pattern changes" (spec: ui/settings-choices.md "Miscellaneous"): on,
+    /// switching pattern selects (only) the lowest-numbered channel with notes or steps in it; a pattern without any
+    /// leaves the selection alone. Off: the selection stays.
+    #[test]
+    fn select_first_channel_with_notes_when_the_pattern_changes() {
+        use crate::prefs::{set_check, SELECT_FIRST_CHANNEL};
+        for on in [false, true] {
+            set_check(&SELECT_FIRST_CHANNEL, on);
+            let mut app = App::new(None);
+            app.state.project = crate::app::test_project();
+            // Pattern 2: steps on channels 4 and 2 (indices 3 and 1); pattern 3 has none.
+            let notes = vec![Note::step(3, 0), Note::step(1, 96)];
+            app.state.project.patterns.push(os_model::Pattern { number: 2, notes, ..Default::default() });
+            app.state.project.patterns.push(os_model::Pattern { number: 3, ..Default::default() });
+            let select = |app: &mut App, r: usize| {
+                app.state.rack.select_only(r);
+                app.state.selected_channel = r;
+            };
+            let selection = |app: &App| (app.state.rack.sel.iter().copied().collect::<Vec<_>>(), app.state.selected_channel);
+            select(&mut app, 4);
+            app.tick();
+            app.state.pattern = 2;
+            app.tick();
+            assert_eq!(selection(&app), if on { (vec![1], 1) } else { (vec![4], 4) }, "check {on}");
+            select(&mut app, 4);
+            app.state.pattern = 3;
+            app.tick();
+            assert_eq!(selection(&app), (vec![4], 4), "no notes: the selection stays (check {on})");
+            // The frame's damage brings it up to date too (an input's paint can come before the tick).
+            app.state.pattern = 2;
+            let _ = app.take_damage();
+            assert_eq!(selection(&app).1, if on { 1 } else { 4 }, "before the frame (check {on})");
+        }
+        set_check(&SELECT_FIRST_CHANNEL, false);
     }
 }

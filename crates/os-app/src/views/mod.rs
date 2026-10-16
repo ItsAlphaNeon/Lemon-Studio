@@ -289,6 +289,13 @@ pub fn framed(ui: &mut Ui, s: &State, win: Win, r: Rect, title: &str, title_x: f
     }
 }
 
+/// "Small scrollbars in editors" is on (General ▸ Miscellaneous; spec: ui/settings-choices.md "Miscellaneous"): the
+/// piano roll's and the playlist's scroll bars are about half as thick, without arrow buttons; the room goes to the
+/// time ruler and the grid.
+pub fn small_scrollbars() -> bool {
+    crate::prefs::check(&crate::prefs::SMALL_SCROLLBARS)
+}
+
 /// A scroll bar over `track`: thumb sized `view / total`, positioned by `pos` (content pixels).
 /// Registers the bar for dragging (see `App::scrollbar_press`).
 pub fn scrollbar(ui: &mut Ui, track: Rect, vertical: bool, pos: f32, view: f32, total: f32, target: Scroll) {

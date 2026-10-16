@@ -104,8 +104,22 @@ pub const BACKUP_LOCATION: Combo = Combo {
     default: 1,
 };
 
+/// General ▸ Miscellaneous: unsolo puts back the mute states from before the first solo (channel rack, playlist,
+/// mixer); off, unsolo turns everything on. Spec: ui/settings-choices.md "Miscellaneous: what four checks do".
+pub const RESTORE_AFTER_SOLO: Check = Check { key: "restore_after_solo", label: "Restore previous state after solo", default: false };
+
+/// General ▸ Miscellaneous: switching pattern selects the first channel with notes in it (`crate::rack::follow_pattern`).
+pub const SELECT_FIRST_CHANNEL: Check =
+    Check { key: "select_first_channel", label: "Select first channel with notes when the pattern changes", default: false };
+
+/// General ▸ Miscellaneous: opening the piano roll zooms on the pattern and the channel's notes (`crate::piano::auto_zoom`).
+pub const AUTO_ZOOM_PIANO: Check = Check { key: "auto_zoom_piano", label: "Auto zoom in piano roll", default: false };
+
+/// General ▸ Miscellaneous: thin editor scroll bars without arrow buttons (`crate::views::small_scrollbars`).
+pub const SMALL_SCROLLBARS: Check = Check { key: "small_scrollbars", label: "Small scrollbars in editors", default: false };
+
 /// The declared checks.
-pub const CHECKS: &[&Check] = &[];
+pub const CHECKS: &[&Check] = &[&RESTORE_AFTER_SOLO, &SELECT_FIRST_CHANNEL, &AUTO_ZOOM_PIANO, &SMALL_SCROLLBARS];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION];
 
@@ -471,5 +485,42 @@ mod tests {
         app.paint(&mut c, None);
         let save = app.hits.iter().rev().find(|h| h.action == crate::views::menus::pick(0, crate::views::menus::FILE_SAVE)).map(|h| h.rect).expect("FILE > Save");
         assert_eq!(save.h, 25.0, "150 %: 12k + 7");
+    }
+
+    /// "Small scrollbars in editors" (spec: ui/settings-choices.md "Miscellaneous"): the piano roll's and the
+    /// playlist's scroll bars get about half as thick (the playlist's as FL measured: 9 px across, 10 px down) and
+    /// lose their arrow buttons; the time rulers grow by the room freed above them, the grids by the room at the side.
+    #[test]
+    fn small_scrollbars_in_editors() {
+        use crate::app::{Scroll, Win};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut seen = Vec::new();
+        for on in [false, true] {
+            set_check(&SMALL_SCROLLBARS, on);
+            let mut app = App::new(None);
+            let mut measure = |app: &mut App, win: Win| {
+                app.state.z = vec![win];
+                app.paint(&mut c, None);
+                let bar = |t: Scroll| app.bars.iter().find(|b| b.target == t).map(|b| b.track).unwrap_or_else(|| panic!("{t:?} bar"));
+                let arrows = app.hits.iter().filter(|h| matches!(h.action, Action::ScrollStep(..) | Action::PitchStep(_))).count();
+                let ruler = |a: Action| hit_rect(app, &a);
+                match win {
+                    Win::PianoRoll => (bar(Scroll::PianoX).h, bar(Scroll::PianoY).w, arrows, ruler(Action::PianoRuler), app.piano_grid.expect("grid")),
+                    _ => (bar(Scroll::PlaylistX).h, bar(Scroll::PlaylistY).w, arrows, ruler(Action::PlRuler), app.pl_grid().expect("grid")),
+                }
+            };
+            seen.push((measure(&mut app, Win::PianoRoll), measure(&mut app, Win::Playlist)));
+        }
+        let ((piano, playlist), (piano_small, playlist_small)) = (seen[0], seen[1]);
+        assert_eq!((piano.0, piano.1, playlist.0, playlist.1), (22.0, 20.0, 18.0, 18.0), "off: as before");
+        assert_eq!((piano_small.0, piano_small.1, playlist_small.0, playlist_small.1), (11.0, 10.0, 9.0, 10.0), "on: thin");
+        assert_eq!((piano.2 > 0, playlist.2), (true, 0), "arrow buttons: the piano roll's");
+        assert_eq!((piano_small.2, playlist_small.2), (0, 0), "on: no arrow buttons");
+        // The rulers end where they did and start higher; the grids keep their top and widen.
+        for ((r0, g0), (r1, g1), freed_h, freed_w) in [((piano.3, piano.4), (piano_small.3, piano_small.4), 11.0, 10.0), ((playlist.3, playlist.4), (playlist_small.3, playlist_small.4), 9.0, 8.0)] {
+            assert_eq!((r1.bottom(), r1.h), (r0.bottom(), r0.h + freed_h), "ruler");
+            assert_eq!((g1.x, g1.y, g1.h, g1.w), (g0.x, g0.y, g0.h, g0.w + freed_w), "grid");
+        }
+        set_check(&SMALL_SCROLLBARS, false);
     }
 }

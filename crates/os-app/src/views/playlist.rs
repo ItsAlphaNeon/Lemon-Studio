@@ -160,14 +160,15 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // its last clip, at least 100 bars; 500 tracks.
     let last = pl::clips(s).iter().map(|c| c.end() as f32 / bar_t).fold(0.0, f32::max);
     let bars = (last.ceil() + 16.0).max(100.0);
-    let over = Rect::new(grid_x, client.y + 1.0, grid_w, 18.0);
+    let (hbar, vbar) = bar_sizes();
+    let over = Rect::new(grid_x, client.y + 1.0, grid_w, hbar);
     debug_assert_eq!(over, overview_rect(s, grid));
     super::scrollbar(ui, over, false, sx, grid_w, bars * bar_w, crate::app::Scroll::PlaylistX);
     overview(ui, s, over, bars * bar_t);
-    let ruler = Rect::new(grid_x, client.y + 22.0, grid_w, 17.0);
+    let ruler = ruler_rect(s, grid);
     ruler_paint(ui, s, &g, ruler, f);
-    ui.c.fill_rect(Rect::new(grid_x + grid_w + 4.0, client.y + 1.0, 18.0, client.h), t.scrollbar);
-    let vtrack = Rect::new(grid_x + grid_w + 4.0, grid_y, 18.0, (r.bottom() - grid_y).max(0.0));
+    ui.c.fill_rect(Rect::new(grid_x + grid_w + 4.0, client.y + 1.0, vbar, client.h), t.scrollbar);
+    let vtrack = Rect::new(grid_x + grid_w + 4.0, grid_y, vbar, (r.bottom() - grid_y).max(0.0));
     super::scrollbar(ui, vtrack, true, sy, vtrack.h, g.rows.total(), crate::app::Scroll::PlaylistY);
     if has_markers {
         markers_paint(ui, s, &g, Rect::new(grid_x, lane_y, grid_w, MARKER_H));
@@ -255,7 +256,20 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 /// The overview bar above `grid` (a miniature of the clips that is also the horizontal scroll bar, §1).
 pub fn overview_rect(s: &State, grid: Rect) -> Rect {
     let lane_y = grid.y - if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
-    Rect::new(grid.x, lane_y - 41.0, grid.w, 18.0)
+    Rect::new(grid.x, lane_y - 41.0, grid.w, bar_sizes().0)
+}
+
+/// The time ruler above `grid`, 3 px under the overview bar: 17 px tall, taller by what thin scroll bars free.
+pub fn ruler_rect(s: &State, grid: Rect) -> Rect {
+    let o = overview_rect(s, grid);
+    Rect::new(grid.x, o.bottom() + 3.0, grid.w, 17.0 + 18.0 - o.h)
+}
+
+/// Thickness of the overview bar (the horizontal scroll bar) and of the vertical scroll bar: 18 px, or 9 and 10 px
+/// with "Small scrollbars in editors" (FL measured 17 → 9 and about 19 → 10 px; spec: ui/settings-choices.md
+/// "Miscellaneous").
+fn bar_sizes() -> (f32, f32) {
+    if super::small_scrollbars() { (9.0, 10.0) } else { (18.0, 18.0) }
 }
 
 /// The grid the playlist would paint now: None while it is collapsed to its title bar.
@@ -280,10 +294,10 @@ pub fn scroll_parts(s: &State, grid: Rect) -> ScrollParts {
     let overview = overview_rect(s, grid);
     ScrollParts {
         grid,
-        ruler: Rect::new(grid.x, overview.y + 21.0, grid.w, 17.0),
+        ruler: ruler_rect(s, grid),
         lane: (!pl::markers(s).is_empty()).then(|| Rect::new(grid.x, overview.y + 41.0, grid.w, MARKER_H)),
         heads: Rect::new(grid.x - 110.0, grid.y, 98.0, grid.h),
-        vbar: Rect::new(grid.right(), overview.y, 22.0, grid.bottom() - overview.y),
+        vbar: Rect::new(grid.right(), overview.y, 4.0 + bar_sizes().1, grid.bottom() - overview.y),
         overview,
     }
 }
@@ -291,7 +305,7 @@ pub fn scroll_parts(s: &State, grid: Rect) -> ScrollParts {
 /// The arrangement grid in a window laid out at `r` with client rect `client` (see `super::frame_rects`).
 fn grid_rect(s: &State, r: Rect, client: Rect) -> Rect {
     let grid_x = r.x + 162.0 + 98.0 + 12.0;
-    let grid_w = (r.right() - grid_x - 22.0).max(1.0);
+    let grid_w = (r.right() - grid_x - 4.0 - bar_sizes().1).max(1.0);
     let grid_y = client.y + 42.0 + if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
     Rect::new(grid_x, grid_y, grid_w, (r.bottom() - grid_y).max(0.0))
 }
@@ -488,7 +502,8 @@ fn ruler_paint(ui: &mut Ui, s: &State, g: &PGeom, ruler: Rect, f: &FrameInfo) {
         }
         let x = g.xs(f64::from(b) * f64::from(bar_w));
         let size = if b % (every * 4) == 0 { 15.0 } else { 13.0 };
-        ui.c.text(super::fnt(size), x + 2.0, ruler.y + (16.0 - size), t.ruler_text, &format!("{}", b + 1));
+        // Along the ruler's bottom 17 px (all of it unless thin scroll bars made it taller).
+        ui.c.text(super::fnt(size), x + 2.0, ruler.bottom() - 17.0 + (16.0 - size), t.ruler_text, &format!("{}", b + 1));
     }
     // Song position: a flag ◤ on the playhead while playing the song, else on the start position (§7: its left edge
     // on the position, its top along the ruler's top).

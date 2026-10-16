@@ -2095,6 +2095,9 @@ impl App {
     /// (all in one `paint_region`).
     /// A playlist scroll is resolved here (`resolve_scroll`): call it right before `paint_region`.
     pub fn take_damage(&mut self) -> Option<Option<Vec<Rect>>> {
+        // An input's paint can come before the next tick (Windows paints before `about_to_wait`): what follows the
+        // settings is brought up to date first, so the frame shows it.
+        self.follow_settings();
         self.resolve_scroll();
         match std::mem::replace(&mut self.damage, Damage::None) {
             Damage::None => None,
@@ -2742,6 +2745,15 @@ impl App {
         false
     }
 
+    /// General ▸ Miscellaneous checks that follow a change, on every tick and before a frame: "Select first channel with
+    /// notes when the pattern changes" (`App::pattern_tick`), "Auto zoom in piano roll" (`piano::open_tick`).
+    fn follow_settings(&mut self) {
+        self.pattern_tick();
+        if crate::piano::open_tick(&mut self.state) {
+            self.invalidate();
+        }
+    }
+
     /// The mixer's cables swing until still: step them and repaint where they were and are.
     fn cables_tick(&mut self, now: std::time::Instant) {
         if !self.state.shown(Win::Mixer) {
@@ -2782,6 +2794,7 @@ impl App {
         self.cables_tick(now);
         self.backup_tick(now);
         self.work_tick(now);
+        self.follow_settings();
         if self.state.cpu.due(now) {
             let tp = &self.transport;
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());
