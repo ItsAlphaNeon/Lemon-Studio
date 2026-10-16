@@ -219,6 +219,27 @@ mod tests {
         assert!(a.state.hosted_rows.contains(&(n + 1)), "the channel hosted before moved down one row");
     }
 
+    /// Replace ▸ (channel menu): the channel keeps its row, notes, mixer track and levels, and takes the new generator.
+    #[test]
+    fn replace_puts_another_generator_on_a_channel() {
+        use crate::plugin_menu::Target;
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.plugins.available = crate::plugins::builtin();
+        a.state.plugdb.rebuild(&a.plugins);
+        let index = a.plugins.index_of(LEMON_TRIO).unwrap();
+        let (n, before) = (a.state.project.channels.len(), a.state.project.channels[2].clone());
+        let cmd = crate::plugin_menu::items(&a.state, Target::Replace(2), true).into_iter().find(|it| it.label == LEMON_TRIO).map(|it| it.cmd).unwrap();
+        crate::playlist::run(&mut a, cmd);
+        let after = &a.state.project.channels[2];
+        assert_eq!(a.state.project.channels.len(), n, "no channel added");
+        assert!(is_osc3(after));
+        assert_eq!(after.name.as_deref(), Some(LEMON_TRIO));
+        assert_eq!((after.index, after.mixer_track, after.volume, after.pan), (before.index, before.mixer_track, before.volume, before.pan));
+        assert_eq!(a.state.pending_plugin, Some((2, index)));
+        assert!(!a.state.hosted_rows.contains(&2), "the old instance is gone");
+    }
+
     /// Corpus check (OPENSTUDIO_FLP_CORPUS): every 3x Osc channel of every file is hosted by Lemon Trio from its
     /// saved state, gives the same bytes back, and an unedited save leaves the whole project as it was.
     #[test]

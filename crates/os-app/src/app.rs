@@ -2070,6 +2070,13 @@ impl App {
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         let mut menu = crate::playlist::plugin_window_menu(row, detached, lx, ly);
                         crate::presets::fill_window_menu(self, row, &mut menu);
+                        // A channel's window: Replace ▸ lists the generators (an effect slot's stays greyed here; the
+                        // mixer's slot menu has its own Replace ▸).
+                        if row < self.state.project.channels.len() {
+                            if let Some(i) = menu.items.iter_mut().find(|i| i.label == "Replace") {
+                                *i = crate::playlist::PItem::sub("Replace", crate::plugin_menu::items(&self.state, crate::plugin_menu::Target::Replace(row), true));
+                            }
+                        }
                         self.state.playlist.popup = Some(menu);
                         self.popup_lift = detached.then_some(row);
                         self.invalidate();
