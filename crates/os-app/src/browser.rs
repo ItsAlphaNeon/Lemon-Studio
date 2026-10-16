@@ -55,6 +55,7 @@ impl App {
                         s.selected_channel = c;
                         s.rack.select_only(c);
                     }
+                    Item::History(e) => s.message = crate::history::go_to(s, e),
                     _ => {}
                 }
                 if let Item::Sample(path) = &row.item {
@@ -62,7 +63,7 @@ impl App {
                 }
                 let s = &mut self.state;
                 s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
-                if !matches!(row.item, Item::None | Item::File(_)) {
+                if !matches!(row.item, Item::None | Item::File(_) | Item::History(_)) {
                     self.drag = Some(Drag::Browser { item: row.item, label: row.label, m0: self.mouse, started: false });
                 }
             }
@@ -298,7 +299,7 @@ impl App {
                     self.state.message = msg;
                 }
             }
-            Item::None | Item::File(_) => {}
+            Item::None | Item::File(_) | Item::History(_) => {}
         }
     }
 
@@ -431,6 +432,22 @@ fn select(s: &mut crate::app::State, key: &str) {
         s.browser_hist.push(key.to_string());
         s.browser_hist_pos = s.browser_hist.len() - 1;
     }
+}
+
+/// Ctrl+Z with "Show undo history in the browser when undoing changes": the browser shows Current project ▸ History,
+/// opened, where the project now is selected (spec: ui/settings-choices.md "Undo history: the four checks
+/// (2026-10-16)"). The All tab shows it too; the others switch to the project's.
+pub(crate) fn show_history(s: &mut crate::app::State) {
+    s.show_browser = true;
+    if s.browser_tab > 1 {
+        s.browser_tab = 1;
+    }
+    s.browser_search.clear();
+    let root = format!("{}:Current project", s.browser_tab);
+    let folder = format!("{root}/History");
+    s.browser_sel = Some(format!("{folder}/{}", s.history.at()));
+    s.browser_open.extend([root, folder]);
+    reveal(s);
 }
 
 /// Scroll the selected row into view.

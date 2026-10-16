@@ -247,9 +247,10 @@ pub const PROJECT_COMBOS: [&str; 5] = [TIMEBASE, SET_AS, NUMERATOR, DENOMINATOR,
 /// The value boxes that work, with their ranges (the mouse wheel changes them: `App::settings_number`).
 pub const LIVE_NUMBERS: [(&str, u16, u16); 2] = [(BEATS_PER_BAR, 1, 32), (STEPS_PER_BEAT, 1, 16)];
 
-/// The range of the working value box labelled `label`.
+/// The range of the working value box labelled `label` (`LIVE_NUMBERS`, and the value boxes declared in
+/// `crate::prefs`).
 pub fn number_range(label: &str) -> Option<(u16, u16)> {
-    LIVE_NUMBERS.iter().find(|n| n.0 == label).map(|n| (n.1, n.2))
+    LIVE_NUMBERS.iter().find(|n| n.0 == label).map(|n| (n.1, n.2)).or_else(|| crate::prefs::find_number(label).map(|n| (n.min, n.max)))
 }
 
 /// The Denominator box's text for `steps` per beat: 16 / steps (spec: flp/engine-events.md "Project"); steps that make
@@ -503,8 +504,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Slider("Horizontal scrolling speed", 0.5),
                 Check("Invert pencil buttons", false),
             ]),
+            // spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)" (`crate::history`).
             gf("Undo history", false, vec![
-                Value("100".into(), "Maximum undo levels"),
+                Value(crate::prefs::number(&crate::prefs::MAX_UNDO_LEVELS).to_string(), "Maximum undo levels"),
                 Check("Undo knob tweaks", true),
                 Check("Alternate undo mode", true),
                 Check("Put undone recordings in the recycle bin", true),
@@ -1019,7 +1021,8 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             let lw = ui.c.text(f, b.right() + 8.0, ty, t.text, label);
             grey(ui, Rect::new(b.x, b.y, b.w + 8.0 + lw, b.h));
         }
-        // Project ▸ Time settings as a time division: the wheel changes the value (`App::settings_number`).
+        // Project ▸ Time settings as a time division, General ▸ Undo history ▸ Maximum undo levels: the wheel changes
+        // the value (`App::settings_number`).
         Row::Value(v, label) if number_range(label).is_some() => {
             let b = Rect::new(x0, y + 3.0, 38.0, 21.0);
             let hov = ui.hit(b, Action::Settings(SAct::Number(label)), "");

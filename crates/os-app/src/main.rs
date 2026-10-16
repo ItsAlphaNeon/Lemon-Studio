@@ -25,6 +25,7 @@ mod cpu;
 mod dialog;
 mod filedlg;
 mod enable_groups;
+mod history;
 mod icons;
 mod knobs;
 mod loading;

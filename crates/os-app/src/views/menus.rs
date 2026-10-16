@@ -125,7 +125,10 @@ const FILE: &[Item] = &[
     it("Exit", "").on(),
 ];
 
-const EDIT: &[Item] = &[it("Undo", "Ctrl+Z")];
+/// The project's undo history (spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)"): the first
+/// entry names what Ctrl+Z does next, Redo (Ctrl+Alt+Z) is there with Alternate undo mode on and a history to act on
+/// (`label_now`, `in_menu`).
+const EDIT: &[Item] = &[it("Undo", "Ctrl+Z"), it("Redo", "Ctrl+Alt+Z")];
 
 const ADD_PLUGINS: &[Item] = &[
     it("More plugins...", "").on(),
@@ -358,7 +361,7 @@ pub fn works(menu: usize, item: &Item) -> bool {
         || ((menu == OPTIONS_MENU || menu == ADD_MENU) && crate::views::settings::tab_for_menu(item.label).is_some())
         || (menu == PATTERNS && crate::patterns::Cmd::from_label(item.label).is_some())
         || (menu == VIEW && (win_of(item.label).is_some() || item.label == "Plugin picker"))
-        || (menu == EDIT_MENU && item.label == "Undo")
+        || (menu == EDIT_MENU && matches!(item.label, "Undo" | "Redo"))
         || crate::params::menu_handles(item.label)
 }
 
@@ -369,6 +372,27 @@ pub fn label_of(menu: usize, item: &Item) -> std::borrow::Cow<'static, str> {
         (0, "New") => format!("New ({})", crate::templates::name()).into(),
         (_, l) => l.into(),
     }
+}
+
+/// `label_of` for the project as it is now: EDIT's entries name the step they act on, "Undo step seq edit" (spec:
+/// ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
+pub fn label_now(s: &State, menu: usize, item: &Item) -> std::borrow::Cow<'static, str> {
+    match (menu, item.label) {
+        (EDIT_MENU, "Undo") => crate::history::edit_label(s, false).into(),
+        (EDIT_MENU, "Redo") => crate::history::edit_label(s, true).into(),
+        _ => label_of(menu, item),
+    }
+}
+
+/// Whether an entry is in its menu now: EDIT's Redo only with Alternate undo mode on and a history to act on (spec:
+/// ui/menus.md "EDIT": only Undo while the history is empty).
+pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
+    !(menu == EDIT_MENU && item.label == "Redo") || crate::history::redo_shown(s)
+}
+
+/// Whether an entry can be chosen now: it works (`works`), and EDIT's have a step to act on.
+pub fn active(s: &State, menu: usize, item: &Item) -> bool {
+    works(menu, item) && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo"))
 }
 
 fn item_action(menu: usize, i: usize, item: &Item) -> Action {
@@ -438,9 +462,13 @@ pub fn bar_model(s: &State) -> Vec<BarMenu> {
                     }
                 }
                 for item in items.iter() {
-                    let enabled = item.kind == Kind::Item && works(mi, item);
+                    if !in_menu(s, mi, item) {
+                        flat += 1;
+                        continue;
+                    }
+                    let enabled = item.kind == Kind::Item && active(s, mi, item);
                     let pick = enabled.then_some((mi, flat));
-                    rows.push(BarRow { kind: item.kind, label: label_of(mi, item).into_owned(), shortcut: item.shortcut, enabled, mark: mark_of(s, mi, item), pick });
+                    rows.push(BarRow { kind: item.kind, label: label_now(s, mi, item).into_owned(), shortcut: item.shortcut, enabled, mark: mark_of(s, mi, item), pick });
                     flat += 1;
                 }
             }
@@ -488,10 +516,18 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
         Vec::new()
     };
     let list_w = pats.iter().map(|(_, n)| ui.c.text_width(Font::new(14), n) + 28.0).fold(80.0f32, f32::max).ceil();
-    let col_w = |ci: usize, w: f32| if menu == PATTERNS && ci == 0 { list_w } else { w };
+    // EDIT grows to fit the step its entries name ("Undo piano roll delete note  Ctrl+Z").
+    let edit_w = if menu == EDIT_MENU {
+        let f = Font::new(14);
+        let ws: Vec<f32> = EDIT.iter().filter(|it| in_menu(s, menu, it)).map(|it| ui.c.text_width(f, &label_now(s, menu, it)) + ui.c.text_width(f.italic(), it.shortcut) + 44.0).collect();
+        ws.into_iter().fold(0.0f32, f32::max).ceil()
+    } else {
+        0.0
+    };
+    let col_w = |ci: usize, w: f32| if menu == PATTERNS && ci == 0 { list_w } else { w.max(edit_w) };
 
     let width: f32 = m.cols.iter().enumerate().map(|(ci, (w, _))| col_w(ci, *w)).sum::<f32>() + border * 2.0;
-    let col_h = |items: &[Item]| items.iter().map(|it| row_h(&mt, it)).sum::<f32>();
+    let col_h = |items: &[Item]| items.iter().filter(|it| in_menu(s, menu, it)).map(|it| row_h(&mt, it)).sum::<f32>();
     let body_h = m
         .cols
         .iter()
@@ -543,6 +579,10 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
             }
         }
         for item in items.iter() {
+            if !in_menu(s, menu, item) {
+                flat += 1;
+                continue;
+            }
             let h = row_h(&mt, item);
             let rr = Rect::new(col.x, y, col.w, h);
             match item.kind {
@@ -556,8 +596,9 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                     ui.c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0 + (h - os_ui::kit::menu::HEAD) / 2.0, t.menu_pop_head_text, item.label);
                 }
                 Kind::Item => {
-                    let ok = works(menu, item);
-                    // Greyed-out entries never light up; they only say they are not available yet.
+                    let ok = active(s, menu, item);
+                    // Greyed-out entries never light up; they only say they are not available yet (EDIT's without a
+                    // step to act on say nothing).
                     if ok {
                         if ui.hit(rr, item_action(menu, flat, item), item.label) {
                             if lemon {
@@ -566,7 +607,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                                 ui.c.fill_rect(rr, t.menu_pop_hi);
                             }
                         }
-                    } else {
+                    } else if !works(menu, item) {
                         ui.off(rr, item.label);
                     }
                     let color = if ok { t.menu_pop_text } else { t.menu_pop_dim };
@@ -586,7 +627,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                         }
                         _ => {}
                     }
-                    ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, rr.w - 24.0, color, &label_of(menu, item));
+                    ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, rr.w - 24.0, color, &label_now(s, menu, item));
                     let right = rr.right() - if item.sub { 16.0 } else { 8.0 };
                     if !item.shortcut.is_empty() {
                         let sc = if ok { t.menu_pop_shortcut } else { t.menu_pop_dim.mix(t.menu_pop, 0.35) };
@@ -643,7 +684,11 @@ mod tests {
             // The columns' separator rows aside, the rows are the items.
             let rows: Vec<&BarRow> = rows.into_iter().filter(|r| r.kind != Kind::Sep || items.iter().any(|it| it.kind == Kind::Sep)).collect();
             let named: Vec<(&str, bool)> = rows.iter().filter(|r| r.kind == Kind::Item).map(|r| (r.label.as_str(), r.enabled)).collect();
-            let want: Vec<(String, bool)> = items.iter().filter(|it| it.kind == Kind::Item).map(|it| (label_of(mi, it).into_owned(), works(mi, it))).collect();
+            let want: Vec<(String, bool)> = items
+                .iter()
+                .filter(|it| it.kind == Kind::Item && in_menu(&app.state, mi, it))
+                .map(|it| (label_now(&app.state, mi, it).into_owned(), active(&app.state, mi, it)))
+                .collect();
             let want: Vec<(&str, bool)> = want.iter().map(|(l, w)| (l.as_str(), *w)).collect();
             assert_eq!(named, want, "{}", m.title);
         }

@@ -13,9 +13,6 @@ use os_ui::Rect;
 use crate::app::State;
 use crate::views::piano::{ROW, TOP_KEY};
 
-/// Undo depth (snapshots of one pattern's notes).
-const UNDO_DEPTH: usize = 200;
-
 /// Piano-roll tools (§9), with their shortcut letters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
@@ -115,7 +112,6 @@ pub struct PianoState {
     pub snap: crate::snap::EditorSnap,
     sel: Vec<usize>,
     sel_key: (u16, u16),
-    undo: Vec<(u16, Vec<Note>, Vec<ControlPoint>)>,
 }
 
 impl Default for PianoState {
@@ -146,7 +142,6 @@ impl Default for PianoState {
             snap: crate::snap::EditorSnap::default(),
             sel: Vec::new(),
             sel_key: (0, 0),
-            undo: Vec::new(),
         }
     }
 }
@@ -487,29 +482,24 @@ pub fn erase_controls(s: &mut State, channel: u16, param: u16, from: u32, to: u3
     gone
 }
 
-/// Remember the current pattern's notes and control points for undo.
+/// Remember the current pattern's notes and control points for undo: a step of the project's undo history
+/// (`crate::history`).
 pub fn snapshot(s: &mut State) {
-    let number = s.pattern;
-    let notes = notes(s).to_vec();
-    let controls = controls(s).to_vec();
-    s.piano.dirty = true;
-    let u = &mut s.piano.undo;
-    if u.len() >= UNDO_DEPTH {
-        u.remove(0);
-    }
-    u.push((number, notes, controls));
+    snapshot_as(s, "Piano roll edit");
 }
 
-/// Restore the last snapshot; returns false when there is nothing to undo.
-pub fn undo(s: &mut State) -> bool {
-    let Some((number, notes, controls)) = s.piano.undo.pop() else { return false };
-    s.pattern = number;
-    let p = pattern_mut(s);
-    p.notes = notes;
-    p.controls = controls;
+/// `snapshot`, the step named `name` (as the browser's History lists it; spec: ui/settings-choices.md "Undo history:
+/// the four checks (2026-10-16)").
+pub fn snapshot_as(s: &mut State, name: &'static str) {
     s.piano.dirty = true;
-    s.piano.clear_selection();
-    true
+    let snap = crate::history::Snap::pattern(s, s.pattern);
+    crate::history::record(s, name, snap);
+}
+
+/// Undo the newest step of the project's history; returns false when there is nothing to undo.
+#[cfg(test)]
+pub fn undo(s: &mut State) -> bool {
+    crate::history::undo(s).is_some()
 }
 
 /// The timebase changed from `from` to `to` ticks per quarter (`Project::set_ppq` rescaled the project): the scroll,
@@ -526,10 +516,6 @@ pub fn rescale(s: &mut State, from: u16, to: u16) {
     p.clipboard.iter_mut().for_each(|n| n.rescale(from, to));
     if let Some((_, x, _)) = &mut p.zoom_back {
         *x *= k;
-    }
-    for (_, notes, controls) in &mut p.undo {
-        notes.iter_mut().for_each(|n| n.rescale(from, to));
-        controls.iter_mut().for_each(|c| c.rescale(from, to));
     }
 }
 

@@ -472,6 +472,13 @@ pub fn set_step(s: &mut State, r: usize, k: u32, on: bool) {
     s.piano.dirty = true;
 }
 
+/// Before a step-sequencer edit of the current pattern: a "Step seq edit" step of the project's undo history
+/// (`crate::history`; spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
+pub fn snapshot(s: &mut State) {
+    let snap = crate::history::Snap::pattern(s, s.pattern.max(1));
+    crate::history::record(s, crate::history::STEP_SEQ_EDIT, snap);
+}
+
 /// Toggle step `k` of row `r`; returns its new state (§9).
 pub fn toggle_step(s: &mut State, r: usize, k: u32) -> bool {
     let on = !ch_index(s, r).is_some_and(|ch| s.project.pattern(s.pattern).is_some_and(|p| step_on(&p.notes, ch, k, per_step(s))));
@@ -1377,6 +1384,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::Cut(r) => {
             s.rack.clipboard = Some(row_notes(s, r));
+            snapshot(s);
             set_row_notes(s, r, Vec::new());
             None
         }
@@ -1386,11 +1394,13 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::Paste(r) => {
             if let Some(n) = s.rack.clipboard.clone() {
+                snapshot(s);
                 set_row_notes(s, r, n);
             }
             None
         }
         RCmd::Fill(r, n) => {
+            snapshot(s);
             fill_each(s, r, n);
             None
         }
@@ -1399,6 +1409,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Rotate(r, d) => {
+            snapshot(s);
             rotate(s, r, d);
             None
         }
@@ -1411,6 +1422,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Reset(k) => {
+            crate::history::knob(s, k, false);
             s.set_knob(k, k.default_value());
             None
         }
@@ -1420,6 +1432,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::PasteValue(k) => {
             if let Some(v) = s.rack.value_clip {
+                crate::history::knob(s, k, false);
                 s.set_knob(k, v);
             }
             None
@@ -1731,6 +1744,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
 /// Accept in the Advanced fill dialog: write the sequence to the channel.
 pub fn fill_accept(s: &mut State) {
     if let Some(f) = s.rack.fill.take() {
+        snapshot(s);
         write_sequence(s, f.row, &f.steps);
     }
 }

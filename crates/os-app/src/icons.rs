@@ -25,6 +25,8 @@ pub enum Icon {
     Blend,
     LoopRecord,
     Undo,
+    /// `Undo` mirrored: an undone step of the undo history (the browser's History).
+    Redo,
     Cut,
     Mic,
     Help,
@@ -83,6 +85,10 @@ pub enum Icon {
 /// Studio's own, in Tabler's style: 24-unit grid, outline, absolute M/L/C/Z only.
 const KICK: TablerIcon = TablerIcon { filled: false, d: "M 13.5 10.5 C 13.5 14.366 12.381 17.5 11 17.5 C 9.619 17.5 8.5 14.366 8.5 10.5 C 8.5 6.634 9.619 3.5 11 3.5 C 12.381 3.5 13.5 6.634 13.5 10.5 Z M 11 3.5 L 19 3.5 M 11 17.5 L 19 17.5 M 19 3.5 C 20.381 3.5 21.5 6.634 21.5 10.5 C 21.5 14.366 20.381 17.5 19 17.5 M 3 21 L 8 19.5 M 4.8 20.5 L 6.4 12.6 M 8.3 10.8 C 8.3 11.628 7.628 12.3 6.8 12.3 C 5.972 12.3 5.3 11.628 5.3 10.8 C 5.3 9.972 5.972 9.3 6.8 9.3 C 7.628 9.3 8.3 9.972 8.3 10.8 Z M 12 17.3 L 11 21 M 18 17.3 L 19 21" };
 
+/// Tabler's `arrow-back-up` mirrored left to right (an undone step, spec: ui/settings-choices.md "Undo history: the
+/// four checks (2026-10-16)").
+const REDO: TablerIcon = TablerIcon { filled: false, d: "M 15 14 L 19 10 L 15 6 M 19 10 L 8 10 C 5.791 10 4 11.791 4 14 C 4 16.209 5.791 18 8 18 L 9 18" };
+
 fn shape(icon: Icon) -> &'static TablerIcon {
     match icon {
         Icon::Minimize => &tb::MINUS,
@@ -96,6 +102,7 @@ fn shape(icon: Icon) -> &'static TablerIcon {
         Icon::Blend => &tb::BLEND_MODE,
         Icon::LoopRecord => &tb::REPEAT,
         Icon::Undo => &tb::ARROW_BACK_UP,
+        Icon::Redo => &REDO,
         Icon::Cut => &tb::CUT,
         Icon::Mic => &tb::MICROPHONE,
         Icon::Help => &tb::HELP,

@@ -139,8 +139,15 @@ Not yet: Align all channel editors, Arrange windows.
 
 ## 🚧 Undo
 
-- Per editor (piano roll, playlist)
-- Not yet: redo, global history
+- One history for the whole project, with redo: Ctrl+Z, Ctrl+Alt+Z and the EDIT menu, which names the step
+- Covers the piano roll, the playlist, step-sequencer edits and knob turns (channel, main, mixer panning and
+  stereo separation, effect mix, send levels, swing)
+- The browser's Current project ▸ History lists the steps from "Last reset"; undone steps are grey, and a click
+  on one goes back or forward to it
+- General settings ▸ Undo history: Maximum undo levels, Undo knob tweaks, Alternate undo mode, and showing the
+  history in the browser, newest first if wanted
+- Not yet: mixer faders and plugin parameters, adding or deleting channels, project settings; "Put undone
+  recordings in the recycle bin" waits for recording
 
 ## 🚧 Audio drivers
 

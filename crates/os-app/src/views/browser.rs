@@ -35,10 +35,11 @@ pub const INFO_H: f32 = 84.0;
 const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin database", Icon::Speaker, 1)];
 
 /// The "Current project" tree's sections, in screenshot order (spec §2), without the ones nothing is tracked in yet
-/// (History, Remote control, Initialized controls).
-const PROJECT: &[(&str, Icon)] = &[("Patterns", Icon::Note), ("Effects", Icon::Speaker), ("Generators", Icon::Plug), ("Samples", Icon::Wave)];
+/// (Remote control, Initialized controls). History: the undo history (spec: ui/settings-choices.md "Undo history: the
+/// four checks (2026-10-16)").
+const PROJECT: &[(&str, Icon)] = &[("History", Icon::Undo), ("Patterns", Icon::Note), ("Effects", Icon::Speaker), ("Generators", Icon::Plug), ("Samples", Icon::Wave)];
 
-/// What a row stands for; everything but `None` can be dragged (spec §3).
+/// What a row stands for; everything but `None`, `File` and `History` can be dragged (spec §3).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     None,
@@ -56,6 +57,9 @@ pub enum Item {
     File(String),
     /// A parameter of a hosted plugin: hosted key, parameter index (spec: plugins/plugin-parameters.md §6).
     Param(usize, usize),
+    /// An entry of the undo history, 0 = "Last reset" (`History::entries`): a click goes back or forward to it; not
+    /// draggable.
+    History(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -303,6 +307,14 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
         }
         let parent = format!("{root}/{name}");
         match name {
+            // Undone steps grey, their arrow mirrored (spec: ui/settings-choices.md "Undo history: the four checks").
+            "History" => {
+                for (e, step) in s.history.entries() {
+                    let icon = if s.history.undone(e) { Icon::Redo } else { Icon::Undo };
+                    let (bright, item) = (s.history.current(e), Item::History(e));
+                    out.push(Row { key: format!("{parent}/{e}"), depth: 2, label: step.into(), icon, cat, open: None, bright, item, path: None });
+                }
+            }
             "Patterns" => {
                 let mut pats: Vec<_> = p.patterns.iter().collect();
                 pats.sort_by_key(|p| p.number);
@@ -557,6 +569,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             c => cats[usize::from(c).min(1)],
         };
         let c = if row.bright { base.shade(0.12) } else if row.depth > 0 { base.shade(-0.06) } else { base };
+        let c = if matches!(row.item, Item::History(e) if s.history.undone(e)) { t.text_faint } else { c };
         // Expander: only an opened node shows its ▾ in the gutter (FL screenshots, spec §2).
         if row.open == Some(true) && s.browser_search.is_empty() {
             let (ax, cy) = (x - 9.0, y + ROW_H / 2.0);
