@@ -940,7 +940,7 @@ pub fn layout_menu(s: &State, x: f32, y: f32) -> Popup {
 
 /// Empty slot: the effect list (§7.1), the plugin menu for this slot (spec: ui/plugin-menu.md).
 pub fn effect_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
-    let mut items = vec![PItem::not_yet("Plugin database").key("Shift+F8"), PItem::sep()];
+    let mut items = vec![PItem::not_yet("Plugin database").key(crate::shortcuts::menu_key("Plugin database", "Shift+F8")), PItem::sep()];
     items.extend(crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), false));
     Popup { x, y, items, sub: None }
 }

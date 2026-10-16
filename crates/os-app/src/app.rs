@@ -847,6 +847,9 @@ pub struct State {
     pub browser_open: std::collections::HashSet<String>,
     /// Folders dropped on the window: All-tab roots (spec: ui/browser.md §6).
     pub browser_folders: Vec<PathBuf>,
+    /// Their Browser names (File ▸ Browser extra search folders, `crate::search_folders`): a root's label in place of
+    /// the folder's name.
+    pub browser_names: std::collections::BTreeMap<PathBuf, String>,
     /// Directory listings of dropped folders, until reread.
     pub browser_dirs: std::cell::RefCell<std::collections::HashMap<PathBuf, std::rc::Rc<Vec<views::browser::Entry>>>>,
     /// The mixer's routing cables, hung by the mixer view as it paints and swung on the tick.
@@ -1141,6 +1144,7 @@ impl App {
                 browser_tab: 0,
                 browser_open: views::browser::default_open(),
                 browser_folders: crate::browser::load_folders(),
+                browser_names: crate::browser::load_names(),
                 params: Default::default(),
                 browser_dirs: Default::default(),
                 cables: std::cell::RefCell::new({
@@ -1644,6 +1648,11 @@ impl App {
             Then::PluginFolder => {
                 if let Some(p) = file {
                     self.plugin_folder_chosen(p);
+                }
+            }
+            Then::BrowserFolder(row) => {
+                if let Some(p) = file {
+                    self.search_folder_chosen(row, p);
                 }
             }
             Then::SavePreset(key) => {
@@ -3155,8 +3164,9 @@ impl App {
         if self.modal_open() {
             return self.dialog_drop(path);
         }
-        // A drop accepts an Info box being edited, as a click does.
+        // A drop accepts an Info box or a browser folder cell being edited, as a click does.
         crate::project_info::accept_info(&mut self.state);
+        crate::search_folders::commit(&mut self.state);
         if ext == "flp" {
             return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
         }
@@ -3719,9 +3729,13 @@ impl App {
             SAct::Button("Rescan all") => self.start_scan(crate::plugin_db::Mode::All),
             SAct::Button("Add folder...") => self.add_plugin_folder(),
             SAct::Button(views::settings::RESET_WORK_TIME) => self.reset_work_time(),
+            SAct::Button(views::settings::MANAGE_SHORTCUTS) => return self.open_shortcuts(),
             SAct::Button(b) => self.state.message = Some(off_text(b)),
             // The Info page's boxes (spec: ui/settings.md "Info").
             SAct::Info(f) => return self.info_act(f),
+            // File ▸ Browser extra search folders (`crate::search_folders`).
+            SAct::FolderPick(i) => return self.search_folder_pick(i),
+            SAct::FolderCell(i, col) => return self.search_folder_cell(i, col),
             SAct::Genres(x, y) => return self.genre_menu(x, y),
         }
         self.invalidate();
@@ -4225,6 +4239,10 @@ impl App {
         // A click anywhere but the Info box being edited accepts it (spec: ui/settings.md "Info").
         if self.state.settings.info_edit.as_ref().is_some_and(|e| action != Some(Action::Settings(views::settings::SAct::Info(e.field)))) {
             crate::project_info::accept_info(&mut self.state);
+        }
+        // The same for a cell of File ▸ Browser extra search folders.
+        if self.state.settings.folder_edit.as_ref().is_some_and(|e| action != Some(Action::Settings(views::settings::SAct::FolderCell(e.row, e.col)))) {
+            crate::search_folders::commit(&mut self.state);
         }
         // Clicking anywhere but the search field leaves it (spec: ui/browser.md §5).
         if action != Some(Action::BrowserSearch) {
@@ -5274,8 +5292,9 @@ impl App {
         if self.modal_open() {
             return self.dialog_key(key, ctrl, alt);
         }
-        // So does a box of the settings window's Info page while it is edited.
-        if self.info_key(key, ctrl, alt) {
+        // So does a box of the settings window's Info page while it is edited, and a cell of File ▸ Browser extra
+        // search folders.
+        if self.info_key(key, ctrl, alt) || self.folder_cell_key(key, ctrl, alt) {
             return;
         }
         use winit::keyboard::{Key, NamedKey};
@@ -5358,8 +5377,8 @@ impl App {
             Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
             Key::Named(NamedKey::F6) => self.act(Action::ToggleWin(Win::ChannelRack)),
             Key::Named(NamedKey::F7) => self.act(Action::ToggleWin(Win::PianoRoll)),
-            Key::Named(NamedKey::F8) if !alt && !ctrl => self.toggle_plugin_menu(),
-            Key::Named(NamedKey::F8) if alt => self.act(Action::ToggleWin(Win::Browser)),
+            // The browser and the pickers: General ▸ Input ▸ Manage shortcuts (spec: ui/settings-choices.md).
+            Key::Named(NamedKey::F8) => self.f8_key(ctrl, alt),
             Key::Named(NamedKey::F9) => self.act(Action::ToggleWin(Win::Mixer)),
             Key::Named(NamedKey::F10) => self.open_settings(views::settings::MIDI),
             Key::Named(NamedKey::F11) => self.open_settings(views::settings::INFO),
@@ -5488,8 +5507,8 @@ impl App {
         if pressed && (self.modal_open() || self.state.playlist.edit.is_some() || self.state.plugdb.finding || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing() || self.state.perf.finding) {
             return false;
         }
-        // So does a box of the settings window's Info page.
-        if pressed && self.info_editing() {
+        // So does a box of the settings window's Info page, and a browser folder cell.
+        if pressed && (self.info_editing() || self.folder_cell_editing()) {
             return false;
         }
         if !pressed {
@@ -8645,6 +8664,7 @@ mod tests {
         match &app.state.dialogs.last().expect("a dialog").body {
             crate::dialog::Body::File(f) => f,
             crate::dialog::Body::Msg(m) => panic!("a message box is on top: {}", m.plain()),
+            crate::dialog::Body::Shortcuts(_) => panic!("Manage shortcuts is on top"),
         }
     }
 
@@ -12016,6 +12036,49 @@ mod tests {
         tap(&mut app, &mut c, 2);
         assert_eq!(app.state.pending_open, None, "a pattern clip opens no sampler");
         assert!(app.state.shown(Win::PianoRoll) && app.state.pattern == 1, "it opens its pattern in the piano roll");
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    /// Double-click on audio clips follows General ▸ Input ▸ Manage shortcuts: the row whose modifier is held wins,
+    /// Show clip properties does nothing yet, and a row set to "(disabled)" never fires (spec: ui/settings-choices.md
+    /// "Input: Manage shortcuts (2026-10-16)").
+    #[test]
+    fn audio_clip_double_click_follows_manage_shortcuts() {
+        use crate::shortcuts::{Form, CLIP_CHANNEL, CLIP_PROPERTIES};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, _, g, _) = ruler_app(&mut c);
+        let wav = std::env::temp_dir().join(format!("os-app-clip-dblclick-sc-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
+        crate::playlist::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 1, 0).expect("audio clip added");
+        let row = app.state.project.channels.len() - 1;
+        frame(&mut app, &mut c, None);
+        let double = |app: &mut App, c: &mut Canvas, alt: bool| {
+            let (x, y) = (g.x_of(10.0) + 10.0, g.y_of(1) + 30.0);
+            app.alt = alt;
+            for _ in 0..2 {
+                app.mouse_move(x, y);
+                app.mouse_down();
+                app.mouse_up();
+                frame(app, c, None);
+            }
+            app.alt = false;
+            app.state.pending_open.take()
+        };
+        // The defaults: Alt is Show clip properties (no window yet), no modifier Show channel settings.
+        assert_eq!(double(&mut app, &mut c, true), None, "Show clip properties opens nothing yet");
+        assert_eq!(double(&mut app, &mut c, false), Some(row));
+        // Show channel settings to Alt (Show clip properties takes "(none)"): only Alt opens the sampler.
+        let mut f = Form::applied();
+        f.pick(8, 2);
+        f.apply();
+        assert_eq!((crate::prefs::choice(&CLIP_PROPERTIES), crate::prefs::choice(&CLIP_CHANNEL)), ("(none)", "Alt"));
+        assert_eq!(double(&mut app, &mut c, false), None);
+        assert_eq!(double(&mut app, &mut c, true), Some(row));
+        // Show channel settings "(disabled)": no double-click opens it.
+        f.pick(8, 0);
+        f.apply();
+        assert_eq!(double(&mut app, &mut c, true), None, "(disabled) never fires");
+        assert_eq!(double(&mut app, &mut c, false), None);
         let _ = std::fs::remove_file(&wav);
     }
 

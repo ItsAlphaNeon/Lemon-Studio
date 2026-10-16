@@ -456,6 +456,10 @@ pub const CHECKS: &[&Check] = &[
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING];
+/// The declared combos no settings page shows (a window of their own does): General ▸ Input ▸ Manage shortcuts' rows
+/// (`crate::shortcuts`). Read by the declaration tests.
+#[cfg_attr(not(test), allow(dead_code))]
+pub const OFF_PAGE_COMBOS: &[&Combo] = &crate::shortcuts::ROWS;
 
 /// The declared value boxes.
 pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BROWSER_PREVIEW_TRACK];
@@ -796,7 +800,8 @@ mod tests {
     }
 
     /// Every declaration has its own key and label, a default among its choices, and a control of its kind with that
-    /// label on a settings page (checks: an enabled check; combos: a combo; value boxes: a value box).
+    /// label on a settings page (checks: an enabled check; combos: a combo; value boxes: a value box). The combos of
+    /// `OFF_PAGE_COMBOS` are on no page.
     #[test]
     fn declarations_match_the_settings_pages() {
         let app = App::new(None);
@@ -832,6 +837,12 @@ mod tests {
         }
         for c in COMBOS {
             assert!(combos_shown.contains(&c.label), "{} is a combo on a settings page", c.label);
+            assert!(c.default < c.choices.len(), "{}: default among its choices", c.label);
+            keys.push(c.key);
+            labels.push(c.label);
+        }
+        for c in OFF_PAGE_COMBOS {
+            assert!(!combos_shown.contains(&c.label), "{} is not on a settings page", c.label);
             assert!(c.default < c.choices.len(), "{}: default among its choices", c.label);
             keys.push(c.key);
             labels.push(c.label);

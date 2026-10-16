@@ -72,6 +72,8 @@ pub enum Then {
     RackSample(usize),
     /// The replace question of the Save dialog under it: Yes answers that dialog with this path.
     Replace(PathBuf),
+    /// File ▸ Browser extra search folders: the folder for this row (`App::search_folder_chosen`).
+    BrowserFolder(usize),
 }
 
 /// What waits for the save-changes question.
@@ -138,6 +140,8 @@ pub fn spans(parts: &[&str]) -> Vec<(String, bool)> {
 pub enum Body {
     Msg(Msg),
     File(Box<FileDlg>),
+    /// General ▸ Input ▸ Manage shortcuts (`crate::shortcuts`).
+    Shortcuts(crate::shortcuts::Form),
 }
 
 /// A dialog on the stack (`State::dialogs`, bottom to top; only the top one takes input).
@@ -150,7 +154,7 @@ pub struct Modal {
 }
 
 impl Modal {
-    fn new(body: Body) -> Modal {
+    pub(crate) fn new(body: Body) -> Modal {
         Modal { body, at: None, rect: Cell::new(Rect::new(0.0, 0.0, 0.0, 0.0)) }
     }
 }
@@ -182,6 +186,11 @@ pub enum DHit {
     FilterItem(usize),
     Accept,
     Cancel,
+    /// Manage shortcuts: a row's box (opens its list), an entry of the open list, Reset all and Apply.
+    Shortcut(usize),
+    ShortcutChoice(usize),
+    ResetAll,
+    Apply,
 }
 
 /// A one-line text field: the text, the caret (in characters) and whether all of it is selected (typing replaces it).
@@ -386,6 +395,7 @@ impl App {
                 }
                 f.then
             }
+            Body::Shortcuts(f) => return self.shortcuts_closed(&f, reply == Reply::Button(Answer::Ok)),
         };
         // The replace question answers the Save dialog under it.
         if let Then::Replace(p) = then {
@@ -402,13 +412,14 @@ impl App {
         Some(match &self.state.dialogs.last()?.body {
             Body::Msg(m) => Reply::Button(m.escape()),
             Body::File(_) => Reply::File(None),
+            Body::Shortcuts(_) => Reply::Button(Answer::Cancel),
         })
     }
 
     fn top_file(&mut self) -> Option<&mut FileDlg> {
         match &mut self.state.dialogs.last_mut()?.body {
             Body::File(f) => Some(f),
-            Body::Msg(_) => None,
+            Body::Msg(_) | Body::Shortcuts(_) => None,
         }
     }
 
@@ -439,6 +450,13 @@ impl App {
                 return;
             }
         }
+        // So does a Manage shortcuts list.
+        if let Body::Shortcuts(f) = &mut m.body {
+            if f.open.is_some() && !matches!(h, DHit::ShortcutChoice(_) | DHit::Shortcut(_)) {
+                f.open = None;
+                return;
+            }
+        }
         match h {
             DHit::Body | DHit::List if !matches!(m.body, Body::File(_)) => {}
             DHit::Caption => self.drag = Some(Drag::Dialog { dx: x - r.x, dy: y - r.y }),
@@ -455,10 +473,25 @@ impl App {
             DHit::Button(i) => {
                 let a = match &m.body {
                     Body::Msg(msg) => msg.buttons.get(i).copied(),
-                    Body::File(_) => None,
+                    Body::File(_) | Body::Shortcuts(_) => None,
                 };
                 if let Some(a) = a {
                     self.answer(Reply::Button(a));
+                }
+            }
+            // Manage shortcuts: Apply keeps the form and closes; a box opens or closes its list; an entry is picked
+            // (a swap within its group, `Form::pick`); Reset all fills in the defaults.
+            DHit::Apply => self.answer(Reply::Button(Answer::Ok)),
+            DHit::Shortcut(_) | DHit::ShortcutChoice(_) | DHit::ResetAll => {
+                let Body::Shortcuts(f) = &mut m.body else { return };
+                match h {
+                    DHit::Shortcut(row) => f.open = if f.open == Some(row) { None } else { Some(row) },
+                    DHit::ShortcutChoice(v) => {
+                        if let Some(row) = f.open.take() {
+                            f.pick(row, v);
+                        }
+                    }
+                    _ => f.reset(),
                 }
             }
             _ => {
@@ -570,6 +603,12 @@ impl App {
                 FileKey::Outcome(o) => self.file_outcome(o),
                 FileKey::Cancel => self.answer(Reply::File(None)),
             },
+            // Manage shortcuts: Esc closes an open list, else the window (as its ×).
+            Body::Shortcuts(f) => {
+                if matches!(key, Key::Named(NamedKey::Escape)) && f.open.take().is_none() {
+                    self.answer(Reply::Button(Answer::Cancel));
+                }
+            }
         }
     }
 
@@ -614,7 +653,7 @@ impl App {
     pub fn top_message(&self) -> Option<(String, String)> {
         match &self.state.dialogs.last()?.body {
             Body::Msg(m) => Some((m.title.clone(), m.plain())),
-            Body::File(_) => None,
+            Body::File(_) | Body::Shortcuts(_) => None,
         }
     }
 }

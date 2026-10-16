@@ -2269,18 +2269,24 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
     if let Some(ci) = hit {
         let c = clips(s)[ci];
         // Double-clicking an audio clip opens its channel's sampler and selects that channel in the rack (§9); a
-        // pattern clip makes its pattern the current one and opens the piano roll (§2b, as FL does).
+        // pattern clip makes its pattern the current one and opens the piano roll (§2b, as FL does). Which modifier
+        // opens what on an audio clip is General ▸ Input ▸ Manage shortcuts' (`crate::shortcuts::clip_double_click`):
+        // Show clip properties does nothing yet (no clip properties window); with neither row's modifier (a row set to
+        // "(disabled)"), the second click is a plain one.
         if !right && matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select) {
             let audio = audio_clip_row(s, &c);
             if audio.is_some() || matches!(c.source, ClipSource::Pattern(_)) {
                 let now = std::time::Instant::now();
                 let double = s.playlist.last_clip.is_some_and(|(i, t)| i == ci && now.duration_since(t).as_millis() < 450);
                 s.playlist.last_clip = (!double).then_some((ci, now));
-                if double {
+                let opens = audio.map(|_| crate::shortcuts::clip_double_click(alt));
+                if double && opens != Some(None) {
                     if let Some(row) = audio {
-                        s.rack.select_only(row);
-                        s.pending_open = Some(row);
-                        app.focus_channel(row);
+                        if opens == Some(Some(crate::shortcuts::ClipOpen::Channel)) {
+                            s.rack.select_only(row);
+                            s.pending_open = Some(row);
+                            app.focus_channel(row);
+                        }
                     } else {
                         run(app, Cmd::ClipEditSource(ci));
                     }
