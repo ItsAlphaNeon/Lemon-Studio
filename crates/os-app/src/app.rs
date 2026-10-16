@@ -7156,6 +7156,105 @@ mod tests {
         assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false });
     }
 
+    // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project"
+    /// Settings > General ▸ Miscellaneous: "Alternate meter scale" (off by default) and "Create automation clips at
+    /// the playback position" (on) switch with a click. The alternate scale is live on the mixer: the "C" column's
+    /// read-out at the height where the default scale has −45 dB reads −30 dB.
+    #[test]
+    fn misc_settings_meter_scale_and_automation_clips() {
+        use crate::mixer::MHit;
+        use crate::prefs::{self, ALTERNATE_METER_SCALE as ALT, AUTOMATION_AT_PLAYBACK_POSITION as AT_POS};
+        use crate::views::settings::{SAct, GENERAL};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        assert_eq!((prefs::check(&ALT), prefs::check(&AT_POS)), (false, true), "the defaults");
+        let mut app = App::new(None);
+        app.open_settings(GENERAL);
+        let above = ["Display", "Language", "Input", "Undo history", "Hints and warnings", "System", "Updates and privacy"];
+        app.state.settings.folded.extend(above);
+        frame(&mut app, &mut c, None);
+        for (check, said) in [(&ALT, "Alternate meter scale: on"), (&AT_POS, "Create automation clips at the playback position: off")] {
+            assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(check.label)), "{} works", check.label);
+            let r = hit_rect(&app, &Action::Settings(SAct::Check(check.label)));
+            click(&mut app, &mut c, r);
+            assert_eq!(app.state.message.as_deref(), Some(said));
+        }
+        assert_eq!((prefs::check(&ALT), prefs::check(&AT_POS)), (true, false));
+        // The mixer's level scale reads levels through the alternate scale while it is on.
+        app.state.settings.open = false;
+        app.state.z = vec![Win::Mixer];
+        let floor = app.state.mixer.meter_cfg.v[crate::meters::k::FLOOR_DB];
+        let read = |app: &mut App, c: &mut Canvas| -> f32 {
+            frame(app, c, None);
+            let r = hit_rect(app, &Action::Mix(MHit::Scale));
+            app.mouse_move(r.cx(), r.bottom() - crate::meters::frac(-45.0, floor, false) * r.h);
+            frame(app, c, None);
+            let h = app.hits.iter().rev().find(|h| h.action == Action::Mix(MHit::Scale)).map(|h| h.hint.to_string()).unwrap();
+            h.split_whitespace().nth(1).and_then(|v| v.trim_end_matches("dB").parse().ok()).unwrap_or_else(|| panic!("{h}"))
+        };
+        assert!((read(&mut app, &mut c) + 30.0).abs() < 0.05, "alternate");
+        prefs::set_check(&ALT, false);
+        assert!((read(&mut app, &mut c) + 45.0).abs() < 0.05, "default");
+    }
+
+    // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project"
+    /// The mixer's "C" column: the default scale's +3, 0, 3 … 45; the alternate scale's 0, 3 … 30 with no +3, 0 at
+    /// the same height, each mark where the default scale has the level the measured table gives (30 where 45 is).
+    #[test]
+    fn alternate_meter_scale_marks() {
+        use crate::views::mixer::scale_marks;
+        let floor = crate::meters::Settings::default().v[crate::meters::k::FLOOR_DB];
+        let off = scale_marks(false, floor);
+        assert_eq!((off.len(), off[0], off[1], off[16]), (17, ("3", 181.0), ("0", 241.0), ("45", 880.0)));
+        let on = scale_marks(true, floor);
+        let labels: Vec<&str> = on.iter().map(|m| m.0).collect();
+        assert_eq!(labels, ["0", "3", "6", "9", "12", "15", "18", "21", "24", "27", "30"]);
+        assert_eq!((on[0].1, on[10].1), (241.0, 880.0), "0 stays, 30 where 45 is");
+        // "3" where the default scale has −6.6 dB: a fifth of the way from its "6" (360) to its "9" (419).
+        assert!((on[1].1 - 371.8).abs() < 1e-3, "{}", on[1].1);
+    }
+
+    // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project"
+    /// "Create automation clips at the playback position", the measured run on an empty playlist: on at bar 5 the clip
+    /// covers bars 5–6 (the song is empty: the pattern's length, 1 bar); off, bars 1–6 on the next track; on at bar
+    /// 2, bars 2–6 on the track after that. A muted clip does not count for the song's end; a time selection sets
+    /// the clip either way.
+    #[test]
+    fn automation_clips_start_at_the_playback_position() {
+        use crate::playlist as pl;
+        use crate::prefs::{self, AUTOMATION_AT_PLAYBACK_POSITION as AT_POS};
+        let mut app = App::new(None);
+        let s = &mut app.state;
+        pl::arr_mut(s).clips.clear();
+        let current = s.pattern;
+        if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == current) {
+            (p.notes, p.length) = (Vec::new(), None);
+        }
+        let bar = s.project.bar_ticks();
+        let last = |s: &State| pl::clips(s).last().map(|c| (c.position / bar, c.end() / bar, c.track)).unwrap();
+        s.playlist.pos = 4 * bar;
+        pl::create_automation(s, 0, "Auto", 0.5);
+        assert_eq!(last(s), (4, 5, 0), "on, at bar 5");
+        prefs::set_check(&AT_POS, false);
+        pl::create_automation(s, 0, "Auto", 0.5);
+        assert_eq!(last(s), (0, 5, 1), "off: from bar 1 to the song's end");
+        prefs::set_check(&AT_POS, true);
+        s.playlist.pos = bar;
+        pl::create_automation(s, 0, "Auto", 0.5);
+        assert_eq!(last(s), (1, 5, 2), "on, at bar 2");
+        // A muted clip ending at bar 11 does not count; from bar 7 the song has ended: one pattern length.
+        pl::arr_mut(s).clips.push(os_model::Clip { muted: true, ..os_model::Clip::new(0, 10 * bar, 6, os_model::ClipSource::Pattern(1)) });
+        s.playlist.pos = 6 * bar;
+        pl::create_automation(s, 0, "Auto", 0.5);
+        assert_eq!(last(s), (6, 7, 7));
+        // A time selection sets the clip, whatever the check.
+        for on in [true, false] {
+            prefs::set_check(&AT_POS, on);
+            s.playlist.range = Some((bar, 3 * bar));
+            pl::create_automation(s, 0, "Auto", 0.5);
+            assert_eq!(last(s).0..last(s).1, 1..3, "time selection, check {on}");
+        }
+    }
+
     /// Settings > Project ▸ Advanced ▸ Panning law (spec: ui/settings-choices.md "Project", audio/gain-laws.md
     /// "Panning law: Triangular"): FL's two choices with the project's marked; a pick changes event 23 at once (the
     /// engine gets the project again, the project counts as changed), saved and opened again, also patched in an
