@@ -489,14 +489,18 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 id::INFO_167 if l.info_167.is_none() => l.info_167 = Some(i),
                 id::INFO_202 if l.info_202.is_none() => l.info_202 = Some(i),
                 id::WORK_TIME if l.work_time.is_none() => l.work_time = Some(i),
-                v if id::OTHER_PROJECT.contains(&v) => l.other_project = Some(i),
+                v if id::OTHER_PROJECT.contains(&v) => {
+                    l.other_project = Some(i);
+                    if v != 10 && !l.unread_settings.iter().any(|&(k, _)| k == v) {
+                        l.unread_settings.push((v, i));
+                    }
+                }
                 id::CURRENT_PATTERN => l.current_pattern = Some(i),
                 id::SWING if l.swing.is_none() => l.swing = Some(i),
                 id::TIME_NUM if l.time_num.is_none() => l.time_num = Some(i),
                 id::TIME_DEN if l.time_den.is_none() => l.time_den = Some(i),
                 id::PLAY_TRUNCATED if l.truncated.is_none() => l.truncated = Some(i),
                 id::MAIN_PITCH if l.main_pitch.is_none() => l.main_pitch = Some(i),
-                9 | 35 | 23 | 44 if !l.unread_settings.iter().any(|&(k, _)| k == e.id) => l.unread_settings.push((e.id, i)),
                 id::GROUP_NAME => l.groups.push(i),
                 id::CURRENT_GROUP => l.current_group = Some(i),
                 _ => {}
