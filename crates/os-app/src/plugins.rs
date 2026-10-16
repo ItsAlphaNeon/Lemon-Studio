@@ -599,21 +599,31 @@ impl Plugins {
         lemon_parametric_eq_2::params::fl_from_plugin_state(&p.save_state()?)
     }
 
-    /// Loads sample `path` into row `row`'s Lemon Sampler: its current state with a new `sample-path`, so every other
-    /// setting stays. False when the row hosts nothing or the plugin refused the state.
     /// Row `row`'s Lemon Sampler takes the stretch settings `sound` holds (§9b), keeping its other settings.
     pub fn set_sampler_stretch(&mut self, row: usize, sound: &os_model::ChannelSound) -> bool {
-        let Some(h) = self.hosted.get(&row) else { return false };
-        let Ok(mut p) = h.plugin.lock() else { return false };
-        let set = stretch_params(sound);
-        let Some(new) = p.save_state().and_then(|b| with_params(&b, &set)) else { return false };
-        p.load_state(&new)
+        self.set_sampler(row, None, &stretch_params(sound))
     }
 
+    /// Loads sample `path` into row `row`'s Lemon Sampler: its current state with a new `sample-path`, so every other
+    /// setting stays. False when the row hosts nothing or the plugin refused the state.
     pub fn load_sample(&mut self, row: usize, path: &str) -> bool {
+        self.set_sampler(row, Some(path), &[])
+    }
+
+    /// Row `row`'s Lemon Sampler takes parameters `set` and, with `path`, that sample, in one change of its state:
+    /// every other setting stays. False when the row hosts nothing or the plugin refused the state.
+    pub fn set_sampler(&mut self, row: usize, path: Option<&str>, set: &[(&str, serde_json::Value)]) -> bool {
         let Some(h) = self.hosted.get(&row) else { return false };
         let Ok(mut p) = h.plugin.lock() else { return false };
-        let Some(new) = p.save_state().and_then(|b| with_sample_path(&b, path)) else { return false };
+        let Some(mut new) = p.save_state() else { return false };
+        if let Some(path) = path {
+            let Some(b) = with_sample_path(&new, path) else { return false };
+            new = b;
+        }
+        if !set.is_empty() {
+            let Some(b) = with_params(&new, set) else { return false };
+            new = b;
+        }
         p.load_state(&new)
     }
 
@@ -1366,6 +1376,15 @@ fn channel_params(ch: &os_model::Channel, frames: impl FnOnce() -> Option<u64>) 
         }
     }
     out
+}
+
+/// Lemon Sampler's parameters for what loading a sample may read into its channel (`rack::read_tags`): the root note
+/// and the stretch settings.
+pub fn tag_params(ch: &os_model::Channel) -> Vec<(&'static str, serde_json::Value)> {
+    let root = i32::from(ch.misc.root).clamp(0, lemon_sampler::params::KEY_MAX);
+    let mut set = vec![("root", serde_json::json!({ "i32": root }))];
+    set.extend(stretch_params(&ch.sound));
+    set
 }
 
 /// Writes an edit of one of Lemon Sampler's root note page parameters (`name`, at normalized value `norm`) into the

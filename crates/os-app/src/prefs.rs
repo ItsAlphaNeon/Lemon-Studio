@@ -265,6 +265,16 @@ pub const UNDO_HISTORY_IN_BROWSER: Check =
 /// Spec: as above.
 pub const RECENT_CHANGES_TOP: Check = Check { key: "undo_history_newest_first", label: "Show recent changes at the top", default: false };
 
+/// General ▸ Advanced: a WAV loaded into a sampler channel sets its root note to the file's `smpl` unity note, C5 (60)
+/// without one; off, the root note stays (`rack::read_tags`). Spec: ui/settings-choices.md "Advanced: Read sample root
+/// note and Read sample tempo information (2026-10-16)".
+pub const READ_ROOT_NOTE: Check = Check { key: "read_sample_root_note", label: "Read sample root note", default: true };
+
+/// General ▸ Advanced: a WAV with an `acid` beat count loaded into a sampler channel is fitted to those beats (stretch
+/// method Auto, TIME the beat count); without one, or off, the time stretching stays (`rack::read_tags`). Spec: as
+/// above.
+pub const READ_TEMPO: Check = Check { key: "read_sample_tempo", label: "Read sample tempo information", default: true };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -295,6 +305,8 @@ pub const CHECKS: &[&Check] = &[
     &UNDONE_RECORDINGS_TO_BIN,
     &UNDO_HISTORY_IN_BROWSER,
     &RECENT_CHANGES_TOP,
+    &READ_ROOT_NOTE,
+    &READ_TEMPO,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS];

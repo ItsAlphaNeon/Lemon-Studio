@@ -503,6 +503,7 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
         return Some("The selected channel is not a sampler".into());
     }
     crate::rack::auto_name(ch, std::path::Path::new(&path));
+    crate::rack::read_tags(ch, std::path::Path::new(&path));
     ch.sample_path = Some(path.clone());
     let row = s.selected_channel;
     s.sample_loads.push((row, path));

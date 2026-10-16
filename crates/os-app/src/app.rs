@@ -1835,12 +1835,16 @@ impl App {
             self.sync_native();
         }
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
+            if !self.state.hosted_rows.contains(&row) {
+                continue;
+            }
+            // The root note and stretch settings the load may have read from the file (`rack::read_tags`) go with it.
+            let set = self.state.project.channels.get(row).map(crate::plugins::tag_params).unwrap_or_default();
             // A row hosted this tick already started from its channel's sample.
-            if self.state.hosted_rows.contains(&row) && self.plugins.sampler_path(row).as_deref() != Some(path.as_str()) {
-                if !self.plugins.load_sample(row, &path) {
-                    self.state.message = Some(format!("Lemon Sampler did not take {path}"));
-                    self.invalidate();
-                }
+            let new = self.plugins.sampler_path(row).as_deref() != Some(path.as_str());
+            if !self.plugins.set_sampler(row, new.then_some(path.as_str()), &set) {
+                self.state.message = Some(format!("Lemon Sampler did not take {path}"));
+                self.invalidate();
             }
         }
         // A native generator waits for its first check in a child process (`Plugins::instrument_ready`).
@@ -3128,7 +3132,7 @@ impl App {
     /// A sample dropped on the channel rack at window y `y` (spec: ui/channel-rack.md, New project / drops): onto a
     /// sampler row it replaces that channel's sample (Lemon Sampler loads it) and renames the channel after the file
     /// while "Auto name channels" is on (`rack::auto_name`); elsewhere it adds a Lemon Sampler channel named after the
-    /// file.
+    /// file. Either channel reads the file's root note and beats (`rack::read_tags`).
     pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
         let s = &mut self.state;
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
@@ -3145,6 +3149,7 @@ impl App {
             }
         };
         let ch = &mut s.project.channels[row];
+        crate::rack::read_tags(ch, std::path::Path::new(&path));
         ch.sample_path = Some(path);
         s.selected_channel = row;
         s.rack.select_only(row);
@@ -3175,7 +3180,11 @@ impl App {
         if self.plugins.drop_file(row, x, y, path, sampler) {
             if let Some(ch) = self.state.project.channels.get_mut(row).filter(|_| sampler) {
                 crate::rack::auto_name(ch, std::path::Path::new(path));
+                crate::rack::read_tags(ch, std::path::Path::new(path));
                 ch.sample_path = Some(path.to_string());
+                // The plugin loads the file itself: it takes what the load read alongside.
+                let set = crate::plugins::tag_params(ch);
+                self.plugins.set_sampler(row, None, &set);
             }
             self.state.message = Some(format!("{} loaded in the plugin", name.unwrap_or_default()));
         } else {

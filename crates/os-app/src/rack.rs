@@ -1314,12 +1314,40 @@ pub fn auto_name(ch: &mut os_model::Channel, path: &std::path::Path) {
     }
 }
 
-/// The sample chosen in Load sample...: row `r`'s channel takes it (and its name, `auto_name`).
+/// Sample `path` went into sampler channel `ch` from the file dialog, the browser or a drop: what its WAV chunks say
+/// is read into the channel (spec: ui/settings-choices.md "Advanced: Read sample root note and Read sample tempo
+/// information (2026-10-16)"; `os_engine::sample::wav_tags`).
+/// - "Read sample root note" on: the root note becomes the `smpl` chunk's unity note, C5 (60) without one (any file
+///   that isn't a WAV too). Off: it stays.
+/// - "Read sample tempo information" on: an `acid` chunk's beat count (above 0) sets the stretch method to Auto and
+///   TIME to the beats, in 1/192 of a beat; PITCH and the multiplier stay. Without one, or off, the stretch stays.
+///
+/// Part of the load: it has no undo step of its own. Project loading and previews don't come here; audio clip channels
+/// keep their settings (not measured).
+pub fn read_tags(ch: &mut os_model::Channel, path: &std::path::Path) {
+    use crate::prefs::{check, READ_ROOT_NOTE, READ_TEMPO};
+    let (root, tempo) = (check(&READ_ROOT_NOTE), check(&READ_TEMPO));
+    if ch.kind != os_model::ChannelKind::Sampler || !(root || tempo) {
+        return;
+    }
+    let tags = os_engine::sample::wav_tags(path);
+    if root {
+        ch.misc.root = tags.unity_note.unwrap_or(60);
+    }
+    if let Some(beats) = tags.beats.filter(|_| tempo) {
+        ch.sound.stretch[0] = ((f64::from(beats) * 192.0) as f32).to_bits();
+        ch.sound.stretch[3] = os_model::stretch_mode::AUTO as u32;
+    }
+}
+
+/// The sample chosen in Load sample...: row `r`'s channel takes it (and its name, `auto_name`, and what the file says,
+/// `read_tags`).
 pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
     let s = &mut app.state;
     let path = p.to_string_lossy().into_owned();
     if let Some(ch) = s.project.channels.get_mut(r) {
         auto_name(ch, &p);
+        read_tags(ch, &p);
         ch.sample_path = Some(path.clone());
     }
     s.sample_loads.push((r, path));
@@ -2332,5 +2360,217 @@ mod tests {
         press(&mut app, false, 7, 4);
         assert_eq!(steps(&app), vec![4, 5, 6, 7], "left drag leftwards");
         set_check(&BOTH_MOUSE_BUTTONS, false);
+    }
+
+    /// A RIFF chunk: id, little-endian length, body, a pad byte after an odd length.
+    fn riff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut c = id.to_vec();
+        c.extend((body.len() as u32).to_le_bytes());
+        c.extend(body);
+        if body.len() % 2 == 1 {
+            c.push(0);
+        }
+        c
+    }
+
+    /// `smpl` with MIDI unity note `note` (its 4th u32), no loops.
+    fn smpl(note: u32) -> Vec<u8> {
+        let b: Vec<u8> = [0, 0, 22675, note, 0, 0, 0, 0, 0].iter().flat_map(|v: &u32| v.to_le_bytes()).collect();
+        riff_chunk(b"smpl", &b)
+    }
+
+    /// `acid` with `beats` beats (at body offset 12) and root note `root` flagged as set, meter 4/4, tempo `bpm`.
+    fn acid(beats: u32, root: u16, bpm: f32) -> Vec<u8> {
+        let mut b = 2u32.to_le_bytes().to_vec();
+        b.extend(root.to_le_bytes());
+        b.extend(0x8000u16.to_le_bytes());
+        b.extend(0f32.to_le_bytes());
+        b.extend(beats.to_le_bytes());
+        b.extend([4, 0, 4, 0]);
+        b.extend(bpm.to_le_bytes());
+        riff_chunk(b"acid", &b)
+    }
+
+    /// A WAV of `secs` seconds of a 16-bit mono 44.1 kHz tone with chunks `extra` before `data`, in `dir` (the temp
+    /// folder when `None`) under a name of its own: tests run in parallel.
+    fn tagged_wav(dir: Option<&std::path::Path>, name: &str, secs: f32, extra: &[Vec<u8>]) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let k = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let frames = (44100.0 * secs) as usize;
+        let data: Vec<u8> = (0..frames).flat_map(|i| (((i as f32 * 0.0627).sin() * 8000.0) as i16).to_le_bytes()).collect();
+        let mut fmt = vec![1, 0, 1, 0];
+        fmt.extend(44100u32.to_le_bytes());
+        fmt.extend(88200u32.to_le_bytes());
+        fmt.extend([2, 0, 16, 0]);
+        let mut body = b"WAVE".to_vec();
+        body.extend(riff_chunk(b"fmt ", &fmt));
+        extra.iter().for_each(|c| body.extend(c));
+        body.extend(riff_chunk(b"data", &data));
+        let mut b = b"RIFF".to_vec();
+        b.extend((body.len() as u32).to_le_bytes());
+        b.extend(body);
+        let dir = dir.map_or_else(std::env::temp_dir, std::path::Path::to_path_buf);
+        let p = dir.join(format!("os-app-tags-{name}-{}-{k}.wav", std::process::id()));
+        std::fs::write(&p, b).unwrap();
+        p
+    }
+
+    /// TIME `beats` with the method Auto, PITCH and MUL as in `was`.
+    fn auto(beats: f32, was: [u32; 4]) -> [u32; 4] {
+        [(beats * 192.0).to_bits(), was[1], was[2], os_model::stretch_mode::AUTO as u32]
+    }
+
+    /// The default project's sampler row.
+    fn sampler_row(app: &App) -> usize {
+        (0..app.state.project.channels.len()).find(|&r| app.state.project.channels[r].kind == os_model::ChannelKind::Sampler).unwrap()
+    }
+
+    // spec: ui/settings-choices.md "Advanced: Read sample root note and Read sample tempo information (2026-10-16)"
+    /// Both checks on (as found): the measured table, file by file, loaded with Load sample... into a channel whose
+    /// root is 50 and whose stretch is Resample x2 at +300 cents. A file without `smpl` sets the root back to C5;
+    /// `acid`'s beats set Auto and TIME (its tempo and root unused), PITCH and MUL kept; a file without `acid`, or with
+    /// 0 beats, keeps the stretch. What the file says is part of the load: no history step of its own.
+    #[test]
+    fn loaded_wavs_set_the_root_note_and_beats() {
+        use crate::prefs::{check, READ_ROOT_NOTE, READ_TEMPO};
+        assert!(check(&READ_ROOT_NOTE) && check(&READ_TEMPO), "both on by default");
+        let mut app = App::new(None);
+        let r = sampler_row(&app);
+        let steps = app.state.history.len();
+        let was = [0, 300, 10000, 0];
+        let cases: [(&str, f32, Vec<Vec<u8>>, u8, [u32; 4]); 6] = [
+            ("none", 2.0, vec![], 60, was),
+            ("smpl72", 2.0, vec![smpl(72)], 72, was),
+            ("acid4", 2.0, vec![acid(4, 64, 120.0)], 60, auto(4.0, was)),
+            ("both", 2.0, vec![smpl(67), acid(4, 60, 95.0)], 67, auto(4.0, was)),
+            // 8 beats at 120 BPM would last 4 s: the beats count, not the tempo.
+            ("acid8", 2.0, vec![acid(8, 60, 120.0)], 60, auto(8.0, was)),
+            ("acid0", 2.0, vec![acid(0, 60, 120.0)], 60, was),
+        ];
+        for (name, secs, extra, root, stretch) in cases {
+            let ch = &mut app.state.project.channels[r];
+            (ch.misc.root, ch.sound.stretch) = (50, was);
+            let p = tagged_wav(None, name, secs, &extra);
+            sample_chosen(&mut app, r, p.clone());
+            let ch = &app.state.project.channels[r];
+            assert_eq!((ch.misc.root, ch.sound.stretch), (root, stretch), "{name}");
+            assert_eq!(ch.sample_path.as_deref(), Some(p.to_string_lossy().as_ref()));
+            let _ = std::fs::remove_file(p);
+        }
+        // A plain file after an `acid` one keeps Auto and its TIME.
+        let (fitted, plain) = (tagged_wav(None, "fitted", 0.5, &[acid(4, 0, 120.0)]), tagged_wav(None, "plain", 0.5, &[]));
+        app.state.project.channels[r].sound.stretch = was;
+        sample_chosen(&mut app, r, fitted.clone());
+        sample_chosen(&mut app, r, plain.clone());
+        assert_eq!(app.state.project.channels[r].sound.stretch, auto(4.0, was));
+        assert_eq!(app.state.history.len(), steps, "no step of its own");
+        // A file that isn't a WAV (or can't be read) has no `smpl` either.
+        app.state.project.channels[r].misc.root = 50;
+        read_tags(&mut app.state.project.channels[r], std::path::Path::new("Z:/no such folder/loop.mp3"));
+        assert_eq!(app.state.project.channels[r].misc.root, 60);
+        for p in [fitted, plain] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// Off, each check leaves its setting as the channel had it; one off doesn't stop the other.
+    #[test]
+    fn read_sample_checks_off_leave_the_channel() {
+        use crate::prefs::{set_check, READ_ROOT_NOTE, READ_TEMPO};
+        let mut app = App::new(None);
+        let r = sampler_row(&app);
+        let was = [0, 0, 0, 0];
+        let both = tagged_wav(None, "off", 0.5, &[smpl(72), acid(4, 64, 120.0)]);
+        let load = |app: &mut App, root: bool, tempo: bool| {
+            set_check(&READ_ROOT_NOTE, root);
+            set_check(&READ_TEMPO, tempo);
+            let ch = &mut app.state.project.channels[r];
+            (ch.misc.root, ch.sound.stretch) = (50, was);
+            sample_chosen(app, r, both.clone());
+            let ch = &app.state.project.channels[r];
+            (ch.misc.root, ch.sound.stretch)
+        };
+        assert_eq!(load(&mut app, false, false), (50, was), "both off");
+        assert_eq!(load(&mut app, true, false), (72, was), "root note only");
+        assert_eq!(load(&mut app, false, true), (50, auto(4.0, was)), "tempo only");
+        assert_eq!(load(&mut app, true, true), (72, auto(4.0, was)), "both on");
+        let _ = std::fs::remove_file(both);
+    }
+
+    /// Every way a sample goes into a sampler channel reads it: a drop on the row, a drop below the rows (a new
+    /// channel), the browser's send. An audio clip channel keeps its settings.
+    #[test]
+    fn every_sample_load_reads_the_file() {
+        use crate::browser::BCmd;
+        let mut app = App::new(None);
+        let r = sampler_row(&app);
+        let y = crate::views::rack::name_rect(&app.state, r).unwrap().cy();
+        let was = app.state.project.channels[r].sound.stretch;
+        let dropped = tagged_wav(None, "drop", 0.5, &[smpl(72)]);
+        app.sample_to_rack(dropped.to_string_lossy().into_owned(), y);
+        assert_eq!(app.state.project.channels[r].misc.root, 72, "a drop on the row");
+        let new = tagged_wav(None, "new", 0.5, &[smpl(67), acid(4, 60, 95.0)]);
+        let n = app.state.project.channels.len();
+        app.sample_to_rack(new.to_string_lossy().into_owned(), crate::views::rack::rect(&app.state).bottom() + 40.0);
+        assert_eq!(app.state.project.channels.len(), n + 1);
+        let ch = &app.state.project.channels[n];
+        assert_eq!((ch.misc.root, ch.sound.stretch), (67, auto(4.0, [0; 4])), "a drop below the rows");
+        // The browser's send, from a folder holding one sample.
+        let dir = std::env::temp_dir().join(format!("os-app-tags-browser-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sent = tagged_wav(Some(&dir), "sent", 0.5, &[smpl(71), acid(2, 0, 120.0)]);
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(crate::views::browser::disk_key(&dir));
+        app.state.selected_channel = r;
+        app.browser_cmd(BCmd::Send(1));
+        let ch = &app.state.project.channels[r];
+        assert_eq!(ch.sample_path.as_deref(), Some(sent.to_string_lossy().as_ref()));
+        assert_eq!((ch.misc.root, ch.sound.stretch), (71, auto(2.0, was)), "the browser's send");
+        // Not measured for audio clip channels: they keep theirs.
+        let mut clip = app.state.project.channels[r].clone();
+        (clip.kind, clip.misc.root) = (os_model::ChannelKind::AudioClip, 50);
+        read_tags(&mut clip, &new);
+        assert_eq!((clip.misc.root, clip.sound.stretch), (50, auto(2.0, was)));
+        for p in [dropped, new] {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The channel's Lemon Sampler gets the root note and stretch the load read, with the sample, in the next tick;
+    /// a plain file after it keeps the stretch there too.
+    #[test]
+    fn lemon_sampler_takes_what_the_load_read() {
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let r = sampler_row(&app);
+        app.plugin_tick();
+        assert!(app.state.hosted_rows.contains(&r), "Lemon Sampler hosts the row");
+        let params = |app: &App| {
+            let st = app.plugins.state(r).expect("state");
+            let json = if st.first() == Some(&b'{') { &st[..] } else { &st[8..] };
+            serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"].clone()
+        };
+        let read = |app: &App| {
+            let p = params(app);
+            let steps = lemon_sampler::params::time_steps(p["ts_time"]["f32"].as_f64().unwrap() as f32);
+            (p["root"]["i32"].as_i64().unwrap(), p["ts_mode"]["i32"].as_i64().unwrap(), steps.round() as i64)
+        };
+        let auto_index = i64::from(lemon_sampler::params::stretch_index(os_model::stretch_mode::AUTO));
+        let both = tagged_wav(None, "hosted", 0.5, &[smpl(67), acid(4, 60, 95.0)]);
+        sample_chosen(&mut app, r, both.clone());
+        app.plugin_tick();
+        assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(both.to_string_lossy().as_ref()));
+        assert_eq!(read(&app), (67, auto_index, 16), "root 67, Auto, 4 beats = 16 steps");
+        let plain = tagged_wav(None, "hosted-plain", 0.5, &[]);
+        sample_chosen(&mut app, r, plain.clone());
+        app.plugin_tick();
+        assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(plain.to_string_lossy().as_ref()));
+        assert_eq!(read(&app), (60, auto_index, 16), "back to C5, the stretch kept");
+        for p in [both, plain] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
