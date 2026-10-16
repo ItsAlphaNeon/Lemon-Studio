@@ -162,6 +162,8 @@ pub enum Action {
     Tempo,
     Menu(usize),
     MenuItem(usize, usize),
+    /// A ▸ entry of a menu bar dropdown (menu, flat item index): opens its submenu (`views::menus::submenu`).
+    MenuSub(usize, usize),
     ToggleWin(Win),
     PatternPrev,
     PatternNext,
@@ -791,6 +793,8 @@ pub struct State {
     pub pattern: u16,
     pub song_mode: bool,
     pub menu_open: Option<usize>,
+    /// The open dropdown's submenu, shown as `playlist.popup`: the flat index of its ▸ entry.
+    pub menu_sub: Option<usize>,
     /// Piano roll event panel Control menu.
     pub lane_menu: bool,
     /// Settings window (OPTIONS > ... settings, F10 / F11).
@@ -1065,6 +1069,7 @@ impl App {
                 pattern: 1,
                 song_mode: false,
                 menu_open: None,
+                menu_sub: None,
                 lane_menu: false,
                 settings: views::settings::SettingsUi { native: os_native::settings_shown(), ..Default::default() },
                 playlist_scroll: (0.0, 0.0),
@@ -3803,7 +3808,12 @@ impl App {
         // Playlist popup menus close on any click outside them; a click elsewhere accepts an open text box.
         if self.state.playlist.popup.is_some() && !matches!(action, Some(Action::PlPopup(_) | Action::PlPopupSub(_))) {
             self.state.playlist.popup = None;
-            return;
+            // A dropdown's submenu: the click goes on to the dropdown (below), but one on the submenu's own ▸ entry only
+            // closes it.
+            match self.state.menu_sub.take() {
+                Some(i) if self.state.menu_open.is_some() && !matches!(action, Some(Action::MenuSub(_, j)) if j == i) => {}
+                _ => return,
+            }
         }
         // The pattern name box / delete confirmation are modal: a click outside accepts the box.
         if (self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm) && !matches!(action, Some(Action::Pat(_))) {
@@ -3832,8 +3842,8 @@ impl App {
             return;
         }
         // Any click outside an open menu closes it. VIEW's window entries are window toggles: one clicked in the menu
-        // closes the menu and toggles its window.
-        if self.state.menu_open.is_some() && !matches!(action, Some(Action::MenuItem(..)) | Some(Action::Menu(_))) {
+        // closes the menu and toggles its window. Its open submenu takes its own clicks.
+        if self.state.menu_open.is_some() && !matches!(action, Some(Action::MenuItem(..) | Action::MenuSub(..) | Action::Menu(_) | Action::PlPopup(_) | Action::PlPopupSub(_))) {
             self.state.menu_open = None;
             if !(matches!(action, Some(Action::ToggleWin(_))) && self.overlays.iter().any(|r| r.contains(x, y))) {
                 return;
@@ -4066,6 +4076,10 @@ impl App {
         let action = self.top_hit(x, y).map(|h| h.action.clone());
         if self.state.menu_open.is_some() {
             self.state.menu_open = None;
+            // With its submenu.
+            if self.state.menu_sub.take().is_some() {
+                self.state.playlist.popup = None;
+            }
             self.invalidate();
             return;
         }
@@ -4907,6 +4921,7 @@ impl App {
             Key::Named(NamedKey::Escape) if self.state.settings.open => self.state.settings.open = false,
             Key::Named(NamedKey::Escape) => {
                 self.state.menu_open = None;
+                self.state.menu_sub = None;
                 self.state.playlist.popup = None;
                 self.state.piano.clear_selection();
             }
@@ -5383,6 +5398,10 @@ impl App {
             }
             _ => return false,
         }
+        // A pick in a dropdown's submenu closes the dropdown with it.
+        if matches!(a, Action::PlPopup(_) | Action::PlPopupSub(_)) && self.state.playlist.popup.is_none() && self.state.menu_sub.take().is_some() {
+            self.state.menu_open = None;
+        }
         self.invalidate();
         true
     }
@@ -5538,11 +5557,13 @@ impl App {
             Action::Menu(i) => {
                 s.pat_ui.menu_at = None;
                 s.menu_open = if s.menu_open == Some(i) { None } else { Some(i) };
+                s.menu_sub = None;
             }
             Action::MenuItem(m, i) => {
                 s.menu_open = None;
                 self.menu_item(m, i);
             }
+            Action::MenuSub(m, i) => self.open_menu_sub(m, i),
             // Show a hidden window, bring a covered one to the front, hide one already in front
             // (spec: ui/channel-rack.md §5).
             Action::ToggleWin(Win::Browser) => s.show_browser = !s.show_browser,
@@ -5991,6 +6012,11 @@ impl App {
                 self.open_plugin_menu(crate::plugin_menu::Target::Gen(None), at);
             }
             (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Refresh plugin list (fast scan)") => self.start_scan(crate::plugin_db::Mode::Changed),
+            // The plugin menus' display mode, as their own radios set it (spec: ui/plugin-menu.md §2-3).
+            (ADD_MENU, i) if item_at(ADD_MENU, i).and_then(|it| menu_view(ADD_MENU, it.label)).is_some() => {
+                let v = item_at(ADD_MENU, i).and_then(|it| menu_view(ADD_MENU, it.label)).expect("checked");
+                self.state.message = crate::plugin_menu::run(self, crate::plugin_menu::PlugCmd::View(v));
+            }
             (HELP_MENU, HELP_ABOUT) => {
                 self.state.message = Some(concat!("Lemon Studio ", env!("CARGO_PKG_VERSION"), " (pre-alpha), free software under the GNU GPL v3 or later").into());
             }
@@ -6052,6 +6078,16 @@ impl App {
                 self.state.message = Some(format!("{label}: not available yet"));
             }
         }
+    }
+
+    /// A ▸ entry of the open dropdown (spec: ui/menus.md "Look"): its submenu, the app's own popup, opens to the right
+    /// of the row as the popups' submenus do (kept on screen); the dropdown stays open under it.
+    fn open_menu_sub(&mut self, menu: usize, i: usize) {
+        let Some(fill) = views::menus::item_at(menu, i).and_then(|it| views::menus::submenu(menu, it.label)) else { return };
+        let at = self.hits.iter().rev().find(|h| h.action == Action::MenuSub(menu, i)).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
+        let items = fill(&self.state);
+        self.state.playlist.popup = Some(crate::playlist::Popup { x: at.right(), y: at.y - 2.0, items, sub: None });
+        self.state.menu_sub = Some(i);
     }
 }
 
@@ -11447,6 +11483,139 @@ mod tests {
         // An empty mixer slot's menu lists the effects for that slot.
         let m = crate::mixer::effect_menu(&app.state, 4, 0.0, 0.0);
         assert!(m.items.iter().any(|i| i.cmd == Cmd::Plugin(PlugCmd::Effect { index, slot: Some(4) })));
+    }
+
+    /// The menu bar dropdown's ▸ entries (spec: ui/menus.md "Look"): a click opens the submenu, the app's popup, to the
+    /// right of the row over the dropdown, which stays open; a click on the entry again closes it, one elsewhere closes
+    /// both; a pick closes both. TOOLS > Change declicking for selected channels to ▸ sets the mode of every selected
+    /// channel, in the channel and its Lemon Sampler, for playback (spec: ui/channel-rack.md §17, audio/declick.md).
+    #[test]
+    fn dropdown_submenu_changes_declicking_of_selected_channels() {
+        use views::menus::{DECLICK_LABEL, TOOLS_MENU};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        app.sync_samplers(None);
+        app.mark_saved();
+        assert!(app.state.hosted_rows.contains(&1), "Lemon Sampler plays the sampler channels");
+        app.state.rack.sel = [1, 3].into();
+        let entry = views::menus::MENUS[TOOLS_MENU].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == DECLICK_LABEL).unwrap();
+        frame(&mut app, &mut c, None);
+        let tools = hit_rect(&app, &Action::Menu(TOOLS_MENU));
+        click(&mut app, &mut c, tools);
+        let row = hit_rect(&app, &Action::MenuSub(TOOLS_MENU, entry));
+        click(&mut app, &mut c, row);
+        let p = app.state.playlist.popup.clone().expect("the submenu opens");
+        assert_eq!((app.state.menu_open, app.state.menu_sub), (Some(TOOLS_MENU), Some(entry)), "over the open dropdown");
+        assert_eq!((p.x, p.y), (row.right(), row.y - 2.0), "right of its row");
+        assert_eq!(p.items, crate::rack::declick_items(&app.state));
+        // The entry again closes the submenu only; a click elsewhere closes both.
+        click(&mut app, &mut c, row);
+        assert!(app.state.playlist.popup.is_none() && app.state.menu_open == Some(TOOLS_MENU));
+        click(&mut app, &mut c, row);
+        assert!(app.state.playlist.popup.is_some());
+        click(&mut app, &mut c, Rect::new(1500.0, 900.0, 4.0, 4.0));
+        assert!(app.state.playlist.popup.is_none() && app.state.menu_open.is_none());
+        // Generic (bleeding) = mode 3 on the selected channels only.
+        click(&mut app, &mut c, tools);
+        click(&mut app, &mut c, row);
+        let item = hit_rect(&app, &Action::PlPopup(3));
+        assert!(app.top_hit(item.cx(), item.cy()).is_some_and(|h| h.action == Action::PlPopup(3)), "the submenu is over the dropdown");
+        app.state.piano.dirty = false;
+        click(&mut app, &mut c, item);
+        assert!(app.state.playlist.popup.is_none() && app.state.menu_open.is_none(), "a pick closes both");
+        let modes: Vec<u8> = app.state.project.channels.iter().map(|ch| ch.sound.declick).collect();
+        assert_eq!(modes, [0, 3, 0, 3, 0]);
+        assert!(app.unsaved() && app.state.piano.dirty, "a change to the project, played at once");
+        // Lemon Sampler plays the new mode (and a save keeps it): the change reaches it on the next UI tick.
+        app.plugin_tick();
+        let mut ch = app.state.project.channels[1].clone();
+        ch.sound.declick = 0;
+        crate::plugins::store_sampler(&mut ch, &app.plugins.state(1).unwrap());
+        assert_eq!(ch.sound.declick, 3);
+        // Without a selection the modes are greyed out and change nothing.
+        app.state.rack.sel.clear();
+        assert!(crate::rack::declick_items(&app.state).iter().all(|i| !i.enabled));
+        click(&mut app, &mut c, tools);
+        click(&mut app, &mut c, row);
+        let item = hit_rect(&app, &Action::PlPopup(5));
+        click(&mut app, &mut c, item);
+        assert_eq!(app.state.project.channels[1].sound.declick, 3);
+        // The channel rack's options menu has the same submenu.
+        app.state.rack.sel = [0].into();
+        let rack = crate::rack::options_menu(&app.state, 0.0, 0.0);
+        let sub = rack.items.iter().find(|i| i.label == DECLICK_LABEL).expect("in the rack's options menu");
+        assert_eq!(sub.children, crate::rack::declick_items(&app.state));
+        crate::playlist::run(&mut app, sub.children[4].cmd.clone());
+        assert_eq!(app.state.project.channels[0].sound.declick, 4);
+    }
+
+    /// TOOLS / the channel rack's options > Switch all plugin editors to ▸ (spec: ui/channel-rack.md §17, ui/plugin-window.md
+    /// "Docking"): every hosted instance's window, the channels' and the mixer effects', docked or detached, kept for a
+    /// window that is closed.
+    #[cfg(plugin_windows)]
+    #[test]
+    fn switch_all_plugin_editors() {
+        use views::menus::{submenu, EDITORS_LABEL, TOOLS_MENU};
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        app.plugins.effects = crate::plugins::builtin_effects();
+        app.sync_samplers(None);
+        app.plugins.create_effect(1, 0, 0, None).expect("an effect in a mixer slot");
+        assert!(app.plugins.hosted.len() >= 2 && app.plugins.hosted.values().all(|h| h.detached.is_none()));
+        let items = submenu(TOOLS_MENU, EDITORS_LABEL).unwrap()(&app.state);
+        let rack = crate::rack::options_menu(&app.state, 0.0, 0.0);
+        assert_eq!(rack.items.iter().find(|i| i.label == EDITORS_LABEL).map(|i| &i.children), Some(&items), "the rack's is the same");
+        crate::playlist::run(&mut app, items[1].cmd.clone());
+        assert!(app.plugins.hosted.values().all(|h| h.detached == Some(true)), "Detached");
+        crate::playlist::run(&mut app, items[0].cmd.clone());
+        assert!(app.plugins.hosted.values().all(|h| h.detached == Some(false)), "Attached");
+    }
+
+    /// ADD > Effect ▸: the effect plugin menu as a submenu; a pick goes into the selected mixer track's first empty
+    /// slot as from F8, and a full track takes nothing (spec: ui/plugin-menu.md §1).
+    #[test]
+    fn add_effect_submenu_fills_the_selected_track() {
+        use crate::playlist::Cmd;
+        use crate::plugin_menu::PlugCmd;
+        use views::menus::ADD_MENU;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.plugins = crate::plugins::Plugins::builtins();
+        app.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
+        app.state.plugdb.rebuild(&app.plugins);
+        crate::mixer::select(&mut app.state, 2, false);
+        let index = app.plugins.effects.len() - 1;
+        let entry = views::menus::MENUS[ADD_MENU].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == "Effect").unwrap();
+        let pick = |app: &mut App, c: &mut Canvas| {
+            frame(app, c, None);
+            let add = hit_rect(app, &Action::Menu(ADD_MENU));
+            click(app, c, add);
+            let row = hit_rect(app, &Action::MenuSub(ADD_MENU, entry));
+            click(app, c, row);
+            let p = app.state.playlist.popup.clone().expect("the effect menu opens");
+            assert!(!p.items.iter().any(|i| i.label == "Generators"), "effects only");
+            assert!(p.items.iter().any(|i| i.label == "Manage plugins..."));
+            let i = p.items.iter().position(|i| i.cmd == Cmd::Plugin(PlugCmd::Effect { index, slot: None })).expect("Test FX is listed");
+            let item = hit_rect(app, &Action::PlPopup(i));
+            click(app, c, item);
+        };
+        app.state.project.mixer[2].slots[0] = Some(os_model::SlotPlugin { name: "Taken".into(), state: Vec::new() });
+        pick(&mut app, &mut c);
+        assert_eq!(crate::mixer::slot_name(&app.state, 2, 1).as_deref(), Some("Test FX"));
+        assert!(app.state.menu_open.is_none() && app.state.playlist.popup.is_none());
+        // Every slot in use: nothing is added.
+        for slot in &mut app.state.project.mixer[2].slots {
+            slot.get_or_insert(os_model::SlotPlugin { name: "Taken".into(), state: Vec::new() });
+        }
+        let before = app.state.project.mixer[2].slots.clone();
+        pick(&mut app, &mut c);
+        assert_eq!(app.state.project.mixer[2].slots, before);
+        assert_eq!(app.state.message.as_deref(), Some("Every slot of this track is in use"));
     }
 
     /// Settings > Plugins (spec: ui/plugin-manager.md §2, §4): Add folder... keeps the folder and scans it in the

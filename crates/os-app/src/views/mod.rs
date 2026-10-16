@@ -127,12 +127,12 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     ui.part(Seg::Toolbar, Rect::new(0.0, 0.0, w, WORK_Y), |ui| toolbar::paint(ui, s, f, w));
     let overlays = ui.hit_count();
-    // A menu opened from the settings window (Audio page combos) goes over it.
-    if !s.settings.open {
-        playlist::paint_overlays(ui, s);
-    }
     if let Some(m) = s.menu_open {
         menus::paint_dropdown(ui, s, m);
+    }
+    // A menu opened from the settings window (Audio page combos) goes over it; a dropdown's submenu over the dropdown.
+    if !s.settings.open {
+        playlist::paint_overlays(ui, s);
     }
     rack::paint_fill(ui, s);
     patterns::paint(ui, s);

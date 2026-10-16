@@ -38,7 +38,7 @@ pub struct Item {
     /// Implemented in this build.
     pub works: bool,
     pub mark: Mark,
-    /// Opens a submenu (contents not captured yet; drawn with an arrow).
+    /// Opens a submenu (drawn with an arrow); `submenu` gives the ones built so far, the others are greyed out.
     pub sub: bool,
 }
 
@@ -137,9 +137,10 @@ const ADD_PLUGINS: &[Item] = &[
     it("Automation clip", ""),
     it("Layer", ""),
     SEP,
-    it("Categories", "").radio(true),
-    it("Simple", "").radio(false),
-    it("Tree", "").radio(false),
+    // The plugin menus' display mode (spec: ui/plugin-menu.md §2-3; `mark_of` puts the dot).
+    it("Categories", "").radio(true).on(),
+    it("Simple", "").radio(false).on(),
+    it("By vendor", "").radio(false).on(),
 ];
 const ADD_OTHER: &[Item] = &[
     head("Other"),
@@ -280,9 +281,9 @@ const TOOLS_B: &[Item] = &[
     it("Unlock all playlist tracks from content", ""),
     it("Reset empty playlist tracks", "").on(),
     it("Delete unused files and save project", ""),
-    it("Switch all plugin editors to", "").sub(),
+    it(EDITORS_LABEL, "").sub(),
     it("Set keyboard focus for all plugins to", "").sub(),
-    it("Change declicking for selected channels to", "").sub(),
+    it(DECLICK_LABEL, "").sub(),
 ];
 
 const HELP: &[Item] = &[
@@ -352,7 +353,8 @@ fn win_of(label: &str) -> Option<Win> {
 }
 
 /// Whether an entry does something in this build: its static flag, or one of the label-dispatched commands
-/// `App::menu_item` handles (settings tabs, pattern commands, window toggles, plugin picker, undo).
+/// `App::menu_item` handles (settings tabs, pattern commands, window toggles, plugin picker, undo), or a ▸ entry whose
+/// submenu is built.
 pub fn works(menu: usize, item: &Item) -> bool {
     item.works
         || ((menu == OPTIONS_MENU || menu == ADD_MENU) && crate::views::settings::tab_for_menu(item.label).is_some())
@@ -360,6 +362,7 @@ pub fn works(menu: usize, item: &Item) -> bool {
         || (menu == VIEW && (win_of(item.label).is_some() || item.label == "Plugin picker"))
         || (menu == EDIT_MENU && item.label == "Undo")
         || crate::params::menu_handles(item.label)
+        || opens_sub(menu, item)
 }
 
 fn item_action(menu: usize, i: usize, item: &Item) -> Action {
@@ -368,12 +371,48 @@ fn item_action(menu: usize, i: usize, item: &Item) -> Action {
             return Action::ToggleWin(w);
         }
     }
+    if opens_sub(menu, item) {
+        return Action::MenuSub(menu, i);
+    }
     Action::MenuItem(menu, i)
 }
 
+/// A ▸ entry whose submenu the dropdown opens (`submenu`). Last tweaked ▸ and Next to last tweaked ▸ open theirs at the
+/// mouse from `App::menu_item` instead (`params::menu_handles`).
+fn opens_sub(menu: usize, item: &Item) -> bool {
+    item.sub && submenu(menu, item.label).is_some()
+}
+
+/// TOOLS > Switch all plugin editors to ▸ and Change declicking for selected channels to ▸, also in the channel rack's
+/// options menu (spec: ui/channel-rack.md §17).
+pub const EDITORS_LABEL: &str = "Switch all plugin editors to";
+pub const DECLICK_LABEL: &str = "Change declicking for selected channels to";
+
+/// What fills the submenu of ▸ entry `label` of `menu`: the app's own popup items, as the same submenu shows them
+/// elsewhere (the channel rack's options menu, the plugin menus). `None` while it is not built: the entry stays greyed
+/// out. The dropdown opens it to the right of the row (`App::open_menu_sub`).
+pub fn submenu(menu: usize, label: &str) -> Option<fn(&State) -> Vec<crate::playlist::PItem>> {
+    match (menu, label) {
+        // spec: ui/plugin-menu.md §1: the effects, a pick into the selected mixer track's first empty slot as from F8.
+        (ADD_MENU, "Effect") => Some(|s| crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(None), true)),
+        (TOOLS_MENU, EDITORS_LABEL) => Some(|_| crate::rack::editor_items()),
+        (TOOLS_MENU, DECLICK_LABEL) => Some(crate::rack::declick_items),
+        _ => None,
+    }
+}
+
+/// ADD > Categories / Simple / By vendor: the plugin menus' display mode the radio picks (spec: ui/plugin-menu.md §3).
+pub fn menu_view(menu: usize, label: &str) -> Option<crate::plugin_db::MenuView> {
+    let views = if menu == ADD_MENU { crate::plugin_menu::VIEWS } else { &[] };
+    views.iter().find(|(l, _)| *l == label).map(|&(_, v)| v)
+}
+
 /// An entry's tick or radio state now: window entries follow their window (the browser its panel), the typing keyboard
-/// switch its toggle; other ticks are drawn unticked.
+/// switch its toggle, ADD's display modes the plugin menus' mode; other ticks are drawn unticked.
 fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
+    if let (Mark::Radio(_), Some(v)) = (item.mark, menu_view(menu, item.label)) {
+        return Mark::Radio(s.plugdb.prefs.menu_view == v);
+    }
     match (item.mark, menu == VIEW) {
         // The browser is a panel of its own, shown by its own switch.
         (Mark::Check(_), true) if item.label == "Browser" => Mark::Check(s.show_browser),
@@ -388,7 +427,7 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
 
 // ---------------------------------------------------------------------------------------------------------------
 // The menus as a native menu bar shows them (macOS): the same entries and what they do, built from `MENUS` and the
-// project as the dropdown is, so the two never differ.
+// project as the dropdown is, so the two never differ (but for the ▸ entries: no native submenus yet).
 
 /// One row of a menu in the native menu bar.
 #[derive(Clone, PartialEq)]
@@ -429,7 +468,8 @@ pub fn bar_model(s: &State) -> Vec<BarMenu> {
                     }
                 }
                 for item in items.iter() {
-                    let enabled = item.kind == Kind::Item && works(mi, item);
+                    // Native submenus are not built yet: a ▸ entry the dropdown opens stays greyed out there.
+                    let enabled = item.kind == Kind::Item && works(mi, item) && !opens_sub(mi, item);
                     let pick = enabled.then_some((mi, flat));
                     rows.push(BarRow { kind: item.kind, label: item.label.to_string(), shortcut: item.shortcut, enabled, mark: mark_of(s, mi, item), pick });
                     flat += 1;
@@ -506,6 +546,8 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
     let font = Font::new(14);
     // Text sits where it does at 100 %, moved by half of what the row lost.
     let dy = (row - os_ui::kit::menu::ROW) / 2.0;
+    // The ▸ entry whose submenu is open stays lit, as in the app's popups.
+    let open = s.menu_sub.filter(|_| s.playlist.popup.is_some());
     let mut cx = r.x + border;
     let mut flat = 0usize;
     for (ci, (cw, items)) in m.cols.iter().enumerate() {
@@ -548,7 +590,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                     let ok = works(menu, item);
                     // Greyed-out entries never light up; they only say they are not available yet.
                     if ok {
-                        if ui.hit(rr, item_action(menu, flat, item), item.label) {
+                        if ui.hit(rr, item_action(menu, flat, item), item.label) || open == Some(flat) {
                             if lemon {
                                 os_ui::kit::row_highlight(ui.c, t, rr);
                             } else {
@@ -620,7 +662,8 @@ mod tests {
     }
 
     /// The native menu bar (macOS) is the dropdowns: every entry in order, greyed out and ticked alike, choosing one
-    /// doing what the dropdown's does, and the project's patterns in PATTERNS.
+    /// doing what the dropdown's does, and the project's patterns in PATTERNS. Its ▸ entries stay greyed out (no native
+    /// submenus yet).
     #[test]
     fn bar_model_follows_the_dropdowns() {
         let mut app = crate::app::App::new(None);
@@ -632,7 +675,7 @@ mod tests {
             // The columns' separator rows aside, the rows are the items.
             let rows: Vec<&BarRow> = rows.into_iter().filter(|r| r.kind != Kind::Sep || items.iter().any(|it| it.kind == Kind::Sep)).collect();
             let named: Vec<(&str, bool)> = rows.iter().filter(|r| r.kind == Kind::Item).map(|r| (r.label.as_str(), r.enabled)).collect();
-            let want: Vec<(&str, bool)> = items.iter().filter(|it| it.kind == Kind::Item).map(|it| (it.label, works(mi, it))).collect();
+            let want: Vec<(&str, bool)> = items.iter().filter(|it| it.kind == Kind::Item).map(|it| (it.label, works(mi, it) && !opens_sub(mi, it))).collect();
             assert_eq!(named, want, "{}", m.title);
         }
         let save = bar[0].rows.iter().find(|r| r.label == "Save").unwrap();
@@ -649,6 +692,62 @@ mod tests {
         app.state.hide(Win::Playlist);
         let playlist = bar_model(&app.state)[VIEW].rows.iter().find(|r| r.label == "Playlist").unwrap().clone();
         assert_eq!(playlist.mark, Mark::Check(false));
+        let declick = bar[TOOLS_MENU].rows.iter().find(|r| r.label == DECLICK_LABEL).unwrap();
+        assert_eq!((declick.enabled, declick.pick), (false, None), "no native submenus yet");
+    }
+
+    /// The ▸ entries with a built submenu work, and open it; the others stay greyed out (spec: ui/menus.md "Look").
+    #[test]
+    fn built_submenus_work_the_others_stay_greyed() {
+        let app = crate::app::App::new(None);
+        let mut built = Vec::new();
+        for (mi, m) in MENUS.iter().enumerate() {
+            for (i, it) in m.cols.iter().flat_map(|(_, items)| items.iter()).enumerate().filter(|(_, it)| it.sub) {
+                let built_here = submenu(mi, it.label).is_some();
+                assert_eq!(works(mi, it), built_here || crate::params::menu_handles(it.label), "{}", it.label);
+                assert_eq!(item_action(mi, i, it) == Action::MenuSub(mi, i), built_here, "{}", it.label);
+                if built_here {
+                    built.push(it.label);
+                }
+            }
+        }
+        assert_eq!(built, ["Effect", EDITORS_LABEL, DECLICK_LABEL]);
+        let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
+        let modes = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
+        assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");
+        assert_eq!(labels(TOOLS_MENU, EDITORS_LABEL), ["Attached", "Detached"]);
+        // ADD > Effect: the effect plugin menu as a submenu (spec: ui/plugin-menu.md §1-2).
+        let fx = submenu(ADD_MENU, "Effect").unwrap()(&app.state);
+        assert_eq!(fx, crate::plugin_menu::items(&app.state, crate::plugin_menu::Target::Fx(None), true));
+        for label in ["New from template", "Import", "Toolbars", "One-click audio recording", "Set keyboard focus for all plugins to"] {
+            let (mi, it) = MENUS.iter().enumerate().find_map(|(mi, m)| m.cols.iter().flat_map(|(_, items)| items.iter()).find(|it| it.label == label).map(|it| (mi, it))).unwrap();
+            assert!(!works(mi, it), "{label} stays greyed out");
+        }
+    }
+
+    /// ADD's Categories / Simple / By vendor are the plugin menus' display mode: the dot follows it, a pick sets it as
+    /// the plugin menus' own radios do (spec: ui/plugin-menu.md §2-3).
+    #[test]
+    fn add_radios_are_the_plugin_menus_display_mode() {
+        use crate::plugin_db::MenuView;
+        let mut app = crate::app::App::new(None);
+        let index = |label: &str| MENUS[ADD_MENU].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == label).unwrap();
+        let radios = |app: &crate::app::App| {
+            let add = &bar_model(&app.state)[ADD_MENU];
+            ["Categories", "Simple", "By vendor"].map(|l| add.rows.iter().find(|r| r.label == l).map(|r| (r.enabled, r.mark)).unwrap())
+        };
+        assert_eq!(app.state.plugdb.prefs.menu_view, MenuView::Categories);
+        assert_eq!(radios(&app), [(true, Mark::Radio(true)), (true, Mark::Radio(false)), (true, Mark::Radio(false))]);
+        app.menu_item(ADD_MENU, index("By vendor"));
+        assert_eq!(app.state.plugdb.prefs.menu_view, MenuView::Vendor);
+        assert_eq!(radios(&app), [(true, Mark::Radio(false)), (true, Mark::Radio(false)), (true, Mark::Radio(true))]);
+        // The plugin menus show the same choice; their own radio changes ADD's.
+        let footer = crate::plugin_menu::items(&app.state, crate::plugin_menu::Target::All, false);
+        assert_eq!(footer.iter().find(|i| i.label == "By vendor").map(|i| i.mark), Some(crate::playlist::Mark::Radio(true)));
+        crate::plugin_menu::run(&mut app, crate::plugin_menu::PlugCmd::View(MenuView::Simple));
+        assert_eq!(radios(&app)[1], (true, Mark::Radio(true)));
+        app.menu_item(ADD_MENU, index("Categories"));
+        assert_eq!(app.state.plugdb.prefs.menu_view, MenuView::Categories);
     }
 }
 

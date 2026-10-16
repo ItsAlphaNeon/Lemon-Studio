@@ -101,20 +101,17 @@ fn section(s: &State, effect: bool, target: Target, nested: bool) -> Vec<PItem> 
     v
 }
 
+/// The display modes as their radio items name them (spec §2-3); ADD's radios are the same.
+pub const VIEWS: &[(&str, MenuView)] = &[("Categories", MenuView::Categories), ("Simple", MenuView::Simple), ("By vendor", MenuView::Vendor)];
+
 /// After the lists (spec §2): Find new plugins, Manage plugins..., the display modes.
 fn footer(s: &State) -> Vec<PItem> {
     let view = s.plugdb.prefs.menu_view;
     let scanning = s.plugdb.progress.is_some();
     let find = PItem::new(if scanning { "Find new plugins (scanning...)" } else { "Find new plugins" }, Cmd::Plugin(PlugCmd::Find));
-    vec![
-        PItem::sep(),
-        if scanning { find.off() } else { find },
-        PItem::new("Manage plugins...", Cmd::Plugin(PlugCmd::Manage)),
-        PItem::sep(),
-        PItem::new("Categories", Cmd::Plugin(PlugCmd::View(MenuView::Categories))).mark(Mark::Radio(view == MenuView::Categories)),
-        PItem::new("Simple", Cmd::Plugin(PlugCmd::View(MenuView::Simple))).mark(Mark::Radio(view == MenuView::Simple)),
-        PItem::new("By vendor", Cmd::Plugin(PlugCmd::View(MenuView::Vendor))).mark(Mark::Radio(view == MenuView::Vendor)),
-    ]
+    let mut v = vec![PItem::sep(), if scanning { find.off() } else { find }, PItem::new("Manage plugins...", Cmd::Plugin(PlugCmd::Manage)), PItem::sep()];
+    v.extend(VIEWS.iter().map(|&(label, m)| PItem::new(label, Cmd::Plugin(PlugCmd::View(m))).mark(Mark::Radio(view == m))));
+    v
 }
 
 /// The entries of a plugin menu for `target`; `nested` when they fill a submenu.

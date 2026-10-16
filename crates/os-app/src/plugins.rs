@@ -44,6 +44,10 @@ pub struct Hosted {
     /// Set while the open editor belongs to a Lemon plugin that joined the strip (host link).
     #[cfg(plugin_windows)]
     pub link: Option<os_hostlink::Link>,
+    /// Its window docked (false) or detached (true), as last chosen for it (window menu > Detached, Switch all plugin
+    /// editors to ▸), kept while the window is closed; `None`: as new windows open (`Plugins::detach_new`).
+    #[cfg(plugin_windows)]
+    pub detached: Option<bool>,
     /// The app was told that the instance stopped after a crash.
     stop_told: bool,
     /// A native instance started from a project's state that it did not give back byte for byte: a save keeps the
@@ -89,6 +93,8 @@ impl Hosted {
             window: None,
             #[cfg(plugin_windows)]
             link: None,
+            #[cfg(plugin_windows)]
+            detached: None,
             stop_told: false,
             keep_file_state: false,
             stand_in: false,
@@ -684,7 +690,7 @@ impl Plugins {
     /// Opens (or raises) row `row`'s plugin window.
     #[cfg(plugin_windows)]
     pub fn open_window(&mut self, row: usize, info: ChannelInfo) -> Result<(), String> {
-        let (owner, scale) = (self.owner, self.scale);
+        let (owner, scale, detach_new) = (self.owner, self.scale, self.detach_new);
         let h = self.hosted.get_mut(&row).ok_or("not a plugin channel")?;
         if let Some(w) = &h.window {
             w.raise();
@@ -693,7 +699,7 @@ impl Plugins {
         let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
         let pos = crate::plugin_window::default_position(owner, scale);
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size.
-        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, self.detach_new)?;
+        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, h.detached.unwrap_or(detach_new))?;
         // Mixer effects have no channel strip (spec: ui/mixer.md §7).
         if row >= FX_KEY {
             w.set_strip(false);
@@ -769,11 +775,25 @@ impl Plugins {
         self.hosted.get(&row).and_then(|h| h.window.as_ref()).map(|w| (w.hwnd(), w.detached()))
     }
 
-    /// Docks or detaches row `row`'s window (window menu > Detached).
+    /// Docks or detaches row `row`'s window (window menu > Detached); closed, it opens that way next time.
     #[cfg(plugin_windows)]
-    pub fn set_detached(&self, row: usize, on: bool) {
-        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
-            w.set_detached(self.owner, on);
+    pub fn set_detached(&mut self, row: usize, on: bool) {
+        let owner = self.owner;
+        if let Some(h) = self.hosted.get_mut(&row) {
+            h.detached = Some(on);
+            if let Some(w) = &h.window {
+                w.set_detached(owner, on);
+            }
+        }
+    }
+
+    /// Switch all plugin editors to ▸ (spec: ui/channel-rack.md §17): every instance's window, rack rows' and mixer
+    /// slots', docked or detached; an open one at once, a closed one when it opens next.
+    #[cfg(plugin_windows)]
+    pub fn set_all_detached(&mut self, on: bool) {
+        let keys: Vec<usize> = self.hosted.keys().copied().collect();
+        for key in keys {
+            self.set_detached(key, on);
         }
     }
 

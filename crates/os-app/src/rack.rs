@@ -952,6 +952,10 @@ pub enum RCmd {
     TransposeSel,
     AssignFreeSel,
     SelectMixerTracks,
+    /// Change declicking for selected channels to ▸: declick mode 0..5 (spec: audio/declick.md).
+    DeclickSel(u8),
+    /// Switch all plugin editors to ▸: detached (true) or attached.
+    DetachAll(bool),
     ZipSel,
     UnzipAll,
     AutoResize(AutoResize),
@@ -1013,13 +1017,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::not_yet("Burn selected loops to pattern"),
         off(it("Assign selected to free mixer track(s)", RCmd::AssignFreeSel).key("Ctrl+L"), none),
         off(it("Select mixer tracks for the selected channels", RCmd::SelectMixerTracks), none),
-        PItem::sub(
-            "Change declicking for selected channels to",
-            ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"]
-                .into_iter()
-                .map(PItem::not_yet)
-                .collect(),
-        ),
+        PItem::sub(crate::views::menus::DECLICK_LABEL, declick_items(s)),
         PItem::sep(),
         off(it("Zip selected", RCmd::ZipSel).key("Alt+Z"), none),
         it("Unzip all", RCmd::UnzipAll).key("Alt+U"),
@@ -1057,7 +1055,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::not_yet("Switch smart disable for all plugins"),
         PItem::sub("Switch all audio clip channels to", vec![PItem::not_yet("Resample"), PItem::not_yet("Stretch")]),
         PItem::sub("Switch selected audio clip channels to", vec![PItem::not_yet("Resample"), PItem::not_yet("Stretch")]),
-        PItem::sub("Switch all plugin editors to", vec![PItem::not_yet("Attached"), PItem::not_yet("Detached")]),
+        PItem::sub(crate::views::menus::EDITORS_LABEL, editor_items()),
     ];
     Popup { x, y, items, sub: None }
 }
@@ -1066,6 +1064,43 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
 pub(crate) fn add_one_items(s: &State) -> Vec<PItem> {
     crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(None), true)
 }
+
+/// Change declicking for selected channels to ▸ (§17, also TOOLS): the six declick modes in their order, named as Lemon
+/// Sampler's list names them (spec: audio/declick.md), greyed out while no channel is selected.
+pub(crate) fn declick_items(s: &State) -> Vec<PItem> {
+    let none = s.rack.sel.is_empty();
+    lemon_sampler::params::DECLICK
+        .iter()
+        .enumerate()
+        .map(|(m, &label)| {
+            let i = it(label, RCmd::DeclickSel(m as u8));
+            if none { i.off() } else { i }
+        })
+        .collect()
+}
+
+/// Switch all plugin editors to ▸ (§17 "Switch", also TOOLS; spec: ui/plugin-window.md "Docking"); greyed out where
+/// plugin editors have no windows of their own.
+pub(crate) fn editor_items() -> Vec<PItem> {
+    let item = |label: &'static str, on: bool| if cfg!(plugin_windows) { it(label, RCmd::DetachAll(on)) } else { it(label, RCmd::DetachAll(on)).off() };
+    vec![item("Attached", false), item("Detached", true)]
+}
+
+/// Every selected channel (`rows`) takes declick mode `mode`: the channel's sound settings, which the engine plays, and
+/// a sampler channel's Lemon Sampler, which plays it in their place (spec: audio/declick.md, plugins/lemon-sampler.md §7).
+fn set_declick(app: &mut App, rows: &[usize], mode: u8) {
+    for &r in rows {
+        let Some(c) = app.state.project.channels.get_mut(r) else { continue };
+        c.sound.declick = mode;
+        if c.kind.is_sampler() {
+            app.plugins.set_param_named(r, SAMPLER_DECLICK, f64::from(mode));
+        }
+    }
+    app.state.piano.dirty = true;
+}
+
+/// Lemon Sampler's declick mode parameter (its index is the mode).
+const SAMPLER_DECLICK: &str = "Declicking mode";
 
 /// Right click on a name button (§18): two columns.
 pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
@@ -1270,6 +1305,10 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             app.focus_channel(r);
             app.state.raise(Win::PianoRoll);
         }
+        RCmd::DeclickSel(mode) => set_declick(app, &sel, mode),
+        // spec: ui/plugin-window.md "Docking and the window menu"
+        #[cfg(plugin_windows)]
+        RCmd::DetachAll(on) => app.plugins.set_all_detached(on),
         _ => {}
     }
     let s = &mut app.state;
@@ -1492,7 +1531,9 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::MoveSel(_)
         | RCmd::Sort(_)
         | RCmd::LoadSample(_)
-        | RCmd::PianoRoll(_) => None,
+        | RCmd::PianoRoll(_)
+        | RCmd::DeclickSel(_)
+        | RCmd::DetachAll(_) => None,
     };
     app.invalidate();
     msg
