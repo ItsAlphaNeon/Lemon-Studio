@@ -129,7 +129,10 @@ mod tests {
 
     /// A sample file for new audio clips.
     fn wav(name: &str) -> String {
-        let p = std::env::temp_dir().join(format!("os-app-clip-colors-{name}-{}.wav", std::process::id()));
+        // One file per call: tests run in parallel, and one writing the file while another loads it fails the load.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let k = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("os-app-clip-colors-{name}-{}-{k}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&p).unwrap(), 48000, &[0.25; 9600]).unwrap();
         p.to_string_lossy().into_owned()
     }
