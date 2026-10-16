@@ -13238,4 +13238,100 @@ mod tests {
         assert_eq!((r.format.as_str(), r.name.as_str(), r.state == kars), (d.format.as_str(), d.name.as_str(), true));
         println!("Kars' changed copy saved as {} ({} bytes of state)", r.format, kars.len());
     }
+
+    /// The header's menus and switches as pictures, for looking (not an assertion): `OS_HEADER_SHOT=<folder>`.
+    #[test]
+    fn header_shot() {
+        use crate::views::toolbar::Switch;
+        use views::menus::{ADD_MENU, MENUS, PATTERNS, VIEW};
+        let Some(out) = std::env::var_os("OS_HEADER_SHOT") else { return };
+        let out = std::path::PathBuf::from(out);
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.pattern = 1;
+        // Kick on every beat, a clap on 2 and 4; two clips of the pattern.
+        let note = |ch: u16, at: u32| Note { length: 48, ..Note::step(ch, at) };
+        app.state.project.patterns[0].notes = vec![note(0, 0), note(1, 96), note(0, 192), note(1, 288), note(0, 384), note(1, 480)];
+        crate::playlist::arr_mut(&mut app.state).clips = vec![
+            os_model::Clip::new(0, 768, 0, os_model::ClipSource::Pattern(1)),
+            os_model::Clip::new(1536, 768, 2, os_model::ClipSource::Pattern(1)),
+        ];
+        let save = |app: &mut App, c: &mut Canvas, name: &str| {
+            app.invalidate();
+            frame(app, c, None);
+            c.pixmap.save_png(out.join(format!("{name}.png"))).unwrap();
+        };
+        let entry = |m: usize, label: &str| MENUS[m].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == label).unwrap();
+        save(&mut app, &mut c, "01_default");
+        // The Toolbars menu on the hint panel.
+        app.mouse_move(200.0, 20.0);
+        app.mouse_down_right();
+        app.mouse_up();
+        save(&mut app, &mut c, "02_toolbars_menu");
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        // VIEW > Toolbars ▸.
+        frame(&mut app, &mut c, None);
+        let view = hit_rect(&app, &Action::Menu(VIEW));
+        click(&mut app, &mut c, view);
+        let row = hit_rect(&app, &Action::MenuSub(VIEW, entry(VIEW, "Toolbars")));
+        click(&mut app, &mut c, row);
+        save(&mut app, &mut c, "03_view_toolbars");
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        // Flat buttons, no separators, the hint bar, a button hovered.
+        app.toolbar_switch(Switch::Flat);
+        app.toolbar_switch(Switch::Separators);
+        app.toolbar_switch(Switch::HintBar);
+        frame(&mut app, &mut c, None);
+        let save_btn = app.hits.iter().find(|h| h.hint.starts_with("Save")).map(|h| h.rect).unwrap();
+        app.mouse_move(save_btn.cx(), save_btn.cy());
+        save(&mut app, &mut c, "04_flat_noseps_hintbar");
+        app.toolbar_switch(Switch::Flat);
+        app.toolbar_switch(Switch::Separators);
+        app.toolbar_switch(Switch::HintBar);
+        app.toolbar_switch(Switch::Hide);
+        save(&mut app, &mut c, "05_hidden");
+        app.toolbar_switch(Switch::Hide);
+        // The clock in SMPTE and in B:B:T, a second and a half in.
+        app.state.clock.mode = crate::clock::Mode::Smpte(4);
+        save(&mut app, &mut c, "06_clock_smpte");
+        app.state.clock.mode = crate::clock::Mode::Bar;
+        app.state.clock.beat = true;
+        let clock = hit_rect(&app, &Action::Clock);
+        app.mouse_move(clock.cx(), clock.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        save(&mut app, &mut c, "07_clock_menu");
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        app.state.clock = Default::default();
+        // ADD and PATTERNS menus.
+        frame(&mut app, &mut c, None);
+        let add = hit_rect(&app, &Action::Menu(ADD_MENU));
+        click(&mut app, &mut c, add);
+        save(&mut app, &mut c, "08_add_menu");
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        frame(&mut app, &mut c, None);
+        let pats = hit_rect(&app, &Action::Menu(PATTERNS));
+        click(&mut app, &mut c, pats);
+        save(&mut app, &mut c, "09_patterns_menu");
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        // The time signature dialog, then 3/8 in the piano roll.
+        app.menu_item(PATTERNS, entry(PATTERNS, "Set time signature..."));
+        save(&mut app, &mut c, "10_timesig_dialog");
+        app.state.dialogs.clear();
+        crate::timesig::set_start(&mut app.state, 1, 3, 8);
+        app.act(Action::ShowMax(Win::PianoRoll));
+        save(&mut app, &mut c, "11_piano_3_8");
+        app.act(Action::ShowMax(Win::Playlist));
+        save(&mut app, &mut c, "11b_playlist_3_8");
+        // Split by channel, then the playlist.
+        app.menu_item(PATTERNS, entry(PATTERNS, "Split by channel"));
+        save(&mut app, &mut c, "12_split_playlist");
+        // ADD > Automation clip and Audio clip.
+        app.menu_item(ADD_MENU, entry(ADD_MENU, "Automation clip"));
+        save(&mut app, &mut c, "13_automation_clip");
+        app.menu_item(ADD_MENU, entry(ADD_MENU, "Audio clip"));
+        save(&mut app, &mut c, "14_audio_clip");
+    }
 }
