@@ -8,7 +8,7 @@
 //! project as opened or made). An edit records a step holding what it is about to change (`record`); undo and redo
 //! swap that with the project's, so a step always holds the other side of itself: the state before it while it is
 //! done, the state after it while it is undone. Covered: a pattern's notes, control points and length (the piano roll
-//! and the step sequencer), the playlist (`playlist::snapshot`) and knob turns.
+//! and the step sequencer), the playlist (`playlist::snapshot`), knob turns and sample loads (`load_sample`).
 //!
 //! The settings of General ▸ Undo history (`crate::prefs`): Maximum undo levels (past it the oldest step goes), Undo
 //! knob tweaks, Alternate undo mode (what Ctrl+Z and Ctrl+Alt+Z do), Show undo history in the browser when undoing
@@ -25,6 +25,8 @@ use crate::prefs;
 pub const LAST_RESET: &str = "Last reset";
 /// A step-sequencer step click (FL's name).
 pub const STEP_SEQ_EDIT: &str = "Step seq edit";
+/// A sample loaded into a channel (FL's name; spec: ui/settings-choices.md "Undo history: the four checks").
+pub const LOAD_SAMPLE: &str = "Load channel sample(s)";
 
 /// What a step changes, as it is on the other side of the step.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +37,12 @@ pub enum Snap {
     Playlist(Box<crate::playlist::Snapshot>),
     /// A knob's value: the model's own for the channel knobs, else the knob's 0..1.
     Knob(KnobId, f64),
+    /// What a sample load changes on channel `row`: its sample, its name ("Auto name channels"), its root note and its
+    /// stretch ("Read sample root note" and "Read sample tempo information", `rack::read_tags`).
+    Sample { row: usize, path: Option<String>, name: Option<String>, root: u8, stretch: [u32; 4] },
+    /// Channel `row` as a sample dropped below the rack's rows made it (`App::sample_to_rack`); `None` while it
+    /// doesn't exist. Only the last row comes and goes.
+    Channel { row: usize, ch: Option<Box<os_model::Channel>> },
 }
 
 impl Snap {
@@ -49,12 +57,22 @@ impl Snap {
         }
     }
 
+    /// Channel `row`'s side of a sample load as it is now (`Snap::Sample`).
+    pub fn sample(s: &State, row: usize) -> Option<Snap> {
+        let ch = s.project.channels.get(row)?;
+        let (path, name) = (ch.sample_path.clone(), ch.name.clone());
+        Some(Snap::Sample { row, path, name, root: ch.misc.root, stretch: ch.sound.stretch })
+    }
+
     /// What this covers, as the project has it now.
     fn now(&self, s: &State) -> Snap {
         match self {
             Snap::Pattern { number, .. } => Snap::pattern(s, *number),
             Snap::Playlist(_) => Snap::Playlist(Box::new(crate::playlist::capture(s))),
             Snap::Knob(id, _) => Snap::Knob(*id, knob_value(s, *id)),
+            // A channel gone since is left as the step has it (`put` does nothing then).
+            Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
+            Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.project.channels.get(*row).cloned().map(Box::new) },
         }
     }
 
@@ -69,6 +87,19 @@ impl Snap {
             }
             Snap::Playlist(p) => crate::playlist::restore(s, *p),
             Snap::Knob(id, v) => set_knob_value(s, id, v),
+            Snap::Sample { row, path, name, root, stretch } => {
+                if let Some(ch) = s.project.channels.get_mut(row) {
+                    (ch.sample_path, ch.name, ch.misc.root, ch.sound.stretch) = (path.clone(), name, root, stretch);
+                    // Its Lemon Sampler follows on the next tick: the sample (none: cleared), root note and stretch.
+                    s.sample_loads.push((row, path.unwrap_or_default()));
+                }
+            }
+            // The channel goes or comes back only as the last row: rows below it would move.
+            Snap::Channel { row, ch } => match ch {
+                None if row + 1 == s.project.channels.len() => crate::rack::remove_last(s),
+                Some(c) if row == s.project.channels.len() => crate::rack::push_channel(s, *c),
+                _ => {}
+            },
         }
         s.piano.dirty = true;
     }
@@ -192,6 +223,15 @@ pub fn record(s: &mut State, name: &'static str, snap: Snap) {
     h.trim();
 }
 
+/// Names the newest step `name` while its press is held (recorded since the last release): a gesture that turned into
+/// another edit, as a held click's clone (`crate::hold`). The step keeps what it holds.
+pub fn rename(s: &mut State, name: &'static str) {
+    let h = &mut s.history;
+    if h.fresh && h.done > 0 && h.done == h.steps.len() {
+        h.steps[h.done - 1].name = name;
+    }
+}
+
 /// Drops the newest step: its edit changed nothing after all.
 pub fn unrecord(s: &mut State) {
     let h = &mut s.history;
@@ -210,6 +250,13 @@ pub fn settle(s: &mut State) {
         unrecord(s);
     }
     s.history.fresh = false;
+}
+
+/// Before a sample loads into channel `row` (the file dialog, a drop, the browser's send): one step, "Load channel
+/// sample(s)", holding what the load changes. `row` past the last channel: the load makes that channel.
+pub fn load_sample(s: &mut State, row: usize) {
+    let snap = Snap::sample(s, row).unwrap_or(Snap::Channel { row: s.project.channels.len(), ch: None });
+    record(s, LOAD_SAMPLE, snap);
 }
 
 /// Before knob `id` turns: a step unless Undo knob tweaks is off. `wheel`: a mouse-wheel notch, which joins the step
@@ -368,7 +415,8 @@ pub fn rescale(s: &mut State, from: u16, to: u16) {
                 p.0.iter_mut().for_each(|c| c.rescale(from, to));
                 p.1.iter_mut().for_each(|m| m.rescale(from, to));
             }
-            Snap::Knob(..) => {}
+            // A channel holds no ticks.
+            Snap::Knob(..) | Snap::Sample { .. } | Snap::Channel { .. } => {}
         }
     }
 }

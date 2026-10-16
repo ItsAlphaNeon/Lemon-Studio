@@ -15,7 +15,8 @@
 //!
 //! A move of more than [`SLOP`] pixels first is an ordinary drag and ends the hold; short clicks work as before. The
 //! app's tick drives the timer ([`App::hold_tick`]), as the hold happens without mouse events. A gesture is one undo
-//! step: the snapshot its press already takes.
+//! step: the snapshot its press already takes, which a clone renames to its history name ("Piano roll clone note",
+//! "Playlist clone clip"; spec: ui/settings-choices.md "Undo history: the four checks").
 //!
 // spec: ui/settings-choices.md "Input: Click-and-hold and both mouse buttons (2026-10-16)"
 
@@ -139,6 +140,7 @@ impl App {
         let Some(Drag::NoteMove { x0, y0, orig }) = self.drag.clone() else { return };
         let (Some(g), Some(ch)) = (self.piano_geom(), piano::channel(&self.state)) else { return };
         let s = &mut self.state;
+        crate::history::rename(s, "Piano roll clone note");
         let selected = !s.piano.selection(s.pattern, Some(ch)).is_empty();
         let p = piano::pattern_mut(s);
         for &(i, o) in &orig {
@@ -166,6 +168,7 @@ impl App {
     fn pick_up_clips(&mut self) {
         let Some(Drag::Pl(PlDrag::Move { x0, y0, orig, fresh: false })) = self.drag.clone() else { return };
         let Some(grid) = self.pl_grid() else { return };
+        crate::history::rename(&mut self.state, "Playlist clone clip");
         let copies = pl::clone_clips(&mut self.state, &orig);
         let g = pl::PGeom::new(&self.state, grid);
         let unit = match pl::grid_snap(&self.state) {
@@ -306,6 +309,7 @@ mod tests {
         app.paint(&mut c, None);
         let unit = crate::piano_snap::unit(&app.state).expect("a snap");
         // Held, with a wobble under the slop: copied at 0.75 s, not before.
+        let steps = app.state.history.len();
         press(&mut app, x, y);
         app.mouse_move(x + 2.0, y - 1.0);
         let now = at(&app, 700);
@@ -320,6 +324,8 @@ mod tests {
         assert_eq!(ns[0], orig, "the original stays");
         assert_eq!((ns[1].position, ns[1].key), (orig.position + unit, orig.key), "one snap step later");
         assert_eq!(Note { position: orig.position, ..ns[1] }, orig, "a copy of it");
+        assert_eq!(app.state.history.len(), steps + 1, "one step");
+        assert_eq!(app.state.history.entries().last().map(|e| e.1), Some("Piano roll clone note"));
         undo(&mut app);
         assert_eq!(notes(&app), vec![orig], "one undo step");
         // A move after the pick-up: a semitone up and three steps later than the copy's start.
@@ -419,6 +425,7 @@ mod tests {
         let orig = pl::clips(&app.state)[0];
         let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
         let unit = pl::grid_snap(&app.state).ticks(g.ppq, g.bar_w);
+        let steps = app.state.history.len();
         press(&mut app, x, y);
         let now = at(&app, 700);
         app.hold_tick(now);
@@ -430,6 +437,8 @@ mod tests {
         assert_eq!(cs.len(), 2, "a copy");
         assert_eq!(cs[0], orig, "the original stays");
         assert_eq!((cs[1].position, cs[1].track, cs[1].source), (orig.position + unit, orig.track, orig.source), "one snap step later");
+        assert_eq!(app.state.history.len(), steps + 1, "one step");
+        assert_eq!(app.state.history.entries().last().map(|e| e.1), Some("Playlist clone clip"));
         undo(&mut app);
         assert_eq!(pl::clips(&app.state).to_vec(), vec![orig], "one undo step");
         // Empty grid: the usual new clip, and nothing more while held.

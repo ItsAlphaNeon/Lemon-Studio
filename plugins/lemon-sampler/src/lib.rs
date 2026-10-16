@@ -458,6 +458,9 @@ impl Plugin for LemonSampler {
             if let Err(e) = self.shared.load(&path, &self.params) {
                 nih_log!("Lemon Sampler: {e}");
             }
+        } else if path.is_empty() && !self.shared.loaded_path().is_empty() {
+            // A restored state without a sample (the host undid a load into an empty channel): nothing plays.
+            self.shared.clear(&self.params);
         } else {
             self.shared.precompute(&self.params);
         }
