@@ -13681,6 +13681,74 @@ mod tests {
         assert_eq!(next.state.clock.mode, crate::clock::Mode::Msc);
     }
 
+    /// Every drop-down entry fits its row in this font: the label is not clipped and stops before its shortcut or its
+    /// ▸ (the columns are FL's widths, widened where an entry needs it; macOS test of #61: TOOLS > Change declicking
+    /// for selected channels to ▸ was cut at "channels t").
+    #[test]
+    fn menu_entries_fit_their_columns() {
+        use views::menus::{label_now, shortcut_now, Kind, MENUS};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.rack.sel = [0, 1].into();
+        let f = os_ui::Font::new(14);
+        for (menu, m) in MENUS.iter().enumerate() {
+            app.state.menu_open = Some(menu);
+            frame(&mut app, &mut c, None);
+            for it in m.cols.iter().flat_map(|(_, items)| items.iter()).filter(|it| matches!(it.kind, Kind::Item)) {
+                let Some(h) = app.hits.iter().rev().find(|h| h.hint == it.label || h.action == Action::Placeholder(it.label)) else { continue };
+                let label = c.text_width(f, &label_now(&app.state, menu, it));
+                let key = if it.shortcut.is_empty() { 0.0 } else { c.text_width(f.italic(), shortcut_now(it)) + 4.0 };
+                let end = h.rect.right() - if it.sub { 13.0 } else { 8.0 } - key;
+                assert!(h.rect.x + 20.0 + label <= end, "{}: {:?} ends at {} past {end}", m.title, it.label, h.rect.x + 20.0 + label);
+            }
+        }
+    }
+
+    /// The toolbar's pattern box: a short name sits at its right; a name too long for the box keeps its start, cut at
+    /// the spin arrow (macOS test of #61: "Lemon Sampler" read "mon Sampler").
+    #[test]
+    fn pattern_box_keeps_the_start_of_long_names() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.pattern = 1;
+        // The left end of the box's text area, drawn with pattern 1 named `name`.
+        let left = |app: &mut App, c: &mut Canvas, name: &str| {
+            crate::patterns::pat_mut(&mut app.state, 1).name = Some(name.into());
+            frame(app, c, None);
+            let pb = hit_rect(app, &Action::PatternNext);
+            let (x0, y0) = (pb.x as u32 + 4, pb.y as u32 + 6);
+            (x0..x0 + 12).flat_map(|x| (y0..pb.bottom() as u32 - 6).map(move |y| (x, y))).map(|(x, y)| c.pixmap.pixel(x, y).unwrap()).collect::<Vec<_>>()
+        };
+        let empty = left(&mut app, &mut c, "");
+        assert_eq!(left(&mut app, &mut c, "P1"), empty, "a short name is right-aligned");
+        // The first letter shows: names differing only there draw differently.
+        let (a, b) = (left(&mut app, &mut c, "Lemon Sampler and more"), left(&mut app, &mut c, "Wemon Sampler and more"));
+        assert!(a != empty && a != b, "a long name shows its start");
+    }
+
+    /// The floating hint bar wraps a hint too long for a line instead of cutting it (macOS test of #61: "...right-click:
+    /// channel mer").
+    #[test]
+    fn hint_bar_wraps_long_hints() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.toolbar.hint_bar = true;
+        // The hint bar's second line, with `text` as the message (the mouse over the bar, which has no hint).
+        let second = |app: &mut App, c: &mut Canvas, text: &str| {
+            app.state.message = Some(text.into());
+            let r = views::toolbar::hint_bar_rect(&app.state);
+            app.mouse_move(r.cx(), r.bottom() - 4.0);
+            frame(app, c, None);
+            let y0 = (r.y + 5.0 + c.line_height(os_ui::Font::new(14))) as u32;
+            (r.x as u32 + 7..r.x as u32 + 300).flat_map(|x| (y0 + 3..y0 + 12).map(move |y| (x, y))).map(|(x, y)| c.pixmap.pixel(x, y).unwrap()).collect::<Vec<_>>()
+        };
+        let empty = second(&mut app, &mut c, "Short");
+        let long = "Click: plugin window, Shift+click: rename, right-click: channel menu, drag: move the channel to another row";
+        assert_ne!(second(&mut app, &mut c, long), empty, "the rest goes on the second line");
+    }
+
     /// The channel rack and time signatures (spec: ui/channel-rack.md §23, FL's numbers): the lit steps, the Auto
     /// length and the mini roll's bars are the pattern's own bars; the step colour groups (a beat) and Set to ▸ N bars
     /// are the project's; a step past an explicit length grows it to the end of the pattern's bar holding it.

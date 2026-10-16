@@ -579,17 +579,24 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
         Vec::new()
     };
     let list_w = pats.iter().map(|(_, n)| ui.c.text_width(Font::new(14), n) + 28.0).fold(80.0f32, f32::max).ceil();
-    // EDIT grows to fit the step its entries name ("Undo piano roll delete note  Ctrl+Z").
-    let edit_w = if menu == EDIT_MENU {
+    // A column is FL's width, or wider when an entry needs it in this font: its label, then its shortcut or its ▸
+    // (EDIT grows with the step its entries name, "Undo piano roll delete note  Ctrl+Z").
+    let mut col_ws = Vec::with_capacity(m.cols.len());
+    for (ci, (w, items)) in m.cols.iter().enumerate() {
+        if menu == PATTERNS && ci == 0 {
+            col_ws.push(list_w);
+            continue;
+        }
         let f = Font::new(14);
-        let ws: Vec<f32> = EDIT.iter().filter(|it| in_menu(s, menu, it)).map(|it| ui.c.text_width(f, &label_now(s, menu, it)) + ui.c.text_width(f.italic(), it.shortcut) + 44.0).collect();
-        ws.into_iter().fold(0.0f32, f32::max).ceil()
-    } else {
-        0.0
-    };
-    let col_w = |ci: usize, w: f32| if menu == PATTERNS && ci == 0 { list_w } else { w.max(edit_w) };
+        let mut need = *w;
+        for it in items.iter().filter(|it| matches!(it.kind, Kind::Item) && in_menu(s, menu, it)) {
+            let key = if it.shortcut.is_empty() { 0.0 } else { ui.c.text_width(f.italic(), shortcut_now(it)) + 16.0 };
+            need = need.max(20.0 + ui.c.text_width(f, &label_now(s, menu, it)) + key + if it.sub { 18.0 } else { 8.0 });
+        }
+        col_ws.push(need.ceil());
+    }
 
-    let width: f32 = m.cols.iter().enumerate().map(|(ci, (w, _))| col_w(ci, *w)).sum::<f32>() + border * 2.0;
+    let width: f32 = col_ws.iter().sum::<f32>() + border * 2.0;
     let col_h = |items: &[Item]| items.iter().filter(|it| in_menu(s, menu, it)).map(|it| row_h(&mt, it)).sum::<f32>();
     let body_h = m
         .cols
@@ -620,8 +627,8 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
     let open = s.menu_sub.filter(|_| s.playlist.popup.is_some());
     let mut cx = r.x + border;
     let mut flat = 0usize;
-    for (ci, (cw, items)) in m.cols.iter().enumerate() {
-        let cw = &col_w(ci, *cw);
+    for (ci, (_, items)) in m.cols.iter().enumerate() {
+        let cw = &col_ws[ci];
         let col = Rect::new(cx, r.y + border, *cw, body_h);
         if ci > 0 {
             ui.c.fill_rect(Rect::new(cx - 1.0, col.y, 1.0, body_h), t.menu_pop_head);

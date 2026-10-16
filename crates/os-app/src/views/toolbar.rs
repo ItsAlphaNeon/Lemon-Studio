@@ -80,7 +80,8 @@ pub fn hint_bar_rect(s: &State) -> Rect {
 }
 
 /// The floating hint bar (§4): a near-black panel with the hint at its top left and a round grip at its right, over
-/// every window. Clicks on it go nowhere.
+/// every window. Clicks on it go nowhere. A hint too long for a line wraps, as many lines as the panel holds (long
+/// hints were not measured on FL; the panel is tall enough for several lines: Lemon Studio's choice).
 pub fn paint_hint_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let t = ui.t;
     let r = hint_bar_rect(s);
@@ -90,7 +91,18 @@ pub fn paint_hint_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_rect_gradient(Rect::new(r.x, r.y, r.w, half), edge, mid, 0.0);
     ui.c.fill_rect_gradient(Rect::new(r.x, r.y + half, r.w, r.h - half), mid, edge, 0.0);
     let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
-    ui.c.text_clip(Font::new(14), r.x + 7.0, r.y + 5.0, r.w - 50.0, t.text, hint);
+    let font = Font::new(14);
+    let (w, lh) = (r.w - 50.0, ui.c.line_height(font));
+    let chars: Vec<char> = hint.chars().collect();
+    let mut y = r.y + 5.0;
+    for (start, n) in super::settings::wrap(ui, font, hint, w) {
+        if y + lh > r.bottom() - 4.0 {
+            break;
+        }
+        let line: String = chars[start..start + n].iter().collect();
+        ui.c.text_clip(font, r.x + 7.0, y, w, t.text, line.trim_end());
+        y += lh;
+    }
     let (cx, cy) = (r.right() - 22.0, r.cy());
     ui.c.fill_circle(cx, cy, 11.0, t.s(0x24272a));
     for (dx, dy) in [(-3.0, -3.0), (3.0, -3.0), (-3.0, 3.0), (3.0, 3.0)] {
@@ -633,9 +645,17 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
         .find(|p| p.number == s.pattern)
         .and_then(|p| p.name.clone())
         .unwrap_or_else(|| format!("Pattern {}", s.pattern));
-    ui.c.push_clip(pb.inset(2.0));
-    ui.c.text_right(Font::condensed(21, 7), pb.right() - 11.0, 49.0, t.glyph, &name);
-    ui.c.pop_clip();
+    // Right-aligned before the spin arrow; a name too long for that keeps its start and is cut at the arrow, as FL
+    // cuts long labels (long names were not measured here: Lemon Studio's choice).
+    let pf = Font::condensed(21, 7);
+    let end = pb.right() - 11.0;
+    if ui.c.text_width(pf, &name) <= end - (pb.x + 2.0) {
+        ui.c.push_clip(pb.inset(2.0));
+        ui.c.text_right(pf, end, 49.0, t.glyph, &name);
+        ui.c.pop_clip();
+    } else {
+        ui.c.text_clip(pf, pb.x + 4.0, 49.0, end - (pb.x + 4.0), t.glyph, &name);
+    }
     let add = Rect::span(951.0, 962.0, 50.0, 72.0);
     ui.hit(add, Action::PatternAdd, "New pattern (find first / next empty)");
     icons::draw(ui.c, Icon::Plus, add, t.glyph);
