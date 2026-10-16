@@ -266,9 +266,12 @@ pub const CROSSFADES_CHECK: &str = "Automatic crossfades";
 pub const SHOW_INFO_CHECK: &str = "Show info on opening";
 pub const RESET_WORK_TIME: &str = "Reset working time";
 
+/// General ▸ Miscellaneous: FILE ▸ New's template; its tree is found at run time (`crate::templates`).
+pub const DEFAULT_TEMPLATE: &str = "Default template";
+
 /// Whether the combo labelled `label` works (opens a menu of choices).
 fn live_combo(label: &str) -> bool {
-    LIVE_COMBOS.contains(&label) || PROJECT_COMBOS.contains(&label)
+    LIVE_COMBOS.contains(&label) || PROJECT_COMBOS.contains(&label) || label == DEFAULT_TEMPLATE
 }
 
 /// A buffer length as the Audio page shows it: frames and milliseconds at `rate`.
@@ -530,7 +533,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Check("Create automation clips at the playback position", true),
                 Check("Select first channel with notes when the pattern changes", false),
                 Check("Limit the number of open plugin editors", true),
-                combo("Basic with limiter", 160.0, "Default template"),
+                combo(&crate::templates::name(), 160.0, DEFAULT_TEMPLATE),
                 combo("Default template", 160.0, "Startup project"),
             ]),
             gf("Advanced", false, vec![
