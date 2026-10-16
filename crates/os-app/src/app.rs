@@ -3363,6 +3363,7 @@ impl App {
             SAct::Button(b) => self.state.message = Some(off_text(b)),
             // The Info page's boxes (spec: ui/settings.md "Info").
             SAct::Info(f) => return self.info_act(f),
+            SAct::Genres(x, y) => return self.genre_menu(x, y),
         }
         self.invalidate();
     }
