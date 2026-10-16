@@ -72,6 +72,9 @@ pub enum Then {
     RackSample(usize),
     /// The replace question of the Save dialog under it: Yes answers that dialog with this path.
     Replace(PathBuf),
+    /// Switch all / selected audio clip channels to ▸: Ok sets these rack rows to this stretch method (spec:
+    /// ui/channel-switches.md §1).
+    StretchClips(Vec<usize>, i32),
 }
 
 /// What waits for the save-changes question.

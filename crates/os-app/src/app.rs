@@ -1547,6 +1547,12 @@ impl App {
                     crate::rack::sample_chosen(self, row, p);
                 }
             }
+            // Cancel and the caption's × change nothing.
+            Then::StretchClips(rows, method) => {
+                if reply == Reply::Button(Answer::Ok) {
+                    crate::rack::set_stretch(self, &rows, method);
+                }
+            }
         }
         self.invalidate();
     }
@@ -11707,6 +11713,120 @@ mod tests {
         for (m, label) in [(VIEW, "Undo history"), (VIEW, "Remote control"), (ADD_MENU, "Browse all installed plugins"), (ADD_MENU, "Browse presets")] {
             assert!(!works(m, item_at(m, index(m, label)).unwrap()), "{label}");
         }
+    }
+
+    /// TOOLS / the channel rack's options > Switch all / selected audio clip channels to ▸ (spec: ui/channel-switches.md
+    /// §1, §6): the stretch methods in two columns; a pick asks "Confirm" first; Ok sets the method on the audio clip
+    /// channels (all, or the selected ones) and their Lemon Sampler, keeping TIME, PITCH and MUL; Cancel changes nothing;
+    /// with no channel concerned nothing is asked. Saving keeps the method.
+    #[test]
+    fn switch_audio_clip_channels_stretch_method() {
+        use crate::dialog::DHit;
+        use crate::playlist::{self as pl, Cmd, Mark};
+        use os_model::stretch_mode as sm;
+        use views::menus::{CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, MENUS, TOOLS_MENU};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let wav = std::env::temp_dir().join(format!("os-app-switch-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
+        pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 1, 0).expect("audio clip added");
+        let n = app.state.project.channels.len();
+        let (a, b) = (n - 2, n - 1);
+        // TIME 4 beats, PITCH +100 cents, MUL x1.19, Resample.
+        let kept = [768f32.to_bits(), 100, 2540];
+        app.state.project.channels[a].sound.stretch = [kept[0], kept[1], kept[2], 0];
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        app.sync_samplers(None);
+        app.mark_saved();
+        assert!(app.state.hosted_rows.contains(&a) && app.state.hosted_rows.contains(&b), "Lemon Sampler plays the audio clips");
+        let sampler = |app: &App, row: usize| {
+            let p = app.plugins.hosted[&row].plugin.lock().unwrap();
+            let mut st = [0u32; 4];
+            for i in (0..p.param_count()).filter_map(|i| p.param_info(i)) {
+                crate::plugins::stretch_param(&i.name, p.param_value(i.id).unwrap(), &mut st);
+            }
+            st[3] as i32
+        };
+        let methods = |app: &App| app.state.project.channels.iter().map(|ch| ch.sound.stretch_mode()).collect::<Vec<_>>();
+        // The submenu: the methods as audio/time-stretch.md names them, the second column from Auto.
+        let labels: Vec<String> = crate::rack::stretch_items(true).iter().map(|i| if i.col { "|".into() } else { i.label.to_string() }).collect();
+        let want = "Realtime Resample Stretch Stretch Pro Elastique e3 generic e3 mono Special Slice stretch Slice map | Auto Legacy e2 generic e2 transient e2 mono e2 speech";
+        assert_eq!(labels.join(" "), want);
+        let items = crate::rack::stretch_items(true);
+        assert!(items.iter().all(|i| i.mark == Mark::None && (i.head || i.col || i.enabled)), "commands, no marks");
+        let stored: Vec<i32> = items.iter().filter_map(|i| match i.cmd {
+            Cmd::Rack(crate::rack::RCmd::StretchClips(true, m)) => Some(m),
+            _ => None,
+        }).collect();
+        assert_eq!(stored, [0, -1, -2, 1, 2, 3, 4, 5, 6, 7, 8, 9], "event 215 int 27");
+        // TOOLS > Switch all audio clip channels to > Stretch Pro asks first.
+        let entry = MENUS[TOOLS_MENU].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == CLIPS_ALL_LABEL).unwrap();
+        let pick = |app: &mut App, c: &mut Canvas, label: &str| {
+            frame(app, c, None);
+            let tools = hit_rect(app, &Action::Menu(TOOLS_MENU));
+            click(app, c, tools);
+            let row = hit_rect(app, &Action::MenuSub(TOOLS_MENU, entry));
+            click(app, c, row);
+            let i = app.state.playlist.popup.as_ref().expect("the submenu").items.iter().position(|it| it.label == label).unwrap();
+            let item = hit_rect(app, &Action::PlPopup(i));
+            click(app, c, item);
+        };
+        pick(&mut app, &mut c, "Stretch Pro");
+        let text = "All audio clip channels will be set to stretch pro mode. Some channels may need manual time adjustment.";
+        assert_eq!(app.top_message(), Some(("Confirm".into(), text.into())));
+        assert!(app.state.menu_open.is_none() && app.state.playlist.popup.is_none());
+        let crate::dialog::Body::Msg(m) = &app.state.dialogs.last().unwrap().body else { panic!("a message box") };
+        assert_eq!((m.kind, &m.buttons[..]), (crate::dialog::Kind::Warning, &[crate::dialog::Answer::Ok, crate::dialog::Answer::Cancel][..]));
+        // Cancel changes nothing.
+        let cancel = hit_rect(&app, &Action::Dlg(DHit::Button(1)));
+        click(&mut app, &mut c, cancel);
+        assert!(!app.modal_open() && !app.unsaved());
+        assert_eq!((methods(&app)[a], methods(&app)[b]), (0, 0));
+        // Ok sets it on both audio clip channels, their other stretch settings kept; the sampler channels keep theirs.
+        pick(&mut app, &mut c, "Stretch Pro");
+        app.state.piano.dirty = false;
+        let ok = hit_rect(&app, &Action::Dlg(DHit::Button(0)));
+        click(&mut app, &mut c, ok);
+        assert!(!app.modal_open());
+        assert_eq!(methods(&app), [0, 0, 0, 0, 0, sm::STRETCH_PRO, sm::STRETCH_PRO]);
+        assert_eq!(app.state.project.channels[a].sound.stretch[..3], kept);
+        assert!(app.unsaved() && app.state.piano.dirty, "a change to the project, played at once");
+        assert_eq!((sampler(&app, a), sampler(&app, b), sampler(&app, 0)), (sm::STRETCH_PRO, sm::STRETCH_PRO, 0), "Lemon Sampler follows");
+        // The rack's options menu: Switch selected... > e2 speech, on the selected audio clip channel only (Enter = Ok).
+        app.state.rack.sel = [0, b].into();
+        let rack = crate::rack::options_menu(&app.state, 0.0, 0.0);
+        let all = rack.items.iter().find(|i| i.label == CLIPS_ALL_LABEL).expect("in the rack's options menu");
+        assert_eq!(all.children, crate::rack::stretch_items(true));
+        let sel = rack.items.iter().find(|i| i.label == CLIPS_SEL_LABEL).expect("in the rack's options menu");
+        assert_eq!(sel.children, crate::rack::stretch_items(false));
+        let speech = sel.children.iter().find(|i| i.label == "e2 speech").unwrap().cmd.clone();
+        pl::run(&mut app, speech.clone());
+        let text = "Selected audio clip channels will be set to e2 speech mode. Some channels may need manual time adjustment.";
+        assert_eq!(app.top_message(), Some(("Confirm".into(), text.into())));
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter), false, false);
+        assert!(!app.modal_open());
+        assert_eq!(methods(&app), [0, 0, 0, 0, 0, sm::STRETCH_PRO, sm::E2_SPEECH]);
+        assert_eq!(sampler(&app, b), sm::E2_SPEECH);
+        // No audio clip channel selected: nothing is asked, nothing changes.
+        app.state.rack.sel = [0, 1].into();
+        pl::run(&mut app, speech);
+        assert!(!app.modal_open());
+        assert_eq!(methods(&app)[a], sm::STRETCH_PRO);
+        // A project without audio clip channels: nothing is asked.
+        let mut plain = App::new(None);
+        plain.state.project = test_project();
+        pl::run(&mut plain, Cmd::Rack(crate::rack::RCmd::StretchClips(true, sm::STRETCH)));
+        assert!(!plain.modal_open());
+        // Saving keeps the methods.
+        let path = std::env::temp_dir().join(format!("os-app-switch-{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let clips: Vec<[u32; 4]> = back.channels.iter().filter(|c| c.kind == ChannelKind::AudioClip).map(|c| c.sound.stretch).collect();
+        assert_eq!(clips, [[kept[0], kept[1], kept[2], sm::STRETCH_PRO as u32], [0, 0, 0, sm::E2_SPEECH as u32]]);
+        let _ = (std::fs::remove_file(&path), std::fs::remove_file(&wav));
     }
 
     /// Settings > Plugins (spec: ui/plugin-manager.md §2, §4): Add folder... keeps the folder and scans it in the

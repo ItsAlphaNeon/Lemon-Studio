@@ -275,8 +275,8 @@ const TOOLS_B: &[Item] = &[
     it("Select unused channels", "").on(),
     it("Purge unused audio clips", "").on(),
     it("Switch smart disable for all plugins", ""),
-    it("Switch all audio clip channels to", "").sub(),
-    it("Switch selected audio clip channels to", "").sub(),
+    it(CLIPS_ALL_LABEL, "").sub(),
+    it(CLIPS_SEL_LABEL, "").sub(),
     it("Lock all playlist tracks to content", ""),
     it("Unlock all playlist tracks from content", ""),
     it("Reset empty playlist tracks", "").on(),
@@ -388,6 +388,10 @@ fn opens_sub(menu: usize, item: &Item) -> bool {
 /// options menu (spec: ui/channel-rack.md §17).
 pub const EDITORS_LABEL: &str = "Switch all plugin editors to";
 pub const DECLICK_LABEL: &str = "Change declicking for selected channels to";
+/// TOOLS > Switch all / selected audio clip channels to ▸, also in the channel rack's options menu (spec:
+/// ui/channel-switches.md §1).
+pub const CLIPS_ALL_LABEL: &str = "Switch all audio clip channels to";
+pub const CLIPS_SEL_LABEL: &str = "Switch selected audio clip channels to";
 
 /// What fills the submenu of ▸ entry `label` of `menu`: the app's own popup items, as the same submenu shows them
 /// elsewhere (the channel rack's options menu, the plugin menus). `None` while it is not built: the entry stays greyed
@@ -398,6 +402,8 @@ pub fn submenu(menu: usize, label: &str) -> Option<fn(&State) -> Vec<crate::play
         (ADD_MENU, "Effect") => Some(|s| crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(None), true)),
         (TOOLS_MENU, EDITORS_LABEL) => Some(|_| crate::rack::editor_items()),
         (TOOLS_MENU, DECLICK_LABEL) => Some(crate::rack::declick_items),
+        (TOOLS_MENU, CLIPS_ALL_LABEL) => Some(|_| crate::rack::stretch_items(true)),
+        (TOOLS_MENU, CLIPS_SEL_LABEL) => Some(|_| crate::rack::stretch_items(false)),
         _ => None,
     }
 }
@@ -712,7 +718,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["Effect", EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["Effect", CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");

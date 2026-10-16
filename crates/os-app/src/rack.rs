@@ -956,6 +956,8 @@ pub enum RCmd {
     DeclickSel(u8),
     /// Switch all plugin editors to ▸: detached (true) or attached.
     DetachAll(bool),
+    /// Switch all (true) / selected audio clip channels to ▸: a stretch method as stored (event 215 int 27).
+    StretchClips(bool, i32),
     ZipSel,
     UnzipAll,
     AutoResize(AutoResize),
@@ -1053,8 +1055,8 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         opt(s, "Detached"),
         PItem::head("Switch"),
         PItem::not_yet("Switch smart disable for all plugins"),
-        PItem::sub("Switch all audio clip channels to", vec![PItem::not_yet("Resample"), PItem::not_yet("Stretch")]),
-        PItem::sub("Switch selected audio clip channels to", vec![PItem::not_yet("Resample"), PItem::not_yet("Stretch")]),
+        PItem::sub(crate::views::menus::CLIPS_ALL_LABEL, stretch_items(true)),
+        PItem::sub(crate::views::menus::CLIPS_SEL_LABEL, stretch_items(false)),
         PItem::sub(crate::views::menus::EDITORS_LABEL, editor_items()),
     ];
     Popup { x, y, items, sub: None }
@@ -1084,6 +1086,49 @@ pub(crate) fn declick_items(s: &State) -> Vec<PItem> {
 pub(crate) fn editor_items() -> Vec<PItem> {
     let item = |label: &'static str, on: bool| if cfg!(plugin_windows) { it(label, RCmd::DetachAll(on)) } else { it(label, RCmd::DetachAll(on)).off() };
     vec![item("Attached", false), item("Detached", true)]
+}
+
+/// Switch all (`all`) / selected audio clip channels to ▸ (§17 "Switch", also TOOLS; spec: ui/channel-switches.md §1):
+/// the stretch methods named and stored as audio/time-stretch.md gives them, in two columns with headers, no marks.
+pub(crate) fn stretch_items(all: bool) -> Vec<PItem> {
+    use lemon_sampler::params::{STRETCH, STRETCH_FILE};
+    let pick = |i: usize| it(STRETCH[i], RCmd::StretchClips(all, STRETCH_FILE[i]));
+    let mut v = Vec::new();
+    for (head, picks) in [("Realtime", 0..3), ("Elastique", 3..5), ("Special", 5..7)] {
+        v.push(PItem::head(head));
+        v.extend(picks.map(pick));
+    }
+    v.push(PItem::col());
+    v.push(pick(7));
+    v.push(PItem::head("Legacy"));
+    v.extend((8..STRETCH.len()).map(pick));
+    v
+}
+
+/// Asks before setting stretch method `method` on every audio clip channel (`all`) or on the selected ones (`sel`);
+/// nothing when no channel is concerned (spec: ui/channel-switches.md §1, §6).
+fn ask_stretch(app: &mut App, all: bool, method: i32, sel: &[usize]) {
+    use crate::dialog::{spans, Answer, Kind, Msg, Then};
+    let chans = &app.state.project.channels;
+    let rows: Vec<usize> = (0..chans.len()).filter(|&r| chans[r].kind == ChannelKind::AudioClip && (all || sel.contains(&r))).collect();
+    if rows.is_empty() {
+        return;
+    }
+    let name = lemon_sampler::params::STRETCH[lemon_sampler::params::stretch_index(method) as usize].to_lowercase();
+    let which = if all { "All" } else { "Selected" };
+    let text = format!("{which} audio clip channels will be set to {name} mode. Some channels may need manual time adjustment.");
+    app.show_msg(Msg::new(Kind::Warning, "Confirm", spans(&[&text]), &[Answer::Ok, Answer::Cancel], Then::StretchClips(rows, method)));
+}
+
+/// Rows `rows` take stretch method `method`, their TIME, PITCH and MUL kept: the channel's sound settings, which the
+/// engine plays and the project saves, and its Lemon Sampler (spec: ui/channel-switches.md §1).
+pub(crate) fn set_stretch(app: &mut App, rows: &[usize], method: i32) {
+    for &r in rows {
+        let Some(c) = app.state.project.channels.get_mut(r) else { continue };
+        c.sound.stretch[3] = method as u32;
+        app.plugins.set_sampler_stretch(r, &c.sound);
+    }
+    app.state.piano.dirty = true;
 }
 
 /// Every selected channel (`rows`) takes declick mode `mode`: the channel's sound settings, which the engine plays, and
@@ -1306,6 +1351,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             app.state.raise(Win::PianoRoll);
         }
         RCmd::DeclickSel(mode) => set_declick(app, &sel, mode),
+        RCmd::StretchClips(all, method) => ask_stretch(app, all, method, &sel),
         // spec: ui/plugin-window.md "Docking and the window menu"
         #[cfg(plugin_windows)]
         RCmd::DetachAll(on) => app.plugins.set_all_detached(on),
@@ -1533,7 +1579,8 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::LoadSample(_)
         | RCmd::PianoRoll(_)
         | RCmd::DeclickSel(_)
-        | RCmd::DetachAll(_) => None,
+        | RCmd::DetachAll(_)
+        | RCmd::StretchClips(..) => None,
     };
     app.invalidate();
     msg
