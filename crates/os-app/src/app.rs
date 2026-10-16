@@ -2926,6 +2926,9 @@ impl App {
             None => canvas.begin_frame(None),
         }
         self.state.screen = canvas.size();
+        // Plugin editors in this process colour their waveforms as the views do (spec: ui/settings-choices.md
+        // "Display: Colorful waveforms (2026-10-16)").
+        crate::waves::publish(&self.theme.colors);
         // Last paint's hits stay available to the parts this one skips (see `Ui::part`).
         std::mem::swap(&mut self.hits, &mut self.keep.prev);
         std::mem::swap(&mut self.bars, &mut self.keep.prev_bars);
@@ -11465,6 +11468,62 @@ mod tests {
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         assert_eq!(back.channels[row2].sound.stretch, [0, 0, (-10000i32) as u32, 0]);
         let _ = (std::fs::remove_file(&path), std::fs::remove_file(&wav));
+    }
+
+    // spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"
+    /// Colorful waveforms colour a playlist audio clip's waveform at once (a 100 Hz sine: Multiband's orange-red), in
+    /// the same shape; back to Off, the clip is drawn exactly as before.
+    #[test]
+    fn playlist_colorful_waveforms() {
+        use crate::playlist as pl;
+        use crate::prefs::{set_choice, COLORFUL_WAVEFORMS};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, _, _, _) = ruler_app(&mut c);
+        app.state.playlist_bar_w = 200.0;
+        let wav = std::env::temp_dir().join(format!("os-app-colorful-{}.wav", std::process::id()));
+        let sine: Vec<f32> = (0..48000)
+            .flat_map(|i| {
+                let v = (2.0 * std::f32::consts::PI * 100.0 * i as f32 / 48000.0).sin() * 0.3;
+                [v, v]
+            })
+            .collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &sine).unwrap();
+        pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let clip = *pl::clips(&app.state).last().unwrap();
+        let (w, h) = (1920, 1080);
+        let shot = |app: &mut App, c: &mut Canvas| {
+            frame(app, c, None);
+            let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
+            let body = g.body(&clip);
+            let mut px = vec![0u32; w * h];
+            c.copy_to_xrgb(&mut px);
+            let (x0, x1) = (body.x.max(0.0) as usize, (body.right() as usize).min(w));
+            let (y0, y1) = (body.y.max(0.0) as usize, (body.bottom() as usize).min(h));
+            (y0..y1).flat_map(|y| px[y * w + x0..y * w + x1].to_vec()).collect::<Vec<u32>>()
+        };
+        let orange = |px: &[u32]| {
+            px.iter()
+                .filter(|&&p| {
+                    let (r, g, b) = ((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff);
+                    r > g + 60 && r > b + 100
+                })
+                .count()
+        };
+        let off = shot(&mut app, &mut c);
+        assert!(!off.is_empty());
+        set_choice(&COLORFUL_WAVEFORMS, 2);
+        let multiband = shot(&mut app, &mut c);
+        assert_eq!(multiband.len(), off.len());
+        assert!(orange(&multiband) > orange(&off) + 200, "orange-red: {} before, {} after", orange(&off), orange(&multiband));
+        // The same shape: only the waveform's own pixels (a band through the middle, at this level) change colour.
+        let changed = off.iter().zip(&multiband).filter(|(a, b)| a != b).count();
+        assert!(changed > 200 && changed < off.len() / 2, "{changed} of {} pixels", off.len());
+        set_choice(&COLORFUL_WAVEFORMS, 1);
+        let map = shot(&mut app, &mut c);
+        assert_ne!(map, multiband, "Color map has colours of its own");
+        set_choice(&COLORFUL_WAVEFORMS, 0);
+        assert!(shot(&mut app, &mut c) == off, "Off: as before");
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// Audio clips follow their channel (spec: ui/playlist.md §9c): the length is worked out from the trims and the

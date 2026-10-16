@@ -71,6 +71,7 @@ mod templates;
 mod transport;
 mod typein;
 mod views;
+mod waves;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;

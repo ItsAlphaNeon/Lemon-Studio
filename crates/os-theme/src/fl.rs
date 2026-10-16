@@ -100,6 +100,8 @@ pub struct FlTheme {
     pub light_mode: bool,
     pub override_clips: bool,
     pub meters: Vec<Color>,
+    /// The Waves gradient, (`WaveSpc`i, `WaveClr`i) for each i in 0..6 that has both, sorted by position (§3).
+    pub waves: Vec<(f32, Color)>,
     pub note_colors: Vec<Color>,
     /// (colour, custom flag, contrast %) for piano roll, playlist, event editor.
     pub pr_grid: (Color, bool, f32),
@@ -141,6 +143,9 @@ impl FlTheme {
             )
         };
         let list = |p: &str, n: usize| (0..n).map_while(|i| col(&format!("{p}{i}"))).collect::<Vec<_>>();
+        let mut waves: Vec<(f32, Color)> =
+            (0..6).filter_map(|i| Some((num(&format!("wavespc{i}"))? as f32, col(&format!("waveclr{i}"))?))).collect();
+        waves.sort_by(|a, b| a.0.total_cmp(&b.0));
         FlTheme {
             surface: Surface {
                 hue: num("hue").unwrap_or(0.0) as f32,
@@ -160,6 +165,7 @@ impl FlTheme {
             light_mode: num("lightmode").unwrap_or(1.0) != 0.0,
             override_clips: num("overrideclips").unwrap_or(0.0) != 0.0,
             meters: list("meter", 6),
+            waves,
             note_colors: list("notecolor", 16),
             pr_grid: grid("pr"),
             pl_grid: grid("pl"),
@@ -434,6 +440,9 @@ pub fn palette(th: &FlTheme) -> Palette {
         out.meter_low = th.meters[0];
         out.meter_high = th.meters[2];
     }
+    // Colourful waveforms use the theme's Waves gradient as it is (spec: ui/settings-choices.md "Display: Colorful
+    // waveforms").
+    out.waves = th.waves.clone();
     out
 }
 
@@ -451,6 +460,24 @@ mod tests {
     #[test]
     fn dark_theme_is_the_default_palette() {
         assert_eq!(palette(&FlTheme::dark()), Palette::default());
+    }
+
+    // spec: ui/flstheme.md §3 (WaveClr / WaveSpc), ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"
+    /// The Waves gradient: COLORREF colours at their positions, sorted, a stop missing either half left out; the
+    /// palette carries it.
+    #[test]
+    fn waves_gradient_is_read() {
+        let th = FlTheme::parse("WaveClr0=4661375
+WaveSpc0=0
+WaveClr1=-7249815
+WaveSpc1=1
+WaveClr2=255
+WaveSpc2=0.5
+WaveClr3=65280
+");
+        assert_eq!(th.waves, vec![(0.0, Color::rgb(0x7f2047)), (0.5, Color::rgb(0xff0000)), (1.0, Color::rgb(0x696091))]);
+        assert_eq!(palette(&th).waves, th.waves);
+        assert!(FlTheme::dark().waves.is_empty());
     }
 
     #[test]

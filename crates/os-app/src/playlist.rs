@@ -485,6 +485,8 @@ pub struct PlaylistState {
     pub last_clip: Option<(usize, std::time::Instant)>,
     /// Waveform cache by sample path (`None` = could not be loaded).
     pub waves: RefCell<HashMap<String, Option<Rc<Wave>>>>,
+    /// Tones of the same samples for colourful waveforms, analysed when first needed (`tones`).
+    pub tones: RefCell<HashMap<String, Option<Rc<os_dsp::tone::Tones>>>>,
     /// A project is loading and its files decode off the UI thread: waveforms wait (spec: ui/project-loading.md).
     pub wave_wait: bool,
     undo: Vec<Snapshot>,
@@ -519,6 +521,7 @@ impl Default for PlaylistState {
             last_header: None,
             last_clip: None,
             waves: RefCell::new(HashMap::new()),
+            tones: RefCell::new(HashMap::new()),
             wave_wait: false,
             undo: Vec::new(),
         }
@@ -564,6 +567,23 @@ impl PlaylistState {
         });
         self.waves.borrow_mut().insert(path.to_string(), w.clone());
         w
+    }
+
+    /// The tones of a sample path, block by block (spec: ui/settings-choices.md "Display: Colorful waveforms
+    /// (2026-10-16)"): analysed once, the first time a waveform is drawn in colour, and kept with the peaks.
+    pub fn tones(&self, path: &str) -> Option<Rc<os_dsp::tone::Tones>> {
+        if let Some(t) = self.tones.borrow().get(path) {
+            return t.clone();
+        }
+        if self.wave_wait {
+            return None;
+        }
+        let file = crate::plugins::resolve_sample(path);
+        let t = os_engine::sample::load_shared(std::path::Path::new(&file))
+            .ok()
+            .map(|s| Rc::new(os_dsp::tone::Tones::analyse_stereo(&s.left, &s.right, s.rate)));
+        self.tones.borrow_mut().insert(path.to_string(), t.clone());
+        t
     }
 }
 

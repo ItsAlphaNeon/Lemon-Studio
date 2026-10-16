@@ -41,7 +41,7 @@ fn main() {
         }
         _ => None,
     };
-    let sv = SampleView { sample: sample.as_ref(), path, bits, spectrum: spec.as_ref().map(|(w, h, p)| (*w, *h, p.as_slice())) };
+    let sv = SampleView { sample: sample.as_ref(), path, bits, spectrum: spec.as_ref().map(|(w, h, p)| (*w, *h, p.as_slice())), tones: None };
     let theme = os_plugkit::palette();
     view::paint(&mut c, &theme, &vals, &st, &sv, "", hosted);
     if std::env::var_os("OS_BENCH").is_some() {

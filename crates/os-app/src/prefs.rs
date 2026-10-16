@@ -73,6 +73,12 @@ pub const POPUPS_SCALING: Combo = Combo {
     default: 0,
 };
 
+/// General ▸ Display: sample waveforms coloured by what they are made of: Off, Color map (the Waves gradient by
+/// spectral centroid) or Multiband (three colours by band power); `crate::waves`. It takes effect at once. Spec:
+/// ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)".
+pub const COLORFUL_WAVEFORMS: Combo =
+    Combo { key: "colorful_waveforms", label: "Colorful waveforms", choices: &["Off", "Color map", "Multiband"], default: 0 };
+
 /// General ▸ Language: how note names read (`crate::note_names`; FL asks for a restart, Lemon Studio renames at once).
 /// Spec: ui/settings-choices.md "Note names and Black notes".
 pub const NOTE_NAMES: Combo = Combo { key: "note_names", label: "Note names", choices: &["English", "Germanic", "Solfege (do, re, mi, ...)"], default: 0 };
@@ -234,7 +240,7 @@ pub const CHECKS: &[&Check] = &[
     &SILENT_STARTUP,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS];
 
 /// Tests only: a check that exercises the settings page. An FL service Lemon Studio leaves out (ui/options-coverage.md
 /// §4), so it is never declared for real.
@@ -646,5 +652,33 @@ mod tests {
             assert_eq!((g1.x, g1.y, g1.h, g1.w), (g0.x, g0.y, g0.h, g0.w + freed_w), "grid");
         }
         set_check(&SMALL_SCROLLBARS, false);
+    }
+
+    // spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"
+    /// "Colorful waveforms" is Off by default and found by its label; the General page's combo (Display) lists Off,
+    /// Color map and Multiband and switches it.
+    #[test]
+    fn colorful_waveforms_setting() {
+        assert_eq!((index(&COLORFUL_WAVEFORMS), choice(&COLORFUL_WAVEFORMS)), (0, "Off"));
+        assert_eq!(find_combo("Colorful waveforms"), Some(&COLORFUL_WAVEFORMS));
+        assert_eq!(COLORFUL_WAVEFORMS.choices, ["Off", "Color map", "Multiband"]);
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::GENERAL);
+        app.paint(&mut c, None);
+        let combo = |app: &App| {
+            app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == COLORFUL_WAVEFORMS.label)).map(|h| h.rect).expect("the combo works")
+        };
+        let r = combo(&app);
+        click(&mut app, &mut c, r);
+        let p = app.state.playlist.popup.as_ref().expect("its menu");
+        let labels: Vec<&str> = p.items.iter().map(|it| it.label.as_ref()).collect();
+        assert_eq!(labels, COLORFUL_WAVEFORMS.choices);
+        assert_eq!(p.items[0].mark, crate::playlist::Mark::Radio(true), "Off marked");
+        let item = hit_rect(&app, &Action::PlPopup(2));
+        click(&mut app, &mut c, item);
+        assert_eq!(choice(&COLORFUL_WAVEFORMS), "Multiband");
+        assert_eq!(app.state.message.as_deref(), Some("Colorful waveforms: Multiband"));
+        set_choice(&COLORFUL_WAVEFORMS, 0);
     }
 }

@@ -545,7 +545,7 @@ impl Logic {
         let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
         let s = s.or_else(|| self.shared.raw.lock().ok().and_then(|r| r.clone()));
         let bits = (self.shared.bits.load(Ordering::Relaxed) & 0x1ff) as u16;
-        f(&SampleView { sample: s.as_deref(), path: &path, bits, spectrum: None })
+        f(&SampleView { sample: s.as_deref(), path: &path, bits, spectrum: None, tones: None })
     }
 
     fn hover_hint(&self, x: f32, y: f32) -> String {
@@ -1315,6 +1315,24 @@ impl SpectrumCache {
     }
 }
 
+/// The shown sample's tones for colourful waveforms, analysed once per sample version (spec: ui/settings-choices.md
+/// "Display: Colorful waveforms (2026-10-16)").
+#[derive(Default)]
+pub struct ToneCache {
+    key: Option<u64>,
+    tones: os_dsp::tone::Tones,
+}
+
+impl ToneCache {
+    pub fn get(&mut self, version: u64, s: &os_engine::Sample) -> &os_dsp::tone::Tones {
+        if self.key != Some(version) {
+            self.tones = os_dsp::tone::Tones::analyse_stereo(&s.left, &s.right, s.rate);
+            self.key = Some(version);
+        }
+        &self.tones
+    }
+}
+
 #[cfg(windows)]
 mod win32 {
     use std::ffi::c_void;
@@ -1343,7 +1361,7 @@ mod win32 {
     use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, ShellExecuteW, HDROP};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-    use super::{Act, Btn, Cmd, Logic, MenuDef, Mods, SpectrumCache};
+    use super::{Act, Btn, Cmd, Logic, MenuDef, Mods, SpectrumCache, ToneCache};
     use crate::params::SamplerParams;
     use crate::view::{self, SampleView, ViewState};
     use crate::Shared;
@@ -1363,6 +1381,9 @@ mod win32 {
         logic: Logic,
         palette: Palette,
         spectrum: SpectrumCache,
+        tones: ToneCache,
+        /// `os_theme::waves::generation()` at the last paint: the host's colourful waveforms setting changed since.
+        last_waves: u64,
         last_sig: u64,
         last_view: ViewState,
         last_ver: u64,
@@ -1440,6 +1461,8 @@ mod win32 {
                 shared,
                 palette: os_plugkit::palette(),
                 spectrum: SpectrumCache::default(),
+                tones: ToneCache::default(),
+                last_waves: 0,
                 last_sig: 0,
                 last_view: ViewState::default(),
                 last_ver: 0,
@@ -1670,7 +1693,8 @@ mod win32 {
             }
             let sig = self.logic.vals.signature();
             let ver = self.shared.version();
-            if dirty || sig != self.last_sig || ver != self.last_ver || self.logic.view != self.last_view || self.logic.hint != self.last_hint {
+            let waves = os_theme::waves::generation() != self.last_waves;
+            if dirty || waves || sig != self.last_sig || ver != self.last_ver || self.logic.view != self.last_view || self.logic.hint != self.last_hint {
                 self.invalidate();
             }
             if self.logic.hint != self.last_hint {
@@ -1889,7 +1913,14 @@ mod win32 {
                     (Some(s), true) => Some(self.spectrum.get(ver, &self.logic.view, s)),
                     _ => None,
                 };
-                let sv = SampleView { sample: s.as_deref(), path: &path, bits, spectrum };
+                // Colourful waveforms, as the host has them.
+                self.last_waves = os_theme::waves::generation();
+                let waves = os_theme::waves::current();
+                let tones = match &s {
+                    Some(s) if waves.on() => Some(self.tones.get(ver, s)),
+                    _ => None,
+                };
+                let sv = SampleView { sample: s.as_deref(), path: &path, bits, spectrum, tones: tones.map(|t| (t, &*waves)) };
                 let hint = if self.logic.hosted { String::new() } else { self.logic.hint.clone() };
                 let hits = view::paint(&mut self.canvas, &self.palette, &self.logic.vals, &self.logic.view, &sv, &hint, self.logic.hosted);
                 self.logic.hits = hits;
@@ -2323,7 +2354,7 @@ mod gui {
     use os_theme::Palette;
     use os_ui::Canvas;
 
-    use super::{Act, Btn, Logic, Mods, SpectrumCache};
+    use super::{Act, Btn, Logic, Mods, SpectrumCache, ToneCache};
     use crate::params::SamplerParams;
     use crate::view::{self, SampleView, ViewState};
     use crate::Shared;
@@ -2345,6 +2376,9 @@ mod gui {
         logic: Logic,
         palette: Palette,
         spectrum: SpectrumCache,
+        tones: ToneCache,
+        /// `os_theme::waves::generation()` at the last paint: the host's colourful waveforms setting changed since.
+        last_waves: u64,
         last_sig: u64,
         last_view: ViewState,
         last_ver: u64,
@@ -2379,6 +2413,8 @@ mod gui {
                 logic,
                 palette: os_plugkit::palette(),
                 spectrum: SpectrumCache::default(),
+                tones: ToneCache::default(),
+                last_waves: 0,
                 last_sig: 0,
                 last_view: ViewState::default(),
                 last_ver: 0,
@@ -2499,7 +2535,8 @@ mod gui {
             }
             let sig = self.logic.vals.signature();
             let ver = self.shared.version();
-            if dirty || sig != self.last_sig || ver != self.last_ver || self.logic.view != self.last_view || self.logic.hint != self.last_hint {
+            let waves = os_theme::waves::generation() != self.last_waves;
+            if dirty || waves || sig != self.last_sig || ver != self.last_ver || self.logic.view != self.last_view || self.logic.hint != self.last_hint {
                 self.dirty = true;
             }
             if self.logic.hint != self.last_hint {
@@ -2682,7 +2719,14 @@ mod gui {
                 (Some(s), true) => Some(self.spectrum.get(ver, &self.logic.view, s)),
                 _ => None,
             };
-            let sv = SampleView { sample: s.as_deref(), path: &path, bits, spectrum };
+            // Colourful waveforms, as the host has them.
+            self.last_waves = os_theme::waves::generation();
+            let waves = os_theme::waves::current();
+            let tones = match &s {
+                Some(s) if waves.on() => Some(self.tones.get(ver, s)),
+                _ => None,
+            };
+            let sv = SampleView { sample: s.as_deref(), path: &path, bits, spectrum, tones: tones.map(|t| (t, &*waves)) };
             let hint = if self.logic.hosted { String::new() } else { self.logic.hint.clone() };
             self.logic.hits = view::paint(&mut self.canvas, &self.palette, &self.logic.vals, &self.logic.view, &sv, &hint, self.logic.hosted);
             self.last_sig = self.logic.vals.signature();
@@ -2737,8 +2781,44 @@ mod tests {
 
     fn paint(l: &mut Logic) {
         let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
-        let sv = SampleView { sample: None, path: "", bits: 16, spectrum: None };
+        let sv = SampleView { sample: None, path: "", bits: 16, spectrum: None, tones: None };
         l.hits = view::paint(&mut c, &os_plugkit::palette(), &l.vals, &l.view, &sv, "", false);
+    }
+
+    // spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"
+    /// With the host's colourful waveforms on, the waveform and its overview strip take the colours of the sample's
+    /// tones (a 100 Hz sine in Multiband: orange-red); off, they keep their greys (only the panel's own marks are red).
+    #[test]
+    fn colourful_waveforms_colour_the_wave_and_the_overview() {
+        use os_theme::waves::{Mode, Waves};
+        let l = logic(0);
+        let rate = 44100u32;
+        let sine: Vec<f32> = (0..rate).map(|i| (std::f32::consts::TAU * 100.0 * i as f32 / rate as f32).sin() * 0.8).collect();
+        let s = os_engine::Sample { rate, left: sine.clone(), right: sine };
+        let tones = os_dsp::tone::Tones::analyse_stereo(&s.left, &s.right, s.rate);
+        let waves = Waves::new(Mode::Multiband, &[]);
+        let draw = |tones: Option<(&os_dsp::tone::Tones, &Waves)>| {
+            let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+            let sv = SampleView { sample: Some(&s), path: "sine.wav", bits: 16, spectrum: None, tones };
+            view::paint(&mut c, &os_plugkit::palette(), &l.vals, &l.view, &sv, "", false);
+            let mut px = vec![0u32; (view::W * view::H) as usize];
+            c.copy_to_xrgb(&mut px);
+            px
+        };
+        let red = |px: &[u32], r: os_ui::Rect| {
+            let (x0, y0) = (r.x.ceil() as u32, r.y.ceil() as u32);
+            let (x1, y1) = (r.right().floor() as u32, r.bottom().floor() as u32);
+            (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| {
+                let v = px[(y * view::W + x) as usize];
+                let (r, g, b) = ((v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff);
+                r > g + 40 && r > b + 60
+            }).count()
+        };
+        let (plain, colour) = (draw(None), draw(Some((&tones, &waves))));
+        for (what, area) in [("waveform", view::wave_area()), ("overview", view::overview_track())] {
+            let (before, after) = (red(&plain, area), red(&colour, area));
+            assert!(after > before + 100, "{what}: {before} orange-red pixels grey, {after} coloured");
+        }
     }
 
     fn centre(l: &Logic, t: &Target) -> (f32, f32) {
