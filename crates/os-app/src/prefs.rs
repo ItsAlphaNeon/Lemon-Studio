@@ -124,8 +124,29 @@ pub const SMALL_SCROLLBARS: Check = Check { key: "small_scrollbars", label: "Sma
 pub const AUTO_CROSSFADES_NEW: Check =
     Check { key: "auto_crossfades_new_projects", label: "Enable automatic crossfades in new projects", default: true };
 
+/// Audio ▸ Mixer: Play, and a jump of the position while playing, start the notes that are under way at the new
+/// place, afresh and for what is left of them; off, those notes are skipped. Read at each start (`transport::Starts`).
+/// Spec: ui/settings-choices.md "Transport: Play truncated notes and Reset plugins".
+pub const PLAY_TRUNCATED_ON_TRANSPORT: Check =
+    Check { key: "play_truncated_on_transport", label: "Play truncated notes on transport", default: true };
+
+/// Audio ▸ Mixer: Play, and a jump of the position while playing, reset every hosted plugin, the effects included
+/// (their tails stop); off, the hosted effects ring on through the start. Stop resets them either way
+/// (audio/transport.md). Read at each start (`transport::Starts`). Spec: ui/settings-choices.md "Transport: Play
+/// truncated notes and Reset plugins".
+pub const RESET_PLUGINS_ON_TRANSPORT: Check =
+    Check { key: "reset_plugins_on_transport", label: "Reset plugins on transport", default: false };
+
 /// The declared checks.
-pub const CHECKS: &[&Check] = &[&RESTORE_AFTER_SOLO, &SELECT_FIRST_CHANNEL, &AUTO_ZOOM_PIANO, &SMALL_SCROLLBARS, &AUTO_CROSSFADES_NEW];
+pub const CHECKS: &[&Check] = &[
+    &RESTORE_AFTER_SOLO,
+    &SELECT_FIRST_CHANNEL,
+    &AUTO_ZOOM_PIANO,
+    &SMALL_SCROLLBARS,
+    &AUTO_CROSSFADES_NEW,
+    &PLAY_TRUNCATED_ON_TRANSPORT,
+    &RESET_PLUGINS_ON_TRANSPORT,
+];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION];
 

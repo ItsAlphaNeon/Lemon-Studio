@@ -7119,6 +7119,36 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Settings > Audio ▸ Mixer (spec: ui/settings-choices.md "Transport: Play truncated notes and Reset plugins"):
+    /// "Play truncated notes on transport" is on and "Reset plugins on transport" off by default; a click switches
+    /// each (kept as a program setting), and the next start of playback goes by them.
+    #[test]
+    fn audio_settings_transport_checks() {
+        use crate::prefs::{self, PLAY_TRUNCATED_ON_TRANSPORT as TRUNCATED, RESET_PLUGINS_ON_TRANSPORT as RESET};
+        use crate::transport::Starts;
+        use crate::views::settings::{SAct, AUDIO};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        assert_eq!((prefs::check(&TRUNCATED), prefs::check(&RESET)), (true, false), "the defaults");
+        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false });
+        let mut app = App::new(None);
+        app.open_settings(AUDIO);
+        frame(&mut app, &mut c, None);
+        for (check, said) in [(&TRUNCATED, "Play truncated notes on transport: off"), (&RESET, "Reset plugins on transport: on")] {
+            assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(check.label)), "{} works", check.label);
+            let r = hit_rect(&app, &Action::Settings(SAct::Check(check.label)));
+            click(&mut app, &mut c, r);
+            assert_eq!(app.state.message.as_deref(), Some(said));
+        }
+        assert_eq!((prefs::check(&TRUNCATED), prefs::check(&RESET)), (false, true));
+        assert_eq!(Starts::from_prefs(), Starts { truncated: false, reset: true }, "the next start goes by them");
+        // And back.
+        for check in [&TRUNCATED, &RESET] {
+            let r = hit_rect(&app, &Action::Settings(SAct::Check(check.label)));
+            click(&mut app, &mut c, r);
+        }
+        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false });
+    }
+
     /// Settings > Project ▸ Advanced ▸ Panning law (spec: ui/settings-choices.md "Project", audio/gain-laws.md
     /// "Panning law: Triangular"): FL's two choices with the project's marked; a pick changes event 23 at once (the
     /// engine gets the project again, the project counts as changed), saved and opened again, also patched in an

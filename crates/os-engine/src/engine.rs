@@ -804,8 +804,10 @@ pub struct Engine {
     triggers: Vec<Trigger>,
     next_trigger: usize,
     /// Audio clips already under way where playback starts, moved to that tick (spec: audio/audio-clips.md,
-    /// "Starting inside a clip").
+    /// "Starting inside a clip"), and with `truncated_on_transport` the notes under way there.
     late: Vec<Trigger>,
+    /// "Play truncated notes on transport" (`set_truncated_on_transport`): a seek starts the notes under way.
+    truncated_on_transport: bool,
     /// Channel control points in tick order, and the next one to apply.
     controls: Vec<CtlEvent>,
     next_ctl: usize,
@@ -1234,6 +1236,7 @@ impl Engine {
             triggers,
             next_trigger: 0,
             late: Vec::new(),
+            truncated_on_transport: false,
             controls,
             next_ctl: 0,
             sounding: Vec::with_capacity(256),
@@ -1360,6 +1363,14 @@ impl Engine {
     /// Used for pattern playback.
     pub fn set_looping(&mut self, on: bool) {
         self.looping = on;
+    }
+
+    /// "Play truncated notes on transport" (Settings > Audio > Mixer; spec: ui/settings-choices.md "Transport: Play
+    /// truncated notes and Reset plugins"): on, `seek_tick` starts the notes that are under way at the new place
+    /// (`notes_under_way`); off (the default), they are skipped and their channels stay silent until their next note.
+    /// Set it before seeking.
+    pub fn set_truncated_on_transport(&mut self, on: bool) {
+        self.truncated_on_transport = on;
     }
 
     /// Drop the scheduled notes: the engine only plays live notes (`note_on`).
@@ -1505,15 +1516,16 @@ impl Engine {
         !self.looping && drained && self.tail_done && self.inst_live.is_empty() && !self.tap_clicks.sounding()
     }
 
-    /// Start playback in the tick that contains `frame` (at the project tempo; notes before that tick are not
-    /// triggered).
+    /// Start playback in the tick that contains `frame` (at the project tempo; notes before that tick as `seek_tick`
+    /// has them).
     pub fn seek(&mut self, frame: u64) {
         let (tick, _) = Clock::tick_of_frame(self.rate, self.ppq, self.tempo, frame);
         self.seek_tick(tick);
     }
 
-    /// Start playback at tick `tick`: control points before it are applied, notes before it are not triggered, audio
-    /// clips that are under way start on it from where their sample has got to.
+    /// Start playback at tick `tick`: control points before it are applied, audio clips that are under way start on it
+    /// from where their sample has got to. Notes before it are not triggered, except, with "Play truncated notes on
+    /// transport" on (`set_truncated_on_transport`), those still going at it: they start afresh on it.
     pub fn seek_tick(&mut self, tick: u64) {
         self.clock = Clock::at_tick(self.rate, self.ppq, self.tempo, tick);
         self.tick = tick;
@@ -1524,6 +1536,10 @@ impl Engine {
         }
         self.sync_controls(tick);
         self.late = self.clips_under_way(tick);
+        if self.truncated_on_transport {
+            let notes = self.notes_under_way(tick);
+            self.late.extend(notes);
+        }
         self.params.forget();
         self.out.clear();
         self.out_pos = 0;
@@ -1553,6 +1569,26 @@ impl Engine {
                 (from < frames).then(|| Trigger { tick, from, start: (from / frames) as f32, shape, ..*t })
             })
             .collect()
+    }
+
+    /// Notes that started before `tick` and are still going at it (start < `tick` < end), moved to `tick` for what is
+    /// left of their length: each sounds there as if it started there, afresh (a sampler voice from the sample's
+    /// start, its envelopes from the top; an instrument gets a new note on), and ends at its own end (spec:
+    /// ui/settings-choices.md "Transport: Play truncated notes and Reset plugins", on). Lemon Studio's rules: a step
+    /// (no length of its own) never counts as going on, a slide note is not started again, a layer's note goes
+    /// through the layer (`start_notes`), and in song mode the notes are those the clip-edge rule (event 30, "Play
+    /// truncated notes in clips") has placed. The retriggers of a note repeat share the note's end: only the latest of
+    /// them starts again (a Lemon Studio choice).
+    fn notes_under_way(&self, tick: u64) -> Vec<Trigger> {
+        let mut out: Vec<Trigger> = Vec::new();
+        for t in &self.triggers[..self.next_trigger] {
+            if t.cut.is_some() || t.slide || !t.end.is_some_and(|e| e > tick) {
+                continue;
+            }
+            out.retain(|o| !(o.channel == t.channel && o.key == t.key && o.end == t.end));
+            out.push(Trigger { tick, ..*t });
+        }
+        out
     }
 
     /// Applies the control points due on the tick starting now, smoothing volume and pan.
@@ -1595,6 +1631,7 @@ impl Engine {
     /// the ticks after it.
     pub fn continue_from(&mut self, old: &mut Engine) {
         self.looping = old.looping;
+        self.truncated_on_transport = old.truncated_on_transport;
         // The metronome carries on, with a click that is sounding (rebuilt at a new rate).
         self.metronome = old.metronome.take().map(|m| if m.rate() == self.rate { m } else { crate::metronome::Metronome::new(m.switch().clone(), self.rate) });
         // So does a tap's click (a tap usually changes the tempo while its click sounds).
@@ -2010,7 +2047,13 @@ impl Engine {
         // for hosted plugins, which have no song-length release).
         let step = u64::from(self.ppq / 4).max(1);
         for t in std::mem::take(&mut self.late) {
-            if t.tick == tick {
+            if t.tick != tick {
+                continue;
+            }
+            // A layer's note under way where playback starts goes through the layer, as at its own start.
+            if self.channels[t.channel].layer.is_some() {
+                self.hand_on(t, step);
+            } else {
                 self.start_trigger(t, step);
             }
         }
@@ -4245,6 +4288,107 @@ mod tests {
         e.seek_tick(300);
         assert!(e.late.is_empty(), "the sample has run out by tick 300");
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// Frame of tick `t` at 48 kHz, PPQ 96, 130 BPM (the test projects').
+    fn frame_48k(t: u64) -> u64 {
+        crate::clock::Clock::frame_of_tick(48000, 96, 130.0, t)
+    }
+
+    /// `p` played by a recorder on channel 0 from tick `at`, with "Play truncated notes on transport" `on`: its note
+    /// ons and note offs as (frame from the start, key).
+    fn started_at(p: &Project, mode: PlayMode, on: bool, at: u64) -> (Vec<(u64, u8)>, Vec<(u64, u8)>, Vec<f32>) {
+        let mut e = Engine::new(p, &mut SampleLibrary::default(), 48000, mode);
+        let rec = Arc::new(std::sync::Mutex::new(Rec::default()));
+        e.set_instrument(0, rec.clone());
+        e.set_truncated_on_transport(on);
+        e.seek_tick(at);
+        let out = e.render_all(512);
+        let keys = |kind: &str| got(&rec, kind).into_iter().map(|g| (g.0, g.1)).collect();
+        (keys("on"), keys("off"), out)
+    }
+
+    // spec: ui/settings-choices.md "Transport: Play truncated notes and Reset plugins"
+    /// "Play truncated notes on transport", on: started in the middle of a 2-bar note, the note sounds at once (a new
+    /// note on at the first frame) and ends at its own end. Off, it is skipped and the channel stays silent. A note
+    /// that is over is not started, one that starts on the place plays once, and a note repeat starts again once.
+    #[test]
+    fn truncated_notes_on_transport_start_the_notes_under_way() {
+        let mut p = project(vec![long_note(0, 768, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        // Four bars: the note does not end with the song (which lets go of every note on its last tick).
+        p.patterns[0].length = Some(4 * 384);
+        let (on, off, out) = started_at(&p, PlayMode::Pattern(1), true, 384);
+        assert_eq!(on, vec![(0, 60)], "sounds at once");
+        assert_eq!(off, vec![(frame_48k(768) - frame_48k(384), 60)], "ends at its own end");
+        assert!(out[..1024].iter().any(|&v| v != 0.0), "heard in the first block");
+        let (on, off, out) = started_at(&p, PlayMode::Pattern(1), false, 384);
+        assert!(on.is_empty() && off.is_empty() && out.iter().all(|&v| v == 0.0), "off: skipped");
+        p.patterns[0].notes = vec![long_note(0, 96, 0), Note { key: 62, ..long_note(384, 96, 0) }];
+        let (on, _, _) = started_at(&p, PlayMode::Pattern(1), true, 384);
+        assert_eq!(on, vec![(0, 62)], "the note that is over is not started, the one on the place plays once");
+        // Repeats every 96 ticks (0, 96, 192, 288), all to tick 384: from 200, one note now, the next repeat at 288.
+        p.patterns[0].notes = vec![long_note(0, 384, 1)];
+        let (on, _, _) = started_at(&p, PlayMode::Pattern(1), true, 200);
+        assert_eq!(on, vec![(0, 60), (frame_48k(288) - frame_48k(200), 60)]);
+    }
+
+    /// On a sampler channel the voice started in the middle of a note starts afresh: its sample from frame 0 and its
+    /// envelopes from the top, frame for frame as the note sounded from its own start. A step and a slide note under
+    /// way are not started again. A layer's note goes through the layer to its children. In song mode, the notes are
+    /// those the clip-edge rule (event 30) placed.
+    #[test]
+    fn truncated_notes_on_transport_start_afresh() {
+        use os_model::{Clip, ClipSource};
+        // A one-second ramp (each frame's value is its time): any other place in the sample sounds different.
+        let wav = std::env::temp_dir().join(format!("os-engine-truncated-transport-{}.wav", std::process::id()));
+        let ramp: Vec<f32> = (0..48000).flat_map(|i| [i as f32 / 48000.0; 2]).collect();
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &ramp).unwrap();
+        let mut p = project(vec![long_note(0, 768, 0)], vec![]);
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        let mut lib = SampleLibrary::new(None);
+        let whole = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1)).render_all(480);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_truncated_on_transport(true);
+        e.seek_tick(384);
+        let inside = e.render_all(480);
+        assert!(whole[4000] > 0.01, "the note sounds");
+        let worst = inside[..20000].iter().zip(&whole[..20000]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-6, "from sample frame 0, envelopes from the top (off by {worst})");
+        // A step and a slide note under way: nothing starts.
+        let slide = Note { key: 67, flags: 0x4000 | Note::SLIDE, ..long_note(0, 768, 0) };
+        p.patterns[0].notes = vec![Note::step(0, 0), slide];
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_truncated_on_transport(true);
+        e.seek_tick(12);
+        assert!(e.late.is_empty(), "neither the step nor the slide note starts again");
+        assert!(e.render_all(480).iter().all(|&v| v == 0.0));
+        let _ = std::fs::remove_file(&wav);
+
+        // A layer's note under way: each child gets it, to its end.
+        let mut lp = layered(0, vec![long_note(0, 768, 0)], &[ChannelKind::Plugin, ChannelKind::Plugin]);
+        lp.patterns[0].length = Some(4 * 384);
+        let (mut e, recs) = recorded(&lp);
+        e.set_truncated_on_transport(true);
+        e.seek_tick(384);
+        e.render_all(512);
+        for r in &recs {
+            assert_eq!(got(r, "on"), vec![(0, 60, 100.0 / 128.0)]);
+            assert_eq!(got(r, "off"), vec![(frame_48k(768) - frame_48k(384), 60, 0.0)]);
+        }
+
+        // Song mode: a clip from tick 384 showing pattern ticks 100..200 (spec: audio/song-structure.md "Play truncated
+        // notes"). Started at 420, the note that began before the window (key 60) is under way only when event 30 put
+        // it in the clip.
+        let mut c = Clip::new(384, 100, 0, ClipSource::Pattern(1));
+        c.window = Some((100.0, 200.0));
+        let mut sp = song(vec![long_note(0, 200, 0), Note { key: 62, ..long_note(150, 200, 0) }], vec![c]);
+        sp.channels[0].kind = ChannelKind::Plugin;
+        let later = frame_48k(434) - frame_48k(420);
+        assert_eq!(started_at(&sp, PlayMode::Song, true, 420).0, vec![(later, 62)], "event 30 off: not in the clip");
+        sp.play_truncated = true;
+        assert_eq!(started_at(&sp, PlayMode::Song, true, 420).0, vec![(0, 60), (later, 62)], "event 30 on");
+        assert_eq!(started_at(&sp, PlayMode::Song, false, 420).0, vec![(later, 62)], "the transport setting off");
     }
 
     // spec: audio/audio-clips.md "Fades and clip gain"
