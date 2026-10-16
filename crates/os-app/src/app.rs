@@ -944,6 +944,8 @@ pub struct App {
     pub hover: Option<Action>,
     /// Action under the cursor while the left button is held (pressed look of buttons).
     pub pressed: Option<Action>,
+    /// A window button pressed and not released yet (`acts_on_release`).
+    armed: Option<Action>,
     hover_rect: Option<Rect>,
     damage: Damage,
     /// Typing keyboard (spec: ui/typing-keyboard.md): keys held now as (physical key, rack row,
@@ -1122,6 +1124,7 @@ impl App {
             bars: Vec::new(),
             hover: None,
             pressed: None,
+            armed: None,
             hover_rect: None,
             damage: Damage::Full,
             typing_held: Vec::new(),
@@ -3754,15 +3757,39 @@ impl App {
         changed
     }
 
+    /// Window buttons act on the release over the same button instead of on the press, like the system's own (owner,
+    /// 2026-10-15: acting on the press made accidental closes easy): the main window's minimize, maximize / restore and
+    /// exit, the child windows' minimize, maximize and close, the × of a dialog, the Settings window and the Advanced
+    /// fill window. The press arms one; moving off it before releasing lets it go.
+    fn acts_on_release(a: &Action) -> bool {
+        matches!(
+            a,
+            Action::Minimize
+                | Action::Maximize
+                | Action::Close
+                | Action::MinWin(_)
+                | Action::MaxWin(_)
+                | Action::CloseWin(_)
+                | Action::Dlg(crate::dialog::DHit::Close)
+                | Action::Settings(crate::views::settings::SAct::Close)
+                | Action::RackFill(crate::rack::FillHit::Close)
+        )
+    }
+
     pub fn mouse_down(&mut self) {
         self.invalidate();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
         self.pressed = action.clone();
+        self.armed = None;
         // A dialog takes every click (spec: ui/dialogs.md §3).
         if self.modal_open() {
             if let Some(Action::Dlg(h)) = action {
-                self.dialog_click(h);
+                if Self::acts_on_release(&Action::Dlg(h.clone())) {
+                    self.armed = Some(Action::Dlg(h));
+                } else {
+                    self.dialog_click(h);
+                }
             }
             return;
         }
@@ -3814,7 +3841,11 @@ impl App {
         }
         self.raise_under_mouse();
         if let Some(a) = action {
-            self.act(a);
+            if Self::acts_on_release(&a) {
+                self.armed = Some(a);
+            } else {
+                self.act(a);
+            }
         }
         self.rack_pending();
     }
@@ -4182,6 +4213,14 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        // An armed window button acts if the release is over it (`acts_on_release`).
+        if let Some(a) = self.armed.take() {
+            let (x, y) = self.mouse;
+            if self.top_hit(x, y).is_some_and(|h| h.action == a) {
+                self.act(a);
+                self.invalidate();
+            }
+        }
         let pressed = self.pressed.take();
         // A click without a drag did its work on the press (painted then): its release only lifts the pressed look.
         if self.drag.is_none() {
@@ -8894,8 +8933,21 @@ mod tests {
         assert_eq!(app.state.docked(), Some(Win::Mixer));
         app.act(Action::MaxWin(Win::Mixer));
         assert_eq!(app.state.win_rect(Win::Mixer), r4);
-        app.act(Action::CloseWin(Win::Mixer));
-        assert!(!app.state.shown(Win::Mixer));
+
+        // The window buttons act on the release over them: not on the press, and not when the mouse slides off
+        // before the release.
+        frame(&mut app, &mut a, None);
+        let close = hit_rect(&app, &Action::CloseWin(Win::Mixer));
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(close.cx(), close.cy()); });
+        step(&mut app, &mut a, &|ap| ap.mouse_down());
+        assert!(app.state.shown(Win::Mixer), "the press does not close");
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(close.cx() - 200.0, close.cy() + 200.0); });
+        step(&mut app, &mut a, &|ap| ap.mouse_up());
+        assert!(app.state.shown(Win::Mixer), "released off the button: nothing");
+        step(&mut app, &mut a, &|ap| { ap.mouse_move(close.cx(), close.cy()); });
+        step(&mut app, &mut a, &|ap| ap.mouse_down());
+        step(&mut app, &mut a, &|ap| ap.mouse_up());
+        assert!(!app.state.shown(Win::Mixer), "released over the button: closed");
 
         // The mixer layout scales with its height only (1 at the measured size).
         assert_eq!(views::mixer::scale(Rect::new(209.0, 83.0, 1711.0, 997.0)), 1.0);

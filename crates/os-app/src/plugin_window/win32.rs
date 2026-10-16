@@ -646,8 +646,11 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 0
             }
             WM_LBUTTONUP => {
+                // Before ReleaseCapture: its WM_CAPTURECHANGED lets an armed button go without acting.
+                let (x, y) = client_point(hwnd, lp, w.scale, false);
+                let r = w.state.borrow_mut().left_up(x, y);
                 ReleaseCapture();
-                w.state.borrow_mut().release();
+                reply(hwnd, w, r);
                 0
             }
             WM_CAPTURECHANGED => {

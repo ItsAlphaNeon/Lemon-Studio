@@ -651,7 +651,10 @@ impl Frame {
                 };
                 self.reply(r, (e.root_x, e.root_y));
             }
-            Event::ButtonRelease(e) if e.detail == 1 => self.state.borrow_mut().release(),
+            Event::ButtonRelease(e) if e.detail == 1 => {
+                let r = self.state.borrow_mut().left_up(f32::from(e.event_x) / k, f32::from(e.event_y) / k);
+                self.reply(r, (e.root_x, e.root_y));
+            }
             Event::MotionNotify(e) if self.state.borrow().moving.is_some() => {
                 let Some((cx, cy, wx, wy)) = self.state.borrow().moving else { return };
                 let at = (wx + i32::from(e.root_x) - cx, wy + i32::from(e.root_y) - cy);

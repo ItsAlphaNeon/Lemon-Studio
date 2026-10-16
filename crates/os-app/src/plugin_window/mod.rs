@@ -224,6 +224,9 @@ struct State {
     /// Title-bar move in progress: cursor and window position (screen px) at the press. Done by hand: the system's
     /// move loop (HTCAPTION) blocks the UI thread, which would freeze all drawing while a window moves.
     moving: Option<(i32, i32, i32, i32)>,
+    /// A title-bar button (close, minimize) pressed and not released yet: it acts on the release over it (owner,
+    /// 2026-10-15: acting on the press made accidental closes easy).
+    armed: Option<Part>,
     /// A top-level window (menu arrow > Detached) instead of a child of the main window (always when the main window is
     /// a native Wayland one).
     detached: bool,
@@ -251,6 +254,7 @@ impl State {
             events: Vec::new(),
             drag: None,
             moving: None,
+            armed: None,
             detached,
             clip: None,
             clip_key: None,
@@ -648,11 +652,11 @@ impl State {
             _ => {}
         }
         match part {
-            Some(Part::Close) => {
-                self.events.push(FrameEvent::Close);
-                Reply::Repaint
+            // Close and minimize only arm on the press; the release over the same button acts (`left_up`).
+            Some(Part::Close | Part::Minimize) => {
+                self.armed = part;
+                Reply::Capture
             }
-            Some(Part::Minimize) => Reply::Minimize,
             Some(Part::Gear) => {
                 self.strip = !self.strip;
                 if !self.strip {
@@ -763,8 +767,27 @@ impl State {
         if hover { Reply::Repaint } else { Reply::None }
     }
 
-    /// The button was released (or the mouse lost otherwise): drags end, a held Misc key is let go.
+    /// The left button was released at (x, y): an armed title-bar button acts if the mouse is still over it, then
+    /// everything a release ends ends (`release`).
+    fn left_up(&mut self, x: f32, y: f32) -> Reply {
+        let armed = self.armed.take();
+        let over = armed.is_some() && part_at(self, x, y) == armed;
+        self.release();
+        match armed {
+            Some(Part::Close) if over => {
+                self.events.push(FrameEvent::Close);
+                Reply::Repaint
+            }
+            Some(Part::Minimize) if over => Reply::Minimize,
+            Some(_) => Reply::Repaint,
+            None => Reply::None,
+        }
+    }
+
+    /// The button was released (or the mouse lost otherwise): drags end, a held Misc key is let go, an armed title-bar
+    /// button is let go without acting.
     fn release(&mut self) {
+        self.armed = None;
         self.drag = None;
         self.moving = None;
         self.misc_ui.drag = None;
@@ -938,6 +961,27 @@ mod tests {
         assert_eq!(at(438.0, 15.0), Some(Part::PresetNext));
         assert_eq!(at(460.0, 15.0), Some(Part::Minimize));
         assert_eq!(at(479.0, 15.0), Some(Part::Close));
+
+        // Close and minimize act on the release over them, not on the press; sliding off, or losing the mouse,
+        // cancels.
+        let mut st = state(true, "Master");
+        let screen = |_: f32, _: f32| (0, 0);
+        let closes = |st: &State| st.events.iter().filter(|e| matches!(e, FrameEvent::Close)).count();
+        assert_eq!(st.left_down(479.0, 15.0, false, &screen), Reply::Capture);
+        assert_eq!(closes(&st), 0, "the press does not close");
+        assert_eq!(st.left_up(200.0, 15.0), Reply::Repaint);
+        assert_eq!(closes(&st), 0, "released off the button");
+        st.left_down(479.0, 15.0, false, &screen);
+        st.release();
+        assert_eq!(st.left_up(479.0, 15.0), Reply::None, "the mouse was lost first");
+        st.left_down(479.0, 15.0, false, &screen);
+        assert_eq!(st.left_up(479.0, 15.0), Reply::Repaint);
+        assert_eq!(closes(&st), 1);
+        st.left_down(460.0, 15.0, false, &screen);
+        assert_eq!(st.left_up(479.0, 15.0), Reply::Repaint, "pressed on minimize, released on close: nothing");
+        assert_eq!(closes(&st), 1);
+        st.left_down(460.0, 15.0, false, &screen);
+        assert_eq!(st.left_up(460.0, 15.0), Reply::Minimize);
         assert_eq!(at(200.0, 15.0), Some(Part::Caption));
         assert_eq!(at(29.0, 50.0), Some(Part::Tab(0)));
         assert_eq!(at(74.0, 50.0), Some(Part::Tab(1)));
