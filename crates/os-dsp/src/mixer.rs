@@ -222,14 +222,34 @@ impl TrackEq { // This code is a part of L e m o n S t u d i o. Please don't upl
     }
 }
 
+/// The frequency in Hz of a stored band frequency position (0..65536): 10 Hz to 16000 Hz (spec: audio/mixer.md
+/// "Equaliser").
+pub fn eq_frequency(freq: i32) -> f32 {
+    let x = knob(freq, R65536);
+    (((f64::from(x) * 101f64.ln()).exp() - 1.0) as f32 as f64 * 159.9 + 10.0) as f32
+}
+
+/// The equaliser's gain in dB at `hz` for stored settings at `rate`: the bands that run (gain not 0), in series. For
+/// drawing its response.
+pub fn eq_response_db(settings: [[i32; 3]; 3], rate: u32, hz: f64) -> f64 {
+    let w = hz * 2.0 * std::f64::consts::PI / f64::from(rate);
+    let (c1, s1, c2, s2) = (w.cos(), w.sin(), (2.0 * w).cos(), (2.0 * w).sin());
+    let mut db = 0.0;
+    for (k, &s) in settings.iter().enumerate().filter(|(_, s)| s[0] != 0) {
+        let [b0, b1, b2, a1, a2] = design(k, s, rate);
+        let num = (b0 + b1 * c1 + b2 * c2).powi(2) + (b1 * s1 + b2 * s2).powi(2);
+        let den = (1.0 + a1 * c1 + a2 * c2).powi(2) + (a1 * s1 + a2 * s2).powi(2);
+        db += 10.0 * (num / den).log10();
+    }
+    db
+}
+
 /// Coefficients `[b0, b1, b2, a1, a2]` of band `k` (0 = low shelf, 1 = peaking, 2 = high shelf) for stored settings
 /// `[gain, frequency, width]`.
 fn design(k: usize, [gain, freq, width]: [i32; 3], rate: u32) -> [f64; 5] {
     // Parameters scaled in single precision.
     let db = gain as f32 * 0.01f32;
-    let x = knob(freq, R65536);
-    let shaped = (((f64::from(x) * 101f64.ln()).exp() - 1.0) as f32 as f64 * 159.9 + 10.0) as f32;
-    let f = shaped.min((f64::from(rate) * 0.4999) as f32);
+    let f = eq_frequency(freq).min((f64::from(rate) * 0.4999) as f32);
     let q = knob(width, R65536);
     // Then in doubles.
     let w = f64::from(f) * 2.0 * std::f64::consts::PI / f64::from(rate);
@@ -270,6 +290,31 @@ fn design(k: usize, [gain, freq, width]: [i32; 3], rate: u32) -> [f64; 5] {
 #[cfg(test)]
 mod tests { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     use super::*;
+
+    /// The default bands sit at 90 Hz, 1500 Hz and 8000 Hz (spec: ui/mixer.md §8); the knob spans 10 Hz .. 16 kHz.
+    #[test]
+    fn eq_frequency_law() {
+        let hz: Vec<f32> = EQ_DEFAULT.iter().map(|b| eq_frequency(b[1]).round()).collect();
+        assert_eq!(hz, [90.0, 1500.0, 8000.0]);
+        assert_eq!(eq_frequency(0), 10.0);
+        assert!((eq_frequency(65536) - 16000.0).abs() < 1.0);
+    }
+
+    /// Flat at zero gain; a band's gain shows at its frequency and fades far from it.
+    #[test]
+    fn eq_response_follows_the_bands() {
+        for hz in [20.0, 1000.0, 15000.0] {
+            assert_eq!(eq_response_db(EQ_DEFAULT, 44100, hz), 0.0);
+        }
+        let mut s = EQ_DEFAULT;
+        s[1][0] = 900;
+        let at = |hz: f64| eq_response_db(s, 44100, hz);
+        assert!((at(1500.0) - 9.0).abs() < 0.05, "{}", at(1500.0));
+        assert!(at(30.0).abs() < 0.5 && at(16000.0).abs() < 0.5, "{} {}", at(30.0), at(16000.0));
+        s[1][0] = 0;
+        s[0][0] = -1200;
+        assert!((eq_response_db(s, 44100, 15.0) + 12.0).abs() < 0.3, "low shelf: {}", eq_response_db(s, 44100, 15.0));
+    }
 
     /// Centred at unity the matrix is the identity; the pan law matches the measured mixer pan (at -0.5:
     /// 1.0068 / 0.2997 / 0.5412, spec: audio/gain-laws.md).

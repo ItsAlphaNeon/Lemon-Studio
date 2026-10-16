@@ -64,16 +64,28 @@ pub fn rr(x0: f32, x1: f32, y0: f32, y1: f32) -> Rect {
     Rect::span(x0, x1, y(y0), y(y1))
 }
 
-/// Centre y of oscillator row `n` (FL px).
+/// Centre y of oscillator row `n` (FL px): the centre of its card, where its shapes, faders and knobs are centred (9 px
+/// under the original's rows, whose captions hung below the card).
 pub fn row_y(n: usize) -> f32 {
-    120.0 + 108.0 * n as f32
+    129.0 + 108.0 * n as f32
 }
 
 /// Shape button centres: (shape or `INVERT`, x, row offset): top row sine, square, rounded saw, custom; bottom row
-/// triangle, saw, noise, invert.
+/// triangle, saw, noise, invert. Evenly spaced (the original's last column sits 2 px further right).
 pub const INVERT: i32 = -1;
 pub const SHAPE_BUTTONS: [(i32, f32, f32); 8] =
-    [(0, 60.0, -19.0), (2, 97.0, -19.0), (4, 134.0, -19.0), (6, 173.0, -19.0), (1, 60.0, 18.0), (3, 97.0, 18.0), (5, 134.0, 18.0), (INVERT, 173.0, 18.0)];
+    [(0, 60.0, -18.0), (2, 97.0, -18.0), (4, 134.0, -18.0), (6, 171.0, -18.0), (1, 60.0, 18.0), (3, 97.0, 18.0), (5, 134.0, 18.0), (INVERT, 171.0, 18.0)];
+
+/// Oscillator cards, centred on their rows (FL px, inclusive): all three the same, 7 px apart and 7 px below the
+/// strip, each with its captions inside.
+const CARD_HALF: f32 = 50.0;
+/// Caption line centre, from the row's centre: 7 px under the lowest fader cap, 7 px over the card's inside edge.
+const CAP_DY: f32 = 38.0;
+/// Fader travel, from the row's centre (the cap reaches 7 px further).
+const FADER_HALF: f32 = 20.0;
+/// The bottom band starts 7 px under the last card; its controls sit on its centre line.
+const BAND_TOP: f32 = 403.0;
+const BAND_Y: f32 = 432.0;
 
 /// Read access to parameter values by id.
 pub trait Model {
@@ -271,10 +283,12 @@ fn metal_knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, r: f32, ticks: usize, val
 }
 
 /// A vertical fader: ticks, a thin groove and a rounded grey cap with a lemon centre line at the value (centre = 0).
+/// The travel is shorter than the original's 80 px so the fader is no taller than the knobs and the cap stays clear of
+/// the captions (drags are relative); the hit area is the drawing's.
 fn fader(ui: &mut Ui, id: &str, x: f32, cy: f32) {
-    let (top, bot) = (y(cy - 40.0), y(cy + 40.0));
+    let (top, bot) = (y(cy - FADER_HALF), y(cy + FADER_HALF));
     let target = Target::Knob(id.into());
-    let hr = Rect::new(x - 13.0, top - 6.0, 26.0, bot - top + 12.0);
+    let hr = Rect::new(x - 13.0, top - 9.0, 26.0, bot - top + 18.0);
     let st = ui.state(hr, &target);
     for k in 0..9 {
         let yy = top + (bot - top) * k as f32 / 8.0;
@@ -352,24 +366,24 @@ fn invert_glyph(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
 fn osc_page(ui: &mut Ui) {
     let t = ui.t;
     // Flat background, the bottom band a step darker.
-    ui.c.fill_rect(rr(4.0, 563.0, 72.0, 385.0), plug::BG);
-    ui.c.fill_rect(rr(4.0, 563.0, 386.0, 461.0), Color::rgb(0x232323));
-    ui.c.fill_rect(rr(4.0, 563.0, 386.0, 386.0), Color::rgb(0x1a1a1a));
+    ui.c.fill_rect(rr(4.0, 563.0, 72.0, BAND_TOP - 1.0), plug::BG);
+    ui.c.fill_rect(rr(4.0, 563.0, BAND_TOP, 461.0), Color::rgb(0x232323));
+    ui.c.fill_rect(rr(4.0, 563.0, BAND_TOP, BAND_TOP), Color::rgb(0x1a1a1a));
 
     let ink = plug::DIM;
     for n in 0..3 {
         let o = n + 1;
         let cy = row_y(n);
         let id = |s: &str| format!("o{o}_{s}");
-        // The oscillator's card and its number badge.
-        let (top, bot) = (y(cy - 27.0), y(cy + 28.0));
+        // The oscillator's card and its number badge: a tab down the card's left side, inset 4 px.
+        let (top, bot) = (y(cy - CARD_HALF + 4.0), y(cy + CARD_HALF - 3.0));
         let s = o.to_string();
-        lemon::plug_panel(ui.c, Rect::new(6.0, y(cy) - 45.0, 556.0, if n < 2 { 103.0 } else { 89.0 }));
-        ui.c.fill_rrect(Rect::new(10.0, top, 30.0, 55.0), 7.0, Color::rgb(0x262626));
+        lemon::plug_panel(ui.c, rr(6.0, 561.0, cy - CARD_HALF, cy + CARD_HALF));
+        ui.c.fill_rrect(Rect::new(10.0, top, 30.0, bot - top), 7.0, Color::rgb(0x262626));
         let f = Font::new(28).bold();
         let lh = ui.c.line_height(f);
         let w = ui.c.text_width(f, &s);
-        ui.c.text(f, (25.0 - w / 2.0).round(), ((top + bot) / 2.0 - lh / 2.0).round(), brand::MAIN, &s);
+        ui.c.text(f, (25.0 - w / 2.0).round(), ((top + bot) / 2.0 - lh / 2.0 - 1.5).round(), brand::MAIN, &s);
         // Shapes and invert.
         let shape = ui.m.plain(&id("shape")).round() as i32;
         for (s, x, dy) in SHAPE_BUTTONS {
@@ -407,21 +421,23 @@ fn osc_page(ui: &mut Ui) {
         if n > 0 {
             metal_knob(ui, &format!("o{o}_mix"), 527.0, cy, 21.0, 5, false);
         }
-        // Captions under rows 1 and 2 (the bottom band covers row 3's, as in the original).
-        if n == 2 {
-            continue;
-        }
-        let cap_y = y(cy + 53.0);
+        // Captions on one line inside the card, each centred under its control: the fader pair around the stereo
+        // mark between them, COARSE, FINE, the pan mark, the mix ramp; the keyboard mark halfway between COARSE and
+        // FINE.
+        let cap_y = y(cy + CAP_DY);
         let lh = ui.c.line_height(CAP);
+        let ty = (cap_y - lh / 2.0).round();
+        let gap = 251.0 - 236.0 - 7.0;
         let wl = ui.c.text_width(CAP, "PHASE OFS");
-        ui.c.text(CAP, (243.0 - wl).round(), (cap_y - lh / 2.0).round(), ink, "PHASE OFS");
+        ui.c.text(CAP, (251.0 - gap - wl).round(), ty, ink, "PHASE OFS");
         bowtie(ui.c, 251.0, cap_y, ink);
-        ui.c.text(CAP, 259.0, (cap_y - lh / 2.0).round(), ink, "DETUNE");
-        let w = ui.c.text_width(CAP, "COARSE");
-        ui.c.text(CAP, (342.0 - w / 2.0).round(), (cap_y - lh / 2.0).round(), ink, "COARSE");
-        ui.c.text(CAP, 393.0, (cap_y - lh / 2.0).round(), ink, "FINE");
-        // Keyboard mark between COARSE and FINE (decorative).
-        icon(ui.c, &tb::PIANO, 377.0, y(cy + 55.0), 14.0, ink);
+        ui.c.text(CAP, 251.0 + gap, ty, ink, "DETUNE");
+        let wc = ui.c.text_width(CAP, "COARSE");
+        ui.c.text(CAP, (342.0 - wc / 2.0).round(), ty, ink, "COARSE");
+        let wf = ui.c.text_width(CAP, "FINE");
+        ui.c.text(CAP, (405.0 - wf / 2.0).round(), ty, ink, "FINE");
+        let mid = ((342.0 + wc / 2.0) + (405.0 - wf / 2.0)) / 2.0;
+        icon(ui.c, &tb::PIANO, mid.round(), cap_y, 14.0, ink);
         bowtie(ui.c, 467.0, cap_y, ink);
         if n > 0 {
             // Ramp mark: the mix level.
@@ -431,21 +447,32 @@ fn osc_page(ui: &mut Ui) {
 
     // Bottom band: AM, HQ, phase randomness, wordmark.
     let am = ui.flag(AM_BYTE);
-    let r = Rect::new(14.0, y(423.0) - 8.0, 70.0, 16.0);
+    let by = y(BAND_Y);
+    let r = Rect::new(14.0, by - 8.0, 70.0, 16.0);
     let st = ui.state(r, &Target::Flag(AM_BYTE));
-    inst::radio(ui.c, t, 22.0, y(423.0), am, st);
-    inst::label(ui.c, t, 32.0, y(423.0), "AM OSC 3", false);
+    inst::radio(ui.c, t, 22.0, by, am, st);
+    inst::label(ui.c, t, 32.0, by, "AM OSC 3", false);
     ui.hit(r, Target::Flag(AM_BYTE));
-    let r = Rect::new(93.0, y(423.0) - 8.0, 40.0, 16.0);
+    let r = Rect::new(93.0, by - 8.0, 40.0, 16.0);
     let st = ui.state(r, &Target::Toggle("hq".into()));
-    inst::radio(ui.c, t, 101.0, y(423.0), ui.on("hq"), st);
-    inst::label(ui.c, t, 111.0, y(423.0), "HQ", false);
+    inst::radio(ui.c, t, 101.0, by, ui.on("hq"), st);
+    inst::label(ui.c, t, 111.0, by, "HQ", false);
     ui.hit(r, Target::Toggle("hq".into()));
-    dark_knob(ui, "rand", 168.0, 423.0, 17.0);
-    bowtie(ui.c, 206.0, y(423.0), plug::DIM);
-    inst::label(ui.c, t, 214.0, y(423.0), "PHASE RAND", false);
-    // The lemon mark and "LEMON" over a large "TRIO".
-    lemon::wordmark(ui.c, 551.0, y(389.0), false, "TRIO", Font::condensed(40, 0), Font::condensed(11, 0).bold());
+    dark_knob(ui, "rand", 168.0, BAND_Y, 17.0);
+    bowtie(ui.c, 206.0, by, plug::DIM);
+    inst::label(ui.c, t, 214.0, by, "PHASE RAND", false);
+    wordmark(ui.c, 552.5, y(BAND_Y - 20.0));
+}
+
+/// The lemon mark and "LEMON" over a large "TRIO" right-aligned at `right`, `top` = top of the small line. "LEMON"
+/// starts over the name's left edge, close above it (concept A "Pith"): TRIO's capitals start 3 px under LEMON's
+/// (they start 8 px into the big cell; LEMON's end 9 px into the small one), not over them.
+fn wordmark(c: &mut Canvas, right: f32, top: f32) {
+    let (big, small) = (Font::condensed(38, 16).bold(), Font::condensed(11, 0));
+    let x0 = right - lemon::spaced_width(c, big, "TRIO", 3.0);
+    lemon::lemon_mark(c, x0 + 6.0, top + 6.0, 4.5, brand::MAIN);
+    lemon::spaced(c, small, x0 + 13.0, top, brand::MAIN, "LEMON", 3.0);
+    lemon::spaced(c, big, x0, top + 5.0, plug::WORDMARK, "TRIO", 3.0);
 }
 
 /// The phase-randomness knob.

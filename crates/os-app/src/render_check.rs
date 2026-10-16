@@ -14,6 +14,7 @@
 //! - `OS_RENDER_RATE` (44100): the render rate; every plugin starts at it.
 //! - `OS_RENDER_SCAN` (0): 1 = also host the installed CLAP / VST3 plugins the project names.
 //! - `OS_RENDER_SECS`: stop after this many seconds of song.
+//! - `OS_RENDER_FROM` (0): start at this tick, as playback started there does.
 //!
 //! With the scan on it loads plugin files in-process: run it alone, in its own process.
 // spec: audio/export.md
@@ -34,6 +35,7 @@ fn render_project() {
     let rate: u32 = env("OS_RENDER_RATE").and_then(|s| s.parse().ok()).unwrap_or(44100);
     let scan = env("OS_RENDER_SCAN").is_some_and(|s| s == "1");
     let limit: f64 = env("OS_RENDER_SECS").and_then(|s| s.parse().ok()).unwrap_or(f64::MAX);
+    let from: u64 = env("OS_RENDER_FROM").and_then(|s| s.parse().ok()).unwrap_or(0);
 
     let mut app = crate::app::App::new(None);
     app.plugins = if scan { crate::plugins::Plugins::scan() } else { crate::plugins::Plugins::builtins() };
@@ -70,6 +72,9 @@ fn render_project() {
     }
     for (t, s, f) in app.plugins.effects() {
         e.set_effect(t, s, f);
+    }
+    if from > 0 {
+        e.seek_tick(from);
     }
     let len = e.length().max(1);
     let cap = (len + u64::from(rate) * 30).min((limit * f64::from(rate)) as u64);
