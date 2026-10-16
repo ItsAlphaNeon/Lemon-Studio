@@ -864,6 +864,15 @@ impl Plugins {
         crate::plugin_window::stack(self.owner, &hwnds);
     }
 
+    /// VIEW > Into workspace for the docked windows: one partly outside the workspace moves fully back in
+    /// (`FrameWindow::move_into_workspace`).
+    #[cfg(all(plugin_windows, windows))]
+    pub fn move_into_workspace(&self) {
+        for w in self.hosted.values().filter_map(|h| h.window.as_ref()) {
+            w.move_into_workspace();
+        }
+    }
+
     /// Clips row `row`'s docked window to `work` minus `covers` (main-window client px).
     #[cfg(plugin_windows)]
     pub fn clip(&self, row: usize, work: [i32; 4], covers: &[[i32; 4]]) {

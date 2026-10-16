@@ -89,6 +89,10 @@ pub const METRONOME_LABEL: &str = "Metronome";
 pub const AUTOSCROLL_LABEL: &str = "Auto scrolling";
 /// OPTIONS > Enable groups (spec: ui/enable-groups.md §1).
 pub const GROUPS_LABEL: &str = "Enable groups";
+/// VIEW > Into workspace: windows partly outside the workspace move fully back in (`App::move_into_workspace`). A plain
+/// entry after "Arrange windows", whose submenu isn't built (spec: ui/settings-choices.md "Advanced: Don't limit
+/// windows to screen (2026-10-16)").
+pub const INTO_WORKSPACE_LABEL: &str = "Into workspace";
 /// Index of the OPTIONS menu.
 pub const OPTIONS_MENU: usize = 5;
 /// OPTIONS > Project info (the toolbar's info button).
@@ -208,6 +212,7 @@ const VIEW_ITEMS: &[Item] = &[
     it("Close all unfocused windows", "Ctrl+F12").on(),
     it("Align all channel editors", "Shift+F12"),
     it("Arrange windows", "").sub(),
+    it(INTO_WORKSPACE_LABEL, "").on(),
     it("Background", "").sub(),
     head("Browser"),
     it("Undo history", ""),

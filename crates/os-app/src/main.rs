@@ -76,6 +76,7 @@ mod transport;
 mod typein;
 mod views;
 mod waves;
+mod win_clamp;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
