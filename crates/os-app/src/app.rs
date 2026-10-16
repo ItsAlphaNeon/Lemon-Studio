@@ -2958,6 +2958,8 @@ impl App {
         if self.modal_open() {
             return self.dialog_drop(path);
         }
+        // A drop accepts an Info box being edited, as a click does.
+        crate::project_info::accept_info(&mut self.state);
         if ext == "flp" {
             return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
         }
@@ -3320,6 +3322,8 @@ impl App {
             SAct::Button("Rescan all") => self.start_scan(crate::plugin_db::Mode::All),
             SAct::Button("Add folder...") => self.add_plugin_folder(),
             SAct::Button(b) => self.state.message = Some(off_text(b)),
+            // The Info page's boxes (spec: ui/settings.md "Info").
+            SAct::Info(f) => return self.info_act(f),
         }
         self.invalidate();
     }
@@ -3818,6 +3822,10 @@ impl App {
         }
         if self.state.playlist.edit.is_some() {
             crate::playlist::commit_edit(&mut self.state);
+        }
+        // A click anywhere but the Info box being edited accepts it (spec: ui/settings.md "Info").
+        if self.state.settings.info_edit.as_ref().is_some_and(|e| action != Some(Action::Settings(views::settings::SAct::Info(e.field)))) {
+            crate::project_info::accept_info(&mut self.state);
         }
         // Clicking anywhere but the search field leaves it (spec: ui/browser.md §5).
         if action != Some(Action::BrowserSearch) {
@@ -4817,6 +4825,10 @@ impl App {
         if self.modal_open() {
             return self.dialog_key(key, ctrl, alt);
         }
+        // So does a box of the settings window's Info page while it is edited.
+        if self.info_key(key, ctrl, alt) {
+            return;
+        }
         use winit::keyboard::{Key, NamedKey};
         // Ctrl+Shift+D: switch the design (spec: ui/lemon-design.md §1).
         if let Key::Character(c) = key
@@ -5013,6 +5025,10 @@ impl App {
     pub fn typing_key(&mut self, code: KeyCode, pressed: bool, ctrl: bool, alt: bool) -> bool {
         // A playlist text box (track / marker name, point value) takes the letters.
         if pressed && (self.modal_open() || self.state.playlist.edit.is_some() || self.state.plugdb.finding || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing() || self.state.perf.finding) {
+            return false;
+        }
+        // So does a box of the settings window's Info page.
+        if pressed && self.info_editing() {
             return false;
         }
         if !pressed {
