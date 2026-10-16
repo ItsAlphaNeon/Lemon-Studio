@@ -23,7 +23,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Resizable event panel: drag the splitter, double-click it to hide or show the panel (remembered)
 - Pattern time markers, saved with the project
 - Step edit (toolbar, OPTIONS menu, Ctrl+E): with the transport stopped, typing-keyboard and MIDI notes are
-  written at the song position a chord at a time, one main-snap step long, and the position moves on a step
+  written at the song position a chord at a time, one main-snap step long, and the position moves on a step; in
+  SONG mode they go where the current pattern plays at the song position
 
 ## ✅ Song arrangement
 
@@ -194,8 +195,8 @@ Not yet: Align all channel editors, Arrange windows.
   double-click can be swapped
 - File ▸ Browser extra search folders: the folders added to the browser, renamed or replaced from here
 - General ▸ Display ▸ High visibility: a white record dot, brighter channel names and light scroll bar thumbs
-- Not yet: the MIDI page, the recording settings, Toolbars scaling, transparent menus and windows, theme
-  adjustments, Invert pencil buttons, Associate project files and data folders
+- Not yet: the MIDI page, the recording settings, Toolbars scaling, theme adjustments, Invert pencil buttons,
+  Associate project files and data folders
 
 ## ❌ Not available yet
 

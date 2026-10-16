@@ -355,6 +355,14 @@ pub const FORCE_REFRESHES: Check = Check { key: "force_refreshes", label: "Force
 /// nothing yet. Spec: as above.
 pub const THICK_LINES: Check = Check { key: "thick_lines", label: "Thick lines", default: false };
 
+/// General ▸ Display: stored and shown only. FL showed no change to its menus either way, so there is nothing to copy
+/// yet. Spec: ui/settings-choices.md "Display: Smoothing, Animation refresh rate, Transparent menus and windows
+/// (2026-10-16)".
+pub const TRANSPARENT_MENUS: Check = Check { key: "transparent_menus", label: "Transparent menus", default: true };
+
+/// General ▸ Display: stored and shown only, like Transparent menus. Spec: as above.
+pub const TRANSPARENT_WINDOWS: Combo = Combo { key: "transparent_windows", label: "Transparent windows", choices: &["Off", "On"], default: 0 };
+
 /// General ▸ Input: stored and shown only. Lemon Studio has no pen or touch input yet; when it does, these choices are
 /// where it starts. Spec: ui/settings-choices.md "Input: Optimize for (2026-10-16)".
 pub const OPTIMIZE_FOR: Combo =
@@ -450,12 +458,13 @@ pub const CHECKS: &[&Check] = &[
     &HIGH_VISIBILITY,
     &FORCE_REFRESHES,
     &THICK_LINES,
+    &TRANSPARENT_MENUS,
     &AUTO_CLOSE,
     &SMART_DISABLE,
     &ALIGN_TICK_LENGTHS,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &TRANSPARENT_WINDOWS, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING];
 /// The declared combos no settings page shows (a window of their own does): General ▸ Input ▸ Manage shortcuts' rows
 /// (`crate::shortcuts`). Read by the declaration tests.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1081,6 +1090,46 @@ main_gui_scaling = 200%
         assert_eq!((choice(&OPTIMIZE_FOR), app.state.message.as_deref()), ("Pencil", Some("Optimize for: Pencil")));
         set_check(&FORCE_REFRESHES, true);
         set_choice(&OPTIMIZE_FOR, 0);
+    }
+
+    // spec: ui/settings-choices.md "Display: Smoothing, Animation refresh rate, Transparent menus and windows
+    // (2026-10-16)"
+    /// Transparent menus (a check, on) and Transparent windows (Off or On, Off) have the defaults as found and are kept
+    /// in the settings file; on the General page both work: the check toggles, the combo lists its two choices and keeps
+    /// the one picked.
+    #[test]
+    fn transparency_settings() {
+        let s = Store::parse("");
+        assert_eq!((check_in(&s, &TRANSPARENT_MENUS), index_in(&s, &TRANSPARENT_WINDOWS)), (true, 0));
+        let s = Store::parse("transparent_menus=0\ntransparent_windows=On\n");
+        assert_eq!((check_in(&s, &TRANSPARENT_MENUS), index_in(&s, &TRANSPARENT_WINDOWS)), (false, 1));
+        assert_eq!(TRANSPARENT_WINDOWS.choices, ["Off", "On"]);
+        assert_eq!((find_check("Transparent menus"), find_combo("Transparent windows")), (Some(&TRANSPARENT_MENUS), Some(&TRANSPARENT_WINDOWS)));
+
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::GENERAL);
+        app.paint(&mut c, None);
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(TRANSPARENT_MENUS.label)), "not greyed out");
+        let r = hit_rect(&app, &Action::Settings(SAct::Check(TRANSPARENT_MENUS.label)));
+        click(&mut app, &mut c, r);
+        assert!(!check(&TRANSPARENT_MENUS));
+        assert_eq!(app.state.message.as_deref(), Some("Transparent menus: off"));
+        let r = app
+            .hits
+            .iter()
+            .rev()
+            .find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == TRANSPARENT_WINDOWS.label))
+            .map(|h| h.rect)
+            .expect("the combo works");
+        click(&mut app, &mut c, r);
+        let labels: Vec<String> = app.state.playlist.popup.as_ref().expect("its menu").items.iter().map(|it| it.label.to_string()).collect();
+        assert_eq!(labels, TRANSPARENT_WINDOWS.choices);
+        let item = hit_rect(&app, &Action::PlPopup(1));
+        click(&mut app, &mut c, item);
+        assert_eq!((choice(&TRANSPARENT_WINDOWS), app.state.message.as_deref()), ("On", Some("Transparent windows: On")));
+        set_check(&TRANSPARENT_MENUS, true);
+        set_choice(&TRANSPARENT_WINDOWS, 0);
     }
 
     // spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High visibility (2026-10-16)"
