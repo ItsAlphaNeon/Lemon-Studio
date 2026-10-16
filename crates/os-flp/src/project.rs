@@ -5161,6 +5161,46 @@ mod tests {
         }
     }
 
+    /// Automatic crossfades are two ordinary fades in the clip records, written without their bits (spec:
+    /// flp/events/playlist.md bytes 36..56, audio/audio-clips.md "Automatic crossfades"): with event 44 on, the
+    /// records' bytes 36..57 come back as written (the bits clear on a crossfade, set on a fade set by hand, other bits
+    /// kept) through a new file, through the crossfades worked out again from what was read, and through edits.
+    #[test]
+    fn crossfade_fades_keep_their_bytes() {
+        let mut p = new_project();
+        (p.auto_crossfades, p.tempo) = (Some(true), Some(130.0));
+        let mut tone = sampler(2, "Tone", 0);
+        tone.kind = ChannelKind::AudioClip;
+        tone.sample_path = Some("C:/samples/tone.wav".into());
+        p.channels.push(tone);
+        let src = ClipSource::Channel(2);
+        let (mut a, mut b, mut c) = (Clip::new(0, 480, 0, src), Clip::new(240, 480, 0, src), Clip::new(2000, 480, 0, src));
+        // A crossfade as FL writes one (240 ticks at 130 BPM, PPQ 96; tensions 2.289 / -2.289; no bits), and a fade set
+        // by hand.
+        a.set_fade_out_length(1153.846);
+        a.set_fade_out_tension(-2.289);
+        b.set_fade_in_length(1153.846);
+        b.set_fade_in_tension(2.289);
+        c.set_fade_in(Some((300.0, -1.5)));
+        c.raw[56] |= 0x08;
+        let mut arr = default_arrangement();
+        arr.clips = vec![a, b, c];
+        p.arrangements.push(arr);
+        let bytes = |p: &Project| p.arrangements[0].clips.iter().map(|c| c.raw[36..57].to_vec()).collect::<Vec<_>>();
+        let want = bytes(&p);
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let mut back = load(&file).unwrap();
+        assert_eq!(back.auto_crossfades, Some(true));
+        assert_eq!(bytes(&back), want, "through a new file");
+        assert!(!os_model::crossfade::derive(&mut back, 130.0), "worked out again: nothing to change");
+        assert_eq!(bytes(&back), want);
+        back.arrangements[0].clips[2].position = 2400;
+        apply(&back, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(bytes(&again), want, "through edits");
+        assert_eq!(again.arrangements[0].clips.iter().map(|c| c.raw[56]).collect::<Vec<_>>(), [0, 0, 9]);
+    }
+
     /// The playlist view (event 242: scroll, time zoom, track height) sits before event 100, reads back and takes
     /// edits; a file without one gets it (spec: flp/events/playlist.md "Playlist view").
     #[test]
