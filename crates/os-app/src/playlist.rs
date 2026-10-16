@@ -1207,6 +1207,29 @@ fn regroup_copies(s: &mut State, from: usize) {
     }
 }
 
+/// Copies of the moved clips `orig` (index, clip as the move began) for a held click's pick-up (spec:
+/// ui/settings-choices.md "Input: Click-and-hold and both mouse buttons (2026-10-16)"): the originals go back to where
+/// they were and the copies are added after every clip, grouped copies in groups of their own as a Shift+drag's are.
+/// Returns the copies.
+pub fn clone_clips(s: &mut State, orig: &[(usize, Clip)]) -> Vec<(usize, Clip)> {
+    let arr = arr_mut(s);
+    for &(i, o) in orig {
+        if let Some(c) = arr.clips.get_mut(i) {
+            c.position = o.position;
+            c.track = o.track;
+        }
+    }
+    let first = arr.clips.len();
+    for &(_, o) in orig {
+        let mut cp = o;
+        cp.set_id(0);
+        arr.clips.push(cp);
+    }
+    regroup_copies(s, first);
+    s.piano.dirty = true;
+    clips(s).iter().enumerate().skip(first).map(|(i, c)| (i, *c)).collect()
+}
+
 /// Alt+wheel: change the track height by FL's 6 px steps around the track under the mouse (§6).
 pub fn zoom_rows(s: &mut State, grid: Rect, y: f32, notches: f32) {
     let row = s.playlist.row_h + ROW_STEP * notches.round();
@@ -2433,6 +2456,10 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     1 => PlDrag::ResizeR { x0: x, orig },
                     _ => PlDrag::Move { x0: x, y0: y, orig, fresh: app.shift },
                 }));
+                // Held without a move, the clips are cloned (Click-and-hold & special gesture functions).
+                if e == 0 && !app.shift {
+                    app.hold_start(crate::hold::Kind::Clips);
+                }
             }
         },
     }

@@ -134,11 +134,14 @@ pub(super) struct Event {
     pub cuts: Option<(u32, u32)>,
     /// The layer channel it came through (its voices answer that layer's slide notes, not the channel's own).
     pub layer: Option<usize>,
+    /// The note's own portamento switch: it inverts the channel's portamento for this note (spec:
+    /// audio/note-rules.md, "A note's own portamento switch").
+    pub porta: bool,
 }
 
 impl Event {
     pub fn on(ch: usize, off: u32, key: u8, vel: f32) -> Event {
-        Event { ch, off, key, vel, start: 0.0, fine: 0.0, long: true, glide: 0, levels: crate::NoteLevels::default(), cuts: None, layer: None }
+        Event { ch, off, key, vel, start: 0.0, fine: 0.0, long: true, glide: 0, levels: crate::NoteLevels::default(), cuts: None, layer: None, porta: false }
     }
     /// A layer note's own cut group (spec: audio/note-rules.md "Layer channels": it acts before the note is handed on).
     pub fn cut(ch: usize, off: u32, group: u32) -> Event {
@@ -511,7 +514,8 @@ fn note_start(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, N
     }
     // Portamento: the voice starts at the last levels and glides to its own.
     match v.last {
-        Some(last) if r.porta && r.glide >= 1 && last != f32::from(key) => {
+        // The channel's setting and the note's own switch differ (spec: audio/note-rules.md "Portamento").
+        Some(last) if r.porta != e.porta && r.glide >= 1 && last != f32::from(key) => {
             let from = last - f32::from(key);
             v.glides.push(Glide { key, now: from, step: -from / (r.glide + 1) as f32, left: r.glide + 1, at: e.off });
         }
@@ -714,6 +718,22 @@ mod tests {
         let mut v = vec![Voices::default()];
         tick(&r, &mut v, &[Event::on(0, 0, 60, 0.8)], 100);
         assert_eq!(tick(&r, &mut v, &[Event::on(0, 0, 72, 0.8)], 100).len(), 1);
+    }
+
+    // spec: audio/note-rules.md "Portamento", "A note's own portamento switch"
+    /// A note's own switch inverts the channel's portamento: a switched note glides on a channel without portamento,
+    /// and does not on a channel with it.
+    #[test]
+    fn a_notes_own_switch_inverts_portamento() {
+        let switched = |key: u8| Event { porta: true, ..Event::on(0, 0, key, 0.8) };
+        let r = [Rules { porta: false, glide: 2, ..Rules::default() }];
+        let mut v = vec![Voices::default()];
+        tick(&r, &mut v, &[Event::on(0, 0, 60, 0.8), Event::off(0, 1, 60)], 100);
+        assert_eq!(tick(&r, &mut v, &[switched(72)], 100), vec![(0, 0, on(72)), (0, 0, Note::Tune(72, -8.0))]);
+        let r = [Rules { porta: true, glide: 2, ..Rules::default() }];
+        let mut v = vec![Voices::default()];
+        tick(&r, &mut v, &[Event::on(0, 0, 60, 0.8), Event::off(0, 1, 60)], 100);
+        assert_eq!(tick(&r, &mut v, &[switched(72)], 100), vec![(0, 0, on(72))]);
     }
 
     // spec: audio/song-structure.md "Slide notes"; "Slide notes and these rules" here
