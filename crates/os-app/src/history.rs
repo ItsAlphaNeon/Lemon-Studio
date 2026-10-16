@@ -32,6 +32,8 @@ pub const LOAD_SAMPLE: &str = "Load channel sample(s)";
 /// "Create automation clip" (FL's name), with the control's initial value while "Initialize controls automatically" is
 /// on (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
 pub const CREATE_AUTOMATION: &str = "Create automation clip";
+/// A chord written by step edit (spec: ui/step-edit.md).
+pub const STEP_EDIT: &str = "Step edit";
 
 /// What a step changes, as it is on the other side of the step.
 #[derive(Debug, Clone, PartialEq)]

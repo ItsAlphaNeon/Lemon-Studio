@@ -22,6 +22,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Vertical zoom and ghost channels
 - Resizable event panel: drag the splitter, double-click it to hide or show the panel (remembered)
 - Pattern time markers, saved with the project
+- Step edit (toolbar, OPTIONS menu, Ctrl+E): with the transport stopped, typing-keyboard and MIDI notes are
+  written at the song position a chord at a time, one main-snap step long, and the position moves on a step
 
 ## ✅ Song arrangement
 

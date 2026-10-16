@@ -136,6 +136,8 @@ pub enum Action {
     AutoScroll,
     /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G).
     EnableGroups,
+    /// Step edit switch (toolbar, OPTIONS menu, Ctrl+E; spec: ui/step-edit.md).
+    StepEdit,
     /// The toolbar's song position slider (spec: ui/song-position-slider.md).
     SongPos,
     /// The time display (song position read-out): a click toggles its mode, right-click opens its menu.
@@ -1050,6 +1052,8 @@ pub struct App {
     /// MIDI controller input, and its held notes: (key, rack row they started on).
     pub midi: crate::midi_in::MidiIn,
     midi_held: Vec<(u8, usize)>,
+    /// Step edit's chord being collected from the typing keyboard and MIDI notes (`crate::step_edit`).
+    pub(crate) step_chord: crate::step_edit::Chord,
     /// Last title-bar press (window, time, position), for double-click maximize / restore.
     pub(crate) title_click: Option<(Win, std::time::Instant, (f32, f32))>,
     /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
@@ -1239,6 +1243,7 @@ impl App {
             key_velocity: TYPING_VELOCITY,
             midi: crate::midi_in::MidiIn::none(),
             midi_held: Vec::new(),
+            step_chord: crate::step_edit::Chord::default(),
             title_click: None,
             rack_click: None,
             cpu_click: None,
@@ -5539,6 +5544,7 @@ impl App {
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("t") => self.toggle_typing(),
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("m") => self.toggle_metronome(),
+            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("e") => self.toggle_step_edit(),
             // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
             // tools (until a typing keyboard exists, which will take them).
             Key::Character(c) if !ctrl && !alt && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
@@ -5649,6 +5655,7 @@ impl App {
             let (_, row, key) = self.typing_held.remove(i);
             self.transport.note_off(row, key);
             self.typing_lit_changed();
+            self.step_edit_up(crate::step_edit::Src::Typing(code));
             return true;
         }
         // Ctrl / Alt / Shift combinations stay shortcuts (Shift+D, Shift+Q in the piano roll).
@@ -5675,6 +5682,7 @@ impl App {
         let key = key as u16;
         self.transport.note_on(row, key, TYPING_VELOCITY);
         self.typing_held.push((code, row, key));
+        self.step_edit_down(crate::step_edit::Src::Typing(code), key, TYPING_VELOCITY);
         self.typing_lit_changed();
         true
     }
@@ -5690,6 +5698,7 @@ impl App {
     /// Release every held typing-keyboard note and the piano-roll key held with the mouse (focus lost, switch off,
     /// rows renumbered): no hanging notes.
     pub fn typing_release_all(&mut self) {
+        self.step_chord.clear();
         if let Some((row, key)) = self.mouse_note.take() {
             self.transport.note_off(row, key);
         }
@@ -5706,6 +5715,11 @@ impl App {
     /// note off releases the key on the channel it started on.
     fn midi_tick(&mut self) {
         let msgs = self.midi.poll();
+        self.midi_notes(msgs);
+    }
+
+    /// MIDI notes received, oldest first.
+    pub(crate) fn midi_notes(&mut self, msgs: Vec<crate::midi_in::Msg>) {
         if msgs.is_empty() {
             return;
         }
@@ -5722,12 +5736,14 @@ impl App {
                     self.sync_live();
                     self.transport.note_on(row, u16::from(key), velocity);
                     self.midi_held.push((key, row));
+                    self.step_edit_down(crate::step_edit::Src::Midi(key), u16::from(key), velocity);
                 }
                 crate::midi_in::Msg::Off(key) => {
                     while let Some(i) = self.midi_held.iter().position(|h| h.0 == key) {
                         let (_, row) = self.midi_held.remove(i);
                         self.transport.note_off(row, u16::from(key));
                     }
+                    self.step_edit_up(crate::step_edit::Src::Midi(key));
                 }
             }
         }
@@ -6076,6 +6092,7 @@ impl App {
             Action::Metronome => self.toggle_metronome(),
             Action::AutoScroll => self.toggle_autoscroll(),
             Action::EnableGroups => self.toggle_groups(),
+            Action::StepEdit => self.toggle_step_edit(),
             // spec: ui/main-window.md §13: a double click opens the Plugin performance monitor; one click does nothing.
             Action::CpuPanel => {
                 let now = std::time::Instant::now();
@@ -6775,6 +6792,7 @@ impl App {
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::METRONOME_LABEL) => self.toggle_metronome(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::AUTOSCROLL_LABEL) => self.toggle_autoscroll(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::GROUPS_LABEL) => self.toggle_groups(),
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::STEP_EDIT_LABEL) => self.toggle_step_edit(),
             (m, i) if item_at(m, i).is_some_and(|it| crate::params::menu_handles(it.label)) => {
                 let label = item_at(m, i).map_or("", |it| it.label);
                 if let Some(msg) = self.params_menu(label) {
