@@ -2332,6 +2332,21 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
         }
     }
+    // Automatic crossfades (event 44: 1 on, 0 off; spec: flp/engine-events.md "The project settings, measured").
+    if let Some(on) = project.auto_crossfades.filter(|&v| Some(v) != current.auto_crossfades) {
+        match unread(id::AUTO_CROSSFADES) {
+            Some(i) => set_int(&mut events[i], u32::from(on)),
+            None => {
+                // Behind the last of 156, 67, 9, 11, 80, 17, 18, 35 and 23 the file has (so before 30 and 10).
+                let at = [l.tempo, l.current_pattern, unread(9), l.swing, l.main_pitch, l.time_num, l.time_den, unread(id::TIME_MODE), unread(id::PANNING_LAW)]
+                    .into_iter()
+                    .flatten()
+                    .max()
+                    .map_or(0, |i| i + 1);
+                settings.push((at, int_event(id::AUTO_CROSSFADES, u32::from(on))));
+            }
+        }
+    }
     // Event 30 is there with 1 when on; off removes it, as FL does (it never writes 0; spec: flp/engine-events.md
     // "Event 30").
     if project.play_truncated != current.play_truncated {
@@ -4300,8 +4315,8 @@ mod tests {
     /// a file that has them (an opened project keeps every other event as it was) and removes 30 for off. Both write
     /// the project settings in FL 26's order ("Order in the file": 156, 67, 9, 11, 80, 17, 18, 35, 23, 44, 30, 10, then
     /// the information): `apply` adds a missing 11, 80, 17, 18, 35 or 30 behind the last of the settings before it
-    /// that the file has. 44 and 40 are read and left as they are; 23 as long as the model's is the file's
-    /// (`panning_law_round_trips`).
+    /// that the file has. 40 is read and left as it is; 23 and 44 as long as the model's are the file's
+    /// (`panning_law_round_trips`, `automatic_crossfades_round_trip`).
     #[test]
     fn time_settings_and_truncated_notes_round_trip() {
         const ORDER: [u8; 12] =
@@ -4544,6 +4559,59 @@ mod tests {
         q.tempo = Some(99.0);
         apply(&q, &mut file).unwrap();
         assert_eq!(law_of(&reparse(&file)), None);
+    }
+
+    /// Settings > Project ▸ Playlist ▸ Automatic crossfades (event 44: 1 on, 0 off; spec: flp/engine-events.md "The
+    /// project settings, measured"): `create` writes it behind 23, before 30; `apply` patches it where the file has it
+    /// (off is 0, not a removal), else adds it behind the last of 156, 67, 9, 11, 80, 17, 18, 35 and 23 the file has; a
+    /// model without one leaves the file as it is.
+    #[test]
+    fn automatic_crossfades_round_trip() {
+        const ORDER: [u8; 6] = [id::TIME_NUM, id::TIME_DEN, id::TIME_MODE, id::PANNING_LAW, id::AUTO_CROSSFADES, id::PLAY_TRUNCATED];
+        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        let prelude = |f: &FlpFile| -> Vec<(u8, u32)> {
+            events_of(f).unwrap().iter().take_while(|e| e.id != id::CH_START).filter(|e| ORDER.contains(&e.id)).map(|e| (e.id, int(e))).collect()
+        };
+        let mut p = new_project();
+        (p.bar, p.bar_as_signature, p.panning_law, p.auto_crossfades, p.play_truncated) = (Some((4, 4)), Some(true), Some(0), Some(true), true);
+        let file = reparse(&create(&p).unwrap());
+        assert_eq!(prelude(&file), [(id::TIME_NUM, 4), (id::TIME_DEN, 4), (id::TIME_MODE, 1), (id::PANNING_LAW, 0), (id::AUTO_CROSSFADES, 1), (id::PLAY_TRUNCATED, 1)]);
+        // Off: 0 in place, nothing else moves; unchanged, byte for byte.
+        let mut q = load(&file).unwrap();
+        assert_eq!(q.auto_crossfades, Some(true));
+        q.auto_crossfades = Some(false);
+        let mut off = file.clone();
+        apply(&q, &mut off).unwrap();
+        let off = reparse(&off);
+        let (a, b) = (events_of(&file).unwrap(), events_of(&off).unwrap());
+        assert!(a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| if x.id == id::AUTO_CROSSFADES { int(y) == 0 } else { x == y }));
+        assert_eq!(load(&off).unwrap().auto_crossfades, Some(false));
+        let mut same = off.clone();
+        apply(&load(&off).unwrap(), &mut same).unwrap();
+        assert_eq!(same.to_bytes().unwrap(), off.to_bytes().unwrap());
+        // Added where it is missing: behind 23, or 35, or 18, always before 30.
+        for (law, mode) in [(Some(0), Some(true)), (None, Some(true)), (None, None)] {
+            let mut start = p.clone();
+            (start.auto_crossfades, start.panning_law, start.bar_as_signature) = (None, law, mode);
+            let mut file = reparse(&create(&start).unwrap());
+            let mut q = load(&file).unwrap();
+            assert_eq!(q.auto_crossfades, None);
+            q.auto_crossfades = Some(true);
+            apply(&q, &mut file).unwrap();
+            let file = reparse(&file);
+            let ids: Vec<u8> = prelude(&file).into_iter().map(|e| e.0).collect();
+            let want: Vec<u8> = ORDER.iter().copied().filter(|&e| (e != id::PANNING_LAW || law.is_some()) && (e != id::TIME_MODE || mode.is_some())).collect();
+            assert_eq!(ids, want, "{law:?} {mode:?}");
+            assert_eq!(load(&file).unwrap().auto_crossfades, Some(true));
+        }
+        // A model without one writes nothing.
+        let mut start = p.clone();
+        start.auto_crossfades = None;
+        let mut file = reparse(&create(&start).unwrap());
+        let mut q = load(&file).unwrap();
+        q.tempo = Some(99.0);
+        apply(&q, &mut file).unwrap();
+        assert!(!prelude(&reparse(&file)).iter().any(|e| e.0 == id::AUTO_CROSSFADES));
     }
 
     /// Settings > Project ▸ Timebase (PPQ): the header's PPQ and every tick count of the project change together;
