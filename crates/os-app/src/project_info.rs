@@ -134,6 +134,8 @@ pub struct Counts {
     /// Channels that hold a plugin plus mixer effect slots that hold one.
     pub plugins: usize,
     pub channels: usize,
+    /// Mixer tracks a channel is routed to or another track routes to (`mixer_tracks`).
+    pub mixer_tracks: usize,
     pub arrangements: usize,
     /// Playlist tracks holding at least one clip, and the clips (the current arrangement's).
     pub pl_tracks: usize,
@@ -151,6 +153,7 @@ pub fn counts(p: &Project) -> Counts {
     Counts {
         plugins: p.channels.iter().filter(|c| c.plugin.as_deref().is_some_and(|n| !n.is_empty())).count() + slots,
         channels: p.channels.len(),
+        mixer_tracks: mixer_tracks(p),
         arrangements: p.arrangements.len(),
         pl_tracks: tracks.len(),
         pl_clips: clips.len(),
@@ -158,9 +161,21 @@ pub fn counts(p: &Project) -> Counts {
     }
 }
 
+/// The footer's "Mixer Tracks" (spec: flp/events/project-info.md "Info counts"): the mixer tracks a channel is routed to
+/// (the master too, when a channel goes straight to it) together with the tracks that receive a route from another
+/// track, the master never counted as a receiver. A track's name, effects and own routes do not count.
+pub fn mixer_tracks(p: &Project) -> usize {
+    let mut used: Vec<u16> = p.channels.iter().map(|c| c.mixer_track).collect();
+    for m in &p.mixer {
+        used.extend(m.routes.iter().copied().filter(|&r| r != 0 && r != m.index));
+    }
+    used.sort_unstable();
+    used.dedup();
+    used.len()
+}
+
 /// The Info page's footer (spec: ui/settings-choices.md "Info"): the start, plus the version that saved the file when
-/// the project was loaded from one (event 199 as loaded: saving does not change it); the time spent; the counts. FL's
-/// third count, "Mixer Tracks", is left out: what it counts is open in the spec.
+/// the project was loaded from one (event 199 as loaded: saving does not change it); the time spent; the counts.
 pub fn footer(s: &State, now: Instant) -> Vec<String> {
     let p = &s.project;
     let mut lines = Vec::new();
@@ -173,7 +188,7 @@ pub fn footer(s: &State, now: Instant) -> Vec<String> {
     }
     lines.push(spent_text(spent_days(s, now)));
     let c = counts(p);
-    lines.push(format!("Plugins: {}, Channels: {}", c.plugins, c.channels));
+    lines.push(format!("Plugins: {}, Channels: {}, Mixer Tracks: {}", c.plugins, c.channels, c.mixer_tracks));
     lines.push(format!("Arrangements: {}, PL tracks: {}, PL clips: {}, Notes: {}", c.arrangements, c.pl_tracks, c.pl_clips, c.notes));
     lines
 }
@@ -714,7 +729,7 @@ mod tests {
         assert_eq!(lines[0], "This project was started on 5/22/2015 4:13 PM, last saved in 24.1.1.4285");
         assert_eq!(lines[1], "Total time spent on it:  146 hours 57 minutes.");
         let c = counts(&app.state.project);
-        assert_eq!(lines[2], format!("Plugins: {}, Channels: {}", c.plugins, c.channels));
+        assert_eq!(lines[2], format!("Plugins: {}, Channels: {}, Mixer Tracks: {}", c.plugins, c.channels, c.mixer_tracks));
         assert_eq!(lines[3], format!("Arrangements: {}, PL tracks: {}, PL clips: {}, Notes: {}", c.arrangements, c.pl_tracks, c.pl_clips, c.notes));
     }
 
@@ -729,6 +744,7 @@ mod tests {
         p.channels[0].plugin = Some("Lemon Sampler".into());
         p.channels[1].plugin = Some(String::new());
         p.channels[2].plugin = None;
+        (p.channels[0].mixer_track, p.channels[1].mixer_track, p.channels[2].mixer_track) = (1, 1, 0);
         let slot = |name: &str| Some(SlotPlugin { name: name.into(), state: Vec::new() });
         let mut m = MixerTrack::new(0);
         m.slots[0] = slot("Fruity Limiter");
@@ -746,11 +762,39 @@ mod tests {
             Pattern { notes: vec![Note::step(0, 0), Note::step(0, 24)], ..Default::default() },
             Pattern { notes: vec![Note::step(1, 0)], ..Default::default() },
         ];
-        let want = Counts { plugins: 3, channels: 3, arrangements: 2, pl_tracks: 2, pl_clips: 3, notes: 3 };
+        let want = Counts { plugins: 3, channels: 3, mixer_tracks: 2, arrangements: 2, pl_tracks: 2, pl_clips: 3, notes: 3 };
         assert_eq!(counts(&p), want);
         // The playlist counts follow the current arrangement.
         p.current_arrangement = Some(1);
         assert_eq!((counts(&p).pl_tracks, counts(&p).pl_clips), (1, 1));
+    }
+
+    /// "Mixer Tracks" (spec: flp/events/project-info.md "Info counts"): the tracks channels are routed to, the master
+    /// included, and the tracks another track sends to, the master not included; names, effects and a track's own
+    /// routes do not count.
+    #[test]
+    fn mixer_tracks_count() {
+        use os_model::{MixerTrack, SlotPlugin};
+        let mut p = crate::app::default_project();
+        let ch = p.channels[0].clone();
+        // Inserts 1-4 route to the master (as FL's do); one channel straight to the master.
+        p.mixer = (0..5).map(MixerTrack::new).collect();
+        p.channels = vec![ch.clone()];
+        p.channels[0].mixer_track = 0;
+        assert_eq!(mixer_tracks(&p), 1, "a channel on the master counts the master; routes to the master do not");
+        // A named track holding an effect, which nothing routes to: not counted.
+        p.mixer[2].name = Some("Bus".into());
+        p.mixer[2].slots[0] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: Vec::new() });
+        assert_eq!(mixer_tracks(&p), 1);
+        // A send: insert 1 routes to insert 3 too, so 3 counts, but not 1 for its own routes.
+        p.mixer[1].routes = vec![0, 3];
+        assert_eq!(mixer_tracks(&p), 2);
+        // Channels on inserts: each insert once, and the master no more once no channel goes to it.
+        p.channels = vec![ch.clone(), ch.clone(), ch];
+        (p.channels[0].mixer_track, p.channels[1].mixer_track, p.channels[2].mixer_track) = (4, 4, 3);
+        assert_eq!(mixer_tracks(&p), 2, "inserts 3 and 4");
+        p.mixer[4].routes = vec![2];
+        assert_eq!(mixer_tracks(&p), 3, "insert 2 receives from insert 4");
     }
 
     /// The working time counts only while the main window is in front (Lemon Studio's rule, `WorkClock`).
