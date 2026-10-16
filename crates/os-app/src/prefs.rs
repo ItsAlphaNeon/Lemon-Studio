@@ -400,6 +400,16 @@ fn headings(c: &Combo) -> &'static [(usize, &'static str)] {
     }
 }
 
+/// General ▸ Hints and warnings: after a save writes a project file over this size (MB = 1024 × 1024 bytes), an
+/// information message says so (`crate::messages`); "Don't warn me" never warns. FL's choices. Spec:
+/// ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)".
+pub const PROJECT_DATA_SIZE_WARNING: Combo = Combo {
+    key: "project_data_size_warning",
+    label: "Project data size warning",
+    choices: &["50MB", "100MB (default)", "250MB", "500MB", "1GB", "1.5GB", "Don't warn me"],
+    default: 1,
+};
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -445,7 +455,7 @@ pub const CHECKS: &[&Check] = &[
     &ALIGN_TICK_LENGTHS,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING];
 
 /// The declared value boxes.
 pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BROWSER_PREVIEW_TRACK];

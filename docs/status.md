@@ -12,6 +12,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Channel rack with steps and mini piano rolls
 - Swing and per-channel loops
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)
+- Deleting channels or a pattern asks first, unless the box's Remember my choice was ticked or the question
+  is turned off in General settings ▸ Hints and warnings ▸ Manage messages
 
 ## ✅ Piano roll
 
@@ -120,6 +122,8 @@ Not yet: Align all channel editors, Arrange windows.
   it; support for older versions is on the roadmap
 - An opened project's samples load behind a progress panel, one file at a time or on up to 4 threads
   (General settings ▸ Advanced ▸ Threaded project sample loading)
+- A save that writes a file over General settings ▸ Hints and warnings ▸ Project data size warning (100 MB
+  unless changed) says how big the file is
 - Still early: always work on copies and keep backups
 
 ## 🚧 Built-in instruments and effects

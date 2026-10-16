@@ -395,6 +395,32 @@ pub fn led(ui: &mut Ui, cx: f32, cy: f32, on: bool) {
     kit::led(ui.c, ui.t, cx, cy, 6.0, kit::State::hover(hov).with_on(on));
 }
 
+/// The label of a question's check that turns its Manage messages entry off when Ok is pressed.
+const REMEMBER: &str = "Remember my choice";
+
+/// How wide `remember_check` draws.
+pub fn remember_width(ui: &mut Ui) -> f32 {
+    20.0 + ui.c.text_width(os_ui::Font::new(13), REMEMBER)
+}
+
+/// A question's "Remember my choice" check at the bottom left of its box, left edge `x`, centred on `cy`: a small box,
+/// ticked when `on`, and its label; a click on either is `action`. Spec: ui/settings-choices.md "Hints and warnings:
+/// Manage messages and Project data size warning (2026-10-16)".
+pub fn remember_check(ui: &mut Ui, x: f32, cy: f32, on: bool, action: Action) {
+    let t = ui.t;
+    let f = os_ui::Font::new(13);
+    let w = remember_width(ui);
+    let hov = ui.hit(Rect::new(x, cy - 10.0, w, 20.0), action, "Ok with this ticked turns this message off (Manage messages)");
+    let b = Rect::new(x, (cy - 6.5).round(), 13.0, 13.0);
+    ui.c.fill_rrect(b, 2.0, t.s(0x141516));
+    ui.c.stroke_rrect(b, 2.0, 1.0, if hov { t.glyph_dim } else { t.text_dim });
+    if on {
+        kit::tick(ui.c, b, t.glyph);
+    }
+    let lh = ui.c.line_height(f);
+    ui.c.text(f, x + 20.0, (cy - lh / 2.0).round(), if hov { t.glyph } else { t.text }, REMEMBER);
+}
+
 /// Channel / clip colors from the model.
 pub fn rgb(c: os_model::Rgb) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: 255 }

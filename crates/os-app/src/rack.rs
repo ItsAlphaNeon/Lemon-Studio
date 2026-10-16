@@ -869,8 +869,14 @@ pub fn ask_delete(s: &mut State, rows: Vec<usize>) {
         s.message = Some("A project keeps at least one channel".into());
         return;
     }
+    // Its Manage messages entry off: as if Ok was pressed; `run` deletes them (spec: ui/settings-choices.md "Hints and
+    // warnings: Manage messages and Project data size warning (2026-10-16)").
+    if !crate::messages::on(&crate::messages::DELETE_CHANNEL) {
+        s.rack.delete_now = Some(rows);
+        return;
+    }
     s.rack.pending_delete = Some(rows);
-    s.pat_ui.confirm = true;
+    crate::patterns::open_confirm(s);
 }
 
 /// Purge unused audio clips: the unused audio-clip channels go, after the delete confirmation (Lemon Studio cannot
@@ -1641,6 +1647,14 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::LoadSample(_)
         | RCmd::PianoRoll(_) => None,
     };
+    // Channels let go without asking (`ask_delete`) are deleted now.
+    let msg = match app.state.rack.delete_now.take() {
+        Some(rows) => {
+            delete_rows(app, &rows);
+            app.state.message.take().or(msg)
+        }
+        None => msg,
+    };
     app.invalidate();
     msg
 }
@@ -2102,6 +2116,69 @@ mod tests {
         // The usual delete confirmation is worded as before.
         ask_delete(&mut app.state, vec![1]);
         assert!(!app.state.rack.purging);
+    }
+
+    // spec: ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)"
+    /// The channel delete confirmation has Remember my choice at its bottom left, off each time it opens. Ticked with
+    /// Cancel nothing goes and "Delete channel" stays on; ticked with Ok the channel goes and the entry turns off.
+    /// While it is off, Delete... and Purge unused audio clips delete at once with no box (Purge still takes only the
+    /// unused audio-clip channels).
+    #[test]
+    fn delete_channel_remembers_ok_and_skips_the_box_when_off() {
+        use crate::app::Action;
+        use crate::messages::{on, set, DELETE_CHANNEL};
+        use crate::patterns::Hit;
+        use os_model::Clip;
+        use os_ui::Canvas;
+        let Ok(mut c) = Canvas::new(1280, 800, 1.0) else { return };
+        let press = |app: &mut App, c: &mut Canvas, h: Hit| {
+            app.paint(c, None);
+            let r = app.hits.iter().rev().find(|x| x.action == Action::Pat(h)).map(|x| x.rect).expect("drawn");
+            app.mouse_move(r.cx(), r.cy());
+            app.mouse_down();
+            app.mouse_up();
+        };
+        // Channels told apart by name (deleting renumbers their indexes).
+        let named = || {
+            let mut app = App::new(None);
+            for (i, ch) in app.state.project.channels.iter_mut().enumerate() {
+                ch.name = Some(format!("c{i}"));
+            }
+            app
+        };
+        let ids = |app: &App| app.state.project.channels.iter().map(|c| c.name.clone().unwrap_or_default()).collect::<Vec<_>>();
+        let mut app = named();
+        let mut want = ids(&app);
+        run(&mut app, RCmd::Delete(1));
+        assert!(app.state.pat_ui.confirm && !app.state.pat_ui.remember);
+        press(&mut app, &mut c, Hit::ConfirmRemember);
+        assert!(app.state.pat_ui.remember);
+        press(&mut app, &mut c, Hit::ConfirmCancel);
+        assert_eq!((ids(&app), on(&DELETE_CHANNEL), app.state.pat_ui.confirm), (want.clone(), true, false), "Cancel");
+        run(&mut app, RCmd::Delete(1));
+        assert!(app.state.pat_ui.confirm && !app.state.pat_ui.remember, "Remember my choice is off again");
+        press(&mut app, &mut c, Hit::ConfirmRemember);
+        press(&mut app, &mut c, Hit::ConfirmOk);
+        want.remove(1);
+        assert_eq!((ids(&app), on(&DELETE_CHANNEL), app.state.pat_ui.confirm), (want.clone(), false, false), "Ok");
+        // Off: as if Ok was pressed.
+        assert_eq!(run(&mut app, RCmd::Delete(0)).as_deref(), Some("Deleted the channel"));
+        want.remove(0);
+        assert_eq!((ids(&app), app.state.pat_ui.confirm), (want, false));
+
+        // Purge: rows 2 to 4 are audio clips, 2 with a note, 3 with a playlist clip, 4 unused.
+        let mut app = named();
+        for r in 2..5 {
+            app.state.project.channels[r].kind = ChannelKind::AudioClip;
+        }
+        let (i2, i3) = (app.state.project.channels[2].index, app.state.project.channels[3].index);
+        crate::patterns::pat_mut(&mut app.state, 2).notes = vec![Note::step(i2, 0)];
+        crate::playlist::arr_mut(&mut app.state).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
+        let before = ids(&app);
+        assert_eq!(run(&mut app, RCmd::Purge).as_deref(), Some("Deleted the channel"));
+        assert!(!app.state.pat_ui.confirm && !app.state.rack.purging);
+        assert_eq!(ids(&app), before[..4].to_vec());
+        set(&DELETE_CHANNEL, true);
     }
 
     /// Lock, zip, groups, swing, loop lengths and a restructured rack survive saving into an opened file ("Saving").

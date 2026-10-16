@@ -1277,7 +1277,9 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             // Disabled here and now (nothing to merge, the last arrangement), not missing.
             ui.hit(rr, action, it.label.to_string());
         }
-        let color = if live { t.menu_pop_text } else { t.menu_pop_dim };
+        // A working entry drawn dim: a Manage messages entry that is off (spec: ui/settings-choices.md "Hints and
+        // warnings: Manage messages and Project data size warning (2026-10-16)").
+        let color = if live && !it.dim { t.menu_pop_text } else { t.menu_pop_dim };
         let (mx, my) = (rr.x + 10.0, rr.y + m.row / 2.0);
         match it.mark {
             Mark::Check(true) => {

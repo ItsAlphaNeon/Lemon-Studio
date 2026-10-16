@@ -336,6 +336,8 @@ pub enum Cmd {
     Genre(Option<&'static str>),
     /// Settings > General ▸ Default template: "Empty" or "<category>/<template>" (`crate::templates`).
     Template(String),
+    /// Settings > General ▸ Hints and warnings ▸ the Manage messages menu (`crate::messages`).
+    Messages(crate::messages::Pick),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -345,6 +347,8 @@ pub struct PItem {
     pub cmd: Cmd,
     pub mark: Mark,
     pub enabled: bool,
+    /// Drawn dim though it works (Manage messages: an entry that is off).
+    pub dim: bool,
     /// Section header (not clickable).
     pub head: bool,
     pub sep: bool,
@@ -355,7 +359,7 @@ pub struct PItem {
 
 impl PItem {
     pub fn new(label: impl Into<Cow<'static, str>>, cmd: Cmd) -> Self {
-        PItem { label: label.into(), key: "", cmd, mark: Mark::None, enabled: true, head: false, sep: false, col: false, children: Vec::new() }
+        PItem { label: label.into(), key: "", cmd, mark: Mark::None, enabled: true, dim: false, head: false, sep: false, col: false, children: Vec::new() }
     }
     pub fn key(mut self, k: &'static str) -> Self {
         self.key = k;
@@ -367,6 +371,10 @@ impl PItem {
     }
     pub fn off(mut self) -> Self {
         self.enabled = false;
+        self
+    }
+    pub fn dim(mut self, on: bool) -> Self {
+        self.dim = on;
         self
     }
     pub fn head(label: &'static str) -> Self {
@@ -3125,6 +3133,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Pref(c, i) => return app.pref_choose(c, i),
         Cmd::Genre(g) => return app.set_genre(g),
         Cmd::Template(t) => return app.set_template(&t),
+        Cmd::Messages(p) => {
+            app.invalidate();
+            return Some(crate::messages::pick(p));
+        }
         Cmd::MetronomeSound(sound) => {
             crate::metronome::set_sound(sound);
             app.invalidate();
@@ -3583,6 +3595,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Pref(..) => None,
         Cmd::Genre(_) => None,
         Cmd::Template(_) => None,
+        Cmd::Messages(_) => None,
     };
     app.invalidate();
     msg
