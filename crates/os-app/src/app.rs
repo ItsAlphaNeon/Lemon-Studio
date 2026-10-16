@@ -3778,6 +3778,10 @@ impl App {
         if hover == Some(Action::CpuPanel) {
             hint = Cow::Owned(self.state.cpu.hint());
         }
+        if let (Some(Action::PianoKeys), Some(g)) = (&hover, self.piano_geom()) {
+            // The key under the cursor: "C5 / 60" (spec: ui/settings-choices.md "Note names and Black notes").
+            hint = Cow::Owned(crate::note_names::key_hint(g.key_at(y).clamp(0, views::piano::TOP_KEY)));
+        }
         let resize = matches!(hover, Some(Action::PianoNote(_)))
             && matches!(self.state.piano.tool, Tool::Draw | Tool::Paint | Tool::Select)
             && rect.is_some_and(|r| x >= r.right() - resize_zone(r.w));

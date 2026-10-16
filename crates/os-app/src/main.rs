@@ -60,6 +60,7 @@ mod project_plugins;
 mod presets;
 mod misc;
 mod misc_page;
+mod note_names;
 mod snap;
 mod song_pos;
 mod stall;
