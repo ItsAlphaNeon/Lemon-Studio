@@ -6,7 +6,8 @@
 
 //! Settings window (OPTIONS > MIDI / Audio / General / File / Theme settings, Project settings, Project info,
 //! Debugging log; F10 / F11): ten tabs of grouped controls. The controls that work today are listed in `LIVE` and
-//! handled in `App::settings_act`; every other control is drawn greyed out and only says it is not available yet.
+//! handled in `App::settings_act`, or are program settings declared in `crate::prefs`; every other control is drawn
+//! greyed out and only says it is not available yet.
 //! The Plugins tab is the plugin manager (search folders, scanning, the plugin table).
 // spec: ui/settings.md, ui/plugin-manager.md
 
@@ -120,8 +121,9 @@ pub fn plugin_check(key: &str) -> bool {
     [STARTUP_CHECK, ERRORS_CHECK, COMBINE_CHECK].contains(&key)
 }
 
-/// The checks and buttons that work (by label, handled in `App::settings_act`). Every other check, combo, value box,
-/// slider and button is not available yet: drawn greyed out, its hint and click say so.
+/// The checks and buttons that work (by label, handled in `App::settings_act`). Apart from these, `LIVE_COMBOS` and the
+/// program settings declared in `crate::prefs`, every other check, combo, value box, slider and button is not available
+/// yet: drawn greyed out, its hint and click say so.
 pub const LIVE: &[&str] = &[
     NATIVE_HOST_CHECK,
     NATIVE_FIRST_CHECK,
@@ -136,8 +138,9 @@ pub const LIVE: &[&str] = &[
     "Reset",
 ];
 
+/// `LIVE`, and the checks declared in `crate::prefs`.
 fn live(key: &str) -> bool {
-    LIVE.contains(&key)
+    LIVE.contains(&key) || crate::prefs::find_check(key).is_some()
 }
 
 /// The combos that work (they open a menu of choices, `App::audio_menu`).
@@ -752,6 +755,8 @@ fn paint_group(ui: &mut Ui, s: &State, gr: &Group, r: Rect, open: bool, clip: Re
 
 /// A check showing `on`; one that is not `enabled` (not in `LIVE`) is greyed out.
 fn check(ui: &mut Ui, key: &'static str, on: bool, x: f32, cy: f32, enabled: bool) {
+    // A check declared in `crate::prefs` shows its state (the row's is its default).
+    let on = crate::prefs::find_check(key).map_or(on, crate::prefs::check);
     let t = ui.t;
     let tw = ui.c.text_width(Font::new(13), key);
     let hr = Rect::new(x - 8.0, cy - 9.0, tw + 26.0, 18.0);
@@ -832,7 +837,12 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             check(ui, b, *db, g.x + 324.0, cy, live(b));
         }
         // The Audio page's device, rate and buffer combos and General's Animations open their menus.
-        Row::Combo(v, w, label) if LIVE_COMBOS.contains(label) => {
+        Row::Combo(v, w, label) if LIVE_COMBOS.contains(label) || crate::prefs::find_combo(label).is_some() => {
+            // A combo declared in `crate::prefs` shows its choice.
+            let v = match crate::prefs::find_combo(label) {
+                Some(c) => crate::prefs::choice(c),
+                None => v,
+            };
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
             let hov = ui.hit(b, Action::Settings(SAct::Combo(label, b.x, b.bottom())), "");
             kit::combo(ui.c, t, b, v, f, kit::State::hover(hov));
