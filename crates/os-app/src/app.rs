@@ -2694,6 +2694,13 @@ impl App {
     /// `playback_damage` for a given state (tests and the paint benchmark play without a device).
     pub(crate) fn show_playback(&mut self, now: Shown) {
         let old = std::mem::replace(&mut self.shown, now.clone());
+        // The song looped back to its start: the initial values again (spec: ui/settings-choices.md "Advanced:
+        // Initialize controls automatically"). The engine sets them itself there; the project follows, so the controls
+        // show them.
+        let looped = now.playing && old.playing && now.song && old.song && !now.paused && now.tick < old.tick;
+        if looped && crate::init::apply(&mut self.state) {
+            self.invalidate();
+        }
         if now.playing != old.playing || now.paused != old.paused || now.song != old.song {
             self.auto_scroll();
             return self.invalidate();
@@ -3084,10 +3091,8 @@ impl App {
 
     /// Song playback from `tick` (Song mode; spec: ui/playlist.md §7).
     pub fn play_song_from(&mut self, tick: u32) {
-        let mut p = self.state.project.clone();
-        p.tempo = Some(self.state.tempo);
         self.state.song_mode = true;
-        if p.arrangement().is_none_or(|a| a.clips.is_empty()) {
+        if self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
             // Nothing plays in SONG mode, so a pattern that was playing stops too.
             if self.transport.playing() {
                 self.transport.stop();
@@ -3095,6 +3100,10 @@ impl App {
             self.state.message = Some("The playlist is empty: nothing to play in SONG mode".into());
             return self.invalidate();
         }
+        // The initial values first (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
+        crate::init::apply(&mut self.state);
+        let mut p = self.state.project.clone();
+        p.tempo = Some(self.state.tempo);
         self.transport.stop();
         self.transport.play(&p, PlayMode::Song, f64::from(tick));
         self.invalidate();
@@ -4529,7 +4538,7 @@ impl App {
             };
             let auto = self.automation_target(a);
             if auto.is_some() || typein.is_some() {
-                self.state.playlist.popup = Some(crate::playlist::knob_menu(auto, typein, x, y));
+                self.state.playlist.popup = Some(crate::playlist::knob_menu(&self.state, auto, typein, x, y));
                 return self.invalidate();
             }
             if self.playlist_act(a, true) {
@@ -5387,13 +5396,18 @@ impl App {
     /// Start playback in the mode the PAT / SONG switch shows. Pattern mode loops the current pattern from the piano
     /// roll's play-start marker (§10); song mode plays the playlist from its start and stops at its end.
     pub(crate) fn start_playback(&mut self) {
-        let p = crate::rack::play_project(&self.state);
         let song = self.state.song_mode;
-        if song && p.arrangement().is_none_or(|a| a.clips.is_empty()) {
+        if song && self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
             self.state.message = Some("The playlist is empty: nothing to play in SONG mode".into());
             self.invalidate();
             return;
         }
+        // The song starts with the project's initial values (spec: ui/settings-choices.md "Advanced: Initialize
+        // controls automatically").
+        if crate::init::apply(&mut self.state) {
+            self.invalidate();
+        }
+        let p = crate::rack::play_project(&self.state);
         let start = if song { f64::from(self.state.playlist.pos) } else { f64::from(self.state.piano.marker) };
         self.transport.play(&p, self.play_mode(), start);
     }
@@ -5906,6 +5920,9 @@ impl App {
                 let s = &mut self.state;
                 if s.song_mode {
                     s.playlist.pos = s.playlist.range.map_or(0, |(a, _)| a);
+                    // A song position move: the initial values (spec: ui/settings-choices.md "Advanced: Initialize
+                    // controls automatically").
+                    crate::init::apply(s);
                 } else {
                     s.piano.marker = 0;
                 }
@@ -11563,10 +11580,15 @@ mod tests {
         ruler_press(&mut app, &mut c, g.x_of(bar as f32) + 1.0, g.x_of(3.0 * bar as f32), ruler.cy(), true);
         assert!(app.state.playlist.range.is_some(), "a time selection");
         assert!(!app.state.song_mode, "a time selection keeps PAT");
+        // The project's initial values follow the move (spec: ui/settings-choices.md "Advanced: Initialize controls
+        // automatically").
+        app.state.project.init_controls = vec![os_model::InitControl { head: 0, target: os_model::target::TEMPO, value: 140_000 }];
+        app.state.tempo = 90.0;
         ruler_press(&mut app, &mut c, g.x_of(4.0 * bar as f32) + 1.0, g.x_of(4.0 * bar as f32) + 1.0, ruler.cy(), false);
         assert!(app.state.song_mode, "a click on the ruler switches to SONG");
         assert_eq!(app.state.playlist.pos, 4 * bar);
         assert!(!app.transport.playing(), "and does not start playback");
+        assert_eq!(app.state.tempo, 140.0, "the initial tempo");
     }
 
     /// Stretch mode (spec: ui/playlist.md §9b): Shift+M on, then dragging an audio clip's end to twice its length

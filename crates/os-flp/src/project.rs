@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use os_model::{
     Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
-    Envelope, MixerTrack,
+    Envelope, InitControl, MixerTrack,
     Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, WorkTime, CLIP_RECORD_LEN,
 };
 
@@ -120,6 +120,9 @@ mod id {
     pub const SMP_REVERB: u8 = 139;
     pub const GROUP_NAME: u8 = 231;
     pub const CURRENT_GROUP: u8 = 146;
+    /// The project's initial values, 12-byte records, in the prelude after 146 (spec: flp/engine-events.md "Event 216",
+    /// flp/events/project-info.md, ui/settings-choices.md "Advanced: Initialize controls automatically").
+    pub const INIT_CONTROLS: u8 = 216;
 
     pub const PAT_START: u8 = 65;
     pub const PAT_NOTES: u8 = 224;
@@ -393,6 +396,8 @@ struct Layout {
     fast_declick: Option<usize>,
     groups: Vec<usize>,
     current_group: Option<usize>,
+    /// Event 216, the initial values.
+    init_controls: Option<usize>,
 }
 
 impl Layout {
@@ -549,6 +554,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 id::MAIN_PITCH if l.main_pitch.is_none() => l.main_pitch = Some(i),
                 id::GROUP_NAME => l.groups.push(i),
                 id::CURRENT_GROUP => l.current_group = Some(i),
+                id::INIT_CONTROLS if l.init_controls.is_none() => l.init_controls = Some(i),
                 _ => {}
             },
             (Region::Channels | Region::Arrangements, id::ARR_START) => {
@@ -700,6 +706,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
     // FL writes 194, 206, 207 and 195 empty when they are empty (spec: flp/events/project-info.md "Writer notes"): an
     // empty text reads as no value.
     let text = |i: Option<usize>| i.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)).filter(|t| !t.is_empty());
+    let init_controls = decode_init_controls(l.init_controls.and_then(|i| events[i].data()).unwrap_or(&[]));
 
     let mut p = Project {
         saved_by: l
@@ -708,7 +715,13 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             .map(|d| decode_text(d, TextEnc::Ansi))
             .unwrap_or_default(),
         ppq: header.ppq().unwrap_or(96),
-        tempo: l.tempo.map(|i| f64::from(int(&events[i])) / 1000.0),
+        // The initial values' tempo record, when there is one, wins over event 156 (spec: flp/engine-events.md "Event
+        // 216").
+        tempo: init_controls
+            .iter()
+            .find(|c| c.target == os_model::target::TEMPO)
+            .map(|c| f64::from(c.value) / 1000.0)
+            .or_else(|| l.tempo.map(|i| f64::from(int(&events[i])) / 1000.0)),
         info: ProjectInfo {
             title: text(l.title),
             author: text(l.author),
@@ -732,6 +745,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         playlist_view: l.playlist_view.and_then(|i| events[i].data()).and_then(PlaylistView::from_bytes),
         work_time: l.work_time.and_then(|i| events[i].data()).and_then(work_time_from),
         show_info: l.show_info.map(|i| int(&events[i]) != 0),
+        init_controls,
         ..Default::default()
     };
 
@@ -1693,6 +1707,19 @@ fn set_record(data: &mut Vec<u8>, kind: u8, loc: u16, pid: u8, v: i32) {
     data.splice(at..at, param_rec(pid, kind, loc, v));
 }
 
+/// Event 216's records, whole ones only (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
+fn decode_init_controls(data: &[u8]) -> Vec<InitControl> {
+    data.chunks_exact(InitControl::LEN).map(|r| InitControl::from_bytes(r.try_into().unwrap())).collect()
+}
+
+/// The initial values as event 216 holds them; `old` (the event's bytes before) keeps any bytes past its last whole
+/// record.
+fn init_controls_bytes(list: &[InitControl], old: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = list.iter().flat_map(|c| c.to_bytes()).collect();
+    out.extend_from_slice(&old[old.len() - old.len() % InitControl::LEN..]);
+    out
+}
+
 /// The main volume: record id 0, kind 0 at place 0x4000 (spec: audio/mixer.md "Main volume").
 fn main_volume(params: &[u8]) -> Option<u16> {
     mixer_param_records(params)
@@ -1848,6 +1875,7 @@ fn plugin_record(slot: Option<(u16, u8)>) -> Vec<u8> {
 
 fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
     let params = l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[]);
+    let init = l.init_controls.and_then(|i| events[i].data()).unwrap_or(&[]);
     let mut out = Vec::new();
     // Track boundaries: header start of track n .. header start of track n+1.
     let starts: Vec<usize> = l
@@ -1897,7 +1925,9 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         let mut slot_mix = [1.0; 10];
         let rt = record_track(index, l.mixer.len());
         let base = mixer_location(rt, 0);
-        for (_, pid, kind, loc, v) in mixer_param_records(params) {
+        // The initial values' records of a slot's switch and mix level win over event 225's (spec: flp/engine-events.md
+        // "Event 216"): read after them.
+        for (_, pid, kind, loc, v) in mixer_param_records(params).chain(mixer_param_records(init)) {
             if kind == MX_KIND_PARAM && (base..base + 10).contains(&loc) {
                 let s = usize::from(loc - base);
                 match pid {
@@ -2168,8 +2198,11 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     let mut inserts: Vec<(usize, Event)> = Vec::new();
     let mut removals: Vec<usize> = Vec::new();
 
-    // Project info.
-    if let (Some(i), Some(t)) = (l.tempo, project.tempo.filter(|&t| Some(t) != current.tempo)) {
+    // Project info. The tempo the file reads is the initial values' tempo record when there is one (spec:
+    // flp/engine-events.md "Event 216"): without one in the model, event 156 has to hold the project's tempo.
+    let reads_156 = !project.init_controls.iter().any(|c| c.target == os_model::target::TEMPO);
+    let tempo_156 = l.tempo.map(|i| f64::from(int(&events[i])) / 1000.0);
+    if let (Some(i), Some(t)) = (l.tempo, project.tempo.filter(|&t| Some(t) != current.tempo || (reads_156 && Some(t) != tempo_156))) {
         set_int(&mut events[i], (t * 1000.0).round() as u32);
     }
     // Title, genre, author, comments, URL (spec: flp/events/project-info.md). A changed text is patched in place. A
@@ -2376,6 +2409,22 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         .or(l.links.first().copied())
         .or(l.channels.first().map(|c| c.start))
         .unwrap_or(0);
+    // The initial values (event 216; spec: ui/settings-choices.md "Advanced: Initialize controls automatically"): the
+    // records written as the model has them, the ones Lemon Studio doesn't understand included, which the model keeps
+    // as read. A file without the event gets it once there is a value, after 146 (or the group names) as FL's prelude
+    // has it (flp/events/project-info.md); pushed first, so it stays behind a 146 added at the same place.
+    if project.init_controls != current.init_controls {
+        match l.init_controls {
+            Some(i) => {
+                let bytes = init_controls_bytes(&project.init_controls, events[i].data().unwrap_or(&[]));
+                set_data(&mut events[i], bytes);
+            }
+            None => {
+                let at = l.current_group.or(l.groups.last().copied()).map_or(groups_at, |i| i + 1);
+                inserts.push((at, Event::new(id::INIT_CONTROLS, Value::var(init_controls_bytes(&project.init_controls, &[])))));
+            }
+        }
+    }
     if project.groups != current.groups {
         removals.extend(l.groups.iter().copied());
         for name in project.groups.iter().rev() {
@@ -3443,6 +3492,9 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     if !project.groups.is_empty() {
         ev.push(Event::new(id::CURRENT_GROUP, Value::U32(project.current_group.unwrap_or(u32::MAX))));
     }
+    // The initial values: FL writes event 216 in every project, with length 0 when there are none (spec:
+    // ui/settings-choices.md "Advanced: Initialize controls automatically"), after 146.
+    ev.push(Event::new(id::INIT_CONTROLS, Value::var(init_controls_bytes(&project.init_controls, &[]))));
     let mut patterns: Vec<&Pattern> = project.patterns.iter().collect();
     patterns.sort_by_key(|p| p.number);
     for pat in &patterns {
@@ -4307,6 +4359,81 @@ mod tests {
         let at = ev.iter().position(|e| e.id == id::MAIN_PITCH).unwrap();
         assert_eq!([ev[at - 2].id, ev[at - 1].id], [id::TEMPO, id::CURRENT_PATTERN]);
         assert_eq!(load(&plain).unwrap().main_pitch, Some(250));
+    }
+
+    /// The initial values (event 216; spec: ui/settings-choices.md "Advanced: Initialize controls automatically",
+    /// flp/engine-events.md "Event 216"): `create` writes the event in every project, empty without values; the records
+    /// read back, one Lemon Studio doesn't understand (a plugin parameter's) byte for byte; the tempo record wins over
+    /// event 156 and a slot's switch and mix records over event 225's; `apply` rewrites the list in place and adds the
+    /// event after 146 to a file without it.
+    #[test]
+    fn initial_values_round_trip() {
+        use os_model::target;
+        use os_model::MixerTrack;
+        // A fresh project: event 216 of length 0.
+        let file = create(&new_project()).unwrap();
+        assert_eq!(event_data(&file, id::INIT_CONTROLS), Some(vec![]));
+        assert!(load(&file).unwrap().init_controls.is_empty());
+
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        p.mixer[2].slots[3] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
+        p.mixer[2].slot_mix[3] = 0.25;
+        p.groups = vec!["Unsorted".into()];
+        let plugin = InitControl { head: 0x0102_0304, target: target::channel_param(1, 7), value: -123_456 };
+        p.init_controls = vec![
+            InitControl { head: 0, target: target::channel(0, target::CHANNEL_VOLUME), value: 10000 },
+            plugin,
+            InitControl { head: 0, target: target::TEMPO, value: 99_500 },
+            InitControl { head: 0, target: target::slot(2, 3, target::SLOT_ON), value: 0 },
+            InitControl { head: 0, target: target::slot(2, 3, target::SLOT_MIX), value: 9600 },
+        ];
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let ev = events_of(&file).unwrap();
+        let at = ev.iter().position(|e| e.id == id::INIT_CONTROLS).unwrap();
+        assert_eq!(ev[at - 1].id, id::CURRENT_GROUP, "after 146");
+        let data = ev[at].data().unwrap();
+        assert_eq!(data.len(), 5 * 12);
+        assert_eq!(data[0..12], [0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x27, 0, 0], "channel 0's volume at 10000");
+        assert_eq!(data[12..24], plugin.to_bytes());
+        let back = load(&file).unwrap();
+        assert_eq!(back.init_controls, p.init_controls);
+        // Event 156 holds 128.5; the initial tempo wins. So do the slot's initial switch and mix level.
+        assert_eq!(int(&ev[ev.iter().position(|e| e.id == id::TEMPO).unwrap()]), 128_500);
+        assert_eq!(back.tempo, Some(99.5));
+        assert_eq!((back.mixer[2].slot_on[3], back.mixer[2].slot_mix[3]), (false, 0.75));
+
+        // Unchanged, the file stays as it is; a changed list is written in place, unknown records kept.
+        let before = file.to_bytes().unwrap();
+        apply(&back, &mut file).unwrap();
+        assert_eq!(file.to_bytes().unwrap(), before);
+        let mut edited = back.clone();
+        edited.init_controls.retain(|c| c.target != target::TEMPO);
+        edited.init_controls[0].value = 6400;
+        apply(&edited, &mut file).unwrap();
+        let again = load(&file).unwrap();
+        assert_eq!(again.init_controls, edited.init_controls);
+        assert_eq!(again.init_controls[1].to_bytes(), plugin.to_bytes());
+        assert_eq!(again.tempo, Some(99.5), "without the record event 156 takes the project's tempo");
+        edited.init_controls.clear();
+        apply(&edited, &mut file).unwrap();
+        assert_eq!(event_data(&file, id::INIT_CONTROLS), Some(vec![]), "an empty list keeps the event, length 0");
+
+        // A file without event 216 gets it after 146 once there is a value.
+        let mut plain = create(&p).unwrap();
+        events_of_mut(&mut plain).unwrap().retain(|e| e.id != id::INIT_CONTROLS);
+        let mut q = load(&plain).unwrap();
+        assert!(q.init_controls.is_empty());
+        apply(&q, &mut plain).unwrap();
+        assert_eq!(event_data(&plain, id::INIT_CONTROLS), None, "nothing to write");
+        q.init_controls = vec![InitControl { head: 0, target: target::mixer(1, target::MIXER_VOLUME), value: 12800 }];
+        apply(&q, &mut plain).unwrap();
+        let ev = events_of(&plain).unwrap();
+        let at = ev.iter().position(|e| e.id == id::INIT_CONTROLS).unwrap();
+        assert_eq!(ev[at - 1].id, id::CURRENT_GROUP);
+        assert_eq!(load(&plain).unwrap().init_controls, q.init_controls);
     }
 
     /// The bar (events 17, 18: beats per bar, steps per beat; 18 is not the denominator), its mode (35) and "play

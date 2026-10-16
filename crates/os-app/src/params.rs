@@ -189,6 +189,8 @@ pub fn row_hint(s: &State, key: usize, index: usize) -> String {
 /// remote control and value entries. `param` = (hosted key, index) of a plugin parameter; `create` = what "Create
 /// automation clip" makes (`None` = disabled).
 fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32, String, f64)>) -> Vec<PItem> {
+    // spec: ui/settings-choices.md "Advanced: Initialize controls automatically"
+    let [init, delete] = crate::init::items(s, create.as_ref().map(|c| (c.0, c.2)));
     let create = match create {
         Some((tgt, name, v)) => PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, v)),
         None => PItem::new("Create automation clip", Cmd::Nothing).off(),
@@ -205,8 +207,8 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         PItem::not_yet("Edit events"),
         PItem::not_yet("Edit events in new window"),
         PItem::not_yet("Edit events in piano roll"),
-        PItem::not_yet("Init song with this position"),
-        PItem::not_yet("Delete initial value"),
+        init,
+        delete,
         PItem::sep(),
         create,
         PItem::not_yet("Edit automation clip..."),
@@ -514,6 +516,10 @@ mod tests {
         let tgt = target::slot_param(2, 1, 35);
         let create = menu.items.iter().find(|i| i.label == "Create automation clip").unwrap();
         assert_eq!(create.cmd, Cmd::CreateAutomation(tgt, "Lemon Parametric EQ - Insert 2 - Main level".into(), 0.5));
+        // A plugin parameter's stored units aren't known: no initial value (spec: ui/settings-choices.md "Advanced:
+        // Initialize controls automatically").
+        let init = menu.items.iter().find(|i| i.label == crate::init::INIT_LABEL).unwrap();
+        assert!(!init.enabled && matches!(init.cmd, Cmd::NotYet(_)));
         // Copy value (main level), then paste another value onto band 1 level.
         crate::playlist::run(&mut a, Cmd::Param(PCmd::Copy(key, 35)));
         assert_eq!(a.state.params.copied, Some(0.5));

@@ -28,6 +28,7 @@ mod enable_groups;
 mod history;
 mod hold;
 mod icons;
+mod init;
 mod knobs;
 mod loading;
 mod logo;

@@ -305,6 +305,11 @@ pub const ANIMATION_REFRESH_RATE: Combo =
 /// screen (2026-10-16)".
 pub const DONT_LIMIT_WINDOWS: Check = Check { key: "dont_limit_windows_to_screen", label: "Don't limit windows to screen", default: false };
 
+/// General ▸ Advanced: "Create automation clip" also puts the control in the project's initial values with its value at
+/// that moment, replacing an earlier one, in the same undo step (`playlist::create_automation`, `crate::init`). Spec:
+/// ui/settings-choices.md "Advanced: Initialize controls automatically (2026-10-16)".
+pub const INIT_CONTROLS: Check = Check { key: "init_controls_automatically", label: "Initialize controls automatically", default: true };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -338,6 +343,7 @@ pub const CHECKS: &[&Check] = &[
     &READ_ROOT_NOTE,
     &READ_TEMPO,
     &DONT_LIMIT_WINDOWS,
+    &INIT_CONTROLS,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE];

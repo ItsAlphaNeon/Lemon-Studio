@@ -284,6 +284,10 @@ pub enum Cmd {
     TrackMuteClips(u16, bool),
     /// "Create automation clip" on a control: target, name, current value 0..1.
     CreateAutomation(u32, String, f64),
+    /// "Init song with this position" on a control: target, current value 0..1; "Delete initial value": target
+    /// (`crate::init`).
+    InitControl(u32, f64),
+    DeleteInit(u32),
     ResetEmptyTracks,
     /// Browser options menu (spec: ui/browser.md §4).
     Browser(crate::browser::BCmd),
@@ -1659,7 +1663,15 @@ pub fn track_after_used(s: &State) -> u16 {
 /// a clip over the time selection, else `automation_span` (spec: plugins/plugin-parameters.md §5), on the first free
 /// track below the last used one.
 pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16 {
-    snapshot(s);
+    // One undo step, "Create automation clip": the playlist, and the control's initial value while "Initialize controls
+    // automatically" is on (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
+    let init = crate::init::automatic(tgt, value);
+    arr_mut(s);
+    let mut snap = crate::history::Snap::Playlist(Box::new(capture(s)));
+    if init.is_some() {
+        snap = crate::history::Snap::Several(vec![snap, crate::history::Snap::Init(tgt, crate::init::entry(s, tgt))]);
+    }
+    crate::history::record(s, crate::history::CREATE_AUTOMATION, snap);
     let name = &unique_channel_name(s, name);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let (a, b) = match s.playlist.range {
@@ -1692,6 +1704,9 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     s.playlist.sel = vec![n - 1];
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Automation;
+    if init.is_some() {
+        crate::init::put(s, tgt, init);
+    }
     s.piano.dirty = true;
     index
 }
@@ -2064,13 +2079,17 @@ pub fn marker_menu(i: usize, x: f32, y: f32) -> Popup {
 }
 
 /// The short right-click menu of the toolbar's and the mixer's knobs, faders and the tempo: "Create automation clip"
-/// (§8) when the control can be automated, "Type in value..." when it takes one (spec: ui/type-in-value.md §8).
-pub fn knob_menu(auto: Option<(u32, String, f64)>, typein: Option<crate::typein::Target>, x: f32, y: f32) -> Popup {
+/// (§8) and the initial value's items (`crate::init::items`) when the control can be automated, "Type in value..." when
+/// it takes one (spec: ui/type-in-value.md §8).
+pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<crate::typein::Target>, x: f32, y: f32) -> Popup {
     let mut items = Vec::new();
     if let Some((tgt, name, value)) = auto {
+        let [init, delete] = crate::init::items(s, Some((tgt, value)));
         items.extend([
             PItem::head("Automation"),
             PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, value)),
+            init,
+            delete,
             PItem::not_yet("Edit events"),
             PItem::not_yet("Link to controller..."),
         ]);
@@ -2636,6 +2655,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
         PlDrag::Playback => {}
         PlDrag::SongPos => {
             s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
+            crate::init::apply(s);
         }
         PlDrag::TimeSel { t0 } => {
             let t = snap_round(s, &g, g.tick_at(x), alt);
@@ -2911,8 +2931,10 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
         app.drag = Some(Drag::Pl(PlDrag::TimeSel { t0: t }));
     } else {
         s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
-        // Moving the song position switches to SONG mode; a time selection does not (§7).
+        // Moving the song position switches to SONG mode; a time selection does not (§7). The initial values follow
+        // (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
         s.song_mode = true;
+        crate::init::apply(s);
         app.drag = Some(Drag::Pl(PlDrag::SongPos));
     }
     app.invalidate();
@@ -3537,6 +3559,14 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             create_automation(s, tgt, &name, v);
             s.raise(crate::app::Win::Playlist);
             Some(format!("Created automation clip \"{name}\""))
+        }
+        Cmd::InitControl(tgt, v) => {
+            crate::init::init(s, tgt, v);
+            None
+        }
+        Cmd::DeleteInit(tgt) => {
+            crate::init::delete(s, tgt);
+            None
         }
         Cmd::ResetEmptyTracks => {
             snapshot(s);
