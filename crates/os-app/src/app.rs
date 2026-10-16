@@ -281,6 +281,8 @@ pub enum Action {
     Pat(crate::patterns::Hit),
     /// A message box or the file dialog (spec: ui/dialogs.md).
     Dlg(crate::dialog::DHit),
+    /// The Song info box: a click closes it (spec: flp/events/project-info.md "The Song info box").
+    SongInfo,
 }
 
 /// Scrollable view axes. Scroll values are in content pixels (see `App::scroll_get`).
@@ -871,6 +873,8 @@ pub struct State {
     pub screen: (f32, f32),
     /// Open message boxes and file dialogs, bottom to top (spec: ui/dialogs.md).
     pub dialogs: Vec<crate::dialog::Modal>,
+    /// The working time's clock and the Song info box (Settings > Info, `project_info`).
+    pub credits: crate::project_info::Credits,
 }
 
 impl State {
@@ -1052,7 +1056,7 @@ pub struct App {
     /// A WAV export is rendering (FILE > Export): its file name and progress (0..1); the same panel shows, input waits.
     export: Option<(String, f32)>,
     /// The project and tempo as last opened, saved or created: anything else has unsaved changes.
-    saved: (Project, f64),
+    pub(crate) saved: (Project, f64),
     /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
     pub(crate) backup: crate::backup::Backup,
 }
@@ -1139,6 +1143,7 @@ impl App {
                 ],
                 screen: (1920.0, 1080.0),
                 dialogs: Vec::new(),
+                credits: Default::default(),
             },
             theme: load_theme(),
             transport,
@@ -1207,6 +1212,7 @@ impl App {
         app.state.global_snap = snap.global;
         app.state.piano.snap = snap.piano;
         app.state.playlist.snap = snap.playlist;
+        crate::project_info::created(&mut app.state);
         app.mark_saved();
         if let Some(p) = path {
             app.open(p);
@@ -1269,6 +1275,7 @@ impl App {
                 s.mixer_scroll = 0.0;
                 s.song_mode = project.arrangement().is_some_and(|a| !a.clips.is_empty());
                 s.project = project;
+                crate::project_info::opened(s);
                 crate::rack::from_model(s);
                 s.file = Some(file);
                 s.message = Some(format!("Opened {}", path.display()));
@@ -1446,6 +1453,7 @@ impl App {
         // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, Lemon Studio status).
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
+        crate::project_info::stamp(s, &mut proj);
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         let result = os_flp::project::apply(&proj, &mut file)
@@ -1613,6 +1621,7 @@ impl App {
         self.reset_hosted();
         let s = &mut self.state;
         s.project = default_project();
+        crate::project_info::created(s);
         s.file = None;
         s.path = None;
         s.tempo = 130.0;
@@ -2772,6 +2781,7 @@ impl App {
         self.song_pos_tick(now);
         self.cables_tick(now);
         self.backup_tick(now);
+        self.work_tick(now);
         if self.state.cpu.due(now) {
             let tp = &self.transport;
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());
@@ -3366,6 +3376,7 @@ impl App {
             SAct::Plug(p) => self.plugin_act(p),
             SAct::Check(k) if crate::prefs::find_check(k).is_some() => self.pref_toggle(k),
             SAct::Check(k) if k == views::settings::TRUNCATED_CHECK => self.toggle_play_truncated(),
+            SAct::Check(k) if k == views::settings::SHOW_INFO_CHECK => self.toggle_show_info(),
             // Checks and buttons outside `settings::LIVE` are drawn greyed out with an `Action::Placeholder` hit instead.
             SAct::Check(k) => self.state.message = Some(off_text(k)),
             SAct::Group(k) => {
@@ -3410,6 +3421,7 @@ impl App {
             SAct::Button("Find new plugins") => self.start_scan(crate::plugin_db::Mode::Changed),
             SAct::Button("Rescan all") => self.start_scan(crate::plugin_db::Mode::All),
             SAct::Button("Add folder...") => self.add_plugin_folder(),
+            SAct::Button(views::settings::RESET_WORK_TIME) => self.reset_work_time(),
             SAct::Button(b) => self.state.message = Some(off_text(b)),
             // The Info page's boxes (spec: ui/settings.md "Info").
             SAct::Info(f) => return self.info_act(f),
@@ -5675,6 +5687,7 @@ impl App {
             }
             Action::Pat(h) => crate::patterns::hit(s, h),
             Action::Dlg(h) => self.dialog_click(h),
+            Action::SongInfo => self.close_song_info(),
             Action::PlPickList => {}
             Action::PlPickAdd => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
