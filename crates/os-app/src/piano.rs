@@ -272,7 +272,7 @@ impl Geom {
 /// (song tick of the clip's start, pattern tick there, length), in song order. A clip that plays its whole pattern
 /// (no window) lasts the pattern's length.
 pub fn song_spans(s: &State) -> Vec<(u32, u32, u32)> {
-    let whole = pattern_length(s, notes(s));
+    let whole = pattern_length(s, s.pattern);
     let track_on = |t: u16| s.project.arrangement().and_then(|a| a.tracks.get(usize::from(t))).is_none_or(|t| t.enabled);
     let mut v: Vec<(u32, u32, u32)> = crate::playlist::clips(s)
         .iter()
