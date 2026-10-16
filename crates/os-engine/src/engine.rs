@@ -824,7 +824,8 @@ pub struct Engine {
     tempo: f64,
     ppq: u16,
     /// The project's time signature, numerator and denominator (4/4 when the file has none): what hosted plugins are
-    /// told (spec: plugins/vst3-hosting.md §1).
+    /// told (spec: plugins/vst3-hosting.md §1). A bar whose steps per beat make no signature (3) is told as its length
+    /// in sixteenths over 16 (what FL tells plugins is not measured: spec: audio/song-structure.md, open questions).
     signature: (u16, u16),
     bus: Vec<Vec<f32>>,
     /// The last rendered tick (interleaved L/R), how much of it has been handed out, its tick index and first sample.
@@ -1235,7 +1236,10 @@ impl Engine {
             tail_done: false,
             tempo,
             ppq,
-            signature: project.time_signature.map_or((4, 4), |(n, d)| (n.max(1), d.max(1))),
+            signature: project.signature().unwrap_or_else(|| {
+                let (beats, steps) = project.bar();
+                (beats.saturating_mul(steps), 16)
+            }),
             out: Vec::with_capacity(8192),
             out_pos: 0,
             out_tick: 0,
@@ -1257,7 +1261,8 @@ impl Engine {
             inst_tail: 0,
             inst_active: false,
             metronome: None,
-            beats_per_accent: project.time_signature.map_or(4, |s| s.0.max(1)),
+            // Accent on every numerator-th quarter (spec: ui/metronome.md §4): event 17, beats per bar.
+            beats_per_accent: project.bar().0,
             tap_clicks: crate::metronome::TapClicks::new(rate),
             report,
         }
@@ -2968,10 +2973,10 @@ fn fallback_tone(rate: u32) -> Arc<Sample> {
     Arc::new(Sample { rate, right: left.clone(), left })
 }
 
-/// Ticks in a bar: `PPQ * 4 * numerator / denominator` (spec: audio/timing.md, "Settings").
+/// Ticks in a bar: beats per bar × steps per beat sixteenths, `17 × 18 × PPQ / 4` (spec: audio/timing.md, "Time
+/// signature").
 fn bar_ticks(project: &Project) -> u64 {
-    let (num, den) = project.time_signature.unwrap_or((4, 4));
-    (u64::from(project.ppq.max(1)) * 4 * u64::from(num.max(1)) / u64::from(den.max(1))).max(1)
+    u64::from(project.bar_ticks())
 }
 
 /// A pattern's length in ticks: an explicit length (the channel rack's length box, spec: ui/channel-rack.md Â§7) wins;
@@ -3009,7 +3014,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
             }
             let mut out = Vec::new();
             let mut end: u64 = 0;
-            let truncated = project.play_truncated.unwrap_or(false);
+            let truncated = project.play_truncated;
             for play in pattern_plays(project, clips) {
                 for note in pattern_notes(play.pattern).iter().filter(|x| !x.muted()) {
                     let p = u64::from(note.position);
@@ -3200,25 +3205,30 @@ mod tests {
     }
 
     /// spec: plugins/vst3-hosting.md §1: the transport carries the project's time signature, and its bars and the
-    /// pattern loop follow it (a pattern is whole bars of the signature, spec: audio/song-structure.md).
+    /// pattern loop follow it (a pattern is whole bars of the project's bar, spec: audio/song-structure.md). The bar
+    /// is events 17 and 18, beats per bar and steps per beat: 6/8 is (6, 2) (spec: flp/engine-events.md "Project").
     #[test]
     fn plugins_see_the_project_time_signature() {
-        let mut p = project(vec![long_note(0, 96, 0)], vec![]);
-        p.time_signature = Some((6, 8));
-        p.channels[0].kind = ChannelKind::Plugin;
-        let mut lib = SampleLibrary::default();
-        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
-        let inst = Arc::new(std::sync::Mutex::new(Clock::default()));
-        e.set_instrument(0, inst.clone());
-        e.set_looping(true);
-        let mut out = vec![0.0f32; 512 * 2];
-        e.process(&mut out);
-        let t = inst.lock().unwrap().seen[0].0;
-        // A 6/8 bar is three quarter notes: the one-bar pattern loops after 3 beats, and beat 4 is in bar 1.
-        assert_eq!((t.numerator, t.denominator, t.looping), (6, 8, Some((0.0, 3.0))));
         let fpb = 48000.0 * 60.0 / 130.0;
-        let later = TransportInfo { looping: None, ..t }.advanced((4.0 * fpb) as u64, 48000);
-        assert_eq!((later.bar, later.bar_start), (1, 3.0), "{later:?}");
+        // 6/8: six beats of two sixteenths, three quarter notes. A time division of three beats of three steps has no
+        // signature: told as its nine sixteenths, 9/16 (2.25 quarter notes).
+        for (bar, sig, quarters) in [((6, 2), (6, 8), 3.0), ((3, 3), (9, 16), 2.25)] {
+            let mut p = project(vec![long_note(0, 96, 0)], vec![]);
+            p.bar = Some(bar);
+            p.channels[0].kind = ChannelKind::Plugin;
+            let mut lib = SampleLibrary::default();
+            let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+            let inst = Arc::new(std::sync::Mutex::new(Clock::default()));
+            e.set_instrument(0, inst.clone());
+            e.set_looping(true);
+            let mut out = vec![0.0f32; 512 * 2];
+            e.process(&mut out);
+            let t = inst.lock().unwrap().seen[0].0;
+            // The one-bar pattern loops after a bar, and the beat after it is in bar 1.
+            assert_eq!((t.numerator, t.denominator, t.looping), (sig.0, sig.1, Some((0.0, quarters))));
+            let later = TransportInfo { looping: None, ..t }.advanced(((quarters + 1.0) * fpb) as u64, 48000);
+            assert_eq!((later.bar, later.bar_start), (1, quarters), "{later:?}");
+        }
     }
 
     // spec: audio/swing.md (whole ticks; notes in the first half of an odd step move towards its middle)
@@ -3758,7 +3768,7 @@ mod tests {
         c.window = Some((100.0, 200.0));
         let mut p = song(notes, vec![c]);
         assert_eq!(song_notes(&p), vec![(434, Some(634))], "off: only the note starting inside, at full length");
-        p.play_truncated = Some(true);
+        p.play_truncated = true;
         assert_eq!(song_notes(&p), vec![(384, Some(484)), (434, Some(484))], "on: the earlier note from the clip start, both cut at its end");
     }
 
@@ -4835,7 +4845,7 @@ mod tests {
     fn metronome_clicks_every_beat_of_a_playing_pattern_and_accents_the_bar() {
         // An empty pattern in 3/4 loops a bar of three beats: accented, plain, plain, accented, ...
         let mut p = project(vec![], vec![]);
-        p.time_signature = Some((3, 4));
+        p.bar = Some((3, 4));
         p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
         let mut lib = SampleLibrary::new(None);
         let rate = 48000;

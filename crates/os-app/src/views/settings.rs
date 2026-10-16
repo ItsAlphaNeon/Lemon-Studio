@@ -43,6 +43,8 @@ pub enum SAct {
     Info(InfoField),
     /// The Info page's genre button, with its bottom left (where the genre menu opens; `App::genre_menu`).
     Genres(f32, f32),
+    /// A working value box (`LIVE_NUMBERS`) by its label: the mouse wheel changes it (`App::settings_number`).
+    Number(&'static str),
 }
 
 /// The Info page's text boxes: the project's credits (spec: ui/settings.md "Info", flp/events/project-info.md).
@@ -143,6 +145,10 @@ pub struct SettingsUi {
     pub info_edit: Option<InfoEdit>,
     /// The Plugins page shows the experimental native host toggles: `os_native::settings_shown()` at startup.
     pub native: bool,
+    /// Project ▸ Time settings: the last bar (beats per bar, steps per beat) of each "Set as" mode, indexed by
+    /// `signature as usize` (0 = time division), kept while the program runs; `None` = 4/4 (spec:
+    /// ui/settings-choices.md "Set as time division").
+    pub bar_memory: [Option<(u16, u16)>; 2],
 }
 
 /// Tabs: label, page title, group (0 system / 1 project / 2 info) (spec §2). Plugins takes the place of FL's Account
@@ -213,15 +219,36 @@ pub const OUTPUT_DEVICE: &str = "Output device";
 pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
 
-/// Project ▸ Time settings: the project's time signature (events 17, 18; spec: audio/song-structure.md "Time
-/// signatures and a pattern's length"). Their menus offer `NUMERATORS` and `DENOMINATORS`: the choices FL offers were
-/// not measured, these are Lemon Studio's.
+/// Project ▸ Time settings (spec: ui/settings-choices.md "Project"): the timebase, the "Set as" mode (event 35; the
+/// combo has no label beside it), and the bar (events 17, 18) as a time signature (Numerator / Denominator, FL's
+/// choices) or as a time division (Beats per bar / Steps per beat value boxes).
+pub const TIMEBASE: &str = "Timebase (PPQ)";
+pub const TIMEBASES: &[u16] = &[24, 48, 72, 96, 120, 144, 168, 192, 384, 768, 960];
+pub const SET_AS: &str = "Set as";
+pub const SET_AS_SIGNATURE: &str = "Set as time signature";
+pub const SET_AS_DIVISION: &str = "Set as time division";
 pub const NUMERATOR: &str = "Numerator";
 pub const DENOMINATOR: &str = "Denominator";
 pub const NUMERATORS: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 pub const DENOMINATORS: &[u16] = &[2, 4, 8, 16];
+pub const BEATS_PER_BAR: &str = "Beats per bar";
+pub const STEPS_PER_BEAT: &str = "Steps per beat";
 /// The Project page's combos that work (their menus: `App::audio_menu`).
-pub const PROJECT_COMBOS: [&str; 2] = [NUMERATOR, DENOMINATOR];
+pub const PROJECT_COMBOS: [&str; 4] = [TIMEBASE, SET_AS, NUMERATOR, DENOMINATOR];
+/// The value boxes that work, with their ranges (the mouse wheel changes them: `App::settings_number`).
+pub const LIVE_NUMBERS: [(&str, u16, u16); 2] = [(BEATS_PER_BAR, 1, 32), (STEPS_PER_BEAT, 1, 16)];
+
+/// The range of the working value box labelled `label`.
+pub fn number_range(label: &str) -> Option<(u16, u16)> {
+    LIVE_NUMBERS.iter().find(|n| n.0 == label).map(|n| (n.1, n.2))
+}
+
+/// The Denominator box's text for `steps` per beat: 16 / steps (spec: flp/engine-events.md "Project"); steps that make
+/// no signature (3) show the quotient to two decimals.
+pub fn denominator_text(steps: u16) -> String {
+    let steps = steps.max(1);
+    if 16 % steps == 0 { (16 / steps).to_string() } else { format!("{:.2}", 16.0 / f64::from(steps)) }
+}
 /// Project ▸ Advanced: "play truncated notes" (event 30; spec: audio/song-structure.md "Play truncated notes").
 pub const TRUNCATED_CHECK: &str = "Play truncated notes in clips";
 
@@ -339,6 +366,15 @@ fn gf(title: &'static str, closed: bool, rows: Vec<Row>) -> Group {
 }
 fn combo(v: &str, w: f32, label: &'static str) -> Row {
     Row::Combo(v.into(), w, label)
+}
+/// The panning law's name for event 23 (0 Circular, 2 Triangular; spec: flp/engine-events.md "Project"); a value
+/// outside those shows as a number.
+fn panning_text(law: Option<u8>) -> String {
+    match law {
+        None | Some(0) => "Circular".into(),
+        Some(2) => "Triangular".into(),
+        Some(v) => v.to_string(),
+    }
 }
 fn txt(v: impl Into<String>) -> Row {
     Row::Text(v.into(), false)
@@ -565,19 +601,37 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 combo("When saving unsaved projects only", 444.0, "Ask for data folder"),
                 Off("Copy used samples to the project folder", false),
             ]),
-            g("Time settings", vec![
-                combo(&s.project.ppq.to_string(), 44.0, "Timebase (PPQ)"),
-                combo("Set as time signature", 196.0, ""),
-                // The project's signature, 4/4 when the file has none; the check shows what the engine plays.
-                combo(&s.project.time_signature.map_or(4, |t| t.0).to_string(), 44.0, NUMERATOR),
-                combo(&s.project.time_signature.map_or(4, |t| t.1).to_string(), 44.0, DENOMINATOR),
-            ]),
+            g("Time settings", {
+                // The bar as the project holds it (4/4 when the file has none), in the mode of event 35: a time
+                // signature's two combos or a time division's two value boxes (spec: ui/settings-choices.md "Project").
+                let (beats, steps) = s.project.bar();
+                let sig = s.project.bar_is_signature();
+                let mut rows = vec![
+                    combo(&s.project.ppq.to_string(), 44.0, TIMEBASE),
+                    combo(if sig { SET_AS_SIGNATURE } else { SET_AS_DIVISION }, 196.0, SET_AS),
+                ];
+                if sig {
+                    rows.push(combo(&beats.to_string(), 44.0, NUMERATOR));
+                    rows.push(combo(&denominator_text(steps), 44.0, DENOMINATOR));
+                } else {
+                    rows.push(Value(beats.to_string(), BEATS_PER_BAR));
+                    rows.push(Value(steps.to_string(), STEPS_PER_BEAT));
+                }
+                rows
+            }),
+            // Panning law, fast declick and automatic crossfades show the project's values, greyed: their sound is not
+            // played yet (events 23, 40, 44; spec: flp/engine-events.md "Project"). The check shows what the engine plays.
             gf("Advanced", true, vec![
-                combo("Circular", 82.0, "Panning law"),
-                Check(TRUNCATED_CHECK, s.project.play_truncated.unwrap_or(false)),
-                Check("Fast declick for cut groups", false),
+                combo(&panning_text(s.project.panning_law), 82.0, "Panning law"),
+                Check(TRUNCATED_CHECK, s.project.play_truncated),
+                Check("Fast declick for cut groups", s.project.fast_declick.unwrap_or(false)),
             ]),
-            gf("Playlist", false, vec![Check2("Automatic crossfades", true, "Enable automatic crossfades in new projects", true)]),
+            gf("Playlist", false, vec![Check2(
+                "Automatic crossfades",
+                s.project.auto_crossfades.unwrap_or(false),
+                "Enable automatic crossfades in new projects",
+                true,
+            )]),
         ],
         // The credits are edited in place (spec: ui/settings.md "Info"; events 194 / 207 / 206 / 195 / 197,
         // flp/events/project-info.md); the genre button opens FL's genre list (spec: ui/settings-choices.md "Info").
@@ -932,9 +986,12 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
             let hov = ui.hit(b, Action::Settings(SAct::Combo(label, b.x, b.bottom())), "");
             kit::combo(ui.c, t, b, v, f, kit::State::hover(hov));
-            ui.c.text(f, b.right() + 8.0, ty, if hov { t.glyph } else { t.text }, label);
+            // Project's "Set as" combo has no label beside it.
+            if *label != SET_AS {
+                ui.c.text(f, b.right() + 8.0, ty, if hov { t.glyph } else { t.text }, label);
+            }
         }
-        // Other combos and value boxes do not work yet. A combo keeps showing its value (the project's PPQ), greyed
+        // Other combos and value boxes do not work yet. A combo keeps showing its value (the project's panning law), greyed
         // out.
         Row::Combo(v, w, label) => {
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
@@ -942,6 +999,13 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             kit::combo(ui.c, t, b, v, f, kit::State::NORMAL);
             let lw = ui.c.text(f, b.right() + 8.0, ty, t.text, label);
             grey(ui, Rect::new(b.x, b.y, b.w + 8.0 + lw, b.h));
+        }
+        // Project ▸ Time settings as a time division: the wheel changes the value (`App::settings_number`).
+        Row::Value(v, label) if number_range(label).is_some() => {
+            let b = Rect::new(x0, y + 3.0, 38.0, 21.0);
+            let hov = ui.hit(b, Action::Settings(SAct::Number(label)), "");
+            value_red(ui, b, v);
+            ui.c.text(f, b.right() + 8.0, ty, if hov { t.glyph } else { t.text }, label);
         }
         Row::Value(v, label) => {
             let b = Rect::new(x0, y + 3.0, 38.0, 21.0);

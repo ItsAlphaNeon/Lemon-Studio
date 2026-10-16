@@ -312,8 +312,13 @@ pub enum Cmd {
     Cpu(crate::cpu::CpuCmd),
     /// The metronome button's menu: the click sound (spec: ui/metronome.md §2).
     MetronomeSound(os_engine::metronome::Sound),
-    /// Settings > Project ▸ Numerator / Denominator: the project's time signature (spec: audio/song-structure.md).
-    TimeSignature(u16, u16),
+    /// Settings > Project ▸ Numerator / Denominator: the project's bar, beats per bar and steps per beat (events 17,
+    /// 18; spec: ui/settings-choices.md "Project").
+    Bar(u16, u16),
+    /// Settings > Project ▸ Set as: time signature (true) or time division (event 35).
+    TimeMode(bool),
+    /// Settings > Project ▸ Timebase (PPQ).
+    Timebase(u16),
     /// The auto-scrolling button's menu (spec: ui/auto-scrolling.md §2).
     ContinuousScrolling,
     /// A PATTERNS command from a pattern's right-click menu in the picker (spec: ui/pattern-menu.md §3).
@@ -3021,7 +3026,9 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return Some(format!("Metronome sound: {}", sound.label()));
         }
-        Cmd::TimeSignature(num, den) => return app.set_time_signature(num, den),
+        Cmd::Bar(beats, steps) => return app.set_bar(beats, steps),
+        Cmd::TimeMode(signature) => return app.set_time_mode(signature),
+        Cmd::Timebase(ppq) => return app.set_timebase(ppq),
         Cmd::ContinuousScrolling => {
             let on = crate::autoscroll::toggle_continuous();
             app.invalidate();
@@ -3067,7 +3074,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::TimeSignature(..) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMsc(_) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::Bar(..) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMsc(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -3748,6 +3755,24 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         app.state.message = Some(m);
     }
     true
+}
+
+/// The timebase changed from `from` to `to` ticks per quarter (`Project::set_ppq` rescaled the project): the song
+/// position, time selection, clipboard, locked clip length and undo steps follow, so nothing of the old timebase comes
+/// back (automation data stays, as in the project).
+pub fn rescale(s: &mut State, from: u16, to: u16) {
+    use os_model::{rescale_length, rescale_tick};
+    let pl = &mut s.playlist;
+    pl.pos = rescale_tick(pl.pos, from, to);
+    pl.range = pl.range.map(|(a, b)| (rescale_tick(a, from, to), rescale_tick(b, from, to)));
+    pl.clipboard.iter_mut().for_each(|c| c.rescale(from, to));
+    if let Some((_, len)) = &mut pl.lock_len {
+        *len = rescale_length(*len, from, to);
+    }
+    for (clips, markers, ..) in &mut pl.undo {
+        clips.iter_mut().for_each(|c| c.rescale(from, to));
+        markers.iter_mut().for_each(|m| m.rescale(from, to));
+    }
 }
 
 /// A playlist edit changed nothing: drop its undo step (used by tests).
