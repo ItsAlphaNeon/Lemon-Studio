@@ -318,6 +318,9 @@ pub enum Cmd {
     Pattern(crate::patterns::Cmd),
     /// The time display's mode: minute:second:centisecond (true) or bar:step:tick.
     ClockMsc(bool),
+    /// A value picked in a list of the time signature dialog: denominator (true) or numerator (spec:
+    /// ui/pattern-time-signature.md §1).
+    TimeSig(bool, u8),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2975,14 +2978,17 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
         Cmd::Param(c) => return app.params_cmd(c),
         Cmd::Pattern(c) => {
-            let at = crate::patterns::box_at_mouse(app.mouse);
-            let m = crate::patterns::run(&mut app.state, c, at);
+            let m = app.pattern_cmd(c);
             app.invalidate();
             return m;
         }
         Cmd::ClockMsc(on) => {
             app.state.clock_msc = on;
             app.invalidate();
+            return None;
+        }
+        Cmd::TimeSig(den, v) => {
+            app.sig_pick(den, v);
             return None;
         }
         Cmd::TypeIn(t) => {
@@ -3056,7 +3062,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMsc(_) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMsc(_) | Cmd::TimeSig(..) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

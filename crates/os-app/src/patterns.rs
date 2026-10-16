@@ -45,6 +45,8 @@ pub enum Cmd {
     Delete,
     MoveUp,
     MoveDown,
+    /// Set time signature...: a dialog, run by `App::pattern_cmd` (spec: ui/pattern-time-signature.md).
+    TimeSignature,
 }
 
 impl Cmd {
@@ -64,6 +66,7 @@ impl Cmd {
             "Delete" => Cmd::Delete,
             "Move up" => Cmd::MoveUp,
             "Move down" => Cmd::MoveDown,
+            "Set time signature..." => Cmd::TimeSignature,
             _ => return None,
         })
     }
@@ -336,6 +339,8 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
             s.pattern = cur + 1;
         }
         Cmd::MoveUp | Cmd::MoveDown => {}
+        // Opens dialogs: `App::pattern_cmd` runs it.
+        Cmd::TimeSignature => {}
     }
     None
 }

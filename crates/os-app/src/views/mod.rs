@@ -130,15 +130,19 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if let Some(m) = s.menu_open {
         menus::paint_dropdown(ui, s, m);
     }
-    // A menu opened from the settings window (Audio page combos) goes over it; a dropdown's submenu over the dropdown.
-    if !s.settings.open {
+    // A menu opened from the settings window (Audio page combos) goes over it; a dropdown's submenu over the dropdown;
+    // the time signature dialog's value lists over the dialog.
+    let over_dialog = crate::timesig::form_open(s);
+    if !s.settings.open && !over_dialog {
         playlist::paint_overlays(ui, s);
     }
     rack::paint_fill(ui, s);
     patterns::paint(ui, s);
     if s.settings.open {
         settings::paint(ui, s);
-        playlist::paint_overlays(ui, s);
+        if !over_dialog {
+            playlist::paint_overlays(ui, s);
+        }
     }
     browser::paint_ghost(ui, s);
     if s.monitor.debug {
@@ -149,6 +153,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
     dialog::paint(ui, s);
+    if over_dialog {
+        playlist::paint_overlays(ui, s);
+    }
     overlays
 }
 

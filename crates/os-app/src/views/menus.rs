@@ -170,7 +170,7 @@ const PAT_CMDS: &[Item] = &[
     it("Change color...", "").on(),
     it("Random color", "").on(),
     it("Open in project browser", "Shift+Ctrl+P"),
-    it("Set time signature...", ""),
+    it("Set time signature...", "").on(),
     it("Transpose...", "").on(),
     SEP,
     it("Insert one", "Shift+Ctrl+Ins").on(),

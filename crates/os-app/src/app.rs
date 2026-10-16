@@ -1553,6 +1553,18 @@ impl App {
                     crate::rack::set_stretch(self, &rows, method);
                 }
             }
+            // spec: ui/pattern-time-signature.md §2-3: No leaves the pattern alone; closing the dialog without Accept
+            // leaves it without a start marker.
+            Then::ReplaceSignature(n) => {
+                if reply == Reply::Button(Answer::Yes) {
+                    self.replace_signature(n);
+                }
+            }
+            Then::Signature(n, num, den) => {
+                if reply == Reply::Button(Answer::Ok) {
+                    crate::timesig::set_start(&mut self.state, n, num, den);
+                }
+            }
         }
         self.invalidate();
     }
@@ -3795,6 +3807,16 @@ impl App {
         self.armed = None;
         // A dialog takes every click (spec: ui/dialogs.md §3).
         if self.modal_open() {
+            // The time signature dialog's value list (the app's popup) takes its own; a click anywhere else closes it.
+            if crate::timesig::list_open(&self.state).is_some() {
+                match action {
+                    Some(a @ (Action::PlPopup(_) | Action::PlPopupSub(_))) => {
+                        self.act(a);
+                    }
+                    _ => self.state.playlist.popup = None,
+                }
+                return;
+            }
             if let Some(Action::Dlg(h)) = action {
                 if Self::acts_on_release(&Action::Dlg(h.clone())) {
                     self.armed = Some(Action::Dlg(h));
@@ -4891,8 +4913,7 @@ impl App {
             return;
         }
         if let Some(cmd) = pattern_shortcut(key, ctrl, self.shift) {
-            let at = crate::patterns::box_at_mouse(self.mouse);
-            if let Some(m) = crate::patterns::run(&mut self.state, cmd, at) {
+            if let Some(m) = self.pattern_cmd(cmd) {
                 self.state.message = Some(m);
             }
             return;
@@ -6004,6 +6025,21 @@ impl App {
         }
     }
 
+    /// A PATTERNS command from the menu bar, the pattern menu or its key: the ones that open dialogs here, the others
+    /// in `patterns::run` with a name box at the mouse. Returns a status message.
+    pub(crate) fn pattern_cmd(&mut self, cmd: crate::patterns::Cmd) -> Option<String> {
+        match cmd {
+            crate::patterns::Cmd::TimeSignature => {
+                self.ask_time_signature();
+                None
+            }
+            _ => {
+                let at = crate::patterns::box_at_mouse(self.mouse);
+                crate::patterns::run(&mut self.state, cmd, at)
+            }
+        }
+    }
+
     pub(crate) fn menu_item(&mut self, menu: usize, item: usize) {
         use views::menus::*;
         match (menu, item) {
@@ -6067,8 +6103,7 @@ impl App {
             (PATTERNS, i) if i >= PATTERN_PICK => self.state.pattern = (i - PATTERN_PICK) as u16,
             (PATTERNS, i) if item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).is_some() => {
                 let cmd = item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).expect("checked");
-                let at = crate::patterns::box_at_mouse(self.mouse);
-                if let Some(m) = crate::patterns::run(&mut self.state, cmd, at) {
+                if let Some(m) = self.pattern_cmd(cmd) {
                     self.state.message = Some(m);
                 }
             }
@@ -7433,6 +7468,7 @@ mod tests {
         match &app.state.dialogs.last().expect("a dialog").body {
             crate::dialog::Body::File(f) => f,
             crate::dialog::Body::Msg(m) => panic!("a message box is on top: {}", m.plain()),
+            crate::dialog::Body::TimeSig(_) => panic!("the time signature dialog is on top"),
         }
     }
 
@@ -11827,6 +11863,119 @@ mod tests {
         let clips: Vec<[u32; 4]> = back.channels.iter().filter(|c| c.kind == ChannelKind::AudioClip).map(|c| c.sound.stretch).collect();
         assert_eq!(clips, [[kept[0], kept[1], kept[2], sm::STRETCH_PRO as u32], [0, 0, 0, sm::E2_SPEECH as u32]]);
         let _ = (std::fs::remove_file(&path), std::fs::remove_file(&wav));
+    }
+
+    /// PATTERNS > Set time signature... (spec: ui/pattern-time-signature.md): the "Time signature change" dialog opens at
+    /// 4/4; its value boxes open the app's popup lists (Numerator 1..16, Denominator 2/4/8/16, the current value marked);
+    /// Accept puts a time-signature marker at the start of the current pattern, which the marker lanes show as "3/8" and
+    /// saving keeps. With one there already the conflict question comes first: No leaves it, Yes removes it and opens
+    /// the dialog, which closed without Accept leaves no start marker. The pattern menu has the command too.
+    #[test]
+    fn pattern_time_signature() {
+        use crate::dialog::{Answer, Body, DHit, Kind};
+        use crate::playlist::{self as pl, Cmd, Mark};
+        use crate::timesig::{form_open, list_open, SigForm};
+        use os_model::TimeMarker;
+        use views::menus::{item_at, works, MENUS, PATTERNS};
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.pattern = 1;
+        app.state.project.patterns[0].markers = vec![TimeMarker::new(192, "Mid")];
+        app.mark_saved();
+        let entry = MENUS[PATTERNS].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == "Set time signature...").unwrap();
+        assert!(works(PATTERNS, item_at(PATTERNS, entry).unwrap()));
+        let popup = views::menus::pattern_popup(0.0, 0.0);
+        let item = popup.items.iter().find(|i| i.label == "Set time signature...").expect("in the pattern menu");
+        assert!(item.enabled && item.cmd == Cmd::Pattern(crate::patterns::Cmd::TimeSignature));
+        let form = |app: &App| match app.state.dialogs.last().map(|m| &m.body) {
+            Some(Body::TimeSig(f)) => Some(*f),
+            _ => None,
+        };
+        let start = |app: &App| app.state.project.pattern(1).unwrap().markers.iter().find(|m| m.position == 0 && m.kind == TimeMarker::SIGNATURE).cloned();
+        // The dialog, at 4/4.
+        app.menu_item(PATTERNS, entry);
+        assert_eq!(form(&app), Some(SigForm { pattern: 1, num: 4, den: 4 }));
+        frame(&mut app, &mut c, None);
+        // Numerator: 1..16 under the box, 4 marked; 3 picked.
+        let num_box = hit_rect(&app, &Action::Dlg(DHit::SigValue(false)));
+        click(&mut app, &mut c, num_box);
+        assert_eq!(list_open(&app.state), Some(false));
+        let p = app.state.playlist.popup.clone().unwrap();
+        assert_eq!((p.x, p.y), (num_box.x, num_box.bottom() + 1.0), "under the box");
+        let labels: Vec<String> = p.items.iter().map(|i| i.label.to_string()).collect();
+        assert_eq!(labels, (1..=16).map(|n: u8| n.to_string()).collect::<Vec<_>>());
+        let marked: Vec<String> = p.items.iter().filter(|i| i.mark == Mark::Radio(true)).map(|i| i.label.to_string()).collect();
+        assert_eq!(marked, ["4"]);
+        let three = hit_rect(&app, &Action::PlPopup(2));
+        assert!(app.top_hit(three.cx(), three.cy()).is_some_and(|h| h.action == Action::PlPopup(2)), "the list is over the dialog");
+        click(&mut app, &mut c, three);
+        assert!(app.state.playlist.popup.is_none() && form_open(&app.state));
+        assert_eq!(form(&app).map(|f| (f.num, f.den)), Some((3, 4)));
+        // Denominator: 2, 4, 8, 16; 8 picked.
+        let den_box = hit_rect(&app, &Action::Dlg(DHit::SigValue(true)));
+        click(&mut app, &mut c, den_box);
+        let p = app.state.playlist.popup.clone().unwrap();
+        assert_eq!(p.items.iter().map(|i| i.label.to_string()).collect::<Vec<_>>(), ["2", "4", "8", "16"]);
+        let eight = hit_rect(&app, &Action::PlPopup(2));
+        click(&mut app, &mut c, eight);
+        assert_eq!(form(&app).map(|f| (f.num, f.den)), Some((3, 8)));
+        // A click beside an open list closes it; so does Esc, before it closes the dialog.
+        click(&mut app, &mut c, num_box);
+        click(&mut app, &mut c, Rect::new(5.0, 5.0, 2.0, 2.0));
+        assert!(app.state.playlist.popup.is_none() && form_open(&app.state));
+        click(&mut app, &mut c, num_box);
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        assert!(app.state.playlist.popup.is_none() && form_open(&app.state));
+        assert_eq!(form(&app).map(|f| (f.num, f.den)), Some((3, 8)));
+        assert!(start(&app).is_none() && !app.unsaved(), "nothing yet");
+        // Accept: a 3/8 marker at the pattern's start, before its other markers.
+        app.state.piano.dirty = false;
+        frame(&mut app, &mut c, None);
+        let accept = hit_rect(&app, &Action::Dlg(DHit::Accept));
+        click(&mut app, &mut c, accept);
+        assert!(!app.modal_open());
+        let want = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: 3, denominator: 8, ..TimeMarker::new(0, "") };
+        assert_eq!(app.state.project.pattern(1).unwrap().markers, [want.clone(), TimeMarker::new(192, "Mid")]);
+        assert!(app.unsaved() && app.state.piano.dirty);
+        assert_eq!(crate::views::playlist::marker_label(&want), "3/8", "shown so in the marker lanes");
+        // Saved with the pattern.
+        let path = std::env::temp_dir().join(format!("os-app-timesig-{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        assert_eq!(back.pattern(1).unwrap().markers, [want.clone(), TimeMarker::new(192, "Mid")]);
+        let _ = std::fs::remove_file(&path);
+        // Again, from the pattern menu: the conflict question; No leaves the marker.
+        pl::run(&mut app, Cmd::Pattern(crate::patterns::Cmd::TimeSignature));
+        let text = "The pattern already has a time signature defined at the start. Do you want replace it?";
+        assert_eq!(app.top_message(), Some(("Time signature conflict".into(), text.into())));
+        let Some(Body::Msg(m)) = app.state.dialogs.last().map(|m| &m.body) else { panic!("a message box") };
+        assert_eq!((m.kind, &m.buttons[..]), (Kind::Question, &[Answer::Yes, Answer::No][..]));
+        frame(&mut app, &mut c, None);
+        let no = hit_rect(&app, &Action::Dlg(DHit::Button(1)));
+        click(&mut app, &mut c, no);
+        assert!(!app.modal_open());
+        assert_eq!(start(&app), Some(want.clone()));
+        // Yes: the marker goes at once and the dialog opens at 4/4; closed with its × it leaves no start marker.
+        app.menu_item(PATTERNS, entry);
+        app.key(&Key::Character("y".into()), false, false);
+        assert_eq!(form(&app), Some(SigForm { pattern: 1, num: 4, den: 4 }));
+        assert!(start(&app).is_none());
+        frame(&mut app, &mut c, None);
+        let close = hit_rect(&app, &Action::Dlg(DHit::Close));
+        click(&mut app, &mut c, close);
+        assert!(!app.modal_open());
+        assert_eq!(app.state.project.pattern(1).unwrap().markers, [TimeMarker::new(192, "Mid")]);
+        // No marker: straight to the dialog; Enter accepts. Another pattern gets its own.
+        app.state.pattern = 2;
+        app.menu_item(PATTERNS, entry);
+        assert_eq!(form(&app), Some(SigForm { pattern: 2, num: 4, den: 4 }));
+        app.key(&Key::Named(NamedKey::Enter), false, false);
+        assert!(!app.modal_open());
+        let four = TimeMarker { kind: TimeMarker::SIGNATURE, ..TimeMarker::new(0, "") };
+        assert_eq!(app.state.project.pattern(2).unwrap().markers, [four]);
+        assert!(start(&app).is_none(), "pattern 1 keeps none");
     }
 
     /// Settings > Plugins (spec: ui/plugin-manager.md §2, §4): Add folder... keeps the folder and scans it in the

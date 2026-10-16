@@ -17,6 +17,7 @@ use crate::app::{Action, State, Ui};
 use crate::dialog::{Body, DHit, Field, Kind, Modal, Msg};
 use crate::filedlg::{self as fd, FileDlg, Focus, Mode, PlaceKind, SortBy, HEAD_H, ROW_H};
 use crate::icons::{self, Icon};
+use crate::timesig::SigForm;
 
 /// The frame's outer border, its colour (caption and button band), the body panel and its edge lines (spec §1a).
 const BORDER: u32 = 0x16191a;
@@ -51,6 +52,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
         match &m.body {
             Body::Msg(msg) => msg_box(ui, s, m, msg),
             Body::File(f) => file_box(ui, s, m, f),
+            Body::TimeSig(f) => sig_box(ui, s, m, f),
         }
     }
 }
@@ -276,6 +278,37 @@ fn button(ui: &mut Ui, b: Rect, label: &str, main: bool, hov: bool, down: bool, 
             dx += 2.0;
         }
     }
+}
+
+// ---------------------------------------------------------------- time signature dialog
+
+/// PATTERNS > Set time signature... (spec: ui/pattern-time-signature.md §1): Numerator and Denominator value boxes, whose
+/// lists are the app's popups (`App::sig_list`), and Accept, in FL's 156 x 143 (wider when the labels need it).
+fn sig_box(ui: &mut Ui, s: &State, m: &Modal, f: &SigForm) {
+    let t = ui.t;
+    let font = Font::new(13);
+    let labels = ["Numerator", "Denominator"];
+    let label_w = labels.iter().map(|l| ui.c.text_width(font, l)).fold(0.0, f32::max).ceil();
+    let box_w = 48.0;
+    let r = place(s, m, (12.0 + label_w + 10.0 + box_w + 12.0).max(156.0), 143.0);
+    frame(ui, r, "Time signature change");
+    panel(ui, Rect::new(r.x + 5.0, r.y + 28.0, r.w - 10.0, 72.0));
+    let lh = ui.c.line_height(font);
+    let open = crate::timesig::list_open(s);
+    for (i, (label, value)) in labels.into_iter().zip([f.num, f.den]).enumerate() {
+        let den = i == 1;
+        let cy = r.y + if den { 75.0 } else { 49.0 };
+        ui.c.text(font, r.x + 12.0, (cy - lh / 2.0).round(), t.text, label);
+        let b = Rect::new(r.right() - 12.0 - box_w, (cy - 10.0).round(), box_w, 20.0);
+        let hov = hit(ui, b, DHit::SigValue(den), if den { "Denominator: click to choose" } else { "Numerator: click to choose" });
+        kit::combo(ui.c, t, b, &value.to_string(), font, kit::State::new(hov, open == Some(den), false));
+    }
+    let bw = (ui.c.text_width(font, "Accept") + 28.0).max(BTN_W).round();
+    let b = Rect::new(r.right() - 12.0 - bw, r.y + 105.0, bw, BTN_H);
+    let act = Action::Dlg(DHit::Accept);
+    let down = ui.down(b, &act);
+    let hov = ui.hit(b, act, "Enter");
+    button(ui, b, "Accept", true, hov, down, false);
 }
 
 // ---------------------------------------------------------------- file dialog

@@ -541,7 +541,8 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
     ui.c.pop_clip();
 }
 
-fn marker_label(m: &TimeMarker) -> String {
+/// A marker's label: its name; a time signature first shows the signature (spec: ui/pattern-time-signature.md §2).
+pub(crate) fn marker_label(m: &TimeMarker) -> String {
     if m.kind == TimeMarker::SIGNATURE {
         let sig = format!("{}/{}", m.numerator, m.denominator);
         if m.name.is_empty() { sig } else { format!("{sig} {}", m.name) }

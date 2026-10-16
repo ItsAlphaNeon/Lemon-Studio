@@ -133,8 +133,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.veil(tab, t.window_title);
 
     overview(ui, s, &l, &g, notes, ch);
-    let markers: Vec<(u32, &str)> =
-        s.project.pattern(s.pattern).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, m.name.as_str())).collect();
+    // A time-signature marker shows its signature (spec: ui/pattern-time-signature.md §2).
+    let markers: Vec<(u32, String)> =
+        s.project.pattern(s.pattern).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, super::playlist::marker_label(m))).collect();
     ruler(ui, &l, &g, range, s.piano.marker, &markers);
     // Lit keys: the one held with the mouse and this channel's notes playing now (§4).
     let mut lit: Vec<i32> = s.piano.held.into_iter().collect();
@@ -356,7 +357,7 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     }
 }
 
-fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u32, markers: &[(u32, &str)]) {
+fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u32, markers: &[(u32, String)]) {
     let t = ui.t;
     let rr = l.ruler;
     ui.hit(Rect::new(l.grid.x, rr.y, l.grid.w, rr.h), Action::PianoRuler, "Drag: move the play start - right-drag: select a time range");
@@ -384,7 +385,8 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u
         ui.c.text(Font::new(13), x + 2.0, rr.y + 1.0, t.text_dim, &format!("{}", b + 1));
     }
     // Time markers (§10a): a flag line and the name, drawn like the playlist's marker tabs.
-    for &(tick, name) in markers {
+    for (tick, name) in markers {
+        let (tick, name) = (*tick, name.as_str());
         let x = g.x_of(tick as f32).round();
         if x < l.grid.x - 200.0 || x > l.grid.right() {
             continue;

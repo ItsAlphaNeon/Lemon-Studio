@@ -61,6 +61,7 @@ mod snap;
 mod song_pos;
 mod stall;
 mod tapper;
+mod timesig;
 mod transport;
 mod typein;
 mod views;
