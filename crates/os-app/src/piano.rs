@@ -509,6 +509,27 @@ pub fn undo(s: &mut State) -> bool {
     true
 }
 
+/// The timebase changed from `from` to `to` ticks per quarter (`Project::set_ppq` rescaled the project): the scroll,
+/// the last note length, the play-start marker, the time selection, the clipboard and the undo steps follow, so the
+/// view stays on the same beats and an undo brings back nothing of the old timebase.
+pub fn rescale(s: &mut State, from: u16, to: u16) {
+    use os_model::{rescale_length, rescale_tick};
+    let k = f32::from(to.max(1)) / f32::from(from.max(1));
+    let p = &mut s.piano;
+    p.scroll_x *= k;
+    p.last_len = rescale_length(p.last_len, from, to);
+    p.marker = rescale_tick(p.marker, from, to);
+    p.range = p.range.map(|(a, b)| (rescale_tick(a, from, to), rescale_tick(b, from, to)));
+    p.clipboard.iter_mut().for_each(|n| n.rescale(from, to));
+    if let Some((_, x, _)) = &mut p.zoom_back {
+        *x *= k;
+    }
+    for (_, notes, controls) in &mut p.undo {
+        notes.iter_mut().for_each(|n| n.rescale(from, to));
+        controls.iter_mut().for_each(|c| c.rescale(from, to));
+    }
+}
+
 /// Add a note with the defaults of a step (patterns.md) at `tick`/`key`; returns its index.
 pub fn add_note(s: &mut State, channel: u16, tick: u32, key: i32) -> usize {
     let ppq = u32::from(s.project.ppq.max(4));

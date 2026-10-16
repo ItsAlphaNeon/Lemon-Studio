@@ -52,10 +52,22 @@ pub struct Project {
     pub groups: Vec<String>,
     /// Current display filter (event 146): a group index, `None` = All.
     pub current_group: Option<u32>,
-    /// Time signature (events 17 and 18): numerator, denominator. `None` = not in the file (4/4).
-    pub time_signature: Option<(u16, u16)>,
-    /// "Play truncated notes" (event 30; spec: audio/song-structure.md). `None` = not in the file (off).
-    pub play_truncated: Option<bool>,
+    /// The bar (events 17 and 18; spec: flp/engine-events.md "Project"): beats per bar and steps per beat, a step
+    /// being a sixteenth. A time signature n/d is (n, 16 / d): 4/4 = (4, 4), 3/8 = (3, 2). `None` = not in the file
+    /// (4, 4). See [`Project::bar`].
+    pub bar: Option<(u16, u16)>,
+    /// How the Project page shows the bar (event 35): `true` = "Set as time signature", `false` = "Set as time
+    /// division". `None` = not in the file (a time signature).
+    pub bar_as_signature: Option<bool>,
+    /// "Play truncated notes in clips" (event 30; spec: audio/song-structure.md): on when the file has the event
+    /// with 1, off when it has none (spec: flp/engine-events.md "Event 30").
+    pub play_truncated: bool,
+    /// Project settings Lemon Studio shows but does not play yet, as the file holds them (spec: flp/engine-events.md
+    /// "Project"): panning law (event 23: 0 Circular, 2 Triangular), fast declick for cut groups (event 40),
+    /// automatic crossfades (event 44). `None` = not in the file. Saving leaves their events as they are.
+    pub panning_law: Option<u8>,
+    pub fast_declick: Option<bool>,
+    pub auto_crossfades: Option<bool>,
     /// Playlist scroll, time zoom and track height (event 242). `None` = not in the file.
     pub playlist_view: Option<PlaylistView>,
     /// Main volume 0..=16000, 12800 = unity (mixer record id 0 at place 0x4000; spec: audio/mixer.md "Main volume").
@@ -69,12 +81,73 @@ impl Project {
     /// Default main volume (unity).
     pub const MAIN_VOLUME_DEFAULT: u16 = 12800;
 
-    /// Ticks in a bar of the project's time signature (4/4 when the file has none): `PPQ * 4 * numerator / denominator`
-    /// (spec: audio/timing.md "Settings").
-    pub fn bar_ticks(&self) -> u32 {
-        let (num, den) = self.time_signature.unwrap_or((4, 4));
-        (u32::from(self.ppq.max(1)) * 4 * u32::from(num.max(1)) / u32::from(den.max(1))).max(1)
+    /// The bar of a project without events 17 and 18: four beats of four steps (4/4).
+    pub const BAR_DEFAULT: (u16, u16) = (4, 4);
+
+    /// The bar: beats per bar and steps per beat, each at least 1 ([`Project::bar`] when set).
+    pub fn bar(&self) -> (u16, u16) {
+        self.bar.map_or(Self::BAR_DEFAULT, |(b, s)| (b.max(1), s.max(1)))
     }
+
+    /// Ticks in a bar: beats per bar × steps per beat sixteenths, `17 × 18 × PPQ / 4` (spec: audio/timing.md
+    /// "Time signature"; `PPQ * 4 * numerator / denominator` for a time signature). Right in either mode, also for
+    /// steps that make no signature (3 steps per beat).
+    pub fn bar_ticks(&self) -> u32 {
+        let (beats, steps) = self.bar();
+        (u32::from(self.ppq.max(1)) * u32::from(beats) * u32::from(steps) / 4).max(1)
+    }
+
+    /// The bar as a time signature (numerator, denominator = 16 / steps per beat), when the steps divide 16.
+    pub fn signature(&self) -> Option<(u16, u16)> {
+        let (beats, steps) = self.bar();
+        (16 % steps == 0).then(|| (beats, 16 / steps))
+    }
+
+    /// Whether the Project page shows the bar as a time signature (event 35; unset = yes).
+    pub fn bar_is_signature(&self) -> bool {
+        self.bar_as_signature.unwrap_or(true)
+    }
+
+    /// Changes the timebase to `ppq` and every tick count of the project with it: note positions and lengths,
+    /// pattern control points, explicit pattern lengths and pattern markers, playlist clip positions, lengths and
+    /// pattern-clip offsets, time markers; the stored playlist view keeps showing the same bars. Automation clip data
+    /// (beats) and audio clip offsets (milliseconds) stay (spec: ui/settings-choices.md "Project", flp/engine-events.md
+    /// "The project settings, measured": FL rescales at once and asks nothing).
+    pub fn set_ppq(&mut self, ppq: u16) {
+        let (from, to) = (self.ppq.max(1), ppq.max(1));
+        if from == to {
+            self.ppq = to;
+            return;
+        }
+        for p in &mut self.patterns {
+            p.notes.iter_mut().for_each(|n| n.rescale(from, to));
+            p.controls.iter_mut().for_each(|c| c.rescale(from, to));
+            p.markers.iter_mut().for_each(|m| m.rescale(from, to));
+            p.length = p.length.map(|l| rescale_length(l, from, to));
+        }
+        for a in &mut self.arrangements {
+            a.clips.iter_mut().for_each(|c| c.rescale(from, to));
+            a.markers.iter_mut().for_each(|m| m.rescale(from, to));
+        }
+        if let Some(v) = &mut self.playlist_view {
+            let k = f64::from(to) / f64::from(from);
+            v.set_left(v.left() * k);
+            v.set_ticks_per_px(v.ticks_per_px() * k);
+        }
+        self.ppq = to;
+    }
+}
+
+/// A tick position at timebase `from` as one at `to`. How FL rounds a ratio that is not whole (96 to 72) was not
+/// measured (spec: ui/settings-choices.md "Project", Timebase): to the nearest tick, halves up.
+pub fn rescale_tick(t: u32, from: u16, to: u16) -> u32 {
+    let (from, to) = (u64::from(from.max(1)), u64::from(to.max(1)));
+    ((u64::from(t) * to + from / 2) / from).min(u64::from(u32::MAX)) as u32
+}
+
+/// A length in ticks at timebase `from` as one at `to` ([`rescale_tick`]); a length that was not 0 stays at least 1.
+pub fn rescale_length(t: u32, from: u16, to: u16) -> u32 {
+    if t == 0 { 0 } else { rescale_tick(t, from, to).max(1) }
 }
 
 /// The playlist view a project stores: scroll, time zoom and track height (event 242, 28 bytes; spec:
@@ -881,6 +954,11 @@ impl ControlPoint {
     pub fn param(&self) -> u16 {
         self.kind as u16
     }
+
+    /// The point at timebase `to` instead of `from` ([`Project::set_ppq`]).
+    pub fn rescale(&mut self, from: u16, to: u16) {
+        self.position = rescale_tick(self.position, from, to);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -943,6 +1021,12 @@ impl Note {
         } else {
             self.group &= !Self::MUTED;
         }
+    }
+
+    /// The note at timebase `to` instead of `from` ([`Project::set_ppq`]): position and length.
+    pub fn rescale(&mut self, from: u16, to: u16) {
+        self.position = rescale_tick(self.position, from, to);
+        self.length = rescale_length(self.length, from, to);
     }
 
     /// A step-sequencer step with default parameters.
@@ -1122,6 +1206,17 @@ impl Clip {
         self.position + self.length
     }
 
+    /// The clip at timebase `to` instead of `from` ([`Project::set_ppq`]): position, length and, for a pattern clip,
+    /// its window (pattern ticks; an audio clip's is in milliseconds, an automation clip's in beats).
+    pub fn rescale(&mut self, from: u16, to: u16) {
+        self.position = rescale_tick(self.position, from, to);
+        self.length = rescale_length(self.length, from, to);
+        if let (ClipSource::Pattern(_), Some((a, b))) = (self.source, self.window) {
+            let k = f64::from(to.max(1)) / f64::from(from.max(1));
+            self.window = Some(((a * k).round(), (b * k).round()));
+        }
+    }
+
     /// Clip id stored in the record (bytes 32..36).
     pub fn id(&self) -> u32 {
         u32::from_le_bytes([self.raw[32], self.raw[33], self.raw[34], self.raw[35]])
@@ -1214,6 +1309,11 @@ impl TimeMarker {
 
     pub fn new(position: u32, name: &str) -> Self {
         TimeMarker { position, kind: 0, name: name.into(), numerator: 4, denominator: 4 }
+    }
+
+    /// The marker at timebase `to` instead of `from` ([`Project::set_ppq`]).
+    pub fn rescale(&mut self, from: u16, to: u16) {
+        self.position = rescale_tick(self.position, from, to);
     }
 }
 

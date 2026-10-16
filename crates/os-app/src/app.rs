@@ -3244,16 +3244,30 @@ impl App {
         let cfg = &st.audio;
         let rate = st.rate.unwrap_or(44100);
         let items: Vec<PItem> = match label {
-            // Project ▸ Time settings: one of the time signature's two numbers (spec: audio/song-structure.md).
+            // Project ▸ Time settings (spec: ui/settings-choices.md "Project"): the timebase, FL's list.
+            views::settings::TIMEBASE => {
+                let now = self.state.project.ppq;
+                views::settings::TIMEBASES.iter().map(|&v| PItem::new(v.to_string(), Cmd::Timebase(v)).mark(Mark::Radio(v == now))).collect()
+            }
+            // The "Set as" mode (event 35), in FL's order.
+            views::settings::SET_AS => {
+                let sig = self.state.project.bar_is_signature();
+                vec![
+                    PItem::new(views::settings::SET_AS_DIVISION, Cmd::TimeMode(false)).mark(Mark::Radio(!sig)),
+                    PItem::new(views::settings::SET_AS_SIGNATURE, Cmd::TimeMode(true)).mark(Mark::Radio(sig)),
+                ]
+            }
+            // One of the time signature's two numbers: a numerator is the beats per bar (the steps per beat stay), a
+            // denominator d makes 16 / d steps per beat (events 17, 18).
             views::settings::NUMERATOR | views::settings::DENOMINATOR => {
-                let now = self.state.project.time_signature.unwrap_or((4, 4));
+                let now = self.state.project.bar();
                 let numerator = label == views::settings::NUMERATOR;
                 let choices = if numerator { views::settings::NUMERATORS } else { views::settings::DENOMINATORS };
                 choices
                     .iter()
                     .map(|&v| {
-                        let sig = if numerator { (v, now.1) } else { (now.0, v) };
-                        PItem::new(v.to_string(), Cmd::TimeSignature(sig.0, sig.1)).mark(Mark::Radio(sig == now))
+                        let bar = if numerator { (v, now.1) } else { (now.0, 16 / v.max(1)) };
+                        PItem::new(v.to_string(), Cmd::Bar(bar.0, bar.1)).mark(Mark::Radio(bar == now))
                     })
                     .collect()
             }
@@ -3302,24 +3316,77 @@ impl App {
         self.file_dialog(dlg);
     }
 
-    /// Settings > Project ▸ Time settings: the project's time signature (spec: audio/song-structure.md "Time signatures
-    /// and a pattern's length"). Playback follows at once (pattern lengths, the metronome's accents, what hosted plugins
-    /// are told), as do the pattern lengths the editors draw; the project counts as changed.
-    pub fn set_time_signature(&mut self, num: u16, den: u16) -> Option<String> {
-        let sig = (num.max(1), den.max(1));
-        if self.state.project.time_signature.unwrap_or((4, 4)) != sig {
-            self.state.project.time_signature = Some(sig);
+    /// Settings > Project ▸ Time settings: the project's bar, beats per bar and steps per beat (events 17, 18; spec:
+    /// ui/settings-choices.md "Project", audio/song-structure.md "Time signatures and a pattern's length"), from the
+    /// Numerator / Denominator combos or a time division's value boxes. Playback follows at once (pattern lengths, the
+    /// metronome's accents, what hosted plugins are told), as do the pattern lengths the editors draw; the project
+    /// counts as changed.
+    pub fn set_bar(&mut self, beats: u16, steps: u16) -> Option<String> {
+        let bar = (beats.max(1), steps.max(1));
+        if self.state.project.bar() != bar {
+            self.state.project.bar = Some(bar);
             self.state.piano.dirty = true;
         }
         self.invalidate();
-        Some(format!("Time signature: {}/{}", sig.0, sig.1))
+        Some(bar_text(&self.state.project))
+    }
+
+    /// Settings > Project ▸ Set as time signature / time division (event 35; spec: ui/settings-choices.md "Set as time
+    /// division"). Each mode keeps its own last bar while the program runs (4/4 at first): switching keeps the bar of
+    /// the mode left and writes the other mode's into the project. A bar is never converted between the modes.
+    pub fn set_time_mode(&mut self, signature: bool) -> Option<String> {
+        let s = &mut self.state;
+        let now = s.project.bar_is_signature();
+        if now != signature {
+            let memory = &mut s.settings.bar_memory;
+            memory[usize::from(now)] = Some(s.project.bar());
+            s.project.bar = Some(memory[usize::from(signature)].unwrap_or(Project::BAR_DEFAULT));
+            s.project.bar_as_signature = Some(signature);
+            s.piano.dirty = true;
+        }
+        self.invalidate();
+        let mode = if signature { views::settings::SET_AS_SIGNATURE } else { views::settings::SET_AS_DIVISION };
+        Some(format!("{mode}: {}", bar_text(&self.state.project)))
+    }
+
+    /// Settings > Project ▸ a time division's value box (`label`, `settings::LIVE_NUMBERS`) moved by `delta` (the
+    /// mouse wheel). It stays in its range; a file's value outside it can only move toward it.
+    fn settings_number(&mut self, label: &str, delta: i32) -> Option<String> {
+        let (lo, hi) = views::settings::number_range(label)?;
+        let (beats, steps) = self.state.project.bar();
+        let beat_box = label == views::settings::BEATS_PER_BAR;
+        let now = if beat_box { beats } else { steps };
+        let v = (i32::from(now) + delta).clamp(i32::from(lo.min(now)), i32::from(hi.max(now))) as u16;
+        if beat_box { self.set_bar(v, steps) } else { self.set_bar(beats, v) }
+    }
+
+    /// Settings > Project ▸ Timebase (PPQ): the project's ticks per quarter (the file header's PPQ). Every tick count
+    /// of the project is rescaled at once and nothing is asked (spec: ui/settings-choices.md "Project"; the rounding is
+    /// `os_model::rescale_tick`'s). Playback stops: its position is in ticks of the old timebase. The editors' positions,
+    /// selections, clipboards and undo steps are rescaled with the project, so no undo brings back ticks of the old
+    /// timebase; choosing the old timebase again rescales back (exactly, unless ticks were rounded on the way).
+    pub fn set_timebase(&mut self, ppq: u16) -> Option<String> {
+        let (from, to) = (self.state.project.ppq.max(1), ppq.max(1));
+        if from != to {
+            self.transport.stop();
+            let s = &mut self.state;
+            s.project.set_ppq(to);
+            crate::piano::rescale(s, from, to);
+            crate::playlist::rescale(s, from, to);
+            if let Some(notes) = &mut s.rack.clipboard {
+                notes.iter_mut().for_each(|n| n.rescale(from, to));
+            }
+            s.piano.dirty = true;
+        }
+        self.invalidate();
+        Some(format!("Timebase: {to} PPQ"))
     }
 
     /// Settings > Project ▸ Advanced ▸ Play truncated notes in clips (spec: audio/song-structure.md "Play truncated
     /// notes"): switched for the project, and playback follows at once. Off when the file does not say.
     fn toggle_play_truncated(&mut self) {
-        let on = !self.state.project.play_truncated.unwrap_or(false);
-        self.state.project.play_truncated = Some(on);
+        let on = !self.state.project.play_truncated;
+        self.state.project.play_truncated = on;
         self.state.piano.dirty = true;
         self.state.message = Some(format!("Play truncated notes in clips: {}", if on { "on" } else { "off" }));
     }
@@ -3366,6 +3433,8 @@ impl App {
             SAct::Plug(p) => self.plugin_act(p),
             SAct::Check(k) if crate::prefs::find_check(k).is_some() => self.pref_toggle(k),
             SAct::Check(k) if k == views::settings::TRUNCATED_CHECK => self.toggle_play_truncated(),
+            // A time division's value box: the mouse wheel changes it (`wheel_act`).
+            SAct::Number(label) => self.state.message = Some(format!("{label}: the mouse wheel changes it")),
             // Checks and buttons outside `settings::LIVE` are drawn greyed out with an `Action::Placeholder` hit instead.
             SAct::Check(k) => self.state.message = Some(off_text(k)),
             SAct::Group(k) => {
@@ -4754,6 +4823,16 @@ impl App {
             let n = self.state.plugdb.rows.len();
             let top = self.state.plugdb.top as f32 - (dy + dx) * 3.0;
             self.state.plugdb.top = (top.max(0.0) as usize).min(n.saturating_sub(views::settings::TABLE_ROWS));
+            return None;
+        }
+        // Project ▸ a time division's value box: one per notch, up for more (spec: ui/settings-choices.md "Set as time
+        // division").
+        if let Some(Action::Settings(views::settings::SAct::Number(label))) = area {
+            if dy + dx != 0.0 {
+                if let Some(m) = self.settings_number(label, if dy + dx > 0.0 { 1 } else { -1 }) {
+                    self.state.message = Some(m);
+                }
+            }
             return None;
         }
         if matches!(area, Some(Action::Settings(_))) {
@@ -6275,6 +6354,16 @@ pub fn default_project() -> Project {
     template_project(&[crate::plugins::LEMON_SAMPLER])
 }
 
+/// The project's bar as the Project page names it: "Time signature: 3/8" or "Time division: 5 beats of 3 steps".
+fn bar_text(p: &Project) -> String {
+    let (beats, steps) = p.bar();
+    if p.bar_is_signature() {
+        format!("Time signature: {beats}/{}", views::settings::denominator_text(steps))
+    } else {
+        format!("Time division: {beats} beats of {steps} steps")
+    }
+}
+
 /// A one-channel project that plays `path` once from the start (browser sample preview, spec: ui/browser.md §7).
 pub(crate) fn preview_project(path: &str) -> Project {
     let mut p = template_project(&["Preview"]);
@@ -6306,7 +6395,7 @@ fn template_project(names: &[&str]) -> Project {
         mixer,
         // FL's default template holds event 30 = 1: "Play truncated notes in clips" is on in a new project (spec:
         // flp/engine-events.md "Project", "Event 30").
-        play_truncated: Some(true),
+        play_truncated: true,
         ..Project::default()
     }
 }
@@ -6617,11 +6706,11 @@ mod tests {
         assert_eq!(back.patterns[0].notes.len(), 2);
     }
 
-    /// Settings > Project (spec: ui/settings.md "Project", audio/song-structure.md): the Numerator and Denominator
-    /// combos list their choices with the project's signature marked, and a pick changes the project at once (the
-    /// pattern lengths the editors use follow; the project counts as changed); "Play truncated notes in clips" shows
-    /// and switches the project's setting, on in a new project. Both survive a save and reopen, of a new project and of
-    /// an opened one.
+    /// Settings > Project (spec: ui/settings-choices.md "Project", audio/song-structure.md): the Numerator and
+    /// Denominator combos list their choices with the project's signature marked, and a pick changes the project's bar
+    /// at once (events 17, 18 = beats per bar, 16 / denominator steps per beat; the pattern lengths the editors use
+    /// follow; the project counts as changed); "Play truncated notes in clips" shows and switches the project's
+    /// setting, on in a new project. Both survive a save and reopen, of a new project and of an opened one.
     #[test]
     fn project_settings_time_signature_and_truncated_notes() {
         use crate::playlist::Mark;
@@ -6656,19 +6745,19 @@ mod tests {
             click(app, c, r);
         };
         pick(&mut app, &mut c, NUMERATOR, "3", 16);
-        assert_eq!(app.state.project.time_signature, Some((3, 4)));
+        assert_eq!(app.state.project.bar, Some((3, 4)), "three beats of four sixteenths");
         assert_eq!(app.state.message.as_deref(), Some("Time signature: 3/4"));
         assert!(app.unsaved(), "a change to the project");
         // Patterns are whole bars of the signature: 288 ticks in 3/4.
         assert_eq!(crate::piano::pattern_length(&app.state, &notes), 576);
         assert_eq!(crate::playlist::source_len(&app.state, os_model::ClipSource::Pattern(app.state.pattern)), 576);
         pick(&mut app, &mut c, DENOMINATOR, "8", 4);
-        assert_eq!(app.state.project.time_signature, Some((3, 8)));
+        assert_eq!(app.state.project.bar, Some((3, 2)), "an eighth is two sixteenths");
         assert_eq!((shown(&app, NUMERATOR).as_deref(), shown(&app, DENOMINATOR).as_deref()), (Some("3"), Some("8")));
         assert_eq!(crate::piano::pattern_length(&app.state, &notes), 432);
         // Play truncated notes: on in a new project, as in FL's default template (spec: flp/engine-events.md "Event
         // 30"), on File > New too; a click switches it.
-        assert_eq!(default_project().play_truncated, Some(true));
+        assert!(default_project().play_truncated);
         let r = hit_rect(&app, &Action::Settings(SAct::Group("Advanced")));
         click(&mut app, &mut c, r);
         assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(TRUNCATED_CHECK)), "it works");
@@ -6677,10 +6766,10 @@ mod tests {
             views::settings::Row::Check(k, v) if k == TRUNCATED_CHECK => Some(v),
             _ => None,
         });
-        assert_eq!((app.state.project.play_truncated, on(&app)), (Some(true), Some(true)));
+        assert_eq!((app.state.project.play_truncated, on(&app)), (true, Some(true)));
         for want in [false, true] {
             click(&mut app, &mut c, r);
-            assert_eq!((app.state.project.play_truncated, on(&app)), (Some(want), Some(want)));
+            assert_eq!((app.state.project.play_truncated, on(&app)), (want, Some(want)));
         }
         // Saved and opened again.
         let path = std::env::temp_dir().join(format!("lemon-project-settings-{}.flp", std::process::id()));
@@ -6689,16 +6778,220 @@ mod tests {
         assert!(!app.unsaved());
         let mut opened = App::new(None);
         opened.open(path.clone());
-        assert_eq!((opened.state.project.time_signature, opened.state.project.play_truncated), (Some((3, 8)), Some(true)));
+        assert_eq!((opened.state.project.bar, opened.state.project.play_truncated), (Some((3, 2)), true));
         // Changed in the opened project and saved over it (the file's events patched), then opened again.
-        crate::playlist::run(&mut opened, crate::playlist::Cmd::TimeSignature(7, 16));
+        crate::playlist::run(&mut opened, crate::playlist::Cmd::Bar(7, 1));
         opened.settings_act(SAct::Check(TRUNCATED_CHECK));
         assert!(opened.unsaved());
         opened.save_to(path.clone());
         let mut again = App::new(None);
         again.open(path.clone());
         let _ = std::fs::remove_file(&path);
-        assert_eq!((again.state.project.time_signature, again.state.project.play_truncated), (Some((7, 16)), Some(false)));
+        assert_eq!((again.state.project.bar, again.state.project.play_truncated), (Some((7, 1)), false));
+        assert_eq!(again.state.project.signature(), Some((7, 16)));
+    }
+
+    /// The rows of the Project page, flattened.
+    fn project_rows(app: &App) -> Vec<views::settings::Row> {
+        views::settings::page(views::settings::PROJECT, &app.state).into_iter().flat_map(|g| g.rows).collect()
+    }
+
+    /// Picks `choice` from the menu of the live Project combo `label` (it must offer `count` choices).
+    fn project_pick(app: &mut App, c: &mut Canvas, label: &str, choice: &str, count: usize) {
+        use crate::views::settings::SAct;
+        let r = app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == label)).map(|h| h.rect).unwrap_or_else(|| panic!("{label} works"));
+        click(app, c, r);
+        let p = app.state.playlist.popup.as_ref().unwrap_or_else(|| panic!("{label} opens a menu"));
+        assert_eq!(p.items.len(), count, "{label}");
+        let i = p.items.iter().position(|it| it.label == choice).unwrap_or_else(|| panic!("{choice} offered"));
+        let r = hit_rect(app, &Action::PlPopup(i));
+        click(app, c, r);
+    }
+
+    /// Settings > Project ▸ Set as (spec: ui/settings-choices.md "Set as time division", flp/engine-events.md
+    /// "Project"): time division swaps the Numerator / Denominator combos for the Beats per bar (1..32) and Steps per
+    /// beat (1..16) boxes the mouse wheel changes; each mode keeps its own last bar while the program runs (4/4 at
+    /// first), switching writes it into the project (event 35 with it), and a bar is never converted. Saved and opened
+    /// again, the page shows the mode and the bar the file holds.
+    #[test]
+    fn project_settings_set_as_time_division() {
+        use crate::playlist::Mark;
+        use crate::views::settings::{Row, SAct, BEATS_PER_BAR, DENOMINATOR, NUMERATOR, PROJECT, SET_AS, SET_AS_DIVISION, SET_AS_SIGNATURE, STEPS_PER_BEAT};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        (app.state.file, app.state.path) = (None, None);
+        app.mark_saved();
+        app.open_settings(PROJECT);
+        frame(&mut app, &mut c, None);
+        let combo = |app: &App, label: &str| project_rows(app).into_iter().find_map(|r| match r {
+            Row::Combo(v, _, l) if l == label => Some(v),
+            _ => None,
+        });
+        let value = |app: &App, label: &str| project_rows(app).into_iter().find_map(|r| match r {
+            Row::Value(v, l) if l == label => Some(v),
+            _ => None,
+        });
+        let shown = |app: &App| (combo(app, SET_AS), combo(app, NUMERATOR), combo(app, DENOMINATOR), value(app, BEATS_PER_BAR), value(app, STEPS_PER_BEAT));
+        let some = |v: &str| Some(v.to_string());
+        assert_eq!(shown(&app), (some(SET_AS_SIGNATURE), some("4"), some("4"), None, None), "a file without event 35 is a time signature");
+        // The menu: FL's two choices, the current one marked.
+        let r = app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == SET_AS)).map(|h| h.rect).expect("Set as works");
+        click(&mut app, &mut c, r);
+        let items: Vec<_> = app.state.playlist.popup.as_ref().expect("a menu").items.iter().map(|it| (it.label.to_string(), it.mark.clone())).collect();
+        assert_eq!(items, vec![(SET_AS_DIVISION.to_string(), Mark::Radio(false)), (SET_AS_SIGNATURE.to_string(), Mark::Radio(true))]);
+        app.state.playlist.popup = None;
+        frame(&mut app, &mut c, None);
+        // 3/8 as a time signature, then time division: 4 and 4 at first.
+        project_pick(&mut app, &mut c, NUMERATOR, "3", 16);
+        project_pick(&mut app, &mut c, DENOMINATOR, "8", 4);
+        project_pick(&mut app, &mut c, SET_AS, SET_AS_DIVISION, 2);
+        assert_eq!((app.state.project.bar, app.state.project.bar_as_signature), (Some((4, 4)), Some(false)));
+        assert_eq!(shown(&app), (some(SET_AS_DIVISION), None, None, some("4"), some("4")));
+        assert!(!app.hits.iter().any(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == NUMERATOR)), "no combos");
+        // The wheel: up adds one, down takes one, inside the box's range.
+        let wheel = |app: &mut App, c: &mut Canvas, label: &'static str, dy: f32, times: usize| {
+            let r = hit_rect(app, &Action::Settings(SAct::Number(label)));
+            app.mouse_move(r.cx(), r.cy());
+            for _ in 0..times {
+                app.wheel(0.0, dy, false, false);
+            }
+            frame(app, c, None);
+        };
+        wheel(&mut app, &mut c, BEATS_PER_BAR, 1.0, 1);
+        wheel(&mut app, &mut c, STEPS_PER_BEAT, -1.0, 1);
+        assert_eq!(app.state.project.bar, Some((5, 3)));
+        assert_eq!(app.state.message.as_deref(), Some("Time division: 5 beats of 3 steps"));
+        assert_eq!((value(&app, BEATS_PER_BAR), value(&app, STEPS_PER_BEAT)), (some("5"), some("3")));
+        // Five beats of three sixteenths: 360 ticks, what the editors' pattern lengths use.
+        assert_eq!(crate::piano::pattern_length(&app.state, &[]), 360);
+        wheel(&mut app, &mut c, STEPS_PER_BEAT, -1.0, 5);
+        wheel(&mut app, &mut c, BEATS_PER_BAR, 1.0, 40);
+        assert_eq!(app.state.project.bar, Some((32, 1)), "1..32 and 1..16");
+        wheel(&mut app, &mut c, STEPS_PER_BEAT, 1.0, 20);
+        assert_eq!(app.state.project.bar, Some((32, 16)));
+        wheel(&mut app, &mut c, BEATS_PER_BAR, -1.0, 27);
+        wheel(&mut app, &mut c, STEPS_PER_BEAT, -1.0, 13);
+        assert_eq!(app.state.project.bar, Some((5, 3)));
+        // Each mode comes back with its own bar; none is converted.
+        project_pick(&mut app, &mut c, SET_AS, SET_AS_SIGNATURE, 2);
+        assert_eq!((app.state.project.bar, app.state.project.bar_as_signature), (Some((3, 2)), Some(true)));
+        assert_eq!(shown(&app), (some(SET_AS_SIGNATURE), some("3"), some("8"), None, None));
+        project_pick(&mut app, &mut c, SET_AS, SET_AS_DIVISION, 2);
+        assert_eq!(app.state.project.bar, Some((5, 3)));
+        assert!(app.unsaved());
+        // Saved and opened again: time division, five beats of three steps.
+        let path = std::env::temp_dir().join(format!("lemon-project-division-{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let mut opened = App::new(None);
+        opened.open(path.clone());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((opened.state.project.bar, opened.state.project.bar_as_signature), (Some((5, 3)), Some(false)));
+        opened.open_settings(PROJECT);
+        assert_eq!(shown(&opened), (some(SET_AS_DIVISION), None, None, some("5"), some("3")));
+        // A time-signature file whose steps per beat make no signature still shows (and plays) its bar.
+        opened.state.project.bar_as_signature = Some(true);
+        assert_eq!((combo(&opened, NUMERATOR), combo(&opened, DENOMINATOR)), (some("5"), some("5.33")));
+        assert_eq!(opened.state.project.bar_ticks(), 360);
+    }
+
+    /// Settings > Project ▸ Timebase (PPQ) (spec: ui/settings-choices.md "Project"): FL's eleven choices, the
+    /// project's marked; a pick rescales every tick count of the project at once (notes, pattern controls, clips,
+    /// markers; automation data stays) and asks nothing. The editors follow (marker, song position, selections,
+    /// clipboards, undo steps), so an undo after it restores the new timebase's ticks. Saved, the file's header holds
+    /// the new PPQ; choosing the old one again gives back the same project.
+    #[test]
+    fn project_settings_timebase_rescales() {
+        use crate::playlist::Mark;
+        use crate::views::settings::{SAct, PROJECT, TIMEBASE, TIMEBASES};
+        use os_model::{Arrangement, Clip, ClipSource, TimeMarker};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        (app.state.file, app.state.path) = (None, None);
+        let note = Note { length: 276, ..Note::step(0, 24) };
+        app.state.project.patterns[0].notes = vec![note];
+        app.state.project.arrangements = vec![Arrangement {
+            clips: vec![Clip::new(192, 384, 0, ClipSource::Pattern(1))],
+            markers: vec![TimeMarker::new(96, "Verse")],
+            ..Default::default()
+        }];
+        // Editor state in ticks: the piano roll's marker, clipboard and an undo step; the song position and selection.
+        app.state.piano.marker = 48;
+        app.state.piano.clipboard = vec![note];
+        crate::piano::snapshot(&mut app.state);
+        app.state.project.patterns[0].notes[0].position = 72;
+        app.state.playlist.pos = 96;
+        app.state.playlist.range = Some((96, 192));
+        app.mark_saved();
+        let before = app.state.project.clone();
+        app.open_settings(PROJECT);
+        frame(&mut app, &mut c, None);
+        let r = app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == TIMEBASE)).map(|h| h.rect).expect("Timebase works");
+        click(&mut app, &mut c, r);
+        let items = &app.state.playlist.popup.as_ref().expect("a menu").items;
+        assert_eq!(items.iter().map(|it| it.label.to_string()).collect::<Vec<_>>(), TIMEBASES.iter().map(u16::to_string).collect::<Vec<_>>());
+        assert!(items.iter().all(|it| it.mark == Mark::Radio(it.label == "96")));
+        assert_eq!(TIMEBASES, &[24, 48, 72, 96, 120, 144, 168, 192, 384, 768, 960]);
+        app.state.playlist.popup = None;
+        frame(&mut app, &mut c, None);
+        project_pick(&mut app, &mut c, TIMEBASE, "192", 11);
+        let p = &app.state.project;
+        assert_eq!(p.ppq, 192);
+        assert_eq!((p.patterns[0].notes[0].position, p.patterns[0].notes[0].length), (144, 552));
+        let a = &p.arrangements[0];
+        assert_eq!((a.clips[0].position, a.clips[0].length, a.markers[0].position), (384, 768, 192));
+        assert_eq!(app.state.message.as_deref(), Some("Timebase: 192 PPQ"));
+        assert!(app.unsaved());
+        assert_eq!((app.state.piano.marker, app.state.piano.clipboard[0].position), (96, 48));
+        assert_eq!((app.state.playlist.pos, app.state.playlist.range), (192, Some((192, 384))));
+        // The pattern is still one 4/4 bar long, in the new ticks.
+        let notes = app.state.project.patterns[0].notes.clone();
+        assert_eq!(crate::piano::pattern_length(&app.state, &notes), 768);
+        // The undo step made before the change comes back in the new ticks.
+        assert!(crate::piano::undo(&mut app.state));
+        assert_eq!(app.state.project.patterns[0].notes[0].position, 48);
+        app.state.project.patterns[0].notes[0].position = 144;
+        // Back to 96: the same project as before (every tick was doubled, none rounded).
+        project_pick(&mut app, &mut c, TIMEBASE, "96", 11);
+        assert!(app.state.project == before && !app.unsaved());
+        // Saved at 72: the header holds the new PPQ, the ticks are the new ones (rounded to the nearest).
+        project_pick(&mut app, &mut c, TIMEBASE, "72", 11);
+        let path = std::env::temp_dir().join(format!("lemon-project-timebase-{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((back.ppq, back.patterns[0].notes[0].position, back.patterns[0].notes[0].length), (72, 54, 207));
+        assert_eq!((back.arrangements[0].clips[0].position, back.arrangements[0].markers[0].position), (144, 72));
+    }
+
+    /// Settings > Project ▸ Panning law, Fast declick for cut groups, Automatic crossfades (events 23, 40, 44; spec:
+    /// flp/engine-events.md "Project"): not played yet, so greyed, but they show the project's values.
+    #[test]
+    fn project_settings_show_the_unplayed_settings() {
+        use crate::views::settings::Row;
+        let mut app = App::new(None);
+        let get = |app: &App| {
+            let rows = project_rows(app);
+            let pan = rows.iter().find_map(|r| match r {
+                Row::Combo(v, _, "Panning law") => Some(v.clone()),
+                _ => None,
+            });
+            let declick = rows.iter().find_map(|r| match r {
+                Row::Check("Fast declick for cut groups", v) => Some(*v),
+                _ => None,
+            });
+            let fades = rows.iter().find_map(|r| match r {
+                Row::Check2("Automatic crossfades", v, ..) => Some(*v),
+                _ => None,
+            });
+            (pan, declick, fades)
+        };
+        assert_eq!(get(&app), (Some("Circular".into()), Some(false), Some(false)), "a project without the events");
+        let p = &mut app.state.project;
+        (p.panning_law, p.fast_declick, p.auto_crossfades) = (Some(2), Some(true), Some(true));
+        assert_eq!(get(&app), (Some("Triangular".into()), Some(true), Some(true)));
+        assert!(!views::settings::PROJECT_COMBOS.contains(&"Panning law"), "greyed");
     }
 
     #[test]
@@ -7487,7 +7780,8 @@ mod tests {
         assert_eq!(app.state.message.as_deref(), Some("Send master sync: not available yet"));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
         click(&mut app, &mut c, r);
-        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Timebase (PPQ)")), "the PPQ combo is greyed out");
+        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Ask for data folder")), "a combo that does not work yet is greyed out");
+        assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Timebase (PPQ)", ..)))), "the PPQ combo works");
         let adv = Action::Settings(SAct::Group("Advanced"));
         let r = hit_rect(&app, &adv);
         click(&mut app, &mut c, r);
