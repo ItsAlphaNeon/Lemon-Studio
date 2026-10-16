@@ -353,8 +353,8 @@ fn win_of(label: &str) -> Option<Win> {
 }
 
 /// Whether an entry does something in this build: its static flag, or one of the label-dispatched commands
-/// `App::menu_item` handles (settings tabs, pattern commands, window toggles, plugin picker, undo), or a ▸ entry whose
-/// submenu is built.
+/// `App::menu_item` handles (settings tabs, pattern commands, window toggles, plugin picker, undo, the ways into the
+/// browser), or a ▸ entry whose submenu is built.
 pub fn works(menu: usize, item: &Item) -> bool {
     item.works
         || ((menu == OPTIONS_MENU || menu == ADD_MENU) && crate::views::settings::tab_for_menu(item.label).is_some())
@@ -362,6 +362,7 @@ pub fn works(menu: usize, item: &Item) -> bool {
         || (menu == VIEW && (win_of(item.label).is_some() || item.label == "Plugin picker"))
         || (menu == EDIT_MENU && item.label == "Undo")
         || crate::params::menu_handles(item.label)
+        || crate::browser::Jump::from_label(menu, item.label).is_some()
         || opens_sub(menu, item)
 }
 

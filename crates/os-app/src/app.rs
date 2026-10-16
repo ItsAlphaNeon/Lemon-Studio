@@ -4903,6 +4903,13 @@ impl App {
             Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
             Key::Named(NamedKey::F6) => self.act(Action::ToggleWin(Win::ChannelRack)),
             Key::Named(NamedKey::F7) => self.act(Action::ToggleWin(Win::PianoRoll)),
+            // VIEW > Plugin database (spec: ui/browser-commands.md §4), unless the browser's search field has the keyboard
+            // (the other text fields took their keys above).
+            Key::Named(NamedKey::F8) if self.shift && !alt && !ctrl => {
+                if !self.state.browser_search_focus {
+                    self.browser_jump(crate::browser::Jump::PluginDb);
+                }
+            }
             Key::Named(NamedKey::F8) if !alt && !ctrl => self.toggle_plugin_menu(),
             Key::Named(NamedKey::F8) if alt => self.act(Action::ToggleWin(Win::Browser)),
             Key::Named(NamedKey::F9) => self.act(Action::ToggleWin(Win::Mixer)),
@@ -4975,6 +4982,8 @@ impl App {
             Key::Character(c) if ctrl && self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_AS)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
+            // TOOLS > Browser find... (spec: ui/browser-commands.md §3).
+            Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("f") => self.browser_jump(crate::browser::Jump::Find),
             _ => {}
         }
     }
@@ -6073,6 +6082,11 @@ impl App {
             }
             // EDIT > Undo = Ctrl+Z (piano-roll undo).
             (EDIT_MENU, i) if item_at(EDIT_MENU, i).is_some_and(|it| it.label == "Undo") => self.act(Action::PianoUndo),
+            // spec: ui/browser-commands.md
+            (m, i) if item_at(m, i).and_then(|it| crate::browser::Jump::from_label(m, it.label)).is_some() => {
+                let j = item_at(m, i).and_then(|it| crate::browser::Jump::from_label(m, it.label)).expect("checked");
+                self.browser_jump(j);
+            }
             (m, i) => {
                 let label = item_at(m, i).map_or("item", |it| it.label);
                 self.state.message = Some(format!("{label}: not available yet"));
@@ -11616,6 +11630,83 @@ mod tests {
         pick(&mut app, &mut c);
         assert_eq!(app.state.project.mixer[2].slots, before);
         assert_eq!(app.state.message.as_deref(), Some("Every slot of this track is in use"));
+    }
+
+    /// The menu bar's ways into the browser (spec: ui/browser-commands.md): VIEW's Browser entries show the browser on
+    /// the Current project tab with only their section open, and selected; Plugin database (ADD > Browse plugin
+    /// database, Shift+F8) shows that tab as it was left; Browser find (Ctrl+F) focuses the search field as a click
+    /// does. Text fields keep their keys; History and Remote control are not in the tree, their entries stay greyed out.
+    #[test]
+    fn browser_commands_jump_into_the_browser() {
+        use crate::views::browser::{project_root, rows, section_key, PLUGIN_TAB, PROJECT_TAB};
+        use views::menus::{item_at, works, ADD_MENU, MENUS, TOOLS_MENU, VIEW};
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let index = |m: usize, label: &str| MENUS[m].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == label).unwrap();
+        let (gens, pats, fx) = (section_key("Generators").unwrap(), section_key("Patterns").unwrap(), section_key("Effects").unwrap());
+        let s = &mut app.state;
+        s.show_browser = false;
+        s.browser_tab = 0;
+        s.browser_search = "kick".into();
+        s.browser_open.insert(gens.clone());
+        s.browser_open.remove(&project_root());
+        app.menu_item(VIEW, index(VIEW, "Patterns"));
+        let s = &app.state;
+        assert!(s.show_browser && s.browser_tab == PROJECT_TAB && s.browser_search.is_empty());
+        assert_eq!(s.browser_sel.as_ref(), Some(&pats));
+        assert!(s.browser_open.contains(&project_root()) && s.browser_open.contains(&pats) && !s.browser_open.contains(&gens));
+        app.menu_item(VIEW, index(VIEW, "Effects in use"));
+        let open: Vec<(String, Option<bool>)> = rows(&app.state).into_iter().filter(|r| r.depth == 1).map(|r| (r.label, r.open)).collect();
+        assert_eq!(open, [("Patterns".into(), Some(false)), ("Effects".into(), Some(true)), ("Generators".into(), Some(false)), ("Samples".into(), Some(false))]);
+        assert_eq!(app.state.browser_sel.as_ref(), Some(&fx));
+        app.menu_item(VIEW, index(VIEW, "Generators in use"));
+        assert_eq!(app.state.browser_sel.as_ref(), Some(&gens));
+        // The Plugin database tab as it was left.
+        let db_fx = format!("{PLUGIN_TAB}:Plugin database/Effects");
+        app.state.browser_open.insert(db_fx.clone());
+        app.state.show_browser = false;
+        app.menu_item(VIEW, index(VIEW, "Plugin database"));
+        let s = &app.state;
+        assert!(s.show_browser && s.browser_tab == PLUGIN_TAB && s.browser_open.contains(&db_fx) && s.browser_open.contains(&gens));
+        app.state.browser_tab = 0;
+        app.menu_item(ADD_MENU, index(ADD_MENU, "Browse plugin database"));
+        assert_eq!(app.state.browser_tab, PLUGIN_TAB);
+        // Shift+F8 (not the plugin menu F8 opens), but not while the search field has the keyboard.
+        app.state.browser_tab = 0;
+        app.shift = true;
+        app.key(&Key::Named(NamedKey::F8), false, false);
+        assert!(app.state.browser_tab == PLUGIN_TAB && app.state.playlist.popup.is_none());
+        app.state.browser_tab = 0;
+        app.state.browser_search_focus = true;
+        app.key(&Key::Named(NamedKey::F8), false, false);
+        assert_eq!(app.state.browser_tab, 0);
+        app.shift = false;
+        app.state.browser_search_focus = false;
+        // Browser find, clicked in the dropdown with the browser hidden: typing then searches.
+        app.state.show_browser = false;
+        frame(&mut app, &mut c, None);
+        let tools = hit_rect(&app, &Action::Menu(TOOLS_MENU));
+        click(&mut app, &mut c, tools);
+        let find = hit_rect(&app, &Action::MenuItem(TOOLS_MENU, index(TOOLS_MENU, "Browser find...")));
+        click(&mut app, &mut c, find);
+        assert!(app.state.show_browser && app.state.browser_search_focus && app.state.menu_open.is_none());
+        app.key(&Key::Character("k".into()), false, false);
+        assert_eq!(app.state.browser_search, "k");
+        // Ctrl+F does the same; a name box keeps the keys.
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        app.state.show_browser = false;
+        app.key(&Key::Character("f".into()), true, false);
+        assert!(app.state.show_browser && app.state.browser_search_focus);
+        app.state.browser_search_focus = false;
+        crate::patterns::run(&mut app.state, crate::patterns::Cmd::Rename, (0.0, 0.0));
+        app.key(&Key::Character("f".into()), true, false);
+        assert!(!app.state.browser_search_focus);
+        // Greyed out: the sections the tree does not list, and the plugin browsers.
+        for (m, label) in [(VIEW, "Undo history"), (VIEW, "Remote control"), (ADD_MENU, "Browse all installed plugins"), (ADD_MENU, "Browse presets")] {
+            assert!(!works(m, item_at(m, index(m, label)).unwrap()), "{label}");
+        }
     }
 
     /// Settings > Plugins (spec: ui/plugin-manager.md §2, §4): Add folder... keeps the folder and scans it in the

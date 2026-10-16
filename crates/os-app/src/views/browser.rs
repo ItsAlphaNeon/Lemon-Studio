@@ -38,6 +38,25 @@ const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugi
 /// (History, Remote control, Initialized controls).
 const PROJECT: &[(&str, Icon)] = &[("Patterns", Icon::Note), ("Effects", Icon::Speaker), ("Generators", Icon::Plug), ("Samples", Icon::Wave)];
 
+/// The Current project and Plugin database tabs (spec §1).
+pub const PROJECT_TAB: usize = 1;
+pub const PLUGIN_TAB: usize = 2;
+
+/// Tree key of the Current project tab's root.
+pub fn project_root() -> String {
+    format!("{PROJECT_TAB}:{}", ROOTS[0].0)
+}
+
+/// The Current project tree's sections, in order.
+pub fn sections() -> impl Iterator<Item = &'static str> {
+    PROJECT.iter().map(|&(l, _)| l)
+}
+
+/// Tree key of section `name` of the Current project tab; `None` for a section the tree does not list.
+pub fn section_key(name: &str) -> Option<String> {
+    sections().any(|l| l == name).then(|| format!("{}/{name}", project_root()))
+}
+
 /// What a row stands for; everything but `None` can be dragged (spec §3).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
