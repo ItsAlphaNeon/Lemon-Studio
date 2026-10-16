@@ -642,6 +642,11 @@ impl Ui<'_> {
         self.pressed.as_ref() == Some(action) && rect.contains(self.mouse.0, self.mouse.1)
     }
 
+    /// Whether `action` is held down by the left button, wherever the cursor is (a drag that began on it).
+    pub fn held(&self, action: &Action) -> bool {
+        self.pressed.as_ref() == Some(action)
+    }
+
     /// Whether the mouse is over `rect` and last frame's topmost hit there was registered by this window
     /// (for decorations without their own action, e.g. a knob drawn under its hit region).
     pub fn hovering(&self, rect: Rect) -> bool {
@@ -773,6 +778,8 @@ pub enum Drag {
     DialogBar { y0: f32, s0: f32, ratio: f32 },
     /// A slider declared in `crate::prefs` follows the mouse along its track (`w` wide from `x`).
     PrefSlider { label: &'static str, x: f32, w: f32 },
+    /// General ▸ Display's PPI ruler, pressed at `x0` while it showed `n0` (`crate::ppi::dragged`).
+    Ppi { x0: f32, n0: u16 },
 }
 
 pub struct State {
@@ -879,6 +886,9 @@ pub struct State {
     pub wins: [WinState; 3],
     /// Size of the shell window in logical pixels (set each paint).
     pub screen: (f32, f32),
+    /// The main window's monitor's own scale (device pixels per logical one, whatever Main GUI scaling says; set at
+    /// every window event): General ▸ Display's PPI ruler follows it (`crate::ppi`).
+    pub display_scale: f32,
     /// Open message boxes and file dialogs, bottom to top (spec: ui/dialogs.md).
     pub dialogs: Vec<crate::dialog::Modal>,
     /// The working time's clock and the Song info box (Settings > Info, `project_info`).
@@ -1166,6 +1176,7 @@ impl App {
                     WinState { rect: Rect::new(480.0, 140.0, 1000.0, 640.0), maxed: true, mini: false },
                 ],
                 screen: (1920.0, 1080.0),
+                display_scale: 1.0,
                 dialogs: Vec::new(),
                 credits: Default::default(),
                 clip_colors: Default::default(),
@@ -3607,6 +3618,7 @@ impl App {
             SAct::Combo(label, x, y) if crate::prefs::find_combo(label).is_some() => return self.pref_menu(label, x, y),
             SAct::Combo(label, x, y) => return self.audio_menu(label, x, y),
             SAct::Slider(label, x, w) => return self.pref_slider_press(label, x, w),
+            SAct::Ppi => return self.ppi_press(),
             SAct::Tab(i) => {
                 st.tab = i;
                 st.scroll = 0.0;
@@ -4028,6 +4040,7 @@ impl App {
                 }
                 Drag::SongPosHold { .. } => {}
                 Drag::PrefSlider { label, x: x0, w } => self.pref_slider_drag(label, x0, w),
+                Drag::Ppi { x0, n0 } => self.ppi_set(crate::ppi::dragged(n0, x - x0, self.px_scale)),
                 Drag::Tempo { y0, t0, step } => {
                     // Rounded to the box's thousandths, so repeated steps don't drift.
                     let t = self.set_tempo(((t0 + f64::from(y0 - y).round() * step) * 1000.0).round() / 1000.0);
@@ -5054,6 +5067,14 @@ impl App {
         if let Some(Action::Settings(views::settings::SAct::Slider(label, ..))) = area {
             if dy + dx != 0.0 {
                 self.pref_slider_wheel(label, if dy + dx > 0.0 { 1 } else { -1 });
+            }
+            return None;
+        }
+        // General ▸ Display's PPI ruler: 1 PPI a notch, up for more (spec: ui/settings-choices.md "Display: PPI ruler,
+        // Force refreshes, Thick lines, High visibility (2026-10-16)").
+        if let Some(Action::Settings(views::settings::SAct::Ppi)) = area {
+            if dy + dx != 0.0 {
+                self.ppi_wheel(if dy + dx > 0.0 { 1 } else { -1 });
             }
             return None;
         }
