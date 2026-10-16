@@ -10,7 +10,7 @@
 use os_ui::{Font, Rect};
 
 use super::{menus, sunken, tool_button, FrameInfo};
-use crate::app::{Action, Live, State, Ui, Win};
+use crate::app::{Action, Live, State, Ui, Util, Win};
 use crate::icons::{self, Icon};
 
 /// Leftmost logo centre: just right of the last toolbar control (the news panel / downloads, x 1473).
@@ -290,21 +290,23 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.c.text_right(Font::condensed(18, 6), 1199.0, 17.0, t.meter_clip, &format!("!{}", r.dropouts.min(9999)));
     }
 
-    // Utility buttons.
+    // Utility buttons: "left / right" hints, right clicks in `App::toolbar_right` (spec: ui/toolbar-buttons.md §2).
     let utils = [
-        (Icon::Undo, "Undo history"),
-        (Icon::Cut, "Edit tools"),
-        (Icon::Mic, "Audio input / recording"),
-        (Icon::Help, "Help"),
-        (Icon::Save, "Save project (Ctrl+S)"),
-        (Icon::SaveRender, "Export the song as a WAV file (Ctrl+R)"),
-        (Icon::Info, "Project info"),
-        (Icon::Download, "Downloads"),
+        (Icon::Undo, "Undo / Undo history (Ctrl+Z)"),
+        (Icon::Cut, "Open audio editor / New audio editor"),
+        (Icon::Mic, "One-click audio recording"),
+        (Icon::Help, "Help index / About..."),
+        (Icon::Save, "Save as... / Save new version (Shift+Ctrl+S)"),
+        (Icon::SaveRender, "Export > Wave file... (Ctrl+R)"),
+        (Icon::Info, "Project info (F11)"),
+        (Icon::Download, "Launch content library"),
     ];
     for (i, (icon, hint)) in utils.into_iter().enumerate() {
         let r = btn(1209.0 + 33.0 * i as f32, 4.0);
         let action = match icon {
-            Icon::Save => Action::MenuItem(0, menus::FILE_SAVE),
+            Icon::Undo => Action::Util(Util::Undo),
+            Icon::Help => Action::Util(Util::Help),
+            Icon::Save => Action::Util(Util::Save),
             Icon::SaveRender => Action::MenuItem(0, menus::FILE_EXPORT),
             Icon::Info => Action::MenuItem(menus::OPTIONS_MENU, menus::OPT_INFO),
             _ => Action::Placeholder(hint),
@@ -542,17 +544,17 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.hit(add, Action::PatternAdd, "New pattern (find first / next empty)");
     icons::draw(ui.c, Icon::Plus, add, t.glyph);
 
-    // Window buttons.
+    // Window buttons (spec: ui/toolbar-buttons.md §2; right clicks in `App::toolbar_right`).
     let wins = [
-        (Icon::Playlist, Action::ToggleWin(Win::Playlist), s.shown(Win::Playlist), "Playlist (F5)"),
-        (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), s.shown(Win::PianoRoll), "Piano roll (F7)"),
+        (Icon::Playlist, Action::ToggleWin(Win::Playlist), s.shown(Win::Playlist), "Playlist / Maximize Play list (F5)"),
+        (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), s.shown(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
         (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), s.shown(Win::ChannelRack), "Channel rack (F6)"),
         (Icon::Mixer, Action::ToggleWin(Win::Mixer), s.shown(Win::Mixer), "Mixer (F9)"),
-        (Icon::Browser, Action::ToggleWin(Win::Browser), s.show_browser, "Browser (Alt+F8)"),
-        (Icon::Project, Action::Placeholder("Project picker"), false, "Project picker"),
-        (Icon::Plug, Action::PickerOpen, false, "Add a plugin (F8)"),
+        (Icon::Browser, Action::ToggleWin(Win::Browser), s.show_browser, "Browser / Plugin picker (Alt+F8)"),
+        (Icon::Project, Action::Placeholder("Project picker"), false, "Project picker / Plugin picker (Ctrl+F8)"),
+        (Icon::Plug, Action::PickerOpen, false, "Plugin picker (F8)"),
         (Icon::Kick, Action::ToggleWin(Win::Tapper), s.shown(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
-        (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller"),
+        (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller (Alt+F7)"),
         (Icon::Store, Action::Placeholder("Plugin store"), false, "Plugin store"),
     ];
     for (i, (icon, action, open, hint)) in wins.into_iter().enumerate() {

@@ -104,6 +104,14 @@ pub struct WinState {
 /// Title bar height of the three docked-style windows.
 pub const TITLE_H: f32 = 23.0;
 
+/// Toolbar utility buttons whose left and right clicks differ (spec: ui/toolbar-buttons.md §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Util {
+    Undo,
+    Help,
+    Save,
+}
+
 /// Mouse cursor shapes the shell should show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cursor {
@@ -183,6 +191,11 @@ pub enum Action {
     Knob(crate::knobs::KnobId),
     /// Toolbar plugin button: the plugin menu (spec: ui/plugin-menu.md §1).
     PickerOpen,
+    /// A toolbar utility button (spec: ui/toolbar-buttons.md §2).
+    Util(Util),
+    /// Show a window maximized and in front (the playlist / piano roll buttons' right click, spec:
+    /// ui/toolbar-buttons.md §2).
+    ShowMax(Win),
     RackResize(u8),
     /// Step / piano-roll view toggle, and a row's mini piano roll (spec: ui/channel-rack.md §6).
     RackRollView,
@@ -950,6 +963,8 @@ pub struct App {
     pub pressed: Option<Action>,
     /// A window button pressed and not released yet (`acts_on_release`).
     armed: Option<Action>,
+    /// A toolbar button right-pressed and not released yet: (its hit, what the release over it runs).
+    armed_right: Option<(Action, Action)>,
     hover_rect: Option<Rect>,
     damage: Damage,
     /// Typing keyboard (spec: ui/typing-keyboard.md): keys held now as (physical key, rack row,
@@ -1130,6 +1145,7 @@ impl App {
             hover: None,
             pressed: None,
             armed: None,
+            armed_right: None,
             hover_rect: None,
             damage: Damage::Full,
             typing_held: Vec::new(),
@@ -3805,6 +3821,7 @@ impl App {
         let action = self.top_hit(x, y).map(|h| h.action.clone());
         self.pressed = action.clone();
         self.armed = None;
+        self.armed_right = None;
         // A dialog takes every click (spec: ui/dialogs.md §3).
         if self.modal_open() {
             // The time signature dialog's value list (the app's popup) takes its own; a click anywhere else closes it.
@@ -4160,6 +4177,12 @@ impl App {
                 self.state.playlist.popup = Some(views::menus::hint_popup(x, y));
                 return self.invalidate();
             }
+            // Toolbar buttons with a right-click action: armed here, run on the release (spec: ui/toolbar-buttons.md §2).
+            Some(a) if toolbar_right(a).is_some() => {
+                self.state.playlist.popup = None;
+                self.armed_right = toolbar_right(a).map(|run| (a.clone(), run));
+                return self.invalidate();
+            }
             Some(Action::BrowserRow(i)) => {
                 if self.browser_remove_root(*i) || self.params_browser_right(*i, x, y) {
                     return;
@@ -4260,6 +4283,13 @@ impl App {
             let (x, y) = self.mouse;
             if self.top_hit(x, y).is_some_and(|h| h.action == a) {
                 self.act(a);
+                self.invalidate();
+            }
+        }
+        if let Some((hit, run)) = self.armed_right.take() {
+            let (x, y) = self.mouse;
+            if self.top_hit(x, y).is_some_and(|h| h.action == hit) {
+                self.act(run);
                 self.invalidate();
             }
         }
@@ -5484,7 +5514,8 @@ impl App {
                 s.piano.tool = t;
                 s.piano.overlay = None;
             }
-            Action::PianoUndo => {
+            // EDIT > Undo, also the toolbar's Undo button (spec: ui/toolbar-buttons.md §2).
+            Action::PianoUndo | Action::Util(Util::Undo) => {
                 if !piano::undo(s) {
                     s.message = Some("Nothing to undo".into());
                 }
@@ -5756,6 +5787,20 @@ impl App {
                     s.wins[i].maxed = !s.wins[i].maxed;
                 }
             }
+            // A second one leaves it maximized (spec: ui/toolbar-buttons.md §2).
+            Action::ShowMax(w) => {
+                s.raise(w);
+                if let Some(i) = w.slot() {
+                    s.wins[i].mini = false;
+                    s.wins[i].maxed = true;
+                }
+                if w == Win::PianoRoll {
+                    piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
+                }
+            }
+            // No help index yet: the left click does nothing.
+            Action::Util(Util::Help) => {}
+            Action::Util(Util::Save) => self.menu_item(0, views::menus::FILE_SAVE_AS),
             Action::CloseWin(Win::Perf) => self.close_perf(),
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch => {}
@@ -6148,6 +6193,19 @@ impl App {
         self.state.playlist.popup = Some(crate::playlist::Popup { x: at.right(), y: at.y - 2.0, items, sub: None });
         self.state.menu_sub = Some(i);
     }
+}
+
+/// What a right click on toolbar button `hit` runs on its release (spec: ui/toolbar-buttons.md §2). The Undo button has
+/// none until the browser has a History section.
+fn toolbar_right(hit: &Action) -> Option<Action> {
+    use views::menus::{FILE_SAVE_VERSION, HELP_ABOUT, HELP_MENU};
+    Some(match *hit {
+        Action::Util(Util::Save) => Action::MenuItem(0, FILE_SAVE_VERSION),
+        Action::Util(Util::Help) => Action::MenuItem(HELP_MENU, HELP_ABOUT),
+        Action::ToggleWin(w @ (Win::Playlist | Win::PianoRoll)) => Action::ShowMax(w),
+        Action::ToggleWin(Win::Browser) => Action::PickerOpen,
+        _ => return None,
+    })
 }
 
 /// PATTERNS menu shortcuts (spec: ui/pattern-menu.md §3).
@@ -11817,6 +11875,95 @@ mod tests {
         reset(&mut app);
         pl::run(&mut app, Cmd::Pattern(crate::patterns::Cmd::OpenInBrowser));
         check(&app, &drums);
+    }
+
+    /// Toolbar utility and window buttons (spec: ui/toolbar-buttons.md §2): "left / right" hints with the key; Undo,
+    /// Save as..., About on Help's right click, Save new version on Save's; the playlist and piano roll shown maximized
+    /// and the plugin picker on a right click, which acts on the release over the same button.
+    #[test]
+    fn toolbar_buttons_left_and_right() {
+        fn right(app: &mut App, c: &mut Canvas, r: Rect, release: (f32, f32)) {
+            app.mouse_move(r.cx(), r.cy());
+            app.mouse_down_right();
+            app.mouse_move(release.0, release.1);
+            app.mouse_up();
+            frame(app, c, None);
+        }
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        frame(&mut app, &mut c, None);
+        let hint = |app: &App, a: &Action| app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.hint.to_string()).unwrap();
+        for (a, h) in [
+            (Action::Util(Util::Undo), "Undo / Undo history (Ctrl+Z)"),
+            (Action::Util(Util::Help), "Help index / About..."),
+            (Action::Util(Util::Save), "Save as... / Save new version (Shift+Ctrl+S)"),
+            (Action::MenuItem(0, views::menus::FILE_EXPORT), "Export > Wave file... (Ctrl+R)"),
+            (Action::MenuItem(views::menus::OPTIONS_MENU, views::menus::OPT_INFO), "Project info (F11)"),
+            (Action::ToggleWin(Win::Playlist), "Playlist / Maximize Play list (F5)"),
+            (Action::ToggleWin(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
+            (Action::ToggleWin(Win::Browser), "Browser / Plugin picker (Alt+F8)"),
+            (Action::PickerOpen, "Plugin picker (F8)"),
+        ] {
+            assert_eq!(hint(&app, &a), h);
+        }
+        // Greyed out.
+        for name in [
+            "Open audio editor / New audio editor",
+            "One-click audio recording",
+            "Launch content library",
+            "Project picker / Plugin picker (Ctrl+F8)",
+            "Touch controller (Alt+F7)",
+        ] {
+            assert_eq!(hint(&app, &Action::Placeholder(name)), format!("{name}: not available yet"));
+        }
+        // Help: the left click does nothing; the right click is About, on the release over the button only.
+        let help = hit_rect(&app, &Action::Util(Util::Help));
+        app.state.message = None;
+        click(&mut app, &mut c, help);
+        assert!(app.state.message.is_none() && app.state.dialogs.is_empty());
+        right(&mut app, &mut c, help, (help.cx() + 40.0, help.cy()));
+        assert!(app.state.message.is_none());
+        right(&mut app, &mut c, help, (help.cx(), help.cy()));
+        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Lemon Studio ")), "{:?}", app.state.message);
+        // Undo: EDIT > Undo; its right click does nothing yet.
+        let undo = hit_rect(&app, &Action::Util(Util::Undo));
+        app.state.message = None;
+        right(&mut app, &mut c, undo, (undo.cx(), undo.cy()));
+        assert!(app.state.message.is_none() && app.state.playlist.popup.is_none());
+        click(&mut app, &mut c, undo);
+        assert_eq!(app.state.message.as_deref(), Some("Nothing to undo"));
+        // Save: Save as... (the save dialog even with a file), Save new version on the right.
+        let path = std::env::temp_dir().join(format!("os_toolbar_save_{}_song.flp", std::process::id()));
+        let next = path.with_file_name(format!("os_toolbar_save_{}_song_2.flp", std::process::id()));
+        let _ = std::fs::remove_file(&next);
+        app.save_to(path.clone());
+        let save = hit_rect(&app, &Action::Util(Util::Save));
+        let saves = crate::dialog::fake::shown().1;
+        crate::dialog::fake::answer(None);
+        click(&mut app, &mut c, save);
+        assert_eq!(crate::dialog::fake::shown().1, saves + 1);
+        assert!(!next.exists());
+        right(&mut app, &mut c, save, (save.cx(), save.cy()));
+        assert!(next.exists(), "{:?}", app.state.message);
+        let _ = (std::fs::remove_file(&path), std::fs::remove_file(&next));
+        // Playlist and piano roll: shown maximized and in front; a second right click leaves them maximized.
+        for w in [Win::Playlist, Win::PianoRoll] {
+            app.state.hide(w);
+            let slot = w.slot().unwrap();
+            app.state.wins[slot].maxed = false;
+            frame(&mut app, &mut c, None);
+            let b = hit_rect(&app, &Action::ToggleWin(w));
+            for _ in 0..2 {
+                right(&mut app, &mut c, b, (b.cx(), b.cy()));
+                assert!(app.state.shown(w) && app.state.in_front(w) && app.state.wins[slot].maxed && !app.state.wins[slot].mini, "{w:?}");
+            }
+        }
+        // Browser: the plugin picker, the browser itself left as it is.
+        let shown = app.state.show_browser;
+        let b = hit_rect(&app, &Action::ToggleWin(Win::Browser));
+        right(&mut app, &mut c, b, (b.cx(), b.cy()));
+        assert!(crate::plugin_menu::is_open(&app.state) && app.state.show_browser == shown);
     }
 
     /// TOOLS / the channel rack's options > Switch all / selected audio clip channels to ▸ (spec: ui/channel-switches.md
