@@ -198,6 +198,8 @@ pub const LIVE: &[&str] = &[
     ERRORS_CHECK,
     COMBINE_CHECK,
     TRUNCATED_CHECK,
+    SHOW_INFO_CHECK,
+    RESET_WORK_TIME,
     "Manage plugins",
     "Add folder...",
     "Find new plugins",
@@ -251,6 +253,10 @@ pub fn denominator_text(steps: u16) -> String {
 }
 /// Project ▸ Advanced: "play truncated notes" (event 30; spec: audio/song-structure.md "Play truncated notes").
 pub const TRUNCATED_CHECK: &str = "Play truncated notes in clips";
+/// Info: "Show info on opening" (event 10) and the button that zeroes the time spent (event 237; spec:
+/// ui/settings-choices.md "Info", flp/events/project-info.md).
+pub const SHOW_INFO_CHECK: &str = "Show info on opening";
+pub const RESET_WORK_TIME: &str = "Reset working time";
 
 /// Whether the combo labelled `label` works (opens a menu of choices).
 fn live_combo(label: &str) -> bool {
@@ -344,6 +350,8 @@ pub enum Row {
     Table,
     /// An Info text box: field, width (0 = to the panel's right edge). The Genre box has a ▸ after it.
     Edit(InfoField, f32),
+    /// The Info page's footer: small grey lines at the left, the Reset working time button at the bottom right.
+    InfoFooter(Vec<String>),
 }
 
 pub struct Group {
@@ -635,14 +643,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         ],
         // The credits are edited in place (spec: ui/settings.md "Info"; events 194 / 207 / 206 / 195 / 197,
         // flp/events/project-info.md); the genre button opens FL's genre list (spec: ui/settings-choices.md "Info").
-        // "Show info on opening" and the working time (the start date, the time spent, Reset working time) are not
-        // available yet: greyed or left out.
+        // "Show info on opening" is event 10; the footer and Reset working time are `crate::project_info`.
         INFO => {
-            let clips: usize = s.project.arrangements.iter().map(|a| a.clips.len()).sum();
-            let notes: usize = s.project.patterns.iter().map(|p| p.notes.len()).sum();
             vec![g("Project credits", vec![
                 Text("Title".into(), true),
-                pair(Edit(InfoField::Title, 288.0), Off("Show info on opening", false)),
+                pair(Edit(InfoField::Title, 288.0), Check(SHOW_INFO_CHECK, s.project.show_info.unwrap_or(false))),
                 Text("Author".into(), true),
                 Edit(InfoField::Author, 0.0),
                 Text("Genre".into(), true),
@@ -652,12 +657,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Text("Web link".into(), true),
                 Edit(InfoField::Url, 0.0),
                 Gap(8.0),
-                // FL's footer, small grey lines (spec: ui/settings-choices.md "Info"). What its "Plugins", "Mixer
-                // Tracks" and "PL tracks" count is not in the spec (FL shows 2, 5 and 0 for a new project from its
-                // default template): left out, like the lines on the start date and the time spent (event 237).
-                Text(format!("Channels: {}", s.project.channels.len()), true),
-                Text(format!("Arrangements: {}, PL clips: {clips}, Notes: {notes}", s.project.arrangements.len()), true),
-                Buttons(vec![("Reset working time", 150.0)]),
+                // FL's footer (spec: ui/settings-choices.md "Info").
+                InfoFooter(crate::project_info::footer(s, std::time::Instant::now())),
             ])]
         }
         DEBUG => {
@@ -719,6 +720,7 @@ fn row_h(r: &Row) -> f32 {
         Row::Prefer(_) => 27.0,
         Row::Table => 4.0 + 18.0 + TABLE_ROW_H * TABLE_ROWS as f32 + 4.0 + 34.0,
         Row::Edit(f, _) => if f.multiline() { COMMENT_LINE_H * COMMENT_LINES as f32 + 12.0 } else { 28.0 },
+        Row::InfoFooter(lines) => (lines.len() as f32 * FOOTER_LINE_H + 8.0).max(36.0),
     }
 }
 
@@ -1168,8 +1170,23 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 kit::combo(ui.c, t, a, "", f, kit::State::hover(hov));
             }
         }
+        // Four lines of small grey text at the bottom left, beside the Reset working time button (spec:
+        // ui/settings-choices.md "Info"), which sits at the bottom right and is drawn as a `Row::Buttons` there.
+        Row::InfoFooter(lines) => {
+            let bx = g.right() - 8.0 - 150.0;
+            let by = y + h - 36.0;
+            for (i, line) in lines.iter().enumerate() {
+                let ly = y + 4.0 + i as f32 * FOOTER_LINE_H;
+                let right = if ly + FOOTER_LINE_H > by + 4.0 { bx - 12.0 } else { g.right() - 8.0 };
+                ui.c.text_clip(Font::new(13), x0, ly, right - x0, t.text_dim, line);
+            }
+            paint_row_at(ui, s, group, &Row::Buttons(vec![(RESET_WORK_TIME, 150.0)]), g, by, 36.0, bx - g.x - 12.0);
+        }
     }
 }
+
+/// The Info footer's line pitch.
+const FOOTER_LINE_H: f32 = 16.0;
 
 /// Lines the Comments box shows, and their pitch.
 const COMMENT_LINES: usize = 24;
@@ -1242,7 +1259,7 @@ fn byte_at(s: &str, i: usize) -> usize {
 
 /// The lines `text` shows in `w` px: (first character, characters) of each, in characters. A line longer than `w`
 /// breaks after its last space that fits, else where it is full; the line break itself belongs to no line.
-fn wrap(ui: &mut Ui, f: Font, text: &str, w: f32) -> Vec<(usize, usize)> {
+pub(crate) fn wrap(ui: &mut Ui, f: Font, text: &str, w: f32) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut base = 0;
     for para in text.split('\n') {

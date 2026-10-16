@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use os_model::{
     Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
     Envelope, MixerTrack,
-    Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, CLIP_RECORD_LEN,
+    Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, WorkTime, CLIP_RECORD_LEN,
 };
 
 use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
@@ -36,6 +36,8 @@ mod id {
     pub const INFO_167: u8 = 167;
     pub const INFO_202: u8 = 202;
     pub const WORK_TIME: u8 = 237;
+    /// Show info on opening, 1 = on (spec: flp/events/project-info.md).
+    pub const SHOW_INFO: u8 = 10;
     /// The project events that stand before the project information and are not read (spec: flp/engine-events.md
     /// "Order in the file": 156, 67, 9, 11, 80, 17, 18, 35, 23, 44, 30, 10).
     pub const OTHER_PROJECT: [u8; 5] = [9, 35, 23, 44, 10];
@@ -238,6 +240,26 @@ fn comments_to_file(s: &str) -> String {
     s.replace("\r\n", "\r").replace('\n', "\r")
 }
 
+/// Event 237: the start and the time spent, two little-endian doubles in days (spec: flp/events/project-info.md).
+/// `None` unless it holds 16 bytes.
+fn work_time_from(d: &[u8]) -> Option<WorkTime> {
+    let d: &[u8; 16] = d.try_into().ok()?;
+    let (a, b) = d.split_at(8);
+    Some(WorkTime { started: f64::from_le_bytes(a.try_into().ok()?), spent: f64::from_le_bytes(b.try_into().ok()?) })
+}
+
+fn work_time_bytes(w: WorkTime) -> Vec<u8> {
+    [w.started.to_le_bytes(), w.spent.to_le_bytes()].concat()
+}
+
+/// A project started now: the local time in days since 1899-12-30 00:00, nothing spent yet (spec:
+/// flp/events/project-info.md, event 237 and "Writer notes").
+pub fn work_time_now() -> WorkTime {
+    let epoch = chrono::NaiveDate::from_ymd_opt(1899, 12, 30).and_then(|d| d.and_hms_opt(0, 0, 0)).expect("valid date");
+    let ms = (chrono::Local::now().naive_local() - epoch).num_milliseconds();
+    WorkTime { started: ms as f64 / 86_400_000.0, spent: 0.0 }
+}
+
 // ---------------------------------------------------------------------------------------
 // Colors
 
@@ -343,6 +365,8 @@ struct Layout {
     info_202: Option<usize>,
     work_time: Option<usize>,
     other_project: Option<usize>,
+    /// Event 10, show info on opening.
+    show_info: Option<usize>,
     current_pattern: Option<usize>,
     current_arrangement: Option<usize>,
     playlist_view: Option<usize>,
@@ -507,6 +531,10 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 id::INFO_167 if l.info_167.is_none() => l.info_167 = Some(i),
                 id::INFO_202 if l.info_202.is_none() => l.info_202 = Some(i),
                 id::WORK_TIME if l.work_time.is_none() => l.work_time = Some(i),
+                id::SHOW_INFO if l.show_info.is_none() => {
+                    l.show_info = Some(i);
+                    l.other_project = Some(i);
+                }
                 v if id::OTHER_PROJECT.contains(&v) => {
                     l.other_project = Some(i);
                     if v != 10 && !l.unread_settings.iter().any(|&(k, _)| k == v) {
@@ -669,7 +697,9 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
     let enc = text_enc(events, l.version);
     l.enc = Some(enc);
     let clen = clip_len(events, l.version);
-    let text = |i: Option<usize>| i.and_then(|i| events[i].data()).map(|d| decode_text(d, enc));
+    // FL writes 194, 206, 207 and 195 empty when they are empty (spec: flp/events/project-info.md "Writer notes"): an
+    // empty text reads as no value.
+    let text = |i: Option<usize>| i.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)).filter(|t| !t.is_empty());
 
     let mut p = Project {
         saved_by: l
@@ -700,6 +730,8 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         main_pitch: l.main_pitch.map(|i| int(&events[i]) as u16 as i16),
         main_volume: main_volume(l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[])),
         playlist_view: l.playlist_view.and_then(|i| events[i].data()).and_then(PlaylistView::from_bytes),
+        work_time: l.work_time.and_then(|i| events[i].data()).and_then(work_time_from),
+        show_info: l.show_info.map(|i| int(&events[i]) != 0),
         ..Default::default()
     };
 
@@ -2143,7 +2175,8 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     // Title, genre, author, comments, URL (spec: flp/events/project-info.md). A changed text is patched in place. A
     // cleared one keeps its event, written empty, as FL 26 writes 194, 206, 207 and 195 when they are empty; a cleared
     // URL loses its event, as FL writes 197 only when there is a URL (Writer notes). An empty field the file lacks gets
-    // no event, a filled one gets its event in FL's order.
+    // no event, a filled one gets its event in FL's order; so do the start and time spent (237) and "show info on
+    // opening" (10) when the model has them.
     let info = &project.info;
     let old_info = &current.info;
     let fields = [
@@ -2165,6 +2198,11 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         .max()
         .or(l.version)
         .map_or(0, |i| i + 1);
+    // Where place `p` of that order goes: after the nearest event before it that the file has, else before the nearest
+    // one after it.
+    let place = |p: usize| {
+        order[..p].iter().rev().find_map(|i| i.map(|i| i + 1)).or_else(|| order[p + 1..].iter().find_map(|&i| i)).unwrap_or(info_at)
+    };
     let mut added = Vec::new();
     for (k, &(eid, value, old)) in fields.iter().enumerate() {
         if value == old {
@@ -2175,21 +2213,30 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         match (order[p], text) {
             (Some(i), v) if eid == id::URL && v.as_deref().unwrap_or("").is_empty() => removals.push(i),
             (Some(i), v) => set_data(&mut events[i], encode_text(v.as_deref().unwrap_or(""), enc)),
-            (None, Some(v)) if !v.is_empty() => {
-                // After the nearest event before it in that order that the file has, else before the nearest one after.
-                let at = order[..p]
-                    .iter()
-                    .rev()
-                    .find_map(|i| i.map(|i| i + 1))
-                    .or_else(|| order[p + 1..].iter().find_map(|&i| i))
-                    .unwrap_or(info_at);
-                added.push((at, Event::new(eid, Value::var(encode_text(&v, enc)))));
-            }
+            (None, Some(v)) if !v.is_empty() => added.push((place(p), Event::new(eid, Value::var(encode_text(&v, enc))))),
             _ => {}
         }
     }
-    // Inserts at one place end up in reverse order of pushing: new fields that share a place keep the order above.
+    // Inserts at one place end up in reverse order of pushing: 237 goes behind the texts added at its place, which keep
+    // the order above, and 10 (below) before them.
+    if let Some(w) = project.work_time.filter(|&w| Some(w) != current.work_time) {
+        match l.work_time {
+            Some(i) => set_data(&mut events[i], work_time_bytes(w)),
+            None => inserts.push((place(7), Event::new(id::WORK_TIME, Value::var(work_time_bytes(w))))),
+        }
+    }
     inserts.extend(added.into_iter().rev());
+    // Show info on opening (event 10), where the file lacks it: behind the project events, before the texts.
+    if project.show_info != current.show_info {
+        let v = u32::from(project.show_info.unwrap_or(false));
+        match l.show_info {
+            Some(i) => set_int(&mut events[i], v),
+            None => {
+                let first_text = order.iter().flatten().min().copied();
+                inserts.push((first_text.map_or(info_at, |f| f.min(info_at)), int_event(id::SHOW_INFO, v)));
+            }
+        }
+    }
     if let (Some(i), Some(v)) = (l.current_pattern, project.current_pattern.filter(|&v| Some(v) != current.current_pattern)) {
         set_int(&mut events[i], v.into());
     }
@@ -3339,6 +3386,12 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     if project.play_truncated {
         ev.push(Event::new(id::PLAY_TRUNCATED, Value::U8(1)));
     }
+    if let Some(on) = project.show_info {
+        ev.push(Event::new(id::SHOW_INFO, Value::U8(u8::from(on))));
+    }
+    // The project information as FL 26 writes it (spec: flp/events/project-info.md "Writer notes"): 194, 206, 207 and
+    // 195 always, empty when empty; 197 only with a URL; then 237, the start (now for a project without one) and the
+    // time spent.
     let info = &project.info;
     for (id, value) in [
         (id::TITLE, info.title.clone()),
@@ -3347,10 +3400,12 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         (id::COMMENTS, info.comments.as_deref().map(comments_to_file)),
         (id::URL, info.url.clone()),
     ] {
-        if let Some(v) = value.filter(|v| !v.is_empty()) {
+        let v = value.unwrap_or_default();
+        if id != id::URL || !v.is_empty() {
             ev.push(Event::new(id, Value::var(encode_text(&v, enc))));
         }
     }
+    ev.push(Event::new(id::WORK_TIME, Value::var(work_time_bytes(project.work_time.unwrap_or_else(work_time_now)))));
     // Filter groups and the current filter (spec: flp/events/project-info.md), before the note blocks.
     for name in &project.groups {
         ev.push(Event::new(id::GROUP_NAME, Value::var(encode_text(name, enc))));
@@ -4947,14 +5002,17 @@ mod tests {
         s.encode_utf16().flat_map(u16::to_le_bytes).chain([0, 0]).collect()
     }
 
-    /// Title, genre, author, comments and URL edited in a saved file: a changed text is patched, missing fields are
-    /// added next to the others in `create`'s order, comments keep single-CR line breaks, the text is UTF-16LE; the
-    /// same model again writes nothing; a cleared field keeps its event, written empty, and an empty one the file lacks
-    /// gets none (spec: flp/events/project-info.md, flp/container.md "Text payloads").
+    /// Title, genre, author, comments and URL edited in a saved file: `create` writes the empty ones empty (the URL not
+    /// at all), a changed text is patched, a missing one is added in FL's order, comments keep single-CR line breaks, the
+    /// text is UTF-16LE; the same model again writes nothing; a cleared field keeps its event, written empty, and reads
+    /// back as no value; an empty one the file lacks gets none (spec: flp/events/project-info.md, flp/container.md "Text
+    /// payloads").
     #[test]
     fn project_info_round_trips() {
         let mut file = FlpFile::parse(&create(&new_project()).unwrap().to_bytes().unwrap()).unwrap();
-        assert_eq!(event_data(&file, id::AUTHOR), None, "an empty field is not written");
+        assert_eq!(event_data(&file, id::AUTHOR), Some(vec![0, 0]), "an empty field is written empty");
+        assert_eq!(event_data(&file, id::URL), None, "an empty URL is not written");
+        assert_eq!(load(&file).unwrap().info.author, None, "an empty field reads as no value");
         let mut m = load(&file).unwrap();
         m.info = ProjectInfo {
             title: Some("Ünïcode Ω title".into()),
@@ -4972,7 +5030,7 @@ mod tests {
         let ids: Vec<u8> = events_of(&file).unwrap().iter().map(|e| e.id).collect();
         let at = ids.iter().position(|&i| i == id::TITLE).unwrap();
         assert_eq!(ids[at - 1], id::CURRENT_PATTERN);
-        assert_eq!(ids[at..at + 5], [id::TITLE, id::GENRE, id::AUTHOR, id::COMMENTS, id::URL]);
+        assert_eq!(ids[at..at + 6], [id::TITLE, id::GENRE, id::AUTHOR, id::COMMENTS, id::URL, id::WORK_TIME]);
         let mut again = file.clone();
         apply(&back, &mut again).unwrap();
         assert_eq!(again.to_bytes().unwrap(), file.to_bytes().unwrap(), "an unchanged model writes nothing");
@@ -4984,13 +5042,14 @@ mod tests {
         apply(&cleared, &mut file2).unwrap();
         assert_eq!((event_data(&file2, id::TITLE), event_data(&file2, id::COMMENTS)), (Some(vec![0, 0]), Some(vec![0, 0])));
         let back2 = load(&FlpFile::parse(&file2.to_bytes().unwrap()).unwrap()).unwrap();
-        assert_eq!((back2.info.title.as_deref(), back2.info.comments.as_deref()), (Some(""), Some("")));
+        assert_eq!((back2.info.title.as_deref(), back2.info.comments.as_deref()), (None, None));
         assert_eq!(back2.info.author.as_deref(), Some("Me"));
 
         // A file without any of them: an empty field adds nothing, a filled one goes after the current pattern.
         let mut bare = new_project();
         bare.info = ProjectInfo::default();
         let mut file3 = create(&bare).unwrap();
+        events_of_mut(&mut file3).unwrap().retain(|e| ![id::TITLE, id::GENRE, id::AUTHOR, id::COMMENTS, id::WORK_TIME].contains(&e.id));
         let mut m3 = load(&file3).unwrap();
         m3.info.genre = Some(String::new());
         m3.info.url = Some("https://example.org".into());
@@ -5034,6 +5093,7 @@ mod tests {
             p.info = ProjectInfo::default();
             let mut file = create(&p).unwrap();
             let ev = events_of_mut(&mut file).unwrap();
+            ev.retain(|e| !INFO.contains(&e.id));
             let at = ev.iter().position(|e| e.id == id::CURRENT_PATTERN).unwrap() + 1;
             let info = ids.iter().map(|&eid| match eid {
                 id::INFO_167 => Event::new(eid, Value::U32(2)),
@@ -5052,10 +5112,10 @@ mod tests {
         };
         let new_fl = [id::TITLE, id::GENRE, id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::WORK_TIME];
 
-        // A new FL project: the empty texts load as empty and stay as they are.
+        // A new FL project: the empty texts load as no value and stay as they are.
         let file = fl_file(&new_fl);
         let m = load(&file).unwrap();
-        assert_eq!((m.info.title.as_deref(), m.info.comments.as_deref(), m.info.url.as_deref()), (Some(""), Some(""), None));
+        assert_eq!((m.info.title.as_deref(), m.info.comments.as_deref(), m.info.url.as_deref()), (None, None, None));
         assert_eq!(saved(&m, &file).to_bytes().unwrap(), file.to_bytes().unwrap());
 
         // A URL goes behind the comments, before 237; the other texts stay empty.
@@ -5088,6 +5148,59 @@ mod tests {
         let mut m5 = load(&file).unwrap();
         m5.info.title = Some("T".into());
         assert_eq!(info_ids(&saved(&m5, &file)), [id::TITLE, id::WORK_TIME]);
+    }
+
+    /// Event 237 (start and time spent, two doubles in days) and event 10 (show info on opening): `create` writes the
+    /// model's, or now and 0, and 10 behind 30; they read back; `apply` patches them in place, or adds them where FL
+    /// writes them: 10 behind the project events, 237 behind the texts (spec: flp/events/project-info.md,
+    /// flp/engine-events.md "Order in the file").
+    #[test]
+    fn work_time_and_show_info_round_trip() {
+        let w = WorkTime { started: 42_139.675_694_444_4, spent: 6.122_916_666_7 };
+        let mut p = new_project();
+        p.play_truncated = true;
+        p.work_time = Some(w);
+        p.show_info = Some(true);
+        let file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let m = load(&file).unwrap();
+        assert_eq!((m.work_time, m.show_info), (Some(w), Some(true)));
+        let mut bytes = w.started.to_le_bytes().to_vec();
+        bytes.extend(w.spent.to_le_bytes());
+        assert_eq!(event_data(&file, id::WORK_TIME), Some(bytes));
+        let ids: Vec<u8> = events_of(&file).unwrap().iter().map(|e| e.id).collect();
+        let at = ids.iter().position(|&i| i == id::SHOW_INFO).unwrap();
+        assert_eq!((ids[at - 1], ids[at + 1]), (id::PLAY_TRUNCATED, id::TITLE));
+
+        // Without a start in the model: now, nothing spent.
+        p.work_time = None;
+        let started = load(&create(&p).unwrap()).unwrap().work_time.expect("written");
+        assert_eq!(started.spent, 0.0);
+        assert!((started.started - work_time_now().started).abs() < 1.0 / 24.0, "{started:?}");
+
+        // Patched in place.
+        let mut m2 = m.clone();
+        m2.work_time = Some(WorkTime { spent: 0.0, ..w });
+        m2.show_info = Some(false);
+        let mut f2 = file.clone();
+        apply(&m2, &mut f2).unwrap();
+        assert_eq!(events_of(&f2).unwrap().len(), events_of(&file).unwrap().len());
+        let back = load(&FlpFile::parse(&f2.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!((back.work_time, back.show_info), (m2.work_time, Some(false)));
+
+        // Added to a file without them.
+        let mut f3 = file.clone();
+        events_of_mut(&mut f3).unwrap().retain(|e| e.id != id::SHOW_INFO && e.id != id::WORK_TIME);
+        let mut m3 = load(&f3).unwrap();
+        assert_eq!((m3.work_time, m3.show_info), (None, None));
+        m3.work_time = Some(w);
+        m3.show_info = Some(true);
+        m3.info.url = Some("https://example.org".into());
+        apply(&m3, &mut f3).unwrap();
+        let f3 = FlpFile::parse(&f3.to_bytes().unwrap()).unwrap();
+        let ids: Vec<u8> = events_of(&f3).unwrap().iter().map(|e| e.id).collect();
+        let at = ids.iter().position(|&i| i == id::SHOW_INFO).unwrap();
+        assert_eq!(ids[at - 1..at + 7], [id::PLAY_TRUNCATED, id::SHOW_INFO, id::TITLE, id::GENRE, id::AUTHOR, id::COMMENTS, id::URL, id::WORK_TIME]);
+        assert_eq!(load(&f3).unwrap(), m3);
     }
 
     /// A pattern's own time markers (piano-roll Alt+T) are marker groups in its metadata block, sorted by position

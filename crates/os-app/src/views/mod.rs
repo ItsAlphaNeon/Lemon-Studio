@@ -154,6 +154,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if s.cables.borrow().debug {
         cabledebug::paint(ui, s);
     }
+    // The Song info box of a project opened with "Show info on opening" (spec: flp/events/project-info.md).
+    crate::project_info::paint_song_info(ui, s);
     // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
     dialog::paint(ui, s);
     overlays

@@ -75,6 +75,26 @@ pub struct Project {
     pub main_volume: Option<u16>,
     /// Main pitch in cents, -1200..=1200 (event 80; spec: audio/voice-levels.md). `None` = not in the file (0).
     pub main_pitch: Option<i16>,
+    /// When the project was started and the time spent working on it (event 237; spec: flp/events/project-info.md).
+    /// `None` = not in the file.
+    pub work_time: Option<WorkTime>,
+    /// "Show info on opening" (event 10; spec: flp/events/project-info.md): opening the project shows its Song info
+    /// box. `None` = not in the file (off).
+    pub show_info: Option<bool>,
+}
+
+/// Event 237: two doubles in days (spec: flp/events/project-info.md).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WorkTime {
+    /// When the project was started: days since 1899-12-30 00:00, local time.
+    pub started: f64,
+    /// The time spent working on it, in days.
+    pub spent: f64,
+}
+
+impl WorkTime {
+    /// Days in a minute.
+    pub const MINUTE: f64 = 1.0 / 1440.0;
 }
 
 impl Project {

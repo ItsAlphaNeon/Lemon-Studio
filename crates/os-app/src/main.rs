@@ -842,6 +842,8 @@ impl ApplicationHandler for Shell {
                 // Linux: plugin windows stay above the main window while Lemon Studio is the active application.
                 #[cfg(target_os = "linux")]
                 crate::plugin_window::main_focused(focused);
+                // The project's working time counts while the main window is in front (`project_info::WorkClock`).
+                self.app.main_focused(focused);
                 if !focused {
                     self.grab = None;
                     self.unmax = None;
