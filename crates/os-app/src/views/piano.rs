@@ -142,8 +142,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.veil(tab, t.window_title);
 
     overview(ui, s, &l, &g, notes, ch);
-    let markers: Vec<(u32, &str)> =
-        s.project.pattern(s.pattern).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, m.name.as_str())).collect();
+    // A time-signature marker shows its signature (spec: ui/pattern-time-signature.md §2).
+    let markers: Vec<(u32, String)> =
+        s.project.pattern(s.pattern).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, super::playlist::marker_label(m))).collect();
     ruler(ui, &l, &g, range, s.piano.marker, &markers);
     // Lit keys: the one held with the mouse and this channel's notes playing now (§4).
     let mut lit: Vec<i32> = s.piano.held.into_iter().collect();
@@ -376,7 +377,7 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     // Horizontal scroll bar over the pattern plus room to scroll on (half a screen past the
     // pattern or the current view).
     let view = l.grid.w / g.ppt;
-    let len = piano::pattern_length(s, notes) as f32;
+    let len = piano::pattern_length(s, s.pattern) as f32;
     let span = len.max(g.scroll_x + view) + view / 2.0;
     // Scroll arrows at both ends (§1a); the bar runs between them (small scroll bars: no arrows).
     let arrow = if super::small_scrollbars() { 0.0 } else { 19.0 };
@@ -397,7 +398,7 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     }
 }
 
-fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u32, markers: &[(u32, &str)]) {
+fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u32, markers: &[(u32, String)]) {
     let t = ui.t;
     ui.hit(Rect::new(l.grid.x, l.ruler.y, l.grid.w, l.ruler.h), Action::PianoRuler, "Drag: move the play start - right-drag: select a time range");
     // The content keeps to the bottom 19 px; small scroll bars make the ruler taller, the extra band plain.
@@ -415,19 +416,19 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u
         ui.c.fill_rect(Rect::new(b.x, b.bottom() - 2.0, b.w, 1.0), Color::rgb(0x9f5556));
         ui.c.fill_rect(Rect::new(b.x, b.bottom() - 1.0, b.w, 1.0), Color::rgb(0xb06667));
     }
+    // Bar numbers on the pattern's own bars (its time-signature markers, spec: ui/pattern-time-signature.md §2).
     let bar_px = g.ppt * g.bar as f32;
     let step = if bar_px < 30.0 { 4 } else if bar_px < 60.0 { 2 } else { 1 };
-    let first = (g.scroll_x / g.bar as f32).floor() as i64;
-    let last = ((g.scroll_x + l.grid.w / g.ppt) / g.bar as f32).ceil() as i64;
-    for b in first..=last {
-        if b % step != 0 {
+    for (tick, n) in g.bar_lines(g.scroll_x + l.grid.w / g.ppt) {
+        let x = g.x_of(tick as f32);
+        if (n - 1) % step != 0 || x < l.grid.x - 40.0 {
             continue;
         }
-        let x = g.x_of((b * i64::from(g.bar)) as f32);
-        ui.c.text(Font::new(13), x + 2.0, rr.y + 1.0, t.text_dim, &format!("{}", b + 1));
+        ui.c.text(Font::new(13), x + 2.0, rr.y + 1.0, t.text_dim, &format!("{n}"));
     }
     // Time markers (§10a): a flag line and the name, drawn like the playlist's marker tabs.
-    for &(tick, name) in markers {
+    for (tick, name) in markers {
+        let (tick, name) = (*tick, name.as_str());
         let x = g.x_of(tick as f32).round();
         if x < l.grid.x - 200.0 || x > l.grid.right() {
             continue;
@@ -530,16 +531,17 @@ fn columns(ui: &mut Ui, g: &Geom, area: Rect, bands: &[(f32, f32, Color)], bar: 
     let beat_px = g.beat as f32 * g.ppt;
     let first = (g.scroll_x / g.step as f32).floor() as i64;
     let last = ((g.scroll_x + area.w / g.ppt) / g.step as f32).ceil() as i64;
-    let per_beat = i64::from((g.beat / g.step).max(1));
-    let per_bar = i64::from((g.bar / g.step).max(1));
-    for i in first..=last {
-        let x = g.x_of((i * i64::from(g.step)) as f32).floor();
+    for i in first.max(0)..=last {
+        let tick = (i * i64::from(g.step)) as u32;
+        let x = g.x_of(tick as f32).floor();
         if x < area.x || x >= area.right() {
             continue;
         }
-        if i % per_bar == 0 {
+        // The pattern's own bars and beats (spec: ui/pattern-time-signature.md §2: 3/8, a bar every 6 steps).
+        let (on_bar, on_beat) = g.line_at(tick);
+        if on_bar {
             ui.c.fill_rect(Rect::new(x, area.y, 1.0, area.h), bar);
-        } else if i % per_beat == 0 && beat_px >= 4.0 {
+        } else if on_beat && beat_px >= 4.0 {
             for &(y, h, c) in bands {
                 ui.c.fill_rect(Rect::new(x, y, 1.0, h), sub(c, 0x12));
             }

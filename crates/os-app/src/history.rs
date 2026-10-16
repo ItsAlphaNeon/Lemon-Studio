@@ -8,8 +8,9 @@
 //! project as opened or made). An edit records a step holding what it is about to change (`record`); undo and redo
 //! swap that with the project's, so a step always holds the other side of itself: the state before it while it is
 //! done, the state after it while it is undone. Covered: a pattern's notes, control points and length (the piano roll
-//! and the step sequencer), the playlist (`playlist::snapshot`), knob turns, sample loads (`load_sample`) and the
-//! project's initial values (`crate::init`).
+//! and the step sequencer), the playlist (`playlist::snapshot`), knob turns, sample loads (`load_sample`), the
+//! project's initial values (`crate::init`), and with the playlist, PATTERNS > Split by channel's patterns and ADD's
+//! clip channels (`playlist::snapshot_with`).
 //!
 //! The settings of General ▸ Undo history (`crate::prefs`): Maximum undo levels (past it the oldest step goes), Undo
 //! knob tweaks, Alternate undo mode (what Ctrl+Z and Ctrl+Alt+Z do), Show undo history in the browser when undoing
@@ -50,9 +51,47 @@ pub enum Snap {
     Channel { row: usize, ch: Option<Box<os_model::Channel>> },
     /// Control `.0`'s entry in the project's initial values; `None` while it isn't in the list (`crate::init`).
     Init(u32, Option<os_model::InitControl>),
+    /// All the patterns and the current one (PATTERNS > Split by channel, spec: ui/split-by-channel.md §2).
+    Patterns { patterns: Vec<os_model::Pattern>, current: u16 },
+    /// What ADD > Audio clip / Automation clip changes in the rack (`RackSide`).
+    Rack(Box<RackSide>),
     /// Several of these in one step, put back last first ("Create automation clip": the playlist and the initial
     /// value).
     Several(Vec<Snap>),
+}
+
+/// The rack's side of ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the added channel at `row`
+/// (`None` while it doesn't exist; only the last row comes and goes), the rack's filter groups, filter and selection,
+/// and the playlist's clip source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RackSide {
+    pub row: usize,
+    pub ch: Option<os_model::Channel>,
+    pub groups: Vec<crate::rack::Group>,
+    pub filter: crate::rack::Filter,
+    pub unsorted_at: Option<usize>,
+    pub sel: std::collections::BTreeSet<usize>,
+    pub selected: usize,
+    pub source: Option<os_model::ClipSource>,
+    pub picker: crate::playlist::PickKind,
+}
+
+impl RackSide {
+    /// Row `row`'s side as the rack has it now.
+    pub fn now(s: &State, row: usize) -> RackSide {
+        let r = &s.rack;
+        RackSide {
+            row,
+            ch: s.project.channels.get(row).cloned(),
+            groups: r.groups.clone(),
+            filter: r.filter,
+            unsorted_at: r.unsorted_at,
+            sel: r.sel.clone(),
+            selected: s.selected_channel,
+            source: s.playlist.source,
+            picker: s.playlist.picker,
+        }
+    }
 }
 
 impl Snap {
@@ -84,6 +123,8 @@ impl Snap {
             Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
             Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.project.channels.get(*row).cloned().map(Box::new) },
             Snap::Init(t, _) => Snap::Init(*t, crate::init::entry(s, *t)),
+            Snap::Patterns { .. } => Snap::Patterns { patterns: s.project.patterns.clone(), current: s.pattern },
+            Snap::Rack(r) => Snap::Rack(Box::new(RackSide::now(s, r.row))),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
         }
     }
@@ -109,9 +150,17 @@ impl Snap {
                 p.0.iter_mut().for_each(|c| c.rescale(from, to));
                 p.1.iter_mut().for_each(|m| m.rescale(from, to));
             }
+            Snap::Patterns { patterns, .. } => {
+                for p in patterns {
+                    p.notes.iter_mut().for_each(|n| n.rescale(from, to));
+                    p.controls.iter_mut().for_each(|c| c.rescale(from, to));
+                    p.markers.iter_mut().for_each(|m| m.rescale(from, to));
+                    p.length = p.length.map(|l| os_model::rescale_length(l, from, to));
+                }
+            }
             Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
             // A channel or an initial value holds no ticks.
-            Snap::Knob(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) => {}
+            Snap::Knob(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) => {}
         }
     }
 
@@ -142,6 +191,22 @@ impl Snap {
                 _ => {}
             },
             Snap::Init(t, e) => crate::init::put(s, t, e),
+            Snap::Patterns { patterns, current } => {
+                s.project.patterns = patterns;
+                s.pattern = current;
+                s.piano.clear_selection();
+            }
+            Snap::Rack(r) => {
+                let RackSide { row, ch, groups, filter, unsorted_at, sel, selected, source, picker } = *r;
+                match ch {
+                    None if row + 1 == s.project.channels.len() => crate::rack::remove_last(s),
+                    Some(c) if row == s.project.channels.len() => crate::rack::push_channel(s, c),
+                    _ => {}
+                }
+                (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (groups, filter, unsorted_at);
+                (s.rack.sel, s.selected_channel) = (sel, selected);
+                (s.playlist.source, s.playlist.picker) = (source, picker);
+            }
             Snap::Several(v) => v.into_iter().rev().for_each(|x| x.put(s)),
         }
         s.piano.dirty = true;
@@ -177,6 +242,7 @@ fn knob_name(id: KnobId) -> &'static str {
         KnobId::SlotMix(..) => "Effect mix level",
         KnobId::Send(..) => "Send level",
         KnobId::Swing => "Main swing",
+        KnobId::Eq(..) => "Mixer track equalizer",
     }
 }
 

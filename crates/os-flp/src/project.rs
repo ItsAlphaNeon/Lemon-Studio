@@ -1539,10 +1539,20 @@ fn auto_template(bipolar: bool) -> (Vec<u8>, Vec<u8>) {
 
 /// A new automation channel's data: a flat line at `value` over `beats` (two points, as FL creates one).
 pub fn new_automation(channel: u16, target: u32, value: f64, beats: f64) -> Automation {
-    let (header, tail) = auto_template(os_model::target::bipolar(target));
+    flat_automation(channel, vec![target], os_model::target::bipolar(target), value, beats)
+}
+
+/// ADD > Automation clip's data (spec: ui/add-clip-channels.md §2): a flat line at `value` over `beats` and no target
+/// (no event 227); FL stored header byte 8 as 1 for it.
+pub fn untargeted_automation(channel: u16, value: f64, beats: f64) -> Automation {
+    flat_automation(channel, Vec::new(), true, value, beats)
+}
+
+fn flat_automation(channel: u16, targets: Vec<u32>, bipolar: bool, value: f64, beats: f64) -> Automation {
+    let (header, tail) = auto_template(bipolar);
     let mut first = AutoPoint::new(0.0, value);
     first.flag = 0;
-    Automation { channel, targets: vec![target], points: vec![first, AutoPoint::new(beats.max(0.0), value)], header, tail }
+    Automation { channel, targets, points: vec![first, AutoPoint::new(beats.max(0.0), value)], header, tail }
 }
 
 fn decode_automation(channel: u16, d: &[u8]) -> Option<Automation> {

@@ -10,11 +10,93 @@
 use os_ui::{Font, Rect};
 
 use super::{menus, sunken, tool_button, FrameInfo};
-use crate::app::{Action, Live, State, Ui, Win};
+use crate::app::{Action, Live, State, Ui, Util, Win};
 use crate::icons::{self, Icon};
 
 /// Leftmost logo centre: just right of the last toolbar control (the news panel / downloads, x 1473).
 const LOGO_MIN_X: f32 = 1520.0;
+
+/// The Toolbars menu's switches (spec: ui/toolbar-menu.md §8): app-wide, kept in `settings.txt` across runs but for
+/// Hide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Opts {
+    /// Group and row separator lines (§2).
+    pub separators: bool,
+    /// Square buttons without face and edges (§3).
+    pub flat: bool,
+    /// The floating hint bar at the window's bottom-left (§4).
+    pub hint_bar: bool,
+    /// Toolbar and menu bar hidden, the browser and workspace up to the window's top (§5).
+    pub hidden: bool,
+}
+
+impl Default for Opts {
+    fn default() -> Self {
+        Opts { separators: true, flat: false, hint_bar: false, hidden: false }
+    }
+}
+
+impl Opts {
+    /// The switches kept in `settings.txt` (`toolbar_separators`, `toolbar_flat_buttons`, `toolbar_hint_bar`); the
+    /// default for one that is missing. Hide is not kept: a start shows the toolbar.
+    pub fn load() -> Opts {
+        use crate::settings_file::flag;
+        let d = Opts::default();
+        Opts {
+            separators: flag("toolbar_separators", d.separators),
+            flat: flag("toolbar_flat_buttons", d.flat),
+            hint_bar: flag("toolbar_hint_bar", d.hint_bar),
+            hidden: false,
+        }
+    }
+
+    /// Keeps the switches but Hide for the next start.
+    pub fn save(&self) {
+        use crate::settings_file::set_flag;
+        set_flag("toolbar_separators", self.separators);
+        set_flag("toolbar_flat_buttons", self.flat);
+        set_flag("toolbar_hint_bar", self.hint_bar);
+    }
+}
+
+/// The Toolbars menu entries that work (§8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switch {
+    Separators,
+    Flat,
+    HintBar,
+    Hide,
+}
+
+/// The toolbar's two rows, the bottom edge excepted: one band, repainted whole while the separators are off (their
+/// contents are moved by a pixel after painting, `paint`).
+pub fn band(width: f32) -> Rect {
+    Rect::new(0.0, 0.0, width, 81.0)
+}
+
+/// The floating hint bar: 400 x 82 at the window's left edge, its bottom 2 px above the window's (§4).
+pub fn hint_bar_rect(s: &State) -> Rect {
+    Rect::new(0.0, s.screen.1 - 84.0, 400.0, 82.0)
+}
+
+/// The floating hint bar (§4): a near-black panel with the hint at its top left and a round grip at its right, over
+/// every window. Clicks on it go nowhere.
+pub fn paint_hint_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
+    let t = ui.t;
+    let r = hint_bar_rect(s);
+    ui.hit(r, Action::Swallow, "");
+    let (edge, mid) = (t.s(0x141618), t.s(0x111213));
+    let half = (r.h / 2.0).round();
+    ui.c.fill_rect_gradient(Rect::new(r.x, r.y, r.w, half), edge, mid, 0.0);
+    ui.c.fill_rect_gradient(Rect::new(r.x, r.y + half, r.w, r.h - half), mid, edge, 0.0);
+    let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
+    ui.c.text_clip(Font::new(14), r.x + 7.0, r.y + 5.0, r.w - 50.0, t.text, hint);
+    let (cx, cy) = (r.right() - 22.0, r.cy());
+    ui.c.fill_circle(cx, cy, 11.0, t.s(0x24272a));
+    for (dx, dy) in [(-3.0, -3.0), (3.0, -3.0), (-3.0, 3.0), (3.0, 3.0)] {
+        ui.c.fill_circle(cx + dx, cy + dy, 1.3, t.s(0x5c6164));
+    }
+}
 
 fn btn(x: f32, y: f32) -> Rect {
     Rect::new(x, y, 30.0, 33.0)
@@ -23,22 +105,27 @@ fn btn(x: f32, y: f32) -> Rect {
 pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     let t = ui.t;
     let lemon = super::lemon(ui);
+    // Separator lines: off from the Toolbars menu (spec: ui/toolbar-menu.md §2).
+    let seps = s.toolbar.separators;
     // Bands.
     if lemon {
         // Lemon (spec: ui/lemon-design.md §4): flat bands, short rounded separators.
         ui.c.fill_rect(Rect::new(0.0, 0.0, width, 81.0), t.toolbar);
-        ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), t.toolbar_line);
+        if seps {
+            ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), t.toolbar_line);
+        }
         ui.c.fill_rect(Rect::new(0.0, 81.0, width, 2.0), t.toolbar_line);
     } else {
         ui.c.fill_rect_gradient(Rect::new(0.0, 0.0, width, 41.0), t.toolbar.shade(0.025), t.toolbar.shade(-0.015), 0.0);
-        ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), t.toolbar_line);
+        let line = if seps { t.toolbar_line } else { t.toolbar.shade(-0.015) };
+        ui.c.fill_rect(Rect::new(0.0, 41.0, width, 1.0), line);
         ui.c.fill_rect_gradient(Rect::new(0.0, 42.0, width, 39.0), t.toolbar.shade(0.02), t.toolbar.shade(-0.02), 0.0);
         ui.c.fill_rect(Rect::new(0.0, 81.0, width, 2.0), t.toolbar_line);
     }
     // Empty toolbar areas drag the window (registered first, so controls win).
     ui.hit(Rect::new(0.0, 0.0, width, 81.0), Action::DragWindow, "");
     // Group separators (2 px gaps measured in row 1 and row 2).
-    for x in [379.0, 575.0, 876.0, 1048.0, 1204.0] {
+    for x in [379.0, 575.0, 876.0, 1048.0, 1204.0].into_iter().filter(|_| seps) {
         if lemon {
             ui.c.fill_rrect(Rect::new(x, 9.0, 2.0, 23.0), 1.0, t.toolbar_line);
             continue;
@@ -46,7 +133,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         ui.c.fill_rect(Rect::new(x, 2.0, 1.0, 37.0), t.toolbar_line);
         ui.c.fill_rect(Rect::new(x + 1.0, 2.0, 1.0, 37.0), t.toolbar_edge.with_alpha(110));
     }
-    for x in [298.0, 378.0, 576.0, 967.0, 1298.0] {
+    for x in [298.0, 378.0, 576.0, 967.0, 1298.0].into_iter().filter(|_| seps) {
         if lemon {
             ui.c.fill_rrect(Rect::new(x, 50.0, 2.0, 23.0), 1.0, t.toolbar_line);
             continue;
@@ -57,6 +144,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
 
     row1(ui, s, f);
     row2(ui, s, f);
+    // Without separators row 1's contents move 1 px down and row 2's 1 px up, over the row line (§2). The pixels are
+    // moved after painting; the band is always repainted whole then (`App::take_damage`).
+    if !seps {
+        let d = ui.c.scale.round().max(1.0) as i32;
+        ui.c.shift(Rect::new(0.0, 0.0, width, 42.0), 0, d, &[]);
+        ui.c.shift(Rect::new(0.0, 41.0, width, 40.0), 0, -d, &[]);
+    }
 
     // Logo spot (spans both rows): the Lemon Studio mark.
     // It keeps to the right edge until the window is too narrow, then the edge crops it
@@ -214,14 +308,13 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.c.fill_rect(tp, ui.t.s(0x212829));
         ui.c.fill_rect(tp.inset(1.0), t.time_panel);
     }
-    let hint = if s.clock_msc { "Song position (minute:second:centisecond)" } else { "Song position (bar:step:tick)" };
-    ui.hit(tp, Action::Clock, hint);
+    // spec: ui/time-display.md §2-3 (the bar's signature is the project's).
+    ui.hit(tp, Action::Clock, s.clock.hint());
     ui.live(Live::Clock, tp);
-    let (bar, step, tick) = if s.clock_msc {
-        msc_ticks(f.tick / f64::from(s.project.ppq.max(1)) * 60.0 / s.tempo.max(1.0))
-    } else {
-        bst_ticks(f.tick * 96.0 / f64::from(s.project.ppq.max(1)))
-    };
+    let ppq = f64::from(s.project.ppq.max(1));
+    // A bar that makes no signature (3 steps per beat) counts its beats as quarters.
+    let sig = s.project.signature().unwrap_or((s.project.bar().0, 4));
+    let (bar, step, tick) = s.clock.reading(f.tick / ppq * 60.0 / s.tempo.max(1.0), f.tick * 96.0 / ppq, sig);
     // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
     // right-aligned so long bar numbers grow to the left and never leave the panel.
     let (big, small) = (Font::light(32, 13), Font::light(22, 8));
@@ -243,7 +336,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_rect(Rect::new(tick_x - 5.0, 29.5, 2.0, 2.0), g);
     ui.c.text(small, tick_x, 9.0, g, &tick_s);
     ui.c.pop_clip();
-    let label = if s.clock_msc { "M:S:CS" } else { "B:S:T" };
+    let label = s.clock.label();
     ui.c.text_right(Font::condensed(7, 3).bold(), 871.0, 5.0, if lemon { t.text_dim } else { t.glyph.shade(-0.1) }, label);
 
     // Monitors (oscilloscope / spectrum analyzer, stereo peak bars) and CPU / memory.
@@ -292,21 +385,23 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.c.text_right(Font::condensed(18, 6), 1199.0, 17.0, t.meter_clip, &format!("!{}", r.dropouts.min(9999)));
     }
 
-    // Utility buttons.
+    // Utility buttons: "left / right" hints, right clicks in `App::toolbar_right` (spec: ui/toolbar-buttons.md §2).
     let utils = [
-        (Icon::Undo, "Undo history"),
-        (Icon::Cut, "Edit tools"),
-        (Icon::Mic, "Audio input / recording"),
-        (Icon::Help, "Help"),
-        (Icon::Save, "Save project (Ctrl+S)"),
-        (Icon::SaveRender, "Export the song as a WAV file (Ctrl+R)"),
-        (Icon::Info, "Project info"),
-        (Icon::Download, "Downloads"),
+        (Icon::Undo, "Undo / Undo history (Ctrl+Z)"),
+        (Icon::Cut, "Open audio editor / New audio editor"),
+        (Icon::Mic, "One-click audio recording"),
+        (Icon::Help, "Help index / About..."),
+        (Icon::Save, "Save as... / Save new version (Shift+Ctrl+S)"),
+        (Icon::SaveRender, "Export > Wave file... (Ctrl+R)"),
+        (Icon::Info, "Project info (F11)"),
+        (Icon::Download, "Launch content library"),
     ];
     for (i, (icon, hint)) in utils.into_iter().enumerate() {
         let r = btn(1209.0 + 33.0 * i as f32, 4.0);
         let action = match icon {
-            Icon::Save => Action::MenuItem(0, menus::FILE_SAVE),
+            Icon::Undo => Action::Util(Util::Undo),
+            Icon::Help => Action::Util(Util::Help),
+            Icon::Save => Action::Util(Util::Save),
             Icon::SaveRender => Action::MenuItem(0, menus::FILE_EXPORT),
             Icon::Info => Action::MenuItem(menus::OPTIONS_MENU, menus::OPT_INFO),
             _ => Action::Placeholder(hint),
@@ -544,17 +639,17 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.hit(add, Action::PatternAdd, "New pattern (find first / next empty)");
     icons::draw(ui.c, Icon::Plus, add, t.glyph);
 
-    // Window buttons.
+    // Window buttons (spec: ui/toolbar-buttons.md §2; right clicks in `App::toolbar_right`).
     let wins = [
-        (Icon::Playlist, Action::ToggleWin(Win::Playlist), s.shown(Win::Playlist), "Playlist (F5)"),
-        (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), s.shown(Win::PianoRoll), "Piano roll (F7)"),
+        (Icon::Playlist, Action::ToggleWin(Win::Playlist), s.shown(Win::Playlist), "Playlist / Maximize Play list (F5)"),
+        (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), s.shown(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
         (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), s.shown(Win::ChannelRack), "Channel rack (F6)"),
         (Icon::Mixer, Action::ToggleWin(Win::Mixer), s.shown(Win::Mixer), "Mixer (F9)"),
-        (Icon::Browser, Action::ToggleWin(Win::Browser), s.show_browser, "Browser (Alt+F8)"),
-        (Icon::Project, Action::Placeholder("Project picker"), false, "Project picker"),
-        (Icon::Plug, Action::PickerOpen, false, "Add a plugin (F8)"),
+        (Icon::Browser, Action::ToggleWin(Win::Browser), s.show_browser, "Browser / Plugin picker (Alt+F8)"),
+        (Icon::Project, Action::Placeholder("Project picker"), false, "Project picker / Plugin picker (Ctrl+F8)"),
+        (Icon::Plug, Action::PickerOpen, false, "Plugin picker (F8)"),
         (Icon::Kick, Action::ToggleWin(Win::Tapper), s.shown(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
-        (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller"),
+        (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller (Alt+F7)"),
         (Icon::Store, Action::Placeholder("Plugin store"), false, "Plugin store"),
     ];
     for (i, (icon, action, open, hint)) in wins.into_iter().enumerate() {
@@ -564,9 +659,9 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
             continue;
         }
         let hov = ui.hit(r, action.clone(), hint) || ui.down(r, &action);
-        super::button_face(ui, r, if hov { super::Look::Hot } else { super::Look::Off });
         let _ = open;
-        icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), if hov { t.on_glyph } else { t.glyph });
+        let ink = super::tool_face(ui, r, if hov { super::Look::Hot } else { super::Look::Off });
+        icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), ink);
     }
 
     // News panel.

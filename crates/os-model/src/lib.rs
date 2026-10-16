@@ -353,6 +353,60 @@ impl Project {
         self.patterns.iter().find(|p| p.number == number)
     }
 
+    /// Ticks in a bar of `num` / `den`: `PPQ * 4 * num / den` (spec: audio/timing.md, "Settings").
+    pub fn bar_of(&self, num: u16, den: u16) -> u32 {
+        (u32::from(self.ppq.max(1)) * 4 * u32::from(num.max(1)) / u32::from(den.max(1))).max(1)
+    }
+
+    /// Pattern `number`'s own bar grid (spec: audio/song-structure.md, "Time signatures and a pattern's length"): one
+    /// region per time-signature marker of the pattern, `(start, bar, signature)`, the project's bar ([`Project::bar`])
+    /// from 0 until the first one. A region starts a bar at its marker. Markers of the arrangements play no part.
+    pub fn pattern_bars(&self, number: u16) -> Vec<(u32, u32, (u16, u16))> {
+        // A bar that makes no signature (3 steps per beat) keeps its beats.
+        let sig = self.signature().unwrap_or((self.bar().0, 4));
+        let mut regions = vec![(0, self.bar_ticks(), sig)];
+        let mut marks: Vec<&TimeMarker> =
+            self.pattern(number).map(|p| p.markers.iter().filter(|m| m.kind == TimeMarker::SIGNATURE).collect()).unwrap_or_default();
+        marks.sort_by_key(|m| m.position);
+        for m in marks {
+            let sig = (u16::from(m.numerator), u16::from(m.denominator));
+            let region = (m.position, self.bar_of(sig.0, sig.1), sig);
+            match regions.last_mut() {
+                Some(last) if last.0 == m.position => *last = region,
+                _ => regions.push(region),
+            }
+        }
+        regions
+    }
+
+    /// The first bar line of pattern `number`'s own grid at or after `tick` (past 0: at least one bar).
+    pub fn pattern_bar_end(&self, number: u16, tick: u32) -> u32 {
+        let regions = self.pattern_bars(number);
+        let t = tick.max(1);
+        for (i, &(start, bar, _)) in regions.iter().enumerate() {
+            let next = regions.get(i + 1).map(|r| r.0);
+            if next.is_some_and(|n| t > n) {
+                continue;
+            }
+            let line = start.saturating_add((t - start).div_ceil(bar).max(1).saturating_mul(bar));
+            return next.map_or(line, |n| line.min(n));
+        }
+        t
+    }
+
+    /// Pattern `number`'s length in ticks (spec: audio/song-structure.md, "Pattern mode" and "Time signatures and a
+    /// pattern's length"): the channel rack's explicit length wins (ui/channel-rack.md §7); otherwise the end of its
+    /// last note (a length of 0 counting as 1) rounded up to the next bar line of the pattern's own grid, at least one
+    /// bar. Notes ending exactly on a bar line make it that long.
+    pub fn pattern_length(&self, number: u16) -> u32 {
+        let p = self.pattern(number);
+        if let Some(l) = p.and_then(|p| p.length).filter(|&l| l > 0) {
+            return l;
+        }
+        let last = p.and_then(|p| p.notes.iter().map(|n| n.position.saturating_add(n.length.max(1))).max()).unwrap_or(0);
+        self.pattern_bar_end(number, last)
+    }
+
     /// Channel by its index (rack position).
     pub fn channel(&self, index: u16) -> Option<&Channel> {
         self.channels.iter().find(|c| c.index == index)

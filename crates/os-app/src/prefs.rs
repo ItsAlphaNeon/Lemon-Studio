@@ -4,9 +4,9 @@
 // This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
 // and not any other part of Lemon Studio.
 
-//! Program settings of the settings window, declared once below: checks and combos kept together in the user folder
-//! (`settings.txt`, `key=value` lines; lines it does not know are kept, a missing or unreadable value is the default),
-//! never in the project. The settings page draws a declared control live: a check toggles on a click; a combo shows its
+//! Program settings of the settings window, declared once below: checks and combos kept in the program's settings file
+//! (`crate::settings_file`: `settings.txt` in the user folder, a missing or unreadable value is the default), never in
+//! the project. The settings page draws a declared control live: a check toggles on a click; a combo shows its
 //! choice and opens the list of its choices, the current one radio-marked. A change is kept at once. Undeclared
 //! controls (without a module of their own) stay greyed out.
 //!
@@ -29,7 +29,7 @@
 //! Sliders ([`Slider`], listed in [`SLIDERS`]) are declared the same way and read with `prefs::slider`.
 // spec: ui/settings.md, ui/options-coverage.md
 
-use std::sync::{Mutex, OnceLock}; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+use crate::settings_file::{read, write, Store}; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
 
 use crate::app::App;
 
@@ -613,91 +613,6 @@ fn index_in(s: &Store, c: &Combo) -> usize {
     s.get(c.key).and_then(|v| c.choices.iter().position(|ch| *ch == v)).unwrap_or(c.default)
 }
 
-/// The file's lines as read: lines of keys this version does not know are written back as they were.
-#[derive(Debug, Clone, Default, PartialEq)]
-struct Store {
-    lines: Vec<String>,
-}
-
-impl Store {
-    fn parse(text: &str) -> Store {
-        Store { lines: text.lines().map(String::from).collect() }
-    }
-
-    fn text(&self) -> String {
-        self.lines.iter().map(|l| format!("{l}\n")).collect()
-    }
-
-    /// The value of `key`: its last line's.
-    fn get(&self, key: &str) -> Option<&str> {
-        self.lines.iter().rev().filter_map(|l| l.split_once('=')).find(|(k, _)| k.trim() == key).map(|(_, v)| v.trim())
-    }
-
-    /// Sets `key` to `value`: its first line is replaced (and any later one dropped), or a line is added at the end.
-    fn set(&mut self, key: &str, value: &str) {
-        let line = format!("{key}={value}");
-        let mut found = false;
-        self.lines.retain_mut(|l| {
-            if !l.split_once('=').is_some_and(|(k, _)| k.trim() == key) {
-                return true;
-            }
-            if found {
-                return false;
-            }
-            found = true;
-            l.clone_from(&line);
-            true
-        });
-        if !found {
-            self.lines.push(line);
-        }
-    }
-}
-
-#[cfg_attr(test, allow(dead_code))]
-static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
-
-#[cfg(test)]
-thread_local! {
-    /// Tests run in parallel threads: each has its own settings, and none reads or writes the user folder.
-    static TEST: std::cell::RefCell<Store> = std::cell::RefCell::new(Store::default());
-}
-
-/// Runs `f` on the settings: read from `settings.txt` the first time.
-fn read<R>(f: impl FnOnce(&Store) -> R) -> R {
-    #[cfg(test)]
-    return TEST.with(|s| f(&s.borrow()));
-    #[cfg(not(test))]
-    f(&STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner()))
-}
-
-/// Sets `key` to `value` and keeps the file when that changed it.
-fn write(key: &str, value: &str) {
-    #[cfg(test)]
-    TEST.with(|s| s.borrow_mut().set(key, value));
-    #[cfg(not(test))]
-    {
-        let mut s = STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner());
-        if s.get(key) != Some(value) {
-            s.set(key, value);
-            save(&s);
-        }
-    }
-}
-
-#[cfg_attr(test, allow(dead_code))]
-fn load() -> Store {
-    os_paths::user_file("settings.txt").and_then(|f| std::fs::read_to_string(f).ok()).map(|t| Store::parse(&t)).unwrap_or_default()
-}
-
-#[cfg_attr(test, allow(dead_code))]
-fn save(s: &Store) {
-    if let Some(dir) = os_paths::user_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("settings.txt"), s.text());
-    }
-}
-
 /// The settings window's side: what a declared control does when clicked (`views::settings` draws them).
 impl App {
     /// A declared check was clicked (`SAct::Check`): toggles and keeps it.
@@ -766,21 +681,23 @@ mod tests {
     use crate::views::settings::{self, Row, SAct};
     use os_ui::{Canvas, Rect};
 
+    /// Values it cannot read are the defaults; the last line of a key counts (the file's own rules:
+    /// `settings_file`).
     #[test]
-    fn file_keeps_unknown_lines_and_defaults_what_is_missing() {
-        let mut s = Store::parse("theme=dark\njunk\nmain_gui_scaling=150%\n");
+    fn values_and_defaults() {
+        let s = Store::parse("theme=dark
+junk
+main_gui_scaling=150%
+");
         assert_eq!(index_in(&s, &MAIN_GUI_SCALING), 3);
         assert!(check_in(&s, &TEST_CHECK), "missing: the default");
-        s.set("test_check", "0");
-        s.set("main_gui_scaling", "System");
-        assert_eq!(s.text(), "theme=dark\njunk\nmain_gui_scaling=System\ntest_check=0\n");
-        assert!(!check_in(&s, &TEST_CHECK));
-        // Values it cannot read are the defaults; a key set twice keeps one line.
-        let mut s = Store::parse("test_check=yes\nmain_gui_scaling=90%\nmain_gui_scaling = 200% \n");
+        assert!(!check_in(&Store::parse("test_check=0"), &TEST_CHECK));
+        let s = Store::parse("test_check=yes
+main_gui_scaling=90%
+main_gui_scaling = 200% 
+");
         assert!(check_in(&s, &TEST_CHECK));
         assert_eq!(index_in(&s, &MAIN_GUI_SCALING), 5, "the last line counts");
-        s.set("main_gui_scaling", "125%");
-        assert_eq!(s.text(), "test_check=yes\nmain_gui_scaling=125%\n");
         assert_eq!(index_in(&Store::parse("main_gui_scaling=90%"), &MAIN_GUI_SCALING), 0);
     }
 

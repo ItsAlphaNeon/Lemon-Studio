@@ -466,7 +466,7 @@ fn pick_used(s: &State, src: ClipSource) -> bool {
 fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect) {
     let ClipSource::Pattern(n) = src else { return };
     let Some(p) = s.project.pattern(n) else { return };
-    let len = crate::piano::pattern_length(s, &p.notes).max(1) as f32;
+    let len = crate::piano::pattern_length(s, n).max(1) as f32;
     let lo = p.notes.iter().map(|n| n.key).min().unwrap_or(0);
     let hi = p.notes.iter().map(|n| n.key).max().unwrap_or(0);
     let span = f32::from(hi - lo + 1).max(6.0);
@@ -572,10 +572,12 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
     ui.c.pop_clip();
 }
 
-fn marker_label(m: &TimeMarker) -> String {
+/// A marker's label: its name; a time signature first shows the signature (spec: ui/pattern-time-signature.md §2).
+pub(crate) fn marker_label(m: &TimeMarker) -> String {
     if m.kind == TimeMarker::SIGNATURE {
+        // FL names a new signature marker after its signature ("3/8", spec: ui/pattern-time-signature.md §4): shown once.
         let sig = format!("{}/{}", m.numerator, m.denominator);
-        if m.name.is_empty() { sig } else { format!("{sig} {}", m.name) }
+        if m.name.is_empty() || m.name == sig { sig } else { format!("{sig} {}", m.name) }
     } else {
         m.name.clone()
     }

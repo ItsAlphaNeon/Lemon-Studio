@@ -211,15 +211,12 @@ impl App {
         }
     }
 
-    /// Show plugin database: the browser shown, on its Plugin database tab with the database open.
+    /// Show plugin database: VIEW > Plugin database (spec: ui/browser-commands.md §4), the browser shown on its Plugin
+    /// database tab as it was left, unless the browser's search field has the keyboard.
     pub(crate) fn show_plugin_database(&mut self) {
-        let s = &mut self.state;
-        s.show_browser = true;
-        if s.browser_tab != 2 {
-            s.browser_tab = 2;
-            s.browser_scroll = 0.0;
+        if !self.state.browser_search_focus {
+            self.browser_jump(crate::browser::Jump::PluginDb);
         }
-        s.browser_open.insert("2:Plugin database".into());
         self.invalidate();
     }
 }
@@ -417,13 +414,12 @@ mod tests {
         assert_eq!(browser(&app), shown);
         app.key(&f8, false, true);
         assert!(!picker(&app));
-        // Shift+F8: the browser on its Plugin database tab.
+        // Shift+F8: the browser on its Plugin database tab, as it was left (spec: ui/browser-commands.md §4).
         app.state.show_browser = false;
         app.shift = true;
         app.key(&f8, false, false);
         app.shift = false;
-        assert!(browser(&app) && app.state.browser_tab == 2);
-        assert!(app.state.browser_open.contains("2:Plugin database"));
+        assert!(browser(&app) && app.state.browser_tab == crate::views::browser::PLUGIN_TAB);
         // Ctrl+F8 (the project picker) and F8 with two modifiers do nothing.
         let before = (browser(&app), picker(&app), app.state.browser_tab);
         app.key(&f8, true, false);

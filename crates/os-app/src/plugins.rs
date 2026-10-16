@@ -59,8 +59,8 @@ pub struct Hosted {
     /// The count and time `idle` last looked at it (`Hosted::due`).
     seen: Look,
     /// Its window opens detached: set when the user adds it while "Detach all new plugins" is on (`Plugins::added`),
-    /// then the mode its window had when it last closed (spec: ui/settings-choices.md "Miscellaneous: naming, detached
-    /// plugins and startup").
+    /// or chosen for it (window menu > Detached, Switch all plugin editors to ▸), then the mode its window had when it
+    /// last closed (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     pub detached: bool,
     /// Where its detached window was when it last closed (screen px): reopened, it goes back there (spec: as above).
@@ -842,11 +842,25 @@ impl Plugins {
         self.hosted.get(&row).and_then(|h| h.window.as_ref()).map(|w| (w.hwnd(), w.detached()))
     }
 
-    /// Docks or detaches row `row`'s window (window menu > Detached).
+    /// Docks or detaches row `row`'s window (window menu > Detached); closed, it opens that way next time.
     #[cfg(plugin_windows)]
-    pub fn set_detached(&self, row: usize, on: bool) {
-        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
-            w.set_detached(self.owner, on);
+    pub fn set_detached(&mut self, row: usize, on: bool) {
+        let owner = self.owner;
+        if let Some(h) = self.hosted.get_mut(&row) {
+            h.detached = on;
+            if let Some(w) = &h.window {
+                w.set_detached(owner, on);
+            }
+        }
+    }
+
+    /// Switch all plugin editors to ▸ (spec: ui/channel-rack.md §17): every instance's window, rack rows' and mixer
+    /// slots', docked or detached; an open one at once, a closed one when it opens next.
+    #[cfg(plugin_windows)]
+    pub fn set_all_detached(&mut self, on: bool) {
+        let keys: Vec<usize> = self.hosted.keys().copied().collect();
+        for key in keys {
+            self.set_detached(key, on);
         }
     }
 

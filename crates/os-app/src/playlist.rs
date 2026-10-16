@@ -328,8 +328,14 @@ pub enum Cmd {
     ContinuousScrolling,
     /// A PATTERNS command from a pattern's right-click menu in the picker (spec: ui/pattern-menu.md §3).
     Pattern(crate::patterns::Cmd),
-    /// The time display's mode: minute:second:centisecond (true) or bar:step:tick.
-    ClockMsc(bool),
+    /// The time display's mode, and its middle unit (Beat when true) (spec: ui/time-display.md §1).
+    ClockMode(crate::clock::Mode),
+    ClockBeat(bool),
+    /// A Toolbars menu switch (spec: ui/toolbar-menu.md §8).
+    Toolbar(crate::views::toolbar::Switch),
+    /// A value picked in a list of the time signature dialog: denominator (true) or numerator (spec:
+    /// ui/pattern-time-signature.md §1).
+    TimeSig(bool, u8),
     /// A settings page combo declared in `crate::prefs`: that entry of its choices.
     Pref(&'static crate::prefs::Combo, usize),
     /// Settings > Info ▸ the genre menu: a genre, None for "(none)" (spec: ui/settings-choices.md "Info").
@@ -988,20 +994,12 @@ fn secs_per_tick(s: &State) -> f64 {
     60.0 / s.tempo.max(1.0) / f64::from(ppq(s))
 }
 
-/// Natural length of a source in ticks: a pattern's whole bars, a sample's duration, an automation's last point.
+/// Natural length of a source in ticks: a pattern's length (its bars, the engine's rule: `Project::pattern_length`,
+/// spec: audio/song-structure.md), a sample's duration, an automation's last point.
 pub fn source_len(s: &State, src: ClipSource) -> u32 {
     let bar = bar(s);
     match src {
-        ClipSource::Pattern(n) => {
-            if let Some(l) = s.project.pattern(n).and_then(|p| p.length).filter(|&l| l > 0) {
-                return l;
-            }
-            let notes = s.project.pattern(n).map(|p| p.notes.as_slice()).unwrap_or(&[]);
-            let end = notes.iter().map(|x| x.position + crate::piano::shown_len(s, x)).max().unwrap_or(0);
-            // Bars of the project's time signature (spec: audio/song-structure.md "Time signatures and a pattern's length").
-            let bar = s.project.bar_ticks();
-            if notes.is_empty() { bar } else { (end / bar + 1) * bar }
-        }
+        ClipSource::Pattern(n) => s.project.pattern_length(n),
         ClipSource::Channel(c) => {
             if let Some(a) = s.project.automation(c) {
                 let beats = a.points.last().map_or(0.0, |p| p.beat);
@@ -1012,6 +1010,18 @@ pub fn source_len(s: &State, src: ClipSource) -> u32 {
             if t > 0.0 && t.is_finite() { (t.round() as u32).max(1) } else { bar }
         }
     }
+}
+
+/// Pattern `n`'s length changed from `old` (its time signature, spec: ui/pattern-time-signature.md §5): its clips that
+/// were not resized by hand (uncut, at the old natural length) take the new one, in every arrangement.
+pub fn refit_pattern_clips(s: &mut State, n: u16, old: u32) {
+    let new = s.project.pattern_length(n);
+    for a in &mut s.project.arrangements {
+        for c in a.clips.iter_mut().filter(|c| c.source == ClipSource::Pattern(n) && c.window.is_none() && c.length == old) {
+            c.length = new;
+        }
+    }
+    s.piano.dirty = true;
 }
 
 /// A clip's window in its source's unit (pattern ticks, audio ms, automation beats), filled in when unset.
@@ -1038,6 +1048,14 @@ pub fn snapshot(s: &mut State) {
 pub fn snapshot_as(s: &mut State, name: &'static str) {
     arr_mut(s);
     let snap = crate::history::Snap::Playlist(Box::new(capture(s)));
+    crate::history::record(s, name, snap);
+}
+
+/// `snapshot_as` for a command that changes more than the playlist: one step named `name`, holding the playlist
+/// and `extra`, what the command changes beyond it.
+pub fn snapshot_with(s: &mut State, name: &'static str, extra: crate::history::Snap) {
+    arr_mut(s);
+    let snap = crate::history::Snap::Several(vec![crate::history::Snap::Playlist(Box::new(capture(s))), extra]);
     crate::history::record(s, name, snap);
 }
 
@@ -1737,6 +1755,47 @@ pub fn unique_channel_name(s: &State, name: &str) -> String {
         return name.to_string();
     }
     (2..).map(|k| format!("{name} #{k}")).find(|n| !taken(n)).unwrap_or_default()
+}
+
+/// ADD > Audio clip and ADD > Automation clip (spec: ui/add-clip-channels.md §3): a channel of `kind` at the end of
+/// the rack named "Audio Clip" / "Automation Clip" (made unique), on the master, the only selected channel, in the
+/// rack filter group "Audio" / "Automation" with the filter on it, and the playlist's clip source; no clip is
+/// placed. An audio clip has no sample and the default stretch and declick settings; an automation clip has FL's
+/// two default points and no target. One undo step. Returns the rack row.
+pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
+    let audio = kind == ChannelKind::AudioClip;
+    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    snapshot_with(s, if audio { "Add audio clip" } else { "Add automation clip" }, before);
+    let name = unique_channel_name(s, if audio { "Audio Clip" } else { "Automation Clip" });
+    s.project.channels.push(Channel {
+        index,
+        kind,
+        name: Some(name),
+        plugin: None,
+        plugin_state: None,
+        color: (!audio).then(|| Rgb::new(0x5a, 0x74, 0x4c)),
+        enabled: true,
+        volume: if audio { 0.78125 } else { 1.0 },
+        pan: 0.0,
+        pitch_cents: 0,
+        mixer_track: 0,
+        sample_path: None,
+        layer_children: Vec::new(),
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+    });
+    if !audio {
+        // Two points, at 0 and at 4 beats (one 4/4 bar), both 0.5, single curve without tension (§2).
+        s.project.automations.push(os_flp::project::untargeted_automation(index, 0.5, 4.0));
+    }
+    let row = s.project.channels.len() - 1;
+    s.selected_channel = row;
+    s.rack.select_only(row);
+    crate::rack::join_group(s, row, if audio { "Audio" } else { "Automation" });
+    s.playlist.source = Some(ClipSource::Channel(index));
+    s.playlist.picker = if audio { PickKind::Audio } else { PickKind::Automation };
+    s.piano.dirty = true;
+    row
 }
 
 /// Add an audio clip channel for a sample file and place it at `tick` on `track` (§9). The channel's colour comes from
@@ -3105,14 +3164,28 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
         Cmd::Param(c) => return app.params_cmd(c),
         Cmd::Pattern(c) => {
-            let at = crate::patterns::box_at_mouse(app.mouse);
-            let m = crate::patterns::run(&mut app.state, c, at);
+            let m = app.pattern_cmd(c);
             app.invalidate();
             return m;
         }
-        Cmd::ClockMsc(on) => {
-            app.state.clock_msc = on;
+        Cmd::ClockMode(m) => {
+            app.state.clock.mode = m;
+            app.state.clock.save();
             app.invalidate();
+            return None;
+        }
+        Cmd::Toolbar(sw) => {
+            app.toolbar_switch(sw);
+            return None;
+        }
+        Cmd::ClockBeat(on) => {
+            app.state.clock.beat = on;
+            app.state.clock.save();
+            app.invalidate();
+            return None;
+        }
+        Cmd::TimeSig(den, v) => {
+            app.sig_pick(den, v);
             return None;
         }
         Cmd::TypeIn(t) => {
@@ -3197,7 +3270,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::Bar(..) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::PanningLaw(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMsc(_) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -3902,12 +3975,6 @@ pub fn rescale(s: &mut State, from: u16, to: u16) {
     if let Some((_, len)) = &mut pl.lock_len {
         *len = rescale_length(*len, from, to);
     }
-}
-
-/// A playlist edit changed nothing: drop its undo step (used by tests).
-#[cfg(test)]
-pub fn undo_len(s: &State) -> usize {
-    s.history.len()
 }
 
 /// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): FL's entries, only Detached

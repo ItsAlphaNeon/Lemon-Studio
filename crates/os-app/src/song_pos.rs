@@ -31,8 +31,7 @@ pub fn range(s: &State) -> Option<u32> {
     if s.song_mode {
         crate::playlist::clips(s).iter().map(|c| c.end()).max().filter(|&e| e > 0)
     } else {
-        let notes = s.project.pattern(s.pattern).map_or(&[][..], |p| &p.notes);
-        Some(crate::piano::pattern_length(s, notes).max(1))
+        Some(crate::piano::pattern_length(s, s.pattern).max(1))
     }
 }
 
