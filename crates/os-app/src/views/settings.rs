@@ -198,6 +198,7 @@ pub const LIVE: &[&str] = &[
     ERRORS_CHECK,
     COMBINE_CHECK,
     TRUNCATED_CHECK,
+    CROSSFADES_CHECK,
     SHOW_INFO_CHECK,
     RESET_WORK_TIME,
     "Manage plugins",
@@ -257,6 +258,9 @@ pub fn denominator_text(steps: u16) -> String {
 }
 /// Project ▸ Advanced: "play truncated notes" (event 30; spec: audio/song-structure.md "Play truncated notes").
 pub const TRUNCATED_CHECK: &str = "Play truncated notes in clips";
+/// Project ▸ Playlist: "Automatic crossfades" (event 44; spec: ui/settings-choices.md "Project"). Its neighbour,
+/// "Enable automatic crossfades in new projects", is a program setting (`prefs::AUTO_CROSSFADES_NEW`).
+pub const CROSSFADES_CHECK: &str = "Automatic crossfades";
 /// Info: "Show info on opening" (event 10) and the button that zeroes the time spent (event 237; spec:
 /// ui/settings-choices.md "Info", flp/events/project-info.md).
 pub const SHOW_INFO_CHECK: &str = "Show info on opening";
@@ -627,18 +631,19 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 }
                 rows
             }),
-            // The panning law (event 23) and the check show what the engine plays. Fast declick and automatic
-            // crossfades show the project's values, greyed: their sound is not played yet (events 40, 44; spec:
-            // flp/engine-events.md "Project").
+            // The panning law (event 23) and the check show what the engine plays. Fast declick shows the project's
+            // value, greyed: its sound is not played yet (event 40; spec: flp/engine-events.md "Project").
             gf("Advanced", true, vec![
                 combo(&panning_text(s.project.panning_law), 82.0, PANNING_LAW),
                 Check(TRUNCATED_CHECK, s.project.play_truncated),
                 Check("Fast declick for cut groups", s.project.fast_declick.unwrap_or(false)),
             ]),
+            // The project's automatic crossfades (event 44; off when the file has none) and the program setting new
+            // projects take it from (`prefs::AUTO_CROSSFADES_NEW`, which the check shows).
             gf("Playlist", false, vec![Check2(
-                "Automatic crossfades",
+                CROSSFADES_CHECK,
                 s.project.auto_crossfades.unwrap_or(false),
-                "Enable automatic crossfades in new projects",
+                crate::prefs::AUTO_CROSSFADES_NEW.label,
                 true,
             )]),
         ],

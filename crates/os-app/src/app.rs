@@ -3431,6 +3431,15 @@ impl App {
         self.state.message = Some(format!("Play truncated notes in clips: {}", if on { "on" } else { "off" }));
     }
 
+    /// Settings > Project ▸ Playlist ▸ Automatic crossfades: switched for the project (event 44), which counts as
+    /// changed; off when the file does not say. What it does to audio clips was not measured (spec:
+    /// ui/settings-choices.md "Project", the storage table: "(not measured)"), so nothing else follows yet.
+    fn toggle_auto_crossfades(&mut self) {
+        let on = !self.state.project.auto_crossfades.unwrap_or(false);
+        self.state.project.auto_crossfades = Some(on);
+        self.state.message = Some(format!("Automatic crossfades: {}", if on { "on" } else { "off" }));
+    }
+
     fn settings_act(&mut self, a: views::settings::SAct) {
         use views::settings::SAct;
         let st = &mut self.state.settings;
@@ -3473,6 +3482,7 @@ impl App {
             SAct::Plug(p) => self.plugin_act(p),
             SAct::Check(k) if crate::prefs::find_check(k).is_some() => self.pref_toggle(k),
             SAct::Check(k) if k == views::settings::TRUNCATED_CHECK => self.toggle_play_truncated(),
+            SAct::Check(k) if k == views::settings::CROSSFADES_CHECK => self.toggle_auto_crossfades(),
             SAct::Check(k) if k == views::settings::SHOW_INFO_CHECK => self.toggle_show_info(),
             // A time division's value box: the mouse wheel changes it (`wheel_act`).
             SAct::Number(label) => self.state.message = Some(format!("{label}: the mouse wheel changes it")),
@@ -6439,6 +6449,9 @@ fn template_project(names: &[&str]) -> Project {
         // FL's default template holds event 30 = 1: "Play truncated notes in clips" is on in a new project (spec:
         // flp/engine-events.md "Project", "Event 30").
         play_truncated: true,
+        // Automatic crossfades (event 44) as the program setting says, whatever the template holds (spec:
+        // ui/settings-choices.md "Project").
+        auto_crossfades: Some(crate::prefs::check(&crate::prefs::AUTO_CROSSFADES_NEW)),
         ..Project::default()
     }
 }
@@ -7009,11 +7022,12 @@ mod tests {
     }
 
     /// Settings > Project ▸ Panning law, Fast declick for cut groups, Automatic crossfades (events 23, 40, 44; spec:
-    /// flp/engine-events.md "Project") show the project's values; the last two are not played yet, so greyed.
+    /// flp/engine-events.md "Project") show the project's values; fast declick is not played yet, so greyed.
     #[test]
     fn project_settings_show_the_unplayed_settings() {
         use crate::views::settings::Row;
         let mut app = App::new(None);
+        app.state.project.auto_crossfades = None;
         let get = |app: &App| {
             let rows = project_rows(app);
             let pan = rows.iter().find_map(|r| match r {
@@ -7035,6 +7049,74 @@ mod tests {
         (p.panning_law, p.fast_declick, p.auto_crossfades) = (Some(2), Some(true), Some(true));
         assert_eq!(get(&app), (Some("Triangular".into()), Some(true), Some(true)));
         assert!(views::settings::PROJECT_COMBOS.contains(&"Panning law"), "the panning law works");
+    }
+
+    /// Settings > Project ▸ Playlist (spec: ui/settings-choices.md "Project", the storage table): "Enable automatic
+    /// crossfades in new projects" is a program setting, on by default, and a new project's Automatic crossfades (event
+    /// 44) takes it, both ways; opening a file keeps the file's 44 (or its lack of one) whatever the setting.
+    /// "Automatic crossfades" switches the project's 44, which counts as a change and is saved.
+    #[test]
+    fn project_settings_automatic_crossfades() {
+        use crate::prefs::{self, AUTO_CROSSFADES_NEW};
+        use crate::views::settings::{Row, SAct, CROSSFADES_CHECK, PROJECT};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        assert!(prefs::check(&AUTO_CROSSFADES_NEW), "on by default");
+        assert_eq!(default_project().auto_crossfades, Some(true));
+        let mut app = App::new(None);
+        app.open_settings(PROJECT);
+        frame(&mut app, &mut c, None);
+        // The program setting: a click switches it, and File > New follows it both ways.
+        let r = hit_rect(&app, &Action::Settings(SAct::Check(AUTO_CROSSFADES_NEW.label)));
+        click(&mut app, &mut c, r);
+        assert!(!prefs::check(&AUTO_CROSSFADES_NEW));
+        assert_eq!(app.state.message.as_deref(), Some("Enable automatic crossfades in new projects: off"));
+        app.new_project();
+        assert_eq!(app.state.project.auto_crossfades, Some(false));
+        click(&mut app, &mut c, r);
+        assert!(prefs::check(&AUTO_CROSSFADES_NEW));
+        app.new_project();
+        assert_eq!(app.state.project.auto_crossfades, Some(true));
+        assert!(!app.unsaved());
+        // The project's check shows and switches event 44.
+        frame(&mut app, &mut c, None);
+        let shown = |app: &App| {
+            project_rows(app).into_iter().find_map(|r| match r {
+                Row::Check2(CROSSFADES_CHECK, v, ..) => Some(v),
+                _ => None,
+            })
+        };
+        assert_eq!(shown(&app), Some(true));
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(CROSSFADES_CHECK)), "it works");
+        let r = hit_rect(&app, &Action::Settings(SAct::Check(CROSSFADES_CHECK)));
+        click(&mut app, &mut c, r);
+        assert_eq!((app.state.project.auto_crossfades, shown(&app)), (Some(false), Some(false)));
+        assert_eq!(app.state.message.as_deref(), Some("Automatic crossfades: off"));
+        assert!(app.unsaved());
+        // Saved (44 = 0) and opened with the setting on: the file's value. Switched on there and saved over it, then
+        // opened with the setting off: on.
+        let path = std::env::temp_dir().join(format!("lemon-project-crossfades-{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let mut opened = App::new(None);
+        opened.open(path.clone());
+        assert_eq!(opened.state.project.auto_crossfades, Some(false));
+        opened.settings_act(SAct::Check(CROSSFADES_CHECK));
+        assert!(opened.unsaved());
+        opened.save_to(path.clone());
+        prefs::set_check(&AUTO_CROSSFADES_NEW, false);
+        let mut again = App::new(None);
+        again.open(path.clone());
+        assert_eq!(again.state.project.auto_crossfades, Some(true));
+        // A file without event 44 opens without one (shown off), whatever the setting.
+        let mut p = test_project();
+        p.auto_crossfades = None;
+        std::fs::write(&path, os_flp::project::create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        for on in [false, true] {
+            prefs::set_check(&AUTO_CROSSFADES_NEW, on);
+            let mut app = App::new(None);
+            app.open(path.clone());
+            assert_eq!((app.state.project.auto_crossfades, shown(&app)), (None, Some(false)), "setting {on}");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Settings > Project ▸ Advanced ▸ Panning law (spec: ui/settings-choices.md "Project", audio/gain-laws.md

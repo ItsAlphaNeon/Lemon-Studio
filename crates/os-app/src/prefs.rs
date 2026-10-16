@@ -118,8 +118,14 @@ pub const AUTO_ZOOM_PIANO: Check = Check { key: "auto_zoom_piano", label: "Auto 
 /// General ▸ Miscellaneous: thin editor scroll bars without arrow buttons (`crate::views::small_scrollbars`).
 pub const SMALL_SCROLLBARS: Check = Check { key: "small_scrollbars", label: "Small scrollbars in editors", default: false };
 
+/// Project ▸ Playlist: a new project's "Automatic crossfades" (event 44) takes this value, whatever FL's template file
+/// holds (`app::default_project`); opening a file keeps the file's. A program setting, on by default. Spec:
+/// ui/settings-choices.md "Project" (the storage table).
+pub const AUTO_CROSSFADES_NEW: Check =
+    Check { key: "auto_crossfades_new_projects", label: "Enable automatic crossfades in new projects", default: true };
+
 /// The declared checks.
-pub const CHECKS: &[&Check] = &[&RESTORE_AFTER_SOLO, &SELECT_FIRST_CHANNEL, &AUTO_ZOOM_PIANO, &SMALL_SCROLLBARS];
+pub const CHECKS: &[&Check] = &[&RESTORE_AFTER_SOLO, &SELECT_FIRST_CHANNEL, &AUTO_ZOOM_PIANO, &SMALL_SCROLLBARS, &AUTO_CROSSFADES_NEW];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION];
 
