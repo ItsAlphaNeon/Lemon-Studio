@@ -360,6 +360,46 @@ pub const THICK_LINES: Check = Check { key: "thick_lines", label: "Thick lines",
 pub const OPTIMIZE_FOR: Combo =
     Combo { key: "optimize_for", label: "Optimize for", choices: &["Multi-button mouse", "Pencil", "Multi-touch monitor"], default: 0 };
 
+/// Audio ▸ Input / output: while another program is in front, the audio output closes and a playing transport pauses;
+/// both come back with the focus (`crate::auto_close`). Spec: ui/settings-choices.md "Input / output: Auto close; CPU
+/// and Mixer: Smart disable, Align tick lengths, Resampling quality (2026-10-16)".
+pub const AUTO_CLOSE: Check = Check { key: "auto_close", label: "Auto close", default: false };
+
+/// Audio ▸ CPU: stored and shown only. Lemon Studio has no smart disable yet. Spec: as above.
+pub const SMART_DISABLE: Check = Check { key: "smart_disable", label: "Smart disable", default: true };
+
+/// Audio ▸ CPU: stored and shown only. Lemon Studio's ticks follow audio/timing.md whatever it says. Spec: as above.
+pub const ALIGN_TICK_LENGTHS: Check = Check { key: "align_tick_lengths", label: "Align tick lengths", default: false };
+
+/// Audio ▸ Mixer: stored and shown only. The sampler keeps the one kernel audio/sampler.md gives, whatever is chosen;
+/// when the live kernels are measured, the choice will pick among them. Its menu groups the choices under grey
+/// headings (`headings`). Spec: as above.
+pub const RESAMPLING_QUALITY: Combo = Combo {
+    key: "resampling_quality",
+    label: "Resampling quality",
+    choices: &[
+        "2-point linear",
+        "6-point Hermite",
+        "16-point sinc",
+        "24-point sinc",
+        "32-point sinc",
+        "64-point sinc",
+        "128-point sinc",
+        "256-point sinc",
+        "512-point sinc",
+    ],
+    default: 3,
+};
+
+/// The grey, unclickable heading rows of combo `c`'s menu: (the choice each stands above, its text).
+fn headings(c: &Combo) -> &'static [(usize, &'static str)] {
+    if c.key == RESAMPLING_QUALITY.key {
+        &[(0, "Low quality / fastest"), (2, "Average quality"), (5, "High quality / slowest")]
+    } else {
+        &[]
+    }
+}
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -400,9 +440,12 @@ pub const CHECKS: &[&Check] = &[
     &HIGH_VISIBILITY,
     &FORCE_REFRESHES,
     &THICK_LINES,
+    &AUTO_CLOSE,
+    &SMART_DISABLE,
+    &ALIGN_TICK_LENGTHS,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY];
 
 /// The declared value boxes.
 pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BROWSER_PREVIEW_TRACK];
@@ -657,7 +700,12 @@ impl App {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let Some(c) = find_combo(label) else { return };
         let now = index(c);
-        let items = c.choices.iter().enumerate().map(|(i, &ch)| PItem::new(ch, Cmd::Pref(c, i)).mark(Mark::Radio(i == now))).collect();
+        // Grey headings stand above the choices they group (`headings`).
+        let mut items = Vec::new();
+        for (i, &ch) in c.choices.iter().enumerate() {
+            items.extend(headings(c).iter().filter(|h| h.0 == i).map(|h| PItem::head(h.1)));
+            items.push(PItem::new(ch, Cmd::Pref(c, i)).mark(Mark::Radio(i == now)));
+        }
         self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None });
         self.invalidate();
     }
@@ -1121,6 +1169,57 @@ mod tests {
         assert!(check(&THICK_LINES), "live at 200 %");
         assert_eq!(app.state.message.as_deref(), Some("Thick lines: on"));
         set_check(&THICK_LINES, false);
+    }
+
+    // spec: ui/settings-choices.md "Input / output: Auto close; CPU and Mixer: Smart disable, Align tick lengths,
+    // Resampling quality (2026-10-16)"
+    /// Auto close (off), Smart disable (on), Align tick lengths (off) and Resampling quality (24-point sinc, of nine,
+    /// under three grey headings) have the defaults as found and are kept in the settings file; on the Audio page
+    /// each is live: a click toggles a check, the combo lists its choices and keeps the one picked.
+    #[test]
+    fn audio_cpu_and_mixer_settings() {
+        let checks = |s: &Store| [&AUTO_CLOSE, &SMART_DISABLE, &ALIGN_TICK_LENGTHS].map(|c| check_in(s, c));
+        let s = Store::parse("");
+        assert_eq!((checks(&s), index_in(&s, &RESAMPLING_QUALITY)), ([false, true, false], 3), "as found");
+        let s = Store::parse("auto_close=1\nsmart_disable=0\nalign_tick_lengths=1\nresampling_quality=512-point sinc\n");
+        assert_eq!((checks(&s), index_in(&s, &RESAMPLING_QUALITY)), ([true, false, true], 8));
+        assert_eq!(
+            RESAMPLING_QUALITY.choices,
+            ["2-point linear", "6-point Hermite", "16-point sinc", "24-point sinc", "32-point sinc", "64-point sinc", "128-point sinc", "256-point sinc", "512-point sinc"]
+        );
+        assert_eq!(choice(&RESAMPLING_QUALITY), "24-point sinc");
+
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::AUDIO);
+        app.paint(&mut c, None);
+        for k in [&AUTO_CLOSE, &SMART_DISABLE, &ALIGN_TICK_LENGTHS] {
+            let was = check(k);
+            let r = hit_rect(&app, &Action::Settings(SAct::Check(k.label)));
+            click(&mut app, &mut c, r);
+            assert_eq!(check(k), !was, "{} toggles", k.label);
+            assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(k.label)), "{} is not greyed out", k.label);
+        }
+        let combo = |app: &App| {
+            app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == RESAMPLING_QUALITY.label)).map(|h| h.rect).expect("the combo works")
+        };
+        let r = combo(&app);
+        click(&mut app, &mut c, r);
+        let items = &app.state.playlist.popup.as_ref().expect("its menu").items;
+        let rows: Vec<(String, bool)> = items.iter().map(|it| (it.label.to_string(), it.head)).collect();
+        let mut want: Vec<(String, bool)> = RESAMPLING_QUALITY.choices.iter().map(|ch| (ch.to_string(), false)).collect();
+        want.insert(5, ("High quality / slowest".into(), true));
+        want.insert(2, ("Average quality".into(), true));
+        want.insert(0, ("Low quality / fastest".into(), true));
+        assert_eq!(rows, want);
+        assert_eq!(items[5].mark, crate::playlist::Mark::Radio(true), "24-point sinc marked");
+        let item = hit_rect(&app, &Action::PlPopup(11));
+        click(&mut app, &mut c, item);
+        assert_eq!((choice(&RESAMPLING_QUALITY), app.state.message.as_deref()), ("512-point sinc", Some("Resampling quality: 512-point sinc")));
+        for k in [&AUTO_CLOSE, &SMART_DISABLE, &ALIGN_TICK_LENGTHS] {
+            set_check(k, k.default);
+        }
+        set_choice(&RESAMPLING_QUALITY, 3);
     }
 
     // spec: ui/settings-choices.md "Input: Vertical and Horizontal scrolling speed (2026-10-16)"

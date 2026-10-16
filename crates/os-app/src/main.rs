@@ -12,6 +12,7 @@
 
 mod app;
 mod audio_cfg;
+mod auto_close;
 mod autoscroll;
 mod backup;
 #[cfg(test)]
@@ -869,6 +870,8 @@ impl ApplicationHandler for Shell {
                 crate::plugin_window::main_focused(focused);
                 // The project's working time counts while the main window is in front (`project_info::WorkClock`).
                 self.app.main_focused(focused);
+                // Audio ▸ Auto close, where the system can't tell which program is in front (`auto_close`).
+                self.app.auto_close.main_focused = focused;
                 if !focused {
                     self.grab = None;
                     self.unmax = None;

@@ -1034,6 +1034,8 @@ pub struct App {
     pub hold: Option<crate::hold::Hold>,
     /// Views easing to where the wheel sent them (General ▸ Display ▸ Smoothing, `crate::smooth`).
     pub(crate) smooth: crate::smooth::Eases,
+    /// Audio ▸ Auto close: whether the output is closed while another program is in front (`crate::auto_close`).
+    pub(crate) auto_close: crate::auto_close::AutoClose,
     pub want_minimize: bool,
     pub want_maximize: bool,
     pub want_close: bool,
@@ -1212,6 +1214,7 @@ impl App {
             drag: None,
             hold: None,
             smooth: Default::default(),
+            auto_close: Default::default(),
             want_minimize: false,
             want_maximize: false,
             want_close: false,
@@ -2891,6 +2894,7 @@ impl App {
         self.cables_tick(now);
         self.backup_tick(now);
         self.work_tick(now);
+        self.auto_close_tick(now);
         self.follow_settings();
         if self.state.cpu.due(now) {
             let tp = &self.transport;

@@ -177,6 +177,10 @@ enum Cmd {
     Export(Box<Project>, PlayMode, u32, PathBuf),
     /// The audio settings changed: move the playback to a new stream, close the live and preview streams.
     Reopen,
+    /// Auto close (`Transport::close_device`): every stream closes; the playback keeps its place for `Open`.
+    Close,
+    /// The output may be used again (`Transport::open_device`).
+    Open,
 }
 
 /// Where an export is (`Transport::export_status`).
@@ -286,6 +290,19 @@ impl Transport {
     /// stream with the new settings; live notes and previews open one when next needed.
     pub fn reopen(&self) {
         let _ = self.tx.send(Cmd::Reopen);
+    }
+
+    /// Lets go of the output device (Audio ▸ Auto close, `crate::auto_close`): playback, previews and live notes close
+    /// their streams after their fade. A playback (pause it first) keeps its place; until `open_device` nothing opens
+    /// a stream (previews and live notes go unheard), except a new `play`.
+    pub fn close_device(&self) {
+        let _ = self.tx.send(Cmd::Close);
+    }
+
+    /// The output device may be used again: a playback held by `close_device` goes on from its place on a new stream,
+    /// playing if the transport plays by then (`resume`), else paused.
+    pub fn open_device(&self) {
+        let _ = self.tx.send(Cmd::Open);
     }
 
     /// Renders `project` offline to a 32-bit float WAV file at `rate`, with the hosted instruments and effects, on the
@@ -501,6 +518,12 @@ impl Transport {
     /// The output the playback or live stream last opened: device name, sample rate, buffer length asked for.
     pub fn opened(&self) -> Option<(String, u32, Option<u32>)> {
         self.shared.opened.lock().ok()?.clone()
+    }
+
+    /// Streams open now, fading ones included (each holds its voice counter in `Shared::engine_voices`).
+    #[cfg(test)]
+    fn streams(&self) -> usize {
+        self.shared.engine_voices.lock().map_or(0, |v| v.iter().filter(|w| w.strong_count() > 0).count())
     }
 }
 
@@ -822,6 +845,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     // that would not open is tried again on the next change of state, not every loop.
     let mut listen = false;
     let mut listen_retry = false;
+    // Auto close (`Transport::close_device`): no stream opens while `closed`; the playback waits in `held` (project,
+    // mode, generation, where).
+    let mut closed = false;
+    let mut held: Option<(Project, PlayMode, u64, At)> = None;
     let swap = |s: &mut Session, library: &mut SampleLibrary| {
         // Build outside the lock, then swap at the playing position.
         let mut e = Engine::new(&s.project, library, s.rate, s.mode);
@@ -864,11 +891,16 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     };
     loop {
         match rx.recv_timeout(Duration::from_millis(10)) {
+            // The output is closed by Auto close: previews and live notes find no stream and open none.
+            Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::TapClick(_)) if closed => {}
             Ok(Cmd::Update) => {
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
                     for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
                         s.project = project.clone();
                         swap(s, &mut library);
+                    }
+                    if let Some(h) = held.as_mut() {
+                        h.0 = project.clone();
                     }
                     live_project = Some(project);
                 }
@@ -986,6 +1018,9 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 if generation != shared.generation.load(Ordering::Acquire) {
                     continue;
                 }
+                // A Play asked for while Auto close holds the output opens it (and drops the playback it held).
+                closed = false;
+                held = None;
                 // The old playback is replaced, not faded; of what it leaves ringing only the hosted effects' tails
                 // go on, with "Reset plugins on transport" off (`reset_hosts`). A live stream left open would process
                 // the same plugin instances a second time (each stream would only hear every other chunk of a ringing
@@ -1054,8 +1089,47 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 for s in [session.take(), live.take(), preview.take()].into_iter().flatten() {
                     retire(s, &mut closing);
                 }
+                held = None;
                 reset_pending = true;
                 listen_retry = true;
+            }
+            Ok(Cmd::Close) => {
+                closed = true;
+                // The playback (paused by the app) is held where it was heard; every stream fades out and closes, then
+                // the instruments are reset as after Stop (without the rewind: the transport is paused).
+                if let Some(s) = session.take() {
+                    let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: true, truncated: s.truncated };
+                    held = Some((s.project.clone(), s.mode, s.generation, at));
+                    retire(s, &mut closing);
+                    reset_pending = true;
+                }
+                for s in [live.take(), preview.take()].into_iter().flatten() {
+                    retire(s, &mut closing);
+                    reset_pending = true;
+                }
+                preview_until = None;
+            }
+            Ok(Cmd::Open) => {
+                closed = false;
+                listen_retry = true;
+                // The held playback goes on at its place, unless a Stop or another Play came since; playing if the
+                // transport was resumed meanwhile, else paused (`resume` follows).
+                if let Some((project, mode, generation, mut at)) = held.take().filter(|h| h.2 == shared.generation.load(Ordering::Acquire)) {
+                    closing.clear();
+                    if reset_pending {
+                        reset_pending = false;
+                        reset_instruments(&inst);
+                    }
+                    at.paused = shared.state.load(Ordering::Acquire) != PLAYING;
+                    match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at) {
+                        Ok(s) => session = Some(s),
+                        Err(e) => {
+                            report(&shared, e);
+                            shared.state.store(STOPPED, Ordering::Release);
+                            shared.rewind(0.0);
+                        }
+                    }
+                }
             }
             Ok(Cmd::Export(project, mode, rate, path)) => {
                 // Every stream that could process the plugins goes at once (no fade), and they start from silence.
@@ -1063,6 +1137,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 live = None;
                 preview = None;
                 preview_until = None;
+                held = None;
                 closing.clear();
                 reset_instruments(&inst);
                 reset_pending = false;
@@ -1098,7 +1173,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         }
         // While an editor is open and nothing plays, the live stream processes the instruments (once the stopped
         // streams are gone and the instruments reset).
-        if listen && listen_retry && live.is_none() && !reset_pending && closing.is_empty() && session.as_ref().is_none_or(|s| s.paused()) {
+        if listen && listen_retry && !closed && live.is_none() && !reset_pending && closing.is_empty() && session.as_ref().is_none_or(|s| s.paused()) {
             listen_retry = false;
             if let Some(p) = live_project.as_ref() {
                 release_paused(&session);
@@ -1690,6 +1765,47 @@ mod tests {
         t.resume();
         std::thread::sleep(Duration::from_millis(200));
         assert!(t.tick() > held, "resumed");
+        t.stop();
+    }
+
+    // spec: ui/settings-choices.md "Input / output: Auto close; CPU and Mixer: Smart disable, Align tick lengths,
+    // Resampling quality (2026-10-16)"
+    /// Auto close: closing the device holds a paused playback at its place with no stream open, and live notes open
+    /// none; opening it again goes on from there on a new stream (needs an audio device; the pattern is silent).
+    #[test]
+    #[ignore]
+    fn closing_the_device_holds_the_playback() {
+        let mut project = crate::app::test_project();
+        project.patterns = vec![os_model::Pattern { number: 1, ..Default::default() }];
+        let t = Transport::new(None);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!((t.take_error(), t.streams()), (None, 1), "playing");
+        t.pause();
+        t.close_device();
+        std::thread::sleep(Duration::from_millis(200));
+        let held = t.tick();
+        assert!(t.paused() && held > 0.0, "paused at {held}");
+        assert_eq!(t.streams(), 0, "no stream open");
+        t.note_on(0, 60, 100);
+        t.preview(project.clone());
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(t.streams(), 0, "a live note or a preview opens none");
+        t.note_off(0, 60);
+        assert!((t.tick() - held).abs() < 1e-9, "held");
+        t.open_device();
+        t.resume();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(t.playing() && !t.paused() && t.tick() > held, "went on from {held}: {}", t.tick());
+        assert_eq!(t.streams(), 1);
+        // Closed while stopped, a Play opens the output again.
+        t.stop();
+        t.close_device();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(t.streams(), 0);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(t.streams(), 1);
         t.stop();
     }
 
