@@ -823,6 +823,10 @@ pub struct State {
     pub lane_menu: bool,
     /// Settings window (OPTIONS > ... settings, F10 / F11).
     pub settings: views::settings::SettingsUi,
+    /// The `.flstheme` that colours the Classic design, as its file holds it; `None`: none (the stock Dark look, or a
+    /// Lemon Studio `theme.txt`). Theme ▸ Options rewrite it (spec: ui/settings-choices.md "Light mode and clip note
+    /// colours").
+    pub fl_text: Option<String>,
     pub playlist_scroll: (f32, f32),
     /// Playlist horizontal zoom, pixels per bar.
     pub playlist_bar_w: f32,
@@ -878,6 +882,13 @@ pub struct State {
 }
 
 impl State {
+    /// The applied `.flstheme` (the stock Dark theme when there is none): its options `light_mode` and
+    /// `override_clips` ("Audio and automation clips use note colors"; spec: ui/settings-choices.md "Light mode and
+    /// clip note colours").
+    pub fn fl_theme(&self) -> os_theme::FlTheme {
+        self.fl_text.as_deref().map_or_else(os_theme::FlTheme::dark, os_theme::FlTheme::parse)
+    }
+
     pub fn shown(&self, w: Win) -> bool {
         self.z.contains(&w)
     }
@@ -1099,6 +1110,7 @@ impl App {
                 menu_open: None,
                 lane_menu: false,
                 settings: views::settings::SettingsUi { native: os_native::settings_shown(), ..Default::default() },
+                fl_text: saved_fl_text(),
                 playlist_scroll: (0.0, 0.0),
                 playlist_bar_w: views::playlist::BAR_W,
                 mixer_scroll: 0.0,
@@ -3157,6 +3169,10 @@ impl App {
                 // Theme files colour the Classic design (Lemon has its own colours).
                 let was_lemon = self.design() == Design::Lemon;
                 self.theme = t;
+                // Theme ▸ Options read and rewrite the applied .flstheme (spec: ui/settings-choices.md "Light mode and
+                // clip note colours").
+                let fl = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme"));
+                self.state.fl_text = fl.then(|| String::from_utf8_lossy(&std::fs::read(path).unwrap_or_default()).into_owned());
                 os_theme::set_current(&self.theme.colors);
                 if remember && was_lemon {
                     save_design(Design::Classic);
@@ -3194,6 +3210,30 @@ impl App {
         }
         self.sync_preset();
         self.state.message = Some(format!("Design: {} (Ctrl+Shift+D switches)", d.name()));
+        self.invalidate();
+    }
+
+    /// Theme ▸ Options: flips "Light mode" (`Lightmode`) or "Audio and automation clips use note colors"
+    /// (`OverrideClips`) in the applied theme, the stock Dark theme's text when no `.flstheme` is applied. The Classic
+    /// design shows it at once (Lemon has its own colours), and it is kept as `current.flstheme` for the next start
+    /// (spec: ui/settings-choices.md "Light mode and clip note colours").
+    pub(crate) fn toggle_theme_option(&mut self, label: &str) {
+        let th = self.state.fl_theme();
+        let (key, on) = if label == views::settings::LIGHT_MODE_CHECK { ("Lightmode", !th.light_mode) } else { ("OverrideClips", !th.override_clips) };
+        let text = self.state.fl_text.as_deref().unwrap_or(os_theme::fl::DARK_TEXT);
+        let text = os_theme::fl::set_key(text, key, if on { "1" } else { "0" });
+        if self.design() == Design::Classic {
+            let palette = os_theme::fl::palette(&os_theme::FlTheme::parse(&text));
+            self.theme = os_theme::Theme::new(&self.theme.name.clone(), palette, self.theme.adjust);
+            os_theme::set_current(&self.theme.colors);
+            self.sync_preset();
+        }
+        if let Some(d) = theme_dir() {
+            let _ = std::fs::create_dir_all(&d);
+            let _ = std::fs::write(d.join("current.flstheme"), &text);
+        }
+        self.state.fl_text = Some(text);
+        self.state.message = Some(format!("{label}: {}", if on { "on" } else { "off" }));
         self.invalidate();
     }
 
@@ -3509,6 +3549,7 @@ impl App {
             SAct::Check(k) if k == views::settings::TRUNCATED_CHECK => self.toggle_play_truncated(),
             SAct::Check(k) if k == views::settings::CROSSFADES_CHECK => self.toggle_auto_crossfades(),
             SAct::Check(k) if k == views::settings::SHOW_INFO_CHECK => self.toggle_show_info(),
+            SAct::Check(k) if k == views::settings::LIGHT_MODE_CHECK || k == views::settings::NOTE_COLORS_CHECK => self.toggle_theme_option(k),
             // A time division's value box: the mouse wheel changes it (`wheel_act`).
             SAct::Number(label) => self.state.message = Some(format!("{label}: the mouse wheel changes it")),
             // Checks and buttons outside `settings::LIVE` are drawn greyed out with an `Action::Placeholder` hit instead.
@@ -3531,6 +3572,7 @@ impl App {
                 if let Some(f) = os_paths::user_file("current.flstheme") {
                     let _ = std::fs::remove_file(f);
                 }
+                self.state.fl_text = None;
                 self.sync_preset();
                 self.state.message = Some("Theme: Classic".into());
             }
@@ -3540,6 +3582,7 @@ impl App {
                     let fl = os_theme::FlTheme::parse(&text);
                     self.theme = os_theme::Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default());
                     os_theme::set_current(&self.theme.colors);
+                    self.state.fl_text = Some(text.clone());
                     save_design(Design::Classic);
                     // Remembered like an imported theme (loaded at the next start).
                     if let Some(d) = os_paths::user_dir() {
@@ -6616,6 +6659,31 @@ pub fn design_theme(d: Design, saved: bool) -> Theme {
     }
 }
 
+/// The text of the `current.flstheme` the Classic design loads at start (`load_theme_inner`; `None` when `theme.txt`
+/// comes first, or there is none). Tests have none.
+fn saved_fl_text() -> Option<String> {
+    let dir = theme_dir()?;
+    if dir.join("theme.txt").exists() {
+        return None;
+    }
+    std::fs::read(dir.join("current.flstheme")).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// The folder `current.flstheme` is kept in: the user folder; in tests this thread's folder, none unless one is set
+/// (`THEME_DIR`).
+fn theme_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    return THEME_DIR.with(|d| d.borrow().clone());
+    #[cfg(not(test))]
+    os_paths::user_dir()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: the folder `theme_dir` gives.
+    static THEME_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 fn load_theme_inner() -> Theme {
     if cfg!(test) {
         return Theme::default();
@@ -6877,6 +6945,79 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!((again.state.project.bar, again.state.project.play_truncated), (Some((7, 1)), false));
         assert_eq!(again.state.project.signature(), Some((7, 16)));
+    }
+
+    /// Theme ▸ Options (spec: ui/settings-choices.md "Light mode and clip note colours"; ui/flstheme.md §4, §5): both
+    /// checks show the applied theme's values (the stock Dark theme's when none is applied); a click flips one in that
+    /// theme, applies it at once in the Classic design (Light mode off: base-palette surfaces, darker steps; Lemon keeps
+    /// its colours) and keeps it as `current.flstheme`, rewriting only its own key. A temp user folder, never the real
+    /// one.
+    #[test]
+    fn theme_options_toggle_the_applied_theme() {
+        use crate::views::settings::{SAct, LIGHT_MODE_CHECK, NOTE_COLORS_CHECK, THEME};
+        use os_theme::fl::{palette, set_key, DARK_TEXT};
+        use os_theme::{FlTheme, Palette};
+        let dir = std::env::temp_dir().join(format!("lemon-theme-options-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let saved = || std::fs::read_to_string(dir.join("current.flstheme")).unwrap_or_default();
+        let shown = |app: &App| -> Vec<bool> {
+            let rows = views::settings::page(THEME, &app.state).into_iter().flat_map(|g| g.rows);
+            rows.filter_map(|r| match r {
+                views::settings::Row::Check(k, v) if k == LIGHT_MODE_CHECK || k == NOTE_COLORS_CHECK => Some(v),
+                _ => None,
+            })
+            .collect()
+        };
+        let light = |p: &Palette, name: &str| p.get(name).unwrap().hsl().2;
+        let mut app = App::new(None);
+        assert_eq!((app.design(), app.state.fl_text.as_deref()), (Design::Classic, None));
+        assert_eq!(shown(&app), [true, false], "the stock Dark theme's values");
+        // Light mode off: base-palette surfaces at once, darker step faces; saved.
+        app.settings_act(SAct::Check(LIGHT_MODE_CHECK));
+        let off = set_key(DARK_TEXT, "Lightmode", "0");
+        assert_eq!((saved(), app.state.fl_text.as_deref()), (off.clone(), Some(off.as_str())));
+        assert_eq!(shown(&app), [false, false]);
+        assert_eq!(app.state.message.as_deref(), Some("Light mode: off"));
+        assert_eq!(app.theme.base, palette(&FlTheme::parse(&off)));
+        assert!(light(&app.theme.colors, "toolbar") > light(&Palette::default(), "toolbar"), "lighter surfaces");
+        assert!(light(&app.theme.colors, "step_a") < light(&Palette::default(), "step_a"), "darker steps");
+        // On again: today's look.
+        app.settings_act(SAct::Check(LIGHT_MODE_CHECK));
+        assert!(saved().contains("Lightmode=1"));
+        assert_eq!((shown(&app), &app.theme.colors), (vec![true, false], &Palette::default()));
+        // Clip note colours: stored and saved (the playlist reads `State::fl_theme`); the palette stays.
+        app.settings_act(SAct::Check(NOTE_COLORS_CHECK));
+        assert!(app.state.fl_theme().override_clips && saved().contains("OverrideClips=1"));
+        assert_eq!((shown(&app), &app.theme.colors), (vec![true, true], &Palette::default()));
+        app.settings_act(SAct::Check(NOTE_COLORS_CHECK));
+        assert!(!app.state.fl_theme().override_clips && saved().contains("OverrideClips=0"));
+        // An imported theme (a BOM, CRLF lines): a click on the page rewrites only its key.
+        let file = dir.join("Night.flstheme");
+        let night = "\u{feff}Hue=-18\r\nSaturation=6\r\nLightness=-57\r\nContrast=40\r\nLightmode=1\r\nSelected=-4546441\r\n";
+        std::fs::write(&file, night).unwrap();
+        app.load_theme_file_ex(&file, false);
+        assert_eq!(shown(&app), [true, false]);
+        if let Ok(mut c) = Canvas::new(1920, 1080, 1.0) {
+            app.open_settings(THEME);
+            frame(&mut app, &mut c, None);
+            let r = hit_rect(&app, &Action::Settings(SAct::Check(LIGHT_MODE_CHECK)));
+            click(&mut app, &mut c, r);
+        } else {
+            app.settings_act(SAct::Check(LIGHT_MODE_CHECK));
+        }
+        let want = night.replace("Lightmode=1", "Lightmode=0");
+        assert_eq!((saved(), shown(&app)), (want.clone(), vec![false, false]));
+        assert_eq!(app.theme.base, palette(&FlTheme::parse(&want)));
+        // The Lemon design keeps its colours; the value is still stored and saved.
+        app.set_design(Design::Lemon, false);
+        let lemon = app.theme.colors.clone();
+        app.settings_act(SAct::Check(LIGHT_MODE_CHECK));
+        assert_eq!((saved(), shown(&app), &app.theme.colors), (night.to_string(), vec![true, false], &lemon));
+        // The next start reads it back.
+        assert_eq!(App::new(None).state.fl_text.as_deref(), Some(night));
+        THEME_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The rows of the Project page, flattened.
