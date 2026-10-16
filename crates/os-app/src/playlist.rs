@@ -312,6 +312,8 @@ pub enum Cmd {
     Cpu(crate::cpu::CpuCmd),
     /// The metronome button's menu: the click sound (spec: ui/metronome.md §2).
     MetronomeSound(os_engine::metronome::Sound),
+    /// Settings > Project ▸ Numerator / Denominator: the project's time signature (spec: audio/song-structure.md).
+    TimeSignature(u16, u16),
     /// The auto-scrolling button's menu (spec: ui/auto-scrolling.md §2).
     ContinuousScrolling,
     /// A PATTERNS command from a pattern's right-click menu in the picker (spec: ui/pattern-menu.md §3).
@@ -954,6 +956,8 @@ pub fn source_len(s: &State, src: ClipSource) -> u32 {
             }
             let notes = s.project.pattern(n).map(|p| p.notes.as_slice()).unwrap_or(&[]);
             let end = notes.iter().map(|x| x.position + crate::piano::shown_len(s, x)).max().unwrap_or(0);
+            // Bars of the project's time signature (spec: audio/song-structure.md "Time signatures and a pattern's length").
+            let bar = s.project.bar_ticks();
             if notes.is_empty() { bar } else { (end / bar + 1) * bar }
         }
         ClipSource::Channel(c) => {
@@ -3014,6 +3018,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return Some(format!("Metronome sound: {}", sound.label()));
         }
+        Cmd::TimeSignature(num, den) => return app.set_time_signature(num, den),
         Cmd::ContinuousScrolling => {
             let on = crate::autoscroll::toggle_continuous();
             app.invalidate();
@@ -3059,7 +3064,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMsc(_) => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::TimeSignature(..) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMsc(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

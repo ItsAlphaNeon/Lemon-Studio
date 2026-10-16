@@ -3192,6 +3192,19 @@ impl App {
         let cfg = &st.audio;
         let rate = st.rate.unwrap_or(44100);
         let items: Vec<PItem> = match label {
+            // Project ▸ Time settings: one of the time signature's two numbers (spec: audio/song-structure.md).
+            views::settings::NUMERATOR | views::settings::DENOMINATOR => {
+                let now = self.state.project.time_signature.unwrap_or((4, 4));
+                let numerator = label == views::settings::NUMERATOR;
+                let choices = if numerator { views::settings::NUMERATORS } else { views::settings::DENOMINATORS };
+                choices
+                    .iter()
+                    .map(|&v| {
+                        let sig = if numerator { (v, now.1) } else { (now.0, v) };
+                        PItem::new(v.to_string(), Cmd::TimeSignature(sig.0, sig.1)).mark(Mark::Radio(sig == now))
+                    })
+                    .collect()
+            }
             OUTPUT_DEVICE => std::iter::once(PItem::new("Default device", Cmd::Audio(Set::Device(None))).mark(Mark::Radio(cfg.device.is_none())))
                 .chain(st.devices.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Device(Some(d.clone())))).mark(Mark::Radio(cfg.device.as_ref() == Some(d)))))
                 .collect(),
@@ -3237,6 +3250,28 @@ impl App {
         self.file_dialog(dlg);
     }
 
+    /// Settings > Project ▸ Time settings: the project's time signature (spec: audio/song-structure.md "Time signatures
+    /// and a pattern's length"). Playback follows at once (pattern lengths, the metronome's accents, what hosted plugins
+    /// are told), as do the pattern lengths the editors draw; the project counts as changed.
+    pub fn set_time_signature(&mut self, num: u16, den: u16) -> Option<String> {
+        let sig = (num.max(1), den.max(1));
+        if self.state.project.time_signature.unwrap_or((4, 4)) != sig {
+            self.state.project.time_signature = Some(sig);
+            self.state.piano.dirty = true;
+        }
+        self.invalidate();
+        Some(format!("Time signature: {}/{}", sig.0, sig.1))
+    }
+
+    /// Settings > Project ▸ Advanced ▸ Play truncated notes in clips (spec: audio/song-structure.md "Play truncated
+    /// notes"): switched for the project, and playback follows at once. Off when the file does not say.
+    fn toggle_play_truncated(&mut self) {
+        let on = !self.state.project.play_truncated.unwrap_or(false);
+        self.state.project.play_truncated = Some(on);
+        self.state.piano.dirty = true;
+        self.state.message = Some(format!("Play truncated notes in clips: {}", if on { "on" } else { "off" }));
+    }
+
     fn settings_act(&mut self, a: views::settings::SAct) {
         use views::settings::SAct;
         let st = &mut self.state.settings;
@@ -3278,6 +3313,7 @@ impl App {
             SAct::Check(k) if views::settings::plugin_check(k) => self.plugin_check(k),
             SAct::Plug(p) => self.plugin_act(p),
             SAct::Check(k) if crate::prefs::find_check(k).is_some() => self.pref_toggle(k),
+            SAct::Check(k) if k == views::settings::TRUNCATED_CHECK => self.toggle_play_truncated(),
             // Checks and buttons outside `settings::LIVE` are drawn greyed out with an `Action::Placeholder` hit instead.
             SAct::Check(k) => self.state.message = Some(off_text(k)),
             SAct::Group(k) => {
@@ -6505,6 +6541,87 @@ mod tests {
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(back.patterns[0].notes.len(), 2);
+    }
+
+    /// Settings > Project (spec: ui/settings.md "Project", audio/song-structure.md): the Numerator and Denominator
+    /// combos list their choices with the project's signature marked, and a pick changes the project at once (the
+    /// pattern lengths the editors use follow; the project counts as changed); "Play truncated notes in clips" shows
+    /// and switches the project's setting. Both survive a save and reopen, of a new project and of an opened one.
+    #[test]
+    fn project_settings_time_signature_and_truncated_notes() {
+        use crate::playlist::Mark;
+        use crate::views::settings::{SAct, DENOMINATOR, NUMERATOR, PROJECT, TRUNCATED_CHECK};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        (app.state.file, app.state.path) = (None, None);
+        // A note ending at tick 300 of the current pattern: one 4/4 bar.
+        app.state.project.patterns[0].notes = vec![Note { length: 276, ..Note::step(0, 24) }];
+        let notes = app.state.project.patterns[0].notes.clone();
+        assert_eq!(crate::piano::pattern_length(&app.state, &notes), 384);
+        app.mark_saved();
+        app.open_settings(PROJECT);
+        frame(&mut app, &mut c, None);
+        let shown = |app: &App, label: &str| {
+            views::settings::page(PROJECT, &app.state).into_iter().flat_map(|g| g.rows).find_map(|r| match r {
+                views::settings::Row::Combo(v, _, l) if l == label => Some(v),
+                _ => None,
+            })
+        };
+        assert_eq!((shown(&app, NUMERATOR).as_deref(), shown(&app, DENOMINATOR).as_deref()), (Some("4"), Some("4")), "4/4 when the file has none");
+        let pick = |app: &mut App, c: &mut Canvas, label: &str, choice: &str, count: usize| {
+            let r = app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == label)).map(|h| h.rect).unwrap_or_else(|| panic!("{label} works"));
+            click(app, c, r);
+            let p = app.state.playlist.popup.as_ref().unwrap_or_else(|| panic!("{label} opens a menu"));
+            assert_eq!(p.items.len(), count, "{label}");
+            let now = shown(app, label).unwrap();
+            assert!(p.items.iter().all(|it| it.mark == Mark::Radio(it.label == now)), "{label}: the current value is marked");
+            let i = p.items.iter().position(|it| it.label == choice).unwrap_or_else(|| panic!("{choice} offered"));
+            let r = hit_rect(app, &Action::PlPopup(i));
+            click(app, c, r);
+        };
+        pick(&mut app, &mut c, NUMERATOR, "3", 16);
+        assert_eq!(app.state.project.time_signature, Some((3, 4)));
+        assert_eq!(app.state.message.as_deref(), Some("Time signature: 3/4"));
+        assert!(app.unsaved(), "a change to the project");
+        // Patterns are whole bars of the signature: 288 ticks in 3/4.
+        assert_eq!(crate::piano::pattern_length(&app.state, &notes), 576);
+        assert_eq!(crate::playlist::source_len(&app.state, os_model::ClipSource::Pattern(app.state.pattern)), 576);
+        pick(&mut app, &mut c, DENOMINATOR, "8", 4);
+        assert_eq!(app.state.project.time_signature, Some((3, 8)));
+        assert_eq!((shown(&app, NUMERATOR).as_deref(), shown(&app, DENOMINATOR).as_deref()), (Some("3"), Some("8")));
+        assert_eq!(crate::piano::pattern_length(&app.state, &notes), 432);
+        // Play truncated notes: off when the file does not say (what the engine plays); a click switches it.
+        let r = hit_rect(&app, &Action::Settings(SAct::Group("Advanced")));
+        click(&mut app, &mut c, r);
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(TRUNCATED_CHECK)), "it works");
+        let r = hit_rect(&app, &Action::Settings(SAct::Check(TRUNCATED_CHECK)));
+        let on = |app: &App| views::settings::page(PROJECT, &app.state).into_iter().flat_map(|g| g.rows).find_map(|r| match r {
+            views::settings::Row::Check(k, v) if k == TRUNCATED_CHECK => Some(v),
+            _ => None,
+        });
+        assert_eq!((app.state.project.play_truncated, on(&app)), (None, Some(false)));
+        for want in [true, false, true] {
+            click(&mut app, &mut c, r);
+            assert_eq!((app.state.project.play_truncated, on(&app)), (Some(want), Some(want)));
+        }
+        // Saved and opened again.
+        let path = std::env::temp_dir().join(format!("lemon-project-settings-{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", app.state.message);
+        assert!(!app.unsaved());
+        let mut opened = App::new(None);
+        opened.open(path.clone());
+        assert_eq!((opened.state.project.time_signature, opened.state.project.play_truncated), (Some((3, 8)), Some(true)));
+        // Changed in the opened project and saved over it (the file's events patched), then opened again.
+        crate::playlist::run(&mut opened, crate::playlist::Cmd::TimeSignature(7, 16));
+        opened.settings_act(SAct::Check(TRUNCATED_CHECK));
+        assert!(opened.unsaved());
+        opened.save_to(path.clone());
+        let mut again = App::new(None);
+        again.open(path.clone());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((again.state.project.time_signature, again.state.project.play_truncated), (Some((7, 16)), Some(false)));
     }
 
     #[test]

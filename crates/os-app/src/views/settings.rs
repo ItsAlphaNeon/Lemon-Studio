@@ -130,6 +130,7 @@ pub const LIVE: &[&str] = &[
     STARTUP_CHECK,
     ERRORS_CHECK,
     COMBINE_CHECK,
+    TRUNCATED_CHECK,
     "Manage plugins",
     "Add folder...",
     "Find new plugins",
@@ -150,6 +151,23 @@ pub const ANIMATIONS: &str = "Animations";
 pub const OUTPUT_DEVICE: &str = "Output device";
 pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
+
+/// Project ▸ Time settings: the project's time signature (events 17, 18; spec: audio/song-structure.md "Time
+/// signatures and a pattern's length"). Their menus offer `NUMERATORS` and `DENOMINATORS`: the choices FL offers were
+/// not measured, these are Lemon Studio's.
+pub const NUMERATOR: &str = "Numerator";
+pub const DENOMINATOR: &str = "Denominator";
+pub const NUMERATORS: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+pub const DENOMINATORS: &[u16] = &[2, 4, 8, 16];
+/// The Project page's combos that work (their menus: `App::audio_menu`).
+pub const PROJECT_COMBOS: [&str; 2] = [NUMERATOR, DENOMINATOR];
+/// Project ▸ Advanced: "play truncated notes" (event 30; spec: audio/song-structure.md "Play truncated notes").
+pub const TRUNCATED_CHECK: &str = "Play truncated notes in clips";
+
+/// Whether the combo labelled `label` works (opens a menu of choices).
+fn live_combo(label: &str) -> bool {
+    LIVE_COMBOS.contains(&label) || PROJECT_COMBOS.contains(&label)
+}
 
 /// A buffer length as the Audio page shows it: frames and milliseconds at `rate`.
 pub fn buffer_text(frames: u32, rate: u32) -> String {
@@ -487,12 +505,13 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             g("Time settings", vec![
                 combo(&s.project.ppq.to_string(), 44.0, "Timebase (PPQ)"),
                 combo("Set as time signature", 196.0, ""),
-                combo("4", 44.0, "Numerator"),
-                combo("4", 44.0, "Denominator"),
+                // The project's signature, 4/4 when the file has none; the check shows what the engine plays.
+                combo(&s.project.time_signature.map_or(4, |t| t.0).to_string(), 44.0, NUMERATOR),
+                combo(&s.project.time_signature.map_or(4, |t| t.1).to_string(), 44.0, DENOMINATOR),
             ]),
             gf("Advanced", true, vec![
                 combo("Circular", 82.0, "Panning law"),
-                Check("Play truncated notes in clips", true),
+                Check(TRUNCATED_CHECK, s.project.play_truncated.unwrap_or(false)),
                 Check("Fast declick for cut groups", false),
             ]),
             gf("Playlist", false, vec![Check2("Automatic crossfades", true, "Enable automatic crossfades in new projects", true)]),
@@ -837,7 +856,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             check(ui, b, *db, g.x + 324.0, cy, live(b));
         }
         // The Audio page's device, rate and buffer combos and General's Animations open their menus.
-        Row::Combo(v, w, label) if LIVE_COMBOS.contains(label) || crate::prefs::find_combo(label).is_some() => {
+        Row::Combo(v, w, label) if live_combo(label) || crate::prefs::find_combo(label).is_some() => {
             // A combo declared in `crate::prefs` shows its choice.
             let v = match crate::prefs::find_combo(label) {
                 Some(c) => crate::prefs::choice(c),

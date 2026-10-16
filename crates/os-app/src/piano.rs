@@ -249,7 +249,8 @@ pub fn pattern_length(s: &State, notes: &[Note]) -> u32 {
     if let Some(l) = s.project.pattern(s.pattern).and_then(|p| p.length).filter(|&l| l > 0) {
         return l;
     }
-    let bar = u32::from(s.project.ppq.max(1)) * 4;
+    // Bars of the project's time signature (spec: audio/song-structure.md "Time signatures and a pattern's length").
+    let bar = s.project.bar_ticks();
     let end = notes.iter().map(|n| n.position + shown_len(s, n)).max().unwrap_or(0);
     (end / bar + 1) * bar
 }
