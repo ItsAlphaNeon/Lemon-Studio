@@ -309,7 +309,7 @@ impl App {
         let s = &mut self.state;
         if !s.browser_folders.contains(&path) {
             s.browser_folders.push(path.clone());
-            save_folders(&s.browser_folders);
+            save_folders(s);
         }
         s.browser_tab = 0;
         s.browser_search.clear();
@@ -327,7 +327,8 @@ impl App {
         let Some(row) = view::rows(s).into_iter().nth(i) else { return false };
         let Some(path) = row.path.filter(|_| row.depth == 0) else { return false };
         s.browser_folders.retain(|f| *f != path);
-        save_folders(&s.browser_folders);
+        s.browser_names.remove(&path);
+        save_folders(s);
         s.browser_open.retain(|k| !k.starts_with(&row.key));
         s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
         s.message = Some(format!("Removed {} from the browser", path.display()));
@@ -336,7 +337,8 @@ impl App {
     }
 }
 
-/// `browser_folders.txt` in the user folder (`os_paths::user_dir`): one dropped folder per line (spec §6).
+/// `browser_folders.txt` in the user folder (`os_paths::user_dir`): one dropped folder per line (spec §6), its Browser
+/// name after a tab when it has one (`crate::search_folders::file_text`).
 fn folders_file() -> Option<std::path::PathBuf> {
     if cfg!(test) {
         return None;
@@ -344,18 +346,27 @@ fn folders_file() -> Option<std::path::PathBuf> {
     os_paths::user_file("browser_folders.txt")
 }
 
-pub(crate) fn load_folders() -> Vec<std::path::PathBuf> {
+fn read_folders() -> Vec<(std::path::PathBuf, String)> {
     let Some(text) = folders_file().and_then(|p| std::fs::read_to_string(p).ok()) else { return Vec::new() };
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(std::path::PathBuf::from).collect()
+    crate::search_folders::parse_file(&text)
 }
 
-fn save_folders(folders: &[std::path::PathBuf]) {
+pub(crate) fn load_folders() -> Vec<std::path::PathBuf> {
+    read_folders().into_iter().map(|f| f.0).collect()
+}
+
+/// The dropped folders' Browser names.
+pub(crate) fn load_names() -> std::collections::BTreeMap<std::path::PathBuf, String> {
+    read_folders().into_iter().filter(|f| !f.1.is_empty()).collect()
+}
+
+/// Keeps the dropped folders and their names.
+pub(crate) fn save_folders(s: &crate::app::State) {
     let Some(p) = folders_file() else { return };
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    let text: String = folders.iter().map(|f| format!("{}\r\n", f.display())).collect();
-    let _ = std::fs::write(p, text);
+    let _ = std::fs::write(p, crate::search_folders::file_text(&s.browser_folders, &s.browser_names));
 }
 
 /// Options-menu commands (spec §4).

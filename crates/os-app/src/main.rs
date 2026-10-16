@@ -69,6 +69,8 @@ mod misc;
 mod misc_page;
 mod note_names;
 mod scroll_speed;
+mod search_folders;
+mod shortcuts;
 mod smooth;
 mod snap;
 mod song_pos;
@@ -825,8 +827,9 @@ impl ApplicationHandler for Shell {
                         return;
                     }
                 }
-                // A dialog takes repeats too (typing, moving through its list), and so does an Info box being edited.
-                if pressed && (!event.repeat || self.app.modal_open() || self.app.info_editing()) {
+                // A dialog takes repeats too (typing, moving through its list), and so does an Info box or a browser
+                // folder cell being edited.
+                if pressed && (!event.repeat || self.app.modal_open() || self.app.info_editing() || self.app.folder_cell_editing()) {
                     // macOS: Option and Command change the character a key types (Option+S is "ß"); shortcuts go by the
                     // key itself.
                     #[cfg(target_os = "macos")]

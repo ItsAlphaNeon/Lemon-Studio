@@ -379,6 +379,12 @@ pub fn label_of(menu: usize, item: &Item) -> std::borrow::Cow<'static, str> {
     }
 }
 
+/// The key shown beside `item`: the browser's and the pickers' follow General ▸ Input ▸ Manage shortcuts
+/// (`crate::shortcuts::menu_key`).
+pub fn shortcut_now(item: &Item) -> &'static str {
+    crate::shortcuts::menu_key(item.label, item.shortcut)
+}
+
 /// `label_of` for the project as it is now: EDIT's entries name the step they act on, "Undo step seq edit" (spec:
 /// ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
 pub fn label_now(s: &State, menu: usize, item: &Item) -> std::borrow::Cow<'static, str> {
@@ -473,7 +479,7 @@ pub fn bar_model(s: &State) -> Vec<BarMenu> {
                     }
                     let enabled = item.kind == Kind::Item && active(s, mi, item);
                     let pick = enabled.then_some((mi, flat));
-                    rows.push(BarRow { kind: item.kind, label: label_now(s, mi, item).into_owned(), shortcut: item.shortcut, enabled, mark: mark_of(s, mi, item), pick });
+                    rows.push(BarRow { kind: item.kind, label: label_now(s, mi, item).into_owned(), shortcut: shortcut_now(item), enabled, mark: mark_of(s, mi, item), pick });
                     flat += 1;
                 }
             }
@@ -636,7 +642,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                     let right = rr.right() - if item.sub { 16.0 } else { 8.0 };
                     if !item.shortcut.is_empty() {
                         let sc = if ok { t.menu_pop_shortcut } else { t.menu_pop_dim.mix(t.menu_pop, 0.35) };
-                        ui.c.text_right(font.italic(), right, rr.y + 3.0 + dy, sc, item.shortcut);
+                        ui.c.text_right(font.italic(), right, rr.y + 3.0 + dy, sc, shortcut_now(item));
                     }
                     if item.sub {
                         let ax = rr.right() - 11.0;

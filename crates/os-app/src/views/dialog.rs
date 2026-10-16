@@ -4,9 +4,10 @@
 // This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
 // and not any other part of Lemon Studio.
 
-//! Message boxes and the file dialog (`dialog`, `filedlg`), painted over everything with a veil under them. Classic
-//! draws FL's message form as measured; Lemon draws the same layout in the Lemon design's rounded parts.
-// spec: ui/dialogs.md §3, §4
+//! Message boxes, the file dialog (`dialog`, `filedlg`) and Manage shortcuts (`shortcuts`), painted over everything
+//! with a veil under them. Classic draws FL's message form as measured; Lemon draws the same layout in the Lemon
+//! design's rounded parts.
+// spec: ui/dialogs.md §3, §4; ui/settings-choices.md "Input: Manage shortcuts (2026-10-16)"
 
 use os_theme::design::lemon as brand;
 use os_ui::kit::{self, lemon as lk};
@@ -51,6 +52,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
         match &m.body {
             Body::Msg(msg) => msg_box(ui, s, m, msg),
             Body::File(f) => file_box(ui, s, m, f),
+            Body::Shortcuts(f) => shortcuts_box(ui, s, m, f),
         }
     }
 }
@@ -357,6 +359,99 @@ fn file_box(ui: &mut Ui, s: &State, m: &Modal, f: &FileDlg) {
     }
     if let (Some(c), true) = (l.combo, f.filter_open) {
         filter_list(ui, f, c, r);
+    }
+}
+
+// ---------------------------------------------------------------- Manage shortcuts
+
+/// Manage shortcuts: the window's width, a row's pitch, a box's size, a list entry's height.
+const SC_W: f32 = 380.0;
+const SC_ROW: f32 = 27.0;
+const SC_BOX: (f32, f32) = (116.0, 21.0);
+const SC_ITEM_H: f32 = 22.0;
+
+/// The height of a Manage shortcuts group of `n` rows: its header, its rows.
+fn sc_group_h(n: usize) -> f32 {
+    30.0 + n as f32 * SC_ROW + 4.0
+}
+
+/// Manage shortcuts: a group per section, a combo per row with the row's label beside it, then Reset all and Apply; the
+/// open list over everything.
+fn shortcuts_box(ui: &mut Ui, s: &State, m: &Modal, f: &crate::shortcuts::Form) {
+    use crate::shortcuts::{GROUPS, ROWS, TITLE};
+    let t = ui.t;
+    let font = Font::new(13);
+    let lh = ui.c.line_height(font);
+    let groups_h: f32 = GROUPS.iter().map(|g| sc_group_h(g.1) + 6.0).sum();
+    let r = place(s, m, SC_W, 28.0 + 4.0 + groups_h + 47.0);
+    frame(ui, r, TITLE);
+    let mut y = r.y + 32.0;
+    let mut row = 0;
+    let mut open_box = None;
+    for (title, n) in GROUPS {
+        let p = Rect::new(r.x + 8.0, y, r.w - 16.0, sc_group_h(n));
+        section(ui, p, title);
+        for k in 0..n {
+            let b = Rect::new(p.x + 10.0, p.y + 30.0 + k as f32 * SC_ROW, SC_BOX.0, SC_BOX.1);
+            let open = f.open == Some(row);
+            let hov = hit(ui, b, DHit::Shortcut(row), ROWS[row].label);
+            kit::combo(ui.c, t, b, f.text(row), font, kit::State::new(hov, open, false));
+            ui.c.text(font, b.right() + 10.0, (b.cy() - lh / 2.0).round(), t.text, ROWS[row].label);
+            if open {
+                open_box = Some((row, b));
+            }
+            row += 1;
+        }
+        y = p.bottom() + 6.0;
+    }
+    let bw = |ui: &mut Ui, s: &str| (ui.c.text_width(font, s) + 28.0).max(BTN_W).round();
+    let (rw, aw) = (bw(ui, "Reset all"), bw(ui, "Apply"));
+    let by = r.bottom() - 8.0 - BTN_H;
+    let reset = Rect::new(r.x + 12.0, by, rw, BTN_H);
+    let apply = Rect::new(r.right() - 12.0 - aw, by, aw, BTN_H);
+    for (b, label, h, main, hint) in [
+        (reset, "Reset all", DHit::ResetAll, false, "Put the default shortcuts in the form (Apply keeps them)"),
+        (apply, "Apply", DHit::Apply, true, "Apply the shortcuts and close"),
+    ] {
+        let act = Action::Dlg(h);
+        let down = ui.down(b, &act);
+        let hov = ui.hit(b, act, hint);
+        button(ui, b, label, main, hov, down, false);
+    }
+    if let Some((row, b)) = open_box {
+        shortcut_list(ui, f, row, b, r);
+    }
+}
+
+/// The open list of a Manage shortcuts box: its choices under the box (above it when there is no room), the chosen one
+/// marked.
+fn shortcut_list(ui: &mut Ui, f: &crate::shortcuts::Form, row: usize, b: Rect, dlg: Rect) {
+    let t = ui.t;
+    let choices = crate::shortcuts::ROWS[row].choices;
+    let h = choices.len() as f32 * SC_ITEM_H + 6.0;
+    let below = Rect::new(b.x, b.bottom() + 2.0, b.w, h);
+    let p = if below.bottom() > dlg.bottom() - 4.0 { Rect::new(b.x, b.y - 2.0 - h, b.w, h) } else { below };
+    if lemon(ui) {
+        lk::popup(ui.c, t, p);
+    } else {
+        ui.c.fill_rect(p, t.menu_pop_border);
+        ui.c.fill_rect(p.inset(1.0), t.menu_pop);
+    }
+    hit(ui, p, DHit::Body, "");
+    let font = Font::new(13);
+    let lh = ui.c.line_height(font);
+    for (i, ch) in choices.iter().enumerate() {
+        let rr = Rect::new(p.x + 1.0, p.y + 3.0 + i as f32 * SC_ITEM_H, p.w - 2.0, SC_ITEM_H);
+        let hov = hit(ui, rr, DHit::ShortcutChoice(i), "");
+        if hov {
+            if lemon(ui) {
+                lk::row_highlight(ui.c, t, rr);
+            } else {
+                ui.c.fill_rect(rr, t.menu_pop_hi);
+            }
+        }
+        let col = if i == f.vals[row] { if lemon(ui) { brand::MAIN } else { t.glyph } } else { t.text };
+        ui.c.text_clip(font, rr.x + 10.0, (rr.cy() - lh / 2.0).round(), rr.w - 16.0, col, ch);
     }
 }
 

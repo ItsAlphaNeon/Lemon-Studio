@@ -163,13 +163,13 @@ fn tree(s: &State) -> Vec<Row> {
         _ => Vec::new(),
     };
     if tab == 0 {
-        // Dropped folders follow the roots, in alphabetical order (spec §6).
+        // Dropped folders follow the roots, in alphabetical order of their labels (spec §6).
         let name = |r: &Result<usize, usize>| match *r {
             Ok(i) => ROOTS[i].0.to_lowercase(),
-            Err(f) => folder_name(&s.browser_folders[f]).to_lowercase(),
+            Err(f) => root_label(s, &s.browser_folders[f]).to_lowercase(),
         };
         for f in 0..s.browser_folders.len() {
-            let me = folder_name(&s.browser_folders[f]).to_lowercase();
+            let me = root_label(s, &s.browser_folders[f]).to_lowercase();
             let at = (ROOTS.len()..roots.len()).find(|&j| name(&roots[j]) > me).unwrap_or(roots.len());
             roots.insert(at, Err(f));
         }
@@ -182,7 +182,7 @@ fn tree(s: &State) -> Vec<Row> {
                 let key = disk_key(path);
                 let open = s.browser_open.contains(&key);
                 let icon = if open { Icon::FolderOpen } else { Icon::Folder };
-                out.push(Row { key: key.clone(), depth: 0, label: folder_name(path), icon, cat: FOLDER, open: Some(open), bright: true, item: Item::None, path: Some(path.clone()) });
+                out.push(Row { key: key.clone(), depth: 0, label: root_label(s, path), icon, cat: FOLDER, open: Some(open), bright: true, item: Item::None, path: Some(path.clone()) });
                 if open {
                     disk_rows(s, path, &key, 1, &mut out);
                 }
@@ -223,6 +223,12 @@ pub fn disk_key(path: &Path) -> String {
 /// A dropped folder's label: its name (the whole path for a drive root).
 pub fn folder_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
+}
+
+/// A dropped folder root's label: its Browser name (File ▸ Browser extra search folders, `crate::search_folders`),
+/// else the folder's name.
+pub fn root_label(s: &State, path: &Path) -> String {
+    s.browser_names.get(path).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| folder_name(path))
 }
 
 /// One directory entry of a dropped folder (spec §6).

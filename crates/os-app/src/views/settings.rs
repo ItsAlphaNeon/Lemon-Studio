@@ -48,6 +48,10 @@ pub enum SAct {
     /// A slider declared in `crate::prefs` by its label, with its track's left and width: a press sets it and drags it
     /// (`App::pref_slider_press`), the wheel steps it (`App::pref_slider_wheel`).
     Slider(&'static str, f32, f32),
+    /// File ▸ Browser extra search folders: row i's folder button (`App::search_folder_pick`).
+    FolderPick(usize),
+    /// Row i's Folder or Browser name cell: a click selects it for typing (`App::search_folder_cell`).
+    FolderCell(usize, crate::search_folders::Col),
 }
 
 /// The Info page's text boxes: the project's credits (spec: ui/settings.md "Info", flp/events/project-info.md).
@@ -146,6 +150,8 @@ pub struct SettingsUi {
     pub preset: usize,
     /// The Info page's box being edited.
     pub info_edit: Option<InfoEdit>,
+    /// The File page's Browser extra search folders cell being typed into.
+    pub folder_edit: Option<crate::search_folders::CellEdit>,
     /// The Plugins page shows the experimental native host toggles: `os_native::settings_shown()` at startup.
     pub native: bool,
     /// Project ▸ Time settings: the last bar (beats per bar, steps per beat) of each "Set as" mode, indexed by
@@ -206,6 +212,7 @@ pub const LIVE: &[&str] = &[
     LIGHT_MODE_CHECK,
     NOTE_COLORS_CHECK,
     RESET_WORK_TIME,
+    MANAGE_SHORTCUTS,
     "Manage plugins",
     "Add folder...",
     "Find new plugins",
@@ -275,6 +282,8 @@ pub const SHOW_INFO_CHECK: &str = "Show info on opening";
 pub const LIGHT_MODE_CHECK: &str = "Light mode";
 pub const NOTE_COLORS_CHECK: &str = "Audio and automation clips use note colors";
 pub const RESET_WORK_TIME: &str = "Reset working time";
+/// General ▸ Input: opens the Manage shortcuts window (`App::open_shortcuts`).
+pub const MANAGE_SHORTCUTS: &str = "Manage shortcuts";
 
 /// General ▸ Miscellaneous: FILE ▸ New's template; its tree is found at run time (`crate::templates`).
 pub const DEFAULT_TEMPLATE: &str = "Default template";
@@ -365,6 +374,8 @@ pub enum Row {
     Dim(&'static str, Box<Row>),
     /// Plugin search folders: (path, tag, searched, added by the user).
     Folders(Vec<(String, &'static str, bool, bool)>),
+    /// File ▸ Browser extra search folders (reads `State::browser_folders`, `crate::search_folders`): the rows shown.
+    SearchFolders(usize),
     /// The preferred-format switch.
     Prefer(Prefer),
     /// The plugin table with its count and Find box (reads `State::plugdb`).
@@ -500,7 +511,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]) },
             gf("Input", false, vec![
                 combo("Multi-button mouse", 136.0, "Optimize for"),
-                Buttons(vec![("Manage shortcuts", 212.0)]),
+                Buttons(vec![(MANAGE_SHORTCUTS, 212.0)]),
                 Check("Click-and-hold & special gesture functions", false),
                 Check("Use both mouse buttons in step sequencer", false),
                 Slider("Vertical scrolling speed", 0.5),
@@ -572,7 +583,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     Text(format!("{} instruments, {} effects", s.plugdb.lists.gens.len(), s.plugdb.lists.fx.len()), true),
                 ]),
                 g("User data folder", vec![txt(user)]),
-                g("Browser extra search folders", vec![dim("Browser extra search folders", List(vec![("Folder", 30.0), ("Browser name", 440.0)], vec![], 12))]),
+                g("Browser extra search folders", vec![SearchFolders(crate::search_folders::shown_rows(s))]),
                 g("External tools", vec![
                     dim("External tools", List(vec![("File", 30.0), ("Name", 320.0)], vec![], 4)),
                     dim("External tools", txt("Script editor   C:\\Windows\\System32\\Notepad.exe")),
@@ -740,6 +751,7 @@ fn row_h(r: &Row) -> f32 {
         Row::Pair(a, b) => row_h(a).max(row_h(b)),
         Row::Dim(_, r) => row_h(r),
         Row::Folders(f) => 21.0 * f.len().max(1) as f32 + 10.0,
+        Row::SearchFolders(n) => 18.0 + SF_ROW_H * *n as f32 + 10.0,
         Row::Prefer(_) => 27.0,
         Row::Table => 4.0 + 18.0 + TABLE_ROW_H * TABLE_ROWS as f32 + 4.0 + 34.0,
         Row::Edit(f, _) => if f.multiline() { COMMENT_LINE_H * COMMENT_LINES as f32 + 12.0 } else { 28.0 },
@@ -1174,6 +1186,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             paint_row_at(ui, s, group, b, g, y, h, 304.0);
         }
         Row::Folders(list) => folders(ui, list, Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 6.0)),
+        Row::SearchFolders(_) => search_folders(ui, s, Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 6.0)),
         Row::Prefer(cur) => prefer(ui, *cur, x0, y, ty),
         Row::Table => table(ui, s, Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 4.0)),
         Row::Dim(name, r) => {
@@ -1324,6 +1337,77 @@ fn list_frame(ui: &mut Ui, b: Rect) {
         ui.c.fill_rect(b, t.s(0x161819));
         ui.c.fill_rect(b.inset(1.0), t.s(0x222527));
     }
+}
+
+/// Browser extra search folders: a row's height, where its Folder and Browser name columns start (from the list's
+/// left).
+const SF_ROW_H: f32 = 17.0;
+const SF_FOLDER_X: f32 = 30.0;
+const SF_NAME_X: f32 = 440.0;
+
+/// File ▸ Browser extra search folders (`crate::search_folders`; spec: ui/settings-choices.md "Browser extra search
+/// folders"): the Folder and Browser name columns with a folder button at the left of each row, the filled rows first,
+/// then empty ones. The cell being typed into shows its text with its caret or selection.
+fn search_folders(ui: &mut Ui, s: &State, b: Rect) {
+    use crate::search_folders::{rows, shown_rows, Col};
+    let t = ui.t;
+    list_frame(ui, b);
+    let f = Font::new(13);
+    for (c, cx) in [("Folder", SF_FOLDER_X), ("Browser name", SF_NAME_X)] {
+        ui.c.text(f, b.x + 6.0 + cx, b.y + 2.0, t.text_dim, c);
+    }
+    let filled = rows(s);
+    let edit = s.settings.folder_edit.as_ref();
+    for i in 0..shown_rows(s) {
+        let rr = Rect::new(b.x + 2.0, b.y + 20.0 + i as f32 * SF_ROW_H, b.w - 4.0, SF_ROW_H);
+        if i % 2 == 1 {
+            ui.c.fill_rect(rr, t.s(0x26292b));
+        }
+        let pick = Rect::new(rr.x + 4.0, rr.y, 22.0, rr.h);
+        let hint = if i < filled.len() { "Choose another folder for this row" } else { "Add a folder to the browser" };
+        let hov = ui.hit(pick, Action::Settings(SAct::FolderPick(i)), hint);
+        let icon = Rect::new(pick.x + 4.0, pick.y + 2.0, 13.0, 13.0);
+        crate::icons::draw(ui.c, crate::icons::Icon::Folder, icon, if hov { t.glyph } else { t.text_dim });
+        let Some((path, name)) = filled.get(i) else { continue };
+        let cells = [
+            (Col::Folder, Rect::span(rr.x + SF_FOLDER_X, rr.x + SF_NAME_X - 6.0, rr.y, rr.bottom()), path, "The folder: click, type another one or empty it (removes it from the browser), Enter"),
+            (Col::Name, Rect::span(rr.x + SF_NAME_X, rr.right(), rr.y, rr.bottom()), name, "Its name in the browser (empty: the folder's name): click, type, Enter"),
+        ];
+        for (col, cr, text, hint) in cells {
+            let typing = edit.filter(|e| e.row == i && e.col == col).map(|e| &e.text);
+            let hov = ui.hit(cr, Action::Settings(SAct::FolderCell(i, col)), if typing.is_some() { "Enter accepts, Esc cancels" } else { hint });
+            cell_text(ui, cr, text, typing, hov);
+        }
+    }
+}
+
+/// A list cell's text, or the text being typed into it: a darker well, the text scrolled sideways to keep the caret in
+/// view, the caret or the selection.
+fn cell_text(ui: &mut Ui, r: Rect, text: &str, typing: Option<&crate::dialog::Field>, hov: bool) {
+    let t = ui.t;
+    let f = Font::new(13);
+    let lh = ui.c.line_height(f);
+    let y = (r.cy() - lh / 2.0).round();
+    let inner = Rect::new(r.x + 4.0, r.y, r.w - 8.0, r.h);
+    let Some(e) = typing else {
+        ui.c.text_clip(f, inner.x, y, inner.w, if hov { t.glyph } else { t.text }, text);
+        return;
+    };
+    ui.c.fill_rect(r, t.s(0x141516));
+    let sel = if super::lemon(ui) { os_theme::design::lemon::COLORED_DARK } else { t.a(0x2d5a8c) };
+    ui.c.push_clip(inner);
+    let caret_x = ui.c.text_width(f, e.before_caret());
+    let x = inner.x - (caret_x - (inner.w - 2.0)).max(0.0);
+    let all = e.all && !e.text.is_empty();
+    if all {
+        let w = ui.c.text_width(f, &e.text);
+        ui.c.fill_rect(Rect::new(x - 1.0, y, w + 2.0, lh), sel);
+    }
+    ui.c.text(f, x, y, t.text, &e.text);
+    if !all {
+        ui.c.fill_rect(Rect::new((x + caret_x).round(), y, 1.0, lh), t.text);
+    }
+    ui.c.pop_clip();
 }
 
 /// Search folders (spec: ui/plugin-manager.md §2): a check, the path, the tag; added folders end with a remove button.
