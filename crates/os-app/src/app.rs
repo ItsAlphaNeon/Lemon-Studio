@@ -675,6 +675,8 @@ pub enum Drag {
     /// Change a channel's mixer track (spec: ui/channel-rack.md §5).
     RackMixer { ch: usize, y0: f32, v0: u16 },
     Fader { track: u16, y0: f32, v0: f64 },
+    /// A press on a track's equaliser graph `g`: band `band` follows the cursor.
+    EqGraph { track: u16, band: u8, g: Rect },
     /// A plain press on a mixer strip, held: the strip under the cursor is selected as it slides across, to preview
     /// tracks one after another.
     MixSelect,
@@ -3349,8 +3351,25 @@ impl App {
                 (target::mixer(t, target::MIXER_VOLUME), format!("{} - Volume", mix_name(t)), v)
             }
             Action::Tempo => (target::TEMPO, "Tempo".into(), crate::playlist::tempo_value(s.tempo)),
+            Action::Knob(k @ crate::knobs::KnobId::Eq(t, b, f)) => {
+                s.project.mixer.iter().find(|m| m.index == t)?;
+                let param = [target::EQ_GAIN, target::EQ_FREQ, target::EQ_WIDTH][usize::from(f.min(2))] + b.min(2);
+                let text = s.knob_text(k);
+                let label = text.split_once(':').map_or(text.as_str(), |(a, _)| a);
+                (target::mixer(t, param), format!("{} - {label}", mix_name(t)), f64::from(s.knob(k)))
+            }
             _ => return None,
         })
+    }
+
+    /// Repaints the current track's equaliser: graph, faders and knobs (a change to one moves the others).
+    fn damage_eq(&mut self) {
+        use crate::{knobs::KnobId, mixer::MHit};
+        let eq = |a: &Action| matches!(a, Action::Knob(KnobId::Eq(..)) | Action::Mix(MHit::EqGraph));
+        match self.hits.iter().filter(|h| eq(&h.action)).map(|h| h.rect).reduce(|a, b| a.union(&b)) {
+            Some(r) => self.damage_rect(r.outset(8.0)),
+            None => self.invalidate(),
+        }
     }
 
     pub(crate) fn top_hit(&self, x: f32, y: f32) -> Option<&Hit> {
@@ -3644,6 +3663,15 @@ impl App {
                         Some(r) => self.damage_rect(r.outset(6.0)),
                         None => self.invalidate(),
                     }
+                    if let crate::knobs::KnobId::Eq(..) = id {
+                        self.damage_eq();
+                    }
+                    self.damage_rect(HINT_RECT);
+                }
+                Drag::EqGraph { track, band, g } => {
+                    crate::mixer::eq_graph_drag(&mut self.state, track, band, g, (x, y));
+                    self.hint = Cow::Owned(crate::mixer::eq_graph_hint(&self.state, g, x));
+                    self.damage_eq();
                     self.damage_rect(HINT_RECT);
                 }
                 Drag::MonParam(i) => {
@@ -3683,6 +3711,9 @@ impl App {
         }
         if hover == Some(Action::CpuPanel) {
             hint = Cow::Owned(self.state.cpu.hint());
+        }
+        if let (Some(Action::Mix(crate::mixer::MHit::EqGraph)), Some(g)) = (&hover, rect) {
+            hint = Cow::Owned(crate::mixer::eq_graph_hint(&self.state, g, x));
         }
         let resize = matches!(hover, Some(Action::PianoNote(_)))
             && matches!(self.state.piano.tool, Tool::Draw | Tool::Paint | Tool::Select)
@@ -5575,6 +5606,14 @@ impl App {
                 crate::patterns::run(s, crate::patterns::Cmd::FindFirst, at);
                 s.playlist.source = None;
             }
+            Action::Mix(crate::mixer::MHit::EqGraph) => {
+                if let Some(g) = self.top_hit(self.mouse.0, self.mouse.1).map(|h| h.rect) {
+                    let (track, band) = (self.state.selected_mixer, crate::mixer::eq_band_at(&self.state, g, self.mouse.0));
+                    self.drag = Some(Drag::EqGraph { track, band, g });
+                    crate::mixer::eq_graph_drag(&mut self.state, track, band, g, self.mouse);
+                    self.damage_eq();
+                }
+            }
             Action::Mix(h) => {
                 let plain_strip = matches!(h, crate::mixer::MHit::Strip(_)) && !self.ctrl && !self.shift;
                 if let Some(m) = crate::mixer::hit(self, h) {
@@ -6565,6 +6604,98 @@ mod tests {
         app.mouse_move(r3.cx(), r3.cy());
         assert_eq!(app.state.selected_mixer, 2, "released: hovering selects nothing");
         assert_eq!(app.state.mixer.sel, Vec::<u16>::new());
+    }
+
+    #[test]
+    fn mixer_eq_fader_and_knobs_edit_the_track() {
+        use crate::knobs::KnobId;
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        app.state.z = vec![Win::Mixer];
+        app.state.selected_mixer = 1;
+        frame(&mut app, &mut a, None);
+        let i = app.state.project.mixer.iter().position(|m| m.index == 1).unwrap();
+        // Band 2's fader: up 40 px is a quarter of the range, +9 dB.
+        let r = hit_rect(&app, &Action::Knob(KnobId::Eq(1, 1, 0)));
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_move(r.cx(), r.cy() - 40.0);
+        app.mouse_up();
+        assert_eq!(app.state.project.mixer[i].eq[1][0], 900);
+        frame(&mut app, &mut a, None);
+        let hint = app.hits.iter().find(|h| h.action == Action::Knob(KnobId::Eq(1, 1, 0))).map(|h| h.hint.to_string());
+        assert_eq!(hint.as_deref(), Some("EQ band 2 (peaking) level: 9.0dB"));
+        let (target, name, v) = app.automation_target(&Action::Knob(KnobId::Eq(1, 1, 0))).unwrap();
+        assert_eq!((target, name.as_str()), (os_model::target::mixer(1, os_model::target::EQ_GAIN + 1), "Insert 1 - EQ band 2 (peaking) level"));
+        assert!((v - 0.75).abs() < 1e-6);
+        // Band 3's frequency knob, when the panel is tall enough to show it.
+        if app.hits.iter().any(|h| h.action == Action::Knob(KnobId::Eq(1, 2, 1))) {
+            let r = hit_rect(&app, &Action::Knob(KnobId::Eq(1, 2, 1)));
+            app.mouse_move(r.cx(), r.cy());
+            app.mouse_down();
+            app.mouse_move(r.cx(), r.cy() - 20.0);
+            app.mouse_up();
+            assert!(app.state.project.mixer[i].eq[2][1] > os_model::EQ_DEFAULT[2][1]);
+        }
+    }
+
+    #[test]
+    fn mixer_eq_graph_drags_the_nearest_band() {
+        use crate::knobs::KnobId;
+        use crate::mixer::MHit;
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        app.state.z = vec![Win::Mixer];
+        app.state.selected_mixer = 1;
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        let i = app.state.project.mixer.iter().position(|m| m.index == 1).unwrap();
+        let g = hit_rect(&app, &Action::Mix(MHit::EqGraph));
+        // Each change repaints the graph with the faders and knobs, and that matches a full repaint.
+        let check = |app: &mut App, a: &mut Canvas, b: &mut Canvas, what: &str| {
+            let d = app.take_damage();
+            let Some(Some(rects)) = &d else { panic!("{what}: repaints regions, not the frame") };
+            assert!(rects.iter().any(|r| r.contains(g.cx(), g.cy())), "{what}: the graph is repainted");
+            frame_damage(app, a, d);
+            frame(app, b, None);
+            assert_same(a, b, what);
+        };
+        // A knob: the graph follows.
+        let k = hit_rect(&app, &Action::Knob(KnobId::Eq(1, 1, 0)));
+        app.mouse_move(k.cx(), k.cy());
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        app.mouse_down();
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        app.mouse_move(k.cx(), k.cy() - 30.0);
+        check(&mut app, &mut a, &mut b, "fader drag");
+        app.mouse_up();
+        app.state.project.mixer[i].eq = os_model::EQ_DEFAULT;
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        // The graph's hint reads the frequency under the cursor and the band a press would take: here band 2 (1500 Hz).
+        let x = g.x + 1.0 + (g.w - 2.0) * 0.55;
+        app.mouse_move(x, g.cy());
+        assert!(app.hint.ends_with("Hz  Tweak band 2"), "{}", app.hint);
+        // Pressing there and dragging up and left: band 2 follows the cursor, the others stay.
+        app.mouse_down();
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        app.mouse_move(x - 10.0, g.cy() - (g.h / 2.0 - 4.0) / 2.0);
+        check(&mut app, &mut a, &mut b, "graph drag");
+        app.mouse_up();
+        let eq = app.state.project.mixer[i].eq;
+        assert_eq!(eq[1][0], 900, "half way up is +9 dB");
+        let want = (crate::mixer::eq_graph_pos(g, x - 10.0) * 65536.0).round() as i32;
+        assert_eq!(eq[1][1], want);
+        assert_eq!((eq[0], eq[2]), (os_model::EQ_DEFAULT[0], os_model::EQ_DEFAULT[2]));
+        // At the left edge the low shelf is the nearest.
+        app.mouse_move(g.x + 3.0, g.cy());
+        assert!(app.hint.ends_with("Tweak band 1"), "{}", app.hint);
     }
 
     #[test]
