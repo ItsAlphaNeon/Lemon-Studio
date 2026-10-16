@@ -207,6 +207,7 @@ pub const LIVE: &[&str] = &[
     NOTE_COLORS_CHECK,
     RESET_WORK_TIME,
     "Manage plugins",
+    "Manage messages",
     "Add folder...",
     "Find new plugins",
     "Rescan all",

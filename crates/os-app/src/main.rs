@@ -38,6 +38,7 @@ mod logo;
 mod macos;
 #[cfg(target_os = "macos")]
 mod menu_bar;
+mod messages;
 mod meters;
 mod metronome;
 mod midi_in;

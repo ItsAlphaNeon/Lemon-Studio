@@ -107,11 +107,15 @@ pub struct Msg {
     /// The focused button (Enter / Space press it).
     pub focus: usize,
     pub then: Then,
+    /// The "Remember my choice" check at the bottom left: the Manage messages entry it turns off when the box is
+    /// answered Ok (or Yes) while it is ticked, and whether it is ticked. None: the box has no such check. Spec:
+    /// ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)".
+    pub remember: Option<(&'static crate::messages::Message, bool)>,
 }
 
 impl Msg {
     pub fn new(kind: Kind, title: &str, text: Vec<(String, bool)>, buttons: &[Answer], then: Then) -> Msg {
-        Msg { kind, title: title.into(), text, buttons: buttons.to_vec(), focus: 0, then }
+        Msg { kind, title: title.into(), text, buttons: buttons.to_vec(), focus: 0, then, remember: None }
     }
 
     /// The button Esc and the caption's × press: Cancel, else No, else the last one.
@@ -160,6 +164,8 @@ pub enum DHit {
     Close,
     /// A message box button (index).
     Button(usize),
+    /// A message box's Remember my choice check.
+    Remember,
     /// File dialog: Back, Up, New folder, the path and name fields, a place, a row, a column header, the list's empty
     /// part, its scroll bar, the type combo and its entries, the main button and Cancel.
     Back,
@@ -365,7 +371,15 @@ impl App {
         }
         self.modal_changed();
         let then = match m.body {
-            Body::Msg(m) => m.then,
+            Body::Msg(m) => {
+                // Ok with Remember my choice ticked turns the message off; Cancel never does.
+                if let Some((entry, true)) = m.remember {
+                    if matches!(reply, Reply::Button(Answer::Ok | Answer::Yes)) {
+                        crate::messages::set(entry, false);
+                    }
+                }
+                m.then
+            }
             Body::File(f) => {
                 if let Reply::File(Some(p)) = &reply {
                     f.remember(p);
@@ -431,6 +445,11 @@ impl App {
             DHit::Close | DHit::Cancel => {
                 if let Some(reply) = self.escape_reply() {
                     self.answer(reply);
+                }
+            }
+            DHit::Remember => {
+                if let Body::Msg(Msg { remember: Some((_, ticked)), .. }) = &mut m.body {
+                    *ticked = !*ticked;
                 }
             }
             DHit::Button(i) => {

@@ -116,7 +116,10 @@ fn msg_box(ui: &mut Ui, s: &State, m: &Modal, msg: &Msg) {
     let bf = Font::new(13);
     let widths: Vec<f32> = msg.buttons.iter().map(|b| (ui.c.text_width(bf, b.label()) + 28.0).max(BTN_W).round()).collect();
     let buttons_w = widths.iter().sum::<f32>() + 6.0 * widths.len().saturating_sub(1) as f32;
-    let w = (text_w + TEXT_X + TEXT_R).max(buttons_w + 24.0).max(MIN_W).ceil();
+    // Remember my choice sits left of the buttons (spec: ui/settings-choices.md "Hints and warnings: Manage messages
+    // and Project data size warning (2026-10-16)").
+    let remember_w = if msg.remember.is_some() { super::remember_width(ui) + 24.0 } else { 0.0 };
+    let w = (text_w + TEXT_X + TEXT_R).max(buttons_w + 24.0 + remember_w).max(MIN_W).ceil();
     let body_h = (27.0 + lines.len() as f32 * LINE).max(91.0);
     let r = place(s, m, w, 28.0 + body_h + 63.0);
     frame(ui, r, &msg.title);
@@ -135,6 +138,9 @@ fn msg_box(ui: &mut Ui, s: &State, m: &Modal, msg: &Msg) {
         }
     }
     let by = body.bottom() + 20.0;
+    if let Some((_, ticked)) = msg.remember {
+        super::remember_check(ui, r.x + 14.0, by + BTN_H / 2.0, ticked, Action::Dlg(DHit::Remember));
+    }
     let mut bx = r.right() - 12.0 - buttons_w;
     for (i, (a, bw)) in msg.buttons.iter().zip(widths).enumerate() {
         let b = Rect::new(bx, by, bw, BTN_H);

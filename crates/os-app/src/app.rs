@@ -1422,7 +1422,15 @@ impl App {
         }
     }
 
+    /// Saves the project to `target`; a file over the Project data size warning is said (`App::size_notice`).
     pub(crate) fn save_to(&mut self, target: PathBuf) {
+        if let Some(bytes) = self.write_project(target) {
+            self.size_notice(bytes);
+        }
+    }
+
+    /// Writes the project to `target`: the size of the file written, None when the save failed.
+    fn write_project(&mut self, target: PathBuf) -> Option<u64> {
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
         crate::backup::keep_overwritten(&target);
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
@@ -1470,7 +1478,7 @@ impl App {
                 Ok(f) => f,
                 Err(e) => {
                     s.message = Some(format!("Save failed: {e}"));
-                    return;
+                    return None;
                 }
             }
         } else {
@@ -1488,10 +1496,10 @@ impl App {
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
-            .and_then(|b| std::fs::write(&target, b).map_err(|e| e.to_string()));
-        s.message = Some(match result {
-            Ok(()) if lost.is_empty() => format!("Saved {}", target.display()),
-            Ok(()) => format!("Saved {} (not stored yet: {})", target.display(), lost.join(", ")),
+            .and_then(|b| std::fs::write(&target, &b).map(|()| b.len() as u64).map_err(|e| e.to_string()));
+        s.message = Some(match &result {
+            Ok(_) if lost.is_empty() => format!("Saved {}", target.display()),
+            Ok(_) => format!("Saved {} (not stored yet: {})", target.display(), lost.join(", ")),
             Err(e) => format!("Save failed: {e}"),
         });
         if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
@@ -1505,6 +1513,7 @@ impl App {
             s.path = Some(target);
             self.mark_saved();
         }
+        result.ok()
     }
 
     /// Writes the project to `target` as Save does, as a copy: the project keeps its file, name, unsaved changes and the
@@ -1517,7 +1526,8 @@ impl App {
         let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone());
         // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project").
         let last = crate::templates::last_kept();
-        self.save_to(target);
+        // A copy never warns about its size.
+        self.write_project(target);
         crate::templates::restore_last(last);
         let s = &mut self.state;
         let done = match s.message.take() {
@@ -3688,6 +3698,7 @@ impl App {
             SAct::Button("Reset") => self.settings_act(SAct::Preset(0)),
             SAct::Button("Load theme...") => self.theme_dialog(),
             SAct::Button("Manage plugins") => self.open_settings(views::settings::PLUGINS),
+            SAct::Button("Manage messages") => return self.messages_menu(),
             SAct::Button("Find new plugins") => self.start_scan(crate::plugin_db::Mode::Changed),
             SAct::Button("Rescan all") => self.start_scan(crate::plugin_db::Mode::All),
             SAct::Button("Add folder...") => self.add_plugin_folder(),

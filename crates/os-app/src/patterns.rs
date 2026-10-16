@@ -81,6 +81,8 @@ pub enum Hit {
     Swatch(usize), // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
     ConfirmOk,
     ConfirmCancel,
+    /// The confirmation's Remember my choice check.
+    ConfirmRemember,
     Inside,
 }
 
@@ -109,6 +111,10 @@ pub struct PatternUi {
     pub name_box: Option<NameBox>,
     /// "The selected pattern is about to be deleted." is showing.
     pub confirm: bool,
+    /// The confirmation's "Remember my choice" check: off each time it opens; Ok with it ticked turns the
+    /// confirmation's Manage messages entry off, Cancel never does (spec: ui/settings-choices.md "Hints and warnings:
+    /// Manage messages and Project data size warning (2026-10-16)").
+    pub remember: bool,
     pub recent: Vec<String>,
     /// Where the PATTERNS menu opens (`None` = under its menu-bar title).
     pub menu_at: Option<(f32, f32)>,
@@ -326,7 +332,9 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
             *pat_mut(s, cur + 1) = copy;
             s.pattern = cur + 1;
         }
-        Cmd::Delete => s.pat_ui.confirm = true,
+        // Its Manage messages entry off: as if Ok was pressed.
+        Cmd::Delete if !crate::messages::on(&crate::messages::DELETE_PATTERN) => delete_pattern(s),
+        Cmd::Delete => open_confirm(s),
         Cmd::MoveUp if cur > 1 => {
             swap(s, cur, cur - 1);
             s.pattern = cur - 1;
@@ -340,16 +348,48 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
     None
 }
 
-/// Ok in the delete confirmation (channels waiting in the rack go to the app, which removes them).
+/// Shows the delete confirmation (the pattern's, or the channels' waiting in `rack.pending_delete`), its Remember my
+/// choice off.
+pub fn open_confirm(s: &mut State) {
+    s.pat_ui.confirm = true;
+    s.pat_ui.remember = false;
+}
+
+/// The Manage messages entry of the delete confirmation showing: the channels' or the pattern's.
+fn confirming(s: &State) -> &'static crate::messages::Message {
+    if s.rack.pending_delete.is_some() {
+        &crate::messages::DELETE_CHANNEL
+    } else {
+        &crate::messages::DELETE_PATTERN
+    }
+}
+
+/// Ok in the delete confirmation (channels waiting in the rack go to the app, which removes them). With Remember my
+/// choice ticked, the confirmation's Manage messages entry turns off.
 pub fn delete_current(s: &mut State) {
+    if s.pat_ui.remember {
+        crate::messages::set(confirming(s), false);
+    }
+    s.pat_ui.confirm = false;
+    s.pat_ui.remember = false;
     if let Some(rows) = s.rack.pending_delete.take() {
         s.rack.delete_now = Some(rows);
-        s.pat_ui.confirm = false;
         return;
     }
+    delete_pattern(s);
+}
+
+/// Cancel in the delete confirmation: nothing is deleted and Remember my choice is not kept.
+fn cancel_confirm(s: &mut State) {
+    s.pat_ui.confirm = false;
+    s.pat_ui.remember = false;
+    s.rack.pending_delete = None;
+}
+
+/// Deletes the current pattern: later ones move down a number, its clips go.
+fn delete_pattern(s: &mut State) {
     let cur = s.pattern.max(1);
     renumber(s, |n| if n == cur { None } else if n > cur { Some(n - 1) } else { Some(n) });
-    s.pat_ui.confirm = false;
 }
 
 /// Accept the name box.
@@ -430,10 +470,8 @@ pub fn hit(s: &mut State, h: Hit) {
         }
         Hit::Swatch(i) => set_color(s, i),
         Hit::ConfirmOk => delete_current(s),
-        Hit::ConfirmCancel => {
-            s.pat_ui.confirm = false;
-            s.rack.pending_delete = None;
-        }
+        Hit::ConfirmCancel => cancel_confirm(s),
+        Hit::ConfirmRemember => s.pat_ui.remember = !s.pat_ui.remember,
         Hit::Inside => {}
     }
 }
@@ -444,10 +482,7 @@ pub fn key(s: &mut State, key: &winit::keyboard::Key, ctrl: bool) -> bool {
     if s.pat_ui.confirm {
         match key {
             Key::Named(NamedKey::Enter) => delete_current(s),
-            Key::Named(NamedKey::Escape) => {
-                s.pat_ui.confirm = false;
-                s.rack.pending_delete = None;
-            }
+            Key::Named(NamedKey::Escape) => cancel_confirm(s),
             _ => {}
         }
         return true;
@@ -551,6 +586,36 @@ mod tests {
         s.pattern = 1;
         delete_current(s);
         assert_eq!(clip_pats(s), vec![3]);
+    }
+
+    // spec: ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)"
+    /// Delete's confirmation has Remember my choice, off each time it opens. Ticked with Cancel nothing goes and the
+    /// "Delete pattern" entry stays on; ticked with Ok the pattern goes and the entry turns off; while it is off,
+    /// Delete deletes at once with no box.
+    #[test]
+    fn delete_confirmation_remembers_ok_only() {
+        use crate::messages::{on, set, DELETE_PATTERN};
+        use winit::keyboard::{Key, NamedKey};
+        let mut app = app();
+        let s = &mut app.state;
+        s.pattern = 2;
+        run(s, Cmd::Delete, (0.0, 0.0));
+        assert!(s.pat_ui.confirm && !s.pat_ui.remember);
+        hit(s, Hit::ConfirmRemember);
+        assert!(s.pat_ui.remember);
+        key(s, &Key::Named(NamedKey::Escape), false);
+        assert_eq!((listed(s), on(&DELETE_PATTERN), s.pat_ui.confirm), (vec![1, 2, 3, 5], true, false), "Cancel");
+        run(s, Cmd::Delete, (0.0, 0.0));
+        assert!(s.pat_ui.confirm && !s.pat_ui.remember, "Remember my choice is off again");
+        hit(s, Hit::ConfirmRemember);
+        hit(s, Hit::ConfirmOk);
+        assert_eq!((listed(s), on(&DELETE_PATTERN), s.pat_ui.confirm), (vec![1, 2, 4], false, false), "Ok");
+        // Off: as if Ok was pressed.
+        s.pattern = 1;
+        run(s, Cmd::Delete, (0.0, 0.0));
+        assert!(!s.pat_ui.confirm);
+        assert_eq!((listed(s), clip_pats(s)), (vec![1, 3], vec![1]));
+        set(&DELETE_PATTERN, true);
     }
 
     #[test]
