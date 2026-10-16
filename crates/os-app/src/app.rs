@@ -844,8 +844,8 @@ pub struct State {
     /// Where the tempo box's tenths, hundredths and thousandths digits start (x), as last painted: a drag from a digit
     /// steps the tempo by that digit (views/toolbar.rs).
     pub tempo_digits: std::cell::Cell<[f32; 3]>,
-    /// The time display shows minute:second:centisecond instead of bar:step:tick (a click toggles it).
-    pub clock_msc: bool,
+    /// The time display's mode and middle unit (spec: ui/time-display.md): app-wide, for the session.
+    pub clock: crate::clock::Clock,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
     /// MIDI input devices that are open (their notes play the selected channel; spec: ui/midi-input.md).
@@ -1117,7 +1117,7 @@ impl App {
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
                 toggles: vec!["typing"],
-                clock_msc: false,
+                clock: crate::clock::Clock::default(),
                 midi_inputs: Vec::new(),
                 maximized: true,
                 piano: PianoState::default(),
@@ -5612,7 +5612,7 @@ impl App {
             }
             Action::SongPos => self.song_pos_press(),
             Action::Clock => {
-                s.clock_msc = !s.clock_msc;
+                s.clock.toggle();
                 self.invalidate();
             }
             Action::GlobalSnap => {
@@ -11964,6 +11964,52 @@ mod tests {
         let b = hit_rect(&app, &Action::ToggleWin(Win::Browser));
         right(&mut app, &mut c, b, (b.cx(), b.cy()));
         assert!(crate::plugin_menu::is_open(&app.state) && app.state.show_browser == shown);
+    }
+
+    /// The time display's right-click menu (spec: ui/time-display.md §1, §3): every mode and middle unit works, one
+    /// dot each; a left click goes between Bar and M:S:CS, and from SMPTE to Bar.
+    #[test]
+    fn time_display_modes() {
+        use crate::clock::{Mode, RATES};
+        use crate::playlist::Mark;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        frame(&mut app, &mut c, None);
+        let clock = hit_rect(&app, &Action::Clock);
+        let pick = |app: &mut App, c: &mut Canvas, label: &str| {
+            app.mouse_move(clock.cx(), clock.cy());
+            app.mouse_down_right();
+            app.mouse_up();
+            frame(app, c, None);
+            let items = &app.state.playlist.popup.as_ref().expect("the clock menu").items;
+            assert!(items.iter().filter(|it| it.label != "Mode" && it.label != "Middle unit").all(|it| it.enabled));
+            let i = items.iter().position(|it| it.label == label).unwrap();
+            let r = hit_rect(app, &Action::PlPopup(i));
+            click(app, c, r);
+            assert!(app.state.playlist.popup.is_none());
+        };
+        let dots = |app: &App| {
+            let p = views::menus::clock_popup(&app.state, 0.0, 0.0);
+            p.items.into_iter().filter(|it| it.mark == Mark::Radio(true)).map(|it| it.label).collect::<Vec<_>>()
+        };
+        assert_eq!(dots(&app), ["Bar : Beat/Step : Tick", "Step"]);
+        assert_eq!(views::menus::clock_popup(&app.state, 0.0, 0.0).items.len(), 2 + 2 + RATES.len() + 2);
+        pick(&mut app, &mut c, "SMPTE 29.97 fps (drop)");
+        assert_eq!(app.state.clock.mode, Mode::Smpte(3));
+        assert_eq!(dots(&app), ["SMPTE 29.97 fps (drop)", "Step"]);
+        assert_eq!(app.hits.iter().find(|h| h.action == Action::Clock).unwrap().hint, "Song position (minute:second:frame)");
+        // A left click from SMPTE: Bar; then M:S:CS and back.
+        click(&mut app, &mut c, clock);
+        assert_eq!(app.state.clock.mode, Mode::Bar);
+        click(&mut app, &mut c, clock);
+        assert_eq!(app.state.clock.mode, Mode::Msc);
+        click(&mut app, &mut c, clock);
+        pick(&mut app, &mut c, "Beat");
+        assert_eq!(dots(&app), ["Bar : Beat/Step : Tick", "Beat"]);
+        assert_eq!(app.hits.iter().find(|h| h.action == Action::Clock).unwrap().hint, "Song position (bar:beat:tick)");
+        pick(&mut app, &mut c, "Minute : Second : Centisecond");
+        assert!(app.state.clock.mode == Mode::Msc && app.state.clock.beat);
     }
 
     /// TOOLS / the channel rack's options > Switch all / selected audio clip channels to ▸ (spec: ui/channel-switches.md

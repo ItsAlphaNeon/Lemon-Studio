@@ -19,6 +19,7 @@ mod audio_bench;
 mod render_check;
 mod browser;
 mod cable;
+mod clock;
 mod cpu;
 mod dialog;
 mod filedlg;

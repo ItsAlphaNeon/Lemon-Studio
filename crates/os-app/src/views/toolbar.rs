@@ -212,14 +212,12 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.c.fill_rect(tp, ui.t.s(0x212829));
         ui.c.fill_rect(tp.inset(1.0), t.time_panel);
     }
-    let hint = if s.clock_msc { "Song position (minute:second:centisecond)" } else { "Song position (bar:step:tick)" };
-    ui.hit(tp, Action::Clock, hint);
+    // spec: ui/time-display.md §2-3 (the bar's signature is the project's).
+    ui.hit(tp, Action::Clock, s.clock.hint());
     ui.live(Live::Clock, tp);
-    let (bar, step, tick) = if s.clock_msc {
-        msc_ticks(f.tick / f64::from(s.project.ppq.max(1)) * 60.0 / s.tempo.max(1.0))
-    } else {
-        bst_ticks(f.tick * 96.0 / f64::from(s.project.ppq.max(1)))
-    };
+    let ppq = f64::from(s.project.ppq.max(1));
+    let sig = s.project.time_signature.unwrap_or((4, 4));
+    let (bar, step, tick) = s.clock.reading(f.tick / ppq * 60.0 / s.tempo.max(1.0), f.tick * 96.0 / ppq, sig);
     // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
     // right-aligned so long bar numbers grow to the left and never leave the panel.
     let (big, small) = (Font::light(32, 13), Font::light(22, 8));
@@ -241,7 +239,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_rect(Rect::new(tick_x - 5.0, 29.5, 2.0, 2.0), g);
     ui.c.text(small, tick_x, 9.0, g, &tick_s);
     ui.c.pop_clip();
-    let label = if s.clock_msc { "M:S:CS" } else { "B:S:T" };
+    let label = s.clock.label();
     ui.c.text_right(Font::condensed(7, 3).bold(), 871.0, 5.0, if lemon { t.text_dim } else { t.glyph.shade(-0.1) }, label);
 
     // Monitors (oscilloscope / spectrum analyzer, stereo peak bars) and CPU / memory.

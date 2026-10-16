@@ -805,24 +805,16 @@ pub fn hint_popup(x: f32, y: f32) -> crate::playlist::Popup {
     Popup { x, y, items, sub: None }
 }
 
-/// The time display's right-click menu: its mode (bar:step:tick or minute:second:centisecond work; SMPTE and the
-/// middle unit are not available yet).
+/// The time display's right-click menu: Mode and Middle unit, one dot each (spec: ui/time-display.md §1).
 pub fn clock_popup(s: &State, x: f32, y: f32) -> crate::playlist::Popup {
+    use crate::clock::{Mode, RATES};
     use crate::playlist::{Cmd, Mark, PItem, Popup};
-    let mut items = vec![
-        PItem::head("Mode"),
-        PItem::new("Bar : Beat/Step : Tick", Cmd::ClockMsc(false)).mark(Mark::Radio(!s.clock_msc)),
-        PItem::new("Minute : Second : Centisecond", Cmd::ClockMsc(true)).mark(Mark::Radio(s.clock_msc)),
-    ];
-    for fps in [
-        "SMPTE 23.976 fps", "SMPTE 24 fps", "SMPTE 25 fps", "SMPTE 29.97 fps (drop)", "SMPTE 29.97 (non-drop)", "SMPTE 30 fps",
-        "SMPTE 48 fps", "SMPTE 50 fps", "SMPTE 59.94 fps (drop)", "SMPTE 59.94 (non-drop)", "SMPTE 60 fps", "SMPTE 72 fps",
-        "SMPTE 120 fps",
-    ] {
-        items.push(PItem::not_yet(fps).mark(Mark::Radio(false)));
-    }
+    let c = s.clock;
+    let mode = |label: &'static str, m: Mode| PItem::new(label, Cmd::ClockMode(m)).mark(Mark::Radio(c.mode == m));
+    let mut items = vec![PItem::head("Mode"), mode("Bar : Beat/Step : Tick", Mode::Bar), mode("Minute : Second : Centisecond", Mode::Msc)];
+    items.extend(RATES.iter().enumerate().map(|(i, r)| mode(r.label, Mode::Smpte(i))));
     items.push(PItem::head("Middle unit"));
-    items.push(PItem::not_yet("Step").mark(Mark::Radio(true)));
-    items.push(PItem::not_yet("Beat").mark(Mark::Radio(false)));
+    items.push(PItem::new("Step", Cmd::ClockBeat(false)).mark(Mark::Radio(!c.beat)));
+    items.push(PItem::new("Beat", Cmd::ClockBeat(true)).mark(Mark::Radio(c.beat)));
     Popup { x, y, items, sub: None }
 }
