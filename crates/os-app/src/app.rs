@@ -3078,20 +3078,25 @@ impl App {
     }
 
     /// A sample dropped on the channel rack at window y `y` (spec: ui/channel-rack.md, New project / drops): onto a
-    /// sampler row it replaces that channel's sample (Lemon Sampler loads it); elsewhere it adds a Lemon Sampler channel
-    /// named after the file.
+    /// sampler row it replaces that channel's sample (Lemon Sampler loads it) and renames the channel after the file
+    /// while "Auto name channels" is on (`rack::auto_name`); elsewhere it adds a Lemon Sampler channel named after the
+    /// file.
     pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
         let s = &mut self.state;
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
         let row = match views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind.is_sampler()) {
             Some(r) => {
                 s.sample_loads.push((r, path.clone()));
+                crate::rack::auto_name(&mut s.project.channels[r], std::path::Path::new(&path));
                 r
             }
-            None => add_channel(&mut s.project),
+            None => {
+                let r = add_channel(&mut s.project);
+                s.project.channels[r].name = stem.clone();
+                r
+            }
         };
         let ch = &mut s.project.channels[row];
-        ch.name = stem.clone();
         ch.sample_path = Some(path);
         s.selected_channel = row;
         s.rack.select_only(row);
@@ -3121,7 +3126,7 @@ impl App {
         let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned());
         if self.plugins.drop_file(row, x, y, path, sampler) {
             if let Some(ch) = self.state.project.channels.get_mut(row).filter(|_| sampler) {
-                ch.name = name.clone();
+                crate::rack::auto_name(ch, std::path::Path::new(path));
                 ch.sample_path = Some(path.to_string());
             }
             self.state.message = Some(format!("{} loaded in the plugin", name.unwrap_or_default()));
@@ -7267,6 +7272,82 @@ mod tests {
             pl::create_automation(s, 0, "Auto", 0.5);
             assert_eq!(last(s).0..last(s).1, 1..3, "time selection, check {on}");
         }
+    }
+
+    // spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup"
+    /// Settings > General ▸ Miscellaneous: "Auto name channels" (on by default) and "Auto name effect slots" (off)
+    /// switch with a click.
+    #[test]
+    fn misc_settings_auto_name_checks() {
+        use crate::prefs::{self, AUTO_NAME_CHANNELS as CHANNELS, AUTO_NAME_EFFECT_SLOTS as SLOTS};
+        use crate::views::settings::{SAct, GENERAL};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        assert_eq!((prefs::check(&CHANNELS), prefs::check(&SLOTS)), (true, false), "the defaults");
+        let mut app = App::new(None);
+        app.open_settings(GENERAL);
+        let above = ["Display", "Language", "Input", "Undo history", "Hints and warnings", "System", "Updates and privacy"];
+        app.state.settings.folded.extend(above);
+        frame(&mut app, &mut c, None);
+        for (check, said) in [(&CHANNELS, "Auto name channels: off"), (&SLOTS, "Auto name effect slots: on")] {
+            assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(check.label)), "{} works", check.label);
+            let r = hit_rect(&app, &Action::Settings(SAct::Check(check.label)));
+            click(&mut app, &mut c, r);
+            assert_eq!(app.state.message.as_deref(), Some(said));
+        }
+        assert_eq!((prefs::check(&CHANNELS), prefs::check(&SLOTS)), (false, true));
+    }
+
+    // spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup"
+    /// "Auto name channels": a sample dropped on a sampler row, chosen in Load sample... or sent from the browser to
+    /// the selected channel renames that channel after the file (without its extension) while the check is on; off,
+    /// the sample loads and the channel keeps its name. A channel made new for a dropped sample takes its name either
+    /// way.
+    #[test]
+    fn auto_name_channels_on_every_sample_path() {
+        use crate::browser::BCmd;
+        use crate::prefs::{self, AUTO_NAME_CHANNELS};
+        let dir = std::env::temp_dir().join(format!("os_auto_name_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = |n: &str| {
+            let p = dir.join(format!("{n}.wav"));
+            os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&p).unwrap(), 44100, &[0.0; 8]).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let (kick6, kick12) = (wav("Grv Kick 06"), wav("Grv Kick 12"));
+        let mut app = App::new(None);
+        let r = (0..app.state.project.channels.len()).find(|&r| app.state.project.channels[r].kind.is_sampler()).unwrap();
+        let y = views::rack::name_rect(&app.state, r).unwrap().cy();
+        // The browser lists the folder's two samples; row `r` is the selected channel.
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(crate::views::browser::disk_key(&dir));
+        app.state.selected_channel = r;
+        let now = |app: &App| {
+            let ch = &app.state.project.channels[r];
+            (ch.name.clone().unwrap_or_default(), ch.sample_path.clone().unwrap_or_default())
+        };
+        let had = |name: &str, path: &str| (name.to_string(), path.to_string());
+        app.state.project.channels[r].name = Some("808 Snare".into());
+        app.sample_to_rack(kick6.clone(), y);
+        assert_eq!(now(&app), had("Grv Kick 06", &kick6), "on: a drop on the row");
+        crate::rack::sample_chosen(&mut app, r, kick12.clone().into());
+        assert_eq!(now(&app), had("Grv Kick 12", &kick12), "on: Load sample...");
+        app.browser_cmd(BCmd::Send(1));
+        assert_eq!(now(&app), had("Grv Kick 06", &kick6), "on: the browser's send");
+        prefs::set_check(&AUTO_NAME_CHANNELS, false);
+        app.state.project.channels[r].name = Some("808 HiHat".into());
+        app.browser_cmd(BCmd::Send(1));
+        assert_eq!(now(&app), had("808 HiHat", &kick12), "off: the browser's send");
+        app.sample_to_rack(kick6.clone(), y);
+        assert_eq!(now(&app), had("808 HiHat", &kick6), "off: a drop on the row");
+        crate::rack::sample_chosen(&mut app, r, kick12.clone().into());
+        assert_eq!(now(&app), had("808 HiHat", &kick12), "off: Load sample...");
+        // Below the rows the drop makes a new channel, named after the file.
+        let n = app.state.project.channels.len();
+        app.sample_to_rack(kick12.clone(), views::rack::rect(&app.state).bottom() + 40.0);
+        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.project.channels[app.state.selected_channel].name.as_deref(), Some("Grv Kick 12"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Settings > Project ▸ Advanced ▸ Panning law (spec: ui/settings-choices.md "Project", audio/gain-laws.md

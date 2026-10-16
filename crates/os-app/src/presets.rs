@@ -278,11 +278,31 @@ fn load_into(app: &mut App, key: usize, path: &Path) -> Option<String> {
         Ok((_, state)) if app.plugins.set_state(key, &state) => {
             app.plugins.mark_edited(key);
             app.plugins.set_preset(key, Some(path.to_path_buf()));
+            auto_name(app, key, path);
             format!("Preset: {}", shown_name(path))
         }
         Ok(_) => format!("{} did not take the preset {}", h.plugin, shown_name(path)),
         Err(e) => e,
     })
+}
+
+/// A preset at `path` went into the instance under `key` (the ◀ ▶ arrows or the Presets lists): while "Auto name
+/// effect slots" is on, a mixer slot takes the preset's name, kept until the next preset or a rename by hand (the
+/// slot's window title shows it too); a channel goes by "Auto name channels" (`rack::auto_name`). Spec:
+/// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
+fn auto_name(app: &mut App, key: usize, path: &Path) {
+    let s = &mut app.state;
+    match crate::plugins::fx_of(key) {
+        Some(slot) if crate::prefs::check(&crate::prefs::AUTO_NAME_EFFECT_SLOTS) => {
+            s.mixer.slot_names.insert(slot, shown_name(path));
+        }
+        Some(_) => {}
+        None => {
+            if let Some(ch) = s.project.channels.get_mut(key) {
+                crate::rack::auto_name(ch, path);
+            }
+        }
+    }
 }
 
 /// Save preset as...: the save dialog, in the plugin's preset folder (`save_chosen` writes the file).
@@ -413,6 +433,9 @@ mod tests {
         assert!(run(&mut app, PCmd::Step(0, -1)).unwrap().contains("Kick"), "back from no preset = last");
         assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/kick.wav"));
         assert_eq!(app.plugins.preset_name(0).as_deref(), Some("Kick"));
+        // spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup": "Auto name channels" is
+        // on by default.
+        assert_eq!(app.state.project.channels[0].name.as_deref(), Some("Kick"), "the ◀ ▶ arrows rename the channel");
         run(&mut app, PCmd::Step(0, 1));
         assert_eq!(app.plugins.sampler_path(0).as_deref(), Some(""), "wrapped to Default");
         assert!(items(&app, 0, true)[0].mark == Mark::Check(true));
@@ -422,6 +445,65 @@ mod tests {
         let p = m.items.iter().find(|i| i.label == "Presets" && !i.head).unwrap();
         assert_eq!(p.children.len(), 2);
         assert!(m.items.iter().any(|i| i.cmd == Cmd::Preset(PCmd::SaveAs(0))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup"
+    /// A preset loaded from the Presets lists names what holds it: a channel while "Auto name channels" is on (the
+    /// default), a mixer slot while "Auto name effect slots" is on (off by default). A slot keeps a preset's name until
+    /// the next preset or a rename by hand, whatever the check; the slot's window title shows the slot's name.
+    #[test]
+    fn presets_auto_name_channels_and_effect_slots() {
+        use crate::app::App;
+        use crate::playlist::EditTarget;
+        use crate::prefs::{self, AUTO_NAME_CHANNELS, AUTO_NAME_EFFECT_SLOTS};
+        let dir = tmp("auto-name");
+        let mut app = App::new(None);
+        let mut pl = crate::plugins::Plugins::default();
+        pl.available = crate::plugins::builtin();
+        let index = pl.index_of(crate::plugins::LEMON_SAMPLER).expect("built in");
+        // Rack row 0's instance, and one in Insert 1's first slot, which holds Fruity Delay 3.
+        let fx = crate::plugins::fx_key(1, 0);
+        pl.create(0, index).unwrap();
+        pl.create(fx, index).unwrap();
+        app.plugins = pl;
+        app.state.project.channels[0].name = Some("808 Snare".into());
+        crate::mixer::track_mut(&mut app.state, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
+        let (h, state) = (header(&app, 0).unwrap(), app.plugins.state(0).unwrap());
+        let preset = |name: &str| {
+            let p = file_for(&dir, name);
+            save(&p, &h, &state).unwrap();
+            p
+        };
+        let (chorus, bandpass, bass) = (preset("Chorus"), preset("Bandpass"), preset("Deep Bass"));
+        let channel = |app: &App| app.state.project.channels[0].name.clone().unwrap_or_default();
+        let slot = |app: &App| crate::mixer::slot_name(&app.state, 1, 0).unwrap_or_default();
+        // Channels: on by default.
+        assert_eq!(run(&mut app, PCmd::Load(0, bass)).as_deref(), Some("Preset: Deep Bass"));
+        assert_eq!(channel(&app), "Deep Bass");
+        prefs::set_check(&AUTO_NAME_CHANNELS, false);
+        app.state.project.channels[0].name = Some("808 HiHat".into());
+        run(&mut app, PCmd::Load(0, chorus.clone()));
+        assert_eq!(channel(&app), "808 HiHat", "off: the channel keeps its name");
+        // Effect slots: off by default.
+        run(&mut app, PCmd::Load(fx, bandpass.clone()));
+        assert_eq!(slot(&app), "Fruity Delay 3", "off: the slot keeps its name");
+        prefs::set_check(&AUTO_NAME_EFFECT_SLOTS, true);
+        run(&mut app, PCmd::Load(fx, chorus));
+        assert_eq!(slot(&app), "Chorus");
+        #[cfg(plugin_windows)]
+        assert_eq!(crate::mixer::fx_info(&app.state.project, &app.state.mixer, fx).unwrap().name, "Chorus", "window title");
+        // The name stays with the check off, until a rename by hand or the next preset with it on.
+        prefs::set_check(&AUTO_NAME_EFFECT_SLOTS, false);
+        run(&mut app, PCmd::Load(fx, bandpass.clone()));
+        assert_eq!(slot(&app), "Chorus", "kept");
+        crate::playlist::start_edit(&mut app.state, EditTarget::SlotName(1, 0), (0.0, 0.0));
+        app.state.playlist.edit.as_mut().unwrap().text = "My echo".into();
+        crate::playlist::commit_edit(&mut app.state);
+        assert_eq!(slot(&app), "My echo", "renamed by hand");
+        prefs::set_check(&AUTO_NAME_EFFECT_SLOTS, true);
+        run(&mut app, PCmd::Load(fx, bandpass));
+        assert_eq!(slot(&app), "Bandpass", "the next preset");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

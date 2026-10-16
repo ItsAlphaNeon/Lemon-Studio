@@ -1298,12 +1298,21 @@ fn box_at_row(s: &State, r: usize, mouse: (f32, f32)) -> (f32, f32) {
     crate::views::rack::name_rect(s, r).map_or(crate::patterns::box_at_mouse(mouse), |nb| (nb.x, nb.y))
 }
 
-/// The sample chosen in Load sample...: row `r`'s channel takes it (and its name).
+/// A sample or channel preset at `path` went into the existing channel `ch`: while "Auto name channels" is on, the
+/// channel takes the file's name without its extension; off, it keeps its name (spec: ui/settings-choices.md
+/// "Miscellaneous: naming, detached plugins and startup"). A channel made new for a file is named after it either way.
+pub fn auto_name(ch: &mut os_model::Channel, path: &std::path::Path) {
+    if crate::prefs::check(&crate::prefs::AUTO_NAME_CHANNELS) {
+        ch.name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
+    }
+}
+
+/// The sample chosen in Load sample...: row `r`'s channel takes it (and its name, `auto_name`).
 pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
     let s = &mut app.state;
     let path = p.to_string_lossy().into_owned();
     if let Some(ch) = s.project.channels.get_mut(r) {
-        ch.name = p.file_stem().map(|n| n.to_string_lossy().into_owned());
+        auto_name(ch, &p);
         ch.sample_path = Some(path.clone());
     }
     s.sample_loads.push((r, path));

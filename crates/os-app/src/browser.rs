@@ -470,7 +470,8 @@ fn find(s: &mut crate::app::State, dir: isize) -> Option<String> {
     None
 }
 
-/// Send the previous / next sample row to the selected channel.
+/// Send the previous / next sample row to the selected channel, which takes the file's name while "Auto name
+/// channels" is on (`rack::auto_name`).
 fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     let rows = view::rows(s);
     let Some(i) = step(s, &rows, dir, |r| matches!(r.item, Item::Sample(_))) else {
@@ -484,6 +485,7 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     if !ch.kind.is_sampler() {
         return Some("The selected channel is not a sampler".into());
     }
+    crate::rack::auto_name(ch, std::path::Path::new(&path));
     ch.sample_path = Some(path.clone());
     let row = s.selected_channel;
     s.sample_loads.push((row, path));

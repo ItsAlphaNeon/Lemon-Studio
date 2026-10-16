@@ -166,6 +166,16 @@ pub const AUTO_SELECT_LINKED: Check = Check { key: "auto_select_linked_modules",
 pub const HIDE_PLUGIN_TOOLBAR: Check =
     Check { key: "hide_plugin_window_toolbar", label: "Hide plugin window toolbar by default", default: true };
 
+/// General ▸ Miscellaneous: a sample or channel preset loaded into an existing channel renames the channel after the
+/// file (`rack::auto_name`); off, the channel keeps its name. Spec: ui/settings-choices.md "Miscellaneous: naming,
+/// detached plugins and startup".
+pub const AUTO_NAME_CHANNELS: Check = Check { key: "auto_name_channels", label: "Auto name channels", default: true };
+
+/// General ▸ Miscellaneous: a preset loaded into an effect renames its mixer slot after the preset
+/// (`presets::auto_name`); off, the slot keeps its name. Spec: ui/settings-choices.md, as above.
+pub const AUTO_NAME_EFFECT_SLOTS: Check =
+    Check { key: "auto_name_effect_slots", label: "Auto name effect slots", default: false };
+
 /// General ▸ Miscellaneous: the project Lemon Studio starts with when no project file is passed to it
 /// (`App::startup_project`). Spec: ui/settings-choices.md, as above.
 pub const STARTUP_PROJECT: Combo =
@@ -186,6 +196,8 @@ pub const CHECKS: &[&Check] = &[
     &AUTOMATION_AT_PLAYBACK_POSITION,
     &AUTO_SELECT_LINKED,
     &HIDE_PLUGIN_TOOLBAR,
+    &AUTO_NAME_CHANNELS,
+    &AUTO_NAME_EFFECT_SLOTS,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT];
