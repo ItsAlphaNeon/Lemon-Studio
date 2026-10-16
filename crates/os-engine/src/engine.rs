@@ -879,6 +879,9 @@ pub struct Engine {
     /// which values are set in place rather than smoothed (playback's first tick after a start, seek or loop).
     auto_last: Vec<(os_model::target::Target, i64)>,
     auto_from: u64,
+    /// The project's initial values the engine can set (song mode), as automation values: a song that loops sets them
+    /// again at its start (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
+    init: Vec<(os_model::target::Target, i64)>,
     /// Clips on plugin parameters: this tick's events.
     params: param_auto::ParamAuto,
     /// The project's random generator (random layers; spec: audio/channel-misc.md "FL's random generator").
@@ -1216,6 +1219,16 @@ impl Engine {
         }
         // Later clips win where clips on the same target overlap.
         autos.sort_by_key(|a| a.start);
+        // The initial values, in song mode. Where playback starts the app has already set them in the project.
+        let init = if mode == PlayMode::Song {
+            project
+                .init_controls
+                .iter()
+                .filter_map(|c| Some((os_model::target::decode(c.target), (c.unit()? * 1_073_741_824.0).round_ties_even() as i64)))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let main_gain = os_dsp::level::curve(f32::from(project.main_volume.unwrap_or(os_model::Project::MAIN_VOLUME_DEFAULT)) * os_dsp::level::R12800);
         Engine {
@@ -1231,6 +1244,7 @@ impl Engine {
             curves,
             auto_last: Vec::new(),
             auto_from: 0,
+            init,
             rate,
             channels,
             bus: vec![Vec::new(); tracks.len()],
@@ -1804,6 +1818,13 @@ impl Engine {
             }
         }
         let len = if now == self.auto_from { 0 } else { len.max(1) as u32 };
+        self.set_auto_values(values, len);
+    }
+
+    /// Passes automation values (2^30 = 1) on to their targets, each only when it differs from the one last passed on;
+    /// `len`: the ticks volumes and pans glide over (0 = set in place).
+    fn set_auto_values(&mut self, values: Vec<(os_model::target::Target, i64)>, len: u32) {
+        use os_model::target::Target;
         for (target, n) in values {
             // Plugin parameters: per-tick plugins get this value, the others the curve sampled through the tick
             // (`run_param_automation`).
@@ -2496,6 +2517,10 @@ impl Engine {
             }
         }
         self.sounding.retain(|&(_, _, end)| end > 0);
+        // A song back at its start: the initial values first, then automation clips act there as usual.
+        if !self.init.is_empty() {
+            self.set_auto_values(self.init.clone(), 0);
+        }
     }
 
     /// Renders the whole song: every tick up to the first quiet one at or after the song's end (spec: audio/timing.md,
@@ -4840,6 +4865,52 @@ mod tests {
         e.next_tick();
         assert!(e.channels[0].ramp.is_none());
         assert_eq!(e.channels[0].vol_v, 0.5);
+    }
+
+    /// A song that loops sets the project's initial values again at its start, before its automation clips act; a
+    /// pattern doesn't (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
+    #[test]
+    fn initial_values_are_set_where_the_song_loops() {
+        use os_model::{AutoPoint, Automation, ChannelKind, Clip, ClipSource, InitControl, target};
+        let mut p = song(vec![long_note(0, 96, 0)], vec![Clip::new(0, 384, 0, ClipSource::Pattern(1))]);
+        p.channels[0].volume = 0.25;
+        let init = |t: u32, value: i32| InitControl { head: 0, target: t, value };
+        p.init_controls = vec![
+            init(target::channel(0, target::CHANNEL_VOLUME), 6400),
+            init(target::channel(0, target::CHANNEL_PITCH), 1200),
+            init(target::channel_param(0, 3), 99),
+        ];
+        // A clip on the pitch from tick 0: it acts after the initial value.
+        let mut auto_ch = channel();
+        auto_ch.index = 1;
+        auto_ch.kind = ChannelKind::Automation;
+        p.channels.push(auto_ch);
+        let points = vec![AutoPoint::new(0.0, 0.75), AutoPoint::new(4.0, 0.75)];
+        p.automations.push(Automation { channel: 1, targets: vec![target::channel(0, target::CHANNEL_PITCH)], points, header: vec![0; 21], tail: vec![] });
+        p.arrangements[0].clips.push(Clip::new(0, 384, 1, ClipSource::Channel(1)));
+        let mut lib = SampleLibrary::new(None);
+        let to_loop = |e: &mut Engine| {
+            let mut last = 0;
+            while e.tick >= last && e.tick < 10_000 {
+                last = e.tick;
+                e.next_tick();
+            }
+        };
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e.set_looping(true);
+        e.next_tick();
+        assert_eq!((e.channels[0].vol_v, e.channels[0].knob), (0.25, 2400.0), "the start is the app's: the channel's own volume");
+        e.channels[0].knob = 0.0;
+        to_loop(&mut e);
+        assert_eq!(e.init.len(), 2, "a plugin parameter's record is left out");
+        assert_eq!(e.channels[0].vol_v, 0.5, "the initial volume where the song starts again");
+        assert_eq!(e.channels[0].knob, 2400.0, "then the clip");
+        // Pattern mode: no initial values.
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_looping(true);
+        to_loop(&mut e);
+        assert!(e.init.is_empty());
+        assert_eq!(e.channels[0].vol_v, 0.25);
     }
 
     /// Halves what passes through (a stand-in for a hosted effect plugin).

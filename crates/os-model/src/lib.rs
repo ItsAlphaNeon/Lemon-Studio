@@ -81,6 +81,91 @@ pub struct Project {
     /// "Show info on opening" (event 10; spec: flp/events/project-info.md): opening the project shows its Song info
     /// box. `None` = not in the file (off).
     pub show_info: Option<bool>,
+    /// The project's initial values, in file order (event 216; spec: ui/settings-choices.md "Advanced: Initialize
+    /// controls automatically"): controls that take a value when the song starts.
+    pub init_controls: Vec<InitControl>,
+}
+
+/// One of the project's initial values: a control and the value it takes when the song starts (spec:
+/// ui/settings-choices.md "Advanced: Initialize controls automatically"). A 12-byte record of event 216, kept as read,
+/// so a record whose meaning isn't known (a plugin parameter's) is written back as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitControl {
+    /// Bytes 0..3 of the record: 0 in every record seen.
+    pub head: u32,
+    /// The control (bytes 4..7), as an automation target ([`target`]): the setting's id in the low 16 bits, its place
+    /// (a channel index, a mixer place or 0x4000 for the project) in the high 16.
+    pub target: u32,
+    /// The value (bytes 8..11), in the units the setting is stored in.
+    pub value: i32,
+}
+
+impl InitControl {
+    /// The record's size in event 216.
+    pub const LEN: usize = 12;
+
+    /// The project's main volume (stored 0..=16000), main swing (0..=128) and main pitch (cents) at the project's place
+    /// (spec: flp/layouts.md "Parameter ids in an automation link").
+    pub const MAIN_VOLUME: u32 = 0x4000_0000;
+    pub const MAIN_SWING: u32 = 0x4000_0001;
+    pub const MAIN_PITCH: u32 = 0x4000_0002;
+
+    /// A record read from event 216's bytes.
+    pub fn from_bytes(b: &[u8; Self::LEN]) -> InitControl {
+        let word = |o: usize| [b[o], b[o + 1], b[o + 2], b[o + 3]];
+        InitControl { head: u32::from_le_bytes(word(0)), target: u32::from_le_bytes(word(4)), value: i32::from_le_bytes(word(8)) }
+    }
+
+    /// The record's 12 bytes.
+    pub fn to_bytes(self) -> [u8; Self::LEN] {
+        let mut b = [0; Self::LEN];
+        b[0..4].copy_from_slice(&self.head.to_le_bytes());
+        b[4..8].copy_from_slice(&self.target.to_le_bytes());
+        b[8..12].copy_from_slice(&self.value.to_le_bytes());
+        b
+    }
+
+    /// Control `t` at the automation value `v` (0..1), in the setting's stored units; `None` for a control whose stored
+    /// units aren't known (plugin parameters, see [`InitControl::unit`]).
+    pub fn from_unit(t: u32, v: f64) -> Option<InitControl> {
+        use target::Target;
+        let v = v.clamp(0.0, 1.0);
+        let value = match target::decode(t) {
+            Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => 12800.0 * v,
+            Target::ChannelPitch(_) => 9600.0 * v - 4800.0,
+            Target::MixerVolume(_) | Target::MixerSend(..) => 16000.0 * v,
+            Target::MixerPan(_) => 12800.0 * v - 6400.0,
+            Target::MixerSeparation(_) => 128.0 * v - 64.0,
+            Target::MixerEq(_, _, 0) => 3600.0 * v - 1800.0,
+            Target::MixerEq(..) => 65536.0 * v,
+            Target::SlotOn(..) => v.round_ties_even(),
+            Target::Tempo => 10000.0 + 512000.0 * v,
+            _ => return None,
+        };
+        Some(InitControl { head: 0, target: t, value: value.round() as i32 })
+    }
+
+    /// The value as an automation clip hands it on (0..1), for the settings whose stored units are known: the inverse
+    /// of [`InitControl::from_unit`] (spec: audio/voice-levels.md "Values from automation", audio/mixer.md "Changes
+    /// while the song plays", audio/timing.md "Tempo that changes"). Plugin parameters, a channel's other levels and
+    /// the project's main volume, swing and pitch give `None`.
+    pub fn unit(&self) -> Option<f64> {
+        use target::Target;
+        let v = f64::from(self.value);
+        let unit = match target::decode(self.target) {
+            Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => v / 12800.0,
+            Target::ChannelPitch(_) => (v + 4800.0) / 9600.0,
+            Target::MixerVolume(_) | Target::MixerSend(..) => v / 16000.0,
+            Target::MixerPan(_) => (v + 6400.0) / 12800.0,
+            Target::MixerSeparation(_) => (v + 64.0) / 128.0,
+            Target::MixerEq(_, _, 0) => (v + 1800.0) / 3600.0,
+            Target::MixerEq(..) => v / 65536.0,
+            Target::SlotOn(..) => f64::from(u8::from(self.value != 0)),
+            Target::Tempo => (v - 10000.0) / 512000.0,
+            _ => return None,
+        };
+        Some(unit.clamp(0.0, 1.0))
+    }
 }
 
 /// Event 237: two doubles in days (spec: flp/events/project-info.md).
@@ -1719,6 +1804,40 @@ pub mod target {
             assert_eq!(decode(channel(3, CHANNEL_MOD_Y)), Target::ChannelLevel(3, 0x14));
             assert_eq!(decode(channel(3, 0x12)), Target::Other(0x0003_0012));
             assert!(bipolar(channel(0, CHANNEL_VOLUME_MULT)) && !bipolar(channel(0, CHANNEL_CUTOFF)));
+        }
+
+        /// Initial values in stored units and back (spec: ui/settings-choices.md "Advanced: Initialize controls
+        /// automatically"): the measured record is channel 0's volume at 10000, the knob's default.
+        #[test]
+        fn initial_values_convert_to_and_from_automation_values() {
+            use crate::InitControl;
+            let vol = InitControl::from_unit(channel(0, CHANNEL_VOLUME), 10000.0 / 12800.0).unwrap();
+            assert_eq!(vol, InitControl { head: 0, target: 0, value: 10000 });
+            let bytes = vol.to_bytes();
+            assert_eq!(bytes, [0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x27, 0, 0]);
+            assert_eq!(InitControl::from_bytes(&bytes), vol);
+            for (t, stored) in [
+                (channel(3, CHANNEL_PAN), 3200),
+                (channel(3, CHANNEL_PITCH), -1200),
+                (mixer(2, MIXER_VOLUME), 12800),
+                (mixer(2, MIXER_PAN), -6400),
+                (mixer(2, MIXER_SEPARATION), 32),
+                (mixer(2, EQ_GAIN + 1), -900),
+                (mixer(2, EQ_FREQ), 33145),
+                (send(2, 5), 8000),
+                (slot(1, 3, SLOT_ON), 0),
+                (slot(1, 3, SLOT_MIX), 6400),
+                (TEMPO, 140000),
+            ] {
+                let c = InitControl { head: 0, target: t, value: stored };
+                let v = c.unit().unwrap();
+                assert_eq!(InitControl::from_unit(t, v), Some(c), "{t:#010x}");
+            }
+            // Units not known: kept, not converted.
+            for t in [channel_param(0, 4), slot_param(1, 0, 2), InitControl::MAIN_VOLUME, channel(0, CHANNEL_CUTOFF)] {
+                assert_eq!(InitControl::from_unit(t, 0.5), None);
+                assert_eq!(InitControl { head: 0, target: t, value: 7 }.unit(), None);
+            }
         }
     }
 }
