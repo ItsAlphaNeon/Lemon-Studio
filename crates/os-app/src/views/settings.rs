@@ -41,6 +41,8 @@ pub enum SAct {
     Combo(&'static str, f32, f32),
     /// An Info page text box: click to edit (`App::info_act`).
     Info(InfoField),
+    /// The Info page's genre button, with its bottom left (where the genre menu opens; `App::genre_menu`).
+    Genres(f32, f32),
 }
 
 /// The Info page's text boxes: the project's credits (spec: ui/settings.md "Info", flp/events/project-info.md).
@@ -578,8 +580,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             gf("Playlist", false, vec![Check2("Automatic crossfades", true, "Enable automatic crossfades in new projects", true)]),
         ],
         // The credits are edited in place (spec: ui/settings.md "Info"; events 194 / 207 / 206 / 195 / 197,
-        // flp/events/project-info.md). The genre list, "Show info on opening" and the working time (the start date, the
-        // time spent, Reset working time) have no spec yet: greyed or left out.
+        // flp/events/project-info.md); the genre button opens FL's genre list (spec: ui/settings-choices.md "Info").
+        // "Show info on opening" and the working time (the start date, the time spent, Reset working time) are not
+        // available yet: greyed or left out.
         INFO => {
             let clips: usize = s.project.arrangements.iter().map(|a| a.clips.len()).sum();
             let notes: usize = s.project.patterns.iter().map(|p| p.notes.len()).sum();
@@ -595,9 +598,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Text("Web link".into(), true),
                 Edit(InfoField::Url, 0.0),
                 Gap(8.0),
-                // FL's footer also counts "Plugins" and "PL tracks"; what those count is not in the spec: left out.
-                txt(format!("Channels: {}, Mixer Tracks: {}", s.project.channels.len(), s.project.mixer.len())),
-                txt(format!("Arrangements: {}, PL clips: {clips}, Notes: {notes}", s.project.arrangements.len())),
+                // FL's footer, small grey lines (spec: ui/settings-choices.md "Info"). What its "Plugins", "Mixer
+                // Tracks" and "PL tracks" count is not in the spec (FL shows 2, 5 and 0 for a new project from its
+                // default template): left out, like the lines on the start date and the time spent (event 237).
+                Text(format!("Channels: {}", s.project.channels.len()), true),
+                Text(format!("Arrangements: {}, PL clips: {clips}, Notes: {notes}", s.project.arrangements.len()), true),
                 Buttons(vec![("Reset working time", 150.0)]),
             ])]
         }
@@ -1092,12 +1097,11 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             let w = if *w > 0.0 { *w } else { g.right() - 8.0 - (x0 - 4.0) };
             let b = Rect::new(x0 - 4.0, y + 2.0, w, h - 4.0);
             info_box(ui, s, *field, b);
-            // The genre list (FL's ▸) has no spec yet.
+            // The genre button (▸ at the box's right end) opens the genre menu (spec: ui/settings-choices.md "Info").
             if *field == InfoField::Genre {
                 let a = Rect::new(b.right() + 4.0, b.y, 22.0, b.h);
-                ui.off(a, "Genre list");
-                kit::combo(ui.c, t, a, "", f, kit::State::NORMAL);
-                grey(ui, a);
+                let hov = ui.hit(a, Action::Settings(SAct::Genres(a.x, a.bottom())), "MP3 music genres");
+                kit::combo(ui.c, t, a, "", f, kit::State::hover(hov));
             }
         }
     }

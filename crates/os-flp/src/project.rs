@@ -31,6 +31,14 @@ mod id {
     pub const URL: u8 = 197;
     pub const GENRE: u8 = 206;
     pub const AUTHOR: u8 = 207;
+    /// Events FL writes between the author and the comments (167, 202), and 237 (the project's start date and the
+    /// time spent), which ends the project information (spec: flp/engine-events.md "Order in the file").
+    pub const INFO_167: u8 = 167;
+    pub const INFO_202: u8 = 202;
+    pub const WORK_TIME: u8 = 237;
+    /// The project events that stand before the project information and are not read (spec: flp/engine-events.md
+    /// "Order in the file": 156, 67, 9, 11, 80, 17, 18, 35, 23, 44, 30, 10).
+    pub const OTHER_PROJECT: [u8; 5] = [9, 35, 23, 44, 10];
     pub const CURRENT_PATTERN: u8 = 67;
     /// Current arrangement number (spec: flp/events/playlist.md).
     pub const CURRENT_ARRANGEMENT: u8 = 100;
@@ -321,6 +329,12 @@ struct Layout {
     genre: Option<usize>,
     comments: Option<usize>,
     url: Option<usize>,
+    /// Events 167, 202 and 237 around the project information texts, and the last of the other project events before
+    /// them (`id::OTHER_PROJECT`).
+    info_167: Option<usize>,
+    info_202: Option<usize>,
+    work_time: Option<usize>,
+    other_project: Option<usize>,
     current_pattern: Option<usize>,
     current_arrangement: Option<usize>,
     playlist_view: Option<usize>,
@@ -472,6 +486,10 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 id::GENRE => l.genre = Some(i),
                 id::COMMENTS => l.comments = Some(i),
                 id::URL => l.url = Some(i),
+                id::INFO_167 if l.info_167.is_none() => l.info_167 = Some(i),
+                id::INFO_202 if l.info_202.is_none() => l.info_202 = Some(i),
+                id::WORK_TIME if l.work_time.is_none() => l.work_time = Some(i),
+                v if id::OTHER_PROJECT.contains(&v) => l.other_project = Some(i),
                 id::CURRENT_PATTERN => l.current_pattern = Some(i),
                 id::SWING if l.swing.is_none() => l.swing = Some(i),
                 id::TIME_NUM if l.time_num.is_none() => l.time_num = Some(i),
@@ -2092,36 +2110,48 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     if let (Some(i), Some(t)) = (l.tempo, project.tempo.filter(|&t| Some(t) != current.tempo)) {
         set_int(&mut events[i], (t * 1000.0).round() as u32);
     }
-    // Title, genre, author, comments, URL (spec: flp/events/project-info.md), in the order `create` writes them. A
-    // changed text is patched in place; a cleared one keeps its event, written empty (whether FL omits empty fields or
-    // writes them empty is open in the spec); an empty field the file lacks gets no event, a filled one gets its event
-    // next to the others.
+    // Title, genre, author, comments, URL (spec: flp/events/project-info.md). A changed text is patched in place. A
+    // cleared one keeps its event, written empty, as FL 26 writes 194, 206, 207 and 195 when they are empty; a cleared
+    // URL loses its event, as FL writes 197 only when there is a URL (Writer notes). An empty field the file lacks gets
+    // no event, a filled one gets its event in FL's order.
     let info = &project.info;
     let old_info = &current.info;
     let fields = [
-        (id::TITLE, l.title, &info.title, &old_info.title),
-        (id::GENRE, l.genre, &info.genre, &old_info.genre),
-        (id::AUTHOR, l.author, &info.author, &old_info.author),
-        (id::COMMENTS, l.comments, &info.comments, &old_info.comments),
-        (id::URL, l.url, &info.url, &old_info.url),
+        (id::TITLE, &info.title, &old_info.title),
+        (id::GENRE, &info.genre, &old_info.genre),
+        (id::AUTHOR, &info.author, &old_info.author),
+        (id::COMMENTS, &info.comments, &old_info.comments),
+        (id::URL, &info.url, &old_info.url),
     ];
-    // Without any of them in the file: after the prelude's tempo, swing, main pitch and current pattern, as `create` does.
-    let info_at = [l.tempo, l.swing, l.main_pitch, l.current_pattern].into_iter().flatten().max().or(l.version).map_or(0, |i| i + 1);
+    // spec: flp/engine-events.md "Order in the file": 194, 206, 207, 167, 202, 195, [197], 237. The five texts take
+    // places 0, 1, 2, 5 and 6 of it.
+    let order = [l.title, l.genre, l.author, l.info_167, l.info_202, l.comments, l.url, l.work_time];
+    const PLACE: [usize; 5] = [0, 1, 2, 5, 6];
+    // Without any of them in the file: behind the project events that come before them (156, 67, 9, 11, 80, 17, 18,
+    // 35, 23, 44, 30, 10), as `create` does.
+    let info_at = [l.tempo, l.current_pattern, l.swing, l.main_pitch, l.time_num, l.time_den, l.truncated, l.other_project]
+        .into_iter()
+        .flatten()
+        .max()
+        .or(l.version)
+        .map_or(0, |i| i + 1);
     let mut added = Vec::new();
-    for (k, &(eid, loc, value, old)) in fields.iter().enumerate() {
+    for (k, &(eid, value, old)) in fields.iter().enumerate() {
         if value == old {
             continue;
         }
+        let p = PLACE[k];
         let text = value.as_deref().map(|v| if eid == id::COMMENTS { comments_to_file(v) } else { v.to_string() });
-        match (loc, text) {
+        match (order[p], text) {
+            (Some(i), v) if eid == id::URL && v.as_deref().unwrap_or("").is_empty() => removals.push(i),
             (Some(i), v) => set_data(&mut events[i], encode_text(v.as_deref().unwrap_or(""), enc)),
             (None, Some(v)) if !v.is_empty() => {
-                // After the nearest field before it that the file has, else before the nearest one after it.
-                let at = fields[..k]
+                // After the nearest event before it in that order that the file has, else before the nearest one after.
+                let at = order[..p]
                     .iter()
                     .rev()
-                    .find_map(|f| f.1.map(|i| i + 1))
-                    .or_else(|| fields[k + 1..].iter().find_map(|f| f.1))
+                    .find_map(|i| i.map(|i| i + 1))
+                    .or_else(|| order[p + 1..].iter().find_map(|&i| i))
                     .unwrap_or(info_at);
                 added.push((at, Event::new(eid, Value::var(encode_text(&v, enc)))));
             }
@@ -4799,6 +4829,75 @@ mod tests {
         assert_eq!(event_data(&file, id::TITLE), Some(b"Caf\xe9\0".to_vec()));
         assert_eq!(event_data(&file, id::COMMENTS), Some(b"a\rb\0".to_vec()));
         assert_eq!(load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap().info, m.info);
+    }
+
+    /// FL 26 writes the project information as 194, 206, 207, 167, 202, 195, [197], 237, the four texts empty in a new
+    /// project: an unchanged model keeps them byte for byte, an added comment or URL goes in that order (after 207,
+    /// 167 and 202, before 237), and a cleared URL loses its event (spec: flp/engine-events.md "Order in the file",
+    /// flp/events/project-info.md "Writer notes").
+    #[test]
+    fn project_info_keeps_fl_order() {
+        const INFO: [u8; 8] = [id::TITLE, id::GENRE, id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::URL, id::WORK_TIME];
+        // A file holding `ids` of the project information, as FL writes them, behind the project events.
+        let fl_file = |ids: &[u8]| {
+            let mut p = new_project();
+            p.info = ProjectInfo::default();
+            let mut file = create(&p).unwrap();
+            let ev = events_of_mut(&mut file).unwrap();
+            let at = ev.iter().position(|e| e.id == id::CURRENT_PATTERN).unwrap() + 1;
+            let info = ids.iter().map(|&eid| match eid {
+                id::INFO_167 => Event::new(eid, Value::U32(2)),
+                id::INFO_202 => Event::new(eid, Value::var(utf16z("C:\\Data\\"))),
+                id::WORK_TIME => Event::new(eid, Value::var(vec![7; 16])),
+                _ => Event::new(eid, Value::var(utf16z(""))),
+            });
+            ev.splice(at..at, info);
+            FlpFile::parse(&file.to_bytes().unwrap()).unwrap()
+        };
+        let info_ids = |file: &FlpFile| -> Vec<u8> { events_of(file).unwrap().iter().map(|e| e.id).filter(|i| INFO.contains(i)).collect() };
+        let saved = |m: &Project, file: &FlpFile| {
+            let mut out = file.clone();
+            apply(m, &mut out).unwrap();
+            FlpFile::parse(&out.to_bytes().unwrap()).unwrap()
+        };
+        let new_fl = [id::TITLE, id::GENRE, id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::WORK_TIME];
+
+        // A new FL project: the empty texts load as empty and stay as they are.
+        let file = fl_file(&new_fl);
+        let m = load(&file).unwrap();
+        assert_eq!((m.info.title.as_deref(), m.info.comments.as_deref(), m.info.url.as_deref()), (Some(""), Some(""), None));
+        assert_eq!(saved(&m, &file).to_bytes().unwrap(), file.to_bytes().unwrap());
+
+        // A URL goes behind the comments, before 237; the other texts stay empty.
+        let mut m2 = m.clone();
+        m2.info.url = Some("https://example.org".into());
+        m2.info.title = Some("Song".into());
+        let f2 = saved(&m2, &file);
+        assert_eq!(info_ids(&f2), [id::TITLE, id::GENRE, id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::URL, id::WORK_TIME]);
+        assert_eq!((event_data(&f2, id::GENRE), event_data(&f2, id::COMMENTS)), (Some(vec![0, 0]), Some(vec![0, 0])));
+        assert_eq!(load(&f2).unwrap().info, m2.info);
+
+        // Cleared again: 197 goes, the others stay.
+        let mut m3 = m2.clone();
+        m3.info.url = None;
+        let f3 = saved(&m3, &f2);
+        assert_eq!(info_ids(&f3), new_fl);
+        assert_eq!(load(&f3).unwrap().info, m3.info);
+
+        // Without 195: added comments and a URL go behind 202, before 237.
+        let file = fl_file(&[id::TITLE, id::GENRE, id::AUTHOR, id::INFO_167, id::INFO_202, id::WORK_TIME]);
+        let mut m4 = load(&file).unwrap();
+        m4.info.comments = Some("a\nb".into());
+        m4.info.url = Some("u".into());
+        let f4 = saved(&m4, &file);
+        assert_eq!(info_ids(&f4), [id::TITLE, id::GENRE, id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::URL, id::WORK_TIME]);
+        assert_eq!(load(&f4).unwrap().info, m4.info);
+
+        // With only 237: a title goes before it.
+        let file = fl_file(&[id::WORK_TIME]);
+        let mut m5 = load(&file).unwrap();
+        m5.info.title = Some("T".into());
+        assert_eq!(info_ids(&saved(&m5, &file)), [id::TITLE, id::WORK_TIME]);
     }
 
     /// A pattern's own time markers (piano-roll Alt+T) are marker groups in its metadata block, sorted by position
