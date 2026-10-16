@@ -169,6 +169,8 @@ Not yet: Align all channel editors, Arrange windows.
   Ctrl+Shift+D
 - Theme files apply to the Classic look
 - Lemon Studio's own plugin editors are drawn in the Lemon design only, whatever design the app shows
+- Smooth scrolling: the wheel and the scroll bars' arrows ease the editors' views (General settings ▸ Display ▸
+  Smoothing, and Animation refresh rate for how often animations redraw)
 
 ## ❌ Not available yet
 

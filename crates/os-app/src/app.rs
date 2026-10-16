@@ -8174,7 +8174,7 @@ mod tests {
         full(&mut app, &mut a);
         // Wheel steps at once (General ▸ Display ▸ Smoothing 0; eased steps below): down, up, right, left, Shift =
         // sideways, several before one paint.
-        crate::smooth::set_smoothing(0.0);
+        crate::prefs::set_slider(&crate::prefs::SMOOTHING, 0);
         app.wheel(0.0, -1.0, false, false);
         check(&mut app, &mut a, &mut b, "wheel down", Some(true), true);
         app.wheel(0.0, -2.0, false, false);
@@ -8193,7 +8193,7 @@ mod tests {
         check(&mut app, &mut a, &mut b, "three steps", Some(true), true);
         // Eased steps (Smoothing 128, 10 ms frames): every frame of the ease moves the drawn pixels, in whole steps of
         // the drawing grid at 150 %; a notch sideways during the ease too.
-        crate::smooth::set_smoothing(128.0);
+        crate::prefs::set_slider(&crate::prefs::SMOOTHING, 128);
         app.wheel(0.0, -2.0, false, false);
         let mut frames = 0;
         while app.smooth.running() {
@@ -8208,7 +8208,7 @@ mod tests {
             assert!(frames < 100, "{}: the ease ends", what_at("eased"));
         }
         assert!(frames > 10, "{}: the steps eased over {frames} frames", what_at("eased"));
-        crate::smooth::set_smoothing(0.0);
+        crate::prefs::set_slider(&crate::prefs::SMOOTHING, 0);
         // Over the track headers: rows move, the time line stays; the hovered group arrow (lit) moves off the mouse.
         app.state.playlist_scroll.1 = 0.0;
         full(&mut app, &mut a);

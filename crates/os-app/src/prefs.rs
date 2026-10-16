@@ -346,8 +346,13 @@ pub const VERTICAL_SCROLLING_SPEED: Slider =
 pub const HORIZONTAL_SCROLLING_SPEED: Slider =
     Slider { key: "horizontal_scrolling_speed", label: "Horizontal scrolling speed", max: 512, default: 256, step: 32 };
 
+/// General ▸ Display: how slowly the editors' scrolls ease to where the wheel or a scroll arrow sends them, 0 (they
+/// jump) to 512 (`crate::smooth`). Spec: ui/settings-choices.md "Display: Smoothing, Animation refresh rate,
+/// Transparent menus and windows (2026-10-16)".
+pub const SMOOTHING: Slider = Slider { key: "smoothing", label: "Smoothing", max: 512, default: 128, step: 16 };
+
 /// The declared sliders.
-pub const SLIDERS: &[&Slider] = &[&VERTICAL_SCROLLING_SPEED, &HORIZONTAL_SCROLLING_SPEED];
+pub const SLIDERS: &[&Slider] = &[&SMOOTHING, &VERTICAL_SCROLLING_SPEED, &HORIZONTAL_SCROLLING_SPEED];
 
 /// Audio ▸ Mixer: the insert track the browser's previews enter the mixer at; 0, shown "---", plays them straight into
 /// the master (`crate::preview_track`). The wheel offers the open project's insert tracks (`App::settings_number`), up
@@ -926,7 +931,7 @@ mod tests {
         assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), 0);
         set_slider(&VERTICAL_SCROLLING_SPEED, 256);
         assert_eq!(find_slider("Vertical scrolling speed"), Some(&VERTICAL_SCROLLING_SPEED));
-        assert_eq!((find_slider(""), find_slider("Smoothing")), (None, None));
+        assert_eq!((find_slider(""), find_slider("Smoothing")), (None, Some(&SMOOTHING)));
         assert_eq!((number(&BROWSER_PREVIEW_TRACK), number_text(&BROWSER_PREVIEW_TRACK).as_str()), (0, "---"));
         set_number(&BROWSER_PREVIEW_TRACK, 5);
         assert_eq!((number(&BROWSER_PREVIEW_TRACK), number_text(&BROWSER_PREVIEW_TRACK).as_str()), (5, "5"));

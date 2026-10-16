@@ -22,7 +22,7 @@ pub fn scaled(dx: f32, dy: f32) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use crate::app::{Action, App, Win};
-    use crate::prefs::{set_slider, HORIZONTAL_SCROLLING_SPEED, VERTICAL_SCROLLING_SPEED};
+    use crate::prefs::{set_slider, HORIZONTAL_SCROLLING_SPEED, SMOOTHING, VERTICAL_SCROLLING_SPEED};
     use os_ui::Canvas;
 
     fn speeds(v: u16, h: u16) {
@@ -33,7 +33,7 @@ mod tests {
     /// The playlist in front, the mouse over an empty spot of its grid.
     fn playlist(c: &mut Canvas) -> App {
         // Notches at once (General ▸ Display ▸ Smoothing 0): these tests measure the steps, `crate::smooth` the ease.
-        crate::smooth::set_smoothing(0.0);
+        set_slider(&SMOOTHING, 0);
         let mut app = App::new(None);
         app.state.z = vec![Win::Playlist];
         app.paint(c, None);
@@ -105,7 +105,7 @@ mod tests {
 
     /// The piano roll in front, the mouse over its grid, scrolled to the middle of the keys.
     fn piano(c: &mut Canvas) -> App {
-        crate::smooth::set_smoothing(0.0);
+        set_slider(&SMOOTHING, 0);
         let mut app = App::new(None);
         app.state.z = vec![Win::PianoRoll];
         app.paint(c, None);

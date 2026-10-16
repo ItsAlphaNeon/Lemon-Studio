@@ -1068,8 +1068,8 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 x += w + 8.0;
             }
         }
-        // A slider declared in `crate::prefs` (General ▸ Input's scrolling speeds): its handle sits at its value (no
-        // number shows); a click or a drag sets it (`App::pref_slider_press`), the wheel steps it.
+        // A slider declared in `crate::prefs` (General ▸ Display's Smoothing, Input's scrolling speeds): its handle is
+        // at its value (no number shows); a click or a drag sets it (`App::pref_slider_press`), the wheel steps it.
         Row::Slider(label, _) if crate::prefs::find_slider(label).is_some() => {
             let Some(sl) = crate::prefs::find_slider(label) else { return };
             let v = f32::from(crate::prefs::slider(sl)) / f32::from(sl.max.max(1));

@@ -20,26 +20,11 @@
 use std::time::{Duration, Instant};
 
 use crate::app::{App, Scroll};
+use crate::prefs;
 
-/// General ▸ Display ▸ Smoothing: FL's value as found, Lemon Studio's default.
-pub const SMOOTHING_DEFAULT: f32 = 128.0;
-/// The slider's top (0 is the bottom: no easing).
-pub const SMOOTHING_MAX: f32 = 512.0;
-/// Smoothing's name in `settings.txt`.
-const SMOOTHING_KEY: &str = "smoothing";
-
-/// General ▸ Display ▸ Smoothing, 0 (scrolls jump) to 512. Everything reads it through here.
+/// General ▸ Display ▸ Smoothing (`prefs::SMOOTHING`), 0 (scrolls jump) to 512, 128 by default.
 pub fn smoothing() -> f32 {
-    crate::prefs::text(SMOOTHING_KEY)
-        .and_then(|v| v.parse::<f32>().ok())
-        .filter(|v| (0.0..=SMOOTHING_MAX).contains(v))
-        .unwrap_or(SMOOTHING_DEFAULT)
-}
-
-/// Tests: sets Smoothing.
-#[cfg(test)]
-pub fn set_smoothing(v: f32) {
-    crate::prefs::set_text(SMOOTHING_KEY, &v.to_string());
+    f32::from(prefs::slider(&prefs::SMOOTHING))
 }
 
 /// How much of the way one stage moves in a frame of `dt_ms` at Smoothing `value`: `1 - 2^(-dt / (value x 0.25 ms))`.
@@ -52,7 +37,7 @@ pub fn share(dt_ms: f64, value: f64) -> f64 {
 /// Animation refresh rate: the shortest time from one frame to the next while something animates. Ultrasmooth: none
 /// (the display's own rate); Smooth: 60 Hz; Less smooth: 40 Hz.
 pub fn frame_cap() -> Duration {
-    match crate::prefs::index(&crate::prefs::ANIMATION_REFRESH_RATE) {
+    match prefs::index(&prefs::ANIMATION_REFRESH_RATE) {
         0 => Duration::from_millis(25),
         1 => Duration::from_secs_f64(1.0 / 60.0),
         _ => Duration::ZERO,
@@ -272,6 +257,7 @@ mod tests {
     use super::*;
     use crate::app::{Action, Win};
     use crate::playlist::PGeom;
+    use crate::prefs::{set_slider, SMOOTHING};
     use os_ui::Canvas;
 
     /// What a 48 px notch at 128 showed, one value per frame (repeats dropped): the spec's measured sequence.
@@ -324,7 +310,7 @@ mod tests {
 
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = playlist_app(&mut c);
-        set_smoothing(128.0);
+        set_slider(&SMOOTHING, 128);
         app.eased(|app| app.scroll_set(Scroll::PlaylistY, 48.0));
         assert_eq!(app.state.playlist_scroll.1, 0.0, "the view starts where it is");
         assert!(app.animating(), "an ease keeps the frames coming");
@@ -345,14 +331,14 @@ mod tests {
     fn zero_is_instant() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = playlist_app(&mut c);
-        set_smoothing(0.0);
+        set_slider(&SMOOTHING, 0);
         app.wheel(-1.0, -1.0, false, false);
         let at_once = app.state.playlist_scroll;
         assert!(at_once.0 > 0.0 && at_once.1 > 0.0, "the wheel scrolled: {at_once:?}");
         assert!(!app.smooth.running(), "nothing eases at 0");
 
         let mut app = playlist_app(&mut c);
-        set_smoothing(128.0);
+        set_slider(&SMOOTHING, 128);
         app.wheel(-1.0, -1.0, false, false);
         assert_eq!(app.state.playlist_scroll, (0.0, 0.0), "at 128 the view starts where it is");
         assert!(app.smooth.running());
@@ -367,12 +353,12 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let y = Axis::Bar(Scroll::PlaylistY);
         let mut app = playlist_app(&mut c);
-        set_smoothing(0.0);
+        set_slider(&SMOOTHING, 0);
         app.wheel(0.0, -2.0, false, false);
         let two = app.state.playlist_scroll.1;
 
         let mut app = playlist_app(&mut c);
-        set_smoothing(128.0);
+        set_slider(&SMOOTHING, 128);
         app.wheel(0.0, -1.0, false, false);
         let one = app.smooth.of(y).expect("eases").target;
         for _ in 0..5 {
@@ -393,7 +379,7 @@ mod tests {
     fn a_zoom_is_not_eased() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = playlist_app(&mut c);
-        set_smoothing(128.0);
+        set_slider(&SMOOTHING, 128);
         app.state.playlist_scroll.0 = 600.0;
         app.paint(&mut c, None);
         app.wheel(-1.0, 0.0, false, false);
@@ -417,7 +403,7 @@ mod tests {
     fn hits_follow_the_drawn_view() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = playlist_app(&mut c);
-        set_smoothing(128.0);
+        set_slider(&SMOOTHING, 128);
         app.wheel(0.0, -1.0, false, false);
         for _ in 0..5 {
             app.ease_step(10.0);
@@ -455,7 +441,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.z = vec![Win::PianoRoll];
         app.paint(&mut c, None);
-        set_smoothing(128.0);
+        set_slider(&SMOOTHING, 128);
         let t = Scroll::PianoY;
         let v0 = app.scroll_get(t);
         let r = app.hits.iter().find(|h| h.action == Action::ScrollStep(t, 1)).expect("the down arrow").rect;
@@ -473,12 +459,56 @@ mod tests {
         assert_eq!(f64::from(app.scroll_get(t)), two);
     }
 
+    /// The ease goes where the wheel's notch goes at the scrolling speed (General ▸ Input, `crate::scroll_speed`):
+    /// at 512 a vertical notch eases two track heights down.
+    #[test]
+    fn the_ease_goes_as_far_as_the_scrolling_speed() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = playlist_app(&mut c);
+        set_slider(&SMOOTHING, 128);
+        set_slider(&prefs::VERTICAL_SCROLLING_SPEED, 512);
+        let row = app.state.playlist.row_h;
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(app.smooth.of(Axis::Bar(Scroll::PlaylistY)).expect("eases").target, f64::from(2.0 * row));
+        app.ease_to_end();
+        assert_eq!(app.state.playlist_scroll.1, 2.0 * row);
+        set_slider(&prefs::VERTICAL_SCROLLING_SPEED, 256);
+    }
+
+    /// General ▸ Display ▸ Smoothing is a live slider: the wheel over it moves it by 16 a notch, a click at its left
+    /// end sets 0.
+    #[test]
+    fn the_smoothing_slider_works() {
+        use crate::views::settings::{SAct, GENERAL};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(GENERAL);
+        app.paint(&mut c, None);
+        let (r, x) = app
+            .hits
+            .iter()
+            .rev()
+            .find_map(|h| match h.action {
+                Action::Settings(SAct::Slider("Smoothing", x, _)) => Some((h.rect, x)),
+                _ => None,
+            })
+            .expect("Smoothing is a live slider");
+        assert_eq!(smoothing(), 128.0, "128 by default");
+        app.mouse_move(r.cx(), r.cy());
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(smoothing(), 144.0);
+        app.mouse_move(x - 5.0, r.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!(smoothing(), 0.0);
+    }
+
     /// An axis moved by something else during its ease (a drag, a jump) ends the ease there.
     #[test]
     fn a_jump_ends_the_ease() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = playlist_app(&mut c);
-        set_smoothing(128.0);
+        set_slider(&SMOOTHING, 128);
         app.wheel(-1.0, 0.0, false, false);
         app.ease_step(10.0);
         app.state.playlist_scroll.0 = 500.0;
