@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use os_model::{MixerTrack, Rgb};
 
 use crate::app::{App, State};
+use crate::knobs::KnobId;
 use crate::playlist::{Cmd, EditTarget, Mark, PItem, Popup};
 
 /// Mixer controls (the view registers them as `Action::Mix`). Controls that are not available yet (title-bar view
@@ -41,6 +42,8 @@ pub enum MHit {
     SlotLed(u8),
     /// The level scale column.
     Scale,
+    /// The current track's equaliser graph: a press grabs the band nearest the cursor's frequency.
+    EqGraph,
 }
 
 /// Menu commands (`Cmd::Mixer`).
@@ -319,8 +322,40 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             changed(s);
             None
         }
-        MHit::Scale => None,
+        MHit::Scale | MHit::EqGraph => None,
     }
+}
+
+// The equaliser graph `g` spans the frequency knob's range left to right (10 Hz .. 16 kHz) and ±18 dB over its
+// half-height less 4 px (spec: ui/mixer.md §8).
+
+/// The frequency position 0..1 at `x`.
+pub fn eq_graph_pos(g: os_ui::Rect, x: f32) -> f32 {
+    ((x - g.x - 1.0) / (g.w - 2.0)).clamp(0.0, 1.0)
+}
+
+/// The gain at `y`, in dB.
+pub fn eq_graph_db(g: os_ui::Rect, y: f32) -> f32 {
+    ((g.cy() - y) / (g.h / 2.0 - 4.0) * 18.0).clamp(-18.0, 18.0)
+}
+
+/// The band of the current track a press at `x` tweaks: the one whose frequency is nearest.
+pub fn eq_band_at(s: &State, g: os_ui::Rect, x: f32) -> u8 {
+    let (t, p) = (s.selected_mixer, eq_graph_pos(g, x));
+    let dist = |b: u8| (s.knob(KnobId::Eq(t, b, 1)) - p).abs();
+    (0..3).min_by(|&a, &b| dist(a).total_cmp(&dist(b))).unwrap_or(0)
+}
+
+/// The graph's hint at `x`: "1278Hz  Tweak band 2" (spec: ui/mixer.md §8).
+pub fn eq_graph_hint(s: &State, g: os_ui::Rect, x: f32) -> String {
+    let hz = os_dsp::mixer::eq_frequency((eq_graph_pos(g, x) * 65536.0).round() as i32);
+    format!("{hz:.0}Hz  Tweak band {}", eq_band_at(s, g, x) + 1)
+}
+
+/// Dragging on the graph: band `band` of track `t` moves to the cursor, its frequency across and its gain up and down.
+pub fn eq_graph_drag(s: &mut State, t: u16, band: u8, g: os_ui::Rect, (x, y): (f32, f32)) {
+    s.set_knob(KnobId::Eq(t, band, 1), eq_graph_pos(g, x));
+    s.set_knob(KnobId::Eq(t, band, 0), (eq_graph_db(g, y) / 18.0 + 1.0) / 2.0);
 }
 
 /// Right click on a mixer control. Returns false when it is not handled here (knob menus).

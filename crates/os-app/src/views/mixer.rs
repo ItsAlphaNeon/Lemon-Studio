@@ -678,7 +678,9 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     // Equalizer: response graph, three band gain faders (±18 dB), band frequency and width knobs (spec: ui/mixer.md §8).
     let eq = Rect::new(r.x + 4.0, sep + 11.0, 146.0, 173.0 * kp);
     let settings = track.map_or(os_model::EQ_DEFAULT, |m| m.eq);
-    ui.hit(eq, Action::Swallow, "Track equalizer");
+    // Its hint follows the cursor (App::mouse_move).
+    let hint = if eq.contains(ui.mouse.0, ui.mouse.1) { mx::eq_graph_hint(s, eq, ui.mouse.0) } else { String::new() };
+    ui.hit(eq, Action::Mix(MHit::EqGraph), hint);
     if super::lemon(ui) {
         lk::outlined(ui.c, eq, lk::r_btn(t), ui.t.s(0x1f2224), ui.t.s(0x272a2c));
     } else {
@@ -697,7 +699,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
             let p = i as f32 / steps as f32;
             let hz = os_dsp::mixer::eq_frequency((p * 65536.0).round() as i32);
             let db = os_dsp::mixer::eq_response_db(settings, 44100, f64::from(hz)) as f32;
-            (eq.x + 1.0 + p * (eq.w - 2.0), eq.cy() - (db / 18.0).clamp(-1.0, 1.0) * half)
+            (eq.x + 1.0 + p * (eq.w - 2.0), eq.cy() - (db / 18.0).clamp(-1.0, 1.0) * half) // as mx::eq_graph_db
         })
         .collect();
     ui.c.push_clip(eq.inset(1.0));
