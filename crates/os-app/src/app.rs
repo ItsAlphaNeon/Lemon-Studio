@@ -3675,7 +3675,7 @@ impl App {
                     self.invalidate();
                 }
                 Drag::RackLen { y0, v0 } => {
-                    let v = (v0 as i32 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32).clamp(0, crate::rack::MAX_STEPS as i32) as u32;
+                    let v = (v0 as i32 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32).clamp(0, crate::rack::max_steps(&self.state) as i32) as u32;
                     crate::rack::set_len(&mut self.state, (v > 0).then_some(v));
                     self.hint = Cow::Owned(if v == 0 { "Pattern length: Auto".into() } else { format!("Pattern length: {v} steps") });
                     self.invalidate();
@@ -4875,7 +4875,7 @@ impl App {
                 return None;
             }
             Some(Action::RackLen) => {
-                let v = (crate::rack::len_value(&self.state) as i32 + d).clamp(0, crate::rack::MAX_STEPS as i32) as u32;
+                let v = (crate::rack::len_value(&self.state) as i32 + d).clamp(0, crate::rack::max_steps(&self.state) as i32) as u32;
                 crate::rack::set_len(&mut self.state, (v > 0).then_some(v));
                 return None;
             }
@@ -5955,10 +5955,11 @@ impl App {
         self.focus_channel(i);
         let s = &mut self.state;
         s.piano.clear_selection();
-        // A step past an explicit length grows the pattern to the bar holding it (§5).
+        // A step past an explicit length grows the pattern to the end of the pattern's bar holding it (§5, §23).
         if let Some(l) = crate::rack::explicit_len(s) {
             if k >= l {
-                crate::rack::set_len(s, Some((k / 16 + 1) * 16));
+                let ps = crate::rack::per_step(s);
+                crate::rack::set_len(s, Some(s.project.pattern_bar_end(s.pattern, (k + 1) * ps).div_ceil(ps)));
             }
         }
         let on = crate::rack::toggle_step(s, i, k);
@@ -12251,6 +12252,69 @@ mod tests {
         assert_eq!(next.state.clock.mode, crate::clock::Mode::Msc);
     }
 
+    /// The channel rack and time signatures (spec: ui/channel-rack.md §23, FL's numbers): the lit steps, the Auto
+    /// length and the mini roll's bars are the pattern's own bars; the step colour groups (a beat) and Set to ▸ N bars
+    /// are the project's; a step past an explicit length grows it to the end of the pattern's bar holding it.
+    #[test]
+    fn rack_follows_time_signatures() {
+        use crate::rack::{bar_steps, beat_steps, pattern_bars, pattern_steps, RCmd};
+        use os_model::TimeMarker;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.pattern = 1;
+        crate::patterns::pat_mut(&mut app.state, 1).notes.clear();
+        let set_to = |app: &App| -> Vec<u32> {
+            let items = crate::rack::length_menu(&app.state, 0.0, 0.0).items;
+            items.into_iter().filter_map(|it| if let crate::playlist::Cmd::Rack(RCmd::SetLen(Some(v))) = it.cmd { Some(v) } else { None }).collect()
+        };
+        // 4/4 and no marker: one 16-step bar, beats of 4.
+        let s = &app.state;
+        assert_eq!((pattern_steps(s), beat_steps(s), bar_steps(s)), (16, 4, 16));
+        // A 3/8 pattern in a 4/4 project: 6 lit steps, 12 with step 8 on; the groups stay at 4; Set to counts 16-step
+        // bars; the pattern's bars are 6 steps.
+        let sig = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: 3, denominator: 8, ..TimeMarker::new(0, "3/8") };
+        crate::patterns::pat_mut(&mut app.state, 1).markers.push(sig);
+        assert_eq!((pattern_steps(&app.state), beat_steps(&app.state)), (6, 4));
+        crate::rack::set_step(&mut app.state, 0, 7, true);
+        assert_eq!(pattern_steps(&app.state), 12);
+        assert_eq!(set_to(&app), [16, 32, 64, 128, 256, 512]);
+        assert_eq!(pattern_bars(&app.state, 12 * 24), [(0, 144), (144, 288)]);
+        crate::rack::set_len(&mut app.state, Some(6));
+        app.rack_step(0, 8);
+        app.drag = None;
+        assert_eq!(pattern_steps(&app.state), 12, "grown to the second 3/8 bar");
+        // A 6/8 project: beats of 2 steps and bars of 12 (an empty pattern without a marker, Set to's 1 bar); 6/16:
+        // beats of 1 and bars of 6.
+        app.state.project.time_signature = Some((6, 8));
+        app.state.pattern = 2;
+        let s = &app.state;
+        assert_eq!((pattern_steps(s), beat_steps(s), bar_steps(s)), (12, 2, 12));
+        assert_eq!(set_to(&app)[0], 12);
+        app.state.project.time_signature = Some((6, 16));
+        let s = &app.state;
+        assert_eq!((pattern_steps(s), beat_steps(s)), (6, 1));
+
+        // Drawn: in the 6/8 project the steps alternate in pairs; the 3/8 pattern's mini roll shades its two bars, each
+        // half the width.
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        app.state.project.time_signature = Some((6, 8));
+        app.state.raise(Win::ChannelRack);
+        frame(&mut app, &mut c, None);
+        let at = |c: &Canvas, x: f32, y: f32| c.pixmap.pixel(x as u32, y as u32).unwrap();
+        let face = |app: &App, c: &Canvas, k: u32| {
+            let r = hit_rect(app, &Action::Step(1, k));
+            at(c, r.x + 6.0, r.y + 12.0)
+        };
+        let f: Vec<_> = (0..5).map(|k| face(&app, &c, k)).collect();
+        assert!(f[0] == f[1] && f[1] != f[2] && f[2] == f[3] && f[3] != f[4], "pairs");
+        app.state.pattern = 1;
+        app.state.rack_roll_view = true;
+        frame(&mut app, &mut c, None);
+        let b = hit_rect(&app, &Action::RackRoll(1));
+        let shade = |q: f32| at(&c, b.x + b.w * q, b.y + 15.0);
+        assert!(shade(0.05) == shade(0.45) && shade(0.45) != shade(0.55) && shade(0.55) == shade(0.95), "two bars over the width");
+    }
+
     /// The Toolbars menu (spec: ui/toolbar-menu.md §8): on the hint panel, on bare toolbar background and as VIEW >
     /// Toolbars ▸; Separators (on), Flat buttons, Hint bar (off) and Hide (Ctrl+F11) work, the rest stays greyed with
     /// our layout checked. Separators off: no lines, row 1 one pixel down and row 2 one up, also after a partial
@@ -13355,5 +13419,20 @@ mod tests {
         save(&mut app, &mut c, "13_automation_clip");
         app.menu_item(ADD_MENU, entry(ADD_MENU, "Audio clip"));
         save(&mut app, &mut c, "14_audio_clip");
+        // The channel rack with pattern 1 in 3/8 (ui/channel-rack.md §23): lit to its length, grouped by the project's
+        // beat; its mini roll over the pattern's bars; then the same in a 6/8 project.
+        app.state.pattern = 1;
+        let sig = os_model::TimeMarker { kind: os_model::TimeMarker::SIGNATURE, numerator: 3, denominator: 8, ..os_model::TimeMarker::new(0, "3/8") };
+        app.state.project.patterns[0].markers = vec![sig];
+        app.state.project.patterns[0].length = None;
+        crate::rack::run(&mut app, crate::rack::RCmd::SetFilter(crate::rack::Filter::All));
+        app.state.rack_size.0 = views::rack::DEFAULT_SIZE.0 + 320.0;
+        app.state.raise(Win::ChannelRack);
+        save(&mut app, &mut c, "15_rack_38");
+        app.state.rack_roll_view = true;
+        save(&mut app, &mut c, "16_rack_mini_38");
+        app.state.rack_roll_view = false;
+        app.state.project.time_signature = Some((6, 8));
+        save(&mut app, &mut c, "17_rack_project_68");
     }
 }

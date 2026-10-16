@@ -32,7 +32,7 @@ pub const ZIP_H: f32 = 12.0;
 pub const LEN_DRAG: f32 = 4.0;
 /// Pixels of vertical drag per insert on the mixer box (§12).
 pub const MIXER_DRAG: f32 = 10.0;
-/// Longest pattern the length box sets (32 bars, §7).
+/// Longest pattern the length box sets in a 4/4 project (32 bars, §7); see [`max_steps`].
 pub const MAX_STEPS: u32 = 512;
 /// Keys the graph editor's Note tab spans (two octaves around C5, a Lemon Studio choice).
 pub const KEY_LO: u16 = 48;
@@ -393,21 +393,53 @@ pub fn explicit_len(s: &State) -> Option<u32> {
     s.project.pattern(s.pattern).and_then(|p| p.length).filter(|&l| l > 0).map(|l| (l / ps).max(1))
 }
 
-/// Pattern length in steps: the explicit length, else whole bars past the last used step, at least one bar (§3, §7).
+/// Pattern length in steps (§3, §7, §23): the explicit length, else the content rounded up to whole bars of the
+/// pattern's own signature (the project's where it has none), at least one bar: the length the engine plays.
 pub fn pattern_steps(s: &State) -> u32 {
     if let Some(l) = explicit_len(s) {
         return l;
     }
-    let ps = per_step(s);
-    let last = s.project.pattern(s.pattern).and_then(|p| p.notes.iter().map(|n| n.position / ps).max());
-    last.map_or(16, |l| (l / 16 + 1) * 16)
+    s.project.pattern_length(s.pattern).div_ceil(per_step(s)).max(1)
+}
+
+/// Steps in a bar of the project's signature: what the length box's Set to ▸ N bars counts (§23).
+pub fn bar_steps(s: &State) -> u32 {
+    (s.project.bar_ticks() / per_step(s)).max(1)
+}
+
+/// Steps in a beat of the project's signature (16 / denominator): the length of the step colour groups (§3, §23).
+pub fn beat_steps(s: &State) -> u32 {
+    let den = s.project.time_signature.map_or(4, |(_, d)| d);
+    (s.project.bar_of(1, den) / per_step(s)).max(1)
+}
+
+/// Longest pattern the length box sets: 32 bars of the project's signature, at least [`MAX_STEPS`].
+pub fn max_steps(s: &State) -> u32 {
+    MAX_STEPS.max(32 * bar_steps(s))
+}
+
+/// The current pattern's bars up to tick `end`, as `(start, end)` ticks (§6, §23): its own signature's from each
+/// marker on, the project's before the first; a marker cuts the bar it falls in.
+pub fn pattern_bars(s: &State, end: u32) -> Vec<(u32, u32)> {
+    let regions = s.project.pattern_bars(s.pattern);
+    let mut bars = Vec::new();
+    for (i, &(start, bar, _)) in regions.iter().enumerate() {
+        let stop = regions.get(i + 1).map_or(end, |r| r.0.min(end));
+        let mut t = start;
+        while t < stop {
+            bars.push((t, (t + bar).min(stop)));
+            t += bar;
+        }
+    }
+    bars
 }
 
 /// Set the current pattern's length (`None` = Auto).
 pub fn set_len(s: &mut State, steps: Option<u32>) {
     let ps = per_step(s);
     let n = s.pattern.max(1);
-    crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(MAX_STEPS) * ps);
+    let max = max_steps(s);
+    crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
     s.piano.dirty = true;
 }
 
@@ -1299,11 +1331,11 @@ pub fn filter_edit_menu(s: &State, x: f32, y: f32) -> Popup {
 
 /// Pattern length box right click (§7).
 pub fn length_menu(s: &State, x: f32, y: f32) -> Popup {
-    let cur = explicit_len(s);
+    let (cur, bar) = (explicit_len(s), bar_steps(s));
     let mut items = vec![PItem::head("Set to"), it("Auto", RCmd::SetLen(None)).mark(Mark::Radio(cur.is_none()))];
     for bars in [1u32, 2, 4, 8, 16, 32] {
         let label = if bars == 1 { "1 bar".to_string() } else { format!("{bars} bars") };
-        items.push(it(label, RCmd::SetLen(Some(bars * 16))).mark(Mark::Radio(cur == Some(bars * 16))));
+        items.push(it(label, RCmd::SetLen(Some(bars * bar))).mark(Mark::Radio(cur == Some(bars * bar))));
     }
     Popup { x, y, items, sub: None }
 }
@@ -1629,18 +1661,15 @@ pub fn play_project(s: &State) -> Project {
     p
 }
 
-/// Repeat each row's first `loop_len` steps up to the end of every pattern; notes past the loop length go.
+/// Repeat each row's first `loop_len` steps up to the end of every pattern (its length as played, §23); notes past
+/// the loop length go.
 fn expand_loops(p: &mut Project, s: &State, rows: &[usize]) {
     let ps = per_step(s);
-    let bar = ps * 16;
+    let ends: Vec<u32> = p.patterns.iter().map(|pat| p.pattern_length(pat.number)).collect();
     for &r in rows {
         let (Some(&len), Some(ch)) = (s.rack.loop_len.get(&r), p.channels.get(r).map(|c| c.index)) else { continue };
         let span = len.max(1) * ps;
-        for pat in &mut p.patterns {
-            let end = pat.length.filter(|&l| l > 0).unwrap_or_else(|| {
-                let last = pat.notes.iter().map(|n| n.position + n.length).max().unwrap_or(0);
-                (last / bar + 1) * bar
-            });
+        for (pat, &end) in p.patterns.iter_mut().zip(&ends) {
             let src: Vec<Note> = pat.notes.iter().filter(|n| n.channel == ch && n.position < span).copied().collect();
             if src.is_empty() {
                 continue;
