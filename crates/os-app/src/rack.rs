@@ -766,8 +766,34 @@ pub fn reorder(app: &mut App, order: &[usize]) {
         }
     }
     let m = |r: usize| map.get(r).copied().flatten();
-    let s = &mut app.state;
-    remap_project(&mut s.project, &map);
+    remap_state(&mut app.state, &map);
+    app.remap_rows(&m);
+    app.invalidate();
+}
+
+/// The last row's channel goes (an undone drop that made it, `history`): `reorder` without the app, whose instrument
+/// for the row goes on the next tick (`App::plugin_tick`). A project keeps at least one channel.
+pub fn remove_last(s: &mut State) {
+    let n = s.project.channels.len();
+    if n < 2 {
+        return;
+    }
+    let map: Vec<Option<usize>> = (0..n).map(|r| (r + 1 < n).then_some(r)).collect();
+    remap_state(s, &map);
+}
+
+/// Channel `ch` comes back as the last row (a redone drop that made it, `history`); Lemon Sampler hosts it from its
+/// settings on the next tick.
+pub fn push_channel(s: &mut State, mut ch: os_model::Channel) {
+    ch.index = s.project.channels.len() as u16;
+    s.project.channels.push(ch);
+    autosize(s);
+}
+
+/// `reorder` in the project and the app state: `map` gives each row's new row (`None`: the channel goes).
+fn remap_state(s: &mut State, map: &[Option<usize>]) {
+    let m = |r: usize| map.get(r).copied().flatten();
+    remap_project(&mut s.project, map);
     let len = s.project.channels.len().max(1);
     s.rack.remap(&m);
     let keep = |r: usize| m(r).unwrap_or(r.min(len - 1));
@@ -788,8 +814,6 @@ pub fn reorder(app: &mut App, order: &[usize]) {
         s.rack.select_only(s.selected_channel);
     }
     autosize(s);
-    app.remap_rows(&m);
-    app.invalidate();
 }
 
 /// Clone rows (§18): each copy goes right below its channel, named "<name> #2", same settings and mixer track,
@@ -1341,10 +1365,13 @@ pub fn read_tags(ch: &mut os_model::Channel, path: &std::path::Path) {
 }
 
 /// The sample chosen in Load sample...: row `r`'s channel takes it (and its name, `auto_name`, and what the file says,
-/// `read_tags`).
+/// `read_tags`), one history step (`history::load_sample`).
 pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
     let s = &mut app.state;
     let path = p.to_string_lossy().into_owned();
+    if r < s.project.channels.len() {
+        crate::history::load_sample(s, r);
+    }
     if let Some(ch) = s.project.channels.get_mut(r) {
         auto_name(ch, &p);
         read_tags(ch, &p);
@@ -2429,7 +2456,7 @@ mod tests {
     /// Both checks on (as found): the measured table, file by file, loaded with Load sample... into a channel whose
     /// root is 50 and whose stretch is Resample x2 at +300 cents. A file without `smpl` sets the root back to C5;
     /// `acid`'s beats set Auto and TIME (its tempo and root unused), PITCH and MUL kept; a file without `acid`, or with
-    /// 0 beats, keeps the stretch. What the file says is part of the load: no history step of its own.
+    /// 0 beats, keeps the stretch. What the file says is part of the load's history step, with none of its own.
     #[test]
     fn loaded_wavs_set_the_root_note_and_beats() {
         use crate::prefs::{check, READ_ROOT_NOTE, READ_TEMPO};
@@ -2463,7 +2490,7 @@ mod tests {
         sample_chosen(&mut app, r, fitted.clone());
         sample_chosen(&mut app, r, plain.clone());
         assert_eq!(app.state.project.channels[r].sound.stretch, auto(4.0, was));
-        assert_eq!(app.state.history.len(), steps, "no step of its own");
+        assert_eq!(app.state.history.len(), steps + 8, "a step per load, none of the read's own");
         // A file that isn't a WAV (or can't be read) has no `smpl` either.
         app.state.project.channels[r].misc.root = 50;
         read_tags(&mut app.state.project.channels[r], std::path::Path::new("Z:/no such folder/loop.mp3"));
@@ -2570,6 +2597,143 @@ mod tests {
         assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(plain.to_string_lossy().as_ref()));
         assert_eq!(read(&app), (60, auto_index, 16), "back to C5, the stretch kept");
         for p in [both, plain] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// Row `r`'s Lemon Sampler: its sample, root note, stretch method (its menu index) and TIME in steps.
+    fn sampler_side(app: &App, r: usize) -> (String, i64, i64, i64) {
+        let st = app.plugins.state(r).expect("hosted");
+        let json = if st.first() == Some(&b'{') { &st[..] } else { &st[8..] };
+        let p = serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"].clone();
+        let steps = lemon_sampler::params::time_steps(p["ts_time"]["f32"].as_f64().unwrap() as f32);
+        let path = app.plugins.sampler_path(r).unwrap_or_default();
+        (path, p["root"]["i32"].as_i64().unwrap(), p["ts_mode"]["i32"].as_i64().unwrap(), steps.round() as i64)
+    }
+
+    /// A file's name as "Auto name channels" gives it.
+    fn stem(p: &std::path::Path) -> Option<String> {
+        p.file_stem().map(|n| n.to_string_lossy().into_owned())
+    }
+
+    // spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)", "Load channel sample(s)"
+    /// A sample load is one history step, "Load channel sample(s)", whichever way it comes in (Load sample..., a drop
+    /// on the row, the browser's send). Undo puts back the old sample, the old name ("Auto name channels" changed it),
+    /// root note and stretch, and the entry is drawn grey; redo loads the new ones again.
+    #[test]
+    fn a_sample_load_is_one_history_step() {
+        use crate::browser::BCmd;
+        use crate::history::{ctrl_alt_z, ctrl_z, LOAD_SAMPLE};
+        let mut app = App::new(None);
+        let r = sampler_row(&app);
+        let y = crate::views::rack::name_rect(&app.state, r).unwrap().cy();
+        let dir = std::env::temp_dir().join(format!("os-app-tags-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(crate::views::browser::disk_key(&dir));
+        let side = |app: &App| {
+            let ch = &app.state.project.channels[r];
+            (ch.sample_path.clone(), ch.name.clone(), ch.misc.root, ch.sound.stretch)
+        };
+        let was = [0, 300, 10000, 0];
+        for how in ["Load sample...", "a drop on the row", "the browser's send"] {
+            let ch = &mut app.state.project.channels[r];
+            (ch.sample_path, ch.name, ch.misc.root, ch.sound.stretch) = (Some("C:/old/808 Clap.wav".into()), Some("808 Clap".into()), 50, was);
+            let before = side(&app);
+            let steps = app.state.history.len();
+            let file = tagged_wav(Some(&dir), "step", 0.5, &[smpl(67), acid(4, 60, 95.0)]);
+            let path = file.to_string_lossy().into_owned();
+            match how {
+                "Load sample..." => sample_chosen(&mut app, r, file.clone()),
+                "a drop on the row" => app.sample_to_rack(path.clone(), y),
+                _ => {
+                    app.state.selected_channel = r;
+                    app.browser_cmd(BCmd::Send(1));
+                }
+            }
+            let after = (Some(path), stem(&file), 67, auto(4.0, was));
+            assert_eq!(side(&app), after, "{how}");
+            assert_eq!(app.state.history.len(), steps + 1, "{how}: one step");
+            assert_eq!(app.state.history.entries().last(), Some(&(steps + 1, LOAD_SAMPLE)), "{how}");
+            assert!(!app.state.history.undone(steps + 1));
+            assert_eq!(ctrl_z(&mut app.state).as_deref(), Some("Undo: load channel sample(s)"));
+            assert_eq!(side(&app), before, "{how}: undone");
+            assert!(app.state.history.undone(steps + 1), "{how}: the undone step is drawn grey");
+            assert_eq!(ctrl_alt_z(&mut app.state).as_deref(), Some("Redo: load channel sample(s)"));
+            assert_eq!(side(&app), after, "{how}: redone");
+            assert!(!app.state.history.undone(steps + 1));
+            // Only one file at a time in the browser's folder: its send picks it.
+            let _ = std::fs::remove_file(file);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sample dropped below the rows makes a channel: the step covers the channel itself. Undone, it goes; redone,
+    /// it comes back as it was.
+    #[test]
+    fn undoing_a_drop_below_the_rows_removes_its_channel() {
+        use crate::history::{ctrl_alt_z, ctrl_z, LOAD_SAMPLE};
+        let mut app = App::new(None);
+        let n = app.state.project.channels.len();
+        let file = tagged_wav(None, "new-row", 0.5, &[smpl(67), acid(4, 60, 95.0)]);
+        app.sample_to_rack(file.to_string_lossy().into_owned(), crate::views::rack::rect(&app.state).bottom() + 40.0);
+        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.history.entries().last().map(|e| e.1), Some(LOAD_SAMPLE));
+        let made = app.state.project.channels[n].clone();
+        assert_eq!((made.name.clone(), made.misc.root), (stem(&file), 67));
+        ctrl_z(&mut app.state);
+        assert_eq!(app.state.project.channels.len(), n, "the channel goes");
+        assert!(app.state.selected_channel < n && app.state.rack.sel.iter().all(|&r| r < n));
+        ctrl_alt_z(&mut app.state);
+        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.project.channels[n], made, "it comes back as it was");
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// Undo and redo of a load reach the channel's Lemon Sampler on the next tick: its sample, root note and stretch
+    /// match the channel again, back to no sample at all; a channel a drop made loses its instrument and gets it back.
+    #[test]
+    fn the_hosted_sampler_follows_undo_and_redo() {
+        use crate::history::{ctrl_alt_z, ctrl_z};
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let r = sampler_row(&app);
+        app.plugin_tick();
+        assert!(app.state.hosted_rows.contains(&r));
+        let start = sampler_side(&app, r);
+        let auto_index = i64::from(lemon_sampler::params::stretch_index(os_model::stretch_mode::AUTO));
+        let (plain, both) = (tagged_wav(None, "undo-plain", 0.5, &[]), tagged_wav(None, "undo-both", 0.5, &[smpl(67), acid(4, 60, 95.0)]));
+        let (plain_s, both_s) = (plain.to_string_lossy().into_owned(), both.to_string_lossy().into_owned());
+        sample_chosen(&mut app, r, plain.clone());
+        app.plugin_tick();
+        sample_chosen(&mut app, r, both.clone());
+        app.plugin_tick();
+        assert_eq!(sampler_side(&app, r), (both_s.clone(), 67, auto_index, 16));
+        ctrl_z(&mut app.state);
+        app.plugin_tick();
+        assert_eq!(sampler_side(&app, r), (plain_s.clone(), 60, 0, 0), "the plain file, C5, Resample");
+        ctrl_alt_z(&mut app.state);
+        app.plugin_tick();
+        assert_eq!(sampler_side(&app, r), (both_s.clone(), 67, auto_index, 16), "redone");
+        ctrl_z(&mut app.state);
+        ctrl_z(&mut app.state);
+        app.plugin_tick();
+        assert_eq!(sampler_side(&app, r), start, "back to the channel's first sample (none)");
+        // A drop below the rows: its channel's instrument goes with it and comes back.
+        let n = app.state.project.channels.len();
+        app.sample_to_rack(both_s.clone(), crate::views::rack::rect(&app.state).bottom() + 40.0);
+        app.plugin_tick();
+        assert_eq!(sampler_side(&app, n), (both_s.clone(), 67, auto_index, 16));
+        ctrl_z(&mut app.state);
+        app.plugin_tick();
+        assert!(!app.plugins.hosted.contains_key(&n) && !app.state.hosted_rows.contains(&n), "the instrument goes");
+        ctrl_alt_z(&mut app.state);
+        app.plugin_tick();
+        assert!(app.state.hosted_rows.contains(&n));
+        assert_eq!(sampler_side(&app, n), (both_s, 67, auto_index, 16), "hosted again from the channel");
+        for p in [plain, both] {
             let _ = std::fs::remove_file(p);
         }
     }

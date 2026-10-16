@@ -2560,6 +2560,37 @@ mod tests {
         assert!(!misc_param("Pitch shift", 0.5, &mut m));
     }
 
+    /// A Lemon Sampler state that names no sample (an undone load into an empty channel, `history`) leaves it with
+    /// none: a note plays nothing.
+    #[test]
+    fn lemon_sampler_state_without_a_sample_plays_nothing() {
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
+        let wav = std::env::temp_dir().join(format!("os-app-sampler-cleared-{}.wav", std::process::id()));
+        let tone: Vec<f32> = (0..9600).flat_map(|i| [((i as f32) * 0.0576).sin() * 0.5; 2]).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
+        pl.create_with(0, index, None).unwrap();
+        assert!(pl.load_sample(0, &wav.to_string_lossy()));
+        let peak = |pl: &Plugins| {
+            let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
+            let mut i = inst.lock().unwrap();
+            i.reset();
+            i.note_on(0, 60, 0.8);
+            let mut m = 0f32;
+            for _ in 0..10 {
+                let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+                i.process(48000, &mut l, &mut r);
+                m = l.iter().chain(&r).fold(m, |a, v| a.max(v.abs()));
+            }
+            m
+        };
+        assert!(peak(&pl) > 0.05, "the sample plays");
+        assert!(pl.set_sampler(0, Some(""), &[]));
+        assert_eq!(pl.sampler_path(0).as_deref(), Some(""));
+        assert_eq!(peak(&pl), 0.0, "nothing plays");
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// Lemon Sampler's time-stretch parameters read back into the channel's stretch settings (`stretch_param`, the
     /// inverse of `stretch_params`): what the app does with the editor's edits (spec: ui/playlist.md §9c).
     #[test]

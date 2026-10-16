@@ -1822,6 +1822,11 @@ impl App {
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     pub(crate) fn plugin_tick(&mut self) {
+        // Rows gone without the app (an undone drop that made a channel, `rack::remove_last`): their instruments go.
+        let len = self.state.project.channels.len();
+        if self.plugins.hosted.range(len..crate::plugins::FX_KEY).next().is_some() {
+            self.remap_rows(&|r| (r < len).then_some(r));
+        }
         self.scan_tick();
         self.loading_tick();
         self.export_tick();
@@ -3132,17 +3137,21 @@ impl App {
     /// A sample dropped on the channel rack at window y `y` (spec: ui/channel-rack.md, New project / drops): onto a
     /// sampler row it replaces that channel's sample (Lemon Sampler loads it) and renames the channel after the file
     /// while "Auto name channels" is on (`rack::auto_name`); elsewhere it adds a Lemon Sampler channel named after the
-    /// file. Either channel reads the file's root note and beats (`rack::read_tags`).
+    /// file. Either channel reads the file's root note and beats (`rack::read_tags`). One history step, "Load channel
+    /// sample(s)" (`history::load_sample`).
     pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
         let s = &mut self.state;
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
         let row = match views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind.is_sampler()) {
             Some(r) => {
+                crate::history::load_sample(s, r);
                 s.sample_loads.push((r, path.clone()));
                 crate::rack::auto_name(&mut s.project.channels[r], std::path::Path::new(&path));
                 r
             }
             None => {
+                // The step covers the channel itself: undone, it goes.
+                crate::history::load_sample(s, s.project.channels.len());
                 let r = add_channel(&mut s.project);
                 s.project.channels[r].name = stem.clone();
                 r
@@ -3178,6 +3187,9 @@ impl App {
         let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
         let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned());
         if self.plugins.drop_file(row, x, y, path, sampler) {
+            if sampler && row < self.state.project.channels.len() {
+                crate::history::load_sample(&mut self.state, row);
+            }
             if let Some(ch) = self.state.project.channels.get_mut(row).filter(|_| sampler) {
                 crate::rack::auto_name(ch, std::path::Path::new(path));
                 crate::rack::read_tags(ch, std::path::Path::new(path));

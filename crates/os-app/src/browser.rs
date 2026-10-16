@@ -488,7 +488,7 @@ fn find(s: &mut crate::app::State, dir: isize) -> Option<String> {
 }
 
 /// Send the previous / next sample row to the selected channel, which takes the file's name while "Auto name
-/// channels" is on (`rack::auto_name`).
+/// channels" is on (`rack::auto_name`). One history step (`history::load_sample`).
 fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     let rows = view::rows(s);
     let Some(i) = step(s, &rows, dir, |r| matches!(r.item, Item::Sample(_))) else {
@@ -498,14 +498,15 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     let key = rows[i].key.clone();
     select(s, &key);
     reveal(s);
-    let Some(ch) = s.project.channels.get_mut(s.selected_channel) else { return None };
-    if !ch.kind.is_sampler() {
+    let row = s.selected_channel;
+    if !s.project.channels.get(row)?.kind.is_sampler() {
         return Some("The selected channel is not a sampler".into());
     }
+    crate::history::load_sample(s, row);
+    let ch = &mut s.project.channels[row];
     crate::rack::auto_name(ch, std::path::Path::new(&path));
     crate::rack::read_tags(ch, std::path::Path::new(&path));
     ch.sample_path = Some(path.clone());
-    let row = s.selected_channel;
     s.sample_loads.push((row, path));
     s.piano.dirty = true;
     Some(format!("Sent {} to the selected channel", rows[i].label))
