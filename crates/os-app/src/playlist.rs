@@ -1605,15 +1605,15 @@ pub fn track_after_used(s: &State) -> u16 {
 }
 
 /// Create an automation clip for `target` (§8): a new type-5 channel named `name`, two flat points at `value`,
-/// a clip over the time selection, else from the song position for the current pattern's length (FL observed,
-/// spec: plugins/plugin-parameters.md §5), on a free track.
+/// a clip over the time selection, else `automation_span` (spec: plugins/plugin-parameters.md §5), on the first free
+/// track below the last used one.
 pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16 {
     snapshot(s);
     let name = &unique_channel_name(s, name);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let (a, b) = match s.playlist.range {
         Some((r0, r1)) if r1 > r0 => (r0, r1),
-        _ => (s.playlist.pos, s.playlist.pos + source_len(s, ClipSource::Pattern(s.pattern)).max(1)),
+        _ => automation_span(s),
     };
     let beats = f64::from(b - a) / f64::from(ppq(s));
     s.project.channels.push(Channel {
@@ -1642,6 +1642,17 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     s.playlist.picker = PickKind::Automation;
     s.piano.dirty = true;
     index
+}
+
+/// Where a new automation clip goes without a time selection (spec: ui/settings-choices.md "Miscellaneous: seven
+/// more checks, Default template and Startup project", "Create automation clips at the playback position"): from the
+/// song position with the check on, from bar 1 with it off; to the song's end (the largest end of a clip that is not
+/// muted, audio/song-structure.md) when that lies after the start, else for the current pattern's length.
+pub fn automation_span(s: &State) -> (u32, u32) {
+    let a = if crate::prefs::check(&crate::prefs::AUTOMATION_AT_PLAYBACK_POSITION) { s.playlist.pos } else { 0 };
+    let end = clips(s).iter().filter(|c| !c.muted).map(|c| c.end()).max().unwrap_or(0);
+    let b = if end > a { end } else { a + source_len(s, ClipSource::Pattern(s.pattern)).max(1) };
+    (a, b)
 }
 
 /// `name`, or `name #2`, `name #3`... when a channel already has it (spec: plugins/plugin-parameters.md §4).

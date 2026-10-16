@@ -5,7 +5,8 @@
 // and not any other part of Lemon Studio.
 
 //! Mixer peak meters: ballistics (rise, fall, peak hold), the level scale law and the colour zones. Every number lives
-//! in one table (`PARAMS`; values tuned by eye against FL by the owner, 2026-10-10).
+//! in one table (`PARAMS`; values tuned by eye against FL by the owner, 2026-10-10). "Alternate meter scale" maps a
+//! level before the law (`alternate_db`).
 //!
 // spec: ui/mixer.md §9 (meters)
 
@@ -147,9 +148,37 @@ const LAW: [(f32, f32); 17] = [
 pub const LAW_TOP: f32 = 130.0;
 pub const LAW_BOTTOM: f32 = 924.0;
 
+/// The alternate scale ("Alternate meter scale", General ▸ Miscellaneous; spec: ui/settings-choices.md
+/// "Miscellaneous: seven more checks, Default template and Startup project"): each alternate mark (dB) and the level
+/// the default scale draws at its height, measured on both scales' tick rows.
+pub const ALTERNATE: [(f32, f32); 11] = [
+    (0.0, 0.0), (-3.0, -6.6), (-6.0, -12.6), (-9.0, -17.9), (-12.0, -22.8), (-15.0, -27.1), (-18.0, -31.1), (-21.0, -34.9),
+    (-24.0, -38.4), (-27.0, -41.6), (-30.0, -45.0),
+];
+
+/// The level the default law draws level `db` as on the alternate scale (spec: ui/settings-choices.md
+/// "Miscellaneous: seven more checks, Default template and Startup project"): above 0 dB the level as it is, between
+/// the marks of `ALTERNATE` linearly, and from −30 dB down to `floor` linearly onto −45 dB down to `floor`. 0 dB
+/// stays where it is; the top 30 dB take the room the top 45 dB take on the default scale.
+pub fn alternate_db(db: f32, floor: f32) -> f32 {
+    if db >= 0.0 || db <= floor {
+        return db;
+    }
+    for w in ALTERNATE.windows(2) {
+        let ((a0, d0), (a1, d1)) = (w[0], w[1]);
+        if db <= a0 && db >= a1 {
+            return d0 + (d1 - d0) * (a0 - db) / (a0 - a1);
+        }
+    }
+    let (a, d) = ALTERNATE[ALTERNATE.len() - 1];
+    d + (floor - d) * (a - db) / (a - floor).max(1e-3)
+}
+
 /// Reference y (C column, 1080p) of level `db`: the measured marks, 20 px/dB above +3 dB, a straight run from −45 dB
-/// down to the floor at the column bottom.
-pub fn law_y(db: f32, floor: f32) -> f32 {
+/// down to the floor at the column bottom. With `alt` ("Alternate meter scale") the level is mapped first
+/// (`alternate_db`).
+pub fn law_y(db: f32, floor: f32, alt: bool) -> f32 {
+    let db = if alt { alternate_db(db, floor) } else { db };
     if db <= floor {
         return LAW_BOTTOM;
     }
@@ -166,17 +195,17 @@ pub fn law_y(db: f32, floor: f32) -> f32 {
     y + (LAW_BOTTOM - y) * (d - db) / (d - floor).max(1e-3)
 }
 
-/// Height fraction of level `db` (0 = empty, 1 = full) on any meter that uses the scale.
-pub fn frac(db: f32, floor: f32) -> f32 {
-    ((LAW_BOTTOM - law_y(db, floor)) / (LAW_BOTTOM - LAW_TOP)).clamp(0.0, 1.0)
+/// Height fraction of level `db` (0 = empty, 1 = full) on any meter that uses the scale (`alt`: the alternate scale).
+pub fn frac(db: f32, floor: f32, alt: bool) -> f32 {
+    ((LAW_BOTTOM - law_y(db, floor, alt)) / (LAW_BOTTOM - LAW_TOP)).clamp(0.0, 1.0)
 }
 
-/// Level at height fraction `f` (the scale's hover read-out).
-pub fn db_at(f: f32, floor: f32) -> f32 {
+/// Level at height fraction `f` (the scale's hover read-out; `alt`: the alternate scale).
+pub fn db_at(f: f32, floor: f32, alt: bool) -> f32 {
     let (mut lo, mut hi) = (floor, 6.0f32);
     for _ in 0..40 {
         let mid = (lo + hi) / 2.0;
-        if frac(mid, floor) < f { lo = mid } else { hi = mid }
+        if frac(mid, floor, alt) < f { lo = mid } else { hi = mid }
     }
     (lo + hi) / 2.0
 }
@@ -188,10 +217,10 @@ mod tests {
     #[test]
     fn law_and_ballistics() {
         let c = Settings::default();
-        let f = |d| frac(d, c.v[k::FLOOR_DB]);
+        let f = |d| frac(d, c.v[k::FLOOR_DB], false);
         assert!(f(0.0) > f(-6.0) && f(-6.0) > f(-45.0) && f(-45.0) > 0.0);
         assert_eq!(f(-100.0), 0.0);
-        assert!((db_at(f(-12.0), c.v[k::FLOOR_DB]) + 12.0).abs() < 0.01);
+        assert!((db_at(f(-12.0), c.v[k::FLOOR_DB], false) + 12.0).abs() < 0.01);
         // Jumps up at once, falls at the set speed, holds the peak line.
         let mut m = Meter::default();
         step(&mut m, [1.0, 0.5], 0.016, &c);
@@ -203,5 +232,30 @@ mod tests {
             step(&mut m, [0.0, 0.0], 0.05, &c);
         }
         assert!(!m.active(), "everything falls back to empty");
+    }
+
+    // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project"
+    /// "Alternate meter scale": a level is mapped through the measured table, then drawn with the default law. 0 dB
+    /// stays put, −30 dB sits where −45 dB does by default, levels above 0 dB and at the floor are unchanged, and the
+    /// hover read-out inverts the mapping.
+    #[test]
+    fn alternate_scale() {
+        let floor = Settings::default().v[k::FLOOR_DB];
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        for &(mark, default) in &ALTERNATE {
+            assert!(near(alternate_db(mark, floor), default), "{mark} dB -> {default} dB");
+            assert!(near(frac(mark, floor, true), frac(default, floor, false)), "{mark} dB at the height of {default} dB");
+        }
+        assert!(near(alternate_db(-4.5, floor), -9.6), "between marks: linear");
+        assert!(near(alternate_db(2.0, floor), 2.0) && near(frac(2.0, floor, true), frac(2.0, floor, false)), "above 0 dB");
+        assert!(near(frac(0.0, floor, true), frac(0.0, floor, false)), "0 dB stays at the same height");
+        assert!(near(alternate_db(floor, floor), floor), "the floor stays the floor");
+        assert!(near(alternate_db((floor - 30.0) / 2.0, floor), (floor - 45.0) / 2.0), "-30 .. floor onto -45 .. floor");
+        assert_eq!(frac(-100.0, floor, true), 0.0);
+        // Below 0 dB a level sits lower than on the default scale, and the read-out gives the level back.
+        assert!(frac(-12.0, floor, true) < frac(-12.0, floor, false));
+        for db in [-1.0, -12.0, -29.0, -40.0] {
+            assert!((db_at(frac(db, floor, true), floor, true) - db).abs() < 0.01, "{db} dB read back");
+        }
     }
 }

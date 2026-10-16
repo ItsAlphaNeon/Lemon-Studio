@@ -137,6 +137,17 @@ pub const PLAY_TRUNCATED_ON_TRANSPORT: Check =
 pub const RESET_PLUGINS_ON_TRANSPORT: Check =
     Check { key: "reset_plugins_on_transport", label: "Reset plugins on transport", default: false };
 
+/// General ▸ Miscellaneous: every meter that uses the mixer's level law, and the "C" scale with its hover read-out,
+/// go by a second dB scale with more room near 0 dB: marks 0 … 30, no +3 (`meters::alternate_db`). Spec:
+/// ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project".
+pub const ALTERNATE_METER_SCALE: Check = Check { key: "alternate_meter_scale", label: "Alternate meter scale", default: false };
+
+/// General ▸ Miscellaneous: without a time selection, "Create automation clip" starts the clip at the song position;
+/// off, at bar 1 (`playlist::automation_span`). Spec: ui/settings-choices.md "Miscellaneous: seven more checks,
+/// Default template and Startup project".
+pub const AUTOMATION_AT_PLAYBACK_POSITION: Check =
+    Check { key: "automation_clips_at_playback_position", label: "Create automation clips at the playback position", default: true };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -146,6 +157,8 @@ pub const CHECKS: &[&Check] = &[
     &AUTO_CROSSFADES_NEW,
     &PLAY_TRUNCATED_ON_TRANSPORT,
     &RESET_PLUGINS_ON_TRANSPORT,
+    &ALTERNATE_METER_SCALE,
+    &AUTOMATION_AT_PLAYBACK_POSITION,
 ];
 /// The declared combos.
 pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION];
