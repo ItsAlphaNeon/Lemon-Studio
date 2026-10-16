@@ -591,6 +591,32 @@ impl Ui<'_> { // This code is a part of L e m o n S t u d i o. Please don't uplo
     pub fn live(&mut self, kind: Live, r: Rect) {
         self.live.push((kind, r));
     }
+
+    /// Paints `paint` at display scale `scale` instead of the frame's (popup menus, spec: ui/ui-scaling.md §1). It works
+    /// in logical px of that scale: a frame position `x` is `x / k` there (`k`, handed to it, = `scale` / frame scale);
+    /// what it registers (hits, bars, live regions) comes back in the frame's px.
+    pub fn scaled(&mut self, scale: f32, paint: impl FnOnce(&mut Self, f32)) {
+        let k = scale / self.c.scale;
+        if !k.is_finite() || k <= 0.0 || (k - 1.0).abs() < 1e-4 {
+            return paint(self, 1.0);
+        }
+        let (h0, b0, l0, mouse) = (self.hits.len(), self.bars.len(), self.live.len(), self.mouse);
+        self.mouse = (mouse.0 / k, mouse.1 / k);
+        let old = self.c.rescale(scale);
+        paint(self, k);
+        self.c.unscale(old);
+        self.mouse = mouse;
+        let up = |r: Rect| Rect::new(r.x * k, r.y * k, r.w * k, r.h * k);
+        for h in &mut self.hits[h0..] {
+            h.rect = up(h.rect);
+        }
+        for b in &mut self.bars[b0..] {
+            (b.track, b.thumb) = (up(b.track), b.thumb * k);
+        }
+        for (_, r) in &mut self.live[l0..] {
+            *r = up(*r);
+        }
+    }
 }
 
 /// What views paint with.
@@ -1027,6 +1053,8 @@ pub struct App {
     export: Option<(String, f32)>,
     /// The project and tempo as last opened, saved or created: anything else has unsaved changes.
     saved: (Project, f64),
+    /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
+    pub(crate) backup: crate::backup::Backup,
 }
 
 /// Window-level requests the shell must carry out after an event.
@@ -1172,6 +1200,7 @@ impl App {
             loading: None,
             export: None,
             saved: (Project::default(), 0.0),
+            backup: Default::default(),
         };
         // The snap settings are program settings, kept in the user folder (spec: ui/global-snap.md §6).
         let snap = crate::snap::load();
@@ -1358,6 +1387,8 @@ impl App {
     }
 
     pub(crate) fn save_to(&mut self, target: PathBuf) {
+        // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
+        crate::backup::keep_overwritten(&target);
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
         // them.
         for row in self.state.hosted_rows.clone() {
@@ -1436,6 +1467,24 @@ impl App {
             s.path = Some(target);
             self.mark_saved();
         }
+    }
+
+    /// Writes the project to `target` as Save does, as a copy: the project keeps its file, name, unsaved changes and the
+    /// message (backups, spec: ui/settings-choices.md "Backup files"). None while a project loads or an export renders.
+    pub(crate) fn save_copy(&mut self, target: PathBuf) -> Option<Result<(), String>> {
+        if self.loading.is_some() || self.export.is_some() {
+            return None;
+        }
+        let s = &mut self.state;
+        let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone());
+        self.save_to(target);
+        let s = &mut self.state;
+        let done = match s.message.take() {
+            Some(m) if m.starts_with("Saved") => Ok(()),
+            m => Err(m.map_or_else(String::new, |m| m.trim_start_matches("Save failed: ").to_string())),
+        };
+        (s.project, s.path, s.file, s.message, self.saved) = keep;
+        Some(done)
     }
 
     /// The project as it is now counts as saved (opened, saved, new).
@@ -2722,6 +2771,7 @@ impl App {
         let now = std::time::Instant::now();
         self.song_pos_tick(now);
         self.cables_tick(now);
+        self.backup_tick(now);
         if self.state.cpu.due(now) {
             let tp = &self.transport;
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());

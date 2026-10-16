@@ -246,7 +246,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 
     velocity_panel(ui, s, &l, &g, notes, ch, &sel);
     if s.lane_menu {
-        lane_menu(ui, s, &l);
+        ui.scaled(super::popup_scale(ui.c.scale), |ui, k| lane_menu(ui, s, &l, k));
     }
     resize_zones(ui, s, Win::PianoRoll, outer);
 }
@@ -672,15 +672,16 @@ fn control_bars(ui: &mut Ui, s: &State, g: &Geom, p: Rect, lane: Lane, ch: Optio
     }
 }
 
-/// The event panel's Control menu (spec: ui/piano-roll.md §7a): same look as the menu bar dropdowns.
-fn lane_menu(ui: &mut Ui, s: &State, l: &Layout) {
+/// The event panel's Control menu (spec: ui/piano-roll.md §7a): same look as the menu bar dropdowns. `k`: the canvas is
+/// at the Pop-ups scaling, a window position `x` is `x / k` (see `Ui::scaled`).
+fn lane_menu(ui: &mut Ui, s: &State, l: &Layout, k: f32) {
     let t = ui.t;
     const ROW: f32 = 19.0;
     const HEAD: f32 = 16.0;
     let (w0, w1) = (170.0, 124.0);
     let h = HEAD + 7.0 * ROW;
     let win_h = ui.c.size().1;
-    let r = Rect::new(l.label.x + 9.0, (l.label.y + 24.0).min(win_h - h - 8.0), w0 + w1 + 6.0, h + 4.0);
+    let r = Rect::new((l.label.x + 9.0) / k, ((l.label.y + 24.0) / k).min(win_h - h - 8.0), w0 + w1 + 6.0, h + 4.0);
     ui.c.fill_rect(r, t.menu_pop);
     ui.c.stroke_rrect(r.inset(1.0), 0.0, 2.0, t.menu_pop_border);
     ui.hit(r, Action::Swallow, "");

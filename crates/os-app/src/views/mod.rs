@@ -59,6 +59,13 @@ pub fn light(size: f32) -> os_ui::Font {
     os_ui::Font::light(size.round() as u16, 0)
 }
 
+/// Display scale of popup menus and combo lists for a window at scale `main`: General ▸ Display ▸ Pop-ups scaling
+/// (Main = `main`). Their row heights follow it (`os_ui::kit::menu::metrics`). Spec: ui/ui-scaling.md §1–2.
+pub fn popup_scale(main: f32) -> f32 {
+    let pct = crate::prefs::choice(&crate::prefs::POPUPS_SCALING).strip_suffix('%').and_then(|p| p.parse::<f32>().ok());
+    pct.map_or(main, |p| p / 100.0)
+}
+
 /// Top of the workspace (§1).
 pub const WORK_Y: f32 = 83.0;
 /// Width of the docked browser incl. the splitter (§4).
@@ -132,7 +139,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         playlist::paint_overlays(ui, s);
     }
     if let Some(m) = s.menu_open {
-        menus::paint_dropdown(ui, s, m);
+        ui.scaled(popup_scale(ui.c.scale), |ui, k| menus::paint_dropdown(ui, s, m, k));
     }
     rack::paint_fill(ui, s);
     patterns::paint(ui, s);
