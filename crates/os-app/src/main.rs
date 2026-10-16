@@ -27,6 +27,7 @@ mod filedlg;
 mod enable_groups;
 mod history;
 mod hold;
+mod keep_on_disk;
 mod icons;
 mod init;
 mod knobs;

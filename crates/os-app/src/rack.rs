@@ -1352,10 +1352,12 @@ pub fn auto_name(ch: &mut os_model::Channel, path: &std::path::Path) {
 ///   that isn't a WAV too). Off: it stays.
 /// - "Read sample tempo information" on: an `acid` chunk's beat count (above 0) sets the stretch method to Auto and
 ///   TIME to the beats, in 1/192 of a beat; PITCH and the multiplier stay. Without one, or off, the stretch stays.
+/// - "Auto keep long audio on disk" on: a file of 30 s or more turns Keep on disk on (`keep_on_disk::keep_long`).
 ///
 /// Part of the load: it has no undo step of its own. Project loading and previews don't come here; audio clip channels
-/// keep their settings (not measured).
+/// keep their root note and stretch (not measured).
 pub fn read_tags(ch: &mut os_model::Channel, path: &std::path::Path) {
+    crate::keep_on_disk::keep_long(ch, path);
     use crate::prefs::{check, READ_ROOT_NOTE, READ_TEMPO};
     let (root, tempo) = (check(&READ_ROOT_NOTE), check(&READ_TEMPO));
     if ch.kind != os_model::ChannelKind::Sampler || !(root || tempo) {

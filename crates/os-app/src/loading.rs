@@ -31,6 +31,8 @@ pub struct Loading {
     /// What is happening now (file or channel name).
     pub label: String,
     rx: Receiver<(String, Option<Arc<Sample>>)>,
+    /// The threads decoding (`workers`).
+    pub workers: usize,
     /// Decodes kept alive until the instances took them (`os_engine::sample::load_shared` hands out live ones).
     held: Vec<Arc<Sample>>,
     queue: Arc<Mutex<Vec<PathBuf>>>,
@@ -48,7 +50,7 @@ impl Loading {
             .collect();
         let queue = Arc::new(Mutex::new(files.iter().rev().map(PathBuf::from).collect::<Vec<_>>()));
         let (tx, rx) = channel();
-        let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 4).min(files.len());
+        let workers = workers(files.len());
         for _ in 0..workers {
             let (queue, tx) = (queue.clone(), tx.clone());
             std::thread::spawn(move || loop {
@@ -61,7 +63,7 @@ impl Loading {
                 os_clap::wake();
             });
         }
-        Loading { files: files.len(), decoded: 0, rows: samplers.len(), hosted: 0, label: String::new(), rx, held: Vec::new(), queue }
+        Loading { files: files.len(), decoded: 0, rows: samplers.len(), hosted: 0, label: String::new(), rx, workers, held: Vec::new(), queue }
     }
 
     /// Takes finished decodes; true when every file is decoded (or failed: the instance reports that file itself).
@@ -91,6 +93,19 @@ impl Loading {
             format!("Starting samplers  {} / {}", self.hosted, self.rows)
         }
     }
+}
+
+/// Threads to decode `files` files on: General ▸ Advanced ▸ Threaded project sample loading on, up to 4 (as many as
+/// the machine runs at once); off, one, a file at a time. Either way off the UI thread, behind the progress panel.
+/// Spec: ui/settings-choices.md "Advanced: Fast sample preview, Auto keep long audio on disk, Threaded project sample
+/// loading (2026-10-16)".
+pub fn workers(files: usize) -> usize {
+    let most = if crate::prefs::check(&crate::prefs::THREADED_SAMPLE_LOADING) {
+        std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 4)
+    } else {
+        1
+    };
+    most.min(files)
 }
 
 impl Drop for Loading {
@@ -124,5 +139,41 @@ pub fn panel(c: &mut Canvas, t: &os_theme::Palette, title: &str, status: &str, p
     let w = ((track.w - 4.0) * progress.clamp(0.0, 1.0)).round();
     if w > 0.0 {
         c.fill_rect(Rect::new(track.x + 2.0, track.y + 2.0, w, track.h - 4.0), t.accent);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prefs::{check, set_check, THREADED_SAMPLE_LOADING};
+
+    // spec: ui/settings-choices.md "Advanced: Fast sample preview, Auto keep long audio on disk, Threaded project
+    // sample loading (2026-10-16)"
+    /// Threaded project sample loading off (as found): one decoding thread, a file at a time; on, up to 4 (as many as
+    /// the machine runs at once), never more than there are files. A project's loading reads it when it starts.
+    #[test]
+    fn decoding_threads_follow_threaded_loading() {
+        assert!(!check(&THREADED_SAMPLE_LOADING), "off by default");
+        assert_eq!((workers(0), workers(1), workers(10)), (0, 1, 1));
+        set_check(&THREADED_SAMPLE_LOADING, true);
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 4);
+        assert_eq!((workers(0), workers(1), workers(10)), (0, 1, cores));
+        // A project of six sampler channels, each with a file of its own (missing: the workers report them failed).
+        let mut p = crate::app::default_project();
+        for i in 0..6 {
+            let r = crate::app::add_channel(&mut p);
+            p.channels[r].sample_path = Some(format!("Z:/no such folder/loading-{i}.wav"));
+        }
+        assert_eq!(Loading::start(&p).workers, cores.min(6), "on");
+        set_check(&THREADED_SAMPLE_LOADING, false);
+        let mut l = Loading::start(&p);
+        assert_eq!(l.workers, 1, "off");
+        // Off the UI thread all the same: every file comes back from the one worker.
+        let t = std::time::Instant::now();
+        while !l.decode_done() {
+            assert!(t.elapsed() < std::time::Duration::from_secs(10), "the worker finishes");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!((l.decoded, l.files), (6, 6));
     }
 }
