@@ -202,7 +202,13 @@ pub fn adopt(s: &State, path: &str) -> String {
         return path.to_string();
     }
     let Some(dir) = folder(s) else { return path.to_string() };
+    reread(s);
     copy_sample(Path::new(&crate::plugins::resolve_sample(path)), &dir).map_or_else(|_| path.to_string(), |p| p.to_string_lossy().into_owned())
+}
+
+/// Files were made or renamed in the data folder: the browser reads its folders again (`views::browser::list_dir`).
+fn reread(s: &State) {
+    s.browser_dirs.borrow_mut().clear();
 }
 
 /// Whether `name` can name a file or folder: not empty, not only dots, none of the characters Windows refuses.
@@ -253,6 +259,7 @@ impl App {
                 Err(_) => failed += 1,
             }
         }
+        reread(&self.state);
         self.invalidate();
         let to = dir.join(SAMPLES_DIR);
         Some(match failed {
@@ -304,6 +311,7 @@ impl App {
                     }
                     let name = crate::backup::project_name(self.state.path.as_deref());
                     self.save_to(dir.join(format!("{name}.flp")));
+                    reread(&self.state);
                 }
             }
             (DThen::Rename { name, folder }, _) => {
@@ -374,6 +382,7 @@ impl App {
             self.state.path = Some(target.clone());
         }
         self.save_to(target);
+        reread(&self.state);
     }
 
     fn rename_refused(&mut self, taken: &Path) {
@@ -788,6 +797,34 @@ mod tests {
         let r = hit(&app, &Action::Dlg(DHit::Cancel)).unwrap();
         click(&mut app, &mut c, r);
         assert!(app.state.dialogs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The browser's Current project tree: a Project data entry just before Samples, only while the project has a data
+    /// folder; it opens like a folder (spec: ui/data-folder.md §3).
+    #[test]
+    fn the_browser_lists_the_data_folder() {
+        use crate::views::browser as view;
+        let dir = scratch("browser");
+        let mut app = App::new(None);
+        let key = format!("{}/{}", view::project_root(), view::PROJECT_DATA);
+        let shown = |app: &mut App| {
+            app.state.browser_tab = view::PROJECT_TAB;
+            app.state.browser_open.insert(view::project_root());
+            view::rows(&app.state)
+        };
+        assert!(!shown(&mut app).iter().any(|r| r.key == key), "no data folder: no entry");
+        let mut app = saved_with_folder(&dir, "song");
+        file(&dir.join("song").join(SAMPLES_DIR).join("kick.wav"), 4);
+        let rows = shown(&mut app);
+        let i = rows.iter().position(|r| r.key == key).expect("Project data");
+        assert_eq!((rows[i].label.as_str(), rows[i].open, rows[i].path.clone()), (view::PROJECT_DATA, Some(false), Some(dir.join("song"))));
+        assert_eq!(rows[i + 1].label, "Samples", "just before Samples");
+        app.state.browser_open.insert(key.clone());
+        app.state.browser_open.insert(format!("{key}/{SAMPLES_DIR}"));
+        let rows = shown(&mut app);
+        let inside: Vec<_> = rows.iter().filter(|r| r.key.starts_with(&format!("{key}/"))).map(|r| (r.depth, r.label.clone())).collect();
+        assert_eq!(inside, vec![(2, SAMPLES_DIR.to_string()), (3, "kick".to_string()), (2, "song.flp".to_string())]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

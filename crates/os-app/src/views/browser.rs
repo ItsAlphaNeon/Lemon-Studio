@@ -37,16 +37,19 @@ const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugi
 /// The "Current project" tree's sections, in screenshot order (spec §2), without the one nothing is tracked in yet
 /// (Remote control). History: the undo history (spec: ui/settings-choices.md "Undo history: the four checks
 /// (2026-10-16)"). Initialized controls: the project's initial values, shown only while there are some (spec:
-/// ui/settings-choices.md "Advanced: Initialize controls automatically").
+/// ui/settings-choices.md "Advanced: Initialize controls automatically"). Project data: the project's data folder, opened
+/// like a folder, shown only while the project has one (spec: ui/data-folder.md §3).
 const PROJECT: &[(&str, Icon)] = &[
     ("History", Icon::Undo),
     ("Patterns", Icon::Note),
     ("Effects", Icon::Speaker),
     ("Generators", Icon::Plug),
     (INITIALIZED_CONTROLS, Icon::Slide),
+    (PROJECT_DATA, Icon::Folder),
     ("Samples", Icon::Wave),
 ];
 pub const INITIALIZED_CONTROLS: &str = "Initialized controls";
+pub const PROJECT_DATA: &str = "Project data";
 
 /// The Current project and Plugin database tabs (spec §1).
 pub const PROJECT_TAB: usize = 1;
@@ -339,6 +342,12 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
         if name == INITIALIZED_CONTROLS && p.init_controls.is_empty() {
             continue;
         }
+        if name == PROJECT_DATA {
+            if let Some(dir) = crate::data_folder::folder(s) {
+                data_folder_rows(s, root, &dir, cat, out);
+            }
+            continue;
+        }
         if !section(s, root, name, icon, cat, out) {
             continue;
         }
@@ -391,6 +400,17 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
             }
             _ => {}
         }
+    }
+}
+
+/// The Project data section: the data folder `dir`, opened like a folder (its subfolders, then its files).
+fn data_folder_rows(s: &State, root: &str, dir: &Path, cat: u8, out: &mut Vec<Row>) {
+    let key = format!("{root}/{PROJECT_DATA}");
+    let open = is_open(s, &key);
+    let icon = if open { Icon::FolderOpen } else { Icon::Folder };
+    out.push(Row { key: key.clone(), depth: 1, label: PROJECT_DATA.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: Some(dir.to_path_buf()) });
+    if open {
+        disk_rows(s, dir, &key, 2, out);
     }
 }
 
