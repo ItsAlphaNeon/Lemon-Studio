@@ -145,7 +145,8 @@ impl ClipShape {
 /// audio/audio-clips.md "Starting inside a clip").
 const LATE_START_SECONDS: f64 = 0.005;
 
-/// An audio clip's fades (milliseconds, tension) and gain as the clip record stores them.
+/// An audio clip's fades (milliseconds, tension) and gain: the fades it plays (with automatic crossfades on, an edge
+/// without its bit plays as the overlaps make it, `os_model::crossfade::playing`) and the gain the record stores.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ClipFx {
     fade_in: (f32, f32),
@@ -154,8 +155,8 @@ struct ClipFx {
 }
 
 impl ClipFx {
-    fn of(c: &os_model::Clip) -> Option<ClipFx> {
-        let fx = ClipFx { fade_in: c.fade_in().unwrap_or((0.0, 0.0)), fade_out: c.fade_out().unwrap_or((0.0, 0.0)), gain: c.gain() };
+    fn of(c: &os_model::Clip, (fade_in, fade_out): (Option<(f32, f32)>, Option<(f32, f32)>)) -> Option<ClipFx> {
+        let fx = ClipFx { fade_in: fade_in.unwrap_or((0.0, 0.0)), fade_out: fade_out.unwrap_or((0.0, 0.0)), gain: c.gain() };
         (fx.fade_in.0 > 0.0 || fx.fade_out.0 > 0.0 || fx.gain != 1.0).then_some(fx)
     }
 }
@@ -3111,7 +3112,9 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                     }
                 }
             }
-            for c in clips {
+            // spec: audio/audio-clips.md "Automatic crossfades"
+            let fades = os_model::crossfade::playing(project, clips, project.tempo.unwrap_or(140.0));
+            for (c, &fx) in clips.iter().zip(&fades) {
                 let start = u64::from(c.position);
                 let len = u64::from(c.length);
                 if !c.muted {
@@ -3128,7 +3131,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         // An audio clip plays its channel's sample from the window start (milliseconds), cut at the clip end.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
                             let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, clip: ClipFx::of(c), slide: false, porta: false });
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, clip: ClipFx::of(c, fx), slide: false, porta: false });
                         }
                         Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
@@ -4506,6 +4509,56 @@ mod tests {
         let end = clip_frames - 1200; // half way through the 50 ms fade-out
         let w = 2.0 * os_model::fade_curve(1200.0 / 2400.0, 3.0) as f32;
         assert!((g(end) - w).abs() < 2e-3, "instrument fade-out half way: {} vs {w}", g(end));
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    // spec: audio/audio-clips.md "Automatic crossfades"
+    #[test]
+    fn automatic_crossfades_play_at_unity() {
+        use os_model::{Clip, ClipSource};
+        let wav = std::env::temp_dir().join(format!("os-engine-crossfades-{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 2 * 96000]).unwrap();
+        // Two one-bar clips of a two-second DC sample on one track, the second from beat 3: 192 ticks of overlap.
+        let mut p = song(vec![], vec![Clip::new(0, 384, 0, ClipSource::Channel(0)), Clip::new(192, 384, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        let mut lib = SampleLibrary::new(None);
+        let alone = {
+            let mut q = p.clone();
+            q.arrangements[0].clips.truncate(1);
+            Engine::new(&q, &mut lib, 48000, PlayMode::Song).render_all(480)
+        };
+        let level = alone[24000 * 2];
+        assert!(level > 0.1);
+        let at = |t: u64| crate::clock::Clock::frame_of_tick(48000, 96, 130.0, t) as usize;
+        // Off (a file without event 44): the clips add up where they overlap, no fades.
+        let plain = Engine::new(&p, &mut lib, 48000, PlayMode::Song).render_all(480);
+        assert!((plain[2 * at(288)] - 2.0 * level).abs() < 1e-4);
+        // On: the records hold no fades (the app writes them), the engine plays the crossfade the overlap makes; the two
+        // gains add up to 1 at any tension of the later clip's fade-in.
+        p.auto_crossfades = Some(true);
+        for t in [0.0f32, 2.289, -4.736] {
+            p.arrangements[0].clips[1].set_fade_in_tension(t);
+            let xf = Engine::new(&p, &mut lib, 48000, PlayMode::Song).render_all(480);
+            for tick in [194, 220, 240, 288, 330, 380] {
+                let f = at(tick);
+                assert!((xf[2 * f] - level).abs() < 2e-4, "t {t} tick {tick}: {} vs {level}", xf[2 * f]);
+            }
+            // Before the overlap the first clip is at full level. The first clip muted (it still makes the crossfade):
+            // the second clip's fade-in alone, at the law's middle in the overlap's middle.
+            assert!((xf[2 * at(100)] - level).abs() < 1e-5);
+            let mut q = p.clone();
+            q.arrangements[0].clips[0].muted = true;
+            let second = Engine::new(&q, &mut lib, 48000, PlayMode::Song).render_all(480);
+            let mid = level * os_model::fade_curve(0.5, f64::from(t)) as f32;
+            assert!((second[2 * at(288)] - mid).abs() < 2e-4, "t {t}: {} vs {mid}", second[2 * at(288)]);
+        }
+        // An edge set by hand plays as stored, and the switch leaves it: the first clip's fade-out at 50 ms.
+        p.arrangements[0].clips[0].set_fade_out(Some((50.0, 0.0)));
+        p.arrangements[0].clips[1].set_fade_in_tension(0.0);
+        let fx = os_model::crossfade::playing(&p, &p.arrangements[0].clips, 130.0);
+        assert_eq!(fx[0].1, Some((50.0, 0.0)));
+        assert_eq!(fx[1].0.map(|f| f.0), Some(os_model::crossfade::ms(192, 130.0, 96)));
         let _ = std::fs::remove_file(&wav);
     }
 

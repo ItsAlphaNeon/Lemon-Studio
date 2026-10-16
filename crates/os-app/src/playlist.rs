@@ -941,6 +941,28 @@ pub fn audio_fits(s: &State) -> Option<Fits> {
     Some(per)
 }
 
+/// Automatic crossfades follow the clips and the tempo (spec: audio/audio-clips.md "Automatic crossfades"): set again
+/// from the overlaps on the tick an edit reaches playback (clips moved, resized, added, deleted or split, the tempo,
+/// undo and redo, a project opened, the switch turned on), before the next undo step is taken, so they undo and redo
+/// with the edit that made them. As with the fits, the saved copy gets them too: an opened project's crossfades are
+/// not an unsaved change.
+pub fn follow_crossfades(app: &mut App) {
+    if !app.state.piano.dirty || !os_model::crossfade::derive(&mut app.state.project, app.state.tempo) {
+        return;
+    }
+    os_model::crossfade::derive(&mut app.saved.0, app.saved.1);
+    app.damage_win(crate::app::Win::Playlist);
+}
+
+/// The project's automatic crossfades were switched (`App::toggle_auto_crossfades`): turned off, the crossfades'
+/// lengths go to 0 and their tensions stay; turned on, they are set from the overlaps on the next tick.
+pub fn crossfades_switched(s: &mut State) {
+    if !os_model::crossfade::on(&s.project) {
+        os_model::crossfade::clear(&mut s.project);
+    }
+    s.piano.dirty = true;
+}
+
 /// Gives the audio clips of `arrangements` their lengths from `fits` (`fit_audio`). Returns whether one changed.
 pub fn fit_clips(arrangements: &mut [os_model::Arrangement], fits: &Fits) -> bool {
     let mut changed = false;
@@ -2201,6 +2223,8 @@ pub enum PlDrag {
     FadeTension { clip: usize, out: bool, y0: f32, t0: f32 },
     /// An audio clip's gain handle: dB from where the drag started.
     Gain { clip: usize, y0: f32, db0: f32 },
+    /// A crossfade's handle (§9a): later clip `b`, earlier clip `a`, `b`'s gain at the middle when the drag started.
+    Crossfade { a: usize, b: usize, y0: f32, m0: f64 },
 }
 
 /// The handles an audio clip shows while the mouse is over it (§9a).
@@ -2211,30 +2235,85 @@ pub enum Handle {
     TensionIn,
     TensionOut,
     Gain,
+    /// The handle in the middle of a crossfade (on the later clip).
+    Crossfade,
 }
 
 /// Tension per logical pixel of a tension-handle drag, and dB per pixel of a gain drag (§9a, OS: FL's per-pixel
 /// steps at 150 %).
 const TENSION_PER_PX: f32 = 0.28;
 const DB_PER_PX: f32 = 0.15;
+/// Logical pixels of a crossfade-handle drag per unit of the later clip's gain at the middle (§9a, OS: 1/120 per
+/// pixel).
+const XFADE_PX: f64 = 120.0;
 
 /// An audio clip (not a collapsed group's strip): the clips with fades and gain.
 pub fn is_audio_clip(s: &State, g: &PGeom, c: &Clip) -> bool {
     source_kind(s, c.source) == PickKind::Audio && matches!(c.source, ClipSource::Channel(_)) && !g.rows.strip(c.track)
 }
 
-/// Pixels of `ms` milliseconds of an audio clip.
-pub fn ms_px(s: &State, g: &PGeom, c: &Clip, ms: f32) -> f32 {
-    (f64::from(ms) / to_src(s, c.source, 1.0).max(1e-9)) as f32 * g.ppt
+/// Pixels of `ms` milliseconds of an audio clip's fades: the song's time at the tempo, as the engine plays them
+/// (spec: audio/audio-clips.md "Fades and clip gain"), whatever the channel's pitch or stretch.
+pub fn ms_px(s: &State, g: &PGeom, ms: f32) -> f32 {
+    (f64::from(ms) / fade_ms_per_tick(s)) as f32 * g.ppt
 }
 
-/// Where an audio clip's fades end on screen: (fade-in end x, fade-out start x).
+/// Milliseconds of a fade per tick at the tempo.
+pub fn fade_ms_per_tick(s: &State) -> f64 {
+    secs_per_tick(s) * 1000.0
+}
+
+/// Where an audio clip's fades end on screen: (fade-in end x, fade-out start x). The fades the record holds, bits or
+/// not: automatic crossfades keep them in step with the clips (`follow_crossfades`), and with the switch off every
+/// stored fade plays.
 pub fn fade_xs(s: &State, g: &PGeom, c: &Clip) -> (f32, f32) {
     let body = g.body(c);
-    let fin = c.fade_in().map_or(0.0, |f| ms_px(s, g, c, f.0)).min(body.w);
-    let fout = c.fade_out().map_or(0.0, |f| ms_px(s, g, c, f.0)).min(body.w);
+    let fin = c.stored_fade_in().map_or(0.0, |f| ms_px(s, g, f.0)).min(body.w);
+    let fout = c.stored_fade_out().map_or(0.0, |f| ms_px(s, g, f.0)).min(body.w);
     (snap(f64::from(body.x) + f64::from(fin)), snap(f64::from(body.right()) - f64::from(fout)))
 }
+
+/// Whether a clip's fade-in (`out` false) or fade-out belongs to the automatic crossfades: the switch is on and the
+/// edge's bit is clear. Its length follows the overlaps, and a fade-out's tension too (spec: audio/audio-clips.md
+/// "Automatic crossfades"), so it has no tension handle of its own.
+pub fn managed(s: &State, c: &Clip, out: bool) -> bool {
+    os_model::crossfade::on(&s.project) && !if out { c.fade_out_set() } else { c.fade_in_set() }
+}
+
+/// A crossfade as drawn (§9a): later clip `b`'s fade-in and earlier clip `a`'s fade-out across their overlap, from `x0`
+/// to `x1` on `b`'s body, and the two tensions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Xfade {
+    pub a: usize,
+    pub b: usize,
+    pub x0: f32,
+    pub x1: f32,
+    pub t_in: f32,
+    pub t_out: f32,
+}
+
+/// The crossfade audio clip `b` makes with an earlier clip, when there is one to draw: the switch is on, both edges
+/// belong to it and each is the other's longest overlap (`os_model::crossfade::partner_before`), neither clip is muted.
+pub fn crossfade(s: &State, g: &PGeom, b: usize) -> Option<Xfade> {
+    let all = clips(s);
+    let c = all.get(b).filter(|c| !c.muted && is_audio_clip(s, g, c))?;
+    let a = os_model::crossfade::partner_before(&s.project, all, b).filter(|&a| !all[a].muted)?;
+    let (_, t_in) = c.stored_fade_in()?;
+    let t_out = all[a].fade_out_tension();
+    Some(Xfade { a, b, x0: g.body(c).x, x1: fade_xs(s, g, c).0, t_in, t_out })
+}
+
+/// The crossfade handle (§9a), drawn and grabbed alike: its x at the overlap's middle, the y of the later clip's gain
+/// there (the big circle) and of the earlier clip's (the small ring), on `b`'s body.
+pub fn xfade_handle(g: &PGeom, b: &Clip, x: &Xfade) -> (f32, f32, f32) {
+    let body = g.body(b);
+    let y = |v: f64| body.bottom() - v as f32 * body.h;
+    ((x.x0 + x.x1) / 2.0, y(os_model::fade_curve(0.5, f64::from(x.t_in))), y(os_model::fade_curve(0.5, f64::from(x.t_out))))
+}
+
+/// Radius of the crossfade handle's big circle, and how far from its middle a press grabs it.
+pub const XFADE_R: f32 = 4.5;
+const XFADE_GRAB: f32 = 6.0;
 
 /// The middle of a fade curve drawn across `body` from `x0` to `x1` (the same height for a fade-in and a fade-out).
 pub fn fade_mid(body: Rect, x0: f32, x1: f32, tension: f32, _out: bool) -> (f32, f32) {
@@ -2251,13 +2330,20 @@ pub fn handle_at(s: &State, g: &PGeom, i: usize, x: f32, y: f32) -> Option<Handl
     let body = g.body(c);
     let (fx_in, fx_out) = fade_xs(s, g, c);
     let near = |hx: f32, hy: f32, r: f32| (x - hx).abs() <= r && (y - hy).abs() <= r;
-    if let Some((_, t)) = c.fade_in() {
+    // A crossfade's handle, on the later clip (§9a).
+    if let Some(xf) = crossfade(s, g, i).filter(|xf| xf.x1 - xf.x0 > 10.0) {
+        let (hx, hy, _) = xfade_handle(g, c, &xf);
+        if near(hx, hy, XFADE_GRAB) {
+            return Some(Handle::Crossfade);
+        }
+    }
+    if let Some((_, t)) = c.stored_fade_in().filter(|_| !managed(s, c, false)) {
         let (mx, my) = fade_mid(body, body.x, fx_in, t, false);
         if fx_in - body.x > 10.0 && near(mx, my, 5.0) {
             return Some(Handle::TensionIn);
         }
     }
-    if let Some((_, t)) = c.fade_out() {
+    if let Some((_, t)) = c.stored_fade_out().filter(|_| !managed(s, c, true)) {
         let (mx, my) = fade_mid(body, fx_out, body.right(), t, true);
         if body.right() - fx_out > 10.0 && near(mx, my, 5.0) {
             return Some(Handle::TensionOut);
@@ -2278,11 +2364,12 @@ pub fn handle_at(s: &State, g: &PGeom, i: usize, x: f32, y: f32) -> Option<Handl
 /// Hint text of a clip handle.
 pub fn handle_hint(c: &Clip, h: Handle) -> String {
     match h {
-        Handle::FadeIn => format!("Fade in: {:.0} ms", c.fade_in().map_or(0.0, |f| f.0)),
-        Handle::FadeOut => format!("Fade out: {:.0} ms", c.fade_out().map_or(0.0, |f| f.0)),
-        Handle::TensionIn => format!("Fade in tension: {:+.2}", c.fade_in().map_or(0.0, |f| f.1)),
-        Handle::TensionOut => format!("Fade out tension: {:+.2}", c.fade_out().map_or(0.0, |f| f.1)),
+        Handle::FadeIn => format!("Fade in: {:.0} ms", c.stored_fade_in().map_or(0.0, |f| f.0)),
+        Handle::FadeOut => format!("Fade out: {:.0} ms", c.stored_fade_out().map_or(0.0, |f| f.0)),
+        Handle::TensionIn => format!("Fade in tension: {:+.2}", c.fade_in_tension()),
+        Handle::TensionOut => format!("Fade out tension: {:+.2}", c.fade_out_tension()),
         Handle::Gain => format!("Clip gain: {:+.1} dB", 20.0 * c.gain().log10()),
+        Handle::Crossfade => format!("Crossfade tension: {:+.2}", c.fade_in_tension()),
     }
 }
 
@@ -2318,9 +2405,13 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             app.drag = Some(Drag::Pl(match h {
                 Handle::FadeIn => PlDrag::Fade { clip: ci, out: false },
                 Handle::FadeOut => PlDrag::Fade { clip: ci, out: true },
-                Handle::TensionIn => PlDrag::FadeTension { clip: ci, out: false, y0: y, t0: c.fade_in().map_or(0.0, |f| f.1) },
-                Handle::TensionOut => PlDrag::FadeTension { clip: ci, out: true, y0: y, t0: c.fade_out().map_or(0.0, |f| f.1) },
+                Handle::TensionIn => PlDrag::FadeTension { clip: ci, out: false, y0: y, t0: c.fade_in_tension() },
+                Handle::TensionOut => PlDrag::FadeTension { clip: ci, out: true, y0: y, t0: c.fade_out_tension() },
                 Handle::Gain => PlDrag::Gain { clip: ci, y0: y, db0: 20.0 * c.gain().log10() },
+                Handle::Crossfade => {
+                    let a = crossfade(s, &g, ci).map_or(ci, |xf| xf.a);
+                    PlDrag::Crossfade { a, b: ci, y0: y, m0: os_model::fade_curve(0.5, f64::from(c.fade_in_tension())) }
+                }
             }));
             app.hint = Cow::Owned(handle_hint(&c, h));
             app.invalidate();
@@ -2621,12 +2712,13 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
     // tension or gain handle only that clip (and the hint bar). A stretch-mode resize changes every clip of the
     // stretched channels: the whole window.
     let stretching = !app.state.playlist.stretch_base.is_empty() && matches!(d, PlDrag::ResizeL { .. } | PlDrag::ResizeR { .. });
-    let handle = matches!(d, PlDrag::Fade { .. } | PlDrag::FadeTension { .. } | PlDrag::Gain { .. });
+    let handle = matches!(d, PlDrag::Fade { .. } | PlDrag::FadeTension { .. } | PlDrag::Gain { .. } | PlDrag::Crossfade { .. });
     let moved: Option<Vec<usize>> = match &d {
         _ if stretching => None,
         PlDrag::Move { orig, .. } | PlDrag::ResizeL { orig, .. } | PlDrag::ResizeR { orig, .. } => Some(orig.iter().map(|&(i, _)| i).collect()),
         PlDrag::Slip { i, .. } => Some(vec![*i]),
         PlDrag::Fade { clip, .. } | PlDrag::FadeTension { clip, .. } | PlDrag::Gain { clip, .. } => Some(vec![*clip]),
+        PlDrag::Crossfade { a, b, .. } => Some(vec![*a, *b]),
         _ => None,
     };
     let rects = |s: &State, idx: &[usize]| -> Vec<Rect> {
@@ -2780,14 +2872,16 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             let (fx_in, fx_out) = fade_xs(s, &g, &c);
             // A fade reaches at most to where the other one starts.
             let px = if out { (body.right() - x).clamp(0.0, body.right() - fx_in) } else { (x - body.x).clamp(0.0, fx_out - body.x) };
-            let ms = (f64::from(px / g.ppt) * to_src(s, c.source, 1.0)) as f32;
+            let ms = (f64::from(px / g.ppt) * fade_ms_per_tick(s)) as f32;
             let c = &mut arr_mut(s).clips[clip];
             let on = (px >= 2.0).then_some(ms);
+            // A fade set with its handle gets its bit (and leaves the automatic crossfades); dragged to nothing, the
+            // edge is theirs again (spec: audio/audio-clips.md "Automatic crossfades").
             if out {
-                let t = c.fade_out().map_or(0.0, |f| f.1);
+                let t = c.fade_out_tension();
                 c.set_fade_out(on.map(|ms| (ms, t)));
             } else {
-                let t = c.fade_in().map_or(0.0, |f| f.1);
+                let t = c.fade_in_tension();
                 c.set_fade_in(on.map(|ms| (ms, t)));
             }
             let c = *c;
@@ -2797,12 +2891,13 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
         PlDrag::FadeTension { clip, out, y0, t0 } => {
             let t = (t0 + (y0 - y) * TENSION_PER_PX).clamp(-40.0, 40.0);
             let c = &mut arr_mut(s).clips[clip];
+            // The tension alone: the length and the bit stay (a stored fade without its bit plays with the switch off).
             if out {
-                if let Some((ms, _)) = c.fade_out() {
-                    c.set_fade_out(Some((ms, t)));
+                if c.stored_fade_out().is_some() {
+                    c.set_fade_out_tension(t);
                 }
-            } else if let Some((ms, _)) = c.fade_in() {
-                c.set_fade_in(Some((ms, t)));
+            } else if c.stored_fade_in().is_some() {
+                c.set_fade_in_tension(t);
             }
             let c = *c;
             app.hint = Cow::Owned(handle_hint(&c, if out { Handle::TensionOut } else { Handle::TensionIn }));
@@ -2815,6 +2910,19 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             let c = *c;
             app.hint = Cow::Owned(handle_hint(&c, Handle::Gain));
             app.state.piano.dirty = true;
+        }
+        PlDrag::Crossfade { a, b, y0, m0 } => {
+            // The later clip's gain at the middle moves 1/120 per logical pixel; its fade-in takes the tension that
+            // gives it, the earlier clip's fade-out the negative (§9a).
+            let t = os_model::crossfade::tension_for_mid(m0 + f64::from(y0 - y) / XFADE_PX) as f32;
+            let arr = arr_mut(s);
+            if a < arr.clips.len() && b < arr.clips.len() {
+                arr.clips[b].set_fade_in_tension(t);
+                arr.clips[a].set_fade_out_tension(os_model::crossfade::opposite(t));
+                let c = arr.clips[b];
+                app.hint = Cow::Owned(handle_hint(&c, Handle::Crossfade));
+                app.state.piano.dirty = true;
+            }
         }
     }
     match (moved, before) {

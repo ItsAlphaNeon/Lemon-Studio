@@ -10,6 +10,7 @@
 //! Units are the project's own: positions and lengths in ticks (see [`Project::ppq`]),
 //! levels as normalized `f64`s. File encodings live in `os-flp`, not here.
 
+pub mod crossfade;
 pub mod curve;
 
 /// An RGB color.
@@ -1455,6 +1456,57 @@ impl Clip {
         self.raw[56] = if ms > 0.0 { self.raw[56] | 2 } else { self.raw[56] & !2 };
     }
 
+    /// Whether the fade-in / fade-out was set with the clip's own handle (bits 0 and 1 of byte 56). A fade without
+    /// its bit belongs to the project's automatic crossfades while they are on (spec: audio/audio-clips.md
+    /// "Automatic crossfades", [`crossfade`]).
+    pub fn fade_in_set(&self) -> bool {
+        self.raw[56] & 1 != 0
+    }
+
+    pub fn fade_out_set(&self) -> bool {
+        self.raw[56] & 2 != 0
+    }
+
+    /// The fade-in / fade-out as the record holds it, bit or not: (milliseconds, tension), `None` for a length of 0.
+    /// Kept in step with the clips while automatic crossfades are on ([`crossfade::derive`]), this is the fade that
+    /// plays (with them off, every stored fade plays).
+    pub fn stored_fade_in(&self) -> Option<(f32, f32)> {
+        let ms = self.f32_at(36);
+        (ms.is_finite() && ms > 0.0).then(|| (ms, self.f32_at(40)))
+    }
+
+    pub fn stored_fade_out(&self) -> Option<(f32, f32)> {
+        let ms = self.f32_at(44);
+        (ms.is_finite() && ms > 0.0).then(|| (ms, self.f32_at(48)))
+    }
+
+    /// The stored tensions (bytes 40 and 48), whatever the lengths.
+    pub fn fade_in_tension(&self) -> f32 {
+        self.f32_at(40)
+    }
+
+    pub fn fade_out_tension(&self) -> f32 {
+        self.f32_at(48)
+    }
+
+    /// Sets a tension alone: the length and the bit stay.
+    pub fn set_fade_in_tension(&mut self, t: f32) {
+        self.set_f32(40, t);
+    }
+
+    pub fn set_fade_out_tension(&mut self, t: f32) {
+        self.set_f32(48, t);
+    }
+
+    /// Sets a length alone (milliseconds, 0 = none): the tension and the bit stay ([`crossfade`]).
+    pub fn set_fade_in_length(&mut self, ms: f32) {
+        self.set_f32(36, ms);
+    }
+
+    pub fn set_fade_out_length(&mut self, ms: f32) {
+        self.set_f32(44, ms);
+    }
+
     /// The clip's gain (bytes 52..56): 1.0 when the record holds no usable value.
     pub fn gain(&self) -> f32 {
         let g = self.f32_at(52);
@@ -1466,14 +1518,23 @@ impl Clip {
     }
 }
 
-/// The gain at `x` (0..1) through an audio clip's fade-in with tension `tension`; a fade-out is `fade_curve(1 - x)`
-/// (spec: audio/audio-clips.md "Fades and clip gain": a raised cosine at tension 0, measured; the tension warp
-/// `x + k x (1 - x)`, `k = t / (|t| + 4.17)`, is a fit).
+/// The gain at `x` (0..1) through an audio clip's fade with tension `tension`: for a fade-in `x` is the time since
+/// the clip's start over the fade's length, for a fade-out the time to the clip's end over its length, each with its
+/// own tension (spec: audio/audio-clips.md "Fades and clip gain"). A raised cosine `s` bent by the tension: with
+/// `q = 1 + |t|`, `(q - q^(1 - s)) / (q - 1)` for t > 0, `(q^s - 1) / (q - 1)` for t < 0, `s` itself for |t| below
+/// 1e-6. A fade-in at `t` and a fade-out at `-t` over the same span add up to 1.
 pub fn fade_curve(x: f64, tension: f64) -> f64 {
     let x = x.clamp(0.0, 1.0);
-    let k = tension / (tension.abs() + 4.17);
-    let w = x + k * x * (1.0 - x);
-    0.5 - 0.5 * (std::f64::consts::PI * w).cos()
+    let s = 0.5 - 0.5 * (std::f64::consts::PI * x).cos();
+    if !tension.is_finite() || tension.abs() < 1e-6 {
+        return s;
+    }
+    let q = 1.0 + tension.abs();
+    if tension > 0.0 {
+        (q - q.powf(1.0 - s)) / (q - 1.0)
+    } else {
+        (q.powf(s) - 1.0) / (q - 1.0)
+    }
 }
 
 /// A time marker (spec: flp/events/playlist.md "Time markers").
@@ -1919,5 +1980,71 @@ impl Automation {
         }
         let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
         Some(curve::segment_value(pts, i, t))
+    }
+}
+
+// spec: audio/audio-clips.md "Fades and clip gain"
+#[cfg(test)]
+mod fade_tests {
+    use super::fade_curve;
+
+    const TENSIONS: [f64; 13] = [-64.0, -32.0, -8.0, -4.736, -1.0, -0.5, 0.0, 0.5, 1.0, 2.289, 3.36, 8.0, 64.0];
+
+    #[test]
+    fn ends_and_rise() {
+        for t in TENSIONS {
+            assert_eq!(fade_curve(0.0, t), 0.0, "t {t}");
+            assert!((fade_curve(1.0, t) - 1.0).abs() < 1e-15, "t {t}");
+            // Rises for any tension (and stays put outside 0..1).
+            let v: Vec<f64> = (0..=1000).map(|k| fade_curve(f64::from(k) / 1000.0, t)).collect();
+            assert!(v.windows(2).all(|w| w[1] > w[0]), "t {t}");
+            assert_eq!((fade_curve(-0.5, t), fade_curve(1.5, t)), (fade_curve(0.0, t), fade_curve(1.0, t)));
+        }
+    }
+
+    #[test]
+    fn tension_zero_is_the_raised_cosine() {
+        for k in 0..=100 {
+            let x = f64::from(k) / 100.0;
+            let s = 0.5 - 0.5 * (std::f64::consts::PI * x).cos();
+            assert_eq!(fade_curve(x, 0.0), s);
+            // The formula's limit near 0, and below 1e-6 the cosine itself.
+            assert!((fade_curve(x, 1e-5) - s).abs() < 1e-5 && (fade_curve(x, -1e-5) - s).abs() < 1e-5);
+            assert_eq!((fade_curve(x, 9e-7), fade_curve(x, -9e-7)), (s, s));
+        }
+    }
+
+    #[test]
+    fn the_middle() {
+        for t in TENSIONS.into_iter().filter(|&t| t != 0.0) {
+            let r = (1.0 + t.abs()).sqrt();
+            let want = if t > 0.0 { r / (1.0 + r) } else { 1.0 / (1.0 + r) };
+            assert!((fade_curve(0.5, t) - want).abs() < 1e-12, "t {t}");
+        }
+        // The two values measured (spec): +3.36 gives 0.676, -4.83 gives 0.293.
+        assert!((fade_curve(0.5, 3.36) - 0.676).abs() < 5e-4);
+        assert!((fade_curve(0.5, -4.83) - 0.293).abs() < 5e-4);
+    }
+
+    #[test]
+    fn negative_tension_is_the_positive_turned_half_a_turn() {
+        for t in TENSIONS {
+            for k in 0..=100 {
+                let x = f64::from(k) / 100.0;
+                assert!((fade_curve(x, -t) - (1.0 - fade_curve(1.0 - x, t))).abs() < 1e-12, "t {t} x {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_fade_in_at_t_and_a_fade_out_at_minus_t_add_up_to_one() {
+        // Over one span: x into it is x for the fade-in and 1 - x (the time to the end) for the fade-out.
+        for t in TENSIONS {
+            for k in 0..=1000 {
+                let x = f64::from(k) / 1000.0;
+                let sum = fade_curve(x, t) + fade_curve(1.0 - x, -t);
+                assert!((sum - 1.0).abs() < 1e-12, "t {t} x {x}: {sum}");
+            }
+        }
     }
 }
