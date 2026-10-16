@@ -843,11 +843,13 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     }
     // From the clip's start (the body starts a pixel in).
     let side = body.x - g.x64(f64::from(c.position));
-    let total_ms = f64::from(c.length) * ms_per_tick;
-    let (fin, fout, gain) = (c.fade_in(), c.fade_out(), f64::from(c.gain()));
+    // The fades count the song's milliseconds (`pl::ms_px`), the window the sample's.
+    let fade_ms = pl::fade_ms_per_tick(s);
+    let total_ms = f64::from(c.length) * fade_ms;
+    let (fin, fout, gain) = (c.stored_fade_in(), c.stored_fade_out(), f64::from(c.gain()));
     // Gain of the fades `d` px into the body (the engine's law, os_model::fade_curve).
     let shape = |d: f64| -> f64 {
-        let ms = (side + d) / ppt * ms_per_tick;
+        let ms = (side + d) / ppt * fade_ms;
         let mut k = gain;
         if let Some((l, t)) = fin {
             k *= os_model::fade_curve(ms / f64::from(l), f64::from(t));
@@ -920,7 +922,9 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
 }
 
 /// An audio clip's fade curves, and its handles while the mouse is over it (§9a): fade triangles at the top
-/// corners (at the fades' ends), tension rings in the middle of each curve, the gain half-circle at the bottom.
+/// corners (at the fades' ends), tension rings in the middle of each curve, the gain half-circle at the bottom. A
+/// crossfade is drawn by its later clip, over both bodies: an X of the two fades across the overlap, with its handle
+/// in the middle.
 fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wave: Color) {
     let body = edges.r;
     if body.w < 12.0 || body.h < 10.0 {
@@ -943,13 +947,24 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
             .collect();
         ui.c.polyline(&pts, 1.4, white.with_alpha(230));
     };
-    if let Some((_, t)) = c.fade_in() {
-        curve(ui, edges.x, f64::from(fx_in), t, false);
+    // This clip's crossfade with an earlier clip, and whether a later clip draws this clip's fade-out in its own.
+    let xf = pl::crossfade(s, g, i);
+    let later = os_model::crossfade::partner_after(&s.project, pl::clips(s), i).filter(|&b| pl::crossfade(s, g, b).is_some());
+    if let Some((_, t)) = c.stored_fade_in() {
+        if xf.is_none() {
+            curve(ui, edges.x, f64::from(fx_in), t, false);
+        }
         ui.c.fill_rect(Rect::new(fx_in, body.y, 1.0, body.h), white.with_alpha(50));
     }
-    if let Some((_, t)) = c.fade_out() {
-        curve(ui, f64::from(fx_out), edges.x + edges.w, t, true);
+    if let Some((_, t)) = c.stored_fade_out() {
+        if later.is_none() {
+            curve(ui, f64::from(fx_out), edges.x + edges.w, t, true);
+        }
         ui.c.fill_rect(Rect::new(fx_out - 1.0, body.y, 1.0, body.h), white.with_alpha(50));
+    }
+    if let Some(xf) = xf {
+        curve(ui, edges.x, f64::from(xf.x1), xf.t_in, false);
+        curve(ui, edges.x, f64::from(xf.x1), xf.t_out, true);
     }
     // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse.
     if !hovered {
@@ -969,9 +984,18 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
     }).collect();
     ui.c.fill_polygon(&half, col(pl::Handle::Gain));
     if hovered {
+        // The crossfade's handle: a big filled circle at the later clip's gain in the middle, a small ring at the
+        // earlier clip's (§9a); where they meet the ring shows inside the circle.
+        if let Some(xf) = xf.filter(|xf| xf.x1 - xf.x0 > 10.0) {
+            let (hx, hy, ry) = pl::xfade_handle(g, c, &xf);
+            let on = lit(pl::Handle::Crossfade);
+            ui.c.fill_circle(hx, hy, if on { pl::XFADE_R + 1.0 } else { pl::XFADE_R }, col(pl::Handle::Crossfade));
+            ui.c.fill_circle(hx, ry, 2.5, ui.t.s(0x1c2328).with_alpha(200));
+            ui.c.stroke_circle(hx, ry, 2.5, 1.1, white);
+        }
         for (h, on, xa, xb, out) in [
-            (pl::Handle::TensionIn, c.fade_in(), body.x, fx_in, false),
-            (pl::Handle::TensionOut, c.fade_out(), fx_out, body.right(), true),
+            (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(s, c, false)), body.x, fx_in, false),
+            (pl::Handle::TensionOut, c.stored_fade_out().filter(|_| !pl::managed(s, c, true)), fx_out, body.right(), true),
         ] {
             let Some((_, t)) = on else { continue };
             if xb - xa <= 10.0 {

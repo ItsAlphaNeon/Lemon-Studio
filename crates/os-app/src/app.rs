@@ -3031,6 +3031,7 @@ impl App {
                 self.damage_win(Win::Playlist);
             }
         }
+        crate::playlist::follow_crossfades(self);
         // Edits (notes, steps, mixer, channel volume / pan / mute, tempo) reach playback right away,
         // also during a drag (at most once per tick).
         if self.state.piano.dirty {
@@ -3698,11 +3699,13 @@ impl App {
     }
 
     /// Settings > Project ▸ Playlist ▸ Automatic crossfades: switched for the project (event 44), which counts as
-    /// changed; off when the file does not say. What it does to audio clips was not measured (spec:
-    /// ui/settings-choices.md "Project", the storage table: "(not measured)"), so nothing else follows yet.
+    /// changed; off when the file does not say. Turned on, the crossfades are set from the overlaps (next tick,
+    /// `playlist::follow_crossfades`); turned off, their lengths go to 0 (spec: audio/audio-clips.md "Automatic
+    /// crossfades").
     fn toggle_auto_crossfades(&mut self) {
         let on = !self.state.project.auto_crossfades.unwrap_or(false);
         self.state.project.auto_crossfades = Some(on);
+        crate::playlist::crossfades_switched(&mut self.state);
         self.state.message = Some(format!("Automatic crossfades: {}", if on { "on" } else { "off" }));
     }
 
@@ -12491,6 +12494,135 @@ mod tests {
         assert_eq!(pl::clips(&app.state)[ci].gain(), 1.0);
         app.key(&winit::keyboard::Key::Character("z".into()), true, false);
         assert_eq!(pl::clips(&app.state)[ci].fade_in().unwrap().1, 0.0);
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    /// Automatic crossfades (spec: audio/audio-clips.md "Automatic crossfades", ui/playlist.md §9a): with the switch
+    /// on, two overlapping audio clips get the overlap as the earlier clip's fade-out and the later clip's fade-in,
+    /// without their bits. They follow a move and the tempo, undo and redo with the edit that made them, go to 0 when
+    /// the switch is turned off (tensions kept) and come back when it is turned on; the crossfade's handle sets both
+    /// tensions in one undo step; an opened project's crossfades are not a change and save as they were read.
+    #[test]
+    fn automatic_crossfades_follow_the_clips() {
+        use crate::playlist as pl;
+        use crate::views::settings::{SAct, CROSSFADES_CHECK};
+        use os_model::crossfade::{ms, tension_for_mid};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, _, _, _) = ruler_app(&mut c);
+        app.state.playlist_bar_w = 400.0;
+        app.state.project.auto_crossfades = Some(true);
+        app.state.tempo = 130.0;
+        let wav = std::env::temp_dir().join(format!("os-app-crossfades-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.5; 2 * 96000]).unwrap();
+        // Two 2 s clips (416 ticks at 130 BPM), the second from tick 192: 224 ticks of overlap.
+        let path = wav.to_string_lossy().into_owned();
+        pl::add_audio_clip(&mut app.state, &path, 0, 0).expect("audio clip added");
+        pl::add_audio_clip(&mut app.state, &path, 0, 192).expect("audio clip added");
+        let srcs: Vec<_> = pl::clips(&app.state).iter().map(|c| c.source).collect();
+        let (sa, sb) = (srcs[srcs.len() - 2], srcs[srcs.len() - 1]);
+        let idx = |app: &App, src| pl::clips(&app.state).iter().position(|c| c.source == src).unwrap();
+        let get = |app: &App, src| pl::clips(&app.state)[idx(app, src)];
+        // (the earlier clip's fade-out, the later clip's fade-in), as stored.
+        let xf = |app: &App| (get(app, sa).stored_fade_out().map(|f| f.0), get(app, sb).stored_fade_in().map(|f| f.0));
+        app.tick();
+        assert_eq!(get(&app, sb).length, 416);
+        assert_eq!(xf(&app), (Some(ms(224, 130.0, 96)), Some(ms(224, 130.0, 96))));
+        assert_eq!((get(&app, sa).raw[56] & 3, get(&app, sb).raw[56] & 3), (0, 0), "without their bits");
+        assert_eq!((get(&app, sa).stored_fade_in(), get(&app, sb).stored_fade_out()), (None, None));
+
+        // Moved a beat right with the mouse: 128 ticks of overlap. Undone and redone with the move.
+        frame(&mut app, &mut c, None);
+        let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
+        let body = g.body(&get(&app, sb));
+        let (x0, y0) = (body.x + body.w * 0.75, body.y + body.h * 0.4);
+        app.mouse_move(x0, y0);
+        app.mouse_down();
+        for k in 1..=8 {
+            app.mouse_move(x0 + 96.0 * g.ppt * k as f32 / 8.0, y0);
+        }
+        app.mouse_up();
+        app.tick();
+        assert_eq!(get(&app, sb).position, 288);
+        assert_eq!(xf(&app), (Some(ms(128, 130.0, 96)), Some(ms(128, 130.0, 96))));
+        crate::history::undo(&mut app.state);
+        assert_eq!((get(&app, sb).position, xf(&app)), (192, (Some(ms(224, 130.0, 96)), Some(ms(224, 130.0, 96)))), "undone with the move");
+        crate::history::redo(&mut app.state);
+        assert_eq!((get(&app, sb).position, xf(&app)), (288, (Some(ms(128, 130.0, 96)), Some(ms(128, 130.0, 96)))));
+        crate::history::undo(&mut app.state);
+        app.tick();
+
+        // The tempo halved: the clips keep their sample's 2 s, now 208 ticks (§9c), so 16 ticks overlap, in
+        // milliseconds at the new tempo.
+        app.set_tempo(65.0);
+        app.tick();
+        assert_eq!((get(&app, sa).length, get(&app, sb).position), (208, 192));
+        assert_eq!(xf(&app), (Some(ms(16, 65.0, 96)), Some(ms(16, 65.0, 96))));
+        app.set_tempo(130.0);
+        app.tick();
+
+        // The crossfade's handle, hit where it is drawn at every scale: dragged up 18 px it moves the later clip's
+        // gain at the middle by 18/120; the earlier clip's fade-out takes the negative tension; one undo step.
+        for k in [1.0f32, 1.5, 2.0] {
+            let Ok(mut ck) = Canvas::new((1920.0 * k) as u32, (1080.0 * k) as u32, k) else { return };
+            app.invalidate();
+            frame(&mut app, &mut ck, None);
+            let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
+            let xfade = pl::crossfade(&app.state, &g, idx(&app, sb)).expect("a crossfade to draw");
+            assert_eq!(xfade.a, idx(&app, sa));
+            let (hx, hy, ry) = pl::xfade_handle(&g, &get(&app, sb), &xfade);
+            assert_eq!(hy, ry, "at tension 0 both gains are 1/2 in the middle");
+            app.mouse_move(hx, hy);
+            assert_eq!(app.state.playlist.hover_handle, Some(pl::Handle::Crossfade), "at {k}");
+            frame(&mut app, &mut ck, None);
+            let p = ck.pixmap.pixel((hx * k) as u32, (hy * k - pl::XFADE_R * k * 0.6) as u32).unwrap();
+            assert!(p.red() > 200 && p.green() > 200 && p.blue() > 200, "the big circle drawn there at {k}: {p:?}");
+            app.mouse_move(hx + 40.0, hy - 30.0);
+        }
+        let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
+        let xfade = pl::crossfade(&app.state, &g, idx(&app, sb)).unwrap();
+        let (hx, hy, _) = pl::xfade_handle(&g, &get(&app, sb), &xfade);
+        app.mouse_move(hx, hy);
+        app.mouse_down();
+        for k in 1..=6 {
+            app.mouse_move(hx, hy - 3.0 * k as f32);
+        }
+        app.mouse_up();
+        let t = tension_for_mid(0.5 + 18.0 / 120.0) as f32;
+        assert_eq!((get(&app, sb).fade_in_tension(), get(&app, sa).fade_out_tension()), (t, -t));
+        assert_eq!((get(&app, sa).raw[56] & 3, get(&app, sb).raw[56] & 3), (0, 0), "still the crossfade's");
+        assert!(app.hint.contains("Crossfade tension: +2.45"), "{}", app.hint);
+        app.tick();
+        assert_eq!((get(&app, sb).fade_in_tension(), get(&app, sa).fade_out_tension()), (t, -t), "as the overlaps make them");
+        crate::history::undo(&mut app.state);
+        assert_eq!((get(&app, sb).fade_in_tension(), get(&app, sa).fade_out_tension()), (0.0, 0.0), "one step");
+        crate::history::redo(&mut app.state);
+
+        // Switched off: the lengths go to 0, the tensions stay, and no edit sets them; switched on: set again.
+        app.settings_act(SAct::Check(CROSSFADES_CHECK));
+        assert_eq!(app.state.project.auto_crossfades, Some(false));
+        assert_eq!(xf(&app), (None, None));
+        assert_eq!((get(&app, sb).fade_in_tension(), get(&app, sa).fade_out_tension()), (t, -t));
+        app.tick();
+        assert_eq!(xf(&app), (None, None));
+        app.settings_act(SAct::Check(CROSSFADES_CHECK));
+        app.tick();
+        assert_eq!(xf(&app), (Some(ms(224, 130.0, 96)), Some(ms(224, 130.0, 96))));
+
+        // Saved and opened again: worked out on opening, nothing changes; saved again, the same bytes.
+        let flp = std::env::temp_dir().join(format!("os-app-crossfades-{}.flp", std::process::id()));
+        app.save_to(flp.clone());
+        let bytes = |p: &Project| p.arrangements.iter().flat_map(|a| a.clips.iter().map(|c| c.raw[36..57].to_vec())).collect::<Vec<_>>();
+        let mut opened = App::new(None);
+        opened.open(flp.clone());
+        let read = bytes(&opened.state.project);
+        opened.tick();
+        assert!(!opened.unsaved(), "an opened project's crossfades are not a change");
+        assert_eq!(bytes(&opened.state.project), read);
+        opened.save_to(flp.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&flp).unwrap()).unwrap()).unwrap();
+        assert_eq!(bytes(&back), read);
+        assert_eq!(back.auto_crossfades, Some(true));
+        let _ = std::fs::remove_file(&flp);
         let _ = std::fs::remove_file(&wav);
     }
 
