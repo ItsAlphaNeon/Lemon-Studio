@@ -362,6 +362,15 @@ pub fn works(menu: usize, item: &Item) -> bool {
         || crate::params::menu_handles(item.label)
 }
 
+/// An entry's text now: FILE's first item names the Default template, "New (<name>)" (spec: ui/settings-choices.md
+/// "Miscellaneous: seven more checks, Default template and Startup project").
+pub fn label_of(menu: usize, item: &Item) -> std::borrow::Cow<'static, str> {
+    match (menu, item.label) {
+        (0, "New") => format!("New ({})", crate::templates::name()).into(),
+        (_, l) => l.into(),
+    }
+}
+
 fn item_action(menu: usize, i: usize, item: &Item) -> Action {
     if menu == VIEW {
         if let Some(w) = win_of(item.label) {
@@ -431,7 +440,7 @@ pub fn bar_model(s: &State) -> Vec<BarMenu> {
                 for item in items.iter() {
                     let enabled = item.kind == Kind::Item && works(mi, item);
                     let pick = enabled.then_some((mi, flat));
-                    rows.push(BarRow { kind: item.kind, label: item.label.to_string(), shortcut: item.shortcut, enabled, mark: mark_of(s, mi, item), pick });
+                    rows.push(BarRow { kind: item.kind, label: label_of(mi, item).into_owned(), shortcut: item.shortcut, enabled, mark: mark_of(s, mi, item), pick });
                     flat += 1;
                 }
             }
@@ -577,7 +586,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                         }
                         _ => {}
                     }
-                    ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, rr.w - 24.0, color, item.label);
+                    ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, rr.w - 24.0, color, &label_of(menu, item));
                     let right = rr.right() - if item.sub { 16.0 } else { 8.0 };
                     if !item.shortcut.is_empty() {
                         let sc = if ok { t.menu_pop_shortcut } else { t.menu_pop_dim.mix(t.menu_pop, 0.35) };
@@ -634,7 +643,8 @@ mod tests {
             // The columns' separator rows aside, the rows are the items.
             let rows: Vec<&BarRow> = rows.into_iter().filter(|r| r.kind != Kind::Sep || items.iter().any(|it| it.kind == Kind::Sep)).collect();
             let named: Vec<(&str, bool)> = rows.iter().filter(|r| r.kind == Kind::Item).map(|r| (r.label.as_str(), r.enabled)).collect();
-            let want: Vec<(&str, bool)> = items.iter().filter(|it| it.kind == Kind::Item).map(|it| (it.label, works(mi, it))).collect();
+            let want: Vec<(String, bool)> = items.iter().filter(|it| it.kind == Kind::Item).map(|it| (label_of(mi, it).into_owned(), works(mi, it))).collect();
+            let want: Vec<(&str, bool)> = want.iter().map(|(l, w)| (l.as_str(), *w)).collect();
             assert_eq!(named, want, "{}", m.title);
         }
         let save = bar[0].rows.iter().find(|r| r.label == "Save").unwrap();

@@ -137,6 +137,21 @@ pub const PLAY_TRUNCATED_ON_TRANSPORT: Check =
 pub const RESET_PLUGINS_ON_TRANSPORT: Check =
     Check { key: "reset_plugins_on_transport", label: "Reset plugins on transport", default: false };
 
+/// General ▸ Miscellaneous: opening or focusing a plugin window selects its mixer track
+/// (`App::select_window_track`). Spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and
+/// Startup project".
+pub const AUTO_SELECT_LINKED: Check = Check { key: "auto_select_linked_modules", label: "Auto select linked modules", default: true };
+
+/// General ▸ Miscellaneous: stored and shown only. FL showed no change on native plugin windows; it has no effect until
+/// hosted plugin windows get a toolbar (spec: ui/settings-choices.md, as above).
+pub const HIDE_PLUGIN_TOOLBAR: Check =
+    Check { key: "hide_plugin_window_toolbar", label: "Hide plugin window toolbar by default", default: true };
+
+/// General ▸ Miscellaneous: the project Lemon Studio starts with when no project file is passed to it
+/// (`App::startup_project`). Spec: ui/settings-choices.md, as above.
+pub const STARTUP_PROJECT: Combo =
+    Combo { key: "startup_project", label: "Startup project", choices: &["Empty project", "Default template", "Last used project"], default: 1 };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -146,9 +161,11 @@ pub const CHECKS: &[&Check] = &[
     &AUTO_CROSSFADES_NEW,
     &PLAY_TRUNCATED_ON_TRANSPORT,
     &RESET_PLUGINS_ON_TRANSPORT,
+    &AUTO_SELECT_LINKED,
+    &HIDE_PLUGIN_TOOLBAR,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT];
 
 /// Tests only: a check that exercises the settings page. An FL service Lemon Studio leaves out (ui/options-coverage.md
 /// §4), so it is never declared for real.
@@ -205,6 +222,17 @@ pub fn set_choice(c: &Combo, i: usize) {
     if let Some(v) = c.choices.get(i) {
         write(c.key, v);
     }
+}
+
+/// A setting kept as free text under `key`, for values found at run time (a template, a file path; `crate::templates`):
+/// `None` when it is not set or empty.
+pub fn text(key: &str) -> Option<String> {
+    read(|s| s.get(key).filter(|v| !v.is_empty()).map(String::from))
+}
+
+/// Keeps `value` (one line: line breaks become spaces) as `key`'s free text; "" clears it.
+pub fn set_text(key: &str, value: &str) {
+    write(key, &value.replace(['\r', '\n'], " "));
 }
 
 fn check_in(s: &Store, c: &Check) -> bool {

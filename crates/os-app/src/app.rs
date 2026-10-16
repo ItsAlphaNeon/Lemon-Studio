@@ -1279,6 +1279,7 @@ impl App {
                 crate::rack::from_model(s);
                 s.file = Some(file);
                 s.message = Some(format!("Opened {}", path.display()));
+                crate::templates::remember(&path);
                 s.path = Some(path);
                 s.piano.reset();
                 s.playlist.reset();
@@ -1472,6 +1473,7 @@ impl App {
             }
             crate::project_plugins::adopt_saved(&mut s.project, &proj);
             s.file = Some(file);
+            crate::templates::remember(&target);
             s.path = Some(target);
             self.mark_saved();
         }
@@ -1485,7 +1487,10 @@ impl App {
         }
         let s = &mut self.state;
         let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone());
+        // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project").
+        let last = crate::templates::last_kept();
         self.save_to(target);
+        crate::templates::restore_last(last);
         let s = &mut self.state;
         let done = match s.message.take() {
             Some(m) if m.starts_with("Saved") => Ok(()),
@@ -1496,7 +1501,7 @@ impl App {
     }
 
     /// The project as it is now counts as saved (opened, saved, new).
-    fn mark_saved(&mut self) {
+    pub(crate) fn mark_saved(&mut self) {
         self.saved = (self.state.project.clone(), self.state.tempo);
     }
 
@@ -1615,8 +1620,12 @@ impl App {
         self.invalidate();
     }
 
-    /// FILE > New project.
+    /// FILE > New project: the Default template (spec: ui/settings-choices.md "Miscellaneous: seven more checks,
+    /// Default template and Startup project"); for Empty, or a template that does not load, the built-in project.
     fn new_project(&mut self) {
+        if self.new_from_template() {
+            return;
+        }
         self.transport.stop();
         self.reset_hosted();
         let s = &mut self.state;
@@ -1839,7 +1848,10 @@ impl App {
         if let Some(row) = self.state.pending_open.take().filter(|r| self.state.hosted_rows.contains(r)) {
             if let Some(info) = channel_info(&self.state.project, row) {
                 match self.plugins.open_window(row, info) {
-                    Ok(()) => self.state.raise(Win::Hosted(row)),
+                    Ok(()) => {
+                        self.state.raise(Win::Hosted(row));
+                        self.select_window_track(row);
+                    }
                     Err(e) => {
                         self.state.message = Some(format!("Plugin: {e}"));
                         self.invalidate();
@@ -1887,6 +1899,7 @@ impl App {
                             self.invalidate();
                         }
                         self.state.raise(Win::Hosted(row));
+                        self.select_window_track(row);
                         continue;
                     }
                     // A native Wayland main window (Linux): the popups cannot be lifted above a plugin window there.
@@ -3447,6 +3460,7 @@ impl App {
             SAct::Body => {}
             SAct::Close => st.open = false,
             // The program settings declared in `crate::prefs`.
+            SAct::Combo(views::settings::DEFAULT_TEMPLATE, x, y) => return self.template_menu(x, y),
             SAct::Combo(label, x, y) if crate::prefs::find_combo(label).is_some() => return self.pref_menu(label, x, y),
             SAct::Combo(label, x, y) => return self.audio_menu(label, x, y),
             SAct::Tab(i) => {
@@ -4136,7 +4150,7 @@ impl App {
         matches!(self.drag, Some(Drag::BarZoom { .. } | Drag::BarRows { .. } | Drag::Knob { .. } | Drag::Tempo { .. }))
     }
 
-    fn bar(&self, t: Scroll) -> Option<Bar> {
+    pub(crate) fn bar(&self, t: Scroll) -> Option<Bar> {
         self.bars.iter().find(|b| b.target == t).copied()
     }
 

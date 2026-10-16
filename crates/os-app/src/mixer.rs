@@ -1319,11 +1319,43 @@ impl App {
         {
             let info = fx_info(&self.state.project, &self.state.mixer, key);
             match info.map(|i| self.plugins.open_window(key, i)) {
-                Some(Ok(())) => self.state.raise(crate::app::Win::Hosted(key)),
+                Some(Ok(())) => {
+                    self.state.raise(crate::app::Win::Hosted(key));
+                    self.select_window_track(key);
+                }
                 Some(Err(e)) => self.state.message = Some(format!("Plugin: {e}")),
                 None => {}
             }
         }
+    }
+
+    /// Auto select linked modules: opening or focusing plugin window `key` (a channel row or an `fx_key`) selects its
+    /// mixer track as clicking that insert would, scrolled into view; a channel on the master selects the master
+    /// (spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project").
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
+    pub(crate) fn select_window_track(&mut self, key: usize) {
+        if !crate::prefs::check(&crate::prefs::AUTO_SELECT_LINKED) {
+            return;
+        }
+        let s = &self.state;
+        let track = match crate::plugins::fx_of(key) {
+            Some((t, _)) => Some(t),
+            None => s.project.channels.get(key).map(|c| c.mixer_track),
+        };
+        let Some(t) = track.filter(|t| s.project.mixer.iter().any(|m| m.index == *t)) else { return };
+        select(&mut self.state, t, false);
+        // The master strip is fixed; an insert scrolls into the mixer's last painted view.
+        if let Some(bar) = self.bar(crate::app::Scroll::MixerX).filter(|_| t > 0) {
+            let w = crate::views::mixer::STRIP_W;
+            let left = w * f32::from(t - 1);
+            let scroll = self.state.mixer_scroll;
+            if left < scroll {
+                self.scroll_set(crate::app::Scroll::MixerX, left);
+            } else if left + w > scroll + bar.view {
+                self.scroll_set(crate::app::Scroll::MixerX, left + w - bar.view);
+            }
+        }
+        self.invalidate();
     }
 }
 
@@ -1384,6 +1416,48 @@ mod tests {
         a.state.playlist.edit.as_mut().unwrap().text = "Drums".into();
         crate::playlist::commit_edit(&mut a.state);
         assert_eq!(name(&a.state, 7), "Drums");
+    }
+
+    /// Auto select linked modules (spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and
+    /// Startup project"): a plugin window selects its channel's insert (scrolled into view) or its slot's track.
+    #[test]
+    fn plugin_windows_select_their_mixer_track() {
+        use crate::app::{Scroll, Win};
+        let mut a = app();
+        assert!(crate::prefs::check(&crate::prefs::AUTO_SELECT_LINKED), "on by default");
+        // Snare (channel 3) is on Insert 4, as in the test FL was checked with.
+        select(&mut a.state, 2, true);
+        a.select_window_track(3);
+        assert_eq!((a.state.selected_mixer, a.state.mixer.sel.clone()), (4, vec![]), "as a plain click on the insert");
+        a.state.project.channels[0].mixer_track = 0;
+        a.select_window_track(0);
+        assert_eq!(a.state.selected_mixer, 0, "a channel on the master selects the master");
+        a.select_window_track(crate::plugins::fx_key(5, 2));
+        assert_eq!(a.state.selected_mixer, 5, "an effect selects its slot's track");
+        a.state.project.channels[1].mixer_track = 40;
+        a.select_window_track(1);
+        assert_eq!(a.state.selected_mixer, 5, "no such track: nothing changes");
+        // Scrolled into the mixer's view.
+        let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
+        let ws = &mut a.state.wins[Win::Mixer.slot().unwrap()];
+        (ws.maxed, ws.rect) = (false, os_ui::Rect::new(100.0, 100.0, 560.0, 400.0));
+        a.state.z = vec![Win::Mixer];
+        a.paint(&mut c, None);
+        let view = a.bar(Scroll::MixerX).expect("mixer scroll bar").view;
+        let w = crate::views::mixer::STRIP_W;
+        assert!(view < 16.0 * w, "the mixer shows part of the inserts");
+        a.state.project.channels[4].mixer_track = 16;
+        a.select_window_track(4);
+        assert_eq!(a.state.selected_mixer, 16);
+        assert!((a.state.mixer_scroll + view - 16.0 * w).abs() < 0.5, "Insert 16 at the right edge: {}", a.state.mixer_scroll);
+        a.select_window_track(2);
+        assert_eq!((a.state.selected_mixer, a.state.mixer_scroll), (3, 2.0 * w), "Insert 3 at the left edge");
+        a.select_window_track(0);
+        assert_eq!((a.state.selected_mixer, a.state.mixer_scroll), (0, 2.0 * w), "the master does not scroll");
+        // Off: the selection is left alone.
+        crate::prefs::set_check(&crate::prefs::AUTO_SELECT_LINKED, false);
+        a.select_window_track(3);
+        assert_eq!(a.state.selected_mixer, 0);
     }
 
     #[test]

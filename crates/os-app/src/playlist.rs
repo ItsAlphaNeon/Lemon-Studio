@@ -331,6 +331,8 @@ pub enum Cmd {
     Pref(&'static crate::prefs::Combo, usize),
     /// Settings > Info ▸ the genre menu: a genre, None for "(none)" (spec: ui/settings-choices.md "Info").
     Genre(Option<&'static str>),
+    /// Settings > General ▸ Default template: "Empty" or "<category>/<template>" (`crate::templates`).
+    Template(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3032,6 +3034,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Cpu(c) => return app.cpu_cmd(c),
         Cmd::Pref(c, i) => return app.pref_choose(c, i),
         Cmd::Genre(g) => return app.set_genre(g),
+        Cmd::Template(t) => return app.set_template(&t),
         Cmd::MetronomeSound(sound) => {
             crate::metronome::set_sound(sound);
             app.invalidate();
@@ -3481,6 +3484,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         // Run above.
         Cmd::Pref(..) => None,
         Cmd::Genre(_) => None,
+        Cmd::Template(_) => None,
     };
     app.invalidate();
     msg

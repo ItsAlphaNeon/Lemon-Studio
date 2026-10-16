@@ -65,6 +65,7 @@ mod snap;
 mod song_pos;
 mod stall;
 mod tapper;
+mod templates;
 mod transport;
 mod typein;
 mod views;
@@ -1409,7 +1410,13 @@ fn main() {
     // Lemon plugins' editors run on threads of their own off Windows and wake the app when they send something.
     #[cfg(not(windows))]
     os_hostlink::set_host_waker(wake_ui);
+    let start = path.is_none();
     let mut app = App::new(path);
+    // Without a project file: the Startup project (spec: ui/settings-choices.md "Miscellaneous: seven more checks,
+    // Default template and Startup project").
+    if start {
+        app.startup_project();
+    }
     // MIDI controllers play the selected channel (spec: ui/midi-input.md).
     app.midi = midi_in::MidiIn::open(wake_ui);
     app.state.midi_inputs = app.midi.names.clone();
