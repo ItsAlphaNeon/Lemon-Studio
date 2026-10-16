@@ -106,6 +106,30 @@ pub fn load(path: &Path) -> Result<Sample, SampleError> {
     decode(bytes, ext).map_err(decode_err)
 }
 
+/// The length of the audio file at `path`: its frames and their rate. Read from the file's headers where they give it
+/// (WAV, AIFF, FLAC, most MP3s), else found by decoding the file. `None` when it can't be read.
+pub fn length(path: &Path) -> Option<(u64, u32)> {
+    if let Some(n) = header_length(path) {
+        return Some(n);
+    }
+    let s = load_shared(path).ok()?;
+    Some((s.frames() as u64, s.rate))
+}
+
+/// The length the file's headers give, without decoding it.
+fn header_length(path: &Path) -> Option<(u64, u32)> {
+    let file = std::fs::File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let format = probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default()).ok()?;
+    let track = format.default_track(TrackType::Audio)?;
+    let rate = track.codec_params.as_ref()?.audio()?.sample_rate.filter(|&r| r > 0)?;
+    Some((track.num_frames?, rate))
+}
+
 /// A WAV file whose `fmt ` tag is one of the Vorbis-ACM tags: the `data` chunk holds a
 /// complete Ogg Vorbis stream, and `fact` holds the true length in frames.
 struct VorbisInWav<'a> {
@@ -452,6 +476,39 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(!Arc::ptr_eq(&c, &d), "a changed file is decoded again");
         assert_eq!(d.frames(), 960);
+    }
+
+    // spec: ui/settings-choices.md "Advanced: Fast sample preview, Auto keep long audio on disk, Threaded project
+    // sample loading (2026-10-16)"
+    /// A file's length is its frames and their rate, from the header (16-bit mono at 22.05 kHz, float stereo at
+    /// 96 kHz) or by decoding it (the MP3); a file that can't be read has none.
+    #[test]
+    fn lengths_in_frames_and_rate() {
+        let dir = std::env::temp_dir();
+        let mono = dir.join(format!("os_engine_length_mono_{}.wav", std::process::id()));
+        let mut fmt = vec![1, 0, 1, 0];
+        fmt.extend(22050u32.to_le_bytes());
+        fmt.extend(44100u32.to_le_bytes());
+        fmt.extend([2, 0, 16, 0]);
+        let mut body = b"WAVE".to_vec();
+        body.extend(chunk(b"fmt ", &fmt));
+        body.extend(chunk(b"data", &vec![0; 2 * 661_500]));
+        let mut b = b"RIFF".to_vec();
+        b.extend((body.len() as u32).to_le_bytes());
+        b.extend(body);
+        std::fs::write(&mono, b).unwrap();
+        assert_eq!(length(&mono), Some((661_500, 22050)), "30 s at 22.05 kHz");
+        let stereo = dir.join(format!("os_engine_length_stereo_{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&stereo).unwrap(), 96000, &vec![0.1; 2 * 96_000]).unwrap();
+        assert_eq!(length(&stereo), Some((96_000, 96000)), "1 s at 96 kHz");
+        for p in [mono, stereo] {
+            let _ = std::fs::remove_file(p);
+        }
+        let mp3 = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/click_sine.mp3");
+        let (frames, rate) = length(&mp3).expect("the mp3's length");
+        assert_eq!(rate, 44100);
+        assert!((13230..=13230 + 2 * 1152).contains(&frames), "about 0.3 s: {frames}");
+        assert_eq!(length(Path::new("Z:/no such folder/none.wav")), None);
     }
 
     /// A RIFF chunk: id, little-endian length, body, a pad byte after an odd length.

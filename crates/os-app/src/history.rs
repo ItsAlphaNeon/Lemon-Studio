@@ -38,8 +38,9 @@ pub enum Snap {
     /// A knob's value: the model's own for the channel knobs, else the knob's 0..1.
     Knob(KnobId, f64),
     /// What a sample load changes on channel `row`: its sample, its name ("Auto name channels"), its root note and its
-    /// stretch ("Read sample root note" and "Read sample tempo information", `rack::read_tags`).
-    Sample { row: usize, path: Option<String>, name: Option<String>, root: u8, stretch: [u32; 4] },
+    /// stretch ("Read sample root note" and "Read sample tempo information", `rack::read_tags`) and its sampler flags
+    /// (Keep on disk, "Auto keep long audio on disk").
+    Sample { row: usize, path: Option<String>, name: Option<String>, root: u8, stretch: [u32; 4], flags: Option<u32> },
     /// Channel `row` as a sample dropped below the rack's rows made it (`App::sample_to_rack`); `None` while it
     /// doesn't exist. Only the last row comes and goes.
     Channel { row: usize, ch: Option<Box<os_model::Channel>> },
@@ -61,7 +62,7 @@ impl Snap {
     pub fn sample(s: &State, row: usize) -> Option<Snap> {
         let ch = s.project.channels.get(row)?;
         let (path, name) = (ch.sample_path.clone(), ch.name.clone());
-        Some(Snap::Sample { row, path, name, root: ch.misc.root, stretch: ch.sound.stretch })
+        Some(Snap::Sample { row, path, name, root: ch.misc.root, stretch: ch.sound.stretch, flags: ch.sound.sampler_flags })
     }
 
     /// What this covers, as the project has it now.
@@ -87,10 +88,12 @@ impl Snap {
             }
             Snap::Playlist(p) => crate::playlist::restore(s, *p),
             Snap::Knob(id, v) => set_knob_value(s, id, v),
-            Snap::Sample { row, path, name, root, stretch } => {
+            Snap::Sample { row, path, name, root, stretch, flags } => {
                 if let Some(ch) = s.project.channels.get_mut(row) {
                     (ch.sample_path, ch.name, ch.misc.root, ch.sound.stretch) = (path.clone(), name, root, stretch);
-                    // Its Lemon Sampler follows on the next tick: the sample (none: cleared), root note and stretch.
+                    ch.sound.sampler_flags = flags;
+                    // Its Lemon Sampler follows on the next tick: the sample (none: cleared), root note, stretch and
+                    // Keep on disk.
                     s.sample_loads.push((row, path.unwrap_or_default()));
                 }
             }

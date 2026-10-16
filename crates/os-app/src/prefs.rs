@@ -305,6 +305,35 @@ pub const ANIMATION_REFRESH_RATE: Combo =
 /// screen (2026-10-16)".
 pub const DONT_LIMIT_WINDOWS: Check = Check { key: "dont_limit_windows_to_screen", label: "Don't limit windows to screen", default: false };
 
+/// General ▸ Advanced: stored and shown only. Lemon Studio's browser preview already starts as soon as the start of
+/// the file is decoded (ui/browser.md §7), and FL showed no difference either. Spec: ui/settings-choices.md "Advanced:
+/// Fast sample preview, Auto keep long audio on disk, Threaded project sample loading (2026-10-16)".
+pub const FAST_SAMPLE_PREVIEW: Check = Check { key: "fast_sample_preview", label: "Fast sample preview", default: true };
+
+/// General ▸ Advanced: a file of 30 s or more loaded into a sampler channel turns its Keep on disk on; nothing turns it
+/// off (`crate::keep_on_disk`). Spec: as above.
+pub const AUTO_KEEP_ON_DISK: Check = Check { key: "auto_keep_long_audio_on_disk", label: "Auto keep long audio on disk", default: true };
+
+/// General ▸ Advanced: an opened project's samples are decoded on up to 4 worker threads; off, one file at a time on
+/// one (`loading::workers`, read when a project starts loading). Spec: as above.
+pub const THREADED_SAMPLE_LOADING: Check =
+    Check { key: "threaded_project_sample_loading", label: "Threaded project sample loading", default: false };
+
+/// General ▸ Advanced: stored and shown only (the choices of Main GUI scaling). Lemon Studio draws no cursors of its
+/// own yet: the system's follow the system's size. Spec: ui/settings-choices.md "Advanced: Cursors scaling and Legacy
+/// scaling (2026-10-16)".
+pub const CURSORS_SCALING: Combo = Combo {
+    key: "cursors_scaling",
+    label: "Cursors scaling",
+    choices: &["System", "100%", "125%", "150%", "175%", "200%", "250%", "300%", "350%", "400%"],
+    default: 0,
+};
+
+/// General ▸ Advanced: stored and shown only; meant for hosted plugin windows that don't follow the display scale,
+/// which keep the size their plugin gives them until that is measured. Spec: as above.
+pub const LEGACY_SCALING: Combo =
+    Combo { key: "legacy_scaling", label: "Legacy scaling", choices: &["Main", "100%", "200%", "300%", "400%"], default: 0 };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -338,9 +367,12 @@ pub const CHECKS: &[&Check] = &[
     &READ_ROOT_NOTE,
     &READ_TEMPO,
     &DONT_LIMIT_WINDOWS,
+    &FAST_SAMPLE_PREVIEW,
+    &AUTO_KEEP_ON_DISK,
+    &THREADED_SAMPLE_LOADING,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &CURSORS_SCALING, &LEGACY_SCALING];
 
 /// The declared value boxes.
 pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BROWSER_PREVIEW_TRACK];
@@ -946,6 +978,55 @@ mod tests {
         set_number(&BROWSER_PREVIEW_TRACK, 0);
         assert_eq!(number_text(&MAX_UNDO_LEVELS), "100", "a box from 1 shows its number");
         assert_eq!(find_number("Browser preview track"), Some(&BROWSER_PREVIEW_TRACK));
+    }
+
+    // spec: ui/settings-choices.md "Advanced: Fast sample preview, Auto keep long audio on disk, Threaded project
+    // sample loading (2026-10-16)", "Advanced: Cursors scaling and Legacy scaling (2026-10-16)"
+    /// General ▸ Advanced: the sample checks and the two scaling lists have the defaults as found and are kept in the
+    /// settings file; on the page each is live: a click toggles a check, a combo lists its choices (Cursors scaling
+    /// those of Main GUI scaling) and keeps the one picked.
+    #[test]
+    fn advanced_sample_and_scaling_settings() {
+        let checks = |s: &Store| [&FAST_SAMPLE_PREVIEW, &AUTO_KEEP_ON_DISK, &THREADED_SAMPLE_LOADING].map(|c| check_in(s, c));
+        let combos = |s: &Store| (index_in(s, &CURSORS_SCALING), index_in(s, &LEGACY_SCALING));
+        let s = Store::parse("");
+        assert_eq!((checks(&s), combos(&s)), ([true, true, false], (0, 0)), "as found");
+        let s = Store::parse(
+            "fast_sample_preview=0\nauto_keep_long_audio_on_disk=0\nthreaded_project_sample_loading=1\ncursors_scaling=250%\nlegacy_scaling=300%\n",
+        );
+        assert_eq!((checks(&s), combos(&s)), ([false, false, true], (6, 3)));
+        assert_eq!(CURSORS_SCALING.choices, MAIN_GUI_SCALING.choices);
+        assert_eq!(LEGACY_SCALING.choices, ["Main", "100%", "200%", "300%", "400%"]);
+
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::GENERAL);
+        app.state.settings.folded.extend(["Display", "Language", "Input", "Undo history", "Hints and warnings", "Miscellaneous"]);
+        app.paint(&mut c, None);
+        for k in [&FAST_SAMPLE_PREVIEW, &AUTO_KEEP_ON_DISK, &THREADED_SAMPLE_LOADING] {
+            let was = check(k);
+            let r = hit_rect(&app, &Action::Settings(SAct::Check(k.label)));
+            click(&mut app, &mut c, r);
+            assert_eq!(check(k), !was, "{} toggles", k.label);
+            assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(k.label)), "{} is not greyed out", k.label);
+        }
+        for (k, pick) in [(&CURSORS_SCALING, 5), (&LEGACY_SCALING, 2)] {
+            let combo = |app: &App| {
+                app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == k.label)).map(|h| h.rect)
+            };
+            let r = combo(&app).unwrap_or_else(|| panic!("{} works", k.label));
+            click(&mut app, &mut c, r);
+            let labels: Vec<String> = app.state.playlist.popup.as_ref().expect("its menu").items.iter().map(|it| it.label.to_string()).collect();
+            assert_eq!(labels, k.choices, "{}", k.label);
+            let item = hit_rect(&app, &Action::PlPopup(pick));
+            click(&mut app, &mut c, item);
+            assert_eq!(index(k), pick, "{}", k.label);
+        }
+        for k in [&FAST_SAMPLE_PREVIEW, &AUTO_KEEP_ON_DISK, &THREADED_SAMPLE_LOADING] {
+            set_check(k, k.default);
+        }
+        set_choice(&CURSORS_SCALING, 0);
+        set_choice(&LEGACY_SCALING, 0);
     }
 
     // spec: ui/settings-choices.md "Input: Vertical and Horizontal scrolling speed (2026-10-16)"

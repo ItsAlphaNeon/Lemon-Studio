@@ -1387,12 +1387,14 @@ fn channel_params(ch: &os_model::Channel, frames: impl FnOnce() -> Option<u64>) 
     out
 }
 
-/// Lemon Sampler's parameters for what loading a sample may read into its channel (`rack::read_tags`): the root note
-/// and the stretch settings.
+/// Lemon Sampler's parameters for what loading a sample may read into its channel (`rack::read_tags`): the root note,
+/// the stretch settings and Keep on disk (`keep_on_disk::keep_long`).
 pub fn tag_params(ch: &os_model::Channel) -> Vec<(&'static str, serde_json::Value)> {
     let root = i32::from(ch.misc.root).clamp(0, lemon_sampler::params::KEY_MAX);
     let mut set = vec![("root", serde_json::json!({ "i32": root }))];
     set.extend(stretch_params(&ch.sound));
+    let flags = ch.sound.sampler_flags.unwrap_or(os_model::ChannelSound::DEFAULT_FLAGS);
+    set.push(("keep_disk", serde_json::json!({ "bool": flags & os_model::ChannelSound::KEEP_ON_DISK != 0 })));
     set
 }
 

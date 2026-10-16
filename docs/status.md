@@ -118,6 +118,8 @@ Not yet: Align all channel editors, Arrange windows.
 - Anything in a file that Lemon Studio does not understand yet is kept and written back unchanged
 - A project in the layout used before version 24.2 is refused with a dialog that explains how to re-save
   it; support for older versions is on the roadmap
+- An opened project's samples load behind a progress panel, one file at a time or on up to 4 threads
+  (General settings ▸ Advanced ▸ Threaded project sample loading)
 - Still early: always work on copies and keep backups
 
 ## 🚧 Built-in instruments and effects
@@ -126,6 +128,8 @@ Not yet: Align all channel editors, Arrange windows.
   and CLAP bundles for other hosts
 - The sampler plays a project's sample settings (start and length, the sample file's loop, the sample
   effects, the channel filter, declicking) and each note's own pan and filter offsets
+- A file of 30 s or more loaded into a sampler channel turns its Keep on disk on (General settings ▸
+  Advanced ▸ Auto keep long audio on disk)
 
 ## 🚧 Exporting audio
 
