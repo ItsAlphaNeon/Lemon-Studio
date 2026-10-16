@@ -64,6 +64,7 @@ mod presets;
 mod misc;
 mod misc_page;
 mod note_names;
+mod smooth;
 mod snap;
 mod song_pos;
 mod splash;
@@ -173,6 +174,13 @@ fn frame_interval(mhz: Option<u32>) -> Duration {
         Some(m) => Duration::from_secs_f64(960.0 / f64::from(m)).clamp(IDLE, FRAME),
         None => FRAME,
     }
+}
+
+/// The time from one frame's start to the next: `frame` (a little under the display's refresh), and while something
+/// animates no less than General ▸ Display ▸ Animation refresh rate allows (`smooth::frame_cap`; spec:
+/// ui/settings-choices.md "Display: Smoothing, Animation refresh rate, Transparent menus and windows (2026-10-16)").
+fn paced(frame: Duration, animating: bool) -> Duration {
+    if animating { frame.max(smooth::frame_cap()) } else { frame }
 }
 
 /// Shortest idle time after a frame. Windows hands out a window's WM_PAINT ahead of its child windows' and ahead of
@@ -484,7 +492,7 @@ impl Shell {
         // winit stops dispatching after each frame and comes back here: asking for the next frame at once would keep
         // our WM_PAINT pending forever while playing, and the plugin windows would never paint (see `FRAME`).
         if self.pending {
-            let next = (self.frame_start + self.frame).max(self.painted + IDLE);
+            let next = (self.frame_start + paced(self.frame, self.app.animating())).max(self.painted + IDLE);
             if now >= next {
                 self.pending = false;
                 if let Some(w) = &self.window {
@@ -1490,6 +1498,26 @@ mod tests {
         assert_eq!(frame_interval(Some(1_000_000)), IDLE);
         assert_eq!(frame_interval(None), FRAME);
         assert_eq!(frame_interval(Some(0)), FRAME);
+    }
+
+    /// Animation refresh rate: while something animates, frames come no closer than the display's refresh
+    /// (Ultrasmooth, the default), 60 Hz (Smooth) or 40 Hz (Less smooth); other frames keep the display's rate.
+    // spec: ui/settings-choices.md "Display: Smoothing, Animation refresh rate, Transparent menus and windows
+    // (2026-10-16)"
+    #[test]
+    fn animation_refresh_rate_caps_frames() {
+        let rate = &prefs::ANIMATION_REFRESH_RATE;
+        let display = frame_interval(Some(180_000));
+        assert_eq!(prefs::choice(rate), "Ultrasmooth");
+        assert_eq!(paced(display, true), display);
+        prefs::set_choice(rate, 1);
+        assert_eq!(paced(display, true), Duration::from_secs_f64(1.0 / 60.0));
+        assert_eq!(paced(display, false), display, "nothing animates");
+        prefs::set_choice(rate, 0);
+        assert_eq!(paced(display, true), Duration::from_millis(25));
+        assert_eq!(paced(FRAME, true), Duration::from_millis(25), "a 60 Hz display too");
+        prefs::set_choice(rate, 2);
+        assert_eq!(paced(FRAME, true), FRAME);
     }
 
     /// Main GUI scaling (spec: ui/ui-scaling.md §1): System keeps the monitor's scale, a percentage replaces it.

@@ -343,7 +343,7 @@ const BAR_ROW_STEP: f32 = 1.15;
 const BAR_ROW_PX: f32 = 12.0;
 
 /// The window a scroll target scrolls.
-fn scroll_win(t: Scroll) -> Win {
+pub(crate) fn scroll_win(t: Scroll) -> Win {
     match t {
         Scroll::PianoX | Scroll::PianoY | Scroll::PitchY => Win::PianoRoll,
         Scroll::PlaylistX | Scroll::PlaylistY | Scroll::PlPick => Win::Playlist,
@@ -1020,6 +1020,8 @@ pub struct App {
     pub drag: Option<Drag>,
     /// A held click that has not moved yet (Click-and-hold & special gesture functions, `crate::hold`).
     pub hold: Option<crate::hold::Hold>,
+    /// Views easing to where the wheel sent them (General ▸ Display ▸ Smoothing, `crate::smooth`).
+    pub(crate) smooth: crate::smooth::Eases,
     pub want_minimize: bool,
     pub want_maximize: bool,
     pub want_close: bool,
@@ -1196,6 +1198,7 @@ impl App {
             mouse: (-1.0, -1.0),
             drag: None,
             hold: None,
+            smooth: Default::default(),
             want_minimize: false,
             want_maximize: false,
             want_close: false,
@@ -2159,6 +2162,11 @@ impl App {
         std::mem::take(&mut self.moved)
     }
 
+    /// The smallest playlist scroll step whose drawn pixels can move (`blit_step` at the last paint's scale).
+    pub(crate) fn playlist_blit_step(&self) -> Option<f32> {
+        blit_step(self.px_scale)
+    }
+
     /// The playlist view scrolled from `before` (its horizontal and vertical scroll). The next paint moves the pixels
     /// already drawn for it instead of repainting the window when that gives exactly what a repaint would
     /// (`resolve_scroll`). Damage waiting inside the moving parts moves along: those pixels are stale wherever they go.
@@ -2783,6 +2791,7 @@ impl App {
             || self.state.tapper.flash_at.is_some()
             || self.state.cables.borrow().moving()
             || self.hold.is_some()
+            || self.smooth.running()
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -2853,6 +2862,7 @@ impl App {
         let now = std::time::Instant::now();
         self.song_pos_tick(now);
         self.hold_tick(now);
+        self.ease_tick(now);
         self.cables_tick(now);
         self.backup_tick(now);
         self.work_tick(now);
@@ -4117,6 +4127,11 @@ impl App {
         self.hold = None;
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
+        // A press stops the views easing where they are drawn; a scroll bar's arrow steps on from where its ease is
+        // going (`crate::smooth`).
+        if !matches!(action, Some(Action::ScrollStep(..))) {
+            self.smooth.stop();
+        }
         self.pressed = action.clone();
         self.armed = None;
         // A dialog takes every click (spec: ui/dialogs.md §3).
@@ -4368,6 +4383,7 @@ impl App {
         if crate::typein::is_open(&self.state) || self.modal_open() {
             return;
         }
+        self.smooth.stop();
         self.raise_under_mouse();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
@@ -4404,6 +4420,7 @@ impl App {
         if crate::typein::is_open(&self.state) || self.modal_open() {
             return;
         }
+        self.smooth.stop();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
         if self.state.menu_open.is_some() {
@@ -4983,7 +5000,8 @@ impl App {
         let s = &self.state;
         let view = (s.playlist_scroll, s.playlist_bar_w, s.playlist.row_h, s.playlist.pick_scroll);
         self.invalidate();
-        if let Some(w) = self.wheel_act(dx, dy, shift, ctrl) {
+        // A scroll eases to where the wheel sends it (General ▸ Display ▸ Smoothing, `crate::smooth`).
+        if let Some(w) = self.eased(|app| app.wheel_act(dx, dy, shift, ctrl)) {
             self.damage = before;
             let s = &self.state;
             if w == Win::Playlist && (s.playlist_bar_w, s.playlist.row_h, s.playlist.pick_scroll) == (view.1, view.2, view.3) {
@@ -5786,7 +5804,7 @@ impl App {
         }
         if let Action::ScrollStep(t, dir) = a {
             let step = self.bar(t).map_or(48.0, |b| (b.view / 8.0).max(18.0).round());
-            return self.scroll_set(t, self.scroll_get(t) + dir as f32 * step);
+            return self.eased(|app| app.scroll_set(t, app.scroll_get(t) + dir as f32 * step));
         }
         self.note_host_tweak(&a);
         if self.playlist_act(&a, false) {
@@ -7916,15 +7934,30 @@ mod tests {
         app.invalidate();
         frame_damage(&mut app, &mut a, Some(None));
         let _ = app.take_damage();
-        // Wheel over the grid: scroll down, then right; Ctrl zooms.
+        // Wheel over the grid: scroll down, then right, each easing over 10 ms frames (General ▸ Display ▸ Smoothing at
+        // its default); Ctrl zooms at once.
         app.mouse_move(g.x + 300.0, g.y + 100.0);
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
+        let eases = |app: &mut App, a: &mut Canvas, b: &mut Canvas, what: &str| {
+            assert!(app.smooth.running(), "{what}: eases");
+            for i in 0..100 {
+                app.ease_step(10.0);
+                if app.has_damage() {
+                    check(app, a, b, &format!("{what}, frame {i}"));
+                }
+                if !app.smooth.running() {
+                    return;
+                }
+            }
+            panic!("{what}: the ease ends");
+        };
         app.wheel(0.0, -2.0, false, false);
-        check(&mut app, &mut a, &mut b, "wheel scroll");
+        eases(&mut app, &mut a, &mut b, "wheel scroll");
         app.wheel(-3.0, 0.0, false, false);
-        check(&mut app, &mut a, &mut b, "wheel sideways");
+        eases(&mut app, &mut a, &mut b, "wheel sideways");
         app.wheel(0.0, 1.0, false, true);
+        assert!(!app.smooth.running(), "a zoom doesn't ease");
         check(&mut app, &mut a, &mut b, "ctrl+wheel zoom");
         // Drag the horizontal scroll bar.
         let bar = app.bar(Scroll::PlaylistX).unwrap();
@@ -8107,7 +8140,9 @@ mod tests {
         let over_grid = (g.x + 300.0, g.y + 200.0);
         app.mouse_move(over_grid.0, over_grid.1);
         full(&mut app, &mut a);
-        // Wheel steps: down, up, right, left, Shift = sideways, several before one paint.
+        // Wheel steps at once (General ▸ Display ▸ Smoothing 0; eased steps below): down, up, right, left, Shift =
+        // sideways, several before one paint.
+        crate::smooth::set_smoothing(0.0);
         app.wheel(0.0, -1.0, false, false);
         check(&mut app, &mut a, &mut b, "wheel down", Some(true), true);
         app.wheel(0.0, -2.0, false, false);
@@ -8124,6 +8159,24 @@ mod tests {
         app.wheel(0.0, -1.0, false, false);
         app.wheel(-1.0, 0.0, false, false);
         check(&mut app, &mut a, &mut b, "three steps", Some(true), true);
+        // Eased steps (Smoothing 128, 10 ms frames): every frame of the ease moves the drawn pixels, in whole steps of
+        // the drawing grid at 150 %; a notch sideways during the ease too.
+        crate::smooth::set_smoothing(128.0);
+        app.wheel(0.0, -2.0, false, false);
+        let mut frames = 0;
+        while app.smooth.running() {
+            if frames == 6 {
+                app.wheel(-1.0, 0.0, false, false);
+            }
+            app.ease_step(10.0);
+            frames += 1;
+            if app.has_damage() {
+                check(&mut app, &mut a, &mut b, &format!("eased frame {frames}"), Some(true), true);
+            }
+            assert!(frames < 100, "{}: the ease ends", what_at("eased"));
+        }
+        assert!(frames > 10, "{}: the steps eased over {frames} frames", what_at("eased"));
+        crate::smooth::set_smoothing(0.0);
         // Over the track headers: rows move, the time line stays; the hovered group arrow (lit) moves off the mouse.
         app.state.playlist_scroll.1 = 0.0;
         full(&mut app, &mut a);
@@ -9786,9 +9839,13 @@ mod tests {
             let v0 = app.scroll_get(t);
             let r = hit_rect(&app, &Action::ScrollStep(t, 1));
             click(&mut app, &mut c, r);
+            // The step eases (General ▸ Display ▸ Smoothing).
+            assert!(app.smooth.running(), "{t:?} eases");
+            app.ease_to_end();
             assert!(app.scroll_get(t) > v0, "{t:?} steps forward");
             let r = hit_rect(&app, &Action::ScrollStep(t, -1));
             click(&mut app, &mut c, r);
+            app.ease_to_end();
             assert!((app.scroll_get(t) - v0).abs() < 0.01, "{t:?} steps back: {v0} -> {}", app.scroll_get(t));
         }
     }
@@ -11321,6 +11378,7 @@ mod tests {
         app.mouse_move(keys.cx(), keys.cy());
         let sy = app.state.piano.scroll_y;
         app.wheel(0.0, 1.0, false, false);
+        app.ease_to_end();
         assert!(app.state.piano.scroll_y < sy, "wheel up over the keys scrolls up");
         assert_eq!(app.state.piano.row_h, views::piano::ROW);
         let z = app.state.piano.px_per_beat;

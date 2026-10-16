@@ -275,6 +275,12 @@ pub const READ_ROOT_NOTE: Check = Check { key: "read_sample_root_note", label: "
 /// above.
 pub const READ_TEMPO: Check = Check { key: "read_sample_tempo", label: "Read sample tempo information", default: true };
 
+/// General ▸ Display: the most frames a second while something animates (`smooth::frame_cap`): the display's own rate
+/// (Ultrasmooth), 60 (Smooth) or 40 (Less smooth). Spec: ui/settings-choices.md "Display: Smoothing, Animation refresh
+/// rate, Transparent menus and windows (2026-10-16)".
+pub const ANIMATION_REFRESH_RATE: Combo =
+    Combo { key: "animation_refresh_rate", label: "Animation refresh rate", choices: &["Less smooth", "Smooth", "Ultrasmooth"], default: 2 };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -309,7 +315,7 @@ pub const CHECKS: &[&Check] = &[
     &READ_TEMPO,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE];
 
 /// The declared value boxes.
 pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS];
