@@ -2083,28 +2083,44 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     if let (Some(i), Some(t)) = (l.tempo, project.tempo.filter(|&t| Some(t) != current.tempo)) {
         set_int(&mut events[i], (t * 1000.0).round() as u32);
     }
+    // Title, genre, author, comments, URL (spec: flp/events/project-info.md), in the order `create` writes them. A
+    // changed text is patched in place; a cleared one keeps its event, written empty (whether FL omits empty fields or
+    // writes them empty is open in the spec); an empty field the file lacks gets no event, a filled one gets its event
+    // next to the others.
     let info = &project.info;
     let old_info = &current.info;
-    for (loc, value, old) in [
-        (l.title, &info.title, &old_info.title),
-        (l.author, &info.author, &old_info.author),
-        (l.genre, &info.genre, &old_info.genre),
-        (l.comments, &info.comments, &old_info.comments),
-        (l.url, &info.url, &old_info.url),
-    ] {
+    let fields = [
+        (id::TITLE, l.title, &info.title, &old_info.title),
+        (id::GENRE, l.genre, &info.genre, &old_info.genre),
+        (id::AUTHOR, l.author, &info.author, &old_info.author),
+        (id::COMMENTS, l.comments, &info.comments, &old_info.comments),
+        (id::URL, l.url, &info.url, &old_info.url),
+    ];
+    // Without any of them in the file: after the prelude's tempo, swing, main pitch and current pattern, as `create` does.
+    let info_at = [l.tempo, l.swing, l.main_pitch, l.current_pattern].into_iter().flatten().max().or(l.version).map_or(0, |i| i + 1);
+    let mut added = Vec::new();
+    for (k, &(eid, loc, value, old)) in fields.iter().enumerate() {
         if value == old {
             continue;
         }
-        let value = if loc == l.comments { value.as_deref().map(comments_to_file) } else { value.clone() };
-        match (loc, value) {
-            (Some(i), Some(v)) => set_data(&mut events[i], encode_text(&v, enc)),
-            (Some(i), None) => set_data(&mut events[i], encode_text("", enc)),
+        let text = value.as_deref().map(|v| if eid == id::COMMENTS { comments_to_file(v) } else { v.to_string() });
+        match (loc, text) {
+            (Some(i), v) => set_data(&mut events[i], encode_text(v.as_deref().unwrap_or(""), enc)),
             (None, Some(v)) if !v.is_empty() => {
-                return Err(ProjectError::Mismatch("adding a missing project-info field".into()));
+                // After the nearest field before it that the file has, else before the nearest one after it.
+                let at = fields[..k]
+                    .iter()
+                    .rev()
+                    .find_map(|f| f.1.map(|i| i + 1))
+                    .or_else(|| fields[k + 1..].iter().find_map(|f| f.1))
+                    .unwrap_or(info_at);
+                added.push((at, Event::new(eid, Value::var(encode_text(&v, enc)))));
             }
             _ => {}
         }
     }
+    // Inserts at one place end up in reverse order of pushing: new fields that share a place keep the order above.
+    inserts.extend(added.into_iter().rev());
     if let (Some(i), Some(v)) = (l.current_pattern, project.current_pattern.filter(|&v| Some(v) != current.current_pattern)) {
         set_int(&mut events[i], v.into());
     }
@@ -4495,6 +4511,89 @@ mod tests {
         let back2 = load(&FlpFile::parse(&file2.to_bytes().unwrap()).unwrap()).unwrap();
         assert_eq!(back2, cleared);
         assert!(!events_of(&file2).unwrap().iter().any(|e| e.id == id::CH_ZIPPED || e.id == id::LOOP_CHANNEL));
+    }
+
+    /// The payload of the first event `eid` in `file`.
+    fn event_data(file: &FlpFile, eid: u8) -> Option<Vec<u8>> {
+        events_of(file).unwrap().iter().find(|e| e.id == eid).and_then(Event::data).map(<[u8]>::to_vec)
+    }
+
+    fn utf16z(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_le_bytes).chain([0, 0]).collect()
+    }
+
+    /// Title, genre, author, comments and URL edited in a saved file: a changed text is patched, missing fields are
+    /// added next to the others in `create`'s order, comments keep single-CR line breaks, the text is UTF-16LE; the
+    /// same model again writes nothing; a cleared field keeps its event, written empty, and an empty one the file lacks
+    /// gets none (spec: flp/events/project-info.md, flp/container.md "Text payloads").
+    #[test]
+    fn project_info_round_trips() {
+        let mut file = FlpFile::parse(&create(&new_project()).unwrap().to_bytes().unwrap()).unwrap();
+        assert_eq!(event_data(&file, id::AUTHOR), None, "an empty field is not written");
+        let mut m = load(&file).unwrap();
+        m.info = ProjectInfo {
+            title: Some("Ünïcode Ω title".into()),
+            author: Some("Me".into()),
+            genre: Some("Ambient".into()),
+            comments: Some("First line\nSecond line\n\nLast".into()),
+            url: Some("https://example.org/song".into()),
+        };
+        apply(&m, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back, m);
+        assert_eq!(event_data(&file, id::TITLE), Some(utf16z("Ünïcode Ω title")));
+        assert_eq!(event_data(&file, id::COMMENTS), Some(utf16z("First line\rSecond line\r\rLast")));
+        let ids: Vec<u8> = events_of(&file).unwrap().iter().map(|e| e.id).collect();
+        let at = ids.iter().position(|&i| i == id::TITLE).unwrap();
+        assert_eq!(ids[at - 1], id::CURRENT_PATTERN);
+        assert_eq!(ids[at..at + 5], [id::TITLE, id::GENRE, id::AUTHOR, id::COMMENTS, id::URL]);
+        let mut again = file.clone();
+        apply(&back, &mut again).unwrap();
+        assert_eq!(again.to_bytes().unwrap(), file.to_bytes().unwrap(), "an unchanged model writes nothing");
+
+        let mut cleared = back.clone();
+        cleared.info.title = None;
+        cleared.info.comments = Some(String::new());
+        let mut file2 = file.clone();
+        apply(&cleared, &mut file2).unwrap();
+        assert_eq!((event_data(&file2, id::TITLE), event_data(&file2, id::COMMENTS)), (Some(vec![0, 0]), Some(vec![0, 0])));
+        let back2 = load(&FlpFile::parse(&file2.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!((back2.info.title.as_deref(), back2.info.comments.as_deref()), (Some(""), Some("")));
+        assert_eq!(back2.info.author.as_deref(), Some("Me"));
+
+        // A file without any of them: an empty field adds nothing, a filled one goes after the current pattern.
+        let mut bare = new_project();
+        bare.info = ProjectInfo::default();
+        let mut file3 = create(&bare).unwrap();
+        let mut m3 = load(&file3).unwrap();
+        m3.info.genre = Some(String::new());
+        m3.info.url = Some("https://example.org".into());
+        apply(&m3, &mut file3).unwrap();
+        let ids: Vec<u8> = events_of(&file3).unwrap().iter().map(|e| e.id).collect();
+        assert!(!ids.contains(&id::GENRE));
+        assert_eq!(ids[ids.iter().position(|&i| i == id::URL).unwrap() - 1], id::CURRENT_PATTERN);
+        assert_eq!(load(&file3).unwrap().info.url.as_deref(), Some("https://example.org"));
+    }
+
+    /// Files saved by FL 11 and older hold 8-bit text (spec: flp/container.md "Text payloads").
+    #[test]
+    fn project_info_is_8_bit_in_old_files() {
+        let mut p = new_project();
+        p.info = ProjectInfo::default();
+        let mut file = create(&p).unwrap();
+        for e in events_of_mut(&mut file).unwrap() {
+            if e.id == id::VERSION {
+                e.value = Value::var(b"11.1.1\0".to_vec());
+            }
+        }
+        let mut m = load(&file).unwrap();
+        m.info.title = Some("Café".into());
+        m.info.comments = Some("a\nb".into());
+        apply(&m, &mut file).unwrap();
+        assert_eq!(event_data(&file, id::TITLE), Some(b"Caf\xe9\0".to_vec()));
+        assert_eq!(event_data(&file, id::COMMENTS), Some(b"a\rb\0".to_vec()));
+        assert_eq!(load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap().info, m.info);
     }
 
     /// A pattern's own time markers (piano-roll Alt+T) are marker groups in its metadata block, sorted by position

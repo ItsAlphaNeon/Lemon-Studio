@@ -391,6 +391,30 @@ fn rack_settings_survive() {
     assert!(checked > 40, "only {checked} files checked");
 }
 
+/// Project info edited in every file (spec: flp/events/project-info.md): each field changed, or set where the file has
+/// none (comments and URL are missing in many), reads back with nothing else changed.
+#[test]
+fn project_info_edits_survive() {
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let Ok(mut project) = load(&file) else { continue };
+        project.info = os_model::ProjectInfo {
+            title: Some("Edited title".into()),
+            author: Some("Edited author".into()),
+            genre: Some("Edited genre".into()),
+            comments: Some("Line one\nLine two".into()),
+            url: Some("https://example.org/edited".into()),
+        };
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back, project, "{path}");
+        checked += 1;
+    }
+    assert!(checked > 40, "only {checked} files checked");
+}
+
 /// Track switches, main volume and main pitch in every file, old 5- and 8-byte track records included (spec:
 /// flp/layouts.md "A mixer track's record (event 236)").
 #[test]
