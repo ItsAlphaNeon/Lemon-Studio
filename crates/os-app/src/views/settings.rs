@@ -211,7 +211,7 @@ pub const ASSOCIATE_CHECK: &str = "Associate project files with application";
 #[cfg(target_os = "macos")]
 const ASSOCIATE_ELSEWHERE: &str = "The app bundle declares .flp files; the system's Open with settings decide";
 #[cfg(all(not(windows), not(target_os = "macos")))]
-const ASSOCIATE_ELSEWHERE: &str = "The desktop file declares .flp files; the system's Open with settings decide";
+const ASSOCIATE_ELSEWHERE: &str = "The system's Open with settings decide which program opens .flp files";
 
 /// The checks and buttons that work (by label, handled in `App::settings_act`). Apart from these, `LIVE_COMBOS` and the
 /// program settings declared in `crate::prefs`, every other check, combo, value box, slider and button is not available

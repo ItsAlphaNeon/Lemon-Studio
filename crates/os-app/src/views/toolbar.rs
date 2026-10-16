@@ -22,8 +22,8 @@ const LOGO_MIN_X: f32 = 1520.0;
 pub const FULL_W: f32 = 1473.0;
 /// The ▶ arrow's width at the band's right end.
 pub const MORE_W: f32 = 18.0;
-/// The arrow's hint. A click on it does nothing (a conservative choice: the spec doesn't say it opens anything).
-pub const MORE_HINT: &str = "More toolbar panels: widen the window or lower Toolbars scaling";
+/// The arrow's hint, short enough for the hint panel. A click on it does nothing (spec: ui/ui-scaling.md, Lemon Studio).
+pub const MORE_HINT: &str = "Widen the window or lower Toolbars scaling";
 
 /// Where the panels of a band `width` px wide must end to show: anywhere when all of them fit, else before the arrow.
 pub fn room(width: f32) -> f32 {
