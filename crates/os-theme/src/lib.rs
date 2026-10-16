@@ -366,9 +366,6 @@ pub struct Theme {
     pub base: Palette,
     /// What widgets paint with.
     pub colors: Palette,
-    /// The `.flstheme` it was made from, if any: also its settings that are not colours of the palette (spec:
-    /// ui/flstheme.md §3, e.g. `OverrideClips` and the note colours).
-    pub fl: Option<FlTheme>,
 }
 
 impl Default for Theme {
@@ -380,17 +377,11 @@ impl Default for Theme {
 impl Theme {
     pub fn new(name: &str, base: Palette, adjust: Adjust) -> Self {
         let colors = base.map(|c| c.adjust(adjust));
-        Theme { name: name.into(), adjust, base, colors, fl: None }
-    }
-
-    /// The theme, made from `.flstheme` `fl`.
-    pub fn with_fl(self, fl: FlTheme) -> Self {
-        Theme { fl: Some(fl), ..self }
+        Theme { name: name.into(), adjust, base, colors }
     }
 
     pub fn set_adjust(&mut self, adjust: Adjust) {
-        let fl = self.fl.take();
-        *self = Theme { fl, ..Theme::new(&self.name, self.base.clone(), adjust) };
+        *self = Theme::new(&self.name, self.base.clone(), adjust);
     }
 
     /// Parse a theme file (see the module docs). Unknown keys are reported as errors.

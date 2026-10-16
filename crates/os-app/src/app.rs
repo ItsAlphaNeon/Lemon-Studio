@@ -2794,11 +2794,12 @@ impl App {
         }
     }
 
-    /// The current theme's rule for the colours of new audio and automation clips' channels (read-only): its
-    /// `OverrideClips` ("Audio and automation clips use note colors", off without a theme file) and note colours.
+    /// The current theme's rule for the colours of new audio and automation clips' channels (read-only): the applied
+    /// `.flstheme`'s `OverrideClips` ("Audio and automation clips use note colors", which the Theme page toggles; off
+    /// for the stock Dark theme used without a file) and its note colours.
     /// Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)".
     pub fn clip_colors(&self) -> crate::clip_colors::ClipColors {
-        crate::clip_colors::ClipColors::of(self.theme.fl.as_ref())
+        crate::clip_colors::ClipColors::of(&self.state.fl_theme())
     }
 
     /// The mixer's cables swing until still: step them and repaint where they were and are.
@@ -3596,7 +3597,7 @@ impl App {
                 if let Some((name, text)) = st.themes.get(i - 2).cloned() {
                     st.preset = i;
                     let fl = os_theme::FlTheme::parse(&text);
-                    self.theme = os_theme::Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default()).with_fl(fl);
+                    self.theme = os_theme::Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default());
                     os_theme::set_current(&self.theme.colors);
                     self.state.fl_text = Some(text.clone());
                     save_design(Design::Classic);
@@ -6618,7 +6619,7 @@ pub fn theme_from_file(path: &std::path::Path) -> Result<Theme, String> {
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")) {
         let fl = os_theme::FlTheme::parse(&text);
-        Ok(Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default()).with_fl(fl))
+        Ok(Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default()))
     } else {
         Theme::parse(&name, &text)
     }
@@ -7002,9 +7003,11 @@ mod tests {
         app.settings_act(SAct::Check(LIGHT_MODE_CHECK));
         assert!(saved().contains("Lightmode=1"));
         assert_eq!((shown(&app), &app.theme.colors), (vec![true, false], &Palette::default()));
-        // Clip note colours: stored and saved (the playlist reads `State::fl_theme`); the palette stays.
+        // Clip note colours: stored and saved; new clips' channels follow it (`App::clip_colors`); the palette stays.
         app.settings_act(SAct::Check(NOTE_COLORS_CHECK));
         assert!(app.state.fl_theme().override_clips && saved().contains("OverrideClips=1"));
+        app.tick();
+        assert!(app.clip_colors().note_colors && app.state.clip_colors.note_colors);
         assert_eq!((shown(&app), &app.theme.colors), (vec![true, true], &Palette::default()));
         app.settings_act(SAct::Check(NOTE_COLORS_CHECK));
         assert!(!app.state.fl_theme().override_clips && saved().contains("OverrideClips=0"));

@@ -32,16 +32,15 @@ pub const ON_HUES: (f32, f32) = (80.0, 155.0);
 /// those channels (`App::follow_settings` keeps it equal to `App::clip_colors`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ClipColors {
-    /// "Audio and automation clips use note colors": the theme's `OverrideClips`, off without a theme file.
+    /// "Audio and automation clips use note colors": the theme's `OverrideClips` (off when the file has no such key).
     pub note_colors: bool,
     /// The theme's `NoteColor0..15`; empty when it gives none.
     pub list: Vec<Rgb>,
 }
 
 impl ClipColors {
-    /// The rule of a theme made from `.flstheme` `fl` (None: no theme file, the setting reads off).
-    pub fn of(fl: Option<&FlTheme>) -> ClipColors {
-        let Some(fl) = fl else { return ClipColors::default() };
+    /// The rule of the applied `.flstheme` `fl`.
+    pub fn of(fl: &FlTheme) -> ClipColors {
         ClipColors { note_colors: fl.override_clips, list: fl.note_colors.iter().map(|c| Rgb::new(c.r, c.g, c.b)).collect() }
     }
 
@@ -135,19 +134,19 @@ mod tests {
         p.to_string_lossy().into_owned()
     }
 
-    /// A theme file with the setting `on`, and `notes` as its NoteColor list (COLORREF values).
-    fn theme(on: bool, notes: &[i64]) -> FlTheme {
+    /// A theme file's text with the setting `on`, and `notes` as its NoteColor list (COLORREF values).
+    fn theme(on: bool, notes: &[i64]) -> String {
         let mut text = format!("Lightmode=1\nOverrideClips={}\n", u8::from(on));
         for (i, n) in notes.iter().enumerate() {
             text += &format!("NoteColor{i}={n}\n");
         }
-        FlTheme::parse(&text)
+        text
     }
 
-    /// The app with the current theme made from `fl`, followed (as on a tick).
-    fn app_with(fl: Option<FlTheme>) -> App {
+    /// The app with the applied theme file's text `fl` (None: none, the stock Dark theme), followed (as on a tick).
+    fn app_with(fl: Option<String>) -> App {
         let mut app = App::new(None);
-        app.theme.fl = fl;
+        app.state.fl_text = fl;
         app.tick();
         app
     }
@@ -249,7 +248,8 @@ mod tests {
         let tints: Vec<Option<Rgb>> =
             app.state.project.channels.iter().map(|c| crate::playlist::clip_tint(&app.state, ClipSource::Channel(c.index))).collect();
         for on in [true, false, true] {
-            app.theme.fl.as_mut().expect("theme").override_clips = on;
+            let text = app.state.fl_text.take().expect("theme");
+            app.state.fl_text = Some(os_theme::fl::set_key(&text, "OverrideClips", if on { "1" } else { "0" }));
             app.tick();
             assert_eq!(app.state.clip_colors.note_colors, on, "followed");
             assert_eq!(app.state.project.channels.iter().map(|c| c.color).collect::<Vec<_>>(), before, "channels, setting {on}");
