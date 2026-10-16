@@ -465,13 +465,14 @@ fn osc_page(ui: &mut Ui) {
 }
 
 /// The lemon mark and "LEMON" over a large "TRIO" right-aligned at `right`, `top` = top of the small line. "LEMON"
-/// starts over the name's left edge, close above it (concept A "Pith").
+/// starts over the name's left edge, close above it (concept A "Pith"): TRIO's capitals start 3 px under LEMON's
+/// (they start 8 px into the big cell; LEMON's end 9 px into the small one), not over them.
 fn wordmark(c: &mut Canvas, right: f32, top: f32) {
     let (big, small) = (Font::condensed(38, 16).bold(), Font::condensed(11, 0));
     let x0 = right - lemon::spaced_width(c, big, "TRIO", 3.0);
     lemon::lemon_mark(c, x0 + 6.0, top + 6.0, 4.5, brand::MAIN);
     lemon::spaced(c, small, x0 + 13.0, top, brand::MAIN, "LEMON", 3.0);
-    lemon::spaced(c, big, x0, top - 1.5, plug::WORDMARK, "TRIO", 3.0);
+    lemon::spaced(c, big, x0, top + 5.0, plug::WORDMARK, "TRIO", 3.0);
 }
 
 /// The phase-randomness knob.
