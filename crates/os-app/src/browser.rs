@@ -603,6 +603,8 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     if !s.project.channels.get(row)?.kind.is_sampler() {
         return Some("The selected channel is not a sampler".into());
     }
+    // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
+    let path = crate::data_folder::adopt(s, &path);
     crate::history::load_sample(s, row);
     let ch = &mut s.project.channels[row];
     crate::rack::auto_name(ch, std::path::Path::new(&path));

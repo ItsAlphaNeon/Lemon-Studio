@@ -1720,6 +1720,7 @@ impl App {
                     crate::timesig::set_start(&mut self.state, n, num, den);
                 }
             }
+            Then::DataFolder(d) => self.data_folder_done(d, reply),
         }
         self.invalidate();
     }
@@ -3282,6 +3283,8 @@ impl App {
     pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
         let s = &mut self.state;
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
+        // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
+        let path = crate::data_folder::adopt(s, &path);
         let row = match views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind.is_sampler()) {
             Some(r) => {
                 crate::history::load_sample(s, r);
@@ -3751,6 +3754,7 @@ impl App {
             // The plugin manager (spec: ui/plugin-manager.md §2).
             SAct::Check(k) if views::settings::plugin_check(k) => self.plugin_check(k),
             SAct::Plug(p) => self.plugin_act(p),
+            SAct::Check(k) if k == crate::prefs::COPY_USED_SAMPLES.label => self.toggle_copy_samples(),
             SAct::Check(k) if crate::prefs::find_check(k).is_some() => self.pref_toggle(k),
             SAct::Check(k) if k == views::settings::TRUNCATED_CHECK => self.toggle_play_truncated(),
             SAct::Check(k) if k == views::settings::CROSSFADES_CHECK => self.toggle_auto_crossfades(),
@@ -3807,6 +3811,8 @@ impl App {
             SAct::Button("Add folder...") => self.add_plugin_folder(),
             SAct::Button(views::settings::RESET_WORK_TIME) => self.reset_work_time(),
             SAct::Button(views::settings::MANAGE_SHORTCUTS) => return self.open_shortcuts(),
+            SAct::Button(crate::data_folder::RENAME) => self.open_rename(),
+            SAct::Button(crate::data_folder::SET_FOLDER) => self.data_folder_pick(),
             SAct::Button(b) => self.state.message = Some(off_text(b)),
             // The Info page's boxes (spec: ui/settings.md "Info").
             SAct::Info(f) => return self.info_act(f),
@@ -9102,6 +9108,7 @@ mod tests {
             crate::dialog::Body::Msg(m) => panic!("a message box is on top: {}", m.plain()),
             crate::dialog::Body::Shortcuts(_) => panic!("Manage shortcuts is on top"),
             crate::dialog::Body::TimeSig(_) => panic!("the time signature dialog is on top"),
+            crate::dialog::Body::Project(_) => panic!("a project form is on top"),
         }
     }
 

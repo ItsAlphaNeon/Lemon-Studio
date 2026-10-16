@@ -20,6 +20,7 @@ pub mod piano;
 pub mod patterns;
 pub mod perf;
 pub mod playlist;
+pub mod project_forms;
 pub mod rack;
 pub mod tapper;
 pub mod toolbar;

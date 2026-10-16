@@ -41,8 +41,8 @@ const ICON_X: f32 = 47.0;
 const LINE: f32 = 22.0;
 const MIN_W: f32 = 260.0;
 const MAX_W: f32 = 560.0;
-const BTN_W: f32 = 64.0;
-const BTN_H: f32 = 31.0;
+pub(super) const BTN_W: f32 = 64.0;
+pub(super) const BTN_H: f32 = 31.0;
 
 /// Every open dialog, bottom to top, each over a veil that covers the window (and what is under it).
 pub fn paint(ui: &mut Ui, s: &State) {
@@ -55,16 +55,17 @@ pub fn paint(ui: &mut Ui, s: &State) {
             Body::File(f) => file_box(ui, s, m, f),
             Body::Shortcuts(f) => shortcuts_box(ui, s, m, f),
             Body::TimeSig(f) => sig_box(ui, s, m, f),
+            Body::Project(f) => super::project_forms::paint(ui, s, m, f),
         }
     }
 }
 
-fn hit(ui: &mut Ui, r: Rect, h: DHit, hint: &'static str) -> bool {
+pub(super) fn hit(ui: &mut Ui, r: Rect, h: DHit, hint: &'static str) -> bool {
     ui.hit(r, Action::Dlg(h), hint)
 }
 
 /// Where a dialog of `w` x `h` sits: where its caption was dragged, else centred; inside the window either way.
-fn place(s: &State, m: &Modal, w: f32, h: f32) -> Rect {
+pub(super) fn place(s: &State, m: &Modal, w: f32, h: f32) -> Rect {
     let (sw, sh) = s.screen;
     let (x, y) = m.at.unwrap_or(((sw - w) / 2.0, (sh - h) / 2.0));
     let r = Rect::new(x.min(sw - w).max(0.0).round(), y.min(sh - h).max(0.0).round(), w, h);
@@ -73,7 +74,7 @@ fn place(s: &State, m: &Modal, w: f32, h: f32) -> Rect {
 }
 
 /// Border, caption (title, ×) and the frame colour under everything else.
-fn frame(ui: &mut Ui, r: Rect, title: &str) {
+pub(super) fn frame(ui: &mut Ui, r: Rect, title: &str) {
     let t = ui.t;
     let lemon = lemon(ui);
     hit(ui, r, DHit::Body, "");
@@ -98,7 +99,7 @@ fn frame(ui: &mut Ui, r: Rect, title: &str) {
 }
 
 /// A body panel: square with darker lines along its top and bottom (Classic), an outlined rounded panel (Lemon).
-fn panel(ui: &mut Ui, r: Rect) {
+pub(super) fn panel(ui: &mut Ui, r: Rect) {
     let t = ui.t;
     if lemon(ui) {
         lk::outlined(ui.c, r, lk::r_panel(t) - 2.0, t.s(PANEL_LINE), t.s(PANEL));
@@ -118,7 +119,7 @@ fn msg_box(ui: &mut Ui, s: &State, m: &Modal, msg: &Msg) {
     let lines = wrap(ui, font, &msg.text, MAX_W - TEXT_X - TEXT_R);
     let text_w = lines.iter().map(|l| line_width(ui, font, l)).fold(0.0, f32::max);
     let bf = Font::new(13);
-    let widths: Vec<f32> = msg.buttons.iter().map(|b| (ui.c.text_width(bf, b.label()) + 28.0).max(BTN_W).round()).collect();
+    let widths: Vec<f32> = (0..msg.buttons.len()).map(|i| (ui.c.text_width(bf, msg.label(i)) + 28.0).max(BTN_W).round()).collect();
     let buttons_w = widths.iter().sum::<f32>() + 6.0 * widths.len().saturating_sub(1) as f32;
     // Remember my choice sits left of the buttons (spec: ui/settings-choices.md "Hints and warnings: Manage messages
     // and Project data size warning (2026-10-16)").
@@ -146,12 +147,12 @@ fn msg_box(ui: &mut Ui, s: &State, m: &Modal, msg: &Msg) {
         super::remember_check(ui, r.x + 14.0, by + BTN_H / 2.0, ticked, Action::Dlg(DHit::Remember));
     }
     let mut bx = r.right() - 12.0 - buttons_w;
-    for (i, (a, bw)) in msg.buttons.iter().zip(widths).enumerate() {
+    for (i, bw) in widths.into_iter().enumerate() {
         let b = Rect::new(bx, by, bw, BTN_H);
         let act = Action::Dlg(DHit::Button(i));
         let down = ui.down(b, &act);
-        let hov = ui.hit(b, act, a.label());
-        button(ui, b, a.label(), i == msg.focus, hov, down, true);
+        let hov = ui.hit(b, act, msg.label(i));
+        button(ui, b, msg.label(i), i == msg.focus, hov, down, true);
         bx += bw + 6.0;
     }
 }
@@ -248,7 +249,7 @@ fn icon(ui: &mut Ui, kind: Kind, cx: f32, cy: f32) {
 
 /// A dialog button (spec §1d, §3). `main`: the focused (message box) or default (file dialog) button. `accel`: the first
 /// letter gets the dotted underline.
-fn button(ui: &mut Ui, b: Rect, label: &str, main: bool, hov: bool, down: bool, accel: bool) {
+pub(super) fn button(ui: &mut Ui, b: Rect, label: &str, main: bool, hov: bool, down: bool, accel: bool) {
     let t = ui.t;
     let ink = if lemon(ui) {
         let rad = lk::r_btn(t);
@@ -495,7 +496,7 @@ fn shortcut_list(ui: &mut Ui, f: &crate::shortcuts::Form, row: usize, b: Rect, d
 }
 
 /// A section panel with its header tab (as the Settings window's groups and FL's Save as form).
-fn section(ui: &mut Ui, p: Rect, title: &str) {
+pub(super) fn section(ui: &mut Ui, p: Rect, title: &str) {
     let t = ui.t;
     let f = Font::new(13).bold();
     if lemon(ui) {
@@ -516,7 +517,7 @@ fn section(ui: &mut Ui, p: Rect, title: &str) {
 }
 
 /// A square tool button with an icon; `on` = it can be used now.
-fn tool(ui: &mut Ui, r: Rect, icon: Icon, h: DHit, hint: &'static str, on: bool) {
+pub(super) fn tool(ui: &mut Ui, r: Rect, icon: Icon, h: DHit, hint: &'static str, on: bool) {
     let t = ui.t;
     let act = Action::Dlg(h);
     let down = on && ui.down(r, &act);
@@ -548,7 +549,7 @@ fn well(ui: &mut Ui, r: Rect, line: Option<Color>) {
 }
 
 /// A one-line text field: the text (scrolled so the caret shows), the selection or the caret while focused.
-fn field(ui: &mut Ui, r: Rect, fl: &Field, focused: bool, h: DHit, hint: &'static str) {
+pub(super) fn field(ui: &mut Ui, r: Rect, fl: &Field, focused: bool, h: DHit, hint: &'static str) {
     let t = ui.t;
     let lemon = lemon(ui);
     hit(ui, r, h, hint);
