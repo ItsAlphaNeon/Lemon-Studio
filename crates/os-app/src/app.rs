@@ -13961,9 +13961,9 @@ mod tests {
         for name in [
             "Open audio editor / New audio editor",
             "One-click audio recording",
-            "Launch content library",
             "Project picker / Plugin picker (Ctrl+F8)",
             "Touch controller (Alt+F7)",
+            "Plugin repository",
         ] {
             assert_eq!(hint(&app, &Action::Placeholder(name)), format!("{name}: not available yet"));
         }

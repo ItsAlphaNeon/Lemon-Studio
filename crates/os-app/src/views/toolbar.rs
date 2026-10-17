@@ -11,13 +11,13 @@ use super::{menus, sunken, tool_button, FrameInfo};
 use crate::app::{Action, Live, State, Ui, Util, Win};
 use crate::icons::{self, Icon};
 
-/// Leftmost logo centre: just right of the last toolbar control (row 1's last utility button, x 1473).
-const LOGO_MIN_X: f32 = 1520.0;
+/// Leftmost logo centre: just right of the last toolbar control (row 1's last utility button, x 1440).
+const LOGO_MIN_X: f32 = 1487.0;
 
-/// The band's width (its own px) from which every panel shows: the last utility button ends at x 1470. A narrower
+/// The band's width (its own px) from which every panel shows: the last utility button ends at x 1437. A narrower
 /// band leaves out the panels that don't fit, from the right, and draws the ▶ arrow at its right
 /// end (`room`). Spec: ui/ui-scaling.md §1 "Toolbars scaling".
-pub const FULL_W: f32 = 1473.0;
+pub const FULL_W: f32 = 1440.0;
 /// The ▶ arrow's width at the band's right end.
 pub const MORE_W: f32 = 18.0;
 /// The arrow's hint, short enough for the hint panel. A click on it does nothing (spec: ui/ui-scaling.md, Lemon Studio).
@@ -447,6 +447,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
     }
 
     // Utility buttons: "left / right" hints, right clicks in `App::toolbar_right` (spec: ui/toolbar-buttons.md §2).
+    // FL's last one, the content library's download, is left out (spec: ui/main-window.md §2).
     let utils = [
         (Icon::Undo, "Undo / Undo history (Ctrl+Z)"),
         (Icon::Cut, "Open audio editor / New audio editor"),
@@ -455,7 +456,6 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         (Icon::Save, "Save as... / Save new version (Shift+Ctrl+S)"),
         (Icon::SaveRender, "Export > Wave file... (Ctrl+R)"),
         (Icon::Info, "Project info (F11)"),
-        (Icon::Download, "Launch content library"),
     ];
     for (i, (icon, hint)) in utils.into_iter().enumerate() {
         let r = btn(1209.0 + 33.0 * i as f32, 4.0);
@@ -742,7 +742,8 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         (Icon::Plug, Action::PickerOpen, false, "Plugin picker (F8)"),
         (Icon::Kick, Action::ToggleWin(Win::Tapper), s.shown(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
         (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller (Alt+F7)"),
-        (Icon::Store, Action::Placeholder("Plugin store"), false, "Plugin store"),
+        // FL's store: kept, greyed, for a repository of free and open-source plugins (spec: ui/main-window.md §3).
+        (Icon::Plug, Action::Placeholder("Plugin repository"), false, "Plugin repository"),
     ];
     for (i, (icon, action, open, hint)) in wins.into_iter().enumerate() {
         let r = btn(973.0 + 33.0 * i as f32, 45.0);
@@ -958,6 +959,6 @@ mod tests {
         let (r, _) = more(&app).expect("the arrow");
         assert_eq!(r, Rect::new(1300.0 - MORE_W, 0.0, MORE_W, 81.0));
         assert!(has(&app, &Action::CpuPanel) && has(&app, &Action::PatternPrev));
-        assert!(!app.hits.iter().any(|h| h.hint == "About Lemon Studio" || h.hint == "Launch content library"));
+        assert!(!app.hits.iter().any(|h| h.hint == "About Lemon Studio" || h.hint == "Project info (F11)"));
     }
 }
