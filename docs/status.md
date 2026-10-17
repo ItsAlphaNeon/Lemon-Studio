@@ -84,7 +84,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Audio clips play at the sample's own level
 - Audio clip fades follow the measured fade curve. Automatic crossfades (Project settings) fade overlapping
   audio clips on a track into each other and follow moves, the tempo and undo; the playlist draws each one
-  as an X with a handle that bends both fades
+  as an X with a handle that bends both fades. Lemon Sampler gives each clip its own fades, so two clips of
+  one sample crossfade flat; another instrument on an audio clip channel shares one gain between overlapping
+  clips, so their crossfade dips
 - MP3 samples are placed as the original encoder output (the info frame plays as silence)
 - The sampler's closing fades
 - A fast resampler while playing, and the exact one for export

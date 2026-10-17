@@ -2419,10 +2419,15 @@ impl Engine {
             }
             let (l, r) = (&mut self.scratch.0[..n], &mut self.scratch.1[..n]);
             inst.process(self.rate, l, r);
-            // An instrument without voice gains: the clips' shapes on its whole output.
+            // An instrument without voice gains: the clips' shapes on its whole output. A clip that has ended keeps the
+            // channel silent through its choke's tail only while no other clip of the channel plays; then the playing
+            // clips' gains alone count. Clips that overlap still share one gain, so a crossfade between them dips.
             if !voiced && self.inst_shapes.iter().any(|s| s.channel == c) {
+                let shapes = &self.inst_shapes;
                 for f in 0..n {
-                    let g: f32 = self.inst_shapes.iter().filter(|s| s.channel == c).map(|s| s.shape.at(s.age + f as u64)).product();
+                    let ended = |s: &InstClip| s.shape.since + s.age + f as u64 >= s.shape.total;
+                    let playing = shapes.iter().any(|s| s.channel == c && !ended(s));
+                    let g: f32 = shapes.iter().filter(|s| s.channel == c && !(playing && ended(s))).map(|s| s.shape.at(s.age + f as u64)).product();
                     l[f] *= g;
                     r[f] *= g;
                 }
@@ -4631,6 +4636,8 @@ mod tests {
     /// over `VOICE_GAIN_FRAMES` frames; a voice's choke ends that voice alone, a key's choke all of them.
     #[derive(Default)]
     struct VoicedSampler {
+        /// Takes no voice gains (chokes still reach one voice): the engine shapes the whole output.
+        no_gains: bool,
         queue: Vec<(u32, VoicedEvent)>,
         /// (name, gain, glide step, glide target, frames left of the glide, a gain was given)
         voices: Vec<(Option<u32>, f32, f32, f32, u32, bool)>,
@@ -4655,7 +4662,7 @@ mod tests {
             self.queue.push((o, VoicedEvent::Start(Some(voice))));
         }
         fn voice_gains(&self) -> bool {
-            true
+            !self.no_gains
         }
         fn voice_gain(&mut self, o: u32, voice: u32, gain: f32) {
             self.queue.push((o, VoicedEvent::Gain(voice, gain)));
@@ -4753,6 +4760,34 @@ mod tests {
             assert!((second[2 * at(288)] - mid).abs() < 2e-4, "t {t}: {} vs {mid}", second[2 * at(288)]);
             assert!(second[2 * at(100)].abs() < 1e-6, "nothing before the second clip");
         }
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    // spec: audio/audio-clips.md "Fades and clip gain"
+    /// An instrument without voice gains gets the clips' shapes on its whole output. Where the first of two overlapping
+    /// clips ends, the second plays on at its own gain (the first's end no longer silences the channel for its choke's
+    /// tail), and once both have ended the channel is silent. In the overlap the two share one gain (not tested: it
+    /// dips, a known limit of such instruments).
+    #[test]
+    fn an_instrument_without_voice_gains_plays_the_second_clip_on() {
+        use os_model::{Clip, ClipSource};
+        let wav = std::env::temp_dir().join(format!("os-engine-unvoiced-crossfades-{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 2 * 96000]).unwrap();
+        let mut p = song(vec![], vec![Clip::new(0, 384, 0, ClipSource::Channel(0)), Clip::new(192, 384, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        p.auto_crossfades = Some(true);
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e.set_instrument(0, Arc::new(std::sync::Mutex::new(VoicedSampler { no_gains: true, ..Default::default() })));
+        let out = e.render_all(480);
+        let at = |t: u64| crate::clock::Clock::frame_of_tick(48000, 96, 130.0, t) as usize;
+        // A voice plays 0.5; before the overlap and after the first clip's end one voice plays at gain 1.
+        assert!((out[2 * at(100)] - 0.5).abs() < 1e-4, "before the overlap: {}", out[2 * at(100)]);
+        for tick in [390, 420, 480, 560] {
+            assert!((out[2 * at(tick)] - 0.5).abs() < 1e-4, "tick {tick}, after the first clip: {}", out[2 * at(tick)]);
+        }
+        assert!(out[2 * (at(576) + 10)].abs() < 1e-6, "silent after the second clip");
         let _ = std::fs::remove_file(&wav);
     }
 

@@ -237,6 +237,9 @@ impl Close {
 /// Frames between modulation updates: the voices' "tick" (**Lemon Studio**: a fixed 32 frames, where FL uses the
 /// sequencer's tick; filter coefficients, gain and pan targets change at these points).
 const CTL: usize = 32;
+// The engine sends a voice's gains every `VOICE_GAIN_FRAMES` frames from a block's start, and a voice glides to each over
+// that many frames: equal to `CTL`, they split no control span.
+const _: () = assert!(CTL == VOICE_GAIN_FRAMES as usize, "VOICE_GAIN_FRAMES (os-engine) and CTL must stay equal");
 
 /// A voice's pan gains for a pan position (−1..1, clamped): the constant-power split at √2, so a centred pan is 1 on
 /// both sides. The host applies the channel's own pan split on the instrument's output, so with either pan centred
