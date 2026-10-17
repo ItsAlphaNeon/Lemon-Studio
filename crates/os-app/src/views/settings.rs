@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Settings window (OPTIONS > MIDI / Audio / General / File / Theme settings, Project settings, Project info,
 //! Debugging log; F10 / F11): ten tabs of grouped controls. The controls that work today are listed in `LIVE` and
@@ -745,13 +743,16 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Gap(20.0),
                 Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
                 txt("A digital audio workstation written in Rust."),
+                txt("Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors."),
                 Gap(10.0),
-                txt("Licence: GNU General Public License v3."),
+                txt("Licence: GNU General Public License, version 3 or later."),
                 txt("Fonts: Cuprum (SIL Open Font License). Icons: Tabler Icons (MIT)."),
             ]),
             g("Licence", vec![
                 Big("Lemon Studio needs no account.".into()),
-                txt("It is free software under the GNU General Public License, version 3."),
+                txt("It is free software: you can redistribute it and/or modify it under the terms"),
+                txt("of the GNU General Public License, version 3 or (at your option) any later version."),
+                txt("It comes with ABSOLUTELY NO WARRANTY. Licence: https://www.gnu.org/licenses/"),
                 txt("No registration, no online services, no usage data."),
             ]),
         ],

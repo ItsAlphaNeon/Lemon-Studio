@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Tests host Lemon Studio's own plug-ins as VST 3 (built by `cargo run -p bundle-plugins` into `<target>/bundled`), and
 //! skip when they are not built. `OS_VST3_PLUGIN=<bundle or module>` adds any other plug-in to `hosts_a_plugin_from_env`.

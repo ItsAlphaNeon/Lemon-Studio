@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! A test plug-in built into the test binary: a gain effect whose edit controller is a separate class, the layout most
 //! VST 3 plug-ins use (Lemon Studio's own bundles are single-component). It covers what those bundles do not reach:
@@ -78,7 +76,7 @@ impl Probe {
 /// Counts a plug-in object as alive until it is freed.
 pub struct Live(Arc<Probe>);
 
-impl Live { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+impl Live { // This code is a part of L e m o n S t u d i o.
     fn new(p: &Arc<Probe>) -> Live {
         p.live.fetch_add(1, Ordering::AcqRel);
         Live(p.clone())

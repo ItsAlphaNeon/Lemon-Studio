@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Enable groups (toolbar, OPTIONS > Enable groups, Shift+Alt+G): while on, grouped playlist clips select, move and
 //! group as one; while off, each clip is on its own (the groups are kept). A program setting, not part of the project:
@@ -17,7 +15,7 @@ use std::sync::OnceLock;
 static ON: OnceLock<AtomicBool> = OnceLock::new();
 
 #[cfg(test)]
-thread_local! { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+thread_local! { // This code is a part of L e m o n S t u d i o.
     /// Tests run in parallel threads: each has its own switch, so one test turning it off never changes another's clicks.
     static TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }

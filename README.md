@@ -36,11 +36,6 @@
 
 ---
 
-> [!CAUTION]
-> **Not for use in ArtCraft.** Lemon Studio is Copyright (C) 2026 ItsAlphaNeon. This code, in its entirety, is not
-> to be used as part of the ArtCraft suite: no file, crate, plugin or tool from this repository, in whole or in part.
-> The [third-party components](#third-party-components) it includes keep their own licences.
-
 ## Overview
 
 Lemon Studio is a pattern-based music production environment: build patterns in a step sequencer and
@@ -288,8 +283,8 @@ cargo test --workspace
 Tests that need an audio device are marked `#[ignore]` and run with `cargo test -p os-app -- --ignored`.
 Project-file corpus tests run when `OPENSTUDIO_FLP_CORPUS` points to a text file listing `.flp` paths;
 project files are never committed to this repository.
-The watermark test (`cargo test -p watermark`) checks that every source file opens with the copyright and ArtCraft
-header, or with its shared form in a file that holds others' work.
+The watermark test (`cargo test -p watermark`) checks that every source file opens with its header: a copyright line
+for each of its copyright holders, its SPDX licence identifier and the project's name.
 
 ### Command-line tools
 
@@ -347,6 +342,10 @@ from developers who are comfortable with Rust and the pull-request workflow.
 All contributions must be **clean-room** work. Decompiled code, and code or pseudocode derived from
 decompiled output, will not be accepted in any form: the codebase must contain none of it.
 
+Contributors keep the copyright of their work and license it under the GPL, version 3 or later, like the rest of
+Lemon Studio. In each file you write or substantially change, add a line with your name or username to the copyright
+lines at the top of the header, `Copyright (C) <year> <name>`, and keep the lines already there.
+
 ## Community
 
 Join the [Lemon Studio Discord server](https://discord.gg/yC2uCuGs3M) to follow development and talk
@@ -360,24 +359,34 @@ about the project. Please keep in mind that support is not offered at this stage
 | [Barlow](https://github.com/jpt/barlow) by The Barlow Project Authors | Interface typeface on Linux and macOS | [SIL Open Font License 1.1](crates/os-ui/fonts/Barlow/OFL.txt) |
 | [Tabler Icons](https://tabler.io/icons) | Interface icons | [MIT](crates/os-ui/icons/TABLER-LICENSE.txt) |
 | [NIH-plug](https://github.com/robbert-vdh/nih-plug) | Plugin framework for Lemon Studio's plugins | ISC |
-| [vst3-sys](https://github.com/RustAudio/vst3-sys) | VST3 interface bindings (plugin hosting and Lemon Studio's plugins) | GPLv3 |
+| [vst3-sys](https://github.com/RustAudio/vst3-sys) | VST3 interface bindings (plugin hosting and Lemon Studio's plugins) | GPLv3 or later (its com crate MIT) |
 | [vst2sdk](https://github.com/Xaymar/vst2sdk) by Xaymar | Clean-room description of the VST2 interface, which `os-vst2`'s bindings are written from | [BSD 3-Clause](crates/os-vst2/LICENSE-vst2sdk.txt) |
 | [FST](https://git.iem.at/zmoelnig/FST) by IOhannes m zmölnig | Reverse-engineered VST2 interface: the parts vst2sdk leaves out (time info, edit gestures) | GPLv3 or later |
 | [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) by Geraint Luff / Signalsmith Audio Ltd, with Signalsmith Linear | Time stretching and pitch shifting | MIT |
 | [signalsmith-stretch](https://github.com/colinmarc/signalsmith-stretch-rs) by Colin Marc | Rust bindings to Signalsmith Stretch | MIT |
 | Rust crates listed in `Cargo.lock` | Various | Their respective licenses |
 
+Their copyright notices and licence texts are collected in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which
+goes with every copy of Lemon Studio next to [LICENSE](LICENSE). The notices of the other crates in `Cargo.lock` are
+to be added to it before binaries are published.
+
 ## License
 
-Copyright (C) 2026 ItsAlphaNeon.
+Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors. Each source file names its copyright holders in
+its header.
 
 Lemon Studio is free software: you can redistribute it and/or modify it under the terms of the
-[GNU General Public License](LICENSE), version 3 or (at your option) any later version.
+[GNU General Public License](LICENSE), version 3 or (at your option) any later version. It is distributed in the hope
+that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
-**This code, in its entirety, is not to be used as part of the ArtCraft suite.** That covers every file in this
-repository, in whole or in part, except the third-party components listed above, which keep their authors' copyright
-and licences. Every source file states this in its header; the two that hold others' work
-(`crates/os-vst2/src/abi.rs`, `crates/os-ui/src/tabler.rs`) say it covers Lemon Studio's own parts only.
+The third-party components listed above keep their authors' copyright and licences, whose notices are in
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt). The two source files that hold others' work
+(`crates/os-vst2/src/abi.rs`, `crates/os-ui/src/tabler.rs`) name it in their header.
+
+**A request, not a licence term.** As the author, I'd ask that Lemon Studio's code not be used in ArtCraft. This is
+only a request: it is not part of Lemon Studio's licence, adds no condition to the GPL, and takes away none of the
+rights the GPL gives you.
 
 ## Trademarks
 
@@ -392,5 +401,5 @@ property of their respective owners.
 <br>
 <img alt="" src="docs/assets/mark.png" width="48">
 <br>
-<sub>Copyright © 2026 ItsAlphaNeon. Not to be used as part of the ArtCraft suite.</sub>
+<sub>Copyright © 2026 ItsAlphaNeon and the Lemon Studio contributors. Free software under the GNU GPL, version 3 or later.</sub>
 </div>

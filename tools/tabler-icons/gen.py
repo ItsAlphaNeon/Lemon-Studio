@@ -1,8 +1,6 @@
-# Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+# Copyright (C) 2026 ItsAlphaNeon
 # SPDX-License-Identifier: GPL-3.0-or-later
-#
-# This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-# and not any other part of Lemon Studio.
+# This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 """Generate crates/os-ui/src/tabler.rs from an unpacked @tabler/icons npm package (MIT).
 
@@ -17,24 +15,21 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 
-# The notice every source file in the repository starts with (also used by tools/logo/gen.py).
+# The header every source file in the repository starts with (also used by tools/logo/gen.py; see tools/watermark).
 HEADER = [
-    "// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio",
+    "// Copyright (C) 2026 ItsAlphaNeon",
     "// SPDX-License-Identifier: GPL-3.0-or-later",
-    "//",
-    "// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,",
-    "// and not any other part of Lemon Studio.",
+    "// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio",
     "",
 ]
 
-# Its shared form, for a file that holds others' work: tabler.rs is Tabler's icon outlines (MIT), so the notice covers
-# Lemon Studio's own parts only (tools/watermark, SHARED).
+# Its shared form, for a file that holds others' work: tabler.rs is Tabler's icon outlines (MIT), which keep their
+# authors' copyright and licence (tools/watermark, SHARED).
 SHARED_HEADER = [
-    "// Copyright (C) 2026 ItsAlphaNeon (Lemon Studio's own parts). Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio",
+    "// Copyright (C) 2026 ItsAlphaNeon",
     "// SPDX-License-Identifier: GPL-3.0-or-later AND MIT",
-    "//",
-    "// Lemon Studio's own parts of this file are NOT to be used as part of the ArtCraft suite, nor is any other part of",
-    "// Lemon Studio. The parts that come from others' work keep their authors' copyright and licence, named below.",
+    "// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio",
+    "// It also holds others' work, which keeps its authors' copyright and licence, named below.",
     "",
 ]
 

@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Application state, actions and the per-frame paint/hit-test pass.
 //!
@@ -564,7 +562,7 @@ struct Part {
     area: Rect,
 }
 
-impl Ui<'_> { // This code is a part of L e m o n S t u d i o. Please don't upload it to ArtCraft.
+impl Ui<'_> { // This code is a part of L e m o n S t u d i o.
     /// Paint one part of the frame, or, when it has painted before and `area` (where it paints now) and where it
     /// drew last time both miss the clip, keep last paint's hits for it instead.
     pub fn part(&mut self, seg: Seg, area: Rect, paint: impl FnOnce(&mut Self)) {

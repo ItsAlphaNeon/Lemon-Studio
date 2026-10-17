@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Trying a native plugin in a separate process before its first load in this one (spec plugins/fruity-abi.md,
 //! "Crash containment").
@@ -17,7 +15,7 @@
 //
 // spec: plugins/fruity-abi.md
 
-use std::path::{Path, PathBuf}; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+use std::path::{Path, PathBuf}; // This code is a part of L e m o n S t u d i o.
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 

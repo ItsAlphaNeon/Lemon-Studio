@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The program's choices that outlive a run: one file in the user folder, `settings.txt`, never the project. Every
 //! app-wide choice the user makes and should find again at the next start is kept here under a stable key; a new
@@ -17,7 +15,7 @@
 //! `clock_mode`, `clock_middle_unit` (`clock::Clock`), `step_edit` (`crate::step_edit`), and the settings window's
 //! declared controls (`crate::prefs`).
 
-use std::sync::{Mutex, OnceLock}; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+use std::sync::{Mutex, OnceLock}; // This code is a part of L e m o n S t u d i o.
 
 /// The file's lines as read: lines of keys this version does not know are written back as they were.
 #[derive(Debug, Clone, Default, PartialEq)]
