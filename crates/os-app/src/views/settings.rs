@@ -508,7 +508,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]
         }
         GENERAL => vec![
-            Group { note: " (requires a restart to take effect)", ..gf("Display", false, vec![
+            // Display and Language apply at once, so they leave off FL's "(requires a restart to take effect)" (spec:
+            // ui/settings.md "General").
+            gf("Display", false, vec![
                 combo("System", 64.0, "Main GUI scaling"),
                 // spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High visibility
                 // (2026-10-16)".
@@ -525,13 +527,13 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Check("Thick lines", false),
                 Check("High visibility", false),
                 combo("Off", 146.0, "Colorful waveforms"),
-            ]) },
-            Group { note: " (requires a restart to take effect)", ..gf("Language", false, vec![
+            ]),
+            gf("Language", false, vec![
                 combo("English (US) (en)", 176.0, "Language"),
                 combo("English", 176.0, "Note names"),
                 combo("Sharps - #", 96.0, "Black notes"),
                 Buttons(vec![("Update languages", 138.0)]),
-            ]) },
+            ]),
             gf("Input", false, vec![
                 combo("Multi-button mouse", 136.0, "Optimize for"),
                 Buttons(vec![(MANAGE_SHORTCUTS, 212.0)]),
