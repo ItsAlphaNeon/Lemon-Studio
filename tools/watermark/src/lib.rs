@@ -1,15 +1,24 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The repository watermark: every source file opens with a header naming ItsAlphaNeon as copyright holder, the SPDX
-//! licence identifier, and the notice that this code, in its entirety, is not to be used as part of the ArtCraft suite.
-//! `cargo test -p watermark` (part of `cargo test --workspace`) fails on any source file without it.
+//! The repository watermark: every source file opens with a header naming its copyright holders, the SPDX licence
+//! identifier and the project it is part of. `cargo test -p watermark` (part of `cargo test --workspace`) fails on any
+//! source file without it.
 //!
-//! The header is the same five lines in each language's comments, followed by an empty line. It comes first in the
-//! file, after the `#!` line in a script that has one:
+//! ```text
+//! // Copyright (C) 2026 ItsAlphaNeon
+//! // Copyright (C) 2026 another-contributor
+//! // SPDX-License-Identifier: GPL-3.0-or-later
+//! // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+//! ```
+//!
+//! The header opens with one `Copyright (C) <years> <name>` line per copyright holder, at least one. Whoever writes a
+//! file, or changes one substantially, adds a line with their own name or username; the lines already there stay. The
+//! years are a year, a range (`2026-2027`) or a list of them (`2026, 2028-2029`). Then come the SPDX line and the line
+//! naming the project, and an empty line.
+//!
+//! The header is in each language's comments. It comes first in the file, after the `#!` line in a script that has one:
 //!
 //! - `//` in Rust and resource scripts (`.rs`, `.rc`)
 //! - `/*`, then ` * ` lines and ` */`, in C and its relatives (`.c`, `.h`, `.cpp`, `.hpp`, `.m`, `.mm`)
@@ -18,33 +27,24 @@
 //! The Tabler icon and logo generators (`tools/tabler-icons/gen.py`, `tools/logo/gen.py`) write it into the files they
 //! generate.
 //!
-//! A file that holds others' work (listed in `SHARED`, with the licences of those parts) opens with the header's shared
-//! form instead: the copyright and the ArtCraft notice cover Lemon Studio's own parts only, the parts from others keep
-//! their authors' copyright and licence (the file names them), and the SPDX identifier names both licences. Neither
-//! notice is put on others' work: it is not Lemon Studio's to claim, and GPL-licensed parts allow no further
-//! restriction (GPL-3.0 §10).
+//! A file that holds others' work (listed in `SHARED`, with the licences of those parts) names both licences in its SPDX
+//! line and adds a line saying that those parts keep their authors' copyright and licence, which the file names below
+//! the header.
 
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    /// The header's lines, without their comment markers.
-    const HEADER: [&str; 5] = [
-        "Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio",
-        "SPDX-License-Identifier: GPL-3.0-or-later",
-        "",
-        "This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,",
-        "and not any other part of Lemon Studio.",
-    ];
+    /// The header's lines after its copyright lines, without their comment markers; `{spdx}` is the file's licence
+    /// expression.
+    const HEADER: [&str; 2] =
+        ["SPDX-License-Identifier: {spdx}", "This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio"];
 
-    /// The shared form's lines; `{spdx}` is the file's licence expression from `SHARED`.
-    const SHARED_HEADER: [&str; 5] = [
-        "Copyright (C) 2026 ItsAlphaNeon (Lemon Studio's own parts). Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio",
-        "SPDX-License-Identifier: {spdx}",
-        "",
-        "Lemon Studio's own parts of this file are NOT to be used as part of the ArtCraft suite, nor is any other part of",
-        "Lemon Studio. The parts that come from others' work keep their authors' copyright and licence, named below.",
-    ];
+    /// Lemon Studio's licence expression.
+    const LICENCE: &str = "GPL-3.0-or-later";
+
+    /// The line a file that holds others' work adds after the header's lines.
+    const SHARED_NOTE: &str = "It also holds others' work, which keeps its authors' copyright and licence, named below.";
 
     /// The files that hold others' work (paths from the repository root) and their licence expression.
     const SHARED: [(&str, &str); 2] = [
@@ -54,12 +54,35 @@ mod tests {
         ("crates/os-ui/src/tabler.rs", "GPL-3.0-or-later AND MIT"),
     ];
 
-    /// The header lines a file needs: the shared form with its licence for a file in `SHARED`, else the header.
+    /// The header lines a file needs after its copyright lines: with its licence expression, and the note for a file in
+    /// `SHARED`.
     fn lines_for(rel: &str) -> Vec<String> {
-        match SHARED.iter().find(|(path, _)| *path == rel) {
-            Some((_, spdx)) => SHARED_HEADER.iter().map(|l| l.replace("{spdx}", spdx)).collect(),
-            None => HEADER.iter().map(|l| l.to_string()).collect(),
+        let shared = SHARED.iter().find(|(path, _)| *path == rel);
+        let spdx = shared.map_or(LICENCE, |(_, spdx)| spdx);
+        let mut lines: Vec<String> = HEADER.iter().map(|l| l.replace("{spdx}", spdx)).collect();
+        lines.extend(shared.map(|_| SHARED_NOTE.to_string()));
+        lines
+    }
+
+    /// Whether `text` is a copyright line: `Copyright (C) `, the years (a year or a range like `2026-2027`, or a list of
+    /// them separated by `, `), a space and a name.
+    fn is_copyright(text: &str) -> bool {
+        let year = |s: &str| s.len() >= 4 && s.as_bytes()[..4].iter().all(u8::is_ascii_digit);
+        let Some(mut rest) = text.strip_prefix("Copyright (C) ") else { return false };
+        loop {
+            if !year(rest) {
+                return false;
+            }
+            rest = &rest[4..];
+            if let Some(end) = rest.strip_prefix('-').filter(|r| year(r)) {
+                rest = &end[4..];
+            }
+            match rest.strip_prefix(", ") {
+                Some(more) => rest = more,
+                None => break,
+            }
         }
+        rest.strip_prefix(' ').is_some_and(|name| !name.trim().is_empty())
     }
 
     /// How a source file writes comments.
@@ -83,27 +106,52 @@ mod tests {
         }
     }
 
-    /// Header lines `text` written in `style`.
-    fn header(style: Style, text: &[String]) -> Vec<String> {
-        let line = |marker: &str, text: &str| if text.is_empty() { marker.into() } else { format!("{marker} {text}") };
+    /// A style's comment markers: the first line's, the other lines', and the line that closes the comment if any.
+    fn markers(style: Style) -> (&'static str, &'static str, Option<&'static str>) {
         match style {
-            Style::Slash => text.iter().map(|t| line("//", t)).collect(),
-            Style::Hash => text.iter().map(|t| line("#", t)).collect(),
-            Style::Block => {
-                let mut lines: Vec<String> =
-                    text.iter().enumerate().map(|(i, t)| line(if i == 0 { "/*" } else { " *" }, t)).collect();
-                lines.push(" */".into());
-                lines
-            }
+            Style::Slash => ("//", "//", None),
+            Style::Hash => ("#", "#", None),
+            Style::Block => ("/*", " *", Some(" */")),
         }
     }
 
-    /// Whether `text` opens with header lines `want` in `style`, after a `#!` line if it has one, followed by an empty
-    /// line.
+    /// `text` as a comment line with `marker`.
+    fn line(marker: &str, text: &str) -> String {
+        if text.is_empty() { marker.into() } else { format!("{marker} {text}") }
+    }
+
+    /// Header lines `text` written in `style`.
+    fn header(style: Style, text: &[String]) -> Vec<String> {
+        let (first, other, close) = markers(style);
+        let mut lines: Vec<String> =
+            text.iter().enumerate().map(|(i, t)| line(if i == 0 { first } else { other }, t)).collect();
+        lines.extend(close.map(String::from));
+        lines
+    }
+
+    /// Whether `text` opens with a header in `style`, after a `#!` line if it has one: one or more copyright lines, then
+    /// lines `want`, followed by an empty line.
     fn has_header(text: &str, style: Style, want: &[String]) -> bool {
+        let (first, other, close) = markers(style);
         let mut lines = text.strip_prefix('\u{feff}').unwrap_or(text).lines().peekable();
         lines.next_if(|l| l.starts_with("#!"));
-        header(style, want).iter().all(|h| lines.next() == Some(h.as_str())) && lines.next().is_none_or(str::is_empty)
+        let mut holders = 0;
+        while lines
+            .next_if(|l| {
+                let marker = if holders == 0 { first } else { other };
+                l.strip_prefix(marker).and_then(|l| l.strip_prefix(' ')).is_some_and(is_copyright)
+            })
+            .is_some()
+        {
+            holders += 1;
+        }
+        let rest: Vec<String> = want.iter().map(|t| line(other, t)).chain(close.map(String::from)).collect();
+        holders > 0 && rest.iter().all(|h| lines.next() == Some(h.as_str())) && lines.next().is_none_or(str::is_empty)
+    }
+
+    /// Copyright lines `holders`, then lines `want`: a whole header's text.
+    fn with_holders(holders: &[&str], want: &[String]) -> Vec<String> {
+        holders.iter().map(|h| h.to_string()).chain(want.iter().cloned()).collect()
     }
 
     /// The source files under `dir`, leaving out what `.gitignore` keeps out of the repository: build output (`target`,
@@ -125,8 +173,8 @@ mod tests {
         }
     }
 
-    /// Every source file in the repository opens with the header, or its shared form for a file that holds others'
-    /// work (see the crate documentation).
+    /// Every source file in the repository opens with the header, with the note for a file that holds others' work (see
+    /// the crate documentation).
     #[test]
     fn every_source_file_has_the_header() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -144,17 +192,19 @@ mod tests {
             .map(|(path, _)| rel(path))
             .collect();
         missing.sort();
+        let example = ["Copyright (C) 2026 ItsAlphaNeon", "Copyright (C) 2026 your-name"];
         assert!(
             missing.is_empty(),
             "{} of {} source files don't open with the repository header:\n  {}\n\nA source file starts with these \
              lines and an empty line, after its #! line if it has one (# comments in Python and shell, /* */ in \
-             C):\n\n{}\n\nA file that holds others' work is listed in SHARED (tools/watermark) and starts with the \
-             shared form instead, its licence expression in the SPDX line:\n\n{}\n",
+             C). It has one copyright line for each of its copyright holders, at least one:\n\n{}\n\nA file that holds \
+             others' work is listed in SHARED (tools/watermark), its licence expression goes in the SPDX line, and it \
+             adds a line:\n\n{}\n",
             missing.len(),
             files.len(),
             missing.join("\n  "),
-            header(Style::Slash, &lines_for("")).join("\n"),
-            header(Style::Slash, &SHARED_HEADER.map(String::from)).join("\n")
+            header(Style::Slash, &with_holders(&example, &lines_for(""))).join("\n"),
+            header(Style::Slash, &with_holders(&example[..1], &lines_for("crates/os-ui/src/tabler.rs"))).join("\n")
         );
     }
 
@@ -163,29 +213,58 @@ mod tests {
     #[test]
     fn header_check() {
         let own = lines_for("crates/os-app/src/main.rs");
-        let slash = header(Style::Slash, &own).join("\n");
+        let whole = with_holders(&["Copyright (C) 2026 ItsAlphaNeon"], &own);
+        let slash = header(Style::Slash, &whole).join("\n");
         assert!(has_header(&format!("{slash}\n\n//! Docs.\n"), Style::Slash, &own));
         assert!(has_header(&format!("{slash}\n\n//! Docs.\n").replace('\n', "\r\n"), Style::Slash, &own));
-        assert!(has_header(&format!("{}\n\nint x;\n", header(Style::Block, &own).join("\n")), Style::Block, &own));
-        assert!(has_header(&format!("#!/bin/sh\n{}\n\necho\n", header(Style::Hash, &own).join("\n")), Style::Hash, &own));
+        assert!(has_header(&format!("{slash}\n"), Style::Slash, &own), "a file that is only the header");
+        assert!(has_header(&format!("{}\n\nint x;\n", header(Style::Block, &whole).join("\n")), Style::Block, &own));
+        assert!(has_header(&format!("#!/bin/sh\n{}\n\necho\n", header(Style::Hash, &whole).join("\n")), Style::Hash, &own));
 
         assert!(!has_header("//! Docs.\n", Style::Slash, &own));
-        assert!(!has_header(&format!("{}\n\n", header(Style::Hash, &own).join("\n")), Style::Slash, &own));
+        assert!(!has_header(&format!("{}\n\n", header(Style::Hash, &whole).join("\n")), Style::Slash, &own));
         assert!(!has_header(&format!("//! Docs.\n{slash}\n\n"), Style::Slash, &own));
         assert!(!has_header(&format!("{slash}\n//! Docs.\n"), Style::Slash, &own));
     }
 
-    /// A file that holds others' work needs the shared form, with its own licence expression; the full header does not
-    /// count there, and the shared form does not count anywhere else.
+    /// A file can have several copyright holders, each with their own years, and needs at least one; a copyright line
+    /// needs its years and a name, and comes before the other lines.
+    #[test]
+    fn copyright_holders() {
+        let own = lines_for("crates/os-app/src/main.rs");
+        let check = |style: Style, holders: &[&str]| {
+            has_header(&format!("{}\n\n", header(style, &with_holders(holders, &own)).join("\n")), style, &own)
+        };
+        let several = ["Copyright (C) 2026 ItsAlphaNeon", "Copyright (C) 2026-2027 someone_else", "Copyright (C) 2026, 2028-2029 Third Person"];
+        assert!(check(Style::Slash, &several));
+        assert!(check(Style::Block, &several));
+        assert!(check(Style::Hash, &several));
+        assert!(check(Style::Slash, &["Copyright (C) 2027 a-contributor"]), "a file without ItsAlphaNeon");
+        assert!(check(Style::Slash, &["Copyright (C) 2026 Some Name <some@example.com>"]));
+
+        assert!(!check(Style::Slash, &[]), "no copyright line");
+        for bad in ["Copyright (C) ItsAlphaNeon", "Copyright (C) 2026", "Copyright (C) 2026 ", "Copyright 2026 ItsAlphaNeon", "Copyright (C) 26 ItsAlphaNeon", "Copyright (C) 2026-27 ItsAlphaNeon", "Copyright (C) 2026,2027 ItsAlphaNeon"] {
+            assert!(!is_copyright(bad), "{bad:?}");
+            assert!(!check(Style::Slash, &[bad]), "{bad:?}");
+            assert!(!check(Style::Slash, &["Copyright (C) 2026 ItsAlphaNeon", bad]), "{bad:?} after a good line");
+        }
+        let after = format!("{}\n// Copyright (C) 2026 someone_else\n\n", header(Style::Slash, &with_holders(&["Copyright (C) 2026 ItsAlphaNeon"], &own)).join("\n"));
+        assert!(!has_header(&after, Style::Slash, &own), "a copyright line after the header");
+    }
+
+    /// A file that holds others' work needs its licence expression and the note; the plain header does not count there,
+    /// and the note does not count anywhere else.
     #[test]
     fn shared_header_check() {
         let shared = lines_for("crates/os-ui/src/tabler.rs");
-        assert_eq!(shared[1], "SPDX-License-Identifier: GPL-3.0-or-later AND MIT");
-        let text = format!("{}\n\n//! Icons.\n", header(Style::Slash, &shared).join("\n"));
+        assert_eq!(shared[0], "SPDX-License-Identifier: GPL-3.0-or-later AND MIT");
+        assert_eq!(shared.last().map(String::as_str), Some(SHARED_NOTE));
+        let holders = ["Copyright (C) 2026 ItsAlphaNeon"];
+        let text = format!("{}\n\n//! Icons.\n", header(Style::Slash, &with_holders(&holders, &shared)).join("\n"));
         assert!(has_header(&text, Style::Slash, &shared));
         let own = lines_for("crates/os-app/src/main.rs");
         assert!(!has_header(&text, Style::Slash, &own));
-        assert!(!has_header(&format!("{}\n\n", header(Style::Slash, &own).join("\n")), Style::Slash, &shared));
+        assert!(!has_header(&format!("{}\n\n", header(Style::Slash, &with_holders(&holders, &own)).join("\n")), Style::Slash, &shared));
         assert!(!has_header(&text, Style::Slash, &lines_for("crates/os-vst2/src/abi.rs")), "another licence expression");
     }
 }

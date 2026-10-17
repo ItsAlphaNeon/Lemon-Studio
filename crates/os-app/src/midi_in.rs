@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! MIDI controller input: every MIDI input device is opened at start, and note messages play the selected channel like
 //! the typing keyboard does. Device choice and other messages (controllers, pitch bend) are not handled yet.
@@ -110,7 +108,7 @@ mod tests {
     /// --ignored`.
     #[test]
     #[ignore]
-    fn midi_loopback() { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+    fn midi_loopback() { // This code is a part of L e m o n S t u d i o.
         use std::sync::atomic::{AtomicUsize, Ordering};
         static WAKES: AtomicUsize = AtomicUsize::new(0);
         fn wake() {
