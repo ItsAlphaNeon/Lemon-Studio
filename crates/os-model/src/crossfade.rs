@@ -102,7 +102,8 @@ pub fn overlaps_of(channels: &[Channel], clips: &[Clip], i: usize) -> Overlaps {
     out
 }
 
-/// `ticks` in milliseconds at `tempo` (BPM) and `ppq`: the unit of a fade's length.
+/// `ticks` in milliseconds at `tempo` (quarter notes a minute: the project's [`Project::tick_tempo`]) and `ppq`: the
+/// unit of a fade's length.
 pub fn ms(ticks: u32, tempo: f64, ppq: u16) -> f32 {
     (f64::from(ticks) * 60_000.0 / (tempo.max(1.0) * f64::from(ppq.max(1)))) as f32
 }
@@ -162,11 +163,13 @@ fn derive_clips(channels: &[Channel], clips: &mut [Clip], tempo: f64, ppq: u16) 
 /// arrangement: a fade-in to its longest overlap with an earlier clip, keeping its own tension `t`; a fade-out to its
 /// longest overlap with a later clip, with that clip's fade-in tension negated, so the two gains add up to 1; 0 where
 /// nothing overlaps, the tension kept. Edges with their bit set, and the bits, stay. `tempo` is the project's tempo
-/// (the lengths are milliseconds). Returns whether a record changed; nothing changes while the switch is off.
+/// (the lengths are milliseconds, at the tempo the ticks run at). Returns whether a record changed; nothing changes
+/// while the switch is off.
 pub fn derive(project: &mut Project, tempo: f64) -> bool {
     if !on(project) {
         return false;
     }
+    let tempo = project.tick_tempo(tempo);
     let Project { channels, arrangements, ppq, .. } = project;
     let mut changed = false;
     for a in arrangements.iter_mut() {
@@ -202,7 +205,7 @@ pub fn playing(project: &Project, clips: &[Clip], tempo: f64) -> Vec<(Option<Fad
         return clips.iter().map(fades).collect();
     }
     let mut own = clips.to_vec();
-    derive_clips(&project.channels, &mut own, tempo, project.ppq);
+    derive_clips(&project.channels, &mut own, project.tick_tempo(tempo), project.ppq);
     own.iter().map(fades).collect()
 }
 
@@ -456,6 +459,16 @@ mod tests {
         assert!(derive(&mut p, 65.0));
         assert!((lengths(&p)[1].0 - 2.0 * XF).abs() < 1e-3);
         assert_eq!(playing(&p, clips(&p), 120.0)[1].0.unwrap().0, ms(240, 120.0, 96));
+    }
+
+    #[test]
+    fn lengths_follow_the_bars_beat() {
+        // In 3/8 the tempo counts eighths: the ticks run at half the speed, so 240 ticks take twice as long.
+        let mut p = project(vec![audio(0, 480, 0), audio(240, 480, 0)]);
+        p.bar = Some((3, 2));
+        assert!(derive(&mut p, 130.0));
+        assert!((lengths(&p)[1].0 - 2.0 * XF).abs() < 1e-3, "{:?}", lengths(&p));
+        assert_eq!(playing(&p, clips(&p), 130.0)[1].0.unwrap().0, ms(240, 65.0, 96));
     }
 
     #[test]

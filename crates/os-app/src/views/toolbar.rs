@@ -369,7 +369,8 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
     let ppq = f64::from(s.project.ppq.max(1));
     // A bar that makes no signature (3 steps per beat) counts its beats as quarters.
     let sig = s.project.signature().unwrap_or((s.project.bar().0, 4));
-    let (bar, step, tick) = s.clock.reading(f.tick / ppq * 60.0 / s.tempo.max(1.0), f.tick * 96.0 / ppq, sig);
+    let secs = f.tick / ppq * 60.0 / s.project.tick_tempo(s.tempo.max(1.0));
+    let (bar, step, tick) = s.clock.reading(secs, f.tick * 96.0 / ppq, sig);
     // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
     // right-aligned so long bar numbers grow to the left and never leave the panel.
     let (big, small) = (Font::light(32, 13), Font::light(22, 8));

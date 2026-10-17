@@ -713,13 +713,9 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             .map(|d| decode_text(d, TextEnc::Ansi))
             .unwrap_or_default(),
         ppq: header.ppq().unwrap_or(96),
-        // The initial values' tempo record, when there is one, wins over event 156 (spec: flp/engine-events.md "Event
-        // 216").
-        tempo: init_controls
-            .iter()
-            .find(|c| c.target == os_model::target::TEMPO)
-            .map(|c| f64::from(c.value) / 1000.0)
-            .or_else(|| l.tempo.map(|i| f64::from(int(&events[i])) / 1000.0)),
+        // The stored tempo. The initial values' tempo record is not read into it: the app sets the initial values on
+        // opening in song mode, as FL does (spec: flp/engine-events.md "Event 216").
+        tempo: l.tempo.map(|i| f64::from(int(&events[i])) / 1000.0),
         info: ProjectInfo {
             title: text(l.title),
             author: text(l.author),
@@ -1888,7 +1884,6 @@ fn plugin_record(slot: Option<(u16, u8)>) -> Vec<u8> {
 
 fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
     let params = l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[]);
-    let init = l.init_controls.and_then(|i| events[i].data()).unwrap_or(&[]);
     let mut out = Vec::new();
     // Track boundaries: header start of track n .. header start of track n+1.
     let starts: Vec<usize> = l
@@ -1938,9 +1933,9 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         let mut slot_mix = [1.0; 10];
         let rt = record_track(index, l.mixer.len());
         let base = mixer_location(rt, 0);
-        // The initial values' records of a slot's switch and mix level win over event 225's (spec: flp/engine-events.md
-        // "Event 216"): read after them.
-        for (_, pid, kind, loc, v) in mixer_param_records(params).chain(mixer_param_records(init)) {
+        // The stored switch and mix level; the initial values' records for them are set by the app on opening in song
+        // mode (spec: flp/engine-events.md "Event 216").
+        for (_, pid, kind, loc, v) in mixer_param_records(params) {
             if kind == MX_KIND_PARAM && (base..base + 10).contains(&loc) {
                 let s = usize::from(loc - base);
                 match pid {
@@ -2211,11 +2206,8 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     let mut inserts: Vec<(usize, Event)> = Vec::new();
     let mut removals: Vec<usize> = Vec::new();
 
-    // Project info. The tempo the file reads is the initial values' tempo record when there is one (spec:
-    // flp/engine-events.md "Event 216"): without one in the model, event 156 has to hold the project's tempo.
-    let reads_156 = !project.init_controls.iter().any(|c| c.target == os_model::target::TEMPO);
-    let tempo_156 = l.tempo.map(|i| f64::from(int(&events[i])) / 1000.0);
-    if let (Some(i), Some(t)) = (l.tempo, project.tempo.filter(|&t| Some(t) != current.tempo || (reads_156 && Some(t) != tempo_156))) {
+    // Project info.
+    if let (Some(i), Some(t)) = (l.tempo, project.tempo.filter(|&t| Some(t) != current.tempo)) {
         set_int(&mut events[i], (t * 1000.0).round() as u32);
     }
     // Title, genre, author, comments, URL (spec: flp/events/project-info.md). A changed text is patched in place. A
@@ -4404,9 +4396,10 @@ mod tests {
 
     /// The initial values (event 216; spec: ui/settings-choices.md "Advanced: Initialize controls automatically",
     /// flp/engine-events.md "Event 216"): `create` writes the event in every project, empty without values; the records
-    /// read back, one Lemon Studio doesn't understand (a plugin parameter's) byte for byte; the tempo record wins over
-    /// event 156 and a slot's switch and mix records over event 225's; `apply` rewrites the list in place and adds the
-    /// event after 146 to a file without it.
+    /// read back, one Lemon Studio doesn't understand (a plugin parameter's) byte for byte; they are not read into the
+    /// stored settings (event 156 stays the tempo, event 225 a slot's switch and mix level: the app sets the initial
+    /// values on opening in song mode); `apply` rewrites the list in place and adds the event after 146 to a file
+    /// without it.
     #[test]
     fn initial_values_round_trip() {
         use os_model::target;
@@ -4441,10 +4434,10 @@ mod tests {
         assert_eq!(data[12..24], plugin.to_bytes());
         let back = load(&file).unwrap();
         assert_eq!(back.init_controls, p.init_controls);
-        // Event 156 holds 128.5; the initial tempo wins. So do the slot's initial switch and mix level.
+        // Event 156 holds 128.5 and stays the tempo; the slot keeps its stored switch and mix level.
         assert_eq!(int(&ev[ev.iter().position(|e| e.id == id::TEMPO).unwrap()]), 128_500);
-        assert_eq!(back.tempo, Some(99.5));
-        assert_eq!((back.mixer[2].slot_on[3], back.mixer[2].slot_mix[3]), (false, 0.75));
+        assert_eq!(back.tempo, Some(128.5));
+        assert_eq!((back.mixer[2].slot_on[3], back.mixer[2].slot_mix[3]), (true, 0.25));
 
         // Unchanged, the file stays as it is; a changed list is written in place, unknown records kept.
         let before = file.to_bytes().unwrap();
@@ -4453,11 +4446,14 @@ mod tests {
         let mut edited = back.clone();
         edited.init_controls.retain(|c| c.target != target::TEMPO);
         edited.init_controls[0].value = 6400;
+        // The values set on opening are saved as the stored settings, as FL saves them.
+        edited.tempo = Some(99.5);
+        edited.mixer[2].slot_on[3] = false;
         apply(&edited, &mut file).unwrap();
         let again = load(&file).unwrap();
         assert_eq!(again.init_controls, edited.init_controls);
         assert_eq!(again.init_controls[1].to_bytes(), plugin.to_bytes());
-        assert_eq!(again.tempo, Some(99.5), "without the record event 156 takes the project's tempo");
+        assert_eq!((again.tempo, again.mixer[2].slot_on[3]), (Some(99.5), false));
         edited.init_controls.clear();
         apply(&edited, &mut file).unwrap();
         assert_eq!(event_data(&file, id::INIT_CONTROLS), Some(vec![]), "an empty list keeps the event, length 0");

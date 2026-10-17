@@ -1358,6 +1358,9 @@ impl App {
                 s.mixer_scroll = 0.0;
                 s.song_mode = project.arrangement().is_some_and(|a| !a.clips.is_empty());
                 s.project = project;
+                // Opening in song mode sets the initial values, as FL 26 does (spec: flp/engine-events.md "Event
+                // 216"); the project is opened with them, not changed.
+                crate::init::apply(s);
                 crate::project_info::opened(s);
                 crate::rack::from_model(s);
                 s.file = Some(file);
@@ -12477,6 +12480,35 @@ mod tests {
         app.state.project.channels[row].sound.stretch = [0; 4];
         app.tick();
         assert!(app.unsaved(), "a stretch edit is");
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    /// The tempo counts the bar's beats (spec: audio/timing.md "The tempo counts the bar's beats"): FL 26 gives a 4 s
+    /// sample at 140 BPM and PPQ 96 a clip of 448 ticks in 3/8, 896 in 4/4 (4 s × 140 / 60 × 96 × steps / 4). A
+    /// stretch TIME is in quarter notes and keeps its ticks.
+    #[test]
+    fn audio_clips_fit_the_bars_beat() {
+        use crate::playlist as pl;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.ppq = 96;
+        app.state.tempo = 140.0;
+        app.state.playlist.reset();
+        let wav = std::env::temp_dir().join(format!("os-app-fit-bar-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &vec![0.25; 2 * 176400]).unwrap();
+        app.state.project.bar = Some((3, 2));
+        pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let row = app.state.project.channels.len() - 1;
+        let len = |app: &App| pl::clips(&app.state).last().unwrap().length;
+        assert_eq!(len(&app), 448, "3/8");
+        for (bar, want) in [(Some((4, 4)), 896), (Some((3, 8)), 1792), (Some((5, 3)), 672), (Some((3, 2)), 448)] {
+            app.state.project.bar = bar;
+            pl::fit_audio(&mut app.state);
+            assert_eq!(len(&app), want, "{bar:?}");
+        }
+        app.state.project.channels[row].sound.stretch = [488f32.to_bits(), 0, 0, 0];
+        pl::fit_audio(&mut app.state);
+        assert_eq!(len(&app), 244, "TIME 0:10:04 in 3/8");
         let _ = std::fs::remove_file(&wav);
     }
 

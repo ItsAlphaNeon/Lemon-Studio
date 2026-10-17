@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The metronome: while its switch is on, a click on every quarter note of the playing position, accented on every
-//! `numerator`-th, added to the master track's input (so the master track and the main volume apply to it). Live
+//! The metronome: while its switch is on, a click on every beat of the playing position (the bar's beat: a quarter
+//! in x/4, an eighth in 3/8), accented on every `numerator`-th, added to the master track's input (so the master track and the main volume apply to it). Live
 //! playback only: an export never clicks. The five sounds are Lemon Studio's own, synthesized here.
 // spec: ui/metronome.md
 
@@ -181,11 +181,12 @@ impl Metronome {
         &self.switch
     }
 
-    /// The tick at position `tick` starts: with `start` (the song is not over) and the switch on, a beat (every `ppq`
-    /// ticks) starts a click, accented on every `numerator`-th beat counted from position 0. Then whatever click is
-    /// sounding is added to `out` (interleaved stereo, the tick's frames); a new click cuts the one before.
-    pub fn tick(&mut self, tick: u64, ppq: u16, numerator: u16, start: bool, out: &mut [f32]) {
-        let ppq = u64::from(ppq.max(1));
+    /// The tick at position `tick` starts: with `start` (the song is not over) and the switch on, a beat (every `beat`
+    /// ticks: `Project::beat_ticks`) starts a click, accented on every `numerator`-th beat counted from position 0.
+    /// Then whatever click is sounding is added to `out` (interleaved stereo, the tick's frames); a new click cuts the
+    /// one before.
+    pub fn tick(&mut self, tick: u64, beat: u32, numerator: u16, start: bool, out: &mut [f32]) {
+        let ppq = u64::from(beat.max(1));
         if start && tick % ppq == 0 && self.switch.on() {
             let sound = self.switch.sound();
             if self.clicks.as_ref().is_none_or(|(s, _)| *s != sound) {

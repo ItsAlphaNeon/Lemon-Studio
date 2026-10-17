@@ -204,6 +204,20 @@ impl Project {
         (u32::from(self.ppq.max(1)) * u32::from(beats) * u32::from(steps) / 4).max(1)
     }
 
+    /// Ticks in a beat, the unit the tempo counts: steps per beat sixteenths, `18 × PPQ / 4` (a quarter in x/4, an
+    /// eighth in 3/8, a half in 3/2).
+    pub fn beat_ticks(&self) -> u32 {
+        (u32::from(self.ppq.max(1)) * u32::from(self.bar().1) / 4).max(1)
+    }
+
+    /// The tempo the ticks run at, in quarter notes a minute, for a project at `tempo`: the tempo counts the bar's
+    /// beats ([`Project::beat_ticks`]), so ticks run at `tempo × steps per beat / 4` quarters a minute (spec:
+    /// audio/timing.md "The tempo counts the bar's beats"). Every conversion between ticks and time goes through it;
+    /// with 4 steps per beat it is `tempo`.
+    pub fn tick_tempo(&self, tempo: f64) -> f64 {
+        tempo * f64::from(self.bar().1) / 4.0
+    }
+
     /// The bar as a time signature (numerator, denominator = 16 / steps per beat), when the steps divide 16.
     pub fn signature(&self) -> Option<(u16, u16)> {
         let (beats, steps) = self.bar();
@@ -782,8 +796,9 @@ impl ChannelSound {
         self.stretch[2] = 0;
     }
 
-    /// How many times its own length a sample of `duration` seconds lasts once stretched at `bpm`, in any method:
-    /// the stretch time (or the sample's length when none) times the multiplier.
+    /// How many times its own length a sample of `duration` seconds lasts once stretched at `bpm` (the tempo the ticks
+    /// run at, [`Project::tick_tempo`]: the stretch time counts quarter notes), in any method: the stretch time (or the
+    /// sample's length when none) times the multiplier.
     pub fn stretch_factor(&self, duration: f64, bpm: f64) -> f64 {
         let m = self.stretch_multiplier();
         match self.stretch_time() {
@@ -2006,6 +2021,39 @@ impl Automation {
 }
 
 // spec: audio/audio-clips.md "Fades and clip gain"
+#[cfg(test)]
+mod bar_tests {
+    use super::Project;
+
+    fn bar(ppq: u16, bar: Option<(u16, u16)>) -> Project {
+        Project { ppq, bar, ..Project::default() }
+    }
+
+    #[test]
+    fn the_beat_is_the_bars_steps() {
+        assert_eq!(bar(96, None).beat_ticks(), 96);
+        assert_eq!(bar(96, Some((3, 2))).beat_ticks(), 48, "an eighth in 3/8");
+        assert_eq!(bar(96, Some((3, 8))).beat_ticks(), 192, "a half in 3/2");
+        assert_eq!(bar(192, Some((5, 3))).beat_ticks(), 144, "3 steps make no signature");
+        assert_eq!(bar(96, Some((3, 2))).bar_ticks(), 3 * 48);
+    }
+
+    #[test]
+    fn the_ticks_run_at_the_tempo_times_the_steps_over_four() {
+        assert_eq!(bar(96, None).tick_tempo(140.0), 140.0);
+        assert_eq!(bar(96, Some((7, 4))).tick_tempo(140.0), 140.0);
+        assert_eq!(bar(96, Some((3, 2))).tick_tempo(140.0), 70.0);
+        assert_eq!(bar(96, Some((3, 8))).tick_tempo(140.0), 280.0);
+        assert_eq!(bar(96, Some((5, 3))).tick_tempo(140.0), 105.0);
+        // A beat lasts 60 / tempo seconds whatever the bar.
+        for b in [None, Some((3, 2)), Some((3, 8)), Some((5, 3))] {
+            let p = bar(96, b);
+            let secs = f64::from(p.beat_ticks()) / 96.0 * 60.0 / p.tick_tempo(140.0);
+            assert!((secs - 60.0 / 140.0).abs() < 1e-12, "{b:?}: {secs}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod fade_tests {
     use super::fade_curve;

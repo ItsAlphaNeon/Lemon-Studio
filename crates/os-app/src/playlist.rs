@@ -895,7 +895,7 @@ pub fn audio_speed(s: &State, src: ClipSource) -> f64 {
     } else {
         // A fitted time needs the sample's duration (the multiplier alone does not).
         let duration = if sound.stretch_time().is_some() { sample_secs(s, ch) } else { 0.0 };
-        1.0 / sound.stretch_factor(duration, s.tempo)
+        1.0 / sound.stretch_factor(duration, s.project.tick_tempo(s.tempo))
     };
     let pitched = sound.channel_pitch_applies() && !os_model::stretch_mode::realtime(sound.stretch_mode());
     if !pitched {
@@ -995,7 +995,7 @@ fn audio_ticks(s: &State, ch: &os_model::Channel) -> f64 {
     let ppq = f64::from(ppq(s));
     let base = match sound.stretch_time() {
         Some(_) => f64::from(f32::from_bits(sound.stretch[0])) * ppq / 192.0,
-        None => secs * s.tempo.max(1.0) / 60.0 * ppq,
+        None => secs * s.project.tick_tempo(s.tempo.max(1.0)) / 60.0 * ppq,
     };
     let ticks = base * sound.stretch_multiplier();
     if !sound.channel_pitch_applies() || os_model::stretch_mode::realtime(sound.stretch_mode()) {
@@ -1011,9 +1011,9 @@ fn sample_secs(s: &State, ch: &os_model::Channel) -> f64 {
     ch.sample_path.as_deref().and_then(|p| s.playlist.wave(p)).map_or(0.0, |w| w.secs())
 }
 
-/// Seconds per tick at the project tempo.
+/// Seconds per tick at the project tempo (the ticks run at `Project::tick_tempo`).
 fn secs_per_tick(s: &State) -> f64 {
-    60.0 / s.tempo.max(1.0) / f64::from(ppq(s))
+    60.0 / s.project.tick_tempo(s.tempo.max(1.0)) / f64::from(ppq(s))
 }
 
 /// Natural length of a source in ticks: a pattern's length (its bars, the engine's rule: `Project::pattern_length`,
@@ -3856,7 +3856,7 @@ pub fn export_tracks(app: &mut App) -> String {
     }
     let rate = 44100;
     let mut lib = os_engine::SampleLibrary::new(os_engine::SampleLibrary::default_factory_dir());
-    let song_frames = os_engine::laws::tick_to_frame(f64::from(end), s.project.ppq, s.tempo, rate) as usize;
+    let song_frames = os_engine::laws::tick_to_frame(f64::from(end), s.project.ppq, s.project.tick_tempo(s.tempo), rate) as usize;
     let mut written = 0;
     for &t in &tracks {
         let mut p = s.project.clone();
@@ -3932,7 +3932,7 @@ pub fn consolidate(app: &mut App) -> String {
     let mut lib = os_engine::SampleLibrary::new(os_engine::SampleLibrary::default_factory_dir());
     let mut e = os_engine::Engine::new(&p, &mut lib, rate, os_engine::PlayMode::Song);
     let mut audio = e.render_all(512);
-    let want = (os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, s.tempo, rate) as usize) * 2;
+    let want = (os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, p.tick_tempo(s.tempo), rate) as usize) * 2;
     audio.resize(want.max(2), 0.0);
     let dir = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"));
     if let Err(e) = std::fs::create_dir_all(&dir) {

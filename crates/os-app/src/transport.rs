@@ -1002,7 +1002,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                         }
                     };
                     if let Some(s) = target {
-                        let tempo = project.tempo.unwrap_or(140.0);
+                        let tempo = project.tick_tempo(project.tempo.unwrap_or(140.0));
                         let frames = os_engine::laws::tick_to_frame(f64::from(n.length.max(1)), project.ppq.max(1), tempo, s.rate);
                         if let Ok(mut e) = s.engine.lock() {
                             e.note_for(r, n.key, n.velocity, frames);
@@ -1276,7 +1276,7 @@ impl Session {
             e.set_truncated_on_transport(at.truncated);
             e.seek_tick(at.tick as u64);
             if song {
-                let tempo = project.tempo.unwrap_or(140.0);
+                let tempo = project.tick_tempo(project.tempo.unwrap_or(140.0));
                 shared.position.store(os_engine::laws::tick_to_frame(at.tick, project.ppq.max(1), tempo, rate), Ordering::Relaxed);
             }
         }

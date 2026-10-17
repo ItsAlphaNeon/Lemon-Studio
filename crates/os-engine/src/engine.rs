@@ -843,6 +843,9 @@ pub struct Engine {
     tail_done: bool,
     tempo: f64,
     ppq: u16,
+    /// Steps per beat (event 18): the tempo counts beats of this many sixteenths, so the ticks run at `tempo × steps /
+    /// 4` quarter notes a minute (`tick_tempo`; spec: audio/timing.md "The tempo counts the bar's beats").
+    steps: u16,
     /// The project's time signature, numerator and denominator (4/4 when the file has none): what hosted plugins are
     /// told (spec: plugins/vst3-hosting.md §1). A bar whose steps per beat make no signature (3) is told as its length
     /// in sixteenths over 16 (what FL tells plugins is not measured: spec: audio/song-structure.md, open questions).
@@ -927,6 +930,8 @@ impl Engine {
         let mut report = EngineReport::default();
         let tempo = project.tempo.unwrap_or(140.0);
         let ppq = project.ppq.max(1);
+        // The tempo the ticks run at (spec: audio/timing.md "The tempo counts the bar's beats").
+        let tick_tempo = project.tick_tempo(tempo);
         let n_tracks = project.mixer.len().max(1);
         // The panning law of the channel and mixer track pans (event 23; spec: audio/gain-laws.md "Panning law:
         // Triangular"). Not of other pans: whether it moves them was not measured. An edit is heard from the next tick,
@@ -970,7 +975,7 @@ impl Engine {
                 let mut how = sample
                     .as_ref()
                     .filter(|_| plays_sample)
-                    .map_or(Stretching::None, |s| ch.sound.stretching(s.frames() as f64 / f64::from(s.rate.max(1)), tempo));
+                    .map_or(Stretching::None, |s| ch.sound.stretching(s.frames() as f64 / f64::from(s.rate.max(1)), tick_tempo));
                 if library.resample_stretches {
                     if let Stretching::Whole { factor, .. } | Stretching::Realtime { factor, .. } = how {
                         how = Stretching::Resample { speed: 1.0 / factor };
@@ -1150,7 +1155,7 @@ impl Engine {
                     buf: 0,
                     shape: n.clip.map(|fx| {
                         let ms = |v: f32| (f64::from(v.max(0.0)) * f64::from(rate) / 1000.0).round() as u64;
-                        let total = Clock::frame_of_tick(rate, ppq, tempo, n.tick + n.len) - Clock::frame_of_tick(rate, ppq, tempo, n.tick);
+                        let total = Clock::frame_of_tick(rate, ppq, tick_tempo, n.tick + n.len) - Clock::frame_of_tick(rate, ppq, tick_tempo, n.tick);
                         ClipShape {
                             since: 0,
                             total,
@@ -1271,7 +1276,7 @@ impl Engine {
             next_ctl: 0,
             sounding: Vec::with_capacity(256),
             voices: Vec::with_capacity(1024),
-            clock: Clock::new(rate, ppq, tempo),
+            clock: Clock::new(rate, ppq, tick_tempo),
             tick: 0,
             frame: 0,
             end_tick,
@@ -1281,6 +1286,7 @@ impl Engine {
             tail_done: false,
             tempo,
             ppq,
+            steps: project.bar().1,
             signature: project.signature().unwrap_or_else(|| {
                 let (beats, steps) = project.bar();
                 (beats.saturating_mul(steps), 16)
@@ -1307,7 +1313,7 @@ impl Engine {
             inst_tail: 0,
             inst_active: false,
             metronome: None,
-            // Accent on every numerator-th quarter (spec: ui/metronome.md §4): event 17, beats per bar.
+            // Accent on every numerator-th beat (spec: ui/metronome.md §4): event 17, beats per bar.
             beats_per_accent: project.bar().0,
             tap_clicks: crate::metronome::TapClicks::new(rate),
             report,
@@ -1519,7 +1525,12 @@ impl Engine {
 
     /// The song's end in frames at the project tempo (voices may ring past it).
     pub fn length(&self) -> u64 {
-        Clock::frame_of_tick(self.rate, self.ppq, self.tempo, self.end_tick)
+        Clock::frame_of_tick(self.rate, self.ppq, self.tick_tempo(), self.end_tick)
+    }
+
+    /// The tempo the ticks run at, in quarter notes a minute (`Project::tick_tempo`).
+    fn tick_tempo(&self) -> f64 {
+        self.tempo * f64::from(self.steps) / 4.0
     }
 
     /// The song's end in ticks.
@@ -1550,7 +1561,7 @@ impl Engine {
     /// Start playback in the tick that contains `frame` (at the project tempo; notes before that tick as `seek_tick`
     /// has them).
     pub fn seek(&mut self, frame: u64) {
-        let (tick, _) = Clock::tick_of_frame(self.rate, self.ppq, self.tempo, frame);
+        let (tick, _) = Clock::tick_of_frame(self.rate, self.ppq, self.tick_tempo(), frame);
         self.seek_tick(tick);
     }
 
@@ -1558,7 +1569,7 @@ impl Engine {
     /// from where their sample has got to. Notes before it are not triggered, except, with "Play truncated notes on
     /// transport" on (`set_truncated_on_transport`), those still going at it: they start afresh on it.
     pub fn seek_tick(&mut self, tick: u64) {
-        self.clock = Clock::at_tick(self.rate, self.ppq, self.tempo, tick);
+        self.clock = Clock::at_tick(self.rate, self.ppq, self.tick_tempo(), tick);
         self.tick = tick;
         self.frame = self.clock.next_start();
         self.next_trigger = self.triggers.partition_point(|t| t.tick < tick);
@@ -1583,7 +1594,7 @@ impl Engine {
     /// advanced by the time since their start; a clip whose sample has run out by then stays silent (spec:
     /// audio/audio-clips.md, "Starting inside a clip"). Notes of pattern clips are not started late.
     fn clips_under_way(&self, tick: u64) -> Vec<Trigger> {
-        let frame = |t: u64| Clock::frame_of_tick(self.rate, self.ppq, self.tempo, t);
+        let frame = |t: u64| Clock::frame_of_tick(self.rate, self.ppq, self.tick_tempo(), t);
         let at = frame(tick);
         self.triggers[..self.next_trigger]
             .iter()
@@ -1672,10 +1683,10 @@ impl Engine {
         let tick = old.tick;
         self.clock = if self.rate == old.rate && self.ppq == old.ppq {
             let mut c = old.clock;
-            c.set_tempo(self.rate, self.ppq, self.tempo);
+            c.set_tempo(self.rate, self.ppq, self.tick_tempo());
             c
         } else {
-            Clock::at_tick(self.rate, self.ppq, self.tempo, tick)
+            Clock::at_tick(self.rate, self.ppq, self.tick_tempo(), tick)
         };
         self.tick = tick;
         self.frame = self.clock.next_start();
@@ -1934,7 +1945,7 @@ impl Engine {
                     let bpm = (10000.0 + (f64::from(v as f32) * 512000.0).round_ties_even()) / 1000.0;
                     if bpm != self.tempo {
                         self.tempo = bpm;
-                        self.clock.set_tempo(self.rate, self.ppq, bpm);
+                        self.clock.set_tempo(self.rate, self.ppq, self.tick_tempo());
                     }
                 }
                 Target::ChannelParam(..) | Target::SlotParam(..) | Target::Other(_) => {}
@@ -2012,7 +2023,8 @@ impl Engine {
         // click once a song is over.
         if let Some(m) = self.metronome.as_mut().filter(|_| !self.exporting && !self.live_only) {
             let start = self.looping || tick < self.end_tick;
-            m.tick(tick, self.ppq, self.beats_per_accent, start, &mut self.bus[0][..len * 2]);
+            let beat = (u32::from(self.ppq) * u32::from(self.steps) / 4).max(1);
+            m.tick(tick, beat, self.beats_per_accent, start, &mut self.bus[0][..len * 2]);
         }
         if !self.exporting {
             self.tap_clicks.mix(&mut self.bus[0][..len * 2]);
@@ -2525,11 +2537,12 @@ impl Engine {
     }
 
     /// The transport hosted plugins see at `frame` (spec: plugins/vst3-hosting.md Â§1): playing at the project tempo,
-    /// in the project's time signature, with the pattern loop while looping.
+    /// in the project's time signature, with the pattern loop while looping. The tempo is the one the ticks run at, in
+    /// quarter notes (`tick_tempo`): what FL tells plugins in a bar of other than 4 steps per beat is not measured.
     fn transport_at(&self, frame: u64) -> TransportInfo {
         let mut start = TransportInfo {
             playing: true,
-            tempo: self.tempo,
+            tempo: self.tick_tempo(),
             frame: 0,
             beats: 0.0,
             bar_start: 0.0,
@@ -3345,10 +3358,12 @@ mod tests {
     /// is events 17 and 18, beats per bar and steps per beat: 6/8 is (6, 2) (spec: flp/engine-events.md "Project").
     #[test]
     fn plugins_see_the_project_time_signature() {
-        let fpb = 48000.0 * 60.0 / 130.0;
         // 6/8: six beats of two sixteenths, three quarter notes. A time division of three beats of three steps has no
-        // signature: told as its nine sixteenths, 9/16 (2.25 quarter notes).
-        for (bar, sig, quarters) in [((6, 2), (6, 8), 3.0), ((3, 3), (9, 16), 2.25)] {
+        // signature: told as its nine sixteenths, 9/16 (2.25 quarter notes). The 130 BPM count the bar's beats, so the
+        // quarter notes the transport counts go at 130 × steps / 4 a minute (spec: audio/timing.md "The tempo counts
+        // the bar's beats").
+        for (bar, sig, quarters, tempo) in [((6, 2), (6, 8), 3.0, 65.0), ((3, 3), (9, 16), 2.25, 97.5)] {
+            let fpb = 48000.0 * 60.0 / tempo;
             let mut p = project(vec![long_note(0, 96, 0)], vec![]);
             p.bar = Some(bar);
             p.channels[0].kind = ChannelKind::Plugin;
@@ -3362,6 +3377,7 @@ mod tests {
             let t = inst.lock().unwrap().seen[0].0;
             // The one-bar pattern loops after a bar, and the beat after it is in bar 1.
             assert_eq!((t.numerator, t.denominator, t.looping), (sig.0, sig.1, Some((0.0, quarters))));
+            assert_eq!(t.tempo, tempo);
             let later = TransportInfo { looping: None, ..t }.advanced(((quarters + 1.0) * fpb) as u64, 48000);
             assert_eq!((later.bar, later.bar_start), (1, quarters), "{later:?}");
         }
@@ -5448,6 +5464,52 @@ mod tests {
         }
         let accented: Vec<bool> = on.iter().map(|o| o.1 > on[1].1 * 1.3).collect();
         assert_eq!(accented, [true, false, false, true, false, false, true]);
+    }
+
+    #[test]
+    fn metronome_clicks_every_beat_of_the_bar_at_the_tempo() {
+        // 3/8 at 130 BPM: a click on every eighth (48 ticks), still 60 / 130 s apart, accented every three.
+        let mut p = project(vec![], vec![]);
+        p.bar = Some((3, 2));
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::new(None);
+        let rate = 48000;
+        let mut e = Engine::new(&p, &mut lib, rate, PlayMode::Pattern(1));
+        e.set_looping(true);
+        e.set_metronome(metronome_on());
+        let mut out = vec![0.0; 2 * rate as usize * 3];
+        e.process(&mut out);
+        let on = click_onsets(&out, rate);
+        let beats: Vec<u64> = (0..7).map(|b| (f64::from(rate) * 60.0 / 130.0 * b as f64).round() as u64).collect();
+        assert_eq!(on.len(), beats.len(), "{on:?}");
+        for ((f, _), b) in on.iter().zip(&beats) {
+            assert!(f.abs_diff(*b) <= 3, "{f} vs beat {b}");
+        }
+        let accented: Vec<bool> = on.iter().map(|o| o.1 > on[1].1 * 1.3).collect();
+        assert_eq!(accented, [true, false, false, true, false, false, true]);
+    }
+
+    /// spec: audio/timing.md "The tempo counts the bar's beats": a tick lasts `60 / (tempo × steps / 4) / PPQ`
+    /// seconds, so in 3/8 (2 steps per beat) a note a quarter note in plays twice as late as in 4/4, and in 3/2 (8
+    /// steps) half as late.
+    #[test]
+    fn notes_play_at_the_bars_beat() {
+        for (bar, tempo) in [(None, 130.0), (Some((3, 2)), 65.0), (Some((3, 8)), 260.0)] {
+            let mut p = project(vec![Note::step(0, 96), Note::step(0, 192)], vec![]);
+            p.bar = bar;
+            p.channels[0].kind = ChannelKind::Plugin;
+            let mut lib = SampleLibrary::default();
+            let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+            let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+            e.set_instrument(0, probe.clone());
+            let mut out = vec![0.0f32; 512 * 2];
+            for _ in 0..400 {
+                e.process(&mut out);
+            }
+            let ons: Vec<u64> = probe.lock().unwrap().log.iter().filter(|l| l.1).map(|l| l.0).collect();
+            assert_eq!(ons[0], laws::tick_to_frame(96.0, 96, tempo, 48000), "{bar:?} {ons:?}");
+            assert_eq!(ons[1], laws::tick_to_frame(192.0, 96, tempo, 48000), "{bar:?} {ons:?}");
+        }
     }
 
     #[test]

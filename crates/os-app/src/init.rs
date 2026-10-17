@@ -388,6 +388,45 @@ mod tests {
         assert_eq!(controls(&a), INIT);
     }
 
+    /// Opening a project in song mode sets the listed controls, as FL 26 does (spec: flp/engine-events.md "Event
+    /// 216"): the file keeps the stored values, the opened project has the initial ones and is not changed, and saving
+    /// it stores them. Opened in pattern mode, the stored values stay.
+    #[test]
+    fn opening_a_song_sets_the_initial_values() {
+        const INIT: (f64, f64) = (0.5, 140.0);
+        const MOVED: (f64, f64) = (1.0, 90.0);
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("lemon-init-open-{}.flp", std::process::id()));
+        let resaved = dir.join(format!("lemon-init-open-{}-resaved.flp", std::process::id()));
+        let stored = |p: &std::path::Path| {
+            let f = os_flp::FlpFile::parse(&std::fs::read(p).unwrap()).unwrap();
+            let q = os_flp::project::load(&f).unwrap();
+            (q.channels[0].volume, q.tempo.unwrap())
+        };
+        let mut a = song_app();
+        moved(&mut a);
+        a.save_to(path.clone());
+        assert_eq!(stored(&path), MOVED);
+        let mut b = App::new(None);
+        b.open(path.clone());
+        assert!(b.state.song_mode);
+        assert_eq!(controls(&b), INIT);
+        assert!(!b.unsaved() && b.state.history.len() == 0, "opened, not changed");
+        b.save_to(resaved.clone());
+        assert_eq!(stored(&resaved), INIT, "saved as the stored values");
+
+        // Pattern mode (no clips): the stored values.
+        pl::arr_mut(&mut a.state).clips.clear();
+        a.state.song_mode = false;
+        a.save_to(path.clone());
+        let mut c = App::new(None);
+        c.open(path.clone());
+        assert!(!c.state.song_mode);
+        assert_eq!(controls(&c), MOVED);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&resaved);
+    }
+
     /// The browser lists the controls under Current project ▸ Initialized controls ("<owner> - <setting>"), a folder
     /// shown only while there are some.
     #[test]
