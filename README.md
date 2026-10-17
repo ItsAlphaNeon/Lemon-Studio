@@ -97,6 +97,17 @@ Where Lemon Studio stands against what a complete DAW offers:
 
 ✅ usable · 🚧 partial · ❌ not available yet
 
+<table>
+  <tr>
+    <td width="50%"><a href="docs/assets/screenshot-piano-roll.webp"><img alt="The piano roll with a two-handed piano part: chords under a melody, with note names and the velocity lane" src="docs/assets/screenshot-piano-roll.webp"></a></td>
+    <td width="50%"><a href="docs/assets/screenshot-playlist.webp"><img alt="The playlist with a 64-bar song arranged from pattern, audio and automation clips under section markers" src="docs/assets/screenshot-playlist.webp"></a></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Piano roll: chords and a melody with their note names, and the velocity lane below</sub></td>
+    <td align="center"><sub>Song arrangement: pattern, audio and automation clips under section markers</sub></td>
+  </tr>
+</table>
+
 Per-area details are in [docs/status.md](docs/status.md). The full, item-by-item roadmap lives on the
 [Discord server](https://discord.gg/yC2uCuGs3M).
 
