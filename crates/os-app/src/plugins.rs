@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -750,7 +751,6 @@ impl Plugins {
             }
         }
         let Some(h) = self.hosted.get_mut(&row) else { return Err("not a plugin channel".into()) };
-        let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
         // A detached window reopens where it was; the first time, on a monitor as the settings say (spec: as above).
         let pos = match (h.detached, h.placed) {
             (true, Some(at)) => at,
@@ -765,12 +765,17 @@ impl Plugins {
         }
         // The editor takes the frame's scale (on Linux the X server's, not the main window's).
         let k = w.scale();
-        let size = p.open_editor(w.area(), k)?;
+        // The instance is locked only while its editor opens: the audio thread skips an instance it cannot lock, so
+        // everything done under the lock is silence for that channel. Held through the frame's creation, layout,
+        // painting and raise as well, opening a plugin window made a playing song drop out on that channel.
+        let size = {
+            let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
+            p.open_editor(w.area(), k)?
+        };
         h.link = fit_editor(&w, size, k);
         // On top: the app stacks it above its other windows (`State::raise`), and a new child window starts below
         // the open ones.
         w.raise();
-        drop(p);
         h.window = Some(w);
         self.opens += 1;
         h.opened = self.opens;
