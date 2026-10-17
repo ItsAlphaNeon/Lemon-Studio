@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Note names, as General ▸ Language ▸ Note names and Black notes choose them: the pitch class's letter or syllable,
 //! then the octave, MIDI note 60 in octave 5 (`C5`). Germanic only renames B to H; Solfege reads Do Re Mi Fa Sol La Si.
@@ -10,7 +8,7 @@
 //! A change of either setting renames at once (FL asks for a restart).
 // spec: ui/settings-choices.md "Note names and Black notes"
 
-use crate::prefs; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+use crate::prefs; // This code is a part of L e m o n S t u d i o.
 
 /// The white keys C D E F G A B in each Note names scheme (English, Germanic, Solfege).
 const WHITE: [[&str; 7]; 3] = [["C", "D", "E", "F", "G", "A", "B"], ["C", "D", "E", "F", "G", "A", "H"], ["Do", "Re", "Mi", "Fa", "Sol", "La", "Si"]];

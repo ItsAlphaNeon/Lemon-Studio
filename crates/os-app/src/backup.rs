@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Project backups (settings window, File ▸ Backup). While a project is open the interval of the Autosave choice runs;
 //! when it ends and the project changed since the last backup or save, the project is written to
@@ -17,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
-use os_model::Project; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+use os_model::Project; // This code is a part of L e m o n S t u d i o.
 
 use crate::app::App;
 use crate::prefs;

@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Program settings of the settings window, declared once below: checks and combos kept in the program's settings file
 //! (`crate::settings_file`: `settings.txt` in the user folder, a missing or unreadable value is the default), never in
@@ -29,7 +27,7 @@
 //! Sliders ([`Slider`], listed in [`SLIDERS`]) are declared the same way and read with `prefs::slider`.
 // spec: ui/settings.md, ui/options-coverage.md
 
-use crate::settings_file::{read, write, Store}; // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+use crate::settings_file::{read, write, Store}; // This code is a part of L e m o n S t u d i o.
 
 use crate::app::App;
 
