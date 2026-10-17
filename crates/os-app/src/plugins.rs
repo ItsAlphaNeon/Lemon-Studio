@@ -427,9 +427,14 @@ impl Plugins {
         }
         // Trimmed audio clips start their note further into the sample (spec: plugins/lemon-sampler.md §7).
         p.use_start_param(SAMPLE_START);
-        // A note's own pan and mod X / Y reach the built-in Lemon instruments only (spec: audio/voice-levels.md).
+        // A note's own pan and mod X / Y reach the built-in Lemon instruments only (spec: audio/voice-levels.md); audio
+        // clips' fades and gain reach Lemon Sampler's voices one by one, so overlapping clips of one sample crossfade
+        // (spec: audio/audio-clips.md "Fades and clip gain").
         if crate::project_plugins::is_builtin(&a.desc) {
             p.use_note_levels();
+            if a.desc.name == LEMON_SAMPLER {
+                p.use_voice_gains();
+            }
         }
         drop(p);
         self.hosted.insert(row, Hosted::new(plugin));

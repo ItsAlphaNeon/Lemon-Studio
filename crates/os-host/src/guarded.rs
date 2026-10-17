@@ -84,6 +84,18 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn choke(&mut self, offset: u32, key: u8) {
         self.run((), |p| p.choke(offset, key))
     }
+    fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32) {
+        self.run((), |p| p.voice_start(offset, key, velocity, start, levels, voice))
+    }
+    fn voice_gains(&self) -> bool {
+        self.look(false, |p| p.voice_gains())
+    }
+    fn voice_gain(&mut self, offset: u32, voice: u32, gain: f32) {
+        self.run((), |p| p.voice_gain(offset, voice, gain))
+    }
+    fn voice_choke(&mut self, offset: u32, key: u8, voice: u32) {
+        self.run((), |p| p.voice_choke(offset, key, voice))
+    }
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
         self.run((), |p| p.tune(offset, key, semitones))
     }
@@ -207,6 +219,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn use_note_levels(&mut self) -> bool {
         self.run(false, |p| p.use_note_levels())
+    }
+    fn use_voice_gains(&mut self) -> bool {
+        self.run(false, |p| p.use_voice_gains())
     }
     fn set_offline(&mut self, offline: bool) {
         self.run((), |p| p.set_offline(offline))

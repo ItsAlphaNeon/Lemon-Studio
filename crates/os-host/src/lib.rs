@@ -214,6 +214,13 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         false
     }
 
+    /// Sends the gains the engine gives audio clip voices (`Instrument::voice_gain`) to the instance, which then puts
+    /// each clip's fades and gain on that clip's voice (UI thread). For Lemon Sampler only (it moves to them as the
+    /// engine expects). False when the format cannot.
+    fn use_voice_gains(&mut self) -> bool {
+        false
+    }
+
     /// Tells the instance whether it renders offline (an export: no deadline, the plugin's best quality) or for live
     /// playback (UI thread, with no stream processing the instance). Formats without such a switch ignore it.
     fn set_offline(&mut self, offline: bool) {

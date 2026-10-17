@@ -93,11 +93,12 @@ pub(super) fn closing_frames(mode: u8, rate: u32) -> u32 {
 pub(super) enum Note {
     /// `fine`: the note's fine pitch in semitones, a tuning of its own on top of the channel's; `levels`: its pan and
     /// mod X / Y.
-    On { key: u8, vel: f32, start: f32, fine: f32, levels: crate::NoteLevels },
+    /// `voice`: an audio clip's voice, named for its gains and its end (`Instrument::voice_start`).
+    On { key: u8, vel: f32, start: f32, fine: f32, levels: crate::NoteLevels, voice: Option<u32> },
     /// The note's end: a plugin's own release, a sampler voice's envelope release.
     Off(u8),
-    /// A sampler voice's closing fade.
-    Choke(u8),
+    /// A sampler voice's closing fade: the voice named when it is an audio clip's, else the key's voices.
+    Choke(u8, Option<u32>),
     /// Tuning of the voices of a key, semitones from the key's own pitch.
     Tune(u8, f32),
 }
@@ -135,11 +136,13 @@ pub(super) struct Event {
     /// The note's own portamento switch: it inverts the channel's portamento for this note (spec:
     /// audio/note-rules.md, "A note's own portamento switch").
     pub porta: bool,
+    /// An audio clip's voice (its start, its end): the engine's name for it (`Instrument::voice_start`).
+    pub voice: Option<u32>,
 }
 
 impl Event {
     pub fn on(ch: usize, off: u32, key: u8, vel: f32) -> Event {
-        Event { ch, off, key, vel, start: 0.0, fine: 0.0, long: true, glide: 0, levels: crate::NoteLevels::default(), cuts: None, layer: None, porta: false }
+        Event { ch, off, key, vel, start: 0.0, fine: 0.0, long: true, glide: 0, levels: crate::NoteLevels::default(), cuts: None, layer: None, porta: false, voice: None }
     }
     /// A layer note's own cut group (spec: audio/note-rules.md "Layer channels": it acts before the note is handed on).
     pub fn cut(ch: usize, off: u32, group: u32) -> Event {
@@ -181,6 +184,8 @@ struct Voice {
     left: f64,
     /// The layer its note came through.
     layer: Option<usize>,
+    /// An audio clip's voice: the engine's name for it.
+    voice: Option<u32>,
 }
 
 /// A glide of the tuning of instrument key `key` (spec "Glides": `n + 1` equal steps, the first on the tick it
@@ -270,7 +275,7 @@ impl Voices {
     /// Starts voice `i`'s closing fade.
     fn close(&mut self, i: usize, r: &Rules, ch: usize, off: u32, out: &mut Vec<(usize, u32, Note)>) {
         let v = &mut self.pool[i];
-        out.push((ch, off, Note::Choke(v.sent)));
+        out.push((ch, off, Note::Choke(v.sent, v.voice)));
         v.state = State::Closing;
         v.left = v.left.min(f64::from(r.close));
         let sent = v.sent;
@@ -387,11 +392,12 @@ fn slide(v: &mut Voices, r: &Rules, e: &Event) {
     v.last = Some(f32::from(e.key));
 }
 
-/// An audio clip's end: its voice closes.
+/// An audio clip's end: its voice closes (the one the event names; another clip's voice on the key plays on).
 fn choke(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, Note)>) {
-    match v.pool.iter().position(|p| p.sent == e.key && p.state != State::Closing) {
+    let mine = |p: &Voice| p.sent == e.key && p.state != State::Closing && (e.voice.is_none() || p.voice == e.voice);
+    match v.pool.iter().position(mine) {
         Some(i) => v.close(i, r, e.ch, e.off, out),
-        None => out.push((e.ch, e.off, Note::Choke(e.key))),
+        None => out.push((e.ch, e.off, Note::Choke(e.key, e.voice))),
     }
 }
 
@@ -505,8 +511,8 @@ fn note_start(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, N
     };
     // A retriggered key: its old tuning ends with it.
     v.glides.retain(|g| g.key != key);
-    out.push((e.ch, e.off, Note::On { key, vel: e.vel, start: e.start, fine: e.fine, levels: e.levels }));
-    v.pool.push(Voice { sent: key, born: v.tick, group, state: State::Held, left, layer: e.layer });
+    out.push((e.ch, e.off, Note::On { key, vel: e.vel, start: e.start, fine: e.fine, levels: e.levels, voice: e.voice }));
+    v.pool.push(Voice { sent: key, born: v.tick, group, state: State::Held, left, layer: e.layer, voice: e.voice });
     if r.mono {
         v.sounding = Some((key, key));
     }
@@ -534,7 +540,7 @@ mod tests {
     }
 
     fn on(key: u8) -> Note {
-        Note::On { key, vel: 0.8, start: 0.0, fine: 0.0, levels: crate::NoteLevels::default() }
+        Note::On { key, vel: 0.8, start: 0.0, fine: 0.0, levels: crate::NoteLevels::default(), voice: None }
     }
 
     fn sampler() -> Rules {
@@ -578,7 +584,7 @@ mod tests {
         let mut closed = Vec::new();
         for key in [60, 62, 64, 65] {
             for e in tick(&r, &mut v, &[Event::on(0, 0, key, 0.8)], 1000) {
-                if let Note::Choke(k) = e.2 {
+                if let Note::Choke(k, _) = e.2 {
                     closed.push((key, k));
                 }
             }
@@ -595,7 +601,7 @@ mod tests {
                 tick(&r, &mut v, &[], 1000);
             }
             for e in tick(&r, &mut v, &[Event::on(0, 0, key, 0.8)], 1000) {
-                if let Note::Choke(k) = e.2 {
+                if let Note::Choke(k, _) = e.2 {
                     closed.push((key, k));
                 }
             }
@@ -612,7 +618,7 @@ mod tests {
         tick(&r, &mut v, &[Event::on(0, 0, 62, 0.8)], 100);
         tick(&r, &mut v, &[Event::off(0, 0, 62)], 100);
         let out = tick(&r, &mut v, &[Event::on(0, 0, 64, 0.8)], 100);
-        assert_eq!(out.iter().map(|e| e.2).collect::<Vec<_>>(), vec![Note::Choke(62), on(64)]);
+        assert_eq!(out.iter().map(|e| e.2).collect::<Vec<_>>(), vec![Note::Choke(62, None), on(64)]);
     }
 
     #[test]
@@ -636,7 +642,27 @@ mod tests {
         // Its note has ended: the ringing voice is cut all the same.
         tick(&r, &mut v, &[Event::off(0, 0, 60)], 100);
         let out = tick(&r, &mut v, &[Event::on(1, 30, 60, 0.8)], 100);
-        assert_eq!(out, vec![(0, 30, Note::Choke(60)), (1, 30, on(60))]);
+        assert_eq!(out, vec![(0, 30, Note::Choke(60, None)), (1, 30, on(60))]);
+    }
+
+    /// Two audio clips of one channel overlap on one key: a clip's end closes its own voice, the other plays on and is
+    /// closed at its own end; a cut closes a clip voice by its name.
+    #[test]
+    fn a_clip_end_closes_its_own_voice() {
+        let r = [Rules { one_shot: true, cut_by: 1, ..sampler() }, Rules { cut: 1, ..sampler() }];
+        let mut v = vec![Voices::default(), Voices::default()];
+        let clip = |off: u32, voice: u32| Event { voice: Some(voice), ..Event::on(0, off, 60, 100.0 / 128.0) };
+        let end = |voice: u32| Event { voice: Some(voice), ..Event::choke(0, 0, 60) };
+        let out = tick(&r, &mut v, &[clip(0, 7)], 100);
+        assert!(matches!(out[..], [(0, 0, Note::On { key: 60, voice: Some(7), .. })]), "{out:?}");
+        tick(&r, &mut v, &[clip(0, 8)], 100);
+        assert_eq!(tick(&r, &mut v, &[end(7)], 100), vec![(0, 0, Note::Choke(60, Some(7)))]);
+        assert_eq!(tick(&r, &mut v, &[end(8)], 100), vec![(0, 0, Note::Choke(60, Some(8)))]);
+        // Nothing of either left to close: the end goes to the instrument as it is.
+        assert_eq!(tick(&r, &mut v, &[end(8)], 100), vec![(0, 0, Note::Choke(60, Some(8)))]);
+        tick(&r, &mut v, &[clip(0, 9)], 100);
+        let out = tick(&r, &mut v, &[Event::on(1, 5, 62, 0.8)], 100);
+        assert_eq!(out[0], (0, 5, Note::Choke(60, Some(9))));
     }
 
     #[test]
@@ -644,9 +670,9 @@ mod tests {
         let r = [Rules { cut: 1, cut_by: 1, one_shot: true, ..sampler() }];
         let mut v = vec![Voices::default()];
         let out = tick(&r, &mut v, &[Event::on(0, 0, 60, 0.8), Event::on(0, 0, 64, 0.8), Event::on(0, 0, 67, 0.8)], 100);
-        assert_eq!(out.iter().filter(|e| matches!(e.2, Note::Choke(_))).count(), 0);
+        assert_eq!(out.iter().filter(|e| matches!(e.2, Note::Choke(..))).count(), 0);
         let out = tick(&r, &mut v, &[Event::on(0, 0, 72, 0.8)], 100);
-        assert_eq!(out.iter().map(|e| e.2).collect::<Vec<_>>(), vec![Note::Choke(60), Note::Choke(64), Note::Choke(67), on(72)]);
+        assert_eq!(out.iter().map(|e| e.2).collect::<Vec<_>>(), vec![Note::Choke(60, None), Note::Choke(64, None), Note::Choke(67, None), on(72)]);
     }
 
     #[test]

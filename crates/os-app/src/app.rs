@@ -10002,6 +10002,57 @@ mod tests {
         assert_eq!(app.state.pending_open, Some(row), "Lemon Sampler's window opens");
     }
 
+    /// One sample on one playlist track twice, the copy starting half way through the first, with Project ▸ Automatic
+    /// crossfades on, exported as FILE ▸ Export as WAV does it (one audio clip channel, played by Lemon Sampler): the
+    /// level stays flat through the overlap and the second clip plays to its own end (spec: audio/audio-clips.md
+    /// "Automatic crossfades").
+    #[test]
+    fn overlapping_clips_of_one_sample_export_flat() {
+        use std::time::Duration;
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        a.plugins.available = crate::plugins::builtin();
+        a.plugins.set_rate(48000);
+        let wav = std::env::temp_dir().join(format!("os-app-crossfade-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 2 * 96000]).unwrap();
+        crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let row = a.state.project.channels.len() - 1;
+        a.plugin_tick();
+        assert!(a.state.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
+        a.transport.set_instruments(a.plugins.instruments());
+        let first = *crate::playlist::arr_mut(&mut a.state).clips.last().unwrap();
+        let second = os_model::Clip { position: first.position + first.length / 2, ..first };
+        crate::playlist::arr_mut(&mut a.state).clips.push(second);
+        // On (a new project takes the switch from the preferences); the next tick sets the crossfades from the overlap.
+        if !os_model::crossfade::on(&a.state.project) {
+            a.toggle_auto_crossfades();
+        }
+        assert!(os_model::crossfade::derive(&mut a.state.project, a.state.tempo), "the overlap makes a crossfade");
+        let p = crate::rack::play_project(&a.state);
+        let out = std::env::temp_dir().join(format!("os-app-crossfade-{}-export.wav", std::process::id()));
+        a.plugins.set_offline(true);
+        a.transport.export(&p, PlayMode::Song, 48000, out.clone());
+        let t0 = std::time::Instant::now();
+        loop {
+            match a.transport.export_status() {
+                crate::transport::Export::Done(r) => break assert!(r.is_ok(), "{r:?}"),
+                _ if t0.elapsed() > Duration::from_secs(60) => panic!("export did not finish"),
+                _ => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        let bytes = std::fs::read(&out).expect("file written");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&wav);
+        let left: Vec<f32> = bytes[44..].chunks_exact(8).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let at = |t: u32| os_engine::Clock::frame_of_tick(48000, p.ppq, f64::from(a.state.tempo), u64::from(t)) as usize;
+        let level = left[at(first.length / 4)];
+        assert!(level > 0.1, "the first clip sounds: {level}");
+        // From the first clip's start to the second's end.
+        let end = at(second.position + second.length);
+        let (worst, f) = (0..end).map(|f| ((left[f] - level).abs(), f)).fold((0.0f32, 0), |m, x| if x.0 > m.0 { x } else { m });
+        assert!(worst < 1e-3 * level, "flat: off by {worst} at frame {f} of {end} (level {level})");
+    }
+
     /// ADD ▸ Lemon Sampler with "Detach all new plugins" on: the new channel's instance opens detached; channels added
     /// before and the project's own keep docked (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins
     /// and startup").

@@ -143,6 +143,17 @@ impl ClipShape {
 /// audio/audio-clips.md "Starting inside a clip").
 const LATE_START_SECONDS: f64 = 0.005;
 
+/// An audio clip with a shape playing on an instrument channel: its voice, frames since the voice started, and the
+/// gain the voice was last given (an instrument that takes voice gains; `None` before the first).
+#[derive(Debug, Clone, Copy)]
+struct InstClip {
+    channel: usize,
+    voice: u32,
+    shape: ClipShape,
+    age: u64,
+    sent: Option<f32>,
+}
+
 /// An audio clip's fades (milliseconds, tension) and gain: the fades it plays (with automatic crossfades on, an edge
 /// without its bit plays as the overlaps make it, `os_model::crossfade::playing`) and the gain the record stores.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -842,11 +853,14 @@ pub struct Engine {
     out_pos: usize,
     out_tick: u64,
     out_frame: u64,
-    /// Instrument channels: scheduled note ends (tick, channel, key, cut = choke at the end of an audio clip), live
-    /// notes waiting for the next tick (channel, key, velocity; negative = note off), this tick's events.
-    inst_offs: Vec<(u64, usize, u8, bool)>,
-    /// Audio clips playing on instrument channels: (channel, shape, frames since its start).
-    inst_shapes: Vec<(usize, ClipShape, u64)>,
+    /// Instrument channels: scheduled note ends (tick, channel, key, an audio clip's voice: choked at the clip's end;
+    /// `None`: a note, which ends with a note off), live notes waiting for the next tick (channel, key, velocity;
+    /// negative = note off), this tick's events.
+    inst_offs: Vec<(u64, usize, u8, Option<u32>)>,
+    /// Audio clips with fades or gain playing on instrument channels.
+    inst_shapes: Vec<InstClip>,
+    /// The name the next audio clip voice on an instrument gets (`Instrument::voice_start`).
+    next_voice: u32,
     inst_live: Vec<(usize, u8, f32)>,
     inst_events: Vec<notes::Event>,
     /// Per instrument channel and key: the fine pitch (semitones) of the note last started there.
@@ -1277,6 +1291,7 @@ impl Engine {
             out_frame: 0,
             inst_offs: Vec::with_capacity(64),
             inst_shapes: Vec::new(),
+            next_voice: 0,
             inst_live: Vec::with_capacity(64),
             inst_events: Vec::with_capacity(64),
             inst_fine: Vec::new(),
@@ -1371,7 +1386,7 @@ impl Engine {
         let k = key.min(127) as u8;
         let ticks = (frames as f64 / self.clock.samples_per_tick()).ceil().max(1.0) as u64;
         self.inst_live.push((channel, k, f32::from(velocity) / 128.0));
-        self.inst_offs.push((self.tick + ticks, channel, k, false));
+        self.inst_offs.push((self.tick + ticks, channel, k, None));
         self.tail_done = false;
     }
 
@@ -1712,7 +1727,9 @@ impl Engine {
         self.inst_offs = std::mem::take(&mut old.inst_offs);
         self.inst_offs.retain(|o| o.1 < n);
         self.inst_shapes = std::mem::take(&mut old.inst_shapes);
-        self.inst_shapes.retain(|s| s.0 < n);
+        self.inst_shapes.retain(|s| s.channel < n);
+        // The voices playing on keep their names: new ones get others.
+        self.next_voice = old.next_voice;
         // An instance that plays on still owes what it missed; a new one starts afresh.
         let same = |c: usize| match (self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()), old.channels.get(c).and_then(|ch| ch.instrument.0.as_ref())) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -2053,9 +2070,12 @@ impl Engine {
         // Instrument notes: their note offs and chokes, all of them at the song's end.
         let mut i = 0;
         while i < self.inst_offs.len() {
-            let (end, ch, key, cut) = self.inst_offs[i];
-            if end <= tick || (song_end && !cut) {
-                self.inst_events.push(if cut { notes::Event::choke(ch, 0, key) } else { notes::Event::off(ch, 0, key) });
+            let (end, ch, key, voice) = self.inst_offs[i];
+            if end <= tick || (song_end && voice.is_none()) {
+                self.inst_events.push(match voice {
+                    Some(v) => notes::Event { voice: Some(v), ..notes::Event::choke(ch, 0, key) },
+                    None => notes::Event::off(ch, 0, key),
+                });
                 self.inst_offs.swap_remove(i);
             } else {
                 i += 1;
@@ -2178,6 +2198,13 @@ impl Engine {
             if self.channels[t.channel].instrument.0.is_some() {
                 self.channels[t.channel].via = t.via;
                 let k = t.key.min(127) as u8;
+                // An audio clip's voice gets a name: its gains and its end reach it alone, while another clip of the
+                // channel plays on the same key (spec: audio/audio-clips.md "Automatic crossfades").
+                let voice = (t.cut.is_some() || t.shape.is_some()).then(|| {
+                    let v = self.next_voice;
+                    self.next_voice = v.wrapping_add(1);
+                    v
+                });
                 self.inst_events.push(notes::Event {
                     ch: t.channel,
                     off: 0,
@@ -2191,14 +2218,15 @@ impl Engine {
                     cuts: t.cuts,
                     layer: t.via.map(|w| w.layer),
                     porta: t.porta,
+                    voice,
                 });
-                if let Some(sh) = t.shape {
-                    self.inst_shapes.push((t.channel, sh, 0));
+                if let (Some(shape), Some(voice)) = (t.shape, voice) {
+                    self.inst_shapes.push(InstClip { channel: t.channel, voice, shape, age: 0, sent: None });
                 }
                 // An audio clip ends at its cut (spec: plugins/lemon-sampler.md Â§7); notes end with a note off.
                 match t.cut {
-                    Some(c) => self.inst_offs.push((c, t.channel, k, true)),
-                    None => self.inst_offs.push((t.end.unwrap_or(t.tick + step), t.channel, k, false)),
+                    Some(c) => self.inst_offs.push((c, t.channel, k, voice)),
+                    None => self.inst_offs.push((t.end.unwrap_or(t.tick + step), t.channel, k, None)),
                 }
             }
             return;
@@ -2367,12 +2395,34 @@ impl Engine {
             for &(_, off, note) in notes {
                 send_note(&mut *inst, off.min(n.saturating_sub(1) as u32), note, shift, fines);
             }
+            // Audio clip fades and gain on this channel (spec: audio/audio-clips.md "Fades and clip gain"): on each
+            // clip's voice when the instrument takes voice gains, so clips that overlap (a crossfade) each have their
+            // own. A voice gets its gain now at its start, then every `VOICE_GAIN_FRAMES` frames the gain due that many
+            // frames on, which it glides to; a gain that stays is not sent again.
+            let voiced = inst.voice_gains();
+            if voiced {
+                let step = crate::instrument::VOICE_GAIN_FRAMES;
+                for s in self.inst_shapes.iter_mut().filter(|s| s.channel == c) {
+                    if s.sent.is_none() {
+                        let g = s.shape.at(s.age);
+                        inst.voice_gain(0, s.voice, g);
+                        s.sent = Some(g);
+                    }
+                    for off in (0..n as u32).step_by(step as usize) {
+                        let g = s.shape.at(s.age + u64::from(off + step));
+                        if s.sent != Some(g) {
+                            inst.voice_gain(off, s.voice, g);
+                            s.sent = Some(g);
+                        }
+                    }
+                }
+            }
             let (l, r) = (&mut self.scratch.0[..n], &mut self.scratch.1[..n]);
             inst.process(self.rate, l, r);
-            // Audio clip fades and gain on this channel (spec: audio/audio-clips.md "Fades and clip gain").
-            if self.inst_shapes.iter().any(|s| s.0 == c) {
+            // An instrument without voice gains: the clips' shapes on its whole output.
+            if !voiced && self.inst_shapes.iter().any(|s| s.channel == c) {
                 for f in 0..n {
-                    let g: f32 = self.inst_shapes.iter().filter(|s| s.0 == c).map(|s| s.1.at(s.2 + f as u64)).product();
+                    let g: f32 = self.inst_shapes.iter().filter(|s| s.channel == c).map(|s| s.shape.at(s.age + f as u64)).product();
                     l[f] *= g;
                     r[f] *= g;
                 }
@@ -2393,9 +2443,9 @@ impl Engine {
         // A clip's shape is kept half a second past its end (the choke's own fade).
         let tail = u64::from(self.rate / 2);
         for s in &mut self.inst_shapes {
-            s.2 += n as u64;
+            s.age += n as u64;
         }
-        self.inst_shapes.retain(|s| s.1.since + s.2 < s.1.total.saturating_add(tail));
+        self.inst_shapes.retain(|s| s.shape.since + s.age < s.shape.total.saturating_add(tail));
         self.inst_active = active;
         if active {
             self.inst_tail = u64::from(self.rate) * INSTRUMENT_TAIL_SECONDS;
@@ -2789,11 +2839,15 @@ fn run_slot(
 /// `fines`: per key, the fine pitch of the note last started there (notes keep the pitch they started with).
 fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, shift: f32, fines: &mut [f32; 128]) {
     match note {
-        notes::Note::Choke(key) => inst.choke(off, key),
+        notes::Note::Choke(key, None) => inst.choke(off, key),
+        notes::Note::Choke(key, Some(voice)) => inst.voice_choke(off, key, voice),
         notes::Note::Off(key) => inst.note_off(off, key),
-        notes::Note::On { key, vel, start, fine, levels } => {
+        notes::Note::On { key, vel, start, fine, levels, voice } => {
             // The note's own pan and mod X / Y go with it (spec: audio/voice-levels.md "The note's own levels").
-            inst.note_start(off, key, vel, start, levels);
+            match voice {
+                Some(v) => inst.voice_start(off, key, vel, start, levels, v),
+                None => inst.note_start(off, key, vel, start, levels),
+            }
             fines[usize::from(key & 127)] = fine;
             if shift + fine != 0.0 {
                 inst.tune(off, key, shift + fine);
@@ -4507,6 +4561,18 @@ mod tests {
         let end = clip_frames - 1200; // half way through the 50 ms fade-out
         let w = 2.0 * os_model::fade_curve(1200.0 / 2400.0, 3.0) as f32;
         assert!((g(end) - w).abs() < 2e-3, "instrument fade-out half way: {} vs {w}", g(end));
+        // An instrument that takes voice gains plays the same on its voice, from silence at the start.
+        let voiced = |p: &Project, lib: &mut SampleLibrary| {
+            let mut e = Engine::new(p, lib, 48000, PlayMode::Song);
+            e.set_instrument(0, Arc::new(std::sync::Mutex::new(VoicedSampler::default())));
+            e.render_all(480)
+        };
+        let (faded, plain) = (voiced(&p, &mut lib), voiced(&q, &mut lib));
+        let g = |f: usize| faded[f * 2] / plain[f * 2];
+        assert!(g(0).abs() < 1e-6, "voice gain at the start: {}", g(0));
+        assert!((g(2400) - want(0.5)).abs() < 1e-3, "voice fade-in midway: {}", g(2400));
+        assert!((g(24000) - 2.0).abs() < 1e-4, "voice gain: {}", g(24000));
+        assert!((g(end) - w).abs() < 2e-3, "voice fade-out half way: {} vs {w}", g(end));
         let _ = std::fs::remove_file(&wav);
     }
 
@@ -4557,6 +4623,136 @@ mod tests {
         let fx = os_model::crossfade::playing(&p, &p.arrangements[0].clips, 130.0);
         assert_eq!(fx[0].1, Some((50.0, 0.0)));
         assert_eq!(fx[1].0.map(|f| f.0), Some(os_model::crossfade::ms(192, 130.0, 96)));
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    /// A hosted sampler that takes voice gains as `Instrument::voice_gain` asks (Lemon Sampler's way): every voice
+    /// plays 0.5 on both sides (a DC sample) at its own gain, the first it is given at once and each later one reached
+    /// over `VOICE_GAIN_FRAMES` frames; a voice's choke ends that voice alone, a key's choke all of them.
+    #[derive(Default)]
+    struct VoicedSampler {
+        queue: Vec<(u32, VoicedEvent)>,
+        /// (name, gain, glide step, glide target, frames left of the glide, a gain was given)
+        voices: Vec<(Option<u32>, f32, f32, f32, u32, bool)>,
+        /// Voices started, by name.
+        started: Vec<Option<u32>>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum VoicedEvent {
+        Start(Option<u32>),
+        Gain(u32, f32),
+        End(u32),
+        EndAll,
+    }
+
+    impl crate::Instrument for VoicedSampler {
+        fn note_on(&mut self, o: u32, _k: u8, _v: f32) {
+            self.queue.push((o, VoicedEvent::Start(None)));
+        }
+        fn note_off(&mut self, _o: u32, _k: u8) {}
+        fn voice_start(&mut self, o: u32, _k: u8, _v: f32, _start: f32, _l: crate::NoteLevels, voice: u32) {
+            self.queue.push((o, VoicedEvent::Start(Some(voice))));
+        }
+        fn voice_gains(&self) -> bool {
+            true
+        }
+        fn voice_gain(&mut self, o: u32, voice: u32, gain: f32) {
+            self.queue.push((o, VoicedEvent::Gain(voice, gain)));
+        }
+        fn voice_choke(&mut self, o: u32, _k: u8, voice: u32) {
+            self.queue.push((o, VoicedEvent::End(voice)));
+        }
+        fn choke(&mut self, o: u32, _k: u8) {
+            self.queue.push((o, VoicedEvent::EndAll));
+        }
+        fn process(&mut self, _rate: u32, l: &mut [f32], r: &mut [f32]) {
+            let ramp = crate::instrument::VOICE_GAIN_FRAMES;
+            self.queue.sort_by_key(|e| e.0);
+            let mut queue = std::mem::take(&mut self.queue).into_iter().peekable();
+            for f in 0..l.len() {
+                while let Some((_, e)) = queue.next_if(|e| e.0 as usize <= f) {
+                    match e {
+                        VoicedEvent::Start(id) => {
+                            self.voices.push((id, 1.0, 0.0, 1.0, 0, false));
+                            self.started.push(id);
+                        }
+                        VoicedEvent::Gain(id, g) => {
+                            for v in self.voices.iter_mut().filter(|v| v.0 == Some(id)) {
+                                if v.5 {
+                                    (v.2, v.3, v.4) = ((g - v.1) / ramp as f32, g, ramp);
+                                } else {
+                                    (v.1, v.4, v.5) = (g, 0, true);
+                                }
+                            }
+                        }
+                        VoicedEvent::End(id) => self.voices.retain(|v| v.0 != Some(id)),
+                        VoicedEvent::EndAll => self.voices.clear(),
+                    }
+                }
+                let mut sum = 0.0;
+                for v in &mut self.voices {
+                    sum += 0.5 * v.1;
+                    if v.4 > 0 {
+                        v.1 += v.2;
+                        v.4 -= 1;
+                        if v.4 == 0 {
+                            v.1 = v.3;
+                        }
+                    }
+                }
+                (l[f], r[f]) = (sum, sum);
+            }
+        }
+    }
+
+    // spec: audio/audio-clips.md "Automatic crossfades", "Fades and clip gain"
+    /// Two clips of one sample overlap on a hosted sampler: one channel, one key. Each voice gets its own fades, so the
+    /// crossfade adds up to 1 as on the engine's own voices, and the first clip's end leaves the second playing to its
+    /// own end.
+    #[test]
+    fn automatic_crossfades_on_a_hosted_sampler_play_at_unity() {
+        use os_model::{Clip, ClipSource};
+        let wav = std::env::temp_dir().join(format!("os-engine-hosted-crossfades-{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 2 * 96000]).unwrap();
+        let mut p = song(vec![], vec![Clip::new(0, 384, 0, ClipSource::Channel(0)), Clip::new(192, 384, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        p.auto_crossfades = Some(true);
+        let mut lib = SampleLibrary::new(None);
+        let run = |p: &Project, lib: &mut SampleLibrary| {
+            let mut e = Engine::new(p, lib, 48000, PlayMode::Song);
+            let inst = Arc::new(std::sync::Mutex::new(VoicedSampler::default()));
+            e.set_instrument(0, inst.clone());
+            let out = e.render_all(480);
+            let started = inst.lock().unwrap().started.clone();
+            (out, started)
+        };
+        let alone = {
+            let mut q = p.clone();
+            q.arrangements[0].clips.truncate(1);
+            run(&q, &mut lib).0
+        };
+        let level = alone[24000 * 2];
+        assert!(level > 0.1);
+        let at = |t: u64| crate::clock::Clock::frame_of_tick(48000, 96, 130.0, t) as usize;
+        for t in [0.0f32, 2.289, -4.736] {
+            p.arrangements[0].clips[1].set_fade_in_tension(t);
+            let (xf, started) = run(&p, &mut lib);
+            assert_eq!(started.len(), 2);
+            assert!(started[0].is_some() && started[1].is_some() && started[0] != started[1], "each clip's voice has its own name: {started:?}");
+            // Flat from the first clip's start to the second's end: no dip in the overlap, no gap after the first ends.
+            let worst = (0..at(576)).map(|f| (xf[2 * f] - level).abs()).fold(0.0f32, f32::max);
+            assert!(worst < 2e-4, "t {t}: off by {worst} (level {level})");
+            assert!(xf[2 * (at(576) + 10)].abs() < 1e-6, "silent after the second clip");
+            // The second clip alone (the first muted, it still makes the crossfade): its fade-in.
+            let mut q = p.clone();
+            q.arrangements[0].clips[0].muted = true;
+            let second = run(&q, &mut lib).0;
+            let mid = level * os_model::fade_curve(0.5, f64::from(t)) as f32;
+            assert!((second[2 * at(288)] - mid).abs() < 2e-4, "t {t}: {} vs {mid}", second[2 * at(288)]);
+            assert!(second[2 * at(100)].abs() < 1e-6, "nothing before the second clip");
+        }
         let _ = std::fs::remove_file(&wav);
     }
 

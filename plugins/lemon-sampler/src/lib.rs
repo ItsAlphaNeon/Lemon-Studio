@@ -379,7 +379,9 @@ impl LemonSampler {
         match ev {
             NoteEvent::NoteOn { note, velocity, voice_id, .. } => self.engine.note_on_id(note, velocity, voice_id, blk),
             NoteEvent::NoteOff { note, .. } => self.engine.note_off(note, blk),
-            NoteEvent::Choke { note, .. } => self.engine.choke(note, blk),
+            NoteEvent::Choke { note, voice_id, .. } => self.engine.choke(voice_id, note, blk),
+            // An audio clip's fades and gain, on its own voice.
+            NoteEvent::PolyVolume { voice_id, note, gain, .. } => self.engine.volume(voice_id, note, gain),
             NoteEvent::PolyTuning { note, tuning, .. } => self.engine.tune(note, f64::from(tuning)),
             // The note's own pan, also while it sounds (spec: audio/voice-levels.md "Final levels").
             NoteEvent::PolyPan { voice_id, note, pan, .. } => self.engine.pan(voice_id, note, pan),
