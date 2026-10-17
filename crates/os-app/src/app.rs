@@ -7968,7 +7968,7 @@ mod tests {
         assert_eq!((prefs::check(&ALT), prefs::check(&AT_POS)), (false, true), "the defaults");
         let mut app = App::new(None);
         app.open_settings(GENERAL);
-        let above = ["Display", "Language", "Input", "Undo history", "Hints and warnings", "System", "Updates and privacy"];
+        let above = ["Display", "Language", "Input", "Undo history", "Hints and warnings", "System", "Updates"];
         app.state.settings.folded.extend(above);
         frame(&mut app, &mut c, None);
         for (check, said) in [(&ALT, "Alternate meter scale: on"), (&AT_POS, "Create automation clips at the playback position: off")] {
@@ -8065,7 +8065,7 @@ mod tests {
         assert_eq!((prefs::check(&CHANNELS), prefs::check(&SLOTS)), (true, false), "the defaults");
         let mut app = App::new(None);
         app.open_settings(GENERAL);
-        let above = ["Display", "Language", "Input", "Undo history", "Hints and warnings", "System", "Updates and privacy"];
+        let above = ["Display", "Language", "Input", "Undo history", "Hints and warnings", "System", "Updates"];
         app.state.settings.folded.extend(above);
         frame(&mut app, &mut c, None);
         for (check, said) in [(&CHANNELS, "Auto name channels: off"), (&SLOTS, "Auto name effect slots: on")] {

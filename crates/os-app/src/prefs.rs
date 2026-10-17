@@ -562,8 +562,8 @@ fn slider_in(st: &Store, s: &Slider) -> u16 {
     st.get(s.key).and_then(|v| v.parse::<u16>().ok()).map_or(s.default, |v| v.min(s.max))
 }
 
-/// Tests only: a check that exercises the settings page. An FL service Lemon Studio leaves out (ui/options-coverage.md
-/// §4), so it is never declared for real.
+/// Tests only: a check that exercises the settings page. It stays greyed for real until Lemon Studio can update itself
+/// (ui/options-coverage.md §4).
 #[cfg(test)]
 pub const TEST_CHECK: Check = Check { key: "test_check", label: "Automatically check for updates", default: true };
 
@@ -874,7 +874,7 @@ main_gui_scaling = 200%
         click(&mut app, &mut c, r);
         assert_eq!(app.state.playlist.popup.as_ref().unwrap().items[2].mark, crate::playlist::Mark::Radio(true));
         app.state.playlist.popup = None;
-        // The test check (Updates and privacy, further down the page: the groups above it folded) toggles.
+        // The test check (Updates, further down the page: the groups above it folded) toggles.
         app.state.settings.folded.extend(["Display", "Language", "Input", "Undo history"]);
         app.paint(&mut c, None);
         let key = Action::Settings(SAct::Check(TEST_CHECK.label));
@@ -886,8 +886,11 @@ main_gui_scaling = 200%
         click(&mut app, &mut c, r);
         assert!(check(&TEST_CHECK));
         // Its neighbours are not declared: greyed out.
-        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Send usage data")));
-        assert!(!app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check("Send usage data"))));
+        let download = "Automatically download program updates";
+        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder(download)));
+        assert!(!app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check(download))));
+        // Nothing about usage data.
+        assert!(!app.hits.iter().any(|h| matches!(h.action, Action::Placeholder(l) if l.contains("usage"))));
     }
 
     /// Pop-ups scaling: menus and combo lists are painted at its scale, rows as ui-scaling.md §2 has them, from where they

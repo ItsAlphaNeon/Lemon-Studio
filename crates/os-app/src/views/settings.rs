@@ -557,10 +557,12 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 combo("100MB (default)", 110.0, "Project data size warning"),
             ]),
             gf("System", false, vec![Check(ASSOCIATE_CHECK, s.settings.assoc)]),
-            gf("Updates and privacy", false, vec![
+            // FL's "Updates and privacy" without Send usage data and its More information button: Lemon Studio collects
+            // nothing. The update checks stay greyed until Lemon Studio can update itself (spec: ui/settings.md
+            // "General").
+            gf("Updates", false, vec![
                 Check("Automatically check for updates", true),
                 Check("Automatically download program updates", true),
-                Check("Send usage data", false),
             ]),
             gf("Miscellaneous", false, vec![
                 Check("Auto name channels", true),
