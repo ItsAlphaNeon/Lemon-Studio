@@ -5544,12 +5544,17 @@ impl App {
         if self.browser_key(key, ctrl, alt) {
             return;
         }
-        // Ctrl+Z / Ctrl+Alt+Z: the project's undo history, whichever window is in front (spec: ui/settings-choices.md
-        // "Undo history: the four checks (2026-10-16)").
+        // Ctrl+Z / Ctrl+Alt+Z: the project's undo history, whichever window is in front; Ctrl+Shift+Z redoes (spec:
+        // ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
         if let Key::Character(c) = key
             && ctrl
             && c.eq_ignore_ascii_case("z")
         {
+            if self.shift {
+                let m = crate::history::ctrl_shift_z(&mut self.state);
+                self.say(m);
+                return self.invalidate();
+            }
             return self.undo_key(alt);
         }
         // The channel rack's keys while it is in front (spec: ui/channel-rack.md §20).
@@ -6560,8 +6565,19 @@ impl App {
     /// ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
     pub(crate) fn undo_key(&mut self, alt: bool) {
         let s = &mut self.state;
-        s.message = if alt { crate::history::ctrl_alt_z(s) } else { crate::history::ctrl_z(s) };
+        if let Some(m) = if alt { crate::history::ctrl_alt_z(s) } else { crate::history::ctrl_z(s) } {
+            self.say(m);
+        }
         self.invalidate();
+    }
+
+    /// A key's result for the hint bar (step edit, undo): it is the message, and it replaces the hint of what the
+    /// pointer rests on until the pointer moves, as step edit's song position does (else a hint over the playlist or
+    /// the rack hid it).
+    pub(crate) fn say(&mut self, m: String) {
+        self.hint = Cow::Owned(m.clone());
+        self.state.message = Some(m);
+        self.damage_rect(HINT_RECT);
     }
 
     /// ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the channel goes last in the rack (kept
@@ -13315,8 +13331,11 @@ mod tests {
         app.mouse_down();
         assert!(!matches!(app.state.playlist.overlay, Some(pl::Overlay::Slice { .. })), "left Shift: no slice");
         app.mouse_up();
+        // Shift let go first: Ctrl+Shift+Z would redo.
+        app.shift = false;
         app.key(&Key::Character("z".into()), true, false);
         assert_eq!(pl::clips(&app.state).len(), n);
+        app.shift = true;
         app.rshift = true;
         drag(&mut app, &mut c, (g.x_of(bar as f32), g.y_of(3) + 30.0), (g.x_of(bar as f32), g.y_of(5) + 30.0));
         app.shift = false;

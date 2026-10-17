@@ -448,6 +448,14 @@ pub fn ctrl_alt_z(s: &mut State) -> Option<String> {
     Some(m)
 }
 
+/// Ctrl+Shift+Z (Command+Shift+Z, macOS's usual redo): redo, in either mode. A Lemon Studio addition: FL redoes with
+/// Ctrl+Alt+Z only.
+pub fn ctrl_shift_z(s: &mut State) -> String {
+    let m = did(s, true);
+    shown_in_browser(s);
+    m
+}
+
 fn shown_in_browser(s: &mut State) {
     if prefs::check(&prefs::UNDO_HISTORY_IN_BROWSER) {
         crate::browser::show_history(s);
@@ -626,6 +634,12 @@ mod tests {
         app.key(&Key::Character("z".into()), true, true);
     }
 
+    fn ctrl_shift_z(app: &mut App) {
+        app.shift = true;
+        app.key(&Key::Character("Z".into()), true, false);
+        app.shift = false;
+    }
+
     /// A drag on knob `id`, `dy` pixels down.
     fn turn(app: &mut App, id: KnobId, dy: f32) {
         app.mouse_move(100.0, 300.0);
@@ -716,6 +730,28 @@ mod tests {
         // EDIT's one entry does what Ctrl+Z does.
         app.menu_item(EDIT_MENU, 0);
         assert_eq!(steps(&app), start);
+        prefs::set_check(&prefs::ALTERNATE_UNDO, true);
+    }
+
+    /// Ctrl+Shift+Z (Command+Shift+Z on macOS) redoes in either mode, where Ctrl+Z alone would undo or toggle (a Lemon
+    /// Studio addition; spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
+    #[test]
+    fn ctrl_shift_z_redoes_in_either_mode() {
+        for alternate in [true, false] {
+            let mut app = App::new(None);
+            prefs::set_check(&prefs::ALTERNATE_UNDO, alternate);
+            click_step(&mut app, 0, 0);
+            let one = steps(&app);
+            click_step(&mut app, 1, 1);
+            let two = steps(&app);
+            ctrl_z(&mut app);
+            assert_eq!(steps(&app), one, "alternate undo mode {alternate}: undone");
+            ctrl_shift_z(&mut app);
+            assert_eq!(steps(&app), two, "alternate undo mode {alternate}: redone");
+            ctrl_shift_z(&mut app);
+            let nothing = (two.clone(), Some("Nothing to redo"));
+            assert_eq!((steps(&app), app.state.message.as_deref()), nothing, "alternate undo mode {alternate}");
+        }
         prefs::set_check(&prefs::ALTERNATE_UNDO, true);
     }
 

@@ -123,9 +123,8 @@ impl App {
         let pos = crate::song_pos::stored(s);
         let at = if s.song_mode {
             let Some(t) = crate::piano::pattern_tick_in_song(s, f64::from(pos)) else {
-                s.message = Some(format!("Step edit: {} does not play at the song position", crate::patterns::name_of(s, s.pattern)));
-                self.invalidate();
-                return;
+                let m = format!("Step edit: {} does not play at the song position", crate::patterns::name_of(s, s.pattern));
+                return self.say(m);
             };
             t as u32
         } else {
@@ -261,7 +260,12 @@ mod tests {
         app.state.playlist.pos = bar / 2;
         tap(&mut app, KeyCode::KeyV);
         assert_eq!((notes(&app).len(), app.state.playlist.pos), (3, bar / 2));
-        assert!(app.state.message.as_deref().is_some_and(|m| m.contains("does not play at the song position")));
+        let m = "Step edit: Pattern 1 does not play at the song position";
+        assert_eq!(app.state.message.as_deref(), Some(m));
+        // The hint bar shows it over the hint of what the pointer rests on, until the pointer moves.
+        assert_eq!(app.hint, m);
+        app.mouse_move(app.mouse.0 + 1.0, app.mouse.1);
+        assert_ne!(app.hint, m);
     }
 
     /// Keys held together give one chord, written on the release of the last one with every key pressed since the
