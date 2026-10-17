@@ -1357,7 +1357,9 @@ impl App {
                 s.rack.reset();
                 s.hide(Win::Plugin);
                 s.mixer_scroll = 0.0;
-                s.song_mode = project.arrangement().is_some_and(|a| !a.clips.is_empty());
+                // As saved (event 9); a file without it opens in song mode, as in FL 26 (spec: flp/engine-events.md
+                // "Project").
+                s.song_mode = project.song_mode.unwrap_or(true);
                 s.project = project;
                 // Opening in song mode sets the initial values, as FL 26 does (spec: flp/engine-events.md "Event
                 // 216"); the project is opened with them, not changed.
@@ -1523,6 +1525,7 @@ impl App {
         self.store_builtin_states();
         let s = &mut self.state;
         s.project.tempo = Some(s.tempo);
+        s.project.song_mode = Some(s.song_mode);
         // Lock, zip, filter groups and loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
         crate::rack::to_model(s);
         // The playlist's track height, zoom and scroll (event 242, spec: flp/events/playlist.md).
@@ -1770,6 +1773,8 @@ impl App {
         s.path = None;
         s.tempo = 130.0;
         s.pattern = 1;
+        // FL's default template is saved in pattern mode.
+        s.song_mode = false;
         s.piano.reset();
         s.playlist.reset();
         s.history.reset();

@@ -390,7 +390,8 @@ mod tests {
 
     /// Opening a project in song mode sets the listed controls, as FL 26 does (spec: flp/engine-events.md "Event
     /// 216"): the file keeps the stored values, the opened project has the initial ones and is not changed, and saving
-    /// it stores them. Opened in pattern mode, the stored values stay.
+    /// it stores them. Opened in pattern mode, the stored values stay. The mode is the one saved (event 9), clips or
+    /// not; a file without it opens in song mode, as in FL.
     #[test]
     fn opening_a_song_sets_the_initial_values() {
         const INIT: (f64, f64) = (0.5, 140.0);
@@ -404,6 +405,7 @@ mod tests {
             (q.channels[0].volume, q.tempo.unwrap())
         };
         let mut a = song_app();
+        a.state.song_mode = true;
         moved(&mut a);
         a.save_to(path.clone());
         assert_eq!(stored(&path), MOVED);
@@ -415,14 +417,28 @@ mod tests {
         b.save_to(resaved.clone());
         assert_eq!(stored(&resaved), INIT, "saved as the stored values");
 
-        // Pattern mode (no clips): the stored values.
-        pl::arr_mut(&mut a.state).clips.clear();
+        // Saved in pattern mode, with the clips: opened in pattern mode, the stored values.
         a.state.song_mode = false;
         a.save_to(path.clone());
         let mut c = App::new(None);
+        c.state.song_mode = true;
         c.open(path.clone());
-        assert!(!c.state.song_mode);
+        assert!(!c.state.song_mode && !pl::clips(&c.state).is_empty());
         assert_eq!(controls(&c), MOVED);
+        // Without event 9 (a file from before Lemon Studio wrote it): song mode, even with no clips.
+        pl::arr_mut(&mut a.state).clips.clear();
+        a.save_to(path.clone());
+        let mut f = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+        for c in &mut f.chunks {
+            if let os_flp::ChunkBody::Events(ev) = &mut c.body {
+                ev.retain(|e| e.id != 9);
+            }
+        }
+        std::fs::write(&path, f.to_bytes().unwrap()).unwrap();
+        let mut d = App::new(None);
+        d.open(path.clone());
+        assert!(d.state.song_mode);
+        assert_eq!(controls(&d), INIT);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&resaved);
     }

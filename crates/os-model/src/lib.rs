@@ -61,6 +61,9 @@ pub struct Project {
     /// "Play truncated notes in clips" (event 30; spec: audio/song-structure.md): on when the file has the event
     /// with 1, off when it has none (spec: flp/engine-events.md "Event 30").
     pub play_truncated: bool,
+    /// Song or pattern mode as saved (event 9: 1 = song, 0 = pattern; spec: flp/engine-events.md "Project"). `None` =
+    /// not in the file, which FL opens in song mode.
+    pub song_mode: Option<bool>,
     /// Project settings Lemon Studio shows but does not play yet, as the file holds them (spec: flp/engine-events.md
     /// "Project"): panning law (event 23: 0 Circular, 2 Triangular), fast declick for cut groups (event 40),
     /// automatic crossfades (event 44). `None` = not in the file. Saving leaves their events as they are.

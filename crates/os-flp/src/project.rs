@@ -73,6 +73,8 @@ mod id {
     pub const TIME_NUM: u8 = 17;
     pub const TIME_DEN: u8 = 18;
     pub const TIME_MODE: u8 = 35;
+    /// Song or pattern mode (9: 1 = song, 0 = pattern), one byte right after 67 (spec: flp/engine-events.md "Project").
+    pub const SONG_MODE: u8 = 9;
     pub const PLAY_TRUNCATED: u8 = 30;
     /// Settings shown but not played yet: panning law (23), automatic crossfades (44), fast declick for cut groups (40,
     /// after event 100) (spec: flp/engine-events.md "Project").
@@ -730,6 +732,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         current_group: l.current_group.map(|i| int(&events[i])).filter(|&v| v != u32::MAX),
         bar: l.time_num.zip(l.time_den).map(|(n, d)| (int(&events[n]) as u16, int(&events[d]) as u16)).filter(|&(n, d)| n > 0 && d > 0),
         bar_as_signature: l.setting(id::TIME_MODE).map(|i| int(&events[i]) != 0),
+        song_mode: l.setting(id::SONG_MODE).map(|i| int(&events[i]) != 0),
         play_truncated: l.truncated.is_some_and(|i| int(&events[i]) != 0),
         panning_law: l.setting(id::PANNING_LAW).map(|i| int(&events[i]) as u8),
         fast_declick: l.fast_declick.map(|i| int(&events[i]) != 0),
@@ -2311,6 +2314,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     let unread = |eid: u8| l.unread_settings.iter().find(|s| s.0 == eid).map(|s| s.1);
     // The swing and the main pitch also stay before a 17 or 18 the file has.
     let before_signature = |at: usize| [l.time_num, l.time_den].into_iter().flatten().fold(at, usize::min);
+    // Song or pattern mode (event 9): right behind 156 and 67.
+    if let Some(on) = project.song_mode.filter(|&on| Some(on) != current.song_mode) {
+        match unread(id::SONG_MODE) {
+            Some(i) => set_int(&mut events[i], u32::from(on)),
+            None => {
+                let at = [l.tempo, l.current_pattern].into_iter().flatten().max().map_or(0, |i| i + 1);
+                settings.push((before_signature(at), Event::new(id::SONG_MODE, Value::U8(u8::from(on)))));
+            }
+        }
+    }
     // Channel rack settings: main swing, filter groups, current filter (spec: flp/events/project-info.md).
     if let Some(v) = project.swing.filter(|&v| Some(v) != current.swing) {
         match l.swing {
@@ -3469,6 +3482,9 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     if let Some(p) = project.current_pattern {
         ev.push(Event::new(id::CURRENT_PATTERN, Value::U16(p)));
     }
+    if let Some(on) = project.song_mode {
+        ev.push(Event::new(id::SONG_MODE, Value::U8(u8::from(on))));
+    }
     if let Some(v) = project.swing.filter(|&v| v != 0) {
         ev.push(Event::new(id::SWING, Value::U8(v)));
     }
@@ -4394,6 +4410,32 @@ mod tests {
         assert_eq!(load(&plain).unwrap().main_pitch, Some(250));
     }
 
+    /// Song or pattern mode (event 9, one byte right after 67; spec: flp/engine-events.md "Project"): `create` writes it
+    /// where the model has it, `load` reads it (`None` without it), `apply` patches it in place.
+    #[test]
+    fn song_mode_round_trip() {
+        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        assert_eq!(load(&create(&new_project()).unwrap()).unwrap().song_mode, None);
+        for on in [false, true] {
+            let mut file = reparse(&create(&Project { song_mode: Some(on), ..new_project() }).unwrap());
+            let ev = events_of(&file).unwrap();
+            let at = ev.iter().position(|e| e.id == id::SONG_MODE).unwrap();
+            assert_eq!((ev[at - 1].id, ev[at].value.clone()), (id::CURRENT_PATTERN, Value::U8(u8::from(on))));
+            let mut q = load(&file).unwrap();
+            assert_eq!(q.song_mode, Some(on));
+            let before = file.to_bytes().unwrap();
+            apply(&q, &mut file).unwrap();
+            assert_eq!(file.to_bytes().unwrap(), before, "unchanged");
+            q.song_mode = Some(!on);
+            apply(&q, &mut file).unwrap();
+            let file = reparse(&file);
+            let ev = events_of(&file).unwrap();
+            assert_eq!(ev.iter().filter(|e| e.id == id::SONG_MODE).count(), 1);
+            assert_eq!(ev[at].id, id::SONG_MODE, "in place");
+            assert_eq!(load(&file).unwrap().song_mode, Some(!on));
+        }
+    }
+
     /// The initial values (event 216; spec: ui/settings-choices.md "Advanced: Initialize controls automatically",
     /// flp/engine-events.md "Event 216"): `create` writes the event in every project, empty without values; the records
     /// read back, one Lemon Studio doesn't understand (a plugin parameter's) byte for byte; they are not read into the
@@ -4576,7 +4618,7 @@ mod tests {
         let back = load(&file).unwrap();
         assert_eq!((back.bar, back.bar_as_signature, back.play_truncated, back.bar_ticks()), (Some((3, 3)), Some(false), true, 216));
 
-        // Missing from such a file, they are added where FL writes them: 11 behind 9 (or 67), 80 behind 11, 17 and 18
+        // Missing from such a file, they are added where FL writes them: 9 behind 67 (or 156), 11 behind 9 (or 67), 80 behind 11, 17 and 18
         // behind 80, 35 behind 18 (before 23, 44), 30 behind 44 (before 10), or behind 35 when the file has no 23, 44.
         let without = |gone: &[u8]| -> Vec<u8> { ORDER.iter().copied().filter(|e| !gone.contains(e)).collect() };
         let cases: [&[u8]; 9] = [
@@ -4593,15 +4635,19 @@ mod tests {
         for missing in cases {
             let mut file = fl_file(missing);
             let mut q = load(&file).unwrap();
+            assert_eq!(q.song_mode, (!missing.contains(&9)).then_some(true));
             (q.bar, q.bar_as_signature, q.play_truncated, q.swing, q.main_pitch) = (Some((6, 2)), Some(true), true, Some(64), Some(1));
+            // Pattern mode: 9 patched to 0, or added behind 156 and 67.
+            q.song_mode = Some(false);
             apply(&q, &mut file).unwrap();
             let file = reparse(&file);
-            let gone: Vec<u8> = missing.iter().copied().filter(|e| [id::CURRENT_PATTERN, 9, 23, 44].contains(e)).collect();
+            let gone: Vec<u8> = missing.iter().copied().filter(|e| [id::CURRENT_PATTERN, 23, 44].contains(e)).collect();
             assert_eq!(prelude_ids(&file, &ORDER), without(&gone), "missing {missing:?}");
+            assert_eq!(value_of(&file, id::SONG_MODE), Some(0));
             let back = load(&file).unwrap();
             assert_eq!(
-                (back.bar, back.bar_as_signature, back.play_truncated, back.swing, back.main_pitch),
-                (Some((6, 2)), Some(true), true, Some(64), Some(1))
+                (back.bar, back.bar_as_signature, back.play_truncated, back.swing, back.main_pitch, back.song_mode),
+                (Some((6, 2)), Some(true), true, Some(64), Some(1), Some(false))
             );
         }
         // A swing or main pitch added to a file with 17 and 18 ahead of the current pattern (as Lemon Studio wrote
