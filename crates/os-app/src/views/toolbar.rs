@@ -11,11 +11,11 @@ use super::{menus, sunken, tool_button, FrameInfo};
 use crate::app::{Action, Live, State, Ui, Util, Win};
 use crate::icons::{self, Icon};
 
-/// Leftmost logo centre: just right of the last toolbar control (the news panel / downloads, x 1473).
+/// Leftmost logo centre: just right of the last toolbar control (row 1's last utility button, x 1473).
 const LOGO_MIN_X: f32 = 1520.0;
 
-/// The band's width (its own px) from which every panel shows: the news panel and the last utility button end at
-/// x 1470. A narrower band leaves out the panels that don't fit, from the right, and draws the ▶ arrow at its right
+/// The band's width (its own px) from which every panel shows: the last utility button ends at x 1470. A narrower
+/// band leaves out the panels that don't fit, from the right, and draws the ▶ arrow at its right
 /// end (`room`). Spec: ui/ui-scaling.md §1 "Toolbars scaling".
 pub const FULL_W: f32 = 1473.0;
 /// The ▶ arrow's width at the band's right end.
@@ -160,7 +160,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         ui.c.fill_rect(Rect::new(x, 2.0, 1.0, 37.0), t.toolbar_line);
         ui.c.fill_rect(Rect::new(x + 1.0, 2.0, 1.0, 37.0), t.toolbar_edge.with_alpha(110));
     }
-    for (x, _) in [(298.0, 376.0), (378.0, 575.0), (576.0, 610.0), (967.0, 1003.0), (1298.0, 1470.0)].into_iter().filter(|&(_, end)| seps && end <= fit) {
+    for (x, _) in [(298.0, 376.0), (378.0, 575.0), (576.0, 610.0), (967.0, 1003.0)].into_iter().filter(|&(_, end)| seps && end <= fit) {
         if lemon {
             ui.c.fill_rrect(Rect::new(x, 50.0, 2.0, 23.0), 1.0, t.toolbar_line);
             continue;
@@ -758,23 +758,8 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         let ink = super::tool_face(ui, r, if hov { super::Look::Hot } else { super::Look::Off });
         icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), ink);
     }
-
-    // News panel.
-    let np = Rect::span(1304.0, 1470.0, 45.0, 77.0);
-    if np.right() > fit {
-        return;
-    }
-    {
-        ui.c.fill_rrect(np, if lemon { 6.0 } else { 2.0 }, t.news_panel);
-        ui.off(np, "News");
-        let tw = ui.c.text(Font::new(13), 1309.0, 53.0, t.text_faint, "Today");
-        let news = "Welcome to Lemon Studio";
-        let avail = 1442.0 - 1315.0 - tw;
-        let nf = ui.c.fit_font(Font::new(14), news, avail);
-        ui.c.text_clip(nf, 1315.0 + tw, 52.0, avail, ui.t.tx(0x9aa8b0), news);
-        icons::draw(ui.c, Icon::Globe, Rect::new(1449.0, 52.0, 18.0, 18.0), t.glyph_dim.shade(0.3));
-        ui.veil(np, t.toolbar);
-    }
+    // FL's news panel (x 1304..1470, with its separator) is left out: it suggested an online service Lemon Studio
+    // does not have. A tips panel may take its place (spec: ui/main-window.md §3).
 }
 
 /// Minutes, seconds and centiseconds of a position in seconds.
@@ -946,6 +931,8 @@ mod tests {
         assert_eq!(more(&app), None);
         assert!(has(&app, &Action::Monitor) && has(&app, &Action::CpuPanel) && has(&app, &Action::PatternPrev));
         assert!(app.hits.iter().any(|h| h.hint == "About Lemon Studio"));
+        // No news panel: Lemon Studio has no online service.
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder("News")));
 
         // 200 %: 960 band px. Row 1 ends after the time display, row 2 after the snap combo.
         set_choice(&TOOLBARS_SCALING, 5);
@@ -963,7 +950,7 @@ mod tests {
         app.mouse_up();
         assert_eq!((app.state.message.clone(), app.state.menu_open, app.state.settings.open), before, "a click does nothing");
 
-        // Main on a narrower window: the same rule (the CPU panel fits, the news panel and the last buttons don't).
+        // Main on a narrower window: the same rule (the CPU panel fits, the last buttons don't).
         set_choice(&TOOLBARS_SCALING, 0);
         let Ok(mut narrow) = Canvas::new(1300, 800, 1.0) else { return };
         app.invalidate();
