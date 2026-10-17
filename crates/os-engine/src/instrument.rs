@@ -11,6 +11,10 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+/// Frames over which a voice glides to each gain `Instrument::voice_gain` gives it after its first. The engine gives
+/// an audio clip's voice its gain every this many frames of a tick, each time the gain due this many frames later.
+pub const VOICE_GAIN_FRAMES: u32 = 32;
+
 /// A note-driven stereo generator.
 pub trait Instrument: Send {
     /// Starts a note `offset` frames into the next `process` call. Velocity 0..=1 (FL velocity / 128).
@@ -38,6 +42,30 @@ pub trait Instrument: Send {
     /// Cuts a note at once, whatever its envelope (the end of an audio clip). Default: a note off.
     fn choke(&mut self, offset: u32, key: u8) {
         self.note_off(offset, key);
+    }
+    /// Starts an audio clip's voice as `note_start` does, named `voice` for `voice_gain` and `voice_choke` (two clips
+    /// of one channel overlap on the same key). Default: `note_start`.
+    fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: NoteLevels, voice: u32) {
+        let _ = voice;
+        self.note_start(offset, key, velocity, start, levels);
+    }
+    /// True for an instrument that puts `voice_gain` on its voices one by one. Default false: the engine puts an audio
+    /// clip's fades and gain on the instrument's whole output, which is right only while one clip plays at a time.
+    fn voice_gains(&self) -> bool {
+        false
+    }
+    /// The gain of voice `voice` (its audio clip's fades and gain; spec: audio/audio-clips.md "Fades and clip gain")
+    /// `offset` frames into the next `process` call: the first one a voice is given (at its start) it takes at once;
+    /// each later one it reaches in a straight line over the [`VOICE_GAIN_FRAMES`] frames from `offset`, from where it
+    /// stands. A gain for a voice that has ended is ignored. Default: ignored.
+    fn voice_gain(&mut self, offset: u32, voice: u32, gain: f32) {
+        let _ = (offset, voice, gain);
+    }
+    /// Cuts voice `voice` of `key` as `choke` does (its audio clip's end), leaving the key's other voices. Default:
+    /// `choke`.
+    fn voice_choke(&mut self, offset: u32, key: u8, voice: u32) {
+        let _ = voice;
+        self.choke(offset, key);
     }
     /// Tunes the sounding voices of `key` to `semitones` from the key's own pitch (portamento glides; spec:
     /// audio/channel-voices.md). Default: ignored (no glide).

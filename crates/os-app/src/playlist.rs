@@ -32,7 +32,6 @@ pub const MARKER_H: f32 = 17.0;
 pub const EDGE: f32 = 6.0;
 /// Number of tracks (flp playlist.md).
 pub const TRACKS: u16 = 500;
-const UNDO_DEPTH: usize = 200;
 
 /// Playlist tools (§3) and their letters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -283,6 +282,10 @@ pub enum Cmd {
     TrackMuteClips(u16, bool),
     /// "Create automation clip" on a control: target, name, current value 0..1.
     CreateAutomation(u32, String, f64),
+    /// "Init song with this position" on a control: target, current value 0..1; "Delete initial value": target
+    /// (`crate::init`).
+    InitControl(u32, f64),
+    DeleteInit(u32),
     ResetEmptyTracks,
     /// Browser options menu (spec: ui/browser.md §4).
     Browser(crate::browser::BCmd),
@@ -310,6 +313,15 @@ pub enum Cmd {
     Cpu(crate::cpu::CpuCmd),
     /// The metronome button's menu: the click sound (spec: ui/metronome.md §2).
     MetronomeSound(os_engine::metronome::Sound),
+    /// Settings > Project ▸ Numerator / Denominator: the project's bar, beats per bar and steps per beat (events 17,
+    /// 18; spec: ui/settings-choices.md "Project").
+    Bar(u16, u16),
+    /// Settings > Project ▸ Set as: time signature (true) or time division (event 35).
+    TimeMode(bool),
+    /// Settings > Project ▸ Timebase (PPQ).
+    Timebase(u16),
+    /// Settings > Project ▸ Advanced ▸ Panning law: event 23's value (0 Circular, 2 Triangular).
+    PanningLaw(u8),
     /// The auto-scrolling button's menu (spec: ui/auto-scrolling.md §2).
     ContinuousScrolling,
     /// A PATTERNS command from a pattern's right-click menu in the picker (spec: ui/pattern-menu.md §3).
@@ -322,6 +334,16 @@ pub enum Cmd {
     /// A value picked in a list of the time signature dialog: denominator (true) or numerator (spec:
     /// ui/pattern-time-signature.md §1).
     TimeSig(bool, u8),
+    /// A settings page combo declared in `crate::prefs`: that entry of its choices.
+    Pref(&'static crate::prefs::Combo, usize),
+    /// Settings > Info ▸ the genre menu: a genre, None for "(none)" (spec: ui/settings-choices.md "Info").
+    Genre(Option<&'static str>),
+    /// Settings > General ▸ Default template: "Empty" or "<category>/<template>" (`crate::templates`).
+    Template(String),
+    /// Settings > General ▸ Hints and warnings ▸ the Manage messages menu (`crate::messages`).
+    Messages(crate::messages::Pick),
+    /// Settings > Project ▸ Data folder's menus and the forms' lists (`crate::data_folder`).
+    DataFolder(crate::data_folder::DCmd),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -331,6 +353,8 @@ pub struct PItem {
     pub cmd: Cmd,
     pub mark: Mark,
     pub enabled: bool,
+    /// Drawn dim though it works (Manage messages: an entry that is off).
+    pub dim: bool,
     /// Section header (not clickable).
     pub head: bool,
     pub sep: bool,
@@ -341,7 +365,7 @@ pub struct PItem {
 
 impl PItem {
     pub fn new(label: impl Into<Cow<'static, str>>, cmd: Cmd) -> Self {
-        PItem { label: label.into(), key: "", cmd, mark: Mark::None, enabled: true, head: false, sep: false, col: false, children: Vec::new() }
+        PItem { label: label.into(), key: "", cmd, mark: Mark::None, enabled: true, dim: false, head: false, sep: false, col: false, children: Vec::new() }
     }
     pub fn key(mut self, k: &'static str) -> Self {
         self.key = k;
@@ -353,6 +377,10 @@ impl PItem {
     }
     pub fn off(mut self) -> Self {
         self.enabled = false;
+        self
+    }
+    pub fn dim(mut self, on: bool) -> Self {
+        self.dim = on;
         self
     }
     pub fn head(label: &'static str) -> Self {
@@ -424,35 +452,9 @@ impl Wave {
     }
 }
 
-/// One undo step: the current arrangement's clips, markers and tracks, the automation data and the channels' stretch
-/// settings, plus what a command beyond the playlist changed ([`Extra`]).
-struct Snapshot {
-    clips: Vec<Clip>,
-    markers: Vec<TimeMarker>,
-    tracks: Vec<PlaylistTrack>,
-    automations: Vec<Automation>,
-    stretch: Vec<[u32; 4]>,
-    extra: Option<Box<Extra>>,
-}
-
-/// The part of an undo step outside the playlist, for the commands that are one undo step with it.
-pub enum Extra {
-    /// A channel was added (ADD > Audio clip / Automation clip, spec: ui/add-clip-channels.md §3): undo removes it
-    /// again and brings back the rack's filter groups, filter and selection and the playlist's clip source.
-    Channel {
-        index: u16,
-        groups: Vec<crate::rack::Group>,
-        filter: crate::rack::Filter,
-        unsorted_at: Option<usize>,
-        sel: std::collections::BTreeSet<usize>,
-        selected: usize,
-        source: Option<ClipSource>,
-        picker: PickKind,
-    },
-    /// The patterns changed (PATTERNS > Split by channel, spec: ui/split-by-channel.md §2): they come back, with the
-    /// current pattern.
-    Patterns { patterns: Vec<os_model::Pattern>, current: u16 },
-}
+/// What a playlist undo step keeps (`crate::history`): the shown arrangement's clips, markers and tracks, the
+/// automation data and the channels' stretch settings.
+pub(crate) type Snapshot = (Vec<Clip>, Vec<TimeMarker>, Vec<PlaylistTrack>, Vec<Automation>, Vec<[u32; 4]>);
 
 pub struct PlaylistState {
     pub tool: PlTool,
@@ -502,9 +504,10 @@ pub struct PlaylistState {
     pub last_clip: Option<(usize, std::time::Instant)>,
     /// Waveform cache by sample path (`None` = could not be loaded).
     pub waves: RefCell<HashMap<String, Option<Rc<Wave>>>>,
+    /// Tones of the same samples for colourful waveforms, analysed when first needed (`tones`).
+    pub tones: RefCell<HashMap<String, Option<Rc<os_dsp::tone::Tones>>>>,
     /// A project is loading and its files decode off the UI thread: waveforms wait (spec: ui/project-loading.md).
     pub wave_wait: bool,
-    undo: Vec<Snapshot>,
 }
 
 impl Default for PlaylistState {
@@ -536,8 +539,8 @@ impl Default for PlaylistState {
             last_header: None,
             last_clip: None,
             waves: RefCell::new(HashMap::new()),
+            tones: RefCell::new(HashMap::new()),
             wave_wait: false,
-            undo: Vec::new(),
         }
     }
 }
@@ -581,6 +584,23 @@ impl PlaylistState {
         });
         self.waves.borrow_mut().insert(path.to_string(), w.clone());
         w
+    }
+
+    /// The tones of a sample path, block by block (spec: ui/settings-choices.md "Display: Colorful waveforms
+    /// (2026-10-16)"): analysed once, the first time a waveform is drawn in colour, and kept with the peaks.
+    pub fn tones(&self, path: &str) -> Option<Rc<os_dsp::tone::Tones>> {
+        if let Some(t) = self.tones.borrow().get(path) {
+            return t.clone();
+        }
+        if self.wave_wait {
+            return None;
+        }
+        let file = crate::plugins::resolve_sample(path);
+        let t = os_engine::sample::load_shared(std::path::Path::new(&file))
+            .ok()
+            .map(|s| Rc::new(os_dsp::tone::Tones::analyse_stereo(&s.left, &s.right, s.rate)));
+        self.tones.borrow_mut().insert(path.to_string(), t.clone());
+        t
     }
 }
 
@@ -921,6 +941,28 @@ pub fn audio_fits(s: &State) -> Option<Fits> {
     Some(per)
 }
 
+/// Automatic crossfades follow the clips and the tempo (spec: audio/audio-clips.md "Automatic crossfades"): set again
+/// from the overlaps on the tick an edit reaches playback (clips moved, resized, added, deleted or split, the tempo,
+/// undo and redo, a project opened, the switch turned on), before the next undo step is taken, so they undo and redo
+/// with the edit that made them. As with the fits, the saved copy gets them too: an opened project's crossfades are
+/// not an unsaved change.
+pub fn follow_crossfades(app: &mut App) {
+    if !app.state.piano.dirty || !os_model::crossfade::derive(&mut app.state.project, app.state.tempo) {
+        return;
+    }
+    os_model::crossfade::derive(&mut app.saved.0, app.saved.1);
+    app.damage_win(crate::app::Win::Playlist);
+}
+
+/// The project's automatic crossfades were switched (`App::toggle_auto_crossfades`): turned off, the crossfades'
+/// lengths go to 0 and their tensions stay; turned on, they are set from the overlaps on the next tick.
+pub fn crossfades_switched(s: &mut State) {
+    if !os_model::crossfade::on(&s.project) {
+        os_model::crossfade::clear(&mut s.project);
+    }
+    s.piano.dirty = true;
+}
+
 /// Gives the audio clips of `arrangements` their lengths from `fits` (`fit_audio`). Returns whether one changed.
 pub fn fit_clips(arrangements: &mut [os_model::Arrangement], fits: &Fits) -> bool {
     let mut changed = false;
@@ -1018,54 +1060,46 @@ pub fn to_src(s: &State, src: ClipSource, ticks: f64) -> f64 {
     }
 }
 
-/// Undo snapshot of everything the playlist edits.
+/// Undo snapshot of everything the playlist edits: a step of the project's undo history (`crate::history`).
 pub fn snapshot(s: &mut State) {
-    snapshot_with(s, None);
+    snapshot_as(s, "Playlist edit");
 }
 
-/// Undo snapshot of the playlist plus `extra`: one step for a command that also changes the rack or the patterns.
-pub fn snapshot_with(s: &mut State, extra: Option<Extra>) {
-    let a = arr_mut(s);
-    let (clips, markers, tracks) = (a.clips.clone(), a.markers.clone(), a.tracks.clone());
+/// `snapshot`, the step named `name` (as the browser's History lists it; spec: ui/settings-choices.md "Undo history:
+/// the four checks (2026-10-16)").
+pub fn snapshot_as(s: &mut State, name: &'static str) {
+    arr_mut(s);
+    let snap = crate::history::Snap::Playlist(Box::new(capture(s)));
+    crate::history::record(s, name, snap);
+}
+
+/// `snapshot_as` for a command that changes more than the playlist: one step named `name`, holding the playlist
+/// and `extra`, what the command changes beyond it.
+pub fn snapshot_with(s: &mut State, name: &'static str, extra: crate::history::Snap) {
+    arr_mut(s);
+    let snap = crate::history::Snap::Several(vec![crate::history::Snap::Playlist(Box::new(capture(s))), extra]);
+    crate::history::record(s, name, snap);
+}
+
+/// The playlist's undo state now (`snapshot`).
+pub(crate) fn capture(s: &State) -> Snapshot {
+    let (clips, markers, tracks) = s.project.arrangement().map(|a| (a.clips.clone(), a.markers.clone(), a.tracks.clone())).unwrap_or_default();
     let stretch = s.project.channels.iter().map(|c| c.sound.stretch).collect();
-    let snap = Snapshot { clips, markers, tracks, automations: s.project.automations.clone(), stretch, extra: extra.map(Box::new) };
-    let u = &mut s.playlist.undo;
-    u.push(snap);
-    if u.len() > UNDO_DEPTH {
-        u.remove(0);
-    }
+    (clips, markers, tracks, s.project.automations.clone(), stretch)
 }
 
-pub fn undo(s: &mut State) -> bool {
-    let Some(Snapshot { clips, markers, tracks, automations, stretch, extra }) = s.playlist.undo.pop() else { return false };
+/// Puts an undo state back (undo and redo, `crate::history`).
+pub(crate) fn restore(s: &mut State, (c, m, t, a, st): Snapshot) {
     let arr = arr_mut(s);
-    arr.clips = clips;
-    arr.markers = markers;
-    arr.tracks = tracks;
-    s.project.automations = automations;
-    for (ch, v) in s.project.channels.iter_mut().zip(stretch) {
+    arr.clips = c;
+    arr.markers = m;
+    arr.tracks = t;
+    s.project.automations = a;
+    for (ch, v) in s.project.channels.iter_mut().zip(st) {
         ch.sound.stretch = v;
-    }
-    match extra.map(|e| *e) {
-        Some(Extra::Channel { index, groups, filter, unsorted_at, sel, selected, source, picker }) => {
-            // The app removes channels (`App::rack_pending`, which the Undo command runs); the rest comes back now.
-            if let Some(row) = s.project.channels.iter().position(|c| c.index == index) {
-                s.rack.delete_now = Some(vec![row]);
-            }
-            (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (groups, filter, unsorted_at);
-            (s.rack.sel, s.selected_channel) = (sel, selected);
-            (s.playlist.source, s.playlist.picker) = (source, picker);
-        }
-        Some(Extra::Patterns { patterns, current }) => {
-            s.project.patterns = patterns;
-            s.pattern = current;
-            s.piano.clear_selection();
-        }
-        None => {}
     }
     s.playlist.sel.clear();
     s.piano.dirty = true;
-    true
 }
 
 /// Topmost clip under (x, y): the last one in the list (drawn on top).
@@ -1228,6 +1262,29 @@ fn regroup_copies(s: &mut State, from: usize) {
             c.set_group(n);
         }
     }
+}
+
+/// Copies of the moved clips `orig` (index, clip as the move began) for a held click's pick-up (spec:
+/// ui/settings-choices.md "Input: Click-and-hold and both mouse buttons (2026-10-16)"): the originals go back to where
+/// they were and the copies are added after every clip, grouped copies in groups of their own as a Shift+drag's are.
+/// Returns the copies.
+pub fn clone_clips(s: &mut State, orig: &[(usize, Clip)]) -> Vec<(usize, Clip)> {
+    let arr = arr_mut(s);
+    for &(i, o) in orig {
+        if let Some(c) = arr.clips.get_mut(i) {
+            c.position = o.position;
+            c.track = o.track;
+        }
+    }
+    let first = arr.clips.len();
+    for &(_, o) in orig {
+        let mut cp = o;
+        cp.set_id(0);
+        arr.clips.push(cp);
+    }
+    regroup_copies(s, first);
+    s.piano.dirty = true;
+    clips(s).iter().enumerate().skip(first).map(|(i, c)| (i, *c)).collect()
 }
 
 /// Alt+wheel: change the track height by FL's 6 px steps around the track under the mouse (§6).
@@ -1578,9 +1635,14 @@ pub fn delete_track(s: &mut State, t: u16) {
     s.piano.dirty = true;
 }
 
-/// Track LED: mute / unmute (a solo ends first).
+/// Track LED: mute / unmute. A solo ends first: with "Restore previous state after solo" on, its saved states come
+/// back; off, the states stay as they are.
 pub fn toggle_track(s: &mut State, t: u16) {
-    end_solo(s);
+    if crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO) {
+        end_solo(s);
+    } else {
+        s.playlist.solo = None;
+    }
     let arr = arr_mut(s);
     if let Some(tr) = arr.tracks.get_mut(usize::from(t)) {
         tr.enabled = !tr.enabled;
@@ -1588,7 +1650,8 @@ pub fn toggle_track(s: &mut State, t: u16) {
     s.piano.dirty = true;
 }
 
-/// Ctrl+click / right-click on the LED: solo the track (others muted); again restores the states.
+/// Ctrl+click / right-click on the LED: solo the track (others muted); again ends the solo (see [`end_solo`]). A solo
+/// moved to another track keeps the states from before the first one.
 pub fn toggle_solo(s: &mut State, t: u16) {
     if let Some((was, _)) = s.playlist.solo {
         end_solo(s);
@@ -1605,11 +1668,14 @@ pub fn toggle_solo(s: &mut State, t: u16) {
     s.piano.dirty = true;
 }
 
+/// Unsolo: every track on, or, with "Restore previous state after solo" on, the states from before the solo (spec:
+/// ui/settings-choices.md "Miscellaneous").
 fn end_solo(s: &mut State) {
     if let Some((_, states)) = s.playlist.solo.take() {
+        let back = crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO);
         let arr = arr_mut(s);
-        for (tr, on) in arr.tracks.iter_mut().zip(states) {
-            tr.enabled = on;
+        for (k, tr) in arr.tracks.iter_mut().enumerate() {
+            tr.enabled = !back || states.get(k).copied().unwrap_or(tr.enabled);
         }
         s.piano.dirty = true;
     }
@@ -1644,16 +1710,25 @@ pub fn track_after_used(s: &State) -> u16 {
     clips(s).iter().map(|c| c.track + 1).max().unwrap_or(0).min(TRACKS - 1)
 }
 
-/// Create an automation clip for `target` (§8): a new type-5 channel named `name`, two flat points at `value`,
-/// a clip over the time selection, else from the song position for the current pattern's length (FL observed,
-/// spec: plugins/plugin-parameters.md §5), on a free track.
+/// Create an automation clip for `target` (§8): a new type-5 channel named `name` (its colour from
+/// `State::clip_colors`), two flat points at `value`,
+/// a clip over the time selection, else `automation_span` (spec: plugins/plugin-parameters.md §5), on the first free
+/// track below the last used one.
 pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16 {
-    snapshot(s);
+    // One undo step, "Create automation clip": the playlist, and the control's initial value while "Initialize controls
+    // automatically" is on (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
+    let init = crate::init::automatic(tgt, value);
+    arr_mut(s);
+    let mut snap = crate::history::Snap::Playlist(Box::new(capture(s)));
+    if init.is_some() {
+        snap = crate::history::Snap::Several(vec![snap, crate::history::Snap::Init(tgt, crate::init::entry(s, tgt))]);
+    }
+    crate::history::record(s, crate::history::CREATE_AUTOMATION, snap);
     let name = &unique_channel_name(s, name);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let (a, b) = match s.playlist.range {
         Some((r0, r1)) if r1 > r0 => (r0, r1),
-        _ => (s.playlist.pos, s.playlist.pos + source_len(s, ClipSource::Pattern(s.pattern)).max(1)),
+        _ => automation_span(s),
     };
     let beats = f64::from(b - a) / f64::from(ppq(s));
     s.project.channels.push(Channel {
@@ -1662,7 +1737,8 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         name: Some(name.to_string()),
         plugin: None,
         plugin_state: None,
-        color: Some(Rgb::new(0x5a, 0x74, 0x4c)),
+        // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
+        color: Some(s.clip_colors.new_channel(index)),
         enabled: true,
         volume: 1.0,
         pan: 0.0,
@@ -1680,8 +1756,22 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     s.playlist.sel = vec![n - 1];
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Automation;
+    if init.is_some() {
+        crate::init::put(s, tgt, init);
+    }
     s.piano.dirty = true;
     index
+}
+
+/// Where a new automation clip goes without a time selection (spec: ui/settings-choices.md "Miscellaneous: seven
+/// more checks, Default template and Startup project", "Create automation clips at the playback position"): from the
+/// song position with the check on, from bar 1 with it off; to the song's end (the largest end of a clip that is not
+/// muted, audio/song-structure.md) when that lies after the start, else for the current pattern's length.
+pub fn automation_span(s: &State) -> (u32, u32) {
+    let a = if crate::prefs::check(&crate::prefs::AUTOMATION_AT_PLAYBACK_POSITION) { s.playlist.pos } else { 0 };
+    let end = clips(s).iter().filter(|c| !c.muted).map(|c| c.end()).max().unwrap_or(0);
+    let b = if end > a { end } else { a + source_len(s, ClipSource::Pattern(s.pattern)).max(1) };
+    (a, b)
 }
 
 /// `name`, or `name #2`, `name #3`... when a channel already has it (spec: plugins/plugin-parameters.md §4).
@@ -1701,9 +1791,8 @@ pub fn unique_channel_name(s: &State, name: &str) -> String {
 pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
     let audio = kind == ChannelKind::AudioClip;
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    let r = &s.rack;
-    let (sel, selected, source, picker) = (r.sel.clone(), s.selected_channel, s.playlist.source, s.playlist.picker);
-    snapshot_with(s, Some(Extra::Channel { index, groups: r.groups.clone(), filter: r.filter, unsorted_at: r.unsorted_at, sel, selected, source, picker }));
+    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    snapshot_with(s, if audio { "Add audio clip" } else { "Add automation clip" }, before);
     let name = unique_channel_name(s, if audio { "Audio Clip" } else { "Automation Clip" });
     s.project.channels.push(Channel {
         index,
@@ -1735,7 +1824,8 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
     row
 }
 
-/// Add an audio clip channel for a sample file and place it at `tick` on `track` (§9).
+/// Add an audio clip channel for a sample file and place it at `tick` on `track` (§9). The channel's colour comes from
+/// `State::clip_colors`.
 pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Option<usize> {
     s.playlist.wave(path)?;
     snapshot(s);
@@ -1748,7 +1838,8 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
         name: Some(name),
         plugin: None,
         plugin_state: None,
-        color: None,
+        // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
+        color: Some(s.clip_colors.new_channel(index)),
         enabled: true,
         volume: 0.78125,
         pan: 0.0,
@@ -2081,13 +2172,17 @@ pub fn marker_menu(i: usize, x: f32, y: f32) -> Popup {
 }
 
 /// The short right-click menu of the toolbar's and the mixer's knobs, faders and the tempo: "Create automation clip"
-/// (§8) when the control can be automated, "Type in value..." when it takes one (spec: ui/type-in-value.md §8).
-pub fn knob_menu(auto: Option<(u32, String, f64)>, typein: Option<crate::typein::Target>, x: f32, y: f32) -> Popup {
+/// (§8) and the initial value's items (`crate::init::items`) when the control can be automated, "Type in value..." when
+/// it takes one (spec: ui/type-in-value.md §8).
+pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<crate::typein::Target>, x: f32, y: f32) -> Popup {
     let mut items = Vec::new();
     if let Some((tgt, name, value)) = auto {
+        let [init, delete] = crate::init::items(s, Some((tgt, value)));
         items.extend([
             PItem::head("Automation"),
             PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, value)),
+            init,
+            delete,
             PItem::not_yet("Edit events"),
             PItem::not_yet("Link to controller..."),
         ]);
@@ -2128,6 +2223,8 @@ pub enum PlDrag {
     FadeTension { clip: usize, out: bool, y0: f32, t0: f32 },
     /// An audio clip's gain handle: dB from where the drag started.
     Gain { clip: usize, y0: f32, db0: f32 },
+    /// A crossfade's handle (§9a): later clip `b`, earlier clip `a`, `b`'s gain at the middle when the drag started.
+    Crossfade { a: usize, b: usize, y0: f32, m0: f64 },
 }
 
 /// The handles an audio clip shows while the mouse is over it (§9a).
@@ -2138,30 +2235,85 @@ pub enum Handle {
     TensionIn,
     TensionOut,
     Gain,
+    /// The handle in the middle of a crossfade (on the later clip).
+    Crossfade,
 }
 
 /// Tension per logical pixel of a tension-handle drag, and dB per pixel of a gain drag (§9a, OS: FL's per-pixel
 /// steps at 150 %).
 const TENSION_PER_PX: f32 = 0.28;
 const DB_PER_PX: f32 = 0.15;
+/// Logical pixels of a crossfade-handle drag per unit of the later clip's gain at the middle (§9a, OS: 1/120 per
+/// pixel).
+const XFADE_PX: f64 = 120.0;
 
 /// An audio clip (not a collapsed group's strip): the clips with fades and gain.
 pub fn is_audio_clip(s: &State, g: &PGeom, c: &Clip) -> bool {
     source_kind(s, c.source) == PickKind::Audio && matches!(c.source, ClipSource::Channel(_)) && !g.rows.strip(c.track)
 }
 
-/// Pixels of `ms` milliseconds of an audio clip.
-pub fn ms_px(s: &State, g: &PGeom, c: &Clip, ms: f32) -> f32 {
-    (f64::from(ms) / to_src(s, c.source, 1.0).max(1e-9)) as f32 * g.ppt
+/// Pixels of `ms` milliseconds of an audio clip's fades: the song's time at the tempo, as the engine plays them
+/// (spec: audio/audio-clips.md "Fades and clip gain"), whatever the channel's pitch or stretch.
+pub fn ms_px(s: &State, g: &PGeom, ms: f32) -> f32 {
+    (f64::from(ms) / fade_ms_per_tick(s)) as f32 * g.ppt
 }
 
-/// Where an audio clip's fades end on screen: (fade-in end x, fade-out start x).
+/// Milliseconds of a fade per tick at the tempo.
+pub fn fade_ms_per_tick(s: &State) -> f64 {
+    secs_per_tick(s) * 1000.0
+}
+
+/// Where an audio clip's fades end on screen: (fade-in end x, fade-out start x). The fades the record holds, bits or
+/// not: automatic crossfades keep them in step with the clips (`follow_crossfades`), and with the switch off every
+/// stored fade plays.
 pub fn fade_xs(s: &State, g: &PGeom, c: &Clip) -> (f32, f32) {
     let body = g.body(c);
-    let fin = c.fade_in().map_or(0.0, |f| ms_px(s, g, c, f.0)).min(body.w);
-    let fout = c.fade_out().map_or(0.0, |f| ms_px(s, g, c, f.0)).min(body.w);
+    let fin = c.stored_fade_in().map_or(0.0, |f| ms_px(s, g, f.0)).min(body.w);
+    let fout = c.stored_fade_out().map_or(0.0, |f| ms_px(s, g, f.0)).min(body.w);
     (snap(f64::from(body.x) + f64::from(fin)), snap(f64::from(body.right()) - f64::from(fout)))
 }
+
+/// Whether a clip's fade-in (`out` false) or fade-out belongs to the automatic crossfades: the switch is on and the
+/// edge's bit is clear. Its length follows the overlaps, and a fade-out's tension too (spec: audio/audio-clips.md
+/// "Automatic crossfades"), so it has no tension handle of its own.
+pub fn managed(s: &State, c: &Clip, out: bool) -> bool {
+    os_model::crossfade::on(&s.project) && !if out { c.fade_out_set() } else { c.fade_in_set() }
+}
+
+/// A crossfade as drawn (§9a): later clip `b`'s fade-in and earlier clip `a`'s fade-out across their overlap, from `x0`
+/// to `x1` on `b`'s body, and the two tensions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Xfade {
+    pub a: usize,
+    pub b: usize,
+    pub x0: f32,
+    pub x1: f32,
+    pub t_in: f32,
+    pub t_out: f32,
+}
+
+/// The crossfade audio clip `b` makes with an earlier clip, when there is one to draw: the switch is on, both edges
+/// belong to it and each is the other's longest overlap (`os_model::crossfade::partner_before`), neither clip is muted.
+pub fn crossfade(s: &State, g: &PGeom, b: usize) -> Option<Xfade> {
+    let all = clips(s);
+    let c = all.get(b).filter(|c| !c.muted && is_audio_clip(s, g, c))?;
+    let a = os_model::crossfade::partner_before(&s.project, all, b).filter(|&a| !all[a].muted)?;
+    let (_, t_in) = c.stored_fade_in()?;
+    let t_out = all[a].fade_out_tension();
+    Some(Xfade { a, b, x0: g.body(c).x, x1: fade_xs(s, g, c).0, t_in, t_out })
+}
+
+/// The crossfade handle (§9a), drawn and grabbed alike: its x at the overlap's middle, the y of the later clip's gain
+/// there (the big circle) and of the earlier clip's (the small ring), on `b`'s body.
+pub fn xfade_handle(g: &PGeom, b: &Clip, x: &Xfade) -> (f32, f32, f32) {
+    let body = g.body(b);
+    let y = |v: f64| body.bottom() - v as f32 * body.h;
+    ((x.x0 + x.x1) / 2.0, y(os_model::fade_curve(0.5, f64::from(x.t_in))), y(os_model::fade_curve(0.5, f64::from(x.t_out))))
+}
+
+/// Radius of the crossfade handle's big circle, and how far from its middle a press grabs it.
+pub const XFADE_R: f32 = 4.5;
+const XFADE_GRAB: f32 = 6.0;
 
 /// The middle of a fade curve drawn across `body` from `x0` to `x1` (the same height for a fade-in and a fade-out).
 pub fn fade_mid(body: Rect, x0: f32, x1: f32, tension: f32, _out: bool) -> (f32, f32) {
@@ -2178,13 +2330,20 @@ pub fn handle_at(s: &State, g: &PGeom, i: usize, x: f32, y: f32) -> Option<Handl
     let body = g.body(c);
     let (fx_in, fx_out) = fade_xs(s, g, c);
     let near = |hx: f32, hy: f32, r: f32| (x - hx).abs() <= r && (y - hy).abs() <= r;
-    if let Some((_, t)) = c.fade_in() {
+    // A crossfade's handle, on the later clip (§9a).
+    if let Some(xf) = crossfade(s, g, i).filter(|xf| xf.x1 - xf.x0 > 10.0) {
+        let (hx, hy, _) = xfade_handle(g, c, &xf);
+        if near(hx, hy, XFADE_GRAB) {
+            return Some(Handle::Crossfade);
+        }
+    }
+    if let Some((_, t)) = c.stored_fade_in().filter(|_| !managed(s, c, false)) {
         let (mx, my) = fade_mid(body, body.x, fx_in, t, false);
         if fx_in - body.x > 10.0 && near(mx, my, 5.0) {
             return Some(Handle::TensionIn);
         }
     }
-    if let Some((_, t)) = c.fade_out() {
+    if let Some((_, t)) = c.stored_fade_out().filter(|_| !managed(s, c, true)) {
         let (mx, my) = fade_mid(body, fx_out, body.right(), t, true);
         if body.right() - fx_out > 10.0 && near(mx, my, 5.0) {
             return Some(Handle::TensionOut);
@@ -2205,11 +2364,12 @@ pub fn handle_at(s: &State, g: &PGeom, i: usize, x: f32, y: f32) -> Option<Handl
 /// Hint text of a clip handle.
 pub fn handle_hint(c: &Clip, h: Handle) -> String {
     match h {
-        Handle::FadeIn => format!("Fade in: {:.0} ms", c.fade_in().map_or(0.0, |f| f.0)),
-        Handle::FadeOut => format!("Fade out: {:.0} ms", c.fade_out().map_or(0.0, |f| f.0)),
-        Handle::TensionIn => format!("Fade in tension: {:+.2}", c.fade_in().map_or(0.0, |f| f.1)),
-        Handle::TensionOut => format!("Fade out tension: {:+.2}", c.fade_out().map_or(0.0, |f| f.1)),
+        Handle::FadeIn => format!("Fade in: {:.0} ms", c.stored_fade_in().map_or(0.0, |f| f.0)),
+        Handle::FadeOut => format!("Fade out: {:.0} ms", c.stored_fade_out().map_or(0.0, |f| f.0)),
+        Handle::TensionIn => format!("Fade in tension: {:+.2}", c.fade_in_tension()),
+        Handle::TensionOut => format!("Fade out tension: {:+.2}", c.fade_out_tension()),
         Handle::Gain => format!("Clip gain: {:+.1} dB", 20.0 * c.gain().log10()),
+        Handle::Crossfade => format!("Crossfade tension: {:+.2}", c.fade_in_tension()),
     }
 }
 
@@ -2245,9 +2405,13 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             app.drag = Some(Drag::Pl(match h {
                 Handle::FadeIn => PlDrag::Fade { clip: ci, out: false },
                 Handle::FadeOut => PlDrag::Fade { clip: ci, out: true },
-                Handle::TensionIn => PlDrag::FadeTension { clip: ci, out: false, y0: y, t0: c.fade_in().map_or(0.0, |f| f.1) },
-                Handle::TensionOut => PlDrag::FadeTension { clip: ci, out: true, y0: y, t0: c.fade_out().map_or(0.0, |f| f.1) },
+                Handle::TensionIn => PlDrag::FadeTension { clip: ci, out: false, y0: y, t0: c.fade_in_tension() },
+                Handle::TensionOut => PlDrag::FadeTension { clip: ci, out: true, y0: y, t0: c.fade_out_tension() },
                 Handle::Gain => PlDrag::Gain { clip: ci, y0: y, db0: 20.0 * c.gain().log10() },
+                Handle::Crossfade => {
+                    let a = crossfade(s, &g, ci).map_or(ci, |xf| xf.a);
+                    PlDrag::Crossfade { a, b: ci, y0: y, m0: os_model::fade_curve(0.5, f64::from(c.fade_in_tension())) }
+                }
             }));
             app.hint = Cow::Owned(handle_hint(&c, h));
             app.invalidate();
@@ -2259,18 +2423,24 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
     if let Some(ci) = hit {
         let c = clips(s)[ci];
         // Double-clicking an audio clip opens its channel's sampler and selects that channel in the rack (§9); a
-        // pattern clip makes its pattern the current one and opens the piano roll (§2b, as FL does).
+        // pattern clip makes its pattern the current one and opens the piano roll (§2b, as FL does). Which modifier
+        // opens what on an audio clip is General ▸ Input ▸ Manage shortcuts' (`crate::shortcuts::clip_double_click`):
+        // Show clip properties does nothing yet (no clip properties window); with neither row's modifier (a row set to
+        // "(disabled)"), the second click is a plain one.
         if !right && matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select) {
             let audio = audio_clip_row(s, &c);
             if audio.is_some() || matches!(c.source, ClipSource::Pattern(_)) {
                 let now = std::time::Instant::now();
                 let double = s.playlist.last_clip.is_some_and(|(i, t)| i == ci && now.duration_since(t).as_millis() < 450);
                 s.playlist.last_clip = (!double).then_some((ci, now));
-                if double {
+                let opens = audio.map(|_| crate::shortcuts::clip_double_click(alt));
+                if double && opens != Some(None) {
                     if let Some(row) = audio {
-                        s.rack.select_only(row);
-                        s.pending_open = Some(row);
-                        app.focus_channel(row);
+                        if opens == Some(Some(crate::shortcuts::ClipOpen::Channel)) {
+                            s.rack.select_only(row);
+                            s.pending_open = Some(row);
+                            app.focus_channel(row);
+                        }
                     } else {
                         run(app, Cmd::ClipEditSource(ci));
                     }
@@ -2357,7 +2527,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             }
             // Any other tool: the right button is the Delete tool while held (also starting on empty grid).
             _ => {
-                snapshot(s);
+                snapshot_as(s, "Playlist delete clip");
                 app.drag = Some(Drag::Pl(PlDrag::Erase));
                 erase_at(app, grid);
                 return;
@@ -2367,7 +2537,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
 
     match tool {
         PlTool::Delete => {
-            snapshot(s);
+            snapshot_as(s, "Playlist delete clip");
             app.drag = Some(Drag::Pl(PlDrag::Erase));
             erase_at(app, grid);
         }
@@ -2408,7 +2578,8 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 s.playlist.overlay = Some(Overlay::Slice { tick: t, t0: track, t1: track });
             }
             None => {
-                snapshot(s);
+                // FL's name for placing the current source's clip (spec: ui/settings-choices.md "Undo history").
+                snapshot_as(s, "Playlist fill paint clip");
                 s.playlist.sel.clear();
                 let start = snap_place(s, &g, tick, alt);
                 let i = place(s, track, start);
@@ -2478,6 +2649,10 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     1 => PlDrag::ResizeR { x0: x, orig },
                     _ => PlDrag::Move { x0: x, y0: y, orig, fresh: app.shift },
                 }));
+                // Held without a move, the clips are cloned (Click-and-hold & special gesture functions).
+                if e == 0 && !app.shift {
+                    app.hold_start(crate::hold::Kind::Clips);
+                }
             }
         },
     }
@@ -2537,12 +2712,13 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
     // tension or gain handle only that clip (and the hint bar). A stretch-mode resize changes every clip of the
     // stretched channels: the whole window.
     let stretching = !app.state.playlist.stretch_base.is_empty() && matches!(d, PlDrag::ResizeL { .. } | PlDrag::ResizeR { .. });
-    let handle = matches!(d, PlDrag::Fade { .. } | PlDrag::FadeTension { .. } | PlDrag::Gain { .. });
+    let handle = matches!(d, PlDrag::Fade { .. } | PlDrag::FadeTension { .. } | PlDrag::Gain { .. } | PlDrag::Crossfade { .. });
     let moved: Option<Vec<usize>> = match &d {
         _ if stretching => None,
         PlDrag::Move { orig, .. } | PlDrag::ResizeL { orig, .. } | PlDrag::ResizeR { orig, .. } => Some(orig.iter().map(|&(i, _)| i).collect()),
         PlDrag::Slip { i, .. } => Some(vec![*i]),
         PlDrag::Fade { clip, .. } | PlDrag::FadeTension { clip, .. } | PlDrag::Gain { clip, .. } => Some(vec![*clip]),
+        PlDrag::Crossfade { a, b, .. } => Some(vec![*a, *b]),
         _ => None,
     };
     let rects = |s: &State, idx: &[usize]| -> Vec<Rect> {
@@ -2648,6 +2824,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
         PlDrag::Playback => {}
         PlDrag::SongPos => {
             s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
+            crate::init::apply(s);
         }
         PlDrag::TimeSel { t0 } => {
             let t = snap_round(s, &g, g.tick_at(x), alt);
@@ -2695,14 +2872,16 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             let (fx_in, fx_out) = fade_xs(s, &g, &c);
             // A fade reaches at most to where the other one starts.
             let px = if out { (body.right() - x).clamp(0.0, body.right() - fx_in) } else { (x - body.x).clamp(0.0, fx_out - body.x) };
-            let ms = (f64::from(px / g.ppt) * to_src(s, c.source, 1.0)) as f32;
+            let ms = (f64::from(px / g.ppt) * fade_ms_per_tick(s)) as f32;
             let c = &mut arr_mut(s).clips[clip];
             let on = (px >= 2.0).then_some(ms);
+            // A fade set with its handle gets its bit (and leaves the automatic crossfades); dragged to nothing, the
+            // edge is theirs again (spec: audio/audio-clips.md "Automatic crossfades").
             if out {
-                let t = c.fade_out().map_or(0.0, |f| f.1);
+                let t = c.fade_out_tension();
                 c.set_fade_out(on.map(|ms| (ms, t)));
             } else {
-                let t = c.fade_in().map_or(0.0, |f| f.1);
+                let t = c.fade_in_tension();
                 c.set_fade_in(on.map(|ms| (ms, t)));
             }
             let c = *c;
@@ -2712,12 +2891,13 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
         PlDrag::FadeTension { clip, out, y0, t0 } => {
             let t = (t0 + (y0 - y) * TENSION_PER_PX).clamp(-40.0, 40.0);
             let c = &mut arr_mut(s).clips[clip];
+            // The tension alone: the length and the bit stay (a stored fade without its bit plays with the switch off).
             if out {
-                if let Some((ms, _)) = c.fade_out() {
-                    c.set_fade_out(Some((ms, t)));
+                if c.stored_fade_out().is_some() {
+                    c.set_fade_out_tension(t);
                 }
-            } else if let Some((ms, _)) = c.fade_in() {
-                c.set_fade_in(Some((ms, t)));
+            } else if c.stored_fade_in().is_some() {
+                c.set_fade_in_tension(t);
             }
             let c = *c;
             app.hint = Cow::Owned(handle_hint(&c, if out { Handle::TensionOut } else { Handle::TensionIn }));
@@ -2730,6 +2910,19 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             let c = *c;
             app.hint = Cow::Owned(handle_hint(&c, Handle::Gain));
             app.state.piano.dirty = true;
+        }
+        PlDrag::Crossfade { a, b, y0, m0 } => {
+            // The later clip's gain at the middle moves 1/120 per logical pixel; its fade-in takes the tension that
+            // gives it, the earlier clip's fade-out the negative (§9a).
+            let t = os_model::crossfade::tension_for_mid(m0 + f64::from(y0 - y) / XFADE_PX) as f32;
+            let arr = arr_mut(s);
+            if a < arr.clips.len() && b < arr.clips.len() {
+                arr.clips[b].set_fade_in_tension(t);
+                arr.clips[a].set_fade_out_tension(os_model::crossfade::opposite(t));
+                let c = arr.clips[b];
+                app.hint = Cow::Owned(handle_hint(&c, Handle::Crossfade));
+                app.state.piano.dirty = true;
+            }
         }
     }
     match (moved, before) {
@@ -2765,7 +2958,7 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             if let Some(Overlay::Slice { tick, t0, t1 }) = overlay {
                 snapshot(s);
                 if slice(s, tick, t0, t1) == 0 {
-                    s.playlist.undo.pop();
+                    crate::history::unrecord(s);
                 }
             }
         }
@@ -2794,7 +2987,7 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             // A click that changed nothing leaves no undo step.
             let same = orig.iter().all(|(i, o)| clips(s).get(*i) == Some(o));
             if same && !app.shift {
-                s.playlist.undo.pop();
+                crate::history::unrecord(s);
             }
         }
         _ => {}
@@ -2870,7 +3063,7 @@ pub fn show_arrangement(s: &mut State, n: u16) {
     s.playlist.sel.clear();
     s.playlist.hover_clip = None;
     s.playlist.hover_handle = None;
-    s.playlist.undo.clear();
+    crate::history::forget_playlist(s);
     s.piano.dirty = true;
 }
 
@@ -2923,8 +3116,10 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
         app.drag = Some(Drag::Pl(PlDrag::TimeSel { t0: t }));
     } else {
         s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
-        // Moving the song position switches to SONG mode; a time selection does not (§7).
+        // Moving the song position switches to SONG mode; a time selection does not (§7). The initial values follow
+        // (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
         s.song_mode = true;
+        crate::init::apply(s);
         app.drag = Some(Drag::Pl(PlDrag::SongPos));
     }
     app.invalidate();
@@ -3095,18 +3290,6 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.toolbar_switch(sw);
             return None;
         }
-        Cmd::Undo => {
-            let done = undo(&mut app.state);
-            // A step that added a channel queued it for removal: it goes now, and the rack selection the step had
-            // comes back after it.
-            if app.state.rack.delete_now.is_some() {
-                let s = &app.state;
-                let keep = (s.rack.sel.clone(), s.selected_channel, s.message.clone());
-                app.rack_pending();
-                (app.state.rack.sel, app.state.selected_channel, app.state.message) = keep;
-            }
-            return (!done).then(|| "Nothing to undo".into());
-        }
         Cmd::ClockBeat(on) => {
             app.state.clock.beat = on;
             app.state.clock.save();
@@ -3138,11 +3321,23 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             return None;
         }
         Cmd::Cpu(c) => return app.cpu_cmd(c),
+        Cmd::Pref(c, i) => return app.pref_choose(c, i),
+        Cmd::Genre(g) => return app.set_genre(g),
+        Cmd::Template(t) => return app.set_template(&t),
+        Cmd::Messages(p) => {
+            app.invalidate();
+            return Some(crate::messages::pick(p));
+        }
+        Cmd::DataFolder(c) => return app.data_folder_cmd(c),
         Cmd::MetronomeSound(sound) => {
             crate::metronome::set_sound(sound);
             app.invalidate();
             return Some(format!("Metronome sound: {}", sound.label()));
         }
+        Cmd::Bar(beats, steps) => return app.set_bar(beats, steps),
+        Cmd::TimeMode(signature) => return app.set_time_mode(signature),
+        Cmd::Timebase(ppq) => return app.set_timebase(ppq),
+        Cmd::PanningLaw(law) => return app.set_panning_law(law),
         Cmd::ContinuousScrolling => {
             let on = crate::autoscroll::toggle_continuous();
             app.invalidate();
@@ -3188,7 +3383,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::Undo => None,
+        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -3200,6 +3395,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             Some(format!("Snap: {}", p.label()))
         }
         Cmd::GlobalSnap(sn) => Some(crate::snap::set(s, sn)),
+        Cmd::Undo => crate::history::ctrl_z(s),
         Cmd::Copy => {
             copy(s);
             None
@@ -3274,7 +3470,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             match group_clips(s) {
                 0 => {
-                    s.playlist.undo.pop();
+                    crate::history::unrecord(s);
                     Some("Group: select two or more clips first".into())
                 }
                 n => Some(format!("Grouped {n} clips")),
@@ -3284,7 +3480,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             match ungroup_clips(s) {
                 0 => {
-                    s.playlist.undo.pop();
+                    crate::history::unrecord(s);
                     Some("Ungroup: no grouped clip is selected".into())
                 }
                 n => Some(format!("Ungrouped {n} clips")),
@@ -3568,6 +3764,14 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             s.raise(crate::app::Win::Playlist);
             Some(format!("Created automation clip \"{name}\""))
         }
+        Cmd::InitControl(tgt, v) => {
+            crate::init::init(s, tgt, v);
+            None
+        }
+        Cmd::DeleteInit(tgt) => {
+            crate::init::delete(s, tgt);
+            None
+        }
         Cmd::ResetEmptyTracks => {
             snapshot(s);
             let used: Vec<u16> = clips(s).iter().map(|c| c.track).collect();
@@ -3579,6 +3783,12 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             s.piano.dirty = true;
             None
         }
+        // Run above.
+        Cmd::Pref(..) => None,
+        Cmd::Genre(_) => None,
+        Cmd::Template(_) => None,
+        Cmd::Messages(_) => None,
+        Cmd::DataFolder(_) => None,
     };
     app.invalidate();
     msg
@@ -3745,7 +3955,7 @@ pub fn consolidate(app: &mut App) -> String {
             c.muted = true;
         }
     }
-    s.playlist.undo.pop(); // one undo step for the whole consolidation (add_audio_clip snapshots)
+    crate::history::unrecord(s); // one undo step for the whole consolidation (add_audio_clip snapshots)
     match add_audio_clip(s, &path, track, a) {
         Some(i) => {
             // The render's own length, exactly.
@@ -3867,10 +4077,18 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
     true
 }
 
-/// A playlist edit changed nothing: drop its undo step (used by tests).
-#[cfg(test)]
-pub fn undo_len(s: &State) -> usize {
-    s.playlist.undo.len()
+/// The timebase changed from `from` to `to` ticks per quarter (`Project::set_ppq` rescaled the project): the song
+/// position, time selection, clipboard, locked clip length and undo steps follow, so nothing of the old timebase comes
+/// back (automation data stays, as in the project).
+pub fn rescale(s: &mut State, from: u16, to: u16) {
+    use os_model::{rescale_length, rescale_tick};
+    let pl = &mut s.playlist;
+    pl.pos = rescale_tick(pl.pos, from, to);
+    pl.range = pl.range.map(|(a, b)| (rescale_tick(a, from, to), rescale_tick(b, from, to)));
+    pl.clipboard.iter_mut().for_each(|c| c.rescale(from, to));
+    if let Some((_, len)) = &mut pl.lock_len {
+        *len = rescale_length(*len, from, to);
+    }
 }
 
 /// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): FL's entries, only Detached

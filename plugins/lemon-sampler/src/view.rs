@@ -11,8 +11,10 @@
 
 use std::f32::consts::{PI, TAU};
 
+use os_dsp::tone::Tones;
 use os_engine::Sample;
 use os_theme::design::lemon as brand;
+use os_theme::waves::Waves;
 use os_theme::Palette;
 use os_ui::kit::lemon::{self, plug};
 use os_ui::kit::{self, inst, State};
@@ -226,6 +228,9 @@ pub struct SampleView<'a> {
     pub bits: u16,
     /// Spectrum picture of the visible range (spectrum view), `w`, `h`, pixels.
     pub spectrum: Option<(usize, usize, &'a [u32])>,
+    /// Colourful waveforms (the host's General ▸ Display setting): the sample's tones and how to colour them; `None`
+    /// draws the plain grey (spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)").
+    pub tones: Option<(&'a Tones, &'a Waves)>,
 }
 
 impl SampleView<'_> {
@@ -613,10 +618,10 @@ fn waveform(ui: &mut Ui, sv: &SampleView) {
         let top = Rect::new(area.x, area.y, area.w, area.h / 2.0);
         let bot = Rect::new(area.x, area.y + area.h / 2.0, area.w, area.h / 2.0);
         ui.c.fill_rect(Rect::new(area.x, bot.y.round(), area.w, 1.0), plug::WELL_LINE);
-        wave_line(ui.c, &s.left, None, top, v0, vl, top.h * 0.5, wave, 1.4);
-        wave_line(ui.c, &s.right, None, bot, v0, vl, bot.h * 0.5, wave, 1.4);
+        wave_line(ui.c, &s.left, None, top, v0, vl, top.h * 0.5, wave, 1.4, sv.tones);
+        wave_line(ui.c, &s.right, None, bot, v0, vl, bot.h * 0.5, wave, 1.4, sv.tones);
     } else {
-        wave_line(ui.c, &s.left, Some(&s.right), area, v0, vl, area.h * 0.5, wave, 1.8);
+        wave_line(ui.c, &s.left, Some(&s.right), area, v0, vl, area.h * 0.5, wave, 1.8, sv.tones);
     }
     let off = f64::from(ui.m.norm("start_offset")) * n as f64;
     if off > 0.0 {
@@ -644,7 +649,7 @@ fn waveform(ui: &mut Ui, sv: &SampleView) {
         }
     }
     let inner = Rect::new(ov.x + 1.0, ov.y, ov.w - 2.0, ov.h);
-    wave_line(ui.c, &s.left, Some(&s.right), inner, 0.0, n as f64, ov.h * 0.42, Color::rgb(0x9a9a9a), 1.3);
+    wave_line(ui.c, &s.left, Some(&s.right), inner, 0.0, n as f64, ov.h * 0.42, Color::rgb(0x9a9a9a), 1.3, sv.tones);
     // Bit depth and channel readout on a dark chip.
     let bits = format!("{}", sv.bits & 0xff);
     let zw = ui.c.text_width(LABEL, &bits);
@@ -659,9 +664,11 @@ fn waveform(ui: &mut Ui, sv: &SampleView) {
 }
 
 /// One channel (or the mid of two) as a line through the visible range: one point per half pixel when zoomed out,
-/// the samples themselves when zoomed in.
+/// the samples themselves when zoomed in. With `tones` (colourful waveforms) each device-pixel column of the line takes
+/// the colour of the frames it shows; silence keeps `col` (spec: ui/settings-choices.md "Display: Colorful
+/// waveforms (2026-10-16)").
 #[allow(clippy::too_many_arguments)]
-fn wave_line(c: &mut Canvas, a: &[f32], b: Option<&[f32]>, area: Rect, v0: f64, vl: f64, amp: f32, col: Color, width: f32) {
+fn wave_line(c: &mut Canvas, a: &[f32], b: Option<&[f32]>, area: Rect, v0: f64, vl: f64, amp: f32, col: Color, width: f32, tones: Option<(&Tones, &Waves)>) {
     let n = a.len();
     if n == 0 || vl <= 0.0 {
         return;
@@ -691,7 +698,17 @@ fn wave_line(c: &mut Canvas, a: &[f32], b: Option<&[f32]>, area: Rect, v0: f64, 
         }
     }
     c.push_clip(area);
-    c.polyline(&pts, width, col);
+    match tones {
+        Some((t, w)) => {
+            let px = 1.0 / c.scale;
+            let frame = |x: f32| v0 + f64::from((x - area.x) / area.w) * vl;
+            c.polyline_columns(&pts, width, &mut |x| {
+                let tone = t.span(frame(x - px / 2.0), frame(x + px / 2.0));
+                w.colour(tone.centroid(), tone.band_powers()).unwrap_or(col)
+            });
+        }
+        None => c.polyline(&pts, width, col),
+    }
     c.pop_clip();
 }
 

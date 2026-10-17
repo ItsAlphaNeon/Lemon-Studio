@@ -11,8 +11,22 @@ use super::{menus, sunken, tool_button, FrameInfo};
 use crate::app::{Action, Live, State, Ui, Util, Win};
 use crate::icons::{self, Icon};
 
-/// Leftmost logo centre: just right of the last toolbar control (the news panel / downloads, x 1473).
-const LOGO_MIN_X: f32 = 1520.0;
+/// Leftmost logo centre: just right of the last toolbar control (row 1's last utility button, x 1440).
+const LOGO_MIN_X: f32 = 1487.0;
+
+/// The band's width (its own px) from which every panel shows: the last utility button ends at x 1437. A narrower
+/// band leaves out the panels that don't fit, from the right, and draws the ▶ arrow at its right
+/// end (`room`). Spec: ui/ui-scaling.md §1 "Toolbars scaling".
+pub const FULL_W: f32 = 1440.0;
+/// The ▶ arrow's width at the band's right end.
+pub const MORE_W: f32 = 18.0;
+/// The arrow's hint, short enough for the hint panel. A click on it does nothing (spec: ui/ui-scaling.md, Lemon Studio).
+pub const MORE_HINT: &str = "Widen the window or lower Toolbars scaling";
+
+/// Where the panels of a band `width` px wide must end to show: anywhere when all of them fit, else before the arrow.
+pub fn room(width: f32) -> f32 {
+    if width >= FULL_W { f32::INFINITY } else { width - MORE_W }
+}
 
 /// The Toolbars menu's switches (spec: ui/toolbar-menu.md §8): app-wide, kept in `settings.txt` across runs but for
 /// Hide.
@@ -91,11 +105,13 @@ pub fn paint_hint_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
     let font = Font::new(14);
     let (w, lh) = (r.w - 50.0, ui.c.line_height(font));
+    let chars: Vec<char> = hint.chars().collect();
     let mut y = r.y + 5.0;
-    for line in wrap_lines(ui, font, hint, w) {
+    for (start, n) in super::settings::wrap(ui, font, hint, w) {
         if y + lh > r.bottom() - 4.0 {
             break;
         }
+        let line: String = chars[start..start + n].iter().collect();
         ui.c.text_clip(font, r.x + 7.0, y, w, t.text, line.trim_end());
         y += lh;
     }
@@ -106,45 +122,16 @@ pub fn paint_hint_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
 }
 
-/// `text` in lines of at most `w` px: a line breaks after its last space that fits, else where it is full.
-fn wrap_lines(ui: &mut Ui, f: Font, text: &str, w: f32) -> Vec<String> {
-    let mut out = Vec::new();
-    for para in text.split('\n') {
-        let chars: Vec<char> = para.chars().collect();
-        let mut start = 0;
-        loop {
-            let (mut x, mut end, mut space) = (0.0, start, None);
-            while end < chars.len() {
-                let cw = ui.c.text_width(f, chars[end].encode_utf8(&mut [0; 4]));
-                if x + cw > w && end > start {
-                    break;
-                }
-                x += cw;
-                end += 1;
-                if chars[end - 1] == ' ' {
-                    space = Some(end);
-                }
-            }
-            if end < chars.len() {
-                end = space.unwrap_or(end);
-            }
-            out.push(chars[start..end].iter().collect());
-            if end >= chars.len() {
-                break;
-            }
-            start = end;
-        }
-    }
-    out
-}
-
 fn btn(x: f32, y: f32) -> Rect {
     Rect::new(x, y, 30.0, 33.0)
 }
 
+/// The band in its own px, `width` of them wide (`views::paint` scales it by Toolbars scaling). Panels that would end
+/// past `room(width)` are left out, from the right.
 pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     let t = ui.t;
     let lemon = super::lemon(ui);
+    let fit = room(width);
     // Separator lines: off from the Toolbars menu (spec: ui/toolbar-menu.md §2).
     let seps = s.toolbar.separators;
     // Bands.
@@ -164,8 +151,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     }
     // Empty toolbar areas drag the window (registered first, so controls win).
     ui.hit(Rect::new(0.0, 0.0, width, 81.0), Action::DragWindow, "");
-    // Group separators (2 px gaps measured in row 1 and row 2).
-    for x in [379.0, 575.0, 876.0, 1048.0, 1204.0].into_iter().filter(|_| seps) {
+    // Group separators (2 px gaps measured in row 1 and row 2), each shown with the panel after it (that panel's end).
+    for (x, _) in [(379.0, 570.0), (575.0, 610.0), (876.0, 1045.0), (1048.0, 1202.0), (1204.0, 1239.0)].into_iter().filter(|&(_, end)| seps && end <= fit) {
         if lemon {
             ui.c.fill_rrect(Rect::new(x, 9.0, 2.0, 23.0), 1.0, t.toolbar_line);
             continue;
@@ -173,7 +160,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         ui.c.fill_rect(Rect::new(x, 2.0, 1.0, 37.0), t.toolbar_line);
         ui.c.fill_rect(Rect::new(x + 1.0, 2.0, 1.0, 37.0), t.toolbar_edge.with_alpha(110));
     }
-    for x in [298.0, 378.0, 576.0, 967.0, 1298.0].into_iter().filter(|_| seps) {
+    for (x, _) in [(298.0, 376.0), (378.0, 575.0), (576.0, 610.0), (967.0, 1003.0)].into_iter().filter(|&(_, end)| seps && end <= fit) {
         if lemon {
             ui.c.fill_rrect(Rect::new(x, 50.0, 2.0, 23.0), 1.0, t.toolbar_line);
             continue;
@@ -182,14 +169,23 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         ui.c.fill_rect(Rect::new(x + 1.0, 44.0, 1.0, 35.0), t.toolbar_edge.with_alpha(110));
     }
 
-    row1(ui, s, f);
-    row2(ui, s, f);
+    row1(ui, s, f, fit);
+    row2(ui, s, f, fit);
     // Without separators row 1's contents move 1 px down and row 2's 1 px up, over the row line (§2). The pixels are
     // moved after painting; the band is always repainted whole then (`App::take_damage`).
     if !seps {
         let d = ui.c.scale.round().max(1.0) as i32;
         ui.c.shift(Rect::new(0.0, 0.0, width, 42.0), 0, d, &[]);
         ui.c.shift(Rect::new(0.0, 41.0, width, 40.0), 0, -d, &[]);
+    }
+
+    // Panels left out (spec: ui/ui-scaling.md §1 "Toolbars scaling"): the ▶ arrow at the band's right end, in the logo's
+    // place. Hovering it says why; a click does nothing.
+    if fit.is_finite() {
+        let r = Rect::new(width - MORE_W, 0.0, MORE_W, 81.0);
+        ui.hit(r, Action::Swallow, MORE_HINT);
+        os_ui::kit::triangle(ui.c, r.cx(), 40.0, 5.0, os_ui::kit::Dir::Right, t.glyph);
+        return;
     }
 
     // Logo spot (spans both rows): the Lemon Studio mark.
@@ -200,9 +196,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     icons::logo(ui.c, lx, 40.0, 26.0, if lemon { t.toolbar_edge } else { t.toolbar_line });
 }
 
-fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
+/// Row 1's panels, left to right, as long as they end within `fit` (`room`).
+fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
     let t = ui.t;
     // Caption buttons.
+    if 63.0 > fit {
+        return;
+    }
     for (x, icon, action, hint) in [
         (4.0, Icon::Minimize, Action::Minimize, "Minimize"),
         (24.0, Icon::Restore, Action::Maximize, "Restore / maximize"),
@@ -216,6 +216,9 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
 
     // Hint panel: project title + hint / message.
     let hp = Rect::span(72.0, 376.0, 4.0, 36.0);
+    if hp.right() > fit {
+        return;
+    }
     sunken(ui, hp, t.sunken);
     ui.hit(hp, Action::DragWindow, "Hint bar");
     ui.c.text_clip(Font::new(13), 76.0, 6.0, 280.0, t.text_dim.shade(-0.05), &f.title);
@@ -223,7 +226,10 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.text_clip(Font::new(14), 77.0, 19.0, 280.0, t.text, hint);
     icons::draw(ui.c, Icon::MidiControl, Rect::span(360.0, 374.0, 17.0, 32.0), ui.t.s(0x515457));
 
-    // Transport group.
+    // Transport group (to the tempo box's right edge, x 570).
+    if 570.0 > fit {
+        return;
+    }
     let lemon = super::lemon(ui);
     let capsule = Rect::span(383.0, 483.0, 4.0, 36.0);
     if lemon {
@@ -287,16 +293,18 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
             icons::draw(ui.c, icon, g, c);
         }
     }
-    // Record: not available yet, so drawn greyed out (no hover, no press).
+    // Record: not available yet, so drawn greyed out (no hover, no press). Its dot is white under High visibility
+    // (`crate::high_visibility`), greyed out the same way.
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
     ui.off(rec, "Recording");
+    let dot = crate::high_visibility::record_dot(t, crate::high_visibility::on());
     if lemon {
         os_ui::kit::button(ui.c, t, Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0), os_ui::kit::State::NORMAL.with_disabled(true));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.mix(t.toolbar, 0.6));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, dot.mix(t.toolbar, 0.6));
     } else {
         ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.toolbar_line.shade(-0.25));
         ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, t.button.shade(-0.12));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.mix(t.button, 0.7).shade(-0.15));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, dot.mix(t.button, 0.7).shade(-0.15));
     }
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);
@@ -325,6 +333,9 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_polygon(&[(tb.right() - 9.0, 22.0), (tb.right() - 6.0, 26.0), (tb.right() - 3.0, 22.0)], t.glyph_dim);
 
     // Recording options. The metronome works (spec: ui/metronome.md); the others wait for recording.
+    if btn(580.0, 4.0).right() > fit {
+        return;
+    }
     tool_button(ui, btn(580.0, 4.0), Icon::Metronome, crate::metronome::on(), Action::Metronome, "Metronome (Ctrl+M) - right-click for the sound");
     for (i, (icon, hint)) in [
         (Icon::WaitInput, "Wait for input to start recording"),
@@ -335,11 +346,17 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     .into_iter()
     .enumerate()
     {
+        if btn(613.0 + 33.0 * i as f32, 4.0).right() > fit {
+            return;
+        }
         tool_button(ui, btn(613.0 + 33.0 * i as f32, 4.0), icon, false, Action::Placeholder(hint), hint);
     }
 
     // Song position (B:S:T, or M:S:CS: a click toggles, right-click opens the mode menu).
     let tp = Rect::span(745.0, 873.0, 4.0, 36.0);
+    if tp.right() > fit {
+        return;
+    }
     if lemon {
         os_ui::kit::lemon::well(ui.c, t, tp, t.time_panel);
     } else {
@@ -350,7 +367,8 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.hit(tp, Action::Clock, s.clock.hint());
     ui.live(Live::Clock, tp);
     let ppq = f64::from(s.project.ppq.max(1));
-    let sig = s.project.time_signature.unwrap_or((4, 4));
+    // A bar that makes no signature (3 steps per beat) counts its beats as quarters.
+    let sig = s.project.signature().unwrap_or((s.project.bar().0, 4));
     let (bar, step, tick) = s.clock.reading(f.tick / ppq * 60.0 / s.tempo.max(1.0), f.tick * 96.0 / ppq, sig);
     // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
     // right-aligned so long bar numbers grow to the left and never leave the panel.
@@ -376,11 +394,17 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let label = s.clock.label();
     ui.c.text_right(Font::condensed(7, 3).bold(), 871.0, 5.0, if lemon { t.text_dim } else { t.glyph.shade(-0.1) }, label);
 
-    // Monitors (oscilloscope / spectrum analyzer, stereo peak bars) and CPU / memory.
+    // Monitors (oscilloscope / spectrum analyzer, stereo peak bars: to x 1045) and CPU / memory.
+    if 1045.0 > fit {
+        return;
+    }
     monitor(ui, s);
     // CPU panel (spec: ui/main-window.md §13): audio load (bar, percent, recent history or the Misc counts), memory,
     // voices (or frames per second), dropouts. The hint is the reading in words (`App::tick`).
     let cpu = crate::app::CPU_RECT;
+    if cpu.right() > fit {
+        return;
+    }
     sunken(ui, cpu, t.sunken_dark);
     ui.hit(cpu, Action::CpuPanel, "");
     let r = &s.cpu.now;
@@ -423,6 +447,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
 
     // Utility buttons: "left / right" hints, right clicks in `App::toolbar_right` (spec: ui/toolbar-buttons.md §2).
+    // FL's last one, the content library's download, is left out (spec: ui/main-window.md §2).
     let utils = [
         (Icon::Undo, "Undo / Undo history (Ctrl+Z)"),
         (Icon::Cut, "Open audio editor / New audio editor"),
@@ -431,10 +456,12 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         (Icon::Save, "Save as... / Save new version (Shift+Ctrl+S)"),
         (Icon::SaveRender, "Export > Wave file... (Ctrl+R)"),
         (Icon::Info, "Project info (F11)"),
-        (Icon::Download, "Launch content library"),
     ];
     for (i, (icon, hint)) in utils.into_iter().enumerate() {
         let r = btn(1209.0 + 33.0 * i as f32, 4.0);
+        if r.right() > fit {
+            return;
+        }
         let action = match icon {
             Icon::Undo => Action::Util(Util::Undo),
             Icon::Help => Action::Util(Util::Help),
@@ -524,10 +551,14 @@ fn monitor(ui: &mut Ui, s: &State) {
     ui.c.stroke_circle(1037.0, 33.5, 4.0, 2.0, ui.t.s(0x66737d));
 }
 
-fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
+/// Row 2's panels, left to right, as long as they end within `fit` (`room`).
+fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
     let t = ui.t;
     // Menu bar.
     let mb = Rect::span(4.0, 296.0, 45.0, 77.0);
+    if mb.right() > fit {
+        return;
+    }
     let lemon = super::lemon(ui);
     if lemon {
         os_ui::kit::lemon::panel(ui.c, mb, 6.0, t.menu_panel);
@@ -550,6 +581,9 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
 
     // Main volume and main pitch (project values; spec: audio/mixer.md "Main volume", audio/voice-levels.md).
+    if 376.0 > fit {
+        return;
+    }
     use crate::knobs::KnobId;
     ui.hit(Rect::span(303.0, 337.0, 45.0, 77.0), Action::Knob(KnobId::MasterVol), s.knob_text(KnobId::MasterVol));
     super::knob(ui, 319.0, 61.0, 14.0, s.knob(KnobId::MasterVol), false, t.glyph, t.button_hi);
@@ -562,6 +596,9 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
 
     // Song position slider (spec: ui/song-position-slider.md): the handle follows the playhead while playing.
     let sp = crate::song_pos::PANEL;
+    if sp.right() > fit {
+        return;
+    }
     let range = crate::song_pos::range(s);
     let pos = crate::song_pos::shown(s, f.playing, f.song, f.tick, f.song_pos_drag);
     ui.live(Live::Clock, sp);
@@ -603,8 +640,8 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
         }
     }
 
-    // Mode buttons (spec: ui/main-window.md §3). Typing keyboard, auto scrolling (spec: ui/auto-scrolling.md) and enable
-    // groups (spec: ui/enable-groups.md) work.
+    // Mode buttons (spec: ui/main-window.md §3). Typing keyboard, auto scrolling (spec: ui/auto-scrolling.md), step
+    // edit (spec: ui/step-edit.md) and enable groups (spec: ui/enable-groups.md) work.
     for (i, (icon, hint)) in [
         (Icon::TypingKeyboard, "Typing keyboard to piano keyboard (Ctrl+T)"),
         (Icon::AutoScroll, "Auto scrolling - right-click for continuous scrolling"),
@@ -615,9 +652,13 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
     .into_iter()
     .enumerate()
     {
+        if btn(580.0 + 33.0 * i as f32, 45.0).right() > fit {
+            return;
+        }
         let (on, action) = match i {
             0 => (s.toggles.contains(&"typing"), Action::Typing),
             1 => (crate::autoscroll::on(), Action::AutoScroll),
+            2 => (crate::step_edit::on(), Action::StepEdit),
             3 => (crate::enable_groups::on(), Action::EnableGroups),
             _ => (false, Action::Placeholder(hint)),
         };
@@ -625,6 +666,9 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
 
     // Snap panel (spec: ui/global-snap.md §1): the magnet turns snapping on / off, the combo holds the global snap.
+    if 830.0 > fit {
+        return;
+    }
     let global = s.global_snap.now;
     let on = global != crate::playlist::Snap::None;
     ui.hit(Rect::span(746.0, 767.0, 50.0, 72.0), Action::GlobalSnapToggle, crate::snap::MAGNET_HINT);
@@ -650,7 +694,10 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let dir = if hov { os_ui::kit::Dir::Down } else { os_ui::kit::Dir::Right };
     os_ui::kit::triangle(ui.c, snap.right() - 8.0, 61.0, 3.5, dir, t.glyph_dim);
 
-    // Pattern selector.
+    // Pattern selector (to the "+", x 962).
+    if 962.0 > fit {
+        return;
+    }
     let prev = Rect::span(838.0, 851.0, 47.0, 76.0);
     ui.hit(prev, Action::PatternPrev, "Pattern options"); // spec: ui/pattern-menu.md §1
     ui.c.fill_rrect(prev, if lemon { 4.0 } else { 2.0 }, t.button);
@@ -695,10 +742,14 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
         (Icon::Plug, Action::PickerOpen, false, "Plugin picker (F8)"),
         (Icon::Kick, Action::ToggleWin(Win::Tapper), s.shown(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
         (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller (Alt+F7)"),
-        (Icon::Store, Action::Placeholder("Plugin store"), false, "Plugin store"),
+        // FL's store: kept, greyed, for a repository of free and open-source plugins (spec: ui/main-window.md §3).
+        (Icon::Plug, Action::Placeholder("Plugin repository"), false, "Plugin repository"),
     ];
     for (i, (icon, action, open, hint)) in wins.into_iter().enumerate() {
         let r = btn(973.0 + 33.0 * i as f32, 45.0);
+        if r.right() > fit {
+            return;
+        }
         if matches!(action, Action::Placeholder(_)) {
             super::tool_button(ui, r, icon, false, action, hint);
             continue;
@@ -708,20 +759,8 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let ink = super::tool_face(ui, r, if hov { super::Look::Hot } else { super::Look::Off });
         icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), ink);
     }
-
-    // News panel.
-    let np = Rect::span(1304.0, 1470.0, 45.0, 77.0);
-    {
-        ui.c.fill_rrect(np, if lemon { 6.0 } else { 2.0 }, t.news_panel);
-        ui.off(np, "News");
-        let tw = ui.c.text(Font::new(13), 1309.0, 53.0, t.text_faint, "Today");
-        let news = "Welcome to Lemon Studio";
-        let avail = 1442.0 - 1315.0 - tw;
-        let nf = ui.c.fit_font(Font::new(14), news, avail);
-        ui.c.text_clip(nf, 1315.0 + tw, 52.0, avail, ui.t.tx(0x9aa8b0), news);
-        icons::draw(ui.c, Icon::Globe, Rect::new(1449.0, 52.0, 18.0, 18.0), t.glyph_dim.shade(0.3));
-        ui.veil(np, t.toolbar);
-    }
+    // FL's news panel (x 1304..1470, with its separator) is left out: it suggested an online service Lemon Studio
+    // does not have. A tips panel may take its place (spec: ui/main-window.md §3).
 }
 
 /// Minutes, seconds and centiseconds of a position in seconds.
@@ -754,5 +793,172 @@ mod tests {
         // 120 BPM: one bar (4 beats) = 2 s.
         assert_eq!(bst(2.0, 120.0, 96), (2, 1, 0));
         assert_eq!(bst(0.125, 120.0, 96), (1, 2, 0));
+    }
+
+    use super::{room, FULL_W, MORE_HINT, MORE_W};
+    use crate::app::{Action, App, Win};
+    use crate::prefs::{choice, set_choice, TOOLBARS_SCALING};
+    use os_ui::{Canvas, Rect};
+
+    fn hit(app: &App, a: &Action) -> Rect {
+        app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.rect).unwrap_or_else(|| panic!("no hit for {a:?}"))
+    }
+
+    fn has(app: &App, a: &Action) -> bool {
+        app.hits.iter().any(|h| &h.action == a)
+    }
+
+    fn click(app: &mut App, c: &mut Canvas, x: f32, y: f32) {
+        app.mouse_move(x, y);
+        app.mouse_down();
+        app.mouse_up();
+        app.paint(c, None);
+    }
+
+    fn twice(r: Rect) -> Rect {
+        Rect::new(r.x * 2.0, r.y * 2.0, r.w * 2.0, r.h * 2.0)
+    }
+
+    /// Toolbars scaling (spec: ui/ui-scaling.md §1), chosen on the settings page: at 200 % on a 100 % window the top band
+    /// is twice as tall at once and its controls twice as big; the browser, the workspace and the windows in it keep
+    /// their places below the band.
+    #[test]
+    fn toolbars_scaling_scales_the_top_band() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.show_browser = true;
+        app.paint(&mut c, None);
+        assert_eq!(choice(&TOOLBARS_SCALING), "Main");
+        assert_eq!((crate::views::band_h(&app.state), app.state.work_rect().y), (83.0, 83.0));
+        let (clock, tab) = (hit(&app, &Action::Clock), hit(&app, &Action::BrowserTab(1)));
+        assert_eq!(app.state.win_rect(Win::Playlist).y, 83.0, "docked under the band");
+
+        app.open_settings(crate::views::settings::GENERAL);
+        app.paint(&mut c, None);
+        let combo = app
+            .hits
+            .iter()
+            .rev()
+            .find(|h| matches!(&h.action, Action::Settings(crate::views::settings::SAct::Combo(l, ..)) if *l == TOOLBARS_SCALING.label))
+            .map(|h| h.rect)
+            .expect("the combo works");
+        click(&mut app, &mut c, combo.cx(), combo.cy());
+        let labels: Vec<String> = app.state.playlist.popup.as_ref().expect("its menu").items.iter().map(|it| it.label.to_string()).collect();
+        assert_eq!(labels, TOOLBARS_SCALING.choices);
+        let item = hit(&app, &Action::PlPopup(5));
+        click(&mut app, &mut c, item.cx(), item.cy());
+        assert_eq!((choice(&TOOLBARS_SCALING), app.state.message.as_deref()), ("200%", Some("Toolbars scaling: 200%")));
+        app.state.settings.open = false;
+        app.paint(&mut c, None);
+
+        // The band: 166 px instead of 83, its controls doubled; the rest keeps its place under it.
+        assert_eq!((crate::views::band_h(&app.state), app.state.work_rect().y), (166.0, 166.0));
+        assert_eq!(hit(&app, &Action::Clock), twice(clock));
+        let drag = app.hits.iter().find(|h| h.action == Action::DragWindow).map(|h| h.rect);
+        assert_eq!(drag, Some(Rect::new(0.0, 0.0, 1920.0, 162.0)));
+        assert_eq!(hit(&app, &Action::BrowserTab(1)), Rect { y: tab.y + 83.0, ..tab });
+        assert_eq!(app.state.win_rect(Win::Playlist).y, 166.0, "docked under the band");
+        // A floating window keeps its distance to the band when the band shrinks back.
+        app.state.wins[0].maxed = false;
+        app.state.wins[0].rect = Rect::new(400.0, 300.0, 900.0, 500.0);
+        app.state.raise(Win::Playlist);
+        app.paint(&mut c, None);
+        assert_eq!(app.pref_choose(&TOOLBARS_SCALING, 0).as_deref(), Some("Toolbars scaling: Main"));
+        app.paint(&mut c, None);
+        assert_eq!((crate::views::band_h(&app.state), app.state.win_rect(Win::Playlist).y), (83.0, 217.0));
+        assert_eq!(hit(&app, &Action::Clock), clock);
+    }
+
+    /// At 200 % the band's controls answer where they are drawn: the metronome, the menu bar (whose FILE menu keeps
+    /// Pop-ups scaling, rows 19 px at Main on a 100 % window) and the tempo's digits; repaints cover the scaled panels.
+    #[test]
+    fn band_controls_are_hit_where_drawn() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        set_choice(&TOOLBARS_SCALING, 5);
+        app.paint(&mut c, None);
+        // The metronome (580, 4, 30 x 33 in the band's px), pressed near its bottom-right corner, where the Main layout
+        // has another button.
+        let m = hit(&app, &Action::Metronome);
+        assert_eq!(m, Rect::new(1160.0, 8.0, 60.0, 66.0));
+        let was = crate::metronome::on();
+        click(&mut app, &mut c, m.right() - 4.0, m.bottom() - 4.0);
+        assert_eq!(crate::metronome::on(), !was);
+        // FILE opens its menu under its title, at Pop-ups scaling.
+        let file = hit(&app, &Action::Menu(0));
+        assert!(file.y >= 90.0 && file.h > 50.0, "{file:?}");
+        click(&mut app, &mut c, file.cx(), file.cy());
+        assert_eq!(app.state.menu_open, Some(0));
+        let save = hit(&app, &crate::views::menus::pick(0, crate::views::menus::FILE_SAVE));
+        app.state.menu_open = None;
+        // Under its title, which moved: at Main the same menu opens 78 px higher (the bottom row ends at 78, not 156)
+        // and 4 px further left (its left edge, 4 px, doubled); same rows, same width.
+        set_choice(&TOOLBARS_SCALING, 0);
+        app.paint(&mut c, None);
+        let main = hit(&app, &Action::Menu(0));
+        click(&mut app, &mut c, main.cx(), main.cy());
+        let save0 = hit(&app, &crate::views::menus::pick(0, crate::views::menus::FILE_SAVE));
+        assert_eq!((save.h, save0.h, save.w, save.x - save0.x, save.y - save0.y), (19.0, 19.0, save0.w, 4.0, 78.0), "{save:?} {save0:?}");
+        app.state.menu_open = None;
+        set_choice(&TOOLBARS_SCALING, 5);
+        app.paint(&mut c, None);
+        // The tempo: the first decimal steps by 0.1.
+        let tempo = hit(&app, &Action::Tempo);
+        let digits = app.state.tempo_digits.get();
+        assert!(digits[0].is_finite() && tempo.contains(2.0 * digits[0] + 2.0, tempo.cy()));
+        app.mouse_move(2.0 * digits[0] + 2.0, tempo.cy());
+        app.mouse_down();
+        assert!(matches!(app.drag, Some(crate::app::Drag::Tempo { step, .. }) if step == 0.1));
+        app.mouse_up();
+        // A change in the hint panel repaints the panel where it is drawn.
+        app.paint(&mut c, None);
+        let _ = app.take_damage();
+        app.damage_rect(crate::app::HINT_RECT);
+        let panel = crate::views::band_rect(&app.state, crate::app::HINT_RECT);
+        let damage = app.take_damage().flatten().expect("rects");
+        assert!(damage.iter().any(|r| r.contains(panel.x, panel.y) && r.contains(panel.right() - 1.0, panel.bottom() - 1.0)), "{damage:?}");
+        set_choice(&TOOLBARS_SCALING, 0);
+    }
+
+    /// Panels that don't fit are left out from the right; the ▶ arrow at the band's right end says why when hovered and
+    /// does nothing when clicked (spec: ui/ui-scaling.md §1). Everything fits at Main on 1920 px.
+    #[test]
+    fn panels_that_do_not_fit_leave_an_arrow() {
+        assert_eq!((room(FULL_W), room(FULL_W - 1.0)), (f32::INFINITY, FULL_W - 1.0 - MORE_W));
+        let more = |app: &App| app.hits.iter().rev().find(|h| h.hint == MORE_HINT).map(|h| (h.rect, h.action.clone()));
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.paint(&mut c, None);
+        assert_eq!(more(&app), None);
+        assert!(has(&app, &Action::Monitor) && has(&app, &Action::CpuPanel) && has(&app, &Action::PatternPrev));
+        assert!(app.hits.iter().any(|h| h.hint == "About Lemon Studio"));
+        // No news panel: Lemon Studio has no online service.
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder("News")));
+
+        // 200 %: 960 band px. Row 1 ends after the time display, row 2 after the snap combo.
+        set_choice(&TOOLBARS_SCALING, 5);
+        app.invalidate();
+        app.paint(&mut c, None);
+        let (r, action) = more(&app).expect("the arrow");
+        assert_eq!((r, action), (Rect::new(1920.0 - 2.0 * MORE_W, 0.0, 2.0 * MORE_W, 162.0), Action::Swallow));
+        assert!(has(&app, &Action::Clock) && has(&app, &Action::GlobalSnap));
+        assert!(!has(&app, &Action::Monitor) && !has(&app, &Action::CpuPanel) && !has(&app, &Action::PatternPrev));
+        assert!(!app.hits.iter().any(|h| h.hint == "About Lemon Studio"));
+        app.mouse_move(r.cx(), r.cy());
+        assert_eq!(app.hint, MORE_HINT);
+        let before = (app.state.message.clone(), app.state.menu_open, app.state.settings.open);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!((app.state.message.clone(), app.state.menu_open, app.state.settings.open), before, "a click does nothing");
+
+        // Main on a narrower window: the same rule (the CPU panel fits, the last buttons don't).
+        set_choice(&TOOLBARS_SCALING, 0);
+        let Ok(mut narrow) = Canvas::new(1300, 800, 1.0) else { return };
+        app.invalidate();
+        app.paint(&mut narrow, None);
+        let (r, _) = more(&app).expect("the arrow");
+        assert_eq!(r, Rect::new(1300.0 - MORE_W, 0.0, MORE_W, 81.0));
+        assert!(has(&app, &Action::CpuPanel) && has(&app, &Action::PatternPrev));
+        assert!(!app.hits.iter().any(|h| h.hint == "About Lemon Studio" || h.hint == "Project info (F11)"));
     }
 }

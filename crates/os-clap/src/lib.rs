@@ -21,7 +21,7 @@ use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
     clap_event_header, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
     clap_event_transport, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_EXPRESSION,
-    CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_TUNING, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
+    CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_TUNING, CLAP_NOTE_EXPRESSION_VOLUME, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
     CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE,
     CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
 };
@@ -489,6 +489,8 @@ enum Kind {
     Choke,
     /// Tuning of a key's voices (note expression); `velocity` holds the semitones.
     Tune,
+    /// A named voice's gain (note expression); `velocity` holds the gain.
+    Gain,
 }
 
 /// One entry of a chunk's event order: an index into `notes`, `mods` or `exprs`.
@@ -510,13 +512,19 @@ struct Ev {
     start: f32,
     /// The note's own pan and mod X / Y (`use_note_levels`).
     levels: os_engine::NoteLevels,
+    /// The engine's name for the voice (`Instrument::voice_start`): its note gets a note id, which its gains and its
+    /// choke go to.
+    voice: Option<u32>,
 }
 
 impl Ev {
     fn new(time: u32, kind: Kind, key: u8, velocity: f32) -> Ev {
-        Ev { time, kind, key, velocity, start: 0.0, levels: os_engine::NoteLevels::default() }
+        Ev { time, kind, key, velocity, start: 0.0, levels: os_engine::NoteLevels::default(), voice: None }
     }
 }
+
+/// Named voices kept for their gains and chokes; the oldest go beyond this.
+const NAMED_VOICES: usize = 512;
 
 /// How an instance takes a note's own levels (`Plugin::use_note_levels`): the pan always (note expression), the mod X /
 /// mod Y as per-note modulation of these parameters (id, the span of its range) where it has them.
@@ -597,6 +605,10 @@ pub struct Plugin {
     level_voices: Vec<LevelVoice>,
     /// Mod amounts of sounding voices to send at the start of the next block (note id, key, parameter, amount).
     mod_resend: Vec<(i32, u8, u32, f64)>,
+    /// Voices get their gains as volume note expressions (`use_voice_gains`).
+    voice_gains: bool,
+    /// The voices the engine named (`Instrument::voice_start`): its name, the note id they were sent with, the key.
+    named: Vec<(u32, i32, u8)>,
     next_note_id: i32,
     steady: i64,
     /// The song position for the next process call (the engine gives it while playing), and the current chunk's.
@@ -788,6 +800,8 @@ impl Plugin {
                 chan_mods: [0.0; 2],
                 level_voices: Vec::new(),
                 mod_resend: Vec::new(),
+                voice_gains: false,
+                named: Vec::new(),
                 next_note_id: 0,
                 steady: 0,
                 song: None,
@@ -952,6 +966,7 @@ impl Plugin {
                     self.ledger.ended(key, id);
                     if id >= 0 {
                         self.level_voices.retain(|v| v.id != id);
+                        self.named.retain(|v| v.1 != id);
                     }
                 }
                 e => {
@@ -1064,6 +1079,15 @@ impl Plugin {
             }
         }
         self.note_levels = Some(np);
+        true
+    }
+
+    /// Sends the gains the engine gives audio clip voices (`Instrument::voice_gain`; UI thread) as CLAP volume note
+    /// expressions with the voice's note id: for Lemon Sampler, which takes the first at once and glides to each later
+    /// one over `os_engine::instrument::VOICE_GAIN_FRAMES` frames (a Lemon Studio choice: CLAP says nothing of how a
+    /// plugin moves to a new volume). Without it the engine puts the clips' fades on the instance's whole output.
+    pub fn use_voice_gains(&mut self) -> bool {
+        self.voice_gains = true;
         true
     }
 
@@ -1260,18 +1284,50 @@ impl Plugin {
                     value: f64::from(e.velocity),
                 });
                 seq.push(Seq::Expr(self.exprs.len() - 1));
+            } else if e.time < n && e.kind == Kind::Gain {
+                // A named voice's gain (`use_voice_gains`): CLAP volume expression with its note id; a voice that has
+                // ended is not sent one.
+                let Some(&(_, id, key)) = self.named.iter().find(|v| Some(v.0) == e.voice) else { continue };
+                self.exprs.push(clap_event_note_expression {
+                    header: clap_event_header {
+                        size: std::mem::size_of::<clap_event_note_expression>() as u32,
+                        time: e.time,
+                        space_id: CLAP_CORE_EVENT_SPACE_ID,
+                        type_: CLAP_EVENT_NOTE_EXPRESSION,
+                        flags: 0,
+                    },
+                    expression_id: CLAP_NOTE_EXPRESSION_VOLUME,
+                    note_id: id,
+                    port_index: 0,
+                    channel: 0,
+                    key: i16::from(key),
+                    value: f64::from(e.velocity).clamp(0.0, 4.0),
+                });
+                seq.push(Seq::Expr(self.exprs.len() - 1));
             } else if e.time < n {
-                // A note with a sample start or its own levels gets an id, so its modulation reaches only that voice.
-                let id = if e.kind == Kind::On && ((self.start_param.is_some() && e.start > 0.0) || self.note_levels.is_some()) {
+                // A note with a sample start or its own levels gets an id, so its modulation reaches only that voice;
+                // so does a voice the engine named, whose gains and choke go to it alone. Its choke takes that id.
+                let fresh = e.kind == Kind::On && ((self.start_param.is_some() && e.start > 0.0) || self.note_levels.is_some() || e.voice.is_some());
+                let id = if fresh {
                     self.next_note_id = self.next_note_id.wrapping_add(1) & 0x7fff_ffff;
                     self.next_note_id
+                } else if e.kind == Kind::Choke {
+                    let at = self.named.iter().position(|v| Some(v.0) == e.voice);
+                    at.map_or(-1, |i| self.named.remove(i).1)
                 } else {
                     -1
                 };
+                if let (Kind::On, Some(v)) = (e.kind, e.voice) {
+                    if self.named.len() >= NAMED_VOICES {
+                        self.named.remove(0);
+                    }
+                    self.named.push((v, id, e.key));
+                }
                 match e.kind {
                     Kind::On => self.ledger.start(e.key, id),
                     Kind::Off => self.ledger.release(e.key),
-                    Kind::Choke | Kind::Tune => self.ledger.choke(e.key),
+                    Kind::Choke if id >= 0 => self.ledger.choke_voice(id),
+                    Kind::Choke | Kind::Tune | Kind::Gain => self.ledger.choke(e.key),
                 }
                 self.notes.push(clap_event_note {
                     header: clap_event_header {
@@ -1281,7 +1337,7 @@ impl Plugin {
                         type_: match e.kind {
                             Kind::On => CLAP_EVENT_NOTE_ON,
                             Kind::Off => CLAP_EVENT_NOTE_OFF,
-                            Kind::Choke | Kind::Tune => CLAP_EVENT_NOTE_CHOKE,
+                            Kind::Choke | Kind::Tune | Kind::Gain => CLAP_EVENT_NOTE_CHOKE,
                         },
                         flags: 0,
                     },
@@ -1496,6 +1552,10 @@ impl os_host::Plugin for Plugin {
         Plugin::use_note_levels(self)
     }
 
+    fn use_voice_gains(&mut self) -> bool {
+        Plugin::use_voice_gains(self)
+    }
+
     fn set_offline(&mut self, offline: bool) {
         Plugin::set_offline(self, offline);
     }
@@ -1603,6 +1663,7 @@ impl os_engine::Instrument for Plugin {
         self.ledger.clear();
         self.level_voices.clear();
         self.mod_resend.clear();
+        self.named.clear();
         if self.rate == 0 {
             return;
         }
@@ -1638,6 +1699,24 @@ impl os_engine::Instrument for Plugin {
 
     fn choke(&mut self, offset: u32, key: u8) {
         self.queue.push(Ev::new(offset, Kind::Choke, key, 0.0));
+    }
+
+    fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32) {
+        self.queue.push(Ev { start: start.clamp(0.0, 1.0), levels, voice: Some(voice), ..Ev::new(offset, Kind::On, key, velocity) });
+    }
+
+    fn voice_gains(&self) -> bool {
+        self.voice_gains
+    }
+
+    fn voice_gain(&mut self, offset: u32, voice: u32, gain: f32) {
+        if self.voice_gains {
+            self.queue.push(Ev { voice: Some(voice), ..Ev::new(offset, Kind::Gain, 0, gain) });
+        }
+    }
+
+    fn voice_choke(&mut self, offset: u32, key: u8, voice: u32) {
+        self.queue.push(Ev { voice: Some(voice), ..Ev::new(offset, Kind::Choke, key, 0.0) });
     }
 
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
@@ -2484,5 +2563,99 @@ mod tests {
         let peak = |w: &[f32]| w.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         let (p0, p1) = (peak(window(0.9, 0.99)), peak(window(1.0, 1.05)));
         assert!(p1 > p0 * 0.8, "no retrigger gap: {p0} -> {p1}");
+    }
+    /// A 2 s DC sample of 0.25 at 48 kHz.
+    fn dc_wav(name: &str) -> PathBuf {
+        let wav = std::env::temp_dir().join(format!("os-clap-{name}-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 2 * 96000]).unwrap();
+        wav
+    }
+
+    /// The built-in Lemon Sampler playing `wav` (the state Lemon Studio gives a sampler channel: its sample), activated
+    /// at 48 kHz.
+    fn sampler_of(wav: &Path) -> Plugin {
+        let entry = &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Sampler.clap")) }.expect("linked Lemon Sampler");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&wav.to_string_lossy()));
+        let mut blob = (state.len() as u64).to_le_bytes().to_vec();
+        blob.extend_from_slice(state.as_bytes());
+        assert!(p.load_state(&blob));
+        assert!(p.activate(48000));
+        p
+    }
+
+    /// Voices the engine names (`use_voice_gains`): each note gets its own id, the voice's gains go to it as volume
+    /// note expressions, its choke takes that id, and a voice that has ended gets no more gains. Without the switch
+    /// the engine is told the instance takes none.
+    #[test]
+    fn named_voices_take_their_gains_and_chokes_by_note_id() {
+        use os_engine::Instrument as _;
+        let wav = dc_wav("named");
+        let mut p = sampler_of(&wav);
+        assert!(!p.voice_gains());
+        assert!(p.use_voice_gains() && p.voice_gains());
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        let levels = os_engine::NoteLevels::default();
+        p.voice_start(0, 60, 0.8, 0.0, levels, 7);
+        p.voice_gain(0, 7, 0.0);
+        p.voice_gain(0, 7, 0.25);
+        p.voice_start(10, 60, 0.8, 0.0, levels, 8);
+        p.voice_gain(10, 8, 1.0);
+        p.process(48000, &mut l, &mut r);
+        let notes: Vec<(u16, i32, i16, u32)> = p.notes.iter().map(|n| (n.header.type_, n.note_id, n.key, n.header.time)).collect();
+        let (a, b) = (notes[0].1, notes[1].1);
+        assert!(a >= 0 && b >= 0 && a != b, "{notes:?}");
+        assert_eq!(notes, vec![(CLAP_EVENT_NOTE_ON, a, 60, 0), (CLAP_EVENT_NOTE_ON, b, 60, 10)]);
+        let exprs: Vec<(i32, i32, i16, u32, f64)> = p.exprs.iter().map(|x| (x.expression_id, x.note_id, x.key, x.header.time, x.value)).collect();
+        assert_eq!(exprs, vec![(CLAP_NOTE_EXPRESSION_VOLUME, a, 60, 0, 0.0), (CLAP_NOTE_EXPRESSION_VOLUME, a, 60, 0, 0.25), (CLAP_NOTE_EXPRESSION_VOLUME, b, 60, 10, 1.0)]);
+        // In the event order a voice's note on comes before its gains.
+        assert_eq!(p.order.first().copied(), Some(&p.notes[0].header as *const clap_event_header));
+        p.voice_choke(5, 60, 7);
+        p.voice_gain(6, 7, 0.5);
+        p.voice_gain(6, 8, 0.5);
+        p.process(48000, &mut l, &mut r);
+        let notes: Vec<(u16, i32, i16, u32)> = p.notes.iter().map(|n| (n.header.type_, n.note_id, n.key, n.header.time)).collect();
+        assert_eq!(notes, vec![(CLAP_EVENT_NOTE_CHOKE, a, 60, 5)]);
+        assert_eq!(p.exprs.iter().map(|x| (x.note_id, x.value)).collect::<Vec<_>>(), vec![(b, 0.5)]);
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    /// Two overlapping audio clips of one sample through Lemon Sampler, as Lemon Studio plays them: one audio clip
+    /// channel, one key. With automatic crossfades each voice has its own fades, so the level stays flat through the
+    /// overlap and the second clip plays to its own end (spec: audio/audio-clips.md "Automatic crossfades").
+    #[test]
+    fn lemon_sampler_crossfades_two_clips_of_one_sample() {
+        use os_model::{Clip, ClipSource};
+        let wav = dc_wav("crossfade");
+        let render = |clips: Vec<Clip>| {
+            let mut p = sampler_of(&wav);
+            p.use_note_levels();
+            p.use_voice_gains();
+            let shared: os_engine::SharedInstrument = Arc::new(Mutex::new(p));
+            let ch = os_model::Channel {
+                index: 0, kind: os_model::ChannelKind::AudioClip, name: None, plugin: None, plugin_state: None, color: None,
+                enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: Some(wav.to_string_lossy().into_owned()),
+                layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            };
+            let arrangement = os_model::Arrangement { clips, tracks: (1..=4).map(os_model::PlaylistTrack::new).collect(), ..Default::default() };
+            let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], arrangements: vec![arrangement], auto_crossfades: Some(true), ..Default::default() };
+            let mut slib = os_engine::SampleLibrary::default();
+            let mut e = os_engine::Engine::new(&project, &mut slib, 48000, os_engine::PlayMode::Song);
+            e.set_instrument(0, shared);
+            let out = e.render_all(480);
+            out.iter().step_by(2).copied().collect::<Vec<f32>>()
+        };
+        let at = |t: u64| os_engine::Clock::frame_of_tick(48000, 96, 130.0, t) as usize;
+        let first = Clip::new(0, 384, 0, ClipSource::Channel(0));
+        let alone = render(vec![first]);
+        let level = alone[24000];
+        assert!(level > 0.1, "{level}");
+        let both = render(vec![first, Clip::new(192, 384, 0, ClipSource::Channel(0))]);
+        let (worst, at_worst) = (0..at(576)).map(|f| ((both[f] - level).abs(), f)).fold((0.0f32, 0), |m, x| if x.0 > m.0 { x } else { m });
+        assert!(worst < 1e-3 * level, "flat through the overlap and after the first clip: off by {worst} at frame {at_worst} (level {level})");
+        // The render goes on to the first quiet tick after the song: the second clip's voice has closed by then.
+        assert!(both.len() > at(576) && both[both.len() - 100..].iter().all(|v| v.abs() < 1e-6), "silent after the second clip");
+        let _ = std::fs::remove_file(&wav);
     }
 }

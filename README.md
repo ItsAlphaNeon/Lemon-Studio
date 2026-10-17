@@ -85,10 +85,11 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ |
 | Exporting audio | 🚧 | Song or pattern to a 32-bit float WAV file; no MP3 or FLAC yet |
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers; no note recording yet |
-| Undo | 🚧 | Per editor (piano roll, playlist); no redo or global history yet |
+| Undo | 🚧 | One history for the whole project, with redo and the browser's History; not yet for mixer faders, plugin parameters or project settings |
 | Audio drivers | 🚧 | WASAPI on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no ASIO or JACK yet |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
 | Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; Lemon plugin editors in the Lemon design only |
+| Settings | 🚧 | The General, Audio, File, Theme, Project and Info pages work; not yet the MIDI page or the recording settings |
 | Audio recording | ❌ | |
 | MIDI file import / export | ❌ | |
 | Audio editing | ❌ | |

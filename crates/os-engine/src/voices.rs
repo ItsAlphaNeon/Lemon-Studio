@@ -98,6 +98,18 @@ impl VoiceLedger {
         }
     }
 
+    /// A choke of the voice with note id `id` alone (an audio clip's end; the key's other voices play on).
+    pub fn choke_voice(&mut self, id: i32) {
+        if self.reports {
+            let left = self.release_left();
+            for v in self.voices.iter_mut().filter(|v| v.id == id && v.left.is_none()) {
+                v.left = Some(left);
+            }
+        } else {
+            self.voices.retain(|v| v.id != id);
+        }
+    }
+
     /// The instrument reports that a voice ended: by note id when the host gave one, else the oldest voice of the key,
     /// released before held (§2.4). A report that matches nothing is ignored.
     pub fn ended(&mut self, key: i16, id: i32) {

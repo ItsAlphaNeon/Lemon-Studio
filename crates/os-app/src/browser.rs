@@ -54,6 +54,7 @@ impl App {
                         s.selected_channel = c;
                         s.rack.select_only(c);
                     }
+                    Item::History(e) => s.message = crate::history::go_to(s, e),
                     _ => {}
                 }
                 if let Item::Sample(path) = &row.item {
@@ -61,7 +62,7 @@ impl App {
                 }
                 let s = &mut self.state;
                 s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
-                if !matches!(row.item, Item::None | Item::File(_)) {
+                if !matches!(row.item, Item::None | Item::File(_) | Item::History(_)) {
                     self.drag = Some(Drag::Browser { item: row.item, label: row.label, m0: self.mouse, started: false });
                 }
             }
@@ -75,6 +76,7 @@ impl App {
     pub(crate) fn preview_sample(&self, path: &str) {
         let mut p = crate::app::preview_project(path);
         p.tempo = Some(self.state.tempo);
+        crate::preview_track::route(&mut p, &self.state.project, crate::prefs::number(&crate::prefs::BROWSER_PREVIEW_TRACK));
         let limit = (!view::opt(&self.state, view::OPT_PREVIEW)).then_some(PREVIEW_LIMIT);
         self.transport.preview_for(p, limit);
     }
@@ -350,7 +352,7 @@ impl App {
                     self.state.message = msg;
                 }
             }
-            Item::None | Item::File(_) => {}
+            Item::None | Item::File(_) | Item::History(_) => {}
         }
     }
 
@@ -359,7 +361,7 @@ impl App {
         let s = &mut self.state;
         if !s.browser_folders.contains(&path) {
             s.browser_folders.push(path.clone());
-            save_folders(&s.browser_folders);
+            save_folders(s);
         }
         s.browser_tab = 0;
         s.browser_search.clear();
@@ -377,7 +379,8 @@ impl App {
         let Some(row) = view::rows(s).into_iter().nth(i) else { return false };
         let Some(path) = row.path.filter(|_| row.depth == 0) else { return false };
         s.browser_folders.retain(|f| *f != path);
-        save_folders(&s.browser_folders);
+        s.browser_names.remove(&path);
+        save_folders(s);
         s.browser_open.retain(|k| !k.starts_with(&row.key));
         s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
         s.message = Some(format!("Removed {} from the browser", path.display()));
@@ -386,7 +389,8 @@ impl App {
     }
 }
 
-/// `browser_folders.txt` in the user folder (`os_paths::user_dir`): one dropped folder per line (spec §6).
+/// `browser_folders.txt` in the user folder (`os_paths::user_dir`): one dropped folder per line (spec §6), its Browser
+/// name after a tab when it has one (`crate::search_folders::file_text`).
 fn folders_file() -> Option<std::path::PathBuf> {
     if cfg!(test) {
         return None;
@@ -394,18 +398,27 @@ fn folders_file() -> Option<std::path::PathBuf> {
     os_paths::user_file("browser_folders.txt")
 }
 
-pub(crate) fn load_folders() -> Vec<std::path::PathBuf> {
+fn read_folders() -> Vec<(std::path::PathBuf, String)> {
     let Some(text) = folders_file().and_then(|p| std::fs::read_to_string(p).ok()) else { return Vec::new() };
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(std::path::PathBuf::from).collect()
+    crate::search_folders::parse_file(&text)
 }
 
-fn save_folders(folders: &[std::path::PathBuf]) {
+pub(crate) fn load_folders() -> Vec<std::path::PathBuf> {
+    read_folders().into_iter().map(|f| f.0).collect()
+}
+
+/// The dropped folders' Browser names.
+pub(crate) fn load_names() -> std::collections::BTreeMap<std::path::PathBuf, String> {
+    read_folders().into_iter().filter(|f| !f.1.is_empty()).collect()
+}
+
+/// Keeps the dropped folders and their names.
+pub(crate) fn save_folders(s: &crate::app::State) {
     let Some(p) = folders_file() else { return };
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    let text: String = folders.iter().map(|f| format!("{}\r\n", f.display())).collect();
-    let _ = std::fs::write(p, text);
+    let _ = std::fs::write(p, crate::search_folders::file_text(&s.browser_folders, &s.browser_names));
 }
 
 /// The menu bar's ways into the browser (spec: ui/browser-commands.md).
@@ -520,6 +533,22 @@ fn select(s: &mut crate::app::State, key: &str) {
     }
 }
 
+/// Ctrl+Z with "Show undo history in the browser when undoing changes": the browser shows Current project ▸ History,
+/// opened, where the project now is selected (spec: ui/settings-choices.md "Undo history: the four checks
+/// (2026-10-16)"). The All tab shows it too; the others switch to the project's.
+pub(crate) fn show_history(s: &mut crate::app::State) {
+    s.show_browser = true;
+    if s.browser_tab > 1 {
+        s.browser_tab = 1;
+    }
+    s.browser_search.clear();
+    let root = format!("{}:Current project", s.browser_tab);
+    let folder = format!("{root}/History");
+    s.browser_sel = Some(format!("{folder}/{}", s.history.at()));
+    s.browser_open.extend([root, folder]);
+    reveal(s);
+}
+
 /// Scroll the selected row into view.
 pub(crate) fn reveal(s: &mut crate::app::State) {
     let rows = view::rows(s);
@@ -557,7 +586,8 @@ fn find(s: &mut crate::app::State, dir: isize) -> Option<String> {
     None
 }
 
-/// Send the previous / next sample row to the selected channel.
+/// Send the previous / next sample row to the selected channel, which takes the file's name while "Auto name
+/// channels" is on (`rack::auto_name`). One history step (`history::load_sample`).
 fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     let rows = view::rows(s);
     let Some(i) = step(s, &rows, dir, |r| matches!(r.item, Item::Sample(_))) else {
@@ -567,12 +597,17 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     let key = rows[i].key.clone();
     select(s, &key);
     reveal(s);
-    let Some(ch) = s.project.channels.get_mut(s.selected_channel) else { return None };
-    if !ch.kind.is_sampler() {
+    let row = s.selected_channel;
+    if !s.project.channels.get(row)?.kind.is_sampler() {
         return Some("The selected channel is not a sampler".into());
     }
+    // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
+    let path = crate::data_folder::adopt(s, &path);
+    crate::history::load_sample(s, row);
+    let ch = &mut s.project.channels[row];
+    crate::rack::auto_name(ch, std::path::Path::new(&path));
+    crate::rack::read_tags(ch, std::path::Path::new(&path));
     ch.sample_path = Some(path.clone());
-    let row = s.selected_channel;
     s.sample_loads.push((row, path));
     s.piano.dirty = true;
     Some(format!("Sent {} to the selected channel", rows[i].label))

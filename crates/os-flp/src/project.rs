@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 
 use os_model::{
     Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
-    Envelope, MixerTrack,
-    Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, CLIP_RECORD_LEN,
+    DataFolder, Envelope, InitControl, MixerTrack,
+    Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, WorkTime, CLIP_RECORD_LEN,
 };
 
 use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
@@ -29,6 +29,16 @@ mod id {
     pub const URL: u8 = 197;
     pub const GENRE: u8 = 206;
     pub const AUTHOR: u8 = 207;
+    /// Events FL writes between the author and the comments (167, 202), and 237 (the project's start date and the
+    /// time spent), which ends the project information (spec: flp/engine-events.md "Order in the file").
+    pub const INFO_167: u8 = 167;
+    pub const INFO_202: u8 = 202;
+    pub const WORK_TIME: u8 = 237;
+    /// Show info on opening, 1 = on (spec: flp/events/project-info.md).
+    pub const SHOW_INFO: u8 = 10;
+    /// The project events that stand before the project information and are not read (spec: flp/engine-events.md
+    /// "Order in the file": 156, 67, 9, 11, 80, 17, 18, 35, 23, 44, 30, 10).
+    pub const OTHER_PROJECT: [u8; 5] = [9, 35, 23, 44, 10];
     pub const CURRENT_PATTERN: u8 = 67;
     /// Current arrangement number (spec: flp/events/playlist.md).
     pub const CURRENT_ARRANGEMENT: u8 = 100;
@@ -57,10 +67,18 @@ mod id {
     pub const CH_GROUP: u8 = 145;
     /// Project-level rack settings (spec: flp/events/project-info.md).
     pub const SWING: u8 = 11;
-    /// Time signature and "play truncated notes" (spec: flp/engine-events.md "Project").
+    /// The bar: beats per bar (17) and steps per beat (18, not the denominator), how the Project page shows them (35:
+    /// 1 = time signature, 0 = time division) and "play truncated notes" (30, present = on) (spec: flp/engine-events.md
+    /// "Project").
     pub const TIME_NUM: u8 = 17;
     pub const TIME_DEN: u8 = 18;
+    pub const TIME_MODE: u8 = 35;
     pub const PLAY_TRUNCATED: u8 = 30;
+    /// Settings shown but not played yet: panning law (23), automatic crossfades (44), fast declick for cut groups (40,
+    /// after event 100) (spec: flp/engine-events.md "Project").
+    pub const PANNING_LAW: u8 = 23;
+    pub const AUTO_CROSSFADES: u8 = 44;
+    pub const FAST_DECLICK: u8 = 40;
     /// The project's main pitch, cents as a signed 16-bit value (spec: flp/engine-events.md "Project").
     pub const MAIN_PITCH: u8 = 80;
     /// Channel fine tune, cents (spec: audio/voice-levels.md).
@@ -100,6 +118,9 @@ mod id {
     pub const SMP_REVERB: u8 = 139;
     pub const GROUP_NAME: u8 = 231;
     pub const CURRENT_GROUP: u8 = 146;
+    /// The project's initial values, 12-byte records, in the prelude after 146 (spec: flp/engine-events.md "Event 216",
+    /// flp/events/project-info.md, ui/settings-choices.md "Advanced: Initialize controls automatically").
+    pub const INIT_CONTROLS: u8 = 216;
 
     pub const PAT_START: u8 = 65;
     pub const PAT_NOTES: u8 = 224;
@@ -220,6 +241,26 @@ fn comments_to_file(s: &str) -> String {
     s.replace("\r\n", "\r").replace('\n', "\r")
 }
 
+/// Event 237: the start and the time spent, two little-endian doubles in days (spec: flp/events/project-info.md).
+/// `None` unless it holds 16 bytes.
+fn work_time_from(d: &[u8]) -> Option<WorkTime> {
+    let d: &[u8; 16] = d.try_into().ok()?;
+    let (a, b) = d.split_at(8);
+    Some(WorkTime { started: f64::from_le_bytes(a.try_into().ok()?), spent: f64::from_le_bytes(b.try_into().ok()?) })
+}
+
+fn work_time_bytes(w: WorkTime) -> Vec<u8> {
+    [w.started.to_le_bytes(), w.spent.to_le_bytes()].concat()
+}
+
+/// A project started now: the local time in days since 1899-12-30 00:00, nothing spent yet (spec:
+/// flp/events/project-info.md, event 237 and "Writer notes").
+pub fn work_time_now() -> WorkTime {
+    let epoch = chrono::NaiveDate::from_ymd_opt(1899, 12, 30).and_then(|d| d.and_hms_opt(0, 0, 0)).expect("valid date");
+    let ms = (chrono::Local::now().naive_local() - epoch).num_milliseconds();
+    WorkTime { started: ms as f64 / 86_400_000.0, spent: 0.0 }
+}
+
 // ---------------------------------------------------------------------------------------
 // Colors
 
@@ -319,6 +360,14 @@ struct Layout {
     genre: Option<usize>,
     comments: Option<usize>,
     url: Option<usize>,
+    /// Events 167, 202 and 237 around the project information texts, and the last of the other project events before
+    /// them (`id::OTHER_PROJECT`).
+    info_167: Option<usize>,
+    info_202: Option<usize>,
+    work_time: Option<usize>,
+    other_project: Option<usize>,
+    /// Event 10, show info on opening.
+    show_info: Option<usize>,
     current_pattern: Option<usize>,
     current_arrangement: Option<usize>,
     playlist_view: Option<usize>,
@@ -337,8 +386,23 @@ struct Layout {
     time_den: Option<usize>,
     truncated: Option<usize>,
     main_pitch: Option<usize>,
+    /// The project settings among `id::OTHER_PROJECT` whose place FL's order fixes (9, 35, 23, 44; spec:
+    /// flp/engine-events.md "Project", "Order in the file"): the id and where it first stands, to place 17, 18 and 30
+    /// (35, 23 and 44 are also read: [`Layout::setting`]).
+    unread_settings: Vec<(u8, usize)>,
+    /// Fast declick for cut groups (event 40), after event 100.
+    fast_declick: Option<usize>,
     groups: Vec<usize>,
     current_group: Option<usize>,
+    /// Event 216, the initial values.
+    init_controls: Option<usize>,
+}
+
+impl Layout {
+    /// Where the project setting `eid` (9, 35, 23 or 44) first stands.
+    fn setting(&self, eid: u8) -> Option<usize> {
+        self.unread_settings.iter().find(|s| s.0 == eid).map(|s| s.1)
+    }
 }
 
 /// Marker kind of a pattern's "Length" marker and its name (spec: flp/events/patterns.md, metadata block).
@@ -467,6 +531,19 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 id::GENRE => l.genre = Some(i),
                 id::COMMENTS => l.comments = Some(i),
                 id::URL => l.url = Some(i),
+                id::INFO_167 if l.info_167.is_none() => l.info_167 = Some(i),
+                id::INFO_202 if l.info_202.is_none() => l.info_202 = Some(i),
+                id::WORK_TIME if l.work_time.is_none() => l.work_time = Some(i),
+                id::SHOW_INFO if l.show_info.is_none() => {
+                    l.show_info = Some(i);
+                    l.other_project = Some(i);
+                }
+                v if id::OTHER_PROJECT.contains(&v) => {
+                    l.other_project = Some(i);
+                    if v != 10 && !l.unread_settings.iter().any(|&(k, _)| k == v) {
+                        l.unread_settings.push((v, i));
+                    }
+                }
                 id::CURRENT_PATTERN => l.current_pattern = Some(i),
                 id::SWING if l.swing.is_none() => l.swing = Some(i),
                 id::TIME_NUM if l.time_num.is_none() => l.time_num = Some(i),
@@ -475,6 +552,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 id::MAIN_PITCH if l.main_pitch.is_none() => l.main_pitch = Some(i),
                 id::GROUP_NAME => l.groups.push(i),
                 id::CURRENT_GROUP => l.current_group = Some(i),
+                id::INIT_CONTROLS if l.init_controls.is_none() => l.init_controls = Some(i),
                 _ => {}
             },
             (Region::Channels | Region::Arrangements, id::ARR_START) => {
@@ -506,6 +584,10 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 }
             }
             (Region::Arrangements | Region::Mixer, id::CURRENT_ARRANGEMENT) => l.current_arrangement = Some(i),
+            // Event 40 stands after event 100, among 29, 39, 31, 38, 103 (spec: flp/engine-events.md "Project").
+            (Region::Arrangements, id::FAST_DECLICK) if l.current_arrangement.is_some() && l.fast_declick.is_none() => {
+                l.fast_declick = Some(i)
+            }
             (Region::Arrangements | Region::Mixer, id::PLAYLIST_VIEW) => l.playlist_view = Some(i),
             (Region::Arrangements, id::PL_NAME) => {
                 if let Some(t) = l.arrangements.last_mut().and_then(|a| a.tracks.last_mut()) {
@@ -619,7 +701,10 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
     let enc = text_enc(events, l.version);
     l.enc = Some(enc);
     let clen = clip_len(events, l.version);
-    let text = |i: Option<usize>| i.and_then(|i| events[i].data()).map(|d| decode_text(d, enc));
+    // FL writes 194, 206, 207 and 195 empty when they are empty (spec: flp/events/project-info.md "Writer notes"): an
+    // empty text reads as no value.
+    let text = |i: Option<usize>| i.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)).filter(|t| !t.is_empty());
+    let init_controls = decode_init_controls(l.init_controls.and_then(|i| events[i].data()).unwrap_or(&[]));
 
     let mut p = Project {
         saved_by: l
@@ -628,7 +713,13 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             .map(|d| decode_text(d, TextEnc::Ansi))
             .unwrap_or_default(),
         ppq: header.ppq().unwrap_or(96),
-        tempo: l.tempo.map(|i| f64::from(int(&events[i])) / 1000.0),
+        // The initial values' tempo record, when there is one, wins over event 156 (spec: flp/engine-events.md "Event
+        // 216").
+        tempo: init_controls
+            .iter()
+            .find(|c| c.target == os_model::target::TEMPO)
+            .map(|c| f64::from(c.value) / 1000.0)
+            .or_else(|| l.tempo.map(|i| f64::from(int(&events[i])) / 1000.0)),
         info: ProjectInfo {
             title: text(l.title),
             author: text(l.author),
@@ -641,11 +732,23 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         swing: l.swing.map(|i| int(&events[i]) as u8),
         groups: l.groups.iter().map(|&i| events[i].data().map(|d| decode_text(d, enc)).unwrap_or_default()).collect(),
         current_group: l.current_group.map(|i| int(&events[i])).filter(|&v| v != u32::MAX),
-        time_signature: l.time_num.zip(l.time_den).map(|(n, d)| (int(&events[n]) as u16, int(&events[d]) as u16)).filter(|&(n, d)| n > 0 && d > 0),
-        play_truncated: l.truncated.map(|i| int(&events[i]) != 0),
+        bar: l.time_num.zip(l.time_den).map(|(n, d)| (int(&events[n]) as u16, int(&events[d]) as u16)).filter(|&(n, d)| n > 0 && d > 0),
+        bar_as_signature: l.setting(id::TIME_MODE).map(|i| int(&events[i]) != 0),
+        play_truncated: l.truncated.is_some_and(|i| int(&events[i]) != 0),
+        panning_law: l.setting(id::PANNING_LAW).map(|i| int(&events[i]) as u8),
+        fast_declick: l.fast_declick.map(|i| int(&events[i]) != 0),
+        auto_crossfades: l.setting(id::AUTO_CROSSFADES).map(|i| int(&events[i]) != 0),
         main_pitch: l.main_pitch.map(|i| int(&events[i]) as u16 as i16),
         main_volume: main_volume(l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[])),
         playlist_view: l.playlist_view.and_then(|i| events[i].data()).and_then(PlaylistView::from_bytes),
+        work_time: l.work_time.and_then(|i| events[i].data()).and_then(work_time_from),
+        show_info: l.show_info.map(|i| int(&events[i]) != 0),
+        // Events 167 and 202 (spec: ui/data-folder.md §2); 202 is read as it is, empty or not.
+        data_folder: (l.info_167.is_some() || l.info_202.is_some()).then(|| DataFolder {
+            choice: l.info_167.map_or(0, |i| int(&events[i])),
+            folder: l.info_202.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)).unwrap_or_default(),
+        }),
+        init_controls,
         ..Default::default()
     };
 
@@ -1617,6 +1720,19 @@ fn set_record(data: &mut Vec<u8>, kind: u8, loc: u16, pid: u8, v: i32) {
     data.splice(at..at, param_rec(pid, kind, loc, v));
 }
 
+/// Event 216's records, whole ones only (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
+fn decode_init_controls(data: &[u8]) -> Vec<InitControl> {
+    data.chunks_exact(InitControl::LEN).map(|r| InitControl::from_bytes(r.try_into().unwrap())).collect()
+}
+
+/// The initial values as event 216 holds them; `old` (the event's bytes before) keeps any bytes past its last whole
+/// record.
+fn init_controls_bytes(list: &[InitControl], old: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = list.iter().flat_map(|c| c.to_bytes()).collect();
+    out.extend_from_slice(&old[old.len() - old.len() % InitControl::LEN..]);
+    out
+}
+
 /// The main volume: record id 0, kind 0 at place 0x4000 (spec: audio/mixer.md "Main volume").
 fn main_volume(params: &[u8]) -> Option<u16> {
     mixer_param_records(params)
@@ -1772,6 +1888,7 @@ fn plugin_record(slot: Option<(u16, u8)>) -> Vec<u8> {
 
 fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
     let params = l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[]);
+    let init = l.init_controls.and_then(|i| events[i].data()).unwrap_or(&[]);
     let mut out = Vec::new();
     // Track boundaries: header start of track n .. header start of track n+1.
     let starts: Vec<usize> = l
@@ -1821,7 +1938,9 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         let mut slot_mix = [1.0; 10];
         let rt = record_track(index, l.mixer.len());
         let base = mixer_location(rt, 0);
-        for (_, pid, kind, loc, v) in mixer_param_records(params) {
+        // The initial values' records of a slot's switch and mix level win over event 225's (spec: flp/engine-events.md
+        // "Event 216"): read after them.
+        for (_, pid, kind, loc, v) in mixer_param_records(params).chain(mixer_param_records(init)) {
             if kind == MX_KIND_PARAM && (base..base + 10).contains(&loc) {
                 let s = usize::from(loc - base);
                 match pid {
@@ -1901,6 +2020,11 @@ fn patch_bytes(e: &mut Event, offset: usize, bytes: &[u8]) {
             e.value = Value::var(d);
         }
     }
+}
+
+/// Beats per bar or steps per beat as their one-byte event holds them (17, 18; spec: flp/engine-events.md).
+fn signature_byte(v: u16) -> u8 {
+    v.clamp(1, 255) as u8
 }
 
 /// An integer event of `id` holding `v`, sized by its id range (spec: flp/container.md).
@@ -2087,30 +2211,98 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     let mut inserts: Vec<(usize, Event)> = Vec::new();
     let mut removals: Vec<usize> = Vec::new();
 
-    // Project info.
-    if let (Some(i), Some(t)) = (l.tempo, project.tempo.filter(|&t| Some(t) != current.tempo)) {
+    // Project info. The tempo the file reads is the initial values' tempo record when there is one (spec:
+    // flp/engine-events.md "Event 216"): without one in the model, event 156 has to hold the project's tempo.
+    let reads_156 = !project.init_controls.iter().any(|c| c.target == os_model::target::TEMPO);
+    let tempo_156 = l.tempo.map(|i| f64::from(int(&events[i])) / 1000.0);
+    if let (Some(i), Some(t)) = (l.tempo, project.tempo.filter(|&t| Some(t) != current.tempo || (reads_156 && Some(t) != tempo_156))) {
         set_int(&mut events[i], (t * 1000.0).round() as u32);
     }
+    // Title, genre, author, comments, URL (spec: flp/events/project-info.md). A changed text is patched in place. A
+    // cleared one keeps its event, written empty, as FL 26 writes 194, 206, 207 and 195 when they are empty; a cleared
+    // URL loses its event, as FL writes 197 only when there is a URL (Writer notes). An empty field the file lacks gets
+    // no event, a filled one gets its event in FL's order; so do the start and time spent (237) and "show info on
+    // opening" (10) when the model has them.
     let info = &project.info;
     let old_info = &current.info;
-    for (loc, value, old) in [
-        (l.title, &info.title, &old_info.title),
-        (l.author, &info.author, &old_info.author),
-        (l.genre, &info.genre, &old_info.genre),
-        (l.comments, &info.comments, &old_info.comments),
-        (l.url, &info.url, &old_info.url),
-    ] {
+    let fields = [
+        (id::TITLE, &info.title, &old_info.title),
+        (id::GENRE, &info.genre, &old_info.genre),
+        (id::AUTHOR, &info.author, &old_info.author),
+        (id::COMMENTS, &info.comments, &old_info.comments),
+        (id::URL, &info.url, &old_info.url),
+    ];
+    // spec: flp/engine-events.md "Order in the file": 194, 206, 207, 167, 202, 195, [197], 237. The five texts take
+    // places 0, 1, 2, 5 and 6 of it.
+    let order = [l.title, l.genre, l.author, l.info_167, l.info_202, l.comments, l.url, l.work_time];
+    const PLACE: [usize; 5] = [0, 1, 2, 5, 6];
+    // Without any of them in the file: behind the project events that come before them (156, 67, 9, 11, 80, 17, 18,
+    // 35, 23, 44, 30, 10), as `create` does.
+    let info_at = [l.tempo, l.current_pattern, l.swing, l.main_pitch, l.time_num, l.time_den, l.truncated, l.other_project]
+        .into_iter()
+        .flatten()
+        .max()
+        .or(l.version)
+        .map_or(0, |i| i + 1);
+    // Where place `p` of that order goes: after the nearest event before it that the file has, else before the nearest
+    // one after it.
+    let place = |p: usize| {
+        order[..p].iter().rev().find_map(|i| i.map(|i| i + 1)).or_else(|| order[p + 1..].iter().find_map(|&i| i)).unwrap_or(info_at)
+    };
+    // The data folder's choice and folder (167, 202; spec: ui/data-folder.md §2), places 3 and 4: patched in place, or
+    // added between the author and the comments when the model's differs from the file's (a missing event reads as
+    // 0 / empty, so an unchanged model adds nothing).
+    let mut folder_added = Vec::new();
+    if project.data_folder != current.data_folder {
+        let (df, old) = (project.data_folder.clone().unwrap_or_default(), current.data_folder.clone().unwrap_or_default());
+        if df.choice != old.choice {
+            match l.info_167 {
+                Some(i) => set_int(&mut events[i], df.choice),
+                None => folder_added.push((place(3), int_event(id::INFO_167, df.choice))),
+            }
+        }
+        if df.folder != old.folder {
+            match l.info_202 {
+                Some(i) => set_data(&mut events[i], encode_text(&df.folder, enc)),
+                None => folder_added.push((place(4), Event::new(id::INFO_202, Value::var(encode_text(&df.folder, enc))))),
+            }
+        }
+    }
+    let mut added = Vec::new();
+    for (k, &(eid, value, old)) in fields.iter().enumerate() {
+        if k == 3 {
+            added.append(&mut folder_added);
+        }
         if value == old {
             continue;
         }
-        let value = if loc == l.comments { value.as_deref().map(comments_to_file) } else { value.clone() };
-        match (loc, value) {
-            (Some(i), Some(v)) => set_data(&mut events[i], encode_text(&v, enc)),
-            (Some(i), None) => set_data(&mut events[i], encode_text("", enc)),
-            (None, Some(v)) if !v.is_empty() => {
-                return Err(ProjectError::Mismatch("adding a missing project-info field".into()));
-            }
+        let p = PLACE[k];
+        let text = value.as_deref().map(|v| if eid == id::COMMENTS { comments_to_file(v) } else { v.to_string() });
+        match (order[p], text) {
+            (Some(i), v) if eid == id::URL && v.as_deref().unwrap_or("").is_empty() => removals.push(i),
+            (Some(i), v) => set_data(&mut events[i], encode_text(v.as_deref().unwrap_or(""), enc)),
+            (None, Some(v)) if !v.is_empty() => added.push((place(p), Event::new(eid, Value::var(encode_text(&v, enc))))),
             _ => {}
+        }
+    }
+    // Inserts at one place end up in reverse order of pushing: 237 goes behind the texts added at its place, which keep
+    // the order above, and 10 (below) before them.
+    if let Some(w) = project.work_time.filter(|&w| Some(w) != current.work_time) {
+        match l.work_time {
+            Some(i) => set_data(&mut events[i], work_time_bytes(w)),
+            None => inserts.push((place(7), Event::new(id::WORK_TIME, Value::var(work_time_bytes(w))))),
+        }
+    }
+    inserts.extend(added.into_iter().rev());
+    // Show info on opening (event 10), where the file lacks it: behind the project events, before the texts.
+    if project.show_info != current.show_info {
+        let v = u32::from(project.show_info.unwrap_or(false));
+        match l.show_info {
+            Some(i) => set_int(&mut events[i], v),
+            None => {
+                let first_text = order.iter().flatten().min().copied();
+                inserts.push((first_text.map_or(info_at, |f| f.min(info_at)), int_event(id::SHOW_INFO, v)));
+            }
         }
     }
     if let (Some(i), Some(v)) = (l.current_pattern, project.current_pattern.filter(|&v| Some(v) != current.current_pattern)) {
@@ -2120,11 +2312,22 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         set_int(&mut events[i], v.into());
     }
 
+    // Project settings the file lacks (11, 80, 17, 18, 30) go where FL 26 writes them (spec: flp/engine-events.md
+    // "Project", "Order in the file": 156, 67, 9, 11, 80, 17, 18, 35, 23, 44, 30, 10): behind the last of the settings
+    // before them that the file has. `settings` holds them in that order; see below.
+    let mut settings: Vec<(usize, Event)> = Vec::new();
+    let unread = |eid: u8| l.unread_settings.iter().find(|s| s.0 == eid).map(|s| s.1);
+    // The swing and the main pitch also stay before a 17 or 18 the file has.
+    let before_signature = |at: usize| [l.time_num, l.time_den].into_iter().flatten().fold(at, usize::min);
     // Channel rack settings: main swing, filter groups, current filter (spec: flp/events/project-info.md).
     if let Some(v) = project.swing.filter(|&v| Some(v) != current.swing) {
         match l.swing {
             Some(i) => set_int(&mut events[i], v.into()),
-            None if v != 0 => inserts.push((l.tempo.map_or(0, |i| i + 1), Event::new(id::SWING, Value::U8(v)))),
+            None if v != 0 => {
+                // Behind the last of 156, 67 and 9 the file has.
+                let at = [l.tempo, l.current_pattern, unread(9)].into_iter().flatten().max().map_or(0, |i| i + 1);
+                settings.push((before_signature(at), Event::new(id::SWING, Value::U8(v))));
+            }
             None => {}
         }
     }
@@ -2133,12 +2336,106 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         match l.main_pitch {
             Some(i) => set_int(&mut events[i], u32::from(v as u16)),
             None if v != 0 => {
-                let at = l.swing.or(l.tempo).map_or(0, |i| i + 1);
-                inserts.push((at, Event::new(id::MAIN_PITCH, Value::U16(v as u16))));
+                // Behind the last of 156, 67, 9 and 11 the file has.
+                let at = [l.tempo, l.current_pattern, unread(9), l.swing].into_iter().flatten().max().map_or(0, |i| i + 1);
+                settings.push((before_signature(at), Event::new(id::MAIN_PITCH, Value::U16(v as u16))));
             }
             None => {}
         }
     }
+    // The bar (events 17, 18: beats per bar, steps per beat), its mode (35) and "play truncated notes" (30): patched
+    // where the file has them, else added where FL 26 writes them (above). The model's `None` is (4, 4) and a time
+    // signature.
+    if project.bar != current.bar {
+        let (n, d) = project.bar();
+        let (n, d) = (u32::from(signature_byte(n)), u32::from(signature_byte(d)));
+        match (l.time_num, l.time_den) {
+            (Some(a), Some(b)) => {
+                set_int(&mut events[a], n);
+                set_int(&mut events[b], d);
+            }
+            (Some(a), None) => {
+                set_int(&mut events[a], n);
+                settings.push((a + 1, int_event(id::TIME_DEN, d)));
+            }
+            (None, Some(b)) => {
+                set_int(&mut events[b], d);
+                settings.push((b, int_event(id::TIME_NUM, n)));
+            }
+            (None, None) => {
+                // Behind the last of 156, 67, 9, 11 and 80 the file has (so before 35, 23, 44, 30 and 10).
+                let at = [l.tempo, l.current_pattern, unread(9), l.swing, l.main_pitch].into_iter().flatten().max().map_or(0, |i| i + 1);
+                settings.push((at, int_event(id::TIME_NUM, n)));
+                settings.push((at, int_event(id::TIME_DEN, d)));
+            }
+        }
+    }
+    if project.bar_as_signature != current.bar_as_signature {
+        let v = u32::from(project.bar_is_signature());
+        match unread(id::TIME_MODE) {
+            Some(i) => set_int(&mut events[i], v),
+            None => {
+                // Behind the last of 156, 67, 9, 11, 80, 17 and 18 the file has (so before 23, 44, 30 and 10).
+                let at = [l.tempo, l.current_pattern, unread(9), l.swing, l.main_pitch, l.time_num, l.time_den]
+                    .into_iter()
+                    .flatten()
+                    .max()
+                    .map_or(0, |i| i + 1);
+                settings.push((at, int_event(id::TIME_MODE, v)));
+            }
+        }
+    }
+    // The panning law (event 23: 0 Circular, 2 Triangular; spec: flp/engine-events.md "Project").
+    if let Some(v) = project.panning_law.filter(|&v| Some(v) != current.panning_law) {
+        match unread(id::PANNING_LAW) {
+            Some(i) => set_int(&mut events[i], v.into()),
+            None => {
+                // Behind the last of 156, 67, 9, 11, 80, 17, 18 and 35 the file has (so before 44, 30 and 10).
+                let at = [l.tempo, l.current_pattern, unread(9), l.swing, l.main_pitch, l.time_num, l.time_den, unread(id::TIME_MODE)]
+                    .into_iter()
+                    .flatten()
+                    .max()
+                    .map_or(0, |i| i + 1);
+                settings.push((at, int_event(id::PANNING_LAW, v.into())));
+            }
+        }
+    }
+    // Automatic crossfades (event 44: 1 on, 0 off; spec: flp/engine-events.md "The project settings, measured").
+    if let Some(on) = project.auto_crossfades.filter(|&v| Some(v) != current.auto_crossfades) {
+        match unread(id::AUTO_CROSSFADES) {
+            Some(i) => set_int(&mut events[i], u32::from(on)),
+            None => {
+                // Behind the last of 156, 67, 9, 11, 80, 17, 18, 35 and 23 the file has (so before 30 and 10).
+                let at = [l.tempo, l.current_pattern, unread(9), l.swing, l.main_pitch, l.time_num, l.time_den, unread(id::TIME_MODE), unread(id::PANNING_LAW)]
+                    .into_iter()
+                    .flatten()
+                    .max()
+                    .map_or(0, |i| i + 1);
+                settings.push((at, int_event(id::AUTO_CROSSFADES, u32::from(on))));
+            }
+        }
+    }
+    // Event 30 is there with 1 when on; off removes it, as FL does (it never writes 0; spec: flp/engine-events.md
+    // "Event 30").
+    if project.play_truncated != current.play_truncated {
+        match l.truncated {
+            Some(i) if project.play_truncated => set_int(&mut events[i], 1),
+            Some(i) => removals.push(i),
+            None if !project.play_truncated => {}
+            None => {
+                // Behind the last of 156, 67, 9, 11, 80, 17, 18, 35, 23 and 44 the file has (so before 10).
+                let at = [l.tempo, l.current_pattern, unread(9), l.swing, l.main_pitch, l.time_num, l.time_den, unread(35), unread(23), unread(44)]
+                    .into_iter()
+                    .flatten()
+                    .max()
+                    .map_or(0, |i| i + 1);
+                settings.push((at, int_event(id::PLAY_TRUNCATED, 1)));
+            }
+        }
+    }
+    // Inserts at one place end up in reverse order of pushing: settings added at one place keep FL's order, ahead of
+    // project information added there.
+    inserts.extend(settings.into_iter().rev());
     let groups_at = l
         .groups
         .first()
@@ -2147,6 +2444,22 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         .or(l.links.first().copied())
         .or(l.channels.first().map(|c| c.start))
         .unwrap_or(0);
+    // The initial values (event 216; spec: ui/settings-choices.md "Advanced: Initialize controls automatically"): the
+    // records written as the model has them, the ones Lemon Studio doesn't understand included, which the model keeps
+    // as read. A file without the event gets it once there is a value, after 146 (or the group names) as FL's prelude
+    // has it (flp/events/project-info.md); pushed first, so it stays behind a 146 added at the same place.
+    if project.init_controls != current.init_controls {
+        match l.init_controls {
+            Some(i) => {
+                let bytes = init_controls_bytes(&project.init_controls, events[i].data().unwrap_or(&[]));
+                set_data(&mut events[i], bytes);
+            }
+            None => {
+                let at = l.current_group.or(l.groups.last().copied()).map_or(groups_at, |i| i + 1);
+                inserts.push((at, Event::new(id::INIT_CONTROLS, Value::var(init_controls_bytes(&project.init_controls, &[])))));
+            }
+        }
+    }
     if project.groups != current.groups {
         removals.extend(l.groups.iter().copied());
         for name in project.groups.iter().rev() {
@@ -2742,6 +3055,17 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
         }
     }
+    // And holds the timebase (Settings > Project ▸ Timebase; spec: flp/engine-events.md "The project settings,
+    // measured"): the tick counts written above are the model's, already at this PPQ.
+    if project.ppq != current.ppq {
+        for c in &mut file.chunks {
+            if let ChunkBody::Header(h) = &mut c.body {
+                if h.raw.len() >= 6 {
+                    h.raw[4..6].copy_from_slice(&project.ppq.max(1).to_le_bytes());
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3148,15 +3472,40 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         Event::new(169, Value::U32(15)),
         Event::new(id::TEMPO, Value::U32((project.tempo.unwrap_or(130.0) * 1000.0).round() as u32)),
     ];
+    // The project settings in FL 26's order (spec: flp/engine-events.md "Project", "Order in the file": 156, 67, 9, 11,
+    // 80, 17, 18, 35, 23, 44, 30, 10), those the model has.
+    if let Some(p) = project.current_pattern {
+        ev.push(Event::new(id::CURRENT_PATTERN, Value::U16(p)));
+    }
     if let Some(v) = project.swing.filter(|&v| v != 0) {
         ev.push(Event::new(id::SWING, Value::U8(v)));
     }
     if let Some(v) = project.main_pitch.filter(|&v| v != 0) {
         ev.push(Event::new(id::MAIN_PITCH, Value::U16(v as u16)));
     }
-    if let Some(p) = project.current_pattern {
-        ev.push(Event::new(id::CURRENT_PATTERN, Value::U16(p)));
+    if let Some((n, d)) = project.bar {
+        ev.push(Event::new(id::TIME_NUM, Value::U8(signature_byte(n))));
+        ev.push(Event::new(id::TIME_DEN, Value::U8(signature_byte(d))));
     }
+    if let Some(on) = project.bar_as_signature {
+        ev.push(Event::new(id::TIME_MODE, Value::U8(u8::from(on))));
+    }
+    if let Some(v) = project.panning_law {
+        ev.push(Event::new(id::PANNING_LAW, Value::U8(v)));
+    }
+    if let Some(on) = project.auto_crossfades {
+        ev.push(Event::new(id::AUTO_CROSSFADES, Value::U8(u8::from(on))));
+    }
+    // Present only when on (spec: flp/engine-events.md "Event 30").
+    if project.play_truncated {
+        ev.push(Event::new(id::PLAY_TRUNCATED, Value::U8(1)));
+    }
+    if let Some(on) = project.show_info {
+        ev.push(Event::new(id::SHOW_INFO, Value::U8(u8::from(on))));
+    }
+    // The project information as FL 26 writes it (spec: flp/events/project-info.md "Writer notes"): 194, 206, 207 and
+    // 195 always, empty when empty; 197 only with a URL; then 237, the start (now for a project without one) and the
+    // time spent.
     let info = &project.info;
     for (id, value) in [
         (id::TITLE, info.title.clone()),
@@ -3165,10 +3514,18 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         (id::COMMENTS, info.comments.as_deref().map(comments_to_file)),
         (id::URL, info.url.clone()),
     ] {
-        if let Some(v) = value.filter(|v| !v.is_empty()) {
+        // The data folder (167, 202) between the author and the comments, when the model has one (spec:
+        // ui/data-folder.md §2).
+        if let Some(df) = project.data_folder.as_ref().filter(|_| id == id::COMMENTS) {
+            ev.push(int_event(id::INFO_167, df.choice));
+            ev.push(Event::new(id::INFO_202, Value::var(encode_text(&df.folder, enc))));
+        }
+        let v = value.unwrap_or_default();
+        if id != id::URL || !v.is_empty() {
             ev.push(Event::new(id, Value::var(encode_text(&v, enc))));
         }
     }
+    ev.push(Event::new(id::WORK_TIME, Value::var(work_time_bytes(project.work_time.unwrap_or_else(work_time_now)))));
     // Filter groups and the current filter (spec: flp/events/project-info.md), before the note blocks.
     for name in &project.groups {
         ev.push(Event::new(id::GROUP_NAME, Value::var(encode_text(name, enc))));
@@ -3176,6 +3533,9 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     if !project.groups.is_empty() {
         ev.push(Event::new(id::CURRENT_GROUP, Value::U32(project.current_group.unwrap_or(u32::MAX))));
     }
+    // The initial values: FL writes event 216 in every project, with length 0 when there are none (spec:
+    // ui/settings-choices.md "Advanced: Initialize controls automatically"), after 146.
+    ev.push(Event::new(id::INIT_CONTROLS, Value::var(init_controls_bytes(&project.init_controls, &[]))));
     let mut patterns: Vec<&Pattern> = project.patterns.iter().collect();
     patterns.sort_by_key(|p| p.number);
     for pat in &patterns {
@@ -3206,6 +3566,10 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     }
     if let Some(n) = project.current_arrangement.filter(|_| !project.arrangements.is_empty()) {
         ev.push(Event::new(id::CURRENT_ARRANGEMENT, Value::U16(n)));
+        // Fast declick for cut groups stands after event 100 (spec: flp/engine-events.md "Project").
+        if let Some(on) = project.fast_declick {
+            ev.push(Event::new(id::FAST_DECLICK, Value::U8(u8::from(on))));
+        }
     }
     // The mixer follows the arrangements (spec: flp/events/mixer.md "Where the mixer sits").
     if !project.arrangements.is_empty() && !project.mixer.is_empty() {
@@ -3659,7 +4023,7 @@ mod tests {
             ev.insert(0, Event::new(id::TIME_NUM, Value::U8(6)));
         }
         let p = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
-        assert_eq!((p.time_signature, p.play_truncated), (Some((6, 8)), Some(true)));
+        assert_eq!((p.bar, p.play_truncated), (Some((6, 8)), true));
         let c = &p.channels[0];
         assert_eq!((c.misc.swing, c.misc.root), (0.5, 48));
         // Fine tune (event 142) and the main pitch switch (215 byte 11, cleared here).
@@ -3675,7 +4039,7 @@ mod tests {
         assert_eq!((e.enabled, e.flags, e.lfo_delay, e.lfo_attack, e.lfo_amount, e.lfo_speed, e.lfo_shape), (true, 1, 2000, 3000, -64, 20000, 2));
         // Files without these events keep the defaults.
         let plain = load(&create(&new_project()).unwrap()).unwrap();
-        assert_eq!((plain.time_signature, plain.play_truncated), (None, None));
+        assert_eq!((plain.bar, plain.play_truncated), (None, false));
         assert_eq!((plain.channels[0].misc.swing, plain.channels[0].misc.root, plain.channels[0].sound), (1.0, 60, ChannelSound::default()));
         assert_eq!((plain.channels[0].misc.fine, plain.channels[0].misc.main_pitch), (0, true));
         let m = plain.channels[0].misc;
@@ -4025,7 +4389,8 @@ mod tests {
         apply(&edited, &mut file).unwrap();
         let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
         assert_eq!((again.mixer, again.main_volume, again.main_pitch), (edited.mixer, Some(16000), Some(1200)));
-        // A file without event 80 gets it after the swing (or the tempo) once the main pitch is set.
+        // A file without event 80 gets it where FL writes it once the main pitch is set: behind the tempo and the current
+        // pattern (and a swing) the file has.
         let mut plain = create(&new_project()).unwrap();
         let mut q = load(&plain).unwrap();
         assert_eq!((q.main_pitch, q.main_volume), (None, None));
@@ -4033,8 +4398,450 @@ mod tests {
         apply(&q, &mut plain).unwrap();
         let ev = events_of(&plain).unwrap();
         let at = ev.iter().position(|e| e.id == id::MAIN_PITCH).unwrap();
-        assert_eq!(ev[at - 1].id, id::TEMPO);
+        assert_eq!([ev[at - 2].id, ev[at - 1].id], [id::TEMPO, id::CURRENT_PATTERN]);
         assert_eq!(load(&plain).unwrap().main_pitch, Some(250));
+    }
+
+    /// The initial values (event 216; spec: ui/settings-choices.md "Advanced: Initialize controls automatically",
+    /// flp/engine-events.md "Event 216"): `create` writes the event in every project, empty without values; the records
+    /// read back, one Lemon Studio doesn't understand (a plugin parameter's) byte for byte; the tempo record wins over
+    /// event 156 and a slot's switch and mix records over event 225's; `apply` rewrites the list in place and adds the
+    /// event after 146 to a file without it.
+    #[test]
+    fn initial_values_round_trip() {
+        use os_model::target;
+        use os_model::MixerTrack;
+        // A fresh project: event 216 of length 0.
+        let file = create(&new_project()).unwrap();
+        assert_eq!(event_data(&file, id::INIT_CONTROLS), Some(vec![]));
+        assert!(load(&file).unwrap().init_controls.is_empty());
+
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        p.mixer[2].slots[3] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
+        p.mixer[2].slot_mix[3] = 0.25;
+        p.groups = vec!["Unsorted".into()];
+        let plugin = InitControl { head: 0x0102_0304, target: target::channel_param(1, 7), value: -123_456 };
+        p.init_controls = vec![
+            InitControl { head: 0, target: target::channel(0, target::CHANNEL_VOLUME), value: 10000 },
+            plugin,
+            InitControl { head: 0, target: target::TEMPO, value: 99_500 },
+            InitControl { head: 0, target: target::slot(2, 3, target::SLOT_ON), value: 0 },
+            InitControl { head: 0, target: target::slot(2, 3, target::SLOT_MIX), value: 9600 },
+        ];
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let ev = events_of(&file).unwrap();
+        let at = ev.iter().position(|e| e.id == id::INIT_CONTROLS).unwrap();
+        assert_eq!(ev[at - 1].id, id::CURRENT_GROUP, "after 146");
+        let data = ev[at].data().unwrap();
+        assert_eq!(data.len(), 5 * 12);
+        assert_eq!(data[0..12], [0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x27, 0, 0], "channel 0's volume at 10000");
+        assert_eq!(data[12..24], plugin.to_bytes());
+        let back = load(&file).unwrap();
+        assert_eq!(back.init_controls, p.init_controls);
+        // Event 156 holds 128.5; the initial tempo wins. So do the slot's initial switch and mix level.
+        assert_eq!(int(&ev[ev.iter().position(|e| e.id == id::TEMPO).unwrap()]), 128_500);
+        assert_eq!(back.tempo, Some(99.5));
+        assert_eq!((back.mixer[2].slot_on[3], back.mixer[2].slot_mix[3]), (false, 0.75));
+
+        // Unchanged, the file stays as it is; a changed list is written in place, unknown records kept.
+        let before = file.to_bytes().unwrap();
+        apply(&back, &mut file).unwrap();
+        assert_eq!(file.to_bytes().unwrap(), before);
+        let mut edited = back.clone();
+        edited.init_controls.retain(|c| c.target != target::TEMPO);
+        edited.init_controls[0].value = 6400;
+        apply(&edited, &mut file).unwrap();
+        let again = load(&file).unwrap();
+        assert_eq!(again.init_controls, edited.init_controls);
+        assert_eq!(again.init_controls[1].to_bytes(), plugin.to_bytes());
+        assert_eq!(again.tempo, Some(99.5), "without the record event 156 takes the project's tempo");
+        edited.init_controls.clear();
+        apply(&edited, &mut file).unwrap();
+        assert_eq!(event_data(&file, id::INIT_CONTROLS), Some(vec![]), "an empty list keeps the event, length 0");
+
+        // A file without event 216 gets it after 146 once there is a value.
+        let mut plain = create(&p).unwrap();
+        events_of_mut(&mut plain).unwrap().retain(|e| e.id != id::INIT_CONTROLS);
+        let mut q = load(&plain).unwrap();
+        assert!(q.init_controls.is_empty());
+        apply(&q, &mut plain).unwrap();
+        assert_eq!(event_data(&plain, id::INIT_CONTROLS), None, "nothing to write");
+        q.init_controls = vec![InitControl { head: 0, target: target::mixer(1, target::MIXER_VOLUME), value: 12800 }];
+        apply(&q, &mut plain).unwrap();
+        let ev = events_of(&plain).unwrap();
+        let at = ev.iter().position(|e| e.id == id::INIT_CONTROLS).unwrap();
+        assert_eq!(ev[at - 1].id, id::CURRENT_GROUP);
+        assert_eq!(load(&plain).unwrap().init_controls, q.init_controls);
+    }
+
+    /// The bar (events 17, 18: beats per bar, steps per beat; 18 is not the denominator), its mode (35) and "play
+    /// truncated notes" (30, present only when on) are saved (spec: flp/engine-events.md "Project", "The project
+    /// settings, measured", "Event 30"): `create` writes them where the model has them; `apply` patches them in place in
+    /// a file that has them (an opened project keeps every other event as it was) and removes 30 for off. Both write
+    /// the project settings in FL 26's order ("Order in the file": 156, 67, 9, 11, 80, 17, 18, 35, 23, 44, 30, 10, then
+    /// the information): `apply` adds a missing 11, 80, 17, 18, 35 or 30 behind the last of the settings before it
+    /// that the file has. 40 is read and left as it is; 23 and 44 as long as the model's are the file's
+    /// (`panning_law_round_trips`, `automatic_crossfades_round_trip`).
+    #[test]
+    fn time_settings_and_truncated_notes_round_trip() {
+        const ORDER: [u8; 12] =
+            [id::TEMPO, id::CURRENT_PATTERN, 9, id::SWING, id::MAIN_PITCH, id::TIME_NUM, id::TIME_DEN, id::TIME_MODE, 23, 44, id::PLAY_TRUNCATED, 10];
+        let prelude_ids = |f: &FlpFile, keep: &[u8]| -> Vec<u8> {
+            events_of(f).unwrap().iter().take_while(|e| e.id != id::CH_START).map(|e| e.id).filter(|i| keep.contains(i)).collect()
+        };
+        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        let value_of = |f: &FlpFile, eid: u8| events_of(f).unwrap().iter().take_while(|e| e.id != id::CH_START).find(|e| e.id == eid).map(int);
+        // What Lemon Studio writes, in FL's order: the settings the model has, then the title.
+        let lemon = [
+            id::TEMPO,
+            id::CURRENT_PATTERN,
+            id::SWING,
+            id::MAIN_PITCH,
+            id::TIME_NUM,
+            id::TIME_DEN,
+            id::TIME_MODE,
+            id::PLAY_TRUNCATED,
+            id::TITLE,
+        ];
+        // A new project in 3/8: 17 = 3, 18 = 16 / 8 = 2.
+        let mut p = new_project();
+        (p.bar, p.bar_as_signature, p.play_truncated, p.swing, p.main_pitch) = (Some((3, 2)), Some(true), true, Some(64), Some(100));
+        let file = reparse(&create(&p).unwrap());
+        let back = load(&file).unwrap();
+        assert_eq!((back.bar, back.bar_as_signature, back.play_truncated), (Some((3, 2)), Some(true), true));
+        assert_eq!((back.signature(), back.bar_ticks()), (Some((3, 8)), 144));
+        assert_eq!(prelude_ids(&file, &lemon), lemon);
+        assert_eq!((value_of(&file, id::TIME_NUM), value_of(&file, id::TIME_DEN), value_of(&file, id::PLAY_TRUNCATED)), (Some(3), Some(2), Some(1)));
+        // Off, event 30 is not written at all; a time division of 3 steps per beat keeps its values.
+        let mut off = back.clone();
+        (off.bar, off.bar_as_signature, off.play_truncated) = (Some((5, 3)), Some(false), false);
+        let file = reparse(&create(&off).unwrap());
+        assert_eq!(value_of(&file, id::PLAY_TRUNCATED), None);
+        let back = load(&file).unwrap();
+        assert_eq!((back.bar, back.bar_as_signature, back.play_truncated), (Some((5, 3)), Some(false), false));
+        assert_eq!((back.signature(), back.bar_ticks()), (None, 360), "five beats of three sixteenths");
+
+        // A file laid out as FL 26 writes one: its settings behind the tempo in FL's order, those the model does not
+        // read among them, without the ids in `missing`. Triangular panning (23 = 2), automatic crossfades off (44 = 0).
+        let fl_file = |missing: &[u8]| -> FlpFile {
+            let mut f = create(&Project { current_pattern: None, ..new_project() }).unwrap();
+            let ev = events_of_mut(&mut f).unwrap();
+            let t = ev.iter().position(|e| e.id == id::TEMPO).unwrap();
+            let value = |eid: u8| match eid {
+                id::TIME_NUM | id::TIME_DEN => 4,
+                id::SWING => 64,
+                23 => 2,
+                44 => 0,
+                _ => 1,
+            };
+            for (k, eid) in ORDER[1..].iter().copied().filter(|e| !missing.contains(e)).enumerate() {
+                ev.insert(t + 1 + k, int_event(eid, value(eid)));
+            }
+            reparse(&f)
+        };
+        let fl = fl_file(&[]);
+        assert_eq!(prelude_ids(&fl, &ORDER), ORDER);
+        let before = events_of(&fl).unwrap().clone();
+        let opened = load(&fl).unwrap();
+        assert_eq!((opened.bar, opened.bar_as_signature, opened.play_truncated), (Some((4, 4)), Some(true), true));
+        assert_eq!((opened.panning_law, opened.auto_crossfades, opened.fast_declick), (Some(2), Some(false), None));
+        let mut file = fl.clone();
+        apply(&opened, &mut file).unwrap();
+        assert_eq!(file.to_bytes().unwrap(), fl.to_bytes().unwrap(), "unchanged: byte for byte");
+        // 7/8 and play truncated notes off: 17 and 18 change in place, 30 goes, nothing else moves.
+        let mut edited = opened.clone();
+        (edited.bar, edited.play_truncated) = (Some((7, 2)), false);
+        apply(&edited, &mut file).unwrap();
+        let file = reparse(&file);
+        let after = events_of(&file).unwrap();
+        let kept: Vec<&Event> = before.iter().filter(|e| e.id != id::PLAY_TRUNCATED).collect();
+        assert_eq!(after.len(), kept.len(), "patched in place, 30 removed");
+        for (a, b) in after.iter().zip(kept) {
+            match a.id {
+                id::TIME_NUM => assert_eq!(int(a), 7),
+                id::TIME_DEN => assert_eq!(int(a), 2),
+                _ => assert_eq!(a, b),
+            }
+        }
+        let again = load(&file).unwrap();
+        assert_eq!((again.bar, again.signature(), again.play_truncated), (Some((7, 2)), Some((7, 8)), false));
+        assert_eq!((again.panning_law, again.auto_crossfades), (Some(2), Some(false)), "23 and 44 as they were");
+        // On again: 30 = 1 back in its place. A time division of 3 / 3: 35 = 0 in place, 18 = 3.
+        let mut file = file.clone();
+        let mut on = again.clone();
+        (on.play_truncated, on.bar, on.bar_as_signature) = (true, Some((3, 3)), Some(false));
+        apply(&on, &mut file).unwrap();
+        let file = reparse(&file);
+        assert_eq!(prelude_ids(&file, &ORDER), ORDER);
+        assert_eq!((value_of(&file, id::PLAY_TRUNCATED), value_of(&file, id::TIME_MODE), value_of(&file, id::TIME_DEN)), (Some(1), Some(0), Some(3)));
+        let back = load(&file).unwrap();
+        assert_eq!((back.bar, back.bar_as_signature, back.play_truncated, back.bar_ticks()), (Some((3, 3)), Some(false), true, 216));
+
+        // Missing from such a file, they are added where FL writes them: 11 behind 9 (or 67), 80 behind 11, 17 and 18
+        // behind 80, 35 behind 18 (before 23, 44), 30 behind 44 (before 10), or behind 35 when the file has no 23, 44.
+        let without = |gone: &[u8]| -> Vec<u8> { ORDER.iter().copied().filter(|e| !gone.contains(e)).collect() };
+        let cases: [&[u8]; 9] = [
+            &[id::TIME_NUM, id::TIME_DEN, id::TIME_MODE, id::PLAY_TRUNCATED],
+            &[id::TIME_NUM, id::TIME_DEN],
+            &[id::TIME_MODE],
+            &[id::PLAY_TRUNCATED],
+            &[id::TIME_NUM, id::TIME_DEN, id::TIME_MODE, 23, 44, id::PLAY_TRUNCATED],
+            &[id::SWING, id::MAIN_PITCH],
+            &[id::SWING, id::MAIN_PITCH, id::TIME_NUM, id::TIME_DEN, id::PLAY_TRUNCATED],
+            &[9, id::SWING],
+            &[id::CURRENT_PATTERN, 9, id::SWING, id::MAIN_PITCH, id::TIME_NUM, id::TIME_DEN, id::TIME_MODE, id::PLAY_TRUNCATED],
+        ];
+        for missing in cases {
+            let mut file = fl_file(missing);
+            let mut q = load(&file).unwrap();
+            (q.bar, q.bar_as_signature, q.play_truncated, q.swing, q.main_pitch) = (Some((6, 2)), Some(true), true, Some(64), Some(1));
+            apply(&q, &mut file).unwrap();
+            let file = reparse(&file);
+            let gone: Vec<u8> = missing.iter().copied().filter(|e| [id::CURRENT_PATTERN, 9, 23, 44].contains(e)).collect();
+            assert_eq!(prelude_ids(&file, &ORDER), without(&gone), "missing {missing:?}");
+            let back = load(&file).unwrap();
+            assert_eq!(
+                (back.bar, back.bar_as_signature, back.play_truncated, back.swing, back.main_pitch),
+                (Some((6, 2)), Some(true), true, Some(64), Some(1))
+            );
+        }
+        // A swing or main pitch added to a file with 17 and 18 ahead of the current pattern (as Lemon Studio wrote
+        // them for a while) stays before them.
+        let mut file = fl_file(&[9, id::SWING, id::MAIN_PITCH, id::TIME_MODE, 23, 44, id::PLAY_TRUNCATED, 10]);
+        {
+            let ev = events_of_mut(&mut file).unwrap();
+            let c = ev.iter().position(|e| e.id == id::CURRENT_PATTERN).unwrap();
+            let e = ev.remove(c);
+            ev.insert(c + 2, e);
+        }
+        let mut file = reparse(&file);
+        let mut q = load(&file).unwrap();
+        (q.swing, q.main_pitch) = (Some(32), Some(50));
+        apply(&q, &mut file).unwrap();
+        let file = reparse(&file);
+        assert_eq!(prelude_ids(&file, &ORDER), [id::TEMPO, id::SWING, id::MAIN_PITCH, id::TIME_NUM, id::TIME_DEN, id::CURRENT_PATTERN]);
+        assert_eq!((load(&file).unwrap().swing, load(&file).unwrap().main_pitch), (Some(32), Some(50)));
+
+        // Lemon Studio files without them: settings added in one save keep FL's order (11, 80, 17, 18, 35, 30) behind
+        // the current pattern, before the title, also when the title is added in the same save.
+        let mut p = new_project();
+        (p.swing, p.main_pitch) = (Some(64), Some(100));
+        for start in [new_project(), p, Project { current_pattern: None, info: ProjectInfo::default(), ..new_project() }] {
+            let mut file = create(&start).unwrap();
+            let mut q = load(&file).unwrap();
+            assert_eq!((q.bar, q.bar_as_signature, q.play_truncated), (None, None, false));
+            (q.bar, q.bar_as_signature, q.play_truncated, q.swing, q.main_pitch) = (Some((5, 4)), Some(false), true, Some(32), Some(-100));
+            q.info.title = Some("Song".into());
+            apply(&q, &mut file).unwrap();
+            let file = reparse(&file);
+            let want: Vec<u8> = lemon.iter().copied().filter(|&e| e != id::CURRENT_PATTERN || start.current_pattern.is_some()).collect();
+            assert_eq!(prelude_ids(&file, &lemon), want);
+            let back = load(&file).unwrap();
+            assert_eq!(
+                (back.bar, back.bar_as_signature, back.play_truncated, back.swing, back.main_pitch),
+                (Some((5, 4)), Some(false), true, Some(32), Some(-100))
+            );
+            assert_eq!(back.info.title.as_deref(), Some("Song"));
+        }
+
+        // Fast declick for cut groups (event 40) stands after event 100: read there, kept through a save.
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        (p.current_arrangement, p.fast_declick) = (Some(0), Some(true));
+        let mut file = reparse(&create(&p).unwrap());
+        let ev = events_of(&file).unwrap();
+        let at = ev.iter().position(|e| e.id == id::CURRENT_ARRANGEMENT).unwrap();
+        assert_eq!((ev[at + 1].id, int(&ev[at + 1])), (id::FAST_DECLICK, 1));
+        let mut q = load(&file).unwrap();
+        assert_eq!(q.fast_declick, Some(true));
+        q.tempo = Some(100.0);
+        apply(&q, &mut file).unwrap();
+        assert_eq!(load(&reparse(&file)).unwrap().fast_declick, Some(true));
+    }
+
+    /// Settings > Project ▸ Advanced ▸ Panning law (event 23: 0 Circular, 2 Triangular; spec: flp/engine-events.md
+    /// "Project", "Order in the file"): `create` writes the model's value in FL's order; `apply` patches it where the
+    /// file has it, else adds it behind the last of 156, 67, 9, 11, 80, 17, 18 and 35 the file has (before 44, 30 and
+    /// 10). Circular is written as 0, as FL's default template holds it; a model without one leaves the file as it is.
+    #[test]
+    fn panning_law_round_trips() {
+        const ORDER: [u8; 11] =
+            [id::TEMPO, id::CURRENT_PATTERN, id::SWING, id::MAIN_PITCH, id::TIME_NUM, id::TIME_DEN, id::TIME_MODE, id::PANNING_LAW, id::AUTO_CROSSFADES, id::PLAY_TRUNCATED, id::TITLE];
+        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        let prelude = |f: &FlpFile| -> Vec<(u8, u32)> {
+            events_of(f).unwrap().iter().take_while(|e| e.id != id::CH_START).filter(|e| ORDER.contains(&e.id)).map(|e| (e.id, int(e))).collect()
+        };
+        let ids = |f: &FlpFile| -> Vec<u8> { prelude(f).into_iter().map(|e| e.0).collect() };
+        let law_of = |f: &FlpFile| prelude(f).into_iter().find(|e| e.0 == id::PANNING_LAW).map(|e| e.1);
+        let mut p = new_project();
+        (p.bar, p.bar_as_signature, p.play_truncated, p.auto_crossfades) = (Some((4, 4)), Some(true), true, Some(true));
+        // Written by `create` behind 35, before 44 and 30.
+        p.panning_law = Some(2);
+        let file = reparse(&create(&p).unwrap());
+        assert_eq!(law_of(&file), Some(2));
+        let full = ids(&file);
+        let at = |eid: u8| full.iter().position(|&e| e == eid).unwrap();
+        assert!(at(id::TIME_MODE) + 1 == at(id::PANNING_LAW) && at(id::PANNING_LAW) + 1 == at(id::AUTO_CROSSFADES), "{full:?}");
+        assert_eq!(load(&file).unwrap().panning_law, Some(2));
+        // Patched in place: back to Circular is 0, nothing else moves.
+        let mut q = load(&file).unwrap();
+        q.panning_law = Some(0);
+        let mut patched = file.clone();
+        apply(&q, &mut patched).unwrap();
+        let patched = reparse(&patched);
+        let (a, b) = (events_of(&file).unwrap(), events_of(&patched).unwrap());
+        assert_eq!(a.len(), b.len());
+        assert!(a.iter().zip(b.iter()).all(|(x, y)| if x.id == id::PANNING_LAW { int(y) == 0 } else { x == y }));
+        assert_eq!(load(&patched).unwrap().panning_law, Some(0));
+        // Unchanged: the file stays byte for byte.
+        let mut same = patched.clone();
+        apply(&load(&patched).unwrap(), &mut same).unwrap();
+        assert_eq!(same.to_bytes().unwrap(), patched.to_bytes().unwrap());
+        // Added to a file without it: behind 35, or behind 18 when there is no 35, or behind the current pattern;
+        // always before 44 and 30.
+        for (mode, bar) in [(Some(true), Some((4, 4))), (None, Some((3, 2))), (None, None)] {
+            let mut start = p.clone();
+            (start.panning_law, start.bar_as_signature, start.bar) = (None, mode, bar);
+            let mut file = reparse(&create(&start).unwrap());
+            assert_eq!(law_of(&file), None);
+            let mut q = load(&file).unwrap();
+            q.panning_law = Some(2);
+            apply(&q, &mut file).unwrap();
+            let file = reparse(&file);
+            let want: Vec<u8> = full
+                .iter()
+                .copied()
+                .filter(|&e| (e != id::TIME_MODE || mode.is_some()) && (![id::TIME_NUM, id::TIME_DEN].contains(&e) || bar.is_some()))
+                .collect();
+            assert_eq!(ids(&file), want, "{mode:?} {bar:?}");
+            assert_eq!(load(&file).unwrap().panning_law, Some(2));
+        }
+        // A model without one writes nothing.
+        let mut start = p.clone();
+        start.panning_law = None;
+        let mut file = reparse(&create(&start).unwrap());
+        let mut q = load(&file).unwrap();
+        q.tempo = Some(99.0);
+        apply(&q, &mut file).unwrap();
+        assert_eq!(law_of(&reparse(&file)), None);
+    }
+
+    /// Settings > Project ▸ Playlist ▸ Automatic crossfades (event 44: 1 on, 0 off; spec: flp/engine-events.md "The
+    /// project settings, measured"): `create` writes it behind 23, before 30; `apply` patches it where the file has it
+    /// (off is 0, not a removal), else adds it behind the last of 156, 67, 9, 11, 80, 17, 18, 35 and 23 the file has; a
+    /// model without one leaves the file as it is.
+    #[test]
+    fn automatic_crossfades_round_trip() {
+        const ORDER: [u8; 6] = [id::TIME_NUM, id::TIME_DEN, id::TIME_MODE, id::PANNING_LAW, id::AUTO_CROSSFADES, id::PLAY_TRUNCATED];
+        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        let prelude = |f: &FlpFile| -> Vec<(u8, u32)> {
+            events_of(f).unwrap().iter().take_while(|e| e.id != id::CH_START).filter(|e| ORDER.contains(&e.id)).map(|e| (e.id, int(e))).collect()
+        };
+        let mut p = new_project();
+        (p.bar, p.bar_as_signature, p.panning_law, p.auto_crossfades, p.play_truncated) = (Some((4, 4)), Some(true), Some(0), Some(true), true);
+        let file = reparse(&create(&p).unwrap());
+        assert_eq!(prelude(&file), [(id::TIME_NUM, 4), (id::TIME_DEN, 4), (id::TIME_MODE, 1), (id::PANNING_LAW, 0), (id::AUTO_CROSSFADES, 1), (id::PLAY_TRUNCATED, 1)]);
+        // Off: 0 in place, nothing else moves; unchanged, byte for byte.
+        let mut q = load(&file).unwrap();
+        assert_eq!(q.auto_crossfades, Some(true));
+        q.auto_crossfades = Some(false);
+        let mut off = file.clone();
+        apply(&q, &mut off).unwrap();
+        let off = reparse(&off);
+        let (a, b) = (events_of(&file).unwrap(), events_of(&off).unwrap());
+        assert!(a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| if x.id == id::AUTO_CROSSFADES { int(y) == 0 } else { x == y }));
+        assert_eq!(load(&off).unwrap().auto_crossfades, Some(false));
+        let mut same = off.clone();
+        apply(&load(&off).unwrap(), &mut same).unwrap();
+        assert_eq!(same.to_bytes().unwrap(), off.to_bytes().unwrap());
+        // Added where it is missing: behind 23, or 35, or 18, always before 30.
+        for (law, mode) in [(Some(0), Some(true)), (None, Some(true)), (None, None)] {
+            let mut start = p.clone();
+            (start.auto_crossfades, start.panning_law, start.bar_as_signature) = (None, law, mode);
+            let mut file = reparse(&create(&start).unwrap());
+            let mut q = load(&file).unwrap();
+            assert_eq!(q.auto_crossfades, None);
+            q.auto_crossfades = Some(true);
+            apply(&q, &mut file).unwrap();
+            let file = reparse(&file);
+            let ids: Vec<u8> = prelude(&file).into_iter().map(|e| e.0).collect();
+            let want: Vec<u8> = ORDER.iter().copied().filter(|&e| (e != id::PANNING_LAW || law.is_some()) && (e != id::TIME_MODE || mode.is_some())).collect();
+            assert_eq!(ids, want, "{law:?} {mode:?}");
+            assert_eq!(load(&file).unwrap().auto_crossfades, Some(true));
+        }
+        // A model without one writes nothing.
+        let mut start = p.clone();
+        start.auto_crossfades = None;
+        let mut file = reparse(&create(&start).unwrap());
+        let mut q = load(&file).unwrap();
+        q.tempo = Some(99.0);
+        apply(&q, &mut file).unwrap();
+        assert!(!prelude(&reparse(&file)).iter().any(|e| e.0 == id::AUTO_CROSSFADES));
+    }
+
+    /// Settings > Project ▸ Timebase (PPQ): the header's PPQ and every tick count of the project change together;
+    /// automation clip data (beats) does not (spec: flp/engine-events.md "The project settings, measured",
+    /// ui/settings-choices.md "Project"). A ratio that is not whole rounds to the nearest tick.
+    #[test]
+    fn timebase_change_rescales_and_saves() {
+        let mut p = new_project();
+        p.patterns[0].notes = vec![Note { length: 50, ..Note::step(0, 48) }, Note { length: 1, ..Note::step(1, 7) }, Note::step(1, 0)];
+        p.patterns[0].length = Some(384);
+        p.patterns[0].markers = vec![TimeMarker::new(192, "Mid")];
+        let mut arr = default_arrangement();
+        let mut c = Clip::new(384, 288, 0, ClipSource::Pattern(2));
+        c.window = Some((96.0, 384.0));
+        arr.clips.push(c);
+        arr.clips.push(Clip::new(0, 384, 1, ClipSource::Channel(2)));
+        arr.markers.push(TimeMarker::new(768, "Verse"));
+        p.arrangements.push(arr);
+        let mut auto_ch = sampler(2, "Kick - Channel volume", 0);
+        auto_ch.kind = ChannelKind::Automation;
+        p.channels.push(auto_ch);
+        p.automations.push(new_automation(2, os_model::target::channel(0, 0), 0.5, 4.0));
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let opened = load(&file).unwrap();
+
+        let mut doubled = opened.clone();
+        doubled.set_ppq(192);
+        let n = &doubled.patterns.iter().find(|p| p.number == 2).unwrap();
+        assert_eq!(n.notes.iter().map(|x| (x.position, x.length)).collect::<Vec<_>>(), [(0, 0), (14, 2), (96, 100)]);
+        assert_eq!((n.length, n.markers[0].position, n.controls[0].position), (Some(768), 384, 0));
+        let a = &doubled.arrangements[0];
+        let pc = a.clips.iter().find(|c| c.source == ClipSource::Pattern(2)).unwrap();
+        assert_eq!((pc.position, pc.length, pc.window), (768, 576, Some((192.0, 768.0))));
+        let ac = a.clips.iter().find(|c| c.source == ClipSource::Channel(2)).unwrap();
+        assert_eq!((ac.position, ac.length, ac.window), (0, 768, None));
+        assert_eq!(a.markers[0].position, 1536);
+        assert_eq!(doubled.automations, opened.automations, "automation data stays");
+
+        apply(&doubled, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(file.header().unwrap().ppq(), Some(192));
+        let back = load(&file).unwrap();
+        assert_eq!(back.ppq, 192);
+        assert_eq!(back.patterns, doubled.patterns);
+        assert_eq!(back.automations, opened.automations);
+        let strip = |v: &[Clip]| {
+            let mut v: Vec<_> = v.iter().map(|c| (c.position, c.length, c.track, c.source, c.window)).collect();
+            v.sort_by_key(|c| (c.0, c.2));
+            v
+        };
+        assert_eq!(strip(&back.arrangements[0].clips), strip(&doubled.arrangements[0].clips));
+        assert_eq!(back.arrangements[0].markers, doubled.arrangements[0].markers);
+
+        // 96 to 72: three quarters, to the nearest tick; a length that was not 0 stays at least 1.
+        let mut q = opened.clone();
+        q.set_ppq(72);
+        let n = &q.patterns.iter().find(|p| p.number == 2).unwrap();
+        assert_eq!(n.notes.iter().map(|x| (x.position, x.length)).collect::<Vec<_>>(), [(0, 0), (5, 1), (36, 38)]);
+        // And back: whole ratios are exact.
+        let mut r = doubled.clone();
+        r.set_ppq(96);
+        assert_eq!((r.patterns.clone(), r.arrangements[0].markers.clone()), (opened.patterns.clone(), opened.arrangements[0].markers.clone()));
     }
 
     /// A 5-byte track record (FL 10 / 11) holds no flags: the track reads as on, unswapped, slots enabled; an edit turns
@@ -4385,6 +5192,46 @@ mod tests {
         }
     }
 
+    /// Automatic crossfades are two ordinary fades in the clip records, written without their bits (spec:
+    /// flp/events/playlist.md bytes 36..56, audio/audio-clips.md "Automatic crossfades"): with event 44 on, the
+    /// records' bytes 36..57 come back as written (the bits clear on a crossfade, set on a fade set by hand, other bits
+    /// kept) through a new file, through the crossfades worked out again from what was read, and through edits.
+    #[test]
+    fn crossfade_fades_keep_their_bytes() {
+        let mut p = new_project();
+        (p.auto_crossfades, p.tempo) = (Some(true), Some(130.0));
+        let mut tone = sampler(2, "Tone", 0);
+        tone.kind = ChannelKind::AudioClip;
+        tone.sample_path = Some("C:/samples/tone.wav".into());
+        p.channels.push(tone);
+        let src = ClipSource::Channel(2);
+        let (mut a, mut b, mut c) = (Clip::new(0, 480, 0, src), Clip::new(240, 480, 0, src), Clip::new(2000, 480, 0, src));
+        // A crossfade as FL writes one (240 ticks at 130 BPM, PPQ 96; tensions 2.289 / -2.289; no bits), and a fade set
+        // by hand.
+        a.set_fade_out_length(1153.846);
+        a.set_fade_out_tension(-2.289);
+        b.set_fade_in_length(1153.846);
+        b.set_fade_in_tension(2.289);
+        c.set_fade_in(Some((300.0, -1.5)));
+        c.raw[56] |= 0x08;
+        let mut arr = default_arrangement();
+        arr.clips = vec![a, b, c];
+        p.arrangements.push(arr);
+        let bytes = |p: &Project| p.arrangements[0].clips.iter().map(|c| c.raw[36..57].to_vec()).collect::<Vec<_>>();
+        let want = bytes(&p);
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let mut back = load(&file).unwrap();
+        assert_eq!(back.auto_crossfades, Some(true));
+        assert_eq!(bytes(&back), want, "through a new file");
+        assert!(!os_model::crossfade::derive(&mut back, 130.0), "worked out again: nothing to change");
+        assert_eq!(bytes(&back), want);
+        back.arrangements[0].clips[2].position = 2400;
+        apply(&back, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(bytes(&again), want, "through edits");
+        assert_eq!(again.arrangements[0].clips.iter().map(|c| c.raw[56]).collect::<Vec<_>>(), [0, 0, 9]);
+    }
+
     /// The playlist view (event 242: scroll, time zoom, track height) sits before event 100, reads back and takes
     /// edits; a file without one gets it (spec: flp/events/playlist.md "Playlist view").
     #[test]
@@ -4503,6 +5350,267 @@ mod tests {
         let back2 = load(&FlpFile::parse(&file2.to_bytes().unwrap()).unwrap()).unwrap();
         assert_eq!(back2, cleared);
         assert!(!events_of(&file2).unwrap().iter().any(|e| e.id == id::CH_ZIPPED || e.id == id::LOOP_CHANNEL));
+    }
+
+    /// The payload of the first event `eid` in `file`.
+    fn event_data(file: &FlpFile, eid: u8) -> Option<Vec<u8>> {
+        events_of(file).unwrap().iter().find(|e| e.id == eid).and_then(Event::data).map(<[u8]>::to_vec)
+    }
+
+    fn utf16z(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_le_bytes).chain([0, 0]).collect()
+    }
+
+    /// Title, genre, author, comments and URL edited in a saved file: `create` writes the empty ones empty (the URL not
+    /// at all), a changed text is patched, a missing one is added in FL's order, comments keep single-CR line breaks, the
+    /// text is UTF-16LE; the same model again writes nothing; a cleared field keeps its event, written empty, and reads
+    /// back as no value; an empty one the file lacks gets none (spec: flp/events/project-info.md, flp/container.md "Text
+    /// payloads").
+    #[test]
+    fn project_info_round_trips() {
+        let mut file = FlpFile::parse(&create(&new_project()).unwrap().to_bytes().unwrap()).unwrap();
+        assert_eq!(event_data(&file, id::AUTHOR), Some(vec![0, 0]), "an empty field is written empty");
+        assert_eq!(event_data(&file, id::URL), None, "an empty URL is not written");
+        assert_eq!(load(&file).unwrap().info.author, None, "an empty field reads as no value");
+        let mut m = load(&file).unwrap();
+        m.info = ProjectInfo {
+            title: Some("Ünïcode Ω title".into()),
+            author: Some("Me".into()),
+            genre: Some("Ambient".into()),
+            comments: Some("First line\nSecond line\n\nLast".into()),
+            url: Some("https://example.org/song".into()),
+        };
+        apply(&m, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back, m);
+        assert_eq!(event_data(&file, id::TITLE), Some(utf16z("Ünïcode Ω title")));
+        assert_eq!(event_data(&file, id::COMMENTS), Some(utf16z("First line\rSecond line\r\rLast")));
+        let ids: Vec<u8> = events_of(&file).unwrap().iter().map(|e| e.id).collect();
+        let at = ids.iter().position(|&i| i == id::TITLE).unwrap();
+        assert_eq!(ids[at - 1], id::CURRENT_PATTERN);
+        assert_eq!(ids[at..at + 6], [id::TITLE, id::GENRE, id::AUTHOR, id::COMMENTS, id::URL, id::WORK_TIME]);
+        let mut again = file.clone();
+        apply(&back, &mut again).unwrap();
+        assert_eq!(again.to_bytes().unwrap(), file.to_bytes().unwrap(), "an unchanged model writes nothing");
+
+        let mut cleared = back.clone();
+        cleared.info.title = None;
+        cleared.info.comments = Some(String::new());
+        let mut file2 = file.clone();
+        apply(&cleared, &mut file2).unwrap();
+        assert_eq!((event_data(&file2, id::TITLE), event_data(&file2, id::COMMENTS)), (Some(vec![0, 0]), Some(vec![0, 0])));
+        let back2 = load(&FlpFile::parse(&file2.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!((back2.info.title.as_deref(), back2.info.comments.as_deref()), (None, None));
+        assert_eq!(back2.info.author.as_deref(), Some("Me"));
+
+        // A file without any of them: an empty field adds nothing, a filled one goes after the current pattern.
+        let mut bare = new_project();
+        bare.info = ProjectInfo::default();
+        let mut file3 = create(&bare).unwrap();
+        events_of_mut(&mut file3).unwrap().retain(|e| ![id::TITLE, id::GENRE, id::AUTHOR, id::COMMENTS, id::WORK_TIME].contains(&e.id));
+        let mut m3 = load(&file3).unwrap();
+        m3.info.genre = Some(String::new());
+        m3.info.url = Some("https://example.org".into());
+        apply(&m3, &mut file3).unwrap();
+        let ids: Vec<u8> = events_of(&file3).unwrap().iter().map(|e| e.id).collect();
+        assert!(!ids.contains(&id::GENRE));
+        assert_eq!(ids[ids.iter().position(|&i| i == id::URL).unwrap() - 1], id::CURRENT_PATTERN);
+        assert_eq!(load(&file3).unwrap().info.url.as_deref(), Some("https://example.org"));
+    }
+
+    /// Files saved by FL 11 and older hold 8-bit text (spec: flp/container.md "Text payloads").
+    #[test]
+    fn project_info_is_8_bit_in_old_files() {
+        let mut p = new_project();
+        p.info = ProjectInfo::default();
+        let mut file = create(&p).unwrap();
+        for e in events_of_mut(&mut file).unwrap() {
+            if e.id == id::VERSION {
+                e.value = Value::var(b"11.1.1\0".to_vec());
+            }
+        }
+        let mut m = load(&file).unwrap();
+        m.info.title = Some("Café".into());
+        m.info.comments = Some("a\nb".into());
+        apply(&m, &mut file).unwrap();
+        assert_eq!(event_data(&file, id::TITLE), Some(b"Caf\xe9\0".to_vec()));
+        assert_eq!(event_data(&file, id::COMMENTS), Some(b"a\rb\0".to_vec()));
+        assert_eq!(load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap().info, m.info);
+    }
+
+    /// FL 26 writes the project information as 194, 206, 207, 167, 202, 195, [197], 237, the four texts empty in a new
+    /// project: an unchanged model keeps them byte for byte, an added comment or URL goes in that order (after 207,
+    /// 167 and 202, before 237), and a cleared URL loses its event (spec: flp/engine-events.md "Order in the file",
+    /// flp/events/project-info.md "Writer notes").
+    #[test]
+    fn project_info_keeps_fl_order() {
+        const INFO: [u8; 8] = [id::TITLE, id::GENRE, id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::URL, id::WORK_TIME];
+        // A file holding `ids` of the project information, as FL writes them, behind the project events.
+        let fl_file = |ids: &[u8]| {
+            let mut p = new_project();
+            p.info = ProjectInfo::default();
+            let mut file = create(&p).unwrap();
+            let ev = events_of_mut(&mut file).unwrap();
+            ev.retain(|e| !INFO.contains(&e.id));
+            let at = ev.iter().position(|e| e.id == id::CURRENT_PATTERN).unwrap() + 1;
+            let info = ids.iter().map(|&eid| match eid {
+                id::INFO_167 => Event::new(eid, Value::U32(2)),
+                id::INFO_202 => Event::new(eid, Value::var(utf16z("C:\\Data\\"))),
+                id::WORK_TIME => Event::new(eid, Value::var(vec![7; 16])),
+                _ => Event::new(eid, Value::var(utf16z(""))),
+            });
+            ev.splice(at..at, info);
+            FlpFile::parse(&file.to_bytes().unwrap()).unwrap()
+        };
+        let info_ids = |file: &FlpFile| -> Vec<u8> { events_of(file).unwrap().iter().map(|e| e.id).filter(|i| INFO.contains(i)).collect() };
+        let saved = |m: &Project, file: &FlpFile| {
+            let mut out = file.clone();
+            apply(m, &mut out).unwrap();
+            FlpFile::parse(&out.to_bytes().unwrap()).unwrap()
+        };
+        let new_fl = [id::TITLE, id::GENRE, id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::WORK_TIME];
+
+        // A new FL project: the empty texts load as no value and stay as they are.
+        let file = fl_file(&new_fl);
+        let m = load(&file).unwrap();
+        assert_eq!((m.info.title.as_deref(), m.info.comments.as_deref(), m.info.url.as_deref()), (None, None, None));
+        assert_eq!(saved(&m, &file).to_bytes().unwrap(), file.to_bytes().unwrap());
+
+        // A URL goes behind the comments, before 237; the other texts stay empty.
+        let mut m2 = m.clone();
+        m2.info.url = Some("https://example.org".into());
+        m2.info.title = Some("Song".into());
+        let f2 = saved(&m2, &file);
+        assert_eq!(info_ids(&f2), [id::TITLE, id::GENRE, id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::URL, id::WORK_TIME]);
+        assert_eq!((event_data(&f2, id::GENRE), event_data(&f2, id::COMMENTS)), (Some(vec![0, 0]), Some(vec![0, 0])));
+        assert_eq!(load(&f2).unwrap().info, m2.info);
+
+        // Cleared again: 197 goes, the others stay.
+        let mut m3 = m2.clone();
+        m3.info.url = None;
+        let f3 = saved(&m3, &f2);
+        assert_eq!(info_ids(&f3), new_fl);
+        assert_eq!(load(&f3).unwrap().info, m3.info);
+
+        // Without 195: added comments and a URL go behind 202, before 237.
+        let file = fl_file(&[id::TITLE, id::GENRE, id::AUTHOR, id::INFO_167, id::INFO_202, id::WORK_TIME]);
+        let mut m4 = load(&file).unwrap();
+        m4.info.comments = Some("a\nb".into());
+        m4.info.url = Some("u".into());
+        let f4 = saved(&m4, &file);
+        assert_eq!(info_ids(&f4), [id::TITLE, id::GENRE, id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::URL, id::WORK_TIME]);
+        assert_eq!(load(&f4).unwrap().info, m4.info);
+
+        // With only 237: a title goes before it.
+        let file = fl_file(&[id::WORK_TIME]);
+        let mut m5 = load(&file).unwrap();
+        m5.info.title = Some("T".into());
+        assert_eq!(info_ids(&saved(&m5, &file)), [id::TITLE, id::WORK_TIME]);
+    }
+
+    /// The data folder (events 167, 202; spec: ui/data-folder.md §2): read as the file holds it, an unchanged model
+    /// writes nothing, a changed one is patched in place, and one the file lacks goes between the author and the
+    /// comments; `create` writes it there when the model has one, and nothing without.
+    #[test]
+    fn data_folder_round_trips() {
+        let info_ids = |file: &FlpFile| -> Vec<u8> {
+            let keep = [id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::WORK_TIME];
+            events_of(file).unwrap().iter().map(|e| e.id).filter(|i| keep.contains(i)).collect()
+        };
+        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        // Without one: `create` writes neither event; the model has none.
+        let file = reparse(&create(&new_project()).unwrap());
+        assert_eq!(info_ids(&file), [id::AUTHOR, id::COMMENTS, id::WORK_TIME]);
+        let mut m = load(&file).unwrap();
+        assert_eq!(m.data_folder, None);
+        // Choosing "Don't use a data folder" explicitly adds nothing.
+        m.data_folder = Some(DataFolder::default());
+        let mut same = file.clone();
+        apply(&m, &mut same).unwrap();
+        assert_eq!(same.to_bytes().unwrap(), file.to_bytes().unwrap());
+        // A specified folder goes between the author and the comments, 202 as UTF-16 text with its backslash.
+        m.data_folder = Some(DataFolder { choice: DataFolder::SPECIFIED, folder: "C:\\Songs\\My song\\".into() });
+        let mut f2 = file.clone();
+        apply(&m, &mut f2).unwrap();
+        let f2 = reparse(&f2);
+        assert_eq!(info_ids(&f2), [id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::WORK_TIME]);
+        assert_eq!(event_data(&f2, id::INFO_202), Some(utf16z("C:\\Songs\\My song\\")));
+        let back = load(&f2).unwrap();
+        assert_eq!(back.data_folder, m.data_folder);
+        let mut again = f2.clone();
+        apply(&back, &mut again).unwrap();
+        assert_eq!(again.to_bytes().unwrap(), f2.to_bytes().unwrap(), "an unchanged model writes nothing");
+        // Patched in place: relative, its folder rewritten; then none, 202 empty (just the terminator).
+        let mut m3 = back.clone();
+        m3.data_folder = Some(DataFolder { choice: DataFolder::RELATIVE, folder: "D:\\Elsewhere\\".into() });
+        let mut f3 = f2.clone();
+        apply(&m3, &mut f3).unwrap();
+        assert_eq!(events_of(&f3).unwrap().len(), events_of(&f2).unwrap().len());
+        assert_eq!(load(&reparse(&f3)).unwrap().data_folder, m3.data_folder);
+        m3.data_folder = Some(DataFolder::default());
+        apply(&m3, &mut f3).unwrap();
+        assert_eq!(event_data(&f3, id::INFO_202), Some(vec![0, 0]));
+        assert_eq!(load(&reparse(&f3)).unwrap().data_folder, Some(DataFolder::default()));
+        // `create` with one: in FL's order, and read back.
+        let mut p = new_project();
+        p.data_folder = Some(DataFolder { choice: DataFolder::RELATIVE, folder: "C:\\Work\\".into() });
+        let f4 = reparse(&create(&p).unwrap());
+        assert_eq!(info_ids(&f4), [id::AUTHOR, id::INFO_167, id::INFO_202, id::COMMENTS, id::WORK_TIME]);
+        assert_eq!(load(&f4).unwrap().data_folder, p.data_folder);
+    }
+
+    /// Event 237 (start and time spent, two doubles in days) and event 10 (show info on opening): `create` writes the
+    /// model's, or now and 0, and 10 behind 30; they read back; `apply` patches them in place, or adds them where FL
+    /// writes them: 10 behind the project events, 237 behind the texts (spec: flp/events/project-info.md,
+    /// flp/engine-events.md "Order in the file").
+    #[test]
+    fn work_time_and_show_info_round_trip() {
+        let w = WorkTime { started: 42_139.675_694_444_4, spent: 6.122_916_666_7 };
+        let mut p = new_project();
+        p.play_truncated = true;
+        p.work_time = Some(w);
+        p.show_info = Some(true);
+        let file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let m = load(&file).unwrap();
+        assert_eq!((m.work_time, m.show_info), (Some(w), Some(true)));
+        let mut bytes = w.started.to_le_bytes().to_vec();
+        bytes.extend(w.spent.to_le_bytes());
+        assert_eq!(event_data(&file, id::WORK_TIME), Some(bytes));
+        let ids: Vec<u8> = events_of(&file).unwrap().iter().map(|e| e.id).collect();
+        let at = ids.iter().position(|&i| i == id::SHOW_INFO).unwrap();
+        assert_eq!((ids[at - 1], ids[at + 1]), (id::PLAY_TRUNCATED, id::TITLE));
+
+        // Without a start in the model: now, nothing spent.
+        p.work_time = None;
+        let started = load(&create(&p).unwrap()).unwrap().work_time.expect("written");
+        assert_eq!(started.spent, 0.0);
+        assert!((started.started - work_time_now().started).abs() < 1.0 / 24.0, "{started:?}");
+
+        // Patched in place.
+        let mut m2 = m.clone();
+        m2.work_time = Some(WorkTime { spent: 0.0, ..w });
+        m2.show_info = Some(false);
+        let mut f2 = file.clone();
+        apply(&m2, &mut f2).unwrap();
+        assert_eq!(events_of(&f2).unwrap().len(), events_of(&file).unwrap().len());
+        let back = load(&FlpFile::parse(&f2.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!((back.work_time, back.show_info), (m2.work_time, Some(false)));
+
+        // Added to a file without them.
+        let mut f3 = file.clone();
+        events_of_mut(&mut f3).unwrap().retain(|e| e.id != id::SHOW_INFO && e.id != id::WORK_TIME);
+        let mut m3 = load(&f3).unwrap();
+        assert_eq!((m3.work_time, m3.show_info), (None, None));
+        m3.work_time = Some(w);
+        m3.show_info = Some(true);
+        m3.info.url = Some("https://example.org".into());
+        apply(&m3, &mut f3).unwrap();
+        let f3 = FlpFile::parse(&f3.to_bytes().unwrap()).unwrap();
+        let ids: Vec<u8> = events_of(&f3).unwrap().iter().map(|e| e.id).collect();
+        let at = ids.iter().position(|&i| i == id::SHOW_INFO).unwrap();
+        assert_eq!(ids[at - 1..at + 7], [id::PLAY_TRUNCATED, id::SHOW_INFO, id::TITLE, id::GENRE, id::AUTHOR, id::COMMENTS, id::URL, id::WORK_TIME]);
+        assert_eq!(load(&f3).unwrap(), m3);
     }
 
     /// A pattern's own time markers (piano-roll Alt+T) are marker groups in its metadata block, sorted by position

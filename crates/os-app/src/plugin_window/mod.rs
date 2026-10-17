@@ -28,7 +28,7 @@ use os_ui::{Canvas, Color, Font, Rect};
 #[cfg(windows)]
 mod win32;
 #[cfg(windows)]
-pub use win32::{default_position, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow};
+pub use win32::{default_position, first_position, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow};
 
 #[cfg(target_os = "linux")]
 mod x11;
@@ -42,6 +42,22 @@ pub use x11::{
 mod cocoa;
 #[cfg(target_os = "macos")]
 pub use cocoa::{default_position, lift_hide, lift_show, pointer, row_window_at, screen_to_main, stack, take_exposed, take_keys, take_lift_input, FrameWindow};
+
+/// Where a detached window opening for the first time goes: where a new window opens. Only Windows places it by
+/// monitor (Settings "Open detached plugins with the main window"; spec: ui/settings-choices.md "Miscellaneous:
+/// naming, detached plugins and startup").
+#[cfg(not(windows))]
+pub fn first_position(owner: isize, scale: f32, _with_main: bool) -> (i32, i32) {
+    default_position(owner, scale)
+}
+
+/// Point `p` on a monitor whose work area is `from` ([left, top, right, bottom], screen px) moved to the same place in
+/// work area `to`, kept inside it with at least `keep` px of the window left on screen.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn moved_to(p: (i32, i32), from: [i32; 4], to: [i32; 4], keep: (i32, i32)) -> (i32, i32) {
+    let (x, y) = (to[0] + p.0 - from[0], to[1] + p.1 - from[1]);
+    (x.min(to[2] - keep.0).max(to[0]), y.min(to[3] - keep.1).max(to[1]))
+}
 
 /// A message a Lemon plugin's editor sent to its frame (host link, plugin -> host).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -943,6 +959,18 @@ mod tests {
     fn state(strip: bool, target: &str) -> State {
         let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, misc: Some(Default::default()) };
         State { strip, ..State::new(info, (480.0, 270.0), false) }
+    }
+
+    /// "Open detached plugins with the main window": a detached window opening for the first time keeps its place
+    /// relative to the monitor it would open on, moved to the chosen monitor and kept on it (spec:
+    /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
+    #[test]
+    fn first_detached_window_moves_between_monitors() {
+        let primary = [0, 0, 1920, 1040];
+        let second = [1920, -200, 4480, 1240];
+        assert_eq!(moved_to((2340, -40), second, second, (200, 100)), (2340, -40), "the same monitor: unchanged");
+        assert_eq!(moved_to((2340, -40), second, primary, (200, 100)), (420, 160));
+        assert_eq!(moved_to((4400, 1200), second, primary, (200, 100)), (1720, 940), "kept on the smaller monitor");
     }
 
     #[test]

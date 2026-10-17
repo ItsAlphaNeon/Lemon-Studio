@@ -224,7 +224,7 @@ fn project(samples: &Path) -> Project {
         arrangements: vec![arr],
         current_arrangement: Some(0),
         automations: vec![cutoff, swell],
-        time_signature: Some((4, 4)),
+        bar: Some((4, 4)),
         playlist_view: Some(view),
         ..Default::default()
     }

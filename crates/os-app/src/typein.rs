@@ -157,7 +157,10 @@ fn get(s: &State, t: Target) -> Option<f64> {
 
 fn set(s: &mut State, t: Target, v: f64) {
     match t {
-        Target::Knob(k) => s.set_knob(k, v as f32),
+        Target::Knob(k) => {
+            crate::history::knob(s, k, false);
+            s.set_knob(k, v as f32);
+        }
         Target::Fader(m) => {
             if let Some(t) = crate::mixer::track_mut(s, m) {
                 t.volume = Some(v.clamp(0.0, 1.0));

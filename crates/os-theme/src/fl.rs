@@ -24,6 +24,19 @@ pub struct Surface {
 /// The stock "Dark" theme: Lemon Studio's default palette was measured in it.
 pub const DARK: Surface = Surface { hue: 0.0, saturation: 0.0, lightness: -153.0, contrast: -8.0 };
 
+/// No adjustment (every parameter 0): surfaces stay in FL's base palette (spec §4, §5).
+pub const BASE: Surface = Surface { hue: 0.0, saturation: 0.0, lightness: 0.0, contrast: 0.0 };
+
+/// With Light mode off, step button faces are their Light mode faces this much darker (mixed toward black): half, a fit
+/// to the stock Dark theme's unlit step #323a3e -> #191d1f and red group step #734b4d -> #3a2626 (spec:
+/// ui/settings-choices.md "Light mode and clip note colours").
+pub const STEP_DARKER: f32 = 0.5;
+
+/// The stock Dark theme's file text (its key colours; what Lemon Studio's default palette was measured with). A theme
+/// file without `Lightmode` has Light mode on, as FL's stock files have it.
+pub const DARK_TEXT: &str = "Hue=0\nSaturation=0\nLightness=-153\nContrast=-8\nText=0\nSelected=11068490\nHighlight=-12283141\n\
+     Mute=577656\nOption=-14135064\nStepEven=-13357016\nStepOdd=-12764317\nTextColor=-3551277\nBackMode=2\n";
+
 impl Surface {
     fn tc(&self) -> (f32, f32) {
         ((self.lightness / 255.0).clamp(-1.0, 1.0), (self.contrast / 100.0).clamp(-1.0, 1.0))
@@ -85,6 +98,8 @@ pub struct FlTheme {
     pub light_mode: bool,
     pub override_clips: bool,
     pub meters: Vec<Color>,
+    /// The Waves gradient, (`WaveSpc`i, `WaveClr`i) for each i in 0..6 that has both, sorted by position (§3).
+    pub waves: Vec<(f32, Color)>,
     pub note_colors: Vec<Color>,
     /// (colour, custom flag, contrast %) for piano roll, playlist, event editor.
     pub pr_grid: (Color, bool, f32),
@@ -126,6 +141,9 @@ impl FlTheme {
             )
         };
         let list = |p: &str, n: usize| (0..n).map_while(|i| col(&format!("{p}{i}"))).collect::<Vec<_>>();
+        let mut waves: Vec<(f32, Color)> =
+            (0..6).filter_map(|i| Some((num(&format!("wavespc{i}"))? as f32, col(&format!("waveclr{i}"))?))).collect();
+        waves.sort_by(|a, b| a.0.total_cmp(&b.0));
         FlTheme {
             surface: Surface {
                 hue: num("hue").unwrap_or(0.0) as f32,
@@ -141,9 +159,11 @@ impl FlTheme {
             option: col("option"),
             step_even: col("stepeven"),
             step_odd: col("stepodd"),
-            light_mode: num("lightmode").unwrap_or(0.0) != 0.0,
+            // A file without the key has Light mode on (FL's stock files hold Lightmode=1; spec §3).
+            light_mode: num("lightmode").unwrap_or(1.0) != 0.0,
             override_clips: num("overrideclips").unwrap_or(0.0) != 0.0,
             meters: list("meter", 6),
+            waves,
             note_colors: list("notecolor", 16),
             pr_grid: grid("pr"),
             pl_grid: grid("pl"),
@@ -156,11 +176,36 @@ impl FlTheme {
 
     /// The stock Dark theme's key colours (what Lemon Studio's default palette was measured with).
     pub fn dark() -> FlTheme {
-        FlTheme::parse(
-            "Hue=0\nSaturation=0\nLightness=-153\nContrast=-8\nText=0\nSelected=11068490\nHighlight=-12283141\n\
-             Mute=577656\nOption=-14135064\nStepEven=-13357016\nStepOdd=-12764317\nTextColor=-3551277\nBackMode=2\n",
-        )
+        FlTheme::parse(DARK_TEXT)
     }
+
+    /// The surface adjustment the theme applies: its own with Light mode on; with it off none, so surfaces stay in the
+    /// base palette (spec §4; ui/settings-choices.md "Light mode and clip note colours").
+    pub fn applied_surface(&self) -> Surface {
+        if self.light_mode { self.surface } else { BASE }
+    }
+}
+
+/// `text` (a `.flstheme` file) with `key` set to `value`: its line rewritten in place, or added at the end; the rest of
+/// the file is kept as it was (toggling a theme option rewrites only its own key, spec: ui/settings-choices.md "Light
+/// mode and clip note colours").
+pub fn set_key(text: &str, key: &str, value: &str) -> String {
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut lines: Vec<String> = text.split(nl).map(String::from).collect();
+    let mut found = false;
+    for line in &mut lines {
+        let bom = if line.starts_with('\u{feff}') { "\u{feff}" } else { "" };
+        if line.trim_start_matches('\u{feff}').split_once('=').is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case(key)) {
+            *line = format!("{bom}{key}={value}");
+            found = true;
+        }
+    }
+    if !found {
+        // Before the final line break, if the file ends with one.
+        let at = lines.len() - usize::from(lines.last().is_some_and(String::is_empty));
+        lines.insert(at, format!("{key}={value}"));
+    }
+    lines.join(nl)
 }
 
 /// What a token is coloured by (spec §3).
@@ -292,30 +337,35 @@ pub fn palette(th: &FlTheme) -> Palette {
     let dark = FlTheme::dark();
     let base = Palette::default();
     let mut out = base.clone();
+    // Light mode off skips the theme's surface adjustment (spec §4).
+    let surface = th.applied_surface();
     let pair = |from: Option<Color>, to: Option<Color>| match (from, to) {
         (Some(f), Some(t)) if f != t => Some((f, t)),
         _ => None,
     };
     out.xf = Xform {
         design: None,
-        surf: (th.surface != DARK).then_some(th.surface),
+        surf: (surface != DARK).then_some(surface),
         accent: pair(dark.selected, th.selected),
         highlight: pair(dark.highlight, th.highlight),
         text: pair(dark.text_color, th.text_color),
         mute: pair(dark.mute, th.mute),
     };
-    let surf = |c: Color| th.surface.apply(DARK.invert(c));
-    let identity = th.surface == DARK;
+    let surf = |c: Color| surface.apply(DARK.invert(c));
+    let identity = surface == DARK;
     let key = |c: Color, from: Option<Color>, to: Option<Color>| match (from, to) {
         (Some(f), Some(t)) if f != t => rekey(c, f, t),
         _ => c,
     };
     // Step faces: the step key colour blended 40 % toward the rack panel surface (§3; fits Dark and NightGold).
     let panel_dark = base.rack_inset;
-    let panel_th = if identity { panel_dark } else { surf(panel_dark) };
+    // They take the theme's own adjustment; with Light mode off they are darkened below.
+    let own = |c: Color| th.surface.apply(DARK.invert(c));
+    let own_identity = th.surface == DARK;
+    let panel_th = if own_identity { panel_dark } else { own(panel_dark) };
     let step = |c: Color, from: Option<Color>, to: Option<Color>| match (from, to) {
         (Some(f), Some(t)) => shift(c, f.mix(panel_dark, 0.4), t.mix(panel_th, 0.4)),
-        _ => if identity { c } else { surf(c) },
+        _ => if own_identity { c } else { own(c) },
     };
     for name in Palette::NAMES {
         let c = base.get(name).expect("token");
@@ -330,6 +380,13 @@ pub fn palette(th: &FlTheme) -> Palette {
             Role::Fixed => c,
         };
         *out.get_mut(name).expect("token") = v;
+    }
+    // Light mode off: darker step faces (spec: ui/settings-choices.md "Light mode and clip note colours").
+    if !th.light_mode {
+        for name in Palette::NAMES.iter().copied().filter(|n| matches!(role(n), Role::StepEven | Role::StepOdd)) {
+            let slot = out.get_mut(name).expect("token");
+            *slot = slot.shade(-STEP_DARKER);
+        }
     }
     // Browser text brightness (§3 Text).
     // Text: browser text brightness, -255 darker .. +255 brighter (spec §3). On light themes darker = more contrast.
@@ -381,6 +438,9 @@ pub fn palette(th: &FlTheme) -> Palette {
         out.meter_low = th.meters[0];
         out.meter_high = th.meters[2];
     }
+    // Colourful waveforms use the theme's Waves gradient as it is (spec: ui/settings-choices.md "Display: Colorful
+    // waveforms").
+    out.waves = th.waves.clone();
     out
 }
 
@@ -400,6 +460,24 @@ mod tests {
         assert_eq!(palette(&FlTheme::dark()), Palette::default());
     }
 
+    // spec: ui/flstheme.md §3 (WaveClr / WaveSpc), ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"
+    /// The Waves gradient: COLORREF colours at their positions, sorted, a stop missing either half left out; the
+    /// palette carries it.
+    #[test]
+    fn waves_gradient_is_read() {
+        let th = FlTheme::parse("WaveClr0=4661375
+WaveSpc0=0
+WaveClr1=-7249815
+WaveSpc1=1
+WaveClr2=255
+WaveSpc2=0.5
+WaveClr3=65280
+");
+        assert_eq!(th.waves, vec![(0.0, Color::rgb(0x7f2047)), (0.5, Color::rgb(0xff0000)), (1.0, Color::rgb(0x696091))]);
+        assert_eq!(palette(&th).waves, th.waves);
+        assert!(FlTheme::dark().waves.is_empty());
+    }
+
     #[test]
     fn invert_round_trips() {
         for c in [0x2e3234u32, 0x22272b, 0x313436, 0x5d6366] {
@@ -417,6 +495,69 @@ mod tests {
         let p = DARK.apply(Color::rgb(0x34444e));
         let want = Color::rgb(0x22272b);
         assert!(p.r.abs_diff(want.r) <= 6 && p.g.abs_diff(want.g) <= 6 && p.b.abs_diff(want.b) <= 6, "{p}");
+    }
+
+    /// Stock Dark with Lightmode=0 (spec: ui/settings-choices.md "Light mode and clip note colours"; ui/flstheme.md §4,
+    /// §5): the surface adjustment is skipped, so every surface is the base palette's, the palette an all-zero theme
+    /// gives, and lighter than Dark's; explicit theme colours are unchanged.
+    #[test]
+    fn light_mode_off_gives_the_base_palette() {
+        let off = palette(&FlTheme::parse(&set_key(DARK_TEXT, "Lightmode", "0")));
+        let zero = palette(&FlTheme::parse("Hue=0\nSaturation=0\nLightness=0\nContrast=0\n"));
+        let on = Palette::default();
+        for name in Palette::NAMES.iter().copied().filter(|n| !matches!(role(n), Role::StepEven | Role::StepOdd)) {
+            assert_eq!(off.get(name), zero.get(name), "{name}");
+        }
+        assert_eq!(off.xf.surf, Some(BASE));
+        for name in ["toolbar", "menu_panel", "browser_list", "grid", "window_title"] {
+            assert!(off.get(name).unwrap().hsl().2 > on.get(name).unwrap().hsl().2 + 0.03, "{name} is lighter");
+        }
+        for name in ["accent", "on_top", "text", "record"] {
+            assert_eq!(off.get(name), on.get(name), "{name} is not a surface");
+        }
+    }
+
+    /// Lightmode=1, or no Lightmode key, is today's look; Lemon ignores the key (spec: as above).
+    #[test]
+    fn light_mode_on_is_unchanged() {
+        assert_eq!(palette(&FlTheme::parse(&set_key(DARK_TEXT, "Lightmode", "1"))), Palette::default());
+        assert_eq!(palette(&FlTheme::dark()), Palette::default());
+        let night = "Hue=-18\nSaturation=6\nLightness=-57\nContrast=40\nSelected=-4546441\n";
+        let lemon = |t: &str| crate::design::palette(crate::Design::Lemon, Some(&FlTheme::parse(t)));
+        assert_eq!(lemon(&set_key(night, "Lightmode", "0")), lemon(night));
+    }
+
+    /// Light mode off darkens the step faces: Dark's unlit step #323a3e -> #191d1f, red group step -> #3a2626 (FL's
+    /// on face is #734b4d, Lemon Studio's #724a4c; spec: as above).
+    #[test]
+    fn light_mode_off_darkens_the_steps() {
+        let off = palette(&FlTheme::parse(&set_key(DARK_TEXT, "Lightmode", "0")));
+        assert_eq!(off.step_a, Color::rgb(0x191d1f));
+        let (b, want) = (off.step_b, Color::rgb(0x3a2626));
+        assert!(b.r.abs_diff(want.r) <= 1 && b.g.abs_diff(want.g) <= 1 && b.b.abs_diff(want.b) <= 1, "{b}");
+        assert!(off.step_dim_a.hsl().2 < Palette::default().step_dim_a.hsl().2);
+    }
+
+    /// A file without Lightmode has Light mode on (FL's stock files hold 1); without OverrideClips note colours are
+    /// off (spec: ui/flstheme.md §3).
+    #[test]
+    fn a_missing_light_mode_key_means_on() {
+        let t = FlTheme::parse("Hue=0\n");
+        assert!(t.light_mode && !t.override_clips);
+        let t = FlTheme::parse("Lightmode=0\r\nOverrideClips=1\r\n");
+        assert!(!t.light_mode && t.override_clips);
+        assert_eq!(t.applied_surface(), BASE);
+    }
+
+    /// Setting a key rewrites only its line, keeping the BOM and the line breaks; a missing key is added at the end.
+    #[test]
+    fn set_key_rewrites_one_line() {
+        let text = "\u{feff}Lightmode=1\r\nHue=4\r\n";
+        assert_eq!(set_key(text, "Lightmode", "0"), "\u{feff}Lightmode=0\r\nHue=4\r\n");
+        assert_eq!(set_key(text, "OverrideClips", "1"), "\u{feff}Lightmode=1\r\nHue=4\r\nOverrideClips=1\r\n");
+        assert_eq!(set_key("Hue=4", "lightmode", "0"), "Hue=4\nlightmode=0");
+        assert_eq!(set_key("", "Lightmode", "0"), "Lightmode=0\n");
+        assert!(!FlTheme::parse(&set_key(DARK_TEXT, "Lightmode", "0")).light_mode);
     }
 
     #[test]

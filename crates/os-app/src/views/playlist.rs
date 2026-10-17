@@ -7,6 +7,7 @@
 
 use os_model::{AutoMode, Clip, ClipSource, TimeMarker};
 use os_ui::kit::lemon as lk;
+use os_theme::waves::Waves;
 use os_ui::{Color, Font, Rect};
 
 use super::{resize_zones, rgb, window_body, FrameInfo};
@@ -158,14 +159,24 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // its last clip, at least 100 bars; 500 tracks.
     let last = pl::clips(s).iter().map(|c| c.end() as f32 / bar_t).fold(0.0, f32::max);
     let bars = (last.ceil() + 16.0).max(100.0);
-    let over = Rect::new(grid_x, client.y + 1.0, grid_w, 18.0);
+    let (hbar, vbar) = bar_sizes();
+    let over = Rect::new(grid_x, client.y + 1.0, grid_w, hbar);
     debug_assert_eq!(over, overview_rect(s, grid));
     super::scrollbar(ui, over, false, sx, grid_w, bars * bar_w, crate::app::Scroll::PlaylistX);
+    // High visibility: two lighter edges at the top and bottom of the track, around the thumb (spec:
+    // ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High visibility").
+    if crate::high_visibility::on() && over.h >= 6.0 {
+        for (i, hex) in crate::high_visibility::PLAYLIST_EDGES.into_iter().enumerate() {
+            let k = i as f32;
+            ui.c.fill_rect(Rect::new(over.x, over.y + k, over.w, 1.0), t.s(hex));
+            ui.c.fill_rect(Rect::new(over.x, over.bottom() - 1.0 - k, over.w, 1.0), t.s(hex));
+        }
+    }
     overview(ui, s, over, bars * bar_t);
-    let ruler = Rect::new(grid_x, client.y + 22.0, grid_w, 17.0);
+    let ruler = ruler_rect(s, grid);
     ruler_paint(ui, s, &g, ruler, f);
-    ui.c.fill_rect(Rect::new(grid_x + grid_w + 4.0, client.y + 1.0, 18.0, client.h), t.scrollbar);
-    let vtrack = Rect::new(grid_x + grid_w + 4.0, grid_y, 18.0, (r.bottom() - grid_y).max(0.0));
+    ui.c.fill_rect(Rect::new(grid_x + grid_w + 4.0, client.y + 1.0, vbar, client.h), t.scrollbar);
+    let vtrack = Rect::new(grid_x + grid_w + 4.0, grid_y, vbar, (r.bottom() - grid_y).max(0.0));
     super::scrollbar(ui, vtrack, true, sy, vtrack.h, g.rows.total(), crate::app::Scroll::PlaylistY);
     if has_markers {
         markers_paint(ui, s, &g, Rect::new(grid_x, lane_y, grid_w, MARKER_H));
@@ -253,7 +264,20 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 /// The overview bar above `grid` (a miniature of the clips that is also the horizontal scroll bar, §1).
 pub fn overview_rect(s: &State, grid: Rect) -> Rect {
     let lane_y = grid.y - if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
-    Rect::new(grid.x, lane_y - 41.0, grid.w, 18.0)
+    Rect::new(grid.x, lane_y - 41.0, grid.w, bar_sizes().0)
+}
+
+/// The time ruler above `grid`, 3 px under the overview bar: 17 px tall, taller by what thin scroll bars free.
+pub fn ruler_rect(s: &State, grid: Rect) -> Rect {
+    let o = overview_rect(s, grid);
+    Rect::new(grid.x, o.bottom() + 3.0, grid.w, 17.0 + 18.0 - o.h)
+}
+
+/// Thickness of the overview bar (the horizontal scroll bar) and of the vertical scroll bar: 18 px, or 9 and 10 px
+/// with "Small scrollbars in editors" (FL measured 17 → 9 and about 19 → 10 px; spec: ui/settings-choices.md
+/// "Miscellaneous").
+fn bar_sizes() -> (f32, f32) {
+    if super::small_scrollbars() { (9.0, 10.0) } else { (18.0, 18.0) }
 }
 
 /// The grid the playlist would paint now: None while it is collapsed to its title bar.
@@ -278,10 +302,10 @@ pub fn scroll_parts(s: &State, grid: Rect) -> ScrollParts {
     let overview = overview_rect(s, grid);
     ScrollParts {
         grid,
-        ruler: Rect::new(grid.x, overview.y + 21.0, grid.w, 17.0),
+        ruler: ruler_rect(s, grid),
         lane: (!pl::markers(s).is_empty()).then(|| Rect::new(grid.x, overview.y + 41.0, grid.w, MARKER_H)),
         heads: Rect::new(grid.x - 110.0, grid.y, 98.0, grid.h),
-        vbar: Rect::new(grid.right(), overview.y, 22.0, grid.bottom() - overview.y),
+        vbar: Rect::new(grid.right(), overview.y, 4.0 + bar_sizes().1, grid.bottom() - overview.y),
         overview,
     }
 }
@@ -289,7 +313,7 @@ pub fn scroll_parts(s: &State, grid: Rect) -> ScrollParts {
 /// The arrangement grid in a window laid out at `r` with client rect `client` (see `super::frame_rects`).
 fn grid_rect(s: &State, r: Rect, client: Rect) -> Rect {
     let grid_x = r.x + 162.0 + 98.0 + 12.0;
-    let grid_w = (r.right() - grid_x - 22.0).max(1.0);
+    let grid_w = (r.right() - grid_x - 4.0 - bar_sizes().1).max(1.0);
     let grid_y = client.y + 42.0 + if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
     Rect::new(grid_x, grid_y, grid_w, (r.bottom() - grid_y).max(0.0))
 }
@@ -391,7 +415,13 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
     let hov = ui.hit(tr, Action::Scrollbar(crate::app::Scroll::PlPick), "Drag to scroll");
     let th = Rect::new(tr.x, tr.y + off, tr.w, thumb);
     ui.c.fill_rect(th, ui.t.s(0x36383a));
-    ui.c.fill_rect(th.inset(1.0), ui.t.s(0x2c2e30).shade(if hov { 0.06 } else { 0.0 }));
+    // A light thumb under High visibility (`os_ui::kit::scroll_thumb`).
+    let face = if crate::high_visibility::on() {
+        os_ui::kit::scroll_thumb(ui.t, os_ui::kit::State::hover(hov), true)
+    } else {
+        ui.t.s(0x2c2e30).shade(if hov { 0.06 } else { 0.0 })
+    };
+    ui.c.fill_rect(th.inset(1.0), face);
     ui.c.fill_rect(Rect::new(th.cx() - 1.0, th.cy() - 2.5, 2.0, 5.0), ui.t.s(0x000000));
     ui.bars.push(crate::app::Bar { target: crate::app::Scroll::PlPick, track: tr, vertical: true, max, view: list.h, thumb });
     // Footer "+": new pattern (find first empty).
@@ -486,7 +516,8 @@ fn ruler_paint(ui: &mut Ui, s: &State, g: &PGeom, ruler: Rect, f: &FrameInfo) {
         }
         let x = g.xs(f64::from(b) * f64::from(bar_w));
         let size = if b % (every * 4) == 0 { 15.0 } else { 13.0 };
-        ui.c.text(super::fnt(size), x + 2.0, ruler.y + (16.0 - size), t.ruler_text, &format!("{}", b + 1));
+        // Along the ruler's bottom 17 px (all of it unless thin scroll bars made it taller).
+        ui.c.text(super::fnt(size), x + 2.0, ruler.bottom() - 17.0 + (16.0 - size), t.ruler_text, &format!("{}", b + 1));
     }
     // Song position: a flag ◤ on the playhead while playing the song, else on the start position (§7: its left edge
     // on the position, its top along the ruler's top).
@@ -719,7 +750,9 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
                 // The channel colour lifted by 80 (§2); without one the measured default.
                 let wave = tint.map_or(cc(t, WAVE), |c| offset(c, 80));
                 let col = if c.muted { content } else { dim(wave) };
-                waveform(ui, s, g, c, ch, body_at, col);
+                // Colorful waveforms colour a clip that plays; a muted one keeps its grey.
+                let waves = (!c.muted).then(|| crate::waves::current(t));
+                waveform(ui, s, g, c, ch, body_at, col, waves.as_ref().map(|w| (w, &dim as &dyn Fn(Color) -> Color)));
                 if !c.muted {
                     fades(ui, s, g, i, c, body_at, dim(wave));
                 }
@@ -781,8 +814,10 @@ fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body
 }
 
 /// The clip's part of the sample: every device-pixel column spans the minimum to the maximum of its samples, times
-/// the clip's fades and gain, filled as one anti-aliased shape (§2, §9a).
-fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, col: Color) {
+/// the clip's fades and gain, filled as one anti-aliased shape (§2, §9a). With `colours` (the colourful waveforms
+/// setting, and how the clip dims its colours) each column takes the colour of the frames behind it.
+#[allow(clippy::too_many_arguments)]
+fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, col: Color, colours: Option<(&Waves, &dyn Fn(Color) -> Color)>) {
     let Some(path) = s.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
     let Some(w) = s.playlist.wave(&path) else { return };
     let Some(area) = ui.c.paint_bounds() else { return };
@@ -806,11 +841,13 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     }
     // From the clip's start (the body starts a pixel in).
     let side = body.x - g.x64(f64::from(c.position));
-    let total_ms = f64::from(c.length) * ms_per_tick;
-    let (fin, fout, gain) = (c.fade_in(), c.fade_out(), f64::from(c.gain()));
+    // The fades count the song's milliseconds (`pl::ms_px`), the window the sample's.
+    let fade_ms = pl::fade_ms_per_tick(s);
+    let total_ms = f64::from(c.length) * fade_ms;
+    let (fin, fout, gain) = (c.stored_fade_in(), c.stored_fade_out(), f64::from(c.gain()));
     // Gain of the fades `d` px into the body (the engine's law, os_model::fade_curve).
     let shape = |d: f64| -> f64 {
-        let ms = (side + d) / ppt * ms_per_tick;
+        let ms = (side + d) / ppt * fade_ms;
         let mut k = gain;
         if let Some((l, t)) = fin {
             k *= os_model::fade_curve(ms / f64::from(l), f64::from(t));
@@ -866,11 +903,26 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     bottom.push((x, yb));
     let mut outline = top;
     outline.extend(bottom.into_iter().rev());
-    ui.c.fill_polygon(&outline, col);
+    // Colorful waveforms (spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"): the same shape,
+    // each device-pixel column in the colour of the frames it shows; silence keeps the plain colour.
+    let tones = colours.filter(|(w, _)| w.on()).and_then(|_| s.playlist.tones(&path));
+    match (colours, tones) {
+        (Some((waves, dim)), Some(tones)) => {
+            let frames = |d: f64| (w0 + d / ppt * ms_per_tick) * frames_per_ms;
+            ui.c.fill_polygon_columns(&outline, &mut |x| {
+                let d = ((f64::from(x) - body.x) / px).floor() * px;
+                let t = tones.span(frames(d), frames(d + px));
+                waves.colour(t.centroid(), t.band_powers()).map_or(col, dim)
+            });
+        }
+        _ => ui.c.fill_polygon(&outline, col),
+    }
 }
 
 /// An audio clip's fade curves, and its handles while the mouse is over it (§9a): fade triangles at the top
-/// corners (at the fades' ends), tension rings in the middle of each curve, the gain half-circle at the bottom.
+/// corners (at the fades' ends), tension rings in the middle of each curve, the gain half-circle at the bottom. A
+/// crossfade is drawn by its later clip, over both bodies: an X of the two fades across the overlap, with its handle
+/// in the middle.
 fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wave: Color) {
     let body = edges.r;
     if body.w < 12.0 || body.h < 10.0 {
@@ -893,13 +945,24 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
             .collect();
         ui.c.polyline(&pts, 1.4, white.with_alpha(230));
     };
-    if let Some((_, t)) = c.fade_in() {
-        curve(ui, edges.x, f64::from(fx_in), t, false);
+    // This clip's crossfade with an earlier clip, and whether a later clip draws this clip's fade-out in its own.
+    let xf = pl::crossfade(s, g, i);
+    let later = os_model::crossfade::partner_after(&s.project, pl::clips(s), i).filter(|&b| pl::crossfade(s, g, b).is_some());
+    if let Some((_, t)) = c.stored_fade_in() {
+        if xf.is_none() {
+            curve(ui, edges.x, f64::from(fx_in), t, false);
+        }
         ui.c.fill_rect(Rect::new(fx_in, body.y, 1.0, body.h), white.with_alpha(50));
     }
-    if let Some((_, t)) = c.fade_out() {
-        curve(ui, f64::from(fx_out), edges.x + edges.w, t, true);
+    if let Some((_, t)) = c.stored_fade_out() {
+        if later.is_none() {
+            curve(ui, f64::from(fx_out), edges.x + edges.w, t, true);
+        }
         ui.c.fill_rect(Rect::new(fx_out - 1.0, body.y, 1.0, body.h), white.with_alpha(50));
+    }
+    if let Some(xf) = xf {
+        curve(ui, edges.x, f64::from(xf.x1), xf.t_in, false);
+        curve(ui, edges.x, f64::from(xf.x1), xf.t_out, true);
     }
     // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse.
     if !hovered {
@@ -919,9 +982,18 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
     }).collect();
     ui.c.fill_polygon(&half, col(pl::Handle::Gain));
     if hovered {
+        // The crossfade's handle: a big filled circle at the later clip's gain in the middle, a small ring at the
+        // earlier clip's (§9a); where they meet the ring shows inside the circle.
+        if let Some(xf) = xf.filter(|xf| xf.x1 - xf.x0 > 10.0) {
+            let (hx, hy, ry) = pl::xfade_handle(g, c, &xf);
+            let on = lit(pl::Handle::Crossfade);
+            ui.c.fill_circle(hx, hy, if on { pl::XFADE_R + 1.0 } else { pl::XFADE_R }, col(pl::Handle::Crossfade));
+            ui.c.fill_circle(hx, ry, 2.5, ui.t.s(0x1c2328).with_alpha(200));
+            ui.c.stroke_circle(hx, ry, 2.5, 1.1, white);
+        }
         for (h, on, xa, xb, out) in [
-            (pl::Handle::TensionIn, c.fade_in(), body.x, fx_in, false),
-            (pl::Handle::TensionOut, c.fade_out(), fx_out, body.right(), true),
+            (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(s, c, false)), body.x, fx_in, false),
+            (pl::Handle::TensionOut, c.stored_fade_out().filter(|_| !pl::managed(s, c, true)), fx_out, body.right(), true),
         ] {
             let Some((_, t)) = on else { continue };
             if xb - xa <= 10.0 {
@@ -1104,13 +1176,16 @@ fn tool_face(ui: &mut Ui, b: Rect, on: bool, hov: bool) -> Color {
 /// The open playlist popup menu and its submenu, and the inline text box (drawn above everything).
 pub fn paint_overlays(ui: &mut Ui, s: &State) {
     if let Some(p) = &s.playlist.popup {
-        let (w, h) = ui.c.size();
-        let (_, rows) = popup_list(ui, &p.items, p.x, p.y, (w, h), p.sub, false);
-        if let Some(i) = p.sub {
-            if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
-                popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true);
+        // At the Pop-ups scaling (spec: ui/ui-scaling.md §1).
+        ui.scaled(super::popup_scale(ui.c.scale), |ui, k| {
+            let (w, h) = ui.c.size();
+            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, false);
+            if let Some(i) = p.sub {
+                if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
+                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true);
+                }
             }
-        }
+        });
     }
     if let Some(e) = &s.playlist.edit
         && let pl::EditTarget::TypeIn(t, norm) = e.target
@@ -1226,7 +1301,9 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             // Disabled here and now (nothing to merge, the last arrangement), not missing.
             ui.hit(rr, action, it.label.to_string());
         }
-        let color = if live { t.menu_pop_text } else { t.menu_pop_dim };
+        // A working entry drawn dim: a Manage messages entry that is off (spec: ui/settings-choices.md "Hints and
+        // warnings: Manage messages and Project data size warning (2026-10-16)").
+        let color = if live && !it.dim { t.menu_pop_text } else { t.menu_pop_dim };
         let (mx, my) = (rr.x + 10.0, rr.y + m.row / 2.0);
         match it.mark {
             Mark::Check(true) => {

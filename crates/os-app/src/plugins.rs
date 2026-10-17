@@ -42,10 +42,6 @@ pub struct Hosted {
     /// Set while the open editor belongs to a Lemon plugin that joined the strip (host link).
     #[cfg(plugin_windows)]
     pub link: Option<os_hostlink::Link>,
-    /// Its window docked (false) or detached (true), as last chosen for it (window menu > Detached, Switch all plugin
-    /// editors to ▸), kept while the window is closed; `None`: as new windows open (`Plugins::detach_new`).
-    #[cfg(plugin_windows)]
-    pub detached: Option<bool>,
     /// The app was told that the instance stopped after a crash.
     stop_told: bool,
     /// A native instance started from a project's state that it did not give back byte for byte: a save keeps the
@@ -60,6 +56,17 @@ pub struct Hosted {
     pub attention: Option<Arc<os_host::Attention>>,
     /// The count and time `idle` last looked at it (`Hosted::due`).
     seen: Look,
+    /// Its window opens detached: set when the user adds it while "Detach all new plugins" is on (`Plugins::added`),
+    /// or chosen for it (window menu > Detached, Switch all plugin editors to ▸), then the mode its window had when it
+    /// last closed (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
+    pub detached: bool,
+    /// Where its detached window was when it last closed (screen px): reopened, it goes back there (spec: as above).
+    #[cfg(plugin_windows)]
+    pub placed: Option<(i32, i32)>,
+    /// When its open window opened (`Plugins::opens`): the limit on open editors closes the earliest first.
+    #[cfg(plugin_windows)]
+    opened: u64,
 }
 
 /// When the UI last locked an instance for one of its per-tick jobs: the attention count it acted on, and when.
@@ -91,13 +98,16 @@ impl Hosted {
             window: None,
             #[cfg(plugin_windows)]
             link: None,
-            #[cfg(plugin_windows)]
-            detached: None,
             stop_told: false,
             keep_file_state: false,
             stand_in: false,
             attention,
             seen: Look::never(),
+            detached: false,
+            #[cfg(plugin_windows)]
+            placed: None,
+            #[cfg(plugin_windows)]
+            opened: 0,
         }
     }
 
@@ -163,6 +173,18 @@ pub enum Request {
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
 pub const FX_KEY: usize = 1 << 24;
 
+/// Plugin editor windows open at once under "Limit the number of open plugin editors" (FL's hint: 25; spec:
+/// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
+pub const MAX_EDITORS: usize = 25;
+
+/// Of the open windows (`hosted` key, when it opened), the one to close before another opens, so that no more than
+/// `max` are open: the one opened earliest, while `max` or more are open.
+#[cfg_attr(not(plugin_windows), allow(dead_code))]
+fn earliest_over(open: impl Iterator<Item = (usize, u64)>, max: usize) -> Option<usize> {
+    let open: Vec<(usize, u64)> = open.collect();
+    open.iter().min_by_key(|o| o.1).filter(|_| open.len() >= max).map(|o| o.0)
+}
+
 /// The `hosted` key of mixer track `track`'s slot `slot`.
 pub fn fx_key(track: u16, slot: u8) -> usize {
     FX_KEY + usize::from(track) * 16 + usize::from(slot)
@@ -183,8 +205,9 @@ pub struct Plugins {
     /// Main window handle (owner of plugin windows).
     pub owner: isize,
     pub scale: f32,
-    /// New plugin windows open detached (settings "Detach all new plugins"; off = docked like FL's default).
-    pub detach_new: bool,
+    /// Plugin windows opened so far (stamps `Hosted::opened`).
+    #[cfg(plugin_windows)]
+    opens: u64,
     /// The preset file each instance last loaded or saved (spec: plugins/presets.md), by `hosted` key.
     pub presets: BTreeMap<usize, PathBuf>,
     /// Plugins (uids) whose file the last scan no longer found: not listed, kept so indices stay valid.
@@ -404,9 +427,14 @@ impl Plugins {
         }
         // Trimmed audio clips start their note further into the sample (spec: plugins/lemon-sampler.md §7).
         p.use_start_param(SAMPLE_START);
-        // A note's own pan and mod X / Y reach the built-in Lemon instruments only (spec: audio/voice-levels.md).
+        // A note's own pan and mod X / Y reach the built-in Lemon instruments only (spec: audio/voice-levels.md); audio
+        // clips' fades and gain reach Lemon Sampler's voices one by one, so overlapping clips of one sample crossfade
+        // (spec: audio/audio-clips.md "Fades and clip gain").
         if crate::project_plugins::is_builtin(&a.desc) {
             p.use_note_levels();
+            if a.desc.name == LEMON_SAMPLER {
+                p.use_voice_gains();
+            }
         }
         drop(p);
         self.hosted.insert(row, Hosted::new(plugin));
@@ -433,6 +461,16 @@ impl Plugins {
         drop(p);
         self.hosted.insert(key, Hosted::new(plugin));
         Ok(a.desc.name)
+    }
+
+    /// The user just added the instance under `key` (a new channel's plugin, a new effect in a slot): its window opens
+    /// detached while "Detach all new plugins" is on. Instances a project brings open docked, as before (spec:
+    /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
+    pub fn added(&mut self, key: usize) {
+        let on = crate::prefs::check(&crate::prefs::DETACH_NEW);
+        if let Some(h) = self.hosted.get_mut(&key) {
+            h.detached = on;
+        }
     }
 
     /// Removes the instance under `key` (closing its window first).
@@ -564,21 +602,31 @@ impl Plugins {
         lemon_parametric_eq_2::params::fl_from_plugin_state(&p.save_state()?)
     }
 
-    /// Loads sample `path` into row `row`'s Lemon Sampler: its current state with a new `sample-path`, so every other
-    /// setting stays. False when the row hosts nothing or the plugin refused the state.
     /// Row `row`'s Lemon Sampler takes the stretch settings `sound` holds (§9b), keeping its other settings.
     pub fn set_sampler_stretch(&mut self, row: usize, sound: &os_model::ChannelSound) -> bool {
-        let Some(h) = self.hosted.get(&row) else { return false };
-        let Ok(mut p) = h.plugin.lock() else { return false };
-        let set = stretch_params(sound);
-        let Some(new) = p.save_state().and_then(|b| with_params(&b, &set)) else { return false };
-        p.load_state(&new)
+        self.set_sampler(row, None, &stretch_params(sound))
     }
 
+    /// Loads sample `path` into row `row`'s Lemon Sampler: its current state with a new `sample-path`, so every other
+    /// setting stays. False when the row hosts nothing or the plugin refused the state.
     pub fn load_sample(&mut self, row: usize, path: &str) -> bool {
+        self.set_sampler(row, Some(path), &[])
+    }
+
+    /// Row `row`'s Lemon Sampler takes parameters `set` and, with `path`, that sample, in one change of its state:
+    /// every other setting stays. False when the row hosts nothing or the plugin refused the state.
+    pub fn set_sampler(&mut self, row: usize, path: Option<&str>, set: &[(&str, serde_json::Value)]) -> bool {
         let Some(h) = self.hosted.get(&row) else { return false };
         let Ok(mut p) = h.plugin.lock() else { return false };
-        let Some(new) = p.save_state().and_then(|b| with_sample_path(&b, path)) else { return false };
+        let Some(mut new) = p.save_state() else { return false };
+        if let Some(path) = path {
+            let Some(b) = with_sample_path(&new, path) else { return false };
+            new = b;
+        }
+        if !set.is_empty() {
+            let Some(b) = with_params(&new, set) else { return false };
+            new = b;
+        }
         p.load_state(&new)
     }
 
@@ -688,16 +736,29 @@ impl Plugins {
     /// Opens (or raises) row `row`'s plugin window.
     #[cfg(plugin_windows)]
     pub fn open_window(&mut self, row: usize, info: ChannelInfo) -> Result<(), String> {
-        let (owner, scale, detach_new) = (self.owner, self.scale, self.detach_new);
-        let h = self.hosted.get_mut(&row).ok_or("not a plugin channel")?;
+        let (owner, scale) = (self.owner, self.scale);
+        let h = self.hosted.get(&row).ok_or("not a plugin channel")?;
         if let Some(w) = &h.window {
             w.raise();
             return Ok(());
         }
+        // At most `MAX_EDITORS` open: the one opened earliest closes (its plugin keeps running). Spec:
+        // ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
+        if crate::prefs::check(&crate::prefs::LIMIT_EDITORS) {
+            while let Some(k) = earliest_over(self.hosted.iter().filter(|(_, h)| h.window.is_some()).map(|(&k, h)| (k, h.opened)), MAX_EDITORS) {
+                self.close_window(k);
+            }
+        }
+        let Some(h) = self.hosted.get_mut(&row) else { return Err("not a plugin channel".into()) };
         let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
-        let pos = crate::plugin_window::default_position(owner, scale);
+        // A detached window reopens where it was; the first time, on a monitor as the settings say (spec: as above).
+        let pos = match (h.detached, h.placed) {
+            (true, Some(at)) => at,
+            (true, None) => crate::plugin_window::first_position(owner, scale, crate::prefs::check(&crate::prefs::DETACHED_WITH_MAIN)),
+            (false, _) => crate::plugin_window::default_position(owner, scale),
+        };
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size.
-        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, h.detached.unwrap_or(detach_new))?;
+        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, h.detached)?;
         // Mixer effects have no channel strip (spec: ui/mixer.md §7).
         if row >= FX_KEY {
             w.set_strip(false);
@@ -711,6 +772,8 @@ impl Plugins {
         w.raise();
         drop(p);
         h.window = Some(w);
+        self.opens += 1;
+        h.opened = self.opens;
         let name = self.preset_name(row);
         if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
             w.set_preset(name);
@@ -759,6 +822,15 @@ impl Plugins {
     #[cfg(plugin_windows)]
     fn close_window(&mut self, row: usize) {
         if let Some(h) = self.hosted.get_mut(&row) {
+            // The mode and place it reopens in (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins
+            // and startup").
+            if let Some(w) = &h.window {
+                h.detached = w.detached();
+                #[cfg(windows)]
+                if h.detached {
+                    h.placed = w.position().or(h.placed);
+                }
+            }
             if let Ok(mut p) = h.plugin.lock() {
                 p.close_editor();
             }
@@ -778,7 +850,7 @@ impl Plugins {
     pub fn set_detached(&mut self, row: usize, on: bool) {
         let owner = self.owner;
         if let Some(h) = self.hosted.get_mut(&row) {
-            h.detached = Some(on);
+            h.detached = on;
             if let Some(w) = &h.window {
                 w.set_detached(owner, on);
             }
@@ -807,6 +879,15 @@ impl Plugins {
     pub fn stack(&self, rows: &[usize]) {
         let hwnds: Vec<isize> = rows.iter().filter_map(|r| self.window_of(*r)).filter(|w| !w.1).map(|w| w.0).collect();
         crate::plugin_window::stack(self.owner, &hwnds);
+    }
+
+    /// VIEW > Into workspace for the docked windows: one partly outside the workspace moves fully back in
+    /// (`FrameWindow::move_into_workspace`).
+    #[cfg(all(plugin_windows, windows))]
+    pub fn move_into_workspace(&self) {
+        for w in self.hosted.values().filter_map(|h| h.window.as_ref()) {
+            w.move_into_workspace();
+        }
     }
 
     /// Clips row `row`'s docked window to `work` minus `covers` (main-window client px).
@@ -917,8 +998,9 @@ impl Plugins {
                         FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
                         FrameEvent::NotAvailable(name) => Request::NotAvailable(name),
                         FrameEvent::Dpi(k) => {
+                            // A Main GUI scaling percentage replaces the monitor's scale (spec: ui/ui-scaling.md §1).
                             #[cfg(any(windows, target_os = "macos"))]
-                            rescale.push((row, k));
+                            rescale.push((row, crate::gui_scale(f64::from(k)) as f32));
                             #[cfg(not(any(windows, target_os = "macos")))]
                             let _ = k;
                             continue;
@@ -1320,6 +1402,17 @@ fn channel_params(ch: &os_model::Channel, frames: impl FnOnce() -> Option<u64>) 
         }
     }
     out
+}
+
+/// Lemon Sampler's parameters for what loading a sample may read into its channel (`rack::read_tags`): the root note,
+/// the stretch settings and Keep on disk (`keep_on_disk::keep_long`).
+pub fn tag_params(ch: &os_model::Channel) -> Vec<(&'static str, serde_json::Value)> {
+    let root = i32::from(ch.misc.root).clamp(0, lemon_sampler::params::KEY_MAX);
+    let mut set = vec![("root", serde_json::json!({ "i32": root }))];
+    set.extend(stretch_params(&ch.sound));
+    let flags = ch.sound.sampler_flags.unwrap_or(os_model::ChannelSound::DEFAULT_FLAGS);
+    set.push(("keep_disk", serde_json::json!({ "bool": flags & os_model::ChannelSound::KEEP_ON_DISK != 0 })));
+    set
 }
 
 /// Writes an edit of one of Lemon Sampler's root note page parameters (`name`, at normalized value `norm`) into the
@@ -2495,6 +2588,37 @@ mod tests {
         assert!(!misc_param("Pitch shift", 0.5, &mut m));
     }
 
+    /// A Lemon Sampler state that names no sample (an undone load into an empty channel, `history`) leaves it with
+    /// none: a note plays nothing.
+    #[test]
+    fn lemon_sampler_state_without_a_sample_plays_nothing() {
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
+        let wav = std::env::temp_dir().join(format!("os-app-sampler-cleared-{}.wav", std::process::id()));
+        let tone: Vec<f32> = (0..9600).flat_map(|i| [((i as f32) * 0.0576).sin() * 0.5; 2]).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
+        pl.create_with(0, index, None).unwrap();
+        assert!(pl.load_sample(0, &wav.to_string_lossy()));
+        let peak = |pl: &Plugins| {
+            let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
+            let mut i = inst.lock().unwrap();
+            i.reset();
+            i.note_on(0, 60, 0.8);
+            let mut m = 0f32;
+            for _ in 0..10 {
+                let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+                i.process(48000, &mut l, &mut r);
+                m = l.iter().chain(&r).fold(m, |a, v| a.max(v.abs()));
+            }
+            m
+        };
+        assert!(peak(&pl) > 0.05, "the sample plays");
+        assert!(pl.set_sampler(0, Some(""), &[]));
+        assert_eq!(pl.sampler_path(0).as_deref(), Some(""));
+        assert_eq!(peak(&pl), 0.0, "nothing plays");
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// Lemon Sampler's time-stretch parameters read back into the channel's stretch settings (`stretch_param`, the
     /// inverse of `stretch_params`): what the app does with the editor's edits (spec: ui/playlist.md §9c).
     #[test]
@@ -3299,5 +3423,79 @@ mod tests {
             println!("round {round} ok");
         }
         transport.stop();
+    }
+
+    /// The four plugin window checks as found in FL; "Detach all new plugins": an instance the user adds takes the
+    /// check's state as its window mode, one that exists keeps its own (spec: ui/settings-choices.md "Miscellaneous:
+    /// naming, detached plugins and startup").
+    #[test]
+    fn new_plugins_take_the_detach_check() {
+        use crate::prefs::{check, DETACHED_WITH_MAIN, DETACH_NEW, LIMIT_EDITORS, TYPING_PRIORITY_OFF};
+        assert_eq!((check(&DETACH_NEW), check(&DETACHED_WITH_MAIN), check(&TYPING_PRIORITY_OFF), check(&LIMIT_EDITORS)), (false, false, false, true));
+        let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
+        pl.create_effect(1, 0, index, None).unwrap();
+        assert!(!pl.hosted[&fx_key(1, 0)].detached, "a project's instance opens docked");
+        pl.added(fx_key(1, 0));
+        assert!(!pl.hosted[&fx_key(1, 0)].detached, "check off: docked");
+        crate::prefs::set_check(&DETACH_NEW, true);
+        pl.create_effect(1, 1, index, None).unwrap();
+        pl.added(fx_key(1, 1));
+        assert!(pl.hosted[&fx_key(1, 1)].detached, "check on: detached");
+        assert!(!pl.hosted[&fx_key(1, 0)].detached, "an existing plugin keeps its mode");
+    }
+
+    /// "Limit the number of open plugin editors": with 25 open, the one opened earliest closes before another opens
+    /// (spec: as above).
+    #[test]
+    fn the_earliest_editor_closes_past_the_limit() {
+        assert_eq!(MAX_EDITORS, 25);
+        // Key 24 opened earliest.
+        let open: Vec<(usize, u64)> = (0..25).map(|i| (i, 50 - i as u64)).collect();
+        assert_eq!(earliest_over(open[..24].iter().copied(), MAX_EDITORS), None, "24 open: the 25th opens beside them");
+        assert_eq!(earliest_over(open.iter().copied(), MAX_EDITORS), Some(24));
+        assert_eq!(earliest_over(std::iter::empty(), MAX_EDITORS), None);
+    }
+
+    /// The limit and the reopening place with real windows (spec: as above): a detached window moved, closed and
+    /// reopened comes back where it was; of 26 Lemon Parametric EQ windows the first opened closes, its plugin still
+    /// hosted; without the check there is no limit. Opens real windows:
+    /// `cargo test -p os-app --bin lemonstudio editor_limit_and_reopen_place -- --ignored`
+    #[test]
+    #[ignore]
+    fn editor_limit_and_reopen_place() {
+        let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
+        let info = |t: u16| ChannelInfo { name: LEMON_EQ.into(), target: format!("Insert {t}"), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: t, misc: None };
+        let keys: Vec<usize> = (0..26u16).map(|i| fx_key(1 + i / 8, (i % 8) as u8)).collect();
+        for &k in &keys {
+            let (t, s) = fx_of(k).unwrap();
+            pl.create_effect(t, s, index, None).unwrap();
+        }
+        let open = |pl: &Plugins| pl.hosted.values().filter(|h| h.window.is_some()).count();
+        // Without a main window every frame is detached.
+        pl.open_window(keys[0], info(1)).unwrap();
+        let hwnd = pl.window_of(keys[0]).unwrap().0;
+        unsafe { SetWindowPos(hwnd as HWND, std::ptr::null_mut(), 300, 200, 0, 0, SWP_NOSIZE | SWP_NOZORDER) };
+        pump(&mut pl, 50);
+        assert!(pl.close_if_open(keys[0]));
+        assert_eq!((pl.hosted[&keys[0]].detached, pl.hosted[&keys[0]].placed), (true, Some((300, 200))));
+        pl.open_window(keys[0], info(1)).unwrap();
+        assert_eq!(pl.hosted[&keys[0]].window.as_ref().unwrap().position(), Some((300, 200)), "reopened where it was");
+        for &k in &keys[1..25] {
+            pl.open_window(k, info(fx_of(k).unwrap().0)).unwrap();
+            pump(&mut pl, 10);
+        }
+        assert_eq!(open(&pl), 25);
+        pl.open_window(keys[25], info(4)).unwrap();
+        assert_eq!(open(&pl), 25, "the 26th closed the earliest first");
+        assert!(pl.hosted[&keys[0]].window.is_none() && pl.hosted.contains_key(&keys[0]), "closed, its plugin kept");
+        crate::prefs::set_check(&crate::prefs::LIMIT_EDITORS, false);
+        pl.open_window(keys[0], info(1)).unwrap();
+        assert_eq!(open(&pl), 26, "no limit");
+        for &k in &keys {
+            pl.drop_key(k);
+        }
+        pump(&mut pl, 100);
     }
 }

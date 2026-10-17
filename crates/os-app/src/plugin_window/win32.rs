@@ -250,7 +250,39 @@ impl FrameWindow {
             return;
         }
         self.state.borrow_mut().clip = Some((work, covers.to_vec()));
+        // The workspace may have shrunk: the window keeps its part in it (`crate::win_clamp::keep_px`).
+        if work[2] > work[0] && work[3] > work[1] {
+            let k = self.scale();
+            self.place(|me| crate::win_clamp::keep_px((me[0], me[1]), me[2] - me[0], work, k));
+        }
         unsafe { apply_clip(self.hwnd, &self.state) };
+    }
+
+    /// VIEW > Into workspace: a docked window partly outside the workspace it was clipped to moves fully back in,
+    /// keeping its size (the plugin's editor sets it). Detached windows stay where they are.
+    pub fn move_into_workspace(&self) {
+        let work = self.state.borrow().clip.as_ref().map(|c| c.0);
+        let Some(work) = work.filter(|_| !self.detached()) else { return };
+        self.place(|me| crate::win_clamp::inside_px(me, work));
+        unsafe { apply_clip(self.hwnd, &self.state) };
+    }
+
+    /// Moves the docked window to where `to` puts it, given its rect in the parent's client area (physical px).
+    fn place(&self, to: impl FnOnce([i32; 4]) -> (i32, i32)) {
+        unsafe {
+            let me = parent_rect(self.hwnd);
+            let p = to(me);
+            if p != (me[0], me[1]) {
+                SetWindowPos(self.hwnd, std::ptr::null_mut(), p.0, p.1, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                expose();
+            }
+        }
+    }
+
+    /// The frame's top-left on screen (physical px), `None` while it is minimized.
+    pub fn position(&self) -> Option<(i32, i32)> {
+        let mut r: RECT = unsafe { std::mem::zeroed() };
+        (unsafe { IsIconic(self.hwnd) == 0 && GetWindowRect(self.hwnd, &mut r) != 0 }).then_some((r.left, r.top))
     }
 
     /// The native frame window (drops find their plugin by it; tests drive and capture it).
@@ -627,7 +659,8 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                     if docked {
                         ScreenToClient(GetParent(hwnd), &mut p);
                     }
-                    SetWindowPos(hwnd, std::ptr::null_mut(), p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    let to = kept(hwnd, w, docked, (p.x, p.y));
+                    SetWindowPos(hwnd, std::ptr::null_mut(), to.0, to.1, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
                     if docked {
                         // Paint what the move uncovered (the main window, other docked plugin windows and their
                         // editors) before the next move. Left to ordinary WM_PAINTs, which wait behind the mouse
@@ -718,12 +751,76 @@ unsafe fn reply(hwnd: HWND, w: &mut Win, r: Reply) {
     }
 }
 
+/// Where a window moved by hand to `p` goes (spec: ui/settings-choices.md "Advanced: Don't limit windows to screen
+/// (2026-10-16)"): a docked one (`p` in the parent's client area) keeps its part in the workspace it was clipped to
+/// (`crate::win_clamp::keep_px`); a detached one (`p` on screen) keeps its title bar on the screens unless "Don't
+/// limit windows to screen" is on (`crate::win_clamp::bar_on_screens`).
+fn kept(hwnd: HWND, w: &Win, docked: bool, p: (i32, i32)) -> (i32, i32) {
+    let mut r: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetWindowRect(hwnd, &mut r) };
+    let width = r.right - r.left;
+    if docked {
+        let work = w.state.borrow().clip.as_ref().map(|c| c.0);
+        return match work {
+            Some(work) if work[2] > work[0] && work[3] > work[1] => crate::win_clamp::keep_px(p, width, work, w.scale),
+            _ => p,
+        };
+    }
+    if crate::prefs::check(&crate::prefs::DONT_LIMIT_WINDOWS) {
+        return p;
+    }
+    let bar = [p.0, p.1, p.0 + width, p.1 + (TITLE_H * w.scale).round() as i32];
+    crate::win_clamp::bar_on_screens(bar, &screens())
+}
+
+/// The monitors' work areas (screen px).
+fn screens() -> Vec<[i32; 4]> {
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+    unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> windows_sys::core::BOOL {
+        unsafe {
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(m, &mut mi) != 0 {
+                let r = mi.rcWork;
+                (*(out as *mut Vec<[i32; 4]>)).push([r.left, r.top, r.right, r.bottom]);
+            }
+        }
+        1
+    }
+    let mut out: Vec<[i32; 4]> = Vec::new();
+    unsafe { EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(each), &mut out as *mut Vec<[i32; 4]> as LPARAM) };
+    out
+}
+
 /// Screen position for a new plugin window: right of the owner's left edge, below its toolbar (physical px; the
 /// offset is logical, so the window lands on the same part of the layout at every scale).
 pub fn default_position(owner: isize, scale: f32) -> (i32, i32) {
     let mut r: RECT = unsafe { std::mem::zeroed() };
     unsafe { GetWindowRect(owner as HWND, &mut r) };
     (r.left + (420.0 * scale).round() as i32, r.top + (160.0 * scale).round() as i32)
+}
+
+/// Screen position for a detached window opening for the first time (physical px): where `default_position` puts a new
+/// window, moved onto the main window's monitor (`with_main`) or onto the primary monitor (Settings "Open detached
+/// plugins with the main window"; spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and
+/// startup").
+pub fn first_position(owner: isize, scale: f32, with_main: bool) -> (i32, i32) {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY};
+    let p = default_position(owner, scale);
+    let work = |m| unsafe {
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        (GetMonitorInfoW(m, &mut mi) != 0).then(|| [mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom])
+    };
+    let (from, to) = unsafe {
+        let to = if with_main { MonitorFromWindow(owner as HWND, MONITOR_DEFAULTTOPRIMARY) } else { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+        (work(MonitorFromPoint(POINT { x: p.0, y: p.1 }, MONITOR_DEFAULTTONEAREST)), work(to))
+    };
+    let keep = ((200.0 * scale).round() as i32, (100.0 * scale).round() as i32);
+    match (from, to) {
+        (Some(from), Some(to)) => super::moved_to(p, from, to, keep),
+        _ => p,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -908,6 +1005,52 @@ mod tests {
 
         drop(docked());
         assert!(take_exposed(), "closing");
+        unsafe { DestroyWindow(owner) };
+    }
+
+    /// Spec ui/settings-choices.md "Advanced: Don't limit windows to screen (2026-10-16)": a docked window keeps 31 px
+    /// of its width and its title bar in the workspace it is clipped to, also when the workspace shrinks, and Into
+    /// workspace brings it fully back in, keeping its size. Opens real windows:
+    /// `cargo test -p os-app --bin lemonstudio docked_windows_keep_their_part -- --ignored`.
+    #[test]
+    #[ignore]
+    fn docked_windows_keep_their_part() {
+        let class = wide("STATIC");
+        let owner = unsafe {
+            CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 900, 700, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null())
+        };
+        assert!(!owner.is_null());
+        let info = ChannelInfo { name: "Keys".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let mut r: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetWindowRect(owner, &mut r) };
+        let f = FrameWindow::new(owner as isize, info, (480.0, 270.0), 1.0, (r.left + 20, r.top + 20), false).unwrap();
+        f.raise();
+        let at = |x: i32, y: i32| unsafe { SetWindowPos(f.hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+        let me = || unsafe { parent_rect(f.hwnd) };
+        let w = me()[2] - me()[0];
+        let work = [100, 50, 800, 600];
+        // Above the workspace's top: down to it.
+        at(300, 10);
+        f.clip_to(work, &[]);
+        assert_eq!(&me()[..2], &[300, 50]);
+        // Past the left, the right and the bottom.
+        at(-3000, 200);
+        f.clip_to(work, &[]);
+        assert_eq!(&me()[..2], &[100 + 31 - w, 200]);
+        at(3000, 3000);
+        f.clip_to(work, &[]);
+        assert_eq!(&me()[..2], &[800 - 31, 600 - 15]);
+        // The workspace shrinks.
+        let small = [100, 50, 600, 400];
+        f.clip_to(small, &[]);
+        assert_eq!(&me()[..2], &[600 - 31, 400 - 15]);
+        // Into workspace: fully in, the same size.
+        f.move_into_workspace();
+        let r = me();
+        assert_eq!(r[2] - r[0], w);
+        // Moved as little as it takes: its bottom-right at the workspace's (its top at the top when it is taller).
+        assert_eq!((r[2], r[3]), (600, (50 + r[3] - r[1]).max(400)));
+        drop(f);
         unsafe { DestroyWindow(owner) };
     }
 }
