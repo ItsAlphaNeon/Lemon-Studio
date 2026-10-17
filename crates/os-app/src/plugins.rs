@@ -696,7 +696,6 @@ impl Plugins {
             w.raise();
             return Ok(());
         }
-        let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
         let pos = crate::plugin_window::default_position(owner, scale);
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size.
         let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, h.detached.unwrap_or(detach_new))?;
@@ -706,12 +705,17 @@ impl Plugins {
         }
         // The editor takes the frame's scale (on Linux the X server's, not the main window's).
         let k = w.scale();
-        let size = p.open_editor(w.area(), k)?;
+        // The instance is locked only while its editor opens: the audio thread skips an instance it cannot lock, so
+        // everything done under the lock is silence for that channel. Held through the frame's creation, layout,
+        // painting and raise as well, opening a plugin window made a playing song drop out on that channel.
+        let size = {
+            let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
+            p.open_editor(w.area(), k)?
+        };
         h.link = fit_editor(&w, size, k);
         // On top: the app stacks it above its other windows (`State::raise`), and a new child window starts below
         // the open ones.
         w.raise();
-        drop(p);
         h.window = Some(w);
         let name = self.preset_name(row);
         if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
