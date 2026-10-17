@@ -1023,7 +1023,8 @@ fn linux_icon() -> Option<winit::window::Icon> {
 }
 
 /// `lemonstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-menu] [--browser-search TEXT] [--browser-folder DIR[|SUB]] [project.flp]`:
-/// paint one 1920×1080 frame offscreen (used to compare with reference measurements).
+/// paint one 1920×1080 frame offscreen (used to compare with reference measurements, and for the README's screenshots
+/// with `--float`, `--rack-pos`, `--rack-all`, `--rack-scroll` and `--insert`).
 fn screenshot(args: &[String]) {
     let mut out = None;
     let mut view = "playlist".to_string();
@@ -1054,6 +1055,12 @@ fn screenshot(args: &[String]) {
     let mut wait = false;
     let mut perf = false;
     let mut cpu_view: Option<String> = None;
+    let mut floats: Vec<(app::Win, os_ui::Rect)> = Vec::new();
+    let mut rack_pos: Option<(f32, f32)> = None;
+    let mut insert: Option<u16> = None;
+    let mut rack_h: Option<f32> = None;
+    let mut rack_scroll: Option<f32> = None;
+    let mut rack_all = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1115,10 +1122,47 @@ fn screenshot(args: &[String]) {
                     win_rect = Some(os_ui::Rect::new(x, y, w, h));
                 }
             }
+            // "--float piano:x,y,w,h": another window floated over the main view (playlist, mixer or piano).
+            "--float" => {
+                if let Some((name, r)) = it.next().and_then(|v| v.split_once(':')) {
+                    let win = match name {
+                        "playlist" => Some(app::Win::Playlist),
+                        "mixer" => Some(app::Win::Mixer),
+                        "piano" => Some(app::Win::PianoRoll),
+                        _ => None,
+                    };
+                    let v: Vec<f32> = r.split(',').filter_map(|n| n.parse().ok()).collect();
+                    if let (Some(win), [x, y, w, h]) = (win, &v[..]) {
+                        floats.push((win, os_ui::Rect::new(*x, *y, *w, *h)));
+                    }
+                }
+            }
+            // "--rack-pos x,y[,w,h]": the channel rack moved there, and sized.
+            "--rack-pos" => {
+                let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
+                if let [x, y, ..] = v[..] {
+                    rack_pos = Some((x, y));
+                }
+                if let [_, _, w, h] = v[..] {
+                    rack_w = Some(w);
+                    rack_h = Some(h);
+                }
+            }
+            // The channel rack shows every channel (not the group the project saved).
+            "--rack-all" => rack_all = true,
+            // Channel rack scrolled down by this many rows.
+            "--rack-scroll" => rack_scroll = it.next().and_then(|v| v.parse().ok()),
+            // The selected mixer insert (its effect slots fill the side panel).
+            "--insert" => insert = it.next().and_then(|v| v.parse().ok()),
             other => path = Some(std::path::PathBuf::from(other)),
         }
     }
     let mut app = App::new(path);
+    if let Some(i) = insert {
+        app.state.selected_mixer = i;
+        // Scrolled so the selected insert sits in the right half of the strips.
+        app.state.mixer_scroll = (f32::from(i.saturating_sub(18)) * views::mixer::STRIP_W).max(0.0);
+    }
     if let Some(d) = design {
         app.theme = app::design_theme(d, true);
         os_theme::set_current(&app.theme.colors);
@@ -1167,6 +1211,14 @@ fn screenshot(args: &[String]) {
         "none" => vec![],
         _ => vec![app::Win::Playlist],
     };
+    for (w, _) in &floats {
+        if !app.state.z.contains(w) {
+            app.state.z.push(*w);
+        }
+    }
+    if let Some(p) = rack_pos {
+        app.state.rack_pos = p;
+    }
     if rack {
         app.state.z.push(app::Win::ChannelRack);
     }
@@ -1192,6 +1244,15 @@ fn screenshot(args: &[String]) {
     if let Some(w) = rack_w {
         app.state.rack_size.0 = w;
     }
+    if let Some(h) = rack_h {
+        app.state.rack_size.1 = h;
+    }
+    if rack_all {
+        app.state.rack.filter = rack::Filter::All;
+    }
+    if let Some(r) = rack_scroll {
+        app.state.rack_scroll = r * views::rack::ROW_H;
+    }
     // The reference views fill the workspace unless `--win` floats the window.
     if let Some(w) = app.state.z.first().copied().filter(|w| w.slot().is_some()) {
         let ws = &mut app.state.wins[w.slot().unwrap_or(0)];
@@ -1203,8 +1264,21 @@ fn screenshot(args: &[String]) {
             None => ws.maxed = true,
         }
     }
+    let mut keys_h = 744.0;
+    for (w, r) in &floats {
+        if let Some(slot) = w.slot() {
+            let ws = &mut app.state.wins[slot];
+            ws.rect = *r;
+            ws.maxed = false;
+            ws.mini = false;
+        }
+        if *w == app::Win::PianoRoll {
+            // The note grid: the window less its title, toolbar, ruler and the control lane.
+            keys_h = (r.h - 280.0).max(100.0);
+        }
+    }
     if app.state.shown(app::Win::PianoRoll) {
-        piano::center_keys(&mut app.state, 744.0);
+        piano::center_keys(&mut app.state, keys_h);
     }
     if let Some(w) = bar_w {
         app.state.playlist_bar_w = w;
@@ -1223,6 +1297,8 @@ fn screenshot(args: &[String]) {
         app.state.cpu.misc = v == "misc";
         app.state.cpu.update(Instant::now(), None, 0, 0);
     }
+    // No "Opened <path>" in the title: the frame shows the project, not where it lives on disk.
+    app.state.message = None;
     let (w, h) = size.unwrap_or(((1920.0 * scale).round() as u32, (1080.0 * scale).round() as u32));
     let mut canvas = Canvas::new(w, h, scale).expect("canvas");
     app.paint(&mut canvas, None);
