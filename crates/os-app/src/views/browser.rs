@@ -576,13 +576,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         icons::draw(ui.c, icon, Rect::new(r.x + 1.0, 87.0 + dy, 12.0, 14.0), if hov { t.glyph } else { t.text_dim });
     }
     ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
-    // Tabs (spec ui/browser.md §1).
+    // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
     ui.c.fill_rect(Rect::span(0.0, 200.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
-    const TIPS: [&str; 5] = ["All", "Current project", "Plugin database", "Online content", "Favorites"];
-    for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Globe, Icon::Star].into_iter().enumerate() {
-        let cx = 20.0 + 40.0 * i as f32;
+    const TIPS: [&str; 4] = ["All", "Current project", "Plugin database", "Favorites"];
+    for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Star].into_iter().enumerate() {
+        let cx = 25.0 + 50.0 * i as f32;
         let rr = Rect::new(cx - 18.0, 108.0 + dy, 36.0, 30.0);
-        // Online content and favorites: not available yet, greyed out.
+        // Favorites: not available yet, greyed out.
         let hov = if i >= OFF_TABS {
             ui.off(rr, TIPS[i]);
             false
@@ -655,7 +655,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         let label = if row.path.is_some() { middle_cut(ui, f, &row.label, w) } else { row.label.clone() };
         ui.c.text_clip(f, x + 25.0, y, w, c, &label);
     }
-    let empty = if !s.browser_search.is_empty() { "No matches" } else if s.browser_tab == 3 { "No online content" } else { "No favorites yet" };
+    let empty = if !s.browser_search.is_empty() { "No matches" } else { "No favorites yet" };
     if rows.is_empty() && (s.browser_tab >= 3 || !s.browser_search.is_empty()) {
         ui.c.text(os_ui::Font::new(14).italic(), 22.0, top + 6.0, t.text_faint, empty);
     }
@@ -702,7 +702,7 @@ fn middle_cut(ui: &mut Ui, f: os_ui::Font, text: &str, w: f32) -> String {
     String::new()
 }
 
-/// Tabs from this one on (online content, favorites) are not available yet (spec §1).
+/// Tabs from this one on (favorites) are not available yet (spec §1).
 const OFF_TABS: usize = 3;
 
 /// Where the options menu opens (just below the title bar's ▸, spec §4).

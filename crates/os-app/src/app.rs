@@ -9952,10 +9952,12 @@ mod tests {
         app.mouse_move(grid.x + 210.0, grid.y + 60.0);
         app.mouse_up();
         assert_eq!(app.state.project.channels.len(), ch0 + 1);
-        // Online / favorites tabs are not available yet: greyed out (no tab hit), their pages empty; wheel never
-        // scrolls past the content.
-        assert!(!app.hits.iter().any(|h| h.action == Action::BrowserTab(4)));
-        app.act(Action::BrowserTab(4));
+        // The favorites tab is not available yet: greyed out (no tab hit), its page empty; wheel never scrolls past
+        // the content. There is no online content tab.
+        assert!(!app.hits.iter().any(|h| h.action == Action::BrowserTab(3)));
+        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Favorites")));
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder("Online content")));
+        app.act(Action::BrowserTab(3));
         assert!(rows(&app.state).is_empty());
         let r0 = hit_rect(&app, &Action::BrowserTab(0));
         click(&mut app, &mut c, r0);

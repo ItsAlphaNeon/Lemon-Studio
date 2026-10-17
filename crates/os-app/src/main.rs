@@ -1266,7 +1266,7 @@ fn screenshot(args: &[String]) {
     }
     app.state.show_browser = browser;
     if let Some(t) = browser_tab {
-        app.state.browser_tab = t.min(4);
+        app.state.browser_tab = t.min(3);
     }
     // A dropped folder (spec: ui/browser.md §6), opened; not remembered. `--browser-folder DIR[|sub/path]` opens a subfolder and selects it.
     if let Some(f) = browser_folder {
