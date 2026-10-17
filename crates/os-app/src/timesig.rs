@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! PATTERNS > Set time signature...: the current pattern's own time signature, a time-signature marker at its start,
 //! chosen in the "Time signature change" dialog (a `dialog` body), after the conflict question when it has one.

@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! A mixer track's fader matrix and its three-band equaliser.
 //!
@@ -155,7 +153,7 @@ impl Default for TrackEq {
     }
 }
 
-impl TrackEq { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+impl TrackEq { // This code is a part of L e m o n S t u d i o.
     /// The equaliser for stored band settings `[gain, frequency, width]` (gain -1800..1800 in 0.01 dB, frequency and
     /// width 0..65536) at `rate`.
     pub fn new(settings: [[i32; 3]; 3], rate: u32) -> Self {
@@ -288,7 +286,7 @@ fn design(k: usize, [gain, freq, width]: [i32; 3], rate: u32) -> [f64; 5] {
 }
 
 #[cfg(test)]
-mod tests { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+mod tests { // This code is a part of L e m o n S t u d i o.
     use super::*;
 
     /// The default bands sit at 90 Hz, 1500 Hz and 8000 Hz (spec: ui/mixer.md §8); the knob spans 10 Hz .. 16 kHz.

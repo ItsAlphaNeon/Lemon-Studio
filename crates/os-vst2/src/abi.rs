@@ -1,8 +1,7 @@
-// Copyright (C) 2026 ItsAlphaNeon (Lemon Studio's own parts). Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later AND BSD-3-Clause
-//
-// Lemon Studio's own parts of this file are NOT to be used as part of the ArtCraft suite, nor is any other part of
-// Lemon Studio. The parts that come from others' work keep their authors' copyright and licence, named below.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// It also holds others' work, which keeps its authors' copyright and licence, named below.
 
 //! The VST 2 binary interface: the structures, op-codes and flags Lemon Studio's host uses.
 //!

@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Message boxes and the file dialog (`dialog`, `filedlg`), painted over everything with a veil under them. Classic
 //! draws FL's message form as measured; Lemon draws the same layout in the Lemon design's rounded parts.

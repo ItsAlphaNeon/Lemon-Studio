@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! What a VST 2 instance saves: the state record FL Studio's plugin wrapper keeps for a VST 2 plugin, so a project's
 //! VST 2 plugins move between the two programs (spec: flp/events/plugins.md §4, "FL 26's own VST2 wrapper").

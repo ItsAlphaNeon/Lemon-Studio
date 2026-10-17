@@ -1,6 +1,6 @@
 [package]
 name = "watermark"
-description = "Checks the repository watermark: every source file opens with the copyright and ArtCraft notice"
+description = "Checks the repository watermark: every source file opens with its copyright holders and licence"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

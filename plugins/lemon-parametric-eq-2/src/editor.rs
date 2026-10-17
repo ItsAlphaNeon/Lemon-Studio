@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The plugin editor: a child of the host's window (Win32, X11 on Linux, an NSView on macOS) that paints `view` with
 //! the os-ui canvas, and the editor logic (platform independent): token / fader / knob drags with the cursor held in
