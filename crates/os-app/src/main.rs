@@ -856,6 +856,25 @@ impl ApplicationHandler for Shell {
                         }
                         event
                     };
+                    // Windows: Ctrl+Alt is AltGr there, so a key that types nothing with it (Ctrl+Alt+Z, the redo) comes
+                    // with no character; shortcuts go by the key itself. A character AltGr does type is kept. Text sent
+                    // as characters rather than keys (an on-screen keyboard, a remote desktop, the emoji panel) comes as
+                    // an unidentified key carrying its text: it types that text.
+                    #[cfg(windows)]
+                    let event = {
+                        use winit::keyboard::Key;
+                        use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+                        let mut event = event;
+                        if matches!(event.logical_key, Key::Unidentified(_)) {
+                            event.logical_key = match (event.key_without_modifiers(), &event.text) {
+                                (Key::Character(c), _) if self.mods.shift_key() => Key::Character(c.to_uppercase().into()),
+                                (Key::Character(c), _) => Key::Character(c),
+                                (_, Some(t)) if !t.chars().any(char::is_control) => Key::Character(t.clone()),
+                                (k, _) => k,
+                            };
+                        }
+                        event
+                    };
                     self.app.key(&event.logical_key, ctrl(self.mods), self.mods.alt_key());
                     window.request_redraw();
                 }
