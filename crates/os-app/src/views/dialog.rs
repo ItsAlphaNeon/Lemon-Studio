@@ -133,7 +133,7 @@ fn msg_box(ui: &mut Ui, s: &State, m: &Modal, msg: &Msg) {
         let (mut x, y) = (r.x + TEXT_X, body.y + 13.0 + k as f32 * LINE);
         for (run, hi) in line {
             let col = match (*hi, lemon) {
-                (true, true) => brand::MAIN,
+                (true, true) => t.brand_lit(brand::MAIN),
                 (true, false) => t.h(0xff9e00),
                 _ => t.text,
             };
@@ -210,9 +210,9 @@ fn line_width(ui: &mut Ui, font: Font, line: &[(String, bool)]) -> f32 {
 fn icon(ui: &mut Ui, kind: Kind, cx: f32, cy: f32) {
     let t = ui.t;
     let (glyph, back, k) = if lemon(ui) {
-        let tile_c = if kind == Kind::Error { t.record.mix(Color::rgb(0x161616), 0.78) } else { brand::COLORED_DARK };
+        let tile_c = if kind == Kind::Error { t.record.mix(Color::rgb(0x161616), 0.78) } else { t.brand_lit(brand::COLORED_DARK) };
         ui.c.fill_rrect(Rect::new(cx - 28.0, cy - 28.0, 56.0, 56.0), lk::r_btn(t) + 4.0, tile_c);
-        (if kind == Kind::Error { t.record } else { brand::MAIN }, tile_c, 0.72)
+        (if kind == Kind::Error { t.record } else { t.brand_lit(brand::MAIN) }, tile_c, 0.72)
     } else {
         (t.tx(0x98a2a8), t.s(PANEL), 1.0)
     };
@@ -252,8 +252,8 @@ pub(super) fn button(ui: &mut Ui, b: Rect, label: &str, main: bool, hov: bool, d
     let ink = if lemon(ui) {
         let rad = lk::r_btn(t);
         if main {
-            lk::lit(ui.c, b, rad, hov);
-            lk::ink_on_lemon()
+            lk::lit_in(ui.c, ui.t, b, rad, hov);
+            lk::ink_on_lit(ui.t)
         } else {
             lk::outlined(ui.c, b, rad, t.s(0x161819), lk::face(t.s(0x2a2d2f), kit::State::new(hov, down, false)));
             if hov { t.glyph } else { t.text }
@@ -488,7 +488,7 @@ fn shortcut_list(ui: &mut Ui, f: &crate::shortcuts::Form, row: usize, b: Rect, d
                 ui.c.fill_rect(rr, t.menu_pop_hi);
             }
         }
-        let col = if i == f.vals[row] { if lemon(ui) { brand::MAIN } else { t.glyph } } else { t.text };
+        let col = if i == f.vals[row] { if lemon(ui) { t.brand_sel(brand::MAIN) } else { t.glyph } } else { t.text };
         ui.c.text_clip(font, rr.x + 10.0, (rr.cy() - lh / 2.0).round(), rr.w - 16.0, col, ch);
     }
 }
@@ -551,7 +551,7 @@ pub(super) fn field(ui: &mut Ui, r: Rect, fl: &Field, focused: bool, h: DHit, hi
     let t = ui.t;
     let lemon = lemon(ui);
     hit(ui, r, h, hint);
-    well(ui, r, focused.then_some(if lemon { brand::MAIN } else { FOCUS_BLUE }));
+    well(ui, r, focused.then_some(if lemon { t.brand_sel(brand::MAIN) } else { FOCUS_BLUE }));
     let f = Font::new(13);
     let lh = ui.c.line_height(f);
     let inner = Rect::new(r.x + 7.0, r.y + 2.0, r.w - 14.0, r.h - 4.0);
@@ -562,8 +562,8 @@ pub(super) fn field(ui: &mut Ui, r: Rect, fl: &Field, focused: bool, h: DHit, hi
     let mut ink = t.text;
     if focused && fl.all {
         let w = ui.c.text_width(f, &fl.text);
-        ui.c.fill_rect(Rect::new(x - 1.0, y, w + 2.0, lh), if lemon { brand::COLORED_DARK } else { SEL_BLUE });
-        ink = if lemon { brand::HIGHLIGHT } else { Color::rgb(0xffffff) };
+        ui.c.fill_rect(Rect::new(x - 1.0, y, w + 2.0, lh), if lemon { t.brand_sel(brand::COLORED_DARK) } else { SEL_BLUE });
+        ink = if lemon { t.brand_sel(brand::HIGHLIGHT) } else { Color::rgb(0xffffff) };
     }
     ui.c.text(f, x, y, ink, &fl.text);
     if focused && !fl.all {
@@ -577,7 +577,7 @@ fn row_bg(ui: &mut Ui, row: Rect, sel: bool, hov: bool) {
     let t = ui.t;
     if lemon(ui) {
         if sel {
-            ui.c.fill_rrect(Rect::new(row.x + 3.0, row.y + 1.0, row.w - 6.0, row.h - 2.0), 4.0, brand::COLORED_DARK);
+            ui.c.fill_rrect(Rect::new(row.x + 3.0, row.y + 1.0, row.w - 6.0, row.h - 2.0), 4.0, t.brand_sel(brand::COLORED_DARK));
         } else if hov {
             ui.c.fill_rrect(Rect::new(row.x + 3.0, row.y + 1.0, row.w - 6.0, row.h - 2.0), 4.0, t.s(0x262a2c));
         }
@@ -592,7 +592,7 @@ fn row_bg(ui: &mut Ui, row: Rect, sel: bool, hov: bool) {
 fn row_ink(ui: &Ui, sel: bool, hov: bool) -> Color {
     let t = ui.t;
     if sel && lemon(ui) {
-        brand::HIGHLIGHT
+        t.brand_sel(brand::HIGHLIGHT)
     } else if sel || hov {
         t.glyph
     } else {
@@ -631,7 +631,7 @@ fn places(ui: &mut Ui, f: &FileDlg, r: Rect) {
             PlaceKind::Drive => &tabler::BOX,
         };
         let ink = row_ink(ui, sel, hov);
-        let ic = if sel && lemon(ui) { brand::MAIN } else if sel || hov { t.glyph } else { t.text_dim };
+        let ic = if sel && lemon(ui) { t.brand_sel(brand::MAIN) } else if sel || hov { t.glyph } else { t.text_dim };
         ui.c.icon(shape, Rect::new(row.x + 8.0, row.y + 3.0, 16.0, 16.0), ic);
         ui.c.text_clip(font, row.x + 30.0, (row.cy() - lh / 2.0).round(), row.w - 36.0, ink, &p.label);
         y += 22.0;
@@ -686,7 +686,7 @@ fn list(ui: &mut Ui, f: &FileDlg, r: Rect) {
         ui.c.text(font, tx, ty, col, label);
         if f.sort == by {
             let cx = if right { tx - 8.0 } else { tx + tw + 8.0 };
-            kit::chevron(ui.c, cx, hr.cy(), 3.0, if f.reversed { kit::Dir::Up } else { kit::Dir::Down }, if lemon { brand::MAIN } else { t.text_dim });
+            kit::chevron(ui.c, cx, hr.cy(), 3.0, if f.reversed { kit::Dir::Up } else { kit::Dir::Down }, if lemon { t.brand_lit(brand::MAIN) } else { t.text_dim });
         }
         if by != SortBy::Name {
             ui.c.fill_rect(Rect::new(x0, hr.y + 4.0, 1.0, hr.h - 8.0), t.s(WELL_LINE));
@@ -703,7 +703,7 @@ fn list(ui: &mut Ui, f: &FileDlg, r: Rect) {
         let sel = f.sel == Some(i);
         row_bg(ui, row, sel, hov);
         let ink = row_ink(ui, sel, hov);
-        let (ic, icol) = if e.dir { (Icon::Folder, if lemon { brand::MAIN } else { t.browser_folder }) } else { (file_icon(&e.name), if sel || hov { t.glyph } else { t.text_dim }) };
+        let (ic, icol) = if e.dir { (Icon::Folder, if lemon { t.brand_lit(brand::MAIN) } else { t.browser_folder }) } else { (file_icon(&e.name), if sel || hov { t.glyph } else { t.text_dim }) };
         icons::draw(ui.c, ic, Rect::new(row.x + 8.0, row.y + 2.0, 16.0, 16.0), icol);
         let ty = (row.cy() - lh / 2.0).round();
         ui.c.text_clip(font, row.x + 30.0, ty, x_size - row.x - 36.0, ink, &e.name);
@@ -759,7 +759,7 @@ fn filter_list(ui: &mut Ui, f: &FileDlg, c: Rect, dlg: Rect) {
                 ui.c.fill_rect(row, t.menu_pop_hi);
             }
         }
-        let col = if i == f.filter { if lemon(ui) { brand::MAIN } else { t.glyph } } else { t.text };
+        let col = if i == f.filter { if lemon(ui) { t.brand_sel(brand::MAIN) } else { t.glyph } } else { t.text };
         ui.c.text_clip(font, row.x + 10.0, (row.cy() - lh / 2.0).round(), row.w - 16.0, col, &flt.label());
     }
 }

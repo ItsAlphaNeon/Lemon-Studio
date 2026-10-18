@@ -95,7 +95,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     let pad = at(PAD.x, PAD.y, PAD.w, PAD.h);
     ui.hit(pad, Action::Tapper(TapAct::Pad), "Tap me, or press any key on your MIDI keyboard");
     let k = tap.flash.clamp(0.0, 1.0);
-    let (lit, ink) = if lemon { (brand::MAIN, lk::ink_on_lemon()) } else { (t.s(0xbdbdbd), t.s(0xbdbdbd).shade(-0.35)) };
+    let (lit, ink) = if lemon { (t.brand_lit(brand::MAIN), lk::ink_on_lit(ui.t)) } else { (t.s(0xbdbdbd), t.s(0xbdbdbd).shade(-0.35)) };
     if lemon {
         // Flat rounded square, lemon while lit.
         let face = t.s(0x282b2c).mix(lit, k);

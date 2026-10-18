@@ -44,15 +44,15 @@ fn cc(t: &os_theme::Palette, v: u32) -> Color {
         CLIP_BORDER => Color::rgb(0x1e1e1e),
         TITLE_TOP | TITLE_BOTTOM => Color::rgb(0x5c5c5c),
         TITLE_TEXT => Color::rgb(0xf2f2f2),
-        SEL_TITLE => brand::MAIN,
-        SEL_TEXT => brand::COLORED_DARK,
+        SEL_TITLE => t.brand_sel(brand::MAIN),
+        SEL_TEXT => t.brand_sel(brand::COLORED_DARK),
         SEL_BODY => Color::rgb(0x2e2810),
         MUTED_TITLE => Color::rgb(0x2b2b2b),
         MUTED_TEXT => Color::rgb(0x767676),
         DEFAULT_BODY => Color::rgb(0x1c1c1c),
         NOTE => Color::rgb(0xd6d6d6),
         WAVE => Color::rgb(0xe6e6e6),
-        CURVE => brand::HIGHLIGHT,
+        CURVE => t.brand_lit(brand::HIGHLIGHT),
         _ => t.s(v),
     }
 }
@@ -1161,11 +1161,11 @@ fn tool_face(ui: &mut Ui, b: Rect, on: bool, hov: bool) -> Color {
     let t = ui.t;
     if super::lemon(ui) {
         if on {
-            lk::lit(ui.c, b.outset(1.0), lk::r_btn(t), hov);
+            lk::lit_in(ui.c, ui.t, b.outset(1.0), lk::r_btn(t), hov);
         } else if hov {
             ui.c.fill_rrect(b.outset(1.0), lk::r_btn(t), t.button_hi);
         }
-        return if on { lk::ink_on_lemon() } else { t.glyph };
+        return if on { lk::ink_on_lit(ui.t) } else { t.glyph };
     }
     if on {
         ui.c.fill_rrect(b.outset(1.0), 3.0, t.glyph.with_alpha(40));

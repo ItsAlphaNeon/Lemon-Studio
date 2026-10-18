@@ -202,7 +202,7 @@ fn list(ui: &mut Ui, s: &State, f: &SaveForm, k: u8, b: Rect) {
                 ui.c.fill_rect(row, t.menu_pop_hi);
             }
         }
-        let col = if i == now { if lemon { brand::MAIN } else { t.glyph } } else { t.text };
+        let col = if i == now { if lemon { t.brand_sel(brand::MAIN) } else { t.glyph } } else { t.text };
         ui.c.text_clip(font, row.x + 10.0, (row.cy() - lh / 2.0).round(), row.w - 16.0, col, text);
     }
 }

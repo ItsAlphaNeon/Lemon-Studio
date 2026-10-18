@@ -565,10 +565,12 @@ fn knob(c: &mut Canvas, cx: f32, cy: f32, v: f32, bipolar: bool, dot: Color) {
 }
 
 fn value_box(c: &mut Canvas, r: Rect, s: &str) {
-    let lemon = os_ui::kit::lemon::on(&os_theme::current());
+    let p = os_theme::current();
+    let lemon = os_ui::kit::lemon::on(&p);
     if lemon {
         use os_theme::design::lemon as brand;
-        os_ui::kit::lemon::outlined(c, r, 4.0, brand::COLORED_DARK.shade(-0.25), brand::COLORED_DARK);
+        let well = p.brand_lit(brand::COLORED_DARK);
+        os_ui::kit::lemon::outlined(c, r, 4.0, well.shade(-0.25), well);
     } else {
         c.fill_rrect(r, 4.0, Color::rgb(0x631d25));
         c.fill_rect_gradient(r.inset(1.0), Color::rgb(0x8d434b), Color::rgb(0x833941), 3.0);
@@ -576,7 +578,7 @@ fn value_box(c: &mut Canvas, r: Rect, s: &str) {
     let f = Font::light(22, 0);
     let w = c.text_width(f, s);
     let lh = c.line_height(f);
-    let ink = if lemon { os_theme::design::lemon::HIGHLIGHT } else { Color::rgb(0xe8dfe2) };
+    let ink = if lemon { p.brand_lit(os_theme::design::lemon::HIGHLIGHT) } else { Color::rgb(0xe8dfe2) };
     c.text(f, r.right() - 11.0 - w, (r.cy() - lh / 2.0).round(), ink, s);
 }
 

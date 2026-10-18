@@ -360,11 +360,11 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
             // Lemon: the active tool is a lit rounded square with a dark glyph.
             let bg = b.outset(1.0);
             if on {
-                lk::lit(ui.c, bg, lk::r_btn(t), hov);
+                lk::lit_in(ui.c, ui.t, bg, lk::r_btn(t), hov);
             } else if hov {
                 ui.c.fill_rrect(bg, lk::r_btn(t), t.button_hi);
             }
-            if on { lk::ink_on_lemon() } else { t.glyph }
+            if on { lk::ink_on_lit(ui.t) } else { t.glyph }
         } else if on {
             t.pill
         } else if hov {

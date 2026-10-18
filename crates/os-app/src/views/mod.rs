@@ -22,6 +22,7 @@ pub mod project_forms;
 pub mod rack;
 pub mod save_form;
 pub mod tapper;
+pub mod theme_preview;
 pub mod toolbar;
 pub mod typein;
 
@@ -407,7 +408,7 @@ pub fn tool_face(ui: &mut Ui, r: Rect, look: Look) -> Color {
         button_face(ui, r, look);
     } else if lit && lemon(ui) {
         ui.c.fill_rrect(r.inset(1.0), ui.t.style.radius, ui.t.button);
-        return os_theme::design::lemon::MAIN;
+        return ui.t.brand_lit(os_theme::design::lemon::MAIN);
     } else if lit {
         ui.c.fill_rect(Rect::new(r.x, r.y + 1.0, r.w, r.h - 2.0), ui.t.s(0x282c2e));
         return ui.t.a(0x4589c7);

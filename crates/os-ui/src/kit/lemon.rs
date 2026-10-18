@@ -51,9 +51,14 @@ pub fn face(base: Color, st: State) -> Color {
     }
 }
 
-/// Text / glyph colour on a lemon face.
+/// Text / glyph colour on a lemon face (the plugin editors' brand look).
 pub fn ink_on_lemon() -> Color {
     brand::COLORED_DARK
+}
+
+/// Text / glyph colour on a lit face (`lit_in`) under the applied theme.
+pub fn ink_on_lit(t: &Palette) -> Color {
+    t.brand_lit(brand::COLORED_DARK)
 }
 
 /// Text colour that reads on `col` (dark on light faces, light on dark ones).
@@ -61,9 +66,16 @@ pub fn ink_on(col: Color) -> Color {
     if col.hsl().2 > 0.62 { brand::COLORED_DARK } else { Color::rgb(0xf4f4f4) }
 }
 
-/// Lit (lemon) face: a soft top-light gradient from the highlight to the main colour.
+/// Lit (lemon) face: a soft top-light gradient from the highlight to the main colour (the plugin editors' brand look).
 pub fn lit(c: &mut Canvas, r: Rect, radius: f32, hover: bool) {
     let (top, bottom) = if hover { (brand::HIGHLIGHT, brand::MAIN.mix(brand::HIGHLIGHT, 0.35)) } else { (brand::HIGHLIGHT.mix(brand::MAIN, 0.45), brand::MAIN) };
+    c.fill_rect_gradient(r, top, bottom, radius);
+}
+
+/// `lit` in the applied theme's highlight (`Palette::brand_lit`).
+pub fn lit_in(c: &mut Canvas, t: &Palette, r: Rect, radius: f32, hover: bool) {
+    let (h, m) = (t.brand_lit(brand::HIGHLIGHT), t.brand_lit(brand::MAIN));
+    let (top, bottom) = if hover { (h, m.mix(h, 0.35)) } else { (h.mix(m, 0.45), m) };
     c.fill_rect_gradient(r, top, bottom, radius);
 }
 
@@ -101,7 +113,7 @@ pub fn button(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
         return;
     }
     if st.on || st.pressed {
-        lit(c, rr, rad, st.hover && st.on);
+        lit_in(c, t, rr, rad, st.hover && st.on);
         return;
     }
     c.fill_rrect(rr, rad, face(t.button, st));
@@ -125,7 +137,7 @@ pub fn combo(c: &mut Canvas, t: &Palette, r: Rect, text: &str, font: Font, st: S
     outlined(c, r, r_btn(t).min(r.h / 2.0), base.shade(-0.2), face(base, st));
     let lh = c.line_height(font);
     c.text_clip(font, r.x + 6.0, (r.cy() - lh / 2.0).round(), r.w - 22.0, if st.hover { t.tx(0xffffff) } else { t.text }, text);
-    chevron(c, r.right() - 10.0, r.cy(), 3.5, Dir::Down, if st.hover { brand::MAIN } else { t.text_dim });
+    chevron(c, r.right() - 10.0, r.cy(), 3.5, Dir::Down, if st.hover { t.brand_lit(brand::MAIN) } else { t.text_dim });
 }
 
 /// Number box with a spin mark.
@@ -141,7 +153,7 @@ pub fn value_box(c: &mut Canvas, t: &Palette, r: Rect, text: &str, font: Font, s
 pub fn pill(c: &mut Canvas, t: &Palette, r: Rect, label: &str, font: Font, st: State) {
     let rad = r_btn(t).min(r.h / 2.0);
     if st.on {
-        lit(c, r, rad, st.hover);
+        lit_in(c, t, r, rad, st.hover);
         c.text_center(font, r, t.pill_text, label);
     } else {
         if st.hover {
@@ -158,13 +170,13 @@ pub fn led(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, radius: f32, st: State
     let h = radius - 0.5;
     let r = Rect::new(cx - h, cy - h, 2.0 * h, 2.0 * h);
     let rad = (radius * 0.45).max(2.0);
-    let rim = if st.hover { brand::DARK_HIGHLIGHT.shade(0.15) } else { t.toolbar_line.shade(-0.2) };
+    let rim = if st.hover { t.brand_grey(brand::DARK_HIGHLIGHT).shade(0.15) } else { t.toolbar_line.shade(-0.2) };
     c.fill_rrect(r, rad, rim);
     let inner = r.inset(1.0);
     if st.on {
-        c.fill_rect_gradient(inner, brand::HIGHLIGHT, brand::MAIN, rad - 1.0);
+        c.fill_rect_gradient(inner, t.brand_led(brand::HIGHLIGHT), t.brand_led(brand::MAIN), rad - 1.0);
     } else {
-        c.fill_rrect(inner, rad - 1.0, brand::COLORED_DARK.mix(t.toolbar_line, 0.35));
+        c.fill_rrect(inner, rad - 1.0, t.brand_led(brand::COLORED_DARK).mix(t.toolbar_line, 0.35));
     }
 }
 
@@ -185,7 +197,7 @@ pub fn knob(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, value: f32, b
     let (a0, a1) = if bipolar { (start + sweep / 2.0, a) } else { (start, a) };
     let span = (a1 - a0).abs();
     let off = st.disabled;
-    let value_col = if off { brand::DARK_HIGHLIGHT } else { brand::MAIN };
+    let value_col = if off { t.brand_grey(brand::DARK_HIGHLIGHT) } else { t.brand_lit(brand::MAIN) };
     let track = t.toolbar_line.shade(-0.1);
     // Ring radius, ring width, disc radius.
     let (ring, w, disc) = match look {
@@ -213,12 +225,12 @@ pub fn knob(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, value: f32, b
 
 /// Fader cap centred at (cx, cy) (same 14 x 23 footprint as Classic): rounded, with a centre line that turns
 /// lemon when the track is selected.
-pub fn fader_handle(c: &mut Canvas, _t: &Palette, cx: f32, cy: f32, selected: bool, st: State) {
+pub fn fader_handle(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, selected: bool, st: State) {
     let h = Rect::new(cx - 7.0, cy - 11.0, 14.0, 23.0);
     c.fill_rrect(h.outset(1.0), 5.0, Color::rgb(0x161616));
     let base = if st.hover || st.pressed { Color::rgb(0x6a6a6a) } else { Color::rgb(0x5c5c5c) };
     c.fill_rect_gradient(h, base.shade(0.08), base.shade(-0.25), 4.0);
-    let line = if selected { brand::MAIN } else { Color::rgb(0xdedede) };
+    let line = if selected { t.brand_sel(brand::MAIN) } else { Color::rgb(0xdedede) };
     c.fill_rrect(Rect::new(h.x + 2.0, cy - 1.0, h.w - 4.0, 2.0), 1.0, line);
 }
 
@@ -234,7 +246,8 @@ pub fn scrollbar(c: &mut Canvas, t: &Palette, track: Rect, vertical: bool, pos: 
 
 /// The scroll bar thumb's own colour (`super::scroll_thumb` without high visibility).
 pub fn scroll_thumb(t: &Palette, st: State) -> Color {
-    if st.pressed { brand::DARK_HIGHLIGHT.shade(0.15) } else if st.hover { brand::DARK_HIGHLIGHT } else { t.overview }
+    let hi = t.brand_grey(brand::DARK_HIGHLIGHT);
+    if st.pressed { hi.shade(0.15) } else if st.hover { hi } else { t.overview }
 }
 
 // ---------------------------------------------------------------- windows and popups
@@ -274,14 +287,15 @@ pub fn step(c: &mut Canvas, t: &Palette, r: Rect, on: bool, odd: bool, dim: bool
     let rad = r_small(t);
     let (a, b) = if dim { (t.step_dim_a, t.step_dim_b) } else { (t.step_a, t.step_b) };
     let off = if odd { b } else { a };
+    let (main, high) = (t.brand_sel(brand::MAIN), t.brand_sel(brand::HIGHLIGHT));
     if on {
-        let (top, bottom) = if dim { (brand::MAIN.mix(off, 0.45), brand::MAIN.mix(off, 0.55)) } else { (brand::HIGHLIGHT.mix(brand::MAIN, 0.5), brand::MAIN) };
-        c.fill_rect_gradient(r, if hover { brand::HIGHLIGHT } else { top }, bottom, rad);
+        let (top, bottom) = if dim { (main.mix(off, 0.45), main.mix(off, 0.55)) } else { (high.mix(main, 0.5), main) };
+        c.fill_rect_gradient(r, if hover { high } else { top }, bottom, rad);
         if playing {
-            c.fill_rrect(Rect::new(r.x + 2.0, r.bottom() - 4.0, r.w - 4.0, 2.0), 1.0, brand::COLORED_DARK);
+            c.fill_rrect(Rect::new(r.x + 2.0, r.bottom() - 4.0, r.w - 4.0, 2.0), 1.0, t.brand_sel(brand::COLORED_DARK));
         }
     } else {
-        c.fill_rrect(r, rad, if hover { off.mix(brand::DARK_HIGHLIGHT, 0.4) } else { off });
+        c.fill_rrect(r, rad, if hover { off.mix(t.brand_grey(brand::DARK_HIGHLIGHT), 0.4) } else { off });
     }
 }
 
@@ -292,10 +306,11 @@ pub fn name_button(c: &mut Canvas, t: &Palette, r: Rect, col: Option<Color>, foc
         Some(col) => col.mix(base, 0.6),
         None => base,
     };
-    let face_c = if hover { face_c.mix(brand::DARK_HIGHLIGHT, 0.3) } else { face_c };
+    let hi = t.brand_grey(brand::DARK_HIGHLIGHT);
+    let face_c = if hover { face_c.mix(hi, 0.3) } else { face_c };
     let rad = r_btn(t).min(r.h / 2.0);
     if focused {
-        outlined(c, r, rad, brand::MAIN, face_c.mix(brand::DARK_HIGHLIGHT, 0.2));
+        outlined(c, r, rad, t.brand_sel(brand::MAIN), face_c.mix(hi, 0.2));
     } else {
         c.fill_rrect(r, rad, face_c);
     }
@@ -303,12 +318,13 @@ pub fn name_button(c: &mut Canvas, t: &Palette, r: Rect, col: Option<Color>, foc
         // A colour tab at the left edge.
         c.fill_rrect(Rect::new(r.x + 3.0, r.y + 5.0, 3.0, r.h - 10.0), 1.5, col.mix(Color::rgb(0xffffff), 0.25));
     }
-    if focused { Color::rgb(0xffffff) } else { t.name_text }
+    // White on the focused face; dark when a light theme makes the face light.
+    if focused { os_theme::fl::readable(Color::rgb(0xffffff), face_c, 0.45) } else { t.name_text }
 }
 
 /// A small control box (rack mixer-track and loop boxes, pattern length).
 pub fn small_box(c: &mut Canvas, t: &Palette, r: Rect, face_c: Color, hover: bool) {
-    outlined(c, r, r_small(t).min(r.h / 2.0), face_c.shade(-0.3), if hover { face_c.mix(brand::DARK_HIGHLIGHT, 0.3) } else { face_c });
+    outlined(c, r, r_small(t).min(r.h / 2.0), face_c.shade(-0.3), if hover { face_c.mix(t.brand_grey(brand::DARK_HIGHLIGHT), 0.3) } else { face_c });
 }
 
 /// A piano-roll / mini-roll note body.
@@ -325,7 +341,7 @@ pub fn note(c: &mut Canvas, r: Rect, fill: Color, rim: Color) {
 /// Track header of the playlist: a rounded tile with an optional colour tab.
 pub fn track_header(c: &mut Canvas, t: &Palette, r: Rect, col: Option<Color>, hover: bool) {
     let rad = r_btn(t).min(r.h / 2.0);
-    c.fill_rrect(r, rad, if hover { t.track_header.mix(brand::DARK_HIGHLIGHT, 0.25) } else { t.track_header });
+    c.fill_rrect(r, rad, if hover { t.track_header.mix(t.brand_grey(brand::DARK_HIGHLIGHT), 0.25) } else { t.track_header });
     if let Some(col) = col {
         c.fill_rrect(Rect::new(r.x + 3.0, r.y + 4.0, 3.0, (r.h - 8.0).max(2.0)), 1.5, col);
     }
