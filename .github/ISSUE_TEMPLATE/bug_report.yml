@@ -1,0 +1,83 @@
+name: Bug report
+description: Report something that is broken or behaves unexpectedly in Lemon Studio.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out each section as completely as you can.
+        Before submitting, search existing issues to make sure this hasn't already been reported.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the issue
+      description: |
+        Explain the problem in as much detail as you can: what you were doing, what went wrong, and any error messages you saw.
+        Screenshots or screen recordings can be dragged into this box.
+      placeholder: When I drag a pattern onto the playlist, the clip appears one bar later than where I dropped it...
+    validations:
+      required: true
+
+  - type: input
+    id: branch
+    attributes:
+      label: Branch
+      description: Which branch did you build Lemon Studio from? Include the commit hash if you know it (`git rev-parse --short HEAD`).
+      placeholder: main @ a1b2c3d
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps needed to make the issue happen, starting from launching the app.
+      placeholder: |
+        1. Open Lemon Studio
+        2. Create a new project
+        3. Click on '...'
+        4. See the problem
+    validations:
+      required: true
+
+  - type: textarea
+    id: flp
+    attributes:
+      label: Project file (FLP)
+      description: |
+        If the issue involves a specific project, please attach an `.flp` that demonstrates it.
+        GitHub doesn't accept `.flp` files directly, so **zip the file first** and drag the `.zip` into this box.
+        Strip out anything you don't want public; the smallest project that still shows the issue is ideal.
+      placeholder: Drag a zipped .flp here, or leave blank if a project file isn't relevant.
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Intended behavior / proposed solution
+      description: What did you expect to happen instead? If you have an idea of how it should be fixed, describe it here.
+      placeholder: The clip should be placed at the bar where it was dropped, snapped to the current grid setting.
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Logs, plugin names and formats (VST2/VST3/CLAP), audio device, or anything else that might help.
+    validations:
+      required: false
