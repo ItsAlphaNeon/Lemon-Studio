@@ -179,6 +179,18 @@ impl FlTheme {
         FlTheme::parse(DARK_TEXT)
     }
 
+    /// Whether this is the stock Dark theme, whatever its two options (Light mode, clip note colours): the colours a
+    /// skin has of its own (Settings > Theme > Themes: Default).
+    pub fn is_stock(&self) -> bool {
+        self.same_colours(&FlTheme::dark())
+    }
+
+    /// Whether the two themes differ at most in their two options (Light mode, clip note colours).
+    pub fn same_colours(&self, other: &FlTheme) -> bool {
+        let plain = |t: &FlTheme| FlTheme { light_mode: true, override_clips: false, ..t.clone() };
+        plain(self) == plain(other)
+    }
+
     /// The surface adjustment the theme applies: its own with Light mode on; with it off none, so surfaces stay in the
     /// base palette (spec §4; ui/settings-choices.md "Light mode and clip note colours").
     pub fn applied_surface(&self) -> Surface {
@@ -274,12 +286,15 @@ pub struct Xform {
     pub mute: Option<(Color, Color)>,
     /// A design's re-colouring (`design::palette`), applied instead of the surface / key pairs above.
     pub design: Option<crate::design::DesignMap>,
+    /// A theme laid over the design's colours (after `design`).
+    pub retint: Option<crate::design::Retint>,
 }
 
 impl Xform {
     pub fn surface(&self, c: Color) -> Color {
         if let Some(d) = &self.design {
-            return d.surface(c);
+            let c = d.surface(c);
+            return self.retint.as_ref().map_or(c, |r| r.surface(c));
         }
         match self.surf {
             Some(s) => s.apply(DARK.invert(c)),
@@ -294,25 +309,29 @@ impl Xform {
     }
     pub fn accent(&self, c: Color) -> Color {
         if let Some(d) = &self.design {
-            return d.accent_of(c);
+            let c = d.accent_of(c);
+            return self.retint.as_ref().map_or(c, |r| r.accent(c));
         }
         Self::key(self.accent, c)
     }
     pub fn highlight(&self, c: Color) -> Color {
         if let Some(d) = &self.design {
-            return d.highlight_of(c);
+            let c = d.highlight_of(c);
+            return self.retint.as_ref().map_or(c, |r| r.highlight(c));
         }
         Self::key(self.highlight, c)
     }
     pub fn text(&self, c: Color) -> Color {
         if let Some(d) = &self.design {
-            return d.text_of(c);
+            let c = d.text_of(c);
+            return self.retint.as_ref().map_or(c, |r| r.text(c));
         }
         Self::key(self.text, c)
     }
     pub fn mute(&self, c: Color) -> Color {
         if let Some(d) = &self.design {
-            return d.mute_of(c);
+            let c = d.mute_of(c);
+            return self.retint.as_ref().map_or(c, |r| r.mute(c));
         }
         Self::key(self.mute, c)
     }
@@ -345,6 +364,7 @@ pub fn palette(th: &FlTheme) -> Palette {
     };
     out.xf = Xform {
         design: None,
+        retint: None,
         surf: (surface != DARK).then_some(surface),
         accent: pair(dark.selected, th.selected),
         highlight: pair(dark.highlight, th.highlight),
@@ -388,7 +408,14 @@ pub fn palette(th: &FlTheme) -> Palette {
             *slot = slot.shade(-STEP_DARKER);
         }
     }
-    // Browser text brightness (§3 Text).
+    finish(&mut out, th, base.note_top, !identity);
+    out
+}
+
+/// What a theme colours directly whatever the skin (spec §3): browser text brightness, the readability guard (`guard`),
+/// custom grids, the solid workspace colour, note colours (re-keyed from `note_from`, the skin's note body), meters and
+/// the Waves gradient.
+pub(crate) fn finish(out: &mut Palette, th: &FlTheme, note_from: Color, guard: bool) {
     // Text: browser text brightness, -255 darker .. +255 brighter (spec §3). On light themes darker = more contrast.
     if th.text != 0.0 {
         let k = (th.text / 255.0).clamp(-1.0, 1.0);
@@ -404,9 +431,13 @@ pub fn palette(th: &FlTheme) -> Palette {
         ("text_dim", out.window_title), ("glyph", out.toolbar), ("menu_text", out.menu_panel),
         ("name_text", out.name_button), ("ruler_text", out.ruler), ("slot_text_used", out.slot),
     ];
-    for (name, bg) in pairs.into_iter().filter(|_| !identity) {
+    for (name, bg) in pairs.into_iter().filter(|_| guard) {
         let slot = out.get_mut(name).expect("token");
         *slot = readable(*slot, bg, 0.38);
+    }
+    // Faint labels (playlist track names) may stay fainter, but not vanish on light themes.
+    if guard {
+        out.text_faint = readable(out.text_faint, out.track_header, 0.3);
     }
     // Custom grid backs are used as given (§3).
     if th.pl_grid.1 {
@@ -429,7 +460,7 @@ pub fn palette(th: &FlTheme) -> Palette {
         out.watermark = bc.shade(if bc.hsl().2 > 0.5 { -0.06 } else { 0.06 });
     }
     if let Some(n) = th.note_colors.first() {
-        let from = base.note_top;
+        let from = note_from;
         for slot in [&mut out.note_top, &mut out.note_bottom, &mut out.note_rim, &mut out.note_text, &mut out.velocity, &mut out.velocity_dot] {
             *slot = rekey(*slot, from, *n);
         }
@@ -441,7 +472,6 @@ pub fn palette(th: &FlTheme) -> Palette {
     // Colourful waveforms use the theme's Waves gradient as it is (spec: ui/settings-choices.md "Display: Colorful
     // waveforms").
     out.waves = th.waves.clone();
-    out
 }
 
 #[cfg(test)]
@@ -517,14 +547,18 @@ WaveClr3=65280
         }
     }
 
-    /// Lightmode=1, or no Lightmode key, is today's look; Lemon ignores the key (spec: as above).
+    /// Lightmode=1, or no Lightmode key, is today's look. Lemon keeps its own colours under the stock Dark theme
+    /// whatever its options, and follows the key of any other theme (spec: as above; ui/theme-presets.md "Skins").
     #[test]
     fn light_mode_on_is_unchanged() {
         assert_eq!(palette(&FlTheme::parse(&set_key(DARK_TEXT, "Lightmode", "1"))), Palette::default());
         assert_eq!(palette(&FlTheme::dark()), Palette::default());
-        let night = "Hue=-18\nSaturation=6\nLightness=-57\nContrast=40\nSelected=-4546441\n";
         let lemon = |t: &str| crate::design::palette(crate::Design::Lemon, Some(&FlTheme::parse(t)));
-        assert_eq!(lemon(&set_key(night, "Lightmode", "0")), lemon(night));
+        let brand = crate::design::palette(crate::Design::Lemon, None);
+        assert_eq!(lemon(&set_key(DARK_TEXT, "Lightmode", "0")), brand);
+        assert_eq!(lemon(&set_key(DARK_TEXT, "OverrideClips", "1")), brand);
+        let night = "Hue=-18\nSaturation=6\nLightness=-57\nContrast=40\nSelected=-4546441\n";
+        assert_ne!(lemon(&set_key(night, "Lightmode", "0")), lemon(night));
     }
 
     /// Light mode off darkens the step faces: Dark's unlit step #323a3e -> #191d1f, red group step -> #3a2626 (FL's

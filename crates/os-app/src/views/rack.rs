@@ -576,11 +576,11 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     if lemon {
         // Lemon: toggles are lit rounded squares with dark glyphs.
         if s.rack.loop_mode {
-            lk::lit(ui.c, lr, lk::r_btn(t), lhov);
+            lk::lit_in(ui.c, ui.t, lr, lk::r_btn(t), lhov);
         } else if lhov {
             ui.c.fill_rrect(lr, lk::r_btn(t), t.button_hi);
         }
-        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if s.rack.loop_mode { lk::ink_on_lemon() } else { t.glyph });
+        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if s.rack.loop_mode { lk::ink_on_lit(ui.t) } else { t.glyph });
     } else {
         if s.rack.loop_mode || lhov {
             ui.c.stroke_rrect(lr, 3.0, 1.0, if s.rack.loop_mode { green } else { t.glyph.shade(-0.3) });
@@ -594,11 +594,11 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let blue = ui.t.a(0x40a8e0);
     let gc = if lemon {
         if s.rack.graph_open {
-            lk::lit(ui.c, gr, lk::r_btn(t), ghov);
+            lk::lit_in(ui.c, ui.t, gr, lk::r_btn(t), ghov);
         } else if ghov {
             ui.c.fill_rrect(gr, lk::r_btn(t), t.button_hi);
         }
-        if s.rack.graph_open { lk::ink_on_lemon() } else { t.glyph }
+        if s.rack.graph_open { lk::ink_on_lit(ui.t) } else { t.glyph }
     } else {
         if s.rack.graph_open || ghov {
             ui.c.stroke_rrect(gr, 3.0, 1.0, if s.rack.graph_open { blue } else { t.glyph.shade(-0.3) });
@@ -620,11 +620,11 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let hv = crate::high_visibility::on();
     if lemon {
         if roll_view {
-            lk::lit(ui.c, br, lk::r_btn(t), hov);
+            lk::lit_in(ui.c, ui.t, br, lk::r_btn(t), hov);
         } else if hov || hv {
             ui.c.fill_rrect(br, lk::r_btn(t), t.button_hi);
         }
-        let oc = if roll_view { lk::ink_on_lemon() } else { t.accent };
+        let oc = if roll_view { lk::ink_on_lit(ui.t) } else { t.accent };
         for i in 0..3 {
             ui.c.fill_rrect(Rect::new(sxc - 7.5 + 5.5 * i as f32, y + 9.0, 4.0, 11.0), 1.0, oc);
         }

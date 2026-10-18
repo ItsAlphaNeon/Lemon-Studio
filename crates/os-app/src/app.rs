@@ -3398,23 +3398,31 @@ impl App {
         self.load_theme_file_ex(path, true)
     }
 
-    /// `load_theme_file`; `remember` = keep it for the next start.
+    /// `load_theme_file`; `remember` = keep it for the next start. A `.flstheme` colours the skin in use; a `theme.txt`
+    /// sets Citrus's tokens, so it switches to Citrus.
     pub fn load_theme_file_ex(&mut self, path: &std::path::Path, remember: bool) {
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        match theme_from_file(path) {
-            Ok(t) => {
-                // Theme files colour the Classic design (Lemon has its own colours).
-                let was_lemon = self.design() == Design::Lemon;
+        let fl = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme"));
+        let loaded = if fl {
+            std::fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).map_err(|e| e.to_string()).map(|text| {
+                let t = skin_theme(self.design(), &name, Some(&text));
+                (t, Some(text))
+            })
+        } else {
+            theme_from_file(path).map(|t| (t, None))
+        };
+        match loaded {
+            Ok((t, text)) => {
+                let to_citrus = !fl && self.design() != Design::Citrus;
                 self.theme = t;
                 // Theme ▸ Options read and rewrite the applied .flstheme (spec: ui/settings-choices.md "Light mode and
                 // clip note colours").
-                let fl = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme"));
-                self.state.fl_text = fl.then(|| String::from_utf8_lossy(&std::fs::read(path).unwrap_or_default()).into_owned());
+                self.state.fl_text = text;
                 os_theme::set_current(&self.theme.colors);
-                if remember && was_lemon {
-                    save_design(Design::Classic);
+                if remember && to_citrus {
+                    save_design(Design::Citrus);
                 }
-                if remember && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")) {
+                if remember && fl {
                     if let Some(d) = os_paths::user_dir() {
                         let _ = std::fs::create_dir_all(&d);
                         let keep = d.join("current.flstheme");
@@ -3423,9 +3431,8 @@ impl App {
                         }
                     }
                 }
-                self.state.settings.preset = usize::MAX;
                 self.sync_preset();
-                self.state.message = Some(if was_lemon { format!("Theme: {name} (Classic design; Ctrl+Shift+D switches)") } else { format!("Theme: {name}") });
+                self.state.message = Some(if to_citrus { format!("Theme: {name} (Citrus skin)") } else { format!("Theme: {name}") });
             }
             Err(e) => self.state.message = Some(format!("Could not load theme {name}: {e}")),
         }
@@ -3437,56 +3444,66 @@ impl App {
         self.theme.colors.style.design
     }
 
-    /// Switch to design `d`: Lemon brings its own colours, Classic the saved theme (or the default look).
-    /// `remember` = keep the choice for the next start (`design.txt` in the user folder).
+    /// Switch to skin `d`, keeping the applied theme (a `.flstheme` colours either skin; with none, Citrus may load the
+    /// saved `theme.txt`). `remember` = keep the choice for the next start (`design.txt` in the user folder).
     pub fn set_design(&mut self, d: Design, remember: bool) {
-        self.theme = design_theme(d, remember);
+        self.theme = match &self.state.fl_text {
+            Some(text) => skin_theme(d, &self.theme.name.clone(), Some(text)),
+            None => design_theme(d, remember),
+        };
         os_theme::set_current(&self.theme.colors);
         if remember {
             save_design(d);
         }
         self.sync_preset();
-        self.state.message = Some(format!("Design: {} (Ctrl+Shift+D switches)", d.name()));
+        self.state.message = Some(format!("Skin: {} (Ctrl+Shift+D switches)", d.name()));
         self.invalidate();
     }
 
     /// Theme ▸ Options: flips "Light mode" (`Lightmode`) or "Audio and automation clips use note colors"
-    /// (`OverrideClips`) in the applied theme, the stock Dark theme's text when no `.flstheme` is applied. The Classic
-    /// design shows it at once (Lemon has its own colours), and it is kept as `current.flstheme` for the next start
-    /// (spec: ui/settings-choices.md "Light mode and clip note colours").
+    /// (`OverrideClips`) in the applied theme, the stock Dark theme's text when no `.flstheme` is applied. The skin shows
+    /// it at once (Lemon's own colours, under the stock theme, have no Light mode), and it is kept as
+    /// `current.flstheme` for the next start (spec: ui/settings-choices.md "Light mode and clip note colours").
     pub(crate) fn toggle_theme_option(&mut self, label: &str) {
         let th = self.state.fl_theme();
         let (key, on) = if label == views::settings::LIGHT_MODE_CHECK { ("Lightmode", !th.light_mode) } else { ("OverrideClips", !th.override_clips) };
         let text = self.state.fl_text.as_deref().unwrap_or(os_theme::fl::DARK_TEXT);
         let text = os_theme::fl::set_key(text, key, if on { "1" } else { "0" });
-        if self.design() == Design::Classic {
-            let palette = os_theme::fl::palette(&os_theme::FlTheme::parse(&text));
-            self.theme = os_theme::Theme::new(&self.theme.name.clone(), palette, self.theme.adjust);
-            os_theme::set_current(&self.theme.colors);
-            self.sync_preset();
-        }
+        let palette = os_theme::design::palette(self.design(), Some(&os_theme::FlTheme::parse(&text)));
+        self.theme = os_theme::Theme::new(&self.theme.name.clone(), palette, self.theme.adjust);
+        os_theme::set_current(&self.theme.colors);
         if let Some(d) = theme_dir() {
             let _ = std::fs::create_dir_all(&d);
             let _ = std::fs::write(d.join("current.flstheme"), &text);
         }
         self.state.fl_text = Some(text);
+        self.sync_preset();
         self.state.message = Some(format!("{label}: {}", if on { "on" } else { "off" }));
         self.invalidate();
     }
 
-    /// The Theme preset tile shown as chosen (spec: ui/lemon-design.md §1): (Default) for Lemon, Classic for the plain
-    /// Classic look, else the theme file picked from the tiles (none when the theme came from elsewhere).
+    /// The Themes tile shown as chosen (spec: ui/theme-presets.md "Settings"): Default when no theme file colours the
+    /// skin (or the stock Dark theme does, whatever its options), else the tile whose theme has the applied colours; none
+    /// when the theme came from elsewhere (Load theme..., a drop, a `theme.txt`). While the window is open the tiles'
+    /// previews are redrawn for the skin and theme in use.
     fn sync_preset(&mut self) {
+        let applied = self.state.fl_text.as_deref().map(os_theme::FlTheme::parse);
+        let design = self.design();
         let st = &mut self.state.settings;
-        st.preset = if self.theme.colors.style.lemon() {
-            0
-        } else if self.theme.colors == os_theme::Palette::default() {
-            1
-        } else if st.preset >= 2 {
-            st.preset
-        } else {
-            usize::MAX
+        let themes: Vec<_> = st.themes.iter().map(|(_, t)| os_theme::FlTheme::parse(t)).collect();
+        st.preset = match &applied {
+            None if design == Design::Lemon || self.theme.colors == os_theme::Palette::default() => 0,
+            None => usize::MAX,
+            Some(th) if th.is_stock() => 0,
+            Some(th) => themes.iter().position(|t| t.same_colours(th)).map_or(usize::MAX, |i| i + 1),
         };
+        st.skin = Design::ALL.iter().position(|d| *d == design).unwrap_or(0);
+        if st.open {
+            st.skin_previews = Design::ALL.iter().map(|d| os_theme::design::palette(*d, applied.as_ref())).collect();
+            st.theme_previews = std::iter::once(os_theme::design::palette(design, None))
+                .chain(themes.iter().map(|th| os_theme::design::palette(design, Some(th))))
+                .collect();
+        }
     }
 
     /// Open the settings window on `tab` (spec: ui/settings.md §1); reads the output devices and theme files.
@@ -3497,7 +3514,6 @@ impl App {
         }
         st.open = true;
         st.tab = tab;
-        self.sync_preset();
         self.audio_page();
         // General ▸ System's association check shows what Windows says now (`crate::file_assoc`).
         #[cfg(windows)]
@@ -3517,6 +3533,7 @@ impl App {
                 st.themes.extend(v);
             }
         }
+        self.sync_preset();
         self.invalidate();
     }
 
@@ -3826,36 +3843,35 @@ impl App {
                     st.folded.insert(k);
                 }
             }
-            // Tiles (spec: ui/lemon-design.md §1): 0 = (Default) = the Lemon design, 1 = the Classic look without a
-            // theme file, then the theme files (they colour the Classic design).
-            SAct::Preset(0) => {
-                self.set_design(Design::Lemon, true);
-                self.state.message = Some("Theme: default (Lemon)".into());
+            // Skins and themes (spec: ui/theme-presets.md "Settings"): a skin keeps the theme; theme 0 = Default (the
+            // skin's own colours), then the built-in and user themes, which colour either skin.
+            SAct::Skin(i) => {
+                if let Some(d) = Design::ALL.get(i).copied() {
+                    self.set_design(d, true);
+                    self.state.message = Some(format!("Skin: {}", d.name()));
+                }
             }
-            SAct::Preset(1) => {
-                self.theme = os_theme::Theme::default();
+            SAct::Preset(0) => {
+                self.theme = design_theme(self.design(), false);
                 os_theme::set_current(&self.theme.colors);
-                save_design(Design::Classic);
-                if let Some(f) = os_paths::user_file("current.flstheme") {
-                    let _ = std::fs::remove_file(f);
+                if let Some(d) = theme_dir() {
+                    let _ = std::fs::remove_file(d.join("current.flstheme"));
                 }
                 self.state.fl_text = None;
                 self.sync_preset();
-                self.state.message = Some("Theme: Classic".into());
+                self.state.message = Some(format!("Theme: Default ({} colours)", self.design().name()));
             }
             SAct::Preset(i) => {
-                if let Some((name, text)) = st.themes.get(i - 2).cloned() {
-                    st.preset = i;
-                    let fl = os_theme::FlTheme::parse(&text);
-                    self.theme = os_theme::Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default());
+                if let Some((name, text)) = st.themes.get(i - 1).cloned() {
+                    self.theme = skin_theme(self.design(), &name, Some(&text));
                     os_theme::set_current(&self.theme.colors);
                     self.state.fl_text = Some(text.clone());
-                    save_design(Design::Classic);
                     // Remembered like an imported theme (loaded at the next start).
-                    if let Some(d) = os_paths::user_dir() {
+                    if let Some(d) = theme_dir() {
                         let _ = std::fs::create_dir_all(&d);
                         let _ = std::fs::write(d.join("current.flstheme"), &text);
                     }
+                    self.sync_preset();
                     self.state.message = Some(format!("Theme: {name}"));
                 }
             }
@@ -7243,8 +7259,7 @@ pub fn theme_from_file(path: &std::path::Path) -> Result<Theme, String> {
     let text = String::from_utf8_lossy(&bytes);
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")) {
-        let fl = os_theme::FlTheme::parse(&text);
-        Ok(Theme::new(&name, os_theme::fl::palette(&fl), os_theme::Adjust::default()))
+        Ok(skin_theme(Design::Citrus, &name, Some(&text)))
     } else {
         Theme::parse(&name, &text)
     }
@@ -7274,7 +7289,7 @@ pub fn move_old_settings() {
 /// The design named in `design.txt` in the user folder; Lemon when there is none. Tests always use Classic.
 pub fn saved_design() -> Design {
     if cfg!(test) {
-        return Design::Classic;
+        return Design::Citrus;
     }
     os_paths::user_file("design.txt")
         .and_then(|f| std::fs::read_to_string(f).ok())
@@ -7292,13 +7307,20 @@ fn save_design(d: Design) {
     }
 }
 
-/// The theme of design `d`: Lemon's own palette, or for Classic the saved theme files (`saved` = read them).
+/// The theme of skin `d` (`saved` = coloured by the saved theme files, else the skin's own colours): Lemon takes the
+/// saved `current.flstheme`; Citrus `theme.txt` (Lemon Studio's token file, Citrus only), else `current.flstheme`.
 pub fn design_theme(d: Design, saved: bool) -> Theme {
     match d {
-        Design::Lemon => Theme::new("Lemon", os_theme::design::palette(Design::Lemon, None), os_theme::Adjust::default()),
-        Design::Classic if saved => load_theme_inner(),
-        Design::Classic => Theme::default(),
+        Design::Lemon => skin_theme(Design::Lemon, "Lemon", saved.then(saved_fl_text).flatten().as_deref()),
+        Design::Citrus if saved => load_theme_inner(),
+        Design::Citrus => Theme::default(),
     }
+}
+
+/// Skin `d` coloured by the `.flstheme` text `fl` (`None`: the skin's own colours; spec: ui/theme-presets.md "Skins").
+pub fn skin_theme(d: Design, name: &str, fl: Option<&str>) -> Theme {
+    let th = fl.map(os_theme::FlTheme::parse);
+    Theme::new(name, os_theme::design::palette(d, th.as_ref()), os_theme::Adjust::default())
 }
 
 /// The text of the `current.flstheme` the Classic design loads at start (`load_theme_inner`; `None` when `theme.txt`
@@ -7612,7 +7634,7 @@ mod tests {
         };
         let light = |p: &Palette, name: &str| p.get(name).unwrap().hsl().2;
         let mut app = App::new(None);
-        assert_eq!((app.design(), app.state.fl_text.as_deref()), (Design::Classic, None));
+        assert_eq!((app.design(), app.state.fl_text.as_deref()), (Design::Citrus, None));
         assert_eq!(shown(&app), [true, false], "the stock Dark theme's values");
         // Light mode off: base-palette surfaces at once, darker step faces; saved.
         app.settings_act(SAct::Check(LIGHT_MODE_CHECK));
@@ -7652,13 +7674,59 @@ mod tests {
         let want = night.replace("Lightmode=1", "Lightmode=0");
         assert_eq!((saved(), shown(&app)), (want.clone(), vec![false, false]));
         assert_eq!(app.theme.base, palette(&FlTheme::parse(&want)));
-        // The Lemon design keeps its colours; the value is still stored and saved.
+        // The theme colours the Lemon skin too, and the option applies there at once (spec: ui/theme-presets.md
+        // "Skins").
         app.set_design(Design::Lemon, false);
-        let lemon = app.theme.colors.clone();
+        let off = app.theme.colors.clone();
+        assert_eq!(off, os_theme::design::palette(Design::Lemon, Some(&FlTheme::parse(&want))));
         app.settings_act(SAct::Check(LIGHT_MODE_CHECK));
-        assert_eq!((saved(), shown(&app), &app.theme.colors), (night.to_string(), vec![true, false], &lemon));
+        assert_eq!((saved(), shown(&app)), (night.to_string(), vec![true, false]));
+        assert_eq!(app.theme.colors, os_theme::design::palette(Design::Lemon, Some(&FlTheme::parse(night))));
+        assert_ne!(app.theme.colors, off);
         // The next start reads it back.
         assert_eq!(App::new(None).state.fl_text.as_deref(), Some(night));
+        THEME_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Settings > Theme's Skins and Themes (spec: ui/theme-presets.md "Settings"): a theme colours either skin and
+    /// stays when the skin changes; Default gives the skin its own colours; the chosen tiles follow; every tile has a
+    /// preview. A temp user folder, never the real one.
+    #[test]
+    fn skins_and_themes_are_chosen_apart() {
+        use crate::views::settings::{SAct, THEME};
+        use os_theme::{presets::PRESETS, FlTheme, Palette};
+        let dir = std::env::temp_dir().join(format!("lemon-skins-themes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut app = App::new(None);
+        app.open_settings(THEME);
+        let st = &app.state.settings;
+        assert_eq!((st.skin_previews.len(), st.theme_previews.len()), (2, PRESETS.len() + 1));
+        assert_eq!((st.skin, st.preset), (1, 0), "Citrus, Default");
+        // A theme in Citrus, then the Lemon skin keeps it.
+        let (name, text) = PRESETS[2];
+        app.settings_act(SAct::Preset(3));
+        assert_eq!(app.theme.colors, os_theme::fl::palette(&FlTheme::parse(text)));
+        assert_eq!(std::fs::read_to_string(dir.join("current.flstheme")).unwrap(), text);
+        app.settings_act(SAct::Skin(0));
+        assert_eq!(app.design(), Design::Lemon);
+        assert_eq!(app.theme.colors, os_theme::design::palette(Design::Lemon, Some(&FlTheme::parse(text))));
+        assert_eq!((app.state.settings.skin, app.state.settings.preset), (0, 3), "{name}");
+        assert_eq!(app.state.settings.theme_previews[3], app.theme.colors, "the tile previews what is applied");
+        // Default: the skin's own colours, the theme file is dropped.
+        app.settings_act(SAct::Preset(0));
+        assert_eq!(app.theme.colors, os_theme::design::palette(Design::Lemon, None));
+        assert!(app.state.fl_text.is_none() && !dir.join("current.flstheme").exists());
+        app.settings_act(SAct::Skin(1));
+        assert_eq!((&app.theme.colors, app.state.settings.preset), (&Palette::default(), 0));
+        // The page draws both lists of tiles with their hits.
+        if let Ok(mut c) = Canvas::new(1920, 1080, 1.0) {
+            frame(&mut app, &mut c, None);
+            for a in [SAct::Skin(0), SAct::Skin(1), SAct::Preset(0), SAct::Preset(PRESETS.len())] {
+                hit_rect(&app, &Action::Settings(a));
+            }
+        }
         THEME_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9209,7 +9277,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("os_dialog_unsaved_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        for design in [Design::Classic, Design::Lemon] {
+        for design in [Design::Citrus, Design::Lemon] {
             let mut app = App::new(None);
             app.set_design(design, false);
             app.state.tempo = 99.0;
@@ -9292,7 +9360,7 @@ mod tests {
             std::fs::write(dir.join(format!("Song {i:02}.flp")), b"x").unwrap();
         }
         std::fs::write(dir.join("Zebra.txt"), b"x").unwrap();
-        for design in [Design::Classic, Design::Lemon] {
+        for design in [Design::Citrus, Design::Lemon] {
             let mut app = App::new(None);
             app.set_design(design, false);
             app.state.path = Some(dir.join("Song 00.flp"));
@@ -9374,7 +9442,7 @@ mod tests {
         for (n, len) in [("Club mix.flp", 48_213), ("Demo.flp", 9_120), ("Night drive.flp", 131_072), ("Sketch 3.flp", 2_048)] {
             std::fs::write(dir.join(n), vec![0u8; len]).unwrap();
         }
-        for design in [Design::Classic, Design::Lemon] {
+        for design in [Design::Citrus, Design::Lemon] {
             let name = format!("{design:?}").to_lowercase();
             let mut app = App::new(None);
             app.set_design(design, false);

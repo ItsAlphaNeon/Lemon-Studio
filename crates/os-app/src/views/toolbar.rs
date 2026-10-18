@@ -249,7 +249,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
     ui.hit(song, Action::PatSong(true), "Song mode: play the playlist");
     for (r, label, active) in [(pat, "PAT", !s.song_mode), (song, "SONG", s.song_mode)] {
         if active && lemon {
-            os_ui::kit::lemon::lit(ui.c, Rect::new(r.x + 2.0, r.y + 1.0, r.w - 3.0, r.h - 1.5), 4.0, false);
+            os_ui::kit::lemon::lit_in(ui.c, ui.t, Rect::new(r.x + 2.0, r.y + 1.0, r.w - 3.0, r.h - 1.5), 4.0, false);
         } else if active {
             ui.c.push_clip(r);
             ui.c.fill_rrect(capsule.inset(1.0), 14.0, t.pill);
@@ -269,7 +269,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         if (on || hov) && lemon {
             let seg = Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0);
             if on {
-                os_ui::kit::lemon::lit(ui.c, seg, 5.0, hov);
+                os_ui::kit::lemon::lit_in(ui.c, ui.t, seg, 5.0, hov);
             } else {
                 ui.c.fill_rrect(seg, 5.0, t.button_hi);
             }
@@ -575,7 +575,7 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         let hov = ui.hit(r, Action::Menu(i), title);
         let open = s.menu_open == Some(i);
         if lemon && open {
-            os_ui::kit::lemon::lit(ui.c, r.inset(1.0), 4.0, false);
+            os_ui::kit::lemon::lit_in(ui.c, ui.t, r.inset(1.0), 4.0, false);
         } else if hov || open {
             ui.c.fill_rrect(if lemon { r.inset(1.0) } else { r }, if lemon { 4.0 } else { 2.0 }, t.menu_drop_hi);
         }
@@ -619,9 +619,9 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         match hx {
             Some(hx) => {
                 use os_theme::design::lemon as brand;
-                ui.c.fill_rrect(Rect::new(390.0, 60.0, hx - 390.0, 4.0), 2.0, brand::MAIN);
+                ui.c.fill_rrect(Rect::new(390.0, 60.0, hx - 390.0, 4.0), 2.0, t.brand_lit(brand::MAIN));
                 ui.c.fill_rrect(Rect::new(hx - 6.0, 55.0, 12.0, 14.0), 3.0, t.button);
-                ui.c.fill_rect(Rect::new(hx - 1.0, 58.0, 2.0, 8.0), brand::MAIN);
+                ui.c.fill_rect(Rect::new(hx - 1.0, 58.0, 2.0, 8.0), t.brand_lit(brand::MAIN));
             }
             None => ui.c.fill_rect(Rect::new(394.0, 58.0, 2.0, 8.0), t.button),
         }

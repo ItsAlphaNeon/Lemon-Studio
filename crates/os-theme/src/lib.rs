@@ -165,7 +165,7 @@ macro_rules! tokens {
 
         impl Default for Palette {
             fn default() -> Self {
-                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default(), style: Style::CLASSIC, waves: Vec::new() }
+                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default(), style: Style::CITRUS, waves: Vec::new() }
             }
         }
 
@@ -340,6 +340,29 @@ impl Palette {
     }
     pub fn led(&self, hex: u32) -> Color {
         self.xf.mute(Color::rgb(hex))
+    }
+}
+
+/// Lemon brand colours (`design::lemon`) as the applied theme has them. A theme laid over the Lemon skin
+/// (`design::Retint`) moves lit and "on" colours to its highlight (`brand_lit`), selection to its selection
+/// (`brand_sel`), enable switches to its mute colour (`brand_led`), the brand greys to its surfaces (`brand_grey`) and
+/// brand text to its text (`brand_ink`); under the skin's own colours each is returned as given (spec:
+/// ui/theme-presets.md "Skins").
+impl Palette {
+    pub fn brand_lit(&self, c: Color) -> Color {
+        self.xf.retint.as_ref().map_or(c, |r| r.highlight(c))
+    }
+    pub fn brand_sel(&self, c: Color) -> Color {
+        self.xf.retint.as_ref().map_or(c, |r| r.accent(c))
+    }
+    pub fn brand_led(&self, c: Color) -> Color {
+        self.xf.retint.as_ref().map_or(c, |r| r.mute(c))
+    }
+    pub fn brand_grey(&self, c: Color) -> Color {
+        self.xf.retint.as_ref().map_or(c, |r| r.surface(c))
+    }
+    pub fn brand_ink(&self, c: Color) -> Color {
+        self.xf.retint.as_ref().map_or(c, |r| r.text(c))
     }
 }
 
