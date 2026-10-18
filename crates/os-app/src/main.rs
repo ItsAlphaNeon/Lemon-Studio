@@ -823,6 +823,12 @@ impl ApplicationHandler for Shell {
                     MouseScrollDelta::PixelDelta(p) => (p.x as f32 / 40.0, p.y as f32 / 40.0),
                 };
                 self.app.wheel(dx, dy, self.mods.shift_key(), ctrl(self.mods));
+                // A wheel step in a menu puts the cursor on the row it lit.
+                if let Some((x, y)) = self.app.warp.take() {
+                    let k = ui_scale(&window);
+                    let at = (f64::from(x) * k + f64::from(self.inset.0), f64::from(y) * k + f64::from(self.inset.1));
+                    let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(at.0, at.1));
+                }
                 self.pending = true;
             }
             WindowEvent::KeyboardInput { event, .. } => {

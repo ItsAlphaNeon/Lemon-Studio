@@ -1292,6 +1292,7 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         let live = it.enabled && (it.children.is_empty() || any_enabled(&it.children));
         if it.enabled {
             let lit = ui.hit(rr, action, it.label.to_string()) || open == Some(i);
+            ui.menu_row(if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP });
             if lit && lemon {
                 os_ui::kit::row_highlight(ui.c, t, rr);
             } else if lit {

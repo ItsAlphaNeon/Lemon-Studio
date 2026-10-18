@@ -530,6 +530,8 @@ pub struct Hit {
     pub hint: Cow<'static, str>,
     /// The child window the control belongs to (clicking raises it).
     pub win: Option<Win>,
+    /// A menu row the wheel steps to (`App::menu_wheel`): which menu it is in, 0 = not a menu row.
+    pub menu: u8,
 }
 
 /// A part of the frame that paints independently: skipped by a repaint whose damage misses where it drew.
@@ -585,7 +587,7 @@ impl Ui<'_> { // This code is a part of L e m o n S t u d i o.
                     let p = &self.keep.parts[i];
                     (p.hits.clone(), p.bars.clone(), p.live.clone(), p.area)
                 };
-                let dummy = || Hit { rect: Rect::default(), action: Action::Swallow, hint: Cow::Borrowed(""), win: None };
+                let dummy = || Hit { rect: Rect::default(), action: Action::Swallow, hint: Cow::Borrowed(""), win: None, menu: 0 };
                 let prev = &mut self.keep.prev;
                 self.hits.extend(hits.map(|k| std::mem::replace(&mut prev[k], dummy())));
                 self.bars.extend_from_slice(&self.keep.prev_bars[bars]);
@@ -681,14 +683,21 @@ impl Ui<'_> {
     /// Register a hit region; returns whether it is hovered (topmost last frame).
     pub fn hit(&mut self, rect: Rect, action: Action, hint: impl Into<Cow<'static, str>>) -> bool {
         let hovered = self.hover.as_ref() == Some(&action) && rect.contains(self.mouse.0, self.mouse.1);
-        self.hits.push(Hit { rect, action, hint: hint.into(), win: self.win });
+        self.hits.push(Hit { rect, action, hint: hint.into(), win: self.win, menu: 0 });
         hovered
+    }
+
+    /// Marks the hit just registered as a row of menu `menu` (1 or more) that the wheel steps to.
+    pub fn menu_row(&mut self, menu: u8) {
+        if let Some(h) = self.hits.last_mut() {
+            h.menu = menu;
+        }
     }
 
     /// A control that is drawn but does nothing yet: its hit only explains that (hint and click message), so it never
     /// lights up, toggles or acts. Draw the control greyed out: `kit::State::disabled`, `menu_pop_dim` text, or `veil`.
     pub fn off(&mut self, rect: Rect, name: &'static str) {
-        self.hits.push(Hit { rect, action: Action::Placeholder(name), hint: Cow::Owned(off_text(name)), win: self.win });
+        self.hits.push(Hit { rect, action: Action::Placeholder(name), hint: Cow::Owned(off_text(name)), win: self.win, menu: 0 });
     }
 
     /// Greys out what was just drawn in `rect` (a disabled control without a disabled look of its own): a veil of the
@@ -697,6 +706,11 @@ impl Ui<'_> {
         self.c.fill_rect(rect, bg.with_alpha(OFF_VEIL));
     }
 }
+
+/// Which menu a row belongs to (`Hit::menu`): a menu bar dropdown, a popup menu, the popup's open submenu.
+pub const MENU_DROPDOWN: u8 = 1;
+pub const MENU_POPUP: u8 = 2;
+pub const MENU_SUB: u8 = 3;
 
 /// Opacity of `Ui::veil`: a greyed-out control keeps about 40 % of its contrast.
 pub const OFF_VEIL: u8 = 155;
@@ -1073,6 +1087,10 @@ pub struct App {
     pub hold: Option<crate::hold::Hold>,
     /// Views easing to where the wheel sent them (General ▸ Display ▸ Smoothing, `crate::smooth`).
     pub(crate) smooth: crate::smooth::Eases,
+    /// Where the shell should move the cursor to (a wheel step in a menu, `menu_wheel`).
+    pub warp: Option<(f32, f32)>,
+    /// Wheel movement in an open menu short of a whole notch (trackpads).
+    menu_notch: f32,
     /// Audio ▸ Auto close: whether the output is closed while another program is in front (`crate::auto_close`).
     pub(crate) auto_close: crate::auto_close::AutoClose,
     pub want_minimize: bool,
@@ -1259,6 +1277,8 @@ impl App {
             drag: None,
             hold: None,
             smooth: Default::default(),
+            warp: None,
+            menu_notch: 0.0,
             auto_close: Default::default(),
             want_minimize: false,
             want_maximize: false,
@@ -5301,6 +5321,9 @@ impl App {
         if self.modal_open() {
             return self.dialog_wheel(dy);
         }
+        if self.menu_wheel(dy + dx) {
+            return;
+        }
         // Scrolling or zooming one window repaints just that window; scrolling the playlist moves its pixels.
         let before = self.damage.clone();
         let s = &self.state;
@@ -5316,6 +5339,42 @@ impl App {
                 self.damage_win(w);
             }
         }
+    }
+
+    /// The wheel over an open menu, as in FL (spec: ui/menus.md "The wheel in menus"): each notch lights the next row
+    /// down (or up) that can be picked, skipping separators, headings and greyed-out rows, on into the next column and
+    /// round from the last row to the first; the cursor moves to the row's middle. Returns whether a menu was open (it
+    /// takes the wheel).
+    fn menu_wheel(&mut self, d: f32) -> bool {
+        if self.state.playlist.popup.is_none() && self.state.menu_open.is_none() {
+            self.menu_notch = 0.0;
+            return false;
+        }
+        self.menu_notch += d;
+        let notches = self.menu_notch.trunc();
+        self.menu_notch -= notches;
+        let (x, y) = self.mouse;
+        // The menu under the cursor; else the popup, else the dropdown (a submenu only under the cursor).
+        let under = self.hits.iter().rev().find(|h| h.menu > 0 && h.rect.contains(x, y)).map(|h| h.menu);
+        let Some(menu) = under.or_else(|| self.hits.iter().map(|h| h.menu).filter(|&m| m > 0 && m != MENU_SUB).max()) else { return true };
+        let rows: Vec<Rect> = self.hits.iter().filter(|h| h.menu == menu).map(|h| h.rect).collect();
+        let n = rows.len();
+        let mut at = rows.iter().position(|r| r.contains(x, y));
+        for _ in 0..notches.abs() as usize {
+            // Up is positive; from off the rows the first notch down lights the first row, up the last.
+            at = Some(match (at, notches < 0.0) {
+                (Some(i), true) => (i + 1) % n,
+                (Some(i), false) => (i + n - 1) % n,
+                (None, true) => 0,
+                (None, false) => n - 1,
+            });
+        }
+        let Some(r) = at.map(|i| rows[i]).filter(|_| notches != 0.0) else { return true };
+        // The cursor keeps its x over the row's column, else goes three quarters of the way across it.
+        let to = (if x > r.x && x < r.right() { x } else { r.x + r.w * 0.75 }, r.y + r.h / 2.0);
+        self.warp = Some(to);
+        self.mouse_move(to.0, to.1);
+        true
     }
 
     /// The wheel's work; returns the window when only that window's view moved (else everything is repainted).
@@ -8888,11 +8947,14 @@ mod tests {
         }
         app.mouse_up();
         full(&mut app, &mut a);
-        // An open popup: the window repaints.
+        // An open popup takes the wheel (spec: ui/menus.md "The wheel in menus"): the playlist stays put.
         app.mouse_move(over_grid.0, over_grid.1);
         app.state.playlist.popup = Some(pl::options_menu(&app.state, g.x + 900.0, g.y + 100.0));
         full(&mut app, &mut a);
+        let view = app.state.playlist_scroll;
         app.wheel(0.0, -1.0, false, false);
+        assert_eq!(app.state.playlist_scroll, view, "popup open at {scale}: the playlist did not scroll");
+        assert!(app.warp.take().is_some());
         check(&mut app, &mut a, &mut b, "popup open", Some(false), false);
         app.state.playlist.popup = None;
         full(&mut app, &mut a);
@@ -9435,6 +9497,67 @@ mod tests {
         }
         fake::live(false);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The wheel in an open menu (spec: ui/menus.md "The wheel in menus"): a notch lights the next row that can be
+    /// picked (past separators, headings and greyed-out rows, on into the next column, round at the ends) and puts the
+    /// cursor in its middle; the menu bar's dropdowns step the same way.
+    #[test]
+    fn wheel_steps_through_menu_rows() {
+        use crate::playlist::{Cmd, PItem, Popup};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        let items = vec![
+            PItem::new("A", Cmd::Nothing),
+            PItem::sep(),
+            PItem::new("Off", Cmd::Nothing).off(),
+            PItem::head("Head"),
+            PItem::new("B", Cmd::Nothing),
+            PItem::col(),
+            PItem::new("C", Cmd::Nothing),
+        ];
+        app.state.playlist.popup = Some(Popup { x: 300.0, y: 200.0, items, sub: None });
+        frame(&mut app, &mut c, None);
+        let (a, b, cc) = (hit_rect(&app, &Action::PlPopup(0)), hit_rect(&app, &Action::PlPopup(4)), hit_rect(&app, &Action::PlPopup(6)));
+        let lit = |app: &App| app.top_hit(app.mouse.0, app.mouse.1).map(|h| h.action.clone());
+        // From off the menu: down lights the first row, three quarters across; the shell is asked to move the cursor.
+        app.mouse_move(10.0, 10.0);
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(app.warp.take(), Some((a.x + a.w * 0.75, a.cy())));
+        assert_eq!(lit(&app), Some(Action::PlPopup(0)));
+        // Down skips the separator, the greyed-out row and the heading; x stays over the column.
+        app.mouse_move(a.x + 5.0, a.cy());
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(app.mouse, (a.x + 5.0, b.cy()));
+        // On into the next column, then round to the first row; up goes back round to the last.
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!((lit(&app), app.mouse), (Some(Action::PlPopup(6)), (cc.x + cc.w * 0.75, cc.cy())));
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(lit(&app), Some(Action::PlPopup(0)));
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(lit(&app), Some(Action::PlPopup(6)));
+        // From off the menu, up lights the last row; part notches add up.
+        app.mouse_move(10.0, 10.0);
+        app.wheel(0.0, 0.5, false, false);
+        assert_eq!(app.mouse, (10.0, 10.0));
+        app.wheel(0.0, 0.5, false, false);
+        assert_eq!(lit(&app), Some(Action::PlPopup(6)));
+        // Nothing was picked and nothing behind the menu scrolled.
+        assert!(app.state.playlist.popup.is_some());
+        app.state.playlist.popup = None;
+        // A menu bar dropdown.
+        app.state.menu_open = Some(views::menus::TOOLS_MENU);
+        frame(&mut app, &mut c, None);
+        let first = app.hits.iter().find(|h| h.menu == MENU_DROPDOWN).map(|h| (h.rect, h.action.clone())).expect("dropdown rows");
+        app.mouse_move(10.0, 10.0);
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!((app.mouse.1, lit(&app)), (first.0.cy(), Some(first.1)));
+        assert!(app.warp.take().is_some());
+        // With no menu open the wheel does what it did.
+        app.state.menu_open = None;
+        frame(&mut app, &mut c, None);
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(app.warp, None);
     }
 
     /// The CPU panel opens Settings > Audio; its combos open menus over the window and a choice becomes the audio
