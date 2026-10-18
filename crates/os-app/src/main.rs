@@ -11,19 +11,28 @@
 
 mod app;
 mod audio_cfg;
+mod auto_close;
 mod autoscroll;
+mod backup;
 #[cfg(test)]
 mod audio_bench;
 #[cfg(test)]
 mod render_check;
 mod browser;
 mod cable;
+mod clip_colors;
 mod clock;
 mod cpu;
+mod data_folder;
 mod dialog;
 mod filedlg;
 mod enable_groups;
+mod high_visibility;
+mod history;
+mod hold;
+mod keep_on_disk;
 mod icons;
+mod init;
 mod knobs;
 mod loading;
 mod logo;
@@ -31,6 +40,7 @@ mod logo;
 mod macos;
 #[cfg(target_os = "macos")]
 mod menu_bar;
+mod messages;
 mod meters;
 mod metronome;
 mod midi_in;
@@ -53,19 +63,37 @@ mod plugin_scan;
 #[cfg(plugin_windows)]
 mod plugin_window;
 mod plugins;
+mod ppi;
+mod prefs;
+mod preview_track;
+mod project_forms;
+mod project_info;
 mod project_plugins;
 mod presets;
 mod misc;
 mod misc_page;
+mod note_names;
+mod save_form;
+mod scroll_speed;
+mod search_folders;
 mod settings_file;
+mod shortcuts;
+mod smooth;
 mod snap;
 mod song_pos;
+mod splash;
 mod stall;
+mod step_edit;
 mod tapper;
+mod templates;
 mod timesig;
 mod transport;
 mod typein;
 mod views;
+mod waves;
+mod win_clamp;
+#[cfg(windows)]
+mod file_assoc;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -114,6 +142,8 @@ struct Shell {
     /// Shortest time from one frame's start to the next, from the refresh rate of `frame_monitor` (see `frame_interval`).
     frame: Duration,
     frame_monitor: Option<winit::monitor::MonitorHandle>,
+    /// The startup splash until the main window shows its first frame (`splash`).
+    splash: Option<splash::Splash>,
     /// `OS_FRAMES=<file>`: one line per frame (see `FrameLog`).
     frames: Option<FrameLog>,
     /// Wakes the app while a modal loop holds up winit's (see `stall`).
@@ -163,6 +193,13 @@ fn frame_interval(mhz: Option<u32>) -> Duration {
         Some(m) => Duration::from_secs_f64(960.0 / f64::from(m)).clamp(IDLE, FRAME),
         None => FRAME,
     }
+}
+
+/// The time from one frame's start to the next: `frame` (a little under the display's refresh), and while something
+/// animates no less than General ▸ Display ▸ Animation refresh rate allows (`smooth::frame_cap`; spec:
+/// ui/settings-choices.md "Display: Smoothing, Animation refresh rate, Transparent menus and windows (2026-10-16)").
+fn paced(frame: Duration, animating: bool) -> Duration {
+    if animating { frame.max(smooth::frame_cap()) } else { frame }
 }
 
 /// Shortest idle time after a frame. Windows hands out a window's WM_PAINT ahead of its child windows' and ahead of
@@ -275,11 +312,24 @@ const BORDER: (f32, f32, f32, f32) = (6.0, 2.0, 6.0, 6.0);
 const TOP_GRIP: f32 = 4.0;
 const CORNER: f32 = 14.0;
 
+/// The UI's scale (device pixels per logical one) on a monitor whose own is `system`: Settings > General > Display >
+/// Main GUI scaling keeps it (System) or replaces it with a percentage (spec: ui/ui-scaling.md §1).
+pub(crate) fn gui_scale(system: f64) -> f64 {
+    let pct = prefs::choice(&prefs::MAIN_GUI_SCALING).strip_suffix('%').and_then(|p| p.parse::<f64>().ok());
+    pct.map_or(system, |p| p / 100.0)
+}
+
+/// The main window's UI scale: its monitor's, or the one chosen (`gui_scale`). Read at every event and paint, so a new
+/// choice applies at once, as a change of the monitor's scale does.
+fn ui_scale(window: &Window) -> f64 {
+    gui_scale(window.scale_factor())
+}
+
 fn insets(window: &Window) -> (u32, u32, u32, u32) {
     if is_maximized(window) || window.fullscreen().is_some() {
         return (0, 0, 0, 0);
     }
-    let k = window.scale_factor() as f32;
+    let k = ui_scale(window) as f32;
     let d = |v: f32| (v * k).round() as u32;
     (d(BORDER.0), d(BORDER.1), d(BORDER.2), d(BORDER.3))
 }
@@ -361,7 +411,7 @@ impl Shell {
         }
         let size = window.inner_size();
         let (w, h) = (f64::from(size.width), f64::from(size.height));
-        let k = window.scale_factor();
+        let k = ui_scale(window);
         let (l, r, b) = (f64::from(self.inset.0), f64::from(self.inset.2), f64::from(self.inset.3));
         let t = f64::from(TOP_GRIP) * k;
         let c = f64::from(CORNER) * k;
@@ -399,7 +449,7 @@ impl Shell {
 
     /// Logical app coordinates of a physical window position (the canvas sits inside the border).
     fn to_app(&self, window: &Window, x: f64, y: f64) -> (f32, f32) {
-        let k = window.scale_factor();
+        let k = ui_scale(window);
         (((x - f64::from(self.inset.0)) / k) as f32, ((y - f64::from(self.inset.1)) / k) as f32)
     }
 
@@ -461,7 +511,7 @@ impl Shell {
         // winit stops dispatching after each frame and comes back here: asking for the next frame at once would keep
         // our WM_PAINT pending forever while playing, and the plugin windows would never paint (see `FRAME`).
         if self.pending {
-            let next = (self.frame_start + self.frame).max(self.painted + IDLE);
+            let next = (self.frame_start + paced(self.frame, self.app.animating())).max(self.painted + IDLE);
             if now >= next {
                 self.pending = false;
                 if let Some(w) = &self.window {
@@ -555,7 +605,7 @@ impl ApplicationHandler for Shell {
         }
         #[cfg(target_os = "macos")]
         menu_bar::install();
-        self.app.plugins.scale = window.scale_factor() as f32;
+        self.app.plugins.scale = ui_scale(&window) as f32;
         // Built-in and cached plugins at once, then a background scan (spec: ui/plugin-manager.md §4).
         self.app.start_plugins();
         self.window = Some(window);
@@ -589,7 +639,7 @@ impl ApplicationHandler for Shell {
     /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor.
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         let (DeviceEvent::MouseMotion { delta }, Some((anchor, virt)), Some(window)) = (event, self.lock, self.window.clone()) else { return };
-        let scale = window.scale_factor();
+        let scale = ui_scale(&window);
         let v = (virt.0 + (delta.0 / scale) as f32, virt.1 + (delta.1 / scale) as f32);
         self.lock = Some((anchor, v));
         self.app.mouse_move(v.0, v.1);
@@ -601,7 +651,9 @@ impl ApplicationHandler for Shell {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(window) = self.window.clone() else { return };
-        let scale = window.scale_factor() as f32;
+        let scale = ui_scale(&window) as f32;
+        // The monitor's own scale, for General ▸ Display's PPI ruler (`crate::ppi`).
+        self.app.state.display_scale = window.scale_factor() as f32;
         // A project is loading (spec: ui/project-loading.md §2): presses, wheel turns and drops wait until it is done;
         // releases still go through so nothing stays held.
         let press = match &event {
@@ -788,8 +840,9 @@ impl ApplicationHandler for Shell {
                         return;
                     }
                 }
-                // A dialog takes repeats too (typing, moving through its list).
-                if pressed && (!event.repeat || self.app.modal_open()) {
+                // A dialog takes repeats too (typing, moving through its list), and so does an Info box or a browser
+                // folder cell being edited.
+                if pressed && (!event.repeat || self.app.modal_open() || self.app.info_editing() || self.app.folder_cell_editing()) {
                     // macOS: Option and Command change the character a key types (Option+S is "ß"); shortcuts go by the
                     // key itself.
                     #[cfg(target_os = "macos")]
@@ -800,6 +853,25 @@ impl ApplicationHandler for Shell {
                             event.logical_key = match event.key_without_modifiers() {
                                 winit::keyboard::Key::Character(c) if self.mods.shift_key() => winit::keyboard::Key::Character(c.to_uppercase().into()),
                                 k => k,
+                            };
+                        }
+                        event
+                    };
+                    // Windows: Ctrl+Alt is AltGr there, so a key that types nothing with it (Ctrl+Alt+Z, the redo) comes
+                    // with no character; shortcuts go by the key itself. A character AltGr does type is kept. Text sent
+                    // as characters rather than keys (an on-screen keyboard, a remote desktop, the emoji panel) comes as
+                    // an unidentified key carrying its text: it types that text.
+                    #[cfg(windows)]
+                    let event = {
+                        use winit::keyboard::Key;
+                        use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+                        let mut event = event;
+                        if matches!(event.logical_key, Key::Unidentified(_)) {
+                            event.logical_key = match (event.key_without_modifiers(), &event.text) {
+                                (Key::Character(c), _) if self.mods.shift_key() => Key::Character(c.to_uppercase().into()),
+                                (Key::Character(c), _) => Key::Character(c),
+                                (_, Some(t)) if !t.chars().any(char::is_control) => Key::Character(t.clone()),
+                                (k, _) => k,
                             };
                         }
                         event
@@ -827,6 +899,10 @@ impl ApplicationHandler for Shell {
                 // Linux: plugin windows stay above the main window while Lemon Studio is the active application.
                 #[cfg(target_os = "linux")]
                 crate::plugin_window::main_focused(focused);
+                // The project's working time counts while the main window is in front (`project_info::WorkClock`).
+                self.app.main_focused(focused);
+                // Audio ▸ Auto close, where the system can't tell which program is in front (`auto_close`).
+                self.app.auto_close.main_focused = focused;
                 if !focused {
                     self.grab = None;
                     self.unmax = None;
@@ -837,7 +913,7 @@ impl ApplicationHandler for Shell {
             // Windows display scale changed, or the window moved to a monitor with another DPI: the canvas follows at
             // the next paint; docked plugin windows are redrawn at the new scale (spec: ui/ui-scaling.md §3).
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.app.plugins.set_scale(scale_factor as f32);
+                self.app.plugins.set_scale(gui_scale(scale_factor) as f32);
                 self.inset = insets(&window);
                 self.app.invalidate();
                 window.request_redraw();
@@ -874,6 +950,8 @@ impl ApplicationHandler for Shell {
                 if canvas.pixmap.width() != cw || canvas.pixmap.height() != ch || canvas.scale != scale {
                     canvas.resize(cw, ch, scale);
                     self.app.invalidate();
+                    // Main GUI scaling changed: docked plugin windows follow (spec: ui/ui-scaling.md §3).
+                    self.app.plugins.set_scale(scale);
                 }
                 // The window may have reached a monitor with another refresh rate.
                 let monitor = window.current_monitor();
@@ -961,6 +1039,8 @@ impl ApplicationHandler for Shell {
                     }
                 }
                 self.painted = Instant::now();
+                // The main window shows its first frame: the splash goes.
+                self.splash = None;
                 if let Some(log) = &mut self.frames {
                     let what = match &damage {
                         None => "none".to_string(),
@@ -1040,6 +1120,7 @@ fn screenshot(args: &[String]) {
     let mut menu: Option<usize> = None;
     let mut plugin_menu: Option<plugin_menu::Target> = None;
     let mut settings: Option<usize> = None;
+    let mut info_edit: Option<usize> = None;
     let mut lane: Option<usize> = None;
     let mut lane_menu = false;
     let mut pans: Option<Vec<f32>> = None;
@@ -1097,6 +1178,8 @@ fn screenshot(args: &[String]) {
             "--lane" => lane = it.next().and_then(|v| v.parse().ok()),
             "--pans" => pans = it.next().map(|v| v.split(',').filter_map(|p| p.parse().ok()).collect()),
             "--settings" => settings = it.next().and_then(|v| v.parse().ok()),
+            // With --settings 7: that Info box (0 title .. 4 web link) being edited.
+            "--info-edit" => info_edit = it.next().and_then(|v| v.parse().ok()),
             "--lane-menu" => lane_menu = true,
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
             "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
@@ -1184,7 +1267,7 @@ fn screenshot(args: &[String]) {
     }
     app.state.show_browser = browser;
     if let Some(t) = browser_tab {
-        app.state.browser_tab = t.min(4);
+        app.state.browser_tab = t.min(3);
     }
     // A dropped folder (spec: ui/browser.md §6), opened; not remembered. `--browser-folder DIR[|sub/path]` opens a subfolder and selects it.
     if let Some(f) = browser_folder {
@@ -1229,6 +1312,10 @@ fn screenshot(args: &[String]) {
     app.load_plugins();
     if let Some(t) = settings {
         app.open_settings(t);
+    }
+    if let Some(i) = info_edit {
+        use views::settings::InfoField as F;
+        app.info_act([F::Title, F::Author, F::Genre, F::Comments, F::Url][i.min(4)]);
     }
     app.state.lane_menu = lane_menu;
     // "--pans 0.2,0.8": mixer pan knob values for inserts 1.. (normalised), to check the value arcs.
@@ -1449,6 +1536,10 @@ fn main() {
         builder.with_x11();
     }
     let event_loop = builder.build().expect("event loop");
+    // The startup splash, from here until the main window shows (spec: ui/settings-choices.md "Miscellaneous: naming,
+    // detached plugins and startup"). After the event loop: on Windows building it makes the process per-monitor DPI
+    // aware, which the splash's size follows.
+    let splash = splash::open();
     // Before the launch: the files the app is launched to open come ahead of `resumed`.
     #[cfg(target_os = "macos")]
     macos::hook_app();
@@ -1459,7 +1550,15 @@ fn main() {
     // Lemon plugins' editors run on threads of their own off Windows and wake the app when they send something.
     #[cfg(not(windows))]
     os_hostlink::set_host_waker(wake_ui);
+    let start = path.is_none();
     let mut app = App::new(path);
+    // Without a project file: the Startup project (spec: ui/settings-choices.md "Miscellaneous: seven more checks,
+    // Default template and Startup project").
+    if start {
+        app.startup_project();
+        // Ask for data folder "On startup": the New project form over it (spec: ui/data-folder.md §7).
+        app.startup_form();
+    }
     // MIDI controllers play the selected channel (spec: ui/midi-input.md).
     app.midi = midi_in::MidiIn::open(wake_ui);
     app.state.midi_inputs = app.midi.names.clone();
@@ -1490,6 +1589,7 @@ fn main() {
         frame_start: Instant::now(),
         frame: FRAME,
         frame_monitor: None,
+        splash,
         frames: FrameLog::open(),
         watchdog,
         ctrl_click: false,
@@ -1519,5 +1619,39 @@ mod tests {
         assert_eq!(frame_interval(Some(1_000_000)), IDLE);
         assert_eq!(frame_interval(None), FRAME);
         assert_eq!(frame_interval(Some(0)), FRAME);
+    }
+
+    /// Animation refresh rate: while something animates, frames come no closer than the display's refresh
+    /// (Ultrasmooth, the default), 60 Hz (Smooth) or 40 Hz (Less smooth); other frames keep the display's rate.
+    // spec: ui/settings-choices.md "Display: Smoothing, Animation refresh rate, Transparent menus and windows
+    // (2026-10-16)"
+    #[test]
+    fn animation_refresh_rate_caps_frames() {
+        let rate = &prefs::ANIMATION_REFRESH_RATE;
+        let display = frame_interval(Some(180_000));
+        assert_eq!(prefs::choice(rate), "Ultrasmooth");
+        assert_eq!(paced(display, true), display);
+        prefs::set_choice(rate, 1);
+        assert_eq!(paced(display, true), Duration::from_secs_f64(1.0 / 60.0));
+        assert_eq!(paced(display, false), display, "nothing animates");
+        prefs::set_choice(rate, 0);
+        assert_eq!(paced(display, true), Duration::from_millis(25));
+        assert_eq!(paced(FRAME, true), Duration::from_millis(25), "a 60 Hz display too");
+        prefs::set_choice(rate, 2);
+        assert_eq!(paced(FRAME, true), FRAME);
+    }
+
+    /// Main GUI scaling (spec: ui/ui-scaling.md §1): System keeps the monitor's scale, a percentage replaces it.
+    #[test]
+    fn main_gui_scaling_replaces_the_monitor_scale() {
+        let choices = prefs::MAIN_GUI_SCALING.choices;
+        let mut got = Vec::new();
+        for i in 0..choices.len() {
+            prefs::set_choice(&prefs::MAIN_GUI_SCALING, i);
+            got.push(gui_scale(1.5));
+        }
+        assert_eq!(got, [1.5, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0]);
+        prefs::set_choice(&prefs::MAIN_GUI_SCALING, 0);
+        assert_eq!(gui_scale(1.25), 1.25);
     }
 }

@@ -8,6 +8,7 @@
 pub mod browser;
 pub mod cabledebug;
 pub mod channel_win;
+pub mod data_folder;
 pub mod dialog;
 pub mod menus;
 pub mod mondebug;
@@ -17,7 +18,9 @@ pub mod piano;
 pub mod patterns;
 pub mod perf;
 pub mod playlist;
+pub mod project_forms;
 pub mod rack;
+pub mod save_form;
 pub mod tapper;
 pub mod toolbar;
 pub mod typein;
@@ -57,13 +60,44 @@ pub fn light(size: f32) -> os_ui::Font {
     os_ui::Font::light(size.round() as u16, 0)
 }
 
+/// Display scale of popup menus and combo lists for a window at scale `main`: General ▸ Display ▸ Pop-ups scaling
+/// (Main = `main`). Their row heights follow it (`os_ui::kit::menu::metrics`). Spec: ui/ui-scaling.md §1–2.
+pub fn popup_scale(main: f32) -> f32 {
+    let pct = crate::prefs::choice(&crate::prefs::POPUPS_SCALING).strip_suffix('%').and_then(|p| p.parse::<f32>().ok());
+    pct.map_or(main, |p| p / 100.0)
+}
+
 /// Top of the workspace (§1) below the toolbar.
 pub const WORK_Y: f32 = 83.0;
 
 /// Top of the workspace and the browser now: the window's top while the toolbar is hidden (spec: ui/toolbar-menu.md
-/// §5).
+/// §5), else the top band's bottom (`band_h`).
 pub fn work_y(s: &State) -> f32 {
-    if s.toolbar.hidden { 0.0 } else { WORK_Y }
+    if s.toolbar.hidden { 0.0 } else { band_h(s) }
+}
+
+/// Display scale of the main window's top band (the toolbar rows with the menu bar, `WORK_Y` tall in its own px) for a
+/// window at scale `main`: General ▸ Display ▸ Toolbars scaling (Main = `main`). Spec: ui/ui-scaling.md §1.
+pub fn toolbar_scale(main: f32) -> f32 {
+    let pct = crate::prefs::choice(&crate::prefs::TOOLBARS_SCALING).strip_suffix('%').and_then(|p| p.parse::<f32>().ok());
+    pct.map_or(main, |p| p / 100.0)
+}
+
+/// The window's px per px of the top band at the last paint's scale: 1 at Toolbars scaling Main.
+pub fn band_k(s: &State) -> f32 {
+    let main = s.ui_scale.max(0.01);
+    toolbar_scale(main) / main
+}
+
+/// Height of the top band in the window's px (shown or not): `WORK_Y` at its scale.
+pub fn band_h(s: &State) -> f32 {
+    WORK_Y * band_k(s)
+}
+
+/// Rect `r` of the top band, in the band's own px (`toolbar`, `app::HINT_RECT`...), in the window's px.
+pub fn band_rect(s: &State, r: Rect) -> Rect {
+    let k = band_k(s);
+    Rect::new(r.x * k, r.y * k, r.w * k, r.h * k)
 }
 /// Width of the docked browser incl. the splitter (§4).
 pub const BROWSER_W: f32 = 209.0;
@@ -131,7 +165,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         ui.win = None;
     }
     if !s.toolbar.hidden {
-        ui.part(Seg::Toolbar, Rect::new(0.0, 0.0, w, WORK_Y), |ui| toolbar::paint(ui, s, f, w));
+        // At Toolbars scaling (spec: ui/ui-scaling.md §1): the band works in its own px, `k` of the window's each, so
+        // it is `w / k` of them wide; what doesn't fit is left out (`toolbar::room`).
+        let scale = toolbar_scale(ui.c.scale);
+        ui.part(Seg::Toolbar, Rect::new(0.0, 0.0, w, band_h(s)), |ui| ui.scaled(scale, |ui, k| toolbar::paint(ui, s, f, w / k)));
     }
     // The floating hint bar, over every window (spec: ui/toolbar-menu.md §4).
     if s.toolbar.hint_bar {
@@ -139,7 +176,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     let overlays = ui.hit_count();
     if let Some(m) = s.menu_open {
-        menus::paint_dropdown(ui, s, m);
+        ui.scaled(popup_scale(ui.c.scale), |ui, k| menus::paint_dropdown(ui, s, m, k));
     }
     // A menu opened from the settings window (Audio page combos) goes over it; a dropdown's submenu over the dropdown;
     // the time signature dialog's value lists over the dialog.
@@ -162,6 +199,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if s.cables.borrow().debug {
         cabledebug::paint(ui, s);
     }
+    // The Song info box of a project opened with "Show info on opening" (spec: flp/events/project-info.md).
+    crate::project_info::paint_song_info(ui, s);
     // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
     dialog::paint(ui, s);
     if over_dialog {
@@ -298,6 +337,13 @@ pub fn framed(ui: &mut Ui, s: &State, win: Win, r: Rect, title: &str, title_x: f
     }
 }
 
+/// "Small scrollbars in editors" is on (General ▸ Miscellaneous; spec: ui/settings-choices.md "Miscellaneous"): the
+/// piano roll's and the playlist's scroll bars are about half as thick, without arrow buttons; the room goes to the
+/// time ruler and the grid.
+pub fn small_scrollbars() -> bool {
+    crate::prefs::check(&crate::prefs::SMALL_SCROLLBARS)
+}
+
 /// A scroll bar over `track`: thumb sized `view / total`, positioned by `pos` (content pixels).
 /// Registers the bar for dragging (see `App::scrollbar_press`).
 pub fn scrollbar(ui: &mut Ui, track: Rect, vertical: bool, pos: f32, view: f32, total: f32, target: Scroll) {
@@ -413,6 +459,32 @@ pub fn ball_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, value: f32) {
 pub fn led(ui: &mut Ui, cx: f32, cy: f32, on: bool) {
     let hov = ui.hovering(Rect::new(cx - 6.0, cy - 6.0, 12.0, 12.0));
     kit::led(ui.c, ui.t, cx, cy, 6.0, kit::State::hover(hov).with_on(on));
+}
+
+/// The label of a question's check that turns its Manage messages entry off when Ok is pressed.
+const REMEMBER: &str = "Remember my choice";
+
+/// How wide `remember_check` draws.
+pub fn remember_width(ui: &mut Ui) -> f32 {
+    20.0 + ui.c.text_width(os_ui::Font::new(13), REMEMBER)
+}
+
+/// A question's "Remember my choice" check at the bottom left of its box, left edge `x`, centred on `cy`: a small box,
+/// ticked when `on`, and its label; a click on either is `action`. Spec: ui/settings-choices.md "Hints and warnings:
+/// Manage messages and Project data size warning (2026-10-16)".
+pub fn remember_check(ui: &mut Ui, x: f32, cy: f32, on: bool, action: Action) {
+    let t = ui.t;
+    let f = os_ui::Font::new(13);
+    let w = remember_width(ui);
+    let hov = ui.hit(Rect::new(x, cy - 10.0, w, 20.0), action, "Ok with this ticked turns this message off (Manage messages)");
+    let b = Rect::new(x, (cy - 6.5).round(), 13.0, 13.0);
+    ui.c.fill_rrect(b, 2.0, t.s(0x141516));
+    ui.c.stroke_rrect(b, 2.0, 1.0, if hov { t.glyph_dim } else { t.text_dim });
+    if on {
+        kit::tick(ui.c, b, t.glyph);
+    }
+    let lh = ui.c.line_height(f);
+    ui.c.text(f, x + 20.0, (cy - lh / 2.0).round(), if hov { t.glyph } else { t.text }, REMEMBER);
 }
 
 /// Channel / clip colors from the model.

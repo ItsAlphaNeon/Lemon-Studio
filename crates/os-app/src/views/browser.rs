@@ -32,9 +32,22 @@ pub const INFO_H: f32 = 84.0;
 /// Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders follow these.
 const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin database", Icon::Speaker, 1)];
 
-/// The "Current project" tree's sections, in screenshot order (spec §2), without the ones nothing is tracked in yet
-/// (History, Remote control, Initialized controls).
-const PROJECT: &[(&str, Icon)] = &[("Patterns", Icon::Note), ("Effects", Icon::Speaker), ("Generators", Icon::Plug), ("Samples", Icon::Wave)];
+/// The "Current project" tree's sections, in screenshot order (spec §2), without the one nothing is tracked in yet
+/// (Remote control). History: the undo history (spec: ui/settings-choices.md "Undo history: the four checks
+/// (2026-10-16)"). Initialized controls: the project's initial values, shown only while there are some (spec:
+/// ui/settings-choices.md "Advanced: Initialize controls automatically"). Project data: the project's data folder, opened
+/// like a folder, shown only while the project has one (spec: ui/data-folder.md §3).
+const PROJECT: &[(&str, Icon)] = &[
+    ("History", Icon::Undo),
+    ("Patterns", Icon::Note),
+    ("Effects", Icon::Speaker),
+    ("Generators", Icon::Plug),
+    (INITIALIZED_CONTROLS, Icon::Slide),
+    (PROJECT_DATA, Icon::Folder),
+    ("Samples", Icon::Wave),
+];
+pub const INITIALIZED_CONTROLS: &str = "Initialized controls";
+pub const PROJECT_DATA: &str = "Project data";
 
 /// The Current project and Plugin database tabs (spec §1).
 pub const PROJECT_TAB: usize = 1;
@@ -55,7 +68,7 @@ pub fn section_key(name: &str) -> Option<String> {
     sections().any(|l| l == name).then(|| format!("{}/{name}", project_root()))
 }
 
-/// What a row stands for; everything but `None` can be dragged (spec §3).
+/// What a row stands for; everything but `None`, `File` and `History` can be dragged (spec §3).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     None,
@@ -73,6 +86,9 @@ pub enum Item {
     File(String),
     /// A parameter of a hosted plugin: hosted key, parameter index (spec: plugins/plugin-parameters.md §6).
     Param(usize, usize),
+    /// An entry of the undo history, 0 = "Last reset" (`History::entries`): a click goes back or forward to it; not
+    /// draggable.
+    History(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -167,13 +183,13 @@ fn tree(s: &State) -> Vec<Row> {
         _ => Vec::new(),
     };
     if tab == 0 {
-        // Dropped folders follow the roots, in alphabetical order (spec §6).
+        // Dropped folders follow the roots, in alphabetical order of their labels (spec §6).
         let name = |r: &Result<usize, usize>| match *r {
             Ok(i) => ROOTS[i].0.to_lowercase(),
-            Err(f) => folder_name(&s.browser_folders[f]).to_lowercase(),
+            Err(f) => root_label(s, &s.browser_folders[f]).to_lowercase(),
         };
         for f in 0..s.browser_folders.len() {
-            let me = folder_name(&s.browser_folders[f]).to_lowercase();
+            let me = root_label(s, &s.browser_folders[f]).to_lowercase();
             let at = (ROOTS.len()..roots.len()).find(|&j| name(&roots[j]) > me).unwrap_or(roots.len());
             roots.insert(at, Err(f));
         }
@@ -186,7 +202,7 @@ fn tree(s: &State) -> Vec<Row> {
                 let key = disk_key(path);
                 let open = s.browser_open.contains(&key);
                 let icon = if open { Icon::FolderOpen } else { Icon::Folder };
-                out.push(Row { key: key.clone(), depth: 0, label: folder_name(path), icon, cat: FOLDER, open: Some(open), bright: true, item: Item::None, path: Some(path.clone()) });
+                out.push(Row { key: key.clone(), depth: 0, label: root_label(s, path), icon, cat: FOLDER, open: Some(open), bright: true, item: Item::None, path: Some(path.clone()) });
                 if open {
                     disk_rows(s, path, &key, 1, &mut out);
                 }
@@ -227,6 +243,12 @@ pub fn disk_key(path: &Path) -> String {
 /// A dropped folder's label: its name (the whole path for a drive root).
 pub fn folder_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
+}
+
+/// A dropped folder root's label: its Browser name (File ▸ Browser extra search folders, `crate::search_folders`),
+/// else the folder's name.
+pub fn root_label(s: &State, path: &Path) -> String {
+    s.browser_names.get(path).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| folder_name(path))
 }
 
 /// One directory entry of a dropped folder (spec §6).
@@ -315,11 +337,28 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
 fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
     let p = &s.project;
     for &(name, icon) in PROJECT {
+        if name == INITIALIZED_CONTROLS && p.init_controls.is_empty() {
+            continue;
+        }
+        if name == PROJECT_DATA {
+            if let Some(dir) = crate::data_folder::folder(s) {
+                data_folder_rows(s, root, &dir, cat, out);
+            }
+            continue;
+        }
         if !section(s, root, name, icon, cat, out) {
             continue;
         }
         let parent = format!("{root}/{name}");
         match name {
+            // Undone steps grey, their arrow mirrored (spec: ui/settings-choices.md "Undo history: the four checks").
+            "History" => {
+                for (e, step) in s.history.entries() {
+                    let icon = if s.history.undone(e) { Icon::Redo } else { Icon::Undo };
+                    let (bright, item) = (s.history.current(e), Item::History(e));
+                    out.push(Row { key: format!("{parent}/{e}"), depth: 2, label: step.into(), icon, cat, open: None, bright, item, path: None });
+                }
+            }
             "Patterns" => {
                 let mut pats: Vec<_> = p.patterns.iter().collect();
                 pats.sort_by_key(|p| p.number);
@@ -343,6 +382,12 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                     }
                 }
             }
+            // "<owner> - <setting>", as the automation clip on the control is named.
+            INITIALIZED_CONTROLS => {
+                for c in &p.init_controls {
+                    leaf(out, &parent, crate::init::name(s, c.target), Icon::Slide, cat, false, Item::None);
+                }
+            }
             "Samples" => {
                 for c in &p.channels {
                     if let Some(path) = c.sample_path.as_ref().filter(|p| !p.is_empty()) {
@@ -353,6 +398,17 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
             }
             _ => {}
         }
+    }
+}
+
+/// The Project data section: the data folder `dir`, opened like a folder (its subfolders, then its files).
+fn data_folder_rows(s: &State, root: &str, dir: &Path, cat: u8, out: &mut Vec<Row>) {
+    let key = format!("{root}/{PROJECT_DATA}");
+    let open = is_open(s, &key);
+    let icon = if open { Icon::FolderOpen } else { Icon::Folder };
+    out.push(Row { key: key.clone(), depth: 1, label: PROJECT_DATA.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: Some(dir.to_path_buf()) });
+    if open {
+        disk_rows(s, dir, &key, 2, out);
     }
 }
 
@@ -520,13 +576,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         icons::draw(ui.c, icon, Rect::new(r.x + 1.0, 87.0 + dy, 12.0, 14.0), if hov { t.glyph } else { t.text_dim });
     }
     ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
-    // Tabs (spec ui/browser.md §1).
+    // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
     ui.c.fill_rect(Rect::span(0.0, 200.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
-    const TIPS: [&str; 5] = ["All", "Current project", "Plugin database", "Online content", "Favorites"];
-    for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Globe, Icon::Star].into_iter().enumerate() {
-        let cx = 20.0 + 40.0 * i as f32;
+    const TIPS: [&str; 4] = ["All", "Current project", "Plugin database", "Favorites"];
+    for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Star].into_iter().enumerate() {
+        let cx = 25.0 + 50.0 * i as f32;
         let rr = Rect::new(cx - 18.0, 108.0 + dy, 36.0, 30.0);
-        // Online content and favorites: not available yet, greyed out.
+        // Favorites: not available yet, greyed out.
         let hov = if i >= OFF_TABS {
             ui.off(rr, TIPS[i]);
             false
@@ -579,6 +635,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             c => cats[usize::from(c).min(1)],
         };
         let c = if row.bright { base.shade(0.12) } else if row.depth > 0 { base.shade(-0.06) } else { base };
+        let c = if matches!(row.item, Item::History(e) if s.history.undone(e)) { t.text_faint } else { c };
         // Expander: only an opened node shows its ▾ in the gutter (FL screenshots, spec §2).
         if row.open == Some(true) && s.browser_search.is_empty() {
             let (ax, cy) = (x - 9.0, y + ROW_H / 2.0);
@@ -598,7 +655,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         let label = if row.path.is_some() { middle_cut(ui, f, &row.label, w) } else { row.label.clone() };
         ui.c.text_clip(f, x + 25.0, y, w, c, &label);
     }
-    let empty = if !s.browser_search.is_empty() { "No matches" } else if s.browser_tab == 3 { "No online content" } else { "No favorites yet" };
+    let empty = if !s.browser_search.is_empty() { "No matches" } else { "No favorites yet" };
     if rows.is_empty() && (s.browser_tab >= 3 || !s.browser_search.is_empty()) {
         ui.c.text(os_ui::Font::new(14).italic(), 22.0, top + 6.0, t.text_faint, empty);
     }
@@ -645,7 +702,7 @@ fn middle_cut(ui: &mut Ui, f: os_ui::Font, text: &str, w: f32) -> String {
     String::new()
 }
 
-/// Tabs from this one on (online content, favorites) are not available yet (spec §1).
+/// Tabs from this one on (favorites) are not available yet (spec §1).
 const OFF_TABS: usize = 3;
 
 /// Where the options menu opens (just below the title bar's ▸, spec §4).

@@ -6,7 +6,10 @@
 //!
 //! One state machine, `State` (stopped / playing / paused), published in `Shared`:
 //! - **Play** starts the pattern or the playlist from a start tick (a pattern loops inside the engine, the
-//!   playlist plays out and stops by itself).
+//!   playlist plays out and stops by itself). A jump of the position while playing is a new Play there (a new stream
+//!   and engine). Before the first block, the hosted instruments are reset, the hosted effects too with "Reset plugins
+//!   on transport"; with "Play truncated notes on transport" the notes under way at the start tick sound from there
+//!   (`Starts`; spec: ui/settings-choices.md "Transport: Play truncated notes and Reset plugins").
 //! - **Pause** fades the stream out over a few milliseconds and holds the engine where it is (position, ringing
 //!   voices, hosted plugins untouched); **Resume** fades back in from that exact place.
 //! - **Stop** fades out, drops the streams, silences every hosted instrument (`Instrument::reset`: voices and tails
@@ -146,8 +149,9 @@ impl Shared {
 }
 
 enum Cmd {
-    /// Project, mode, start tick (the piano roll's play-start marker in pattern mode), request generation.
-    Play(Box<Project>, PlayMode, f64, u64),
+    /// Project, mode, start tick (the piano roll's play-start marker in pattern mode), request generation, and the
+    /// transport settings as they were asked for.
+    Play(Box<Project>, PlayMode, f64, u64, Starts),
     Pause,
     Resume,
     /// The newest edited project is in `Transport::latest` (older ones are skipped).
@@ -171,6 +175,10 @@ enum Cmd {
     Export(Box<Project>, PlayMode, u32, PathBuf),
     /// The audio settings changed: move the playback to a new stream, close the live and preview streams.
     Reopen,
+    /// Auto close (`Transport::close_device`): every stream closes; the playback keeps its place for `Open`.
+    Close,
+    /// The output may be used again (`Transport::open_device`).
+    Open,
 }
 
 /// Where an export is (`Transport::export_status`).
@@ -181,6 +189,27 @@ pub enum Export {
     Running(f32),
     /// Finished: the length written in seconds, or what went wrong.
     Done(Result<f64, String>),
+}
+
+/// The Audio > Mixer transport settings a start of playback goes by (Play, and a jump of the position while playing,
+/// which the app makes a new Play), read from the program settings on the UI thread when the start is asked for, so a
+/// change counts from the next start (spec: ui/settings-choices.md "Transport: Play truncated notes and Reset
+/// plugins").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Starts {
+    /// "Play truncated notes on transport": the notes under way at the start tick sound from there, afresh, for what
+    /// is left of them (`Engine::set_truncated_on_transport`).
+    pub(crate) truncated: bool,
+    /// "Reset plugins on transport": the start resets the hosted effects too (their delay lines and tails), not only
+    /// the instruments.
+    pub(crate) reset: bool,
+}
+
+impl Starts {
+    pub(crate) fn from_prefs() -> Starts {
+        use crate::prefs::{check, PLAY_TRUNCATED_ON_TRANSPORT, RESET_PLUGINS_ON_TRANSPORT};
+        Starts { truncated: check(&PLAY_TRUNCATED_ON_TRANSPORT), reset: check(&RESET_PLUGINS_ON_TRANSPORT) }
+    }
 }
 
 /// An export renders at most this long past the song's end (instruments that never report silence).
@@ -261,6 +290,19 @@ impl Transport {
         let _ = self.tx.send(Cmd::Reopen);
     }
 
+    /// Lets go of the output device (Audio ▸ Auto close, `crate::auto_close`): playback, previews and live notes close
+    /// their streams after their fade. A playback (pause it first) keeps its place; until `open_device` nothing opens
+    /// a stream (previews and live notes go unheard), except a new `play`.
+    pub fn close_device(&self) {
+        let _ = self.tx.send(Cmd::Close);
+    }
+
+    /// The output device may be used again: a playback held by `close_device` goes on from its place on a new stream,
+    /// playing if the transport plays by then (`resume`), else paused.
+    pub fn open_device(&self) {
+        let _ = self.tx.send(Cmd::Open);
+    }
+
     /// Renders `project` offline to a 32-bit float WAV file at `rate`, with the hosted instruments and effects, on the
     /// audio thread: playback, previews and live notes stop at once and nothing else processes the plugins meanwhile.
     /// Follow it with `export_status`.
@@ -283,7 +325,8 @@ impl Transport {
         Export::Idle
     }
 
-    /// Start (or restart) playback from `start_tick`; replaces whatever is playing or paused.
+    /// Start (or restart) playback from `start_tick`; replaces whatever is playing or paused. The transport settings
+    /// (`Starts`) are read now.
     pub fn play(&self, project: &Project, mode: PlayMode, start_tick: f64) {
         if let Ok(mut slot) = self.latest.lock() {
             *slot = None;
@@ -292,7 +335,7 @@ impl Transport {
         self.shared.song.store(matches!(mode, PlayMode::Song), Ordering::Relaxed);
         self.shared.rewind(start_tick);
         self.shared.state.store(PLAYING, Ordering::Release);
-        let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode, start_tick, generation));
+        let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode, start_tick, generation, Starts::from_prefs()));
     }
 
     /// Replace the playing project, continuing from the current position.
@@ -473,6 +516,19 @@ impl Transport {
     /// The output the playback or live stream last opened: device name, sample rate, buffer length asked for.
     pub fn opened(&self) -> Option<(String, u32, Option<u32>)> {
         self.shared.opened.lock().ok()?.clone()
+    }
+
+    /// Shows as playing without starting anything: what the UI sees between Play and the first sound (tests have no
+    /// device, so a real Play stops again).
+    #[cfg(test)]
+    pub(crate) fn pretend_playing(&self) {
+        self.shared.state.store(PLAYING, Ordering::Release);
+    }
+
+    /// Streams open now, fading ones included (each holds its voice counter in `Shared::engine_voices`).
+    #[cfg(test)]
+    fn streams(&self) -> usize {
+        self.shared.engine_voices.lock().map_or(0, |v| v.iter().filter(|w| w.strong_count() > 0).count())
     }
 }
 
@@ -747,11 +803,23 @@ fn export(project: &Project, mode: PlayMode, rate: u32, path: &std::path::Path, 
     Ok(audio.len() as f64 / 2.0 / f64::from(rate))
 }
 
-/// Silences every hosted instrument (voices, tails, queued notes). Only called while no stream processes them.
+/// Silences every hosted instrument (voices, tails, queued notes) and effect (tails, delay lines). Only called while no
+/// stream processes them.
 fn reset_instruments(inst: &Instruments) {
+    reset_hosts(inst, true);
+}
+
+/// Resets every hosted instrument, and every hosted effect when `effects`. Only called while no stream processes them.
+///
+/// A start of playback (Play, a jump while playing) calls it with "Reset plugins on transport" (spec:
+/// ui/settings-choices.md "Transport: Play truncated notes and Reset plugins"): on, every hosted plugin is reset before
+/// the first block at the new place; off, the effects are left alone, so a delay's tail rings on through the start. The
+/// instruments are reset either way, as at Stop: the new engine does not know the notes the old one held at them (a
+/// Lemon Studio choice; what FL does to an instrument's voices at a jump is not measured).
+fn reset_hosts(inst: &Instruments, effects: bool) {
     let (list, fx): (Vec<SharedInstrument>, Vec<SharedEffect>) = inst
         .lock()
-        .map(|l| (l.inst.iter().map(|(_, i)| i.clone()).collect(), l.fx.iter().map(|(_, _, f)| f.clone()).collect()))
+        .map(|l| (l.inst.iter().map(|(_, i)| i.clone()).collect(), l.fx.iter().filter(|_| effects).map(|(_, _, f)| f.clone()).collect()))
         .unwrap_or_default();
     for i in list {
         if let Ok(mut i) = i.lock() {
@@ -782,6 +850,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     // that would not open is tried again on the next change of state, not every loop.
     let mut listen = false;
     let mut listen_retry = false;
+    // Auto close (`Transport::close_device`): no stream opens while `closed`; the playback waits in `held` (project,
+    // mode, generation, where).
+    let mut closed = false;
+    let mut held: Option<(Project, PlayMode, u64, At)> = None;
     let swap = |s: &mut Session, library: &mut SampleLibrary| {
         // Build outside the lock, then swap at the playing position.
         let mut e = Engine::new(&s.project, library, s.rate, s.mode);
@@ -824,11 +896,16 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     };
     loop {
         match rx.recv_timeout(Duration::from_millis(10)) {
+            // The output is closed by Auto close: previews and live notes find no stream and open none.
+            Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::TapClick(_)) if closed => {}
             Ok(Cmd::Update) => {
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
                     for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
                         s.project = project.clone();
                         swap(s, &mut library);
+                    }
+                    if let Some(h) = held.as_mut() {
+                        h.0 = project.clone();
                     }
                     live_project = Some(project);
                 }
@@ -925,7 +1002,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                         }
                     };
                     if let Some(s) = target {
-                        let tempo = project.tempo.unwrap_or(140.0);
+                        let tempo = project.tick_tempo(project.tempo.unwrap_or(140.0));
                         let frames = os_engine::laws::tick_to_frame(f64::from(n.length.max(1)), project.ppq.max(1), tempo, s.rate);
                         if let Ok(mut e) = s.engine.lock() {
                             e.note_for(r, n.key, n.velocity, frames);
@@ -941,22 +1018,28 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     Err(e) => report(&shared, e),
                 }
             }
-            Ok(Cmd::Play(project, mode, start, generation)) => {
+            Ok(Cmd::Play(project, mode, start, generation, starts)) => {
                 // A newer request (stop, another play) already superseded this one.
                 if generation != shared.generation.load(Ordering::Acquire) {
                     continue;
                 }
-                // The old playback is replaced, not faded; nothing may keep ringing into the new one. A live stream
-                // left open would process the same plugin instances a second time (each stream would only hear
-                // every other chunk of a ringing sample): typed notes go into the playing engine instead.
+                // A Play asked for while Auto close holds the output opens it (and drops the playback it held).
+                closed = false;
+                held = None;
+                // The old playback is replaced, not faded; of what it leaves ringing only the hosted effects' tails
+                // go on, with "Reset plugins on transport" off (`reset_hosts`). A live stream left open would process
+                // the same plugin instances a second time (each stream would only hear every other chunk of a ringing
+                // sample): typed notes go into the playing engine instead.
                 session = None;
                 live = None;
                 closing.clear();
-                reset_instruments(&inst);
+                // A jump while playing arrives as a Stop and this Play: the Stop's pending reset gives way to this one.
+                reset_hosts(&inst, starts.reset);
                 reset_pending = false;
                 listen_retry = true;
                 live_project = Some((*project).clone());
-                match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, At { tick: start, paused: false }) {
+                let at = At { tick: start, paused: false, truncated: starts.truncated };
+                match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at) {
                     Ok(s) => session = Some(s),
                     Err(e) => {
                         report(&shared, e);
@@ -972,7 +1055,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 preview_until = None;
                 closing.clear();
                 if let Some(old) = session.take() {
-                    let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: old.paused() };
+                    let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: old.paused(), truncated: old.truncated };
                     let (project, mode, generation) = (old.project.clone(), old.mode, old.generation);
                     drop(old);
                     reset_instruments(&inst);
@@ -1011,8 +1094,47 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 for s in [session.take(), live.take(), preview.take()].into_iter().flatten() {
                     retire(s, &mut closing);
                 }
+                held = None;
                 reset_pending = true;
                 listen_retry = true;
+            }
+            Ok(Cmd::Close) => {
+                closed = true;
+                // The playback (paused by the app) is held where it was heard; every stream fades out and closes, then
+                // the instruments are reset as after Stop (without the rewind: the transport is paused).
+                if let Some(s) = session.take() {
+                    let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: true, truncated: s.truncated };
+                    held = Some((s.project.clone(), s.mode, s.generation, at));
+                    retire(s, &mut closing);
+                    reset_pending = true;
+                }
+                for s in [live.take(), preview.take()].into_iter().flatten() {
+                    retire(s, &mut closing);
+                    reset_pending = true;
+                }
+                preview_until = None;
+            }
+            Ok(Cmd::Open) => {
+                closed = false;
+                listen_retry = true;
+                // The held playback goes on at its place, unless a Stop or another Play came since; playing if the
+                // transport was resumed meanwhile, else paused (`resume` follows).
+                if let Some((project, mode, generation, mut at)) = held.take().filter(|h| h.2 == shared.generation.load(Ordering::Acquire)) {
+                    closing.clear();
+                    if reset_pending {
+                        reset_pending = false;
+                        reset_instruments(&inst);
+                    }
+                    at.paused = shared.state.load(Ordering::Acquire) != PLAYING;
+                    match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at) {
+                        Ok(s) => session = Some(s),
+                        Err(e) => {
+                            report(&shared, e);
+                            shared.state.store(STOPPED, Ordering::Release);
+                            shared.rewind(0.0);
+                        }
+                    }
+                }
             }
             Ok(Cmd::Export(project, mode, rate, path)) => {
                 // Every stream that could process the plugins goes at once (no fade), and they start from silence.
@@ -1020,6 +1142,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 live = None;
                 preview = None;
                 preview_until = None;
+                held = None;
                 closing.clear();
                 reset_instruments(&inst);
                 reset_pending = false;
@@ -1055,7 +1178,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         }
         // While an editor is open and nothing plays, the live stream processes the instruments (once the stopped
         // streams are gone and the instruments reset).
-        if listen && listen_retry && live.is_none() && !reset_pending && closing.is_empty() && session.as_ref().is_none_or(|s| s.paused()) {
+        if listen && listen_retry && !closed && live.is_none() && !reset_pending && closing.is_empty() && session.as_ref().is_none_or(|s| s.paused()) {
             listen_retry = false;
             if let Some(p) = live_project.as_ref() {
                 release_paused(&session);
@@ -1078,11 +1201,13 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     }
 }
 
-/// Where a new stream starts: the tick to seek to before anything is rendered, and whether it starts paused.
+/// Where a new stream starts: the tick to seek to before anything is rendered, whether it starts paused, and whether
+/// the notes under way there sound ("Play truncated notes on transport", `Starts`).
 #[derive(Clone, Copy, Default)]
 struct At {
     tick: f64,
     paused: bool,
+    truncated: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1117,6 +1242,8 @@ struct Session {
     project: Project,
     mode: PlayMode,
     rate: u32,
+    /// "Play truncated notes on transport" as this playback started with (a move to new audio settings keeps it).
+    truncated: bool,
 }
 
 impl Session {
@@ -1146,9 +1273,10 @@ impl Session {
         }
         // Seek before anything is queued, so the first block is already the start position.
         if at.tick > 0.0 {
+            e.set_truncated_on_transport(at.truncated);
             e.seek_tick(at.tick as u64);
             if song {
-                let tempo = project.tempo.unwrap_or(140.0);
+                let tempo = project.tick_tempo(project.tempo.unwrap_or(140.0));
                 shared.position.store(os_engine::laws::tick_to_frame(at.tick, project.ppq.max(1), tempo, rate), Ordering::Relaxed);
             }
         }
@@ -1185,7 +1313,7 @@ impl Session {
         }
         let stream = stream?;
         stream.play().map_err(|e| e.to_string())?;
-        Ok(Session { _stream: stream, feed, kind, engine, done, ctl, generation, project: project.clone(), mode, rate })
+        Ok(Session { _stream: stream, feed, kind, engine, done, ctl, generation, project: project.clone(), mode, rate, truncated: at.truncated })
     }
 }
 
@@ -1645,6 +1773,47 @@ mod tests {
         t.stop();
     }
 
+    // spec: ui/settings-choices.md "Input / output: Auto close; CPU and Mixer: Smart disable, Align tick lengths,
+    // Resampling quality (2026-10-16)"
+    /// Auto close: closing the device holds a paused playback at its place with no stream open, and live notes open
+    /// none; opening it again goes on from there on a new stream (needs an audio device; the pattern is silent).
+    #[test]
+    #[ignore]
+    fn closing_the_device_holds_the_playback() {
+        let mut project = crate::app::test_project();
+        project.patterns = vec![os_model::Pattern { number: 1, ..Default::default() }];
+        let t = Transport::new(None);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!((t.take_error(), t.streams()), (None, 1), "playing");
+        t.pause();
+        t.close_device();
+        std::thread::sleep(Duration::from_millis(200));
+        let held = t.tick();
+        assert!(t.paused() && held > 0.0, "paused at {held}");
+        assert_eq!(t.streams(), 0, "no stream open");
+        t.note_on(0, 60, 100);
+        t.preview(project.clone());
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(t.streams(), 0, "a live note or a preview opens none");
+        t.note_off(0, 60);
+        assert!((t.tick() - held).abs() < 1e-9, "held");
+        t.open_device();
+        t.resume();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(t.playing() && !t.paused() && t.tick() > held, "went on from {held}: {}", t.tick());
+        assert_eq!(t.streams(), 1);
+        // Closed while stopped, a Play opens the output again.
+        t.stop();
+        t.close_device();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(t.streams(), 0);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(t.streams(), 1);
+        t.stop();
+    }
+
     /// The monitor tap carries what is played and goes quiet (count stops) when stopped (needs an audio device).
     #[test]
     #[ignore]
@@ -1733,5 +1902,81 @@ mod tests {
         t.stop();
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!((t.engine_voices(), pl.voices()), (0, 0), "Stop ends every voice");
+    }
+
+    /// A hosted plugin (instrument or effect) that counts its resets.
+    struct Counted(Arc<AtomicU32>);
+
+    impl os_engine::HostedEffect for Counted {
+        fn process_fx(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        fn reset_fx(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl os_engine::Instrument for Counted {
+        fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {}
+        fn note_off(&mut self, _o: u32, _k: u8) {}
+        fn process(&mut self, _r: u32, _l: &mut [f32], _rr: &mut [f32]) {}
+        fn reset(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A start of playback (Play, a jump while playing) resets the hosted instruments, and the hosted effects only
+    /// with "Reset plugins on transport" (spec: ui/settings-choices.md "Transport: Play truncated notes and Reset
+    /// plugins"); Stop resets both.
+    #[test]
+    fn a_start_resets_hosted_effects_only_with_the_setting() {
+        let (synth, fx) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let hosts: Instruments = Arc::new(Mutex::new(Hosts {
+            inst: vec![(0, Arc::new(Mutex::new(Counted(synth.clone()))) as SharedInstrument)],
+            fx: vec![(1, 0, Arc::new(Mutex::new(Counted(fx.clone()))) as SharedEffect)],
+        }));
+        let counts = || (synth.load(Ordering::Relaxed), fx.load(Ordering::Relaxed));
+        reset_hosts(&hosts, false);
+        assert_eq!(counts(), (1, 0), "off: the effect rings on");
+        reset_hosts(&hosts, true);
+        assert_eq!(counts(), (2, 1), "on: every hosted plugin");
+        reset_instruments(&hosts);
+        assert_eq!(counts(), (3, 2), "Stop");
+    }
+
+    /// The same through the audio thread (needs an audio device: `cargo test -p os-app -- --ignored a_jump_resets`):
+    /// Play and a jump while playing (a Stop and a Play, as the playlist ruler and the song position slider make it,
+    /// or a Play while playing, as the piano roll's marker does) reset a hosted effect with "Reset plugins on
+    /// transport" on, not with it off; pause and resume never do; Stop does either way.
+    #[test]
+    #[ignore]
+    fn a_jump_resets_hosted_effects_only_with_the_setting() {
+        use crate::prefs::{set_check, RESET_PLUGINS_ON_TRANSPORT};
+        let (_, project) = looping_engine();
+        for on in [false, true] {
+            set_check(&RESET_PLUGINS_ON_TRANSPORT, on);
+            let fx = Arc::new(AtomicU32::new(0));
+            let t = Transport::new(None);
+            t.set_effects(vec![(0, 0, Arc::new(Mutex::new(Counted(fx.clone()))) as SharedEffect)]);
+            let resets = |n: u32| if on { n } else { 0 };
+            t.play(&project, PlayMode::Pattern(1), 0.0);
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(t.playing() && t.take_error().is_none(), "playing");
+            assert_eq!(fx.load(Ordering::Relaxed), resets(1), "Play, setting {on}");
+            t.stop();
+            t.play(&project, PlayMode::Pattern(1), 192.0);
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(t.playing() && t.tick() >= 192.0, "jumped: {}", t.tick());
+            assert_eq!(fx.load(Ordering::Relaxed), resets(2), "a jump, setting {on}");
+            t.play(&project, PlayMode::Pattern(1), 96.0);
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(fx.load(Ordering::Relaxed), resets(3), "a Play while playing, setting {on}");
+            t.pause();
+            std::thread::sleep(Duration::from_millis(100));
+            t.resume();
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(fx.load(Ordering::Relaxed), resets(3), "pause and resume, setting {on}");
+            t.stop();
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(fx.load(Ordering::Relaxed), resets(3) + 1, "Stop, setting {on}");
+        }
     }
 }

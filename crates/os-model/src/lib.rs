@@ -8,6 +8,7 @@
 //! Units are the project's own: positions and lengths in ticks (see [`Project::ppq`]),
 //! levels as normalized `f64`s. File encodings live in `os-flp`, not here.
 
+pub mod crossfade;
 pub mod curve;
 
 /// An RGB color.
@@ -50,10 +51,25 @@ pub struct Project {
     pub groups: Vec<String>,
     /// Current display filter (event 146): a group index, `None` = All.
     pub current_group: Option<u32>,
-    /// Time signature (events 17 and 18): numerator, denominator. `None` = not in the file (4/4).
-    pub time_signature: Option<(u16, u16)>,
-    /// "Play truncated notes" (event 30; spec: audio/song-structure.md). `None` = not in the file (off).
-    pub play_truncated: Option<bool>,
+    /// The bar (events 17 and 18; spec: flp/engine-events.md "Project"): beats per bar and steps per beat, a step
+    /// being a sixteenth. A time signature n/d is (n, 16 / d): 4/4 = (4, 4), 3/8 = (3, 2). `None` = not in the file
+    /// (4, 4). See [`Project::bar`].
+    pub bar: Option<(u16, u16)>,
+    /// How the Project page shows the bar (event 35): `true` = "Set as time signature", `false` = "Set as time
+    /// division". `None` = not in the file (a time signature).
+    pub bar_as_signature: Option<bool>,
+    /// "Play truncated notes in clips" (event 30; spec: audio/song-structure.md): on when the file has the event
+    /// with 1, off when it has none (spec: flp/engine-events.md "Event 30").
+    pub play_truncated: bool,
+    /// Song or pattern mode as saved (event 9: 1 = song, 0 = pattern; spec: flp/engine-events.md "Project"). `None` =
+    /// not in the file, which FL opens in song mode.
+    pub song_mode: Option<bool>,
+    /// Project settings Lemon Studio shows but does not play yet, as the file holds them (spec: flp/engine-events.md
+    /// "Project"): panning law (event 23: 0 Circular, 2 Triangular), fast declick for cut groups (event 40),
+    /// automatic crossfades (event 44). `None` = not in the file. Saving leaves their events as they are.
+    pub panning_law: Option<u8>,
+    pub fast_declick: Option<bool>,
+    pub auto_crossfades: Option<bool>,
     /// Playlist scroll, time zoom and track height (event 242). `None` = not in the file.
     pub playlist_view: Option<PlaylistView>,
     /// Main volume 0..=16000, 12800 = unity (mixer record id 0 at place 0x4000; spec: audio/mixer.md "Main volume").
@@ -61,11 +77,201 @@ pub struct Project {
     pub main_volume: Option<u16>,
     /// Main pitch in cents, -1200..=1200 (event 80; spec: audio/voice-levels.md). `None` = not in the file (0).
     pub main_pitch: Option<i16>,
+    /// When the project was started and the time spent working on it (event 237; spec: flp/events/project-info.md).
+    /// `None` = not in the file.
+    pub work_time: Option<WorkTime>,
+    /// "Show info on opening" (event 10; spec: flp/events/project-info.md): opening the project shows its Song info
+    /// box. `None` = not in the file (off).
+    pub show_info: Option<bool>,
+    /// The project's data folder: the Project page's choice and the folder (events 167 and 202; spec:
+    /// ui/data-folder.md §2). `None` = neither event in the file (Don't use a data folder).
+    pub data_folder: Option<DataFolder>,
+    /// The project's initial values, in file order (event 216; spec: ui/settings-choices.md "Advanced: Initialize
+    /// controls automatically"): controls that take a value when the song starts.
+    pub init_controls: Vec<InitControl>,
+}
+
+/// One of the project's initial values: a control and the value it takes when the song starts (spec:
+/// ui/settings-choices.md "Advanced: Initialize controls automatically"). A 12-byte record of event 216, kept as read,
+/// so a record whose meaning isn't known (a plugin parameter's) is written back as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitControl {
+    /// Bytes 0..3 of the record: 0 in every record seen.
+    pub head: u32,
+    /// The control (bytes 4..7), as an automation target ([`target`]): the setting's id in the low 16 bits, its place
+    /// (a channel index, a mixer place or 0x4000 for the project) in the high 16.
+    pub target: u32,
+    /// The value (bytes 8..11), in the units the setting is stored in.
+    pub value: i32,
+}
+
+impl InitControl {
+    /// The record's size in event 216.
+    pub const LEN: usize = 12;
+
+    /// The project's main volume (stored 0..=16000), main swing (0..=128) and main pitch (cents) at the project's place
+    /// (spec: flp/layouts.md "Parameter ids in an automation link").
+    pub const MAIN_VOLUME: u32 = 0x4000_0000;
+    pub const MAIN_SWING: u32 = 0x4000_0001;
+    pub const MAIN_PITCH: u32 = 0x4000_0002;
+
+    /// A record read from event 216's bytes.
+    pub fn from_bytes(b: &[u8; Self::LEN]) -> InitControl {
+        let word = |o: usize| [b[o], b[o + 1], b[o + 2], b[o + 3]];
+        InitControl { head: u32::from_le_bytes(word(0)), target: u32::from_le_bytes(word(4)), value: i32::from_le_bytes(word(8)) }
+    }
+
+    /// The record's 12 bytes.
+    pub fn to_bytes(self) -> [u8; Self::LEN] {
+        let mut b = [0; Self::LEN];
+        b[0..4].copy_from_slice(&self.head.to_le_bytes());
+        b[4..8].copy_from_slice(&self.target.to_le_bytes());
+        b[8..12].copy_from_slice(&self.value.to_le_bytes());
+        b
+    }
+
+    /// Control `t` at the automation value `v` (0..1), in the setting's stored units; `None` for a control whose stored
+    /// units aren't known (plugin parameters, see [`InitControl::unit`]).
+    pub fn from_unit(t: u32, v: f64) -> Option<InitControl> {
+        use target::Target;
+        let v = v.clamp(0.0, 1.0);
+        let value = match target::decode(t) {
+            Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => 12800.0 * v,
+            Target::ChannelPitch(_) => 9600.0 * v - 4800.0,
+            Target::MixerVolume(_) | Target::MixerSend(..) => 16000.0 * v,
+            Target::MixerPan(_) => 12800.0 * v - 6400.0,
+            Target::MixerSeparation(_) => 128.0 * v - 64.0,
+            Target::MixerEq(_, _, 0) => 3600.0 * v - 1800.0,
+            Target::MixerEq(..) => 65536.0 * v,
+            Target::SlotOn(..) => v.round_ties_even(),
+            Target::Tempo => 10000.0 + 512000.0 * v,
+            _ => return None,
+        };
+        Some(InitControl { head: 0, target: t, value: value.round() as i32 })
+    }
+
+    /// The value as an automation clip hands it on (0..1), for the settings whose stored units are known: the inverse
+    /// of [`InitControl::from_unit`] (spec: audio/voice-levels.md "Values from automation", audio/mixer.md "Changes
+    /// while the song plays", audio/timing.md "Tempo that changes"). Plugin parameters, a channel's other levels and
+    /// the project's main volume, swing and pitch give `None`.
+    pub fn unit(&self) -> Option<f64> {
+        use target::Target;
+        let v = f64::from(self.value);
+        let unit = match target::decode(self.target) {
+            Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => v / 12800.0,
+            Target::ChannelPitch(_) => (v + 4800.0) / 9600.0,
+            Target::MixerVolume(_) | Target::MixerSend(..) => v / 16000.0,
+            Target::MixerPan(_) => (v + 6400.0) / 12800.0,
+            Target::MixerSeparation(_) => (v + 64.0) / 128.0,
+            Target::MixerEq(_, _, 0) => (v + 1800.0) / 3600.0,
+            Target::MixerEq(..) => v / 65536.0,
+            Target::SlotOn(..) => f64::from(u8::from(self.value != 0)),
+            Target::Tempo => (v - 10000.0) / 512000.0,
+            _ => return None,
+        };
+        Some(unit.clamp(0.0, 1.0))
+    }
+}
+
+/// Event 237: two doubles in days (spec: flp/events/project-info.md).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WorkTime {
+    /// When the project was started: days since 1899-12-30 00:00, local time.
+    pub started: f64,
+    /// The time spent working on it, in days.
+    pub spent: f64,
+}
+
+impl WorkTime {
+    /// Days in a minute.
+    pub const MINUTE: f64 = 1.0 / 1440.0;
 }
 
 impl Project {
     /// Default main volume (unity).
     pub const MAIN_VOLUME_DEFAULT: u16 = 12800;
+
+    /// The bar of a project without events 17 and 18: four beats of four steps (4/4).
+    pub const BAR_DEFAULT: (u16, u16) = (4, 4);
+
+    /// The bar: beats per bar and steps per beat, each at least 1 ([`Project::bar`] when set).
+    pub fn bar(&self) -> (u16, u16) {
+        self.bar.map_or(Self::BAR_DEFAULT, |(b, s)| (b.max(1), s.max(1)))
+    }
+
+    /// Ticks in a bar: beats per bar × steps per beat sixteenths, `17 × 18 × PPQ / 4` (spec: audio/timing.md
+    /// "Time signature"; `PPQ * 4 * numerator / denominator` for a time signature). Right in either mode, also for
+    /// steps that make no signature (3 steps per beat).
+    pub fn bar_ticks(&self) -> u32 {
+        let (beats, steps) = self.bar();
+        (u32::from(self.ppq.max(1)) * u32::from(beats) * u32::from(steps) / 4).max(1)
+    }
+
+    /// Ticks in a beat, the unit the tempo counts: steps per beat sixteenths, `18 × PPQ / 4` (a quarter in x/4, an
+    /// eighth in 3/8, a half in 3/2).
+    pub fn beat_ticks(&self) -> u32 {
+        (u32::from(self.ppq.max(1)) * u32::from(self.bar().1) / 4).max(1)
+    }
+
+    /// The tempo the ticks run at, in quarter notes a minute, for a project at `tempo`: the tempo counts the bar's
+    /// beats ([`Project::beat_ticks`]), so ticks run at `tempo × steps per beat / 4` quarters a minute (spec:
+    /// audio/timing.md "The tempo counts the bar's beats"). Every conversion between ticks and time goes through it;
+    /// with 4 steps per beat it is `tempo`.
+    pub fn tick_tempo(&self, tempo: f64) -> f64 {
+        tempo * f64::from(self.bar().1) / 4.0
+    }
+
+    /// The bar as a time signature (numerator, denominator = 16 / steps per beat), when the steps divide 16.
+    pub fn signature(&self) -> Option<(u16, u16)> {
+        let (beats, steps) = self.bar();
+        (16 % steps == 0).then(|| (beats, 16 / steps))
+    }
+
+    /// Whether the Project page shows the bar as a time signature (event 35; unset = yes).
+    pub fn bar_is_signature(&self) -> bool {
+        self.bar_as_signature.unwrap_or(true)
+    }
+
+    /// Changes the timebase to `ppq` and every tick count of the project with it: note positions and lengths,
+    /// pattern control points, explicit pattern lengths and pattern markers, playlist clip positions, lengths and
+    /// pattern-clip offsets, time markers; the stored playlist view keeps showing the same bars. Automation clip data
+    /// (beats) and audio clip offsets (milliseconds) stay (spec: ui/settings-choices.md "Project", flp/engine-events.md
+    /// "The project settings, measured": FL rescales at once and asks nothing).
+    pub fn set_ppq(&mut self, ppq: u16) {
+        let (from, to) = (self.ppq.max(1), ppq.max(1));
+        if from == to {
+            self.ppq = to;
+            return;
+        }
+        for p in &mut self.patterns {
+            p.notes.iter_mut().for_each(|n| n.rescale(from, to));
+            p.controls.iter_mut().for_each(|c| c.rescale(from, to));
+            p.markers.iter_mut().for_each(|m| m.rescale(from, to));
+            p.length = p.length.map(|l| rescale_length(l, from, to));
+        }
+        for a in &mut self.arrangements {
+            a.clips.iter_mut().for_each(|c| c.rescale(from, to));
+            a.markers.iter_mut().for_each(|m| m.rescale(from, to));
+        }
+        if let Some(v) = &mut self.playlist_view {
+            let k = f64::from(to) / f64::from(from);
+            v.set_left(v.left() * k);
+            v.set_ticks_per_px(v.ticks_per_px() * k);
+        }
+        self.ppq = to;
+    }
+}
+
+/// A tick position at timebase `from` as one at `to`. How FL rounds a ratio that is not whole (96 to 72) was not
+/// measured (spec: ui/settings-choices.md "Project", Timebase): to the nearest tick, halves up.
+pub fn rescale_tick(t: u32, from: u16, to: u16) -> u32 {
+    let (from, to) = (u64::from(from.max(1)), u64::from(to.max(1)));
+    ((u64::from(t) * to + from / 2) / from).min(u64::from(u32::MAX)) as u32
+}
+
+/// A length in ticks at timebase `from` as one at `to` ([`rescale_tick`]); a length that was not 0 stays at least 1.
+pub fn rescale_length(t: u32, from: u16, to: u16) -> u32 {
+    if t == 0 { 0 } else { rescale_tick(t, from, to).max(1) }
 }
 
 /// The playlist view a project stores: scroll, time zoom and track height (event 242, 28 bytes; spec:
@@ -171,17 +377,12 @@ impl Project {
         (u32::from(self.ppq.max(1)) * 4 * u32::from(num.max(1)) / u32::from(den.max(1))).max(1)
     }
 
-    /// Ticks in a bar of the project's own time signature (events 17 and 18; 4/4 when not in the file).
-    pub fn bar_ticks(&self) -> u32 {
-        let (num, den) = self.time_signature.unwrap_or((4, 4));
-        self.bar_of(num, den)
-    }
-
     /// Pattern `number`'s own bar grid (spec: audio/song-structure.md, "Time signatures and a pattern's length"): one
-    /// region per time-signature marker of the pattern, `(start, bar, signature)`, the project's signature from 0
-    /// until the first one. A region starts a bar at its marker. Markers of the arrangements play no part.
+    /// region per time-signature marker of the pattern, `(start, bar, signature)`, the project's bar ([`Project::bar`])
+    /// from 0 until the first one. A region starts a bar at its marker. Markers of the arrangements play no part.
     pub fn pattern_bars(&self, number: u16) -> Vec<(u32, u32, (u16, u16))> {
-        let sig = self.time_signature.unwrap_or((4, 4));
+        // A bar that makes no signature (3 steps per beat) keeps its beats.
+        let sig = self.signature().unwrap_or((self.bar().0, 4));
         let mut regions = vec![(0, self.bar_ticks(), sig)];
         let mut marks: Vec<&TimeMarker> =
             self.pattern(number).map(|p| p.markers.iter().filter(|m| m.kind == TimeMarker::SIGNATURE).collect()).unwrap_or_default();
@@ -300,6 +501,27 @@ impl Project {
             });
         }
     }
+}
+
+/// A project's data folder as the file keeps it (spec: ui/data-folder.md §2, flp/events/project-info.md): a folder of
+/// its own for its backups and the copies of the samples it uses. An event the file lacks reads as its default.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DataFolder {
+    /// Event 167, the Project page's choice: [`DataFolder::NONE`], [`DataFolder::RELATIVE`] or
+    /// [`DataFolder::SPECIFIED`].
+    pub choice: u32,
+    /// Event 202, the folder the choice resolves to, as the file holds it: with a trailing backslash, empty for none.
+    /// It is not always the data folder: with [`DataFolder::RELATIVE`] that is the project file's own folder.
+    pub folder: String,
+}
+
+impl DataFolder {
+    /// Don't use a data folder.
+    pub const NONE: u32 = 0;
+    /// Store data relative to the project file.
+    pub const RELATIVE: u32 = 1;
+    /// Store data in the specified folder.
+    pub const SPECIFIED: u32 = 2;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -577,8 +799,9 @@ impl ChannelSound {
         self.stretch[2] = 0;
     }
 
-    /// How many times its own length a sample of `duration` seconds lasts once stretched at `bpm`, in any method:
-    /// the stretch time (or the sample's length when none) times the multiplier.
+    /// How many times its own length a sample of `duration` seconds lasts once stretched at `bpm` (the tempo the ticks
+    /// run at, [`Project::tick_tempo`]: the stretch time counts quarter notes), in any method: the stretch time (or the
+    /// sample's length when none) times the multiplier.
     pub fn stretch_factor(&self, duration: f64, bpm: f64) -> f64 {
         let m = self.stretch_multiplier();
         match self.stretch_time() {
@@ -931,6 +1154,11 @@ impl ControlPoint {
     pub fn param(&self) -> u16 {
         self.kind as u16
     }
+
+    /// The point at timebase `to` instead of `from` ([`Project::set_ppq`]).
+    pub fn rescale(&mut self, from: u16, to: u16) {
+        self.position = rescale_tick(self.position, from, to);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -976,6 +1204,30 @@ impl Note {
         self.flags & Self::SLIDE != 0
     }
 
+    /// Byte-19 value of a note's own portamento switch (spec: audio/note-rules.md, "A note's own portamento switch").
+    pub const PORTA: u8 = 0x10;
+
+    /// The note's own portamento switch: it inverts the channel's portamento for this note (spec: as above).
+    pub fn porta(&self) -> bool {
+        self.group & Self::PORTA != 0
+    }
+
+    pub fn set_slide(&mut self, on: bool) {
+        if on {
+            self.flags |= Self::SLIDE;
+        } else {
+            self.flags &= !Self::SLIDE;
+        }
+    }
+
+    pub fn set_porta(&mut self, on: bool) {
+        if on {
+            self.group |= Self::PORTA;
+        } else {
+            self.group &= !Self::PORTA;
+        }
+    }
+
     /// Highest repeat index (spec: flp/events/patterns.md, note repeat table).
     pub const MAX_REPEAT: u8 = 14;
 
@@ -993,6 +1245,12 @@ impl Note {
         } else {
             self.group &= !Self::MUTED;
         }
+    }
+
+    /// The note at timebase `to` instead of `from` ([`Project::set_ppq`]): position and length.
+    pub fn rescale(&mut self, from: u16, to: u16) {
+        self.position = rescale_tick(self.position, from, to);
+        self.length = rescale_length(self.length, from, to);
     }
 
     /// A step-sequencer step with default parameters.
@@ -1172,6 +1430,17 @@ impl Clip {
         self.position + self.length
     }
 
+    /// The clip at timebase `to` instead of `from` ([`Project::set_ppq`]): position, length and, for a pattern clip,
+    /// its window (pattern ticks; an audio clip's is in milliseconds, an automation clip's in beats).
+    pub fn rescale(&mut self, from: u16, to: u16) {
+        self.position = rescale_tick(self.position, from, to);
+        self.length = rescale_length(self.length, from, to);
+        if let (ClipSource::Pattern(_), Some((a, b))) = (self.source, self.window) {
+            let k = f64::from(to.max(1)) / f64::from(from.max(1));
+            self.window = Some(((a * k).round(), (b * k).round()));
+        }
+    }
+
     /// Clip id stored in the record (bytes 32..36).
     pub fn id(&self) -> u32 {
         u32::from_le_bytes([self.raw[32], self.raw[33], self.raw[34], self.raw[35]])
@@ -1227,6 +1496,57 @@ impl Clip {
         self.raw[56] = if ms > 0.0 { self.raw[56] | 2 } else { self.raw[56] & !2 };
     }
 
+    /// Whether the fade-in / fade-out was set with the clip's own handle (bits 0 and 1 of byte 56). A fade without
+    /// its bit belongs to the project's automatic crossfades while they are on (spec: audio/audio-clips.md
+    /// "Automatic crossfades", [`crossfade`]).
+    pub fn fade_in_set(&self) -> bool {
+        self.raw[56] & 1 != 0
+    }
+
+    pub fn fade_out_set(&self) -> bool {
+        self.raw[56] & 2 != 0
+    }
+
+    /// The fade-in / fade-out as the record holds it, bit or not: (milliseconds, tension), `None` for a length of 0.
+    /// Kept in step with the clips while automatic crossfades are on ([`crossfade::derive`]), this is the fade that
+    /// plays (with them off, every stored fade plays).
+    pub fn stored_fade_in(&self) -> Option<(f32, f32)> {
+        let ms = self.f32_at(36);
+        (ms.is_finite() && ms > 0.0).then(|| (ms, self.f32_at(40)))
+    }
+
+    pub fn stored_fade_out(&self) -> Option<(f32, f32)> {
+        let ms = self.f32_at(44);
+        (ms.is_finite() && ms > 0.0).then(|| (ms, self.f32_at(48)))
+    }
+
+    /// The stored tensions (bytes 40 and 48), whatever the lengths.
+    pub fn fade_in_tension(&self) -> f32 {
+        self.f32_at(40)
+    }
+
+    pub fn fade_out_tension(&self) -> f32 {
+        self.f32_at(48)
+    }
+
+    /// Sets a tension alone: the length and the bit stay.
+    pub fn set_fade_in_tension(&mut self, t: f32) {
+        self.set_f32(40, t);
+    }
+
+    pub fn set_fade_out_tension(&mut self, t: f32) {
+        self.set_f32(48, t);
+    }
+
+    /// Sets a length alone (milliseconds, 0 = none): the tension and the bit stay ([`crossfade`]).
+    pub fn set_fade_in_length(&mut self, ms: f32) {
+        self.set_f32(36, ms);
+    }
+
+    pub fn set_fade_out_length(&mut self, ms: f32) {
+        self.set_f32(44, ms);
+    }
+
     /// The clip's gain (bytes 52..56): 1.0 when the record holds no usable value.
     pub fn gain(&self) -> f32 {
         let g = self.f32_at(52);
@@ -1238,14 +1558,23 @@ impl Clip {
     }
 }
 
-/// The gain at `x` (0..1) through an audio clip's fade-in with tension `tension`; a fade-out is `fade_curve(1 - x)`
-/// (spec: audio/audio-clips.md "Fades and clip gain": a raised cosine at tension 0, measured; the tension warp
-/// `x + k x (1 - x)`, `k = t / (|t| + 4.17)`, is a fit).
+/// The gain at `x` (0..1) through an audio clip's fade with tension `tension`: for a fade-in `x` is the time since
+/// the clip's start over the fade's length, for a fade-out the time to the clip's end over its length, each with its
+/// own tension (spec: audio/audio-clips.md "Fades and clip gain"). A raised cosine `s` bent by the tension: with
+/// `q = 1 + |t|`, `(q - q^(1 - s)) / (q - 1)` for t > 0, `(q^s - 1) / (q - 1)` for t < 0, `s` itself for |t| below
+/// 1e-6. A fade-in at `t` and a fade-out at `-t` over the same span add up to 1.
 pub fn fade_curve(x: f64, tension: f64) -> f64 {
     let x = x.clamp(0.0, 1.0);
-    let k = tension / (tension.abs() + 4.17);
-    let w = x + k * x * (1.0 - x);
-    0.5 - 0.5 * (std::f64::consts::PI * w).cos()
+    let s = 0.5 - 0.5 * (std::f64::consts::PI * x).cos();
+    if !tension.is_finite() || tension.abs() < 1e-6 {
+        return s;
+    }
+    let q = 1.0 + tension.abs();
+    if tension > 0.0 {
+        (q - q.powf(1.0 - s)) / (q - 1.0)
+    } else {
+        (q.powf(s) - 1.0) / (q - 1.0)
+    }
 }
 
 /// A time marker (spec: flp/events/playlist.md "Time markers").
@@ -1264,6 +1593,11 @@ impl TimeMarker {
 
     pub fn new(position: u32, name: &str) -> Self {
         TimeMarker { position, kind: 0, name: name.into(), numerator: 4, denominator: 4 }
+    }
+
+    /// The marker at timebase `to` instead of `from` ([`Project::set_ppq`]).
+    pub fn rescale(&mut self, from: u16, to: u16) {
+        self.position = rescale_tick(self.position, from, to);
     }
 }
 
@@ -1626,6 +1960,40 @@ pub mod target {
             assert_eq!(decode(channel(3, 0x12)), Target::Other(0x0003_0012));
             assert!(bipolar(channel(0, CHANNEL_VOLUME_MULT)) && !bipolar(channel(0, CHANNEL_CUTOFF)));
         }
+
+        /// Initial values in stored units and back (spec: ui/settings-choices.md "Advanced: Initialize controls
+        /// automatically"): the measured record is channel 0's volume at 10000, the knob's default.
+        #[test]
+        fn initial_values_convert_to_and_from_automation_values() {
+            use crate::InitControl;
+            let vol = InitControl::from_unit(channel(0, CHANNEL_VOLUME), 10000.0 / 12800.0).unwrap();
+            assert_eq!(vol, InitControl { head: 0, target: 0, value: 10000 });
+            let bytes = vol.to_bytes();
+            assert_eq!(bytes, [0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x27, 0, 0]);
+            assert_eq!(InitControl::from_bytes(&bytes), vol);
+            for (t, stored) in [
+                (channel(3, CHANNEL_PAN), 3200),
+                (channel(3, CHANNEL_PITCH), -1200),
+                (mixer(2, MIXER_VOLUME), 12800),
+                (mixer(2, MIXER_PAN), -6400),
+                (mixer(2, MIXER_SEPARATION), 32),
+                (mixer(2, EQ_GAIN + 1), -900),
+                (mixer(2, EQ_FREQ), 33145),
+                (send(2, 5), 8000),
+                (slot(1, 3, SLOT_ON), 0),
+                (slot(1, 3, SLOT_MIX), 6400),
+                (TEMPO, 140000),
+            ] {
+                let c = InitControl { head: 0, target: t, value: stored };
+                let v = c.unit().unwrap();
+                assert_eq!(InitControl::from_unit(t, v), Some(c), "{t:#010x}");
+            }
+            // Units not known: kept, not converted.
+            for t in [channel_param(0, 4), slot_param(1, 0, 2), InitControl::MAIN_VOLUME, channel(0, CHANNEL_CUTOFF)] {
+                assert_eq!(InitControl::from_unit(t, 0.5), None);
+                assert_eq!(InitControl { head: 0, target: t, value: 7 }.unit(), None);
+            }
+        }
     }
 }
 
@@ -1652,5 +2020,104 @@ impl Automation {
         }
         let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
         Some(curve::segment_value(pts, i, t))
+    }
+}
+
+// spec: audio/audio-clips.md "Fades and clip gain"
+#[cfg(test)]
+mod bar_tests {
+    use super::Project;
+
+    fn bar(ppq: u16, bar: Option<(u16, u16)>) -> Project {
+        Project { ppq, bar, ..Project::default() }
+    }
+
+    #[test]
+    fn the_beat_is_the_bars_steps() {
+        assert_eq!(bar(96, None).beat_ticks(), 96);
+        assert_eq!(bar(96, Some((3, 2))).beat_ticks(), 48, "an eighth in 3/8");
+        assert_eq!(bar(96, Some((3, 8))).beat_ticks(), 192, "a half in 3/2");
+        assert_eq!(bar(192, Some((5, 3))).beat_ticks(), 144, "3 steps make no signature");
+        assert_eq!(bar(96, Some((3, 2))).bar_ticks(), 3 * 48);
+    }
+
+    #[test]
+    fn the_ticks_run_at_the_tempo_times_the_steps_over_four() {
+        assert_eq!(bar(96, None).tick_tempo(140.0), 140.0);
+        assert_eq!(bar(96, Some((7, 4))).tick_tempo(140.0), 140.0);
+        assert_eq!(bar(96, Some((3, 2))).tick_tempo(140.0), 70.0);
+        assert_eq!(bar(96, Some((3, 8))).tick_tempo(140.0), 280.0);
+        assert_eq!(bar(96, Some((5, 3))).tick_tempo(140.0), 105.0);
+        // A beat lasts 60 / tempo seconds whatever the bar.
+        for b in [None, Some((3, 2)), Some((3, 8)), Some((5, 3))] {
+            let p = bar(96, b);
+            let secs = f64::from(p.beat_ticks()) / 96.0 * 60.0 / p.tick_tempo(140.0);
+            assert!((secs - 60.0 / 140.0).abs() < 1e-12, "{b:?}: {secs}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod fade_tests {
+    use super::fade_curve;
+
+    const TENSIONS: [f64; 13] = [-64.0, -32.0, -8.0, -4.736, -1.0, -0.5, 0.0, 0.5, 1.0, 2.289, 3.36, 8.0, 64.0];
+
+    #[test]
+    fn ends_and_rise() {
+        for t in TENSIONS {
+            assert_eq!(fade_curve(0.0, t), 0.0, "t {t}");
+            assert!((fade_curve(1.0, t) - 1.0).abs() < 1e-15, "t {t}");
+            // Rises for any tension (and stays put outside 0..1).
+            let v: Vec<f64> = (0..=1000).map(|k| fade_curve(f64::from(k) / 1000.0, t)).collect();
+            assert!(v.windows(2).all(|w| w[1] > w[0]), "t {t}");
+            assert_eq!((fade_curve(-0.5, t), fade_curve(1.5, t)), (fade_curve(0.0, t), fade_curve(1.0, t)));
+        }
+    }
+
+    #[test]
+    fn tension_zero_is_the_raised_cosine() {
+        for k in 0..=100 {
+            let x = f64::from(k) / 100.0;
+            let s = 0.5 - 0.5 * (std::f64::consts::PI * x).cos();
+            assert_eq!(fade_curve(x, 0.0), s);
+            // The formula's limit near 0, and below 1e-6 the cosine itself.
+            assert!((fade_curve(x, 1e-5) - s).abs() < 1e-5 && (fade_curve(x, -1e-5) - s).abs() < 1e-5);
+            assert_eq!((fade_curve(x, 9e-7), fade_curve(x, -9e-7)), (s, s));
+        }
+    }
+
+    #[test]
+    fn the_middle() {
+        for t in TENSIONS.into_iter().filter(|&t| t != 0.0) {
+            let r = (1.0 + t.abs()).sqrt();
+            let want = if t > 0.0 { r / (1.0 + r) } else { 1.0 / (1.0 + r) };
+            assert!((fade_curve(0.5, t) - want).abs() < 1e-12, "t {t}");
+        }
+        // The two values measured (spec): +3.36 gives 0.676, -4.83 gives 0.293.
+        assert!((fade_curve(0.5, 3.36) - 0.676).abs() < 5e-4);
+        assert!((fade_curve(0.5, -4.83) - 0.293).abs() < 5e-4);
+    }
+
+    #[test]
+    fn negative_tension_is_the_positive_turned_half_a_turn() {
+        for t in TENSIONS {
+            for k in 0..=100 {
+                let x = f64::from(k) / 100.0;
+                assert!((fade_curve(x, -t) - (1.0 - fade_curve(1.0 - x, t))).abs() < 1e-12, "t {t} x {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_fade_in_at_t_and_a_fade_out_at_minus_t_add_up_to_one() {
+        // Over one span: x into it is x for the fade-in and 1 - x (the time to the end) for the fade-out.
+        for t in TENSIONS {
+            for k in 0..=1000 {
+                let x = f64::from(k) / 1000.0;
+                let sum = fade_curve(x, t) + fade_curve(1.0 - x, -t);
+                assert!((sum - 1.0).abs() < 1e-12, "t {t} x {x}: {sum}");
+            }
+        }
     }
 }

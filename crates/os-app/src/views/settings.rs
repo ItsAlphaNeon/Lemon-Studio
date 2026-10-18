@@ -4,7 +4,8 @@
 
 //! Settings window (OPTIONS > MIDI / Audio / General / File / Theme settings, Project settings, Project info,
 //! Debugging log; F10 / F11): ten tabs of grouped controls. The controls that work today are listed in `LIVE` and
-//! handled in `App::settings_act`; every other control is drawn greyed out and only says it is not available yet.
+//! handled in `App::settings_act`, or are program settings declared in `crate::prefs`; every other control is drawn
+//! greyed out and only says it is not available yet.
 //! The Plugins tab is the plugin manager (search folders, scanning, the plugin table).
 // spec: ui/settings.md, ui/plugin-manager.md
 
@@ -36,6 +37,77 @@ pub enum SAct {
     Plug(Plug),
     /// A working combo (`LIVE_COMBOS`) by its label, with its box's bottom left (where its menu opens).
     Combo(&'static str, f32, f32),
+    /// An Info page text box: click to edit (`App::info_act`).
+    Info(InfoField),
+    /// The Info page's genre button, with its bottom left (where the genre menu opens; `App::genre_menu`).
+    Genres(f32, f32),
+    /// A working value box (`LIVE_NUMBERS`) by its label: the mouse wheel changes it (`App::settings_number`).
+    Number(&'static str),
+    /// A slider declared in `crate::prefs` by its label, with its track's left and width: a press sets it and drags it
+    /// (`App::pref_slider_press`), the wheel steps it (`App::pref_slider_wheel`).
+    Slider(&'static str, f32, f32),
+    /// General ▸ Display's PPI ruler: a press starts a drag of its end (`App::ppi_press`), the wheel steps it
+    /// (`App::ppi_wheel`).
+    Ppi,
+    /// File ▸ Browser extra search folders: row i's folder button (`App::search_folder_pick`).
+    FolderPick(usize),
+    /// Row i's Folder or Browser name cell: a click selects it for typing (`App::search_folder_cell`).
+    FolderCell(usize, crate::search_folders::Col),
+}
+
+/// The Info page's text boxes: the project's credits (spec: ui/settings.md "Info", flp/events/project-info.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfoField {
+    Title,
+    Author,
+    Genre,
+    /// Several lines: Enter starts a new one.
+    Comments,
+    Url,
+}
+
+impl InfoField {
+    pub fn multiline(self) -> bool {
+        self == InfoField::Comments
+    }
+
+    pub fn get(self, i: &os_model::ProjectInfo) -> &Option<String> {
+        match self {
+            InfoField::Title => &i.title,
+            InfoField::Author => &i.author,
+            InfoField::Genre => &i.genre,
+            InfoField::Comments => &i.comments,
+            InfoField::Url => &i.url,
+        }
+    }
+
+    pub fn get_mut(self, i: &mut os_model::ProjectInfo) -> &mut Option<String> {
+        match self {
+            InfoField::Title => &mut i.title,
+            InfoField::Author => &mut i.author,
+            InfoField::Genre => &mut i.genre,
+            InfoField::Comments => &mut i.comments,
+            InfoField::Url => &mut i.url,
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            InfoField::Title => "Project title: the window caption shows it instead of the file name",
+            InfoField::Author => "Project author",
+            InfoField::Genre => "Project genre",
+            InfoField::Comments => "Project comments",
+            InfoField::Url => "Project web link",
+        }
+    }
+}
+
+/// The Info box that has the keyboard: its field and the text being typed (the file dialog's text field: caret,
+/// selection). Enter, a click elsewhere or another tab writes it into the project; Esc drops it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InfoEdit {
+    pub field: InfoField,
+    pub text: crate::dialog::Field,
 }
 
 /// Plugin manager controls. Rows count in `plugin_db::search_dirs` order (folders) or in `Db::rows` (table).
@@ -77,8 +149,19 @@ pub struct SettingsUi {
     /// Theme presets (name, `.flstheme` text): built-ins (spec ui/theme-presets.md), then the user's theme folder.
     pub themes: Vec<(String, String)>,
     pub preset: usize,
+    /// The Info page's box being edited.
+    pub info_edit: Option<InfoEdit>,
+    /// The File page's Browser extra search folders cell being typed into.
+    pub folder_edit: Option<crate::search_folders::CellEdit>,
     /// The Plugins page shows the experimental native host toggles: `os_native::settings_shown()` at startup.
     pub native: bool,
+    /// Project ▸ Time settings: the last bar (beats per bar, steps per beat) of each "Set as" mode, indexed by
+    /// `signature as usize` (0 = time division), kept while the program runs; `None` = 4/4 (spec:
+    /// ui/settings-choices.md "Set as time division").
+    pub bar_memory: [Option<(u16, u16)>; 2],
+    /// General ▸ System: `.flp` files open with this program, as Windows said when the page last opened or was
+    /// clicked (`crate::file_assoc`); always false on macOS and Linux, where the check is greyed.
+    pub assoc: bool,
 }
 
 /// Tabs: label, page title, group (0 system / 1 project / 2 info) (spec §2). Plugins takes the place of FL's Account
@@ -118,24 +201,45 @@ pub fn plugin_check(key: &str) -> bool {
     [STARTUP_CHECK, ERRORS_CHECK, COMBINE_CHECK].contains(&key)
 }
 
-/// The checks and buttons that work (by label, handled in `App::settings_act`). Every other check, combo, value box,
-/// slider and button is not available yet: drawn greyed out, its hint and click say so.
+/// General ▸ System: whether `.flp` files open with this program. Not a stored setting: on Windows the check shows what
+/// the registry says (`SettingsUi::assoc`, `crate::file_assoc`); on macOS and Linux it is greyed. Spec:
+/// ui/settings-choices.md "System: Associate project files with application (2026-10-16)".
+pub const ASSOCIATE_CHECK: &str = "Associate project files with application";
+/// Its hint where the system's own "Open with" settings decide (spec).
+#[cfg(target_os = "macos")]
+const ASSOCIATE_ELSEWHERE: &str = "The app bundle declares .flp files; the system's Open with settings decide";
+#[cfg(all(not(windows), not(target_os = "macos")))]
+const ASSOCIATE_ELSEWHERE: &str = "The system's Open with settings decide which program opens .flp files";
+
+/// The checks and buttons that work (by label, handled in `App::settings_act`). Apart from these, `LIVE_COMBOS` and the
+/// program settings declared in `crate::prefs`, every other check, combo, value box, slider and button is not available
+/// yet: drawn greyed out, its hint and click say so.
 pub const LIVE: &[&str] = &[
     NATIVE_HOST_CHECK,
     NATIVE_FIRST_CHECK,
     STARTUP_CHECK,
     ERRORS_CHECK,
     COMBINE_CHECK,
+    TRUNCATED_CHECK,
+    CROSSFADES_CHECK,
+    SHOW_INFO_CHECK,
+    LIGHT_MODE_CHECK,
+    NOTE_COLORS_CHECK,
+    RESET_WORK_TIME,
+    MANAGE_SHORTCUTS,
     "Manage plugins",
+    "Manage messages",
     "Add folder...",
     "Find new plugins",
     "Rescan all",
     "Load theme...",
     "Reset",
+    ASSOCIATE_CHECK,
 ];
 
+/// `LIVE`, and the checks declared in `crate::prefs`.
 fn live(key: &str) -> bool {
-    LIVE.contains(&key)
+    LIVE.contains(&key) || crate::prefs::find_check(key).is_some()
 }
 
 /// The combos that work (they open a menu of choices, `App::audio_menu`).
@@ -145,6 +249,65 @@ pub const ANIMATIONS: &str = "Animations";
 pub const OUTPUT_DEVICE: &str = "Output device";
 pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
+
+/// Project ▸ Time settings (spec: ui/settings-choices.md "Project"): the timebase, the "Set as" mode (event 35; the
+/// combo has no label beside it), and the bar (events 17, 18) as a time signature (Numerator / Denominator, FL's
+/// choices) or as a time division (Beats per bar / Steps per beat value boxes).
+pub const TIMEBASE: &str = "Timebase (PPQ)";
+pub const TIMEBASES: &[u16] = &[24, 48, 72, 96, 120, 144, 168, 192, 384, 768, 960];
+pub const SET_AS: &str = "Set as";
+pub const SET_AS_SIGNATURE: &str = "Set as time signature";
+pub const SET_AS_DIVISION: &str = "Set as time division";
+pub const NUMERATOR: &str = "Numerator";
+pub const DENOMINATOR: &str = "Denominator";
+pub const NUMERATORS: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+pub const DENOMINATORS: &[u16] = &[2, 4, 8, 16];
+pub const BEATS_PER_BAR: &str = "Beats per bar";
+pub const STEPS_PER_BEAT: &str = "Steps per beat";
+/// Project ▸ Advanced ▸ Panning law (event 23; spec: ui/settings-choices.md "Project", audio/gain-laws.md "Panning
+/// law: Triangular"): FL's choices and their values.
+pub const PANNING_LAW: &str = "Panning law";
+pub const PANNING_LAWS: [(&str, u8); 2] = [("Circular", 0), ("Triangular", 2)];
+/// The Project page's combos that work (their menus: `App::audio_menu`).
+pub const PROJECT_COMBOS: [&str; 5] = [TIMEBASE, SET_AS, NUMERATOR, DENOMINATOR, PANNING_LAW];
+/// The value boxes that work, with their ranges (the mouse wheel changes them: `App::settings_number`).
+pub const LIVE_NUMBERS: [(&str, u16, u16); 2] = [(BEATS_PER_BAR, 1, 32), (STEPS_PER_BEAT, 1, 16)];
+
+/// The range of the working value box labelled `label` (`LIVE_NUMBERS`, and the value boxes declared in
+/// `crate::prefs`).
+pub fn number_range(label: &str) -> Option<(u16, u16)> {
+    LIVE_NUMBERS.iter().find(|n| n.0 == label).map(|n| (n.1, n.2)).or_else(|| crate::prefs::find_number(label).map(|n| (n.min, n.max)))
+}
+
+/// The Denominator box's text for `steps` per beat: 16 / steps (spec: flp/engine-events.md "Project"); steps that make
+/// no signature (3) show the quotient to two decimals.
+pub fn denominator_text(steps: u16) -> String {
+    let steps = steps.max(1);
+    if 16 % steps == 0 { (16 / steps).to_string() } else { format!("{:.2}", 16.0 / f64::from(steps)) }
+}
+/// Project ▸ Advanced: "play truncated notes" (event 30; spec: audio/song-structure.md "Play truncated notes").
+pub const TRUNCATED_CHECK: &str = "Play truncated notes in clips";
+/// Project ▸ Playlist: "Automatic crossfades" (event 44; spec: ui/settings-choices.md "Project"). Its neighbour,
+/// "Enable automatic crossfades in new projects", is a program setting (`prefs::AUTO_CROSSFADES_NEW`).
+pub const CROSSFADES_CHECK: &str = "Automatic crossfades";
+/// Info: "Show info on opening" (event 10) and the button that zeroes the time spent (event 237; spec:
+/// ui/settings-choices.md "Info", flp/events/project-info.md).
+pub const SHOW_INFO_CHECK: &str = "Show info on opening";
+/// Theme ▸ Options: the applied theme's `Lightmode` and `OverrideClips` (`App::toggle_theme_option`; spec:
+/// ui/settings-choices.md "Light mode and clip note colours").
+pub const LIGHT_MODE_CHECK: &str = "Light mode";
+pub const NOTE_COLORS_CHECK: &str = "Audio and automation clips use note colors";
+pub const RESET_WORK_TIME: &str = "Reset working time";
+/// General ▸ Input: opens the Manage shortcuts window (`App::open_shortcuts`).
+pub const MANAGE_SHORTCUTS: &str = "Manage shortcuts";
+
+/// General ▸ Miscellaneous: FILE ▸ New's template; its tree is found at run time (`crate::templates`).
+pub const DEFAULT_TEMPLATE: &str = "Default template";
+
+/// Whether the combo labelled `label` works (opens a menu of choices).
+fn live_combo(label: &str) -> bool {
+    LIVE_COMBOS.contains(&label) || PROJECT_COMBOS.contains(&label) || label == DEFAULT_TEMPLATE
+}
 
 /// A buffer length as the Audio page shows it: frames and milliseconds at `rate`.
 pub fn buffer_text(frames: u32, rate: u32) -> String {
@@ -198,7 +361,8 @@ pub enum Row {
     Check(&'static str, bool),
     /// Two checks side by side (second at x 340).
     Check2(&'static str, bool, &'static str, bool),
-    /// Disabled check (drawn dim).
+    /// Disabled check (drawn dim). No page has one at the moment.
+    #[allow(dead_code)]
     Off(&'static str, bool),
     /// Combo box: value, box width, label to its right.
     Combo(String, f32, &'static str),
@@ -227,10 +391,20 @@ pub enum Row {
     Dim(&'static str, Box<Row>),
     /// Plugin search folders: (path, tag, searched, added by the user).
     Folders(Vec<(String, &'static str, bool, bool)>),
+    /// File ▸ Browser extra search folders (reads `State::browser_folders`, `crate::search_folders`): the rows shown.
+    SearchFolders(usize),
     /// The preferred-format switch.
     Prefer(Prefer),
     /// The plugin table with its count and Find box (reads `State::plugdb`).
     Table,
+    /// An Info text box: field, width (0 = to the panel's right edge). The Genre box has a ▸ after it.
+    Edit(InfoField, f32),
+    /// The Info page's footer: small grey lines at the left, the Reset working time button at the bottom right.
+    InfoFooter(Vec<String>),
+    /// General ▸ Display's PPI ruler (`crate::ppi`, `ppi_ruler`).
+    Ppi,
+    /// Project ▸ Data folder's Rename button, folder button and path (`super::data_folder`).
+    DataFolder,
 }
 
 pub struct Group {
@@ -253,6 +427,11 @@ fn gf(title: &'static str, closed: bool, rows: Vec<Row>) -> Group {
 }
 fn combo(v: &str, w: f32, label: &'static str) -> Row {
     Row::Combo(v.into(), w, label)
+}
+/// The panning law's name for event 23 (`PANNING_LAWS`; none is Circular); a value outside those shows as a number.
+pub fn panning_text(law: Option<u8>) -> String {
+    let v = law.unwrap_or(0);
+    PANNING_LAWS.iter().find(|l| l.1 == v).map_or_else(|| v.to_string(), |l| l.0.to_string())
 }
 fn txt(v: impl Into<String>) -> Row {
     Row::Text(v.into(), false)
@@ -321,7 +500,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 ]),
                 g("Mixer", vec![
                     combo("24-point sinc", 122.0, "Resampling quality"),
-                    Value("---".into(), "Browser preview track"),
+                    Value(crate::prefs::number_text(&crate::prefs::BROWSER_PREVIEW_TRACK), "Browser preview track"),
                     Value("---".into(), "Metronome track"),
                     Check("Play truncated notes on transport", true),
                     Check("Reset plugins on transport", false),
@@ -329,11 +508,15 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]
         }
         GENERAL => vec![
-            Group { note: " (requires a restart to take effect)", ..gf("Display", false, vec![
+            // Display and Language apply at once, so they leave off FL's "(requires a restart to take effect)" (spec:
+            // ui/settings.md "General").
+            gf("Display", false, vec![
                 combo("System", 64.0, "Main GUI scaling"),
-                dim("Display PPI", txt("Define 1 inch / 2.54 cm or set display's PPI")),
-                dim("Display PPI", Text("(96 PPI/advised scaling: 100%)".into(), true)),
-                Slider("", 0.25),
+                // spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High visibility
+                // (2026-10-16)".
+                txt("Define 1 inch / 2.54 cm or set display's PPI"),
+                Text(crate::ppi::label(crate::ppi::ppi(s.display_scale), s.display_scale), true),
+                Ppi,
                 combo("Main", 64.0, "Pop-ups scaling"),
                 combo("Main", 64.0, "Toolbars scaling"),
                 combo("Off", 64.0, "Transparent windows"),
@@ -341,27 +524,28 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Slider("Smoothing", 0.2),
                 combo("Ultrasmooth", 126.0, "Animation refresh rate"),
                 Check2("Force refreshes", true, "Transparent menus", true),
-                Off("Thick lines", true),
+                Check("Thick lines", false),
                 Check("High visibility", false),
                 combo("Off", 146.0, "Colorful waveforms"),
-            ]) },
-            Group { note: " (requires a restart to take effect)", ..gf("Language", false, vec![
+            ]),
+            gf("Language", false, vec![
                 combo("English (US) (en)", 176.0, "Language"),
                 combo("English", 176.0, "Note names"),
                 combo("Sharps - #", 96.0, "Black notes"),
                 Buttons(vec![("Update languages", 138.0)]),
-            ]) },
+            ]),
             gf("Input", false, vec![
                 combo("Multi-button mouse", 136.0, "Optimize for"),
-                Buttons(vec![("Manage shortcuts", 212.0)]),
+                Buttons(vec![(MANAGE_SHORTCUTS, 212.0)]),
                 Check("Click-and-hold & special gesture functions", false),
                 Check("Use both mouse buttons in step sequencer", false),
                 Slider("Vertical scrolling speed", 0.5),
                 Slider("Horizontal scrolling speed", 0.5),
                 Check("Invert pencil buttons", false),
             ]),
+            // spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)" (`crate::history`).
             gf("Undo history", false, vec![
-                Value("100".into(), "Maximum undo levels"),
+                Value(crate::prefs::number(&crate::prefs::MAX_UNDO_LEVELS).to_string(), "Maximum undo levels"),
                 Check("Undo knob tweaks", true),
                 Check("Alternate undo mode", true),
                 Check("Put undone recordings in the recycle bin", true),
@@ -372,11 +556,13 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Buttons(vec![("Manage messages", 138.0)]),
                 combo("100MB (default)", 110.0, "Project data size warning"),
             ]),
-            gf("System", false, vec![Check("Associate project files with application", true)]),
-            gf("Updates and privacy", false, vec![
+            gf("System", false, vec![Check(ASSOCIATE_CHECK, s.settings.assoc)]),
+            // FL's "Updates and privacy" without Send usage data and its More information button: Lemon Studio collects
+            // nothing. The update checks stay greyed until Lemon Studio can update itself (spec: ui/settings.md
+            // "General").
+            gf("Updates", false, vec![
                 Check("Automatically check for updates", true),
                 Check("Automatically download program updates", true),
-                Check("Send usage data", false),
             ]),
             gf("Miscellaneous", false, vec![
                 Check("Auto name channels", true),
@@ -396,7 +582,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Check("Create automation clips at the playback position", true),
                 Check("Select first channel with notes when the pattern changes", false),
                 Check("Limit the number of open plugin editors", true),
-                combo("Basic with limiter", 160.0, "Default template"),
+                combo(&crate::templates::name(), 160.0, DEFAULT_TEMPLATE),
                 combo("Default template", 160.0, "Startup project"),
             ]),
             gf("Advanced", false, vec![
@@ -424,7 +610,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     Text(format!("{} instruments, {} effects", s.plugdb.lists.gens.len(), s.plugdb.lists.fx.len()), true),
                 ]),
                 g("User data folder", vec![txt(user)]),
-                g("Browser extra search folders", vec![dim("Browser extra search folders", List(vec![("Folder", 30.0), ("Browser name", 440.0)], vec![], 12))]),
+                g("Browser extra search folders", vec![SearchFolders(crate::search_folders::shown_rows(s))]),
                 g("External tools", vec![
                     dim("External tools", List(vec![("File", 30.0), ("Name", 320.0)], vec![], 4)),
                     dim("External tools", txt("Script editor   C:\\Windows\\System32\\Notepad.exe")),
@@ -468,53 +654,75 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             vec![
                 g("Presets", vec![Presets(tiles, st.preset)]),
                 g("Adjustments", vec![ThemeKnobs]),
-                g("Options", vec![Check("Light mode", true), Check("Audio and automation clips use note colors", false)]),
+                g("Options", {
+                    let th = s.fl_theme();
+                    vec![Check(LIGHT_MODE_CHECK, th.light_mode), Check(NOTE_COLORS_CHECK, th.override_clips)]
+                }),
                 g("", vec![Buttons(vec![("Load theme...", 110.0), ("Reset", 64.0), ("Save preset...", 100.0)])]),
             ]
         }
         PROJECT => vec![
-            g("Data folder", vec![
-                combo("Don't use a data folder", 306.0, ""),
-                txt("(none)"),
-                combo("When saving unsaved projects only", 444.0, "Ask for data folder"),
-                Off("Copy used samples to the project folder", false),
+            // The project's data folder (events 167 and 202) and two program settings (spec: ui/data-folder.md §1);
+            // drawn by `super::data_folder`.
+            g(super::data_folder::GROUP, vec![
+                combo(crate::data_folder::choice_text(&s.project), 306.0, crate::data_folder::COMBO),
+                DataFolder,
+                combo(crate::prefs::choice(&crate::prefs::ASK_DATA_FOLDER), 444.0, crate::prefs::ASK_DATA_FOLDER.label),
+                Check(crate::prefs::COPY_USED_SAMPLES.label, false),
             ]),
-            g("Time settings", vec![
-                combo(&s.project.ppq.to_string(), 44.0, "Timebase (PPQ)"),
-                combo("Set as time signature", 196.0, ""),
-                combo("4", 44.0, "Numerator"),
-                combo("4", 44.0, "Denominator"),
-            ]),
+            g("Time settings", {
+                // The bar as the project holds it (4/4 when the file has none), in the mode of event 35: a time
+                // signature's two combos or a time division's two value boxes (spec: ui/settings-choices.md "Project").
+                let (beats, steps) = s.project.bar();
+                let sig = s.project.bar_is_signature();
+                let mut rows = vec![
+                    combo(&s.project.ppq.to_string(), 44.0, TIMEBASE),
+                    combo(if sig { SET_AS_SIGNATURE } else { SET_AS_DIVISION }, 196.0, SET_AS),
+                ];
+                if sig {
+                    rows.push(combo(&beats.to_string(), 44.0, NUMERATOR));
+                    rows.push(combo(&denominator_text(steps), 44.0, DENOMINATOR));
+                } else {
+                    rows.push(Value(beats.to_string(), BEATS_PER_BAR));
+                    rows.push(Value(steps.to_string(), STEPS_PER_BEAT));
+                }
+                rows
+            }),
+            // The panning law (event 23) and the check show what the engine plays. Fast declick shows the project's
+            // value, greyed: its sound is not played yet (event 40; spec: flp/engine-events.md "Project").
             gf("Advanced", true, vec![
-                combo("Circular", 82.0, "Panning law"),
-                Check("Play truncated notes in clips", true),
-                Check("Fast declick for cut groups", false),
+                combo(&panning_text(s.project.panning_law), 82.0, PANNING_LAW),
+                Check(TRUNCATED_CHECK, s.project.play_truncated),
+                Check("Fast declick for cut groups", s.project.fast_declick.unwrap_or(false)),
             ]),
-            gf("Playlist", false, vec![Check2("Automatic crossfades", true, "Enable automatic crossfades in new projects", true)]),
+            // The project's automatic crossfades (event 44; off when the file has none) and the program setting new
+            // projects take it from (`prefs::AUTO_CROSSFADES_NEW`, which the check shows).
+            gf("Playlist", false, vec![Check2(
+                CROSSFADES_CHECK,
+                s.project.auto_crossfades.unwrap_or(false),
+                crate::prefs::AUTO_CROSSFADES_NEW.label,
+                true,
+            )]),
         ],
+        // The credits are edited in place (spec: ui/settings.md "Info"; events 194 / 207 / 206 / 195 / 197,
+        // flp/events/project-info.md); the genre button opens FL's genre list (spec: ui/settings-choices.md "Info").
+        // "Show info on opening" is event 10; the footer and Reset working time are `crate::project_info`.
         INFO => {
-            let i = &s.project.info;
-            let or = |v: &Option<String>| v.clone().unwrap_or_default();
-            let clips: usize = s.project.arrangements.iter().map(|a| a.clips.len()).sum();
-            let notes: usize = s.project.patterns.iter().map(|p| p.notes.len()).sum();
-            let mut rows = vec![
+            vec![g("Project credits", vec![
                 Text("Title".into(), true),
-                Big(or(&i.title)),
+                pair(Edit(InfoField::Title, 288.0), Check(SHOW_INFO_CHECK, s.project.show_info.unwrap_or(false))),
                 Text("Author".into(), true),
-                Big(or(&i.author)),
+                Edit(InfoField::Author, 0.0),
                 Text("Genre".into(), true),
-                Big(or(&i.genre)),
+                Edit(InfoField::Genre, 288.0),
                 Text("Comments".into(), true),
-            ];
-            let comments = or(&i.comments);
-            let lines: Vec<String> = comments.lines().map(String::from).collect();
-            rows.push(List(vec![("", 0.0)], lines.into_iter().map(|l| vec![l]).collect(), 14));
-            rows.push(Text("Web link".into(), true));
-            rows.push(Big(or(&i.url)));
-            rows.push(Gap(8.0));
-            rows.push(txt(format!("Channels: {}, Mixer Tracks: {}", s.project.channels.len(), s.project.mixer.len())));
-            rows.push(txt(format!("Arrangements: {}, PL clips: {clips}, Notes: {notes}", s.project.arrangements.len())));
-            vec![g("Project credits", rows)]
+                Edit(InfoField::Comments, 0.0),
+                Text("Web link".into(), true),
+                Edit(InfoField::Url, 0.0),
+                Gap(8.0),
+                // FL's footer (spec: ui/settings-choices.md "Info").
+                InfoFooter(crate::project_info::footer(s, std::time::Instant::now())),
+            ])]
         }
         DEBUG => {
             let mut lines = vec![
@@ -565,7 +773,7 @@ fn row_h(r: &Row) -> f32 {
         Row::Check(..) | Row::Check2(..) | Row::Off(..) => 21.0,
         Row::Combo(..) | Row::Value(..) | Row::ValueR(..) => 27.0,
         Row::Buttons(..) => 36.0,
-        Row::Slider(..) => 28.0,
+        Row::Slider(..) | Row::Ppi => 28.0,
         Row::List(c, _, n) => (if c.iter().any(|c| !c.0.is_empty()) { 18.0 } else { 0.0 }) + 17.0 * *n as f32 + 10.0,
         Row::Text(_, dim) => if *dim { 16.0 } else { 20.0 },
         Row::Big(_) => 28.0,
@@ -575,8 +783,12 @@ fn row_h(r: &Row) -> f32 {
         Row::Pair(a, b) => row_h(a).max(row_h(b)),
         Row::Dim(_, r) => row_h(r),
         Row::Folders(f) => 21.0 * f.len().max(1) as f32 + 10.0,
+        Row::SearchFolders(n) => 18.0 + SF_ROW_H * *n as f32 + 10.0,
         Row::Prefer(_) => 27.0,
         Row::Table => 4.0 + 18.0 + TABLE_ROW_H * TABLE_ROWS as f32 + 4.0 + 34.0,
+        Row::Edit(f, _) => if f.multiline() { COMMENT_LINE_H * COMMENT_LINES as f32 + 12.0 } else { 28.0 },
+        Row::InfoFooter(lines) => (lines.len() as f32 * FOOTER_LINE_H + 8.0).max(36.0),
+        Row::DataFolder => super::data_folder::FOLDER_ROW_H,
     }
 }
 
@@ -753,6 +965,8 @@ fn paint_group(ui: &mut Ui, s: &State, gr: &Group, r: Rect, open: bool, clip: Re
 
 /// A check showing `on`; one that is not `enabled` (not in `LIVE`) is greyed out.
 fn check(ui: &mut Ui, key: &'static str, on: bool, x: f32, cy: f32, enabled: bool) {
+    // A check declared in `crate::prefs` shows its state (the row's is its default).
+    let on = crate::prefs::find_check(key).map_or(on, crate::prefs::check);
     let t = ui.t;
     let tw = ui.c.text_width(Font::new(13), key);
     let hr = Rect::new(x - 8.0, cy - 9.0, tw + 26.0, 18.0);
@@ -769,8 +983,29 @@ fn check(ui: &mut Ui, key: &'static str, on: bool, x: f32, cy: f32, enabled: boo
     }
 }
 
+/// A declared check that can't be changed now, for a reason other than "not available yet": it shows its state
+/// greyed out, and its hit only shows `hint` (a click and the wheel act as on the page's body).
+fn check_greyed(ui: &mut Ui, key: &'static str, x: f32, cy: f32, hint: &'static str) {
+    let on = crate::prefs::find_check(key).is_some_and(crate::prefs::check);
+    let t = ui.t;
+    let tw = ui.c.text_width(Font::new(13), key);
+    let hr = Rect::new(x - 8.0, cy - 9.0, tw + 26.0, 18.0);
+    ui.hit(hr, Action::Settings(SAct::Body), hint);
+    led(ui, x, cy, on, false);
+    let lh = ui.c.line_height(Font::new(13));
+    ui.c.text(Font::new(13), x + 11.0, (cy - lh / 2.0).round(), t.text, key);
+    grey(ui, hr);
+}
+
+/// Whether General ▸ Display's Thick lines (`crate::prefs::THICK_LINES`) can be changed on a canvas at `scale` (the
+/// effective UI scale): from 200 % (spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines,
+/// High visibility (2026-10-16)").
+pub fn thick_lines_live(scale: f32) -> bool {
+    (scale * 100.0).round() >= 200.0
+}
+
 /// The check mark itself at (x, cy).
-fn led(ui: &mut Ui, x: f32, cy: f32, on: bool, hov: bool) {
+pub(super) fn led(ui: &mut Ui, x: f32, cy: f32, on: bool, hov: bool) {
     let t = ui.t;
     // Round LED (spec §3): orange when on. Lemon: a rounded square check, lit with a tick when on.
     let lemon = super::lemon(ui);
@@ -796,7 +1031,7 @@ fn led(ui: &mut Ui, x: f32, cy: f32, on: bool, hov: bool) {
 }
 
 /// Greys out what was just drawn in `r` on a group body.
-fn grey(ui: &mut Ui, r: Rect) {
+pub(super) fn grey(ui: &mut Ui, r: Rect) {
     let bg = ui.t.s(0x25272a);
     ui.veil(r, bg);
 }
@@ -825,6 +1060,16 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
     let lh = ui.c.line_height(f);
     let ty = (cy - lh / 2.0).round();
     match row {
+        // Project ▸ Data folder's rows.
+        _ if super::data_folder::shows(group) => super::data_folder::paint_row(ui, s, row, g, x0, y, h),
+        // General ▸ Display's Thick lines works from 200 % scaling: below, greyed out, it says so.
+        Row::Check(k, _) if *k == crate::prefs::THICK_LINES.label && !thick_lines_live(ui.c.scale) => {
+            check_greyed(ui, k, x0 + 10.0, cy, "Thick lines: from 200 % scaling")
+        }
+        // General ▸ System's association: the system's own "Open with" settings decide on macOS and Linux (spec:
+        // ui/settings-choices.md "System: Associate project files with application").
+        #[cfg(not(windows))]
+        Row::Check(k, _) if *k == ASSOCIATE_CHECK => check_greyed(ui, k, x0 + 10.0, cy, ASSOCIATE_ELSEWHERE),
         // A check that is not available yet shows its default, greyed out.
         Row::Check(k, d) => check(ui, k, *d, x0 + 10.0, cy, live(k)),
         Row::Off(k, d) => check(ui, k, *d, x0 + 10.0, cy, false),
@@ -833,20 +1078,35 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             check(ui, b, *db, g.x + 324.0, cy, live(b));
         }
         // The Audio page's device, rate and buffer combos and General's Animations open their menus.
-        Row::Combo(v, w, label) if LIVE_COMBOS.contains(label) => {
+        Row::Combo(v, w, label) if live_combo(label) || crate::prefs::find_combo(label).is_some() => {
+            // A combo declared in `crate::prefs` shows its choice.
+            let v = match crate::prefs::find_combo(label) {
+                Some(c) => crate::prefs::choice(c),
+                None => v,
+            };
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
             let hov = ui.hit(b, Action::Settings(SAct::Combo(label, b.x, b.bottom())), "");
             kit::combo(ui.c, t, b, v, f, kit::State::hover(hov));
-            ui.c.text(f, b.right() + 8.0, ty, if hov { t.glyph } else { t.text }, label);
+            // Project's "Set as" combo has no label beside it.
+            if *label != SET_AS {
+                ui.c.text(f, b.right() + 8.0, ty, if hov { t.glyph } else { t.text }, label);
+            }
         }
-        // Other combos and value boxes do not work yet. A combo keeps showing its value (the project's PPQ), greyed
-        // out.
+        // Other combos and value boxes do not work yet. A combo keeps showing its value, greyed out.
         Row::Combo(v, w, label) => {
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
             ui.off(b, name_of(label, group));
             kit::combo(ui.c, t, b, v, f, kit::State::NORMAL);
             let lw = ui.c.text(f, b.right() + 8.0, ty, t.text, label);
             grey(ui, Rect::new(b.x, b.y, b.w + 8.0 + lw, b.h));
+        }
+        // Project ▸ Time settings as a time division, General ▸ Undo history ▸ Maximum undo levels: the wheel changes
+        // the value (`App::settings_number`).
+        Row::Value(v, label) if number_range(label).is_some() => {
+            let b = Rect::new(x0, y + 3.0, 38.0, 21.0);
+            let hov = ui.hit(b, Action::Settings(SAct::Number(label)), "");
+            value_red(ui, b, v);
+            ui.c.text(f, b.right() + 8.0, ty, if hov { t.glyph } else { t.text }, label);
         }
         Row::Value(v, label) => {
             let b = Rect::new(x0, y + 3.0, 38.0, 21.0);
@@ -884,19 +1144,19 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 x += w + 8.0;
             }
         }
+        // A slider declared in `crate::prefs` (General ▸ Display's Smoothing, Input's scrolling speeds): its handle is
+        // at its value (no number shows); a click or a drag sets it (`App::pref_slider_press`), the wheel steps it.
+        Row::Slider(label, _) if crate::prefs::find_slider(label).is_some() => {
+            let Some(sl) = crate::prefs::find_slider(label) else { return };
+            let v = f32::from(crate::prefs::slider(sl)) / f32::from(sl.max.max(1));
+            let tr = Rect::new(x0, cy - 2.0, 150.0, 4.0);
+            let hov = ui.hit(Rect::span(tr.x - 9.0, tr.right() + 9.0, cy - 9.0, cy + 9.0), Action::Settings(SAct::Slider(label, tr.x, tr.w)), "");
+            slider_track(ui, tr, cy, v);
+            ui.c.text(f, tr.right() + 12.0, ty, if hov { t.glyph } else { t.text }, label);
+        }
         Row::Slider(label, v) => {
             let tr = Rect::new(x0, cy - 2.0, 150.0, 4.0);
-            if super::lemon(ui) {
-                ui.c.fill_rrect(tr, 2.0, t.s(0x161819));
-                ui.c.fill_rrect(Rect::new(tr.x, tr.y, tr.w * v, tr.h), 2.0, t.accent);
-            } else {
-                ui.c.fill_rect(tr, t.s(0x161819));
-                ui.c.fill_rect(Rect::new(tr.x, tr.y, tr.w * v, tr.h), t.h(0xc8312e));
-            }
-            let hx = tr.x + tr.w * v;
-            ui.c.fill_circle(hx, cy, 8.0, t.s(0x111213));
-            ui.c.fill_circle(hx, cy, 7.0, t.s(0x4a4d50));
-            ui.c.fill_rect(Rect::new(hx - 0.5, cy - 6.0, 1.0, 5.0), t.s(0x1a1b1c));
+            slider_track(ui, tr, cy, *v);
             let lw = ui.c.text(f, tr.right() + 12.0, ty, t.text, label);
             let r = Rect::span(tr.x - 9.0, tr.right() + 14.0 + lw, cy - 9.0, cy + 9.0);
             ui.off(r, name_of(label, group));
@@ -990,6 +1250,8 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             paint_row_at(ui, s, group, b, g, y, h, 304.0);
         }
         Row::Folders(list) => folders(ui, list, Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 6.0)),
+        Row::Ppi => ppi_ruler(ui, s, x0, cy),
+        Row::SearchFolders(_) => search_folders(ui, s, Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 6.0)),
         Row::Prefer(cur) => prefer(ui, *cur, x0, y, ty),
         Row::Table => table(ui, s, Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 4.0)),
         Row::Dim(name, r) => {
@@ -998,7 +1260,138 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             ui.off(b, name);
             grey(ui, b);
         }
+        Row::Edit(field, w) => {
+            let w = if *w > 0.0 { *w } else { g.right() - 8.0 - (x0 - 4.0) };
+            let b = Rect::new(x0 - 4.0, y + 2.0, w, h - 4.0);
+            info_box(ui, s, *field, b);
+            // The genre button (▸ at the box's right end) opens the genre menu (spec: ui/settings-choices.md "Info").
+            if *field == InfoField::Genre {
+                let a = Rect::new(b.right() + 4.0, b.y, 22.0, b.h);
+                let hov = ui.hit(a, Action::Settings(SAct::Genres(a.x, a.bottom())), "MP3 music genres");
+                kit::combo(ui.c, t, a, "", f, kit::State::hover(hov));
+            }
+        }
+        // Four lines of small grey text at the bottom left, beside the Reset working time button (spec:
+        // ui/settings-choices.md "Info"), which sits at the bottom right and is drawn as a `Row::Buttons` there.
+        Row::InfoFooter(lines) => {
+            let bx = g.right() - 8.0 - 150.0;
+            let by = y + h - 36.0;
+            for (i, line) in lines.iter().enumerate() {
+                let ly = y + 4.0 + i as f32 * FOOTER_LINE_H;
+                let right = if ly + FOOTER_LINE_H > by + 4.0 { bx - 12.0 } else { g.right() - 8.0 };
+                ui.c.text_clip(Font::new(13), x0, ly, right - x0, t.text_dim, line);
+            }
+            paint_row_at(ui, s, group, &Row::Buttons(vec![(RESET_WORK_TIME, 150.0)]), g, by, 36.0, bx - g.x - 12.0);
+        }
+        Row::DataFolder => super::data_folder::paint_row(ui, s, row, g, x0, y, h),
     }
+}
+
+/// The Info footer's line pitch.
+const FOOTER_LINE_H: f32 = 16.0;
+
+/// Lines the Comments box shows, and their pitch.
+const COMMENT_LINES: usize = 24;
+const COMMENT_LINE_H: f32 = 17.0;
+
+/// An Info text box: the project's text, or the text being typed with its caret or selection. A one-line box scrolls
+/// sideways to keep the caret in view; Comments wraps its lines at the box's width and, while edited, scrolls to the
+/// caret's line.
+fn info_box(ui: &mut Ui, s: &State, field: InfoField, b: Rect) {
+    let t = ui.t;
+    let f = LABEL;
+    let lh = ui.c.line_height(f);
+    let edit = s.settings.info_edit.as_ref().filter(|e| e.field == field).map(|e| &e.text);
+    let hint = match (edit.is_some(), field.multiline()) {
+        (false, _) => field.hint(),
+        (true, false) => "Enter accepts, Esc cancels",
+        (true, true) => "Enter starts a new line; a click elsewhere accepts, Esc cancels",
+    };
+    let hov = ui.hit(b, Action::Settings(SAct::Info(field)), hint);
+    let well = if edit.is_some() { t.s(0x141516) } else if hov { t.s(0x1d1f21) } else { t.s(0x191b1c) };
+    kit::sunken(ui.c, t, b, well);
+    let shown = field.get(&s.project.info).as_deref().unwrap_or("");
+    let (text, caret, all) = match edit {
+        Some(e) => (e.text.as_str(), Some(e.caret), e.all && !e.text.is_empty()),
+        None => (shown, None, false),
+    };
+    let sel = if super::lemon(ui) { os_theme::design::lemon::COLORED_DARK } else { t.a(0x2d5a8c) };
+    let inner = Rect::new(b.x + 6.0, b.y + 3.0, b.w - 12.0, b.h - 6.0);
+    ui.c.push_clip(inner);
+    if !field.multiline() {
+        let caret_x = caret.map_or(0.0, |c| ui.c.text_width(f, &text[..byte_at(text, c)]));
+        let x = inner.x - (caret_x - (inner.w - 2.0)).max(0.0);
+        let y = (b.cy() - lh / 2.0).round();
+        if all {
+            let w = ui.c.text_width(f, text);
+            ui.c.fill_rect(Rect::new(x - 1.0, y, w + 2.0, lh), sel);
+        }
+        ui.c.text(f, x, y, t.text, text);
+        if caret.is_some() && !all {
+            ui.c.fill_rect(Rect::new((x + caret_x).round(), y, 1.0, lh), t.text);
+        }
+    } else {
+        let lines = wrap(ui, f, text, inner.w - 2.0);
+        // The caret's line: the last one starting at or before it.
+        let at = caret.map(|c| lines.iter().rposition(|&(start, _)| start <= c).unwrap_or(0));
+        let top = at.map_or(0, |l| (l + 1).saturating_sub(COMMENT_LINES));
+        for (i, &(start, n)) in lines.iter().enumerate().skip(top).take(COMMENT_LINES) {
+            let y = inner.y + 1.0 + (i - top) as f32 * COMMENT_LINE_H + ((COMMENT_LINE_H - lh) / 2.0).round();
+            let line = &text[byte_at(text, start)..byte_at(text, start + n)];
+            if all {
+                let w = ui.c.text_width(f, line);
+                ui.c.fill_rect(Rect::new(inner.x - 1.0, y, w + 2.0, lh), sel);
+            }
+            ui.c.text(f, inner.x, y, t.text, line);
+            if let (Some(c), Some(l)) = (caret, at) {
+                if l == i && !all {
+                    let cx = ui.c.text_width(f, &text[byte_at(text, start)..byte_at(text, c)]);
+                    ui.c.fill_rect(Rect::new((inner.x + cx).round(), y, 1.0, lh), t.text);
+                }
+            }
+        }
+    }
+    ui.c.pop_clip();
+}
+
+/// Byte offset of character `i` in `s` (its length past the end).
+fn byte_at(s: &str, i: usize) -> usize {
+    s.char_indices().nth(i).map_or(s.len(), |(b, _)| b)
+}
+
+/// The lines `text` shows in `w` px: (first character, characters) of each, in characters. A line longer than `w`
+/// breaks after its last space that fits, else where it is full; the line break itself belongs to no line.
+pub(crate) fn wrap(ui: &mut Ui, f: Font, text: &str, w: f32) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut base = 0;
+    for para in text.split('\n') {
+        let chars: Vec<char> = para.chars().collect();
+        let mut start = 0;
+        loop {
+            let (mut x, mut end, mut space) = (0.0, start, None);
+            while end < chars.len() {
+                let cw = ui.c.text_width(f, chars[end].encode_utf8(&mut [0; 4]));
+                if x + cw > w && end > start {
+                    break;
+                }
+                x += cw;
+                end += 1;
+                if chars[end - 1] == ' ' {
+                    space = Some(end);
+                }
+            }
+            if end < chars.len() {
+                end = space.unwrap_or(end);
+            }
+            out.push((base + start, end - start));
+            if end >= chars.len() {
+                break;
+            }
+            start = end;
+        }
+        base += chars.len() + 1;
+    }
+    out
 }
 
 /// A list frame (lists, the folder list, the plugin table).
@@ -1010,6 +1403,77 @@ fn list_frame(ui: &mut Ui, b: Rect) {
         ui.c.fill_rect(b, t.s(0x161819));
         ui.c.fill_rect(b.inset(1.0), t.s(0x222527));
     }
+}
+
+/// Browser extra search folders: a row's height, where its Folder and Browser name columns start (from the list's
+/// left).
+const SF_ROW_H: f32 = 17.0;
+const SF_FOLDER_X: f32 = 30.0;
+const SF_NAME_X: f32 = 440.0;
+
+/// File ▸ Browser extra search folders (`crate::search_folders`; spec: ui/settings-choices.md "Browser extra search
+/// folders"): the Folder and Browser name columns with a folder button at the left of each row, the filled rows first,
+/// then empty ones. The cell being typed into shows its text with its caret or selection.
+fn search_folders(ui: &mut Ui, s: &State, b: Rect) {
+    use crate::search_folders::{rows, shown_rows, Col};
+    let t = ui.t;
+    list_frame(ui, b);
+    let f = Font::new(13);
+    for (c, cx) in [("Folder", SF_FOLDER_X), ("Browser name", SF_NAME_X)] {
+        ui.c.text(f, b.x + 6.0 + cx, b.y + 2.0, t.text_dim, c);
+    }
+    let filled = rows(s);
+    let edit = s.settings.folder_edit.as_ref();
+    for i in 0..shown_rows(s) {
+        let rr = Rect::new(b.x + 2.0, b.y + 20.0 + i as f32 * SF_ROW_H, b.w - 4.0, SF_ROW_H);
+        if i % 2 == 1 {
+            ui.c.fill_rect(rr, t.s(0x26292b));
+        }
+        let pick = Rect::new(rr.x + 4.0, rr.y, 22.0, rr.h);
+        let hint = if i < filled.len() { "Choose another folder for this row" } else { "Add a folder to the browser" };
+        let hov = ui.hit(pick, Action::Settings(SAct::FolderPick(i)), hint);
+        let icon = Rect::new(pick.x + 4.0, pick.y + 2.0, 13.0, 13.0);
+        crate::icons::draw(ui.c, crate::icons::Icon::Folder, icon, if hov { t.glyph } else { t.text_dim });
+        let Some((path, name)) = filled.get(i) else { continue };
+        let cells = [
+            (Col::Folder, Rect::span(rr.x + SF_FOLDER_X, rr.x + SF_NAME_X - 6.0, rr.y, rr.bottom()), path, "The folder: click, type another one or empty it (removes it from the browser), Enter"),
+            (Col::Name, Rect::span(rr.x + SF_NAME_X, rr.right(), rr.y, rr.bottom()), name, "Its name in the browser (empty: the folder's name): click, type, Enter"),
+        ];
+        for (col, cr, text, hint) in cells {
+            let typing = edit.filter(|e| e.row == i && e.col == col).map(|e| &e.text);
+            let hov = ui.hit(cr, Action::Settings(SAct::FolderCell(i, col)), if typing.is_some() { "Enter accepts, Esc cancels" } else { hint });
+            cell_text(ui, cr, text, typing, hov);
+        }
+    }
+}
+
+/// A list cell's text, or the text being typed into it: a darker well, the text scrolled sideways to keep the caret in
+/// view, the caret or the selection.
+fn cell_text(ui: &mut Ui, r: Rect, text: &str, typing: Option<&crate::dialog::Field>, hov: bool) {
+    let t = ui.t;
+    let f = Font::new(13);
+    let lh = ui.c.line_height(f);
+    let y = (r.cy() - lh / 2.0).round();
+    let inner = Rect::new(r.x + 4.0, r.y, r.w - 8.0, r.h);
+    let Some(e) = typing else {
+        ui.c.text_clip(f, inner.x, y, inner.w, if hov { t.glyph } else { t.text }, text);
+        return;
+    };
+    ui.c.fill_rect(r, t.s(0x141516));
+    let sel = if super::lemon(ui) { os_theme::design::lemon::COLORED_DARK } else { t.a(0x2d5a8c) };
+    ui.c.push_clip(inner);
+    let caret_x = ui.c.text_width(f, e.before_caret());
+    let x = inner.x - (caret_x - (inner.w - 2.0)).max(0.0);
+    let all = e.all && !e.text.is_empty();
+    if all {
+        let w = ui.c.text_width(f, &e.text);
+        ui.c.fill_rect(Rect::new(x - 1.0, y, w + 2.0, lh), sel);
+    }
+    ui.c.text(f, x, y, t.text, &e.text);
+    if !all {
+        ui.c.fill_rect(Rect::new((x + caret_x).round(), y, 1.0, lh), t.text);
+    }
+    ui.c.pop_clip();
 }
 
 /// Search folders (spec: ui/plugin-manager.md §2): a check, the path, the tag; added folders end with a remove button.
@@ -1175,6 +1639,49 @@ fn table(ui: &mut Ui, s: &State, area: Rect) {
             ui.c.fill_rect(Rect::new(cx.round() + 1.0, fr.y + 4.0, 1.0, fr.h - 8.0), t.text);
         }
     }
+}
+
+/// General ▸ Display's PPI ruler from `x` (the page's left margin), centred a little above `cy` (spec:
+/// ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High visibility (2026-10-16)"): a dark
+/// track as long as 400 device pixels with ticks under it every 100, filled from its left end N device pixels long
+/// (+1 for the rounded end), grey at rest and orange (Lemon: the accent) while the mouse is over the bar or drags it.
+fn ppi_ruler(ui: &mut Ui, s: &State, x: f32, cy: f32) {
+    let t = ui.t;
+    // Logical px per device px.
+    let px = 1.0 / ui.c.scale.max(0.01);
+    let n = crate::ppi::ppi(s.display_scale);
+    let track = Rect::new(x, cy - 6.0, f32::from(crate::ppi::MAX) * px, 6.0);
+    let a = Action::Settings(SAct::Ppi);
+    let hit = Rect::new(track.x - 4.0, track.y - 4.0, track.w + 8.0, 18.0);
+    let hov = ui.hit(hit, a.clone(), "Display PPI: drag, or turn the mouse wheel");
+    let active = hov || ui.held(&a);
+    ui.c.fill_rrect(track, 3.0, t.s(0x161819));
+    for i in 1..=4 {
+        let tx = x + 100.0 * i as f32 * px;
+        ui.c.fill_rect(Rect::new(tx - px, track.bottom() + 2.0, px, 4.0), t.text_dim);
+    }
+    let col = match (active, super::lemon(ui)) {
+        (false, _) => t.tx(0xb9bfc3),
+        (true, false) => t.h(0xffbc40),
+        (true, true) => t.accent,
+    };
+    ui.c.fill_rrect(Rect::new(x, track.y, f32::from(n + 1) * px, track.h), 3.0, col);
+}
+
+/// A slider's track `tr` filled up to `v` (0..=1) and its handle there, centred on `cy`.
+fn slider_track(ui: &mut Ui, tr: Rect, cy: f32, v: f32) {
+    let t = ui.t;
+    if super::lemon(ui) {
+        ui.c.fill_rrect(tr, 2.0, t.s(0x161819));
+        ui.c.fill_rrect(Rect::new(tr.x, tr.y, tr.w * v, tr.h), 2.0, t.accent);
+    } else {
+        ui.c.fill_rect(tr, t.s(0x161819));
+        ui.c.fill_rect(Rect::new(tr.x, tr.y, tr.w * v, tr.h), t.h(0xc8312e));
+    }
+    let hx = tr.x + tr.w * v;
+    ui.c.fill_circle(hx, cy, 8.0, t.s(0x111213));
+    ui.c.fill_circle(hx, cy, 7.0, t.s(0x4a4d50));
+    ui.c.fill_rect(Rect::new(hx - 0.5, cy - 6.0, 1.0, 5.0), t.s(0x1a1b1c));
 }
 
 fn value_red(ui: &mut Ui, b: Rect, v: &str) {

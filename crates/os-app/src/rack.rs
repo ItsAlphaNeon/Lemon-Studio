@@ -161,10 +161,9 @@ impl Tab {
     }
 }
 
-/// "C5" for key 60.
+/// "C5" for key 60, as the settings choose it (`crate::note_names`).
 pub fn key_name(k: u16) -> String {
-    const N: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-    format!("{}{}", N[usize::from(k % 12)], k / 12)
+    crate::note_names::note_name(i32::from(k))
 }
 
 /// A named set of channels (§21).
@@ -209,6 +208,11 @@ pub struct RackUi {
     pub locked: BTreeSet<usize>,
     /// The channel the last solo click soloed.
     pub soloed: Option<usize>,
+    /// Mute states (`enabled` per row) from before the first solo: what unsolo puts back when "Restore previous
+    /// state after solo" is on.
+    pub pre_solo: Option<Vec<bool>>,
+    /// The current pattern at the last tick (`None` = not yet seen), to notice a switch ([`App::pattern_tick`]).
+    pub pattern_seen: Option<u16>,
     /// Name button width in percent (§17).
     pub name_pct: u32,
     pub show_mixer: bool,
@@ -248,6 +252,8 @@ impl Default for RackUi {
             zipped: BTreeSet::new(),
             locked: BTreeSet::new(),
             soloed: None,
+            pre_solo: None,
+            pattern_seen: None,
             name_pct: 100,
             show_mixer: true,
             colorful: false,
@@ -293,6 +299,7 @@ impl RackUi {
             g.members = set(&g.members);
         }
         self.soloed = self.soloed.and_then(m);
+        self.pre_solo = None; // rows renumbered: unsolo turns everything on
         self.loop_len = self.loop_len.iter().filter_map(|(&r, &l)| m(r).map(|n| (n, l))).collect();
         if let Some(f) = self.fill.as_mut() {
             match m(f.row) {
@@ -405,10 +412,10 @@ pub fn bar_steps(s: &State) -> u32 {
     (s.project.bar_ticks() / per_step(s)).max(1)
 }
 
-/// Steps in a beat of the project's signature (16 / denominator): the length of the step colour groups (§3, §23).
+/// Steps in a beat of the project's bar (16 / denominator for a time signature): the length of the step colour
+/// groups (§3, §23).
 pub fn beat_steps(s: &State) -> u32 {
-    let den = s.project.time_signature.map_or(4, |(_, d)| d);
-    (s.project.bar_of(1, den) / per_step(s)).max(1)
+    u32::from(s.project.bar().1).max(1)
 }
 
 /// Longest pattern the length box sets: 32 bars of the project's signature, at least [`MAX_STEPS`].
@@ -493,6 +500,13 @@ pub fn set_step(s: &mut State, r: usize, k: u32, on: bool) {
         p.notes.retain(|x| !(x.channel == ch && x.position / ps == k));
     }
     s.piano.dirty = true;
+}
+
+/// Before a step-sequencer edit of the current pattern: a "Step seq edit" step of the project's undo history
+/// (`crate::history`; spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
+pub fn snapshot(s: &mut State) {
+    let snap = crate::history::Snap::pattern(s, s.pattern.max(1));
+    crate::history::record(s, crate::history::STEP_SEQ_EDIT, snap);
 }
 
 /// Toggle step `k` of row `r`; returns its new state (§9).
@@ -611,22 +625,76 @@ pub fn gradient(s: &mut State) {
     }
 }
 
-/// Ctrl / Alt + click on a LED (§10): solo this channel; the same click again on the soloed channel unmutes all.
-/// Locked channels keep their state.
+/// Ctrl / Alt + click on a LED (§10): solo this channel; the same click again on the soloed channel unmutes all, or,
+/// with "Restore previous state after solo" on, puts back the states from before the first solo (a solo moved to
+/// another channel keeps them; spec: ui/settings-choices.md "Miscellaneous"). Locked channels keep their state.
 pub fn solo(s: &mut State, r: usize) {
-    let n = s.project.channels.len();
     let locked = s.rack.locked.clone();
-    let soloed_now = s.project.channels.get(r).is_some_and(|c| c.enabled)
-        && (0..n).filter(|&i| i != r && !locked.contains(&i)).all(|i| !s.project.channels[i].enabled);
+    let soloed_now = solo_of(s, r);
+    // A solo still in effect (the last solo click's shape, untouched since) keeps the states saved when it started.
+    let in_solo = s.rack.soloed.is_some_and(|a| solo_of(s, a));
+    if !soloed_now && !in_solo {
+        s.rack.pre_solo = Some(s.project.channels.iter().map(|c| c.enabled).collect());
+    }
+    let back = if soloed_now { s.rack.pre_solo.take().filter(|_| in_solo && crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO)) } else { None };
     for (i, c) in s.project.channels.iter_mut().enumerate() {
-        if i == r {
-            c.enabled = true;
-        } else if !locked.contains(&i) {
-            c.enabled = soloed_now;
+        if locked.contains(&i) {
+            if i == r {
+                c.enabled = true;
+            }
+        } else if let Some(b) = &back {
+            c.enabled = b.get(i).copied().unwrap_or(true);
+        } else {
+            c.enabled = i == r || soloed_now;
         }
     }
     s.rack.soloed = (!soloed_now).then_some(r);
     s.piano.dirty = true;
+}
+
+/// What follows a pattern switch. Run on every tick and before each frame (`App::follow_settings`), so every way of
+/// switching pattern counts (numpad - / +, the pattern picker and box, a new pattern, the playlist...); a new or opened
+/// project is not a switch. Two General ▸ Miscellaneous checks (spec: ui/settings-choices.md "Miscellaneous"):
+/// - "Auto zip empty channels": the channels with notes or steps in the new pattern are unzipped and every other one
+///   is zipped; a pattern without any unzips every channel. Zipping by hand works as ever between switches.
+/// - "Select first channel with notes when the pattern changes": the lowest-numbered channel with notes or steps in
+///   the new pattern becomes the only selected channel and the focused one; a pattern without any (also one just made
+///   with "+") leaves the selection alone.
+impl App {
+    pub(crate) fn pattern_tick(&mut self) {
+        let now = self.state.pattern;
+        let seen = self.state.rack.pattern_seen.replace(now);
+        if seen.is_none_or(|p| p == now) {
+            return;
+        }
+        // Per rack row: the channel has notes or steps in the new pattern.
+        let s = &self.state;
+        let used: Vec<bool> = match s.project.pattern(now) {
+            Some(p) => s.project.channels.iter().map(|c| p.notes.iter().any(|n| n.channel == c.index)).collect(),
+            None => vec![false; s.project.channels.len()],
+        };
+        if crate::prefs::check(&crate::prefs::AUTO_ZIP_EMPTY) {
+            let s = &mut self.state;
+            let zipped: BTreeSet<usize> = used.iter().enumerate().filter(|&(_, &u)| !u).map(|(r, _)| r).collect();
+            s.rack.zipped = if zipped.len() == used.len() { BTreeSet::new() } else { zipped };
+            autosize(s);
+            self.invalidate();
+        }
+        if crate::prefs::check(&crate::prefs::SELECT_FIRST_CHANNEL) {
+            if let Some(r) = used.iter().position(|&u| u) {
+                self.state.rack.select_only(r);
+                self.focus_channel(r);
+                self.invalidate();
+            }
+        }
+    }
+}
+
+/// Channel `r` is the only unlocked channel on.
+fn solo_of(s: &State, r: usize) -> bool {
+    let locked = &s.rack.locked;
+    s.project.channels.get(r).is_some_and(|c| c.enabled)
+        && s.project.channels.iter().enumerate().all(|(i, c)| i == r || locked.contains(&i) || !c.enabled)
 }
 
 pub fn toggle_mute(s: &mut State, r: usize) {
@@ -733,6 +801,11 @@ pub fn remap_project(p: &mut Project, map: &[Option<usize>]) {
             ClipSource::Pattern(_) => true,
         });
     }
+    // Initial values: a place below 0x2000 is a channel's index (spec: flp/layouts.md "Mixer places").
+    p.init_controls.retain_mut(|c| {
+        let hi = (c.target >> 16) as u16;
+        hi >= 0x2000 || idx.get(&hi).map(|&n| c.target = u32::from(n) << 16 | (c.target & 0xFFFF)).is_some()
+    });
 }
 
 /// Apply a new channel order (`order` = old rows top to bottom; rows left out are deleted) to the project, the
@@ -746,8 +819,34 @@ pub fn reorder(app: &mut App, order: &[usize]) {
         }
     }
     let m = |r: usize| map.get(r).copied().flatten();
-    let s = &mut app.state;
-    remap_project(&mut s.project, &map);
+    remap_state(&mut app.state, &map);
+    app.remap_rows(&m);
+    app.invalidate();
+}
+
+/// The last row's channel goes (an undone drop that made it, `history`): `reorder` without the app, whose instrument
+/// for the row goes on the next tick (`App::plugin_tick`). A project keeps at least one channel.
+pub fn remove_last(s: &mut State) {
+    let n = s.project.channels.len();
+    if n < 2 {
+        return;
+    }
+    let map: Vec<Option<usize>> = (0..n).map(|r| (r + 1 < n).then_some(r)).collect();
+    remap_state(s, &map);
+}
+
+/// Channel `ch` comes back as the last row (a redone drop that made it, `history`); Lemon Sampler hosts it from its
+/// settings on the next tick.
+pub fn push_channel(s: &mut State, mut ch: os_model::Channel) {
+    ch.index = s.project.channels.len() as u16;
+    s.project.channels.push(ch);
+    autosize(s);
+}
+
+/// `reorder` in the project and the app state: `map` gives each row's new row (`None`: the channel goes).
+fn remap_state(s: &mut State, map: &[Option<usize>]) {
+    let m = |r: usize| map.get(r).copied().flatten();
+    remap_project(&mut s.project, map);
     let len = s.project.channels.len().max(1);
     s.rack.remap(&m);
     let keep = |r: usize| m(r).unwrap_or(r.min(len - 1));
@@ -768,8 +867,6 @@ pub fn reorder(app: &mut App, order: &[usize]) {
         s.rack.select_only(s.selected_channel);
     }
     autosize(s);
-    app.remap_rows(&m);
-    app.invalidate();
 }
 
 /// Clone rows (§18): each copy goes right below its channel, named "<name> #2", same settings and mixer track,
@@ -820,8 +917,14 @@ pub fn ask_delete(s: &mut State, rows: Vec<usize>) {
         s.message = Some("A project keeps at least one channel".into());
         return;
     }
+    // Its Manage messages entry off: as if Ok was pressed; `run` deletes them (spec: ui/settings-choices.md "Hints and
+    // warnings: Manage messages and Project data size warning (2026-10-16)").
+    if !crate::messages::on(&crate::messages::DELETE_CHANNEL) {
+        s.rack.delete_now = Some(rows);
+        return;
+    }
     s.rack.pending_delete = Some(rows);
-    s.pat_ui.confirm = true;
+    crate::patterns::open_confirm(s);
 }
 
 /// Purge unused audio clips: the unused audio-clip channels go, after the delete confirmation (Lemon Studio cannot
@@ -1246,13 +1349,15 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
 
 /// The Automation / Remote control / Value groups shared by knob and LED menus (§19).
 fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)>) -> Vec<PItem> {
+    // spec: ui/settings-choices.md "Advanced: Initialize controls automatically"
+    let [init, delete] = crate::init::items(s, auto.as_ref().map(|a| (a.0, a.2)));
     let mut v = vec![
         PItem::head("Automation"),
         PItem::not_yet("Edit events"),
         PItem::new("Edit events in new window", Cmd::Nothing).off(),
         PItem::new("Edit events in piano roll", Cmd::Nothing).off(),
-        PItem::not_yet("Init song with this position"),
-        PItem::new("Delete initial value", Cmd::Nothing).off(),
+        init,
+        delete,
         PItem::sep(),
     ];
     v.push(match auto {
@@ -1365,12 +1470,55 @@ fn box_at_row(s: &State, r: usize, mouse: (f32, f32)) -> (f32, f32) {
     crate::views::rack::name_rect(s, r).map_or(crate::patterns::box_at_mouse(mouse), |nb| (nb.x, nb.y))
 }
 
-/// The sample chosen in Load sample...: row `r`'s channel takes it (and its name).
+/// A sample or channel preset at `path` went into the existing channel `ch`: while "Auto name channels" is on, the
+/// channel takes the file's name without its extension; off, it keeps its name (spec: ui/settings-choices.md
+/// "Miscellaneous: naming, detached plugins and startup"). A channel made new for a file is named after it either way.
+pub fn auto_name(ch: &mut os_model::Channel, path: &std::path::Path) {
+    if crate::prefs::check(&crate::prefs::AUTO_NAME_CHANNELS) {
+        ch.name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
+    }
+}
+
+/// Sample `path` went into sampler channel `ch` from the file dialog, the browser or a drop: what its WAV chunks say
+/// is read into the channel (spec: ui/settings-choices.md "Advanced: Read sample root note and Read sample tempo
+/// information (2026-10-16)"; `os_engine::sample::wav_tags`).
+/// - "Read sample root note" on: the root note becomes the `smpl` chunk's unity note, C5 (60) without one (any file
+///   that isn't a WAV too). Off: it stays.
+/// - "Read sample tempo information" on: an `acid` chunk's beat count (above 0) sets the stretch method to Auto and
+///   TIME to the beats, in 1/192 of a beat; PITCH and the multiplier stay. Without one, or off, the stretch stays.
+/// - "Auto keep long audio on disk" on: a file of 30 s or more turns Keep on disk on (`keep_on_disk::keep_long`).
+///
+/// Part of the load: it has no undo step of its own. Project loading and previews don't come here; audio clip channels
+/// keep their root note and stretch (not measured).
+pub fn read_tags(ch: &mut os_model::Channel, path: &std::path::Path) {
+    crate::keep_on_disk::keep_long(ch, path);
+    use crate::prefs::{check, READ_ROOT_NOTE, READ_TEMPO};
+    let (root, tempo) = (check(&READ_ROOT_NOTE), check(&READ_TEMPO));
+    if ch.kind != os_model::ChannelKind::Sampler || !(root || tempo) {
+        return;
+    }
+    let tags = os_engine::sample::wav_tags(path);
+    if root {
+        ch.misc.root = tags.unity_note.unwrap_or(60);
+    }
+    if let Some(beats) = tags.beats.filter(|_| tempo) {
+        ch.sound.stretch[0] = ((f64::from(beats) * 192.0) as f32).to_bits();
+        ch.sound.stretch[3] = os_model::stretch_mode::AUTO as u32;
+    }
+}
+
+/// The sample chosen in Load sample...: row `r`'s channel takes it (and its name, `auto_name`, and what the file says,
+/// `read_tags`), one history step (`history::load_sample`).
 pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
     let s = &mut app.state;
-    let path = p.to_string_lossy().into_owned();
+    // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
+    let path = crate::data_folder::adopt(s, &p.to_string_lossy());
+    if r < s.project.channels.len() {
+        crate::history::load_sample(s, r);
+    }
     if let Some(ch) = s.project.channels.get_mut(r) {
-        ch.name = p.file_stem().map(|n| n.to_string_lossy().into_owned());
+        auto_name(ch, &p);
+        read_tags(ch, &p);
         ch.sample_path = Some(path.clone());
     }
     s.sample_loads.push((r, path));
@@ -1440,6 +1588,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::Cut(r) => {
             s.rack.clipboard = Some(row_notes(s, r));
+            snapshot(s);
             set_row_notes(s, r, Vec::new());
             None
         }
@@ -1449,11 +1598,13 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::Paste(r) => {
             if let Some(n) = s.rack.clipboard.clone() {
+                snapshot(s);
                 set_row_notes(s, r, n);
             }
             None
         }
         RCmd::Fill(r, n) => {
+            snapshot(s);
             fill_each(s, r, n);
             None
         }
@@ -1462,6 +1613,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Rotate(r, d) => {
+            snapshot(s);
             rotate(s, r, d);
             None
         }
@@ -1474,6 +1626,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Reset(k) => {
+            crate::history::knob(s, k, false);
             s.set_knob(k, k.default_value());
             None
         }
@@ -1483,6 +1636,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::PasteValue(k) => {
             if let Some(v) = s.rack.value_clip {
+                crate::history::knob(s, k, false);
                 s.set_knob(k, v);
             }
             None
@@ -1629,6 +1783,14 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::DeclickSel(_)
         | RCmd::DetachAll(_)
         | RCmd::StretchClips(..) => None,
+    };
+    // Channels let go without asking (`ask_delete`) are deleted now.
+    let msg = match app.state.rack.delete_now.take() {
+        Some(rows) => {
+            delete_rows(app, &rows);
+            app.state.message.take().or(msg)
+        }
+        None => msg,
     };
     app.invalidate();
     msg
@@ -1794,6 +1956,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
 /// Accept in the Advanced fill dialog: write the sequence to the channel.
 pub fn fill_accept(s: &mut State) {
     if let Some(f) = s.rack.fill.take() {
+        snapshot(s);
         write_sequence(s, f.row, &f.steps);
     }
 }
@@ -2089,6 +2252,69 @@ mod tests {
         assert!(!app.state.rack.purging);
     }
 
+    // spec: ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)"
+    /// The channel delete confirmation has Remember my choice at its bottom left, off each time it opens. Ticked with
+    /// Cancel nothing goes and "Delete channel" stays on; ticked with Ok the channel goes and the entry turns off.
+    /// While it is off, Delete... and Purge unused audio clips delete at once with no box (Purge still takes only the
+    /// unused audio-clip channels).
+    #[test]
+    fn delete_channel_remembers_ok_and_skips_the_box_when_off() {
+        use crate::app::Action;
+        use crate::messages::{on, set, DELETE_CHANNEL};
+        use crate::patterns::Hit;
+        use os_model::Clip;
+        use os_ui::Canvas;
+        let Ok(mut c) = Canvas::new(1280, 800, 1.0) else { return };
+        let press = |app: &mut App, c: &mut Canvas, h: Hit| {
+            app.paint(c, None);
+            let r = app.hits.iter().rev().find(|x| x.action == Action::Pat(h)).map(|x| x.rect).expect("drawn");
+            app.mouse_move(r.cx(), r.cy());
+            app.mouse_down();
+            app.mouse_up();
+        };
+        // Channels told apart by name (deleting renumbers their indexes).
+        let named = || {
+            let mut app = App::new(None);
+            for (i, ch) in app.state.project.channels.iter_mut().enumerate() {
+                ch.name = Some(format!("c{i}"));
+            }
+            app
+        };
+        let ids = |app: &App| app.state.project.channels.iter().map(|c| c.name.clone().unwrap_or_default()).collect::<Vec<_>>();
+        let mut app = named();
+        let mut want = ids(&app);
+        run(&mut app, RCmd::Delete(1));
+        assert!(app.state.pat_ui.confirm && !app.state.pat_ui.remember);
+        press(&mut app, &mut c, Hit::ConfirmRemember);
+        assert!(app.state.pat_ui.remember);
+        press(&mut app, &mut c, Hit::ConfirmCancel);
+        assert_eq!((ids(&app), on(&DELETE_CHANNEL), app.state.pat_ui.confirm), (want.clone(), true, false), "Cancel");
+        run(&mut app, RCmd::Delete(1));
+        assert!(app.state.pat_ui.confirm && !app.state.pat_ui.remember, "Remember my choice is off again");
+        press(&mut app, &mut c, Hit::ConfirmRemember);
+        press(&mut app, &mut c, Hit::ConfirmOk);
+        want.remove(1);
+        assert_eq!((ids(&app), on(&DELETE_CHANNEL), app.state.pat_ui.confirm), (want.clone(), false, false), "Ok");
+        // Off: as if Ok was pressed.
+        assert_eq!(run(&mut app, RCmd::Delete(0)).as_deref(), Some("Deleted the channel"));
+        want.remove(0);
+        assert_eq!((ids(&app), app.state.pat_ui.confirm), (want, false));
+
+        // Purge: rows 2 to 4 are audio clips, 2 with a note, 3 with a playlist clip, 4 unused.
+        let mut app = named();
+        for r in 2..5 {
+            app.state.project.channels[r].kind = ChannelKind::AudioClip;
+        }
+        let (i2, i3) = (app.state.project.channels[2].index, app.state.project.channels[3].index);
+        crate::patterns::pat_mut(&mut app.state, 2).notes = vec![Note::step(i2, 0)];
+        crate::playlist::arr_mut(&mut app.state).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
+        let before = ids(&app);
+        assert_eq!(run(&mut app, RCmd::Purge).as_deref(), Some("Deleted the channel"));
+        assert!(!app.state.pat_ui.confirm && !app.state.rack.purging);
+        assert_eq!(ids(&app), before[..4].to_vec());
+        set(&DELETE_CHANNEL, true);
+    }
+
     /// Lock, zip, groups, swing, loop lengths and a restructured rack survive saving into an opened file ("Saving").
     #[test]
     fn rack_settings_save_and_reopen() {
@@ -2153,5 +2379,582 @@ mod tests {
         assert_eq!(n.position / 24, 4, "time shift stays inside its step");
         assert_eq!(Tab::Vel.text(&Note::step(0, 0), 24), "Velocity 78%");
         assert_eq!(key_name(60), "C5");
+    }
+
+    /// "Restore previous state after solo" (spec: ui/settings-choices.md "Miscellaneous"), as measured in the channel
+    /// rack, the playlist and the mixer: mute B, solo A (the second time moving the solo on to C), unsolo. Off:
+    /// everything on; on: the states from before the first solo (B muted). A locked channel keeps its state.
+    #[test]
+    fn restore_previous_state_after_solo() {
+        use crate::prefs::{set_check, RESTORE_AFTER_SOLO};
+        for on in [false, true] {
+            set_check(&RESTORE_AFTER_SOLO, on);
+            for moved in [false, true] {
+                let what = format!("check {}, solo {}", if on { "on" } else { "off" }, if moved { "moved" } else { "kept" });
+                let (a, b, c) = (0, 1, 2);
+                let want = |i: usize| !(on && i == b);
+                let mut app = App::new(None);
+                app.state.project = crate::app::test_project();
+                let s = &mut app.state;
+
+                // Channel rack (Ctrl+click on the LEDs); channel 5 is locked and muted.
+                toggle_mute(s, b);
+                toggle_mute(s, 4);
+                toggle_lock(s, 4);
+                solo(s, a);
+                assert!(s.project.channels.iter().enumerate().all(|(i, ch)| ch.enabled == (i == a)), "rack solo, {what}");
+                if moved {
+                    solo(s, c);
+                    assert!(s.project.channels.iter().enumerate().all(|(i, ch)| ch.enabled == (i == c)), "rack solo moved, {what}");
+                }
+                solo(s, if moved { c } else { a });
+                let got: Vec<bool> = s.project.channels.iter().map(|ch| ch.enabled).collect();
+                assert_eq!(got, (0..5).map(|i| i != 4 && want(i)).collect::<Vec<_>>(), "rack, {what}");
+
+                // Playlist tracks.
+                let tracks = |s: &mut State| crate::playlist::arr_mut(s).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
+                crate::playlist::toggle_track(s, b as u16);
+                crate::playlist::toggle_solo(s, a as u16);
+                if moved {
+                    crate::playlist::toggle_solo(s, c as u16);
+                    assert!(tracks(s).iter().enumerate().all(|(i, &on)| on == (i == c)), "playlist solo moved, {what}");
+                }
+                crate::playlist::toggle_solo(s, if moved { c } else { a } as u16);
+                assert!(tracks(s).iter().enumerate().all(|(i, &on)| on == want(i)), "playlist, {what}");
+
+                // Mixer inserts (right-click on the LEDs): inserts 1, 2 and 3 are A, B and C.
+                crate::mixer::track_mut(s, 2).expect("insert 2").enabled = false;
+                crate::mixer::solo(s, 1);
+                if moved {
+                    crate::mixer::solo(s, 3);
+                    assert!(s.project.mixer.iter().all(|m| m.enabled == matches!(m.index, 0 | 3)), "mixer solo moved, {what}");
+                }
+                crate::mixer::solo(s, if moved { 3 } else { 1 });
+                assert!(s.project.mixer.iter().all(|m| m.enabled == (!on || m.index != 2)), "mixer, {what}");
+            }
+        }
+        set_check(&RESTORE_AFTER_SOLO, false);
+    }
+
+    /// "Select first channel with notes when the pattern changes" (spec: ui/settings-choices.md "Miscellaneous"): on,
+    /// switching pattern selects (only) the lowest-numbered channel with notes or steps in it; a pattern without any
+    /// leaves the selection alone. Off: the selection stays.
+    #[test]
+    fn select_first_channel_with_notes_when_the_pattern_changes() {
+        use crate::prefs::{set_check, SELECT_FIRST_CHANNEL};
+        for on in [false, true] {
+            set_check(&SELECT_FIRST_CHANNEL, on);
+            let mut app = App::new(None);
+            app.state.project = crate::app::test_project();
+            // Pattern 2: steps on channels 4 and 2 (indices 3 and 1); pattern 3 has none.
+            let notes = vec![Note::step(3, 0), Note::step(1, 96)];
+            app.state.project.patterns.push(os_model::Pattern { number: 2, notes, ..Default::default() });
+            app.state.project.patterns.push(os_model::Pattern { number: 3, ..Default::default() });
+            let select = |app: &mut App, r: usize| {
+                app.state.rack.select_only(r);
+                app.state.selected_channel = r;
+            };
+            let selection = |app: &App| (app.state.rack.sel.iter().copied().collect::<Vec<_>>(), app.state.selected_channel);
+            select(&mut app, 4);
+            app.tick();
+            app.state.pattern = 2;
+            app.tick();
+            assert_eq!(selection(&app), if on { (vec![1], 1) } else { (vec![4], 4) }, "check {on}");
+            select(&mut app, 4);
+            app.state.pattern = 3;
+            app.tick();
+            assert_eq!(selection(&app), (vec![4], 4), "no notes: the selection stays (check {on})");
+            // The frame's damage brings it up to date too (an input's paint can come before the tick).
+            app.state.pattern = 2;
+            let _ = app.take_damage();
+            assert_eq!(selection(&app).1, if on { 1 } else { 4 }, "before the frame (check {on})");
+        }
+        set_check(&SELECT_FIRST_CHANNEL, false);
+    }
+
+    /// "Auto zip empty channels" (spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and
+    /// Startup project"), the measured case: steps on Kick and HiHat in pattern 1 and on Clap in pattern 2. On, each
+    /// pattern switch unzips the channels with notes or steps in the new pattern and zips the others; an empty pattern
+    /// unzips them all; zipping by hand holds until the next switch. Off: the zips stay as they are.
+    #[test]
+    fn auto_zip_empty_channels() {
+        use crate::prefs::{set_check, AUTO_ZIP_EMPTY};
+        for on in [false, true] {
+            set_check(&AUTO_ZIP_EMPTY, on);
+            let mut app = App::new(None);
+            app.state.project = crate::app::test_project();
+            // Rows: 0 Kick, 1 Clap, 2 Hat, 3 Snare, 4 Pluck.
+            let pat = |number: u16, notes: Vec<Note>| os_model::Pattern { number, notes, ..Default::default() };
+            app.state.project.patterns = vec![pat(1, vec![Note::step(0, 0), Note::step(2, 48)]), pat(2, vec![Note::step(1, 96)]), pat(3, Vec::new())];
+            let zips = |app: &App| app.state.rack.zipped.iter().copied().collect::<Vec<usize>>();
+            app.state.rack.zipped = [4].into();
+            app.tick();
+            assert_eq!(zips(&app), vec![4], "no switch yet, check {on}");
+            let switch = |app: &mut App, p: u16| {
+                app.state.pattern = p;
+                app.tick();
+                zips(app)
+            };
+            assert_eq!(switch(&mut app, 2), if on { vec![0, 2, 3, 4] } else { vec![4] }, "pattern 2, check {on}");
+            assert_eq!(switch(&mut app, 1), if on { vec![1, 3, 4] } else { vec![4] }, "pattern 1, check {on}");
+            // Zipping by hand works between switches.
+            app.state.rack.zipped.insert(0);
+            app.tick();
+            assert_eq!(zips(&app), if on { vec![0, 1, 3, 4] } else { vec![0, 4] }, "zipped by hand, check {on}");
+            // A pattern without notes (as one just made with "+") unzips every channel.
+            assert_eq!(switch(&mut app, 3), if on { Vec::new() } else { vec![0, 4] }, "empty pattern, check {on}");
+            assert_eq!(switch(&mut app, 9), if on { Vec::new() } else { vec![0, 4] }, "a pattern with no data, check {on}");
+        }
+        set_check(&AUTO_ZIP_EMPTY, false);
+    }
+
+    /// The rack shown with row 0's steps `on` (the rest off), painted so its step buttons can be hit.
+    fn step_app(c: &mut os_ui::Canvas, on: &[u32]) -> App {
+        let mut app = App::new(None);
+        app.state.z = vec![crate::app::Win::ChannelRack];
+        let ch = ch_index(&app.state, 0).expect("row 0");
+        let ps = per_step(&app.state);
+        let n = app.state.pattern;
+        crate::patterns::pat_mut(&mut app.state, n).notes = on.iter().map(|&k| Note::step(ch, k * ps)).collect();
+        app.paint(c, None);
+        app
+    }
+
+    /// Row 0's steps that are on among the first 16.
+    fn steps(app: &App) -> Vec<u32> {
+        let (ch, ps) = (ch_index(&app.state, 0).expect("row 0"), per_step(&app.state));
+        let notes = app.state.project.pattern(app.state.pattern).map(|p| p.notes.clone()).unwrap_or_default();
+        (0..16).filter(|&k| step_on(&notes, ch, k, ps)).collect()
+    }
+
+    /// Presses the left or `right` button on row 0's step `k`, moves over to step `to`, and releases.
+    fn press(app: &mut App, right: bool, k: u32, to: u32) {
+        let at = |app: &App, k: u32| {
+            let r = app.hits.iter().rev().find(|h| h.action == crate::app::Action::Step(0, k)).map(|h| h.rect).expect("step shown");
+            (r.cx(), r.cy())
+        };
+        let (x, y) = at(app, k);
+        app.mouse_move(x, y);
+        if right {
+            app.mouse_down_right();
+        } else {
+            app.mouse_down();
+        }
+        let (x, y) = at(app, to);
+        app.mouse_move(x, y);
+        app.mouse_up();
+    }
+
+    /// "Use both mouse buttons in step sequencer", off as found (spec: ui/settings-choices.md "Input: Click-and-hold
+    /// and both mouse buttons (2026-10-16)", the table's Off column): a left or a right click toggles the step; a left
+    /// drag sets each step it crosses on, a right drag sets each one off.
+    #[test]
+    fn step_buttons_with_both_mouse_buttons_off() {
+        use crate::prefs::{check, BOTH_MOUSE_BUTTONS};
+        let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
+        assert!(!check(&BOTH_MOUSE_BUTTONS), "off by default");
+        for (right, start, want, row) in [
+            (false, vec![], vec![2], "left click on an off step: on"),
+            (false, vec![2], vec![], "left click on an on step: off"),
+            (true, vec![2], vec![], "right click on an on step: off"),
+            (true, vec![], vec![2], "right click on an off step: on"),
+        ] {
+            let mut app = step_app(&mut c, &start);
+            press(&mut app, right, 2, 2);
+            assert_eq!(steps(&app), want, "{row}");
+            assert_eq!(app.state.selected_channel, 0, "{row}: the row is selected");
+        }
+        // Drags, from an off and from an on step: left sets every step crossed, right clears them.
+        let mut app = step_app(&mut c, &[5, 9]);
+        press(&mut app, false, 3, 7);
+        assert_eq!(steps(&app), vec![3, 4, 5, 6, 7, 9], "left drag along the row");
+        let mut app = step_app(&mut c, &[2, 3, 5, 6, 7, 9]);
+        press(&mut app, true, 2, 6);
+        assert_eq!(steps(&app), vec![7, 9], "right drag along the row");
+        let mut app = step_app(&mut c, &[4, 9]);
+        press(&mut app, false, 4, 6);
+        assert_eq!(steps(&app), vec![4, 5, 6, 9], "left drag from an on step");
+        let mut app = step_app(&mut c, &[9]);
+        press(&mut app, true, 4, 6);
+        assert_eq!(steps(&app), vec![9], "right drag from an off step");
+    }
+
+    /// The check on (spec, as above, the On column): the left button only sets a step, the right one only clears it;
+    /// drags as with it off (the spec's choice for Lemon Studio).
+    #[test]
+    fn step_buttons_with_both_mouse_buttons_on() {
+        use crate::prefs::{set_check, BOTH_MOUSE_BUTTONS};
+        let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
+        set_check(&BOTH_MOUSE_BUTTONS, true);
+        for (right, start, want, row) in [
+            (false, vec![], vec![2], "left click on an off step: on"),
+            (false, vec![2], vec![2], "left click on an on step: stays on"),
+            (true, vec![2], vec![], "right click on an on step: off"),
+            (true, vec![], vec![], "right click on an off step: stays off"),
+        ] {
+            let mut app = step_app(&mut c, &start);
+            press(&mut app, right, 2, 2);
+            assert_eq!(steps(&app), want, "{row}");
+        }
+        let mut app = step_app(&mut c, &[5, 9]);
+        press(&mut app, false, 3, 7);
+        assert_eq!(steps(&app), vec![3, 4, 5, 6, 7, 9], "left drag along the row");
+        let mut app = step_app(&mut c, &[2, 3, 5, 6, 7, 9]);
+        press(&mut app, true, 2, 6);
+        assert_eq!(steps(&app), vec![7, 9], "right drag along the row");
+        // Back the other way: a drag to the left covers the same steps.
+        let mut app = step_app(&mut c, &[]);
+        press(&mut app, false, 7, 4);
+        assert_eq!(steps(&app), vec![4, 5, 6, 7], "left drag leftwards");
+        set_check(&BOTH_MOUSE_BUTTONS, false);
+    }
+
+    /// A RIFF chunk: id, little-endian length, body, a pad byte after an odd length.
+    fn riff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut c = id.to_vec();
+        c.extend((body.len() as u32).to_le_bytes());
+        c.extend(body);
+        if body.len() % 2 == 1 {
+            c.push(0);
+        }
+        c
+    }
+
+    /// `smpl` with MIDI unity note `note` (its 4th u32), no loops.
+    fn smpl(note: u32) -> Vec<u8> {
+        let b: Vec<u8> = [0, 0, 22675, note, 0, 0, 0, 0, 0].iter().flat_map(|v: &u32| v.to_le_bytes()).collect();
+        riff_chunk(b"smpl", &b)
+    }
+
+    /// `acid` with `beats` beats (at body offset 12) and root note `root` flagged as set, meter 4/4, tempo `bpm`.
+    fn acid(beats: u32, root: u16, bpm: f32) -> Vec<u8> {
+        let mut b = 2u32.to_le_bytes().to_vec();
+        b.extend(root.to_le_bytes());
+        b.extend(0x8000u16.to_le_bytes());
+        b.extend(0f32.to_le_bytes());
+        b.extend(beats.to_le_bytes());
+        b.extend([4, 0, 4, 0]);
+        b.extend(bpm.to_le_bytes());
+        riff_chunk(b"acid", &b)
+    }
+
+    /// A WAV of `secs` seconds of a 16-bit mono 44.1 kHz tone with chunks `extra` before `data`, in `dir` (the temp
+    /// folder when `None`) under a name of its own: tests run in parallel.
+    fn tagged_wav(dir: Option<&std::path::Path>, name: &str, secs: f32, extra: &[Vec<u8>]) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let k = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let frames = (44100.0 * secs) as usize;
+        let data: Vec<u8> = (0..frames).flat_map(|i| (((i as f32 * 0.0627).sin() * 8000.0) as i16).to_le_bytes()).collect();
+        let mut fmt = vec![1, 0, 1, 0];
+        fmt.extend(44100u32.to_le_bytes());
+        fmt.extend(88200u32.to_le_bytes());
+        fmt.extend([2, 0, 16, 0]);
+        let mut body = b"WAVE".to_vec();
+        body.extend(riff_chunk(b"fmt ", &fmt));
+        extra.iter().for_each(|c| body.extend(c));
+        body.extend(riff_chunk(b"data", &data));
+        let mut b = b"RIFF".to_vec();
+        b.extend((body.len() as u32).to_le_bytes());
+        b.extend(body);
+        let dir = dir.map_or_else(std::env::temp_dir, std::path::Path::to_path_buf);
+        let p = dir.join(format!("os-app-tags-{name}-{}-{k}.wav", std::process::id()));
+        std::fs::write(&p, b).unwrap();
+        p
+    }
+
+    /// TIME `beats` with the method Auto, PITCH and MUL as in `was`.
+    fn auto(beats: f32, was: [u32; 4]) -> [u32; 4] {
+        [(beats * 192.0).to_bits(), was[1], was[2], os_model::stretch_mode::AUTO as u32]
+    }
+
+    /// The default project's sampler row.
+    fn sampler_row(app: &App) -> usize {
+        (0..app.state.project.channels.len()).find(|&r| app.state.project.channels[r].kind == os_model::ChannelKind::Sampler).unwrap()
+    }
+
+    // spec: ui/settings-choices.md "Advanced: Read sample root note and Read sample tempo information (2026-10-16)"
+    /// Both checks on (as found): the measured table, file by file, loaded with Load sample... into a channel whose
+    /// root is 50 and whose stretch is Resample x2 at +300 cents. A file without `smpl` sets the root back to C5;
+    /// `acid`'s beats set Auto and TIME (its tempo and root unused), PITCH and MUL kept; a file without `acid`, or with
+    /// 0 beats, keeps the stretch. What the file says is part of the load's history step, with none of its own.
+    #[test]
+    fn loaded_wavs_set_the_root_note_and_beats() {
+        use crate::prefs::{check, READ_ROOT_NOTE, READ_TEMPO};
+        assert!(check(&READ_ROOT_NOTE) && check(&READ_TEMPO), "both on by default");
+        let mut app = App::new(None);
+        let r = sampler_row(&app);
+        let steps = app.state.history.len();
+        let was = [0, 300, 10000, 0];
+        let cases: [(&str, f32, Vec<Vec<u8>>, u8, [u32; 4]); 6] = [
+            ("none", 2.0, vec![], 60, was),
+            ("smpl72", 2.0, vec![smpl(72)], 72, was),
+            ("acid4", 2.0, vec![acid(4, 64, 120.0)], 60, auto(4.0, was)),
+            ("both", 2.0, vec![smpl(67), acid(4, 60, 95.0)], 67, auto(4.0, was)),
+            // 8 beats at 120 BPM would last 4 s: the beats count, not the tempo.
+            ("acid8", 2.0, vec![acid(8, 60, 120.0)], 60, auto(8.0, was)),
+            ("acid0", 2.0, vec![acid(0, 60, 120.0)], 60, was),
+        ];
+        for (name, secs, extra, root, stretch) in cases {
+            let ch = &mut app.state.project.channels[r];
+            (ch.misc.root, ch.sound.stretch) = (50, was);
+            let p = tagged_wav(None, name, secs, &extra);
+            sample_chosen(&mut app, r, p.clone());
+            let ch = &app.state.project.channels[r];
+            assert_eq!((ch.misc.root, ch.sound.stretch), (root, stretch), "{name}");
+            assert_eq!(ch.sample_path.as_deref(), Some(p.to_string_lossy().as_ref()));
+            let _ = std::fs::remove_file(p);
+        }
+        // A plain file after an `acid` one keeps Auto and its TIME.
+        let (fitted, plain) = (tagged_wav(None, "fitted", 0.5, &[acid(4, 0, 120.0)]), tagged_wav(None, "plain", 0.5, &[]));
+        app.state.project.channels[r].sound.stretch = was;
+        sample_chosen(&mut app, r, fitted.clone());
+        sample_chosen(&mut app, r, plain.clone());
+        assert_eq!(app.state.project.channels[r].sound.stretch, auto(4.0, was));
+        assert_eq!(app.state.history.len(), steps + 8, "a step per load, none of the read's own");
+        // A file that isn't a WAV (or can't be read) has no `smpl` either.
+        app.state.project.channels[r].misc.root = 50;
+        read_tags(&mut app.state.project.channels[r], std::path::Path::new("Z:/no such folder/loop.mp3"));
+        assert_eq!(app.state.project.channels[r].misc.root, 60);
+        for p in [fitted, plain] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// Off, each check leaves its setting as the channel had it; one off doesn't stop the other.
+    #[test]
+    fn read_sample_checks_off_leave_the_channel() {
+        use crate::prefs::{set_check, READ_ROOT_NOTE, READ_TEMPO};
+        let mut app = App::new(None);
+        let r = sampler_row(&app);
+        let was = [0, 0, 0, 0];
+        let both = tagged_wav(None, "off", 0.5, &[smpl(72), acid(4, 64, 120.0)]);
+        let load = |app: &mut App, root: bool, tempo: bool| {
+            set_check(&READ_ROOT_NOTE, root);
+            set_check(&READ_TEMPO, tempo);
+            let ch = &mut app.state.project.channels[r];
+            (ch.misc.root, ch.sound.stretch) = (50, was);
+            sample_chosen(app, r, both.clone());
+            let ch = &app.state.project.channels[r];
+            (ch.misc.root, ch.sound.stretch)
+        };
+        assert_eq!(load(&mut app, false, false), (50, was), "both off");
+        assert_eq!(load(&mut app, true, false), (72, was), "root note only");
+        assert_eq!(load(&mut app, false, true), (50, auto(4.0, was)), "tempo only");
+        assert_eq!(load(&mut app, true, true), (72, auto(4.0, was)), "both on");
+        let _ = std::fs::remove_file(both);
+    }
+
+    /// Every way a sample goes into a sampler channel reads it: a drop on the row, a drop below the rows (a new
+    /// channel), the browser's send. An audio clip channel keeps its settings.
+    #[test]
+    fn every_sample_load_reads_the_file() {
+        use crate::browser::BCmd;
+        let mut app = App::new(None);
+        let r = sampler_row(&app);
+        let y = crate::views::rack::name_rect(&app.state, r).unwrap().cy();
+        let was = app.state.project.channels[r].sound.stretch;
+        let dropped = tagged_wav(None, "drop", 0.5, &[smpl(72)]);
+        app.sample_to_rack(dropped.to_string_lossy().into_owned(), y);
+        assert_eq!(app.state.project.channels[r].misc.root, 72, "a drop on the row");
+        let new = tagged_wav(None, "new", 0.5, &[smpl(67), acid(4, 60, 95.0)]);
+        let n = app.state.project.channels.len();
+        app.sample_to_rack(new.to_string_lossy().into_owned(), crate::views::rack::rect(&app.state).bottom() + 40.0);
+        assert_eq!(app.state.project.channels.len(), n + 1);
+        let ch = &app.state.project.channels[n];
+        assert_eq!((ch.misc.root, ch.sound.stretch), (67, auto(4.0, [0; 4])), "a drop below the rows");
+        // The browser's send, from a folder holding one sample.
+        let dir = std::env::temp_dir().join(format!("os-app-tags-browser-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sent = tagged_wav(Some(&dir), "sent", 0.5, &[smpl(71), acid(2, 0, 120.0)]);
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(crate::views::browser::disk_key(&dir));
+        app.state.selected_channel = r;
+        app.browser_cmd(BCmd::Send(1));
+        let ch = &app.state.project.channels[r];
+        assert_eq!(ch.sample_path.as_deref(), Some(sent.to_string_lossy().as_ref()));
+        assert_eq!((ch.misc.root, ch.sound.stretch), (71, auto(2.0, was)), "the browser's send");
+        // Not measured for audio clip channels: they keep theirs.
+        let mut clip = app.state.project.channels[r].clone();
+        (clip.kind, clip.misc.root) = (os_model::ChannelKind::AudioClip, 50);
+        read_tags(&mut clip, &new);
+        assert_eq!((clip.misc.root, clip.sound.stretch), (50, auto(2.0, was)));
+        for p in [dropped, new] {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The channel's Lemon Sampler gets the root note and stretch the load read, with the sample, in the next tick;
+    /// a plain file after it keeps the stretch there too.
+    #[test]
+    fn lemon_sampler_takes_what_the_load_read() {
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let r = sampler_row(&app);
+        app.plugin_tick();
+        assert!(app.state.hosted_rows.contains(&r), "Lemon Sampler hosts the row");
+        let params = |app: &App| {
+            let st = app.plugins.state(r).expect("state");
+            let json = if st.first() == Some(&b'{') { &st[..] } else { &st[8..] };
+            serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"].clone()
+        };
+        let read = |app: &App| {
+            let p = params(app);
+            let steps = lemon_sampler::params::time_steps(p["ts_time"]["f32"].as_f64().unwrap() as f32);
+            (p["root"]["i32"].as_i64().unwrap(), p["ts_mode"]["i32"].as_i64().unwrap(), steps.round() as i64)
+        };
+        let auto_index = i64::from(lemon_sampler::params::stretch_index(os_model::stretch_mode::AUTO));
+        let both = tagged_wav(None, "hosted", 0.5, &[smpl(67), acid(4, 60, 95.0)]);
+        sample_chosen(&mut app, r, both.clone());
+        app.plugin_tick();
+        assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(both.to_string_lossy().as_ref()));
+        assert_eq!(read(&app), (67, auto_index, 16), "root 67, Auto, 4 beats = 16 steps");
+        let plain = tagged_wav(None, "hosted-plain", 0.5, &[]);
+        sample_chosen(&mut app, r, plain.clone());
+        app.plugin_tick();
+        assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(plain.to_string_lossy().as_ref()));
+        assert_eq!(read(&app), (60, auto_index, 16), "back to C5, the stretch kept");
+        for p in [both, plain] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// Row `r`'s Lemon Sampler: its sample, root note, stretch method (its menu index) and TIME in steps.
+    fn sampler_side(app: &App, r: usize) -> (String, i64, i64, i64) {
+        let st = app.plugins.state(r).expect("hosted");
+        let json = if st.first() == Some(&b'{') { &st[..] } else { &st[8..] };
+        let p = serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"].clone();
+        let steps = lemon_sampler::params::time_steps(p["ts_time"]["f32"].as_f64().unwrap() as f32);
+        let path = app.plugins.sampler_path(r).unwrap_or_default();
+        (path, p["root"]["i32"].as_i64().unwrap(), p["ts_mode"]["i32"].as_i64().unwrap(), steps.round() as i64)
+    }
+
+    /// A file's name as "Auto name channels" gives it.
+    fn stem(p: &std::path::Path) -> Option<String> {
+        p.file_stem().map(|n| n.to_string_lossy().into_owned())
+    }
+
+    // spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)", "Load channel sample(s)"
+    /// A sample load is one history step, "Load channel sample(s)", whichever way it comes in (Load sample..., a drop
+    /// on the row, the browser's send). Undo puts back the old sample, the old name ("Auto name channels" changed it),
+    /// root note and stretch, and the entry is drawn grey; redo loads the new ones again.
+    #[test]
+    fn a_sample_load_is_one_history_step() {
+        use crate::browser::BCmd;
+        use crate::history::{ctrl_alt_z, ctrl_z, LOAD_SAMPLE};
+        let mut app = App::new(None);
+        let r = sampler_row(&app);
+        let y = crate::views::rack::name_rect(&app.state, r).unwrap().cy();
+        let dir = std::env::temp_dir().join(format!("os-app-tags-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(crate::views::browser::disk_key(&dir));
+        let side = |app: &App| {
+            let ch = &app.state.project.channels[r];
+            (ch.sample_path.clone(), ch.name.clone(), ch.misc.root, ch.sound.stretch)
+        };
+        let was = [0, 300, 10000, 0];
+        for how in ["Load sample...", "a drop on the row", "the browser's send"] {
+            let ch = &mut app.state.project.channels[r];
+            (ch.sample_path, ch.name, ch.misc.root, ch.sound.stretch) = (Some("C:/old/808 Clap.wav".into()), Some("808 Clap".into()), 50, was);
+            let before = side(&app);
+            let steps = app.state.history.len();
+            let file = tagged_wav(Some(&dir), "step", 0.5, &[smpl(67), acid(4, 60, 95.0)]);
+            let path = file.to_string_lossy().into_owned();
+            match how {
+                "Load sample..." => sample_chosen(&mut app, r, file.clone()),
+                "a drop on the row" => app.sample_to_rack(path.clone(), y),
+                _ => {
+                    app.state.selected_channel = r;
+                    app.browser_cmd(BCmd::Send(1));
+                }
+            }
+            let after = (Some(path), stem(&file), 67, auto(4.0, was));
+            assert_eq!(side(&app), after, "{how}");
+            assert_eq!(app.state.history.len(), steps + 1, "{how}: one step");
+            assert_eq!(app.state.history.entries().last(), Some(&(steps + 1, LOAD_SAMPLE)), "{how}");
+            assert!(!app.state.history.undone(steps + 1));
+            assert_eq!(ctrl_z(&mut app.state).as_deref(), Some("Undo: load channel sample(s)"));
+            assert_eq!(side(&app), before, "{how}: undone");
+            assert!(app.state.history.undone(steps + 1), "{how}: the undone step is drawn grey");
+            assert_eq!(ctrl_alt_z(&mut app.state).as_deref(), Some("Redo: load channel sample(s)"));
+            assert_eq!(side(&app), after, "{how}: redone");
+            assert!(!app.state.history.undone(steps + 1));
+            // Only one file at a time in the browser's folder: its send picks it.
+            let _ = std::fs::remove_file(file);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sample dropped below the rows makes a channel: the step covers the channel itself. Undone, it goes; redone,
+    /// it comes back as it was.
+    #[test]
+    fn undoing_a_drop_below_the_rows_removes_its_channel() {
+        use crate::history::{ctrl_alt_z, ctrl_z, LOAD_SAMPLE};
+        let mut app = App::new(None);
+        let n = app.state.project.channels.len();
+        let file = tagged_wav(None, "new-row", 0.5, &[smpl(67), acid(4, 60, 95.0)]);
+        app.sample_to_rack(file.to_string_lossy().into_owned(), crate::views::rack::rect(&app.state).bottom() + 40.0);
+        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.history.entries().last().map(|e| e.1), Some(LOAD_SAMPLE));
+        let made = app.state.project.channels[n].clone();
+        assert_eq!((made.name.clone(), made.misc.root), (stem(&file), 67));
+        ctrl_z(&mut app.state);
+        assert_eq!(app.state.project.channels.len(), n, "the channel goes");
+        assert!(app.state.selected_channel < n && app.state.rack.sel.iter().all(|&r| r < n));
+        ctrl_alt_z(&mut app.state);
+        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.project.channels[n], made, "it comes back as it was");
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// Undo and redo of a load reach the channel's Lemon Sampler on the next tick: its sample, root note and stretch
+    /// match the channel again, back to no sample at all; a channel a drop made loses its instrument and gets it back.
+    #[test]
+    fn the_hosted_sampler_follows_undo_and_redo() {
+        use crate::history::{ctrl_alt_z, ctrl_z};
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let r = sampler_row(&app);
+        app.plugin_tick();
+        assert!(app.state.hosted_rows.contains(&r));
+        let start = sampler_side(&app, r);
+        let auto_index = i64::from(lemon_sampler::params::stretch_index(os_model::stretch_mode::AUTO));
+        let (plain, both) = (tagged_wav(None, "undo-plain", 0.5, &[]), tagged_wav(None, "undo-both", 0.5, &[smpl(67), acid(4, 60, 95.0)]));
+        let (plain_s, both_s) = (plain.to_string_lossy().into_owned(), both.to_string_lossy().into_owned());
+        sample_chosen(&mut app, r, plain.clone());
+        app.plugin_tick();
+        sample_chosen(&mut app, r, both.clone());
+        app.plugin_tick();
+        assert_eq!(sampler_side(&app, r), (both_s.clone(), 67, auto_index, 16));
+        ctrl_z(&mut app.state);
+        app.plugin_tick();
+        assert_eq!(sampler_side(&app, r), (plain_s.clone(), 60, 0, 0), "the plain file, C5, Resample");
+        ctrl_alt_z(&mut app.state);
+        app.plugin_tick();
+        assert_eq!(sampler_side(&app, r), (both_s.clone(), 67, auto_index, 16), "redone");
+        ctrl_z(&mut app.state);
+        ctrl_z(&mut app.state);
+        app.plugin_tick();
+        assert_eq!(sampler_side(&app, r), start, "back to the channel's first sample (none)");
+        // A drop below the rows: its channel's instrument goes with it and comes back.
+        let n = app.state.project.channels.len();
+        app.sample_to_rack(both_s.clone(), crate::views::rack::rect(&app.state).bottom() + 40.0);
+        app.plugin_tick();
+        assert_eq!(sampler_side(&app, n), (both_s.clone(), 67, auto_index, 16));
+        ctrl_z(&mut app.state);
+        app.plugin_tick();
+        assert!(!app.plugins.hosted.contains_key(&n) && !app.state.hosted_rows.contains(&n), "the instrument goes");
+        ctrl_alt_z(&mut app.state);
+        app.plugin_tick();
+        assert!(app.state.hosted_rows.contains(&n));
+        assert_eq!(sampler_side(&app, n), (both_s, 67, auto_index, 16), "hosted again from the channel");
+        for p in [plain, both] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }

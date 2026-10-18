@@ -95,6 +95,12 @@ pub struct Canvas {
     drawn: Option<(i32, i32, i32, i32)>,
 }
 
+/// The scale and clips `Canvas::rescale` replaced, for `Canvas::unscale`.
+pub struct Rescaled {
+    scale: f32,
+    clips: Vec<Rect>,
+}
+
 /// Coverage (0..=255) of a shape, `w` x `h` device pixels.
 struct Coverage {
     w: i32,
@@ -167,6 +173,24 @@ impl Canvas {
         self.scale = scale;
         self.clips.clear();
         self.region.clear();
+    }
+
+    /// Paints at `scale` from here until `unscale`: a part of the frame scaled apart from the rest (popup menus, spec:
+    /// ui/ui-scaling.md §1). Logical px become `scale` device px; the clips keep their device bounds.
+    pub fn rescale(&mut self, scale: f32) -> Rescaled {
+        let old = Rescaled { scale: self.scale, clips: self.clips.clone() };
+        let k = self.scale / scale;
+        for c in &mut self.clips {
+            *c = Rect::new(c.x * k, c.y * k, c.w * k, c.h * k);
+        }
+        self.scale = scale;
+        old
+    }
+
+    /// Back to the scale and clips `rescale` replaced.
+    pub fn unscale(&mut self, old: Rescaled) {
+        self.scale = old.scale;
+        self.clips = old.clips;
     }
 
     /// Logical size.
@@ -339,6 +363,57 @@ impl Canvas {
             let src = &cov.a[((y - p.y0) * cov.w + (x0 - p.x0)) as usize..][..n];
             let dst = &mut data[(y as usize * pw + x0 as usize) * 4..][..n * 4];
             blend_cov_row(dst.as_chunks_mut::<4>().0, src, c);
+        }
+    }
+
+    /// Blend through `cov` with a colour per device-pixel column: column `x` (device) takes `cols[x - cov.x0]`.
+    fn blend_columns(&mut self, p: &Placed, cols: &[Color]) {
+        for i in 0..self.clip_count() {
+            let clip = self.clip_at(i);
+            self.blend_columns_in(clip, p, cols);
+        }
+    }
+
+    fn blend_columns_in(&mut self, (cx0, cy0, cx1, cy1): (i32, i32, i32, i32), p: &Placed, cols: &[Color]) {
+        let cov = &*p.cov;
+        let (x0, x1) = (p.x0.max(cx0), (p.x0 + cov.w).min(cx1));
+        let (y0, y1) = (p.y0.max(cy0), (p.y0 + cov.h).min(cy1));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        self.mark(x0, y0, x1, y1);
+        let pw = self.pixmap.width() as usize;
+        let n = (x1 - x0) as usize;
+        let cols = &cols[(x0 - p.x0) as usize..][..n];
+        let data = self.pixmap.data_mut();
+        for y in y0..y1 {
+            let src = &cov.a[((y - p.y0) * cov.w + (x0 - p.x0)) as usize..][..n];
+            let dst = &mut data[(y as usize * pw + x0 as usize) * 4..][..n * 4];
+            let dst = dst.as_chunks_mut::<4>().0;
+            // Runs of one colour blend together.
+            let mut i = 0;
+            while i < n {
+                let c = cols[i];
+                let j = (i + 1..n).find(|&j| cols[j] != c).unwrap_or(n);
+                if c.a != 0 {
+                    blend_cov_row(&mut dst[i..j], &src[i..j], c);
+                }
+                i = j;
+            }
+        }
+    }
+
+    /// Fill (`stroke` None) or stroke `path` with a colour per device-pixel column, `color` called once per column
+    /// with the logical x of its centre. The shape's pixels are the ones `fill` / `stroke` draw.
+    fn columns(&mut self, path: &tiny_skia::Path, stroke: Option<&Stroke>, color: &mut dyn FnMut(f32) -> Color) {
+        let pad = stroke.map_or(1.0, |s| s.width + 1.0);
+        if self.outside(path.bounds(), pad) {
+            return;
+        }
+        if let Some(cov) = self.coverage(path, stroke) {
+            let k = self.scale;
+            let cols: Vec<Color> = (0..cov.cov.w).map(|i| color((cov.x0 + i) as f32 / k + 0.5 / k)).collect();
+            self.blend_columns(&cov, &cols);
         }
     }
 
@@ -702,6 +777,22 @@ impl Canvas {
     pub fn fill_polygon(&mut self, pts: &[(f32, f32)], c: Color) {
         if let Some(path) = poly_path(pts, true) {
             self.fill(&path, c);
+        }
+    }
+
+    /// `fill_polygon` coloured column by column (colourful waveforms): each device-pixel column takes `color(x)`, `x`
+    /// the logical x of the column's centre.
+    pub fn fill_polygon_columns(&mut self, pts: &[(f32, f32)], color: &mut dyn FnMut(f32) -> Color) {
+        if let Some(path) = poly_path(pts, true) {
+            self.columns(&path, None, color);
+        }
+    }
+
+    /// `polyline` coloured column by column, as `fill_polygon_columns`.
+    pub fn polyline_columns(&mut self, pts: &[(f32, f32)], width: f32, color: &mut dyn FnMut(f32) -> Color) {
+        if let Some(path) = poly_path(pts, false) {
+            let s = Stroke { width, ..Stroke::default() };
+            self.columns(&path, Some(&s), color);
         }
     }
 
@@ -1334,6 +1425,20 @@ mod tests {
         assert_eq!(out[0], 0);
     }
 
+    /// `rescale` paints at another scale inside the same clip (device bounds); `unscale` comes back.
+    #[test]
+    fn rescale_paints_at_another_scale() {
+        let Ok(mut c) = Canvas::new(20, 10, 1.0) else { return };
+        let px = |c: &Canvas, x: usize, y: usize| c.pixmap.data()[(y * 20 + x) * 4];
+        c.push_clip(Rect::new(0.0, 0.0, 6.0, 10.0));
+        let old = c.rescale(2.0);
+        assert_eq!((c.size(), c.clip_rect()), ((10.0, 5.0), Rect::new(0.0, 0.0, 3.0, 5.0)));
+        c.fill_rect(Rect::new(1.0, 1.0, 4.0, 1.0), Color::rgb(0xff0000));
+        c.unscale(old);
+        assert_eq!((c.scale, c.clip_rect()), (1.0, Rect::new(0.0, 0.0, 6.0, 10.0)));
+        assert_eq!([px(&c, 2, 2), px(&c, 5, 3), px(&c, 6, 2), px(&c, 1, 2), px(&c, 2, 4)], [255, 255, 0, 0, 0], "device 2..6 x 2..4, cut at 6");
+    }
+
     /// `shift` moves the pixels of its area by whole device pixels in any direction (overlapping copies included),
     /// leaves the strip it uncovers, everything outside the area and the kept pixels alone, and rounds the area like a
     /// clip (kept areas inwards).
@@ -1429,6 +1534,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    // spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"
+    /// A shape filled or stroked column by column covers the pixels the one-colour call does: with one colour the
+    /// pictures are the same; with a colour per column each column has its own.
+    #[test]
+    fn column_colours_draw_the_same_shape() {
+        let pts = [(3.2, 20.0), (9.7, 4.4), (18.1, 15.3), (29.6, 2.8), (33.0, 24.5), (12.4, 27.1)];
+        for scale in [1.0, 1.5] {
+            let (Ok(mut a), Ok(mut b)) = (Canvas::new(40, 30, scale), Canvas::new(40, 30, scale)) else { return };
+            for c in [&mut a, &mut b] {
+                c.fill_rect(Rect::new(0.0, 0.0, 40.0, 30.0), Color::rgb(0x202020));
+            }
+            a.fill_polygon(&pts, Color::rgb(0xc0d0e0));
+            a.polyline(&pts, 1.6, Color::rgb(0x405060));
+            b.fill_polygon_columns(&pts, &mut |_| Color::rgb(0xc0d0e0));
+            b.polyline_columns(&pts, 1.6, &mut |_| Color::rgb(0x405060));
+            assert!(a.pixmap.data() == b.pixmap.data(), "scale {scale}");
+        }
+        let Ok(mut c) = Canvas::new(40, 30, 1.0) else { return };
+        c.fill_rect(Rect::new(0.0, 0.0, 40.0, 30.0), Color::rgb(0x000000));
+        c.fill_polygon_columns(&[(0.0, 0.0), (40.0, 0.0), (40.0, 30.0), (0.0, 30.0)], &mut |x| {
+            if x < 20.0 { Color::rgb(0xff0000) } else { Color::rgb(0x0000ff) }
+        });
+        let px = |x: usize| c.pixmap.pixels()[10 * 40 + x];
+        assert_eq!((px(19).red(), px(19).blue(), px(20).red(), px(20).blue()), (255, 0, 0, 255));
     }
 
     #[test]

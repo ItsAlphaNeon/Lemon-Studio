@@ -20,6 +20,7 @@ use std::fmt;
 pub mod design;
 pub mod fl;
 pub mod presets;
+pub mod waves;
 pub use design::{Design, Style};
 pub use fl::FlTheme;
 
@@ -156,11 +157,15 @@ macro_rules! tokens {
             pub xf: fl::Xform,
             /// Shape language of the design this palette belongs to (corner radii; spec: ui/lemon-design.md).
             pub style: Style,
+            /// The theme's Waves gradient, (position, colour) sorted by position: a `.flstheme`'s `WaveClr0..5` at
+            /// `WaveSpc0..5` (spec: ui/flstheme.md §3). Empty without one; colourful waveforms then use
+            /// `waves::STOCK`.
+            pub waves: Vec<(f32, Color)>,
         }
 
         impl Default for Palette {
             fn default() -> Self {
-                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default(), style: Style::CLASSIC }
+                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default(), style: Style::CLASSIC, waves: Vec::new() }
             }
         }
 
@@ -183,7 +188,7 @@ macro_rules! tokens {
             }
 
             fn map(&self, f: impl Fn(Color) -> Color) -> Palette {
-                Palette { $($name: f(self.$name),)* xf: self.xf.clone(), style: self.style }
+                Palette { $($name: f(self.$name),)* xf: self.xf.clone(), style: self.style, waves: self.waves.clone() }
             }
         }
     };

@@ -44,11 +44,11 @@ impl Answer {
             Answer::Ok => "Ok",
         }
     }
+}
 
-    /// Its accelerator: the label's first letter, pressed without Alt (spec §1e).
-    fn accel(self) -> char {
-        self.label().chars().next().map_or(' ', |c| c.to_ascii_lowercase())
-    }
+/// A button's accelerator: its label's first letter, pressed without Alt (spec §1e).
+fn accel(label: &str) -> char {
+    label.chars().next().map_or(' ', |c| c.to_ascii_lowercase())
 }
 
 /// The work that waits for a dialog's answer (`App::dialog_done`).
@@ -70,6 +70,8 @@ pub enum Then {
     RackSample(usize),
     /// The replace question of the Save dialog under it: Yes answers that dialog with this path.
     Replace(PathBuf),
+    /// File ▸ Browser extra search folders: the folder for this row (`App::search_folder_chosen`).
+    BrowserFolder(usize),
     /// Switch all / selected audio clip channels to ▸: Ok sets these rack rows to this stretch method (spec:
     /// ui/channel-switches.md §1).
     StretchClips(Vec<usize>, i32),
@@ -78,6 +80,8 @@ pub enum Then {
     ReplaceSignature(u16),
     /// The time signature dialog: Accept (Ok) puts numerator / denominator at the start of this pattern (§2).
     Signature(u16, u8, u8),
+    /// The project's data folder: its questions and folder pickers (`crate::data_folder`).
+    DataFolder(crate::data_folder::DThen),
 }
 
 /// What waits for the save-changes question.
@@ -113,11 +117,28 @@ pub struct Msg {
     /// The focused button (Enter / Space press it).
     pub focus: usize,
     pub then: Then,
+    /// The "Remember my choice" check at the bottom left: the Manage messages entry it turns off when the box is
+    /// answered Ok (or Yes) while it is ticked, and whether it is ticked. None: the box has no such check. Spec:
+    /// ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)".
+    pub remember: Option<(&'static crate::messages::Message, bool)>,
+    /// The buttons' own labels, in the order of `buttons` (empty: the answers' labels, "Yes", "No", ...).
+    pub labels: Vec<&'static str>,
 }
 
 impl Msg {
     pub fn new(kind: Kind, title: &str, text: Vec<(String, bool)>, buttons: &[Answer], then: Then) -> Msg {
-        Msg { kind, title: title.into(), text, buttons: buttons.to_vec(), focus: 0, then }
+        Msg { kind, title: title.into(), text, buttons: buttons.to_vec(), focus: 0, then, remember: None, labels: Vec::new() }
+    }
+
+    /// The same box with buttons labelled `labels` (in the order of its buttons) instead of the answers' names.
+    pub fn labelled(mut self, labels: &[&'static str]) -> Msg {
+        self.labels = labels.to_vec();
+        self
+    }
+
+    /// Button `i`'s label.
+    pub fn label(&self, i: usize) -> &'static str {
+        self.labels.get(i).copied().or_else(|| self.buttons.get(i).map(|b| b.label())).unwrap_or("")
     }
 
     /// The button Esc and the caption's × press: Cancel, else No, else the last one.
@@ -140,8 +161,12 @@ pub fn spans(parts: &[&str]) -> Vec<(String, bool)> {
 pub enum Body {
     Msg(Msg),
     File(Box<FileDlg>),
+    /// General ▸ Input ▸ Manage shortcuts (`crate::shortcuts`).
+    Shortcuts(crate::shortcuts::Form),
     /// PATTERNS > Set time signature... (`timesig`).
     TimeSig(crate::timesig::SigForm),
+    /// Rename project, Save as and New project (`crate::project_forms`).
+    Project(crate::project_forms::Form),
 }
 
 /// A dialog on the stack (`State::dialogs`, bottom to top; only the top one takes input).
@@ -154,7 +179,7 @@ pub struct Modal {
 }
 
 impl Modal {
-    fn new(body: Body) -> Modal {
+    pub(crate) fn new(body: Body) -> Modal {
         Modal { body, at: None, rect: Cell::new(Rect::new(0.0, 0.0, 0.0, 0.0)) }
     }
 }
@@ -168,6 +193,8 @@ pub enum DHit {
     Close,
     /// A message box button (index).
     Button(usize),
+    /// A message box's Remember my choice check.
+    Remember,
     /// File dialog: Back, Up, New folder, the path and name fields, a place, a row, a column header, the list's empty
     /// part, its scroll bar, the type combo and its entries, the main button and Cancel.
     Back,
@@ -184,8 +211,15 @@ pub enum DHit {
     FilterItem(usize),
     Accept,
     Cancel,
+    /// Manage shortcuts: a row's box (opens its list), an entry of the open list, Reset all and Apply.
+    Shortcut(usize),
+    ShortcutChoice(usize),
+    ResetAll,
+    Apply,
     /// Time signature dialog: the denominator's value box (true) or the numerator's; Accept is `Accept`.
     SigValue(bool),
+    /// Rename project, Save as and New project: their parts (`crate::project_forms`).
+    Form(crate::project_forms::FHit),
 }
 
 /// A one-line text field: the text, the caret (in characters) and whether all of it is selected (typing replaces it).
@@ -381,13 +415,23 @@ impl App {
         }
         self.modal_changed();
         let then = match m.body {
-            Body::Msg(m) => m.then,
+            Body::Msg(m) => {
+                // Ok with Remember my choice ticked turns the message off; Cancel never does.
+                if let Some((entry, true)) = m.remember {
+                    if matches!(reply, Reply::Button(Answer::Ok | Answer::Yes)) {
+                        crate::messages::set(entry, false);
+                    }
+                }
+                m.then
+            }
             Body::File(f) => {
                 if let Reply::File(Some(p)) = &reply {
                     f.remember(p);
                 }
                 f.then
             }
+            Body::Shortcuts(f) => return self.shortcuts_closed(&f, reply == Reply::Button(Answer::Ok)),
+            Body::Project(f) => return self.form_closed(f, reply),
             Body::TimeSig(f) => {
                 // Its value list goes with it.
                 self.state.playlist.popup = None;
@@ -409,14 +453,16 @@ impl App {
         Some(match &self.state.dialogs.last()?.body {
             Body::Msg(m) => Reply::Button(m.escape()),
             Body::File(_) => Reply::File(None),
+            Body::Shortcuts(_) => Reply::Button(Answer::Cancel),
             Body::TimeSig(_) => Reply::Button(Answer::Cancel),
+            Body::Project(_) => Reply::Button(Answer::Cancel),
         })
     }
 
     fn top_file(&mut self) -> Option<&mut FileDlg> {
         match &mut self.state.dialogs.last_mut()?.body {
             Body::File(f) => Some(f),
-            Body::Msg(_) | Body::TimeSig(_) => None,
+            Body::Msg(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) => None,
         }
     }
 
@@ -447,6 +493,13 @@ impl App {
                 return;
             }
         }
+        // So does a Manage shortcuts list.
+        if let Body::Shortcuts(f) = &mut m.body {
+            if f.open.is_some() && !matches!(h, DHit::ShortcutChoice(_) | DHit::Shortcut(_)) {
+                f.open = None;
+                return;
+            }
+        }
         match h {
             DHit::Body | DHit::List if !matches!(m.body, Body::File(_)) => {}
             DHit::Caption => self.drag = Some(Drag::Dialog { dx: x - r.x, dy: y - r.y }),
@@ -455,18 +508,44 @@ impl App {
                     self.answer(reply);
                 }
             }
+            DHit::Remember => {
+                if let Body::Msg(Msg { remember: Some((_, ticked)), .. }) = &mut m.body {
+                    *ticked = !*ticked;
+                }
+            }
             DHit::Button(i) => {
                 let a = match &m.body {
                     Body::Msg(msg) => msg.buttons.get(i).copied(),
-                    Body::File(_) | Body::TimeSig(_) => None,
+                    Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) => None,
                 };
                 if let Some(a) = a {
                     self.answer(Reply::Button(a));
                 }
             }
+            // Manage shortcuts: Apply keeps the form and closes; a box opens or closes its list; an entry is picked
+            // (a swap within its group, `Form::pick`); Reset all fills in the defaults.
+            DHit::Apply => self.answer(Reply::Button(Answer::Ok)),
+            DHit::Shortcut(_) | DHit::ShortcutChoice(_) | DHit::ResetAll => {
+                let Body::Shortcuts(f) = &mut m.body else { return };
+                match h {
+                    DHit::Shortcut(row) => f.open = if f.open == Some(row) { None } else { Some(row) },
+                    DHit::ShortcutChoice(v) => {
+                        if let Some(row) = f.open.take() {
+                            f.pick(row, v);
+                        }
+                    }
+                    _ => f.reset(),
+                }
+            }
             // The time signature dialog (spec: ui/pattern-time-signature.md §1-2).
             DHit::SigValue(den) => self.sig_list(den),
             DHit::Accept if matches!(m.body, Body::TimeSig(_)) => self.answer(Reply::Button(Answer::Ok)),
+            // Rename project, Save as and New project: a part that closes the form answers it.
+            DHit::Form(h) => {
+                if let Some(reply) = self.form_click(h) {
+                    self.answer(reply);
+                }
+            }
             _ => {
                 let Some(f) = self.top_file() else { return };
                 let out = match h {
@@ -563,7 +642,7 @@ impl App {
                     Key::Named(NamedKey::Escape) => Some(msg.escape()),
                     Key::Character(c) if !ctrl => {
                         let c = c.chars().next().map(|c| c.to_ascii_lowercase());
-                        msg.buttons.iter().copied().find(|b| Some(b.accel()) == c)
+                        (0..msg.buttons.len()).find(|&i| Some(accel(msg.label(i))) == c).map(|i| msg.buttons[i])
                     }
                     _ => None,
                 };
@@ -576,6 +655,12 @@ impl App {
                 FileKey::Outcome(o) => self.file_outcome(o),
                 FileKey::Cancel => self.answer(Reply::File(None)),
             },
+            // Manage shortcuts: Esc closes an open list, else the window (as its ×).
+            Body::Shortcuts(f) => {
+                if matches!(key, Key::Named(NamedKey::Escape)) && f.open.take().is_none() {
+                    self.answer(Reply::Button(Answer::Cancel));
+                }
+            }
             // Esc closes an open value list first, then the dialog (as its ×); Enter presses Accept, its only button.
             Body::TimeSig(_) => {
                 let list = self.state.playlist.popup.is_some();
@@ -584,6 +669,11 @@ impl App {
                     Key::Named(NamedKey::Escape) => self.answer(Reply::Button(Answer::Cancel)),
                     Key::Named(NamedKey::Enter) if !list => self.answer(Reply::Button(Answer::Ok)),
                     _ => {}
+                }
+            }
+            Body::Project(_) => {
+                if let Some(reply) = self.form_key(key, ctrl, alt) {
+                    self.answer(reply);
                 }
             }
         }
@@ -630,7 +720,7 @@ impl App {
     pub fn top_message(&self) -> Option<(String, String)> {
         match &self.state.dialogs.last()?.body {
             Body::Msg(m) => Some((m.title.clone(), m.plain())),
-            Body::File(_) | Body::TimeSig(_) => None,
+            Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) => None,
         }
     }
 }

@@ -86,6 +86,9 @@ impl App {
         let s = &mut self.state;
         if s.song_mode {
             s.playlist.pos = t;
+            // The initial values follow a song position move (spec: ui/settings-choices.md "Advanced: Initialize
+            // controls automatically").
+            crate::init::apply(s);
         } else {
             s.piano.marker = t;
         }
@@ -121,7 +124,8 @@ impl App {
     /// held, see `song_pos_tick`).
     pub(crate) fn song_pos_press(&mut self) {
         let Some(range) = range(&self.state) else { return };
-        let x = self.mouse.0;
+        // The slider is laid out in the top band's px (Toolbars scaling).
+        let x = self.band_mouse().0;
         let hx = handle_x(self.song_pos_now(), range);
         if (x - hx).abs() <= GRAB {
             self.drag = Some(Drag::SongPos { dx: x - hx });
@@ -135,7 +139,7 @@ impl App {
     fn song_pos_step(&mut self) {
         let Some(range) = range(&self.state) else { return };
         let now = self.song_pos_now();
-        let target = tick_at(self.mouse.0, range);
+        let target = tick_at(self.band_mouse().0, range);
         let step = click_step(range, self.state.project.ppq);
         let next = if target > now { (now + step).min(target) } else { now.saturating_sub(step).max(target) };
         if next != now {
@@ -146,7 +150,7 @@ impl App {
     /// Dragging the handle: the position follows the pointer (minus the grab offset).
     pub(crate) fn song_pos_drag(&mut self, dx: f32) {
         if let Some(range) = range(&self.state) {
-            self.set_song_pos(tick_at(self.mouse.0 - dx, range), false);
+            self.set_song_pos(tick_at(self.band_mouse().0 - dx, range), false);
         }
     }
 
@@ -158,7 +162,7 @@ impl App {
     /// Right click on the slider: straight to the pointer (§3).
     pub(crate) fn song_pos_jump(&mut self) {
         if let Some(range) = range(&self.state) {
-            self.set_song_pos(tick_at(self.mouse.0, range), true);
+            self.set_song_pos(tick_at(self.band_mouse().0, range), true);
         }
     }
 

@@ -44,6 +44,17 @@ const SCALE: [(&str, f32); 17] = [
     ("45", 880.0),
 ];
 
+/// The "C" column's marks as (label, reference y), top down: the default scale's `SCALE`, its first mark the "+3"; with
+/// `alt` ("Alternate meter scale") 0, 3 … 30 at the heights the default law puts the levels `meters::ALTERNATE` maps
+/// them to, with no +3 (spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup
+/// project").
+pub fn scale_marks(alt: bool, floor: f32) -> Vec<(&'static str, f32)> {
+    if !alt {
+        return SCALE.to_vec();
+    }
+    SCALE[1..].iter().zip(meters::ALTERNATE).map(|(&(m, _), (_, d))| (m, meters::law_y(d, floor, false))).collect()
+}
+
 /// Height of the mixer window the absolute y values above were measured at (1080p workspace).
 const REF_H: f32 = 997.0;
 /// Reference y of the window top.
@@ -129,9 +140,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // bars keep their proportions at any mixer height (the strips' fixed-size controls do not apply here).
     let law_h = meters::LAW_BOTTOM - meters::LAW_TOP;
     let cy = |abs: f32| col.y + (abs - meters::LAW_TOP) / law_h * col.h;
+    let alt = crate::prefs::check(&crate::prefs::ALTERNATE_METER_SCALE);
     let hint = if col.contains(ui.mouse.0, ui.mouse.1) {
         // The level at the mouse (the scale is not linear in y: invert it through the law).
-        let db = meters::db_at((col.bottom() - ui.mouse.1) / col.h.max(1.0), floor);
+        let db = meters::db_at((col.bottom() - ui.mouse.1) / col.h.max(1.0), floor, alt);
         format!("Current  {db:.2}dB  {:.2}", 10f32.powf(db / 20.0))
     } else {
         "Level scale".to_string()
@@ -145,16 +157,17 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.fill_rrect(col.inset(1.0), 2.5, ui.t.s(0x222527));
     }
     // Marks closer than a label height are skipped when the window is squished: "0" always shows, "+3" only with room
-    // above it, the rest downward from "0".
-    let zero = cy(SCALE[1].1);
-    let plus = cy(SCALE[0].1);
+    // above it, the rest downward from "0". The alternate scale has no "+3".
+    let scale = scale_marks(alt, floor);
+    let (plus, below) = if alt { (None, &scale[..]) } else { (Some(scale[0]), &scale[1..]) };
+    let zero = cy(below[0].1);
     let mut marks: Vec<(&str, f32)> = Vec::new();
-    if zero - plus >= 14.0 {
-        marks.push((SCALE[0].0, plus));
+    if let Some((m, y)) = plus.map(|(m, y)| (m, cy(y))).filter(|&(_, y)| zero - y >= 14.0) {
+        marks.push((m, y));
     }
-    marks.push((SCALE[1].0, zero));
+    marks.push((below[0].0, zero));
     let mut last = zero;
-    for &(m, y) in &SCALE[2..] {
+    for &(m, y) in &below[1..] {
         let y = cy(y);
         if y - last >= 14.0 {
             marks.push((m, y));
@@ -165,7 +178,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.text_center(Font::new(12), Rect::new(col.x, y - 8.0, col.w, 15.0), ui.t.s(0x7f8a90), m);
         ui.c.fill_rect(Rect::new(col.x + 4.0, y + 7.0, col.w - 8.0, 1.0), ui.t.s(0x111315));
     }
-    for k in 0..4 {
+    // Four unlabelled ticks below 45 (the alternate scale has none below its 30).
+    for k in (0..4).filter(|_| !alt) {
         let y = cy(893.0 + 7.5 * k as f32);
         if y - last >= 10.0 {
             ui.c.fill_rect(Rect::new(col.x + 4.0, y, col.w - 8.0, 1.0), ui.t.s(0x111315));
@@ -174,7 +188,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // The bars cover the labels (measured: two 13 px bars filling the column inside its 1 px border).
     ui.live(Live::Meter, col);
     if let Some(m) = s.mixer.meters.get(usize::from(s.selected_mixer)) {
-        let ys = |db: f32| cy(meters::law_y(db, floor)).min(col.bottom() - 1.0);
+        let ys = |db: f32| cy(meters::law_y(db, floor, alt)).min(col.bottom() - 1.0);
         for i in 0..2 {
             meter_bar(ui, col.x + 1.0 + 13.0 * i as f32, 13.0, col.bottom() - 1.0, m.db[i], m.hold[i], cfg, &ys);
         }
@@ -424,7 +438,8 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
         let cfg = &s.mixer.meter_cfg;
         let (top, bot) = (meter.y + 2.0, meter.bottom() - 2.0);
         let floor = cfg.v[meters::k::FLOOR_DB];
-        let ys = |db: f32| bot - meters::frac(db, floor) * (bot - top);
+        let alt = crate::prefs::check(&crate::prefs::ALTERNATE_METER_SCALE);
+        let ys = |db: f32| bot - meters::frac(db, floor, alt) * (bot - top);
         for i in 0..2 {
             meter_bar(ui, meter.x + 2.0 + 6.0 * i as f32, 6.0, bot, m.db[i], m.hold[i], cfg, &ys);
         }

@@ -40,6 +40,39 @@ pub fn pan_split(level: f32, pan: f32) -> (f32, f32) {
     ((l * angle.cos()) as f32, (l * angle.sin()) as f32)
 }
 
+/// The project's panning law (event 23; spec: audio/gain-laws.md "Panning law: Triangular"). Circular (0, the
+/// default) is the constant-power split; Triangular (2) keeps the louder side at the centre level and lowers the
+/// quieter side in a straight line. The centre is the same under both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanLaw {
+    #[default]
+    Circular,
+    Triangular,
+}
+
+impl PanLaw {
+    /// The law event 23 holds: 2 is Triangular; 0, no event and values the spec does not name are Circular.
+    pub fn from_event(v: Option<u8>) -> PanLaw {
+        if v == Some(2) { PanLaw::Triangular } else { PanLaw::Circular }
+    }
+}
+
+/// [`pan_split`] under the panning law `law`. Circular is `pan_split` itself. Triangular takes each side's centre
+/// level (the products `pan_split` makes at centre, so the centre is the same bit for bit) times `min(1, 1 - pan)` on
+/// the left and `min(1, 1 + pan)` on the right, rounded to single once (spec: audio/gain-laws.md "Panning law:
+/// Triangular").
+pub fn pan_split_law(level: f32, pan: f32, law: PanLaw) -> (f32, f32) {
+    match law {
+        PanLaw::Circular => pan_split(level, pan),
+        PanLaw::Triangular => {
+            let p = f64::from(pan.clamp(-1.0, 1.0));
+            let centre = std::f64::consts::PI / 4.0;
+            let l = f64::from(level);
+            ((l * centre.cos() * (1.0 - p).min(1.0)) as f32, (l * centre.sin() * (1.0 + p).min(1.0)) as f32)
+        }
+    }
+}
+
 /// `level * sqrt(2)` as a single (one rounding): the level that comes out of [`pan_split`] as itself at centre.
 pub fn unity_at_centre(level: f32) -> f32 {
     (f64::from(level) * std::f64::consts::SQRT_2) as f32
@@ -85,6 +118,24 @@ mod tests {
         let (l, r) = pan_split(1.0, 1.0);
         assert!(l.abs() < 1e-15 && r == 1.0);
         assert_eq!(pan_split(1.0, 3.0), pan_split(1.0, 1.0), "clamped");
+    }
+
+    /// spec: audio/gain-laws.md "Panning law: Triangular": the louder side stays at the centre level, the quieter one
+    /// falls in a straight line; the centre is the circular one; Circular is `pan_split`.
+    #[test]
+    fn pan_split_law_triangular() {
+        let tri = |p: f32| pan_split_law(1.0, p, PanLaw::Triangular);
+        let c = std::f32::consts::FRAC_1_SQRT_2;
+        assert_eq!(tri(0.0), pan_split(1.0, 0.0), "the same centre");
+        for (p, l, r) in [(-1.0, 1.0, 0.0), (-0.5, 1.0, 0.4999), (-0.25, 1.0, 0.7499), (0.25, 0.75, 1.0), (0.5, 0.5001, 1.0)] {
+            let (gl, gr) = tri(p);
+            assert!((gl / c - l).abs() < 2e-4 && (gr / c - r).abs() < 2e-4, "{p}: {} {}", gl / c, gr / c);
+        }
+        assert_eq!(tri(3.0), tri(1.0), "clamped");
+        for p in [-1.0, -0.3, 0.0, 0.7, 1.0] {
+            assert_eq!(pan_split_law(0.8, p, PanLaw::Circular), pan_split(0.8, p));
+        }
+        assert_eq!((PanLaw::from_event(None), PanLaw::from_event(Some(0)), PanLaw::from_event(Some(2))), (PanLaw::Circular, PanLaw::Circular, PanLaw::Triangular));
     }
 
     /// An audio clip at the default channel volume, centred, plays at unity.

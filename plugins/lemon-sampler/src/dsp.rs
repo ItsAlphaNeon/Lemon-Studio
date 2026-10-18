@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use os_dsp::resample::{self, Quality};
 use os_dsp::stretch::Stream;
+use os_engine::instrument::VOICE_GAIN_FRAMES;
 use os_engine::{envelope, laws, Sample};
 
 /// Time stretch to `ratio` × the length, the pitch moved by the factor `shift` (spec §5.6: Signalsmith Stretch).
@@ -236,6 +237,9 @@ impl Close {
 /// Frames between modulation updates: the voices' "tick" (**Lemon Studio**: a fixed 32 frames, where FL uses the
 /// sequencer's tick; filter coefficients, gain and pan targets change at these points).
 const CTL: usize = 32;
+// The engine sends a voice's gains every `VOICE_GAIN_FRAMES` frames from a block's start, and a voice glides to each over
+// that many frames: equal to `CTL`, they split no control span.
+const _: () = assert!(CTL == VOICE_GAIN_FRAMES as usize, "VOICE_GAIN_FRAMES (os-engine) and CTL must stay equal");
 
 /// A voice's pan gains for a pan position (−1..1, clamped): the constant-power split at √2, so a centred pan is 1 on
 /// both sides. The host applies the channel's own pan split on the instrument's output, so with either pan centred
@@ -280,6 +284,30 @@ struct Voice {
     /// Frames left of the crossfade from the plain reading to the stretcher (a voice that starts stretching while it
     /// plays).
     xf: u32,
+    /// The host's gain on the voice (CLAP volume expression: an audio clip's fades and gain), once it gives one.
+    vol: Option<HostGain>,
+}
+
+/// The gain the host gives a voice (`Engine::volume`): where it stands, where it glides to, the step per frame and the
+/// frames of the glide left.
+#[derive(Clone, Copy)]
+struct HostGain {
+    now: f32,
+    to: f32,
+    step: f32,
+    left: u32,
+}
+
+impl HostGain {
+    /// The gain of this frame; the glide then moves on a frame.
+    fn next(&mut self) -> f32 {
+        let g = self.now;
+        if self.left > 0 {
+            self.left -= 1;
+            self.now = if self.left == 0 { self.to } else { self.now + self.step };
+        }
+        g
+    }
 }
 
 /// Output frames a realtime stretch voice makes at a time.
@@ -609,6 +637,7 @@ impl Engine {
             pan: (1.0, 1.0),
             rt,
             xf: 0,
+            vol: None,
         });
     }
 
@@ -675,12 +704,26 @@ impl Engine {
         }
     }
 
-    /// Closes the voices of `key` with the declick mode's closing, whatever their envelopes (the host's choke: an
-    /// audio clip ends, a cut group, the voice limit; spec: audio/note-rules.md).
-    pub fn choke(&mut self, key: u8, b: &Block) {
+    /// Closes the voices of a note with the declick mode's closing, whatever their envelopes (the host's choke: an
+    /// audio clip ends, its own voice by note id; a cut group, the voice limit; spec: audio/note-rules.md).
+    pub fn choke(&mut self, id: Option<i32>, key: u8, b: &Block) {
         let close = Close::new(&declick(b.declick), f64::from(self.rate));
-        for v in self.voices.iter_mut().filter(|v| v.key == key && v.close.is_none()) {
+        for v in self.of_note(id, key).filter(|v| v.close.is_none()) {
             v.close = Some(close);
+        }
+    }
+
+    /// The host's gain on a note's voices (CLAP volume expression: an audio clip's fades and gain, spec:
+    /// audio/audio-clips.md "Fades and clip gain"). A voice takes the first at once and glides to each later one in a
+    /// straight line over `VOICE_GAIN_FRAMES` frames, as the engine gives them: one every that many frames from a
+    /// block's start, which is also where `CTL`'s spans start, so they split no span.
+    pub fn volume(&mut self, id: Option<i32>, key: u8, gain: f32) {
+        let (to, n) = (gain.max(0.0), VOICE_GAIN_FRAMES);
+        for v in self.of_note(id, key) {
+            v.vol = Some(match v.vol {
+                None => HostGain { now: to, to, step: 0.0, left: 0 },
+                Some(h) => HostGain { now: h.now, to, step: (to - h.now) / n as f32, left: n },
+            });
         }
     }
 
@@ -867,7 +910,7 @@ fn render_voice(
                 }
             }
             let u = j as f32 / chunk as f32;
-            let g = v.vel * (g0 + (g1 - g0) * u);
+            let g = v.vel * (g0 + (g1 - g0) * u) * v.vol.as_mut().map_or(1.0, HostGain::next);
             let (pl, pr) = (p0.0 + (p1.0 - p0.0) * u, p0.1 + (p1.1 - p0.1) * u);
             out_l[f + j] += l * g * pl;
             out_r[f + j] += r * g * pr;
@@ -1161,7 +1204,7 @@ mod tests {
         assert_eq!(e.sounding().count(), 2);
         // A choke closes both through the mode's closing: 20 ms in mode 2.
         let b2 = Block { declick: 2, ..Block::default() };
-        e.choke(60, &b2);
+        e.choke(None, 60, &b2);
         for _ in 0..2 {
             l.fill(0.0);
             e.render(&mut l, &mut r, &b2);
@@ -1170,6 +1213,34 @@ mod tests {
         e.render(&mut l, &mut r, &b2);
         e.render(&mut l, &mut r, &b2);
         assert!(!e.has_voices());
+    }
+
+    // spec: audio/audio-clips.md "Fades and clip gain", "Automatic crossfades"
+    /// The host's gain on a voice (two audio clips of one sample on one key): the first a voice gets it takes at once,
+    /// each later one it reaches in a straight line over `VOICE_GAIN_FRAMES` frames, and the key's other voice keeps
+    /// its own; a choke by note id closes that voice alone.
+    #[test]
+    fn host_gains_and_chokes_reach_one_voice() {
+        let mut e = Engine::new(48000.0);
+        e.sample = Some(Arc::new(Sample { rate: 48000, left: vec![0.5; 48000], right: vec![0.5; 48000] }));
+        let b = Block::default();
+        e.note_on_id(60, 100.0 / 128.0, Some(1), &b);
+        e.note_on_id(60, 100.0 / 128.0, Some(2), &b);
+        e.volume(Some(1), 60, 0.0);
+        e.volume(Some(1), 60, 1.0);
+        e.volume(Some(2), 60, 0.5);
+        let n = VOICE_GAIN_FRAMES as usize;
+        let (mut l, mut r) = (vec![0.0; 2 * n], vec![0.0; 2 * n]);
+        e.render(&mut l, &mut r, &b);
+        for (j, v) in l.iter().enumerate() {
+            let want = 0.5 * 0.5 + 0.5 * j.min(n) as f32 / n as f32;
+            assert!((v - want).abs() < 1e-5, "frame {j}: {v} vs {want}");
+        }
+        e.choke(Some(1), 60, &b);
+        let (mut l, mut r) = (vec![0.0; 1440], vec![0.0; 1440]);
+        e.render(&mut l, &mut r, &b);
+        assert!(l[960..].iter().all(|v| (v - 0.25).abs() < 1e-6), "the other voice plays on: {}", l[1439]);
+        assert_eq!(e.voices.iter().map(|v| v.id).collect::<Vec<_>>(), vec![Some(2)]);
     }
 
     // spec: audio/declick.md "Gain fade": the closing falls from just under 1 to just over 0; tension 5 bends it.

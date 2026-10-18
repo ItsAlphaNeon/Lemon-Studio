@@ -10,6 +10,7 @@
 // spec: ui/main-window.md §1 (button faces, LEDs), ui/knobs.md, ui/flstheme.md (roles)
 
 use std::f32::consts::PI;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use os_theme::{Color, Palette};
 
@@ -223,6 +224,14 @@ pub fn arrow_button(c: &mut Canvas, t: &Palette, r: Rect, dir: Dir, st: State) {
     chevron(c, r.cx().round(), r.cy().round(), 5.0, dir, col);
 }
 
+/// A scroll bar's end button: `arrow_button`, with the light arrow of high visibility while it is on
+/// (`scroll_arrow`).
+pub fn scroll_arrow_button(c: &mut Canvas, t: &Palette, r: Rect, dir: Dir, st: State) {
+    let Some(col) = scroll_arrow(t, st, high_visibility()) else { return arrow_button(c, t, r, dir, st) };
+    flat_button(c, t, r, st);
+    chevron(c, r.cx().round(), r.cy().round(), if lemon::on(t) { 4.0 } else { 5.0 }, dir, col);
+}
+
 /// Small up/down spin mark next to a number.
 pub fn spin_mark(c: &mut Canvas, x: f32, cy: f32, col: Color) {
     c.polyline(&[(x - 1.5, cy - 6.0), (x + 1.0, cy - 4.0), (x - 1.5, cy - 2.0)], 1.0, col);
@@ -403,7 +412,40 @@ pub fn thumb(track_len: f32, pos: f32, view: f32, total: f32) -> (f32, f32) {
     (off, len)
 }
 
-/// Scroll bar: flat track, rounded thumb that lifts on hover / drag.
+/// High visibility (the program's General ▸ Display setting; spec: ui/settings-choices.md "Display: PPI ruler, Force
+/// refreshes, Thick lines, High visibility"): every scroll bar draws a light thumb and light arrows. The app sets it
+/// from its setting before it paints; separately painted windows (plugin editors) follow.
+static HIGH_VISIBILITY: AtomicBool = AtomicBool::new(false);
+
+/// Turns high visibility on or off (`HIGH_VISIBILITY`).
+pub fn set_high_visibility(on: bool) {
+    HIGH_VISIBILITY.store(on, Ordering::Relaxed);
+}
+
+/// Whether high visibility is on (`HIGH_VISIBILITY`).
+pub fn high_visibility() -> bool {
+    HIGH_VISIBILITY.load(Ordering::Relaxed)
+}
+
+/// A scroll bar's thumb colour: the look's own, or with `high` (high visibility) a light grey, #b9bfc3 as measured
+/// (in the Lemon look the same grey through the look's colour map, a neutral light grey); it lifts on hover / drag.
+pub fn scroll_thumb(t: &Palette, st: State, high: bool) -> Color {
+    if high {
+        return t.s(0xb9bfc3).shade(if st.pressed { 0.18 } else if st.hover { 0.1 } else { 0.0 });
+    }
+    if lemon::on(t) {
+        return lemon::scroll_thumb(t, st);
+    }
+    if st.pressed { t.overview.shade(0.18) } else if st.hover { t.overview.shade(0.12) } else { t.overview }
+}
+
+/// A scroll bar's arrow colour with `high` (high visibility): light, #adb3b7 as measured (the look's own light grey
+/// in the Lemon look), the bright glyph colour on hover. `None` without it: the look's own arrows.
+pub fn scroll_arrow(t: &Palette, st: State, high: bool) -> Option<Color> {
+    high.then(|| if st.hover || st.pressed { t.glyph } else { t.s(0xadb3b7) })
+}
+
+/// Scroll bar: flat track, rounded thumb that lifts on hover / drag (`scroll_thumb`).
 pub fn scrollbar(c: &mut Canvas, t: &Palette, track: Rect, vertical: bool, pos: f32, view: f32, total: f32, st: State) {
     if lemon::on(t) {
         return lemon::scrollbar(c, t, track, vertical, pos, view, total, st);
@@ -416,8 +458,7 @@ pub fn scrollbar(c: &mut Canvas, t: &Palette, track: Rect, vertical: bool, pos: 
     } else {
         Rect::new(track.x + off, track.y + 2.0, tl, track.h - 4.0)
     };
-    let col = if st.pressed { t.overview.shade(0.18) } else if st.hover { t.overview.shade(0.12) } else { t.overview };
-    c.fill_rrect(r, 2.0_f32.min(r.w / 2.0).min(r.h / 2.0), col);
+    c.fill_rrect(r, 2.0_f32.min(r.w / 2.0).min(r.h / 2.0), scroll_thumb(t, st, high_visibility()));
 }
 
 // ---------------------------------------------------------------- windows and popups
@@ -517,6 +558,30 @@ mod tests {
         assert_eq!(thumb(100.0, 10.0, 200.0, 100.0), (0.0, 100.0));
     }
 
+    /// High visibility (spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High
+    /// visibility"): the thumb is light grey (#b9bfc3) instead of almost the background, the arrows light (#adb3b7);
+    /// the Lemon look uses its own light grey. Off, both looks keep their own.
+    #[test]
+    fn high_visibility_scroll_bar_colours() {
+        let t = Palette::default();
+        assert_eq!(scroll_thumb(&t, State::NORMAL, false), t.overview);
+        assert_eq!(scroll_thumb(&t, State::NORMAL, true), Color::rgb(0xb9bfc3));
+        assert_eq!(scroll_arrow(&t, State::NORMAL, false), None);
+        assert_eq!(scroll_arrow(&t, State::NORMAL, true), Some(Color::rgb(0xadb3b7)));
+        assert_eq!(scroll_arrow(&t, State::hover(true), true), Some(t.glyph));
+        let hover = scroll_thumb(&t, State::hover(true), true);
+        assert!(hover.r > 0xb9 && hover.g > 0xbf, "lifts on hover: {hover:?}");
+
+        let l = os_theme::design::palette(os_theme::Design::Lemon, None);
+        assert_eq!(scroll_thumb(&l, State::NORMAL, false), l.overview);
+        let light = scroll_thumb(&l, State::NORMAL, true);
+        assert_eq!((light.r, light.g), (light.g, light.b), "a neutral grey: {light:?}");
+        assert!(light.r > 0xb0, "light: {light:?}");
+        let arrow = scroll_arrow(&l, State::NORMAL, true).unwrap();
+        assert!(arrow.r > 0xa0 && arrow.r == arrow.b, "{arrow:?}");
+        assert!(!high_visibility(), "off unless the app turns it on");
+    }
+
     #[test]
     fn widgets_paint_without_panics() {
         let mut c = Canvas::new(200, 120, 1.0).unwrap();
@@ -531,6 +596,7 @@ mod tests {
             scrollbar(&mut c, &t, Rect::new(110.0, 2.0, 10.0, 100.0), true, 5.0, 10.0, 40.0, st);
             fader_handle(&mut c, &t, 150.0, 50.0, st.on, st);
             arrow_button(&mut c, &t, Rect::new(130.0, 90.0, 18.0, 18.0), Dir::Up, st);
+            scroll_arrow_button(&mut c, &t, Rect::new(150.0, 90.0, 18.0, 18.0), Dir::Down, st);
         }
         tooltip(&mut c, &t, (190.0, 110.0), "Name", "Caption", Rect::new(0.0, 0.0, 200.0, 120.0));
     }

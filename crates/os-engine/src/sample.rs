@@ -8,7 +8,7 @@
 // spec: flp/sample-paths.md (placeholders, formats), audio/sample-formats.md (Vorbis in WAV, MP3, AIFF)
 
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -105,6 +105,30 @@ pub fn load(path: &Path) -> Result<Sample, SampleError> {
     decode(bytes, ext).map_err(decode_err)
 }
 
+/// The length of the audio file at `path`: its frames and their rate. Read from the file's headers where they give it
+/// (WAV, AIFF, FLAC, most MP3s), else found by decoding the file. `None` when it can't be read.
+pub fn length(path: &Path) -> Option<(u64, u32)> {
+    if let Some(n) = header_length(path) {
+        return Some(n);
+    }
+    let s = load_shared(path).ok()?;
+    Some((s.frames() as u64, s.rate))
+}
+
+/// The length the file's headers give, without decoding it.
+fn header_length(path: &Path) -> Option<(u64, u32)> {
+    let file = std::fs::File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let format = probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default()).ok()?;
+    let track = format.default_track(TrackType::Audio)?;
+    let rate = track.codec_params.as_ref()?.audio()?.sample_rate.filter(|&r| r > 0)?;
+    Some((track.num_frames?, rate))
+}
+
 /// A WAV file whose `fmt ` tag is one of the Vorbis-ACM tags: the `data` chunk holds a
 /// complete Ogg Vorbis stream, and `fact` holds the true length in frames.
 struct VorbisInWav<'a> {
@@ -134,6 +158,55 @@ fn vorbis_in_wav(b: &[u8]) -> Option<VorbisInWav<'_>> {
         0x674F | 0x6750 | 0x6751 | 0x676F | 0x6770 | 0x6771 => Some(VorbisInWav { ogg: data?, fact_frames: fact }),
         _ => None,
     }
+}
+
+/// What a WAV file's sampler and loop chunks say about playing it (spec: ui/settings-choices.md "Advanced: Read sample
+/// root note and Read sample tempo information"): `smpl`'s MIDI unity note, the sample's root key, and `acid`'s beat
+/// count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WavTags {
+    /// The first `smpl` chunk's MIDI unity note (the 4th u32 of its body), when it is a key (0..=127).
+    pub unity_note: Option<u8>,
+    /// The first `acid` chunk's beat count (the u32 at body offset 12, after the flags u32, the root note u16, a u16
+    /// and a float), when it is above 0.
+    pub beats: Option<u32>,
+}
+
+/// The `smpl` and `acid` chunks of the file at `path`. A file that isn't a RIFF WAV, or can't be read, has neither.
+/// Only the chunk headers and those two bodies are read.
+pub fn wav_tags(path: &Path) -> WavTags {
+    std::fs::File::open(path).ok().and_then(|f| tags_of(std::io::BufReader::new(f))).unwrap_or_default()
+}
+
+fn tags_of(mut r: impl Read + Seek) -> Option<WavTags> {
+    let mut head = [0u8; 12];
+    r.read_exact(&mut head).ok()?;
+    if &head[0..4] != b"RIFF" || &head[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut tags = WavTags::default();
+    let mut chunk = [0u8; 8];
+    while r.read_exact(&mut chunk).is_ok() {
+        let len = u64::from(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]));
+        let mut skip = len + (len & 1);
+        if matches!(&chunk[0..4], b"smpl" | b"acid") && len >= 16 {
+            let mut body = [0u8; 16];
+            if r.read_exact(&mut body).is_err() {
+                break;
+            }
+            skip -= 16;
+            let v = u32::from_le_bytes([body[12], body[13], body[14], body[15]]);
+            if &chunk[0..4] == b"smpl" {
+                tags.unity_note = tags.unity_note.or(u8::try_from(v).ok().filter(|&k| k <= 127));
+            } else {
+                tags.beats = tags.beats.or((v > 0).then_some(v));
+            }
+        }
+        if r.seek(SeekFrom::Current(i64::try_from(skip).ok()?)).is_err() {
+            break;
+        }
+    }
+    Some(tags)
 }
 
 /// The length in frames of an MP3 stream's leading info frame (a Xing / Info / VBRI tag in the first MPEG frame, after
@@ -402,5 +475,129 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(!Arc::ptr_eq(&c, &d), "a changed file is decoded again");
         assert_eq!(d.frames(), 960);
+    }
+
+    // spec: ui/settings-choices.md "Advanced: Fast sample preview, Auto keep long audio on disk, Threaded project
+    // sample loading (2026-10-16)"
+    /// A file's length is its frames and their rate, from the header (16-bit mono at 22.05 kHz, float stereo at
+    /// 96 kHz) or by decoding it (the MP3); a file that can't be read has none.
+    #[test]
+    fn lengths_in_frames_and_rate() {
+        let dir = std::env::temp_dir();
+        let mono = dir.join(format!("os_engine_length_mono_{}.wav", std::process::id()));
+        let mut fmt = vec![1, 0, 1, 0];
+        fmt.extend(22050u32.to_le_bytes());
+        fmt.extend(44100u32.to_le_bytes());
+        fmt.extend([2, 0, 16, 0]);
+        let mut body = b"WAVE".to_vec();
+        body.extend(chunk(b"fmt ", &fmt));
+        body.extend(chunk(b"data", &vec![0; 2 * 661_500]));
+        let mut b = b"RIFF".to_vec();
+        b.extend((body.len() as u32).to_le_bytes());
+        b.extend(body);
+        std::fs::write(&mono, b).unwrap();
+        assert_eq!(length(&mono), Some((661_500, 22050)), "30 s at 22.05 kHz");
+        let stereo = dir.join(format!("os_engine_length_stereo_{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&stereo).unwrap(), 96000, &vec![0.1; 2 * 96_000]).unwrap();
+        assert_eq!(length(&stereo), Some((96_000, 96000)), "1 s at 96 kHz");
+        for p in [mono, stereo] {
+            let _ = std::fs::remove_file(p);
+        }
+        let mp3 = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/click_sine.mp3");
+        let (frames, rate) = length(&mp3).expect("the mp3's length");
+        assert_eq!(rate, 44100);
+        assert!((13230..=13230 + 2 * 1152).contains(&frames), "about 0.3 s: {frames}");
+        assert_eq!(length(Path::new("Z:/no such folder/none.wav")), None);
+    }
+
+    /// A RIFF chunk: id, little-endian length, body, a pad byte after an odd length.
+    fn chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut c = id.to_vec();
+        c.extend((body.len() as u32).to_le_bytes());
+        c.extend(body);
+        if body.len() % 2 == 1 {
+            c.push(0);
+        }
+        c
+    }
+
+    /// A WAV of 4 silent 16-bit mono frames with `extra` chunks before `data`.
+    fn wav(extra: &[Vec<u8>]) -> Vec<u8> {
+        let mut fmt = vec![1, 0, 1, 0];
+        fmt.extend(44100u32.to_le_bytes());
+        fmt.extend(88200u32.to_le_bytes());
+        fmt.extend([2, 0, 16, 0]);
+        let mut body = b"WAVE".to_vec();
+        body.extend(chunk(b"fmt ", &fmt));
+        extra.iter().for_each(|c| body.extend(c));
+        body.extend(chunk(b"data", &[0; 8]));
+        let mut b = b"RIFF".to_vec();
+        b.extend((body.len() as u32).to_le_bytes());
+        b.extend(body);
+        b
+    }
+
+    /// `smpl` with MIDI unity note `note`: manufacturer, product, sample period, unity note, pitch fraction, SMPTE
+    /// format and offset, no loops, no sampler data.
+    fn smpl(note: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        for v in [0, 0, 22675, note, 0, 0, 0, 0, 0] {
+            b.extend(u32::to_le_bytes(v));
+        }
+        chunk(b"smpl", &b)
+    }
+
+    /// `acid` with `beats` beats: flags (root note set), root note, two unused fields, beats, meter 4/4, tempo.
+    fn acid(beats: u32, root: u16, bpm: f32) -> Vec<u8> {
+        let mut b = 2u32.to_le_bytes().to_vec();
+        b.extend(root.to_le_bytes());
+        b.extend(0x8000u16.to_le_bytes());
+        b.extend(0f32.to_le_bytes());
+        b.extend(beats.to_le_bytes());
+        b.extend(4u16.to_le_bytes());
+        b.extend(4u16.to_le_bytes());
+        b.extend(bpm.to_le_bytes());
+        chunk(b"acid", &b)
+    }
+
+    fn tags(b: Vec<u8>) -> Option<WavTags> {
+        tags_of(Cursor::new(b))
+    }
+
+    /// The chunk combinations of the measured table (spec: ui/settings-choices.md "Advanced: Read sample root note and
+    /// Read sample tempo information"), each read back.
+    #[test]
+    fn wav_tags_read_the_sampler_and_loop_chunks() {
+        let none = WavTags::default();
+        assert_eq!(tags(wav(&[])), Some(none), "no chunks");
+        assert_eq!(tags(wav(&[smpl(72)])), Some(WavTags { unity_note: Some(72), beats: None }));
+        assert_eq!(tags(wav(&[acid(4, 64, 120.0)])), Some(WavTags { unity_note: None, beats: Some(4) }), "acid's root is not read");
+        assert_eq!(tags(wav(&[smpl(67), acid(4, 60, 95.0)])), Some(WavTags { unity_note: Some(67), beats: Some(4) }));
+        assert_eq!(tags(wav(&[acid(8, 60, 120.0)])), Some(WavTags { unity_note: None, beats: Some(8) }), "the tempo is not used");
+        // After `data`, and behind an odd-length chunk with its pad byte.
+        let mut b = wav(&[chunk(b"LIST", b"INFOx")]);
+        let extra = [smpl(48), acid(16, 0, 0.0)].concat();
+        b.extend(&extra);
+        let riff = (b.len() - 8) as u32;
+        b[4..8].copy_from_slice(&riff.to_le_bytes());
+        assert_eq!(tags(b), Some(WavTags { unity_note: Some(48), beats: Some(16) }));
+        // Unusable values count as no chunk: 0 beats, a unity note above 127; a body too short is skipped.
+        assert_eq!(tags(wav(&[acid(0, 60, 120.0), smpl(200)])), Some(none));
+        assert_eq!(tags(wav(&[chunk(b"smpl", &[0; 12])])), Some(none));
+        // The first chunk of each kind counts.
+        assert_eq!(tags(wav(&[smpl(50), smpl(70)])).unwrap().unity_note, Some(50));
+        // Not a WAV.
+        assert_eq!(tags(b"fLaC\0\0\0\x22".to_vec()), None);
+        assert_eq!(tags(b"RIFF".to_vec()), None);
+        // A cut-off file keeps what it read before the cut.
+        let mut b = wav(&[smpl(61), acid(2, 0, 0.0)]);
+        b.truncate(b.len() - 20);
+        assert_eq!(tags(b).unwrap().unity_note, Some(61));
+        // From a file; a missing file has none.
+        let path = std::env::temp_dir().join(format!("os_engine_wav_tags_{}.wav", std::process::id()));
+        std::fs::write(&path, wav(&[smpl(67), acid(4, 60, 95.0)])).unwrap();
+        assert_eq!(wav_tags(&path), WavTags { unity_note: Some(67), beats: Some(4) });
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(wav_tags(&path), none);
     }
 }
