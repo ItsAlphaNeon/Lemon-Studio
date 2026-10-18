@@ -179,10 +179,6 @@ pub struct SettingsUi {
     pub picker: Option<crate::theme_adjust::Picker>,
     /// The Themes tiles from here on are the user's own (`crate::theme_library::user_dir`).
     pub user_from: usize,
-    /// The Themes tile whose theme the window shows while hovered, and the applied theme to put back
-    /// (`App::theme_hover`).
-    pub previewing: Option<usize>,
-    pub preview_base: Option<os_theme::Theme>,
     /// The name panel (Save preset..., a tile's Rename... / Delete...), while open.
     pub name_edit: Option<crate::theme_library::NameEdit>,
     /// Theme undo / redo.

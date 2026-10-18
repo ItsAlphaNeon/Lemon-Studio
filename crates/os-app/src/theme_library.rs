@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Settings ▸ Theme extras of Lemon Studio's own: a Themes tile previews its theme on the whole window while hovered;
-//! the applied theme can be saved under a name into the user `themes` folder (Save preset...), and the user's themes
-//! renamed, duplicated, deleted or shown in their folder from a tile's right-click menu; theme changes can be undone
-//! and redone (Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y while the page is open, or its Undo / Redo buttons); and a theme whose
-//! text is hard to read on its surfaces gets a warning with a one-click fix.
+//! Settings ▸ Theme extras of Lemon Studio's own: the applied theme can be saved under a name into the user `themes`
+//! folder (Save preset...), and the user's themes renamed, duplicated, deleted or shown in their folder from a tile's
+//! right-click menu; theme changes can be undone and redone (Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y while the page is open,
+//! or its Undo / Redo buttons); and a theme whose text is hard to read on its surfaces gets a warning with a one-click
+//! fix.
 // spec: ui/theme-presets.md §D
 
 use crate::app::{App, State};
@@ -186,56 +186,6 @@ pub fn fix_text(text: &str, d: os_theme::Design) -> Option<String> {
 }
 
 impl App {
-    // ---- Hover preview ----
-
-    /// The Themes tile under the mouse previews its theme on the whole window; moving off puts the applied theme back
-    /// (nothing is saved). Only while the Theme page is open with no picker, name panel or drag. Returns whether the
-    /// window's colours changed.
-    pub(crate) fn theme_hover(&mut self) -> bool {
-        let st = &self.state.settings;
-        let want = match &self.hover {
-            Some(crate::app::Action::Settings(SAct::Preset(i)))
-                if st.open && st.tab == THEME && st.picker.is_none() && st.name_edit.is_none() && self.drag.is_none() && self.state.playlist.popup.is_none() =>
-            {
-                Some(*i)
-            }
-            _ => None,
-        };
-        if want == st.previewing {
-            return false;
-        }
-        let mut changed = self.end_preview();
-        let st = &mut self.state.settings;
-        if let Some(p) = want.and_then(|i| st.theme_previews.get(i)) {
-            if *p != self.theme.colors {
-                let base = self.theme.clone();
-                self.theme = os_theme::Theme::new(&base.name, p.clone(), base.adjust);
-                os_theme::set_current(&self.theme.colors);
-                st.preview_base = Some(base);
-                changed = true;
-            }
-        }
-        self.state.settings.previewing = want;
-        if changed {
-            self.invalidate();
-        }
-        changed
-    }
-
-    /// Ends a hover preview: the applied theme back. Returns whether one was showing.
-    pub(crate) fn end_preview(&mut self) -> bool {
-        self.state.settings.previewing = None;
-        match self.state.settings.preview_base.take() {
-            Some(t) => {
-                self.theme = t;
-                os_theme::set_current(&self.theme.colors);
-                self.invalidate();
-                true
-            }
-            None => false,
-        }
-    }
-
     // ---- Undo / redo ----
 
     fn snap(&self) -> Snap {
@@ -262,7 +212,6 @@ impl App {
 
     /// Theme undo (`redo` = redo): goes back to the last state that differs from now. Returns the message.
     pub(crate) fn theme_undo(&mut self, redo: bool) -> String {
-        self.end_preview();
         self.picker_close();
         let now = self.snap();
         let h = &mut self.state.settings.history;
@@ -335,14 +284,12 @@ impl App {
 
     /// Updates the Theme page's readability warning from the applied colours.
     pub(crate) fn check_readable(&mut self) {
-        let p = self.state.settings.preview_base.as_ref().map_or(&self.theme.colors, |t| &t.colors);
-        let r = readability(p);
+        let r = readability(&self.theme.colors);
         self.state.settings.unreadable = (r < READABLE).then_some(r);
     }
 
     /// Fix text: the applied theme's text colour moved until its text reads (`fix_text`).
     pub(crate) fn theme_fix_text(&mut self) {
-        self.end_preview();
         let text = self.theme_text();
         match fix_text(&text, self.design()) {
             Some(t) => {
@@ -374,7 +321,6 @@ impl App {
         if i >= self.state.settings.themes.len() {
             return;
         }
-        self.end_preview();
         let mut items = vec![PItem::new("Duplicate as my theme", Cmd::Theme(ThemeCmd::Duplicate(i)))];
         if i >= self.state.settings.user_from {
             items.push(PItem::new("Rename...", Cmd::Theme(ThemeCmd::Rename(i))));
@@ -427,7 +373,6 @@ impl App {
     }
 
     fn name_open(&mut self, target: NameTarget, name: &str, at: (f32, f32)) {
-        self.end_preview();
         self.picker_close();
         let mut text = Field::default();
         text.set(name);

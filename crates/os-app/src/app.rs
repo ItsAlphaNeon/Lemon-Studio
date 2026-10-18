@@ -3015,9 +3015,6 @@ impl App {
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         self.plugin_tick();
-        if self.state.settings.previewing.is_some() {
-            self.theme_hover();
-        }
         #[cfg(all(plugin_windows, not(windows)))]
         self.lift_input();
         {
@@ -3537,7 +3534,6 @@ impl App {
         self.assoc_read();
         // The Lemon and Citrus themes, the built-in themes, then the user's own (`crate::theme_library`).
         self.state.settings.name_edit = None;
-        self.end_preview();
         self.theme_list();
         self.sync_preset();
         self.invalidate();
@@ -3787,8 +3783,7 @@ impl App {
         if !matches!(a, SAct::Swatch(..) | SAct::PickBody | SAct::PickPart(_) | SAct::PickSv | SAct::PickHue | SAct::PickRevert) {
             self.picker_close();
         }
-        // A hover preview ends before anything acts on the theme; a click off the name panel cancels it.
-        self.end_preview();
+        // A click off the name panel cancels it.
         if !matches!(a, SAct::NameBody | SAct::NameOk | SAct::NameCancel) {
             self.state.settings.name_edit = None;
         }
@@ -4413,7 +4408,7 @@ impl App {
         self.hover = hover;
         self.hover_rect = rect;
         self.hint = hint;
-        self.theme_hover() || changed
+        changed
     }
 
     /// Window buttons act on the release over the same button instead of on the press, like the system's own (owner,
@@ -7791,44 +7786,6 @@ mod tests {
                 hit_rect(&app, &Action::Settings(a));
             }
         }
-        THEME_DIR.with(|d| *d.borrow_mut() = None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Theme ▸ Themes (spec: ui/theme-presets.md §D): a hovered tile shows its theme on the whole window without
-    /// choosing it; moving off puts the applied theme back, and a click keeps it.
-    #[test]
-    fn hovering_a_theme_tile_previews_it() {
-        use crate::views::settings::{SAct, THEME};
-        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
-        let dir = std::env::temp_dir().join(format!("lemon-theme-hover-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
-        let mut app = App::new(None);
-        app.open_settings(THEME);
-        frame(&mut app, &mut c, None);
-        let before = app.theme.colors.clone();
-        let tile = hit_rect(&app, &Action::Settings(SAct::Preset(5)));
-        app.mouse_move(tile.cx(), tile.cy());
-        assert_eq!(app.theme.colors, app.state.settings.theme_previews[5], "previewed");
-        assert!(app.state.fl_text.is_none() && !dir.join("current.flstheme").exists(), "not chosen");
-        frame(&mut app, &mut c, None);
-        app.mouse_move(2.0, 2.0);
-        assert_eq!(app.theme.colors, before, "back");
-        app.mouse_move(tile.cx(), tile.cy());
-        app.mouse_down();
-        app.mouse_up();
-        app.mouse_move(2.0, 2.0);
-        assert_eq!(app.state.settings.preset, 5);
-        assert_eq!(app.theme.colors, app.state.settings.theme_previews[5], "kept after the click");
-        // Closing the window ends a preview too.
-        frame(&mut app, &mut c, None);
-        let tile = hit_rect(&app, &Action::Settings(SAct::Preset(7)));
-        app.mouse_move(tile.cx(), tile.cy());
-        assert_ne!(app.theme.colors, app.state.settings.theme_previews[5]);
-        app.state.settings.open = false;
-        app.tick();
-        assert_eq!(app.theme.colors, app.state.settings.theme_previews[5]);
         THEME_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);
     }
