@@ -1641,14 +1641,11 @@ pub fn delete_track(s: &mut State, t: u16) {
     s.piano.dirty = true;
 }
 
-/// Track LED: mute / unmute. A solo ends first: with "Restore previous state after solo" on, its saved states come
-/// back; off, the states stay as they are.
+/// Track LED: mute / unmute only this track. During a solo the other tracks stay as they are and the solo is over (its
+/// saved states are forgotten), with "Restore previous state after solo" on or off, as in the channel rack and the
+/// mixer: unmuting a second track after a solo leaves both on.
 pub fn toggle_track(s: &mut State, t: u16) {
-    if crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO) {
-        end_solo(s);
-    } else {
-        s.playlist.solo = None;
-    }
+    s.playlist.solo = None;
     let arr = arr_mut(s);
     if let Some(tr) = arr.tracks.get_mut(usize::from(t)) {
         tr.enabled = !tr.enabled;

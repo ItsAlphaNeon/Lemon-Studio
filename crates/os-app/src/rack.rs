@@ -2440,6 +2440,26 @@ mod tests {
         set_check(&RESTORE_AFTER_SOLO, false);
     }
 
+    /// A plain click on a playlist track's LED during a solo unmutes only that track: the soloed track stays on, the
+    /// others stay muted. ("Restore previous state after solo" is not read on this path; the setting is left alone so
+    /// as not to race `restore_previous_state_after_solo`.)
+    #[test]
+    fn playlist_click_after_solo_unmutes_only_that_track() {
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        let s = &mut app.state;
+        let tracks = |s: &mut State| crate::playlist::arr_mut(s).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
+        crate::playlist::toggle_solo(s, 0);
+        crate::playlist::toggle_track(s, 2);
+        let got = tracks(s);
+        assert!(got.iter().enumerate().all(|(i, &e)| e == (i == 0 || i == 2)), "{got:?}");
+        assert!(s.playlist.solo.is_none(), "the solo is over");
+        // Again: only that track is muted again.
+        crate::playlist::toggle_track(s, 2);
+        let got = tracks(s);
+        assert!(got.iter().enumerate().all(|(i, &e)| e == (i == 0)), "again: {got:?}");
+    }
+
     /// "Select first channel with notes when the pattern changes" (spec: ui/settings-choices.md "Miscellaneous"): on,
     /// switching pattern selects (only) the lowest-numbered channel with notes or steps in it; a pattern without any
     /// leaves the selection alone. Off: the selection stays.
