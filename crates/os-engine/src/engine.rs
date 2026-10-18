@@ -143,6 +143,24 @@ impl ClipShape {
 /// audio/audio-clips.md "Starting inside a clip").
 const LATE_START_SECONDS: f64 = 0.005;
 
+/// What an instrument channel's notes were last tuned with: the channel's shift (semitones), and per key the fine pitch
+/// of the note last started there and its glide; `keys` marks the keys started on it. A change of the shift (the main
+/// pitch, the pitch knob, automation) retunes those keys, so sounding notes follow it (spec: audio/voice-levels.md
+/// "The main pitch").
+#[derive(Debug, Clone, Copy)]
+struct InstTuning {
+    shift: f32,
+    fine: [f32; 128],
+    glide: [f32; 128],
+    keys: u128,
+}
+
+impl Default for InstTuning {
+    fn default() -> Self {
+        InstTuning { shift: 0.0, fine: [0.0; 128], glide: [0.0; 128], keys: 0 }
+    }
+}
+
 /// An audio clip with a shape playing on an instrument channel: its voice, frames since the voice started, and the
 /// gain the voice was last given (an instrument that takes voice gains; `None` before the first).
 #[derive(Debug, Clone, Copy)]
@@ -866,8 +884,8 @@ pub struct Engine {
     next_voice: u32,
     inst_live: Vec<(usize, u8, f32)>,
     inst_events: Vec<notes::Event>,
-    /// Per instrument channel and key: the fine pitch (semitones) of the note last started there.
-    inst_fine: Vec<[f32; 128]>,
+    /// Per instrument channel: the tuning its notes were last given (`InstTuning`).
+    inst_tuning: Vec<InstTuning>,
     /// This tick's events after the channels' note rules, sorted by channel, and each channel's notes at its
     /// instrument (spec: audio/note-rules.md).
     inst_notes: Vec<(usize, u32, notes::Note)>,
@@ -1300,7 +1318,7 @@ impl Engine {
             next_voice: 0,
             inst_live: Vec::with_capacity(64),
             inst_events: Vec::with_capacity(64),
-            inst_fine: Vec::new(),
+            inst_tuning: Vec::new(),
             inst_notes: Vec::with_capacity(64),
             note_voices: vec![notes::Voices::default(); project.channels.len()],
             inst_owed: Vec::new(),
@@ -1751,6 +1769,8 @@ impl Engine {
         missed.retain(|m| same(m.0));
         self.inst_owed = owed;
         self.inst_missed = missed;
+        // So does the tuning its notes were given: a changed channel pitch retunes them on the next tick.
+        self.inst_tuning = old.inst_tuning.iter().enumerate().map(|(c, &t)| if same(c) { t } else { InstTuning::default() }).collect();
         self.missed = old.missed;
         // The main volume glides from where it was.
         self.main_glide = old.main_glide;
@@ -2354,10 +2374,18 @@ impl Engine {
             // channel's instrument applies root and fine itself) reaches the instrument as each note's tuning, with the
             // note's fine pitch, on top of any glide; notes keep the pitch they started with.
             let shift = ch.hosted_shift();
-            if self.inst_fine.len() <= c {
-                self.inst_fine.resize(c + 1, [0.0; 128]);
+            if self.inst_tuning.len() <= c {
+                self.inst_tuning.resize(c + 1, InstTuning::default());
             }
-            let fines = &mut self.inst_fine[c];
+            let fines = &mut self.inst_tuning[c];
+            // A changed channel pitch reaches the notes already sounding.
+            if fines.shift != shift {
+                fines.shift = shift;
+                for key in (0..128u8).filter(|&k| fines.keys >> k & 1 == 1) {
+                    let k = usize::from(key);
+                    inst.tune(0, key, shift + fines.fine[k] + fines.glide[k]);
+                }
+            }
             // Ticks it missed are made up first: their notes at once, then their frames, unheard (at most a second;
             // an instance held longer than that loses that much of its place).
             let owed = self.inst_owed.get_mut(c).map_or(0, std::mem::take);
@@ -2855,7 +2883,7 @@ fn run_slot(
 
 /// Hands one note event to an instrument at frame `off` of its next block. `shift`: the channel's pitch in semitones;
 /// `fines`: per key, the fine pitch of the note last started there (notes keep the pitch they started with).
-fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, shift: f32, fines: &mut [f32; 128]) {
+fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, shift: f32, fines: &mut InstTuning) {
     match note {
         notes::Note::Choke(key, None) => inst.choke(off, key),
         notes::Note::Choke(key, Some(voice)) => inst.voice_choke(off, key, voice),
@@ -2866,12 +2894,18 @@ fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, shift: f32,
                 Some(v) => inst.voice_start(off, key, vel, start, levels, v),
                 None => inst.note_start(off, key, vel, start, levels),
             }
-            fines[usize::from(key & 127)] = fine;
+            let k = key & 127;
+            (fines.fine[usize::from(k)], fines.glide[usize::from(k)]) = (fine, 0.0);
+            fines.keys |= 1 << k;
             if shift + fine != 0.0 {
                 inst.tune(off, key, shift + fine);
             }
         }
-        notes::Note::Tune(key, semitones) => inst.tune(off, key, semitones + shift + fines[usize::from(key & 127)]),
+        notes::Note::Tune(key, semitones) => {
+            let k = usize::from(key & 127);
+            fines.glide[k] = semitones;
+            inst.tune(off, key, semitones + shift + fines.fine[k]);
+        }
     }
 }
 
@@ -4355,6 +4389,47 @@ mod tests {
         p.channels[0].kind = ChannelKind::Plugin;
         let got = tunes(&p);
         assert!((got[0].1 - (12.0 - 2.5 + 0.3)).abs() < 1e-3, "{got:?}");
+    }
+
+    // spec: audio/voice-levels.md "The main pitch": sounding voices follow a change, here a hosted sampler's note
+    // stretched by Lemon Sampler, while the song plays on.
+    #[test]
+    fn main_pitch_moved_while_playing_retunes_hosted_notes() {
+        use os_model::{Clip, ClipSource};
+        #[derive(Default)]
+        struct Log(Vec<(u8, f32)>);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {}
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn tune(&mut self, _o: u32, key: u8, semitones: f32) {
+                self.0.push((key, semitones));
+            }
+            fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        }
+        let mut p = song(vec![long_note(0, 384, 0)], vec![Clip::new(0, 384, 0, ClipSource::Pattern(1))]);
+        p.channels[0].sound.stretch = [0, 0, 0, os_model::stretch_mode::STRETCH as u32];
+        let mut lib = SampleLibrary::new(None);
+        lib.resample_stretches = true;
+        let log = Arc::new(std::sync::Mutex::new(Log::default()));
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e.set_instrument(0, log.clone());
+        let mut out = Vec::new();
+        e.render_ticks(48, &mut out);
+        assert!(log.lock().unwrap().0.is_empty(), "no pitch, no tuning");
+        // The main pitch moves (the knob rebuilds the playing engine): the note already sounding follows it.
+        p.main_pitch = Some(300);
+        let mut e2 = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e2.set_instrument(0, log.clone());
+        e2.continue_from(&mut e);
+        e2.render_ticks(48, &mut out);
+        assert_eq!(log.lock().unwrap().0, vec![(60, 3.0)]);
+        // A channel that does not follow the main pitch is left alone.
+        p.channels[0].misc.main_pitch = false;
+        let mut e3 = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e3.set_instrument(0, log.clone());
+        e3.continue_from(&mut e2);
+        e3.render_ticks(48, &mut out);
+        assert_eq!(log.lock().unwrap().0, vec![(60, 3.0), (60, 0.0)], "back to its own pitch");
     }
 
     // spec: audio/audio-clips.md "Starting inside a clip"
