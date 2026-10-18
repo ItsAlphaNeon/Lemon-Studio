@@ -388,13 +388,33 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
 /// The palette of skin `design` coloured by `theme` (a `.flstheme`). The stock Dark theme (whatever its options), or
 /// none, leaves a skin its own colours: Citrus the measured look, Lemon the brand palette; any other theme colours
 /// Citrus through `fl::palette` and is laid over Lemon's colours by a `Retint`.
+///
+/// Being see-through belongs to the skin, colours to the theme: on Etched every theme's surfaces are see-through as
+/// Etched's own are; on the other skins every theme is opaque (the Etched theme laid over its dark base).
 pub fn palette(design: Design, theme: Option<&FlTheme>) -> Palette {
+    let mut p = colours(design, theme);
+    let dark = crate::etched::appearance().dark;
+    if design == Design::Etched {
+        let own = crate::etched::overrides(crate::etched::appearance());
+        for (name, c) in own.into_iter().filter(|(_, c)| c.a < 255) {
+            if let Some(slot) = p.get_mut(name) {
+                *slot = slot.with_alpha(c.a);
+            }
+        }
+    } else if crate::etched::see_through(&p) {
+        crate::etched::flatten(&mut p, dark);
+    }
+    p
+}
+
+/// `palette` before the skin sets what is see-through.
+fn colours(design: Design, theme: Option<&FlTheme>) -> Palette {
     // The Lemon and Citrus themes (`skin_text`): the Lemon theme on Citrus is Lemon's colours with Citrus's shapes; the
     // Citrus theme on Lemon is the stock Dark theme laid over Lemon (stock Dark without the key counts as Lemon's own);
     // Citrus with the Citrus theme is the stock Dark theme, as usual.
     match (design, theme.and_then(|t| t.colors)) {
         // A skin's own theme on that skin is the skin as it is; the Etched theme on another skin is Etched's colours
-        // (see-through, so the backdrop shows) with that skin's shapes, and the Lemon theme on Etched Lemon's colours.
+        // with that skin's shapes, and the Lemon theme on Etched Lemon's colours (`palette` sets what shows through).
         (d, Some(c)) if d == c && d != Design::Citrus => return palette(design, None),
         (d, Some(Design::Etched)) => {
             let mut p = palette(Design::Etched, None);
@@ -627,6 +647,32 @@ fn retint(p: &mut Palette, d: Design, th: &FlTheme) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// See-through is the skin's, colours the theme's: every theme on Etched shows the backdrop where Etched's own
+    /// colours do, and no theme on another skin does (the Etched theme included).
+    #[test]
+    fn only_the_etched_skin_is_see_through() {
+        let own = palette(Design::Etched, None);
+        let mut themes: Vec<Option<FlTheme>> = vec![None, Some(FlTheme::parse(fl::DARK_TEXT))];
+        themes.extend(Design::ALL.iter().map(|d| Some(FlTheme::parse(&skin_text(*d)))));
+        // A theme of its own colours (not a skin's).
+        themes.push(Some(FlTheme::parse(&fl::set_key(fl::DARK_TEXT, "Hue", "120"))));
+        for d in Design::ALL {
+            for th in &themes {
+                let p = palette(d, th.as_ref());
+                let what = format!("{} skin, theme {:?}", d.name(), th.as_ref().and_then(|t| t.colors));
+                assert_eq!(crate::etched::see_through(&p), d == Design::Etched, "{what}");
+                for name in Palette::NAMES {
+                    let (a, b) = (p.get(name).expect("token").a, own.get(name).expect("token").a);
+                    if d == Design::Etched {
+                        assert!(b == 255 || a == b, "{what}: {name} alpha {a}, Etched's {b}");
+                    } else {
+                        assert_eq!(a, 255, "{what}: {name}");
+                    }
+                }
+            }
+        }
+    }
 
     fn contrast(a: Color, b: Color) -> f32 {
         (a.hsl().2 - b.hsl().2).abs()
