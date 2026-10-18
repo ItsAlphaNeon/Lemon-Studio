@@ -482,6 +482,26 @@ impl Retint {
 /// Lemon's palette `p` coloured by `th` (see `Retint`). Step faces are the theme's own (as Citrus draws them); the
 /// fixed tokens drawn in the lemon key colour (lit steps, notes, key labels, the default clip, the project category)
 /// follow the theme's selection colour; then what the theme colours directly (`fl::finish`).
+/// A skin's own colours as theme text: where Settings ▸ Theme ▸ Adjustments start while Default is in use. Citrus: the
+/// stock Dark theme. Lemon: the stock Dark surface with saturation at its lowest (Lemon's neutral greys), Lemon's Main
+/// as selection, highlight and mute, Lemon's text, and no step colours, so it colours Lemon as Lemon is (spec:
+/// ui/theme-presets.md §C).
+pub fn default_text(d: Design) -> String {
+    match d {
+        Design::Citrus => fl::DARK_TEXT.to_string(),
+        Design::Lemon => {
+            let v = |key: &str, c: Color| format!("{key}={}\n", fl::colour_value(key, c));
+            format!(
+                "Hue=0\nSaturation=-256\nLightness=-153\nContrast=-8\nText=0\n{}{}{}{}BackMode=2\n",
+                v("Selected", lemon::MAIN),
+                v("Highlight", lemon::MAIN),
+                v("Mute", lemon::MAIN),
+                v("TextColor", lemon::TEXT)
+            )
+        }
+    }
+}
+
 fn retint(p: &mut Palette, th: &FlTheme) {
     let r = Retint::lemon(th);
     let citrus = fl::palette(th);
@@ -494,6 +514,9 @@ fn retint(p: &mut Palette, th: &FlTheme) {
             fl::Role::Highlight => r.highlight(c),
             fl::Role::Text => r.text(c),
             fl::Role::Mute => r.mute(c),
+            // A theme without step colours leaves the skin's own step faces (only re-greyed like its surfaces).
+            fl::Role::StepEven if th.step_even.is_none() => r.surface(c),
+            fl::Role::StepOdd if th.step_odd.is_none() => r.surface(c),
             fl::Role::StepEven | fl::Role::StepOdd => citrus.get(name).expect("token"),
             fl::Role::Fixed => match *name {
                 "step_on" | "note_top" | "note_bottom" | "note_rim" | "note_text" | "note_sel_top" | "note_sel_bottom"
@@ -514,6 +537,28 @@ mod tests {
 
     fn contrast(a: Color, b: Color) -> f32 {
         (a.hsl().2 - b.hsl().2).abs()
+    }
+
+    /// Adjustments start from the skin's own colours as a theme: Citrus's is the stock Dark theme; Lemon's colours
+    /// Lemon as it is (within rounding), so the first knob turn changes only what it turns.
+    #[test]
+    fn default_text_is_the_skins_own_colours() {
+        assert!(FlTheme::parse(&default_text(Design::Citrus)).is_stock());
+        let own = palette(Design::Lemon, None);
+        let th = FlTheme::parse(&default_text(Design::Lemon));
+        assert!(!th.is_stock());
+        let p = palette(Design::Lemon, Some(&th));
+        let worst = Palette::NAMES
+            .iter()
+            .map(|n| {
+                let (a, b) = (own.get(n).unwrap(), p.get(n).unwrap());
+                let d = [a.r.abs_diff(b.r), a.g.abs_diff(b.g), a.b.abs_diff(b.b)].into_iter().max().unwrap();
+                (d, *n)
+            })
+            .max()
+            .unwrap();
+        assert!(worst.0 <= 12, "{worst:?}");
+        assert_eq!(p.a(0x2d7cd0), own.a(0x2d7cd0), "accents stay Lemon's Main");
     }
 
     #[test]

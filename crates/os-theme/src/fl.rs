@@ -220,6 +220,32 @@ pub fn set_key(text: &str, key: &str, value: &str) -> String {
     lines.join(nl)
 }
 
+/// The value of `key` in `text` (a `.flstheme` file), trimmed; the last line wins, as in `FlTheme::parse`.
+pub fn get_key<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.trim_start_matches('\u{feff}')
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .filter(|(k, _)| k.trim().eq_ignore_ascii_case(key))
+        .map(|(_, v)| v.trim())
+        .next_back()
+}
+
+/// Whether `key` holds an RGB-ordered colour (§2: Selected and TextColor); the other colour keys are COLORREF.
+pub fn rgb_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("Selected") || key.eq_ignore_ascii_case("TextColor")
+}
+
+/// `key`'s colour from its file value (§2).
+pub fn colour_of(key: &str, v: i64) -> Color {
+    if rgb_key(key) { rgb_value(v) } else { colorref(v) }
+}
+
+/// `c` as `key`'s file value (§2), high byte 0.
+pub fn colour_value(key: &str, c: Color) -> u32 {
+    let (r, g, b) = (u32::from(c.r), u32::from(c.g), u32::from(c.b));
+    if rgb_key(key) { r << 16 | g << 8 | b } else { b << 16 | g << 8 | r }
+}
+
 /// What a token is coloured by (spec §3).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Role {
@@ -493,6 +519,20 @@ mod tests {
     // spec: ui/flstheme.md §3 (WaveClr / WaveSpc), ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"
     /// The Waves gradient: COLORREF colours at their positions, sorted, a stop missing either half left out; the
     /// palette carries it.
+    #[test]
+    fn keys_are_read_and_colours_written_in_their_byte_order() {
+        let text = "Hue=0\r\nSelected=11068490\r\nHighlight=-12283141\r\nhue=-20\r\n";
+        assert_eq!(get_key(text, "HUE"), Some("-20"), "the last line wins, any case");
+        assert_eq!(get_key(text, "Mute"), None);
+        assert_eq!(colour_of("Selected", 11068490), Color::rgb(0xa8e44a));
+        assert_eq!(colour_of("Highlight", -12283141), Color::rgb(0xfb9244));
+        assert_eq!(colour_value("Selected", Color::rgb(0xa8e44a)), 0xa8e44a);
+        assert_eq!(colour_value("Highlight", Color::rgb(0xfb9244)), 0x4492fb);
+        assert_eq!(colour_value("textcolor", Color::rgb(0x123456)), 0x123456);
+        let th = FlTheme::parse(&set_key(text, "Highlight", &colour_value("Highlight", Color::rgb(0x102030)).to_string()));
+        assert_eq!(th.highlight, Some(Color::rgb(0x102030)));
+    }
+
     #[test]
     fn waves_gradient_is_read() {
         let th = FlTheme::parse("WaveClr0=4661375

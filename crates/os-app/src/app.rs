@@ -802,6 +802,11 @@ pub enum Drag {
     PrefSlider { label: &'static str, x: f32, w: f32 },
     /// General ▸ Display's PPI ruler, pressed at `x0` while it showed `n0` (`crate::ppi::dragged`).
     Ppi { x0: f32, n0: u16 },
+    /// Theme ▸ Adjustments knob `i`, pressed at height `y0` at position `p0` (`crate::theme_adjust`).
+    ThemeKnob { i: usize, y0: f32, p0: f32 },
+    /// The colour picker's saturation / brightness square and hue strip (their rects).
+    PickSv(Rect),
+    PickHue(Rect),
 }
 
 pub struct State {
@@ -860,6 +865,9 @@ pub struct State {
     /// Lemon Studio `theme.txt`). Theme ▸ Options rewrite it (spec: ui/settings-choices.md "Light mode and clip note
     /// colours").
     pub fl_text: Option<String>,
+    /// The theme as it was chosen (a Themes tile, Load theme..., the one kept from the last session), before Theme ▸
+    /// Adjustments changed it: their middle clicks restore its values and its tile stays framed (`None`: Default).
+    pub theme_base: Option<String>,
     pub playlist_scroll: (f32, f32),
     /// Playlist horizontal zoom, pixels per bar.
     pub playlist_bar_w: f32,
@@ -1172,6 +1180,7 @@ impl App {
                 lane_menu: false,
                 settings: views::settings::SettingsUi { native: os_native::settings_shown(), ..Default::default() },
                 fl_text: saved_fl_text(),
+                theme_base: saved_fl_text(),
                 playlist_scroll: (0.0, 0.0),
                 playlist_bar_w: views::playlist::BAR_W,
                 mixer_scroll: 0.0,
@@ -3417,6 +3426,7 @@ impl App {
                 self.theme = t;
                 // Theme ▸ Options read and rewrite the applied .flstheme (spec: ui/settings-choices.md "Light mode and
                 // clip note colours").
+                self.state.theme_base = text.clone();
                 self.state.fl_text = text;
                 os_theme::set_current(&self.theme.colors);
                 if remember && to_citrus {
@@ -3486,16 +3496,19 @@ impl App {
     /// skin (or the stock Dark theme does, whatever its options), else the tile whose theme has the applied colours; none
     /// when the theme came from elsewhere (Load theme..., a drop, a `theme.txt`). While the window is open the tiles'
     /// previews are redrawn for the skin and theme in use.
-    fn sync_preset(&mut self) {
+    pub(crate) fn sync_preset(&mut self) {
         let applied = self.state.fl_text.as_deref().map(os_theme::FlTheme::parse);
+        // The tile the theme was chosen from stays framed while Adjustments change it (`State::theme_base`).
+        let chosen = self.state.theme_base.as_deref().map(os_theme::FlTheme::parse);
         let design = self.design();
         let st = &mut self.state.settings;
         let themes: Vec<_> = st.themes.iter().map(|(_, t)| os_theme::FlTheme::parse(t)).collect();
-        st.preset = match &applied {
-            None if design == Design::Lemon || self.theme.colors == os_theme::Palette::default() => 0,
-            None => usize::MAX,
-            Some(th) if th.is_stock() => 0,
-            Some(th) => themes.iter().position(|t| t.same_colours(th)).map_or(usize::MAX, |i| i + 1),
+        st.preset = match (&chosen, &applied) {
+            (None, None) if design == Design::Lemon || self.theme.colors == os_theme::Palette::default() => 0,
+            (None, None) => usize::MAX,
+            (None, Some(_)) => 0,
+            (Some(th), _) if th.is_stock() => 0,
+            (Some(th), _) => themes.iter().position(|t| t.same_colours(th)).map_or(usize::MAX, |i| i + 1),
         };
         st.skin = Design::ALL.iter().position(|d| *d == design).unwrap_or(0);
         if st.open {
@@ -3513,6 +3526,7 @@ impl App {
             st.scroll = 0.0;
         }
         st.open = true;
+        st.picker = None;
         st.tab = tab;
         self.audio_page();
         // General ▸ System's association check shows what Windows says now (`crate::file_assoc`).
@@ -3777,9 +3791,40 @@ impl App {
 
     fn settings_act(&mut self, a: views::settings::SAct) {
         use views::settings::SAct;
+        // A click anywhere but the colour picker and the colour circles closes the picker.
+        if !matches!(a, SAct::Swatch(..) | SAct::PickBody | SAct::PickPart(_) | SAct::PickSv | SAct::PickHue | SAct::PickRevert) {
+            self.picker_close();
+        }
         let st = &mut self.state.settings;
         match a {
-            SAct::Body => {}
+            SAct::Body | SAct::PickBody | SAct::PickClose => {}
+            // Theme ▸ Adjustments (spec: ui/theme-presets.md §C).
+            SAct::ThemeKnob(i) => return self.theme_knob_press(usize::from(i)),
+            SAct::Swatch(i, part) => {
+                let r = self.hits.iter().rev().find(|h| h.action == Action::Settings(SAct::Swatch(i, part))).map(|h| h.rect);
+                let (i, part) = (usize::from(i), usize::from(part));
+                let at = r.map_or((self.mouse.0, self.mouse.1, 0.0), |r| {
+                    // Steps is two half circles, each its own hit.
+                    let cx = if i != crate::theme_adjust::STEPS { r.cx() } else if part == 0 { r.right() } else { r.x };
+                    (cx, r.cy(), r.h / 2.0)
+                });
+                return self.picker_open(i, part, at);
+            }
+            SAct::PickPart(k) => return self.picker_part(usize::from(k)),
+            SAct::PickSv | SAct::PickHue => {
+                let r = self.hits.iter().rev().find(|h| h.action == Action::Settings(a.clone())).map(|h| h.rect);
+                let Some(r) = r else { return };
+                let (x, y) = self.mouse;
+                if a == SAct::PickSv {
+                    self.picker_sv(r, x, y);
+                    self.drag = Some(Drag::PickSv(r));
+                } else {
+                    self.picker_hue(r, y);
+                    self.drag = Some(Drag::PickHue(r));
+                }
+                return;
+            }
+            SAct::PickRevert => return self.picker_revert(),
             SAct::Close => st.open = false,
             // The program settings declared in `crate::prefs`.
             SAct::Combo(views::settings::DEFAULT_TEMPLATE, x, y) => return self.template_menu(x, y),
@@ -3858,6 +3903,7 @@ impl App {
                     let _ = std::fs::remove_file(d.join("current.flstheme"));
                 }
                 self.state.fl_text = None;
+                self.state.theme_base = None;
                 self.sync_preset();
                 self.state.message = Some(format!("Theme: Default ({} colours)", self.design().name()));
             }
@@ -3866,6 +3912,7 @@ impl App {
                     self.theme = skin_theme(self.design(), &name, Some(&text));
                     os_theme::set_current(&self.theme.colors);
                     self.state.fl_text = Some(text.clone());
+                    self.state.theme_base = Some(text.clone());
                     // Remembered like an imported theme (loaded at the next start).
                     if let Some(d) = theme_dir() {
                         let _ = std::fs::create_dir_all(&d);
@@ -4259,6 +4306,9 @@ impl App {
                 Drag::SongPosHold { .. } => {}
                 Drag::PrefSlider { label, x: x0, w } => self.pref_slider_drag(label, x0, w),
                 Drag::Ppi { x0, n0 } => self.ppi_set(crate::ppi::dragged(n0, x - x0, self.px_scale)),
+                Drag::ThemeKnob { i, y0, p0 } => self.theme_knob_drag(i, y0, p0, y),
+                Drag::PickSv(r) => self.picker_sv(r, x, y),
+                Drag::PickHue(r) => self.picker_hue(r, y),
                 Drag::Tempo { y0, t0, step } => {
                     // Rounded to the box's thousandths, so repeated steps don't drift.
                     let t = self.set_tempo(((t0 + f64::from(y0 - y).round() * step) * 1000.0).round() / 1000.0);
@@ -4669,6 +4719,9 @@ impl App {
                 return self.invalidate();
             }
         }
+        if let Some(Action::Settings(views::settings::SAct::ThemeKnob(i))) = action {
+            return self.theme_knob_reset(usize::from(i));
+        }
         if let Some(Action::Knob(id)) = action {
             crate::history::knob(&mut self.state, id, false);
             self.state.set_knob(id, id.default_value());
@@ -4933,6 +4986,7 @@ impl App {
                 self.start_playback();
             }
             Some(Drag::SongRuler) => self.song_pos_release(),
+            Some(Drag::ThemeKnob { .. } | Drag::PickSv(_) | Drag::PickHue(_)) => self.theme_store(),
             _ => {}
         }
         if had_overlay {
@@ -5344,6 +5398,13 @@ impl App {
         }
         // General ▸ Display's PPI ruler: 1 PPI a notch, up for more (spec: ui/settings-choices.md "Display: PPI ruler,
         // Force refreshes, Thick lines, High visibility (2026-10-16)").
+        // Theme ▸ Adjustments: a knob steps its value, up for more (`crate::theme_adjust`).
+        if let Some(Action::Settings(views::settings::SAct::ThemeKnob(i))) = area {
+            if dy + dx != 0.0 {
+                self.theme_knob_wheel(usize::from(i), if dy + dx > 0.0 { 1 } else { -1 });
+            }
+            return None;
+        }
         if let Some(Action::Settings(views::settings::SAct::Ppi)) = area {
             if dy + dx != 0.0 {
                 self.ppi_wheel(if dy + dx > 0.0 { 1 } else { -1 });
@@ -5640,6 +5701,7 @@ impl App {
             } else {
                 CloseAll::All
             }),
+            Key::Named(NamedKey::Escape) if self.state.settings.open && self.state.settings.picker.is_some() => self.picker_close(),
             Key::Named(NamedKey::Escape) if self.state.settings.open => self.state.settings.open = false,
             Key::Named(NamedKey::Escape) => {
                 self.state.menu_open = None;
@@ -7335,7 +7397,7 @@ fn saved_fl_text() -> Option<String> {
 
 /// The folder `current.flstheme` is kept in: the user folder; in tests this thread's folder, none unless one is set
 /// (`THEME_DIR`).
-fn theme_dir() -> Option<PathBuf> {
+pub(crate) fn theme_dir() -> Option<PathBuf> {
     #[cfg(test)]
     return THEME_DIR.with(|d| d.borrow().clone());
     #[cfg(not(test))]
@@ -7727,6 +7789,79 @@ mod tests {
                 hit_rect(&app, &Action::Settings(a));
             }
         }
+        THEME_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Theme ▸ Adjustments (spec: ui/theme-presets.md §C): the knobs show the applied theme's values and edit them live
+    /// (drag, wheel, middle click back to the chosen theme's value), its tile stays framed, and the theme is kept for the
+    /// next start; a colour circle opens the picker, whose square sets the colour live, Revert goes back, Esc closes it
+    /// before the window, and a click elsewhere closes it.
+    #[test]
+    fn theme_adjustments_edit_the_applied_theme() {
+        use crate::theme_adjust::{knob_value, KNOBS, METERS};
+        use crate::views::settings::{SAct, THEME};
+        use os_theme::{presets::PRESETS, FlTheme};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("lemon-theme-adjust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut app = App::new(None);
+        app.open_settings(THEME);
+        app.settings_act(SAct::Preset(1));
+        let base = PRESETS[0].1;
+        frame(&mut app, &mut c, None);
+        // Brightness: dragged up 30 px = a tenth of its 510 range.
+        let knob = hit_rect(&app, &Action::Settings(SAct::ThemeKnob(2)));
+        let v0 = knob_value(&FlTheme::parse(base), 2);
+        app.mouse_move(knob.cx(), knob.cy());
+        app.mouse_down();
+        app.mouse_move(knob.cx(), knob.cy() - 30.0);
+        let v = knob_value(&app.state.fl_theme(), 2);
+        assert_eq!(v, KNOBS[2].at(KNOBS[2].pos(v0) + 0.1));
+        assert_eq!(app.theme.colors, os_theme::design::palette(app.design(), Some(&app.state.fl_theme())), "live");
+        assert_eq!(app.state.settings.preset, 1, "the tile it came from stays framed");
+        app.mouse_up();
+        assert_eq!(std::fs::read_to_string(dir.join("current.flstheme")).unwrap(), app.state.fl_text.clone().unwrap(), "kept");
+        // The wheel steps Hue by 5 degrees; a middle click restores the theme's value.
+        frame(&mut app, &mut c, None);
+        let hue = hit_rect(&app, &Action::Settings(SAct::ThemeKnob(0)));
+        app.mouse_move(hue.cx(), hue.cy());
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(app.state.fl_theme().surface.hue, knob_value(&FlTheme::parse(base), 0) + 5.0);
+        app.mouse_down_middle();
+        assert_eq!(app.state.fl_theme().surface.hue, knob_value(&FlTheme::parse(base), 0));
+        app.mouse_move(knob.cx(), knob.cy());
+        app.mouse_down_middle();
+        assert!(app.state.fl_theme().same_colours(&FlTheme::parse(base)), "back to the theme as chosen");
+        // Meters: the picker opens on its first colour; the square's top right corner is full saturation and brightness.
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Settings(SAct::Swatch(METERS as u8, 0)));
+        click(&mut app, &mut c, r);
+        assert_eq!(app.state.settings.picker.as_ref().map(|p| (p.swatch, p.part)), Some((METERS, 0)));
+        let r = hit_rect(&app, &Action::Settings(SAct::PickPart(2)));
+        click(&mut app, &mut c, r);
+        let sv = hit_rect(&app, &Action::Settings(SAct::PickSv));
+        let h = app.state.settings.picker.as_ref().unwrap().hsv[0];
+        app.mouse_move(sv.right() - 0.01, sv.y);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!(app.state.fl_theme().meters[2], crate::theme_adjust::from_hsv([h, 1.0, 1.0]));
+        // Revert, then Esc closes the picker and leaves the window open.
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Settings(SAct::PickRevert));
+        click(&mut app, &mut c, r);
+        assert!(app.state.fl_theme().same_colours(&FlTheme::parse(base)));
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        assert!(app.state.settings.picker.is_none() && app.state.settings.open);
+        // A click elsewhere on the page closes it too.
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Settings(SAct::Swatch(0, 0)));
+        click(&mut app, &mut c, r);
+        assert!(app.state.settings.picker.is_some());
+        let r = hit_rect(&app, &Action::Settings(SAct::ThemeKnob(4)));
+        click(&mut app, &mut c, r);
+        assert!(app.state.settings.picker.is_none());
         THEME_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -85,6 +85,7 @@ mod splash;
 mod stall;
 mod step_edit;
 mod tapper;
+mod theme_adjust;
 mod templates;
 mod timesig;
 mod transport;
@@ -1121,6 +1122,7 @@ fn screenshot(args: &[String]) {
     let mut plugin_menu: Option<plugin_menu::Target> = None;
     let mut settings: Option<usize> = None;
     let mut info_edit: Option<usize> = None;
+    let mut clicks: Vec<(f32, f32)> = Vec::new();
     let mut lane: Option<usize> = None;
     let mut lane_menu = false;
     let mut pans: Option<Vec<f32>> = None;
@@ -1173,6 +1175,13 @@ fn screenshot(args: &[String]) {
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
                 if let [x, y] = v[..] {
                     mouse = Some((x, y));
+                }
+            }
+            // Click at x,y (left button) before the frame is captured; may be given more than once, done in order.
+            "--click" => {
+                let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
+                if let [x, y] = v[..] {
+                    clicks.push((x, y));
                 }
             }
             "--lane" => lane = it.next().and_then(|v| v.parse().ok()),
@@ -1390,6 +1399,12 @@ fn screenshot(args: &[String]) {
     let (w, h) = size.unwrap_or(((1920.0 * scale).round() as u32, (1080.0 * scale).round() as u32));
     let mut canvas = Canvas::new(w, h, scale).expect("canvas");
     app.paint(&mut canvas, None);
+    for (x, y) in clicks {
+        app.mouse_move(x, y);
+        app.mouse_down();
+        app.mouse_up();
+        app.paint(&mut canvas, None);
+    }
     if let Some((x, y)) = mouse {
         app.mouse_move(x, y);
         app.paint(&mut canvas, None);

@@ -35,6 +35,20 @@ pub enum SAct {
     Skin(usize),
     /// Themes tile: 0 = Default (the skin's own colours), n = `SettingsUi::themes[n - 1]`.
     Preset(usize),
+    /// Theme ▸ Adjustments knob `i` (`crate::theme_adjust::KNOBS`): a drag or the wheel turns it, a middle click restores
+    /// the chosen theme's value.
+    ThemeKnob(u8),
+    /// Colour circle `.0` (`crate::theme_adjust::SWATCHES`), its colour `.1` (Steps: the left half is 0, the right 1):
+    /// opens the colour picker under it.
+    Swatch(u8, u8),
+    /// The colour picker (`crate::theme_adjust::Picker`): its panel (swallows clicks), close button, colour chips,
+    /// saturation / brightness square, hue strip, and Revert (also a click on the old colour).
+    PickBody,
+    PickClose,
+    PickPart(u8),
+    PickSv,
+    PickHue,
+    PickRevert,
     /// The plugin manager's controls (spec: ui/plugin-manager.md §2).
     Plug(Plug),
     /// A working combo (`LIVE_COMBOS`) by its label, with its box's bottom left (where its menu opens).
@@ -157,6 +171,8 @@ pub struct SettingsUi {
     /// then each of `themes`.
     pub skin_previews: Vec<os_theme::Palette>,
     pub theme_previews: Vec<os_theme::Palette>,
+    /// Theme ▸ Adjustments' colour picker, while open.
+    pub picker: Option<crate::theme_adjust::Picker>,
     /// The Info page's box being edited.
     pub info_edit: Option<InfoEdit>,
     /// The File page's Browser extra search folders cell being typed into.
@@ -424,14 +440,14 @@ pub enum TileList {
     Themes,
 }
 
-/// Theme tiles, four to a row: size, pitch, the preview's height (the miniature's shape) and the name strip under it.
-const TILE_W: f32 = 140.0;
+/// Theme tiles, five to a row: size, pitch, the preview's height (the miniature's shape) and the name strip under it.
+const TILE_W: f32 = 110.0;
 const TILE_PREVIEW_H: f32 = ((TILE_W - 4.0) * super::theme_preview::H / super::theme_preview::W) as i32 as f32;
 const TILE_NAME_H: f32 = 18.0;
 const TILE_H: f32 = TILE_PREVIEW_H + TILE_NAME_H + 4.0;
 const TILE_PITCH_X: f32 = TILE_W + 8.0;
 const TILE_PITCH_Y: f32 = TILE_H + 6.0;
-const TILES_PER_ROW: usize = 4;
+const TILES_PER_ROW: usize = 5;
 
 pub struct Group {
     pub title: &'static str,
@@ -678,8 +694,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             vec![
                 g("Skins", vec![Tiles(TileList::Skins, skins, st.skin)]),
                 g("Themes", vec![Tiles(TileList::Themes, themes, st.preset)]),
-                // Not available yet: folded by default so Options and the buttons show without scrolling.
-                gf("Adjustments", true, vec![ThemeKnobs]),
+                gf("Adjustments", false, vec![ThemeKnobs]),
                 g("Options", {
                     let th = s.fl_theme();
                     vec![Check(LIGHT_MODE_CHECK, th.light_mode), Check(NOTE_COLORS_CHECK, th.override_clips)]
@@ -920,6 +935,108 @@ pub fn paint(ui: &mut Ui, s: &State) {
         let track = Rect::new(area.right() - 10.0, area.y + 4.0, 7.0, area.h - 8.0);
         kit::scrollbar(ui.c, t, track, true, scroll, area.h, total, kit::State::NORMAL);
     }
+    if let Some(p) = st.picker.as_ref().filter(|_| st.tab == THEME) {
+        picker(ui, s, p, r);
+    }
+}
+
+/// A circle of radius `r` split into equal slices of `colours`, the first from the bottom round by the left.
+fn pie(c: &mut os_ui::Canvas, cx: f32, cy: f32, r: f32, colours: &[Color]) {
+    let n = colours.len();
+    if n <= 1 {
+        return c.fill_circle(cx, cy, r, colours.first().copied().unwrap_or(Color::rgb(0)));
+    }
+    let tau = std::f32::consts::TAU;
+    for (k, col) in colours.iter().enumerate() {
+        let a0 = tau / 4.0 + k as f32 * tau / n as f32;
+        let steps = (48 / n).max(4);
+        let mut pts = vec![(cx, cy)];
+        pts.extend((0..=steps).map(|j| {
+            let a = a0 + j as f32 / steps as f32 * tau / n as f32;
+            (cx + r * a.cos(), cy + r * a.sin())
+        }));
+        c.fill_polygon(&pts, *col);
+    }
+}
+
+/// Theme ▸ Adjustments' colour picker (`crate::theme_adjust`), over the page: a saturation / brightness square, a hue
+/// strip, the new colour over the old one with its hex value, Revert, and chips for circles with several colours.
+fn picker(ui: &mut Ui, s: &State, p: &crate::theme_adjust::Picker, win: Rect) {
+    use crate::theme_adjust::{self as adj, from_hsv, SWATCHES};
+    let t = ui.t;
+    let text = adj::applied_text(s, t.style.design);
+    let parts = adj::parts(&text, p.swatch);
+    let rr = adj::picker_rects(p, parts.len(), win);
+    let lemon = super::lemon(ui);
+    let rad = if lemon { lk::r_panel(t) } else { 0.0 };
+    ui.hit(rr.panel, Action::Settings(SAct::PickBody), "");
+    ui.c.fill_rrect(rr.panel.outset(3.0), rad + 3.0, Color::rgb(0).with_alpha(70));
+    ui.c.fill_rrect(rr.panel, rad, t.s(0x1c1e21));
+    ui.c.fill_rrect(rr.panel.inset(1.0), (rad - 1.0).max(0.0), t.s(0x2b2d30));
+    let title = match parts.get(p.part) {
+        Some(part) if parts.len() > 1 => format!("{} colour {}", SWATCHES[p.swatch], part.label.to_lowercase()),
+        _ => format!("{} colour", SWATCHES[p.swatch]),
+    };
+    ui.c.text(Font::new(13).bold(), rr.panel.x + 10.0, rr.panel.y + 9.0, t.text, &title);
+    let hov = ui.hit(rr.close, Action::Settings(SAct::PickClose), "Close (Esc)");
+    ui.c.icon(&os_ui::tabler::X, rr.close.inset(3.0), if hov { t.glyph } else { t.text });
+    for (k, (b, part)) in rr.chips.iter().zip(&parts).enumerate() {
+        let hov = ui.hit(*b, Action::Settings(SAct::PickPart(k as u8)), "Pick this colour");
+        let frame = if k == p.part {
+            if lemon { t.brand_sel(os_theme::design::lemon::MAIN) } else { t.a(0x2d7cd0) }
+        } else if hov {
+            t.s(0x8a8c8e)
+        } else {
+            t.s(0x161819)
+        };
+        ui.c.fill_rrect(*b, 4.0, frame);
+        ui.c.fill_rrect(b.inset(2.0), 3.0, part.colour);
+        let ink = if part.colour.hsl().2 > 0.55 { Color::rgb(0x111111) } else { Color::rgb(0xf2f2f2) };
+        ui.c.text_center(Font::new(12), *b, ink, &part.label);
+    }
+    // Saturation left to right, brightness bottom to top, at the picked hue; a ring marks the colour.
+    let (w, h) = (48usize, 36usize);
+    let sv: Vec<u32> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let c = from_hsv([p.hsv[0], x as f32 / (w - 1) as f32, 1.0 - y as f32 / (h - 1) as f32]);
+            u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+        })
+        .collect();
+    ui.hit(rr.sv, Action::Settings(SAct::PickSv), "Saturation (left to right) and brightness (bottom to top)");
+    ui.c.image(rr.sv, w, h, &sv);
+    let (mx, my) = (rr.sv.x + p.hsv[1] * rr.sv.w, rr.sv.y + (1.0 - p.hsv[2]) * rr.sv.h);
+    ui.c.stroke_circle(mx, my, 5.0, 1.5, Color::rgb(0));
+    ui.c.stroke_circle(mx, my, 4.0, 1.5, Color::rgb(0xffffff));
+    let hue: Vec<u32> = (0..64)
+        .map(|y| {
+            let c = from_hsv([y as f32 / 63.0 * 360.0, 1.0, 1.0]);
+            u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+        })
+        .collect();
+    ui.hit(rr.hue, Action::Settings(SAct::PickHue), "Hue");
+    ui.c.image(rr.hue, 1, 64, &hue);
+    let hy = (rr.hue.y + p.hsv[0] / 360.0 * rr.hue.h).round();
+    ui.c.fill_rect(Rect::new(rr.hue.x - 2.0, hy - 2.0, rr.hue.w + 4.0, 4.0), Color::rgb(0));
+    ui.c.fill_rect(Rect::new(rr.hue.x - 1.0, hy - 1.0, rr.hue.w + 2.0, 2.0), Color::rgb(0xffffff));
+    // New colour over the old one (a click goes back to it), the hex value, Revert.
+    let new = from_hsv(p.hsv);
+    let before = p.before.clone().unwrap_or_else(|| os_theme::design::default_text(t.style.design));
+    let old = adj::parts(&before, p.swatch).get(p.part).map_or(new, |q| q.colour);
+    ui.c.fill_rect(rr.new, new);
+    ui.hit(rr.old, Action::Settings(SAct::PickRevert), "The colour before: click to go back to it");
+    ui.c.fill_rect(rr.old, old);
+    ui.c.stroke_rrect(Rect::new(rr.new.x, rr.new.y, rr.new.w, rr.old.bottom() - rr.new.y), 0.0, 1.0, t.s(0x161819));
+    let hex = format!("#{:02x}{:02x}{:02x}", new.r, new.g, new.b);
+    ui.c.text_center(Font::new(13), Rect::new(rr.new.x, rr.old.bottom() + 4.0, rr.new.w, 20.0), t.text, &hex);
+    let b = rr.revert;
+    let hov = ui.hit(b, Action::Settings(SAct::PickRevert), "Back to the colours from before the picker opened");
+    if lemon {
+        lk::outlined(ui.c, b, lk::r_btn(t), t.s(0x161819), lk::face(t.s(0x2a2d2f), kit::State::hover(hov)));
+    } else {
+        kit::bordered(ui.c, b, 2.0, t.s(0x161819), kit::face(t.s(0x212425), kit::State::hover(hov)));
+    }
+    ui.c.text_center(Font::new(13), b, if hov { t.glyph } else { t.text }, "Revert");
 }
 
 /// Tab rects in window `r`: text width + 10 px each side, 4 px apart, 15 px more between groups.
@@ -1251,25 +1368,49 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 let name_bg = t.s(0x1d1e1f);
                 ui.c.fill_rrect(nr, rad, name_bg);
                 ui.c.fill_rect(Rect::new(nr.x, nr.y, nr.w, rad), name_bg);
-                ui.c.text_center(Font::new(13).bold(), nr, t.text, name);
+                let f = ui.c.fit_font(Font::new(13).bold(), name, nr.w - 6.0);
+                ui.c.text_center(f, nr, t.text, name);
             }
         }
+        // The applied theme's values and colours, edited live (spec: ui/theme-presets.md §C, `crate::theme_adjust`).
         Row::ThemeKnobs => {
-            for (i, k) in ["Hue", "Saturation", "Brightness", "Contrast", "Text"].iter().enumerate() {
+            use crate::theme_adjust::{self as adj, KNOBS, SWATCHES};
+            let text = adj::applied_text(s, t.style.design);
+            let th = os_theme::FlTheme::parse(&text);
+            for (i, k) in KNOBS.iter().enumerate() {
                 let cx = x0 + 28.0 + i as f32 * 61.0;
-                kit::knob(ui.c, t, cx, y + 24.0, 14.0, 0.5, true, kit::KnobLook::Ring, kit::State::NORMAL);
-                ui.c.text_center(Font::new(13), Rect::new(cx - 30.0, y + 42.0, 60.0, 18.0), t.text, k);
+                let v = adj::knob_value(&th, i);
+                let act = Action::Settings(SAct::ThemeKnob(i as u8));
+                let held = ui.held(&act);
+                let hint = format!("{} (drag or scroll; middle click: the theme's own value)", k.text(v));
+                let hov = ui.hit(Rect::new(cx - 28.0, y + 4.0, 56.0, 58.0), act, hint);
+                kit::knob(ui.c, t, cx, y + 24.0, 14.0, k.pos(v), true, kit::KnobLook::Ring, kit::State::hover(hov || held));
+                ui.c.text_center(Font::new(13), Rect::new(cx - 30.0, y + 42.0, 60.0, 18.0), t.text, k.label);
             }
-            let cols = [t.a(0xa6d84a), t.h(0xfb9244), t.led(0x7cd317), t.h(0xe8502a), t.s(0x3a3c3e), t.h(0xf0a040), t.a(0x8fa8c8), t.tx(0xcfd1d2)];
-            for (i, k) in ["Selection", "Highlight", "Mute", "Option", "Steps", "Meters", "Waves", "Text"].iter().enumerate() {
-                let cx = x0 + 28.0 + i as f32 * 61.0;
-                ui.c.fill_circle(cx, y + 92.0, 16.0, t.s(0x111213));
-                ui.c.fill_circle(cx, y + 92.0, 14.5, cols[i]);
+            let open = s.settings.picker.as_ref().map(|p| p.swatch);
+            for (i, k) in SWATCHES.iter().enumerate() {
+                let (cx, cy) = (x0 + 28.0 + i as f32 * 61.0, y + 92.0);
+                let parts = adj::parts(&text, i);
+                let cr = Rect::new(cx - 16.0, cy - 16.0, 32.0, 32.0);
+                let hint = format!("{k} colour: click to pick");
+                let hov = if i == adj::STEPS {
+                    let l = ui.hit(Rect::new(cr.x, cr.y, 16.0, 32.0), Action::Settings(SAct::Swatch(i as u8, 0)), format!("{k} colour (even groups): click to pick"));
+                    let r = ui.hit(Rect::new(cx, cr.y, 16.0, 32.0), Action::Settings(SAct::Swatch(i as u8, 1)), format!("{k} colour (odd groups): click to pick"));
+                    l || r
+                } else {
+                    ui.hit(cr, Action::Settings(SAct::Swatch(i as u8, 0)), hint)
+                };
+                let ring = if open == Some(i) {
+                    if super::lemon(ui) { t.brand_sel(os_theme::design::lemon::MAIN) } else { t.a(0x2d7cd0) }
+                } else if hov {
+                    t.s(0x8a8c8e)
+                } else {
+                    t.s(0x111213)
+                };
+                ui.c.fill_circle(cx, cy, 16.0, ring);
+                pie(ui.c, cx, cy, 14.5, &parts.iter().map(|p| p.colour).collect::<Vec<_>>());
                 ui.c.text_center(Font::new(13), Rect::new(cx - 30.0, y + 110.0, 60.0, 18.0), t.text, k);
             }
-            let r = Rect::new(x0, y, g.w - 24.0, 130.0);
-            ui.off(r, "Theme adjustments");
-            grey(ui, r);
         }
         Row::Gap(_) => {}
         Row::Pair(a, b) => {
