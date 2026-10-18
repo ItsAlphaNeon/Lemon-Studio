@@ -3584,7 +3584,8 @@ impl App {
     }
 
     pub(crate) fn take_look(&mut self, s: crate::backdrop::System) {
-        let a = os_theme::etched::Appearance { dark: s.dark, accent: s.accent.unwrap_or(os_theme::etched::DEFAULT_ACCENT) };
+        // Dark whatever the system says, for now (`os_theme::etched::set_appearance`).
+        let a = os_theme::etched::Appearance { dark: true, accent: s.accent.unwrap_or(os_theme::etched::DEFAULT_ACCENT) };
         if !self.look.set(s) {
             return;
         }
@@ -4036,7 +4037,7 @@ impl App {
                 if let Some(d) = Design::ALL.get(i).copied() {
                     self.set_design(d, true);
                     self.state.message = Some(if d == Design::Etched {
-                        "Skin: Etched (Ctrl+Shift+E tunes its look)".to_string()
+                        "Skin: Etched (more graphically intensive than the other skins; Ctrl+Shift+E tunes its look)".to_string()
                     } else {
                         format!("Skin: {}", d.name())
                     });
@@ -10359,6 +10360,64 @@ mod tests {
         assert!(app.state.shown(Win::Tapper) && app.state.in_front(Win::Tapper));
         click(&mut app, &mut c, b);
         assert!(!app.state.shown(Win::Tapper));
+    }
+
+    /// Paint times of the skins (run by hand: `cargo test --release -p os-app skin_paint_times -- --ignored --nocapture`):
+    /// a full frame, hovering an open menu's rows and scrolling the playlist, at 150 %.
+    #[test]
+    #[ignore]
+    fn skin_paint_times() {
+        use std::time::Instant;
+        let (w, h, k) = (2880, 1620, 1.5);
+        let px: Vec<u32> = (0..240 * 135u32).map(|i| if (i % 240) / 8 % 2 == 0 { 0xd0_4020 } else { 0x20_60d0 } + (i / 240) / 2).collect();
+        let px = std::rc::Rc::new(px);
+        for d in [Design::Lemon, Design::Etched] {
+            let mut c = Canvas::new(w, h, k).unwrap();
+            let mut app = App::new(None);
+            app.state.project = test_project();
+            app.theme = design_theme(d, false);
+            if os_theme::etched::see_through(&app.theme.colors) {
+                c.set_backdrop(Some(os_ui::Backdrop { w: 240, h: 135, px: px.clone(), at: Rect::new(0.0, 0.0, 1920.0, 1080.0) }));
+            }
+            frame(&mut app, &mut c, None);
+            let time = |n: usize, f: &mut dyn FnMut()| {
+                let t0 = Instant::now();
+                for _ in 0..n {
+                    f();
+                }
+                t0.elapsed().as_secs_f64() * 1000.0 / n as f64
+            };
+            let full = time(10, &mut || frame(&mut app, &mut c, None));
+            // The window dragged: the backdrop moves under it, all repaints.
+            let mut x = 0.0;
+            let drag = time(10, &mut || {
+                x -= 2.0;
+                if let Some(b) = c.backdrop().cloned() {
+                    c.set_backdrop(Some(os_ui::Backdrop { at: Rect::new(x, 0.0, b.at.w, b.at.h), ..b }));
+                }
+                frame(&mut app, &mut c, None);
+            });
+            let pl = app.state.win_rect(Win::Playlist);
+            let mut dir = 1.0;
+            let scroll = time(20, &mut || {
+                app.mouse_move(pl.cx(), pl.cy());
+                dir = -dir;
+                app.wheel(0.0, dir, false, false);
+                let d = app.take_damage();
+                frame_damage(&mut app, &mut c, d);
+            });
+            app.state.menu_open = Some(0);
+            frame(&mut app, &mut c, None);
+            let _ = app.take_damage();
+            let mut i = 0;
+            let hover = time(20, &mut || {
+                i += 1;
+                app.mouse_move(60.0, if i % 2 == 0 { 100.0 } else { 160.0 });
+                let d = app.take_damage();
+                frame_damage(&mut app, &mut c, d);
+            });
+            println!("{:>7}: full {full:6.1} ms, window drag {drag:6.1} ms, playlist scroll {scroll:6.1} ms, menu hover {hover:6.1} ms", d.name());
+        }
     }
 
     /// Etched (spec: ui/etched-design.md §7): with the backdrop under the frame and a frosted menu open, repainting

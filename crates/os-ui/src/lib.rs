@@ -97,6 +97,11 @@ pub struct Canvas {
     drawn: Option<(i32, i32, i32, i32)>,
     /// What a see-through `clear` shows (`set_backdrop`).
     backdrop: Option<Backdrop>,
+    /// The backdrop enlarged to device px, made on first use and kept while it, its place and the canvas stay.
+    backdrop_px: Option<frost::BackdropPx>,
+    /// The last frosted panels and shadows drawn, to draw again without working them out (`frost::KEEP`).
+    kept_frost: Vec<frost::KeptFrost>,
+    kept_shadow: Vec<frost::KeptShadow>,
     /// Where frosted panels and their shadows were drawn since the last `take_frosted` (logical, with their reach).
     frosted: Vec<Rect>,
 }
@@ -164,6 +169,9 @@ impl Canvas {
             glyphs: Lru::new(16 << 20),
             drawn: None,
             backdrop: None,
+            backdrop_px: None,
+            kept_frost: Vec::new(),
+            kept_shadow: Vec::new(),
             frosted: Vec::new(),
         })
     }
@@ -568,10 +576,7 @@ impl Canvas {
         if self.backdrop.is_none() {
             return self.fill_rect(r, c.with_alpha(255));
         }
-        self.fill_backdrop(r);
-        if c.a > 0 {
-            self.fill_rect(r, c);
-        }
+        self.fill_backdrop(r, c);
     }
 
     /// True when `b` (logical, padded by `pad`) lies entirely outside the current clip.

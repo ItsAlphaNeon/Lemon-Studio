@@ -253,9 +253,15 @@ fn cables(ui: &mut Ui, s: &State, strips: Rect, area: Rect, bottom: f32) {
     }
     cables.end();
     // Cables between inserts are clipped where the inserts scroll; those into the master are not.
+    // Etched's knobs are see-through (os_ui::kit::etched::knob): a cable ends at its knob's ring, not under it.
+    let see_through = ui.t.style.etched();
     for (master, pts, col) in cables.each() {
         ui.c.push_clip(if master { strips } else { area });
-        ui.c.polyline(pts, 2.0, col);
+        if see_through {
+            ui.c.polyline(&end_at_ring(pts, 13.0), 2.0, col);
+        } else {
+            ui.c.polyline(pts, 2.0, col);
+        }
         ui.c.pop_clip();
     }
     drop(cables);
@@ -271,6 +277,28 @@ fn cables(ui: &mut Ui, s: &State, strips: Rect, area: Rect, bottom: f32) {
         send_knob(ui, s, n, socket_x(n), ky, level);
         ui.c.pop_clip();
     }
+}
+
+/// A cable's points (its knob at the last) cut where they first come within `r` of the knob's centre.
+fn end_at_ring(pts: &[(f32, f32)], r: f32) -> Vec<(f32, f32)> {
+    let Some(&c) = pts.last() else { return Vec::new() };
+    let dist = |p: (f32, f32)| (p.0 - c.0).hypot(p.1 - c.1);
+    let Some(i) = pts.iter().position(|&p| dist(p) < r) else { return pts.to_vec() };
+    let mut out = pts[..i].to_vec();
+    if let Some(&a) = out.last() {
+        // Where the segment into the ring crosses it (the distance falls from outside to inside along it).
+        let b = pts[i];
+        let (da, db) = (dist(a), dist(b));
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..12 {
+            let m = (lo + hi) / 2.0;
+            if dist((a.0 + (b.0 - a.0) * m, a.1 + (b.1 - a.1) * m)) > r { lo = m } else { hi = m }
+        }
+        if da > r && db < r {
+            out.push((a.0 + (b.0 - a.0) * lo, a.1 + (b.1 - a.1) * lo));
+        }
+    }
+    out
 }
 
 fn title_tools(ui: &mut Ui, s: &State, r: Rect) {

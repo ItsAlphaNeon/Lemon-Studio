@@ -341,6 +341,10 @@ pub const SAVE_PRESET: &str = "Save preset...";
 pub const THEME_UNDO: &str = "Undo";
 pub const THEME_REDO: &str = "Redo";
 pub const FIX_TEXT: &str = "Fix text";
+/// The note under the skins while Etched is chosen.
+pub const ETCHED_NOTE: &str = "Etched is more graphically intensive than the other skins: it may slow drawing on some computers.";
+/// The colour of warning marks.
+const WARN: Color = Color::rgb(0xffb020);
 pub const RESET_WORK_TIME: &str = "Reset working time";
 /// General ▸ Input: opens the Manage shortcuts window (`App::open_shortcuts`).
 pub const MANAGE_SHORTCUTS: &str = "Manage shortcuts";
@@ -430,6 +434,8 @@ pub enum Row {
     ThemeKnobs,
     /// Theme: the applied theme's text is hard to read; a Fix text button (`crate::theme_library`).
     ThemeWarn,
+    /// Theme: a caution under the skins (a warning mark and a line of text).
+    SkinNote(&'static str),
     Gap(f32),
     /// Two controls on one line: left one, right one (right-hand column at x 304).
     Pair(Box<Row>, Box<Row>),
@@ -713,8 +719,13 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // ui/theme-presets.md "Settings".
             let skins = os_theme::Design::ALL.iter().map(|d| d.name().to_string()).collect();
             let themes = st.themes.iter().map(|(n, _)| n.clone()).collect();
+            // Etched draws see-through, blurred layers (spec: ui/etched-design.md): it costs more to draw.
+            let mut skin_rows = vec![Tiles(TileList::Skins, skins, st.skin)];
+            if os_theme::Design::ALL.get(st.skin) == Some(&os_theme::Design::Etched) {
+                skin_rows.push(SkinNote(ETCHED_NOTE));
+            }
             vec![
-                g("Skins", vec![Tiles(TileList::Skins, skins, st.skin)]),
+                g("Skins", skin_rows),
                 g("Themes", vec![Tiles(TileList::Themes, themes, st.preset)]),
             ]
             .into_iter()
@@ -843,6 +854,7 @@ fn row_h(r: &Row) -> f32 {
         Row::Tiles(_, t, _) => t.len().div_ceil(TILES_PER_ROW) as f32 * TILE_PITCH_Y + 4.0,
         Row::ThemeKnobs => 140.0,
         Row::ThemeWarn => 36.0,
+        Row::SkinNote(_) => 24.0,
         Row::Gap(h) => *h,
         Row::Pair(a, b) => row_h(a).max(row_h(b)),
         Row::Dim(_, r) => row_h(r),
@@ -1470,11 +1482,16 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 kit::bordered(ui.c, b, 2.0, t.s(0x161819), kit::face(t.s(0x212425), kit::State::hover(hov)));
             }
             ui.c.text_center(Font::new(13), b, if hov { t.glyph } else { t.text }, FIX_TEXT);
-            let warn = Color::rgb(0xffb020);
             let (cx, cy) = (b.right() + 20.0, cy);
-            ui.c.fill_circle(cx, cy, 8.0, warn);
+            ui.c.fill_circle(cx, cy, 8.0, WARN);
             ui.c.text_center(Font::new(13).bold(), Rect::new(cx - 8.0, cy - 8.0, 16.0, 16.0), Color::rgb(0x1a1a1a), "!");
             ui.c.text_clip(f, cx + 14.0, ty, g.right() - 12.0 - (cx + 14.0), t.text, "Text is hard to read on some surfaces with these colours.");
+        }
+        Row::SkinNote(text) => {
+            let (cx, cy) = (x0 + 8.0, cy);
+            ui.c.fill_circle(cx, cy, 7.0, WARN);
+            ui.c.text_center(Font::new(12).bold(), Rect::new(cx - 7.0, cy - 7.0, 14.0, 14.0), Color::rgb(0x1a1a1a), "!");
+            ui.c.text_clip(f, cx + 14.0, ty, g.right() - 12.0 - (cx + 14.0), t.text_dim, text);
         }
         // The applied theme's values and colours, edited live (spec: ui/theme-presets.md §C, `crate::theme_adjust`).
         Row::ThemeKnobs => {

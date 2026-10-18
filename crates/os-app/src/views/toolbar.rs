@@ -562,7 +562,10 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         return;
     }
     let lemon = super::lemon(ui);
-    if lemon {
+    if t.style.etched() {
+        // Etched: the same see-through well as the hint bar.
+        super::sunken(ui, mb, t.sunken);
+    } else if lemon {
         os_ui::kit::lemon::panel(ui.c, mb, 6.0, t.menu_panel);
     } else {
         ui.c.fill_rect_gradient(mb, t.menu_panel.shade(-0.04), t.menu_panel.shade(0.02), 2.5);
