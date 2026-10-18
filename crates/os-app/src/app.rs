@@ -315,6 +315,10 @@ pub enum Scroll {
     RackY,
     /// Playlist picker list.
     PlPick,
+    /// The settings window's page (spec: ui/settings.md).
+    Settings,
+    /// Settings ▸ Plugins: the plugin table (whole rows).
+    PlugTable,
 }
 
 /// A scroll bar painted this frame.
@@ -358,13 +362,14 @@ enum Damage {
 const BAR_ROW_STEP: f32 = 1.15;
 const BAR_ROW_PX: f32 = 12.0;
 
-/// The window a scroll target scrolls.
-pub(crate) fn scroll_win(t: Scroll) -> Win {
+/// The window a scroll target scrolls (`None`: the settings window, repainted whole).
+pub(crate) fn scroll_win(t: Scroll) -> Option<Win> {
     match t {
-        Scroll::PianoX | Scroll::PianoY | Scroll::PitchY => Win::PianoRoll,
-        Scroll::PlaylistX | Scroll::PlaylistY | Scroll::PlPick => Win::Playlist,
-        Scroll::MixerX => Win::Mixer,
-        Scroll::RackX | Scroll::RackY => Win::ChannelRack,
+        Scroll::PianoX | Scroll::PianoY | Scroll::PitchY => Some(Win::PianoRoll),
+        Scroll::PlaylistX | Scroll::PlaylistY | Scroll::PlPick => Some(Win::Playlist),
+        Scroll::MixerX => Some(Win::Mixer),
+        Scroll::RackX | Scroll::RackY => Some(Win::ChannelRack),
+        Scroll::Settings | Scroll::PlugTable => None,
     }
 }
 
@@ -2831,6 +2836,14 @@ impl App {
         t
     }
 
+    /// Repaint what scroll target `t` scrolls.
+    pub(crate) fn damage_scroll(&mut self, t: Scroll) {
+        match scroll_win(t) {
+            Some(w) => self.damage_win(w),
+            None => self.invalidate(),
+        }
+    }
+
     pub(crate) fn damage_win(&mut self, w: Win) {
         if !self.state.shown(w) {
             return self.invalidate();
@@ -3988,7 +4001,7 @@ impl App {
                     // Keep the content that was centred in view, then add the horizontal drag.
                     self.scroll_set(t, (center * k - view / 2.0) + (x - m0.0) * ratio * k);
                     let _ = p0;
-                    self.damage_win(scroll_win(t));
+                    self.damage_scroll(t);
                 }
                 Drag::BarRows { t, last, row } => {
                     // Only when it moved up/down: the clamp uses last frame's bar, stale once the rows were resized.
@@ -4001,7 +4014,7 @@ impl App {
                         r
                     });
                     self.drag = Some(Drag::BarRows { t, last: (x, y), row });
-                    self.damage_win(scroll_win(t));
+                    self.damage_scroll(t);
                 }
                 Drag::PianoRowZoom { y0, row0 } => {
                     if let Some(g) = self.piano_geom() {
@@ -4023,7 +4036,7 @@ impl App {
                             self.playlist_scrolled(before);
                         } else {
                             self.scroll_set(t, v);
-                            self.damage_win(scroll_win(t));
+                            self.damage_scroll(t);
                         }
                     }
                 }
@@ -4585,6 +4598,8 @@ impl App {
             Scroll::RackX => s.rack_scroll_x,
             Scroll::RackY => s.rack_scroll,
             Scroll::PlPick => s.playlist.pick_scroll,
+            Scroll::Settings => s.settings.scroll,
+            Scroll::PlugTable => s.plugdb.top as f32 * views::settings::TABLE_ROW_H,
         }
     }
 
@@ -4604,6 +4619,8 @@ impl App {
             Scroll::RackX => s.rack_scroll_x = v,
             Scroll::RackY => s.rack_scroll = v,
             Scroll::PlPick => s.playlist.pick_scroll = v,
+            Scroll::Settings => s.settings.scroll = v,
+            Scroll::PlugTable => s.plugdb.top = (v / views::settings::TABLE_ROW_H).round() as usize,
         }
     }
 
@@ -5389,7 +5406,7 @@ impl App {
             self.browser_wheel(dy + dx);
             return None;
         }
-        if matches!(area, Some(Action::Settings(views::settings::SAct::Plug(views::settings::Plug::Table | views::settings::Plug::Row(_) | views::settings::Plug::Star(_) | views::settings::Plug::Show(_))))) {
+        if matches!(area, Some(Action::Settings(views::settings::SAct::Plug(views::settings::Plug::Table | views::settings::Plug::Row(_) | views::settings::Plug::Star(_) | views::settings::Plug::Show(_)))) | Some(Action::Scrollbar(Scroll::PlugTable))) {
             let n = self.state.plugdb.rows.len();
             let top = self.state.plugdb.top as f32 - (dy + dx) * 3.0;
             self.state.plugdb.top = (top.max(0.0) as usize).min(n.saturating_sub(views::settings::TABLE_ROWS));
@@ -5421,7 +5438,7 @@ impl App {
             }
             return None;
         }
-        if matches!(area, Some(Action::Settings(_))) {
+        if matches!(area, Some(Action::Settings(_) | Action::Scrollbar(Scroll::Settings))) {
             let s = &self.state;
             let max = (views::settings::content_h(s) - views::settings::page_h(s)).max(0.0);
             self.state.settings.scroll = (self.state.settings.scroll - (dy + dx) * 63.0).min(max).max(0.0);
@@ -5461,7 +5478,7 @@ impl App {
             // An editor's bar scrolls at the scrolling speeds (`crate::scroll_speed`); the picker list keeps its step.
             let (dx, dy) = if shift || t == Scroll::PlPick { (dx, dy) } else { crate::scroll_speed::scaled(dx, dy) };
             self.scroll_set(t, self.scroll_get(t) - (dy + dx) * step);
-            return Some(scroll_win(t));
+            return scroll_win(t);
         }
         // Piano roll (spec: ui/piano-roll.md §3a): Alt+wheel over the ruler zooms time; the keyboard takes the wheel
         // like the grid (scroll, Ctrl = time zoom); the keys zoom with Ctrl+middle-drag.
@@ -9164,6 +9181,60 @@ mod tests {
 
     /// Settings window (spec: ui/settings.md): OPTIONS entries open their tab, tabs switch, checks and
     /// group folds toggle, the General page scrolls, Esc closes; every tab paints.
+    /// Every scroll bar drags (spec: ui/scroll-bars.md): the settings page's and the Plugins table's too, by the thumb
+    /// or by a press on the track, which jumps the thumb there first.
+    #[test]
+    fn settings_scroll_bars_drag() {
+        use crate::views::settings::{GENERAL, PLUGINS};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        let drag = |app: &mut App, c: &mut Canvas, t: Scroll, dy: f32| {
+            frame(app, c, None);
+            let b = app.bar(t).unwrap_or_else(|| panic!("{t:?} has a bar"));
+            let (x, y) = (b.track.cx(), b.track.y + b.thumb / 2.0);
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_move(x, y + dy);
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        app.open_settings(GENERAL);
+        drag(&mut app, &mut c, Scroll::Settings, 60.0);
+        let after = app.state.settings.scroll;
+        assert!(after > 0.0, "the page scrolled");
+        drag(&mut app, &mut c, Scroll::Settings, -1000.0);
+        assert_eq!(app.state.settings.scroll, 0.0, "back to the top, no further");
+        // A press low on the track jumps there.
+        let b = app.bar(Scroll::Settings).unwrap();
+        click(&mut app, &mut c, Rect::new(b.track.x, b.track.bottom() - 4.0, b.track.w, 1.0));
+        assert!(app.state.settings.scroll > after);
+
+        app.open_settings(PLUGINS);
+        let row = |i: usize| crate::plugin_db::TableRow {
+            uid: format!("u{i}"),
+            name: format!("Plugin {i}"),
+            format: "CLAP",
+            kind: "Effect",
+            vendor: String::new(),
+            status: String::new(),
+            file: String::new(),
+            path: String::new(),
+            note: String::new(),
+            favorite: false,
+            shown: true,
+            dim: false,
+            toggles: true,
+        };
+        app.state.plugdb.rows = (0..80).map(row).collect();
+        app.state.plugdb.all_rows = app.state.plugdb.rows.clone();
+        drag(&mut app, &mut c, Scroll::PlugTable, 40.0);
+        let top = app.state.plugdb.top;
+        assert!(top > 0, "the table scrolled by whole rows");
+        assert!(top + crate::views::settings::TABLE_ROWS <= 80);
+        drag(&mut app, &mut c, Scroll::PlugTable, 2000.0);
+        assert_eq!(app.state.plugdb.top, 80 - crate::views::settings::TABLE_ROWS, "to the last row, no further");
+    }
+
     #[test]
     fn settings_window() {
         use crate::views::menus::{item_at, OPTIONS_MENU};
