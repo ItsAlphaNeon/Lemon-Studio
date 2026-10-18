@@ -1316,7 +1316,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::new("Show waveform preview", Cmd::Nothing).off(),
         PItem::sep(),
         PItem::sub("Insert", crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(Some(r)), true)),
-        PItem::not_yet("Replace"),
+        PItem::sub("Replace", crate::plugin_menu::items(s, crate::plugin_menu::Target::Replace(r), true)),
         PItem::new("Patcherize", Cmd::Nothing).off(),
         it("Clone", RCmd::Clone(r)),
         it("Delete...", RCmd::Delete(r)),

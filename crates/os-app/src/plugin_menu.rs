@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -19,6 +20,8 @@ pub enum PlugCmd {
     /// Generator `index` (into `Plugins::available`): a new channel at the bottom of the rack, or right below row
     /// `after`.
     Generator { index: usize, after: Option<usize> },
+    /// Generator `index` in place of rack row `row`'s (channel menu / plugin window menu > Replace ▸).
+    Replace { index: usize, row: usize },
     /// Effect `index` (into `Plugins::effects`) into the selected mixer track: slot `slot`, else its first empty slot.
     Effect { index: usize, slot: Option<u8> },
     /// Find new plugins (a background scan).
@@ -35,6 +38,8 @@ pub enum Target {
     All,
     /// Generators: a new channel at the bottom (`None`) or right below row `r`.
     Gen(Option<usize>),
+    /// Generators in place of rack row `r`'s generator.
+    Replace(usize),
     /// Effects into the selected track: slot `k`, else its first empty slot.
     Fx(Option<u8>),
 }
@@ -44,6 +49,7 @@ fn pick(target: Target, effect: bool, index: usize) -> Cmd {
         (Target::Fx(slot), _) => PlugCmd::Effect { index, slot },
         (_, true) => PlugCmd::Effect { index, slot: None },
         (Target::Gen(after), false) => PlugCmd::Generator { index, after },
+        (Target::Replace(row), false) => PlugCmd::Replace { index, row },
         (Target::All, false) => PlugCmd::Generator { index, after: None },
     })
 }
@@ -123,7 +129,7 @@ pub fn items(s: &State, target: Target, nested: bool) -> Vec<PItem> {
             v.push(PItem::head("Effects"));
             v.extend(section(s, true, target, nested));
         }
-        Target::Gen(_) => v.extend(section(s, false, target, nested)),
+        Target::Gen(_) | Target::Replace(_) => v.extend(section(s, false, target, nested)),
         Target::Fx(_) => v.extend(section(s, true, target, nested)),
     }
     v.extend(footer(s));
@@ -163,6 +169,7 @@ impl App {
 pub fn run(app: &mut App, c: PlugCmd) -> Option<String> {
     let m = match c {
         PlugCmd::Generator { index, after } => add_generator(app, index, after),
+        PlugCmd::Replace { index, row } => replace_generator(app, index, row),
         PlugCmd::Effect { index, slot } => add_effect(app, index, slot),
         PlugCmd::Find => {
             app.start_scan(Mode::Changed);
@@ -212,6 +219,38 @@ pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Optio
         s.rack_scroll = (crate::views::rack::content_h(s) - view_h).max(0.0);
     }
     sampler.then(|| "Added a sampler channel (Lemon Sampler)".into())
+}
+
+/// Generator `index` in place of rack row `row`'s (channel menu and plugin window menu > Replace ▸; FL: "the plugin list
+/// of Add one", spec ui/channel-rack.md §18). The channel keeps its row, notes and steps, mixer track, levels and
+/// Misc settings; its old instance goes, the new one starts from its defaults, and the channel takes the new
+/// plugin's name. Lemon Studio choice where FL was not measured: the name follows the plugin.
+pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<String> {
+    let d = app.plugins.available.get(index)?.desc.clone();
+    app.state.project.channels.get(row)?;
+    let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
+    app.plugins.drop_key(row);
+    app.state.hosted_rows.retain(|&r| r != row);
+    app.transport.set_instruments(app.plugins.instruments());
+    let s = &mut app.state;
+    let ch = &mut s.project.channels[row];
+    ch.plugin_state = None;
+    if sampler {
+        ch.kind = os_model::ChannelKind::Sampler;
+        ch.plugin = None;
+        ch.sample_path = None;
+        ch.name = Some(d.name.clone());
+        s.pending_open = Some(row);
+    } else {
+        ch.kind = os_model::ChannelKind::Plugin;
+        ch.plugin = Some(crate::osc3::file_name(&d.name).to_string());
+        ch.name = Some(d.name.clone());
+        s.pending_plugin = Some((row, index));
+    }
+    s.piano.dirty = true;
+    s.selected_channel = row;
+    s.rack.select_only(row);
+    Some(format!("Replaced with {}", d.name))
 }
 
 /// Effect `index` into the selected mixer track (spec §1): slot `slot`, else the first empty one.
