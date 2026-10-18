@@ -1059,7 +1059,7 @@ pub struct App {
     pub hover: Option<Action>,
     /// Action under the cursor while the left button is held (pressed look of buttons).
     pub pressed: Option<Action>,
-    /// A window button pressed and not released yet (`acts_on_release`).
+    /// A button pressed and not released yet (`acts_on_release`).
     armed: Option<Action>,
     /// A toolbar button right-pressed and not released yet: (its hit, what the release over it runs).
     armed_right: Option<(Action, Action)>,
@@ -4395,23 +4395,112 @@ impl App {
         changed
     }
 
-    /// Window buttons act on the release over the same button instead of on the press, like the system's own (owner,
-    /// 2026-10-15: acting on the press made accidental closes easy): the main window's minimize, maximize / restore and
-    /// exit, the child windows' minimize, maximize and close, the × of a dialog, the Settings window and the Advanced
-    /// fill window. The press arms one; moving off it before releasing lets it go.
-    fn acts_on_release(a: &Action) -> bool {
-        matches!(
-            a,
-            Action::Minimize
-                | Action::Maximize
-                | Action::Close
-                | Action::MinWin(_)
-                | Action::MaxWin(_)
-                | Action::CloseWin(_)
-                | Action::Dlg(crate::dialog::DHit::Close)
-                | Action::Settings(crate::views::settings::SAct::Close)
-                | Action::RackFill(crate::rack::FillHit::Close)
-        )
+    /// Plain buttons, switches and menu entries act on the release over the same control instead of on the press, like
+    /// the system's own (owner, 2026-10-15 for the window buttons, 2026-10-18 for the rest: acting on the press made
+    /// accidental clicks easy). The press arms one; moving off it before releasing lets it go. What a press starts stays
+    /// on the press: drags (knobs, faders, sliders, value boxes, scroll bars, grids, steps, window title bars), menu and
+    /// list openers, list rows, text fields, scroll bar arrows and the tempo tapper's pad.
+    fn acts_on_release(&self, a: &Action) -> bool {
+        use crate::dialog::DHit;
+        use crate::mixer::MHit;
+        use crate::project_forms::FHit;
+        use crate::views::settings::{Plug, SAct};
+        match a {
+            Action::Settings(sa) => matches!(
+                sa,
+                SAct::Close
+                    | SAct::Tab(_)
+                    | SAct::Check(_)
+                    | SAct::Group(_)
+                    | SAct::Button(_)
+                    | SAct::Preset(_)
+                    | SAct::FolderPick(_)
+                    | SAct::Plug(Plug::Folder(_) | Plug::Remove(_) | Plug::Prefer(_) | Plug::Sort(_) | Plug::Star(_) | Plug::Show(_))
+            ),
+            // A filled effect slot's name opens its window; an empty one's opens the effect menu.
+            Action::Mix(MHit::SlotName(i)) => crate::mixer::slot_name(&self.state, self.state.selected_mixer, *i).is_some(),
+            Action::Mix(h) => matches!(
+                h,
+                MHit::Led(_) | MHit::Polarity(_) | MHit::Swap(_) | MHit::Route(_) | MHit::Unroute(_) | MHit::Add | MHit::AddAfter | MHit::SlotLed(_)
+            ),
+            Action::Dlg(h) => matches!(
+                h,
+                DHit::Close
+                    | DHit::Button(_)
+                    | DHit::Remember
+                    | DHit::Back
+                    | DHit::Up
+                    | DHit::NewFolder
+                    | DHit::Place(_)
+                    | DHit::Header(_)
+                    | DHit::FilterItem(_)
+                    | DHit::Accept
+                    | DHit::Cancel
+                    | DHit::ShortcutChoice(_)
+                    | DHit::ResetAll
+                    | DHit::Apply
+                    | DHit::Form(FHit::Check(_) | FHit::Main | FHit::Skip | FHit::Auto | FHit::Folder | FHit::Item(_) | FHit::Fold)
+            ),
+            Action::Perf(p) => matches!(p, crate::perf::PerfAct::Sort(_) | crate::perf::PerfAct::ResetOnTransport | crate::perf::PerfAct::Freeze),
+            Action::Tapper(t) => *t == crate::tapper::TapAct::Apply,
+            Action::CableDebug(d) => !matches!(d, crate::cable::DebugAct::Param(_)),
+            Action::TypeIn(t) => !matches!(t, crate::typein::TiAct::Field),
+            Action::Pat(h) => {
+                use crate::patterns::Hit;
+                matches!(h, Hit::Accept | Hit::Cancel | Hit::Suggest(..) | Hit::Swatch(_) | Hit::ConfirmOk | Hit::ConfirmCancel | Hit::ConfirmRemember)
+            }
+            Action::RackFill(h) => !matches!(h, crate::rack::FillHit::Inside),
+            _ => matches!(
+                a,
+                Action::Placeholder(_)
+                    | Action::Typing
+                    | Action::Metronome
+                    | Action::AutoScroll
+                    | Action::EnableGroups
+                    | Action::StepEdit
+                    | Action::Clock
+                    | Action::GlobalSnapToggle
+                    | Action::Monitor
+                    | Action::MonReset
+                    | Action::MonSave
+                    | Action::MonClose
+                    | Action::Minimize
+                    | Action::Maximize
+                    | Action::Close
+                    | Action::Play
+                    | Action::Stop
+                    | Action::PatSong(_)
+                    | Action::MenuItem(..)
+                    | Action::ToggleWin(_)
+                    | Action::PatternAdd
+                    | Action::ChannelSelect(_)
+                    | Action::ChannelEnable(_)
+                    | Action::Util(_)
+                    | Action::RackRollView
+                    | Action::RackRoll(_)
+                    | Action::CloseWin(_)
+                    | Action::MinWin(_)
+                    | Action::MaxWin(_)
+                    | Action::BrowserTab(_)
+                    | Action::BrowserCollapse
+                    | Action::BrowserReread
+                    | Action::PianoUndo
+                    | Action::PianoTool(_)
+                    | Action::PianoLanePick(_)
+                    | Action::PlTool(_)
+                    | Action::PlLed(_)
+                    | Action::PlGroupArrow(_)
+                    | Action::PlStretch
+                    | Action::PlPickTab(_)
+                    | Action::PlPickAdd
+                    | Action::PlPopup(_)
+                    | Action::RackSpeaker
+                    | Action::RackLoop
+                    | Action::RackGraph
+                    | Action::RackGraphTab(_)
+                    | Action::SongInfo
+            ),
+        }
     }
 
     pub fn mouse_down(&mut self) {
@@ -4440,7 +4529,7 @@ impl App {
                 return;
             }
             if let Some(Action::Dlg(h)) = action {
-                if Self::acts_on_release(&Action::Dlg(h.clone())) {
+                if self.acts_on_release(&Action::Dlg(h.clone())) {
                     self.armed = Some(Action::Dlg(h));
                 } else {
                     self.dialog_click(h);
@@ -4450,8 +4539,12 @@ impl App {
         }
         // The value box is modal: only its own parts take clicks (spec: ui/type-in-value.md §1).
         if crate::typein::is_open(&self.state) {
-            if let Some(Action::TypeIn(a)) = action {
-                crate::typein::click(&mut self.state, a);
+            if let Some(a @ Action::TypeIn(_)) = action {
+                if self.acts_on_release(&a) {
+                    self.armed = Some(a);
+                } else {
+                    self.act(a);
+                }
             }
             return;
         }
@@ -4509,7 +4602,7 @@ impl App {
         }
         self.raise_under_mouse();
         if let Some(a) = action {
-            if Self::acts_on_release(&a) {
+            if self.acts_on_release(&a) {
                 self.armed = Some(a);
             } else {
                 self.act(a);
@@ -4907,11 +5000,12 @@ impl App {
     }
 
     fn release(&mut self) {
-        // An armed window button acts if the release is over it (`acts_on_release`).
+        // An armed button acts if the release is over it (`acts_on_release`).
         if let Some(a) = self.armed.take() {
             let (x, y) = self.mouse;
             if self.top_hit(x, y).is_some_and(|h| h.action == a) {
                 self.act(a);
+                self.rack_pending();
                 self.invalidate();
             }
         }
@@ -6611,7 +6705,8 @@ impl App {
             Action::CloseWin(Win::Perf) => self.close_perf(),
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch => {}
-            Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow | Action::TypeIn(_) => {}
+            Action::TypeIn(t) => crate::typein::click(s, t),
+            Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
             Action::PlTool(_)
             | Action::PlSnap
             | Action::PlOptions
@@ -8514,6 +8609,44 @@ mod tests {
         assert_eq!(px(&a), idle, "back to idle after release and moving away");
     }
 
+    #[test]
+    fn buttons_act_on_release() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        // A button: nothing on the press, its work on the release over it.
+        let r = hit_rect(&app, &Action::ToggleWin(Win::Browser));
+        let shown = app.state.show_browser;
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        assert_eq!(app.state.show_browser, shown, "the press does nothing yet");
+        app.mouse_up();
+        assert_ne!(app.state.show_browser, shown, "the release over the button toggles it");
+        frame(&mut app, &mut c, None);
+        // Moving off before the release lets it go.
+        let r = hit_rect(&app, &Action::ToggleWin(Win::Browser));
+        let shown = app.state.show_browser;
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_move(900.0, 600.0);
+        app.mouse_up();
+        assert_eq!(app.state.show_browser, shown, "a release off the button does nothing");
+        frame(&mut app, &mut c, None);
+        // A menu opens on the press; its entry acts on the release.
+        let m = hit_rect(&app, &Action::Menu(0));
+        app.mouse_move(m.cx(), m.cy());
+        app.mouse_down();
+        assert_eq!(app.state.menu_open, Some(0), "the menu opens on the press");
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        let item = app.hits.iter().find(|h| matches!(h.action, Action::MenuItem(0, _))).map(|h| (h.action.clone(), h.rect)).unwrap();
+        app.mouse_move(item.1.cx(), item.1.cy());
+        app.mouse_down();
+        assert_eq!(app.state.menu_open, Some(0), "the entry's press keeps the menu");
+        app.mouse_up();
+        assert_eq!(app.state.menu_open, None, "the entry's release runs it and closes the menu");
+    }
+
     /// A damage-region repaint must give the pixels of a full repaint (anti-aliased edges cut by
     /// the damage rect may round by a level or two in tiny-skia's masked pipeline).
     #[test]
@@ -8649,14 +8782,18 @@ mod tests {
         check(&mut app, &mut a, &mut b, "automation clip hovered");
         app.mouse_move(ar.x + 20.0, ar.bottom() + 60.0);
         check(&mut app, &mut a, &mut b, "automation clip left");
-        // A plain click on a tool button: the press repaints everything, the release just the button.
+        // A plain click on a tool button: the press only shows it pressed, the release picks the tool.
         let tool = hit_rect(&app, &Action::PlTool(crate::playlist::PlTool::Paint));
         app.mouse_move(tool.cx(), tool.cy());
         app.mouse_down();
+        assert_eq!(app.state.playlist.tool, crate::playlist::PlTool::Draw, "the press doesn't pick the tool");
         let d = app.take_damage();
         frame_damage(&mut app, &mut a, d);
         app.mouse_up();
-        check(&mut app, &mut a, &mut b, "tool button released");
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut a, d);
+        frame(&mut app, &mut b, None);
+        assert_same(&a, &b, "tool button released");
         assert_eq!(app.state.playlist.tool, crate::playlist::PlTool::Paint);
         app.state.playlist.tool = crate::playlist::PlTool::Draw;
         app.invalidate();
