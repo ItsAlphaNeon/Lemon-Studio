@@ -3252,7 +3252,7 @@ impl App {
         };
         let overlays = views::paint(&mut ui, &self.state, &info);
         if self.state.cables.get_mut().take_slowed() {
-            self.state.message = Some("Mixer cables hang still: the mixer is too slow to redraw them swinging (they try again with a new route or another current track)".into());
+            self.state.message = Some("Mixer cables hang still: the mixer is too slow to redraw them swinging (General settings > Animations)".into());
             self.damage_win(Win::Mixer);
         }
         self.keep.parts = std::mem::take(&mut self.keep.next);
@@ -3728,7 +3728,7 @@ impl App {
         use crate::audio_cfg::{Set, BUFFERS, RATES};
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         use views::settings::{ANIMATIONS, BUFFER_LENGTH, OUTPUT_DEVICE, SAMPLE_RATE};
-        let still = !self.state.cables.borrow().animations();
+        let still = self.state.cables.borrow().still_cables;
         let st = &self.state.settings;
         let cfg = &st.audio;
         let rate = st.rate.unwrap_or(44100);

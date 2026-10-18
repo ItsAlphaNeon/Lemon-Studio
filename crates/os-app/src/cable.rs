@@ -32,7 +32,7 @@ const CURVE: usize = 128;
 const SETTLE_MAX: usize = 2400;
 /// A mixer paint (simulation included) slower than this while the cables swing is slow...
 const SLOW: std::time::Duration = std::time::Duration::from_millis(8);
-/// ...and this many slow paints in a row hang the cables still, until a new cable is plugged in.
+/// ...and this many slow paints in a row hang the cables still for the session.
 const SLOW_PAINTS: u32 = 8;
 
 /// A tunable factor of the simulation.
@@ -163,16 +163,8 @@ pub struct Cables {
     pub tuning: Tuning,
     /// The debug panel is open.
     pub debug: bool,
-    /// No simulation, every cable hangs still in its pre-rendered shape: animations are off, or the mixer was too
-    /// slow to redraw the cables swinging.
+    /// Animations off: no simulation, every cable hangs still in its pre-rendered shape.
     pub still_cables: bool,
-    /// General settings ▸ Animations is off.
-    off: bool,
-    /// The mixer was too slow to redraw the cables swinging (`paint_cost`).
-    too_slow: bool,
-    /// A cable that was not there before was plugged in this paint (`connect`), or the current track changed (its
-    /// cables are drawn anew).
-    plugged: bool,
     /// Pre-rendered shapes by span (rounded, px), relative to the first socket.
     shapes: std::collections::HashMap<(i32, i32), Vec<Pt>>,
     ropes: Vec<Rope>,
@@ -229,40 +221,19 @@ impl Cables {
     /// Turn the simulation on or off (General settings ▸ Animations). Off, the cables snap to their pre-rendered
     /// shapes at the next paint; on, they start from there.
     pub fn animate(&mut self, on: bool) {
-        self.off = !on;
-        self.too_slow = false;
-        self.update();
-    }
-
-    /// General settings ▸ Animations as the user set it (the cables may hang still anyway, `paint_cost`).
-    pub fn animations(&self) -> bool {
-        !self.off
-    }
-
-    fn update(&mut self) {
-        self.still_cables = self.off || self.too_slow;
+        self.still_cables = !on;
         self.still = None;
         self.slow = 0;
     }
 
     /// A mixer paint that ran while the cables swung took `cost`. Once the mixer has been too slow to redraw them
-    /// at animation rate (a large project with many sends), they hang still in their pre-rendered shapes until a
-    /// new cable is plugged in (`end`); the Animations setting stays as the user set it.
+    /// at animation rate (a large project with many sends), they hang still in their pre-rendered shapes, for this
+    /// session: the saved Animations setting stands, and choosing "Entertain me" tries again.
     pub fn paint_cost(&mut self, cost: std::time::Duration) {
         self.slow = if cost + std::mem::take(&mut self.sim) > SLOW { self.slow + 1 } else { 0 };
         if self.slow >= SLOW_PAINTS {
-            self.too_slow = true;
-            self.update();
+            self.animate(false);
             self.slowed = true;
-        }
-    }
-
-    /// A new cable was plugged in (a new route, another current track, the mixer shown again): cables made still for
-    /// being slow to redraw swing again, while animations are on, and `paint_cost` measures again.
-    fn retry(&mut self) {
-        if self.too_slow {
-            self.too_slow = false;
-            self.update();
         }
     }
 
@@ -278,7 +249,6 @@ impl Cables {
             Some(c) if current < c => -1.0,
             _ => 0.0,
         };
-        self.plugged |= self.current != Some(current);
         self.current = Some(current);
         for r in &mut self.ropes {
             r.seen = false;
@@ -294,7 +264,6 @@ impl Cables {
         let n = ((len / tu.v[k::SPACING]).round() as usize + 1).clamp(MIN_POINTS, MAX_POINTS);
         let seg = len / (n - 1) as f32;
         let tug = tu.v[k::TUG];
-        self.plugged |= !self.ropes.iter().any(|r| r.key == key);
         if self.still_cables {
             return self.hang_still(key, a, b, master, color, seg);
         }
@@ -359,9 +328,6 @@ impl Cables {
     /// The paint is over: unplug cables it did not connect, and give the rest the track change's kick and lift.
     pub fn end(&mut self) {
         self.ropes.retain(|r| r.seen);
-        if std::mem::take(&mut self.plugged) {
-            self.retry();
-        }
         let (kick, lift) = (self.tuning.v[k::KICK], self.tuning.v[k::LIFT]);
         if self.still_cables || self.switched == 0.0 || (kick == 0.0 && lift == 0.0) {
             return;
@@ -658,33 +624,10 @@ mod tests {
         c.paint_cost(ms(20));
         assert!(c.still_cables && !c.moving(), "slow paints in a row hang the cables still");
         assert!(c.take_slowed() && !c.take_slowed(), "reported once");
-        // The user's setting is still on; turning animations back on tries again.
-        assert!(c.animations());
+        // Turning animations back on tries again.
         c.animate(true);
         c.paint_cost(ms(20));
         assert!(!c.still_cables);
-        // A new cable tries again too (a new route, or another track's cables), and the measuring starts over: slow
-        // again, still again. The same cables painted again are not new.
-        for _ in 0..SLOW_PAINTS {
-            c.paint_cost(ms(20));
-        }
-        assert!(c.still_cables && c.take_slowed());
-        plug(&mut c, 1, &[(4, (50.0, 200.0), (230.0, 198.0))]);
-        assert!(c.still_cables, "no new cable");
-        plug(&mut c, 1, &[(4, (50.0, 200.0), (230.0, 198.0)), (5, (50.0, 200.0), (270.0, 198.0))]);
-        assert!(!c.still_cables && c.animations() && c.moving(), "a new route");
-        for _ in 0..SLOW_PAINTS - 1 {
-            c.paint_cost(ms(20));
-        }
-        assert!(!c.still_cables, "a fresh count after the retry");
-        c.paint_cost(ms(20));
-        assert!(c.still_cables);
-        plug(&mut c, 2, &[(4, (90.0, 200.0), (230.0, 198.0))]);
-        assert!(!c.still_cables, "another current track, even with a cable to the same place");
-        // With animations off a new cable leaves them still.
-        c.animate(false);
-        plug(&mut c, 1, &[(4, (50.0, 200.0), (230.0, 198.0))]);
-        assert!(c.still_cables && !c.animations());
     }
 
     #[test]
