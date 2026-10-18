@@ -369,16 +369,33 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         let filled = pick_used(s, src);
         let k = if hov { 0.05 } else { 0.0 };
         let lemon = super::lemon(ui);
+        // The source's colour, as its clips' titles take it (§2): an audio or automation clip's channel colour, a
+        // pattern's own colour when it has one; an unused source a darker shade of it.
+        let tint = match src {
+            ClipSource::Pattern(_) => pl::source_color(s, src),
+            ClipSource::Channel(_) => pl::clip_tint(s, src),
+        }
+        .map(rgb);
+        let (edge, face) = match tint {
+            Some(c) if filled => (offset(c, -42), offset(c, -17)),
+            Some(c) => (offset(c, -70), offset(c, -55)),
+            None if filled => (ui.t.s(0x2f3539), ui.t.s(0x464e53)),
+            None => (ui.t.s(0x2a2d2e), ui.t.s(0x2a2d2e)),
+        };
+        let face = face.shade(k);
         if filled && lemon {
-            lk::outlined(ui.c, row, lk::r_btn(ui.t), ui.t.s(0x2f3539), ui.t.s(0x464e53).shade(k));
+            lk::outlined(ui.c, row, lk::r_btn(ui.t), edge, face);
             preview(ui, s, src, row.inset(3.0));
         } else if filled {
-            // Used source: grey button with a faint preview of its contents (pl_asher.png).
-            ui.c.fill_rect(row, ui.t.s(0x2f3539));
-            ui.c.fill_rect(row.inset(1.0), ui.t.s(0x464e53).shade(k));
+            // Used source: a button with a faint preview of its contents (pl_asher.png).
+            ui.c.fill_rect(row, edge);
+            ui.c.fill_rect(row.inset(1.0), face);
             preview(ui, s, src, row.inset(3.0));
         } else if lemon {
-            ui.c.fill_rrect(row, lk::r_btn(ui.t), ui.t.s(0x2a2d2e).shade(k));
+            ui.c.fill_rrect(row, lk::r_btn(ui.t), face);
+        } else if tint.is_some() {
+            ui.c.fill_rect(row, edge);
+            ui.c.fill_rect(row.inset(1.0), face);
         } else {
             // Empty pattern: dark face (owner's FL screenshot).
             ui.c.fill_rect_gradient(row, ui.t.s(0x2a2d2e).shade(k), ui.t.s(0x232627).shade(k), 0.0);
