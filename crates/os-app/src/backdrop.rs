@@ -100,14 +100,17 @@ pub fn read(picture: Option<PathBuf>) -> System {
     System { dark, accent: sys::accent(), desktop: sys::desktop(dark, picture) }
 }
 
+/// What a backdrop was made for (`State::backdrop`).
+type Key = (u32, u32, bool, Frost, f32);
+
 /// What the app keeps: the last reading and the backdrop made from it.
 #[derive(Default)]
 pub struct State {
     pub system: Option<System>,
     /// When the system was last asked (reads on focus are spaced out).
     pub asked: Option<Instant>,
-    /// The frosted backdrop, by what it was made for: (monitor px w, h, dark).
-    made: Option<((u32, u32, bool), Rc<Vec<u32>>, usize, usize)>,
+    /// The frosted backdrop, by what it was made for: monitor px w, h, dark, and the tuning it was made with.
+    made: Option<(Key, Rc<Vec<u32>>, usize, usize)>,
 }
 
 impl State {
@@ -132,7 +135,7 @@ impl State {
 
     /// The frosted backdrop for a monitor of `mw` x `mh` px: (pixels, w, h).
     pub fn backdrop(&mut self, mw: u32, mh: u32, dark: bool) -> (Rc<Vec<u32>>, usize, usize) {
-        let key = (mw.max(1), mh.max(1), dark);
+        let key = (mw.max(1), mh.max(1), dark, os_theme::etched::backdrop_frost(dark), os_theme::etched::backdrop_blur(dark));
         if let Some((k, px, w, h)) = &self.made {
             if *k == key {
                 return (px.clone(), *w, *h);
@@ -154,8 +157,8 @@ pub fn frosted(desk: Option<&Desktop>, accent: Color, mw: u32, mh: u32, dark: bo
         Some(d) => laid_out(d, w, h).unwrap_or_else(|| generated(accent, w, h, dark)),
         None => generated(accent, w, h, dark),
     };
-    // Heavy: about 1/12 of the monitor's height.
-    let r = (h / 24).max(2);
+    // The tuned blur is in screen px; the picture is `h / mh` of the screen.
+    let r = (os_theme::etched::backdrop_blur(dark) * h as f32 / mh.max(1) as f32).round() as usize;
     os_ui::blur(&mut p.px, w, h, r, 3);
     let f: Frost = os_theme::etched::backdrop_frost(dark);
     for v in &mut p.px {

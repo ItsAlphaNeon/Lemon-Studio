@@ -1169,6 +1169,7 @@ fn screenshot(args: &[String]) {
     let mut theme: Option<std::path::PathBuf> = None;
     let mut design: Option<os_theme::Design> = None;
     let mut look: (bool, Option<os_theme::Color>, Option<std::path::PathBuf>) = (true, None, None);
+    let (mut etched_debug, mut tunes) = (false, Vec::<String>::new());
     let mut scale = 1.0f32;
     let mut size: Option<(u32, u32)> = None;
     let mut bar_w: Option<f32> = None;
@@ -1193,6 +1194,9 @@ fn screenshot(args: &[String]) {
             "--look" => look.0 = it.next().is_none_or(|v| v != "light"),
             "--accent" => look.1 = it.next().and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok()).map(os_theme::Color::rgb),
             "--wallpaper" => look.2 = it.next().map(std::path::PathBuf::from),
+            // The Etched look's debug panel open, and its values: `--tune "Backdrop opacity=0.3"` (the current mode's).
+            "--etched-debug" => etched_debug = true,
+            "--tune" => tunes.extend(it.next().cloned()),
             // Device pixels per logical one (the frame stays 1920x1080 logical): 1.5 = Windows at 150 %.
             "--scale" => scale = it.next().and_then(|v| v.parse().ok()).filter(|s: &f32| *s >= 0.5 && *s <= 4.0).unwrap_or(1.0),
             "--view" => view = it.next().cloned().unwrap_or_default(),
@@ -1301,6 +1305,12 @@ fn screenshot(args: &[String]) {
     }
     os_theme::etched::set_appearance(os_theme::etched::Appearance { dark: look.0, accent: look.1.unwrap_or(os_theme::etched::DEFAULT_ACCENT) });
     let mut app = App::new(path);
+    app.state.etched_debug = etched_debug;
+    let mut tuning = os_theme::etched::tuning();
+    for line in &tunes {
+        tuning.load(&format!("{}.{line}", if look.0 { "dark" } else { "light" }));
+    }
+    os_theme::etched::set_tuning(tuning);
     let picture = look.2.as_deref().and_then(backdrop::load);
     app.take_look(backdrop::System { dark: look.0, accent: look.1, desktop: backdrop::Desktop { picture, fit: backdrop::Fit::Fill, colour: None } });
     if let Some(i) = insert {

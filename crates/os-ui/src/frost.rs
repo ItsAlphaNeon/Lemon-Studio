@@ -124,9 +124,11 @@ pub fn frost_pixel(v: u32, f: &Frost) -> u32 {
     let (y, ty) = (luma(c), luma(t));
     let y2 = y + (ty - y) * f.luminosity;
     let mut out = [0.0f32; 3];
+    let b = f.brightness.clamp(-1.0, 1.0);
     for i in 0..3 {
         let v = y2 + (c[i] - y) * f.chroma;
-        out[i] = v + (t[i] - v) * f.tint_opacity;
+        let v = v + (t[i] - v) * f.tint_opacity;
+        out[i] = if b >= 0.0 { v + (255.0 - v) * b } else { v * (1.0 + b) };
     }
     let q = |v: f32| v.round().clamp(0.0, 255.0) as u32;
     q(out[0]) << 16 | q(out[1]) << 8 | q(out[2])
@@ -201,6 +203,16 @@ fn dither(v: u32, n: u32, grain: i64) -> u8 {
     ((i64::from(v) + i64::from(n) + (i64::from(n) - 32768) * grain) >> 16).clamp(0, 255) as u8
 }
 
+/// The backdrop's grain in `dither` units (its tuning, in the current dark or light).
+fn backdrop_grain() -> i64 {
+    grain_of(os_theme::etched::backdrop_frost(os_theme::etched::appearance().dark).noise)
+}
+
+/// Grain (0..1 of a level step) in `dither` units.
+fn grain_of(noise: f32) -> i64 {
+    (noise * 510.0).round() as i64
+}
+
 /// `new` over `old` by coverage `cov` (0..1).
 fn blend(old: PremultipliedColorU8, new: [u8; 3], cov: f32) -> PremultipliedColorU8 {
     if cov >= 1.0 {
@@ -254,13 +266,14 @@ impl Canvas {
         let mut e = Enlarge::new(&b.px, b.w, b.h, o, f, x0, x1);
         let mut row = Vec::with_capacity((x1 - x0) as usize);
         let pw = self.pixmap.width() as usize;
+        let g = backdrop_grain();
         let pixels = self.pixmap.pixels_mut();
         for y in y0..y1 {
             e.row(y, &mut row);
             let line = &mut pixels[y as usize * pw + x0 as usize..y as usize * pw + x1 as usize];
             for ((p, c), x) in line.iter_mut().zip(&row).zip(x0..) {
                 let n = noise(x, y);
-                *p = PremultipliedColorU8::from_rgba(dither(c[0], n, 0), dither(c[1], n, 0), dither(c[2], n, 0), 255).expect("opaque");
+                *p = PremultipliedColorU8::from_rgba(dither(c[0], n, g), dither(c[1], n, g), dither(c[2], n, g), 255).expect("opaque");
             }
         }
     }
@@ -282,7 +295,7 @@ impl Canvas {
         let target = (dx as i32, dy as i32, (dx + dw) as i32, (dy + dh) as i32);
         let rr = (r.x * k, r.y * k, r.right() * k, r.bottom() * k);
         let (o, f) = self.backdrop_map(&b);
-        self.enlarge_in(target, rr, radius * k, (&b.px, b.w, b.h), o, f, 0);
+        self.enlarge_in(target, rr, radius * k, (&b.px, b.w, b.h), o, f, backdrop_grain());
     }
 
     /// Draws a small picture enlarged (`Enlarge`) over device rect `target`, clipped and masked by the rounded rect
@@ -424,8 +437,7 @@ impl Canvas {
         let rr = (r.x * k, r.y * k, r.right() * k, r.bottom() * k);
         // The small picture's px `i` covers device px sx0 + i * d .. + d.
         let (o, fxy) = ((sx0 as f32, sy0 as f32), (1.0 / d as f32, 1.0 / d as f32));
-        let grain = (f.noise * 510.0).round() as i64;
-        self.enlarge_in(target, rr, radius * k, (&small, sw, sh), o, fxy, grain);
+        self.enlarge_in(target, rr, radius * k, (&small, sw, sh), o, fxy, grain_of(f.noise));
     }
 }
 
@@ -446,7 +458,7 @@ mod tests {
 
     #[test]
     fn frost_pulls_towards_the_tint() {
-        let f = Frost { tint: os_theme::Color::rgb(0x202020), tint_opacity: 0.8, luminosity: 1.0, chroma: 0.7, noise: 0.0 };
+        let f = Frost { tint: os_theme::Color::rgb(0x202020), tint_opacity: 0.8, luminosity: 1.0, chroma: 0.7, noise: 0.0, brightness: 0.0 };
         let v = frost_pixel(0xffffff, &f);
         assert_eq!(v, 0x202020, "white: lightness to the tint's, then the tint");
         let blue = frost_pixel(0x2060ff, &f);
@@ -472,7 +484,7 @@ mod tests {
         c.clear(os_theme::Color::rgb(0).with_alpha(0));
         let at = |c: &Canvas, x: u32, y: u32| c.pixmap.pixel(x, y).map(|p| p.red()).unwrap_or(0);
         assert!(at(&c, 2, 16) < 20 && at(&c, 60, 16) > 235, "left dark, right light");
-        let f = Frost { tint: os_theme::Color::rgb(0x808080), tint_opacity: 0.0, luminosity: 0.0, chroma: 1.0, noise: 0.0 };
+        let f = Frost { tint: os_theme::Color::rgb(0x808080), tint_opacity: 0.0, luminosity: 0.0, chroma: 1.0, noise: 0.0, brightness: 0.0 };
         c.frost(Rect::new(16.0, 4.0, 32.0, 24.0), 4.0, 12.0, &f);
         let mid = at(&c, 32, 16);
         assert!(mid > 60 && mid < 200, "blurred across the edge: {mid}");

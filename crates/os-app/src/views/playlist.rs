@@ -72,7 +72,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // The grid covers most of the window and is painted all over (rows and gaps): the frame skips it.
     let (fr, fc) = super::frame_rects(s, Win::Playlist, r);
     let cover = grid_rect(s, fr, fc);
-    ui.c.set_cover((fr.h >= 2.0 * crate::app::TITLE_H).then_some(cover));
+    // (Not under see-through rows, Etched: the frame's body shows through them.)
+    ui.c.set_cover((fr.h >= 2.0 * crate::app::TITLE_H && t.grid.a == 255).then_some(cover));
     let (r, client) = super::framed(ui, s, Win::Playlist, r, &title, 281.0, true);
     ui.c.set_cover(None);
     // The arrangement name opens the arrangement menu; hovered it turns orange with a down arrow (§12, as FL).

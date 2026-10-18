@@ -161,6 +161,8 @@ pub enum Action {
     MonClose,
     /// Cable physics debug panel (views/cabledebug.rs).
     CableDebug(crate::cable::DebugAct),
+    /// The Etched look's debug panel (views/etcheddebug.rs).
+    EtchedDebug(crate::cable::DebugAct),
     Minimize,
     Maximize,
     Close,
@@ -743,6 +745,8 @@ pub enum Drag {
     MonParam(usize),
     /// Cable physics debug panel slider.
     CableParam(usize),
+    /// Etched debug panel slider.
+    EtchedParam(usize),
     /// Piano roll: move notes (originals by index), resize their ends, erase, draw velocities.
     NoteMove { x0: f32, y0: f32, orig: Vec<(usize, Note)> },
     NoteResize { x0: f32, orig: Vec<(usize, Note)> },
@@ -886,6 +890,8 @@ pub struct State {
     pub browser_dirs: std::cell::RefCell<std::collections::HashMap<PathBuf, std::rc::Rc<Vec<views::browser::Entry>>>>,
     /// The mixer's routing cables, hung by the mixer view as it paints and swung on the tick.
     pub cables: std::cell::RefCell<crate::cable::Cables>,
+    /// The Etched look's debug panel is open (Ctrl+Shift+E on the Etched skin; views/etcheddebug.rs).
+    pub etched_debug: bool,
     pub browser_scroll: f32,
     pub browser_sel: Option<String>,
     pub browser_drag: Option<(String, f32, f32)>,
@@ -1146,6 +1152,7 @@ pub struct App {
 /// Window-level requests the shell must carry out after an event.
 impl App {
     pub fn new(path: Option<PathBuf>) -> App {
+        os_theme::etched::set_tuning(load_etched_cfg());
         let transport = Transport::new(os_engine::SampleLibrary::default_factory_dir());
         // Tests keep the old five-channel template; a new session starts with one Lemon Sampler channel.
         #[cfg(test)]
@@ -1199,6 +1206,7 @@ impl App {
                     c.animate(load_animations());
                     c
                 }),
+                etched_debug: false,
                 browser_scroll: 0.0,
                 browser_sel: None,
                 browser_drag: None,
@@ -2446,7 +2454,9 @@ impl App {
             && self.loading.is_none()
             && self.export.is_none()
             && self.state.playlist.overlay.is_none()
-            && !self.state.monitor.debug;
+            && !self.state.monitor.debug
+            // A see-through grid (Etched) shows the backdrop, which does not move with the playlist.
+            && self.theme.colors.grid.a == 255;
         if !can {
             return self.damage_win(Win::Playlist);
         }
@@ -2967,6 +2977,59 @@ impl App {
         self.damage_rect(views::cabledebug::PANEL);
         self.damage_rect(HINT_RECT);
         self.damage_win(Win::Mixer);
+    }
+
+    /// The Etched debug panel's controls (views/etcheddebug.rs). The values are the current mode's (dark or light).
+    fn etched_debug(&mut self, d: crate::cable::DebugAct) {
+        use crate::cable::DebugAct;
+        use os_theme::etched::{self as et, Tuning};
+        let dark = et::appearance().dark;
+        match d {
+            DebugAct::Param(i) => {
+                self.drag = Some(Drag::EtchedParam(i));
+                let x = self.mouse.0;
+                return self.set_etched_param(i, x);
+            }
+            DebugAct::Reset => {
+                let mut t = et::tuning();
+                for i in 0..et::PARAMS.len() {
+                    t.set(dark, i, Tuning::default_of(dark, i));
+                }
+                et::set_tuning(t);
+                return self.etched_tuned();
+            }
+            DebugAct::Save => {
+                self.state.message = Some(match save_etched_cfg(&et::tuning()) {
+                    Ok(p) => format!("Etched look saved to {}", p.display()),
+                    Err(e) => format!("Etched look not saved: {e}"),
+                });
+            }
+            DebugAct::Close => self.state.etched_debug = false,
+        }
+        self.invalidate();
+    }
+
+    /// Etched debug panel slider `i` follows mouse x.
+    fn set_etched_param(&mut self, i: usize, x: f32) {
+        use os_theme::etched as et;
+        let t = views::etcheddebug::slider(i);
+        let p = &et::PARAMS[i];
+        let k = ((x - t.x) / t.w).clamp(0.0, 1.0);
+        let dark = et::appearance().dark;
+        let mut tu = et::tuning();
+        tu.set(dark, i, p.min + (p.max - p.min) * k);
+        et::set_tuning(tu);
+        self.hint = Cow::Owned(format!("{}: {}", p.name, tu.text(dark, i)));
+        self.etched_tuned();
+    }
+
+    /// The Etched look's tuning changed: the backdrop is made again on the next frame, the colours (the editors'
+    /// opacity) are made again, and everything repaints.
+    fn etched_tuned(&mut self) {
+        if self.design() == Design::Etched {
+            self.reskin(Design::Etched, true);
+        }
+        self.invalidate();
     }
 
     /// The monitor is moving (a signal or a decay), or the tapper's pad fading: the shell should tick at animation rate.
@@ -3972,7 +4035,11 @@ impl App {
             SAct::Skin(i) => {
                 if let Some(d) = Design::ALL.get(i).copied() {
                     self.set_design(d, true);
-                    self.state.message = Some(format!("Skin: {}", d.name()));
+                    self.state.message = Some(if d == Design::Etched {
+                        "Skin: Etched (Ctrl+Shift+E tunes its look)".to_string()
+                    } else {
+                        format!("Skin: {}", d.name())
+                    });
                 }
             }
             SAct::Button("Reset") => {
@@ -4373,6 +4440,10 @@ impl App {
                 }
                 Drag::CableParam(i) => {
                     self.set_cable_param(i, x);
+                    return true;
+                }
+                Drag::EtchedParam(i) => {
+                    self.set_etched_param(i, x);
                     return true;
                 }
                 Drag::SongPos { dx } => self.song_pos_drag(dx),
@@ -4963,6 +5034,13 @@ impl App {
             self.state.cables.get_mut().set(i, crate::cable::PARAMS[i].default);
             self.damage_rect(views::cabledebug::PANEL);
             return self.damage_win(Win::Mixer);
+        }
+        if let Some(Action::EtchedDebug(crate::cable::DebugAct::Param(i))) = action {
+            let dark = os_theme::etched::appearance().dark;
+            let mut t = os_theme::etched::tuning();
+            t.set(dark, i, os_theme::etched::Tuning::default_of(dark, i));
+            os_theme::etched::set_tuning(t);
+            return self.etched_tuned();
         }
         if action == Some(Action::PianoRuler) {
             if let Some(g) = self.piano_geom() {
@@ -5687,6 +5765,17 @@ impl App {
             && c.eq_ignore_ascii_case("g")
         {
             return self.toggle_groups();
+        }
+        // Ctrl+Shift+E on the Etched skin: its look's debug panel (views/etcheddebug.rs).
+        if let Key::Character(c) = key
+            && ctrl
+            && self.shift
+            && !alt
+            && c.eq_ignore_ascii_case("e")
+            && self.theme.colors.style.etched()
+        {
+            self.state.etched_debug = !self.state.etched_debug;
+            return self.invalidate();
         }
         if self.plugin_find_key(key, ctrl) {
             return;
@@ -6447,6 +6536,7 @@ impl App {
                 self.invalidate();
             }
             Action::CableDebug(d) => self.cable_debug(d),
+            Action::EtchedDebug(d) => self.etched_debug(d),
             Action::Tempo => {
                 // The digit under the press sets the step: the whole number, else the decimal place it is over.
                 let x = self.mouse.0 / views::band_k(s); // the tempo box is laid out in band px
@@ -7342,6 +7432,32 @@ fn load_monitor_cfg() -> crate::monitor::Settings {
 
 fn cable_cfg_path() -> Option<PathBuf> {
     os_paths::user_file("cables.txt")
+}
+
+fn etched_cfg_path() -> Option<PathBuf> {
+    os_paths::user_file("etched.txt")
+}
+
+/// The Etched look's tuning from `etched.txt` in the user folder (written by its debug panel's Save), else the
+/// defaults. Tests use the defaults.
+pub(crate) fn load_etched_cfg() -> os_theme::etched::Tuning {
+    let mut t = os_theme::etched::Tuning::default();
+    if cfg!(test) {
+        return t;
+    }
+    if let Some(text) = etched_cfg_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        t.load(&text);
+    }
+    t
+}
+
+fn save_etched_cfg(t: &os_theme::etched::Tuning) -> Result<PathBuf, String> {
+    let p = etched_cfg_path().ok_or("no user folder")?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, t.dump()).map_err(|e| e.to_string())?;
+    Ok(p)
 }
 
 /// Cable physics factors from `cables.txt` in the user folder (written by the cable debug panel's Save), else
@@ -9185,10 +9301,12 @@ mod tests {
             let region = a.region();
             let area: f32 = region.iter().map(|r| r.w * r.h).sum();
             let moved = app.take_moved();
+            // A see-through grid (the Etched skin) shows the backdrop, which does not scroll: no moves, it repaints.
+            let opaque = app.theme.colors.grid.a == 255;
             if let Some(m) = moves {
-                assert_eq!(!moved.is_empty(), m, "{what}: the drawn pixels moved");
+                assert_eq!(!moved.is_empty(), m && opaque, "{what}: the drawn pixels moved");
             }
-            if small {
+            if small && opaque {
                 assert!(area < pl.w * pl.h / 4.0, "{what}: painted {area} of {} px²: {region:?}", pl.w * pl.h);
             }
             frame(app, b, None);
@@ -9325,7 +9443,7 @@ mod tests {
         for (what, dx, dy) in [("covered: down", 0.0, -1.0), ("covered: right", -2.0, 0.0), ("covered: up", 0.0, 2.0), ("covered: left", 1.0, 0.0)] {
             app.wheel(dx, dy, false, false);
             let region = check(&mut app, &mut a, &mut b, what, Some(true), false);
-            for inside in insides {
+            for inside in insides.into_iter().filter(|_| app.theme.colors.grid.a == 255) {
                 let painted: f32 = region.iter().map(|r| r.intersect(&inside)).map(|r| r.w * r.h).sum();
                 assert!(painted < inside.w * inside.h / 10.0, "{what} at {scale}: painted {painted} px² inside {inside:?}: {region:?}");
             }

@@ -258,7 +258,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let lemon = super::lemon(ui);
     let hv = crate::high_visibility::on();
     // Frame (§1). Lemon (spec: ui/lemon-design.md §5): one rounded outlined panel.
-    if lemon {
+    if t.style.etched() {
+        // Etched (spec: ui/etched-design.md §5): a window of its own over the desktop: the backdrop, a see-through body,
+        // a hairline.
+        ui.c.backdrop_rrect(win, lk::r_panel(t), t.window_body);
+        ui.c.fill_rrect(win, lk::r_panel(t), t.window_body);
+        ui.c.stroke_rrect(win.inset(0.5), lk::r_panel(t) - 0.5, 1.0, lk::edge(t));
+    } else if lemon {
         lk::outlined(ui.c, win, lk::r_panel(t), t.window_border, t.window_body);
     } else {
         ui.c.fill_rect(win, t.window_border);
@@ -273,7 +279,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
 
     // Rows panel (§1, §3).
     let inner = panel(win);
-    if lemon {
+    if t.style.etched() {
+        ui.c.fill_rrect(inner.outset(1.0), lk::r_btn(t), t.rack_inset);
+        os_ui::kit::etched::edge(ui.c, t, inner.outset(1.0), lk::r_btn(t));
+    } else if lemon {
         lk::outlined(ui.c, inner.outset(1.0), lk::r_btn(t), t.rack_inset_border, t.rack_inset);
     } else {
         ui.c.fill_rect(inner.outset(1.0), t.rack_inset_border);

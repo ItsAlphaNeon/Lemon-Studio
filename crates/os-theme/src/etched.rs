@@ -52,42 +52,219 @@ pub fn accent_shade(accent: Color, l: f32) -> Color {
 }
 
 /// How the backdrop is tinted: the blurred wallpaper's lightness is pulled to `tint`'s by `luminosity` (its colour
-/// mostly kept), then `tint` is laid over it at `tint_opacity`.
+/// kept by `chroma`), then `tint` is laid over it at `tint_opacity`, then the result lightened (`brightness` > 0) or
+/// darkened (< 0).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Frost {
     pub tint: Color,
     pub tint_opacity: f32,
     pub luminosity: f32,
-    /// How much of the wallpaper's colour survives (0..1).
+    /// How much of the wallpaper's colour survives (0 = grey; above 1 more vivid).
     pub chroma: f32,
-    /// Grain over the frosted panels (0..1 of a level step; 0 = none).
+    /// Grain (0..1 of a level step; 0 = none).
     pub noise: f32,
+    /// -1..1: toward black / white, after the tint.
+    pub brightness: f32,
+}
+
+/// A tunable value of the look (the Etched debug panel, views/etcheddebug.rs): its range and its default in dark and
+/// in light.
+pub struct Param {
+    pub name: &'static str,
+    pub dark: f32,
+    pub light: f32,
+    pub min: f32,
+    pub max: f32,
+    pub decimals: usize,
+    pub unit: &'static str,
+    pub hint: &'static str,
+}
+
+#[allow(clippy::too_many_arguments)]
+const fn p(name: &'static str, dark: f32, light: f32, min: f32, max: f32, decimals: usize, unit: &'static str, hint: &'static str) -> Param {
+    Param { name, dark, light, min, max, decimals, unit, hint }
+}
+
+/// Indices into `PARAMS`.
+pub mod k {
+    pub const BACK_BRIGHTNESS: usize = 0;
+    pub const BACK_FROST: usize = 1;
+    pub const BACK_OPACITY: usize = 2;
+    pub const BACK_LUMINOSITY: usize = 3;
+    pub const BACK_COLOUR: usize = 4;
+    pub const BACK_GRAIN: usize = 5;
+    pub const PANEL_BRIGHTNESS: usize = 6;
+    pub const PANEL_FROST: usize = 7;
+    pub const PANEL_OPACITY: usize = 8;
+    pub const PANEL_LUMINOSITY: usize = 9;
+    pub const PANEL_COLOUR: usize = 10;
+    pub const PANEL_GRAIN: usize = 11;
+    pub const CONTROLS: usize = 12;
+    pub const EDITORS: usize = 13;
+    pub const SURFACES: usize = 14;
+}
+
+/// What the debug panel tunes (spec: ui/etched-design.md §9). The first six make the backdrop, the next six the
+/// frosted panels; the last two set how see-through controls and the editors' surfaces are.
+pub const PARAMS: [Param; 15] = [
+    p("Backdrop brightness", 0.0, 0.0, -0.5, 0.5, 2, "", "Lightens (right) or darkens (left) the backdrop after its tint"),
+    p("Backdrop frost", 36.0, 36.0, 0.0, 160.0, 0, "px", "How far the desktop picture is blurred (on the screen)"),
+    p("Backdrop opacity", 0.5, 0.4, 0.0, 1.0, 2, "", "How much the base colour covers the desktop (0 = the picture shows fully)"),
+    p("Backdrop luminosity", 0.7, 0.65, 0.0, 1.0, 2, "", "How far the picture's lightness is pulled to the base colour's"),
+    p("Backdrop colour", 1.1, 1.0, 0.0, 2.0, 2, "x", "How much of the picture's colour is kept"),
+    p("Backdrop grain", 0.02, 0.02, 0.0, 0.12, 3, "", "Noise over the backdrop"),
+    p("Panel brightness", 0.0, 0.0, -0.5, 0.5, 2, "", "Lightens or darkens menus and popups"),
+    p("Panel frost", 30.0, 30.0, 0.0, 60.0, 0, "px", "How far what is behind a menu is blurred"),
+    p("Panel opacity", 0.45, 0.35, 0.0, 1.0, 2, "", "How much the panel colour covers what is behind a menu"),
+    p("Panel luminosity", 0.9, 0.8, 0.0, 1.0, 2, "", "How far what is behind a menu is pulled to the panel colour's lightness"),
+    p("Panel colour", 1.0, 1.0, 0.0, 2.0, 2, "x", "How much colour from behind a menu is kept"),
+    p("Panel grain", 0.03, 0.03, 0.0, 0.12, 3, "", "Noise over menus and popups"),
+    p("Control fill", 1.0, 1.0, 0.0, 3.0, 2, "x", "Strength of the see-through fills of buttons, fields and rows"),
+    p("Editor opacity", 0.55, 0.6, 0.0, 1.0, 2, "", "How solid an editor window's body is over the backdrop (1 = opaque)"),
+    p("Surface tint", 0.5, 0.5, 0.0, 1.0, 2, "", "How solid the surfaces inside an editor are over its body (grids, track headers, strips)"),
+];
+
+/// The editors' surfaces (`overrides`): see-through, so the backdrop shows through the whole window. A window's
+/// body (`window_body`) takes the tuned editor opacity, the surfaces inside it the surface tint. Lines and small parts
+/// stay solid.
+pub const EDITOR_SURFACES: [&str; 18] = [
+    "grid",
+    "grid_alt",
+    "grid_gap",
+    "ruler",
+    "track_header",
+    "window_body",
+    "mixer_bg",
+    "mixer_strip",
+    "mixer_strip_dark",
+    "pr_row",
+    "pr_row_black",
+    "pr_row_sel",
+    "pr_row_black_sel",
+    "rack_inset",
+    "rack_row_box",
+    "scrollbar",
+    "splitter",
+    "picker",
+];
+
+/// The look's tunable values, one set for dark and one for light (`PARAMS`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tuning {
+    pub dark: [f32; PARAMS.len()],
+    pub light: [f32; PARAMS.len()],
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Tuning { dark: PARAMS.map(|p| p.dark), light: PARAMS.map(|p| p.light) }
+    }
+}
+
+impl Tuning {
+    pub fn get(&self, dark: bool, i: usize) -> f32 {
+        if dark { self.dark[i] } else { self.light[i] }
+    }
+    pub fn default_of(dark: bool, i: usize) -> f32 {
+        if dark { PARAMS[i].dark } else { PARAMS[i].light }
+    }
+    pub fn set(&mut self, dark: bool, i: usize, x: f32) {
+        let p = &PARAMS[i];
+        // Dividing by a power of ten gives back exactly the literal a value was written as (defaults, etched.txt).
+        let scale = 10f32.powi(p.decimals as i32);
+        let v = ((x.clamp(p.min, p.max) * scale).round() / scale).clamp(p.min, p.max);
+        if dark { self.dark[i] = v } else { self.light[i] = v }
+    }
+    pub fn norm(&self, dark: bool, i: usize) -> f32 {
+        (self.get(dark, i) - PARAMS[i].min) / (PARAMS[i].max - PARAMS[i].min)
+    }
+    pub fn text(&self, dark: bool, i: usize) -> String {
+        let p = &PARAMS[i];
+        format!("{:.*} {}", p.decimals, self.get(dark, i), p.unit).trim_end().to_string()
+    }
+    /// `dark.<name> = value` and `light.<name> = value` lines (what the panel's Save writes, `load` reads).
+    pub fn dump(&self) -> String {
+        let mut out = String::new();
+        for (mode, v) in [("dark", &self.dark), ("light", &self.light)] {
+            for (p, x) in PARAMS.iter().zip(v) {
+                out += &format!("{mode}.{} = {x:.*}\n", p.name, p.decimals);
+            }
+        }
+        out
+    }
+    pub fn load(&mut self, text: &str) {
+        for line in text.lines() {
+            let Some((name, val)) = line.split_once('=') else { continue };
+            let Some((mode, name)) = name.trim().split_once('.') else { continue };
+            if let (Some(i), Ok(x)) = (PARAMS.iter().position(|p| p.name == name.trim()), val.trim().parse::<f32>()) {
+                self.set(mode != "light", i, x);
+            }
+        }
+    }
+}
+
+static TUNING: RwLock<Option<Tuning>> = RwLock::new(None);
+
+/// The look's values now (the defaults until the app loads `etched.txt` or the debug panel changes one).
+pub fn tuning() -> Tuning {
+    TUNING.read().ok().and_then(|g| *g).unwrap_or_default()
+}
+
+pub fn set_tuning(t: Tuning) {
+    if let Ok(mut g) = TUNING.write() {
+        *g = Some(t);
+    }
+}
+
+/// Value `i` of the current tuning in dark or light.
+pub fn tuned(dark: bool, i: usize) -> f32 {
+    tuning().get(dark, i)
 }
 
 /// The window backdrop (the wallpaper behind the window, blurred).
 pub fn backdrop_frost(dark: bool) -> Frost {
-    if dark {
-        Frost { tint: Color::rgb(0x202020), tint_opacity: 0.8, luminosity: 1.0, chroma: 0.7, noise: 0.0 }
-    } else {
-        Frost { tint: Color::rgb(0xf3f3f3), tint_opacity: 0.5, luminosity: 1.0, chroma: 0.6, noise: 0.0 }
+    let v = |i| tuned(dark, i);
+    Frost {
+        tint: base(dark),
+        tint_opacity: v(k::BACK_OPACITY),
+        luminosity: v(k::BACK_LUMINOSITY),
+        chroma: v(k::BACK_COLOUR),
+        noise: v(k::BACK_GRAIN),
+        brightness: v(k::BACK_BRIGHTNESS),
     }
 }
 
-/// Frosted panels (menus, the settings window, floating title bars) over the app's own content.
+/// How far the backdrop is blurred, in screen px.
+pub fn backdrop_blur(dark: bool) -> f32 {
+    tuned(dark, k::BACK_FROST)
+}
+
+/// Frosted panels (menus and popups) over the app's own content.
 pub fn panel_frost(dark: bool) -> Frost {
-    if dark {
-        Frost { tint: Color::rgb(0x2c2c2c), tint_opacity: 0.15, luminosity: 0.96, chroma: 0.9, noise: 0.02 }
-    } else {
-        Frost { tint: Color::rgb(0xfcfcfc), tint_opacity: 0.0, luminosity: 0.85, chroma: 0.9, noise: 0.02 }
+    let v = |i| tuned(dark, i);
+    Frost {
+        tint: if dark { Color::rgb(0x2c2c2c) } else { Color::rgb(0xfcfcfc) },
+        tint_opacity: v(k::PANEL_OPACITY),
+        luminosity: v(k::PANEL_LUMINOSITY),
+        chroma: v(k::PANEL_COLOUR),
+        noise: v(k::PANEL_GRAIN),
+        brightness: v(k::PANEL_BRIGHTNESS),
     }
 }
 
 /// Blur radius of the frosted panels, in logical px.
-pub const PANEL_BLUR: f32 = 30.0;
+pub fn panel_blur(dark: bool) -> f32 {
+    tuned(dark, k::PANEL_FROST)
+}
+
+/// The strength of the controls' see-through fills (1 = as designed).
+pub fn control_fill(dark: bool) -> f32 {
+    tuned(dark, k::CONTROLS)
+}
 
 /// Etched's base colour: the backdrop's tint, what see-through tokens are mixed with when there is no backdrop.
 pub fn base(dark: bool) -> Color {
-    backdrop_frost(dark).tint
+    if dark { Color::rgb(0x202020) } else { Color::rgb(0xf3f3f3) }
 }
 
 /// Lightness ramps for the role-mapped literals (`Palette::s`): classic lightness -> Etched lightness. Dark: the
@@ -186,8 +363,23 @@ pub fn on_accent(a: Appearance) -> Color {
 }
 
 /// Tokens Etched sets outright (all of them), for the current appearance. See-through tokens have alpha 0 (the
-/// backdrop shows) or a low alpha (a veil over it); their colour is what they mix toward without one.
+/// backdrop shows) or a low alpha (a veil over it); their colour is what they mix toward without one. The editors'
+/// surfaces take the tuned editor opacity.
 pub fn overrides(a: Appearance) -> Vec<(&'static str, Color)> {
+    let alpha = |i: usize| (tuned(a.dark, i) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let (body, inner) = (alpha(k::EDITORS), alpha(k::SURFACES));
+    let mut v = own(a);
+    for (name, c) in &mut v {
+        if *name == "window_body" {
+            *c = c.with_alpha(body);
+        } else if EDITOR_SURFACES.contains(name) {
+            *c = c.with_alpha(inner);
+        }
+    }
+    v
+}
+
+fn own(a: Appearance) -> Vec<(&'static str, Color)> {
     let c = Color::rgb;
     let k = accent(a);
     let on = on_accent(a);
@@ -490,6 +682,18 @@ mod tests {
         }
         let blue = accent_shade(DEFAULT_ACCENT, 0.65);
         assert!(blue.b > blue.g && blue.g > blue.r, "{blue:?}");
+    }
+
+    #[test]
+    fn tuning_round_trips_through_its_text() {
+        let mut t = Tuning::default();
+        t.set(true, k::BACK_OPACITY, 0.25);
+        t.set(false, k::PANEL_FROST, 12.0);
+        let mut u = Tuning::default();
+        u.load(&t.dump());
+        assert_eq!(t, u);
+        assert_eq!(u.get(true, k::BACK_OPACITY), 0.25);
+        assert_eq!(u.get(false, k::BACK_OPACITY), PARAMS[k::BACK_OPACITY].light);
     }
 
     #[test]
