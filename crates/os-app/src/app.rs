@@ -907,6 +907,9 @@ pub struct State {
     pub browser_hist_pos: usize,
     /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
+    /// "Copy value": a normalized value for "Paste value", one for every control and automation point, as in FL
+    /// (spec: ui/playlist.md §8 "Point menu").
+    pub value_clip: Option<f64>,
     pub tempo: f64,
     /// Where the tempo box's tenths, hundredths and thousandths digits start (x), as last painted: a drag from a digit
     /// steps the tempo by that digit (views/toolbar.rs).
@@ -1201,6 +1204,7 @@ impl App {
                 browser_folders: crate::browser::load_folders(),
                 browser_names: crate::browser::load_names(),
                 params: Default::default(),
+                value_clip: None,
                 browser_dirs: Default::default(),
                 cables: std::cell::RefCell::new({
                     let mut c = crate::cable::Cables::with(load_cable_cfg());
@@ -9560,6 +9564,38 @@ mod tests {
         assert_eq!(app.warp, None);
     }
 
+    /// The automation point menu's Copy value / Paste value (spec: ui/playlist.md §8 "Point menu"): one clipboard with
+    /// the knobs and parameters, Paste value naming the copied value as a percentage and greyed out until something
+    /// was copied; a paste is one undo step.
+    #[test]
+    fn point_menu_copies_and_pastes_values() {
+        use crate::playlist::{self as pl, Cmd};
+        use crate::knobs::KnobId;
+        let mut app = App::new(None);
+        let ch = pl::create_automation(&mut app.state, 0, "Auto", 0.25);
+        let s = &mut app.state;
+        let labels = |s: &State| pl::point_menu(s, ch, 1, 0.0, 0.0).items.iter().map(|it| (it.label.to_string(), it.enabled)).collect::<Vec<_>>();
+        let l = labels(s);
+        let at = l.iter().position(|(n, _)| n == "Copy value").expect("Copy value");
+        assert_eq!(l[at..], [("Copy value".into(), true), ("Paste value".into(), false), ("Type in value...".into(), true)]);
+        // Copy a point, paste onto the main volume knob; its menu names the value.
+        pl::run(&mut app, Cmd::PointCopy(ch, 1));
+        assert_eq!(app.state.value_clip, Some(0.25));
+        let knob_menu = crate::rack::knob_menu(&app.state, KnobId::MasterVol, None, 0.0, 0.0);
+        assert!(knob_menu.items.iter().any(|it| it.label == "Paste value (25%)" && it.enabled));
+        crate::rack::run(&mut app, crate::rack::RCmd::PasteValue(KnobId::MasterVol));
+        assert!((app.state.knob(KnobId::MasterVol) - 0.25).abs() < 1e-3);
+        // Copy a knob, paste onto the first point: it moves to that value and stays at its time; undo puts it back.
+        app.state.set_knob(KnobId::MasterVol, 0.8);
+        crate::rack::run(&mut app, crate::rack::RCmd::CopyValue(KnobId::MasterVol));
+        assert_eq!(labels(&app.state)[at + 1], ("Paste value (80%)".into(), true));
+        pl::run(&mut app, Cmd::PointPaste(ch, 0));
+        let p0 = app.state.project.automation(ch).unwrap().points[0];
+        assert!((p0.value - 0.8).abs() < 1e-3 && p0.beat == 0.0, "{p0:?}");
+        crate::history::undo(&mut app.state);
+        assert_eq!(app.state.project.automation(ch).unwrap().points[0].value, 0.25);
+    }
+
     /// The CPU panel opens Settings > Audio; its combos open menus over the window and a choice becomes the audio
     /// settings (spec: ui/main-window.md "CPU panel", ui/settings.md "Audio").
     #[test]
@@ -15392,7 +15428,7 @@ mod tests {
         let last = v.state.params.lists[&row].params.len() - 1;
         let id = v.state.params.lists[&row].params[last].id;
         let x = v.plugins.hosted[&row].plugin.lock().unwrap().param_value(id).unwrap();
-        v.state.params.copied = Some(if x > 0.5 { 0.25 } else { 0.75 });
+        v.state.value_clip = Some(if x > 0.5 { 0.25 } else { 0.75 });
         assert_eq!(crate::playlist::run(&mut v, crate::playlist::Cmd::Param(crate::params::PCmd::Paste(row, last))), None);
         v.plugins.hosted[&row].plugin.lock().unwrap().idle();
         let kars = v.plugins.state(row).unwrap();

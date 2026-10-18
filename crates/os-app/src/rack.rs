@@ -230,7 +230,6 @@ pub struct RackUi {
     /// Steps copied by Cut / Copy (the channel's notes of the pattern).
     pub clipboard: Option<Vec<Note>>,
     /// Copied knob value (knob menu, §19).
-    pub value_clip: Option<f32>,
     /// Menu checkboxes that have no effect yet (greyed out): their default ticks.
     pub opts: BTreeSet<&'static str>,
     /// Channels waiting for the delete confirmation's Ok.
@@ -266,7 +265,6 @@ impl Default for RackUi {
             loop_type: 0,
             unsorted_at: None,
             clipboard: None,
-            value_clip: None,
             opts: ["Show complete piano roll preview", "Show a mute button on the piano roll preview"].into_iter().collect(),
             pending_delete: None,
             purging: false,
@@ -1380,8 +1378,8 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
     match knob {
         Some(k) => {
             v.push(it("Copy value", RCmd::CopyValue(k)));
-            let p = it("Paste value", RCmd::PasteValue(k));
-            v.push(if s.rack.value_clip.is_some() { p } else { p.off() });
+            let p = it(crate::playlist::paste_label(s), RCmd::PasteValue(k));
+            v.push(if s.value_clip.is_some() { p } else { p.off() });
         }
         None => v.extend([PItem::not_yet("Copy value"), PItem::new("Paste value", Cmd::Nothing).off()]),
     }
@@ -1637,13 +1635,13 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::CopyValue(k) => {
-            s.rack.value_clip = Some(s.knob(k));
+            s.value_clip = Some(f64::from(s.knob(k)));
             None
         }
         RCmd::PasteValue(k) => {
-            if let Some(v) = s.rack.value_clip {
+            if let Some(v) = s.value_clip {
                 crate::history::knob(s, k, false);
-                s.set_knob(k, v);
+                s.set_knob(k, v as f32);
             }
             None
         }

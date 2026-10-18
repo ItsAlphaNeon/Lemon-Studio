@@ -255,6 +255,9 @@ pub enum Cmd {
     /// A picker item's menu (§10a) on an audio or automation clip source: the command and the source's channel index.
     Pick(PickCmd, u16),
     PointDelete(u16, usize),
+    /// The point menu's Copy value / Paste value (the clipboard every control shares).
+    PointCopy(u16, usize),
+    PointPaste(u16, usize),
     PointMode(u16, usize, AutoMode),
     PointValue(u16, usize),
     TrackRename(u16),
@@ -2206,8 +2209,18 @@ pub fn point_menu(s: &State, ch: u16, i: usize, x: f32, y: f32) -> Popup {
         items.push(PItem::new(m.name(), Cmd::PointMode(ch, i, m)).mark(Mark::Radio(mode == Some(m))));
     }
     items.push(PItem::sep());
+    items.push(PItem::new("Copy value", Cmd::PointCopy(ch, i)));
+    items.push(if s.value_clip.is_some() { PItem::new(paste_label(s), Cmd::PointPaste(ch, i)) } else { PItem::new("Paste value", Cmd::Nothing).off() });
     items.push(PItem::new("Type in value...", Cmd::PointValue(ch, i)));
     Popup { x, y, items, sub: None }
+}
+
+/// "Paste value" with the copied value as a percentage, as FL writes it ("Paste value (23%)").
+pub fn paste_label(s: &State) -> String {
+    match s.value_clip {
+        Some(v) => format!("Paste value ({}%)", (v * 100.0).round()),
+        None => "Paste value".to_string(),
+    }
 }
 
 pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
@@ -3723,6 +3736,16 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::PointDelete(ch, i) => {
             snapshot(s);
             delete_point(s, ch, i);
+            None
+        }
+        Cmd::PointCopy(ch, i) => {
+            s.value_clip = s.project.automation(ch).and_then(|a| a.points.get(i)).map(|p| p.value);
+            None
+        }
+        Cmd::PointPaste(ch, i) => {
+            let (Some(v), Some(beat)) = (s.value_clip, s.project.automation(ch).and_then(|a| a.points.get(i)).map(|p| p.beat)) else { return None };
+            snapshot(s);
+            move_point(s, ch, i, beat, v);
             None
         }
         Cmd::PointMode(ch, i, m) => {

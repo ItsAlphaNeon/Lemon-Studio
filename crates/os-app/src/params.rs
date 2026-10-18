@@ -55,8 +55,6 @@ pub struct ParamUi {
     pub lists: BTreeMap<usize, List>,
     /// Newest first: "Last tweaked", "Next to last tweaked".
     pub last: Vec<Tweak>,
-    /// "Copy value": a normalized parameter value for "Paste value".
-    pub copied: Option<f64>,
 }
 
 impl ParamUi {
@@ -197,8 +195,8 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         Some((key, index)) => PItem::new("Copy value", Cmd::Param(PCmd::Copy(key, index))),
         None => PItem::new("Copy value", Cmd::Nothing).off(),
     };
-    let paste = match param.filter(|_| s.params.copied.is_some()) {
-        Some((key, index)) => PItem::new("Paste value", Cmd::Param(PCmd::Paste(key, index))),
+    let paste = match param.filter(|_| s.value_clip.is_some()) {
+        Some((key, index)) => PItem::new(crate::playlist::paste_label(s), Cmd::Param(PCmd::Paste(key, index))),
         None => PItem::new("Paste value", Cmd::Nothing).off(),
     };
     vec![
@@ -399,12 +397,12 @@ impl App {
         match c {
             PCmd::Browse(key) => self.browse_params(key),
             PCmd::Copy(key, index) => {
-                self.state.params.copied = value_of(&self.state, key, index);
+                self.state.value_clip = value_of(&self.state, key, index);
                 None
             }
             PCmd::Paste(key, index) => {
                 let id = self.state.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id);
-                let (Some(v), Some(id)) = (self.state.params.copied, id) else { return None };
+                let (Some(v), Some(id)) = (self.state.value_clip, id) else { return None };
                 let p = self.state.params.plugin(key)?;
                 let ok = p.lock().ok()?.set_param(id, v);
                 if ok {
@@ -520,8 +518,8 @@ mod tests {
         assert!(!init.enabled && matches!(init.cmd, Cmd::NotYet(_)));
         // Copy value (main level), then paste another value onto band 1 level.
         crate::playlist::run(&mut a, Cmd::Param(PCmd::Copy(key, 35)));
-        assert_eq!(a.state.params.copied, Some(0.5));
-        a.state.params.copied = Some(0.75);
+        assert_eq!(a.state.value_clip, Some(0.5));
+        a.state.value_clip = Some(0.75);
         assert_eq!(crate::playlist::run(&mut a, Cmd::Param(PCmd::Paste(key, 0))), None);
         a.plugins.hosted[&key].plugin.lock().unwrap().idle();
         assert!((value_of(&a.state, key, 0).unwrap() - 0.75).abs() < 1e-6);
