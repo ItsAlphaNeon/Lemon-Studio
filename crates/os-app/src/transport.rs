@@ -703,7 +703,7 @@ impl Feeder {
         if frames > 0 && self.ctl.report.load(Ordering::Relaxed) {
             if let Ok(mut v) = self.shared.sounding.lock() {
                 v.clear();
-                if !self.ctl.paused.load(Ordering::Relaxed) {
+                if !self.ctl.paused.load(Ordering::Relaxed) && !e.paused() {
                     v.extend(e.sounding().map(|(c, k)| (c as u16, k)));
                 }
             }
@@ -860,6 +860,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     // Streams that were stopped and finish their fade before they are dropped.
     let mut closing: Vec<(Session, Instant)> = Vec::new();
     let mut reset_pending = false;
+    // The pending reset also silences the hosted effects (Stop).
+    let mut reset_fx_pending = false;
     // An instrument's editor is open: the live stream stays open while nothing plays (`Transport::listen`). A stream
     // that would not open is tried again on the next change of state, not every loop.
     let mut listen = false;
@@ -901,6 +903,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             if let Ok(mut e) = s.engine.lock() {
                 e.release_instruments();
             }
+            // Its effects stop ringing there too: the other stream processes the same instances.
+            s.ctl.paused.store(true, Ordering::Relaxed);
         }
     };
     let retire = |s: Session, closing: &mut Vec<(Session, Instant)>| {
@@ -1086,8 +1090,13 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
             }
             Ok(Cmd::Pause) => {
+                // The engine holds its channels where they are and lets the mixer's effects ring out on this stream.
                 if let Some(s) = &session {
-                    s.ctl.paused.store(true, Ordering::Relaxed);
+                    s.ctl.held.store(true, Ordering::Relaxed);
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.pause();
+                    }
+                    s.feed.wake();
                 }
                 if listen || live.is_some() {
                     release_paused(&session);
@@ -1101,15 +1110,23 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     live = None;
                 }
                 if let Some(s) = &session {
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.resume();
+                    }
+                    s.ctl.held.store(false, Ordering::Relaxed);
                     s.ctl.paused.store(false, Ordering::Relaxed);
+                    s.feed.wake();
                 }
             }
             Ok(Cmd::Stop) => {
+                // Everything fades out and goes; then the instruments and the effects are reset, so no tail rings on
+                // into the next Play (pause is where tails ring out, `Engine::pause`).
                 for s in [session.take(), live.take(), preview.take()].into_iter().flatten() {
                     retire(s, &mut closing);
                 }
                 held = None;
                 reset_pending = true;
+                reset_fx_pending = true;
                 listen_retry = true;
             }
             Ok(Cmd::Close) => {
@@ -1185,7 +1202,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         closing.retain(|(_, since)| since.elapsed() < CLOSE_AFTER);
         if reset_pending && closing.is_empty() {
             reset_pending = false;
-            reset_instruments(&inst);
+            reset_hosts(&inst, std::mem::take(&mut reset_fx_pending));
             if session.is_none() && shared.state.load(Ordering::Acquire) == STOPPED {
                 shared.rewind(0.0);
             }
@@ -1236,8 +1253,10 @@ enum Kind {
 
 /// Controls shared with a stream's callback.
 struct Ctl {
-    /// Fade out and hold the engine (pause, stop).
+    /// Fade out and hold the stream (stop; a pause once another stream processes the same plugins).
     paused: AtomicBool,
+    /// Paused in the engine (`Engine::pause`): the stream runs on, ringing out the effects.
+    held: AtomicBool,
     /// Publish position, meters and sounding notes (the playback stream until it is stopped).
     report: AtomicBool,
 }
@@ -1262,7 +1281,7 @@ struct Session {
 
 impl Session {
     fn paused(&self) -> bool {
-        self.ctl.paused.load(Ordering::Relaxed)
+        self.ctl.paused.load(Ordering::Relaxed) || self.ctl.held.load(Ordering::Relaxed)
     }
 
     /// Opens a stream with the audio settings and starts it at `at` (playback: the position is published at once).
@@ -1296,7 +1315,7 @@ impl Session {
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));
-        let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), report: AtomicBool::new(song) });
+        let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), held: AtomicBool::new(false), report: AtomicBool::new(song) });
         let fixed = match config.buffer_size {
             BufferSize::Fixed(b) => Some(b),
             BufferSize::Default => None,
@@ -1502,7 +1521,7 @@ mod tests {
 
     /// A stream's callback with its queue filled in the callback (no feeder thread).
     fn renderer(e: Engine) -> (Renderer, Arc<Ctl>, Arc<Shared>) {
-        let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), report: AtomicBool::new(true) });
+        let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), held: AtomicBool::new(false), report: AtomicBool::new(true) });
         let shared = Arc::new(Shared::default());
         let queue = Arc::new(Queue::new());
         let mut r = Renderer::new(queue.clone(), ctl.clone(), Arc::new(AtomicBool::new(false)), shared.clone(), 48000);

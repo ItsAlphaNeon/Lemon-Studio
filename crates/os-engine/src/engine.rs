@@ -859,6 +859,12 @@ pub struct Engine {
     awake: bool,
     /// The tail rule has ended the song: a tick at or after its end stayed quiet (spec: audio/timing.md).
     tail_done: bool,
+    /// Pause (`pause`): the channels fade out of the mixer and are then held where they are (`held`) while the mixer
+    /// runs on; `resume` fades them back in. Frames left of the fade out / in, and the fades' length.
+    held: bool,
+    fade_out: u32,
+    fade_in: u32,
+    fade_len: u32,
     tempo: f64,
     ppq: u16,
     /// Steps per beat (event 18): the tempo counts beats of this many sixteenths, so the ticks run at `tempo × steps /
@@ -929,6 +935,9 @@ pub struct Engine {
     pub report: EngineReport,
 }
 
+/// Length of the fade that takes the channels out of the mixer at Pause, and back in at Resume (as the stream's own
+/// stop fade).
+const PAUSE_FADE_SECONDS: f64 = 0.006;
 /// Seconds an instrument keeps running after its last note (a Lemon Studio choice).
 const INSTRUMENT_TAIL_SECONDS: u64 = 5;
 
@@ -1302,6 +1311,10 @@ impl Engine {
             live_only: false,
             awake: false,
             tail_done: false,
+            held: false,
+            fade_out: 0,
+            fade_in: 0,
+            fade_len: 0,
             tempo,
             ppq,
             steps: project.bar().1,
@@ -1437,6 +1450,35 @@ impl Engine {
         self.live_only = true;
     }
 
+    /// Pause in place (spec: audio/transport.md "Pause"): the channels (voices, audio clips, hosted instruments) fade
+    /// out of the mixer over about 6 ms and are then held exactly where they are, with the song position, while the
+    /// mixer's effects run on with nothing coming in, so a reverb's or a delay's tail rings out.
+    pub fn pause(&mut self) {
+        if self.fade_out > 0 || self.held {
+            return;
+        }
+        self.fade_len = ((f64::from(self.rate) * PAUSE_FADE_SECONDS).round() as u32).max(1);
+        // Out from where a fade in has got to.
+        self.fade_out = self.fade_len - self.fade_in.min(self.fade_len);
+        self.fade_in = 0;
+    }
+
+    /// Resume after `pause`: the channels go on from where they were held, fading back in.
+    pub fn resume(&mut self) {
+        if !self.held && self.fade_out == 0 {
+            return;
+        }
+        self.fade_len = self.fade_len.max(1);
+        self.fade_in = self.fade_len - self.fade_out.min(self.fade_len);
+        self.fade_out = 0;
+        self.held = false;
+    }
+
+    /// Paused: the channels are held (or fading out to be).
+    pub fn paused(&self) -> bool {
+        self.held || self.fade_out > 0
+    }
+
     /// Keep a live-only engine running while nothing plays (an instrument's editor is open): its instruments are
     /// processed every tick, so notes from the editor's own keyboard sound. Off, it finishes again once silent.
     pub fn set_awake(&mut self, on: bool) {
@@ -1570,10 +1612,11 @@ impl Engine {
             if self.awake {
                 return false;
             }
-            let rest_silent = self.out[self.out_pos.min(self.out.len())..].iter().all(|&s| s == 0.0);
+            // Quiet, not exact zeros: an effect's tail may never reach zero.
+            let rest_silent = self.out[self.out_pos.min(self.out.len())..].iter().all(|&s| s.abs() < QUIET);
             return rest_silent && self.voices.is_empty() && self.inst_tail == 0 && self.inst_live.is_empty() && !self.tap_clicks.sounding();
         }
-        !self.looping && drained && self.tail_done && self.inst_live.is_empty() && !self.tap_clicks.sounding()
+        !self.looping && !self.paused() && drained && self.tail_done && self.inst_live.is_empty() && !self.tap_clicks.sounding()
     }
 
     /// Start playback in the tick that contains `frame` (at the project tempo; notes before that tick as `seek_tick`
@@ -1753,6 +1796,7 @@ impl Engine {
         self.note_voices.resize(n, notes::Voices::default());
         self.inst_tail = old.inst_tail;
         self.awake = old.awake;
+        (self.held, self.fade_out, self.fade_in, self.fade_len) = (old.held, old.fade_out, old.fade_in, old.fade_len);
         self.inst_offs = std::mem::take(&mut old.inst_offs);
         self.inst_offs.retain(|o| o.1 < n);
         self.inst_shapes = std::mem::take(&mut old.inst_shapes);
@@ -2019,6 +2063,9 @@ impl Engine {
     /// moves; control points, then automation clips; notes that end are released, then notes that start are
     /// triggered; then the tick's samples are produced.
     fn render_tick(&mut self) {
+        if self.held {
+            return self.render_held();
+        }
         // A looping engine starts again at tick 0 when the pattern is over; voices and effects carry on.
         if self.looping && self.end_tick > 0 && self.tick >= self.end_tick {
             self.wrap();
@@ -2055,6 +2102,25 @@ impl Engine {
         if !self.exporting {
             self.tap_clicks.mix(&mut self.bus[0][..len * 2]);
         }
+        // Pause / resume: the channels fade out of (into) the mixer's inputs; the effects behind them run on.
+        if self.fade_out > 0 || self.fade_in > 0 {
+            let total = self.fade_len as f32;
+            let (left, out) = if self.fade_out > 0 { (self.fade_out as f32, true) } else { (self.fade_in as f32, false) };
+            for b in &mut self.bus {
+                for (f, fr) in b[..len * 2].chunks_exact_mut(2).enumerate() {
+                    let down = ((left - f as f32) / total).clamp(0.0, 1.0);
+                    let g = if out { down } else { 1.0 - down };
+                    fr[0] *= g;
+                    fr[1] *= g;
+                }
+            }
+            if out {
+                self.fade_out = self.fade_out.saturating_sub(len as u32);
+                self.held = self.fade_out == 0;
+            } else {
+                self.fade_in = self.fade_in.saturating_sub(len as u32);
+            }
+        }
         self.tick = tick + 1;
         self.frame = start + len as u64;
         self.mix(len, &song);
@@ -2085,6 +2151,30 @@ impl Engine {
             let limit = (TAIL_LIMIT_SECONDS * f64::from(self.rate) / self.clock.samples_per_tick()) as u64;
             if quiet || tick >= self.end_tick + limit {
                 self.tail_done = true;
+            }
+        }
+    }
+
+    /// A tick's worth of the mixer alone while paused (`pause`): the position, the channels and the automation stay
+    /// where they are, the effects run with nothing coming in.
+    fn render_held(&mut self) {
+        let len = (self.clock.samples_per_tick().round() as usize).max(1);
+        let mut song = self.transport_at(self.frame);
+        song.playing = false;
+        for b in &mut self.bus {
+            b.clear();
+            b.resize(len * 2, 0.0);
+        }
+        self.mix(len, &song);
+        self.out.clear();
+        self.out.extend_from_slice(&self.bus[0][..len * 2]);
+        self.out_pos = 0;
+        let mut ramp = self.main_glide.block(self.main_gain, len, os_dsp::glide::engine_limit(self.rate));
+        if !(ramp.is_flat() && ramp.first() == 1.0) {
+            for f in self.out.chunks_exact_mut(2) {
+                let g = ramp.next();
+                f[0] *= g;
+                f[1] *= g;
             }
         }
     }
@@ -3666,6 +3756,64 @@ mod tests {
         let (gl, _) = laws::channel_pan(0.0);
         let g = (laws::channel_gain(p.channels[0].volume) * gl) as f32;
         assert!(frames.chunks_exact(2).all(|f| f[0] == 0.0 || (f[0] - g).abs() < 1e-6));
+    }
+
+    /// A slow-decaying tail: follows the loudest input and lets it fall away (a reverb's tail, for the test).
+    struct Ring(f32);
+
+    impl crate::instrument::HostedEffect for Ring {
+        fn process_fx(&mut self, _rate: u32, left: &mut [f32], right: &mut [f32]) {
+            for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+                self.0 = (self.0 * 0.9995).max(l.abs());
+                *l = self.0;
+                *r = self.0;
+            }
+        }
+
+        fn reset_fx(&mut self) {
+            self.0 = 0.0;
+        }
+    }
+
+    // spec: audio/transport.md "Pause"
+    #[test]
+    fn pause_holds_the_channels_and_lets_the_effects_ring_out() {
+        let mut p = project(vec![long_note(0, 384 * 4, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        p.channels[0].mixer_track = 1;
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        e.set_effect(1, 0, Arc::new(Mutex::new(Ring(0.0))));
+        let peak = |e: &mut Engine, ticks: usize| {
+            let mut m = 0.0f32;
+            for _ in 0..ticks {
+                if let Some((s, _, _)) = e.next_tick() {
+                    m = s.iter().fold(m, |m, v| m.max(v.abs()));
+                }
+            }
+            m
+        };
+        let playing = peak(&mut e, 20);
+        assert!(playing > 0.1, "the note sounds through the effect: {playing}");
+        e.pause();
+        // About 6 ms of fade (a tick is about 230 frames), then the channels are held where they are.
+        peak(&mut e, 4);
+        let (tick, at) = (e.tick, probe.lock().unwrap().at);
+        assert!(e.paused() && !e.finished());
+        let tail = peak(&mut e, 40);
+        assert!(tail > 0.01 && tail < playing, "the effect's tail rings on while paused: {tail}");
+        let probe_now = probe.lock().unwrap();
+        assert_eq!((e.tick, probe_now.at), (tick, at), "the position and the instrument are held");
+        assert_eq!(probe_now.held, vec![60], "the note is still held at the instrument");
+        drop(probe_now);
+        // Resume: the note goes on from where it was held.
+        e.resume();
+        assert!(!e.paused());
+        let again = peak(&mut e, 20);
+        assert!(again > 0.1 && e.tick > tick, "the note sounds again: {again}");
     }
 
     /// An instrument's editor is open: the live engine keeps processing it with no note from the host, so a note
