@@ -81,6 +81,8 @@ pub struct Shared {
     position: AtomicU64,
     /// Playback position in ticks (f64 bits): what every playhead and the time display show. A pattern wraps.
     tick: AtomicU64,
+    /// The tempo the playback plays at (f64 bits; 0 = none yet): tempo automation moves it.
+    tempo: AtomicU64,
     sample_rate: AtomicU32,
     /// An export is running, its progress in 1/1000 of the song, and its outcome once done.
     exporting: AtomicBool,
@@ -140,6 +142,7 @@ impl Shared {
     fn rewind(&self, tick: f64) {
         self.position.store(0, Ordering::Relaxed);
         self.tick.store(tick.to_bits(), Ordering::Relaxed);
+        self.tempo.store(0, Ordering::Relaxed);
         self.peak_l.store(0, Ordering::Relaxed);
         self.peak_r.store(0, Ordering::Relaxed);
         if let Ok(mut v) = self.sounding.lock() {
@@ -481,6 +484,13 @@ impl Transport {
         )
     }
 
+    /// The tempo the running playback plays at, tempo automation included; `None` while stopped or before its first
+    /// tick.
+    pub fn tempo(&self) -> Option<f64> {
+        let t = f64::from_bits(self.shared.tempo.load(Ordering::Relaxed));
+        (self.playing() && t > 0.0).then_some(t)
+    }
+
     /// Notes playing now (pattern or song playback, not previews), as (channel index, key).
     pub fn sounding(&self) -> Vec<(u16, u16)> {
         self.shared.sounding.lock().map(|v| v.clone()).unwrap_or_default()
@@ -684,6 +694,10 @@ impl Feeder {
             if let Ok(mut v) = self.shared.tracks.lock() {
                 e.take_track_peaks(&mut v);
             }
+        }
+        // So does the tempo shown.
+        if frames > 0 && self.ctl.report.load(Ordering::Relaxed) {
+            self.shared.tempo.store(e.tempo().to_bits(), Ordering::Relaxed);
         }
         // Lit keys run ahead of what is heard by the queue's length (a few milliseconds).
         if frames > 0 && self.ctl.report.load(Ordering::Relaxed) {
@@ -1522,6 +1536,26 @@ mod tests {
         // The queue keeps one block and a few ticks, not more.
         let queued = r.queue.queued() / 2;
         assert!(queued <= 2048 + 3 * 300, "{queued} frames queued");
+    }
+
+    /// Playback publishes the tempo it plays at, so the toolbar follows a tempo automation clip (spec: audio/timing.md
+    /// "Tempo that changes").
+    #[test]
+    fn playback_publishes_the_automated_tempo() {
+        use os_model::{AutoPoint, Automation, Channel, ChannelKind, Clip, ClipSource, target};
+        let mut project = crate::app::test_project();
+        project.tempo = Some(130.0);
+        let index = project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+        project.channels.push(Channel { index, kind: ChannelKind::Automation, ..project.channels[0].clone() });
+        // 0.25: (10000 + Round(0.25 * 512000)) / 1000 = 138 BPM.
+        project.automations.push(Automation { channel: index, targets: vec![target::TEMPO], points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![] });
+        project.arrangements = vec![os_model::Arrangement { clips: vec![Clip::new(0, 384 * 4, 0, ClipSource::Channel(index))], ..Default::default() }];
+        let e = Engine::new(&project, &mut SampleLibrary::default(), 48000, PlayMode::Song);
+        let (mut r, _, shared) = renderer(e);
+        r.render(&mut vec![0.0f32; 2 * 4800]);
+        assert_eq!(f64::from_bits(shared.tempo.load(Ordering::Relaxed)), 138.0);
+        shared.rewind(0.0);
+        assert_eq!(shared.tempo.load(Ordering::Relaxed), 0, "none once rewound");
     }
 
     /// Streams that publish no position (live notes, previews) still free the tick records they have played: a live

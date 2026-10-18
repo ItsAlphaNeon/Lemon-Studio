@@ -1810,6 +1810,12 @@ impl Engine {
         (i + 1) as u16
     }
 
+    /// The tempo in force (BPM): the project's, or what tempo automation last set (spec: audio/timing.md "Tempo that
+    /// changes").
+    pub fn tempo(&self) -> f64 {
+        self.tempo
+    }
+
     /// The engine's own voices sounding (sampler voices, previews; hosted instruments count theirs: spec
     /// audio/voices.md §1).
     pub fn voice_count(&self) -> usize {

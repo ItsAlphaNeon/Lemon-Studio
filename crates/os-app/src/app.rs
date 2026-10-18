@@ -479,6 +479,8 @@ pub(crate) struct Shown {
     pub tick: f64,
     pub song: bool,
     pub sounding: Vec<(u16, u16)>,
+    /// The tempo playback plays at (tempo automation moves it); `None` while stopped.
+    pub tempo: Option<f64>,
 }
 
 /// The hint panel (spec §2): its text changes whenever the hovered control does.
@@ -2835,6 +2837,7 @@ impl App {
             tick: self.transport.tick(),
             song: self.transport.song(),
             sounding: if playing { self.transport.sounding() } else { Vec::new() },
+            tempo: self.transport.tempo(),
         }
     }
 
@@ -2859,6 +2862,9 @@ impl App {
         if now.playing != old.playing || now.paused != old.paused || now.song != old.song {
             self.auto_scroll();
             return self.invalidate();
+        }
+        if now.tempo != old.tempo {
+            self.damage_rect(TEMPO_RECT);
         }
         if !now.playing {
             return;
@@ -3164,6 +3170,7 @@ impl App {
             paused: self.shown.paused,
             tick: self.shown.tick,
             song: self.shown.song,
+            tempo: self.shown.tempo.unwrap_or(self.state.tempo),
             peaks: self.transport.peaks(),
             sounding: self.shown.sounding.clone(),
             song_pos_drag: matches!(self.drag, Some(Drag::SongPos { .. })),
@@ -8460,7 +8467,7 @@ mod tests {
         app.state.project.patterns[0].notes.extend((0..16).step_by(4).map(|k| Note::step(1, k * 24)));
         crate::playlist::place(&mut app.state, 0, 0);
         crate::playlist::place(&mut app.state, 1, 384);
-        let play = |tick: f64, song: bool, sounding: Vec<(u16, u16)>| Shown { playing: true, paused: false, tick, song, sounding };
+        let play = |tick: f64, song: bool, sounding: Vec<(u16, u16)>| Shown { playing: true, paused: false, tick, song, sounding, tempo: None };
         // Floating windows side by side, so every playback region is on screen.
         for (w, r) in [(Win::Playlist, Rect::new(220.0, 90.0, 1000.0, 480.0)), (Win::PianoRoll, Rect::new(220.0, 90.0, 1000.0, 480.0)), (Win::Mixer, Rect::new(230.0, 590.0, 1500.0, 480.0))] {
             let ws = &mut app.state.wins[w.slot().unwrap()];
@@ -8832,7 +8839,7 @@ mod tests {
         // Song playback: the playhead moves between steps.
         let pg = pl::PGeom::new(&app.state, g);
         let tick = f64::from(pg.tick_at(g.x + 400.0));
-        let shown = |tick: f64| Shown { playing: true, paused: false, tick, song: true, sounding: Vec::new() };
+        let shown = |tick: f64| Shown { playing: true, paused: false, tick, song: true, sounding: Vec::new(), tempo: None };
         app.show_playback(shown(tick));
         full(&mut app, &mut a);
         // The playhead's damage before a step was taken where it was drawn; its pixels move with the step.
@@ -9541,7 +9548,7 @@ mod tests {
             ws.maxed = false;
             ws.rect = Rect::new(220.0, 90.0, 1000.0, 480.0);
         }
-        let play = |tick: f64, song: bool| Shown { playing: true, paused: false, tick, song, sounding: Vec::new() };
+        let play = |tick: f64, song: bool| Shown { playing: true, paused: false, tick, song, sounding: Vec::new(), tempo: None };
         crate::autoscroll::toggle();
 
         // Song mode, playlist in front.

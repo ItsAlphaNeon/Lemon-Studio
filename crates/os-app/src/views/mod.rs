@@ -43,6 +43,8 @@ pub struct FrameInfo {
     /// the playlist. Every playhead and the time display read these, never the UI's own tempo or mode.
     pub tick: f64,
     pub song: bool,
+    /// The tempo the toolbar shows: the one playback plays at (tempo automation moves it), else the project's.
+    pub tempo: f64,
     pub peaks: (f32, f32),
     /// Notes playing now, as (channel index, key).
     pub sounding: Vec<(u16, u16)>,
