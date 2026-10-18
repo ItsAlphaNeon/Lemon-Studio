@@ -318,18 +318,22 @@ fn grid_rect(s: &State, r: Rect, client: Rect) -> Rect {
     Rect::new(grid_x, grid_y, grid_w, (r.bottom() - grid_y).max(0.0))
 }
 
+/// The icon of a kind of clip source: its picker tab's, also drawn on the left of its picker items and clip titles
+/// (Lemon Studio, ui/playlist.md §1).
+fn kind_icon(kind: PickKind) -> Icon {
+    match kind {
+        PickKind::Pattern => Icon::PianoRoll,
+        PickKind::Audio => Icon::Wave,
+        PickKind::Automation => Icon::Slide,
+    }
+}
+
 /// Picker panel: kind tabs, then the list of clip sources of that kind (§1).
 fn picker(ui: &mut Ui, s: &State, p: Rect) {
     let t = ui.t;
     ui.c.fill_rect(p, t.picker);
-    for (i, (icon, kind, hint)) in [
-        (Icon::PianoRoll, PickKind::Pattern, "Patterns"),
-        (Icon::Wave, PickKind::Audio, "Audio clips"),
-        (Icon::Slide, PickKind::Automation, "Automation clips"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (i, (kind, hint)) in [(PickKind::Pattern, "Patterns"), (PickKind::Audio, "Audio clips"), (PickKind::Automation, "Automation clips")].into_iter().enumerate() {
+        let icon = kind_icon(kind);
         let cx = p.x + 23.0 + 47.0 * i as f32;
         let b = Rect::new(cx - 14.0, p.y + 11.0, 28.0, 28.0);
         let hov = ui.hit(b, Action::PlPickTab(kind), hint);
@@ -383,14 +387,8 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             ui.c.stroke_rrect(row.inset(0.5), if lemon { lk::r_btn(ui.t) } else { 0.0 }, 1.0, ui.t.a(0xa8e44a));
         }
         let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
-        if matches!(src, ClipSource::Pattern(_)) && !filled {
-            ui.c.fill_circle(row.x + 7.5, row.cy(), 1.6, ui.t.tx(0xb9bcbd));
-        } else {
-            for k in 0..3 {
-                ui.c.fill_rect(Rect::new(row.x + 4.0, row.cy() - 4.0 + 3.0 * k as f32, 6.0, 1.0), ic);
-            }
-        }
-        ui.c.text_clip(Font::new(14), row.x + 15.0, row.cy() - 8.0, row.w - 18.0, ic, &pl::source_name(s, src));
+        icons::draw(ui.c, kind_icon(pl::source_kind(s, src)), Rect::new(row.x + 4.0, row.cy() - 6.0, 12.0, 12.0), ic);
+        ui.c.text_clip(Font::new(14), row.x + 20.0, row.cy() - 8.0, row.w - 23.0, ic, &pl::source_name(s, src));
         if src == cur {
             let ax = list.x - 1.0;
             let mark = if lemon { ui.t.accent } else { Color::rgb(0xe64363) };
@@ -721,21 +719,8 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
             ui.c.line(ix, iy + 1.0, ix + 7.0, iy + 8.0, 1.2, ic);
             ui.c.line(ix + 7.0, iy + 1.0, ix, iy + 8.0, 1.2, ic);
         } else {
-            match kind {
-                PickKind::Pattern => {
-                    for k in 0..3 {
-                        ui.c.fill_rect(Rect::new(ix, iy + 1.0 + 3.0 * k as f32, 8.0, 1.0), ic);
-                    }
-                }
-                PickKind::Audio => {
-                    // A bar, a solid arrowhead against it, a shaft and a second arrowhead (FL's audio clip mark).
-                    ui.c.fill_rect(Rect::new(ix, iy + 1.0, 1.0, 8.0), ic);
-                    ui.c.fill_polygon(&[(ix + 1.0, iy + 2.5), (ix + 4.0, iy + 5.0), (ix + 1.0, iy + 7.5)], ic);
-                    ui.c.line(ix + 3.0, iy + 5.0, ix + 8.5, iy + 5.0, 1.0, ic);
-                    ui.c.fill_polygon(&[(ix + 6.0, iy + 3.0), (ix + 9.0, iy + 5.0), (ix + 6.0, iy + 7.0)], ic);
-                }
-                PickKind::Automation => ui.c.line(ix, iy + 8.0, ix + 8.0, iy + 1.0, 1.2, ic),
-            }
+            // On whole pixels: a partial repaint draws it exactly as a full one (smooth scrolling stops between them).
+            icons::draw(ui.c, kind_icon(kind), Rect::new((ix - 0.5).round(), iy.round(), 10.0, 10.0), ic);
         }
     }
     if r.w > 16.0 {
