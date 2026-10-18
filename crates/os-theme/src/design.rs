@@ -427,7 +427,7 @@ const BASE_TINT: Color = Color::rgb(0x434c51);
 /// key colour, and its text colour the skin's text, keeping each text's place between the skin's background and text.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Retint {
-    /// The theme's surface adjustment (`FlTheme::applied_surface`).
+    /// The theme's surface adjustment.
     pub surface: fl::Surface,
     /// The skin's key colour (Lemon: Main) and the theme's keys (`None` = keep the skin's).
     pub key: Color,
@@ -443,7 +443,7 @@ impl Retint {
     /// `th` over the Lemon skin.
     pub fn lemon(th: &FlTheme) -> Retint {
         let mut r = Retint {
-            surface: th.applied_surface(),
+            surface: th.surface,
             key: lemon::MAIN,
             accent: th.selected,
             highlight: th.highlight,
@@ -630,7 +630,7 @@ mod tests {
     }
 
     /// A theme colours the Lemon skin (spec: ui/theme-presets.md "Skins"): Lemon's shapes stay, the theme's
-    /// selection replaces Main, its surfaces are light where Citrus's are, and text stays readable on them.
+    /// selection replaces Main, its surfaces are light where Citrus's clearly are, and text stays readable on them.
     #[test]
     fn themes_colour_lemon() {
         for (name, text) in crate::presets::PRESETS {
@@ -640,7 +640,9 @@ mod tests {
             assert_eq!(p.accent, th.selected.unwrap(), "{name}");
             assert_eq!(p.a(0xa8e44a), th.selected.unwrap(), "{name}");
             let citrus = palette(Design::Citrus, Some(&th));
-            assert_eq!(p.toolbar.hsl().2 > 0.5, citrus.toolbar.hsl().2 > 0.5, "{name}: light like Citrus");
+            // Light where Citrus is clearly light, dark where it is clearly dark (a mid-grey theme may sit either side).
+            let (l, cl) = (p.toolbar.hsl().2, citrus.toolbar.hsl().2);
+            assert!(!(cl > 0.6 && l <= 0.5) && !(cl < 0.4 && l >= 0.5), "{name}: light like Citrus ({l} vs {cl})");
             for (fg, bg) in [(p.text, p.window_title), (p.glyph, p.toolbar), (p.menu_text, p.menu_panel), (p.name_text, p.name_button)] {
                 assert!(contrast(fg, bg) >= 0.3, "{name}: {fg} on {bg}");
             }

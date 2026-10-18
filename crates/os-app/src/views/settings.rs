@@ -247,7 +247,6 @@ pub const LIVE: &[&str] = &[
     TRUNCATED_CHECK,
     CROSSFADES_CHECK,
     SHOW_INFO_CHECK,
-    LIGHT_MODE_CHECK,
     NOTE_COLORS_CHECK,
     RESET_WORK_TIME,
     MANAGE_SHORTCUTS,
@@ -317,9 +316,8 @@ pub const CROSSFADES_CHECK: &str = "Automatic crossfades";
 /// Info: "Show info on opening" (event 10) and the button that zeroes the time spent (event 237; spec:
 /// ui/settings-choices.md "Info", flp/events/project-info.md).
 pub const SHOW_INFO_CHECK: &str = "Show info on opening";
-/// Theme ▸ Options: the applied theme's `Lightmode` and `OverrideClips` (`App::toggle_theme_option`; spec:
-/// ui/settings-choices.md "Light mode and clip note colours").
-pub const LIGHT_MODE_CHECK: &str = "Light mode";
+/// Theme ▸ Options: the applied theme's `OverrideClips` (`App::toggle_theme_option`; spec: ui/settings-choices.md
+/// "Light mode and clip note colours"). There is no Light mode option (removed 2026-10-18; themes draw as with it on).
 pub const NOTE_COLORS_CHECK: &str = "Audio and automation clips use note colors";
 pub const RESET_WORK_TIME: &str = "Reset working time";
 /// General ▸ Input: opens the Manage shortcuts window (`App::open_shortcuts`).
@@ -695,10 +693,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 g("Skins", vec![Tiles(TileList::Skins, skins, st.skin)]),
                 g("Themes", vec![Tiles(TileList::Themes, themes, st.preset)]),
                 gf("Adjustments", false, vec![ThemeKnobs]),
-                g("Options", {
-                    let th = s.fl_theme();
-                    vec![Check(LIGHT_MODE_CHECK, th.light_mode), Check(NOTE_COLORS_CHECK, th.override_clips)]
-                }),
+                g("Options", vec![Check(NOTE_COLORS_CHECK, s.fl_theme().override_clips)]),
                 g("", vec![Buttons(vec![("Load theme...", 110.0), ("Reset", 64.0), ("Save preset...", 100.0)])]),
             ]
         }

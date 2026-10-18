@@ -939,9 +939,8 @@ pub struct State {
 }
 
 impl State {
-    /// The applied `.flstheme` (the stock Dark theme when there is none): its options `light_mode` and
-    /// `override_clips` ("Audio and automation clips use note colors"; spec: ui/settings-choices.md "Light mode and
-    /// clip note colours").
+    /// The applied `.flstheme` (the stock Dark theme when there is none): its option `override_clips` ("Audio and
+    /// automation clips use note colors"; spec: ui/settings-choices.md "Light mode and clip note colours").
     pub fn fl_theme(&self) -> os_theme::FlTheme {
         self.fl_text.as_deref().map_or_else(os_theme::FlTheme::dark, os_theme::FlTheme::parse)
     }
@@ -3470,15 +3469,13 @@ impl App {
         self.invalidate();
     }
 
-    /// Theme ▸ Options: flips "Light mode" (`Lightmode`) or "Audio and automation clips use note colors"
-    /// (`OverrideClips`) in the applied theme, the stock Dark theme's text when no `.flstheme` is applied. The skin shows
-    /// it at once (Lemon's own colours, under the stock theme, have no Light mode), and it is kept as
-    /// `current.flstheme` for the next start (spec: ui/settings-choices.md "Light mode and clip note colours").
+    /// Theme ▸ Options: flips "Audio and automation clips use note colors" (`OverrideClips`) in the applied theme, the
+    /// stock Dark theme's text when no `.flstheme` is applied, and keeps it as `current.flstheme` for the next start
+    /// (spec: ui/settings-choices.md "Light mode and clip note colours").
     pub(crate) fn toggle_theme_option(&mut self, label: &str) {
-        let th = self.state.fl_theme();
-        let (key, on) = if label == views::settings::LIGHT_MODE_CHECK { ("Lightmode", !th.light_mode) } else { ("OverrideClips", !th.override_clips) };
+        let on = !self.state.fl_theme().override_clips;
         let text = self.state.fl_text.as_deref().unwrap_or(os_theme::fl::DARK_TEXT);
-        let text = os_theme::fl::set_key(text, key, if on { "1" } else { "0" });
+        let text = os_theme::fl::set_key(text, "OverrideClips", if on { "1" } else { "0" });
         let palette = os_theme::design::palette(self.design(), Some(&os_theme::FlTheme::parse(&text)));
         self.theme = os_theme::Theme::new(&self.theme.name.clone(), palette, self.theme.adjust);
         os_theme::set_current(&self.theme.colors);
@@ -3880,7 +3877,7 @@ impl App {
             SAct::Check(k) if k == views::settings::TRUNCATED_CHECK => self.toggle_play_truncated(),
             SAct::Check(k) if k == views::settings::CROSSFADES_CHECK => self.toggle_auto_crossfades(),
             SAct::Check(k) if k == views::settings::SHOW_INFO_CHECK => self.toggle_show_info(),
-            SAct::Check(k) if k == views::settings::LIGHT_MODE_CHECK || k == views::settings::NOTE_COLORS_CHECK => self.toggle_theme_option(k),
+            SAct::Check(k) if k == views::settings::NOTE_COLORS_CHECK => self.toggle_theme_option(k),
             // The only place that writes the registry (`crate::file_assoc`).
             #[cfg(windows)]
             SAct::Check(k) if k == views::settings::ASSOCIATE_CHECK => self.assoc_click(),
@@ -7666,81 +7663,58 @@ mod tests {
         assert_eq!(again.state.project.signature(), Some((7, 16)));
     }
 
-    /// Theme ▸ Options (spec: ui/settings-choices.md "Light mode and clip note colours"; ui/flstheme.md §4, §5): both
-    /// checks show the applied theme's values (the stock Dark theme's when none is applied); a click flips one in that
-    /// theme, applies it at once in the Classic design (Light mode off: base-palette surfaces, darker steps; Lemon keeps
-    /// its colours) and keeps it as `current.flstheme`, rewriting only its own key. A temp user folder, never the real
-    /// one.
+    /// Theme ▸ Options (spec: ui/settings-choices.md "Light mode and clip note colours"): the clip note colours check
+    /// shows the applied theme's value (the stock Dark theme's when none is applied); a click flips it in that theme,
+    /// keeps it as `current.flstheme` rewriting only its own key, and leaves the palette alone. There is no Light mode
+    /// check (removed 2026-10-18). A temp user folder, never the real one.
     #[test]
     fn theme_options_toggle_the_applied_theme() {
-        use crate::views::settings::{SAct, LIGHT_MODE_CHECK, NOTE_COLORS_CHECK, THEME};
-        use os_theme::fl::{palette, set_key, DARK_TEXT};
+        use crate::views::settings::{SAct, NOTE_COLORS_CHECK, THEME};
         use os_theme::{FlTheme, Palette};
         let dir = std::env::temp_dir().join(format!("lemon-theme-options-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
         let saved = || std::fs::read_to_string(dir.join("current.flstheme")).unwrap_or_default();
-        let shown = |app: &App| -> Vec<bool> {
+        let checks = |app: &App| -> Vec<(&'static str, bool)> {
             let rows = views::settings::page(THEME, &app.state).into_iter().flat_map(|g| g.rows);
             rows.filter_map(|r| match r {
-                views::settings::Row::Check(k, v) if k == LIGHT_MODE_CHECK || k == NOTE_COLORS_CHECK => Some(v),
+                views::settings::Row::Check(k, v) => Some((k, v)),
                 _ => None,
             })
             .collect()
         };
-        let light = |p: &Palette, name: &str| p.get(name).unwrap().hsl().2;
         let mut app = App::new(None);
         assert_eq!((app.design(), app.state.fl_text.as_deref()), (Design::Citrus, None));
-        assert_eq!(shown(&app), [true, false], "the stock Dark theme's values");
-        // Light mode off: base-palette surfaces at once, darker step faces; saved.
-        app.settings_act(SAct::Check(LIGHT_MODE_CHECK));
-        let off = set_key(DARK_TEXT, "Lightmode", "0");
-        assert_eq!((saved(), app.state.fl_text.as_deref()), (off.clone(), Some(off.as_str())));
-        assert_eq!(shown(&app), [false, false]);
-        assert_eq!(app.state.message.as_deref(), Some("Light mode: off"));
-        assert_eq!(app.theme.base, palette(&FlTheme::parse(&off)));
-        assert!(light(&app.theme.colors, "toolbar") > light(&Palette::default(), "toolbar"), "lighter surfaces");
-        assert!(light(&app.theme.colors, "step_a") < light(&Palette::default(), "step_a"), "darker steps");
-        // On again: today's look.
-        app.settings_act(SAct::Check(LIGHT_MODE_CHECK));
-        assert!(saved().contains("Lightmode=1"));
-        assert_eq!((shown(&app), &app.theme.colors), (vec![true, false], &Palette::default()));
+        assert_eq!(checks(&app), [(NOTE_COLORS_CHECK, false)], "only the clip note colours check");
         // Clip note colours: stored and saved; new clips' channels follow it (`App::clip_colors`); the palette stays.
         app.settings_act(SAct::Check(NOTE_COLORS_CHECK));
         assert!(app.state.fl_theme().override_clips && saved().contains("OverrideClips=1"));
         app.tick();
         assert!(app.clip_colors().note_colors && app.state.clip_colors.note_colors);
-        assert_eq!((shown(&app), &app.theme.colors), (vec![true, true], &Palette::default()));
+        assert_eq!((checks(&app), &app.theme.colors), (vec![(NOTE_COLORS_CHECK, true)], &Palette::default()));
         app.settings_act(SAct::Check(NOTE_COLORS_CHECK));
         assert!(!app.state.fl_theme().override_clips && saved().contains("OverrideClips=0"));
-        // An imported theme (a BOM, CRLF lines): a click on the page rewrites only its key.
+        // An imported theme with Lightmode=0 (a BOM, CRLF lines) draws as with Light mode on; a click on the page
+        // rewrites only its own key.
         let file = dir.join("Night.flstheme");
-        let night = "\u{feff}Hue=-18\r\nSaturation=6\r\nLightness=-57\r\nContrast=40\r\nLightmode=1\r\nSelected=-4546441\r\n";
+        let night = "\u{feff}Hue=-18\r\nSaturation=6\r\nLightness=-57\r\nContrast=40\r\nLightmode=0\r\nSelected=-4546441\r\n";
         std::fs::write(&file, night).unwrap();
         app.load_theme_file_ex(&file, false);
-        assert_eq!(shown(&app), [true, false]);
+        let lit = night.replace("Lightmode=0", "Lightmode=1");
+        assert_eq!(app.theme.base, os_theme::fl::palette(&FlTheme::parse(&lit)));
         if let Ok(mut c) = Canvas::new(1920, 1080, 1.0) {
             app.open_settings(THEME);
             frame(&mut app, &mut c, None);
-            let r = hit_rect(&app, &Action::Settings(SAct::Check(LIGHT_MODE_CHECK)));
+            assert!(!app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check("Light mode"))));
+            let r = hit_rect(&app, &Action::Settings(SAct::Check(NOTE_COLORS_CHECK)));
             click(&mut app, &mut c, r);
         } else {
-            app.settings_act(SAct::Check(LIGHT_MODE_CHECK));
+            app.settings_act(SAct::Check(NOTE_COLORS_CHECK));
         }
-        let want = night.replace("Lightmode=1", "Lightmode=0");
-        assert_eq!((saved(), shown(&app)), (want.clone(), vec![false, false]));
-        assert_eq!(app.theme.base, palette(&FlTheme::parse(&want)));
-        // The theme colours the Lemon skin too, and the option applies there at once (spec: ui/theme-presets.md
-        // "Skins").
-        app.set_design(Design::Lemon, false);
-        let off = app.theme.colors.clone();
-        assert_eq!(off, os_theme::design::palette(Design::Lemon, Some(&FlTheme::parse(&want))));
-        app.settings_act(SAct::Check(LIGHT_MODE_CHECK));
-        assert_eq!((saved(), shown(&app)), (night.to_string(), vec![true, false]));
-        assert_eq!(app.theme.colors, os_theme::design::palette(Design::Lemon, Some(&FlTheme::parse(night))));
-        assert_ne!(app.theme.colors, off);
+        let want = format!("{night}OverrideClips=1\r\n");
+        assert_eq!(saved(), want);
         // The next start reads it back.
-        assert_eq!(App::new(None).state.fl_text.as_deref(), Some(night));
+        assert_eq!(App::new(None).state.fl_text.as_deref(), Some(want.as_str()));
         THEME_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);
     }
