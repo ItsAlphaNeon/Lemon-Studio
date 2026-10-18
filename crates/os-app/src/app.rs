@@ -3015,6 +3015,9 @@ impl App {
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         self.plugin_tick();
+        if self.state.settings.previewing.is_some() {
+            self.theme_hover();
+        }
         #[cfg(all(plugin_windows, not(windows)))]
         self.lift_input();
         {
@@ -3421,6 +3424,7 @@ impl App {
         };
         match loaded {
             Ok((t, text)) => {
+                self.theme_mark(crate::theme_library::Step::Other);
                 let to_citrus = !fl && self.design() != Design::Citrus;
                 self.theme = t;
                 // Theme ▸ Options read and rewrite the applied .flstheme (spec: ui/settings-choices.md "Light mode and
@@ -3473,6 +3477,7 @@ impl App {
     /// stock Dark theme's text when no `.flstheme` is applied, and keeps it as `current.flstheme` for the next start
     /// (spec: ui/settings-choices.md "Light mode and clip note colours").
     pub(crate) fn toggle_theme_option(&mut self, label: &str) {
+        self.theme_mark(crate::theme_library::Step::Other);
         let on = !self.state.fl_theme().override_clips;
         let text = self.state.fl_text.as_deref().unwrap_or(os_theme::fl::DARK_TEXT);
         let text = os_theme::fl::set_key(text, "OverrideClips", if on { "1" } else { "0" });
@@ -3514,6 +3519,7 @@ impl App {
             st.skin_previews = Design::ALL.iter().map(|d| os_theme::design::palette(*d, applied.as_ref())).collect();
             st.theme_previews = themes.iter().map(|th| os_theme::design::palette(design, Some(th))).collect();
         }
+        self.check_readable();
     }
 
     /// Open the settings window on `tab` (spec: ui/settings.md §1); reads the output devices and theme files.
@@ -3529,26 +3535,10 @@ impl App {
         // General ▸ System's association check shows what Windows says now (`crate::file_assoc`).
         #[cfg(windows)]
         self.assoc_read();
-        let st = &mut self.state.settings;
-        // Built-in presets (spec: ui/theme-presets.md), then .flstheme files in the user folder's `themes`.
-        // The skins' own colours first (the Lemon and Citrus themes), then the built-in presets.
-        st.themes = Design::ALL
-            .iter()
-            .map(|d| (d.name().to_string(), os_theme::design::skin_text(*d)))
-            .chain(os_theme::presets::PRESETS.iter().map(|(n, t)| (n.to_string(), t.to_string())))
-            .collect();
-        if let Some(d) = os_paths::user_file("themes") {
-            if let Ok(rd) = std::fs::read_dir(&d) {
-                let mut v: Vec<_> = rd
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")))
-                    .filter_map(|p| Some((p.file_stem()?.to_string_lossy().into_owned(), String::from_utf8_lossy(&std::fs::read(&p).ok()?).into_owned())))
-                    .collect();
-                v.sort();
-                st.themes.extend(v);
-            }
-        }
+        // The Lemon and Citrus themes, the built-in themes, then the user's own (`crate::theme_library`).
+        self.state.settings.name_edit = None;
+        self.end_preview();
+        self.theme_list();
         self.sync_preset();
         self.invalidate();
     }
@@ -3797,9 +3787,21 @@ impl App {
         if !matches!(a, SAct::Swatch(..) | SAct::PickBody | SAct::PickPart(_) | SAct::PickSv | SAct::PickHue | SAct::PickRevert) {
             self.picker_close();
         }
+        // A hover preview ends before anything acts on the theme; a click off the name panel cancels it.
+        self.end_preview();
+        if !matches!(a, SAct::NameBody | SAct::NameOk | SAct::NameCancel) {
+            self.state.settings.name_edit = None;
+        }
         let st = &mut self.state.settings;
         match a {
-            SAct::Body | SAct::PickBody | SAct::PickClose => {}
+            SAct::Body | SAct::PickBody | SAct::PickClose | SAct::NameBody => {}
+            // The name panel (`crate::theme_library`).
+            SAct::NameOk => return self.name_ok(),
+            SAct::NameCancel => return self.name_close(),
+            SAct::Button(views::settings::SAVE_PRESET) => return self.theme_save_open(),
+            SAct::Button(views::settings::THEME_UNDO) => self.state.message = Some(self.theme_undo(false)),
+            SAct::Button(views::settings::THEME_REDO) => self.state.message = Some(self.theme_undo(true)),
+            SAct::Button(views::settings::FIX_TEXT) => self.theme_fix_text(),
             // Theme ▸ Adjustments (spec: ui/theme-presets.md §C).
             SAct::ThemeKnob(i) => return self.theme_knob_press(usize::from(i)),
             SAct::Swatch(i, part) => {
@@ -3816,6 +3818,7 @@ impl App {
             SAct::PickSv | SAct::PickHue => {
                 let r = self.hits.iter().rev().find(|h| h.action == Action::Settings(a.clone())).map(|h| h.rect);
                 let Some(r) = r else { return };
+                self.theme_mark(crate::theme_library::Step::Other);
                 let (x, y) = self.mouse;
                 if a == SAct::PickSv {
                     self.picker_sv(r, x, y);
@@ -3899,6 +3902,7 @@ impl App {
                 }
             }
             SAct::Button("Reset") => {
+                self.theme_mark(crate::theme_library::Step::Other);
                 self.theme = design_theme(self.design(), false);
                 os_theme::set_current(&self.theme.colors);
                 if let Some(d) = theme_dir() {
@@ -3911,6 +3915,7 @@ impl App {
             }
             SAct::Preset(i) => {
                 if let Some((name, text)) = st.themes.get(i).cloned() {
+                    self.theme_mark(crate::theme_library::Step::Other);
                     self.theme = skin_theme(self.design(), &name, Some(&text));
                     os_theme::set_current(&self.theme.colors);
                     self.state.fl_text = Some(text.clone());
@@ -4408,7 +4413,7 @@ impl App {
         self.hover = hover;
         self.hover_rect = rect;
         self.hint = hint;
-        changed
+        self.theme_hover() || changed
     }
 
     /// Window buttons act on the release over the same button instead of on the press, like the system's own (owner,
@@ -4768,6 +4773,7 @@ impl App {
         }
         // Pattern selector (spec: ui/pattern-menu.md §1): box = menu at the mouse, "+" = find next empty.
         match &action {
+            Some(Action::Settings(views::settings::SAct::Preset(i))) => return self.theme_menu(*i, x, y),
             Some(Action::PatternNext) => {
                 self.state.pat_ui.menu_at = Some((x, y));
                 self.state.menu_open = Some(views::menus::PATTERNS);
@@ -5595,7 +5601,7 @@ impl App {
         }
         // So does a box of the settings window's Info page while it is edited, and a cell of File ▸ Browser extra
         // search folders.
-        if self.info_key(key, ctrl, alt) || self.folder_cell_key(key, ctrl, alt) {
+        if self.info_key(key, ctrl, alt) || self.folder_cell_key(key, ctrl, alt) || self.name_key(key, ctrl, alt) {
             return;
         }
         use winit::keyboard::{Key, NamedKey};
@@ -5620,6 +5626,11 @@ impl App {
         }
         if self.browser_key(key, ctrl, alt) {
             return;
+        }
+        // While Settings > Theme is open, Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y undo and redo theme changes
+        // (`crate::theme_library`).
+        if !alt && self.theme_undo_key(key, ctrl) {
+            return self.invalidate();
         }
         // Ctrl+Z / Ctrl+Alt+Z: the project's undo history, whichever window is in front; Ctrl+Shift+Z redoes (spec:
         // ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
@@ -5829,7 +5840,7 @@ impl App {
             return false;
         }
         // So does a box of the settings window's Info page, and a browser folder cell.
-        if pressed && (self.info_editing() || self.folder_cell_editing()) {
+        if pressed && (self.info_editing() || self.folder_cell_editing() || self.name_editing()) {
             return false;
         }
         if !pressed {
@@ -7784,6 +7795,199 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Theme ▸ Themes (spec: ui/theme-presets.md §D): a hovered tile shows its theme on the whole window without
+    /// choosing it; moving off puts the applied theme back, and a click keeps it.
+    #[test]
+    fn hovering_a_theme_tile_previews_it() {
+        use crate::views::settings::{SAct, THEME};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("lemon-theme-hover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut app = App::new(None);
+        app.open_settings(THEME);
+        frame(&mut app, &mut c, None);
+        let before = app.theme.colors.clone();
+        let tile = hit_rect(&app, &Action::Settings(SAct::Preset(5)));
+        app.mouse_move(tile.cx(), tile.cy());
+        assert_eq!(app.theme.colors, app.state.settings.theme_previews[5], "previewed");
+        assert!(app.state.fl_text.is_none() && !dir.join("current.flstheme").exists(), "not chosen");
+        frame(&mut app, &mut c, None);
+        app.mouse_move(2.0, 2.0);
+        assert_eq!(app.theme.colors, before, "back");
+        app.mouse_move(tile.cx(), tile.cy());
+        app.mouse_down();
+        app.mouse_up();
+        app.mouse_move(2.0, 2.0);
+        assert_eq!(app.state.settings.preset, 5);
+        assert_eq!(app.theme.colors, app.state.settings.theme_previews[5], "kept after the click");
+        // Closing the window ends a preview too.
+        frame(&mut app, &mut c, None);
+        let tile = hit_rect(&app, &Action::Settings(SAct::Preset(7)));
+        app.mouse_move(tile.cx(), tile.cy());
+        assert_ne!(app.theme.colors, app.state.settings.theme_previews[5]);
+        app.state.settings.open = false;
+        app.tick();
+        assert_eq!(app.theme.colors, app.state.settings.theme_previews[5]);
+        THEME_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Save preset... writes the applied theme into the user `themes` folder under a typed name and frames its new tile;
+    /// a tile's right-click menu duplicates any theme, and renames or deletes the user's own (spec:
+    /// ui/theme-presets.md §D).
+    #[test]
+    fn user_themes_are_saved_renamed_and_deleted() {
+        use crate::playlist::ThemeCmd;
+        use crate::views::settings::{SAct, SAVE_PRESET, THEME};
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("lemon-theme-library-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let themes = dir.join("themes");
+        let mut app = App::new(None);
+        app.open_settings(THEME);
+        app.settings_act(SAct::Preset(3));
+        app.theme_knob_wheel(0, 2);
+        frame(&mut app, &mut c, None);
+        // The buttons are below the tiles: scroll to the end.
+        let t0 = hit_rect(&app, &Action::Settings(SAct::Preset(0)));
+        app.mouse_move(t0.cx(), t0.cy());
+        app.wheel(0.0, -40.0, false, false);
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Settings(SAct::Button(SAVE_PRESET)));
+        click(&mut app, &mut c, r);
+        let name = |app: &App| app.state.settings.name_edit.as_ref().map(|e| e.text.text.clone());
+        assert_eq!(name(&app), Some(format!("{} custom", app.state.settings.themes[3].0)));
+        // A built-in theme's name is refused; the panel stays.
+        app.state.settings.name_edit.as_mut().unwrap().text.set("frost");
+        app.key(&Key::Named(NamedKey::Enter), false, false);
+        assert!(app.state.settings.name_edit.is_some() && !themes.exists());
+        app.state.settings.name_edit.as_mut().unwrap().text.set("Mine");
+        app.key(&Key::Named(NamedKey::Enter), false, false);
+        assert!(app.state.settings.name_edit.is_none());
+        assert_eq!(std::fs::read_to_string(themes.join("Mine.flstheme")).ok(), app.state.fl_text.clone());
+        let st = &app.state.settings;
+        let mine = st.themes.iter().position(|(n, _)| n == "Mine").expect("its tile");
+        assert_eq!((st.user_from, st.preset), (mine, mine), "after the built-in tiles, and framed");
+        // The menu: Duplicate only on a built-in tile; all four on the user's.
+        app.wheel(0.0, 40.0, false, false);
+        frame(&mut app, &mut c, None);
+        let t0 = hit_rect(&app, &Action::Settings(SAct::Preset(0)));
+        app.mouse_move(t0.cx(), t0.cy());
+        app.mouse_down_right();
+        assert_eq!(app.state.playlist.popup.as_ref().map(|p| p.items.len()), Some(1));
+        app.state.playlist.popup = None;
+        app.theme_menu(mine, 100.0, 100.0);
+        assert_eq!(app.state.playlist.popup.as_ref().map(|p| p.items.len()), Some(4));
+        app.state.playlist.popup = None;
+        // Duplicate, rename, delete.
+        app.theme_cmd(ThemeCmd::Duplicate(0));
+        assert_eq!(std::fs::read_to_string(themes.join("Lemon copy.flstheme")).ok().as_deref(), Some(app.state.settings.themes[0].1.as_str()));
+        let mine = app.state.settings.themes.iter().position(|(n, _)| n == "Mine").unwrap();
+        app.theme_cmd(ThemeCmd::Rename(mine));
+        assert_eq!(name(&app).as_deref(), Some("Mine"));
+        app.state.settings.name_edit.as_mut().unwrap().text.set("Lemon copy");
+        app.key(&Key::Named(NamedKey::Enter), false, false);
+        assert!(app.state.settings.name_edit.is_some(), "a clash with another of the user's themes is refused");
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        assert!(app.state.settings.name_edit.is_none() && app.state.settings.open, "Esc closes the panel, not the window");
+        app.theme_cmd(ThemeCmd::Rename(mine));
+        app.state.settings.name_edit.as_mut().unwrap().text.set("Ours");
+        app.key(&Key::Named(NamedKey::Enter), false, false);
+        assert!(themes.join("Ours.flstheme").exists() && !themes.join("Mine.flstheme").exists());
+        let ours = app.state.settings.themes.iter().position(|(n, _)| n == "Ours").unwrap();
+        assert_eq!(app.state.settings.preset, ours, "still framed");
+        app.theme_cmd(ThemeCmd::Delete(ours));
+        app.name_ok();
+        assert!(!themes.join("Ours.flstheme").exists());
+        assert!(app.state.settings.themes.iter().all(|(n, _)| n != "Ours"));
+        THEME_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y on the Theme page step back and forward through theme changes; a run of wheel
+    /// notches on one knob is one step (spec: ui/theme-presets.md §D).
+    #[test]
+    fn theme_changes_undo_and_redo() {
+        use crate::views::settings::{SAct, THEME};
+        use winit::keyboard::Key;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("lemon-theme-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut app = App::new(None);
+        app.open_settings(THEME);
+        let none = app.theme.colors.clone();
+        app.settings_act(SAct::Preset(2));
+        app.settings_act(SAct::Preset(5));
+        let five = app.state.fl_text.clone();
+        frame(&mut app, &mut c, None);
+        let hue = hit_rect(&app, &Action::Settings(SAct::ThemeKnob(0)));
+        app.mouse_move(hue.cx(), hue.cy());
+        for _ in 0..3 {
+            app.wheel(0.0, 1.0, false, false);
+        }
+        let wheeled = app.state.fl_text.clone();
+        assert_ne!(wheeled, five);
+        let z = Key::Character("z".into());
+        app.key(&z, true, false);
+        assert_eq!(app.state.fl_text, five, "the three notches are one step");
+        assert_eq!(app.state.settings.preset, 5);
+        app.key(&z, true, false);
+        assert_eq!(app.state.settings.preset, 2);
+        app.key(&z, true, false);
+        assert!(app.state.fl_text.is_none() && !dir.join("current.flstheme").exists());
+        assert_eq!(app.theme.colors, none, "the skin's own colours");
+        app.shift = true;
+        app.key(&z, true, false);
+        app.shift = false;
+        assert_eq!(app.state.settings.preset, 2);
+        app.key(&Key::Character("y".into()), true, false);
+        app.key(&Key::Character("y".into()), true, false);
+        assert_eq!(app.state.fl_text, wheeled);
+        assert_eq!(std::fs::read_to_string(dir.join("current.flstheme")).ok(), wheeled, "kept");
+        // A new change empties the redo list.
+        app.key(&z, true, false);
+        app.settings_act(SAct::Preset(7));
+        app.key(&Key::Character("y".into()), true, false);
+        assert_eq!(app.state.settings.preset, 7);
+        THEME_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A theme whose text is too faint on its surfaces gets a warning on the Theme page; Fix text changes only its text
+    /// colour so the text reads (spec: ui/theme-presets.md §D).
+    #[test]
+    fn faint_text_is_warned_and_fixed() {
+        use crate::views::settings::{SAct, FIX_TEXT, THEME};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("lemon-theme-faint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut app = App::new(None);
+        // On Citrus, which draws a theme's text colour as given.
+        app.set_design(Design::Citrus, false);
+        app.open_settings(THEME);
+        app.settings_act(SAct::Preset(3));
+        assert!(app.state.settings.unreadable.is_none());
+        // Text the grey of the surfaces (with no Text adjustment moving it).
+        let faint = os_theme::fl::set_key(os_theme::fl::DARK_TEXT, "TextColor", &os_theme::fl::colour_value("TextColor", os_theme::Color::rgb(0x2a2e30)).to_string());
+        app.theme_edit(faint.clone());
+        assert!(app.state.settings.unreadable.is_some());
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Settings(SAct::Button(FIX_TEXT)));
+        click(&mut app, &mut c, r);
+        assert!(app.state.settings.unreadable.is_none());
+        let now = app.state.fl_text.clone().unwrap();
+        assert_eq!(os_theme::fl::remove_key(&now, "TextColor"), os_theme::fl::remove_key(&faint, "TextColor"));
+        frame(&mut app, &mut c, None);
+        assert!(!app.hits.iter().any(|h| h.action == Action::Settings(SAct::Button(FIX_TEXT))), "the warning is gone");
+        THEME_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Theme ▸ Adjustments (spec: ui/theme-presets.md §C): the knobs show the applied theme's values and edit them live
     /// (drag, wheel, middle click back to the chosen theme's value), its tile stays framed, and the theme is kept for the
     /// next start; a colour circle opens the picker, whose square sets the colour live, Revert goes back, Esc closes it
@@ -9321,6 +9525,9 @@ mod tests {
             (THEME, SAct::Preset(0)),
             (THEME, SAct::Button("Load theme...")),
             (THEME, SAct::Button("Reset")),
+            (THEME, SAct::Button(crate::views::settings::SAVE_PRESET)),
+            (THEME, SAct::Button(crate::views::settings::THEME_UNDO)),
+            (THEME, SAct::Button(crate::views::settings::THEME_REDO)),
         ] {
             let r = hit_rect(&app, &Action::Settings(SAct::Tab(tab)));
             click(&mut app, &mut c, r);
@@ -9331,7 +9538,6 @@ mod tests {
             }
             assert!(app.hits.iter().any(|h| h.action == Action::Settings(live.clone())), "{live:?} works");
         }
-        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Save preset...")));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(GENERAL)));
         click(&mut app, &mut c, r);
         app.wheel(0.0, -3.0, false, false);

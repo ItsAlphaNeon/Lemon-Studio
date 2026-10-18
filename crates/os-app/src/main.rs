@@ -86,6 +86,7 @@ mod stall;
 mod step_edit;
 mod tapper;
 mod theme_adjust;
+mod theme_library;
 mod templates;
 mod timesig;
 mod transport;
@@ -843,7 +844,7 @@ impl ApplicationHandler for Shell {
                 }
                 // A dialog takes repeats too (typing, moving through its list), and so does an Info box or a browser
                 // folder cell being edited.
-                if pressed && (!event.repeat || self.app.modal_open() || self.app.info_editing() || self.app.folder_cell_editing()) {
+                if pressed && (!event.repeat || self.app.modal_open() || self.app.info_editing() || self.app.folder_cell_editing() || self.app.name_editing()) {
                     // macOS: Option and Command change the character a key types (Option+S is "ß"); shortcuts go by the
                     // key itself.
                     #[cfg(target_os = "macos")]
@@ -1123,6 +1124,7 @@ fn screenshot(args: &[String]) {
     let mut settings: Option<usize> = None;
     let mut info_edit: Option<usize> = None;
     let mut clicks: Vec<(f32, f32)> = Vec::new();
+    let mut wheels: Vec<(f32, f32, f32)> = Vec::new();
     let mut lane: Option<usize> = None;
     let mut lane_menu = false;
     let mut pans: Option<Vec<f32>> = None;
@@ -1182,6 +1184,14 @@ fn screenshot(args: &[String]) {
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
                 if let [x, y] = v[..] {
                     clicks.push((x, y));
+                }
+            }
+            // The wheel turned `dy` notches at x,y after the first paint, before the clicks (scrolls a page, e.g.
+            // `--settings 5 --wheel 960,500,-40` shows the Theme page's buttons); may be given more than once.
+            "--wheel" => {
+                let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
+                if let [x, y, dy] = v[..] {
+                    wheels.push((x, y, dy));
                 }
             }
             "--lane" => lane = it.next().and_then(|v| v.parse().ok()),
@@ -1399,6 +1409,11 @@ fn screenshot(args: &[String]) {
     let (w, h) = size.unwrap_or(((1920.0 * scale).round() as u32, (1080.0 * scale).round() as u32));
     let mut canvas = Canvas::new(w, h, scale).expect("canvas");
     app.paint(&mut canvas, None);
+    for (x, y, dy) in wheels {
+        app.mouse_move(x, y);
+        app.wheel(0.0, dy, false, false);
+        app.paint(&mut canvas, None);
+    }
     for (x, y) in clicks {
         app.mouse_move(x, y);
         app.mouse_down();

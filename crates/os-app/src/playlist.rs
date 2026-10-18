@@ -339,6 +339,8 @@ pub enum Cmd {
     Pref(&'static crate::prefs::Combo, usize),
     /// Settings > Info ▸ the genre menu: a genre, None for "(none)" (spec: ui/settings-choices.md "Info").
     Genre(Option<&'static str>),
+    /// Settings > Theme ▸ a Themes tile's right-click menu (`crate::theme_library`).
+    Theme(ThemeCmd),
     /// Settings > General ▸ Default template: "Empty" or "<category>/<template>" (`crate::templates`).
     Template(String),
     /// Settings > General ▸ Hints and warnings ▸ the Manage messages menu (`crate::messages`).
@@ -409,6 +411,15 @@ pub struct Popup {
     pub items: Vec<PItem>,
     /// Open submenu: index of its parent item.
     pub sub: Option<usize>,
+}
+
+/// A Themes tile's menu (Settings > Theme; `App::theme_cmd`): the tile's index in `SettingsUi::themes`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ThemeCmd {
+    Duplicate(usize),
+    Rename(usize),
+    Delete(usize),
+    Show(usize),
 }
 
 /// What an inline text box edits.
@@ -3324,6 +3335,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Cpu(c) => return app.cpu_cmd(c),
         Cmd::Pref(c, i) => return app.pref_choose(c, i),
         Cmd::Genre(g) => return app.set_genre(g),
+        Cmd::Theme(c) => return app.theme_cmd(c),
         Cmd::Template(t) => return app.set_template(&t),
         Cmd::Messages(p) => {
             app.invalidate();
@@ -3787,6 +3799,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         // Run above.
         Cmd::Pref(..) => None,
         Cmd::Genre(_) => None,
+        Cmd::Theme(_) => None,
         Cmd::Template(_) => None,
         Cmd::Messages(_) => None,
         Cmd::DataFolder(_) => None,

@@ -49,6 +49,10 @@ pub enum SAct {
     PickSv,
     PickHue,
     PickRevert,
+    /// The name panel (`crate::theme_library::NameEdit`): its body (swallows clicks), OK and Cancel.
+    NameBody,
+    NameOk,
+    NameCancel,
     /// The plugin manager's controls (spec: ui/plugin-manager.md §2).
     Plug(Plug),
     /// A working combo (`LIVE_COMBOS`) by its label, with its box's bottom left (where its menu opens).
@@ -173,6 +177,18 @@ pub struct SettingsUi {
     pub theme_previews: Vec<os_theme::Palette>,
     /// Theme ▸ Adjustments' colour picker, while open.
     pub picker: Option<crate::theme_adjust::Picker>,
+    /// The Themes tiles from here on are the user's own (`crate::theme_library::user_dir`).
+    pub user_from: usize,
+    /// The Themes tile whose theme the window shows while hovered, and the applied theme to put back
+    /// (`App::theme_hover`).
+    pub previewing: Option<usize>,
+    pub preview_base: Option<os_theme::Theme>,
+    /// The name panel (Save preset..., a tile's Rename... / Delete...), while open.
+    pub name_edit: Option<crate::theme_library::NameEdit>,
+    /// Theme undo / redo.
+    pub history: crate::theme_library::History,
+    /// The applied theme's text is hard to read: its readability (`crate::theme_library::readability`).
+    pub unreadable: Option<f32>,
     /// The Info page's box being edited.
     pub info_edit: Option<InfoEdit>,
     /// The File page's Browser extra search folders cell being typed into.
@@ -248,6 +264,10 @@ pub const LIVE: &[&str] = &[
     CROSSFADES_CHECK,
     SHOW_INFO_CHECK,
     NOTE_COLORS_CHECK,
+    SAVE_PRESET,
+    THEME_UNDO,
+    THEME_REDO,
+    FIX_TEXT,
     RESET_WORK_TIME,
     MANAGE_SHORTCUTS,
     "Manage plugins",
@@ -319,6 +339,12 @@ pub const SHOW_INFO_CHECK: &str = "Show info on opening";
 /// Theme ▸ Options: the applied theme's `OverrideClips` (`App::toggle_theme_option`; spec: ui/settings-choices.md
 /// "Light mode and clip note colours"). There is no Light mode option (removed 2026-10-18; themes draw as with it on).
 pub const NOTE_COLORS_CHECK: &str = "Audio and automation clips use note colors";
+/// Theme: save the applied theme under a name, undo / redo theme changes, and the readability warning's fix
+/// (`crate::theme_library`).
+pub const SAVE_PRESET: &str = "Save preset...";
+pub const THEME_UNDO: &str = "Undo";
+pub const THEME_REDO: &str = "Redo";
+pub const FIX_TEXT: &str = "Fix text";
 pub const RESET_WORK_TIME: &str = "Reset working time";
 /// General ▸ Input: opens the Manage shortcuts window (`App::open_shortcuts`).
 pub const MANAGE_SHORTCUTS: &str = "Manage shortcuts";
@@ -406,6 +432,8 @@ pub enum Row {
     Tiles(TileList, Vec<String>, usize),
     /// Theme adjustment knobs and colour circles.
     ThemeKnobs,
+    /// Theme: the applied theme's text is hard to read; a Fix text button (`crate::theme_library`).
+    ThemeWarn,
     Gap(f32),
     /// Two controls on one line: left one, right one (right-hand column at x 304).
     Pair(Box<Row>, Box<Row>),
@@ -692,10 +720,18 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             vec![
                 g("Skins", vec![Tiles(TileList::Skins, skins, st.skin)]),
                 g("Themes", vec![Tiles(TileList::Themes, themes, st.preset)]),
+            ]
+            .into_iter()
+            .chain(st.unreadable.map(|_| g("", vec![ThemeWarn])))
+            .chain([
                 gf("Adjustments", false, vec![ThemeKnobs]),
                 g("Options", vec![Check(NOTE_COLORS_CHECK, s.fl_theme().override_clips)]),
-                g("", vec![Buttons(vec![("Load theme...", 110.0), ("Reset", 64.0), ("Save preset...", 100.0)])]),
-            ]
+                g(
+                    "",
+                    vec![Buttons(vec![("Load theme...", 110.0), ("Reset", 64.0), (SAVE_PRESET, 100.0), (THEME_UNDO, 64.0), (THEME_REDO, 64.0)])],
+                ),
+            ])
+            .collect()
         }
         PROJECT => vec![
             // The project's data folder (events 167 and 202) and two program settings (spec: ui/data-folder.md §1);
@@ -810,6 +846,7 @@ fn row_h(r: &Row) -> f32 {
         Row::Big(_) => 28.0,
         Row::Tiles(_, t, _) => t.len().div_ceil(TILES_PER_ROW) as f32 * TILE_PITCH_Y + 4.0,
         Row::ThemeKnobs => 140.0,
+        Row::ThemeWarn => 36.0,
         Row::Gap(h) => *h,
         Row::Pair(a, b) => row_h(a).max(row_h(b)),
         Row::Dim(_, r) => row_h(r),
@@ -932,6 +969,56 @@ pub fn paint(ui: &mut Ui, s: &State) {
     }
     if let Some(p) = st.picker.as_ref().filter(|_| st.tab == THEME) {
         picker(ui, s, p, r);
+    }
+    if let Some(e) = st.name_edit.as_ref().filter(|_| st.tab == THEME) {
+        name_panel(ui, s, e, r);
+    }
+}
+
+/// The name panel over the Theme page (`crate::theme_library`): a title, the name box (not for Delete), OK and Cancel.
+fn name_panel(ui: &mut Ui, s: &State, e: &crate::theme_library::NameEdit, win: Rect) {
+    let t = ui.t;
+    let (panel, field, ok, cancel) = crate::theme_library::name_rects(e, win);
+    let lemon = super::lemon(ui);
+    let rad = if lemon { lk::r_panel(t) } else { 0.0 };
+    ui.hit(panel, Action::Settings(SAct::NameBody), "");
+    ui.c.fill_rrect(panel.outset(3.0), rad + 3.0, Color::rgb(0).with_alpha(70));
+    ui.c.fill_rrect(panel, rad, t.s(0x1c1e21));
+    ui.c.fill_rrect(panel.inset(1.0), (rad - 1.0).max(0.0), t.s(0x2b2d30));
+    ui.c.text_clip(Font::new(13).bold(), panel.x + 10.0, panel.y + 9.0, panel.w - 20.0, t.text, &e.target.title(s));
+    if e.target.typed() {
+        kit::sunken(ui.c, t, field, t.s(0x141516));
+        let f = LABEL;
+        let lh = ui.c.line_height(f);
+        let text = e.text.text.as_str();
+        let inner = Rect::new(field.x + 6.0, field.y + 2.0, field.w - 12.0, field.h - 4.0);
+        let caret_x = ui.c.text_width(f, &text[..byte_at(text, e.text.caret)]);
+        let x = inner.x - (caret_x - (inner.w - 2.0)).max(0.0);
+        let y = (field.cy() - lh / 2.0).round();
+        ui.c.push_clip(inner);
+        if e.text.all && !text.is_empty() {
+            let sel = if lemon { t.brand_sel(os_theme::design::lemon::COLORED_DARK) } else { t.a(0x2d5a8c) };
+            let tw = ui.c.text_width(f, text);
+            ui.c.fill_rect(Rect::new(x - 1.0, y, tw + 2.0, lh), sel);
+        } else {
+            ui.c.fill_rect(Rect::new((x + caret_x).round(), y, 1.0, lh), t.text);
+        }
+        ui.c.text(f, x, y, t.text, text);
+        ui.c.pop_clip();
+    } else {
+        ui.c.text_clip(Font::new(13), field.x, field.y + 4.0, field.w, t.text_dim, "The file goes from your themes folder.");
+    }
+    for (b, act, label, hint) in [
+        (ok, SAct::NameOk, e.target.ok(), "Enter"),
+        (cancel, SAct::NameCancel, "Cancel", "Esc"),
+    ] {
+        let hov = ui.hit(b, Action::Settings(act), hint);
+        if lemon {
+            lk::outlined(ui.c, b, lk::r_btn(t), t.s(0x161819), lk::face(t.s(0x2a2d2f), kit::State::hover(hov)));
+        } else {
+            kit::bordered(ui.c, b, 2.0, t.s(0x161819), kit::face(t.s(0x212425), kit::State::hover(hov)));
+        }
+        ui.c.text_center(Font::new(13), b, if hov { t.glyph } else { t.text }, label);
     }
 }
 
@@ -1339,8 +1426,13 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 let b = Rect::new(x0 + col * TILE_PITCH_X, y + 4.0 + rowi * TILE_PITCH_Y, TILE_W, TILE_H);
                 let (act, hint) = match kind {
                     TileList::Skins => (SAct::Skin(i), "Use this skin: its shapes and own colours"),
-                    TileList::Themes if i < os_theme::Design::ALL.len() => (SAct::Preset(i), "Use this skin's own colours, on either skin"),
-                    TileList::Themes => (SAct::Preset(i), "Use this theme's colours"),
+                    TileList::Themes if i < os_theme::Design::ALL.len() => {
+                        (SAct::Preset(i), "Use this skin's own colours, on either skin (right-click to duplicate)")
+                    }
+                    TileList::Themes if i >= s.settings.user_from => {
+                        (SAct::Preset(i), "Use your theme (right-click to rename, duplicate, delete or show it in its folder)")
+                    }
+                    TileList::Themes => (SAct::Preset(i), "Use this theme's colours (right-click to duplicate)"),
                 };
                 let hov = ui.hit(b, Action::Settings(act), hint);
                 let lemon = super::lemon(ui);
@@ -1366,6 +1458,22 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 let f = ui.c.fit_font(Font::new(13).bold(), name, nr.w - 6.0);
                 ui.c.text_center(f, nr, t.text, name);
             }
+        }
+        // The applied theme's text is hard to read on some of its surfaces (`crate::theme_library::readability`).
+        Row::ThemeWarn => {
+            let b = Rect::new(x0, y + 4.0, 80.0, 28.0);
+            let hov = ui.hit(b, Action::Settings(SAct::Button(FIX_TEXT)), "Change the text colour so it reads on every surface");
+            if super::lemon(ui) {
+                lk::outlined(ui.c, b, lk::r_btn(t), t.s(0x161819), lk::face(t.s(0x2a2d2f), kit::State::hover(hov)));
+            } else {
+                kit::bordered(ui.c, b, 2.0, t.s(0x161819), kit::face(t.s(0x212425), kit::State::hover(hov)));
+            }
+            ui.c.text_center(Font::new(13), b, if hov { t.glyph } else { t.text }, FIX_TEXT);
+            let warn = Color::rgb(0xffb020);
+            let (cx, cy) = (b.right() + 20.0, cy);
+            ui.c.fill_circle(cx, cy, 8.0, warn);
+            ui.c.text_center(Font::new(13).bold(), Rect::new(cx - 8.0, cy - 8.0, 16.0, 16.0), Color::rgb(0x1a1a1a), "!");
+            ui.c.text_clip(f, cx + 14.0, ty, g.right() - 12.0 - (cx + 14.0), t.text, "Text is hard to read on some surfaces with these colours.");
         }
         // The applied theme's values and colours, edited live (spec: ui/theme-presets.md §C, `crate::theme_adjust`).
         Row::ThemeKnobs => {

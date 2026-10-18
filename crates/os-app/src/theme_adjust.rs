@@ -248,6 +248,7 @@ impl App {
         if self.state.settings.open {
             self.state.settings.skin_previews = os_theme::design::Design::ALL.iter().map(|d| os_theme::design::palette(*d, Some(&th))).collect();
         }
+        self.check_readable();
         self.invalidate();
     }
 
@@ -269,6 +270,7 @@ impl App {
 
     /// Knob `i` was pressed: a drag from here turns it (`Drag::ThemeKnob`).
     pub(crate) fn theme_knob_press(&mut self, i: usize) {
+        self.theme_mark(crate::theme_library::Step::Other);
         let th = FlTheme::parse(&self.theme_text());
         let k = &KNOBS[i];
         self.drag = Some(Drag::ThemeKnob { i, y0: self.mouse.1, p0: k.pos(knob_value(&th, i)) });
@@ -282,6 +284,7 @@ impl App {
 
     /// Wheel notches over knob `i`: one step each, up for more.
     pub(crate) fn theme_knob_wheel(&mut self, i: usize, notches: i32) {
+        self.theme_mark(crate::theme_library::Step::Wheel(i));
         let v = knob_value(&FlTheme::parse(&self.theme_text()), i);
         self.knob_set(i, v + notches as f32 * KNOBS[i].notch);
         self.theme_store();
@@ -289,6 +292,7 @@ impl App {
 
     /// A middle click: knob `i` goes back to the value of the theme as it was chosen.
     pub(crate) fn theme_knob_reset(&mut self, i: usize) {
+        self.theme_mark(crate::theme_library::Step::Other);
         let base = self.state.theme_base.clone().unwrap_or_else(|| os_theme::design::default_text(self.design()));
         self.knob_set(i, knob_value(&FlTheme::parse(&base), i));
         self.theme_store();
@@ -351,6 +355,7 @@ impl App {
     /// Revert (or a click on the old colour): the theme goes back to how it was when the picker opened.
     pub(crate) fn picker_revert(&mut self) {
         let Some(p) = self.state.settings.picker.clone() else { return };
+        self.theme_mark(crate::theme_library::Step::Other);
         match p.before.clone() {
             Some(text) => self.theme_edit(text),
             None => {
