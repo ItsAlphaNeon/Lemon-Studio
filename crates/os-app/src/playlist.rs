@@ -4222,7 +4222,8 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::not_yet("Change color..."),
         PItem::not_yet("Random color"),
         PItem::not_yet("Change icon..."),
-        PItem::new("Detached", Cmd::PluginDetach(row, !detached)).mark(Mark::Check(detached)),
+        // Named for what it does, not checked as in FL: Detach while docked, Attach while detached (owner, 2026-10-18).
+        PItem::new(if detached { "Attach" } else { "Detach" }, Cmd::PluginDetach(row, !detached)),
         PItem::col(),
         PItem::head("Channel"),
         PItem::not_yet("Save channel state as..."),

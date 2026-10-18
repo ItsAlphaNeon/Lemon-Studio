@@ -8609,6 +8609,17 @@ mod tests {
         assert_eq!(px(&a), idle, "back to idle after release and moving away");
     }
 
+    /// The plugin window menu names its docking entry for what it does: Detach while docked, Attach while detached.
+    #[test]
+    fn plugin_menu_says_detach_or_attach() {
+        for (detached, label) in [(false, "Detach"), (true, "Attach")] {
+            let m = crate::playlist::plugin_window_menu(0, detached, 0.0, 0.0);
+            let it = m.items.iter().find(|i| i.cmd == crate::playlist::Cmd::PluginDetach(0, !detached)).expect("the entry");
+            assert_eq!(it.label, label);
+            assert_eq!(it.mark, crate::playlist::Mark::None, "no check mark");
+        }
+    }
+
     #[test]
     fn buttons_act_on_release() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
