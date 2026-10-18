@@ -108,20 +108,20 @@ pub mod k {
 /// frosted panels; the last two set how see-through controls and the editors' surfaces are.
 pub const PARAMS: [Param; 15] = [
     p("Backdrop brightness", 0.0, 0.0, -0.5, 0.5, 2, "", "Lightens (right) or darkens (left) the backdrop after its tint"),
-    p("Backdrop frost", 36.0, 36.0, 0.0, 160.0, 0, "px", "How far the desktop picture is blurred (on the screen)"),
+    p("Backdrop frost", 17.0, 36.0, 0.0, 160.0, 0, "px", "How far the desktop picture is blurred (on the screen)"),
     p("Backdrop opacity", 0.5, 0.4, 0.0, 1.0, 2, "", "How much the base colour covers the desktop (0 = the picture shows fully)"),
     p("Backdrop luminosity", 0.7, 0.65, 0.0, 1.0, 2, "", "How far the picture's lightness is pulled to the base colour's"),
     p("Backdrop colour", 1.1, 1.0, 0.0, 2.0, 2, "x", "How much of the picture's colour is kept"),
-    p("Backdrop grain", 0.02, 0.02, 0.0, 0.12, 3, "", "Noise over the backdrop"),
+    p("Backdrop grain", 0.013, 0.02, 0.0, 0.12, 3, "", "Noise over the backdrop"),
     p("Panel brightness", 0.0, 0.0, -0.5, 0.5, 2, "", "Lightens or darkens menus and popups"),
-    p("Panel frost", 30.0, 30.0, 0.0, 60.0, 0, "px", "How far what is behind a menu is blurred"),
+    p("Panel frost", 20.0, 30.0, 0.0, 60.0, 0, "px", "How far what is behind a menu is blurred"),
     p("Panel opacity", 0.45, 0.35, 0.0, 1.0, 2, "", "How much the panel colour covers what is behind a menu"),
     p("Panel luminosity", 0.9, 0.8, 0.0, 1.0, 2, "", "How far what is behind a menu is pulled to the panel colour's lightness"),
     p("Panel colour", 1.0, 1.0, 0.0, 2.0, 2, "x", "How much colour from behind a menu is kept"),
-    p("Panel grain", 0.03, 0.03, 0.0, 0.12, 3, "", "Noise over menus and popups"),
-    p("Control fill", 1.0, 1.0, 0.0, 3.0, 2, "x", "Strength of the see-through fills of buttons, fields and rows"),
-    p("Editor opacity", 0.55, 0.6, 0.0, 1.0, 2, "", "How solid an editor window's body is over the backdrop (1 = opaque)"),
-    p("Surface tint", 0.5, 0.5, 0.0, 1.0, 2, "", "How solid the surfaces inside an editor are over its body (grids, track headers, strips)"),
+    p("Panel grain", 0.014, 0.03, 0.0, 0.12, 3, "", "Noise over menus and popups"),
+    p("Control fill", 2.4, 1.0, 0.0, 3.0, 2, "x", "Strength of the see-through fills of buttons, fields and rows"),
+    p("Editor opacity", 0.65, 0.6, 0.0, 1.0, 2, "", "How solid an editor window's body is over the backdrop (1 = opaque)"),
+    p("Surface tint", 0.71, 0.5, 0.0, 1.0, 2, "", "How solid the surfaces inside an editor are over its body (grids, track headers, strips)"),
 ];
 
 /// The editors' surfaces (`overrides`): see-through, so the backdrop shows through the whole window. A window's
