@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 ariymarkowitz
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -48,10 +49,17 @@ fn size_of(view: &NSView) -> (f64, f64) {
     (s.width, s.height)
 }
 
-/// What one look at an open window found: the editor area and the editor's own view, in points; the window's number.
+/// A view's frame in its superview, in points: x, y, width, height.
+fn frame_of(view: &NSView) -> (f64, f64, f64, f64) {
+    let f = view.frame();
+    (f.origin.x, f.origin.y, f.size.width, f.size.height)
+}
+
+/// What one look at an open window found: the editor area and the editor's own view's frame in it, in points; the
+/// window's number.
 struct Look {
     area: (f64, f64),
-    editor: Option<(f64, f64)>,
+    editor: Option<(f64, f64, f64, f64)>,
     window: Option<isize>,
 }
 
@@ -59,7 +67,7 @@ fn look(pl: &Plugins) -> Option<Look> {
     let w = pl.hosted.get(&0)?.window.as_ref()?;
     // SAFETY: the frame's views live as long as its window, which `pl` holds.
     let (frame, area) = unsafe { (&*(w.hwnd() as *const NSView), &*(w.area() as *const NSView)) };
-    let editor = area.subviews().firstObject().map(|v| size_of(&v));
+    let editor = area.subviews().firstObject().map(|v| frame_of(&v));
     Some(Look { area: size_of(area), editor, window: frame.window().map(|win| win.windowNumber()) })
 }
 
@@ -130,12 +138,13 @@ pub fn run(args: &[String]) -> i32 {
                 failed = true;
                 break;
             };
-            let fits = l.editor.is_some_and(|e| (e.0 - l.area.0).abs() < 0.5 && (e.1 - l.area.1).abs() < 0.5);
+            // The editor's view fills the area: its size, and at the area's origin (not left where a smaller area had it).
+            let fits = l.editor.is_some_and(|(x, y, w, h)| x.abs() < 0.5 && y.abs() < 0.5 && (w - l.area.0).abs() < 0.5 && (h - l.area.1).abs() < 0.5);
             failed |= !fits;
             let shot = dir.join(format!("{stem}_{tag}.png"));
             let pictured = l.window.is_some_and(|n| shoot(n, &shot));
             println!(
-                "{name} at {k} ({tag}): editor view {:?} pt, editor area {:?} pt, reported {reported:?} px: {}{}",
+                "{name} at {k} ({tag}): editor view (x, y, w, h) {:?} pt, editor area {:?} pt, reported {reported:?} px: {}{}",
                 l.editor,
                 l.area,
                 if fits { "fits" } else { "DOES NOT FIT" },

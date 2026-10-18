@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 ariymarkowitz
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -572,6 +573,9 @@ impl FrameWindow {
         if self.f.state.borrow().editor != editor {
             self.f.state.borrow_mut().editor = editor;
             self.f.layout();
+        } else {
+            // Editors move their views as they resize, before or after the frame follows them.
+            self.f.pin_editor();
         }
     }
 
@@ -703,6 +707,7 @@ impl Frame {
             None => self.view.setFrameSize(NSSize::new(w, h)),
         }
         self.area.setFrame(rect(f64::from(BORDER), f64::from(ay), f64::from(ed.0), f64::from(ed.1)));
+        self.pin_editor();
         self.area.setHidden(!show);
         let k = self.scale.get();
         let px = |v: f32| (v * k).round().max(1.0) as u32;
@@ -710,6 +715,21 @@ impl Frame {
         self.state.borrow_mut().clip_key = None;
         self.apply_clip();
         self.view.setNeedsDisplay(true);
+    }
+
+    /// Keeps the editor's views at the area's top-left, as on Windows and X11. The area is not flipped, so a view in it
+    /// keeps its distance from the bottom when the area changes height, and editors place themselves against the
+    /// area's height when they open or resize (before the frame follows them): Vital, resized from its own settings,
+    /// hung below a gap at the top; Surge, placed at the origin of a smaller area, was cut off at the top.
+    fn pin_editor(&self) {
+        let h = self.area.frame().size.height;
+        for v in self.area.subviews().iter() {
+            let f = v.frame();
+            let y = h - f.size.height;
+            if f.origin.x != 0.0 || f.origin.y != y {
+                v.setFrameOrigin(NSPoint::new(0.0, y));
+            }
+        }
     }
 
     /// Paints the frame into its layer (`updateLayer`).
