@@ -27,7 +27,7 @@ presets!(
     "Afterlight",
     "Blueshift",
     "Low Profile",
-    "Grey Cells",
+    "Charcoal",
     "Salamander",
     "Velour",
     "Moss Light",
