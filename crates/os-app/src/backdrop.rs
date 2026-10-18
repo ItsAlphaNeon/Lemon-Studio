@@ -236,43 +236,198 @@ fn generated(accent: Color, w: usize, h: usize, dark: bool) -> Picture {
     Picture { w, h, px }
 }
 
-/// Reads a picture file (PNG or JPEG), shrunk to at most `MAX_SIDE` px on its long side.
+/// Reads a picture file, shrunk to at most `MAX_SIDE` px on its long side. PNG, JPEG and WebP are read here; other
+/// formats (JPEG XL, SVG, HEIC, AVIF...) through a converter the system has (`convert`). A picture that was larger, or
+/// converted, is kept shrunk in the cache (`os_paths::cache_file`), by its path, size and time: a big desktop picture
+/// (an 8K one is over 100 MB decoded) is decoded once, not each time the window comes to the front.
 pub fn load(path: &Path) -> Option<Picture> {
-    let data = std::fs::read(path).ok()?;
-    let p = decode(&data)?;
-    let k = (p.w.max(p.h) as f32 / MAX_SIDE as f32).max(1.0);
-    if k <= 1.0 {
-        return Some(p);
+    let cached = cache_path(path);
+    if let Some(p) = cached.as_ref().and_then(|c| std::fs::read(c).ok()).and_then(|d| decode(&d, MAX_SIDE)) {
+        return Some(p.0);
     }
-    let (w, h) = (((p.w as f32 / k).round() as usize).max(1), ((p.h as f32 / k).round() as usize).max(1));
-    Some(Picture { w, h, px: os_ui::shrink(&p.px, p.w, p.h, w, h) })
+    let read = std::fs::read(path).ok().and_then(|d| decode(&d, MAX_SIDE));
+    let (p, keep) = match read {
+        Some(r) => r,
+        None => (convert(path)?, true),
+    };
+    if keep {
+        if let Some(c) = cached {
+            keep_in_cache(&c, &p);
+        }
+    }
+    Some(p)
 }
 
-fn decode(data: &[u8]) -> Option<Picture> {
-    if data.starts_with(b"\x89PNG") {
-        let pm = tiny_skia::Pixmap::decode_png(data).ok()?;
-        let px = pm
-            .pixels()
-            .iter()
-            .map(|p| {
-                let c = p.demultiply();
-                u32::from(c.red()) << 16 | u32::from(c.green()) << 8 | u32::from(c.blue())
-            })
-            .collect();
-        return Some(Picture { w: pm.width() as usize, h: pm.height() as usize, px });
+/// Where a shrunk copy of the picture at `path` is kept: named by its path, size and modification time, so a changed
+/// file is read again.
+fn cache_path(path: &Path) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let meta = std::fs::metadata(path).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    meta.len().hash(&mut h);
+    meta.modified().ok()?.hash(&mut h);
+    os_paths::cache_file(&format!("{CACHE_PREFIX}{:016x}.png", h.finish()))
+}
+
+/// The cached desktop pictures' names start so (`cache_path`).
+const CACHE_PREFIX: &str = "desktop-";
+
+/// Writes `p` to `to` as a PNG, in place of the pictures kept before (one desktop picture is kept).
+fn keep_in_cache(to: &Path, p: &Picture) {
+    let Some(dir) = to.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
     }
-    if data.starts_with(&[0xff, 0xd8]) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            if n.starts_with(CACHE_PREFIX) && n.ends_with(".png") && e.path() != to {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let Some(mut pm) = tiny_skia::Pixmap::new(p.w as u32, p.h as u32) else { return };
+    for (o, v) in pm.pixels_mut().iter_mut().zip(&p.px) {
+        *o = tiny_skia::PremultipliedColorU8::from_rgba((v >> 16) as u8, (v >> 8) as u8, *v as u8, 255).expect("opaque");
+    }
+    if let Ok(png) = pm.encode_png() {
+        // Written aside, then moved in: a picture half written is never read.
+        let part = to.with_extension("part");
+        if std::fs::write(&part, png).is_ok() && std::fs::rename(&part, to).is_err() {
+            let _ = std::fs::remove_file(&part);
+        }
+    }
+}
+
+/// A PNG, JPEG or WebP file's picture, shrunk to at most `max` px on its long side straight from the decoded pixels
+/// (no second full-size copy), and whether it was larger.
+fn decode(data: &[u8], max: usize) -> Option<(Picture, bool)> {
+    let (raw, w, h, ch) = if data.starts_with(b"\x89PNG") {
+        let pm = tiny_skia::Pixmap::decode_png(data).ok()?;
+        let (w, h) = (pm.width() as usize, pm.height() as usize);
+        (pm.take(), w, h, Channels::Premultiplied)
+    } else if data.starts_with(&[0xff, 0xd8]) {
         use zune_jpeg::zune_core::colorspace::ColorSpace;
         use zune_jpeg::zune_core::options::DecoderOptions;
         let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
         let mut d = zune_jpeg::JpegDecoder::new_with_options(std::io::Cursor::new(data), opts);
         let rgb = d.decode().ok()?;
         let (w, h) = d.dimensions()?;
-        if rgb.len() < w * h * 3 {
-            return None;
+        (rgb, w, h, Channels::Rgb)
+    } else if data.len() > 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        let mut d = image_webp::WebPDecoder::new(std::io::Cursor::new(data)).ok()?;
+        let (w, h) = d.dimensions();
+        let alpha = d.has_alpha();
+        let mut buf = vec![0u8; d.output_buffer_size()?];
+        d.read_image(&mut buf).ok()?;
+        (buf, w as usize, h as usize, if alpha { Channels::Rgba } else { Channels::Rgb })
+    } else {
+        return None;
+    };
+    if w == 0 || h == 0 || raw.len() < w * h * ch.n() {
+        return None;
+    }
+    let k = (w.max(h) as f32 / max as f32).max(1.0);
+    let (nw, nh) = (((w as f32 / k).round() as usize).max(1), ((h as f32 / k).round() as usize).max(1));
+    Some((Picture { w: nw, h: nh, px: shrink_raw(&raw, w, h, ch, nw, nh) }, k > 1.0))
+}
+
+/// How a decoded buffer holds its pixels.
+#[derive(Clone, Copy)]
+enum Channels {
+    Rgb,
+    Rgba,
+    /// RGBA, the colour multiplied by the alpha.
+    Premultiplied,
+}
+
+impl Channels {
+    fn n(self) -> usize {
+        match self {
+            Channels::Rgb => 3,
+            _ => 4,
         }
-        let px = rgb.chunks_exact(3).map(|c| u32::from(c[0]) << 16 | u32::from(c[1]) << 8 | u32::from(c[2])).collect();
-        return Some(Picture { w, h, px });
+    }
+}
+
+/// `raw` (`w` x `h`, `ch`) shrunk to `nw` x `nh` `0x00RRGGBB` pixels, each the average of those it covers (see-through
+/// parts weighed by how much they cover).
+fn shrink_raw(raw: &[u8], w: usize, h: usize, ch: Channels, nw: usize, nh: usize) -> Vec<u32> {
+    let n = ch.n();
+    let mut out = Vec::with_capacity(nw * nh);
+    for y in 0..nh {
+        let (y0, y1) = (y * h / nh, ((y + 1) * h / nh).max(y * h / nh + 1).min(h));
+        for x in 0..nw {
+            let (x0, x1) = (x * w / nw, ((x + 1) * w / nw).max(x * w / nw + 1).min(w));
+            // Colour (premultiplied) and alpha sums.
+            let mut acc = [0u64; 4];
+            for sy in y0..y1 {
+                for p in raw[(sy * w + x0) * n..(sy * w + x1) * n].chunks_exact(n) {
+                    let a = if n == 4 { u64::from(p[3]) } else { 255 };
+                    let k = |v: u8| match ch {
+                        Channels::Rgba => u64::from(v) * a / 255,
+                        _ => u64::from(v),
+                    };
+                    acc[0] += k(p[0]);
+                    acc[1] += k(p[1]);
+                    acc[2] += k(p[2]);
+                    acc[3] += a;
+                }
+            }
+            // Back from premultiplied: the colour of what is there.
+            let q = |v: u64| ((v * 255 + acc[3] / 2) / acc[3].max(1)).min(255) as u32;
+            out.push(q(acc[0]) << 16 | q(acc[1]) << 8 | q(acc[2]));
+        }
+    }
+    out
+}
+
+/// A picture this program does not read, through a converter the system has, shrunk to `MAX_SIDE` as it is written
+/// (so a huge one never comes into memory whole): sips on macOS, ImageMagick, libvips, rsvg-convert, djxl.
+fn convert(path: &Path) -> Option<Picture> {
+    use std::ffi::OsString;
+    let out = std::env::temp_dir().join(format!("lemonstudio-picture-{}.png", std::process::id()));
+    let side = MAX_SIDE.to_string();
+    let fit = format!("{side}x{side}>");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let os = |s: &str| OsString::from(s);
+    let (src, dst) = (path.as_os_str().to_owned(), out.as_os_str().to_owned());
+    // ImageMagick: the first frame in, PNG out.
+    let mut first = src.clone();
+    first.push("[0]");
+    let mut png = os("png:");
+    png.push(&dst);
+    let mut tries: Vec<(&str, Vec<OsString>)> = Vec::new();
+    if cfg!(target_os = "macos") {
+        tries.push(("sips", vec![os("-s"), os("format"), os("png"), os("-Z"), os(&side), src.clone(), os("--out"), dst.clone()]));
+    }
+    tries.push(("magick", vec![first.clone(), os("-thumbnail"), os(&fit), png.clone()]));
+    // `convert` is ImageMagick 6 on Unix (on Windows, a disk tool).
+    if cfg!(unix) {
+        tries.push(("convert", vec![first, os("-thumbnail"), os(&fit), png]));
+    }
+    tries.push(("vipsthumbnail", vec![src.clone(), os("-s"), os(&side), os("-o"), dst.clone()]));
+    if ext == "svg" || ext == "svgz" {
+        tries.push(("rsvg-convert", vec![os("-w"), os(&side), os("-h"), os(&side), os("-a"), os("-o"), dst.clone(), src.clone()]));
+    }
+    if ext == "jxl" {
+        tries.push(("djxl", vec![src, dst]));
+    }
+    for (tool, args) in tries {
+        let ok = std::process::Command::new(tool)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        let pic = ok.then(|| std::fs::read(&out).ok()).flatten().and_then(|d| decode(&d, MAX_SIDE)).map(|p| p.0);
+        let _ = std::fs::remove_file(&out);
+        if pic.is_some() {
+            return pic;
+        }
     }
     None
 }
@@ -382,154 +537,18 @@ mod sys {
     }
 
     pub fn desktop(_dark: bool, picture: Option<std::path::PathBuf>) -> Desktop {
-        let picture = picture.and_then(|p| {
-            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-            if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
-                if let Some(pic) = load(&p) {
-                    return Some(pic);
-                }
-            }
-            // HEIC and the rest: the system converts it.
-            let out = std::env::temp_dir().join(format!("lemonstudio-desktop-{}.png", std::process::id()));
-            let ok = Command::new("sips")
-                .args(["-s", "format", "png", "-Z", "640"])
-                .arg(&p)
-                .arg("--out")
-                .arg(&out)
-                .output()
-                .is_ok_and(|o| o.status.success());
-            let pic = ok.then(|| load(&out)).flatten();
-            let _ = std::fs::remove_file(&out);
-            pic
-        });
+        // HEIC and the rest: `load` has the system convert it.
+        let picture = picture.and_then(|p| load(&p));
         Desktop { picture, fit: Fit::Fill, colour: None }
     }
 }
 
+// Linux and the other Unixes; its parsers are tested on every platform.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
-mod sys {
-    use super::{load, triple, Desktop, Fit};
-    use os_theme::Color;
-    use std::path::PathBuf;
-    use std::process::Command;
-
-    fn gsettings(schema: &str, key: &str) -> Option<String> {
-        let out = Command::new("gsettings").args(["get", schema, key]).output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().trim_matches('\'').to_string())
-    }
-
-    fn config(name: &str) -> Option<String> {
-        let dir = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        std::fs::read_to_string(dir.join(name)).ok()
-    }
-
-    /// `key=` in `[section]` of an ini-like file.
-    fn ini(text: &str, section: &str, key: &str) -> Option<String> {
-        let mut inside = false;
-        for line in text.lines() {
-            let l = line.trim();
-            if l.starts_with('[') {
-                inside = l == format!("[{section}]");
-            } else if inside {
-                if let Some(v) = l.strip_prefix(key).and_then(|r| r.strip_prefix('=')) {
-                    return Some(v.trim().to_string());
-                }
-            }
-        }
-        None
-    }
-
-    fn kde() -> bool {
-        std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.to_ascii_uppercase().contains("KDE"))
-    }
-
-    pub fn dark() -> Option<bool> {
-        if kde() {
-            let g = config("kdeglobals")?;
-            if let Some(bg) = ini(&g, "Colors:Window", "BackgroundNormal").and_then(|s| triple(&s)) {
-                return Some(bg.hsl().2 < 0.5);
-            }
-            return ini(&g, "General", "ColorScheme").map(|s| s.to_ascii_lowercase().contains("dark"));
-        }
-        if let Some(s) = gsettings("org.gnome.desktop.interface", "color-scheme") {
-            return Some(s == "prefer-dark");
-        }
-        gsettings("org.gnome.desktop.interface", "gtk-theme").map(|t| t.to_ascii_lowercase().contains("dark"))
-    }
-
-    pub fn accent() -> Option<Color> {
-        if kde() {
-            if let Some(c) = config("kdeglobals").and_then(|g| ini(&g, "General", "AccentColor")).and_then(|s| triple(&s)) {
-                return Some(c);
-            }
-        }
-        let c = match gsettings("org.gnome.desktop.interface", "accent-color")?.as_str() {
-            "teal" => 0x2190a4,
-            "green" => 0x3a944a,
-            "yellow" => 0xc88800,
-            "orange" => 0xed5b00,
-            "red" => 0xe62d42,
-            "pink" => 0xd56199,
-            "purple" => 0x9141ac,
-            "slate" => 0x6f8396,
-            _ => 0x3584e4,
-        };
-        Some(Color::rgb(c))
-    }
-
-    fn from_uri(s: &str) -> PathBuf {
-        let s = s.strip_prefix("file://").unwrap_or(s);
-        // %20 and the like.
-        let b = s.as_bytes();
-        let mut out = Vec::with_capacity(b.len());
-        let mut i = 0;
-        while i < b.len() {
-            if b[i] == b'%' && i + 2 < b.len() {
-                if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    out.push(v);
-                    i += 3;
-                    continue;
-                }
-            }
-            out.push(b[i]);
-            i += 1;
-        }
-        PathBuf::from(String::from_utf8_lossy(&out).into_owned())
-    }
-
-    pub fn desktop(dark: bool, _picture: Option<PathBuf>) -> Desktop {
-        if kde() {
-            let picture = config("plasma-org.kde.plasma.desktop-appletsrc").and_then(|t| {
-                t.lines().find_map(|l| l.trim().strip_prefix("Image=").map(|v| from_uri(v.trim())))
-            });
-            // A wallpaper package (a folder): its largest picture.
-            let picture = picture.and_then(|p| if p.is_dir() { largest(&p.join("contents/images")) } else { Some(p) });
-            return Desktop { picture: picture.and_then(|p| load(&p)), fit: Fit::Fill, colour: None };
-        }
-        let key = if dark { "picture-uri-dark" } else { "picture-uri" };
-        let uri = gsettings("org.gnome.desktop.background", key).filter(|s| !s.is_empty()).or_else(|| gsettings("org.gnome.desktop.background", "picture-uri"));
-        let picture = uri.map(|u| from_uri(&u)).and_then(|p| load(&p));
-        let fit = match gsettings("org.gnome.desktop.background", "picture-options").as_deref() {
-            Some("stretched") => Fit::Stretch,
-            Some("scaled" | "centered") => Fit::Fit,
-            _ => Fit::Fill,
-        };
-        let colour = gsettings("org.gnome.desktop.background", "primary-color").and_then(|s| {
-            let h = s.trim_start_matches('#');
-            (h.len() == 6).then(|| u32::from_str_radix(h, 16).ok()).flatten().map(Color::rgb)
-        });
-        Desktop { picture, fit, colour }
-    }
-
-    fn largest(dir: &std::path::Path) -> Option<PathBuf> {
-        let px = |p: &PathBuf| {
-            let n = p.file_stem()?.to_str()?;
-            let (w, h) = n.split_once('x')?;
-            Some(w.parse::<u64>().ok()? * h.parse::<u64>().ok()?)
-        };
-        std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|e| e == "png" || e == "jpg" || e == "jpeg")).max_by_key(|p| px(p).unwrap_or(0))
-    }
-}
+use linux as sys;
 
 #[cfg(test)]
 mod tests {
@@ -568,9 +587,11 @@ mod tests {
     fn pictures_decode() {
         let mut pm = tiny_skia::Pixmap::new(4, 2).expect("pixmap");
         pm.fill(tiny_skia::Color::from_rgba8(0x12, 0x34, 0x56, 255));
-        let p = decode(&pm.encode_png().expect("png")).expect("decoded");
-        assert_eq!((p.w, p.h, p.px[0]), (4, 2, 0x123456));
-        assert!(decode(b"not a picture").is_none());
+        let (p, larger) = decode(&pm.encode_png().expect("png"), MAX_SIDE).expect("decoded");
+        assert_eq!((p.w, p.h, p.px[0], larger), (4, 2, 0x123456, false));
+        let (p, larger) = decode(&pm.encode_png().expect("png"), 2).expect("decoded");
+        assert_eq!((p.w, p.h, p.px[0], larger), (2, 1, 0x123456, true), "shrunk");
+        assert!(decode(b"not a picture", MAX_SIDE).is_none());
     }
 }
 

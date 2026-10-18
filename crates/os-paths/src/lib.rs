@@ -43,6 +43,21 @@ pub fn user_file(name: &str) -> Option<PathBuf> {
     user_dir().map(|d| d.join(name))
 }
 
+/// A file or folder in Lemon Studio's per-user cache: what can be made again from elsewhere (a shrunk desktop
+/// picture), kept out of the settings folder so it is never synced or backed up with it.
+///
+/// - Windows: `%LOCALAPPDATA%\Lemon Studio`
+/// - macOS: `~/Library/Caches/Lemon Studio`
+/// - Linux and other Unix: `$XDG_CACHE_HOME/Lemon Studio`, else `~/.cache/Lemon Studio`
+///
+/// With `OPENSTUDIO_USER_DIR` set, its `cache` folder.
+pub fn cache_file(name: &str) -> Option<PathBuf> {
+    if let Some(d) = var("OPENSTUDIO_USER_DIR") {
+        return Some(d.join("cache").join(name));
+    }
+    cache_dir().map(|d| d.join(APP).join(name))
+}
+
 /// A set, absolute environment variable (empty and relative values are ignored, as XDG asks).
 fn var(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from).filter(|p| p.is_absolute())
@@ -68,6 +83,26 @@ fn platform_dir() -> Option<PathBuf> {
     None
 }
 
+#[cfg(windows)]
+fn cache_dir() -> Option<PathBuf> {
+    var("LOCALAPPDATA")
+}
+
+#[cfg(target_os = "macos")]
+fn cache_dir() -> Option<PathBuf> {
+    var("HOME").map(|h| h.join("Library").join("Caches"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn cache_dir() -> Option<PathBuf> {
+    var("XDG_CACHE_HOME").or_else(|| var("HOME").map(|h| h.join(".cache")))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn cache_dir() -> Option<PathBuf> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +117,10 @@ mod tests {
             }
         }
         assert_eq!(user_file("monitor.txt").map(|f| f.file_name().unwrap().to_owned()), user_dir().map(|_| "monitor.txt".into()));
+        // The cache is apart from the settings, under its own name.
+        if let (Some(c), Some(u)) = (cache_file("x"), user_dir()) {
+            assert!(c.is_absolute() && !c.starts_with(&u) || std::env::var_os("OPENSTUDIO_USER_DIR").is_some(), "{c:?}");
+        }
         // The old folder sits next to it.
         if let (Some(old), Some(new)) = (legacy_dir(), user_dir()) {
             assert_eq!(old.parent(), new.parent());
