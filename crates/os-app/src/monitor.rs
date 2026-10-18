@@ -58,19 +58,19 @@ pub mod k {
 pub const PARAMS: [Param; 18] = [
     p("Refresh rate", 120.0, 5.0, 240.0, 0, "Hz"),
     p("FFT size (2^n)", 14.0, 9.0, 14.0, 0, ""),
-    p("Low frequency", 10.0, 5.0, 200.0, 0, "Hz"),
+    p("Low frequency", 23.0, 5.0, 200.0, 0, "Hz"),
     p("High frequency", 24000.0, 4000.0, 24000.0, 0, "Hz"),
     p("Analyzer floor", -78.0, -140.0, -30.0, 0, "dB"),
     p("Analyzer top", -30.0, -60.0, 12.0, 0, "dB"),
-    p("Tilt", 1.4, 0.0, 9.0, 1, "dB/oct"),
+    p("Tilt", 5.5, 0.0, 9.0, 1, "dB/oct"),
     p("Rise (1 = instant)", 1.0, 0.05, 1.0, 2, ""),
-    p("Bar fall", 600.0, 5.0, 2000.0, 0, "dB/s"),
+    p("Bar fall", 2000.0, 5.0, 2000.0, 0, "dB/s"),
     p("Column blur", 1.0, 0.0, 4.0, 0, "cols"),
-    p("Bin: max(0) / avg(1)", 0.0, 0.0, 1.0, 0, ""),
+    p("Bin: max(0) / avg(1)", 1.0, 0.0, 1.0, 0, ""),
     p("Scope window", 25.0, 2.0, 170.0, 0, "ms"),
-    p("Scope gain", 2.64, 0.25, 4.0, 2, "x"),
+    p("Scope gain", 1.0, 0.25, 4.0, 2, "x"),
     p("Scope trigger", 1.0, 0.0, 1.0, 0, "on/off"),
-    p("Meter range", 96.0, 20.0, 120.0, 0, "dB"),
+    p("Meter range", 45.0, 20.0, 120.0, 0, "dB"),
     p("Meter fall", 241.0, 3.0, 300.0, 0, "dB/s"),
     p("Meter peak hold", 2018.0, 0.0, 3000.0, 0, "ms"),
     p("Silence after", 499.0, 50.0, 1000.0, 0, "ms"),
@@ -491,6 +491,8 @@ mod tests {
         let mut m = Monitor::default();
         m.cfg.set(k::TILT, 0.0);
         m.cfg.set(k::SMOOTH, 0.0);
+        // Max per column: averaging spreads one tone's level over the column's bins.
+        m.cfg.set(k::PEAK_MODE, 0.0);
         let changed = m.update(Instant::now(), 48000, || (0.5, 0.5), |b| {
             sine(1000.0, 48000, 0.5, b);
             1
