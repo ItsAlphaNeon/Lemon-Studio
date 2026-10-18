@@ -118,7 +118,7 @@ fn cinnamon(_dark: bool) -> Option<Found> {
 
 fn mate(_dark: bool) -> Option<Found> {
     let s = "org.mate.background";
-    gsettings_found(s, gsettings(s, "picture-filename").map(PathBuf::from))
+    gsettings_found(s, gsettings(s, "picture-filename").map(|p| from_uri(&p)))
 }
 
 /// A GNOME-like desktop's picture, how it is laid and the colour, from schema `s`.
@@ -135,7 +135,9 @@ fn xfce(_dark: bool) -> Option<Found> {
 
 fn kde(dark: bool) -> Option<Found> {
     let _ = dark;
-    kde_found(&config("plasma-org.kde.plasma.desktop-appletsrc")?, &kde_default())
+    // Outside Plasma its config may be left from an earlier install: only a picture it names is taken there.
+    let default = kde_session().then(kde_default);
+    kde_found(&config("plasma-org.kde.plasma.desktop-appletsrc")?, default.as_deref())
 }
 
 /// The wallpaper package Plasma shows while none is set: the one its desktop theme names (`[Wallpaper]
@@ -333,7 +335,7 @@ fn xfce_found(text: &str) -> Option<Found> {
 }
 
 /// Plasma's desktop: the containment on the first screen that shows a picture (`org.kde.image`), its picture and fill.
-fn kde_found(text: &str, default: &Path) -> Option<Found> {
+fn kde_found(text: &str, default: Option<&Path>) -> Option<Found> {
     let sections = sections(text);
     // Desktop containments with the picture plugin, the first screen's first.
     let mut desks: Vec<(&str, i64)> = sections
@@ -343,9 +345,9 @@ fn kde_found(text: &str, default: &Path) -> Option<Found> {
         .collect();
     desks.sort_by_key(|d| d.1);
     // A wallpaper never changed from the default has no section or no Image: Plasma shows its default package.
-    desks.into_iter().next().map(|(name, _)| {
+    desks.into_iter().next().and_then(|(name, _)| {
         let keys = sections.iter().find(|(n, _)| *n == format!("{name}][Wallpaper][org.kde.image][General")).map(|s| s.1.clone()).unwrap_or_default();
-        let path = get(&keys, "Image").filter(|i| !i.is_empty()).map_or_else(|| default.to_path_buf(), from_uri);
+        let path = get(&keys, "Image").filter(|i| !i.is_empty()).map(from_uri).or_else(|| default.map(Path::to_path_buf))?;
         // Qt's fill modes: 0 stretch, 1 fit, 2 crop (the default), 6 pad.
         let fit = match get(&keys, "FillMode").and_then(|v| v.parse::<u32>().ok()) {
             Some(0) => Fit::Stretch,
@@ -353,7 +355,7 @@ fn kde_found(text: &str, default: &Path) -> Option<Found> {
             _ => Fit::Fill,
         };
         let colour = get(&keys, "Color").and_then(triple);
-        Found { path: Some(path), fit, colour }
+        Some(Found { path: Some(path), fit, colour })
     })
 }
 
@@ -399,7 +401,7 @@ fn swww_found(text: &str) -> Option<Found> {
     text.lines().find_map(|l| l.split_once("image: ")).map(|(_, p)| Found::picture(PathBuf::from(p.trim()), Fit::Fill))
 }
 
-/// hyprpaper: `hyprctl hyprpaper listactive` ("DP-1 = /path"), or its config (`wallpaper = DP-1,/path`, or a
+/// hyprpaper: `hyprctl hyprpaper listactive` ("DP-1 = /path" or "DP-1 => /path"), or its config (`wallpaper = DP-1,/path`, or a
 /// `wallpaper { path = … }` block).
 fn hyprpaper_found(text: &str) -> Option<Found> {
     text.lines().map(|l| l.split('#').next().unwrap_or("").trim()).find_map(|l| {
@@ -408,8 +410,8 @@ fn hyprpaper_found(text: &str) -> Option<Found> {
         let path = match key {
             "wallpaper" => value.rsplit_once(',').map_or(value, |(_, p)| p).trim(),
             "path" => value,
-            // `listactive`: the output's name.
-            k if !k.is_empty() && !k.contains(' ') && value.starts_with('/') => value,
+            // `listactive`: the output's name ("DP-1 = /path", or "DP-1 => /path").
+            k if !k.is_empty() && !k.contains(' ') && value.trim_start_matches('>').trim_start().starts_with('/') => value.trim_start_matches(['>', ' ']),
             _ => return None,
         };
         let path = path.strip_prefix("contain:").unwrap_or(path);
@@ -555,14 +557,16 @@ fn hex(s: &str) -> Option<Color> {
 
 /// A `file://` URI's path (%20 and the like decoded), or a path as it is.
 fn from_uri(s: &str) -> PathBuf {
-    let s = s.strip_prefix("file://").unwrap_or(s);
+    let Some(s) = s.strip_prefix("file://") else { return PathBuf::from(s) };
+    // Bytes, not text: what follows a `%` may be part of a character.
     let b = s.as_bytes();
+    let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+        if let (b'%', Some(&h), Some(&l)) = (b[i], b.get(i + 1), b.get(i + 2)) {
+            if let (Some(h), Some(l)) = (digit(h), digit(l)) {
+                out.push(h << 4 | l);
                 i += 3;
                 continue;
             }
@@ -671,7 +675,7 @@ mod tests {
             [Containments][2]\nlastScreen=0\nwallpaperplugin=org.kde.image\n\n\
             [Containments][2][Wallpaper][org.kde.image][General]\nFillMode=1\nImage=/usr/share/wallpapers/Next/\n\n\
             [Containments][9]\nlastScreen=0\nplugin=org.kde.panel\n";
-        assert_eq!(kde_found(text, Path::new("/d")), pic("/usr/share/wallpapers/Next/", Fit::Fit));
+        assert_eq!(kde_found(text, Some(Path::new("/d"))), pic("/usr/share/wallpapers/Next/", Fit::Fit));
     }
 
     #[test]
@@ -681,10 +685,12 @@ mod tests {
             [Containments][219]\nItemGeometries-1536x864=\nactivityId=00000000-0000-0000-0000-000000000001\nformfactor=0\nimmutability=1\nlastScreen=0\nlocation=0\nplugin=org.kde.plasma.folder\nwallpaperplugin=org.kde.image\n\n\
             [Containments][220]\nactivityId=\nformfactor=2\nlastScreen=0\nlocation=4\nplugin=org.kde.panel\nwallpaperplugin=org.kde.image\n\n\
             [Containments][220][Applets][221]\nimmutability=1\nplugin=org.kde.plasma.kickoff\n";
-        assert_eq!(kde_found(text, Path::new("/usr/share/wallpapers/Next")), pic("/usr/share/wallpapers/Next", Fit::Fill));
+        assert_eq!(kde_found(text, Some(Path::new("/usr/share/wallpapers/Next"))), pic("/usr/share/wallpapers/Next", Fit::Fill));
         let empty = "[Containments][1]\nlastScreen=0\nwallpaperplugin=org.kde.image\n\n[Containments][1][Wallpaper][org.kde.image][General]\nFillMode=1\nImage=\n";
-        assert_eq!(kde_found(empty, Path::new("/d")), pic("/d", Fit::Fit));
-        assert_eq!(kde_found("[Containments][1]\nwallpaperplugin=org.kde.color\n", Path::new("/d")), None);
+        assert_eq!(kde_found(empty, Some(Path::new("/d"))), pic("/d", Fit::Fit));
+        assert_eq!(kde_found("[Containments][1]\nwallpaperplugin=org.kde.color\n", Some(Path::new("/d"))), None);
+        // Outside a Plasma session there is no default to fall back on.
+        assert_eq!(kde_found(text, None), None);
     }
 
     #[test]
@@ -713,6 +719,7 @@ mod tests {
     fn wlroots_tools_and_configs() {
         assert_eq!(swww_found("eDP-1: 1920x1080, scale: 1, currently displaying: image: /w/a.webp"), pic("/w/a.webp", Fit::Fill));
         assert_eq!(hyprpaper_found("DP-1 = /w/b.png"), pic("/w/b.png", Fit::Fill));
+        assert_eq!(hyprpaper_found("DP-1 => /w/b.png"), pic("/w/b.png", Fit::Fill));
         assert_eq!(hyprpaper_found("preload = /w/c.png\n# wallpaper = ,/no.png\nwallpaper = DP-1,/w/c.png"), pic("/w/c.png", Fit::Fill));
         assert_eq!(hyprpaper_found("wallpaper {\n    monitor = DP-1\n    path = /w/d.png\n}"), pic("/w/d.png", Fit::Fill));
         let args: Vec<String> = ["swaybg", "-o", "*", "-i", "/w/e.jpg", "-m", "fit"].iter().map(|s| s.to_string()).collect();
@@ -745,6 +752,8 @@ mod tests {
         assert_eq!(hex("'#023c88'"), Some(Color::rgb(0x023c88)));
         assert_eq!(hex("#02023c3c8888"), Some(Color::rgb(0x023c88)));
         assert_eq!(from_uri("file:///home/u/My%20Pictures/a.png"), PathBuf::from("/home/u/My Pictures/a.png"));
+        assert_eq!(from_uri("file:///w/%aé%20"), PathBuf::from("/w/%aé "));
+        assert_eq!(from_uri("/w/100%20.png"), PathBuf::from("/w/100%20.png"));
         assert_eq!(shell_words("feh --bg-fill '/a b' \"c d\" e"), ["feh", "--bg-fill", "/a b", "c d", "e"]);
     }
 }
