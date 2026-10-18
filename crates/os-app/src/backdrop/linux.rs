@@ -96,13 +96,13 @@ fn resolve(p: &Path, dark: bool) -> Option<PathBuf> {
     p.is_file().then(|| p.to_path_buf())
 }
 
-/// A KDE wallpaper package's largest picture (its dark ones in dark mode, where it has them).
+/// A KDE wallpaper package's picture for a screen (its dark ones in dark mode, where it has them).
 fn package_picture(dir: &Path, dark: bool) -> Option<PathBuf> {
     let images = dir.join("contents");
     let dark_dir = images.join("images_dark");
     let at = if dark && dark_dir.is_dir() { dark_dir } else { images.join("images") };
     let names: Vec<PathBuf> = std::fs::read_dir(at).ok()?.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    largest(&names)
+    screen_sized(&names)
 }
 
 fn gnome(dark: bool) -> Option<Found> {
@@ -135,7 +135,20 @@ fn xfce(_dark: bool) -> Option<Found> {
 
 fn kde(dark: bool) -> Option<Found> {
     let _ = dark;
-    kde_found(&config("plasma-org.kde.plasma.desktop-appletsrc")?)
+    kde_found(&config("plasma-org.kde.plasma.desktop-appletsrc")?, &kde_default())
+}
+
+/// The wallpaper package Plasma shows while none is set: the one its desktop theme names (`[Wallpaper]
+/// defaultWallpaperTheme` in the theme's `plasmarc`), else Next.
+fn kde_default() -> PathBuf {
+    let rc = |name: &str| config(name).and_then(|t| ini(&t, "Theme", "name"));
+    let theme = rc("plasmarc").or_else(|| rc("kdedefaults/plasmarc")).unwrap_or_else(|| "default".into());
+    let named = data_dirs().into_iter().find_map(|d| {
+        let t = std::fs::read_to_string(d.join("plasma/desktoptheme").join(&theme).join("plasmarc")).ok()?;
+        ini(&t, "Wallpaper", "defaultWallpaperTheme")
+    });
+    let name = named.unwrap_or_else(|| "Next".into());
+    data_dirs().iter().map(|d| d.join("wallpapers").join(&name)).find(|p| p.is_dir()).unwrap_or_else(|| PathBuf::from("/usr/share/wallpapers").join(name))
 }
 
 fn cosmic(_dark: bool) -> Option<Found> {
@@ -320,7 +333,7 @@ fn xfce_found(text: &str) -> Option<Found> {
 }
 
 /// Plasma's desktop: the containment on the first screen that shows a picture (`org.kde.image`), its picture and fill.
-fn kde_found(text: &str) -> Option<Found> {
+fn kde_found(text: &str, default: &Path) -> Option<Found> {
     let sections = sections(text);
     // Desktop containments with the picture plugin, the first screen's first.
     let mut desks: Vec<(&str, i64)> = sections
@@ -329,9 +342,10 @@ fn kde_found(text: &str) -> Option<Found> {
         .map(|(name, keys)| (*name, get(keys, "lastScreen").and_then(|s| s.parse().ok()).unwrap_or(i64::MAX)))
         .collect();
     desks.sort_by_key(|d| d.1);
-    desks.into_iter().find_map(|(name, _)| {
-        let keys = sections.iter().find(|(n, _)| *n == format!("{name}][Wallpaper][org.kde.image][General"))?.1.clone();
-        let image = get(&keys, "Image")?;
+    // A wallpaper never changed from the default has no section or no Image: Plasma shows its default package.
+    desks.into_iter().next().map(|(name, _)| {
+        let keys = sections.iter().find(|(n, _)| *n == format!("{name}][Wallpaper][org.kde.image][General")).map(|s| s.1.clone()).unwrap_or_default();
+        let path = get(&keys, "Image").filter(|i| !i.is_empty()).map_or_else(|| default.to_path_buf(), from_uri);
         // Qt's fill modes: 0 stretch, 1 fit, 2 crop (the default), 6 pad.
         let fit = match get(&keys, "FillMode").and_then(|v| v.parse::<u32>().ok()) {
             Some(0) => Fit::Stretch,
@@ -339,7 +353,7 @@ fn kde_found(text: &str) -> Option<Found> {
             _ => Fit::Fill,
         };
         let colour = get(&keys, "Color").and_then(triple);
-        Some(Found { path: Some(from_uri(image)), fit, colour })
+        Found { path: Some(path), fit, colour }
     })
 }
 
@@ -568,18 +582,28 @@ fn expand(p: &str) -> PathBuf {
     }
 }
 
-/// The largest picture of those named `<w>x<h>.<ext>` (KDE's packages), else the first.
-fn largest(paths: &[PathBuf]) -> Option<PathBuf> {
-    let px = |p: &PathBuf| {
+/// Of the pictures named `<w>x<h>.<ext>` (KDE's packages), the one shaped most like a 16:9 screen, the largest of
+/// those (a package also holds phone and 32:9 ones, which a window crops badly); else the first.
+fn screen_sized(paths: &[PathBuf]) -> Option<PathBuf> {
+    let key = |p: &PathBuf| {
         let (w, h) = p.file_stem()?.to_str()?.split_once('x')?;
-        Some(w.parse::<u64>().ok()? * h.parse::<u64>().ok()?)
+        let (w, h) = (w.parse::<u64>().ok()?, h.parse::<u64>().ok()?);
+        let off = ((w as f64 / h.max(1) as f64).ln() - (16.0f64 / 9.0).ln()).abs();
+        Some((std::cmp::Reverse((off * 100.0).round() as u64), w * h))
     };
     let pictures = paths.iter().filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "jxl" | "avif" | "svg")));
-    pictures.max_by_key(|p| px(p).unwrap_or(0)).cloned()
+    pictures.max_by_key(|p| key(p).unwrap_or((std::cmp::Reverse(u64::MAX), 0))).cloned()
 }
 
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute())
+}
+
+/// The folders data is looked up in: the user's first, then the system's (`XDG_DATA_HOME`, `XDG_DATA_DIRS`).
+fn data_dirs() -> Vec<PathBuf> {
+    let user = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|d| d.is_absolute()).or_else(|| home().map(|h| h.join(".local/share")));
+    let system = std::env::var("XDG_DATA_DIRS").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    user.into_iter().chain(system.split(':').map(PathBuf::from).filter(|d| d.is_absolute())).collect()
 }
 
 /// A file under the user's config folder.
@@ -647,7 +671,27 @@ mod tests {
             [Containments][2]\nlastScreen=0\nwallpaperplugin=org.kde.image\n\n\
             [Containments][2][Wallpaper][org.kde.image][General]\nFillMode=1\nImage=/usr/share/wallpapers/Next/\n\n\
             [Containments][9]\nlastScreen=0\nplugin=org.kde.panel\n";
-        assert_eq!(kde_found(text), pic("/usr/share/wallpapers/Next/", Fit::Fit));
+        assert_eq!(kde_found(text, Path::new("/d")), pic("/usr/share/wallpapers/Next/", Fit::Fit));
+    }
+
+    #[test]
+    fn kde_never_changed_shows_the_default_package() {
+        // As Plasma 6 writes it before the wallpaper is first changed: no [Wallpaper] section at all.
+        let text = "[ActionPlugins][0]\nRightButton;NoModifier=org.kde.contextmenu\n\n\
+            [Containments][219]\nItemGeometries-1536x864=\nactivityId=00000000-0000-0000-0000-000000000001\nformfactor=0\nimmutability=1\nlastScreen=0\nlocation=0\nplugin=org.kde.plasma.folder\nwallpaperplugin=org.kde.image\n\n\
+            [Containments][220]\nactivityId=\nformfactor=2\nlastScreen=0\nlocation=4\nplugin=org.kde.panel\nwallpaperplugin=org.kde.image\n\n\
+            [Containments][220][Applets][221]\nimmutability=1\nplugin=org.kde.plasma.kickoff\n";
+        assert_eq!(kde_found(text, Path::new("/usr/share/wallpapers/Next")), pic("/usr/share/wallpapers/Next", Fit::Fill));
+        let empty = "[Containments][1]\nlastScreen=0\nwallpaperplugin=org.kde.image\n\n[Containments][1][Wallpaper][org.kde.image][General]\nFillMode=1\nImage=\n";
+        assert_eq!(kde_found(empty, Path::new("/d")), pic("/d", Fit::Fit));
+        assert_eq!(kde_found("[Containments][1]\nwallpaperplugin=org.kde.color\n", Path::new("/d")), None);
+    }
+
+    #[test]
+    fn packages_give_the_screen_shaped_picture() {
+        let names: Vec<PathBuf> = ["1440x2960.png", "7680x2160.png", "1920x1080.png", "5120x2880.png", "metadata.json"].iter().map(PathBuf::from).collect();
+        assert_eq!(screen_sized(&names), Some(PathBuf::from("5120x2880.png")));
+        assert_eq!(screen_sized(&[PathBuf::from("a.jpg")]), Some(PathBuf::from("a.jpg")));
     }
 
     #[test]
