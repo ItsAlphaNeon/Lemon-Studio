@@ -885,7 +885,12 @@ pub fn paint(ui: &mut Ui, s: &State) {
     ui.hit(r, Action::Settings(SAct::Body), "");
     // Shadow, frame, title bar.
     let lemon = super::lemon(ui);
-    if lemon {
+    if t.style.etched() {
+        // Etched (spec: ui/etched-design.md §6): a window of its own over the desktop; the groups sit on it as cards.
+        ui.c.fill_rrect(r.outset(4.0), lk::r_panel(t) + 4.0, Color::rgb(0).with_alpha(50));
+        ui.c.backdrop_rrect(r, lk::r_panel(t), t.window_title);
+        ui.c.stroke_rrect(r.inset(0.5), lk::r_panel(t) - 0.5, 1.0, lk::edge(t));
+    } else if lemon {
         // Lemon (spec: ui/lemon-design.md §10): rounded window, pill tabs, rounded groups and square checks.
         ui.c.fill_rrect(r.outset(4.0), lk::r_panel(t) + 4.0, Color::rgb(0).with_alpha(50));
         lk::outlined(ui.c, r, lk::r_panel(t), t.s(0x1c1e21), t.s(0x2b2d30));

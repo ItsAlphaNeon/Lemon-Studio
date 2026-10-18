@@ -254,7 +254,31 @@ pub fn scroll_thumb(t: &Palette, st: State) -> Color {
 
 /// Outer frame + body of a floating window: rounded, 1 px outline, title-coloured body.
 pub fn window(c: &mut Canvas, t: &Palette, r: Rect) {
+    if t.style.etched() {
+        // Etched (spec: ui/etched-design.md §5): a window of its own over the desktop, in the frame's margin a soft
+        // shadow (kept inside `r`, which is all that is repainted when it goes).
+        let panel = Rect::new(r.x + 4.0, r.y + 3.0, r.w - 8.0, r.h - 8.0);
+        let rad = r_panel(t);
+        c.shadow(panel, rad, 3.0, 1.0, Color::rgb(0).with_alpha(if dark(t) { 0x80 } else { 0x38 }));
+        c.backdrop_rrect(panel, rad, t.window_title);
+        c.stroke_rrect(panel.inset(0.5), rad - 0.5, 1.0, edge(t));
+        return;
+    }
     outlined(c, r, r_panel(t), t.window_border, t.window_title);
+}
+
+/// Etched: whether the colours are the dark ones (light text).
+pub fn dark(t: &Palette) -> bool {
+    t.text.hsl().2 > 0.5
+}
+
+/// Etched: the hairline edge of a window or a floating panel.
+pub fn edge(t: &Palette) -> Color {
+    if dark(t) {
+        Color::rgb(0xffffff).with_alpha(0x1c)
+    } else {
+        Color::rgb(0).with_alpha(0x1a)
+    }
 }
 
 /// The client area well inside a floating window frame (rounded at the bottom like the window).
@@ -264,8 +288,21 @@ pub fn client(c: &mut Canvas, t: &Palette, r: Rect) {
 
 /// Popup / dropdown panel body (no shadow: it would paint outside the popup's damage rect).
 pub fn popup(c: &mut Canvas, t: &Palette, r: Rect) {
+    if t.style.etched() {
+        return frosted(c, t, r, t.menu_pop);
+    }
     let rad = 6.0;
     outlined(c, r, rad, t.menu_pop_border, t.menu_pop);
+}
+
+/// Etched (spec: ui/etched-design.md §4): a floating panel of frosted glass over what is behind it, with a soft shadow
+/// and a hairline edge; `base` tells dark glass from light.
+pub fn frosted(c: &mut Canvas, t: &Palette, r: Rect, base: Color) {
+    let rad = r_panel(t);
+    let dark = base.hsl().2 < 0.5;
+    c.frost(r, rad, os_theme::etched::PANEL_BLUR, &os_theme::etched::panel_frost(dark));
+    c.shadow(r, rad, 18.0, 6.0, Color::rgb(0).with_alpha(if dark { 0x70 } else { 0x30 }));
+    c.stroke_rrect(r.inset(0.5), rad - 0.5, 1.0, edge(t));
 }
 
 /// Hovered row of a list or menu: an inset rounded bar in the coloured dark.
@@ -275,6 +312,11 @@ pub fn row_highlight(c: &mut Canvas, t: &Palette, r: Rect) {
 
 /// Window button hover face (minimize / maximize / close).
 pub fn window_button_hover(c: &mut Canvas, t: &Palette, b: Rect, close: bool) {
+    if t.style.etched() {
+        // The system's caption buttons: close turns red, the others a faint veil.
+        let veil = if dark(t) { Color::rgb(0xffffff).with_alpha(0x18) } else { Color::rgb(0).with_alpha(0x10) };
+        return c.fill_rrect(b, 4.0, if close { Color::rgb(0xc42b1c) } else { veil });
+    }
     c.fill_rrect(b, 4.0, if close { t.record.with_alpha(200) } else { t.button_hi });
 }
 

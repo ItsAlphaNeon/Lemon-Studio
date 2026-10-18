@@ -104,6 +104,17 @@ fn ns_window(window: &Window) -> Option<Retained<NSWindow>> {
     view.window()
 }
 
+/// The desktop picture's file on the main screen (main thread only), for the Etched skin's backdrop (`crate::backdrop`).
+#[allow(unused_unsafe)]
+pub fn desktop_picture() -> Option<PathBuf> {
+    let mtm = MainThreadMarker::new()?;
+    let screen = NSScreen::mainScreen(mtm)?;
+    // SAFETY: plain queries of the shared workspace and a URL.
+    let url = unsafe { objc2_app_kit::NSWorkspace::sharedWorkspace().desktopImageURLForScreen(&screen) }?;
+    let path = unsafe { url.path() }?;
+    Some(PathBuf::from(path.to_string()))
+}
+
 /// Height of the primary screen (points): AppKit counts y upward from its bottom.
 fn primary_height(mtm: MainThreadMarker) -> f64 {
     NSScreen::screens(mtm).firstObject().map_or(0.0, |s| s.frame().size.height)

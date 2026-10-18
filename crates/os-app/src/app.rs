@@ -1080,6 +1080,8 @@ pub struct App {
     pub(crate) smooth: crate::smooth::Eases,
     /// Audio ▸ Auto close: whether the output is closed while another program is in front (`crate::auto_close`).
     pub(crate) auto_close: crate::auto_close::AutoClose,
+    /// The system's look and the Etched skin's backdrop made from it (`crate::backdrop`).
+    pub(crate) look: crate::backdrop::State,
     pub want_minimize: bool,
     pub want_maximize: bool,
     pub want_close: bool,
@@ -1109,6 +1111,8 @@ pub struct App {
     shifts: Vec<Moved>,
     /// Areas the last paint moved: the shell moves its window buffer the same way (`take_moved`).
     moved: Vec<Moved>,
+    /// Where frosted panels and their shadows are (`Canvas::take_frosted`): a repaint touching one repaints it whole.
+    frosted: Vec<Rect>,
     /// The canvas scale at the last paint.
     px_scale: f32,
     /// What covered the playlist at the last paint (`playlist_covers`).
@@ -1266,6 +1270,7 @@ impl App {
             hold: None,
             smooth: Default::default(),
             auto_close: Default::default(),
+            look: Default::default(),
             want_minimize: false,
             want_maximize: false,
             want_close: false,
@@ -1283,6 +1288,7 @@ impl App {
             scrolled: None,
             shifts: Vec::new(),
             moved: Vec::new(),
+            frosted: Vec::new(),
             px_scale: 1.0,
             pl_covers: Vec::new(),
             piano_win: None,
@@ -2308,6 +2314,15 @@ impl App {
                 if o.hint_bar && v.iter().any(|r| !r.intersect(&HINT_RECT).is_empty()) {
                     add_damage(&mut v, views::toolbar::hint_bar_rect(&self.state));
                 }
+                // A frosted panel (the Etched skin) blurs what is around it: a repaint or a scroll that touches it
+                // repaints all it reads, or the blur would take in its own last frame. Twice, for one reaching another.
+                for _ in 0..2 {
+                    let touched = |f: &Rect| v.iter().chain(self.shifts.iter().map(|m| &m.area)).any(|r| !r.intersect(f).is_empty());
+                    let add: Vec<Rect> = self.frosted.iter().filter(|f| touched(f)).copied().collect();
+                    for r in add {
+                        add_damage(&mut v, r);
+                    }
+                }
                 Some(Some(v))
             }
         }
@@ -2403,6 +2418,8 @@ impl App {
         // a radius-wide band at the left and right leaves out all four corners.
         let st = self.theme.colors.style;
         let k = st.radius_panel;
+        // Etched (spec: ui/etched-design.md §5): the frame's margin holds a shadow over what is under the window.
+        let r = if st.etched() { Rect::new(r.x + 4.0, r.y + 3.0, (r.w - 8.0).max(0.0), (r.h - 8.0).max(0.0)) } else { r };
         Some(if st.lemon() { Rect::new(r.x + k, r.y, (r.w - 2.0 * k).max(0.0), r.h) } else { r })
     }
 
@@ -3039,6 +3056,7 @@ impl App {
         self.backup_tick(now);
         self.work_tick(now);
         self.auto_close_tick(now);
+        self.look_tick();
         self.follow_settings();
         if self.state.cpu.due(now) {
             let tp = &self.transport;
@@ -3196,6 +3214,26 @@ impl App {
         if let Some((name, p)) = &self.export {
             let status = format!("Rendering {name}   {:.0} %", p * 100.0);
             crate::loading::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
+        }
+        self.track_frosted(canvas.take_frosted(), damage.is_none());
+    }
+
+    /// Keeps where frosted panels are (`frosted`). One that appeared in a partial paint was drawn only where the damage
+    /// was (its shadow and what it blurs reach further): it is painted again whole.
+    fn track_frosted(&mut self, now: Vec<Rect>, full: bool) {
+        if full {
+            self.frosted = now;
+            return;
+        }
+        for r in now {
+            if !self.frosted.contains(&r) {
+                self.frosted.push(r);
+                self.damage_rect(r);
+            }
+        }
+        // Panels long gone only cost a larger repaint: a full paint starts the list again.
+        if self.frosted.len() > 24 {
+            self.invalidate();
         }
     }
 
@@ -3457,17 +3495,51 @@ impl App {
     /// Switch to skin `d`, keeping the applied theme (a `.flstheme` colours either skin; with none, Citrus may load the
     /// saved `theme.txt`). `remember` = keep the choice for the next start (`design.txt` in the user folder).
     pub fn set_design(&mut self, d: Design, remember: bool) {
-        self.theme = match &self.state.fl_text {
-            Some(text) => skin_theme(d, &self.theme.name.clone(), Some(text)),
-            None => design_theme(d, remember),
-        };
-        os_theme::set_current(&self.theme.colors);
+        self.reskin(d, remember);
         if remember {
             save_design(d);
         }
-        self.sync_preset();
         self.state.message = Some(format!("Skin: {}", d.name()));
+    }
+
+    /// Rebuilds the colours of skin `d` with the applied theme (`set_design`).
+    fn reskin(&mut self, d: Design, saved: bool) {
+        self.theme = match &self.state.fl_text {
+            Some(text) => skin_theme(d, &self.theme.name.clone(), Some(text)),
+            None => design_theme(d, saved),
+        };
+        os_theme::set_current(&self.theme.colors);
+        self.sync_preset();
         self.invalidate();
+    }
+
+    /// A new reading of the system's look (`crate::backdrop`): the Etched skin follows its dark or light and its accent
+    /// (spec: ui/etched-design.md §2), and its backdrop the desktop picture.
+    fn look_tick(&mut self) {
+        let Some(s) = crate::backdrop::take() else { return };
+        self.take_look(s);
+    }
+
+    pub(crate) fn take_look(&mut self, s: crate::backdrop::System) {
+        let a = os_theme::etched::Appearance { dark: s.dark, accent: s.accent.unwrap_or(os_theme::etched::DEFAULT_ACCENT) };
+        if !self.look.set(s) {
+            return;
+        }
+        if os_theme::etched::appearance() != a {
+            os_theme::etched::set_appearance(a);
+            if self.design() == Design::Etched {
+                self.reskin(Design::Etched, true);
+            } else {
+                self.sync_preset();
+            }
+        }
+        self.invalidate();
+    }
+
+    /// The see-through skin's backdrop for a monitor of `mw` x `mh` px: (pixels, w, h); none when the colours in use
+    /// are opaque.
+    pub fn backdrop_for(&mut self, mw: u32, mh: u32) -> Option<(std::rc::Rc<Vec<u32>>, usize, usize)> {
+        os_theme::etched::see_through(&self.theme.colors).then(|| self.look.backdrop(mw, mh, os_theme::etched::appearance().dark))
     }
 
     /// Theme ▸ Options: flips "Audio and automation clips use note colors" (`OverrideClips`) in the applied theme, the
@@ -3513,8 +3585,15 @@ impl App {
         };
         st.skin = own;
         if st.open {
-            st.skin_previews = Design::ALL.iter().map(|d| os_theme::design::palette(*d, applied.as_ref())).collect();
-            st.theme_previews = themes.iter().map(|th| os_theme::design::palette(design, Some(th))).collect();
+            // A see-through skin's tile shows it over its plain base (the tiles have no backdrop).
+            let flat = |mut p: os_theme::Palette| {
+                if os_theme::etched::see_through(&p) {
+                    os_theme::etched::flatten(&mut p, os_theme::etched::appearance().dark);
+                }
+                p
+            };
+            st.skin_previews = Design::ALL.iter().map(|d| flat(os_theme::design::palette(*d, applied.as_ref()))).collect();
+            st.theme_previews = themes.iter().map(|th| flat(os_theme::design::palette(design, Some(th)))).collect();
         }
         self.check_readable();
     }
@@ -7370,7 +7449,7 @@ fn save_design(d: Design) {
 /// saved `current.flstheme`; Citrus `theme.txt` (Lemon Studio's token file, Citrus only), else `current.flstheme`.
 pub fn design_theme(d: Design, saved: bool) -> Theme {
     match d {
-        Design::Lemon => skin_theme(Design::Lemon, "Lemon", saved.then(saved_fl_text).flatten().as_deref()),
+        Design::Lemon | Design::Etched => skin_theme(d, d.name(), saved.then(saved_fl_text).flatten().as_deref()),
         Design::Citrus if saved => load_theme_inner(),
         Design::Citrus => Theme::default(),
     }
@@ -7712,6 +7791,11 @@ mod tests {
             app.open_settings(THEME);
             frame(&mut app, &mut c, None);
             assert!(!app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check("Light mode"))));
+            // The options are below the tiles: scroll to the end.
+            let t0 = hit_rect(&app, &Action::Settings(SAct::Preset(0)));
+            app.mouse_move(t0.cx(), t0.cy());
+            app.wheel(0.0, -40.0, false, false);
+            frame(&mut app, &mut c, None);
             let r = hit_rect(&app, &Action::Settings(SAct::Check(NOTE_COLORS_CHECK)));
             click(&mut app, &mut c, r);
         } else {
@@ -7738,19 +7822,19 @@ mod tests {
         let mut app = App::new(None);
         app.open_settings(THEME);
         let st = &app.state.settings;
-        assert_eq!((st.skin_previews.len(), st.theme_previews.len()), (2, PRESETS.len() + 2));
-        assert_eq!(st.themes[..2].iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["Lemon", "Citrus"]);
+        assert_eq!((st.skin_previews.len(), st.theme_previews.len()), (3, PRESETS.len() + 3));
+        assert_eq!(st.themes[..3].iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["Lemon", "Citrus", "Etched"]);
         assert_eq!((st.skin, st.preset), (1, 1), "Citrus skin, no theme: the Citrus theme's tile");
         // A theme in Citrus, then the Lemon skin keeps it.
         let (name, text) = PRESETS[2];
-        app.settings_act(SAct::Preset(4));
+        app.settings_act(SAct::Preset(5));
         assert_eq!(app.theme.colors, os_theme::fl::palette(&FlTheme::parse(text)));
         assert_eq!(std::fs::read_to_string(dir.join("current.flstheme")).unwrap(), text);
         app.settings_act(SAct::Skin(0));
         assert_eq!(app.design(), Design::Lemon);
         assert_eq!(app.theme.colors, os_theme::design::palette(Design::Lemon, Some(&FlTheme::parse(text))));
-        assert_eq!((app.state.settings.skin, app.state.settings.preset), (0, 4), "{name}");
-        assert_eq!(app.state.settings.theme_previews[4], app.theme.colors, "the tile previews what is applied");
+        assert_eq!((app.state.settings.skin, app.state.settings.preset), (0, 5), "{name}");
+        assert_eq!(app.state.settings.theme_previews[5], app.theme.colors, "the tile previews what is applied");
         // The Citrus theme on the Lemon skin: Lemon's shapes, the stock look's colours; kept across a skin switch.
         let lemon_own = os_theme::design::palette(Design::Lemon, None);
         app.settings_act(SAct::Preset(1));
@@ -7782,7 +7866,7 @@ mod tests {
         // The page draws both lists of tiles with their hits.
         if let Ok(mut c) = Canvas::new(1920, 1080, 1.0) {
             frame(&mut app, &mut c, None);
-            for a in [SAct::Skin(0), SAct::Skin(1), SAct::Preset(0), SAct::Preset(PRESETS.len() + 1)] {
+            for a in [SAct::Skin(0), SAct::Skin(1), SAct::Preset(0), SAct::Preset(PRESETS.len() + 2)] {
                 hit_rect(&app, &Action::Settings(a));
             }
         }
@@ -7805,7 +7889,7 @@ mod tests {
         let themes = dir.join("themes");
         let mut app = App::new(None);
         app.open_settings(THEME);
-        app.settings_act(SAct::Preset(3));
+        app.settings_act(SAct::Preset(4));
         app.theme_knob_wheel(0, 2);
         frame(&mut app, &mut c, None);
         // The buttons are below the tiles: scroll to the end.
@@ -7816,7 +7900,7 @@ mod tests {
         let r = hit_rect(&app, &Action::Settings(SAct::Button(SAVE_PRESET)));
         click(&mut app, &mut c, r);
         let name = |app: &App| app.state.settings.name_edit.as_ref().map(|e| e.text.text.clone());
-        assert_eq!(name(&app), Some(format!("{} custom", app.state.settings.themes[3].0)));
+        assert_eq!(name(&app), Some(format!("{} custom", app.state.settings.themes[4].0)));
         // A built-in theme's name is refused; the panel stays.
         app.state.settings.name_edit.as_mut().unwrap().text.set("frost");
         app.key(&Key::Named(NamedKey::Enter), false, false);
@@ -7877,8 +7961,8 @@ mod tests {
         let mut app = App::new(None);
         app.open_settings(THEME);
         let none = app.theme.colors.clone();
-        app.settings_act(SAct::Preset(2));
-        app.settings_act(SAct::Preset(5));
+        app.settings_act(SAct::Preset(3));
+        app.settings_act(SAct::Preset(6));
         let five = app.state.fl_text.clone();
         frame(&mut app, &mut c, None);
         let hue = hit_rect(&app, &Action::Settings(SAct::ThemeKnob(0)));
@@ -7891,25 +7975,25 @@ mod tests {
         let z = Key::Character("z".into());
         app.key(&z, true, false);
         assert_eq!(app.state.fl_text, five, "the three notches are one step");
-        assert_eq!(app.state.settings.preset, 5);
+        assert_eq!(app.state.settings.preset, 6);
         app.key(&z, true, false);
-        assert_eq!(app.state.settings.preset, 2);
+        assert_eq!(app.state.settings.preset, 3);
         app.key(&z, true, false);
         assert!(app.state.fl_text.is_none() && !dir.join("current.flstheme").exists());
         assert_eq!(app.theme.colors, none, "the skin's own colours");
         app.shift = true;
         app.key(&z, true, false);
         app.shift = false;
-        assert_eq!(app.state.settings.preset, 2);
+        assert_eq!(app.state.settings.preset, 3);
         app.key(&Key::Character("y".into()), true, false);
         app.key(&Key::Character("y".into()), true, false);
         assert_eq!(app.state.fl_text, wheeled);
         assert_eq!(std::fs::read_to_string(dir.join("current.flstheme")).ok(), wheeled, "kept");
         // A new change empties the redo list.
         app.key(&z, true, false);
-        app.settings_act(SAct::Preset(7));
+        app.settings_act(SAct::Preset(8));
         app.key(&Key::Character("y".into()), true, false);
-        assert_eq!(app.state.settings.preset, 7);
+        assert_eq!(app.state.settings.preset, 8);
         THEME_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7927,7 +8011,7 @@ mod tests {
         // On Citrus, which draws a theme's text colour as given.
         app.set_design(Design::Citrus, false);
         app.open_settings(THEME);
-        app.settings_act(SAct::Preset(3));
+        app.settings_act(SAct::Preset(4));
         assert!(app.state.settings.unreadable.is_none());
         // Text the grey of the surfaces (with no Text adjustment moving it).
         let faint = os_theme::fl::set_key(os_theme::fl::DARK_TEXT, "TextColor", &os_theme::fl::colour_value("TextColor", os_theme::Color::rgb(0x2a2e30)).to_string());
@@ -7960,7 +8044,7 @@ mod tests {
         THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
         let mut app = App::new(None);
         app.open_settings(THEME);
-        app.settings_act(SAct::Preset(2));
+        app.settings_act(SAct::Preset(3));
         let base = PRESETS[0].1;
         frame(&mut app, &mut c, None);
         // Brightness: dragged up 30 px = a tenth of its 510 range.
@@ -7972,7 +8056,7 @@ mod tests {
         let v = knob_value(&app.state.fl_theme(), 2);
         assert_eq!(v, KNOBS[2].at(KNOBS[2].pos(v0) + 0.1));
         assert_eq!(app.theme.colors, os_theme::design::palette(app.design(), Some(&app.state.fl_theme())), "live");
-        assert_eq!(app.state.settings.preset, 2, "the tile it came from stays framed");
+        assert_eq!(app.state.settings.preset, 3, "the tile it came from stays framed");
         app.mouse_up();
         assert_eq!(std::fs::read_to_string(dir.join("current.flstheme")).unwrap(), app.state.fl_text.clone().unwrap(), "kept");
         // The wheel steps Hue by 5 degrees; a middle click restores the theme's value.
@@ -10157,6 +10241,43 @@ mod tests {
         assert!(app.state.shown(Win::Tapper) && app.state.in_front(Win::Tapper));
         click(&mut app, &mut c, b);
         assert!(!app.state.shown(Win::Tapper));
+    }
+
+    /// Etched (spec: ui/etched-design.md §7): with the backdrop under the frame and a frosted menu open, repainting
+    /// what changed shows the same as a full paint: hovering its rows, then closing it (its shadow and blur go too).
+    #[test]
+    fn etched_frosted_menu_repaints_match_full() {
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+        // A desktop with something to blur: stripes across, a ramp down.
+        let px: Vec<u32> = (0..64 * 36u32).map(|i| if (i % 64) / 4 % 2 == 0 { 0xd0_4020 } else { 0x20_60d0 } + (i / 64) * 2).collect();
+        let px = std::rc::Rc::new(px);
+        for c in [&mut a, &mut b] {
+            c.set_backdrop(Some(os_ui::Backdrop { w: 64, h: 36, px: px.clone(), at: Rect::new(0.0, 0.0, 1920.0, 1080.0) }));
+        }
+        let mut app = App::new(None);
+        app.theme = design_theme(Design::Etched, false);
+        assert!(os_theme::etched::see_through(&app.theme.colors));
+        app.state.menu_open = Some(0);
+        frame(&mut app, &mut a, None);
+        let _ = app.take_damage();
+        let mut partial = 0;
+        for y in [100.0, 130.0, 160.0, 230.0, 600.0] {
+            app.mouse_move(60.0, y);
+            let d = app.take_damage();
+            partial += usize::from(matches!(d, Some(Some(_))));
+            frame_damage(&mut app, &mut a, d);
+            frame(&mut app, &mut b, None);
+            assert_same(&a, &b, &format!("Etched: menu hovered at {y}"));
+        }
+        assert!(partial > 0, "the hovers repaint regions");
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        assert!(app.state.menu_open.is_none());
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut a, d);
+        frame(&mut app, &mut b, None);
+        assert_same(&a, &b, "Etched: menu closed (its shadow and blur gone)");
     }
 
     /// The tapper's flash fades on the ticks (spec: ui/tempo-tapper.md §4, §8): each repaints just the pad, which shows
