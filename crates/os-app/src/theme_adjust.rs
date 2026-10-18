@@ -4,7 +4,7 @@
 
 //! Settings ▸ Theme ▸ Adjustments: five knobs and eight colour circles that edit the applied theme live.
 //!
-//! They read and rewrite the applied `.flstheme` (`State::fl_text`; while Default is in use, the skin's own colours as
+//! They read and rewrite the applied `.flstheme` (`State::fl_text`; with no theme, the skin's own colours as
 //! a theme, `os_theme::design::default_text`), so they colour either skin like any theme. A knob is dragged up / down or stepped by the wheel; a middle click
 //! restores the value of the theme as it was chosen (`State::theme_base`). A colour circle opens a colour picker under
 //! it: a saturation / brightness square, a hue strip, the old and new colours and Revert. Steps, Meters and Waves hold
@@ -18,7 +18,7 @@ use os_theme::fl;
 use os_theme::{Color, FlTheme};
 use os_ui::Rect;
 
-/// The applied theme's text: while Default is in use, skin `d`'s own colours as a theme.
+/// The applied theme's text: with no theme, skin `d`'s own colours as a theme.
 pub fn applied_text(s: &State, d: Design) -> String {
     s.fl_text.clone().unwrap_or_else(|| os_theme::design::default_text(d))
 }
@@ -226,9 +226,12 @@ pub fn picker_rects(p: &Picker, n_parts: usize, win: Rect) -> PickerRects {
 }
 
 impl App {
-    /// The applied theme's text (`applied_text`).
+    /// The applied theme's text (`applied_text`) to edit. The Lemon theme's key goes: edited, it is a theme like any
+    /// other (on Lemon still Lemon's colours, `os_theme::design::default_text`); the Citrus theme keeps its key, so on
+    /// Lemon it stays laid over Lemon even where it is stock Dark.
     pub(crate) fn theme_text(&self) -> String {
-        applied_text(&self.state, self.design())
+        let text = applied_text(&self.state, self.design());
+        if FlTheme::parse(&text).colors == Some(Design::Lemon) { fl::remove_key(&text, fl::COLORS_KEY) } else { text }
     }
 
     /// Applies an edited theme `text` to the skin in use, live: the window, the skin tiles' previews (the theme tiles

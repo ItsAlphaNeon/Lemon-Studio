@@ -108,7 +108,14 @@ pub struct FlTheme {
     pub back_mode: i32,
     pub back_color: Option<Color>,
     pub back_picture: String,
+    /// Lemon Studio's own key (`COLORS_KEY`, ignored by FL): the theme is a skin's own colours, the Lemon or Citrus
+    /// theme (spec: ui/theme-presets.md §B).
+    pub colors: Option<crate::Design>,
 }
+
+/// The key that makes a theme file a skin's own colours: `LemonStudioColors=Lemon` or `=Citrus`. FL ignores it and
+/// reads the rest of the file (an approximation of those colours).
+pub const COLORS_KEY: &str = "LemonStudioColors";
 
 /// Decode an RGB-ordered value (§2: Selected, TextColor): blue in the low byte, high byte ignored.
 pub fn rgb_value(v: i64) -> Color {
@@ -171,6 +178,7 @@ impl FlTheme {
             back_mode: num("backmode").unwrap_or(2.0) as i32,
             back_color: col("backcolor"),
             back_picture: kv.get("backpicfilename").cloned().unwrap_or_default(),
+            colors: kv.get(&COLORS_KEY.to_ascii_lowercase()).and_then(|v| crate::Design::parse(v)),
         }
     }
 
@@ -218,6 +226,15 @@ pub fn set_key(text: &str, key: &str, value: &str) -> String {
         lines.insert(at, format!("{key}={value}"));
     }
     lines.join(nl)
+}
+
+/// `text` without its `key` lines.
+pub fn remove_key(text: &str, key: &str) -> String {
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    text.split(nl)
+        .filter(|l| !l.trim_start_matches('\u{feff}').split_once('=').is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case(key)))
+        .collect::<Vec<_>>()
+        .join(nl)
 }
 
 /// The value of `key` in `text` (a `.flstheme` file), trimmed; the last line wins, as in `FlTheme::parse`.

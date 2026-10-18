@@ -370,6 +370,23 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
 /// none, leaves a skin its own colours: Citrus the measured look, Lemon the brand palette; any other theme colours
 /// Citrus through `fl::palette` and is laid over Lemon's colours by a `Retint`.
 pub fn palette(design: Design, theme: Option<&FlTheme>) -> Palette {
+    // The Lemon and Citrus themes (`skin_text`): the Lemon theme on Citrus is Lemon's colours with Citrus's shapes; the
+    // Citrus theme on Lemon is the stock Dark theme laid over Lemon (stock Dark without the key counts as Lemon's own);
+    // Citrus with the Citrus theme is the stock Dark theme, as usual.
+    match (design, theme.and_then(|t| t.colors)) {
+        (Design::Lemon, Some(Design::Lemon)) => return palette(design, None),
+        (Design::Citrus, Some(Design::Lemon)) => {
+            let mut p = palette(Design::Lemon, None);
+            p.style = Design::Citrus.style();
+            return p;
+        }
+        (Design::Lemon, Some(Design::Citrus)) => {
+            let mut p = palette(Design::Lemon, None);
+            retint(&mut p, &FlTheme { colors: None, ..theme.expect("a theme").clone() });
+            return p;
+        }
+        _ => {}
+    }
     let Some(map) = map_of(design) else {
         return match theme {
             Some(th) => fl::palette(th),
@@ -479,10 +496,7 @@ impl Retint {
     }
 }
 
-/// Lemon's palette `p` coloured by `th` (see `Retint`). Step faces are the theme's own (as Citrus draws them); the
-/// fixed tokens drawn in the lemon key colour (lit steps, notes, key labels, the default clip, the project category)
-/// follow the theme's selection colour; then what the theme colours directly (`fl::finish`).
-/// A skin's own colours as theme text: where Settings ▸ Theme ▸ Adjustments start while Default is in use. Citrus: the
+/// A skin's own colours as theme text: where Settings ▸ Theme ▸ Adjustments start with no theme applied. Citrus: the
 /// stock Dark theme. Lemon: the stock Dark surface with saturation at its lowest (Lemon's neutral greys), Lemon's Main
 /// as selection, highlight and mute, Lemon's text, and no step colours, so it colours Lemon as Lemon is (spec:
 /// ui/theme-presets.md §C).
@@ -502,6 +516,16 @@ pub fn default_text(d: Design) -> String {
     }
 }
 
+/// The Lemon and Citrus themes (Settings ▸ Theme ▸ Themes): skin `d`'s own colours as a theme file, marked with
+/// `fl::COLORS_KEY` so either skin draws them exactly (spec: ui/theme-presets.md §B). The rest of the file is
+/// `default_text(d)`, which is what FL reads.
+pub fn skin_text(d: Design) -> String {
+    format!("{}{}={}\n", default_text(d), fl::COLORS_KEY, d.name())
+}
+
+/// Lemon's palette `p` coloured by `th` (see `Retint`). Step faces are the theme's own (as Citrus draws them); the
+/// fixed tokens drawn in the lemon key colour (lit steps, notes, key labels, the default clip, the project category)
+/// follow the theme's selection colour; then what the theme colours directly (`fl::finish`).
 fn retint(p: &mut Palette, th: &FlTheme) {
     let r = Retint::lemon(th);
     let citrus = fl::palette(th);

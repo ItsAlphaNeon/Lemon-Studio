@@ -5,8 +5,8 @@
 //! Built-in themes, `.flstheme` files in `themes/` (parsed by `FlTheme::parse`). They colour either skin.
 // spec: ui/theme-presets.md
 //
-// Settings > Theme > Themes lists Default (the skin's own colours), these, then the user's own `.flstheme` files from
-// the `themes` folder in Lemon Studio's user folder (`os_paths::user_dir`).
+// Settings > Theme > Themes lists the Lemon and Citrus themes (the skins' own colours), these, then the user's own
+// `.flstheme` files from the `themes` folder in Lemon Studio's user folder (`os_paths::user_dir`).
 
 macro_rules! presets {
     ($($name:literal),* $(,)?) => {
@@ -24,6 +24,12 @@ presets!(
     "Moss",
     "Cinnamon",
     "Dragonfruit",
+    "Afterlight",
+    "Blueshift",
+    "Low Profile",
+    "Grey Cells",
+    "Salamander",
+    "Velour",
     "Moss Light",
     "Cinnamon Light",
     "Raspberry",
@@ -39,7 +45,7 @@ mod tests {
     /// Every built-in theme parses, none is the stock Dark theme (each is its own colours), and all differ.
     #[test]
     fn presets_parse_and_differ() {
-        assert_eq!(PRESETS.len(), 13);
+        assert_eq!(PRESETS.len(), 19);
         let themes: Vec<FlTheme> = PRESETS.iter().map(|(_, t)| FlTheme::parse(t)).collect();
         for (th, (name, _)) in themes.iter().zip(PRESETS) {
             assert!(th.selected.is_some() && th.highlight.is_some() && th.text_color.is_some(), "{name}");

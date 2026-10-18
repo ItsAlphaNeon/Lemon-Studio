@@ -33,7 +33,7 @@ pub enum SAct {
     Button(&'static str),
     /// Skins tile: `os_theme::Design::ALL[i]`.
     Skin(usize),
-    /// Themes tile: 0 = Default (the skin's own colours), n = `SettingsUi::themes[n - 1]`.
+    /// Themes tile `SettingsUi::themes[i]`: the Lemon and Citrus themes (the skins' own colours), then the rest.
     Preset(usize),
     /// Theme ▸ Adjustments knob `i` (`crate::theme_adjust::KNOBS`): a drag or the wheel turns it, a middle click restores
     /// the chosen theme's value.
@@ -167,8 +167,8 @@ pub struct SettingsUi {
     /// The chosen Themes tile (`SAct::Preset`; `usize::MAX`: none) and Skins tile (`SAct::Skin`).
     pub preset: usize,
     pub skin: usize,
-    /// The tiles' previews (`App::sync_preset`): each skin under the applied theme, and the skin in use under Default
-    /// then each of `themes`.
+    /// The tiles' previews (`App::sync_preset`): each skin under the applied theme, and the skin in use under each of
+    /// `themes`.
     pub skin_previews: Vec<os_theme::Palette>,
     pub theme_previews: Vec<os_theme::Palette>,
     /// Theme ▸ Adjustments' colour picker, while open.
@@ -436,7 +436,7 @@ pub enum Row {
 pub enum TileList {
     /// The skins (`os_theme::Design::ALL`), each previewed under the applied theme.
     Skins,
-    /// Default, then the themes, each previewed in the skin in use.
+    /// The themes (the Lemon and Citrus themes first), each previewed in the skin in use.
     Themes,
 }
 
@@ -690,7 +690,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // Skins (shapes and base colours) and themes (`.flstheme` colours for either skin), spec:
             // ui/theme-presets.md "Settings".
             let skins = os_theme::Design::ALL.iter().map(|d| d.name().to_string()).collect();
-            let themes = std::iter::once("Default".to_string()).chain(st.themes.iter().map(|(n, _)| n.clone())).collect();
+            let themes = st.themes.iter().map(|(n, _)| n.clone()).collect();
             vec![
                 g("Skins", vec![Tiles(TileList::Skins, skins, st.skin)]),
                 g("Themes", vec![Tiles(TileList::Themes, themes, st.preset)]),
@@ -1344,7 +1344,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 let b = Rect::new(x0 + col * TILE_PITCH_X, y + 4.0 + rowi * TILE_PITCH_Y, TILE_W, TILE_H);
                 let (act, hint) = match kind {
                     TileList::Skins => (SAct::Skin(i), "Use this skin: its shapes and own colours"),
-                    TileList::Themes if i == 0 => (SAct::Preset(i), "Use the skin's own colours"),
+                    TileList::Themes if i < os_theme::Design::ALL.len() => (SAct::Preset(i), "Use this skin's own colours, on either skin"),
                     TileList::Themes => (SAct::Preset(i), "Use this theme's colours"),
                 };
                 let hov = ui.hit(b, Action::Settings(act), hint);

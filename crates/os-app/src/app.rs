@@ -3466,7 +3466,7 @@ impl App {
             save_design(d);
         }
         self.sync_preset();
-        self.state.message = Some(format!("Skin: {} (Ctrl+Shift+D switches)", d.name()));
+        self.state.message = Some(format!("Skin: {}", d.name()));
         self.invalidate();
     }
 
@@ -3503,19 +3503,19 @@ impl App {
         let design = self.design();
         let st = &mut self.state.settings;
         let themes: Vec<_> = st.themes.iter().map(|(_, t)| os_theme::FlTheme::parse(t)).collect();
+        // With no theme file the skin shows its own colours: its own tile (the Lemon or Citrus theme, listed first in
+        // `Design::ALL` order); so does stock Dark without Lemon Studio's key.
+        let own = Design::ALL.iter().position(|d| *d == design).unwrap_or(0);
         st.preset = match (&chosen, &applied) {
-            (None, None) if design == Design::Lemon || self.theme.colors == os_theme::Palette::default() => 0,
+            (None, None) if design == Design::Lemon || self.theme.colors == os_theme::Palette::default() => own,
             (None, None) => usize::MAX,
-            (None, Some(_)) => 0,
-            (Some(th), _) if th.is_stock() => 0,
-            (Some(th), _) => themes.iter().position(|t| t.same_colours(th)).map_or(usize::MAX, |i| i + 1),
+            (None, Some(_)) => own,
+            (Some(th), _) => themes.iter().position(|t| t.same_colours(th)).or(th.is_stock().then_some(own)).unwrap_or(usize::MAX),
         };
-        st.skin = Design::ALL.iter().position(|d| *d == design).unwrap_or(0);
+        st.skin = own;
         if st.open {
             st.skin_previews = Design::ALL.iter().map(|d| os_theme::design::palette(*d, applied.as_ref())).collect();
-            st.theme_previews = std::iter::once(os_theme::design::palette(design, None))
-                .chain(themes.iter().map(|th| os_theme::design::palette(design, Some(th))))
-                .collect();
+            st.theme_previews = themes.iter().map(|th| os_theme::design::palette(design, Some(th))).collect();
         }
     }
 
@@ -3534,7 +3534,12 @@ impl App {
         self.assoc_read();
         let st = &mut self.state.settings;
         // Built-in presets (spec: ui/theme-presets.md), then .flstheme files in the user folder's `themes`.
-        st.themes = os_theme::presets::PRESETS.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect();
+        // The skins' own colours first (the Lemon and Citrus themes), then the built-in presets.
+        st.themes = Design::ALL
+            .iter()
+            .map(|d| (d.name().to_string(), os_theme::design::skin_text(*d)))
+            .chain(os_theme::presets::PRESETS.iter().map(|(n, t)| (n.to_string(), t.to_string())))
+            .collect();
         if let Some(d) = os_paths::user_file("themes") {
             if let Ok(rd) = std::fs::read_dir(&d) {
                 let mut v: Vec<_> = rd
@@ -3888,15 +3893,15 @@ impl App {
                     st.folded.insert(k);
                 }
             }
-            // Skins and themes (spec: ui/theme-presets.md "Settings"): a skin keeps the theme; theme 0 = Default (the
-            // skin's own colours), then the built-in and user themes, which colour either skin.
+            // Skins and themes (spec: ui/theme-presets.md §B): a skin keeps the theme; the themes (the skins' own colours,
+            // then the built-in and user themes) colour either skin. Reset = no theme: the skin's own colours.
             SAct::Skin(i) => {
                 if let Some(d) = Design::ALL.get(i).copied() {
                     self.set_design(d, true);
                     self.state.message = Some(format!("Skin: {}", d.name()));
                 }
             }
-            SAct::Preset(0) => {
+            SAct::Button("Reset") => {
                 self.theme = design_theme(self.design(), false);
                 os_theme::set_current(&self.theme.colors);
                 if let Some(d) = theme_dir() {
@@ -3905,10 +3910,10 @@ impl App {
                 self.state.fl_text = None;
                 self.state.theme_base = None;
                 self.sync_preset();
-                self.state.message = Some(format!("Theme: Default ({} colours)", self.design().name()));
+                self.state.message = Some(format!("Theme: {} (the skin's own colours)", self.design().name()));
             }
             SAct::Preset(i) => {
-                if let Some((name, text)) = st.themes.get(i - 1).cloned() {
+                if let Some((name, text)) = st.themes.get(i).cloned() {
                     self.theme = skin_theme(self.design(), &name, Some(&text));
                     os_theme::set_current(&self.theme.colors);
                     self.state.fl_text = Some(text.clone());
@@ -3922,7 +3927,6 @@ impl App {
                     self.state.message = Some(format!("Theme: {name}"));
                 }
             }
-            SAct::Button("Reset") => self.settings_act(SAct::Preset(0)),
             SAct::Button("Load theme...") => self.theme_dialog(),
             SAct::Button("Manage plugins") => self.open_settings(views::settings::PLUGINS),
             SAct::Button("Manage messages") => return self.messages_menu(),
@@ -5598,16 +5602,6 @@ impl App {
             return;
         }
         use winit::keyboard::{Key, NamedKey};
-        // Ctrl+Shift+D: switch the design (spec: ui/lemon-design.md §1).
-        if let Key::Character(c) = key
-            && ctrl
-            && self.shift
-            && c.eq_ignore_ascii_case("d")
-        {
-            let next = self.design().next();
-            self.set_design(next, true);
-            return;
-        }
         // Shift+Alt+G: Enable groups (spec: ui/enable-groups.md §1), everywhere the main window has the keyboard.
         if let Key::Character(c) = key
             && alt
@@ -7764,28 +7758,51 @@ mod tests {
         let mut app = App::new(None);
         app.open_settings(THEME);
         let st = &app.state.settings;
-        assert_eq!((st.skin_previews.len(), st.theme_previews.len()), (2, PRESETS.len() + 1));
-        assert_eq!((st.skin, st.preset), (1, 0), "Citrus, Default");
+        assert_eq!((st.skin_previews.len(), st.theme_previews.len()), (2, PRESETS.len() + 2));
+        assert_eq!(st.themes[..2].iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["Lemon", "Citrus"]);
+        assert_eq!((st.skin, st.preset), (1, 1), "Citrus skin, no theme: the Citrus theme's tile");
         // A theme in Citrus, then the Lemon skin keeps it.
         let (name, text) = PRESETS[2];
-        app.settings_act(SAct::Preset(3));
+        app.settings_act(SAct::Preset(4));
         assert_eq!(app.theme.colors, os_theme::fl::palette(&FlTheme::parse(text)));
         assert_eq!(std::fs::read_to_string(dir.join("current.flstheme")).unwrap(), text);
         app.settings_act(SAct::Skin(0));
         assert_eq!(app.design(), Design::Lemon);
         assert_eq!(app.theme.colors, os_theme::design::palette(Design::Lemon, Some(&FlTheme::parse(text))));
-        assert_eq!((app.state.settings.skin, app.state.settings.preset), (0, 3), "{name}");
-        assert_eq!(app.state.settings.theme_previews[3], app.theme.colors, "the tile previews what is applied");
-        // Default: the skin's own colours, the theme file is dropped.
-        app.settings_act(SAct::Preset(0));
-        assert_eq!(app.theme.colors, os_theme::design::palette(Design::Lemon, None));
-        assert!(app.state.fl_text.is_none() && !dir.join("current.flstheme").exists());
+        assert_eq!((app.state.settings.skin, app.state.settings.preset), (0, 4), "{name}");
+        assert_eq!(app.state.settings.theme_previews[4], app.theme.colors, "the tile previews what is applied");
+        // The Citrus theme on the Lemon skin: Lemon's shapes, the stock look's colours; kept across a skin switch.
+        let lemon_own = os_theme::design::palette(Design::Lemon, None);
+        app.settings_act(SAct::Preset(1));
+        assert!(app.theme.colors.style.lemon() && app.theme.colors != lemon_own);
+        assert_eq!(app.theme.colors.a(0xa8e44a), os_theme::Color::rgb(0xa8e44a), "the stock look's green selection");
+        assert_eq!(app.state.settings.preset, 1);
         app.settings_act(SAct::Skin(1));
-        assert_eq!((&app.theme.colors, app.state.settings.preset), (&Palette::default(), 0));
+        assert_eq!((&app.theme.colors, app.state.settings.preset), (&Palette::default(), 1));
+        // The Lemon theme on the Citrus skin: Citrus's shapes, Lemon's colours.
+        app.settings_act(SAct::Preset(0));
+        assert!(!app.theme.colors.style.lemon());
+        assert_eq!(app.theme.colors.toolbar, lemon_own.toolbar);
+        assert_eq!(app.theme.colors.a(0xa8e44a), lemon_own.a(0xa8e44a), "Lemon's Main as the selection");
+        assert_eq!(app.state.settings.preset, 0);
+        app.settings_act(SAct::Skin(0));
+        assert_eq!((&app.theme.colors, app.state.settings.preset), (&lemon_own, 0));
+        // Reset: no theme, the skin's own colours; the theme file is dropped and the skin's own tile is framed.
+        app.settings_act(SAct::Button("Reset"));
+        assert_eq!(app.theme.colors, lemon_own);
+        assert!(app.state.fl_text.is_none() && !dir.join("current.flstheme").exists());
+        assert_eq!(app.state.settings.preset, 0);
+        app.settings_act(SAct::Skin(1));
+        assert_eq!((&app.theme.colors, app.state.settings.preset), (&Palette::default(), 1));
+        // Ctrl+Shift+D no longer switches the skin (owner, 2026-10-17).
+        app.shift = true;
+        app.key(&winit::keyboard::Key::Character("d".into()), true, false);
+        app.shift = false;
+        assert_eq!(app.design(), Design::Citrus);
         // The page draws both lists of tiles with their hits.
         if let Ok(mut c) = Canvas::new(1920, 1080, 1.0) {
             frame(&mut app, &mut c, None);
-            for a in [SAct::Skin(0), SAct::Skin(1), SAct::Preset(0), SAct::Preset(PRESETS.len())] {
+            for a in [SAct::Skin(0), SAct::Skin(1), SAct::Preset(0), SAct::Preset(PRESETS.len() + 1)] {
                 hit_rect(&app, &Action::Settings(a));
             }
         }
@@ -7808,7 +7825,7 @@ mod tests {
         THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
         let mut app = App::new(None);
         app.open_settings(THEME);
-        app.settings_act(SAct::Preset(1));
+        app.settings_act(SAct::Preset(2));
         let base = PRESETS[0].1;
         frame(&mut app, &mut c, None);
         // Brightness: dragged up 30 px = a tenth of its 510 range.
@@ -7820,7 +7837,7 @@ mod tests {
         let v = knob_value(&app.state.fl_theme(), 2);
         assert_eq!(v, KNOBS[2].at(KNOBS[2].pos(v0) + 0.1));
         assert_eq!(app.theme.colors, os_theme::design::palette(app.design(), Some(&app.state.fl_theme())), "live");
-        assert_eq!(app.state.settings.preset, 1, "the tile it came from stays framed");
+        assert_eq!(app.state.settings.preset, 2, "the tile it came from stays framed");
         app.mouse_up();
         assert_eq!(std::fs::read_to_string(dir.join("current.flstheme")).unwrap(), app.state.fl_text.clone().unwrap(), "kept");
         // The wheel steps Hue by 5 degrees; a middle click restores the theme's value.
@@ -9327,12 +9344,17 @@ mod tests {
             (PLUGINS, SAct::Button("Add folder...")),
             (PLUGINS, SAct::Button("Find new plugins")),
             (PLUGINS, SAct::Check(crate::views::settings::COMBINE_CHECK)),
+            (THEME, SAct::Preset(0)),
             (THEME, SAct::Button("Load theme...")),
             (THEME, SAct::Button("Reset")),
-            (THEME, SAct::Preset(0)),
         ] {
             let r = hit_rect(&app, &Action::Settings(SAct::Tab(tab)));
             click(&mut app, &mut c, r);
+            if !app.hits.iter().any(|h| h.action == Action::Settings(live.clone())) {
+                // Below the fold (the Theme page's tiles fill more than a 1080 px window): scroll to the end.
+                app.wheel(0.0, -40.0, false, false);
+                frame(&mut app, &mut c, None);
+            }
             assert!(app.hits.iter().any(|h| h.action == Action::Settings(live.clone())), "{live:?} works");
         }
         assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Save preset...")));
