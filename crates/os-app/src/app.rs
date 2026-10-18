@@ -6129,10 +6129,20 @@ impl App {
                 if let os_model::ClipSource::Pattern(n) = src {
                     self.state.pattern = n;
                 }
-                if right && matches!(src, os_model::ClipSource::Pattern(_)) {
-                    // Right-click on a pattern: the PATTERNS commands for it (spec: ui/pattern-menu.md §3).
+                if right {
                     let (x, y) = self.mouse;
-                    self.state.playlist.popup = Some(views::menus::pattern_popup(x, y));
+                    match src {
+                        // Right-click on a pattern: the PATTERNS commands for it (spec: ui/pattern-menu.md §3).
+                        os_model::ClipSource::Pattern(_) => self.state.playlist.popup = Some(views::menus::pattern_popup(x, y)),
+                        // On an audio or automation clip: its channel's menu, the channel selected in the rack (spec:
+                        // ui/playlist.md §10a).
+                        os_model::ClipSource::Channel(ch) => {
+                            if let Some(row) = self.state.project.channels.iter().position(|c| c.index == ch) {
+                                self.state.rack.select_only(row);
+                            }
+                            self.state.playlist.popup = Some(pl::pick_menu(&self.state, ch, x, y));
+                        }
+                    }
                 }
             }
             Action::PlPopup(i) => {
@@ -15445,5 +15455,40 @@ mod tests {
         app.state.rack_roll_view = false;
         app.state.project.bar = Some((6, 2));
         save(&mut app, &mut c, "17_rack_project_68");
+    }
+
+    // spec: ui/playlist.md §10a
+    #[test]
+    fn picker_audio_and_automation_items_have_their_channel_menu() {
+        use crate::playlist::{self as pl, Cmd, PickCmd};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let auto = pl::create_automation(&mut app.state, os_model::target::TEMPO, "Tempo", 0.5);
+        pl::add_point(&mut app.state, auto, 2.0, 0.9);
+        let labels = |p: &pl::Popup| p.items.iter().filter(|i| !i.sep).map(|i| i.label.to_string()).collect::<Vec<_>>();
+        let menu = pl::pick_menu(&app.state, auto, 0.0, 0.0);
+        let want = ["Select in playlist", "Group selected...", "Rename, color and icon...", "Change color...", "Random color", "Change icon...", "Cut itself", "Clone", "Clone with links", "Delete..."];
+        assert_eq!(labels(&menu), want);
+        app.state.project.channels[0].kind = ChannelKind::AudioClip;
+        let audio = app.state.project.channels[0].index;
+        let want = ["Preview", "Select in playlist", "Group selected...", "Rename, color and icon...", "Change color...", "Random color", "Change icon...", "Load sample...", "Edit sample...", "Cut itself", "Clone", "Delete..."];
+        assert_eq!(labels(&pl::pick_menu(&app.state, audio, 0.0, 0.0)), want);
+        // Select in playlist: every clip of the source.
+        app.state.playlist.sel.clear();
+        pl::run(&mut app, Cmd::Pick(PickCmd::SelectInPlaylist, auto));
+        let of_auto: Vec<usize> = pl::clips(&app.state).iter().enumerate().filter(|(_, c)| c.source == os_model::ClipSource::Channel(auto)).map(|(i, _)| i).collect();
+        assert!(!of_auto.is_empty());
+        assert_eq!(app.state.playlist.sel, of_auto);
+        // Clone: a channel "<name> #2" whose clip has the same curve and targets.
+        let n = app.state.project.channels.len();
+        let name = app.state.project.channel(auto).and_then(|c| c.name.clone()).unwrap();
+        pl::run(&mut app, Cmd::Pick(PickCmd::Clone, auto));
+        assert_eq!(app.state.project.channels.len(), n + 1);
+        let copy = app.state.project.channels.iter().find(|c| c.name.as_deref() == Some(&format!("{name} #2"))).expect("the clone").index;
+        let (a, b) = (app.state.project.automation(auto).unwrap(), app.state.project.automation(copy).unwrap());
+        assert_eq!((&a.points, &a.targets), (&b.points, &b.targets));
+        // Delete asks first.
+        pl::run(&mut app, Cmd::Pick(PickCmd::Delete, copy));
+        assert!(app.state.rack.pending_delete.is_some() || app.state.rack.delete_now.is_some());
     }
 }

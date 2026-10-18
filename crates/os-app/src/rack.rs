@@ -884,8 +884,14 @@ pub fn clone_rows(app: &mut App, rows: &[usize]) {
         if rows.contains(&r) {
             let name = clone_name(&app.state, r);
             let mut c = app.state.project.channels[r].clone();
+            let from = c.index;
             c.index = app.state.project.channels.len() as u16;
             c.name = Some(name);
+            // An automation clip's copy has its curve and targets (spec: ui/playlist.md §10a).
+            if let Some(mut a) = app.state.project.automation(from).cloned() {
+                a.channel = c.index;
+                app.state.project.automations.push(a);
+            }
             app.state.project.channels.push(c);
             order.push(app.state.project.channels.len() - 1);
             sources.push(r);

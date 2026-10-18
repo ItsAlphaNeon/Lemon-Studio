@@ -361,7 +361,7 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             continue;
         }
         let row = Rect::new(list.x + 2.0, y, list.w - 4.0, PICK_ROW - 1.0);
-        let hov = ui.hit(row, Action::PlPick(src), "Select clip source (right-click a pattern for its menu)");
+        let hov = ui.hit(row, Action::PlPick(src), "Select clip source (right-click for its menu)");
         let filled = pick_used(s, src);
         let k = if hov { 0.05 } else { 0.0 };
         let lemon = super::lemon(ui);
