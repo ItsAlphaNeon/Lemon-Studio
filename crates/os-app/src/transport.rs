@@ -24,8 +24,10 @@
 //! swapped in, a heavy tick) never costs a silent block. The queue holds one device block and `AHEAD_TICKS` ticks;
 //! a block the queue could not fill counts as an underrun (`Transport::underruns`).
 //!
-//! Streams open with the audio settings (`audio_cfg`: device, rate, buffer length); `reopen` moves the running
-//! playback onto a stream with new settings at the position heard.
+//! The streams are not device streams: they all play through one output device (`device::OutputDevice`, which mixes
+//! them), since an ASIO driver serves one stream per program. It opens with the audio settings (`audio_cfg`: device,
+//! rate, buffer length) when a stream first needs it; `reopen` moves the running playback onto the device opened with
+//! new settings at the position heard.
 //!
 //! `update` swaps in an edited snapshot at the current position (decoded samples stay cached in the library).
 //! `preview` plays one note once on its own stream. Hosted generator plugins (`set_instruments`) are attached to
@@ -38,8 +40,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use cpal::traits::{DeviceTrait, StreamTrait};
-use cpal::{BufferSize, FromSample, SampleFormat, SizedSample, StreamConfig};
+use crate::device::{OutputDevice, Source};
 use os_engine::{Engine, PlayMode, SampleLibrary, SharedEffect, SharedInstrument};
 use os_model::Project;
 
@@ -182,6 +183,9 @@ enum Cmd {
     Close,
     /// The output may be used again (`Transport::open_device`).
     Open,
+    /// Tests: the open device fails as if it went away.
+    #[cfg(test)]
+    FailDevice,
 }
 
 /// Where an export is (`Transport::export_status`).
@@ -528,6 +532,12 @@ impl Transport {
         self.shared.opened.lock().ok()?.clone()
     }
 
+    /// The open device fails as if it was unplugged (it opens again, see `audio_thread`).
+    #[cfg(test)]
+    fn fail_device(&self) {
+        let _ = self.tx.send(Cmd::FailDevice);
+    }
+
     /// Shows as playing without starting anything: what the UI sees between Play and the first sound (tests have no
     /// device, so a real Play stops again).
     #[cfg(test)]
@@ -848,6 +858,8 @@ fn reset_hosts(inst: &Instruments, effects: bool) {
 }
 
 fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option<Project>>>, inst: Instruments, mut library: SampleLibrary) {
+    // Every stream below plays through it.
+    let mut device = OutputDevice::default();
     // The playback: the pattern or the playlist, running or paused.
     let mut session: Option<Session> = None;
     // One-shot note previews play on their own stream, so they also sound while playing or paused.
@@ -870,6 +882,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     // mode, generation, where).
     let mut closed = false;
     let mut held: Option<(Project, PlayMode, u64, At)> = None;
+    // The device failed while in use; the playback waits in `held` until it opens again.
+    let mut lost: Option<Lost> = None;
     let swap = |s: &mut Session, library: &mut SampleLibrary| {
         // Build outside the lock, then swap at the playing position.
         let mut e = Engine::new(&s.project, library, s.rate, s.mode);
@@ -889,8 +903,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         }
     };
     // The live stream: live notes, previews of plugin channels, and the instruments while an editor is open.
-    let open_live = |p: &Project, awake: bool, library: &mut SampleLibrary| {
-        let s = Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, library, shared.clone(), &inst, At::default())?;
+    let open_live = |p: &Project, awake: bool, library: &mut SampleLibrary, device: &mut OutputDevice| {
+        let s = Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, library, shared.clone(), &inst, At::default(), device)?;
         if let Ok(mut e) = s.engine.lock() {
             e.set_awake(awake);
         }
@@ -915,7 +929,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     loop {
         match rx.recv_timeout(Duration::from_millis(10)) {
             // The output is closed by Auto close: previews and live notes find no stream and open none.
-            Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::TapClick(_)) if closed => {}
+            // So is a device that failed, until it opens again.
+            Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::TapClick(_)) if closed || lost.is_some() => {}
             Ok(Cmd::Update) => {
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
                     for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
@@ -952,7 +967,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     _ => {
                         if live.is_none() {
                             if let Some(p) = project {
-                                match open_live(p, listen, &mut library) {
+                                match open_live(p, listen, &mut library, &mut device) {
                                     Ok(s) => live = Some(s),
                                     Err(e) => report(&shared, e),
                                 }
@@ -984,7 +999,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             Ok(Cmd::PreviewFor(project, limit)) => {
                 preview = None;
                 preview_until = limit.map(|d| Instant::now() + d);
-                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default()) {
+                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default(), &mut device) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
@@ -992,7 +1007,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             Ok(Cmd::PreviewSong(project)) => {
                 preview = None;
                 preview_until = None;
-                match Session::start(&project, PlayMode::Song, Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default()) {
+                match Session::start(&project, PlayMode::Song, Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default(), &mut device) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
@@ -1006,7 +1021,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     let running = session.as_ref().is_some_and(|s| !s.paused());
                     if !running && live.is_none() {
                         if let Some(p) = live_project.as_ref().or(Some(&*project)) {
-                            match open_live(p, listen, &mut library) {
+                            match open_live(p, listen, &mut library, &mut device) {
                                 Ok(s) => live = Some(s),
                                 Err(e) => report(&shared, e),
                             }
@@ -1031,7 +1046,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
                 preview = None;
                 preview_until = None;
-                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default()) {
+                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default(), &mut device) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
@@ -1041,9 +1056,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 if generation != shared.generation.load(Ordering::Acquire) {
                     continue;
                 }
-                // A Play asked for while Auto close holds the output opens it (and drops the playback it held).
+                // A Play asked for while Auto close holds the output opens it (and drops the playback it held); so does
+                // one while the device that failed is being tried again.
                 closed = false;
                 held = None;
+                lost = None;
                 // The old playback is replaced, not faded; of what it leaves ringing only the hosted effects' tails
                 // go on, with "Reset plugins on transport" off (`reset_hosts`). A live stream left open would process
                 // the same plugin instances a second time (each stream would only hear every other chunk of a ringing
@@ -1057,7 +1074,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 listen_retry = true;
                 live_project = Some((*project).clone());
                 let at = At { tick: start, paused: false, truncated: starts.truncated };
-                match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at) {
+                match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at, &mut device) {
                     Ok(s) => session = Some(s),
                     Err(e) => {
                         report(&shared, e);
@@ -1072,12 +1089,18 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 preview = None;
                 preview_until = None;
                 closing.clear();
+                // The next stream opens the device with the new settings; a device that failed is tried with them at
+                // once.
+                device.close();
+                if let Some(l) = lost.as_mut() {
+                    (l.next, l.tries) = (Instant::now(), 0);
+                }
                 if let Some(old) = session.take() {
                     let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: old.paused(), truncated: old.truncated };
                     let (project, mode, generation) = (old.project.clone(), old.mode, old.generation);
                     drop(old);
                     reset_instruments(&inst);
-                    match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at) {
+                    match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at, &mut device) {
                         Ok(s) => session = Some(s),
                         Err(e) => {
                             report(&shared, e);
@@ -1147,6 +1170,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             }
             Ok(Cmd::Open) => {
                 closed = false;
+                lost = None;
                 listen_retry = true;
                 // The held playback goes on at its place, unless a Stop or another Play came since; playing if the
                 // transport was resumed meanwhile, else paused (`resume` follows).
@@ -1157,7 +1181,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                         reset_instruments(&inst);
                     }
                     at.paused = shared.state.load(Ordering::Acquire) != PLAYING;
-                    match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at) {
+                    match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at, &mut device) {
                         Ok(s) => session = Some(s),
                         Err(e) => {
                             report(&shared, e);
@@ -1167,6 +1191,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     }
                 }
             }
+            #[cfg(test)]
+            Ok(Cmd::FailDevice) => device.fail("test"),
             Ok(Cmd::Export(project, mode, rate, path)) => {
                 // Every stream that could process the plugins goes at once (no fade), and they start from silence.
                 session = None;
@@ -1175,6 +1201,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 preview_until = None;
                 held = None;
                 closing.clear();
+                device.close_idle();
                 reset_instruments(&inst);
                 reset_pending = false;
                 shared.rewind(0.0);
@@ -1200,6 +1227,82 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         }
         // Stopped streams are dropped once their fade is over; then the instruments are silenced for good.
         closing.retain(|(_, since)| since.elapsed() < CLOSE_AFTER);
+        shared.underruns.fetch_add(device.take_xruns(), Ordering::Relaxed);
+        // A device that failed (it went away, a driver asked to be reset): the playback is held where it was heard and
+        // the other streams go; it goes on when the device opens again (spec: audio/devices.md).
+        if lost.is_none() {
+            if let Some((name, why)) = device.failure() {
+                if let Some(s) = session.take() {
+                    let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: s.paused(), truncated: s.truncated };
+                    held = Some((s.project.clone(), s.mode, s.generation, at));
+                }
+                live = None;
+                preview = None;
+                preview_until = None;
+                closing.clear();
+                device.close();
+                // As after Reopen: the new engines do not know the notes the old ones held at the instruments.
+                reset_instruments(&inst);
+                reset_pending = false;
+                let now = Instant::now();
+                lost = Some(Lost { since: now, next: now, tries: 0, name, why });
+            }
+        }
+        if !closed {
+            if let Some(l) = lost.as_mut() {
+                let now = Instant::now();
+                let mut over = held.is_none() && !listen;
+                // Not back soon: the transport shows it paused, so the playback does not jump back in much later.
+                if now.duration_since(l.since) >= LOST_PAUSES && shared.state.compare_exchange(PLAYING, PAUSED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                    if let Ok(mut v) = shared.sounding.lock() {
+                        v.clear();
+                    }
+                }
+                if !over && now >= l.next {
+                    match device.open().map(|o| o.name.clone()) {
+                        Ok(name) => {
+                            // Another device (the system's default, `audio_cfg::output`): say so.
+                            if name != l.name {
+                                report(&shared, format!("{} stopped ({}); playing on {name}", l.name, l.why));
+                            }
+                            if let Some((project, mode, generation, mut at)) = held.take().filter(|h| h.2 == shared.generation.load(Ordering::Acquire)) {
+                                at.paused = shared.state.load(Ordering::Acquire) != PLAYING;
+                                match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at, &mut device) {
+                                    Ok(s) => session = Some(s),
+                                    Err(e) => {
+                                        report(&shared, e);
+                                        shared.state.store(STOPPED, Ordering::Release);
+                                        shared.rewind(0.0);
+                                    }
+                                }
+                            }
+                            listen_retry = true;
+                            over = true;
+                        }
+                        Err(e) => {
+                            if l.tries == 0 {
+                                report(&shared, format!("{} stopped ({}), and no output device opens: {e}", l.name, l.why));
+                            }
+                            l.tries += 1;
+                            l.next = now + RETRY[l.tries.min(RETRY.len() - 1)];
+                        }
+                    }
+                }
+                if over {
+                    lost = None;
+                }
+            }
+        }
+        // The device frees the streams it let go of; with none left it lets go of the device (Auto close: also one
+        // that would stay open).
+        device.collect();
+        if session.is_none() && live.is_none() && preview.is_none() && closing.is_empty() {
+            if closed {
+                device.close();
+            } else {
+                device.close_idle();
+            }
+        }
         if reset_pending && closing.is_empty() {
             reset_pending = false;
             reset_hosts(&inst, std::mem::take(&mut reset_fx_pending));
@@ -1209,11 +1312,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         }
         // While an editor is open and nothing plays, the live stream processes the instruments (once the stopped
         // streams are gone and the instruments reset).
-        if listen && listen_retry && !closed && live.is_none() && !reset_pending && closing.is_empty() && session.as_ref().is_none_or(|s| s.paused()) {
+        if listen && listen_retry && !closed && lost.is_none() && live.is_none() && !reset_pending && closing.is_empty() && session.as_ref().is_none_or(|s| s.paused()) {
             listen_retry = false;
             if let Some(p) = live_project.as_ref() {
                 release_paused(&session);
-                match open_live(p, true, &mut library) {
+                match open_live(p, true, &mut library, &mut device) {
                     Ok(s) => live = Some(s),
                     Err(e) => eprintln!("lemonstudio: live stream for the open plugin editor: {e}"),
                 }
@@ -1231,6 +1334,29 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         }
     }
 }
+
+/// A device that failed while in use (`audio_thread`): when, the next try at opening it again (or the system's default
+/// device, `audio_cfg::output`) and how many failed, its name and what it said.
+struct Lost {
+    since: Instant,
+    next: Instant,
+    tries: usize,
+    name: String,
+    why: String,
+}
+
+/// Waits between tries at opening a device that failed: at once, then longer, then every 5 s.
+const RETRY: [Duration; 7] = [
+    Duration::ZERO,
+    Duration::from_millis(100),
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+];
+/// A playback held this long for a device that failed shows as paused.
+const LOST_PAUSES: Duration = Duration::from_secs(2);
 
 /// Where a new stream starts: the tick to seek to before anything is rendered, whether it starts paused, and whether
 /// the notes under way there sound ("Play truncated notes on transport", `Starts`).
@@ -1261,9 +1387,18 @@ struct Ctl {
     report: AtomicBool,
 }
 
+/// Takes a stream off the device when its session goes: the device's callback stops playing it at its next block.
+struct Detach(Arc<AtomicBool>);
+
+impl Drop for Detach {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 struct Session {
-    _stream: cpal::Stream,
-    /// Renders ahead of the stream; stopped after the stream (fields drop in order).
+    _detach: Detach,
+    /// Renders ahead of the stream; stopped after the stream leaves the device (fields drop in order).
     feed: FeedThread,
     kind: Kind,
     engine: Arc<Mutex<Engine>>,
@@ -1284,13 +1419,13 @@ impl Session {
         self.ctl.paused.load(Ordering::Relaxed) || self.ctl.held.load(Ordering::Relaxed)
     }
 
-    /// Opens a stream with the audio settings and starts it at `at` (playback: the position is published at once).
+    /// Starts a stream on the output device (opened with the audio settings if it is closed) at `at` (playback: the
+    /// position is published at once).
     #[allow(clippy::too_many_arguments)]
-    fn start(project: &Project, mode: PlayMode, kind: Kind, generation: u64, library: &mut SampleLibrary, shared: Arc<Shared>, inst: &Instruments, at: At) -> Result<Session, String> {
+    fn start(project: &Project, mode: PlayMode, kind: Kind, generation: u64, library: &mut SampleLibrary, shared: Arc<Shared>, inst: &Instruments, at: At, device: &mut OutputDevice) -> Result<Session, String> {
         let song = kind == Kind::Song;
-        let out = crate::audio_cfg::output(&crate::audio_cfg::AudioCfg::current())?;
-        let (device, format, mut config) = (out.device, out.format, out.config);
-        let rate = config.sample_rate;
+        let out = device.open()?;
+        let (rate, fixed, name) = (out.rate, out.fixed, out.name.clone());
         let mut e = Engine::new(project, library, rate, mode);
         // Playback loops: a pattern on its bar line, the song at its end (back to the start).
         e.set_looping(song);
@@ -1316,14 +1451,10 @@ impl Session {
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));
         let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), held: AtomicBool::new(false), report: AtomicBool::new(song) });
-        let fixed = match config.buffer_size {
-            BufferSize::Fixed(b) => Some(b),
-            BufferSize::Default => None,
-        };
         if kind != Kind::Preview {
             shared.sample_rate.store(rate, Ordering::Relaxed);
             if let Ok(mut o) = shared.opened.lock() {
-                *o = Some((out.name.clone(), rate, fixed));
+                *o = Some((name, rate, fixed));
             }
         }
         // The queue gets a first block before the stream starts; then the feeder keeps it filled.
@@ -1332,32 +1463,12 @@ impl Session {
         feeder.meters = kind != Kind::Preview;
         feeder.fill(PREFILL_FRAMES.max(fixed.unwrap_or(0) as usize));
         let feed = FeedThread::spawn(feeder);
-        let renderer = || {
-            let mut r = Renderer::new(queue.clone(), ctl.clone(), done.clone(), shared.clone(), rate);
-            r.tap = kind != Kind::Preview;
-            r.wake = feed.thread();
-            r
-        };
-        let mut stream = build_any(&device, format, &config, renderer());
-        if stream.is_err() && fixed.is_some() {
-            // A buffer length the device refuses: its own.
-            config.buffer_size = BufferSize::Default;
-            stream = build_any(&device, format, &config, renderer());
-        }
-        let stream = stream?;
-        stream.play().map_err(|e| e.to_string())?;
-        Ok(Session { _stream: stream, feed, kind, engine, done, ctl, generation, project: project.clone(), mode, rate, truncated: at.truncated })
-    }
-}
-
-/// An output stream in the device's sample format.
-fn build_any(device: &cpal::Device, format: SampleFormat, config: &StreamConfig, renderer: Renderer) -> Result<cpal::Stream, String> {
-    match format {
-        SampleFormat::F32 => build::<f32>(device, config, renderer),
-        SampleFormat::I16 => build::<i16>(device, config, renderer),
-        SampleFormat::I32 => build::<i32>(device, config, renderer),
-        SampleFormat::U16 => build::<u16>(device, config, renderer),
-        other => Err(format!("unsupported output sample format {other:?}")),
+        let mut r = Renderer::new(queue, ctl.clone(), done.clone(), shared.clone(), rate);
+        r.tap = kind != Kind::Preview;
+        r.wake = feed.thread();
+        let detach = Detach(r.detach.clone());
+        device.add(Box::new(r))?;
+        Ok(Session { _detach: detach, feed, kind, engine, done, ctl, generation, project: project.clone(), mode, rate, truncated: at.truncated })
     }
 }
 
@@ -1387,6 +1498,8 @@ struct Renderer {
     step: f32,
     /// Feed the monitor tap with what this stream outputs.
     tap: bool,
+    /// Its session let go of it (`Detach`): the device no longer plays it.
+    detach: Arc<AtomicBool>,
 }
 
 impl Renderer {
@@ -1394,7 +1507,7 @@ impl Renderer {
         let step = (1.0 / (f64::from(rate.max(1)) * FADE_SECONDS)) as f32;
         // A stream that starts paused (moved to new audio settings while paused) starts silent.
         let gain = if ctl.paused.load(Ordering::Relaxed) { 0.0 } else { 1.0 };
-        Renderer { queue, wake: None, inline: None, ctl, done, shared, gain, step, tap: false }
+        Renderer { queue, wake: None, inline: None, ctl, done, shared, gain, step, tap: false, detach: Arc::new(AtomicBool::new(false)) }
     }
 
     /// Renders one block (see `render_block`) and copies it to the monitor tap, unless the stream is held.
@@ -1442,9 +1555,10 @@ impl Renderer {
                 return;
             }
         }
-        // Every stream frees the tick records it has played (`heard`); only playback publishes where it is.
+        // Every stream frees the tick records it has played (`heard`); only playback publishes where it is (not in the
+        // block it may still play after its session went: the next playback publishes from its start).
         let heard = self.queue.heard();
-        if self.ctl.report.load(Ordering::Relaxed) {
+        if self.ctl.report.load(Ordering::Relaxed) && !self.detach.load(Ordering::Acquire) {
             if let Some((frame, tick)) = heard {
                 self.shared.position.store(frame, Ordering::Relaxed);
                 self.shared.tick.store(tick.to_bits(), Ordering::Relaxed);
@@ -1460,44 +1574,31 @@ impl Renderer {
     }
 }
 
-fn build<T>(device: &cpal::Device, config: &StreamConfig, mut renderer: Renderer) -> Result<cpal::Stream, String>
-where
-    T: SizedSample + FromSample<f32>,
-{
-    let channels = usize::from(config.channels);
-    let mut stereo: Vec<f32> = Vec::with_capacity(8192);
-    device
-        .build_output_stream::<T, _, _>(
-            config.clone(),
-            move |out: &mut [T], _| {
-                let frames = out.len() / channels;
-                stereo.resize(frames * 2, 0.0);
-                renderer.render(&mut stereo);
-                let (mut pl, mut pr) = (0.0f32, 0.0f32);
-                for (frame, s) in out.chunks_mut(channels).zip(stereo.chunks_exact(2)) {
-                    pl = pl.max(s[0].abs());
-                    pr = pr.max(s[1].abs());
-                    for (c, slot) in frame.iter_mut().enumerate() {
-                        let v = if c < 2 { s[c] } else { 0.0 };
-                        *slot = T::from_sample(v.clamp(-1.0, 1.0));
-                    }
-                }
-                // Meter peaks: the largest since the monitor last read them (non-negative f32 bits order like u32s).
-                if renderer.ctl.report.load(Ordering::Relaxed) {
-                    renderer.shared.peak_l.store(pl.to_bits(), Ordering::Relaxed);
-                    renderer.shared.peak_r.store(pr.to_bits(), Ordering::Relaxed);
-                }
-                // Toolbar meter: the largest peak since the monitor last read it (non-negative f32 bits order like
-                // u32s), from every stream the monitor taps (playback and live notes).
-                if renderer.tap {
-                    renderer.shared.meter_l.fetch_max(pl.to_bits(), Ordering::Relaxed);
-                    renderer.shared.meter_r.fetch_max(pr.to_bits(), Ordering::Relaxed);
-                }
-            },
-            |e| eprintln!("audio stream error: {e}"),
-            None,
-        )
-        .map_err(|e| e.to_string())
+/// What the device plays of a stream: its block, and its own peaks for the meters.
+impl Source for Renderer {
+    fn play(&mut self, stereo: &mut [f32]) {
+        self.render(stereo);
+        let (mut pl, mut pr) = (0.0f32, 0.0f32);
+        for s in stereo.chunks_exact(2) {
+            pl = pl.max(s[0].abs());
+            pr = pr.max(s[1].abs());
+        }
+        // Meter peaks: the largest since the monitor last read them (non-negative f32 bits order like u32s).
+        if self.ctl.report.load(Ordering::Relaxed) {
+            self.shared.peak_l.store(pl.to_bits(), Ordering::Relaxed);
+            self.shared.peak_r.store(pr.to_bits(), Ordering::Relaxed);
+        }
+        // Toolbar meter: the largest peak since the monitor last read it (non-negative f32 bits order like u32s), from
+        // every stream the monitor taps (playback and live notes).
+        if self.tap {
+            self.shared.meter_l.fetch_max(pl.to_bits(), Ordering::Relaxed);
+            self.shared.meter_r.fetch_max(pr.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    fn detached(&self) -> bool {
+        self.detach.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(test)]
@@ -1779,6 +1880,39 @@ mod tests {
         t.stop();
         std::thread::sleep(Duration::from_millis(150));
         assert!(!t.playing() && t.seconds() == 0.0 && t.tick() == 0.0 && t.peaks() == (0.0, 0.0), "stopped = rewound");
+    }
+
+    /// A device that fails while in use (unplugged, an ASIO driver asking to be reset) opens again: the playback goes on
+    /// from where it was heard, saying nothing when it is the same device; paused stays paused (needs an audio device).
+    #[test]
+    #[ignore]
+    fn a_failed_device_opens_again_and_playback_goes_on() {
+        let mut project = crate::app::test_project();
+        let ch = project.channels[0].index;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: (0..8).map(|i| os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, i * 48) }).collect(), ..Default::default() }];
+        let t = Transport::new(None);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        std::thread::sleep(Duration::from_millis(400));
+        let before = t.seconds();
+        assert!(before > 0.2, "playing: {before}");
+        t.fail_device();
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(t.playing() && !t.paused(), "still playing");
+        assert!(t.seconds() > before + 0.2, "goes on from {before}: {}", t.seconds());
+        assert_eq!(t.take_error(), None, "the same device opened again: nothing to say");
+        assert_eq!(t.streams(), 1, "the playback only");
+        // Paused, it fails and comes back paused, at the same place.
+        t.pause();
+        std::thread::sleep(Duration::from_millis(150));
+        let at = t.tick();
+        t.fail_device();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(t.paused(), "paused stays paused");
+        assert!((t.tick() - at).abs() < 1.0, "held at {at}: {}", t.tick());
+        t.resume();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(t.tick() > at || t.tick() < at - 1.0, "resumed from {at}: {}", t.tick());
+        t.stop();
     }
 
     /// Play from a position: what is heard starts there (nothing from the start is queued before the seek). New audio

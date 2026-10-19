@@ -2445,6 +2445,7 @@ dependencies = [
  "block2 0.6.2",
  "chrono",
  "cpal",
+ "crossbeam-queue",
  "lemon-3x-osc",
  "lemon-parametric-eq-2",
  "lemon-sampler",

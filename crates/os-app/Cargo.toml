@@ -29,6 +29,7 @@ lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"
+crossbeam-queue = "0.3"
 midir = "0.11"
 tiny-skia = "0.11"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
