@@ -11705,10 +11705,13 @@ mod tests {
             clips: vec![os_model::Clip::new(0, 384 * 4, 0, os_model::ClipSource::Pattern(1))],
             ..Default::default()
         }];
-        // Song mode.
+        // Song mode. A device opening for the first time may take a while.
         app.act(Action::PatSong(true));
         app.act(Action::Play);
-        step();
+        let start = std::time::Instant::now();
+        while app.transport.tick() <= 10.0 && start.elapsed() < std::time::Duration::from_secs(3) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert_eq!(app.transport.state(), T::Playing);
         assert!(app.transport.song() && app.transport.tick() > 10.0, "song tick {}", app.transport.tick());
         // Pause holds the tick in place; Play resumes from it (no restart).
