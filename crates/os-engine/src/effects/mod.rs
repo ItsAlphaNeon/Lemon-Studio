@@ -9,6 +9,7 @@ mod biquad;
 pub mod dynamics;
 pub mod eq;
 pub mod limiter;
+pub mod reverb;
 
 pub use biquad::Biquad;
 
@@ -18,6 +19,8 @@ pub trait Effect: Send {
     /// Empties delay lines and filter states (a slot switched on during the song, spec: audio/mixer.md "Changes while
     /// the song plays").
     fn reset(&mut self) {}
+    /// The song's tempo in BPM (effects with tempo-based times).
+    fn set_tempo(&mut self, _bpm: f64) {}
 }
 
 /// Creates a Lemon Studio effect for a slot plugin, if one exists for that plugin.
@@ -26,6 +29,7 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
     match name {
         "Fruity Parametric EQ 2" => eq::ParametricEq::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Limiter" => limiter::Limiter::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Reeverb 2" => reverb::Reverb::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         _ => None,
     }
 }
