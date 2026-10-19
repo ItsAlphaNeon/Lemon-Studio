@@ -16164,6 +16164,55 @@ mod tests {
         set_check(&MONO_PAINTING, false);
     }
 
+    /// With an ASIO driver chosen, the Audio page's buffer length is the driver's and its panel button works.
+    #[test]
+    fn the_audio_page_has_the_asio_panel_button() {
+        use crate::audio_cfg::{AudioCfg, Set};
+        use crate::views::settings::{SAct, AUDIO, BUFFER_LENGTH, SHOW_ASIO_PANEL};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(AUDIO);
+        let shown = |app: &App| {
+            let combo = app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo(BUFFER_LENGTH, ..))));
+            (combo, app.hits.iter().any(|h| h.action == Action::Settings(SAct::Button(SHOW_ASIO_PANEL))))
+        };
+        frame(&mut app, &mut c, None);
+        assert_eq!(shown(&app), (true, false), "a Windows device");
+        // Only the page's copy of the settings: no driver is opened.
+        app.state.settings.audio = AudioCfg::default().with(Set::Asio("Some ASIO".into()));
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        assert_eq!(shown(&app), if cfg!(windows) { (false, true) } else { (true, false) }, "an ASIO driver");
+    }
+
+    /// The Audio page with an ASIO driver chosen (the first installed one), and its Output device menu, as pictures,
+    /// for looking (not an assertion): `OS_AUDIO_SHOT=<folder>`. Windows, with a driver installed.
+    #[test]
+    fn audio_shot() {
+        use crate::audio_cfg::{AudioCfg, Set};
+        use crate::views::settings::{SAct, AUDIO, OUTPUT_DEVICE};
+        let Some(out) = std::env::var_os("OS_AUDIO_SHOT") else { return };
+        let out = std::path::PathBuf::from(out);
+        let Some(driver) = crate::device::asio_drivers().into_iter().next() else { return };
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        AudioCfg::default().with(Set::Asio(driver)).apply();
+        let mut app = App::new(None);
+        // The driver opens with the audio thread; the page then shows its buffer length.
+        let t = std::time::Instant::now();
+        while crate::device::opens() == 0 && t.elapsed() < std::time::Duration::from_secs(3) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.open_settings(AUDIO);
+        app.audio_status();
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(out.join("01_audio_asio.png")).unwrap();
+        let r = app.hits.iter().find(|h| matches!(h.action, Action::Settings(SAct::Combo(OUTPUT_DEVICE, ..)))).map(|h| h.rect).unwrap();
+        click(&mut app, &mut c, r);
+        c.pixmap.save_png(out.join("02_output_device_menu.png")).unwrap();
+        AudioCfg::default().apply();
+    }
+
     /// The header's menus and switches as pictures, for looking (not an assertion): `OS_HEADER_SHOT=<folder>`.
     #[test]
     fn header_shot() {

@@ -277,6 +277,7 @@ pub const LIVE: &[&str] = &[
     "Load theme...",
     "Reset",
     ASSOCIATE_CHECK,
+    SHOW_ASIO_PANEL,
 ];
 
 /// `LIVE`, and the checks declared in `crate::prefs`.

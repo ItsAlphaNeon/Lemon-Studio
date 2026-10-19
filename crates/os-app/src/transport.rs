@@ -2003,11 +2003,13 @@ mod tests {
         assert!(crate::device::opens() > opens, "opened anew");
         assert!(t.playing() && t.seconds() > before + 0.2, "goes on from {before}: {}", t.seconds());
         assert_eq!(t.take_error(), None, "the same driver: nothing to say");
-        // Its panel opens on the audio thread (a window shows: only when asked for).
-        if std::env::var_os("LEMON_TEST_ASIO_PANEL").is_some() {
+        // Its panel opens on the audio thread (a window shows: only when asked for, and kept that many seconds).
+        if let Ok(s) = std::env::var("LEMON_TEST_ASIO_PANEL") {
             t.asio_panel();
             std::thread::sleep(Duration::from_millis(1500));
             assert_eq!(t.take_error(), None, "the panel opened");
+            eprintln!("{name}'s panel is open");
+            std::thread::sleep(Duration::from_secs_f64(s.parse().unwrap_or(0.0)));
         }
         t.stop();
     }
