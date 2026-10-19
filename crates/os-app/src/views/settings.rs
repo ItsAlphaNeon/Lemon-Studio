@@ -365,7 +365,7 @@ pub const DEBUG: usize = 8;
 
 /// Plugin table rows shown at once (spec: ui/plugin-manager.md §2).
 pub const TABLE_ROWS: usize = 18;
-const TABLE_ROW_H: f32 = 17.0;
+pub const TABLE_ROW_H: f32 = 17.0;
 /// Table columns: x from the table's left edge, width.
 const COLS: [(f32, f32); 8] = [(0.0, 20.0), (20.0, 38.0), (58.0, 152.0), (210.0, 50.0), (260.0, 68.0), (328.0, 112.0), (440.0, 66.0), (506.0, 80.0)];
 
@@ -584,7 +584,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 combo("Main", 64.0, "Pop-ups scaling"),
                 combo("Main", 64.0, "Toolbars scaling"),
                 combo("Off", 64.0, "Transparent windows"),
-                combo(if s.cables.borrow().still_cables { "Off" } else { "Entertain me" }, 126.0, ANIMATIONS),
+                combo(if s.cables.borrow().animations() { "Entertain me" } else { "Off" }, 126.0, ANIMATIONS),
                 Slider("Smoothing", 0.2),
                 combo("Ultrasmooth", 126.0, "Animation refresh rate"),
                 Check2("Force refreshes", true, "Transparent menus", true),
@@ -961,7 +961,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
     ui.c.pop_clip();
     if total > area.h {
         let track = Rect::new(area.right() - 10.0, area.y + 4.0, 7.0, area.h - 8.0);
-        kit::scrollbar(ui.c, t, track, true, scroll, area.h, total, kit::State::NORMAL);
+        super::scrollbar(ui, track, true, scroll, area.h, total, crate::app::Scroll::Settings);
     }
     if let Some(p) = st.picker.as_ref().filter(|_| st.tab == THEME) {
         picker(ui, s, p, r);
@@ -1883,7 +1883,7 @@ fn table(ui: &mut Ui, s: &State, area: Rect) {
     }
     if scroll {
         let track = Rect::new(b.right() - 10.0, ry0 + 2.0, 7.0, TABLE_ROW_H * TABLE_ROWS as f32 - 4.0);
-        kit::scrollbar(ui.c, t, track, true, d.top as f32 * TABLE_ROW_H, TABLE_ROW_H * TABLE_ROWS as f32, n as f32 * TABLE_ROW_H, kit::State::NORMAL);
+        super::scrollbar(ui, track, true, d.top as f32 * TABLE_ROW_H, TABLE_ROW_H * TABLE_ROWS as f32, n as f32 * TABLE_ROW_H, crate::app::Scroll::PlugTable);
     }
     // Count and Find box.
     let fy = b.bottom() + 6.0;

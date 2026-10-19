@@ -228,7 +228,7 @@ impl App {
         for a in moved {
             match a {
                 Axis::Bar(Scroll::PlaylistX | Scroll::PlaylistY) => {}
-                Axis::Bar(t) => self.damage_win(crate::app::scroll_win(t)),
+                Axis::Bar(t) => self.damage_scroll(t),
                 Axis::Browser => self.invalidate(),
             }
         }

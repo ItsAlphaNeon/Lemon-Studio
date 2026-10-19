@@ -638,6 +638,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
             for (n, name) in &pats {
                 let rr = Rect::new(col.x, y, col.w, row);
                 let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
+                ui.menu_row(crate::app::MENU_DROPDOWN);
                 let lit = hov || (*n == s.pattern && away);
                 if lit && lemon {
                     os_ui::kit::row_highlight(ui.c, t, rr);
@@ -672,7 +673,9 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                     // Greyed-out entries never light up; they only say they are not available yet (EDIT's without a
                     // step to act on say nothing).
                     if ok {
-                        if ui.hit(rr, item_action(menu, flat, item), item.label) || open == Some(flat) {
+                        let hov = ui.hit(rr, item_action(menu, flat, item), item.label);
+                        ui.menu_row(crate::app::MENU_DROPDOWN);
+                        if hov || open == Some(flat) {
                             if lemon {
                                 os_ui::kit::row_highlight(ui.c, t, rr);
                             } else {

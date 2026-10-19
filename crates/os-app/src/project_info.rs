@@ -10,7 +10,8 @@
 //!
 //! The page's footer tells when the project was started, the time spent working on it (event 237, which counts on
 //! while the project is open: `WorkClock`) and what the project holds. "Show info on opening" (event 10) makes opening
-//! the project show its Song info box.
+//! the project show its Song info box for a few seconds; it then fades out, and any click in the app's windows takes it
+//! away at once.
 // spec: ui/settings.md "Info", ui/settings-choices.md "Info", flp/events/project-info.md
 
 use std::time::{Duration, Instant};
@@ -70,6 +71,11 @@ pub struct Credits {
     pub clock: WorkClock,
     /// The Song info box is shown (the project was opened with "Show info on opening" on).
     pub song_box: bool,
+    /// Since when the Song info box is shown: the first tick after opening (`App::song_info_tick`), so the time a
+    /// project takes to open does not count.
+    song_since: Option<Instant>,
+    /// How opaque the Song info box is painted: 1 until it fades.
+    song_alpha: f32,
     /// The minutes of time spent the Info page showed last (`App::work_tick`).
     minutes: u64,
 }
@@ -93,6 +99,7 @@ pub(crate) fn opened(s: &mut State) {
     s.project.work_time.get_or_insert_with(os_flp::project::work_time_now);
     s.credits.clock.restart(Instant::now());
     s.credits.song_box = s.project.show_info == Some(true);
+    (s.credits.song_since, s.credits.song_alpha) = (None, 1.0);
 }
 
 /// A new project: started now, nothing spent (spec: ui/settings-choices.md "Info": "A new project starts now").
@@ -191,6 +198,10 @@ pub fn footer(s: &State, now: Instant) -> Vec<String> {
     lines
 }
 
+/// How long the Song info box stays, then how long it takes to fade out (Lemon Studio's choice).
+const SONG_HOLD: f32 = 5.0;
+const SONG_FADE: f32 = 0.5;
+
 /// The Song info box's size and colours (spec: flp/events/project-info.md "The Song info box").
 const SONG_BOX: (f32, f32) = (502.0, 272.0);
 const SONG_BG: u32 = 0xCCD1D5;
@@ -204,17 +215,19 @@ pub fn song_box_rect(screen: (f32, f32)) -> Rect {
 
 /// Paints the Song info box while it is shown (spec: flp/events/project-info.md "The Song info box"): borderless, light
 /// grey with a 1 px darker frame; "<author> - <title>" in large dark text at the top left, the genre at the top right,
-/// the comments with their line breaks, the web link at the bottom right. A click on it closes it (`Action::SongInfo`).
-/// The app's own fonts.
+/// the comments with their line breaks, the web link at the bottom right. A click on it closes it (`Action::SongInfo`), as
+/// does a click anywhere else (`App::mouse_down`). It is painted see-through while it fades. The app's own fonts.
 pub(crate) fn paint_song_info(ui: &mut Ui, s: &State) {
     if !s.credits.song_box {
         return;
     }
     let r = song_box_rect(s.screen);
     ui.hit(r, Action::SongInfo, "Click to close");
-    ui.c.fill_rect(r, Color::rgb(SONG_BORDER));
-    ui.c.fill_rect(r.inset(1.0), Color::rgb(SONG_BG));
-    let ink = Color::rgb(SONG_INK);
+    let a = (s.credits.song_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let color = |hex: u32| Color::rgb(hex).with_alpha(a);
+    ui.c.fill_rect(r, color(SONG_BORDER));
+    ui.c.fill_rect(r.inset(1.0), color(SONG_BG));
+    let ink = color(SONG_INK);
     let (big, small) = (Font::new(22).bold(), Font::new(14));
     let inner = r.inset(12.0);
     let i = &s.project.info;
@@ -351,10 +364,37 @@ impl App {
         self.state.message = Some(format!("Show info on opening: {}", if on { "on" } else { "off" }));
     }
 
-    /// A click on the Song info box closes it.
+    /// A click on the Song info box closes it, as does a click anywhere else in the main window or in a plugin window.
     pub(crate) fn close_song_info(&mut self) {
-        self.state.credits.song_box = false;
-        self.invalidate();
+        if self.state.credits.song_box {
+            self.state.credits.song_box = false;
+            self.damage_rect(song_box_rect(self.state.screen));
+        }
+    }
+
+    /// The Song info box is fading out: the shell ticks at animation rate.
+    pub(crate) fn song_info_fading(&self) -> bool {
+        self.state.credits.song_box && self.state.credits.song_alpha < 1.0
+    }
+
+    /// Periodic (`App::tick`): the Song info box stays for `SONG_HOLD` from the first tick after opening, then fades out
+    /// over `SONG_FADE` and goes.
+    pub(crate) fn song_info_tick(&mut self, now: Instant) {
+        let c = &mut self.state.credits;
+        if !c.song_box {
+            return;
+        }
+        let since = *c.song_since.get_or_insert(now);
+        let t = now.saturating_duration_since(since).as_secs_f32() - SONG_HOLD;
+        if t < 0.0 {
+            return;
+        }
+        if t >= SONG_FADE {
+            self.close_song_info();
+            return;
+        }
+        c.song_alpha = 1.0 - t / SONG_FADE;
+        self.damage_rect(song_box_rect(self.state.screen));
     }
 }
 
@@ -793,6 +833,38 @@ mod tests {
         assert_eq!(mixer_tracks(&p), 2, "inserts 3 and 4");
         p.mixer[4].routes = vec![2];
         assert_eq!(mixer_tracks(&p), 3, "insert 2 receives from insert 4");
+    }
+
+    /// The Song info box stays 5 s from the first tick after opening, then fades out over half a second and goes; a
+    /// left, right or middle press anywhere takes it away at once (Lemon Studio's choice).
+    #[test]
+    fn song_info_fades_and_any_click_closes() {
+        let secs = Duration::from_secs_f32;
+        let mut app = app();
+        app.state.project.show_info = Some(true);
+        opened(&mut app.state);
+        let t = Instant::now() + secs(60.0);
+        app.song_info_tick(t);
+        app.song_info_tick(t + secs(4.9));
+        assert!(app.state.credits.song_box && !app.song_info_fading(), "shown, not fading yet");
+        app.song_info_tick(t + secs(5.25));
+        assert!(app.song_info_fading());
+        assert!((app.state.credits.song_alpha - 0.5).abs() < 0.01, "{}", app.state.credits.song_alpha);
+        app.song_info_tick(t + secs(5.5));
+        assert!(!app.state.credits.song_box && !app.song_info_fading(), "gone");
+        // Opened again: shown again, from its first tick.
+        opened(&mut app.state);
+        app.song_info_tick(t + secs(6.0));
+        app.song_info_tick(t + secs(10.0));
+        assert!(app.state.credits.song_box && app.state.credits.song_alpha == 1.0);
+        for press in [App::mouse_down, App::mouse_down_right, App::mouse_down_middle] {
+            let mut app = self::app();
+            app.state.project.show_info = Some(true);
+            opened(&mut app.state);
+            app.mouse_move(2.0, 2.0);
+            press(&mut app);
+            assert!(!app.state.credits.song_box, "a press elsewhere closes it");
+        }
     }
 
     /// The working time counts only while the main window is in front (Lemon Studio's rule, `WorkClock`).

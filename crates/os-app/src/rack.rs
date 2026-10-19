@@ -230,7 +230,6 @@ pub struct RackUi {
     /// Steps copied by Cut / Copy (the channel's notes of the pattern).
     pub clipboard: Option<Vec<Note>>,
     /// Copied knob value (knob menu, §19).
-    pub value_clip: Option<f32>,
     /// Menu checkboxes that have no effect yet (greyed out): their default ticks.
     pub opts: BTreeSet<&'static str>,
     /// Channels waiting for the delete confirmation's Ok.
@@ -266,7 +265,6 @@ impl Default for RackUi {
             loop_type: 0,
             unsorted_at: None,
             clipboard: None,
-            value_clip: None,
             opts: ["Show complete piano roll preview", "Show a mute button on the piano roll preview"].into_iter().collect(),
             pending_delete: None,
             purging: false,
@@ -884,8 +882,14 @@ pub fn clone_rows(app: &mut App, rows: &[usize]) {
         if rows.contains(&r) {
             let name = clone_name(&app.state, r);
             let mut c = app.state.project.channels[r].clone();
+            let from = c.index;
             c.index = app.state.project.channels.len() as u16;
             c.name = Some(name);
+            // An automation clip's copy has its curve and targets (spec: ui/playlist.md §10a).
+            if let Some(mut a) = app.state.project.automation(from).cloned() {
+                a.channel = c.index;
+                app.state.project.automations.push(a);
+            }
             app.state.project.channels.push(c);
             order.push(app.state.project.channels.len() - 1);
             sources.push(r);
@@ -1374,8 +1378,8 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
     match knob {
         Some(k) => {
             v.push(it("Copy value", RCmd::CopyValue(k)));
-            let p = it("Paste value", RCmd::PasteValue(k));
-            v.push(if s.rack.value_clip.is_some() { p } else { p.off() });
+            let p = it(crate::playlist::paste_label(s), RCmd::PasteValue(k));
+            v.push(if s.value_clip.is_some() { p } else { p.off() });
         }
         None => v.extend([PItem::not_yet("Copy value"), PItem::new("Paste value", Cmd::Nothing).off()]),
     }
@@ -1631,13 +1635,13 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::CopyValue(k) => {
-            s.rack.value_clip = Some(s.knob(k));
+            s.value_clip = Some(f64::from(s.knob(k)));
             None
         }
         RCmd::PasteValue(k) => {
-            if let Some(v) = s.rack.value_clip {
+            if let Some(v) = s.value_clip {
                 crate::history::knob(s, k, false);
-                s.set_knob(k, v);
+                s.set_knob(k, v as f32);
             }
             None
         }
@@ -2434,6 +2438,26 @@ mod tests {
             }
         }
         set_check(&RESTORE_AFTER_SOLO, false);
+    }
+
+    /// A plain click on a playlist track's LED during a solo unmutes only that track: the soloed track stays on, the
+    /// others stay muted. ("Restore previous state after solo" is not read on this path; the setting is left alone so
+    /// as not to race `restore_previous_state_after_solo`.)
+    #[test]
+    fn playlist_click_after_solo_unmutes_only_that_track() {
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        let s = &mut app.state;
+        let tracks = |s: &mut State| crate::playlist::arr_mut(s).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
+        crate::playlist::toggle_solo(s, 0);
+        crate::playlist::toggle_track(s, 2);
+        let got = tracks(s);
+        assert!(got.iter().enumerate().all(|(i, &e)| e == (i == 0 || i == 2)), "{got:?}");
+        assert!(s.playlist.solo.is_none(), "the solo is over");
+        // Again: only that track is muted again.
+        crate::playlist::toggle_track(s, 2);
+        let got = tracks(s);
+        assert!(got.iter().enumerate().all(|(i, &e)| e == (i == 0)), "again: {got:?}");
     }
 
     /// "Select first channel with notes when the pattern changes" (spec: ui/settings-choices.md "Miscellaneous"): on,

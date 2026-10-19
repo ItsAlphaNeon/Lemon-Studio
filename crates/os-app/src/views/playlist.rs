@@ -318,18 +318,22 @@ fn grid_rect(s: &State, r: Rect, client: Rect) -> Rect {
     Rect::new(grid_x, grid_y, grid_w, (r.bottom() - grid_y).max(0.0))
 }
 
+/// The icon of a kind of clip source: its picker tab's, also drawn on the left of its picker items and clip titles
+/// (Lemon Studio, ui/playlist.md §1).
+fn kind_icon(kind: PickKind) -> Icon {
+    match kind {
+        PickKind::Pattern => Icon::PianoRoll,
+        PickKind::Audio => Icon::Wave,
+        PickKind::Automation => Icon::Slide,
+    }
+}
+
 /// Picker panel: kind tabs, then the list of clip sources of that kind (§1).
 fn picker(ui: &mut Ui, s: &State, p: Rect) {
     let t = ui.t;
     ui.c.fill_rect(p, t.picker);
-    for (i, (icon, kind, hint)) in [
-        (Icon::PianoRoll, PickKind::Pattern, "Patterns"),
-        (Icon::Wave, PickKind::Audio, "Audio clips"),
-        (Icon::Slide, PickKind::Automation, "Automation clips"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (i, (kind, hint)) in [(PickKind::Pattern, "Patterns"), (PickKind::Audio, "Audio clips"), (PickKind::Automation, "Automation clips")].into_iter().enumerate() {
+        let icon = kind_icon(kind);
         let cx = p.x + 23.0 + 47.0 * i as f32;
         let b = Rect::new(cx - 14.0, p.y + 11.0, 28.0, 28.0);
         let hov = ui.hit(b, Action::PlPickTab(kind), hint);
@@ -361,20 +365,37 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             continue;
         }
         let row = Rect::new(list.x + 2.0, y, list.w - 4.0, PICK_ROW - 1.0);
-        let hov = ui.hit(row, Action::PlPick(src), "Select clip source (right-click a pattern for its menu)");
+        let hov = ui.hit(row, Action::PlPick(src), "Select clip source (right-click for its menu)");
         let filled = pick_used(s, src);
         let k = if hov { 0.05 } else { 0.0 };
         let lemon = super::lemon(ui);
+        // The source's colour, as its clips' titles take it (§2): an audio or automation clip's channel colour, a
+        // pattern's own colour when it has one; an unused source a darker shade of it.
+        let tint = match src {
+            ClipSource::Pattern(_) => pl::source_color(s, src),
+            ClipSource::Channel(_) => pl::clip_tint(s, src),
+        }
+        .map(rgb);
+        let (edge, face) = match tint {
+            Some(c) if filled => (offset(c, -42), offset(c, -17)),
+            Some(c) => (offset(c, -70), offset(c, -55)),
+            None if filled => (ui.t.s(0x2f3539), ui.t.s(0x464e53)),
+            None => (ui.t.s(0x2a2d2e), ui.t.s(0x2a2d2e)),
+        };
+        let face = face.shade(k);
         if filled && lemon {
-            lk::outlined(ui.c, row, lk::r_btn(ui.t), ui.t.s(0x2f3539), ui.t.s(0x464e53).shade(k));
+            lk::outlined(ui.c, row, lk::r_btn(ui.t), edge, face);
             preview(ui, s, src, row.inset(3.0));
         } else if filled {
-            // Used source: grey button with a faint preview of its contents (pl_asher.png).
-            ui.c.fill_rect(row, ui.t.s(0x2f3539));
-            ui.c.fill_rect(row.inset(1.0), ui.t.s(0x464e53).shade(k));
+            // Used source: a button with a faint preview of its contents (pl_asher.png).
+            ui.c.fill_rect(row, edge);
+            ui.c.fill_rect(row.inset(1.0), face);
             preview(ui, s, src, row.inset(3.0));
         } else if lemon {
-            ui.c.fill_rrect(row, lk::r_btn(ui.t), ui.t.s(0x2a2d2e).shade(k));
+            ui.c.fill_rrect(row, lk::r_btn(ui.t), face);
+        } else if tint.is_some() {
+            ui.c.fill_rect(row, edge);
+            ui.c.fill_rect(row.inset(1.0), face);
         } else {
             // Empty pattern: dark face (owner's FL screenshot).
             ui.c.fill_rect_gradient(row, ui.t.s(0x2a2d2e).shade(k), ui.t.s(0x232627).shade(k), 0.0);
@@ -383,14 +404,8 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             ui.c.stroke_rrect(row.inset(0.5), if lemon { lk::r_btn(ui.t) } else { 0.0 }, 1.0, ui.t.a(0xa8e44a));
         }
         let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
-        if matches!(src, ClipSource::Pattern(_)) && !filled {
-            ui.c.fill_circle(row.x + 7.5, row.cy(), 1.6, ui.t.tx(0xb9bcbd));
-        } else {
-            for k in 0..3 {
-                ui.c.fill_rect(Rect::new(row.x + 4.0, row.cy() - 4.0 + 3.0 * k as f32, 6.0, 1.0), ic);
-            }
-        }
-        ui.c.text_clip(Font::new(14), row.x + 15.0, row.cy() - 8.0, row.w - 18.0, ic, &pl::source_name(s, src));
+        icons::draw(ui.c, kind_icon(pl::source_kind(s, src)), Rect::new(row.x + 4.0, row.cy() - 6.0, 12.0, 12.0), ic);
+        ui.c.text_clip(Font::new(14), row.x + 20.0, row.cy() - 8.0, row.w - 23.0, ic, &pl::source_name(s, src));
         if src == cur {
             let ax = list.x - 1.0;
             let mark = if lemon { ui.t.accent } else { Color::rgb(0xe64363) };
@@ -721,21 +736,8 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
             ui.c.line(ix, iy + 1.0, ix + 7.0, iy + 8.0, 1.2, ic);
             ui.c.line(ix + 7.0, iy + 1.0, ix, iy + 8.0, 1.2, ic);
         } else {
-            match kind {
-                PickKind::Pattern => {
-                    for k in 0..3 {
-                        ui.c.fill_rect(Rect::new(ix, iy + 1.0 + 3.0 * k as f32, 8.0, 1.0), ic);
-                    }
-                }
-                PickKind::Audio => {
-                    // A bar, a solid arrowhead against it, a shaft and a second arrowhead (FL's audio clip mark).
-                    ui.c.fill_rect(Rect::new(ix, iy + 1.0, 1.0, 8.0), ic);
-                    ui.c.fill_polygon(&[(ix + 1.0, iy + 2.5), (ix + 4.0, iy + 5.0), (ix + 1.0, iy + 7.5)], ic);
-                    ui.c.line(ix + 3.0, iy + 5.0, ix + 8.5, iy + 5.0, 1.0, ic);
-                    ui.c.fill_polygon(&[(ix + 6.0, iy + 3.0), (ix + 9.0, iy + 5.0), (ix + 6.0, iy + 7.0)], ic);
-                }
-                PickKind::Automation => ui.c.line(ix, iy + 8.0, ix + 8.0, iy + 1.0, 1.2, ic),
-            }
+            // On whole pixels: a partial repaint draws it exactly as a full one (smooth scrolling stops between them).
+            icons::draw(ui.c, kind_icon(kind), Rect::new((ix - 0.5).round(), iy.round(), 10.0, 10.0), ic);
         }
     }
     if r.w > 16.0 {
@@ -1290,6 +1292,7 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         let live = it.enabled && (it.children.is_empty() || any_enabled(&it.children));
         if it.enabled {
             let lit = ui.hit(rr, action, it.label.to_string()) || open == Some(i);
+            ui.menu_row(if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP });
             if lit && lemon {
                 os_ui::kit::row_highlight(ui.c, t, rr);
             } else if lit {

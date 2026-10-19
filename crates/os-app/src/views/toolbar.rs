@@ -318,8 +318,9 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
     }
     // Lemon displays show their digits in the brand colour.
     let digits = if lemon { t.pill } else { t.glyph };
-    let whole = format!("{}", s.tempo.trunc() as i64);
-    let frac = format!(".{:03}", ((s.tempo.fract()) * 1000.0).round() as i64 % 1000);
+    // While playing, the tempo playback is at: tempo automation moves it (spec: audio/timing.md "Tempo that changes").
+    let whole = format!("{}", f.tempo.trunc() as i64);
+    let frac = format!(".{:03}", ((f.tempo.fract()) * 1000.0).round() as i64 % 1000);
     let ww = ui.c.text_width(Font::condensed(19, 6), &whole);
     let fw = ui.c.text_width(Font::condensed(13, 5), &frac);
     let x0 = (tb.right() - 11.0 - ww - fw).max(tb.x + 2.0);

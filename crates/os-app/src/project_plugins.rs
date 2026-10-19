@@ -941,7 +941,7 @@ mod tests {
         // format.)
         let exe = std::env::current_exe().unwrap();
         assert_eq!(a.browse_params(fx_key(2, 0)), None);
-        a.state.params.copied = Some(0.75);
+        a.state.value_clip = Some(0.75);
         let paste = crate::playlist::Cmd::Param(crate::params::PCmd::Paste(fx_key(2, 0), 0));
         assert_eq!(crate::playlist::run(&mut a, paste), None);
         a.plugins.hosted[&fx_key(2, 0)].plugin.lock().unwrap().idle();

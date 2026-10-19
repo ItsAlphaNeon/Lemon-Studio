@@ -252,7 +252,12 @@ pub enum Cmd {
     ClipRename(usize),
     ClipRandomColor(usize),
     ClipPreview(usize),
+    /// A picker item's menu (§10a) on an audio or automation clip source: the command and the source's channel index.
+    Pick(PickCmd, u16),
     PointDelete(u16, usize),
+    /// The point menu's Copy value / Paste value (the clipboard every control shares).
+    PointCopy(u16, usize),
+    PointPaste(u16, usize),
     PointMode(u16, usize, AutoMode),
     PointValue(u16, usize),
     TrackRename(u16),
@@ -1647,14 +1652,11 @@ pub fn delete_track(s: &mut State, t: u16) {
     s.piano.dirty = true;
 }
 
-/// Track LED: mute / unmute. A solo ends first: with "Restore previous state after solo" on, its saved states come
-/// back; off, the states stay as they are.
+/// Track LED: mute / unmute only this track. During a solo the other tracks stay as they are and the solo is over (its
+/// saved states are forgotten), with "Restore previous state after solo" on or off, as in the channel rack and the
+/// mixer: unmuting a second track after a solo leaves both on.
 pub fn toggle_track(s: &mut State, t: u16) {
-    if crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO) {
-        end_solo(s);
-    } else {
-        s.playlist.solo = None;
-    }
+    s.playlist.solo = None;
     let arr = arr_mut(s);
     if let Some(tr) = arr.tracks.get_mut(usize::from(t)) {
         tr.enabled = !tr.enabled;
@@ -2128,6 +2130,82 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None }
 }
 
+/// The commands of a picker item's menu (§10a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickCmd {
+    Preview,
+    SelectInPlaylist,
+    Group,
+    Rename,
+    ChangeColor,
+    RandomColor,
+    LoadSample,
+    Clone,
+    Delete,
+}
+
+/// Right-click on an audio or automation clip in the picker (§10a): its channel's menu, as FL shows it there.
+pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
+    let audio = source_kind(s, ClipSource::Channel(ch)) == PickKind::Audio;
+    let it = |label: &'static str, c: PickCmd| PItem::new(label, Cmd::Pick(c, ch));
+    let mut items = Vec::new();
+    if audio {
+        items.push(it("Preview", PickCmd::Preview));
+    }
+    items.extend([
+        it("Select in playlist", PickCmd::SelectInPlaylist),
+        it("Group selected...", PickCmd::Group),
+        PItem::sep(),
+        it("Rename, color and icon...", PickCmd::Rename),
+        it("Change color...", PickCmd::ChangeColor),
+        it("Random color", PickCmd::RandomColor),
+        PItem::not_yet("Change icon..."),
+        PItem::sep(),
+    ]);
+    if audio {
+        items.extend([it("Load sample...", PickCmd::LoadSample), PItem::not_yet("Edit sample...")]);
+    }
+    items.extend([PItem::not_yet("Cut itself").mark(Mark::Check(true)), PItem::sep(), it("Clone", PickCmd::Clone)]);
+    if !audio {
+        items.push(it("Clone with links", PickCmd::Clone));
+    }
+    items.push(it("Delete...", PickCmd::Delete));
+    Popup { x, y, items, sub: None }
+}
+
+/// Runs a picker item's command on the channel with index `ch` (§10a).
+fn pick(app: &mut App, c: PickCmd, ch: u16) -> Option<String> {
+    let row = app.state.project.channels.iter().position(|x| x.index == ch)?;
+    let src = ClipSource::Channel(ch);
+    let at = crate::patterns::box_at_mouse(app.mouse);
+    let s = &mut app.state;
+    match c {
+        PickCmd::Preview => {
+            // The source as one clip of its own length (the fitted length, else that of a clip of it).
+            let fit = audio_fits(s).and_then(|f| f.get(&ch).copied().flatten()).map(|(t, _)| t.round().max(1.0) as u32);
+            let len = fit.or_else(|| clips(s).iter().find(|c| c.source == src).map(|c| c.length))?;
+            app.preview_clip(&Clip::new(0, len, 0, src));
+        }
+        PickCmd::SelectInPlaylist => s.playlist.sel = clips(s).iter().enumerate().filter(|(_, c)| c.source == src).map(|(i, _)| i).collect(),
+        PickCmd::Group => crate::rack::open_box(s, crate::rack::RBox::GroupSel, at),
+        PickCmd::Rename => crate::rack::open_box(s, crate::rack::RBox::Channel(row), at),
+        PickCmd::ChangeColor => {
+            crate::rack::open_box(s, crate::rack::RBox::Channel(row), at);
+            if let Some(b) = s.pat_ui.name_box.as_mut() {
+                b.palette = true;
+            }
+        }
+        PickCmd::RandomColor => {
+            crate::rack::random_color(s, row, u64::from(ch));
+            s.piano.dirty = true;
+        }
+        PickCmd::LoadSample => return crate::rack::run(app, crate::rack::RCmd::LoadSample(row)),
+        PickCmd::Clone => crate::rack::clone_rows(app, &[row]),
+        PickCmd::Delete => crate::rack::ask_delete(s, vec![row]),
+    }
+    None
+}
+
 pub fn point_menu(s: &State, ch: u16, i: usize, x: f32, y: f32) -> Popup {
     let a = s.project.automation(ch);
     let n = a.map_or(0, |a| a.points.len());
@@ -2139,8 +2217,18 @@ pub fn point_menu(s: &State, ch: u16, i: usize, x: f32, y: f32) -> Popup {
         items.push(PItem::new(m.name(), Cmd::PointMode(ch, i, m)).mark(Mark::Radio(mode == Some(m))));
     }
     items.push(PItem::sep());
+    items.push(PItem::new("Copy value", Cmd::PointCopy(ch, i)));
+    items.push(if s.value_clip.is_some() { PItem::new(paste_label(s), Cmd::PointPaste(ch, i)) } else { PItem::new("Paste value", Cmd::Nothing).off() });
     items.push(PItem::new("Type in value...", Cmd::PointValue(ch, i)));
     Popup { x, y, items, sub: None }
+}
+
+/// "Paste value" with the copied value as a percentage, as FL writes it ("Paste value (23%)").
+pub fn paste_label(s: &State) -> String {
+    match s.value_clip {
+        Some(v) => format!("Paste value ({}%)", (v * 100.0).round()),
+        None => "Paste value".to_string(),
+    }
 }
 
 pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
@@ -3390,13 +3478,18 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             }
             return None;
         }
+        Cmd::Pick(c, ch) => {
+            let m = pick(app, c, ch);
+            app.invalidate();
+            return m;
+        }
         _ => {}
     }
     let s = &mut app.state;
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -3652,6 +3745,16 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::PointDelete(ch, i) => {
             snapshot(s);
             delete_point(s, ch, i);
+            None
+        }
+        Cmd::PointCopy(ch, i) => {
+            s.value_clip = s.project.automation(ch).and_then(|a| a.points.get(i)).map(|p| p.value);
+            None
+        }
+        Cmd::PointPaste(ch, i) => {
+            let (Some(v), Some(beat)) = (s.value_clip, s.project.automation(ch).and_then(|a| a.points.get(i)).map(|p| p.beat)) else { return None };
+            snapshot(s);
+            move_point(s, ch, i, beat, v);
             None
         }
         Cmd::PointMode(ch, i, m) => {
@@ -4132,7 +4235,8 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::not_yet("Change color..."),
         PItem::not_yet("Random color"),
         PItem::not_yet("Change icon..."),
-        PItem::new("Detached", Cmd::PluginDetach(row, !detached)).mark(Mark::Check(detached)),
+        // Named for what it does, not checked as in FL: Detach while docked, Attach while detached (owner, 2026-10-18).
+        PItem::new(if detached { "Attach" } else { "Detach" }, Cmd::PluginDetach(row, !detached)),
         PItem::col(),
         PItem::head("Channel"),
         PItem::not_yet("Save channel state as..."),

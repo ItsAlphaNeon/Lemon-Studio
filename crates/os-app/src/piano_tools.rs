@@ -362,14 +362,27 @@ pub fn add_marker(s: &mut State, tick: u32) -> String {
     format!("Piano roll: added \"{name}\" at bar {bar}")
 }
 
-/// Ctrl+B (§9): copy the selection (or every note of the channel) right after its end.
+/// Ctrl+B (§9): copy the selection (or every note of the channel) right after its end. With a time selection (§10) the
+/// copies move by the range's length instead, so the space before and after the notes inside it is kept, and the range
+/// moves on over them (as in the playlist); an empty range only moves on.
 pub fn duplicate(s: &mut State) {
-    let idx = piano::targets(s);
+    let range = s.piano.range.filter(|(a, b)| b > a);
+    let idx = match range {
+        Some(_) => s.piano.selection(s.pattern, piano::channel(s)),
+        None => piano::targets(s),
+    };
     let all = piano::notes(s);
     let clip: Vec<Note> = idx.iter().filter_map(|&i| all.get(i).copied()).collect();
     let start = clip.iter().map(|n| n.position).min();
     let end = clip.iter().map(|n| n.position + piano::shown_len(s, n)).max();
-    if let (Some(a), Some(b)) = (start, end) {
+    if let Some((r0, r1)) = range {
+        let span = r1 - r0;
+        if let Some(a) = start {
+            piano::paste(s, &clip, a + span);
+        }
+        s.piano.range = Some((r0 + span, r1 + span));
+        s.piano.dirty = true;
+    } else if let (Some(a), Some(b)) = (start, end) {
         piano::paste(s, &clip, b.max(a + 1));
         s.piano.dirty = true;
     }

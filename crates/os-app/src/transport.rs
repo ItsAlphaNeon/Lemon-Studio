@@ -81,6 +81,8 @@ pub struct Shared {
     position: AtomicU64,
     /// Playback position in ticks (f64 bits): what every playhead and the time display show. A pattern wraps.
     tick: AtomicU64,
+    /// The tempo the playback plays at (f64 bits; 0 = none yet): tempo automation moves it.
+    tempo: AtomicU64,
     sample_rate: AtomicU32,
     /// An export is running, its progress in 1/1000 of the song, and its outcome once done.
     exporting: AtomicBool,
@@ -140,6 +142,7 @@ impl Shared {
     fn rewind(&self, tick: f64) {
         self.position.store(0, Ordering::Relaxed);
         self.tick.store(tick.to_bits(), Ordering::Relaxed);
+        self.tempo.store(0, Ordering::Relaxed);
         self.peak_l.store(0, Ordering::Relaxed);
         self.peak_r.store(0, Ordering::Relaxed);
         if let Ok(mut v) = self.sounding.lock() {
@@ -481,6 +484,13 @@ impl Transport {
         )
     }
 
+    /// The tempo the running playback plays at, tempo automation included; `None` while stopped or before its first
+    /// tick.
+    pub fn tempo(&self) -> Option<f64> {
+        let t = f64::from_bits(self.shared.tempo.load(Ordering::Relaxed));
+        (self.playing() && t > 0.0).then_some(t)
+    }
+
     /// Notes playing now (pattern or song playback, not previews), as (channel index, key).
     pub fn sounding(&self) -> Vec<(u16, u16)> {
         self.shared.sounding.lock().map(|v| v.clone()).unwrap_or_default()
@@ -685,11 +695,15 @@ impl Feeder {
                 e.take_track_peaks(&mut v);
             }
         }
+        // So does the tempo shown.
+        if frames > 0 && self.ctl.report.load(Ordering::Relaxed) {
+            self.shared.tempo.store(e.tempo().to_bits(), Ordering::Relaxed);
+        }
         // Lit keys run ahead of what is heard by the queue's length (a few milliseconds).
         if frames > 0 && self.ctl.report.load(Ordering::Relaxed) {
             if let Ok(mut v) = self.shared.sounding.lock() {
                 v.clear();
-                if !self.ctl.paused.load(Ordering::Relaxed) {
+                if !self.ctl.paused.load(Ordering::Relaxed) && !e.paused() {
                     v.extend(e.sounding().map(|(c, k)| (c as u16, k)));
                 }
             }
@@ -846,6 +860,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     // Streams that were stopped and finish their fade before they are dropped.
     let mut closing: Vec<(Session, Instant)> = Vec::new();
     let mut reset_pending = false;
+    // The pending reset also silences the hosted effects (Stop).
+    let mut reset_fx_pending = false;
     // An instrument's editor is open: the live stream stays open while nothing plays (`Transport::listen`). A stream
     // that would not open is tried again on the next change of state, not every loop.
     let mut listen = false;
@@ -887,6 +903,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             if let Ok(mut e) = s.engine.lock() {
                 e.release_instruments();
             }
+            // Its effects stop ringing there too: the other stream processes the same instances.
+            s.ctl.paused.store(true, Ordering::Relaxed);
         }
     };
     let retire = |s: Session, closing: &mut Vec<(Session, Instant)>| {
@@ -1072,8 +1090,13 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
             }
             Ok(Cmd::Pause) => {
+                // The engine holds its channels where they are and lets the mixer's effects ring out on this stream.
                 if let Some(s) = &session {
-                    s.ctl.paused.store(true, Ordering::Relaxed);
+                    s.ctl.held.store(true, Ordering::Relaxed);
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.pause();
+                    }
+                    s.feed.wake();
                 }
                 if listen || live.is_some() {
                     release_paused(&session);
@@ -1087,15 +1110,23 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     live = None;
                 }
                 if let Some(s) = &session {
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.resume();
+                    }
+                    s.ctl.held.store(false, Ordering::Relaxed);
                     s.ctl.paused.store(false, Ordering::Relaxed);
+                    s.feed.wake();
                 }
             }
             Ok(Cmd::Stop) => {
+                // Everything fades out and goes; then the instruments and the effects are reset, so no tail rings on
+                // into the next Play (pause is where tails ring out, `Engine::pause`).
                 for s in [session.take(), live.take(), preview.take()].into_iter().flatten() {
                     retire(s, &mut closing);
                 }
                 held = None;
                 reset_pending = true;
+                reset_fx_pending = true;
                 listen_retry = true;
             }
             Ok(Cmd::Close) => {
@@ -1171,7 +1202,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         closing.retain(|(_, since)| since.elapsed() < CLOSE_AFTER);
         if reset_pending && closing.is_empty() {
             reset_pending = false;
-            reset_instruments(&inst);
+            reset_hosts(&inst, std::mem::take(&mut reset_fx_pending));
             if session.is_none() && shared.state.load(Ordering::Acquire) == STOPPED {
                 shared.rewind(0.0);
             }
@@ -1222,8 +1253,10 @@ enum Kind {
 
 /// Controls shared with a stream's callback.
 struct Ctl {
-    /// Fade out and hold the engine (pause, stop).
+    /// Fade out and hold the stream (stop; a pause once another stream processes the same plugins).
     paused: AtomicBool,
+    /// Paused in the engine (`Engine::pause`): the stream runs on, ringing out the effects.
+    held: AtomicBool,
     /// Publish position, meters and sounding notes (the playback stream until it is stopped).
     report: AtomicBool,
 }
@@ -1248,7 +1281,7 @@ struct Session {
 
 impl Session {
     fn paused(&self) -> bool {
-        self.ctl.paused.load(Ordering::Relaxed)
+        self.ctl.paused.load(Ordering::Relaxed) || self.ctl.held.load(Ordering::Relaxed)
     }
 
     /// Opens a stream with the audio settings and starts it at `at` (playback: the position is published at once).
@@ -1282,7 +1315,7 @@ impl Session {
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));
-        let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), report: AtomicBool::new(song) });
+        let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), held: AtomicBool::new(false), report: AtomicBool::new(song) });
         let fixed = match config.buffer_size {
             BufferSize::Fixed(b) => Some(b),
             BufferSize::Default => None,
@@ -1488,7 +1521,7 @@ mod tests {
 
     /// A stream's callback with its queue filled in the callback (no feeder thread).
     fn renderer(e: Engine) -> (Renderer, Arc<Ctl>, Arc<Shared>) {
-        let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), report: AtomicBool::new(true) });
+        let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), held: AtomicBool::new(false), report: AtomicBool::new(true) });
         let shared = Arc::new(Shared::default());
         let queue = Arc::new(Queue::new());
         let mut r = Renderer::new(queue.clone(), ctl.clone(), Arc::new(AtomicBool::new(false)), shared.clone(), 48000);
@@ -1522,6 +1555,26 @@ mod tests {
         // The queue keeps one block and a few ticks, not more.
         let queued = r.queue.queued() / 2;
         assert!(queued <= 2048 + 3 * 300, "{queued} frames queued");
+    }
+
+    /// Playback publishes the tempo it plays at, so the toolbar follows a tempo automation clip (spec: audio/timing.md
+    /// "Tempo that changes").
+    #[test]
+    fn playback_publishes_the_automated_tempo() {
+        use os_model::{AutoPoint, Automation, Channel, ChannelKind, Clip, ClipSource, target};
+        let mut project = crate::app::test_project();
+        project.tempo = Some(130.0);
+        let index = project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+        project.channels.push(Channel { index, kind: ChannelKind::Automation, ..project.channels[0].clone() });
+        // 0.25: (10000 + Round(0.25 * 512000)) / 1000 = 138 BPM.
+        project.automations.push(Automation { channel: index, targets: vec![target::TEMPO], points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![] });
+        project.arrangements = vec![os_model::Arrangement { clips: vec![Clip::new(0, 384 * 4, 0, ClipSource::Channel(index))], ..Default::default() }];
+        let e = Engine::new(&project, &mut SampleLibrary::default(), 48000, PlayMode::Song);
+        let (mut r, _, shared) = renderer(e);
+        r.render(&mut vec![0.0f32; 2 * 4800]);
+        assert_eq!(f64::from_bits(shared.tempo.load(Ordering::Relaxed)), 138.0);
+        shared.rewind(0.0);
+        assert_eq!(shared.tempo.load(Ordering::Relaxed), 0, "none once rewound");
     }
 
     /// Streams that publish no position (live notes, previews) still free the tick records they have played: a live
