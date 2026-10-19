@@ -463,6 +463,9 @@ pub enum Row {
     Ppi,
     /// Project ▸ Data folder's Rename button, folder button and path (`super::data_folder`).
     DataFolder,
+    /// The ASIO Compatible Logo with Steinberg's trademark notice to its right (`asio_logo`), on Windows, whose build
+    /// includes the ASIO SDK: the SDK's usage guidelines ask for it in the About box and where ASIO is switched on.
+    AsioLogo,
 }
 
 /// The two tile lists of Settings > Theme (spec: ui/theme-presets.md "Settings").
@@ -574,8 +577,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     ],
                     st.instead.iter().map(|i| Text(i.clone(), true)).collect(),
                     vec![Text(st.status[0].clone(), true), Text(st.status[1].clone(), true)],
-                    // Below Status, as FL has it; there are ASIO drivers on Windows only.
-                    if cfg!(windows) { vec![Buttons(vec![(SHOW_ASIO_PANEL, 136.0)])] } else { Vec::new() },
+                    // Below Status, as FL has it; there are ASIO drivers on Windows only. The ASIO logo goes with them
+                    // (the SDK's usage guidelines: in every dialog that switches ASIO on).
+                    if cfg!(windows) { vec![pair(Buttons(vec![(SHOW_ASIO_PANEL, 136.0)]), Row::AsioLogo)] } else { Vec::new() },
                     vec![
                         List(vec![("Output devices", 0.0)], listed.map(|d| vec![d]).collect(), 4),
                         Check2("Mix in buffer switch", false, "Triple buffer", false),
@@ -839,16 +843,32 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             vec![g("", vec![List(vec![("", 0.0)], lines.into_iter().map(|l| vec![l]).collect(), 40)])]
         }
         // About also carries what FL's Account tab had (spec: ui/plugin-manager.md §2).
+        // The Windows build includes the ASIO SDK, which is under the GPL version 3 only, and names ASIO, so it carries
+        // the ASIO logo and Steinberg's notice (THIRD-PARTY-NOTICES.txt §9).
         _ => vec![
-            g("", vec![
-                Gap(20.0),
-                Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
-                txt("A digital audio workstation written in Rust."),
-                txt("Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors."),
-                Gap(10.0),
-                txt("Licence: GNU General Public License, version 3 or later."),
-                txt("Fonts: Cuprum (SIL Open Font License). Icons: Tabler Icons (MIT)."),
-            ]),
+            g("", [
+                vec![
+                    Gap(20.0),
+                    Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
+                    txt("A digital audio workstation written in Rust."),
+                    txt("Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors."),
+                    Gap(10.0),
+                ],
+                if cfg!(windows) {
+                    vec![txt("Licence: GNU General Public License, version 3 (the ASIO SDK it includes is version 3 only).")]
+                } else {
+                    vec![txt("Licence: GNU General Public License, version 3 or later.")]
+                },
+                vec![txt("Fonts: Cuprum (SIL Open Font License). Icons: Tabler Icons (MIT).")],
+                if cfg!(windows) {
+                    vec![txt("ASIO® output: the ASIO SDK by Steinberg Media Technologies GmbH (GPL version 3)."), Row::AsioLogo]
+                } else {
+                    Vec::new()
+                },
+            ]
+            .into_iter()
+            .flatten()
+            .collect()),
             g("Licence", vec![
                 Big("Lemon Studio needs no account.".into()),
                 txt("It is free software: you can redistribute it and/or modify it under the terms"),
@@ -882,6 +902,7 @@ fn row_h(r: &Row) -> f32 {
         Row::Edit(f, _) => if f.multiline() { COMMENT_LINE_H * COMMENT_LINES as f32 + 12.0 } else { 28.0 },
         Row::InfoFooter(lines) => (lines.len() as f32 * FOOTER_LINE_H + 8.0).max(36.0),
         Row::DataFolder => super::data_folder::FOLDER_ROW_H,
+        Row::AsioLogo => ASIO_LOGO_H + 4.0,
     }
 }
 
@@ -1584,11 +1605,39 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             paint_row_at(ui, s, group, &Row::Buttons(vec![(RESET_WORK_TIME, 150.0)]), g, by, 36.0, bx - g.x - 12.0);
         }
         Row::DataFolder => super::data_folder::paint_row(ui, s, row, g, x0, y, h),
+        // As Steinberg provides it, with the notice beside it in the page's own font (its usage guidelines §14).
+        Row::AsioLogo => {
+            let Some((iw, ih, px)) = asio_logo() else { return };
+            let r = Rect::new(x0, y + 2.0, (ASIO_LOGO_H * *iw as f32 / *ih as f32).round(), ASIO_LOGO_H);
+            ui.c.image(r, *iw, *ih, px);
+            let small = Font::new(13);
+            let lh = ui.c.line_height(small);
+            let ty = (r.cy() - lh).round();
+            ui.c.text(small, r.right() + 8.0, ty, t.text_dim, "ASIO is a registered trademark of");
+            ui.c.text(small, r.right() + 8.0, ty + lh, t.text_dim, "Steinberg Media Technologies GmbH.");
+        }
     }
 }
 
 /// The Info footer's line pitch.
 const FOOTER_LINE_H: f32 = 16.0;
+
+/// The ASIO Compatible Logo's height (`Row::AsioLogo`).
+const ASIO_LOGO_H: f32 = 40.0;
+
+/// The ASIO Compatible Logo from the ASIO SDK (`asiosdk/logo`, unchanged), decoded once.
+#[cfg(windows)]
+pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
+    static LOGO: std::sync::OnceLock<Option<(usize, usize, Vec<u32>)>> = std::sync::OnceLock::new();
+    LOGO.get_or_init(|| os_ui::Canvas::decode_png(include_bytes!("../../asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png")))
+        .as_ref()
+}
+
+/// Builds without ASIO show no logo.
+#[cfg(not(windows))]
+pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
+    None
+}
 
 /// Lines the Comments box shows, and their pitch.
 const COMMENT_LINES: usize = 24;

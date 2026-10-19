@@ -3714,7 +3714,7 @@ impl App {
                     .collect()
             }
             // The Windows devices, then the ASIO drivers, each under its heading (spec: audio/devices.md, "The Output
-            // device menu").
+            // device menu"). The ASIO heading has the ® its first use needs (the ASIO SDK's usage guidelines §15).
             OUTPUT_DEVICE => {
                 let asio = cfg.asio_driver().is_some();
                 let on = |d: &String, driver: bool| Mark::Radio(asio == driver && cfg.device.as_ref() == Some(d));
@@ -3723,7 +3723,7 @@ impl App {
                     .into_iter()
                     .chain(std::iter::once(PItem::new("Default device", Cmd::Audio(Set::Device(None))).mark(Mark::Radio(cfg.device.is_none()))))
                     .chain(st.devices.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Device(Some(d.clone())))).mark(on(d, false))))
-                    .chain((!st.asio_drivers.is_empty()).then(|| PItem::head("ASIO devices")))
+                    .chain((!st.asio_drivers.is_empty()).then(|| PItem::head("ASIO® devices")))
                     .chain(st.asio_drivers.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Asio(d.clone()))).mark(on(d, true))))
                     .collect()
             }
@@ -7228,7 +7228,9 @@ impl App {
                 self.state.message = crate::plugin_menu::run(self, crate::plugin_menu::PlugCmd::View(v));
             }
             (HELP_MENU, HELP_ABOUT) => {
-                self.state.message = Some(concat!("Lemon Studio ", env!("CARGO_PKG_VERSION"), " (pre-alpha), free software under the GNU GPL v3 or later").into());
+                // The Windows build includes the ASIO SDK, which is under version 3 only (THIRD-PARTY-NOTICES.txt §9).
+                let licence = if cfg!(windows) { "the GNU GPL v3" } else { "the GNU GPL v3 or later" };
+                self.state.message = Some(format!("Lemon Studio {} (pre-alpha), free software under {licence}", env!("CARGO_PKG_VERSION")));
             }
             (ADD_MENU | TOOLS_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Pattern") => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
@@ -16223,6 +16225,19 @@ mod tests {
         assert_eq!(shown(&app), (true, cfg!(windows)), "an ASIO driver, open");
     }
 
+    /// The Windows build names ASIO on the Audio and About pages, so both show the ASIO logo with Steinberg's notice
+    /// (the ASIO SDK's usage guidelines); the other builds have no ASIO and show neither.
+    #[test]
+    fn the_asio_logo_goes_where_asio_is_named() {
+        use crate::views::settings::{page, Row, AUDIO, TABS};
+        let app = App::new(None);
+        let logo = |r: &Row| matches!(r, Row::AsioLogo);
+        let shows = |tab| page(tab, &app.state).iter().flat_map(|g| &g.rows).any(|r| logo(r) || matches!(r, Row::Pair(_, b) if logo(b)));
+        assert_eq!(shows(AUDIO), cfg!(windows), "Audio");
+        assert_eq!(shows(TABS.len() - 1), cfg!(windows), "About");
+        assert_eq!(crate::views::settings::asio_logo().map(|l| (l.0, l.1)), cfg!(windows).then_some((474, 443)), "the logo decodes");
+    }
+
     /// The Audio page with an ASIO driver chosen (the first installed one), and its Output device menu, as pictures,
     /// for looking (not an assertion): `OS_AUDIO_SHOT=<folder>`. Windows, with a driver installed.
     #[test]
@@ -16253,6 +16268,10 @@ mod tests {
         let r = app.hits.iter().find(|h| matches!(h.action, Action::Settings(SAct::Combo(BUFFER_LENGTH, ..)))).map(|h| h.rect).unwrap();
         click(&mut app, &mut c, r);
         c.pixmap.save_png(out.join("03_buffer_length_menu.png")).unwrap();
+        app.state.playlist.popup = None;
+        app.open_settings(crate::views::settings::TABS.len() - 1);
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(out.join("04_about.png")).unwrap();
         AudioCfg::default().apply();
     }
 

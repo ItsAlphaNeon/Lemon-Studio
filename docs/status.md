@@ -173,7 +173,7 @@ Not yet: Align all channel editors, Arrange windows.
 ## 🚧 Audio drivers
 
 - WASAPI (shared mode) on Windows
-- ASIO on Windows, output only: the installed drivers are in Settings > Audio's Output device list; the master plays
+- ASIO® on Windows, output only: the installed drivers are in Settings > Audio's Output device list; the master plays
   to the driver's first two outputs, and Show ASIO panel opens the driver's own settings
 - ALSA (and PipeWire / PulseAudio through it) on Linux
 - Core Audio on macOS
@@ -183,6 +183,10 @@ Not yet: Align all channel editors, Arrange windows.
 - A device that fails (unplugged, or a driver asking to be reset) is opened again; an ASIO driver that does not
   open gives way to the default device
 - Not yet: ASIO inputs and output pairs, JACK
+
+<img alt="ASIO Compatible logo" src="../crates/os-app/asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png" width="96">
+
+ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## 🚧 Platforms
 

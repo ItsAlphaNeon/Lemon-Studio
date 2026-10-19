@@ -84,7 +84,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Exporting audio | 🚧 | Song or pattern to a 32-bit float WAV file; no MP3 or FLAC yet |
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers; no note recording yet |
 | Undo | 🚧 | One history for the whole project, with redo and the browser's History; not yet for mixer faders, plugin parameters or project settings |
-| Audio drivers | 🚧 | WASAPI and ASIO (output) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
+| Audio drivers | 🚧 | WASAPI and ASIO® (output) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
 | Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; Lemon plugin editors in the Lemon design only |
 | Settings | 🚧 | The General, Audio, File, Theme, Project and Info pages work; not yet the MIDI page or the recording settings |
@@ -94,6 +94,10 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Plugin delay compensation | ❌ | |
 
 ✅ usable · 🚧 partial · ❌ not available yet
+
+<img alt="ASIO Compatible logo" src="crates/os-app/asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png" width="96">
+
+ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 <table>
   <tr>
@@ -379,6 +383,8 @@ about the project. Please keep in mind that support is not offered at this stage
 Their copyright notices and licence texts are collected in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which
 goes with every copy of Lemon Studio next to [LICENSE](LICENSE). The notices of the other crates in `Cargo.lock` are
 to be added to it before binaries are published.
+
+ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## License
 
