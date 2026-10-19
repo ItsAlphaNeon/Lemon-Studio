@@ -15,4 +15,4 @@ not download the SDK.
   `dllentry.cpp`, `register.cpp`, `wxdebug.h`), the project files, the PDFs and the logo artwork. `combase.*`,
   `dllentry.cpp` and `wxdebug.h` carry Microsoft's own notice instead of the SDK's license.
 
-ASIO is a trademark of Steinberg Media Technologies GmbH.
+ASIO is a registered trademark of Steinberg Media Technologies GmbH.
