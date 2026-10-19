@@ -58,6 +58,8 @@ pub(crate) struct Opened {
     /// The rates of `audio_cfg::RATES` and the lengths of `audio_cfg::BUFFERS` it takes.
     pub(crate) rates: Vec<u32>,
     pub(crate) sizes: Vec<u32>,
+    /// Its output latency, frames (`ASIOGetLatencies`).
+    pub(crate) latency: Option<u32>,
 }
 
 /// Loads driver `name` and plays `mix` on it: at `rate` when the driver takes it (else its own), at `buffer` frames
@@ -153,7 +155,8 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
     out.driver.start().map_err(|e| e.to_string())?;
     started.store(true, Ordering::Release);
     let buffers = (range.min.max(1) as u32, range.max.max(1) as u32);
-    Ok(Opened { out, rate: now.round() as u32, frames: frames as u32, buffers, channels: channels as u16, rates, sizes })
+    let latency = out.driver.latencies().ok().map(|l| l.output).filter(|&l| l > 0).map(|l| l as u32);
+    Ok(Opened { out, rate: now.round() as u32, frames: frames as u32, buffers, channels: channels as u16, rates, sizes, latency })
 }
 
 /// The lengths of `audio_cfg::BUFFERS` a driver takes: within its range, and a power of two or a whole number of steps

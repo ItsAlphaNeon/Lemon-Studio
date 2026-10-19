@@ -10674,6 +10674,129 @@ mod tests {
         }
     }
 
+    /// How far ahead of an ASIO driver playback renders (spec: audio/devices.md "Render-ahead"): plays a song, muted, at
+    /// each buffer length for a while with an edit every second, and prints the frames queued when the driver asked for
+    /// a block (least, mean, most), the driver's own latency, the longest time between two blocks (a driver that
+    /// stalled), the audio load and the dropouts. Needs the driver installed and free. LEMON_ASIO: the driver
+    /// ("ASIO4ALL v2"); LEMON_ASIO_BUFFERS: the lengths ("64,128,256");
+    /// LEMON_SONG: an .flp to play, or "trio:<n>" for a pattern of n Lemon Trio channels playing chords on every step;
+    /// LEMON_PLUGINS: host the song's plugins the app's last scan found; LEMON_SECONDS: how long at each length (30);
+    /// LEMON_RUNS: how many times each length is played (1).
+    #[test]
+    #[ignore]
+    fn render_ahead_on_asio() {
+        use crate::audio_cfg::AudioCfg;
+        use std::time::{Duration, Instant};
+        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let driver = var("LEMON_ASIO").unwrap_or_else(|| "ASIO4ALL v2".into());
+        let buffers: Vec<u32> = var("LEMON_ASIO_BUFFERS").unwrap_or_else(|| "64,128,256".into()).split(',').filter_map(|b| b.trim().parse().ok()).collect();
+        let seconds: u64 = var("LEMON_SECONDS").and_then(|s| s.parse().ok()).unwrap_or(30);
+        let runs: usize = var("LEMON_RUNS").and_then(|s| s.parse().ok()).unwrap_or(1);
+        let Some(song) = var("LEMON_SONG") else { return eprintln!("LEMON_SONG names no song") };
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::builtins();
+        // LEMON_PLUGINS: the plugins the app's last scan found too (the song's FL plugins, hosted as the app hosts them).
+        if var("LEMON_PLUGINS").is_some() {
+            app.load_plugins();
+        }
+        let run = |app: &mut App, ms: u64| {
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_millis(ms) {
+                app.tick();
+                std::thread::sleep(Duration::from_millis(4));
+            }
+        };
+        if let Some(n) = song.strip_prefix("trio:") {
+            // A heavy pattern instead of a song: `n` Lemon Trio channels, each playing four-note chords on every step,
+            // a beat long.
+            let index = app.plugins.index_of(crate::osc3::LEMON_TRIO).expect("Lemon Trio");
+            let mut notes = Vec::new();
+            for c in 0..n.parse::<u16>().unwrap_or(8) {
+                let row = add_plugin_channel(&mut app.state.project, crate::osc3::LEMON_TRIO);
+                app.plugins.create(row, index).expect("a Lemon Trio instance");
+                app.state.hosted_rows.push(row);
+                let ch = app.state.project.channels[row].index;
+                for i in 0..16 {
+                    for k in [0, 4, 7, 11] {
+                        notes.push(os_model::Note { length: 96, key: 48 + c % 12 + k, ..os_model::Note::step(ch, i * 24) });
+                    }
+                }
+            }
+            app.state.project.patterns[0].notes = notes;
+            app.state.song_mode = false;
+            app.transport.set_instruments(app.plugins.instruments());
+        } else {
+            app.open(song.clone().into());
+        }
+        let t0 = Instant::now();
+        while app.loading() {
+            run(&mut app, 50);
+            assert!(t0.elapsed() < Duration::from_secs(180), "the song loads");
+        }
+        run(&mut app, 500);
+        // Muted: the master track's volume at 0 (the engine renders the same).
+        if let Some(m) = app.state.project.mixer.iter_mut().find(|m| m.index == 0) {
+            m.volume = Some(0.0);
+        }
+        let (tempo, ppq) = (app.state.project.tempo.unwrap_or(140.0), app.state.project.ppq.max(1));
+        eprintln!("{song}: {tempo} BPM, PPQ {ppq}, {} hosted rows", app.state.hosted_rows.len());
+        eprintln!("driver | block | rate | tick | ahead min / mean / max (frames) | mean ms | driver latency | longest gap ms | load | dropouts");
+        for &b in &buffers {
+            for _ in 0..runs {
+                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b) }.apply();
+                app.transport.reopen();
+                let t0 = Instant::now();
+                let info = loop {
+                    run(&mut app, 50);
+                    // The stream before the reopen may still be the one open for a moment: wait for the new length (a
+                    // driver that refuses it runs at its own).
+                    let settled = |i: &crate::device::DeviceInfo| i.fixed == Some(b) || t0.elapsed() > Duration::from_secs(3);
+                    if let Some(i) = app.transport.opened().filter(|i| i.host == crate::device::ASIO && i.name == driver && settled(i)) {
+                        break Some(i);
+                    }
+                    if t0.elapsed() > Duration::from_secs(15) {
+                        eprintln!("{driver} did not open: {:?}", app.transport.take_error());
+                        break None;
+                    }
+                };
+                let Some(info) = info else { continue };
+                app.act(Action::Play);
+                run(&mut app, 2000);
+                eprintln!("{} instruments and {} effects hosted", app.state.hosted_rows.len(), app.plugins.hosted.len() - app.state.hosted_rows.len());
+                let _ = app.transport.take_ahead();
+                let u0 = app.transport.underruns();
+                let (mut min, mut max, mut sum, mut blocks, mut gap, mut load) = (u64::MAX, 0u64, 0.0f64, 0u64, 0u64, 0.0f32);
+                for _ in 0..seconds {
+                    // An edit: the engine is rebuilt and swapped in at the position playing (LEMON_EDITS=0: none).
+                    if var("LEMON_EDITS").is_none_or(|v| v != "0") {
+                        app.transport.update(&app.state.project);
+                    }
+                    run(&mut app, 1000);
+                    load = load.max(app.transport.load());
+                    if let Some(a) = app.transport.take_ahead() {
+                        (min, max, gap) = (min.min(a.min), max.max(a.max), gap.max(a.gap));
+                        sum += a.mean * a.blocks as f64;
+                        blocks += a.blocks;
+                    }
+                }
+                let du = app.transport.underruns() - u0;
+                let rate = f64::from(info.rate);
+                let mean = sum / blocks.max(1) as f64;
+                let tick = rate * 60.0 / (tempo * f64::from(ppq));
+                eprintln!(
+                    "{driver} | {} | {} | {tick:.0} | {min} / {mean:.0} / {max} | {:.2} | {:?} | {:.1} | {load:.2} | {du}",
+                    app.transport.block(),
+                    info.rate,
+                    mean * 1000.0 / rate,
+                    info.latency,
+                    gap as f64 / 1000.0,
+                );
+                app.act(Action::Stop);
+                run(&mut app, 500);
+            }
+        }
+    }
+
     /// An empty project with a Lemon Trio played from the typing keyboard while the UI ticks, then in a playing
     /// pattern: the streams keep up (no run of dropouts) and the voices end.
     #[test]

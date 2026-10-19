@@ -21,8 +21,8 @@
 //!
 //! Every stream renders ahead of its device: a feeder thread renders whole ticks into a lock-free queue and the
 //! device callback only copies from it (spec: audio/implementing.md "Playing live"), so a busy engine (an edit being
-//! swapped in, a heavy tick) never costs a silent block. The queue holds one device block and `AHEAD_TICKS` ticks;
-//! a block the queue could not fill counts as an underrun (`Transport::underruns`).
+//! swapped in, a heavy tick) never costs a silent block. The queue keeps one device block and a margin queued (one
+//! block more, but 3 to 6 ms: `margin`); a block it could not fill counts as an underrun (`Transport::underruns`).
 //!
 //! The streams are not device streams: they all play through one output device (`device::OutputDevice`, which mixes
 //! them), since an ASIO driver serves one stream per program. It opens with the audio settings (`audio_cfg`: device,
@@ -60,8 +60,12 @@ const PAUSED: u8 = 2;
 const FADE_SECONDS: f64 = 0.006;
 /// How long a stopped stream stays alive to finish its fade before it is dropped.
 const CLOSE_AFTER: Duration = Duration::from_millis(40);
-/// Ticks a stream renders ahead of its device on top of one device block: what a live edit or note waits for.
-const AHEAD_TICKS: u64 = 2;
+/// What a stream keeps queued beyond the block its device is about to take (spec: audio/devices.md "Render-ahead"):
+/// one block more, since some drivers ask for two blocks back to back, but at least `MARGIN_MIN` seconds (the feeder
+/// has to wake and render a tick between two blocks) and at most `MARGIN_MAX`. Together with the block and part of a
+/// tick it is what a live edit or note waits for.
+const MARGIN_MIN: f64 = 0.003;
+const MARGIN_MAX: f64 = 0.006;
 /// A stream's queue: samples (interleaved stereo) and ticks it can hold, and the room the feeder leaves for one more
 /// tick (a tick at 10 BPM and 24 PPQ at 192 kHz is 96 000 samples).
 const QUEUE_SAMPLES: usize = 1 << 19;
@@ -103,6 +107,8 @@ pub struct Shared {
     tracks: Mutex<Vec<[f32; 2]>>,
     /// Device blocks the queue could not fill since the program started.
     underruns: AtomicU64,
+    /// How far the playback and live streams render ahead of the device.
+    ahead: AheadStats,
     /// Time spent rendering per second of audio (f32 bits), over the last quarter second of playback.
     load: AtomicU32,
     /// Frames the device asked for in its last block.
@@ -114,6 +120,54 @@ pub struct Shared {
     /// Each running stream's engine voices (its feeder writes them after every fill; a stream that closed drops its
     /// counter). Spec: audio/voices.md §5.
     engine_voices: Mutex<Vec<Weak<AtomicU32>>>,
+}
+
+/// The frames queued when the device asked for a block, since they were last taken (`AheadStats::take`): what the
+/// engine rendered ahead of the device, so what an edit or a note played by hand waits for before the device has it.
+pub struct Ahead {
+    pub min: u64,
+    pub max: u64,
+    pub mean: f64,
+    pub blocks: u64,
+    /// The longest time between two blocks, µs: a driver that stalled (and then catches up) shows here.
+    pub gap: u64,
+}
+
+/// `Ahead`, gathered by the device's callback.
+struct AheadStats {
+    min: AtomicU64,
+    max: AtomicU64,
+    sum: AtomicU64,
+    blocks: AtomicU64,
+    gap: AtomicU64,
+}
+
+impl Default for AheadStats {
+    fn default() -> Self {
+        AheadStats { min: AtomicU64::new(u64::MAX), max: AtomicU64::new(0), sum: AtomicU64::new(0), blocks: AtomicU64::new(0), gap: AtomicU64::new(0) }
+    }
+}
+
+impl AheadStats {
+    /// One block: the frames queued when the device asked, and the time since the block before (`None`: the first).
+    fn record(&self, frames: u64, gap: Option<Duration>) {
+        self.min.fetch_min(frames, Ordering::Relaxed);
+        self.max.fetch_max(frames, Ordering::Relaxed);
+        self.sum.fetch_add(frames, Ordering::Relaxed);
+        self.blocks.fetch_add(1, Ordering::Relaxed);
+        if let Some(g) = gap {
+            self.gap.fetch_max(g.as_micros() as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// What was gathered since the last call (`None`: no block), and starts again.
+    fn take(&self) -> Option<Ahead> {
+        let blocks = self.blocks.swap(0, Ordering::Relaxed);
+        let sum = self.sum.swap(0, Ordering::Relaxed);
+        let (min, max) = (self.min.swap(u64::MAX, Ordering::Relaxed), self.max.swap(0, Ordering::Relaxed));
+        let gap = self.gap.swap(0, Ordering::Relaxed);
+        (blocks > 0).then(|| Ahead { min, max, mean: sum as f64 / blocks as f64, blocks, gap })
+    }
 }
 
 /// Ring of the newest output samples.
@@ -537,6 +591,12 @@ impl Transport {
         self.shared.block.load(Ordering::Relaxed)
     }
 
+    /// How far playback and live notes rendered ahead of the device since the last call (`None`: nothing played).
+    #[cfg(test)]
+    pub(crate) fn take_ahead(&self) -> Option<Ahead> {
+        self.shared.ahead.take()
+    }
+
     /// The output device the playback or live stream last opened.
     pub fn opened(&self) -> Option<DeviceInfo> {
         self.shared.opened.lock().ok()?.clone()
@@ -672,11 +732,19 @@ struct Feeder {
     voices: Arc<AtomicU32>,
 }
 
+/// Frames a stream keeps queued beyond a device block of `block` frames (see `MARGIN_MIN`).
+fn margin(block: u64, rate: u32) -> u64 {
+    let frames = |seconds: f64| (f64::from(rate) * seconds) as u64;
+    block.clamp(frames(MARGIN_MIN), frames(MARGIN_MAX))
+}
+
 impl Feeder {
     /// Renders whole ticks until the queue holds one device block (`block` frames before the device has asked) and
-    /// `AHEAD_TICKS` ticks more, or the engine has played out.
+    /// the margin beyond it, or the engine has played out. It stops at the first tick that gets there, so the device
+    /// finds the block, the margin and less than a tick more queued.
     fn fill(&mut self, block: usize) {
-        let block = 2 * block.max(self.queue.block.load(Ordering::Relaxed)) as u64;
+        let block = block.max(self.queue.block.load(Ordering::Relaxed)) as u64;
+        let want = 2 * (block + margin(block, self.rate));
         let Ok(mut e) = self.engine.lock() else { return };
         // A paused (or stopped) stream renders no more: its fade plays from what is queued, and the engine starts no
         // note that another stream (live notes, an open editor) would then hear ringing at the instruments.
@@ -685,16 +753,14 @@ impl Feeder {
         }
         let t0 = Instant::now();
         let mut frames = 0u64;
-        let mut tick_len = 0u64;
-        while self.queue.queued() < block + AHEAD_TICKS * tick_len && self.queue.has_room() {
+        while self.queue.queued() < want && self.queue.has_room() {
             match e.next_tick() {
                 None => {
                     self.queue.ended.store(true, Ordering::Release);
                     break;
                 }
                 Some((s, tick, frame, held)) => {
-                    tick_len = s.len() as u64;
-                    frames += tick_len / 2;
+                    frames += s.len() as u64 / 2;
                     self.queue.push(s, tick, frame, held);
                     self.queue.ended.store(e.finished(), Ordering::Release);
                 }
@@ -900,6 +966,9 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     // An ASIO driver chosen opens at once (at the start, with new settings), not with the first note: it stays open,
     // and loading it takes a while. When it does not open it is tried again (`ASIO_TRIES`): when, and the tries so far.
     let mut open_asio = Some((Instant::now(), 0));
+    // OS_DEBUG: how far playback renders ahead of the device, every 2 s.
+    let debug = std::env::var_os("OS_DEBUG").is_some();
+    let mut logged = Instant::now();
     let swap = |s: &mut Session, library: &mut SampleLibrary| {
         // Build outside the lock, then swap at the playing position.
         let mut e = Engine::new(&s.project, library, s.rate, s.mode);
@@ -1371,6 +1440,24 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
             }
         }
+        if debug && logged.elapsed() >= Duration::from_secs(2) {
+            logged = Instant::now();
+            if let Some(a) = shared.ahead.take() {
+                let rate = f64::from(shared.sample_rate.load(Ordering::Relaxed).max(1));
+                let latency = shared.opened.lock().ok().and_then(|o| o.as_ref().and_then(|i| i.latency)).map_or(String::new(), |l| format!("; the device adds {l}"));
+                eprintln!(
+                    "[transport] ahead of the device: {}..{} frames, {:.0} on average ({:.1} ms), {} blocks of {} (at most {:.1} ms apart){latency}; {} dropouts",
+                    a.min,
+                    a.max,
+                    a.mean,
+                    a.mean * 1000.0 / rate,
+                    a.blocks,
+                    shared.block.load(Ordering::Relaxed),
+                    a.gap as f64 / 1000.0,
+                    shared.underruns.load(Ordering::Relaxed)
+                );
+            }
+        }
         // A pattern loops inside the engine; a song ends when it has played out and everything has rung out.
         if session.as_ref().is_some_and(|s| s.done.load(Ordering::Relaxed)) {
             if let Some(s) = session.take() {
@@ -1561,6 +1648,8 @@ struct Renderer {
     tap: bool,
     /// Its session let go of it (`Detach`): the device no longer plays it.
     detach: Arc<AtomicBool>,
+    /// When the device last asked for a block (monitored streams, for `Ahead::gap`).
+    asked: Option<Instant>,
 }
 
 impl Renderer {
@@ -1568,7 +1657,7 @@ impl Renderer {
         let step = (1.0 / (f64::from(rate.max(1)) * FADE_SECONDS)) as f32;
         // A stream that starts paused (moved to new audio settings while paused) starts silent.
         let gain = if ctl.paused.load(Ordering::Relaxed) { 0.0 } else { 1.0 };
-        Renderer { queue, wake: None, inline: None, ctl, done, shared, gain, step, tap: false, detach: Arc::new(AtomicBool::new(false)) }
+        Renderer { queue, wake: None, inline: None, ctl, done, shared, gain, step, tap: false, detach: Arc::new(AtomicBool::new(false)), asked: None }
     }
 
     /// Renders one block (see `render_block`) and copies it to the monitor tap, unless the stream is held.
@@ -1598,6 +1687,11 @@ impl Renderer {
         }
         if let Some(f) = &mut self.inline {
             f.fill(0);
+        }
+        if self.tap {
+            let now = Instant::now();
+            self.shared.ahead.record(self.queue.queued() / 2, self.asked.map(|t| now - t));
+            self.asked = Some(now);
         }
         let got = self.queue.pop(stereo);
         let ended = self.queue.ended.load(Ordering::Acquire);
@@ -1724,9 +1818,38 @@ mod tests {
         }
         assert_eq!(&got[..want.len()], &want[..], "same samples as the engine");
         assert_eq!(shared.underruns.load(Ordering::Relaxed), 0);
-        // The queue keeps one block and a few ticks, not more.
+        // The queue keeps the largest block, the margin and less than a tick, not more.
         let queued = r.queue.queued() / 2;
-        assert!(queued <= 2048 + 3 * 300, "{queued} frames queued");
+        assert!(queued < 2048 + margin(2048, 48000) + 300, "{queued} frames queued");
+    }
+
+    /// One more block, but 3 to 6 ms (spec: audio/devices.md "Render-ahead").
+    #[test]
+    fn the_margin_is_a_block_from_3_to_6_ms() {
+        assert_eq!([64, 128, 256, 512, 2048].map(|b| margin(b, 44100)), [132, 132, 256, 264, 264]);
+        assert_eq!([64, 128, 256, 512].map(|b| margin(b, 96000)), [288, 288, 288, 512]);
+    }
+
+    /// When the device asks for a block, the queue holds that block and the margin, and less than one tick more
+    /// (ticks are whole): never less (no dropout while the feeder keeps up), never a few ticks more (live edits and
+    /// notes wait for it).
+    #[test]
+    fn the_device_finds_a_block_and_the_margin_queued() {
+        // 130 BPM at PPQ 96 and 48 kHz: ticks of 230 or 231 frames.
+        let tick = 231;
+        for n in [64usize, 128, 256, 1024] {
+            let (e, _) = looping_engine();
+            let (mut r, _, shared) = renderer(e);
+            r.tap = true;
+            let mut block = vec![0.0f32; 2 * n];
+            for _ in 0..(48000 / n) {
+                r.render(&mut block);
+            }
+            let a = shared.ahead.take().expect("blocks recorded");
+            let least = n as u64 + margin(n as u64, 48000);
+            assert!(a.min >= least && a.max < least + tick, "blocks of {n}: {}..{} frames, want {least}..{}", a.min, a.max, least + tick);
+            assert_eq!(shared.underruns.load(Ordering::Relaxed), 0);
+        }
     }
 
     /// Playback publishes the tempo it plays at, so the toolbar follows a tempo automation clip (spec: audio/timing.md
