@@ -19,26 +19,35 @@ use os_ui::{Canvas, Color, Font, Rect};
 use crate::room;
 
 /// Editor size in logical pixels.
-pub const W: u32 = 640;
-pub const H: u32 = 224;
+pub const W: u32 = 664;
+pub const H: u32 = 248;
 
-/// The room visual's bezel and its picture (the original's 160 px panel shown at 200 px).
-pub const BEZEL: Rect = Rect::span(8.0, 215.0, 8.0, 215.0);
-pub const PICTURE: Rect = Rect::new(12.0, 12.0, 200.0, 200.0);
+/// The room visual's bezel and its picture (the original's 160 px panel shown at 224 px).
+pub const BEZEL: Rect = Rect::span(8.0, 240.0, 8.0, 240.0);
+pub const PICTURE: Rect = Rect::new(12.0, 12.0, 224.0, 224.0);
 
-/// Knob rows (centres) and the cards' span.
-const ROWS: [f32; 3] = [62.0, 122.0, 182.0];
+/// Knob rows (centres; the cards keep 13 px above the first dial and below the last caption) and the cards' span.
+const ROWS: [f32; 3] = [62.0, 126.0, 190.0];
 const CARD_TOP: f32 = 28.0;
-const CARD_BOT: f32 = 216.0;
+const CARD_BOT: f32 = 240.0;
 const HEAD_Y: f32 = 16.0;
+/// A caption's top under its control's centre (every caption of a row on one line).
+const CAPTION_DY: f32 = 26.0;
 
 /// Columns: (left, right, heading).
-const COLUMNS: [(f32, f32, &str); 4] = [(224.0, 296.0, "INPUT"), (302.0, 420.0, "ROOM"), (426.0, 544.0, "DECAY"), (550.0, 632.0, "MIX")];
+const COLUMNS: [(f32, f32, &str); 4] = [(248.0, 322.0, "INPUT"), (328.0, 446.0, "ROOM"), (452.0, 570.0, "DECAY"), (576.0, 656.0, "MIX")];
+/// Two controls side by side sit this far either side of their card's centre.
+const PAIR: f32 = 26.0;
 
-/// The level faders' travel (top = 160, the knob's top; bottom = 0).
+/// The level faders' travel (top = 160, the knob's top; bottom = 0), between the first knob row and the SEP knob.
 pub const FADER_TOP: f32 = 44.0;
-pub const FADER_BOT: f32 = 128.0;
-pub const FADER_X: [f32; 3] = [566.0, 591.0, 616.0];
+pub const FADER_BOT: f32 = 136.0;
+pub const FADER_X: [f32; 3] = [mid(3) - 25.0, mid(3), mid(3) + 25.0];
+
+/// A card's centre.
+const fn mid(i: usize) -> f32 {
+    (COLUMNS[i].0 + COLUMNS[i].1) / 2.0
+}
 
 const RULE: Color = Color::rgb(0x3c3c3c);
 const HEADING: Font = Font::condensed(11, 0).bold();
@@ -132,28 +141,29 @@ pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, look: &
     for (x0, x1, _) in COLUMNS {
         lemon::plug_panel(ui.c, Rect::span(x0, x1, CARD_TOP, CARD_BOT));
     }
+    let (l, r) = (|i: usize| mid(i) - PAIR, |i: usize| mid(i) + PAIR);
     // INPUT
-    switch(&mut ui, "midside", 260.0, ROWS[0], "M/S", "MID/SIDE");
-    knob(&mut ui, "hcut", 260.0, ROWS[1], "H.CUT");
-    knob(&mut ui, "lcut", 260.0, ROWS[2], "L.CUT");
+    switch(&mut ui, "midside", mid(0), ROWS[0], "M/S", "MID/SIDE");
+    knob(&mut ui, "hcut", mid(0), ROWS[1], "H.CUT");
+    knob(&mut ui, "lcut", mid(0), ROWS[2], "L.CUT");
     // ROOM: pre-delay and its tempo switch; size and diffusion with the modulation beside them.
-    knob(&mut ui, "delay", 336.0, ROWS[0], "DELAY");
-    switch(&mut ui, "tempo", 388.0, ROWS[0], "BPM", "TEMPO");
-    knob(&mut ui, "size", 336.0, ROWS[1], "SIZE");
-    knob(&mut ui, "mod", 388.0, ROWS[1], "MOD");
-    knob(&mut ui, "diff", 336.0, ROWS[2], "DIFF");
-    knob(&mut ui, "speed", 388.0, ROWS[2], "SPEED");
+    knob(&mut ui, "delay", l(1), ROWS[0], "DELAY");
+    switch(&mut ui, "tempo", r(1), ROWS[0], "BPM", "TEMPO");
+    knob(&mut ui, "size", l(1), ROWS[1], "SIZE");
+    knob(&mut ui, "mod", r(1), ROWS[1], "MOD");
+    knob(&mut ui, "diff", l(1), ROWS[2], "DIFF");
+    knob(&mut ui, "speed", r(1), ROWS[2], "SPEED");
     // DECAY
-    knob(&mut ui, "bass", 460.0, ROWS[0], "BASS");
-    knob(&mut ui, "dec", 512.0, ROWS[0], "DEC");
-    knob(&mut ui, "cross", 460.0, ROWS[1], "CROSS");
-    knob(&mut ui, "damp", 512.0, ROWS[1], "DAMP");
+    knob(&mut ui, "bass", l(2), ROWS[0], "BASS");
+    knob(&mut ui, "dec", r(2), ROWS[0], "DEC");
+    knob(&mut ui, "cross", l(2), ROWS[1], "CROSS");
+    knob(&mut ui, "damp", r(2), ROWS[1], "DAMP");
     logo(&mut ui);
     // MIX
     for (id, x, cap) in [("dry", FADER_X[0], "DRY"), ("er", FADER_X[1], "ER"), ("wet", FADER_X[2], "WET")] {
         fader(&mut ui, id, x, cap);
     }
-    knob(&mut ui, "sep", 591.0, ROWS[2], "SEP");
+    knob(&mut ui, "sep", mid(3), ROWS[2], "SEP");
     ui.hits
 }
 
@@ -175,7 +185,7 @@ fn knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, caption: &str) {
     let hr = Rect::new(cx - 22.0, cy - 22.0, 44.0, 44.0);
     let st = ui.state(hr, &target);
     lemon::dial(ui.c, cx, cy, 19.0, 2.8, ui.m.norm(id), id == "sep", brand::MAIN, st);
-    inst::caption(ui.c, ui.t, cx, cy + 26.0, caption, false);
+    inst::caption(ui.c, ui.t, cx, cy + CAPTION_DY, caption, false);
     ui.hit(hr, target);
 }
 
@@ -188,7 +198,7 @@ fn switch(ui: &mut Ui, id: &str, cx: f32, cy: f32, label: &str, caption: &str) {
     st.on = ui.m.norm(id) > 0.5;
     let ink = lemon::plug_button(ui.c, r, 6.0, st);
     ui.c.text_center(PILL, r, ink, label);
-    inst::caption(ui.c, ui.t, cx, cy + 26.0, caption, false);
+    inst::caption(ui.c, ui.t, cx, cy + CAPTION_DY, caption, false);
     ui.hit(hr, target);
 }
 
@@ -213,13 +223,15 @@ fn fader(ui: &mut Ui, id: &str, cx: f32, caption: &str) {
     ui.hit(hr, target);
 }
 
-/// The wordmark under the decay knobs (where the original has its logo): the lemon and "LEMON" over a large "REVERB".
+/// The wordmark in the decay card's third row (where the original has its logo): the lemon and "LEMON" over a large
+/// "REVERB", centred between the second row's captions and the card's foot.
 fn logo(ui: &mut Ui) {
     let (big, small) = (Font::condensed(20, 0).bold(), Font::condensed(10, 0).bold());
     let wn = lemon::spaced_width(ui.c, big, "REVERB", 3.0);
-    let x = ((426.0 + 544.0) / 2.0 + wn / 2.0).round();
-    lemon::wordmark(ui.c, x, 166.0, false, "REVERB", big, small);
-    ui.hit(Rect::span(432.0, 538.0, 160.0, 206.0), Target::Logo);
+    let x = (mid(2) + wn / 2.0).round();
+    let top = ROWS[2] - 8.0;
+    lemon::wordmark(ui.c, x, top, false, "REVERB", big, small);
+    ui.hit(Rect::span(COLUMNS[2].0 + 6.0, COLUMNS[2].1 - 6.0, top - 6.0, top + 40.0), Target::Logo);
 }
 
 /// The room visual in its bezel; the hint over its top-left corner.
