@@ -16364,6 +16364,18 @@ mod tests {
         assert_eq!(crate::views::settings::asio_logo().map(|l| (l.0, l.1)), cfg!(windows).then_some((474, 443)), "the logo decodes");
     }
 
+    /// With no ASIO driver installed, the Audio page says to install one (Windows only); with one, it doesn't.
+    #[test]
+    fn no_asio_driver_says_to_install_one() {
+        use crate::views::settings::{page, Row, AUDIO, NO_ASIO_DRIVER};
+        let mut app = App::new(None);
+        let says = |app: &App| page(AUDIO, &app.state).iter().flat_map(|g| &g.rows).any(|r| matches!(r, Row::Text(t, _) if t == NO_ASIO_DRIVER));
+        app.state.settings.asio_drivers = Vec::new();
+        assert_eq!(says(&app), cfg!(windows), "none installed");
+        app.state.settings.asio_drivers = vec!["ASIO4ALL v2".into()];
+        assert!(!says(&app), "one installed");
+    }
+
     /// The Audio page with an ASIO driver chosen (the first installed one), and its Output device menu, as pictures,
     /// for looking (not an assertion): `OS_AUDIO_SHOT=<folder>`. Windows, with a driver installed.
     #[test]
@@ -16399,6 +16411,12 @@ mod tests {
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(out.join("04_about.png")).unwrap();
         AudioCfg::default().apply();
+        // As a PC without an ASIO driver has it.
+        app.open_settings(AUDIO);
+        app.state.settings.asio_drivers.clear();
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(out.join("05_audio_no_asio_driver.png")).unwrap();
     }
 
     /// The header's menus and switches as pictures, for looking (not an assertion): `OS_HEADER_SHOT=<folder>`.

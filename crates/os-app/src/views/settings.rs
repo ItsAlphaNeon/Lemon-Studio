@@ -300,6 +300,9 @@ pub const BUFFER_LENGTH: &str = "Buffer length";
 pub const SHOW_ASIO_PANEL: &str = "Show ASIO panel";
 /// Show ASIO panel's hint while no ASIO driver is open.
 const PANEL_WAITS: &str = "Show ASIO panel: the ASIO driver's own settings, while one is open";
+/// The Audio page's line under Show ASIO panel on Windows while no ASIO driver is installed (the page is filled again
+/// each time Settings opens, so a driver installed meanwhile is listed then).
+pub const NO_ASIO_DRIVER: &str = "No ASIO driver is installed. For lower latency, install one (ASIO4ALL is free), then reopen Settings.";
 
 /// Project ▸ Time settings (spec: ui/settings-choices.md "Project"): the timebase, the "Set as" mode (event 35; the
 /// combo has no label beside it), and the bar (events 17, 18) as a time signature (Numerator / Denominator, FL's
@@ -578,8 +581,14 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     st.instead.iter().map(|i| Text(i.clone(), true)).collect(),
                     vec![Text(st.status[0].clone(), true), Text(st.status[1].clone(), true)],
                     // Below Status, as FL has it; there are ASIO drivers on Windows only. The ASIO logo goes with them
-                    // (the SDK's usage guidelines: in every dialog that switches ASIO on).
-                    if cfg!(windows) { vec![pair(Buttons(vec![(SHOW_ASIO_PANEL, 136.0)]), Row::AsioLogo)] } else { Vec::new() },
+                    // (the SDK's usage guidelines: in every dialog that switches ASIO on). With none installed, a line
+                    // says to install one.
+                    if cfg!(windows) {
+                        let none = st.asio_drivers.is_empty().then(|| Text(NO_ASIO_DRIVER.into(), true));
+                        [pair(Buttons(vec![(SHOW_ASIO_PANEL, 136.0)]), Row::AsioLogo)].into_iter().chain(none).collect()
+                    } else {
+                        Vec::new()
+                    },
                     vec![
                         List(vec![("Output devices", 0.0)], listed.map(|d| vec![d]).collect(), 4),
                         Check2("Mix in buffer switch", false, "Triple buffer", false),
