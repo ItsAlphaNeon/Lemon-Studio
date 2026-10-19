@@ -59,6 +59,7 @@ mod playlist;
 mod plugin_db;
 mod plugin_manager;
 mod plugin_menu;
+mod plugin_rebuild;
 mod plugin_scan;
 #[cfg(plugin_windows)]
 mod plugin_window;
@@ -1564,6 +1565,8 @@ fn main() {
         screenshot(&args);
         return;
     }
+    // Run from source: Lemon Studio's own plugins are rebuilt and installed before the plugin scan looks for them.
+    plugin_rebuild::run();
     let path = args.first().map(std::path::PathBuf::from);
     let mut builder = EventLoop::<()>::with_user_event();
     #[cfg(target_os = "linux")]
