@@ -1532,6 +1532,16 @@ mod tests {
         (r, ctl, shared)
     }
 
+    /// Device tests: waits up to 3 s for `ready`, as a device opening for the first time may take a while. Wait on
+    /// something only a running device does (the position, peaks, the tap): a stream's first block is rendered before
+    /// its device opens, so voices and sounding notes show up early.
+    fn wait_for(mut ready: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !ready() && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// The queue hands out exactly what the engine renders, tick after tick, whatever the device's block size; the
     /// published position is that of the sample being heard.
     #[test]
@@ -1732,8 +1742,8 @@ mod tests {
         project.tempo = Some(130.0);
         let t = Transport::new(None);
         t.play(&project, PlayMode::Pattern(1), 0.0);
-        std::thread::sleep(Duration::from_millis(500));
-        assert!(!t.sounding().is_empty() || t.peaks().0 > 0.0, "playing");
+        wait_for(|| t.seconds() > 0.0 && (!t.sounding().is_empty() || t.peaks().0 > 0.0));
+        assert!(t.seconds() > 0.0 && (!t.sounding().is_empty() || t.peaks().0 > 0.0), "playing");
         project.patterns[0].notes.clear();
         t.update(&project);
         std::thread::sleep(Duration::from_millis(300));
@@ -1756,7 +1766,7 @@ mod tests {
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 384, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
         t.play(&project, PlayMode::Pattern(1), 0.0);
-        std::thread::sleep(Duration::from_millis(250));
+        wait_for(|| t.peaks().0 > 0.01);
         assert!(t.peaks().0 > 0.01, "pluck rings: {:?}", t.peaks());
         let track = project.channels[4].mixer_track;
         project.mixer.iter_mut().find(|m| m.index == track).unwrap().volume = Some(0.0);
@@ -1775,11 +1785,14 @@ mod tests {
         let t = Transport::new(None);
         t.update(&project);
         t.note_on(4, 60, 100);
-        std::thread::sleep(Duration::from_millis(300));
+        // The live stream feeds the monitor tap once it plays.
+        let mut b = vec![0.0f32; 64];
+        wait_for(|| t.tap(&mut b) > 0);
         t.note_off(4, 60);
         assert_eq!(t.take_error(), None, "live stream opened");
+        assert!(t.tap(&mut b) > 0, "live stream plays");
         t.play(&project, PlayMode::Pattern(1), 0.0);
-        std::thread::sleep(Duration::from_millis(300));
+        wait_for(|| t.seconds() > 0.0);
         t.note_on(4, 67, 100);
         std::thread::sleep(Duration::from_millis(100));
         assert!(t.sounding().contains(&(4, 67)), "held while playing: {:?}", t.sounding());
@@ -1798,11 +1811,7 @@ mod tests {
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
         t.play(&project, PlayMode::Pattern(1), 0.0);
-        // A device opening for the first time may take a while.
-        let start = Instant::now();
-        while t.seconds() < 0.2 && start.elapsed() < Duration::from_secs(3) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        wait_for(|| t.seconds() >= 0.2);
         assert!(t.seconds() >= 0.2, "playing: {}", t.seconds());
         t.pause();
         std::thread::sleep(Duration::from_millis(100));
@@ -1833,11 +1842,12 @@ mod tests {
         let start = f64::from(4 * bar);
         let t = Transport::new(None);
         t.play(&project, PlayMode::Pattern(1), start);
+        // Every position published until it has played on a little (the device may take a while to open).
         let t0 = Instant::now();
-        let mut seen = Vec::new();
-        while t0.elapsed() < Duration::from_millis(300) {
-            seen.push(t.tick());
+        let mut seen = vec![t.tick()];
+        while seen.last().is_some_and(|&k| k <= start + 10.0) && t0.elapsed() < Duration::from_secs(3) {
             std::thread::sleep(Duration::from_millis(1));
+            seen.push(t.tick());
         }
         assert!(seen.iter().all(|&k| k >= start), "heard before the start: {:?}", seen.iter().find(|&&k| k < start));
         assert!(seen.last().is_some_and(|&k| k > start + 10.0), "playing on");
@@ -1876,7 +1886,7 @@ mod tests {
         project.patterns = vec![os_model::Pattern { number: 1, ..Default::default() }];
         let t = Transport::new(None);
         t.play(&project, PlayMode::Pattern(1), 0.0);
-        std::thread::sleep(Duration::from_millis(300));
+        wait_for(|| t.seconds() > 0.0);
         assert_eq!((t.take_error(), t.streams()), (None, 1), "playing");
         t.pause();
         t.close_device();
@@ -1915,8 +1925,8 @@ mod tests {
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
         t.play(&project, PlayMode::Pattern(1), 0.0);
-        std::thread::sleep(Duration::from_millis(300));
         let mut b = vec![0.0f32; 2048];
+        wait_for(|| t.tap(&mut b) > 0 && b.iter().any(|v| v.abs() > 0.01));
         let n1 = t.tap(&mut b);
         assert!(n1 > 0 && b.iter().any(|v| v.abs() > 0.01), "tap has audio");
         assert!(t.sample_rate() > 0);
@@ -1962,7 +1972,7 @@ mod tests {
         let t = Transport::new(None);
         t.set_instruments(vec![(0, inst.clone())]);
         t.play(&project, PlayMode::Pattern(1), 0.0);
-        std::thread::sleep(Duration::from_millis(400));
+        wait_for(|| t.peaks().0 > 0.05);
         assert!(t.peaks().0 > 0.05, "the instrument is heard: {:?}", t.peaks());
         t.stop();
         std::thread::sleep(Duration::from_millis(200));
@@ -1988,12 +1998,7 @@ mod tests {
         let t = Transport::new(None);
         t.set_instruments(vec![(0, pl.hosted[&0].plugin.clone() as SharedInstrument)]);
         t.play(&project, PlayMode::Pattern(1), 0.0);
-        // A device opening for the first time may take a while (the first block is rendered before it opens, so the
-        // voices alone do not say it plays).
-        let start = Instant::now();
-        while (t.seconds() == 0.0 || pl.voices() != 2 || t.engine_voices() == 0) && start.elapsed() < Duration::from_secs(3) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        wait_for(|| t.seconds() > 0.0 && pl.voices() == 2 && t.engine_voices() > 0);
         assert!(t.seconds() > 0.0, "playing");
         assert_eq!(pl.voices(), 2, "the synth's chord");
         assert!(t.engine_voices() >= 1, "the engine's own voice");
@@ -2056,7 +2061,7 @@ mod tests {
             t.set_effects(vec![(0, 0, Arc::new(Mutex::new(Counted(fx.clone()))) as SharedEffect)]);
             let resets = |n: u32| if on { n } else { 0 };
             t.play(&project, PlayMode::Pattern(1), 0.0);
-            std::thread::sleep(Duration::from_millis(300));
+            wait_for(|| t.seconds() > 0.0);
             assert!(t.playing() && t.take_error().is_none(), "playing");
             assert_eq!(fx.load(Ordering::Relaxed), resets(1), "Play, setting {on}");
             t.stop();
