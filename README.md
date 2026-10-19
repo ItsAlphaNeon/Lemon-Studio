@@ -133,8 +133,9 @@ Windows 10 or 11, x64.
 - The Microsoft C++ build tools that Rust uses (rustup offers them when it installs; otherwise the Visual Studio Build
   Tools with the "Desktop development with C++" workload). They include the Windows SDK, which embeds the application
   icon in the program; without the SDK the build still succeeds, without the icon.
-- LLVM, whose libclang generates the time stretcher's bindings at build time: `winget install LLVM.LLVM`. If
-  `libclang.dll` is not in LLVM's default folder, set `LIBCLANG_PATH` to the folder that holds it.
+- LLVM, whose libclang generates the time stretcher's and the ASIO SDK's bindings at build time:
+  `winget install LLVM.LLVM`. If `libclang.dll` is not in LLVM's default folder, set `LIBCLANG_PATH` to the folder
+  that holds it.
 
 **Build and run**
 
