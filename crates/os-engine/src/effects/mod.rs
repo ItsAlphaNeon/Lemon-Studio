@@ -6,6 +6,7 @@
 //! plugin state.
 
 mod biquad;
+pub mod dynamics;
 pub mod eq;
 pub mod limiter;
 pub mod reverb;
