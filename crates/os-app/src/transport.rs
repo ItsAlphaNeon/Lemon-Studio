@@ -40,7 +40,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use crate::device::{OutputDevice, Source};
+use crate::device::{DeviceInfo, OutputDevice, Source};
 use os_engine::{Engine, PlayMode, SampleLibrary, SharedEffect, SharedInstrument};
 use os_model::Project;
 
@@ -107,8 +107,8 @@ pub struct Shared {
     load: AtomicU32,
     /// Frames the device asked for in its last block.
     block: AtomicU32,
-    /// The output the playback or live stream opened: device name, rate, buffer length asked for.
-    opened: Mutex<Option<(String, u32, Option<u32>)>>,
+    /// The output device the playback or live stream opened.
+    opened: Mutex<Option<DeviceInfo>>,
     /// An instrument's editor is open (`Transport::listen`).
     listening: AtomicBool,
     /// Each running stream's engine voices (its feeder writes them after every fill; a stream that closed drops its
@@ -251,6 +251,7 @@ impl Transport {
                 let latest = latest.clone();
                 let inst = instruments.clone();
                 move || {
+                    crate::device::init_thread();
                     // The channels' Lemon Sampler instances stretch for themselves (spec: audio/time-stretch.md).
                     let mut library = SampleLibrary::new(factory);
                     library.resample_stretches = true;
@@ -286,9 +287,10 @@ impl Transport {
         }).unwrap_or_default()
     }
 
-    /// The sample rate streams open at (the audio settings' device and rate; what hosted plugins are activated at).
+    /// The sample rate streams open at (the audio settings' device and rate; what hosted plugins are activated at):
+    /// the open device's, which the audio thread publishes (`device::rate`).
     pub fn device_rate() -> Option<u32> {
-        crate::audio_cfg::rate()
+        crate::device::rate()
     }
 
     /// The audio settings changed (`audio_cfg`): playing or paused playback goes on from the position heard on a
@@ -527,8 +529,8 @@ impl Transport {
         self.shared.block.load(Ordering::Relaxed)
     }
 
-    /// The output the playback or live stream last opened: device name, sample rate, buffer length asked for.
-    pub fn opened(&self) -> Option<(String, u32, Option<u32>)> {
+    /// The output device the playback or live stream last opened.
+    pub fn opened(&self) -> Option<DeviceInfo> {
         self.shared.opened.lock().ok()?.clone()
     }
 
@@ -927,6 +929,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         closing.push((s, Instant::now()));
     };
     loop {
+        crate::device::pump();
         match rx.recv_timeout(Duration::from_millis(10)) {
             // The output is closed by Auto close: previews and live notes find no stream and open none.
             // So is a device that failed, until it opens again.
@@ -1259,7 +1262,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     }
                 }
                 if !over && now >= l.next {
-                    match device.open().map(|o| o.name.clone()) {
+                    match device.open().map(|o| o.info.name.clone()) {
                         Ok(name) => {
                             // Another device (the system's default, `audio_cfg::output`): say so.
                             if name != l.name {
@@ -1425,7 +1428,7 @@ impl Session {
     fn start(project: &Project, mode: PlayMode, kind: Kind, generation: u64, library: &mut SampleLibrary, shared: Arc<Shared>, inst: &Instruments, at: At, device: &mut OutputDevice) -> Result<Session, String> {
         let song = kind == Kind::Song;
         let out = device.open()?;
-        let (rate, fixed, name) = (out.rate, out.fixed, out.name.clone());
+        let (rate, fixed, info) = (out.info.rate, out.info.fixed, out.info.clone());
         let mut e = Engine::new(project, library, rate, mode);
         // Playback loops: a pattern on its bar line, the song at its end (back to the start).
         e.set_looping(song);
@@ -1454,7 +1457,7 @@ impl Session {
         if kind != Kind::Preview {
             shared.sample_rate.store(rate, Ordering::Relaxed);
             if let Ok(mut o) = shared.opened.lock() {
-                *o = Some((name, rate, fixed));
+                *o = Some(info);
             }
         }
         // The queue gets a first block before the stream starts; then the feeder keeps it filled.
@@ -1892,9 +1895,13 @@ mod tests {
         project.patterns = vec![os_model::Pattern { number: 1, notes: (0..8).map(|i| os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, i * 48) }).collect(), ..Default::default() }];
         let t = Transport::new(None);
         t.play(&project, PlayMode::Pattern(1), 0.0);
-        std::thread::sleep(Duration::from_millis(400));
+        // A device opening for the first time may take a while.
+        let start = Instant::now();
+        while t.seconds() < 0.2 && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let before = t.seconds();
-        assert!(before > 0.2, "playing: {before}");
+        assert!(before >= 0.2, "playing: {before}");
         t.fail_device();
         std::thread::sleep(Duration::from_millis(400));
         assert!(t.playing() && !t.paused(), "still playing");
@@ -1943,7 +1950,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert!(t.playing() && !t.paused());
         assert!(t.tick() > before, "went on from {before}: {}", t.tick());
-        assert_eq!(t.opened().map(|o| o.2), Some(Some(2048)));
+        assert_eq!(t.opened().map(|o| o.fixed), Some(Some(2048)));
         // Paused: the new stream holds the same position, silent.
         t.pause();
         std::thread::sleep(Duration::from_millis(100));
@@ -1953,7 +1960,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert!(t.paused() && (t.tick() - held).abs() < 1.0, "held at {held}: {}", t.tick());
         assert_eq!(t.peaks(), (0.0, 0.0), "silent");
-        assert_eq!(t.opened().map(|o| o.2), Some(None));
+        assert_eq!(t.opened().map(|o| o.fixed), Some(None));
         t.resume();
         std::thread::sleep(Duration::from_millis(200));
         assert!(t.tick() > held, "resumed");

@@ -1161,6 +1161,8 @@ pub struct App {
     loading: Option<crate::loading::Loading>,
     /// A WAV export is rendering (FILE > Export): its file name and progress (0..1); the same panel shows, input waits.
     export: Option<(String, f32)>,
+    /// `device::opens` when the hosted plugins last followed the output device's rate (`follow_device`).
+    device_opens: u64,
     /// The project and tempo as last opened, saved or created: anything else has unsaved changes.
     pub(crate) saved: (Project, f64),
     /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
@@ -1327,6 +1329,7 @@ impl App {
             native_failed: Vec::new(),
             loading: None,
             export: None,
+            device_opens: 0,
             saved: (Project::default(), 0.0),
             backup: Default::default(),
         };
@@ -3030,6 +3033,20 @@ impl App {
     /// General ▸ Miscellaneous checks that follow a change, on every tick and before a frame: "Select first channel with
     /// notes when the pattern changes" (`App::pattern_tick`), "Auto zoom in piano roll" (`piano::open_tick`). Also the
     /// theme's rule for new clips' channel colours, which the code making them reads from the state.
+    /// The output device opened (again, or another one: a fallback, a driver set to another rate): hosted plugins move
+    /// to its rate.
+    fn follow_device(&mut self) {
+        let opens = crate::device::opens();
+        if opens == self.device_opens {
+            return;
+        }
+        self.device_opens = opens;
+        if let Some(rate) = crate::device::last().map(|i| i.rate) {
+            self.plugins.set_rate(rate);
+            self.state.settings.rate = Some(rate);
+        }
+    }
+
     fn follow_settings(&mut self) {
         self.pattern_tick();
         if crate::piano::open_tick(&mut self.state) {
@@ -3082,6 +3099,7 @@ impl App {
             self.state.message = Some(format!("Audio: {e}"));
             self.invalidate();
         }
+        self.follow_device();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
         let now = std::time::Instant::now();
@@ -3606,24 +3624,24 @@ impl App {
         };
         st.devices = devices;
         st.audio = cfg;
-        st.rate = crate::audio_cfg::rate();
+        st.rate = Transport::device_rate();
         self.audio_status();
     }
 
     /// The Audio page's status lines from the stream that is open; returns whether they changed.
     fn audio_status(&mut self) -> bool {
         let tp = &self.transport;
-        let host = cpal::default_host().id().name();
         let first = match tp.opened() {
-            Some((name, rate, buffer)) => {
+            Some(o) => {
+                let rate = o.rate;
                 let block = match tp.block() {
                     0 => String::new(),
                     b => format!(", blocks of {}", views::settings::buffer_text(b, rate)),
                 };
-                let buffer = buffer.map_or(String::new(), |b| format!(", buffer {}", views::settings::buffer_text(b, rate)));
-                format!("Status: {name} open at {rate} Hz{block}{buffer} ({host})")
+                let buffer = o.fixed.map_or(String::new(), |b| format!(", buffer {}", views::settings::buffer_text(b, rate)));
+                format!("Status: {} open at {rate} Hz{block}{buffer} ({})", o.name, o.host)
             }
-            None => format!("Status: opens with the first note or Play ({host})"),
+            None => format!("Status: opens with the first note or Play ({})", cpal::default_host().id().name()),
         };
         let second = match tp.underruns() {
             0 => "No dropouts so far.".to_string(),
@@ -3703,7 +3721,7 @@ impl App {
     pub fn set_audio(&mut self, s: crate::audio_cfg::Set) {
         let cfg = crate::audio_cfg::AudioCfg::current().with(s);
         cfg.apply();
-        if let Some(rate) = crate::audio_cfg::rate() {
+        if let Some(rate) = Transport::device_rate() {
             self.plugins.set_rate(rate);
         }
         self.transport.reopen();

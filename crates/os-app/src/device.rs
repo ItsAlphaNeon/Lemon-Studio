@@ -13,6 +13,9 @@
 //! closes again once nothing plays (`close_idle`), as the streams did when each sound had its own: an open stream keeps
 //! the computer from sleeping. A stream that failed (the device went away, a driver asked to be reset) reports it
 //! (`failure`) and is opened anew the next time it is needed.
+//!
+//! What opened is published (`last`, `rate`), so the settings page and the hosted plugins never have to ask the device
+//! themselves: asking an ASIO driver means loading it, and only the thread that drives the device may.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -91,17 +94,76 @@ impl Mix {
     }
 }
 
+/// What a device opened as (`Transport::opened`, `last`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// The audio system it is on, cpal's name for it ("WASAPI", "ASIO", "ALSA", ...).
+    pub host: &'static str,
+    /// The device's name as the settings show it.
+    pub name: String,
+    pub rate: u32,
+    /// The buffer length asked for (`None`: the device's own).
+    pub fixed: Option<u32>,
+    /// The buffer lengths the device says it takes, frames (`None`: it does not say).
+    pub buffers: Option<(u32, u32)>,
+    /// Output channels open (the master plays on the first two).
+    pub channels: u16,
+}
+
+/// The device last opened and the settings it opened for (`rate`), and how many times one opened (`opens`).
+static LAST: Mutex<Option<(AudioCfg, DeviceInfo)>> = Mutex::new(None);
+static OPENS: AtomicU64 = AtomicU64::new(0);
+
+/// The device that opened last (it may have closed since).
+pub fn last() -> Option<DeviceInfo> {
+    LAST.lock().ok()?.as_ref().map(|(_, i)| i.clone())
+}
+
+/// Counts the devices opened: a change means `last` is another (or the same opened again).
+pub fn opens() -> u64 {
+    OPENS.load(Ordering::Acquire)
+}
+
+/// The sample rate the device plays at with the audio settings in use: the rate it last opened at with them, else what
+/// the settings' device says it would open at (`audio_cfg::rate`).
+pub fn rate() -> Option<u32> {
+    let cfg = AudioCfg::current();
+    let opened = LAST.lock().ok().and_then(|l| l.as_ref().filter(|(c, _)| *c == cfg).map(|(_, i)| i.rate));
+    opened.or_else(audio_cfg::rate)
+}
+
+/// Makes the calling thread one that can drive the device. Windows: a COM single-threaded apartment, which ASIO
+/// drivers (COM objects) are made in and called from; cpal asks the same of the threads that open its streams.
+pub(crate) fn init_thread() {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+    }
+}
+
+/// Handles the window messages waiting for the calling thread. Windows: an ASIO driver may make windows on the thread
+/// that loaded it (its control panel, a hidden one it keeps time with), which only work while that thread takes its
+/// messages.
+pub(crate) fn pump() {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
+        let mut msg: MSG = std::mem::zeroed();
+        while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
 /// The open stream and what it was opened with.
 pub(crate) struct Open {
     /// Dropped first: the callback (and the sources in it) stop before the queues go.
     _stream: cpal::Stream,
     inbox: Arc<Queue>,
     outbox: Arc<Queue>,
-    /// The device's name as the settings show it.
-    pub(crate) name: String,
-    pub(crate) rate: u32,
-    /// The buffer length asked for (`None`: the device's own).
-    pub(crate) fixed: Option<u32>,
+    pub(crate) info: DeviceInfo,
     /// The stream reported an error it does not recover from (the device went away), and what it said.
     failed: Arc<AtomicBool>,
     fault: Arc<Mutex<Option<String>>>,
@@ -122,7 +184,13 @@ impl OutputDevice {
             self.open = None;
         }
         if self.open.is_none() {
-            self.open = Some(open(&AudioCfg::current(), &self.xruns)?);
+            let cfg = AudioCfg::current();
+            let o = open(&cfg, &self.xruns)?;
+            if let Ok(mut l) = LAST.lock() {
+                *l = Some((cfg, o.info.clone()));
+            }
+            OPENS.fetch_add(1, Ordering::AcqRel);
+            self.open = Some(o);
         }
         Ok(self.open.as_ref().expect("opened"))
     }
@@ -158,7 +226,7 @@ impl OutputDevice {
     pub(crate) fn failure(&self) -> Option<(String, String)> {
         let o = self.open.as_ref().filter(|o| o.failed.load(Ordering::Acquire))?;
         let why = o.fault.lock().ok().and_then(|f| f.clone()).unwrap_or_else(|| "it stopped".into());
-        Some((o.name.clone(), why))
+        Some((o.info.name.clone(), why))
     }
 
     /// The device's own dropouts since the last call.
@@ -178,11 +246,12 @@ impl OutputDevice {
 fn open(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
     let out = audio_cfg::output(cfg)?;
     let (device, format, mut config) = (out.device, out.format, out.config);
+    let (host, buffers) = (out.host, out.buffers);
     let inbox = Arc::new(Queue::new(MAX_SOURCES));
     let outbox = Arc::new(Queue::new(MAX_SOURCES));
     let errors = Errors { failed: Arc::new(AtomicBool::new(false)), fault: Arc::new(Mutex::new(None)), xruns: xruns.clone() };
     let mix = || Mix::new(inbox.clone(), outbox.clone());
-    let fixed = match config.buffer_size {
+    let mut fixed = match config.buffer_size {
         BufferSize::Fixed(b) => Some(b),
         BufferSize::Default => None,
     };
@@ -190,11 +259,13 @@ fn open(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
     if stream.is_err() && fixed.is_some() {
         // A buffer length the device refuses: its own.
         config.buffer_size = BufferSize::Default;
+        fixed = None;
         stream = build_any(&device, format, &config, mix(), &errors);
     }
     let stream = stream?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok(Open { _stream: stream, inbox, outbox, name: out.name, rate: config.sample_rate, fixed, failed: errors.failed, fault: errors.fault })
+    let info = DeviceInfo { host, name: out.name, rate: config.sample_rate, fixed, buffers, channels: config.channels };
+    Ok(Open { _stream: stream, inbox, outbox, info, failed: errors.failed, fault: errors.fault })
 }
 
 /// Where a stream's errors go (its error callback, which runs off the audio callback).

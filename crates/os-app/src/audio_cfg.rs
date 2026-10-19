@@ -136,10 +136,14 @@ pub fn devices() -> (Vec<String>, Option<String>) {
 
 /// What a stream opens.
 pub struct Output {
+    /// The audio system the device is on (cpal's name for it).
+    pub host: &'static str,
     pub device: cpal::Device,
     pub name: String,
     pub format: SampleFormat,
     pub config: StreamConfig,
+    /// The buffer lengths the device says it takes, frames.
+    pub buffers: Option<(u32, u32)>,
 }
 
 /// The output for `cfg`: its device (else the system default), its rate when the device offers it (else the
@@ -165,6 +169,10 @@ pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
     };
     let format = supported.sample_format();
     let range = supported.buffer_size().clone();
+    let buffers = match range {
+        SupportedBufferSize::Range { min, max } => Some((min, max)),
+        SupportedBufferSize::Unknown => None,
+    };
     let mut config: StreamConfig = supported.into();
     if let Some(b) = cfg.buffer {
         let fits = match range {
@@ -176,10 +184,11 @@ pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
             config.buffer_size = BufferSize::Fixed(b);
         }
     }
-    Ok(Output { name: device_name(&device), device, format, config })
+    Ok(Output { host: host.id().name(), name: device_name(&device), device, format, config, buffers })
 }
 
-/// The sample rate streams open at now (what hosted plugins are activated at).
+/// The sample rate the settings' device would open at now, asking the device (`device::rate` knows it once the device
+/// opened).
 pub fn rate() -> Option<u32> {
     output(&AudioCfg::current()).ok().map(|o| o.config.sample_rate)
 }
