@@ -120,6 +120,14 @@ git clone https://github.com/ItsAlphaNeon/Lemon-Studio.git
 cd Lemon-Studio
 ```
 
+`cargo run -p os-app --release` builds and runs Lemon Studio. Before Lemon Studio starts, it also rebuilds Lemon
+Studio's own plugins (Lemon Sampler, Lemon Trio, Lemon Parametric EQ, Lemon Limiter and Lemon Reverb) and installs the
+ones that changed as VST3 and CLAP plugins, in the folders where Lemon Studio and other DAWs find them. A plugin that is
+new or updated in the repository shows up at the next run. The first run builds every plugin, which takes a few minutes
+more; later runs rebuild only what changed. Set `OPENSTUDIO_NO_PLUGIN_BUILD=1` to skip the plugin build. A Lemon Studio
+installed as below builds nothing: after pulling changes, either run the command above once, or build and install only
+the plugins with `cargo run -p bundle-plugins -- --install`.
+
 ### Windows
 
 Windows 10 or 11, x64.
@@ -148,8 +156,9 @@ $link.TargetPath = "$env:USERPROFILE\.cargo\bin\lemonstudio.exe"
 $link.Save()
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
-VST3 and CLAP plugins and installs them in `%LOCALAPPDATA%\Programs\Common\VST3` and `...\CLAP`, where DAWs find them.
+**Plugins:** `cargo run -p os-app --release` installs Lemon Studio's plugins in `%LOCALAPPDATA%\Programs\Common\VST3`
+and `...\CLAP`, where DAWs find them. To build and install them without starting Lemon Studio, run
+`cargo run -p bundle-plugins -- --install`.
 
 **Notes**
 
@@ -194,8 +203,8 @@ install -Dm644 crates/os-app/assets/lemonstudio.png ~/.local/share/icons/hicolor
 install -Dm644 crates/os-app/assets/lemonstudio.desktop ~/.local/share/applications/lemonstudio.desktop
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
-VST3 and CLAP plugins and installs them in `~/.vst3` and `~/.clap`.
+**Plugins:** `cargo run -p os-app --release` installs Lemon Studio's plugins in `~/.vst3` and `~/.clap`. To build and
+install them without starting Lemon Studio, run `cargo run -p bundle-plugins -- --install`.
 
 **Notes**
 
@@ -241,9 +250,9 @@ Finder opens `.flp` projects with it. Without `--install` the app is only writte
 cargo run -p bundle-app -- --install
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
-VST3 and CLAP plugin bundles, signed ad hoc so that Apple silicon loads them, and installs them in
-`~/Library/Audio/Plug-Ins/VST3` and `.../CLAP`.
+**Plugins:** `cargo run -p os-app --release` installs Lemon Studio's plugins as bundles, signed ad hoc so that Apple
+silicon loads them, in `~/Library/Audio/Plug-Ins/VST3` and `.../CLAP`. To build and install them without starting Lemon
+Studio, run `cargo run -p bundle-plugins -- --install`.
 
 **Notes**
 
@@ -280,8 +289,9 @@ Ctrl.
 
 Lemon Trio and Lemon Parametric EQ were called Lemon 3x Osc and Lemon Parametric EQ 2 before, and earlier all three
 plugins were called Open Sampler, Open 3x Osc and Open Parametric EQ 2. They keep their plugin IDs, so sessions saved
-with the old names still open with the new plugins. `bundle-plugins --install` removes bundles it installed under the
-old names; delete any others you copied yourself, or DAWs will list each plugin twice.
+with the old names still open with the new plugins. Installing the plugins (by the run from source or
+`bundle-plugins --install`) removes bundles installed under the old names; delete any others you copied yourself, or
+DAWs will list each plugin twice.
 
 ### Tests
 
@@ -302,7 +312,7 @@ for each of its copyright holders, its SPDX licence identifier and the project's
 | `flp-dump` | Print a project file's event stream and verify that it round-trips |
 | `os-render` | Render a project or pattern offline to a WAV file |
 | `os-play` | Play a project through the default audio output |
-| `bundle-plugins` | Build Lemon Studio's own plugins as VST3 and CLAP bundles, and optionally install them |
+| `bundle-plugins` | Build Lemon Studio's own plugins as VST3 and CLAP bundles, and optionally install them (`cargo run -p os-app --release` runs it with `--install`) |
 | `bundle-app` | Build Lemon Studio as a macOS app, and optionally install it |
 
 ## Architecture
@@ -328,6 +338,8 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`lemon-sampler`](plugins/lemon-sampler) | Lemon Sampler instrument (VST3 + CLAP) |
 | [`lemon-3x-osc`](plugins/lemon-3x-osc) | Lemon Trio instrument (VST3 + CLAP) |
 | [`lemon-parametric-eq-2`](plugins/lemon-parametric-eq-2) | Lemon Parametric EQ effect (VST3 + CLAP) |
+| [`lemon-limiter`](plugins/lemon-limiter) | Lemon Limiter effect (VST3 + CLAP) |
+| [`lemon-reverb`](plugins/lemon-reverb) | Lemon Reverb effect (VST3 + CLAP) |
 
 ## Roadmap
 
