@@ -63,8 +63,6 @@ young, so read the warning below before trying it on real work.
 >   are refused with a dialog that explains how to re-save them; support for them is on the roadmap.
 > - **Project-file support is at a very early stage.** Do not overwrite your original `.flp` projects
 >   with files saved by Lemon Studio until this support is declared stable. Work on copies and keep backups.
-> - **Support is not available yet**, and issue reports will not be tracked until a later stage of
->   development.
 
 ## Capabilities
 
