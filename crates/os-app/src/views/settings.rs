@@ -166,8 +166,12 @@ pub struct SettingsUi {
     /// Audio page: the audio settings, the rate streams open at, and the status lines (kept up to date while shown).
     pub audio: crate::audio_cfg::AudioCfg,
     pub rate: Option<u32>,
-    /// The open ASIO driver's buffer length.
-    pub asio_buffer: Option<u32>,
+    /// The chosen ASIO driver as it last opened in this session (its rate and buffer length, the rates and lengths it
+    /// takes), whether an ASIO driver is open now (Show ASIO panel works), and the device playing in place of the
+    /// driver chosen (`DeviceInfo::instead`).
+    pub driver: Option<crate::device::DeviceInfo>,
+    pub asio_open: bool,
+    pub instead: Option<String>,
     pub status: [String; 2],
     /// Theme presets (name, `.flstheme` text): built-ins (spec ui/theme-presets.md), then the user's theme folder.
     pub themes: Vec<(String, String)>,
@@ -294,6 +298,8 @@ pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
 /// With an ASIO driver: its own settings window, where its buffer length is set.
 pub const SHOW_ASIO_PANEL: &str = "Show ASIO panel";
+/// Show ASIO panel's hint while no ASIO driver is open.
+const PANEL_WAITS: &str = "Show ASIO panel: the ASIO driver's own settings, while one is open";
 
 /// Project ▸ Time settings (spec: ui/settings-choices.md "Project"): the timebase, the "Set as" mode (event 35; the
 /// combo has no label beside it), and the bar (events 17, 18) as a time signature (Numerator / Denominator, FL's
@@ -541,31 +547,36 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         AUDIO => {
             // Device, rate and buffer length work (spec: ui/settings.md "Audio"); a choice of "the device's own" shows
             // what that is.
+            // Under an ASIO driver its own rate and buffer length are the "Driver" ones (spec: audio/devices.md).
             let rate = st.rate.unwrap_or(44100);
+            let asio = st.audio.asio_driver().is_some();
             let rate_text = match st.audio.rate {
                 Some(r) => r.to_string(),
+                None if asio => format!("Driver ({rate})"),
                 None => format!("Device ({rate})"),
             };
             let buffer = match st.audio.buffer {
                 Some(b) => buffer_text(b, rate),
+                None if asio => match st.driver.as_ref().and_then(|d| d.fixed.map(|b| buffer_text(b, d.rate))) {
+                    Some(b) => format!("Driver ({b})"),
+                    None => "Driver".into(),
+                },
                 None => "Device default".into(),
-            };
-            // An ASIO driver's buffer length is set in its own panel (spec: audio/devices.md).
-            let length = if st.audio.asio_driver().is_some() {
-                let now = st.asio_buffer.map_or("set in the driver's panel".into(), |b| format!("{} (the driver's)", buffer_text(b, rate)));
-                vec![Text(format!("Buffer length: {now}"), true), Buttons(vec![(SHOW_ASIO_PANEL, 136.0)])]
-            } else {
-                vec![combo(&buffer, 160.0, BUFFER_LENGTH)]
             };
             let listed = st.devices.iter().cloned().chain(st.asio_drivers.iter().map(|d| format!("{d} (ASIO)")));
             vec![
                 g("Input / output", [
-                    vec![combo(&st.device, 360.0, OUTPUT_DEVICE), combo(&rate_text, 120.0, SAMPLE_RATE)],
-                    length,
                     vec![
+                        combo(&st.device, 360.0, OUTPUT_DEVICE),
+                        combo(&rate_text, 120.0, SAMPLE_RATE),
+                        combo(&buffer, 160.0, BUFFER_LENGTH),
                         Check("Auto close", false),
-                        Text(st.status[0].clone(), true),
-                        Text(st.status[1].clone(), true),
+                    ],
+                    st.instead.iter().map(|i| Text(i.clone(), true)).collect(),
+                    vec![Text(st.status[0].clone(), true), Text(st.status[1].clone(), true)],
+                    // Below Status, as FL has it; there are ASIO drivers on Windows only.
+                    if cfg!(windows) { vec![Buttons(vec![(SHOW_ASIO_PANEL, 136.0)])] } else { Vec::new() },
+                    vec![
                         List(vec![("Output devices", 0.0)], listed.map(|d| vec![d]).collect(), 4),
                         Check2("Mix in buffer switch", false, "Triple buffer", false),
                         combo("Highest", 96.0, "Priority"),
@@ -1361,9 +1372,13 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             let mut x = x0;
             for &(label, w) in bs {
                 let b = Rect::new(x, y + 4.0, w, 28.0);
-                let on = live(label);
+                // Show ASIO panel works while an ASIO driver is open.
+                let waits = label == SHOW_ASIO_PANEL && !s.settings.asio_open;
+                let on = live(label) && !waits;
                 let hov = on && ui.hit(b, Action::Settings(SAct::Button(label)), "");
-                if !on {
+                if waits {
+                    ui.hit(b, Action::Settings(SAct::Body), PANEL_WAITS);
+                } else if !on {
                     ui.off(b, label);
                 }
                 if super::lemon(ui) {

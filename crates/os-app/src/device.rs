@@ -123,6 +123,12 @@ pub struct DeviceInfo {
     pub buffers: Option<(u32, u32)>,
     /// Output channels open (the master plays on the first two).
     pub channels: u16,
+    /// An ASIO driver's: the rates of `audio_cfg::RATES` and the lengths of `audio_cfg::BUFFERS` it takes (empty for
+    /// a Windows device, which is not asked).
+    pub rates: Vec<u32>,
+    pub sizes: Vec<u32>,
+    /// It opened in place of the ASIO driver chosen: "Couldn't open <driver>: <why>; using <this device>".
+    pub instead: Option<String>,
 }
 
 /// The device last opened and the settings it opened for (`rate`), and how many times one opened (`opens`).
@@ -199,6 +205,8 @@ pub(crate) struct OutputDevice {
     open: Option<Open>,
     /// Blocks the device itself reports as lost (an ASIO driver's overload), since `take_xruns`.
     xruns: Arc<AtomicU64>,
+    /// An ASIO driver that does not open is an error, not the system's default device (while it is tried again).
+    pub(crate) wait_for_asio: bool,
 }
 
 impl OutputDevice {
@@ -209,7 +217,7 @@ impl OutputDevice {
         }
         if self.open.is_none() {
             let cfg = AudioCfg::current();
-            let o = open(&cfg, &self.xruns)?;
+            let o = open(&cfg, &self.xruns, self.wait_for_asio)?;
             if let Ok(mut l) = LAST.lock() {
                 *l = Some((cfg, o.info.clone()));
             }
@@ -291,20 +299,23 @@ impl OutputDevice {
 }
 
 /// Opens the stream for `cfg`. An ASIO driver that does not open (another program has it, its device is missing)
-/// gives way to the system's default device, saying so; the settings keep the driver, which is tried again with the
-/// next open.
-fn open(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
+/// gives way to the system's default device, saying so (unless `wait`: then that is the error); the settings keep the
+/// driver, which is tried again with the next open (spec: audio/devices.md, "Driver reset, lost device, fallback").
+fn open(cfg: &AudioCfg, xruns: &Arc<AtomicU64>, wait: bool) -> Result<Open, String> {
     #[cfg(windows)]
     if let Some(name) = cfg.asio_driver() {
-        let e = match open_asio(name, cfg.rate, xruns) {
+        let e = match open_asio(name, cfg, xruns) {
             Ok(o) => return Ok(o),
+            Err(e) if wait => return Err(format!("Couldn't open {name}: {e}")),
             Err(e) => e,
         };
         let system = AudioCfg { asio: false, device: None, ..cfg.clone() };
-        let mut o = open_system(&system, xruns).map_err(|f| format!("{name} did not open ({e}), nor did the default device ({f})"))?;
-        o.note = Some(format!("{name} did not open ({e}); playing on {}", o.info.name));
+        let mut o = open_system(&system, xruns).map_err(|f| format!("Couldn't open {name}: {e} (nor the default device: {f})"))?;
+        let instead = format!("Couldn't open {name}: {e}; using {}", o.info.name);
+        (o.note, o.info.instead) = (Some(instead.clone()), Some(instead));
         return Ok(o);
     }
+    let _ = wait; // (no drivers to wait for off Windows)
     open_system(cfg, xruns)
 }
 
@@ -314,12 +325,13 @@ fn queues(xruns: &Arc<AtomicU64>) -> (Arc<Queue>, Arc<Queue>, Errors) {
     (Arc::new(Queue::new(MAX_SOURCES)), Arc::new(Queue::new(MAX_SOURCES)), errors)
 }
 
-/// Opens ASIO driver `name`, at `rate` when it takes it.
+/// Opens ASIO driver `name`, at the rate and buffer length of `cfg` when it takes them.
 #[cfg(windows)]
-fn open_asio(name: &str, rate: Option<u32>, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
+fn open_asio(name: &str, cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
     let (inbox, outbox, errors) = queues(xruns);
-    let a = asio::open(name, rate, Mix::new(inbox.clone(), outbox.clone()), errors.clone())?;
-    let info = DeviceInfo { host: ASIO, name: name.to_string(), rate: a.rate, fixed: Some(a.frames), buffers: Some(a.buffers), channels: a.channels };
+    let a = asio::open(name, cfg.rate, cfg.buffer, Mix::new(inbox.clone(), outbox.clone()), errors.clone())?;
+    let (fixed, buffers) = (Some(a.frames), Some(a.buffers));
+    let info = DeviceInfo { host: ASIO, name: name.to_string(), rate: a.rate, fixed, buffers, channels: a.channels, rates: a.rates, sizes: a.sizes, instead: None };
     Ok(Open { _stream: Stream::Asio(a.out), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault })
 }
 
@@ -344,7 +356,7 @@ fn open_system(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
     }
     let stream = stream?;
     stream.play().map_err(|e| e.to_string())?;
-    let info = DeviceInfo { host, name: out.name, rate: config.sample_rate, fixed, buffers, channels: config.channels };
+    let info = DeviceInfo { host, name: out.name, rate: config.sample_rate, fixed, buffers, channels: config.channels, rates: Vec::new(), sizes: Vec::new(), instead: None };
     Ok(Open { _stream: Stream::Cpal(stream), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault })
 }
 

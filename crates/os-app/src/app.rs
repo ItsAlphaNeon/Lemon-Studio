@@ -3633,10 +3633,19 @@ impl App {
 
     /// The Audio page's status lines from the stream that is open; returns whether they changed.
     fn audio_status(&mut self) -> bool {
+        use crate::device::ASIO;
         let tp = &self.transport;
         let opened = tp.opened();
-        let asio_buffer = opened.as_ref().filter(|o| o.host == crate::device::ASIO).and_then(|o| o.fixed);
+        let asio_open = opened.as_ref().is_some_and(|o| o.host == ASIO);
+        let instead = opened.as_ref().and_then(|o| o.instead.clone());
+        let chosen = self.state.settings.audio.asio_driver().map(str::to_string);
+        let driver = chosen.and_then(|name| crate::device::last().filter(|i| i.host == ASIO && i.name == name));
         let first = match opened {
+            // An ASIO driver's blocks are its buffer (spec: audio/devices.md, "Status lines").
+            Some(o) if o.host == ASIO => {
+                let blocks = o.fixed.map_or(String::new(), |b| format!(", blocks of {}", views::settings::buffer_text(b, o.rate)));
+                format!("Status: {} open at {} Hz{blocks} ({ASIO})", o.name, o.rate)
+            }
             Some(o) => {
                 let rate = o.rate;
                 let block = match tp.block() {
@@ -3647,7 +3656,7 @@ impl App {
                 format!("Status: {} open at {rate} Hz{block}{buffer} ({})", o.name, o.host)
             }
             None => {
-                let host = if self.state.settings.audio.asio_driver().is_some() { crate::device::ASIO } else { cpal::default_host().id().name() };
+                let host = if self.state.settings.audio.asio_driver().is_some() { ASIO } else { cpal::default_host().id().name() };
                 format!("Status: opens with the first note or Play ({host})")
             }
         };
@@ -3656,9 +3665,9 @@ impl App {
             n => format!("Dropouts so far: {n} (device blocks the engine could not fill in time; a longer buffer helps)"),
         };
         let st = &mut self.state.settings;
-        let changed = st.status[0] != first || st.status[1] != second || st.asio_buffer != asio_buffer;
+        let changed = st.status[0] != first || st.status[1] != second || (&st.driver, st.asio_open, &st.instead) != (&driver, asio_open, &instead);
         st.status = [first, second];
-        st.asio_buffer = asio_buffer;
+        (st.driver, st.asio_open, st.instead) = (driver, asio_open, instead);
         changed
     }
 
@@ -3704,24 +3713,47 @@ impl App {
                     })
                     .collect()
             }
-            // The Windows devices, then the ASIO drivers under their heading (spec: audio/devices.md).
+            // The Windows devices, then the ASIO drivers, each under its heading (spec: audio/devices.md, "The Output
+            // device menu").
             OUTPUT_DEVICE => {
                 let asio = cfg.asio_driver().is_some();
                 let on = |d: &String, driver: bool| Mark::Radio(asio == driver && cfg.device.as_ref() == Some(d));
-                std::iter::once(PItem::new("Default device", Cmd::Audio(Set::Device(None))).mark(Mark::Radio(cfg.device.is_none())))
+                cfg!(windows)
+                    .then(|| PItem::head("Windows devices"))
+                    .into_iter()
+                    .chain(std::iter::once(PItem::new("Default device", Cmd::Audio(Set::Device(None))).mark(Mark::Radio(cfg.device.is_none()))))
                     .chain(st.devices.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Device(Some(d.clone())))).mark(on(d, false))))
-                    .chain((!st.asio_drivers.is_empty()).then(|| PItem::head("ASIO")))
+                    .chain((!st.asio_drivers.is_empty()).then(|| PItem::head("ASIO devices")))
                     .chain(st.asio_drivers.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Asio(d.clone()))).mark(on(d, true))))
                     .collect()
             }
-            SAMPLE_RATE => std::iter::once(PItem::new("Device rate", Cmd::Audio(Set::Rate(None))).mark(Mark::Radio(cfg.rate.is_none())))
-                .chain(RATES.iter().map(|&r| PItem::new(format!("{r} Hz"), Cmd::Audio(Set::Rate(Some(r)))).mark(Mark::Radio(cfg.rate == Some(r)))))
-                .collect(),
-            BUFFER_LENGTH => std::iter::once(PItem::new("Device default", Cmd::Audio(Set::Buffer(None))).mark(Mark::Radio(cfg.buffer.is_none())))
-                .chain(BUFFERS.iter().map(|&b| {
-                    PItem::new(views::settings::buffer_text(b, rate), Cmd::Audio(Set::Buffer(Some(b)))).mark(Mark::Radio(cfg.buffer == Some(b)))
-                }))
-                .collect(),
+            // Under an ASIO driver: the driver's own, then what it takes, once it has opened (spec: audio/devices.md,
+            // "Sample rate and buffer length under ASIO").
+            SAMPLE_RATE => {
+                let (own, rates) = match (cfg.asio_driver(), &st.driver) {
+                    (Some(_), Some(d)) => (format!("Driver ({rate})"), d.rates.clone()),
+                    (Some(_), None) => (format!("Driver ({rate})"), RATES.to_vec()),
+                    (None, _) => ("Device rate".to_string(), RATES.to_vec()),
+                };
+                std::iter::once(PItem::new(own, Cmd::Audio(Set::Rate(None))).mark(Mark::Radio(cfg.rate.is_none())))
+                    .chain(rates.into_iter().map(|r| PItem::new(format!("{r} Hz"), Cmd::Audio(Set::Rate(Some(r)))).mark(Mark::Radio(cfg.rate == Some(r)))))
+                    .collect()
+            }
+            BUFFER_LENGTH => {
+                let (own, sizes) = match (cfg.asio_driver(), &st.driver) {
+                    (Some(_), Some(d)) => match d.fixed {
+                        Some(b) => (format!("Driver ({})", views::settings::buffer_text(b, d.rate)), d.sizes.clone()),
+                        None => ("Driver".to_string(), d.sizes.clone()),
+                    },
+                    (Some(_), None) => ("Driver".to_string(), Vec::new()),
+                    (None, _) => ("Device default".to_string(), BUFFERS.to_vec()),
+                };
+                std::iter::once(PItem::new(own, Cmd::Audio(Set::Buffer(None))).mark(Mark::Radio(cfg.buffer.is_none())))
+                    .chain(sizes.into_iter().map(|b| {
+                        PItem::new(views::settings::buffer_text(b, rate), Cmd::Audio(Set::Buffer(Some(b)))).mark(Mark::Radio(cfg.buffer == Some(b)))
+                    }))
+                    .collect()
+            }
             ANIMATIONS => {
                 let item = |label: &'static str, on: bool| PItem::new(label, Cmd::Mixer(crate::mixer::MCmd::Animations(on))).mark(Mark::Radio(still != on));
                 vec![item("Entertain me", true), item("Off", false)]
@@ -10249,14 +10281,16 @@ mod tests {
         let combo = |app: &App, label: &str| {
             app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == label)).map(|h| h.rect).unwrap_or_else(|| panic!("{label} works"))
         };
-        for (label, first) in [(OUTPUT_DEVICE, "Default device"), (SAMPLE_RATE, "Device rate"), (BUFFER_LENGTH, "Device default")] {
+        let devices = if cfg!(windows) { "Windows devices" } else { "Default device" };
+        for (label, first) in [(OUTPUT_DEVICE, devices), (SAMPLE_RATE, "Device rate"), (BUFFER_LENGTH, "Device default")] {
             let r = combo(&app, label);
             click(&mut app, &mut c, r);
             let p = app.state.playlist.popup.as_ref().unwrap_or_else(|| panic!("{label} opens a menu"));
             assert_eq!(p.items[0].label, first);
             assert!((p.y - r.bottom()).abs() < 2.0, "under its box");
-            // The menu is painted over the settings window: its rows take the clicks.
-            assert!(app.top_hit(r.x + 10.0, r.bottom() + 10.0).is_some_and(|h| matches!(h.action, Action::PlPopup(_))));
+            // The menu is painted over the settings window: its rows take the clicks (the first row under a heading).
+            let row = if p.items[0].head { 30.0 } else { 10.0 };
+            assert!(app.top_hit(r.x + 10.0, r.bottom() + row).is_some_and(|h| matches!(h.action, Action::PlPopup(_))));
             app.state.playlist.popup = None;
             frame(&mut app, &mut c, None);
         }
@@ -16164,9 +16198,9 @@ mod tests {
         set_check(&MONO_PAINTING, false);
     }
 
-    /// With an ASIO driver chosen, the Audio page's buffer length is the driver's and its panel button works.
+    /// Show ASIO panel works while an ASIO driver is open; the buffer length combo stays.
     #[test]
-    fn the_audio_page_has_the_asio_panel_button() {
+    fn show_asio_panel_works_while_a_driver_is_open() {
         use crate::audio_cfg::{AudioCfg, Set};
         use crate::views::settings::{SAct, AUDIO, BUFFER_LENGTH, SHOW_ASIO_PANEL};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
@@ -16182,7 +16216,11 @@ mod tests {
         app.state.settings.audio = AudioCfg::default().with(Set::Asio("Some ASIO".into()));
         app.invalidate();
         frame(&mut app, &mut c, None);
-        assert_eq!(shown(&app), if cfg!(windows) { (false, true) } else { (true, false) }, "an ASIO driver");
+        assert_eq!(shown(&app), (true, false), "an ASIO driver, not open");
+        app.state.settings.asio_open = true;
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        assert_eq!(shown(&app), (true, cfg!(windows)), "an ASIO driver, open");
     }
 
     /// The Audio page with an ASIO driver chosen (the first installed one), and its Output device menu, as pictures,
@@ -16190,7 +16228,7 @@ mod tests {
     #[test]
     fn audio_shot() {
         use crate::audio_cfg::{AudioCfg, Set};
-        use crate::views::settings::{SAct, AUDIO, OUTPUT_DEVICE};
+        use crate::views::settings::{SAct, AUDIO, BUFFER_LENGTH, OUTPUT_DEVICE};
         let Some(out) = std::env::var_os("OS_AUDIO_SHOT") else { return };
         let out = std::path::PathBuf::from(out);
         let Some(driver) = crate::device::asio_drivers().into_iter().next() else { return };
@@ -16210,6 +16248,11 @@ mod tests {
         let r = app.hits.iter().find(|h| matches!(h.action, Action::Settings(SAct::Combo(OUTPUT_DEVICE, ..)))).map(|h| h.rect).unwrap();
         click(&mut app, &mut c, r);
         c.pixmap.save_png(out.join("02_output_device_menu.png")).unwrap();
+        app.state.playlist.popup = None;
+        frame(&mut app, &mut c, None);
+        let r = app.hits.iter().find(|h| matches!(h.action, Action::Settings(SAct::Combo(BUFFER_LENGTH, ..)))).map(|h| h.rect).unwrap();
+        click(&mut app, &mut c, r);
+        c.pixmap.save_png(out.join("03_buffer_length_menu.png")).unwrap();
         AudioCfg::default().apply();
     }
 

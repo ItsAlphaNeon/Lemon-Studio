@@ -5,8 +5,8 @@
 //! Audio device settings (Settings > Audio): the output device, sample rate and buffer length. They are kept in the
 //! user folder (`audio.txt`) and every stream the transport opens uses them; a device that is gone, a rate it does not
 //! offer or a buffer length it refuses falls back to the system's default device and that device's own rate and buffer.
-//! The device is a Windows (ALSA, Core Audio) one or, on Windows, an ASIO driver (`asio`), whose buffer length is set
-//! in the driver's own panel.
+//! The device is a Windows (ALSA, Core Audio) one or, on Windows, an ASIO driver (`asio`): for a driver, `None` and a
+//! rate or buffer length it does not take mean the driver's own (its buffer length is set in its own panel).
 // spec: ui/settings.md "Audio"
 
 use std::sync::Mutex;
@@ -23,7 +23,7 @@ pub struct AudioCfg {
     pub device: Option<String>,
     /// Sample rate, Hz.
     pub rate: Option<u32>,
-    /// Buffer length of a Windows device, frames (an ASIO driver's is the driver's own).
+    /// Buffer length, frames.
     pub buffer: Option<u32>,
 }
 
