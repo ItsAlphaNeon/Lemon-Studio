@@ -11800,6 +11800,39 @@ mod tests {
         assert_eq!(app.state.piano.range, None, "other selections don't shade");
     }
 
+    /// Ctrl+B with a time selection (spec: ui/piano-roll.md §9, §10): the copies move by the range's length, keeping
+    /// the space before the notes, and the range moves on over them; without one, right after the notes' end.
+    #[test]
+    fn piano_duplicate_follows_the_time_selection() {
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let ch = piano::channel(&app.state).expect("a channel");
+        piano::pattern_mut(&mut app.state).notes = vec![Note { length: 24, ..Note::step(ch, 48) }];
+        let starts = |app: &App| {
+            let mut v: Vec<u32> = piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| n.position).collect();
+            v.sort_unstable();
+            v
+        };
+        // A bar-long range (0..384) with the note 48 ticks in: the copy lands 48 ticks into the next bar.
+        piano::select_range(&mut app.state, 0, 384);
+        crate::piano_tools::duplicate(&mut app.state);
+        assert_eq!(starts(&app), [48, 432]);
+        assert_eq!(app.state.piano.range, Some((384, 768)), "the range moves on");
+        assert_eq!(app.state.piano.selection(app.state.pattern, Some(ch)).len(), 1, "the copy is selected");
+        // Again: from the moved range.
+        crate::piano_tools::duplicate(&mut app.state);
+        assert_eq!(starts(&app), [48, 432, 816]);
+        // An empty range only moves on.
+        piano::select_range(&mut app.state, 1000, 1100);
+        crate::piano_tools::duplicate(&mut app.state);
+        assert_eq!(starts(&app).len(), 3);
+        assert_eq!(app.state.piano.range, Some((1100, 1200)));
+        // No range: right after the selection's end.
+        app.state.piano.select(app.state.pattern, ch, vec![0]);
+        crate::piano_tools::duplicate(&mut app.state);
+        assert_eq!(starts(&app), [48, 72, 432, 816]);
+    }
+
     /// The piano roll title's target channel (spec: ui/piano-target-channel.md): hint, the channel menu and a pick,
     /// the wheel through the channels with notes, right-click for the channel's window.
     /// "Type in value..." (spec: ui/type-in-value.md): the knob menu's item opens the value box at the mouse; typed text
