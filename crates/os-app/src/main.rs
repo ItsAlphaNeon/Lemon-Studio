@@ -668,6 +668,12 @@ impl ApplicationHandler for Shell {
         if press && self.app.loading() {
             return;
         }
+        // Linux: a wheel turn over a docked plugin window is the plugin window's alone; nothing behind it scrolls
+        // (`plugin_window::pointer_in_docked`).
+        #[cfg(target_os = "linux")]
+        if matches!(event, WindowEvent::MouseWheel { .. }) && crate::plugin_window::pointer_in_docked() {
+            return;
+        }
         // Linux: a click in the main window takes the keyboard back from a plugin editor that holds it (X11 leaves it
         // there), so the typing keyboard plays again.
         #[cfg(target_os = "linux")]
