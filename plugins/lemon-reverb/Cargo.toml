@@ -1,0 +1,26 @@
+[package]
+name = "lemon-reverb"
+description = "Lemon Reverb: Lemon Studio's plate reverb as a VST3 / CLAP plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Compiled into Lemon Studio: no exported plugin entry points (they would clash with the other built-in plugins).
+linked = []
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
+os-engine.workspace = true
+os-hostlink.workspace = true
+os-plugkit = { path = "../../crates/os-plugkit" }
+os-ui = { path = "../../crates/os-ui" }
+os-theme = { path = "../../crates/os-theme" }
+serde_json = "1"
+tiny-skia = "0.11"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_System_LibraryLoader"] }

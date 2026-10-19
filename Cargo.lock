@@ -1673,6 +1673,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-reverb"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-engine",
+ "os-hostlink",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "serde_json",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "lemon-sampler"
 version = "0.0.1"
 dependencies = [

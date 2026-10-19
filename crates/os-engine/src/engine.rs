@@ -1090,7 +1090,8 @@ impl Engine {
                     for (k, slot) in m.slots.iter().enumerate() {
                         let Some(slot) = slot else { continue };
                         match crate::effects::from_slot(&slot.name, &slot.state, rate) {
-                            Some(fx) => {
+                            Some(mut fx) => {
+                                fx.set_tempo(tempo);
                                 effects.push(FxSlot::new(k, m.slot_on[k], mix_level(m.slot_mix[k]), Fx::Own(fx)));
                                 report.effects_active += 1;
                             }
