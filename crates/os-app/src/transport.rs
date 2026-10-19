@@ -570,8 +570,9 @@ struct Queue {
     /// Samples written / read since the start.
     written: AtomicU64,
     read: AtomicU64,
-    /// Per tick: first sample, length in samples, tick (f64 bits), engine frame.
-    ticks: Box<[[AtomicU64; 4]]>,
+    /// Per tick: first sample, length in samples, tick (f64 bits), engine frame, and 1 for a held tick (paused: the
+    /// position does not move through it).
+    ticks: Box<[[AtomicU64; 5]]>,
     ticks_written: AtomicU64,
     /// The tick record the reader is in.
     ticks_read: AtomicU64,
@@ -607,7 +608,7 @@ impl Queue {
     }
 
     /// Feeder: appends one tick (call `has_room` first).
-    fn push(&self, s: &[f32], tick: u64, frame: u64) {
+    fn push(&self, s: &[f32], tick: u64, frame: u64, held: bool) {
         let w = self.written.load(Ordering::Relaxed);
         for (i, &v) in s.iter().enumerate() {
             self.samples[(w as usize + i) % QUEUE_SAMPLES].store(v.to_bits(), Ordering::Relaxed);
@@ -618,6 +619,7 @@ impl Queue {
         rec[1].store(s.len() as u64, Ordering::Relaxed);
         rec[2].store((tick as f64).to_bits(), Ordering::Relaxed);
         rec[3].store(frame, Ordering::Relaxed);
+        rec[4].store(u64::from(held), Ordering::Relaxed);
         self.ticks_written.store(tw + 1, Ordering::Release);
         self.written.store(w + s.len() as u64, Ordering::Release);
     }
@@ -648,7 +650,8 @@ impl Queue {
         }
         let rec = &self.ticks[at as usize % QUEUE_TICKS];
         let (start, len) = (rec[0].load(Ordering::Relaxed), rec[1].load(Ordering::Relaxed).max(1));
-        let into = r.saturating_sub(start);
+        // A held tick is heard at its start all through (the paused position stays put).
+        let into = if rec[4].load(Ordering::Relaxed) != 0 { 0 } else { r.saturating_sub(start) };
         Some((rec[3].load(Ordering::Relaxed) + into / 2, f64::from_bits(rec[2].load(Ordering::Relaxed)) + into as f64 / len as f64))
     }
 }
@@ -689,10 +692,10 @@ impl Feeder {
                     self.queue.ended.store(true, Ordering::Release);
                     break;
                 }
-                Some((s, tick, frame)) => {
+                Some((s, tick, frame, held)) => {
                     tick_len = s.len() as u64;
                     frames += tick_len / 2;
-                    self.queue.push(s, tick, frame);
+                    self.queue.push(s, tick, frame, held);
                     self.queue.ended.store(e.finished(), Ordering::Release);
                 }
             }
@@ -1823,6 +1826,37 @@ mod tests {
         assert!(shared.sounding.lock().unwrap().len() <= 8);
     }
 
+    /// Pause in the engine (the stream runs on, ringing out the effects): once the channels are held, the published
+    /// position stays exactly where they are held, block after block; resume goes on from there.
+    #[test]
+    fn a_paused_engine_holds_the_published_position() {
+        let (e, _) = looping_engine();
+        let (mut r, _, shared) = renderer(e);
+        let engine = r.inline.as_ref().unwrap().engine.clone();
+        let at = |s: &Shared| (s.position.load(Ordering::Relaxed), f64::from_bits(s.tick.load(Ordering::Relaxed)));
+        let mut block = vec![0.0f32; 512 * 2];
+        for _ in 0..20 {
+            r.render(&mut block);
+        }
+        engine.lock().unwrap().pause();
+        // What was queued before the pause and the fade play out first (under 2000 frames).
+        for _ in 0..8 {
+            r.render(&mut block);
+        }
+        let held = at(&shared);
+        for _ in 0..10 {
+            r.render(&mut block);
+            assert_eq!(at(&shared), held, "position held");
+        }
+        // Once the held ticks already queued have played, it goes on from there (no jump).
+        engine.lock().unwrap().resume();
+        for _ in 0..4 {
+            r.render(&mut block);
+        }
+        let (frame, tick) = at(&shared);
+        assert!(frame > held.0 && frame < held.0 + 4 * 512 && tick > held.1, "continues from {held:?}, got {frame}, {tick}");
+    }
+
     /// The tick published to the UI follows the engine (a looping pattern wraps with it).
     #[test]
     fn tick_wraps_with_the_loop() {
@@ -1923,7 +1957,12 @@ mod tests {
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
         t.play(&project, PlayMode::Pattern(1), 0.0);
-        std::thread::sleep(Duration::from_millis(400));
+        // A device opening for the first time may take a while.
+        let start = Instant::now();
+        while t.seconds() < 0.2 && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(t.seconds() >= 0.2, "playing: {}", t.seconds());
         t.pause();
         std::thread::sleep(Duration::from_millis(100));
         let at = t.seconds();
@@ -2253,7 +2292,13 @@ mod tests {
         let t = Transport::new(None);
         t.set_instruments(vec![(0, pl.hosted[&0].plugin.clone() as SharedInstrument)]);
         t.play(&project, PlayMode::Pattern(1), 0.0);
-        std::thread::sleep(Duration::from_millis(150));
+        // A device opening for the first time may take a while (the first block is rendered before it opens, so the
+        // voices alone do not say it plays).
+        let start = Instant::now();
+        while (t.seconds() == 0.0 || pl.voices() != 2 || t.engine_voices() == 0) && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(t.seconds() > 0.0, "playing");
         assert_eq!(pl.voices(), 2, "the synth's chord");
         assert!(t.engine_voices() >= 1, "the engine's own voice");
         t.stop();
