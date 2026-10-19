@@ -1177,8 +1177,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 preview_until = None;
                 closing.clear();
                 // The next stream opens the device with the new settings; a device that failed is tried with them at
-                // once.
+                // once. Until one opens, the page says so rather than show the device let go of.
                 device.close();
+                if let Ok(mut o) = shared.opened.lock() {
+                    *o = None;
+                }
                 if let Some(l) = lost.as_mut() {
                     (l.next, l.tries) = (Instant::now(), 0);
                 }
@@ -1353,10 +1356,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     }
                 }
                 if !over && now >= l.next {
-                    // An ASIO driver is tried again before the system's default device plays instead.
-                    device.wait_for_asio = l.tries < ASIO_TRIES;
+                    // The device chosen (an ASIO driver, a Windows device another program took) is tried again before
+                    // the system's default device (or shared mode) plays instead.
+                    device.wait = l.tries < ASIO_TRIES;
                     let opened = device.open().map(|o| (o.info.name.clone(), o.info.instead.is_some()));
-                    device.wait_for_asio = false;
+                    device.wait = false;
                     match opened {
                         Ok((name, instead)) => {
                             // Another device (the system's default, `audio_cfg::output`): say so (in place of an ASIO
@@ -1379,8 +1383,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                             over = true;
                         }
                         Err(e) => {
-                            let asio = crate::audio_cfg::AudioCfg::current().asio_driver().is_some();
-                            if !l.told && !(asio && l.tries < ASIO_TRIES) {
+                            // Told once the device chosen gives way to another (`OutputDevice::wait`) and that fails
+                            // too; at once when there is none to give way to.
+                            let cfg = crate::audio_cfg::AudioCfg::current();
+                            let waits = cfg.asio_driver().is_some() || cfg.exclusive() || cfg.device.is_some();
+                            if !l.told && !(waits && l.tries < ASIO_TRIES) {
                                 l.told = true;
                                 report(&shared, format!("{} stopped ({}), and no output device opens: {e}", l.name, l.why));
                             }
@@ -1411,9 +1418,9 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         if let Some((_, tries)) = open_asio.filter(|&(at, _)| !closed && lost.is_none() && Instant::now() >= at) {
             open_asio = None;
             if crate::audio_cfg::AudioCfg::current().asio_driver().is_some() {
-                device.wait_for_asio = tries < ASIO_TRIES;
+                device.wait = tries < ASIO_TRIES;
                 let opened = device.open().map(|o| o.info.clone());
-                device.wait_for_asio = false;
+                device.wait = false;
                 match opened {
                     Ok(info) => publish(&shared, &info),
                     Err(_) if tries < ASIO_TRIES => open_asio = Some((Instant::now() + ASIO_AGAIN, tries + 1)),
@@ -1503,7 +1510,7 @@ const RETRY: [Duration; 7] = [
     Duration::from_secs(5),
 ];
 /// An ASIO driver that does not open is tried again this many times, `ASIO_AGAIN` apart, before the system's default
-/// device plays instead.
+/// device plays instead (as is a device chosen that failed while in use, at `RETRY`'s times).
 const ASIO_TRIES: usize = 3;
 const ASIO_AGAIN: Duration = Duration::from_millis(500);
 /// A playback held this long for a device that failed shows as paused.

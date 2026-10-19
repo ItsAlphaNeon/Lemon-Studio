@@ -10,10 +10,12 @@
 //! freed on the audio thread (`OutputDevice::collect`).
 //!
 //! The device opens with the audio settings (`audio_cfg`) when first needed: a Windows (or ALSA, Core Audio) device
-//! through cpal, an ASIO driver through `asio`. A Windows device closes again once nothing plays (`close_idle`), as the
-//! streams did when each sound had its own: an open stream keeps the computer from sleeping. An ASIO driver stays open
-//! (another program could take it meanwhile) until Auto close or new settings let go of it. A stream that failed (the
-//! device went away, a driver asked to be reset) reports it (`failure`) and is opened anew the next time it is needed.
+//! through cpal, an ASIO driver through `asio`, and a Windows device in exclusive mode, or in shared mode at a period
+//! shorter than its default, through `wasapi`. A Windows device closes again once nothing plays (`close_idle`), as the
+//! streams did when each sound had its own: an open stream keeps the computer from sleeping (and in exclusive mode
+//! silences every other program). An ASIO driver stays open (another program could take it meanwhile) until Auto close
+//! or new settings let go of it. A stream that failed (the device went away, a driver asked to be reset) reports it
+//! (`failure`) and is opened anew the next time it is needed.
 //!
 //! What opened is published (`last`, `rate`), so the settings page and the hosted plugins never have to ask the device
 //! themselves: asking an ASIO driver means loading it, and only the thread that drives the device may.
@@ -25,13 +27,16 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, SampleFormat, SizedSample, StreamConfig};
 use crossbeam_queue::ArrayQueue;
 
-use crate::audio_cfg::{self, AudioCfg};
+use crate::audio_cfg::{self, AudioCfg, BUFFERS};
 
 #[cfg(windows)]
 mod asio;
+#[cfg(windows)]
+mod wasapi;
 
-/// `DeviceInfo::host` of an ASIO driver.
+/// `DeviceInfo::host` of an ASIO driver, and of a Windows device in exclusive mode.
 pub const ASIO: &str = "ASIO";
+pub const WASAPI_EXCLUSIVE: &str = "WASAPI exclusive";
 
 /// The installed ASIO drivers' names (none off Windows). None is loaded to list them, so any thread may ask.
 pub fn asio_drivers() -> Vec<String> {
@@ -39,6 +44,82 @@ pub fn asio_drivers() -> Vec<String> {
     return asio::drivers();
     #[cfg(not(windows))]
     Vec::new()
+}
+
+/// What a Windows device offers for short buffers (`periods`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Periods {
+    /// The device's own rate (the system mixer's for it).
+    pub rate: u32,
+    /// Shared mode: the system mixer's periods on it, frames at `rate` (IAudioClient3): the default, the step, the
+    /// smallest and the largest. `None`: it does not say.
+    pub shared: Option<(u32, u32, u32, u32)>,
+    /// Shared mode: the buffer a stream gets when it asks for no length (0: unknown).
+    pub shared_buffer: u32,
+    /// Exclusive mode: its default and smallest period, in 100-nanosecond units (whatever the rate).
+    pub exclusive: (i64, i64),
+    /// The rates of `audio_cfg::RATES` it takes in exclusive mode (empty: unknown, or exclusive mode is refused).
+    pub exclusive_rates: Vec<u32>,
+}
+
+impl Periods {
+    /// Exclusive mode's default and smallest period in frames at `rate`.
+    pub fn exclusive_frames(&self, rate: u32) -> (u32, u32) {
+        let f = |hns: i64| (hns as f64 * f64::from(rate) / 1e7).round() as u32;
+        (f(self.exclusive.0), f(self.exclusive.1))
+    }
+
+    /// The device's own period ("Device"): exclusive, its default at `rate`; shared, the system mixer's default for it.
+    pub fn own(&self, exclusive: bool, rate: u32) -> u32 {
+        if exclusive {
+            self.exclusive_frames(rate).0
+        } else {
+            self.shared_period()
+        }
+    }
+
+    /// Shared mode's period: the system mixer's default for the device.
+    pub fn shared_period(&self) -> u32 {
+        self.shared.map_or_else(|| self.exclusive_frames(self.rate).0, |s| s.0)
+    }
+
+    /// Shared mode's lengths shorter than its default period: its smallest, then each of `BUFFERS` that is a whole
+    /// number of steps inside its range.
+    pub fn small(&self) -> Vec<u32> {
+        let Some((def, step, min, max)) = self.shared else { return Vec::new() };
+        if min == 0 || min >= def {
+            return Vec::new();
+        }
+        let mut v = vec![min];
+        v.extend(BUFFERS.into_iter().filter(|&b| b > min && b < def && b <= max && b % step.max(1) == 0));
+        v
+    }
+
+    /// The lengths the Buffer length menu offers after the device's own (spec: audio/wasapi-low-latency.md 4.3), each
+    /// once. Shared: the short ones, then those of `BUFFERS` longer than the buffer a stream gets anyway (they add
+    /// latency). Exclusive (at `rate`): those of `BUFFERS` from its smallest period up ("Smallest" comes before them).
+    pub fn sizes(&self, exclusive: bool, rate: u32) -> Vec<u32> {
+        if exclusive {
+            let (def, min) = self.exclusive_frames(rate);
+            return BUFFERS.into_iter().filter(|&b| b >= min && b != def && b != min).collect();
+        }
+        let small = self.small();
+        let anyway = self.shared_buffer.max(self.shared_period());
+        let longer = BUFFERS.into_iter().filter(|&b| b > anyway && !small.contains(&b));
+        small.iter().copied().chain(longer).collect()
+    }
+}
+
+/// What the Windows device named `device` (`None`: the default) offers for short buffers; `None` off Windows, for a
+/// device that is not there, or when Windows does not say. It plays nothing: any thread may ask.
+pub fn periods(device: Option<&str>) -> Option<Periods> {
+    #[cfg(windows)]
+    return wasapi::periods(device);
+    #[cfg(not(windows))]
+    {
+        let _ = device;
+        None
+    }
 }
 
 /// What the device's callback plays: one stream's worth of sound (playback, a preview, live notes).
@@ -181,11 +262,13 @@ pub(crate) fn pump() {
     }
 }
 
-/// What plays the mix: a cpal stream or an ASIO driver.
+/// What plays the mix: a cpal stream, an ASIO driver or a WASAPI stream of Lemon Studio's own.
 enum Stream {
     Cpal(#[allow(dead_code)] cpal::Stream),
     #[cfg(windows)]
     Asio(#[allow(dead_code)] asio::AsioOut),
+    #[cfg(windows)]
+    Wasapi(#[allow(dead_code)] wasapi::WasapiOut),
 }
 
 /// The open stream and what it was opened with.
@@ -208,8 +291,9 @@ pub(crate) struct OutputDevice {
     open: Option<Open>,
     /// Blocks the device itself reports as lost (an ASIO driver's overload), since `take_xruns`.
     xruns: Arc<AtomicU64>,
-    /// An ASIO driver that does not open is an error, not the system's default device (while it is tried again).
-    pub(crate) wait_for_asio: bool,
+    /// The device chosen not opening (an ASIO driver; a Windows device another program has, or that refuses exclusive
+    /// mode for that reason) is an error, not the system's default device or shared mode (while it is tried again).
+    pub(crate) wait: bool,
 }
 
 impl OutputDevice {
@@ -220,7 +304,7 @@ impl OutputDevice {
         }
         if self.open.is_none() {
             let cfg = AudioCfg::current();
-            let o = open(&cfg, &self.xruns, self.wait_for_asio)?;
+            let o = open(&cfg, &self.xruns, self.wait)?;
             if let Ok(mut l) = LAST.lock() {
                 *l = Some((cfg, o.info.clone()));
             }
@@ -303,7 +387,8 @@ impl OutputDevice {
 
 /// Opens the stream for `cfg`. An ASIO driver that does not open (another program has it, its device is missing)
 /// gives way to the system's default device, saying so (unless `wait`: then that is the error); the settings keep the
-/// driver, which is tried again with the next open (spec: audio/devices.md, "Driver reset, lost device, fallback").
+/// driver, which is tried again with the next open (spec: audio/devices.md, "Driver reset, lost device, fallback"). A
+/// Windows device in exclusive mode that refuses it plays in shared mode, saying why (`open_exclusive`).
 fn open(cfg: &AudioCfg, xruns: &Arc<AtomicU64>, wait: bool) -> Result<Open, String> {
     #[cfg(windows)]
     if let Some(name) = cfg.asio_driver() {
@@ -312,14 +397,106 @@ fn open(cfg: &AudioCfg, xruns: &Arc<AtomicU64>, wait: bool) -> Result<Open, Stri
             Err(e) if wait => return Err(format!("Couldn't open {name}: {e}")),
             Err(e) => e,
         };
-        let system = AudioCfg { asio: false, device: None, ..cfg.clone() };
+        let system = AudioCfg { asio: false, device: None, exclusive: false, ..cfg.clone() };
         let mut o = open_system(&system, xruns).map_err(|f| format!("Couldn't open {name}: {e} (nor the default device: {f})"))?;
         let instead = format!("Couldn't open {name}: {e}; using {}", o.info.name);
-        (o.note, o.info.instead) = (Some(instead.clone()), Some(instead));
+        say_instead(&mut o, instead);
         return Ok(o);
     }
-    let _ = wait; // (no drivers to wait for off Windows)
-    open_system(cfg, xruns)
+    #[cfg(windows)]
+    if cfg.exclusive() {
+        return open_exclusive(cfg, xruns, wait);
+    }
+    #[cfg(windows)]
+    let note = match open_small(cfg, xruns) {
+        Ok(o) => return Ok(o),
+        Err(note) => note,
+    };
+    #[cfg(not(windows))]
+    let note: Option<String> = None;
+    let mut o = open_shared(cfg, xruns, wait)?;
+    if let Some(n) = note.filter(|_| o.note.is_none()) {
+        say_instead(&mut o, n);
+    }
+    Ok(o)
+}
+
+/// What the status tells about how `o` opened, above the status lines and once as a message.
+fn say_instead(o: &mut Open, instead: String) {
+    (o.note, o.info.instead) = (Some(instead.clone()), Some(instead));
+}
+
+/// A Windows (ALSA, Core Audio) device in shared mode. A device chosen that is there but does not open (another
+/// program has it to itself) gives way to the system's default device when that is another, saying so (unless `wait`:
+/// then that is the error; spec: audio/wasapi-low-latency.md 4.5).
+fn open_shared(cfg: &AudioCfg, xruns: &Arc<AtomicU64>, wait: bool) -> Result<Open, String> {
+    let e = match open_system(cfg, xruns) {
+        Ok(o) => return Ok(o),
+        Err(e) => e,
+    };
+    let Some(name) = cfg.device.as_deref().filter(|_| !wait) else { return Err(e) };
+    let mut o = open_system(&AudioCfg { device: None, ..cfg.clone() }, xruns).map_err(|_| e.clone())?;
+    if o.info.name != name {
+        let instead = format!("Couldn't open {name}: {e}; using {}", o.info.name);
+        say_instead(&mut o, instead);
+    }
+    Ok(o)
+}
+
+/// A Windows device in exclusive mode (spec: audio/wasapi-low-latency.md 4.5). Refused, it plays in shared mode,
+/// saying why: at once when Windows' sound settings do not allow it, else (another program has the device to itself)
+/// unless `wait`. A device that is not there: the system's default, as in shared mode.
+#[cfg(windows)]
+fn open_exclusive(cfg: &AudioCfg, xruns: &Arc<AtomicU64>, wait: bool) -> Result<Open, String> {
+    use wasapi::Refused;
+    let (inbox, outbox, errors) = queues(xruns);
+    let mix = Mix::new(inbox.clone(), outbox.clone());
+    let shared = AudioCfg { exclusive: false, buffer: cfg.buffer.filter(|&b| b != audio_cfg::SMALLEST), ..cfg.clone() };
+    let refused = match wasapi::open(cfg.device.as_deref(), wasapi::Mode::Exclusive, cfg.rate, cfg.buffer, mix, errors.clone()) {
+        Ok(w) => return Ok(wasapi_open(w, WASAPI_EXCLUSIVE, inbox, outbox, errors)),
+        Err(Refused::Missing) => return open_shared(&shared, xruns, wait),
+        Err(r @ Refused::InUse) if wait => return Err(format!("Couldn't open {}: {}", cfg.device.as_deref().unwrap_or("the default device"), r.why())),
+        Err(r) => r.why(),
+    };
+    let mut o = open_shared(&shared, xruns, false).map_err(|f| {
+        format!("Couldn't open {}: {refused} (nor in shared mode: {f})", cfg.device.as_deref().unwrap_or("the default device"))
+    })?;
+    let name = cfg.device.clone().unwrap_or_else(|| o.info.name.clone());
+    let instead = if o.info.name == name {
+        format!("Couldn't open {name} in exclusive mode: {refused}; using shared mode")
+    } else {
+        format!("Couldn't open {name}: {refused}; using {}", o.info.name)
+    };
+    say_instead(&mut o, instead);
+    Ok(o)
+}
+
+/// A Windows device in shared mode at a period shorter than its default (IAudioClient3), when the buffer length chosen
+/// is one it offers. Otherwise cpal opens it: `Err` with what to tell (a short period needs the device's own rate).
+#[cfg(windows)]
+fn open_small(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, Option<String>> {
+    use wasapi::Refused;
+    let Some(b) = cfg.buffer.filter(|&b| b != audio_cfg::SMALLEST) else { return Err(None) };
+    let (inbox, outbox, errors) = queues(xruns);
+    let mix = Mix::new(inbox.clone(), outbox.clone());
+    match wasapi::open(cfg.device.as_deref(), wasapi::Mode::Small, cfg.rate, Some(b), mix, errors.clone()) {
+        Ok(w) => Ok(wasapi_open(w, cpal::HostId::Wasapi.name(), inbox, outbox, errors)),
+        Err(Refused::OwnRate(r)) => {
+            let device = cfg.device.as_deref().unwrap_or("the default device");
+            Err(Some(format!("Small buffers need {device}'s own rate ({r} Hz)")))
+        }
+        Err(_) => Err(None),
+    }
+}
+
+/// The `Open` of a WASAPI stream: exclusive, its period is its blocks and its buffer (as an ASIO driver's); shared,
+/// its buffer is the one the status shows.
+#[cfg(windows)]
+fn wasapi_open(w: wasapi::Opened, host: &'static str, inbox: Arc<Queue>, outbox: Arc<Queue>, errors: Errors) -> Open {
+    let i = w.info;
+    let fixed = Some(if host == WASAPI_EXCLUSIVE { i.period } else { i.buffer });
+    let info = DeviceInfo { host, name: i.name, rate: i.rate, fixed, buffers: Some(i.range), channels: i.channels, rates: Vec::new(), sizes: Vec::new(), latency: i.latency, instead: None };
+    Open { _stream: Stream::Wasapi(w.out), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault }
 }
 
 /// The two queues a new stream's callback takes its sources from and hands them back on, and where its errors go.
@@ -543,5 +720,99 @@ mod tests {
         let got = m.block(MAX_FRAMES + 100);
         assert_eq!(got.len(), 2 * (MAX_FRAMES + 100));
         assert!(got.iter().all(|v| *v == 0.5));
+    }
+
+    /// The Buffer length menu's lengths per mode (spec: audio/wasapi-low-latency.md 4.3): only those that change
+    /// something.
+    #[test]
+    fn buffer_lengths_per_mode() {
+        // This PC's Realtek endpoint: 10 ms only in shared mode, 3 ms smallest in exclusive mode.
+        let realtek = Periods { rate: 48000, shared: Some((480, 480, 480, 480)), shared_buffer: 1056, exclusive: (100_000, 30_000), exclusive_rates: vec![] };
+        assert_eq!(realtek.small(), [] as [u32; 0]);
+        assert_eq!(realtek.own(false, 48000), 480);
+        assert_eq!(realtek.sizes(false, 48000), [2048, 4096, 8192], "only lengths over the buffer granted anyway");
+        assert_eq!(realtek.exclusive_frames(48000), (480, 144));
+        assert_eq!(realtek.exclusive_frames(44100), (441, 132));
+        assert_eq!(realtek.sizes(true, 48000), [256, 512, 1024, 2048, 4096, 8192]);
+        // Microsoft's HD Audio driver: 128 to 480 frames in steps of 32 at 48 kHz.
+        let inbox = Periods { shared: Some((480, 32, 128, 480)), ..realtek.clone() };
+        assert_eq!(inbox.small(), [128, 256]);
+        assert_eq!(inbox.sizes(false, 48000), [128, 256, 2048, 4096, 8192]);
+        // A device whose smallest is a length of the usual list: listed once, as "Smallest".
+        let even = Periods { exclusive: (106_667, 26_667), ..realtek };
+        assert_eq!(even.exclusive_frames(48000), (512, 128));
+        assert_eq!(even.sizes(true, 48000), [256, 1024, 2048, 4096, 8192]);
+    }
+
+    /// What the Windows devices here offer for short buffers (`--nocapture` prints it). Needs an audio device.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn periods_of_the_windows_devices() {
+        let (devices, _) = audio_cfg::devices();
+        let p = periods(None).expect("the default device says");
+        assert!(p.rate >= 8000 && p.exclusive.1 > 0 && p.exclusive.1 <= p.exclusive.0, "{p:?}");
+        for d in devices {
+            println!("{d}: {:?}", periods(Some(&d)));
+        }
+        assert_eq!(periods(Some("No Such Device")), None);
+    }
+
+    /// The first Windows device here that takes exclusive mode (Windows' sound settings allow it, `Periods`).
+    #[cfg(windows)]
+    fn exclusive_device() -> Option<String> {
+        audio_cfg::devices().0.into_iter().find(|d| periods(Some(d)).is_some_and(|p| !p.exclusive_rates.is_empty()))
+    }
+
+    /// Exclusive mode plays on a device that takes it, at its default period, its smallest or a length asked; while
+    /// it has the device, a second exclusive open gives way to another device (or is an error while it waits). Needs
+    /// a device that allows exclusive mode.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn exclusive_mode_plays_and_holds_the_device() {
+        let Some(name) = exclusive_device() else { return eprintln!("no device here allows exclusive mode") };
+        let p = periods(Some(&name)).expect("it says");
+        let xruns = Arc::new(AtomicU64::new(0));
+        let cfg = AudioCfg { device: Some(name.clone()), exclusive: true, ..AudioCfg::default() };
+        for (buffer, frames) in [(None, p.exclusive_frames(p.rate).0), (Some(audio_cfg::SMALLEST), p.exclusive_frames(p.rate).1), (Some(1024), 1024)] {
+            let o = open(&AudioCfg { buffer, ..cfg.clone() }, &xruns, false).expect("opens");
+            assert_eq!((o.info.host, o.info.name.as_str(), o.info.instead.as_deref()), (WASAPI_EXCLUSIVE, name.as_str(), None));
+            assert_eq!(o.info.fixed, Some(frames), "{buffer:?}");
+            let (src, _, blocks) = level(0.0);
+            assert!(o.inbox.push(src).is_ok());
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(blocks.load(Ordering::Relaxed) >= 3, "it plays");
+            if buffer.is_none() {
+                // Held: another exclusive open waits, or plays elsewhere in shared mode.
+                let e = open(&cfg, &xruns, true).err().expect("in use");
+                assert_eq!(e, format!("Couldn't open {name}: another program has it to itself"));
+                match open(&cfg, &xruns, false) {
+                    Ok(other) => {
+                        assert!(other.info.host != WASAPI_EXCLUSIVE && other.info.name != name);
+                        let want = format!("Couldn't open {name}: another program has it to itself; using {}", other.info.name);
+                        assert_eq!(other.info.instead, Some(want));
+                    }
+                    Err(e) => assert!(e.contains("nor in shared mode"), "{e}"),
+                }
+            }
+        }
+    }
+
+    /// The default device in exclusive mode: it plays so, or (Windows' sound settings do not allow it) plays in
+    /// shared mode and says why. Needs an audio device.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn exclusive_mode_or_why_not() {
+        let xruns = Arc::new(AtomicU64::new(0));
+        let o = open(&AudioCfg { exclusive: true, ..AudioCfg::default() }, &xruns, false).expect("opens");
+        if o.info.host == WASAPI_EXCLUSIVE {
+            return;
+        }
+        let name = o.info.name.clone();
+        let want = format!("Couldn't open {name} in exclusive mode: Windows' sound settings don't allow it for this device; using shared mode");
+        assert_eq!(o.info.instead.as_deref(), Some(want.as_str()));
+        assert_eq!(o.note.as_deref(), Some(want.as_str()), "told once");
     }
 }

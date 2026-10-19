@@ -166,6 +166,9 @@ pub struct SettingsUi {
     /// Audio page: the audio settings, the rate streams open at, and the status lines (kept up to date while shown).
     pub audio: crate::audio_cfg::AudioCfg,
     pub rate: Option<u32>,
+    /// What the chosen Windows device offers for short buffers (`device::periods`; `None` under an ASIO driver, off
+    /// Windows, or when Windows does not say).
+    pub periods: Option<crate::device::Periods>,
     /// The chosen ASIO driver as it last opened in this session (its rate and buffer length, the rates and lengths it
     /// takes), whether an ASIO driver is open now (Show ASIO panel works), and the device playing in place of the
     /// driver chosen (`DeviceInfo::instead`).
@@ -290,12 +293,18 @@ fn live(key: &str) -> bool {
 }
 
 /// The combos that work (they open a menu of choices, `App::audio_menu`).
-pub const LIVE_COMBOS: [&str; 4] = [OUTPUT_DEVICE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
+pub const LIVE_COMBOS: [&str; 5] = [OUTPUT_DEVICE, MODE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
 /// General ▸ Display: "Entertain me" simulates the mixer's cables, "Off" hangs them still (crate::cable).
 pub const ANIMATIONS: &str = "Animations";
 pub const OUTPUT_DEVICE: &str = "Output device";
 pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
+/// Windows devices: shared mode, or exclusive mode with the device to Lemon Studio alone (spec:
+/// audio/wasapi-low-latency.md 4.2); its menu's two choices; its hint under an ASIO driver, which has no such mode.
+pub const MODE: &str = "Mode";
+pub const MODE_SHARED: &str = "Shared (other programs play too)";
+pub const MODE_EXCLUSIVE: &str = "Exclusive (Lemon Studio alone, smaller buffers)";
+const MODE_ASIO: &str = "Mode: for Windows devices (an ASIO driver plays on its own terms)";
 /// With an ASIO driver: its own settings window, where its buffer length is set.
 pub const SHOW_ASIO_PANEL: &str = "Show ASIO panel";
 /// Show ASIO panel's hint while no ASIO driver is open.
@@ -561,21 +570,40 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 None if asio => format!("Driver ({rate})"),
                 None => format!("Device ({rate})"),
             };
+            // A Windows device's own period and its smallest, as the device says (spec: audio/wasapi-low-latency.md 4.3).
+            let exclusive = st.audio.exclusive();
+            let periods = st.periods.as_ref().filter(|_| !asio);
             let buffer = match st.audio.buffer {
+                Some(crate::audio_cfg::SMALLEST) => match periods {
+                    Some(p) => format!("Smallest ({})", buffer_text(p.exclusive_frames(rate).1, rate)),
+                    None => "Smallest".into(),
+                },
                 Some(b) => buffer_text(b, rate),
                 None if asio => match st.driver.as_ref().and_then(|d| d.fixed.map(|b| buffer_text(b, d.rate))) {
                     Some(b) => format!("Driver ({b})"),
                     None => "Driver".into(),
                 },
-                None => "Device default".into(),
+                None => match periods {
+                    Some(p) => format!("Device ({})", buffer_text(p.own(exclusive, rate), rate)),
+                    None => "Device default".into(),
+                },
             };
             let listed = st.devices.iter().cloned().chain(st.asio_drivers.iter().map(|d| format!("{d} (ASIO)")));
             vec![
                 g("Input / output", [
+                    vec![combo(&st.device, 360.0, OUTPUT_DEVICE)],
+                    // Windows devices play shared or exclusive (greyed under an ASIO driver, `MODE_ASIO`).
+                    if cfg!(windows) {
+                        let mode = combo(if st.audio.exclusive { "Exclusive" } else { "Shared" }, 120.0, MODE);
+                        let device = st.audio.device.as_deref().unwrap_or("the default device");
+                        let alone = exclusive.then(|| Text(format!("Other programs can't play on {device} while Lemon Studio has it open."), true));
+                        std::iter::once(mode).chain(alone).collect()
+                    } else {
+                        Vec::new()
+                    },
                     vec![
-                        combo(&st.device, 360.0, OUTPUT_DEVICE),
                         combo(&rate_text, 120.0, SAMPLE_RATE),
-                        combo(&buffer, 160.0, BUFFER_LENGTH),
+                        combo(&buffer, 190.0, BUFFER_LENGTH),
                         Check("Auto close", false),
                     ],
                     st.instead.iter().map(|i| Text(i.clone(), true)).collect(),
@@ -1353,6 +1381,14 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             check(ui, b, *db, g.x + 324.0, cy, live(b));
         }
         // The Audio page's device, rate and buffer combos and General's Animations open their menus.
+        // An ASIO driver has no Windows mode: the Mode combo shows the one kept, greyed, and its hint says why.
+        Row::Combo(v, w, label) if *label == MODE && s.settings.audio.asio_driver().is_some() => {
+            let b = Rect::new(x0, y + 3.0, *w, 21.0);
+            ui.hit(b, Action::Settings(SAct::Body), MODE_ASIO);
+            kit::combo(ui.c, t, b, v, f, kit::State::NORMAL);
+            let lw = ui.c.text(f, b.right() + 8.0, ty, t.text, label);
+            grey(ui, Rect::new(b.x, b.y, b.w + 8.0 + lw, b.h));
+        }
         Row::Combo(v, w, label) if live_combo(label) || crate::prefs::find_combo(label).is_some() => {
             // A combo declared in `crate::prefs` shows its choice.
             let v = match crate::prefs::find_combo(label) {
