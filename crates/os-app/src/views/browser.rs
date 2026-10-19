@@ -681,9 +681,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     let glass = Rect::new(178.0, fy + 3.0, 21.0, 21.0);
     let hov = ui.hit(glass, Action::BrowserSearch, "Search the browser (Enter = find next, Esc = clear)");
     icons::draw(ui.c, Icon::Search, Rect::new(180.0, fy + 5.0, 17.0, 17.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
-    // Splitter.
-    ui.c.fill_rect(Rect::new(201.0, r.y, 6.0, r.h), t.splitter);
-    ui.c.fill_rect(Rect::new(207.0, r.y, 2.0, r.h), t.splitter_dark);
+    // Splitter. Etched: a hairline down its middle, the backdrop showing either side.
+    if t.style.etched() {
+        ui.c.fill_rect(Rect::new(204.0, r.y, 1.0, r.h), t.toolbar_line);
+    } else {
+        ui.c.fill_rect(Rect::new(201.0, r.y, 6.0, r.h), t.splitter);
+        ui.c.fill_rect(Rect::new(207.0, r.y, 2.0, r.h), t.splitter_dark);
+    }
 }
 
 /// A long disk name shortened in the middle with ".." to fit `w` (FL screenshots, spec §6).

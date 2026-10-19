@@ -13,6 +13,7 @@ mod app;
 mod audio_cfg;
 mod auto_close;
 mod autoscroll;
+mod backdrop;
 mod backup;
 #[cfg(test)]
 mod audio_bench;
@@ -611,6 +612,7 @@ impl ApplicationHandler for Shell {
         // Built-in and cached plugins at once, then a background scan (spec: ui/plugin-manager.md §4).
         self.app.start_plugins();
         self.window = Some(window);
+        self.ask_look();
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16)));
     }
 
@@ -911,6 +913,10 @@ impl ApplicationHandler for Shell {
                 self.app.main_focused(focused);
                 // Audio ▸ Auto close, where the system can't tell which program is in front (`auto_close`).
                 self.app.auto_close.main_focused = focused;
+                // The system's look may have changed meanwhile (the Etched skin follows it).
+                if focused {
+                    self.ask_look();
+                }
                 if !focused {
                     self.grab = None;
                     self.unmax = None;
@@ -925,6 +931,12 @@ impl ApplicationHandler for Shell {
                 self.inset = insets(&window);
                 self.app.invalidate();
                 window.request_redraw();
+            }
+            // The see-through backdrop stays put on the monitor: it is placed again at the next paint.
+            WindowEvent::Moved(_) => {
+                if self.canvas.as_ref().is_some_and(|c| c.backdrop().is_some()) {
+                    window.request_redraw();
+                }
             }
             WindowEvent::Resized(_) => {
                 self.inset = insets(&window);
@@ -965,7 +977,28 @@ impl ApplicationHandler for Shell {
                 let monitor = window.current_monitor();
                 if monitor != self.frame_monitor {
                     self.frame = frame_interval(monitor.as_ref().and_then(|m| m.refresh_rate_millihertz()));
-                    self.frame_monitor = monitor;
+                    self.frame_monitor = monitor.clone();
+                }
+                // The see-through skin's backdrop: the desktop picture where the monitor is, relative to the canvas
+                // (centred on it where the window's position is unknown).
+                let want = monitor.as_ref().and_then(|m| {
+                    let (mp, ms) = (m.position(), m.size());
+                    let (px, bw, bh) = self.app.backdrop_for(ms.width, ms.height)?;
+                    let (mx, my) = match window.inner_position() {
+                        Ok(p) => ((mp.x - p.x - inset.0 as i32) as f32, (mp.y - p.y - inset.1 as i32) as f32),
+                        Err(_) => ((cw as f32 - ms.width as f32) / 2.0, (ch as f32 - ms.height as f32) / 2.0),
+                    };
+                    let at = os_ui::Rect::new(mx / scale, my / scale, ms.width as f32 / scale, ms.height as f32 / scale);
+                    Some(os_ui::Backdrop { w: bw, h: bh, px, at })
+                });
+                let same = match (canvas.backdrop(), &want) {
+                    (Some(a), Some(b)) => std::rc::Rc::ptr_eq(&a.px, &b.px) && a.at == b.at,
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !same {
+                    canvas.set_backdrop(want);
+                    self.app.invalidate();
                 }
                 // Paint only what changed, then present only that region.
                 let damage = self.app.take_damage();
@@ -1141,6 +1174,8 @@ fn screenshot(args: &[String]) {
     let mut win_rect: Option<os_ui::Rect> = None;
     let mut theme: Option<std::path::PathBuf> = None;
     let mut design: Option<os_theme::Design> = None;
+    let mut look: (bool, Option<os_theme::Color>, Option<std::path::PathBuf>) = (true, None, None);
+    let (mut etched_debug, mut tunes) = (false, Vec::<String>::new());
     let mut scale = 1.0f32;
     let mut size: Option<(u32, u32)> = None;
     let mut bar_w: Option<f32> = None;
@@ -1160,6 +1195,14 @@ fn screenshot(args: &[String]) {
             "--theme" => theme = it.next().map(std::path::PathBuf::from),
             // "classic" / "lemon" (spec: ui/lemon-design.md); default: the saved design.
             "--design" => design = it.next().and_then(|v| os_theme::Design::parse(v)),
+            // The system look the Etched skin follows: "dark" / "light", an accent (RRGGBB) and a desktop picture
+            // (default: a generated one).
+            "--look" => look.0 = it.next().is_none_or(|v| v != "light"),
+            "--accent" => look.1 = it.next().and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok()).map(os_theme::Color::rgb),
+            "--wallpaper" => look.2 = it.next().map(std::path::PathBuf::from),
+            // The Etched look's debug panel open, and its values: `--tune "Backdrop opacity=0.3"` (the current mode's).
+            "--etched-debug" => etched_debug = true,
+            "--tune" => tunes.extend(it.next().cloned()),
             // Device pixels per logical one (the frame stays 1920x1080 logical): 1.5 = Windows at 150 %.
             "--scale" => scale = it.next().and_then(|v| v.parse().ok()).filter(|s: &f32| *s >= 0.5 && *s <= 4.0).unwrap_or(1.0),
             "--view" => view = it.next().cloned().unwrap_or_default(),
@@ -1266,7 +1309,16 @@ fn screenshot(args: &[String]) {
             other => path = Some(std::path::PathBuf::from(other)),
         }
     }
+    os_theme::etched::set_appearance(os_theme::etched::Appearance { dark: look.0, accent: look.1.unwrap_or(os_theme::etched::DEFAULT_ACCENT) });
     let mut app = App::new(path);
+    app.state.etched_debug = etched_debug;
+    let mut tuning = os_theme::etched::tuning();
+    for line in &tunes {
+        tuning.load(&format!("{}.{line}", if look.0 { "dark" } else { "light" }));
+    }
+    os_theme::etched::set_tuning(tuning);
+    let picture = look.2.as_deref().and_then(backdrop::load);
+    app.take_look(backdrop::System { dark: look.0, accent: look.1, desktop: backdrop::Desktop { picture, fit: backdrop::Fit::Fill, colour: None } });
     if let Some(i) = insert {
         app.state.selected_mixer = i;
         // Scrolled so the selected insert sits in the right half of the strips.
@@ -1414,6 +1466,10 @@ fn screenshot(args: &[String]) {
     app.state.message = None;
     let (w, h) = size.unwrap_or(((1920.0 * scale).round() as u32, (1080.0 * scale).round() as u32));
     let mut canvas = Canvas::new(w, h, scale).expect("canvas");
+    // The see-through skin: the frame is the whole monitor.
+    if let Some((px, bw, bh)) = app.backdrop_for(w, h) {
+        canvas.set_backdrop(Some(os_ui::Backdrop { w: bw, h: bh, px, at: os_ui::Rect::new(0.0, 0.0, w as f32 / scale, h as f32 / scale) }));
+    }
     app.paint(&mut canvas, None);
     for (x, y, dy) in wheels {
         app.mouse_move(x, y);
@@ -1532,6 +1588,20 @@ fn use_x11() -> bool {
         return false;
     }
     std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) && x11rb::rust_connection::RustConnection::connect(None).is_ok()
+}
+
+impl Shell {
+    /// Reads the system's look in the background (`backdrop`), unless it was just read.
+    fn ask_look(&mut self) {
+        if !self.app.look.due(Instant::now()) {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        let picture = macos::desktop_picture();
+        #[cfg(not(target_os = "macos"))]
+        let picture = None;
+        backdrop::read_async(wake_ui, picture);
+    }
 }
 
 fn wake_ui() {

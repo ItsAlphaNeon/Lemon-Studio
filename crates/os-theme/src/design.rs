@@ -6,7 +6,9 @@
 //! in use.
 //!
 //! `Citrus` (formerly Classic) is the measured default look. `Lemon` is Lemon Studio's own look: neutral greys, one
-//! lemon-yellow brand colour and rounded-square controls (knobs stay round). It re-colours every token and every
+//! lemon-yellow brand colour and rounded-square controls (knobs stay round). `Etched` is a frosted-glass look over
+//! Lemon's shapes: see-through to a blurred wallpaper, colours following the system's dark / light mode and accent
+//! (`crate::etched`). It re-colours every token and every
 //! role-mapped literal (`Palette::s/a/h/tx/led`) through a `DesignMap` (a neutral lightness ramp plus key colours), sets
 //! the tokens the map can't get right outright, and tells the widget kit which shape language to draw (`Style`). A
 //! theme other than the stock Dark one is laid over Lemon's colours by a `Retint`.
@@ -25,16 +27,19 @@ pub enum Design {
     Citrus,
     /// Lemon Studio's own look: lemon on neutral greys, rounded squares.
     Lemon,
+    /// Frosted glass over a blurred wallpaper, in the system's mode and accent (spec: ui/etched-design.md).
+    Etched,
 }
 
 impl Design {
     /// In the order Settings > Theme > Skins shows them.
-    pub const ALL: [Design; 2] = [Design::Lemon, Design::Citrus];
+    pub const ALL: [Design; 3] = [Design::Lemon, Design::Citrus, Design::Etched];
 
     pub fn name(self) -> &'static str {
         match self {
             Design::Citrus => "Citrus",
             Design::Lemon => "Lemon",
+            Design::Etched => "Etched",
         }
     }
 
@@ -55,6 +60,7 @@ impl Design {
         match self {
             Design::Citrus => Style::CITRUS,
             Design::Lemon => Style::LEMON,
+            Design::Etched => Style::ETCHED,
         }
     }
 }
@@ -74,13 +80,20 @@ pub struct Style {
 impl Style {
     pub const CITRUS: Style = Style { design: Design::Citrus, radius: 3.0, radius_small: 2.5, radius_panel: 4.0 };
     pub const LEMON: Style = Style { design: Design::Lemon, radius: 6.0, radius_small: 4.0, radius_panel: 10.0 };
+    pub const ETCHED: Style = Style { design: Design::Etched, radius: 4.0, radius_small: 3.0, radius_panel: 8.0 };
 
     pub fn is(&self, d: Design) -> bool {
         self.design == d
     }
 
+    /// Whether views draw Lemon's shapes: Lemon, and Etched (which is drawn over them).
     pub fn lemon(&self) -> bool {
-        self.design == Design::Lemon
+        matches!(self.design, Design::Lemon | Design::Etched)
+    }
+
+    /// Whether the Etched skin draws (its frosted frame on top of Lemon's shapes).
+    pub fn etched(&self) -> bool {
+        self.design == Design::Etched
     }
 }
 
@@ -110,20 +123,24 @@ pub struct DesignMap {
 const CLASSIC_TEXT_L: f32 = 0.85;
 const CLASSIC_BG_L: f32 = 0.19;
 
+/// Lightness `l` through the (input, output) points of `r` (ascending input), linear between them.
+pub fn ramp(r: &[(f32, f32)], l: f32) -> f32 {
+    if l <= r[0].0 {
+        return r[0].1;
+    }
+    for w in r.windows(2) {
+        let ((a, fa), (b, fb)) = (w[0], w[1]);
+        if l <= b {
+            let t = if b > a { (l - a) / (b - a) } else { 1.0 };
+            return fa + (fb - fa) * t;
+        }
+    }
+    r[r.len() - 1].1
+}
+
 impl DesignMap {
     fn ramp_l(&self, l: f32) -> f32 {
-        let r = self.ramp;
-        if l <= r[0].0 {
-            return r[0].1;
-        }
-        for w in r.windows(2) {
-            let ((a, fa), (b, fb)) = (w[0], w[1]);
-            if l <= b {
-                let t = if b > a { (l - a) / (b - a) } else { 1.0 };
-                return fa + (fb - fa) * t;
-            }
-        }
-        r[r.len() - 1].1
+        ramp(self.ramp, l)
     }
 
     /// A classic surface colour in this design: lightness through the ramp, neutrals take the design's tint;
@@ -219,6 +236,7 @@ const LEMON_RAMP: &[(f32, f32)] = &[
 fn map_of(d: Design) -> Option<DesignMap> {// This code is a part of L e m o n S t u d i o.
     match d {
         Design::Citrus => None,
+        Design::Etched => Some(crate::etched::map(crate::etched::appearance())),
         Design::Lemon => Some(DesignMap {
             ramp: LEMON_RAMP,
             tint: (48.0, 0.0),
@@ -237,6 +255,7 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
     use lemon::*;
     match d {
         Design::Citrus => vec![],
+        Design::Etched => crate::etched::overrides(crate::etched::appearance()),
         Design::Lemon => vec![
             ("toolbar", DARK),
             ("toolbar_line", c(0x2a2a2a)),
@@ -369,20 +388,52 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
 /// The palette of skin `design` coloured by `theme` (a `.flstheme`). The stock Dark theme (whatever its options), or
 /// none, leaves a skin its own colours: Citrus the measured look, Lemon the brand palette; any other theme colours
 /// Citrus through `fl::palette` and is laid over Lemon's colours by a `Retint`.
+///
+/// Being see-through belongs to the skin, colours to the theme: on Etched every theme's surfaces are see-through as
+/// Etched's own are; on the other skins every theme is opaque (the Etched theme laid over its dark base).
 pub fn palette(design: Design, theme: Option<&FlTheme>) -> Palette {
+    let mut p = colours(design, theme);
+    let dark = crate::etched::appearance().dark;
+    if design == Design::Etched {
+        let own = crate::etched::overrides(crate::etched::appearance());
+        for (name, c) in own.into_iter().filter(|(_, c)| c.a < 255) {
+            if let Some(slot) = p.get_mut(name) {
+                *slot = slot.with_alpha(c.a);
+            }
+        }
+    } else if crate::etched::see_through(&p) {
+        crate::etched::flatten(&mut p, dark);
+    }
+    p
+}
+
+/// `palette` before the skin sets what is see-through.
+fn colours(design: Design, theme: Option<&FlTheme>) -> Palette {
     // The Lemon and Citrus themes (`skin_text`): the Lemon theme on Citrus is Lemon's colours with Citrus's shapes; the
     // Citrus theme on Lemon is the stock Dark theme laid over Lemon (stock Dark without the key counts as Lemon's own);
     // Citrus with the Citrus theme is the stock Dark theme, as usual.
     match (design, theme.and_then(|t| t.colors)) {
-        (Design::Lemon, Some(Design::Lemon)) => return palette(design, None),
+        // A skin's own theme on that skin is the skin as it is; the Etched theme on another skin is Etched's colours
+        // with that skin's shapes, and the Lemon theme on Etched Lemon's colours (`palette` sets what shows through).
+        (d, Some(c)) if d == c && d != Design::Citrus => return palette(design, None),
+        (d, Some(Design::Etched)) => {
+            let mut p = palette(Design::Etched, None);
+            p.style = d.style();
+            return p;
+        }
+        (Design::Etched, Some(Design::Lemon)) => {
+            let mut p = palette(Design::Lemon, None);
+            p.style = Design::Etched.style();
+            return p;
+        }
         (Design::Citrus, Some(Design::Lemon)) => {
             let mut p = palette(Design::Lemon, None);
             p.style = Design::Citrus.style();
             return p;
         }
-        (Design::Lemon, Some(Design::Citrus)) => {
-            let mut p = palette(Design::Lemon, None);
-            retint(&mut p, &FlTheme { colors: None, ..theme.expect("a theme").clone() });
+        (Design::Lemon | Design::Etched, Some(Design::Citrus)) => {
+            let mut p = palette(design, None);
+            retint(&mut p, design, &FlTheme { colors: None, ..theme.expect("a theme").clone() });
             return p;
         }
         _ => {}
@@ -412,9 +463,12 @@ pub fn palette(design: Design, theme: Option<&FlTheme>) -> Palette {
         }
     }
     p.xf = fl::Xform { design: Some(map), ..fl::Xform::default() };
+    if design == Design::Etched {
+        p.xf.brand = Some(crate::etched::brand(crate::etched::appearance()));
+    }
     p.style = design.style();
     if let Some(th) = theme.filter(|t| !t.is_stock()) {
-        retint(&mut p, th);
+        retint(&mut p, design, th);
     }
     p
 }
@@ -437,32 +491,58 @@ pub struct Retint {
     /// (text, background) of the skin, and of the theme.
     pub text_from: (Color, Color),
     pub text_to: (Color, Color),
+    /// Greys go through this lightness ramp (neutral) instead of the theme's surface adjustment: Lemon's own greys
+    /// re-keyed to another skin's (`crate::etched::brand`).
+    pub ramp: Option<&'static [(f32, f32)]>,
 }
 
 impl Retint {
     /// `th` over the Lemon skin.
     pub fn lemon(th: &FlTheme) -> Retint {
+        Retint::skin(Design::Lemon, th)
+    }
+
+    /// `th` over skin `d`'s own colours (Lemon's, or Etched's in the current appearance).
+    pub fn skin(d: Design, th: &FlTheme) -> Retint {
+        let (key, text, bg) = match d {
+            Design::Etched => {
+                let m = crate::etched::map(crate::etched::appearance());
+                (m.accent, m.text, m.text_bg)
+            }
+            _ => (lemon::MAIN, lemon::TEXT, lemon::DARK),
+        };
         let mut r = Retint {
             surface: th.surface,
-            key: lemon::MAIN,
+            key,
             accent: th.selected,
             highlight: th.highlight,
             mute: th.mute,
-            text_from: (lemon::TEXT, lemon::DARK),
-            text_to: (lemon::TEXT, lemon::DARK),
+            text_from: (text, bg),
+            text_to: (text, bg),
+            ramp: None,
         };
-        let bg = r.surface(lemon::DARK);
+        let bg = r.surface(bg);
         let text = th.text_color.unwrap_or(if bg.hsl().2 > 0.5 { Color::rgb(0x1e1e1e) } else { lemon::TEXT });
         r.text_to = (fl::readable(text, bg, 0.38), bg);
         r
     }
 
     pub fn surface(&self, c: Color) -> Color {
+        let chroma = f32::from(c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b)) / 255.0;
+        if let Some(r) = self.ramp {
+            let l = ramp(r, c.hsl().2).clamp(0.0, 1.0);
+            let (h, s) = if chroma > 0.09 {
+                let (kh, ks, _) = self.accent(c).hsl();
+                (kh, ks * 0.5)
+            } else {
+                (0.0, 0.0)
+            };
+            return Color::from_hsl_pub(h, s, l, c.a);
+        }
         let l = fl::DARK.invert(c).hsl().2;
         let (h, s, _) = BASE_TINT.hsl();
         let (h2, s2, l2) = self.surface.apply(Color::from_hsl_pub(h, s, l, c.a)).hsl();
         // A coloured surface (Lemon's lemon-tinted wells and hovers) takes the theme's selection hue.
-        let chroma = f32::from(c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b)) / 255.0;
         let (h2, s2) = if chroma > 0.09 {
             let (kh, ks, _) = self.accent(c).hsl();
             (kh, ks)
@@ -501,17 +581,22 @@ impl Retint {
 /// as selection, highlight and mute, Lemon's text, and no step colours, so it colours Lemon as Lemon is (spec:
 /// ui/theme-presets.md §C).
 pub fn default_text(d: Design) -> String {
+    let v = |key: &str, c: Color| format!("{key}={}\n", fl::colour_value(key, c));
+    let own = |key: Color, text: Color| {
+        format!(
+            "Hue=0\nSaturation=-256\nLightness=-153\nContrast=-8\nText=0\n{}{}{}{}BackMode=2\n",
+            v("Selected", key),
+            v("Highlight", key),
+            v("Mute", key),
+            v("TextColor", text)
+        )
+    };
     match d {
         Design::Citrus => fl::DARK_TEXT.to_string(),
-        Design::Lemon => {
-            let v = |key: &str, c: Color| format!("{key}={}\n", fl::colour_value(key, c));
-            format!(
-                "Hue=0\nSaturation=-256\nLightness=-153\nContrast=-8\nText=0\n{}{}{}{}BackMode=2\n",
-                v("Selected", lemon::MAIN),
-                v("Highlight", lemon::MAIN),
-                v("Mute", lemon::MAIN),
-                v("TextColor", lemon::TEXT)
-            )
+        Design::Lemon => own(lemon::MAIN, lemon::TEXT),
+        Design::Etched => {
+            let m = crate::etched::map(crate::etched::appearance());
+            own(m.accent, m.text)
         }
     }
 }
@@ -526,8 +611,8 @@ pub fn skin_text(d: Design) -> String {
 /// Lemon's palette `p` coloured by `th` (see `Retint`). Step faces are the theme's own (as Citrus draws them); the
 /// fixed tokens drawn in the lemon key colour (lit steps, notes, key labels, the default clip, the project category)
 /// follow the theme's selection colour; then what the theme colours directly (`fl::finish`).
-fn retint(p: &mut Palette, th: &FlTheme) {
-    let r = Retint::lemon(th);
+fn retint(p: &mut Palette, d: Design, th: &FlTheme) {
+    let r = Retint::skin(d, th);
     let citrus = fl::palette(th);
     let skin = p.clone();
     for name in Palette::NAMES {
@@ -553,11 +638,41 @@ fn retint(p: &mut Palette, th: &FlTheme) {
     }
     fl::finish(p, th, skin.note_top, true);
     p.xf.retint = Some(r);
+    // Lemon's own colours (which the widget kit draws with) follow the theme as they do on Lemon.
+    if d == Design::Etched {
+        p.xf.brand = Some(Retint::lemon(th));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// See-through is the skin's, colours the theme's: every theme on Etched shows the backdrop where Etched's own
+    /// colours do, and no theme on another skin does (the Etched theme included).
+    #[test]
+    fn only_the_etched_skin_is_see_through() {
+        let own = palette(Design::Etched, None);
+        let mut themes: Vec<Option<FlTheme>> = vec![None, Some(FlTheme::parse(fl::DARK_TEXT))];
+        themes.extend(Design::ALL.iter().map(|d| Some(FlTheme::parse(&skin_text(*d)))));
+        // A theme of its own colours (not a skin's).
+        themes.push(Some(FlTheme::parse(&fl::set_key(fl::DARK_TEXT, "Hue", "120"))));
+        for d in Design::ALL {
+            for th in &themes {
+                let p = palette(d, th.as_ref());
+                let what = format!("{} skin, theme {:?}", d.name(), th.as_ref().and_then(|t| t.colors));
+                assert_eq!(crate::etched::see_through(&p), d == Design::Etched, "{what}");
+                for name in Palette::NAMES {
+                    let (a, b) = (p.get(name).expect("token").a, own.get(name).expect("token").a);
+                    if d == Design::Etched {
+                        assert!(b == 255 || a == b, "{what}: {name} alpha {a}, Etched's {b}");
+                    } else {
+                        assert_eq!(a, 255, "{what}: {name}");
+                    }
+                }
+            }
+        }
+    }
 
     fn contrast(a: Color, b: Color) -> f32 {
         (a.hsl().2 - b.hsl().2).abs()

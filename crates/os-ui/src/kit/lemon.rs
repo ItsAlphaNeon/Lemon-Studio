@@ -12,6 +12,7 @@ use std::f32::consts::PI;
 use os_theme::design::lemon as brand;
 use os_theme::{Color, Palette};
 
+use super::etched as et;
 use super::{chevron, Dir, KnobLook, State};
 use crate::{Canvas, Font, Rect};
 
@@ -58,6 +59,9 @@ pub fn ink_on_lemon() -> Color {
 
 /// Text / glyph colour on a lit face (`lit_in`) under the applied theme.
 pub fn ink_on_lit(t: &Palette) -> Color {
+    if et::on(t) {
+        return t.on_glyph;
+    }
     t.brand_lit(brand::COLORED_DARK)
 }
 
@@ -74,6 +78,9 @@ pub fn lit(c: &mut Canvas, r: Rect, radius: f32, hover: bool) {
 
 /// `lit` in the applied theme's highlight (`Palette::brand_lit`).
 pub fn lit_in(c: &mut Canvas, t: &Palette, r: Rect, radius: f32, hover: bool) {
+    if et::on(t) {
+        return et::accent(c, t, r, radius, hover);
+    }
     let (h, m) = (t.brand_lit(brand::HIGHLIGHT), t.brand_lit(brand::MAIN));
     let (top, bottom) = if hover { (h, m.mix(h, 0.35)) } else { (h.mix(m, 0.45), m) };
     c.fill_rect_gradient(r, top, bottom, radius);
@@ -94,6 +101,9 @@ pub fn outlined(c: &mut Canvas, r: Rect, radius: f32, line: Color, fill: Color) 
 
 /// A display well (hint bar, monitors, time / tempo displays, number fields): darker rounded field.
 pub fn well(c: &mut Canvas, t: &Palette, r: Rect, fill: Color) {
+    if et::on(t) {
+        return et::well(c, t, r, fill);
+    }
     outlined(c, r, r_btn(t).min(r.h / 2.0), fill.shade(-0.22), fill);
 }
 
@@ -106,6 +116,9 @@ pub fn raised(c: &mut Canvas, r: Rect, base: Color, radius: f32) {
 
 /// Toolbar / caption button: rounded square; lemon when on or pressed; only an outline when not available.
 pub fn button(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
+    if et::on(t) {
+        return et::button(c, t, r, st);
+    }
     let rr = r.inset(1.0);
     let rad = r_btn(t).min(rr.w / 2.0).min(rr.h / 2.0);
     if st.disabled && !(st.on || st.pressed) {
@@ -121,11 +134,17 @@ pub fn button(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
 
 /// Small square push button (scroll arrows, spin buttons).
 pub fn flat_button(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
+    if et::on(t) {
+        return et::flat_button(c, t, r, st);
+    }
     let base = t.button.mix(t.scrollbar, 0.5);
     c.fill_rrect(r.inset(0.5), r_small(t), face(base, st));
 }
 
 pub fn arrow_button(c: &mut Canvas, t: &Palette, r: Rect, dir: Dir, st: State) {
+    if et::on(t) {
+        return et::arrow_button(c, t, r, dir, st);
+    }
     flat_button(c, t, r, st);
     let col = if st.hover { t.glyph } else { t.glyph.with_alpha(160) };
     chevron(c, r.cx().round(), r.cy().round(), 4.0, dir, col);
@@ -133,6 +152,9 @@ pub fn arrow_button(c: &mut Canvas, t: &Palette, r: Rect, dir: Dir, st: State) {
 
 /// Dropdown combo: rounded dark field, text, a small down chevron.
 pub fn combo(c: &mut Canvas, t: &Palette, r: Rect, text: &str, font: Font, st: State) {
+    if et::on(t) {
+        return et::combo(c, t, r, text, font, st);
+    }
     let base = t.sunken;
     outlined(c, r, r_btn(t).min(r.h / 2.0), base.shade(-0.2), face(base, st));
     let lh = c.line_height(font);
@@ -142,6 +164,9 @@ pub fn combo(c: &mut Canvas, t: &Palette, r: Rect, text: &str, font: Font, st: S
 
 /// Number box with a spin mark.
 pub fn value_box(c: &mut Canvas, t: &Palette, r: Rect, text: &str, font: Font, st: State) {
+    if et::on(t) {
+        return et::value_box(c, t, r, text, font, st);
+    }
     let base = t.sunken;
     outlined(c, r, r_small(t).min(r.h / 2.0), base.shade(-0.2), face(base, st));
     let lh = c.line_height(font);
@@ -151,6 +176,9 @@ pub fn value_box(c: &mut Canvas, t: &Palette, r: Rect, text: &str, font: Font, s
 
 /// Segmented choice (PAT / SONG, tabs): a rounded square, lemon when chosen.
 pub fn pill(c: &mut Canvas, t: &Palette, r: Rect, label: &str, font: Font, st: State) {
+    if et::on(t) {
+        return et::pill(c, t, r, label, font, st);
+    }
     let rad = r_btn(t).min(r.h / 2.0);
     if st.on {
         lit_in(c, t, r, rad, st.hover);
@@ -167,6 +195,9 @@ pub fn pill(c: &mut Canvas, t: &Palette, r: Rect, label: &str, font: Font, st: S
 
 /// Enable switch in place of the round LED (same centre and radius): a rounded square, lemon when on.
 pub fn led(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, radius: f32, st: State) {
+    if et::on(t) {
+        return et::led(c, t, cx, cy, radius, st);
+    }
     let h = radius - 0.5;
     let r = Rect::new(cx - h, cy - h, 2.0 * h, 2.0 * h);
     let rad = (radius * 0.45).max(2.0);
@@ -190,6 +221,9 @@ pub fn focus_frame(c: &mut Canvas, t: &Palette, r: Rect, width: f32) {
 /// Knobs stay round: a dark disc, a track ring, the value as a lemon arc and a light pointer.
 #[allow(clippy::too_many_arguments)]
 pub fn knob(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, value: f32, bipolar: bool, look: KnobLook, st: State) {
+    if et::on(t) {
+        return et::knob(c, t, cx, cy, r, value, bipolar, look, st);
+    }
     let v = value.clamp(0.0, 1.0);
     let start = 0.75 * PI;
     let sweep = 1.5 * PI;
@@ -226,6 +260,9 @@ pub fn knob(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, value: f32, b
 /// Fader cap centred at (cx, cy) (same 14 x 23 footprint as Classic): rounded, with a centre line that turns
 /// lemon when the track is selected.
 pub fn fader_handle(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, selected: bool, st: State) {
+    if et::on(t) {
+        return et::fader_handle(c, t, cx, cy, selected, st);
+    }
     let h = Rect::new(cx - 7.0, cy - 11.0, 14.0, 23.0);
     c.fill_rrect(h.outset(1.0), 5.0, Color::rgb(0x161616));
     let base = if st.hover || st.pressed { Color::rgb(0x6a6a6a) } else { Color::rgb(0x5c5c5c) };
@@ -237,6 +274,9 @@ pub fn fader_handle(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, selected: boo
 // ---------------------------------------------------------------- scrolling
 
 pub fn scrollbar(c: &mut Canvas, t: &Palette, track: Rect, vertical: bool, pos: f32, view: f32, total: f32, st: State) {
+    if et::on(t) {
+        return et::scrollbar(c, t, track, vertical, pos, view, total, st);
+    }
     c.fill_rect(track, t.scrollbar);
     let len = if vertical { track.h } else { track.w };
     let (off, tl) = super::thumb(len, pos, view, total);
@@ -254,27 +294,72 @@ pub fn scroll_thumb(t: &Palette, st: State) -> Color {
 
 /// Outer frame + body of a floating window: rounded, 1 px outline, title-coloured body.
 pub fn window(c: &mut Canvas, t: &Palette, r: Rect) {
+    if t.style.etched() {
+        // Etched (spec: ui/etched-design.md §5): a window of its own over the desktop, in the frame's margin a soft
+        // shadow (kept inside `r`, which is all that is repainted when it goes).
+        let panel = Rect::new(r.x + 4.0, r.y + 3.0, r.w - 8.0, r.h - 8.0);
+        let rad = r_panel(t);
+        c.shadow(panel, rad, 3.0, 1.0, Color::rgb(0).with_alpha(if dark(t) { 0x80 } else { 0x38 }));
+        c.backdrop_rrect(panel, rad, t.window_title);
+        c.stroke_rrect(panel.inset(0.5), rad - 0.5, 1.0, edge(t));
+        return;
+    }
     outlined(c, r, r_panel(t), t.window_border, t.window_title);
+}
+
+/// Etched: whether the colours are the dark ones (light text).
+pub fn dark(t: &Palette) -> bool {
+    t.text.hsl().2 > 0.5
+}
+
+/// Etched: the hairline edge of a window or a floating panel.
+pub fn edge(t: &Palette) -> Color {
+    et::panel_edge(t)
 }
 
 /// The client area well inside a floating window frame (rounded at the bottom like the window).
 pub fn client(c: &mut Canvas, t: &Palette, r: Rect) {
+    if et::on(t) {
+        // None: the backdrop the frame drew shows under the window's see-through surfaces.
+        return;
+    }
     c.fill_rrect(r, (r_panel(t) - 3.0).max(2.0), t.window_border.mix(t.window_title, 0.3));
 }
 
 /// Popup / dropdown panel body (no shadow: it would paint outside the popup's damage rect).
 pub fn popup(c: &mut Canvas, t: &Palette, r: Rect) {
+    if t.style.etched() {
+        return frosted(c, t, r, t.menu_pop);
+    }
     let rad = 6.0;
     outlined(c, r, rad, t.menu_pop_border, t.menu_pop);
 }
 
+/// Etched (spec: ui/etched-design.md §4): a floating panel of frosted glass over what is behind it, with a soft shadow
+/// and a hairline edge; `base` tells dark glass from light.
+pub fn frosted(c: &mut Canvas, t: &Palette, r: Rect, base: Color) {
+    let rad = r_panel(t);
+    let dark = base.hsl().2 < 0.5;
+    c.frost(r, rad, os_theme::etched::panel_blur(dark), &os_theme::etched::panel_frost(dark));
+    c.shadow(r, rad, 18.0, 6.0, Color::rgb(0).with_alpha(if dark { 0x70 } else { 0x30 }));
+    c.stroke_rrect(r.inset(0.5), rad - 0.5, 1.0, edge(t));
+}
+
 /// Hovered row of a list or menu: an inset rounded bar in the coloured dark.
 pub fn row_highlight(c: &mut Canvas, t: &Palette, r: Rect) {
+    if et::on(t) {
+        return et::row_highlight(c, t, r);
+    }
     c.fill_rrect(Rect::new(r.x + 3.0, r.y, r.w - 6.0, r.h), 4.0_f32.min(r.h / 2.0), t.menu_pop_hi);
 }
 
 /// Window button hover face (minimize / maximize / close).
 pub fn window_button_hover(c: &mut Canvas, t: &Palette, b: Rect, close: bool) {
+    if t.style.etched() {
+        // The system's caption buttons: close turns red, the others a faint veil.
+        let veil = if dark(t) { Color::rgb(0xffffff).with_alpha(0x18) } else { Color::rgb(0).with_alpha(0x10) };
+        return c.fill_rrect(b, 4.0, if close { Color::rgb(0xc42b1c) } else { veil });
+    }
     c.fill_rrect(b, 4.0, if close { t.record.with_alpha(200) } else { t.button_hi });
 }
 
@@ -284,6 +369,9 @@ pub fn window_button_hover(c: &mut Canvas, t: &Palette, b: Rect, close: bool) {
 /// step playing now.
 #[allow(clippy::too_many_arguments)]
 pub fn step(c: &mut Canvas, t: &Palette, r: Rect, on: bool, odd: bool, dim: bool, hover: bool, playing: bool) {
+    if et::on(t) {
+        return et::step(c, t, r, on, odd, dim, hover, playing);
+    }
     let rad = r_small(t);
     let (a, b) = if dim { (t.step_dim_a, t.step_dim_b) } else { (t.step_a, t.step_b) };
     let off = if odd { b } else { a };
@@ -301,6 +389,9 @@ pub fn step(c: &mut Canvas, t: &Palette, r: Rect, on: bool, odd: bool, dim: bool
 
 /// Channel name button (rack): `col` = the channel colour. Returns the label colour.
 pub fn name_button(c: &mut Canvas, t: &Palette, r: Rect, col: Option<Color>, focused: bool, hover: bool) -> Color {
+    if et::on(t) {
+        return et::name_button(c, t, r, col, focused, hover);
+    }
     let base = t.name_button;
     let face_c = match col {
         Some(col) => col.mix(base, 0.6),
@@ -324,6 +415,9 @@ pub fn name_button(c: &mut Canvas, t: &Palette, r: Rect, col: Option<Color>, foc
 
 /// A small control box (rack mixer-track and loop boxes, pattern length).
 pub fn small_box(c: &mut Canvas, t: &Palette, r: Rect, face_c: Color, hover: bool) {
+    if et::on(t) {
+        return et::small_box(c, t, r, face_c, hover);
+    }
     outlined(c, r, r_small(t).min(r.h / 2.0), face_c.shade(-0.3), if hover { face_c.mix(t.brand_grey(brand::DARK_HIGHLIGHT), 0.3) } else { face_c });
 }
 
@@ -340,6 +434,9 @@ pub fn note(c: &mut Canvas, r: Rect, fill: Color, rim: Color) {
 
 /// Track header of the playlist: a rounded tile with an optional colour tab.
 pub fn track_header(c: &mut Canvas, t: &Palette, r: Rect, col: Option<Color>, hover: bool) {
+    if et::on(t) {
+        return et::track_header(c, t, r, col, hover);
+    }
     let rad = r_btn(t).min(r.h / 2.0);
     c.fill_rrect(r, rad, if hover { t.track_header.mix(t.brand_grey(brand::DARK_HIGHLIGHT), 0.25) } else { t.track_header });
     if let Some(col) = col {

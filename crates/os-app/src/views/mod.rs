@@ -7,6 +7,7 @@
 
 pub mod browser;
 pub mod cabledebug;
+pub mod etcheddebug;
 pub mod channel_win;
 pub mod data_folder;
 pub mod dialog;
@@ -111,6 +112,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     let (w, h) = ui.c.size();
     // A maximized Playlist or Piano roll paints all of its rect (`framed`): the workspace under it needs no clear.
     let cover = s.docked().filter(|w| matches!(w, Win::Playlist | Win::PianoRoll)).map(|w| s.win_rect(w));
+    // Etched: its title bar shows the backdrop (`window_frame_ex`).
+    let cover = cover.map(|r| if ui.t.style.etched() { Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0) } else { r });
+    // See-through editors (Etched, spec: ui/etched-design.md §5) show the backdrop under them: nothing is covered.
+    let cover = cover.filter(|_| ui.t.grid.a == 255);
     ui.c.set_cover(cover);
     ui.c.clear(ui.t.workspace);
     ui.c.set_cover(None);
@@ -202,6 +207,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if s.cables.borrow().debug {
         cabledebug::paint(ui, s);
     }
+    if s.etched_debug && ui.t.style.etched() {
+        etcheddebug::paint(ui, s);
+    }
     // The Song info box of a project opened with "Show info on opening" (spec: flp/events/project-info.md).
     crate::project_info::paint_song_info(ui, s);
     // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
@@ -282,7 +290,13 @@ pub fn window_frame(ui: &mut Ui, win: Win, r: Rect, title: &str, title_x: f32, b
 /// `window_frame` with `flat`: a flat title bar without the separator (inside a floating frame).
 pub fn window_frame_ex(ui: &mut Ui, win: Win, r: Rect, title: &str, title_x: f32, buttons: bool, flat: bool) -> Rect {
     let t = ui.t;
-    ui.c.fill_rect(r, t.window_title);
+    if t.style.etched() {
+        // Etched (spec: ui/etched-design.md §5): the title bar shows the backdrop (the frame's, or the workspace's);
+        // the body is a see-through layer the window's surfaces tint.
+        ui.c.fill_rect(Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0), t.window_body);
+    } else {
+        ui.c.fill_rect(r, t.window_title);
+    }
     let bar = Rect::new(r.x, r.y, r.w, 23.0);
     if kit::lemon::on(t) {
         // Lemon (spec: ui/lemon-design.md §3): a flat bar, a hairline under it.

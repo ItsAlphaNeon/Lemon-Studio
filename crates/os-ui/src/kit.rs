@@ -17,6 +17,7 @@ use os_theme::{Color, Palette};
 use crate::{Canvas, Font, Glyph, Rect};
 
 pub mod eq;
+pub mod etched;
 pub mod inst;
 pub mod lemon;
 pub mod menu;
@@ -518,6 +519,14 @@ pub fn tooltip(c: &mut Canvas, t: &Palette, at: (f32, f32), name: &str, caption:
     let x = at.0.min(bounds.right() - w - 4.0).max(bounds.x + 4.0);
     let y = if at.1 + h > bounds.bottom() { at.1 - h - 24.0 } else { at.1 };
     let b = Rect::new(x, y, w, h);
+    if etched::on(t) {
+        etched::tooltip_body(c, t, b);
+        c.text(nf, b.x + 9.0, b.y + 3.0, t.text, name);
+        if !caption.is_empty() {
+            c.text(cf, b.x + 9.0, b.y + 24.0, t.text_dim, caption);
+        }
+        return b;
+    }
     c.fill_rrect(b.outset(1.0), 7.0, Color::rgb(0).with_alpha(90));
     c.fill_rrect(b, 6.0, t.s(0x090909).with_alpha(245));
     c.text(nf, b.x + 9.0, b.y + 3.0, t.tx(0xffffff), name);

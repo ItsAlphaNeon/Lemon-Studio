@@ -9,6 +9,7 @@
 // spec: ui/main-window.md §10 (typography)
 
 mod cache;
+mod frost;
 mod glyph;
 pub mod kit;
 pub mod tabler;
@@ -19,6 +20,7 @@ use std::rc::Rc;
 
 use cache::{Fx, Lru};
 pub use os_theme::Color;
+pub use frost::{blur, frost_pixel, shrink, Backdrop};
 pub use glyph::Glyph;
 pub use text::{font_count, Face, Font};
 use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
@@ -93,6 +95,15 @@ pub struct Canvas {
     glyphs: Lru<Rc<GlyphCoverage>>,
     /// Device bounds of everything drawn since the last `take_drawn` (x0, y0, x1, y1).
     drawn: Option<(i32, i32, i32, i32)>,
+    /// What a see-through `clear` shows (`set_backdrop`).
+    backdrop: Option<Backdrop>,
+    /// The backdrop enlarged to device px, made on first use and kept while it, its place and the canvas stay.
+    backdrop_px: Option<frost::BackdropPx>,
+    /// The last frosted panels and shadows drawn, to draw again without working them out (`frost::KEEP`).
+    kept_frost: Vec<frost::KeptFrost>,
+    kept_shadow: Vec<frost::KeptShadow>,
+    /// Where frosted panels and their shadows were drawn since the last `take_frosted` (logical, with their reach).
+    frosted: Vec<Rect>,
 }
 
 /// The scale and clips `Canvas::rescale` replaced, for `Canvas::unscale`.
@@ -157,6 +168,11 @@ impl Canvas {
             shapes: Lru::new(32 << 20),
             glyphs: Lru::new(16 << 20),
             drawn: None,
+            backdrop: None,
+            backdrop_px: None,
+            kept_frost: Vec::new(),
+            kept_shadow: Vec::new(),
+            frosted: Vec::new(),
         })
     }
 
@@ -549,9 +565,18 @@ impl Canvas {
         (x0 < x1 && y0 < y1).then(|| Rect::new(x0 as f32 / k, y0 as f32 / k, (x1 - x0) as f32 / k, (y1 - y0) as f32 / k))
     }
 
+    /// Fills the canvas with `c`; a colour that is not opaque is laid over the backdrop, or drawn opaque when there is
+    /// none (so what is drawn over it never builds up on the last frame).
     pub fn clear(&mut self, c: Color) {
         let (w, h) = self.size();
-        self.fill_rect(Rect::new(0.0, 0.0, w, h), c);
+        let r = Rect::new(0.0, 0.0, w, h);
+        if c.a == 255 {
+            return self.fill_rect(r, c);
+        }
+        if self.backdrop.is_none() {
+            return self.fill_rect(r, c.with_alpha(255));
+        }
+        self.fill_backdrop(r, c);
     }
 
     /// True when `b` (logical, padded by `pad`) lies entirely outside the current clip.

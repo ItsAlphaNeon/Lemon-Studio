@@ -318,6 +318,9 @@ pub struct Xform {
     pub design: Option<crate::design::DesignMap>,
     /// A theme laid over the design's colours (after `design`).
     pub retint: Option<crate::design::Retint>,
+    /// How Lemon's own colours (the widget kit's constants: `Palette::brand_*`) are re-coloured, when not by `retint`
+    /// (Etched: to its own colours).
+    pub brand: Option<crate::design::Retint>,
 }
 
 impl Xform {
@@ -394,6 +397,7 @@ pub fn palette(th: &FlTheme) -> Palette {
     out.xf = Xform {
         design: None,
         retint: None,
+        brand: None,
         surf: (surface != DARK).then_some(surface),
         accent: pair(dark.selected, th.selected),
         highlight: pair(dark.highlight, th.highlight),
