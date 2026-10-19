@@ -2081,10 +2081,12 @@ impl App {
                 match r {
                     Request::Close(_) => continue,
                     Request::Raise(row) => {
-                        // A click in a plugin window closes an open app popup, as a click elsewhere does.
+                        // A click in a plugin window closes an open app popup and the Song info box, as a click elsewhere
+                        // does.
                         if self.state.playlist.popup.take().is_some() {
                             self.invalidate();
                         }
+                        self.close_song_info();
                         self.state.raise(Win::Hosted(row));
                         self.select_window_track(row);
                         continue;
@@ -3003,6 +3005,7 @@ impl App {
             || self.loading()
             || self.plugin_windows_busy()
             || self.state.tapper.flash_at.is_some()
+            || self.song_info_fading()
             || self.state.cables.borrow().moving()
             || self.hold.is_some()
             || self.smooth.running()
@@ -3080,6 +3083,7 @@ impl App {
         self.cables_tick(now);
         self.backup_tick(now);
         self.work_tick(now);
+        self.song_info_tick(now);
         self.auto_close_tick(now);
         self.follow_settings();
         if self.state.cpu.due(now) {
@@ -4513,6 +4517,10 @@ impl App {
         if !matches!(action, Some(Action::ScrollStep(..))) {
             self.smooth.stop();
         }
+        // Any press takes the Song info box away at once; one outside it goes on to what it is over.
+        if action != Some(Action::SongInfo) {
+            self.close_song_info();
+        }
         self.pressed = action.clone();
         self.armed = None;
         self.armed_right = None;
@@ -4789,6 +4797,7 @@ impl App {
     /// Middle button: grab-scroll the Piano roll and Playlist (FL manual: middle-drag scrolls
     /// both directions).
     pub fn mouse_down_middle(&mut self) {
+        self.close_song_info();
         if crate::typein::is_open(&self.state) || self.modal_open() {
             return;
         }
@@ -4826,6 +4835,7 @@ impl App {
     /// Right button: delete notes in the piano roll (spec: ui/piano-roll.md §8); right-drag on
     /// a scroll bar scrolls.
     pub fn mouse_down_right(&mut self) {
+        self.close_song_info();
         if crate::typein::is_open(&self.state) || self.modal_open() {
             return;
         }
