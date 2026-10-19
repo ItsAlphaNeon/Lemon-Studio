@@ -159,12 +159,15 @@ pub struct SettingsUi {
     pub scroll: f32,
     /// Groups whose open state differs from their default.
     pub folded: HashSet<&'static str>,
-    /// Filled when the window opens: output devices, theme files (name, path), selected preset.
+    /// Filled when the window opens: output devices and ASIO drivers, theme files (name, path), selected preset.
     pub devices: Vec<String>,
+    pub asio_drivers: Vec<String>,
     pub device: String,
     /// Audio page: the audio settings, the rate streams open at, and the status lines (kept up to date while shown).
     pub audio: crate::audio_cfg::AudioCfg,
     pub rate: Option<u32>,
+    /// The open ASIO driver's buffer length.
+    pub asio_buffer: Option<u32>,
     pub status: [String; 2],
     /// Theme presets (name, `.flstheme` text): built-ins (spec ui/theme-presets.md), then the user's theme folder.
     pub themes: Vec<(String, String)>,
@@ -288,6 +291,8 @@ pub const ANIMATIONS: &str = "Animations";
 pub const OUTPUT_DEVICE: &str = "Output device";
 pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
+/// With an ASIO driver: its own settings window, where its buffer length is set.
+pub const SHOW_ASIO_PANEL: &str = "Show ASIO panel";
 
 /// Project ▸ Time settings (spec: ui/settings-choices.md "Project"): the timebase, the "Set as" mode (event 35; the
 /// combo has no label beside it), and the bar (events 17, 18) as a time signature (Numerator / Denominator, FL's
@@ -544,20 +549,32 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Some(b) => buffer_text(b, rate),
                 None => "Device default".into(),
             };
+            // An ASIO driver's buffer length is set in its own panel (spec: audio/devices.md).
+            let length = if st.audio.asio_driver().is_some() {
+                let now = st.asio_buffer.map_or("set in the driver's panel".into(), |b| format!("{} (the driver's)", buffer_text(b, rate)));
+                vec![Text(format!("Buffer length: {now}"), true), Buttons(vec![(SHOW_ASIO_PANEL, 136.0)])]
+            } else {
+                vec![combo(&buffer, 160.0, BUFFER_LENGTH)]
+            };
+            let listed = st.devices.iter().cloned().chain(st.asio_drivers.iter().map(|d| format!("{d} (ASIO)")));
             vec![
-                g("Input / output", vec![
-                    combo(&st.device, 360.0, OUTPUT_DEVICE),
-                    combo(&rate_text, 120.0, SAMPLE_RATE),
-                    combo(&buffer, 160.0, BUFFER_LENGTH),
-                    Check("Auto close", false),
-                    Text(st.status[0].clone(), true),
-                    Text(st.status[1].clone(), true),
-                    List(vec![("Output devices", 0.0)], st.devices.iter().map(|d| vec![d.clone()]).collect(), 4),
-                    Check2("Mix in buffer switch", false, "Triple buffer", false),
-                    combo("Highest", 96.0, "Priority"),
-                    Check("Safe overloads", true),
-                    combo("Mixer", 96.0, "Playback tracking"),
-                ]),
+                g("Input / output", [
+                    vec![combo(&st.device, 360.0, OUTPUT_DEVICE), combo(&rate_text, 120.0, SAMPLE_RATE)],
+                    length,
+                    vec![
+                        Check("Auto close", false),
+                        Text(st.status[0].clone(), true),
+                        Text(st.status[1].clone(), true),
+                        List(vec![("Output devices", 0.0)], listed.map(|d| vec![d]).collect(), 4),
+                        Check2("Mix in buffer switch", false, "Triple buffer", false),
+                        combo("Highest", 96.0, "Priority"),
+                        Check("Safe overloads", true),
+                        combo("Mixer", 96.0, "Playback tracking"),
+                    ],
+                ]
+                .into_iter()
+                .flatten()
+                .collect()),
                 g("CPU", vec![
                     Check2("Multithreaded generator processing", true, "Smart disable", true),
                     Check2("Multithreaded mixer processing", true, "Align tick lengths", false),

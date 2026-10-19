@@ -183,6 +183,8 @@ enum Cmd {
     Close,
     /// The output may be used again (`Transport::open_device`).
     Open,
+    /// Opens the ASIO driver's own settings window (`Transport::asio_panel`).
+    AsioPanel,
     /// Tests: the open device fails as if it went away.
     #[cfg(test)]
     FailDevice,
@@ -310,6 +312,12 @@ impl Transport {
     /// playing if the transport plays by then (`resume`), else paused.
     pub fn open_device(&self) {
         let _ = self.tx.send(Cmd::Open);
+    }
+
+    /// Opens the ASIO driver's own settings window (Settings ▸ Audio ▸ Show ASIO panel), opening the driver first if
+    /// it is closed: on the audio thread, which drives the driver. What went wrong comes back as an error.
+    pub fn asio_panel(&self) {
+        let _ = self.tx.send(Cmd::AsioPanel);
     }
 
     /// Renders `project` offline to a 32-bit float WAV file at `rate`, with the hosted instruments and effects, on the
@@ -886,6 +894,9 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     let mut held: Option<(Project, PlayMode, u64, At)> = None;
     // The device failed while in use; the playback waits in `held` until it opens again.
     let mut lost: Option<Lost> = None;
+    // An ASIO driver chosen opens at once (at the start, with new settings), not with the first note: it stays open,
+    // and loading it takes a while.
+    let mut open_asio = true;
     let swap = |s: &mut Session, library: &mut SampleLibrary| {
         // Build outside the lock, then swap at the playing position.
         let mut e = Engine::new(&s.project, library, s.rate, s.mode);
@@ -1089,6 +1100,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             Ok(Cmd::Reopen) => {
                 live = None;
                 listen_retry = true;
+                open_asio = true;
                 preview = None;
                 preview_until = None;
                 closing.clear();
@@ -1155,6 +1167,12 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 reset_fx_pending = true;
                 listen_retry = true;
             }
+            Ok(Cmd::AsioPanel) if closed => report(&shared, "the output is let go of (Auto close)".into()),
+            Ok(Cmd::AsioPanel) => {
+                if let Err(e) = device.asio_panel() {
+                    report(&shared, e);
+                }
+            }
             Ok(Cmd::Close) => {
                 closed = true;
                 // The playback (paused by the app) is held where it was heard; every stream fades out and closes, then
@@ -1175,6 +1193,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 closed = false;
                 lost = None;
                 listen_retry = true;
+                open_asio = true;
                 // The held playback goes on at its place, unless a Stop or another Play came since; playing if the
                 // transport was resumed meanwhile, else paused (`resume` follows).
                 if let Some((project, mode, generation, mut at)) = held.take().filter(|h| h.2 == shared.generation.load(Ordering::Acquire)) {
@@ -1296,6 +1315,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
             }
         }
+        // An ASIO driver that did not open, and what plays instead.
+        if let Some(note) = device.take_note() {
+            report(&shared, note);
+        }
         // The device frees the streams it let go of; with none left it lets go of the device (Auto close: also one
         // that would stay open).
         device.collect();
@@ -1304,6 +1327,15 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 device.close();
             } else {
                 device.close_idle();
+            }
+        }
+        if open_asio && !closed && lost.is_none() {
+            open_asio = false;
+            if crate::audio_cfg::AudioCfg::current().asio_driver().is_some() {
+                match device.open() {
+                    Ok(o) => publish(&shared, &o.info),
+                    Err(e) => report(&shared, e),
+                }
             }
         }
         if reset_pending && closing.is_empty() {
@@ -1335,6 +1367,14 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             }
             listen_retry = true;
         }
+    }
+}
+
+/// The device opened: the UI shows it (`Transport::opened`, `sample_rate`).
+fn publish(shared: &Shared, info: &DeviceInfo) {
+    shared.sample_rate.store(info.rate, Ordering::Relaxed);
+    if let Ok(mut o) = shared.opened.lock() {
+        *o = Some(info.clone());
     }
 }
 
@@ -1455,10 +1495,7 @@ impl Session {
         let done = Arc::new(AtomicBool::new(false));
         let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), held: AtomicBool::new(false), report: AtomicBool::new(song) });
         if kind != Kind::Preview {
-            shared.sample_rate.store(rate, Ordering::Relaxed);
-            if let Ok(mut o) = shared.opened.lock() {
-                *o = Some(info);
-            }
+            publish(&shared, &info);
         }
         // The queue gets a first block before the stream starts; then the feeder keeps it filled.
         let queue = Arc::new(Queue::new());
@@ -1920,6 +1957,94 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert!(t.tick() > at || t.tick() < at - 1.0, "resumed from {at}: {}", t.tick());
         t.stop();
+    }
+
+    /// An ASIO driver plays the playback at its own buffer length, and stays open once nothing plays (needs a driver:
+    /// `LEMON_TEST_ASIO` names it, else FL Studio ASIO or the first one installed).
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn an_asio_driver_plays() {
+        use crate::audio_cfg::{AudioCfg, Set};
+        let drivers = crate::device::asio_drivers();
+        let pick = std::env::var("LEMON_TEST_ASIO").ok().or_else(|| drivers.iter().find(|d| d.as_str() == "FL Studio ASIO").or(drivers.first()).cloned());
+        let Some(name) = pick else { return };
+        let _restore = DefaultAudio;
+        AudioCfg::default().with(Set::Asio(name.clone())).apply();
+        let mut project = crate::app::test_project();
+        let ch = project.channels[0].index;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: (0..8).map(|i| os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, i * 48) }).collect(), ..Default::default() }];
+        let t = Transport::new(None);
+        // It opens before anything plays.
+        let start = Instant::now();
+        while t.opened().is_none() && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(t.opened().is_some_and(|o| o.host == crate::device::ASIO), "opened at once: {:?} {:?}", t.opened(), t.take_error());
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        let start = Instant::now();
+        while t.seconds() < 0.3 && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let error = t.take_error();
+        let o = t.opened().expect("opened");
+        assert_eq!(error, None);
+        assert!(t.seconds() >= 0.3, "playing: {}", t.seconds());
+        assert_eq!((o.host, o.name.as_str()), (crate::device::ASIO, name.as_str()));
+        assert!(o.fixed.is_some_and(|b| b > 0) && o.rate > 0, "{o:?}");
+        assert_eq!(t.block(), o.fixed.unwrap(), "blocks of the driver's buffer length");
+        // The driver asks to be reset (a buffer length changed in its panel): it opens anew and the playback goes on.
+        let (opens, before) = (crate::device::opens(), t.seconds());
+        t.fail_device();
+        let reset = Instant::now();
+        while t.seconds() < before + 0.2 && reset.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(crate::device::opens() > opens, "opened anew");
+        assert!(t.playing() && t.seconds() > before + 0.2, "goes on from {before}: {}", t.seconds());
+        assert_eq!(t.take_error(), None, "the same driver: nothing to say");
+        // Its panel opens on the audio thread (a window shows: only when asked for).
+        if std::env::var_os("LEMON_TEST_ASIO_PANEL").is_some() {
+            t.asio_panel();
+            std::thread::sleep(Duration::from_millis(1500));
+            assert_eq!(t.take_error(), None, "the panel opened");
+        }
+        t.stop();
+    }
+
+    /// Puts the default audio settings back when dropped (a test that chose others ends, or fails).
+    struct DefaultAudio;
+
+    impl Drop for DefaultAudio {
+        fn drop(&mut self) {
+            crate::audio_cfg::AudioCfg::default().apply();
+        }
+    }
+
+    /// An ASIO driver that does not open gives way to the system's default device, saying so (needs an audio device).
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn a_missing_asio_driver_plays_on_the_default_device() {
+        use crate::audio_cfg::{AudioCfg, Set};
+        let _restore = DefaultAudio;
+        AudioCfg::default().with(Set::Asio("No Such ASIO Driver".into())).apply();
+        let mut project = crate::app::test_project();
+        let ch = project.channels[0].index;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
+        let t = Transport::new(None);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        let start = Instant::now();
+        let mut error = None;
+        while error.is_none() && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+            error = t.take_error();
+        }
+        let o = t.opened();
+        t.stop();
+        let error = error.expect("says so");
+        assert!(error.starts_with("No Such ASIO Driver did not open (") && error.contains("; playing on "), "{error}");
+        assert!(o.is_some_and(|o| o.host != crate::device::ASIO), "a Windows device");
     }
 
     /// Play from a position: what is heard starts there (nothing from the start is queued before the seek). New audio

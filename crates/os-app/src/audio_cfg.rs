@@ -5,6 +5,8 @@
 //! Audio device settings (Settings > Audio): the output device, sample rate and buffer length. They are kept in the
 //! user folder (`audio.txt`) and every stream the transport opens uses them; a device that is gone, a rate it does not
 //! offer or a buffer length it refuses falls back to the system's default device and that device's own rate and buffer.
+//! The device is a Windows (ALSA, Core Audio) one or, on Windows, an ASIO driver (`asio`), whose buffer length is set
+//! in the driver's own panel.
 // spec: ui/settings.md "Audio"
 
 use std::sync::Mutex;
@@ -15,11 +17,13 @@ use cpal::{BufferSize, SampleFormat, StreamConfig, SupportedBufferSize};
 /// The chosen output; `None` = the device's (or the system's) own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioCfg {
+    /// `device` is an ASIO driver (`device::asio_drivers`), not a Windows device.
+    pub asio: bool,
     /// Output device by name.
     pub device: Option<String>,
     /// Sample rate, Hz.
     pub rate: Option<u32>,
-    /// Buffer length, frames.
+    /// Buffer length of a Windows device, frames (an ASIO driver's is the driver's own).
     pub buffer: Option<u32>,
 }
 
@@ -29,14 +33,17 @@ pub const DEFAULT_BUFFER: Option<u32> = if cfg!(target_os = "linux") { Some(512)
 
 impl Default for AudioCfg {
     fn default() -> AudioCfg {
-        AudioCfg { device: None, rate: None, buffer: DEFAULT_BUFFER }
+        AudioCfg { asio: false, device: None, rate: None, buffer: DEFAULT_BUFFER }
     }
 }
 
 /// One setting changed from the Audio page's menus (`Cmd::Audio`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Set {
+    /// A Windows device (`None`: the system's default).
     Device(Option<String>),
+    /// An ASIO driver.
+    Asio(String),
     Rate(Option<u32>),
     Buffer(Option<u32>),
 }
@@ -63,20 +70,28 @@ impl AudioCfg {
 
     pub fn with(mut self, s: Set) -> AudioCfg {
         match s {
-            Set::Device(d) => self.device = d,
+            Set::Device(d) => (self.asio, self.device) = (false, d),
+            Set::Asio(d) => (self.asio, self.device) = (true, Some(d)),
             Set::Rate(r) => self.rate = r,
             Set::Buffer(b) => self.buffer = b,
         }
         self
     }
 
-    /// `key=value` lines: `device`, `rate`, `buffer` (`device`: the device's own); anything else is ignored.
+    /// The ASIO driver chosen (Windows; elsewhere the name is looked for among the devices and not found).
+    pub fn asio_driver(&self) -> Option<&str> {
+        self.device.as_deref().filter(|_| self.asio && cfg!(windows))
+    }
+
+    /// `key=value` lines: `host` (`asio`: the device is an ASIO driver), `device`, `rate`, `buffer` (`device`: the
+    /// device's own); anything else is ignored.
     pub fn parse(text: &str) -> AudioCfg {
         let mut c = AudioCfg::default();
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=') else { continue };
             let v = v.trim();
             match k.trim() {
+                "host" => c.asio = v.eq_ignore_ascii_case("asio"),
                 "device" if !v.is_empty() => c.device = Some(v.to_string()),
                 "rate" => c.rate = v.parse().ok().filter(|&r| r >= 8000),
                 "buffer" if v == "device" => c.buffer = None,
@@ -89,6 +104,9 @@ impl AudioCfg {
 
     pub fn text(&self) -> String {
         let mut s = String::new();
+        if self.asio {
+            s += "host=asio\n";
+        }
         if let Some(d) = &self.device {
             s += &format!("device={d}\n");
         }
@@ -188,9 +206,13 @@ pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
 }
 
 /// The sample rate the settings' device would open at now, asking the device (`device::rate` knows it once the device
-/// opened).
+/// opened). An ASIO driver is not asked (that would load it): the rate chosen, else unknown until it opens.
 pub fn rate() -> Option<u32> {
-    output(&AudioCfg::current()).ok().map(|o| o.config.sample_rate)
+    let cfg = AudioCfg::current();
+    if cfg.asio_driver().is_some() {
+        return cfg.rate;
+    }
+    output(&cfg).ok().map(|o| o.config.sample_rate)
 }
 
 #[cfg(test)]
@@ -199,8 +221,15 @@ mod tests {
 
     #[test]
     fn settings_text_round_trips() {
-        let c = AudioCfg { device: Some("Speakers (USB Audio)".into()), rate: Some(48000), buffer: Some(256) };
+        let c = AudioCfg { asio: false, device: Some("Speakers (USB Audio)".into()), rate: Some(48000), buffer: Some(256) };
         assert_eq!(AudioCfg::parse(&c.text()), c);
+        // An ASIO driver; a file from before there were drivers (no `host`) is a Windows device.
+        let a = AudioCfg::default().with(Set::Asio("FL Studio ASIO".into()));
+        assert!(a.text().starts_with("host=asio\ndevice=FL Studio ASIO\n"), "{}", a.text());
+        assert_eq!(AudioCfg::parse(&a.text()), a);
+        assert!(!AudioCfg::parse("device=FL Studio ASIO\n").asio);
+        assert_eq!(a.clone().with(Set::Device(None)), AudioCfg::default(), "a Windows device again");
+        assert_eq!(a.asio_driver(), cfg!(windows).then_some("FL Studio ASIO"));
         assert_eq!(AudioCfg::parse(""), AudioCfg::default());
         // Unknown keys and nonsense values are skipped.
         let d = AudioCfg::parse("colour=red\nrate=12\nbuffer=0\ndevice=\n");

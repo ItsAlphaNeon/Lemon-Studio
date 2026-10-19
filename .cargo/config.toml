@@ -1,0 +1,4 @@
+# ASIO output (Windows): asio-sys builds the ASIO SDK's host files kept in crates/os-app/asiosdk (its variable keeps
+# cpal's name); without this its build downloads the whole SDK from Steinberg.
+[env]
+CPAL_ASIO_DIR = { value = "crates/os-app/asiosdk", relative = true }

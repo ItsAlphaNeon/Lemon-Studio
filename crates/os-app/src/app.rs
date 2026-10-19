@@ -3615,14 +3615,17 @@ impl App {
     /// Fills the Audio page: the output devices, the audio settings and the status (spec: ui/settings.md "Audio").
     fn audio_page(&mut self) {
         let (devices, default) = crate::audio_cfg::devices();
+        let drivers = crate::device::asio_drivers();
         let cfg = crate::audio_cfg::AudioCfg::current();
         let st = &mut self.state.settings;
+        let listed = if cfg.asio_driver().is_some() { &drivers } else { &devices };
         st.device = match &cfg.device {
-            Some(d) if devices.contains(d) => d.clone(),
+            Some(d) if listed.contains(d) => d.clone(),
             Some(d) => format!("{d} (not found: default device)"),
             None => format!("Default ({})", default.as_deref().unwrap_or("no output device")),
         };
         st.devices = devices;
+        st.asio_drivers = drivers;
         st.audio = cfg;
         st.rate = Transport::device_rate();
         self.audio_status();
@@ -3631,7 +3634,9 @@ impl App {
     /// The Audio page's status lines from the stream that is open; returns whether they changed.
     fn audio_status(&mut self) -> bool {
         let tp = &self.transport;
-        let first = match tp.opened() {
+        let opened = tp.opened();
+        let asio_buffer = opened.as_ref().filter(|o| o.host == crate::device::ASIO).and_then(|o| o.fixed);
+        let first = match opened {
             Some(o) => {
                 let rate = o.rate;
                 let block = match tp.block() {
@@ -3641,15 +3646,19 @@ impl App {
                 let buffer = o.fixed.map_or(String::new(), |b| format!(", buffer {}", views::settings::buffer_text(b, rate)));
                 format!("Status: {} open at {rate} Hz{block}{buffer} ({})", o.name, o.host)
             }
-            None => format!("Status: opens with the first note or Play ({})", cpal::default_host().id().name()),
+            None => {
+                let host = if self.state.settings.audio.asio_driver().is_some() { crate::device::ASIO } else { cpal::default_host().id().name() };
+                format!("Status: opens with the first note or Play ({host})")
+            }
         };
         let second = match tp.underruns() {
             0 => "No dropouts so far.".to_string(),
             n => format!("Dropouts so far: {n} (device blocks the engine could not fill in time; a longer buffer helps)"),
         };
         let st = &mut self.state.settings;
-        let changed = st.status[0] != first || st.status[1] != second;
+        let changed = st.status[0] != first || st.status[1] != second || st.asio_buffer != asio_buffer;
         st.status = [first, second];
+        st.asio_buffer = asio_buffer;
         changed
     }
 
@@ -3695,9 +3704,16 @@ impl App {
                     })
                     .collect()
             }
-            OUTPUT_DEVICE => std::iter::once(PItem::new("Default device", Cmd::Audio(Set::Device(None))).mark(Mark::Radio(cfg.device.is_none())))
-                .chain(st.devices.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Device(Some(d.clone())))).mark(Mark::Radio(cfg.device.as_ref() == Some(d)))))
-                .collect(),
+            // The Windows devices, then the ASIO drivers under their heading (spec: audio/devices.md).
+            OUTPUT_DEVICE => {
+                let asio = cfg.asio_driver().is_some();
+                let on = |d: &String, driver: bool| Mark::Radio(asio == driver && cfg.device.as_ref() == Some(d));
+                std::iter::once(PItem::new("Default device", Cmd::Audio(Set::Device(None))).mark(Mark::Radio(cfg.device.is_none())))
+                    .chain(st.devices.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Device(Some(d.clone())))).mark(on(d, false))))
+                    .chain((!st.asio_drivers.is_empty()).then(|| PItem::head("ASIO")))
+                    .chain(st.asio_drivers.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Asio(d.clone()))).mark(on(d, true))))
+                    .collect()
+            }
             SAMPLE_RATE => std::iter::once(PItem::new("Device rate", Cmd::Audio(Set::Rate(None))).mark(Mark::Radio(cfg.rate.is_none())))
                 .chain(RATES.iter().map(|&r| PItem::new(format!("{r} Hz"), Cmd::Audio(Set::Rate(Some(r)))).mark(Mark::Radio(cfg.rate == Some(r)))))
                 .collect(),
@@ -3998,6 +4014,7 @@ impl App {
                 }
             }
             SAct::Button("Load theme...") => self.theme_dialog(),
+            SAct::Button(views::settings::SHOW_ASIO_PANEL) => self.transport.asio_panel(),
             SAct::Button("Manage plugins") => self.open_settings(views::settings::PLUGINS),
             SAct::Button("Manage messages") => return self.messages_menu(),
             SAct::Button("Find new plugins") => self.start_scan(crate::plugin_db::Mode::Changed),

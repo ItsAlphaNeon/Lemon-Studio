@@ -9,10 +9,11 @@
 //! so the callback never locks, allocates or frees memory; a source let go of (`Source::detached`) is handed back and
 //! freed on the audio thread (`OutputDevice::collect`).
 //!
-//! The device opens with the audio settings (`audio_cfg`) when first needed. A Windows (or ALSA, Core Audio) device
-//! closes again once nothing plays (`close_idle`), as the streams did when each sound had its own: an open stream keeps
-//! the computer from sleeping. A stream that failed (the device went away, a driver asked to be reset) reports it
-//! (`failure`) and is opened anew the next time it is needed.
+//! The device opens with the audio settings (`audio_cfg`) when first needed: a Windows (or ALSA, Core Audio) device
+//! through cpal, an ASIO driver through `asio`. A Windows device closes again once nothing plays (`close_idle`), as the
+//! streams did when each sound had its own: an open stream keeps the computer from sleeping. An ASIO driver stays open
+//! (another program could take it meanwhile) until Auto close or new settings let go of it. A stream that failed (the
+//! device went away, a driver asked to be reset) reports it (`failure`) and is opened anew the next time it is needed.
 //!
 //! What opened is published (`last`, `rate`), so the settings page and the hosted plugins never have to ask the device
 //! themselves: asking an ASIO driver means loading it, and only the thread that drives the device may.
@@ -25,6 +26,20 @@ use cpal::{BufferSize, FromSample, SampleFormat, SizedSample, StreamConfig};
 use crossbeam_queue::ArrayQueue;
 
 use crate::audio_cfg::{self, AudioCfg};
+
+#[cfg(windows)]
+mod asio;
+
+/// `DeviceInfo::host` of an ASIO driver.
+pub const ASIO: &str = "ASIO";
+
+/// The installed ASIO drivers' names (none off Windows). None is loaded to list them, so any thread may ask.
+pub fn asio_drivers() -> Vec<String> {
+    #[cfg(windows)]
+    return asio::drivers();
+    #[cfg(not(windows))]
+    Vec::new()
+}
 
 /// What the device's callback plays: one stream's worth of sound (playback, a preview, live notes).
 pub(crate) trait Source: Send {
@@ -102,7 +117,7 @@ pub struct DeviceInfo {
     /// The device's name as the settings show it.
     pub name: String,
     pub rate: u32,
-    /// The buffer length asked for (`None`: the device's own).
+    /// The buffer length asked for (`None`: the device's own); an ASIO driver's own.
     pub fixed: Option<u32>,
     /// The buffer lengths the device says it takes, frames (`None`: it does not say).
     pub buffers: Option<(u32, u32)>,
@@ -157,13 +172,22 @@ pub(crate) fn pump() {
     }
 }
 
+/// What plays the mix: a cpal stream or an ASIO driver.
+enum Stream {
+    Cpal(#[allow(dead_code)] cpal::Stream),
+    #[cfg(windows)]
+    Asio(#[allow(dead_code)] asio::AsioOut),
+}
+
 /// The open stream and what it was opened with.
 pub(crate) struct Open {
     /// Dropped first: the callback (and the sources in it) stop before the queues go.
-    _stream: cpal::Stream,
+    _stream: Stream,
     inbox: Arc<Queue>,
     outbox: Arc<Queue>,
     pub(crate) info: DeviceInfo,
+    /// What to tell about how it opened (the ASIO driver that did not open, and what plays instead).
+    note: Option<String>,
     /// The stream reported an error it does not recover from (the device went away), and what it said.
     failed: Arc<AtomicBool>,
     fault: Arc<Mutex<Option<String>>>,
@@ -211,9 +235,33 @@ impl OutputDevice {
         self.open = None;
     }
 
-    /// Nothing plays any more: lets go of the device.
+    /// Nothing plays any more: lets go of a Windows device (an ASIO driver stays open).
     pub(crate) fn close_idle(&mut self) {
-        self.close();
+        if !self.is_asio() {
+            self.close();
+        }
+    }
+
+    /// An ASIO driver is open.
+    pub(crate) fn is_asio(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.info.host == ASIO)
+    }
+
+    /// What to tell about how the device opened, once.
+    pub(crate) fn take_note(&mut self) -> Option<String> {
+        self.open.as_mut()?.note.take()
+    }
+
+    /// Opens the ASIO driver's own settings window (opening the driver first if it is closed).
+    pub(crate) fn asio_panel(&mut self) -> Result<(), String> {
+        self.open()?;
+        if !self.is_asio() {
+            return Err("the output is not an ASIO driver".into());
+        }
+        #[cfg(windows)]
+        return asio::control_panel();
+        #[cfg(not(windows))]
+        Ok(())
     }
 
     /// Plays `source` from the next block on (opening the device first if it is closed).
@@ -242,14 +290,46 @@ impl OutputDevice {
     }
 }
 
-/// Opens the stream for `cfg`: its device, rate and buffer length, else the device's own buffer length.
+/// Opens the stream for `cfg`. An ASIO driver that does not open (another program has it, its device is missing)
+/// gives way to the system's default device, saying so; the settings keep the driver, which is tried again with the
+/// next open.
 fn open(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
+    #[cfg(windows)]
+    if let Some(name) = cfg.asio_driver() {
+        let e = match open_asio(name, cfg.rate, xruns) {
+            Ok(o) => return Ok(o),
+            Err(e) => e,
+        };
+        let system = AudioCfg { asio: false, device: None, ..cfg.clone() };
+        let mut o = open_system(&system, xruns).map_err(|f| format!("{name} did not open ({e}), nor did the default device ({f})"))?;
+        o.note = Some(format!("{name} did not open ({e}); playing on {}", o.info.name));
+        return Ok(o);
+    }
+    open_system(cfg, xruns)
+}
+
+/// The two queues a new stream's callback takes its sources from and hands them back on, and where its errors go.
+fn queues(xruns: &Arc<AtomicU64>) -> (Arc<Queue>, Arc<Queue>, Errors) {
+    let errors = Errors { failed: Arc::new(AtomicBool::new(false)), fault: Arc::new(Mutex::new(None)), xruns: xruns.clone() };
+    (Arc::new(Queue::new(MAX_SOURCES)), Arc::new(Queue::new(MAX_SOURCES)), errors)
+}
+
+/// Opens ASIO driver `name`, at `rate` when it takes it.
+#[cfg(windows)]
+fn open_asio(name: &str, rate: Option<u32>, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
+    let (inbox, outbox, errors) = queues(xruns);
+    let a = asio::open(name, rate, Mix::new(inbox.clone(), outbox.clone()), errors.clone())?;
+    let info = DeviceInfo { host: ASIO, name: name.to_string(), rate: a.rate, fixed: Some(a.frames), buffers: Some(a.buffers), channels: a.channels };
+    Ok(Open { _stream: Stream::Asio(a.out), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault })
+}
+
+/// Opens a Windows (ALSA, Core Audio) device's stream for `cfg`: its device, rate and buffer length, else the
+/// device's own buffer length.
+fn open_system(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
     let out = audio_cfg::output(cfg)?;
     let (device, format, mut config) = (out.device, out.format, out.config);
     let (host, buffers) = (out.host, out.buffers);
-    let inbox = Arc::new(Queue::new(MAX_SOURCES));
-    let outbox = Arc::new(Queue::new(MAX_SOURCES));
-    let errors = Errors { failed: Arc::new(AtomicBool::new(false)), fault: Arc::new(Mutex::new(None)), xruns: xruns.clone() };
+    let (inbox, outbox, errors) = queues(xruns);
     let mix = || Mix::new(inbox.clone(), outbox.clone());
     let mut fixed = match config.buffer_size {
         BufferSize::Fixed(b) => Some(b),
@@ -265,7 +345,7 @@ fn open(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
     let stream = stream?;
     stream.play().map_err(|e| e.to_string())?;
     let info = DeviceInfo { host, name: out.name, rate: config.sample_rate, fixed, buffers, channels: config.channels };
-    Ok(Open { _stream: stream, inbox, outbox, info, failed: errors.failed, fault: errors.fault })
+    Ok(Open { _stream: Stream::Cpal(stream), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault })
 }
 
 /// Where a stream's errors go (its error callback, which runs off the audio callback).
@@ -280,20 +360,28 @@ impl Errors {
     fn report(&self, e: cpal::Error) {
         use cpal::ErrorKind::*;
         match e.kind() {
-            Xrun => {
-                self.xruns.fetch_add(1, Ordering::Relaxed);
-            }
+            Xrun => self.xrun(),
             // The stream plays on (moved to the new default device, or at a normal priority).
             DeviceChanged | RealtimeDenied => eprintln!("audio stream: {e}"),
             // Anything else: the stream has to be opened anew.
             _ => {
                 eprintln!("audio stream error: {e}");
-                if let Ok(mut f) = self.fault.lock() {
-                    f.get_or_insert_with(|| e.to_string());
-                }
-                self.failed.store(true, Ordering::Release);
+                self.fail(e.to_string());
             }
         }
+    }
+
+    /// The stream does not play on: it is opened anew (`OutputDevice::failure`); the first reason is kept.
+    fn fail(&self, why: String) {
+        if let Ok(mut f) = self.fault.lock() {
+            f.get_or_insert(why);
+        }
+        self.failed.store(true, Ordering::Release);
+    }
+
+    /// The device lost a block.
+    fn xrun(&self) {
+        self.xruns.fetch_add(1, Ordering::Relaxed);
     }
 }
 
