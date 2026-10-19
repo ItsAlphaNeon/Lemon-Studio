@@ -840,6 +840,20 @@ pub fn pointer() -> Option<(i32, i32)> {
     Some((i32::from(r.root_x), i32::from(r.root_y)))
 }
 
+/// Whether the pointer is over a docked frame or its editor. A wheel turn there reaches the main window as well: it also
+/// comes as XInput 2 motion carrying only scroll values, which has no core form, so the frame and editors reading the
+/// wheel as buttons 4 and 5 leave it to their parent. The main window has to get it all the same (its toolkit counts
+/// the wheel from the scroll values it sees), so the app drops the turn instead (UI thread).
+pub fn pointer_in_docked() -> bool {
+    let Some(conn) = CONN.with(|c| c.borrow().clone()) else { return false };
+    let owner = conn.owner.get();
+    if owner == 0 || conn.frames.borrow().is_empty() {
+        return false;
+    }
+    let Some(r) = conn.c.query_pointer(owner).ok().and_then(|r| r.reply().ok()) else { return false };
+    conn.frames.borrow().get(&r.child).and_then(Weak::upgrade).is_some_and(|f| !f.state.borrow().detached)
+}
+
 /// The window an event is about.
 fn window_of(e: &Event) -> Option<xproto::Window> {
     Some(match e {
