@@ -1161,6 +1161,8 @@ pub struct App {
     loading: Option<crate::loading::Loading>,
     /// A WAV export is rendering (FILE > Export): its file name and progress (0..1); the same panel shows, input waits.
     export: Option<(String, f32)>,
+    /// `device::opens` when the hosted plugins last followed the output device's rate (`follow_device`).
+    device_opens: u64,
     /// The project and tempo as last opened, saved or created: anything else has unsaved changes.
     pub(crate) saved: (Project, f64),
     /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
@@ -1327,6 +1329,7 @@ impl App {
             native_failed: Vec::new(),
             loading: None,
             export: None,
+            device_opens: 0,
             saved: (Project::default(), 0.0),
             backup: Default::default(),
         };
@@ -3030,6 +3033,20 @@ impl App {
     /// General ▸ Miscellaneous checks that follow a change, on every tick and before a frame: "Select first channel with
     /// notes when the pattern changes" (`App::pattern_tick`), "Auto zoom in piano roll" (`piano::open_tick`). Also the
     /// theme's rule for new clips' channel colours, which the code making them reads from the state.
+    /// The output device opened (again, or another one: a fallback, a driver set to another rate): hosted plugins move
+    /// to its rate.
+    fn follow_device(&mut self) {
+        let opens = crate::device::opens();
+        if opens == self.device_opens {
+            return;
+        }
+        self.device_opens = opens;
+        if let Some(rate) = crate::device::last().map(|i| i.rate) {
+            self.plugins.set_rate(rate);
+            self.state.settings.rate = Some(rate);
+        }
+    }
+
     fn follow_settings(&mut self) {
         self.pattern_tick();
         if crate::piano::open_tick(&mut self.state) {
@@ -3082,6 +3099,7 @@ impl App {
             self.state.message = Some(format!("Audio: {e}"));
             self.invalidate();
         }
+        self.follow_device();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
         let now = std::time::Instant::now();
@@ -3597,49 +3615,77 @@ impl App {
     /// Fills the Audio page: the output devices, the audio settings and the status (spec: ui/settings.md "Audio").
     fn audio_page(&mut self) {
         let (devices, default) = crate::audio_cfg::devices();
+        let drivers = crate::device::asio_drivers();
         let cfg = crate::audio_cfg::AudioCfg::current();
         let st = &mut self.state.settings;
+        let listed = if cfg.asio_driver().is_some() { &drivers } else { &devices };
         st.device = match &cfg.device {
-            Some(d) if devices.contains(d) => d.clone(),
+            Some(d) if listed.contains(d) => d.clone(),
             Some(d) => format!("{d} (not found: default device)"),
             None => format!("Default ({})", default.as_deref().unwrap_or("no output device")),
         };
         st.devices = devices;
+        st.asio_drivers = drivers;
+        // What the Windows device offers for short buffers (spec: audio/wasapi-low-latency.md 4.3).
+        st.periods = if cfg.asio_driver().is_some() { None } else { crate::device::periods(cfg.device.as_deref()) };
         st.audio = cfg;
-        st.rate = crate::audio_cfg::rate();
+        st.rate = Transport::device_rate();
         self.audio_status();
     }
 
     /// The Audio page's status lines from the stream that is open; returns whether they changed.
     fn audio_status(&mut self) -> bool {
+        use crate::device::{ASIO, WASAPI_EXCLUSIVE};
         let tp = &self.transport;
-        let host = cpal::default_host().id().name();
-        let first = match tp.opened() {
-            Some((name, rate, buffer)) => {
+        let opened = tp.opened();
+        let asio_open = opened.as_ref().is_some_and(|o| o.host == ASIO);
+        let instead = opened.as_ref().and_then(|o| o.instead.clone());
+        let chosen = self.state.settings.audio.asio_driver().map(str::to_string);
+        let driver = chosen.and_then(|name| crate::device::last().filter(|i| i.host == ASIO && i.name == name));
+        let first = match opened {
+            // An ASIO driver's blocks are its buffer (spec: audio/devices.md, "Status lines"), as are those of a device in
+            // exclusive mode (audio/wasapi-low-latency.md 4.6).
+            Some(o) if o.host == ASIO || o.host == WASAPI_EXCLUSIVE => {
+                let blocks = o.fixed.map_or(String::new(), |b| format!(", blocks of {}", views::settings::buffer_text(b, o.rate)));
+                format!("Status: {} open at {} Hz{blocks} ({})", o.name, o.rate, o.host)
+            }
+            Some(o) => {
+                let rate = o.rate;
                 let block = match tp.block() {
                     0 => String::new(),
                     b => format!(", blocks of {}", views::settings::buffer_text(b, rate)),
                 };
-                let buffer = buffer.map_or(String::new(), |b| format!(", buffer {}", views::settings::buffer_text(b, rate)));
-                format!("Status: {name} open at {rate} Hz{block}{buffer} ({host})")
+                let buffer = o.fixed.map_or(String::new(), |b| format!(", buffer {}", views::settings::buffer_text(b, rate)));
+                format!("Status: {} open at {rate} Hz{block}{buffer} ({})", o.name, o.host)
             }
-            None => format!("Status: opens with the first note or Play ({host})"),
+            None => {
+                let cfg = &self.state.settings.audio;
+                let host = if cfg.asio_driver().is_some() {
+                    ASIO
+                } else if cfg.exclusive() {
+                    WASAPI_EXCLUSIVE
+                } else {
+                    cpal::default_host().id().name()
+                };
+                format!("Status: opens with the first note or Play ({host})")
+            }
         };
         let second = match tp.underruns() {
             0 => "No dropouts so far.".to_string(),
             n => format!("Dropouts so far: {n} (device blocks the engine could not fill in time; a longer buffer helps)"),
         };
         let st = &mut self.state.settings;
-        let changed = st.status[0] != first || st.status[1] != second;
+        let changed = st.status[0] != first || st.status[1] != second || (&st.driver, st.asio_open, &st.instead) != (&driver, asio_open, &instead);
         st.status = [first, second];
+        (st.driver, st.asio_open, st.instead) = (driver, asio_open, instead);
         changed
     }
 
     /// The menu of an Audio page combo, under its box (`x`, `y`).
     fn audio_menu(&mut self, label: &str, x: f32, y: f32) {
-        use crate::audio_cfg::{Set, BUFFERS, RATES};
+        use crate::audio_cfg::{Set, BUFFERS, RATES, SMALLEST};
         use crate::playlist::{Cmd, Mark, PItem, Popup};
-        use views::settings::{ANIMATIONS, BUFFER_LENGTH, OUTPUT_DEVICE, SAMPLE_RATE};
+        use views::settings::{ANIMATIONS, BUFFER_LENGTH, MODE, MODE_EXCLUSIVE, MODE_SHARED, OUTPUT_DEVICE, SAMPLE_RATE};
         let still = !self.state.cables.borrow().animations();
         let st = &self.state.settings;
         let cfg = &st.audio;
@@ -3677,17 +3723,67 @@ impl App {
                     })
                     .collect()
             }
-            OUTPUT_DEVICE => std::iter::once(PItem::new("Default device", Cmd::Audio(Set::Device(None))).mark(Mark::Radio(cfg.device.is_none())))
-                .chain(st.devices.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Device(Some(d.clone())))).mark(Mark::Radio(cfg.device.as_ref() == Some(d)))))
-                .collect(),
-            SAMPLE_RATE => std::iter::once(PItem::new("Device rate", Cmd::Audio(Set::Rate(None))).mark(Mark::Radio(cfg.rate.is_none())))
-                .chain(RATES.iter().map(|&r| PItem::new(format!("{r} Hz"), Cmd::Audio(Set::Rate(Some(r)))).mark(Mark::Radio(cfg.rate == Some(r)))))
-                .collect(),
-            BUFFER_LENGTH => std::iter::once(PItem::new("Device default", Cmd::Audio(Set::Buffer(None))).mark(Mark::Radio(cfg.buffer.is_none())))
-                .chain(BUFFERS.iter().map(|&b| {
-                    PItem::new(views::settings::buffer_text(b, rate), Cmd::Audio(Set::Buffer(Some(b)))).mark(Mark::Radio(cfg.buffer == Some(b)))
-                }))
-                .collect(),
+            // The Windows devices, then the ASIO drivers, each under its heading (spec: audio/devices.md, "The Output
+            // device menu"). The ASIO heading has the ® its first use needs (the ASIO SDK's usage guidelines §15).
+            OUTPUT_DEVICE => {
+                let asio = cfg.asio_driver().is_some();
+                let on = |d: &String, driver: bool| Mark::Radio(asio == driver && cfg.device.as_ref() == Some(d));
+                cfg!(windows)
+                    .then(|| PItem::head("Windows devices"))
+                    .into_iter()
+                    .chain(std::iter::once(PItem::new("Default device", Cmd::Audio(Set::Device(None))).mark(Mark::Radio(cfg.device.is_none()))))
+                    .chain(st.devices.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Device(Some(d.clone())))).mark(on(d, false))))
+                    .chain((!st.asio_drivers.is_empty()).then(|| PItem::head("ASIO® devices")))
+                    .chain(st.asio_drivers.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Asio(d.clone()))).mark(on(d, true))))
+                    .collect()
+            }
+            // Windows devices: shared or exclusive mode (spec: audio/wasapi-low-latency.md 4.2).
+            MODE => vec![
+                PItem::new(MODE_SHARED, Cmd::Audio(Set::Mode(false))).mark(Mark::Radio(!cfg.exclusive)),
+                PItem::new(MODE_EXCLUSIVE, Cmd::Audio(Set::Mode(true))).mark(Mark::Radio(cfg.exclusive)),
+            ],
+            // Under an ASIO driver: the driver's own, then what it takes, once it has opened (spec: audio/devices.md,
+            // "Sample rate and buffer length under ASIO"). In exclusive mode: the rates the device runs at itself
+            // (audio/wasapi-low-latency.md 4.4).
+            SAMPLE_RATE => {
+                let exclusive_rates = st.periods.as_ref().map(|p| p.exclusive_rates.clone()).filter(|r| cfg.exclusive() && !r.is_empty());
+                let (own, rates) = match (cfg.asio_driver(), &st.driver) {
+                    (Some(_), Some(d)) => (format!("Driver ({rate})"), d.rates.clone()),
+                    (Some(_), None) => (format!("Driver ({rate})"), RATES.to_vec()),
+                    (None, _) => ("Device rate".to_string(), exclusive_rates.unwrap_or_else(|| RATES.to_vec())),
+                };
+                std::iter::once(PItem::new(own, Cmd::Audio(Set::Rate(None))).mark(Mark::Radio(cfg.rate.is_none())))
+                    .chain(rates.into_iter().map(|r| PItem::new(format!("{r} Hz"), Cmd::Audio(Set::Rate(Some(r)))).mark(Mark::Radio(cfg.rate == Some(r)))))
+                    .collect()
+            }
+            // A Windows device: its own period, in exclusive mode its smallest, then the lengths that change something
+            // in the mode (spec: audio/wasapi-low-latency.md 4.3).
+            BUFFER_LENGTH => {
+                let text = |b| views::settings::buffer_text(b, rate);
+                let mut smallest = None;
+                let (own, sizes) = match (cfg.asio_driver(), &st.driver, &st.periods) {
+                    (Some(_), Some(d), _) => match d.fixed {
+                        Some(b) => (format!("Driver ({})", views::settings::buffer_text(b, d.rate)), d.sizes.clone()),
+                        None => ("Driver".to_string(), d.sizes.clone()),
+                    },
+                    (Some(_), None, _) => ("Driver".to_string(), Vec::new()),
+                    (None, _, Some(p)) => {
+                        let x = cfg.exclusive();
+                        if x {
+                            let item = PItem::new(format!("Smallest ({})", text(p.exclusive_frames(rate).1)), Cmd::Audio(Set::Buffer(Some(SMALLEST))));
+                            smallest = Some(item.mark(Mark::Radio(cfg.buffer == Some(SMALLEST))));
+                        }
+                        (format!("Device ({})", text(p.own(x, rate))), p.sizes(x, rate))
+                    }
+                    (None, _, None) => ("Device default".to_string(), BUFFERS.to_vec()),
+                };
+                std::iter::once(PItem::new(own, Cmd::Audio(Set::Buffer(None))).mark(Mark::Radio(cfg.buffer.is_none())))
+                    .chain(smallest)
+                    .chain(sizes.into_iter().map(|b| {
+                        PItem::new(views::settings::buffer_text(b, rate), Cmd::Audio(Set::Buffer(Some(b)))).mark(Mark::Radio(cfg.buffer == Some(b)))
+                    }))
+                    .collect()
+            }
             ANIMATIONS => {
                 let item = |label: &'static str, on: bool| PItem::new(label, Cmd::Mixer(crate::mixer::MCmd::Animations(on))).mark(Mark::Radio(still != on));
                 vec![item("Entertain me", true), item("Off", false)]
@@ -3703,7 +3799,7 @@ impl App {
     pub fn set_audio(&mut self, s: crate::audio_cfg::Set) {
         let cfg = crate::audio_cfg::AudioCfg::current().with(s);
         cfg.apply();
-        if let Some(rate) = crate::audio_cfg::rate() {
+        if let Some(rate) = Transport::device_rate() {
             self.plugins.set_rate(rate);
         }
         self.transport.reopen();
@@ -3980,6 +4076,7 @@ impl App {
                 }
             }
             SAct::Button("Load theme...") => self.theme_dialog(),
+            SAct::Button(views::settings::SHOW_ASIO_PANEL) => self.transport.asio_panel(),
             SAct::Button("Manage plugins") => self.open_settings(views::settings::PLUGINS),
             SAct::Button("Manage messages") => return self.messages_menu(),
             SAct::Button("Find new plugins") => self.start_scan(crate::plugin_db::Mode::Changed),
@@ -7161,7 +7258,9 @@ impl App {
                 self.state.message = crate::plugin_menu::run(self, crate::plugin_menu::PlugCmd::View(v));
             }
             (HELP_MENU, HELP_ABOUT) => {
-                self.state.message = Some(concat!("Lemon Studio ", env!("CARGO_PKG_VERSION"), " (pre-alpha), free software under the GNU GPL v3 or later").into());
+                // The Windows build includes the ASIO SDK, which is under version 3 only (THIRD-PARTY-NOTICES.txt §9).
+                let licence = if cfg!(windows) { "the GNU GPL v3" } else { "the GNU GPL v3 or later" };
+                self.state.message = Some(format!("Lemon Studio {} (pre-alpha), free software under {licence}", env!("CARGO_PKG_VERSION")));
             }
             (ADD_MENU | TOOLS_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Pattern") => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
@@ -10214,25 +10313,33 @@ mod tests {
         let combo = |app: &App, label: &str| {
             app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == label)).map(|h| h.rect).unwrap_or_else(|| panic!("{label} works"))
         };
-        for (label, first) in [(OUTPUT_DEVICE, "Default device"), (SAMPLE_RATE, "Device rate"), (BUFFER_LENGTH, "Device default")] {
+        let devices = if cfg!(windows) { "Windows devices" } else { "Default device" };
+        // The buffer lengths start with the device's own ("Device default", or its period where Windows says it).
+        let mut menus = vec![(OUTPUT_DEVICE, devices), (SAMPLE_RATE, "Device rate"), (BUFFER_LENGTH, "Device")];
+        if cfg!(windows) {
+            menus.push((views::settings::MODE, views::settings::MODE_SHARED));
+        }
+        for (label, first) in menus {
             let r = combo(&app, label);
             click(&mut app, &mut c, r);
             let p = app.state.playlist.popup.as_ref().unwrap_or_else(|| panic!("{label} opens a menu"));
-            assert_eq!(p.items[0].label, first);
+            assert!(p.items[0].label.starts_with(first), "{label}: {}", p.items[0].label);
             assert!((p.y - r.bottom()).abs() < 2.0, "under its box");
-            // The menu is painted over the settings window: its rows take the clicks.
-            assert!(app.top_hit(r.x + 10.0, r.bottom() + 10.0).is_some_and(|h| matches!(h.action, Action::PlPopup(_))));
+            // The menu is painted over the settings window: its rows take the clicks (the first row under a heading).
+            let row = if p.items[0].head { 30.0 } else { 10.0 };
+            assert!(app.top_hit(r.x + 10.0, r.bottom() + row).is_some_and(|h| matches!(h.action, Action::PlPopup(_))));
             app.state.playlist.popup = None;
             frame(&mut app, &mut c, None);
         }
         let r = combo(&app, BUFFER_LENGTH);
         click(&mut app, &mut c, r);
-        let i = app.state.playlist.popup.as_ref().unwrap().items.iter().position(|it| it.label.starts_with("1024 frames")).expect("1024 offered");
+        // (Windows shared mode offers only lengths that change something: here, longer than the buffer it grants.)
+        let i = app.state.playlist.popup.as_ref().unwrap().items.iter().position(|it| it.label.starts_with("2048 frames")).expect("2048 offered");
         let r = hit_rect(&app, &Action::PlPopup(i));
         click(&mut app, &mut c, r);
         assert!(app.state.playlist.popup.is_none());
-        assert_eq!(AudioCfg::current().buffer, Some(1024));
-        assert_eq!(app.state.settings.audio.buffer, Some(1024));
+        assert_eq!(AudioCfg::current().buffer, Some(2048));
+        assert_eq!(app.state.settings.audio.buffer, Some(2048));
         // Back to the defaults for the other tests in this process.
         AudioCfg::default().apply();
     }
@@ -10600,6 +10707,129 @@ mod tests {
                 assert_same(&a, &b, &format!("{design:?}: flash {what}"));
             }
             assert!(!app.animating() && app.state.tapper.flash == 0.0);
+        }
+    }
+
+    /// How far ahead of an ASIO driver playback renders (spec: audio/devices.md "Render-ahead"): plays a song, muted, at
+    /// each buffer length for a while with an edit every second, and prints the frames queued when the driver asked for
+    /// a block (least, mean, most), the driver's own latency, the longest time between two blocks (a driver that
+    /// stalled), the audio load and the dropouts. Needs the driver installed and free. LEMON_ASIO: the driver
+    /// ("ASIO4ALL v2"); LEMON_ASIO_BUFFERS: the lengths ("64,128,256");
+    /// LEMON_SONG: an .flp to play, or "trio:<n>" for a pattern of n Lemon Trio channels playing chords on every step;
+    /// LEMON_PLUGINS: host the song's plugins the app's last scan found; LEMON_SECONDS: how long at each length (30);
+    /// LEMON_RUNS: how many times each length is played (1).
+    #[test]
+    #[ignore]
+    fn render_ahead_on_asio() {
+        use crate::audio_cfg::AudioCfg;
+        use std::time::{Duration, Instant};
+        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let driver = var("LEMON_ASIO").unwrap_or_else(|| "ASIO4ALL v2".into());
+        let buffers: Vec<u32> = var("LEMON_ASIO_BUFFERS").unwrap_or_else(|| "64,128,256".into()).split(',').filter_map(|b| b.trim().parse().ok()).collect();
+        let seconds: u64 = var("LEMON_SECONDS").and_then(|s| s.parse().ok()).unwrap_or(30);
+        let runs: usize = var("LEMON_RUNS").and_then(|s| s.parse().ok()).unwrap_or(1);
+        let Some(song) = var("LEMON_SONG") else { return eprintln!("LEMON_SONG names no song") };
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::builtins();
+        // LEMON_PLUGINS: the plugins the app's last scan found too (the song's FL plugins, hosted as the app hosts them).
+        if var("LEMON_PLUGINS").is_some() {
+            app.load_plugins();
+        }
+        let run = |app: &mut App, ms: u64| {
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_millis(ms) {
+                app.tick();
+                std::thread::sleep(Duration::from_millis(4));
+            }
+        };
+        if let Some(n) = song.strip_prefix("trio:") {
+            // A heavy pattern instead of a song: `n` Lemon Trio channels, each playing four-note chords on every step,
+            // a beat long.
+            let index = app.plugins.index_of(crate::osc3::LEMON_TRIO).expect("Lemon Trio");
+            let mut notes = Vec::new();
+            for c in 0..n.parse::<u16>().unwrap_or(8) {
+                let row = add_plugin_channel(&mut app.state.project, crate::osc3::LEMON_TRIO);
+                app.plugins.create(row, index).expect("a Lemon Trio instance");
+                app.state.hosted_rows.push(row);
+                let ch = app.state.project.channels[row].index;
+                for i in 0..16 {
+                    for k in [0, 4, 7, 11] {
+                        notes.push(os_model::Note { length: 96, key: 48 + c % 12 + k, ..os_model::Note::step(ch, i * 24) });
+                    }
+                }
+            }
+            app.state.project.patterns[0].notes = notes;
+            app.state.song_mode = false;
+            app.transport.set_instruments(app.plugins.instruments());
+        } else {
+            app.open(song.clone().into());
+        }
+        let t0 = Instant::now();
+        while app.loading() {
+            run(&mut app, 50);
+            assert!(t0.elapsed() < Duration::from_secs(180), "the song loads");
+        }
+        run(&mut app, 500);
+        // Muted: the master track's volume at 0 (the engine renders the same).
+        if let Some(m) = app.state.project.mixer.iter_mut().find(|m| m.index == 0) {
+            m.volume = Some(0.0);
+        }
+        let (tempo, ppq) = (app.state.project.tempo.unwrap_or(140.0), app.state.project.ppq.max(1));
+        eprintln!("{song}: {tempo} BPM, PPQ {ppq}, {} hosted rows", app.state.hosted_rows.len());
+        eprintln!("driver | block | rate | tick | ahead min / mean / max (frames) | mean ms | driver latency | longest gap ms | load | dropouts");
+        for &b in &buffers {
+            for _ in 0..runs {
+                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false }.apply();
+                app.transport.reopen();
+                let t0 = Instant::now();
+                let info = loop {
+                    run(&mut app, 50);
+                    // The stream before the reopen may still be the one open for a moment: wait for the new length (a
+                    // driver that refuses it runs at its own).
+                    let settled = |i: &crate::device::DeviceInfo| i.fixed == Some(b) || t0.elapsed() > Duration::from_secs(3);
+                    if let Some(i) = app.transport.opened().filter(|i| i.host == crate::device::ASIO && i.name == driver && settled(i)) {
+                        break Some(i);
+                    }
+                    if t0.elapsed() > Duration::from_secs(15) {
+                        eprintln!("{driver} did not open: {:?}", app.transport.take_error());
+                        break None;
+                    }
+                };
+                let Some(info) = info else { continue };
+                app.act(Action::Play);
+                run(&mut app, 2000);
+                eprintln!("{} instruments and {} effects hosted", app.state.hosted_rows.len(), app.plugins.hosted.len() - app.state.hosted_rows.len());
+                let _ = app.transport.take_ahead();
+                let u0 = app.transport.underruns();
+                let (mut min, mut max, mut sum, mut blocks, mut gap, mut load) = (u64::MAX, 0u64, 0.0f64, 0u64, 0u64, 0.0f32);
+                for _ in 0..seconds {
+                    // An edit: the engine is rebuilt and swapped in at the position playing (LEMON_EDITS=0: none).
+                    if var("LEMON_EDITS").is_none_or(|v| v != "0") {
+                        app.transport.update(&app.state.project);
+                    }
+                    run(&mut app, 1000);
+                    load = load.max(app.transport.load());
+                    if let Some(a) = app.transport.take_ahead() {
+                        (min, max, gap) = (min.min(a.min), max.max(a.max), gap.max(a.gap));
+                        sum += a.mean * a.blocks as f64;
+                        blocks += a.blocks;
+                    }
+                }
+                let du = app.transport.underruns() - u0;
+                let rate = f64::from(info.rate);
+                let mean = sum / blocks.max(1) as f64;
+                let tick = rate * 60.0 / (tempo * f64::from(ppq));
+                eprintln!(
+                    "{driver} | {} | {} | {tick:.0} | {min} / {mean:.0} / {max} | {:.2} | {:?} | {:.1} | {load:.2} | {du}",
+                    app.transport.block(),
+                    info.rate,
+                    mean * 1000.0 / rate,
+                    info.latency,
+                    gap as f64 / 1000.0,
+                );
+                app.act(Action::Stop);
+                run(&mut app, 500);
+            }
         }
     }
 
@@ -11705,10 +11935,13 @@ mod tests {
             clips: vec![os_model::Clip::new(0, 384 * 4, 0, os_model::ClipSource::Pattern(1))],
             ..Default::default()
         }];
-        // Song mode.
+        // Song mode. A device opening for the first time may take a while.
         app.act(Action::PatSong(true));
         app.act(Action::Play);
-        step();
+        let start = std::time::Instant::now();
+        while app.transport.tick() <= 10.0 && start.elapsed() < std::time::Duration::from_secs(3) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert_eq!(app.transport.state(), T::Playing);
         assert!(app.transport.song() && app.transport.tick() > 10.0, "song tick {}", app.transport.tick());
         // Pause holds the tick in place; Play resumes from it (no restart).
@@ -16127,6 +16360,168 @@ mod tests {
             assert_eq!(piano::notes(&app.state), &run[..], "one undo step for the drag, check {on}");
         }
         set_check(&MONO_PAINTING, false);
+    }
+
+    /// Show ASIO panel works while an ASIO driver is open; the buffer length combo stays.
+    #[test]
+    fn show_asio_panel_works_while_a_driver_is_open() {
+        use crate::audio_cfg::{AudioCfg, Set};
+        use crate::views::settings::{SAct, AUDIO, BUFFER_LENGTH, SHOW_ASIO_PANEL};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(AUDIO);
+        let shown = |app: &App| {
+            let combo = app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo(BUFFER_LENGTH, ..))));
+            (combo, app.hits.iter().any(|h| h.action == Action::Settings(SAct::Button(SHOW_ASIO_PANEL))))
+        };
+        frame(&mut app, &mut c, None);
+        assert_eq!(shown(&app), (true, false), "a Windows device");
+        // Only the page's copy of the settings: no driver is opened.
+        app.state.settings.audio = AudioCfg::default().with(Set::Asio("Some ASIO".into()));
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        assert_eq!(shown(&app), (true, false), "an ASIO driver, not open");
+        app.state.settings.asio_open = true;
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        assert_eq!(shown(&app), (true, cfg!(windows)), "an ASIO driver, open");
+    }
+
+    /// The Windows build names ASIO on the Audio and About pages, so both show the ASIO logo with Steinberg's notice
+    /// (the ASIO SDK's usage guidelines); the other builds have no ASIO and show neither.
+    #[test]
+    fn the_asio_logo_goes_where_asio_is_named() {
+        use crate::views::settings::{page, Row, AUDIO, TABS};
+        let app = App::new(None);
+        let logo = |r: &Row| matches!(r, Row::AsioLogo);
+        let shows = |tab| page(tab, &app.state).iter().flat_map(|g| &g.rows).any(|r| logo(r) || matches!(r, Row::Pair(_, b) if logo(b)));
+        assert_eq!(shows(AUDIO), cfg!(windows), "Audio");
+        assert_eq!(shows(TABS.len() - 1), cfg!(windows), "About");
+        assert_eq!(crate::views::settings::asio_logo().map(|l| (l.0, l.1)), cfg!(windows).then_some((474, 443)), "the logo decodes");
+    }
+
+    /// Windows devices have a Mode combo (spec: audio/wasapi-low-latency.md 4.2): in exclusive mode a line says other
+    /// programs can't play on the device, and its buffer lengths are the device's periods; under an ASIO driver the
+    /// combo is greyed. Elsewhere there is none.
+    #[test]
+    fn the_mode_combo_on_windows_devices() {
+        use crate::audio_cfg::{AudioCfg, Set, SMALLEST};
+        use crate::device::Periods;
+        use crate::views::settings::{page, Row, SAct, AUDIO, BUFFER_LENGTH, MODE};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(AUDIO);
+        let rows = |app: &App| page(AUDIO, &app.state).into_iter().flat_map(|g| g.rows).collect::<Vec<_>>();
+        let mode = |app: &App| rows(app).iter().find_map(|r| match r { Row::Combo(v, _, l) if *l == MODE => Some(v.clone()), _ => None });
+        let alone = |app: &App| rows(app).iter().any(|r| matches!(r, Row::Text(t, _) if t.starts_with("Other programs can't play on")));
+        assert_eq!((mode(&app), alone(&app)), (cfg!(windows).then(|| "Shared".to_string()), false));
+        if !cfg!(windows) {
+            return;
+        }
+        // Exclusive, on this PC's Realtek endpoint as measured (only the page's copy of the settings: nothing opens).
+        let realtek = Periods { rate: 48000, shared: Some((480, 480, 480, 480)), shared_buffer: 1056, exclusive: (100_000, 30_000), exclusive_rates: vec![] };
+        app.state.settings.audio = AudioCfg::default().with(Set::Mode(true));
+        app.state.settings.periods = Some(realtek);
+        app.state.settings.rate = Some(48000);
+        assert_eq!((mode(&app).as_deref(), alone(&app)), (Some("Exclusive"), true));
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        let combo = |app: &App, label: &str| app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == label)).map(|h| h.rect);
+        let r = combo(&app, BUFFER_LENGTH).expect("buffer length");
+        click(&mut app, &mut c, r);
+        let labels: Vec<String> = app.state.playlist.popup.take().expect("a menu").items.iter().map(|i| i.label.to_string()).collect();
+        assert_eq!(labels[..3], ["Device (480 frames (10.0 ms))", "Smallest (144 frames (3.0 ms))", "256 frames (5.3 ms)"]);
+        app.state.settings.audio.buffer = Some(SMALLEST);
+        let buffer = rows(&app).iter().find_map(|r| match r { Row::Combo(v, _, l) if *l == BUFFER_LENGTH => Some(v.clone()), _ => None });
+        assert_eq!(buffer.as_deref(), Some("Smallest (144 frames (3.0 ms))"));
+        // Under an ASIO driver: shown greyed, no menu.
+        app.state.settings.audio = AudioCfg::default().with(Set::Mode(true)).with(Set::Asio("Some ASIO".into()));
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        assert_eq!((mode(&app).as_deref(), alone(&app)), (Some("Exclusive"), false));
+        assert!(combo(&app, MODE).is_none(), "greyed");
+    }
+
+    /// With no ASIO driver installed, the Audio page says to install one (Windows only); with one, it doesn't.
+    #[test]
+    fn no_asio_driver_says_to_install_one() {
+        use crate::views::settings::{page, Row, AUDIO, NO_ASIO_DRIVER};
+        let mut app = App::new(None);
+        let says = |app: &App| page(AUDIO, &app.state).iter().flat_map(|g| &g.rows).any(|r| matches!(r, Row::Text(t, _) if t == NO_ASIO_DRIVER));
+        app.state.settings.asio_drivers = Vec::new();
+        assert_eq!(says(&app), cfg!(windows), "none installed");
+        app.state.settings.asio_drivers = vec!["ASIO4ALL v2".into()];
+        assert!(!says(&app), "one installed");
+    }
+
+    /// The Audio page with an ASIO driver chosen (the first installed one), and its Output device menu, as pictures,
+    /// for looking (not an assertion): `OS_AUDIO_SHOT=<folder>`. Windows, with a driver installed.
+    #[test]
+    fn audio_shot() {
+        use crate::audio_cfg::{AudioCfg, Set};
+        use crate::views::settings::{SAct, AUDIO, BUFFER_LENGTH, MODE, OUTPUT_DEVICE};
+        let Some(out) = std::env::var_os("OS_AUDIO_SHOT") else { return };
+        let out = std::path::PathBuf::from(out);
+        let Some(driver) = crate::device::asio_drivers().into_iter().next() else { return };
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        AudioCfg::default().with(Set::Asio(driver)).apply();
+        let mut app = App::new(None);
+        // The driver opens with the audio thread; the page then shows its buffer length.
+        let t = std::time::Instant::now();
+        while crate::device::opens() == 0 && t.elapsed() < std::time::Duration::from_secs(3) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.open_settings(AUDIO);
+        app.audio_status();
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(out.join("01_audio_asio.png")).unwrap();
+        let r = app.hits.iter().find(|h| matches!(h.action, Action::Settings(SAct::Combo(OUTPUT_DEVICE, ..)))).map(|h| h.rect).unwrap();
+        click(&mut app, &mut c, r);
+        c.pixmap.save_png(out.join("02_output_device_menu.png")).unwrap();
+        app.state.playlist.popup = None;
+        frame(&mut app, &mut c, None);
+        let r = app.hits.iter().find(|h| matches!(h.action, Action::Settings(SAct::Combo(BUFFER_LENGTH, ..)))).map(|h| h.rect).unwrap();
+        click(&mut app, &mut c, r);
+        c.pixmap.save_png(out.join("03_buffer_length_menu.png")).unwrap();
+        app.state.playlist.popup = None;
+        app.open_settings(crate::views::settings::TABS.len() - 1);
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(out.join("04_about.png")).unwrap();
+        AudioCfg::default().apply();
+        // As a PC without an ASIO driver has it.
+        app.open_settings(AUDIO);
+        app.state.settings.asio_drivers.clear();
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(out.join("05_audio_no_asio_driver.png")).unwrap();
+        // The default Windows device: the Mode menu, then exclusive mode's page and buffer lengths.
+        let combo = |app: &App, label: &str| app.hits.iter().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == label)).map(|h| h.rect).unwrap();
+        let r = combo(&app, MODE);
+        click(&mut app, &mut c, r);
+        c.pixmap.save_png(out.join("06_mode_menu.png")).unwrap();
+        app.state.playlist.popup = None;
+        // As picked on the page: the driver is let go of, and the device opens in exclusive mode with the first note.
+        app.set_audio(Set::Mode(true));
+        let t = std::time::Instant::now();
+        while app.transport.opened().is_some() && t.elapsed() < std::time::Duration::from_secs(3) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.open_settings(AUDIO);
+        app.audio_status();
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(out.join("07_audio_exclusive.png")).unwrap();
+        let r = combo(&app, BUFFER_LENGTH);
+        click(&mut app, &mut c, r);
+        c.pixmap.save_png(out.join("08_exclusive_buffer_length_menu.png")).unwrap();
+        app.state.playlist.popup = None;
+        AudioCfg::default().apply();
+        app.open_settings(AUDIO);
+        frame(&mut app, &mut c, None);
+        let r = combo(&app, BUFFER_LENGTH);
+        click(&mut app, &mut c, r);
+        c.pixmap.save_png(out.join("09_shared_buffer_length_menu.png")).unwrap();
     }
 
     /// The header's menus and switches as pictures, for looking (not an assertion): `OS_HEADER_SHOT=<folder>`.

@@ -5,7 +5,10 @@
 //! Audio device settings (Settings > Audio): the output device, sample rate and buffer length. They are kept in the
 //! user folder (`audio.txt`) and every stream the transport opens uses them; a device that is gone, a rate it does not
 //! offer or a buffer length it refuses falls back to the system's default device and that device's own rate and buffer.
-// spec: ui/settings.md "Audio"
+//! The device is a Windows (ALSA, Core Audio) one or, on Windows, an ASIO driver (`asio`): for a driver, `None` and a
+//! rate or buffer length it does not take mean the driver's own (its buffer length is set in its own panel). A Windows
+//! device plays in shared mode, or in exclusive mode (`exclusive`, `device::wasapi`) with the device to itself.
+// spec: ui/settings.md "Audio", audio/wasapi-low-latency.md
 
 use std::sync::Mutex;
 
@@ -15,13 +18,21 @@ use cpal::{BufferSize, SampleFormat, StreamConfig, SupportedBufferSize};
 /// The chosen output; `None` = the device's (or the system's) own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioCfg {
+    /// `device` is an ASIO driver (`device::asio_drivers`), not a Windows device.
+    pub asio: bool,
     /// Output device by name.
     pub device: Option<String>,
     /// Sample rate, Hz.
     pub rate: Option<u32>,
-    /// Buffer length, frames.
+    /// Buffer length, frames (`SMALLEST`: the device's smallest period, in exclusive mode).
     pub buffer: Option<u32>,
+    /// A Windows device in exclusive mode (Lemon Studio alone on it); ignored for an ASIO driver and off Windows.
+    pub exclusive: bool,
 }
+
+/// `AudioCfg::buffer` for "Smallest": the shortest period the device takes in exclusive mode, at whatever rate it opens
+/// (elsewhere the device's own length).
+pub const SMALLEST: u32 = 0;
 
 /// The buffer length until one is chosen. Linux: 512 frames, since devices' own lengths there are often short enough
 /// to pop; elsewhere the device's own.
@@ -29,16 +40,21 @@ pub const DEFAULT_BUFFER: Option<u32> = if cfg!(target_os = "linux") { Some(512)
 
 impl Default for AudioCfg {
     fn default() -> AudioCfg {
-        AudioCfg { device: None, rate: None, buffer: DEFAULT_BUFFER }
+        AudioCfg { asio: false, device: None, rate: None, buffer: DEFAULT_BUFFER, exclusive: false }
     }
 }
 
 /// One setting changed from the Audio page's menus (`Cmd::Audio`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Set {
+    /// A Windows device (`None`: the system's default).
     Device(Option<String>),
+    /// An ASIO driver.
+    Asio(String),
     Rate(Option<u32>),
     Buffer(Option<u32>),
+    /// Exclusive (`true`) or shared mode for Windows devices.
+    Mode(bool),
 }
 
 /// Sample rates the settings offer.
@@ -63,23 +79,39 @@ impl AudioCfg {
 
     pub fn with(mut self, s: Set) -> AudioCfg {
         match s {
-            Set::Device(d) => self.device = d,
+            Set::Device(d) => (self.asio, self.device) = (false, d),
+            Set::Asio(d) => (self.asio, self.device) = (true, Some(d)),
             Set::Rate(r) => self.rate = r,
             Set::Buffer(b) => self.buffer = b,
+            Set::Mode(on) => self.exclusive = on,
         }
         self
     }
 
-    /// `key=value` lines: `device`, `rate`, `buffer` (`device`: the device's own); anything else is ignored.
+    /// A Windows device chosen in exclusive mode (not an ASIO driver; never off Windows).
+    pub fn exclusive(&self) -> bool {
+        self.exclusive && !self.asio && cfg!(windows)
+    }
+
+    /// The ASIO driver chosen (Windows; elsewhere the name is looked for among the devices and not found).
+    pub fn asio_driver(&self) -> Option<&str> {
+        self.device.as_deref().filter(|_| self.asio && cfg!(windows))
+    }
+
+    /// `key=value` lines: `host` (`asio`: the device is an ASIO driver), `mode` (`exclusive`; else shared), `device`,
+    /// `rate`, `buffer` (`device`: the device's own; `smallest`: `SMALLEST`); anything else is ignored.
     pub fn parse(text: &str) -> AudioCfg {
         let mut c = AudioCfg::default();
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=') else { continue };
             let v = v.trim();
             match k.trim() {
+                "host" => c.asio = v.eq_ignore_ascii_case("asio"),
+                "mode" => c.exclusive = v.eq_ignore_ascii_case("exclusive"),
                 "device" if !v.is_empty() => c.device = Some(v.to_string()),
                 "rate" => c.rate = v.parse().ok().filter(|&r| r >= 8000),
                 "buffer" if v == "device" => c.buffer = None,
+                "buffer" if v == "smallest" => c.buffer = Some(SMALLEST),
                 "buffer" => c.buffer = v.parse().ok().filter(|&b| b > 0).or(c.buffer),
                 _ => {}
             }
@@ -89,6 +121,12 @@ impl AudioCfg {
 
     pub fn text(&self) -> String {
         let mut s = String::new();
+        if self.asio {
+            s += "host=asio\n";
+        }
+        if self.exclusive {
+            s += "mode=exclusive\n";
+        }
         if let Some(d) = &self.device {
             s += &format!("device={d}\n");
         }
@@ -96,6 +134,7 @@ impl AudioCfg {
             s += &format!("rate={r}\n");
         }
         match self.buffer {
+            Some(SMALLEST) => s += "buffer=smallest\n",
             Some(b) => s += &format!("buffer={b}\n"),
             // The device's own length, where the default is another (Linux).
             None if DEFAULT_BUFFER.is_some() => s += "buffer=device\n",
@@ -136,10 +175,14 @@ pub fn devices() -> (Vec<String>, Option<String>) {
 
 /// What a stream opens.
 pub struct Output {
+    /// The audio system the device is on (cpal's name for it).
+    pub host: &'static str,
     pub device: cpal::Device,
     pub name: String,
     pub format: SampleFormat,
     pub config: StreamConfig,
+    /// The buffer lengths the device says it takes, frames.
+    pub buffers: Option<(u32, u32)>,
 }
 
 /// The output for `cfg`: its device (else the system default), its rate when the device offers it (else the
@@ -165,8 +208,13 @@ pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
     };
     let format = supported.sample_format();
     let range = supported.buffer_size().clone();
+    let buffers = match range {
+        SupportedBufferSize::Range { min, max } => Some((min, max)),
+        SupportedBufferSize::Unknown => None,
+    };
     let mut config: StreamConfig = supported.into();
-    if let Some(b) = cfg.buffer {
+    // "Smallest" is exclusive mode's; here it is the device's own.
+    if let Some(b) = cfg.buffer.filter(|&b| b != SMALLEST) {
         let fits = match range {
             // Windows shared mode takes any length (it sizes the device buffer; blocks stay one device period).
             SupportedBufferSize::Range { min, max } => cfg!(windows) || (min..=max).contains(&b),
@@ -176,12 +224,21 @@ pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
             config.buffer_size = BufferSize::Fixed(b);
         }
     }
-    Ok(Output { name: device_name(&device), device, format, config })
+    Ok(Output { host: host.id().name(), name: device_name(&device), device, format, config, buffers })
 }
 
-/// The sample rate streams open at now (what hosted plugins are activated at).
+/// The sample rate the settings' device would open at now, asking the device (`device::rate` knows it once the device
+/// opened). An ASIO driver is not asked (that would load it): the rate chosen, else unknown until it opens. A device in
+/// exclusive mode runs at the rate chosen when it takes it, else (and until one is chosen) at its own.
 pub fn rate() -> Option<u32> {
-    output(&AudioCfg::current()).ok().map(|o| o.config.sample_rate)
+    let cfg = AudioCfg::current();
+    if cfg.asio_driver().is_some() {
+        return cfg.rate;
+    }
+    if let Some(r) = cfg.rate.filter(|_| cfg.exclusive()) {
+        return Some(r);
+    }
+    output(&cfg).ok().map(|o| o.config.sample_rate)
 }
 
 #[cfg(test)]
@@ -190,8 +247,22 @@ mod tests {
 
     #[test]
     fn settings_text_round_trips() {
-        let c = AudioCfg { device: Some("Speakers (USB Audio)".into()), rate: Some(48000), buffer: Some(256) };
+        let c = AudioCfg { asio: false, device: Some("Speakers (USB Audio)".into()), rate: Some(48000), buffer: Some(256), exclusive: false };
         assert_eq!(AudioCfg::parse(&c.text()), c);
+        // Exclusive mode and its smallest period; a file without `mode` is shared.
+        let x = c.clone().with(Set::Mode(true)).with(Set::Buffer(Some(SMALLEST)));
+        assert_eq!(x.text(), "mode=exclusive\ndevice=Speakers (USB Audio)\nrate=48000\nbuffer=smallest\n");
+        assert_eq!(AudioCfg::parse(&x.text()), x);
+        assert_eq!(x.exclusive(), cfg!(windows));
+        assert!(!AudioCfg::parse("mode=shared\n").exclusive);
+        assert!(!x.clone().with(Set::Asio("FL Studio ASIO".into())).exclusive(), "not for an ASIO driver");
+        // An ASIO driver; a file from before there were drivers (no `host`) is a Windows device.
+        let a = AudioCfg::default().with(Set::Asio("FL Studio ASIO".into()));
+        assert!(a.text().starts_with("host=asio\ndevice=FL Studio ASIO\n"), "{}", a.text());
+        assert_eq!(AudioCfg::parse(&a.text()), a);
+        assert!(!AudioCfg::parse("device=FL Studio ASIO\n").asio);
+        assert_eq!(a.clone().with(Set::Device(None)), AudioCfg::default(), "a Windows device again");
+        assert_eq!(a.asio_driver(), cfg!(windows).then_some("FL Studio ASIO"));
         assert_eq!(AudioCfg::parse(""), AudioCfg::default());
         // Unknown keys and nonsense values are skipped.
         let d = AudioCfg::parse("colour=red\nrate=12\nbuffer=0\ndevice=\n");

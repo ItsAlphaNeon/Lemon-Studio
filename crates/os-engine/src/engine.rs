@@ -875,11 +875,13 @@ pub struct Engine {
     /// in sixteenths over 16 (what FL tells plugins is not measured: spec: audio/song-structure.md, open questions).
     signature: (u16, u16),
     bus: Vec<Vec<f32>>,
-    /// The last rendered tick (interleaved L/R), how much of it has been handed out, its tick index and first sample.
+    /// The last rendered tick (interleaved L/R), how much of it has been handed out, its tick index and first sample,
+    /// and whether it is a held one (`render_held`: the position stays at that tick and frame all through it).
     out: Vec<f32>,
     out_pos: usize,
     out_tick: u64,
     out_frame: u64,
+    out_held: bool,
     /// Instrument channels: scheduled note ends (tick, channel, key, an audio clip's voice: choked at the clip's end;
     /// `None`: a note, which ends with a note off), live notes waiting for the next tick (channel, key, velocity;
     /// negative = note off), this tick's events.
@@ -1327,6 +1329,7 @@ impl Engine {
             out_pos: 0,
             out_tick: 0,
             out_frame: 0,
+            out_held: false,
             inst_offs: Vec::with_capacity(64),
             inst_shapes: Vec::new(),
             next_voice: 0,
@@ -1572,7 +1575,11 @@ impl Engine {
     }
 
     /// Frames handed out so far in the current pass (the sample being heard; a looping engine starts again at 0).
+    /// Paused, it stays where the channels are held.
     pub fn position(&self) -> u64 {
+        if self.out_held {
+            return self.out_frame;
+        }
         self.out_frame + (self.out_pos / 2) as u64
     }
 
@@ -1580,6 +1587,9 @@ impl Engine {
     pub fn tick_position(&self) -> f64 {
         if self.out.is_empty() {
             return self.tick as f64;
+        }
+        if self.out_held {
+            return self.out_tick as f64;
         }
         self.out_tick as f64 + self.out_pos as f64 / self.out.len() as f64
     }
@@ -1649,6 +1659,7 @@ impl Engine {
         self.out_pos = 0;
         self.out_tick = tick;
         self.out_frame = self.frame;
+        self.out_held = false;
         self.tail_done = false;
     }
 
@@ -1757,6 +1768,7 @@ impl Engine {
             self.out_pos = old.out_pos;
             self.out_tick = old.out_tick;
             self.out_frame = old.out_frame;
+            self.out_held = old.out_held;
         } else {
             (self.out_tick, self.out_frame) = (tick, self.frame);
         }
@@ -2045,9 +2057,10 @@ impl Engine {
     }
 
     /// Renders the next whole tick for a stream that queues ticks ahead of its device (spec: audio/implementing.md
-    /// "Playing live") and hands out its samples (interleaved L/R) with the tick and the frame it starts on; `None`
-    /// once playback is over (a live engine renders again after its next note).
-    pub fn next_tick(&mut self) -> Option<(&[f32], u64, u64)> {
+    /// "Playing live") and hands out its samples (interleaved L/R) with the tick and the frame it starts on, and
+    /// whether it is held (paused: the position stays at that tick and frame all through it); `None` once playback is
+    /// over (a live engine renders again after its next note).
+    pub fn next_tick(&mut self) -> Option<(&[f32], u64, u64, bool)> {
         self.exporting = false;
         if self.out_pos >= self.out.len() {
             if self.finished() {
@@ -2057,7 +2070,8 @@ impl Engine {
         }
         let from = self.out_pos;
         self.out_pos = self.out.len();
-        Some((&self.out[from..], self.out_tick, self.out_frame + (from / 2) as u64))
+        let frame = if self.out_held { self.out_frame } else { self.out_frame + (from / 2) as u64 };
+        Some((&self.out[from..], self.out_tick, frame, self.out_held))
     }
 
     /// Renders the next tick into `self.out`, in the order of spec audio/timing.md ("What a tick does"): the clock
@@ -2130,6 +2144,7 @@ impl Engine {
         self.out_pos = 0;
         self.out_tick = tick;
         self.out_frame = start;
+        self.out_held = false;
         // The main volume (spec: audio/mixer.md "Main volume"): playback hears it as a ramped gain on the master; an
         // export writes the samples without it and only its tail test sees it. With delay compensation and the stored
         // value exactly 12800 FL tests less of the tick (audio/timing.md); Lemon Studio has no delay compensation yet.
@@ -2157,7 +2172,8 @@ impl Engine {
     }
 
     /// A tick's worth of the mixer alone while paused (`pause`): the position, the channels and the automation stay
-    /// where they are, the effects run with nothing coming in.
+    /// where they are, the effects run with nothing coming in. It is handed out at the held position: the tick and
+    /// the frame the next tick starts on.
     fn render_held(&mut self) {
         let len = (self.clock.samples_per_tick().round() as usize).max(1);
         let mut song = self.transport_at(self.frame);
@@ -2170,6 +2186,9 @@ impl Engine {
         self.out.clear();
         self.out.extend_from_slice(&self.bus[0][..len * 2]);
         self.out_pos = 0;
+        self.out_tick = self.tick;
+        self.out_frame = self.frame;
+        self.out_held = true;
         let mut ramp = self.main_glide.block(self.main_gain, len, os_dsp::glide::engine_limit(self.rate));
         if !(ramp.is_flat() && ramp.first() == 1.0) {
             for f in self.out.chunks_exact_mut(2) {
@@ -3791,7 +3810,7 @@ mod tests {
         let peak = |e: &mut Engine, ticks: usize| {
             let mut m = 0.0f32;
             for _ in 0..ticks {
-                if let Some((s, _, _)) = e.next_tick() {
+                if let Some((s, ..)) = e.next_tick() {
                     m = s.iter().fold(m, |m, v| m.max(v.abs()));
                 }
             }
@@ -3804,6 +3823,12 @@ mod tests {
         peak(&mut e, 4);
         let (tick, at) = (e.tick, probe.lock().unwrap().at);
         assert!(e.paused() && !e.finished());
+        // Held ticks are handed out at the held position, which stays put all through them.
+        for _ in 0..3 {
+            let (_, t, f, held) = e.next_tick().unwrap();
+            assert_eq!((t, f, held), (tick, e.frame, true), "a held tick");
+            assert_eq!((e.tick_position(), e.position()), (tick as f64, e.frame), "the position holds");
+        }
         let tail = peak(&mut e, 40);
         assert!(tail > 0.01 && tail < playing, "the effect's tail rings on while paused: {tail}");
         let probe_now = probe.lock().unwrap();
@@ -3813,6 +3838,9 @@ mod tests {
         // Resume: the note goes on from where it was held.
         e.resume();
         assert!(!e.paused());
+        let frame = e.frame;
+        let (_, t, f, held) = e.next_tick().unwrap();
+        assert_eq!((t, f, held), (tick, frame, false), "goes on from the held tick and frame");
         let again = peak(&mut e, 20);
         assert!(again > 0.1 && e.tick > tick, "the note sounds again: {again}");
     }
@@ -3830,12 +3858,12 @@ mod tests {
         e.set_instrument(0, probe.clone());
         assert!(e.next_tick().is_none(), "idle live engine renders nothing");
         e.set_awake(true);
-        let quiet = e.next_tick().map(|(s, _, _)| s.iter().all(|&v| v == 0.0));
+        let quiet = e.next_tick().map(|(s, ..)| s.iter().all(|&v| v == 0.0));
         assert_eq!(quiet, Some(true), "awake: rendered, silent");
         assert!(probe.lock().unwrap().at > 0, "the instrument was processed");
         // A key pressed in the plugin's editor (the host sent no note).
         probe.lock().unwrap().held.push(70);
-        let loud = e.next_tick().map(|(s, _, _)| s.iter().any(|&v| v != 0.0));
+        let loud = e.next_tick().map(|(s, ..)| s.iter().any(|&v| v != 0.0));
         assert_eq!(loud, Some(true), "the editor's note is heard");
         probe.lock().unwrap().held.clear();
         e.set_awake(false);

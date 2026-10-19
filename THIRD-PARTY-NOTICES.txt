@@ -26,6 +26,7 @@ Contents
   6. NIH-plug (ISC)
   7. Signalsmith Stretch and Signalsmith Linear (MIT)
   8. signalsmith-stretch Rust bindings (MIT)
+  9. Steinberg ASIO® SDK (GNU GPL, version 3)
 
 -------------------------------------------------------------------------------
 1. Cuprum and Barlow fonts (SIL Open Font License 1.1)
@@ -319,3 +320,29 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+-------------------------------------------------------------------------------
+9. Steinberg ASIO® SDK (GNU GPL, version 3)
+-------------------------------------------------------------------------------
+
+The host files of the ASIO SDK 2.3.4 by Steinberg Media Technologies GmbH
+(https://www.steinberg.net/asiosdk), built into the Windows program for ASIO
+output from crates/os-app/asiosdk (crates/os-app/asiosdk/README.md lists the
+files kept and left out). The files are unchanged.
+
+(c) 2025, Steinberg Media Technologies GmbH, All Rights Reserved
+
+The SDK is licensed under the Steinberg ASIO License or, as its alternative,
+under the GNU General Public License, version 3; Lemon Studio uses it under
+the GNU General Public License, version 3, whose text is in LICENSE. Its licence
+file is kept as crates/os-app/asiosdk/LICENSE.txt. As the SDK is under version 3
+only, a Windows build of Lemon Studio that includes it is distributed under the
+GNU General Public License, version 3.
+
+The ASIO Compatible Logo in crates/os-app/asiosdk/logo comes unchanged from
+the SDK's "Steinberg ASIO Logo Artwork" folder. It is Steinberg's trademark
+artwork, not covered by the GPL. Lemon Studio shows it, as the Steinberg ASIO
+Usage Guidelines in the SDK ask, in Settings > Audio and Settings > About of the
+Windows program and in its documentation.
+
+ASIO is a registered trademark of Steinberg Media Technologies GmbH.

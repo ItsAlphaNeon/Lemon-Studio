@@ -159,12 +159,22 @@ pub struct SettingsUi {
     pub scroll: f32,
     /// Groups whose open state differs from their default.
     pub folded: HashSet<&'static str>,
-    /// Filled when the window opens: output devices, theme files (name, path), selected preset.
+    /// Filled when the window opens: output devices and ASIO drivers, theme files (name, path), selected preset.
     pub devices: Vec<String>,
+    pub asio_drivers: Vec<String>,
     pub device: String,
     /// Audio page: the audio settings, the rate streams open at, and the status lines (kept up to date while shown).
     pub audio: crate::audio_cfg::AudioCfg,
     pub rate: Option<u32>,
+    /// What the chosen Windows device offers for short buffers (`device::periods`; `None` under an ASIO driver, off
+    /// Windows, or when Windows does not say).
+    pub periods: Option<crate::device::Periods>,
+    /// The chosen ASIO driver as it last opened in this session (its rate and buffer length, the rates and lengths it
+    /// takes), whether an ASIO driver is open now (Show ASIO panel works), and the device playing in place of the
+    /// driver chosen (`DeviceInfo::instead`).
+    pub driver: Option<crate::device::DeviceInfo>,
+    pub asio_open: bool,
+    pub instead: Option<String>,
     pub status: [String; 2],
     /// Theme presets (name, `.flstheme` text): built-ins (spec ui/theme-presets.md), then the user's theme folder.
     pub themes: Vec<(String, String)>,
@@ -274,6 +284,7 @@ pub const LIVE: &[&str] = &[
     "Load theme...",
     "Reset",
     ASSOCIATE_CHECK,
+    SHOW_ASIO_PANEL,
 ];
 
 /// `LIVE`, and the checks declared in `crate::prefs`.
@@ -282,12 +293,25 @@ fn live(key: &str) -> bool {
 }
 
 /// The combos that work (they open a menu of choices, `App::audio_menu`).
-pub const LIVE_COMBOS: [&str; 4] = [OUTPUT_DEVICE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
+pub const LIVE_COMBOS: [&str; 5] = [OUTPUT_DEVICE, MODE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
 /// General ▸ Display: "Entertain me" simulates the mixer's cables, "Off" hangs them still (crate::cable).
 pub const ANIMATIONS: &str = "Animations";
 pub const OUTPUT_DEVICE: &str = "Output device";
 pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
+/// Windows devices: shared mode, or exclusive mode with the device to Lemon Studio alone (spec:
+/// audio/wasapi-low-latency.md 4.2); its menu's two choices; its hint under an ASIO driver, which has no such mode.
+pub const MODE: &str = "Mode";
+pub const MODE_SHARED: &str = "Shared (other programs play too)";
+pub const MODE_EXCLUSIVE: &str = "Exclusive (Lemon Studio alone, smaller buffers)";
+const MODE_ASIO: &str = "Mode: for Windows devices (an ASIO driver plays on its own terms)";
+/// With an ASIO driver: its own settings window, where its buffer length is set.
+pub const SHOW_ASIO_PANEL: &str = "Show ASIO panel";
+/// Show ASIO panel's hint while no ASIO driver is open.
+const PANEL_WAITS: &str = "Show ASIO panel: the ASIO driver's own settings, while one is open";
+/// The Audio page's line under Show ASIO panel on Windows while no ASIO driver is installed (the page is filled again
+/// each time Settings opens, so a driver installed meanwhile is listed then).
+pub const NO_ASIO_DRIVER: &str = "No ASIO driver is installed. For lower latency, install one (ASIO4ALL is free), then reopen Settings.";
 
 /// Project ▸ Time settings (spec: ui/settings-choices.md "Project"): the timebase, the "Set as" mode (event 35; the
 /// combo has no label beside it), and the bar (events 17, 18) as a time signature (Numerator / Denominator, FL's
@@ -451,6 +475,9 @@ pub enum Row {
     Ppi,
     /// Project ▸ Data folder's Rename button, folder button and path (`super::data_folder`).
     DataFolder,
+    /// The ASIO Compatible Logo with Steinberg's trademark notice to its right (`asio_logo`), on Windows, whose build
+    /// includes the ASIO SDK: the SDK's usage guidelines ask for it in the About box and where ASIO is switched on.
+    AsioLogo,
 }
 
 /// The two tile lists of Settings > Theme (spec: ui/theme-presets.md "Settings").
@@ -535,29 +562,72 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         AUDIO => {
             // Device, rate and buffer length work (spec: ui/settings.md "Audio"); a choice of "the device's own" shows
             // what that is.
+            // Under an ASIO driver its own rate and buffer length are the "Driver" ones (spec: audio/devices.md).
             let rate = st.rate.unwrap_or(44100);
+            let asio = st.audio.asio_driver().is_some();
             let rate_text = match st.audio.rate {
                 Some(r) => r.to_string(),
+                None if asio => format!("Driver ({rate})"),
                 None => format!("Device ({rate})"),
             };
+            // A Windows device's own period and its smallest, as the device says (spec: audio/wasapi-low-latency.md 4.3).
+            let exclusive = st.audio.exclusive();
+            let periods = st.periods.as_ref().filter(|_| !asio);
             let buffer = match st.audio.buffer {
+                Some(crate::audio_cfg::SMALLEST) => match periods {
+                    Some(p) => format!("Smallest ({})", buffer_text(p.exclusive_frames(rate).1, rate)),
+                    None => "Smallest".into(),
+                },
                 Some(b) => buffer_text(b, rate),
-                None => "Device default".into(),
+                None if asio => match st.driver.as_ref().and_then(|d| d.fixed.map(|b| buffer_text(b, d.rate))) {
+                    Some(b) => format!("Driver ({b})"),
+                    None => "Driver".into(),
+                },
+                None => match periods {
+                    Some(p) => format!("Device ({})", buffer_text(p.own(exclusive, rate), rate)),
+                    None => "Device default".into(),
+                },
             };
+            let listed = st.devices.iter().cloned().chain(st.asio_drivers.iter().map(|d| format!("{d} (ASIO)")));
             vec![
-                g("Input / output", vec![
-                    combo(&st.device, 360.0, OUTPUT_DEVICE),
-                    combo(&rate_text, 120.0, SAMPLE_RATE),
-                    combo(&buffer, 160.0, BUFFER_LENGTH),
-                    Check("Auto close", false),
-                    Text(st.status[0].clone(), true),
-                    Text(st.status[1].clone(), true),
-                    List(vec![("Output devices", 0.0)], st.devices.iter().map(|d| vec![d.clone()]).collect(), 4),
-                    Check2("Mix in buffer switch", false, "Triple buffer", false),
-                    combo("Highest", 96.0, "Priority"),
-                    Check("Safe overloads", true),
-                    combo("Mixer", 96.0, "Playback tracking"),
-                ]),
+                g("Input / output", [
+                    vec![combo(&st.device, 360.0, OUTPUT_DEVICE)],
+                    // Windows devices play shared or exclusive (greyed under an ASIO driver, `MODE_ASIO`).
+                    if cfg!(windows) {
+                        let mode = combo(if st.audio.exclusive { "Exclusive" } else { "Shared" }, 120.0, MODE);
+                        let device = st.audio.device.as_deref().unwrap_or("the default device");
+                        let alone = exclusive.then(|| Text(format!("Other programs can't play on {device} while Lemon Studio has it open."), true));
+                        std::iter::once(mode).chain(alone).collect()
+                    } else {
+                        Vec::new()
+                    },
+                    vec![
+                        combo(&rate_text, 120.0, SAMPLE_RATE),
+                        combo(&buffer, 190.0, BUFFER_LENGTH),
+                        Check("Auto close", false),
+                    ],
+                    st.instead.iter().map(|i| Text(i.clone(), true)).collect(),
+                    vec![Text(st.status[0].clone(), true), Text(st.status[1].clone(), true)],
+                    // Below Status, as FL has it; there are ASIO drivers on Windows only. The ASIO logo goes with them
+                    // (the SDK's usage guidelines: in every dialog that switches ASIO on). With none installed, a line
+                    // says to install one.
+                    if cfg!(windows) {
+                        let none = st.asio_drivers.is_empty().then(|| Text(NO_ASIO_DRIVER.into(), true));
+                        [pair(Buttons(vec![(SHOW_ASIO_PANEL, 136.0)]), Row::AsioLogo)].into_iter().chain(none).collect()
+                    } else {
+                        Vec::new()
+                    },
+                    vec![
+                        List(vec![("Output devices", 0.0)], listed.map(|d| vec![d]).collect(), 4),
+                        Check2("Mix in buffer switch", false, "Triple buffer", false),
+                        combo("Highest", 96.0, "Priority"),
+                        Check("Safe overloads", true),
+                        combo("Mixer", 96.0, "Playback tracking"),
+                    ],
+                ]
+                .into_iter()
+                .flatten()
+                .collect()),
                 g("CPU", vec![
                     Check2("Multithreaded generator processing", true, "Smart disable", true),
                     Check2("Multithreaded mixer processing", true, "Align tick lengths", false),
@@ -810,16 +880,32 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             vec![g("", vec![List(vec![("", 0.0)], lines.into_iter().map(|l| vec![l]).collect(), 40)])]
         }
         // About also carries what FL's Account tab had (spec: ui/plugin-manager.md §2).
+        // The Windows build includes the ASIO SDK, which is under the GPL version 3 only, and names ASIO, so it carries
+        // the ASIO logo and Steinberg's notice (THIRD-PARTY-NOTICES.txt §9).
         _ => vec![
-            g("", vec![
-                Gap(20.0),
-                Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
-                txt("A digital audio workstation written in Rust."),
-                txt("Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors."),
-                Gap(10.0),
-                txt("Licence: GNU General Public License, version 3 or later."),
-                txt("Fonts: Cuprum (SIL Open Font License). Icons: Tabler Icons (MIT)."),
-            ]),
+            g("", [
+                vec![
+                    Gap(20.0),
+                    Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
+                    txt("A digital audio workstation written in Rust."),
+                    txt("Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors."),
+                    Gap(10.0),
+                ],
+                if cfg!(windows) {
+                    vec![txt("Licence: GNU General Public License, version 3 (the ASIO SDK it includes is version 3 only).")]
+                } else {
+                    vec![txt("Licence: GNU General Public License, version 3 or later.")]
+                },
+                vec![txt("Fonts: Cuprum (SIL Open Font License). Icons: Tabler Icons (MIT).")],
+                if cfg!(windows) {
+                    vec![txt("ASIO® output: the ASIO SDK by Steinberg Media Technologies GmbH (GPL version 3)."), Row::AsioLogo]
+                } else {
+                    Vec::new()
+                },
+            ]
+            .into_iter()
+            .flatten()
+            .collect()),
             g("Licence", vec![
                 Big("Lemon Studio needs no account.".into()),
                 txt("It is free software: you can redistribute it and/or modify it under the terms"),
@@ -853,6 +939,7 @@ fn row_h(r: &Row) -> f32 {
         Row::Edit(f, _) => if f.multiline() { COMMENT_LINE_H * COMMENT_LINES as f32 + 12.0 } else { 28.0 },
         Row::InfoFooter(lines) => (lines.len() as f32 * FOOTER_LINE_H + 8.0).max(36.0),
         Row::DataFolder => super::data_folder::FOLDER_ROW_H,
+        Row::AsioLogo => ASIO_LOGO_H + 4.0,
     }
 }
 
@@ -1294,6 +1381,14 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             check(ui, b, *db, g.x + 324.0, cy, live(b));
         }
         // The Audio page's device, rate and buffer combos and General's Animations open their menus.
+        // An ASIO driver has no Windows mode: the Mode combo shows the one kept, greyed, and its hint says why.
+        Row::Combo(v, w, label) if *label == MODE && s.settings.audio.asio_driver().is_some() => {
+            let b = Rect::new(x0, y + 3.0, *w, 21.0);
+            ui.hit(b, Action::Settings(SAct::Body), MODE_ASIO);
+            kit::combo(ui.c, t, b, v, f, kit::State::NORMAL);
+            let lw = ui.c.text(f, b.right() + 8.0, ty, t.text, label);
+            grey(ui, Rect::new(b.x, b.y, b.w + 8.0 + lw, b.h));
+        }
         Row::Combo(v, w, label) if live_combo(label) || crate::prefs::find_combo(label).is_some() => {
             // A combo declared in `crate::prefs` shows its choice.
             let v = match crate::prefs::find_combo(label) {
@@ -1343,9 +1438,13 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             let mut x = x0;
             for &(label, w) in bs {
                 let b = Rect::new(x, y + 4.0, w, 28.0);
-                let on = live(label);
+                // Show ASIO panel works while an ASIO driver is open.
+                let waits = label == SHOW_ASIO_PANEL && !s.settings.asio_open;
+                let on = live(label) && !waits;
                 let hov = on && ui.hit(b, Action::Settings(SAct::Button(label)), "");
-                if !on {
+                if waits {
+                    ui.hit(b, Action::Settings(SAct::Body), PANEL_WAITS);
+                } else if !on {
                     ui.off(b, label);
                 }
                 if super::lemon(ui) {
@@ -1551,11 +1650,39 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             paint_row_at(ui, s, group, &Row::Buttons(vec![(RESET_WORK_TIME, 150.0)]), g, by, 36.0, bx - g.x - 12.0);
         }
         Row::DataFolder => super::data_folder::paint_row(ui, s, row, g, x0, y, h),
+        // As Steinberg provides it, with the notice beside it in the page's own font (its usage guidelines §14).
+        Row::AsioLogo => {
+            let Some((iw, ih, px)) = asio_logo() else { return };
+            let r = Rect::new(x0, y + 2.0, (ASIO_LOGO_H * *iw as f32 / *ih as f32).round(), ASIO_LOGO_H);
+            ui.c.image(r, *iw, *ih, px);
+            let small = Font::new(13);
+            let lh = ui.c.line_height(small);
+            let ty = (r.cy() - lh).round();
+            ui.c.text(small, r.right() + 8.0, ty, t.text_dim, "ASIO is a registered trademark of");
+            ui.c.text(small, r.right() + 8.0, ty + lh, t.text_dim, "Steinberg Media Technologies GmbH.");
+        }
     }
 }
 
 /// The Info footer's line pitch.
 const FOOTER_LINE_H: f32 = 16.0;
+
+/// The ASIO Compatible Logo's height (`Row::AsioLogo`).
+const ASIO_LOGO_H: f32 = 40.0;
+
+/// The ASIO Compatible Logo from the ASIO SDK (`asiosdk/logo`, unchanged), decoded once.
+#[cfg(windows)]
+pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
+    static LOGO: std::sync::OnceLock<Option<(usize, usize, Vec<u32>)>> = std::sync::OnceLock::new();
+    LOGO.get_or_init(|| os_ui::Canvas::decode_png(include_bytes!("../../asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png")))
+        .as_ref()
+}
+
+/// Builds without ASIO show no logo.
+#[cfg(not(windows))]
+pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
+    None
+}
 
 /// Lines the Comments box shows, and their pitch.
 const COMMENT_LINES: usize = 24;
