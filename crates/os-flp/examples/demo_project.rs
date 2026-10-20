@@ -139,6 +139,7 @@ fn project(samples: &Path) -> Project {
                 ChannelKind::Sampler
             };
             Channel {
+                id: os_model::Id::NONE,
                 index: i,
                 kind,
                 name: Some(name.into()),

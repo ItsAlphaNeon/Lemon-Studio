@@ -1619,7 +1619,7 @@ fn main() {
         app.state.message = Some(match control::server::start(at, level, wake_ui) {
             Ok(server) => {
                 let m = format!("Control plane: listening at {}", server.at);
-                app.rpc_server = Some(server);
+                app.listen(server);
                 m
             }
             Err(e) => format!("Control plane: could not listen at {at}: {e}"),

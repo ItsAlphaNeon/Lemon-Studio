@@ -168,8 +168,7 @@ impl Snap {
                 }
             }
             Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
-            // Commands hold ticks; a step of them across a timebase change is dropped (`rescale`).
-            Snap::Commands(_) => {}
+            Snap::Commands(v) => v.iter_mut().for_each(|c| c.rescale(from, to)),
             // A channel or an initial value holds no ticks.
             Snap::Knob(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) => {}
         }

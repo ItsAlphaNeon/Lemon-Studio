@@ -118,14 +118,27 @@ pub struct Control {
     pub proposals: Vec<Proposal>,
     proposal_seq: u64,
     /// The project (and tempo) as the last command left it or the last tick saw it: a tick that finds it changed
-    /// otherwise tells clients of an edit in the interface (`App::tick`).
+    /// otherwise tells clients of an edit in the interface (`App::tick`). Kept only while `watched`.
     seen: Option<(os_model::Project, f64)>,
+    /// A client may be connected (the app listens, `--control` / `--serve`): edits in the interface become events.
+    pub watched: bool,
+    /// How many things the project had at the last `settle` (`settle_tick`).
+    counted: [usize; 6],
 }
 
 impl Control {
     /// Gives ids to new things (`ids::settle`).
     pub fn settle(&mut self, p: &mut os_model::Project) -> bool {
+        self.counted = count(p);
         ids::settle(&mut self.ids, p)
+    }
+
+    /// `settle` on the app's tick: when the project was edited (`dirty`) or holds another number of things (one was
+    /// added or copied), else nothing to do.
+    pub fn settle_tick(&mut self, p: &mut os_model::Project, dirty: bool) {
+        if dirty || count(p) != self.counted {
+            self.settle(p);
+        }
     }
 
     pub fn set_param(&mut self, owner: u32, param: u32, v: f64) {
@@ -158,12 +171,14 @@ impl Control {
 
     /// The project as it is now is known to clients (a command's event told them).
     pub fn saw(&mut self, p: &os_model::Project, tempo: f64) {
-        self.seen = Some((p.clone(), tempo));
+        if self.watched {
+            self.seen = Some((p.clone(), tempo));
+        }
     }
 
-    /// Whether the project changed since `saw` (and notes it as seen).
+    /// Whether the project changed since `saw` (and notes it as seen). Always false while no one watches.
     pub fn changed_since_seen(&mut self, p: &os_model::Project, tempo: f64) -> bool {
-        if self.seen.as_ref().is_some_and(|(q, t)| q == p && *t == tempo) {
+        if !self.watched || self.seen.as_ref().is_some_and(|(q, t)| q == p && *t == tempo) {
             return false;
         }
         let first = self.seen.is_none();
@@ -180,6 +195,13 @@ impl Control {
         self.proposals.clear();
         self.seen = None;
     }
+}
+
+/// The things `settle` gives ids to, counted.
+fn count(p: &os_model::Project) -> [usize; 6] {
+    let clips = p.arrangements.iter().map(|a| a.clips.len()).sum();
+    let slots = p.mixer.iter().map(|m| m.slots.iter().flatten().count()).sum();
+    [p.channels.len(), p.patterns.len(), p.mixer.len(), p.arrangements.len(), clips, slots]
 }
 
 fn op(c: &Command) -> &'static str {

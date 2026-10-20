@@ -3131,7 +3131,8 @@ impl App {
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         // Things the interface added get their ids before anything looks them up (`control::ids`).
-        self.state.control.settle(&mut self.state.project);
+        let s = &mut self.state;
+        s.control.settle_tick(&mut s.project, s.piano.dirty);
         self.control_tick();
         self.plugin_tick();
         // Song playback loops over the playlist's time selection, as it is now.

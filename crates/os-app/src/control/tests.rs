@@ -237,6 +237,7 @@ fn proposals_ask_the_user() {
 #[test]
 fn events_tell_clients_what_changed() {
     let mut a = app();
+    a.state.control.watched = true;
     let (_, last) = a.state.control.events_since(0);
     apply(&mut a.state, &test_client(), Some("Faster"), vec![cmd(json!({"op": "set_tempo", "bpm": 150}))]).unwrap();
     crate::history::undo(&mut a.state);
@@ -355,7 +356,7 @@ fn clients_connect_over_a_local_socket() {
     use std::io::{BufRead, BufReader, Write};
     let path = std::env::temp_dir().join(format!("lemon-control-{}.sock", std::process::id()));
     let mut a = app();
-    a.rpc_server = Some(server::start(path.to_str().unwrap(), Level::Edit, || {}).unwrap());
+    a.listen(server::start(path.to_str().unwrap(), Level::Edit, || {}).unwrap());
     let s = std::os::unix::net::UnixStream::connect(&path).unwrap();
     let mut w = s.try_clone().unwrap();
     let mut r = BufReader::new(s);
@@ -544,4 +545,44 @@ fn a_deleted_channel_s_instrument_comes_back_with_an_undo() {
     a.plugin_tick();
     assert_eq!((0..5).map(|r| key(&a, ch[r])).collect::<Vec<_>>(), (0..5).map(Some).collect::<Vec<_>>());
     assert_eq!(a.state.hosted_rows.iter().copied().collect::<std::collections::BTreeSet<_>>(), (0..5).collect());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_in_the_socket_s_place_is_left_alone() {
+    let path = std::env::temp_dir().join(format!("lemon-control-file-{}.flp", std::process::id()));
+    std::fs::write(&path, b"a project").unwrap();
+    assert!(server::start(path.to_str().unwrap(), Level::Edit, || {}).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"a project");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn clients_connect_over_a_local_port() {
+    use std::io::{BufRead, BufReader, Write};
+    let mut a = app();
+    let server = server::start("0", Level::Read, || {}).unwrap();
+    let at = server.at.clone();
+    assert!(at.starts_with("127.0.0.1:"), "{at}");
+    a.listen(server);
+    let s = std::net::TcpStream::connect(&at).unwrap();
+    let mut w = s.try_clone().unwrap();
+    writeln!(w, "{}", json!({"jsonrpc": "2.0", "id": 1, "method": "apply", "params": {"command": {"op": "set_tempo", "bpm": 99}}})).unwrap();
+    let mut line = String::new();
+    std::thread::scope(|sc| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut r = BufReader::new(s);
+        let line = &mut line;
+        sc.spawn(move || {
+            r.read_line(line).unwrap();
+            tx.send(()).unwrap();
+        });
+        while rx.try_recv().is_err() {
+            a.control_tick();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
+    let r: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(r["error"]["code"], -32001, "a read-only client: {r}");
+    assert_eq!(a.state.tempo, 130.0);
 }

@@ -40,8 +40,11 @@ pub fn start(at: &str, level: Level, wake: fn()) -> std::io::Result<Server> {
         if at.parse::<u16>().is_ok() {
             shown = tcp(at, tx, wake)?;
         } else {
-            // A socket left by an earlier run that ended without removing it.
-            let _ = std::fs::remove_file(at);
+            // A socket left by an earlier run that ended without removing it goes; any other file stays (bind fails).
+            use std::os::unix::fs::FileTypeExt;
+            if std::fs::symlink_metadata(at).is_ok_and(|m| m.file_type().is_socket()) {
+                let _ = std::fs::remove_file(at);
+            }
             let l = std::os::unix::net::UnixListener::bind(at)?;
             shown = at.to_string();
             std::thread::Builder::new().name("control".into()).spawn(move || {
@@ -98,6 +101,12 @@ fn serve<R: BufRead + Send + 'static, W: Write + Send + 'static>(conn: u64, r: R
 }
 
 impl crate::app::App {
+    /// Answers `server`'s clients from now on.
+    pub fn listen(&mut self, server: Server) {
+        self.rpc_server = Some(server);
+        self.state.control.watched = true;
+    }
+
     /// Answers the requests waiting (on every tick).
     pub fn control_tick(&mut self) {
         let Some(mut server) = self.rpc_server.take() else { return };
@@ -168,7 +177,7 @@ pub fn serve_headless(at: &str, level: Level, project: Option<std::path::PathBuf
     };
     server.headless = true;
     eprintln!("Lemon Studio: serving the control plane at {} ({:?})", server.at, level);
-    app.rpc_server = Some(server);
+    app.listen(server);
     loop {
         app.tick();
         std::thread::sleep(std::time::Duration::from_millis(5));

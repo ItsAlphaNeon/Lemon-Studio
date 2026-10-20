@@ -529,6 +529,25 @@ impl Command {
         })
     }
 
+    /// The timebase changed from `from` to `to` ticks per quarter (`history::rescale`): what an undo command puts back
+    /// follows, so no undo brings back ticks of the old timebase.
+    pub fn rescale(&mut self, from: u16, to: u16) {
+        let Command::Put(t) = self else { return };
+        match &mut **t {
+            Taken::Pattern(p) => {
+                let mut one = Project { ppq: from, patterns: vec![std::mem::take(&mut **p)], ..Project::default() };
+                one.set_ppq(to);
+                **p = one.patterns.pop().unwrap_or_default();
+            }
+            Taken::Arrangement(a) => {
+                a.clips.iter_mut().for_each(|c| c.rescale(from, to));
+                a.markers.iter_mut().for_each(|m| m.rescale(from, to));
+            }
+            Taken::Project(side) => side.project.set_ppq(to),
+            Taken::Settings(_) | Taken::Channel(_) | Taken::Track(_) | Taken::Param(..) => {}
+        }
+    }
+
     /// For an undo command (`Put`): the command putting back the same things as they are now (the undo history's
     /// check that a press changed something, `history::settle`). Others are as they are.
     pub fn now(&self, s: &State) -> Command {
