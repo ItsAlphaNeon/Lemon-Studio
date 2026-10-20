@@ -7,7 +7,7 @@
 //!
 //! | Method | Params | Level | Result |
 //! |---|---|---|---|
-//! | `hello` | `name` | read | the app, the protocol version, the client's level |
+//! | `hello` | `name`, `token` (on a port) | read | the app, the protocol version, the client's level |
 //! | `state` | | read | the project (`query::project`) |
 //! | `notes` | `pattern` | read | a pattern's notes |
 //! | `plugins` | | read | the instruments and effects commands can add |
@@ -38,6 +38,8 @@ pub struct Client {
     pub level: Level,
     /// It saves the project itself (`save`): only without a window (`--serve`), where no one could be asked.
     pub saves: bool,
+    /// The token it must give in `hello` before anything else (a port's, `server::Server::token`); `None` once given.
+    pub token: Option<String>,
 }
 
 /// A JSON-RPC error: its code and message.
@@ -107,6 +109,12 @@ impl App {
 
     /// Method `m` with `params` for client `c`.
     pub fn rpc(&mut self, c: &mut Client, m: &str, params: &Value) -> Result<Value, Fail> {
+        if let Some(t) = &c.token {
+            if m != "hello" || params.get("token").and_then(Value::as_str) != Some(t.as_str()) {
+                return Err(Fail(NOT_ALLOWED, "give the token in `hello` first".into()));
+            }
+            c.token = None;
+        }
         let by = By::Client(c.name.clone());
         let out = match m {
             "hello" => {

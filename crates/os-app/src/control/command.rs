@@ -322,6 +322,8 @@ pub struct Side {
     pub zipped: std::collections::BTreeSet<usize>,
     pub locked: std::collections::BTreeSet<usize>,
     pub loop_len: std::collections::BTreeMap<usize, u32>,
+    /// The mixer's slot names typed in this session (they follow tracks and slots as they move).
+    pub slot_names: std::collections::HashMap<(u16, u8), String>,
 }
 
 impl Side {
@@ -337,6 +339,7 @@ impl Side {
             zipped: r.zipped.clone(),
             locked: r.locked.clone(),
             loop_len: r.loop_len.clone(),
+            slot_names: s.mixer.slot_names.clone(),
         }
     }
 }
@@ -435,6 +438,17 @@ fn unit(name: &str, v: f64, lo: f64, hi: f64) -> Result<f64, Error> {
         Ok(v)
     } else {
         Err(format!("{name} must be {lo}..={hi}, not {v}"))
+    }
+}
+
+/// The latest tick a position or length may reach (about 87 000 bars at 96 ticks a quarter): sums stay in range.
+const MAX_TICK: u32 = 1 << 30;
+
+fn ticks(name: &str, v: u32) -> Result<u32, Error> {
+    if v <= MAX_TICK {
+        Ok(v)
+    } else {
+        Err(format!("{name} {v} is past the last tick ({MAX_TICK})"))
     }
 }
 
@@ -880,6 +894,7 @@ impl Command {
                 none
             }
             Command::SetPattern { pattern, name, color, length } => {
+                length.map(|l| ticks("length", l)).transpose()?;
                 let color = color.map(|c| parse_color(&c)).transpose()?;
                 let place = pattern_place(&s.project, pattern)?;
                 let p = &mut s.project.patterns[place];
@@ -914,6 +929,8 @@ impl Command {
             }
 
             Command::AddClip { track, position, length, pattern, channel } => {
+                ticks("position", position)?;
+                length.map(|l| ticks("length", l)).transpose()?;
                 let source = match (pattern, channel) {
                     (Some(p), None) => ClipSource::Pattern(s.project.patterns[pattern_place(&s.project, p)?].number),
                     (None, Some(c)) => {
@@ -948,6 +965,8 @@ impl Command {
                 none
             }
             Command::SetClip { clip, position, track, length, muted } => {
+                position.map(|v| ticks("position", v)).transpose()?;
+                length.map(|v| ticks("length", v)).transpose()?;
                 let i = clip_place(&s.project, clip)?;
                 if track.is_some_and(|t| t == 0 || t > crate::playlist::TRACKS) {
                     return Err(format!("playlist tracks are 1..={}", crate::playlist::TRACKS));
@@ -1054,7 +1073,8 @@ fn restore(s: &mut State, side: Side) {
     let sel_clips = selected_clips(s);
     let new_row: std::collections::HashMap<u32, usize> = side.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
     let map: Vec<Option<usize>> = old.iter().map(|id| new_row.get(id).copied()).collect();
-    let Side { project, tempo, pattern, groups, unsorted_at, filter, zipped, locked, loop_len } = side;
+    let Side { project, tempo, pattern, groups, unsorted_at, filter, zipped, locked, loop_len, slot_names } = side;
+    s.mixer.slot_names = slot_names;
     s.project = project;
     s.tempo = tempo;
     s.pattern = pattern;
@@ -1086,6 +1106,8 @@ fn notes_of(p: &Project, notes: &[NoteIn]) -> Result<Vec<Note>, Error> {
         .iter()
         .map(|n| {
             let ch = p.channels[channel_row(p, n.channel)?].index;
+            ticks("a note's position", n.position)?;
+            ticks("a note's length", n.length)?;
             if n.key > 131 {
                 return Err(format!("key {} is past the last (131)", n.key));
             }

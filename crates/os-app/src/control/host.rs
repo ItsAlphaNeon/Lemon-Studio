@@ -57,7 +57,10 @@ impl App {
         if !row_map.is_empty() {
             let m = |r: usize| row_map.get(&r).copied().unwrap_or(Some(r));
             self.remap_rows(&m);
-            // The rows hosted are the instances' rows (an edit may have moved the list already).
+        }
+        if rows_too {
+            // The rows hosted are the instances' rows: an edit may have moved or dropped rows of the list without
+            // moving the instances (a command's delete, taken back before a tick).
             self.state.hosted_rows = self.plugins.hosted.range(..FX_KEY).map(|(&r, _)| r).collect();
         }
         if !fx_map.is_empty() {
@@ -84,24 +87,27 @@ impl App {
         if !(rows_too || fx_too) || self.plugins.stash.is_empty() {
             return;
         }
-        let back: Vec<(usize, Id, bool, usize, Vec<u8>)> = self
+        let back: Vec<(usize, Id, bool, String, Vec<u8>)> = self
             .plugins
             .stash
             .iter()
             .filter(|e| if e.1 { fx_too } else { rows_too })
-            .filter_map(|(id, fx, index, state)| {
+            .filter_map(|(id, fx, uid, state)| {
                 let key = if *fx { slots.get(&id.0).map(|&(t, k)| fx_key(t, k)) } else { rows.get(&id.0).copied() }?;
-                (!self.plugins.hosted.contains_key(&key)).then(|| (key, *id, *fx, *index, state.clone()))
+                (!self.plugins.hosted.contains_key(&key)).then(|| (key, *id, *fx, uid.clone(), state.clone()))
             })
             .collect();
-        for (key, id, fx, index, state) in back {
+        for (key, id, fx, uid, state) in back {
             self.plugins.stash.retain(|e| e.0 .0 != id.0);
             let made = match fx_of(key) {
-                Some((t, k)) if fx => self.plugins.create_effect(t, k, index, Some(&state)).is_ok(),
-                None if !fx => {
-                    self.plugin_paste(key, index, &state);
-                    self.plugins.hosted.contains_key(&key)
-                }
+                Some((t, k)) if fx => self.plugins.effect_index_of_uid(&uid).is_some_and(|i| self.plugins.create_effect(t, k, i, Some(&state)).is_ok()),
+                None if !fx => match self.plugins.index_of_uid(&uid) {
+                    Some(i) => {
+                        self.plugin_paste(key, i, &state);
+                        self.plugins.hosted.contains_key(&key)
+                    }
+                    None => false,
+                },
                 _ => false,
             };
             if let Some(h) = self.plugins.hosted.get_mut(&key).filter(|_| made) {

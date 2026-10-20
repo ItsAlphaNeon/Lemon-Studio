@@ -1361,6 +1361,8 @@ impl App {
                 FxReq::Delete { track, slot } => {
                     let key = crate::plugins::fx_key(track, slot);
                     if self.plugins.hosted.contains_key(&key) {
+                        // Kept for an undo that brings the slot back (`control::host`).
+                        self.plugins.keep(key);
                         self.plugins.drop_key(key);
                         relink = true;
                     }

@@ -1580,7 +1580,7 @@ fn main() {
     });
     let level = control.level.unwrap_or(control::Level::Edit);
     if let Some(at) = &control.serve {
-        control::server::serve_headless(at, level, args.first().map(std::path::PathBuf::from));
+        control::server::serve_headless(at, level, control.token.clone(), args.first().map(std::path::PathBuf::from));
     }
     // Run from source: Lemon Studio's own plugins are rebuilt and installed before the plugin scan looks for them.
     plugin_rebuild::run();
@@ -1617,8 +1617,12 @@ fn main() {
     }
     if let Some(at) = &control.control {
         app.state.message = Some(match control::server::start(at, level, wake_ui) {
-            Ok(server) => {
-                let m = format!("Control plane: listening at {}", server.at);
+            Ok(mut server) => {
+                if control.token.is_some() {
+                    server.token = control.token.clone();
+                }
+                let m = format!("Control plane: {}", server.describe());
+                eprintln!("Lemon Studio: {m}");
                 app.listen(server);
                 m
             }

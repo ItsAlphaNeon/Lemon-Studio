@@ -29,12 +29,27 @@ pub struct Server {
     pub clients: std::collections::HashMap<u64, Client>,
     /// Where it listens, as the hint bar names it.
     pub at: String,
+    /// On a port, the token a client gives in `hello` before anything else: every program on the computer can reach a
+    /// port (a web page too), not only this user's. A socket path needs none (only this user can open it).
+    pub token: Option<String>,
+}
+
+/// A token no one can guess: 128 bits from the standard library's random hash keys.
+fn new_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let half = || {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+        h.finish()
+    };
+    format!("{:016x}{:016x}", half(), half())
 }
 
 /// Starts listening at `at` (a socket path, or a port number); `wake` wakes the UI thread when a request comes.
 pub fn start(at: &str, level: Level, wake: fn()) -> std::io::Result<Server> {
     let (tx, rx) = channel::<Request>();
     let shown;
+    let token = at.parse::<u16>().is_ok().then(new_token);
     #[cfg(unix)]
     {
         if at.parse::<u16>().is_ok() {
@@ -63,7 +78,7 @@ pub fn start(at: &str, level: Level, wake: fn()) -> std::io::Result<Server> {
     {
         shown = tcp(at, tx, wake)?;
     }
-    Ok(Server { rx, level, headless: false, clients: Default::default(), at: shown })
+    Ok(Server { rx, level, headless: false, clients: Default::default(), at: shown, token })
 }
 
 fn tcp(at: &str, tx: Sender<Request>, wake: fn()) -> std::io::Result<String> {
@@ -87,6 +102,11 @@ fn serve<R: BufRead + Send + 'static, W: Write + Send + 'static>(conn: u64, r: R
             let Ok(line) = line else { break };
             if line.trim().is_empty() {
                 continue;
+            }
+            // Not JSON (an HTTP request a web page sent to the port): one parse error, and the connection closes.
+            if serde_json::from_str::<serde_json::Value>(&line).is_err() {
+                let _ = writeln!(w, "{}", serde_json::json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "not JSON: closing"}}));
+                break;
             }
             let (reply, answer) = channel();
             if tx.send(Request { conn, line, reply }).is_err() {
@@ -116,7 +136,9 @@ impl crate::app::App {
         while let Ok(req) = server.rx.try_recv() {
             let level = server.level;
             let headless = server.headless;
-            let mut client = server.clients.remove(&req.conn).unwrap_or_else(|| Client { name: format!("Client {}", req.conn), level, saves: headless });
+            let token = server.token.clone();
+            let mut client =
+                server.clients.remove(&req.conn).unwrap_or_else(|| Client { name: format!("Client {}", req.conn), level, saves: headless, token });
             if let Some(a) = self.rpc_line(&mut client, &req.line) {
                 let _ = req.reply.send(a);
             }
@@ -133,6 +155,8 @@ pub struct Flags {
     pub control: Option<String>,
     pub serve: Option<String>,
     pub level: Option<Level>,
+    /// `--control-token <t>`: the token clients give in `hello` (else a port gets a new one each run, a socket path none).
+    pub token: Option<String>,
 }
 
 impl Flags {
@@ -144,6 +168,7 @@ impl Flags {
             let slot = match args[i].as_str() {
                 "--control" => &mut f.control,
                 "--serve" => &mut f.serve,
+                "--control-token" => &mut f.token,
                 "--control-level" => {
                     let v = args.get(i + 1).ok_or("--control-level needs read, propose or edit")?;
                     f.level = Some(Level::parse(v).ok_or_else(|| format!("--control-level: {v} is not read, propose or edit"))?);
@@ -155,7 +180,7 @@ impl Flags {
                     continue;
                 }
             };
-            let v = args.get(i + 1).filter(|v| !v.starts_with("--")).ok_or_else(|| format!("{} needs a socket path or a port", args[i]))?;
+            let v = args.get(i + 1).filter(|v| !v.starts_with("--")).ok_or_else(|| format!("{} needs a value", args[i]))?;
             *slot = Some(v.clone());
             args.drain(i..i + 2);
         }
@@ -166,8 +191,18 @@ impl Flags {
     }
 }
 
+impl Server {
+    /// Where it listens and, on a port, the token clients give: for the hint bar and the terminal.
+    pub fn describe(&self) -> String {
+        match &self.token {
+            Some(t) => format!("listening at {}, token {t}", self.at),
+            None => format!("listening at {}", self.at),
+        }
+    }
+}
+
 /// `--serve`: the app without a window, `project` opened, answering clients until the process is ended.
-pub fn serve_headless(at: &str, level: Level, project: Option<std::path::PathBuf>) -> ! {
+pub fn serve_headless(at: &str, level: Level, token: Option<String>, project: Option<std::path::PathBuf>) -> ! {
     let mut app = crate::app::App::new(project);
     // The plugins of the last scan, as the window's app has them before its own scan.
     app.load_plugins();
@@ -179,7 +214,10 @@ pub fn serve_headless(at: &str, level: Level, project: Option<std::path::PathBuf
         }
     };
     server.headless = true;
-    eprintln!("Lemon Studio: serving the control plane at {} ({:?})", server.at, level);
+    if token.is_some() {
+        server.token = token;
+    }
+    eprintln!("Lemon Studio: control plane {} ({level:?})", server.describe());
     app.listen(server);
     loop {
         app.tick();

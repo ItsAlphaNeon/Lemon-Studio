@@ -221,7 +221,7 @@ fn a_proposal_leaves_the_project_until_accepted() {
 fn proposals_ask_the_user() {
     let mut a = app();
     a.state.dialogs.clear();
-    let mut c = rpc::Client { name: "Helper".into(), level: Level::Propose, saves: false };
+    let mut c = rpc::Client { name: "Helper".into(), level: Level::Propose, saves: false, token: None };
     let r = a.rpc(&mut c, "propose", &json!({"name": "Faster", "commands": [{"op": "set_tempo", "bpm": 150}]})).ok().unwrap();
     let n = r["proposal"].as_u64().unwrap();
     assert_eq!(a.state.dialogs.len(), 1, "a box asks");
@@ -256,7 +256,7 @@ fn events_tell_clients_what_changed() {
 #[test]
 fn rpc_requests_and_errors() {
     let mut a = app();
-    let mut c = rpc::Client { name: "Client 1".into(), level: Level::Edit, saves: false };
+    let mut c = rpc::Client { name: "Client 1".into(), level: Level::Edit, saves: false, token: None };
     let call = |a: &mut App, c: &mut rpc::Client, req: Value| -> Value { serde_json::from_str(&a.rpc_line(c, &req.to_string()).unwrap()).unwrap() };
     let r = call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"name": "Assistant"}}));
     assert_eq!((r["id"].clone(), r["result"]["protocol"].clone(), r["result"]["level"].clone()), (json!(1), json!(rpc::PROTOCOL), json!("edit")));
@@ -279,7 +279,7 @@ fn rpc_requests_and_errors() {
     assert_eq!(code(call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 7, "method": "nope"}))), Some(-32601));
     assert_eq!(code(call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 8, "method": "apply", "params": {"command": {"op": "fly"}}}))), Some(-32602));
     assert_eq!(code(call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 9, "method": "apply", "params": {"command": {"op": "delete_channel", "channel": 9999}}}))), Some(-32000));
-    let mut reader = rpc::Client { name: "Reader".into(), level: Level::Read, saves: false };
+    let mut reader = rpc::Client { name: "Reader".into(), level: Level::Read, saves: false, token: None };
     assert_eq!(code(call(&mut a, &mut reader, json!({"jsonrpc": "2.0", "id": 10, "method": "apply", "params": {"command": {"op": "set_tempo", "bpm": 99}}}))), Some(-32001));
     assert_eq!(a.state.tempo, 130.0);
     // A notification (no id) gets no answer.
@@ -301,7 +301,7 @@ fn hosted_plugins_follow_deletes_and_undo() {
     let (ch, ..) = ids(&a);
     let rows = |a: &App| a.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, h)| (r, h.owner.0)).collect::<Vec<_>>();
     assert_eq!(rows(&a), ch.iter().copied().enumerate().collect::<Vec<_>>(), "each sampler hosted, owned by its channel");
-    let mut c = rpc::Client { name: "Test".into(), level: Level::Edit, saves: false };
+    let mut c = rpc::Client { name: "Test".into(), level: Level::Edit, saves: false, token: None };
     // A parameter set through the control plane, then its channel deleted and brought back.
     let params = a.rpc(&mut c, "params", &json!({"owner": ch[1]})).ok().unwrap();
     let p = params["params"].as_array().unwrap().iter().find(|p| p["steps"] == 0 && p["read_only"] == false && p["value"].as_f64().is_some_and(|v| v < 0.9)).unwrap().clone();
@@ -407,14 +407,14 @@ fn command_line_flags() {
 fn saving_asks_the_user_unless_headless() {
     let mut a = app();
     let path = std::env::temp_dir().join(format!("lemon-control-save-{}.flp", std::process::id()));
-    let mut c = rpc::Client { name: "Helper".into(), level: Level::Edit, saves: false };
+    let mut c = rpc::Client { name: "Helper".into(), level: Level::Edit, saves: false, token: None };
     a.state.dialogs.clear();
     let r = a.rpc(&mut c, "save", &json!({"path": path})).ok().unwrap();
     assert!(r.get("asked").is_some() && !path.exists() && a.state.dialogs.len() == 1, "{r}");
     a.dialog_done(crate::dialog::Then::ClientSave(path.clone()), crate::dialog::Reply::Button(crate::dialog::Answer::Yes));
     assert!(path.exists(), "saved once the user said yes");
     let _ = std::fs::remove_file(&path);
-    let mut c = rpc::Client { name: "Script".into(), level: Level::Edit, saves: true };
+    let mut c = rpc::Client { name: "Script".into(), level: Level::Edit, saves: true, token: None };
     let r = a.rpc(&mut c, "save", &json!({"path": path})).ok().unwrap();
     assert_eq!(r["saved"], json!(path.display().to_string()));
     let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
@@ -564,27 +564,116 @@ fn clients_connect_over_a_local_port() {
     use std::io::{BufRead, BufReader, Write};
     let mut a = app();
     let server = server::start("0", Level::Read, || {}).unwrap();
-    let at = server.at.clone();
-    assert!(at.starts_with("127.0.0.1:"), "{at}");
+    let (at, token) = (server.at.clone(), server.token.clone().unwrap());
+    assert!(at.starts_with("127.0.0.1:") && token.len() == 32, "{at} {token}");
     a.listen(server);
     let s = std::net::TcpStream::connect(&at).unwrap();
     let mut w = s.try_clone().unwrap();
-    writeln!(w, "{}", json!({"jsonrpc": "2.0", "id": 1, "method": "apply", "params": {"command": {"op": "set_tempo", "bpm": 99}}})).unwrap();
-    let mut line = String::new();
-    std::thread::scope(|sc| {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut r = BufReader::new(s);
-        let line = &mut line;
-        sc.spawn(move || {
-            r.read_line(line).unwrap();
-            tx.send(()).unwrap();
+    let mut r = BufReader::new(s);
+    let mut ask = |a: &mut App, req: &str| -> String {
+        writeln!(w, "{req}").unwrap();
+        let mut line = String::new();
+        std::thread::scope(|sc| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (r, line) = (&mut r, &mut line);
+            sc.spawn(move || {
+                r.read_line(line).unwrap();
+                tx.send(()).unwrap();
+            });
+            while rx.try_recv().is_err() {
+                a.control_tick();
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
         });
-        while rx.try_recv().is_err() {
-            a.control_tick();
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-    });
-    let r: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(r["error"]["code"], -32001, "a read-only client: {r}");
+        line
+    };
+    let code = |l: &str| serde_json::from_str::<Value>(l).unwrap()["error"]["code"].as_i64();
+    let apply = json!({"jsonrpc": "2.0", "id": 1, "method": "apply", "params": {"command": {"op": "set_tempo", "bpm": 99}}}).to_string();
+    assert_eq!(code(&ask(&mut a, &apply)), Some(-32001), "nothing before the token");
+    let bad = json!({"jsonrpc": "2.0", "id": 2, "method": "hello", "params": {"token": "guess"}}).to_string();
+    assert_eq!(code(&ask(&mut a, &bad)), Some(-32001));
+    let hello = json!({"jsonrpc": "2.0", "id": 3, "method": "hello", "params": {"name": "Port", "token": token}}).to_string();
+    assert_eq!(code(&ask(&mut a, &hello)), None);
+    assert_eq!(code(&ask(&mut a, &apply)), Some(-32001), "a read-only client");
     assert_eq!(a.state.tempo, 130.0);
+    // A web page's request: one parse error, then the connection is closed.
+    assert_eq!(code(&ask(&mut a, "POST / HTTP/1.1")), Some(-32700));
+    let mut rest = String::new();
+    assert_eq!(r.read_line(&mut rest).unwrap(), 0, "closed");
+}
+
+#[test]
+fn a_replaced_generator_stays_replaced() {
+    let mut a = app();
+    a.plugins = crate::plugins::Plugins::default();
+    a.plugins.available = crate::plugins::builtin();
+    a.plugin_tick();
+    a.plugin_tick();
+    let trio = a.plugins.available.iter().position(|p| p.desc.name == crate::osc3::LEMON_TRIO).unwrap();
+    crate::plugin_menu::replace_generator(&mut a, trio, 0);
+    for _ in 0..3 {
+        a.plugin_tick();
+    }
+    assert_eq!(a.plugins.descriptor(0).map(|d| d.name), Some(crate::osc3::LEMON_TRIO.to_string()), "the old sampler is not hosted again");
+    assert_eq!(a.state.hosted_rows.iter().filter(|&&r| r == 0).count(), 1);
+    // And back: Lemon Sampler hosts the channel, not the Lemon Trio it replaced.
+    let sampler = a.plugins.available.iter().position(|p| p.desc.name == crate::plugins::LEMON_SAMPLER).unwrap();
+    crate::plugin_menu::replace_generator(&mut a, sampler, 0);
+    for _ in 0..3 {
+        a.plugin_tick();
+    }
+    assert_eq!(a.plugins.descriptor(0).map(|d| d.name), Some(crate::plugins::LEMON_SAMPLER.to_string()));
+}
+
+#[test]
+fn a_dry_run_leaves_the_instruments_and_the_selections() {
+    let mut a = app();
+    a.plugins = crate::plugins::Plugins::default();
+    a.plugins.available = crate::plugins::builtin();
+    a.plugin_tick();
+    a.plugin_tick();
+    let ch = ids(&a).0;
+    a.state.rack.select_only(1);
+    a.state.selected_channel = 1;
+    let live = a.plugins.hosted[&1].plugin.clone();
+    let rows = a.state.hosted_rows.clone();
+    propose(&mut a.state, &test_client(), "Fewer", vec![cmd(json!({"op": "delete_channel", "channel": ch[1]}))]).unwrap();
+    assert_eq!((a.state.selected_channel, a.state.rack.sel.iter().copied().collect::<Vec<_>>()), (1, vec![1]));
+    assert_eq!(a.state.hosted_rows, rows);
+    a.plugin_tick();
+    a.plugin_tick();
+    assert!(std::sync::Arc::ptr_eq(&a.plugins.hosted[&1].plugin, &live), "the same instance plays the channel");
+    // A transaction that fails half way leaves them too.
+    let bad = vec![cmd(json!({"op": "delete_channel", "channel": ch[1]})), cmd(json!({"op": "set_tempo", "bpm": 1}))];
+    assert!(apply(&mut a.state, &test_client(), None, bad).is_err());
+    a.plugin_tick();
+    assert!(std::sync::Arc::ptr_eq(&a.plugins.hosted[&1].plugin, &live));
+    assert_eq!(a.state.hosted_rows, rows);
+}
+
+#[test]
+fn slot_names_come_back_with_their_track() {
+    let mut a = app();
+    a.state.mixer.slot_names.insert((3, 1), "Crunch".into());
+    crate::mixer::run(&mut a, crate::mixer::MCmd::Delete(2));
+    assert_eq!(a.state.mixer.slot_names.get(&(2, 1)).map(String::as_str), Some("Crunch"), "moved left with its track");
+    crate::history::undo(&mut a.state);
+    assert_eq!(a.state.mixer.slot_names.get(&(3, 1)).map(String::as_str), Some("Crunch"));
+    assert_eq!(a.state.mixer.slot_names.len(), 1);
+}
+
+#[test]
+fn ticks_past_the_last_are_refused() {
+    let mut a = app();
+    let pat = ids(&a).2[0];
+    let before = reading(&a);
+    for c in [
+        json!({"op": "add_clip", "track": 1, "position": u32::MAX, "pattern": pat}),
+        json!({"op": "add_clip", "track": 1, "position": 0, "length": u32::MAX, "pattern": pat}),
+        json!({"op": "set_pattern", "pattern": pat, "name": "Nope", "length": u32::MAX}),
+        json!({"op": "add_notes", "pattern": pat, "notes": [{"channel": ids(&a).0[0], "position": u32::MAX}]}),
+    ] {
+        assert!(apply(&mut a.state, &test_client(), None, vec![cmd(c.clone())]).is_err(), "{c}");
+        assert_eq!(reading(&a), before, "{c} changed nothing");
+    }
 }

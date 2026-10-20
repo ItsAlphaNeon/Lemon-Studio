@@ -243,6 +243,8 @@ fn op(c: &Command) -> &'static str {
 /// order to apply them). Records nothing.
 pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
     s.control.settle(&mut s.project);
+    let queues = Queues::of(s);
+    let known = s.control.known.clone();
     let mut undo = Vec::with_capacity(commands.len());
     let mut results = Vec::with_capacity(commands.len());
     for (i, c) in commands.into_iter().enumerate() {
@@ -256,6 +258,8 @@ pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Val
                 // Back to where the list started.
                 undo.reverse();
                 take_back(s, undo);
+                queues.put(s);
+                s.control.known = known;
                 return Err(format!("command {i}: {e}"));
             }
         }
@@ -351,7 +355,9 @@ fn lower(t: &str) -> String {
     c.next().map(|f| f.to_lowercase().chain(c).collect()).unwrap_or_default()
 }
 
-/// What the app's queues held before a dry run, so it can leave them as they were.
+/// What the app's queues and the interface's selections were before commands that are taken back at once (a dry
+/// run, a transaction that fails), so they are left as they were: no plugin is dropped and hosted again, no
+/// selection moves.
 struct Queues {
     host: usize,
     params: usize,
@@ -359,6 +365,15 @@ struct Queues {
     fx: usize,
     dirty: bool,
     message: Option<String>,
+    hosted_rows: Vec<usize>,
+    selected_channel: usize,
+    rack_sel: std::collections::BTreeSet<usize>,
+    selected_mixer: u16,
+    mixer_sel: Vec<u16>,
+    windows: Vec<crate::app::Win>,
+    plugin_channel: usize,
+    clips: Vec<usize>,
+    piano: crate::piano::PianoState,
 }
 
 impl Queues {
@@ -370,6 +385,15 @@ impl Queues {
             fx: s.mixer.pending.len(),
             dirty: s.piano.dirty,
             message: s.message.clone(),
+            hosted_rows: s.hosted_rows.clone(),
+            selected_channel: s.selected_channel,
+            rack_sel: s.rack.sel.clone(),
+            selected_mixer: s.selected_mixer,
+            mixer_sel: s.mixer.sel.clone(),
+            windows: s.z.clone(),
+            plugin_channel: s.plugin_channel,
+            clips: s.playlist.sel.clone(),
+            piano: s.piano.clone(),
         }
     }
 
@@ -378,8 +402,12 @@ impl Queues {
         s.control.params.truncate(self.params);
         s.sample_loads.truncate(self.sample_loads);
         s.mixer.pending.truncate(self.fx);
-        s.piano.dirty = self.dirty;
         s.message = self.message;
+        s.hosted_rows = self.hosted_rows;
+        (s.selected_channel, s.rack.sel, s.selected_mixer, s.mixer.sel) = (self.selected_channel, self.rack_sel, self.selected_mixer, self.mixer_sel);
+        (s.z, s.plugin_channel, s.playlist.sel) = (self.windows, self.plugin_channel, self.clips);
+        s.piano = self.piano;
+        s.piano.dirty = self.dirty;
     }
 }
 
@@ -413,9 +441,17 @@ pub fn propose(s: &mut State, by: &By, name: &str, commands: Vec<Command>) -> Re
 pub fn accept(s: &mut State, n: u64) -> Result<Vec<serde_json::Value>, String> {
     let i = s.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
     let p = s.control.proposals.remove(i);
-    let r = apply(s, &p.by, Some(&p.name), p.commands)?;
-    s.control.event(&p.by, "accepted", p.name, Vec::new());
-    Ok(r)
+    match apply(s, &p.by, Some(&p.name), p.commands.clone()) {
+        Ok(r) => {
+            s.control.event(&p.by, "accepted", p.name, Vec::new());
+            Ok(r)
+        }
+        // The project changed since it was proposed: it waits on, for the client to discard or the user to see why.
+        Err(e) => {
+            s.control.proposals.insert(i, p);
+            Err(e)
+        }
+    }
 }
 
 /// Discards proposal `n`.

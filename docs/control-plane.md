@@ -17,9 +17,12 @@ The design is in the specs repository's `roadmap/control-plane.md`.
 | `--control <socket>` | The app listens beside its window. `<socket>` is a Unix socket path (Linux, macOS) or a port number (any platform; Windows takes ports only). The hint bar says where it listens. |
 | `--serve <socket> [project.flp]` | No window: the app opens the project (or a new one) and answers clients until the process ends. |
 | `--control-level read\|propose\|edit` | What clients may do; `edit` by default. |
+| `--control-token <token>` | The token clients give in `hello`. A port gets a new random one each run without it (the hint bar and the terminal show it); a socket path needs none unless one is given. |
 
 A socket path is made readable and writable by your user only. A port listens on 127.0.0.1, so only this computer
-can connect, but every program on it can: on Linux and macOS prefer a socket path. Port `0` picks a free one.
+can connect, but every program on it can, so on a port a client must first give the token in `hello`; nothing else is
+answered before that. A connection that sends a line that isn't JSON (a web page posting to the port) gets one parse
+error and is closed. On Linux and macOS prefer a socket path. Port `0` picks a free one.
 
 ```bash
 lemonstudio --control /tmp/lemon.sock song.flp
@@ -41,7 +44,7 @@ says that they were. Without a window (`--serve`) the client saves directly.
 
 | Method | Params | Result |
 |---|---|---|
-| `hello` | `name` | `app`, `version`, `protocol` (1), `name`, `level`. The name labels the client's undo steps and events. |
+| `hello` | `name`, `token` (on a port) | `app`, `version`, `protocol` (1), `name`, `level`. The name labels the client's undo steps and events. |
 | `state` | | The project: settings, `channels`, `mixer` (the tracks in use), `patterns`, `playlist` |
 | `notes` | `pattern` | That pattern's notes |
 | `plugins` | | The `instruments` and `effects` that `add_channel` and `add_effect` take, by name |

@@ -2095,6 +2095,8 @@ impl App {
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
         self.plugins.idle(|_| None);
+        // What was hosted on this tick takes the id of its channel or slot now, before anything moves rows.
+        self.follow_ids(false, false);
         // An open instrument editor is processed while nothing plays, so notes from its own keyboard sound.
         let listen = self.plugins.editor_open();
         if listen {
@@ -7235,6 +7237,8 @@ impl App {
     pub(crate) fn remap_rows(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
         self.typing_release_all();
         self.plugins.remap(m);
+        // The rows hosted are the instances' rows.
+        self.state.hosted_rows = self.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
         self.sampler_failed = self.sampler_failed.iter().filter_map(|&r| m(r)).collect();
         self.wrap_failed = self.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
         self.native_failed = self.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
