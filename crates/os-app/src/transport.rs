@@ -1630,6 +1630,7 @@ impl Session {
         }
         if song {
             e.set_run_on(crate::record::run_on_flag());
+            e.set_loop_range(crate::record::loop_range_flag());
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));

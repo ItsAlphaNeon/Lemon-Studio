@@ -129,9 +129,8 @@ impl App {
         if !self.state.song_mode {
             self.act(Action::PatSong(true));
         }
-        if !self.state.rec.armed {
-            self.toggle_record();
-        }
+        // Armed directly: the audio was the answer to "what to record".
+        self.state.rec.armed = true;
         self.play_counted_if_armed();
         self.invalidate();
     }

@@ -299,8 +299,9 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
             icons::draw(ui.c, icon, g, c);
         }
     }
-    // Record (spec: ui/recording.md §2): armed, the dot is lit and larger, on a face of its colour. Its dot is white
-    // under High visibility (`crate::high_visibility`).
+    // Record (spec: ui/recording.md §2): armed, the whole round face fills with the record colour, a lighter rim and a
+    // dark dot in the middle; disarmed, a small dimmed dot. The record colour is white under High visibility
+    // (`crate::high_visibility`).
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
     let hov = ui.hit(rec, Action::Record, crate::record::hint());
     let armed = s.rec.armed;
@@ -309,20 +310,19 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
     let face = Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0);
     if lemon {
         os_ui::kit::button(ui.c, t, face, os_ui::kit::State::new(hov, down, false));
-        if armed {
-            ui.c.fill_circle(rec.cx(), rec.cy(), 10.0, dot.with_alpha(70));
-        }
-        ui.c.fill_circle(rec.cx(), rec.cy(), if armed { 7.0 } else { 5.6 }, if armed || hov { dot } else { dot.mix(t.toolbar, 0.35) });
     } else {
         ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.toolbar_line.shade(-0.25));
         let bg = if hov || down { t.button_hi } else { t.button.shade(-0.12) };
         ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, bg);
-        if armed {
-            ui.c.fill_circle(rec.cx(), rec.cy(), 10.0, dot.mix(bg, 0.55));
-            ui.c.fill_circle(rec.cx(), rec.cy(), 7.4, dot);
-        } else {
-            ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, dot.mix(bg, 0.25));
-        }
+    }
+    if armed {
+        let fill = if hov || down { dot.shade(0.12) } else { dot };
+        ui.c.fill_circle(rec.cx(), rec.cy(), 12.0, fill);
+        ui.c.stroke_circle(rec.cx(), rec.cy(), 11.4, 1.6, dot.shade(0.45));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 4.6, dot.shade(-0.6));
+    } else {
+        let bg = if lemon { t.toolbar } else { t.button.shade(-0.12) };
+        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, if hov { dot } else { dot.mix(bg, 0.35) });
     }
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);

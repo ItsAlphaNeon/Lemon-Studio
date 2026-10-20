@@ -327,6 +327,8 @@ pub enum Cmd {
     RecPrecountBars(u32),
     /// One-click audio recording's input (spec: ui/one-click-recording.md §2).
     OneClick(crate::capture::Input),
+    /// The record popups: what to record, the metronome menu's precount, the score logger (spec: ui/recording.md).
+    Rec(crate::record::RecCmd),
     /// Settings > Project ▸ Numerator / Denominator: the project's bar, beats per bar and steps per beat (events 17,
     /// 18; spec: ui/settings-choices.md "Project").
     Bar(u16, u16),
@@ -3453,6 +3455,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.one_click_start(input);
             return None;
         }
+        Cmd::Rec(c) => return app.rec_cmd(c),
         Cmd::RecPrecountBars(bars) => {
             crate::record::set_precount_bars(bars);
             app.invalidate();
@@ -3517,7 +3520,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(_) | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

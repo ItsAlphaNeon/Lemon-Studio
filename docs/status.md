@@ -161,11 +161,17 @@ Not yet: Align all channel editors, Arrange windows.
   with the mouse, with octave steps
 - Note recording (the toolbar's Record button): armed and playing, notes from the typing keyboard, MIDI or the Touch
   controller go into the current pattern, quantized to the main snap; a take replaces the notes that start inside it
-  and is one undo step; in SONG mode a clip of the pattern is placed where none plays. Right-click for the options
+  and is one undo step; in SONG mode a clip of the pattern is placed where none plays, and made longer when the
+  take runs past it. A click or R (typing keyboard off) asks what to record (notes and automation, notes, automation,
+  or audio into the playlist); armed, the whole button fills red. Right-click for the options
+- Time selection loop: a piano roll (PAT) or playlist (SONG) time selection loops playback; armed with Loop record
+  off it punches in and out (plays it once and stops back at its start)
+- Score logger (TOOLS): every note played is kept for 30 minutes; Dump score log writes the last 2 to 30 minutes into
+  the pattern at their real timing (Merge / Replace when it has notes); Clear log
 - Automation recording: channel volume and pan knob moves while recording become the pattern's control points
 - Record options (toolbar, OPTIONS, Ctrl+I / Ctrl+P / Ctrl+B): Start on input (Play waits for the first note, which
-  is recorded at the start), Recording precount (1 or 2 bars of metronome count-in, "REC IN n" on the clock) and
-  Blend (a take keeps the notes it overlaps)
+  is recorded at the start), Recording precount (1 or 2 bars of metronome count-in, "REC IN n" on the clock; also
+  set from the metronome's right-click menu) and Blend (a take keeps the notes it overlaps)
 - Loop record (toolbar, OPTIONS): off, recording runs on past the pattern's or song's end and the pattern grows;
   on, playback loops and each pass is a take (one undo step) that replaces what the pass before recorded
 - One-click audio recording (the toolbar's microphone, TOOLS): pick an input (an ASIO driver's inputs, else the

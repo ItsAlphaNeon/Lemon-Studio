@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 use os_model::{ChannelKind, ClipSource, ControlPoint, Project, Stretching};
 
 use crate::clock::Clock;
+
+/// A time selection's loop, shared with the app (`Engine::set_loop_range`): from and to ticks; `to` <= `from` is none.
+pub type LoopRange = Arc<[std::sync::atomic::AtomicU64; 2]>;
 use os_dsp::glide::Glide;
 use crate::effects::Effect;
 use crate::envelope;
@@ -872,6 +875,8 @@ pub struct Engine {
     /// Recording with Loop record off (`set_run_on`): while the flag is set, a looping playback runs on past its end
     /// instead of going back to the start (spec: ui/recording.md §4).
     run_on: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// A time selection's loop (`set_loop_range`): from and to ticks, read every tick; `to` <= `from` is none.
+    loop_range: Option<LoopRange>,
     tempo: f64,
     ppq: u16,
     /// Steps per beat (event 18): the tempo counts beats of this many sixteenths, so the ticks run at `tempo × steps /
@@ -1325,6 +1330,7 @@ impl Engine {
             count_in: 0,
             count_in_len: 0,
             run_on: None,
+            loop_range: None,
             fade_out: 0,
             fade_in: 0,
             fade_len: 0,
@@ -1383,6 +1389,20 @@ impl Engine {
     /// While `flag` is set, a looping playback runs on past its end (spec: ui/recording.md §4); it is read every tick.
     pub fn set_run_on(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
         self.run_on = Some(flag);
+    }
+
+    /// While `range` holds a span (from < to), a looping playback goes back to `from` on reaching `to` instead of
+    /// from its end to tick 0 (a time selection, spec: ui/recording.md §5); it is read every tick.
+    pub fn set_loop_range(&mut self, range: LoopRange) {
+        self.loop_range = Some(range);
+    }
+
+    /// The loop range's span now, when it has one.
+    fn loop_span(&self) -> Option<(u64, u64)> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let r = self.loop_range.as_ref()?;
+        let (a, b) = (r[0].load(Relaxed), r[1].load(Relaxed));
+        (b > a).then_some((a, b))
     }
 
     /// Ticks of the count-in left to render (0: none, or over).
@@ -1846,6 +1866,7 @@ impl Engine {
         (self.held, self.fade_out, self.fade_in, self.fade_len) = (old.held, old.fade_out, old.fade_in, old.fade_len);
         (self.count_in, self.count_in_len) = (old.count_in, old.count_in_len);
         self.run_on = old.run_on.take();
+        self.loop_range = old.loop_range.take();
         self.inst_offs = std::mem::take(&mut old.inst_offs);
         self.inst_offs.retain(|o| o.1 < n);
         self.inst_shapes = std::mem::take(&mut old.inst_shapes);
@@ -2123,8 +2144,10 @@ impl Engine {
         // A looping engine starts again at tick 0 when the pattern is over; voices and effects carry on. Recording
         // with Loop record off, it runs on.
         let run_on = self.run_on.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
-        if self.looping && !run_on && self.end_tick > 0 && self.tick >= self.end_tick {
-            self.wrap();
+        match self.loop_span() {
+            Some((from, to)) if self.looping && !run_on && self.tick >= to => self.wrap_to(from, self.tick),
+            None if self.looping && !run_on && self.end_tick > 0 && self.tick >= self.end_tick => self.wrap(),
+            _ => {}
         }
         let tick = self.tick;
         let (start, len) = self.clock.advance();
@@ -2778,7 +2801,9 @@ impl Engine {
             denominator: self.signature.1,
             looping: None,
         };
-        if self.looping && self.end_tick > 0 {
+        if let Some((from, to)) = self.loop_span().filter(|_| self.looping) {
+            start.looping = Some((from as f64 / f64::from(self.ppq), to as f64 / f64::from(self.ppq)));
+        } else if self.looping && self.end_tick > 0 {
             start.looping = Some((0.0, self.end_tick as f64 / f64::from(self.ppq)));
         }
         start.advanced(frame, self.rate)
@@ -2786,33 +2811,48 @@ impl Engine {
 
     /// Loop point: back to tick 0 (sounding notes keep their remaining length).
     fn wrap(&mut self) {
-        let at = self.end_tick;
+        self.wrap_to(0, self.end_tick);
+    }
+
+    /// Loop point at tick `at`: back to tick `from` (sounding notes keep their remaining length; audio clips under way
+    /// at `from` resume there, as at a start inside them).
+    fn wrap_to(&mut self, from: u64, at: u64) {
+        let shift = at.saturating_sub(from);
         for o in &mut self.inst_offs {
-            o.0 = o.0.saturating_sub(at);
+            o.0 = o.0.saturating_sub(shift);
         }
         for v in &mut self.voices {
-            v.cut = v.cut.map(|c| c.saturating_sub(at));
-            v.release_at = v.release_at.map(|r| r.saturating_sub(at));
+            v.cut = v.cut.map(|c| c.saturating_sub(shift));
+            v.release_at = v.release_at.map(|r| r.saturating_sub(shift));
         }
-        self.clock.restart();
-        self.tick = 0;
-        self.frame = 0;
-        self.next_trigger = 0;
+        if from == 0 {
+            self.clock.restart();
+            self.frame = 0;
+        } else {
+            self.clock = Clock::at_tick(self.rate, self.ppq, self.tick_tempo(), from);
+            self.frame = self.clock.next_start();
+        }
+        self.tick = from;
+        self.next_trigger = self.triggers.partition_point(|t| t.tick < from);
         // Control points replay from the top: until the first one the channel has its own settings, and mixer tracks
         // glide back to theirs until automation hands its values on again (a Lemon Studio choice; FL's behaviour at
         // the loop point is not measured).
         for t in &mut self.tracks {
             t.restore(false);
         }
-        self.sync_controls(0);
+        self.sync_controls(from);
         for s in &mut self.sounding {
             if s.2 != u64::MAX {
-                s.2 = s.2.saturating_sub(at);
+                s.2 = s.2.saturating_sub(shift);
             }
         }
-        self.sounding.retain(|&(_, _, end)| end > 0);
+        self.sounding.retain(|&(_, _, end)| end > from);
+        if from > 0 {
+            let late = self.clips_under_way(from);
+            self.late.extend(late);
+        }
         // A song back at its start: the initial values first, then automation clips act there as usual.
-        if !self.init.is_empty() {
+        if from == 0 && !self.init.is_empty() {
             self.set_auto_values(self.init.clone(), 0);
         }
     }
@@ -5860,6 +5900,35 @@ mod tests {
         let mut out = vec![0.0; 2 * 4800];
         e.process(&mut out);
         assert!(e.tick_position() < 384.0, "back to the start: {}", e.tick_position());
+    }
+
+    // spec: ui/recording.md §5
+    #[test]
+    fn a_loop_range_goes_back_to_its_start() {
+        let mut p = project(vec![], vec![]);
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_looping(true);
+        let range: LoopRange = std::sync::Arc::new([std::sync::atomic::AtomicU64::new(96), std::sync::atomic::AtomicU64::new(192)]);
+        e.set_loop_range(range.clone());
+        e.seek_tick(96);
+        // Two seconds at 130 BPM is about 416 ticks: the 96-tick range loops four times and never leaves it.
+        let mut seen = Vec::new();
+        for _ in 0..200 {
+            let mut out = vec![0.0; 2 * 480];
+            e.process(&mut out);
+            seen.push(e.tick_position());
+        }
+        assert!(seen.iter().all(|&t| (96.0..193.0).contains(&t)), "{seen:?}");
+        assert!(seen.windows(2).filter(|w| w[1] < w[0]).count() >= 3, "it looped");
+        // Cleared: the pattern loops at its own end again.
+        range[1].store(0, std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..200 {
+            let mut out = vec![0.0; 2 * 480];
+            e.process(&mut out);
+        }
+        assert!(e.tick_position() < 384.0);
     }
 
     #[test]

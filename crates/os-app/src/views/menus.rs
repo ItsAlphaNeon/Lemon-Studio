@@ -281,8 +281,8 @@ const TOOLS_A: &[Item] = &[
     it("Save audio clipboard to browser", ""),
     it("Save MIDI clipboard to browser", ""),
     head("Score logger"),
-    it("Dump score log to selected pattern", "").sub(),
-    it("Clear log", ""),
+    it(DUMP_LOG_LABEL, "").sub(),
+    it(CLEAR_LOG_LABEL, "").on(),
     head("Audio logger"),
     it("Enabled", "").tick(),
     it("Settings", "").sub(),
@@ -451,6 +451,8 @@ fn opens_sub(menu: usize, item: &Item) -> bool {
 /// TOOLS > Switch all plugin editors to ▸ and Change declicking for selected channels to ▸, also in the channel rack's
 /// options menu (spec: ui/channel-rack.md §17).
 pub const ONE_CLICK_LABEL: &str = "One-click audio recording";
+pub const DUMP_LOG_LABEL: &str = "Dump score log to selected pattern";
+pub const CLEAR_LOG_LABEL: &str = "Clear log";
 pub const EDITORS_LABEL: &str = "Switch all plugin editors to";
 pub const DECLICK_LABEL: &str = "Change declicking for selected channels to";
 /// TOOLS > Switch all / selected audio clip channels to ▸, also in the channel rack's options menu (spec:
@@ -468,6 +470,8 @@ pub fn submenu(menu: usize, label: &str) -> Option<fn(&State) -> Vec<crate::play
         (TOOLS_MENU, EDITORS_LABEL) => Some(|_| crate::rack::editor_items()),
         // spec: ui/one-click-recording.md §2
         (TOOLS_MENU, ONE_CLICK_LABEL) => Some(crate::one_click::items),
+        // spec: ui/recording.md §6
+        (TOOLS_MENU, DUMP_LOG_LABEL) => Some(crate::score_log::items),
         (TOOLS_MENU, DECLICK_LABEL) => Some(crate::rack::declick_items),
         (TOOLS_MENU, CLIPS_ALL_LABEL) => Some(|_| crate::rack::stretch_items(true)),
         (TOOLS_MENU, CLIPS_SEL_LABEL) => Some(|_| crate::rack::stretch_items(false)),
@@ -824,7 +828,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["Effect", "Toolbars", ONE_CLICK_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");

@@ -2578,13 +2578,20 @@ impl App {
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
     }
 
-    /// The metronome button's right-click menu: the sound (spec: ui/metronome.md §2).
-    fn metronome_menu(&mut self, x: f32, y: f32) {
+    /// The metronome button's right-click menu: the sound (spec: ui/metronome.md §2), and Recording precount (spec:
+    /// ui/recording.md §3 "The metronome's menu").
+    pub(crate) fn metronome_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
+        use crate::record::{Opt, RecCmd};
         use os_engine::metronome::Sound;
         let now = crate::metronome::sound();
         let mut items = vec![PItem::head("Metronome sound")];
         items.extend(Sound::ALL.iter().map(|&s| PItem::new(s.label(), Cmd::MetronomeSound(s)).mark(Mark::Radio(s == now))));
+        let bars = if Opt::Precount.on() { crate::record::precount_bars() } else { 0 };
+        items.push(PItem::head("Recording precount"));
+        for (label, n) in [("Off", 0), ("1 bar", 1), ("2 bars", 2)] {
+            items.push(PItem::new(label, Cmd::Rec(RecCmd::Precount(n))).mark(Mark::Radio(bars == n)));
+        }
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
     }
 
@@ -6057,6 +6064,8 @@ impl App {
             Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("p") => self.toggle_record_option(crate::record::Opt::Precount),
             Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("b") => self.toggle_record_option(crate::record::Opt::Blend),
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("e") => self.toggle_step_edit(),
+            // Record (spec: ui/recording.md §2): R, when the typing keyboard has not taken it as a note.
+            Key::Character(c) if !ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::Record),
             // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
             // tools (until a typing keyboard exists, which will take them).
             Key::Character(c) if !ctrl && !alt && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
@@ -6139,6 +6148,13 @@ impl App {
         }
         let p = crate::rack::play_project(&self.state);
         let start = if song { f64::from(self.state.playlist.pos) } else { f64::from(self.state.piano.marker) };
+        // A looping time selection starts at its start unless the position is inside it (spec: ui/recording.md §5).
+        let start = match self.selection_loop() {
+            Some((a, b)) if start < f64::from(a) || start >= f64::from(b) => f64::from(a),
+            _ => start,
+        };
+        // The engine gets the loop range before its first tick.
+        self.sync_loop_range();
         self.transport.play_counted(&p, self.play_mode(), start, bars);
     }
 
@@ -6690,7 +6706,8 @@ impl App {
                     // controls automatically").
                     crate::init::apply(s);
                 } else {
-                    s.piano.marker = 0;
+                    // spec: ui/recording.md §5: to the time selection's start, as in SONG mode.
+                    s.piano.marker = if s.shown(Win::PianoRoll) { s.piano.range.map_or(0, |(a, _)| a) } else { 0 };
                 }
                 self.invalidate();
             }
@@ -7372,6 +7389,11 @@ impl App {
             (VIEW, i) if item_at(VIEW, i).is_some_and(|it| it.label == INTO_WORKSPACE_LABEL) => self.move_into_workspace(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::METRONOME_LABEL) => self.toggle_metronome(),
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::CLEAR_LOG_LABEL) => {
+                if let Some(m) = self.rec_cmd(crate::record::RecCmd::ClearLog) {
+                    self.state.message = Some(m);
+                }
+            }
             (m, i) if let Some(o) = item_at(m, i).and_then(|it| views::menus::record_option(it.label)) => self.toggle_record_option(o),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::AUTOSCROLL_LABEL) => self.toggle_autoscroll(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::GROUPS_LABEL) => self.toggle_groups(),
@@ -10433,7 +10455,7 @@ mod tests {
         app.mouse_down_right();
         frame(&mut app, &mut c, None);
         let labels: Vec<String> = app.state.playlist.popup.as_ref().unwrap().items.iter().map(|it| it.label.to_string()).collect();
-        assert_eq!(labels, ["Metronome sound", "Hi-hat", "Tick", "Beep", "Cowbell", "Pulse"]);
+        assert_eq!(labels, ["Metronome sound", "Hi-hat", "Tick", "Beep", "Cowbell", "Pulse", "Recording precount", "Off", "1 bar", "2 bars"]);
         let before = crate::metronome::sound();
         let i = labels.iter().position(|x| x == "Cowbell").unwrap();
         let item = hit_rect(&app, &Action::PlPopup(i));
