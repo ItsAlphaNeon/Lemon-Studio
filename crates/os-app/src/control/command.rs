@@ -350,15 +350,12 @@ impl Side {
     }
 }
 
-/// What an edit in the interface changes (`control::edit`): the project settings, one channel (by row), one mixer
-/// track (by number), one pattern (by number), the arrangement shown, or the whole project.
+/// What an edit in the interface changes (`control::edit`): the project settings, one mixer track (by number), or the
+/// whole project with the rack's state of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
     Settings,
-    Channel(usize),
     Track(u16),
-    Pattern(u16),
-    Arrangement,
     Project,
 }
 
@@ -368,10 +365,7 @@ impl Taken {
         let p = &s.project;
         Some(match region {
             Region::Settings => Taken::Settings(Box::new(Settings::of(s))),
-            Region::Channel(r) => Taken::Channel(Box::new(p.channels.get(r)?.clone())),
             Region::Track(n) => Taken::Track(Box::new(p.mixer.iter().find(|m| m.index == n)?.clone())),
-            Region::Pattern(n) => Taken::Pattern(Box::new(p.pattern(n)?.clone())),
-            Region::Arrangement => Taken::Arrangement(Box::new(p.arrangement()?.clone())),
             Region::Project => Taken::Project(Box::new(Side::of(s))),
         })
     }
