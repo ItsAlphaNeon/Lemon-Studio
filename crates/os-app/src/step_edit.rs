@@ -102,6 +102,8 @@ impl App {
 
     /// A note started sounding (typing keyboard or MIDI): collected while step editing takes notes.
     pub(crate) fn step_edit_down(&mut self, src: Src, key: u16, velocity: u8) {
+        // While playing, Record takes the note instead (spec: ui/recording.md §2 Taking notes).
+        self.record_down(src, key, velocity);
         if self.step_edit_live() {
             self.step_chord.down(src, key, velocity);
         }
@@ -109,6 +111,7 @@ impl App {
 
     /// A note was released: the release of the last held one writes the chord.
     pub(crate) fn step_edit_up(&mut self, src: Src) {
+        self.record_up(src);
         let Some(keys) = self.step_chord.up(src) else { return };
         if self.step_edit_live() && !keys.is_empty() {
             self.step_edit_write(&keys);

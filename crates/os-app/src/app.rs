@@ -133,6 +133,8 @@ pub enum Action {
     Typing,
     /// Metronome switch (toolbar, OPTIONS menu, Ctrl+M); right-click on the button picks the sound.
     Metronome,
+    /// The Record button (spec: ui/recording.md §2); right-click for its options.
+    Record,
     /// Auto scrolling switch (toolbar, OPTIONS menu); right-click on the button for continuous scrolling.
     AutoScroll,
     /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G).
@@ -852,6 +854,7 @@ pub struct State {
     /// The Tempo tapper: where it is, the count of taps, the pad's flash.
     pub tapper: crate::tapper::TapperUi,
     pub touch: crate::touch::TouchUi,
+    pub rec: crate::record::Rec,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
     /// Rack rows played by a hosted plugin.
@@ -1251,6 +1254,7 @@ impl App {
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
                 touch: Default::default(),
+                rec: Default::default(),
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::load(),
                 toolbar: views::toolbar::Opts::load(),
@@ -3112,6 +3116,7 @@ impl App {
             self.invalidate();
         }
         self.follow_device();
+        self.record_tick();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
         let now = std::time::Instant::now();
@@ -5057,6 +5062,10 @@ impl App {
                 self.metronome_menu(x, y);
                 return self.invalidate();
             }
+            Some(Action::Record) => {
+                self.record_menu(x, y);
+                return self.invalidate();
+            }
             Some(Action::PianoTarget) => {
                 // spec: ui/piano-target-channel.md §4
                 let row = self.state.selected_channel;
@@ -6605,6 +6614,7 @@ impl App {
             Action::PianoUndo | Action::Util(Util::Undo) => s.message = crate::history::ctrl_z(s),
             Action::Typing => self.toggle_typing(),
             Action::Metronome => self.toggle_metronome(),
+            Action::Record => self.toggle_record(),
             Action::AutoScroll => self.toggle_autoscroll(),
             Action::EnableGroups => self.toggle_groups(),
             Action::StepEdit => self.toggle_step_edit(),

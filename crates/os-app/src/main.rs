@@ -89,6 +89,7 @@ mod stall;
 mod step_edit;
 mod tapper;
 mod touch;
+mod record;
 mod theme_adjust;
 mod theme_library;
 mod templates;

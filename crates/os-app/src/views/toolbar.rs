@@ -294,18 +294,30 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
             icons::draw(ui.c, icon, g, c);
         }
     }
-    // Record: not available yet, so drawn greyed out (no hover, no press). Its dot is white under High visibility
-    // (`crate::high_visibility`), greyed out the same way.
+    // Record (spec: ui/recording.md §2): armed, the dot is lit and larger, on a face of its colour. Its dot is white
+    // under High visibility (`crate::high_visibility`).
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
-    ui.off(rec, "Recording");
+    let hov = ui.hit(rec, Action::Record, "Record (notes) - right-click for options");
+    let armed = s.rec.armed;
+    let down = ui.down(rec, &Action::Record);
     let dot = crate::high_visibility::record_dot(t, crate::high_visibility::on());
+    let face = Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0);
     if lemon {
-        os_ui::kit::button(ui.c, t, Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0), os_ui::kit::State::NORMAL.with_disabled(true));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, dot.mix(t.toolbar, 0.6));
+        os_ui::kit::button(ui.c, t, face, os_ui::kit::State::new(hov, down, false));
+        if armed {
+            ui.c.fill_circle(rec.cx(), rec.cy(), 10.0, dot.with_alpha(70));
+        }
+        ui.c.fill_circle(rec.cx(), rec.cy(), if armed { 7.0 } else { 5.6 }, if armed || hov { dot } else { dot.mix(t.toolbar, 0.35) });
     } else {
         ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.toolbar_line.shade(-0.25));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, t.button.shade(-0.12));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, dot.mix(t.button, 0.7).shade(-0.15));
+        let bg = if hov || down { t.button_hi } else { t.button.shade(-0.12) };
+        ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, bg);
+        if armed {
+            ui.c.fill_circle(rec.cx(), rec.cy(), 10.0, dot.mix(bg, 0.55));
+            ui.c.fill_circle(rec.cx(), rec.cy(), 7.4, dot);
+        } else {
+            ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, dot.mix(bg, 0.25));
+        }
     }
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);

@@ -159,7 +159,10 @@ Not yet: Align all channel editors, Arrange windows.
 - Mouse, computer keyboard and MIDI controllers; notes play the selected channel
 - Touch controller (VIEW, Alt+F7 or the toolbar's touch button): 4 x 4 pads or a two-octave keyboard, played
   with the mouse, with octave steps
-- Not yet: note recording
+- Note recording (the toolbar's Record button): armed and playing, notes from the typing keyboard, MIDI or the Touch
+  controller go into the current pattern, quantized to the main snap; a take replaces the notes that start inside it
+  and is one undo step; in SONG mode a clip of the pattern is placed where none plays. Right-click for the options
+- Not yet: automation recording, audio recording, Wait for input, Countdown, Blend, Loop recording
 
 ## 🚧 Undo
 

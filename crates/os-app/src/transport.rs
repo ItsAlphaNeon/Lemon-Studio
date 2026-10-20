@@ -615,6 +615,14 @@ impl Transport {
         self.shared.state.store(PLAYING, Ordering::Release);
     }
 
+    /// Shows as playing at `tick` of the pattern (`song` false) or the playlist, without starting anything.
+    #[cfg(test)]
+    pub(crate) fn pretend_at(&self, tick: f64, song: bool) {
+        self.shared.state.store(PLAYING, Ordering::Release);
+        self.shared.song.store(song, Ordering::Relaxed);
+        self.shared.tick.store(tick.to_bits(), Ordering::Relaxed);
+    }
+
     /// Streams open now, fading ones included (each holds its voice counter in `Shared::engine_voices`).
     #[cfg(test)]
     fn streams(&self) -> usize {
