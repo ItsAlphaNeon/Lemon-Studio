@@ -88,6 +88,7 @@ mod splash;
 mod stall;
 mod step_edit;
 mod tapper;
+mod touch;
 mod theme_adjust;
 mod theme_library;
 mod templates;

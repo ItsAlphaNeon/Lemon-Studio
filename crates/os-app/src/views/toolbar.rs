@@ -744,7 +744,7 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         (Icon::Project, Action::ProjectPicker, false, "Project picker / Plugin picker (Ctrl+F8)"),
         (Icon::Plug, Action::PickerOpen, false, "Plugin picker (F8)"),
         (Icon::Kick, Action::ToggleWin(Win::Tapper), s.shown(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
-        (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller (Alt+F7)"),
+        (Icon::Touch, Action::ToggleWin(Win::Touch), s.shown(Win::Touch), "Touch controller (Alt+F7)"),
         // FL's store: kept, greyed, for a repository of free and open-source plugins (spec: ui/main-window.md §3).
         (Icon::Plug, Action::Placeholder("Plugin repository"), false, "Plugin repository"),
     ];

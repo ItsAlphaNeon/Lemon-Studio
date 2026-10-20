@@ -48,6 +48,8 @@ pub enum Src {
     Typing(KeyCode),
     /// A MIDI keyboard's key.
     Midi(u8),
+    /// A Touch controller pad or key (spec: ui/touch-controller.md §2).
+    Touch(u8),
 }
 
 /// The chord being collected: the notes held now, and every key pressed since the first of them, with its velocity.

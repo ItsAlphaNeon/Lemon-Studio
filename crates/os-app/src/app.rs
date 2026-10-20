@@ -36,6 +36,8 @@ pub enum Win {
     Perf,
     /// The Tempo tapper (spec: ui/tempo-tapper.md).
     Tapper,
+    /// The Touch controller (spec: ui/touch-controller.md).
+    Touch,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -154,6 +156,8 @@ pub enum Action {
     Perf(crate::perf::PerfAct),
     /// The Tempo tapper's pad and Apply tempo switch (spec: ui/tempo-tapper.md).
     Tapper(crate::tapper::TapAct),
+    /// The Touch controller's controls (spec: ui/touch-controller.md).
+    Touch(crate::touch::TouchAct),
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -738,6 +742,8 @@ const PLUGIN_POPUPS: &str = "Menus of detached plugin windows on Linux (dock the
 
 #[derive(Debug, Clone)]
 pub enum Drag {
+    /// A Touch controller pad or key held: the note follows the mouse (spec: ui/touch-controller.md §2).
+    Touch,
     /// Vertical drag on the pattern name box steps the number (spec: ui/pattern-menu.md §1).
     PatternBox { y0: f32, p0: u16 },
     /// Move a floating window (offset of the mouse from its top-left).
@@ -845,6 +851,7 @@ pub struct State {
     pub perf: crate::perf::Perf,
     /// The Tempo tapper: where it is, the count of taps, the pad's flash.
     pub tapper: crate::tapper::TapperUi,
+    pub touch: crate::touch::TouchUi,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
     /// Rack rows played by a hosted plugin.
@@ -1243,6 +1250,7 @@ impl App {
                 cpu: crate::cpu::Cpu::saved(),
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
+                touch: Default::default(),
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::load(),
                 toolbar: views::toolbar::Opts::load(),
@@ -2416,7 +2424,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -2438,6 +2446,7 @@ impl App {
             Win::Plugin => s.project.channels.get(s.plugin_channel).map(|_| views::channel_win::rect(s)),
             Win::Perf => Some(views::perf::rect(s)),
             Win::Tapper => Some(views::tapper::rect(s)),
+            Win::Touch => Some(views::touch::rect(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -2867,6 +2876,7 @@ impl App {
             Win::ChannelRack => self.damage_rect(views::rack::bounds(&self.state)),
             Win::Perf => self.damage_rect(views::perf::bounds(&self.state)),
             Win::Tapper => self.damage_rect(views::tapper::bounds(&self.state)),
+            Win::Touch => self.damage_rect(views::touch::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
             _ => self.invalidate(),
         }
@@ -4280,6 +4290,7 @@ impl App {
                     self.erase_control_points(last_x, x);
                     self.drag = Some(Drag::ControlErase { last_x: x });
                 }
+                Drag::Touch => self.touch_drag(x, y),
                 Drag::PianoKeys { key } => {
                     if let Some(g) = self.piano_geom() {
                         let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
@@ -4613,6 +4624,7 @@ impl App {
             ),
             Action::Perf(p) => matches!(p, crate::perf::PerfAct::Sort(_) | crate::perf::PerfAct::ResetOnTransport | crate::perf::PerfAct::Freeze),
             Action::Tapper(t) => *t == crate::tapper::TapAct::Apply,
+            Action::Touch(t) => !matches!(t, crate::touch::TouchAct::Note(_)),
             Action::CableDebug(d) => !matches!(d, crate::cable::DebugAct::Param(_)),
             Action::TypeIn(t) => !matches!(t, crate::typein::TiAct::Field),
             Action::Pat(h) => {
@@ -4805,6 +4817,7 @@ impl App {
             Win::Plugin => views::channel_win::bounds(&self.state),
             Win::Perf => views::perf::bounds(&self.state),
             Win::Tapper => views::tapper::bounds(&self.state),
+            Win::Touch => views::touch::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
             w => self.state.win_rect(w).outset(5.0),
         }
@@ -5246,6 +5259,7 @@ impl App {
                 self.start_playback();
             }
             Some(Drag::SongRuler) => self.song_pos_release(),
+            Some(Drag::Touch) => self.touch_hold(None),
             Some(Drag::ThemeKnob { .. } | Drag::PickSv(_) | Drag::PickHue(_)) => self.theme_store(),
             _ => {}
         }
@@ -5975,6 +5989,7 @@ impl App {
             Key::Named(NamedKey::Space) => self.act(if self.transport.playing() { Action::Stop } else { Action::Play }),
             // spec: ui/tempo-tapper.md §1
             Key::Named(NamedKey::F5) if ctrl => self.act(Action::ToggleWin(Win::Tapper)),
+            Key::Named(NamedKey::F7) if alt && !ctrl => self.act(Action::ToggleWin(Win::Touch)),
             Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
             Key::Named(NamedKey::F6) => self.act(Action::ToggleWin(Win::ChannelRack)),
             Key::Named(NamedKey::F7) => self.act(Action::ToggleWin(Win::PianoRoll)),
@@ -6173,7 +6188,7 @@ impl App {
     }
 
     /// The live stream needs the project before the first live note.
-    fn sync_live(&mut self) {
+    pub(crate) fn sync_live(&mut self) {
         if !self.typing_synced {
             self.typing_synced = true;
             self.transport.update(&crate::rack::play_project(&self.state));
@@ -6236,9 +6251,9 @@ impl App {
     }
 
     /// Held typing-keyboard keys and MIDI notes light on the piano roll's keyboard (§4).
-    fn typing_lit_changed(&mut self) {
+    pub(crate) fn typing_lit_changed(&mut self) {
         let channels = &self.state.project.channels;
-        let midi = self.midi_held.iter().map(|&(key, row)| (row, u16::from(key)));
+        let midi = self.midi_held.iter().chain(self.state.touch.held.as_ref()).map(|&(key, row)| (row, u16::from(key)));
         self.state.piano.typed = self.typing_held.iter().map(|&(_, row, key)| (row, key)).chain(midi).filter_map(|(row, key)| Some((channels.get(row)?.index, i32::from(key)))).collect();
         match self.piano_grid {
             Some(g) => self.damage_rect(Rect::new(g.x - 73.0, g.y, 73.0, g.h)),
@@ -6604,6 +6619,7 @@ impl App {
             }
             Action::Perf(p) => self.perf_act(p),
             Action::Tapper(a) => self.tapper_act(a),
+            Action::Touch(a) => self.touch_act(a),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -6709,6 +6725,7 @@ impl App {
             Action::ToggleWin(Win::Browser) => s.show_browser = !s.show_browser,
             Action::ToggleWin(Win::Perf) => self.toggle_perf(),
             Action::ToggleWin(Win::Tapper) => self.toggle_tapper(),
+            Action::ToggleWin(Win::Touch) => self.toggle_touch(),
             Action::ToggleWin(w) => {
                 if s.shown(w) && s.in_front(w) {
                     s.hide(w);
@@ -6851,6 +6868,7 @@ impl App {
                     Win::Plugin => s.plugin_pos,
                     Win::Perf => s.perf.pos,
                     Win::Tapper => s.tapper.pos,
+                    Win::Touch => s.touch.pos,
                     Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
@@ -7386,7 +7404,7 @@ pub(crate) fn lift_windows(s: &mut State, dy: f32) {
     for w in &mut s.wins {
         lift(&mut w.rect.y);
     }
-    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos] {
+    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos] {
         lift(&mut pos.1);
     }
 }
@@ -15045,6 +15063,7 @@ mod tests {
             (Action::ToggleWin(Win::Browser), "Browser / Plugin picker (Alt+F8)"),
             (Action::PickerOpen, "Plugin picker (F8)"),
             (Action::ProjectPicker, "Project picker / Plugin picker (Ctrl+F8)"),
+            (Action::ToggleWin(Win::Touch), "Touch controller (Alt+F7)"),
         ] {
             assert_eq!(hint(&app, &a), h);
         }
@@ -15052,7 +15071,6 @@ mod tests {
         for name in [
             "Open audio editor / New audio editor",
             "One-click audio recording",
-            "Touch controller (Alt+F7)",
             "Plugin repository",
         ] {
             assert_eq!(hint(&app, &Action::Placeholder(name)), format!("{name}: not available yet"));

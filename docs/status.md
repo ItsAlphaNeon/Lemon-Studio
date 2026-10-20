@@ -157,6 +157,8 @@ Not yet: Align all channel editors, Arrange windows.
 ## 🚧 Note input
 
 - Mouse, computer keyboard and MIDI controllers; notes play the selected channel
+- Touch controller (VIEW, Alt+F7 or the toolbar's touch button): 4 x 4 pads or a two-octave keyboard, played
+  with the mouse, with octave steps
 - Not yet: note recording
 
 ## 🚧 Undo
