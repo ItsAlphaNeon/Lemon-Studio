@@ -82,6 +82,8 @@ pub struct Shared {
     generation: AtomicU64,
     /// The running playback is the playlist (else one pattern).
     song: AtomicBool,
+    /// The song's loop points, start << 32 | end in ticks (0 = the whole song): the playlist's time selection.
+    loop_range: AtomicU64,
     /// Playback position in frames of the output stream.
     position: AtomicU64,
     /// Playback position in ticks (f64 bits): what every playhead and the time display show. A pattern wraps.
@@ -407,6 +409,13 @@ impl Transport {
         self.shared.rewind(start_tick);
         self.shared.state.store(PLAYING, Ordering::Release);
         let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode, start_tick, generation, Starts::from_prefs()));
+    }
+
+    /// The song's loop points (the playlist's time selection; `None` = the whole song). Song playback follows them
+    /// from the next tick it renders, also while playing.
+    pub fn set_loop(&self, range: Option<(u32, u32)>) {
+        let packed = range.filter(|&(a, b)| b > a).map_or(0, |(a, b)| u64::from(a) << 32 | u64::from(b));
+        self.shared.loop_range.store(packed, Ordering::Relaxed);
     }
 
     /// Replace the playing project, continuing from the current position.
@@ -746,6 +755,11 @@ impl Feeder {
         let block = block.max(self.queue.block.load(Ordering::Relaxed)) as u64;
         let want = 2 * (block + margin(block, self.rate));
         let Ok(mut e) = self.engine.lock() else { return };
+        // Song playback loops over the loop points as they are now.
+        if self.ctl.report.load(Ordering::Relaxed) {
+            let r = self.shared.loop_range.load(Ordering::Relaxed);
+            e.set_loop_range((r != 0).then(|| (r >> 32, r & 0xffff_ffff)));
+        }
         // A paused (or stopped) stream renders no more: its fade plays from what is queued, and the engine starts no
         // note that another stream (live notes, an open editor) would then hear ringing at the instruments.
         if self.ctl.paused.load(Ordering::Relaxed) && self.queue.queued() > 0 {

@@ -871,7 +871,7 @@ impl Frame {
         match r {
             Reply::None => {}
             // AppKit sends a press's drags to the view that took it: nothing to capture.
-            Reply::Repaint | Reply::Capture => self.view.setNeedsDisplay(true),
+            Reply::Repaint | Reply::Capture | Reply::Hold => self.view.setNeedsDisplay(true),
             Reply::Relayout => self.layout(),
             Reply::Move => {
                 // Moved by hand (`motion`), docked or not, from the cursor and the frame at the press.
@@ -1159,7 +1159,7 @@ mod tests {
     /// Off the main thread (where tests run) there are no plugin windows, and asking says so.
     #[test]
     fn frames_need_the_main_thread() {
-        let info = ChannelInfo { name: "Keys".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Keys".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         if MainThreadMarker::new().is_none() {
             assert!(FrameWindow::new(0, info, (480.0, 270.0), 2.0, (0, 0), false).is_err());
             assert_eq!(screen_to_main(10, 10), None);

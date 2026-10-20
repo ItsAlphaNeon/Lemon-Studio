@@ -535,10 +535,11 @@ fn monitor(ui: &mut Ui, s: &State) {
         if len < 1.0 {
             continue;
         }
-        let (a, b) = if lemon { ((0xc9, 0xa9, 0x2c), (0xff, 0xf1, 0xb8)) } else { ((0xc8, 0xce, 0xd1), (0xcd, 0xc7, 0xa8)) };
+        // Both ends follow the theme's highlight key, like the held peak.
+        let (a, b) = if lemon { (ui.t.h(0xc9a92c), ui.t.h(0xfff1b8)) } else { (ui.t.h(0xc8ced1), ui.t.h(0xcdc7a8)) };
         let mix = |k: f32, shade: f32| {
-            let l = |u: i32, v: i32| (((u as f32 + (v - u) as f32 * k) * shade).round() as u32).min(255);
-            os_ui::Color::rgb((l(a.0, b.0) << 16) | (l(a.1, b.1) << 8) | l(a.2, b.2))
+            let l = |u: u8, v: u8| (((u as f32 + (v as f32 - u as f32) * k) * shade).round() as u32).min(255);
+            os_ui::Color::rgb((l(a.r, b.r) << 16) | (l(a.g, b.g) << 8) | l(a.b, b.b))
         };
         for x in 0..len as i32 {
             let k = x as f32 / len.max(1.0);

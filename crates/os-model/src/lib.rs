@@ -892,6 +892,9 @@ pub struct ChannelMisc {
     pub key_range: [i32; 2],
     /// How a layer channel hands its notes to its children (stored with every channel; only a layer uses it).
     pub layer: LayerSettings,
+    /// The pitch knob's range, semitones either way (1..=48; the plugin window's RANGE box). Not saved: where the file
+    /// keeps it is not mapped yet (flp/events/channels.md).
+    pub pitch_range: u8,
 }
 
 /// A layer channel's settings besides its children (spec: audio/note-rules.md "Settings", "Layer channels").
@@ -936,6 +939,7 @@ impl Default for ChannelMisc {
             fine: 0,
             key_range: [0, 256],
             layer: LayerSettings::default(),
+            pitch_range: 2,
         }
     }
 }
