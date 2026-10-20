@@ -2154,6 +2154,24 @@ impl App {
                     Request::Volume(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.volume = v),
                     Request::Pan(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.pan = v),
                     Request::PitchCents(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.pitch_cents = v),
+                    Request::PitchRange(row, r) => chans.get_mut(row).into_iter().for_each(|c| {
+                        // A narrower range takes the pitch knob with it.
+                        c.misc.pitch_range = r.clamp(1, 48) as u8;
+                        let lim = 100 * i32::from(c.misc.pitch_range);
+                        c.pitch_cents = c.pitch_cents.clamp(-lim, lim);
+                    }),
+                    Request::Track(row, t) => {
+                        let max = crate::mixer::max_insert(&self.state.project);
+                        let chans = &mut self.state.project.channels;
+                        chans.get_mut(row).into_iter().for_each(|c| c.mixer_track = t.min(max));
+                    }
+                    Request::ShowTrack(row) => {
+                        // As a double click on the channel rack's mixer box (spec: ui/channel-rack.md §12).
+                        if let Some(t) = chans.get(row).map(|c| c.mixer_track) {
+                            self.state.selected_mixer = t;
+                            self.state.raise(Win::Mixer);
+                        }
+                    }
                     Request::Note(row, key, vel, on) => {
                         // The plugin's own keyboard plays on the live stream, like the typing keyboard.
                         if on {
@@ -3085,6 +3103,8 @@ impl App {
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         self.plugin_tick();
+        // Song playback loops over the playlist's time selection, as it is now.
+        self.transport.set_loop(self.state.playlist.range);
         #[cfg(all(plugin_windows, not(windows)))]
         self.lift_input();
         {
@@ -3343,6 +3363,7 @@ impl App {
         let mut p = self.state.project.clone();
         p.tempo = Some(self.state.tempo);
         self.transport.stop();
+        self.transport.set_loop(self.state.playlist.range);
         self.transport.play(&p, PlayMode::Song, f64::from(tick));
         self.invalidate();
     }
@@ -5971,6 +5992,8 @@ impl App {
             // keyboard shortcuts: "Start/Stop Playback", "Start/Pause Playback").
             Key::Named(NamedKey::Space) if ctrl => self.act(Action::Play),
             Key::Named(NamedKey::Space) => self.act(if self.transport.playing() { Action::Stop } else { Action::Play }),
+            // L flips the PAT / SONG switch, as in FL (the typing keyboard, when on, takes L first).
+            Key::Character(c) if !ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("l") => self.act(Action::PatSong(!self.state.song_mode)),
             // spec: ui/tempo-tapper.md §1
             Key::Named(NamedKey::F5) if ctrl => self.act(Action::ToggleWin(Win::Tapper)),
             Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
@@ -6089,6 +6112,7 @@ impl App {
         }
         let p = crate::rack::play_project(&self.state);
         let start = if song { f64::from(self.state.playlist.pos) } else { f64::from(self.state.piano.marker) };
+        self.transport.set_loop(self.state.playlist.range);
         self.transport.play(&p, self.play_mode(), start);
     }
 
@@ -6627,15 +6651,16 @@ impl App {
             Action::Stop => {
                 self.perf_transport();
                 self.transport.stop();
-                // Stop rewinds: the song position slider goes back to the start (of the time selection, if any).
+                // Stop rewinds to where playback started: the song position (or the piano roll's play-start marker)
+                // stays where it was put, so the next start plays from there again; with a time selection, its start.
                 let s = &mut self.state;
                 if s.song_mode {
-                    s.playlist.pos = s.playlist.range.map_or(0, |(a, _)| a);
+                    if let Some((a, _)) = s.playlist.range {
+                        s.playlist.pos = a;
+                    }
                     // A song position move: the initial values (spec: ui/settings-choices.md "Advanced: Initialize
                     // controls automatically").
                     crate::init::apply(s);
-                } else {
-                    s.piano.marker = 0;
                 }
                 self.invalidate();
             }
@@ -7475,8 +7500,9 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
         volume: ch.volume,
         pan: ch.pan,
         pitch_cents: ch.pitch_cents,
-        range: 2,
+        range: i32::from(ch.misc.pitch_range),
         track: ch.mixer_track,
+        max_track: crate::mixer::max_insert(p),
         misc: Some(crate::misc::vals_of(ch)),
     })
 }
@@ -11971,6 +11997,43 @@ mod tests {
         assert_eq!(app.transport.state(), T::Stopped);
     }
 
+    /// Stop goes back to where playback started: the song position and the piano roll's marker stay where they were
+    /// put (user report: Space played the song from its beginning); with a time selection, to its start.
+    #[test]
+    fn stop_keeps_the_start_position() {
+        let mut app = App::new(None);
+        app.state.song_mode = true;
+        app.state.playlist.pos = 768;
+        app.act(Action::Stop);
+        assert_eq!(app.state.playlist.pos, 768);
+        app.state.playlist.range = Some((384, 1152));
+        app.act(Action::Stop);
+        assert_eq!(app.state.playlist.pos, 384, "the time selection's start");
+        app.state.song_mode = false;
+        app.state.piano.marker = 48;
+        app.act(Action::Stop);
+        assert_eq!(app.state.piano.marker, 48);
+    }
+
+    /// L flips the PAT / SONG switch (FL's key); with the typing keyboard on, L is a note instead.
+    #[test]
+    fn l_flips_pat_and_song() {
+        use winit::keyboard::{Key, KeyCode};
+        let mut app = App::new(None);
+        if app.typing_on() {
+            app.toggle_typing();
+        }
+        let song = app.state.song_mode;
+        app.key(&Key::Character("l".into()), false, false);
+        assert_eq!(app.state.song_mode, !song);
+        app.key(&Key::Character("L".into()), false, false);
+        assert_eq!(app.state.song_mode, song);
+        app.key(&Key::Character("l".into()), true, false);
+        assert_eq!(app.state.song_mode, song, "Ctrl+L is not the switch");
+        app.toggle_typing();
+        assert!(app.typing_key(KeyCode::KeyL, true, false, false), "the typing keyboard takes L");
+    }
+
     /// A click in the event panel sets the note already playing where it lands (the latest start at or before it),
     /// above or below its line, in a gap after it too; left of the first note, the first note (spec: ui/piano-roll.md
     /// §7, "Drag in the event panel").
@@ -14045,6 +14108,18 @@ mod tests {
         let mut t0: Vec<u32> = on_track(&app, 0).iter().map(|c| c.position).collect();
         t0.sort_unstable();
         assert_eq!(t0, vec![5 * bar, 6 * bar]);
+        frame(&mut app, &mut c, None);
+        // One left click in the ruler keeps the time selection; a double click clears it.
+        let r = (g.x_of(2.0 * bar as f32), ruler.cy());
+        app.state.playlist.last_ruler = None;
+        tap(&mut app, &mut c, r, false);
+        assert_eq!(app.state.playlist.range, Some((0, bar)), "a single click keeps it");
+        tap(&mut app, &mut c, r, false);
+        assert_eq!(app.state.playlist.range, None, "a double click clears it");
+        tap(&mut app, &mut c, r, false);
+        drag(&mut app, &mut c, (g.x_of(0.0) + 1.0, ruler.cy()), (g.x_of(bar as f32), ruler.cy()), true);
+        tap(&mut app, &mut c, r, false);
+        assert_eq!(app.state.playlist.range, Some((0, bar)), "a third click starts a new count");
         frame(&mut app, &mut c, None);
 
         // The track LED mutes the track.

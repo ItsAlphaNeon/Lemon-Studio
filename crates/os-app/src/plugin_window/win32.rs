@@ -114,6 +114,9 @@ struct Win {
     buf: Vec<u32>,
     scale: f32,
     state: Rc<RefCell<State>>,
+    /// A held drag (`Reply::Hold`): the hidden cursor's screen point, kept there, and the virtual window point (logical
+    /// px) the mouse's motion moves.
+    held: Option<(POINT, (f32, f32))>,
 }
 
 /// A plugin window. Dropping it destroys the native window (close the plugin's editor first).
@@ -160,7 +163,7 @@ impl FrameWindow {
                 RegisterClassW(&wc); // fails harmlessly once registered
             }
             let canvas = Canvas::new(px(w) as u32, px(h) as u32, scale)?;
-            let win = Box::new(Win { hwnd: std::ptr::null_mut(), area: std::ptr::null_mut(), canvas, buf: Vec::new(), scale, state: state.clone() });
+            let win = Box::new(Win { hwnd: std::ptr::null_mut(), area: std::ptr::null_mut(), canvas, buf: Vec::new(), scale, state: state.clone(), held: None });
             let title = wide(&state.borrow().info.name);
             let mut p = POINT { x: pos.0, y: pos.1 };
             if !detached {
@@ -648,6 +651,21 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 0
             }
             WM_MOUSEMOVE => {
+                if let Some((anchor, virt)) = w.held {
+                    // A held drag: the motion away from the anchor moves the virtual point; the cursor goes back.
+                    let mut c: POINT = std::mem::zeroed();
+                    GetCursorPos(&mut c);
+                    if (c.x, c.y) == (anchor.x, anchor.y) {
+                        return 0;
+                    }
+                    let v = (virt.0 + (c.x - anchor.x) as f32 / w.scale, virt.1 + (c.y - anchor.y) as f32 / w.scale);
+                    w.held = Some((anchor, v));
+                    SetCursorPos(anchor.x, anchor.y);
+                    let fine = GetKeyState(VK_CONTROL as i32) < 0;
+                    let r = w.state.borrow_mut().motion(v.0, v.1, fine);
+                    reply(hwnd, w, r);
+                    return 0;
+                }
                 let (x, y) = client_point(hwnd, lp, w.scale, false);
                 let moving = w.state.borrow().moving;
                 if let Some((cx, cy, wx, wy)) = moving {
@@ -678,14 +696,19 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             }
             WM_LBUTTONUP => {
                 // Before ReleaseCapture: its WM_CAPTURECHANGED lets an armed button go without acting.
-                let (x, y) = client_point(hwnd, lp, w.scale, false);
+                let (x, y) = match w.held {
+                    Some((_, v)) => v,
+                    None => client_point(hwnd, lp, w.scale, false),
+                };
                 let r = w.state.borrow_mut().left_up(x, y);
                 ReleaseCapture();
+                unhold(w);
                 reply(hwnd, w, r);
                 0
             }
             WM_CAPTURECHANGED => {
                 w.state.borrow_mut().release();
+                unhold(w);
                 0
             }
             WM_MOUSEWHEEL => {
@@ -729,6 +752,18 @@ unsafe fn reply(hwnd: HWND, w: &mut Win, r: Reply) {
                 SetCapture(hwnd);
                 InvalidateRect(hwnd, std::ptr::null(), 0);
             }
+            Reply::Hold => {
+                let mut c: POINT = std::mem::zeroed();
+                GetCursorPos(&mut c);
+                let mut p = c;
+                ScreenToClient(hwnd, &mut p);
+                if w.held.is_none() {
+                    ShowCursor(0);
+                }
+                w.held = Some((c, (p.x as f32 / w.scale, p.y as f32 / w.scale)));
+                SetCapture(hwnd);
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
             Reply::Move => {
                 // Moved by hand (WM_MOUSEMOVE): the system's move loop (HTCAPTION) blocks the UI thread.
                 let mut c: POINT = std::mem::zeroed();
@@ -747,6 +782,16 @@ unsafe fn reply(hwnd: HWND, w: &mut Win, r: Reply) {
                 }
                 ShowWindow(hwnd, if detached { SW_MINIMIZE } else { SW_HIDE });
             }
+        }
+    }
+}
+
+/// Ends a held drag: the cursor shows again where the drag started.
+unsafe fn unhold(w: &mut Win) {
+    if let Some((anchor, _)) = w.held.take() {
+        unsafe {
+            SetCursorPos(anchor.x, anchor.y);
+            ShowCursor(1);
         }
     }
 }
@@ -974,7 +1019,7 @@ mod tests {
             CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 900, 700, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null())
         };
         assert!(!owner.is_null());
-        let info = ChannelInfo { name: "Keys".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Keys".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         let docked = || {
             let mut r: RECT = unsafe { std::mem::zeroed() };
             unsafe { GetWindowRect(owner, &mut r) };
@@ -1020,7 +1065,7 @@ mod tests {
             CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 900, 700, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null())
         };
         assert!(!owner.is_null());
-        let info = ChannelInfo { name: "Keys".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Keys".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         let mut r: RECT = unsafe { std::mem::zeroed() };
         unsafe { GetWindowRect(owner, &mut r) };
         let f = FrameWindow::new(owner as isize, info, (480.0, 270.0), 1.0, (r.left + 20, r.top + 20), false).unwrap();
