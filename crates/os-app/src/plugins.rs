@@ -2874,7 +2874,7 @@ mod tests {
         a.state.hosted_rows.push(row);
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
         assert!(a.plugins.set_state(row, json.as_bytes()));
-        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { name: "Lemon Parametric EQ".into(), state: Vec::new() });
+        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Lemon Parametric EQ".into(), state: Vec::new() });
         a.plugins.create_effect(3, 2, 0, None).unwrap();
         // An edit of the effect, through the hosting layer, flushed into its processor.
         {
