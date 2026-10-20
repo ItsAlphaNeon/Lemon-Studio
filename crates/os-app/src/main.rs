@@ -680,9 +680,10 @@ impl ApplicationHandler for Shell {
         if matches!(event, WindowEvent::MouseWheel { .. }) && crate::plugin_window::pointer_in_docked() {
             return;
         }
-        // Linux: a click in the main window takes the keyboard back from a plugin editor that holds it (X11 leaves it
-        // there), so the typing keyboard plays again.
-        #[cfg(target_os = "linux")]
+        // Linux and Windows: a click in the main window takes the keyboard back from a plugin editor that holds it (X11
+        // leaves it there, and so does Windows for a docked editor, a child window of this one), so the shortcuts and
+        // the typing keyboard work again (spec: ui/piano-keys.md §4 rule 2).
+        #[cfg(any(target_os = "linux", windows))]
         if matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, .. }) {
             crate::plugin_window::focus_main();
         }
@@ -861,9 +862,10 @@ impl ApplicationHandler for Shell {
                         return;
                     }
                 }
-                // A dialog takes repeats too (typing, moving through its list), and so does an Info box or a browser
-                // folder cell being edited.
-                if pressed && (!event.repeat || self.app.modal_open() || self.app.info_editing() || self.app.folder_cell_editing() || self.app.name_editing()) {
+                // Repeats go on too: a dialog, an Info box or a browser folder cell takes them (typing, moving through a
+                // list), and `App::key` keeps those of the piano roll's moving and copying keys (spec: ui/piano-keys.md
+                // §4 rule 1).
+                if pressed {
                     // macOS: Option and Command change the character a key types (Option+S is "ß"); shortcuts go by the
                     // key itself.
                     #[cfg(target_os = "macos")]
@@ -897,7 +899,9 @@ impl ApplicationHandler for Shell {
                         }
                         event
                     };
+                    self.app.repeat = event.repeat;
                     self.app.key(&event.logical_key, ctrl(self.mods), self.mods.alt_key());
+                    self.app.repeat = false;
                     window.request_redraw();
                 }
             }

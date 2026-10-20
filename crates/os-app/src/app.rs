@@ -1147,6 +1147,8 @@ pub struct App {
     pub alt: bool,
     /// The right Shift key is held (the playlist's quick slice, ui/playlist.md §3).
     pub rshift: bool,
+    /// The key now passed to [`App::key`] is an auto-repeat of a held key (spec: ui/piano-keys.md §4 rule 1).
+    pub repeat: bool,
     /// Playlist regions from the last paint (grid, ruler, marker lane).
     pl_grid: Option<Rect>,
     /// Playlist scrolls since the last paint: how far the content moved (logical px, right and down), see
@@ -1334,6 +1336,7 @@ impl App {
             shift: false,
             alt: false,
             rshift: false,
+            repeat: false,
             pl_grid: None,
             scrolled: None,
             shifts: Vec::new(),
@@ -4296,6 +4299,7 @@ impl App {
                 Drag::Marker => {
                     if let Some(g) = self.piano_geom() {
                         self.state.piano.marker = crate::piano_snap::place(&self.state, &g, g.tick_at(x), self.alt);
+                        self.state.piano.marker_placed = true;
                     }
                     self.damage_piano();
                 }
@@ -5579,20 +5583,6 @@ impl App {
     }
 
     /// Where Ctrl+V pastes (§9): the playhead when it is in view, else the left edge of the view.
-    fn paste_tick(&self) -> u32 {
-        let s = &self.state;
-        let Some(g) = self.piano_geom() else { return 0 };
-        let ppq = f64::from(s.project.ppq.max(1));
-        let head = if self.transport.playing() && !self.transport.song() {
-            (self.transport.tick() * 96.0 / ppq) as f32
-        } else {
-            s.piano.marker as f32
-        };
-        let x = g.x_of(head);
-        let tick = if x >= g.grid.x && x < g.grid.right() { head } else { g.scroll_x };
-        crate::piano_snap::place(s, &g, tick, false)
-    }
-
     /// Delete the channel lane's control points between two x positions.
     fn erase_control_points(&mut self, last_x: f32, x: f32) {
         let (Some(g), Some(panel)) = (self.piano_geom(), self.piano_panel) else { return };
@@ -5961,6 +5951,11 @@ impl App {
         if self.info_key(key, ctrl, alt) || self.folder_cell_key(key, ctrl, alt) || self.name_key(key, ctrl, alt) {
             return;
         }
+        // A held key repeats only the piano roll's moving and copying keys; every other key acts on its first press
+        // (switches would flicker on and off; spec: ui/piano-keys.md §4 rule 1).
+        if self.repeat && !(self.piano_keys() && crate::piano_tools::repeats(key, ctrl, alt, self.shift)) {
+            return;
+        }
         use winit::keyboard::{Key, NamedKey};
         // Shift+Alt+G: Enable groups (spec: ui/enable-groups.md §1), everywhere the main window has the keyboard.
         if let Key::Character(c) = key
@@ -6028,7 +6023,7 @@ impl App {
             }
             return;
         }
-        // The piano roll's editing and tool keys (spec: ui/piano-roll.md §11).
+        // The piano roll's editing and tool keys (spec: ui/piano-roll.md §11, ui/piano-keys.md).
         let s = &self.state;
         if s.shown(Win::PianoRoll) && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && crate::piano_tools::key(self, key, ctrl, alt) {
             return;
@@ -6072,11 +6067,13 @@ impl App {
                 self.state.piano.clear_selection();
             }
             // Piano roll editing keys (spec: ui/piano-roll.md §8).
+            // Ctrl+A also makes the whole pattern the time selection, as FL does (spec: ui/piano-keys.md §4 rule 4).
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") && self.state.shown(Win::PianoRoll) => {
                 let s = &mut self.state;
                 if let Some(ch) = piano::channel(s) {
                     let all = piano::notes(s).iter().enumerate().filter(|(_, n)| n.channel == ch).map(|(i, _)| i).collect();
                     s.piano.select(s.pattern, ch, all);
+                    s.piano.range = Some((0, piano::pattern_end(s)));
                 }
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("t") => self.toggle_typing(),
@@ -6091,7 +6088,7 @@ impl App {
             Key::Character(c) if !ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::Record),
             // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
             // tools (until a typing keyboard exists, which will take them).
-            Key::Character(c) if !ctrl && !alt && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
+            Key::Character(c) if !ctrl && !alt && !self.shift && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
                 if let Some(t) = Tool::from_letter(c) {
                     self.act(Action::PianoTool(t));
                 }
@@ -6103,22 +6100,24 @@ impl App {
                 s.piano.clipboard = sel.iter().filter_map(|&i| notes.get(i).copied()).collect();
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") && self.state.shown(Win::PianoRoll) => {
-                let at = self.paste_tick();
                 let clip = self.state.piano.clipboard.clone();
+                let at = piano::paste_tick(&self.state, &clip);
                 piano::paste(&mut self.state, &clip, at);
                 self.state.piano.dirty = true;
             }
             Key::Named(k @ (NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::ArrowUp | NamedKey::ArrowDown))
                 if self.state.shown(Win::PianoRoll) =>
             {
-                self.piano_arrow(*k, ctrl);
+                self.piano_arrow(*k, ctrl, alt);
             }
+            // Delete: the selection, or with nothing selected every note of the channel (spec: ui/piano-keys.md §4
+            // rule 3).
             Key::Named(NamedKey::Delete) if self.state.shown(Win::PianoRoll) => {
                 let s = &mut self.state;
-                let sel = s.piano.selection(s.pattern, piano::channel(s));
-                if !sel.is_empty() {
+                let idx = piano::targets(s);
+                if !idx.is_empty() {
                     piano::snapshot_as(s, "Piano roll delete note");
-                    piano::delete(s, sel);
+                    piano::delete(s, idx);
                 }
             }
             // FILE shortcuts (views/menus.rs). Shift picks another command: Shift+Ctrl+S = Save as; the other Shift
@@ -6345,20 +6344,32 @@ impl App {
     /// Arrow keys in the piano roll (§9): Left/Right scroll; Shift+arrows move the selection (or
     /// every note) one snap unit (a tick without one, spec: ui/piano-snap.md §6) / semitone; Ctrl+Up/Down
     /// move it an octave.
-    fn piano_arrow(&mut self, k: winit::keyboard::NamedKey, ctrl: bool) {
+    /// The arrows in the piano roll (spec: ui/piano-roll.md §11, ui/piano-keys.md §2 "Moving notes", §4 rules 8 and 9):
+    /// Shift moves the targets a key or a snap unit, Ctrl an octave, Alt a tick, Ctrl+Shift+Left / Right rotates them;
+    /// Left / Right alone scroll a bar.
+    fn piano_arrow(&mut self, k: winit::keyboard::NamedKey, ctrl: bool, alt: bool) {
         use winit::keyboard::NamedKey::*;
         let Some(g) = self.piano_geom() else { return };
         let step = i64::from(crate::piano_snap::unit(&self.state).unwrap_or(1));
-        let (dt, dk) = match (k, ctrl, self.shift) {
-            (ArrowUp, true, _) => (0, 12),
-            (ArrowDown, true, _) => (0, -12),
-            (ArrowLeft | ArrowRight, true, _) => return,
-            (ArrowLeft, false, true) => (-step, 0),
-            (ArrowRight, false, true) => (step, 0),
-            (ArrowUp, false, true) => (0, 1),
-            (ArrowDown, false, true) => (0, -1),
-            (ArrowLeft | ArrowRight, false, false) => {
-                let d = if k == ArrowLeft { -1.0 } else { 1.0 };
+        let left = k == ArrowLeft;
+        let (dt, dk) = match (k, ctrl, self.shift, alt) {
+            (ArrowLeft | ArrowRight, true, true, false) => {
+                let idx = piano::targets(&self.state);
+                if piano::rotate(&mut self.state, &idx, if left { -step } else { step }) {
+                    self.state.piano.dirty = true;
+                }
+                return;
+            }
+            (ArrowLeft | ArrowRight, false, false, true) => (if left { -1 } else { 1 }, 0),
+            (_, _, _, true) | (ArrowUp | ArrowDown, true, true, _) | (ArrowLeft | ArrowRight, true, false, _) => return,
+            (ArrowUp, true, false, _) => (0, 12),
+            (ArrowDown, true, false, _) => (0, -12),
+            (ArrowLeft, false, true, _) => (-step, 0),
+            (ArrowRight, false, true, _) => (step, 0),
+            (ArrowUp, false, true, _) => (0, 1),
+            (ArrowDown, false, true, _) => (0, -1),
+            (ArrowLeft | ArrowRight, false, false, _) => {
+                let d = if left { -1.0 } else { 1.0 };
                 let s = &mut self.state;
                 s.piano.scroll_x = (s.piano.scroll_x + d * g.bar as f32).max(0.0);
                 return;
@@ -6369,6 +6380,19 @@ impl App {
         if piano::shift(&mut self.state, &idx, dt, dk) {
             self.state.piano.dirty = true;
         }
+    }
+
+    /// The piano roll gets the editing keys: it is shown, no menu, Settings or playlist text box is open, and neither
+    /// the channel rack, the mixer nor the playlist is in front of it (`App::key` asks those first).
+    fn piano_keys(&self) -> bool {
+        let s = &self.state;
+        s.shown(Win::PianoRoll)
+            && s.menu_open.is_none()
+            && !s.settings.open
+            && s.playlist.edit.is_none()
+            && s.rack.fill.is_none()
+            && !matches!(s.z.last(), Some(Win::ChannelRack | Win::Mixer))
+            && !self.pl_focus()
     }
 
     /// Left click in the piano roll (spec: ui/piano-roll.md §8 Draw tool, §9 other tools).
@@ -6661,6 +6685,7 @@ impl App {
                     self.drag = Some(Drag::SongRuler);
                 } else {
                     self.state.piano.marker = t;
+                    self.state.piano.marker_placed = true;
                     self.drag = Some(Drag::Marker);
                 }
             }
@@ -12531,7 +12556,8 @@ mod tests {
         frame(&mut app, &mut c, None);
         assert!(!mine(&app).iter().any(|n| n.position == 192 && n.key == 60));
 
-        // Ctrl+A, Ctrl+C, Ctrl+V: pasted at the playhead (stopped: tick 0), selected.
+        // Ctrl+A, Ctrl+C, Ctrl+V: the marker was never placed, so the copy keeps the first note's place in its bar
+        // (tick 0, onto the selected originals), and it is selected.
         let count = mine(&app).len();
         app.key(&Key::Character("a".into()), true, false);
         app.key(&Key::Character("c".into()), true, false);
@@ -12549,14 +12575,15 @@ mod tests {
         let ry = ruler.cy();
         swipe(&mut app, &mut c, (g.x_of(0.0) + 1.0, ry), (g.x_of(190.0), ry), false);
         assert_eq!(app.state.piano.marker, 192);
-        assert_eq!(app.paste_tick(), 192, "stopped: paste at the marker");
+        assert!(app.state.piano.marker_placed);
+        assert_eq!(piano::paste_tick(&app.state, &[Note::step(0, 500)]), 192, "placed: paste at the marker");
         swipe(&mut app, &mut c, (g.x_of(0.0) + 1.0, ry), (g.x_of(100.0), ry), true);
         assert_eq!(app.state.piano.range, Some((0, 96)));
         let sel = app.state.piano.selection(app.state.pattern, ch);
         let notes = piano::notes(&app.state);
         assert!(!sel.is_empty() && sel.iter().all(|&i| notes[i].position < 96));
         app.key(&Key::Character("a".into()), true, false);
-        assert_eq!(app.state.piano.range, None, "other selections don't shade");
+        assert_eq!(app.state.piano.range, Some((0, piano::pattern_end(&app.state))), "Ctrl+A: the whole pattern");
     }
 
     /// Ctrl+B with a time selection (spec: ui/piano-roll.md §9, §10): the copies move by the range's length, keeping
@@ -12590,6 +12617,267 @@ mod tests {
         app.state.piano.select(app.state.pattern, ch, vec![0]);
         crate::piano_tools::duplicate(&mut app.state);
         assert_eq!(starts(&app), [48, 72, 432, 816]);
+    }
+
+    /// The piano roll's keys as FL 26 does them (spec: ui/piano-keys.md §2, §4), sent the way main.rs sends a key (the
+    /// typing keyboard first, then `App::key` with the repeat flag) to the project those measurements used.
+    mod piano_keys {
+        use super::*;
+        use winit::keyboard::{Key, KeyCode, NamedKey};
+
+        const CTRL: u8 = 1;
+        const SHIFT: u8 = 2;
+        const ALT: u8 = 4;
+
+        /// A C5 E5 G5 chord at 0, two touching C6, two overlapping D6, an off-grid F5, D5 and C5 (pos, len, key).
+        const PLAIN: [(u32, u32, u16); 10] =
+            [(0, 96, 60), (0, 96, 64), (0, 96, 67), (384, 48, 72), (432, 48, 72), (480, 72, 74), (520, 72, 74), (581, 30, 65), (672, 24, 62), (800, 48, 60)];
+
+        /// The piano roll alone with the project on channel 0, Line snap (24 ticks), the typing keyboard off and the mouse
+        /// over the grid; painted once, as the arrows need the grid. None where no canvas can be made.
+        fn setup() -> Option<(App, Canvas)> {
+            let mut c = Canvas::new(1920, 1080, 1.0).ok()?;
+            let mut app = App::new(None);
+            app.state.project = test_project();
+            app.state.z = vec![Win::PianoRoll];
+            app.state.selected_channel = 0;
+            app.state.piano.snap = crate::snap::EditorSnap::Grid(crate::playlist::Snap::Line);
+            piano::pattern_mut(&mut app.state).notes = PLAIN.iter().map(|&(p, l, k)| Note { length: l, key: k, ..Note::step(0, p) }).collect();
+            if app.typing_on() {
+                app.toggle_typing();
+            }
+            frame(&mut app, &mut c, None);
+            let grid = app.piano_geom().expect("the grid").grid;
+            app.mouse_move(grid.cx(), grid.cy());
+            assert_eq!(crate::piano_snap::unit(&app.state), Some(24));
+            Some((app, c))
+        }
+
+        /// One key press (and its release) the way main.rs delivers it; `repeat` = an auto-repeat of a held key.
+        fn press(app: &mut App, code: KeyCode, key: Key, mods: u8, repeat: bool) {
+            let (ctrl, alt) = (mods & CTRL != 0, mods & ALT != 0);
+            app.shift = mods & SHIFT != 0;
+            if !app.typing_key(code, true, ctrl, alt) {
+                app.repeat = repeat;
+                app.key(&key, ctrl, alt);
+                app.repeat = false;
+            }
+            app.typing_key(code, false, ctrl, alt);
+            app.shift = false;
+        }
+
+        /// A letter key held for `n` key-downs (the first press and `n - 1` repeats).
+        fn letter(app: &mut App, l: char, mods: u8, n: usize) {
+            let code = match l {
+                'a' => KeyCode::KeyA,
+                'b' => KeyCode::KeyB,
+                'c' => KeyCode::KeyC,
+                'd' => KeyCode::KeyD,
+                'h' => KeyCode::KeyH,
+                'i' => KeyCode::KeyI,
+                'k' => KeyCode::KeyK,
+                'l' => KeyCode::KeyL,
+                'm' => KeyCode::KeyM,
+                'r' => KeyCode::KeyR,
+                'u' => KeyCode::KeyU,
+                'v' => KeyCode::KeyV,
+                'z' => KeyCode::KeyZ,
+                _ => unreachable!("add the key"),
+            };
+            let text = if mods & SHIFT != 0 { l.to_ascii_uppercase() } else { l };
+            for i in 0..n {
+                press(app, code, Key::Character(text.to_string().into()), mods, i > 0);
+            }
+        }
+
+        fn named(app: &mut App, k: NamedKey, mods: u8, n: usize) {
+            let code = match k {
+                NamedKey::ArrowUp => KeyCode::ArrowUp,
+                NamedKey::ArrowDown => KeyCode::ArrowDown,
+                NamedKey::ArrowLeft => KeyCode::ArrowLeft,
+                NamedKey::ArrowRight => KeyCode::ArrowRight,
+                NamedKey::Delete => KeyCode::Delete,
+                NamedKey::Enter => KeyCode::Enter,
+                _ => unreachable!("add the key"),
+            };
+            for i in 0..n {
+                press(app, code, Key::Named(k), mods, i > 0);
+            }
+        }
+
+        /// Channel 0's notes as (pos, len, key), sorted.
+        fn spans(app: &App) -> Vec<(u32, u32, u16)> {
+            let mut v: Vec<(u32, u32, u16)> = piano::notes(&app.state).iter().filter(|n| n.channel == 0).map(|n| (n.position, n.length, n.key)).collect();
+            v.sort_unstable();
+            v
+        }
+
+        fn select(app: &mut App, pos: u32, key: u16) {
+            let i = piano::notes(&app.state).iter().position(|n| n.position == pos && n.key == key).expect("the note");
+            app.state.piano.select(app.state.pattern, 0, vec![i]);
+        }
+
+        fn selected(app: &App) -> Vec<(u32, u16)> {
+            let all = piano::notes(&app.state);
+            let mut v: Vec<(u32, u16)> = app.state.piano.selection(app.state.pattern, Some(0)).iter().map(|&i| (all[i].position, all[i].key)).collect();
+            v.sort_unstable();
+            v
+        }
+
+        fn moved(dt: i64, dk: i32) -> Vec<(u32, u32, u16)> {
+            let mut v: Vec<(u32, u32, u16)> = PLAIN.iter().map(|&(p, l, k)| ((i64::from(p) + dt) as u32, l, (i32::from(k) + dk) as u16)).collect();
+            v.sort_unstable();
+            v
+        }
+
+        /// Held keys (§4 rule 1): FL's 5 key-downs of Shift+Up = 5 semitones, 4 of Shift+Right = 4 steps, 3 of Ctrl+B =
+        /// 3 copies; a held switch acts once; nothing repeats into the channel rack.
+        #[test]
+        fn held_keys_repeat_the_moving_and_copying_keys() {
+            let Some((mut app, _c)) = setup() else { return };
+            named(&mut app, NamedKey::ArrowUp, SHIFT, 5);
+            assert_eq!(spans(&app), moved(0, 5));
+            named(&mut app, NamedKey::ArrowRight, SHIFT, 4);
+            assert_eq!(spans(&app), moved(96, 5));
+            named(&mut app, NamedKey::ArrowDown, CTRL, 2);
+            assert_eq!(spans(&app), moved(96, -19));
+            select(&mut app, 896, 41);
+            letter(&mut app, 'b', CTRL, 3);
+            let copies: Vec<u32> = spans(&app).iter().filter(|n| n.2 == 41 && n.0 >= 800).map(|n| n.0).collect();
+            assert_eq!(copies, [896, 944, 992, 1040]);
+            // L (PAT / SONG) held: one flip; Ctrl+L held: one legato.
+            let song = app.state.song_mode;
+            letter(&mut app, 'l', 0, 3);
+            assert_eq!(app.state.song_mode, !song);
+            letter(&mut app, 'l', 0, 1);
+            app.state.piano.clear_selection();
+            letter(&mut app, 'l', CTRL, 1);
+            let once = spans(&app);
+            app.repeat = true;
+            app.shift = false;
+            app.key(&Key::Character("l".into()), true, false);
+            app.repeat = false;
+            assert_eq!(spans(&app), once, "a repeat of Ctrl+L does nothing");
+            // The channel rack in front takes the keys: no repeats reach the notes.
+            app.state.z = vec![Win::PianoRoll, Win::ChannelRack];
+            app.repeat = true;
+            app.shift = true;
+            app.key(&Key::Named(NamedKey::ArrowUp), false, false);
+            app.repeat = false;
+            app.shift = false;
+            assert_eq!(spans(&app), once);
+        }
+
+        /// Delete with nothing selected, Ctrl+A's time selection with Ctrl+B and Ctrl+D, Ctrl+Enter (§4 rules 3, 4, 12).
+        #[test]
+        fn delete_select_all_and_ctrl_enter() {
+            let Some((mut app, _c)) = setup() else { return };
+            named(&mut app, NamedKey::Delete, 0, 1);
+            assert!(spans(&app).is_empty(), "nothing selected: every note goes");
+            letter(&mut app, 'z', CTRL, 1);
+            assert_eq!(spans(&app), moved(0, 0), "one undo step");
+            letter(&mut app, 'a', CTRL, 1);
+            assert_eq!(selected(&app).len(), 10);
+            assert_eq!(app.state.piano.range, Some((0, 1152)), "bars 1 to 3: the notes end at 848");
+            letter(&mut app, 'b', CTRL, 1);
+            let mut both = moved(0, 0);
+            both.extend(moved(1152, 0));
+            both.sort_unstable();
+            assert_eq!(spans(&app), both, "the copies move by the pattern's length in bars");
+            letter(&mut app, 'd', CTRL, 1);
+            assert!(selected(&app).is_empty());
+            assert_eq!(app.state.piano.range, None);
+            select(&mut app, 800, 60);
+            named(&mut app, NamedKey::Enter, CTRL, 1);
+            assert_eq!((app.state.piano.range, app.state.piano.marker), (Some((800, 848)), 800));
+            assert_eq!(selected(&app), [(800, 60)]);
+        }
+
+        /// Ctrl+L, Ctrl+U and Ctrl+V as measured (§2 "Editing", "Paste"; §4 rules 5 to 7).
+        #[test]
+        fn legato_chop_and_paste() {
+            let Some((mut app, _c)) = setup() else { return };
+            letter(&mut app, 'l', CTRL, 1);
+            let s = spans(&app);
+            assert!(s.contains(&(0, 384, 60)) && s.contains(&(581, 91, 65)), "{s:?}");
+            assert!(s.contains(&(800, 352, 60)), "the last note: to the end of bar 3");
+            letter(&mut app, 'z', CTRL, 1);
+            letter(&mut app, 'u', CTRL, 1);
+            let s = spans(&app);
+            assert!(s.contains(&(581, 24, 65)) && s.contains(&(605, 6, 65)), "{s:?}");
+            assert!([520, 544, 568].iter().all(|&t| s.contains(&(t, 24, 74))), "{s:?}");
+            letter(&mut app, 'z', CTRL, 1);
+            assert_eq!(spans(&app), moved(0, 0));
+
+            // The marker never placed: the note's place in its bar, in bar 1; a second paste onto the first moves a unit.
+            select(&mut app, 432, 72);
+            letter(&mut app, 'c', CTRL, 1);
+            letter(&mut app, 'd', CTRL, 1);
+            letter(&mut app, 'v', CTRL, 1);
+            assert_eq!(selected(&app), [(48, 72)]);
+            letter(&mut app, 'd', CTRL, 1);
+            letter(&mut app, 'v', CTRL, 1);
+            assert_eq!(selected(&app), [(72, 72)]);
+            // C5 from 800 lands at 32, inside the chord's C5: one unit later.
+            select(&mut app, 800, 60);
+            letter(&mut app, 'c', CTRL, 1);
+            letter(&mut app, 'd', CTRL, 1);
+            letter(&mut app, 'v', CTRL, 1);
+            assert_eq!(selected(&app), [(56, 60)]);
+            // Pasting again while that copy is still selected lands on it.
+            letter(&mut app, 'v', CTRL, 1);
+            assert_eq!(selected(&app), [(56, 60)]);
+            assert_eq!(spans(&app).iter().filter(|n| n.0 == 56).count(), 2);
+            // A placed marker: there.
+            app.state.piano.marker = 480;
+            app.state.piano.marker_placed = true;
+            letter(&mut app, 'v', CTRL, 1);
+            assert_eq!(selected(&app), [(480, 60)]);
+        }
+
+        /// Alt+arrows, rotation, mute, the selection keys and Shift+K / Shift+H (§4 rules 8 to 11, 13, 14).
+        #[test]
+        fn alt_arrows_rotate_mute_and_select() {
+            let Some((mut app, _c)) = setup() else { return };
+            named(&mut app, NamedKey::ArrowRight, ALT, 2);
+            assert_eq!(spans(&app), moved(2, 0));
+            named(&mut app, NamedKey::ArrowUp, ALT, 1);
+            assert_eq!(spans(&app), moved(2, 0), "Alt+Up does nothing");
+            named(&mut app, NamedKey::ArrowLeft, ALT, 3);
+            assert_eq!(spans(&app), moved(0, 0), "Alt+Left stops at 0");
+            named(&mut app, NamedKey::ArrowUp, CTRL | SHIFT, 1);
+            assert_eq!(spans(&app), moved(0, 0), "Ctrl+Shift+Up moves no notes");
+            named(&mut app, NamedKey::ArrowLeft, CTRL | SHIFT, 1);
+            let s = spans(&app);
+            assert!(s.contains(&(1128, 96, 60)) && s.contains(&(776, 48, 60)), "the chord wraps to 1152 - 24: {s:?}");
+            letter(&mut app, 'z', CTRL, 1);
+            assert_eq!(spans(&app), moved(0, 0));
+
+            letter(&mut app, 'm', ALT, 1);
+            assert!(piano::notes(&app.state).iter().all(|n| n.muted()), "nothing selected: all");
+            select(&mut app, 800, 60);
+            letter(&mut app, 'm', ALT | SHIFT, 1);
+            assert_eq!(piano::notes(&app.state).iter().filter(|n| n.muted()).count(), 9);
+
+            letter(&mut app, 'i', SHIFT, 1);
+            assert_eq!(selected(&app).len(), 9);
+            assert!(!selected(&app).contains(&(800, 60)));
+            letter(&mut app, 'r', SHIFT, 1);
+            assert_eq!(selected(&app).len(), 1);
+            letter(&mut app, 'm', SHIFT, 1);
+            assert!((1..=10).contains(&selected(&app).len()));
+            letter(&mut app, 'c', SHIFT, 1);
+            assert_eq!(selected(&app).len(), 10, "one colour: all");
+            assert_eq!(app.state.piano.tool, Tool::Draw, "Shift+C is no tool letter");
+
+            // Shift+K / Shift+H work with the typing keyboard on.
+            app.toggle_typing();
+            assert!(app.typing_on());
+            letter(&mut app, 'k', SHIFT, 1);
+            assert_eq!(app.state.selected_channel, 1);
+            letter(&mut app, 'h', SHIFT, 1);
+            assert_eq!(app.state.selected_channel, 0, "the next channel with notes, wrapping");
+        }
     }
 
     /// The piano roll title's target channel (spec: ui/piano-target-channel.md): hint, the channel menu and a pick,
@@ -13255,10 +13543,10 @@ mod tests {
         assert_eq!(mine(&app), vec![(0, 24, 60), (24, 24, 60), (48, 24, 60)]);
         key(&mut app, "g", true, false, false);
         assert_eq!(mine(&app), vec![(0, 72, 60)]);
-        // Ctrl+L: legato.
+        // Ctrl+L: legato; the last note lasts to the end of the pattern's bar (spec: ui/piano-keys.md §4 rule 5).
         put(&mut app, &[(0, 10, 60), (48, 10, 62)]);
         key(&mut app, "l", true, false, false);
-        assert_eq!(mine(&app), vec![(0, 48, 60), (48, 10, 62)]);
+        assert_eq!(mine(&app), vec![(0, 48, 60), (48, 336, 62)]);
         // A selection limits the edit and follows the results.
         put(&mut app, &[(0, 72, 60), (96, 72, 62)]);
         let first = piano::notes(&app.state).iter().position(|n| n.channel == ch && n.key == 60).unwrap();

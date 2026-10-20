@@ -91,6 +91,7 @@ impl App {
             crate::init::apply(s);
         } else {
             s.piano.marker = t;
+            s.piano.marker_placed = true;
         }
         self.hint = Cow::Owned(hint(&self.state, t));
         self.damage_rect(HINT_RECT);
