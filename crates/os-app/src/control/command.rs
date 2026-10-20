@@ -286,6 +286,9 @@ pub struct Settings {
     pub bar: Option<(u16, u16)>,
     pub bar_as_signature: Option<bool>,
     pub info: os_model::ProjectInfo,
+    /// Settings > Project's switches that are the project's own (its interface edits; no command sets them).
+    pub panning_law: Option<u8>,
+    pub play_truncated: bool,
 }
 
 impl Settings {
@@ -299,6 +302,8 @@ impl Settings {
             bar: p.bar,
             bar_as_signature: p.bar_as_signature,
             info: p.info.clone(),
+            panning_law: p.panning_law,
+            play_truncated: p.play_truncated,
         }
     }
 
@@ -307,6 +312,7 @@ impl Settings {
         s.tempo = self.tempo;
         (p.swing, p.main_volume, p.main_pitch, p.bar, p.bar_as_signature, p.info) =
             (self.swing, self.main_volume, self.main_pitch, self.bar, self.bar_as_signature, self.info);
+        (p.panning_law, p.play_truncated) = (self.panning_law, self.play_truncated);
     }
 }
 
@@ -370,6 +376,12 @@ impl Taken {
         })
     }
 }
+
+/// The steps of the project settings, the commands' and the interface's.
+pub const TEMPO: &str = "Tempo";
+pub const TIME_SIGNATURE: &str = "Time signature";
+pub const SONG_INFO: &str = "Song info";
+pub const PLUGIN_PARAMETER: &str = "Plugin parameter";
 
 /// A command that can't be applied: an id that names nothing, a value out of range.
 pub type Error = String;
@@ -463,12 +475,12 @@ impl Command {
     /// The undo history's name for this command's step.
     pub fn name(&self) -> &'static str {
         match self {
-            Command::SetTempo { .. } => "Tempo",
+            Command::SetTempo { .. } => TEMPO,
             Command::SetSwing { .. } => "Main swing",
             Command::SetMainVolume { .. } => "Main volume",
             Command::SetMainPitch { .. } => "Main pitch",
-            Command::SetTimeSignature { .. } => "Time signature",
-            Command::SetInfo { .. } => "Song info",
+            Command::SetTimeSignature { .. } => TIME_SIGNATURE,
+            Command::SetInfo { .. } => SONG_INFO,
             Command::AddChannel { .. } => "Add channel",
             Command::DeleteChannel { .. } => "Delete channel",
             Command::MoveChannel { .. } => "Move channel",
@@ -490,7 +502,7 @@ impl Command {
             Command::DeleteClip { .. } => "Delete clip",
             Command::SetClip { .. } => "Edit clip",
             Command::SetPlaylistTrack { .. } => "Playlist track",
-            Command::SetParam { .. } => "Plugin parameter",
+            Command::SetParam { .. } => PLUGIN_PARAMETER,
             Command::Put(_) => "Undo",
         }
     }

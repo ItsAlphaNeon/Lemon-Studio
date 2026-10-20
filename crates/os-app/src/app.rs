@@ -2850,7 +2850,7 @@ impl App {
             TapAct::Apply => {
                 if crate::tapper::toggle_apply() {
                     if let Some(bpm) = self.state.tapper.count.tempo() {
-                        self.set_tempo(bpm);
+                        crate::control::edit_app(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, |app| app.set_tempo(bpm));
                     }
                 }
             }
@@ -2871,8 +2871,12 @@ impl App {
         tp.test_clicks.push(accent);
         #[cfg(not(test))]
         self.transport.tap_click(accent);
+        // A count's taps make one undo step; a new count, a new one.
+        if bpm.is_none() {
+            self.state.history.end_run();
+        }
         if let Some(bpm) = bpm.filter(|_| crate::tapper::get().apply) {
-            self.set_tempo(bpm);
+            crate::control::edit_run(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, crate::history::Run::Tap, |app| app.set_tempo(bpm));
         }
         self.damage_win(Win::Tapper);
     }
@@ -3884,6 +3888,10 @@ impl App {
     /// metronome's accents, what hosted plugins are told), as do the pattern lengths the editors draw; the project
     /// counts as changed.
     pub fn set_bar(&mut self, beats: u16, steps: u16) -> Option<String> {
+        crate::control::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_bar_now(beats, steps))
+    }
+
+    fn set_bar_now(&mut self, beats: u16, steps: u16) -> Option<String> {
         let bar = (beats.max(1), steps.max(1));
         if self.state.project.bar() != bar {
             self.state.project.bar = Some(bar);
@@ -3897,6 +3905,10 @@ impl App {
     /// division"). Each mode keeps its own last bar while the program runs (4/4 at first): switching keeps the bar of
     /// the mode left and writes the other mode's into the project. A bar is never converted between the modes.
     pub fn set_time_mode(&mut self, signature: bool) -> Option<String> {
+        crate::control::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_time_mode_now(signature))
+    }
+
+    fn set_time_mode_now(&mut self, signature: bool) -> Option<String> {
         let s = &mut self.state;
         let now = s.project.bar_is_signature();
         if now != signature {
@@ -3930,7 +3942,9 @@ impl App {
         let beat_box = label == views::settings::BEATS_PER_BAR;
         let now = if beat_box { beats } else { steps };
         let v = (i32::from(now) + delta).clamp(i32::from(lo.min(now)), i32::from(hi.max(now))) as u16;
-        if beat_box { self.set_bar(v, steps) } else { self.set_bar(beats, v) }
+        // Wheel notches in a row make one undo step.
+        let bar = if beat_box { (v, steps) } else { (beats, v) };
+        crate::control::edit_run(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, crate::history::Run::Bar, |app| app.set_bar_now(bar.0, bar.1))
     }
 
     /// Settings > Project ▸ Timebase (PPQ): the project's ticks per quarter (the file header's PPQ). Every tick count
@@ -3960,10 +3974,12 @@ impl App {
     /// "Panning law: Triangular"): the law of the channel and mixer track pans. Playback follows from its next tick, as
     /// for any pan edit; the project counts as changed. A file without the event is Circular.
     pub fn set_panning_law(&mut self, law: u8) -> Option<String> {
-        if self.state.project.panning_law.unwrap_or(0) != law {
-            self.state.project.panning_law = Some(law);
-            self.state.piano.dirty = true;
-        }
+        crate::control::edit(&mut self.state, "Panning law", crate::control::command::Region::Settings, |s| {
+            if s.project.panning_law.unwrap_or(0) != law {
+                s.project.panning_law = Some(law);
+                s.piano.dirty = true;
+            }
+        });
         self.invalidate();
         Some(format!("Panning law: {}", views::settings::panning_text(Some(law))))
     }
@@ -3972,7 +3988,7 @@ impl App {
     /// notes"): switched for the project, and playback follows at once. Off when the file does not say.
     fn toggle_play_truncated(&mut self) {
         let on = !self.state.project.play_truncated;
-        self.state.project.play_truncated = on;
+        crate::control::edit(&mut self.state, "Play truncated notes in clips", crate::control::command::Region::Settings, |s| s.project.play_truncated = on);
         self.state.piano.dirty = true;
         self.state.message = Some(format!("Play truncated notes in clips: {}", if on { "on" } else { "off" }));
     }
@@ -3983,8 +3999,11 @@ impl App {
     /// crossfades").
     fn toggle_auto_crossfades(&mut self) {
         let on = !self.state.project.auto_crossfades.unwrap_or(false);
-        self.state.project.auto_crossfades = Some(on);
-        crate::playlist::crossfades_switched(&mut self.state);
+        // The whole project: switching sets the clips' crossfades.
+        crate::control::edit(&mut self.state, "Automatic crossfades", crate::control::command::Region::Project, |s| {
+            s.project.auto_crossfades = Some(on);
+            crate::playlist::crossfades_switched(s);
+        });
         self.state.message = Some(format!("Automatic crossfades: {}", if on { "on" } else { "off" }));
     }
 
@@ -6742,6 +6761,8 @@ impl App {
                 let x = self.mouse.0 / views::band_k(s); // the tempo box is laid out in band px
                 let n = s.tempo_digits.get().iter().filter(|&&d| x >= d).count();
                 let step = [1.0, 0.1, 0.01, 0.001][n];
+                // One undo step for the drag (none when it doesn't change the tempo).
+                crate::control::edit_press(s, crate::control::command::TEMPO, crate::control::command::Region::Settings);
                 self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo, step });
             }
             Action::SongPos => self.song_pos_press(),
@@ -8940,6 +8961,63 @@ mod tests {
         assert!(!app.cursor_locked());
     }
 
+    /// The tempo box's drag, Settings > Project's time settings: undo steps named as the control plane's commands, one
+    /// per drag or run of wheel notches, none for a press that changes nothing.
+    #[test]
+    fn tempo_and_time_settings_are_undo_steps() {
+        use crate::control::command::{TEMPO, TIME_SIGNATURE};
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut a, None);
+        let r = hit_rect(&app, &Action::Tempo);
+        let (t0, steps) = (app.state.tempo, app.state.history.at());
+        let x = app.state.tempo_digits.get()[0] - 4.0;
+        app.mouse_move(x, r.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!(app.state.history.at(), steps, "a click on the tempo");
+        app.mouse_down();
+        app.mouse_move(x, r.cy() - 10.0);
+        app.mouse_move(x, r.cy() - 20.0);
+        app.mouse_up();
+        assert_eq!((app.state.tempo, app.state.history.at()), (t0 + 20.0, steps + 1));
+        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TEMPO));
+        assert_eq!(app.state.tempo, t0);
+        assert_eq!(crate::history::redo(&mut app.state).as_deref(), Some(TEMPO));
+        assert_eq!(app.state.tempo, t0 + 20.0);
+
+        let bar = app.state.project.bar();
+        app.set_bar(3, 4);
+        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
+        assert_eq!(app.state.project.bar(), bar);
+        crate::history::redo(&mut app.state);
+        assert_eq!(app.state.project.bar(), (3, 4));
+        let at = app.state.history.at();
+        app.set_bar(3, 4);
+        assert_eq!(app.state.history.at(), at, "the bar it is already");
+        for _ in 0..3 {
+            app.settings_number(views::settings::BEATS_PER_BAR, 1);
+        }
+        assert_eq!((app.state.project.bar(), app.state.history.at()), ((6, 4), at + 1), "wheel notches in a row: one step");
+        crate::history::undo(&mut app.state);
+        assert_eq!(app.state.project.bar(), (3, 4));
+        let signature = app.state.project.bar_is_signature();
+        app.set_time_mode(!signature);
+        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
+        assert_eq!((app.state.project.bar_is_signature(), app.state.project.bar()), (signature, (3, 4)));
+        // The Project page's switches.
+        let before = app.state.project.clone();
+        app.set_panning_law(2);
+        app.toggle_play_truncated();
+        app.toggle_auto_crossfades();
+        let p = &app.state.project;
+        assert!(p.panning_law == Some(2) && p.play_truncated != before.play_truncated && p.auto_crossfades != before.auto_crossfades);
+        for name in ["Automatic crossfades", "Play truncated notes in clips", "Panning law"] {
+            assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(name));
+        }
+        assert!(app.state.project == before);
+    }
+
     #[test]
     fn tempo_drag_steps_by_the_digit_it_starts_on() {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
@@ -10686,6 +10764,7 @@ mod tests {
         };
         assert!(crate::tapper::get().apply);
         assert_eq!(app.state.tempo, 130.0);
+        let steps = app.state.history.at();
         tap(&mut app, &mut c, 10.0);
         assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (None, 130.0), "one tap: TAP stays");
         assert!(app.state.tapper.flash == 1.0 && app.animating(), "a tap lights the pad, which then fades");
@@ -10695,6 +10774,7 @@ mod tests {
         tap(&mut app, &mut c, 11.4);
         assert_eq!(app.state.tempo, 129.0, "the average of every interval, rounded (128.57)");
         assert!(app.unsaved(), "a tapped tempo is a change to the project");
+        assert_eq!(app.state.history.at(), steps + 1, "a count's taps are one undo step");
         // Off: the pad shows the tempo, the project keeps its own; turning it on applies the pad's.
         let apply = hit_rect(&app, &Action::Tapper(TapAct::Apply));
         click(&mut app, &mut c, apply);
@@ -10709,6 +10789,16 @@ mod tests {
         assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (None, 133.0));
         tap(&mut app, &mut c, 20.05);
         assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (Some(1200.0), 522.0));
+        // Steps: the first count, turning Apply tempo on, the new count; each undoes to the tempo before it.
+        assert_eq!(app.state.history.at(), steps + 3);
+        for want in [133.0, 129.0, 130.0] {
+            assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::control::command::TEMPO));
+            assert_eq!(app.state.tempo, want);
+        }
+        for want in [129.0, 133.0, 522.0] {
+            crate::history::redo(&mut app.state);
+            assert_eq!(app.state.tempo, want);
+        }
         // MIDI keys tap while the window is open; a chord's keys are one tap.
         for t in [30.0, 30.03, 30.5] {
             app.state.tapper.test_time = Some(t);

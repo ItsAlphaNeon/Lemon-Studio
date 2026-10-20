@@ -341,6 +341,42 @@ pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: comman
     r
 }
 
+/// A parameter moved in a plugin's own window from `before`: one step, unless Undo knob tweaks is off. `run`: a value the
+/// plugin sent outside a gesture (no begin and end of the edit), which joins the step of the values just before it on
+/// the same parameter, as a knob's wheel notches do.
+pub fn param_edit(s: &mut State, owner: u32, param: u32, before: f64, run: bool) {
+    if !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
+        return;
+    }
+    let r = crate::history::Run::Param(owner, param);
+    if run && s.history.joins(r) {
+        return;
+    }
+    record_edit(s, command::PLUGIN_PARAMETER, command::Taken::Param(owner, param, before));
+    if run {
+        s.history.set_run(r);
+    }
+}
+
+/// `edit_app` for a run of changes that make one step (the tempo tapper's taps, wheel notches on a value box): a change
+/// that joins the newest step of run `run` (`History::joins`) records none, as that step holds the region from before
+/// the run.
+pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, run: crate::history::Run, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
+    if app.state.history.joins(run) {
+        return f(app);
+    }
+    let before = command::Taken::of(&app.state, region);
+    let r = f(app);
+    let s = &mut app.state;
+    if let Some(before) = before {
+        if command::Taken::of(s, region).as_ref() != Some(&before) {
+            record_edit(s, name, before);
+            s.history.set_run(run);
+        }
+    }
+    r
+}
+
 /// A press that starts an edit of `region` (a fader drag): the step named `name` is recorded now, holding the region
 /// as it is, and goes again at the release when the drag changed nothing (`history::settle`).
 pub fn edit_press(s: &mut State, name: &'static str, region: command::Region) {

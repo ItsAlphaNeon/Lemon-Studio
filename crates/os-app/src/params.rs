@@ -18,6 +18,11 @@ use crate::app::{Action, App, State};
 use crate::playlist::{Cmd, PItem, Popup};
 use crate::plugins::{fx_key, fx_of};
 
+/// The values of an instance's parameters, by id.
+fn read_values(p: &dyn os_host::Plugin, params: &[Entry]) -> BTreeMap<u32, f64> {
+    params.iter().filter_map(|e| Some((e.id, p.param_value(e.id)?))).collect()
+}
+
 /// Browser tab of the project tree, and the sections plugin nodes live in (spec: ui/browser.md §2).
 const PROJECT_TAB: usize = 1;
 pub const ROOT: &str = "1:Current project";
@@ -38,6 +43,11 @@ pub struct List {
     pub params: Vec<Entry>,
     /// When `params_tick` last took the instance's events (`Hosted::due`).
     pub seen: crate::plugins::Look,
+    /// The parameters' values as last read or sent by the plugin, by id: what an edit in the plugin's window moves
+    /// from (its undo step's value).
+    pub values: BTreeMap<u32, f64>,
+    /// The parameters being edited in the plugin's window (a gesture begun and not ended): the value each moves from.
+    pub open: BTreeMap<u32, f64>,
 }
 
 /// Something the user moved last (spec §5).
@@ -261,6 +271,7 @@ impl App {
         let mut edited = Vec::new();
         let mut automate = Vec::new();
         let mut stretch = Vec::new();
+        let (mut seen, mut steps) = (Vec::new(), Vec::new());
         for (&key, h) in &self.plugins.hosted {
             // Only an instance with something new is locked, and never waited for: one the audio thread is rendering
             // is read again next tick (its events stay queued).
@@ -270,19 +281,50 @@ impl App {
             let count = p.param_count();
             let stale = ui.lists.get(&key).is_none_or(|l| l.params.len() != count || !Weak::ptr_eq(&l.plugin, &weak));
             if stale {
-                let params = (0..count)
+                let params: Vec<Entry> = (0..count)
                     .map(|i| match p.param_info(i) {
                         Some(info) => Entry { id: info.id, name: info.name, hidden: info.hidden },
                         None => Entry { id: u32::MAX, name: String::new(), hidden: true },
                     })
                     .collect();
-                ui.lists.insert(key, List { plugin: weak, params, seen: look });
+                let values = read_values(&*p, &params);
+                ui.lists.insert(key, List { plugin: weak, params, seen: look, values, open: BTreeMap::new() });
             }
+            let events = p.take_param_events();
             if let Some(l) = ui.lists.get_mut(&key) {
+                // The plugin reported something other than its editor's edits (a preset it loaded, a restart): its
+                // values are read again, so an undo moves back to what was there.
+                if !stale && events.is_empty() && l.seen.count != look.count {
+                    l.values = read_values(&*p, &l.params);
+                }
                 l.seen = look;
+                let owner = h.owner;
+                for e in &events {
+                    match *e {
+                        os_host::ParamEvent::Begin(id) => {
+                            let from = l.values.get(&id).copied().or_else(|| p.param_value(id));
+                            if let Some(from) = from {
+                                l.open.insert(id, from);
+                            }
+                        }
+                        os_host::ParamEvent::Value(id, v) => {
+                            let from = l.values.insert(id, v);
+                            seen.push((owner, id, v));
+                            if let (false, Some(from)) = (l.open.contains_key(&id), from) {
+                                steps.push((owner, id, from, v, true));
+                            }
+                        }
+                        os_host::ParamEvent::End(id) => {
+                            if let Some(from) = l.open.remove(&id) {
+                                let now = l.values.get(&id).copied().unwrap_or(from);
+                                steps.push((owner, id, from, now, false));
+                            }
+                        }
+                    }
+                }
             }
             let sampler = key < crate::plugins::FX_KEY && p.desc().name == crate::plugins::LEMON_SAMPLER;
-            for e in p.take_param_events() {
+            for e in events {
                 if let (true, os_host::ParamEvent::Value(id, v)) = (sampler, &e) {
                     if let Some(x) = ui.lists.get(&key).and_then(|l| l.params.iter().find(|x| x.id == *id)) {
                         stretch.push((key, x.name.clone(), *v));
@@ -299,6 +341,18 @@ impl App {
                 if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
                     automate.push((key, index));
                 }
+            }
+        }
+        // An edit in a plugin's window is an undo step (by the owner's id, so it follows moves): a gesture's from its
+        // begin to its end, values sent without one joined while they come in a row.
+        for (owner, id, v) in seen {
+            if !owner.is_none() {
+                self.state.control.saw_param(owner.0, id, v);
+            }
+        }
+        for (owner, id, from, now, run) in steps {
+            if !owner.is_none() && from != now {
+                crate::control::param_edit(&mut self.state, owner.0, id, from, run);
             }
         }
         // A knob moved in a plugin's own window is the user's edit (`Plugins::mark_edited`).
@@ -473,7 +527,7 @@ mod tests {
         assert_eq!(target_of(s, fx_key(2, 3), 35), Some(target::slot_param(2, 3, 35)));
         assert_eq!(key_of(s, Target::ChannelParam(ch, 7)), Some((0, 7)));
         assert_eq!(key_of(s, Target::SlotParam(2, 3, 35)), Some((fx_key(2, 3), 35)));
-        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![Entry { id: 9, name: "Cutoff".into(), hidden: false }], seen: crate::plugins::Look::never() });
+        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![Entry { id: 9, name: "Cutoff".into(), hidden: false }], seen: crate::plugins::Look::never(), values: BTreeMap::new(), open: BTreeMap::new() });
         assert_eq!(clip_name(s, 0, 0), "Lead - Cutoff");
         // Last tweaked keeps the two newest, newest first, without repeats.
         let p = &mut s.params;

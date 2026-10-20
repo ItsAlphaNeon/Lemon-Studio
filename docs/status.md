@@ -167,13 +167,17 @@ Not yet: Align all channel editors, Arrange windows.
   (adding, removing, moving, their lights) and adding, moving, deleting and trimming tracks
 - The channel rack's colours, names, cloning, moving, sorting, deleting, mixer track assignments, groups and Burn
   loops, and the PATTERNS menu's colours, names, inserting, cloning, moving and deleting
+- The tempo (the toolbar's box; the tempo tapper's taps, one step per count), Settings ▸ Project's time signature,
+  panning law, Play truncated notes in clips and Automatic crossfades, and Settings ▸ Info's boxes
+- Parameters changed in a plugin's own window: one step per gesture (mouse down to up on its knob), or per run of
+  values from a plugin that sends them without one; "Undo knob tweaks" switches these off too
 - Changes made through the control plane (see Scripting and assistants), named after the client that made them
 - The browser's Current project ▸ History lists the steps from "Last reset"; undone steps are grey, and a click
   on one goes back or forward to it
 - General settings ▸ Undo history: Maximum undo levels, Undo knob tweaks, Alternate undo mode, and showing the
   history in the browser, newest first if wanted
-- Not yet: project settings (the tempo box, the Project page) and plugin parameters changed in their editors;
-  "Put undone recordings in the recycle bin" waits for recording
+- Not yet: "Put undone recordings in the recycle bin", which waits for recording. A plugin's own undo inside its
+  window is the plugin's, apart from the app's history
 
 ## 🚧 Scripting and assistants
 

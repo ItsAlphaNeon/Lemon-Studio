@@ -677,3 +677,127 @@ fn ticks_past_the_last_are_refused() {
         assert_eq!(reading(&a), before, "{c} changed nothing");
     }
 }
+
+/// A plugin with one parameter (id 7) whose window's edits a test sends (`events`).
+struct Knob {
+    desc: os_host::Descriptor,
+    value: f64,
+    events: Vec<os_host::ParamEvent>,
+}
+
+impl os_engine::Instrument for Knob {
+    fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+    fn note_off(&mut self, _: u32, _: u8) {}
+    fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+}
+
+impl os_engine::HostedEffect for Knob {
+    fn process_fx(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+}
+
+impl os_host::Plugin for Knob {
+    fn desc(&self) -> &os_host::Descriptor {
+        &self.desc
+    }
+    fn activate(&mut self, _: u32) -> bool {
+        true
+    }
+    fn idle(&mut self) {}
+    fn has_editor(&self) -> bool {
+        false
+    }
+    fn editor_open(&self) -> bool {
+        false
+    }
+    fn open_editor(&mut self, _: *mut std::ffi::c_void, _: f32) -> Result<(u32, u32), String> {
+        Err(String::new())
+    }
+    fn editor_size(&self) -> Option<(u32, u32)> {
+        None
+    }
+    fn close_editor(&mut self) {}
+    fn save_state(&self) -> Option<Vec<u8>> {
+        None
+    }
+    fn load_state(&mut self, _: &[u8]) -> bool {
+        false
+    }
+    fn param_count(&self) -> usize {
+        1
+    }
+    fn param_info(&self, i: usize) -> Option<os_host::ParamInfo> {
+        (i == 0).then(|| os_host::ParamInfo {
+            id: 7,
+            name: "Cutoff".into(),
+            unit: String::new(),
+            group: String::new(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.5,
+            steps: 0,
+            automatable: true,
+            read_only: false,
+            hidden: false,
+            bypass: false,
+            enumerated: false,
+        })
+    }
+    fn param_value(&self, id: u32) -> Option<f64> {
+        (id == 7).then_some(self.value)
+    }
+    fn set_param(&mut self, id: u32, v: f64) -> bool {
+        self.value = v;
+        id == 7
+    }
+    fn take_param_events(&mut self) -> Vec<os_host::ParamEvent> {
+        std::mem::take(&mut self.events)
+    }
+}
+
+#[test]
+fn edits_in_a_plugin_s_window_are_undo_steps() {
+    use os_host::ParamEvent::{Begin, End, Value};
+    let mut a = app();
+    a.plugins = crate::plugins::Plugins::default();
+    let desc = crate::plugins::builtin()[0].desc.clone();
+    let knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: 0.25, events: Vec::new() }));
+    let mut h = crate::plugins::Hosted::new(knob.clone());
+    h.owner = a.state.project.channels[0].id;
+    a.plugins.hosted.insert(0, h);
+    a.params_tick();
+    // The plugin moves its knob as its window is dragged: Begin, values, End (the value is the plugin's at once).
+    let drag = |a: &mut App, events: Vec<os_host::ParamEvent>| {
+        {
+            let mut k = knob.lock().unwrap();
+            if let Some(&Value(_, v)) = events.iter().rev().find(|e| matches!(e, Value(..))) {
+                k.value = v;
+            }
+            k.events = events;
+        }
+        a.params_tick();
+    };
+    let value = |a: &mut App| {
+        a.host_commands();
+        knob.lock().unwrap().value
+    };
+    let steps = a.state.history.at();
+    drag(&mut a, vec![Begin(7), Value(7, 0.4), Value(7, 0.6)]);
+    assert_eq!(a.state.history.at(), steps, "nothing until the gesture ends");
+    drag(&mut a, vec![Value(7, 0.7), End(7)]);
+    assert_eq!(a.state.history.at(), steps + 1, "a gesture is one step");
+    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(command::PLUGIN_PARAMETER));
+    assert_eq!(value(&mut a), 0.25, "back to the value before the gesture");
+    assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some(command::PLUGIN_PARAMETER));
+    assert_eq!(value(&mut a), 0.7);
+    // A gesture that ends where it began is none.
+    drag(&mut a, vec![Begin(7), Value(7, 0.9), Value(7, 0.7), End(7)]);
+    assert_eq!(a.state.history.at(), steps + 1);
+    // Values sent without a gesture (some VST2 plugins) join while they come in a row.
+    drag(&mut a, vec![Value(7, 0.1)]);
+    drag(&mut a, vec![Value(7, 0.2)]);
+    assert_eq!(a.state.history.at(), steps + 2);
+    crate::history::undo(&mut a.state);
+    assert_eq!(value(&mut a), 0.7);
+    crate::history::redo(&mut a.state);
+    assert_eq!(value(&mut a), 0.2);
+}

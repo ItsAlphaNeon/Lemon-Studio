@@ -10,7 +10,9 @@
 //! and the step sequencer), the playlist (`playlist::snapshot`), knob turns, sample loads (`load_sample`), the
 //! project's initial values (`crate::init`), and with the playlist, PATTERNS > Split by channel's patterns and ADD's
 //! clip channels (`playlist::snapshot_with`), and everything the control plane's commands change (`crate::control`):
-//! their steps hold the commands that undo them (`Snap::Commands`).
+//! their steps hold the commands that undo them (`Snap::Commands`), as do the interface's edits that go through
+//! `control::edit` (the mixer, the rack, the project settings) and parameters moved in a plugin's own window
+//! (`control::param_edit`).
 //!
 //! The settings of General ▸ Undo history (`crate::prefs`): Maximum undo levels (past it the oldest step goes), Undo
 //! knob tweaks, Alternate undo mode (what Ctrl+Z and Ctrl+Alt+Z do), Show undo history in the browser when undoing
@@ -273,13 +275,40 @@ pub struct History {
     done: usize,
     /// The last move was an undo: with Alternate undo mode off, Ctrl+Z redoes it.
     undid: bool,
-    /// The knob the newest step's mouse-wheel turns go to (one step for a run of notches).
-    wheel: Option<KnobId>,
+    /// What the newest step's run of changes goes to: a knob's mouse-wheel notches, the tempo tapper's taps (one step
+    /// for the run).
+    run: Option<Run>,
     /// The newest step was recorded since the last button release (`settle` looks at it then).
     fresh: bool,
 }
 
+/// A run of changes that make one step (`History::run`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Run {
+    Wheel(KnobId),
+    Tap,
+    /// Mouse-wheel notches on Settings > Project's time boxes.
+    Bar,
+    /// Values a plugin sends for parameter `.1` of owner `.0` outside a gesture (no begin and end of an edit).
+    Param(u32, u32),
+}
+
 impl History {
+    /// Whether a change of run `r` joins the newest step: the step is of that run and nothing came after it.
+    pub fn joins(&self, r: Run) -> bool {
+        self.run == Some(r) && self.done == self.steps.len()
+    }
+
+    /// The newest step's run goes on with `r` (`joins`).
+    pub fn set_run(&mut self, r: Run) {
+        self.run = Some(r);
+    }
+
+    /// The run ends: the next change is a step of its own.
+    pub fn end_run(&mut self) {
+        self.run = None;
+    }
+
     /// How many steps there are ("Last reset" not counted).
     #[cfg(test)]
     pub fn len(&self) -> usize {
@@ -345,7 +374,7 @@ pub fn record_named(s: &mut State, name: Cow<'static, str>, snap: Snap) {
     h.steps.push(Step { name, snap });
     h.done = h.steps.len();
     h.undid = false;
-    h.wheel = None;
+    h.run = None;
     h.fresh = true;
     h.trim();
 }
@@ -371,7 +400,7 @@ pub fn unrecord(s: &mut State) {
         h.steps.pop();
         h.done -= 1;
     }
-    (h.wheel, h.fresh) = (None, false);
+    (h.run, h.fresh) = (None, false);
 }
 
 /// A button was released: the step recorded since the last release goes when its edit changed nothing (a click on a
@@ -398,13 +427,13 @@ pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
         return;
     }
     let h = &s.history;
-    if wheel && h.wheel == Some(id) && h.done == h.steps.len() {
+    if wheel && h.joins(Run::Wheel(id)) {
         return;
     }
     let snap = Snap::Knob(id, knob_value(s, id));
     record(s, knob_name(id), snap);
     if wheel {
-        s.history.wheel = Some(id);
+        s.history.run = Some(Run::Wheel(id));
     }
 }
 
@@ -428,7 +457,7 @@ pub fn undo(s: &mut State) -> Option<String> {
         return None;
     }
     h.done -= 1;
-    (h.undid, h.wheel, h.fresh) = (true, None, false);
+    (h.undid, h.run, h.fresh) = (true, None, false);
     let i = h.done;
     swap(s, i);
     Some(s.history.steps[i].name.to_string())
@@ -444,7 +473,7 @@ pub fn redo(s: &mut State) -> Option<String> {
     swap(s, i);
     let h = &mut s.history;
     h.done += 1;
-    (h.undid, h.wheel, h.fresh) = (false, None, false);
+    (h.undid, h.run, h.fresh) = (false, None, false);
     Some(h.steps[i].name.to_string())
 }
 
@@ -545,7 +574,7 @@ pub fn forget_playlist(s: &mut State) {
             kept.push(st);
         }
     }
-    (h.steps, h.done, h.wheel) = (kept, done, None);
+    (h.steps, h.done, h.run) = (kept, done, None);
 }
 
 /// The timebase changed from `from` to `to` ticks per quarter: the steps' notes, control points, lengths, clips and

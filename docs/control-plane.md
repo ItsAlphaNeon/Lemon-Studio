@@ -117,7 +117,9 @@ default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre).
   user can undo it like any other step, and Ctrl+Z after it works as usual.
 - The interface's own edits use the same path: mixer edits (faders, mute, polarity, routing, colours, names, effect
   slots, adding, moving and deleting tracks), channel colours, names, cloning, moving and deleting, and pattern
-  colours, names, inserting, cloning, moving and deleting are undo steps too.
+  colours, names, inserting, cloning, moving and deleting are undo steps too, as are the tempo, the project settings
+  and parameters changed in a plugin's own window. A change has the same step name whichever made it ("Tempo",
+  "Time signature", "Song info", "Plugin parameter").
 - A proposal is applied to see what it changes and taken back at once; with a window the app asks the user to Apply
   or Discard it. Accepted, it is one undo step named after its client.
 - `events` lists each change: `apply`, `undo`, `redo`, `proposal`, `accepted`, `discarded`, `opened` (a project was
@@ -150,6 +152,5 @@ call("apply", commands=[
 - Live commands that reach the playing engine without a rebuild (each change rebuilds it, as edits in the interface
   do); parameter changes go straight to the plugin.
 - A native project format: projects are read and saved as FL Studio projects.
-- Rendering through the control plane, and pushing events to clients (they poll `events`).
-- Undo for project settings changed in the interface (the tempo box, the Project page) and for plugin parameters
-  changed in their editors.
+- Rendering through the control plane, and pushing events to clients (they poll `events`). A parameter changed in a
+  plugin's window is an undo step but not an `edit` event.
