@@ -16,8 +16,6 @@ mod autoscroll;
 mod backup;
 #[cfg(test)]
 mod audio_bench;
-#[cfg(test)]
-mod render_check;
 mod browser;
 mod cable;
 mod clip_colors;
@@ -54,6 +52,7 @@ mod piano_snap;
 mod piano_split;
 mod piano_tools;
 mod rack;
+mod render;
 mod patterns;
 mod perf;
 mod playlist;
@@ -1568,6 +1567,10 @@ fn main() {
         std::process::exit(plugins::window_check::run(&args[1..]));
     }
     app::move_old_settings();
+    // A render without a window (FILE > Export as WAV from the command line, `render`).
+    if args.first().map(String::as_str) == Some("--render") {
+        std::process::exit(render::cli(&args[1..]));
+    }
     if args.iter().any(|a| a == "--screenshot") {
         screenshot(&args);
         return;

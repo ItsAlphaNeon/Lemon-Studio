@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -286,6 +287,15 @@ struct Hosts {
 }
 
 type Instruments = Arc<Mutex<Hosts>>;
+
+/// Set by a render without a window (`crate::render`): the audio thread never opens an output device by itself.
+static HEADLESS: AtomicBool = AtomicBool::new(false);
+
+/// No output device opens unless playback asks for one: for renders without a window (`crate::render`). Call before
+/// the first `Transport::new`.
+pub fn headless() {
+    HEADLESS.store(true, Ordering::Release);
+}
 
 pub struct Transport {
     tx: Sender<Cmd>,
@@ -965,7 +975,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     let mut lost: Option<Lost> = None;
     // An ASIO driver chosen opens at once (at the start, with new settings), not with the first note: it stays open,
     // and loading it takes a while. When it does not open it is tried again (`ASIO_TRIES`): when, and the tries so far.
-    let mut open_asio = Some((Instant::now(), 0));
+    let mut open_asio = (!HEADLESS.load(Ordering::Acquire)).then(|| (Instant::now(), 0));
     // OS_DEBUG: how far playback renders ahead of the device, every 2 s.
     let debug = std::env::var_os("OS_DEBUG").is_some();
     let mut logged = Instant::now();
