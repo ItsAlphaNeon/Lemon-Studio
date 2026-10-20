@@ -70,6 +70,7 @@ mod prefs;
 mod preview_track;
 mod project_forms;
 mod project_info;
+mod project_picker;
 mod project_plugins;
 mod presets;
 mod misc;

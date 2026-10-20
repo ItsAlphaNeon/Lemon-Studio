@@ -201,7 +201,7 @@ const VIEW_ITEMS: &[Item] = &[
     it("Channel rack", "F6").on().tick(),
     it("Mixer", "F9").on().tick(),
     it("Browser", "Alt+F8").on().tick(),
-    it("Project picker", "Ctrl+F8"),
+    it("Project picker", "Ctrl+F8").on(),
     it("Plugin picker", "F8").on(),
     it("Tempo tapper", "Ctrl+F5").tick(),
     it("Touch controller", "Alt+F7"),
@@ -368,7 +368,7 @@ pub fn works(menu: usize, item: &Item) -> bool {
     item.works
         || ((menu == OPTIONS_MENU || menu == ADD_MENU) && crate::views::settings::tab_for_menu(item.label).is_some())
         || (menu == PATTERNS && crate::patterns::Cmd::from_label(item.label).is_some())
-        || (menu == VIEW && (win_of(item.label).is_some() || item.label == "Plugin picker"))
+        || (menu == VIEW && (win_of(item.label).is_some() || matches!(item.label, "Plugin picker" | "Project picker")))
         || (menu == EDIT_MENU && matches!(item.label, "Undo" | "Redo"))
         || crate::params::menu_handles(item.label)
         || crate::browser::Jump::from_label(menu, item.label).is_some()

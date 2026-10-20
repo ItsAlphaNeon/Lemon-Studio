@@ -32,6 +32,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Clip groups, markers and several arrangements
 - Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
+- Project picker (VIEW, Ctrl+F8 or the toolbar's project button): a menu of the patterns and channels; picking a
+  pattern makes it current, picking a channel opens its window
 - Song position slider in the toolbar: drag, click to step, right-click to jump, wheel; it follows playback
   (through the pattern in PAT mode)
 - Auto scrolling (toolbar, OPTIONS menu): while playing, the playlist follows the playhead (the piano roll in

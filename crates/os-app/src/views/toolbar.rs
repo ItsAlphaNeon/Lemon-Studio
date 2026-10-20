@@ -741,7 +741,7 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), s.shown(Win::ChannelRack), "Channel rack (F6)"),
         (Icon::Mixer, Action::ToggleWin(Win::Mixer), s.shown(Win::Mixer), "Mixer (F9)"),
         (Icon::Browser, Action::ToggleWin(Win::Browser), s.show_browser, "Browser / Plugin picker (Alt+F8)"),
-        (Icon::Project, Action::Placeholder("Project picker"), false, "Project picker / Plugin picker (Ctrl+F8)"),
+        (Icon::Project, Action::ProjectPicker, false, "Project picker / Plugin picker (Ctrl+F8)"),
         (Icon::Plug, Action::PickerOpen, false, "Plugin picker (F8)"),
         (Icon::Kick, Action::ToggleWin(Win::Tapper), s.shown(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
         (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller (Alt+F7)"),

@@ -192,6 +192,8 @@ pub enum Action {
     Knob(crate::knobs::KnobId),
     /// Toolbar plugin button: the plugin menu (spec: ui/plugin-menu.md §1).
     PickerOpen,
+    /// Toolbar project button: the project picker (spec: ui/project-picker.md §2).
+    ProjectPicker,
     /// A toolbar utility button (spec: ui/toolbar-buttons.md §2).
     Util(Util),
     /// Show a window maximized and in front (the playlist / piano roll buttons' right click, spec:
@@ -6778,6 +6780,12 @@ impl App {
                 let at = self.top_hit(x, y).map_or((x, y), |h| (h.rect.x, h.rect.bottom() + 2.0));
                 self.open_plugin_menu(crate::plugin_menu::Target::All, at);
             }
+            // Under the button (spec: ui/project-picker.md §2).
+            Action::ProjectPicker => {
+                let (x, y) = self.mouse;
+                let at = self.top_hit(x, y).map_or((x, y), |h| (h.rect.x, h.rect.bottom() + 2.0));
+                self.open_project_picker(at);
+            }
             Action::Knob(id) => {
                 crate::history::knob(s, id, false);
                 self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
@@ -7287,6 +7295,10 @@ impl App {
             (0, FILE_SAVE_AS) => self.save(true),
             (0, FILE_SAVE_VERSION) => self.save_new_version(),
             (0, FILE_EXIT) => self.want_close = true,
+            (VIEW, i) if item_at(menu, i).is_some_and(|it| it.label == "Project picker") => {
+                let at = self.mouse;
+                self.open_project_picker(at);
+            }
             (VIEW | ADD_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Plugin picker") => {
                 let at = self.mouse;
                 self.open_plugin_menu(crate::plugin_menu::Target::All, at);
@@ -7387,7 +7399,7 @@ fn toolbar_right(hit: &Action) -> Option<Action> {
         Action::Util(Util::Save) => Action::MenuItem(0, FILE_SAVE_VERSION),
         Action::Util(Util::Help) => Action::MenuItem(HELP_MENU, HELP_ABOUT),
         Action::ToggleWin(w @ (Win::Playlist | Win::PianoRoll)) => Action::ShowMax(w),
-        Action::ToggleWin(Win::Browser) => Action::PickerOpen,
+        Action::ToggleWin(Win::Browser) | Action::ProjectPicker => Action::PickerOpen,
         _ => return None,
     })
 }
@@ -15032,6 +15044,7 @@ mod tests {
             (Action::ToggleWin(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
             (Action::ToggleWin(Win::Browser), "Browser / Plugin picker (Alt+F8)"),
             (Action::PickerOpen, "Plugin picker (F8)"),
+            (Action::ProjectPicker, "Project picker / Plugin picker (Ctrl+F8)"),
         ] {
             assert_eq!(hint(&app, &a), h);
         }
@@ -15039,7 +15052,6 @@ mod tests {
         for name in [
             "Open audio editor / New audio editor",
             "One-click audio recording",
-            "Project picker / Plugin picker (Ctrl+F8)",
             "Touch controller (Alt+F7)",
             "Plugin repository",
         ] {
