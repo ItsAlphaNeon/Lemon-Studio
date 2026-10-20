@@ -865,6 +865,10 @@ pub struct Engine {
     fade_out: u32,
     fade_in: u32,
     fade_len: u32,
+    /// A recording count-in (`set_count_in`): ticks of it left, and its length. While it lasts the position holds at the
+    /// start and the metronome counts in (spec: ui/recording.md §3).
+    count_in: u64,
+    count_in_len: u64,
     tempo: f64,
     ppq: u16,
     /// Steps per beat (event 18): the tempo counts beats of this many sixteenths, so the ticks run at `tempo × steps /
@@ -1315,6 +1319,8 @@ impl Engine {
             awake: false,
             tail_done: false,
             held: false,
+            count_in: 0,
+            count_in_len: 0,
             fade_out: 0,
             fade_in: 0,
             fade_len: 0,
@@ -1358,6 +1364,25 @@ impl Engine {
     /// Clicks with `switch` while playing live (spec: ui/metronome.md); an export never does.
     pub fn set_metronome(&mut self, switch: std::sync::Arc<crate::metronome::Switch>) {
         self.metronome = Some(crate::metronome::Metronome::new(switch, self.rate));
+    }
+
+    /// Count in `bars` bars of the time signature's beats before playback moves (spec: ui/recording.md §3): the
+    /// position holds where it is, the metronome clicks every beat whether it is on or off, live notes and the effects
+    /// sound. Needs `set_metronome` for the clicks.
+    pub fn set_count_in(&mut self, bars: u32) {
+        let bar = u64::from(self.beat_ticks()) * u64::from(self.beats_per_accent.max(1));
+        self.count_in = bar * u64::from(bars);
+        self.count_in_len = self.count_in;
+        self.tail_done = false;
+    }
+
+    /// Ticks of the count-in left to render (0: none, or over).
+    pub fn counting_in(&self) -> u64 {
+        self.count_in
+    }
+
+    fn beat_ticks(&self) -> u32 {
+        (u32::from(self.ppq) * u32::from(self.steps) / 4).max(1)
     }
 
     /// A click from the next tick, for a tap on the Tempo tapper (spec: ui/tempo-tapper.md §8): the metronome's Tick,
@@ -1810,6 +1835,7 @@ impl Engine {
         self.inst_tail = old.inst_tail;
         self.awake = old.awake;
         (self.held, self.fade_out, self.fade_in, self.fade_len) = (old.held, old.fade_out, old.fade_in, old.fade_len);
+        (self.count_in, self.count_in_len) = (old.count_in, old.count_in_len);
         self.inst_offs = std::mem::take(&mut old.inst_offs);
         self.inst_offs.retain(|o| o.1 < n);
         self.inst_shapes = std::mem::take(&mut old.inst_shapes);
@@ -2081,6 +2107,9 @@ impl Engine {
         if self.held {
             return self.render_held();
         }
+        if self.count_in > 0 {
+            return self.render_count_in();
+        }
         // A looping engine starts again at tick 0 when the pattern is over; voices and effects carry on.
         if self.looping && self.end_tick > 0 && self.tick >= self.end_tick {
             self.wrap();
@@ -2109,9 +2138,9 @@ impl Engine {
         }
         // The metronome's click enters the master track (spec: ui/metronome.md §4): live playback only, and no new
         // click once a song is over.
+        let beat = self.beat_ticks();
         if let Some(m) = self.metronome.as_mut().filter(|_| !self.exporting && !self.live_only) {
             let start = self.looping || tick < self.end_tick;
-            let beat = (u32::from(self.ppq) * u32::from(self.steps) / 4).max(1);
             m.tick(tick, beat, self.beats_per_accent, start, &mut self.bus[0][..len * 2]);
         }
         if !self.exporting {
@@ -2167,6 +2196,48 @@ impl Engine {
             let limit = (TAIL_LIMIT_SECONDS * f64::from(self.rate) / self.clock.samples_per_tick()) as u64;
             if quiet || tick >= self.end_tick + limit {
                 self.tail_done = true;
+            }
+        }
+    }
+
+    /// A tick of the recording count-in (`set_count_in`): handed out at the held position like a paused tick, but live
+    /// notes and voices still ringing sound, and the metronome counts in.
+    fn render_count_in(&mut self) {
+        // Whole ticks of the count-in's own clock, so its beats fall on time.
+        let done = self.count_in_len - self.count_in;
+        let at = |t: u64| Clock::frame_of_tick(self.rate, self.ppq, self.tick_tempo(), t);
+        let len = (at(done + 1) - at(done)).max(1) as usize;
+        let mut song = self.transport_at(self.frame);
+        song.playing = false;
+        for b in &mut self.bus {
+            b.clear();
+            b.resize(len * 2, 0.0);
+        }
+        let channels = &self.channels;
+        let bus = &mut self.bus;
+        self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, 0, len));
+        self.render_instruments(len, &song);
+        for ch in &mut self.channels {
+            ch.advance(len as u32);
+        }
+        let beat = self.beat_ticks();
+        if let Some(m) = self.metronome.as_mut() {
+            m.count_in(done, beat, self.beats_per_accent, &mut self.bus[0][..len * 2]);
+        }
+        self.count_in -= 1;
+        self.mix(len, &song);
+        self.out.clear();
+        self.out.extend_from_slice(&self.bus[0][..len * 2]);
+        self.out_pos = 0;
+        self.out_tick = self.tick;
+        self.out_frame = self.frame;
+        self.out_held = true;
+        let mut ramp = self.main_glide.block(self.main_gain, len, os_dsp::glide::engine_limit(self.rate));
+        if !(ramp.is_flat() && ramp.first() == 1.0) {
+            for f in self.out.chunks_exact_mut(2) {
+                let g = ramp.next();
+                f[0] *= g;
+                f[1] *= g;
             }
         }
     }
@@ -5722,6 +5793,40 @@ mod tests {
         }
         let accented: Vec<bool> = on.iter().map(|o| o.1 > on[1].1 * 1.3).collect();
         assert_eq!(accented, [true, false, false, true, false, false, true]);
+    }
+
+    // spec: ui/recording.md §3
+    #[test]
+    fn a_count_in_holds_the_position_and_clicks_with_the_metronome_off() {
+        // 3/4, one bar: three clicks (accented, plain, plain) while the position stays at 0, then playback moves on
+        // and, the switch being off, clicks no more.
+        let mut p = project(vec![], vec![]);
+        p.bar = Some((3, 4));
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::new(None);
+        let rate = 48000;
+        let mut e = Engine::new(&p, &mut lib, rate, PlayMode::Pattern(1));
+        e.set_looping(true);
+        let off = metronome_on();
+        off.set_on(false);
+        e.set_metronome(off);
+        e.set_count_in(1);
+        assert_eq!(e.counting_in(), 3 * 96);
+        let mut out = vec![0.0; 2 * rate as usize];
+        e.process(&mut out);
+        assert_eq!(e.tick_position(), 0.0, "held through the count-in");
+        let mut more = vec![0.0; 2 * rate as usize * 2];
+        e.process(&mut more);
+        out.extend(more);
+        assert_eq!(e.counting_in(), 0);
+        assert!(e.tick_position() > 0.0, "playing again");
+        let on = click_onsets(&out, rate);
+        let beats: Vec<u64> = (0..3).map(|b| crate::clock::Clock::frame_of_tick(rate, 96, 130.0, 96 * b)).collect();
+        assert_eq!(on.len(), 3, "{on:?}");
+        for ((f, _), b) in on.iter().zip(&beats) {
+            assert!(f.abs_diff(*b) <= 3, "{f} vs beat {b}");
+        }
+        assert!(on[0].1 > on[1].1 * 1.3 && on[1].1 < on[2].1 * 1.3);
     }
 
     #[test]

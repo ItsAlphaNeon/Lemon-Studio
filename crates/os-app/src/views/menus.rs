@@ -84,6 +84,21 @@ pub const FILE_EXIT: usize = 16;
 pub const OPT_THEME: usize = 5;
 /// OPTIONS > Metronome (spec: ui/metronome.md §1).
 pub const METRONOME_LABEL: &str = "Metronome";
+/// OPTIONS > the record options (spec: ui/recording.md §3).
+pub const PRECOUNT_LABEL: &str = "Recording precount";
+pub const WAIT_LABEL: &str = "Start on input";
+pub const BLEND_LABEL: &str = "Blend recorded notes";
+
+/// The record option an OPTIONS entry switches.
+pub fn record_option(label: &str) -> Option<crate::record::Opt> {
+    use crate::record::Opt;
+    match label {
+        PRECOUNT_LABEL => Some(Opt::Precount),
+        WAIT_LABEL => Some(Opt::Wait),
+        BLEND_LABEL => Some(Opt::Blend),
+        _ => None,
+    }
+}
 /// OPTIONS > Auto scrolling (spec: ui/auto-scrolling.md §1).
 pub const AUTOSCROLL_LABEL: &str = "Auto scrolling";
 /// OPTIONS > Enable groups (spec: ui/enable-groups.md §1).
@@ -245,9 +260,9 @@ const OPTIONS: &[Item] = &[
     head("Switches"),
     it("Typing keyboard to piano", "Ctrl+T").on().tick(),
     it(METRONOME_LABEL, "Ctrl+M").on().tick(),
-    it("Recording precount", "Ctrl+P").tick(),
-    it("Start on input", "Ctrl+I").tick(),
-    it("Blend recorded notes", "Ctrl+B").tick(),
+    it(PRECOUNT_LABEL, "Ctrl+P").on().tick(),
+    it(WAIT_LABEL, "Ctrl+I").on().tick(),
+    it(BLEND_LABEL, "Ctrl+B").on().tick(),
     it(STEP_EDIT_LABEL, "Ctrl+E").on().tick(),
     it("Loop record", "").tick(),
     it(AUTOSCROLL_LABEL, "").on().tick(),
@@ -475,6 +490,7 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
         (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
         (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
         (Mark::Check(_), _) if item.label == METRONOME_LABEL => Mark::Check(crate::metronome::on()),
+        (Mark::Check(_), _) if let Some(o) = record_option(item.label) => Mark::Check(o.on()),
         (Mark::Check(_), _) if item.label == AUTOSCROLL_LABEL => Mark::Check(crate::autoscroll::on()),
         (Mark::Check(_), _) if item.label == GROUPS_LABEL => Mark::Check(crate::enable_groups::on()),
         (Mark::Check(_), _) if item.label == STEP_EDIT_LABEL => Mark::Check(crate::step_edit::on()),

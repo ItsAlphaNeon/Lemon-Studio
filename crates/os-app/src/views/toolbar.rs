@@ -284,7 +284,12 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         }
         let g = Rect::new(r.x + 8.0, r.y + 8.0, r.w - 16.0, r.h - 16.0);
         let c = if on { t.on_glyph } else { t.glyph };
-        if icon == Icon::Play && on {
+        if icon == Icon::Play && s.rec.waiting {
+            // Waiting for input (spec: ui/recording.md §3): three dots.
+            for k in [-1.0, 0.0, 1.0] {
+                ui.c.fill_circle(g.cx() + k * g.w * 0.32, g.cy(), (g.w * 0.1).max(1.5), c);
+            }
+        } else if icon == Icon::Play && on {
             // Pause: two bars.
             let (w, h) = (g.w * 0.22, g.h * 0.7);
             let y = g.cy() - h / 2.0;
@@ -351,20 +356,19 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         return;
     }
     tool_button(ui, btn(580.0, 4.0), Icon::Metronome, crate::metronome::on(), Action::Metronome, "Metronome (Ctrl+M) - right-click for the sound");
-    for (i, (icon, hint)) in [
-        (Icon::WaitInput, "Wait for input to start recording"),
-        (Icon::Countdown, "Countdown before recording"),
-        (Icon::Blend, "Blend recording"),
-        (Icon::LoopRecord, "Loop recording"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if btn(613.0 + 33.0 * i as f32, 4.0).right() > fit {
+    // Start on input, Recording precount, Blend (spec: ui/recording.md §3); Loop recording is not built yet.
+    use crate::record::Opt;
+    for (i, (icon, opt)) in [(Icon::WaitInput, Opt::Wait), (Icon::Countdown, Opt::Precount), (Icon::Blend, Opt::Blend)].into_iter().enumerate() {
+        let r = btn(613.0 + 33.0 * i as f32, 4.0);
+        if r.right() > fit {
             return;
         }
-        tool_button(ui, btn(613.0 + 33.0 * i as f32, 4.0), icon, false, Action::Placeholder(hint), hint);
+        tool_button(ui, r, icon, opt.on(), Action::RecOpt(opt), crate::record::option_hint(opt));
     }
+    if btn(712.0, 4.0).right() > fit {
+        return;
+    }
+    tool_button(ui, btn(712.0, 4.0), Icon::LoopRecord, false, Action::Placeholder("Loop recording"), "Loop recording");
 
     // Song position (B:S:T, or M:S:CS: a click toggles, right-click opens the mode menu).
     let tp = Rect::span(745.0, 873.0, 4.0, 36.0);
@@ -398,13 +402,18 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
     let bar_x = (step_x - 8.0 - bw).max(tp.x + 2.0);
     ui.c.push_clip(tp.inset(1.0));
     let g = digits;
-    ui.c.text(big, bar_x, -3.0, g, &bar_s);
-    ui.c.fill_rect(Rect::new(step_x - 5.5, 20.0, 2.0, 2.5), g);
-    ui.c.fill_rect(Rect::new(step_x - 5.5, 30.0, 2.0, 2.5), g);
-    ui.c.text(big, step_x, -3.0, g, &step_s);
-    ui.c.fill_rect(Rect::new(tick_x - 5.0, 21.0, 2.0, 2.0), g);
-    ui.c.fill_rect(Rect::new(tick_x - 5.0, 29.5, 2.0, 2.0), g);
-    ui.c.text(small, tick_x, 9.0, g, &tick_s);
+    if let Some(c) = s.rec.count.filter(|c| c.left() > 0) {
+        // A recording count-in (spec: ui/recording.md §3): the beats left.
+        ui.c.text_center(Font::light(22, 8), Rect::new(tp.x, tp.y + 2.0, tp.w, tp.h - 2.0), g, &format!("REC IN {}", c.left()));
+    } else {
+        ui.c.text(big, bar_x, -3.0, g, &bar_s);
+        ui.c.fill_rect(Rect::new(step_x - 5.5, 20.0, 2.0, 2.5), g);
+        ui.c.fill_rect(Rect::new(step_x - 5.5, 30.0, 2.0, 2.5), g);
+        ui.c.text(big, step_x, -3.0, g, &step_s);
+        ui.c.fill_rect(Rect::new(tick_x - 5.0, 21.0, 2.0, 2.0), g);
+        ui.c.fill_rect(Rect::new(tick_x - 5.0, 29.5, 2.0, 2.0), g);
+        ui.c.text(small, tick_x, 9.0, g, &tick_s);
+    }
     ui.c.pop_clip();
     let label = s.clock.label();
     ui.c.text_right(Font::condensed(7, 3).bold(), 871.0, 5.0, if lemon { t.text_dim } else { t.glyph.shade(-0.1) }, label);

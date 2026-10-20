@@ -266,12 +266,14 @@ pub(crate) struct Starts {
     /// "Reset plugins on transport": the start resets the hosted effects too (their delay lines and tails), not only
     /// the instruments.
     pub(crate) reset: bool,
+    /// Bars of a recording count-in before the position moves (spec: ui/recording.md §3); 0: none.
+    pub(crate) count_in: u32,
 }
 
 impl Starts {
     pub(crate) fn from_prefs() -> Starts {
         use crate::prefs::{check, PLAY_TRUNCATED_ON_TRANSPORT, RESET_PLUGINS_ON_TRANSPORT};
-        Starts { truncated: check(&PLAY_TRUNCATED_ON_TRANSPORT), reset: check(&RESET_PLUGINS_ON_TRANSPORT) }
+        Starts { truncated: check(&PLAY_TRUNCATED_ON_TRANSPORT), reset: check(&RESET_PLUGINS_ON_TRANSPORT), count_in: 0 }
     }
 }
 
@@ -399,6 +401,12 @@ impl Transport {
     /// Start (or restart) playback from `start_tick`; replaces whatever is playing or paused. The transport settings
     /// (`Starts`) are read now.
     pub fn play(&self, project: &Project, mode: PlayMode, start_tick: f64) {
+        self.play_counted(project, mode, start_tick, 0);
+    }
+
+    /// `play`, after a recording count-in of `bars` bars (spec: ui/recording.md §3): the position holds at
+    /// `start_tick` while the metronome counts in.
+    pub fn play_counted(&self, project: &Project, mode: PlayMode, start_tick: f64, bars: u32) {
         if let Ok(mut slot) = self.latest.lock() {
             *slot = None;
         }
@@ -406,7 +414,8 @@ impl Transport {
         self.shared.song.store(matches!(mode, PlayMode::Song), Ordering::Relaxed);
         self.shared.rewind(start_tick);
         self.shared.state.store(PLAYING, Ordering::Release);
-        let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode, start_tick, generation, Starts::from_prefs()));
+        let starts = Starts { count_in: bars, ..Starts::from_prefs() };
+        let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode, start_tick, generation, starts));
     }
 
     /// Replace the playing project, continuing from the current position.
@@ -1167,7 +1176,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 reset_pending = false;
                 listen_retry = true;
                 live_project = Some((*project).clone());
-                let at = At { tick: start, paused: false, truncated: starts.truncated };
+                let at = At { tick: start, paused: false, truncated: starts.truncated, count_in: starts.count_in };
                 match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at, &mut device) {
                     Ok(s) => session = Some(s),
                     Err(e) => {
@@ -1194,7 +1203,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     (l.next, l.tries) = (Instant::now(), 0);
                 }
                 if let Some(old) = session.take() {
-                    let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: old.paused(), truncated: old.truncated };
+                    let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: old.paused(), truncated: old.truncated, count_in: 0 };
                     let (project, mode, generation) = (old.project.clone(), old.mode, old.generation);
                     drop(old);
                     reset_instruments(&inst);
@@ -1261,7 +1270,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 // The playback (paused by the app) is held where it was heard; every stream fades out and closes, then
                 // the instruments are reset as after Stop (without the rewind: the transport is paused).
                 if let Some(s) = session.take() {
-                    let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: true, truncated: s.truncated };
+                    let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: true, truncated: s.truncated, count_in: 0 };
                     held = Some((s.project.clone(), s.mode, s.generation, at));
                     retire(s, &mut closing);
                     reset_pending = true;
@@ -1338,7 +1347,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         if lost.is_none() {
             if let Some((name, why)) = device.failure() {
                 if let Some(s) = session.take() {
-                    let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: s.paused(), truncated: s.truncated };
+                    let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: s.paused(), truncated: s.truncated, count_in: 0 };
                     held = Some((s.project.clone(), s.mode, s.generation, at));
                 }
                 live = None;
@@ -1531,6 +1540,8 @@ struct At {
     tick: f64,
     paused: bool,
     truncated: bool,
+    /// Bars of a recording count-in (`Starts::count_in`).
+    count_in: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1613,6 +1624,9 @@ impl Session {
                 let tempo = project.tick_tempo(project.tempo.unwrap_or(140.0));
                 shared.position.store(os_engine::laws::tick_to_frame(at.tick, project.ppq.max(1), tempo, rate), Ordering::Relaxed);
             }
+        }
+        if song && at.count_in > 0 {
+            e.set_count_in(at.count_in);
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));

@@ -27,6 +27,12 @@ pub enum Opt {
     DisarmOnStop,
     QuantizeStart,
     QuantizeEnd,
+    /// The record options (spec §3): Start on input and its right-click checks, Recording precount, Blend.
+    Wait,
+    WaitFilter,
+    WaitArmed,
+    Precount,
+    Blend,
 }
 
 impl Opt {
@@ -38,6 +44,11 @@ impl Opt {
             Opt::DisarmOnStop => ("rec_disarm_stop", false),
             Opt::QuantizeStart => ("rec_q_start", true),
             Opt::QuantizeEnd => ("rec_q_end", true),
+            Opt::Wait => ("rec_wait", false),
+            Opt::WaitFilter => ("rec_wait_filter", true),
+            Opt::WaitArmed => ("rec_wait_armed", false),
+            Opt::Precount => ("rec_precount", false),
+            Opt::Blend => ("rec_blend", false),
         }
     }
 
@@ -62,6 +73,40 @@ pub fn hint() -> String {
         (false, false) => "nothing",
     };
     format!("Record ({what}) - right-click for options")
+}
+
+/// Recording precount's length in bars: 1 or 2 (spec §3), in `settings.txt`.
+pub fn precount_bars() -> u32 {
+    if crate::settings_file::get("rec_precount_bars").as_deref() == Some("2") { 2 } else { 1 }
+}
+
+pub fn set_precount_bars(bars: u32) {
+    crate::settings_file::write("rec_precount_bars", if bars == 2 { "2" } else { "1" });
+}
+
+/// The three option buttons' hints (spec §3).
+pub fn option_hint(o: Opt) -> &'static str {
+    match o {
+        Opt::Wait => "Start on input (Ctrl+I) - right-click for options",
+        Opt::Precount => "Recording precount (Ctrl+P) - right-click for the length",
+        _ => "Blend recorded notes (Ctrl+B)",
+    }
+}
+
+/// A recording count-in under way (spec §3): when it started, a beat's length in seconds, its beats.
+#[derive(Debug, Clone, Copy)]
+pub struct CountIn {
+    from: std::time::Instant,
+    beat: f64,
+    beats: u32,
+}
+
+impl CountIn {
+    /// Beats left (the clock's "REC IN n"); 0 once over.
+    pub fn left(&self) -> u32 {
+        let done = (self.from.elapsed().as_secs_f64() / self.beat.max(1e-6)).floor();
+        self.beats.saturating_sub(done.min(f64::from(u32::MAX)) as u32)
+    }
 }
 
 /// A note held while recording: where it started, in the pattern and in the running playback's ticks.
@@ -97,6 +142,12 @@ pub struct Rec {
     /// The playback position at the last poll while playing: where held notes end when playback stops.
     last: Option<f64>,
     was_live: bool,
+    /// Start on input: Play was pressed and playback waits for the first note (spec §3).
+    pub waiting: bool,
+    /// The count-in of Recording precount, while it lasts (spec §3).
+    pub count: Option<CountIn>,
+    /// The count-in's beats left as last drawn.
+    shown: u32,
 }
 
 impl Rec {
@@ -140,10 +191,86 @@ impl App {
             self.state.rec.armed = false;
         } else {
             self.state.rec.armed = true;
-            if !self.transport.playing() && Opt::StartsPlayback.on() {
-                self.start_playback();
+            if !self.transport.playing() && !self.state.rec.waiting && Opt::StartsPlayback.on() {
+                self.play_from_stop();
             }
         }
+        self.invalidate();
+    }
+
+    /// Play from stopped (the Play button, Space, Recording starts playback), with the record options (spec §3):
+    /// Start on input waits for the first note instead (Play again cancels the wait); Recording precount, armed,
+    /// counts in first.
+    pub(crate) fn play_from_stop(&mut self) {
+        let r = &mut self.state.rec;
+        if r.waiting {
+            r.waiting = false;
+        } else if Opt::Wait.on() && (r.armed || !Opt::WaitArmed.on()) {
+            r.waiting = true;
+        } else {
+            let bars = if r.armed && Opt::Precount.on() { precount_bars() } else { 0 };
+            self.start_playback_counted(bars);
+            if bars > 0 && self.transport.playing() {
+                let p = &self.state.project;
+                let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+                let beat = f64::from(p.beat_ticks()) / f64::from(p.ppq.max(1)) * 60.0 / tempo;
+                let beats = bars * u32::from(p.bar().0.max(1));
+                self.state.rec.count = Some(CountIn { from: std::time::Instant::now(), beat, beats });
+                self.state.rec.shown = beats;
+            }
+        }
+        self.invalidate();
+    }
+
+    /// Stop ends a wait or a count-in.
+    pub(crate) fn record_stopped(&mut self) {
+        self.state.rec.waiting = false;
+        self.state.rec.count = None;
+    }
+
+    /// Start on input: the first input that counts starts playback from the start (spec §3). `what` is what the input
+    /// is (notes, automation); with Respect recording filter, the filter must record it.
+    fn start_on_input(&mut self, what: Opt) {
+        if self.state.rec.waiting && (!Opt::WaitFilter.on() || what.on()) {
+            self.state.rec.waiting = false;
+            self.start_playback();
+            self.invalidate();
+        }
+    }
+
+    /// The option buttons' right-click menus (spec §3): Start on input's checks, Recording precount's length.
+    pub(crate) fn record_option_menu(&mut self, o: Opt, x: f32, y: f32) {
+        use crate::playlist::{Cmd, Mark, PItem, Popup};
+        let items = match o {
+            Opt::Wait => vec![
+                PItem::new("Respect recording filter", Cmd::Record(Opt::WaitFilter)).mark(Mark::Check(Opt::WaitFilter.on())),
+                PItem::new("Only when recording", Cmd::Record(Opt::WaitArmed)).mark(Mark::Check(Opt::WaitArmed.on())),
+            ],
+            Opt::Precount => {
+                let bars = precount_bars();
+                vec![
+                    PItem::head("Precount duration"),
+                    PItem::new("1 bar", Cmd::RecPrecountBars(1)).mark(Mark::Radio(bars == 1)),
+                    PItem::new("2 bars", Cmd::RecPrecountBars(2)).mark(Mark::Radio(bars == 2)),
+                ]
+            }
+            _ => return,
+        };
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+    }
+
+    /// An option switch (the buttons, OPTIONS menu, Ctrl+I / Ctrl+P / Ctrl+B); turning Start on input off ends a wait.
+    pub(crate) fn toggle_record_option(&mut self, o: Opt) {
+        let on = o.toggle();
+        if o == Opt::Wait && !on {
+            self.state.rec.waiting = false;
+        }
+        let name = match o {
+            Opt::Wait => "Start on input",
+            Opt::Precount => "Recording precount",
+            _ => "Blend recorded notes",
+        };
+        self.state.message = Some(format!("{name} {}", if on { "on" } else { "off" }));
         self.invalidate();
     }
 
@@ -169,14 +296,19 @@ impl App {
     }
 
     /// Whether something played now is recorded: armed, `what` on in the filter, playing and not paused.
+    /// Nothing is recorded during a count-in (spec §3).
     fn rec_live(&self, what: Opt) -> bool {
-        self.state.rec.armed && what.on() && self.transport.playing() && !self.transport.paused()
+        let r = &self.state.rec;
+        r.armed && r.count.is_none() && what.on() && self.transport.playing() && !self.transport.paused()
     }
 
     /// A channel's volume or pan knob moved: its value goes into the current pattern as a control point at the playback
     /// position while recording automation (spec §2 Taking automation).
     pub(crate) fn record_knob(&mut self, id: KnobId) {
         use os_model::ControlPoint;
+        if matches!(id, KnobId::ChanVol(_) | KnobId::ChanPan(_)) {
+            self.start_on_input(Opt::Automation);
+        }
         if !self.rec_live(Opt::Automation) {
             return;
         }
@@ -197,7 +329,7 @@ impl App {
         let last = take.controls.iter().find(|c| c.0 == kind).map(|c| c.1);
         take.controls.retain(|c| c.0 != kind);
         take.controls.push((kind, tick));
-        if let Some(last) = last.filter(|&l| l < tick) {
+        if let Some(last) = last.filter(|&l| l < tick && !Opt::Blend.on()) {
             let p = crate::piano::pattern_mut(s);
             p.controls.retain(|c| !(c.kind == kind && c.position > last && c.position < tick));
         }
@@ -208,6 +340,7 @@ impl App {
     /// A note went down (typing keyboard, MIDI, Touch controller): recorded from the playback position while
     /// recording (spec §2 Taking notes).
     pub(crate) fn record_down(&mut self, src: Src, key: u16, velocity: u8) {
+        self.start_on_input(Opt::Notes);
         if !self.rec_live(Opt::Notes) {
             return;
         }
@@ -290,6 +423,8 @@ impl App {
         take.new.push(note);
         let (lo, hi) = take.span.map_or((a, b), |(lo, hi)| (lo.min(a), hi.max(b)));
         take.span = Some((lo, hi));
+        // Blend recorded notes: the earlier notes stay (spec §3).
+        let (lo, hi) = if Opt::Blend.on() { (0, 0) } else { (lo, hi) };
         let notes: Vec<Note> = take
             .before
             .iter()
@@ -320,6 +455,22 @@ impl App {
     /// Each tick: notes the playback position; when playback stops or pauses, or the pattern changes, the take ends;
     /// a stop disarms when "Disarm on stop" is on.
     pub(crate) fn record_tick(&mut self) {
+        // A count-in ends after its beats (or with the playback); the clock shows each beat left. A wait ends when
+        // something else starts playback.
+        if let Some(c) = self.state.rec.count {
+            let left = c.left();
+            if left == 0 || !self.transport.playing() || self.transport.paused() {
+                self.state.rec.count = None;
+                self.invalidate();
+            } else if left != self.state.rec.shown {
+                self.state.rec.shown = left;
+                self.invalidate();
+            }
+        }
+        if self.state.rec.waiting && self.transport.playing() {
+            self.state.rec.waiting = false;
+            self.invalidate();
+        }
         let live = self.transport.playing() && !self.transport.paused();
         if live {
             self.state.rec.last = Some(self.transport.tick());
@@ -538,5 +689,118 @@ mod tests {
         stop(&mut app);
         assert!(!app.state.rec.armed);
         assert_eq!(notes(&app), [(0, 24, 0)], "only the recorded note: step edit wrote nothing while playing");
+    }
+
+    /// The option buttons switch their settings and say so in their hints; Start on input and Recording precount have
+    /// right-click menus; Ctrl+I / Ctrl+P / Ctrl+B and the OPTIONS entries switch the same settings (spec §3).
+    #[test]
+    fn option_buttons_menus_and_keys() {
+        use winit::keyboard::{Key, SmolStr};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = app();
+        app.paint(&mut c, None);
+        for o in [Opt::Wait, Opt::Precount, Opt::Blend] {
+            let hint = app.hits.iter().rev().find(|h| h.action == Action::RecOpt(o)).map(|h| h.hint.to_string());
+            assert_eq!(hint.as_deref(), Some(option_hint(o)));
+        }
+        let b = hit_rect(&app, &Action::RecOpt(Opt::Blend));
+        app.mouse_move(b.cx(), b.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert!(Opt::Blend.on());
+        let p = hit_rect(&app, &Action::RecOpt(Opt::Precount));
+        app.mouse_move(p.cx(), p.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        let Some(Popup { items, .. }) = app.state.playlist.popup.take() else { panic!("no menu") };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(labels, ["Precount duration", "1 bar", "2 bars"]);
+        crate::playlist::run(&mut app, Cmd::RecPrecountBars(2));
+        assert_eq!(precount_bars(), 2);
+        let w = hit_rect(&app, &Action::RecOpt(Opt::Wait));
+        app.mouse_move(w.cx(), w.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        let Some(Popup { items, .. }) = app.state.playlist.popup.take() else { panic!("no menu") };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(labels, ["Respect recording filter", "Only when recording"]);
+        let ctrl = |app: &mut App, ch: &str| app.key(&Key::Character(SmolStr::new(ch)), true, false);
+        // A focused playlist keeps Ctrl+P (Performance mode) and Ctrl+B (duplicate); elsewhere they switch the options.
+        assert!(app.pl_focus());
+        ctrl(&mut app, "i");
+        ctrl(&mut app, "p");
+        ctrl(&mut app, "b");
+        assert_eq!((Opt::Wait.on(), Opt::Precount.on(), Opt::Blend.on()), (true, false, true));
+        app.state.z.retain(|&w| w != crate::app::Win::Playlist && w != crate::app::Win::PianoRoll);
+        ctrl(&mut app, "p");
+        ctrl(&mut app, "b");
+        assert_eq!((Opt::Wait.on(), Opt::Precount.on(), Opt::Blend.on()), (true, true, false));
+        assert_eq!(crate::views::menus::record_option("Start on input"), Some(Opt::Wait));
+    }
+
+    /// Start on input: Play waits; the first note starts playback from the start and is recorded there; Play again
+    /// cancels a wait; with Respect recording filter and Notes off, a note does not start it (spec §3).
+    #[test]
+    fn start_on_input() {
+        let mut app = app();
+        Opt::Wait.toggle();
+        app.toggle_record();
+        app.act(Action::Play);
+        assert!(app.state.rec.waiting && !app.transport.playing());
+        app.act(Action::Play);
+        assert!(!app.state.rec.waiting, "Play again cancels");
+        app.act(Action::Play);
+        Opt::Notes.toggle();
+        assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
+        assert!(app.typing_key(KeyCode::KeyZ, false, false, false));
+        assert!(app.state.rec.waiting, "Notes are off in the filter");
+        Opt::Notes.toggle();
+        assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
+        assert!(!app.state.rec.waiting && app.transport.playing() && app.transport.tick() == 0.0);
+        assert!(app.state.rec.recording(), "the note that started playback is recorded");
+        key(&mut app, KeyCode::KeyZ, false, 48.0, false);
+        stop(&mut app);
+        assert_eq!(notes(&app), [(0, 48, 0)]);
+        // Only when recording: disarmed, Play plays at once.
+        Opt::WaitArmed.toggle();
+        app.toggle_record();
+        app.act(Action::Play);
+        assert!(!app.state.rec.waiting && app.transport.playing());
+        app.act(Action::Stop);
+    }
+
+    /// Recording precount, armed: Play counts in (the clock's beats left) and nothing is recorded until it is over;
+    /// disarmed, Play plays at once (spec §3).
+    #[test]
+    fn precount_counts_in_when_armed() {
+        let mut app = app();
+        Opt::Precount.toggle();
+        app.act(Action::Play);
+        assert!(app.state.rec.count.is_none(), "disarmed: no count-in");
+        app.act(Action::Stop);
+        app.toggle_record();
+        app.act(Action::Play);
+        let beats = u32::from(app.state.project.bar().0);
+        assert_eq!(app.state.rec.count.map(|c| c.left()), Some(beats));
+        assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
+        assert!(app.typing_key(KeyCode::KeyZ, false, false, false));
+        assert!(!app.state.rec.recording(), "not during the count-in");
+        app.act(Action::Stop);
+        assert!(app.state.rec.count.is_none(), "Stop ends it");
+    }
+
+    /// Blend recorded notes: a second take keeps the notes it overlaps (spec §3).
+    #[test]
+    fn blend_keeps_earlier_notes() {
+        let mut app = app();
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyZ, true, 0.0, false);
+        key(&mut app, KeyCode::KeyZ, false, 96.0, false);
+        stop(&mut app);
+        Opt::Blend.toggle();
+        key(&mut app, KeyCode::KeyX, true, 0.0, false);
+        key(&mut app, KeyCode::KeyX, false, 48.0, false);
+        stop(&mut app);
+        assert_eq!(notes(&app), [(0, 48, 0), (0, 96, 0)]);
     }
 }

@@ -163,7 +163,10 @@ Not yet: Align all channel editors, Arrange windows.
   controller go into the current pattern, quantized to the main snap; a take replaces the notes that start inside it
   and is one undo step; in SONG mode a clip of the pattern is placed where none plays. Right-click for the options
 - Automation recording: channel volume and pan knob moves while recording become the pattern's control points
-- Not yet: audio recording, Wait for input, Countdown, Blend, Loop recording
+- Record options (toolbar, OPTIONS, Ctrl+I / Ctrl+P / Ctrl+B): Start on input (Play waits for the first note, which
+  is recorded at the start), Recording precount (1 or 2 bars of metronome count-in, "REC IN n" on the clock) and
+  Blend (a take keeps the notes it overlaps)
+- Not yet: audio recording, Loop recording
 
 ## 🚧 Undo
 

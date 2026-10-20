@@ -135,6 +135,8 @@ pub enum Action {
     Metronome,
     /// The Record button (spec: ui/recording.md §2); right-click for its options.
     Record,
+    /// A record option's switch: Start on input, Recording precount, Blend (spec: ui/recording.md §3).
+    RecOpt(crate::record::Opt),
     /// Auto scrolling switch (toolbar, OPTIONS menu); right-click on the button for continuous scrolling.
     AutoScroll,
     /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G).
@@ -5067,6 +5069,10 @@ impl App {
                 self.record_menu(x, y);
                 return self.invalidate();
             }
+            Some(Action::RecOpt(o)) => {
+                self.record_option_menu(*o, x, y);
+                return self.invalidate();
+            }
             Some(Action::PianoTarget) => {
                 // spec: ui/piano-target-channel.md §4
                 let row = self.state.selected_channel;
@@ -6039,6 +6045,11 @@ impl App {
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("t") => self.toggle_typing(),
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("m") => self.toggle_metronome(),
+            // The record options (spec: ui/recording.md §3); a focused playlist or the piano roll took Ctrl+B / Ctrl+P
+            // before this.
+            Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("i") => self.toggle_record_option(crate::record::Opt::Wait),
+            Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("p") => self.toggle_record_option(crate::record::Opt::Precount),
+            Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("b") => self.toggle_record_option(crate::record::Opt::Blend),
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("e") => self.toggle_step_edit(),
             // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
             // tools (until a typing keyboard exists, which will take them).
@@ -6104,6 +6115,11 @@ impl App {
     /// Start playback in the mode the PAT / SONG switch shows. Pattern mode loops the current pattern from the piano
     /// roll's play-start marker (§10); song mode plays the playlist from its start and stops at its end.
     pub(crate) fn start_playback(&mut self) {
+        self.start_playback_counted(0);
+    }
+
+    /// `start_playback` after a recording count-in of `bars` bars (spec: ui/recording.md §3).
+    pub(crate) fn start_playback_counted(&mut self, bars: u32) {
         let song = self.state.song_mode;
         if song && self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
             self.state.message = Some("The playlist is empty: nothing to play in SONG mode".into());
@@ -6117,7 +6133,7 @@ impl App {
         }
         let p = crate::rack::play_project(&self.state);
         let start = if song { f64::from(self.state.playlist.pos) } else { f64::from(self.state.piano.marker) };
-        self.transport.play(&p, self.play_mode(), start);
+        self.transport.play_counted(&p, self.play_mode(), start, bars);
     }
 
     fn play_mode(&self) -> PlayMode {
@@ -6617,6 +6633,7 @@ impl App {
             Action::Typing => self.toggle_typing(),
             Action::Metronome => self.toggle_metronome(),
             Action::Record => self.toggle_record(),
+            Action::RecOpt(o) => self.toggle_record_option(o),
             Action::AutoScroll => self.toggle_autoscroll(),
             Action::EnableGroups => self.toggle_groups(),
             Action::StepEdit => self.toggle_step_edit(),
@@ -6651,12 +6668,13 @@ impl App {
                     // Play toggles pause (the position is held in place); Stop rewinds.
                     TransportState::Playing => self.transport.pause(),
                     TransportState::Paused => self.transport.resume(),
-                    TransportState::Stopped => self.start_playback(),
+                    TransportState::Stopped => self.play_from_stop(),
                 }
             }
             Action::Stop => {
                 self.perf_transport();
                 self.transport.stop();
+                self.record_stopped();
                 // Stop rewinds: the song position slider goes back to the start (of the time selection, if any).
                 let s = &mut self.state;
                 if s.song_mode {
@@ -7347,6 +7365,7 @@ impl App {
             (VIEW, i) if item_at(VIEW, i).is_some_and(|it| it.label == INTO_WORKSPACE_LABEL) => self.move_into_workspace(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::METRONOME_LABEL) => self.toggle_metronome(),
+            (m, i) if let Some(o) = item_at(m, i).and_then(|it| views::menus::record_option(it.label)) => self.toggle_record_option(o),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::AUTOSCROLL_LABEL) => self.toggle_autoscroll(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::GROUPS_LABEL) => self.toggle_groups(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::STEP_EDIT_LABEL) => self.toggle_step_edit(),
@@ -8649,7 +8668,7 @@ mod tests {
         use crate::views::settings::{SAct, AUDIO};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         assert_eq!((prefs::check(&TRUNCATED), prefs::check(&RESET)), (true, false), "the defaults");
-        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false });
+        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false, count_in: 0 });
         let mut app = App::new(None);
         app.open_settings(AUDIO);
         frame(&mut app, &mut c, None);
@@ -8660,13 +8679,13 @@ mod tests {
             assert_eq!(app.state.message.as_deref(), Some(said));
         }
         assert_eq!((prefs::check(&TRUNCATED), prefs::check(&RESET)), (false, true));
-        assert_eq!(Starts::from_prefs(), Starts { truncated: false, reset: true }, "the next start goes by them");
+        assert_eq!(Starts::from_prefs(), Starts { truncated: false, reset: true, count_in: 0 }, "the next start goes by them");
         // And back.
         for check in [&TRUNCATED, &RESET] {
             let r = hit_rect(&app, &Action::Settings(SAct::Check(check.label)));
             click(&mut app, &mut c, r);
         }
-        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false });
+        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false, count_in: 0 });
     }
 
     // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project"
