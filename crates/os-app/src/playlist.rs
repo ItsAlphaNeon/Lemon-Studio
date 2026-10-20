@@ -3352,9 +3352,11 @@ pub fn commit_edit(s: &mut State) {
         }
         EditTarget::MixerName(n) => {
             let def = if n == 0 { "Master".to_string() } else { format!("Insert {n}") };
-            if let Some(m) = s.project.mixer.iter_mut().find(|m| m.index == n) {
-                m.name = (!text.is_empty() && text != def).then_some(text);
-            }
+            crate::control::edit(s, "Mixer track name", crate::control::command::Region::Track(n), |s| {
+                if let Some(m) = s.project.mixer.iter_mut().find(|m| m.index == n) {
+                    m.name = (!text.is_empty() && text != def).then_some(text);
+                }
+            });
         }
         EditTarget::SlotName(t, k) => {
             if text.is_empty() {

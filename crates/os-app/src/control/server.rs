@@ -24,6 +24,8 @@ pub struct Request {
 pub struct Server {
     pub rx: Receiver<Request>,
     pub level: Level,
+    /// Serving without a window (`--serve`): there is no one to ask, so clients save the project themselves.
+    pub headless: bool,
     pub clients: std::collections::HashMap<u64, Client>,
     /// Where it listens, as the hint bar names it.
     pub at: String,
@@ -55,7 +57,7 @@ pub fn start(at: &str, level: Level, wake: fn()) -> std::io::Result<Server> {
     {
         shown = tcp(at, tx, wake)?;
     }
-    Ok(Server { rx, level, clients: Default::default(), at: shown })
+    Ok(Server { rx, level, headless: false, clients: Default::default(), at: shown })
 }
 
 fn tcp(at: &str, tx: Sender<Request>, wake: fn()) -> std::io::Result<String> {
@@ -101,12 +103,74 @@ impl crate::app::App {
         let Some(mut server) = self.rpc_server.take() else { return };
         while let Ok(req) = server.rx.try_recv() {
             let level = server.level;
-            let mut client = server.clients.remove(&req.conn).unwrap_or_else(|| Client { name: format!("Client {}", req.conn), level });
+            let headless = server.headless;
+            let mut client = server.clients.remove(&req.conn).unwrap_or_else(|| Client { name: format!("Client {}", req.conn), level, saves: headless });
             if let Some(a) = self.rpc_line(&mut client, &req.line) {
                 let _ = req.reply.send(a);
             }
             server.clients.insert(req.conn, client);
         }
         self.rpc_server = Some(server);
+    }
+}
+
+/// The control plane's command-line flags: `--control <where>` (listen beside the window), `--serve <where>` (listen
+/// without a window), `--control-level read|propose|edit` (what clients may do; edit by default).
+#[derive(Debug, Default, PartialEq)]
+pub struct Flags {
+    pub control: Option<String>,
+    pub serve: Option<String>,
+    pub level: Option<Level>,
+}
+
+impl Flags {
+    /// Takes the flags out of `args` (the rest stay: the project to open).
+    pub fn take(args: &mut Vec<String>) -> Result<Flags, String> {
+        let mut f = Flags::default();
+        let mut i = 0;
+        while i < args.len() {
+            let slot = match args[i].as_str() {
+                "--control" => &mut f.control,
+                "--serve" => &mut f.serve,
+                "--control-level" => {
+                    let v = args.get(i + 1).ok_or("--control-level needs read, propose or edit")?;
+                    f.level = Some(Level::parse(v).ok_or_else(|| format!("--control-level: {v} is not read, propose or edit"))?);
+                    args.drain(i..i + 2);
+                    continue;
+                }
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let v = args.get(i + 1).filter(|v| !v.starts_with("--")).ok_or_else(|| format!("{} needs a socket path or a port", args[i]))?;
+            *slot = Some(v.clone());
+            args.drain(i..i + 2);
+        }
+        if f.control.is_some() && f.serve.is_some() {
+            return Err("--control and --serve: one or the other".into());
+        }
+        Ok(f)
+    }
+}
+
+/// `--serve`: the app without a window, `project` opened, answering clients until the process is ended.
+pub fn serve_headless(at: &str, level: Level, project: Option<std::path::PathBuf>) -> ! {
+    let mut app = crate::app::App::new(project);
+    // The plugins of the last scan, as the window's app has them before its own scan.
+    app.load_plugins();
+    let mut server = match start(at, level, || {}) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Lemon Studio: could not listen at {at}: {e}");
+            std::process::exit(1);
+        }
+    };
+    server.headless = true;
+    eprintln!("Lemon Studio: serving the control plane at {} ({:?})", server.at, level);
+    app.rpc_server = Some(server);
+    loop {
+        app.tick();
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }

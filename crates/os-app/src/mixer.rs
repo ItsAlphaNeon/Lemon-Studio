@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -12,6 +13,12 @@ use std::collections::HashMap;
 use os_model::{MixerTrack, Rgb};
 
 use crate::app::{App, State};
+use crate::control::{command::Region, edit};
+
+/// Undo step names of the mixer's edits.
+const ROUTING: &str = "Mixer routing";
+const INSERT: &str = "Insert mixer track";
+const SLOT: &str = "Effect slot";
 use crate::knobs::KnobId;
 use crate::playlist::{Cmd, EditTarget, Mark, PItem, Popup};
 
@@ -257,40 +264,51 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
         }
         MHit::Led(n) => {
             select(s, n, ctrl);
-            let m = track_mut(s, n)?;
-            m.enabled = !m.enabled;
-            changed(s);
+            edit(s, "Mixer track mute", Region::Track(n), |s| {
+                let m = track_mut(s, n)?;
+                m.enabled = !m.enabled;
+                changed(s);
+                Some(())
+            })?;
             None
         }
         MHit::Polarity(n) => {
             select(s, n, ctrl);
-            let m = track_mut(s, n)?;
-            m.polarity = !m.polarity;
-            changed(s);
+            edit(s, "Mixer track polarity", Region::Track(n), |s| {
+                let m = track_mut(s, n)?;
+                m.polarity = !m.polarity;
+                changed(s);
+                Some(())
+            })?;
             None
         }
         MHit::Swap(n) => {
             select(s, n, ctrl);
-            let m = track_mut(s, n)?;
-            m.swap = !m.swap;
-            changed(s);
+            edit(s, "Mixer track swap", Region::Track(n), |s| {
+                let m = track_mut(s, n)?;
+                m.swap = !m.swap;
+                changed(s);
+                Some(())
+            })?;
             None
         }
-        MHit::Route(dst) => route(s, dst, ctrl, shift),
+        MHit::Route(dst) => edit(s, ROUTING, Region::Project, |s| route(s, dst, ctrl, shift)),
         MHit::Unroute(dst) => {
             let cur = s.selected_mixer;
-            let m = track_mut(s, cur)?;
-            m.routes.retain(|&r| r != dst);
-            m.send_levels.retain(|&(d, _)| d != dst);
-            changed(s);
-            Some(format!("{} no longer sends to {}", name(s, cur), name(s, dst)))
+            edit(s, ROUTING, Region::Track(cur), |s| {
+                let m = track_mut(s, cur)?;
+                m.routes.retain(|&r| r != dst);
+                m.send_levels.retain(|&(d, _)| d != dst);
+                changed(s);
+                Some(format!("{} no longer sends to {}", name(s, cur), name(s, dst)))
+            })
         }
         MHit::Add => {
-            let n = add_track(s, None);
+            let n = edit(s, INSERT, Region::Project, |s| add_track(s, None));
             Some(format!("Added {}", name(s, n)))
         }
         MHit::AddAfter => {
-            let n = add_track(s, Some(s.selected_mixer + 1));
+            let n = edit(s, INSERT, Region::Project, |s| add_track(s, Some(s.selected_mixer + 1)));
             Some(format!("Added {}", name(s, n)))
         }
         MHit::Options => {
@@ -317,10 +335,13 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
         }
         MHit::SlotLed(i) => {
             let t = s.selected_mixer;
-            let m = track_mut(s, t)?;
-            let k = usize::from(i);
-            m.slot_on[k] = !m.slot_on[k];
-            changed(s);
+            edit(s, SLOT, Region::Track(t), |s| {
+                let m = track_mut(s, t)?;
+                let k = usize::from(i);
+                m.slot_on[k] = !m.slot_on[k];
+                changed(s);
+                Some(())
+            })?;
             None
         }
         MHit::Scale | MHit::EqGraph => None,
@@ -398,13 +419,15 @@ pub fn right(app: &mut App, h: MHit) -> bool {
         MHit::SlotLed(i) => {
             // Solo the slot: the track's other slots are bypassed (§7).
             let t = s.selected_mixer;
-            if let Some(m) = track_mut(s, t) {
-                let only = (0..10).all(|k| m.slot_on[k] == (k == usize::from(i)));
-                for k in 0..10 {
-                    m.slot_on[k] = only || k == usize::from(i);
+            edit(s, SLOT, Region::Track(t), |s| {
+                if let Some(m) = track_mut(s, t) {
+                    let only = (0..10).all(|k| m.slot_on[k] == (k == usize::from(i)));
+                    for k in 0..10 {
+                        m.slot_on[k] = only || k == usize::from(i);
+                    }
+                    changed(s);
                 }
-                changed(s);
-            }
+            });
         }
         MHit::Polarity(n) | MHit::Swap(n) => select(s, n, false),
         _ => return false,
@@ -1023,6 +1046,26 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
 // Commands
 
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
+    // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
+    let step = match &c {
+        MCmd::Color(..) | MCmd::RandomColor(_) => Some("Mixer track color"),
+        MCmd::Reset(_) => Some("Mixer track reset"),
+        MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } => Some(ROUTING),
+        MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
+        MCmd::MoveLeft(_) | MCmd::MoveRight(_) => Some("Move mixer track"),
+        MCmd::InsertOne(_) => Some(INSERT),
+        MCmd::AddEffect(..) => Some("Add effect"),
+        MCmd::SlotDelete(_) => Some("Remove effect"),
+        MCmd::SlotMove(..) => Some("Move effect"),
+        _ => None,
+    };
+    if let Some(name) = step {
+        return crate::control::edit_app(app, name, Region::Project, |app| run_now(app, c));
+    }
+    run_now(app, c)
+}
+
+fn run_now(app: &mut App, c: MCmd) -> Option<String> {
     let at = app.mouse;
     let s = &mut app.state;
     let msg = match c {

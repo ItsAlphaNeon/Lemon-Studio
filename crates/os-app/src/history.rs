@@ -133,8 +133,8 @@ impl Snap {
             Snap::Patterns { .. } => Snap::Patterns { patterns: s.project.patterns.clone(), current: s.pattern },
             Snap::Rack(r) => Snap::Rack(Box::new(RackSide::now(s, r.row))),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
-            // Known only by applying them (`swap`).
-            Snap::Commands(_) => self.clone(),
+            // What each command would put back, as it is now (`swap` applies them).
+            Snap::Commands(v) => Snap::Commands(v.iter().map(|c| c.now(s)).collect()),
         }
     }
 
@@ -349,6 +349,11 @@ pub fn record_named(s: &mut State, name: Cow<'static, str>, snap: Snap) {
     h.wheel = None;
     h.fresh = true;
     h.trim();
+}
+
+/// The newest step is done with: no button release drops it (`settle`), a client's change, made without a press.
+pub fn done_with(s: &mut State) {
+    s.history.fresh = false;
 }
 
 /// Names the newest step `name` while its press is held (recorded since the last release): a gesture that turned into

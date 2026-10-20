@@ -341,6 +341,33 @@ impl Side {
     }
 }
 
+/// What an edit in the interface changes (`control::edit`): the project settings, one channel (by row), one mixer
+/// track (by number), one pattern (by number), the arrangement shown, or the whole project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Region {
+    Settings,
+    Channel(usize),
+    Track(u16),
+    Pattern(u16),
+    Arrangement,
+    Project,
+}
+
+impl Taken {
+    /// `region` as it is now (`None`: it names nothing).
+    pub fn of(s: &State, region: Region) -> Option<Taken> {
+        let p = &s.project;
+        Some(match region {
+            Region::Settings => Taken::Settings(Box::new(Settings::of(s))),
+            Region::Channel(r) => Taken::Channel(Box::new(p.channels.get(r)?.clone())),
+            Region::Track(n) => Taken::Track(Box::new(p.mixer.iter().find(|m| m.index == n)?.clone())),
+            Region::Pattern(n) => Taken::Pattern(Box::new(p.pattern(n)?.clone())),
+            Region::Arrangement => Taken::Arrangement(Box::new(p.arrangement()?.clone())),
+            Region::Project => Taken::Project(Box::new(Side::of(s))),
+        })
+    }
+}
+
 /// A command that can't be applied: an id that names nothing, a value out of range.
 pub type Error = String;
 
@@ -472,13 +499,11 @@ impl Command {
             Command::SetPattern { pattern, .. } | Command::SetNotes { pattern, .. } | Command::AddNotes { pattern, .. } => {
                 Taken::Pattern(Box::new(p.patterns[pattern_place(p, *pattern)?].clone()))
             }
-            Command::AddClip { .. } | Command::DeleteClip { .. } | Command::SetClip { .. } | Command::SetPlaylistTrack { .. } => {
-                // A project without an arrangement gets one first (`playlist::arr_mut`), so the undo has one to put back.
-                if p.arrangement().is_none() {
-                    return Err("the project has no arrangement".into());
-                }
-                Taken::Arrangement(Box::new(p.arrangement().cloned().unwrap_or_default()))
-            }
+            Command::AddClip { .. } | Command::DeleteClip { .. } | Command::SetClip { .. } | Command::SetPlaylistTrack { .. } => match p.arrangement() {
+                Some(a) => Taken::Arrangement(Box::new(a.clone())),
+                // A project without an arrangement gets one (`playlist::arr_mut`); the undo takes it away again.
+                None => Taken::Project(Box::new(Side::of(s))),
+            },
             Command::SetParam { owner, param, from, .. } => {
                 Taken::Param(*owner, *param, from.ok_or("the parameter's value before is not known (the app fills it in)")?)
             }
@@ -502,6 +527,15 @@ impl Command {
                 Taken::Project(_) => Taken::Project(Box::new(Side::of(s))),
             },
         })
+    }
+
+    /// For an undo command (`Put`): the command putting back the same things as they are now (the undo history's
+    /// check that a press changed something, `history::settle`). Others are as they are.
+    pub fn now(&self, s: &State) -> Command {
+        match self {
+            Command::Put(t) if !matches!(**t, Taken::Param(..)) => self.take(s).map_or_else(|_| self.clone(), |t| Command::Put(Box::new(t))),
+            _ => self.clone(),
+        }
     }
 
     /// Applies the command to the project; see `Done`. Nothing is changed when it fails.

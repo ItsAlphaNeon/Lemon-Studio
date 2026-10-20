@@ -22,9 +22,12 @@ fn test_client() -> By {
     By::Client("Test".into())
 }
 
-/// The project and the rack's state of it, ids included (`==` on the model leaves ids out).
+/// The project and the rack's state of it, ids included (`==` on the model leaves ids out). Not the selection: an
+/// undo leaves it where it is, as before.
 fn reading(a: &App) -> (os_model::Project, Value, f64) {
-    (a.state.project.clone(), query::project(&a.state), a.state.tempo)
+    let mut q = query::project(&a.state);
+    q.as_object_mut().unwrap().remove("selected_channel");
+    (a.state.project.clone(), q, a.state.tempo)
 }
 
 fn ids(a: &App) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
@@ -218,7 +221,7 @@ fn a_proposal_leaves_the_project_until_accepted() {
 fn proposals_ask_the_user() {
     let mut a = app();
     a.state.dialogs.clear();
-    let mut c = rpc::Client { name: "Helper".into(), level: Level::Propose };
+    let mut c = rpc::Client { name: "Helper".into(), level: Level::Propose, saves: false };
     let r = a.rpc(&mut c, "propose", &json!({"name": "Faster", "commands": [{"op": "set_tempo", "bpm": 150}]})).ok().unwrap();
     let n = r["proposal"].as_u64().unwrap();
     assert_eq!(a.state.dialogs.len(), 1, "a box asks");
@@ -252,7 +255,7 @@ fn events_tell_clients_what_changed() {
 #[test]
 fn rpc_requests_and_errors() {
     let mut a = app();
-    let mut c = rpc::Client { name: "Client 1".into(), level: Level::Edit };
+    let mut c = rpc::Client { name: "Client 1".into(), level: Level::Edit, saves: false };
     let call = |a: &mut App, c: &mut rpc::Client, req: Value| -> Value { serde_json::from_str(&a.rpc_line(c, &req.to_string()).unwrap()).unwrap() };
     let r = call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"name": "Assistant"}}));
     assert_eq!((r["id"].clone(), r["result"]["protocol"].clone(), r["result"]["level"].clone()), (json!(1), json!(rpc::PROTOCOL), json!("edit")));
@@ -275,7 +278,7 @@ fn rpc_requests_and_errors() {
     assert_eq!(code(call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 7, "method": "nope"}))), Some(-32601));
     assert_eq!(code(call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 8, "method": "apply", "params": {"command": {"op": "fly"}}}))), Some(-32602));
     assert_eq!(code(call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 9, "method": "apply", "params": {"command": {"op": "delete_channel", "channel": 9999}}}))), Some(-32000));
-    let mut reader = rpc::Client { name: "Reader".into(), level: Level::Read };
+    let mut reader = rpc::Client { name: "Reader".into(), level: Level::Read, saves: false };
     assert_eq!(code(call(&mut a, &mut reader, json!({"jsonrpc": "2.0", "id": 10, "method": "apply", "params": {"command": {"op": "set_tempo", "bpm": 99}}}))), Some(-32001));
     assert_eq!(a.state.tempo, 130.0);
     // A notification (no id) gets no answer.
@@ -297,7 +300,7 @@ fn hosted_plugins_follow_deletes_and_undo() {
     let (ch, ..) = ids(&a);
     let rows = |a: &App| a.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, h)| (r, h.owner.0)).collect::<Vec<_>>();
     assert_eq!(rows(&a), ch.iter().copied().enumerate().collect::<Vec<_>>(), "each sampler hosted, owned by its channel");
-    let mut c = rpc::Client { name: "Test".into(), level: Level::Edit };
+    let mut c = rpc::Client { name: "Test".into(), level: Level::Edit, saves: false };
     // A parameter set through the control plane, then its channel deleted and brought back.
     let params = a.rpc(&mut c, "params", &json!({"owner": ch[1]})).ok().unwrap();
     let p = params["params"].as_array().unwrap().iter().find(|p| p["steps"] == 0 && p["read_only"] == false && p["value"].as_f64().is_some_and(|v| v < 0.9)).unwrap().clone();
@@ -381,4 +384,164 @@ fn clients_connect_over_a_local_socket() {
     let h = &a.state.history;
     assert_eq!(h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string()).as_deref(), Some("Socket: tempo"), "the client's name stays with its connection");
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn command_line_flags() {
+    let mut args: Vec<String> = ["song.flp", "--control", "/tmp/x.sock", "--control-level", "propose"].map(String::from).to_vec();
+    let f = server::Flags::take(&mut args).unwrap();
+    assert_eq!((f.control.as_deref(), f.serve, f.level), (Some("/tmp/x.sock"), None, Some(Level::Propose)));
+    assert_eq!(args, ["song.flp"], "the project stays");
+    let mut args: Vec<String> = ["--serve", "7777"].map(String::from).to_vec();
+    assert_eq!(server::Flags::take(&mut args).unwrap().serve.as_deref(), Some("7777"));
+    for bad in [&["--control"][..], &["--control-level", "root"], &["--control", "a", "--serve", "b"], &["--serve", "--control-level"]] {
+        let mut args: Vec<String> = bad.iter().map(|s| s.to_string()).collect();
+        assert!(server::Flags::take(&mut args).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn saving_asks_the_user_unless_headless() {
+    let mut a = app();
+    let path = std::env::temp_dir().join(format!("lemon-control-save-{}.flp", std::process::id()));
+    let mut c = rpc::Client { name: "Helper".into(), level: Level::Edit, saves: false };
+    a.state.dialogs.clear();
+    let r = a.rpc(&mut c, "save", &json!({"path": path})).ok().unwrap();
+    assert!(r.get("asked").is_some() && !path.exists() && a.state.dialogs.len() == 1, "{r}");
+    a.dialog_done(crate::dialog::Then::ClientSave(path.clone()), crate::dialog::Reply::Button(crate::dialog::Answer::Yes));
+    assert!(path.exists(), "saved once the user said yes");
+    let _ = std::fs::remove_file(&path);
+    let mut c = rpc::Client { name: "Script".into(), level: Level::Edit, saves: true };
+    let r = a.rpc(&mut c, "save", &json!({"path": path})).ok().unwrap();
+    assert_eq!(r["saved"], json!(path.display().to_string()));
+    let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+    assert_eq!(saved.channels.len(), a.state.project.channels.len());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_first_clip_makes_the_playlist_and_its_undo_takes_it_away() {
+    let mut a = app();
+    a.state.project.arrangements.clear();
+    let pat = ids(&a).2[0];
+    let r = round_trip(&mut a, json!({"op": "add_clip", "track": 1, "position": 0, "pattern": pat}));
+    assert!(r[0]["clip"].as_u64().is_some());
+    crate::history::undo(&mut a.state);
+    assert!(a.state.project.arrangements.is_empty());
+}
+
+/// Does `f` (an edit in the interface) and checks it is one undo step named `name` that undo and redo take back and
+/// give again exactly.
+fn ui_round_trip(a: &mut App, name: &str, f: impl FnOnce(&mut App)) {
+    let before = reading(a);
+    let steps = a.state.history.at();
+    f(a);
+    a.state.control.settle(&mut a.state.project);
+    let after = reading(a);
+    assert_ne!(before, after, "{name} changes something");
+    assert_eq!(a.state.history.at(), steps + 1, "{name} is one step");
+    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(name));
+    let now = reading(a);
+    assert!(now == before, "{name} undone: {:?}, the model alike: {}", query::changes(&before.1, &now.1), now.0 == before.0);
+    assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some(name));
+    assert_eq!(reading(a), after, "{name} redone");
+}
+
+#[test]
+fn the_mixer_s_edits_are_undoable() {
+    use crate::mixer::{hit, run, MCmd, MHit};
+    let mut a = app();
+    ui_round_trip(&mut a, "Mixer track mute", |a| {
+        hit(a, MHit::Led(2));
+    });
+    ui_round_trip(&mut a, "Mixer track polarity", |a| {
+        hit(a, MHit::Polarity(3));
+    });
+    ui_round_trip(&mut a, "Effect slot", |a| {
+        a.state.selected_mixer = 1;
+        hit(a, MHit::SlotLed(4));
+    });
+    ui_round_trip(&mut a, "Mixer track color", |a| {
+        run(a, MCmd::Color(2, Some(os_model::Rgb::new(1, 2, 3))));
+    });
+    ui_round_trip(&mut a, "Mixer routing", |a| {
+        a.state.selected_mixer = 1;
+        a.state.mixer.sel.clear();
+        run(a, MCmd::Route { dst: 3, only: true, side: false });
+    });
+    ui_round_trip(&mut a, "Move mixer track", |a| {
+        run(a, MCmd::MoveRight(1));
+    });
+    ui_round_trip(&mut a, "Delete mixer track", |a| {
+        run(a, MCmd::Delete(2));
+    });
+    ui_round_trip(&mut a, "Insert mixer track", |a| {
+        run(a, MCmd::InsertOne(2));
+    });
+    ui_round_trip(&mut a, "Mixer track name", |a| {
+        crate::playlist::start_edit(&mut a.state, crate::playlist::EditTarget::MixerName(1), (0.0, 0.0));
+        a.state.playlist.edit.as_mut().unwrap().text = "Drums".into();
+        crate::playlist::commit_edit(&mut a.state);
+    });
+    // A fader drag is one step; a press that doesn't move it is none.
+    let steps = a.state.history.at();
+    crate::control::edit_press(&mut a.state, "Mixer track volume", command::Region::Track(1));
+    crate::history::settle(&mut a.state);
+    assert_eq!(a.state.history.at(), steps, "a click without a drag");
+    ui_round_trip(&mut a, "Mixer track volume", |a| {
+        crate::control::edit_press(&mut a.state, "Mixer track volume", command::Region::Track(1));
+        a.state.project.mixer[1].volume = Some(0.3);
+        crate::history::settle(&mut a.state);
+    });
+}
+
+#[test]
+fn the_rack_s_and_patterns_edits_are_undoable() {
+    use crate::rack::{run, RCmd};
+    let mut a = app();
+    ui_round_trip(&mut a, "Channel color", |a| {
+        run(a, RCmd::RandomColor(1));
+    });
+    ui_round_trip(&mut a, "Clone channel", |a| {
+        run(a, RCmd::Clone(0));
+    });
+    ui_round_trip(&mut a, "Move channel", |a| {
+        a.state.rack.select_only(2);
+        run(a, RCmd::MoveSel(-1));
+    });
+    ui_round_trip(&mut a, "Delete channel", |a| {
+        crate::rack::delete_step(a, &[3]);
+    });
+    ui_round_trip(&mut a, "Channel name", |a| {
+        crate::rack::open_box(&mut a.state, crate::rack::RBox::Channel(0), (0.0, 0.0));
+        a.state.pat_ui.name_box.as_mut().unwrap().text = "Boom".into();
+        crate::patterns::accept(&mut a.state);
+    });
+    crate::messages::set(&crate::messages::DELETE_PATTERN, false);
+    ui_round_trip(&mut a, "Clone pattern", |a| {
+        crate::patterns::run(&mut a.state, crate::patterns::Cmd::Clone, (0.0, 0.0));
+    });
+    ui_round_trip(&mut a, "Delete pattern", |a| {
+        crate::patterns::run(&mut a.state, crate::patterns::Cmd::Delete, (0.0, 0.0));
+    });
+    crate::messages::set(&crate::messages::DELETE_PATTERN, true);
+}
+
+#[test]
+fn a_deleted_channel_s_instrument_comes_back_with_an_undo() {
+    let mut a = app();
+    a.plugins = crate::plugins::Plugins::default();
+    a.plugins.available = crate::plugins::builtin();
+    a.plugin_tick();
+    a.plugin_tick();
+    let ch = ids(&a).0;
+    let key = |a: &App, id: u32| a.plugins.hosted.iter().find(|(_, h)| h.owner.0 == id).map(|(&k, _)| k);
+    crate::rack::delete_step(&mut a, &[1]);
+    a.plugin_tick();
+    assert_eq!(key(&a, ch[1]), None);
+    assert_eq!(key(&a, ch[2]), Some(1));
+    crate::history::undo(&mut a.state);
+    a.plugin_tick();
+    assert_eq!((0..5).map(|r| key(&a, ch[r])).collect::<Vec<_>>(), (0..5).map(Some).collect::<Vec<_>>());
+    assert_eq!(a.state.hosted_rows.iter().copied().collect::<std::collections::BTreeSet<_>>(), (0..5).collect());
 }

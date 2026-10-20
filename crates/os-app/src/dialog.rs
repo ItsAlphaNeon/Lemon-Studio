@@ -85,6 +85,8 @@ pub enum Then {
     DataFolder(crate::data_folder::DThen),
     /// A control-plane client's proposal: Yes applies it, No discards it (`crate::control::propose`).
     Proposal(u64),
+    /// A control-plane client asks to save the project to this file: Yes saves it.
+    ClientSave(PathBuf),
 }
 
 /// What waits for the save-changes question.

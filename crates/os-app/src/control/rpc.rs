@@ -19,6 +19,7 @@
 //! | `proposals` | | read | the proposals waiting |
 //! | `accept`, `discard` | `proposal` | edit | the commands' results; nothing |
 //! | `undo`, `redo` | | edit | the step undone or redone |
+//! | `save` | `path` (else the project's file) | edit | where it was saved; with a window the user is asked instead |
 //!
 //! A client that proposes waits for the user: the app asks them (`App::ask_proposal`).
 
@@ -35,6 +36,8 @@ pub const PROTOCOL: u32 = 1;
 pub struct Client {
     pub name: String,
     pub level: Level,
+    /// It saves the project itself (`save`): only without a window (`--serve`), where no one could be asked.
+    pub saves: bool,
 }
 
 /// A JSON-RPC error: its code and message.
@@ -170,6 +173,24 @@ impl App {
                 }
                 Ok(json!({ "step": name }))
             }
+            // Writing a file is an effect outside the project: with a window, the user decides (spec:
+            // roadmap/control-plane.md "Safety model").
+            "save" => {
+                need(c, Level::Edit)?;
+                let path = params.get("path").and_then(Value::as_str).map(std::path::PathBuf::from).or_else(|| self.state.path.clone());
+                let path = path.ok_or_else(|| bad("the project has no file yet: give `path`"))?;
+                if c.saves {
+                    self.save_to(path.clone());
+                    let msg = self.state.message.clone().unwrap_or_default();
+                    if !msg.starts_with("Saved") {
+                        return Err(failed(msg));
+                    }
+                    Ok(json!({ "saved": path.display().to_string() }))
+                } else {
+                    self.ask_save(&c.name, path.clone());
+                    Ok(json!({ "asked": path.display().to_string() }))
+                }
+            }
             _ => Err(Fail(NO_METHOD, format!("no method `{m}`"))),
         };
         if matches!(m, "apply" | "accept" | "undo" | "redo") && out.is_ok() {
@@ -232,6 +253,15 @@ impl App {
 }
 
 impl App {
+    /// Asks the user whether client `who` may save the project to `path`.
+    pub(crate) fn ask_save(&mut self, who: &str, path: std::path::PathBuf) {
+        use crate::dialog::{Answer, Kind, Msg, Then};
+        let text = vec![(who.to_string(), true), (" asks to save the project to ".into(), false), (path.display().to_string(), true), (".".into(), false)];
+        let mut msg = Msg::new(Kind::Warning, "Save", text, &[Answer::Yes, Answer::No], Then::ClientSave(path));
+        msg.labels = vec!["Save", "Don't save"];
+        self.show_msg(msg);
+    }
+
     /// Asks the user about proposal `n`: what it would change, Apply or Discard (spec: roadmap/control-plane.md
     /// "Proposals").
     pub(crate) fn ask_proposal(&mut self, n: u64) {

@@ -1794,6 +1794,11 @@ impl App {
                 }
             }
             Then::DataFolder(d) => self.data_folder_done(d, reply),
+            Then::ClientSave(p) => {
+                if reply == Reply::Button(Answer::Yes) {
+                    self.save_to(p);
+                }
+            }
             Then::Proposal(n) => {
                 let s = &mut self.state;
                 let r = if reply == Reply::Button(Answer::Yes) { crate::control::accept(s, n).map(|_| ()) } else { crate::control::discard(s, n) };
@@ -6796,6 +6801,7 @@ impl App {
             Action::Mix(crate::mixer::MHit::EqGraph) => {
                 if let Some(g) = self.top_hit(self.mouse.0, self.mouse.1).map(|h| h.rect) {
                     let (track, band) = (self.state.selected_mixer, crate::mixer::eq_band_at(&self.state, g, self.mouse.0));
+                    crate::control::edit_press(&mut self.state, "Mixer track equalizer", crate::control::command::Region::Track(track));
                     self.drag = Some(Drag::EqGraph { track, band, g });
                     crate::mixer::eq_graph_drag(&mut self.state, track, band, g, self.mouse);
                     self.damage_eq();
@@ -6812,6 +6818,8 @@ impl App {
             }
             Action::Fader(t) => {
                 crate::mixer::select(s, t, self.ctrl);
+                // One undo step for the drag (none when it doesn't move the fader).
+                crate::control::edit_press(s, "Mixer track volume", crate::control::command::Region::Track(t));
                 let v0 = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
                 self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0 });
             }
@@ -7218,7 +7226,7 @@ impl App {
     /// Channels whose deletion was confirmed go now (spec: ui/channel-rack.md §18).
     pub(crate) fn rack_pending(&mut self) {
         if let Some(rows) = self.state.rack.delete_now.take() {
-            crate::rack::delete_rows(self, &rows);
+            crate::rack::delete_step(self, &rows);
         }
     }
 

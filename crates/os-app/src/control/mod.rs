@@ -274,9 +274,53 @@ pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>)
         By::Client(n) => format!("{n}: {}", lower(&step)).into(),
     };
     crate::history::record_named(s, label, crate::history::Snap::Commands(undo));
+    crate::history::done_with(s);
     s.control.saw(&s.project, s.tempo);
     s.control.event(by, "apply", step, ops);
     Ok(results)
+}
+
+/// An edit in the interface: `region` is taken, `f` changes it, and the change is one undo step named `name` (none
+/// when nothing changed). The interface's edits thus have the commands' undo: what was taken is put back by
+/// `Command::Put`, as a command's own undo is.
+pub fn edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
+    let before = command::Taken::of(s, region);
+    let r = f(s);
+    if let Some(before) = before {
+        if command::Taken::of(s, region).as_ref() != Some(&before) {
+            record_edit(s, name, before);
+        }
+    }
+    r
+}
+
+/// Records an interface edit's step. A step of the same press that changed nothing goes first (a text box's playlist
+/// step when the box named a mixer track), as the press's release would have dropped it.
+fn record_edit(s: &mut State, name: &'static str, before: command::Taken) {
+    crate::history::settle(s);
+    crate::history::record(s, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(before))]));
+    crate::history::done_with(s);
+}
+
+/// `edit` for an edit that needs the app (a mixer menu command hosting or dropping plugins).
+pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
+    let before = command::Taken::of(&app.state, region);
+    let r = f(app);
+    let s = &mut app.state;
+    if let Some(before) = before {
+        if command::Taken::of(s, region).as_ref() != Some(&before) {
+            record_edit(s, name, before);
+        }
+    }
+    r
+}
+
+/// A press that starts an edit of `region` (a fader drag): the step named `name` is recorded now, holding the region
+/// as it is, and goes again at the release when the drag changed nothing (`history::settle`).
+pub fn edit_press(s: &mut State, name: &'static str, region: command::Region) {
+    if let Some(before) = command::Taken::of(s, region) {
+        crate::history::record(s, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(before))]));
+    }
 }
 
 /// "Build Drum Kit" in a client's step name keeps its case; only the first letter goes lower ("Tempo" > "tempo").
