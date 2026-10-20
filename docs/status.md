@@ -32,6 +32,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Clip groups, markers and several arrangements
 - Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
+- Project picker (VIEW, Ctrl+F8 or the toolbar's project button): a menu of the patterns and channels; picking a
+  pattern makes it current, picking a channel opens its window
 - Song position slider in the toolbar: drag, click to step, right-click to jump, wheel; it follows playback
   (through the pattern in PAT mode)
 - Auto scrolling (toolbar, OPTIONS menu): while playing, the playlist follows the playhead (the piano roll in
@@ -155,7 +157,27 @@ Not yet: Align all channel editors, Arrange windows.
 ## 🚧 Note input
 
 - Mouse, computer keyboard and MIDI controllers; notes play the selected channel
-- Not yet: note recording
+- Touch controller (VIEW, Alt+F7 or the toolbar's touch button): 4 x 4 pads or a two-octave keyboard, played
+  with the mouse, with octave steps
+- Note recording (the toolbar's Record button): armed and playing, notes from the typing keyboard, MIDI or the Touch
+  controller go into the current pattern, quantized to the main snap; a take replaces the notes that start inside it
+  and is one undo step; in SONG mode a clip of the pattern is placed where none plays, and made longer when the
+  take runs past it. A click or R (typing keyboard off) asks what to record (notes and automation, notes, automation,
+  or audio into the playlist); armed, the whole button fills red. Right-click for the options
+- Time selection loop: a piano roll (PAT) or playlist (SONG) time selection loops playback; armed with Loop record
+  off it punches in and out (plays it once and stops back at its start)
+- Score logger (TOOLS): every note played is kept for 30 minutes; Dump score log writes the last 2 to 30 minutes into
+  the pattern at their real timing (Merge / Replace when it has notes); Clear log
+- Automation recording: channel volume and pan knob moves while recording become the pattern's control points
+- Record options (toolbar, OPTIONS, Ctrl+I / Ctrl+P / Ctrl+B): Start on input (Play waits for the first note, which
+  is recorded at the start), Recording precount (1 or 2 bars of metronome count-in, "REC IN n" on the clock; also
+  set from the metronome's right-click menu) and Blend (a take keeps the notes it overlaps)
+- Loop record (toolbar, OPTIONS): off, recording runs on past the pattern's or song's end and the pattern grows;
+  on, playback loops and each pass is a take (one undo step) that replaces what the pass before recorded
+- One-click audio recording (the toolbar's microphone, TOOLS): pick an input (an ASIO driver's inputs, else the
+  system's input devices), the song plays with Record armed and precount, and on stop the take becomes a 32-bit WAV
+  in the data folder's `Recorded` folder plus a new audio clip channel and clip where playback started
+- Not yet: audio recording into mixer tracks, input monitoring, the audio editor
 
 ## 🚧 Undo
 
@@ -184,7 +206,8 @@ Not yet: Align all channel editors, Arrange windows.
   until Lemon Studio is back in front
 - A device that fails (unplugged, or a driver asking to be reset) is opened again; an ASIO driver that does not
   open gives way to the default device
-- Not yet: ASIO inputs and output pairs, JACK
+- An ASIO driver's first 8 inputs open with its outputs (full duplex) for audio recording
+- Not yet: ASIO output pairs, JACK
 
 <img alt="ASIO Compatible logo" src="../crates/os-app/asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png" width="96">
 
@@ -222,7 +245,6 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## ❌ Not available yet
 
-- Audio recording
 - MIDI file import / export
 - Audio editing
 - Plugin delay compensation

@@ -36,6 +36,8 @@ pub enum Win {
     Perf,
     /// The Tempo tapper (spec: ui/tempo-tapper.md).
     Tapper,
+    /// The Touch controller (spec: ui/touch-controller.md).
+    Touch,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -131,6 +133,13 @@ pub enum Action {
     Typing,
     /// Metronome switch (toolbar, OPTIONS menu, Ctrl+M); right-click on the button picks the sound.
     Metronome,
+    /// The Record button (spec: ui/recording.md §2); right-click for its options.
+    Record,
+    /// A record option's switch: Start on input, Recording precount, Blend (spec: ui/recording.md §3).
+    RecOpt(crate::record::Opt),
+    /// The toolbar's microphone: One-click audio recording's menu, or Stop while it records (spec:
+    /// ui/one-click-recording.md §2).
+    OneClick,
     /// Auto scrolling switch (toolbar, OPTIONS menu); right-click on the button for continuous scrolling.
     AutoScroll,
     /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G).
@@ -154,6 +163,8 @@ pub enum Action {
     Perf(crate::perf::PerfAct),
     /// The Tempo tapper's pad and Apply tempo switch (spec: ui/tempo-tapper.md).
     Tapper(crate::tapper::TapAct),
+    /// The Touch controller's controls (spec: ui/touch-controller.md).
+    Touch(crate::touch::TouchAct),
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -192,6 +203,8 @@ pub enum Action {
     Knob(crate::knobs::KnobId),
     /// Toolbar plugin button: the plugin menu (spec: ui/plugin-menu.md §1).
     PickerOpen,
+    /// Toolbar project button: the project picker (spec: ui/project-picker.md §2).
+    ProjectPicker,
     /// A toolbar utility button (spec: ui/toolbar-buttons.md §2).
     Util(Util),
     /// Show a window maximized and in front (the playlist / piano roll buttons' right click, spec:
@@ -736,6 +749,8 @@ const PLUGIN_POPUPS: &str = "Menus of detached plugin windows on Linux (dock the
 
 #[derive(Debug, Clone)]
 pub enum Drag {
+    /// A Touch controller pad or key held: the note follows the mouse (spec: ui/touch-controller.md §2).
+    Touch,
     /// Vertical drag on the pattern name box steps the number (spec: ui/pattern-menu.md §1).
     PatternBox { y0: f32, p0: u16 },
     /// Move a floating window (offset of the mouse from its top-left).
@@ -843,6 +858,8 @@ pub struct State {
     pub perf: crate::perf::Perf,
     /// The Tempo tapper: where it is, the count of taps, the pad's flash.
     pub tapper: crate::tapper::TapperUi,
+    pub touch: crate::touch::TouchUi,
+    pub rec: crate::record::Rec,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
     /// Rack rows played by a hosted plugin.
@@ -1104,6 +1121,8 @@ pub struct App {
     pub(crate) smooth: crate::smooth::Eases,
     /// Where the shell should move the cursor to (a wheel step in a menu, `menu_wheel`).
     pub warp: Option<(f32, f32)>,
+    /// One-click audio recording under way (spec: ui/one-click-recording.md §2).
+    pub(crate) audio_rec: Option<crate::one_click::AudioRec>,
     /// Wheel movement in an open menu short of a whole notch (trackpads).
     menu_notch: f32,
     /// Audio ▸ Auto close: whether the output is closed while another program is in front (`crate::auto_close`).
@@ -1241,6 +1260,8 @@ impl App {
                 cpu: crate::cpu::Cpu::saved(),
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
+                touch: Default::default(),
+                rec: Default::default(),
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::load(),
                 toolbar: views::toolbar::Opts::load(),
@@ -1297,6 +1318,7 @@ impl App {
             hold: None,
             smooth: Default::default(),
             warp: None,
+            audio_rec: None,
             menu_notch: 0.0,
             auto_close: Default::default(),
             want_minimize: false,
@@ -2432,7 +2454,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -2454,6 +2476,7 @@ impl App {
             Win::Plugin => s.project.channels.get(s.plugin_channel).map(|_| views::channel_win::rect(s)),
             Win::Perf => Some(views::perf::rect(s)),
             Win::Tapper => Some(views::tapper::rect(s)),
+            Win::Touch => Some(views::touch::rect(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -2573,13 +2596,20 @@ impl App {
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
     }
 
-    /// The metronome button's right-click menu: the sound (spec: ui/metronome.md §2).
-    fn metronome_menu(&mut self, x: f32, y: f32) {
+    /// The metronome button's right-click menu: the sound (spec: ui/metronome.md §2), and Recording precount (spec:
+    /// ui/recording.md §3 "The metronome's menu").
+    pub(crate) fn metronome_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
+        use crate::record::{Opt, RecCmd};
         use os_engine::metronome::Sound;
         let now = crate::metronome::sound();
         let mut items = vec![PItem::head("Metronome sound")];
         items.extend(Sound::ALL.iter().map(|&s| PItem::new(s.label(), Cmd::MetronomeSound(s)).mark(Mark::Radio(s == now))));
+        let bars = if Opt::Precount.on() { crate::record::precount_bars() } else { 0 };
+        items.push(PItem::head("Recording precount"));
+        for (label, n) in [("Off", 0), ("1 bar", 1), ("2 bars", 2)] {
+            items.push(PItem::new(label, Cmd::Rec(RecCmd::Precount(n))).mark(Mark::Radio(bars == n)));
+        }
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
     }
 
@@ -2883,6 +2913,7 @@ impl App {
             Win::ChannelRack => self.damage_rect(views::rack::bounds(&self.state)),
             Win::Perf => self.damage_rect(views::perf::bounds(&self.state)),
             Win::Tapper => self.damage_rect(views::tapper::bounds(&self.state)),
+            Win::Touch => self.damage_rect(views::touch::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
             _ => self.invalidate(),
         }
@@ -3103,8 +3134,8 @@ impl App {
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         self.plugin_tick();
-        // Song playback loops over the playlist's time selection, as it is now.
-        self.transport.set_loop(self.state.playlist.range);
+        // Playback loops over the time selection, as it is now (spec: ui/recording.md §5).
+        self.sync_loop_range();
         #[cfg(all(plugin_windows, not(windows)))]
         self.lift_input();
         {
@@ -3120,6 +3151,7 @@ impl App {
             self.invalidate();
         }
         self.follow_device();
+        self.record_tick();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
         let now = std::time::Instant::now();
@@ -4299,6 +4331,7 @@ impl App {
                     self.erase_control_points(last_x, x);
                     self.drag = Some(Drag::ControlErase { last_x: x });
                 }
+                Drag::Touch => self.touch_drag(x, y),
                 Drag::PianoKeys { key } => {
                     if let Some(g) = self.piano_geom() {
                         let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
@@ -4445,6 +4478,7 @@ impl App {
                 }
                 Drag::Knob { id, y0, v0 } => {
                     self.state.set_knob(id, v0 - (y - y0) * id.drag_rate());
+                    self.record_knob(id);
                     self.hint = Cow::Owned(self.state.knob_text(id));
                     match self.hits.iter().rev().find(|h| h.action == Action::Knob(id)).map(|h| h.rect) {
                         Some(r) => self.damage_rect(r.outset(6.0)),
@@ -4632,6 +4666,7 @@ impl App {
             ),
             Action::Perf(p) => matches!(p, crate::perf::PerfAct::Sort(_) | crate::perf::PerfAct::ResetOnTransport | crate::perf::PerfAct::Freeze),
             Action::Tapper(t) => *t == crate::tapper::TapAct::Apply,
+            Action::Touch(t) => !matches!(t, crate::touch::TouchAct::Note(_)),
             Action::CableDebug(d) => !matches!(d, crate::cable::DebugAct::Param(_)),
             Action::TypeIn(t) => !matches!(t, crate::typein::TiAct::Field),
             Action::Pat(h) => {
@@ -4824,6 +4859,7 @@ impl App {
             Win::Plugin => views::channel_win::bounds(&self.state),
             Win::Perf => views::perf::bounds(&self.state),
             Win::Tapper => views::tapper::bounds(&self.state),
+            Win::Touch => views::touch::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
             w => self.state.win_rect(w).outset(5.0),
         }
@@ -5063,6 +5099,14 @@ impl App {
                 self.metronome_menu(x, y);
                 return self.invalidate();
             }
+            Some(Action::Record) => {
+                self.record_menu(x, y);
+                return self.invalidate();
+            }
+            Some(Action::RecOpt(o)) => {
+                self.record_option_menu(*o, x, y);
+                return self.invalidate();
+            }
             Some(Action::PianoTarget) => {
                 // spec: ui/piano-target-channel.md §4
                 let row = self.state.selected_channel;
@@ -5265,6 +5309,7 @@ impl App {
                 self.start_playback();
             }
             Some(Drag::SongRuler) => self.song_pos_release(),
+            Some(Drag::Touch) => self.touch_hold(None),
             Some(Drag::ThemeKnob { .. } | Drag::PickSv(_) | Drag::PickHue(_)) => self.theme_store(),
             _ => {}
         }
@@ -5818,6 +5863,7 @@ impl App {
                 crate::history::knob(&mut self.state, id, true);
             }
             self.state.set_knob(id, v);
+            self.record_knob(id);
             self.hint = Cow::Owned(self.state.knob_text(id));
             return None;
         }
@@ -5996,6 +6042,7 @@ impl App {
             Key::Character(c) if !ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("l") => self.act(Action::PatSong(!self.state.song_mode)),
             // spec: ui/tempo-tapper.md §1
             Key::Named(NamedKey::F5) if ctrl => self.act(Action::ToggleWin(Win::Tapper)),
+            Key::Named(NamedKey::F7) if alt && !ctrl => self.act(Action::ToggleWin(Win::Touch)),
             Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
             Key::Named(NamedKey::F6) => self.act(Action::ToggleWin(Win::ChannelRack)),
             Key::Named(NamedKey::F7) => self.act(Action::ToggleWin(Win::PianoRoll)),
@@ -6034,7 +6081,14 @@ impl App {
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("t") => self.toggle_typing(),
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("m") => self.toggle_metronome(),
+            // The record options (spec: ui/recording.md §3); a focused playlist or the piano roll took Ctrl+B / Ctrl+P
+            // before this.
+            Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("i") => self.toggle_record_option(crate::record::Opt::Wait),
+            Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("p") => self.toggle_record_option(crate::record::Opt::Precount),
+            Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("b") => self.toggle_record_option(crate::record::Opt::Blend),
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("e") => self.toggle_step_edit(),
+            // Record (spec: ui/recording.md §2): R, when the typing keyboard has not taken it as a note.
+            Key::Character(c) if !ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::Record),
             // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
             // tools (until a typing keyboard exists, which will take them).
             Key::Character(c) if !ctrl && !alt && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
@@ -6099,8 +6153,13 @@ impl App {
     /// Start playback in the mode the PAT / SONG switch shows. Pattern mode loops the current pattern from the piano
     /// roll's play-start marker (§10); song mode plays the playlist from its start and stops at its end.
     pub(crate) fn start_playback(&mut self) {
+        self.start_playback_counted(0);
+    }
+
+    /// `start_playback` after a recording count-in of `bars` bars (spec: ui/recording.md §3).
+    pub(crate) fn start_playback_counted(&mut self, bars: u32) {
         let song = self.state.song_mode;
-        if song && self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
+        if song && !self.one_click_starting() && self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
             self.state.message = Some("The playlist is empty: nothing to play in SONG mode".into());
             self.invalidate();
             return;
@@ -6112,8 +6171,14 @@ impl App {
         }
         let p = crate::rack::play_project(&self.state);
         let start = if song { f64::from(self.state.playlist.pos) } else { f64::from(self.state.piano.marker) };
-        self.transport.set_loop(self.state.playlist.range);
-        self.transport.play(&p, self.play_mode(), start);
+        // A looping time selection starts at its start unless the position is inside it (spec: ui/recording.md §5).
+        let start = match self.selection_loop() {
+            Some((a, b)) if start < f64::from(a) || start >= f64::from(b) => f64::from(a),
+            _ => start,
+        };
+        // The engine gets the loop range before its first tick.
+        self.sync_loop_range();
+        self.transport.play_counted(&p, self.play_mode(), start, bars);
     }
 
     fn play_mode(&self) -> PlayMode {
@@ -6195,7 +6260,7 @@ impl App {
     }
 
     /// The live stream needs the project before the first live note.
-    fn sync_live(&mut self) {
+    pub(crate) fn sync_live(&mut self) {
         if !self.typing_synced {
             self.typing_synced = true;
             self.transport.update(&crate::rack::play_project(&self.state));
@@ -6258,9 +6323,9 @@ impl App {
     }
 
     /// Held typing-keyboard keys and MIDI notes light on the piano roll's keyboard (§4).
-    fn typing_lit_changed(&mut self) {
+    pub(crate) fn typing_lit_changed(&mut self) {
         let channels = &self.state.project.channels;
-        let midi = self.midi_held.iter().map(|&(key, row)| (row, u16::from(key)));
+        let midi = self.midi_held.iter().chain(self.state.touch.held.as_ref()).map(|&(key, row)| (row, u16::from(key)));
         self.state.piano.typed = self.typing_held.iter().map(|&(_, row, key)| (row, key)).chain(midi).filter_map(|(row, key)| Some((channels.get(row)?.index, i32::from(key)))).collect();
         match self.piano_grid {
             Some(g) => self.damage_rect(Rect::new(g.x - 73.0, g.y, 73.0, g.h)),
@@ -6612,6 +6677,9 @@ impl App {
             Action::PianoUndo | Action::Util(Util::Undo) => s.message = crate::history::ctrl_z(s),
             Action::Typing => self.toggle_typing(),
             Action::Metronome => self.toggle_metronome(),
+            Action::Record => self.toggle_record(),
+            Action::RecOpt(o) => self.toggle_record_option(o),
+            Action::OneClick => self.one_click_button(),
             Action::AutoScroll => self.toggle_autoscroll(),
             Action::EnableGroups => self.toggle_groups(),
             Action::StepEdit => self.toggle_step_edit(),
@@ -6626,6 +6694,7 @@ impl App {
             }
             Action::Perf(p) => self.perf_act(p),
             Action::Tapper(a) => self.tapper_act(a),
+            Action::Touch(a) => self.touch_act(a),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -6645,12 +6714,13 @@ impl App {
                     // Play toggles pause (the position is held in place); Stop rewinds.
                     TransportState::Playing => self.transport.pause(),
                     TransportState::Paused => self.transport.resume(),
-                    TransportState::Stopped => self.start_playback(),
+                    TransportState::Stopped => self.play_from_stop(),
                 }
             }
             Action::Stop => {
                 self.perf_transport();
                 self.transport.stop();
+                self.record_stopped();
                 // Stop rewinds to where playback started: the song position (or the piano roll's play-start marker)
                 // stays where it was put, so the next start plays from there again; with a time selection, its start.
                 let s = &mut self.state;
@@ -6661,6 +6731,9 @@ impl App {
                     // A song position move: the initial values (spec: ui/settings-choices.md "Advanced: Initialize
                     // controls automatically").
                     crate::init::apply(s);
+                } else if let Some((a, _)) = s.piano.range.filter(|_| s.shown(Win::PianoRoll)) {
+                    // spec: ui/recording.md §5: the piano roll's time selection, as in SONG mode.
+                    s.piano.marker = a;
                 }
                 self.invalidate();
             }
@@ -6732,6 +6805,7 @@ impl App {
             Action::ToggleWin(Win::Browser) => s.show_browser = !s.show_browser,
             Action::ToggleWin(Win::Perf) => self.toggle_perf(),
             Action::ToggleWin(Win::Tapper) => self.toggle_tapper(),
+            Action::ToggleWin(Win::Touch) => self.toggle_touch(),
             Action::ToggleWin(w) => {
                 if s.shown(w) && s.in_front(w) {
                     s.hide(w);
@@ -6803,6 +6877,12 @@ impl App {
                 let at = self.top_hit(x, y).map_or((x, y), |h| (h.rect.x, h.rect.bottom() + 2.0));
                 self.open_plugin_menu(crate::plugin_menu::Target::All, at);
             }
+            // Under the button (spec: ui/project-picker.md §2).
+            Action::ProjectPicker => {
+                let (x, y) = self.mouse;
+                let at = self.top_hit(x, y).map_or((x, y), |h| (h.rect.x, h.rect.bottom() + 2.0));
+                self.open_project_picker(at);
+            }
             Action::Knob(id) => {
                 crate::history::knob(s, id, false);
                 self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
@@ -6868,6 +6948,7 @@ impl App {
                     Win::Plugin => s.plugin_pos,
                     Win::Perf => s.perf.pos,
                     Win::Tapper => s.tapper.pos,
+                    Win::Touch => s.touch.pos,
                     Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
@@ -7312,6 +7393,10 @@ impl App {
             (0, FILE_SAVE_AS) => self.save(true),
             (0, FILE_SAVE_VERSION) => self.save_new_version(),
             (0, FILE_EXIT) => self.want_close = true,
+            (VIEW, i) if item_at(menu, i).is_some_and(|it| it.label == "Project picker") => {
+                let at = self.mouse;
+                self.open_project_picker(at);
+            }
             (VIEW | ADD_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Plugin picker") => {
                 let at = self.mouse;
                 self.open_plugin_menu(crate::plugin_menu::Target::All, at);
@@ -7330,6 +7415,12 @@ impl App {
             (VIEW, i) if item_at(VIEW, i).is_some_and(|it| it.label == INTO_WORKSPACE_LABEL) => self.move_into_workspace(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::METRONOME_LABEL) => self.toggle_metronome(),
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::CLEAR_LOG_LABEL) => {
+                if let Some(m) = self.rec_cmd(crate::record::RecCmd::ClearLog) {
+                    self.state.message = Some(m);
+                }
+            }
+            (m, i) if let Some(o) = item_at(m, i).and_then(|it| views::menus::record_option(it.label)) => self.toggle_record_option(o),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::AUTOSCROLL_LABEL) => self.toggle_autoscroll(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::GROUPS_LABEL) => self.toggle_groups(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::STEP_EDIT_LABEL) => self.toggle_step_edit(),
@@ -7399,7 +7490,7 @@ pub(crate) fn lift_windows(s: &mut State, dy: f32) {
     for w in &mut s.wins {
         lift(&mut w.rect.y);
     }
-    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos] {
+    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos] {
         lift(&mut pos.1);
     }
 }
@@ -7412,7 +7503,7 @@ fn toolbar_right(hit: &Action) -> Option<Action> {
         Action::Util(Util::Save) => Action::MenuItem(0, FILE_SAVE_VERSION),
         Action::Util(Util::Help) => Action::MenuItem(HELP_MENU, HELP_ABOUT),
         Action::ToggleWin(w @ (Win::Playlist | Win::PianoRoll)) => Action::ShowMax(w),
-        Action::ToggleWin(Win::Browser) => Action::PickerOpen,
+        Action::ToggleWin(Win::Browser) | Action::ProjectPicker => Action::PickerOpen,
         _ => return None,
     })
 }
@@ -8633,7 +8724,7 @@ mod tests {
         use crate::views::settings::{SAct, AUDIO};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         assert_eq!((prefs::check(&TRUNCATED), prefs::check(&RESET)), (true, false), "the defaults");
-        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false });
+        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false, count_in: 0 });
         let mut app = App::new(None);
         app.open_settings(AUDIO);
         frame(&mut app, &mut c, None);
@@ -8644,13 +8735,13 @@ mod tests {
             assert_eq!(app.state.message.as_deref(), Some(said));
         }
         assert_eq!((prefs::check(&TRUNCATED), prefs::check(&RESET)), (false, true));
-        assert_eq!(Starts::from_prefs(), Starts { truncated: false, reset: true }, "the next start goes by them");
+        assert_eq!(Starts::from_prefs(), Starts { truncated: false, reset: true, count_in: 0 }, "the next start goes by them");
         // And back.
         for check in [&TRUNCATED, &RESET] {
             let r = hit_rect(&app, &Action::Settings(SAct::Check(check.label)));
             click(&mut app, &mut c, r);
         }
-        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false });
+        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false, count_in: 0 });
     }
 
     // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project"
@@ -10391,7 +10482,7 @@ mod tests {
         app.mouse_down_right();
         frame(&mut app, &mut c, None);
         let labels: Vec<String> = app.state.playlist.popup.as_ref().unwrap().items.iter().map(|it| it.label.to_string()).collect();
-        assert_eq!(labels, ["Metronome sound", "Hi-hat", "Tick", "Beep", "Cowbell", "Pulse"]);
+        assert_eq!(labels, ["Metronome sound", "Hi-hat", "Tick", "Beep", "Cowbell", "Pulse", "Recording precount", "Off", "1 bar", "2 bars"]);
         let before = crate::metronome::sound();
         let i = labels.iter().position(|x| x == "Cowbell").unwrap();
         let item = hit_rect(&app, &Action::PlPopup(i));
@@ -15107,15 +15198,14 @@ mod tests {
             (Action::ToggleWin(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
             (Action::ToggleWin(Win::Browser), "Browser / Plugin picker (Alt+F8)"),
             (Action::PickerOpen, "Plugin picker (F8)"),
+            (Action::ProjectPicker, "Project picker / Plugin picker (Ctrl+F8)"),
+            (Action::ToggleWin(Win::Touch), "Touch controller (Alt+F7)"),
         ] {
             assert_eq!(hint(&app, &a), h);
         }
         // Greyed out.
         for name in [
             "Open audio editor / New audio editor",
-            "One-click audio recording",
-            "Project picker / Plugin picker (Ctrl+F8)",
-            "Touch controller (Alt+F7)",
             "Plugin repository",
         ] {
             assert_eq!(hint(&app, &Action::Placeholder(name)), format!("{name}: not available yet"));

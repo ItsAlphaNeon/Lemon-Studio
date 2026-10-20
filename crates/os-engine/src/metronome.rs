@@ -186,8 +186,19 @@ impl Metronome {
     /// Then whatever click is sounding is added to `out` (interleaved stereo, the tick's frames); a new click cuts the
     /// one before.
     pub fn tick(&mut self, tick: u64, beat: u32, numerator: u16, start: bool, out: &mut [f32]) {
+        let on = start && self.switch.on();
+        self.click(tick, beat, numerator, on, out);
+    }
+
+    /// A tick of a recording count-in (spec: ui/recording.md §3), `tick` counted from the count-in's start: clicks on
+    /// every beat, accented on each bar's first, with the switch on or off.
+    pub fn count_in(&mut self, tick: u64, beat: u32, numerator: u16, out: &mut [f32]) {
+        self.click(tick, beat, numerator, true, out);
+    }
+
+    fn click(&mut self, tick: u64, beat: u32, numerator: u16, on: bool, out: &mut [f32]) {
         let ppq = u64::from(beat.max(1));
-        if start && tick % ppq == 0 && self.switch.on() {
+        if on && tick % ppq == 0 {
             let sound = self.switch.sound();
             if self.clicks.as_ref().is_none_or(|(s, _)| *s != sound) {
                 self.clicks = Some((sound, [render(sound, false, self.rate), render(sound, true, self.rate)]));

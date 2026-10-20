@@ -20,6 +20,9 @@ mod audio_bench;
 mod render_check;
 mod browser;
 mod cable;
+mod capture;
+mod one_click;
+mod score_log;
 mod clip_colors;
 mod clock;
 mod cpu;
@@ -70,6 +73,7 @@ mod prefs;
 mod preview_track;
 mod project_forms;
 mod project_info;
+mod project_picker;
 mod project_plugins;
 mod presets;
 mod misc;
@@ -87,6 +91,8 @@ mod splash;
 mod stall;
 mod step_edit;
 mod tapper;
+mod touch;
+mod record;
 mod theme_adjust;
 mod theme_library;
 mod templates;
@@ -1137,7 +1143,7 @@ fn screenshot(args: &[String]) {
     let mut plugin_menu: Option<plugin_menu::Target> = None;
     let mut settings: Option<usize> = None;
     let mut info_edit: Option<usize> = None;
-    let mut clicks: Vec<(f32, f32)> = Vec::new();
+    let mut clicks: Vec<(f32, f32, bool)> = Vec::new();
     let mut wheels: Vec<(f32, f32, f32)> = Vec::new();
     let mut lane: Option<usize> = None;
     let mut lane_menu = false;
@@ -1193,11 +1199,13 @@ fn screenshot(args: &[String]) {
                     mouse = Some((x, y));
                 }
             }
-            // Click at x,y (left button) before the frame is captured; may be given more than once, done in order.
-            "--click" => {
+            // Click at x,y (left button; `--rclick`: the right one) before the frame is captured; may be given more than
+            // once, done in order.
+            a @ ("--click" | "--rclick") => {
+                let right = a == "--rclick";
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
                 if let [x, y] = v[..] {
-                    clicks.push((x, y));
+                    clicks.push((x, y, right));
                 }
             }
             // The wheel turned `dy` notches at x,y after the first paint, before the clicks (scrolls a page, e.g.
@@ -1428,9 +1436,13 @@ fn screenshot(args: &[String]) {
         app.wheel(0.0, dy, false, false);
         app.paint(&mut canvas, None);
     }
-    for (x, y) in clicks {
+    for (x, y, right) in clicks {
         app.mouse_move(x, y);
-        app.mouse_down();
+        if right {
+            app.mouse_down_right();
+        } else {
+            app.mouse_down();
+        }
         app.mouse_up();
         app.paint(&mut canvas, None);
     }

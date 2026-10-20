@@ -3,7 +3,9 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! ASIO output (Windows): the chosen driver plays the mix on its first two outputs, at the buffer length chosen on the
-//! Audio page when it takes it, else the one set in its own panel (`control_panel`).
+//! Audio page when it takes it, else the one set in its own panel (`control_panel`). Its first inputs open with the
+//! outputs (full duplex): the same callback hands them to the capture while One-click audio recording records
+//! (`crate::capture`; spec: ui/one-click-recording.md §2).
 //!
 //! The driver is loaded by name through asio-sys, which builds the ASIO SDK's host files (`asiosdk`). cpal's ASIO host
 //! is not used: it finds a driver by loading every driver listed before it, and one whose hardware is missing may
@@ -55,12 +57,18 @@ pub(crate) struct Opened {
     pub(crate) frames: u32,
     pub(crate) buffers: (u32, u32),
     pub(crate) channels: u16,
+    /// Inputs open (0: none, or the driver refused them).
+    pub(crate) inputs: u16,
     /// The rates of `audio_cfg::RATES` and the lengths of `audio_cfg::BUFFERS` it takes.
     pub(crate) rates: Vec<u32>,
     pub(crate) sizes: Vec<u32>,
-    /// Its output latency, frames (`ASIOGetLatencies`).
+    /// Its output and input latencies, frames (`ASIOGetLatencies`).
     pub(crate) latency: Option<u32>,
+    pub(crate) input_latency: Option<u32>,
 }
+
+/// The inputs opened at most: the ones the menu lists.
+const MAX_INPUTS: i32 = 8;
 
 /// Loads driver `name` and plays `mix` on it: at `rate` when the driver takes it (else its own), at `buffer` frames
 /// when it takes that (else its own, the length set in its panel). Overloads and requests to be reset (a buffer length
@@ -90,7 +98,8 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
     if now < 1.0 {
         return Err("the driver has no sample rate".into());
     }
-    let outs = driver.channels().map_err(|e| e.to_string())?.outs;
+    let counts = driver.channels().map_err(|e| e.to_string())?;
+    let outs = counts.outs;
     if outs < 1 {
         return Err("the driver has no outputs".into());
     }
@@ -101,11 +110,30 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
     let sizes = sizes(&range);
     // A length it refuses after all: its own.
     let ask = buffer.filter(|b| sizes.contains(b)).map(|b| b as i32);
-    let streams = match driver.prepare_output_stream(None, channels, ask) {
-        Err(_) if ask.is_some() => driver.prepare_output_stream(None, channels, None),
-        s => s,
+    // Its inputs with its outputs, else its outputs alone (a driver that refuses its inputs, or has none, plays on).
+    let ins = counts.ins.clamp(0, MAX_INPUTS) as usize;
+    let in_format = driver.input_data_type().ok().and_then(|t| Format::of(&t));
+    let prepare = |ins: usize, ask: Option<i32>| {
+        if ins == 0 {
+            return driver.prepare_output_stream(None, channels, ask);
+        }
+        let s = driver.prepare_input_stream(None, ins, ask)?;
+        driver.prepare_output_stream(s.input, channels, ask)
     };
-    let stream = streams.map_err(|e| e.to_string())?.output.ok_or("the driver made no output buffers")?;
+    let tries = [(ins, ask), (ins, None), (0, ask), (0, None)];
+    let mut streams = Err(sys::AsioError::NoDrivers);
+    for (i, a) in tries.into_iter().filter(|&(i, _)| i == 0 || in_format.is_some()) {
+        streams = prepare(i, a);
+        if streams.is_ok() {
+            break;
+        }
+    }
+    let streams = streams.map_err(|e| e.to_string())?;
+    let input = streams.input.filter(|i| !i.buffer_infos.is_empty());
+    let stream = streams.output.ok_or("the driver made no output buffers")?;
+    let in_halves = Halves(input.as_ref().map_or(Vec::new(), |i| i.buffer_infos.iter().map(|b| b.buffers.map(|p| p as usize)).collect()));
+    let inputs = in_halves.0.len() as u16;
+    let (in_format, in_big) = in_format.unwrap_or((Format::F32, false));
     let frames = stream.buffer_size.max(1) as usize;
     // Each channel's two halves (the driver plays one while the callback fills the other).
     let halves = Halves(stream.buffer_infos.iter().map(|b| b.buffers.map(|p| p as usize)).collect());
@@ -119,6 +147,18 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
             // Safety: the driver's buffer holds `frames` samples of `format` until the buffers are disposed of, which
             // only happens after this callback is removed (`AsioOut::drop`).
             unsafe { write(b[half] as *mut u8, sum, side, frames, format, big) };
+        }
+        // The inputs of the same block, while One-click audio recording records.
+        let cap = crate::capture::capture();
+        if cap.on() && !in_halves.0.is_empty() {
+            let last = in_halves.0.len() - 1;
+            let n = in_format.bytes();
+            cap.push(frames, |ch, f| {
+                let p = in_halves.0[ch.min(last)][half] as *const u8;
+                // Safety: the driver's input buffer holds `frames` samples of `in_format` while this callback runs.
+                let b = unsafe { std::slice::from_raw_parts(p.add(f * n), n) };
+                decode(b, in_format, in_big)
+            });
         }
     });
     // Drivers may ask to be reset while they start; that is not a reason to open them anew.
@@ -155,8 +195,10 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
     out.driver.start().map_err(|e| e.to_string())?;
     started.store(true, Ordering::Release);
     let buffers = (range.min.max(1) as u32, range.max.max(1) as u32);
-    let latency = out.driver.latencies().ok().map(|l| l.output).filter(|&l| l > 0).map(|l| l as u32);
-    Ok(Opened { out, rate: now.round() as u32, frames: frames as u32, buffers, channels: channels as u16, rates, sizes, latency })
+    let lat = out.driver.latencies().ok();
+    let latency = lat.as_ref().map(|l| l.output).filter(|&l| l > 0).map(|l| l as u32);
+    let input_latency = lat.map(|l| l.input).filter(|&l| l > 0 && inputs > 0).map(|l| l as u32);
+    Ok(Opened { out, rate: now.round() as u32, frames: frames as u32, buffers, channels: channels as u16, inputs, rates, sizes, latency, input_latency })
 }
 
 /// The lengths of `audio_cfg::BUFFERS` a driver takes: within its range, and a power of two or a whole number of steps
@@ -262,6 +304,27 @@ fn encode(x: f32, format: Format, big: bool, out: &mut [u8]) {
     out.copy_from_slice(b);
 }
 
+/// One sample from the driver's `format` (`bytes` long) as a float.
+fn decode(b: &[u8], format: Format, big: bool) -> f32 {
+    let mut w = [0u8; 8];
+    let n = format.bytes();
+    w[..n].copy_from_slice(&b[..n]);
+    if big {
+        w[..n].reverse();
+    }
+    match format {
+        Format::Int { bytes, bits } => {
+            // Sign-extend the word, then scale by the bits used (low bits of the word).
+            let shift = 64 - 8 * bytes as u32;
+            let v = (i64::from_le_bytes(w) << shift) >> shift;
+            let full = ((1i64 << (bits - 1)) - 1) as f64;
+            (v as f64 / full) as f32
+        }
+        Format::F32 => f32::from_le_bytes([w[0], w[1], w[2], w[3]]),
+        Format::F64 => f64::from_le_bytes(w) as f32,
+    }
+}
+
 /// Which of the stereo mix an output gets: one side, or both summed and halved (a driver with one output).
 #[derive(Clone, Copy)]
 enum Side {
@@ -313,6 +376,20 @@ mod tests {
         assert_eq!(bytes(0.25, ASIOSTFloat32MSB), 0.25f32.to_be_bytes());
         assert_eq!(bytes(-0.5, ASIOSTFloat64LSB), (-0.5f64).to_le_bytes());
         assert_eq!(Format::of(&ASIOSTDSDInt8LSB1), None, "DSD is not written");
+    }
+
+    /// Input samples read back as written, every format either way round.
+    #[test]
+    fn samples_are_read_as_the_driver_gives_them() {
+        use sys::AsioSampleType::*;
+        for t in [ASIOSTInt16LSB, ASIOSTInt24MSB, ASIOSTInt32LSB, ASIOSTInt32LSB24, ASIOSTInt32MSB16, ASIOSTFloat32MSB, ASIOSTFloat64LSB] {
+            let (f, big) = Format::of(&t).expect("a format");
+            for x in [0.5f32, -0.25, -1.0, 0.0] {
+                let mut b = vec![0; f.bytes()];
+                encode(x, f, big, &mut b);
+                assert!((decode(&b, f, big) - x).abs() < 1e-4, "{t:?} {x}");
+            }
+        }
     }
 
     /// A buffer gets one side of the stereo mix; a driver's only output gets both, halved.

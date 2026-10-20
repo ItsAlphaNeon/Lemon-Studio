@@ -84,6 +84,23 @@ pub const FILE_EXIT: usize = 16;
 pub const OPT_THEME: usize = 5;
 /// OPTIONS > Metronome (spec: ui/metronome.md §1).
 pub const METRONOME_LABEL: &str = "Metronome";
+/// OPTIONS > the record options (spec: ui/recording.md §3).
+pub const PRECOUNT_LABEL: &str = "Recording precount";
+pub const WAIT_LABEL: &str = "Start on input";
+pub const BLEND_LABEL: &str = "Blend recorded notes";
+pub const LOOP_LABEL: &str = "Loop record";
+
+/// The record option an OPTIONS entry switches.
+pub fn record_option(label: &str) -> Option<crate::record::Opt> {
+    use crate::record::Opt;
+    match label {
+        PRECOUNT_LABEL => Some(Opt::Precount),
+        WAIT_LABEL => Some(Opt::Wait),
+        BLEND_LABEL => Some(Opt::Blend),
+        LOOP_LABEL => Some(Opt::Loop),
+        _ => None,
+    }
+}
 /// OPTIONS > Auto scrolling (spec: ui/auto-scrolling.md §1).
 pub const AUTOSCROLL_LABEL: &str = "Auto scrolling";
 /// OPTIONS > Enable groups (spec: ui/enable-groups.md §1).
@@ -201,10 +218,10 @@ const VIEW_ITEMS: &[Item] = &[
     it("Channel rack", "F6").on().tick(),
     it("Mixer", "F9").on().tick(),
     it("Browser", "Alt+F8").on().tick(),
-    it("Project picker", "Ctrl+F8"),
+    it("Project picker", "Ctrl+F8").on(),
     it("Plugin picker", "F8").on(),
     it("Tempo tapper", "Ctrl+F5").tick(),
-    it("Touch controller", "Alt+F7"),
+    it("Touch controller", "Alt+F7").tick(),
     it("Script output", ""),
     it("Toolbars", "").sub(),
     it("Plugin performance monitor", ""),
@@ -245,11 +262,11 @@ const OPTIONS: &[Item] = &[
     head("Switches"),
     it("Typing keyboard to piano", "Ctrl+T").on().tick(),
     it(METRONOME_LABEL, "Ctrl+M").on().tick(),
-    it("Recording precount", "Ctrl+P").tick(),
-    it("Start on input", "Ctrl+I").tick(),
-    it("Blend recorded notes", "Ctrl+B").tick(),
+    it(PRECOUNT_LABEL, "Ctrl+P").on().tick(),
+    it(WAIT_LABEL, "Ctrl+I").on().tick(),
+    it(BLEND_LABEL, "Ctrl+B").on().tick(),
     it(STEP_EDIT_LABEL, "Ctrl+E").on().tick(),
-    it("Loop record", "").tick(),
+    it(LOOP_LABEL, "").on().tick(),
     it(AUTOSCROLL_LABEL, "").on().tick(),
     it(GROUPS_LABEL, "Shift+Alt+G").on().tick(),
     it("Multilink to controllers", "Ctrl+J").tick(),
@@ -257,15 +274,15 @@ const OPTIONS: &[Item] = &[
 
 const TOOLS_A: &[Item] = &[
     it("Browser find...", "Ctrl+F"),
-    it("One-click audio recording", "").sub(),
+    it(ONE_CLICK_LABEL, "").sub(),
     it("Chord progression tool...", ""),
     it("Control creator", ""),
     head("Clipboard"),
     it("Save audio clipboard to browser", ""),
     it("Save MIDI clipboard to browser", ""),
     head("Score logger"),
-    it("Dump score log to selected pattern", "").sub(),
-    it("Clear log", ""),
+    it(DUMP_LOG_LABEL, "").sub(),
+    it(CLEAR_LOG_LABEL, "").on(),
     head("Audio logger"),
     it("Enabled", "").tick(),
     it("Settings", "").sub(),
@@ -357,6 +374,8 @@ fn win_of(label: &str) -> Option<Win> {
         "Plugin performance monitor" => Win::Perf,
         // spec: ui/tempo-tapper.md §1
         "Tempo tapper" => Win::Tapper,
+        // spec: ui/touch-controller.md §2
+        "Touch controller" => Win::Touch,
         _ => return None,
     })
 }
@@ -368,7 +387,7 @@ pub fn works(menu: usize, item: &Item) -> bool {
     item.works
         || ((menu == OPTIONS_MENU || menu == ADD_MENU) && crate::views::settings::tab_for_menu(item.label).is_some())
         || (menu == PATTERNS && crate::patterns::Cmd::from_label(item.label).is_some())
-        || (menu == VIEW && (win_of(item.label).is_some() || item.label == "Plugin picker"))
+        || (menu == VIEW && (win_of(item.label).is_some() || matches!(item.label, "Plugin picker" | "Project picker")))
         || (menu == EDIT_MENU && matches!(item.label, "Undo" | "Redo"))
         || crate::params::menu_handles(item.label)
         || crate::browser::Jump::from_label(menu, item.label).is_some()
@@ -431,6 +450,9 @@ fn opens_sub(menu: usize, item: &Item) -> bool {
 
 /// TOOLS > Switch all plugin editors to ▸ and Change declicking for selected channels to ▸, also in the channel rack's
 /// options menu (spec: ui/channel-rack.md §17).
+pub const ONE_CLICK_LABEL: &str = "One-click audio recording";
+pub const DUMP_LOG_LABEL: &str = "Dump score log to selected pattern";
+pub const CLEAR_LOG_LABEL: &str = "Clear log";
 pub const EDITORS_LABEL: &str = "Switch all plugin editors to";
 pub const DECLICK_LABEL: &str = "Change declicking for selected channels to";
 /// TOOLS > Switch all / selected audio clip channels to ▸, also in the channel rack's options menu (spec:
@@ -446,6 +468,10 @@ pub fn submenu(menu: usize, label: &str) -> Option<fn(&State) -> Vec<crate::play
         // spec: ui/plugin-menu.md §1: the effects, a pick into the selected mixer track's first empty slot as from F8.
         (ADD_MENU, "Effect") => Some(|s| crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(None), true)),
         (TOOLS_MENU, EDITORS_LABEL) => Some(|_| crate::rack::editor_items()),
+        // spec: ui/one-click-recording.md §2
+        (TOOLS_MENU, ONE_CLICK_LABEL) => Some(crate::one_click::items),
+        // spec: ui/recording.md §6
+        (TOOLS_MENU, DUMP_LOG_LABEL) => Some(crate::score_log::items),
         (TOOLS_MENU, DECLICK_LABEL) => Some(crate::rack::declick_items),
         (TOOLS_MENU, CLIPS_ALL_LABEL) => Some(|_| crate::rack::stretch_items(true)),
         (TOOLS_MENU, CLIPS_SEL_LABEL) => Some(|_| crate::rack::stretch_items(false)),
@@ -473,6 +499,7 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
         (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
         (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
         (Mark::Check(_), _) if item.label == METRONOME_LABEL => Mark::Check(crate::metronome::on()),
+        (Mark::Check(_), _) if let Some(o) = record_option(item.label) => Mark::Check(o.on()),
         (Mark::Check(_), _) if item.label == AUTOSCROLL_LABEL => Mark::Check(crate::autoscroll::on()),
         (Mark::Check(_), _) if item.label == GROUPS_LABEL => Mark::Check(crate::enable_groups::on()),
         (Mark::Check(_), _) if item.label == STEP_EDIT_LABEL => Mark::Check(crate::step_edit::on()),
@@ -801,7 +828,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["Effect", "Toolbars", CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");
@@ -809,7 +836,7 @@ mod tests {
         // ADD > Effect: the effect plugin menu as a submenu (spec: ui/plugin-menu.md §1-2).
         let fx = submenu(ADD_MENU, "Effect").unwrap()(&app.state);
         assert_eq!(fx, crate::plugin_menu::items(&app.state, crate::plugin_menu::Target::Fx(None), true));
-        for label in ["New from template", "Import", "One-click audio recording", "Set keyboard focus for all plugins to"] {
+        for label in ["New from template", "Import", "Set keyboard focus for all plugins to"] {
             let (mi, it) = MENUS.iter().enumerate().find_map(|(mi, m)| m.cols.iter().flat_map(|(_, items)| items.iter()).find(|it| it.label == label).map(|it| (mi, it))).unwrap();
             assert!(!works(mi, it), "{label} stays greyed out");
         }

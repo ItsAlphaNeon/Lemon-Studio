@@ -22,6 +22,7 @@ pub mod project_forms;
 pub mod rack;
 pub mod save_form;
 pub mod tapper;
+pub mod touch;
 pub mod theme_preview;
 pub mod toolbar;
 pub mod typein;
@@ -164,6 +165,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::Plugin => ui.part(Seg::Win(win), a, |ui| channel_win::paint(ui, s, f)),
             Win::Perf => ui.part(Seg::Win(win), a, |ui| perf::paint(ui, s, f)),
             Win::Tapper => ui.part(Seg::Win(win), a, |ui| tapper::paint(ui, s, f)),
+            Win::Touch => ui.part(Seg::Win(win), a, |ui| touch::paint(ui, s, f)),
             _ => {}
         }
         ui.c.pop_clip();
@@ -222,6 +224,7 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
         Win::Plugin => channel_win::rect(s),
         Win::Perf => perf::bounds(s),
         Win::Tapper => tapper::bounds(s),
+        Win::Touch => touch::bounds(s),
         w => s.win_rect(w),
     }
 }

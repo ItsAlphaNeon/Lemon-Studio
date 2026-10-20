@@ -28,7 +28,7 @@ pub const TOGGLE_BROWSER: Combo = Combo { key: "shortcut_toggle_browser", label:
 /// Opens or closes the plugin menu (`App::toggle_plugin_menu`).
 pub const TOGGLE_PLUGIN_PICKER: Combo =
     Combo { key: "shortcut_toggle_plugin_picker", label: "Toggle plugin picker", choices: F8_KEYS, default: 0 };
-/// Lemon Studio has no project picker yet: its key does nothing for now.
+/// Opens or closes the project picker (`App::toggle_project_picker`).
 pub const TOGGLE_PROJECT_PICKER: Combo =
     Combo { key: "shortcut_toggle_project_picker", label: "Toggle project picker", choices: F8_KEYS, default: 2 };
 /// Shows the plugin database: the browser on its Plugin database tab (`App::show_plugin_database`).
@@ -205,7 +205,8 @@ impl App {
             Some(F8::Browser) => self.act(Action::ToggleWin(Win::Browser)),
             Some(F8::PluginPicker) => self.toggle_plugin_menu(),
             Some(F8::PluginDatabase) => self.show_plugin_database(),
-            Some(F8::ProjectPicker) | None => {}
+            Some(F8::ProjectPicker) => self.toggle_project_picker(),
+            None => {}
         }
     }
 

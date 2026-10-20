@@ -284,7 +284,12 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         }
         let g = Rect::new(r.x + 8.0, r.y + 8.0, r.w - 16.0, r.h - 16.0);
         let c = if on { t.on_glyph } else { t.glyph };
-        if icon == Icon::Play && on {
+        if icon == Icon::Play && s.rec.waiting {
+            // Waiting for input (spec: ui/recording.md §3): three dots.
+            for k in [-1.0, 0.0, 1.0] {
+                ui.c.fill_circle(g.cx() + k * g.w * 0.32, g.cy(), (g.w * 0.1).max(1.5), c);
+            }
+        } else if icon == Icon::Play && on {
             // Pause: two bars.
             let (w, h) = (g.w * 0.22, g.h * 0.7);
             let y = g.cy() - h / 2.0;
@@ -294,18 +299,30 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
             icons::draw(ui.c, icon, g, c);
         }
     }
-    // Record: not available yet, so drawn greyed out (no hover, no press). Its dot is white under High visibility
-    // (`crate::high_visibility`), greyed out the same way.
+    // Record (spec: ui/recording.md §2): armed, the whole round face fills with the record colour, a lighter rim and a
+    // dark dot in the middle; disarmed, a small dimmed dot. The record colour is white under High visibility
+    // (`crate::high_visibility`).
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
-    ui.off(rec, "Recording");
+    let hov = ui.hit(rec, Action::Record, crate::record::hint());
+    let armed = s.rec.armed;
+    let down = ui.down(rec, &Action::Record);
     let dot = crate::high_visibility::record_dot(t, crate::high_visibility::on());
+    let face = Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0);
     if lemon {
-        os_ui::kit::button(ui.c, t, Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0), os_ui::kit::State::NORMAL.with_disabled(true));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, dot.mix(t.toolbar, 0.6));
+        os_ui::kit::button(ui.c, t, face, os_ui::kit::State::new(hov, down, false));
     } else {
         ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.toolbar_line.shade(-0.25));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, t.button.shade(-0.12));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, dot.mix(t.button, 0.7).shade(-0.15));
+        let bg = if hov || down { t.button_hi } else { t.button.shade(-0.12) };
+        ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, bg);
+    }
+    if armed {
+        let fill = if hov || down { dot.shade(0.12) } else { dot };
+        ui.c.fill_circle(rec.cx(), rec.cy(), 12.0, fill);
+        ui.c.stroke_circle(rec.cx(), rec.cy(), 11.4, 1.6, dot.shade(0.45));
+        ui.c.fill_circle(rec.cx(), rec.cy(), 4.6, dot.shade(-0.6));
+    } else {
+        let bg = if lemon { t.toolbar } else { t.button.shade(-0.12) };
+        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, if hov { dot } else { dot.mix(bg, 0.35) });
     }
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);
@@ -339,19 +356,15 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         return;
     }
     tool_button(ui, btn(580.0, 4.0), Icon::Metronome, crate::metronome::on(), Action::Metronome, "Metronome (Ctrl+M) - right-click for the sound");
-    for (i, (icon, hint)) in [
-        (Icon::WaitInput, "Wait for input to start recording"),
-        (Icon::Countdown, "Countdown before recording"),
-        (Icon::Blend, "Blend recording"),
-        (Icon::LoopRecord, "Loop recording"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if btn(613.0 + 33.0 * i as f32, 4.0).right() > fit {
+    // Start on input, Recording precount, Blend, Loop record (spec: ui/recording.md §3-4).
+    use crate::record::Opt;
+    let opts = [(Icon::WaitInput, Opt::Wait), (Icon::Countdown, Opt::Precount), (Icon::Blend, Opt::Blend), (Icon::LoopRecord, Opt::Loop)];
+    for (i, (icon, opt)) in opts.into_iter().enumerate() {
+        let r = btn(613.0 + 33.0 * i as f32, 4.0);
+        if r.right() > fit {
             return;
         }
-        tool_button(ui, btn(613.0 + 33.0 * i as f32, 4.0), icon, false, Action::Placeholder(hint), hint);
+        tool_button(ui, r, icon, opt.on(), Action::RecOpt(opt), crate::record::option_hint(opt));
     }
 
     // Song position (B:S:T, or M:S:CS: a click toggles, right-click opens the mode menu).
@@ -386,13 +399,18 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
     let bar_x = (step_x - 8.0 - bw).max(tp.x + 2.0);
     ui.c.push_clip(tp.inset(1.0));
     let g = digits;
-    ui.c.text(big, bar_x, -3.0, g, &bar_s);
-    ui.c.fill_rect(Rect::new(step_x - 5.5, 20.0, 2.0, 2.5), g);
-    ui.c.fill_rect(Rect::new(step_x - 5.5, 30.0, 2.0, 2.5), g);
-    ui.c.text(big, step_x, -3.0, g, &step_s);
-    ui.c.fill_rect(Rect::new(tick_x - 5.0, 21.0, 2.0, 2.0), g);
-    ui.c.fill_rect(Rect::new(tick_x - 5.0, 29.5, 2.0, 2.0), g);
-    ui.c.text(small, tick_x, 9.0, g, &tick_s);
+    if let Some(c) = s.rec.count.filter(|c| c.left() > 0) {
+        // A recording count-in (spec: ui/recording.md §3): the beats left.
+        ui.c.text_center(Font::light(22, 8), Rect::new(tp.x, tp.y + 2.0, tp.w, tp.h - 2.0), g, &format!("REC IN {}", c.left()));
+    } else {
+        ui.c.text(big, bar_x, -3.0, g, &bar_s);
+        ui.c.fill_rect(Rect::new(step_x - 5.5, 20.0, 2.0, 2.5), g);
+        ui.c.fill_rect(Rect::new(step_x - 5.5, 30.0, 2.0, 2.5), g);
+        ui.c.text(big, step_x, -3.0, g, &step_s);
+        ui.c.fill_rect(Rect::new(tick_x - 5.0, 21.0, 2.0, 2.0), g);
+        ui.c.fill_rect(Rect::new(tick_x - 5.0, 29.5, 2.0, 2.0), g);
+        ui.c.text(small, tick_x, 9.0, g, &tick_s);
+    }
     ui.c.pop_clip();
     let label = s.clock.label();
     ui.c.text_right(Font::condensed(7, 3).bold(), 871.0, 5.0, if lemon { t.text_dim } else { t.glyph.shade(-0.1) }, label);
@@ -471,9 +489,12 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
             Icon::Save => Action::Util(Util::Save),
             Icon::SaveRender => Action::MenuItem(0, menus::FILE_EXPORT),
             Icon::Info => Action::MenuItem(menus::OPTIONS_MENU, menus::OPT_INFO),
+            // spec: ui/one-click-recording.md §2: lit while it records; a click then stops.
+            Icon::Mic => Action::OneClick,
             _ => Action::Placeholder(hint),
         };
-        tool_button(ui, r, icon, false, action, hint);
+        let lit = icon == Icon::Mic && s.rec.audio;
+        tool_button(ui, r, icon, lit, action, hint);
     }
 }
 
@@ -742,10 +763,10 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), s.shown(Win::ChannelRack), "Channel rack (F6)"),
         (Icon::Mixer, Action::ToggleWin(Win::Mixer), s.shown(Win::Mixer), "Mixer (F9)"),
         (Icon::Browser, Action::ToggleWin(Win::Browser), s.show_browser, "Browser / Plugin picker (Alt+F8)"),
-        (Icon::Project, Action::Placeholder("Project picker"), false, "Project picker / Plugin picker (Ctrl+F8)"),
+        (Icon::Project, Action::ProjectPicker, false, "Project picker / Plugin picker (Ctrl+F8)"),
         (Icon::Plug, Action::PickerOpen, false, "Plugin picker (F8)"),
         (Icon::Kick, Action::ToggleWin(Win::Tapper), s.shown(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
-        (Icon::Touch, Action::Placeholder("Touch controller"), false, "Touch controller (Alt+F7)"),
+        (Icon::Touch, Action::ToggleWin(Win::Touch), s.shown(Win::Touch), "Touch controller (Alt+F7)"),
         // FL's store: kept, greyed, for a repository of free and open-source plugins (spec: ui/main-window.md §3).
         (Icon::Plug, Action::Placeholder("Plugin repository"), false, "Plugin repository"),
     ];
