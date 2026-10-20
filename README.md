@@ -83,7 +83,8 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ |
 | Exporting audio | 🚧 | Song or pattern to a 32-bit float WAV file; no MP3 or FLAC yet |
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers; no note recording yet |
-| Undo | 🚧 | One history for the whole project, with redo and the browser's History; not yet for mixer faders, plugin parameters or project settings |
+| Undo | 🚧 | One history for the whole project, with redo and the browser's History; not yet for project settings or plugin parameters changed in their editors |
+| Scripting and assistants | 🚧 | Scripts, tests and AI assistants read and edit projects over a local socket, every change undoable; see [docs/control-plane.md](docs/control-plane.md) |
 | Audio drivers | 🚧 | WASAPI (shared and exclusive) and ASIO® (output) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
 | Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; Lemon plugin editors in the Lemon design only |
@@ -309,6 +310,17 @@ Project-file corpus tests run when `OPENSTUDIO_FLP_CORPUS` points to a text file
 project files are never committed to this repository.
 The watermark test (`cargo test -p watermark`) checks that every source file opens with its header: a copyright line
 for each of its copyright holders, its SPDX licence identifier and the project's name.
+
+### Scripting and assistants
+
+`--control <socket>` lets scripts, tests and AI assistants read and change the open project over a local socket
+(JSON-RPC 2.0), and `--serve <socket> [project.flp]` does the same without a window. Each change is an undo step named
+after the client; clients can be limited to reading or to proposing changes the user accepts. The protocol and its
+commands are in [docs/control-plane.md](docs/control-plane.md).
+
+```bash
+cargo run -p os-app --release -- --control /tmp/lemon.sock path/to/project.flp
+```
 
 ### Command-line tools
 

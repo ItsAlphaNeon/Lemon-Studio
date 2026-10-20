@@ -46,6 +46,9 @@ pub fn start(at: &str, level: Level, wake: fn()) -> std::io::Result<Server> {
                 let _ = std::fs::remove_file(at);
             }
             let l = std::os::unix::net::UnixListener::bind(at)?;
+            // Only this user may connect.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o600))?;
             shown = at.to_string();
             std::thread::Builder::new().name("control".into()).spawn(move || {
                 for (conn, s) in l.incoming().flatten().enumerate() {

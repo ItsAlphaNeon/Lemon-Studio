@@ -357,6 +357,8 @@ fn clients_connect_over_a_local_socket() {
     let path = std::env::temp_dir().join(format!("lemon-control-{}.sock", std::process::id()));
     let mut a = app();
     a.listen(server::start(path.to_str().unwrap(), Level::Edit, || {}).unwrap());
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "this user only");
     let s = std::os::unix::net::UnixStream::connect(&path).unwrap();
     let mut w = s.try_clone().unwrap();
     let mut r = BufReader::new(s);

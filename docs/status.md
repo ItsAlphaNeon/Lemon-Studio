@@ -163,12 +163,28 @@ Not yet: Align all channel editors, Arrange windows.
 - Covers the piano roll, the playlist, step-sequencer edits and knob turns (channel, main, mixer panning and
   stereo separation, effect mix, send levels, swing), sample loads, the project's initial values, PATTERNS ▸ Split
   by channel and ADD's audio and automation clip channels
+- The mixer: faders, mute, polarity and swap buttons, the equaliser graph, routing, colours, names, effect slots
+  (adding, removing, moving, their lights) and adding, moving, deleting and trimming tracks
+- The channel rack's colours, names, cloning, moving, sorting, deleting, mixer track assignments, groups and Burn
+  loops, and the PATTERNS menu's colours, names, inserting, cloning, moving and deleting
+- Changes made through the control plane (see Scripting and assistants), named after the client that made them
 - The browser's Current project ▸ History lists the steps from "Last reset"; undone steps are grey, and a click
   on one goes back or forward to it
 - General settings ▸ Undo history: Maximum undo levels, Undo knob tweaks, Alternate undo mode, and showing the
   history in the browser, newest first if wanted
-- Not yet: mixer faders and plugin parameters, other ways of adding or deleting channels, project settings;
+- Not yet: project settings (the tempo box, the Project page) and plugin parameters changed in their editors;
   "Put undone recordings in the recycle bin" waits for recording
+
+## 🚧 Scripting and assistants
+
+- The control plane ([control-plane.md](control-plane.md)): `--control <socket>` beside the window, `--serve` without
+  one; JSON-RPC 2.0 over a Unix socket or a local port
+- Reads the project (channels, mixer, patterns, notes, playlist, plugin parameters) with stable ids, and changes it
+  with commands: one undo step per request, applied whole or not at all
+- Read-only, propose-only (the user applies or discards each proposal) and edit levels; saving to a file asks the
+  user while there is a window
+- Events for every change, including edits in the interface
+- Not yet: live commands to the playing engine, a native project format, rendering through it
 
 ## 🚧 Audio drivers
 
