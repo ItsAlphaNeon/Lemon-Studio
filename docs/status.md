@@ -166,7 +166,9 @@ Not yet: Align all channel editors, Arrange windows.
 - Record options (toolbar, OPTIONS, Ctrl+I / Ctrl+P / Ctrl+B): Start on input (Play waits for the first note, which
   is recorded at the start), Recording precount (1 or 2 bars of metronome count-in, "REC IN n" on the clock) and
   Blend (a take keeps the notes it overlaps)
-- Not yet: audio recording, Loop recording
+- Loop record (toolbar, OPTIONS): off, recording runs on past the pattern's or song's end and the pattern grows;
+  on, playback loops and each pass is a take (one undo step) that replaces what the pass before recorded
+- Not yet: audio recording
 
 ## 🚧 Undo
 

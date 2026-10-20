@@ -869,6 +869,9 @@ pub struct Engine {
     /// start and the metronome counts in (spec: ui/recording.md §3).
     count_in: u64,
     count_in_len: u64,
+    /// Recording with Loop record off (`set_run_on`): while the flag is set, a looping playback runs on past its end
+    /// instead of going back to the start (spec: ui/recording.md §4).
+    run_on: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     tempo: f64,
     ppq: u16,
     /// Steps per beat (event 18): the tempo counts beats of this many sixteenths, so the ticks run at `tempo × steps /
@@ -1321,6 +1324,7 @@ impl Engine {
             held: false,
             count_in: 0,
             count_in_len: 0,
+            run_on: None,
             fade_out: 0,
             fade_in: 0,
             fade_len: 0,
@@ -1374,6 +1378,11 @@ impl Engine {
         self.count_in = bar * u64::from(bars);
         self.count_in_len = self.count_in;
         self.tail_done = false;
+    }
+
+    /// While `flag` is set, a looping playback runs on past its end (spec: ui/recording.md §4); it is read every tick.
+    pub fn set_run_on(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.run_on = Some(flag);
     }
 
     /// Ticks of the count-in left to render (0: none, or over).
@@ -1836,6 +1845,7 @@ impl Engine {
         self.awake = old.awake;
         (self.held, self.fade_out, self.fade_in, self.fade_len) = (old.held, old.fade_out, old.fade_in, old.fade_len);
         (self.count_in, self.count_in_len) = (old.count_in, old.count_in_len);
+        self.run_on = old.run_on.take();
         self.inst_offs = std::mem::take(&mut old.inst_offs);
         self.inst_offs.retain(|o| o.1 < n);
         self.inst_shapes = std::mem::take(&mut old.inst_shapes);
@@ -2110,8 +2120,10 @@ impl Engine {
         if self.count_in > 0 {
             return self.render_count_in();
         }
-        // A looping engine starts again at tick 0 when the pattern is over; voices and effects carry on.
-        if self.looping && self.end_tick > 0 && self.tick >= self.end_tick {
+        // A looping engine starts again at tick 0 when the pattern is over; voices and effects carry on. Recording
+        // with Loop record off, it runs on.
+        let run_on = self.run_on.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+        if self.looping && !run_on && self.end_tick > 0 && self.tick >= self.end_tick {
             self.wrap();
         }
         let tick = self.tick;
@@ -5827,6 +5839,27 @@ mod tests {
             assert!(f.abs_diff(*b) <= 3, "{f} vs beat {b}");
         }
         assert!(on[0].1 > on[1].1 * 1.3 && on[1].1 < on[2].1 * 1.3);
+    }
+
+    // spec: ui/recording.md §4
+    #[test]
+    fn run_on_plays_past_the_loop_end_while_set() {
+        let mut p = project(vec![], vec![]);
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_looping(true);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        e.set_run_on(flag.clone());
+        // Three seconds at 130 BPM: past the one-bar pattern's end (1.85 s).
+        let mut out = vec![0.0; 2 * 48000 * 3];
+        e.process(&mut out);
+        assert!(e.tick_position() > 384.0, "ran on: {}", e.tick_position());
+        assert!(!e.finished());
+        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        let mut out = vec![0.0; 2 * 4800];
+        e.process(&mut out);
+        assert!(e.tick_position() < 384.0, "back to the start: {}", e.tick_position());
     }
 
     #[test]

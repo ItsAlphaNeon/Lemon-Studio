@@ -1628,6 +1628,9 @@ impl Session {
         if song && at.count_in > 0 {
             e.set_count_in(at.count_in);
         }
+        if song {
+            e.set_run_on(crate::record::run_on_flag());
+        }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));
         let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), held: AtomicBool::new(false), report: AtomicBool::new(song) });

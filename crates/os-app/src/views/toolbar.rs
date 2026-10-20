@@ -356,19 +356,16 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         return;
     }
     tool_button(ui, btn(580.0, 4.0), Icon::Metronome, crate::metronome::on(), Action::Metronome, "Metronome (Ctrl+M) - right-click for the sound");
-    // Start on input, Recording precount, Blend (spec: ui/recording.md §3); Loop recording is not built yet.
+    // Start on input, Recording precount, Blend, Loop record (spec: ui/recording.md §3-4).
     use crate::record::Opt;
-    for (i, (icon, opt)) in [(Icon::WaitInput, Opt::Wait), (Icon::Countdown, Opt::Precount), (Icon::Blend, Opt::Blend)].into_iter().enumerate() {
+    let opts = [(Icon::WaitInput, Opt::Wait), (Icon::Countdown, Opt::Precount), (Icon::Blend, Opt::Blend), (Icon::LoopRecord, Opt::Loop)];
+    for (i, (icon, opt)) in opts.into_iter().enumerate() {
         let r = btn(613.0 + 33.0 * i as f32, 4.0);
         if r.right() > fit {
             return;
         }
         tool_button(ui, r, icon, opt.on(), Action::RecOpt(opt), crate::record::option_hint(opt));
     }
-    if btn(712.0, 4.0).right() > fit {
-        return;
-    }
-    tool_button(ui, btn(712.0, 4.0), Icon::LoopRecord, false, Action::Placeholder("Loop recording"), "Loop recording");
 
     // Song position (B:S:T, or M:S:CS: a click toggles, right-click opens the mode menu).
     let tp = Rect::span(745.0, 873.0, 4.0, 36.0);

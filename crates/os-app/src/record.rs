@@ -33,6 +33,8 @@ pub enum Opt {
     WaitArmed,
     Precount,
     Blend,
+    /// Loop record (spec §4).
+    Loop,
 }
 
 impl Opt {
@@ -49,6 +51,7 @@ impl Opt {
             Opt::WaitArmed => ("rec_wait_armed", false),
             Opt::Precount => ("rec_precount", false),
             Opt::Blend => ("rec_blend", false),
+            Opt::Loop => ("rec_loop", false),
         }
     }
 
@@ -89,7 +92,24 @@ pub fn option_hint(o: Opt) -> &'static str {
     match o {
         Opt::Wait => "Start on input (Ctrl+I) - right-click for options",
         Opt::Precount => "Recording precount (Ctrl+P) - right-click for the length",
+        Opt::Loop => "Loop record (off: playback runs on past the end while recording)",
         _ => "Blend recorded notes (Ctrl+B)",
+    }
+}
+
+/// Set while Record is armed and Loop record is off: playback runs on past its end (spec §4). Every playback engine
+/// reads it (`Engine::set_run_on`); `App::record_tick` keeps it up to date. One per test thread under tests.
+pub fn run_on_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::{atomic::AtomicBool, Arc};
+    #[cfg(test)]
+    {
+        thread_local!(static TEST: Arc<AtomicBool> = Arc::new(AtomicBool::new(false)));
+        TEST.with(Arc::clone)
+    }
+    #[cfg(not(test))]
+    {
+        static FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+        FLAG.get_or_init(|| Arc::new(AtomicBool::new(false))).clone()
     }
 }
 
@@ -268,6 +288,7 @@ impl App {
         let name = match o {
             Opt::Wait => "Start on input",
             Opt::Precount => "Recording precount",
+            Opt::Loop => "Loop record",
             _ => "Blend recorded notes",
         };
         self.state.message = Some(format!("{name} {}", if on { "on" } else { "off" }));
@@ -471,9 +492,21 @@ impl App {
             self.state.rec.waiting = false;
             self.invalidate();
         }
+        let run_on = self.state.rec.armed && !Opt::Loop.on();
+        run_on_flag().store(run_on, std::sync::atomic::Ordering::Relaxed);
         let live = self.transport.playing() && !self.transport.paused();
+        // Playback went back to the start (a loop, or a jump back): the pass's take ends there, its held notes at the
+        // pattern's end; the next note starts a new take (spec §4).
+        let now = self.transport.tick();
+        if live && self.state.rec.last.is_some_and(|l| now < l) && self.state.rec.take.is_some() {
+            let held = std::mem::take(&mut self.state.rec.held);
+            for h in held {
+                self.write_held(h, Some(f64::MIN));
+            }
+            self.state.rec.take = None;
+        }
         if live {
-            self.state.rec.last = Some(self.transport.tick());
+            self.state.rec.last = Some(now);
         }
         let r = &self.state.rec;
         let changed = r.take.as_ref().is_some_and(|t| t.pattern != self.state.pattern);
@@ -578,8 +611,8 @@ mod tests {
         // 30..100 rounds to 24..96; 190..205 to 192..216 (the end rounds onto the start: one step long).
         key(&mut app, KeyCode::KeyZ, true, 30.0, false);
         assert!(app.state.rec.recording());
-        key(&mut app, KeyCode::KeyX, true, 190.0, false);
         key(&mut app, KeyCode::KeyZ, false, 100.0, false);
+        key(&mut app, KeyCode::KeyX, true, 190.0, false);
         key(&mut app, KeyCode::KeyX, false, 205.0, false);
         stop(&mut app);
         assert_eq!(notes(&app), [(24, 72, 0), (192, 24, 0)]);
@@ -787,6 +820,37 @@ mod tests {
         assert!(!app.state.rec.recording(), "not during the count-in");
         app.act(Action::Stop);
         assert!(app.state.rec.count.is_none(), "Stop ends it");
+    }
+
+    /// Loop record: the flag the engines read is set while armed with Loop record off; each pass of a loop is a take
+    /// of its own, which replaces what the pass before recorded there, and a note held over the loop ends at the
+    /// pattern's end (spec §4).
+    #[test]
+    fn loop_record_passes() {
+        use std::sync::atomic::Ordering;
+        let mut app = app();
+        app.record_tick();
+        assert!(!run_on_flag().load(Ordering::Relaxed), "disarmed");
+        app.toggle_record();
+        app.record_tick();
+        assert!(run_on_flag().load(Ordering::Relaxed), "armed, Loop record off: runs on");
+        app.toggle_record_option(Opt::Loop);
+        app.record_tick();
+        assert!(!run_on_flag().load(Ordering::Relaxed), "Loop record on: loops");
+        let len = f64::from(app.state.project.pattern_length(1).max(1));
+        let steps = app.state.history.len();
+        key(&mut app, KeyCode::KeyZ, true, 48.0, false);
+        key(&mut app, KeyCode::KeyZ, false, 96.0, false);
+        key(&mut app, KeyCode::KeyX, true, len - 24.0, false);
+        // The loop: a new pass, a new take.
+        key(&mut app, KeyCode::KeyC, true, 48.0, false);
+        key(&mut app, KeyCode::KeyC, false, 72.0, false);
+        stop(&mut app);
+        let l = len as u32;
+        assert_eq!(notes(&app), [(48, 24, 0), (l - 24, 24, 0)], "the second pass replaced the first's note at 48");
+        assert_eq!(app.state.history.len(), steps + 2, "one undo step per pass");
+        crate::history::undo(&mut app.state);
+        assert_eq!(notes(&app), [(48, 48, 0), (l - 24, 24, 0)]);
     }
 
     /// Blend recorded notes: a second take keeps the notes it overlaps (spec §3).

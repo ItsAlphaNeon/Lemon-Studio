@@ -88,6 +88,7 @@ pub const METRONOME_LABEL: &str = "Metronome";
 pub const PRECOUNT_LABEL: &str = "Recording precount";
 pub const WAIT_LABEL: &str = "Start on input";
 pub const BLEND_LABEL: &str = "Blend recorded notes";
+pub const LOOP_LABEL: &str = "Loop record";
 
 /// The record option an OPTIONS entry switches.
 pub fn record_option(label: &str) -> Option<crate::record::Opt> {
@@ -96,6 +97,7 @@ pub fn record_option(label: &str) -> Option<crate::record::Opt> {
         PRECOUNT_LABEL => Some(Opt::Precount),
         WAIT_LABEL => Some(Opt::Wait),
         BLEND_LABEL => Some(Opt::Blend),
+        LOOP_LABEL => Some(Opt::Loop),
         _ => None,
     }
 }
@@ -264,7 +266,7 @@ const OPTIONS: &[Item] = &[
     it(WAIT_LABEL, "Ctrl+I").on().tick(),
     it(BLEND_LABEL, "Ctrl+B").on().tick(),
     it(STEP_EDIT_LABEL, "Ctrl+E").on().tick(),
-    it("Loop record", "").tick(),
+    it(LOOP_LABEL, "").on().tick(),
     it(AUTOSCROLL_LABEL, "").on().tick(),
     it(GROUPS_LABEL, "Shift+Alt+G").on().tick(),
     it("Multilink to controllers", "Ctrl+J").tick(),
