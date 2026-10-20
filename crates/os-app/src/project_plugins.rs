@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -543,7 +544,7 @@ mod tests {
         let mut fl = lemon_parametric_eq_2::params::default_state();
         lemon_parametric_eq_2::params::set_field(&mut fl, 1, -600);
         let eq = lemon_parametric_eq_2::params::plugin_state_from_fl(&fl);
-        a.state.project.mixer[3].slots[2] = Some(SlotPlugin { name: LEMON_EQ.into(), state: Vec::new() });
+        a.state.project.mixer[3].slots[2] = Some(SlotPlugin { id: os_model::Id::NONE, name: LEMON_EQ.into(), state: Vec::new() });
         a.plugins.create_effect(3, 2, a.plugins.effect_index(LEMON_EQ).unwrap(), Some(&eq)).unwrap();
         a.save_to(path.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", a.state.message);
@@ -743,7 +744,7 @@ mod tests {
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert_eq!(saved.mixer[2].slots[1], Some(SlotPlugin { name: "Fruity Balance".into(), state: vec![9, 8, 7, 6] }));
+        assert_eq!(saved.mixer[2].slots[1], Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Balance".into(), state: vec![9, 8, 7, 6] }));
         assert_eq!(a.state.project.mixer[2].slots[1], saved.mixer[2].slots[1]);
     }
 
@@ -764,10 +765,10 @@ mod tests {
         a.state.project.channels[harmor].plugin_state = Some(vec![1, 2, 3]);
         let sytrus = crate::app::add_plugin_channel(&mut a.state.project, "Sytrus");
         a.state.project.channels[sytrus].plugin_state = Some(vec![4]);
-        a.state.project.mixer[2].slots[1] = Some(SlotPlugin { name: "Fruity Balance".into(), state: vec![5, 6] });
-        a.state.project.mixer[3].slots[0] = Some(SlotPlugin { name: "Gross Beat".into(), state: vec![7, 8, 9] });
+        a.state.project.mixer[2].slots[1] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Balance".into(), state: vec![5, 6] });
+        a.state.project.mixer[3].slots[0] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Gross Beat".into(), state: vec![7, 8, 9] });
         // A file id in another case than the folder name (files store `Fruity slicer`).
-        a.state.project.mixer[4].slots[0] = Some(SlotPlugin { name: "fruity balance".into(), state: vec![] });
+        a.state.project.mixer[4].slots[0] = Some(SlotPlugin { id: os_model::Id::NONE, name: "fruity balance".into(), state: vec![] });
         let (balance, gross, lower) = (fx_key(2, 1), fx_key(3, 0), fx_key(4, 0));
 
         a.host_native();
@@ -794,10 +795,10 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!((saved.channels[harmor].plugin.as_deref(), saved.channels[harmor].plugin_state.as_deref()), (Some("Harmor"), Some(&[11, 12][..])));
         assert_eq!((saved.channels[sytrus].plugin.as_deref(), saved.channels[sytrus].plugin_state.as_deref()), (Some("Sytrus"), Some(&[4][..])));
-        assert_eq!(saved.mixer[2].slots[1], Some(SlotPlugin { name: "Fruity Balance".into(), state: vec![13] }));
-        assert_eq!(saved.mixer[3].slots[0], Some(SlotPlugin { name: "Gross Beat".into(), state: vec![7, 8, 9] }));
+        assert_eq!(saved.mixer[2].slots[1], Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Balance".into(), state: vec![13] }));
+        assert_eq!(saved.mixer[3].slots[0], Some(SlotPlugin { id: os_model::Id::NONE, name: "Gross Beat".into(), state: vec![7, 8, 9] }));
         // The file's own spelling of the id is kept; the instance's state (its defaults) is written.
-        assert_eq!(saved.mixer[4].slots[0], Some(SlotPlugin { name: "fruity balance".into(), state: vec![0, 0] }));
+        assert_eq!(saved.mixer[4].slots[0], Some(SlotPlugin { id: os_model::Id::NONE, name: "fruity balance".into(), state: vec![0, 0] }));
     }
 
     /// The hidden "real native plugins" toggle: a 3x Osc channel and a parametric EQ slot played by the Open
@@ -819,7 +820,7 @@ mod tests {
         a.state.project.channels[row].plugin_state = Some(osc_file.clone());
         let mut eq_file = lemon_parametric_eq_2::params::default_state();
         lemon_parametric_eq_2::params::set_field(&mut eq_file, 1, -600);
-        a.state.project.mixer[2].slots[1] = Some(SlotPlugin { name: EQ_FILE_NAME.into(), state: eq_file.clone() });
+        a.state.project.mixer[2].slots[1] = Some(SlotPlugin { id: os_model::Id::NONE, name: EQ_FILE_NAME.into(), state: eq_file.clone() });
         let slot = fx_key(2, 1);
         let builtin_at = |a: &App, key| a.plugins.descriptor(key).is_some_and(|d| is_builtin(&d));
         let native_at = |a: &App, key| a.plugins.descriptor(key).is_some_and(|d| d.format == Format::Native);
@@ -895,7 +896,7 @@ mod tests {
             path: format!("C:/Plugins/{file}"),
             state: eq.clone(),
         };
-        let slot = |r: &PluginRef| Some(SlotPlugin { name: WRAPPER.into(), state: wrapper::encode(None, r) });
+        let slot = |r: &PluginRef| Some(SlotPlugin { id: os_model::Id::NONE, name: WRAPPER.into(), state: wrapper::encode(None, r) });
         a.state.project.mixer[2].slots[0] = slot(&saved_as("vst2", LEMON_EQ, "Lemon EQ.dll"));
         a.state.project.mixer[3].slots[0] = slot(&saved_as("clap", LEMON_EQ, "Lemon EQ.clap"));
         let row = crate::app::add_plugin_channel(&mut a.state.project, WRAPPER);

@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -82,6 +83,10 @@ pub enum Then {
     Signature(u16, u8, u8),
     /// The project's data folder: its questions and folder pickers (`crate::data_folder`).
     DataFolder(crate::data_folder::DThen),
+    /// A control-plane client's proposal: Yes applies it, No discards it (`crate::control::propose`).
+    Proposal(u64),
+    /// A control-plane client asks to save the project to this file: Yes saves it.
+    ClientSave(PathBuf),
 }
 
 /// What waits for the save-changes question.

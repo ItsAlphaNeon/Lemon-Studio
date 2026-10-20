@@ -22,6 +22,7 @@ mod browser;
 mod cable;
 mod clip_colors;
 mod clock;
+mod control;
 mod cpu;
 mod data_folder;
 mod device;
@@ -1553,7 +1554,7 @@ fn wake_ui() {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
     // A plugin scanner process (spec: ui/plugin-manager.md §4): loads one file, prints its plugins, ends.
     if args.first().map(String::as_str) == Some(plugin_scan::ARG) {
         plugin_scan::child_main(&args[1..]);
@@ -1571,6 +1572,15 @@ fn main() {
     if args.iter().any(|a| a == "--screenshot") {
         screenshot(&args);
         return;
+    }
+    // The control plane's socket (spec: roadmap/control-plane.md): beside the window, or without one.
+    let control = control::server::Flags::take(&mut args).unwrap_or_else(|e| {
+        eprintln!("Lemon Studio: {e}");
+        std::process::exit(2);
+    });
+    let level = control.level.unwrap_or(control::Level::Edit);
+    if let Some(at) = &control.serve {
+        control::server::serve_headless(at, level, control.token.clone(), args.first().map(std::path::PathBuf::from));
     }
     // Run from source: Lemon Studio's own plugins are rebuilt and installed before the plugin scan looks for them.
     plugin_rebuild::run();
@@ -1604,6 +1614,20 @@ fn main() {
         app.startup_project();
         // Ask for data folder "On startup": the New project form over it (spec: ui/data-folder.md §7).
         app.startup_form();
+    }
+    if let Some(at) = &control.control {
+        app.state.message = Some(match control::server::start(at, level, wake_ui) {
+            Ok(mut server) => {
+                if control.token.is_some() {
+                    server.token = control.token.clone();
+                }
+                let m = format!("Control plane: {}", server.describe());
+                eprintln!("Lemon Studio: {m}");
+                app.listen(server);
+                m
+            }
+            Err(e) => format!("Control plane: could not listen at {at}: {e}"),
+        });
     }
     // MIDI controllers play the selected channel (spec: ui/midi-input.md).
     app.midi = midi_in::MidiIn::open(wake_ui);

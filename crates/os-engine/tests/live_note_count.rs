@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -28,6 +29,7 @@ impl Instrument for Count {
 
 fn channel() -> os_model::Channel {
     os_model::Channel {
+        id: os_model::Id::NONE,
         index: 0,
         kind: os_model::ChannelKind::Plugin,
         name: None,

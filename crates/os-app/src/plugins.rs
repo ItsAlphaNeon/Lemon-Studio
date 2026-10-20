@@ -33,6 +33,9 @@ pub struct Available {
 
 pub struct Hosted {
     pub plugin: SharedPlugin,
+    /// The channel or slot plugin it plays (`os_model::Id`): the control plane keeps it with them when rows or slots
+    /// move under it (`App::follow_ids`). `Id::NONE` until the next tick takes the id of what is under its key.
+    pub owner: os_model::Id,
     /// Processing time and voices, read without locking the instance (spec: ui/plugin-performance.md §3,
     /// audio/voices.md §5).
     pub meter: Option<Arc<os_host::Meter>>,
@@ -93,6 +96,7 @@ impl Hosted {
         let (meter, attention, name) = plugin.lock().map(|p| (p.meter(), p.attention(), p.desc().name.clone())).unwrap_or_default();
         Hosted {
             plugin,
+            owner: os_model::Id::NONE,
             meter,
             name,
             #[cfg(plugin_windows)]
@@ -224,7 +228,14 @@ pub struct Plugins {
     /// Verdicts of the one-time child-process check a native plugin passes before its first load here (spec:
     /// plugins/fruity-abi.md "Crash containment"). `None`: no check (tests, where this program is the test harness).
     native_checks: Option<os_native::check::Checks>,
+    /// Instances that went with their channel or slot, by its id: (an effect, the plugin's uid, its saved state).
+    /// Only those whose channel or slot went (`keep`); an undo that brings it back hosts it again from here
+    /// (`App::follow_ids`); the oldest go past `STASH_MAX`.
+    pub stash: Vec<(os_model::Id, bool, String, Vec<u8>)>,
 }
+
+/// How many gone instances `Plugins::stash` keeps.
+const STASH_MAX: usize = 64;
 
 /// Lemon Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
 /// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio likewise (spec: plugins/lemon-3x-osc.md §6).
@@ -486,6 +497,28 @@ impl Plugins {
         self.presets.remove(&key);
     }
 
+    /// Keeps the state of the instance under `key`, about to go with its channel or slot, in `stash` by its owner's id.
+    pub fn keep(&mut self, key: usize) {
+        if let Some(h) = self.hosted.remove(&key) {
+            self.keep_hosted(&h, key >= FX_KEY);
+            self.hosted.insert(key, h);
+        }
+    }
+
+    /// `keep` for an instance already taken out of `hosted`.
+    fn keep_hosted(&mut self, h: &Hosted, fx: bool) {
+        if h.owner.is_none() || h.stopped() {
+            return;
+        }
+        let Some((uid, state)) = h.plugin.lock().ok().and_then(|p| Some((p.desc().uid(), p.save_state()?))) else { return };
+        let owner = h.owner;
+        self.stash.retain(|e| e.0 .0 != owner.0);
+        self.stash.push((owner, fx, uid, state));
+        if self.stash.len() > STASH_MAX {
+            self.stash.remove(0);
+        }
+    }
+
     /// Remembers the preset the instance under `key` holds and shows its name in the window's Presets box.
     pub fn set_preset(&mut self, key: usize, path: Option<PathBuf>) {
         match path {
@@ -517,11 +550,16 @@ impl Plugins {
                     }
                     moved.push((fx_key(nt, ns), self.hosted.remove(&k).unwrap()))
                 }
-                None => self.drop_key(k),
+                None => {
+                    self.keep(k);
+                    self.drop_key(k);
+                }
             }
         }
         for (k, h) in moved {
-            self.hosted.insert(k, h);
+            if let Some(old) = self.hosted.insert(k, h) {
+                self.keep_hosted(&old, true);
+            }
         }
     }
 
@@ -685,6 +723,7 @@ impl Plugins {
         }
         self.hosted.clear();
         self.presets.clear();
+        self.stash.clear();
     }
 
     /// The sample file a Lemon Sampler instance holds (its persisted `sample-path`), `Some("")` when it has none.
@@ -913,7 +952,12 @@ impl Plugins {
             if row >= FX_KEY {
                 self.hosted.insert(row, h);
             } else if let Some(n) = m(row) {
-                self.hosted.insert(n, h);
+                // Two instances mapped onto one row: the one there goes, kept.
+                if let Some(old) = self.hosted.insert(n, h) {
+                    self.keep_hosted(&old, false);
+                }
+            } else {
+                self.keep_hosted(&h, false);
             }
         }
     }
@@ -1128,9 +1172,9 @@ pub fn slot_label(name: &str) -> &str {
 /// state, so the file opens elsewhere; other effects by name).
 pub fn new_slot(name: &str) -> os_model::SlotPlugin {
     if name == LEMON_EQ {
-        os_model::SlotPlugin { name: EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() }
+        os_model::SlotPlugin { id: os_model::Id::NONE, name: EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() }
     } else {
-        os_model::SlotPlugin { name: name.into(), state: Vec::new() }
+        os_model::SlotPlugin { id: os_model::Id::NONE, name: name.into(), state: Vec::new() }
     }
 }
 /// File (in the user folder) remembering which native plugins passed the child-process check.
@@ -2830,7 +2874,7 @@ mod tests {
         a.state.hosted_rows.push(row);
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
         assert!(a.plugins.set_state(row, json.as_bytes()));
-        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { name: "Lemon Parametric EQ".into(), state: Vec::new() });
+        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Lemon Parametric EQ".into(), state: Vec::new() });
         a.plugins.create_effect(3, 2, 0, None).unwrap();
         // An edit of the effect, through the hosting layer, flushed into its processor.
         {

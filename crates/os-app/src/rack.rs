@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -842,9 +843,14 @@ pub fn push_channel(s: &mut State, mut ch: os_model::Channel) {
 }
 
 /// `reorder` in the project and the app state: `map` gives each row's new row (`None`: the channel goes).
-fn remap_state(s: &mut State, map: &[Option<usize>]) {
-    let m = |r: usize| map.get(r).copied().flatten();
+pub(crate) fn remap_state(s: &mut State, map: &[Option<usize>]) {
     remap_project(&mut s.project, map);
+    remap_ui(s, map);
+}
+
+/// `remap_state`'s part in the app state, for a project already renumbered (`map` as there).
+pub(crate) fn remap_ui(s: &mut State, map: &[Option<usize>]) {
+    let m = |r: usize| map.get(r).copied().flatten();
     let len = s.project.channels.len().max(1);
     s.rack.remap(&m);
     let keep = |r: usize| m(r).unwrap_or(r.min(len - 1));
@@ -941,6 +947,11 @@ pub fn ask_purge(s: &mut State) -> Option<String> {
     ask_delete(s, rows);
     s.rack.purging = s.rack.pending_delete.is_some();
     None
+}
+
+/// `delete_rows` as one undo step (their hosted instruments come back with an undo, `control::host`).
+pub fn delete_step(app: &mut App, rows: &[usize]) {
+    crate::control::edit_app(app, "Delete channel", crate::control::command::Region::Project, |app| delete_rows(app, rows));
 }
 
 /// Delete rows now: the channels, their notes and clips go.
@@ -1294,6 +1305,7 @@ fn set_declick(app: &mut App, rows: &[usize], mode: u8) {
         c.sound.declick = mode;
         if c.kind.is_sampler() {
             app.plugins.set_param_named(r, SAMPLER_DECLICK, f64::from(mode));
+            app.state.params.reread(r);
         }
     }
     app.state.piano.dirty = true;
@@ -1531,6 +1543,26 @@ pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
 
 /// Run a rack menu command. Returns a status message.
 pub fn run(app: &mut App, c: RCmd) -> Option<String> {
+    // The commands that change the project are one undo step each (spec: roadmap/control-plane.md); Cut, Paste, Fill
+    // and Rotate record their own.
+    let step = match c {
+        RCmd::RandomColor(_) | RCmd::ColorGradient | RCmd::ColorRandom => Some("Channel color"),
+        RCmd::Clone(_) | RCmd::CloneSel => Some("Clone channel"),
+        RCmd::MoveSel(_) | RCmd::Sort(_) => Some("Move channel"),
+        RCmd::MuteSel(_) => Some("Channel mute"),
+        RCmd::MixerReset(_) | RCmd::AssignFree(_) | RCmd::AssignFreeSel => Some("Channel mixer track"),
+        RCmd::DeclickSel(_) => Some("Channel settings"),
+        RCmd::AddGroup | RCmd::DeleteGroup | RCmd::GroupSel => Some("Channel group"),
+        RCmd::Burn(_) => Some("Burn loops"),
+        _ => None,
+    };
+    if let Some(name) = step {
+        return crate::control::edit_app(app, name, crate::control::command::Region::Project, |app| run_now(app, c));
+    }
+    run_now(app, c)
+}
+
+fn run_now(app: &mut App, c: RCmd) -> Option<String> {
     let mouse = app.mouse;
     let sel: Vec<usize> = app.state.rack.sel.iter().copied().collect();
     match c {
@@ -1791,7 +1823,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
     // Channels let go without asking (`ask_delete`) are deleted now.
     let msg = match app.state.rack.delete_now.take() {
         Some(rows) => {
-            delete_rows(app, &rows);
+            delete_step(app, &rows);
             app.state.message.take().or(msg)
         }
         None => msg,

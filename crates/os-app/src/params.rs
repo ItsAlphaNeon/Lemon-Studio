@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -16,6 +17,11 @@ use os_model::target::{self, Target};
 use crate::app::{Action, App, State};
 use crate::playlist::{Cmd, PItem, Popup};
 use crate::plugins::{fx_key, fx_of};
+
+/// The values of an instance's parameters, by id.
+fn read_values(p: &dyn os_host::Plugin, params: &[Entry]) -> BTreeMap<u32, f64> {
+    params.iter().filter_map(|e| Some((e.id, p.param_value(e.id)?))).collect()
+}
 
 /// Browser tab of the project tree, and the sections plugin nodes live in (spec: ui/browser.md §2).
 const PROJECT_TAB: usize = 1;
@@ -37,7 +43,20 @@ pub struct List {
     pub params: Vec<Entry>,
     /// When `params_tick` last took the instance's events (`Hosted::due`).
     pub seen: crate::plugins::Look,
+    /// The parameters' values as last read or sent by the plugin, by id: what an edit in the plugin's window moves
+    /// from (its undo step's value).
+    pub values: BTreeMap<u32, f64>,
+    /// The parameters being edited in the plugin's window (a gesture begun and not ended): the value each moves from.
+    pub open: BTreeMap<u32, f64>,
+    /// When `values` were last read from the plugin, and whether they are to be read again (the host set a parameter
+    /// whose value it does not know: `ParamUi::reread`).
+    pub read_at: std::time::Instant,
+    pub reread: bool,
 }
+
+/// `values` are read again at most this often when the plugin reports something other than its editor's edits (an
+/// automation clip moving a parameter does on every tick).
+const REREAD_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Something the user moved last (spec §5).
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +65,23 @@ pub enum Tweak {
     Plugin { key: usize, index: usize },
     /// A host control with an automation target (knob, fader, tempo).
     Host(Action),
+}
+
+impl ParamUi {
+    /// The host set parameter `id` of instance `key` to `v` (an undo, the value box, Paste): what the plugin's window
+    /// moves it from next.
+    pub fn set_by_host(&mut self, key: usize, id: u32, v: f64) {
+        if let Some(l) = self.lists.get_mut(&key) {
+            l.values.insert(id, v);
+        }
+    }
+
+    /// The host set parameters of instance `key` it does not know the value of: they are read again next tick.
+    pub fn reread(&mut self, key: usize) {
+        if let Some(l) = self.lists.get_mut(&key) {
+            l.reread = true;
+        }
+    }
 }
 
 /// What the app knows about plugin parameters.
@@ -148,9 +184,13 @@ pub(crate) fn param_value(s: &State, key: usize, index: usize) -> Option<f64> {
     value_of(s, key, index)
 }
 
-pub(crate) fn set_param_value(s: &State, key: usize, index: usize, v: f64) -> bool {
+pub(crate) fn set_param_value(s: &mut State, key: usize, index: usize, v: f64) -> bool {
     let Some(id) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return false };
-    s.params.plugin(key).is_some_and(|p| p.lock().is_ok_and(|mut p| p.set_param(id, v)))
+    let set = s.params.plugin(key).is_some_and(|p| p.lock().is_ok_and(|mut p| p.set_param(id, v)));
+    if set {
+        s.params.set_by_host(key, id, v);
+    }
+    set
 }
 
 /// "Create automation clip" for parameter `index` of instance `key`: target, clip name, current value.
@@ -260,6 +300,7 @@ impl App {
         let mut edited = Vec::new();
         let mut automate = Vec::new();
         let mut stretch = Vec::new();
+        let (mut seen, mut steps) = (Vec::new(), Vec::new());
         for (&key, h) in &self.plugins.hosted {
             // Only an instance with something new is locked, and never waited for: one the audio thread is rendering
             // is read again next tick (its events stay queued).
@@ -269,19 +310,64 @@ impl App {
             let count = p.param_count();
             let stale = ui.lists.get(&key).is_none_or(|l| l.params.len() != count || !Weak::ptr_eq(&l.plugin, &weak));
             if stale {
-                let params = (0..count)
+                let params: Vec<Entry> = (0..count)
                     .map(|i| match p.param_info(i) {
                         Some(info) => Entry { id: info.id, name: info.name, hidden: info.hidden },
                         None => Entry { id: u32::MAX, name: String::new(), hidden: true },
                     })
                     .collect();
-                ui.lists.insert(key, List { plugin: weak, params, seen: look });
+                let values = read_values(&*p, &params);
+                let now = std::time::Instant::now();
+                ui.lists.insert(key, List { plugin: weak, params, seen: look, values, open: BTreeMap::new(), read_at: now, reread: false });
             }
+            let events = p.take_param_events();
             if let Some(l) = ui.lists.get_mut(&key) {
+                let moved_count = l.seen.count != look.count;
                 l.seen = look;
+                let owner = h.owner;
+                // What this tick's edits in the window change, by parameter: the value each moved from and to, and
+                // whether a value came without a gesture.
+                let mut changed: BTreeMap<u32, (f64, f64)> = BTreeMap::new();
+                let mut loose = false;
+                for e in &events {
+                    match *e {
+                        os_host::ParamEvent::Begin(id) => {
+                            let from = l.values.get(&id).copied().or_else(|| p.param_value(id));
+                            if let Some(from) = from {
+                                l.open.entry(id).or_insert(from);
+                            }
+                        }
+                        os_host::ParamEvent::Value(id, v) => {
+                            let from = l.values.insert(id, v);
+                            seen.push((owner, id, v));
+                            if let (false, Some(from)) = (l.open.contains_key(&id), from) {
+                                changed.entry(id).or_insert((from, v)).1 = v;
+                                loose = true;
+                            }
+                        }
+                        os_host::ParamEvent::End(id) => {
+                            if let Some(from) = l.open.remove(&id) {
+                                let now = l.values.get(&id).copied().unwrap_or(from);
+                                changed.entry(id).or_insert((from, now)).1 = now;
+                            }
+                        }
+                    }
+                }
+                let changed: Vec<(u32, f64)> = changed.into_iter().filter(|(_, (from, now))| from != now).map(|(id, (from, _))| (id, from)).collect();
+                if !changed.is_empty() && !owner.is_none() {
+                    steps.push((owner.0, changed, loose));
+                }
+                // The plugin reported something other than its editor's edits (a preset it loaded, a restart,
+                // automation), or the host set what it doesn't know: the values are read again, so an undo moves
+                // back to what was there. Never during a gesture, whose start is kept.
+                let due = l.reread || (events.is_empty() && moved_count && l.read_at.elapsed() >= REREAD_EVERY);
+                if !stale && due && l.open.is_empty() {
+                    l.values = read_values(&*p, &l.params);
+                    (l.read_at, l.reread) = (std::time::Instant::now(), false);
+                }
             }
             let sampler = key < crate::plugins::FX_KEY && p.desc().name == crate::plugins::LEMON_SAMPLER;
-            for e in p.take_param_events() {
+            for e in events {
                 if let (true, os_host::ParamEvent::Value(id, v)) = (sampler, &e) {
                     if let Some(x) = ui.lists.get(&key).and_then(|l| l.params.iter().find(|x| x.id == *id)) {
                         stretch.push((key, x.name.clone(), *v));
@@ -299,6 +385,16 @@ impl App {
                     automate.push((key, index));
                 }
             }
+        }
+        // An edit in a plugin's window is an undo step (by the owner's id, so it follows moves): a gesture's from its
+        // begin to its end, values sent without one joined while they come in a row.
+        for (owner, id, v) in seen {
+            if !owner.is_none() {
+                self.state.control.saw_param(owner.0, id, v);
+            }
+        }
+        for (owner, changed, run) in steps {
+            crate::control::param_edit(&mut self.state, owner, &changed, run);
         }
         // A knob moved in a plugin's own window is the user's edit (`Plugins::mark_edited`).
         for key in edited {
@@ -407,6 +503,7 @@ impl App {
                 let ok = p.lock().ok()?.set_param(id, v);
                 if ok {
                     self.plugins.mark_edited(key);
+                    self.state.params.set_by_host(key, id, v);
                 }
                 (!ok).then(|| "The plugin did not take the value".to_string())
             }
@@ -472,7 +569,7 @@ mod tests {
         assert_eq!(target_of(s, fx_key(2, 3), 35), Some(target::slot_param(2, 3, 35)));
         assert_eq!(key_of(s, Target::ChannelParam(ch, 7)), Some((0, 7)));
         assert_eq!(key_of(s, Target::SlotParam(2, 3, 35)), Some((fx_key(2, 3), 35)));
-        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![Entry { id: 9, name: "Cutoff".into(), hidden: false }], seen: crate::plugins::Look::never() });
+        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![Entry { id: 9, name: "Cutoff".into(), hidden: false }], seen: crate::plugins::Look::never(), values: BTreeMap::new(), open: BTreeMap::new(), read_at: std::time::Instant::now(), reread: false });
         assert_eq!(clip_name(s, 0, 0), "Lead - Cutoff");
         // Last tweaked keeps the two newest, newest first, without repeats.
         let p = &mut s.params;
@@ -492,7 +589,7 @@ mod tests {
         a.state.project = crate::app::test_project();
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
-        let eq = os_model::SlotPlugin { name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
+        let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
         a.state.project.mixer[2].slots[1] = Some(eq);
         a.sync_effects();
         let key = fx_key(2, 1);

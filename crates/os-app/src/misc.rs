@@ -169,6 +169,7 @@ pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
     if sampler {
         if let Some((name, plain)) = sampler_param(&misc, m) {
             app.plugins.set_param_named(row, name, plain);
+            app.state.params.reread(row);
         }
     }
     app.state.piano.dirty = true;

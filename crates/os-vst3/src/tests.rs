@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -313,6 +314,7 @@ fn engine_plays_a_pattern() {
         assert!(p.activate(48000));
     }
     let ch = os_model::Channel {
+        id: os_model::Id::NONE,
         index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
         enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
         layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
@@ -347,6 +349,7 @@ fn mono_portamento_glides_through_the_tuning_expression() {
     }
     let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 1.0, ..Default::default() };
     let ch = os_model::Channel {
+        id: os_model::Id::NONE,
         index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
         enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
         layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc, sound: Default::default(),
