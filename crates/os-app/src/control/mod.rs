@@ -341,18 +341,29 @@ pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: comman
     r
 }
 
-/// A parameter moved in a plugin's own window from `before`: one step, unless Undo knob tweaks is off. `run`: a value the
-/// plugin sent outside a gesture (no begin and end of the edit), which joins the step of the values just before it on
-/// the same parameter, as a knob's wheel notches do.
-pub fn param_edit(s: &mut State, owner: u32, param: u32, before: f64, run: bool) {
+/// Parameters of plugin `owner` moved in its own window, each from its value `before`: one step, unless Undo knob
+/// tweaks is off. `run`: values the plugin sent outside a gesture (no begin and end of the edit), which join the step
+/// of the plugin's values just before them, as a knob's wheel notches do; a parameter not in that step yet joins it
+/// with its value before. The step comes from no press of the app's, so no release looks at it.
+pub fn param_edit(s: &mut State, owner: u32, before: &[(u32, f64)], run: bool) {
     if !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
         return;
     }
-    let r = crate::history::Run::Param(owner, param);
+    let put = |&(param, v): &(u32, f64)| Command::Put(Box::new(command::Taken::Param(owner, param, v)));
+    let r = crate::history::Run::Param(owner);
     if run && s.history.joins(r) {
+        crate::history::extend_newest(s, |cmds| {
+            for b in before {
+                let has = cmds.iter().any(|c| matches!(c, Command::Put(t) if matches!(**t, command::Taken::Param(_, p, _) if p == b.0)));
+                if !has {
+                    cmds.push(put(b));
+                }
+            }
+        });
         return;
     }
-    record_edit(s, command::PLUGIN_PARAMETER, command::Taken::Param(owner, param, before));
+    crate::history::record(s, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(before.iter().map(put).collect()));
+    crate::history::done_with(s);
     if run {
         s.history.set_run(r);
     }

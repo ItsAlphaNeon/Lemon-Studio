@@ -174,6 +174,7 @@ impl App {
             let set = self.plugins.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.set_param(param, v));
             if set {
                 self.plugins.mark_edited(key);
+                self.state.params.set_by_host(key, param, v);
             }
         }
         if relink.0 {

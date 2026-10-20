@@ -289,8 +289,8 @@ pub enum Run {
     Tap,
     /// Mouse-wheel notches on Settings > Project's time boxes.
     Bar,
-    /// Values a plugin sends for parameter `.1` of owner `.0` outside a gesture (no begin and end of an edit).
-    Param(u32, u32),
+    /// Values plugin `.0` sends outside a gesture (no begin and end of an edit).
+    Param(u32),
 }
 
 impl History {
@@ -377,6 +377,17 @@ pub fn record_named(s: &mut State, name: Cow<'static, str>, snap: Snap) {
     h.run = None;
     h.fresh = true;
     h.trim();
+}
+
+/// Adds to the newest step's commands (a plugin's values joining its step, `control::param_edit`), when it is done
+/// and holds commands.
+pub fn extend_newest(s: &mut State, f: impl FnOnce(&mut Vec<crate::control::Command>)) {
+    let h = &mut s.history;
+    if h.done > 0 && h.done == h.steps.len() {
+        if let Snap::Commands(c) = &mut h.steps[h.done - 1].snap {
+            f(c);
+        }
+    }
 }
 
 /// The newest step is done with: no button release drops it (`settle`), a client's change, made without a press.

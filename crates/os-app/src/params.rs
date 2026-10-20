@@ -48,7 +48,15 @@ pub struct List {
     pub values: BTreeMap<u32, f64>,
     /// The parameters being edited in the plugin's window (a gesture begun and not ended): the value each moves from.
     pub open: BTreeMap<u32, f64>,
+    /// When `values` were last read from the plugin, and whether they are to be read again (the host set a parameter
+    /// whose value it does not know: `ParamUi::reread`).
+    pub read_at: std::time::Instant,
+    pub reread: bool,
 }
+
+/// `values` are read again at most this often when the plugin reports something other than its editor's edits (an
+/// automation clip moving a parameter does on every tick).
+const REREAD_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Something the user moved last (spec §5).
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +65,23 @@ pub enum Tweak {
     Plugin { key: usize, index: usize },
     /// A host control with an automation target (knob, fader, tempo).
     Host(Action),
+}
+
+impl ParamUi {
+    /// The host set parameter `id` of instance `key` to `v` (an undo, the value box, Paste): what the plugin's window
+    /// moves it from next.
+    pub fn set_by_host(&mut self, key: usize, id: u32, v: f64) {
+        if let Some(l) = self.lists.get_mut(&key) {
+            l.values.insert(id, v);
+        }
+    }
+
+    /// The host set parameters of instance `key` it does not know the value of: they are read again next tick.
+    pub fn reread(&mut self, key: usize) {
+        if let Some(l) = self.lists.get_mut(&key) {
+            l.reread = true;
+        }
+    }
 }
 
 /// What the app knows about plugin parameters.
@@ -159,9 +184,13 @@ pub(crate) fn param_value(s: &State, key: usize, index: usize) -> Option<f64> {
     value_of(s, key, index)
 }
 
-pub(crate) fn set_param_value(s: &State, key: usize, index: usize, v: f64) -> bool {
+pub(crate) fn set_param_value(s: &mut State, key: usize, index: usize, v: f64) -> bool {
     let Some(id) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return false };
-    s.params.plugin(key).is_some_and(|p| p.lock().is_ok_and(|mut p| p.set_param(id, v)))
+    let set = s.params.plugin(key).is_some_and(|p| p.lock().is_ok_and(|mut p| p.set_param(id, v)));
+    if set {
+        s.params.set_by_host(key, id, v);
+    }
+    set
 }
 
 /// "Create automation clip" for parameter `index` of instance `key`: target, clip name, current value.
@@ -288,39 +317,53 @@ impl App {
                     })
                     .collect();
                 let values = read_values(&*p, &params);
-                ui.lists.insert(key, List { plugin: weak, params, seen: look, values, open: BTreeMap::new() });
+                let now = std::time::Instant::now();
+                ui.lists.insert(key, List { plugin: weak, params, seen: look, values, open: BTreeMap::new(), read_at: now, reread: false });
             }
             let events = p.take_param_events();
             if let Some(l) = ui.lists.get_mut(&key) {
-                // The plugin reported something other than its editor's edits (a preset it loaded, a restart): its
-                // values are read again, so an undo moves back to what was there.
-                if !stale && events.is_empty() && l.seen.count != look.count {
-                    l.values = read_values(&*p, &l.params);
-                }
+                let moved_count = l.seen.count != look.count;
                 l.seen = look;
                 let owner = h.owner;
+                // What this tick's edits in the window change, by parameter: the value each moved from and to, and
+                // whether a value came without a gesture.
+                let mut changed: BTreeMap<u32, (f64, f64)> = BTreeMap::new();
+                let mut loose = false;
                 for e in &events {
                     match *e {
                         os_host::ParamEvent::Begin(id) => {
                             let from = l.values.get(&id).copied().or_else(|| p.param_value(id));
                             if let Some(from) = from {
-                                l.open.insert(id, from);
+                                l.open.entry(id).or_insert(from);
                             }
                         }
                         os_host::ParamEvent::Value(id, v) => {
                             let from = l.values.insert(id, v);
                             seen.push((owner, id, v));
                             if let (false, Some(from)) = (l.open.contains_key(&id), from) {
-                                steps.push((owner, id, from, v, true));
+                                changed.entry(id).or_insert((from, v)).1 = v;
+                                loose = true;
                             }
                         }
                         os_host::ParamEvent::End(id) => {
                             if let Some(from) = l.open.remove(&id) {
                                 let now = l.values.get(&id).copied().unwrap_or(from);
-                                steps.push((owner, id, from, now, false));
+                                changed.entry(id).or_insert((from, now)).1 = now;
                             }
                         }
                     }
+                }
+                let changed: Vec<(u32, f64)> = changed.into_iter().filter(|(_, (from, now))| from != now).map(|(id, (from, _))| (id, from)).collect();
+                if !changed.is_empty() && !owner.is_none() {
+                    steps.push((owner.0, changed, loose));
+                }
+                // The plugin reported something other than its editor's edits (a preset it loaded, a restart,
+                // automation), or the host set what it doesn't know: the values are read again, so an undo moves
+                // back to what was there. Never during a gesture, whose start is kept.
+                let due = l.reread || (events.is_empty() && moved_count && l.read_at.elapsed() >= REREAD_EVERY);
+                if !stale && due && l.open.is_empty() {
+                    l.values = read_values(&*p, &l.params);
+                    (l.read_at, l.reread) = (std::time::Instant::now(), false);
                 }
             }
             let sampler = key < crate::plugins::FX_KEY && p.desc().name == crate::plugins::LEMON_SAMPLER;
@@ -350,10 +393,8 @@ impl App {
                 self.state.control.saw_param(owner.0, id, v);
             }
         }
-        for (owner, id, from, now, run) in steps {
-            if !owner.is_none() && from != now {
-                crate::control::param_edit(&mut self.state, owner.0, id, from, run);
-            }
+        for (owner, changed, run) in steps {
+            crate::control::param_edit(&mut self.state, owner, &changed, run);
         }
         // A knob moved in a plugin's own window is the user's edit (`Plugins::mark_edited`).
         for key in edited {
@@ -462,6 +503,7 @@ impl App {
                 let ok = p.lock().ok()?.set_param(id, v);
                 if ok {
                     self.plugins.mark_edited(key);
+                    self.state.params.set_by_host(key, id, v);
                 }
                 (!ok).then(|| "The plugin did not take the value".to_string())
             }
@@ -527,7 +569,7 @@ mod tests {
         assert_eq!(target_of(s, fx_key(2, 3), 35), Some(target::slot_param(2, 3, 35)));
         assert_eq!(key_of(s, Target::ChannelParam(ch, 7)), Some((0, 7)));
         assert_eq!(key_of(s, Target::SlotParam(2, 3, 35)), Some((fx_key(2, 3), 35)));
-        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![Entry { id: 9, name: "Cutoff".into(), hidden: false }], seen: crate::plugins::Look::never(), values: BTreeMap::new(), open: BTreeMap::new() });
+        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![Entry { id: 9, name: "Cutoff".into(), hidden: false }], seen: crate::plugins::Look::never(), values: BTreeMap::new(), open: BTreeMap::new(), read_at: std::time::Instant::now(), reread: false });
         assert_eq!(clip_name(s, 0, 0), "Lead - Cutoff");
         // Last tweaked keeps the two newest, newest first, without repeats.
         let p = &mut s.params;
