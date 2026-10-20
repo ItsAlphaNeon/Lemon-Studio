@@ -202,7 +202,7 @@ pub fn sep_text(sep: f64) -> String {
 }
 
 /// Would a route `src` -> `dst` make a loop (dst already reaches src)?
-fn makes_loop(s: &State, src: u16, dst: u16) -> bool {
+pub(crate) fn makes_loop(s: &State, src: u16, dst: u16) -> bool {
     let mut seen = vec![dst];
     let mut i = 0;
     while i < seen.len() {
@@ -770,7 +770,7 @@ fn move_track(s: &mut State, n: u16, d: i32) -> Option<String> {
 }
 
 /// Deletes track `n`: later tracks move one left, a default track is added at the end (§6.1 Delete).
-fn delete_track(s: &mut State, n: u16) -> Option<String> {
+pub(crate) fn delete_track(s: &mut State, n: u16) -> Option<String> {
     if n == 0 || n > inserts(s) {
         return Some("The master track can't be deleted".into());
     }
@@ -1640,7 +1640,7 @@ mod tests {
         a.state.project.channels[4].mixer_track = 9;
         track_mut(&mut a.state, 9).unwrap().name = Some("Nine".into());
         // 12 holds an effect, 11 feeds nothing but 9 sends to 13.
-        track_mut(&mut a.state, 12).unwrap().slots[0] = Some(os_model::SlotPlugin { name: "FX".into(), state: Vec::new() });
+        track_mut(&mut a.state, 12).unwrap().slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "FX".into(), state: Vec::new() });
         track_mut(&mut a.state, 9).unwrap().routes = vec![13];
         assert_eq!(trim_list(&a.state, false), vec![4, 6, 7, 8, 10, 11, 14, 15, 16]);
         assert_eq!(trim_list(&a.state, true), vec![4, 6, 7, 8, 10, 11, 12, 14, 15, 16]);

@@ -244,6 +244,7 @@ mod tests {
 
     fn channel(index: u16, kind: ChannelKind) -> Channel {
         Channel {
+            id: os_model::Id::NONE,
             index,
             kind,
             name: None,

@@ -842,9 +842,14 @@ pub fn push_channel(s: &mut State, mut ch: os_model::Channel) {
 }
 
 /// `reorder` in the project and the app state: `map` gives each row's new row (`None`: the channel goes).
-fn remap_state(s: &mut State, map: &[Option<usize>]) {
-    let m = |r: usize| map.get(r).copied().flatten();
+pub(crate) fn remap_state(s: &mut State, map: &[Option<usize>]) {
     remap_project(&mut s.project, map);
+    remap_ui(s, map);
+}
+
+/// `remap_state`'s part in the app state, for a project already renumbered (`map` as there).
+pub(crate) fn remap_ui(s: &mut State, map: &[Option<usize>]) {
+    let m = |r: usize| map.get(r).copied().flatten();
     let len = s.project.channels.len().max(1);
     s.rack.remap(&m);
     let keep = |r: usize| m(r).unwrap_or(r.min(len - 1));

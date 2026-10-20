@@ -783,7 +783,7 @@ mod tests {
         p.channels[1].plugin = Some(String::new());
         p.channels[2].plugin = None;
         (p.channels[0].mixer_track, p.channels[1].mixer_track, p.channels[2].mixer_track) = (1, 1, 0);
-        let slot = |name: &str| Some(SlotPlugin { name: name.into(), state: Vec::new() });
+        let slot = |name: &str| Some(SlotPlugin { id: os_model::Id::NONE, name: name.into(), state: Vec::new() });
         let mut m = MixerTrack::new(0);
         m.slots[0] = slot("Fruity Limiter");
         m.slots[3] = slot("");
@@ -822,7 +822,7 @@ mod tests {
         assert_eq!(mixer_tracks(&p), 1, "a channel on the master counts the master; routes to the master do not");
         // A named track holding an effect, which nothing routes to: not counted.
         p.mixer[2].name = Some("Bus".into());
-        p.mixer[2].slots[0] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: Vec::new() });
+        p.mixer[2].slots[0] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: Vec::new() });
         assert_eq!(mixer_tracks(&p), 1);
         // A send: insert 1 routes to insert 3 too, so 3 counts, but not 1 for its own routes.
         p.mixer[1].routes = vec![0, 3];

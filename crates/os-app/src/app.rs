@@ -940,6 +940,8 @@ pub struct State {
     pub playlist: crate::playlist::PlaylistState,
     /// The project's undo history (spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
     pub history: crate::history::History,
+    /// The control plane: ids, its commands' requests for the app, events, proposals (`crate::control`).
+    pub control: crate::control::Control,
     /// The main toolbar's snap, which the editors' Main follows (spec: ui/global-snap.md).
     pub global_snap: crate::snap::Global,
     pub pat_ui: crate::patterns::PatternUi,
@@ -1147,6 +1149,8 @@ pub struct App {
     piano_panel: Option<Rect>,
     /// Sampler channel rows whose Lemon Sampler instance could not be created (not retried).
     sampler_failed: Vec<usize>,
+    /// The control plane's socket (`--control`), when it listens.
+    pub rpc_server: Option<crate::control::server::Server>,
     /// Mixer slots (`plugins::fx_key`) whose Lemon Parametric EQ could not start (not retried).
     pub(crate) fx_failed: Vec<usize>,
     /// The running plugin scan, and the scan asked for while it runs (spec: ui/plugin-manager.md §4).
@@ -1249,6 +1253,7 @@ impl App {
                 piano: PianoState::default(),
                 playlist: crate::playlist::PlaylistState::default(),
                 history: Default::default(),
+                control: Default::default(),
                 global_snap: Default::default(),
                 pat_ui: Default::default(),
                 wins: [
@@ -1322,6 +1327,7 @@ impl App {
             piano_grid: None,
             piano_panel: None,
             sampler_failed: Vec::new(),
+            rpc_server: None,
             fx_failed: Vec::new(),
             sweep: None,
             scan_queued: None,
@@ -1415,6 +1421,8 @@ impl App {
                 s.piano.reset();
                 s.playlist.reset();
                 s.history.reset();
+                s.control.reset();
+                s.control.event(&crate::control::By::User, "opened", s.path.as_ref().map_or(String::new(), |p| p.display().to_string()), Vec::new());
                 crate::playlist::load_view(s);
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
@@ -1655,6 +1663,8 @@ impl App {
 
     /// The project as it is now counts as saved (opened, saved, new).
     pub(crate) fn mark_saved(&mut self) {
+        // New things get their ids before the copy, so ids alone are no unsaved change.
+        self.state.control.settle(&mut self.state.project);
         self.saved = (self.state.project.clone(), self.state.tempo);
     }
 
@@ -1784,6 +1794,13 @@ impl App {
                 }
             }
             Then::DataFolder(d) => self.data_folder_done(d, reply),
+            Then::Proposal(n) => {
+                let s = &mut self.state;
+                let r = if reply == Reply::Button(Answer::Yes) { crate::control::accept(s, n).map(|_| ()) } else { crate::control::discard(s, n) };
+                if let Err(e) = r {
+                    s.message = Some(e);
+                }
+            }
         }
         self.invalidate();
     }
@@ -1820,6 +1837,8 @@ impl App {
         s.piano.reset();
         s.playlist.reset();
         s.history.reset();
+        s.control.reset();
+        s.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
         crate::playlist::load_view(s);
         s.rack.reset();
         crate::rack::from_model(s);
@@ -1981,6 +2000,8 @@ impl App {
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     pub(crate) fn plugin_tick(&mut self) {
+        // Instances follow their channels by id (an undo, a command), before rows are looked at.
+        self.follow_ids(true, false);
         // Rows gone without the app (an undone drop that made a channel, `rack::remove_last`): their instruments go.
         let len = self.state.project.channels.len();
         if self.plugins.hosted.range(len..crate::plugins::FX_KEY).next().is_some() {
@@ -1991,6 +2012,8 @@ impl App {
         self.export_tick();
         self.midi_tick();
         self.mixer_tick();
+        self.follow_ids(false, true);
+        self.host_commands();
         self.sync_effects();
         self.params_tick();
         if self.loading.is_none() {
@@ -3102,6 +3125,9 @@ impl App {
 
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
+        // Things the interface added get their ids before anything looks them up (`control::ids`).
+        self.state.control.settle(&mut self.state.project);
+        self.control_tick();
         self.plugin_tick();
         // Song playback loops over the playlist's time selection, as it is now.
         self.transport.set_loop(self.state.playlist.range);
@@ -3179,6 +3205,11 @@ impl App {
         // also during a drag (at most once per tick).
         if self.state.piano.dirty {
             self.state.piano.dirty = false;
+            // An edit in the interface (a command's change is its event already; an undo or redo is one too).
+            let s = &mut self.state;
+            if s.control.changed_since_seen(&s.project, s.tempo) {
+                s.control.event(&crate::control::By::User, "edit", "", Vec::new());
+            }
             // Also while Play is still starting (not `playing` yet); ignored when stopped.
             {
                 self.transport.update(&crate::rack::play_project(&self.state));
@@ -7463,6 +7494,7 @@ fn typing_semitone(code: KeyCode) -> Option<i32> {
 /// An empty sampler channel at rack position `i`.
 fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
     Channel {
+        id: os_model::Id::NONE,
         index: i,
         kind: ChannelKind::Sampler,
         name: Some(name.into()),
@@ -7786,7 +7818,7 @@ mod tests {
         a.plugins.effects = crate::plugins::builtin_effects();
         let mut fl = lemon_parametric_eq_2::params::default_state();
         lemon_parametric_eq_2::params::set_field(&mut fl, 1, -600);
-        a.state.project.mixer[2].slots[1] = Some(os_model::SlotPlugin { name: EQ_FILE_NAME.into(), state: fl.clone() });
+        a.state.project.mixer[2].slots[1] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: EQ_FILE_NAME.into(), state: fl.clone() });
         a.sync_effects();
         assert!(a.plugins.hosted.contains_key(&fx_key(2, 1)));
         assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some(LEMON_EQ));
@@ -14736,7 +14768,7 @@ mod tests {
         app.state.project.mixer[6].swap = true;
         app.state.project.mixer[2].enabled = false;
         app.state.project.mixer[3].name = Some("Drums".into());
-        app.state.project.mixer[3].slots[0] = Some(os_model::SlotPlugin { name: "Test Delay".into(), state: Vec::new() });
+        app.state.project.mixer[3].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Test Delay".into(), state: Vec::new() });
         app.state.project.mixer[3].slot_on[1] = false;
         mx::select(&mut app.state, 6, true);
         mx::select(&mut app.state, 3, true);
@@ -14781,7 +14813,7 @@ mod tests {
         }
         // An effect: the selected track's first empty slot.
         crate::mixer::select(&mut app.state, 2, false);
-        app.state.project.mixer[2].slots[0] = Some(os_model::SlotPlugin { name: "Taken".into(), state: Vec::new() });
+        app.state.project.mixer[2].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Taken".into(), state: Vec::new() });
         let fx = pick(&app, "Test FX").expect("the effects are listed");
         let index = app.plugins.effects.len() - 1;
         assert_eq!(fx, Cmd::Plugin(PlugCmd::Effect { index, slot: None }));
@@ -14929,13 +14961,13 @@ mod tests {
             let item = hit_rect(app, &Action::PlPopup(i));
             click(app, c, item);
         };
-        app.state.project.mixer[2].slots[0] = Some(os_model::SlotPlugin { name: "Taken".into(), state: Vec::new() });
+        app.state.project.mixer[2].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Taken".into(), state: Vec::new() });
         pick(&mut app, &mut c);
         assert_eq!(crate::mixer::slot_name(&app.state, 2, 1).as_deref(), Some("Test FX"));
         assert!(app.state.menu_open.is_none() && app.state.playlist.popup.is_none());
         // Every slot in use: nothing is added.
         for slot in &mut app.state.project.mixer[2].slots {
-            slot.get_or_insert(os_model::SlotPlugin { name: "Taken".into(), state: Vec::new() });
+            slot.get_or_insert(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Taken".into(), state: Vec::new() });
         }
         let before = app.state.project.mixer[2].slots.clone();
         pick(&mut app, &mut c);

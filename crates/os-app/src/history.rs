@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -8,12 +9,15 @@
 //! done, the state after it while it is undone. Covered: a pattern's notes, control points and length (the piano roll
 //! and the step sequencer), the playlist (`playlist::snapshot`), knob turns, sample loads (`load_sample`), the
 //! project's initial values (`crate::init`), and with the playlist, PATTERNS > Split by channel's patterns and ADD's
-//! clip channels (`playlist::snapshot_with`).
+//! clip channels (`playlist::snapshot_with`), and everything the control plane's commands change (`crate::control`):
+//! their steps hold the commands that undo them (`Snap::Commands`).
 //!
 //! The settings of General ▸ Undo history (`crate::prefs`): Maximum undo levels (past it the oldest step goes), Undo
 //! knob tweaks, Alternate undo mode (what Ctrl+Z and Ctrl+Alt+Z do), Show undo history in the browser when undoing
 //! changes and Show recent changes at the top (the browser's History folder, `views::browser`).
 // spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)"
+
+use std::borrow::Cow;
 
 use os_model::{ControlPoint, Note};
 
@@ -58,6 +62,9 @@ pub enum Snap {
     /// Several of these in one step, put back last first ("Create automation clip": the playlist and the initial
     /// value).
     Several(Vec<Snap>),
+    /// The control plane's commands that take a step back (`control::run`'s undo); applying them gives the commands
+    /// for the other way (`swap`).
+    Commands(Vec<crate::control::Command>),
 }
 
 /// The rack's side of ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the added channel at `row`
@@ -126,6 +133,8 @@ impl Snap {
             Snap::Patterns { .. } => Snap::Patterns { patterns: s.project.patterns.clone(), current: s.pattern },
             Snap::Rack(r) => Snap::Rack(Box::new(RackSide::now(s, r.row))),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
+            // Known only by applying them (`swap`).
+            Snap::Commands(_) => self.clone(),
         }
     }
 
@@ -159,6 +168,8 @@ impl Snap {
                 }
             }
             Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
+            // Commands hold ticks; a step of them across a timebase change is dropped (`rescale`).
+            Snap::Commands(_) => {}
             // A channel or an initial value holds no ticks.
             Snap::Knob(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) => {}
         }
@@ -208,6 +219,9 @@ impl Snap {
                 (s.playlist.source, s.playlist.picker) = (source, picker);
             }
             Snap::Several(v) => v.into_iter().rev().for_each(|x| x.put(s)),
+            Snap::Commands(v) => {
+                crate::control::take_back(s, v);
+            }
         }
         s.piano.dirty = true;
     }
@@ -248,7 +262,7 @@ fn knob_name(id: KnobId) -> &'static str {
 
 #[derive(Debug, Clone)]
 struct Step {
-    name: &'static str,
+    name: Cow<'static, str>,
     snap: Snap,
 }
 
@@ -295,8 +309,8 @@ impl History {
 
     /// The list as the browser's History folder shows it: (entry, name), oldest first from "Last reset", or newest
     /// first with Show recent changes at the top.
-    pub fn entries(&self) -> Vec<(usize, &'static str)> {
-        let mut v: Vec<(usize, &'static str)> = std::iter::once(LAST_RESET).chain(self.steps.iter().map(|st| st.name)).enumerate().collect();
+    pub fn entries(&self) -> Vec<(usize, &str)> {
+        let mut v: Vec<(usize, &str)> = std::iter::once(LAST_RESET).chain(self.steps.iter().map(|st| &*st.name)).enumerate().collect();
         if prefs::check(&prefs::RECENT_CHANGES_TOP) {
             v.reverse();
         }
@@ -322,6 +336,11 @@ impl History {
 /// Records step `name`: `snap` holds what the edit is about to change. Undone steps are dropped (a new action ends
 /// their branch), and the oldest step past Maximum undo levels.
 pub fn record(s: &mut State, name: &'static str, snap: Snap) {
+    record_named(s, Cow::Borrowed(name), snap);
+}
+
+/// `record` with a name made at run time (a client's step: "Assistant: build drum kit").
+pub fn record_named(s: &mut State, name: Cow<'static, str>, snap: Snap) {
     let h = &mut s.history;
     h.steps.truncate(h.done);
     h.steps.push(Step { name, snap });
@@ -337,7 +356,7 @@ pub fn record(s: &mut State, name: &'static str, snap: Snap) {
 pub fn rename(s: &mut State, name: &'static str) {
     let h = &mut s.history;
     if h.fresh && h.done > 0 && h.done == h.steps.len() {
-        h.steps[h.done - 1].name = name;
+        h.steps[h.done - 1].name = Cow::Borrowed(name);
     }
 }
 
@@ -386,13 +405,20 @@ pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
 }
 
 fn swap(s: &mut State, i: usize) {
+    if let Snap::Commands(v) = &mut s.history.steps[i].snap {
+        let v = std::mem::take(v);
+        let other = crate::control::take_back(s, v);
+        s.history.steps[i].snap = Snap::Commands(other);
+        s.piano.dirty = true;
+        return;
+    }
     let now = s.history.steps[i].snap.now(s);
     let old = std::mem::replace(&mut s.history.steps[i].snap, now);
     old.put(s);
 }
 
 /// Undoes the newest done step; its name, or `None` when nothing is done.
-pub fn undo(s: &mut State) -> Option<&'static str> {
+pub fn undo(s: &mut State) -> Option<String> {
     let h = &mut s.history;
     if h.done == 0 {
         return None;
@@ -401,11 +427,11 @@ pub fn undo(s: &mut State) -> Option<&'static str> {
     (h.undid, h.wheel, h.fresh) = (true, None, false);
     let i = h.done;
     swap(s, i);
-    Some(s.history.steps[i].name)
+    Some(s.history.steps[i].name.to_string())
 }
 
 /// Redoes the oldest undone step; its name, or `None` when nothing is undone.
-pub fn redo(s: &mut State) -> Option<&'static str> {
+pub fn redo(s: &mut State) -> Option<String> {
     let h = &mut s.history;
     if h.done == h.steps.len() {
         return None;
@@ -415,7 +441,7 @@ pub fn redo(s: &mut State) -> Option<&'static str> {
     let h = &mut s.history;
     h.done += 1;
     (h.undid, h.wheel, h.fresh) = (false, None, false);
-    Some(h.steps[i].name)
+    Some(h.steps[i].name.to_string())
 }
 
 /// "Step seq edit" as a menu entry writes it after Undo / Redo: "step seq edit".
@@ -427,7 +453,7 @@ fn lower(name: &str) -> String {
 fn did(s: &mut State, redo_it: bool) -> String {
     let (verb, name) = if redo_it { ("Redo", redo(s)) } else { ("Undo", undo(s)) };
     match name {
-        Some(n) => format!("{verb}: {}", lower(n)),
+        Some(n) => format!("{verb}: {}", lower(&n)),
         None => format!("Nothing to {}", verb.to_lowercase()),
     }
 }
@@ -471,7 +497,7 @@ pub fn go_to(s: &mut State, p: usize) -> Option<String> {
     while s.history.done < p {
         redo(s);
     }
-    let name = if p == 0 { LAST_RESET } else { s.history.steps[p - 1].name };
+    let name = if p == 0 { LAST_RESET } else { &s.history.steps[p - 1].name };
     Some(format!("History: {}", lower(name)))
 }
 
@@ -483,7 +509,7 @@ pub fn edit_label(s: &State, redo_entry: bool) -> String {
     let redo_it = redo_entry || h.ctrl_z_redoes();
     let (verb, step) = if redo_it { ("Redo", h.steps.get(h.done)) } else { ("Undo", h.done.checked_sub(1).and_then(|i| h.steps.get(i))) };
     match step {
-        Some(st) => format!("{verb} {}", lower(st.name)),
+        Some(st) => format!("{verb} {}", lower(&st.name)),
         None => verb.into(),
     }
 }
@@ -548,10 +574,10 @@ mod tests {
             crate::rack::set_step(s, 0, 10 + k, true);
         }
         assert_eq!(note_count(s), start + 2);
-        assert_eq!((undo(s), note_count(s)), (Some(STEP_SEQ_EDIT), start + 1));
-        assert_eq!((undo(s), note_count(s)), (Some(STEP_SEQ_EDIT), start));
+        assert_eq!((undo(s).as_deref(), note_count(s)), (Some(STEP_SEQ_EDIT), start + 1));
+        assert_eq!((undo(s).as_deref(), note_count(s)), (Some(STEP_SEQ_EDIT), start));
         assert_eq!(undo(s), None);
-        assert_eq!((redo(s), note_count(s)), (Some(STEP_SEQ_EDIT), start + 1));
+        assert_eq!((redo(s).as_deref(), note_count(s)), (Some(STEP_SEQ_EDIT), start + 1));
         assert!(s.history.undone(2) && s.history.current(1) && !s.history.undone(1));
         // A new action: the undone step is gone.
         let snap = Snap::pattern(s, s.pattern);
@@ -600,7 +626,7 @@ mod tests {
             s.set_knob(id, v);
         }
         assert_eq!(s.history.len(), 1, "one step for the notches");
-        assert_eq!(undo(s), Some("Channel volume"));
+        assert_eq!(undo(s).as_deref(), Some("Channel volume"));
         assert_eq!(s.project.channels[0].volume, v0, "exactly back");
     }
 

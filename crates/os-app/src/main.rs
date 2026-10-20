@@ -22,6 +22,7 @@ mod browser;
 mod cable;
 mod clip_colors;
 mod clock;
+mod control;
 mod cpu;
 mod data_folder;
 mod device;

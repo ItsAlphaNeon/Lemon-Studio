@@ -28,6 +28,7 @@ impl Instrument for Count {
 
 fn channel() -> os_model::Channel {
     os_model::Channel {
+        id: os_model::Id::NONE,
         index: 0,
         kind: os_model::ChannelKind::Plugin,
         name: None,

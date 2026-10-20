@@ -492,7 +492,7 @@ mod tests {
         a.state.project = crate::app::test_project();
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
-        let eq = os_model::SlotPlugin { name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
+        let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
         a.state.project.mixer[2].slots[1] = Some(eq);
         a.sync_effects();
         let key = fx_key(2, 1);

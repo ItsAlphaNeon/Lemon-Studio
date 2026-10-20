@@ -199,7 +199,7 @@ pub fn pat_mut(s: &mut State, n: u16) -> &mut Pattern {
 
 /// Renumber patterns (`None` removes one): playlist clips follow (clips of removed patterns go). Numbers that
 /// end up without a pattern keep an empty entry so saving clears their blocks.
-fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
+pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
     let old: Vec<u16> = s.project.patterns.iter().map(|p| p.number).collect();
     let mut pats: Vec<Pattern> = std::mem::take(&mut s.project.patterns)
         .into_iter()

@@ -775,6 +775,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         let mut markers = decode_markers(events, &loc.markers, enc);
         markers.retain(|m| !(u32::from(m.kind) == LENGTH_MARKER_KIND && Some(m.position) == length));
         p.patterns.push(Pattern {
+            id: os_model::Id::NONE,
             number,
             name: text(loc.name),
             color: loc.color.map(|i| int(&events[i])).filter(|v| v >> 24 == 0xFF).map(rgb_from_bgr),
@@ -836,6 +837,7 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
     let i32_at = |o: usize| levels.get(o..o + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
     let custom = loc.color_flag.is_some_and(|i| int(&events[i]) != 0);
     Channel {
+        id: os_model::Id::NONE,
         index: int(&block[0]) as u16,
         kind,
         name: loc.name.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)),
@@ -1412,6 +1414,7 @@ fn decode_clip(r: &[u8]) -> Clip {
     let n = r.len().min(CLIP_RECORD_LEN);
     raw[..n].copy_from_slice(&r[..n]);
     Clip {
+        id: os_model::Id::NONE,
         position: u32_at(0),
         length: u32_at(8),
         track: 499u16.saturating_sub(u16_at(12)),
@@ -1904,7 +1907,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         for e in &events[from..to] {
             match e.id {
                 id::PLUGIN_NAME => {
-                    pending_plugin = e.data().map(|d| SlotPlugin { name: decode_text(d, enc), state: Vec::new() });
+                    pending_plugin = e.data().map(|d| SlotPlugin { id: os_model::Id::NONE, name: decode_text(d, enc), state: Vec::new() });
                 }
                 // spec: flp/events/mixer.md (slot sub-block: 213 = plugin state)
                 id::PLUGIN_STATE => {
@@ -3816,6 +3819,7 @@ mod tests {
     use super::*;
     fn sampler(index: u16, name: &str, track: u16) -> Channel {
         Channel {
+            id: os_model::Id::NONE,
             index,
             kind: ChannelKind::Sampler,
             name: Some(name.into()),
@@ -4455,7 +4459,7 @@ mod tests {
         p.arrangements.push(default_arrangement());
         p.mixer = (0..18).map(MixerTrack::new).collect();
         p.mixer[17].routes.clear();
-        p.mixer[2].slots[3] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
+        p.mixer[2].slots[3] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![] });
         p.mixer[2].slot_mix[3] = 0.25;
         p.groups = vec!["Unsorted".into()];
         let plugin = InitControl { head: 0x0102_0304, target: target::channel_param(1, 7), value: -123_456 };
@@ -4994,8 +4998,8 @@ mod tests {
         m.pan = Some(-0.25);
         m.routes = vec![0, 5];
         m.send_levels = vec![(5, 0.5)];
-        m.slots[0] = Some(SlotPlugin { name: "Fruity Parametric EQ 2".into(), state: vec![1, 2, 3] });
-        m.slots[3] = Some(SlotPlugin { name: crate::wrapper::WRAPPER.into(), state: vec![10, 0, 0, 0] });
+        m.slots[0] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Parametric EQ 2".into(), state: vec![1, 2, 3] });
+        m.slots[3] = Some(SlotPlugin { id: os_model::Id::NONE, name: crate::wrapper::WRAPPER.into(), state: vec![10, 0, 0, 0] });
         m.slot_on[3] = false;
         m.slot_mix[3] = 0.5;
         p.mixer[0].enabled = false;
@@ -5011,7 +5015,7 @@ mod tests {
         assert_eq!((rec[0], rec[4], rec[17]), (2, 3, 0x01));
         let mut edited = back.clone();
         edited.mixer[2].slots.swap(0, 9);
-        edited.mixer[4].slots[1] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
+        edited.mixer[4].slots[1] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![] });
         edited.mixer[2].slot_mix[9] = 0.75;
         apply(&edited, &mut file).unwrap();
         assert_eq!(load(&file).unwrap().mixer, edited.mixer);
@@ -5026,7 +5030,7 @@ mod tests {
         p.arrangements.push(default_arrangement());
         p.mixer = (0..18).map(MixerTrack::new).collect();
         p.mixer[17].routes.clear();
-        p.mixer[17].slots[9] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: vec![7; 4] });
+        p.mixer[17].slots[9] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![7; 4] });
         p.mixer[17].slot_mix[9] = 0.25;
         p.mixer[17].volume = Some(0.5);
         let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
@@ -5045,7 +5049,7 @@ mod tests {
         grown.mixer.extend((17..20).map(MixerTrack::new));
         grown.mixer.push(current);
         grown.mixer[18].name = Some("New".into());
-        grown.mixer[18].slots[0] = Some(SlotPlugin { name: "Fruity Parametric EQ 2".into(), state: vec![1, 2] });
+        grown.mixer[18].slots[0] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Parametric EQ 2".into(), state: vec![1, 2] });
         grown.mixer[19].routes = vec![0, 18];
         apply(&grown, &mut file).unwrap();
         let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();

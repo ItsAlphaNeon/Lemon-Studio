@@ -626,7 +626,7 @@ fn slot_edits_survive() {
         let mut edited = project.clone();
         let p = edited.mixer[t].slots[from].take().unwrap();
         edited.mixer[u].slots[9] = Some(p);
-        edited.mixer[t].slots[to] = Some(SlotPlugin { name: "Fruity Parametric EQ 2".into(), state: vec![1, 2, 3, 4] });
+        edited.mixer[t].slots[to] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Parametric EQ 2".into(), state: vec![1, 2, 3, 4] });
         if let Some(k) = (0..10).find(|&k| k != to && edited.mixer[u].slots[k].is_some() && k != 9) {
             edited.mixer[u].slots[k] = None;
         }

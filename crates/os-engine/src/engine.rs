@@ -3432,6 +3432,7 @@ mod tests {
 
     fn channel() -> Channel {
         Channel {
+            id: os_model::Id::NONE,
             index: 0,
             kind: ChannelKind::Sampler,
             name: None,

@@ -1749,6 +1749,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     };
     let beats = f64::from(b - a) / f64::from(ppq(s));
     s.project.channels.push(Channel {
+        id: os_model::Id::NONE,
         index,
         kind: ChannelKind::Automation,
         name: Some(name.to_string()),
@@ -1812,6 +1813,7 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
     snapshot_with(s, if audio { "Add audio clip" } else { "Add automation clip" }, before);
     let name = unique_channel_name(s, if audio { "Audio Clip" } else { "Automation Clip" });
     s.project.channels.push(Channel {
+        id: os_model::Id::NONE,
         index,
         kind,
         name: Some(name),
@@ -1850,6 +1852,7 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
     let mixer_track = (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project));
     s.project.channels.push(Channel {
+        id: os_model::Id::NONE,
         index,
         kind: ChannelKind::AudioClip,
         name: Some(name),
