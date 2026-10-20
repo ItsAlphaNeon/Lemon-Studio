@@ -288,7 +288,14 @@ Open a project directly by passing its path:
 cargo run -p os-app --release -- path/to/project.flp
 ```
 
-Use `FILE > Export as WAV` (Ctrl+R) to render the song, or the current pattern in PAT mode, to a file.
+Use `FILE > Export as WAV` (Ctrl+R) to render the song, or the current pattern in PAT mode, to a file. The same
+render runs without a window, hosting the same plugins the app would and without opening an audio device:
+
+```bash
+cargo run -p os-app --release -- --render path/to/project.flp out.wav [--rate 48000] [--seconds 30] [--from TICK] [--builtin-only]
+```
+
+`--builtin-only` hosts only Lemon Studio's own plugins, for a render that is the same on every machine.
 Ctrl+Shift+D switches between the Lemon and Classic designs (the choice is remembered). On macOS, Command stands in for
 Ctrl.
 
@@ -315,7 +322,7 @@ for each of its copyright holders, its SPDX licence identifier and the project's
 | Tool | Purpose |
 |---|---|
 | `flp-dump` | Print a project file's event stream and verify that it round-trips |
-| `os-render` | Render a project or pattern offline to a WAV file |
+| `os-render` | Render a project or pattern offline to a WAV file with the engine alone (no hosted plugins, so it does not sound like the app; `--render` above does) |
 | `os-play` | Play a project through the default audio output |
 | `bundle-plugins` | Build Lemon Studio's own plugins as VST3 and CLAP bundles, and optionally install them (`cargo run -p os-app --release` runs it with `--install`) |
 | `bundle-app` | Build Lemon Studio as a macOS app, and optionally install it |
