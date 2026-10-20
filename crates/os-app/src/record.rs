@@ -131,22 +131,6 @@ pub fn run_on_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
     }
 }
 
-/// The time selection's loop range shared with every playback engine (`Engine::set_loop_range`; spec §5);
-/// `App::record_tick` keeps it up to date. One per test thread under tests.
-pub fn loop_range_flag() -> os_engine::LoopRange {
-    use std::sync::{atomic::AtomicU64, Arc};
-    #[cfg(test)]
-    {
-        thread_local!(static TEST: os_engine::LoopRange = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]));
-        TEST.with(Arc::clone)
-    }
-    #[cfg(not(test))]
-    {
-        static FLAG: std::sync::OnceLock<os_engine::LoopRange> = std::sync::OnceLock::new();
-        FLAG.get_or_init(|| Arc::new([AtomicU64::new(0), AtomicU64::new(0)])).clone()
-    }
-}
-
 /// A recording count-in under way (spec §3): when it started, a beat's length in seconds, its beats.
 #[derive(Debug, Clone, Copy)]
 pub struct CountIn {
@@ -365,13 +349,10 @@ impl App {
         Some(format!("Dumped {n} note{} into the pattern", if n == 1 { "" } else { "s" }))
     }
 
-    /// Hands the looping time selection to the engines (`loop_range_flag`); returns it.
+    /// Hands the looping time selection to the playback (`Transport::set_loop`); returns it.
     pub(crate) fn sync_loop_range(&self) -> Option<(u32, u32)> {
         let sel = self.selection_loop();
-        let range = loop_range_flag();
-        let (a, b) = sel.map_or((0, 0), |(a, b)| (u64::from(a), u64::from(b)));
-        range[0].store(a, std::sync::atomic::Ordering::Relaxed);
-        range[1].store(b, std::sync::atomic::Ordering::Relaxed);
+        self.transport.set_loop(sel);
         sel
     }
 
@@ -973,9 +954,7 @@ mod tests {
             app.state.z.push(crate::app::Win::PianoRoll);
         }
         app.state.piano.range = Some((96, 192));
-        app.record_tick();
-        let r = loop_range_flag();
-        assert_eq!((r[0].load(std::sync::atomic::Ordering::Relaxed), r[1].load(std::sync::atomic::Ordering::Relaxed)), (96, 192));
+        assert_eq!(app.selection_loop(), Some((96, 192)));
         app.toggle_record();
         key(&mut app, KeyCode::KeyZ, true, 120.0, false);
         app.transport.pretend_at(170.0, false);
@@ -987,8 +966,7 @@ mod tests {
         assert_eq!(notes(&app), [(120, 72, 0)], "the held note ends at the selection's end");
         assert_eq!(app.state.piano.marker, 96);
         app.state.piano.range = None;
-        app.record_tick();
-        assert_eq!(r[1].load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(app.selection_loop(), None);
     }
 
     /// Dump score log: notes played (playing or not) go into the pattern at their real time offsets from the first,

@@ -168,7 +168,8 @@ pub struct WavTags {
     /// The first `smpl` chunk's MIDI unity note (the 4th u32 of its body), when it is a key (0..=127).
     pub unity_note: Option<u8>,
     /// The first `acid` chunk's beat count (the u32 at body offset 12, after the flags u32, the root note u16, a u16
-    /// and a float), when it is above 0.
+    /// and a float), when it is above 0 and the flags don't mark the file a one-shot (bit 0): a one-shot's beat count
+    /// is not a length to fit it to.
     pub beats: Option<u32>,
 }
 
@@ -185,6 +186,7 @@ fn tags_of(mut r: impl Read + Seek) -> Option<WavTags> {
         return None;
     }
     let mut tags = WavTags::default();
+    let mut acid_seen = false;
     let mut chunk = [0u8; 8];
     while r.read_exact(&mut chunk).is_ok() {
         let len = u64::from(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]));
@@ -198,8 +200,10 @@ fn tags_of(mut r: impl Read + Seek) -> Option<WavTags> {
             let v = u32::from_le_bytes([body[12], body[13], body[14], body[15]]);
             if &chunk[0..4] == b"smpl" {
                 tags.unity_note = tags.unity_note.or(u8::try_from(v).ok().filter(|&k| k <= 127));
-            } else {
-                tags.beats = tags.beats.or((v > 0).then_some(v));
+            } else if !acid_seen {
+                acid_seen = true;
+                let one_shot = body[0] & 1 != 0;
+                tags.beats = (v > 0 && !one_shot).then_some(v);
             }
         }
         if r.seek(SeekFrom::Current(i64::try_from(skip).ok()?)).is_err() {
@@ -549,7 +553,11 @@ mod tests {
 
     /// `acid` with `beats` beats: flags (root note set), root note, two unused fields, beats, meter 4/4, tempo.
     fn acid(beats: u32, root: u16, bpm: f32) -> Vec<u8> {
-        let mut b = 2u32.to_le_bytes().to_vec();
+        acid_flags(2, beats, root, bpm)
+    }
+
+    fn acid_flags(flags: u32, beats: u32, root: u16, bpm: f32) -> Vec<u8> {
+        let mut b = flags.to_le_bytes().to_vec();
         b.extend(root.to_le_bytes());
         b.extend(0x8000u16.to_le_bytes());
         b.extend(0f32.to_le_bytes());
@@ -584,6 +592,11 @@ mod tests {
         // Unusable values count as no chunk: 0 beats, a unity note above 127; a body too short is skipped.
         assert_eq!(tags(wav(&[acid(0, 60, 120.0), smpl(200)])), Some(none));
         assert_eq!(tags(wav(&[chunk(b"smpl", &[0; 12])])), Some(none));
+        // A one-shot (flags bit 0) has no length to fit: its beats are not read (user report 2026-10-19: short
+        // one-shots stretched to a beat sounded like a feedback loop on every hit).
+        assert_eq!(tags(wav(&[acid_flags(1, 4, 60, 120.0)])), Some(none));
+        assert_eq!(tags(wav(&[acid_flags(0x13, 2, 60, 120.0)])), Some(none));
+        assert_eq!(tags(wav(&[acid_flags(0, 2, 60, 120.0)])).unwrap().beats, Some(2));
         // The first chunk of each kind counts.
         assert_eq!(tags(wav(&[smpl(50), smpl(70)])).unwrap().unity_note, Some(50));
         // Not a WAV.

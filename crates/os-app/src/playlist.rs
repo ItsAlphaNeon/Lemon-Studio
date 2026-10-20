@@ -529,6 +529,8 @@ pub struct PlaylistState {
     pub last_header: Option<(u16, std::time::Instant)>,
     /// Last left click on an audio clip (clip, time): a second one soon after opens its sampler.
     pub last_clip: Option<(usize, std::time::Instant)>,
+    /// Last left click in the ruler: a second one soon after clears the time selection.
+    pub last_ruler: Option<std::time::Instant>,
     /// Waveform cache by sample path (`None` = could not be loaded).
     pub waves: RefCell<HashMap<String, Option<Rc<Wave>>>>,
     /// Tones of the same samples for colourful waveforms, analysed when first needed (`tones`).
@@ -565,6 +567,7 @@ impl Default for PlaylistState {
             row_h: ROW_H,
             last_header: None,
             last_clip: None,
+            last_ruler: None,
             waves: RefCell::new(HashMap::new()),
             tones: RefCell::new(HashMap::new()),
             wave_wait: false,
@@ -3228,8 +3231,16 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
     let t = snap_round(s, &g, g.tick_at(x), alt);
     if right {
         s.playlist.range = None;
+        s.playlist.last_ruler = None;
         app.drag = Some(Drag::Pl(PlDrag::TimeSel { t0: t }));
     } else {
+        // A double click clears the time selection (a Lemon Studio choice, besides FL's right click).
+        let now = std::time::Instant::now();
+        let double = s.playlist.last_ruler.is_some_and(|t| now.duration_since(t).as_millis() < 450);
+        s.playlist.last_ruler = (!double).then_some(now);
+        if double {
+            s.playlist.range = None;
+        }
         s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
         // Moving the song position switches to SONG mode; a time selection does not (§7). The initial values follow
         // (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").

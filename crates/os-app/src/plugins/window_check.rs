@@ -118,7 +118,7 @@ pub fn run(args: &[String]) -> i32 {
             println!("{name}: no editor");
             continue;
         }
-        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         if let Err(e) = pl.open_window(0, info) {
             println!("{name}: the window did not open: {e}");
             failed = true;

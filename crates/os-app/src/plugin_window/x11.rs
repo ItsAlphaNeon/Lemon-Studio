@@ -582,7 +582,7 @@ impl Frame {
         match r {
             Reply::None => {}
             // The press grabs the pointer until the release: drags keep their motion without more.
-            Reply::Repaint | Reply::Capture => self.dirty.set(true),
+            Reply::Repaint | Reply::Capture | Reply::Hold => self.dirty.set(true),
             Reply::Relayout => self.layout(),
             Reply::Move if !self.state.borrow().detached => {
                 // Docked: moved by hand within the main window (the press's grab brings the motion here).
