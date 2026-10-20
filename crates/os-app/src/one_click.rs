@@ -1,3 +1,7 @@
+// Copyright (C) 2026 ItsAlphaNeon
+// SPDX-License-Identifier: GPL-3.0-or-later
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+
 //! One-click audio recording (spec: ui/one-click-recording.md §2): the toolbar's microphone (and TOOLS > One-click
 //! audio recording) picks an input, plays the song with Record armed and turns what came in into a new audio clip
 //! channel and its clip in the playlist where playback started.
