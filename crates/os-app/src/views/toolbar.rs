@@ -297,7 +297,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
     // Record (spec: ui/recording.md §2): armed, the dot is lit and larger, on a face of its colour. Its dot is white
     // under High visibility (`crate::high_visibility`).
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
-    let hov = ui.hit(rec, Action::Record, "Record (notes) - right-click for options");
+    let hov = ui.hit(rec, Action::Record, crate::record::hint());
     let armed = s.rec.armed;
     let down = ui.down(rec, &Action::Record);
     let dot = crate::high_visibility::record_dot(t, crate::high_visibility::on());

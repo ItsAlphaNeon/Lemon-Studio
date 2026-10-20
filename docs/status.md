@@ -162,7 +162,8 @@ Not yet: Align all channel editors, Arrange windows.
 - Note recording (the toolbar's Record button): armed and playing, notes from the typing keyboard, MIDI or the Touch
   controller go into the current pattern, quantized to the main snap; a take replaces the notes that start inside it
   and is one undo step; in SONG mode a clip of the pattern is placed where none plays. Right-click for the options
-- Not yet: automation recording, audio recording, Wait for input, Countdown, Blend, Loop recording
+- Automation recording: channel volume and pan knob moves while recording become the pattern's control points
+- Not yet: audio recording, Wait for input, Countdown, Blend, Loop recording
 
 ## 🚧 Undo
 

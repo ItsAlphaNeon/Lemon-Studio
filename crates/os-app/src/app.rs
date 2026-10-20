@@ -4442,6 +4442,7 @@ impl App {
                 }
                 Drag::Knob { id, y0, v0 } => {
                     self.state.set_knob(id, v0 - (y - y0) * id.drag_rate());
+                    self.record_knob(id);
                     self.hint = Cow::Owned(self.state.knob_text(id));
                     match self.hits.iter().rev().find(|h| h.action == Action::Knob(id)).map(|h| h.rect) {
                         Some(r) => self.damage_rect(r.outset(6.0)),
@@ -5822,6 +5823,7 @@ impl App {
                 crate::history::knob(&mut self.state, id, true);
             }
             self.state.set_knob(id, v);
+            self.record_knob(id);
             self.hint = Cow::Owned(self.state.knob_text(id));
             return None;
         }

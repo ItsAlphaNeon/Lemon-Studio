@@ -4,12 +4,13 @@
 
 //! Recording (the toolbar's Record button): while it is armed and the transport plays, the notes played on the typing
 //! keyboard, a MIDI keyboard or the Touch controller are written into the current pattern for the selected channel,
-//! each as long as it was held. A take (from its first note to the stop, a pause, disarming or a pattern change) is one
+//! each as long as it was held, and channel volume / pan knob moves become the pattern's control points. A take (from its first note to the stop, a pause, disarming or a pattern change) is one
 //! undo step and replaces the pattern's earlier notes that start inside it. The right-click menu's checks are program
 //! settings in `settings.txt`; the arm itself is not saved.
 // spec: ui/recording.md
 
 use crate::app::{App, State};
+use crate::knobs::KnobId;
 use crate::playlist::Snap;
 use crate::step_edit::Src;
 use os_model::{ClipSource, Note};
@@ -21,6 +22,7 @@ pub const RECORDED: &str = "Recorded items";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opt {
     Notes,
+    Automation,
     StartsPlayback,
     DisarmOnStop,
     QuantizeStart,
@@ -31,6 +33,7 @@ impl Opt {
     fn key(self) -> (&'static str, bool) {
         match self {
             Opt::Notes => ("rec_notes", true),
+            Opt::Automation => ("rec_automation", true),
             Opt::StartsPlayback => ("rec_starts_play", false),
             Opt::DisarmOnStop => ("rec_disarm_stop", false),
             Opt::QuantizeStart => ("rec_q_start", true),
@@ -48,6 +51,17 @@ impl Opt {
         crate::settings_file::set_flag(self.key().0, on);
         on
     }
+}
+
+/// The button's hint: what the filter records (spec §2 The button).
+pub fn hint() -> String {
+    let what = match (Opt::Notes.on(), Opt::Automation.on()) {
+        (true, true) => "notes, automation",
+        (true, false) => "notes",
+        (false, true) => "automation",
+        (false, false) => "nothing",
+    };
+    format!("Record ({what}) - right-click for options")
 }
 
 /// A note held while recording: where it started, in the pattern and in the running playback's ticks.
@@ -70,6 +84,8 @@ struct Take {
     channels: Vec<u16>,
     span: Option<(u32, u32)>,
     new: Vec<Note>,
+    /// Each recorded control (`ControlPoint::kind`) and the tick of its last point in this take.
+    controls: Vec<(u32, u32)>,
 }
 
 /// Record's state (spec §2).
@@ -138,7 +154,10 @@ impl App {
         let items = vec![
             PItem::head("Recording filter"),
             it("Notes", Opt::Notes),
-            PItem::new("Automation", Cmd::Nothing).off(),
+            it("Automation", Opt::Automation),
+            // Audio (FL: into the audio editor, or the playlist): the audio editor is to be a plugin of its own, and the
+            // playlist's audio comes with One-click audio recording.
+            PItem::new("Audio", Cmd::Nothing).off(),
             PItem::head("Options"),
             it("Recording starts playback", Opt::StartsPlayback),
             it("Disarm on stop", Opt::DisarmOnStop),
@@ -149,15 +168,47 @@ impl App {
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
     }
 
-    /// Whether a note played now is recorded: armed, notes on, playing and not paused.
-    fn rec_live(&self) -> bool {
-        self.state.rec.armed && Opt::Notes.on() && self.transport.playing() && !self.transport.paused()
+    /// Whether something played now is recorded: armed, `what` on in the filter, playing and not paused.
+    fn rec_live(&self, what: Opt) -> bool {
+        self.state.rec.armed && what.on() && self.transport.playing() && !self.transport.paused()
+    }
+
+    /// A channel's volume or pan knob moved: its value goes into the current pattern as a control point at the playback
+    /// position while recording automation (spec §2 Taking automation).
+    pub(crate) fn record_knob(&mut self, id: KnobId) {
+        use os_model::ControlPoint;
+        if !self.rec_live(Opt::Automation) {
+            return;
+        }
+        let (row, param, value) = match id {
+            KnobId::ChanVol(i) => (i, ControlPoint::VOLUME, (self.state.knob(id) * 12800.0).round() as i32),
+            KnobId::ChanPan(i) => (i, ControlPoint::PAN, (self.state.knob(id) * 12800.0).round() as i32),
+            _ => return,
+        };
+        let Some(channel) = self.state.project.channels.get(row).map(|c| c.index) else { return };
+        let song = self.transport.song();
+        let t = self.transport.tick();
+        self.open_take(song);
+        let Some(at) = self.rec_pattern_tick(t, song) else { return };
+        let tick = at.max(0.0).round() as u32;
+        let kind = ControlPoint::new(tick, channel, param, value).kind;
+        let s = &mut self.state;
+        let Some(take) = s.rec.take.as_mut() else { return };
+        let last = take.controls.iter().find(|c| c.0 == kind).map(|c| c.1);
+        take.controls.retain(|c| c.0 != kind);
+        take.controls.push((kind, tick));
+        if let Some(last) = last.filter(|&l| l < tick) {
+            let p = crate::piano::pattern_mut(s);
+            p.controls.retain(|c| !(c.kind == kind && c.position > last && c.position < tick));
+        }
+        crate::piano::set_control(s, channel, param, tick, value);
+        s.piano.dirty = true;
     }
 
     /// A note went down (typing keyboard, MIDI, Touch controller): recorded from the playback position while
     /// recording (spec §2 Taking notes).
     pub(crate) fn record_down(&mut self, src: Src, key: u16, velocity: u8) {
-        if !self.rec_live() {
+        if !self.rec_live(Opt::Notes) {
             return;
         }
         let Some(channel) = crate::piano::channel(&self.state) else { return };
@@ -198,7 +249,7 @@ impl App {
         };
         crate::history::record(s, RECORDED, snap);
         let before = s.project.pattern(pattern).map(|p| p.notes.clone()).unwrap_or_default();
-        s.rec.take = Some(Take { pattern, before, channels: Vec::new(), span: None, new: Vec::new() });
+        s.rec.take = Some(Take { pattern, before, channels: Vec::new(), span: None, new: Vec::new(), controls: Vec::new() });
     }
 
     /// The current pattern's tick at playback tick `t`: the tick itself in PAT mode; in SONG mode where a clip of the
@@ -341,7 +392,7 @@ mod tests {
         app.paint(&mut c, None);
         let b = hit_rect(&app, &Action::Record);
         let hint = app.hits.iter().rev().find(|h| h.action == Action::Record).map(|h| h.hint.to_string());
-        assert_eq!(hint.as_deref(), Some("Record (notes) - right-click for options"));
+        assert_eq!(hint.as_deref(), Some("Record (notes, automation) - right-click for options"));
         app.mouse_move(b.cx(), b.cy());
         app.mouse_down();
         app.mouse_up();
@@ -352,9 +403,9 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
         assert_eq!(
             labels,
-            ["Recording filter", "Notes", "Automation", "Options", "Recording starts playback", "Disarm on stop", "Quantize", "Note start time", "Note end time"]
+            ["Recording filter", "Notes", "Automation", "Audio", "Options", "Recording starts playback", "Disarm on stop", "Quantize", "Note start time", "Note end time"]
         );
-        assert!(Opt::Notes.on() && Opt::QuantizeStart.on() && Opt::QuantizeEnd.on() && !Opt::DisarmOnStop.on());
+        assert!(Opt::Notes.on() && Opt::Automation.on() && Opt::QuantizeStart.on() && Opt::QuantizeEnd.on() && !Opt::DisarmOnStop.on());
         crate::playlist::run(&mut app, Cmd::Record(Opt::DisarmOnStop));
         assert!(Opt::DisarmOnStop.on());
         app.state.playlist.popup = None;
@@ -421,6 +472,58 @@ mod tests {
         // Undo takes the clip away with the notes.
         crate::history::undo(&mut app.state);
         assert!(crate::playlist::clips(&app.state).is_empty() && notes(&app).is_empty());
+    }
+
+    /// Pattern 1's control points as (position, channel, param, value).
+    fn controls(app: &App) -> Vec<(u32, u16, u16, i32)> {
+        app.state.project.pattern(1).map_or(vec![], |p| p.controls.iter().map(|c| (c.position, c.channel(), c.param(), c.value)).collect())
+    }
+
+    /// A channel volume knob dragged while recording becomes the pattern's control points at the playback position;
+    /// the sweep replaces the earlier points between its points; undo puts them back; pan records too; with
+    /// Automation off nothing is written (spec §2 Taking automation).
+    #[test]
+    fn records_channel_knobs() {
+        use os_model::ControlPoint;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = app();
+        let ch = app.state.project.channels[1].index;
+        crate::piano::set_control(&mut app.state, ch, ControlPoint::VOLUME, 70, 1000);
+        crate::piano::set_control(&mut app.state, ch, ControlPoint::VOLUME, 200, 2000);
+        app.paint(&mut c, None);
+        let k = hit_rect(&app, &Action::Knob(KnobId::ChanVol(1)));
+        app.toggle_record();
+        app.transport.pretend_at(48.0, false);
+        app.record_tick();
+        app.mouse_move(k.cx(), k.cy());
+        app.mouse_down();
+        app.mouse_move(k.cx(), k.cy() + 10.0);
+        let mid = (app.state.knob(KnobId::ChanVol(1)) * 12800.0).round() as i32;
+        app.transport.pretend_at(96.0, false);
+        app.mouse_move(k.cx(), k.cy() + 20.0);
+        app.mouse_up();
+        let end = (app.state.knob(KnobId::ChanVol(1)) * 12800.0).round() as i32;
+        assert!(end < mid);
+        let vol = |app: &App| controls(app).into_iter().filter(|c| c.2 == ControlPoint::VOLUME).map(|c| (c.0, c.3)).collect::<Vec<_>>();
+        assert_eq!(vol(&app), [(48, mid), (96, end), (200, 2000)], "the point at 70 is replaced, the one at 200 stays");
+        assert!(controls(&app).iter().all(|c| c.1 == ch));
+
+        // Pan, by the wheel path's call.
+        app.state.set_knob(KnobId::ChanPan(1), 0.25);
+        app.record_knob(KnobId::ChanPan(1));
+        assert!(controls(&app).contains(&(96, ch, ControlPoint::PAN, 3200)));
+        stop(&mut app);
+        crate::history::undo(&mut app.state);
+        assert_eq!(vol(&app), [(70, 1000), (200, 2000)]);
+
+        // Automation off: knob moves write nothing.
+        Opt::Automation.toggle();
+        app.transport.pretend_at(10.0, false);
+        app.record_tick();
+        app.state.set_knob(KnobId::ChanVol(1), 0.1);
+        app.record_knob(KnobId::ChanVol(1));
+        assert_eq!(vol(&app), [(70, 1000), (200, 2000)]);
+        assert_eq!(crate::record::hint(), "Record (notes) - right-click for options");
     }
 
     /// "Disarm on stop" disarms at the stop; step edit never takes a recorded note.
