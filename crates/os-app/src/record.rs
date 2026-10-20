@@ -157,6 +157,8 @@ struct Take {
 #[derive(Debug, Default)]
 pub struct Rec {
     pub armed: bool,
+    /// One-click audio recording is taking in (its button is lit; `crate::one_click`).
+    pub audio: bool,
     held: Vec<Held>,
     take: Option<Take>,
     /// The playback position at the last poll while playing: where held notes end when playback stops.
@@ -228,18 +230,23 @@ impl App {
         } else if Opt::Wait.on() && (r.armed || !Opt::WaitArmed.on()) {
             r.waiting = true;
         } else {
-            let bars = if r.armed && Opt::Precount.on() { precount_bars() } else { 0 };
-            self.start_playback_counted(bars);
-            if bars > 0 && self.transport.playing() {
-                let p = &self.state.project;
-                let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
-                let beat = f64::from(p.beat_ticks()) / f64::from(p.ppq.max(1)) * 60.0 / tempo;
-                let beats = bars * u32::from(p.bar().0.max(1));
-                self.state.rec.count = Some(CountIn { from: std::time::Instant::now(), beat, beats });
-                self.state.rec.shown = beats;
-            }
+            self.play_counted_if_armed();
         }
         self.invalidate();
+    }
+
+    /// Play, with Recording precount's count-in when armed.
+    pub(crate) fn play_counted_if_armed(&mut self) {
+        let bars = if self.state.rec.armed && Opt::Precount.on() { precount_bars() } else { 0 };
+        self.start_playback_counted(bars);
+        if bars > 0 && self.transport.playing() {
+            let p = &self.state.project;
+            let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+            let beat = f64::from(p.beat_ticks()) / f64::from(p.ppq.max(1)) * 60.0 / tempo;
+            let beats = bars * u32::from(p.bar().0.max(1));
+            self.state.rec.count = Some(CountIn { from: std::time::Instant::now(), beat, beats });
+            self.state.rec.shown = beats;
+        }
     }
 
     /// Stop ends a wait or a count-in.
@@ -476,6 +483,7 @@ impl App {
     /// Each tick: notes the playback position; when playback stops or pauses, or the pattern changes, the take ends;
     /// a stop disarms when "Disarm on stop" is on.
     pub(crate) fn record_tick(&mut self) {
+        self.one_click_tick();
         // A count-in ends after its beats (or with the playback); the clock shows each beat left. A wait ends when
         // something else starts playback.
         if let Some(c) = self.state.rec.count {

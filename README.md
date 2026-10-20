@@ -88,7 +88,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
 | Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; Lemon plugin editors in the Lemon design only |
 | Settings | 🚧 | The General, Audio, File, Theme, Project and Info pages work; not yet the MIDI page or the recording settings |
-| Audio recording | ❌ | |
+| Audio recording | 🚧 | One-click audio recording into the playlist, from ASIO or system inputs |
 | MIDI file import / export | ❌ | |
 | Audio editing | ❌ | |
 | Plugin delay compensation | ❌ | |
@@ -351,7 +351,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 The roadmap is kept on the [Lemon Studio Discord server](https://discord.gg/yC2uCuGs3M), where every item is
 marked as complete, in progress or not started. The broad next steps are the engine rework (sampler voice,
 automation, delay compensation), opening projects from older FL Studio versions, audio and note recording, MIDI
-settings, ASIO inputs, more built-in instruments and effects, and the rest of the plugin window features on Linux.
+settings, more built-in instruments and effects, and the rest of the plugin window features on Linux.
 
 ## Development approach
 

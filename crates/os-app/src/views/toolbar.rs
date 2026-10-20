@@ -489,9 +489,12 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
             Icon::Save => Action::Util(Util::Save),
             Icon::SaveRender => Action::MenuItem(0, menus::FILE_EXPORT),
             Icon::Info => Action::MenuItem(menus::OPTIONS_MENU, menus::OPT_INFO),
+            // spec: ui/one-click-recording.md §2: lit while it records; a click then stops.
+            Icon::Mic => Action::OneClick,
             _ => Action::Placeholder(hint),
         };
-        tool_button(ui, r, icon, false, action, hint);
+        let lit = icon == Icon::Mic && s.rec.audio;
+        tool_button(ui, r, icon, lit, action, hint);
     }
 }
 

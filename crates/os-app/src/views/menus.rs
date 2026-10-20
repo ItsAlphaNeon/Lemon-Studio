@@ -274,7 +274,7 @@ const OPTIONS: &[Item] = &[
 
 const TOOLS_A: &[Item] = &[
     it("Browser find...", "Ctrl+F"),
-    it("One-click audio recording", "").sub(),
+    it(ONE_CLICK_LABEL, "").sub(),
     it("Chord progression tool...", ""),
     it("Control creator", ""),
     head("Clipboard"),
@@ -450,6 +450,7 @@ fn opens_sub(menu: usize, item: &Item) -> bool {
 
 /// TOOLS > Switch all plugin editors to ▸ and Change declicking for selected channels to ▸, also in the channel rack's
 /// options menu (spec: ui/channel-rack.md §17).
+pub const ONE_CLICK_LABEL: &str = "One-click audio recording";
 pub const EDITORS_LABEL: &str = "Switch all plugin editors to";
 pub const DECLICK_LABEL: &str = "Change declicking for selected channels to";
 /// TOOLS > Switch all / selected audio clip channels to ▸, also in the channel rack's options menu (spec:
@@ -465,6 +466,8 @@ pub fn submenu(menu: usize, label: &str) -> Option<fn(&State) -> Vec<crate::play
         // spec: ui/plugin-menu.md §1: the effects, a pick into the selected mixer track's first empty slot as from F8.
         (ADD_MENU, "Effect") => Some(|s| crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(None), true)),
         (TOOLS_MENU, EDITORS_LABEL) => Some(|_| crate::rack::editor_items()),
+        // spec: ui/one-click-recording.md §2
+        (TOOLS_MENU, ONE_CLICK_LABEL) => Some(crate::one_click::items),
         (TOOLS_MENU, DECLICK_LABEL) => Some(crate::rack::declick_items),
         (TOOLS_MENU, CLIPS_ALL_LABEL) => Some(|_| crate::rack::stretch_items(true)),
         (TOOLS_MENU, CLIPS_SEL_LABEL) => Some(|_| crate::rack::stretch_items(false)),
@@ -821,7 +824,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["Effect", "Toolbars", CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["Effect", "Toolbars", ONE_CLICK_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");
@@ -829,7 +832,7 @@ mod tests {
         // ADD > Effect: the effect plugin menu as a submenu (spec: ui/plugin-menu.md §1-2).
         let fx = submenu(ADD_MENU, "Effect").unwrap()(&app.state);
         assert_eq!(fx, crate::plugin_menu::items(&app.state, crate::plugin_menu::Target::Fx(None), true));
-        for label in ["New from template", "Import", "One-click audio recording", "Set keyboard focus for all plugins to"] {
+        for label in ["New from template", "Import", "Set keyboard focus for all plugins to"] {
             let (mi, it) = MENUS.iter().enumerate().find_map(|(mi, m)| m.cols.iter().flat_map(|(_, items)| items.iter()).find(|it| it.label == label).map(|it| (mi, it))).unwrap();
             assert!(!works(mi, it), "{label} stays greyed out");
         }

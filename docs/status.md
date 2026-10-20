@@ -168,7 +168,10 @@ Not yet: Align all channel editors, Arrange windows.
   Blend (a take keeps the notes it overlaps)
 - Loop record (toolbar, OPTIONS): off, recording runs on past the pattern's or song's end and the pattern grows;
   on, playback loops and each pass is a take (one undo step) that replaces what the pass before recorded
-- Not yet: audio recording
+- One-click audio recording (the toolbar's microphone, TOOLS): pick an input (an ASIO driver's inputs, else the
+  system's input devices), the song plays with Record armed and precount, and on stop the take becomes a 32-bit WAV
+  in the data folder's `Recorded` folder plus a new audio clip channel and clip where playback started
+- Not yet: audio recording into mixer tracks, input monitoring, the audio editor
 
 ## 🚧 Undo
 
@@ -197,7 +200,8 @@ Not yet: Align all channel editors, Arrange windows.
   until Lemon Studio is back in front
 - A device that fails (unplugged, or a driver asking to be reset) is opened again; an ASIO driver that does not
   open gives way to the default device
-- Not yet: ASIO inputs and output pairs, JACK
+- An ASIO driver's first 8 inputs open with its outputs (full duplex) for audio recording
+- Not yet: ASIO output pairs, JACK
 
 <img alt="ASIO Compatible logo" src="../crates/os-app/asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png" width="96">
 
@@ -235,7 +239,6 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## ❌ Not available yet
 
-- Audio recording
 - MIDI file import / export
 - Audio editing
 - Plugin delay compensation

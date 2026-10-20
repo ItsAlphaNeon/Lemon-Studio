@@ -137,6 +137,9 @@ pub enum Action {
     Record,
     /// A record option's switch: Start on input, Recording precount, Blend (spec: ui/recording.md §3).
     RecOpt(crate::record::Opt),
+    /// The toolbar's microphone: One-click audio recording's menu, or Stop while it records (spec:
+    /// ui/one-click-recording.md §2).
+    OneClick,
     /// Auto scrolling switch (toolbar, OPTIONS menu); right-click on the button for continuous scrolling.
     AutoScroll,
     /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G).
@@ -1118,6 +1121,8 @@ pub struct App {
     pub(crate) smooth: crate::smooth::Eases,
     /// Where the shell should move the cursor to (a wheel step in a menu, `menu_wheel`).
     pub warp: Option<(f32, f32)>,
+    /// One-click audio recording under way (spec: ui/one-click-recording.md §2).
+    pub(crate) audio_rec: Option<crate::one_click::AudioRec>,
     /// Wheel movement in an open menu short of a whole notch (trackpads).
     menu_notch: f32,
     /// Audio ▸ Auto close: whether the output is closed while another program is in front (`crate::auto_close`).
@@ -1313,6 +1318,7 @@ impl App {
             hold: None,
             smooth: Default::default(),
             warp: None,
+            audio_rec: None,
             menu_notch: 0.0,
             auto_close: Default::default(),
             want_minimize: false,
@@ -6121,7 +6127,7 @@ impl App {
     /// `start_playback` after a recording count-in of `bars` bars (spec: ui/recording.md §3).
     pub(crate) fn start_playback_counted(&mut self, bars: u32) {
         let song = self.state.song_mode;
-        if song && self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
+        if song && !self.one_click_starting() && self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
             self.state.message = Some("The playlist is empty: nothing to play in SONG mode".into());
             self.invalidate();
             return;
@@ -6634,6 +6640,7 @@ impl App {
             Action::Metronome => self.toggle_metronome(),
             Action::Record => self.toggle_record(),
             Action::RecOpt(o) => self.toggle_record_option(o),
+            Action::OneClick => self.one_click_button(),
             Action::AutoScroll => self.toggle_autoscroll(),
             Action::EnableGroups => self.toggle_groups(),
             Action::StepEdit => self.toggle_step_edit(),
@@ -15101,7 +15108,6 @@ mod tests {
         // Greyed out.
         for name in [
             "Open audio editor / New audio editor",
-            "One-click audio recording",
             "Plugin repository",
         ] {
             assert_eq!(hint(&app, &Action::Placeholder(name)), format!("{name}: not available yet"));

@@ -20,6 +20,8 @@ mod audio_bench;
 mod render_check;
 mod browser;
 mod cable;
+mod capture;
+mod one_click;
 mod clip_colors;
 mod clock;
 mod cpu;
