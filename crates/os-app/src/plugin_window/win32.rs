@@ -21,7 +21,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetActiveWindow, GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_MENU};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use super::*;
@@ -74,15 +74,7 @@ unsafe extern "system" fn key_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
         if code == 0 {
             let focus = GetFocus();
             if !focus.is_null() {
-                // Inside a plugin frame: docked frames are children of the main window, so walk up to the frame.
-                let mut w = focus;
-                let mut in_frame = false;
-                while !w.is_null() && !in_frame {
-                    let mut name = [0u16; 64];
-                    let n = GetClassNameW(w, name.as_mut_ptr(), 64) as usize;
-                    in_frame = String::from_utf16_lossy(&name[..n]) == FRAME_CLASS;
-                    w = GetAncestor(w, GA_PARENT);
-                }
+                let in_frame = frame_of(focus).is_some();
                 let up = lp & (1 << 31) != 0;
                 let repeat = !up && lp & (1 << 30) != 0;
                 if in_frame && !repeat {
@@ -98,6 +90,47 @@ unsafe extern "system" fn key_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
             }
         }
         CallNextHookEx(std::ptr::null_mut(), code, wp, lp)
+    }
+}
+
+/// The plugin frame `w` is or lies inside: docked frames are children of the main window, so walk up to the frame.
+unsafe fn frame_of(mut w: HWND) -> Option<HWND> {
+    unsafe {
+        while !w.is_null() {
+            let mut name = [0u16; 64];
+            let n = GetClassNameW(w, name.as_mut_ptr(), 64) as usize;
+            if String::from_utf16_lossy(&name[..n]) == FRAME_CLASS {
+                return Some(w);
+            }
+            w = GetAncestor(w, GA_PARENT);
+        }
+        None
+    }
+}
+
+/// Gives the keyboard back to the main window when a docked plugin editor holds it, or nobody does. A plugin takes it
+/// with a click (for its text fields) and keeps it: a docked frame is a child of the main window, so a click elsewhere
+/// in the main window leaves the window active and Windows leaves the focus where it was; only the typing keyboard
+/// (`key_hook`) would still work. When the focused editor closes, the focus goes to nobody. A detached frame needs
+/// nothing: clicking the main window activates it, which moves the focus. Called on clicks in the main window.
+pub fn focus_main() {
+    unsafe {
+        let focus = GetFocus();
+        if focus.is_null() {
+            let active = GetActiveWindow();
+            if !active.is_null() {
+                SetFocus(active);
+            }
+            return;
+        }
+        let Some(frame) = frame_of(focus) else { return };
+        if GetWindowLongPtrW(frame, GWL_STYLE) as u32 & WS_CHILD == 0 {
+            return;
+        }
+        let main = GetAncestor(frame, GA_ROOT);
+        if !main.is_null() {
+            SetFocus(main);
+        }
     }
 }
 
