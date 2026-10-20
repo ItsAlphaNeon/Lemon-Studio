@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -19,6 +20,8 @@ use os_model::{
 };
 
 use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
+
+pub mod legacy;
 
 // Event IDs (see the specs for meanings).
 mod id {
@@ -3852,6 +3855,49 @@ mod tests {
             ],
             ..Project::default()
         }
+    }
+
+    /// `p` written in the layout used before FL 24.2: channel blocks without their end event, a channel's mixer track
+    /// in event 22.
+    fn older_of(p: &Project) -> FlpFile {
+        let mut f = create(p).unwrap();
+        for c in &mut f.chunks {
+            if let ChunkBody::Events(v) = &mut c.body {
+                v.retain(|e| e.id != id::CH_END);
+                for e in v.iter_mut() {
+                    if e.id == id::CH_TARGET {
+                        let track = e.int_value().unwrap_or(0) as u8;
+                        *e = Event::new(22, Value::U8(track));
+                    } else if e.id == id::VERSION {
+                        *e = Event::new(id::VERSION, Value::var(format!("{}\0", p.saved_by).into_bytes()));
+                    }
+                }
+            }
+        }
+        f
+    }
+
+    /// A project in the layout used before FL 24.2 (channel blocks without their end event 51, a channel's mixer track
+    /// in event 22) is converted to the newer one and reads as the same project; a newer file is left alone
+    /// (spec: flp/layouts.md "What differs", "Saving a file of an older generation"). Files of FL 20 and later only.
+    #[test]
+    fn older_layout_is_converted_on_reading() {
+        let p = Project { saved_by: "21.0.0.3290".into(), ..new_project() };
+        let newer = create(&p).unwrap();
+        let mut older = older_of(&p);
+        assert!(matches!(load(&older), Err(ProjectError::LegacyLayout(_))), "the older layout is refused as it is");
+        assert!(legacy::upgrade(&mut older), "converted");
+        let (a, b) = (load(&older).unwrap(), load(&newer).unwrap());
+        let chans = |p: &Project| p.channels.iter().map(|c| (c.index, c.name.clone(), c.mixer_track, c.kind)).collect::<Vec<_>>();
+        assert_eq!(chans(&a), chans(&b));
+        assert_eq!(a.patterns, b.patterns);
+        let mut again = newer.clone();
+        assert!(!legacy::upgrade(&mut again), "a newer file is not converted");
+        assert_eq!(again.to_bytes().unwrap(), newer.to_bytes().unwrap());
+        // A file of FL 12 in the older layout is left alone: still refused.
+        let mut twelve = older_of(&Project { saved_by: "12.3.0.72".into(), ..new_project() });
+        assert!(!legacy::upgrade(&mut twelve));
+        assert!(matches!(load(&twelve), Err(ProjectError::LegacyLayout(_))));
     }
 
     /// A project made from the model alone reads back the same, and `apply` can edit it afterwards
