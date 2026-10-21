@@ -31,8 +31,8 @@ pub enum TouchAct {
     Note(u8),
 }
 
-/// The window's state: where it is (centred the first time in a run, not saved), its mode and range, and the note
-/// held by the mouse.
+/// The window's state: where it is (centred the first time, then where it was left, also in later runs: `layout`), its
+/// mode and range, and the note held by the mouse.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TouchUi {
     pub pos: (f32, f32),
@@ -84,7 +84,8 @@ pub fn is_black(key: u8) -> bool {
 
 impl App {
     /// VIEW > Touch controller, Alt+F7 and the toolbar button: open it (or bring it to the front), centred over the
-    /// main window the first time in a run; close it when it is in front (spec §2 Opening).
+    /// main window the first time (then where it was left, also in later runs: `layout`); close it when it is in front
+    /// (spec §2 Opening).
     pub(crate) fn toggle_touch(&mut self) {
         let s = &mut self.state;
         if s.shown(Win::Touch) && s.in_front(Win::Touch) {

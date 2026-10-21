@@ -2814,7 +2814,7 @@ impl App {
     // ---------------------------------------------------------------- Tempo tapper (spec: ui/tempo-tapper.md)
 
     /// VIEW > Tempo tapper and Ctrl+F5: open it (or bring it to the front), centred over the main window the first
-    /// time in a run and then where it was left; close it when it is in front (§1, §8).
+    /// time and then where it was left, also in later runs (`layout`); close it when it is in front (§1, §8).
     fn toggle_tapper(&mut self) {
         let s = &mut self.state;
         if s.shown(Win::Tapper) && s.in_front(Win::Tapper) {

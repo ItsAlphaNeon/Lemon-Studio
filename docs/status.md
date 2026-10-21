@@ -115,6 +115,11 @@ the first of each four accented. Apply tempo is remembered between sessions. Not
 in front) and Close all plugin windows (Alt+F12: channel settings and plugin editors); the browser stays.
 Not yet: Align all channel editors, Arrange windows.
 
+**Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main
+window (its place and size, and whether it was maximized; brought back onto a screen if its screen is gone) and the
+Playlist, Mixer, Piano roll (floating, maximized or collapsed), Channel rack, Plugin performance monitor, Tempo tapper
+and Touch controller. Kept with the program's settings, not the project. Which windows are open is not kept.
+
 ## 🚧 Automation
 
 - Automation clips for channel, mixer and plugin parameters

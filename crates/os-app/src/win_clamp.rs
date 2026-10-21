@@ -62,8 +62,8 @@ pub fn inside_px(r: [i32; 4], work: [i32; 4]) -> (i32, i32) {
 
 /// Where a detached window's title bar `bar` ([left, top, right, bottom], screen px) may be with "Don't limit windows
 /// to screen" off: where it is while all of it is on the screens (`screens`, their work areas), else moved fully onto
-/// the screen it overlaps most (the nearest one when it overlaps none). Returns the bar's top-left.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// the screen it overlaps most (the nearest one when it overlaps none). Returns the bar's top-left. The main window's
+/// top at the start goes the same way (`layout::on_screens`).
 pub fn bar_on_screens(bar: [i32; 4], screens: &[[i32; 4]]) -> (i32, i32) {
     if screens.is_empty() || covered(bar, screens) {
         return (bar[0], bar[1]);

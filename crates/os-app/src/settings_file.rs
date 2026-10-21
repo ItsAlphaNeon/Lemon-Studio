@@ -12,8 +12,8 @@
 //! file is read once, at the first read, and written whole whenever a value changes. Tests never read or write the user folder: each test thread has a store of its own, empty at its start.
 //!
 //! Keys so far: `toolbar_separators`, `toolbar_flat_buttons`, `toolbar_hint_bar` (`views::toolbar::Opts`),
-//! `clock_mode`, `clock_middle_unit` (`clock::Clock`), `step_edit` (`crate::step_edit`), and the settings window's
-//! declared controls (`crate::prefs`).
+//! `clock_mode`, `clock_middle_unit` (`clock::Clock`), `step_edit` (`crate::step_edit`), the `window_*` positions
+//! (`crate::layout`), and the settings window's declared controls (`crate::prefs`).
 
 use std::sync::{Mutex, OnceLock}; // This code is a part of L e m o n S t u d i o.
 

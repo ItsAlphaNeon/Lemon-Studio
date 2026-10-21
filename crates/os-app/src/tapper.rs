@@ -95,8 +95,8 @@ pub enum TapAct {
     Apply,
 }
 
-/// The window's state: where it is (centred over the main window the first time in a run, not saved), the count and
-/// the pad's flash.
+/// The window's state: where it is (centred over the main window the first time, then where it was left, also in later
+/// runs: `layout`), the count and the pad's flash.
 pub struct TapperUi {
     /// Top-left corner (logical px).
     pub pos: (f32, f32),
