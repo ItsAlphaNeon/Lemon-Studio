@@ -1224,7 +1224,7 @@ fn linux_icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(rgba, w, h).ok()
 }
 
-/// `lemonstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-menu] [--browser-search TEXT] [--browser-folder DIR[|SUB]] [project.flp]`:
+/// `lemonstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-width PX] [--browser-menu] [--browser-search TEXT] [--browser-folder DIR[|SUB]] [project.flp]`:
 /// paint one 1920×1080 frame offscreen (used to compare with reference measurements, and for the README's screenshots
 /// with `--float`, `--rack-pos`, `--rack-all`, `--rack-scroll` and `--insert`).
 fn screenshot(args: &[String]) {
@@ -1235,6 +1235,7 @@ fn screenshot(args: &[String]) {
     let mut rack_w: Option<f32> = None;
     let mut rack_roll = false;
     let mut browser_tab: Option<usize> = None;
+    let mut browser_w: Option<f32> = None;
     let mut browser_menu = false;
     let mut browser_search: Option<String> = None;
     let mut browser_folder: Option<String> = None;
@@ -1283,6 +1284,8 @@ fn screenshot(args: &[String]) {
             "--browser-search" => browser_search = it.next().cloned(),
             "--browser-folder" => browser_folder = it.next().cloned(),
             "--browser-tab" => browser_tab = it.next().and_then(|v| v.parse().ok()),
+            // The browser's width incl. its splitter, as dragged (spec: ui/browser.md §9).
+            "--browser-width" => browser_w = it.next().and_then(|v| v.parse().ok()),
             // "all" / "gen" / "fx": that plugin menu at the window's centre (spec: ui/plugin-menu.md §5).
             "--plugin-menu" => {
                 plugin_menu = Some(match it.next().map(String::as_str) {
@@ -1408,6 +1411,9 @@ fn screenshot(args: &[String]) {
     app.state.show_browser = browser;
     if let Some(t) = browser_tab {
         app.state.browser_tab = t.min(3);
+    }
+    if let Some(w) = browser_w {
+        app.state.browser_w = w;
     }
     // A dropped folder (spec: ui/browser.md §6), opened; not remembered. `--browser-folder DIR[|sub/path]` opens a subfolder and selects it.
     if let Some(f) = browser_folder {

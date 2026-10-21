@@ -104,8 +104,14 @@ pub fn band_rect(s: &State, r: Rect) -> Rect {
     let k = band_k(s);
     Rect::new(r.x * k, r.y * k, r.w * k, r.h * k)
 }
-/// Width of the docked browser incl. the splitter (§4).
+/// Width of the docked browser incl. the splitter (§4): the default, and the least its splitter drags it to.
 pub const BROWSER_W: f32 = 209.0;
+
+/// Width of the docked browser incl. the splitter, as dragged (`State::browser_w`), at most half the window (spec:
+/// ui/browser.md §9).
+pub fn browser_w(s: &State) -> f32 {
+    s.browser_w.min(s.screen.0 / 2.0).max(BROWSER_W)
+}
 
 /// Paints the frame; returns the number of hits registered before the overlays (menus, popups, picker...), which cover
 /// docked plugin windows.
@@ -118,7 +124,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     ui.c.set_cover(None);
 
     // Workspace (§9): watermark, then docked windows on top.
-    let left = if s.show_browser { BROWSER_W } else { 0.0 };
+    let left = if s.show_browser { browser_w(s) } else { 0.0 };
     let top = work_y(s);
     let work = Rect::new(left, top, w - left, h - top);
     let docked = s.docked();
@@ -136,7 +142,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     let docked_at = s.z.iter().rposition(|&w| s.is_max(w));
     // Each part is skipped by a repaint that misses it (`Ui::part`).
     if s.show_browser {
-        let r = Rect::new(0.0, top, BROWSER_W, h - top);
+        let r = Rect::new(0.0, top, browser_w(s), h - top);
         ui.part(Seg::Browser, r, |ui| browser::paint(ui, s, r));
     }
     let _ = work;
